@@ -99,6 +99,20 @@ TEST_CASE("a doodad with a collision mesh is a floor where it stands, and not on
     CHECK_FALSE(world.m2Floor(kEverywhere, 10.5f, 9.5f, 6.0f));
 }
 
+TEST_CASE("a world surface ray keeps close and grazing hits that a camera excludes", "[collision][lightning]") {
+    CollisionWorld world;
+    world.placeWmo(1, building({group({floorAt(0.0f)})}), at({0, 0, 0}));
+    const glm::vec3 close(0, 0, 0.1f), down(0, 0, -1);
+    CHECK(world.wmoRaycast(kEverywhere, close, down, 10.0f) == 10.0f);
+    CHECK(world.wmoRaycast(kEverywhere, close, down, 10.0f, false) == Catch::Approx(0.1f));
+    const glm::vec3 shallow(0, 0, 0.001f);
+    const auto direction = glm::normalize(glm::vec3(1, 0, -0.001f));
+    CHECK(world.wmoRaycast(kEverywhere, shallow, direction, 10.0f) == 10.0f);
+    CHECK(world.wmoRaycast(kEverywhere, shallow, direction, 10.0f, false) == Catch::Approx(1.0f).margin(1e-5f));
+    world.setWmoHidden(1, true);
+    CHECK(world.wmoRaycast(kEverywhere, close, down, 10.0f, false) == 10.0f);
+}
+
 TEST_CASE("a doodad that moves is stood on where it went, not where it was", "[collision]") {
     // The grid it is found through is refiled on every move; one that kept the
     // old cells would answer from both places, or from neither.

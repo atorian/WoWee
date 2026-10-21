@@ -580,7 +580,8 @@ public:
     /** Pre-allocate GPU resources (bone SSBOs, descriptors) on main thread before parallel render. */
     struct Frame;
     std::shared_ptr<const Frame> extract(const Camera& camera, const std::vector<LocalLight>& lights, float time, const glm::mat4& shadowMatrix, float shadowRadius,
-                                         const glm::mat4* overheadMatrix = nullptr, float overheadRadius = 1.0f);
+                                         const glm::mat4* overheadMatrix = nullptr, float overheadRadius = 1.0f,
+                                         const glm::mat4* strikeMatrix = nullptr, float strikeRadius = 1.0f);
     void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
     void prepareRender(uint32_t frameIndex, const Camera& camera);
     /** Dispatch GPU frustum culling compute shader on primary cmd before render pass. */
@@ -1633,8 +1634,8 @@ public:
         std::vector<glm::mat4> bones;
         std::vector<CullInstanceGPU> cullInput;
         std::vector<uint32_t> cullIds;
-        std::vector<ShadowDraw> depth, solarDepth;
-        glm::mat4 solarMatrix{0.0f}, overheadMatrix{0.0f};
+        std::vector<ShadowDraw> depth, solarDepth, strikeDepth;
+        glm::mat4 solarMatrix{0.0f}, overheadMatrix{0.0f}, strikeMatrix{0.0f};
         float maxPossibleDistSq = 0, time = 0;
         uint64_t sceneIdentity = 0;
         glm::vec3 cameraPosition{0};

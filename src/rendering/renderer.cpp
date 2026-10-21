@@ -281,10 +281,28 @@ bool Renderer::createPerFrameResources() {
         contactFB.layers = 1;
         if (vkCreateFramebuffer(device, &contactFB, nullptr, &contactShadowFramebuffer_[i]) != VK_SUCCESS)
             return false;
+        lightningShadowImages_[i] = createImage(device, vkCtx->getAllocator(),
+            LIGHTNING_MAP_SIZE, LIGHTNING_MAP_SIZE, VK_FORMAT_D32_SFLOAT,
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        if (!lightningShadowImages_[i].image) {
+            LOG_ERROR("Lightning shadow map allocation failed for frame ", i, "; renderer initialization failed");
+            return false;
+        }
+        VkFramebufferCreateInfo lightningFB{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        lightningFB.renderPass = shadowRenderPass;
+        lightningFB.attachmentCount = 1;
+        lightningFB.pAttachments = &lightningShadowImages_[i].imageView;
+        lightningFB.width = lightningFB.height = LIGHTNING_MAP_SIZE;
+        lightningFB.layers = 1;
+        if (vkCreateFramebuffer(device, &lightningFB, nullptr, &lightningShadowFramebuffer_[i]) != VK_SUCCESS) {
+            LOG_ERROR("Lightning shadow framebuffer failed for frame ", i, "; renderer initialization failed");
+            return false;
+        }
     }
     // Bindings must be valid before the first world/preview draw as well.
     vkCtx->immediateSubmit([&](VkCommandBuffer cmd) {
-        for (auto& image : contactShadowImages_) {
+        for (auto* images : {&contactShadowImages_, &lightningShadowImages_}) for (auto& image : *images) {
             const VkImageSubresourceRange range{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
             VkImageMemoryBarrier2 initial{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
             initial.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
@@ -304,7 +322,7 @@ bool Renderer::createPerFrameResources() {
             VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
             b.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
             b.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-            b.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+            b.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
             b.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
             b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
             b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -318,10 +336,11 @@ bool Renderer::createPerFrameResources() {
         }
     });
     for (auto& layout : contactShadowLayout_) layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    for (auto& layout : lightningShadowLayout_) layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     // --- Create descriptor set layout for set 0 (per-frame UBO + shadow sampler + fog volume
     //     + ray traced lighting) ---
-    VkDescriptorSetLayoutBinding bindings[10]{};
+    VkDescriptorSetLayoutBinding bindings[11]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -393,7 +412,10 @@ bool Renderer::createPerFrameResources() {
     bindings[9].descriptorCount = 1;
     bindings[9].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
                              VK_SHADER_STAGE_COMPUTE_BIT;
-    layoutInfo.bindingCount = 10;
+    bindings[10] = bindings[8];
+    bindings[10].binding = 10;
+    bindings[10].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
+    layoutInfo.bindingCount = 11;
     layoutInfo.pBindings = bindings;
 
     if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &perFrameSetLayout) != VK_SUCCESS) {
@@ -406,7 +428,7 @@ bool Renderer::createPerFrameResources() {
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = MAX_FRAMES * 3; // world, capture and reflection sets
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = MAX_FRAMES * 3 * 8;  // shadow, fog, lighting, sky, reflection and geometry
+    poolSizes[1].descriptorCount = MAX_FRAMES * 3 * 9;  // shadow, fog, lighting, sky, reflection and geometry
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     poolSizes[2].descriptorCount = MAX_FRAMES * 3;  // the point lights
 
@@ -479,7 +501,7 @@ bool Renderer::createPerFrameResources() {
         rtImgInfo[3].imageView = rtLighting_->geometryViewForSlot(i);
         for (auto& info : rtImgInfo) info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-        VkWriteDescriptorSet writes[9]{};
+        VkWriteDescriptorSet writes[10]{};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[0].dstSet = perFrameDescSets[i];
         writes[0].dstBinding = 0;
@@ -520,7 +542,13 @@ bool Renderer::createPerFrameResources() {
         writes[8] = writes[1];
         writes[8].dstBinding = 8;
         writes[8].pImageInfo = &contactInfo;
-        vkUpdateDescriptorSets(device, 9, writes, 0, nullptr);
+        VkDescriptorImageInfo lightningInfo{};
+        lightningInfo.imageView = lightningShadowImages_[i].imageView;
+        lightningInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        writes[9] = writes[1];
+        writes[9].dstBinding = 10;
+        writes[9].pImageInfo = &lightningInfo;
+        vkUpdateDescriptorSets(device, 10, writes, 0, nullptr);
         // Sky capture gets a separate set whose binding 5 stays neutral:
         // the M2 shader also declares the surface sampler, and must never
         // bind the image being written by this pass as a sampled image.
@@ -528,7 +556,7 @@ bool Renderer::createPerFrameResources() {
         if (vkAllocateDescriptorSets(device, &setAlloc, &skyPerFrameDescSets[i]) != VK_SUCCESS)
             return false;
         for (auto& write : writes) write.dstSet = skyPerFrameDescSets[i];
-        vkUpdateDescriptorSets(device, 9, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 10, writes, 0, nullptr);
     }
 
     skyBackground_ = std::make_unique<SkyBackground>();
@@ -593,7 +621,7 @@ bool Renderer::createPerFrameResources() {
             rtImgInfo.imageView = rtLighting_->neutralView();
             rtImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-            VkWriteDescriptorSet writes[9]{};
+            VkWriteDescriptorSet writes[10]{};
             writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[0].dstSet = reflPerFrameDescSet[i];
             writes[0].dstBinding = 0;
@@ -633,7 +661,13 @@ bool Renderer::createPerFrameResources() {
             writes[8] = writes[1];
             writes[8].dstBinding = 8;
             writes[8].pImageInfo = &contactInfo;
-            vkUpdateDescriptorSets(device, 9, writes, 0, nullptr);
+            VkDescriptorImageInfo lightningInfo{};
+            lightningInfo.imageView = lightningShadowImages_[i].imageView;
+            lightningInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            writes[9] = writes[1];
+            writes[9].dstBinding = 10;
+            writes[9].pImageInfo = &lightningInfo;
+            vkUpdateDescriptorSets(device, 10, writes, 0, nullptr);
         }
     }
 
@@ -789,6 +823,11 @@ void Renderer::destroyPerFrameResources() {
             contactShadowFramebuffer_[i] = VK_NULL_HANDLE;
         }
         destroyImage(device, vkCtx->getAllocator(), contactShadowImages_[i]);
+        if (lightningShadowFramebuffer_[i]) {
+            vkDestroyFramebuffer(device, lightningShadowFramebuffer_[i], nullptr);
+            lightningShadowFramebuffer_[i] = VK_NULL_HANDLE;
+        }
+        destroyImage(device, vkCtx->getAllocator(), lightningShadowImages_[i]);
     }
     contactShadowSampler_ = VK_NULL_HANDLE;
     if (shadowRenderPass) { vkDestroyRenderPass(device, shadowRenderPass, nullptr); shadowRenderPass = VK_NULL_HANDLE; }
@@ -903,6 +942,11 @@ void Renderer::updatePerFrameUBO() {
     currentFrameData.shadowParams = glm::vec4(frameInputs_.shadows ? 1.0f : 0.0f, 0.0f,
                                               1.0f / static_cast<float>(SHADOW_MAP_SIZE),
                                               2.0f * frameInputs_.shadowDistance / static_cast<float>(SHADOW_MAP_SIZE));
+
+    currentFrameData.lightningColor = frameInputs_.scene->lightning.lightColor;
+    currentFrameData.lightningColor.w = 1.0f / LIGHTNING_MAP_SIZE;
+    currentFrameData.lightningPosition = frameInputs_.scene->lightning.lightPosition;
+    currentFrameData.lightningMatrix = frameInputs_.scene->lightning.lightMatrix;
 
     // Whether this frame builds the fog volume. Decided here, beside the
     // switch in the block the shaders read, and the frame graph dispatches by
@@ -1540,6 +1584,7 @@ FrameInputs Renderer::extractFrameInputs() {
     in.playerPos = glm::vec4(characterPosition, playerSpeed_);
     in.playerWake = glm::vec4(playerWakePos_, 0.0f);
     auto scene = std::make_shared<FrameScene>();
+    if (lightning) scene->lightning = lightning->extract();
     scene->sequence = ++extractedSceneSequence_;
     if (vkCtx) scene->resources = vkCtx->holdSnapshotResources();
     extraction.lap("motion and resource lease");
@@ -1577,7 +1622,8 @@ FrameInputs Renderer::extractFrameInputs() {
         const glm::mat4 shelterMatrix = shelterFrame.viewProjection();
         scene->models = m2Renderer->extract(in.camera, in.localLights, in.time, in.shadowMatrix,
             in.shadowDistance * 1.35f, in.weather.any() ? &shelterMatrix : nullptr,
-            ShelterMap::kHalfExtent * 1.415f);
+            ShelterMap::kHalfExtent * 1.415f,
+            scene->lightning.lightColor.b > 0.0f ? &scene->lightning.lightMatrix : nullptr, 550.0f);
     }
     extraction.lap("M2");
     if (minimap && in.minimapEnabled) {
@@ -1607,7 +1653,6 @@ FrameInputs Renderer::extractFrameInputs() {
             if (request) scene->composites.push_back(std::move(request));
         }
     }
-    if (lightning) scene->lightning = lightning->extract();
     if (chargeEffect) scene->charge = chargeEffect->extract();
     if (precipitation_) scene->precipitation = precipitation_->extract();
     extraction.lap("effects and composites");
@@ -4900,23 +4945,27 @@ void Renderer::renderReflectionPass() {
 }
 
 void Renderer::renderShadowPass() {
-    // Each map ends on its own mark; these group its commands under the
-    // same name in a capture.
     {
         GpuScope scope(*vkCtx, currentCmd, "shadows");
-        renderShadowMap(false);
+        renderShadowMap(ShadowView::Sun);
     }
     {
         GpuScope scope(*vkCtx, currentCmd, "contact shadows");
-        renderShadowMap(true);
+        renderShadowMap(ShadowView::Contact);
+    }
+    if (currentFrameData.lightningColor.b > 0.0f) {
+        GpuScope scope(*vkCtx, currentCmd, "lightning shadows");
+        renderShadowMap(ShadowView::Lightning);
     }
 }
 
-void Renderer::renderShadowMap(bool contact) {
+void Renderer::renderShadowMap(ShadowView view) {
+    const bool contact = view == ShadowView::Contact;
+    const bool strike = view == ShadowView::Lightning;
     ZoneScopedN("Renderer::renderShadowPass");
     static const bool skipShadows = (std::getenv("WOWEE_SKIP_SHADOWS") != nullptr);
-    if (skipShadows) return;
-    if (passAblation_ && passAblation_->skip(AblationPass::Shadows)) return;
+    if (!strike && skipShadows) return;
+    if (!strike && passAblation_ && passAblation_->skip(AblationPass::Shadows)) return;
     if (shadowDepthImage[0] == VK_NULL_HANDLE) return;
     if (currentCmd == VK_NULL_HANDLE) return;
     // Shadows off still runs the pass, and the pass still clears the map and
@@ -4924,21 +4973,21 @@ void Renderer::renderShadowMap(bool contact) {
     // into it. Returning here instead left the image untransitioned while it
     // stayed bound for sampling, which is the shape of fault that takes the
     // device down rather than drawing something wrong.
-    const bool drawCasters = frameInputs_.shadows && (!contact || currentFrameData.contactParams.x > 0.5f);
+    const bool drawCasters = strike || (frameInputs_.shadows && (!contact || currentFrameData.contactParams.x > 0.5f));
 
     // Shadows render every frame - throttling causes visible flicker on player/NPCs
 
-    const glm::mat4& passMatrix = contact ? currentFrameData.contactSpaceMatrix : lightSpaceMatrix;
-    const uint32_t mapSize = contact ? CONTACT_MAP_SIZE : SHADOW_MAP_SIZE;
+    const glm::mat4& passMatrix = strike ? currentFrameData.lightningMatrix : contact ? currentFrameData.contactSpaceMatrix : lightSpaceMatrix;
+    const uint32_t mapSize = strike ? LIGHTNING_MAP_SIZE : contact ? CONTACT_MAP_SIZE : SHADOW_MAP_SIZE;
     // passMatrix was already computed at frame start (before updatePerFrameUBO).
     // Zero matrix means character position isn't set yet - skip shadow pass entirely.
     if (passMatrix == glm::mat4(0.0f)) return;
     uint32_t frame = vkCtx->getCurrentFrame();
-    const VkImage passImage = contact ? contactShadowImages_[frame].image : shadowDepthImage[frame];
-    const VkImageView passView = contact ? contactShadowImages_[frame].imageView : shadowDepthView[frame];
-    const VkFramebuffer passFramebuffer = contact ? contactShadowFramebuffer_[frame] : shadowFramebuffer[frame];
-    auto& passLayout = contact ? contactShadowLayout_[frame] : shadowDepthLayout_[frame];
-    const glm::vec3 passCenter = contact ? frameInputs_.characterPosition : shadowCenter;
+    const VkImage passImage = strike ? lightningShadowImages_[frame].image : contact ? contactShadowImages_[frame].image : shadowDepthImage[frame];
+    const VkImageView passView = strike ? lightningShadowImages_[frame].imageView : contact ? contactShadowImages_[frame].imageView : shadowDepthView[frame];
+    const VkFramebuffer passFramebuffer = strike ? lightningShadowFramebuffer_[frame] : contact ? contactShadowFramebuffer_[frame] : shadowFramebuffer[frame];
+    auto& passLayout = strike ? lightningShadowLayout_[frame] : contact ? contactShadowLayout_[frame] : shadowDepthLayout_[frame];
+    const glm::vec3 passCenter = strike ? frameInputs_.scene->lightning.ground : contact ? frameInputs_.characterPosition : shadowCenter;
 
     // Barrier 1: transition this frame's shadow map into writable depth layout.
     VkImageMemoryBarrier2 b1{};
@@ -5023,33 +5072,29 @@ void Renderer::renderShadowMap(bool contact) {
     // The units' map takes whatever reaches into its square: out to its
     // corners, and a few yards past them for a caster standing outside whose
     // body leans in.
-    const float shadowCullRadius = contact ? CONTACT_MAP_HALF_EXTENT * 1.415f + 8.0f
+    const float shadowCullRadius = strike ? 550.0f : contact ? CONTACT_MAP_HALF_EXTENT * 1.415f + 8.0f
                                            : frameInputs_.shadowDistance * 1.35f;
-    // With shadows off the pass still begins and ends, so the map is cleared
-    // and left where its readers expect it; only the casters are skipped.
     if (drawCasters) {
-    // Each caster kind's recording timed apart, under the pass that runs it:
-    // the pass's whole is the largest part of beginFrame in a city, and which
-    // of these it is decides where to cut.
     constexpr std::string_view kStageGroup = "beginFrame/graph/shadow_pass";
-    if (!contact) wmoCasterSetsReset_ = m2CasterSetsReset_ = true;
     if (terrainRenderer && !contact) {
         CpuStage stage(vkCtx->cpuStages(), kStageGroup, "sun: terrain");
         terrainRenderer->recordDepth(currentCmd, passMatrix, passCenter, shadowCullRadius, frameInputs_.scene->terrain);
     }
     if (wmoRenderer && !contact) {
-        CpuStage stage(vkCtx->cpuStages(), kStageGroup, "sun: wmo");
-        wmoRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius);
+        CpuStage stage(vkCtx->cpuStages(), kStageGroup, strike ? "lightning: wmo" : "sun: wmo");
+        wmoRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius, !wmoCasterSetsReset_);
+        wmoCasterSetsReset_ = true;
     }
     if (m2Renderer) {
-        CpuStage stage(vkCtx->cpuStages(), kStageGroup, contact ? "units: m2" : "sun: m2");
+        CpuStage stage(vkCtx->cpuStages(), kStageGroup, strike ? "lightning: m2" : contact ? "units: m2" : "sun: m2");
         m2Renderer->renderShadow(currentCmd, passMatrix, frameInputs_.wind, passCenter, shadowCullRadius,
-                                 !contact, /*reuseCull=*/!contact);
+                                 !m2CasterSetsReset_, /*reuseCull=*/!contact && !strike);
+        m2CasterSetsReset_ = true;
     }
     if (characterRenderer) {
-        CpuStage stage(vkCtx->cpuStages(), kStageGroup,
-                       contact ? "units: characters" : "sun: characters");
-        characterRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius, !contact);
+        CpuStage stage(vkCtx->cpuStages(), kStageGroup, strike ? "lightning: characters" : contact ? "units: characters" : "sun: characters");
+        characterRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius, !characterCasterSetsReset_);
+        characterCasterSetsReset_ = true;
     }
     }  // drawCasters
 
@@ -5079,7 +5124,7 @@ void Renderer::renderShadowMap(bool contact) {
     b2Dep.pImageMemoryBarriers = &b2;
     cmdPipelineBarrier2(currentCmd, b2Dep);
     passLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    if (vkCtx) vkCtx->gpuMark(currentCmd, contact ? "contact shadows" : "shadows");
+    if (vkCtx) vkCtx->gpuMark(currentCmd, strike ? "lightning shadows" : contact ? "contact shadows" : "shadows");
 }
 
 VkImageView Renderer::getNeutralRtLightingView() const {
@@ -5379,11 +5424,25 @@ void Renderer::updateWeather(float deltaTime) {
     // Lightning over a thunderstorm, as often as it is heavy.
     if (lightning) {
         const bool storm = weatherControls_.lightning && mix.thunder > 0.05f;
-        lightning->setEnabled(storm);
-        if (storm) {
-            lightning->setIntensity(mix.thunder);
-            lightning->update(deltaTime, *camera);
+        if (lightningMapId_ != environment_.mapId) {
+            lightning->reset();
+            lightningMapId_ = environment_.mapId;
         }
+        lightning->setIntensity(mix.thunder);
+        lightning->setEnabled(storm);
+        lightning->update(deltaTime, *camera, [this](const glm::vec3& point) -> std::optional<float> {
+            std::optional<float> height;
+            height = collision_->terrainHeight(point.x, point.y);
+            {
+                const glm::vec3 origin = point + glm::vec3(0, 0, 500);
+                const float hit = collision_->wmoRaycast(collision::Reach::everywhere(), origin,
+                    glm::vec3(0, 0, -1), 1500.0f, /*cameraQuery=*/false);
+                if (hit < 1500.0f && (!height || origin.z - hit > *height)) height = origin.z - hit;
+            }
+            if (!height) LOG_WARNING("Lightning at ", point.x, ",", point.y,
+                                     " has no loaded terrain or building; strike skipped");
+            return height;
+        });
     }
 }
 
@@ -5454,6 +5513,9 @@ void Renderer::renderVolumetricFog() {
         fogLayerBase_ += (ground - fogLayerBase_) * (1.0f - std::exp(-dt / 1.5f));
     }
 
+    const bool strikeLight = currentFrameData.lightningColor.b > 0.0f;
+    if (strikeLight || lightningFogLastFrame_) volumetricFog_->resetHistory();
+    lightningFogLastFrame_ = strikeLight;
     const float target = frameInputs_.fogTargetExtinction;
     if (fogExtinction_ < 0.0f) fogExtinction_ = target;
     fogExtinction_ += (target - fogExtinction_) * (1.0f - std::exp(-dt / 1.0f));
@@ -5536,7 +5598,7 @@ void Renderer::buildFrameGraph() {
     if (!renderGraph_) return;
 
     renderGraph_->reset();
-    wmoCasterSetsReset_ = m2CasterSetsReset_ = false;
+    characterCasterSetsReset_ = wmoCasterSetsReset_ = m2CasterSetsReset_ = false;
 
     auto shadowDepth = renderGraph_->findResource("shadow_depth");
     auto reflTex = renderGraph_->findResource("reflection_texture");

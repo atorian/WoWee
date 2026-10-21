@@ -145,7 +145,8 @@ public:
     /// The distance along a ray to the first building surface it meets, up to
     /// maxDistance: the camera's collision with buildings.
     [[nodiscard]] float wmoRaycast(const Reach& reach, const glm::vec3& origin,
-                                   const glm::vec3& direction, float maxDistance) const;
+                                   const glm::vec3& direction, float maxDistance,
+                                   bool cameraQuery = true) const;
     /// Whether a point is inside any group of a building, and which building
     /// model holds it.
     [[nodiscard]] bool insideWmo(const Reach& reach, float x, float y, float z,

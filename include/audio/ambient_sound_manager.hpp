@@ -5,6 +5,7 @@
 #include <string>
 #include <cstdint>
 #include <glm/vec3.hpp>
+#include "audio/rain_mix.hpp"
 
 namespace wowee {
 namespace pipeline {
@@ -16,7 +17,7 @@ namespace audio {
 class AmbientSoundManager {
 public:
     AmbientSoundManager() = default;
-    ~AmbientSoundManager() = default;
+    ~AmbientSoundManager();
 
     // Initialization
     bool initialize(pipeline::AssetManager* assets);
@@ -27,7 +28,9 @@ public:
 
     // Weather control
     enum class WeatherType { NONE, RAIN_LIGHT, RAIN_MEDIUM, RAIN_HEAVY, SNOW_LIGHT, SNOW_MEDIUM, SNOW_HEAVY };
-    void setWeather(WeatherType type);
+    void setWeather(WeatherType type, float rainAmount);
+    // End the character's weather, including continuous loops, on logout.
+    void resetWeather();
     [[nodiscard]] WeatherType getCurrentWeather() const { return currentWeather_; }
 
     // Zone ambience control
@@ -81,6 +84,9 @@ public:
     // Time of day control (0-24 hours)
     void setGameTime(float hours);
 
+    /// An already-arrived thunder event from the client's strike timeline.
+    void playThunder(const glm::vec3& position, uint32_t variant, float exposure);
+
     // Volume control
     void setVolumeScale(float scale);
     [[nodiscard]] float getVolumeScale() const { return volumeScale_; }
@@ -118,9 +124,15 @@ private:
     std::vector<AmbientSample> cricketSounds_;
 
     // Weather sound libraries
+    std::vector<AmbientSample> thunderSounds_;
+    uint32_t thunderPlaybackFailures_ = 0;
     std::vector<AmbientSample> rainLightSounds_;
     std::vector<AmbientSample> rainMediumSounds_;
     std::vector<AmbientSample> rainHeavySounds_;
+    RainMix rainMix_;
+    float rainAmount_ = 0.0f;
+    std::array<uint32_t, 6> rainVoices_{};
+    std::array<bool, 6> rainPlaybackFailed_{};
     std::vector<AmbientSample> snowLightSounds_;
     std::vector<AmbientSample> snowMediumSounds_;
     std::vector<AmbientSample> snowHeavySounds_;
@@ -203,6 +215,7 @@ private:
     void updateWindAmbience(float deltaTime, bool isIndoor);
     void updateBlacksmithAmbience(float deltaTime);
     void updateWeatherAmbience(float deltaTime, bool isIndoor);
+    void updateRainAmbience(float deltaTime, bool isIndoor);
     void updateWaterAmbience(float deltaTime, bool isSwimming);
     void updateZoneAmbience(float deltaTime, bool isIndoor);
     void updateCityAmbience(float deltaTime);

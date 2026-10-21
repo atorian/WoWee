@@ -1257,17 +1257,17 @@ void TerrainRenderer::recordDepth(VkCommandBuffer cmd, const glm::mat4& lightSpa
                         0, sizeof(push), &push);
     const glm::vec4 centreLs = lightSpaceMatrix * glm::vec4(shadowCenter, 1.0f);
     const float scaleZ = glm::length(glm::vec3(lightSpaceMatrix[0][2], lightSpaceMatrix[1][2],
-                                               lightSpaceMatrix[2][2]));
-    const float scaleX = glm::length(glm::vec3(lightSpaceMatrix[0][0], lightSpaceMatrix[1][0],
-                                               lightSpaceMatrix[2][0]));
-    const float scaleY = glm::length(glm::vec3(lightSpaceMatrix[0][1], lightSpaceMatrix[1][1],
-                                               lightSpaceMatrix[2][1]));
+                                             lightSpaceMatrix[2][2]));
+    const bool perspective = glm::length(glm::vec3(lightSpaceMatrix[0][3], lightSpaceMatrix[1][3], lightSpaceMatrix[2][3])) > 1e-6f;
+    Frustum shadowFrustum;
+    shadowFrustum.extractFromMatrix(lightSpaceMatrix);
 
     // The same test for a sphere, a chunk's or a whole tile's: a tile's holds
     // its chunks', so a tile that fails it has no chunk that passes.
     const auto mayCast = [&](const glm::vec3& centre, float radius) {
+        if (!shadowFrustum.intersectsSphere(centre, radius)) return false;
+        if (perspective) return true;
         const glm::vec4 ls = lightSpaceMatrix * glm::vec4(centre, 1.0f);
-        if (std::abs(ls.x) > 1.0f + radius * scaleX || std::abs(ls.y) > 1.0f + radius * scaleY) return false;
         // Depth grows away from the light in either depth convention.
         return ls.z <= centreLs.z + (shadowRadius + radius) * scaleZ;
     };

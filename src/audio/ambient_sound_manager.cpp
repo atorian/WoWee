@@ -111,13 +111,20 @@ bool AmbientSoundManager::initialize(pipeline::AssetManager* assets) {
 
     // Load weather sounds
     rainLightSounds_.resize(1);
-    bool rainLightLoaded = loadSound("Sound\\Ambience\\Weather\\RainLight.wav", rainLightSounds_[0], assets);
+    bool rainLightLoaded = loadSound("Sound\\Ambience\\Weather\\RainLightLoop.wav", rainLightSounds_[0], assets);
 
     rainMediumSounds_.resize(1);
-    bool rainMediumLoaded = loadSound("Sound\\Ambience\\Weather\\RainMedium.wav", rainMediumSounds_[0], assets);
+    bool rainMediumLoaded = loadSound("Sound\\Ambience\\Weather\\RainMediumLoop.wav", rainMediumSounds_[0], assets);
 
     rainHeavySounds_.resize(1);
-    bool rainHeavyLoaded = loadSound("Sound\\Ambience\\Weather\\RainHeavy.wav", rainHeavySounds_[0], assets);
+    bool rainHeavyLoaded = loadSound("Sound\\Ambience\\Weather\\RainHeavyLoop.wav", rainHeavySounds_[0], assets);
+
+    for (const auto* library : {&rainLightSounds_, &rainMediumSounds_, &rainHeavySounds_}) {
+        if (!library->front().loaded) {
+            LOG_WARNING("Rain ambience missing: ", library->front().path,
+                        "; this rain intensity will be silent indoors and outdoors");
+        }
+    }
 
     snowLightSounds_.resize(1);
     bool snowLightLoaded = loadSound("Sound\\Ambience\\Weather\\SnowLight.wav", snowLightSounds_[0], assets);
@@ -248,19 +255,60 @@ bool AmbientSoundManager::initialize(pipeline::AssetManager* assets) {
     birdTimer_ = randomFloat(0.0f, 5.0f);
     cricketTimer_ = randomFloat(0.0f, 5.0f);
 
+    // Authored outdoor lightning sounds, loaded once with the other ambience.
+    thunderSounds_.resize(4);
+    const char* thunderPaths[] = {
+        "Sound\\Doodad\\BlastedLandsLightningBolt01Stand-Bolt.wav",
+        "Sound\\Doodad\\BlastedLandsLightningBolt01Stand-Bolt1.wav",
+        "Sound\\Doodad\\BlastedLandsLightningBolt01Stand-Bolt2.wav",
+        "Sound\\Doodad\\BlastedLandsLightningBolt01Stand-Bolt3.wav"};
+    for (size_t i = 0; i < thunderSounds_.size(); ++i) {
+        if (!loadSound(thunderPaths[i], thunderSounds_[i], assets))
+            LOG_WARNING("Thunder sound unavailable: ", thunderPaths[i], "; this variant will be silent");
+    }
+    thunderPlaybackFailures_ = 0;
     initialized_ = true;
     LOG_INFO("AmbientSoundManager: Initialization complete");
     return true;
 }
 
+AmbientSoundManager::~AmbientSoundManager() { shutdown(); }
+
 void AmbientSoundManager::shutdown() {
+    resetWeather();
     emitters_.clear();
     activeSounds_.clear();
     initialized_ = false;
 }
 
+void AmbientSoundManager::resetWeather() {
+    for (auto& voice : rainVoices_) {
+        if (voice) AudioEngine::instance().stopSound(voice);
+        voice = 0;
+    }
+    rainMix_ = {};
+    rainPlaybackFailed_.fill(false);
+    rainAmount_ = 0.0f;
+    currentWeather_ = WeatherType::NONE;
+    weatherLoopTime_ = 0.0f;
+}
+
 bool AmbientSoundManager::loadSound(const std::string& path, AmbientSample& sample, pipeline::AssetManager* assets) {
     return loadSampleFile(path, sample, assets, "AmbientSoundManager");
+}
+
+void AmbientSoundManager::playThunder(const glm::vec3& position, uint32_t variant, float exposure) {
+    if (!initialized_ || volumeScale_ <= 0.0f || thunderSounds_.empty()) return;
+    auto& engine = AudioEngine::instance();
+    if (!engine.isInitialized() || engine.getMasterVolume() <= 0.0f) return;
+    const size_t i = variant % thunderSounds_.size();
+    const auto& sample = thunderSounds_[i];
+    if (!sample.loaded || (thunderPlaybackFailures_ & (1u << i))) return;
+    const float volume = volumeScale_ * glm::mix(0.3f, 0.85f, glm::clamp(exposure, 0.0f, 1.0f));
+    if (!engine.playSound3D(sample.data, position, volume, 1.0f, 1200.0f, 80.0f)) {
+        LOG_WARNING("Thunder playback failed for ", sample.path, "; this thunder sample disabled");
+        thunderPlaybackFailures_ |= 1u << i;
+    }
 }
 
 void AmbientSoundManager::update(float deltaTime, const glm::vec3& cameraPos, bool isIndoor, bool isSwimming, bool isBlacksmith) {
@@ -548,7 +596,8 @@ void AmbientSoundManager::setVolumeScale(float scale) {
     volumeScale_ = std::max(0.0f, std::min(1.0f, scale));
 }
 
-void AmbientSoundManager::setWeather(WeatherType type) {
+void AmbientSoundManager::setWeather(WeatherType type, float rainAmount) {
+    rainAmount_ = std::clamp(rainAmount, 0.0f, 1.0f);
     if (currentWeather_ != type) {
         LOG_INFO("AmbientSoundManager: Weather changed from ", static_cast<int>(currentWeather_),
                  " to ", static_cast<int>(type));
@@ -675,8 +724,40 @@ void AmbientSoundManager::setCityType(CityType type) {
     }
 }
 
+void AmbientSoundManager::updateRainAmbience(float deltaTime, bool isIndoor) {
+    const auto& gains = rainMix_.update(deltaTime, rainAmount_, isIndoor);
+    auto& engine = AudioEngine::instance();
+    if (!engine.isInitialized()) return; // Device is not ready, not a failed sample.
+    const std::vector<AmbientSample>* libraries[] = {
+        &rainLightSounds_, &rainMediumSounds_, &rainHeavySounds_
+    };
+    for (size_t i = 0; i < rainVoices_.size(); ++i) {
+        const float volume = gains[i] * volumeScale_;
+        auto& voice = rainVoices_[i];
+        if (volume < 0.0001f) {
+            if (voice) engine.stopSound(voice);
+            voice = 0;
+            continue;
+        }
+        if (!voice && !rainPlaybackFailed_[i]) {
+            const auto& library = *libraries[i % 3];
+            if (library.empty() || !library.front().loaded) continue; // Reported at load time.
+            const auto& sample = library.front();
+            // Through a roof the sharp outdoor hiss is removed, leaving quiet patter.
+            voice = engine.playSound2DLoop(sample.data, 0.0f, i >= 3 ? 1500.0f : 0.0f);
+            if (!voice) {
+                LOG_WARNING("Rain loop playback failed: ", sample.path,
+                            i >= 3 ? " (indoors)" : " (outdoors)", "; this layer disabled");
+                rainPlaybackFailed_[i] = true;
+            }
+        }
+        if (voice) engine.setSoundVolume(voice, volume);
+    }
+}
+
 void AmbientSoundManager::updateWeatherAmbience(float deltaTime, bool isIndoor) {
-    // Don't play weather sounds when indoors
+    // Rain keeps running through doorway and weather transitions, including its fade out.
+    updateRainAmbience(deltaTime, isIndoor);
     if (isIndoor || currentWeather_ == WeatherType::NONE) return;
 
     weatherLoopTime_ += deltaTime;
@@ -686,18 +767,6 @@ void AmbientSoundManager::updateWeatherAmbience(float deltaTime, bool isIndoor) 
     float loopInterval = 20.0f;  // Default 20 second loop for weather
 
     switch (currentWeather_) {
-        case WeatherType::RAIN_LIGHT:
-            weatherLibrary = &rainLightSounds_;
-            loopInterval = 25.0f;
-            break;
-        case WeatherType::RAIN_MEDIUM:
-            weatherLibrary = &rainMediumSounds_;
-            loopInterval = 20.0f;
-            break;
-        case WeatherType::RAIN_HEAVY:
-            weatherLibrary = &rainHeavySounds_;
-            loopInterval = 18.0f;
-            break;
         case WeatherType::SNOW_LIGHT:
             weatherLibrary = &snowLightSounds_;
             loopInterval = 30.0f;

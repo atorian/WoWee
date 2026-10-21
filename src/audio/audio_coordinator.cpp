@@ -222,7 +222,7 @@ void AudioCoordinator::updateZoneAudio(const ZoneAudioContext& ctx) {
             else if (ctx.snowAmount < 0.66f) audioWeatherType = AmbientSoundManager::WeatherType::SNOW_MEDIUM;
             else                             audioWeatherType = AmbientSoundManager::WeatherType::SNOW_HEAVY;
         }
-        ambientSoundManager_->setWeather(audioWeatherType);
+        ambientSoundManager_->setWeather(audioWeatherType, ctx.rainAmount);
         ambientSoundManager_->update(deltaTime, ctx.cameraPosition, ctx.insideWmo, ctx.isSwimming, isBlacksmith);
     }
 

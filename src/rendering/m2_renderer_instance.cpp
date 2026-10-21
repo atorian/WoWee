@@ -84,12 +84,18 @@ void M2Renderer::gatherShadowCandidates(const glm::mat4& lightSpace, float shado
                                         std::vector<uint32_t>& out) const {
     out.clear();
     const float invRadius = shadowRadius > 0.0f ? 1.0f / shadowRadius : 0.0f;
+    const bool perspective = glm::length(glm::vec3(lightSpace[0][3], lightSpace[1][3], lightSpace[2][3])) > 1e-6f;
+    Frustum frustum;
+    if (perspective) frustum.extractFromMatrix(lightSpace);
     for (const auto& cell : scene_->cullGrid_.cells()) {
         if (cell.ids.empty()) continue;
         // The light's box, not the camera's: a caster behind the camera can
         // still throw its shadow into view.
-        if (!cellMayCastShadow(lightSpace, cell.posMin, cell.posMax,
-                               cell.maxShadowRadius * invRadius)) continue;
+        if (perspective) {
+            const glm::vec3 margin(cell.maxShadowRadius);
+            if (!frustum.intersectsAABB(cell.posMin - margin, cell.posMax + margin)) continue;
+        } else if (!cellMayCastShadow(lightSpace, cell.posMin, cell.posMax,
+                                      cell.maxShadowRadius * invRadius)) continue;
         for (const uint32_t id : cell.ids) {
             const auto it = scene_->instanceIndexById.find(id);
             if (it != scene_->instanceIndexById.end() && it->second < scene_->instances.size()) {

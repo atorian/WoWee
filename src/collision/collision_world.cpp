@@ -754,17 +754,17 @@ bool CollisionWorld::wmoWallSlide(const Reach& reach, const glm::vec3& from, con
 }
 
 float CollisionWorld::wmoRaycast(const Reach& reach, const glm::vec3& origin,
-                                 const glm::vec3& direction, float maxDistance) const {
+                                 const glm::vec3& direction, float maxDistance, bool cameraQuery) const {
     QueryTimer timer(wmoQueryMs_, wmoQueryCalls_);
     float closestHit = maxDistance;
     // The camera is a solid sphere and every solid surface stops it, floors
     // and ceilings as much as walls. A surface within a hand's width of the
     // pivot is the one the player stands in, and would jam the camera.
-    constexpr float kMinHitDistance = 0.20f;
+    const float kMinHitDistance = cameraQuery ? 0.20f : 0.0f;
     // Only surfaces the ray is very nearly parallel to are dropped: a wall
     // approached at a shallow angle is exactly the one the camera slides
     // along and is about to pass through.
-    constexpr float kMinSurfaceAlignment = 0.05f;
+    const float kMinSurfaceAlignment = cameraQuery ? 0.05f : 0.0f;
 
     const glm::vec3 rayEnd = origin + direction * maxDistance;
     std::vector<const WmoPlacement*> candidates;

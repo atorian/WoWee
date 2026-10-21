@@ -36,5 +36,7 @@ void main() {
     // a tenth of its intended value and disappeared, leaving only the bright
     // ones - each of which was also drawn at the largest point size. Few, fat
     // and soft is the look that reads as bad focus.
-    outColor = vec4(vColor * vBrightness * profile, 1.0);
+    // Keep the compact core visible after MSAA and sky composition.
+    const float radianceScale = 12.0;
+    outColor = vec4(vColor * vBrightness * profile * radianceScale, 1.0);
 }

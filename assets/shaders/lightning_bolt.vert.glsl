@@ -1,5 +1,4 @@
 #version 450
-
 layout(set = 0, binding = 0) uniform PerFrame {
     mat4 view;
     mat4 projection;
@@ -32,17 +31,17 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 aerialLight;
     vec4 terrainLodParams;
     vec4 aerialParams;
+    mat4 lightningMatrix;
+    vec4 lightningPosition;
+    vec4 lightningColor;
 };
-
-layout(push_constant) uniform Push {
-    float brightness;
-} push;
-
 layout(location = 0) in vec3 aPos;
-
-layout(location = 0) out float vBrightness;
-
+layout(location = 1) in float aSide;
+layout(location = 2) in float aBrightness;
+layout(location = 0) out float side;
+layout(location = 1) out float brightness;
 void main() {
-    vBrightness = push.brightness;
+    side = aSide;
+    brightness = aBrightness;
     gl_Position = projection * view * vec4(aPos, 1.0);
 }

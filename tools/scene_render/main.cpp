@@ -15,6 +15,9 @@
 //     "weather": "clear",                 // clear | fog | rain | snow | sandstorm |
 //                                         //   thunderstorm | blackrain | blacksnow
 //     "weatherIntensity": 0.0,            //   0-1; there from the first frame
+//     "lightning": { "start": [70, 70, 160], // a fixed strike after streaming,
+//                    "end": [70, 70, 0],    // offsets from origin, render axes;
+//                    "age": 0.5, "seed": 17 }, // seconds after its leader starts
 //     "lens": true,                       // what the weather leaves on the camera's
 //                                         //   lens - it gathers over the frames
 //     "splashes": true,                   // rain splashing where it lands
@@ -59,6 +62,7 @@
 //     "size": [1280, 720],
 //     "frames": 30,                       // drawn before the one that is kept
 //     "shadowQuality": 2,                 // 0-4, as the settings slider
+//     "rayTracedLighting": 0,             // RT lighting mode 0-3
 //     "msaa": 1,                          // samples: 1, 2, 4 or 8
 //     "bloom": 0.8,                       // bright light glow, 0 disables
 //     "fxaa": false,                      // FXAA, drawn through its own target
@@ -89,6 +93,9 @@
 #include "core/frame_worker.hpp"
 #include "core/frame_budget.hpp"
 #include "rendering/minimap.hpp"
+#include "rendering/lightning.hpp"
+#include "rendering/frame_sink.hpp"
+#include "stb_image_write.h"
 #include "core/logger.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
@@ -732,6 +739,8 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     if (scene.contains("fsrScale") && renderer.getPostProcessPipeline())
         renderer.getPostProcessPipeline()->setFSRQuality(scene["fsrScale"].get<float>());
 
+    renderer.setRtLightingMode(scene.value("rayTracedLighting", 0));
+
     // Fixed steps, so the same scene draws the same frame. Terrain streams in
     // on its own threads, as long as it takes; with it on, it streams first,
     // with the scene's clock held, and the frames run from the clock's start
@@ -843,6 +852,7 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
             renderer.setShadowDistance(40.0f);
             renderer.setWorldInView(false);
             renderer.setSharpStars(false);
+            if (auto* lightning = renderer.getLightning()) lightning->reset();
             if (auto* post = renderer.getPostProcessPipeline()) {
                 post->setFXAAEnabled(!inputs.postProcess.fxaa);
                 post->setFSR2Enabled(!inputs.postProcess.fsr2);
@@ -883,6 +893,14 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         }
     }
     timer.report(*renderer.getVkContext());
+    // A repeatable strike after streaming has settled, for lighting and trail captures.
+    if (scene.contains("lightning")) {
+        const auto& strike = scene["lightning"];
+        renderer.getLightning()->reseed(strike.value("seed", 17u));
+        renderer.getLightning()->triggerStrike(origin + vec3(strike.at("start")), origin + vec3(strike.at("end")));
+        const int strikeFrames = std::max(1, static_cast<int>(std::round(strike.value("age", 0.5f) / kStep)));
+        for (int i = 0; i < strikeFrames; ++i) drawFrame();
+    }
     if (renderer.weatherMix().any()) {
         const auto& mix = renderer.weatherMix();
         LOG_WARNING("scene_render: weather rain ", mix.rain, " snow ", mix.snow, " sand ", mix.sand,

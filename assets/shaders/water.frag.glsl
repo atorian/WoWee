@@ -32,7 +32,12 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 aerialLight;
     vec4 terrainLodParams;
     vec4 aerialParams;
+    mat4 lightningMatrix;
+    vec4 lightningPosition;
+    vec4 lightningColor;
 };
+
+#include "lightning_light.glsli"
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
@@ -931,6 +936,7 @@ void main() {
         alpha *= smoothstep(0.0, 0.2, shoreDepth);
     }
 
+    color += lightningDiffuse(FragPos, norm, vec3(0.22, 0.28, 0.34));
     color = applyFog(color, FragPos, dist);
 
     outColor = vec4(color, alpha);

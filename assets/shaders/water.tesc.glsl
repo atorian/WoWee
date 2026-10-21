@@ -41,6 +41,9 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 aerialLight;
     vec4 terrainLodParams;
     vec4 aerialParams;
+    mat4 lightningMatrix;
+    vec4 lightningPosition;
+    vec4 lightningColor;
 };
 
 layout(push_constant) uniform Push {

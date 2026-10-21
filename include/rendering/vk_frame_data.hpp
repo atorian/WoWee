@@ -64,6 +64,10 @@ struct GPUPerFrameData {
     glm::vec4 aerialLight{0.0f}; // neutral illuminated aerosol; w reserved
     glm::vec4 terrainLodParams{0.0f}; // WDL overlap start/end, ready, reserved
     glm::vec4 aerialParams{0.0f}; // xyz reserved, w aerial colour correction enabled
+    // The current lightning source and its independent shadow view. Zero colour disables it.
+    glm::mat4 lightningMatrix{0.0f};
+    glm::vec4 lightningPosition{0.0f}; // xyz source, w range in yards
+    glm::vec4 lightningColor{0.0f}; // rgb radiance, w shadow texel size
 };
 
 // Push constants for the model matrix (most common case)

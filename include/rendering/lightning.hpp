@@ -1,124 +1,50 @@
 #pragma once
 
-#include "rendering/per_frame_buffer.hpp"
+#include "rendering/frames_in_flight.hpp"
+#include "rendering/lightning_storm.hpp"
+#include "rendering/vk_utils.hpp"
+#include <array>
 
-#include <vulkan/vulkan.h>
-#include <vk_mem_alloc.h>
-#include <glm/glm.hpp>
-#include <vector>
-
-namespace wowee {
-namespace rendering {
-
+namespace wowee::rendering {
 class Camera;
 class VkContext;
 
-/**
- * Lightning system for thunder storm effects
- *
- * Features:
- * - Random lightning strikes during rain
- * - Screen flash effect
- * - Procedural lightning bolts with branches
- * - Thunder timing (light then sound delay)
- * - Intensity scaling with weather
- */
+/// Depth-tested luminous ribbons, driven by the same strike as scene light and thunder.
 class Lightning {
 public:
     Lightning();
     ~Lightning();
-
     [[nodiscard]] bool initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout);
     void shutdown();
     void recreatePipelines();
-    /// The two pipelines both initialize() and recreatePipelines() need.
-    void buildBoltPipeline(VkDevice device,
-                           const VkPipelineShaderStageCreateInfo& vertStage,
-                           const VkPipelineShaderStageCreateInfo& fragStage);
-    void buildFlashPipeline(VkDevice device,
-                            const VkPipelineShaderStageCreateInfo& vertStage,
-                            const VkPipelineShaderStageCreateInfo& fragStage);
-
-    void update(float deltaTime, const Camera& camera);
-    struct BoltDraw { std::vector<glm::vec3> vertices; float brightness = 0; };
-    struct Frame { std::vector<BoltDraw> bolts; float flash = 0; };
+    void update(float dt, const Camera& camera, const LightningStorm::Ground& ground);
+    struct Vertex { glm::vec3 position; float side; float brightness; };
+    struct Frame {
+        std::vector<Vertex> vertices;
+        glm::vec3 ground{0.0f};
+        glm::mat4 lightMatrix{0.0f};
+        glm::vec4 lightPosition{0.0f}, lightColor{0.0f};
+    };
     Frame extract() const;
     void record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Frame& input);
-
-    // Control
-    void setEnabled(bool enabled);
-    [[nodiscard]] bool isEnabled() const { return enabled; }
-
-    void setIntensity(float intensity);  // 0.0 - 1.0 (affects frequency)
-    [[nodiscard]] float getIntensity() const { return intensity; }
-
-    // Trigger manual strike (for testing or scripted events)
-    void triggerStrike(const glm::vec3& position);
+    void setEnabled(bool enabled) { storm_.setWeather(enabled, storm_.intensity()); }
+    [[nodiscard]] bool isEnabled() const { return storm_.enabled(); }
+    void setIntensity(float intensity) { storm_.setWeather(storm_.enabled(), intensity); }
+    [[nodiscard]] float getIntensity() const { return storm_.intensity(); }
+    void triggerStrike(const glm::vec3& cloud, const glm::vec3& ground) { storm_.strike(cloud, ground); }
+    void reset() { storm_.reset(); }
+    void reseed(uint32_t seed) { storm_.reseed(seed); }
+    [[nodiscard]] const LightningStorm& storm() const { return storm_; }
+    [[nodiscard]] std::vector<ThunderArrival> takeThunder() { return storm_.takeThunder(); }
 
 private:
-    struct LightningBolt {
-        glm::vec3 startPos;
-        glm::vec3 endPos;
-        float lifetime;
-        float maxLifetime;
-        std::vector<glm::vec3> segments;  // Bolt path
-        std::vector<glm::vec3> branches;  // Branch points
-        float brightness;
-        bool active;
-    };
-
-    struct Flash {
-        float intensity;  // 0.0 - 1.0
-        float lifetime;
-        float maxLifetime;
-        bool active;
-    };
-
-    void generateLightningBolt(LightningBolt& bolt);
-    void generateBoltSegments(const glm::vec3& start, const glm::vec3& end,
-                             std::vector<glm::vec3>& segments, int depth = 0);
-    void updateBolts(float deltaTime);
-    void updateFlash(float deltaTime);
-    void spawnRandomStrike(const glm::vec3& cameraPos);
-
-    void recordBolts(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Frame& input);
-    void recordFlash(VkCommandBuffer cmd, float intensity);
-
-    bool enabled = true;
-    float intensity = 0.5f;  // Strike frequency multiplier
-
-    // Timing
-    float strikeTimer = 0.0f;
-    float nextStrikeTime = 0.0f;
-
-    // Active effects
-    std::vector<LightningBolt> bolts;
-    Flash flash;
-
-    // Vulkan objects
-    VkContext* vkCtx = nullptr;
-
-    // Bolt pipeline + dynamic buffer
-    VkPipeline boltPipeline = VK_NULL_HANDLE;
-    VkPipelineLayout boltPipelineLayout = VK_NULL_HANDLE;
-    PerFrameBuffer boltDynamicVB;
-
-    // Flash pipeline + static quad buffer
-    VkPipeline flashPipeline = VK_NULL_HANDLE;
-    VkPipelineLayout flashPipelineLayout = VK_NULL_HANDLE;
-    ::VkBuffer flashQuadVB = VK_NULL_HANDLE;
-    VmaAllocation flashQuadVBAlloc = VK_NULL_HANDLE;
-
-    // Configuration
-    static constexpr int MAX_BOLTS = 3;
-    static constexpr float MIN_STRIKE_INTERVAL = 2.0f;
-    static constexpr float MAX_STRIKE_INTERVAL = 8.0f;
-    static constexpr float BOLT_LIFETIME = 0.15f;  // Quick flash
-    static constexpr float FLASH_LIFETIME = 0.3f;
-    static constexpr float STRIKE_DISTANCE = 200.0f;  // From camera
-    static constexpr int MAX_SEGMENTS = 64;
-    static constexpr float BRANCH_PROBABILITY = 0.3f;
+    LightningStorm storm_;
+    glm::vec3 eye_{0.0f};
+    VkContext* ctx_ = nullptr;
+    VkPipeline pipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout layout_ = VK_NULL_HANDLE;
+    std::array<AllocatedBuffer, MAX_FRAMES_IN_FLIGHT> vertices_{};
+    // 28 main segments, at most 18 branches of five segments, six vertices each.
+    static constexpr uint32_t kVertexCapacity = 1024;
 };
-
-} // namespace rendering
-} // namespace wowee
+} // namespace wowee::rendering

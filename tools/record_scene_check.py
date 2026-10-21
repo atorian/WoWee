@@ -40,7 +40,7 @@ LIVE = {
     "WaterWake": r"cornerTexel_|pendingShift_|pendingSteps_|stillPending_|moverCount_|place_|shape_|head_",
     "MountDust": r"particles",
     "SwimEffects": r"rippleVertexData|bubbleVertexData|insectVertexData",
-    "Lightning": r"enabled|bolts|flash",
+    "Lightning": r"enabled|bolts|flash|storm_|eye_",
     "ChargeEffect": r"trail_|dustPuffs_",
     "QuestMarkerRenderer": r"markers_",
     "FootprintRenderer": r"prints_",

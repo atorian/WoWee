@@ -1,506 +1,114 @@
 #include "rendering/lightning.hpp"
-#include "core/coordinates.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/vk_context.hpp"
-#include "rendering/vk_shader.hpp"
 #include "rendering/vk_pipeline.hpp"
-#include "rendering/vk_frame_data.hpp"
-#include "rendering/vk_utils.hpp"
+#include "rendering/vk_shader.hpp"
 #include "core/logger.hpp"
-#include <random>
-#include <cmath>
+
 #include <cstring>
+#include <random>
+#include <glm/gtc/matrix_transform.hpp>
 
-namespace wowee {
-namespace rendering {
-
-namespace {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-
-    float randomRange(float min, float max) {
-        return min + dist(gen) * (max - min);
-    }
-}
-
-Lightning::Lightning() {
-    flash.active = false;
-    flash.intensity = 0.0f;
-    flash.lifetime = 0.0f;
-    flash.maxLifetime = FLASH_LIFETIME;
-
-    bolts.resize(MAX_BOLTS);
-    for (auto& bolt : bolts) {
-        bolt.active = false;
-        bolt.lifetime = 0.0f;
-        bolt.maxLifetime = BOLT_LIFETIME;
-        bolt.brightness = 1.0f;
-    }
-
-    // Random initial strike time
-    nextStrikeTime = randomRange(MIN_STRIKE_INTERVAL, MAX_STRIKE_INTERVAL);
-}
-
-Lightning::~Lightning() {
-    shutdown();
-}
-
-/// The bolt pipeline: line-list geometry, additive, no depth test.
-///
-/// initialize() and recreatePipelines() described this and the flash pipeline
-/// below identically, vertex layout included, so each was stated twice.
-void Lightning::buildBoltPipeline(VkDevice device,
-                                  const VkPipelineShaderStageCreateInfo& vertStage,
-                                  const VkPipelineShaderStageCreateInfo& fragStage) {
-    const std::vector<VkDynamicState> dynamicStates = viewportAndScissorDynamic();
-
-    // Vertex input: position only (vec3)
-    VkVertexInputBindingDescription binding{};
-    binding.binding = 0;
-    binding.stride = sizeof(glm::vec3);
-    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-    VkVertexInputAttributeDescription posAttr{};
-    posAttr.location = 0;
-    posAttr.binding = 0;
-    posAttr.format = VK_FORMAT_R32G32B32_SFLOAT;
-    posAttr.offset = 0;
-
-    boltPipeline = PipelineBuilder()
-        .setShaders(vertStage, fragStage)
-        .setVertexInput({binding}, {posAttr})
-        .setTopology(VK_PRIMITIVE_TOPOLOGY_LINE_STRIP)
-        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-        .setNoDepthTest()  // Always visible (like the GL version)
-        .setColorBlendAttachment(PipelineBuilder::blendAdditive())  // Additive for electric glow
-        .setMultisample(vkCtx->getMsaaSamples())
-        .setLayout(boltPipelineLayout)
-        .setRenderPass(vkCtx->getImGuiRenderPass())
-        .setDynamicStates(dynamicStates)
-        .build(device, vkCtx->getPipelineCache());
-}
-
-/// The flash pipeline: a fullscreen quad tinting the sky when a bolt strikes.
-void Lightning::buildFlashPipeline(VkDevice device,
-                                   const VkPipelineShaderStageCreateInfo& vertStage,
-                                   const VkPipelineShaderStageCreateInfo& fragStage) {
-    const std::vector<VkDynamicState> dynamicStates = viewportAndScissorDynamic();
-
-    // Vertex input: position only (vec2)
-    VkVertexInputBindingDescription binding{};
-    binding.binding = 0;
-    binding.stride = 2 * sizeof(float);
-    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-    VkVertexInputAttributeDescription posAttr{};
-    posAttr.location = 0;
-    posAttr.binding = 0;
-    posAttr.format = VK_FORMAT_R32G32_SFLOAT;
-    posAttr.offset = 0;
-
-    flashPipeline = PipelineBuilder()
-        .setShaders(vertStage, fragStage)
-        .setVertexInput({binding}, {posAttr})
-        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP)
-        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-        .setNoDepthTest()
-        .setColorBlendAttachment(PipelineBuilder::blendAlpha())
-        .setMultisample(vkCtx->getMsaaSamples())
-        .setLayout(flashPipelineLayout)
-        .setRenderPass(vkCtx->getImGuiRenderPass())
-        .setDynamicStates(dynamicStates)
-        .build(device, vkCtx->getPipelineCache());
-}
+namespace wowee::rendering {
+Lightning::Lightning() : storm_(std::random_device{}()) {}
+Lightning::~Lightning() { shutdown(); }
 
 bool Lightning::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
-    core::Logger::getInstance().info("Initializing lightning system...");
-
-    vkCtx = ctx;
-    VkDevice device = vkCtx->getDevice();
-
-
-    // ---- Bolt pipeline (LINE_STRIP) ----
-    {
-        auto shaders = loadShaderPair(device, "assets/shaders/lightning_bolt.vert.spv", "assets/shaders/lightning_bolt.frag.spv", "lightning_bolt");
-        if (!shaders) return false;
-        const auto& vertStage = shaders.vertStage;
-        const auto& fragStage = shaders.fragStage;
-
-        // Push constant: { float brightness; } = 4 bytes
-        VkPushConstantRange pushRange{};
-        pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-        pushRange.offset = 0;
-        pushRange.size = sizeof(float);
-
-        boltPipelineLayout = createPipelineLayout(device, {perFrameLayout}, {pushRange});
-        if (boltPipelineLayout == VK_NULL_HANDLE) {
-            core::Logger::getInstance().error("Failed to create bolt pipeline layout");
-            return false;
-        }
-
-        buildBoltPipeline(device, vertStage, fragStage);
-
-
-        if (boltPipeline == VK_NULL_HANDLE) {
-            core::Logger::getInstance().error("Failed to create bolt pipeline");
-            return false;
-        }
-    }
-
-    // ---- Flash pipeline (fullscreen quad, TRIANGLE_STRIP) ----
-    {
-        auto shaders = loadShaderPair(device, "assets/shaders/lightning_flash.vert.spv", "assets/shaders/lightning_flash.frag.spv", "lightning_flash");
-        if (!shaders) return false;
-        const auto& vertStage = shaders.vertStage;
-        const auto& fragStage = shaders.fragStage;
-
-        // Push constant: { float intensity; } = 4 bytes
-        VkPushConstantRange pushRange{};
-        pushRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        pushRange.offset = 0;
-        pushRange.size = sizeof(float);
-
-        flashPipelineLayout = createPipelineLayout(device, {}, {pushRange});
-        if (flashPipelineLayout == VK_NULL_HANDLE) {
-            core::Logger::getInstance().error("Failed to create flash pipeline layout");
-            return false;
-        }
-
-        buildFlashPipeline(device, vertStage, fragStage);
-
-
-        if (flashPipeline == VK_NULL_HANDLE) {
-            core::Logger::getInstance().error("Failed to create flash pipeline");
-            return false;
-        }
-    }
-
-    // ---- Create dynamic mapped vertex buffer for bolt segments ----
-    // Each bolt can have up to MAX_SEGMENTS * 2 vec3 entries (segments + branches)
-    if (!boltDynamicVB.create(vkCtx->getAllocator(),
-                              MAX_SEGMENTS * 4 * sizeof(glm::vec3),  // generous capacity
-                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {
-        core::Logger::getInstance().error("Failed to create bolt dynamic vertex buffer");
+    ctx_ = ctx;
+    layout_ = createPipelineLayout(ctx_->getDevice(), {perFrameLayout}, {});
+    if (!layout_) {
+        LOG_ERROR("Lightning pipeline layout failed; bolts unavailable");
         return false;
     }
-
-    // ---- Create static flash quad vertex buffer ----
-    {
-        float flashQuad[] = {
-            -1.0f, -1.0f,
-             1.0f, -1.0f,
-            -1.0f,  1.0f,
-             1.0f,  1.0f
-        };
-
-        AllocatedBuffer buf = uploadBuffer(*vkCtx, flashQuad, sizeof(flashQuad),
-            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-        flashQuadVB = buf.buffer;
-        flashQuadVBAlloc = buf.allocation;
-        if (flashQuadVB == VK_NULL_HANDLE) {
-            core::Logger::getInstance().error("Failed to create flash quad vertex buffer");
+    for (auto& buffer : vertices_) {
+        buffer = createBuffer(ctx_->getAllocator(), kVertexCapacity * sizeof(Vertex),
+                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        if (!buffer.buffer || !buffer.info.pMappedData) {
+            LOG_ERROR("Lightning vertex buffer allocation failed; bolts unavailable");
             return false;
         }
     }
-
-    core::Logger::getInstance().info("Lightning system initialized");
-    return true;
+    recreatePipelines();
+    return pipeline_ != VK_NULL_HANDLE;
 }
-
 void Lightning::shutdown() {
-    if (vkCtx) {
-        VkDevice device = vkCtx->getDevice();
-        VmaAllocator allocator = vkCtx->getAllocator();
-
-        destroy(device, boltPipeline);
-        destroy(device, boltPipelineLayout);
-        boltDynamicVB.destroy(allocator);
-
-        destroy(device, flashPipeline);
-        destroy(device, flashPipelineLayout);
-        destroy(allocator, flashQuadVB, flashQuadVBAlloc);
-    }
-
-    vkCtx = nullptr;
+    if (!ctx_) return;
+    destroy(ctx_->getDevice(), pipeline_);
+    destroy(ctx_->getDevice(), layout_);
+    for (auto& buffer : vertices_) destroyBuffer(ctx_->getAllocator(), buffer);
+    ctx_ = nullptr;
 }
-
 void Lightning::recreatePipelines() {
-    if (!vkCtx) return;
-    VkDevice device = vkCtx->getDevice();
-
-    // Destroy old pipelines (NOT layouts)
-    destroy(device, boltPipeline);
-    destroy(device, flashPipeline);
-
-
-    // ---- Rebuild bolt pipeline (LINE_STRIP) ----
-    {
-        auto shaders = loadShaderPair(device, "assets/shaders/lightning_bolt.vert.spv", "assets/shaders/lightning_bolt.frag.spv", "lightning_bolt");
-        if (!shaders) return;
-        const auto& vertStage = shaders.vertStage;
-        const auto& fragStage = shaders.fragStage;
-
-        buildBoltPipeline(device, vertStage, fragStage);
-
-    }
-
-    // ---- Rebuild flash pipeline (TRIANGLE_STRIP) ----
-    {
-        auto shaders = loadShaderPair(device, "assets/shaders/lightning_flash.vert.spv", "assets/shaders/lightning_flash.frag.spv", "lightning_flash");
-        if (!shaders) return;
-        const auto& vertStage = shaders.vertStage;
-        const auto& fragStage = shaders.fragStage;
-
-        buildFlashPipeline(device, vertStage, fragStage);
-
-    }
+    if (!ctx_) return;
+    destroy(ctx_->getDevice(), pipeline_);
+    auto shaders = loadShaderPair(ctx_->getDevice(), "assets/shaders/lightning_bolt.vert.spv",
+                                 "assets/shaders/lightning_bolt.frag.spv", "lightning_bolt");
+    if (!shaders) return;
+    const VkVertexInputBindingDescription binding{0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX};
+    const std::vector<VkVertexInputAttributeDescription> attributes{
+        {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, position)},
+        {1, 0, VK_FORMAT_R32_SFLOAT, offsetof(Vertex, side)},
+        {2, 0, VK_FORMAT_R32_SFLOAT, offsetof(Vertex, brightness)}};
+    pipeline_ = PipelineBuilder().setShaders(shaders.vertStage, shaders.fragStage)
+        .setVertexInput({binding}, attributes)
+        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+        .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
+        .setColorBlendAttachment(PipelineBuilder::blendAdditive())
+        .setMultisample(ctx_->getMsaaSamples())
+        .setLayout(layout_).setRenderPass(ctx_->getImGuiRenderPass())
+        .setDynamicStates(viewportAndScissorDynamic())
+        .build(ctx_->getDevice(), ctx_->getPipelineCache());
+    if (!pipeline_) LOG_ERROR("Lightning pipeline failed; bolts unavailable");
 }
-
-void Lightning::update(float deltaTime, const Camera& camera) {
-    if (!enabled) {
-        return;
-    }
-
-    // Update strike timer
-    strikeTimer += deltaTime;
-
-    // Spawn random strikes based on intensity
-    if (strikeTimer >= nextStrikeTime) {
-        spawnRandomStrike(camera.getPosition());
-        strikeTimer = 0.0f;
-
-        // Calculate next strike time (higher intensity = more frequent)
-        float intervalRange = MAX_STRIKE_INTERVAL - MIN_STRIKE_INTERVAL;
-        float adjustedInterval = MIN_STRIKE_INTERVAL + intervalRange * (1.0f - intensity);
-        nextStrikeTime = randomRange(adjustedInterval * 0.8f, adjustedInterval * 1.2f);
-    }
-
-    updateBolts(deltaTime);
-    updateFlash(deltaTime);
+void Lightning::update(float dt, const Camera& camera, const LightningStorm::Ground& ground) {
+    eye_ = camera.getPosition();
+    storm_.update(dt, eye_, ground);
 }
-
-void Lightning::updateBolts(float deltaTime) {
-    for (auto& bolt : bolts) {
-        if (!bolt.active) {
-            continue;
-        }
-
-        bolt.lifetime += deltaTime;
-        if (bolt.lifetime >= bolt.maxLifetime) {
-            bolt.active = false;
-            continue;
-        }
-
-        // Fade out
-        float t = bolt.lifetime / bolt.maxLifetime;
-        bolt.brightness = 1.0f - t;
-    }
-}
-
-void Lightning::updateFlash(float deltaTime) {
-    if (!flash.active) {
-        return;
-    }
-
-    flash.lifetime += deltaTime;
-    if (flash.lifetime >= flash.maxLifetime) {
-        flash.active = false;
-        flash.intensity = 0.0f;
-        return;
-    }
-
-    // Quick fade
-    float t = flash.lifetime / flash.maxLifetime;
-    flash.intensity = 1.0f - (t * t);  // Quadratic fade
-}
-
-void Lightning::spawnRandomStrike(const glm::vec3& cameraPos) {
-    // Find inactive bolt
-    LightningBolt* bolt = nullptr;
-    for (auto& b : bolts) {
-        if (!b.active) {
-            bolt = &b;
-            break;
-        }
-    }
-
-    if (!bolt) {
-        return;  // All bolts active
-    }
-
-    // Random position around camera
-    float angle = randomRange(0.0f, core::coords::TWO_PI);
-    float distance = randomRange(50.0f, STRIKE_DISTANCE);
-
-    // Out on the ground plane (render z is up), from high over it.
-    glm::vec3 strikePos;
-    strikePos.x = cameraPos.x + std::cos(angle) * distance;
-    strikePos.y = cameraPos.y + std::sin(angle) * distance;
-    strikePos.z = cameraPos.z + randomRange(80.0f, 150.0f);
-
-    triggerStrike(strikePos);
-}
-
-void Lightning::triggerStrike(const glm::vec3& position) {
-    // Find inactive bolt
-    LightningBolt* bolt = nullptr;
-    for (auto& b : bolts) {
-        if (!b.active) {
-            bolt = &b;
-            break;
-        }
-    }
-
-    if (!bolt) {
-        return;
-    }
-
-    // Setup bolt
-    bolt->active = true;
-    bolt->lifetime = 0.0f;
-    bolt->brightness = 1.0f;
-    bolt->startPos = position;
-    bolt->endPos = position;
-    bolt->endPos.z = position.z - randomRange(90.0f, 160.0f);  // down to the ground
-
-    // Generate segments
-    bolt->segments.clear();
-    bolt->branches.clear();
-    generateLightningBolt(*bolt);
-
-    // Trigger screen flash
-    flash.active = true;
-    flash.lifetime = 0.0f;
-    flash.intensity = 1.0f;
-}
-
-void Lightning::generateLightningBolt(LightningBolt& bolt) {
-    generateBoltSegments(bolt.startPos, bolt.endPos, bolt.segments, 0);
-}
-
-void Lightning::generateBoltSegments(const glm::vec3& start, const glm::vec3& end,
-                                     std::vector<glm::vec3>& segments, int depth) {
-    if (depth > 4) {  // Max recursion depth
-        return;
-    }
-
-    int numSegments = 8 + static_cast<int>(randomRange(0.0f, 8.0f));
-    glm::vec3 direction = end - start;
-    float length = glm::length(direction);
-    direction = glm::normalize(direction);
-
-    glm::vec3 current = start;
-    segments.push_back(current);
-
-    for (int i = 1; i < numSegments; i++) {
-        float t = static_cast<float>(i) / static_cast<float>(numSegments);
-        glm::vec3 target = start + direction * (length * t);
-
-        // Add random offset perpendicular to direction
-        float offsetAmount = (1.0f - t) * 8.0f;  // More offset at start
-        // Against a level axis: the bolt runs nearly straight down, and its
-        // cross with the up axis is nothing.
-        glm::vec3 perpendicular1 = glm::normalize(glm::cross(direction, glm::vec3(1.0f, 0.0f, 0.0f)));
-        glm::vec3 perpendicular2 = glm::normalize(glm::cross(direction, perpendicular1));
-
-        glm::vec3 offset = perpendicular1 * randomRange(-offsetAmount, offsetAmount) +
-                          perpendicular2 * randomRange(-offsetAmount, offsetAmount);
-
-        current = target + offset;
-        segments.push_back(current);
-
-        // Random branches
-        if (dist(gen) < BRANCH_PROBABILITY && depth < 3) {
-            glm::vec3 branchEnd = current;
-            branchEnd += glm::vec3(randomRange(-20.0f, 20.0f),
-                                   randomRange(-20.0f, 20.0f),
-                                   randomRange(-30.0f, -10.0f));
-            generateBoltSegments(current, branchEnd, segments, depth + 1);
-        }
-    }
-
-    segments.push_back(end);
-}
-
 Lightning::Frame Lightning::extract() const {
     Frame frame;
-    if (!enabled) return frame;
-    for (const auto& bolt : bolts) if (bolt.active && !bolt.segments.empty())
-        frame.bolts.push_back({bolt.segments, bolt.brightness});
-    if (flash.active) frame.flash = flash.intensity;
+    frame.ground = storm_.groundPosition();
+    if (storm_.illumination() > 0.001f) {
+        const glm::vec3 source = storm_.lightPosition();
+        glm::mat4 projection = glm::perspectiveRH_ZO(glm::radians(145.0f), 1.0f, 2.0f, 650.0f);
+        projection[1][1] *= -1.0f;
+        frame.lightMatrix = projection * glm::lookAtRH(source, frame.ground, glm::vec3(0, 1, 0));
+        frame.lightPosition = glm::vec4(source, 500.0f);
+        frame.lightColor = glm::vec4(glm::vec3(1.1f, 1.3f, 1.7f) * storm_.illumination(), 0.0f);
+    }
+    if (!storm_.visible()) return frame;
+    auto& mesh = frame.vertices;
+    mesh.reserve(kVertexCapacity);
+    for (const auto& segment : storm_.segments()) {
+        const float fraction = glm::clamp((storm_.progress() - segment.begin) /
+                                         std::max(segment.finish - segment.begin, 0.001f), 0.0f, 1.0f);
+        if (fraction <= 0.0f) continue;
+        const glm::vec3 a = segment.start;
+        const glm::vec3 b = glm::mix(a, segment.end, fraction);
+        glm::vec3 side = glm::cross(b - a, eye_ - (a + b) * 0.5f);
+        if (glm::dot(side, side) < 1e-8f) continue;
+        side = glm::normalize(side) * (segment.width * 5.0f);
+        const float light = storm_.brightness();
+        mesh.insert(mesh.end(), {{a - side, -1, light}, {a + side, 1, light}, {b - side, -1, light},
+                                 {b - side, -1, light}, {a + side, 1, light}, {b + side, 1, light}});
+    }
     return frame;
 }
-
 void Lightning::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Frame& input) {
-    recordBolts(cmd, perFrameSet, input);
-    recordFlash(cmd, input.flash);
-}
-
-void Lightning::recordBolts(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Frame& input) {
-    if (boltPipeline == VK_NULL_HANDLE || !boltDynamicVB.valid()) return;
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, boltPipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, boltPipelineLayout,
-        0, 1, &perFrameSet, 0, nullptr);
-
-    // This frame's copy of the buffer: the frame before may still be drawing
-    // from the other one.
-    const uint32_t frame = vkCtx->getCurrentFrame();
-    VkBuffer vb = boltDynamicVB.buffer(frame);
-    auto* mapped = static_cast<glm::vec3*>(boltDynamicVB.mapped(frame));
-    VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &offset);
-
-    // Each bolt in its own stretch of the buffer: the draws read it when they
-    // execute, so one stretch rewritten per bolt drew the last bolt every time.
-    const uint32_t capacity = static_cast<uint32_t>(boltDynamicVB.size() / sizeof(glm::vec3));
-    uint32_t used = 0;
-    for (const auto& bolt : input.bolts) {
-        const uint32_t count = std::min(static_cast<uint32_t>(bolt.vertices.size()), capacity - used);
-        if (count < 2) break;
-        std::memcpy(mapped + used, bolt.vertices.data(), count * sizeof(glm::vec3));
-
-        vkCmdPushConstants(cmd, boltPipelineLayout,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0, sizeof(float), &bolt.brightness);
-        vkCmdDraw(cmd, count, 1, used, 0);
-        used += count;
-    }
-}
-
-void Lightning::recordFlash(VkCommandBuffer cmd, float intensity) {
-    if (intensity <= 0.01f || flashPipeline == VK_NULL_HANDLE) {
+    if (!pipeline_ || input.vertices.empty()) return;
+    const auto& mesh = input.vertices;
+    if (mesh.size() > kVertexCapacity) {
+        LOG_ERROR("Lightning geometry exceeded buffer capacity; strike not drawn");
         return;
     }
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, flashPipeline);
-
-    // Push flash intensity
-    vkCmdPushConstants(cmd, flashPipelineLayout,
-        VK_SHADER_STAGE_FRAGMENT_BIT,
-        0, sizeof(float), &intensity);
-
-    VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &flashQuadVB, &offset);
-    vkCmdDraw(cmd, 4, 1, 0, 0);
+    // This slot is fenced before recording. Never overwrite another frame's bolt.
+    auto& buffer = vertices_[ctx_->getCurrentFrame()];
+    std::memcpy(buffer.info.pMappedData, mesh.data(), mesh.size() * sizeof(Vertex));
+    vmaFlushAllocation(ctx_->getAllocator(), buffer.allocation, 0, mesh.size() * sizeof(Vertex));
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &perFrameSet, 0, nullptr);
+    const VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &buffer.buffer, &offset);
+    vkCmdDraw(cmd, static_cast<uint32_t>(mesh.size()), 1, 0, 0);
 }
-
-void Lightning::setEnabled(bool enabled) {
-    this->enabled = enabled;
-
-    if (!enabled) {
-        // Clear active effects
-        for (auto& bolt : bolts) {
-            bolt.active = false;
-        }
-        flash.active = false;
-    }
-}
-
-void Lightning::setIntensity(float intensity) {
-    this->intensity = glm::clamp(intensity, 0.0f, 1.0f);
-}
-
-} // namespace rendering
-} // namespace wowee
+} // namespace wowee::rendering

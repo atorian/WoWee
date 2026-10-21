@@ -1643,7 +1643,8 @@ void M2Renderer::acceptCullAnswers(const std::vector<CullAnswer>& answers) {
 }
 
 std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camera, const std::vector<LocalLight>& lights, float time, const glm::mat4& shadowMatrix, float shadowRadius,
-        const glm::mat4* overheadMatrix, float overheadRadius) {
+        const glm::mat4* overheadMatrix, float overheadRadius,
+        const glm::mat4* strikeMatrix, float strikeRadius) {
     auto frame = std::make_shared<Frame>();
     frame->time = time;
     frame->cameraPosition = camera.getPosition();
@@ -1679,6 +1680,16 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
             const auto& inst = scene_->instances[index];
             if (inst.hidden || inst.finishing || !inst.cachedModel || !inst.cachedIsValid || inst.cachedIsInvisibleTrap) continue;
             frame->depth.push_back({inst.modelId, inst.modelMatrix, models.at(inst.modelId), inst.position, inst.scale});
+        }
+    }
+    if (strikeMatrix) {
+        frame->strikeMatrix = *strikeMatrix;
+        gatherShadowCandidates(*strikeMatrix, strikeRadius, shadowCandidates_);
+        frame->strikeDepth.reserve(shadowCandidates_.size());
+        for (uint32_t index : shadowCandidates_) {
+            const auto& inst = scene_->instances[index];
+            if (inst.hidden || inst.finishing || !inst.cachedModel || !inst.cachedIsValid || inst.cachedIsInvisibleTrap) continue;
+            frame->strikeDepth.push_back({inst.modelId, inst.modelMatrix, models.at(inst.modelId), inst.position, inst.scale});
         }
     }
     frameLights_ = nullptr;
@@ -2564,7 +2575,11 @@ void M2Renderer::cullShadowCasters(const glm::mat4& lightSpaceMatrix, float shad
     // cast across the whole view while sitting far outside any player
     // sphere - sphere culling made such shadows pop on/off at the cull
     // boundary as the player moved (large-area flicker at low sun).
+    const bool perspective = glm::length(glm::vec3(lightSpaceMatrix[0][3], lightSpaceMatrix[1][3], lightSpaceMatrix[2][3])) > 1e-6f;
+    Frustum lightFrustum;
+    if (perspective) lightFrustum.extractFromMatrix(lightSpaceMatrix);
     auto insideFootprint = [&](const glm::vec3& position, float scale, const M2ModelGPU& model) {
+        if (perspective) return lightFrustum.intersectsSphere(position, model.boundRadius * scale * 1.5f);
         const glm::vec4 clip = lightSpaceMatrix * glm::vec4(position, 1.0f);
         // Orthographic projection: w == 1, NDC directly comparable.
         // Inflate by the model's bounding sphere converted to NDC
@@ -2580,7 +2595,8 @@ void M2Renderer::cullShadowCasters(const glm::mat4& lightSpaceMatrix, float shad
     shadowDraws_.clear();
     shadowCasters_[0].clear();
     shadowCasters_[1].clear();
-    const auto& candidates = lightSpaceMatrix == recording_->overheadMatrix ? recording_->depth : recording_->solarDepth;
+    const auto& candidates = lightSpaceMatrix == recording_->strikeMatrix ? recording_->strikeDepth
+        : lightSpaceMatrix == recording_->overheadMatrix ? recording_->depth : recording_->solarDepth;
     for (const auto& source : candidates) {
         if (!insideFootprint(source.position, source.scale, *source.model)) continue;
         const uint32_t draw = static_cast<uint32_t>(shadowDraws_.size());
@@ -2729,7 +2745,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                               const glm::vec3& /*shadowCenter*/, float shadowRadius, bool resetDescriptors,
                               bool reuseCull) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
-    if (recording_->depth.empty() && recording_->solarDepth.empty()) return;
+    if (recording_->depth.empty() && recording_->solarDepth.empty() && recording_->strikeDepth.empty()) return;
 
     // Reset this frame slot's texture descriptor pool (safe: fence was waited on in beginFrame)
     const uint32_t frameIdx = vkCtx_->getCurrentFrame();

@@ -91,6 +91,7 @@
 #include "audio/footstep_manager.hpp"
 #include "audio/activity_sound_manager.hpp"
 #include "audio/audio_engine.hpp"
+#include "rendering/lightning.hpp"
 #include "addons/lua_api_registrations.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "addons/addon_manager.hpp"
@@ -2712,6 +2713,9 @@ void Application::exiting() {
 }
 
 void Application::characterLeft(bool keptConnection) {
+    if (auto* ambience = audioCoordinator_ ? audioCoordinator_->getAmbientSoundManager() : nullptr) {
+        ambience->resetWeather();
+    }
     if (auto* music = audioCoordinator_ ? audioCoordinator_->getMusicManager() : nullptr) {
         music->stopMusic(0.0f);
     }
@@ -4046,6 +4050,14 @@ void Application::followRendererUpdate(float deltaTime) {
         audioCoordinator_->setListener(camera->getPosition(), fwd, up);
     }
     audioCoordinator_->update(deltaTime);
+    if (auto* lightning = renderer->getLightning()) {
+        const auto thunder = lightning->takeThunder();
+        if (auto* ambience = audioCoordinator_->getAmbientSoundManager()) {
+            for (const auto& arrival : thunder)
+                ambience->playThunder(arrival.position, arrival.variant, renderer->skyExposure());
+        }
+    }
+
 
     // Ambient environmental sounds + zone/music transitions.
     audio::ZoneAudioContext zctx;

@@ -69,14 +69,18 @@ public:
 
     // Stoppable 2D sound - returns a non-zero handle, or 0 on failure
     uint32_t playSound2DStoppable(const std::vector<uint8_t>& wavData, float volume = 1.0f);
+    // Continuous ambience; cutoffHz > 0 applies a low-pass filter to this voice only.
+    uint32_t playSound2DLoop(const std::vector<uint8_t>& wavData, float volume = 1.0f,
+                             float cutoffHz = 0.0f);
+    void setSoundVolume(uint32_t id, float volume);
     // Stop a sound started with playSound2DStoppable (no-op if already finished)
     void stopSound(uint32_t id);
 
     // 3D positional sound playback
     bool playSound3D(const std::vector<uint8_t>& wavData, const glm::vec3& position,
-                     float volume = 1.0f, float pitch = 1.0f, float maxDistance = 100.0f);
+                     float volume = 1.0f, float pitch = 1.0f, float maxDistance = 100.0f, float minDistance = 1.0f);
     bool playSound3D(const std::string& mpqPath, const glm::vec3& position,
-                     float volume = 1.0f, float pitch = 1.0f, float maxDistance = 100.0f);
+                     float volume = 1.0f, float pitch = 1.0f, float maxDistance = 100.0f, float minDistance = 1.0f);
 
     // Music streaming (for background music)
     // Retains shared ownership: the decoder streams directly from encoded tracks that
@@ -117,7 +121,11 @@ private:
         void* buffer;  // ma_audio_buffer* - Keep audio buffer alive
         std::shared_ptr<const std::vector<uint8_t>> pcmDataRef;  // Keep decoded PCM alive
         uint32_t id = 0;  // 0 = anonymous (not stoppable)
+        void* lowPass = nullptr; // optional ma_lpf_node, owned with this voice
     };
+    static void releaseSound(ActiveSound& sound);
+    uint32_t playTrackedSound(const std::vector<uint8_t>& data, float volume,
+                              bool loop, float cutoffHz);
     std::vector<ActiveSound> activeSounds_;
     uint32_t nextSoundId_ = 1;
 
