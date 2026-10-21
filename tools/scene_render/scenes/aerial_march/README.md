@@ -137,3 +137,28 @@ retained ray-marched 0.8 capture, fixed column/parapet rectangles differ by
 at most 1/255 per channel in the far-only variant. The retained three-way
 metrics record the rectangles and the single-run GPU times (19.05 ms for
 1.25 and 21.04 ms for far-only). These are still expensive reference previews.
+
+
+## Kalimdor / Hyjal three-way preview
+
+The same three variants are available for `hyjal_day`: the retained original
+mode at 0.8, ray marching at 1.25, and ray marching with only far-air density
+boosted at base 0.8. The camera stays at the existing Barrens viewpoint facing
+Hyjal, at noon, with the full streamed landscape, buildings and trees.
+
+```powershell
+./tools/scene_render/aerial_march_preview.ps1 -Scene hyjal_day -Variant thick
+./tools/scene_render/aerial_march_preview.ps1 -Scene hyjal_day -Variant far
+python tools/scene_render/compare_aerial_march.py
+```
+
+The single-row output is `build-dev/scratch/aerial-march/hyjal_day-three-way.png`.
+Three-way metrics now use scene-specific filenames so subsequent comparisons
+do not overwrite each other's reports. Dalaran's fixed near-geometry sample
+rectangles are not applied to other viewpoints.
+
+The two new Hyjal captures completed without ERROR or incomplete-terrain
+messages; all seven shader variants passed glslc and spirv-val. Single-run
+GPU averages were 12.18 ms for 1.25 and 13.38 ms for far-only. The original
+mode's retained 0.8 capture averaged 8.04 ms. These are indicative timings,
+not a controlled performance benchmark.
