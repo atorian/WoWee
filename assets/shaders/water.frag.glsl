@@ -608,8 +608,9 @@ void main() {
 
     vec4 reflClip = reflViewProj * vec4(FragPos, 1.0);
     if (reflClip.w > 0.1) {
+        // Match the reflection pass's positive-height Vulkan viewport;
+        // reflViewProj already includes the projection's Y inversion.
         vec2 reflUV = reflClip.xy / reflClip.w * 0.5 + 0.5;
-        reflUV.y = 1.0 - reflUV.y;
         reflUV += norm.xy * 0.015;
 
         // Wide fade so there's no visible boundary - fully gone well inside the edge
