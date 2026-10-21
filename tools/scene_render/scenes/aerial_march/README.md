@@ -53,7 +53,7 @@ account is involved. The main client remains running if it was running.
 
 ## Captured results (2026-10-21)
 
-All five captures completed with no ERROR entries or incomplete-terrain
+The original five captures completed with no ERROR entries or incomplete-terrain
 messages. All seven affected material shaders passed glslc and spirv-val.
 The evening 24/48-step comparison differs by at most 1/255 in any channel
 (mean absolute difference 0.00001845/255); the sky strip is pixel-identical
@@ -77,3 +77,30 @@ evening difference and should remain an experiment.
 Full-resolution before/after PNGs, comparison sheets and
 `comparison-metrics.json` are retained in `build-dev/scratch/aerial-march`.
 The normal default runtime shaders were restored after the 48-step test.
+
+## Dalaran landing platform toward Gundrak
+
+`dalaran_gundrak.json` adds a full streamed-world pair: terrain and distant
+terrain, buildings and trees, View Distance 10000 yards, Fog Thickness 0.8,
+12:00, 1280x720 and 4x MSAA. This is not an isolated WMO fixture.
+
+The position comes from local `TaxiNodes.dbc`, node 310 (Dalaran):
+(5813.8901, 449.1300, 658.75). Per the user's request the camera is lifted
+twelve yards above the platform datum to clear the parapet, then shifted
+four yards camera-right as requested, plus a twenty-five-yard forward shift
+to approach the parapet and clear the column. The final eye is
+(5815.7700, 423.8819, 670.75). It looks toward node 331 (Gundrak):
+(6897.6499, -4118.2300, 467.35), a heading of about -76.65 degrees in render
+axes. This identifies the direction; it does not guarantee the temple itself
+is unoccluded from the platform. The observer's lighting is sampled in Dalaran.
+
+```powershell
+./tools/scene_render/aerial_march_preview.ps1 -Scene dalaran_gundrak -Variant before
+./tools/scene_render/aerial_march_preview.ps1 -Scene dalaran_gundrak -Variant after
+```
+
+The comparison uses the same reframed camera for both variants. Both captures
+completed without ERROR entries or incomplete-terrain messages. Logged average
+GPU times were 12.18 ms before and 18.42 ms with 24 steps; these remain
+single-run measurements. The column stays along the left edge, with the
+central landscape open and the parapet along the bottom.

@@ -1,6 +1,6 @@
 param(
     [ValidateSet('before','after','reference')][string]$Variant = 'after',
-    [ValidateSet('hyjal_day','citadel_evening')][string]$Scene = 'hyjal_day'
+    [ValidateSet('hyjal_day','citadel_evening','dalaran_gundrak')][string]$Scene = 'hyjal_day'
 )
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path "$PSScriptRoot\..\..").Path

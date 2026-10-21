@@ -9,7 +9,7 @@ root = Path(__file__).resolve().parents[2]
 out = root / "build-dev/scratch/aerial-march"
 font = ImageFont.truetype("C:/Windows/Fonts/segoeui.ttf", 23)
 report = {}
-for scene in ("hyjal_day", "citadel_evening"):
+for scene in ("hyjal_day", "citadel_evening", "dalaran_gundrak"):
     images = [Image.open(out / f"{scene}-{variant}.png").convert("RGB")
               for variant in ("before", "after")]
     a, b = [np.asarray(im).astype(np.int16) for im in images]
@@ -17,7 +17,7 @@ for scene in ("hyjal_day", "citadel_evening"):
     stats = {"mean_absolute_rgb_8bit": float(delta.mean()),
              "max_rgb_8bit": int(delta.max()),
              "changed_pixel_percent": float(100 * np.any(delta, axis=2).mean()),
-             "unchanged_sky_max_difference": int(delta[:80].max())}
+             "top_strip_max_difference": int(delta[:80].max())}
     for variant in ("before", "after", "reference"):
         log = out / f"{scene}-{variant}.log"
         if not log.exists(): continue
