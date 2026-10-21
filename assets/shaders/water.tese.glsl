@@ -19,7 +19,26 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 fogParams;
     vec4 shadowParams;
     vec4 playerPos;   // xyz = player world position, w = horizontal speed
-    vec4 playerWake;
+    vec4 playerWake;  // xyz = trailing player position (springback reference)
+    ivec4 localLightMeta;
+    vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
+    mat4 rtViewProj;
+    vec4 rtCameraPos;
+    vec4 rtParams;
+    vec4 fogSkyTop;  // rgb = zenith, w = sky tint amount (0 disables it)
+    vec4 fogSkyMiddle;
+    vec4 fogSkyBand1;
+    vec4 fogSkyBand2;
+    mat4 contactSpaceMatrix;  // read by contact_shadows.glsli
+    vec4 contactParams;
+    vec4 windDirLean;
+    vec4 windPhases;
+    vec4 windTravel;
+    vec4 skySmogColor;
+    vec4 aerialSun;
+    vec4 aerialLight;
+    vec4 terrainLodParams;
+    vec4 aerialParams;
 };
 
 layout(push_constant) uniform Push {
@@ -49,6 +68,8 @@ layout(set = 2, binding = 3) uniform WaterFrameData {
     mat4 seaBedMatrix;
     vec4 seaBed;
     vec4 wakeArea;
+    vec4 reflectionSun;
+    vec4 reflectionSunColor;
 };
 layout(set = 2, binding = 4) uniform sampler2DArray oceanSurface;
 layout(set = 2, binding = 5) uniform sampler2D seaBedMap;

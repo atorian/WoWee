@@ -68,6 +68,8 @@
 #include "rendering/performance_hud.hpp"
 #include "core/resource_monitor.hpp"
 #include "core/benchmark_run.hpp"
+#include "core/scene_replay.hpp"
+#include "rendering/frame_scene.hpp"
 #include "rendering/water_renderer.hpp"
 #include "rendering/skybox.hpp"
 #include "rendering/starfield.hpp"
@@ -1648,6 +1650,11 @@ void Application::run() {
     resourceMonitor_ = std::make_unique<ResourceMonitor>(frameProfileEnabled_);
     performanceHUD_->setResourceTelemetry(&resourceMonitor_->telemetry());
     startBenchmarkFromEnvironment();
+    if (std::getenv("WOWEE_SCENE_CAPTURE") || std::getenv("WOWEE_SCENE_REPLAY") ||
+        std::getenv("WOWEE_PERF_TRACE")) {
+        sceneReplay_ = std::make_shared<SceneReplay>();
+        sceneReplay_->initialize(*this);
+    }
 
     // Integer nanoseconds off a monotonic clock, and the finest sleep the
     // platform will give for as long as the loop runs. See frame_pacer.hpp
@@ -1763,8 +1770,10 @@ void Application::requestClose() {
 }
 
 float Application::beginFrame() {
+    if (sceneReplay_) sceneReplay_->producerStarted();
     if (renderWorker_) renderWorker_->check();
     if (renderer) for (const auto& result : renderer->takeFrameResults()) {
+        if (sceneReplay_) sceneReplay_->result(result);
         float recordingMs = 0.0f;
         for (const auto& part : result.cpu) {
             if (part.group == "Render") {
@@ -1785,7 +1794,8 @@ float Application::beginFrame() {
                 if (completed == path) running = false;
     }
     if (screenRecording_) screenRecording_->update();
-    return FramePacer::toSeconds(pacer_.tickNs());
+    const float actual = FramePacer::toSeconds(pacer_.tickNs());
+    return sceneReplay_ ? sceneReplay_->deltaTime(actual) : actual;
 }
 
 void Application::pace() {
@@ -1795,6 +1805,7 @@ void Application::pace() {
 }
 
 void Application::frameFinished() {
+    if (sceneReplay_) sceneReplay_->frameEnded(*this);
     // One clock for the frame, end to end, which every report reads.
     const auto now = std::chrono::steady_clock::now();
     std::optional<float> frameSeconds;
@@ -2265,6 +2276,13 @@ void Application::clientShortcut(ClientShortcut shortcut) {
             weatherPanel_->toggle();
             LOG_INFO("Weather panel: ", weatherPanel_->isOpen() ? "open" : "closed");
             break;
+        case ClientShortcut::ToggleSceneCapture:
+            if (!sceneReplay_) {
+                sceneReplay_ = std::make_shared<SceneReplay>();
+                sceneReplay_->initialize(*this);
+            }
+            sceneReplay_->toggleCapture(*this);
+            break;
         case ClientShortcut::None:
             break;
     }
@@ -2362,6 +2380,7 @@ void Application::shutdown() {
         renderer->setFrameDrain({});
         renderWorker_.reset();
     }
+    sceneReplay_.reset();
     // Close visibly before saved variables or worker lifetime fences can delay cleanup.
     if (window && window->getSDLWindow()) SDL_HideWindow(window->getSDLWindow());
     // What watched the frames goes first, then the interface hears the
@@ -4059,6 +4078,7 @@ void Application::followRendererUpdate(float deltaTime) {
 }
 
 void Application::prepareFrame() {
+    if (sceneReplay_) sceneReplay_->prepare(*this);
     // Reproduce world entry with real Kalimdor assets without a realm session.
     if (std::getenv("WOWEE_MULGORE_PROBE") && worldLoader_) {
         static bool loaded = false;
@@ -4317,6 +4337,7 @@ void Application::updateLogin(float deltaTime, const FramePlan& plan) {
 }
 
 void Application::updateWorld(float deltaTime) {
+    if (sceneReplay_) sceneReplay_->beforeGame(*this);
     const char* checkpoint = "in_game: enter";
     updateInGame(deltaTime, checkpoint);
 }
@@ -4395,6 +4416,7 @@ void Application::present(float deltaTime, const FramePlan& plan) {
             // from the route while the world was kept around the character
             // standing at the start, and nothing ever streamed in or out.
             placeBenchmarkCamera();
+            if (sceneReplay_) sceneReplay_->placeCamera(*this);
             timed("rendererUpdate", [&] { renderer->update(deltaTime); });
             timed("followRendererUpdate", [&] { followRendererUpdate(deltaTime); });
             if (std::getenv("WOWEE_SHADOW_PROBE_SCENE")) {
@@ -4445,14 +4467,21 @@ void Application::present(float deltaTime, const FramePlan& plan) {
     }
     if (renderer) {
         renderer->setWorldInView(plan.view == FrameView::World);
+        double queueWaitMs = 0;
         if (renderWorker_) {
             const auto waiting = std::chrono::steady_clock::now();
             renderPermit_.emplace(renderWorker_->reserve());
-            noteStage("Present/render queue wait", std::chrono::duration<float, std::milli>(
-                std::chrono::steady_clock::now() - waiting).count());
+            queueWaitMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - waiting).count();
+            noteStage("Present/render queue wait", static_cast<float>(queueWaitMs));
         }
         if (!renderInputs_) renderInputs_ = std::make_unique<rendering::FrameInputs>();
         *renderInputs_ = renderer->extractFrameInputs();
+        if (sceneReplay_) {
+            sceneReplay_->extracted(renderInputs_->scene->sequence, queueWaitMs,
+                renderWorker_ ? renderWorker_->outstanding() : 0);
+            sceneReplay_->sampled(*this, *renderInputs_);
+        }
         if (canDrawInterface()) renderInputs_->interface = rendering::extractImGuiFrame(*renderer->getVkContext());
         if (mapWindow_) renderInputs_->auxiliaryInterface = mapWindow_->extractFrame();
     }
@@ -5382,7 +5411,12 @@ void Application::renderFrame(const FramePlan& plan) {
         std::getenv("WOWEE_FOUNTAIN_PROBE") || std::getenv("WOWEE_MODEL_PROBE");
     if (!renderInputs_) throw std::logic_error("Render requires frame inputs extracted in Present");
     auto frame = std::shared_ptr<const rendering::FrameInputs>(std::move(renderInputs_));
-    auto record = [target = renderer.get(), frame = std::move(frame), drawWorld] {
+    const auto sequence = frame->scene->sequence;
+    noteRendererStages();
+    if (sceneReplay_) sceneReplay_->submitted(sequence);
+    auto record = [target = renderer.get(), frame = std::move(frame), drawWorld,
+                   trace = sceneReplay_, sequence] {
+        if (trace) trace->recordingStarted(sequence);
         auto timed = [&](const char* name, auto&& fn) {
             const auto start = std::chrono::steady_clock::now();
             fn();
@@ -5392,6 +5426,7 @@ void Application::renderFrame(const FramePlan& plan) {
         timed("beginFrame", [&] { target->beginFrame(*frame); });
         if (drawWorld) timed("renderWorld", [&] { target->renderWorld(); });
         target->endFrame();
+        if (trace) trace->recordingFinished(sequence);
     };
     if (renderWorker_) {
         if (!renderPermit_) throw std::logic_error("Render frame was not reserved before extraction");
@@ -5450,6 +5485,7 @@ void Application::noteStageTime(const char* stage, float milliseconds) {
 }
 
 void Application::noteStage(std::string_view stage, float milliseconds) {
+    if (sceneReplay_) sceneReplay_->stage(stage, milliseconds);
     frameBudget_.noteStage(stage, milliseconds);
     if (benchmark_ && benchmark_->recording()) benchmark_->budget().noteStage(stage, milliseconds);
 }
@@ -5508,6 +5544,8 @@ void Application::noteRendererStages() {
 }
 
 void Application::reportStageTimes() {
+    // Machine traces retain every frame and format once after the run. A
+    // hundred synchronous log lines every ten seconds distort their tail.
     using namespace std::chrono;
     const auto now = steady_clock::now();
     if (stageStatsSince_.time_since_epoch().count() == 0) {
@@ -5516,6 +5554,11 @@ void Application::reportStageTimes() {
     }
     const double windowMs = duration<double, std::milli>(now - stageStatsSince_).count();
     if (windowMs < 10000.0) return;
+    if (sceneReplay_) {
+        frameBudget_.reset();
+        stageStatsSince_ = now;
+        return;
+    }
 
     // The frame time's spread and the frames that missed 120, 60 and 30 fps;
     // each stage, costliest first, with its parts under it; and the GPU's

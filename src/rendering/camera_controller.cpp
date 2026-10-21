@@ -1287,7 +1287,8 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
             if (now - lastPlayerFloorLog > std::chrono::seconds(1)) {
                 lastPlayerFloorLog = now;
                 core::Logger::getInstance().warning(
-                    "Player floor jump: feet=", targetPos.z,
+                    "Player floor jump at render (", targetPos.x, ", ", targetPos.y,
+                    "): feet=", targetPos.z,
                     " lastGround=", lastGroundZ, " -> chose ", *groundH,
                     " grounded=", grounded ? 1 : 0,
                     " (terrain=", terrainH ? *terrainH : -99999.0f,

@@ -55,6 +55,9 @@ struct WaterFrameUBOData {
     // The wake round the camera (WaterWake::area): xy = the world position
     // of its corner, z = 1 / its side in yards, w = 1 once it has run.
     glm::vec4 wakeArea{0.0f};
+    // Visible solar disc, independent of the legacy fixed diffuse light.
+    glm::vec4 reflectionSun{0.0f, 0.0f, 1.0f, 0.0f}; // xyz direction, w visibility
+    glm::vec4 reflectionSunColor{0.0f};
 };
 
 class WaterRenderer : public LiquidSceneListener {

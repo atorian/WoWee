@@ -1835,6 +1835,7 @@ void GameScreen::saveSettings() {
     out << "brightness=" << settingsPanel_.pendingBrightness << "\n";
     out << "water_refraction=" << (settingsPanel_.pendingWaterRefraction ? 1 : 0) << "\n";
     out << "antialiasing=" << settingsPanel_.pendingAntiAliasing << "\n";
+    out << "bloom=" << settingsPanel_.pendingBloom << "\n";
     out << "fxaa=" << (settingsPanel_.pendingFXAA ? 1 : 0) << "\n";
     out << "normal_mapping=" << (settingsPanel_.pendingNormalMapping ? 1 : 0) << "\n";
     out << "normal_map_strength=" << settingsPanel_.pendingNormalMapStrength << "\n";
@@ -2087,6 +2088,7 @@ void GameScreen::loadSettings() {
             else if (key == "brightness") settingsPanel_.pendingBrightness = std::clamp(std::stoi(val), 0, 100);
             else if (key == "water_refraction") settingsPanel_.pendingWaterRefraction = (std::stoi(val) != 0);
             else if (key == "antialiasing") settingsPanel_.pendingAntiAliasing = std::clamp(std::stoi(val), 0, 3);
+            else if (key == "bloom") settingsPanel_.pendingBloom = std::clamp(std::stof(val), 0.0f, 2.0f);
             else if (key == "fxaa") settingsPanel_.pendingFXAA = (std::stoi(val) != 0);
             else if (key == "check_for_updates") settingsPanel_.pendingCheckForUpdates = (std::stoi(val) != 0);
             else if (key == "normal_mapping") settingsPanel_.pendingNormalMapping = (std::stoi(val) != 0);

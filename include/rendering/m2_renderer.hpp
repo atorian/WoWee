@@ -1082,13 +1082,12 @@ private:
         InteriorLightGPU interiorLight; // 32 bytes @ offset 160 - M2Instance::interiorLight
         LocalLightSet localLights = kNoLocalLights; // 16 bytes @ offset 192 - local_lights.glsli
     };
-    // How many instances one frame may hand the GPU, not how many exist. Ground
-    // clutter is what fills it: it is drawn by the thousand and every tuft
-    // takes a slot of its own, so at 16384 a dwarf standing in Dun Morogh
-    // grass was already losing whole models for a frame at a time - which reads
-    // as clutter blinking rather than as anything being over budget. Two
-    // buffers of 208 bytes a slot, so this costs 13 MB.
-    static constexpr uint32_t MAX_INSTANCE_DATA = 32768;
+    // Bootstrap size only. Visible instances and per-batch UV records determine
+    // each frame slot's capacity; scene models must not disappear at this size.
+    static constexpr uint32_t kInitialInstanceCapacity = 32768;
+    uint32_t instanceCapacity_[2] = {kInitialInstanceCapacity,kInitialInstanceCapacity};
+    bool instanceGrowthFailed_[2] = {};
+    bool prepareInstanceStorage(uint32_t slot,uint64_t entries);
     VkDescriptorSetLayout instanceSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool instanceDescPool_ = VK_NULL_HANDLE;
     ::VkBuffer instanceBuffer_[2] = {};
@@ -1623,6 +1622,7 @@ private:
 
 public:
     struct Frame {
+        uint64_t instanceEntries = 0;
         std::vector<DrawInstance> drawInstances_;
         std::vector<VisibleEntry> sortedVisible_, transparentVisible_;
         std::vector<GlowSprite> glowSprites_;

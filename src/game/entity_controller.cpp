@@ -1773,6 +1773,15 @@ void EntityController::announceObjectsInView() {
              " gameobjects=", objects, " corpses=", corpses);
 }
 
+void EntityController::applyRecordedObjects(const UpdateObjectData& data) {
+    float costs[4]{};
+    processOutOfRangeObjectsUntil(data.outOfRangeGuids, 0,
+        std::chrono::steady_clock::time_point::max(), costs);
+    bool itemsCreated = false;
+    for (const auto& block : data.blocks) applyUpdateObjectBlock(block, itemsCreated);
+    finalizeUpdateObjectBatch(itemsCreated);
+}
+
 // Track online item/container objects during CREATE.
 void EntityController::trackItemOnCreate(const UpdateBlock& block, bool& newItemCreated) {
     // The inventory reads what an item object's fields say; this rebuilds the

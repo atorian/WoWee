@@ -141,6 +141,15 @@ public:
     }
 
     // Multi-segment path movement (Catmull-Rom spline interpolation)
+    /// A sampled scene supplies the evaluated position and locomotion at its
+    /// timestamp; no interpolation from the previous live network report.
+    void applySampledPosition(float px, float py, float pz, float o, bool moving) {
+        setPosition(px, py, pz, o);
+        moveEndX_ = px; moveEndY_ = py; moveEndZ_ = pz;
+        moveDuration_ = moveElapsed_ = 0.0f;
+        isMoving_ = moving;
+    }
+
     void startMoveAlongPath(const std::vector<std::array<float, 3>>& path, float destO, float totalDuration) {
         if (path.empty()) return;
         if (path.size() == 1 || totalDuration <= 0.0f) {

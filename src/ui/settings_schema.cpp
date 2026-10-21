@@ -294,6 +294,10 @@ constexpr SettingDesc kSchema[] = {
      "How bright the picture is. 50 leaves it as the zone was lit; below\n"
      "darkens and above lifts the shadows. The game's own panel called\n"
      "this gamma and reached the same value.", "", 50},
+    {"bloom", "Bright light glow (Bloom)", SettingKind::Float, 0, 2, 0.05f, "Display", "Light",
+     "Soft glow around the sun, water highlights and other bright lights.\n"
+     "Keeps the surface detail sharp. Lower for a cleaner picture;\n"
+     "0 removes the glow. The interface is unaffected.", "", 0.8f},
     // Gamma, on the game's own panel, is this same value on another scale -
     // GetGamma answers it divided by 50 - and both end in SetGamma, so the
     // two cannot disagree whichever a player reaches for.

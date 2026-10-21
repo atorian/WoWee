@@ -67,6 +67,7 @@ public:
         changed_.notify_all();
     }
     void check() const { std::lock_guard lock(mutex_); checkLocked(); }
+    size_t outstanding() const { std::lock_guard lock(mutex_); return outstanding_; }
     void drain() {
         std::unique_lock lock(mutex_);
         changed_.wait(lock, [&] { return outstanding_ == 0; });

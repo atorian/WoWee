@@ -5,6 +5,7 @@ namespace rt_math {
 using vec3 = glm::vec3;
 using glm::min;
 using glm::mix;
+using glm::smoothstep;
 glm::vec4 rtParams(0.0f);
 #include "../assets/shaders/rt_light_composition.glsli"
 }

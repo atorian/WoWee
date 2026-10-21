@@ -28,6 +28,10 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 windPhases;
     vec4 windTravel;
     vec4 skySmogColor;
+    vec4 aerialSun;
+    vec4 aerialLight;
+    vec4 terrainLodParams;
+    vec4 aerialParams;
 };
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
@@ -35,6 +39,7 @@ layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 layout(set = 0, binding = 5) uniform sampler2D uSceneSky;
 
 #include "sky_atmosphere.glsli"
+#include "aerial_frame.glsli"
 #include "rt_lighting.glsli"
 #include "contact_shadows.glsli"
 
@@ -121,6 +126,8 @@ layout(set = 2, binding = 3) uniform WaterFrameData {
     // The wake round the camera (WaterWake): xy = its corner, z = 1 / its
     // side in yards, w = 1 once it has run.
     vec4 wakeArea;
+    vec4 reflectionSun;
+    vec4 reflectionSunColor;
 };
 layout(set = 2, binding = 4) uniform sampler2DArray oceanSurface;
 layout(set = 2, binding = 5) uniform sampler2D seaBedMap;
@@ -307,8 +314,8 @@ vec4 fogVolumeAt(vec3 worldPos) {
 // everything between the camera and that, sunlit shafts and torch glow
 // included.
 vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
-    float fogFactor = distanceFogVisibility(dist, fogParams.x, fogParams.y);
-    color = mix(fogColor.rgb, color, fogFactor);
+    float fogFactor = aerialVisibilityAt(worldPos, dist);
+    color = mix(aerialColorAt(worldPos - viewPos.xyz), color, fogFactor);
     if (volumetricParams.x > 0.5) {
         vec4 air = fogVolumeAt(worldPos);
         color = color * air.a + air.rgb;
@@ -325,14 +332,14 @@ vec3 skyAlong(vec3 dir) {
     vec3 gradient = atmosphereSkyColor(dir, fogSkyTop.rgb, fogSkyMiddle.rgb,
                                        fogSkyBand1.rgb, fogSkyBand2.rgb,
                                        skySmogColor.rgb, fogColor.rgb);
-    if (fogSkyMiddle.w < 0.5) return gradient;
+    if (fogSkyMiddle.w < 0.5) return aerialSky(gradient,dir);
     vec4 clip = projection * view * vec4(viewPos.xyz + dir * 1000.0, 1.0);
-    if (clip.w <= 0.0) return gradient;
+    if (clip.w <= 0.0) return aerialSky(gradient,dir);
     vec2 uv = clip.xy / clip.w * 0.5 + 0.5;
     float onScreen = smoothstep(0.0, 0.05, uv.x) * smoothstep(1.0, 0.95, uv.x)
                    * smoothstep(0.0, 0.05, uv.y) * smoothstep(1.0, 0.95, uv.y);
-    if (onScreen <= 0.0) return gradient;
-    return mix(gradient, textureLod(uSceneSky, clamp(uv, vec2(0.0), vec2(1.0)), 0.0).rgb, onScreen);
+    if (onScreen <= 0.0) return aerialSky(gradient,dir);
+    return mix(aerialSky(gradient, dir), textureLod(uSceneSky, clamp(uv, vec2(0.0), vec2(1.0)), 0.0).rgb, onScreen);
 }
 
 void main() {
@@ -423,7 +430,8 @@ void main() {
     float breaking = smoothstep(0.55, 0.25, sea.jacobian) * push.exposed;
 
     vec3 viewDir = normalize(viewPos.xyz - FragPos);
-    vec3 ldir = normalize(-lightDir.xyz);
+    // The glitter path follows the disc, not the legacy diffuse-light azimuth.
+    vec3 ldir = normalize(reflectionSun.xyz);
     float NdotV = max(dot(norm, viewDir), 0.001);
     float NdotL = max(dot(norm, ldir), 0.0);
 
@@ -669,8 +677,7 @@ void main() {
     // ground beside it says the sun is, and once the wind spread it into a
     // path it sank into the water's own colour.
     const float kPi = 3.14159265;
-    vec3 specular = kPi * (D * G * F) / (4.0 * NdotV * NdotL + 0.001) * lightColor.rgb * NdotL;
-    specular = min(specular, vec3(2.0));
+    vec3 specular = kPi * (D * G * F) / (4.0 * NdotV * NdotL + 0.001) * reflectionSunColor.rgb * reflectionSun.w * NdotL;
 
     // Noise-based sparkle. Its features are far smaller than the wave detail:
     // its coarsest octave is twelve to the yard, so it is there only while a
@@ -680,7 +687,7 @@ void main() {
     if (sparkleShown > 0.001) {
         float sparkleNoise = fbmNoise(FragPos.xy * 4.0 + time * 0.5, time * 1.5);
         float sparkle = pow(max(sparkleNoise - 0.55, 0.0) / 0.45, 3.0) * shimmerStrength * 0.10;
-        specular += sparkle * lightColor.rgb * sparkleShown;
+        specular += sparkle * reflectionSunColor.rgb * reflectionSun.w * sparkleShown;
     }
 
     // ============================================================
@@ -688,7 +695,7 @@ void main() {
     // ============================================================
     float sssBase = pow(max(dot(viewDir, -ldir), 0.0), 4.0);
     float sss = sssBase * max(0.0, waveHeight * 3.0) * 0.25;
-    vec3 sssColor = vec3(0.05, 0.55, 0.35) * sss * lightColor.rgb;
+    vec3 sssColor = vec3(0.05, 0.55, 0.35) * sss * reflectionSunColor.rgb * reflectionSun.w;
 
     // ============================================================
     // Combine: what comes up through the water, and what the surface
@@ -911,7 +918,9 @@ void main() {
     // into the horizon haze instead of ending on a hard line. This has to come
     // after the clamp - clamping afterwards restored the 0.15 floor and put the
     // edge straight back.
-    alpha *= smoothstep(2400.0, 600.0, dist);
+    float waterRange = max(fogSkyBand1.w, 1.0);
+    float horizontalDist = length(FragPos.xy - viewPos.xy);
+    alpha *= 1.0 - smoothstep(waterRange * 0.25, waterRange, horizontalDist);
     // And into the beach: the sheet thins out over its last fifth of a yard of
     // depth, so there is no line where it meets the sand. Only a few
     // hundredths of a yard did this before, and with the 0.15 floor above the

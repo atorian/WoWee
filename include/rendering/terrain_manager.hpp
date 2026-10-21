@@ -1,4 +1,5 @@
 #pragma once
+#include "rendering/terrain_placement_refs.hpp"
 
 #include <functional>
 #include "core/cache_stats.hpp"
@@ -58,7 +59,10 @@ struct TileCoord {
 /**
  * Loaded terrain tile data
  */
+enum class TileDetail { Detailed, Landmarks };
+
 struct TerrainTile {
+    TileDetail detail = TileDetail::Detailed;
     TileCoord coord;
     /// The parsed tile, which height, hole, area and texture queries read.
     /// Not the mesh built from it: that is on the GPU once the tile commits,
@@ -80,6 +84,7 @@ struct TerrainTile {
  * Pre-processed tile data ready for GPU upload (produced by background thread)
  */
 struct PendingTile {
+    TileDetail detail = TileDetail::Detailed;
     core::JobGroup::Token token;
     TileCoord coord;
     pipeline::ADTTerrain terrain;
@@ -121,6 +126,7 @@ struct PendingTile {
 
     // WMO doodad M2 models (M2s placed inside WMOs)
     struct WMODoodadReady {
+        size_t ownerPlacement = 0;
         uint32_t modelId;
         pipeline::M2Model model;
         glm::vec3 worldPosition;   // For frustum culling
@@ -189,6 +195,7 @@ struct FinalizingTile {
     // duplicate of itself - it had been marked placed on the first step - and
     // every liquid group after the first few was skipped.
     bool wmoInstanceOpen = false;
+    std::vector<uint32_t> wmoPlacementInstances;
 
     // Incremental terrain upload state (splits TERRAIN phase across frames)
     bool terrainPreloaded = false;  // True after preloaded textures uploaded
@@ -239,6 +246,7 @@ public:
      * @param mapName Map name (e.g., "Azeroth", "Kalimdor")
      */
     void setMapName(const std::string& mapName) { this->mapName = mapName; }
+    const std::string& getMapName() const { return mapName; }
     [[nodiscard]] bool isCustomZone() const { return isCustomZone_; }
     void setCustomZone(bool custom) { isCustomZone_ = custom; }
 
@@ -266,9 +274,11 @@ public:
     /**
      * Set streaming parameters
      */
-    void setLoadRadius(int radius) { loadRadius = radius; }
+    void setLoadRadius(int radius) { if(loadRadius!=radius) streamingPolicyDirty_=true; loadRadius = radius; }
+    void setLandmarkRadius(int radius) { if(landmarkRadius_!=radius) streamingPolicyDirty_=true; landmarkRadius_ = radius; }
     void setUnloadRadius(int radius) { unloadRadius = radius; }
     void setStreamingEnabled(bool enabled) { streamingEnabled = enabled; }
+    bool isStreamingEnabled() const { return streamingEnabled; }
     void setUpdateInterval(float seconds) { updateInterval = seconds; }
     void setTaxiStreamingMode(bool enabled) { taxiStreamingMode_ = enabled; }
     void setGroundClutterDensityScale(float scale) { groundClutterDensityScale_ = glm::clamp(scale, 0.0f, 1.5f); }
@@ -398,7 +408,7 @@ private:
     /**
      * Background thread: prepare tile data (CPU work only, no OpenGL)
      */
-    std::shared_ptr<PendingTile> prepareTile(int x, int y);
+    std::shared_ptr<PendingTile> prepareTile(int x, int y, TileDetail detail);
 
     /**
      * Advance incremental finalization of a tile (one bounded unit of work).
@@ -442,6 +452,8 @@ private:
 
     // Streaming parameters
     bool streamingEnabled = true;
+    bool streamingPolicyDirty_ = true;
+    int landmarkRadius_ = 0;
     int loadRadius = 6;      // Load tiles within this radius (13x13 grid = 169 tiles)
     /// Time one finalization step may take before it yields, set per frame by
     /// processReadyTiles from how near the tile being finished is.
@@ -518,7 +530,7 @@ private:
     core::JobGroup::Token mapToken_ = standaloneJobs_.token();
 
     // Track tiles currently queued or being processed to avoid duplicates
-    std::unordered_map<TileCoord, bool, TileCoord::Hash> pendingTiles; // THREAD-SAFE: protected by queueMutex
+    std::unordered_map<TileCoord, TileDetail, TileCoord::Hash> pendingTiles; // THREAD-SAFE: protected by queueMutex
     // Tiles a worker has taken and not yet handed to readyQueue. Protected by queueMutex.
     int preparingTiles_ = 0;
     // Whether the workers are waiting on memory, so the wait is reported once
@@ -561,10 +573,10 @@ private:
 
     // MAIN-THREAD-ONLY: checked and modified in processReadyTiles() and unloadDistantTiles(),
     // both of which run exclusively on the main thread.
-    std::unordered_set<uint32_t> placedDoodadIds;
+    TerrainPlacementRefs placedDoodadIds;
 
     // MAIN-THREAD-ONLY: same contract as placedDoodadIds.
-    std::unordered_set<uint32_t> placedWmoIds;
+    TerrainPlacementRefs placedWmoIds;
 
     // Tiles currently being incrementally finalized across frames
     std::deque<FinalizingTile> finalizingTiles_;

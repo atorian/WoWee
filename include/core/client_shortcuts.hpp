@@ -12,6 +12,7 @@ enum class ClientShortcut {
     TogglePerformanceHud,
     /// Show or hide the weather dev panel.
     ToggleWeatherPanel,
+    ToggleSceneCapture,
 };
 
 /// The client's own shortcut a key press is, or None.

@@ -109,6 +109,8 @@ public:
 
     // --- Public API (delegated from Renderer) ---
 
+    void setBloomStrength(float strength);
+
     // FXAA
     void setFXAAEnabled(bool enabled);
     [[nodiscard]] bool isFXAAEnabled() const { return requested_.fxaa; }

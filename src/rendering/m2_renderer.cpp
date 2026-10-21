@@ -690,7 +690,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     // Shader reads instanceData[push.instanceDataOffset + gl_InstanceIndex].
     {
         static_assert(sizeof(M2InstanceGPU) == 208, "M2InstanceGPU must be 208 bytes (std430)");
-        const VkDeviceSize instBufSize = MAX_INSTANCE_DATA * sizeof(M2InstanceGPU);
+        const VkDeviceSize instBufSize = kInitialInstanceCapacity * sizeof(M2InstanceGPU);
 
         // Descriptor pool for 2 sets (double-buffered)
         VkDescriptorPoolSize poolSize{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 2};
@@ -701,6 +701,8 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         vkCreateDescriptorPool(device, &poolCi, nullptr, &instanceDescPool_);
 
         for (int i = 0; i < 2; i++) {
+            instanceCapacity_[i]=kInitialInstanceCapacity;
+            instanceGrowthFailed_[i]=false;
             VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
             bci.size = instBufSize;
             bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;

@@ -12,6 +12,7 @@
 
 #include "rendering/rt_scene.hpp"
 #include "rendering/terrain_renderer.hpp"
+#include "rendering/distant_terrain.hpp"
 #include "rendering/water_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/wmo_renderer.hpp"
@@ -35,6 +36,7 @@ struct FrameScene {
     ChargeEffect::Frame charge;
     Precipitation::Frame precipitation;
     TerrainRenderer::DrawList terrain;
+    DistantTerrain::Frame distantTerrain;
     WaterRenderer::DrawList water;
     GrassRenderer::Frame grass;
     std::shared_ptr<const M2Renderer::Frame> models, skyModels;

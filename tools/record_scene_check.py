@@ -15,7 +15,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 FILES = tuple("src/rendering/" + name + ".cpp" for name in (
     "m2_renderer", "m2_renderer_render", "m2_renderer_particles", "m2_renderer_instance",
     "m2_renderer_posed_emitters", "wmo_renderer", "character_renderer", "terrain_renderer",
-    "terrain_bake", "water_renderer", "grass_renderer", "sky_system", "skybox", "clouds",
+    "terrain_bake", "distant_terrain", "water_renderer", "grass_renderer", "sky_system", "skybox", "clouds",
     "starfield", "lens_flare", "precipitation", "ocean_waves", "water_wake", "mount_dust",
     "swim_effects", "lightning", "charge_effect", "quest_marker_renderer", "footprint_renderer",
     "overlay_system", "volumetric_fog", "rt_scene", "renderer", "renderer_results", "minimap",
@@ -27,6 +27,7 @@ LIVE = {
     "CharacterRenderer": r"scene_|models|frameLights_|normalMappingEnabled_|normalMapStrength_",
     "TerrainRenderer": r"chunks|chunkAt_|geometryPages_|shadowTiles_|bakeQueue_",
     "TerrainBake": r"atlases_",
+    "DistantTerrain": r"gpu_|pending_|map_|source_|setMap|update",
     "WaterRenderer": r"drawn_|gameUBO_|inView_|renderingEnabled",
     "GrassRenderer": r"population_|profiles_|cullDistance_",
     "SkySystem": r"proceduralStarsEnabled_|debugSkyMode_",

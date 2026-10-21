@@ -1,0 +1,6 @@
+// Colour of the distant air; opacity follows the zone's linear distance fog.
+vec3 aerialScatteringColor(vec3 direction, vec3 authoredFog, vec3 neutralLight,
+                           vec3 sunlight, vec4 sun) {
+    float forward=pow(max(dot(normalize(direction),vec3(sun)),0.0f),8.0f);
+    return mix(authoredFog,neutralLight,clamp(sun.w,0.0f,1.0f)) + sunlight*(forward*sun.w*0.4f);
+}

@@ -60,6 +60,7 @@
 //     "frames": 30,                       // drawn before the one that is kept
 //     "shadowQuality": 2,                 // 0-4, as the settings slider
 //     "msaa": 1,                          // samples: 1, 2, 4 or 8
+//     "bloom": 0.8,                       // bright light glow, 0 disables
 //     "fxaa": false,                      // FXAA, drawn through its own target
 //     "sharpStars": true,                 // point stars in place of baked star layers
 //     "viewDistance": 1900.0,             // world geometry range, in yards
@@ -614,12 +615,14 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     }
     if (scene.value("waterPlane", false)) {
         pipeline::WMOLiquid liquid;
-        liquid.xTiles = liquid.yTiles = 8;
-        liquid.xVerts = liquid.yVerts = 9;
-        liquid.basePosition = origin + glm::vec3(-16.0f, -16.0f, -1.0f);
+        const int tiles = std::clamp(scene.value("waterTiles", 8), 1, 64);
+        liquid.xTiles = liquid.yTiles = tiles;
+        liquid.xVerts = liquid.yVerts = tiles + 1;
+        const float halfWidth = tiles * (533.33333f / 128.0f) * 0.5f;
+        liquid.basePosition = origin + glm::vec3(-halfWidth, -halfWidth, -1.0f);
         liquid.liquidType = 1;
-        liquid.heights.assign(81, liquid.basePosition.z);
-        liquid.flags.assign(64, 0);
+        liquid.heights.assign((tiles + 1) * (tiles + 1), liquid.basePosition.z);
+        liquid.flags.assign(tiles * tiles, 0);
         if (!renderer.liquidScene().addWmoLiquid(liquid, glm::mat4(1.0f), 1, rendering::LiquidShelter::Open)) return 1;
     }
     if (scene.value("selection", false)) renderer.setSelectionCircle(origin, 2.0f, {0, 1, 0});
@@ -706,6 +709,7 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     if (scene.contains("volumetricDensity")) {
         renderer.setVolumetricFogDensity(scene["volumetricDensity"].get<float>());
     }
+    if (auto* post = renderer.getPostProcessPipeline()) post->setBloomStrength(scene.value("bloom", 0.8f));
     if (scene.contains("sunShafts")) renderer.setSunShaftsEnabled(scene["sunShafts"].get<bool>());
 
     // Anti-aliasing as the settings panel sets it: the sample count, and
@@ -749,13 +753,13 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         int waited = 0;
         int settled = 0;
         int lastLoaded = -1;
-        for (; waited < 600 && settled < kSettledFrames; ++waited) {
+        for (; waited < scene.value("settleFrames",600) && settled < kSettledFrames; ++waited) {
             renderer.update(0.0f);
             renderer.beginFrame(renderer.extractFrameInputs());
             renderer.renderWorld();
             renderer.endFrame();
             const int loaded = terrain->getLoadedTileCount();
-            settled = terrain->getRemainingTileCount() == 0 && loaded == lastLoaded ? settled + 1 : 0;
+            settled = terrain->getRemainingTileCount() == 0 && (!scene.value("distantTerrain",false) || renderer.extractFrameInputs().distantTerrainReady) && loaded == lastLoaded ? settled + 1 : 0;
             lastLoaded = loaded;
         }
         if (terrain->getRemainingTileCount() > 0) {
@@ -842,6 +846,7 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
             if (auto* post = renderer.getPostProcessPipeline()) {
                 post->setFXAAEnabled(!inputs.postProcess.fxaa);
                 post->setFSR2Enabled(!inputs.postProcess.fsr2);
+                post->setBloomStrength(inputs.postProcess.bloom > 0 ? 0.0f : 2.0f);
                 post->setBrightness(0.3f);
                 post->setIntoxication(0.8f);
             }

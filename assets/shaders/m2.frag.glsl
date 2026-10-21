@@ -22,13 +22,22 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 fogSkyMiddle;
     vec4 fogSkyBand1;
     vec4 fogSkyBand2;
-    mat4 contactSpaceMatrix;
+    mat4 contactSpaceMatrix;  // read by contact_shadows.glsli
     vec4 contactParams;
+    vec4 windDirLean;
+    vec4 windPhases;
+    vec4 windTravel;
+    vec4 skySmogColor;
+    vec4 aerialSun;
+    vec4 aerialLight;
+    vec4 terrainLodParams;
+    vec4 aerialParams;
 };
 
 #include "rt_lighting.glsli"
 #include "contact_shadows.glsli"
 #include "sky_atmosphere.glsli"
+#include "aerial_frame.glsli"
 #include "interior_light.glsli"
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
@@ -109,8 +118,8 @@ vec4 fogVolumeAt(vec3 worldPos) {
 // everything between the camera and that, sunlit shafts and torch glow
 // included.
 vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
-    float fogFactor = distanceFogVisibility(dist, fogParams.x, fogParams.y);
-    color = mix(fogColor.rgb, color, fogFactor);
+    float fogFactor = aerialVisibilityAt(worldPos, dist);
+    color = mix(aerialColorAt(worldPos - viewPos.xyz), color, fogFactor);
     if (volumetricParams.x > 0.5) {
         vec4 air = fogVolumeAt(worldPos);
         color = color * air.a + air.rgb;
@@ -168,6 +177,9 @@ void main() {
         // additive layer only loses what the air hides of it; the air's own
         // light is already in the layer it is added to.
         vec3 skyColor = texColor.rgb + stageAdd;
+        vec3 skyDir = normalize(FragPos-viewPos.xyz);
+        if(blendMode<3) skyColor=aerialSky(skyColor,skyDir);
+        else if(aerialParams.w>0.5) skyColor*=smoothstep(0.02,0.18,max(skyDir.z,0.0));
         if (volumetricParams.x > 0.5) {
             vec4 clip = projection * view * vec4(FragPos, 1.0);
             vec4 air = fogVolumeSky(clip.xy / max(clip.w, 1e-4) * 0.5 + 0.5);
@@ -358,7 +370,7 @@ void main() {
     if (blendMode == 5 || blendMode == 6) {
         // Fade toward the multiplication identity. Black would darken the
         // background, while additive fading would wash out the base texture.
-        float visibility = distanceFogVisibility(dist, fogParams.x, fogParams.y) * vFadeAlpha;
+        float visibility = aerialVisibilityAt(FragPos, dist) * vFadeAlpha;
         if (volumetricParams.x > 0.5) visibility *= fogVolumeAt(FragPos).a;
         float neutral = blendMode == 6 ? 0.5 : 1.0;
         result = mix(vec3(neutral), result, clamp(visibility, 0.0, 1.0));
@@ -370,7 +382,7 @@ void main() {
         // Distance can only take an additive contribution away, and so can
         // the air in front of it: its own light is already in the scene
         // behind the card.
-        float fogFactor = distanceFogVisibility(dist, fogParams.x, fogParams.y);
+        float fogFactor = aerialVisibilityAt(FragPos, dist);
         result *= fogFactor;
         if (volumetricParams.x > 0.5) result *= fogVolumeAt(FragPos).a;
     } else {

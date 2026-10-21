@@ -11,6 +11,7 @@
 #include "rendering/local_lights.hpp"
 #include "rendering/range_allocator.hpp"
 #include "rendering/terrain_bake.hpp"
+#include "pipeline/distant_terrain.hpp"
 #include "rendering/uniform_slot_pool.hpp"
 #include "rendering/vk_utils.hpp"
 
@@ -321,6 +322,7 @@ public:
     /// level of detail is chosen against: a chunk is drawn at the coarsest
     /// level whose error stays within kLodMaxErrorPixels on screen.
     void setLodViewportHeight(uint32_t pixels) { lodViewportHeight_ = pixels; }
+    pipeline::TerrainCoverage detailedCoverage() const;
     [[nodiscard]] VkContext* getVkContext() const { return vkCtx; }
 
     /// Where chunks register their geometry for the ray traced lighting.

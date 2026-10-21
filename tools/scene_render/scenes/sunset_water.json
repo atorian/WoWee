@@ -1,0 +1,34 @@
+{
+  "map": "Azeroth",
+  "mapId": 0,
+  "zoneId": 33,
+  "hour": 20.3,
+  "server": [
+    -14600,
+    1400,
+    2
+  ],
+  "terrain": false,
+  "waterPlane": true,
+  "waterTiles": 64,
+  "camera": {
+    "offset": [
+      -12,
+      -12,
+      1
+    ],
+    "yaw": 45,
+    "pitch": -2
+  },
+  "size": [
+    1280,
+    720
+  ],
+  "frames": 90,
+  "bloom": 0.8,
+  "sunShafts": false,
+  "volumetricFog": 0,
+  "fogStrength": 0.4,
+  "msaa": 1,
+  "streamWorld": false
+}

@@ -424,6 +424,7 @@ void PostProcessPipeline::destroyAllResources() {
 
 // Settings setters run on the game side. Resource state changes only when
 // applyFrameSettings consumes the settings captured for a rendered frame.
+void PostProcessPipeline::setBloomStrength(float strength) { requested_.bloom = glm::clamp(strength, 0.0f, 2.0f); }
 void PostProcessPipeline::setFXAAEnabled(bool on) { requested_.fxaa = on; }
 void PostProcessPipeline::setFSREnabled(bool on) {
     requested_.fsr = on;

@@ -94,6 +94,8 @@ class RtLighting;
 class LootSparkles;
 class CorpseBones;
 class SunShafts;
+class Bloom;
+class DistantTerrain;
 class ScreenCapture;
 class FrameSink;
 
@@ -600,7 +602,7 @@ public:
     /// Rays streaming from the sun across the finished picture. See SunShafts.
     void setSunShaftsEnabled(bool enabled) { sunShaftsEnabled_ = enabled; }
     int getTerrainLoadRadius() const;
-    int getTerrainUnloadRadius() const { return getTerrainLoadRadius() + 3; }
+    int getTerrainUnloadRadius() const;
     void setMsaaSamples(VkSampleCountFlagBits samples);
 
     // Post-process pipeline API - delegates to PostProcessPipeline (§4.3)
@@ -839,6 +841,8 @@ private:
 
     // Screen-space sun shafts, built from the finished frame at the end of
     // endFrame and added in the overlay pass ahead of the interface.
+    std::unique_ptr<DistantTerrain> distantTerrain_;
+    std::unique_ptr<Bloom> bloom_;
     std::unique_ptr<SunShafts> sunShafts_;
     bool sunShaftsEnabled_ = true;
     /// renderWorld ran this frame. The shafts are built from the world's

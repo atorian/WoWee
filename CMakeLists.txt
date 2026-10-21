@@ -698,6 +698,7 @@ set(WOWEE_SOURCES
     src/core/resource_telemetry.cpp
     src/core/resource_monitor.cpp
     src/core/benchmark_run.cpp
+    src/core/scene_replay.cpp
     src/core/screen_recorder.cpp
     src/core/entity_spawner.cpp
     src/core/entity_spawner_player.cpp
@@ -1001,6 +1002,7 @@ set(WOWEE_SOURCES
     src/pipeline/spell_icon_paths.cpp
 
     src/pipeline/terrain_mesh.cpp
+    src/pipeline/distant_terrain.cpp
 
     # Rendering (Vulkan infrastructure)
     src/rendering/pass_ablation.cpp
@@ -1082,6 +1084,8 @@ set(WOWEE_SOURCES
     src/rendering/hiz_system.cpp
     src/rendering/volumetric_fog.cpp
     src/rendering/sun_shafts.cpp
+    src/rendering/bloom.cpp
+    src/rendering/distant_terrain.cpp
     src/rendering/screen_capture.cpp
     src/rendering/loot_sparkles.cpp
     src/rendering/corpse_bones.cpp
@@ -2225,6 +2229,10 @@ if(WOWEE_BUILD_TESTS)
     wowee_add_scene_test(scene_transport_shown_again_casts transport_shown_again.json
                          "WMO shadow draw calls: [1-9][0-9]* in")
     if(Python3_FOUND)
+        add_test(NAME scene_bloom
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_bloom.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/bloom/behaviour)
+        set_tests_properties(scene_bloom PROPERTIES SKIP_RETURN_CODE 77)
         add_test(NAME scene_interface_frame
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_interface_frame.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/interface-frame)

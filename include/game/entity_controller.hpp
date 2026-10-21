@@ -39,6 +39,9 @@ public:
     /// and a create that arrived before the scene existed had nowhere to go.
     /// Sends nothing to the server.
     void announceObjectsInView();
+    /// Offline scene input, through the ordinary create/values/despawn path.
+    /// The caller owns the sampled clock and supplies positions separately.
+    void applyRecordedObjects(const UpdateObjectData& data);
 
     // --- Name / info cache queries ---
     void queryPlayerName(uint64_t guid);

@@ -1,0 +1,16 @@
+#include "aerial_perspective.glsli"
+float aerialVisibilityAt(vec3 worldPos,float distance) {
+    // Zone distances already include Fog thickness. Geometry visibility and
+    // the ADT/WDL handoff must not stretch this curve or clear high mountains.
+    return distanceFogVisibility(distance,fogParams.x,fogParams.y);
+}
+vec3 aerialColorAt(vec3 direction) {
+    if(aerialParams.w<0.5)return fogColor.rgb;
+    float len=length(direction);
+    return aerialScatteringColor(len>0.001 ? direction/len : vec3(0,0,1),fogColor.rgb,aerialLight.rgb,lightColor.rgb,aerialSun);
+}
+vec3 aerialSky(vec3 sky,vec3 direction) {
+    if(aerialParams.w<0.5)return sky;
+    float horizon=1.0-smoothstep(0.02,0.18,max(normalize(direction).z,0.0));
+    return mix(sky,aerialColorAt(direction),horizon);
+}

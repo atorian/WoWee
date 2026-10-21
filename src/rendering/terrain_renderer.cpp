@@ -982,6 +982,16 @@ void TerrainRenderer::bindDraw(VkCommandBuffer cmd, const GeometryDraw& draw) {
     vkCmdBindIndexBuffer(cmd, draw.indices, 0, VK_INDEX_TYPE_UINT32);
 }
 
+pipeline::TerrainCoverage TerrainRenderer::detailedCoverage() const {
+    pipeline::TerrainCoverage result{};
+    for(const auto& chunk:chunks) {
+        if(!chunk.isValid() || !chunk.materialSet || chunk.tileX<0 || chunk.tileX>=64 || chunk.tileY<0 || chunk.tileY>=64)continue;
+        const int cell=chunk.chunkY*16+chunk.chunkX;
+        if(cell>=0 && cell<256)result[chunk.tileY*64+chunk.tileX][cell/32]|=1u<<(cell%32);
+    }
+    return result;
+}
+
 TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const std::vector<LocalLight>& lights) {
     DrawList list;
     list.wireframe = wireframe;
@@ -1025,8 +1035,7 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
         const int ny[4] = {gy - 1, gy + 1, gy, gy};
         for (size_t edge = 0; edge < 4; ++edge) {
             const auto neighbour = chunkAt_.find(chunkMapKey(nx[edge], ny[edge]));
-            if (neighbour != chunkAt_.end() && levels[neighbour->second] >= 0 &&
-                levels[neighbour->second] != levels[i]) draw.ranges[edge + 1] = ch.skirts[level][edge];
+            if (neighbour == chunkAt_.end() || levels[neighbour->second] != levels[i]) draw.ranges[edge + 1] = ch.skirts[level][edge];
         }
         const float distance = glm::length(ch.boundingSphereCenter - camPos);
         const auto source = bakeEnabled_ && ch.bakeComplete->load()

@@ -245,16 +245,13 @@ void TerrainManager::update(const Camera& camera, float deltaTime) {
 
     timeSinceLastUpdate += deltaTime;
 
-    // Only update streaming periodically (not every frame)
-    if (timeSinceLastUpdate < updateInterval) {
-        return;
-    }
-
+    // Entry, a crossed tile and a changed distance policy need an immediate
+    // request, even behind a loading screen whose game clock is held still.
+    const glm::vec3 camPos = camera.getPosition();
+    const TileCoord newTile = worldToTile(camPos.x, camPos.y);
+    const bool needsStream = streamingPolicyDirty_ || newTile.x != lastStreamTile.x || newTile.y != lastStreamTile.y;
+    if (timeSinceLastUpdate < updateInterval && !needsStream) return;
     timeSinceLastUpdate = 0.0f;
-
-    // Get current tile from camera position.
-    glm::vec3 camPos = camera.getPosition();
-    TileCoord newTile = worldToTile(camPos.x, camPos.y);
 
     // Check if we've moved to a different tile
     if (newTile.x != currentTile.x || newTile.y != currentTile.y) {
@@ -265,7 +262,7 @@ void TerrainManager::update(const Camera& camera, float deltaTime) {
     prefetchAhead(camPos);
 
     // Stream tiles when player crosses a tile boundary
-    if (newTile.x != lastStreamTile.x || newTile.y != lastStreamTile.y) {
+    if (needsStream) {
         LOG_DEBUG("Streaming: cam=(", camPos.x, ",", camPos.y, ",", camPos.z,
                  ") tile=[", newTile.x, ",", newTile.y,
                  "] loaded=", loadedTiles.size());
@@ -273,6 +270,7 @@ void TerrainManager::update(const Camera& camera, float deltaTime) {
         streamTiles();
         streamMs = elapsedMs(tStream, clock::now());
         lastStreamTile = newTile;
+        streamingPolicyDirty_ = false;
         prefetchedCenters_.clear();
     } else {
         // Proactive loading: when workers are idle, periodically re-check for
@@ -310,13 +308,14 @@ bool TerrainManager::enqueueTile(int x, int y) {
     {
         std::lock_guard<std::mutex> lock(queueMutex);
         loadQueue.push_back(coord);
-        pendingTiles[coord] = true;
+        pendingTiles[coord] = TileDetail::Detailed;
     }
     queueCV.notify_all();
     return true;
 }
 
-std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
+std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetail detail) {
+    const bool landmarks = detail == TileDetail::Landmarks;
     TileCoord coord = {.x = x, .y = y};
     LOG_DEBUG("Preparing tile [", x, ",", y, "] (CPU work)");
 
@@ -506,8 +505,9 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
     }
 
     // Generate mesh
-    pipeline::TerrainMesh mesh = pipeline::TerrainMeshGenerator::generate(*terrainPtr);
-    if (mesh.validChunkCount == 0) {
+    pipeline::TerrainMesh mesh;
+    if (!landmarks) mesh = pipeline::TerrainMeshGenerator::generate(*terrainPtr);
+    if (!landmarks && mesh.validChunkCount == 0) {
         LOG_ERROR("Failed to generate terrain mesh for tile [", x, ",", y, "]");
         return nullptr;
     }
@@ -517,9 +517,10 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
     auto pending = std::make_shared<PendingTile>();
     pending->token = mapToken_;
     pending->coord = coord;
+    pending->detail = detail;
     // The ground the world's queries read, taken here beside the mesh rather
     // than on the main thread at the commit.
-    pending->heights = collision::TerrainTileHeights::build(*terrainPtr, x, y);
+    if (!landmarks) pending->heights = collision::TerrainTileHeights::build(*terrainPtr, x, y);
     pending->terrain = std::move(*terrainPtr);
     pending->mesh = std::move(mesh);
 
@@ -616,6 +617,10 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
         return true;
     };
 
+    // Far tiles keep silhouettes large enough to matter at the detail boundary.
+    // They never allocate terrain materials, collision, clutter or small props.
+    constexpr float landmarkSize = core::coords::TILE_SIZE / 8.f;
+    thread_local std::unordered_map<std::string, float> modelDiameters;
     // Pre-load M2 doodads (CPU: read files, parse models)
     int skippedNameId = 0, skippedFileNotFound = 0, skippedInvalid = 0, skippedSkinNotFound = 0;
     for (const auto& placement : pending->terrain.doodadPlacements) {
@@ -631,6 +636,19 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
         // nothing, and did not appear.
         m2Path = pipeline::modelPathToM2(m2Path);
 
+        if (landmarks) {
+            auto found = modelDiameters.find(m2Path);
+            if (found == modelDiameters.end()) {
+                auto bytes = assetManager->readFileShared(m2Path);
+                if (!bytes) {
+                    LOG_WARNING("Distant landmark model missing: ", m2Path, " - placement omitted");
+                    modelDiameters.emplace(m2Path, 0.f); continue;
+                }
+                auto headerModel = pipeline::M2Loader::load(*bytes);
+                found = modelDiameters.emplace(m2Path, glm::length(headerModel.boundMax-headerModel.boundMin)).first;
+            }
+            if (found->second * placement.scale * kInv1024 < landmarkSize) continue;
+        }
         uint32_t modelId = static_cast<uint32_t>(std::hash<std::string>{}(m2Path));
         if (!ensureModelPrepared(m2Path, modelId, skippedFileNotFound, skippedInvalid, skippedSkinNotFound)) {
             continue;
@@ -659,8 +677,10 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
     }
 
     // Procedural ground clutter from terrain layer effectId -> GroundEffectTexture/Doodad DBCs.
-    ensureGroundEffectTablesLoaded();
-    generateGroundClutterPlacements(pending, preparedModelIds);
+    if (!landmarks) {
+        ensureGroundEffectTablesLoaded();
+        generateGroundClutterPlacements(pending, preparedModelIds);
+    }
 
     if (!workerRunning.load() || !mapToken_.current()) return nullptr;
 
@@ -669,6 +689,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
         for (const auto& placement : pending->terrain.wmoPlacements) {
             if (!workerRunning.load() || !mapToken_.current()) return nullptr;
             if (placement.nameId >= pending->terrain.wmoNames.size()) continue;
+            if (landmarks && glm::length(glm::vec3(placement.extentUpper[0]-placement.extentLower[0],placement.extentUpper[1]-placement.extentLower[1],placement.extentUpper[2]-placement.extentLower[2])) < landmarkSize) continue;
 
             const std::string& wmoPath = pending->terrain.wmoNames[placement.nameId];
 
@@ -729,12 +750,12 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
                 // This prevents 15+ copies of Stormwind's ~6000 doodads from being parsed
                 // simultaneously, which was the primary cause of OOM during world load.
                 bool wmoAlreadyPrepared = false;
-                if (placement.uniqueId != 0) {
+                if (!landmarks && placement.uniqueId != 0) {
                     std::lock_guard<std::mutex> lock(preparedWmoUniqueIdsMutex_);
                     wmoAlreadyPrepared = !preparedWmoUniqueIds_.insert(placement.uniqueId).second;
                 }
 
-                if (!wmoAlreadyPrepared && !wmoModel.doodadSets.empty() && !wmoModel.doodads.empty()) {
+                if (!landmarks && !wmoAlreadyPrepared && !wmoModel.doodadSets.empty() && !wmoModel.doodads.empty()) {
                     glm::mat4 wmoMatrix(1.0f);
                     wmoMatrix = glm::translate(wmoMatrix, pos);
                     wmoMatrix = glm::rotate(wmoMatrix, rot.z, glm::vec3(0, 0, 1));
@@ -855,6 +876,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
                         }
 
                         PendingTile::WMODoodadReady doodadReady;
+                        doodadReady.ownerPlacement = pending->wmoModels.size();
                         doodadReady.modelId = doodadModelId;
                         doodadReady.model = std::move(m2Model);
                         doodadReady.worldPosition = worldPos;
@@ -934,7 +956,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
     // loaded earlier already left it in the cache.
     TextureCache* textureCache = terrainRenderer && terrainRenderer->getVkContext()
         ? &terrainRenderer->getVkContext()->textures() : nullptr;
-    for (const auto& texPath : pending->terrain.textures) {
+    if (!landmarks) for (const auto& texPath : pending->terrain.textures) {
         if (pending->preloadedTextures.find(texPath) != pending->preloadedTextures.end()) continue;
         // Terrain tilesets and M2 skins stay in their blocks - both are only
         // sampled, and M2's transparency now comes from the blocks too. The
@@ -955,6 +977,11 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
              pending->wmoDoodads.size(), " WMO doodads, ",
              pending->preloadedTextures.size(), " textures");
 
+    if (landmarks) {
+        // Placement ownership is retained in the finalized instance lists.
+        // No detailed ADT arrays are needed after their silhouettes are prepared.
+        pending->terrain = {};
+    }
     return pending;
 }
 
@@ -978,6 +1005,10 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
     switch (ft.phase) {
 
     case FinalizationPhase::TERRAIN: {
+        if (pending->detail == TileDetail::Landmarks) {
+            ft.phase = FinalizationPhase::M2_MODELS;
+            return false;
+        }
         // Check if tile was already loaded or failed
         if (loadedTiles.find(coord) != loadedTiles.end() || failedTiles.find(coord) != failedTiles.end()) {
             {
@@ -1143,6 +1174,8 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 }
                 const auto& p = pending->m2Placements[ft.m2InstanceIndex++];
                 if (p.uniqueId != 0 && placedDoodadIds.count(p.uniqueId)) {
+                    ft.m2InstanceIds.push_back(placedDoodadIds.retain(p.uniqueId));
+                    ft.tileUniqueIds.push_back(p.uniqueId);
                     continue;
                 }
                 if (!m2Renderer->hasModel(p.modelId)) {
@@ -1155,7 +1188,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 if (instId) {
                     ft.m2InstanceIds.push_back(instId);
                     if (p.uniqueId != 0) {
-                        placedDoodadIds.insert(p.uniqueId);
+                        placedDoodadIds.insert(p.uniqueId,instId);
                         ft.tileUniqueIds.push_back(p.uniqueId);
                     }
                     created++;
@@ -1212,6 +1245,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
     }
 
     case FinalizationPhase::WMO_INSTANCES: {
+        if(ft.wmoPlacementInstances.empty()) ft.wmoPlacementInstances.resize(pending->wmoModels.size());
         // Create WMO instances incrementally to avoid stalls on tiles with many WMOs.
         // Liquid group loading is also budgeted (max 4 per call) to prevent stalls
         // on WMOs with many liquid groups (e.g. Stormwind canals).
@@ -1229,29 +1263,42 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 // placed it.
                 if (!ft.wmoInstanceOpen) {
                     if (wmoReady.uniqueId != 0 && placedWmoIds.count(wmoReady.uniqueId)) {
-                        ft.wmoInstanceIndex++;
-                        continue;
-                    }
-                    if (!wmoRenderer->isModelLoaded(wmoReady.modelId)) {
-                        ft.wmoInstanceIndex++;
-                        continue;
-                    }
-                    uint32_t wmoInstId = wmoRenderer->createInstance(
-                        wmoReady.modelId, wmoReady.position, wmoReady.rotation, wmoReady.scale);
-                    if (!wmoInstId) {
-                        ft.wmoInstanceIndex++;
-                        continue;
-                    }
-                    ft.wmoInstanceIds.push_back(wmoInstId);
-                    if (wmoReady.uniqueId != 0) {
-                        placedWmoIds.insert(wmoReady.uniqueId);
+                        const auto instance=placedWmoIds.retain(wmoReady.uniqueId);
+                        ft.wmoInstanceIds.push_back(instance);
+                        ft.wmoPlacementInstances[ft.wmoInstanceIndex]=instance;
                         ft.tileWmoUniqueIds.push_back(wmoReady.uniqueId);
+                        if(pending->detail==TileDetail::Landmarks || placedWmoIds.hasDetail(instance)) {
+                            ft.wmoInstanceIndex++;
+                            continue;
+                        }
+                        // Promote the shared far hull: its nearby owner also
+                        // needs the liquids which the far representation omits.
+                        ft.wmoInstanceOpen=true;
+                        ft.wmoLiquidGroupIndex=0;
                     }
-                    ft.wmoInstanceOpen = true;
-                    ft.wmoLiquidGroupIndex = 0;
+                    if (!ft.wmoInstanceOpen) {
+                        if (!wmoRenderer->isModelLoaded(wmoReady.modelId)) {
+                            ft.wmoInstanceIndex++;
+                            continue;
+                        }
+                        uint32_t wmoInstId = wmoRenderer->createInstance(
+                            wmoReady.modelId, wmoReady.position, wmoReady.rotation, wmoReady.scale);
+                        if (!wmoInstId) {
+                            ft.wmoInstanceIndex++;
+                            continue;
+                        }
+                        ft.wmoInstanceIds.push_back(wmoInstId);
+                        ft.wmoPlacementInstances[ft.wmoInstanceIndex]=wmoInstId;
+                        placedWmoIds.insert(wmoReady.uniqueId,wmoInstId);
+                        if (wmoReady.uniqueId != 0) {
+                            ft.tileWmoUniqueIds.push_back(wmoReady.uniqueId);
+                        }
+                        ft.wmoInstanceOpen = true;
+                        ft.wmoLiquidGroupIndex = 0;
+                    }
                 }
                 // Load WMO liquids incrementally (canals, pools, etc.)
-                if (liquidScene) {
+                if (liquidScene && pending->detail == TileDetail::Detailed && !placedWmoIds.hasDetail(ft.wmoInstanceIds.back())) {
                     uint32_t wmoInstId = ft.wmoInstanceIds.back();
                     glm::mat4 modelMatrix = glm::mat4(1.0f);
                     modelMatrix = glm::translate(modelMatrix, wmoReady.position);
@@ -1282,6 +1329,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                     }
                 }
                 ft.wmoInstanceIndex++;
+                if(pending->detail==TileDetail::Detailed) placedWmoIds.markDetail(ft.wmoInstanceIds.back());
                 ft.wmoLiquidGroupIndex = 0;
                 ft.wmoInstanceOpen = false;
                 created++;
@@ -1307,6 +1355,11 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                    (uploaded == 0 || std::chrono::duration<float, std::milli>(
                         std::chrono::steady_clock::now() - stepStart).count() < stepBudgetMs_)) {
                 auto& doodad = pending->wmoDoodads[ft.wmoDoodadIndex];
+                const auto owner=ft.wmoPlacementInstances[doodad.ownerPlacement];
+                if(!owner) { // parent upload/placement failed; its renderer logged the failure
+                    ++ft.wmoDoodadIndex;
+                    continue;
+                }
                 const auto modelStart = std::chrono::steady_clock::now();
                 const bool modelLoaded = m2Renderer->loadModel(doodad.model, doodad.modelId);
                 const auto instanceStart = std::chrono::steady_clock::now();
@@ -1329,7 +1382,9 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                     // carry the only authored floor for their walkable ramps.
                     m2Renderer->setSkipWallCollision(wmoDoodadInstId, true);
                     m2Renderer->setInteriorLight(wmoDoodadInstId, doodad.interiorLight);
-                    ft.m2InstanceIds.push_back(wmoDoodadInstId);
+                    // The hull owns its attachments, not whichever tile first
+                    // prepared it. They survive a near/far tile handoff together.
+                    placedWmoIds.attach(owner,wmoDoodadInstId);
                 }
                 finalizePartMs_[kPartM2InstanceCreate] += std::chrono::duration<float, std::milli>(
                     std::chrono::steady_clock::now() - instanceStart).count();
@@ -1344,6 +1399,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
     }
 
     case FinalizationPhase::WATER: {
+        if (pending->detail == TileDetail::Landmarks) { ft.phase = FinalizationPhase::AMBIENT; return false; }
         // Terrain water was already loaded in TERRAIN phase.
         // Generate water ambient emitters here.
         if (ambientEmitterSink_) {
@@ -1389,9 +1445,10 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
         }
 
         // Commit tile to loadedTiles, and its ground to the world's.
-        if (collision_) collision_->addTerrainTile(pending->heights);
+        if (collision_ && pending->heights) collision_->addTerrainTile(pending->heights);
         auto tile = std::make_unique<TerrainTile>();
         tile->coord = coord;
+        tile->detail = pending->detail;
         tile->terrain = std::move(pending->terrain);
         tile->loaded = true;
         tile->m2InstanceIds = std::move(ft.m2InstanceIds);
@@ -1431,6 +1488,7 @@ void TerrainManager::workerLoop() {
     while (workerRunning.load()) {
         TileCoord coord;
         bool hasWork = false;
+        TileDetail detail = TileDetail::Detailed;
 
         {
             std::unique_lock<std::mutex> lock(queueMutex);
@@ -1482,7 +1540,10 @@ void TerrainManager::workerLoop() {
 
             if (!loadQueue.empty()) {
                 coord = loadQueue.front();
+                auto requested = pendingTiles.find(coord);
                 loadQueue.pop_front();
+                if (requested == pendingTiles.end()) continue;
+                detail = requested->second;
                 hasWork = true;
                 ++preparingTiles_;
             }
@@ -1490,7 +1551,7 @@ void TerrainManager::workerLoop() {
 
         if (hasWork) {
             auto lifetime = core::JobGroup::track(mapToken_);
-            auto pending = lifetime && mapToken_.current() ? prepareTile(coord.x, coord.y) : nullptr;
+            auto pending = lifetime && mapToken_.current() ? prepareTile(coord.x, coord.y, detail) : nullptr;
 
             std::lock_guard<std::mutex> lock(queueMutex);
             --preparingTiles_;
@@ -1682,7 +1743,8 @@ void TerrainManager::processPendingUnloads() {
         // would pop visible terrain out from under them.
         int dx = coord.x - currentTile.x;
         int dy = coord.y - currentTile.y;
-        if (dx*dx + dy*dy <= unloadRadius*unloadRadius) continue;
+        const int keepRadius=std::max(unloadRadius,landmarkRadius_+1);
+        if (dx*dx + dy*dy <= keepRadius*keepRadius) continue;
 
         unloadTile(coord.x, coord.y);
         unloaded++;
@@ -1762,19 +1824,22 @@ void TerrainManager::unloadTile(int x, int y) {
             if (fit->phase != FinalizationPhase::TERRAIN && liquidScene) {
                 liquidScene->removeTile(x, y);
             }
+            if(fit->wmoInstanceOpen && fit->pending->detail==TileDetail::Detailed &&
+               !fit->wmoInstanceIds.empty() && !placedWmoIds.hasDetail(fit->wmoInstanceIds.back()) && liquidScene)
+                liquidScene->removeWmo(fit->wmoInstanceIds.back());
             // Clean up any M2/WMO instances that were already created
             if (m2Renderer && !fit->m2InstanceIds.empty()) {
-                m2Renderer->removeInstances(fit->m2InstanceIds);
+                m2Renderer->removeInstances(placedDoodadIds.release(fit->m2InstanceIds));
             }
             if (wmoRenderer && !fit->wmoInstanceIds.empty()) {
-                for (uint32_t id : fit->wmoInstanceIds) {
-                    if (liquidScene) liquidScene->removeWmo(id);
-                }
-                wmoRenderer->removeInstances(fit->wmoInstanceIds);
+                std::vector<uint32_t> attached;
+                const auto dead=placedWmoIds.release(fit->wmoInstanceIds,&attached);
+                if(m2Renderer) m2Renderer->removeInstances(attached);
+                for (uint32_t id : dead) if (liquidScene) liquidScene->removeWmo(id);
+                wmoRenderer->removeInstances(dead);
             }
-            for (uint32_t uid : fit->tileUniqueIds) placedDoodadIds.erase(uid);
             for (uint32_t uid : fit->tileWmoUniqueIds) {
-                placedWmoIds.erase(uid);
+                if (placedWmoIds.count(uid)) continue;
                 std::lock_guard<std::mutex> lock(preparedWmoUniqueIdsMutex_);
                 preparedWmoUniqueIds_.erase(uid);
             }
@@ -1793,16 +1858,6 @@ void TerrainManager::unloadTile(int x, int y) {
 
     const auto& tile = it->second;
 
-    // Remove doodad unique IDs from dedup set
-    for (uint32_t uid : tile->doodadUniqueIds) {
-        placedDoodadIds.erase(uid);
-    }
-    for (uint32_t uid : tile->wmoUniqueIds) {
-        placedWmoIds.erase(uid);
-        std::lock_guard<std::mutex> lock(preparedWmoUniqueIdsMutex_);
-        preparedWmoUniqueIds_.erase(uid);
-    }
-
     using clock = std::chrono::steady_clock;
     auto partStart = clock::now();
     auto endPart = [&](size_t part) {
@@ -1816,20 +1871,27 @@ void TerrainManager::unloadTile(int x, int y) {
 
     // Remove M2 doodad instances
     if (m2Renderer) {
-        m2Renderer->removeInstances(tile->m2InstanceIds);
+        m2Renderer->removeInstances(placedDoodadIds.release(tile->m2InstanceIds));
         LOG_DEBUG("  Removed ", tile->m2InstanceIds.size(), " M2 instances");
     }
     endPart(0);
 
     // Remove WMO instances and their liquids
     if (wmoRenderer) {
-        for (uint32_t id : tile->wmoInstanceIds) {
+        std::vector<uint32_t> attached;
+        const auto dead=placedWmoIds.release(tile->wmoInstanceIds,&attached);
+        if(m2Renderer) m2Renderer->removeInstances(attached);
+        for (uint32_t id : dead) {
             // Remove WMO liquids associated with this instance
             if (liquidScene) {
                 liquidScene->removeWmo(id);
             }
         }
-        wmoRenderer->removeInstances(tile->wmoInstanceIds);
+        wmoRenderer->removeInstances(dead);
+        for(auto uid:tile->wmoUniqueIds) if(!placedWmoIds.count(uid)) {
+            std::lock_guard<std::mutex> lock(preparedWmoUniqueIdsMutex_);
+            preparedWmoUniqueIds_.erase(uid);
+        }
         LOG_DEBUG("  Removed ", tile->wmoInstanceIds.size(), " WMO instances");
     }
     endPart(1);
@@ -2407,7 +2469,7 @@ const pipeline::MapChunk* TerrainManager::findChunkAt(float glX, float glY,
     };
 
     auto inTile = [&](const TerrainTile* tile) -> const pipeline::MapChunk* {
-        if (!tile || !tile->loaded) return nullptr;
+        if (!tile || !tile->loaded || tile->detail != TileDetail::Detailed) return nullptr;
         // Recorded per attempt rather than per hit: whichever tile the found
         // chunk came from was necessarily the last one tried.
         if (outTile) *outTile = tile;
@@ -2502,6 +2564,13 @@ std::optional<std::string> TerrainManager::getDominantTextureAt(float glX, float
 }
 
 void TerrainManager::streamTiles() {
+    std::vector<TileCoord> changed;
+    for (const auto& [coord,tile] : loadedTiles) {
+        const int dx=coord.x-currentTile.x, dy=coord.y-currentTile.y, d2=dx*dx+dy*dy;
+        if ((tile->detail==TileDetail::Landmarks && d2<=loadRadius*loadRadius) ||
+            (tile->detail==TileDetail::Detailed && landmarkRadius_>0 && d2>unloadRadius*unloadRadius)) changed.push_back(coord);
+    }
+    for (const auto& coord:changed) unloadTile(coord.x,coord.y);
     enqueueAround(currentTile, /*urgent=*/true);
 
     // Unload tiles beyond unload radius (well past the camera far clip).
@@ -2518,7 +2587,7 @@ void TerrainManager::streamTiles() {
         int dy = coord.y - currentTile.y;
 
         // Circular pattern: unload beyond radius (Euclidean distance)
-        if (dx*dx + dy*dy > unloadRadius*unloadRadius && !alreadyQueued.count(coord)) {
+        if (dx*dx + dy*dy > std::max(unloadRadius,landmarkRadius_+1)*std::max(unloadRadius,landmarkRadius_+1) && !alreadyQueued.count(coord)) {
             pendingUnloadQueue_.push_back(coord);
             queuedNow++;
         }
@@ -2580,8 +2649,9 @@ void TerrainManager::enqueueAround(const TileCoord& center, bool urgent) {
         struct PendingEntry { TileCoord coord; int distSq; };
         std::vector<PendingEntry> newTiles;
 
-        for (int dy = -loadRadius; dy <= loadRadius; dy++) {
-            for (int dx = -loadRadius; dx <= loadRadius; dx++) {
+        const int radius = std::max(loadRadius,landmarkRadius_);
+        for (int dy = -radius; dy <= radius; dy++) {
+            for (int dx = -radius; dx <= radius; dx++) {
                 int tileX = currentTile.x + dx;
                 int tileY = currentTile.y + dy;
 
@@ -2591,7 +2661,7 @@ void TerrainManager::enqueueAround(const TileCoord& center, bool urgent) {
                 }
 
                 // Circular pattern: skip corner tiles beyond radius (Euclidean distance)
-                if (dx*dx + dy*dy > loadRadius*loadRadius) {
+                if (dx*dx + dy*dy > radius*radius) {
                     continue;
                 }
 
@@ -2604,7 +2674,7 @@ void TerrainManager::enqueueAround(const TileCoord& center, bool urgent) {
                 if (shouldSkipMissingAdt(coord)) continue;
 
                 newTiles.push_back({.coord = coord, .distSq = dx*dx + dy*dy});
-                pendingTiles[coord] = true;
+                pendingTiles[coord] = dx*dx+dy*dy <= loadRadius*loadRadius ? TileDetail::Detailed : TileDetail::Landmarks;
             }
         }
 
@@ -2647,7 +2717,7 @@ void TerrainManager::precacheTiles(const std::vector<std::pair<int, int>>& tiles
         // Precache work is prioritized so taxi-route tiles are prepared before
         // opportunistic radius streaming tiles.
         loadQueue.push_front(coord);
-        pendingTiles[coord] = true;
+        pendingTiles[coord] = TileDetail::Detailed;
     }
 
     // Notify workers to start loading

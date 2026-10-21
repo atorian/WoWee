@@ -50,6 +50,8 @@
 #include "rendering/volumetric_fog.hpp"
 #include "rendering/sky_background.hpp"
 #include "rendering/sun_shafts.hpp"
+#include "rendering/bloom.hpp"
+#include "rendering/distant_terrain.hpp"
 #include "rendering/rt_lighting.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/screen_capture.hpp"
@@ -805,6 +807,8 @@ void Renderer::updatePerFrameUBO() {
     currentFrameData.windPhases = wind.phases;
     currentFrameData.windTravel = wind.travel;
 
+    currentFrameData.aerialParams=glm::vec4(0);
+    currentFrameData.terrainLodParams=glm::vec4(kDistantTerrainStart,kDistantTerrainEnd,frameInputs_.distantTerrainReady ? 1.f : 0.f,0.f);
     currentFrameData.fogSkyTop.w = 0.0f;
     currentFrameData.fogSkyMiddle.w = 0.0f; // actual sky image becomes valid in renderWorld
     currentFrameData.fogSkyBand1.w = frameInputs_.viewDistance; // common horizontal geometry range
@@ -834,6 +838,18 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.fogSkyBand1 = glm::vec4(lp.skyBand1Color, frameInputs_.viewDistance);
         currentFrameData.fogSkyBand2 = glm::vec4(lp.skyBand2Color, 0.0f);
         currentFrameData.skySmogColor = glm::vec4(lp.skySmogColor, 0.0f);
+        const auto disc=sky_celestial::sunDisc(frameInputs_.timeOfDay/24.f);
+        const float day=glm::smoothstep(-0.04f,0.15f,disc.direction.z);
+        const glm::vec3 illumination=glm::min(lp.ambientColor+lp.diffuseColor,glm::vec3(1));
+        const float grey=glm::dot(lp.skySmogColor,glm::vec3(.2126f,.7152f,.0722f));
+        currentFrameData.aerialSun=glm::vec4(disc.direction,day);
+        currentFrameData.aerialLight=glm::vec4(glm::mix(glm::vec3(grey),illumination,.65f),0);
+        const float thickness=frameInputs_.fogStrength;
+        if(frameInputs_.worldInView && thickness>0.001f) {
+            // Enable the shared sky/surface colour correction only. Opacity
+            // uses fogParams' zone start/end, scaled by LightingManager.
+            currentFrameData.aerialParams=glm::vec4(0,0,0,1);
+        }
 
         // Shift fog to blue when camera is significantly underwater (terrain water only).
         {
@@ -844,6 +860,7 @@ void Renderer::updatePerFrameUBO() {
                 float blend = glm::clamp(1.0f - std::exp(-depth * 0.08f), 0.0f, 0.7f);
                 glm::vec3 underwaterFog(0.03f, 0.09f, 0.18f);
                 glm::vec3 blendedFog = glm::mix(lp.fogColor, underwaterFog, blend);
+                currentFrameData.aerialParams.w=0;
                 currentFrameData.fogColor = glm::vec4(blendedFog, 1.0f);
                 currentFrameData.fogSkyTop.w = 0.0f;
                 currentFrameData.fogParams.x = glm::mix(lp.fogStart, 20.0f, blend);
@@ -1063,6 +1080,15 @@ bool Renderer::initialize(RenderSurface* surface) {
                          postProcessPipeline_->sceneDepthIsMsaa(), "endFrame/post-process");
     });
 
+    distantTerrain_ = std::make_unique<DistantTerrain>();
+    if(!distantTerrain_->initialize(*vkCtx,perFrameSetLayout)) distantTerrain_.reset();
+
+    bloom_ = std::make_unique<Bloom>();
+    if (!bloom_->initialize(vkCtx)) {
+        LOG_WARNING("Bloom initialization failed - scene glow unavailable");
+        bloom_.reset();
+    }
+
     // Not fatal: without them the picture is only missing its rays.
     sunShafts_ = std::make_unique<SunShafts>();
     if (!sunShafts_->initialize(vkCtx)) {
@@ -1135,6 +1161,9 @@ void Renderer::shutdown() {
         minimap->shutdown();
         minimap.reset();
     }
+
+    if (distantTerrain_) distantTerrain_.reset();
+    if (bloom_) bloom_.reset();
 
     if (sunShafts_) {
         sunShafts_->shutdown();
@@ -1317,6 +1346,7 @@ void Renderer::applyMsaaChange() {
     // Recreate all sub-renderer pipelines (they embed sample count from render pass)
     if (terrainRenderer) terrainRenderer->recreatePipelines();
     if (grassRenderer_) grassRenderer_->recreatePipelines();
+    if (distantTerrain_) distantTerrain_->recreatePipeline();
     if (waterRenderer) {
         waterRenderer->recreatePipelines();
         // Under MSAA the water draws single-sampled in its own pass, after the
@@ -1396,6 +1426,7 @@ void Renderer::applyMsaaChange() {
 }
 
 FrameInputs Renderer::extractFrameInputs() {
+    CpuStageLaps extraction(vkCtx ? &vkCtx->gameCpuStages() : nullptr, "extract");
     std::optional<CpuStage> extractStage;
     if (vkCtx) extractStage.emplace(vkCtx->gameCpuStages(), "Present", "extract scene");
     if (std::getenv("WOWEE_SKY_BACKGROUND_PROBE") && updateSkyboxLayers()) {
@@ -1403,6 +1434,7 @@ FrameInputs Renderer::extractFrameInputs() {
         skyboxModelRenderer_->update(0.016f, camera->getViewMatrix(), camera->getProjectionMatrix());
     }
     updateGrassPopulation();
+    extraction.lap("grass population");
     FrameInputs in;
     in.worldEpoch = worldEpoch_;
     in.capture = extractCaptureRequest();
@@ -1437,6 +1469,7 @@ FrameInputs Renderer::extractFrameInputs() {
     in.shadowMatrix = computeLightSpaceMatrix(in, in.shadowCenter);
     in.worldInView = worldInView_;
     in.terrainEnabled = terrainEnabled;
+    in.distantTerrainReady = distantTerrain_ && distantTerrain_->ready();
     in.drawSkyModels = skyboxModelRenderer_ && !skyLayers_.empty();
     in.hideProceduralSky = skyModelsHideProceduralSky();
     in.sunShafts = sunShaftsEnabled_;
@@ -1456,6 +1489,7 @@ FrameInputs Renderer::extractFrameInputs() {
     in.fogDensity = volumetricFogDensity_;
     in.fogTargetExtinction = volumetricFogExtinction();
     in.fogGround = characterPosition.z;
+    in.fogStrength = lightingManager ? lightingManager->getFogStrength() : 1.f;
     if (const auto h = collision_->terrainHeight(characterPosition.x, characterPosition.y))
         in.fogGround = std::min(in.fogGround, *h);
     in.cameraWaterDepth = cameraWaterDepth();
@@ -1471,6 +1505,7 @@ FrameInputs Renderer::extractFrameInputs() {
         if (m2Renderer) m2Renderer->gatherLocalLights(eye, in.localLights);
         if (characterRenderer) characterRenderer->gatherLocalLights(in.camera, in.localLights);
     }
+    extraction.lap("globals, collision and local lights");
     in.shelterRevision = wmoRenderer ? wmoRenderer->contentRevision() : 0;
     in.shelterRevision = in.shelterRevision * 1000003u + (wmoRenderer ? wmoRenderer->getInstanceCount() : 0);
     in.shelterRevision = in.shelterRevision * 1000003u + (m2Renderer ? m2Renderer->getInstanceCount() : 0);
@@ -1507,17 +1542,33 @@ FrameInputs Renderer::extractFrameInputs() {
     auto scene = std::make_shared<FrameScene>();
     scene->sequence = ++extractedSceneSequence_;
     if (vkCtx) scene->resources = vkCtx->holdSnapshotResources();
+    extraction.lap("motion and resource lease");
     if (terrainRenderer) {
-        terrainRenderer->setViewDistance(in.viewDistance);
+        terrainRenderer->setViewDistance(in.distantTerrainReady ? std::min(in.viewDistance,kDistantTerrainEnd) : in.viewDistance);
         terrainRenderer->setLodViewportHeight(sceneRenderExtent().height);
         scene->terrain = terrainRenderer->extract(in.camera, in.localLights);
     }
-    if (waterRenderer) scene->water = waterRenderer->extract(in.camera);
+    if(distantTerrain_ && terrainRenderer && in.terrainEnabled)
+        scene->distantTerrain=distantTerrain_->extract(in.camera,in.viewDistance,terrainRenderer->detailedCoverage());
+    extraction.lap("terrain");
+    if (waterRenderer) {
+        scene->water = waterRenderer->extract(in.camera);
+        if (in.hasLighting) {
+            const auto sun = sky_celestial::sunDisc(in.timeOfDay / 24.0f);
+            const float visible = sky_celestial::discHorizonAlpha(sun, 0.0f) * in.sunGlareSky *
+                                  sky_celestial::weatherFade(in.weather.strength());
+            scene->water.water.reflectionSun = glm::vec4(sun.direction, visible);
+            scene->water.water.reflectionSunColor = glm::vec4(in.weatherLight.sunColor, 0.0f);
+        }
+    }
+    extraction.lap("water");
     if (wmoRenderer) {
         wmoRenderer->setViewDistance(in.viewDistance);
         scene->buildings = wmoRenderer->extract(in.camera, in.characterPosition, in.localLights, scene->water.inView);
     }
+    extraction.lap("WMO");
     if (characterRenderer) scene->characters = characterRenderer->extract(in.camera, in.localLights);
+    extraction.lap("characters");
     if (m2Renderer) {
         m2Renderer->setViewDistance(in.viewDistance);
         const auto shelterFrame = overheadFrameFor(glm::vec2(in.camera.getPosition()),
@@ -1528,15 +1579,18 @@ FrameInputs Renderer::extractFrameInputs() {
             in.shadowDistance * 1.35f, in.weather.any() ? &shelterMatrix : nullptr,
             ShelterMap::kHalfExtent * 1.415f);
     }
+    extraction.lap("M2");
     if (minimap && in.minimapEnabled) {
         const auto centre = in.viewer.thirdPerson ? in.characterPosition : in.camera.getPosition();
         scene->minimap = minimap->extract(in.camera, centre, in.windowWidth, in.windowHeight,
                                           glm::radians(in.characterYaw), true);
     }
+    extraction.lap("minimap");
     if (skyboxModelRenderer_) {
         skyboxModelRenderer_->setSuppressBakedStars(in.sharpStars);
         scene->skyModels = skyboxModelRenderer_->extract(in.camera, in.localLights, in.time, glm::mat4(0.0f), 1.0f);
     }
+    extraction.lap("sky models");
     if (grassRenderer_) scene->grass = grassRenderer_->extract();
     if (questMarkerRenderer) scene->markers = questMarkerRenderer->extract(in.camera, in.time);
     if (footprintRenderer) scene->footprints = footprintRenderer->extract(in.camera);
@@ -1556,10 +1610,12 @@ FrameInputs Renderer::extractFrameInputs() {
     if (lightning) scene->lightning = lightning->extract();
     if (chargeEffect) scene->charge = chargeEffect->extract();
     if (precipitation_) scene->precipitation = precipitation_->extract();
+    extraction.lap("effects and composites");
     if (in.rtMode != 0) {
         if (wmoRenderer) wmoRenderer->syncRtScene();
         if (m2Renderer) m2Renderer->syncRtScene();
     }
+    extraction.lap("RT source sync");
     if (rtScene_) {
         RtRegion region;
         region.enabled = in.rtMode != 0;
@@ -1570,6 +1626,7 @@ FrameInputs Renderer::extractFrameInputs() {
         region.sunlight = region.sunDirection.z > -0.05f;
         scene->rtChanges = rtScene_->extractChanges(region);
     }
+    extraction.lap("RT region changes");
     in.scene = std::move(scene);
 
     return in;
@@ -1994,6 +2051,13 @@ void Renderer::endFrame() {
     // The picture is finished and out of every pass that drew it: the one
     // point where the shafts and the lens can copy it down, before the
     // overlay pass opens.
+    if (bloom_) {
+        GpuPass pass(*vkCtx, currentCmd, "bloom filter");
+        const auto& images = vkCtx->getSwapchainImages();
+        bloom_->record(currentCmd, vkCtx->getCurrentFrame(),
+            worldDrawnThisFrame_ && currentImageIndex < images.size() ? images[currentImageIndex] : VK_NULL_HANDLE,
+            vkCtx->getSwapchainExtent(), frameInputs_.postProcess.bloom);
+    }
     recordSunShafts();
     recordLensWeather();
 
@@ -2018,6 +2082,11 @@ void Renderer::endFrame() {
         sc.extent = ext;
         vkCmdSetScissor(currentCmd, 0, 1, &sc);
 
+        // Bloom is derived from the world alone, never from the interface.
+        if (bloom_) {
+            GpuScope glow(*vkCtx, currentCmd, "bloom composite");
+            bloom_->composite(currentCmd, vkCtx->getCurrentFrame());
+        }
         // Under the interface, over everything else.
         if (sunShafts_) sunShafts_->composite(currentCmd, vkCtx->getCurrentFrame());
         // What the weather left on the lens, over the shafts as over the rest.
@@ -2301,6 +2370,12 @@ void Renderer::update(float deltaTime) {
     auto updateStart = std::chrono::steady_clock::now();
     globalTime += deltaTime;
     runDeferredWorldInitStep(deltaTime);
+    if(distantTerrain_ && cachedAssetManager && terrainManager && terrainManager->isStreamingEnabled()) {
+        const bool before=distantTerrain_->hasSource();
+        distantTerrain_->setMap(cachedAssetManager,terrainManager->getMapName());
+        distantTerrain_->update();
+        if(before!=distantTerrain_->hasSource())setViewDistance(viewDistance_);
+    }
 
     updateGlares(deltaTime);
 
@@ -3292,7 +3367,10 @@ void Renderer::renderWorld() {
                 auto t0 = std::chrono::steady_clock::now();
                 VkCommandBuffer cmd = beginSecondary(SEC_TERRAIN);
                 setSecondaryViewportScissor(cmd);
-                if (drawTerrain) terrainRenderer->recordView(cmd, perFrameSet, frameInputs_.scene->terrain);
+                if (drawTerrain) {
+                    if(distantTerrain_)distantTerrain_->record(cmd,perFrameSet,frameInputs_.scene->distantTerrain);
+                    terrainRenderer->recordView(cmd, perFrameSet, frameInputs_.scene->terrain);
+                }
                 if (drawGrass) grassRenderer_->record(cmd, frameIdx, perFrameSet, frameInputs_.scene->grass);
                 vkEndCommandBuffer(cmd);
                 return std::chrono::duration<double, std::milli>(
@@ -3573,6 +3651,7 @@ void Renderer::renderWorld() {
             auto terrainStart = std::chrono::steady_clock::now();
             {
                 GpuPass pass(*vkCtx, currentCmd, "terrain");
+                if(distantTerrain_)distantTerrain_->record(currentCmd,perFrameSet,frameInputs_.scene->distantTerrain);
                 terrainRenderer->recordView(currentCmd, perFrameSet, frameInputs_.scene->terrain);
             }
             lastTerrainRenderMs = std::chrono::duration<double, std::milli>(
@@ -4444,6 +4523,7 @@ void Renderer::setViewDistance(float distance) {
     viewDistance_ = glm::clamp(distance, kMinViewDistance, kMaxViewDistance);
 
     if (terrainManager) {
+        terrainManager->setLandmarkRadius(distantTerrain_ && distantTerrain_->hasSource() ? static_cast<int>(std::ceil(viewDistance_/core::coords::TILE_SIZE))+1 : 0);
         terrainManager->setLoadRadius(getTerrainLoadRadius());
         terrainManager->setUnloadRadius(getTerrainUnloadRadius());
     }
@@ -4453,8 +4533,13 @@ int Renderer::getTerrainLoadRadius() const {
     constexpr float kAdtTileSize = core::coords::TILE_SIZE;
     // One tile beyond the visible circle covers the camera's position inside
     // its tile. Derive the radius from the setting instead of capping it at
-    // six tiles, which would leave the far end of a 4000-yard view unloaded.
-    return std::max(2, static_cast<int>(std::ceil(viewDistance_ / kAdtTileSize)) + 1);
+    // six tiles, which would leave the far end of a long view unloaded.
+    const float detailedRange=distantTerrain_ && distantTerrain_->hasSource() ? std::min(viewDistance_,kDistantTerrainEnd) : viewDistance_;
+    return std::max(2, static_cast<int>(std::ceil(detailedRange / kAdtTileSize)) + 1);
+}
+
+int Renderer::getTerrainUnloadRadius() const {
+    return getTerrainLoadRadius()+(distantTerrain_ && distantTerrain_->hasSource() ? 1 : 3);
 }
 
 // ──────────────────────────────────────────────────────
@@ -4803,6 +4888,7 @@ void Renderer::renderReflectionPass() {
         // model and no weather, and where the reflection held it, it stood
         // in for the real one as a grey wash over the sea.
         if (terrainRenderer && frameInputs_.terrainEnabled) {
+            if(distantTerrain_)distantTerrain_->record(currentCmd,reflDescSet,frameInputs_.scene->distantTerrain);
             terrainRenderer->recordView(currentCmd, reflDescSet, frameInputs_.scene->terrain);
         }
         if (wmoRenderer) {

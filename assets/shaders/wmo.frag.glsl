@@ -22,13 +22,22 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 fogSkyMiddle;
     vec4 fogSkyBand1;
     vec4 fogSkyBand2;
-    mat4 contactSpaceMatrix;
+    mat4 contactSpaceMatrix;  // read by contact_shadows.glsli
     vec4 contactParams;
+    vec4 windDirLean;
+    vec4 windPhases;
+    vec4 windTravel;
+    vec4 skySmogColor;
+    vec4 aerialSun;
+    vec4 aerialLight;
+    vec4 terrainLodParams;
+    vec4 aerialParams;
 };
 
 #include "rt_lighting.glsli"
 #include "contact_shadows.glsli"
 #include "sky_atmosphere.glsli"
+#include "aerial_frame.glsli"
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
 
@@ -175,8 +184,8 @@ vec4 fogVolumeAt(vec3 worldPos) {
 // everything between the camera and that, sunlit shafts and torch glow
 // included.
 vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
-    float fogFactor = distanceFogVisibility(dist, fogParams.x, fogParams.y);
-    color = mix(fogColor.rgb, color, fogFactor);
+    float fogFactor = aerialVisibilityAt(worldPos, dist);
+    color = mix(aerialColorAt(worldPos - viewPos.xyz), color, fogFactor);
     if (volumetricParams.x > 0.5) {
         vec4 air = fogVolumeAt(worldPos);
         color = color * air.a + air.rgb;

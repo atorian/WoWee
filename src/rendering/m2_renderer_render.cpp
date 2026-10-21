@@ -807,7 +807,53 @@ void M2Renderer::extractBones(Frame& frame) {
     }
 }
 
+bool M2Renderer::prepareInstanceStorage(uint32_t slot,uint64_t entries) {
+    if(entries<=instanceCapacity_[slot]) return true;
+    if(instanceGrowthFailed_[slot]) return false;
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(vkCtx_->getPhysicalDevice(),&properties);
+    const uint64_t limit=properties.limits.maxStorageBufferRange/sizeof(M2InstanceGPU);
+    const auto fail=[&](const char* why) {
+        instanceGrowthFailed_[slot]=true;
+        LOG_ERROR("M2 instance storage: need ",entries," records in slot ",slot,
+            ", capacity ",instanceCapacity_[slot],", device limit ",limit,"; ",why,
+            " - M2 meshes omitted while this frame exceeds available storage");
+        return false;
+    };
+    if(entries>limit) return fail("storage-buffer range exceeded");
+    const uint32_t capacity=static_cast<uint32_t>(std::min(limit,
+        std::max(entries,uint64_t(instanceCapacity_[slot])*2)));
+    const VkDeviceSize bytes=VkDeviceSize(capacity)*sizeof(M2InstanceGPU);
+    VkBufferCreateInfo bci{.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size=bytes; bci.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    VmaAllocationCreateInfo aci{};
+    aci.usage=VMA_MEMORY_USAGE_CPU_TO_GPU;
+    aci.flags=VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    AllocatedBuffer next;
+    if(gpuCreateBuffer(vkCtx_->getAllocator(),&bci,&aci,&next.buffer,&next.allocation,&next.info)!=VK_SUCCESS)
+        return fail("mapped GPU allocation failed");
+    if(!next.info.pMappedData) {
+        gpuDestroyBuffer(vkCtx_->getAllocator(),next.buffer,next.allocation);
+        return fail("GPU allocation has no CPU mapping");
+    }
+    // prepareRender runs after this slot's fence, before any M2 command is
+    // recorded. The other slot's descriptor and buffer remain untouched.
+    VkDescriptorBufferInfo info{next.buffer,0,bytes};
+    VkWriteDescriptorSet write{.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet=instanceSet_[slot]; write.dstBinding=0; write.descriptorCount=1;
+    write.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; write.pBufferInfo=&info;
+    vkUpdateDescriptorSets(vkCtx_->getDevice(),1,&write,0,nullptr);
+    DeferredResources retire(*vkCtx_);
+    retire.buffer(instanceBuffer_[slot],instanceAlloc_[slot]);
+    instanceBuffer_[slot]=next.buffer; instanceAlloc_[slot]=next.allocation;
+    instanceMapped_[slot]=next.info.pMappedData; instanceCapacity_[slot]=capacity;
+    LOG_INFO("M2 instance storage: slot ",slot," grew to ",capacity," records (",bytes/1024,
+        " KiB), frame requires ",entries);
+    return true;
+}
+
 void M2Renderer::prepareRender(uint32_t frameIndex, const Camera&) {
+    if(!prepareInstanceStorage(frameIndex,recording_->instanceEntries)) return;
     if (megaBoneMapped_[frameIndex] && !recording_->bones.empty())
         std::memcpy(megaBoneMapped_[frameIndex], recording_->bones.data(), recording_->bones.size() * sizeof(glm::mat4));
 }
@@ -1284,6 +1330,37 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
         rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE *
         rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE);
 
+    // The existing batch probe also explains models rejected before drawing.
+    // Emit only when the reason changes; this is opt-in, never per-frame noise.
+    if (!m2BatchDiagModel().empty()) {
+        static std::unordered_map<uint32_t, uint32_t> reasons;
+        for (const auto& inst : scene_->instances) {
+            if (!inst.cachedModel || !m2BatchDiagNames(*inst.cachedModel)) continue;
+            const float distanceSq=glm::dot(inst.position-camPos,inst.position-camPos);
+            const float centreSq=glm::dot(inst.cachedCullCenter-camPos,inst.cachedCullCenter-camPos);
+            const float effective=m2InstanceMaxDistSq(maxRenderDistanceSq,inst.cachedEffectiveMaxDistSqFactor,
+                inst.isGameObject,M2_GAME_OBJECT_MIN_RENDER_DISTANCE,cappedViewDistance(),
+                inst.cachedIsGroundDetail,groundDetailMaxDistance_);
+            const bool inFrustum=frustum.intersectsSphere(inst.cachedCullCenter,inst.cachedPaddedRadius);
+            const uint32_t reason=(distanceSq>maxPossibleDistSq ? 1u:0u) |
+                (centreSq>maxPossibleDistSq ? 2u:0u) | (distanceSq>effective ? 4u:0u) |
+                (!inFrustum ? 8u:0u) | (!inst.lastCullVisible ? 16u:0u) | (inst.hidden ? 32u:0u) |
+                (!inst.cachedIsValid ? 64u:0u) | (inst.cachedIsInvisibleTrap ? 128u:0u) |
+                (inst.cachedModel->hasAnimation && !inst.cachedModel->disableAnimation && inst.boneMatrices.empty() ? 256u:0u);
+            auto [at,inserted]=reasons.emplace(inst.id,reason);
+            if (!inserted && at->second==reason) continue;
+            at->second=reason;
+            LOG_WARNING("M2 VISIBILITY '",inst.cachedModel->name,"' flags=",reason,
+                " eye=",camPos.x,",",camPos.y,",",camPos.z,
+                " pos=",inst.position.x,",",inst.position.y,",",inst.position.z,
+                " distance=",std::sqrt(distanceSq)," centreDistance=",std::sqrt(centreSq),
+                " broadRange=",std::sqrt(maxPossibleDistSq)," ownRange=",std::sqrt(effective),
+                " radius=",inst.cachedPaddedRadius," frustum=",inFrustum,
+                " animated=",inst.cachedModel->hasAnimation," disableAnim=",inst.cachedModel->disableAnimation,
+                " bones=",inst.boneMatrices.size()," boneOffset=",inst.megaBoneOffset);
+        }
+    }
+
     // The instances in columns this camera may see; every one the test below
     // would keep is among them. This walked the whole resident world - ninety
     // thousand instances in Dalaran - for the few thousand it drew.
@@ -1465,6 +1542,21 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
         }
     }
 
+    if (!m2BatchDiagModel().empty()) {
+        static std::unordered_map<uint32_t,bool> selected;
+        for(const auto& inst:scene_->instances) {
+            if(!inst.cachedModel || !m2BatchDiagNames(*inst.cachedModel)) continue;
+            bool present=false;
+            for(const auto& d:drawInstances_) if(d.model.get()==inst.cachedModel) {present=true;break;}
+            auto [at,inserted]=selected.emplace(inst.id,present);
+            if(inserted || at->second!=present) {
+                at->second=present;
+                LOG_WARNING("M2 SELECTION '",inst.cachedModel->name,"' selected=",present,
+                    " candidates=",candidates.size()," bones=",inst.boneMatrices.size()," boneOffset=",inst.megaBoneOffset);
+            }
+        }
+    }
+
     // The furthest doodad actually drawn, for the diagnostic that sets it
     // against the furthest terrain chunk. See Renderer::logViewDistanceDiag.
     furthestDrawnSq_ = 0.0f;
@@ -1564,6 +1656,10 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
     extractBones(*frame);
     extractCull(camera, *frame);
     cullView(camera, *frame);
+    // One base record and at most one override per batch (opaque UVs or
+    // transparent draws). This bounds every pass before any command is recorded.
+    for(const auto& draw:frame->drawInstances_)
+        if(draw.model) frame->instanceEntries+=uint64_t(1)+draw.model->batches.size();
     gatherM2Particles(*frame);
     gatherM2Ribbons(*frame);
     if (shadowMatrix != glm::mat4(0.0f)) {
@@ -1617,6 +1713,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     skyDiagDrawsOpaque_ = 0;
     skyDiagDrawsTransparent_ = 0;
     const uint32_t frameIndex = vkCtx_->getCurrentFrame();
+    if(recording_->instanceEntries>instanceCapacity_[frameIndex]) return;
 
     // State tracking
     VkPipeline currentPipeline = VK_NULL_HANDLE;
@@ -1739,7 +1836,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             uint32_t baseSSBOOffset = instanceDataCount_;
             size_t writtenInstances = 0;
             for (const auto& p : pending) {
-                if (instanceDataCount_ >= MAX_INSTANCE_DATA) break;
+                if (instanceDataCount_ >= instanceCapacity_[frameIndex]) break;
                 const DrawInstance& inst = drawInstances_[p.draw];
                 auto& e = instSSBO[instanceDataCount_];
                 e.model = inst.modelMatrix;
@@ -1773,7 +1870,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 static bool warnedInstanceCap = false;
                 if (!warnedInstanceCap) {
                     warnedInstanceCap = true;
-                    LOG_WARNING("M2Renderer: instance buffer full at ", MAX_INSTANCE_DATA,
+                    LOG_WARNING("M2Renderer: instance buffer full at ", instanceCapacity_[frameIndex],
                                 "; dropping ", pending.size() - writtenInstances,
                                 " instances of '", model.name, "' this frame");
                 }
@@ -1839,7 +1936,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     bool hasBatchTexAnim = (batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation)
                                            || skyMode_ || batch.batchOpacity != 1.0f;
                     uint32_t drawOffset = groupSSBOOffset;
-                    if (hasBatchTexAnim && instanceDataCount_ + groupSize <= MAX_INSTANCE_DATA) {
+                    if (hasBatchTexAnim && instanceDataCount_ + groupSize <= instanceCapacity_[frameIndex]) {
                         drawOffset = instanceDataCount_;
                         // Hoist per-batch lookups: the transform pointer is fixed for
                         // every instance in this group; only the sampled transform
@@ -1976,6 +2073,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
     // M2InstanceGPU entry and issues a single-instance indexed draw. The cull
     // sorted them back to front.
     const uint32_t frameIndex = vkCtx_->getCurrentFrame();
+    if(recording_->instanceEntries>instanceCapacity_[frameIndex]) return;
     auto* instSSBO = static_cast<M2InstanceGPU*>(instanceMapped_[frameIndex]);
 
     // The sets the opaque pass bound, again: this may be a different command
@@ -2127,7 +2225,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             }
 
             // Write single instance entry to SSBO
-            if (instanceDataCount_ >= MAX_INSTANCE_DATA) continue;
+            if (instanceDataCount_ >= instanceCapacity_[frameIndex]) continue;
             uint32_t drawOffset = instanceDataCount_;
             auto& e = instSSBO[instanceDataCount_];
             e.model = instance.modelMatrix;

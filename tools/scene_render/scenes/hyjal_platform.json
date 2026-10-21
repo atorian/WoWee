@@ -1,0 +1,33 @@
+{
+  "map": "Kalimdor",
+  "mapId": 1,
+  "zoneId": 1637,
+  "hour": 12,
+  "server": [
+    1141,
+    -4127,
+    140
+  ],
+  "terrain": true,
+  "terrainRadius": 5,
+  "distantTerrain": true,
+  "settleFrames": 6000,
+  "camera": {
+    "offset": [
+      0,
+      0,
+      5
+    ],
+    "yaw": 8.1,
+    "pitch": 8
+  },
+  "viewDistance": 10000,
+  "size": [
+    1280,
+    720
+  ],
+  "frames": 40,
+  "fogStrength": 0,
+  "volumetricFog": 2,
+  "volumetricDensity": 0.65
+}

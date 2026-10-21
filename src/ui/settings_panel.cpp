@@ -849,7 +849,7 @@ constexpr const char* kGraphicsApplyKeys[] = {
     "fsrsharpness", "framegen", "brightness", "uiopacity", "minimapsquare",
     "minimapnpcdots", "minimapclock", "minimapcoords", "minimaprotate", "latencymeter",
     "fogstrength", "sharpstars", "lightshafts", "mistdensity", "sunshafts",
-    "raytracedlighting", "rtdistance",
+    "raytracedlighting", "rtdistance", "bloom",
     // Moved off the game's own Effects panel, so this list is now what
     // applies them at startup; the cvar store used to do it.
     "groundclutterdistance", "particledensity", "weatherdetail",
@@ -1032,6 +1032,7 @@ constexpr FieldBinding kFieldBindings[] = {
     {.key = "waterrefraction",   .asBool  = &SettingsPanel::pendingWaterRefraction},
     {.key = "antialiasing",      .asInt   = &SettingsPanel::pendingAntiAliasing},
     {.key = "fxaa",              .asBool  = &SettingsPanel::pendingFXAA},
+    {.key = "bloom",             .asFloat = &SettingsPanel::pendingBloom},
     {.key = "normalmapping",     .asBool  = &SettingsPanel::pendingNormalMapping},
     {.key = "normalmapstrength", .asFloat = &SettingsPanel::pendingNormalMapStrength},
     {.key = "lensflare",         .asFloat = &SettingsPanel::pendingLensFlare},
@@ -1328,6 +1329,8 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
             }
             renderer->setMsaaSamples(allowed);
         }
+    } else if (key == "bloom") {
+        if (post) post->setBloomStrength(pendingBloom);
     } else if (key == "fxaa") {
         if (post) post->setFXAAEnabled(pendingFXAA);
     } else if (key == "normalmapping") {

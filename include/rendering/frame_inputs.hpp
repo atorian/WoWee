@@ -71,6 +71,7 @@ struct FrameInputs {
     bool shadows = true;
     bool worldInView = false;
     bool terrainEnabled = true;
+    bool distantTerrainReady = false;
     bool drawSkyModels = false;
     bool hideProceduralSky = false;
     bool sunShafts = true;
@@ -86,6 +87,7 @@ struct FrameInputs {
     float fogDensity = 1.0f;
     float fogTargetExtinction = 0.0f;
     float fogGround = 0.0f;
+    float fogStrength = 1.0f;
     std::optional<float> cameraWaterDepth;
     std::optional<float> waterHeight;
     std::optional<float> reflectionWaterHeight;

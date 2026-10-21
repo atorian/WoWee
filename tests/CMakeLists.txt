@@ -708,6 +708,8 @@ register_test_target(test_warden_reloc)
 if(Python3_Interpreter_FOUND)
     add_test(NAME sweep_guard
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/sweep_guard.py)
+    add_test(NAME perf_trace COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_perf_trace.py)
+    set_tests_properties(perf_trace PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 endif()
 
 # ── unicorn_stub_compiles ────────────────────────────────────────
@@ -3287,6 +3289,9 @@ foreach(_domain chat spell inventory quest social session account_data action_ba
 endforeach()
 
 # The loading screen keeps its former terrain/warmup readiness criteria.
+wowee_add_test(test_recorded_entities SOURCES test_recorded_entities.cpp)
+target_link_libraries(test_recorded_entities PRIVATE wowee_game_harness)
+
 wowee_add_test(test_world_load_progress SOURCES test_world_load_progress.cpp)
 wowee_add_test(test_job_group SOURCES test_job_group.cpp)
 
@@ -3359,6 +3364,10 @@ if(WOWEE_BUILD_RENDER_CLIENT_PROBE AND NOT ANDROID)
     target_link_libraries(render_client_probe PRIVATE wowee_client_objects)
     wowee_test_link_glm(render_client_probe)
     wowee_apply_client_flags(render_client_probe)
+    add_executable(scene_replay_probe scene_replay_probe.cpp)
+    target_link_libraries(scene_replay_probe PRIVATE wowee_client_objects)
+    wowee_test_link_glm(scene_replay_probe)
+    wowee_apply_client_flags(scene_replay_probe)
 endif()
 
 # The native loading fixture: the client's own objects with a main of its own
@@ -3434,3 +3443,7 @@ while(_wowee_test_libraries)
 endwhile()
 
 wowee_add_test(test_frame_worker SOURCES test_frame_worker.cpp)
+
+wowee_add_test(test_distant_terrain
+    SOURCES test_distant_terrain.cpp ${CMAKE_SOURCE_DIR}/src/pipeline/distant_terrain.cpp
+            ${TEST_COMMON_SOURCES})

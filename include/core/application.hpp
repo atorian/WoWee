@@ -74,6 +74,7 @@ class RendererTransportScene;
 class ScreenRecording;
 class ResourceMonitor;
 class BenchmarkRun;
+class SceneReplay;
 class AudioCallbackHandler;
 class EntitySpawnCallbackHandler;
 class AnimationCallbackHandler;
@@ -239,7 +240,7 @@ private:
     void render(const FramePlan& plan) override;
     void afterTransitions() override;
     [[nodiscard]] bool profilingStages() const override {
-        return frameProfileEnabled_ || benchmark_ != nullptr;
+        return frameProfileEnabled_ || benchmark_ != nullptr || sceneReplay_ != nullptr;
     }
     void frameFinished() override;
     void mapEntryBegun(const WorldLoader::Entry& entry) override;
@@ -328,6 +329,8 @@ private:
     /// WOWEE_BENCHMARK=<route>: the run, from the offline world entry to
     /// the report; null without it.
     std::unique_ptr<BenchmarkRun> benchmark_;
+    friend class SceneReplay;
+    std::shared_ptr<SceneReplay> sceneReplay_;
     bool benchmarkEntered_ = false;
     /// WOWEE_BENCHMARK_MSAA: the run's sample count, over the saved one.
     std::optional<int> benchmarkMsaa_;

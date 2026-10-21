@@ -43,7 +43,8 @@ struct GPUPerFrameData {
     glm::vec4 rtCameraPos;
     glm::vec4 rtParams;
     // Sky colours for water reflections, followed by view-distance metadata.
-    // Surface distance fog uses fogColor directly.
+    // Surface distance fog keeps the zone's start/end and shares the sky's
+    // aerial colour correction when aerialParams.w is enabled.
     glm::vec4 fogSkyTop{0.0f}; // rgb = zenith, w = reserved
     glm::vec4 fogSkyMiddle{0.0f}; // w = actual sky capture valid
     glm::vec4 fogSkyBand1{0.0f}; // w = common horizontal geometry limit
@@ -59,6 +60,10 @@ struct GPUPerFrameData {
     glm::vec4 windPhases{0.0f};  // x trunk, y branch, z leaf phase, w branch/leaf scale
     glm::vec4 windTravel{0.0f};  // x cloth phase, y grass fronts (yd), z grass swells (yd), w rustle phase
     glm::vec4 skySmogColor{0.0f}; // appended: horizon band for water sky reflections
+    glm::vec4 aerialSun{0.0f};   // toward visible sun; w daylight weight
+    glm::vec4 aerialLight{0.0f}; // neutral illuminated aerosol; w reserved
+    glm::vec4 terrainLodParams{0.0f}; // WDL overlap start/end, ready, reserved
+    glm::vec4 aerialParams{0.0f}; // xyz reserved, w aerial colour correction enabled
 };
 
 // Push constants for the model matrix (most common case)
