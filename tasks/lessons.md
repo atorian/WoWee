@@ -88,3 +88,7 @@
 - 2026-10-19 — A bad horizon tint needs a matched sky/fog comparison, not another guessed colour. Check all authored sky bands, including smog and fog, and any CPU sky-colour mixing before changing density or restoring background matching. Distinguish confirmed code differences from a visually verified fix.
 
 - 2026-10-19 — When the user pauses builds to inspect an existing effect, stop the implementation/build workflow and audit the actual CPU inputs, GPU passes and composition first. Distinguish a complete volumetric technique from its intentionally limited coverage; do not propose replacing or deleting it before checking its existing capabilities.
+
+- 2026-10-21 — A thunderstorm appeared as frequent full-screen white flashes. Keep strike geometry, illumination and delayed thunder on one world-space timeline; validate the leader, peak, fading trail and occlusion in a fixed scene. A fullscreen tint is not building illumination, and a short-lived line is not a visible afterglow.
+
+- 2026-10-21 — The user found procedural stars almost invisible. A narrow point-sprite core can fall between pixel centres and lose most of its light. Filter the core over the pixel footprint before tuning radiance; compare the same night sky with the active MSAA setting rather than judging the brightness constant alone.

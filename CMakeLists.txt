@@ -1046,6 +1046,7 @@ set(WOWEE_SOURCES
     src/rendering/precipitation.cpp
     src/rendering/lens_drops.cpp
     src/rendering/lens_weather.cpp
+    src/rendering/lightning_storm.cpp
     src/rendering/lightning.cpp
     src/rendering/lighting_manager.cpp
     src/rendering/sky_system.cpp

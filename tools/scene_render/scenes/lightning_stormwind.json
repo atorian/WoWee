@@ -1,0 +1,13 @@
+// A repeatable bolt behind the roofs: change age to 0.1 for the pulse,
+// 0.5 for the trail, 1.0 for the last glow, 1.6 for the quiet scene.
+{
+  "map": "Azeroth", "mapId": 0, "zoneId": 1519,
+  "hour": 20.0,
+  "server": [-8833.0, 628.0, 94.0],
+  "terrain": true,
+  "camera": { "offset": [-25, -25, 12], "lookAt": [35, 35, 45] },
+  "weather": "thunderstorm", "weatherIntensity": 1.0,
+  "lens": false,
+  "lightning": { "start": [70, 70, 160], "end": [70, 70, 0], "age": 0.5, "seed": 17 },
+  "size": [1280, 720], "frames": 60
+}

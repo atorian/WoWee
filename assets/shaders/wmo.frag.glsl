@@ -24,7 +24,16 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 fogSkyBand2;
     mat4 contactSpaceMatrix;
     vec4 contactParams;
+    vec4 windDirLean;
+    vec4 windPhases;
+    vec4 windTravel;
+    vec4 skySmogColor;
+    mat4 lightningMatrix;
+    vec4 lightningPosition;
+    vec4 lightningColor;
 };
+
+#include "lightning_light.glsli"
 
 #include "rt_lighting.glsli"
 #include "contact_shadows.glsli"
@@ -410,6 +419,7 @@ void main() {
                          VertColor.a);
     }
 
+    if (isLava == 0) result += lightningDiffuse(FragPos, norm, texColor.rgb);
     if (isLava == 0)
         result +=localLightContribution(FragPos, norm, texColor.rgb, vLocalLights);
 

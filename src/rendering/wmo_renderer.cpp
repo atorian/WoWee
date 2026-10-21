@@ -4267,6 +4267,15 @@ std::optional<InteriorLight> WMORenderer::interiorLightAt(float glX, float glY, 
 }
 
 float WMORenderer::raycastBoundingBoxes(const glm::vec3& origin, const glm::vec3& direction, float maxDistance) const {
+    return raycastScene(origin, direction, maxDistance, true);
+}
+
+float WMORenderer::raycastSurface(const glm::vec3& origin, const glm::vec3& direction, float maxDistance) const {
+    return raycastScene(origin, direction, maxDistance, false);
+}
+
+float WMORenderer::raycastScene(const glm::vec3& origin, const glm::vec3& direction,
+                               float maxDistance, bool cameraQuery) const {
     QueryTimer timer(&queryTimeMs, &queryCallCount);
     float closestHit = maxDistance;
     // The camera is a solid sphere and every solid surface stops it: floors and
@@ -4284,12 +4293,12 @@ float WMORenderer::raycastBoundingBoxes(const glm::vec3& origin, const glm::vec3
     // Ignore whatever the pivot is standing in, though: the ray starts inside
     // the player, so a surface within a hand's width would otherwise jam the
     // camera at the minimum.
-    constexpr float MIN_HIT_DISTANCE = 0.20f;
+    const float MIN_HIT_DISTANCE = cameraQuery ? 0.20f : 0.0f;
     // Only surfaces the ray is very nearly parallel to are dropped. This was
     // 0.25, which is a 75-degree cone: a wall approached at a shallow angle -
     // exactly when the camera is sliding along it and about to pass through -
     // failed the test and was not collided with at all.
-    constexpr float MIN_SURFACE_ALIGNMENT = 0.05f;
+    const float MIN_SURFACE_ALIGNMENT = cameraQuery ? 0.05f : 0.0f;
 
     glm::vec3 rayEnd = origin + direction * maxDistance;
     glm::vec3 queryMin = glm::min(origin, rayEnd) - glm::vec3(1.0f);
@@ -4298,7 +4307,7 @@ float WMORenderer::raycastBoundingBoxes(const glm::vec3& origin, const glm::vec3
 
     for (size_t idx : tl_candidateScratch) {
         const auto& instance = scene_->instances[idx];
-        if (outsideCollisionFocus(instance)) continue;
+        if (cameraQuery && outsideCollisionFocus(instance)) continue;
 
         glm::vec3 center = (instance.worldBoundsMin + instance.worldBoundsMax) * 0.5f;
         glm::vec3 halfExtent = instance.worldBoundsMax - center;
@@ -4340,7 +4349,7 @@ float WMORenderer::raycastBoundingBoxes(const glm::vec3& origin, const glm::vec3
                 continue;
             }
 
-            // Narrow-phase: triangle raycast using spatial grid (wall-only).
+            // Narrow-phase: all solid surfaces, including roofs and floors.
             const auto& verts = group.collisionVertices;
             const auto& indices = group.collisionIndices;
 

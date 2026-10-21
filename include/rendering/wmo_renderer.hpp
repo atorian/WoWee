@@ -450,6 +450,10 @@ public:
      */
     float raycastBoundingBoxes(const glm::vec3& origin, const glm::vec3& direction, float maxDistance) const;
 
+    /// Closest solid surface anywhere in the loaded world. Unlike camera
+    /// collision, this has no player focus or near-pivot exclusion.
+    float raycastSurface(const glm::vec3& origin, const glm::vec3& direction, float maxDistance) const;
+
     /**
      * Limit expensive collision/raycast queries to objects near a focus point.
      */
@@ -497,6 +501,8 @@ public:
     void setDeferNormalMaps(bool defer) { deferNormalMaps_ = defer; }
 
 private:
+    float raycastScene(const glm::vec3& origin, const glm::vec3& direction,
+                       float maxDistance, bool cameraQuery) const;
     const std::vector<LocalLight>* frameLights_ = nullptr;
     // WMO material UBO - matches WMOMaterial in wmo.frag.glsl
     struct WMOMaterialUBO {

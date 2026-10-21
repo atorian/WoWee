@@ -3264,6 +3264,17 @@ wowee_test_link_glm(test_m2_cull_grid)
 add_test(NAME m2_cull_grid COMMAND test_m2_cull_grid)
 register_test_target(test_m2_cull_grid)
 
+# Strike timing, geometry, fading and the sound travelling to the listener.
+wowee_add_test(test_lightning_storm
+    SOURCES test_lightning_storm.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/lightning_storm.cpp)
+
+wowee_add_test(test_rain_audio
+    SOURCES test_rain_audio.cpp
+            ${CMAKE_SOURCE_DIR}/src/audio/ambient_sound_manager.cpp
+            ${CMAKE_SOURCE_DIR}/src/audio/audio_engine.cpp)
+target_link_libraries(test_rain_audio PRIVATE wowee_pipeline wowee_base ${CMAKE_DL_LIBS} Threads::Threads)
+
 # ── The libraries' sources from their libraries, never a copy ─
 # Keep this last, after every test is declared. A test that names a source one
 # of these libraries builds has that source taken out of its own list and links

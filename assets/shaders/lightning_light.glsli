@@ -1,0 +1,27 @@
+// Independent light and depth map for this strike. No screen tint: roofs and
+// walls occlude it, and each material keeps its albedo and facing direction.
+layout(set = 0, binding = 10) uniform sampler2D uLightningShadow;
+vec3 lightningAt(vec3 p) {
+    if (lightningColor.b <= 0.0) return vec3(0.0);
+    vec4 clip = lightningMatrix * vec4(p, 1.0);
+    if (clip.w <= 0.0) return vec3(0.0);
+    vec3 q = clip.xyz / clip.w;
+    vec2 uv = q.xy * 0.5 + 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))) || q.z < 0.0 || q.z > 1.0)
+        return vec3(0.0);
+    float visible = 0.0;
+    for (int y = -1; y <= 1; ++y) for (int x = -1; x <= 1; ++x) {
+        float depth = textureLod(uLightningShadow, uv + vec2(x, y) * lightningColor.w, 0.0).r;
+        visible += q.z - 0.000015 <= depth ? 1.0 : 0.0;
+    }
+    float distance = length(lightningPosition.xyz - p);
+    float falloff = 1.0 / (1.0 + distance * distance / (140.0 * 140.0));
+    float edge = 1.0 - smoothstep(0.85, 1.0, max(abs(q.x), abs(q.y)));
+    float range = 1.0 - smoothstep(lightningPosition.w * 0.7, lightningPosition.w, distance);
+    return lightningColor.rgb * (visible / 9.0 * falloff * edge * range);
+}
+vec3 lightningDiffuse(vec3 p, vec3 normal, vec3 albedo) {
+    if (lightningColor.b <= 0.0) return vec3(0.0);
+    vec3 toward = normalize(lightningPosition.xyz - p);
+    return albedo * lightningAt(p + normal * 0.12) * max(dot(normal, toward), 0.0);
+}

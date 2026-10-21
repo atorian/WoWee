@@ -15,6 +15,9 @@
 //     "weather": "clear",                 // clear | fog | rain | snow | sandstorm |
 //                                         //   thunderstorm | blackrain | blacksnow
 //     "weatherIntensity": 0.0,            //   0-1; there from the first frame
+//     "lightning": { "start": [70, 70, 160], // a fixed strike after streaming,
+//                    "end": [70, 70, 0],    // offsets from origin, render axes;
+//                    "age": 0.5, "seed": 17 }, // seconds after its leader starts
 //     "lens": true,                       // what the weather leaves on the camera's
 //                                         //   lens - it gathers over the frames
 //     "splashes": true,                   // rain splashing where it lands
@@ -59,6 +62,7 @@
 //     "size": [1280, 720],
 //     "frames": 30,                       // drawn before the one that is kept
 //     "shadowQuality": 2,                 // 0-4, as the settings slider
+//     "rayTracedLighting": 0,             // RT lighting mode 0-3
 //     "msaa": 1,                          // samples: 1, 2, 4 or 8
 //     "fxaa": false,                      // FXAA, drawn through its own target
 //     "viewDistance": 1900.0,             // world geometry range, in yards
@@ -78,6 +82,9 @@
 
 #include "core/coordinates.hpp"
 #include "rendering/minimap.hpp"
+#include "rendering/lightning.hpp"
+#include "rendering/frame_sink.hpp"
+#include "stb_image_write.h"
 #include "core/logger.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
@@ -371,6 +378,46 @@ void reportVideoMemory(const rendering::Renderer& renderer) {
     }
 }
 
+// Keep the final submitted frame through the renderer's in-frame readback.
+// Reading a swapchain image after present is no longer owned by the caller.
+class SceneImage final : public rendering::FrameSink {
+public:
+    SceneImage(rendering::Renderer& renderer, uint32_t width, uint32_t height)
+        : renderer_(renderer), width_(width), height_(height) {}
+    ~SceneImage() override { if (started_) renderer_.endFrameCapture(); }
+    bool start() { return started_ = renderer_.beginFrameCapture(this, width_, height_); }
+    bool frameDue(int64_t* pts) const override { *pts = next_; return true; }
+    void frameTaken(int64_t pts) override { next_ = pts + 1; }
+    void frameDropped() override { LOG_WARNING("scene_render: frame readback dropped; keeping previous frame"); }
+    double elapsedSeconds() const override { return 0; }
+    void submit(Frame frame) override {
+        if (frame.pts >= last_) {
+            pixels_.resize(static_cast<size_t>(width_) * height_ * 4);
+            for (uint32_t y = 0; y < height_; ++y) for (uint32_t x = 0; x < width_; ++x) {
+                const auto* in = frame.bgra + y * frame.stride + x * 4;
+                auto* out = pixels_.data() + (static_cast<size_t>(y) * width_ + x) * 4;
+                out[0] = in[2]; out[1] = in[1]; out[2] = in[0]; out[3] = 255;
+            }
+            last_ = frame.pts;
+        }
+        frame.release();
+    }
+    bool write(const std::string& path) {
+        renderer_.flushFrameCapture();
+        if (pixels_.empty()) return false;
+        std::error_code ec;
+        if (const auto parent = std::filesystem::path(path).parent_path(); !parent.empty())
+            std::filesystem::create_directories(parent, ec);
+        return stbi_write_png(path.c_str(), width_, height_, 4, pixels_.data(), width_ * 4) != 0;
+    }
+private:
+    rendering::Renderer& renderer_;
+    uint32_t width_, height_;
+    bool started_ = false;
+    int64_t next_ = 0, last_ = -1;
+    std::vector<uint8_t> pixels_;
+};
+
 int render(const json& scene, const std::string& outPath, pipeline::AssetManager& assets,
            rendering::Renderer& renderer) {
     const std::string map = scene.value("map", "Northrend");
@@ -512,6 +559,14 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         }
     }
 
+    renderer.setRtLightingMode(scene.value("rayTracedLighting", 0));
+    const auto imageSize = scene.value("size", json::array({1280, 720}));
+    SceneImage image(renderer, imageSize[0].get<uint32_t>(), imageSize[1].get<uint32_t>());
+    if (!image.start()) {
+        LOG_ERROR("scene_render: could not initialize frame readback");
+        return 1;
+    }
+
     // Fixed steps, so the same scene draws the same frame. Terrain streams in
     // on its own threads: with it on, the frames wait for it as well.
     const int frames = std::max(1, scene.value("frames", 30));
@@ -557,6 +612,14 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
             drawFrame();
         }
     }
+    // A repeatable strike after streaming has settled, for lighting and trail captures.
+    if (scene.contains("lightning")) {
+        const auto& strike = scene["lightning"];
+        renderer.getLightning()->reseed(strike.value("seed", 17u));
+        renderer.getLightning()->triggerStrike(origin + vec3(strike.at("start")), origin + vec3(strike.at("end")));
+        const int strikeFrames = std::max(1, static_cast<int>(std::round(strike.value("age", 0.5f) / kStep)));
+        for (int i = 0; i < strikeFrames; ++i) drawFrame();
+    }
     if (renderer.weatherMix().any()) {
         const auto& mix = renderer.weatherMix();
         LOG_WARNING("scene_render: weather rain ", mix.rain, " snow ", mix.snow, " sand ", mix.sand,
@@ -567,7 +630,7 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     }
     std::printf("scene_render: world M2 draw calls: %u in the kept frame\n",
                 renderer.getM2Renderer()->getDrawCallCount());
-    if (!renderer.captureScreenshot(outPath)) {
+    if (!image.write(outPath)) {
         std::fprintf(stderr, "scene_render: could not write %s\n", outPath.c_str());
         return 1;
     }

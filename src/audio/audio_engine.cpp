@@ -65,6 +65,8 @@ private:
 
 using AudioBufferStorage = MaStorage<ma_audio_buffer, ma_audio_buffer_uninit>;
 using SoundStorage = MaStorage<ma_sound, ma_sound_uninit>;
+void uninitLowPass(ma_lpf_node* node) { ma_lpf_node_uninit(node, nullptr); }
+using LowPassStorage = MaStorage<ma_lpf_node, uninitLowPass>;
 
 struct DecodedWavCacheEntry {
     ma_format format = ma_format_unknown;
@@ -261,11 +263,7 @@ void AudioEngine::shutdown() {
 
     // Clean up all active sounds
     for (auto& activeSound : activeSounds_) {
-        ma_sound_uninit(activeSound.sound);
-        std::free(activeSound.sound);
-        ma_audio_buffer* buffer = static_cast<ma_audio_buffer*>(activeSound.buffer);
-        ma_audio_buffer_uninit(buffer);
-        std::free(buffer);
+        releaseSound(activeSound);
     }
     activeSounds_.clear();
 
@@ -389,8 +387,18 @@ bool AudioEngine::playSound2D(const std::vector<uint8_t>& wavData, float volume,
 }
 
 uint32_t AudioEngine::playSound2DStoppable(const std::vector<uint8_t>& wavData, float volume) {
-    if (!initialized_ || !engine_ || wavData.empty()) return 0;
     if (masterVolume_ <= 0.0f) return 0;
+    return playTrackedSound(wavData, volume, false, 0.0f);
+}
+
+uint32_t AudioEngine::playSound2DLoop(const std::vector<uint8_t>& wavData, float volume, float cutoffHz) {
+    // Keep loops alive while muted so unmuting resumes the current ambience.
+    return playTrackedSound(wavData, volume, true, cutoffHz);
+}
+
+uint32_t AudioEngine::playTrackedSound(const std::vector<uint8_t>& wavData, float volume,
+                                      bool loop, float cutoffHz) {
+    if (!initialized_ || !engine_ || wavData.empty()) return 0;
 
     DecodedWavCacheEntry decoded;
     if (!decodeWavCached(wavData, decoded) || !decoded.pcmData || decoded.frames == 0) return 0;
@@ -400,32 +408,97 @@ uint32_t AudioEngine::playSound2DStoppable(const std::vector<uint8_t>& wavData, 
     bufferConfig.sampleRate = decoded.sampleRate;
 
     AudioBufferStorage audioBuffer;
-    if (!audioBuffer) return 0;
-    if (ma_audio_buffer_init(&bufferConfig, audioBuffer.get()) != MA_SUCCESS) {
+    if (!audioBuffer) {
+        LOG_ERROR("AudioEngine: could not allocate tracked sound buffer; sound unavailable");
+        return 0;
+    }
+    const ma_result bufferResult = ma_audio_buffer_init(&bufferConfig, audioBuffer.get());
+    if (bufferResult != MA_SUCCESS) {
+        LOG_WARNING("AudioEngine: tracked buffer init failed: ", bufferResult, "; sound unavailable");
         return 0;
     }
     audioBuffer.markInitialised();
 
+    // Construct the filter before the sound so failure unwinds in graph order.
+    LowPassStorage lowPass;
+    if (cutoffHz > 0.0f) {
+        if (!lowPass) {
+            LOG_ERROR("AudioEngine: could not allocate low-pass filter; sound unavailable");
+            return 0;
+        }
+        const auto config = ma_lpf_node_config_init(ma_engine_get_channels(engine_),
+            ma_engine_get_sample_rate(engine_), cutoffHz, 2);
+        ma_result result = ma_lpf_node_init(ma_engine_get_node_graph(engine_), &config, nullptr, lowPass.get());
+        if (result != MA_SUCCESS) {
+            LOG_WARNING("AudioEngine: low-pass init failed: ", result, "; sound unavailable");
+            return 0;
+        }
+        lowPass.markInitialised();
+        result = ma_node_attach_output_bus(lowPass.get(), 0, ma_engine_get_endpoint(engine_), 0);
+        if (result != MA_SUCCESS) {
+            LOG_WARNING("AudioEngine: low-pass output attachment failed: ", result, "; sound unavailable");
+            return 0;
+        }
+    }
     SoundStorage sound;
-    if (!sound) return 0;
+    if (!sound) {
+        LOG_ERROR("AudioEngine: could not allocate tracked sound; sound unavailable");
+        return 0;
+    }
     ma_result result = ma_sound_init_from_data_source(
         engine_, audioBuffer.get(),
         MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_ASYNC | MA_SOUND_FLAG_NO_PITCH | MA_SOUND_FLAG_NO_SPATIALIZATION,
         nullptr, sound.get());
     if (result != MA_SUCCESS) {
+        LOG_WARNING("AudioEngine: tracked sound init failed: ", result, "; sound unavailable");
         return 0;
     }
     sound.markInitialised();
+    if (cutoffHz > 0.0f) {
+        result = ma_node_attach_output_bus(sound.get(), 0, lowPass.get(), 0);
+        if (result != MA_SUCCESS) {
+            LOG_WARNING("AudioEngine: low-pass input attachment failed: ", result, "; sound unavailable");
+            return 0;
+        }
+    }
+    ma_sound_set_looping(sound.get(), loop ? MA_TRUE : MA_FALSE);
 
-    ma_sound_set_volume(sound.get(), volume);
-    if (ma_sound_start(sound.get()) != MA_SUCCESS) {
+    ma_sound_set_volume(sound.get(), 1.0f);
+    ma_sound_set_fade_in_milliseconds(sound.get(), volume, volume, 0);
+    result = ma_sound_start(sound.get());
+    if (result != MA_SUCCESS) {
+        LOG_WARNING("AudioEngine: tracked sound start failed: ", result, "; sound unavailable");
         return 0;
     }
 
     uint32_t id = nextSoundId_++;
     if (nextSoundId_ == 0) nextSoundId_ = 1;  // Skip 0 (sentinel)
-    activeSounds_.push_back({sound.release(), audioBuffer.release(), decoded.pcmData, id});
+    activeSounds_.push_back({sound.release(), audioBuffer.release(), decoded.pcmData, id,
+                             cutoffHz > 0.0f ? lowPass.release() : nullptr});
     return id;
+}
+
+void AudioEngine::setSoundVolume(uint32_t id, float volume) {
+    if (id == 0) return;
+    for (auto& voice : activeSounds_) {
+        if (voice.id == id) {
+            // Interpolate on the audio thread as well as the frame envelope.
+            ma_sound_set_fade_in_milliseconds(voice.sound, -1.0f, glm::clamp(volume, 0.0f, 1.0f), 40);
+            return;
+        }
+    }
+}
+
+void AudioEngine::releaseSound(ActiveSound& voice) {
+    ma_sound_uninit(voice.sound);
+    std::free(voice.sound);
+    if (voice.lowPass) {
+        uninitLowPass(static_cast<ma_lpf_node*>(voice.lowPass));
+        std::free(voice.lowPass);
+    }
+    auto* buffer = static_cast<ma_audio_buffer*>(voice.buffer);
+    ma_audio_buffer_uninit(buffer);
+    std::free(buffer);
 }
 
 void AudioEngine::stopSound(uint32_t id) {
@@ -433,11 +506,7 @@ void AudioEngine::stopSound(uint32_t id) {
     for (auto it = activeSounds_.begin(); it != activeSounds_.end(); ++it) {
         if (it->id == id) {
             ma_sound_stop(it->sound);
-            ma_sound_uninit(it->sound);
-            std::free(it->sound);
-            ma_audio_buffer* buffer = static_cast<ma_audio_buffer*>(it->buffer);
-            ma_audio_buffer_uninit(buffer);
-            std::free(buffer);
+            releaseSound(*it);
             activeSounds_.erase(it);
             return;
         }
@@ -465,7 +534,7 @@ bool AudioEngine::playSound2D(const std::string& mpqPath, float volume, float pi
 }
 
 bool AudioEngine::playSound3D(const std::vector<uint8_t>& wavData, const glm::vec3& position,
-                              float volume, float pitch, float maxDistance) {
+                              float volume, float pitch, float maxDistance, float minDistance) {
     if (!initialized_ || !engine_ || wavData.empty()) return false;
     if (masterVolume_ <= 0.0f) return false;
 
@@ -522,7 +591,7 @@ bool AudioEngine::playSound3D(const std::vector<uint8_t>& wavData, const glm::ve
     ma_sound_set_attenuation_model(sound.get(), ma_attenuation_model_inverse);
     ma_sound_set_min_gain(sound.get(), 0.0f);
     ma_sound_set_max_gain(sound.get(), 1.0f);
-    ma_sound_set_min_distance(sound.get(), 1.0f);
+    ma_sound_set_min_distance(sound.get(), std::clamp(minDistance, 0.01f, std::max(maxDistance, 0.01f)));
     ma_sound_set_max_distance(sound.get(), maxDistance);
     ma_sound_set_rolloff(sound.get(), 1.0f);
 
@@ -538,7 +607,7 @@ bool AudioEngine::playSound3D(const std::vector<uint8_t>& wavData, const glm::ve
 }
 
 bool AudioEngine::playSound3D(const std::string& mpqPath, const glm::vec3& position,
-                              float volume, float pitch, float maxDistance) {
+                              float volume, float pitch, float maxDistance, float minDistance) {
     if (!assetManager_) {
         LOG_WARNING("AudioEngine::playSound3D(path): no AssetManager set");
         return false;
@@ -548,7 +617,7 @@ bool AudioEngine::playSound3D(const std::string& mpqPath, const glm::vec3& posit
         LOG_WARNING("AudioEngine::playSound3D: failed to load '", mpqPath, "'");
         return false;
     }
-    return playSound3D(data, position, volume, pitch, maxDistance);
+    return playSound3D(data, position, volume, pitch, maxDistance, minDistance);
 }
 
 bool AudioEngine::playMusic(std::shared_ptr<const std::vector<uint8_t>> musicData,
@@ -686,11 +755,7 @@ void AudioEngine::update(float deltaTime) {
     // ActiveSound's shared_ptr made that shift noticeably more expensive).
     for (size_t i = 0; i < activeSounds_.size(); ) {
         if (!ma_sound_is_playing(activeSounds_[i].sound)) {
-            ma_sound_uninit(activeSounds_[i].sound);
-            std::free(activeSounds_[i].sound);
-            ma_audio_buffer* buffer = static_cast<ma_audio_buffer*>(activeSounds_[i].buffer);
-            ma_audio_buffer_uninit(buffer);
-            std::free(buffer);
+            releaseSound(activeSounds_[i]);
             activeSounds_[i] = std::move(activeSounds_.back());
             activeSounds_.pop_back();
         } else {

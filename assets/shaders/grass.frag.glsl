@@ -29,7 +29,18 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 fogSkyMiddle;
     vec4 fogSkyBand1;
     vec4 fogSkyBand2;
+    mat4 contactSpaceMatrix;
+    vec4 contactParams;
+    vec4 windDirLean;
+    vec4 windPhases;
+    vec4 windTravel;
+    vec4 skySmogColor;
+    mat4 lightningMatrix;
+    vec4 lightningPosition;
+    vec4 lightningColor;
 };
+
+#include "lightning_light.glsli"
 
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
@@ -109,6 +120,7 @@ void main() {
     vec3 lit = albedo * (ambientColor.rgb + lightColor.rgb * wrapped) * ao;
     // Fogged as the ground under it is, or a field stands out of the haze
     // the terrain it grows from has gone into.
+    lit += lightningDiffuse(vWorldPos, n, albedo);
     lit = applyFog(lit, vWorldPos, length(viewPos.xyz - vWorldPos));
     outColor = vec4(lit, 1.0);
 }

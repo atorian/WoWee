@@ -26,7 +26,25 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 playerWake;
     ivec4 localLightMeta;
     vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
+    mat4 rtViewProj;
+    vec4 rtCameraPos;
+    vec4 rtParams;
+    vec4 fogSkyTop;
+    vec4 fogSkyMiddle;
+    vec4 fogSkyBand1;
+    vec4 fogSkyBand2;
+    mat4 contactSpaceMatrix;
+    vec4 contactParams;
+    vec4 windDirLean;
+    vec4 windPhases;
+    vec4 windTravel;
+    vec4 skySmogColor;
+    mat4 lightningMatrix;
+    vec4 lightningPosition;
+    vec4 lightningColor;
 };
+
+#include "lightning_light.glsli"
 
 #include "local_lights.glsli"
 
@@ -186,5 +204,8 @@ void main() {
         }
     }
 
+    // The renderer resets history during the pulse and on its first clear
+    // frame, so the light appears and ends with the bolt.
+    result.rgb += lightningAt(p) * (density * vol.lighting.x);
     imageStore(uCellsOut, cell, result);
 }

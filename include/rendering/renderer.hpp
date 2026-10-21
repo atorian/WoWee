@@ -508,6 +508,12 @@ private:
     VkFramebuffer contactShadowFramebuffer_[2]{};
     VkImageLayout contactShadowLayout_[2]{};
     VkSampler contactShadowSampler_ = VK_NULL_HANDLE;
+    static constexpr uint32_t LIGHTNING_MAP_SIZE = 1024;
+    AllocatedImage lightningShadowImages_[2]{};
+    VkFramebuffer lightningShadowFramebuffer_[2]{};
+    VkImageLayout lightningShadowLayout_[2]{};
+    uint32_t lightningMapId_ = ~0u;
+    bool lightningFogLastFrame_ = false;
     VkRenderPass shadowRenderPass = VK_NULL_HANDLE;
     VkFramebuffer shadowFramebuffer[2] = {};
     VkImageLayout shadowDepthLayout_[2] = {};
@@ -582,7 +588,8 @@ private:
     VkSampleCountFlagBits pendingMsaaSamples_ = VK_SAMPLE_COUNT_1_BIT;
     bool msaaChangePending_ = false;
     void renderShadowPass();
-    void renderShadowMap(bool contact);
+    enum class ShadowView { Sun, Contact, Lightning };
+    void renderShadowMap(ShadowView view);
     glm::mat4 computeLightSpaceMatrix();
 
     std::vector<pipeline::CustomZoneInfo> customZones_;
@@ -767,6 +774,7 @@ private:
     /// doodads' caster texture sets, which a later one in the frame then
     /// reuses: the sun's pass resets both, the sea bed's the buildings', the
     /// shelter map's whichever is still to be reset.
+    bool characterCasterSetsReset_ = false;
     bool wmoCasterSetsReset_ = false;
     bool m2CasterSetsReset_ = false;
     float volumetricFogExtinction() const;

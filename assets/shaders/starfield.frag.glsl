@@ -6,16 +6,15 @@ layout(location = 1) in vec3 vColor;
 layout(location = 0) out vec4 outColor;
 
 void main() {
-    // Radius across the sprite: 0 at the centre, 1 at the edge.
-    float r = length(gl_PointCoord - vec2(0.5)) * 2.0;
+    vec2 point = (gl_PointCoord - vec2(0.5)) * 2.0;
+    // Filter the narrow core over the pixel footprint. Sampling its centre
+    // alone loses most of the light when a star falls between pixel centres.
+    vec2 footprint = fwidth(point);
+    vec2 width = vec2(1.0 / 26.0) + footprint * footprint / 6.0;
+    float core = (1.0 / 26.0) / sqrt(width.x * width.y)
+               * exp(-dot(point * point, 1.0 / width));
+    float r = length(point);
     if (r > 1.0) discard;
-
-    // A point source is not a disc with a soft rim. The old profile held full
-    // brightness out to 40% of the sprite and faded across all the rest, which
-    // is a defocused blob at every size it is drawn. This is the shape a real
-    // point makes through a lens: a tight core carrying nearly all the flux,
-    // and a faint wide halo around it.
-    float core = exp(-r * r * 26.0);
     float halo = 0.035 * exp(-r * r * 3.0);
     float profile = core + halo;
 
@@ -25,5 +24,7 @@ void main() {
     // a tenth of its intended value and disappeared, leaving only the bright
     // ones - each of which was also drawn at the largest point size. Few, fat
     // and soft is the look that reads as bad focus.
-    outColor = vec4(vColor * vBrightness * profile, 1.0);
+    // Keep the compact core visible after MSAA and sky composition.
+    const float radianceScale = 12.0;
+    outColor = vec4(vColor * vBrightness * profile * radianceScale, 1.0);
 }

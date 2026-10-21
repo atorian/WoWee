@@ -364,7 +364,7 @@ void CharacterPreview::createFBO() {
         sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         sizes[0].descriptorCount = MAX_FRAMES;
         sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        sizes[1].descriptorCount = MAX_FRAMES * 8;
+        sizes[1].descriptorCount = MAX_FRAMES * 9;
         sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         sizes[2].descriptorCount = MAX_FRAMES;
 
@@ -442,7 +442,7 @@ void CharacterPreview::createFBO() {
         lightBuf.offset = 0;
         lightBuf.range = VK_WHOLE_SIZE;
 
-        VkWriteDescriptorSet writes[10]{};
+        VkWriteDescriptorSet writes[11]{};
         writes[9].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[9].dstSet = previewPerFrameSet_[i];
         writes[9].dstBinding = 9;
@@ -476,7 +476,9 @@ void CharacterPreview::createFBO() {
             writes[b].pImageInfo = &rtImg;
         }
 
-        vkUpdateDescriptorSets(device, 10, writes, 0, nullptr);
+        writes[10] = writes[1];
+        writes[10].dstBinding = 10;
+        vkUpdateDescriptorSets(device, 11, writes, 0, nullptr);
     }
 
     // 5. Register the color attachment as an ImGui texture
