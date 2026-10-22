@@ -148,6 +148,7 @@ inline void computeBoneMatrices(const M2ModelGPU& model, M2Instance& instance,
     size_t numBones = std::min(model.bones.size(), size_t(kMaxBonesPerInstance));
     if (numBones == 0) return;
     instance.boneMatrices.resize(numBones);
+    ++instance.boneRevision;
     const auto& gsd = model.globalSequenceDurations;
     // Model space to view space and back, for billboard bones; worked out at
     // the first one.

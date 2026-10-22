@@ -1,4 +1,5 @@
 #pragma once
+#include <optional>
 #include "rendering/quest_marker_renderer.hpp"
 #include "rendering/footprint_renderer.hpp"
 #include "rendering/sky_system.hpp"
@@ -25,6 +26,7 @@ namespace wowee::rendering {
 /// Owned world data extracted on the game side of a frame.
 struct FrameScene {
     uint64_t sequence = 0;
+    std::optional<SceneView> reflectionView;
     std::shared_ptr<SnapshotLease> resources;
     RtScene::Changes rtChanges;
     SkySystem::Frame sky;

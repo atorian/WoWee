@@ -216,8 +216,8 @@ void WindField::respond() {
     // than a breeze, but not without limit - and the swings grow more slowly
     // than the speed: amplitude is the square root of the push, near enough.
     const float s = std::max(state_.speed * state_.gust, 0.0f) / kReferenceSpeed;
-    state_.lean = 0.3f * s / (1.0f + s);
-    state_.swing = std::min(std::sqrt(s), 2.5f);
+    state_.lean = WindState::maxLean * s / (1.0f + s);
+    state_.swing = std::min(std::sqrt(s), WindState::maxSwing);
     state_.detail = std::min(std::pow(s, 0.75f), 3.5f);
 }
 

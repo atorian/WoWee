@@ -1,4 +1,7 @@
 #pragma once
+#include "rendering/scene_view.hpp"
+
+#include "rendering/rt_instance_changes.hpp"
 #include "rendering/frame_pool.hpp"
 
 #include "collision/wmo_shape.hpp"
@@ -99,10 +102,8 @@ public:
 
     /// Where loaded models register their geometry for the ray traced lighting.
     void setRtScene(RtScene* scene) { rtScene_ = scene; }
-    /// Bring the scene's instances in line with this renderer's: added,
-    /// moved, hidden and removed. Once a frame, and only while the lighting
-    /// is on; one pass over the instances is cheaper than hooking every one
-    /// of the half-dozen ways they change.
+    /// Flush added, moved and hidden placements after producer mutations.
+    /// Unchanged instances are not visited; removals retire immediately.
     void syncRtScene();
 
     /**
@@ -261,7 +262,7 @@ public:
     /** Pre-update mutable state (frame ID, material UBOs) on main thread before parallel render. */
     struct Frame;
     std::shared_ptr<const Frame> extract(const Camera& camera, const glm::vec3& viewer,
-                                        const std::vector<LocalLight>& lights, bool reflection = false);
+                                        const std::vector<LocalLight>& lights, const SceneView* reflection = nullptr);
     void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
     void prepareRender();
     /// The passes that draw the buildings in colour. Each culls into a draw
@@ -365,7 +366,6 @@ public:
     void setDistanceCulling(bool enabled, float maxDistance = 500.0f) {
         distanceCulling = enabled;
         maxGroupDistance = maxDistance;
-        maxGroupDistanceSq = maxDistance * maxDistance;
     }
     bool isDistanceCullingEnabled() const { return distanceCulling; }
     float getMaxGroupDistance() const { return maxGroupDistance; }
@@ -673,12 +673,6 @@ private:
     std::unordered_map<uint32_t, std::shared_ptr<WmoModelPrep>> preparedHere_;
 
     /**
-     * Check if group is visible in frustum
-     */
-    bool isGroupVisible(const GroupResources& group, const glm::mat4& modelMatrix,
-                       const Camera& camera) const;
-
-    /**
      * Find which group index contains a position (model space)
      * @return Group index or -1 if outside all groups
      */
@@ -761,14 +755,6 @@ private:
 
     RtScene* rtScene_ = nullptr;
     std::unordered_map<uint32_t, uint32_t> rtModelMeshes_;  // modelId -> RtScene mesh
-    struct RtInstanceRecord {
-        uint32_t rtId;
-        uint32_t modelId;
-        glm::mat4 matrix;
-        uint64_t seen;
-    };
-    std::unordered_map<uint32_t, RtInstanceRecord> rtInstances_;  // WMO instance id ->
-    uint64_t rtSyncGeneration_ = 0;
     /// Adds the mesh the preparation built to the ray-traced scene, its
     /// triangles coloured by the textures the model now has.
     void registerRtModel(uint32_t modelId, const ModelData& model, WmoModelPrep& prep);
@@ -840,17 +826,16 @@ private:
 
     // Rendering state
     bool wireframeMode = false;
-    bool frustumCulling = true;  // dead: every instance is included, the group cull does the work
+    bool frustumCulling = true;  // conservative world-group bounds, independently per view
     bool portalCulling = true;   // AABB transform bug fixed; conservative frustum test (no plane-side check) is visually safe
     bool distanceCulling = false;  // Disabled - causes ground to disappear
 
-    /// Optional portal/frustum and tighter group culling stay off by default:
+    /// Optional portal and tighter group culling stay off by default:
     /// they historically removed nearby building interiors. The common horizontal
     /// view-distance limit always applies, matching terrain even with this off.
     /// WOWEE_WMO_CULL=1 enables the additional culling for diagnostics.
     bool cullingEnabled_ = false;
     float maxGroupDistance = 500.0f;
-    float maxGroupDistanceSq = 250000.0f;  // maxGroupDistance^2
     float viewDistance_ = 1200.0f;
     uint32_t shadowDrawCalls_ = 0;
 
@@ -881,6 +866,8 @@ private:
     struct DrawList {
         std::vector<DrawEntry> entries;
         size_t used = 0;
+        glm::vec3 cameraPosition{0};
+        uint32_t frustumCulled = 0;
         uint32_t portalCulled = 0;
         uint32_t distanceCulled = 0;
         uint32_t drawCalls = 0;
@@ -889,7 +876,7 @@ private:
 
         void clear() {
             used = 0;
-            portalCulled = distanceCulled = drawCalls = 0;
+            frustumCulled = portalCulled = distanceCulled = drawCalls = 0;
         }
         DrawEntry& add() {
             if (used == entries.size()) entries.emplace_back();
@@ -906,7 +893,7 @@ private:
 
 
     /// The instances the camera sees and their groups that are drawn.
-    void cullView(const Camera& camera, const glm::vec3& portalViewerPos, DrawList& list) const;
+    void cullView(const SceneView& camera, const glm::vec3& portalViewerPos, DrawList& list) const;
     uint32_t recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const glm::vec3& camPos,
                     const DrawList& list) const;
     /// The instances, shown, and groups that reach a shadow map of this centre and reach.
@@ -916,6 +903,7 @@ private:
     struct InstanceState {
         std::unordered_map<uint32_t, ModelData> loadingModels_;
         std::vector<WMOInstance> instances;
+        RtInstanceChanges rtChanges;
         std::unordered_map<uint32_t, size_t> instanceIndexById;
     };
     InstanceState defaultInstances_;

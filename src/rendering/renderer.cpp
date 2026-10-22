@@ -1607,9 +1607,13 @@ FrameInputs Renderer::extractFrameInputs() {
         }
     }
     extraction.lap("water");
+    if (scene->water.inView && in.reflectionWaterHeight && in.msaaSamples == 1 &&
+            in.camera.getPosition().z >= *in.reflectionWaterHeight + 0.5f)
+        scene->reflectionView = SceneView::reflection(in.camera, *in.reflectionWaterHeight);
     if (wmoRenderer) {
         wmoRenderer->setViewDistance(in.viewDistance);
-        scene->buildings = wmoRenderer->extract(in.camera, in.characterPosition, in.localLights, scene->water.inView);
+        scene->buildings = wmoRenderer->extract(in.camera, in.characterPosition, in.localLights,
+            scene->reflectionView ? &*scene->reflectionView : nullptr);
     }
     extraction.lap("WMO");
     if (characterRenderer) scene->characters = characterRenderer->extract(in.camera, in.localLights);
@@ -4913,8 +4917,10 @@ void Renderer::renderReflectionPass() {
     if (camPos.z < waterHeight + 0.5f) return;
 
     // Compute reflected view and oblique projection
-    glm::mat4 reflView = mirroredView(frameCamera()->getPosition(), frameCamera()->getForward(), waterHeight);
-    glm::mat4 reflProj = obliqueReflectionProjection(frameCamera()->getProjectionMatrix(), reflView, waterHeight);
+    if (!frameInputs_.scene->reflectionView) return;
+    const auto& reflectionView = *frameInputs_.scene->reflectionView;
+    const glm::mat4& reflView = reflectionView.view;
+    const glm::mat4& reflProj = reflectionView.projection;
 
     // Update water renderer's reflection UBO with the reflected viewProj
     waterRenderer->updateReflectionUBO(reflProj * reflView);
@@ -4924,8 +4930,7 @@ void Renderer::renderReflectionPass() {
     reflData.view = reflView;
     reflData.projection = reflProj;
     // Reflected camera position (Z is up)
-    glm::vec3 reflPos = camPos;
-    reflPos.z = 2.0f * waterHeight - reflPos.z;
+    const glm::vec3 reflPos = reflectionView.position;
     reflData.viewPos = glm::vec4(reflPos, 1.0f);
     // The fog volume is the camera's; its sets here bind the neutral one.
     reflData.volumetricParams = glm::vec4(0.0f);

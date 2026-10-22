@@ -1428,6 +1428,27 @@ wowee_add_test(test_frustum
     SOURCES test_frustum.cpp
             ${CMAKE_SOURCE_DIR}/src/rendering/frustum.cpp)
 
+wowee_add_test(test_rt_instance_changes SOURCES test_rt_instance_changes.cpp)
+wowee_add_test(test_scene_spatial_index SOURCES test_scene_spatial_index.cpp)
+wowee_add_test(test_paged_frame_buffer SOURCES test_paged_frame_buffer.cpp)
+wowee_add_test(test_rt_scene_publication SOURCES test_rt_scene_publication.cpp)
+target_link_libraries(test_rt_scene_publication PRIVATE wowee_render)
+option(WOWEE_BUILD_RT_RENDERER_CHANGES_TEST "Build native renderer RT mutation regression" OFF)
+if(WOWEE_BUILD_RT_RENDERER_CHANGES_TEST AND NOT ANDROID)
+    add_executable(rt_renderer_changes_test rt_renderer_changes_main.cpp)
+    target_link_libraries(rt_renderer_changes_test PRIVATE wowee_render)
+    wowee_test_link_glm(rt_renderer_changes_test)
+    wowee_apply_client_flags(rt_renderer_changes_test)
+    add_test(NAME rt_renderer_changes COMMAND rt_renderer_changes_test
+             WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+    set_tests_properties(rt_renderer_changes PROPERTIES SKIP_RETURN_CODE 77)
+    register_test_target(rt_renderer_changes_test)
+endif()
+
+wowee_add_test(test_terrain_depth
+    SOURCES test_terrain_depth.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/frustum.cpp)
+
 # ── test_rt_bvh ──────────────────────────────────────────────
 # The hierarchy the software ray tracer walks, against a brute-force scan.
 wowee_add_test(test_rt_bvh

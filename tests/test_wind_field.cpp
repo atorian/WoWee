@@ -9,6 +9,7 @@
 
 #include "pipeline/wind_zones.hpp"
 #include "rendering/wind_field.hpp"
+#include "rendering/wmo_deformation_bounds.hpp"
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -447,4 +448,21 @@ TEST_CASE("Grass bends downwind, and further in a stronger wind", "[wind][shader
     CHECK(glm::dot(glm::normalize(breeze), downwind) > 0.98f);
     CHECK(glm::dot(glm::normalize(gale), downwind) > 0.98f);
     CHECK(glm::length(gale) > glm::length(breeze) * 1.5f);
+}
+
+TEST_CASE("WMO cloth render bounds contain the shader at every wind strength", "[wind]") {
+    for(float span : {1.f,10.f,40.f}) {
+        const float bound=wowee::rendering::wmoClothDisplacementBound(span);
+        for(float lean : {0.f,wowee::rendering::WindState::maxLean})
+        for(float swing : {0.f,wowee::rendering::WindState::maxSwing})
+        for(int step=0;step<80;++step) {
+            const float phase=float(step)*.37f;
+            wind_shader::ClothWind wind{{std::cos(phase),std::sin(phase)},lean,swing,phase};
+            for(glm::vec3 normal : {glm::vec3(1,0,0),glm::vec3(0,1,0),glm::vec3(0,0,1),
+                                   glm::normalize(glm::vec3(1,2,3))}) {
+                const glm::vec3 displacement=wind_shader::clothWindSway(wind,{1,2,-span},normal,{3,4},span*.05f);
+                CHECK(glm::length(displacement)<=bound+1e-5f);
+            }
+        }
+    }
 }

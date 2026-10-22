@@ -76,6 +76,7 @@ void M2Renderer::seedInstanceAnimation(const M2ModelGPU& model, uint32_t modelId
             const auto& existing = scene_->instances[idxIt->second];
             if (existing.modelId == modelId && !existing.boneMatrices.empty()) {
                 instance.boneMatrices = existing.boneMatrices;
+                ++instance.boneRevision;
             } else {
                 scene_->boneSeedInstanceByModel_.erase(seedIt);  // stale entry
             }
@@ -200,6 +201,7 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     // Track special instances for fast-path iteration
     fileInIndexSets(idx);
     scene_->instanceIndexById[placed.id] = idx;
+    scene_->rtChanges.add(placed.id, placed.modelId);
     fileInCullGrid(scene_->instances[idx]);
     placeInCollision(placed);
 
@@ -297,6 +299,7 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     const M2Instance& placed = scene_->instances[idx];
     fileInIndexSets(idx);
     scene_->instanceIndexById[placed.id] = idx;
+    scene_->rtChanges.add(placed.id, placed.modelId);
     fileInCullGrid(scene_->instances[idx]);
     placeInCollision(placed);
 
@@ -733,19 +736,20 @@ void M2Renderer::extractBones(Frame& frame) {
     if (!initialized_ || scene_->instances.empty()) return;
     reapFinishedInstances();
 
-    // --- Mega bone SSBO: assign ranges and upload all animated instance bones ---
-    // Offset 0 is reserved as the identity/no-bones sentinel; animated instances
-    // are packed after it at their own bone count, so a 300-bone creature gets
-    // all 300 matrices instead of being truncated into a fixed stride and
-    // reading into its neighbour's range.
-    uint32_t nextOffset = 1;
-    frame.bones.emplace_back(1.0f);
+    // Stable ranges, immutable page versions and per-slot uploads. The game
+    // may publish another pose while a queued frame still owns its old pages.
+    if (!scene_->boneIdentityWritten) {
+        const glm::mat4 identity(1.0f);
+        scene_->bonePages.write(0,std::span(&identity,1));
+        scene_->boneIdentityWritten=true;
+    }
     for (size_t idx : scene_->animatedInstanceIndices_) {
         if (idx >= scene_->instances.size()) continue;
         auto& instance = scene_->instances[idx];
 
         if (instance.boneMatrices.empty()) {
             instance.megaBoneOffset = 0;  // Use identity slot
+            instance.boneRange.reset();
             continue;
         }
 
@@ -796,17 +800,39 @@ void M2Renderer::extractBones(Frame& frame) {
         }
 
         const uint32_t boneCount = static_cast<uint32_t>(instance.boneMatrices.size());
-        if (boneCount > MEGA_BONE_MATRIX_CAPACITY - nextOffset) {
-            instance.megaBoneOffset = 0;  // Overflow - use identity
-            continue;
+        if (!instance.boneRange || instance.boneRange->count!=boneCount) {
+            instance.boneRange.reset();
+            const uint64_t revision=scene_->boneArena->revision.load(std::memory_order_relaxed);
+            if (instance.failedBoneArenaRevision==revision && instance.failedBoneCount==boneCount) continue;
+            const auto range=scene_->boneArena->ranges.allocate(boneCount);
+            if (!range) {
+                instance.megaBoneOffset=0;
+                instance.failedBoneArenaRevision=revision;
+                instance.failedBoneCount=boneCount;
+                if (!instance.boneAllocationReported) {
+                    LOG_ERROR("M2 bone storage: instance ",instance.id," model ",instance.modelId,
+                        " needs ",boneCount," matrices, used ",scene_->boneArena->ranges.used(),
+                        " of ",MEGA_BONE_MATRIX_CAPACITY-1,
+                        " - mesh omitted until a bone range becomes available");
+                    instance.boneAllocationReported=true;
+                }
+                continue;
+            }
+            instance.boneRange=std::make_shared<M2BoneRange>();
+            instance.boneRange->arena=scene_->boneArena;
+            instance.boneRange->offset=*range;
+            instance.boneRange->count=boneCount;
+            instance.megaBoneOffset=*range+1; // zero is the identity sentinel
+            instance.publishedBoneRevision=0;
+            instance.failedBoneArenaRevision=0;
+            instance.boneAllocationReported=false;
         }
-
-        instance.megaBoneOffset = nextOffset;
-
-        frame.bones.insert(frame.bones.end(), instance.boneMatrices.begin(), instance.boneMatrices.end());
-
-        nextOffset += boneCount;
+        if (instance.publishedBoneRevision!=instance.boneRevision) {
+            scene_->bonePages.write(instance.megaBoneOffset,instance.boneMatrices);
+            instance.publishedBoneRevision=instance.boneRevision;
+        }
     }
+    scene_->bonePages.publish(frame.bones);
 }
 
 bool M2Renderer::prepareInstanceStorage(uint32_t slot,uint64_t entries) {
@@ -856,8 +882,12 @@ bool M2Renderer::prepareInstanceStorage(uint32_t slot,uint64_t entries) {
 
 void M2Renderer::prepareRender(uint32_t frameIndex, const Camera&) {
     if(!prepareInstanceStorage(frameIndex,recording_->instanceEntries)) return;
-    if (megaBoneMapped_[frameIndex] && !recording_->bones.empty())
-        std::memcpy(megaBoneMapped_[frameIndex], recording_->bones.data(), recording_->bones.size() * sizeof(glm::mat4));
+    if (megaBoneMapped_[frameIndex])
+        PagedFrameBuffer<glm::mat4>::upload(recording_->bones,uploadedBones_[frameIndex],
+            [&](size_t offset,std::span<const glm::mat4> values) {
+                std::memcpy(static_cast<glm::mat4*>(megaBoneMapped_[frameIndex])+offset,
+                            values.data(),values.size_bytes());
+            });
 }
 
 
@@ -878,13 +908,10 @@ void M2Renderer::extractCull(const Camera& camera, Frame& frame) {
     smoothedRenderDist_ = glm::mix(smoothedRenderDist_, targetRenderDist, blendRate);
     const float maxRenderDistance = smoothedRenderDist_;
     const float maxRenderDistanceSq = maxRenderDistance * maxRenderDistance;
-    // The shader rejects on this bound before it ever reads the per-instance
-    // distance, so it has to clear the game-object floor as well - otherwise
-    // that floor is silently capped at 2x the ambient doodad distance.
-    const float maxPossibleDistSq = std::max(
-        maxRenderDistanceSq * 4.0f,  // 2x safety margin
-        rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE *
-        rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE);
+    // Every per-instance range is capped by View Distance. The broad phase
+    // must cover that ceiling: twice the adaptive clutter range can be much
+    // shorter than a large landmark's own range once a dense scene settles.
+    const float maxPossibleDistSq = cappedViewDistance() * cappedViewDistance();
 
     // --- Upload frustum planes + camera (UBO, binding 0) ---
     const glm::mat4 vp = camera.getProjectionMatrix() * camera.getViewMatrix();
@@ -1257,9 +1284,9 @@ void fillSway(M2PushConstants& pc, const M2ModelGPU& mdl, bool sky) {
 }  // namespace
 
 void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera&,
-                        const StarReplacement& drawStars) {
+                        const StarReplacement& drawStars, bool drawBakedStars) {
     if (!opaquePipeline_) return;
-    recordView(cmd, perFrameSet, drawStars);
+    recordView(cmd, perFrameSet, drawStars, drawBakedStars);
 }
 
 
@@ -1325,12 +1352,9 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
         const glm::mat4 vp = camera.getProjectionMatrix() * camera.getViewMatrix();
         frustum.extractFromMatrix(vp);
     }
-    // Matches the bound uploaded to the cull shader, including the headroom the
-    // game-object floor needs (see dispatchCullCompute).
-    const float maxPossibleDistSq = std::max(
-        maxRenderDistanceSq * 4.0f,
-        rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE *
-        rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE);
+    // Same conservative ceiling as extractCull, before each instance's own
+    // size/detail range is tested. Scene density must not shrink this bound.
+    const float maxPossibleDistSq = cappedViewDistance() * cappedViewDistance();
 
     // The existing batch probe also explains models rejected before drawing.
     // Emit only when the reason changes; this is opt-in, never per-frame noise.
@@ -1366,12 +1390,10 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
     // The instances in columns this camera may see; every one the test below
     // would keep is among them. This walked the whole resident world - ninety
     // thousand instances in Dalaran - for the few thousand it drew.
-    std::vector<uint32_t>& candidates = viewCandidates_;
+    const auto& candidates = forceNoCull_ ? viewCandidates_ : cullCandidates_;
     if (forceNoCull_) {
-        candidates.resize(scene_->instances.size());
-        for (uint32_t i = 0; i < candidates.size(); ++i) candidates[i] = i;
-    } else {
-        gatherViewCandidates(camPos, frustum, maxPossibleDistSq, candidates);
+        viewCandidates_.resize(scene_->instances.size());
+        for (uint32_t i = 0; i < viewCandidates_.size(); ++i) viewCandidates_[i] = i;
     }
     const uint32_t totalInstances = static_cast<uint32_t>(candidates.size());
     const bool haveLights = frameLights_ && !frameLights_->empty();
@@ -1736,7 +1758,7 @@ void M2Renderer::recordStarReplacement(VkCommandBuffer cmd, VkDescriptorSet perF
 }
 
 void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                            const StarReplacement& drawStars) {
+                            const StarReplacement& drawStars, bool drawBakedStars) {
     const auto& drawInstances_ = recording_->drawInstances_;
     const auto& sortedVisible_ = recording_->sortedVisible_;
 
@@ -2024,6 +2046,10 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         }
                     }
 
+                    // Keep SSBO addresses identical across the atmosphere,
+                    // reflection and main sky passes; filter only the draw.
+                    if (!drawBakedStars && batch.starLayer) continue;
+
                     // Pipeline selection (per-model/batch, not per-instance).
                     // What the batch is drawn as was decided when the model
                     // loaded - see m2BatchDrawState.
@@ -2067,7 +2093,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // With the water out of the scene pass, the blended half waits for it:
     // drawn now, the water would be laid over it.
     blendedPendingAfterWater_ = drawsBlendedAfterWater();
-    if (!blendedPendingAfterWater_) recordTransparentPass(cmd, perFrameSet, drawStars);
+    if (!blendedPendingAfterWater_) recordTransparentPass(cmd, perFrameSet, drawStars, drawBakedStars);
 
     // How many of the sky's layers were actually drawn this frame.
     //
@@ -2090,7 +2116,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 }
 
 void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                                       const StarReplacement& drawStars) {
+                                       const StarReplacement& drawStars, bool drawBakedStars) {
     const auto& drawInstances_ = recording_->drawInstances_;
     const auto& transparentVisible_ = recording_->transparentVisible_;
     const auto& glowSprites_ = recording_->glowSprites_;
@@ -2278,6 +2304,10 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             e.flags = instance.afloat ? 1 : 0;
             e.interiorLight = instance.interiorLight;
             instanceDataCount_++;
+
+            // Earlier captures still reference these SSBO addresses. Reserve
+            // the same entries even when this pass omits celestial imagery.
+            if (!drawBakedStars && batch.starLayer) continue;
 
             // Pipeline selection
             const uint8_t drawBlendMode = batch.drawState.drawBlendMode;

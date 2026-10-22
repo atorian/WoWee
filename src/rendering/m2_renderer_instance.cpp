@@ -1,6 +1,7 @@
 #include <cstdlib>
 #include "pipeline/heap_bytes.hpp"
 #include "rendering/m2_renderer.hpp"
+#include "rendering/rt_scene.hpp"
 #include "rendering/m2_renderer_internal.h"
 #include "rendering/m2_model_classifier.hpp"
 #include "rendering/texture_upload.hpp"
@@ -214,13 +215,17 @@ void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& posit
         inst.recomputeCachedCullFactors();
     }
     fileInCullGrid(inst);
+    scene_->rtChanges.changed(instanceId);
     if (collision_) collision_->moveM2(instanceId, inst.modelMatrix, inst.scale);
 }
 
 void M2Renderer::setInstanceFade(uint32_t instanceId, float alpha) {
     auto idxIt = scene_->instanceIndexById.find(instanceId);
     if (idxIt == scene_->instanceIndexById.end()) return;
-    scene_->instances[idxIt->second].fade = std::clamp(alpha, 0.0f, 1.0f);
+    auto& inst = scene_->instances[idxIt->second];
+    const float next = std::clamp(alpha, 0.0f, 1.0f);
+    if ((inst.fade >= 1.0f) != (next >= 1.0f)) scene_->rtChanges.changed(instanceId);
+    inst.fade = next;
 }
 
 void M2Renderer::setInstanceHidden(uint32_t instanceId, bool hidden) {
@@ -238,6 +243,7 @@ void M2Renderer::setInstancesHidden(const std::vector<uint32_t>& instanceIds, bo
         auto& inst = scene_->instances[idxIt->second];
         if (inst.hidden == hidden) continue;
         inst.hidden = hidden;
+        scene_->rtChanges.changed(id);
         if (collision_) collision_->setM2Hidden(id, hidden);
         if (hidden) {
             dropFromIndexSets(idxIt->second);
@@ -491,6 +497,7 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
         inst.recomputeCachedCullFactors();
     }
     fileInCullGrid(inst);
+    scene_->rtChanges.changed(instanceId);
     if (collision_) collision_->moveM2(instanceId, inst.modelMatrix, inst.scale);
 }
 
@@ -503,6 +510,7 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
 
     auto& inst = scene_->instances[idx];
 
+    scene_->rtChanges.remove(instanceId, rtScene_);
     if (collision_) collision_->removeM2(instanceId);
     scene_->cullGrid_.remove(instanceId);
 
@@ -651,6 +659,7 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
         if (!toRemove.insert(id).second) continue;
         auto& inst = scene_->instances[idxIt->second];
         holes.push_back(idxIt->second);
+        scene_->rtChanges.remove(id, rtScene_);
         if (collision_) collision_->removeM2(id);
 
         if (!inst.cachedIsGroundDetail) {
@@ -687,13 +696,14 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
 }
 
 void M2Renderer::clear() {
+    scene_->rtChanges.clear(rtScene_);
     scene_->identity = nextSceneIdentity_.fetch_add(1, std::memory_order_relaxed);
     ++instanceLayoutRevision_;
     if (vkCtx_) {
         // Their owners see them gone (hasPosedEmitters) and ask again.
         destroyPosedEmitterModels();
         for (auto& [id, modelResource] : models) {
-            destroyModelGPU(modelResource);
+            destroyModelGPU(id, modelResource);
         }
         for (auto& inst : scene_->instances) {
             destroyInstanceBones(inst);
@@ -724,6 +734,7 @@ void M2Renderer::clear() {
 }
 
 void M2Renderer::clearInstances() {
+    scene_->rtChanges.clear(rtScene_);
     ++instanceLayoutRevision_;
     for (auto& inst : scene_->instances) destroyInstanceBones(inst);
     *scene_ = InstanceState{};
@@ -777,7 +788,7 @@ void M2Renderer::cleanupUnusedModels() {
     for (uint32_t id : toRemove) {
         auto it = models.find(id);
         if (it != models.end()) {
-            destroyModelGPU(it->second);
+            destroyModelGPU(id, it->second);
             models.erase(it);
             // Record the eviction so owners caching "uploaded" model IDs can
             // drop it; otherwise their next spawn skips the load as a stale hit
@@ -800,7 +811,7 @@ std::vector<uint32_t> M2Renderer::drainReapedModelIds() {
 void M2Renderer::unloadModel(uint32_t modelId) {
     auto it = models.find(modelId);
     if (it == models.end()) return;
-    destroyModelGPU(it->second);
+    destroyModelGPU(modelId, it->second);
     models.erase(it);
     modelUnusedSince_.erase(modelId);
     pinnedModelIds_.erase(modelId);

@@ -36,6 +36,7 @@
 #include "rendering/rt_build_budget.hpp"
 #include "rendering/rt_bvh.hpp"
 #include "rendering/rt_region.hpp"
+#include "rendering/scene_spatial_index.hpp"
 #include "rendering/rt_range_allocator.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_utils.hpp"
@@ -83,6 +84,13 @@ public:
     using Changes = std::vector<Change>;
     /// Producer-side handoff. Subsequent edits belong to the next frame.
     Changes extractChanges(const RtRegion& region = {});
+    struct ExtractionStats {
+        uint32_t testedInstances = 0;
+        uint32_t publishedInstances = 0;
+        uint32_t spatialCells = 0;
+    };
+    /// Producer-side work counters, independent of GPU residency/build budgets.
+    [[nodiscard]] ExtractionStats extractionStats() const { return extractionStats_; }
     /// Consumer-side: apply a frame's ordered changes, even with RT disabled.
     void applyChanges(std::span<const Change> changes);
 
@@ -127,6 +135,7 @@ private:
         MeshId mesh = kInvalid;
         glm::mat4 objectToWorld{1.0f};
         RtAabb bounds;
+        uint64_t generation = 0;
     };
 
     void applyAddMesh(MeshId id, std::shared_ptr<const MeshSource> source);
@@ -146,7 +155,16 @@ private:
     std::vector<SourceMesh> sourceMeshes_;
     std::vector<std::shared_ptr<const MeshSource>> publishedMeshes_;
     std::vector<Instance> publishedInstances_;
-    std::vector<uint8_t> wantedInstances_, wantedMeshes_;
+    std::vector<uint8_t> wantedInstances_;
+    SceneSpatialIndex sourceIndex_;
+    std::vector<InstanceId> dirtyInstances_, publishedIds_;
+    std::vector<uint8_t> instanceDirty_;
+    std::vector<uint32_t> publishedSlots_, meshReferences_;
+    std::vector<MeshId> touchedMeshes_;
+    std::vector<uint8_t> meshTouched_;
+    uint64_t nextInstanceGeneration_ = 1;
+    ExtractionStats extractionStats_;
+    void sourceChanged(InstanceId id);
     RtRegion publishedRegion_;
     bool regionDirty_ = true;
     std::atomic<uint64_t> sourceBytes_{0};

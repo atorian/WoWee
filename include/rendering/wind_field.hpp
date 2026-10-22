@@ -76,6 +76,8 @@ struct WindInputs {
 
 /// The wind as everything that moves in it reads it.
 struct WindState {
+    static constexpr float maxLean = 0.3f;
+    static constexpr float maxSwing = 2.5f;
     glm::vec2 direction{1.0f, 0.0f};  ///< toward, render xy, unit
     float speed = 0.0f;               ///< yards per second, smoothed
     float gust = 1.0f;                ///< multiplies the speed while a gust passes
