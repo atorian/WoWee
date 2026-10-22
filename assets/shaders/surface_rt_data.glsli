@@ -10,10 +10,12 @@ struct SurfaceMaterial {
     uvec4 history; // x: previous rendered placement is valid (cloth invalidates)
 };
 struct SurfaceHistory {
-    uvec4 identity;
-    uvec4 geometry; // previous camera-relative position bits, packed geometric normal
+    // uvec2 alignment gives a 40-byte array stride, without uvec4 tail padding.
+    uvec2 placement;
+    uvec2 publication;
+    uvec2 positionXY;
+    uvec2 positionZNormalCount; // float Z, 12+12 normal bits + 8 history-count bits
     uvec2 light;
-    uvec2 history; // sample count, reserved
 };
 // 8 bytes per sample: visibility/AO unorm8, three signed half GI channels.
 uvec2 packSurfaceLight(vec2 light, vec3 gi) {

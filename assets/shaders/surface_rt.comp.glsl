@@ -29,51 +29,44 @@ uvec2 accumulate(Receiver r,uvec2 raw,uint block) {
             SurfaceHistory h=previousHistory[q.y*uint(pass.extent.x)+q.x];
             vec3 oldNormal=normalize(transpose(inverse(mat3(m.previousFromCurrent)))*r.normal);
             float expected=length(oldPosition.xyz);
-            vec3 oldPoint=uintBitsToFloat(h.geometry.xyz);
-            if(all(equal(h.identity,m.identity)) && h.history.x>0u &&
+            vec3 oldPoint=uintBitsToFloat(uvec3(h.positionXY,h.positionZNormalCount.x));
+            if(all(equal(h.placement,m.identity.xy)) && all(equal(h.publication,m.identity.zw)) && (h.positionZNormalCount.y>>24u)>0u &&
                abs(length(oldPoint)-expected)<0.02*expected+0.03 &&
                abs(dot(oldPoint-oldPosition.xyz,oldNormal))<0.01+0.0002*expected &&
-               dot(unpackSurfaceNormal(h.geometry.w),oldNormal)>0.95) {
+               dot(historyNormal(h.positionZNormalCount.y),oldNormal)>0.95) {
                 vec2 oldLight;vec3 oldGi;unpackSurfaceLight(h.light,oldLight,oldGi);
-                count=min(float(h.history.x)+1.0,24.0);
+                count=min(float(h.positionZNormalCount.y>>24u)+1.0,24.0);
                 light=mix(oldLight,light,1.0/count);gi=mix(oldGi,gi,1.0/count);
             }
         }
     }
     uvec2 result=packSurfaceLight(light,gi);
-    currentHistory[block]=SurfaceHistory(m.identity,uvec4(floatBitsToUint(r.position),packSurfaceNormal(r.normal)),result,uvec2(uint(count),0));
+    currentHistory[block]=SurfaceHistory(m.identity.xy,m.identity.zw,floatBitsToUint(r.position.xy),uvec2(floatBitsToUint(r.position.z),historyNormalCount(r.normal,uint(count))),result);
     return result;
 }
-void main() {
-#ifdef SURFACE_EXTRA
-    uint stride=gl_NumWorkGroups.x*64u;
-    for(uint item=gl_GlobalInvocationID.x;item<missingCount;item+=stride) {
-        uint index=missing[item], s=index%pc.samples, pixel=index/pc.samples;
-        ivec2 p=ivec2(pixel%uint(pass.sceneExtent.x),pixel/uint(pass.sceneExtent.x));
-        Receiver r=receiverAt(p,s);
-        uvec2 light=traceReceiver(r,p,s);
-        // Pixel-centre geometry can give several MSAA samples exactly the same
-        // receiver. Trace that receiver once, preserving other covered surfaces.
-        for(uint i=s;i<pc.samples;++i) {
-            Receiver other=receiverAt(p,i);
-            if(other.material==r.material && other.depth==r.depth && other.normalKey==r.normalKey) rawLight[sampleIndex(p,i)]=light;
-        }
-    }
-#else
-    for(uint block=gl_GlobalInvocationID.x;block<uint(pass.extent.x)*uint(pass.extent.y);block+=gl_NumWorkGroups.x*64u) {
-    ivec2 base=ivec2(block%uint(pass.extent.x),block/uint(pass.extent.x))*2;
+#ifndef SURFACE_EXTRA
+shared uint unresolved;
+shared uint occupied;
+bool traceBlock(ivec2 base) {
+    if(any(greaterThanEqual(base,ivec2(pass.sceneExtent.xy))))return false;
+    uint block=uint(base.y/2)*uint(pass.extent.x)+uint(base.x/2);
     Receiver best;best.material=0u;best.distance=1e30;
     ivec2 bestPixel=base;uint bestSample=0u;
+    bool covered=false;
     for(int i=0;i<4;++i) {
         ivec2 p=base+ivec2(i&1,i>>1);
         if(any(greaterThanEqual(p,ivec2(pass.sceneExtent.xy))))continue;
         for(uint s=0u;s<pc.samples;++s) {
             Receiver r=receiverAt(p,s);
+            covered=covered || r.material!=0u;
             if(usable(r) && r.distance<best.distance){best=r;bestPixel=p;bestSample=s;}
         }
     }
+    if(!covered)return false;
+    atomicOr(occupied,1u);
     uvec2 baseLight=packSurfaceLight(vec2(1),vec3(0));
     if(best.material!=0u)baseLight=accumulate(best,traceReceiver(best,bestPixel,bestSample),block);
+    bool missing=false;
     for(int i=0;i<4;++i) {
         ivec2 p=base+ivec2(i&1,i>>1);
         if(any(greaterThanEqual(p,ivec2(pass.sceneExtent.xy))))continue;
@@ -81,15 +74,64 @@ void main() {
             Receiver r=receiverAt(p,s);uint index=sampleIndex(p,s);
             if(!usable(r)){rawLight[index]=packSurfaceLight(vec2(1),vec3(0));continue;}
             if(sameReceiver(r,best)){rawLight[index]=baseLight;continue;}
-            bool duplicate=false;
-            for(uint prior=0u;prior<s;++prior){Receiver q=receiverAt(p,prior);duplicate=duplicate||(q.material==r.material && q.depth==r.depth && q.normalKey==r.normalKey);}
-            if(duplicate)continue;
-            // Capacity is the total sample count. Each sample can append at
-            // most once; no overflow fallback or stale/background substitution.
-            uint at=atomicAdd(missingCount,1u);missing[at]=index;
-            atomicMax(groupsX,min((at+64u)/64u,pc.maxDispatch));
+            rawLight[index]=pendingSurfaceLight;
+            missing=true;
         }
     }
+    if(missing)atomicOr(unresolved,1u);
+    return true;
+}
+#endif
+void main() {
+#ifdef SURFACE_EXTRA
+    for(uint item=gl_WorkGroupID.x;item<extraTileCount;item+=gl_NumWorkGroups.x) {
+        ivec2 origin=tileOrigin(tiles[item].y);
+        // One invocation owns all samples of a pixel: duplicate MSAA receivers
+        // can be completed together without cross-invocation reads or writes.
+        for(uint i=gl_LocalInvocationIndex;i<256u;i+=64u) {
+            ivec2 p=origin+ivec2(i%16u,i/16u);
+            if(any(greaterThanEqual(p,ivec2(pass.sceneExtent.xy))))continue;
+            for(uint s=0u;s<pc.samples;++s) {
+                if(!pendingLight(rawLight[sampleIndex(p,s)]))continue;
+                Receiver r=receiverAt(p,s);
+                uvec2 light=traceReceiver(r,p,s);
+                for(uint next=s;next<pc.samples;++next) {
+                    Receiver other=receiverAt(p,next);
+                    if(other.material==r.material && other.depth==r.depth && other.normalKey==r.normalKey)
+                        rawLight[sampleIndex(p,next)]=light;
+                }
+            }
+        }
+    }
+#else
+    if(gl_LocalInvocationIndex==0u){unresolved=0u;occupied=0u;}
+    barrier();
+    uint tile=gl_WorkGroupID.y*tileWidth()+gl_WorkGroupID.x;
+    ivec2 base=tileOrigin(tile)+ivec2(gl_LocalInvocationIndex%8u,gl_LocalInvocationIndex/8u)*2;
+    bool covered=traceBlock(base);
+    barrier();
+    // Extra tracing scans all pixels of an occupied tile. Initialize its empty
+    // blocks too, so it never tests a stale/uninitialized pending marker.
+    // Entirely empty tiles still need no raw/output writes.
+    if(occupied!=0u && !covered) {
+        for(int i=0;i<4;++i) {
+            ivec2 p=base+ivec2(i&1,i>>1);
+            if(any(greaterThanEqual(p,ivec2(pass.sceneExtent.xy))))continue;
+            for(uint sampleId=0u;sampleId<pc.samples;++sampleId)
+                rawLight[sampleIndex(p,sampleId)]=packSurfaceLight(vec2(1),vec3(0));
+        }
+    }
+    if(gl_LocalInvocationIndex==0u) {
+        if(occupied!=0u) {
+            uint index=atomicAdd(tileCount,1u);
+            tiles[index].x=tile;
+            atomicMax(filterGroups.x,min((index+1u)*pc.filtersPerTile,pc.maxDispatch));
+        }
+        if(unresolved!=0u) {
+            uint index=atomicAdd(extraTileCount,1u);
+            tiles[index].y=tile;
+            atomicMax(extraGroups.x,min(index+1u,pc.maxDispatch));
+        }
     }
 #endif
 }

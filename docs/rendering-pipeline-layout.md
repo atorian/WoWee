@@ -194,14 +194,24 @@ blended WMO and reflected views still consume legacy RT; that work remains until
 those consumers are converted. Wireframe remains explicitly unsupported here.
 
 Each opaque run produces current material/depth/geometric-normal receivers.
-One representative per 2x2 block traces the shared sun/AO/GI estimator. Compatible
-receivers share it; other covered samples enter a worst-case-sized GPU queue
-and an indirect dispatch traces them in the same submission. Identical MSAA
-receivers are coalesced only when material, depth and geometric normal agree.
+Coverage checking and the base trace share one dispatch over 16x16 tiles. An
+empty material key exits before loading depth or reconstructing normals/positions.
+One representative per covered 2x2 block traces the shared sun/AO/GI estimator.
+Compatible receivers share it; others are marked pending in the raw-light buffer.
+Each workgroup appends at most one occupied-tile entry and one extra-ray-tile
+entry. Indirect extra tracing visits only tiles with pending receivers; each
+invocation owns all samples of a pixel and completes identical material/depth/
+normal samples together. Indirect filtering visits only occupied tiles. Counts
+are bounded by the number of screen tiles; clamped dispatch counts use striding
+loops to consume every entry on devices with smaller workgroup-count limits.
 Normals face the visible side before tracing. Empty samples are neutral, and
 receivers outside RT distance are faded by the material consumer. A central
 geometry-aware filter resolves the estimates before lighting reads one result
-per sample. Its 8x8 groups cache a 16x16 input tile including the filter halo.
+per sample. On devices with sufficient shared memory and 256-thread groups,
+16x16 groups cache a 24x24 input tile including the halo. Smaller devices use
+8x8 groups with a 16x16 input tile; `WOWEE_SURFACE_RT_FILTER_8=1` tests that
+path explicitly. `WOWEE_SURFACE_RT_PROFILE=1` adds GPU timestamps around the
+first opaque run's base, extra and filter dispatches for diagnosis.
 
 The material upload is now 176 bytes: the original 80-byte material/light data,
 a current-to-previous camera-relative transform, a 128-bit lifetime identity,
@@ -213,26 +223,35 @@ only after a fresh trace; it does not search old pixels for missing receivers.
 Frame gaps, changed RT mode/distance, replaced placements/material publications,
 missing previous placement or cloth deformation invalidate correspondence.
 
-Temporal records are 48 bytes per half-resolution block per frame slot; only
+Temporal records are 40 bytes per half-resolution block per frame slot; only
 the base representative is accumulated. Additional queued receivers currently
-have spatial filtering only. When multiple opaque runs cover a block, its last
+have spatial filtering only. The record retains full 128-bit lifetime identity
+and float32 position, packs the history normal into two 12-bit octahedral
+coordinates, and stores the sample count in the remaining byte. The current
+trace/filter/lighting normals retain their existing precision. When multiple
+opaque runs cover a block, its last
 valid representative owns the saved history. Earlier layers may therefore start
 fresh next frame. Rigid transform correspondence is implemented; a dedicated
 moving-transport image test is still required before claiming motion parity.
 
-RT scratch uses 20 bytes per full-resolution sample (raw, filtered and queue),
-plus a 16-byte indirect command. Sun/AO use unorm8 and signed GI uses three
-half-floats. At 2560x1369, scratch plus two history slots adds 147.12 MiB at 1x
-or 347.66 MiB at 4x, beyond surface images and material uploads. These are
+RT scratch uses 16 bytes per full-resolution sample (raw and filtered), 8 bytes
+per 16x16 tile for both lists, and 48 bytes for counts/indirect commands. Sun/AO
+use unorm8 and signed GI uses three half-floats. At 2560x1369, scratch plus two
+history slots adds 120.48 MiB at 1x or 280.91 MiB at 4x, beyond surface images
+and material uploads. Entirely uncovered tiles are not initialized: the lighting
+consumer checks current material coverage before reading output, and filter
+halos never read raw estimates for uncovered samples. Empty blocks within an
+occupied tile are initialized before extra tracing scans that tile. These are
 logical storage sizes, not allocator or measured process-memory peaks. Device
 storage-range and descriptor limits are checked; peak resize-budget policy is
 still pending. Scratch stays shared on one graphics queue, uniforms/descriptors
 and histories are per slot, and replaced resources retire behind frame fences.
 
 Run ordering is preserved: compute happens after that run's geometry and before
-its lighting/next blended run. Rays skip uncovered samples, but classification
-and filter dispatches still scan the target for each opaque run. Sparse tile
-dispatch, persistent material tables and removal of legacy consumers remain
-optimization work. The measured total, including the retained legacy RT, is
-recorded in `tasks/performance/dalaran-wmo-current-rt.json`. This partial WMO
-implementation remains opt-in and does not complete the all-family pipeline.
+its lighting/next blended run. One base/coverage dispatch still visits screen
+tiles for each opaque run; there is no separate fullscreen classification pass.
+Persistent material tables, peak resize budgeting and conversion/removal of
+legacy consumers remain work. Saved measurements include both RT paths in
+`tasks/performance/dalaran-wmo-current-rt.json`; the sparse follow-up is recorded
+separately. This partial WMO implementation remains opt-in and does not complete
+the all-family pipeline.

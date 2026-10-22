@@ -613,6 +613,8 @@ function(compile_shaders TARGET_NAME)
         "surface_rt.comp.glsl|surface_rt_hw_ms.comp.spv|-DRT_HARDWARE --target-env=vulkan1.2 -DSURFACE_MSAA"
         "surface_rt.comp.glsl|surface_rt_extra_hw_ms.comp.spv|-DSURFACE_EXTRA -DRT_HARDWARE --target-env=vulkan1.2 -DSURFACE_MSAA"
         "surface_rt_filter.comp.glsl|surface_rt_filter_ms.comp.spv|-DSURFACE_MSAA"
+        "surface_rt_filter.comp.glsl|surface_rt_filter_wide.comp.spv|-DSURFACE_WIDE"
+        "surface_rt_filter.comp.glsl|surface_rt_filter_wide_ms.comp.spv|-DSURFACE_WIDE -DSURFACE_MSAA"
         "wmo_lighting.frag.glsl|wmo_lighting_ms.frag.spv|-DSURFACE_MSAA"
         "rt_prepare.comp.glsl|rt_prepare_ms.comp.spv|-DRT_MSAA"
         "rt_trace.comp.glsl|rt_trace_hw.comp.spv|-DRT_HARDWARE --target-env=vulkan1.2"

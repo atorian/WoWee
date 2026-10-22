@@ -423,3 +423,55 @@ Only base representatives have temporal history, and opaque-run boundaries still
 cause fullscreen classification/filter scans. Sparse work dispatch and conversion
 of remaining consumers are the next GPU targets. Full-client replay has not been
 repeated: the last completed result remains 46.73 FPS from d440fce.
+
+### Sparse WMO surface RT checkpoint (2026-10-22)
+
+Coverage and base tracing now share a 16x16 tile dispatch. The GPU emits bounded
+occupied/extra tile lists; additional rays and spatial filtering visit those
+lists through indirect dispatch. Empty material keys exit before depth/normal
+reconstruction. This adds no producer/model walk and keeps ordered opaque runs,
+worker recording, per-slot history and fence-based retirement intact.
+
+RT scratch drops from 20 to 16 bytes per full-resolution sample plus eight bytes
+per screen tile. Temporal records drop from 48 to 40 bytes: lifetime identity and
+float32 position stay intact, only the historical normal uses 12-bit octahedral
+coordinates. Capable GPUs filter 16x16 outputs from a shared 24x24 tile; devices
+with smaller limits retain the tested 8x8 implementation. At 2560x1369 with two
+history slots, logical added RT buffers fall from **147.12 to 120.48 MiB at 1x**
+and **347.66 to 280.91 MiB at 4x**. Surface images, material uploads, allocator
+rounding and peak resize residency are additional.
+
+Only the new version was measured against the saved 3bdf782 report, using the
+same Dalaran WMO scene/settings and 230 GPU samples. There were no competing
+wow/wowee/scene_render processes in 55 monitoring samples; this does not control
+browser/OS GPU work or clock variation. The specifically authorized original
+WoW PID was already absent when the stop/restore wrapper ran.
+
+| Metric | Saved current WMO RT | Sparse WMO RT |
+|---|---:|---:|
+| WMO incl. surface RT GPU mean / p95, ms | 6.55 / 7.05 | 6.70 / 7.08 |
+| Retained legacy RT GPU mean, ms | 2.68 | 2.70 |
+| Whole GPU mean / p95, ms | 10.72 / 11.34 | 10.87 / 11.24 |
+| CPU renderWorld mean / p95, ms | 0.47 / 0.64 | 0.72 / 1.11 |
+
+**No FPS increase is established.** GPU mean is 1.4% higher and CPU recording is
+also higher in this run; CPU causality is not established. This is a memory
+reduction checkpoint. A separate classification pass and explicit filter-loop
+unrolling did not improve the result and were removed. The fixture is FIFO
+limited; its approximately 60 FPS is not a full-client performance result.
+
+GPU probes pass on hardware/software tracing, filter16/filter8 and MSAA1/MSAA4,
+including cold sparse coverage, moving coverage through an empty run and odd
+partial edge tiles. Khronos synchronization validation passed the serial/parallel
+scene checks, interleaved opaque/blended runs, MSAA/FXAA target recreation and
+queued source mutation. The strict scan found no validation errors beyond the
+two known missing Epic overlay manifests. All available architectural sweeps
+passed; missing data/server/FrameXML fixtures were skipped. Layer captures match the saved images;
+full-resolution Dalaran differs in 210 of 10,513,920 RGB channels (maximum 12/255).
+[Report, hashes, diagnostics and raw paths](performance/dalaran-wmo-sparse-rt.json).
+
+The pipeline remains opt-in and incomplete: base tracing still visits screen
+tiles once per opaque run, extra receivers lack temporal history, and blended
+WMO, reflections and other geometry still require legacy RT. Converting those
+consumers is necessary before removing that duplicated lighting path. No new
+full-client replay was run; the last result remains 46.727 FPS at d440fce.

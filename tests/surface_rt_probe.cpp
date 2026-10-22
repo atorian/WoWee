@@ -23,7 +23,7 @@ RtScene::MeshSource blocker() {
 }
 }
 int checkSurfaceRt(VkContext& ctx) {
-    constexpr uint32_t size=64;
+    constexpr uint32_t size=67;
     int failures=0;
     auto expect=[&](const char* label,bool ok){std::printf("%s: %s\n",ok?"ok":"FAIL",label);if(!ok)++failures;};
     for(auto samples:{VK_SAMPLE_COUNT_1_BIT,VK_SAMPLE_COUNT_4_BIT}) {
@@ -76,7 +76,7 @@ int checkSurfaceRt(VkContext& ctx) {
         input.projection=glm::ortho(-8.f,8.f,-8.f,8.f,.5f,100.f);input.projection[1][1]*=-1;
         input.sunDir={-1,0,0};input.sunColor={1,1,1};input.skyColor={.2f,.2f,.2f};
         auto depth=[&](float x){auto p=input.projection*glm::mat4(glm::mat3(input.view))*glm::vec4(x,0,0,1);return p.z/p.w;};
-        struct Push {glm::vec4 depths;glm::uvec4 config;} push{{depth(10),depth(20),0,0},{uint32_t(samples),0,0,0}};
+        struct Push {glm::vec4 depths;glm::uvec4 config;} push{{depth(10),depth(20),0,0},{uint32_t(samples),0,0,size}};
         {
             SurfaceRt lighting(ctx,scene);
             auto frame=[&](int mode) {
@@ -105,6 +105,10 @@ int checkSurfaceRt(VkContext& ctx) {
             };
             auto value=[&](uint32_t x,uint32_t y,uint32_t s){return static_cast<const glm::uvec2*>(readback.info.pMappedData)[(y*size+x)*uint32_t(samples)+s];};
             auto sun=[&](uint32_t x,uint32_t y,uint32_t s){return glm::unpackUnorm4x8(value(x,y,s).x).x;};
+            push.config.z=1;
+            frame(1);
+            expect("cold sparse tile shades its covered samples",sun(5,5,samples==1?0:1)>.95f);
+            push.config.z=0;
             frame(1);
             expect("base receiver in front of caster is lit in its first frame",sun(32,32,0)>.95f);
             expect("receiver missed by half-resolution base gets its own current shadow",sun(33,33,samples==1?0:1)<.05f);
@@ -132,6 +136,20 @@ int checkSurfaceRt(VkContext& ctx) {
                 finite=finite && std::isfinite(glm::unpackHalf1x16(uint16_t(packed.x>>16))) && std::isfinite(yz.x) && std::isfinite(yz.y);
             }
             expect("mode change produces finite current GI for every sample",finite);
+            // Move coverage between nonadjacent tiles, through an empty run.
+            // The final tile is partial (67x67) and its newly visible receiver
+            // must be traced even though neither prior tile lists included it.
+            push.config.z=1;
+            ++data[1].identity.x;
+            scene.setInstanceTransform(caster,glm::translate(glm::mat4(1),camera+glm::vec3(0,6,6)));
+            frame(1);
+            expect("isolated occupied tile receives a fresh shadow",sun(5,5,0)<.05f);
+            push.config.z=3;
+            frame(1); // No output samples are covered, so none may be consumed.
+            push.config.z=2;
+            scene.setInstanceTransform(caster,glm::translate(glm::mat4(1),camera+glm::vec3(0,-6,-6)));
+            frame(1);
+            expect("new partial edge tile after an empty frame receives a fresh shadow",sun(size-5,size-5,0)<.05f);
         }
         ctx.flushDeferredCleanup();
         vkDestroyPipeline(device,pipeline,nullptr);vkDestroyPipelineLayout(device,layout,nullptr);

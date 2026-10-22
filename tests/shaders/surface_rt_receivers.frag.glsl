@@ -14,4 +14,7 @@ void main() {
     keys=uvec4(packSurfaceNormal(normal),0,0,front?1u:2u);
     payload=uvec4(0,0,floatBitsToUint(front?pc.depths.x:pc.depths.y),0);
     if(pc.config.x>1u && s==3)keys.w=0u;
+    if(pc.config.z==1u && any(greaterThanEqual(p,ivec2(8))))keys.w=0u;
+    if(pc.config.z==2u && any(lessThan(p,ivec2(pc.config.w)-8)))keys.w=0u;
+    if(pc.config.z==3u)keys.w=0u;
 }

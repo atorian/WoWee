@@ -15,6 +15,7 @@ def main():
     parser.add_argument('--msaa', type=int, default=1)
     parser.add_argument('--scene', type=Path)
     parser.add_argument('--rebuild', action='store_true')
+    parser.add_argument('--ordered', action='store_true')
     args = parser.parse_args()
     binary, scratch = args.binary.resolve(), args.scratch.resolve()
     scratch.mkdir(parents=True, exist_ok=True)
@@ -26,6 +27,9 @@ def main():
                  shadowQuality=0, volumetricFog=0, bloom=0, fogStrength=0)
     if args.scene:
         scene = json.loads(args.scene.read_text(encoding='utf-8-sig'))
+    if args.ordered:
+        scene['wmoLayers'].insert(1, {'x':2, 'rect':[-2,-2,2,2],
+                                     'rgba':[40,120,160,96], 'blend':2, 'flags':0})
     scene.update(size=[640,480], frames=30, msaa=args.msaa, fxaa=False)
     if args.rebuild:
         scene['renderTargetChanges']=[{'frame':2,'msaa':4,'fxaa':True},
@@ -58,7 +62,8 @@ def main():
     difference=sum(abs(a-b) for a,b in zip(images['off'],images['current']))/len(images['current'])
     if difference<0.01:
         raise RuntimeError('current RT did not reach the material lighting consumer')
-    report={'msaa':args.msaa,'rebuild':args.rebuild,'serial_parallel_changed_channels':0,'rt_mean_channel_change':difference}
+    report={'msaa':args.msaa,'rebuild':args.rebuild,'ordered':args.ordered,
+            'serial_parallel_changed_channels':0,'rt_mean_channel_change':difference}
     (scratch/'comparison.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
     print(json.dumps(report))
 

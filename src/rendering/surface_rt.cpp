@@ -3,6 +3,7 @@
 #include "rendering/rt_region.hpp"
 #include "rendering/vk_shader.hpp"
 #include "core/logger.hpp"
+#include "core/env_flag.hpp"
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -63,7 +64,7 @@ void SurfaceRt::createPipelines() {
         requireRt(uniforms_[i].info.pMappedData!=nullptr,"uniform allocation failed");
     }
     VkDescriptorSetLayout layouts[]={setLayout_,scene_.descriptorSetLayout()};
-    VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT,0,8};
+    VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT,0,12};
     VkPipelineLayoutCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     info.setLayoutCount=2;info.pSetLayouts=layouts;info.pushConstantRangeCount=1;info.pPushConstantRanges=&push;
     requireRt(vkCreatePipelineLayout(device,&info,nullptr,&layout_)==VK_SUCCESS,"pipeline layout creation failed");
@@ -75,12 +76,21 @@ void SurfaceRt::createPipelines() {
         const auto result=vkCreateComputePipelines(device,ctx_.getPipelineCache(),1,&ci,nullptr,&output);
         shader.destroy();requireRt(result==VK_SUCCESS,"compute pipeline creation failed");
     };
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(ctx_.getPhysicalDevice(),&properties);
+    // Conservative vec3 alignment: 576 * (vec4 + vec3 + uint + uvec2).
+    // Also check the invocation limit before selecting the larger workgroup.
+    const bool wide=properties.limits.maxComputeSharedMemorySize>=576u*44u &&
+        properties.limits.maxComputeWorkGroupInvocations>=256 &&
+        properties.limits.maxComputeWorkGroupSize[0]>=16 && properties.limits.maxComputeWorkGroupSize[1]>=16 &&
+        !core::envFlagEnabled("WOWEE_SURFACE_RT_FILTER_8",false);
+    filtersPerTile_=wide?1u:4u;
     const std::string hardware=scene_.backend()==RtScene::Backend::Hardware?"_hw":"";
     for(uint32_t ms=0;ms<2;++ms) {
         const std::string suffix=ms?"_ms":"";
         pipeline("surface_rt"+hardware+suffix,base_[ms]);
         pipeline("surface_rt_extra"+hardware+suffix,extra_[ms]);
-        pipeline("surface_rt_filter"+suffix,filter_[ms]);
+        pipeline(std::string("surface_rt_filter")+(wide?"_wide":"")+suffix,filter_[ms]);
     }
     VkSamplerCreateInfo sampler{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     sampler.magFilter=sampler.minFilter=VK_FILTER_NEAREST;sampler.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST;
@@ -92,21 +102,22 @@ void SurfaceRt::resize(VkExtent2D extent,VkSampleCountFlagBits samples) {
     const uint64_t count=uint64_t(extent.width)*extent.height*uint32_t(samples);
     const uint64_t blocks=uint64_t((extent.width+1)/2)*((extent.height+1)/2);
     requireRt(count<=UINT32_MAX && count*8<=properties.limits.maxStorageBufferRange &&
-              blocks*48<=properties.limits.maxStorageBufferRange,"receiver/history table exceeds device storage range");
+              blocks*40<=properties.limits.maxStorageBufferRange,"receiver/history table exceeds device storage range");
     requireRt(properties.limits.maxPerStageDescriptorStorageBuffers>=7,"seven compute storage buffers unsupported");
     retireBuffers();extent_=extent;samples_=samples;sampleCount_=uint32_t(samples);
     maxDispatch_=properties.limits.maxComputeWorkGroupCount[0];
-    outputBytes_=count*8;historyBytes_=blocks*48;
+    outputBytes_=count*8;historyBytes_=blocks*40;
+    tileBytes_=uint64_t((extent.width+15)/16)*((extent.height+15)/16)*8;
     auto allocate=[&](AllocatedBuffer& buffer,VkDeviceSize bytes,VkBufferUsageFlags additional=0) {
         buffer=createBuffer(ctx_.getAllocator(),bytes,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT|additional,VMA_MEMORY_USAGE_GPU_ONLY);
         requireRt(buffer.buffer!=VK_NULL_HANDLE,"receiver buffer allocation failed");
     };
-    allocate(raw_,outputBytes_);allocate(filtered_,outputBytes_,VK_BUFFER_USAGE_TRANSFER_SRC_BIT);allocate(queue_,count*4);
-    allocate(indirect_,16,VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+    allocate(raw_,outputBytes_);allocate(filtered_,outputBytes_,VK_BUFFER_USAGE_TRANSFER_SRC_BIT);allocate(queue_,tileBytes_);
+    allocate(indirect_,48,VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
     for(auto& history:history_)allocate(history,historyBytes_);
     LOG_INFO("Current surface RT: ",extent.width,"x",extent.height," samples=",sampleCount_,
-        " scratch bytes=",count*20+16," history bytes=",historyBytes_*MAX_FRAMES_IN_FLIGHT,
-        " backend=",scene_.backend()==RtScene::Backend::Hardware?"hardware":"software");
+        " scratch bytes=",count*16+tileBytes_+48," history bytes=",historyBytes_*MAX_FRAMES_IN_FLIGHT,
+        " filter tile=",filtersPerTile_==1?16:8," backend=",scene_.backend()==RtScene::Backend::Hardware?"hardware":"software");
 }
 void SurfaceRt::prepare(VkExtent2D extent,VkSampleCountFlagBits samples,VkImageView keys,VkImageView payload,
         VkDescriptorBufferInfo materials,int mode,const RtLighting::FrameInputs& in) {
@@ -131,8 +142,8 @@ void SurfaceRt::prepare(VkExtent2D extent,VkSampleCountFlagBits samples,VkImageV
     VkDescriptorBufferInfo buffers[10]{};
     buffers[0]={uniforms_[slot].buffer,0,sizeof(d)};
     buffers[3]={raw_.buffer,0,outputBytes_};buffers[4]={filtered_.buffer,0,outputBytes_};
-    buffers[5]={queue_.buffer,0,uint64_t(extent.width)*extent.height*sampleCount_*4};
-    buffers[6]={indirect_.buffer,0,16};buffers[7]=materials;
+    buffers[5]={queue_.buffer,0,tileBytes_};
+    buffers[6]={indirect_.buffer,0,48};buffers[7]=materials;
     buffers[8]={history_[previous].buffer,0,historyBytes_};buffers[9]={history_[slot].buffer,0,historyBytes_};
     VkDescriptorImageInfo images[]={{sampler_,keys,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
         {sampler_,payload,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
@@ -146,12 +157,15 @@ void SurfaceRt::prepare(VkExtent2D extent,VkSampleCountFlagBits samples,VkImageV
 }
 VkDescriptorBufferInfo SurfaceRt::output() const { return {filtered_.buffer,0,outputBytes_}; }
 void SurfaceRt::record(VkCommandBuffer cmd) {
+    static const bool profile=core::envFlagEnabled("WOWEE_SURFACE_RT_PROFILE",false);
+    const bool firstRun=profile && recordedFrame_!=preparedFrame_;
+    if(firstRun)ctx_.gpuMark(cmd,"WMO before first surface RT");
     // Orders readers from the previous run/submission before shared scratch is
     // overwritten. The surface render pass publishes its MRT writes to compute.
     barrier(cmd,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,VK_ACCESS_2_MEMORY_WRITE_BIT|VK_ACCESS_2_MEMORY_READ_BIT,
         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_2_TRANSFER_BIT,
         VK_ACCESS_2_SHADER_STORAGE_READ_BIT|VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT|VK_ACCESS_2_SHADER_SAMPLED_READ_BIT|VK_ACCESS_2_TRANSFER_WRITE_BIT);
-    const uint32_t initial[]={0,1,1,0};vkCmdUpdateBuffer(cmd,indirect_.buffer,0,sizeof(initial),initial);
+    const uint32_t initial[]={0,0,0,0,0,1,1,0,0,1,1,0};vkCmdUpdateBuffer(cmd,indirect_.buffer,0,sizeof(initial),initial);
     const auto slot=ctx_.getCurrentFrame();
     if(recordedFrame_!=preparedFrame_) {
         vkCmdFillBuffer(cmd,history_[slot].buffer,0,historyBytes_,0);
@@ -161,20 +175,22 @@ void SurfaceRt::record(VkCommandBuffer cmd) {
         VK_ACCESS_2_SHADER_STORAGE_READ_BIT|VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
     const VkDescriptorSet sets[]={sets_[slot],scene_.descriptorSet()};
     vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,layout_,0,2,sets,0,nullptr);
-    const uint32_t push[]={sampleCount_,maxDispatch_};
+    const uint32_t push[]={sampleCount_,maxDispatch_,filtersPerTile_};
     vkCmdPushConstants(cmd,layout_,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(push),push);
     const auto ms=samples_==VK_SAMPLE_COUNT_1_BIT?0:1;
     vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,base_[ms]);
-    const uint32_t blocks=((extent_.width+1)/2)*((extent_.height+1)/2);
-    vkCmdDispatch(cmd,std::min((blocks+63)/64,maxDispatch_),1,1);
+    vkCmdDispatch(cmd,(extent_.width+15)/16,(extent_.height+15)/16,1);
+    if(firstRun)ctx_.gpuMark(cmd,"surface RT first base");
     barrier(cmd,VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
         VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT|VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
         VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT|VK_ACCESS_2_SHADER_STORAGE_READ_BIT|VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
     vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,extra_[ms]);
-    vkCmdDispatchIndirect(cmd,indirect_.buffer,0);
+    vkCmdDispatchIndirect(cmd,indirect_.buffer,16);
+    if(firstRun)ctx_.gpuMark(cmd,"surface RT first extra");
     barrier(cmd,VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
     vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,filter_[ms]);
-    vkCmdDispatch(cmd,(extent_.width+7)/8,(extent_.height+7)/8,1);
+    vkCmdDispatchIndirect(cmd,indirect_.buffer,32);
+    if(firstRun)ctx_.gpuMark(cmd,"surface RT first filter");
     barrier(cmd,VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
     previousCamera_=glm::vec3(frameData_.cameraPos);previousViewProj_=glm::inverse(frameData_.invViewProj);
     previousMode_=int(frameData_.params.x);previousDistance_=frameData_.misc.w;recordedFrame_=preparedFrame_;
