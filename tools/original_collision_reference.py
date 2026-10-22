@@ -191,6 +191,10 @@ class OriginalCollision:
             raise RuntimeError(f'Original surface failed at EIP={cpu.reg_read(UC_X86_REG_EIP):08x}: {error}') from error
         if cpu.reg_read(UC_X86_REG_EIP) != 0x1000000:
             raise RuntimeError('Original surface exceeded its instruction budget')
+        return self.surface_state(case,body,routine)
+
+    def surface_state(self,case,body,routine=0x6eac40):
+        cpu=self.cpu
         result = dict(name=case.get('name', ''),
                     position=list(struct.unpack('<3f', cpu.mem_read(body + 0x10, 12))),
                     flags=struct.unpack('<I', cpu.mem_read(body + 0x44, 4))[0],

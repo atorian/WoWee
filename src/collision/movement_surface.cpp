@@ -1,4 +1,5 @@
 #include "collision/movement_surface.hpp"
+#include "collision/movement_input.hpp"
 #include "collision/movement_query.hpp"
 #include "collision/movement_request.hpp"
 #include "collision/detail/movement_geometry.hpp"
@@ -908,6 +909,66 @@ struct SurfaceTraversal {
         return 1;
     }
 
+    // Original shared input operations. Active-spline branches are outside
+    // this traversal's contract; pending airborne input remains stateful.
+    bool StopMove() {
+        const auto flags=state.flags;
+        if(!(flags&3)) {
+            if(flags&0x30000)state.flags=flags&~0x30000u;
+            return false;
+        }
+        if(flags&0x4000000) {state.flags=flags&~0x4000000u;TryStartFalling();}
+        if(state.flags&0x1000) {
+            state.flags=(state.flags&~0x34000u)|0x4000;
+            return false;
+        }
+        state.flags&=~0x4003u;
+        CalcCurrentSpeed(0);UpdateAnchors(0);
+        return true;
+    }
+    bool StopStrafe() {
+        const auto flags=state.flags;
+        if(!(flags&12)) {
+            if(flags&0xc0000)state.flags=flags&~0xc0000u;
+            return false;
+        }
+        if(flags&0x4000000) {state.flags=flags&~0x4000000u;TryStartFalling();}
+        if(state.flags&0x1000) {
+            state.flags=(state.flags&~0xc8000u)|0x8000;
+            return false;
+        }
+        state.flags&=~0x800cu;
+        CalcCurrentSpeed(0);UpdateAnchors(0);
+        return true;
+    }
+    void StartTurn(bool left) {
+        state.flags=(state.flags&~0x30u)|(left?0x10:0x20);
+        state.flags2&=~0x800u;UpdateAnchors(0);
+    }
+    bool StopTurn() {
+        if(!(state.flags&0x30))return false;
+        state.flags&=~0x30u;UpdateAnchors(0);return true;
+    }
+    void StartPitch(bool up) {
+        if(!(state.flags&0x2200000)&&!(state.flags2&0x20))return;
+        state.flags=(state.flags&~0xc0u)|(up?0x40:0x80);
+        state.flags2&=~0x1000u;UpdateAnchors(0);
+    }
+    bool StopPitch() {
+        if(!(state.flags&0xc0))return false;
+        state.flags&=~0xc0u;UpdateAnchors(0);return true;
+    }
+    bool StartAscend(bool up) {
+        if(!(state.flags&0x2200000)||(state.flags2&1))return false;
+        state.flags|=up?0x400000:0x800000;
+        UpdateAnchors(0);CalcCurrentSpeed(0);return true;
+    }
+    bool StopAscend() {
+        if(!(state.flags&0x2200000))return false;
+        state.flags&=~0xc00000u;
+        CalcCurrentSpeed(0);UpdateAnchors(0);return true;
+    }
+
     // 0x006eb3b0, state transitions for a mover with no active spline.
     // Active input/queue notification belongs to the caller's event adapter.
     bool HandlePendingActions() {
@@ -937,12 +998,13 @@ struct SurfaceTraversal {
     }
 
     // 0x009883f0, without an active spline.
-    void JumpFromWater() {
-        if ((state.flags & 0x40000000) && !(state.flags & MOVEMENTFLAG_SWIMMING)) return;
-        if (state.flags & (MOVEMENTFLAG_ROOT | MOVEMENTFLAG_FALLING | MOVEMENTFLAG_FLYING)) return;
-        if (!(state.flags2 & 4) && IsGravityDisabled()) return;
-        if (state.flags2 & 2) return;
+    bool JumpFromWater() {
+        if ((state.flags & 0x40000000) && !(state.flags & MOVEMENTFLAG_SWIMMING)) return false;
+        if (state.flags & (MOVEMENTFLAG_ROOT | MOVEMENTFLAG_FALLING | MOVEMENTFLAG_FLYING)) return false;
+        if (!(state.flags2 & 4) && IsGravityDisabled()) return false;
+        if (state.flags2 & 2) return false;
         StartFalling(state.flags & MOVEMENTFLAG_SWIMMING ? -9.0967484f : -7.9555473f);
+        return true;
     }
 
     // 0x00760b40. The solid hit latches for this request: after touching a
@@ -2168,5 +2230,27 @@ MovementRequestResult traceUnattachedMovementRequest(MovementFacetSource& world,
     SurfaceTraversal traversal{cache.solids,state,shape.radius,shape.height,shape.stepHeight,
         shape.clientControlled,std::nullopt,std::nullopt,&geometry};
     return traversal.CollideRequestMove(geometry,displacement,timeMs,elapsedMs);
+}
+bool applyMovementInput(SurfaceMovementState& state,MovementInput input) {
+    SurfaceTraversal t{{},state,0,0,0,true,std::nullopt,std::nullopt};
+    switch(input) {
+    case MovementInput::Forward:return t.StartMove(1,0);
+    case MovementInput::Backward:return t.StartMove(0,0);
+    case MovementInput::Stop:return t.StopMove();
+    case MovementInput::StrafeLeft:return t.StartStrafe(1);
+    case MovementInput::StrafeRight:return t.StartStrafe(0);
+    case MovementInput::StopStrafe:return t.StopStrafe();
+    case MovementInput::TurnLeft:t.StartTurn(true);return true;
+    case MovementInput::TurnRight:t.StartTurn(false);return true;
+    case MovementInput::StopTurn:return t.StopTurn();
+    case MovementInput::PitchUp:t.StartPitch(true);return true;
+    case MovementInput::PitchDown:t.StartPitch(false);return true;
+    case MovementInput::StopPitch:return t.StopPitch();
+    case MovementInput::Ascend:return t.StartAscend(true);
+    case MovementInput::Descend:return t.StartAscend(false);
+    case MovementInput::StopAscend:return t.StopAscend();
+    case MovementInput::Jump:return t.JumpFromWater();
+    }
+    return false;
 }
 } // namespace wowee::collision

@@ -510,3 +510,30 @@ unit/network side effects that are not supplied by the observation fixture.
 These APIs remain offline. The full command set, unit notification side effects,
 packet serialization, interpolation, attached transports/splines and production
 world ownership still have to be completed before ordinary gameplay can switch.
+
+
+## Shared input operations (2026-10-23)
+
+`applyMovementInput` exposes original shared state operations for a mover with
+no active spline or attached transport. This reuses the existing SurfaceTraversal
+anchor/direction/speed logic instead of introducing another state copy.
+
+Reference addresses: StartMove 0x988a20, StopMove 0x98c8d0, StartStrafe 0x988b00,
+StopStrafe 0x98bf80, StartTurn 0x988df0, StopTurn 0x989010, StartPitch 0x989220,
+StopPitch 0x989450, StartAscensionDescension 0x9898e0,
+StopAscensionDescension 0x989940 and Jump(1) 0x9883f0. The original instructions
+execute unmodified; no movement-state operation is replaced by a hook.
+
+`original_input_12340.json` records 5120 cases: 2048 random state combinations
+and 3072 explicit mode/input/extra-flag combinations. Checks include airborne
+pending direction/stop actions, ordinary start/stop, water/flight ascent,
+turning/pitching anchors and jump admission. All float32 state and boolean
+return values match on native Windows and ASan/UBSan. The void turn/pitch
+starts are explicitly represented by a true adapter result, not interpreted
+from an undefined original EAX. All 42 native collision/ADT tests pass; the
+expanded input matrix is also rerun natively. Collision dependencies stay
+below the renderer/game. The preceding execution increment passed full sweep.
+
+Queue admission and the unit/input/network notification side effects are not
+part of this shared-operation API. It remains offline until the complete
+original event and world lifecycle is integrated and compared.

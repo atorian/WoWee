@@ -5,6 +5,7 @@
 #include "collision/movement_request.hpp"
 #include "collision/movement_frame.hpp"
 #include "collision/movement_execution.hpp"
+#include "collision/movement_input.hpp"
 #include "world_facet_fixture.hpp"
 #include <iomanip>
 #include <iostream>
@@ -62,8 +63,9 @@ struct ExecutionObservations final:wowee::collision::MovementExecutionSink {
 };
 
 int main(int argc, char** argv) {
+    const bool input = argc == 2 && std::string(argv[1]) == "--world-input";
     const bool execute = argc == 2 && std::string(argv[1]) == "--world-execute";
-    const bool apply = execute || argc == 2 && std::string(argv[1]) == "--world-apply";
+    const bool apply = input || execute || argc == 2 && std::string(argv[1]) == "--world-apply";
     const bool fullWorld = apply || argc == 2 && std::string(argv[1]) == "--world-request";
     const bool frame = fullWorld || (argc == 2 && std::string(argv[1]) == "--request");
     const bool dimensions = argc == 2 && std::string(argv[1]) == "--dimensions";
@@ -152,7 +154,7 @@ int main(int argc, char** argv) {
         if ((hovering || frame) && !(std::cin >> state.hoverHeight)) return 2;
         MovementRequestResult frameResult;
         ExecutionObservations observations(state,shape);
-        MovementClock clock;bool retire=false;
+        MovementClock clock;bool retire=false,inputAccepted=false;
         SuppliedWorld world;
         std::unique_ptr<world_fixture::Scene> scene;
         if (frame) {
@@ -167,7 +169,10 @@ int main(int argc, char** argv) {
             if(apply) {
                 bool active;
                 if(!(std::cin>>active>>state.moveStartDelayMs>>state.turnRate>>state.pitchRate>>state.pitchCos>>state.pitchSin))return 2;
-                if(execute) {
+                if(input) {
+                    uint32_t command;if(!(std::cin>>command)||command>15)return 2;
+                    inputAccepted=applyMovementInput(state,static_cast<MovementInput>(command));
+                } else if(execute) {
                     uint32_t lastTime,count;bool defer;
                     if(!(std::cin>>lastTime>>clock.heartbeatTimeMs>>clock.idleTimeMs>>defer>>count))return 2;
                     MovementCommandQueue commands;
@@ -198,6 +203,7 @@ int main(int argc, char** argv) {
         vector("move_direction", state.direction);
         std::cout << ",\"move_direction_2d\":[" << state.direction2D.x << ',' << state.direction2D.y << ']';
         if(apply) {number("pitch_cos",state.pitchCos);number("pitch_sin",state.pitchSin);number("facing",state.facing);number("pitch",state.pitch);number("move_start_delay",state.moveStartDelayMs);}
+        if(input) {number("accepted",inputAccepted?"true":"false");number("flags2",state.flags2);}
         if(execute) {
             observations.print();number("height",shape.height);number("flags2",state.flags2);
             number("heartbeat_time",clock.heartbeatTimeMs);number("idle_time",clock.idleTimeMs);

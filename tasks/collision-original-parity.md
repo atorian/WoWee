@@ -8,7 +8,7 @@ Status: contact/surface phases and the combined supplied-state world collector
 have original-executable comparisons. The unattached request-to-world path,
 frame projection/application, height-command queue and restricted frame
 scheduler are verified offline. The native collision/ADT selection passes
-41/41 tests. Full behavioural equivalence is not established and the player
+42/42 tests. Full behavioural equivalence is not established and the player
 solver is not replaced. Production world lifecycle, remaining input commands,
 unit event delivery, interpolation, transport/spline movement and outgoing
 packet bytes remain open. See `docs/original-collision-reference.md` for the
@@ -331,3 +331,21 @@ retirement are observed boundaries; their remaining side effects are not
 silently treated as implemented. No change is enabled in player control.
 Next work is the remaining original input/state commands, their synchronous
 unit/protocol effects and integration with production world ownership.
+
+
+### 2026-10-23 — Shared input state transitions
+
+Added the original shared start/stop operations for forward/backward motion,
+strafe, turn, pitch and ascent/descent, plus Jump(1), reusing the verified
+anchor, direction and speed calculations. All 5120 original-code comparisons
+pass: random states plus explicit ordinary, falling/pending, swimming, flying,
+rooted, gravity-disabled and pitch/no-jump/no-strafe cases. Float32 outputs
+and return values are compared; void start-turn/pitch operations have an
+explicit true adapter result. Native Windows and ASan/UBSan pass. The native
+collision/ADT selection passes 42/42, with the expanded input matrix rerun
+separately. The collision dependency check remains clean.
+
+These shared operations are not queue admission: the original event dispatcher
+also suppresses some inputs for transport/root/pending-root, updates heartbeat
+clocks and calls the unit/input services. Wiring and independently validating
+those synchronous effects remains the next step.

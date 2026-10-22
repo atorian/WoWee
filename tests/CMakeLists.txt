@@ -3735,3 +3735,10 @@ if(Python3_Interpreter_FOUND)
             --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_execution_12340.json
             --probe $<TARGET_FILE:movement_surface_probe>)
 endif()
+
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_input
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_input.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_input_12340.json
+            --probe $<TARGET_FILE:movement_surface_probe>)
+endif()
