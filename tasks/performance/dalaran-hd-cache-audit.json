@@ -1,0 +1,118 @@
+{
+  "date": "2026-10-22",
+  "implementationCommit": "0800842",
+  "sourceLog": "/mnt/d/games/wowee/build-dev/scratch/gpu-scene-pipeline/checkout/build-dev/scratch/scene-replay/run-20261022-203251-590/client.log",
+  "userAssetContext": "User confirms assets were taken from an HD client. No original-vs-HD asset size comparison available.",
+  "dds": {
+    "successfulReads": 947,
+    "uniquePaths": 325,
+    "repeatReadsBeyondFirst": 622,
+    "logicalBytesReadUsingCurrentFileSizes": 1409206640,
+    "uniqueFileBytes": 551249072,
+    "repeatedLogicalBytes": 857957568,
+    "measuredReads": 25,
+    "measuredUniquePaths": 21,
+    "measuredReadsSeenDuringWarmup": 25,
+    "mostRead": [
+      {
+        "path": "D:\\games\\WoWee\\Data/expansions\\wotlk/./world/expansion02/doodads/howlingfjord/firefx/t_vfx_fire_anim02_128_full_desat.dds",
+        "reads": 23,
+        "bytes": 1398256
+      },
+      {
+        "path": "D:\\games\\WoWee\\Data/expansions\\wotlk/./world/azeroth/elwynn/passivedoodads/lamppost/glow32.dds",
+        "reads": 20,
+        "bytes": 22000
+      },
+      {
+        "path": "D:\\games\\WoWee\\Data/expansions\\wotlk/./world/generic/nightelf/passive doodads/magicalimplements/glow.dds",
+        "reads": 19,
+        "bytes": 22000
+      },
+      {
+        "path": "D:\\games\\WoWee\\Data/expansions\\wotlk/./world/skillactivated/containers/sparkle.dds",
+        "reads": 17,
+        "bytes": 87536
+      },
+      {
+        "path": "D:\\games\\WoWee\\Data/expansions\\wotlk/./world/generic/human/passive doodads/candelabras/glowwhite32.dds",
+        "reads": 17,
+        "bytes": 22000
+      },
+      {
+        "path": "D:\\games\\WoWee\\Data/expansions\\wotlk/./world/generic/human/passive doodads/cauldrons/waterfallsteam.dds",
+        "reads": 17,
+        "bytes": 22000
+      },
+      {
+        "path": "D:\\games\\WoWee\\Data/expansions\\wotlk/./world/azeroth/westfall/passivedoodads/barrel/bar_but_hay_har_car.dds",
+        "reads": 15,
+        "bytes": 1398256
+      },
+      {
+        "path": "D:\\games\\WoWee\\Data/expansions\\wotlk/./world/kalimdor/silithus/passivedoodads/crystals/silithus_crystal_environment_map.dds",
+        "reads": 13,
+        "bytes": 5616
+      },
+      {
+        "path": "D:\\games\\WoWee\\Data/expansions\\wotlk/./world/generic/passivedoodads/lights/candel_thread.dds",
+        "reads": 12,
+        "bytes": 1520
+      },
+      {
+        "path": "D:\\games\\WoWee\\Data/expansions\\wotlk/./world/generic/goblin/passivedoodads/goblinrocketcarts/westfallwagonwood copy.dds",
+        "reads": 10,
+        "bytes": 349680
+      },
+      {
+        "path": "D:\\games\\WoWee\\Data/expansions\\wotlk/./world/generic/goblin/passivedoodads/goblinmachinery/bottlegreen.dds",
+        "reads": 10,
+        "bytes": 43856
+      },
+      {
+        "path": "D:\\games\\WoWee\\Data/expansions\\wotlk/./world/generic/darkirondwarf/passive doodads/skeletons/darkyellowbone.dds",
+        "reads": 10,
+        "bytes": 87568
+      },
+      {
+        "path": "D:\\games\\WoWee\\Data/expansions\\wotlk/./world/generic/darkirondwarf/passive doodads/skeletons/darkyellowskull01.dds",
+        "reads": 10,
+        "bytes": 87536
+      },
+      {
+        "path": "D:\\games\\WoWee\\Data/expansions\\wotlk/./world/generic/passivedoodads/lights/candel_cave01.dds",
+        "reads": 10,
+        "bytes": 43856
+      },
+      {
+        "path": "D:\\games\\WoWee\\Data/expansions\\wotlk/./world/generic/orc/passive doodads/barrelsandcrates/beermug.dds",
+        "reads": 9,
+        "bytes": 1398256
+      }
+    ]
+  },
+  "resourceSamples": [
+    "[2026-10-22 20:34:00.620] [INFO ] resources: 163.7 fps avg, 1.9 min, p99 38.3 ms | latency n/a | working set 4.19 GB, private 7.89 GB | system commit 32.36 GB of 57.88 GB, physical 10.83 GB free of 31.88 GB | threads 42 | video memory 3.65 GB of 10.82 GB budget (render targets 718 MB, textures 1.51 GB, geometry 915 MB, ray tracing 230 MB, other buffers 235 MB, cache: textures 883 MB, cache: decoded textures 774 KB, cache: normal maps 292 MB, cache: character composites 1 MB, cache: owned textures 307 MB, cache: unreferenced 0 KB, cache: waiting for frames 0 KB) | asset files 683 MB of 1.00 GB (8420) | texture cache 1.45 GB of 4.00 GB (95965) | DBC tables 19 | terrain tiles loaded 107 | terrain tiles in flight 33 | M2 models 3578 | WMO models 294 | character models 1 | normal-map jobs 0",
+    "[2026-10-22 20:35:00.715] [INFO ] resources: 27.9 fps avg, 4.8 min, p99 113.3 ms | latency n/a | working set 6.64 GB, private 11.65 GB | system commit 36.01 GB of 57.88 GB, physical 8.44 GB free of 31.88 GB | threads 43 | video memory 4.92 GB of 10.82 GB budget (render targets 935 MB, textures 2.02 GB, geometry 1.16 GB, ray tracing 232 MB, other buffers 371 MB, cache: textures 935 MB, cache: decoded textures 192 MB, cache: normal maps 352 MB, cache: character composites 151 MB, cache: owned textures 381 MB, cache: unreferenced 45 MB, cache: waiting for frames 0 KB) | asset files 967 MB of 1.00 GB (10009) | texture cache 1.96 GB of 4.00 GB (119221) | DBC tables 31 | terrain tiles loaded 135 | terrain tiles in flight 0 | M2 models 3975 | WMO models 332 | character models 267 | normal-map jobs 0"
+  ],
+  "fileCacheFinal": [
+    "[2026-10-22 20:36:03.480] [INFO ] File cache stats: 17620 hits, 30495 misses (36% hit rate), 1022 MB cached"
+  ],
+  "gpuCacheFullWarnings": 0,
+  "findings": [
+    "AssetManager::tryLoadDdsOverride reads sidecar bytes directly on every call. Texture loads intentionally do not populate the raw file cache.",
+    "TerrainManager tile workers deduplicate M2/WMO preparation only inside PendingTile; workers for other tiles can read/analyze the same texture again. WMO normal-map generation is also performed before the GPU consumer cache lookup.",
+    "M2Renderer::loadTexture and WMORenderer::loadTexture check shared GPU cache later, after workers have prepared input. A GPU hit can avoid upload but cannot undo already completed worker I/O/analysis.",
+    "Character preparation reads RGBA separately from Stored world textures, and normal-map generation may reread source pixels. Different output forms are sometimes necessary; repeat count alone is not avoidable-work count.",
+    "File cache at 1 GiB limit with 36% aggregate hit rate suggests a candidate for instrumentation, not proof of cache thrashing. Misses include first reads and failed reads; DDS is not included in that miss counter.",
+    "GPU cache last sampled at 1.96 of 4 GiB and no full warning. No evidence that HD assets exhausted its configured capacity in this run.",
+    "All 25 measured DDS reads were previously seen paths, correcting the earlier description of these as new resources. New entities can reuse existing textures.",
+    "CPU texture reuse can reduce loading, allocations and frame tails; it does not by itself explain or remove the roughly 10.3ms M2 surface/RT GPU stage."
+  ],
+  "limits": [
+    "Read counts are successful DDS override logs only, excluding BLP/PNG, failed attempts and unlogged paths.",
+    "Byte totals use current file sizes, not physical disk I/O; OS cache may serve reads.",
+    "No per-key CPU duration, in-flight dedup, raw-file evictions or decoded CPU peak counters yet."
+  ],
+  "recommendedChange": "Share bounded immutable preparation results and in-flight jobs by asset generation, normalized path and output recipe; pin published resources across worker/GPU consumption, reuse prepared normals, instrument hits/misses/duplicate jobs/evictions/bytes. Do not merely raise global cache budgets or retain all decoded HD images."
+}

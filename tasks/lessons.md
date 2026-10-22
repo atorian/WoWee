@@ -163,3 +163,5 @@
 - 2026-10-22 — After the user authorized the complete rendering pipeline, I stopped at foundation commits and then at a benchmark without fixing the remaining bottleneck. Treat benchmark/status requests as checkpoints within the authorized implementation: identify the next concrete change, implement and verify it, and keep incomplete G-buffer/current-frame RT work explicit instead of presenting infrastructure as completion.
 
 - 2026-10-22 — Before continuing a new rendering stage, the user requested committing the completed work first. Verify and report the existing checkpoint commit, stage only this session's changes, then begin the next stage; never include another session's work in that checkpoint.
+
+- 2026-10-22 — DDS loads during playback were described as new resources, but the HD-asset cache audit found all 25 paths had already been read during warmup. Compare normalized paths across phases before calling a load new; separate CPU preparation rereads from GPU-cache misses, and distinguish logical reads from physical disk I/O.

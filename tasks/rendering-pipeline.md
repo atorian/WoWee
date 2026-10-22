@@ -595,3 +595,25 @@ Actual viewport was 2560x1392 versus 2560x1369 previously (1.68% more pixels).
 Cache/system differences were not isolated. All old reports are preserved.
 
 [Full metrics and warmup evidence](performance/dalaran-m2-surfaces-warm60.json).
+
+
+### HD asset cache audit (2026-10-22)
+
+User confirmed the current resources come from an HD client. The warm60 log
+contains 947 successful DDS reads of 325 paths (622 repeats), representing
+1,409,206,640 logical bytes versus 551,249,072 unique file bytes at current sizes.
+All 25 measured DDS reads had already occurred during warmup; the earlier
+"new resources" explanation was too broad. These are not physical disk bytes,
+and some repeated reads serve distinct decoded/normal-map output forms.
+
+GPU texture cache was last sampled at 1.96/4 GiB with no full warning. Raw file
+cache ended at 1022 MiB and 36% hits, but that metric excludes uncached DDS and
+cannot prove thrashing. The concrete avoidable-work candidate is worker-side
+preparation: terrain jobs deduplicate textures per tile, WMO normals are prepared
+before later GPU-cache checks, and DDS reads bypass raw-file retention. Cache
+hits on upload therefore do not prevent earlier reads, analyses and allocations.
+
+Prioritize bounded shared immutable preparation/in-flight jobs by asset generation,
+path and output recipe, with safe resource pinning and per-key cost counters.
+Do not increase memory budgets blindly or promise this fixes M2's GPU RT cost.
+[Evidence and limitations](performance/dalaran-hd-cache-audit.json).
