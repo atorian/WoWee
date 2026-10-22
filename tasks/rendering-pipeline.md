@@ -95,12 +95,55 @@ checkout remains on master with its concurrent uncommitted work preserved.
   Opposite primary/reflected cameras and hidden placements preserve independent
   pass membership and already queued snapshots. Water/reflection settings
   regression also passes with synchronization validation.
-- No branch FPS improvement is claimed. The replay preflight refused to start
-  because another client was running from the independent
-  `build-dev/scratch/aerial-march/checkout` worktree (PID 32644 at the check).
-  That concurrent session was preserved; no branch FPS or RAM/VRAM result was
-  collected. The prepared `replay-branch.ps1` runner checks for concurrent clients
-  and samples process memory on D: when a clean run is possible.
+- The 2026-10-22 Dalaran replay completed on this branch. No overall FPS
+  improvement was measured; detailed results follow.
+
+## Dalaran measurement — 2026-10-22
+
+[Full machine-readable report](performance/dalaran-pipeline-foundation.json).
+Implementation commit `5746c8d`; saved comparison is
+`performance/dalaran-rt-instance-changes-after.json`. Both use a measured
+2560x1369 viewport, render thread 1, hardware RT mode 3, MSAA 1 and dev/no-LTO.
+Validation is disabled. All 760 source samples completed (0–759), with 759
+producer frame intervals; trace error is empty and the client exited normally.
+
+| Metric | Saved baseline | Foundation branch |
+|---|---:|---:|
+| FPS (1000 / mean frame interval) | 42.46 | 41.96 |
+| Mean frame interval, ms | 23.551 | 23.833 |
+| p95 frame interval, ms | 33.404 | 32.901 |
+| p99 frame interval, ms | 44.012 | 45.003 |
+| CPU scene extraction, mean ms | 12.242 | 11.320 |
+| CPU WMO extraction, mean ms | 0.640 | 0.383 |
+| CPU RT region extraction, mean ms | 1.928 | 1.316 |
+| CPU M2 extraction, mean ms | 6.424 | 6.245 |
+| GPU WMO, mean ms | 5.039 | 4.617 |
+| GPU RT, mean ms | 3.101 | 3.289 |
+| Reported VRAM usage, mean GiB | 4.274 | 4.425 |
+| Reported VRAM usage, max GiB | 4.425 | 4.425 |
+
+Overall FPS is 1.2% lower; one run does not establish a regression or a
+statistically significant improvement. This is a historical comparison, not
+an isolated A/B. Resident populations differ because loading is asynchronous:
+mean characters 446.6 → 440.7, M2 104456.8 → 104413.6, WMO 792.7 → 792.6.
+All 3040 comparisons of character/M2/tile/WMO populations against the original
+capture differ, as in the saved baseline. Entity populations match the baseline.
+Nested CPU scopes and concurrent recording must not be summed.
+
+Sampled process memory maxima (500ms polling, loading + replay): working set
+5.093 GiB, private commit 9.677 GiB. There is no previous process-memory baseline;
+private commit is not resident RAM. VRAM numbers use the renderer's heap-usage
+counter. Other wowee processes were absent at preflight; there was no continuous
+competing-process monitor.
+
+One ERROR occurred during warmup, before measured frames: `Unprepared character
+texture reached GPU consumer: character\tauren\taurenmalefacelower04_18.blp`.
+This benchmark does not establish its cause or fix it. Do not call this an
+error-free visual-parity run.
+
+Raw trace, CSV and comparison: `build-dev/scratch/scene-replay/run-20261022-110258-583/`.
+Process memory and runner logs: `../replay-memory.json`, `../replay-output.log`,
+`../replay-errors.log`, relative to this checkout. The replay client has exited.
 
 ## Remaining implementation
 
