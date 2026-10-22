@@ -2202,11 +2202,19 @@ TextureRef WMORenderer::loadNormalHeightMap(const std::string& resolvedPath,
 
     // Prefer what the terrain workers made alongside the decoded diffuse: the
     // Sobel/blur pass then never runs on the render thread.
+    if (preparedNormalMapCache_) {
+        auto normalIt = preparedNormalMapCache_->find(resolvedPath);
+        if (normalIt != preparedNormalMapCache_->end()) {
+            const auto prepared = std::move(normalIt->second);
+            preparedNormalMapCache_->erase(normalIt);
+            if (prepared && prepared->valid()) return cacheNormalMap(*vkCtx_, key, *prepared);
+        }
+    }
     if (predecodedNormalMapCache_) {
-        auto normalIt = predecodedNormalMapCache_->find(resolvedPath);
-        if (normalIt != predecodedNormalMapCache_->end()) {
-            const EncodedNormalMap prepared = std::move(normalIt->second);
-            predecodedNormalMapCache_->erase(normalIt);
+        auto ready = predecodedNormalMapCache_->find(resolvedPath);
+        if (ready != predecodedNormalMapCache_->end()) {
+            auto prepared = std::move(ready->second);
+            predecodedNormalMapCache_->erase(ready);
             if (prepared.valid()) return cacheNormalMap(*vkCtx_, key, prepared);
         }
     }
@@ -2326,31 +2334,43 @@ WMORenderer::LoadedTexture WMORenderer::loadTexture(const std::string& path) {
 
     // Try loading all candidates until one succeeds
     // Check pre-decoded BLP cache first (populated by background worker threads)
-    pipeline::BLPImage blp;
+    pipeline::PreparedTextureRef prepared;
     std::string resolvedKey;
-    if (predecodedBLPCache_) {
+    if (preparedTextureCache_) {
         for (const auto& c : uniqueCandidates) {
-            auto pit = predecodedBLPCache_->find(c);
-            if (pit != predecodedBLPCache_->end()) {
-                blp = std::move(pit->second);
-                predecodedBLPCache_->erase(pit);
+            auto pit = preparedTextureCache_->find(c);
+            if (pit != preparedTextureCache_->end()) {
+                prepared = std::move(pit->second);
+                preparedTextureCache_->erase(pit);
                 resolvedKey = c;
                 break;
             }
         }
     }
-    if (!blp.isValid()) {
+    if (!prepared && predecodedBLPCache_) {
+        for (const auto& c : uniqueCandidates) {
+            auto ready = predecodedBLPCache_->find(c);
+            if (ready != predecodedBLPCache_->end()) {
+                prepared = std::make_shared<const pipeline::PreparedTexture>(
+                    pipeline::PreparedTexture{std::move(ready->second), 0});
+                predecodedBLPCache_->erase(ready);
+                resolvedKey = c;
+                break;
+            }
+        }
+    }
+    if (!prepared || !prepared->image.isValid()) {
         for (const auto& c : attemptedCandidates) {
             // Blocks. The diffuse is only ever sampled; the normal map
             // below needs pixels and decodes them from these when it runs.
-            blp = assetManager->loadTexture(c, true);
-            if (blp.isValid()) {
+            prepared = assetManager->loadTextureShared(c, true);
+            if (prepared->image.isValid()) {
                 resolvedKey = c;
                 break;
             }
         }
     }
-    if (!blp.isValid()) {
+    if (!prepared || !prepared->image.isValid()) {
         for (const auto& c : attemptedCandidates) {
             failedTextureRetryAt_[c] = lookupSerial + kFailedTextureRetryLookups;
         }
@@ -2363,6 +2383,8 @@ WMORenderer::LoadedTexture WMORenderer::loadTexture(const std::string& path) {
         // poisons the texture for this session.
         return {whiteTexture_, {}};
     }
+
+    const auto& blp = prepared->image;
 
     core::Logger::getInstance().debug("WMO texture: ", path, " size=", blp.width, "x", blp.height);
 

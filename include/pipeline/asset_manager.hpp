@@ -3,6 +3,8 @@
 #include "core/cache_stats.hpp"
 #include "pipeline/archive_layer.hpp"
 #include "pipeline/blp_loader.hpp"
+#include "pipeline/prepared_texture.hpp"
+#include "pipeline/preparation_cache.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/asset_manifest.hpp"
 #include "pipeline/loose_file_reader.hpp"
@@ -67,6 +69,13 @@ public:
     /// keepCompressed asks the loader to leave a DXT texture in its blocks.
     /// A PNG override is decoded regardless - it has no blocks to keep.
     BLPImage loadTexture(const std::string& path, bool keepCompressed = false);
+    /// Shared immutable image + alpha facts, deduplicated across worker jobs.
+    /// Stored and RGBA are distinct outputs; RGBA reuses the stored source.
+    /// An invalid image is a completed failure until eviction/clearCache.
+    [[nodiscard]] PreparedTextureRef loadTextureShared(const std::string& path, bool keepCompressed = false);
+    using TexturePreparationStats = PreparationCache<PreparedTexture>::Stats;
+    [[nodiscard]] TexturePreparationStats texturePreparationStats() const { return texturePreparations_.stats(); }
+    void setTexturePreparationBudget(size_t bytes) { texturePreparations_.setBudget(bytes); }
 
     /**
      * Set expansion-specific data path for CSV DBC lookup.
@@ -238,6 +247,8 @@ private:
 
     // Base manifest (loaded from dataPath/manifest.json)
     AssetManifest manifest_;
+    PreparationCache<PreparedTexture> texturePreparations_{256ull * 1024 * 1024};
+    BLPImage loadTextureUncached(const std::string& path, bool keepCompressed);
 
     // Optional base-path fallback: used when manifest_ doesn't contain a file.
     // Populated by setBaseFallbackPath(); ignored if baseFallbackDataPath_ is empty.

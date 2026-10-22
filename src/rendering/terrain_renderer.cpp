@@ -785,14 +785,15 @@ TextureRef TerrainRenderer::loadNormalMap(const std::string& path) {
 }
 
 void TerrainRenderer::uploadPreloadedTextures(
-    const std::unordered_map<std::string, pipeline::BLPImage>& textures) {
+    const pipeline::PreparedTextures& textures) {
     // Into the shared cache ahead of the chunks that will name them, in one
     // submission. Held by nothing until those chunks bind them, so a full
     // cache may evict one again before then; loadTexture then reads it anew.
     TextureCache& cache = vkCtx->textures();
     vkCtx->beginUploadBatch();
-    for (const auto& [path, blp] : textures) {
-        if (!blp.isValid()) continue;
+    for (const auto& [path, prepared] : textures) {
+        if (!prepared || !prepared->image.isValid()) continue;
+        const auto& blp = prepared->image;
         if (cache.find({normalizeTexturePath(path), TextureForm::Stored, 0})) continue;
         (void)cacheStoredTexture(*vkCtx, path, blp);
     }

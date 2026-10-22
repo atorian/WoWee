@@ -140,6 +140,11 @@ TerrainManager::TerrainManager() {
 
 TerrainManager::~TerrainManager() {
     stopWorkers();
+    const auto normals = normalPreparations_.stats();
+    LOG_INFO("Normal preparation cache: ", normals.hits, " hits, ", normals.misses,
+             " preparations, ", normals.joined, " joined, ", normals.evicted, " evictions, ",
+             normals.oversized, " oversized, ", normals.bytes, " retained bytes / ",
+             normals.budgetBytes, " budget, ", normals.entries, " entries");
     // Its tiles' ground goes with it: the map they belonged to is being left.
     if (collision_) {
         for (const auto& [coord, tile] : loadedTiles) collision_->removeTerrainTile(coord.x, coord.y);
@@ -152,6 +157,7 @@ void TerrainManager::setWMORenderer(WMORenderer* renderer) {
 }
 
 bool TerrainManager::initialize(pipeline::AssetManager* assets, TerrainRenderer* renderer) {
+    normalPreparations_.clear();
     assetManager = assets;
     terrainRenderer = renderer;
     if (renderer) terrainNormalMapFormat_ = renderer->normalMapFormat();
@@ -601,11 +607,8 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
             std::transform(texKey.begin(), texKey.end(), texKey.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             if (pending->preloadedM2Textures.find(texKey) != pending->preloadedM2Textures.end()) continue;
-            auto blp = assetManager->loadTexture(texKey, true);
-            if (blp.isValid()) {
-                blp.analyzeAlpha();
-                pending->preloadedM2Textures[texKey] = std::move(blp);
-            }
+            auto blp = assetManager->loadTextureShared(texKey, true);
+            pending->preloadedM2Textures[texKey] = std::move(blp);
         }
 
         PendingTile::M2Ready ready;
@@ -824,11 +827,8 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
                                 std::transform(texKey.begin(), texKey.end(), texKey.begin(),
                                                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                                 if (pending->preloadedM2Textures.find(texKey) != pending->preloadedM2Textures.end()) continue;
-                                auto blp = assetManager->loadTexture(texKey, true);
-                                if (blp.isValid()) {
-                                    blp.analyzeAlpha();
-                                    pending->preloadedM2Textures[texKey] = std::move(blp);
-                                }
+                                auto blp = assetManager->loadTextureShared(texKey, true);
+                                pending->preloadedM2Textures[texKey] = std::move(blp);
                             }
                         }
 
@@ -910,25 +910,11 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
                             blpKey = blpKey.substr(0, blpKey.size() - 4) + ".blp";
                         }
                     }
-                    // Blocks for the upload; the normal map decodes a copy
-                    // here on the worker thread and lets it go, which is where
-                    // that cost already was.
-                    auto blp = assetManager->loadTexture(blpKey, true);
-                    if (blp.isValid()) {
-                        const std::vector<uint8_t> decoded =
-                            blp.isBlockCompressed()
-                                ? pipeline::BLPLoader::decodeBaseLevel(blp)
-                                : blp.data;
-                        auto normals = decoded.empty()
-                            ? EncodedNormalMap{}
-                            : WMORenderer::prepareNormalHeightMap(
-                                  decoded.data(), static_cast<uint32_t>(blp.width),
-                                  static_cast<uint32_t>(blp.height), wmoNormalMapFormat_);
-                        if (normals.valid()) {
-                            pending->preloadedWMONormalMaps[blpKey] = std::move(normals);
-                        }
-                        blp.analyzeAlpha();
-                        pending->preloadedWMOTextures[blpKey] = std::move(blp);
+                    auto texture = assetManager->loadTextureShared(blpKey, true);
+                    if (texture->image.isValid()) {
+                        auto normals = prepareNormalMap(blpKey, texture, false, wmoNormalMapFormat_);
+                        if (normals->valid()) pending->preloadedWMONormalMaps[blpKey] = std::move(normals);
+                        pending->preloadedWMOTextures[blpKey] = std::move(texture);
                     }
                 }
 
@@ -961,13 +947,12 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
         // Terrain tilesets and M2 skins stay in their blocks - both are only
         // sampled, and M2's transparency now comes from the blocks too. The
         // normal-map source below still decodes: it reads the pixels.
-        pipeline::BLPImage blp = assetManager->loadTexture(texPath, true);
-        if (blp.isValid() && !(textureCache && textureCache->find(TerrainRenderer::normalMapKey(texPath)))) {
-            EncodedNormalMap normals = TerrainRenderer::deriveNormalMap(blp, terrainNormalMapFormat_);
-            if (normals.valid()) pending->preloadedTerrainNormalMaps[texPath] = std::move(normals);
+        auto texture = assetManager->loadTextureShared(texPath, true);
+        if (texture->image.isValid() && !(textureCache && textureCache->find(TerrainRenderer::normalMapKey(texPath)))) {
+            auto normals = prepareNormalMap(texPath, texture, true, terrainNormalMapFormat_);
+            if (normals->valid()) pending->preloadedTerrainNormalMaps[texPath] = std::move(normals);
         }
-        if (blp.isValid()) blp.analyzeAlpha();
-        pending->preloadedTextures[texPath] = std::move(blp);
+        pending->preloadedTextures[texPath] = std::move(texture);
     }
 
     LOG_DEBUG("Prepared tile [", x, ",", y, "]: ",
@@ -983,6 +968,31 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
         pending->terrain = {};
     }
     return pending;
+}
+
+std::shared_ptr<const EncodedNormalMap> TerrainManager::prepareNormalMap(
+    const std::string& path, const pipeline::PreparedTextureRef& texture,
+    bool terrain, NormalMapFormat format) {
+    const std::string key = normalizeTexturePath(path) + "|" + std::to_string(texture->generation) +
+        (terrain ? "|terrain|" : "|wmo|") + std::to_string(static_cast<unsigned>(format));
+    return normalPreparations_.get(key, [&](uint64_t) {
+        const auto& image = texture->image;
+        EncodedNormalMap result;
+        if (terrain) {
+            result = TerrainRenderer::deriveNormalMap(image, format);
+        } else {
+            const auto decoded = image.isBlockCompressed() ? pipeline::BLPLoader::decodeBaseLevel(image) : image.data;
+            if (!decoded.empty()) result = WMORenderer::prepareNormalHeightMap(
+                decoded.data(), static_cast<uint32_t>(image.width), static_cast<uint32_t>(image.height), format);
+        }
+        if (!result.valid()) LOG_WARNING("Normal preparation failed for ", path,
+            terrain ? " (terrain)" : " (WMO)", " - the surface is lit flat");
+        return result;
+    }, [](const EncodedNormalMap& map) {
+        size_t bytes = map.levels.capacity() * sizeof(std::vector<uint8_t>);
+        for (const auto& mip : map.levels) bytes += mip.capacity();
+        return bytes;
+    });
 }
 
 void TerrainManager::logMissingAdtOnce(const std::string& adtPath) {
@@ -1028,7 +1038,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 ft.terrainTexKeysCollected = true;
             }
             const auto stepStart = std::chrono::steady_clock::now();
-            std::unordered_map<std::string, pipeline::BLPImage> one;
+            pipeline::PreparedTextures one;
             while (ft.terrainTexNext < ft.terrainTexKeys.size()) {
                 const auto it = pending->preloadedTextures.find(ft.terrainTexKeys[ft.terrainTexNext++]);
                 if (it == pending->preloadedTextures.end()) continue;
@@ -1037,7 +1047,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 terrainRenderer->uploadPreloadedTextures(one);
                 if (auto normals = pending->preloadedTerrainNormalMaps.find(it->first);
                     normals != pending->preloadedTerrainNormalMaps.end()) {
-                    terrainRenderer->uploadPreloadedNormalMap(normals->first, normals->second);
+                    terrainRenderer->uploadPreloadedNormalMap(normals->first, *normals->second);
                     pending->preloadedTerrainNormalMaps.erase(normals);
                 }
                 if (std::chrono::duration<float, std::milli>(
@@ -1112,7 +1122,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
         // main thread to trickle-upload models.
         if (m2Renderer && ft.m2ModelIndex < pending->m2Models.size()) {
             // Set pre-decoded BLP cache so loadTexture() skips main-thread BLP decode
-            m2Renderer->setPredecodedBLPCache(&pending->preloadedM2Textures);
+            m2Renderer->setPreparedTextureCache(&pending->preloadedM2Textures);
             bool workersIdle;
             {
                 std::lock_guard<std::mutex> lk(queueMutex);
@@ -1140,7 +1150,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 ft.m2ModelIndex++;
                 uploaded++;
             }
-            m2Renderer->setPredecodedBLPCache(nullptr);
+            m2Renderer->setPreparedTextureCache(nullptr);
             // Stay in this phase until all models uploaded
             if (ft.m2ModelIndex < pending->m2Models.size()) {
                 return false;
@@ -1211,8 +1221,8 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 LOG_WARNING("WMORenderer terrain re-init failed");
             // Diffuse decode and normal/height generation were completed by the
             // terrain worker. The main thread only uploads those prepared pixels.
-            wmoRenderer->setPredecodedBLPCache(&pending->preloadedWMOTextures);
-            wmoRenderer->setPredecodedNormalMapCache(&pending->preloadedWMONormalMaps);
+            wmoRenderer->setPreparedTextureCache(&pending->preloadedWMOTextures);
+            wmoRenderer->setPreparedNormalMapCache(&pending->preloadedWMONormalMaps);
             wmoRenderer->setDeferNormalMaps(true);
 
             // One model per step, and a large model spread across several
@@ -1236,8 +1246,8 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 break;               // one model per step
             }
             wmoRenderer->setDeferNormalMaps(false);
-            wmoRenderer->setPredecodedBLPCache(nullptr);
-            wmoRenderer->setPredecodedNormalMapCache(nullptr);
+            wmoRenderer->setPreparedTextureCache(nullptr);
+            wmoRenderer->setPreparedNormalMapCache(nullptr);
             if (ft.wmoModelIndex < pending->wmoModels.size()) return false;
         }
         ft.phase = FinalizationPhase::WMO_INSTANCES;
@@ -1347,7 +1357,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
         // Upload multiple WMO doodad M2s per call (batched GPU uploads)
         if (m2Renderer && ft.wmoDoodadIndex < pending->wmoDoodads.size()) {
             // Set pre-decoded BLP cache for doodad M2 textures
-            m2Renderer->setPredecodedBLPCache(&pending->preloadedM2Textures);
+            m2Renderer->setPreparedTextureCache(&pending->preloadedM2Textures);
             constexpr size_t kDoodadsPerStep = 4;
             const auto stepStart = std::chrono::steady_clock::now();
             size_t uploaded = 0;
@@ -1391,7 +1401,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 ft.wmoDoodadIndex++;
                 uploaded++;
             }
-            m2Renderer->setPredecodedBLPCache(nullptr);
+            m2Renderer->setPreparedTextureCache(nullptr);
             if (ft.wmoDoodadIndex < pending->wmoDoodads.size()) return false;
         }
         ft.phase = FinalizationPhase::WATER;

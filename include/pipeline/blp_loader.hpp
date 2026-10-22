@@ -101,6 +101,8 @@ struct BLPImage {
     /// handing it over, so the frame that uploads it only reads the result.
     /// Call it last: the answers describe the pixels as they were then.
     void analyzeAlpha();
+    /// A mutable copy must scan again after the caller edits its pixels.
+    void invalidateAlphaAnalysis() { alphaFacts_.reset(); }
 
     /// What this will occupy once uploaded, which the texture caches spend
     /// their budget against. Block-compressed is its own levels; decoded is

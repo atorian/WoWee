@@ -1,4 +1,6 @@
 #pragma once
+#include "pipeline/prepared_texture.hpp"
+#include "pipeline/preparation_cache.hpp"
 #include "rendering/terrain_placement_refs.hpp"
 
 #include <functional>
@@ -145,20 +147,20 @@ struct PendingTile {
 
     // Pre-loaded terrain texture BLP data (loaded on background thread to avoid
     // blocking file I/O on the main thread during finalizeTile)
-    std::unordered_map<std::string, pipeline::BLPImage> preloadedTextures;
+    pipeline::PreparedTextures preloadedTextures;
     // Their relief (TerrainRenderer::deriveNormalMap), keyed alike; none for
     // a texture whose relief was already in the cache.
-    std::unordered_map<std::string, EncodedNormalMap> preloadedTerrainNormalMaps;
+    std::unordered_map<std::string, std::shared_ptr<const EncodedNormalMap>> preloadedTerrainNormalMaps;
 
     // Pre-decoded M2 model textures (decoded on background thread)
-    std::unordered_map<std::string, pipeline::BLPImage> preloadedM2Textures;
+    pipeline::PreparedTextures preloadedM2Textures;
 
     // Pre-decoded WMO textures (decoded on background thread)
-    std::unordered_map<std::string, pipeline::BLPImage> preloadedWMOTextures;
+    pipeline::PreparedTextures preloadedWMOTextures;
     // Normal/height maps for those WMO textures, derived and encoded with
     // their mips. Keeping this work on terrain workers avoids multi-second
     // main-thread backfill stalls.
-    std::unordered_map<std::string, EncodedNormalMap> preloadedWMONormalMaps;
+    std::unordered_map<std::string, std::shared_ptr<const EncodedNormalMap>> preloadedWMONormalMaps;
 };
 
 /**
@@ -225,6 +227,9 @@ class TerrainManager {
 public:
     TerrainManager();
     ~TerrainManager();
+    [[nodiscard]] pipeline::PreparationCache<EncodedNormalMap>::Stats normalPreparationStats() const {
+        return normalPreparations_.stats();
+    }
     void setJobToken(core::JobGroup::Token token) { mapToken_ = std::move(token); }
 
     /**
@@ -433,6 +438,12 @@ private:
     collision::CollisionWorld* collision_ = nullptr;
     /// How the workers encode WMO normal maps: the device's, read once when
     /// the renderer is set rather than from the workers.
+    // Derived maps have their own recipe (WMO vs terrain) and output encoding.
+    // Shared pins in PendingTile survive eviction while upload is queued.
+    pipeline::PreparationCache<EncodedNormalMap> normalPreparations_{128ull * 1024 * 1024};
+    std::shared_ptr<const EncodedNormalMap> prepareNormalMap(
+        const std::string& path, const pipeline::PreparedTextureRef& texture,
+        bool terrain, NormalMapFormat format);
     NormalMapFormat wmoNormalMapFormat_ = NormalMapFormat::Rgba8;
     /// The same for the ground's relief, read when the terrain renderer is set.
     NormalMapFormat terrainNormalMapFormat_ = NormalMapFormat::Rgba8;

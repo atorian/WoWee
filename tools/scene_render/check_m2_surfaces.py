@@ -16,6 +16,8 @@ def main():
     parser.add_argument('--mixed', action='store_true')
     parser.add_argument('--rebuild', action='store_true')
     parser.add_argument('--software', action='store_true')
+    parser.add_argument('--regions', action='store_true')
+    parser.add_argument('--near-plane', action='store_true')
     args = parser.parse_args()
     binary, out = args.binary.resolve(), args.scratch.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -34,6 +36,17 @@ def main():
                  m2LayerInstances=[{'offset':[0,-2.3,0]},
                                    {'offset':[0,2.3,0], 'interiorAmbient':[.12,.25,.35],
                                     'interiorDirect':[.5,.2,.1]}])
+    if args.regions:
+        # An opaque alpha-key batch stays in the authored forward sequence.
+        # Geometry on both sides forces separate surface runs over the same
+        # screen area, including old keys where the later layer has holes.
+        scene['m2Layers'][2:2] = [
+            {'x':1.8, 'rect':[-1.6,-2.6,1.6,2.6], 'rgba':[120,90,60,255], 'blend':1},
+            {'x':1.5, 'rect':[-1.4,-2.4,1.4,2.4], 'rgba':[60,160,100,255]}]
+        scene['size']=[641,479]  # Partial tiles at the target boundary.
+    if args.near_plane:
+        scene['camera']={'offset':[1.7,0,0], 'lookAt':[3,0,0]}
+        for layer in scene['m2Layers']: layer['flags']=4  # Two sided.
     if args.mixed:
         scene['wmoLayers']=[{'x':4,'rect':[-6,-4,6,4],'rgba':[100,100,120,255],'flags':0},
                             {'x':-1,'rect':[-.5,-4,.5,4],'rgba':[180,80,80,100],'blend':2,'flags':0}]
@@ -48,8 +61,12 @@ def main():
     env.pop('WOWEE_RT_FORCE_SOFTWARE',None)
     if args.software: env['WOWEE_RT_FORCE_SOFTWARE']='1'
     images={}
-    for label, surfaces, mode, serial in [('forward',False,0,False),('surface',True,0,False),
-                                          ('current',True,3,False),('serial',True,3,True)]:
+    cases=[('forward',False,0,False),('surface',True,0,False),
+           ('current',True,3,False),('serial',True,3,True)]
+    if args.regions: cases.append(('full',True,3,False))
+    for label, surfaces, mode, serial in cases:
+        env.pop('WOWEE_SURFACE_FULL_EXTENT',None)
+        if label=='full': env['WOWEE_SURFACE_FULL_EXTENT']='1'
         env.pop('WOWEE_MODEL_SURFACES',None)
         env.pop('WOWEE_SINGLE_THREAD_RECORD',None)
         if surfaces: env['WOWEE_MODEL_SURFACES']='1'
@@ -76,8 +93,13 @@ def main():
     if images['current']!=images['serial']:
         raise RuntimeError('parallel recording changed M2 lighting')
     rt=sum(abs(a-b) for a,b in zip(images['surface'],images['current']))/len(delta)
-    if rt<.01: raise RuntimeError('current RT did not affect M2 material lighting')
+    if args.regions and images['current']!=images['full']:
+        changed=sum(a!=b for a,b in zip(images['current'],images['full']))
+        raise RuntimeError(f'bounded surface runs changed {changed} image channels')
+    if rt<.01 and not args.near_plane: raise RuntimeError('current RT did not affect M2 material lighting')
     report={'msaa':args.msaa,'mixed':args.mixed,'software':args.software,'rebuild':args.rebuild,
+            'regions':args.regions,'near_plane':args.near_plane,
+            'bounded_full_changed_channels':0 if args.regions else None,
             'forward_surface_mean_channel_error':mean,'fraction_error_over_8':substantial,
             'rt_mean_channel_change':rt,'serial_parallel_changed_channels':0}
     (out/'comparison.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')

@@ -13,6 +13,9 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
+#include <future>
+#include <chrono>
+#include <thread>
 
 namespace {
 
@@ -102,4 +105,139 @@ TEST_CASE("a file kept in the cache is shared out, not copied for every reader",
     CHECK((*first)[0] == 7);
 
     CHECK_FALSE(assets.readFileShared("World\\Missing.m2"));
+}
+
+
+namespace {
+class CountingTextureLayer final : public wowee::pipeline::ArchiveLayer {
+public:
+    mutable std::atomic<size_t> reads{0};
+    std::vector<uint8_t> bytes = tinyDxt1Blp();
+    bool contains(const std::string& path) const override {
+        return path == "world\\shared.blp";
+    }
+    std::vector<uint8_t> read(const std::string&) const override {
+        ++reads;
+        return bytes;
+    }
+};
+}
+
+TEST_CASE("texture preparation reuses source reads across tiles and output forms", "[assets][texture-preparation]") {
+    const auto root = wowee::test::makeDataRoot("wowee_texture_preparation", {});
+    wowee::pipeline::AssetManager assets;
+    REQUIRE(assets.initialize(root.string()));
+    auto layer = std::make_shared<CountingTextureLayer>();
+    assets.setArchiveLayer(layer);
+    const auto stored = assets.loadTexture("World/Shared.blp", true);
+    const auto repeated = assets.loadTexture("world\\shared.blp", true);
+    const auto pixels = assets.loadTexture("WORLD/SHARED.BLP", false);
+    REQUIRE(stored.isValid());
+    REQUIRE(repeated.isValid());
+    REQUIRE(pixels.isValid());
+    CHECK(pixels.data.size() == 4 * 4 * 4);
+    CHECK(pixels.data[0] == 255);
+    CHECK(layer->reads.load() == 1);
+}
+
+
+TEST_CASE("shared texture output survives invalidation and never exposes another output form", "[assets][texture-preparation]") {
+    const auto root = wowee::test::makeDataRoot("wowee_texture_shared", {});
+    wowee::pipeline::AssetManager assets;
+    REQUIRE(assets.initialize(root.string()));
+    auto white = std::make_shared<CountingTextureLayer>();
+    assets.setArchiveLayer(white);
+    const auto first = assets.loadTextureShared("World/Shared.blp", true);
+    const auto repeated = assets.loadTextureShared("world\\shared.blp", true);
+    CHECK(first == repeated);
+    const auto rgba = assets.loadTextureShared("world/shared.blp", false);
+    REQUIRE(rgba->image.data.size() == 64);
+    CHECK(rgba->image.data[0] == 255);
+    CHECK(white->reads == 1);
+    auto red = std::make_shared<CountingTextureLayer>();
+    red->bytes[1172] = red->bytes[1174] = 0;
+    red->bytes[1173] = red->bytes[1175] = 0xf8;
+    assets.setArchiveLayer(red);
+    const auto fresh = assets.loadTextureShared("world/shared.blp", false);
+    REQUIRE(fresh->image.data.size() == 64);
+    CHECK(fresh->image.data[0] == 255);
+    CHECK(fresh->image.data[1] == 0);
+    CHECK(rgba->image.data[1] == 255);
+    CHECK(first->generation != fresh->generation);
+    CHECK(red->reads == 1);
+}
+
+namespace {
+class BlockingTextureLayer final : public wowee::pipeline::ArchiveLayer {
+public:
+    mutable std::atomic<size_t> reads{0};
+    mutable std::promise<void> entered;
+    std::shared_future<void> release;
+    explicit BlockingTextureLayer(std::shared_future<void> gate) : release(std::move(gate)) {}
+    bool contains(const std::string& path) const override { return path == "world\\shared.blp"; }
+    std::vector<uint8_t> read(const std::string&) const override {
+        if (++reads == 1) entered.set_value();
+        release.wait();
+        return tinyDxt1Blp();
+    }
+};
+}
+
+TEST_CASE("concurrent tile texture requests join one read without blocking a new asset generation", "[assets][texture-preparation]") {
+    using namespace std::chrono_literals;
+    const auto root = wowee::test::makeDataRoot("wowee_texture_flight", {});
+    wowee::pipeline::AssetManager assets;
+    REQUIRE(assets.initialize(root.string()));
+    std::promise<void> release;
+    auto layer = std::make_shared<BlockingTextureLayer>(release.get_future().share());
+    assets.setArchiveLayer(layer);
+    auto a = std::async(std::launch::async, [&] { return assets.loadTextureShared("world/shared.blp", true); });
+    layer->entered.get_future().wait();
+    auto b = std::async(std::launch::async, [&] { return assets.loadTextureShared("WORLD/SHARED.BLP", true); });
+    const auto end = std::chrono::steady_clock::now() + 5s;
+    while (!assets.texturePreparationStats().joined && std::chrono::steady_clock::now() < end)
+        std::this_thread::yield();
+    const bool joined = assets.texturePreparationStats().joined != 0;
+    auto replacement = std::make_shared<CountingTextureLayer>();
+    assets.setArchiveLayer(replacement);
+    auto fresh = assets.loadTextureShared("world/shared.blp", true);
+    release.set_value();
+    const auto first = a.get(), second = b.get();
+    CHECK(joined);
+    CHECK(first == second);
+    CHECK(first != fresh);
+    CHECK(layer->reads == 1);
+    CHECK(replacement->reads == 1);
+    CHECK(assets.loadTextureShared("world/shared.blp", true) == fresh);
+}
+
+TEST_CASE("failed texture preparation is shared until asset invalidation", "[assets][texture-preparation]") {
+    const auto root = wowee::test::makeDataRoot("wowee_texture_failure", {});
+    wowee::pipeline::AssetManager assets;
+    REQUIRE(assets.initialize(root.string()));
+    auto broken = std::make_shared<CountingTextureLayer>();
+    broken->bytes = {0, 1, 2, 3};
+    assets.setArchiveLayer(broken);
+    CHECK_FALSE(assets.loadTextureShared("world/shared.blp", true)->image.isValid());
+    CHECK_FALSE(assets.loadTextureShared("world/shared.blp", true)->image.isValid());
+    CHECK(broken->reads == 1);
+    assets.setArchiveLayer(std::make_shared<CountingTextureLayer>());
+    CHECK(assets.loadTextureShared("world/shared.blp", true)->image.isValid());
+}
+
+
+TEST_CASE("mutable texture copies can change alpha without changing shared source facts", "[assets][texture-preparation]") {
+    const auto root = wowee::test::makeDataRoot("wowee_texture_mutable", {});
+    wowee::pipeline::AssetManager assets;
+    REQUIRE(assets.initialize(root.string()));
+    assets.setArchiveLayer(std::make_shared<CountingTextureLayer>());
+    const auto source = assets.loadTextureShared("world/shared.blp");
+    REQUIRE(source->image.isValid());
+    CHECK_FALSE(source->image.hasTransparency());
+    auto keyed = assets.loadTexture("world/shared.blp");
+    REQUIRE(keyed.data.size() == 64);
+    keyed.data[3] = 0;
+    CHECK(keyed.hasTransparency());
+    CHECK_FALSE(source->image.hasTransparency());
+    CHECK(source->image.data[3] == 255);
 }

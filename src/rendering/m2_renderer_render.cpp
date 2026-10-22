@@ -1711,6 +1711,7 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
     auto frame = framePool_.acquire();
     frame->time = time;
     frame->cameraPosition = camera.getPosition();
+    frame->cameraRelativeViewProjection = camera.getProjectionMatrix()*glm::mat4(glm::mat3(camera.getViewMatrix()));
     frame->skyHour = skyTimeOfDayHours_;
     frame->suppressStars = suppressBakedStars_;
     frame->skipDetail = skipGroundDetail_;
@@ -1824,7 +1825,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     };
     const auto beginRun=[&](bool nextGeometry) {
         if(cmd)surfacePass_->endRun(SurfacePass::Family::M2);
-        cmd=surfacePass_->beginRun(SurfacePass::Family::M2,nextGeometry);
+        cmd=surfacePass_->beginRun(SurfacePass::Family::M2,nextGeometry,nextGeometry);
         geometry=nextGeometry;activeLayout=geometry?surfaceLayout_:pipelineLayout_;
         currentPipeline=VK_NULL_HANDLE;currentMaterialSet=VK_NULL_HANDLE;
         bindBase();
@@ -1854,6 +1855,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             uint16_t targetLOD;
             glm::mat4 previousFromCurrent{1};
             bool historyValid=false;
+            VkRect2D surfaceRegion{};
         };
         std::vector<PendingInstance> pending;
         pending.reserve(128);
@@ -1918,6 +1920,8 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             vkCmdBindVertexBuffers(cmd, 0, 1, &model.vertexBuffer, &vbOffset);
             vkCmdBindIndexBuffer(cmd, model.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
+            M2PushConstants modelSway;fillSway(modelSway,model,false);
+
             // Write base instance data to SSBO (no texture animation - overridden for tex-anim batches)
             uint32_t baseSSBOOffset = instanceDataCount_;
             size_t writtenInstances = 0;
@@ -1926,9 +1930,16 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 const DrawInstance& inst = drawInstances_[p.draw];
                 if(surfaces) {
                     const auto previous=previousSurfaceTransforms_.find(inst.surfaceLifetime);
-                    M2PushConstants sway;fillSway(sway,model,false);
+                    p.surfaceRegion=surfacePass_->fullRegion();
+                    const bool rigid=!p.useBones && !inst.afloat && modelSway.isFoliage==0;
+                    if(rigid) {
+                        auto relative=inst.modelMatrix;
+                        relative[3]-=glm::vec4(recording_->cameraPosition,0);
+                        p.surfaceRegion=surfacePass_->projectBounds(
+                            recording_->cameraRelativeViewProjection*relative,model.boundMin,model.boundMax);
+                    }
                     p.historyValid=previousValid && previous!=previousSurfaceTransforms_.end() &&
-                        !p.useBones && !inst.afloat && sway.isFoliage==0;
+                        rigid;
                     if(p.historyValid) {
                         auto inverse=glm::inverse(inst.modelMatrix);
                         inverse[3]=inverse*glm::vec4(recording_->cameraPosition,1);
@@ -1982,7 +1993,11 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             while (lodIdx < pending.size()) {
                 uint16_t lod = pending[lodIdx].targetLOD;
                 size_t lodEnd = lodIdx + 1;
-                while (lodEnd < pending.size() && pending[lodEnd].targetLOD == lod) lodEnd++;
+                VkRect2D groupRegion=pending[lodIdx].surfaceRegion;
+                while (lodEnd < pending.size() && pending[lodEnd].targetLOD == lod) {
+                    if(surfaces)groupRegion=SurfacePass::uniteRegions(groupRegion,pending[lodEnd].surfaceRegion);
+                    ++lodEnd;
+                }
                 uint32_t groupSize = static_cast<uint32_t>(lodEnd - lodIdx);
                 uint32_t groupSSBOOffset = baseSSBOOffset + static_cast<uint32_t>(lodIdx);
 
@@ -2106,12 +2121,17 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         : blendPipeline(m2BlendPipeline(drawState.drawBlendMode));
                     if (skyMode_ && drawState.drawBlendMode <= 1) desiredPipeline = scenePipes_.alpha;
                     const bool evaluated=surfaces && (drawState.forceCutout || drawState.drawBlendMode==0);
+                    if(evaluated && (!groupRegion.extent.width || !groupRegion.extent.height))continue;
                     if(surfaces && geometry!=evaluated) {
                         beginRun(evaluated);
                         vkCmdBindVertexBuffers(cmd,0,1,&model.vertexBuffer,&vbOffset);
                         vkCmdBindIndexBuffer(cmd,model.indexBuffer,0,VK_INDEX_TYPE_UINT16);
                     }
-                    if(evaluated)desiredPipeline=drawState.forceCutout?surfaceCutout_:surfaceOpaque_;
+                    if(evaluated) {
+                        desiredPipeline=drawState.forceCutout?surfaceCutout_:surfaceOpaque_;
+                        surfacePass_->includeRegion(SurfacePass::Family::M2,groupRegion);
+                        vkCmdSetScissor(cmd,0,1,&groupRegion);
+                    }
                     if (desiredPipeline != currentPipeline) {
                         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
                         currentPipeline = desiredPipeline;

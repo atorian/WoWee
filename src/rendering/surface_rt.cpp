@@ -64,7 +64,7 @@ void SurfaceRt::createPipelines() {
         requireRt(uniforms_[i].info.pMappedData!=nullptr,"uniform allocation failed");
     }
     VkDescriptorSetLayout layouts[]={setLayout_,scene_.descriptorSetLayout()};
-    VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT,0,12};
+    VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT,0,28};
     VkPipelineLayoutCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     info.setLayoutCount=2;info.pSetLayouts=layouts;info.pushConstantRangeCount=1;info.pPushConstantRanges=&push;
     requireRt(vkCreatePipelineLayout(device,&info,nullptr,&layout_)==VK_SUCCESS,"pipeline layout creation failed");
@@ -156,10 +156,10 @@ void SurfaceRt::prepare(VkExtent2D extent,VkSampleCountFlagBits samples,VkImageV
     vkUpdateDescriptorSets(ctx_.getDevice(),writes.size(),writes.data(),0,nullptr);
 }
 VkDescriptorBufferInfo SurfaceRt::output() const { return {filtered_.buffer,0,outputBytes_}; }
-void SurfaceRt::record(VkCommandBuffer cmd) {
-    static const bool profile=core::envFlagEnabled("WOWEE_SURFACE_RT_PROFILE",false);
-    const bool firstRun=profile && recordedFrame_!=preparedFrame_;
-    if(firstRun)ctx_.gpuMark(cmd,"WMO before first surface RT");
+void SurfaceRt::record(VkCommandBuffer cmd, Profile profile, VkRect2D region) {
+    if(!region.extent.width || !region.extent.height)region={{0,0},extent_};
+    const bool firstRun=profile!=Profile::None;
+    const bool m2=profile==Profile::M2;
     // Orders readers from the previous run/submission before shared scratch is
     // overwritten. The surface render pass publishes its MRT writes to compute.
     barrier(cmd,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,VK_ACCESS_2_MEMORY_WRITE_BIT|VK_ACCESS_2_MEMORY_READ_BIT,
@@ -175,22 +175,22 @@ void SurfaceRt::record(VkCommandBuffer cmd) {
         VK_ACCESS_2_SHADER_STORAGE_READ_BIT|VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
     const VkDescriptorSet sets[]={sets_[slot],scene_.descriptorSet()};
     vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,layout_,0,2,sets,0,nullptr);
-    const uint32_t push[]={sampleCount_,maxDispatch_,filtersPerTile_};
+    const uint32_t push[]={sampleCount_,maxDispatch_,filtersPerTile_,uint32_t(region.offset.x),uint32_t(region.offset.y),region.extent.width,region.extent.height};
     vkCmdPushConstants(cmd,layout_,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(push),push);
     const auto ms=samples_==VK_SAMPLE_COUNT_1_BIT?0:1;
     vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,base_[ms]);
-    vkCmdDispatch(cmd,(extent_.width+15)/16,(extent_.height+15)/16,1);
-    if(firstRun)ctx_.gpuMark(cmd,"surface RT first base");
+    vkCmdDispatch(cmd,(region.extent.width+15)/16,(region.extent.height+15)/16,1);
+    if(firstRun)ctx_.gpuMark(cmd,m2?"M2 surface RT base":"WMO surface RT base");
     barrier(cmd,VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
         VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT|VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
         VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT|VK_ACCESS_2_SHADER_STORAGE_READ_BIT|VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
     vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,extra_[ms]);
     vkCmdDispatchIndirect(cmd,indirect_.buffer,16);
-    if(firstRun)ctx_.gpuMark(cmd,"surface RT first extra");
+    if(firstRun)ctx_.gpuMark(cmd,m2?"M2 surface RT extra":"WMO surface RT extra");
     barrier(cmd,VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
     vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,filter_[ms]);
     vkCmdDispatchIndirect(cmd,indirect_.buffer,32);
-    if(firstRun)ctx_.gpuMark(cmd,"surface RT first filter");
+    if(firstRun)ctx_.gpuMark(cmd,m2?"M2 surface RT filter":"WMO surface RT filter");
     barrier(cmd,VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
     previousCamera_=glm::vec3(frameData_.cameraPos);previousViewProj_=glm::inverse(frameData_.invViewProj);
     previousMode_=int(frameData_.params.x);previousDistance_=frameData_.misc.w;recordedFrame_=preparedFrame_;

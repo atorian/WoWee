@@ -164,11 +164,23 @@ ResourceSample ResourceMonitor::sample(const rendering::Renderer* renderer,
 
     if (assets) {
         out.caches.push_back({"asset files", assets->fileCacheStats()});
+        const auto prepared = assets->texturePreparationStats();
+        out.caches.push_back({"CPU texture preparation", {prepared.entries, prepared.bytes, prepared.budgetBytes}});
+        out.counts.push_back({"texture prep hits", prepared.hits});
+        out.counts.push_back({"texture prep jobs", prepared.misses});
+        out.counts.push_back({"texture prep joined", prepared.joined});
+        out.counts.push_back({"texture prep evictions", prepared.evicted});
         out.counts.push_back({"DBC tables", assets->dbcCacheEntries()});
     }
     if (!renderer) return out;
     sampleVideoMemory(*renderer, now, out);
     if (const auto* terrain = renderer->getTerrainManager()) {
+        const auto prepared = terrain->normalPreparationStats();
+        out.caches.push_back({"CPU normal preparation", {prepared.entries, prepared.bytes, prepared.budgetBytes}});
+        out.counts.push_back({"normal prep hits", prepared.hits});
+        out.counts.push_back({"normal prep jobs", prepared.misses});
+        out.counts.push_back({"normal prep joined", prepared.joined});
+        out.counts.push_back({"normal prep evictions", prepared.evicted});
         out.counts.push_back({"terrain tiles loaded",
                               static_cast<uint64_t>(terrain->getLoadedTileCount())});
         out.counts.push_back({"terrain tiles in flight",

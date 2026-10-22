@@ -1,0 +1,406 @@
+{
+  "date": "2026-10-22",
+  "build": "dev no LTO",
+  "scene": "/mnt/d/games/wowee/build-dev/scratch/gpu-scene-pipeline/m2-surfaces-dalaran-scene.json",
+  "baseline": {
+    "log": "/mnt/d/games/wowee/build-dev/scratch/gpu-scene-pipeline/surface-profile-m2-baseline-wmo-m2.log",
+    "samples": 230,
+    "gpuMs": {
+      "mean": 22.99,
+      "p95": 25.85,
+      "max": 30.13
+    },
+    "stagesMs": {
+      "M2 cull": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "grass cull": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "minimap_composite": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "offscreen_composites": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "terrain_bake": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "shadows": {
+        "mean": 0.42,
+        "p95": 0.54,
+        "max": 0.73
+      },
+      "contact shadows": {
+        "mean": 0.12,
+        "p95": 0.16,
+        "max": 0.37
+      },
+      "volumetric fog": {
+        "mean": 0.28,
+        "p95": 0.34,
+        "max": 0.57
+      },
+      "reflection_pass": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "sky capture": {
+        "mean": 0.03,
+        "p95": 0.03,
+        "max": 0.27
+      },
+      "rt_scene": {
+        "mean": 0.46,
+        "p95": 1.07,
+        "max": 9.45
+      },
+      "scene pass begin": {
+        "mean": 0.02,
+        "p95": 0.02,
+        "max": 0.04
+      },
+      "terrain": {
+        "mean": 0.01,
+        "p95": 0.01,
+        "max": 0.01
+      },
+      "sky": {
+        "mean": 0.72,
+        "p95": 0.96,
+        "max": 1.05
+      },
+      "WMO surface geometry": {
+        "mean": 2.18,
+        "p95": 2.51,
+        "max": 2.64
+      },
+      "WMO surface RT base": {
+        "mean": 3.06,
+        "p95": 3.48,
+        "max": 3.53
+      },
+      "WMO surface RT extra": {
+        "mean": 0.79,
+        "p95": 0.91,
+        "max": 0.94
+      },
+      "WMO surface RT filter": {
+        "mean": 1.2,
+        "p95": 1.32,
+        "max": 1.37
+      },
+      "WMO surface lighting": {
+        "mean": 0.44,
+        "p95": 0.45,
+        "max": 0.5
+      },
+      "wmo": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "selection": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "characters": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "M2 surface geometry": {
+        "mean": 0.15,
+        "p95": 0.17,
+        "max": 0.18
+      },
+      "M2 surface RT base": {
+        "mean": 0.14,
+        "p95": 0.17,
+        "max": 0.2
+      },
+      "M2 surface RT extra": {
+        "mean": 0.06,
+        "p95": 0.07,
+        "max": 0.09
+      },
+      "M2 surface RT filter": {
+        "mean": 0.01,
+        "p95": 0.01,
+        "max": 0.02
+      },
+      "M2 surface lighting": {
+        "mean": 0.04,
+        "p95": 0.05,
+        "max": 0.05
+      },
+      "m2": {
+        "mean": 8.86,
+        "p95": 10.26,
+        "max": 12.62
+      },
+      "water/effects": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.01
+      },
+      "world total": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "rt_lighting": {
+        "mean": 3.03,
+        "p95": 3.62,
+        "max": 3.69
+      },
+      "post-process": {
+        "mean": 0.96,
+        "p95": 1.14,
+        "max": 1.16
+      },
+      "bloom filter": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "interface": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      }
+    },
+    "m2IncludingSurfaceMeanMs": 9.26
+  },
+  "after": {
+    "log": "/mnt/d/games/wowee/build-dev/scratch/gpu-scene-pipeline/surface-profile-m2-regions-wmo-m2.log",
+    "samples": 230,
+    "gpuMs": {
+      "mean": 22.67,
+      "p95": 25.1,
+      "max": 27.37
+    },
+    "stagesMs": {
+      "M2 cull": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.01
+      },
+      "grass cull": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "minimap_composite": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "offscreen_composites": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "terrain_bake": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "shadows": {
+        "mean": 0.42,
+        "p95": 0.49,
+        "max": 0.78
+      },
+      "contact shadows": {
+        "mean": 0.12,
+        "p95": 0.14,
+        "max": 0.37
+      },
+      "volumetric fog": {
+        "mean": 0.29,
+        "p95": 0.54,
+        "max": 0.63
+      },
+      "reflection_pass": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "sky capture": {
+        "mean": 0.03,
+        "p95": 0.03,
+        "max": 0.27
+      },
+      "rt_scene": {
+        "mean": 0.49,
+        "p95": 1.09,
+        "max": 8.02
+      },
+      "scene pass begin": {
+        "mean": 0.02,
+        "p95": 0.02,
+        "max": 0.25
+      },
+      "terrain": {
+        "mean": 0.01,
+        "p95": 0.01,
+        "max": 0.22
+      },
+      "sky": {
+        "mean": 0.73,
+        "p95": 0.97,
+        "max": 1.14
+      },
+      "WMO surface geometry": {
+        "mean": 2.32,
+        "p95": 2.93,
+        "max": 3.19
+      },
+      "WMO surface RT base": {
+        "mean": 3.25,
+        "p95": 3.93,
+        "max": 3.99
+      },
+      "WMO surface RT extra": {
+        "mean": 0.88,
+        "p95": 1.06,
+        "max": 1.35
+      },
+      "WMO surface RT filter": {
+        "mean": 1.33,
+        "p95": 1.65,
+        "max": 1.83
+      },
+      "WMO surface lighting": {
+        "mean": 0.47,
+        "p95": 0.58,
+        "max": 0.59
+      },
+      "wmo": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "selection": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "characters": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "M2 surface geometry": {
+        "mean": 0.17,
+        "p95": 0.22,
+        "max": 0.22
+      },
+      "M2 surface RT base": {
+        "mean": 0.15,
+        "p95": 0.18,
+        "max": 0.2
+      },
+      "M2 surface RT extra": {
+        "mean": 0.06,
+        "p95": 0.08,
+        "max": 0.09
+      },
+      "M2 surface RT filter": {
+        "mean": 0.01,
+        "p95": 0.01,
+        "max": 0.02
+      },
+      "M2 surface lighting": {
+        "mean": 0.05,
+        "p95": 0.05,
+        "max": 0.05
+      },
+      "m2": {
+        "mean": 7.88,
+        "p95": 8.96,
+        "max": 9.12
+      },
+      "water/effects": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.01
+      },
+      "world total": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "rt_lighting": {
+        "mean": 3.03,
+        "p95": 3.63,
+        "max": 3.99
+      },
+      "post-process": {
+        "mean": 0.95,
+        "p95": 1.16,
+        "max": 1.21
+      },
+      "bloom filter": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "interface": {
+        "mean": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      }
+    },
+    "m2IncludingSurfaceMeanMs": 8.32
+  },
+  "m2Runs": {
+    "geometry": 26,
+    "forward": 25,
+    "fullRegionPixels": 91120640,
+    "boundedRegionPixels": 68198656
+  },
+  "imageChangedChannels": 0,
+  "tests": {
+    "cache": {
+      "executables": 3,
+      "cases": 13,
+      "assertions": 157,
+      "passed": true
+    },
+    "boundedEqualsFull": [
+      "MSAA1 mixed WMO/M2",
+      "MSAA4 with target recreation",
+      "eye-plane crossing",
+      "software RT"
+    ],
+    "serialEqualsParallel": true,
+    "rtProbe": [
+      "hardware MSAA1/4",
+      "software MSAA1/4"
+    ],
+    "vulkanValidationErrors": 0,
+    "sweepGuard": "Every sweep at or under its ceiling; unavailable FrameXML probes skipped",
+    "knownEnvironmentDiagnostics": "Only the two pre-existing missing Epic EOS Vulkan layer manifest warnings were excluded; no VUID or synchronization errors."
+  },
+  "notes": [
+    "M2 timing includes first-run component markers plus residual m2 stage; stage p95 values must not be added.",
+    "Regions computed during existing frame-record instance loop from immutable snapshots; no new world traversal.",
+    "Deformed models and boxes crossing the eye plane keep the complete render region.",
+    "Authored geometry/forward order remains unchanged.",
+    "Caches retain at most configured budgets; upload pins can outlive cache eviction.",
+    "Legacy RT for remaining consumers is still present; full pipeline not complete."
+  ]
+}

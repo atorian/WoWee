@@ -835,20 +835,28 @@ TextureRef M2Renderer::loadTexture(const std::string& path) {
     }
 
     // Check pre-decoded BLP cache first (populated by background worker threads)
-    pipeline::BLPImage blp;
-    if (predecodedBLPCache_) {
-        auto pit = predecodedBLPCache_->find(key);
-        if (pit != predecodedBLPCache_->end()) {
-            blp = std::move(pit->second);
-            predecodedBLPCache_->erase(pit);
+    pipeline::PreparedTextureRef prepared;
+    if (preparedTextureCache_) {
+        auto pit = preparedTextureCache_->find(key);
+        if (pit != preparedTextureCache_->end()) {
+            prepared = std::move(pit->second);
+            preparedTextureCache_->erase(pit);
         }
     }
-    if (!blp.isValid()) {
+    if (!prepared && predecodedBLPCache_) {
+        auto ready = predecodedBLPCache_->find(key);
+        if (ready != predecodedBLPCache_->end()) {
+            prepared = std::make_shared<const pipeline::PreparedTexture>(
+                pipeline::PreparedTexture{std::move(ready->second), 0});
+            predecodedBLPCache_->erase(ready);
+        }
+    }
+    if (!prepared) {
         // M2 skins are sampled and their transparency is read from the
         // blocks, so they need no decode.
-        blp = assetManager->loadTexture(key, true);
+        prepared = assetManager->loadTextureShared(key, true);
     }
-    if (!blp.isValid()) {
+    if (!prepared || !prepared->image.isValid()) {
         // Cache misses briefly to avoid repeated expensive MPQ/disk probes.
         failedTextureRetryAt_[key] = lookupSerial + kFailedTextureRetryLookups;
         if (loggedTextureLoadFails_.insert(key).second) {
@@ -856,6 +864,8 @@ TextureRef M2Renderer::loadTexture(const std::string& path) {
         }
         return whiteTexture_;
     }
+
+    const auto& blp = prepared->image;
 
     // Into the shared cache, with whether the texture actually uses alpha and
     // whether that alpha is a silhouette, read from the blocks once

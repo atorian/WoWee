@@ -1,4 +1,5 @@
 #pragma once
+#include "pipeline/prepared_texture.hpp"
 #include "rendering/surface_pass.hpp"
 #include "rendering/scene_view.hpp"
 
@@ -410,12 +411,16 @@ public:
 
     // Pre-decoded BLP cache: set before calling loadModel() to skip main-thread BLP decode
     void setPredecodedBLPCache(std::unordered_map<std::string, pipeline::BLPImage>* cache) { predecodedBLPCache_ = cache; }
+    void setPreparedTextureCache(pipeline::PreparedTextures* cache) { preparedTextureCache_ = cache; }
 
     // Normal/height maps may be made and encoded by terrain workers alongside
     // the decoded diffuse textures. loadTexture() then only performs the
     // bounded GPU upload while building the WMO model on the main thread.
     void setPredecodedNormalMapCache(std::unordered_map<std::string, EncodedNormalMap>* cache) {
         predecodedNormalMapCache_ = cache;
+    }
+    void setPreparedNormalMapCache(std::unordered_map<std::string, std::shared_ptr<const EncodedNormalMap>>* cache) {
+        preparedNormalMapCache_ = cache;
     }
     /// A building texture's normal/height map from its RGBA8 pixels, encoded
     /// as `format` with its mip chain: what a worker prepares for the upload.
@@ -718,7 +723,9 @@ private:
     /// workers' prepared pixels, or - outside streaming - made here.
     TextureRef loadNormalHeightMap(const std::string& resolvedPath, const pipeline::BLPImage* decoded);
     std::unordered_map<std::string, pipeline::BLPImage>* predecodedBLPCache_ = nullptr;
+    pipeline::PreparedTextures* preparedTextureCache_ = nullptr;
     std::unordered_map<std::string, EncodedNormalMap>* predecodedNormalMapCache_ = nullptr;
+    std::unordered_map<std::string, std::shared_ptr<const EncodedNormalMap>>* preparedNormalMapCache_ = nullptr;
 
     /**
      * Allocate a material descriptor set from the pool

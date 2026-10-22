@@ -1382,6 +1382,9 @@ wowee_add_test(test_dds_override
     SOURCES test_dds_override.cpp)
 target_link_libraries(test_dds_override PRIVATE wowee_pipeline wowee_base)
 
+wowee_add_test(test_preparation_cache
+    SOURCES test_preparation_cache.cpp)
+
 # ── test_asset_file_cache ────────────────────────────────────
 # A texture read to be uploaded is not kept a second time in the file cache;
 # a model file read for its own sake is.

@@ -25,10 +25,15 @@ layout(std430,set=0,binding=6) buffer Dispatch {
 layout(std430,set=0,binding=7) readonly buffer Materials { SurfaceMaterial materials[]; };
 layout(std430,set=0,binding=8) readonly buffer PreviousHistory { SurfaceHistory previousHistory[]; };
 layout(std430,set=0,binding=9) buffer CurrentHistory { SurfaceHistory currentHistory[]; };
-layout(push_constant) uniform SurfacePush { uint samples; uint maxDispatch; uint filtersPerTile; } pc;
+layout(push_constant) uniform SurfacePush { uint samples; uint maxDispatch; uint filtersPerTile; uint regionX; uint regionY; uint regionWidth; uint regionHeight; } pc;
 struct Receiver { vec3 position; vec3 normal; float distance; uint material; uint depth; uint normalKey; };
 uint sampleIndex(ivec2 p,uint s) { return (uint(p.y)*uint(pass.sceneExtent.x)+uint(p.x))*pc.samples+s; }
 Receiver receiverAt(ivec2 p,uint s) {
+    // Images outside this run's render area are undefined or belong to an
+    // earlier run. Reject before fetching, including the filter halo.
+    if(any(lessThan(p,ivec2(pc.regionX,pc.regionY))) ||
+       any(greaterThanEqual(p,ivec2(pc.regionX+pc.regionWidth,pc.regionY+pc.regionHeight))))
+        return Receiver(vec3(0),vec3(0),0.0,0u,0u,0u);
     uvec4 keys=LOAD_KEYS(p,s);
     if(keys.w==0u)return Receiver(vec3(0),vec3(0),0.0,0u,0u,0u);
     uvec4 payload=LOAD_PAYLOAD(p,s);

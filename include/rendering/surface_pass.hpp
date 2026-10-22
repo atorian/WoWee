@@ -50,15 +50,21 @@ public:
     // prepare runs on the render owner after the slot fence; each family worker
     // records its runs. finishMaterials runs after the workers join; execute
     // only walks commands, never the producer scene.
-    VkCommandBuffer beginRun(Family family, bool geometry);
+    VkCommandBuffer beginRun(Family family, bool geometry, bool bounded = false);
+    VkRect2D fullRegion() const { return {{0,0},extent_}; }
+    // Conservative raster bounds for an undeformed box. Near-plane crossings
+    // use the whole target; callers with vertex deformation do the same.
+    VkRect2D projectBounds(const glm::mat4& clipFromLocal, glm::vec3 lo, glm::vec3 hi) const;
+    void includeRegion(Family family, VkRect2D region);
+    static VkRect2D uniteRegions(VkRect2D a, VkRect2D b);
     void endRun(Family family);
     void execute(Family family, VkCommandBuffer cmd, VkDescriptorSet frameSet, VkFramebuffer scene,
                  const glm::mat4& inverseViewProjection, VkSubpassContents resumeContents);
 private:
-    void beginGeometry(VkCommandBuffer cmd);
+    void beginGeometry(VkCommandBuffer cmd, VkRect2D region);
     uint32_t appendMaterialBytes(Family family, const void* material);
     void light(Family family, VkCommandBuffer cmd, VkDescriptorSet frameSet, VkFramebuffer scene,
-               const glm::mat4& inverseViewProjection);
+               const glm::mat4& inverseViewProjection, VkRect2D region, bool profile);
     void resumeScene(VkCommandBuffer cmd, VkFramebuffer scene, VkSubpassContents contents);
     void retire();
     void create(VkExtent2D extent, VkImageView depth);
@@ -80,7 +86,7 @@ private:
     std::array<AllocatedBuffer,kSlots> buffers_{};
     std::array<size_t,kSlots> capacities_{};
     std::array<VkDescriptorSet,kSlots> sets_{};
-    struct Run { VkCommandBuffer command; bool geometry; };
+    struct Run { VkCommandBuffer command; bool geometry; VkRect2D region; };
     struct Commands {
         VkCommandPool pool = VK_NULL_HANDLE;
         std::vector<VkCommandBuffer> buffers;

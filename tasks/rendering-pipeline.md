@@ -617,3 +617,59 @@ Prioritize bounded shared immutable preparation/in-flight jobs by asset generati
 path and output recipe, with safe resource pinning and per-key cost counters.
 Do not increase memory budgets blindly or promise this fixes M2's GPU RT cost.
 [Evidence and limitations](performance/dalaran-hd-cache-audit.json).
+
+
+### Bounded M2 surface runs and shared CPU preparation (2026-10-22)
+
+M2 records conservative screen rectangles while writing the existing instance
+snapshot, unions them per authored geometry run, and limits geometry clears,
+RT dispatch and lighting to that rectangle. Rectangles align to global 16 px RT
+tiles; receiver reads reject the outside before fetching, including filter halos.
+Bones, foliage/cloth/water deformation and eye-plane crossings keep full extent.
+No world traversal or reordering of intervening forward draws was added.
+`WOWEE_SURFACE_FULL_EXTENT=1` provides a correctness reference;
+`WOWEE_SURFACE_RT_PROFILE=1` reports run counts/area and first run GPU components.
+
+AssetManager shares immutable prepared textures across tile workers with a
+256 MiB LRU and per-key in-flight joining. Stored and RGBA forms reuse the source;
+asset generations detach obsolete in-flight work. Terrain/WMO normal preparation
+has a separate 128 MiB LRU keyed by source generation, recipe and output format.
+Queued uploads pin results. Mutable legacy callers receive independent copies
+with invalidated alpha analysis. Retention budgets do not bound outstanding pins;
+filesystem hot reload and the remaining mutable entity/spell APIs were not redesigned.
+
+Validation: 157 cache assertions/13 cases pass, including fail-before reproduction
+(three source reads instead of one), concurrent invalidation, eviction pins and
+exception propagation. Bounded/full and serial/parallel images match exactly in
+mixed WMO/M2, MSAA 1/4, target recreation, eye-plane and software RT fixtures.
+Hardware/software SurfaceRt probes pass. Synchronization validation reports no
+new errors; only the two known absent Epic overlay manifests were excluded.
+`sweep_guard` passes its available checks; FrameXML probes without their runner
+are explicitly skipped. Client, scene_render and rt_probe builds pass.
+
+Isolated Dalaran: 26 geometry/25 forward M2 runs remain, but run area falls from
+91,120,640 to 68,198,656 pixels (-25.2%). M2 including current RT falls 9.26→8.32 ms;
+whole GPU 22.99→22.67 ms. The output matches the saved image bit for bit.
+[Diagnostic measurements](performance/dalaran-m2-regions.json).
+
+Full current-HD replay, 60 second settle, 760 samples:
+
+| Metric | Saved warm 60 | New cache + regions |
+|---|---:|---:|
+| FPS from producer intervals |30.670|32.985|
+| Frame mean / p95 / p99, ms |32.605 /55.679 /73.691|30.317 /49.874 /68.807|
+| GPU M2 incl. RT mean, ms |10.330|9.261|
+| CPU extraction mean, ms |10.692|10.098|
+| DDS reads / repeated reads |947 /622|500 /175|
+| Repeated logical DDS bytes, MiB |818.21|228.35|
+| Peak private bytes, GiB |14.16|14.31|
+
+The observed FPS increase is 7.5%, with a smaller viewport in the new full run
+(2560 x 1369 versus 2560 x 1392, 1.65% fewer pixels) and 418 initial characters versus 419.
+It is not a controlled code only percentage. Twenty measured DDS reads still
+repeat warmup paths after eviction. Memory did not decrease: the bounded caches
+trade about 151 MiB additional peak private bytes for fewer repeated preparations.
+[Full replay, memory, cache counters and caveats](performance/dalaran-m2-regions-cache-replay.json).
+
+The complete pipeline is still unfinished: remaining consumers use legacy RT,
+and deformed M2 and ordered forward boundaries still carry substantial GPU cost.

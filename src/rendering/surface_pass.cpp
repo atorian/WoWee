@@ -4,7 +4,10 @@
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_shader.hpp"
 #include "core/logger.hpp"
+#include "core/env_flag.hpp"
 #include <cstring>
+#include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 namespace wowee::rendering {
@@ -188,7 +191,42 @@ void SurfacePass::finishMaterials() {
     requireSurface(vmaFlushAllocation(ctx_.getAllocator(),buffers_[ctx_.getCurrentFrame()].allocation,
         0,VK_WHOLE_SIZE)==VK_SUCCESS,"surface material upload flush failed");
 }
-VkCommandBuffer SurfacePass::beginRun(Family family,bool geometry) {
+VkRect2D SurfacePass::projectBounds(const glm::mat4& clipFromLocal,glm::vec3 lo,glm::vec3 hi) const {
+    static const bool full=core::envFlagEnabled("WOWEE_SURFACE_FULL_EXTENT",false);
+    if(full)return fullRegion();
+    glm::vec2 minimum(1.f),maximum(-1.f);
+    for(unsigned i=0;i<8;++i) {
+        const glm::vec4 clip=clipFromLocal*glm::vec4(i&1?hi.x:lo.x,i&2?hi.y:lo.y,i&4?hi.z:lo.z,1);
+        if(!std::isfinite(clip.x) || !std::isfinite(clip.y) || !std::isfinite(clip.w) || clip.w<=0.f)
+            return fullRegion();
+        const glm::vec2 ndc=glm::vec2(clip)/clip.w;
+        minimum=glm::min(minimum,ndc);maximum=glm::max(maximum,ndc);
+    }
+    // Outward rounding plus a pixel protects raster/sample rounding. Align to
+    // RT tiles so each invocation still owns the same global 2x2 receivers.
+    const auto axis=[](float lo,float hi,uint32_t extent) {
+        const float a=std::clamp((lo*.5f+.5f)*extent-1.f,0.f,float(extent));
+        const float b=std::clamp((hi*.5f+.5f)*extent+1.f,0.f,float(extent));
+        const uint32_t first=uint32_t(std::floor(a))/16u*16u;
+        const uint32_t last=std::min(extent,(uint32_t(std::ceil(b))+15u)/16u*16u);
+        return std::pair{first,last};
+    };
+    const auto x=axis(minimum.x,maximum.x,extent_.width),y=axis(minimum.y,maximum.y,extent_.height);
+    return {{int32_t(x.first),int32_t(y.first)},{x.second-x.first,y.second-y.first}};
+}
+VkRect2D SurfacePass::uniteRegions(VkRect2D a,VkRect2D b) {
+    if(!a.extent.width || !a.extent.height)return b;
+    if(!b.extent.width || !b.extent.height)return a;
+    const auto right=std::max(a.offset.x+int32_t(a.extent.width),b.offset.x+int32_t(b.extent.width));
+    const auto bottom=std::max(a.offset.y+int32_t(a.extent.height),b.offset.y+int32_t(b.extent.height));
+    const VkOffset2D offset{std::min(a.offset.x,b.offset.x),std::min(a.offset.y,b.offset.y)};
+    return {offset,{uint32_t(right-offset.x),uint32_t(bottom-offset.y)}};
+}
+void SurfacePass::includeRegion(Family family,VkRect2D region) {
+    auto& target=commands_[ctx_.getCurrentFrame()][size_t(family)].runs.back().region;
+    target=uniteRegions(target,region);
+}
+VkCommandBuffer SurfacePass::beginRun(Family family,bool geometry,bool bounded) {
     auto& commands = commands_[ctx_.getCurrentFrame()][size_t(family)];
     const size_t index = commands.runs.size();
     if (index == commands.buffers.size()) {
@@ -210,7 +248,7 @@ VkCommandBuffer SurfacePass::beginRun(Family family,bool geometry) {
     begin.pInheritanceInfo = &inheritance;
     requireSurface(vkBeginCommandBuffer(cmd, &begin) == VK_SUCCESS, "worker command recording failed");
     viewport(cmd, extent_);
-    commands.runs.push_back({cmd, geometry});
+    commands.runs.push_back({cmd, geometry,bounded?VkRect2D{}:fullRegion()});
     return cmd;
 }
 void SurfacePass::endRun(Family family) {
@@ -220,11 +258,25 @@ void SurfacePass::endRun(Family family) {
 void SurfacePass::execute(Family family,VkCommandBuffer cmd, VkDescriptorSet frameSet, VkFramebuffer scene,
         const glm::mat4& inverseViewProjection, VkSubpassContents resumeContents) {
     auto contents = resumeContents;
-    for (const auto& run : commands_[ctx_.getCurrentFrame()][size_t(family)].runs) {
+    static const bool profile=core::envFlagEnabled("WOWEE_SURFACE_RT_PROFILE",false);
+    bool firstGeometry=true;
+    const auto& runs=commands_[ctx_.getCurrentFrame()][size_t(family)].runs;
+    if(profile && ctx_.frameNumber()%120==0) {
+        size_t geometryRuns=0;uint64_t pixels=0;for(const auto& run:runs)if(run.geometry){++geometryRuns;pixels+=uint64_t(run.region.extent.width)*run.region.extent.height;}
+        LOG_INFO("Surface runs: family=",family==Family::M2?"M2":"WMO",
+            " geometry=",geometryRuns," forward=",runs.size()-geometryRuns,
+            " materials=",materialsWritten_[size_t(family)]," pixels=",pixels);
+    }
+    for (const auto& run : runs) {
         if (run.geometry) {
-            beginGeometry(cmd);
+            if(!run.region.extent.width || !run.region.extent.height)continue;
+            beginGeometry(cmd,run.region);
             vkCmdExecuteCommands(cmd, 1, &run.command);
-            light(family,cmd, frameSet, scene, inverseViewProjection);
+            const bool mark=profile && firstGeometry;
+            if(mark)ctx_.gpuMark(cmd,family==Family::M2?"M2 surface geometry":"WMO surface geometry");
+            light(family,cmd, frameSet, scene, inverseViewProjection,run.region,mark);
+            if(mark)ctx_.gpuMark(cmd,family==Family::M2?"M2 surface lighting":"WMO surface lighting");
+            firstGeometry=false;
             contents = VK_SUBPASS_CONTENTS_INLINE;
         } else {
             if (contents != VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS) {
@@ -238,12 +290,12 @@ void SurfacePass::execute(Family family,VkCommandBuffer cmd, VkDescriptorSet fra
     if (contents != resumeContents) {
         vkCmdEndRenderPass(cmd);
         resumeScene(cmd, scene, resumeContents);
-    }
+    } else if(contents==VK_SUBPASS_CONTENTS_INLINE) viewport(cmd,extent_);
 }
-void SurfacePass::beginGeometry(VkCommandBuffer cmd) {
+void SurfacePass::beginGeometry(VkCommandBuffer cmd,VkRect2D region) {
     vkCmdEndRenderPass(cmd);
     VkClearValue clear[3]{};VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    begin.renderPass=pass_;begin.framebuffer=framebuffer_;begin.renderArea.extent=extent_;
+    begin.renderPass=pass_;begin.framebuffer=framebuffer_;begin.renderArea=region;
     begin.clearValueCount=3;begin.pClearValues=clear;
     vkCmdBeginRenderPass(cmd,&begin,VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
 }
@@ -253,10 +305,12 @@ void SurfacePass::resumeScene(VkCommandBuffer cmd,VkFramebuffer scene,VkSubpassC
     vkCmdBeginRenderPass(cmd,&begin,contents);
     if(contents==VK_SUBPASS_CONTENTS_INLINE) viewport(cmd,extent_);
 }
-void SurfacePass::light(Family family,VkCommandBuffer cmd,VkDescriptorSet frameSet,VkFramebuffer scene,const glm::mat4& inverseViewProjection) {
+void SurfacePass::light(Family family,VkCommandBuffer cmd,VkDescriptorSet frameSet,VkFramebuffer scene,const glm::mat4& inverseViewProjection,VkRect2D region,bool profile) {
     vkCmdEndRenderPass(cmd);
-    if(rtMode_!=0)rt_->record(cmd);
+    if(rtMode_!=0)rt_->record(cmd,!profile?SurfaceRt::Profile::None:
+        family==Family::M2?SurfaceRt::Profile::M2:SurfaceRt::Profile::Wmo,region);
     resumeScene(cmd,scene,VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdSetScissor(cmd,0,1,&region);
     vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_[size_t(family)]);
     VkDescriptorSet sets[]{frameSet,sets_[ctx_.getCurrentFrame()]};
     vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,layout_,0,2,sets,0,nullptr);

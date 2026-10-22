@@ -1,4 +1,5 @@
 #pragma once
+#include "pipeline/prepared_texture.hpp"
 
 #include "rendering/view_distance.hpp"
 #include "rendering/terrain_depth.hpp"
@@ -196,7 +197,7 @@ public:
 
     void removeTile(int tileX, int tileY);
 
-    void uploadPreloadedTextures(const std::unordered_map<std::string, pipeline::BLPImage>& textures);
+    void uploadPreloadedTextures(const pipeline::PreparedTextures& textures);
 
     /// The relief of a tileset texture, derived from its colours on a loading
     /// worker and encoded with its mips. Pure: no Vulkan, safe off the main

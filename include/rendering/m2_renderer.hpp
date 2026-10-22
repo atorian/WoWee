@@ -1,4 +1,5 @@
 #pragma once
+#include "pipeline/prepared_texture.hpp"
 #include "rendering/paged_frame_buffer.hpp"
 #include "rendering/surface_identity.hpp"
 #include "rendering/range_allocator.hpp"
@@ -939,6 +940,7 @@ public:
     // Pre-decoded BLP cache: set by terrain manager before calling loadModel()
     // so loadTexture() can skip the expensive assetManager->loadTexture() call.
     void setPredecodedBLPCache(std::unordered_map<std::string, pipeline::BLPImage>* cache) { predecodedBLPCache_ = cache; }
+    void setPreparedTextureCache(pipeline::PreparedTextures* cache) { preparedTextureCache_ = cache; }
 
 private:
     bool initialized_ = false;
@@ -1287,6 +1289,7 @@ private:
     /// business (batchImageInfo), not the texture's.
     TextureRef loadTexture(const std::string& path);
     std::unordered_map<std::string, pipeline::BLPImage>* predecodedBLPCache_ = nullptr;
+    pipeline::PreparedTextures* preparedTextureCache_ = nullptr;
 
     /// When a key that would not load, or found no room, is next worth a read.
     std::unordered_map<std::string, uint64_t> failedTextureRetryAt_;
@@ -1699,6 +1702,7 @@ public:
         float maxPossibleDistSq = 0, time = 0;
         uint64_t sceneIdentity = 0;
         glm::vec3 cameraPosition{0};
+        glm::mat4 cameraRelativeViewProjection{1};
         float skyHour = 12;
         bool suppressStars = false, skipDetail = false;
     };

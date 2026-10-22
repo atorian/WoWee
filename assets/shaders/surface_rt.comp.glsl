@@ -106,7 +106,7 @@ void main() {
 #else
     if(gl_LocalInvocationIndex==0u){unresolved=0u;occupied=0u;}
     barrier();
-    uint tile=gl_WorkGroupID.y*tileWidth()+gl_WorkGroupID.x;
+    uint tile=(gl_WorkGroupID.y+pc.regionY/16u)*tileWidth()+gl_WorkGroupID.x+pc.regionX/16u;
     ivec2 base=tileOrigin(tile)+ivec2(gl_LocalInvocationIndex%8u,gl_LocalInvocationIndex/8u)*2;
     bool covered=traceBlock(base);
     barrier();

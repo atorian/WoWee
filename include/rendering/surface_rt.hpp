@@ -13,7 +13,8 @@ public:
     void prepare(VkExtent2D extent, VkSampleCountFlagBits samples,
                  VkImageView keys, VkImageView payload, VkDescriptorBufferInfo materials,
                  int mode, const RtLighting::FrameInputs& inputs);
-    void record(VkCommandBuffer cmd);
+    enum class Profile { None, Wmo, M2 };
+    void record(VkCommandBuffer cmd, Profile profile = Profile::None, VkRect2D region = {});
     // Only samples with a nonzero current material key may be read. Completely
     // uncovered tiles are untouched; consumers must check coverage first.
     VkDescriptorBufferInfo output() const;

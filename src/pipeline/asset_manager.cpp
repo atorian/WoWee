@@ -63,6 +63,8 @@ bool AssetManager::initialize(const std::string& dataPath_) {
     LOG_INFO("Initializing asset manager with data path: ", dataPath);
 
     setupFileCacheBudget();
+    if (const size_t mb = parseEnvSizeMB("WOWEE_TEXTURE_PREPARATION_MB"))
+        texturePreparations_.setBudget(mb * 1024 * 1024);
 
     std::string manifestPath = dataPath + "/manifest.json";
     if (!std::filesystem::exists(manifestPath)) {
@@ -141,6 +143,11 @@ void AssetManager::shutdown() {
     }
 
     LOG_INFO("Shutting down asset manager");
+    const auto textures = texturePreparationStats();
+    LOG_INFO("Texture preparation cache: ", textures.hits, " hits, ", textures.misses,
+             " preparations, ", textures.joined, " joined, ", textures.evicted, " evictions, ",
+             textures.oversized, " oversized, ", textures.bytes, " retained bytes / ",
+             textures.budgetBytes, " budget, ", textures.entries, " entries");
 
     if (fileCacheHits + fileCacheMisses > 0) {
         float hitRate = static_cast<float>(fileCacheHits) / (fileCacheHits + fileCacheMisses) * 100.0f;
@@ -247,6 +254,8 @@ bool AssetManager::looseFileExists(const std::string& filesystemPath) const {
 
 bool AssetManager::setBaseFallbackPath(const std::string& basePath,
                                        const std::string& expansionId) {
+    // Removing/changing the fallback changes texture sources as well as files.
+    clearCache();
     if (baseFallbackHits_.load(std::memory_order_relaxed) > 0) {
         // Said on the way out rather than per lookup. Next to a warning about
         // an unlabelled or forced base, this is how much of what was on screen
@@ -307,6 +316,59 @@ bool AssetManager::setBaseFallbackPath(const std::string& basePath,
 }
 
 BLPImage AssetManager::loadTexture(const std::string& path, bool keepCompressed) {
+    BLPImage image = loadTextureShared(path, keepCompressed)->image;
+    // Value callers own mutable pixels (e.g. character magenta-key/composites).
+    // The shared facts describe the immutable source, not their future edits.
+    image.invalidateAlphaAnalysis();
+    return image;
+}
+
+PreparedTextureRef AssetManager::loadTextureShared(const std::string& path, bool keepCompressed) {
+    if (!initialized) {
+        LOG_ERROR("AssetManager not initialized - texture is unavailable: ", path);
+        return std::make_shared<const PreparedTexture>();
+    }
+    const std::string normalized = normalizePath(path);
+    const bool bc = blockCompressionSupported();
+    keepCompressed = keepCompressed && bc;
+    // Device capability changes the source policy (DDS is unavailable without BC).
+    const std::string key = normalized + (keepCompressed ? "|blocks" : bc ? "|rgba-bc" : "|rgba");
+    return texturePreparations_.get(key, [&](uint64_t generation) -> PreparedTextureRef {
+        PreparedTexture result;
+        result.generation = generation;
+        if (normalized.empty()) return std::make_shared<const PreparedTexture>(std::move(result));
+        if (!keepCompressed && bc) {
+            const auto stored = loadTextureShared(normalized, true);
+            // A clear may separate this request from its nested source request.
+            // Label decoded pixels with the source epoch, not the outer flight.
+            result.generation = stored->generation;
+            if (!stored->image.isBlockCompressed()) {
+                // PNG/uncompressed BLP already is RGBA; share its allocation.
+                return stored;
+            } else {
+                result.image.width = stored->image.width;
+                result.image.height = stored->image.height;
+                result.image.channels = stored->image.channels;
+                result.image.format = stored->image.format;
+                result.image.compression = stored->image.compression;
+                result.image.data = BLPLoader::decodeBaseLevel(stored->image);
+                // Preserve the existing diagnostic/fallback for unsupported DDS.
+                if (result.image.data.empty()) result.image = loadTextureUncached(normalized, false);
+            }
+        } else {
+            result.image = loadTextureUncached(normalized, keepCompressed);
+        }
+        if (result.image.isValid()) result.image.analyzeAlpha();
+        return std::make_shared<const PreparedTexture>(std::move(result));
+    }, [](const PreparedTexture& prepared) {
+        const auto& image = prepared.image;
+        size_t bytes = image.data.capacity() + image.mipmaps.capacity() * sizeof(std::vector<uint8_t>);
+        for (const auto& mip : image.mipmaps) bytes += mip.capacity();
+        return bytes;
+    });
+}
+
+BLPImage AssetManager::loadTextureUncached(const std::string& path, bool keepCompressed) {
     ZoneScopedN("AssetManager::loadTexture");
     // Callers ask for the blocks to save the decompression and the memory. On a
     // GPU that cannot sample them the saving is a blank surface, so the answer
@@ -942,7 +1004,10 @@ void AssetManager::clearCache() {
     std::lock_guard<std::shared_mutex> lock(cacheMutex);
     ++cacheGeneration_;
     dbcCache.clear();
-    LOG_INFO("Cleared asset cache (DBC + file cache)");
+    // Publish the preparation generation after all source-cache invalidations.
+    // A reader between those clears still belongs to the old preparation epoch.
+    texturePreparations_.clear();
+    LOG_INFO("Cleared asset cache (DBC + files + texture preparation)");
 }
 std::string AssetManager::normalizePath(const std::string& path) const {
     std::string normalized = path;
