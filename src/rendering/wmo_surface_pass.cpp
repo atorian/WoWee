@@ -23,7 +23,11 @@ void viewport(VkCommandBuffer cmd,VkExtent2D extent) {
 }
 WmoSurfacePass::WmoSurfacePass(VkContext& ctx,VkDescriptorSetLayout frameLayout)
     :ctx_(ctx),frameLayout_(frameLayout) {}
-WmoSurfacePass::~WmoSurfacePass() { retire(); }
+WmoSurfacePass::~WmoSurfacePass() {
+    retire();
+    DeferredResources release(ctx_);
+    for (auto& commands : commands_) release.release(commands.pool, vkDestroyCommandPool);
+}
 void WmoSurfacePass::retire() {
     DeferredResources release(ctx_);
     release.release(framebuffer_, vkDestroyFramebuffer); release.destroy(pipeline_); release.destroy(layout_);
@@ -113,6 +117,16 @@ void WmoSurfacePass::prepare(VkExtent2D extent,VkImageView depth,TargetVersion v
        samples_!=ctx_.getMsaaSamples() || colorFormat_!=ctx_.getSwapchainFormat() || depthFormat_!=ctx_.getDepthFormat()) create(extent,depth);
     targetVersion_=version;
     const uint32_t slot=ctx_.getCurrentFrame();
+    auto& commands = commands_[slot];
+    if (!commands.pool) {
+        VkCommandPoolCreateInfo info{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        info.queueFamilyIndex = ctx_.getGraphicsQueueFamily();
+        requireSurface(vkCreateCommandPool(ctx_.getDevice(), &info, nullptr, &commands.pool) == VK_SUCCESS,
+                       "worker command pool creation failed");
+    }
+    requireSurface(vkResetCommandPool(ctx_.getDevice(), commands.pool, 0) == VK_SUCCESS,
+                   "worker command pool reset failed");
+    commands.runs.clear();
     materialLimit_=materialCapacity; materialsWritten_=0;
     const size_t bytes=std::max(size_t(1),materialCapacity)*sizeof(Material);
     VkPhysicalDeviceProperties props{};vkGetPhysicalDeviceProperties(ctx_.getPhysicalDevice(),&props);
@@ -148,12 +162,64 @@ void WmoSurfacePass::finishMaterials() {
     requireSurface(vmaFlushAllocation(ctx_.getAllocator(),buffers_[ctx_.getCurrentFrame()].allocation,
         0,VK_WHOLE_SIZE)==VK_SUCCESS,"surface material upload flush failed");
 }
+VkCommandBuffer WmoSurfacePass::beginRun(bool geometry) {
+    auto& commands = commands_[ctx_.getCurrentFrame()];
+    const size_t index = commands.runs.size();
+    if (index == commands.buffers.size()) {
+        VkCommandBufferAllocateInfo info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        info.commandPool = commands.pool;
+        info.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+        info.commandBufferCount = 1;
+        VkCommandBuffer buffer = VK_NULL_HANDLE;
+        requireSurface(vkAllocateCommandBuffers(ctx_.getDevice(), &info, &buffer) == VK_SUCCESS,
+                       "worker command buffer allocation failed");
+        commands.buffers.push_back(buffer);
+    }
+    const auto cmd = commands.buffers[index];
+    VkCommandBufferInheritanceInfo inheritance{VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO};
+    inheritance.renderPass = geometry ? pass_ : ctx_.getSceneContinueRenderPass();
+    // No framebuffer binding: the run remains valid for the current scene target.
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT | VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
+    begin.pInheritanceInfo = &inheritance;
+    requireSurface(vkBeginCommandBuffer(cmd, &begin) == VK_SUCCESS, "worker command recording failed");
+    viewport(cmd, extent_);
+    commands.runs.push_back({cmd, geometry});
+    return cmd;
+}
+void WmoSurfacePass::endRun() {
+    requireSurface(vkEndCommandBuffer(commands_[ctx_.getCurrentFrame()].runs.back().command) == VK_SUCCESS,
+                   "worker command recording completion failed");
+}
+void WmoSurfacePass::execute(VkCommandBuffer cmd, VkDescriptorSet frameSet, VkFramebuffer scene,
+        const glm::mat4& inverseViewProjection, VkSubpassContents resumeContents) {
+    auto contents = resumeContents;
+    for (const auto& run : commands_[ctx_.getCurrentFrame()].runs) {
+        if (run.geometry) {
+            beginGeometry(cmd);
+            vkCmdExecuteCommands(cmd, 1, &run.command);
+            light(cmd, frameSet, scene, inverseViewProjection);
+            contents = VK_SUBPASS_CONTENTS_INLINE;
+        } else {
+            if (contents != VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS) {
+                vkCmdEndRenderPass(cmd);
+                resumeScene(cmd, scene, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+            }
+            vkCmdExecuteCommands(cmd, 1, &run.command);
+            contents = VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS;
+        }
+    }
+    if (contents != resumeContents) {
+        vkCmdEndRenderPass(cmd);
+        resumeScene(cmd, scene, resumeContents);
+    }
+}
 void WmoSurfacePass::beginGeometry(VkCommandBuffer cmd) {
     vkCmdEndRenderPass(cmd);
     VkClearValue clear[3]{};VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     begin.renderPass=pass_;begin.framebuffer=framebuffer_;begin.renderArea.extent=extent_;
     begin.clearValueCount=3;begin.pClearValues=clear;
-    vkCmdBeginRenderPass(cmd,&begin,VK_SUBPASS_CONTENTS_INLINE);viewport(cmd,extent_);
+    vkCmdBeginRenderPass(cmd,&begin,VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
 }
 void WmoSurfacePass::resumeScene(VkCommandBuffer cmd,VkFramebuffer scene,VkSubpassContents contents) {
     VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};

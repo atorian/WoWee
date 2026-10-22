@@ -264,9 +264,10 @@ public:
     struct Frame;
     std::shared_ptr<const Frame> extract(const Camera& camera, const glm::vec3& viewer,
                                         const std::vector<LocalLight>& lights, const SceneView* reflection = nullptr);
-    void renderSurface(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
-                       VkFramebuffer scene, VkImageView depth, VkExtent2D extent,
-                       WmoSurfacePass::TargetVersion version, VkSubpassContents resumeContents);
+    void prepareSurface(VkImageView depth, VkExtent2D extent, WmoSurfacePass::TargetVersion version);
+    void recordSurface(VkDescriptorSet perFrameSet, const Camera& camera);
+    void executeSurface(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
+                        VkFramebuffer scene, VkSubpassContents resumeContents);
     void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
     /// The passes that draw the buildings in colour. Each culls into a draw
     /// list of its own: the water's reflection is recorded on the main thread

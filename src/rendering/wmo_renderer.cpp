@@ -1149,14 +1149,13 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
     if (pass == Pass::View) viewDrawCallCount_ = draws;
 }
 
-void WMORenderer::renderSurface(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
-        VkFramebuffer scene, VkImageView depth, VkExtent2D extent,
-        WmoSurfacePass::TargetVersion version, VkSubpassContents resumeContents) {
+void WMORenderer::prepareSurface(VkImageView depth, VkExtent2D extent,
+        WmoSurfacePass::TargetVersion version) {
     if (recording_->wireframe) {
         LOG_ERROR("WMO evaluated-surface wireframe is not implemented - refusing mismatched rendering");
         throw std::runtime_error("WMO surface wireframe unsupported");
     }
-    if (recording_->view.surfaceMaterialCapacity==0) { viewDrawCallCount_=0; return; }
+    if (recording_->view.surfaceMaterialCapacity == 0) return;
     if (!surfacePass_) surfacePass_=std::make_unique<WmoSurfacePass>(*vkCtx_,frameSetLayout_);
     surfacePass_->prepare(extent,depth,version,recording_->view.surfaceMaterialCapacity);
     if (surfacePipelinePass_!=surfacePass_->geometryPass()) {
@@ -1182,15 +1181,17 @@ void WMORenderer::renderSurface(VkCommandBuffer cmd, VkDescriptorSet perFrameSet
         }
         surfacePipelinePass_=surfacePass_->geometryPass();
     }
-    // Invert around the camera. Inverting a continent-sized translation loses
-    // precision before the perspective divide, visible in specular/shadow edges.
-    glm::mat4 rotation=camera.getViewMatrix();
-    rotation[3]=glm::vec4(0,0,0,1);
-    const glm::mat4 inverse=glm::inverse(camera.getProjectionMatrix()*rotation);
+}
+
+void WMORenderer::recordSurface(VkDescriptorSet perFrameSet, const Camera& camera) {
+    viewDrawCallCount_ = 0;
+    if (recording_->view.surfaceMaterialCapacity == 0) return;
     const glm::vec4 options(float(recording_->normalMap),float(recording_->pom),float(recording_->samples),recording_->normalStrength);
-    // Enter inline scene recording even when the surrounding pass uses secondaries.
-    vkCmdEndRenderPass(cmd);surfacePass_->resumeScene(cmd,scene,VK_SUBPASS_CONTENTS_INLINE);
-    bool geometry=false;uint32_t draws=0;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    ::VkBuffer boundVertex = VK_NULL_HANDLE, boundIndex = VK_NULL_HANDLE;
+    VkDescriptorSet boundMaterial = VK_NULL_HANDLE;
+    bool geometry = false;
+    uint32_t draws = 0;
     for (const auto& entry : recording_->view.drawn()) {
         for (const uint32_t index : entry.groups) {
             const auto& kept=recording_->groups[index];
@@ -1201,9 +1202,6 @@ void WMORenderer::renderSurface(VkCommandBuffer cmd, VkDescriptorSet perFrameSet
                 if (glm::dot(center-camera.getPosition(),center-camera.getPosition())<196.f*196.f) continue;
             }
             if (!group.vertexBuffer || !group.indexBuffer) continue;
-            VkDeviceSize offset=0;
-            vkCmdBindVertexBuffers(cmd,0,1,&group.vertexBuffer,&offset);
-            vkCmdBindIndexBuffer(cmd,group.indexBuffer,0,VK_INDEX_TYPE_UINT16);
             for (const auto& batch:group.mergedBatches) {
                 if (!batch.materialSet) continue;
                 const bool opaque=!batch.isTransparent;
@@ -1211,16 +1209,37 @@ void WMORenderer::renderSurface(VkCommandBuffer cmd, VkDescriptorSet perFrameSet
                     LOG_ERROR("WMO blended pipeline unavailable - surface frame cannot be rendered");
                     throw std::runtime_error("WMO blended pipeline unavailable");
                 }
-                if (opaque && !geometry) {surfacePass_->beginGeometry(cmd);geometry=true;}
-                if (!opaque && geometry) {surfacePass_->light(cmd,perFrameSet,scene,inverse);geometry=false;}
                 const auto layout=opaque?surfaceLayout_:pipelineLayout_;
-                vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,opaque?surfacePipeline_:transparentPipeline_);
-                VkDescriptorSet sets[]{perFrameSet,batch.materialSet};
-                vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,layout,0,2,sets,0,nullptr);
+                if (!cmd || opaque != geometry) {
+                    if (cmd) surfacePass_->endRun();
+                    cmd = surfacePass_->beginRun(opaque);
+                    geometry = opaque;
+                    boundVertex = boundIndex = VK_NULL_HANDLE;
+                    boundMaterial = VK_NULL_HANDLE;
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        opaque ? surfacePipeline_ : transparentPipeline_);
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        layout, 0, 1, &perFrameSet, 0, nullptr);
+                    vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                        96, sizeof(options), &options);
+                }
+                if (boundVertex != group.vertexBuffer) {
+                    VkDeviceSize offset = 0;
+                    vkCmdBindVertexBuffers(cmd, 0, 1, &group.vertexBuffer, &offset);
+                    boundVertex = group.vertexBuffer;
+                }
+                if (boundIndex != group.indexBuffer) {
+                    vkCmdBindIndexBuffer(cmd, group.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+                    boundIndex = group.indexBuffer;
+                }
+                if (boundMaterial != batch.materialSet) {
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        layout, 1, 1, &batch.materialSet, 0, nullptr);
+                    boundMaterial = batch.materialSet;
+                }
                 WMOPushConstants push{};push.model=entry.modelMatrix;push.localLights=kept.lights;
                 push.cloth={batch.clothTop,batch.clothDrop,batch.clothCentreX,batch.clothCentreY};
                 vkCmdPushConstants(cmd,layout,VK_SHADER_STAGE_VERTEX_BIT,0,sizeof(push),&push);
-                vkCmdPushConstants(cmd,layout,VK_SHADER_STAGE_FRAGMENT_BIT,96,sizeof(options),&options);
                 if (opaque) {
                     WmoSurfacePass::Material material{};
                     static_assert(sizeof(batch.material)==sizeof(material.words));
@@ -1235,12 +1254,20 @@ void WMORenderer::renderSurface(VkCommandBuffer cmd, VkDescriptorSet perFrameSet
             }
         }
     }
+    if (cmd) surfacePass_->endRun();
     surfacePass_->finishMaterials();
-    if(geometry) surfacePass_->light(cmd,perFrameSet,scene,inverse);
-    if(resumeContents==VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS) {
-        vkCmdEndRenderPass(cmd);surfacePass_->resumeScene(cmd,scene,resumeContents);
-    }
     viewDrawCallCount_=draws;
+}
+
+void WMORenderer::executeSurface(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
+        VkFramebuffer scene, VkSubpassContents resumeContents) {
+    if (recording_->view.surfaceMaterialCapacity == 0) return;
+    // Invert around the camera. Inverting a continent-sized translation loses
+    // precision before the perspective divide, visible in specular/shadow edges.
+    glm::mat4 rotation=camera.getViewMatrix();
+    rotation[3]=glm::vec4(0,0,0,1);
+    const glm::mat4 inverse=glm::inverse(camera.getProjectionMatrix()*rotation);
+    surfacePass_->execute(cmd, perFrameSet, scene, inverse, resumeContents);
 }
 
 bool WMORenderer::cullPortals(const ModelData& model, const WMOInstance& instance,

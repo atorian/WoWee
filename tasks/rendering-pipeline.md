@@ -322,3 +322,45 @@ stored in the same JSON. There is no new measured full-client FPS result.
 Next implementation step remains current-frame RT receiver/resolve/history,
 then the other geometry families and persistent GPU submission. Do not enable
 this partial WMO path as the default renderer or call the complete pipeline done.
+
+## WMO worker recording — 2026-10-22
+
+Moved evaluated WMO command recording back to a frame worker. Resource
+preparation stays on the render owner; the worker produces contiguous authored
+opaque/blended secondary runs in the existing snapshot traversal. The owner
+executes those runs and their lighting boundaries without walking models.
+Frame-slot command pools are reset after acquisition and reused, and repeated
+pipeline/frame/material bindings are suppressed. A WMO worker failure cannot
+submit a partial plan; all workers join before propagating it.
+
+Native `wowee` and `scene_render` builds passed. Forced Khronos synchronization
+validation passed serial/parallel recording, ship day/night, 1x/4x MSAA, FXAA,
+repeated target recreation, interleaved opaque/blended/cutout layers with the
+reordering negative control, Dalaran, water reflection, queued material settings
+and source removal. The ordinary forward RT=3 mutation fixture also passed.
+All nine comparable captures (including full-resolution Dalaran) have exactly
+zero changed RGB channels against the saved previous surface implementation.
+Recording and dependency guards remain at zero. `sweep_guard` passed every
+available check; data/server/FrameXML-dependent checks were explicitly skipped
+where their fixtures or executable are absent in this checkout.
+
+Only the changed version was measured, using the saved RT=0 isolated Dalaran
+WMO scene, 2560x1369, MSAA=1, FXAA, shadow quality 2, volumetrics 3, render thread
+and parallel recording, dev/no-LTO, validation off, 230 GPU samples after warmup.
+
+| Metric, ms | Previous surface path | Worker surface path |
+|---|---:|---:|
+| CPU renderWorld mean | 0.44 | 0.38 |
+| CPU renderWorld p95 | 0.48 | 0.53 |
+| WMO GPU mean | 2.85 | 2.85 |
+| WMO GPU p95 | 3.22 | 3.63 |
+| Whole GPU mean | 4.36 | 4.45 |
+| Whole GPU p95 | 4.86 | 5.21 |
+
+The CPU mean improved by about 14%, but tails did not improve and the single
+run does not establish GPU speedup. CPU renderWorld includes waiting for workers;
+this isolated scene provides little other geometry work to overlap. It is not a
+full-client FPS result. Previous full-client measurement remains 46.73 FPS.
+[Saved worker measurement](performance/dalaran-wmo-workers.json) includes the
+scene, binary hash, raw log location and image comparisons. Default rendering
+is unchanged; current-frame RT and the remaining full-pipeline stages are pending.

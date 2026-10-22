@@ -3,6 +3,7 @@
 #include "rendering/frames_in_flight.hpp"
 #include <glm/glm.hpp>
 #include <array>
+#include <vector>
 
 namespace wowee::rendering {
 class VkContext;
@@ -22,11 +23,17 @@ public:
     uint32_t appendMaterial(const Material& material);
     void finishMaterials();
     VkRenderPass geometryPass() const { return pass_; }
+    // prepare runs on the render owner after the slot fence; one worker then
+    // records contiguous authored runs. execute only walks these commands.
+    VkCommandBuffer beginRun(bool geometry);
+    void endRun();
+    void execute(VkCommandBuffer cmd, VkDescriptorSet frameSet, VkFramebuffer scene,
+                 const glm::mat4& inverseViewProjection, VkSubpassContents resumeContents);
+private:
     void beginGeometry(VkCommandBuffer cmd);
     void light(VkCommandBuffer cmd, VkDescriptorSet frameSet, VkFramebuffer scene,
                const glm::mat4& inverseViewProjection);
     void resumeScene(VkCommandBuffer cmd, VkFramebuffer scene, VkSubpassContents contents);
-private:
     void retire();
     void create(VkExtent2D extent, VkImageView depth);
     VkContext& ctx_;
@@ -47,6 +54,13 @@ private:
     std::array<AllocatedBuffer,kSlots> buffers_{};
     std::array<size_t,kSlots> capacities_{};
     std::array<VkDescriptorSet,kSlots> sets_{};
+    struct Run { VkCommandBuffer command; bool geometry; };
+    struct Commands {
+        VkCommandPool pool = VK_NULL_HANDLE;
+        std::vector<VkCommandBuffer> buffers;
+        std::vector<Run> runs;
+    };
+    std::array<Commands,kSlots> commands_{};
     size_t materialLimit_ = 0, materialsWritten_ = 0;
 };
 }

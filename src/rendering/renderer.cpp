@@ -3368,13 +3368,13 @@ void Renderer::renderWorld() {
         LOG_ERROR("WMO surface pass currently requires RT disabled - refusing previous-frame RT substitution");
         throw std::runtime_error("WMO surface pass current-frame RT is not connected yet");
     }
-    const auto recordWmoSurface=[&](VkSubpassContents resume) {
+    const auto prepareWmoSurface=[&]() {
         const bool offscreen=postProcessPipeline_ && postProcessPipeline_->getSceneFramebuffer();
         const auto depth=offscreen
             ?postProcessPipeline_->getSceneAttachmentDepthView():vkCtx->getDepthImageView();
         const WmoSurfacePass::TargetVersion version{vkCtx->syncResetGeneration(),
             offscreen?postProcessPipeline_->sceneTargetGeneration():0,offscreen};
-        wmoRenderer->renderSurface(currentCmd,perFrameSet,*frameCamera(),activeFramebuffer_,depth,activeRenderExtent_,version,resume);
+        wmoRenderer->prepareSurface(depth,activeRenderExtent_,version);
     };
     // The terrain chooses its chunks' detail by their triangles' size in the
     // image it is drawn into, which an upscaler makes smaller than the window.
@@ -3405,13 +3405,17 @@ void Renderer::renderWorld() {
     if (parallelRecordingEnabled_) {
         // --- Pre-compute state + GPU allocations on main thread (not thread-safe) ---
         auto prepStart = std::chrono::steady_clock::now();
+        if (surfaceWmo) prepareWmoSurface();
+        const auto prepWmoEnd = std::chrono::steady_clock::now();
         if (m2Renderer && frameCamera()) m2Renderer->prepareRender(frameIdx, *frameCamera());
         if (drawSkyModels && frameCamera())
             skyboxModelRenderer_->prepareRender(frameIdx, *frameCamera());
         // The characters' bones went up in beginFrame, before the shadow maps.
         auto prepM2End = std::chrono::steady_clock::now();
-        const double prepM2Ms   = std::chrono::duration<double, std::milli>(prepM2End - prepStart).count();
+        const double prepM2Ms   = std::chrono::duration<double, std::milli>(prepM2End - prepWmoEnd).count();
         CpuStageTimes& stages = vkCtx->cpuStages();
+        stages.add("renderWorld", "prepare WMO", static_cast<float>(
+            std::chrono::duration<double, std::milli>(prepWmoEnd - prepStart).count()));
         stages.add("renderWorld", "prepare M2", static_cast<float>(prepM2Ms));
         // From here to the wait the main thread hands work out and records its
         // own share; then it waits for the slowest worker.
@@ -3448,13 +3452,17 @@ void Renderer::renderWorld() {
             });
         }
 
-        if (wmoRenderer && frameCamera() && !skipWMO && !surfaceWmo) {
+        if (wmoRenderer && frameCamera() && !skipWMO) {
             wmoFuture = core::ThreadPool::frameWorkers().submit("record: WMO", [&]() -> double {
                 auto t0 = std::chrono::steady_clock::now();
-                VkCommandBuffer cmd = beginSecondary(SEC_WMO);
-                setSecondaryViewportScissor(cmd);
-                wmoRenderer->render(cmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition);
-                vkEndCommandBuffer(cmd);
+                if (surfaceWmo) {
+                    wmoRenderer->recordSurface(perFrameSet, *frameCamera());
+                } else {
+                    VkCommandBuffer cmd = beginSecondary(SEC_WMO);
+                    setSecondaryViewportScissor(cmd);
+                    wmoRenderer->render(cmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition);
+                    vkEndCommandBuffer(cmd);
+                }
                 return std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
             });
@@ -3598,10 +3606,14 @@ void Renderer::renderWorld() {
         // propagate as an unhandled exception and terminate the process.
         dispatchStage.reset();
         std::optional<CpuStage> waitStage(std::in_place, stages, "renderWorld", "wait for workers");
+        std::exception_ptr wmoRecordingFailure;
         try { if (terrainFuture.valid()) lastTerrainRenderMs = terrainFuture.get(); }
         catch (const std::exception& e) { LOG_ERROR("Terrain render worker: ", e.what()); }
         try { if (wmoFuture.valid()) lastWMORenderMs = wmoFuture.get(); }
-        catch (const std::exception& e) { LOG_ERROR("WMO render worker: ", e.what()); }
+        catch (const std::exception& e) {
+            LOG_ERROR("WMO render worker: ", e.what(), " - frame cannot be submitted");
+            wmoRecordingFailure = std::current_exception();
+        }
         try { if (m2Future.valid()) lastM2RenderMs = m2Future.get(); }
         catch (const std::exception& e) { LOG_ERROR("M2 render worker: ", e.what()); }
         try { if (charFuture.valid()) (void)charFuture.get(); }
@@ -3609,11 +3621,14 @@ void Renderer::renderWorld() {
         try { if (postFuture.valid()) (void)postFuture.get(); }
         catch (const std::exception& e) { LOG_ERROR("Post render worker: ", e.what()); }
         waitStage.reset();
+        // Join every worker before propagating: their lambdas borrow this frame.
+        // A partial WMO plan may contain an unfinished secondary and cannot execute.
+        if (wmoRecordingFailure) std::rethrow_exception(wmoRecordingFailure);
 
         // prepareRender() does the GPU allocations that are not thread-safe, so it runs
         // on the main thread and is not covered by the worker timings. Name the culprit
         // when a frame runs long instead of leaving renderWorld as one opaque number.
-        const double prepTotalMs = prepM2Ms;
+        const double prepTotalMs = std::chrono::duration<double, std::milli>(prepM2End - prepStart).count();
         const double worstWorkerMs = std::max({lastTerrainRenderMs, lastWMORenderMs, lastM2RenderMs});
 
         // The same breakdown on a timer, not only when a frame runs long.
@@ -3700,7 +3715,8 @@ void Renderer::renderWorld() {
         // recorded in its own inherited secondary: primary timestamp/debug
         // commands are forbidden inside a secondary-only subpass.
         for (uint32_t i = 0; i < numCmds; ++i) {
-            if (!validCmds[i]) recordWmoSurface(VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+            if (!validCmds[i]) wmoRenderer->executeSurface(currentCmd, perFrameSet, *frameCamera(),
+                activeFramebuffer_, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
             else vkCmdExecuteCommands(currentCmd, 1, &validCmds[i]);
             recordSecondaryMark(i + 1, validLabels[i]);
         }
@@ -3756,7 +3772,12 @@ void Renderer::renderWorld() {
             auto wmoStart = std::chrono::steady_clock::now();
             {
                 GpuPass pass(*vkCtx, currentCmd, "wmo");
-                if (surfaceWmo) recordWmoSurface(VK_SUBPASS_CONTENTS_INLINE);
+                if (surfaceWmo) {
+                    prepareWmoSurface();
+                    wmoRenderer->recordSurface(perFrameSet, *frameCamera());
+                    wmoRenderer->executeSurface(currentCmd, perFrameSet, *frameCamera(),
+                        activeFramebuffer_, VK_SUBPASS_CONTENTS_INLINE);
+                }
                 else wmoRenderer->render(currentCmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition);
             }
             lastWMORenderMs = std::chrono::duration<double, std::milli>(

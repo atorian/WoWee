@@ -155,3 +155,38 @@ at 4x; depth is borrowed, not allocated a second time. These are logical image
 bytes, not measured allocator overhead. Automatic peak-budget handling on resize
 remains pending. The stage rejects RT-on or wireframe explicitly with an error;
 it is opt-in and is not the ordinary renderer.
+
+## WMO command recording and ordered execution
+
+Resource preparation runs on the render owner after acquiring the frame slot.
+It creates/replaces attachments and descriptors, sizes the material upload and
+resets that slot's dedicated command pool. One WMO worker then records from the
+immutable snapshot. During the existing traversal it opens a secondary command
+buffer whenever the authored sequence switches between evaluated opaque/cutout
+and forward blended work. The result is an ordered list of command runs, not a
+second copy of model/group/batch data. Pipeline, frame descriptor and surface
+settings are bound once per run; geometry and material bindings change only
+when required.
+
+After joining workers, the render owner walks only the run list. An opaque run
+executes in the surface render pass and is lit before the next blended run.
+Blended commands inherit the scene continuation pass. The owner restores the
+surrounding pass's inline/secondary recording mode. The serial configuration
+uses the same recorder and executor, with recording on the owner. Empty frames
+execute no stale plan. A failed WMO recording is propagated after all workers
+join; a partially recorded command plan cannot be submitted.
+
+Each frame slot retains its command pool/buffers up to its high-water mark;
+reset occurs only after the slot fence. Target recreation does not add a pool
+per target. Pool destruction is deferred like other in-flight resources. The
+material upload has a single worker writer and is flushed before submission.
+The command plan can be discarded on slot reuse; submitted command buffers
+retain their own lifetime. No producer-scene reads or additional model walk are
+introduced.
+
+This explicit order does not yet combine RT work across runs. Inserting a full
+screen trace at every opaque-to-blended boundary would multiply RT cost. The
+next receiver/resolve implementation must account for the regions and receivers
+required by each dependency, including opaque surfaces subsequently covered by
+blended layers, before connecting RT here. Motion/identity, current-frame
+resolve and history remain unimplemented.

@@ -52,7 +52,7 @@ LIVE = {
     "CharacterPreview": r"camera|modelLoaded_|compositeRequested_",
     "CompositeRenderer": r"assetManager|zoneTextureSlots_|pendingCompositeIdx_|prepared_",
 }
-EXTRA = {"prepareRender", "dispatchCullCompute", "dispatchCull", "cullShadowCasters"}
+EXTRA = {"prepareRender", "prepareSurface", "executeSurface", "dispatchCullCompute", "dispatchCull", "cullShadowCasters"}
 PRODUCER_CALL = re.compile(r"->(?:extract\w*|gather\w*|syncRtScene|updateInView)\s*\(")
 SCENE = re.compile(r"\bscene_\b")
 LINE_COMMENT = re.compile(r"//.*$")

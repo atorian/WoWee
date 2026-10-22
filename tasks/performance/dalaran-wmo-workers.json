@@ -1,0 +1,127 @@
+{
+  "implementation": "WMO worker secondary recording and ordered command runs",
+  "reference": "dalaran-wmo-surfaces.json final_surfaces",
+  "scene": {
+    "map": "Northrend",
+    "mapId": 571,
+    "zoneId": 2817,
+    "hour": 9.408292770385742,
+    "origin": [
+      5824.882487012499,
+      666.949869825,
+      641.9556274414062
+    ],
+    "playerPosition": [
+      5946.4130859375,
+      623.02783203125,
+      655.4375
+    ],
+    "streamWorld": false,
+    "models": [
+      {
+        "path": "WORLD\\WMO\\NORTHREND\\DALARAN\\ND_DALARAN.WMO",
+        "rotation": [
+          0,
+          0,
+          -39
+        ]
+      }
+    ],
+    "camera": {
+      "position": [
+        5946.4130859375,
+        623.02783203125,
+        655.4375
+      ],
+      "yaw": 166.30895876598606,
+      "pitch": -18.600008189205408
+    },
+    "fov": 70.0,
+    "viewDistance": 2500,
+    "size": [
+      2560,
+      1369
+    ],
+    "frames": 240,
+    "msaa": 1,
+    "fxaa": true,
+    "bloom": 0,
+    "volumetricFog": 3,
+    "volumetricDensity": 1,
+    "shadowQuality": 2,
+    "rayTracedLighting": 0,
+    "rtDistance": 300,
+    "fogStrength": 0.85
+  },
+  "build": "dev/no-LTO",
+  "validation": false,
+  "render_thread": true,
+  "parallel_recording": true,
+  "samples": 230,
+  "warmup": 10,
+  "metrics": {
+    "cpu_render_world": {
+      "mean_ms": 0.38,
+      "p95_ms": 0.53,
+      "worst_ms": 0.6
+    },
+    "whole_gpu": {
+      "mean_ms": 4.45,
+      "p95_ms": 5.21,
+      "worst_ms": 6.0
+    },
+    "wmo_gpu": {
+      "mean_ms": 2.85,
+      "p95_ms": 3.63,
+      "worst_ms": 4.01
+    }
+  },
+  "same_pixels_as_saved_surfaces": {
+    "full_dalaran": {
+      "changed_channels": 0,
+      "channels": 10513920
+    },
+    "parallel-1": {
+      "changed_channels": 0,
+      "channels": 921600
+    },
+    "parallel-4": {
+      "changed_channels": 0,
+      "channels": 921600
+    },
+    "night-4": {
+      "changed_channels": 0,
+      "channels": 921600
+    },
+    "fxaa-4": {
+      "changed_channels": 0,
+      "channels": 921600
+    },
+    "layers-1": {
+      "changed_channels": 0,
+      "channels": 921600
+    },
+    "layers-4": {
+      "changed_channels": 0,
+      "channels": 921600
+    },
+    "dalaran": {
+      "changed_channels": 0,
+      "channels": 921600
+    },
+    "dalaran-4": {
+      "changed_channels": 0,
+      "channels": 921600
+    }
+  },
+  "binary_sha256": "b282c414ced60ad50cbfee3d7e9675cd2c4aa780fb591f45589c64dcbea4f865",
+  "raw_log": "build-dev/scratch/gpu-scene-pipeline/surface-cost-workers-surfaces.log",
+  "validation_log": "build-dev/scratch/gpu-scene-pipeline/check-workers.log",
+  "limitations": [
+    "Isolated WMO fixture, RT disabled; not a full-client FPS measurement.",
+    "Single new-version run compared with stored prior results; no old performance run.",
+    "GPU clocks and background system load not locked; no competing renderer at preflight.",
+    "CPU renderWorld includes joining workers; isolated WMO has little concurrent work to overlap.",
+    "Mean CPU time decreased 0.44 to 0.38 ms; p95 increased 0.48 to 0.53 ms. WMO GPU mean unchanged at 2.85 ms; no confirmed GPU improvement."
+  ]
+}
