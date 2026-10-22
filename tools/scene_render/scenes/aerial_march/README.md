@@ -2,7 +2,7 @@
 
 Branch: `codex/aerial-march-preview`. The parent snapshot commit records the
 uncommitted rendering work used for the comparison; the following experiment
-is separate from it. No changes are installed in the normal client.
+is separate from it. The main checkout is unchanged; this branch now exposes the experiment as an optional client setting.
 
 These are paired visual experiments, not a claim of a finished physical
 atmosphere. Both variants use the same executable, scene, camera, weather,
@@ -162,3 +162,48 @@ messages; all seven shader variants passed glslc and spirv-val. Single-run
 GPU averages were 12.18 ms for 1.25 and 13.38 ms for far-only. The original
 mode's retained 0.8 capture averaged 8.04 ms. These are indicative timings,
 not a controlled performance benchmark.
+
+
+## Runtime option
+
+Graphics > Atmosphere > **Ray-marched distance fog** enables the 24-step
+in-scattering model immediately. It defaults off and persists as
+`aerial_ray_marching=0|1` in settings.cfg. Fog Thickness and Fog height influence
+remain independent; the far-density experiment is not enabled by this switch.
+The choice is captured with immutable frame inputs and carried to the shaders
+in the previously reserved `aerialLight.w` lane. Reflection views inherit the
+same choice; underwater and character-preview views keep their existing guards.
+
+It affects distance-haze illumination on terrain, distant terrain, buildings,
+M2 models/trees, characters, grass and water. It does not add geometry shadows,
+new reflections, or multiple scattering. The existing near fog/light-shaft
+volume is separate. This reference implementation can be costly on the GPU.
+
+The scene_render property is `aerialRayMarching` (default false). Paired preview
+scripts now use that runtime property with identical compiled on/off shaders.
+For the fixed-frame test, render citadel_evening.json with these overrides:
+
+| Capture | Overrides |
+| --- | --- |
+| off | none |
+| on | aerialRayMarching=true |
+| held_off | aerialRayMarchingAfterExtract=true |
+| held_on | aerialRayMarching=true, aerialRayMarchingAfterExtract=false |
+| next_on | aerialRayMarchingAfterExtract=true, mutateAtFrame=0 |
+| next_off | aerialRayMarching=true, aerialRayMarchingAfterExtract=false, mutateAtFrame=0 |
+
+Run `python tools/scene_render/check_aerial_march.py <capture-directory>` to
+check the visible response and both switching directions across frame snapshots.
+
+Runtime validation passed: six captures with the same compiled shaders show
+a visible off/on difference, held frames match their original modes exactly,
+and subsequent frames match the newly selected modes in both directions.
+No ERROR or incomplete-terrain entries were logged. The settings schema,
+settings layout and apply-on-load checks also passed (3/3). Capture hashes
+are retained in `runtime-toggle-results.json`.
+
+The branch client (`build-dev/bin/wowee.exe`) built successfully and was
+launched using a separate local copy of the existing portable profile.
+Startup loaded that profile without ERROR entries, the process responded,
+and all seven deployed material shaders matched the built SPIR-V hashes.
+The main checkout and its client binary remain unchanged.

@@ -90,6 +90,7 @@ struct FrameInputs {
     float fogGround = 0.0f;
     float fogStrength = 1.0f;
     float fogHeightInfluence = 1.0f;
+    bool aerialRayMarching = false;
     std::optional<float> cameraWaterDepth;
     std::optional<float> waterHeight;
     std::optional<float> reflectionWaterHeight;

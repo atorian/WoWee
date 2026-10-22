@@ -57,6 +57,7 @@ vec3 aerialColorAt(vec3 direction) {
 #if !AERIAL_MARCH_ENABLED
     return background;
 #else
+    if (aerialLight.w < 0.5) return background;
     float distance = length(direction);
     if (aerialParams.w < 0.5 || aerialParams.z <= 0.001 || distance < 0.001)
         return background;

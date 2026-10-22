@@ -1,0 +1,16 @@
+{
+  "result": "PASS",
+  "checks": [
+    "runtime off/on visibly differ",
+    "post-extraction changes preserve held frames",
+    "both settings reach subsequent frames"
+  ],
+  "captures": {
+    "off": "764bfdf9099ba70c5ab32e75e1ddb079c017dba228b4c042b66ec4e23a463b4f",
+    "on": "c70dfa791ed0a60d5c25d37ef1d8cde219fbb93e5554975a63c770ff83b99d75",
+    "held_off": "764bfdf9099ba70c5ab32e75e1ddb079c017dba228b4c042b66ec4e23a463b4f",
+    "held_on": "c70dfa791ed0a60d5c25d37ef1d8cde219fbb93e5554975a63c770ff83b99d75",
+    "next_off": "764bfdf9099ba70c5ab32e75e1ddb079c017dba228b4c042b66ec4e23a463b4f",
+    "next_on": "c70dfa791ed0a60d5c25d37ef1d8cde219fbb93e5554975a63c770ff83b99d75"
+  }
+}

@@ -893,7 +893,8 @@ void Renderer::updatePerFrameUBO() {
         const glm::vec3 illumination=glm::mix(lp.skyMiddleColor,lp.skyBand1Color,.5f);
         const float grey=glm::dot(illumination,glm::vec3(.2126f,.7152f,.0722f));
         currentFrameData.aerialSun=glm::vec4(disc.direction,day);
-        currentFrameData.aerialLight=glm::vec4(glm::mix(glm::vec3(grey),illumination,.65f),0);
+        currentFrameData.aerialLight=glm::vec4(glm::mix(glm::vec3(grey),illumination,.65f),
+            frameInputs_.aerialRayMarching ? 1.0f : 0.0f);
         const float thickness=frameInputs_.fogStrength;
         if(frameInputs_.worldInView && thickness>0.001f) {
             // Outdoor haze retains the zone's near gradient and extends to
@@ -1551,6 +1552,7 @@ FrameInputs Renderer::extractFrameInputs() {
     in.fogGround = characterPosition.z;
     in.fogStrength = lightingManager ? lightingManager->getFogStrength() : 1.f;
     in.fogHeightInfluence = lightingManager ? lightingManager->getFogHeightInfluence() : 1.f;
+    in.aerialRayMarching = lightingManager && lightingManager->getAerialRayMarching();
     // Apply user density after zone/time smoothing and weather blending.
     // Keep the range and its density coherent in this immutable frame: the
     // aerial shader recovers the reference profile before scaling optical depth.

@@ -25,15 +25,14 @@ $enabled = if ($Variant -eq 'before') { 0 } else { 1 }
 $steps = if ($Variant -eq 'reference') { 48 } else { 24 }
 $farDensity = if ($Variant -eq 'far') { 1 } else { 0 }
 $scenePath = "$root\tools\scene_render\scenes\aerial_march\$Scene.json"
-if ($Variant -eq 'thick') {
-    $sceneData = Get-Content -Raw $scenePath | ConvertFrom-Json
-    $sceneData.fogStrength = 1.25
-    $scenePath = "$output\$Scene-$Variant.json"
-    $json = $sceneData | ConvertTo-Json -Depth 20
-    [System.IO.File]::WriteAllText($scenePath, $json, (New-Object System.Text.UTF8Encoding($false)))
-}
+$sceneData = Get-Content -Raw $scenePath | ConvertFrom-Json
+$sceneData | Add-Member -NotePropertyName aerialRayMarching -NotePropertyValue ([bool]$enabled) -Force
+if ($Variant -eq 'thick') { $sceneData.fogStrength = 1.25 }
+$scenePath = "$output\$Scene-$Variant.json"
+$json = $sceneData | ConvertTo-Json -Depth 20
+[System.IO.File]::WriteAllText($scenePath, $json, (New-Object System.Text.UTF8Encoding($false)))
 foreach ($shader in @('terrain','distant_terrain','wmo','m2','character','water','grass')) {
-    & glslc -O -fshader-stage=frag "-DAERIAL_MARCH_ENABLED=$enabled" "-DAERIAL_MARCH_STEPS=$steps" "-DAERIAL_FAR_DENSITY_ENABLED=$farDensity" `
+    & glslc -O -fshader-stage=frag "-DAERIAL_MARCH_ENABLED=1" "-DAERIAL_MARCH_STEPS=$steps" "-DAERIAL_FAR_DENSITY_ENABLED=$farDensity" `
       "-I$root\assets\shaders" "$root\assets\shaders\$shader.frag.glsl" `
       -o "$root\build-dev\bin\assets\shaders\$shader.frag.spv"
     if ($LASTEXITCODE) { exit $LASTEXITCODE }

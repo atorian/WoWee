@@ -261,6 +261,10 @@ public:
     void setFogHeightInfluence(float value) { fogHeightInfluence_ = glm::clamp(value, 0.0f, 2.0f); }
     [[nodiscard]] float getFogHeightInfluence() const { return fogHeightInfluence_; }
 
+    /// Integrate distant-air illumination along the view ray. Independent of density.
+    void setAerialRayMarching(bool enabled) { aerialRayMarching_ = enabled; }
+    [[nodiscard]] bool getAerialRayMarching() const { return aerialRayMarching_; }
+
     /**
      * Get current time of day (0.0-1.0)
      */
@@ -392,6 +396,7 @@ private:
     bool isIndoors_ = false;
     float fogStrength_ = 0.4f;
     float fogHeightInfluence_ = 1.0f;
+    bool aerialRayMarching_ = false;
 
     // Last values the sky diagnostic reported, so it prints on a change
     // rather than every frame. See LightingManager::update.

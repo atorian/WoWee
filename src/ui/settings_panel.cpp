@@ -848,7 +848,7 @@ constexpr const char* kGraphicsApplyKeys[] = {
     "grassdistance", "waterrefraction", "upscaling", "fsrquality",
     "fsrsharpness", "framegen", "brightness", "uiopacity", "minimapsquare",
     "minimapnpcdots", "minimapclock", "minimapcoords", "minimaprotate", "latencymeter",
-    "fogstrength", "fogheightinfluence", "sharpstars", "lightshafts", "mistdensity", "sunshafts",
+    "fogstrength", "fogheightinfluence", "aerialraymarching", "sharpstars", "lightshafts", "mistdensity", "sunshafts",
     "raytracedlighting", "rtdistance", "bloom",
     // Moved off the game's own Effects panel, so this list is now what
     // applies them at startup; the cvar store used to do it.
@@ -991,6 +991,7 @@ constexpr FieldBinding kFieldBindings[] = {
     {.key = "viewdistance",   .asFloat = &SettingsPanel::pendingViewDistance},
     {.key = "fogstrength",    .asFloat = &SettingsPanel::pendingFogStrength},
     {.key = "fogheightinfluence", .asFloat = &SettingsPanel::pendingFogHeightInfluence},
+    {.key = "aerialraymarching", .asBool = &SettingsPanel::pendingAerialRayMarching},
     {.key = "lightshafts",    .asInt   = &SettingsPanel::pendingVolumetricFog},
     {.key = "raytracedlighting", .asInt = &SettingsPanel::pendingRtLighting},
     {.key = "rtdistance", .asFloat = &SettingsPanel::pendingRtDistance},
@@ -1375,6 +1376,12 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
         if (renderer) {
             if (auto* lighting = renderer->getLightingManager()) {
                 lighting->setFogStrength(pendingFogStrength);
+            }
+        }
+    } else if (key == "aerialraymarching") {
+        if (renderer) {
+            if (auto* lighting = renderer->getLightingManager()) {
+                lighting->setAerialRayMarching(pendingAerialRayMarching);
             }
         }
     } else if (key == "fogheightinfluence") {
