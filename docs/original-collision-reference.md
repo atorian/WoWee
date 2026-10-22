@@ -625,3 +625,25 @@ passed after the handlers were routed through MovementPacket::buildForceAck.
 1280 original envelopes pass natively and with ASan/UBSan. Existing movement
 and pre-WotLK layout tests pass. State transitions and packet timing still
 need their own integration proof; this is not a full movement parity claim.
+
+
+## Shared state changes and timed speeds (2026-10-23)
+
+`original_state_12340.json`: 4784 original CMovementShared calls, covering
+Change*Speed/Rate (0x989c50..0x98ae90), EnableGravity (0x98b310), FeatherFall
+(0x987440), PostFeatherFall/GetFeatherFallVelocity (0x987410/0x986e10),
+WalkOnWater (0x9873f0), Hover (0x987460), TryRoot (0x98c4f0) and UnRoot
+(0x98c550), with no active spline. Original return values and full shared
+state are compared. Speed changes update anchors before recalculating speed;
+airborne root becomes pending; feather-fall preserves the separate post-step.
+
+`original_rate_queue_12340.json`: 2304 original enqueue/dispatch comparisons
+for nine rate kinds mixed with basic input and height changes. Local/remote
+wrappers execute directly, so acknowledgement counters and stable ordering
+come from original code. State visible at each rate notification is recorded.
+`original_rate_execution_12340.json`: 1444 scheduler/world cases including
+six thirty-frame sequences, with state propagated from the original each frame.
+The unit delivery boundary reports no send; heartbeat preparation is supplied
+as successful. These fixtures establish state and scheduling, not those unit
+or network side effects. Native Windows and ASan/UBSan pass all three matrices;
+full collision/ADT selection is 49/49 and full sweep passes.

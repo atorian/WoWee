@@ -1,5 +1,6 @@
 #include "collision/movement_surface.hpp"
 #include "collision/movement_input.hpp"
+#include "collision/movement_state.hpp"
 #include "collision/movement_query.hpp"
 #include "collision/movement_request.hpp"
 #include "collision/detail/movement_geometry.hpp"
@@ -2252,5 +2253,78 @@ bool applyMovementInput(SurfaceMovementState& state,MovementInput input) {
     case MovementInput::Jump:return t.JumpFromWater();
     }
     return false;
+}
+bool applyMovementRateChange(SurfaceMovementState& state,MovementRate rateKind,float value) {
+    SurfaceTraversal t{{},state,0,0,0,true,std::nullopt,std::nullopt};
+    // 0x989c50..0x98ae90: store the changed rate, then update anchors;
+    // directional speed is recalculated only for the seven linear speeds.
+    constexpr float SurfaceMovementState::* rates[]={
+        &SurfaceMovementState::walkSpeed,&SurfaceMovementState::runSpeed,
+        &SurfaceMovementState::runBackSpeed,&SurfaceMovementState::swimSpeed,
+        &SurfaceMovementState::swimBackSpeed,&SurfaceMovementState::flightSpeed,
+        &SurfaceMovementState::flightBackSpeed,&SurfaceMovementState::turnRate,
+        &SurfaceMovementState::pitchRate};
+    const auto kind=static_cast<unsigned>(rateKind);
+    if(kind<std::size(rates)) {
+        float& rate=state.*rates[kind];
+        if(std::abs(double(value)-rate)<2.3841858e-7f)return false;
+        rate=value;
+        t.UpdateAnchors(0);
+        if(kind<7)t.CalcCurrentSpeed(0);
+        return true;
+    }
+    return false;
+}
+bool applyMovementStateChange(SurfaceMovementState& state,MovementStateChange change,float value) {
+    SurfaceTraversal t{{},state,0,0,0,true,std::nullopt,std::nullopt};
+    const bool enable=value!=0;
+    switch(change) {
+    case MovementStateChange::Gravity: {
+        // EnableGravity 0x98b310, without spline-derived gravity flags.
+        const auto old=state.flags;
+        state.flags=enable?old&~0x400u:old|0x400u;
+        if(old==state.flags)return false;
+        t.UpdateAnchors(0);
+        return true;
+    }
+    case MovementStateChange::FeatherFall:
+        state.flags=enable?state.flags|MOVEMENTFLAG_SAFE_FALL:state.flags&~MOVEMENTFLAG_SAFE_FALL;
+        break;
+    case MovementStateChange::PostFeatherFall:
+        // 0x987410 and GetFeatherFallVelocity 0x986e10. Preserve x87
+        // intermediate precision until the result reaches the float field.
+        if(state.flags&MOVEMENTFLAG_FALLING) {
+            const double terminal=(state.flags&MOVEMENTFLAG_SAFE_FALL)?
+                SurfaceTraversal::s_safeFallTerminalVelocity:SurfaceTraversal::s_terminalVelocity;
+            const double velocity=std::min(double(state.fallVelocity),terminal)+
+                double(state.fallTimeMs)*0.001f*19.291105f;
+            state.fallVelocity=static_cast<float>(std::min(velocity,terminal));
+            state.fallTimeMs=0;
+            state.fallStartZ=state.position.z;
+        }
+        break;
+    case MovementStateChange::WaterWalk:
+        state.flags=enable?state.flags|0x10000000u:state.flags&~0x10000000u;
+        break;
+    case MovementStateChange::Hover:
+        state.flags=enable?(state.flags&~MOVEMENTFLAG_SPLINE_ELEVATION)|0x40000000u:
+            state.flags&~0x40000000u;
+        break;
+    case MovementStateChange::Root:
+        // TryRoot 0x98c4f0 defers a root while airborne, without a spline.
+        if(state.flags&MOVEMENTFLAG_ROOT)break;
+        if(state.flags&MOVEMENTFLAG_FALLING) {state.flags|=MOVEMENTFLAG_PENDING_ROOT;break;}
+        state.flags|=MOVEMENTFLAG_ROOT;
+        t.StopFalling();
+        state.flags&=0xff203f00u;
+        t.CalcCurrentSpeed(0);
+        break;
+    case MovementStateChange::Unroot:
+        state.flags&=~(MOVEMENTFLAG_ROOT|MOVEMENTFLAG_PENDING_ROOT);
+        if(enable)t.TryStartFalling();
+        break;
+    default:return false;
+    }
+    return true;
 }
 } // namespace wowee::collision

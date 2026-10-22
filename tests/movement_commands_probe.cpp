@@ -10,6 +10,7 @@ struct Sink final:MovementCommandSink {
     SurfaceMovementShape& shape;
     bool first=true;
     Sink(SurfaceMovementState& s,SurfaceMovementShape& h):state(s),shape(h){}
+    bool rateChanged(uint32_t,uint32_t,float,uint32_t,bool) override {throw std::logic_error("Rate outside height-only fixture");}
     bool inputChanged(uint32_t,uint32_t,bool) override {throw std::logic_error("Input outside height-only fixture");}
     void angularInputStopped(bool) override {throw std::logic_error("Angular input outside height-only fixture");}
     void resetHeartbeat(uint32_t) override {throw std::logic_error("Heartbeat reset outside height-only fixture");}

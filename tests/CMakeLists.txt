@@ -3779,3 +3779,21 @@ if(Python3_Interpreter_FOUND)
             --opcodes ${CMAKE_SOURCE_DIR}/Data/expansions/wotlk/opcodes.json
             --probe $<TARGET_FILE:movement_ack_probe>)
 endif()
+
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_state_changes
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_state.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_state_12340.json
+            --probe $<TARGET_FILE:movement_surface_probe>)
+endif()
+
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_rate_queue
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_rate_queue.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_rate_queue_12340.json
+            --probe $<TARGET_FILE:movement_surface_probe>)
+    add_test(NAME original_collision_rate_execution
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_rate_queue.py --execute
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_rate_execution_12340.json
+            --probe $<TARGET_FILE:movement_surface_probe>)
+endif()

@@ -24,7 +24,13 @@ class OriginalMovementInputQueue(OriginalMovementExecution):
         self.input_control=self.alloc(bytes(0x100))
         ids=[0,1,2,3,4,5,11,12,13,14,15,16,6,7,8,10]
         for op in case['inputs']:
-            if len(op)==4:
+            if len(op)==5:
+                time,rate,value,counter,ack=op
+                local=[0x6edd10,0x6edb30,0x6edc20,0x6ede00,0x6edef0,0x6edfe0,0x6ee0d0,0x6ee1c0,0x6ee2b0]
+                bits=struct.unpack('<I',struct.pack('<f',value))[0]
+                self.call(local[rate] if ack else local[rate]+0x50,
+                    [time,counter,bits] if ack else [time,bits],body)
+            elif len(op)==4:
                 time,height,counter,ack=op;bits=struct.unpack('<I',struct.pack('<f',height))[0]
                 self.call(0x6ee760 if ack else 0x6ee7b0,[time,counter,bits] if ack else [time,bits],body)
             else:

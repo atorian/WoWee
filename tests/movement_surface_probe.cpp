@@ -1,3 +1,4 @@
+#include "collision/movement_state.hpp"
 // Offline front door for original-code comparisons. No game, device or socket.
 #include "collision/movement_surface.hpp"
 #include "collision/movement_query.hpp"
@@ -33,6 +34,8 @@ struct ExecutionObservations final:wowee::collision::MovementExecutionSink {
     struct Height {uint32_t time,opcode,counter;float value,applied;bool ack;uint32_t delay,flags2;};
     struct Heartbeat {uint32_t time;float height;glm::vec3 position;uint32_t flags;};
     std::vector<Height> heights;
+    std::vector<wowee::collision::SurfaceMovementState> rateStates;
+    bool captureRates=false;
     std::vector<Heartbeat> beats;
     std::vector<uint32_t> finished;
     std::vector<bool> stopped;
@@ -41,6 +44,10 @@ struct ExecutionObservations final:wowee::collision::MovementExecutionSink {
     ExecutionObservations(wowee::collision::SurfaceMovementState& s,wowee::collision::SurfaceMovementShape& h,wowee::collision::MovementClock& c):state(s),shape(h),clock(c){}
     void collisionHeightChanged(uint32_t time,float height,uint32_t counter,bool ack) override {
         heights.push_back({time,1303,counter,height,shape.height,ack,state.moveStartDelayMs,state.flags2});
+    }
+    bool rateChanged(uint32_t time,uint32_t opcode,float value,uint32_t counter,bool ack) override {
+        heights.push_back({time,opcode,counter,value,shape.height,ack,state.moveStartDelayMs,state.flags2});
+        rateStates.push_back(state);return false;
     }
     bool inputChanged(uint32_t time,uint32_t opcode,bool ack) override {
         heights.push_back({time,opcode,0,0,shape.height,ack,state.moveStartDelayMs,state.flags2});return false;
@@ -51,7 +58,23 @@ struct ExecutionObservations final:wowee::collision::MovementExecutionSink {
         beats.push_back({time,shape.height,state.position,state.flags});return true;
     }
     void frameFinished(uint32_t time) override {finished.push_back(time);}
+    static void printRates(const wowee::collision::SurfaceMovementState& s) {
+        std::cout<<",\"speeds\":["<<s.walkSpeed<<','<<s.runSpeed<<','<<s.runBackSpeed<<','
+            <<s.swimSpeed<<','<<s.swimBackSpeed<<','<<s.flightSpeed<<','<<s.flightBackSpeed<<']'
+            <<",\"turn_rate\":"<<s.turnRate<<",\"pitch_rate\":"<<s.pitchRate;
+    }
     void print() const {
+        if(captureRates) {
+            std::cout<<",\"rate_states\":[";
+            for(size_t i=0;i<rateStates.size();++i) {
+                if(i)std::cout<<',';
+                const auto& s=rateStates[i];
+                std::cout<<"{\"flags\":"<<s.flags<<",\"flags2\":"<<s.flags2<<",\"current_speed\":"<<s.currentSpeed
+                    <<",\"fall_time\":"<<s.fallTimeMs<<",\"fall_velocity\":"<<s.fallVelocity<<",\"anchor_elapsed\":"<<s.anchorElapsedMs;
+                printRates(s);std::cout<<'}';
+            }
+            std::cout<<']';
+        }
         std::cout<<",\"notifications\":[";
         for(size_t i=0;i<heights.size();++i) {
             if(i)std::cout<<',';
@@ -71,11 +94,14 @@ struct ExecutionObservations final:wowee::collision::MovementExecutionSink {
 };
 
 int main(int argc, char** argv) {
-    const bool executeInput = argc == 2 && std::string(argv[1]) == "--world-input-execute";
-    const bool queuedInput = executeInput || argc == 2 && std::string(argv[1]) == "--world-input-queue";
+    const bool rateQueue = argc == 2 && (std::string(argv[1]) == "--world-rate-queue" || std::string(argv[1]) == "--world-rate-execute");
+    const bool executeRates = rateQueue && std::string(argv[1]) == "--world-rate-execute";
+    const bool executeInput = executeRates || argc == 2 && std::string(argv[1]) == "--world-input-execute";
+    const bool queuedInput = rateQueue || executeInput || argc == 2 && std::string(argv[1]) == "--world-input-queue";
+    const bool stateChange = argc == 2 && std::string(argv[1]) == "--world-state";
     const bool input = argc == 2 && std::string(argv[1]) == "--world-input";
     const bool execute = queuedInput || argc == 2 && std::string(argv[1]) == "--world-execute";
-    const bool apply = input || execute || argc == 2 && std::string(argv[1]) == "--world-apply";
+    const bool apply = stateChange || input || execute || argc == 2 && std::string(argv[1]) == "--world-apply";
     const bool fullWorld = apply || argc == 2 && std::string(argv[1]) == "--world-request";
     const bool frame = fullWorld || (argc == 2 && std::string(argv[1]) == "--request");
     const bool dimensions = argc == 2 && std::string(argv[1]) == "--dimensions";
@@ -165,6 +191,7 @@ int main(int argc, char** argv) {
         MovementRequestResult frameResult;
         MovementClock clock;
         ExecutionObservations observations(state,shape,clock);
+        observations.captureRates=rateQueue;
         bool retire=false,inputAccepted=false;int queueResult=0;
         SuppliedWorld world;
         std::unique_ptr<world_fixture::Scene> scene;
@@ -180,7 +207,12 @@ int main(int argc, char** argv) {
             if(apply) {
                 bool active;
                 if(!(std::cin>>active>>state.moveStartDelayMs>>state.turnRate>>state.pitchRate>>state.pitchCos>>state.pitchSin))return 2;
-                if(input) {
+                if(stateChange) {
+                    uint32_t command;float value;
+                    if(!(std::cin>>command>>value)||command>15)return 2;
+                    inputAccepted=command<9?applyMovementRateChange(state,static_cast<MovementRate>(command),value):
+                        applyMovementStateChange(state,static_cast<MovementStateChange>(command-9),value);
+                } else if(input) {
                     uint32_t command;if(!(std::cin>>command)||command>15)return 2;
                     inputAccepted=applyMovementInput(state,static_cast<MovementInput>(command));
                 } else if(execute) {
@@ -191,8 +223,12 @@ int main(int argc, char** argv) {
                     for(uint32_t i=0;i<count;++i) {
                         if(queuedInput) {
                             uint32_t kind,eventTime;bool ack;
-                            if(!(std::cin>>kind>>eventTime)||kind>1)return 2;
-                            if(kind) {
+                            if(!(std::cin>>kind>>eventTime)||kind>2)return 2;
+                            if(kind==2) {
+                                uint32_t rate,counter;float value;
+                                if(!(std::cin>>rate>>value>>counter>>ack)||rate>8)return 2;
+                                commands.enqueueRateChange(eventTime,static_cast<MovementRate>(rate),value,counter,ack);
+                            } else if(kind==1) {
                                 float height;uint32_t counter;
                                 if(!(std::cin>>height>>counter>>ack))return 2;
                                 commands.enqueueCollisionHeight(eventTime,height,counter,ack);
@@ -232,7 +268,8 @@ int main(int argc, char** argv) {
         vector("move_direction", state.direction);
         std::cout << ",\"move_direction_2d\":[" << state.direction2D.x << ',' << state.direction2D.y << ']';
         if(apply) {number("pitch_cos",state.pitchCos);number("pitch_sin",state.pitchSin);number("facing",state.facing);number("pitch",state.pitch);number("move_start_delay",state.moveStartDelayMs);}
-        if(input) {number("accepted",inputAccepted?"true":"false");number("flags2",state.flags2);}
+        if(input||stateChange) {number("accepted",inputAccepted?"true":"false");number("flags2",state.flags2);}
+        if(stateChange||rateQueue)ExecutionObservations::printRates(state);
         if(queuedInput) {
             if(!executeInput)number("queue_result",queueResult);
             std::cout<<",\"angular_stops\":[";

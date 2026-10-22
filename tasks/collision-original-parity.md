@@ -6,13 +6,15 @@ behaviour must match the original client. See
 
 Status: contact/surface phases and the combined supplied-state world collector
 have original-executable comparisons. The unattached request-to-world path,
-frame projection/application, height-command queue and restricted frame
-scheduler are verified offline. The native collision/ADT selection passes
-44/44 tests. Full behavioural equivalence is not established and the player
-solver is not replaced. Production world lifecycle, remaining input commands,
-unit event delivery, interpolation, transport/spline movement and outgoing
-packet bytes remain open. See `docs/original-collision-reference.md` for the
-implemented boundaries and checks.
+frame projection/application, basic-input/height/rate queue and restricted
+frame scheduler are verified offline. Shared gravity, hover, water walk,
+feather-fall and root state operations are compared independently. The native
+collision/ADT selection passes 49/49 tests. Original status bytes and ordinary
+forced ACK envelopes are compared; two production codec/ACK defects are fixed.
+Full behavioural equivalence is not established and the player solver is not
+replaced. Production world lifecycle, remaining queued state commands and unit
+event delivery, packet timing/admission, interpolation and transport/spline
+movement remain open. See `docs/original-collision-reference.md` for boundaries.
 This plan supersedes the audit's generic solver
 redesign as the acceptance target. A common collision API remains useful, but
 its behaviour must be derived from the original implementation.
@@ -405,3 +407,27 @@ Native ACK domain, original wire status, original ACK, movement payload and
 pre-WotLK tests pass (5/5). This verifies construction and command routing,
 not the remaining movement-state effects, timing, active transport/spline
 handling or unit event side effects. Those remain work before solver rollout.
+
+
+### 2026-10-23 — Shared state changes and timed rates
+
+4784 comparisons cover all nine speed/rate changes and shared gravity, feather
+fall, post-feather-fall, water walk, hover, root and unroot operations without
+an active spline. This includes rate equality/epsilon boundaries and airborne
+pending root. Shared mode functions do not yet implement their queue's unit
+effects: feather-fall's post-step, for example, must occur after its ACK.
+
+Added typed rate changes to the common input/height queue. State changes happen
+before notification even when the rate compares equal. All 2304 mixed queue
+cases match original enqueues/dispatch, including wrapping clocks, equal-time
+ordering, future commands, root/transport flags and passenger deferral.
+1444 complete scheduler/world comparisons pass, including 180 consecutive
+trajectory frames. Each rate notification also compares the state visible to
+the unit at that moment. Unit notification returns false (no send); heartbeat
+preparation remains a supplied successful boundary.
+
+Native collision/ADT selection: 49/49. All three new matrices pass ASan/UBSan.
+Full sweep passes after consolidating the ACK builder's repeated player-GUID
+lookup (domain ownership reach count 1205, below ceiling 1206). No new physics
+is enabled in ordinary gameplay. Remaining queued mode/knockback transitions,
+unit side effects, lifecycle and integration remain required work.

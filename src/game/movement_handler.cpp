@@ -1091,6 +1091,7 @@ void MovementHandler::dismount() {
 // GUID + counter + movement payload with server-space coordinates. Centralised
 // here so transport coordinate conversion can't diverge between handlers.
 network::Packet MovementHandler::buildForceAck(Opcode ackOpcode, uint32_t counter, float value) {
+    const auto playerGuid = owner_.getPlayerGuid();
     MovementInfo wire = movementInfo;
     wire.time = nextMovementTimestampMs();
     if (wire.hasFlag(MovementFlags::ONTRANSPORT)) {
@@ -1109,15 +1110,15 @@ network::Packet MovementHandler::buildForceAck(Opcode ackOpcode, uint32_t counte
         wire.transportZ = serverTransport.z;
     }
     if (isActiveExpansion("wotlk")) {
-        return MovementPacket::buildForceAck(ackOpcode, wire, owner_.getPlayerGuid(), counter, value);
+        return MovementPacket::buildForceAck(ackOpcode, wire, playerGuid, counter, value);
     }
     network::Packet ack(wireOpcode(ackOpcode));
     const bool legacyGuid =
         isActiveExpansion("classic") || isActiveExpansion("tbc") || isActiveExpansion("turtle");
     if (legacyGuid) {
-        ack.writeUInt64(owner_.getPlayerGuid());
+        ack.writeUInt64(playerGuid);
     } else {
-        ack.writePackedGuid(owner_.getPlayerGuid());
+        ack.writePackedGuid(playerGuid);
     }
     ack.writeUInt32(counter);
 

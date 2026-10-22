@@ -7,6 +7,10 @@ void MovementCommandQueue::enqueueCollisionHeight(uint32_t time,float height,
     uint32_t counter,bool needAck) {
     enqueue({time,needAck,Height{height,needAck?counter:0}});
 }
+void MovementCommandQueue::enqueueRateChange(uint32_t time,MovementRate rate,float value,
+    uint32_t counter,bool needAck) {
+    enqueue({time,needAck,Rate{rate,value,needAck?counter:0}});
+}
 void MovementCommandQueue::enqueueInput(uint32_t time,MovementInput input,bool needAck) {
     enqueue({time,needAck,input});
 }
@@ -37,6 +41,12 @@ MovementQueueResult MovementCommandQueue::process(uint32_t time,bool defer,
         if(const auto* height=std::get_if<Height>(&event.action)) {
             setMovementCollisionHeight(shape,height->height);
             sink.collisionHeightChanged(time,height->height,height->counter,event.needAck);
+        } else if(const auto* rate=std::get_if<Rate>(&event.action)) {
+            // State changes precede notification, even if the value compares
+            // equal and no anchor update is needed. No basic-input root gate.
+            (void)applyMovementRateChange(state,rate->rate,rate->value);
+            constexpr uint32_t opcodes[]={0x2db,0xe3,0xe5,0xe7,0x2dd,0x382,0x384,0x2df,0x45d};
+            sent=sink.rateChanged(time,opcodes[static_cast<unsigned>(rate->rate)],rate->value,rate->counter,event.needAck);
         } else {
             const auto input=std::get<MovementInput>(event.action);
             const bool movement=input<=MovementInput::StopStrafe||input==MovementInput::Jump;
