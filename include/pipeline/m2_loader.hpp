@@ -381,7 +381,7 @@ struct M2Model {
     // Collision mesh (simplified geometry for physics)
     std::vector<glm::vec3> collisionVertices;
     std::vector<uint16_t> collisionIndices;      // 3 per triangle
-    std::vector<glm::vec4> collisionNormals;     // xyz=normal, w=distance; one per triangle
+    std::vector<glm::vec3> collisionNormals;     // Authored face normals; no plane offset
 
     // Flags
     uint32_t globalFlags;

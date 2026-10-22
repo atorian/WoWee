@@ -266,6 +266,29 @@ original ground-normal queries cover slope thresholds and overlapping facets.
 Both matrices match on Linux, native MinGW and ASan/UBSan. All thirteen native
 CTest regressions pass, including the unchanged earlier movement fixtures.
 
+## Authored M2 facets
+
+`queryM2Facets` executes the recovered `CM2Model::GetCollisionFacets`
+(`0x82ec30`) path: transform vertices, apply world-box outcodes, preserve
+triangle order, normalize each placement basis independently and transform the
+file's face normals. This is distinct from the WMO cross-product path. The
+original consumes a three-float normal per face and does not renormalize the
+transformed authored normal.
+
+WoWee previously read these records as four floats and then discarded them at
+M2Shape construction. A loader regression failed before the repair (zero normals
+instead of two at EOF); the repaired loader-to-shape-to-query test passes all
+12 assertions. M2Shape now retains the authored normals, including through
+renderer model preparation. Invalid face/index references are diagnosed instead
+of being supplied to the new query.
+
+The 1512 original binary calls cover authored normals that differ from cross
+products, box boundaries, empty/degenerate geometry, scales and general finite
+transforms. They match exactly on Linux, native MinGW and ASan/UBSan. All fifteen
+native collision tests pass and both modified WMO/M2 renderer preparation
+translation units compile. The new probe targets are registered before the
+sanitizer propagation block.
+
 ## Remaining acceptance work
 
 The full checklist is in `tasks/collision-original-parity.md`. World facet

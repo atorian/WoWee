@@ -1,4 +1,5 @@
 #include "collision/m2_shape.hpp"
+#include "core/logger.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -7,7 +8,18 @@
 namespace wowee::collision {
 
 std::shared_ptr<const M2Shape> M2Shape::build(std::string name, std::vector<glm::vec3> vertices,
-                                              std::vector<uint16_t> indices) {
+                                              std::vector<uint16_t> indices, std::vector<glm::vec3> faceNormals) {
+    if (faceNormals.size() > indices.size() / 3) {
+        LOG_ERROR("M2 '", name, "' has more collision face normals than indexed triangles - collision shape unavailable");
+        return nullptr;
+    }
+    for (size_t i = 0; i < faceNormals.size() * 3; ++i) {
+        if (indices[i] >= vertices.size()) {
+            LOG_ERROR("M2 '", name, "' collision face ", i / 3, " references vertex ", indices[i],
+                      " of ", vertices.size(), " - collision shape unavailable");
+            return nullptr;
+        }
+    }
     if (indices.size() < 3 || vertices.empty()) return nullptr;
 
     auto shape = std::make_shared<M2Shape>();
@@ -15,6 +27,7 @@ std::shared_ptr<const M2Shape> M2Shape::build(std::string name, std::vector<glm:
     s.name = std::move(name);
     s.vertices = std::move(vertices);
     s.indices = std::move(indices);
+    s.faceNormals = std::move(faceNormals);
     s.triCount = static_cast<uint32_t>(s.indices.size() / 3);
 
     glm::vec3 bmin(std::numeric_limits<float>::max());
@@ -118,6 +131,7 @@ uint64_t M2Shape::bytes() const {
     uint64_t total = sizeof(M2Shape) + name.capacity() +
                      vertices.capacity() * sizeof(glm::vec3) +
                      indices.capacity() * sizeof(uint16_t) +
+                     faceNormals.capacity() * sizeof(glm::vec3) +
                      triBounds.capacity() * sizeof(TriBounds);
     for (const auto* cells : {&cellTris, &cellWallTris}) {
         total += cells->capacity() * sizeof(std::vector<uint32_t>);

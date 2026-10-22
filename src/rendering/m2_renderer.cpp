@@ -1741,7 +1741,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
 
     // Build collision mesh + spatial grid from M2 bounding geometry
     gpuModel.collision = collision::M2Shape::build(model.name, model.collisionVertices,
-                                                   model.collisionIndices);
+                                                   model.collisionIndices, model.collisionNormals);
     if (gpuModel.collision) {
         core::Logger::getInstance().debug("  M2 collision mesh: ", gpuModel.collision->triCount,
             " tris, grid ", gpuModel.collision->gridCellsX, "x", gpuModel.collision->gridCellsY);

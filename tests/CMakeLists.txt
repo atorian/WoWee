@@ -2952,6 +2952,56 @@ if(Python3_Interpreter_FOUND)
             --probe $<TARGET_FILE:movement_surface_probe>)
 endif()
 
+# Authored WMO collision topology and the original 12340 BSP traversal.
+wowee_add_test(test_wmo_bsp SOURCES test_wmo_bsp.cpp)
+target_link_libraries(test_wmo_bsp PRIVATE wowee_collision)
+add_executable(wmo_bsp_probe wmo_bsp_probe.cpp)
+target_link_libraries(wmo_bsp_probe PRIVATE wowee_collision)
+wowee_test_link_glm(wmo_bsp_probe)
+register_test_target(wmo_bsp_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_wmo_bsp
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_wmo.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_wmo_bsp_12340.json
+            --probe $<TARGET_FILE:wmo_bsp_probe>)
+endif()
+
+add_executable(movement_facet_probe movement_facet_probe.cpp)
+target_link_libraries(movement_facet_probe PRIVATE wowee_collision)
+wowee_test_link_glm(movement_facet_probe)
+register_test_target(movement_facet_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_facets
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_facets.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_facets_12340.json
+            --probe $<TARGET_FILE:movement_facet_probe>)
+endif()
+
+add_executable(terrain_facet_probe terrain_facet_probe.cpp)
+target_link_libraries(terrain_facet_probe PRIVATE wowee_collision)
+wowee_test_link_glm(terrain_facet_probe)
+register_test_target(terrain_facet_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_terrain
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_terrain.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_terrain_12340.json
+            --probe $<TARGET_FILE:terrain_facet_probe>)
+endif()
+
+# Original authored M2 collision input and facet assembly.
+wowee_add_test(test_m2_collision SOURCES test_m2_collision.cpp)
+target_link_libraries(test_m2_collision PRIVATE wowee_collision)
+add_executable(m2_facet_probe m2_facet_probe.cpp)
+target_link_libraries(m2_facet_probe PRIVATE wowee_collision)
+wowee_test_link_glm(m2_facet_probe)
+register_test_target(m2_facet_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_m2
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_m2.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_m2_12340.json
+            --probe $<TARGET_FILE:m2_facet_probe>)
+endif()
+
 # ── test_race_gender_suffix ──────────────────────────────────
 # The two-letter race code per-race models are suffixed with. Written out twice
 # - the helmet resolver and the shoulder attachment - and a wrong suffix reads
@@ -3511,39 +3561,3 @@ wowee_add_test(test_frame_pool SOURCES test_frame_pool.cpp)
 wowee_add_test(test_distant_terrain
     SOURCES test_distant_terrain.cpp ${CMAKE_SOURCE_DIR}/src/pipeline/distant_terrain.cpp
             ${TEST_COMMON_SOURCES})
-
-# Authored WMO collision topology and the original 12340 BSP traversal.
-wowee_add_test(test_wmo_bsp SOURCES test_wmo_bsp.cpp)
-target_link_libraries(test_wmo_bsp PRIVATE wowee_collision)
-add_executable(wmo_bsp_probe wmo_bsp_probe.cpp)
-target_link_libraries(wmo_bsp_probe PRIVATE wowee_collision)
-wowee_test_link_glm(wmo_bsp_probe)
-register_test_target(wmo_bsp_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_wmo_bsp
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_wmo.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_wmo_bsp_12340.json
-            --probe $<TARGET_FILE:wmo_bsp_probe>)
-endif()
-
-add_executable(movement_facet_probe movement_facet_probe.cpp)
-target_link_libraries(movement_facet_probe PRIVATE wowee_collision)
-wowee_test_link_glm(movement_facet_probe)
-register_test_target(movement_facet_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_facets
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_facets.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_facets_12340.json
-            --probe $<TARGET_FILE:movement_facet_probe>)
-endif()
-
-add_executable(terrain_facet_probe terrain_facet_probe.cpp)
-target_link_libraries(terrain_facet_probe PRIVATE wowee_collision)
-wowee_test_link_glm(terrain_facet_probe)
-register_test_target(terrain_facet_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_terrain
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_terrain.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_terrain_12340.json
-            --probe $<TARGET_FILE:terrain_facet_probe>)
-endif()

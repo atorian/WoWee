@@ -1859,12 +1859,17 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
     if (header.nBoundingTriangles > 0 && header.ofsBoundingTriangles > 0) {
         model.collisionIndices = readArray<uint16_t>(m2Data, header.ofsBoundingTriangles, header.nBoundingTriangles);
     }
-    if (header.nBoundingNormals > 0 && header.ofsBoundingNormals > 0) {
-        struct Vec4Disk { float x, y, z, w; };
-        auto diskNormals = readArray<Vec4Disk>(m2Data, header.ofsBoundingNormals, header.nBoundingNormals);
+    if (header.nBoundingNormals > 0) {
+        struct Vec3Disk { float x, y, z; };
+        auto diskNormals = header.ofsBoundingNormals ?
+            readArray<Vec3Disk>(m2Data, header.ofsBoundingNormals, header.nBoundingNormals) : std::vector<Vec3Disk>{};
+        if (diskNormals.size() != header.nBoundingNormals) {
+            LOG_ERROR("M2 '", model.name, "' collision normals at ", header.ofsBoundingNormals,
+                      " are truncated or exceed the allocation limit - authored collision facets unavailable");
+        }
         model.collisionNormals.reserve(diskNormals.size());
         for (const auto& n : diskNormals) {
-            model.collisionNormals.emplace_back(n.x, n.y, n.z, n.w);
+            model.collisionNormals.emplace_back(n.x, n.y, n.z);
         }
     }
     if (!model.collisionVertices.empty()) {

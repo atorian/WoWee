@@ -26,6 +26,7 @@ struct M2Shape {
     std::string name;
     std::vector<glm::vec3> vertices;
     std::vector<uint16_t> indices;
+    std::vector<glm::vec3> faceNormals; // Preserved authored collision planes, before placement
     uint32_t triCount = 0;
     /// The box around the vertices.
     glm::vec3 boundMin{0.0f};
@@ -48,7 +49,8 @@ struct M2Shape {
     /// The shape of a mesh, or nothing for one with no triangle in it.
     [[nodiscard]] static std::shared_ptr<const M2Shape> build(std::string name,
                                                              std::vector<glm::vec3> vertices,
-                                                             std::vector<uint16_t> indices);
+                                                             std::vector<uint16_t> indices,
+                                                             std::vector<glm::vec3> faceNormals = {});
 
     /// The triangles a model-space XY box reaches, each once in mesh order.
     void trisInRange(float minX, float minY, float maxX, float maxY,

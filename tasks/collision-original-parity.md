@@ -152,3 +152,8 @@ dispatcher remain outside this phase. Eleven native collision tests pass.
 Hover/ground progress: 2256 HoverMove calls and 1065 GroundNormal queries
 match original machine code on Linux, native MinGW and ASan/UBSan. The frame
 dispatcher, world-facet acquisition and protocol integration are still pending.
+
+M2 progress: fixed the three-float authored-normal loader stride and retained
+normals through collision shape creation. Original GetCollisionFacets agrees
+in 1512 cases on Linux, native Windows and ASan/UBSan. This closes model-local
+facet generation, not whole-world collection order or movement integration.
