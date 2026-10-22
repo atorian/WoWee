@@ -5,6 +5,7 @@
 #include <vector>
 
 #include <glm/glm.hpp>
+#include "pipeline/wmo_bsp.hpp"
 
 namespace wowee::collision {
 
@@ -24,6 +25,10 @@ struct WmoGroupShape {
     glm::vec3 boundingBoxMin{0.0f};
     glm::vec3 boundingBoxMax{0.0f};
 
+    // Authored collision topology, kept separately from the legacy query grids.
+    // Null means the source group supplied no BSP; it must not be synthesized
+    // from render batches or the legacy floor/wall classification.
+    std::shared_ptr<const pipeline::WmoBspData> collisionBsp;
     std::vector<glm::vec3> vertices;
     std::vector<uint16_t> indices;
     /// MOCV per vertex, for an interior group that has them: the floor's
@@ -73,7 +78,8 @@ struct WmoGroupShape {
     [[nodiscard]] static std::shared_ptr<const WmoGroupShape> build(
         uint32_t groupFlags, const glm::vec3& boundsMin, const glm::vec3& boundsMax,
         std::vector<glm::vec3> vertices, std::vector<uint16_t> indices,
-        std::vector<glm::vec3> vertexColors, std::vector<uint8_t> mopyFlags);
+        std::vector<glm::vec3> vertexColors, std::vector<uint8_t> mopyFlags,
+        std::shared_ptr<const pipeline::WmoBspData> collisionBsp = {});
 
     /// The triangles of the grid a model-space XY box reaches, each once: any
     /// triangle, floors only, walls only.

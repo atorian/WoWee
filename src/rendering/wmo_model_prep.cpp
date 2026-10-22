@@ -171,7 +171,7 @@ bool WMORenderer::prepareGroupResources(const pipeline::WMOGroup& group, GroupRe
     resources.shape = collision::WmoGroupShape::build(
         groupFlags, resources.boundingBoxMin, resources.boundingBoxMax,
         std::move(collisionVertices), group.indices, std::move(vertexColors),
-        std::move(mopyFlags));
+        std::move(mopyFlags), group.collisionBsp);
 
     // Create batches
     if (!group.batches.empty()) {

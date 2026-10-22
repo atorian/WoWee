@@ -683,8 +683,11 @@ set(WOWEE_SOURCES
     src/collision/m2_shape.cpp
     src/collision/movement_contact.cpp
     src/collision/movement_surface.cpp
+    src/collision/movement_facet.cpp
     src/collision/terrain_heights.cpp
+    src/collision/terrain_facets.cpp
     src/collision/wmo_shape.cpp
+    src/collision/wmo_bsp_query.cpp
 
     # Core
     src/core/application.cpp
@@ -845,6 +848,7 @@ set(WOWEE_SOURCES
     src/pipeline/loose_file_reader.cpp
     src/pipeline/m2_loader.cpp
     src/pipeline/wmo_loader.cpp
+    src/pipeline/wmo_bsp.cpp
     src/pipeline/liquid_types.cpp
     src/pipeline/liquid_types_dbc.cpp
     src/pipeline/adt_loader.cpp
@@ -1810,9 +1814,9 @@ add_library(wowee_collision STATIC ${WOWEE_COLLISION_SOURCES})
 # The recovered x87 calculation has explicit precision boundaries. Fused
 # multiply-add or fast-math reassociation changes which contact is first.
 if(MSVC)
-    set_source_files_properties(src/collision/movement_contact.cpp src/collision/movement_surface.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
+    set_source_files_properties(src/collision/movement_contact.cpp src/collision/movement_surface.cpp src/collision/movement_facet.cpp src/collision/terrain_facets.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
 else()
-    set_source_files_properties(src/collision/movement_contact.cpp src/collision/movement_surface.cpp PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
+    set_source_files_properties(src/collision/movement_contact.cpp src/collision/movement_surface.cpp src/collision/movement_facet.cpp src/collision/terrain_facets.cpp PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
 endif()
 target_link_libraries(wowee_collision PUBLIC wowee_pipeline wowee_base)
 target_precompile_headers(wowee_collision PRIVATE

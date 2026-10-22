@@ -58,6 +58,23 @@ class OriginalCollision:
     def floats(self, values):
         return self.alloc(struct.pack('<' + 'f' * len(values), *values))
 
+    def call(self, address, args, this=0):
+        cpu = self.cpu
+        stack = 0x30ff000
+        cpu.mem_write(stack, struct.pack('<'+'I'*(len(args)+1), 0x1000000, *args))
+        cpu.reg_write(UC_X86_REG_ESP, stack)
+        cpu.reg_write(UC_X86_REG_ECX, this)
+        cpu.reg_write(UC_X86_REG_FPCW, self.control_word)
+        cpu.reg_write(UC_X86_REG_FPSW, 0)
+        cpu.reg_write(UC_X86_REG_FPTAG, 0xffff)
+        try:
+            cpu.emu_start(address, 0x1000000, count=10_000_000)
+        except UcError as error:
+            raise RuntimeError(f'Original routine failed at {cpu.reg_read(UC_X86_REG_EIP):08x}: {error}') from error
+        if cpu.reg_read(UC_X86_REG_EIP) != 0x1000000:
+            raise RuntimeError('Original routine exceeded instruction budget')
+        return cpu.reg_read(UC_X86_REG_EAX)
+
     def surface_move(self, case):
         """Run TraceSurface with a real player-shaped unit and preloaded world.
 

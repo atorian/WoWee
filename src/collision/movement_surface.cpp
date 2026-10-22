@@ -1,5 +1,5 @@
 #include "collision/movement_surface.hpp"
-#include "movement_geometry.hpp"
+#include "collision/detail/movement_geometry.hpp"
 
 #include <algorithm>
 #include <cmath>

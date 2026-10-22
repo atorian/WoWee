@@ -146,6 +146,68 @@ falling, jump/landing events, swimming, flying, hover, pending movement actions,
 streaming queries and server-visible packets still require separate validation.
 It is not connected to CameraController's player simulation.
 
+## Authored WMO and terrain geometry
+
+The WMO loader now retains validated MOBN nodes and MOBR face references in
+an immutable `WmoBspData`, passed through model preparation into `WmoGroupShape`.
+It rejects incomplete records, missing face/vertex references and child cycles
+with a contextual error. The loader regression failed first: the old loader
+lost the BSP and accepted both malformed files. Legacy floor/wall queries
+remain separate; retaining the BSP does not certify their participation rules.
+
+`queryWmoBsp` executes the recovered positive-before-negative traversal,
+original query/MOPY masks, ordered duplicate suppression and 8192 tested-face
+limit. The digest path accepts at most 300 faces and 450 distinct vertices;
+its boundary comparisons differ from the uncached path. Both are preserved.
+`tools/original_wmo_reference.py` runs the original traversal at `0x7ca920`,
+including original digest creation and filtering. The 508-case fixture covers
+these paths, boundaries, masks, duplicates, capacity and randomized trees.
+
+`makeMovementFacet` reproduces `World::TriDataToFacetData` (`0x782740`), including
+local cross products, original placement transforms, precision boundaries,
+owner GUIDs and the upward plane supplied for a degenerate face. It reports the
+degenerate result to the geometry owner for logging once per asset.
+`queryTerrainFacets` reproduces `CMapChunk::Intersect` (`0x7d8840`), using the
+original interleaved grid, holes, four-triangle order, chunk-local query margin
+and plane construction. Its world corner is supplied explicitly; the world
+collector still needs to provide original chunk placement and availability.
+
+Both normalizers have the original x87 and SSE paths. The original selects SSE
+from processor features in `CMap::Initialize`; it is not a visual setting.
+**Unicorn's built-in RSQRTSS is not an adequate oracle**: it computes an exact
+reciprocal square root, unlike the hardware approximation. The reference uses
+`tools/original_cpu_reference.cpp` to execute that one instruction on the host
+CPU while all original geometry code continues in the emulator. The only
+external routine replaced is `SysMsgPrintf`: the reference records its
+output-only degenerate-data diagnostic without calling Windows/UI code.
+
+The portable checked-in fixtures use the x87 path: 1017 transformed-geometry
+cases and 460 terrain queries. SSE comparison must use the same host CPU as
+the original, since its approximation is processor-dependent. Generate SSE
+reference output with `--sse --cpu-reference <helper-library>`; do not commit
+one processor's SSE outputs as a universal golden fixture. Build the helper
+from `tools/original_cpu_reference.cpp` as a shared library in `build-dev/scratch`
+(`-shared -fPIC` on Linux; `-shared` on native MinGW), with temporaries on D:.
+
+```text
+python tools/check_original_wmo.py --reference tests/fixtures/original_wmo_bsp_12340.json --probe <wmo_bsp_probe>
+python tools/check_original_facets.py --reference tests/fixtures/original_facets_12340.json --probe <movement_facet_probe>
+python tools/check_original_terrain.py --reference tests/fixtures/original_terrain_12340.json --probe <terrain_facet_probe>
+```
+
+Use `--binary <original.exe>` and `--write-reference <output>` to regenerate.
+For SSE add the options above. Validation on 2026-10-22: native Windows CMake dev targets built; all nine
+selected CTest tests passed (contact, surface, WMO BSP/loading, transformed
+facets, terrain, the collision world and existing WMO/interior-light tests).
+The changed WMO model preparation also compiled in `wowee_render`. Linux and
+native Windows match all 1017 transformed-facet and 460 terrain cases in both
+x87 and host-SSE modes. ASan/UBSan passed the BSP, transformed-facet and terrain
+matrices; leak detection was disabled for the sandbox tracing limitation.
+
+These are geometry phases: whole-world instance
+ordering, M2 collection, liquid/impassable facets and streaming remain separate
+acceptance work. The exact geometry queries are not yet the player's source.
+
 ## Remaining acceptance work
 
 The full checklist is in `tasks/collision-original-parity.md`. World facet

@@ -6,6 +6,8 @@ behaviour must match the original client. See
 
 Status: three legacy query defects fixed; original contact primitive matches
 1306 supplied-geometry reference cases; the surface phase matches 1069 calls;
+authored WMO BSP, transformed facets and terrain queries have executable-reference
+coverage (508, 1017 and 460 cases respectively);
 full behavioural equivalence is not
 established and the player solver is not replaced. See
 `docs/original-collision-reference.md` for the implemented boundary and checks.
@@ -130,3 +132,10 @@ remain runnable; unsupported cases remain visible in the completion report.
 - [ ] Equivalent full movement trajectories and state transitions.
 - [ ] Equivalent server-visible movement.
 - [ ] Verified production integration and removal of competing heuristics.
+
+Geometry progress: WMO MOBN/MOBR are now retained through loading and model
+preparation. Independent original-code comparisons cover BSP traversal/masks,
+model facet transforms and terrain chunk queries including holes. SSE references
+execute host RSQRTSS because the emulator's default approximation is incorrect.
+World placement ordering, M2 facets, liquids, impassable boundaries and streaming
+still need to be connected and compared before changing player simulation.

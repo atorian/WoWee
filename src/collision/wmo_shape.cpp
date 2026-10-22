@@ -39,10 +39,12 @@ thread_local VisitStamps tl_visits;
 std::shared_ptr<const WmoGroupShape> WmoGroupShape::build(
         uint32_t groupFlags, const glm::vec3& boundsMin, const glm::vec3& boundsMax,
         std::vector<glm::vec3> vertices, std::vector<uint16_t> indices,
-        std::vector<glm::vec3> vertexColors, std::vector<uint8_t> mopyFlags) {
+        std::vector<glm::vec3> vertexColors, std::vector<uint8_t> mopyFlags,
+        std::shared_ptr<const pipeline::WmoBspData> collisionBsp) {
     auto shape = std::make_shared<WmoGroupShape>();
     WmoGroupShape& s = *shape;
     s.groupFlags = groupFlags;
+    s.collisionBsp = std::move(collisionBsp);
     s.boundingBoxMin = boundsMin;
     s.boundingBoxMax = boundsMax;
     s.vertices = std::move(vertices);
@@ -207,6 +209,12 @@ uint64_t WmoGroupShape::bytes() const {
                      triBounds.capacity() * sizeof(TriBounds) +
                      triNormals.capacity() * sizeof(glm::vec3) +
                      triMopyFlags.capacity();
+    if (collisionBsp) {
+        total += sizeof(pipeline::WmoBspData) +
+                 collisionBsp->nodes.capacity() * sizeof(pipeline::WmoBspNode) +
+                 collisionBsp->faces.capacity() * sizeof(uint16_t) +
+                 collisionBsp->digestEligible.capacity();
+    }
     for (const auto* cells : {&cellTriangles, &cellFloorTriangles, &cellWallTriangles}) {
         total += cells->capacity() * sizeof(std::vector<uint32_t>);
         for (const auto& cell : *cells) total += cell.capacity() * sizeof(uint32_t);

@@ -464,18 +464,27 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
 
     auto& group = model.groups[groupIndex];
     group.groupId = groupIndex;
+    group.collisionBsp.reset();
+    std::vector<WmoBspNode> bspNodes;
+    std::vector<uint16_t> bspFaces;
+    bool sawBspNodes = false, sawBspFaces = false;
+    auto collisionError = [&](const std::string& reason) {
+        core::Logger::getInstance().error(groupLabel(model, groupIndex),
+            " invalid collision data: ", reason, " - group loading failed");
+        return false;
+    };
 
     uint32_t offset = 0;
 
     // Parse chunks in group file
-    while (offset + 8 < groupData.size()) {
+    while (uint64_t(offset) + 8 <= groupData.size()) {
         uint32_t chunkId = read<uint32_t>(groupData, offset);
         uint32_t chunkSize = read<uint32_t>(groupData, offset);
-        uint32_t chunkEnd = offset + chunkSize;
-
-        if (chunkEnd > groupData.size()) {
-            break;
+        const uint64_t chunkEnd64 = uint64_t(offset) + chunkSize;
+        if (chunkEnd64 > groupData.size()) {
+            return collisionError("truncated group chunk");
         }
+        const uint32_t chunkEnd = static_cast<uint32_t>(chunkEnd64);
 
         if (chunkId == MVER) {
             // Version - skip
@@ -484,8 +493,7 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
             // Group header - parse sub-chunks
             // MOGP header is 68 bytes, followed by sub-chunks
             if (chunkSize < 68) {
-                offset = chunkEnd;
-                continue;
+                return collisionError("truncated MOGP header");
             }
 
             // Read MOGP header
@@ -521,7 +529,7 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
 
             // Parse sub-chunks within MOGP
             int groupLogCount = 0;
-            while (mogpOffset + 8 < chunkEnd) {
+            while (uint64_t(mogpOffset) + 8 <= chunkEnd) {
                 uint32_t subChunkId = read<uint32_t>(groupData, mogpOffset);
                 uint32_t subChunkSize = read<uint32_t>(groupData, mogpOffset);
                 // Widened for the same reason as the root chunk loop: both
@@ -532,7 +540,7 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
                 const uint64_t subChunkEnd64 =
                     static_cast<uint64_t>(mogpOffset) + subChunkSize;
                 if (subChunkEnd64 > chunkEnd) {
-                    break;
+                    return collisionError("truncated MOGP subchunk");
                 }
                 // Past the guard it is <= chunkEnd, so this cannot truncate.
                 const uint32_t subChunkEnd = static_cast<uint32_t>(subChunkEnd64);
@@ -579,6 +587,30 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
                         group.triFlags[i] = read<uint8_t>(groupData, mogpOffset);
                         read<uint8_t>(groupData, mogpOffset); // materialId (skip)
                     }
+                }
+                else if (subChunkId == 0x4D4F424E) { // MOBN - authored collision BSP
+                    if (sawBspNodes || subChunkSize % 16)
+                        return collisionError("duplicate or incomplete MOBN records");
+                    sawBspNodes = true;
+                    bspNodes.reserve(subChunkSize / 16);
+                    while (mogpOffset < subChunkEnd) {
+                        WmoBspNode node;
+                        node.flags = read<uint16_t>(groupData, mogpOffset);
+                        node.negativeChild = read<uint16_t>(groupData, mogpOffset);
+                        node.positiveChild = read<uint16_t>(groupData, mogpOffset);
+                        node.faceCount = read<uint16_t>(groupData, mogpOffset);
+                        node.firstFace = read<uint32_t>(groupData, mogpOffset);
+                        node.planeDistance = read<float>(groupData, mogpOffset);
+                        bspNodes.push_back(node);
+                    }
+                }
+                else if (subChunkId == 0x4D4F4252) { // MOBR - ordered MOVI triangle references
+                    if (sawBspFaces || subChunkSize % 2)
+                        return collisionError("duplicate or incomplete MOBR records");
+                    sawBspFaces = true;
+                    bspFaces.reserve(subChunkSize / 2);
+                    while (mogpOffset < subChunkEnd)
+                        bspFaces.push_back(read<uint16_t>(groupData, mogpOffset));
                 }
                 else if (subChunkId == MONR) { // Normals
                     uint32_t normalCount = subChunkSize / 12;
@@ -733,6 +765,17 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
         }
 
         offset = chunkEnd;
+    }
+
+    if (sawBspNodes || sawBspFaces) {
+        if (!sawBspNodes || !sawBspFaces)
+            return collisionError("MOBN and MOBR must both be present");
+        if (group.triFlags.size() != group.indices.size() / 3)
+            return collisionError("MOPY must describe every MOVI triangle");
+        std::string error;
+        group.collisionBsp = WmoBspData::build(std::move(bspNodes), std::move(bspFaces),
+            group.indices, group.vertices.size(), error);
+        if (!group.collisionBsp) return collisionError(error);
     }
 
     // Create a default batch if none were loaded
