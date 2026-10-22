@@ -2,6 +2,7 @@
 #include <iostream>
 #include <iomanip>
 #include <string>
+#include <stdexcept>
 
 using namespace wowee::collision;
 struct Sink final:MovementCommandSink {
@@ -9,6 +10,9 @@ struct Sink final:MovementCommandSink {
     SurfaceMovementShape& shape;
     bool first=true;
     Sink(SurfaceMovementState& s,SurfaceMovementShape& h):state(s),shape(h){}
+    bool inputChanged(uint32_t,uint32_t,bool) override {throw std::logic_error("Input outside height-only fixture");}
+    void angularInputStopped(bool) override {throw std::logic_error("Angular input outside height-only fixture");}
+    void resetHeartbeat(uint32_t) override {throw std::logic_error("Heartbeat reset outside height-only fixture");}
     void collisionHeightChanged(uint32_t time,float height,uint32_t counter,bool ack) override {
         if(!first)std::cout<<',';
         first=false;

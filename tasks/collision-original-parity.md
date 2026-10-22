@@ -8,7 +8,7 @@ Status: contact/surface phases and the combined supplied-state world collector
 have original-executable comparisons. The unattached request-to-world path,
 frame projection/application, height-command queue and restricted frame
 scheduler are verified offline. The native collision/ADT selection passes
-42/42 tests. Full behavioural equivalence is not established and the player
+44/44 tests. Full behavioural equivalence is not established and the player
 solver is not replaced. Production world lifecycle, remaining input commands,
 unit event delivery, interpolation, transport/spline movement and outgoing
 packet bytes remain open. See `docs/original-collision-reference.md` for the
@@ -349,3 +349,25 @@ These shared operations are not queue admission: the original event dispatcher
 also suppresses some inputs for transport/root/pending-root, updates heartbeat
 clocks and calls the unit/input services. Wiring and independently validating
 those synchronous effects remains the next step.
+
+
+### 2026-10-23 — Basic input queue and complete offline execution
+
+The common queue now admits the 16 basic input operations alongside collision
+height changes, preserves stable timed ordering, enforces the original
+transport/root/pending-root gates and resets extrapolation delay even for
+ignored input. Angular-stop notifications and the fallback heartbeat reset
+are delivered synchronously at their original boundaries.
+
+All 5120 queue scenarios match original AddPlayerMoveEvent/UpdatePlayerMovement.
+All 1564 combined input/height/scheduler/world scenarios match, including ten
+thirty-frame trajectories and mixed commands with equal timestamps. ASan/UBSan
+and native Windows pass; the full native collision/ADT selection is 44/44.
+The 36,864 height-only update calls still pass with the generalized queue.
+
+Unit notification delivery in these fixtures reports no send; original dispatch
+executes its own fallback heartbeat reset. Heartbeat packet preparation itself
+is still supplied as a successful service. Actual outgoing packet contents and
+unit side effects are the next verification boundary. The complete original
+movement-status writer can now execute against a supplied CDataStore buffer;
+a scratch probe has produced its real bytes for a falling mover.

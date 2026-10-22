@@ -37,7 +37,7 @@ class OriginalMovementCommands(OriginalCollision):
             self.write(at,'3I',offset,at+4,(at+4)|1)
         # Supply storage only. Original AllocEvent, Enqueue and list operations
         # run unmodified, including recycling delivered events to this list.
-        free=0xada370;nodes=[self.alloc(bytes(0x60)) for _ in range(len(case['operations'])+1)]
+        free=0xada370;nodes=[self.alloc(bytes(0x60)) for _ in range(len(case['operations'])+len(case.get('inputs',[]))+1)]
         self.write(free,'3I',0,nodes[-1],nodes[0])
         for i,node in enumerate(nodes):
             self.write(node,'2I',nodes[i-1] if i else free+4,

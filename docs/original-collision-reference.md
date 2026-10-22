@@ -537,3 +537,35 @@ below the renderer/game. The preceding execution increment passed full sweep.
 Queue admission and the unit/input/network notification side effects are not
 part of this shared-operation API. It remains offline until the complete
 original event and world lifecycle is integrated and compared.
+
+
+## Basic input dispatch and mixed command execution (2026-10-23)
+
+MovementCommandQueue now uses one stable queue for typed height and input
+commands. The shared operations above are dispatched with the original
+transport/root/pending-root admission rules from UpdatePlayerMovement. The
+queue resets movement delay before admission, conditionally emits jump and
+ascent notifications, always delivers the original angular-stop boundary, and
+requests UpdateHeartbeatTimerA when new movement was not reported by the unit.
+The owner applies that reset only for the active mover. Height notification
+still occurs after the shape change and its return does not count as `sent`.
+
+Original AddPlayerMoveEvent (0x6ec840), real queue allocation/insertion/recycling,
+UpdatePlayerMovement, shared state operations, SetInterpolation and fallback
+UpdateHeartbeatTimerA execute in the oracle. Unit ProcessLocalMoveEvent is an
+observed external service returning false; angular input stop services are
+observed at 0x5f9650 and 0x5fb510. These are explicit fixture boundaries, not
+claims that all unit side effects have been implemented.
+
+`original_input_queue_12340.json`: 5120 cases, including timestamp ties and
+rollover, rooted/transport/pending-root admission and angular control delivery.
+`original_input_execution_12340.json`: 1564 cases with real ApplyMovement/world
+collection, including ten thirty-frame sequences, jump/turn/strafe, swimming,
+flight, long frames and mixed server height changes. Equal-time height and
+input changes preserve their arrival order. Native Windows and ASan/UBSan
+comparisons pass. The generalized queue also retains all 36,864 height-only
+update results. All 44 native collision/ADT tests pass.
+
+Normal player control remains on the old path. Remaining state-change commands,
+unit effects, packet bytes, interpolation, active spline/transport handling
+and production world lifecycle are still required before enabling replacement.

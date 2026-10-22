@@ -5,33 +5,59 @@
 namespace wowee::collision {
 void MovementCommandQueue::enqueueCollisionHeight(uint32_t time,float height,
     uint32_t counter,bool needAck) {
+    enqueue({time,needAck,Height{height,needAck?counter:0}});
+}
+void MovementCommandQueue::enqueueInput(uint32_t time,MovementInput input,bool needAck) {
+    enqueue({time,needAck,input});
+}
+void MovementCommandQueue::enqueue(Command command) {
     // 0x6ec090: stable insertion using signed differences of wrapping clocks.
     // A numeric sort is wrong across rollover; std::sort also requires an
     // ordering relation that modular timestamps do not provide for all inputs.
-    auto at=heights_.begin();
-    for(;at!=heights_.end();++at)
-        if(std::bit_cast<int32_t>(time-at->timeMs)<0)break;
-    heights_.insert(at,{time,needAck?counter:0,height,needAck});
+    auto at=commands_.begin();
+    for(;at!=commands_.end();++at)
+        if(std::bit_cast<int32_t>(command.timeMs-at->timeMs)<0)break;
+    commands_.insert(at,command);
 }
 std::optional<uint32_t> MovementCommandQueue::nextTime() const {
-    if(heights_.empty())return std::nullopt;
-    return heights_.front().timeMs;
+    if(commands_.empty())return std::nullopt;
+    return commands_.front().timeMs;
 }
 MovementQueueResult MovementCommandQueue::process(uint32_t time,bool defer,
     SurfaceMovementState& state,SurfaceMovementShape& shape,MovementCommandSink& sink) {
     // UpdatePlayerMovement 0x6ef860. A deferred passenger keeps the due event
     // queued; future events alone do not trigger the deferral result.
-    while(!heights_.empty()&&std::bit_cast<int32_t>(time-heights_.front().timeMs)>=0) {
+    while(!commands_.empty()&&std::bit_cast<int32_t>(time-commands_.front().timeMs)>=0) {
         if(defer)return MovementQueueResult::Deferred;
-        const auto event=heights_.front();
-        heights_.pop_front();
+        const auto event=commands_.front();
+        commands_.pop_front();
         state.moveStartDelayMs=0;
-        setMovementCollisionHeight(shape,event.height);
-        sink.collisionHeightChanged(time,event.height,event.ackCounter,event.needAck);
+        const uint32_t oldFlags=state.flags;
+        bool sent=false;
+        if(const auto* height=std::get_if<Height>(&event.action)) {
+            setMovementCollisionHeight(shape,height->height);
+            sink.collisionHeightChanged(time,height->height,height->counter,event.needAck);
+        } else {
+            const auto input=std::get<MovementInput>(event.action);
+            const bool movement=input<=MovementInput::StopStrafe||input==MovementInput::Jump;
+            if(movement&&(oldFlags&(0x200|0x800|0x100000)))continue;
+            const bool changed=applyMovementInput(state,input);
+            const bool conditional=input==MovementInput::Ascend||input==MovementInput::Descend||
+                input==MovementInput::StopAscend||input==MovementInput::Jump;
+            if(changed||!conditional) {
+                constexpr uint32_t opcodes[]={0xb5,0xb6,0xb7,0xb8,0xb9,0xba,0xbc,0xbd,
+                    0xbe,0xbf,0xc0,0xc1,0x359,0x3a7,0x35a,0xbb};
+                sent=sink.inputChanged(time,opcodes[static_cast<unsigned>(input)],event.needAck);
+            }
+            if(input==MovementInput::StopTurn||input==MovementInput::StopPitch)
+                sink.angularInputStopped(input==MovementInput::StopPitch);
+        }
+        if(event.needAck&&!sent&&(state.flags&0xc0100f)&&!(oldFlags&0xc0100f))
+            sink.resetHeartbeat(time);
         // SetInterpolation 0x6ea6a0 clears all three interpolation bits; the
         // next event in this subset has no remote heartbeat to interpolate to.
         state.flags2&=~0x1c00u;
     }
-    return !heights_.empty()||(state.flags&0xc010ff)?MovementQueueResult::Pending:MovementQueueResult::Idle;
+    return !commands_.empty()||(state.flags&0xc010ff)?MovementQueueResult::Pending:MovementQueueResult::Idle;
 }
 } // namespace wowee::collision
