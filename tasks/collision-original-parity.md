@@ -388,3 +388,20 @@ pre-WotLK packet tests pass. Full sweep passes. The preceding collision/ADT
 selection remains 44/44; this increment adds the independent wire-status test.
 Packet envelopes, ACK metadata and complete synchronous unit effects still need
 comparison and integration, alongside remaining movement/world lifecycle work.
+
+
+### 2026-10-23 — Complete ordinary forced ACK envelopes
+
+Executed original PrepareMovementPacket (0x71ef80), including active-mover
+admission and the real CDataStore writers, for 1280 cases across 20 ACK types.
+All output bytes match on native Windows and ASan/UBSan. A GameHarness test
+first failed on all ten enable/disable flag commands: the WotLK handler omitted
+the float value for hover, feather fall, water walk, can fly and swim/fly
+transition. A shared WotLK ACK builder now owns conditional values for those
+commands, nine speed/rate changes and collision height. Gravity, root/unroot
+and knockback carry no value. Other expansion paths retain their prior layout.
+
+Native ACK domain, original wire status, original ACK, movement payload and
+pre-WotLK tests pass (5/5). This verifies construction and command routing,
+not the remaining movement-state effects, timing, active transport/spline
+handling or unit event side effects. Those remain work before solver rollout.

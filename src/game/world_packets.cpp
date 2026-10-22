@@ -1071,6 +1071,37 @@ bool MovementPacket::readMovementPayload(network::Packet& packet, MovementInfo& 
     return true;
 }
 
+network::Packet MovementPacket::buildForceAck(Opcode opcode, const MovementInfo& info,
+    uint64_t playerGuid, uint32_t counter, float value) {
+    network::Packet packet(wireOpcode(opcode));
+    packet.writePackedGuid(playerGuid);
+    packet.writeUInt32(counter);
+    writeMovementPayload(packet, info);
+    // PrepareMovementPacket 0x71ef80 / HasValue 0x7151f0 in build 12340.
+    switch (opcode) {
+    case Opcode::CMSG_FORCE_RUN_SPEED_CHANGE_ACK:
+    case Opcode::CMSG_FORCE_RUN_BACK_SPEED_CHANGE_ACK:
+    case Opcode::CMSG_FORCE_WALK_SPEED_CHANGE_ACK:
+    case Opcode::CMSG_FORCE_SWIM_SPEED_CHANGE_ACK:
+    case Opcode::CMSG_FORCE_SWIM_BACK_SPEED_CHANGE_ACK:
+    case Opcode::CMSG_FORCE_FLIGHT_SPEED_CHANGE_ACK:
+    case Opcode::CMSG_FORCE_FLIGHT_BACK_SPEED_CHANGE_ACK:
+    case Opcode::CMSG_FORCE_TURN_RATE_CHANGE_ACK:
+    case Opcode::CMSG_FORCE_PITCH_RATE_CHANGE_ACK:
+    case Opcode::CMSG_MOVE_HOVER_ACK:
+    case Opcode::CMSG_MOVE_FEATHER_FALL_ACK:
+    case Opcode::CMSG_MOVE_WATER_WALK_ACK:
+    case Opcode::CMSG_MOVE_SET_CAN_TRANSITION_BETWEEN_SWIM_AND_FLY_ACK:
+    case Opcode::CMSG_MOVE_SET_CAN_FLY_ACK:
+    case Opcode::CMSG_MOVE_SET_COLLISION_HGT_ACK:
+        packet.writeFloat(value);
+        break;
+    default:
+        break;
+    }
+    return packet;
+}
+
 network::Packet MovementPacket::build(Opcode opcode, const MovementInfo& info, uint64_t playerGuid) {
     network::Packet packet(wireOpcode(opcode));
 

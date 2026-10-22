@@ -228,7 +228,7 @@ private:
     /// Set one of another unit's movement speeds.
     void applyUnitSpeed(uint64_t guid, float MovementSpeeds::* speed, float value);
     void handleForceRunSpeedChange(network::Packet& packet);
-    network::Packet buildForceAck(Opcode ackOpcode, uint32_t counter);
+    network::Packet buildForceAck(Opcode ackOpcode, uint32_t counter, float value = 0);
     /// A forced speed change. Ours is applied and acknowledged; another
     /// unit's goes into its speeds as unitSpeed (null: not one it keeps).
     void handleForceSpeedChange(network::Packet& packet, const char* name, Opcode ackOpcode,

@@ -3530,7 +3530,7 @@ target_compile_definitions(wowee_game_harness PRIVATE WOWEE_SOURCE_DIR="${CMAKE_
 target_link_libraries(wowee_game_harness PUBLIC wowee_game catch2_main)
 wowee_test_link_glm(wowee_game_harness)
 
-foreach(_domain chat spell inventory quest social session account_data action_bar pet reputation realm_time weather)
+foreach(_domain chat spell inventory quest social session account_data action_bar pet reputation realm_time weather movement_ack)
     wowee_add_test(test_${_domain}_domain SOURCES test_${_domain}_domain.cpp)
     target_link_libraries(test_${_domain}_domain PRIVATE wowee_game_harness)
 endforeach()
@@ -3766,4 +3766,16 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_status.py
             --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_status_12340.json
             --probe $<TARGET_FILE:movement_status_probe>)
+endif()
+
+add_executable(movement_ack_probe movement_ack_probe.cpp ${CMAKE_SOURCE_DIR}/src/core/movement_status.cpp)
+target_link_libraries(movement_ack_probe PRIVATE wowee_protocol)
+wowee_test_link_glm(movement_ack_probe)
+register_test_target(movement_ack_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_force_ack
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_ack.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_ack_12340.json
+            --opcodes ${CMAKE_SOURCE_DIR}/Data/expansions/wotlk/opcodes.json
+            --probe $<TARGET_FILE:movement_ack_probe>)
 endif()

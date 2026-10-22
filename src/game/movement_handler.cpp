@@ -1090,17 +1090,7 @@ void MovementHandler::dismount() {
 // root, flag, collision-height, knockback) require the same ACK structure:
 // GUID + counter + movement payload with server-space coordinates. Centralised
 // here so transport coordinate conversion can't diverge between handlers.
-network::Packet MovementHandler::buildForceAck(Opcode ackOpcode, uint32_t counter) {
-    network::Packet ack(wireOpcode(ackOpcode));
-    const bool legacyGuid =
-        isActiveExpansion("classic") || isActiveExpansion("tbc") || isActiveExpansion("turtle");
-    if (legacyGuid) {
-        ack.writeUInt64(owner_.getPlayerGuid());
-    } else {
-        ack.writePackedGuid(owner_.getPlayerGuid());
-    }
-    ack.writeUInt32(counter);
-
+network::Packet MovementHandler::buildForceAck(Opcode ackOpcode, uint32_t counter, float value) {
     MovementInfo wire = movementInfo;
     wire.time = nextMovementTimestampMs();
     if (wire.hasFlag(MovementFlags::ONTRANSPORT)) {
@@ -1118,6 +1108,19 @@ network::Packet MovementHandler::buildForceAck(Opcode ackOpcode, uint32_t counte
         wire.transportY = serverTransport.y;
         wire.transportZ = serverTransport.z;
     }
+    if (isActiveExpansion("wotlk")) {
+        return MovementPacket::buildForceAck(ackOpcode, wire, owner_.getPlayerGuid(), counter, value);
+    }
+    network::Packet ack(wireOpcode(ackOpcode));
+    const bool legacyGuid =
+        isActiveExpansion("classic") || isActiveExpansion("tbc") || isActiveExpansion("turtle");
+    if (legacyGuid) {
+        ack.writeUInt64(owner_.getPlayerGuid());
+    } else {
+        ack.writePackedGuid(owner_.getPlayerGuid());
+    }
+    ack.writeUInt32(counter);
+
     if (owner_.getPacketParsers()) {
         owner_.getPacketParsers()->writeMovementPayload(ack, wire);
     } else {
@@ -1164,8 +1167,8 @@ void MovementHandler::handleForceSpeedChange(network::Packet& packet, const char
     }
 
     if (owner_.getSocket()) {
-        auto ack = buildForceAck(ackOpcode, counter);
-        ack.writeFloat(newSpeed);
+        auto ack = buildForceAck(ackOpcode, counter, newSpeed);
+        if (!isActiveExpansion("wotlk")) ack.writeFloat(newSpeed);
         owner_.getSocket()->send(ack);
     }
 
@@ -1226,7 +1229,7 @@ void MovementHandler::handleForceMoveFlagChange(network::Packet& packet, const c
 
     if (!owner_.getSocket()) return;
     if (wireOpcode(ackOpcode) == 0xFFFF) return;
-    owner_.getSocket()->send(buildForceAck(ackOpcode, counter));
+    owner_.getSocket()->send(buildForceAck(ackOpcode, counter, set ? 1.0f : 0.0f));
 }
 
 void MovementHandler::handleMoveSetCollisionHeight(network::Packet& packet) {
@@ -1246,8 +1249,8 @@ void MovementHandler::handleMoveSetCollisionHeight(network::Packet& packet) {
     if (wireOpcode(Opcode::CMSG_MOVE_SET_COLLISION_HGT_ACK) == 0xFFFF) return;
     // buildForceAck now handles transport coordinate conversion, fixing the
     // previous omission that caused desync when riding boats/zeppelins.
-    auto ack = buildForceAck(Opcode::CMSG_MOVE_SET_COLLISION_HGT_ACK, counter);
-    ack.writeFloat(height);
+    auto ack = buildForceAck(Opcode::CMSG_MOVE_SET_COLLISION_HGT_ACK, counter, height);
+    if (!isActiveExpansion("wotlk")) ack.writeFloat(height);
     owner_.getSocket()->send(ack);
 }
 

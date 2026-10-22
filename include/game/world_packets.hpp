@@ -231,6 +231,13 @@ public:
      * @return Packet ready to send
      */
     static network::Packet build(Opcode opcode, const MovementInfo& info, uint64_t playerGuid = 0);
+
+    // Build 12340 ordinary forced ACK: packed guid, counter, movement status,
+    // and the command value for the ACK categories that carry it. Teleport
+    // and worldport have separate layouts and must not use this function.
+    static network::Packet buildForceAck(Opcode opcode, const MovementInfo& info,
+        uint64_t playerGuid, uint32_t counter, float value = 0);
+
 };
 
 /**

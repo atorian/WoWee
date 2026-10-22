@@ -601,3 +601,27 @@ and pre-WotLK packet regressions pass; full sweep remains within all ceilings.
 Scope: ordinary movement status, no attached transport or active spline. GUID,
 opcode envelopes, ACK counter/value suffixes and the full unit-to-network
 notification path remain separate work. No live player/server experiment ran.
+
+
+## Forced movement ACK envelopes (2026-10-23)
+
+`original_ack_12340.json` records 1280 complete packets from original
+CGUnit_C::PrepareMovementPacket (0x71ef80), including GetMoveStatus and actual
+serialization, for an active unattached mover without an active spline.
+The fixture supplies a preallocated CDataStore and matching active GUID; no
+packet writer or field is hooked. Its internal four-byte opcode prefix is
+compared separately with Packet::getOpcode; the remaining bytes are the body.
+
+AckMessageNeedsIndex (0x990370) and HasValue (0x7151f0) distinguish the layouts.
+Nine speed/rate ACKs, hover, feather fall, water walk, can fly, swim/fly
+transition and collision height include a float. Root/unroot, knockback and
+gravity ACKs do not. Teleport/worldport have distinct layouts and are excluded.
+`check_original_movement_ack.py` compares every byte, varying packed GUID,
+counter, movement flags, optional pitch/elevation and falling values.
+
+The production WotLK flag handler omitted the five toggle ACK values.
+`test_movement_ack_domain.cpp` reproduced ten failures before the fix, then
+passed after the handlers were routed through MovementPacket::buildForceAck.
+1280 original envelopes pass natively and with ASan/UBSan. Existing movement
+and pre-WotLK layout tests pass. State transitions and packet timing still
+need their own integration proof; this is not a full movement parity claim.
