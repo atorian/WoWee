@@ -12,8 +12,8 @@ def probe_input(c):
 def cases():
     rng = random.Random(0x98a0b0)
     base = next(apply_cases())
-    for i in range(4096):
-        command = i % 16
+    for i in range(4608):
+        command = i % 16 if i < 4096 else 16 + i % 2
         yield dict(base, name=f'state_{i}', command=command,
             value=f32(rng.uniform(-10, 50)) if command < 9 else i // 16 % 2,
             flags=rng.getrandbits(32) & ~0x08000000, flags2=rng.getrandbits(16),
@@ -25,7 +25,7 @@ def cases():
             speeds=vector([rng.uniform(0, 20) for _ in range(7)]),
             turn_rate=f32(rng.uniform(0, 10)), pitch_rate=f32(rng.uniform(0, 10)))
     modes = [0, 1, 0x1000, 0x1001, 0x200001, 0x2000001, 0x800, 0x100000]
-    for command in range(16):
+    for command in range(18):
         values = [0, 2**-24, -(2**-24), 2**-22, -(2**-22), 2**-21, 1, -1] if command < 9 else [0, 1]
         for flags in modes:
             for index, value in enumerate(values):

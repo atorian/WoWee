@@ -45,7 +45,7 @@ struct ExecutionObservations final:wowee::collision::MovementExecutionSink {
     void collisionHeightChanged(uint32_t time,float height,uint32_t counter,bool ack) override {
         heights.push_back({time,1303,counter,height,shape.height,ack,state.moveStartDelayMs,state.flags2});
     }
-    bool rateChanged(uint32_t time,uint32_t opcode,float value,uint32_t counter,bool ack) override {
+    bool forcedMovementChanged(uint32_t time,uint32_t opcode,float value,uint32_t counter,bool ack) override {
         heights.push_back({time,opcode,counter,value,shape.height,ack,state.moveStartDelayMs,state.flags2});
         rateStates.push_back(state);return false;
     }
@@ -98,10 +98,11 @@ int main(int argc, char** argv) {
     const bool executeRates = rateQueue && std::string(argv[1]) == "--world-rate-execute";
     const bool executeInput = executeRates || argc == 2 && std::string(argv[1]) == "--world-input-execute";
     const bool queuedInput = rateQueue || executeInput || argc == 2 && std::string(argv[1]) == "--world-input-queue";
+    const bool launch = argc == 2 && std::string(argv[1]) == "--world-launch";
     const bool stateChange = argc == 2 && std::string(argv[1]) == "--world-state";
     const bool input = argc == 2 && std::string(argv[1]) == "--world-input";
     const bool execute = queuedInput || argc == 2 && std::string(argv[1]) == "--world-execute";
-    const bool apply = stateChange || input || execute || argc == 2 && std::string(argv[1]) == "--world-apply";
+    const bool apply = launch || stateChange || input || execute || argc == 2 && std::string(argv[1]) == "--world-apply";
     const bool fullWorld = apply || argc == 2 && std::string(argv[1]) == "--world-request";
     const bool frame = fullWorld || (argc == 2 && std::string(argv[1]) == "--request");
     const bool dimensions = argc == 2 && std::string(argv[1]) == "--dimensions";
@@ -207,9 +208,13 @@ int main(int argc, char** argv) {
             if(apply) {
                 bool active;
                 if(!(std::cin>>active>>state.moveStartDelayMs>>state.turnRate>>state.pitchRate>>state.pitchCos>>state.pitchSin))return 2;
-                if(stateChange) {
+                if(launch) {
+                    glm::vec2 direction;float speed,vertical;
+                    if(!(std::cin>>direction.x>>direction.y>>speed>>vertical))return 2;
+                    launchUnattachedMovement(state,direction,speed,vertical);inputAccepted=true;
+                } else if(stateChange) {
                     uint32_t command;float value;
-                    if(!(std::cin>>command>>value)||command>15)return 2;
+                    if(!(std::cin>>command>>value)||command>17)return 2;
                     inputAccepted=command<9?applyMovementRateChange(state,static_cast<MovementRate>(command),value):
                         applyMovementStateChange(state,static_cast<MovementStateChange>(command-9),value);
                 } else if(input) {
@@ -223,8 +228,12 @@ int main(int argc, char** argv) {
                     for(uint32_t i=0;i<count;++i) {
                         if(queuedInput) {
                             uint32_t kind,eventTime;bool ack;
-                            if(!(std::cin>>kind>>eventTime)||kind>2)return 2;
-                            if(kind==2) {
+                            if(!(std::cin>>kind>>eventTime)||kind>3)return 2;
+                            if(kind==3) {
+                                glm::vec2 direction;float speed,vertical;uint32_t counter;
+                                if(!(std::cin>>direction.x>>direction.y>>speed>>vertical>>counter))return 2;
+                                commands.enqueueLaunch(eventTime,counter,direction,speed,vertical);
+                            } else if(kind==2) {
                                 uint32_t rate,counter;float value;
                                 if(!(std::cin>>rate>>value>>counter>>ack)||rate>8)return 2;
                                 commands.enqueueRateChange(eventTime,static_cast<MovementRate>(rate),value,counter,ack);
@@ -268,8 +277,8 @@ int main(int argc, char** argv) {
         vector("move_direction", state.direction);
         std::cout << ",\"move_direction_2d\":[" << state.direction2D.x << ',' << state.direction2D.y << ']';
         if(apply) {number("pitch_cos",state.pitchCos);number("pitch_sin",state.pitchSin);number("facing",state.facing);number("pitch",state.pitch);number("move_start_delay",state.moveStartDelayMs);}
-        if(input||stateChange) {number("accepted",inputAccepted?"true":"false");number("flags2",state.flags2);}
-        if(stateChange||rateQueue)ExecutionObservations::printRates(state);
+        if(input||stateChange||launch) {number("accepted",inputAccepted?"true":"false");number("flags2",state.flags2);}
+        if(stateChange||rateQueue||launch)ExecutionObservations::printRates(state);
         if(queuedInput) {
             if(!executeInput)number("queue_result",queueResult);
             std::cout<<",\"angular_stops\":[";

@@ -647,3 +647,21 @@ The unit delivery boundary reports no send; heartbeat preparation is supplied
 as successful. These fixtures establish state and scheduling, not those unit
 or network side effects. Native Windows and ASan/UBSan pass all three matrices;
 full collision/ADT selection is 49/49 and full sweep passes.
+
+
+## Unattached knockback (2026-10-23)
+
+Launch (0x6e9ff0), StopSwim (0x98bff0), StopFlying (0x98c240) and local
+launch enqueue (0x6ecc80) now execute against independent fixtures. Shared
+state coverage grows to 5328 calls. `original_launch_12340.json` compares
+2560 standalone launches, including root/swim/flight combinations and raw
+non-unit directions. `original_launch_queue_12340.json` compares 2304 mixed
+queues; `original_launch_execution_12340.json` compares 1424 full frame/world
+scenarios, including four forty-frame sequences.
+
+The original dispatch gate at 0x6ef927..0x6ef965 drops knockback with
+ONTRANSPORT before Launch and ACK. Omitting this gate caused 1093 failures;
+adding it at dispatch resolves all of them. This does not establish attached
+transport semantics: the fixture has no transport GUID or moving passenger
+frame. Native Windows and ASan/UBSan match all new matrices; 52 native
+collision/ADT tests pass. Unit delivery is still an observed boundary.

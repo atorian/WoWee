@@ -21,7 +21,7 @@ struct MovementExecutionResult {
     bool retireRequested=false;
 };
 // Original ExecuteMovement scheduling over the verified uninterpolated frame
-// path and basic-input/height-command subset. No attached transport or active spline.
+// path and verified input/height/rate/knockback queue. No attached transport or active spline.
 // Unit state-event callbacks remain observations, as in MovementRequestResult.
 // This offline composition is not a gameplay/network replacement yet.
 [[nodiscard]] MovementExecutionResult executeUninterpolatedMovement(

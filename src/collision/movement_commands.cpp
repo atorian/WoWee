@@ -7,6 +7,10 @@ void MovementCommandQueue::enqueueCollisionHeight(uint32_t time,float height,
     uint32_t counter,bool needAck) {
     enqueue({time,needAck,Height{height,needAck?counter:0}});
 }
+void MovementCommandQueue::enqueueLaunch(uint32_t time,uint32_t counter,const glm::vec2& direction,
+    float speed,float verticalSpeed) {
+    enqueue({time,true,Launch{direction,speed,verticalSpeed,counter}});
+}
 void MovementCommandQueue::enqueueRateChange(uint32_t time,MovementRate rate,float value,
     uint32_t counter,bool needAck) {
     enqueue({time,needAck,Rate{rate,value,needAck?counter:0}});
@@ -41,12 +45,16 @@ MovementQueueResult MovementCommandQueue::process(uint32_t time,bool defer,
         if(const auto* height=std::get_if<Height>(&event.action)) {
             setMovementCollisionHeight(shape,height->height);
             sink.collisionHeightChanged(time,height->height,height->counter,event.needAck);
+        } else if(const auto* launch=std::get_if<Launch>(&event.action)) {
+            if(oldFlags&0x200)continue; // Original queue drops knockback on a transport.
+            launchUnattachedMovement(state,launch->direction,launch->speed,launch->verticalSpeed);
+            sent=sink.forcedMovementChanged(time,0xf0,0,launch->counter,true);
         } else if(const auto* rate=std::get_if<Rate>(&event.action)) {
             // State changes precede notification, even if the value compares
             // equal and no anchor update is needed. No basic-input root gate.
             (void)applyMovementRateChange(state,rate->rate,rate->value);
             constexpr uint32_t opcodes[]={0x2db,0xe3,0xe5,0xe7,0x2dd,0x382,0x384,0x2df,0x45d};
-            sent=sink.rateChanged(time,opcodes[static_cast<unsigned>(rate->rate)],rate->value,rate->counter,event.needAck);
+            sent=sink.forcedMovementChanged(time,opcodes[static_cast<unsigned>(rate->rate)],rate->value,rate->counter,event.needAck);
         } else {
             const auto input=std::get<MovementInput>(event.action);
             const bool movement=input<=MovementInput::StopStrafe||input==MovementInput::Jump;

@@ -6,10 +6,10 @@ behaviour must match the original client. See
 
 Status: contact/surface phases and the combined supplied-state world collector
 have original-executable comparisons. The unattached request-to-world path,
-frame projection/application, basic-input/height/rate queue and restricted
+frame projection/application, basic-input/height/rate/knockback queue and restricted
 frame scheduler are verified offline. Shared gravity, hover, water walk,
 feather-fall and root state operations are compared independently. The native
-collision/ADT selection passes 49/49 tests. Original status bytes and ordinary
+collision/ADT selection passes 52/52 tests. Original status bytes and ordinary
 forced ACK envelopes are compared; two production codec/ACK defects are fixed.
 Full behavioural equivalence is not established and the player solver is not
 replaced. Production world lifecycle, remaining queued state commands and unit
@@ -431,3 +431,21 @@ Full sweep passes after consolidating the ACK builder's repeated player-GUID
 lookup (domain ownership reach count 1205, below ceiling 1206). No new physics
 is enabled in ordinary gameplay. Remaining queued mode/knockback transitions,
 unit side effects, lifecycle and integration remain required work.
+
+
+### 2026-10-23 — Unattached knockback and swim/flight exit
+
+Added original StopSwim, StopFlying and Launch without an attached transport
+or active spline. Shared-state coverage is now 5328 calls; 2560 standalone
+Launch cases also match. Launch retains the supplied direction, exits swim
+or flight, defers root and sets pending stop in the original order.
+
+Timed knockback initially diverged in 1093 mixed queue cases: UpdatePlayerMovement
+rejects knockback while ONTRANSPORT, although direct Launch still has defined
+state behavior. The gate was added at dispatch, preserving delay reset and
+skipping ACK/interpolation work exactly there. All 2304 queue cases now match.
+1424 complete scheduler/world scenarios match, including 160 consecutive frames
+with repeated launches. State visible at each ACK boundary is compared.
+Native collision/ADT selection is 52/52; all new matrices pass ASan/UBSan.
+Transport-frame conversion, attached movement and real unit/protocol effects
+remain outside these offline comparisons.

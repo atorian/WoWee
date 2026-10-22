@@ -3797,3 +3797,19 @@ if(Python3_Interpreter_FOUND)
             --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_rate_execution_12340.json
             --probe $<TARGET_FILE:movement_surface_probe>)
 endif()
+
+if(Python3_Interpreter_FOUND)
+    foreach(_launch_mode launch launch_queue launch_execution)
+        if(_launch_mode STREQUAL "launch_queue")
+            set(_launch_args --queue)
+        elseif(_launch_mode STREQUAL "launch_execution")
+            set(_launch_args --execute)
+        else()
+            set(_launch_args)
+        endif()
+        add_test(NAME original_collision_${_launch_mode}
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_launch.py ${_launch_args}
+                --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_${_launch_mode}_12340.json
+                --probe $<TARGET_FILE:movement_surface_probe>)
+    endforeach()
+endif()

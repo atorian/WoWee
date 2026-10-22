@@ -2323,8 +2323,39 @@ bool applyMovementStateChange(SurfaceMovementState& state,MovementStateChange ch
         state.flags&=~(MOVEMENTFLAG_ROOT|MOVEMENTFLAG_PENDING_ROOT);
         if(enable)t.TryStartFalling();
         break;
+    case MovementStateChange::StopSwimming:
+        // StopSwim 0x98bff0 retains pitch when ALWAYS_ALLOW_PITCHING is set.
+        state.flags&=~(MOVEMENTFLAG_SWIMMING|MOVEMENTFLAG_ASCENDING|MOVEMENTFLAG_DESCENDING);
+        if(!(state.flags2&MOVEMENTFLAG2_ALWAYS_ALLOW_PITCHING)) {
+            state.flags&=~(MOVEMENTFLAG_PITCH_UP|MOVEMENTFLAG_PITCH_DOWN);
+            state.anchorPitch=state.pitch=0;
+        }
+        t.TryStartFalling();t.CalcCurrentSpeed(0);t.UpdateAnchors(0);
+        break;
+    case MovementStateChange::StopFlying:
+        state.flags&=~(MOVEMENTFLAG_PITCH_UP|MOVEMENTFLAG_PITCH_DOWN|
+            MOVEMENTFLAG_ASCENDING|MOVEMENTFLAG_DESCENDING|MOVEMENTFLAG_FLYING);
+        state.anchorPitch=state.pitch=0;
+        t.TryStartFalling();t.CalcCurrentSpeed(0);t.UpdateAnchors(0);
+        break;
     default:return false;
     }
     return true;
+}
+void launchUnattachedMovement(SurfaceMovementState& state,const glm::vec2& direction,
+    float speed,float verticalSpeed) {
+    SurfaceTraversal t{{},state,0,0,0,true,std::nullopt,std::nullopt};
+    if(state.flags&MOVEMENTFLAG_SWIMMING)
+        (void)applyMovementStateChange(state,MovementStateChange::StopSwimming,0);
+    else if(state.flags&MOVEMENTFLAG_FLYING)
+        (void)applyMovementStateChange(state,MovementStateChange::StopFlying,0);
+    if(state.flags&MOVEMENTFLAG_ROOT)
+        state.flags=(state.flags&~(MOVEMENTFLAG_ROOT|MOVEMENTFLAG_PENDING_ROOT))|MOVEMENTFLAG_PENDING_ROOT;
+    state.flags&=~0x1000000u;
+    t.StartFalling(verticalSpeed);
+    state.direction2D=direction;
+    state.direction=glm::vec3(direction,0);
+    state.currentSpeed=speed;
+    state.flags=(state.flags&~MOVEMENTFLAG_BACKWARD)|MOVEMENTFLAG_FORWARD|MOVEMENTFLAG_PENDING_STOP;
 }
 } // namespace wowee::collision
