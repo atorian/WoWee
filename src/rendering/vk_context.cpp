@@ -578,6 +578,7 @@ bool VkContext::selectPhysicalDevice() {
         wanted.*field = VK_TRUE;
         return vkbPhysicalDevice_.enable_features_if_present(wanted);
     };
+    sampleShadingSupported_ = enableIfPresent(&VkPhysicalDeviceFeatures::sampleRateShading);
     samplerAnisotropySupported_ = enableIfPresent(&VkPhysicalDeviceFeatures::samplerAnisotropy);
     fillModeNonSolidSupported_ = enableIfPresent(&VkPhysicalDeviceFeatures::fillModeNonSolid);
     // The sun's and moon's glare count how many samples of their disc the
@@ -1976,7 +1977,7 @@ bool VkContext::createMsaaColorImage() {
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-    if (hasLazyMemory) {
+    if (hasLazyMemory && !core::envFlagEnabled("WOWEE_WMO_SURFACES", false)) {
         imgInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
         allocInfo.preferredFlags = VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT;
     } else {
@@ -2144,7 +2145,9 @@ bool VkContext::createSwapchainTargetSet(const char* verb) {
         attachments[0].format = swapchainFormat;
         attachments[0].samples = msaaSamples_;
         attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        // Evaluated surfaces leave and resume this multisampled colour target.
+        attachments[0].storeOp = core::envFlagEnabled("WOWEE_WMO_SURFACES", false)
+            ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
         attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -2249,6 +2252,15 @@ bool VkContext::createSwapchainTargetSet(const char* verb) {
                 LOG_ERROR("Failed to ", verb, " MSAA render pass (depth resolve)");
                 return false;
             }
+            for (uint32_t i : {0u,1u}) {
+                attachments2[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                attachments2[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                attachments2[i].initialLayout = attachments2[i].finalLayout;
+            }
+            if (vkCreateRenderPass2(device, &rpInfo2, nullptr, &sceneContinueRenderPass) != VK_SUCCESS) {
+                LOG_ERROR("Failed to create multisampled scene continuation");
+                return false;
+            }
         } else {
             VkAttachmentReference colorRef{};
             colorRef.attachment = 0;
@@ -2280,6 +2292,15 @@ bool VkContext::createSwapchainTargetSet(const char* verb) {
 
             if (vkCreateRenderPass(device, &rpInfo, nullptr, &imguiRenderPass) != VK_SUCCESS) {
                 LOG_ERROR("Failed to ", verb, " MSAA render pass");
+                return false;
+            }
+            for (uint32_t i : {0u,1u}) {
+                attachments[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                attachments[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                attachments[i].initialLayout = attachments[i].finalLayout;
+            }
+            if (vkCreateRenderPass(device, &rpInfo, nullptr, &sceneContinueRenderPass) != VK_SUCCESS) {
+                LOG_ERROR("Failed to create multisampled scene continuation");
                 return false;
             }
         }
@@ -2503,13 +2524,11 @@ bool VkContext::createOverlayRenderPass() {
 // pipelines built for it work unchanged) but loading what is already drawn
 // instead of clearing. Water renders here, after the scene has been copied for
 // refraction, which is what keeps the water out of its own refraction source.
-// Only built without MSAA - a multisampled continuation would have to resolve a
-// second time and could not preserve the first resolve.
+// The multisampled variant is created beside the original scene pass, with
+// identical resolve attachments. It loads retained MSAA samples and resolves
+// again after the additional geometry/lighting. Here build the 1x variant.
 bool VkContext::createSceneContinueRenderPass() {
-    if (msaaSamples_ > VK_SAMPLE_COUNT_1_BIT) {
-        sceneContinueRenderPass = VK_NULL_HANDLE;
-        return true;
-    }
+    if (msaaSamples_ > VK_SAMPLE_COUNT_1_BIT) return sceneContinueRenderPass != VK_NULL_HANDLE;
 
     VkAttachmentDescription attachments[2]{};
     attachments[0].format = swapchainFormat;
@@ -2579,10 +2598,6 @@ void VkContext::destroyOverlayRenderPass() {
         vkDestroyRenderPass(device, overlayClearRenderPass, nullptr);
         overlayClearRenderPass = VK_NULL_HANDLE;
     }
-    if (sceneContinueRenderPass) {
-        vkDestroyRenderPass(device, sceneContinueRenderPass, nullptr);
-        sceneContinueRenderPass = VK_NULL_HANDLE;
-    }
 }
 
 void VkContext::destroyImGuiResources() {
@@ -2611,6 +2626,10 @@ void VkContext::destroyImGuiResources() {
     destroyDepthBuffer();
     // Framebuffers are destroyed in destroySwapchain()
     destroyOverlayRenderPass();
+    if (sceneContinueRenderPass) {
+        vkDestroyRenderPass(device, sceneContinueRenderPass, nullptr);
+        sceneContinueRenderPass = VK_NULL_HANDLE;
+    }
     if (imguiRenderPass) {
         vkDestroyRenderPass(device, imguiRenderPass, nullptr);
         imguiRenderPass = VK_NULL_HANDLE;
@@ -3013,6 +3032,10 @@ bool VkContext::recreateSwapchain(int width, int height) {
 
     // Destroy old render pass (needs recreation if MSAA changed)
     destroyOverlayRenderPass();
+    if (sceneContinueRenderPass) {
+        vkDestroyRenderPass(device, sceneContinueRenderPass, nullptr);
+        sceneContinueRenderPass = VK_NULL_HANDLE;
+    }
     if (imguiRenderPass) {
         vkDestroyRenderPass(device, imguiRenderPass, nullptr);
         imguiRenderPass = VK_NULL_HANDLE;

@@ -1,0 +1,13 @@
+// Octahedral signed-normal packing. Preserve the hemisphere at the seams.
+vec2 surfaceSign(vec2 v) { return mix(vec2(-1), vec2(1), greaterThanEqual(v, vec2(0))); }
+uint packSurfaceNormal(vec3 n) {
+    n /= max(abs(n.x) + abs(n.y) + abs(n.z), 1e-20);
+    vec2 p = n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * surfaceSign(n.xy);
+    return packSnorm2x16(p);
+}
+vec3 unpackSurfaceNormal(uint bits) {
+    vec2 p = unpackSnorm2x16(bits);
+    vec3 n = vec3(p, 1.0 - abs(p.x) - abs(p.y));
+    if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * surfaceSign(n.xy);
+    return normalize(n);
+}

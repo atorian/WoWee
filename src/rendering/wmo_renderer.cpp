@@ -257,8 +257,11 @@ bool WMORenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
     surfaceRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     surfaceRange.offset = sizeof(WMOPushConstants);
     surfaceRange.size = sizeof(glm::vec4);
+    frameSetLayout_ = perFrameLayout;
     pipelineLayout_ = createPipelineLayout(device, setLayouts, { pushRange, surfaceRange });
-    if (!pipelineLayout_) {
+    surfaceRange.size = 32;
+    surfaceLayout_ = createPipelineLayout(device, setLayouts, { pushRange, surfaceRange });
+    if (!pipelineLayout_ || !surfaceLayout_) {
         core::Logger::getInstance().error("WMORenderer: failed to create pipeline layout");
         return false;
     }
@@ -361,6 +364,10 @@ void WMORenderer::shutdown() {
     if (materialSlots_) materialSlots_->release();
 
     // Destroy pipelines
+    surfacePass_.reset();
+    destroy(device, surfacePipeline_);
+    surfacePipelinePass_ = VK_NULL_HANDLE;
+    destroy(device, surfaceLayout_);
     destroy(device, opaquePipeline_);
     destroy(device, transparentPipeline_);
     destroy(device, wireframePipeline_);
@@ -1115,7 +1122,10 @@ std::shared_ptr<const WMORenderer::Frame> WMORenderer::extract(const Camera& cam
                                                glm::length(kept.worldMax - kept.worldMin) * 0.5f);
             const uint32_t index = static_cast<uint32_t>(frame->groups.size());
             frame->groups.push_back(std::move(kept));
-            if (inView) viewEntry.groups.push_back(index);
+            if (inView) {
+                viewEntry.groups.push_back(index);
+                frame->view.surfaceMaterialCapacity+=group.mergedBatches.size();
+            }
             if (inReflection) reflectionEntry->groups.push_back(index);
             if (inDepth) depthEntry.groups.push_back(index);
         }
@@ -1137,6 +1147,100 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
     const auto& list = pass == Pass::Reflection ? recording_->reflection : recording_->view;
     const uint32_t draws = recordView(cmd, perFrameSet, list.cameraPosition, list);
     if (pass == Pass::View) viewDrawCallCount_ = draws;
+}
+
+void WMORenderer::renderSurface(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
+        VkFramebuffer scene, VkImageView depth, VkExtent2D extent,
+        WmoSurfacePass::TargetVersion version, VkSubpassContents resumeContents) {
+    if (recording_->wireframe) {
+        LOG_ERROR("WMO evaluated-surface wireframe is not implemented - refusing mismatched rendering");
+        throw std::runtime_error("WMO surface wireframe unsupported");
+    }
+    if (recording_->view.surfaceMaterialCapacity==0) { viewDrawCallCount_=0; return; }
+    if (!surfacePass_) surfacePass_=std::make_unique<WmoSurfacePass>(*vkCtx_,frameSetLayout_);
+    surfacePass_->prepare(extent,depth,version,recording_->view.surfaceMaterialCapacity);
+    if (surfacePipelinePass_!=surfacePass_->geometryPass()) {
+        DeferredResources retire(*vkCtx_);retire.destroy(surfacePipeline_);
+        VkShaderModule vert,frag;
+        if (!vert.loadFromFile(vkCtx_->getDevice(),"assets/shaders/wmo.vert.spv") ||
+            !frag.loadFromFile(vkCtx_->getDevice(),"assets/shaders/wmo_surface.frag.spv")) {
+            LOG_ERROR("WMO surface shaders unavailable - frame cannot be rendered");
+            throw std::runtime_error("WMO surface shaders unavailable");
+        }
+        surfacePipeline_=PipelineBuilder().setShaders(vert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),frag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+            .setVertexInput({perVertexBinding(sizeof(WMOVertex))},toVkAttributes(kWmoVertexAttributes))
+            .setRasterization(VK_POLYGON_MODE_FILL,VK_CULL_MODE_NONE,kWmoFrontFace)
+            .setDepthTest(true,true,VK_COMPARE_OP_LESS_OR_EQUAL)
+            .setColorBlendAttachments(std::vector<VkPipelineColorBlendAttachmentState>(3,PipelineBuilder::blendDisabled()))
+            .setMultisample(vkCtx_->getMsaaSamples()).setLayout(surfaceLayout_)
+            .setRenderPass(surfacePass_->geometryPass()).setDynamicStates(viewportAndScissorDynamic())
+            .build(vkCtx_->getDevice(),vkCtx_->getPipelineCache());
+        vert.destroy();frag.destroy();
+        if (!surfacePipeline_) {
+            LOG_ERROR("WMO surface pipeline creation failed - frame cannot be rendered");
+            throw std::runtime_error("WMO surface pipeline creation failed");
+        }
+        surfacePipelinePass_=surfacePass_->geometryPass();
+    }
+    // Invert around the camera. Inverting a continent-sized translation loses
+    // precision before the perspective divide, visible in specular/shadow edges.
+    glm::mat4 rotation=camera.getViewMatrix();
+    rotation[3]=glm::vec4(0,0,0,1);
+    const glm::mat4 inverse=glm::inverse(camera.getProjectionMatrix()*rotation);
+    const glm::vec4 options(float(recording_->normalMap),float(recording_->pom),float(recording_->samples),recording_->normalStrength);
+    // Enter inline scene recording even when the surrounding pass uses secondaries.
+    vkCmdEndRenderPass(cmd);surfacePass_->resumeScene(cmd,scene,VK_SUBPASS_CONTENTS_INLINE);
+    bool geometry=false;uint32_t draws=0;
+    for (const auto& entry : recording_->view.drawn()) {
+        for (const uint32_t index : entry.groups) {
+            const auto& kept=recording_->groups[index];
+            const auto& group=*kept.gpu;
+            if (group.groupFlags & 0x4000000) continue;
+            if (group.isLOD) {
+                const glm::vec3 center=entry.modelMatrix*glm::vec4((group.boundingBoxMin+group.boundingBoxMax)*0.5f,1);
+                if (glm::dot(center-camera.getPosition(),center-camera.getPosition())<196.f*196.f) continue;
+            }
+            if (!group.vertexBuffer || !group.indexBuffer) continue;
+            VkDeviceSize offset=0;
+            vkCmdBindVertexBuffers(cmd,0,1,&group.vertexBuffer,&offset);
+            vkCmdBindIndexBuffer(cmd,group.indexBuffer,0,VK_INDEX_TYPE_UINT16);
+            for (const auto& batch:group.mergedBatches) {
+                if (!batch.materialSet) continue;
+                const bool opaque=!batch.isTransparent;
+                if (!opaque && !transparentPipeline_) {
+                    LOG_ERROR("WMO blended pipeline unavailable - surface frame cannot be rendered");
+                    throw std::runtime_error("WMO blended pipeline unavailable");
+                }
+                if (opaque && !geometry) {surfacePass_->beginGeometry(cmd);geometry=true;}
+                if (!opaque && geometry) {surfacePass_->light(cmd,perFrameSet,scene,inverse);geometry=false;}
+                const auto layout=opaque?surfaceLayout_:pipelineLayout_;
+                vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,opaque?surfacePipeline_:transparentPipeline_);
+                VkDescriptorSet sets[]{perFrameSet,batch.materialSet};
+                vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,layout,0,2,sets,0,nullptr);
+                WMOPushConstants push{};push.model=entry.modelMatrix;push.localLights=kept.lights;
+                push.cloth={batch.clothTop,batch.clothDrop,batch.clothCentreX,batch.clothCentreY};
+                vkCmdPushConstants(cmd,layout,VK_SHADER_STAGE_VERTEX_BIT,0,sizeof(push),&push);
+                vkCmdPushConstants(cmd,layout,VK_SHADER_STAGE_FRAGMENT_BIT,96,sizeof(options),&options);
+                if (opaque) {
+                    WmoSurfacePass::Material material{};
+                    static_assert(sizeof(batch.material)==sizeof(material.words));
+                    std::memcpy(material.words.data(),&batch.material,sizeof(batch.material));
+                    material.localLights=kept.lights;
+                    const glm::uvec4 key(surfacePass_->appendMaterial(material),0,0,0);
+                    vkCmdPushConstants(cmd,layout,VK_SHADER_STAGE_FRAGMENT_BIT,112,sizeof(key),&key);
+                }
+                for (const auto& range:batch.draws) if (range.indexCount) {
+                    vkCmdDrawIndexed(cmd,range.indexCount,1,range.firstIndex,0,0);++draws;
+                }
+            }
+        }
+    }
+    surfacePass_->finishMaterials();
+    if(geometry) surfacePass_->light(cmd,perFrameSet,scene,inverse);
+    if(resumeContents==VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS) {
+        vkCmdEndRenderPass(cmd);surfacePass_->resumeScene(cmd,scene,resumeContents);
+    }
+    viewDrawCallCount_=draws;
 }
 
 bool WMORenderer::cullPortals(const ModelData& model, const WMOInstance& instance,
@@ -1666,6 +1770,7 @@ void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupR
     matData.wmoAmbientG = model.wmoAmbientColor.g;
     matData.wmoAmbientB = model.wmoAmbientColor.b;
     matData.emissive = static_cast<int32_t>(mb.emissiveLevel);
+    mb.material = matData;
     memcpy(mb.materialSlot.mapped, &matData, sizeof(matData));
 
     // Allocate and write descriptor set

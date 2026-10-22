@@ -593,6 +593,68 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         }
     }
     std::vector<MovingCharacter> movingCharacters;
+    // Authored-order material layers through the ordinary WMO upload/scene API.
+    // Kept in scene_render only: no fixture switch in the shipping renderer.
+    if (scene.contains("wmoLayers")) {
+        const auto& layers=scene["wmoLayers"];
+        if (!layers.is_array() || layers.empty() || layers.size()>64)
+            throw std::runtime_error("wmoLayers requires 1..64 rectangular layers");
+        pipeline::WMOModel model{};
+        model.sourcePath="scene_render_layers.wmo";
+        model.nGroups=1; model.flags=pipeline::kWMOModelUnifiedRenderPath;
+        model.ambientColor=glm::vec3(0.2f);
+        pipeline::WMOGroup group{};
+        group.flags=8|pipeline::kWMOGroupHasVertexColors;
+        group.boundingBoxMin=glm::vec3(1e10f);group.boundingBoxMax=glm::vec3(-1e10f);
+        std::unordered_map<std::string,pipeline::BLPImage> pixels;
+        for (const auto& layer:layers) {
+            const auto id=static_cast<uint8_t>(model.materials.size());
+            const auto color=layer.at("rgba").get<std::array<uint8_t,4>>();
+            const auto rect=layer.at("rect").get<std::array<float,4>>();
+            const float x=layer.at("x").get<float>();
+            const std::string texture="scene_render_layer_"+std::to_string(id)+".blp";
+            pipeline::BLPImage image;image.width=image.height=16;image.data.resize(16*16*4);
+            for (int y=0;y<16;++y) for (int z=0;z<16;++z) {
+                std::copy(color.begin(),color.end(),image.data.begin()+(y*16+z)*4);
+                if (layer.value("cutout",false) && ((y/4+z/4)%2)) image.data[(y*16+z)*4+3]=0;
+            }
+            pixels.emplace(texture,std::move(image));
+            model.textureOffsetToIndex[id]=id;model.textures.push_back(texture);
+            pipeline::WMOMaterial material{};material.texture1=id;
+            material.blendMode=layer.value("blend",0u);material.flags=layer.value("flags",1u);
+            model.materials.push_back(material);
+            const uint16_t first=static_cast<uint16_t>(group.vertices.size());
+            const std::array<glm::vec2,4> corners{{{rect[0],rect[1]},{rect[2],rect[1]},
+                                                {rect[2],rect[3]},{rect[0],rect[3]}}};
+            for (size_t i=0;i<4;++i) {
+                pipeline::WMOVertex vertex{};vertex.position={x,corners[i].x,corners[i].y};
+                vertex.normal={-1,0,0};vertex.color={1,1,1,1};
+                vertex.texCoord={i==1||i==2?1.f:0.f,i>=2?1.f:0.f};
+                group.vertices.push_back(vertex);
+                group.boundingBoxMin=glm::min(group.boundingBoxMin,vertex.position);
+                group.boundingBoxMax=glm::max(group.boundingBoxMax,vertex.position);
+            }
+            pipeline::WMOBatch batch{};batch.startIndex=static_cast<uint32_t>(group.indices.size());
+            batch.indexCount=6;batch.startVertex=first;batch.lastVertex=first+3;batch.materialId=id;
+            group.batches.push_back(batch);
+            for (uint16_t i: {0,1,2,0,2,3}) group.indices.push_back(first+i);
+        }
+        model.nTextures=static_cast<uint32_t>(model.textures.size());
+        model.boundingBoxMin=group.boundingBoxMin;model.boundingBoxMax=group.boundingBoxMax;
+        model.groupInfo.push_back({group.flags,group.boundingBoxMin,group.boundingBoxMax,0});
+        model.groups.push_back(std::move(group));
+        auto& wmo=*renderer.getWMORenderer();
+        wmo.setPredecodedBLPCache(&pixels);
+        const bool loaded=wmo.loadModel(model,modelId);
+        wmo.setPredecodedBLPCache(nullptr);
+        if (!loaded) throw std::runtime_error("scene_render WMO layers upload failed");
+        const uint32_t instance=wmo.createInstance(modelId,origin,glm::vec3(0),1);
+        placements.push_back({.wmo=true,.instanceId=instance,.modelId=modelId++});
+        const auto lo=origin+model.boundingBoxMin,hi=origin+model.boundingBoxMax;
+        if (!bounds.valid) bounds={lo,hi,true};
+        else {bounds.min=glm::min(bounds.min,lo);bounds.max=glm::max(bounds.max,hi);}
+        LOG_INFO("scene_render: placed ",layers.size()," ordered WMO layers");
+    }
     for (const auto& entry : scene.value("characters", json::array())) {
         MovingCharacter placed;
         if (!placeCharacter(entry, origin, assets, renderer, modelId++, placed)) return 1;
@@ -812,6 +874,17 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     auto drawFrame = [&]() {
         const auto start = std::chrono::steady_clock::now();
         (void)renderer.takeFrameResults();
+        for (const auto& change : scene.value("renderTargetChanges", json::array())) {
+            if (change.at("frame").get<int>() != frame) continue;
+            if (change.contains("msaa")) {
+                const int samples=change["msaa"].get<int>();
+                if (samples!=1 && samples!=2 && samples!=4 && samples!=8)
+                    throw std::runtime_error("renderTargetChanges msaa must be 1, 2, 4 or 8");
+                renderer.setMsaaSamples(static_cast<VkSampleCountFlagBits>(samples));
+            }
+            if (change.contains("fxaa"))
+                renderer.getPostProcessPipeline()->setFXAAEnabled(change["fxaa"].get<bool>());
+        }
         for (const auto& placement : placements) {
             if (placement.shownAtFrame != frame) continue;
             if (placement.wmo) {

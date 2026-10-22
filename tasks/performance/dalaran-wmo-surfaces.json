@@ -1,0 +1,217 @@
+{
+  "scene": {
+    "map": "Northrend",
+    "mapId": 571,
+    "zoneId": 2817,
+    "hour": 9.408292770385742,
+    "origin": [
+      5824.882487012499,
+      666.949869825,
+      641.9556274414062
+    ],
+    "playerPosition": [
+      5946.4130859375,
+      623.02783203125,
+      655.4375
+    ],
+    "streamWorld": false,
+    "models": [
+      {
+        "path": "WORLD\\WMO\\NORTHREND\\DALARAN\\ND_DALARAN.WMO",
+        "rotation": [
+          0,
+          0,
+          -39
+        ]
+      }
+    ],
+    "camera": {
+      "position": [
+        5946.4130859375,
+        623.02783203125,
+        655.4375
+      ],
+      "yaw": 166.30895876598606,
+      "pitch": -18.600008189205408
+    },
+    "fov": 70.0,
+    "viewDistance": 2500,
+    "size": [
+      2560,
+      1369
+    ],
+    "frames": 240,
+    "msaa": 1,
+    "fxaa": true,
+    "bloom": 0,
+    "volumetricFog": 3,
+    "volumetricDensity": 1,
+    "shadowQuality": 2,
+    "rayTracedLighting": 0,
+    "rtDistance": 300,
+    "fogStrength": 0.85
+  },
+  "kind": "isolated WMO diagnostic, not full-client FPS",
+  "build": "dev/no-LTO",
+  "validation": false,
+  "render_thread": true,
+  "parallel_recording": true,
+  "samples": 230,
+  "warmup": 10,
+  "runs": {
+    "forward": {
+      "wmo_gpu": {
+        "mean_ms": 2.8,
+        "p95_ms": 2.96,
+        "worst_ms": 3.04
+      },
+      "whole_gpu": {
+        "mean_ms": 4.58,
+        "p95_ms": 4.85,
+        "worst_ms": 4.99
+      },
+      "cpu_render_world": {
+        "mean_ms": 0.25,
+        "p95_ms": 0.4,
+        "worst_ms": 0.51
+      }
+    },
+    "surfaces": {
+      "wmo_gpu": {
+        "mean_ms": 2.68,
+        "p95_ms": 3.15,
+        "worst_ms": 3.21
+      },
+      "whole_gpu": {
+        "mean_ms": 4.2,
+        "p95_ms": 4.68,
+        "worst_ms": 6.09
+      },
+      "cpu_render_world": {
+        "mean_ms": 0.49,
+        "p95_ms": 0.58,
+        "worst_ms": 0.87
+      }
+    },
+    "final_surfaces": {
+      "wmo_gpu": {
+        "mean_ms": 2.85,
+        "p95_ms": 3.22,
+        "worst_ms": 3.36
+      },
+      "whole_gpu": {
+        "mean_ms": 4.36,
+        "p95_ms": 4.86,
+        "worst_ms": 4.92
+      },
+      "cpu_render_world": {
+        "mean_ms": 0.44,
+        "p95_ms": 0.48,
+        "worst_ms": 0.54
+      }
+    }
+  },
+  "caveats": [
+    "Initial paired checkpoint precedes camera-relative reconstruction. final_surfaces is the final implementation; forward baseline was not rerun.",
+    "One run per mode; clocks not locked. No competing wowee/scene_render at preflight, no continuous monitor.",
+    "VSync/FIFO limits FPS. Compare GPU timestamps, not game FPS.",
+    "Three color targets cost 40 bytes/sample plus allocator padding; existing scene depth reused.",
+    "Opt-in RT=0 WMO primary view only. Current-frame RT remains pending."
+  ],
+  "binary_sha256": "3c0cf4ef48a1d563cff3750b91b4248c7ae300b48f09e5e769f05eeb41190858",
+  "gpu_validation": {
+    "parallel-1": {
+      "mean_absolute_channel_error": 0.0006705729166666666,
+      "p99_channel_error": 0,
+      "max_channel_error": 2,
+      "channels_above_4": 0.0,
+      "msaa": 1,
+      "hour": 12,
+      "parallel": true,
+      "fxaa": false,
+      "layers": false
+    },
+    "parallel-4": {
+      "mean_absolute_channel_error": 0.0006922743055555556,
+      "p99_channel_error": 0,
+      "max_channel_error": 2,
+      "channels_above_4": 0.0,
+      "msaa": 4,
+      "hour": 12,
+      "parallel": true,
+      "fxaa": false,
+      "layers": false
+    },
+    "night-4": {
+      "mean_absolute_channel_error": 0.0005392795138888888,
+      "p99_channel_error": 0,
+      "max_channel_error": 2,
+      "channels_above_4": 0.0,
+      "msaa": 4,
+      "hour": 0.0,
+      "parallel": true,
+      "fxaa": false,
+      "layers": false
+    },
+    "fxaa-4": {
+      "mean_absolute_channel_error": 0.0011827256944444444,
+      "p99_channel_error": 0,
+      "max_channel_error": 25,
+      "channels_above_4": 1.736111111111111e-05,
+      "msaa": 4,
+      "hour": 12,
+      "parallel": true,
+      "fxaa": true,
+      "layers": false
+    },
+    "layers-1": {
+      "mean_absolute_channel_error": 5.859375e-05,
+      "p99_channel_error": 0,
+      "max_channel_error": 1,
+      "channels_above_4": 0.0,
+      "msaa": 1,
+      "hour": 12,
+      "parallel": true,
+      "fxaa": false,
+      "layers": true
+    },
+    "layers-4": {
+      "mean_absolute_channel_error": 5.859375e-05,
+      "p99_channel_error": 0,
+      "max_channel_error": 1,
+      "channels_above_4": 0.0,
+      "msaa": 4,
+      "hour": 12,
+      "parallel": true,
+      "fxaa": false,
+      "layers": true
+    },
+    "dalaran": {
+      "mean_absolute_channel_error": 0.06206814236111111,
+      "p99_channel_error": 1,
+      "max_channel_error": 36,
+      "channels_above_4": 0.0006434461805555555,
+      "msaa": 1,
+      "hour": 12,
+      "parallel": true,
+      "fxaa": true,
+      "layers": false
+    },
+    "dalaran-4": {
+      "mean_absolute_channel_error": 0.06162543402777778,
+      "p99_channel_error": 1,
+      "max_channel_error": 21,
+      "channels_above_4": 0.0006401909722222222,
+      "msaa": 4,
+      "hour": 12,
+      "parallel": true,
+      "fxaa": true,
+      "layers": false
+    }
+  },
+  "full_resolution_image_error": {
+    "mean_absolute_channel_error": 0.05111281044558071,
+    "max_channel_error": 36,
+    "channels_above_4": 0.00048583211589968347
+  }
+}

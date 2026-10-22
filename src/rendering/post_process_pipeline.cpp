@@ -154,6 +154,13 @@ VkImage PostProcessPipeline::getSceneColorImage() const {
     return VK_NULL_HANDLE;
 }
 
+VkImageView PostProcessPipeline::getSceneAttachmentDepthView() const {
+    if (fsr2_.enabled && fsr2_.sceneFramebuffer) return fsr2_.sceneDepth.imageView;
+    if (needsFXAAPass() && fxaa_.sceneFramebuffer) return fxaa_.sceneDepth.imageView;
+    if (fsr_.enabled && fsr_.sceneFramebuffer) return fsr_.sceneDepth.imageView;
+    return VK_NULL_HANDLE;
+}
+
 VkImage PostProcessPipeline::getSceneDepthImage() const {
     // Prefer the resolved depth where MSAA produced one: it is single-sampled and
     // can be copied directly.

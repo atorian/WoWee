@@ -605,6 +605,7 @@ function(compile_shaders TARGET_NAME)
     # then the extra glslc arguments. Ray queries need SPIR-V 1.4 or later,
     # hence the target environment on the hardware tracer.
     set(SHADER_VARIANTS
+        "wmo_lighting.frag.glsl|wmo_lighting_ms.frag.spv|-DSURFACE_MSAA"
         "rt_prepare.comp.glsl|rt_prepare_ms.comp.spv|-DRT_MSAA"
         "rt_trace.comp.glsl|rt_trace_hw.comp.spv|-DRT_HARDWARE --target-env=vulkan1.2"
     )
@@ -614,9 +615,14 @@ function(compile_shaders TARGET_NAME)
         list(GET VARIANT_PARTS 1 VARIANT_OUT)
         list(GET VARIANT_PARTS 2 VARIANT_ARGS)
         separate_arguments(VARIANT_ARGS UNIX_COMMAND "${VARIANT_ARGS}")
+        if(VARIANT_SRC MATCHES "[.]frag[.]glsl$")
+            set(VARIANT_STAGE fragment)
+        else()
+            set(VARIANT_STAGE compute)
+        endif()
         add_custom_command(
             OUTPUT ${SPV_DIR}/${VARIANT_OUT}
-            COMMAND ${GLSLC} -fshader-stage=compute ${VARIANT_ARGS} -O
+            COMMAND ${GLSLC} -fshader-stage=${VARIANT_STAGE} ${VARIANT_ARGS} -O
                     ${SHADER_DIR}/${VARIANT_SRC} -o ${SPV_DIR}/${VARIANT_OUT}
             DEPENDS ${SHADER_DIR}/${VARIANT_SRC} ${GLSL_INCLUDES}
             COMMENT "Compiling SPIR-V: ${VARIANT_SRC} -> ${VARIANT_OUT}"
@@ -1067,6 +1073,7 @@ set(WOWEE_SOURCES
     src/rendering/sky_system.cpp
     src/rendering/character_renderer.cpp
     src/rendering/character_preview.cpp
+    src/rendering/wmo_surface_pass.cpp
     src/rendering/wmo_renderer.cpp
     src/rendering/wmo_model_prep.cpp
     src/rendering/imgui_texture.cpp
@@ -2933,6 +2940,7 @@ add_executable(wowee_editor
     src/rendering/m2_renderer_particles.cpp
     src/rendering/m2_renderer_render.cpp
     src/rendering/m2_model_classifier.cpp
+    src/rendering/wmo_surface_pass.cpp
     src/rendering/wmo_renderer.cpp
     src/rendering/wmo_model_prep.cpp
     src/rendering/imgui_texture.cpp

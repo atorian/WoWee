@@ -3362,6 +3362,20 @@ void Renderer::renderWorld() {
     const bool skipTerrain = envSkipTerrain || ablated(AblationPass::Terrain);
     const bool skipSky = envSkipSky || ablated(AblationPass::Sky);
     const bool skipGrass = ablated(AblationPass::Grass);
+    static const bool surfaceRequested=core::envFlagEnabled("WOWEE_WMO_SURFACES",false);
+    const bool surfaceWmo=surfaceRequested && wmoRenderer && frameCamera() && !skipWMO;
+    if (surfaceWmo && frameInputs_.rtMode!=0) {
+        LOG_ERROR("WMO surface pass currently requires RT disabled - refusing previous-frame RT substitution");
+        throw std::runtime_error("WMO surface pass current-frame RT is not connected yet");
+    }
+    const auto recordWmoSurface=[&](VkSubpassContents resume) {
+        const bool offscreen=postProcessPipeline_ && postProcessPipeline_->getSceneFramebuffer();
+        const auto depth=offscreen
+            ?postProcessPipeline_->getSceneAttachmentDepthView():vkCtx->getDepthImageView();
+        const WmoSurfacePass::TargetVersion version{vkCtx->syncResetGeneration(),
+            offscreen?postProcessPipeline_->sceneTargetGeneration():0,offscreen};
+        wmoRenderer->renderSurface(currentCmd,perFrameSet,*frameCamera(),activeFramebuffer_,depth,activeRenderExtent_,version,resume);
+    };
     // The terrain chooses its chunks' detail by their triangles' size in the
     // image it is drawn into, which an upscaler makes smaller than the window.
     if (m2Renderer) {
@@ -3434,7 +3448,7 @@ void Renderer::renderWorld() {
             });
         }
 
-        if (wmoRenderer && frameCamera() && !skipWMO) {
+        if (wmoRenderer && frameCamera() && !skipWMO && !surfaceWmo) {
             wmoFuture = core::ThreadPool::frameWorkers().submit("record: WMO", [&]() -> double {
                 auto t0 = std::chrono::steady_clock::now();
                 VkCommandBuffer cmd = beginSecondary(SEC_WMO);
@@ -3673,7 +3687,7 @@ void Renderer::renderWorld() {
             queue(secondaryCmds_[SEC_TERRAIN][frameIdx], "terrain");
         queue(secondaryCmds_[SEC_SKY][frameIdx], "sky");
         if (wmoRenderer && frameCamera() && !skipWMO)
-            queue(secondaryCmds_[SEC_WMO][frameIdx], "wmo");
+            queue(surfaceWmo?VK_NULL_HANDLE:secondaryCmds_[SEC_WMO][frameIdx], "wmo");
         queue(secondaryCmds_[SEC_SELECTION][frameIdx], "selection");
         queue(secondaryCmds_[SEC_CHARS][frameIdx], "characters");
         if (m2Renderer && frameCamera() && !skipM2)
@@ -3686,7 +3700,8 @@ void Renderer::renderWorld() {
         // recorded in its own inherited secondary: primary timestamp/debug
         // commands are forbidden inside a secondary-only subpass.
         for (uint32_t i = 0; i < numCmds; ++i) {
-            vkCmdExecuteCommands(currentCmd, 1, &validCmds[i]);
+            if (!validCmds[i]) recordWmoSurface(VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+            else vkCmdExecuteCommands(currentCmd, 1, &validCmds[i]);
             recordSecondaryMark(i + 1, validLabels[i]);
         }
         // The world, as one mark.
@@ -3741,7 +3756,8 @@ void Renderer::renderWorld() {
             auto wmoStart = std::chrono::steady_clock::now();
             {
                 GpuPass pass(*vkCtx, currentCmd, "wmo");
-                wmoRenderer->render(currentCmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition);
+                if (surfaceWmo) recordWmoSurface(VK_SUBPASS_CONTENTS_INLINE);
+                else wmoRenderer->render(currentCmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition);
             }
             lastWMORenderMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - wmoStart).count();

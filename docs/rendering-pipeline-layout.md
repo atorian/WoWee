@@ -1,8 +1,9 @@
 # Surface and frame-resource contract
 
 Implementation design for `codex/gpu-scene-pipeline`. This document selects the
-next implementation's representation; it does **not** claim these attachments
-or current-frame deferred lighting are already connected to Renderer.
+target representation. WMO primary-view evaluated surfaces and RT-disabled
+lighting are connected behind `WOWEE_WMO_SURFACES=1`; current-frame RT and
+the other material families remain pending.
 
 ## Surface/material boundary
 
@@ -116,3 +117,41 @@ opaque pixel behind a transparent surface does not satisfy this contract.
 - Connect forward and reflected receivers with equivalent material semantics.
 - Measure total frame cost, peak memory and replay percentiles before enabling
   the new path as the ordinary renderer.
+
+## First connected stage: WMO, RT disabled
+
+The primary WMO pass uses the selected three color formats and the scene's
+existing depth attachment. Geometry and forward shading share texture/POM/
+normal evaluation. Opaque/cutout runs store evaluated surfaces; the lighting
+pass shades covered samples and applies atmosphere. Before an ordered blended
+batch the preceding opaque run is lit into the scene, then the existing forward
+batch draws there. Subsequent opaque work begins a new run. Thus lighting is
+not necessarily one fullscreen draw per frame; no opaque work moves across a
+blended dependency. Reflected WMO stays forward at this stage.
+
+The temporary payload is vertex RGBA (two half pairs), exact raster depth bits,
+and a reserved zero word. It contains **no instance token or motion yet**.
+Reconstruction uses inverse camera-relative view/projection and adds the camera
+position only after dividing by W. Sampled depth is carried in the surface
+payload to avoid reading the scene depth while lighting attaches it. Geometry
+uses pixel-centre interpolation; under MSAA each covered sample receives that
+invocation's payload, and lighting reads samples individually before color resolve.
+
+A frame-slot SSBO holds 80 bytes per submitted opaque material, including the
+captured group's local lights. Extraction accumulates an upper bound while
+classifying groups. Recording uploads each material while issuing its geometry,
+then flushes before submission; it does not build a second draw list or read
+live scene objects. This SSBO is not the planned persistent material table.
+
+Three images are shared on the graphics queue with render-pass dependencies
+covering prior readers/writers. Upload buffers and descriptor sets are per slot,
+updated only after acquisition of its fence. Target generations distinguish
+recreated attachments even if the driver reuses handles. Replaced resources
+retire behind all frame fences. MSAA scene continuations retain unresolved color
+and depth; ordinary forward-only MSAA keeps its previous discard behavior.
+
+At 2560x1369 the new color storage alone is 133.69 MiB at 1x and 534.77 MiB
+at 4x; depth is borrowed, not allocated a second time. These are logical image
+bytes, not measured allocator overhead. Automatic peak-budget handling on resize
+remains pending. The stage rejects RT-on or wireframe explicitly with an error;
+it is opt-in and is not the ordinary renderer.

@@ -64,6 +64,7 @@ public:
     // water refraction after it is drawn but before the water goes over it.
     [[nodiscard]] VkImage getSceneColorImage() const;
     [[nodiscard]] VkImage getSceneDepthImage() const;
+    [[nodiscard]] VkImageView getSceneAttachmentDepthView() const;
     [[nodiscard]] bool sceneDepthIsMsaa() const;
     /// Single-sampled views of the off-screen scene target - its colour and
     /// its depth, resolved where the scene is multisampled - for a pass that

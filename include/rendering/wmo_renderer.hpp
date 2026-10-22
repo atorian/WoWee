@@ -1,4 +1,5 @@
 #pragma once
+#include "rendering/wmo_surface_pass.hpp"
 #include "rendering/scene_view.hpp"
 
 #include "rendering/rt_instance_changes.hpp"
@@ -263,6 +264,9 @@ public:
     struct Frame;
     std::shared_ptr<const Frame> extract(const Camera& camera, const glm::vec3& viewer,
                                         const std::vector<LocalLight>& lights, const SceneView* reflection = nullptr);
+    void renderSurface(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
+                       VkFramebuffer scene, VkImageView depth, VkExtent2D extent,
+                       WmoSurfacePass::TargetVersion version, VkSubpassContents resumeContents);
     void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
     /// The passes that draw the buildings in colour. Each culls into a draw
     /// list of its own: the water's reflection is recorded on the main thread
@@ -488,6 +492,7 @@ private:
             VkDescriptorSet materialSet = VK_NULL_HANDLE;  // set 1
             /// Its WMOMaterialUBO, a slot of materialSlots_.
             UniformSlotPool::Slot materialSlot;
+            WMOMaterialUBO material{};
             bool hasTexture = false;
             bool alphaTest = false;
             bool isTransparent = false;     // blendMode >= 2
@@ -779,6 +784,11 @@ private:
 
     // Descriptor set layouts
     VkDescriptorSetLayout materialSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout frameSetLayout_ = VK_NULL_HANDLE;
+    std::unique_ptr<WmoSurfacePass> surfacePass_;
+    VkPipeline surfacePipeline_ = VK_NULL_HANDLE;
+    VkRenderPass surfacePipelinePass_ = VK_NULL_HANDLE;
+    VkPipelineLayout surfaceLayout_ = VK_NULL_HANDLE;
 
     // Descriptor pool for material sets
     VkDescriptorPool materialDescPool_ = VK_NULL_HANDLE;
@@ -859,6 +869,7 @@ private:
     struct DrawList {
         std::vector<DrawEntry> entries;
         size_t used = 0;
+        size_t surfaceMaterialCapacity = 0;
         glm::vec3 cameraPosition{0};
         uint32_t frustumCulled = 0;
         uint32_t portalCulled = 0;
@@ -869,6 +880,7 @@ private:
 
         void clear() {
             used = 0;
+            surfaceMaterialCapacity = 0;
             frustumCulled = portalCulled = distanceCulled = drawCalls = 0;
         }
         DrawEntry& add() {

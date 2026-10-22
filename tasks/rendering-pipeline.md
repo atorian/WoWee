@@ -59,7 +59,7 @@ checkout remains on master with its concurrent uncommitted work preserved.
   remain byte-identical to the pre-refactor references with sync validation.
 - [Surface layout and memory contract](../docs/rendering-pipeline-layout.md)
   selects three MRTs, per-sample MSAA handling and explicit transient lifetimes.
-  The attachments and current-frame lighting are not yet connected to Renderer.
+  The initial RT-disabled WMO connection is described below; current-frame RT remains pending.
 
 - WMO frame settings are pushed from the immutable snapshot; materials contain
   only resource properties. Removed the settings-change device idle and shared
@@ -232,7 +232,9 @@ was rerun. Current-frame RT/G-buffer implementation is still pending.
 - [x] Finish foundation GPU snapshot/lifetime tests and guards.
 - [ ] Record exact material/depth/blend contracts and choose G-buffer packing,
       MSAA resolve and device capability/memory budgets.
-- [ ] Implement opaque/cutout G-buffer and material lighting with RT disabled;
+- [x] Connect primary WMO evaluated surfaces and RT-disabled lighting, with
+      ordered blended runs, MSAA, slot lifetime and GPU image checks.
+- [ ] Extend opaque/cutout G-buffer and material lighting to the other families;
       preserve forward ordering for incompatible blended materials.
 - [ ] Route current-frame receivers into RT, centralized denoise/resolve and
       lighting; explicit motion/history and missing half-resolution samples.
@@ -249,3 +251,74 @@ All compiler temp/cache and runtime data stay on D:. Windows tools require the
 approved WSL interop execution path in this session; ordinary sandbox invocation
 fails with `UtilBindVsockAnyPort`. One approval review timed out; its allowed
 single retry succeeded. No sandbox or global configuration was changed.
+
+## Evaluated WMO surfaces — 2026-10-22
+
+Implemented the first connected primary-view G-buffer/lighting path, opt-in
+with `WOWEE_WMO_SURFACES=1` and RT mode 0. Texture/POM/normal evaluation is
+shared with forward WMO. Three attachments preserve material inputs; lighting
+reads actual MSAA samples and retains the authored opaque/blended order.
+The render thread records from the immutable WMO snapshot. Material capacity
+is accumulated during the existing extraction traversal and upload occurs while
+recording geometry: no additional model walk or copied draw list. Other subsystem
+workers continue parallel recording. Per-slot upload ownership and shared-image
+dependencies add no GPU idle or queue drain.
+
+This is WMO only, not completion of the full pipeline. Current-frame RT,
+receiver identity/motion/history, M2/character/terrain conversion, persistent
+GPU tables and indirect submission are still pending. Reflections and blended
+WMO use forward shading; RT-on and wireframe are explicitly rejected by the
+opt-in path. Automatic resize memory-budget policy remains pending.
+
+GPU checks use `tools/scene_render/check_wmo_surfaces.py`. The generated layer
+fixture goes through the public WMO upload/placement API and exists only in
+scene_render. A negative control moves opaque batches across a blended layer
+and must visibly change the reference; the new pass must preserve the original.
+The test includes alpha-cutout holes and MSAA coverage. Real ship/Dalaran cases
+compare final lit images with bounded packing error, not only shader compilation.
+Settings changed after extraction and source model removal preserve the queued
+image; the following frame adopts the changes. Water reflections are included.
+
+First isolated cost checkpoint (before final camera-relative reconstruction):
+Dalaran WMO alone, saved investigation camera, 2560x1369, RT=0, MSAA=1,
+FXAA, shadow quality 2, volumetrics 3, render thread + parallel recording,
+dev/no-LTO, validation off. Each mode ran 240 frames; 230 GPU frames were
+read back after warmup. No competing wowee/scene_render process at preflight.
+
+| Metric | Forward | Evaluated surfaces |
+|---|---:|---:|
+| WMO GPU mean, ms | 2.80 | 2.68 |
+| WMO GPU p95, ms | 2.96 | 3.15 |
+| Whole GPU mean, ms | 4.58 | 4.20 |
+| CPU renderWorld mean, ms | 0.25 | 0.49 |
+
+This is one paired diagnostic comparison, not a measured game FPS improvement.
+VSync limits this fixture near 60 FPS. New pass splits/primary recording raise
+CPU recording cost; the main intended benefit depends on removing previous-frame
+RT lookup, which is not connected yet. Raw inputs/logs/PNGs are preserved under
+`../surface-cost-*` relative to this checkout. The saved full-client result remains
+46.73 FPS from d440fce; no new full replay has run for this stage.
+
+Final implementation check: native `wowee` and `scene_render` build passed.
+Forced Khronos synchronization validation passed parallel/inline recording,
+MSAA 1x/4x, day/night, FXAA, real Dalaran WMO, ordered layers and cutout,
+water reflection, queued settings changes and source removal. Repeated MSAA
+and FXAA target recreation preserves the final PNG byte-for-byte. The opt-out
+WMO RT=3 source-mutation fixture also passes. Only the two known stale Epic
+implicit-layer manifest messages are excluded. `sweep_guard` passed all available
+checks (data/server/FrameXML-dependent checks explicitly skipped in this checkout);
+recording and renderer-dependency guards remain at zero.
+
+After camera-relative reconstruction and explicit target generations, only the
+new mode was remeasured against the saved forward reference: WMO GPU mean
+**2.85 ms**, p95 **3.22 ms**; whole GPU mean **4.36 ms**; CPU renderWorld mean
+**0.44 ms**. This does **not** confirm a WMO speedup over forward (2.80 ms).
+[Saved measurements and image comparisons](performance/dalaran-wmo-surfaces.json)
+retain both the first checkpoint and final run, including the executable hash.
+At 640x480 Dalaran mean RGB error is 0.062/255 for 1x and 0.062/255 for 4x;
+ordered-layer error is 0.000059/255, max 1/255. The full-resolution check is
+stored in the same JSON. There is no new measured full-client FPS result.
+
+Next implementation step remains current-frame RT receiver/resolve/history,
+then the other geometry families and persistent GPU submission. Do not enable
+this partial WMO path as the default renderer or call the complete pipeline done.

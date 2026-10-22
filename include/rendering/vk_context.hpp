@@ -342,7 +342,7 @@ public:
     [[nodiscard]] const std::vector<VkFramebuffer>& getOverlayFramebuffers() const { return overlayFramebuffers; }
     // Compatible with getImGuiRenderPass(), but loads the scene instead of
     // clearing it, so drawing can continue into the same framebuffer after the
-    // pass has been closed for a copy. Null under MSAA.
+    // pass has been closed for a copy or evaluated-surface lighting, including MSAA.
     [[nodiscard]] VkRenderPass getSceneContinueRenderPass() const { return sceneContinueRenderPass; }
     [[nodiscard]] VkDescriptorPool getImGuiDescriptorPool() const { return imguiDescriptorPool; }
     [[nodiscard]] const std::vector<VkFramebuffer>& getSwapchainFramebuffers() const { return swapchainFramebuffers; }
@@ -384,6 +384,7 @@ public:
     [[nodiscard]] bool isSamplerAnisotropySupported() const { return samplerAnisotropySupported_; }
     /// False on hardware without fillModeNonSolid, where a VK_POLYGON_MODE_LINE
     /// pipeline cannot be built and the wireframe views are unavailable.
+    [[nodiscard]] bool isSampleShadingSupported() const { return sampleShadingSupported_; }
     [[nodiscard]] bool isWireframeSupported() const { return fillModeNonSolidSupported_; }
     /// Occlusion queries count samples rather than answering yes or no.
     [[nodiscard]] bool isOcclusionQueryPreciseSupported() const {
@@ -822,6 +823,7 @@ private:
     std::mutex samplerCacheMutex_;
     std::unordered_map<uint64_t, VkSampler> samplerCache_;
     bool samplerAnisotropySupported_ = false;
+    bool sampleShadingSupported_ = false;
     bool fillModeNonSolidSupported_ = false;
     bool occlusionQueryPreciseSupported_ = false;
     bool tessellationSupported_ = false;

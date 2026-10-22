@@ -1,0 +1,142 @@
+layout(set = 1, binding = 0) uniform sampler2D uTexture;
+
+// Resource-only material. Frame settings are captured in the command stream.
+layout(set = 1, binding = 1) uniform WMOMaterial {
+    int hasTexture;
+    int alphaTest;
+    int light;
+    int transitionLight;
+    float specularIntensity;
+    float heightMapVariance;
+    int isLava;
+    int emissive;
+    float wmoAmbientR;
+    float wmoAmbientG;
+    float wmoAmbientB;
+    int hasVertexColors;
+    int receivesExteriorShadows;
+    float sidnR;
+    float sidnG;
+    float sidnB;
+};
+layout(push_constant) uniform SurfaceOptions {
+    layout(offset = 96) vec4 geometry; // normal mapping, POM, samples, normal strength
+#ifdef WMO_GBUFFER
+    layout(offset = 112) uvec4 surfaceKey;
+#endif
+} surfaceOptions;
+const float pomScale = 0.012;
+
+layout(set = 1, binding = 2) uniform sampler2D uNormalHeightMap;
+
+layout(location = 0) in vec3 FragPos;
+layout(location = 1) in vec3 Normal;
+layout(location = 2) in vec2 TexCoord;
+layout(location = 3) in vec4 VertColor;
+layout(location = 4) in vec3 Tangent;
+layout(location = 5) in vec3 Bitangent;
+layout(location = 6) flat in uvec4 vLocalLights;
+
+layout(location = 0) out vec4 outColor;
+#ifdef WMO_GBUFFER
+layout(location = 1) out uvec4 outKeys;
+layout(location = 2) out uvec4 outPayload;
+#include "surface_encoding.glsli"
+#endif
+
+// LOD factor from screen-space UV derivatives
+float computeLodFactor() {
+    vec2 dx = dFdx(TexCoord);
+    vec2 dy = dFdy(TexCoord);
+    float texelDensity = max(dot(dx, dx), dot(dy, dy));
+    // Low density = close/head-on = full detail (0)
+    // High density = far/steep = vertex normals only (1)
+    return smoothstep(0.0001, 0.005, texelDensity);
+}
+
+#include "parallax_occlusion.glsli"
+
+void main() {
+    const vec3 receiverFace = receiverFaceNormal(FragPos);
+    if (fogSkyBand1.w > 0.0 && length(FragPos.xy - viewPos.xy) >= fogSkyBand1.w) discard;
+
+    float lodFactor = computeLodFactor();
+    // Gradients of the authored UV, taken here where every pixel of the quad
+    // still agrees on them. Parallax moves the UV by a different amount per
+    // pixel, and a mip level chosen from the moved UV flickers.
+    vec2 uvDx = dFdx(TexCoord);
+    vec2 uvDy = dFdy(TexCoord);
+
+    vec3 vertexNormal = normalize(Normal);
+    if (!gl_FrontFacing) vertexNormal = -vertexNormal;
+
+    // Compute final UV (with POM if enabled)
+    vec2 finalUV = TexCoord;
+
+    // Lava/magma: scroll UVs for flowing effect
+    if (isLava != 0) {
+        float time = fogParams.z;
+        // Scroll both axes - pools get horizontal flow, waterfalls get vertical flow
+        // (UV orientation depends on mesh, so animate both)
+        finalUV += vec2(time * 0.04, time * 0.06);
+    }
+
+    // Build TBN matrix
+    vec3 T = normalize(Tangent);
+    vec3 B = normalize(Bitangent);
+    vec3 N = vertexNormal;
+    mat3 TBN = mat3(T, B, N);
+
+    if (surfaceOptions.geometry.y > 0.5 && heightMapVariance > 0.001 && lodFactor < 0.99) {
+        mat3 TBN_inv = transpose(TBN);
+        vec3 viewDirWorld = normalize(viewPos.xyz - FragPos);
+        vec3 viewDirTS = TBN_inv * viewDirWorld;
+        finalUV = parallaxOcclusionMap(uNormalHeightMap, TexCoord, viewDirTS, lodFactor,
+                                       int(surfaceOptions.geometry.z), pomScale);
+    }
+
+    vec4 texColor = hasTexture != 0 ? textureGrad(uTexture, finalUV, uvDx, uvDy) : vec4(1.0);
+    // A WMO material's alpha key cuts at 224/255, as the original client's
+    // does, not at a half. Dalaran's lattice windows (DAL_WINDOWCUTOUT) leave
+    // their holes at alpha 0.5-0.6; cut at a half, they drew as solid panes.
+    if (alphaTest != 0 && texColor.a < 224.0 / 255.0) discard;
+
+    // Compute normal (with normal mapping if enabled)
+    vec3 norm = vertexNormal;
+    if (surfaceOptions.geometry.x > 0.5 && lodFactor < 0.99 && surfaceOptions.geometry.w > 0.001) {
+        vec3 mapNormal = textureGrad(uNormalHeightMap, finalUV, uvDx, uvDy).rgb * 2.0 - 1.0;
+        mapNormal = normalize(mapNormal);
+        vec3 worldNormal = normalize(TBN * mapNormal);
+        if (!gl_FrontFacing) worldNormal = -worldNormal;
+        // Linear blend: strength controls how much normal map detail shows,
+        // LOD fades out at distance. Both multiply for smooth falloff.
+        float blend = clamp(surfaceOptions.geometry.w, 0.0, 1.0) * (1.0 - lodFactor);
+        norm = normalize(mix(vertexNormal, worldNormal, blend));
+    }
+
+    WmoLightingMaterial material = WmoLightingMaterial(light, transitionLight,
+        specularIntensity, vec3(wmoAmbientR, wmoAmbientG, wmoAmbientB),
+        vec3(sidnR, sidnG, sidnB), hasVertexColors, receivesExteriorShadows,
+        emissive, isLava);
+    WmoSurface surface = WmoSurface(FragPos, texColor, norm, vertexNormal,
+        receiverFace, VertColor, vLocalLights);
+#ifdef WMO_GBUFFER
+    outColor = texColor;
+    outKeys = uvec4(packSurfaceNormal(receiverFace), packSurfaceNormal(norm),
+                    packSurfaceNormal(vertexNormal), surfaceOptions.surfaceKey.x + 1u);
+    // Stage one has no temporal history. Keep exact raster depth until the
+    // current-frame receiver/motion path owns a separate depth input.
+    outPayload = uvec4(packHalf2x16(VertColor.rg), packHalf2x16(VertColor.ba),
+                       floatBitsToUint(gl_FragCoord.z), 0u);
+#else
+    RtLight rt = rtLightAt(FragPos, normalize(receiverFace));
+    vec3 result = shadeWmoSurface(surface, material, rt);
+
+    float dist = length(viewPos.xyz - FragPos);
+
+    float alpha = texColor.a;
+
+    result = applyFog(result, FragPos, dist);
+    outColor = vec4(result, alpha);
+#endif
+}
