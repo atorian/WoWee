@@ -16,6 +16,7 @@ struct MovementPlane {
 struct MovementFacet {
     MovementPlane plane;
     std::array<glm::vec3, 3> vertices;
+    uint64_t owner = 0;
 };
 struct MovementBody {
     glm::vec3 feet;

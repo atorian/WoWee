@@ -1,4 +1,5 @@
 #include "collision/movement_contact.hpp"
+#include "movement_geometry.hpp"
 
 #include <algorithm>
 #include <array>
@@ -92,39 +93,6 @@ void clip(Polygon& polygon, size_t& count, const MovementPlane& plane) {
     if (count<3) count=0;
 }
 
-// Side planes of the swept triangle/quad: 0x75bc50 and 0x75be80.
-// The original forms the displaced point then subtracts the base. Preserve
-// that operation (and its precision) instead of substituting a different sweep.
-bool extrusion(const BodyVolume& volume, std::span<const uint8_t> face,
-               const glm::vec3& move, std::array<MovementPlane,4>& planes) {
-    for (size_t i=0;i<face.size();++i) {
-        const auto p=volume.vertices[face[i]];
-        const auto q=volume.vertices[face[(i+1)%face.size()]];
-        const auto previous=volume.vertices[face[(i+face.size()-1)%face.size()]];
-        const double ax=(double(p.x)+move.x)-p.x;
-        const double ay=(double(p.y)+move.y)-p.y;
-        const double az=(double(p.z)+move.z)-p.z;
-        const double bx=double(q.x)-p.x, by=double(q.y)-p.y, bz=double(q.z)-p.z;
-        // x87 spills bx, by, bz and ay before reusing them for the latter
-        // two components (0x75bcf8..0x75bd20 / 0x75bf25..0x75bf4b).
-        const double nx=by*az-ay*bz;
-        const double ny=double(float(bz))*ax-az*float(bx);
-        const double nz=double(float(bx))*float(ay)-ax*float(by);
-        const double lengthSquared=nz*nz+ny*ny+nx*nx;
-        if (lengthSquared<tiny) return false;
-        const double inverse=1.0/std::sqrt(lengthSquared);
-        auto& plane=planes[i];
-        plane.normal={float(nx*inverse),float(ny*inverse),float(nz*inverse)};
-        const double ux=nx*inverse, uy=ny*inverse, uz=nz*inverse;
-        plane.offset=float(-(uz*p.z + uy*p.y + ux*p.x));
-        const double side=uy*(double(previous.y)-p.y)+
-                          (double(previous.z)-p.z)*uz+
-                          (double(previous.x)-p.x)*ux;
-        if (side>0) {plane.normal=-plane.normal;plane.offset=-plane.offset;}
-    }
-    return true;
-}
-
 // 0x75c0b0: retain shallow initial overlaps, but reject facets fully behind
 // the body. This distinction is needed when leaving a contact or an edge.
 bool polygonDistance(Polygon polygon, size_t count, const BodyVolume& volume,
@@ -185,6 +153,42 @@ bool traceFace(std::span<const MovementFacet> facets, const BodyVolume& volume,
 
 } // namespace
 
+namespace detail {
+// Side planes of the swept triangle/quad: 0x75bc50 and 0x75be80.
+// The original forms the displaced point then subtracts the base. Preserve
+// that operation (and its precision) instead of substituting a different sweep.
+bool extrudeMovementFace(std::span<const glm::vec3> vertices, std::span<const uint8_t> face,
+               const glm::vec3& move, std::span<MovementPlane> planes) {
+    for (size_t i=0;i<face.size();++i) {
+        const auto p=vertices[face[i]];
+        const auto q=vertices[face[(i+1)%face.size()]];
+        const auto previous=vertices[face[(i+face.size()-1)%face.size()]];
+        const double ax=(double(p.x)+move.x)-p.x;
+        const double ay=(double(p.y)+move.y)-p.y;
+        const double az=(double(p.z)+move.z)-p.z;
+        const double bx=double(q.x)-p.x, by=double(q.y)-p.y, bz=double(q.z)-p.z;
+        // x87 spills bx, by, bz and ay before reusing them for the latter
+        // two components (0x75bcf8..0x75bd20 / 0x75bf25..0x75bf4b).
+        const double nx=by*az-ay*bz;
+        const double ny=double(float(bz))*ax-az*float(bx);
+        const double nz=double(float(bx))*float(ay)-ax*float(by);
+        const double lengthSquared=nz*nz+ny*ny+nx*nx;
+        if (lengthSquared<tiny) return false;
+        const double inverse=1.0/std::sqrt(lengthSquared);
+        auto& plane=planes[i];
+        plane.normal={float(nx*inverse),float(ny*inverse),float(nz*inverse)};
+        const double ux=nx*inverse, uy=ny*inverse, uz=nz*inverse;
+        plane.offset=float(-(uz*p.z + uy*p.y + ux*p.x));
+        const double side=uy*(double(previous.y)-p.y)+
+                          (double(previous.z)-p.z)*uz+
+                          (double(previous.x)-p.x)*ux;
+        if (side>0) {plane.normal=-plane.normal;plane.offset=-plane.offset;}
+    }
+    return true;
+}
+
+} // namespace detail
+
 MovementContact traceMovementBody(std::span<const MovementFacet> facets,
                                   const MovementBody& body,
                                   const glm::vec3& direction, float distance) {
@@ -205,7 +209,7 @@ MovementContact traceMovementBody(std::span<const MovementFacet> facets,
         if (dot(plane.normal,movement)<=0) continue;
         const size_t count=pass<4 ? 3 : 4;
         std::array<MovementPlane,4> sides;
-        if (!extrusion(volume,std::span(faces[pass]).first(count),movement,sides)) continue;
+        if (!detail::extrudeMovementFace(volume.vertices,std::span(faces[pass]).first(count),movement,sides)) continue;
         float allowed=distance;
         if (!traceFace(facets,volume,face,std::span(sides).first(count),direction,allowed,result.facet)) continue;
         if (allowed >= result.distance-skin) {

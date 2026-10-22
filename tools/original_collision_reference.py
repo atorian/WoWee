@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Execute 12340's DistanceToMove in an isolated x86 emulator, without an OS.
+"""Execute 12340 collision and surface movement in an isolated x86 emulator.
 
 Requires pefile and unicorn in the caller's Python environment. The caller
 supplies their original executable; no proprietary bytes are distributed.
@@ -13,7 +13,7 @@ import struct
 import sys
 
 import pefile
-from unicorn import Uc, UC_ARCH_X86, UC_MODE_32, UcError
+from unicorn import Uc, UC_ARCH_X86, UC_MODE_32, UC_HOOK_CODE, UcError
 from unicorn.x86_const import (UC_X86_REG_ECX, UC_X86_REG_ESP,
                               UC_X86_REG_EIP, UC_X86_REG_EAX,
                               UC_X86_REG_FPCW, UC_X86_REG_FPSW,
@@ -39,6 +39,13 @@ class OriginalCollision:
         self.cpu.mem_map(0x3000000, 0x100000)
         self.cpu.mem_map(0x1000000, 0x1000)
         self.control_word = control_word
+        self.transport_request = None
+        self.cpu.hook_add(UC_HOOK_CODE, self._observe_transport, begin=0x6ec7b0, end=0x6ec7b0)
+
+    def _observe_transport(self, cpu, address, size, user_data):
+        # Observe the request at the API boundary; execute the real function.
+        stack = cpu.reg_read(UC_X86_REG_ESP)
+        self.transport_request = struct.unpack('<Q', cpu.mem_read(stack + 4, 8))[0]
 
     def alloc(self, blob):
         p = self.next
@@ -50,6 +57,80 @@ class OriginalCollision:
 
     def floats(self, values):
         return self.alloc(struct.pack('<' + 'f' * len(values), *values))
+
+    def surface_move(self, case):
+        """Run TraceSurface with a real player-shaped unit and preloaded world.
+
+        No collision, stepping, unit-control, falling or arithmetic function
+        is replaced. All facets are already resident inside a large query box;
+        this fixture does not model world streaming or moving transports.
+        """
+        self.next = 0x2000000
+        cpu = self.cpu
+        self.transport_request = None
+        body = self.alloc(bytes(0x500))
+        unit = self.alloc(bytes(0x1000))
+        fields = self.alloc(bytes(0x1000))
+        object_fields = self.alloc(struct.pack('<QII', 1, 0x10 if case.get('client_controlled', True) else 0x8, 0))
+        def write(address, fmt, *values):
+            cpu.mem_write(address, struct.pack('<' + fmt, *values))
+        write(unit + 8, 'I', object_fields)
+        write(unit + 0xd0, 'I', fields)
+        write(body + 0x144, 'I', unit)
+        write(body + 0x28, 'I', object_fields)
+        write(body + 0x10, '3f', *case['position'])
+        write(body + 0x20, 'f', case.get('facing', 0))
+        write(body + 0x24, 'f', case.get('pitch', 0))
+        write(body + 0x48, 'H', case.get('flags2', 0))
+        write(body + 0x4c, '3f', *case.get('anchor_position', [0, 0, 0]))
+        write(body + 0x58, '2f', case.get('anchor_facing', 0), case.get('anchor_pitch', 0))
+        write(body + 0x60, 'I', case.get('anchor_elapsed', 0))
+        write(body + 0x64, '3f', *case.get('move_direction', [0, 0, 0]))
+        write(body + 0x70, '2f', *case.get('move_direction_2d', [0, 0]))
+        write(body + 0x78, '2f', case.get('pitch_cos', 1), case.get('pitch_sin', 0))
+        write(body + 0x80, 'I', case.get('fall_time', 0))
+        write(body + 0x84, 'f', case.get('fall_start', 0))
+        write(body + 0x8c, 'f', case.get('current_speed', 0))
+        write(body + 0xb8, 'f', case.get('fall_velocity', 0))
+        write(body + 0x44, 'I', case.get('flags', 1))
+        write(body + 0x88, 'f', case.get('step_start', case['position'][2]))
+        write(body + 0xc8, '3f', case['radius'], case['height'], case.get('step_height', 1))
+        triangles = case['triangles']
+        data = b''.join(struct.pack('<13f', *(t['plane'] + sum(t['vertices'], []))) for t in triangles)
+        facets = self.alloc(data or bytes(16))
+        ids = self.alloc(b''.join(struct.pack('<Q', t.get('owner', 0)) for t in triangles) or bytes(8))
+        write(0xadba34, '8I', len(triangles), len(triangles), facets, 0,
+              len(triangles), len(triangles), ids, 0)
+        write(0xca1660, '6f', -100000, -100000, -100000, 100000, 100000, 100000)
+        direction = self.floats(case['direction'][:2])
+        distance_bits = struct.unpack('<I', struct.pack('<f', case['distance']))[0]
+        stack = 0x30ff000
+        write(stack, '5I', 0x1000000, 1000, case.get('elapsed', 16), distance_bits, direction)
+        cpu.reg_write(UC_X86_REG_ESP, stack)
+        cpu.reg_write(UC_X86_REG_ECX, body)
+        cpu.reg_write(UC_X86_REG_FPCW, self.control_word)
+        cpu.reg_write(UC_X86_REG_FPSW, 0)
+        cpu.reg_write(UC_X86_REG_FPTAG, 0xffff)
+        try:
+            cpu.emu_start(0x7620f0, 0x1000000, count=10_000_000)
+        except UcError as error:
+            raise RuntimeError(f'Original surface failed at EIP={cpu.reg_read(UC_X86_REG_EIP):08x}: {error}') from error
+        if cpu.reg_read(UC_X86_REG_EIP) != 0x1000000:
+            raise RuntimeError('Original surface exceeded its instruction budget')
+        result = dict(name=case.get('name', ''),
+                    position=list(struct.unpack('<3f', cpu.mem_read(body + 0x10, 12))),
+                    flags=struct.unpack('<I', cpu.mem_read(body + 0x44, 4))[0],
+                    step_start=struct.unpack('<f', cpu.mem_read(body + 0x88, 4))[0],
+                    elapsed=cpu.reg_read(UC_X86_REG_EAX))
+        for name, offset, fmt in [('fall_time', 0x80, 'I'), ('fall_start', 0x84, 'f'),
+                                  ('fall_velocity', 0xb8, 'f'), ('current_speed', 0x8c, 'f'),
+                                  ('anchor_elapsed', 0x60, 'I'), ('anchor_facing', 0x58, 'f'),
+                                  ('anchor_pitch', 0x5c, 'f'), ('anchor_position', 0x4c, '3f'),
+                                  ('move_direction', 0x64, '3f'), ('move_direction_2d', 0x70, '2f')]:
+            values = struct.unpack('<' + fmt, cpu.mem_read(body + offset, struct.calcsize(fmt)))
+            result[name] = values[0] if len(values) == 1 else list(values)
+        result['transport'] = self.transport_request
+        return result
 
     def distance_to_move(self, case):
         self.next = 0x2000000
@@ -103,7 +184,9 @@ def main():
     original = OriginalCollision(args.binary, args.fpu_control)
     for line in sys.stdin:
         if line.strip():
-            print(json.dumps(original.distance_to_move(json.loads(line))), flush=True)
+            case = json.loads(line)
+            result = original.surface_move(case) if case.get('operation') == 'surface' else original.distance_to_move(case)
+            print(json.dumps(result), flush=True)
 
 
 if __name__ == '__main__':

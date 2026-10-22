@@ -3,8 +3,8 @@
 Branch: `codex/original-collision-parity`.
 
 This branch fixes three existing query defects and adds a separately verified
-contact primitive. **It does not yet make player movement equivalent to the
-original client.** The primitive is linked into the collision library for
+contact primitive and surface traversal phase. **It does not yet make player movement equivalent to the
+original client.** These phases are linked into the collision library for
 offline testing; CameraController and ordinary movement still use the legacy
 solver. There is no new gameplay toggle or silent mixed-solver fallback.
 
@@ -100,11 +100,57 @@ These runs compile the affected sources as offline test executables. A full
 client build, ordinary player movement and server traffic have not been
 validated by this branch's changes.
 
+## Surface traversal
+
+`src/collision/movement_surface.cpp` implements the supplied-geometry surface
+phase at `0x7620f0`, including obstacle redirection, the up/forward/down step
+attempt at `0x761b00`, `WillPassObstacle` at `0x7619c0` and its speculative
+falling checks. The caller owns `SurfaceMovementState`; the solver keeps no
+second persistent state. The control flow was adapted from the same pinned
+reconstruction and checked against execution of the original binary.
+
+The reference now creates a player-shaped unit in emulator memory so that the
+original unit-control checks, stepping, anchor updates and falling transitions
+execute. The facet query box encloses all fixture geometry. No physics routine
+is stubbed. A read-only hook records calls to `SetTransport`; the real function
+continues executing. Comparing the request is not a test of transport object
+lookup, attachment or movement between coordinate frames.
+
+The surface fixture contains 1069 reference calls: headroom, tall and narrow
+steps, signed slopes around the walkable boundary, ledges, existing step state,
+oblique walls, rotated geometry, continent coordinates, uncontrolled-unit
+slope policy, facet owners and consecutive stair traversal at different frame
+schedules. It compares binary32 coordinates and simulation fields, flags,
+consumed time and transport requests. The first straightforward float port
+matched only 185 of the initial 252 cases; preserving x87 register intermediates
+and memory spills corrected those mismatches. The shared face extrusion used
+by both contact and footprint checks has one numerical implementation.
+
+```text
+python tools/check_original_surface.py --reference tests/fixtures/original_surface_12340.json --probe <built movement_surface_probe executable>
+```
+
+Regeneration uses `--binary <original.exe>` and `--write-reference <fixture>`.
+For a Windows executable launched from WSL, large redirected pipes can time
+out: write `probe_input` records to a file on D:, run the native probe with
+file redirection, and compare its JSON lines using `--actual <output-file>`.
+This changes only test I/O, not the compared inputs or algorithm.
+
+Validation on 2026-10-22: Linux GCC and native Windows MinGW both match all
+1069 surface cases. AddressSanitizer and UndefinedBehaviorSanitizer passed all
+1069 surface cases; LeakSanitizer remains disabled for the sandbox's
+tracing limitation. The contact matrix still passes all 1306 cases.
+
+This API remains a surface phase, not a complete frame simulator. Ordinary
+falling, jump/landing events, swimming, flying, hover, pending movement actions,
+streaming queries and server-visible packets still require separate validation.
+It is not connected to CameraController's player simulation.
+
 ## Remaining acceptance work
 
 The full checklist is in `tasks/collision-original-parity.md`. World facet
 gathering/masks/order, mover dimensions from model and server updates,
-AttemptStepUp/TraceSurface, complete trajectories, movement-state transitions,
+world-supplied surface traversal, complete trajectories, movement-state transitions,
 transports and emitted packets still need their own original-reference
 comparisons before the replacement is enabled for players. Passing this
 contact matrix is not a claim of full gameplay parity or immunity from bans.

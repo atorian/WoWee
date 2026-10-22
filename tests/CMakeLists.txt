@@ -2921,6 +2921,17 @@ if(Python3_Interpreter_FOUND)
             --probe $<TARGET_FILE:movement_contact_probe>)
 endif()
 
+add_executable(movement_surface_probe movement_surface_probe.cpp)
+target_link_libraries(movement_surface_probe PRIVATE wowee_collision)
+wowee_test_link_glm(movement_surface_probe)
+register_test_target(movement_surface_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_surface
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_surface.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_surface_12340.json
+            --probe $<TARGET_FILE:movement_surface_probe>)
+endif()
+
 # ── test_race_gender_suffix ──────────────────────────────────
 # The two-letter race code per-race models are suffixed with. Written out twice
 # - the helmet resolver and the shoulder attachment - and a wrong suffix reads

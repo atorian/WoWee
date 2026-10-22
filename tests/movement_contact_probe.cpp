@@ -8,7 +8,7 @@
 
 int main() {
     using namespace wowee::collision;
-    std::cout << std::setprecision(9);
+    std::cout << std::setprecision(9) << std::showpoint;
     std::string name;
     auto vector = [](glm::vec3& v) { return bool(std::cin >> v.x >> v.y >> v.z); };
     while (std::cin >> name) {

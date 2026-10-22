@@ -5,7 +5,8 @@ behaviour must match the original client. See
 [the governing principle](principles/original-gameplay-behaviour.md).
 
 Status: three legacy query defects fixed; original contact primitive matches
-1306 supplied-geometry reference cases; full behavioural equivalence is not
+1306 supplied-geometry reference cases; the surface phase matches 1069 calls;
+full behavioural equivalence is not
 established and the player solver is not replaced. See
 `docs/original-collision-reference.md` for the implemented boundary and checks.
 This plan supersedes the audit's generic solver
@@ -122,9 +123,10 @@ remain runnable; unsupported cases remain visible in the completion report.
 - [x] Executable original-reference comparisons for DistanceToMove on supplied facets.
 - [x] Three legacy query regressions reproduced before fixes and corrected.
 - [ ] Equivalent collision geometry and mover parameters.
-- [ ] Equivalent contact/surface solver.
-  DistanceToMove matches the current 1306-case matrix; stepping and surface
-  traversal are not implemented in the replacement.
+- [x] Supplied-geometry contact/surface phases against the original executable.
+  DistanceToMove matches 1306 calls; TraceSurface, stepping and its speculative
+  fall checks match 1069 calls, including consecutive-frame stair trajectories.
+  This does not certify world facet collection or the other movement phases.
 - [ ] Equivalent full movement trajectories and state transitions.
 - [ ] Equivalent server-visible movement.
 - [ ] Verified production integration and removal of competing heuristics.
