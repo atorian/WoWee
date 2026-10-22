@@ -186,6 +186,47 @@ Preserved failure evidence: `../replay-texture-oom.log` and
 The last completed FPS result remains **41.96 FPS**, predating these fixes.
 Current-frame RT, G-buffer lighting and GPU indirect submission remain unfinished.
 
+## Successful follow-up replay — 2026-10-22
+
+[Full report](performance/dalaran-m2-resource-publication.json), implementation
+`d440fce`. All 760 samples completed; client exit was normal, trace error empty,
+and the runtime log contains no ERROR/FATAL or unprepared-character-texture
+message. Missing-asset warnings remain. A low-system-commit warning occurred
+while loading; this is not evidence that the earlier OOM is fixed.
+
+| Metric | Previous foundation run | Resource publication run |
+|---|---:|---:|
+| FPS | 41.96 | 46.73 |
+| Mean frame interval, ms | 23.833 | 21.401 |
+| p95 frame interval, ms | 32.901 | 26.307 |
+| p99 frame interval, ms | 45.003 | 42.938 |
+| CPU scene extraction, mean ms | 11.320 | 9.146 |
+| CPU M2 extraction, mean ms | 6.245 | 4.817 |
+| GPU WMO, mean ms | 4.617 | 4.539 |
+| GPU RT lighting, mean ms | 3.289 | 3.287 |
+| Peak sampled process working set, GiB | 5.093 | 5.133 |
+| Peak sampled process private commit, GiB | 9.677 | 9.604 |
+
+The observed FPS increase is 11.4%; this historical comparison does not isolate
+code effects. Measured viewport changed from 2560x1369 to 2560x1392 (1.68% more
+pixels), system memory conditions differ, and asynchronous resident populations
+are slightly different: mean M2 104414 -> 104469, characters 440.7 -> 447.5.
+The original pre-foundation baseline was 42.46 FPS. RT mode 3, MSAA 1, render
+thread 1, settle 8 seconds and dev/no-LTO build are unchanged.
+
+New M2 subphase means: candidate gathering 1.555 ms, emitters 1.606 ms, view
+classification 0.766 ms, shadow lists 0.544 ms, pose publication 0.334 ms,
+frame/resource acquisition 0.011 ms. These are parts of the M2 extraction
+measurement, not additional frame costs. No older subphase baseline exists.
+GPU-slot wait increased from 2.94 to 7.96 ms and producer queue wait from 0.62
+to 2.64 ms; the faster producer now encounters more downstream waiting. These
+wall measurements alone do not establish a GPU critical path, but WMO/RT GPU
+costs remain largely unchanged and remain the next renderer targets.
+
+Raw trace, CSV, both comparisons, runtime log and memory samples are preserved
+in `build-dev/scratch/scene-replay/run-20261022-114001-489/`. No old client version
+was rerun. Current-frame RT/G-buffer implementation is still pending.
+
 ## Remaining implementation
 
 - [x] Finish foundation GPU snapshot/lifetime tests and guards.
