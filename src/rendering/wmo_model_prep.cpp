@@ -244,7 +244,7 @@ std::shared_ptr<WmoModelPrep> WMORenderer::prepareModel(const pipeline::WMOModel
         const auto& wmoGroup = model.groups[gi];
         WmoModelPrep::Group g;
         const bool renderable=prepareGroupResources(wmoGroup,g.resources,g.vertices);
-        prep->collisionGroups.push_back(g.resources.shape);
+        prep->collisionGroups.push_back(collision::WmoModelGroup::build(model,gi,g.resources.shape));
         if (!renderable) continue;
         g.indices = wmoGroup.indices;
         GroupResources& resources = g.resources;

@@ -23,6 +23,7 @@ struct TerrainLiquidGrid {
 struct LiquidFacetQuery {
     std::vector<MovementFacet> facets;
     uint32_t degenerateFaces = 0; // Geometry owner logs once per asset.
+    uint32_t indexReservation = 0; // WMO reserves the entire clipped rectangle.
 };
 
 // CChunkLiquid::GetTris + CMap::GetChunkLiquidFacets in build 12340. Query

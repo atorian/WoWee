@@ -270,11 +270,27 @@ uint64_t WmoGroupShape::bytes() const {
     return total;
 }
 
+WmoModelGroup WmoModelGroup::build(const pipeline::WMOModel& model, size_t index,
+                                   std::shared_ptr<const WmoGroupShape> shape) {
+    WmoModelGroup result;
+    result.shape=std::move(shape);
+    if (index<model.groupInfo.size()) {
+        const auto& info=model.groupInfo[index];
+        result.bounds=WmoGroupBounds{info.boundingBoxMin,info.boundingBoxMax};
+    } else {
+        LOG_ERROR("WMO '",model.sourcePath,"' group ",index,
+                  " has no MOGI bounds: original model collision unavailable");
+    }
+    return result;
+}
 uint64_t WmoShape::bytes() const {
-    uint64_t total=sizeof(WmoShape)+(groups.capacity()+originalGroups.capacity())*sizeof(groups[0]);
+    uint64_t total=sizeof(WmoShape)+groups.capacity()*sizeof(groups[0])+
+                   originalGroups.capacity()*sizeof(originalGroups[0]);
     std::unordered_set<const WmoGroupShape*> seen;
-    for (const auto* list:{&groups,&originalGroups}) for (const auto& group:*list)
+    for (const auto& group:groups)
         if (group && seen.insert(group.get()).second) total+=group->bytes();
+    for (const auto& group:originalGroups)
+        if (group.shape && seen.insert(group.shape.get()).second) total+=group.shape->bytes();
     return total;
 }
 

@@ -357,3 +357,46 @@ ASan/UBSan comparisons pass. These retained bounds still require world wiring.
 
 The native collision/ADT selection passes 22/22 tests. The full sweep remains
 at or below its existing ceilings (optional data-dependent checks were skipped).
+
+## WMO model/world and linked objects
+
+The original executable now supplies four further fixture sets:
+
+| Collector | Original entry | Cases | Boundaries |
+| --- | --- | ---: | --- |
+| WMO model | GetTris `0x7aef00`, GetLiquidFacets `0x7af000` | 682 | Real BSP, liquids, batch/index/face pools and facet conversion |
+| World WMO | GetMapObjFacets `0x7a55e0` | 1693 | Real transforms, models and loading barriers; linked service calls recorded |
+| Linked doodads | GetDoodadDefFacets `0x7a50c0` | 1248 | Real M2 facets, transformed pending bounds and query-tag state |
+| Dynamic entities | QueryDestructibleFacets `0x7a5240` | 1095 | Supplied collision-data callback, real M2 facets and query-tag state |
+
+`tools/check_original_wmo_model.py`, `check_original_wmo_world.py`,
+`check_original_doodads.py` and `check_original_entities.py` accept the same
+`--binary ... --probe ... --write-reference ...` or `--reference ... --probe ...`
+workflow as the earlier tools. WMO model/world checkers also accept `--sse`
+with `--cpu-reference` for host RSQRTSS. Portable fixtures use the original
+x87 path and retain the executable SHA-256 and FPU control word. Comparison
+checks every emitted float's 32-bit representation, facet order and owner.
+
+MOGI group bounds are retained independently from MOGP and visual bounds.
+World query centering retains x87 precision for centered extents, then uses
+stored float centers for matrix multiplication; box transformation stores each
+axis contribution. Missing whole-WMO and missing linked-group branches have
+different body-overlap behaviour. No shared "streaming safety" heuristic
+replaces them. The model collector preserves both original liquid passes and
+the strict pool capacities, including reserved indices for dry liquid cells.
+
+Linked doodads share mutable tags across chunk/group lists. A bounds miss still
+marks the object, whereas a disabled, absent or mask-excluded object does not.
+Pending preparation marks static flag 0x10000 and uses the transformed shared
+model box. Entity collection stops at the first link lacking static flag 2;
+its supplied callback may return no collision data, and that still marks the
+query tag. Callback parameters and facet ownership are part of the comparison.
+
+All four fixture sets pass on Linux, native MinGW and ASan/UBSan. Both WMO sets
+also pass host-SSE comparisons on Linux and native Windows. The native
+collision/ADT selection passes 33/33 tests, affected renderer objects compile,
+and `sweep_guard` stays within all ceilings (optional unavailable FrameXML
+checks skip). These are collection contracts over supplied world state. Real
+placement/link lifecycle, combined world collection, the gameplay collision
+provider and movement/protocol integration remain unverified; the replacement
+is still offline.

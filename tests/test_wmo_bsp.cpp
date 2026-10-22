@@ -3,6 +3,7 @@
 #include "collision/wmo_bsp_query.hpp"
 #include "collision/wmo_shape.hpp"
 #include "collision/liquid_facets.hpp"
+#include "collision/wmo_model_facets.hpp"
 #include <cstring>
 
 namespace {
@@ -112,4 +113,34 @@ TEST_CASE("A WMO liquid-only group retains authored collision geometry", "[colli
 TEST_CASE("A truncated WMO liquid cannot acquire invented wet cells", "[collision][wmo]") {
     wowee::pipeline::WMOModel model;model.groups.resize(1);
     CHECK_FALSE(wowee::pipeline::WMOLoader::loadGroup(liquidOnlyGroupFile(true,true),model,0));
+}
+
+TEST_CASE("WMO model collision uses MOGI selection before the group's mesh", "[collision][wmo]") {
+    using namespace wowee;
+    pipeline::WMOModel source;source.groups.resize(1);source.groupInfo.resize(1);
+    REQUIRE(pipeline::WMOLoader::loadGroup(groupFile(),source,0));
+    source.groupInfo[0].boundingBoxMin={-1,-1,-1};
+    source.groupInfo[0].boundingBoxMax={1,1,1};
+    SECTION("MOGI includes the mesh") {}
+    SECTION("MOGI excludes an otherwise intersecting mesh") {
+        source.groupInfo[0].boundingBoxMin={10,10,10};
+        source.groupInfo[0].boundingBoxMax={20,20,20};
+    }
+    class NoLiquids final:public collision::WmoLiquidMaterials {
+        std::optional<uint32_t> flags(uint16_t) const override { return std::nullopt; }
+    } materials;
+    collision::WmoShape model;
+    model.originalGroups.push_back(collision::WmoModelGroup::build(source,0,
+        collision::WmoGroupShape::build(source.groups[0])));
+    std::vector<collision::MovementFacet> facets;
+    const auto result=collision::appendWmoModelFacets(model,{-2,-2,-2},{2,2,2},0x10,
+        glm::mat4(1),42,materials,collision::FacetNormalization::X87,facets);
+    REQUIRE(result.status==collision::MovementGeometryStatus::Ready);
+    if (source.groupInfo[0].boundingBoxMin.x==10) CHECK(facets.empty());
+    else {
+        REQUIRE(facets.size()==2);
+        CHECK(facets[0].owner==42);
+        CHECK(facets[0].vertices[0].z==.4f);
+        CHECK(facets[1].vertices[0].z==-.4f);
+    }
 }

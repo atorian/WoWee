@@ -8,7 +8,7 @@
 #include <glm/glm.hpp>
 #include "pipeline/wmo_bsp.hpp"
 
-namespace wowee::pipeline { struct WMOGroup; }
+namespace wowee::pipeline { struct WMOGroup; struct WMOModel; }
 namespace wowee::collision {
 struct WmoLiquidShape {
     uint32_t xVerts=0,yVerts=0,xTiles=0,yTiles=0;
@@ -128,6 +128,15 @@ private:
                              std::vector<uint32_t>& out) const;
 };
 
+struct WmoGroupBounds { glm::vec3 low, high; };
+struct WmoModelGroup {
+    // MOGI bounds are distinct from the group's MOGP and visual mesh bounds.
+    std::optional<WmoGroupBounds> bounds;
+    std::shared_ptr<const WmoGroupShape> shape;
+    [[nodiscard]] static WmoModelGroup build(const pipeline::WMOModel& model,
+        size_t index, std::shared_ptr<const WmoGroupShape> shape);
+};
+
 /// What a building is solid with: its groups' shapes, in the order the
 /// renderer keeps its groups, and what a query needs to know of the whole.
 struct WmoShape {
@@ -137,7 +146,7 @@ struct WmoShape {
     std::vector<std::shared_ptr<const WmoGroupShape>> groups;
     // Every authored group in file order, including groups with no render
     // batches. Shares shapes with groups above wherever they are rendered.
-    std::vector<std::shared_ptr<const WmoGroupShape>> originalGroups;
+    std::vector<WmoModelGroup> originalGroups;
     glm::vec3 boundingBoxMin{0.0f};
     glm::vec3 boundingBoxMax{0.0f};
     /// A flat model (a dock, a platform) whose floor is searched for further

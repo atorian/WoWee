@@ -127,6 +127,7 @@ std::optional<LiquidFacetQuery> queryWmoLiquidFacets(
             result.facets.push_back(built->facet);
         }
     }
+    if (!result.facets.empty()) result.indexReservation=6u*(maxX-minX+1)*(maxY-minY+1);
     return result;
 }
 } // namespace wowee::collision

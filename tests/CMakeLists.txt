@@ -3012,6 +3012,50 @@ if(Python3_Interpreter_FOUND)
             --probe $<TARGET_FILE:terrain_facet_probe>)
 endif()
 
+add_executable(entity_facet_probe entity_facet_probe.cpp)
+target_link_libraries(entity_facet_probe PRIVATE wowee_collision)
+wowee_test_link_glm(entity_facet_probe)
+register_test_target(entity_facet_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_entities
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_entities.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_entities_12340.json
+            --probe $<TARGET_FILE:entity_facet_probe>)
+endif()
+
+add_executable(doodad_facet_probe doodad_facet_probe.cpp)
+target_link_libraries(doodad_facet_probe PRIVATE wowee_collision)
+wowee_test_link_glm(doodad_facet_probe)
+register_test_target(doodad_facet_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_doodads
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_doodads.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_doodads_12340.json
+            --probe $<TARGET_FILE:doodad_facet_probe>)
+endif()
+
+add_executable(wmo_world_probe wmo_world_probe.cpp)
+target_link_libraries(wmo_world_probe PRIVATE wowee_collision)
+wowee_test_link_glm(wmo_world_probe)
+register_test_target(wmo_world_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_wmo_world
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_wmo_world.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_wmo_world_12340.json
+            --probe $<TARGET_FILE:wmo_world_probe>)
+endif()
+
+add_executable(wmo_model_probe wmo_model_probe.cpp)
+target_link_libraries(wmo_model_probe PRIVATE wowee_collision)
+wowee_test_link_glm(wmo_model_probe)
+register_test_target(wmo_model_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_wmo_model
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_wmo_model.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_wmo_model_12340.json
+            --probe $<TARGET_FILE:wmo_model_probe>)
+endif()
+
 add_executable(wmo_liquid_probe wmo_liquid_probe.cpp)
 target_link_libraries(wmo_liquid_probe PRIVATE wowee_collision)
 wowee_test_link_glm(wmo_liquid_probe)

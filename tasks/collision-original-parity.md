@@ -213,3 +213,45 @@ No game account or server was used. Production movement is still the old path.
 Remaining work includes MOGI/world placement selection and order, linked doodads
 and dynamic objects, mover dimensions, transports/splines, unit event delivery
 and packet comparisons. The overall acceptance checklist remains open.
+
+WMO model assembly progress: `appendWmoModelFacets` matches 682 executions of
+GetTris/GetLiquidFacets, including MOGI selection independent of MOGP, authored
+group order, the separate solid/liquid passes, 31 usable batches and strict
+face/index pool limits. Liquid rectangles reserve all clipped indices before
+filtering dry cells. Preparation now retains MOGI bounds beside every source
+group; missing MOGI is reported rather than replaced by visual mesh bounds.
+
+World WMO progress: `appendWorldWmoFacets` matches 1693 original GetMapObjFacets
+executions. Coverage includes rotated/scaled/translated placements, x87 center
+rounding and per-axis AABB stores, root/group bounds, disabled placements,
+destructible proxy rejection, partial output before failure, local-control
+barriers and their different whole-building/group readiness rules. Linked
+M2/entity calls in this particular oracle are supplied services: call order,
+arguments and facet counts are compared, but their bodies are not executed
+there. Separate collectors below execute those bodies independently.
+
+Linked M2 progress: `appendDoodadFacets` matches 1248 GetDoodadDefFacets
+executions with real M2 facet generation and original box barriers. This covers
+query-tag deduplication across lists, marking misses, GUID-dependent masks,
+disabled/missing models and transformed shared-model bounds while preparation
+is pending. No per-model exemptions or visual bounds substitutions were added.
+
+Dynamic entity progress: `appendEntityFacets` matches 1095
+QueryDestructibleFacets executions with a supplied collision-data callback and
+real M2 facet generation. The first link without static flag 2 ends the list;
+hidden/visited entries skip instead. Callback failure still marks the query
+tag, while callback absence does not. Parameters, callback order and returned
+facet ownership are compared. The real game's collision-data provider still
+needs to be wired and validated.
+
+The four new independent fixture sets contain 4718 cases. Linux comparisons
+and ASan/UBSan pass; WMO model/world comparisons also pass with host RSQRTSS.
+This closes additional collection rules, not the world owner's lifecycle,
+original placement/link construction, combined collector integration, mover
+sizes, active splines/transports or network reporting. Production player
+movement remains on the old path until those contracts are verified.
+
+Validation for the object-collection increment: 33/33 native collision/ADT tests
+pass, WMO model/world host-SSE results also match on native Windows, affected
+renderer objects compile, and all available sweep_guard checks remain within
+their ceilings. No live client or player account was used.
