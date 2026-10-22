@@ -348,6 +348,7 @@ public:
 private:
     void loadAtmosphereProfiles(const std::string& path);
     AtmosphereProfile defaultAtmosphere_;
+    std::map<std::pair<uint32_t, uint32_t>, AtmosphereProfile> zoneAtmosphereProfiles_;
     std::map<std::pair<uint32_t, uint32_t>, AtmosphereProfile> atmosphereProfiles_;
     /**
      * Load Light.dbc

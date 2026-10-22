@@ -9,6 +9,14 @@
       "baseHeight": 600,
       "scaleHeight": 400,
       "densityScale": 1.2
+    },
+    {
+      "name": "Icecrown highlands",
+      "mapId": 571,
+      "zoneId": 210,
+      "baseHeight": 300,
+      "scaleHeight": 600,
+      "densityScale": 1.2
     }
   ]
 }

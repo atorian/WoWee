@@ -69,6 +69,7 @@ bool LightingManager::initialize(pipeline::AssetManager* assetManager,
 void LightingManager::loadAtmosphereProfiles(const std::string& path) {
     defaultAtmosphere_ = {};
     atmosphereProfiles_.clear();
+    zoneAtmosphereProfiles_.clear();
     using Json = nlohmann::json;
     const auto profile = [](const Json& row, AtmosphereProfile p) {
         if (!row.is_object()) throw std::runtime_error("profile must be an object");
@@ -99,7 +100,19 @@ void LightingManager::loadAtmosphereProfiles(const std::string& path) {
         for (const auto& row : doc.at("profiles")) {
             ++index;
             try {
-                const auto map = id(row, "mapId"), light = id(row, "lightId");
+                const auto map = id(row, "mapId");
+                if (row.contains("zoneId") == row.contains("lightId"))
+                    throw std::runtime_error("exactly one of zoneId or lightId required");
+                if (row.contains("zoneId")) {
+                    const auto zone = id(row, "zoneId");
+                    if (zone == 0) throw std::runtime_error("zoneId 0 means unresolved zone");
+                    if (!globalLightByMap_.contains(map) && !lightVolumesByMap_.contains(map))
+                        throw std::runtime_error("map absent from loaded Light.dbc");
+                    if (!zoneAtmosphereProfiles_.emplace(std::make_pair(map, zone), profile(row, defaultAtmosphere_)).second)
+                        throw std::runtime_error("duplicate map/zone pair");
+                    continue;
+                }
+                const auto light = id(row, "lightId");
                 const auto global = globalLightByMap_.find(map);
                 const auto locals = lightVolumesByMap_.find(map);
                 const bool exists = (global != globalLightByMap_.end() && global->second.lightId == light) ||
@@ -116,11 +129,13 @@ void LightingManager::loadAtmosphereProfiles(const std::string& path) {
     } catch (const std::exception& e) {
         defaultAtmosphere_ = {};
         atmosphereProfiles_.clear();
+        zoneAtmosphereProfiles_.clear();
         LOG_WARNING("Atmosphere profiles ", path, ": ", e.what(),
                     "; using sea-level atmosphere (scale height 300 yards, density 1)");
     }
     fallbackParams_.atmosphere = defaultAtmosphere_;
-    LOG_INFO("Atmosphere profiles: ", atmosphereProfiles_.size(), " regional overrides from ", path);
+    LOG_INFO("Atmosphere profiles: ", atmosphereProfiles_.size(), " light overrides, ",
+             zoneAtmosphereProfiles_.size(), " zone overrides from ", path);
 }
 
 bool LightingManager::loadLightDbc(pipeline::AssetManager* assetManager) {
@@ -493,6 +508,18 @@ void LightingManager::update(float deltaTime, const glm::vec3& playerPos, uint32
     // their own light in the shaders.
     LightingParams newParams;
 
+    // A zone can extend beyond (and above) its Light.dbc spheres. Use its
+    // medium as the background, without changing the map's sky or colours.
+    // Authored local light profiles still take precedence with spatial falloff.
+    AtmosphereProfile regionAtmosphere = defaultAtmosphere_;
+    const auto globalLight = globalLightByMap_.find(mapId);
+    if (globalLight != globalLightByMap_.end()) {
+        if (const auto p = atmosphereProfiles_.find({mapId, globalLight->second.lightId}); p != atmosphereProfiles_.end())
+            regionAtmosphere = p->second;
+    }
+    if (const auto p = zoneAtmosphereProfiles_.find({mapId, zoneId}); p != zoneAtmosphereProfiles_.end())
+        regionAtmosphere = p->second;
+
     std::optional<LightingParams> blended;
     {
         // Every light by its share: laying them over each other with lerps,
@@ -520,13 +547,11 @@ void LightingManager::update(float deltaTime, const glm::vec3& playerPos, uint32
             }
             // The same Light.dbc spatial weights as the zone colours. Weather
             // retains its own DBC extinction ranges; this is the region's air layer.
-            params.atmosphere = defaultAtmosphere_;
-            if (const auto global = globalLightByMap_.find(mapId); global != globalLightByMap_.end()) {
-                if (const auto p = atmosphereProfiles_.find({mapId, global->second.lightId}); p != atmosphereProfiles_.end())
+            params.atmosphere = regionAtmosphere;
+            if (globalLight == globalLightByMap_.end() || wv.volume->lightId != globalLight->second.lightId) {
+                if (const auto p = atmosphereProfiles_.find({mapId, wv.volume->lightId}); p != atmosphereProfiles_.end())
                     params.atmosphere = p->second;
             }
-            if (const auto p = atmosphereProfiles_.find({mapId, wv.volume->lightId}); p != atmosphereProfiles_.end())
-                params.atmosphere = p->second;
             parts.push_back({.params = params, .weight = wv.weight});
 
             // Debug logging for fog params (first few samples only)
@@ -550,6 +575,7 @@ void LightingManager::update(float deltaTime, const glm::vec3& playerPos, uint32
         // (said once in findLightVolumes), or lights naming no LightParams
         // row: the fallback, with time-based animation
         newParams = fallbackParams_;
+        newParams.atmosphere = regionAtmosphere;
         newParams.directionalDir = sunLightDirection(timeOfDay_);
 
         // Time-of-day color adjustments
@@ -632,6 +658,8 @@ void LightingManager::update(float deltaTime, const glm::vec3& playerPos, uint32
                      " skyLuma=", skyLuma, " volumes=", firstVolume, "/", secondVolume,
                      " shares=", first ? first->weight : 0.0f, "/", second ? second->weight : 0.0f,
                      " lights=", activeVolumes_.size(),
+                     " atmosphere=", newParams.atmosphere.baseHeight, "/",
+                     newParams.atmosphere.scaleHeight, "/", newParams.atmosphere.densityScale,
                      " skybox=", topSkybox.empty() ? "-" : topSkybox);
             diagZoneId_ = zoneId;
             diagSkyboxPath_ = topSkybox;

@@ -25,14 +25,39 @@ Hyjal view was rendered again with terrain, buildings and trees. Capture
 hashes are in `solid-model-results.json`; images are in
 `build-dev/scratch/m2-no-distance-fade/`.
 
+## Icecrown zone profile (2026-10-22)
+
+`icecrown_day.json` is a complete streamed landscape at height 780 yards,
+with Thickness 1 and height influence 1. The sea-level baseline is the profile
+file at f91460d, passed through `atmosphereProfiles`; the final scene uses the
+current profile file. The 300 / 600 / 1.2 zone profile retains 33–34% of baseline
+local detail contrast in two distant mountain patches, and 54% on the tower.
+This is measured adjacent-pixel contrast in RGB8, not physical transmission.
+M2 draw counts match (2828); no geometry fading is introduced.
+Results and exact image rectangles/hashes are in `icecrown-results.json`;
+the before/after PNGs and labelled comparison are in
+`build-dev/scratch/icecrown-profile/`. The initial 600 / 600 / 1.6 trial left
+only 10–11% distant contrast and was reduced. All 9 lighting cases (61
+assertions) and sweep_guard pass. The full Vulkan-validation run ran out of
+memory; the final ordinary-mode captures completed without rendering errors
+or incomplete-streaming warnings.
+
 ## Regional physical atmosphere profiles (2026-10-22)
 
 `assets/atmosphere_profiles.json` extends the loaded Light.dbc spatial profiles.
-Each row addresses a `(mapId, lightId)` pair, including map-global Light rows;
+Each row addresses either a `(mapId, lightId)` pair (including map-global Light rows)
+or a `(mapId, zoneId)` pair; specify exactly one selector.
 `name` is an editorial label, never a runtime match. There are no landmark or
-zone-name conditions in the renderer. Unspecified local lights inherit their
-map-global override, otherwise `default`. Explicit rows inherit omitted fields
-from `default`. Overrides referencing absent Light.dbc rows are warned and
+zone-name conditions in the renderer. A zone profile supplies the background
+atmosphere even above/outside local light spheres; it overrides the map-global
+atmosphere, otherwise `default`. Explicit local light profiles take precedence
+and blend over this background using their usual spatial weights. The caller
+supplies the resolved parent zone (the client already resolves AreaTable ancestry).
+Zone boundaries use the existing temporal smoothing; they do not introduce a new
+spatial blend band. A zone override changes the medium, not DBC sky colours.
+Unknown maps, unresolved zone 0, duplicate selectors and invalid values are warned
+and ignored. Zone IDs are numeric caller identities, not validated against
+AreaTable. Explicit rows inherit omitted fields from `default`. Overrides referencing absent Light.dbc rows are warned and
 ignored, allowing another expansion's data to keep its default atmosphere.
 
 - `baseHeight`: world Z in yards; below this height aerosol density is constant.
@@ -51,6 +76,10 @@ Legacy distance fog and underwater fog ignore these new parameters.
 
 The default 0 / 300 / 1 preserves the accepted Barrens-to-Hyjal view and all
 unmodified regions. Dalaran (map 571, Light 1802) starts at 600 / 400 / 1.2.
+Icecrown (map 571, zone 210) uses 300 / 600 / 1.2, preserving haze at flying
+height without changing all of Northrend's global Light 752. The desired roughly
+40% distant visibility is an artistic target, not constant model opacity;
+actual transmission depends on distance, altitude and the sampled DBC fog range.
 These are authored visual choices, not heights reconstructed from the DBC.
 The existing Fog Thickness slider remains a global multiplier: 1.0 gives
 Dalaran x1.2, and 1.2 gives x1.44 relative to its unscaled DBC calibration.
