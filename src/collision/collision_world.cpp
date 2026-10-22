@@ -378,7 +378,9 @@ std::optional<float> CollisionWorld::wmoFloor(const Reach& reach, float x, float
         const float zMarginUp = shape.isLowPlatform ? 20.0f : 4.0f;
 
         // Broad phase in world space, before any matrix work.
-        if (bestFloor && p.boundsMax.z <= (*bestFloor + 0.05f)) continue;
+        // Highest-floor pruning cannot serve a nearest-to-feet query. Nor
+        // may a tolerance discard a distinct, slightly higher surface.
+        if (!byReference && bestFloor && p.boundsMax.z <= *bestFloor) continue;
         const bool insideXY = x >= p.boundsMin.x && x <= p.boundsMax.x &&
                               y >= p.boundsMin.y && y <= p.boundsMax.y;
         if (!withinBounds(p.boundsMin, p.boundsMax, x, y, z, zMarginDown, zMarginUp)) {
@@ -930,7 +932,7 @@ std::optional<float> CollisionWorld::m2Floor(const Reach& reach, float x, float 
         if (localRayLength <= 1e-5f) continue;
         const glm::vec3 localRayDir = localRayVector / localRayLength;
 
-        shape.floorTrisInRange(std::min(localRayOrigin.x, localRayEnd.x) - 1.0f,
+        shape.trisInRange(std::min(localRayOrigin.x, localRayEnd.x) - 1.0f,
                                std::min(localRayOrigin.y, localRayEnd.y) - 1.0f,
                                std::max(localRayOrigin.x, localRayEnd.x) + 1.0f,
                                std::max(localRayOrigin.y, localRayEnd.y) + 1.0f, tl_triScratch);
@@ -991,7 +993,7 @@ std::optional<float> CollisionWorld::m2InstanceFloor(uint32_t instanceId, const 
     if (localRayLength <= 1e-5f) return std::nullopt;
     const glm::vec3 localRayDir = localRayVector / localRayLength;
 
-    shape.floorTrisInRange(std::min(localRayOrigin.x, localRayEnd.x) - 1.0f,
+    shape.trisInRange(std::min(localRayOrigin.x, localRayEnd.x) - 1.0f,
                            std::min(localRayOrigin.y, localRayEnd.y) - 1.0f,
                            std::max(localRayOrigin.x, localRayEnd.x) + 1.0f,
                            std::max(localRayOrigin.y, localRayEnd.y) + 1.0f, tl_triScratch);
@@ -1169,7 +1171,7 @@ glm::vec3 CollisionWorld::sweepMover(const Reach& reach, const glm::vec3& from, 
                                      bool insideWmo, bool includeDoodads) const {
     const glm::vec3 delta = to - from;
     const float distSq = glm::dot(delta, delta);
-    if (distSq <= 1e-4f) return to;  // standing still: not worth a query
+    if (distSq == 0.0f) return to;
 
     const float dist = std::sqrt(distSq);
     // Tighter steps indoors, where the geometry is closer together.

@@ -86,6 +86,36 @@ constexpr uint32_t kIndoor = 0x2000;
 
 }  // namespace
 
+TEST_CASE("floor selection does not discard a closer or slightly higher placement", "[collision][regression]") {
+    for (bool reverse : {false, true}) {
+        CollisionWorld world;
+        auto lower = building({group({floorAt(0.0f)})});
+        auto upper = building({group({floorAt(0.02f)})});
+        world.placeWmo(1, reverse ? upper : lower, at({0, 0, 0}));
+        world.placeWmo(2, reverse ? lower : upper, at({0, 0, 0}));
+        CHECK(world.wmoFloor(kEverywhere, 0, 0, 1) == Catch::Approx(0.02f).margin(1e-4));
+        CHECK(world.wmoFloor(kEverywhere, 0, 0, 1, nullptr, 0.0f) == Catch::Approx(0.0f).margin(1e-4));
+    }
+}
+
+TEST_CASE("a model-space wall rotated into a deck supplies a world-space floor", "[collision][regression]") {
+    CollisionWorld world;
+    const auto pose = at({0, 0, 5}) * glm::rotate(glm::mat4(1), glm::radians(-90.0f), glm::vec3(0, 1, 0));
+    world.placeM2(1, post(), pose, 1);
+    CHECK(world.m2Floor(kEverywhere, -1, 0, 6) == Catch::Approx(5.0f).margin(1e-4));
+    CHECK(world.m2InstanceFloor(1, pose, -1, 0, 6) == Catch::Approx(5.0f).margin(1e-4));
+}
+
+TEST_CASE("small movement cannot bypass a building wall", "[collision][regression]") {
+    CollisionWorld world;
+    const Quad wall{{0,-5,0},{0,5,0},{0,5,5},{0,-5,5}};
+    world.placeWmo(1, building({group({wall})}), at({0,0,0}));
+    const glm::vec3 from(-0.451f,0,0), to(-0.446f,0,0);
+    // The indoor mover has a 0.45-yard radius; its body must remain on this
+    // side of x=0 even when a single frame asks for only 0.005 yards.
+    CHECK(world.sweepMover(kEverywhere, from, to, true, false).x <= -0.45f);
+}
+
 TEST_CASE("a doodad with a collision mesh is a floor where it stands, and not once it leaves",
           "[collision]") {
     CollisionWorld world;

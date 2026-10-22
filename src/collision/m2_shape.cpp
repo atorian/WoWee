@@ -31,7 +31,7 @@ std::shared_ptr<const M2Shape> M2Shape::build(std::string name, std::vector<glm:
     s.gridCellsY = std::max(1, std::min(32, static_cast<int>(std::ceil((bmax.y - bmin.y) / kCellSize))));
 
     const size_t cells = static_cast<size_t>(s.gridCellsX) * static_cast<size_t>(s.gridCellsY);
-    s.cellFloorTris.resize(cells);
+    s.cellTris.resize(cells);
     s.cellWallTris.resize(cells);
     s.triBounds.resize(s.triCount);
 
@@ -51,7 +51,6 @@ std::shared_ptr<const M2Shape> M2Shape::build(std::string name, std::vector<glm:
         const glm::vec3 normal = glm::cross(v1 - v0, v2 - v0);
         const float normalLen = glm::length(normal);
         const float absNz = (normalLen > 0.001f) ? std::abs(normal.z / normalLen) : 0.0f;
-        const bool isFloor = (absNz >= 0.35f);
         const bool isWall = (absNz < 0.65f);
 
         const float triMinX = std::min({v0.x, v1.x, v2.x});
@@ -67,7 +66,7 @@ std::shared_ptr<const M2Shape> M2Shape::build(std::string name, std::vector<glm:
         for (int cy = cyMin; cy <= cyMax; cy++) {
             for (int cx = cxMin; cx <= cxMax; cx++) {
                 const int ci = cy * s.gridCellsX + cx;
-                if (isFloor) s.cellFloorTris[ci].push_back(ti);
+                s.cellTris[ci].push_back(ti);
                 if (isWall) s.cellWallTris[ci].push_back(ti);
             }
         }
@@ -105,9 +104,9 @@ void M2Shape::gatherTrisInRange(const std::vector<std::vector<uint32_t>>& cells,
     out.erase(std::unique(out.begin(), out.end()), out.end());
 }
 
-void M2Shape::floorTrisInRange(float minX, float minY, float maxX, float maxY,
+void M2Shape::trisInRange(float minX, float minY, float maxX, float maxY,
                                std::vector<uint32_t>& out) const {
-    gatherTrisInRange(cellFloorTris, minX, minY, maxX, maxY, out);
+    gatherTrisInRange(cellTris, minX, minY, maxX, maxY, out);
 }
 
 void M2Shape::wallTrisInRange(float minX, float minY, float maxX, float maxY,
@@ -120,7 +119,7 @@ uint64_t M2Shape::bytes() const {
                      vertices.capacity() * sizeof(glm::vec3) +
                      indices.capacity() * sizeof(uint16_t) +
                      triBounds.capacity() * sizeof(TriBounds);
-    for (const auto* cells : {&cellFloorTris, &cellWallTris}) {
+    for (const auto* cells : {&cellTris, &cellWallTris}) {
         total += cells->capacity() * sizeof(std::vector<uint32_t>);
         for (const auto& cell : *cells) total += cell.capacity() * sizeof(uint32_t);
     }
