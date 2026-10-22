@@ -10,7 +10,7 @@
 #include "rendering/m2_particle_emission.hpp"
 #include "core/thread_pool.hpp"
 #include "rendering/m2_model_classifier.hpp"
-#include "rendering/hiz_system.hpp"
+#include "rendering/gpu_draw_list.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/cpu_stage_times.hpp"
 #include "rendering/vk_buffer.hpp"
@@ -896,6 +896,8 @@ bool M2Renderer::prepareInstanceStorage(uint32_t slot,uint64_t entries) {
     write.dstSet=instanceSet_[slot]; write.dstBinding=0; write.descriptorCount=1;
     write.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; write.pBufferInfo=&info;
     vkUpdateDescriptorSets(vkCtx_->getDevice(),1,&write,0,nullptr);
+    write.dstBinding=2; // valid direct-path placeholder until world prepare installs its list
+    vkUpdateDescriptorSets(vkCtx_->getDevice(),1,&write,0,nullptr);
     DeferredResources retire(*vkCtx_);
     retire.buffer(instanceBuffer_[slot],instanceAlloc_[slot]);
     instanceBuffer_[slot]=next.buffer; instanceAlloc_[slot]=next.allocation;
@@ -907,6 +909,16 @@ bool M2Renderer::prepareInstanceStorage(uint32_t slot,uint64_t entries) {
 
 void M2Renderer::prepareRender(uint32_t frameIndex, const Camera&) {
     if(!prepareInstanceStorage(frameIndex,recording_->instanceEntries)) return;
+    if(!skyMode_ && gpuDrawsEnabled_) {
+        if(!gpuDraws_)gpuDraws_=std::make_unique<GpuDrawList>(*vkCtx_);
+        gpuDraws_->prepare(frameIndex,recording_->drawInstances_.size(),recording_->instanceEntries);
+        VkDescriptorBufferInfo info{gpuDraws_->visibleBuffer(),0,VK_WHOLE_SIZE};
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet=instanceSet_[frameIndex];write.dstBinding=2;write.descriptorCount=1;
+        write.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;write.pBufferInfo=&info;
+        vkUpdateDescriptorSets(vkCtx_->getDevice(),1,&write,0,nullptr);
+    }
+
     if (megaBoneMapped_[frameIndex])
         PagedFrameBuffer<glm::mat4>::upload(recording_->bones,uploadedBones_[frameIndex],
             [&](size_t offset,std::span<const glm::mat4> values) {
@@ -916,12 +928,8 @@ void M2Renderer::prepareRender(uint32_t frameIndex, const Camera&) {
 }
 
 
-// Dispatch GPU frustum culling compute shader into the primary frame command
-// buffer. render() consumes the completed output left in this frame slot from
-// its previous use; this dispatch produces results for the slot's next reuse.
-void M2Renderer::extractCull(const Camera& camera, Frame& frame) {
-
-
+// Gather the camera columns once for visibility classification and publication.
+void M2Renderer::gatherCameraCandidates(const Camera& camera) {
     // --- Compute per-instance adaptive distances (same formula as old CPU cull) ---
     const float targetRenderDist = viewDistanceScale_ *
         ((scene_->instances.size() > 2000) ? 300.0f
@@ -931,14 +939,12 @@ void M2Renderer::extractCull(const Camera& camera, Frame& frame) {
     const float growRate   = 0.05f;
     float blendRate = (targetRenderDist < smoothedRenderDist_) ? shrinkRate : growRate;
     smoothedRenderDist_ = glm::mix(smoothedRenderDist_, targetRenderDist, blendRate);
-    const float maxRenderDistance = smoothedRenderDist_;
-    const float maxRenderDistanceSq = maxRenderDistance * maxRenderDistance;
     // Every per-instance range is capped by View Distance. The broad phase
     // must cover that ceiling: twice the adaptive clutter range can be much
     // shorter than a large landmark's own range once a dense scene settles.
     const float maxPossibleDistSq = cappedViewDistance() * cappedViewDistance();
 
-    // --- Upload frustum planes + camera (UBO, binding 0) ---
+    // Query the spatial index using this view's frustum.
     const glm::mat4 vp = camera.getProjectionMatrix() * camera.getViewMatrix();
     Frustum frustum;
     frustum.extractFromMatrix(vp);
@@ -949,136 +955,11 @@ void M2Renderer::extractCull(const Camera& camera, Frame& frame) {
     // city with ninety thousand resident that was a quarter of them, picked by
     // load order, with the rest left to a CPU test in render().
     gatherViewCandidates(camPos, frustum, maxPossibleDistSq, cullCandidates_);
-    const uint32_t numInstances =
-        std::min(static_cast<uint32_t>(cullCandidates_.size()), MAX_CULL_INSTANCES);
-
-    frame.maxPossibleDistSq = maxPossibleDistSq;
-    frame.cullIds.reserve(numInstances);
-    frame.cullInput.reserve(numInstances);
-    for (uint32_t i = 0; i < numInstances; ++i) {
-        const auto& inst = scene_->instances[cullCandidates_[i]];
-        float distanceSq = rendering::m2InstanceMaxDistSq(maxRenderDistanceSq,
-            inst.cachedEffectiveMaxDistSqFactor, inst.isGameObject,
-            rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE, cappedViewDistance(),
-            inst.cachedIsGroundDetail, groundDetailMaxDistance_);
-        if (inst.cachedIsSkyBird && inst.cachedHasAnimation && !inst.cachedDisableAnimation)
-            distanceSq = std::min(distanceSq, rendering::M2_SKY_BIRD_MAX_RENDER_DISTANCE * rendering::M2_SKY_BIRD_MAX_RENDER_DISTANCE);
-        frame.cullIds.push_back(inst.id);
-        frame.cullInput.push_back({glm::vec4(inst.cachedCullCenter, inst.cachedPaddedRadius), distanceSq,
-                                   (inst.cachedIsValid ? 1u : 0u) | (inst.cachedIsInvisibleTrap ? 4u : 0u) |
-                                   (inst.hizPrevCulledFrames < 2 && !inst.isGameObject ? 8u : 0u), {0.0f, 0.0f}});
-    }
 }
 
-void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera) {
-    if (!cullPipeline_ || recording_->cullInput.empty()) return;
-    const uint32_t numInstances = static_cast<uint32_t>(recording_->cullInput.size());
-    const float maxPossibleDistSq = recording_->maxPossibleDistSq;
-    const glm::mat4 vp = camera.getViewProjectionMatrix();
-    Frustum frustum;
-    frustum.extractFromMatrix(vp);
-    const glm::vec3 camPos = camera.getPosition();
-    if (cullUniformMapped_[frameIndex]) {
-        auto* ubo = static_cast<CullUniformsGPU*>(cullUniformMapped_[frameIndex]);
-        for (int i = 0; i < 6; i++) {
-            const auto& p = frustum.getPlane(static_cast<Frustum::Side>(i));
-            ubo->frustumPlanes[i] = glm::vec4(p.normal, p.distance);
-        }
-        ubo->cameraPos = glm::vec4(camPos, maxPossibleDistSq);
-        ubo->instanceCount = numInstances;
-
-        // HiZ occlusion culling fields
-        const bool hizReady = hizSystem_ && hizSystem_->isReady();
-
-        // Auto-disable HiZ when the camera has moved/rotated significantly.
-        // Large VP changes make the depth pyramid unreliable because the
-        // reprojected screen positions diverge from the actual pyramid data.
-        bool hizSafe = hizReady;
-        if (hizReady) {
-            // Compare current VP against previous VP - Frobenius-style max diff.
-            float maxDiff = 0.0f;
-            const float* curM  = &vp[0][0];
-            const float* prevM = &prevVP_[0][0];
-            for (int k = 0; k < 16; ++k)
-                maxDiff = std::max(maxDiff, std::abs(curM[k] - prevM[k]));
-            // Threshold: typical tracking-camera motion (following a walking
-            // character) produces diffs of 0.05–0.25.  A fast rotation or
-            // zoom easily exceeds 0.5.  The previous threshold (0.15) caused
-            // the HiZ pass to toggle on/off every other frame during normal
-            // gameplay, which produced global M2 doodad flicker.
-            if (maxDiff > rendering::HIZ_VP_DIFF_THRESHOLD) hizSafe = false;
-        }
-
-        ubo->hizEnabled = hizSafe ? 1u : 0u;
-        ubo->hizMipLevels = hizReady ? hizSystem_->getMipLevels() : 0u;
-        ubo->_pad2 = 0;
-        if (hizReady) {
-            ubo->hizParams = glm::vec4(
-                static_cast<float>(hizSystem_->getPyramidWidth()),
-                static_cast<float>(hizSystem_->getPyramidHeight()),
-                camera.getNearPlane(),
-                0.0f
-            );
-            ubo->viewProj = vp;
-            // Use previous frame's VP for HiZ reprojection - the HiZ pyramid
-            // was built from the previous frame's depth, so we must project
-            // into the same screen space to sample the correct depths.
-            ubo->prevViewProj = prevVP_;
-        } else {
-            ubo->hizParams = glm::vec4(0.0f);
-            ubo->viewProj = glm::mat4(1.0f);
-            ubo->prevViewProj = glm::mat4(1.0f);
-        }
-
-        // Save current VP for next frame's temporal reprojection
-        prevVP_ = vp;
-    }
-
-    collectCullOutput(frameIndex);
-    submittedCullIds_[frameIndex] = recording_->cullIds;
-    submittedCullScenes_[frameIndex] = recording_->sceneIdentity;
-    submittedCullFrames_[frameIndex] = vkCtx_->frameNumber();
-
-    // --- Upload per-instance cull data (SSBO, binding 1) ---
-    // The per-instance radius math used to be recomputed here every frame; it's
-    // now precomputed once by recomputeCachedCullFactors() since it depends only
-    // on static instance state (scale, bound radius, animation/ground flags).
-    if (cullInputMapped_[frameIndex] && numInstances)
-        std::memcpy(cullInputMapped_[frameIndex], recording_->cullInput.data(), numInstances * sizeof(CullInstanceGPU));
-
-
-    // --- Dispatch compute shader ---
-    const bool useHiZ = (cullHiZPipeline_ != VK_NULL_HANDLE)
-                     && hizSystem_ && hizSystem_->isReady();
-    if (useHiZ) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cullHiZPipeline_);
-        // Set 0: cull UBO + input/output SSBOs
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                cullHiZPipelineLayout_, 0, 1, &cullSet_[frameIndex], 0, nullptr);
-        // Set 1: HiZ pyramid sampler
-        VkDescriptorSet hizSet = hizSystem_->getDescriptorSet(frameIndex);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                cullHiZPipelineLayout_, 1, 1, &hizSet, 0, nullptr);
-    } else {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cullPipeline_);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                cullPipelineLayout_, 0, 1, &cullSet_[frameIndex], 0, nullptr);
-    }
-
-    const uint32_t groupCount = (numInstances + 63) / 64;
-    vkCmdDispatch(cmd, groupCount, 1, 1);
-
-    // Make writes available to the host after this frame's fence signals. The
-    // CPU invalidates and reads them when this frame slot is reused.
-    VkMemoryBarrier2 barrier{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-    barrier.srcStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-    barrier.dstStageMask = VK_PIPELINE_STAGE_HOST_BIT;
-    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-    VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    dep.memoryBarrierCount = 1;
-    dep.pMemoryBarriers = &barrier;
-    cmdPipelineBarrier2(cmd, dep);
+bool M2Renderer::hasGpuDraws() const { return gpuDraws_ && gpuDraws_->hasDraws(); }
+void M2Renderer::recordGpuDraws(VkCommandBuffer cmd,const Camera& camera) {
+    if(gpuDraws_)gpuDraws_->record(cmd,camera,recording_->forceVisible);
 }
 
 namespace {
@@ -1092,6 +973,7 @@ struct M2PushConstants {
     float swayAmp;              // Wind amplitude scale; 1.0 = the tree-sized default
     float plantHeight;          // The model's own height, for the player brush
     int32_t texCoordSet2;       // the second stage's: 0 UV0, 1 UV1, -1 sphere map, 2 UV0 unanimated
+    int32_t visibleOffset = -1; // compact GPU list; -1 for direct/ordered draws
 };
 static_assert(sizeof(M2PushConstants) == kM2PushConstantBytes, "m2.vert's Push block");
 
@@ -1354,8 +1236,6 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
     glowSprites_.clear();
     drawInstances_.clear();
 
-    const bool gpuCullAvailable = cullPipeline_ != VK_NULL_HANDLE;
-    const uint32_t verdictSerial = cullVerdictSerial_;
 
     const float maxRenderDistanceSq = smoothedRenderDist_ * smoothedRenderDist_;
 
@@ -1371,13 +1251,13 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
     if (transparentVisible_.capacity() < expectedVisible / 4)
         transparentVisible_.reserve(expectedVisible / 4);
 
-    // GPU frustum culling - build frustum for CPU fallback path and overflow instances
+    // CPU ordered draws and the spatial diagnostic use this same current view.
     Frustum frustum;
     {
         const glm::mat4 vp = camera.getProjectionMatrix() * camera.getViewMatrix();
         frustum.extractFromMatrix(vp);
     }
-    // Same conservative ceiling as extractCull, before each instance's own
+    // Same conservative ceiling as gatherCameraCandidates, before each instance's own
     // size/detail range is tested. Scene density must not shrink this bound.
     const float maxPossibleDistSq = cappedViewDistance() * cappedViewDistance();
 
@@ -1395,7 +1275,7 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
             const bool inFrustum=frustum.intersectsSphere(inst.cachedCullCenter,inst.cachedPaddedRadius);
             const uint32_t reason=(distanceSq>maxPossibleDistSq ? 1u:0u) |
                 (centreSq>maxPossibleDistSq ? 2u:0u) | (distanceSq>effective ? 4u:0u) |
-                (!inFrustum ? 8u:0u) | (!inst.lastCullVisible ? 16u:0u) | (inst.hidden ? 32u:0u) |
+                (!inFrustum ? 8u:0u) | (inst.hidden ? 32u:0u) |
                 (!inst.cachedIsValid ? 64u:0u) | (inst.cachedIsInvisibleTrap ? 128u:0u) |
                 (inst.cachedModel->hasAnimation && !inst.cachedModel->disableAnimation && inst.boneMatrices.empty() ? 256u:0u);
             auto [at,inserted]=reasons.emplace(inst.id,reason);
@@ -1465,14 +1345,6 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
                 glm::vec3 toCam = instance.position - camPos;
                 distSq = glm::dot(toCam, toCam);
                 effectiveMaxDistSq = instanceMaxDistSq;
-            } else if (gpuCullAvailable && instance.cullVerdictSerial == verdictSerial) {
-                // Per-instance verdict scattered above - indexing visibility[]
-                // directly here would read the slot of whichever instance held
-                // this array position when the dispatch was recorded.
-                if (!instance.lastCullVisible) continue;
-                glm::vec3 toCam = instance.position - camPos;
-                distSq = glm::dot(toCam, toCam);
-                effectiveMaxDistSq = instanceMaxDistSq;
             } else {
                 if (!instance.cachedIsValid || instance.cachedIsInvisibleTrap) continue;
                 glm::vec3 toCam = instance.position - camPos;
@@ -1481,7 +1353,11 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
                 effectiveMaxDistSq = instanceMaxDistSq;
                 if (distSq > effectiveMaxDistSq) continue;
                 float paddedRadius = instance.cachedPaddedRadius;
-                if (paddedRadius > 0.0f && !frustum.intersectsSphere(instance.cachedCullCenter, paddedRadius)) continue;
+                // Ordered transparent batches and emitters still need a CPU
+                // view decision. Pure opaque candidates are compacted on GPU.
+                const bool cpuView=!gpuDrawsEnabled_ || skyMode_ || instance.fade<0.999f ||
+                    (instance.cachedModel && (instance.cachedModel->hasTransparentBatches || instance.cachedModel->hasGlowSprites));
+                if (cpuView && paddedRadius>0.0f && !frustum.intersectsSphere(instance.cachedCullCenter,paddedRadius))continue;
             }
 
             if (instance.cachedIsSkyBird && instance.cachedHasAnimation && !instance.cachedDisableAnimation) {
@@ -1501,6 +1377,7 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
             out.draws.push_back(DrawInstance{
                 .surfaceLifetime = instance.surfaceLifetime,
                 .modelMatrix = instance.modelMatrix,
+                .cullSphere = glm::vec4(instance.cachedCullCenter,instance.cachedPaddedRadius),
                 .model = instance.cachedModel,
                 .interiorLight = instance.interiorLight,
                 .localLights = haveLights
@@ -1584,26 +1461,35 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
         chunk.clear();
     }
 
-    // WOWEE_M2_CULL_CHECK=1: classify the whole world as well, the way this
-    // did before the columns, and say when the two disagree. Only a GPU verdict
-    // from before the camera moved can make them differ.
+    // Opt-in whole-world reference: compare the identities surviving the
+    // current frustum, not broad-phase candidate counts (GPU culls them later).
     static const bool cullCheck = core::envFlagEnabled("WOWEE_M2_CULL_CHECK", false);
     if (cullCheck && !forceNoCull_ && !skyMode_) {
         std::vector<uint32_t> all(scene_->instances.size());
         for (uint32_t i = 0; i < all.size(); ++i) all[i] = i;
         std::vector<VisibleChunk> whole(1);
         classifyInto(whole, all, 0, 0, static_cast<uint32_t>(all.size()));
+        const auto visibleIdentities=[&](const auto& entries,const auto& draws) {
+            std::vector<uint64_t> ids;ids.reserve(entries.size());
+            for(const auto& entry:entries) {
+                const auto& draw=draws[entry.draw];const auto sphere=draw.cullSphere;
+                if(sphere.w<=0 || frustum.intersectsSphere(glm::vec3(sphere),sphere.w))ids.push_back(draw.surfaceLifetime);
+            }
+            std::sort(ids.begin(),ids.end());return ids;
+        };
+        const auto opaque=visibleIdentities(sortedVisible_,drawInstances_);
+        const auto wholeOpaque=visibleIdentities(whole[0].opaque,whole[0].draws);
+        const auto transparent=visibleIdentities(transparentVisible_,drawInstances_);
+        const auto wholeTransparent=visibleIdentities(whole[0].transparent,whole[0].draws);
+        const bool differs=opaque!=wholeOpaque || transparent!=wholeTransparent;
         static std::chrono::steady_clock::time_point lastReport{};
-        const auto now = std::chrono::steady_clock::now();
-        const bool differs = whole[0].opaque.size() != sortedVisible_.size() ||
-                             whole[0].transparent.size() != transparentVisible_.size();
-        if (now - lastReport > std::chrono::seconds(differs ? 1 : 10)) {
-            lastReport = now;
-            LOG_WARNING("M2 cull check: columns kept ", candidates.size(), " of ", scene_->instances.size(),
-                        " to classify; visible opaque ", sortedVisible_.size(), " vs ",
-                        whole[0].opaque.size(), " whole-world, transparent ",
-                        transparentVisible_.size(), " vs ", whole[0].transparent.size(),
-                        differs ? "  <-- DIFFERS" : "");
+        const auto now=std::chrono::steady_clock::now();
+        if(now-lastReport>std::chrono::seconds(differs?1:10)) {
+            lastReport=now;
+            LOG_WARNING("M2 cull check: columns kept ",candidates.size()," of ",scene_->instances.size(),
+                "; visible opaque ",opaque.size()," vs ",wholeOpaque.size(),
+                " whole-world, transparent ",transparent.size()," vs ",wholeTransparent.size(),
+                differs?"  <-- DIFFERS":"");
         }
     }
 
@@ -1679,34 +1565,6 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
     std::sort(transparentVisible_.begin(), transparentVisible_.end(),
               [](const VisibleEntry& a, const VisibleEntry& b) { return a.distSq > b.distSq; });
 }
-void M2Renderer::collectCullOutput(uint32_t frame) {
-    const auto* visibility = static_cast<const uint32_t*>(cullOutputMapped_[frame]);
-    if (!visibility) return;
-    std::lock_guard<std::mutex> lock(cullResultMutex_);
-    for (size_t k = 0; k < submittedCullIds_[frame].size(); ++k)
-        collectedCull_.push_back({submittedCullIds_[frame][k], visibility[k] != 0, submittedCullScenes_[frame], submittedCullFrames_[frame]});
-}
-
-std::vector<CullAnswer> M2Renderer::takeCullAnswers() {
-    std::lock_guard lock(cullResultMutex_);
-    std::vector<CullAnswer> result;
-    result.swap(collectedCull_);
-    return result;
-}
-
-void M2Renderer::acceptCullAnswers(const std::vector<CullAnswer>& answers) {
-    ++cullVerdictSerial_;
-    for (const auto& result : answers) {
-        if (result.sceneIdentity != scene_->identity) continue;
-        const auto found = scene_->instanceIndexById.find(result.id);
-        if (found == scene_->instanceIndexById.end()) continue;
-        auto& inst = scene_->instances[found->second];
-        inst.cullVerdictSerial = cullVerdictSerial_;
-        inst.lastCullVisible = result.visible ? 1 : 0;
-        inst.hizPrevCulledFrames = result.visible ? 0 : std::min(inst.hizPrevCulledFrames + 1u, 3u);
-    }
-}
-
 std::shared_ptr<const M2Renderer::ModelResources> M2Renderer::publishModelResources() {
     if (!modelResources_) {
         auto resources = std::make_shared<ModelResources>();
@@ -1721,7 +1579,7 @@ void M2Renderer::Frame::clear() noexcept {
     drawInstances_.clear(); sortedVisible_.clear(); transparentVisible_.clear();
     glowSprites_.clear(); ribbonDraws_.clear(); particleRuns_.clear();
     ribbonVertices.clear(); particleVertices.clear(); bones.clear();
-    cullInput.clear(); cullIds.clear(); depth.clear(); solarDepth.clear(); strikeDepth.clear();
+    depth.clear(); solarDepth.clear(); strikeDepth.clear();
     modelResources.reset();
     instanceEntries = 0;
     solarMatrix = overheadMatrix = strikeMatrix = glm::mat4(0.0f);
@@ -1734,6 +1592,7 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
                         skyMode_ ? "extract sky M2" : "extract M2");
     auto frame = framePool_.acquire();
     frame->time = time;
+    frame->forceVisible=forceNoCull_;
     frame->cameraPosition = camera.getPosition();
     frame->cameraRelativeViewProjection = camera.getProjectionMatrix()*glm::mat4(glm::mat3(camera.getViewMatrix()));
     frame->skyHour = skyTimeOfDayHours_;
@@ -1746,7 +1605,7 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
     timing.lap("frame acquisition");
     extractBones(*frame);
     timing.lap("pose publication");
-    extractCull(camera, *frame);
+    gatherCameraCandidates(camera);
     timing.lap("cull candidates");
     cullView(camera, *frame);
     timing.lap("view classification");
@@ -1942,6 +1801,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
             // Write base instance data to SSBO (no texture animation - overridden for tex-anim batches)
             uint32_t baseSSBOOffset = instanceDataCount_;
+            const uint32_t sphereBase=gpuDraws_?gpuDraws_->candidateCount():0;
             size_t writtenInstances = 0;
             for (auto& p : pending) {
                 if (instanceDataCount_ >= instanceCapacity_[frameIndex]) break;
@@ -1967,6 +1827,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     }
                     currentSurfaceTransforms_.insert_or_assign(inst.surfaceLifetime,inst.modelMatrix);
                 }
+                if(gpuDraws_)gpuDraws_->appendSphere(inst.cullSphere);
                 auto& e = instSSBO[instanceDataCount_];
                 e.model = inst.modelMatrix;
                 e.uv = M2UVTransform{};
@@ -2020,6 +1881,8 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 }
                 uint32_t groupSize = static_cast<uint32_t>(lodEnd - lodIdx);
                 uint32_t groupSSBOOffset = baseSSBOOffset + static_cast<uint32_t>(lodIdx);
+                const uint32_t visibleOffset=sphereBase+uint32_t(lodIdx);
+                const uint32_t visibilityGroup=gpuDraws_?gpuDraws_->addGroup(visibleOffset,groupSize):0;
 
                 // What each batch of a named model does at draw time, once.
                 //
@@ -2173,6 +2036,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     pc.texCoordSet2 = static_cast<int32_t>(batch.secondTexCoords);
                     fillSway(pc, model, skyMode_);
                     pc.instanceDataOffset = static_cast<int32_t>(drawOffset);
+                    pc.visibleOffset=gpuDraws_?int32_t(visibleOffset):-1;
                     vkCmdPushConstants(cmd, activeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
                     if(evaluated) {
                         const uint32_t baseMaterial=surfaceReferenceCount_;
@@ -2198,7 +2062,10 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         }
                         vkCmdPushConstants(cmd,activeLayout,VK_SHADER_STAGE_VERTEX_BIT,sizeof(pc),sizeof(baseMaterial),&baseMaterial);
                     }
-                    vkCmdDrawIndexed(cmd, batch.indexCount, groupSize, batch.indexStart, 0, 0);
+                    if(gpuDraws_) {
+                        const auto offset=gpuDraws_->addDraw(visibilityGroup,batch.indexCount,batch.indexStart);
+                        vkCmdDrawIndexedIndirect(cmd,gpuDraws_->drawBuffer(),offset,1,sizeof(VkDrawIndexedIndirectCommand));
+                    } else vkCmdDrawIndexed(cmd, batch.indexCount, groupSize, batch.indexStart, 0, 0);
                     if (skyMode_) ++skyDiagDrawsOpaque_;
                     lastDrawCallCount++;
                 }

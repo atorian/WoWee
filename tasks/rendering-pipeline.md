@@ -770,3 +770,24 @@ validation, renderer/recording guards and client/renderer/probe builds pass.
 [Correctness report](performance/persistent-materials-correctness.json).
 
 The GPU indirect and persistent instance stages remain in progress; no FPS test.
+
+### GPU-owned M2 visibility and draw counts
+
+Removed the old M2 visibility readback buffers, CullAnswer channel and cull
+shaders. GPU compaction is stable and shared by a model/LOD group's batches;
+indirect instance counts use the current view in the same submission.
+
+The GPU behavior probe passes 17 assertions covering partial workgroups,
+camera reversal, forced visibility, shared batch counts, empty frames and slot
+reuse. The all-family opaque fixture keeps four geometry runs / one lighting
+group; CPU/GPU, serial/worker and bounded/full images match exactly. The
+whole-world diagnostic agrees on 12 visible of 14 candidates. Vulkan validation
+also caught uninitialized main shadow maps without a player projection; the
+reproducing fixture passes after initializing all shadow maps and preserving
+their clear/transition when casters cannot be drawn.
+
+[Correctness report](performance/gpu-draw-submission-correctness.json). Builds
+pass; persistent M2 instance uploads remain next. No benchmark was run.
+
+The M2 source-removal snapshot fixture also passes with RT3, MSAA4 and FXAA:
+queued captured pixels survive removal; the next extraction changes.

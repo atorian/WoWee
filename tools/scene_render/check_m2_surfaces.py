@@ -21,6 +21,7 @@ def main():
     parser.add_argument('--regions', action='store_true')
     parser.add_argument('--near-plane', action='store_true')
     parser.add_argument('--material-changes', action='store_true')
+    parser.add_argument('--gpu-compare', action='store_true')
     args = parser.parse_args()
     binary, out = args.binary.resolve(), args.scratch.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -73,6 +74,9 @@ def main():
         for family in ('m2Layers','wmoLayers','characterLayers'):
             scene[family]=[layer for layer in scene.get(family,[]) if layer.get('blend',0)<2]
         scene['characterLayerInstances']=[{'offset':[0,0,0]}]
+    if args.gpu_compare:
+        scene['m2LayerInstances'] += [{'offset':[x,y,0]} for x in (-2,2) for y in (-20,-12,-8,8,12,20)]
+        scene['playerPosition']=scene['origin']
     if args.rebuild:
         scene['renderTargetChanges']=[{'frame':2,'msaa':4,'fxaa':True},
                                       {'frame':4,'msaa':1,'fxaa':False},
@@ -87,8 +91,11 @@ def main():
     images={}
     cases=[('forward',False,0,False),('surface',True,0,False),
            ('current',True,3,False),('serial',True,3,True)]
+    if args.gpu_compare: cases.append(('cpu',True,3,False))
     if args.regions: cases.append(('full',True,3,False))
     for label, surfaces, mode, serial in cases:
+        env.pop('WOWEE_M2_GPU_DRAW',None)
+        if label=='cpu': env['WOWEE_M2_GPU_DRAW']='0'
         env.pop('WOWEE_SURFACE_FULL_EXTENT',None)
         if label=='full': env['WOWEE_SURFACE_FULL_EXTENT']='1'
         env.pop('WOWEE_MODEL_SURFACES',None)
@@ -114,6 +121,8 @@ def main():
             raise RuntimeError('Compatible terrain/WMO/character/M2 geometry did not share one lighting group')
         if surfaces and mode==0 and b'uploaded bytes=0' not in log:
             raise RuntimeError('Unchanged material tables were uploaded every frame')
+        if args.gpu_compare and label!='cpu' and b'GPU draw list: candidates=' not in log:
+            raise RuntimeError('GPU draw list was not executed')
         images[label]=rgb_pixels(out/(label+'.png'))
     # Surface storage quantizes color/normals. It must not lose a texture stage,
     # instance light, alpha silhouette or the authored transparent layer.
@@ -124,12 +133,14 @@ def main():
         raise RuntimeError(f'evaluated materials changed the image: mean={mean}, fraction>8={substantial}')
     if images['current']!=images['serial']:
         raise RuntimeError('parallel recording changed M2 lighting')
+    if args.gpu_compare and images['cpu']!=images['current']:
+        raise RuntimeError(f"GPU compaction changed {sum(a!=b for a,b in zip(images['cpu'],images['current']))} image channels")
     rt=sum(abs(a-b) for a,b in zip(images['surface'],images['current']))/len(delta)
     if args.regions and images['current']!=images['full']:
         changed=sum(a!=b for a,b in zip(images['current'],images['full']))
         raise RuntimeError(f'bounded surface runs changed {changed} image channels')
     if rt<.01 and not args.near_plane: raise RuntimeError('current RT did not affect M2 material lighting')
-    report={'material_changes':args.material_changes,'all_families':args.all_families,'msaa':args.msaa,'mixed':args.mixed,'software':args.software,'rebuild':args.rebuild,
+    report={'cpu_gpu_changed_channels':0 if args.gpu_compare else None,'gpu_compare':args.gpu_compare,'material_changes':args.material_changes,'all_families':args.all_families,'msaa':args.msaa,'mixed':args.mixed,'software':args.software,'rebuild':args.rebuild,
             'regions':args.regions,'near_plane':args.near_plane,
             'bounded_full_changed_channels':0 if args.regions else None,
             'forward_surface_mean_channel_error':mean,'fraction_error_over_8':substantial,

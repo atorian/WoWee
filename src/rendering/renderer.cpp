@@ -132,7 +132,7 @@ bool Renderer::createPerFrameResources() {
     imgCI.arrayLayers = 1;
     imgCI.samples = VK_SAMPLE_COUNT_1_BIT;
     imgCI.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imgCI.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imgCI.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     VmaAllocationCreateInfo imgAllocCI{};
     imgAllocCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;
     for (uint32_t i = 0; i < MAX_FRAMES; i++) {
@@ -307,7 +307,13 @@ bool Renderer::createPerFrameResources() {
     }
     // Bindings must be valid before the first world/preview draw as well.
     vkCtx->immediateSubmit([&](VkCommandBuffer cmd) {
-        for (auto* images : {&contactShadowImages_, &lightningShadowImages_}) for (auto& image : *images) {
+        std::vector<VkImage> images;
+        for(uint32_t i=0;i<MAX_FRAMES;++i) {
+            images.push_back(shadowDepthImage[i]);
+            images.push_back(contactShadowImages_[i].image);
+            images.push_back(lightningShadowImages_[i].image);
+        }
+        for (const auto image : images) {
             const VkImageSubresourceRange range{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
             VkImageMemoryBarrier2 initial{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
             initial.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
@@ -315,14 +321,14 @@ bool Renderer::createPerFrameResources() {
             initial.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
             initial.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
             initial.srcQueueFamilyIndex = initial.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            initial.image = image.image;
+            initial.image = image;
             initial.subresourceRange = range;
             VkDependencyInfo initialDep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
             initialDep.imageMemoryBarrierCount = 1;
             initialDep.pImageMemoryBarriers = &initial;
             cmdPipelineBarrier2(cmd, initialDep);
             const VkClearDepthStencilValue clear{1.0f, 0};
-            vkCmdClearDepthStencilImage(cmd, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            vkCmdClearDepthStencilImage(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                        &clear, 1, &range);
             VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
             b.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
@@ -332,7 +338,7 @@ bool Renderer::createPerFrameResources() {
             b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
             b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            b.image = image.image;
+            b.image = image;
             b.subresourceRange = range;
             VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
             dep.imageMemoryBarrierCount = 1;
@@ -340,6 +346,7 @@ bool Renderer::createPerFrameResources() {
             cmdPipelineBarrier2(cmd, dep);
         }
     });
+    for (auto& layout : shadowDepthLayout_) layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     for (auto& layout : contactShadowLayout_) layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     for (auto& layout : lightningShadowLayout_) layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
@@ -1239,7 +1246,6 @@ void Renderer::applyMsaaChange() {
         auto ext = vkCtx->getSwapchainExtent();
         if (!hizSystem_->resize(ext.width, ext.height)) {
             LOG_WARNING("HiZ resize failed after MSAA change");
-            if (m2Renderer) m2Renderer->setHiZSystem(nullptr);
             hizSystem_->shutdown();
             hizSystem_.reset();
         }
@@ -1346,7 +1352,7 @@ FrameInputs Renderer::extractFrameInputs() {
             in.canal = *type == 5 || *type == 13 || *type == 17;
         if (waterRenderer)
             in.seaWaterHeight = waterRenderer->highestOpenWaterNear(glm::vec2(eye), SeaBedMap::kHalfExtent);
-        if (m2Renderer) m2Renderer->gatherLocalLights(eye, in.localLights);
+        if (m2Renderer) m2Renderer->gatherLocalLights(in.camera, in.localLights);
         if (characterRenderer) characterRenderer->gatherLocalLights(in.camera, in.localLights);
     }
     extraction.lap("globals, collision and local lights");
@@ -1626,7 +1632,6 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
             auto ext = vkCtx->getSwapchainExtent();
             if (!hizSystem_->resize(ext.width, ext.height)) {
                 LOG_WARNING("HiZ resize failed - disabling occlusion culling");
-                if (m2Renderer) m2Renderer->setHiZSystem(nullptr);
                 hizSystem_->shutdown();
                 hizSystem_.reset();
             }
@@ -1729,24 +1734,7 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
     }
     skySetStage.reset();
 
-    // ── Early compute: M2 frustum culling ──
-    // beginFrame() has already waited for this frame slot's previous fence, so
-    // its mapped visibility output is complete and safe for the CPU to reuse.
-    // Read/invalidate that completed output, then record the next cull dispatch
-    // directly into the normal frame command buffer. The old path submitted a
-    // separate command buffer and synchronously waited on a fence every frame,
-    // serializing CPU and GPU work solely to obtain same-frame cull results.
-    if (m2Renderer && frameCamera() && vkCtx) {
-        CpuStage stage(stages, "beginFrame", "M2 cull");
-        GpuPass pass(*vkCtx, currentCmd, "M2 cull");
-        uint32_t frame = vkCtx->getCurrentFrame();
-        m2Renderer->invalidateCullOutput(frame);
-        m2Renderer->dispatchCullCompute(currentCmd, frame, *frameCamera());
-    }
-
-    // Grass culls here too, for the same reason: a dispatch has to be recorded
-    // outside a render pass. Unlike the M2 path nothing reads the result back -
-    // the count it produces is consumed by the indirect draw on the GPU.
+    // Grass compaction writes indirect counts on the GPU before scene recording.
     if (grassRenderer_ && frameCamera() && vkCtx) {
         CpuStage stage(stages, "beginFrame", "grass");
         GpuPass pass(*vkCtx, currentCmd, "grass cull");
@@ -3525,6 +3513,17 @@ void Renderer::renderWorld() {
                         terrainRenderer ? terrainRenderer->getChunkCount() : 0);
         }
 
+        if(m2Renderer && !skipM2 && m2Renderer->hasGpuDraws()) {
+            vkCmdEndRenderPass(currentCmd);
+            {
+                GpuPass pass(*vkCtx,currentCmd,"M2 cull and commands");
+                m2Renderer->recordGpuDraws(currentCmd,*frameCamera());
+            }
+            VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+            begin.renderPass=vkCtx->getSceneContinueRenderPass();begin.framebuffer=activeFramebuffer_;
+            begin.renderArea.extent=activeRenderExtent_;
+            vkCmdBeginRenderPass(currentCmd,&begin,VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+        }
         if(anySurfaces)surfacePass_->finishMaterials();
         std::vector<SurfacePass::Operation> operations;
         const auto forward=[&](uint32_t index){operations.push_back({SurfacePass::Family::Count,secondaryCmds_[index][frameIdx]});};
@@ -4074,6 +4073,7 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         m2Renderer = std::make_unique<M2Renderer>();
         if (!m2Renderer->initialize(vkCtx, perFrameSetLayout, assetManager))
             LOG_ERROR("M2Renderer initialization failed");
+        m2Renderer->enableGpuDrawSubmission();
         m2Renderer->setRtScene(rtScene_.get());
         m2Renderer->setCollisionWorld(collision_.get());
         m2Renderer->setWaterHeightQuery([this](float x, float y, float z) -> std::optional<float> {
@@ -4731,15 +4731,16 @@ void Renderer::renderShadowMap(ShadowView view) {
     // into it. Returning here instead left the image untransitioned while it
     // stayed bound for sampling, which is the shape of fault that takes the
     // device down rather than drawing something wrong.
-    const bool drawCasters = strike || (frameInputs_.shadows && (!contact || currentFrameData.contactParams.x > 0.5f));
 
     // Shadows render every frame - throttling causes visible flicker on player/NPCs
 
     const glm::mat4& passMatrix = strike ? currentFrameData.lightningMatrix : contact ? currentFrameData.contactSpaceMatrix : lightSpaceMatrix;
     const uint32_t mapSize = strike ? LIGHTNING_MAP_SIZE : contact ? CONTACT_MAP_SIZE : SHADOW_MAP_SIZE;
     // passMatrix was already computed at frame start (before updatePerFrameUBO).
-    // Zero matrix means character position isn't set yet - skip shadow pass entirely.
-    if (passMatrix == glm::mat4(0.0f)) return;
+    // An unplaced player has no shadow projection, but readers still require
+    // a cleared, readable map (including after a previously populated frame).
+    const bool drawCasters = passMatrix!=glm::mat4(0.0f) &&
+        (strike || (frameInputs_.shadows && (!contact || currentFrameData.contactParams.x>0.5f)));
     uint32_t frame = vkCtx->getCurrentFrame();
     const VkImage passImage = strike ? lightningShadowImages_[frame].image : contact ? contactShadowImages_[frame].image : shadowDepthImage[frame];
     const VkImageView passView = strike ? lightningShadowImages_[frame].imageView : contact ? contactShadowImages_[frame].imageView : shadowDepthView[frame];

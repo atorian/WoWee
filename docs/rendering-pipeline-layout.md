@@ -339,3 +339,29 @@ The earlier sections describing isolated WMO opt-in work are historical stages.
 The persistent instance/material table and general GPU-driven submission gates
 remain distinct from the current-receiver/pass migration. No intermediate FPS
 benchmark is run while the user-authorized pipeline work is incomplete.
+
+## Current M2 GPU submission
+
+One spatial candidate query feeds the captured view. Pure opaque candidates
+are compacted against the current camera on GPU; ordered blended materials
+retain their CPU visibility/order. One stable compact list per model/LOD group
+is shared by all its material batches. A second compute phase writes instance
+counts into indexed indirect commands, which execute in the existing ordered
+plan. No M2 visibility results return through FrameResults or the CPU scene.
+
+The compute path uses four storage bindings, a 64-thread workgroup and 112 bytes
+of push constants. Draws use one core indexed indirect command at a time, with
+firstInstance zero; multiDrawIndirect, indirectCount and descriptor indexing are
+not required. The direct path consumes the same captured values. Standalone
+owners such as the editor keep it unless they explicitly wire GPU dispatch.
+
+Per acquired slot, spheres/groups/draw metadata upload changed records only.
+GPU output counts and compact indices belong to that slot. Compute-write →
+compute-read and compute-write → vertex/indirect-read barriers stay within one
+submission. No wait/fence is inserted between cull and draws.
+
+Main, contact and lightning shadow maps are initialized to readable empty depth
+before any preview/world consumer. An absent player projection still clears the
+map instead of leaving a sampled descriptor with an undefined image layout.
+
+The general M2 instance upload is the next migration stage; no FPS acceptance yet.

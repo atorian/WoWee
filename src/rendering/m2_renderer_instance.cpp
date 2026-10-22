@@ -258,8 +258,6 @@ void M2Renderer::setInstancesHidden(const std::vector<uint32_t>& instanceIds, bo
             // Back as if newly placed: no cull verdict to trust, and its bone
             // slots were handed to others while it was away, so the bones are
             // uploaded again wherever it lands.
-            inst.lastCullVisible = 1;
-            inst.hizPrevCulledFrames = 2;
             fileInIndexSets(idxIt->second);
         }
     }

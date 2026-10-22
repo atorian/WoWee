@@ -14,12 +14,6 @@ struct FrameStage {
     float milliseconds = 0;
 };
 
-struct CullAnswer {
-    uint32_t id = 0;
-    bool visible = false;
-    uint64_t sceneIdentity = 0, gpuFrame = 0;
-};
-
 struct VisibilityAnswer {
     uint64_t gpuFrame = 0, worldEpoch = 0;
     float value = 0;
@@ -59,7 +53,6 @@ struct FrameResults {
     std::vector<std::pair<std::string, double>> gpu;
     VisibilityAnswer exposure, skyView, sun, moon;
     RenderStatistics statistics;
-    std::vector<CullAnswer> culling;
     std::vector<CapturedImage> images;
     std::vector<uint64_t> captureDrops;
     std::vector<std::pair<std::string, bool>> screenshots;

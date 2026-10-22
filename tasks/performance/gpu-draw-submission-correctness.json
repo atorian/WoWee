@@ -1,0 +1,28 @@
+{
+  "cpu_gpu_changed_channels": 0,
+  "gpu_compare": true,
+  "material_changes": true,
+  "all_families": true,
+  "msaa": 4,
+  "mixed": true,
+  "software": false,
+  "rebuild": true,
+  "regions": true,
+  "near_plane": false,
+  "bounded_full_changed_channels": 0,
+  "forward_surface_mean_channel_error": 0.06264676474324109,
+  "fraction_error_over_8": 0.0019204943563086991,
+  "rt_mean_channel_change": 9.057687568463072,
+  "serial_parallel_changed_channels": 0,
+  "gpu_probe_assertions": 17,
+  "validation": "Vulkan synchronization validation passed",
+  "cull_reference": "12 visible opaque instances vs 12 in whole-world reference, 14 candidates",
+  "shadow_readiness": "Original unplaced-player fixture failed VUID-vkCmdDraw-None-09600 before neutral initialization; same fixture and new target-recreation check pass",
+  "builds": [
+    "wowee",
+    "scene_render",
+    "rt_probe"
+  ],
+  "performance_measurement": false,
+  "source_removal_snapshot": "Passed M2 with RT3, MSAA4, FXAA; captured pixels unchanged, next extraction changes"
+}

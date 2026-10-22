@@ -1101,6 +1101,7 @@ set(WOWEE_SOURCES
     src/rendering/bone_slots.cpp
     src/rendering/normal_map.cpp
     src/rendering/m2_renderer.cpp
+    src/rendering/gpu_draw_list.cpp
     src/rendering/m2_renderer_render.cpp
     src/rendering/m2_renderer_particles.cpp
     src/rendering/m2_renderer_instance.cpp
@@ -2321,6 +2322,7 @@ if(WOWEE_BUILD_RT_PROBE)
         tools/legacy_rt_lighting.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tools/rt_probe.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/surface_rt_probe.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/gpu_draw_list_probe.cpp
         ${WOWEE_PLATFORM_SOURCES}
     )
     target_link_libraries(rt_probe PRIVATE wowee_render)

@@ -45,6 +45,7 @@ layout(push_constant) uniform Push {
     float swayAmp;           // Sway amplitude scale; 1.0 = the tree-sized default
     float plantHeight;       // The model's own height (model space), for the player brush
     int texCoordSet2;        // second stage: 0 UV0, 1 UV1, -1 sphere map, 2 UV0 unanimated
+    int visibleOffset; // negative for direct/ordered instance ranges
 #ifdef M2_GBUFFER
     uint surfaceMaterialBase;
 #endif
@@ -84,6 +85,7 @@ layout(set = 3, binding = 0) readonly buffer InstanceSSBO {
     InstanceData instanceData[];
 };
 
+layout(set=3,binding=2) readonly buffer VisibleInstances { uint visibleInstances[]; };
 #ifdef M2_GBUFFER
 layout(set=3,binding=1) readonly buffer SurfaceReferences { uint surfaceReferences[]; };
 #endif
@@ -125,11 +127,12 @@ vec2 uvTransform(vec4 row0, vec4 row1, vec2 uv) {
 }
 
 void main() {
+    int sourceInstance=push.visibleOffset<0?gl_InstanceIndex:int(visibleInstances[push.visibleOffset+gl_InstanceIndex]);
 #ifdef M2_GBUFFER
-    vSurfaceMaterial=surfaceReferences[push.surfaceMaterialBase+gl_InstanceIndex];
+    vSurfaceMaterial=surfaceReferences[push.surfaceMaterialBase+sourceInstance];
 #endif
     // Fetch per-instance data from SSBO
-    int instIdx = push.instanceDataOffset + gl_InstanceIndex;
+    int instIdx = push.instanceDataOffset + sourceInstance;
     mat4 model = instanceData[instIdx].model;
     float fade = instanceData[instIdx].fadeAlpha;
     int uBones = instanceData[instIdx].useBones;

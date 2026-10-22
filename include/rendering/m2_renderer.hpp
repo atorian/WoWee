@@ -64,7 +64,7 @@ class Camera;
 class Frustum;
 class VkContext;
 class VkTexture;
-class HiZSystem;
+class GpuDrawList;
 class RtScene;
 class SurfacePass;
 
@@ -426,27 +426,12 @@ struct M2Instance {
     glm::vec3 cachedCullCenter{0.0f};              // transformed visual-bounds center
     float cachedVisualRadius = 0.0f;               // transformed visual-bounds half diagonal
     // Pre-computed per-instance cull factors (depend only on static flags + scale +
-    // bound radius), populated by recomputeCachedCullFactors(). The per-frame SSBO
-    // upload just multiplies by the smoothed render distance and packs the rest.
+    // bound radius), populated by recomputeCachedCullFactors(). Extraction
+    // publishes these bounds with the instance, shared by all GPU draw batches.
     float cachedEffectiveMaxDistSqFactor = 1.0f;  // multiplied by maxRenderDistanceSq each frame
     float cachedPaddedRadius = 0.0f;              // sphere radius used by the cull compute
     const M2ModelGPU* cachedModel = nullptr;  // Avoid per-frame hash lookups
 
-    // Result of the most recent GPU cull dispatch that actually covered this
-    // instance, matched back by instance ID (never by array index - see
-    // cullSubmittedIds_).  Defaults to visible so an instance created after the
-    // in-flight dispatch draws immediately instead of waiting ~2 frames for its
-    // first cull result.
-    uint8_t lastCullVisible = 1;
-    // Consecutive frames this instance has been culled (capped at 3), used for
-    // the HiZ `previouslyVisible` hysteresis.  Defaults to 2 ("not recently
-    // visible") so a freshly spawned instance skips the HiZ test rather than
-    // being judged against depth data that never contained it.
-    uint8_t hizPrevCulledFrames = 2;
-    // Which render() call last scattered a GPU verdict onto this instance.
-    // Only a verdict from the call reading it counts: the dispatch covers the
-    // instances the camera's columns held then, not a fixed prefix of the array.
-    uint32_t cullVerdictSerial = 0;
     // Server game object (mailbox, chest, node, door): exempt from the adaptive
     // ambient-doodad distance, which collapses to ~200 units in a city and hid
     // interactable objects long before the server stopped sending them.
@@ -616,7 +601,10 @@ public:
     void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
     void prepareRender(uint32_t frameIndex, const Camera& camera);
     /** Dispatch GPU frustum culling compute shader on primary cmd before render pass. */
-    void dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera);
+    // Enable only for an owner that dispatches recordGpuDraws before executing draws.
+    void enableGpuDrawSubmission();
+    bool hasGpuDraws() const;
+    void recordGpuDraws(VkCommandBuffer cmd,const Camera& camera);
     /// The opaque pass, and the blended one too unless it is drawn after the
     /// water (see renderAfterWater).
     /// A replacement is recorded where a suppressed star sheet would draw,
@@ -643,13 +631,10 @@ public:
     /// Append the point lights of the models animated this frame - those in
     /// view, and those within ten yards of the camera - as the client lights
     /// a scene with them (local_lights.hpp).
-    void gatherLocalLights(const glm::vec3& cameraPos, std::vector<LocalLight>& out) const;
+    void gatherLocalLights(const Camera& camera, std::vector<LocalLight>& out) const;
     /// The frame's point lights, which every draw picks its nearest from.
     /// Owned by the Renderer, filled before anything draws.
     /// Time captured with the view, for effects made while preparing its draws.
-
-    /** Set the HiZ system for occlusion culling (Phase 6.3). nullptr disables HiZ. */
-    void setHiZSystem(HiZSystem* hiz) { hizSystem_ = hiz; }
 
     /// Where loaded models register their geometry for the ray traced
     /// lighting. Static doodads only - animated models would cast their
@@ -661,10 +646,6 @@ public:
     /// Changes accumulate while lighting is off; removals retire immediately.
     void syncRtScene();
     void setForceNoCull(bool v) { forceNoCull_ = v; }
-
-    /** Ensure GPU→CPU cull output is visible to the host after a fence wait.
-     *  Call after the early compute submission finishes (endSingleTimeCommands). */
-    void invalidateCullOutput(uint32_t frameIndex);
 
     /**
      * Initialize shadow pipeline (Phase 7)
@@ -836,8 +817,6 @@ public:
     // Stats
     [[nodiscard]] bool isInitialized() const { return initialized_; }
     [[nodiscard]] uint32_t getModelCount() const { return static_cast<uint32_t>(models.size()); }
-    std::vector<CullAnswer> takeCullAnswers();
-    void acceptCullAnswers(const std::vector<CullAnswer>& answers);
     /// CPU memory the models keep after upload - bones and their animation
     /// tracks, emitters, collision - and the instances with what each holds.
     [[nodiscard]] uint64_t modelDataBytes() const;
@@ -1143,60 +1122,13 @@ private:
     uint32_t surfaceReferenceCapacity_[2]{};
     uint32_t surfaceReferenceCount_ = 0;
 
-    // GPU Frustum Culling via Compute Shader
-    // Compute shader tests each M2 instance against frustum planes + distance, writes visibility[].
-    // CPU reads back visibility to build sortedVisible_ without per-instance frustum/distance tests.
-    struct CullInstanceGPU {        // matches CullInstance in m2_cull.comp.glsl (32 bytes, std430)
-        glm::vec4 sphere;           // xyz = world position, w = padded radius
-        float effectiveMaxDistSq;   // adaptive distance cull threshold
-        uint32_t flags;             // bit 0 = valid, bit 1 unused, bit 2 = invisibleTrap, bit 3 = previously visible
-        float _pad[2] = {};
-    };
-    struct CullUniformsGPU {        // matches CullUniforms in m2_cull_hiz.comp.glsl (std140)
-        glm::vec4 frustumPlanes[6]; // xyz = normal, w = distance         (96 bytes)
-        glm::vec4 cameraPos;        // xyz = camera position, w = maxPossibleDistSq (16 bytes)
-        uint32_t instanceCount;     //                                    (4 bytes)
-        uint32_t hizEnabled;        // 1 = HiZ occlusion active           (4 bytes)
-        uint32_t hizMipLevels;      // mip levels in HiZ pyramid          (4 bytes)
-        uint32_t _pad2 = {};        //                                    (4 bytes)
-        glm::vec4 hizParams;        // x=pyramidW, y=pyramidH, z=nearPlane, w=unused (16 bytes)
-        glm::mat4 viewProj;         // current frame view-projection                 (64 bytes)
-        glm::mat4 prevViewProj;     // previous frame VP for HiZ reprojection        (64 bytes)
-    };                              // Total: 272 bytes
-    static constexpr uint32_t MAX_CULL_INSTANCES = 24576;
-    VkPipeline cullPipeline_ = VK_NULL_HANDLE;           // frustum-only (fallback)
-    VkPipeline cullHiZPipeline_ = VK_NULL_HANDLE;        // frustum + HiZ occlusion
-    VkPipelineLayout cullPipelineLayout_ = VK_NULL_HANDLE;  // frustum-only layout (set 0)
-    VkPipelineLayout cullHiZPipelineLayout_ = VK_NULL_HANDLE; // HiZ layout (set 0 + set 1)
-    VkDescriptorSetLayout cullSetLayout_ = VK_NULL_HANDLE;
-    VkDescriptorPool cullDescPool_ = VK_NULL_HANDLE;
-    VkDescriptorSet cullSet_[2] = {};               // double-buffered
-    ::VkBuffer cullUniformBuffer_[2] = {};           // frustum planes + camera + HiZ params (UBO)
-    VmaAllocation cullUniformAlloc_[2] = {};
-    void* cullUniformMapped_[2] = {};
-    ::VkBuffer cullInputBuffer_[2] = {};             // per-instance bounding sphere + flags (SSBO)
-    VmaAllocation cullInputAlloc_[2] = {};
-    void* cullInputMapped_[2] = {};
-    ::VkBuffer cullOutputBuffer_[2] = {};            // uint visibility[] (SSBO, host-readable)
-    VmaAllocation cullOutputAlloc_[2] = {};
-    void* cullOutputMapped_[2] = {};
-
-    // HiZ occlusion culling (Phase 6.3) - optional, driven by Renderer
-    HiZSystem* hizSystem_ = nullptr;
+    bool gpuDrawsEnabled_ = false;
+    std::unique_ptr<GpuDrawList> gpuDraws_;
     const std::vector<LocalLight>* frameLights_ = nullptr;
 
     RtScene* rtScene_ = nullptr;
     void registerRtModel(M2ModelGPU& gpuModel, const pipeline::M2Model& model);
     void releaseRtModel(uint32_t modelId, M2ModelGPU& gpuModel);
-
-    // Previous frame's view-projection for temporal reprojection in HiZ culling.
-    // Stored each frame so the cull shader can project into the same screen space
-    // as the depth buffer the HiZ pyramid was built from.
-    glm::mat4 prevVP_{1.0f};
-
-    // The recording side retains submitted instance IDs and scene identities.
-    // After a slot's fence, collectCullOutput publishes completed verdicts;
-    // extraction applies them by identity, never by a volatile array index.
 
     // Dynamic ribbon vertex buffer (CPU-written triangle strip)
     // 9 floats each, for every trail in view. One riding phoenix lays 660
@@ -1334,7 +1266,7 @@ private:
     void gatherShadowCandidates(const glm::mat4& lightSpace, float shadowRadius,
                                 std::vector<uint32_t>& out) const;
     std::vector<uint32_t> viewCandidates_;    // reused by render()
-    std::vector<uint32_t> cullCandidates_;    // reused by dispatchCullCompute()
+    std::vector<uint32_t> cullCandidates_;    // shared broad phase for this view
     std::vector<uint32_t> shadowCandidates_;  // reused by renderShadow()
     /// The sun map's candidates: the instances that can cast at all (valid,
     /// not a trap), within kShadowCullSlack of the map shadowCullMatrix_
@@ -1355,7 +1287,6 @@ private:
     uint64_t instanceLayoutRevision_ = 0;
     /// shadowCandidates_ for the sun's map, from shadowCullIds_ or a new cull.
     void gatherReusedShadowCandidates(const glm::mat4& lightSpace, float shadowRadius);
-    uint32_t cullVerdictSerial_ = 0;
     // Instance to copy bone matrices from when spawning another of the same
     // model. Finding one by scanning every instance is O(n) per spawn, which
     // became 18ms for a single createInstance once a zone held tens of
@@ -1368,6 +1299,7 @@ private:
     struct DrawInstance {
         uint64_t surfaceLifetime = 0;
         glm::mat4 modelMatrix{1.0f};
+        glm::vec4 cullSphere{0};
         /// Pinned by Frame::modelResources, including queued/unrecorded frames.
         const M2ModelGPU* model = nullptr;
         InteriorLightGPU interiorLight;
@@ -1416,14 +1348,12 @@ private:
     // their draws are moved into the immutable frame.
     std::array<VisibleChunk, 4> visibilityChunks_;
 
-    /// The view's half of render(): folds the GPU's cull verdicts into the
-    /// instances, keeps what the camera sees, copies it into drawInstances_,
-    /// sorts the two lists and makes the glow sprites. Reads the scene and
-    /// writes only the verdicts into it.
+    /// Classify spatial candidates into opaque groups and ordered transparent
+    /// draws, then publish immutable instance records. GPU visibility is consumed
+    /// directly by the draw commands and never written back into the scene.
     void cullView(const Camera& camera, Frame& frame);
     void extractBones(Frame& frame);
-    void extractCull(const Camera& camera, Frame& frame);
-    void collectCullOutput(uint32_t frame);
+    void gatherCameraCandidates(const Camera& camera);
     /// The opaque pass, from the lists cullView made; reads no instance.
     void recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     const StarReplacement& drawStars, bool drawBakedStars, bool surfaces = false);
@@ -1700,25 +1630,18 @@ public:
         std::vector<float> ribbonVertices;
         std::vector<M2ParticleQuad> particleVertices;
         PagedFrameBuffer<glm::mat4>::Snapshot bones;
-        std::vector<CullInstanceGPU> cullInput;
-        std::vector<uint32_t> cullIds;
         std::vector<ShadowDraw> depth, solarDepth, strikeDepth;
         glm::mat4 solarMatrix{0.0f}, overheadMatrix{0.0f}, strikeMatrix{0.0f};
-        float maxPossibleDistSq = 0, time = 0;
+        float time = 0;
         uint64_t sceneIdentity = 0;
         glm::vec3 cameraPosition{0};
         glm::mat4 cameraRelativeViewProjection{1};
         float skyHour = 12;
-        bool suppressStars = false, skipDetail = false;
+        bool suppressStars = false, skipDetail = false, forceVisible = false;
     };
 private:
     FramePool<Frame> framePool_;
     std::shared_ptr<const Frame> recording_ = std::make_shared<Frame>();
-    std::mutex cullResultMutex_;
-    std::vector<CullAnswer> collectedCull_;
-    std::vector<uint32_t> submittedCullIds_[2];
-    uint64_t submittedCullScenes_[2]{};
-    uint64_t submittedCullFrames_[2]{};
 
 };
 
