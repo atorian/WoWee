@@ -14,6 +14,19 @@
   symptom. When the proper fix is a real feature, lay out the plan and its
   costs first, then build it fully.
 
+## Original gameplay behaviour
+
+- User decision (2026-10-22): graphics may change; gameplay behaviour must
+  match the corresponding original client. Movement and collision are a
+  compatibility contract, including the movement observed by the server.
+- Follow `tasks/principles/original-gameplay-behaviour.md`. Port verified
+  original rules and compare against independent original-code execution or
+  original-client traces; plausible physics and our own expected outputs do
+  not establish equivalence.
+- Do not expose an unverified replacement to ordinary gameplay or describe
+  it as exact, safe from bans, or complete. The current parity work is tracked
+  in `tasks/collision-original-parity.md`.
+
 ## Disks: everything on D:, nothing on C:
 
 - Build only inside `D:\games\WoWee` — the `build-dev` tree (preset `dev`,
