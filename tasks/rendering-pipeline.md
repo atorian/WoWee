@@ -568,3 +568,30 @@ conversion remains incomplete. The earlier 11 GiB replay guard no longer gives
 headroom for the observed current-data workload.
 
 [Full distributions, provenance and raw paths](performance/dalaran-m2-surfaces-replay.json).
+
+
+### Longer warmup replay (2026-10-22, same 0800842 binary)
+
+User requested another run to reduce loading effects. Same executable hash and
+current-data scene, settle increased from 8 to 60 seconds (budget 120 seconds).
+Warmup finished without the busy-budget warning, with stable resident counters.
+All 760 source samples completed; no ERROR/FATAL or trace error, normal exit.
+
+| Metric | Previous settle 8s | Settle 60s |
+|---|---:|---:|
+| FPS | 29.136 | 30.670 |
+| Frame interval mean, ms | 34.322 | 32.605 |
+| Frame interval p95, ms | 63.233 | 55.679 |
+| Frame interval p99, ms | 99.104 | 73.691 |
+| GPU M2 incl. surface RT mean, ms | 10.273 | 10.330 |
+| GPU WMO mean, ms | 6.660 | 6.732 |
+| CPU extraction mean, ms | 12.239 | 10.692 |
+
+This is a 5.3% observed FPS increase without a code change, with improved frame
+tails. It does not remove M2's GPU cost. Playback still logged 25 DDS loads for
+resources encountered during the recorded sequence; initial readiness is not
+whole-route preloading. Missing assets and residency mismatches remain.
+Actual viewport was 2560x1392 versus 2560x1369 previously (1.68% more pixels).
+Cache/system differences were not isolated. All old reports are preserved.
+
+[Full metrics and warmup evidence](performance/dalaran-m2-surfaces-warm60.json).
