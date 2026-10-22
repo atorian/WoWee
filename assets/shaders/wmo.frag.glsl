@@ -46,34 +46,29 @@ layout(set = 0, binding = 0) uniform PerFrame {
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
 
+// Resource-only material. Frame settings are captured in the command stream.
 layout(set = 1, binding = 1) uniform WMOMaterial {
     int hasTexture;
     int alphaTest;
-    // The client's light the batch is drawn with (rendering/wmo_lighting.hpp):
-    // one of the LIGHT_ values below.
     int light;
-    // A transition batch's second light, drawn under `light` where the vertex
-    // colour's alpha falls to 0; -1 for every other batch.
     int transitionLight;
     float specularIntensity;
-    int enableNormalMap;
-    int enablePOM;
-    float pomScale;
-    int pomMaxSamples;
     float heightMapVariance;
-    float normalMapStrength;
     int isLava;
+    int emissive;
     float wmoAmbientR;
     float wmoAmbientG;
     float wmoAmbientB;
-    int emissive;
     int hasVertexColors;
     int receivesExteriorShadows;
-    // F_SIDN: the colour the material glows in, black without the flag.
     float sidnR;
     float sidnG;
     float sidnB;
 };
+layout(push_constant) uniform SurfaceOptions {
+    layout(offset = 96) vec4 geometry; // normal mapping, POM, samples, normal strength
+} surfaceOptions;
+const float pomScale = 0.012;
 
 layout(set = 1, binding = 2) uniform sampler2D uNormalHeightMap;
 
@@ -118,58 +113,7 @@ float computeLodFactor() {
     return smoothstep(0.0001, 0.005, texelDensity);
 }
 
-// Parallax Occlusion Mapping with angle-adaptive sampling
-vec2 parallaxOcclusionMap(vec2 uv, vec3 viewDirTS, float lodFactor) {
-    float VdotN = abs(viewDirTS.z);  // 1=head-on, 0=grazing
-
-    // Fade out POM at grazing angles to avoid distortion
-    if (VdotN < 0.15) return uv;
-
-    float angleFactor = clamp(VdotN, 0.15, 1.0);
-    int maxS = pomMaxSamples;
-    int minS = max(maxS / 4, 4);
-    int numSamples = int(mix(float(minS), float(maxS), angleFactor));
-    numSamples = int(mix(float(minS), float(numSamples), 1.0 - lodFactor));
-
-    float layerDepth = 1.0 / float(numSamples);
-    float currentLayerDepth = 0.0;
-
-    // Direction to shift UV per layer - clamp denominator to prevent explosion at grazing angles
-    vec2 P = viewDirTS.xy / max(VdotN, 0.15) * pomScale;
-    // Hard-clamp total UV offset to prevent texture swimming
-    float maxOffset = pomScale * 3.0;
-    P = clamp(P, vec2(-maxOffset), vec2(maxOffset));
-    vec2 deltaUV = P / float(numSamples);
-
-    // The mip level is chosen once, from the undisplaced UV, and used for
-    // every sample in the march. Inside the loop the UV differs from one
-    // pixel to the next by how many steps each has taken, so the implicit
-    // derivatives were noise and the level chosen from them was too - which
-    // showed as sparkle on relief at distance and cost a gradient fetch
-    // per sample on top.
-    float lod = textureQueryLod(uNormalHeightMap, uv).x;
-    vec2 currentUV = uv;
-    float currentDepthMapValue = 1.0 - textureLod(uNormalHeightMap, currentUV, lod).a;
-
-    // Ray march through layers
-    for (int i = 0; i < 64; i++) {
-        if (i >= numSamples || currentLayerDepth >= currentDepthMapValue) break;
-        currentUV -= deltaUV;
-        currentDepthMapValue = 1.0 - textureLod(uNormalHeightMap, currentUV, lod).a;
-        currentLayerDepth += layerDepth;
-    }
-
-    // Interpolate between last two layers for smooth result
-    vec2 prevUV = currentUV + deltaUV;
-    float afterDepth = currentDepthMapValue - currentLayerDepth;
-    float beforeDepth = (1.0 - textureLod(uNormalHeightMap, prevUV, lod).a) - currentLayerDepth + layerDepth;
-    float weight = afterDepth / (afterDepth - beforeDepth + 0.0001);
-    vec2 result = mix(currentUV, prevUV, weight);
-
-    // Fade toward original UV at grazing angles for smooth transition
-    float fadeFactor = smoothstep(0.15, 0.35, VdotN);
-    return mix(uv, result, fadeFactor);
-}
+#include "parallax_occlusion.glsli"
 
 // The air between the camera and this point, out of the fog volume: rgb is
 // the light it scatters toward the camera, a how much of the point shows
@@ -231,11 +175,12 @@ void main() {
     vec3 N = vertexNormal;
     mat3 TBN = mat3(T, B, N);
 
-    if (enablePOM != 0 && heightMapVariance > 0.001 && lodFactor < 0.99) {
+    if (surfaceOptions.geometry.y > 0.5 && heightMapVariance > 0.001 && lodFactor < 0.99) {
         mat3 TBN_inv = transpose(TBN);
         vec3 viewDirWorld = normalize(viewPos.xyz - FragPos);
         vec3 viewDirTS = TBN_inv * viewDirWorld;
-        finalUV = parallaxOcclusionMap(TexCoord, viewDirTS, lodFactor);
+        finalUV = parallaxOcclusionMap(uNormalHeightMap, TexCoord, viewDirTS, lodFactor,
+                                       int(surfaceOptions.geometry.z), pomScale);
     }
 
     vec4 texColor = hasTexture != 0 ? textureGrad(uTexture, finalUV, uvDx, uvDy) : vec4(1.0);
@@ -246,14 +191,14 @@ void main() {
 
     // Compute normal (with normal mapping if enabled)
     vec3 norm = vertexNormal;
-    if (enableNormalMap != 0 && lodFactor < 0.99 && normalMapStrength > 0.001) {
+    if (surfaceOptions.geometry.x > 0.5 && lodFactor < 0.99 && surfaceOptions.geometry.w > 0.001) {
         vec3 mapNormal = textureGrad(uNormalHeightMap, finalUV, uvDx, uvDy).rgb * 2.0 - 1.0;
         mapNormal = normalize(mapNormal);
         vec3 worldNormal = normalize(TBN * mapNormal);
         if (!gl_FrontFacing) worldNormal = -worldNormal;
         // Linear blend: strength controls how much normal map detail shows,
         // LOD fades out at distance. Both multiply for smooth falloff.
-        float blend = clamp(normalMapStrength, 0.0, 1.0) * (1.0 - lodFactor);
+        float blend = clamp(surfaceOptions.geometry.w, 0.0, 1.0) * (1.0 - lodFactor);
         norm = normalize(mix(vertexNormal, worldNormal, blend));
     }
 

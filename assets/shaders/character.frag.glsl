@@ -154,52 +154,7 @@ vec4 samplePreviewTexture(sampler2D tex, vec2 uv) {
     return vec4(0.0);
 }
 
-// Parallax Occlusion Mapping with angle-adaptive sampling
-vec2 parallaxOcclusionMap(vec2 uv, vec3 viewDirTS, float lodFactor) {
-    float VdotN = abs(viewDirTS.z);
-
-    if (VdotN < 0.15) return uv;
-
-    float angleFactor = clamp(VdotN, 0.15, 1.0);
-    int maxS = pomMaxSamples;
-    int minS = max(maxS / 4, 4);
-    int numSamples = int(mix(float(minS), float(maxS), angleFactor));
-    numSamples = int(mix(float(minS), float(numSamples), 1.0 - lodFactor));
-
-    float layerDepth = 1.0 / float(numSamples);
-    float currentLayerDepth = 0.0;
-
-    vec2 P = viewDirTS.xy / max(VdotN, 0.15) * pomScale;
-    float maxOffset = pomScale * 3.0;
-    P = clamp(P, vec2(-maxOffset), vec2(maxOffset));
-    vec2 deltaUV = P / float(numSamples);
-
-    // The mip level is chosen once, from the undisplaced UV, and used for
-    // every sample in the march. Inside the loop the UV differs from one
-    // pixel to the next by how many steps each has taken, so the implicit
-    // derivatives were noise and the level chosen from them was too - which
-    // showed as sparkle on relief at distance and cost a gradient fetch
-    // per sample on top.
-    float lod = textureQueryLod(uNormalHeightMap, uv).x;
-    vec2 currentUV = uv;
-    float currentDepthMapValue = 1.0 - textureLod(uNormalHeightMap, currentUV, lod).a;
-
-    for (int i = 0; i < 64; i++) {
-        if (i >= numSamples || currentLayerDepth >= currentDepthMapValue) break;
-        currentUV -= deltaUV;
-        currentDepthMapValue = 1.0 - textureLod(uNormalHeightMap, currentUV, lod).a;
-        currentLayerDepth += layerDepth;
-    }
-
-    vec2 prevUV = currentUV + deltaUV;
-    float afterDepth = currentDepthMapValue - currentLayerDepth;
-    float beforeDepth = (1.0 - textureLod(uNormalHeightMap, prevUV, lod).a) - currentLayerDepth + layerDepth;
-    float weight = afterDepth / (afterDepth - beforeDepth + 0.0001);
-    vec2 result = mix(currentUV, prevUV, weight);
-
-    float fadeFactor = smoothstep(0.15, 0.35, VdotN);
-    return mix(uv, result, fadeFactor);
-}
+#include "parallax_occlusion.glsli"
 
 // The air between the camera and this point, out of the fog volume: rgb is
 // the light it scatters toward the camera, a how much of the point shows
@@ -287,7 +242,8 @@ void main() {
         mat3 TBN_inv = transpose(TBN);
         vec3 viewDirWorld = normalize(viewPos.xyz - FragPos);
         vec3 viewDirTS = TBN_inv * viewDirWorld;
-        finalUV = parallaxOcclusionMap(TexCoord, viewDirTS, lodFactor);
+        finalUV = parallaxOcclusionMap(uNormalHeightMap, TexCoord, viewDirTS, lodFactor,
+                                       pomMaxSamples, pomScale);
     }
 
     // The stages as the client combines them, before anything reads colour or

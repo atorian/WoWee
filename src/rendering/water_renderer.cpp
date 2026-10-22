@@ -1615,14 +1615,12 @@ bool WaterRenderer::createWater1xPass(VkFormat colorFormat, VkFormat depthFormat
     subpass.pColorAttachments = &colorRef;
     subpass.pDepthStencilAttachment = &depthRef;
 
-    VkSubpassDependency dep{};
-    dep.srcSubpass = VK_SUBPASS_EXTERNAL;
-    dep.dstSubpass = 0;
-    dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-    dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-                        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+    // The loaded depth may have been resolved and automatically transitioned
+    // at the end of the multisampled scene pass, or restored after an RT/
+    // refraction read. Waiting only for late depth tests and color writes does
+    // not make that layout transition visible to this LOAD operation. Use the
+    // same external attachment dependency as the ordinary continuation pass.
+    const auto dep = sceneAttachmentDependency();
 
     VkRenderPassCreateInfo rpCI{};
     rpCI.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;

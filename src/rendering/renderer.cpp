@@ -3391,17 +3391,13 @@ void Renderer::renderWorld() {
     if (parallelRecordingEnabled_) {
         // --- Pre-compute state + GPU allocations on main thread (not thread-safe) ---
         auto prepStart = std::chrono::steady_clock::now();
-        if (wmoRenderer) wmoRenderer->prepareRender();
-        auto prepWmoEnd = std::chrono::steady_clock::now();
         if (m2Renderer && frameCamera()) m2Renderer->prepareRender(frameIdx, *frameCamera());
         if (drawSkyModels && frameCamera())
             skyboxModelRenderer_->prepareRender(frameIdx, *frameCamera());
         // The characters' bones went up in beginFrame, before the shadow maps.
         auto prepM2End = std::chrono::steady_clock::now();
-        const double prepWmoMs  = std::chrono::duration<double, std::milli>(prepWmoEnd - prepStart).count();
-        const double prepM2Ms   = std::chrono::duration<double, std::milli>(prepM2End - prepWmoEnd).count();
+        const double prepM2Ms   = std::chrono::duration<double, std::milli>(prepM2End - prepStart).count();
         CpuStageTimes& stages = vkCtx->cpuStages();
-        stages.add("renderWorld", "prepare WMO", static_cast<float>(prepWmoMs));
         stages.add("renderWorld", "prepare M2", static_cast<float>(prepM2Ms));
         // From here to the wait the main thread hands work out and records its
         // own share; then it waits for the slowest worker.
@@ -3603,7 +3599,7 @@ void Renderer::renderWorld() {
         // prepareRender() does the GPU allocations that are not thread-safe, so it runs
         // on the main thread and is not covered by the worker timings. Name the culprit
         // when a frame runs long instead of leaving renderWorld as one opaque number.
-        const double prepTotalMs = prepWmoMs + prepM2Ms;
+        const double prepTotalMs = prepM2Ms;
         const double worstWorkerMs = std::max({lastTerrainRenderMs, lastWMORenderMs, lastM2RenderMs});
 
         // The same breakdown on a timer, not only when a frame runs long.
@@ -3620,7 +3616,7 @@ void Renderer::renderWorld() {
             if (sayNow - lastSaid > std::chrono::seconds(10)) {
                 lastSaid = sayNow;
                 LOG_WARNING("  renderWorld: prepare ", prepTotalMs,
-                            "ms (wmo ", prepWmoMs, " m2 ", prepM2Ms, "), workers terrain ",
+                            "ms, workers terrain ",
                             lastTerrainRenderMs, " wmo ", lastWMORenderMs,
                             " m2 ", lastM2RenderMs, " (worst ", worstWorkerMs,
                             "), terrain chunks drawn ",
@@ -3642,7 +3638,7 @@ void Renderer::renderWorld() {
 
         if (prepTotalMs + worstWorkerMs > 40.0) {
             LOG_WARNING("SLOW renderWorld breakdown: prepare=", prepTotalMs,
-                        "ms (wmo=", prepWmoMs, " m2=", prepM2Ms,
+                        "ms (M2=", prepM2Ms,
                         ") workers: terrain=", lastTerrainRenderMs,
                         " wmo=", lastWMORenderMs, " m2=", lastM2RenderMs,
                         // Terrain is usually the critical path here, and its cost
@@ -3742,7 +3738,6 @@ void Renderer::renderWorld() {
         }
 
         if (wmoRenderer && frameCamera() && !skipWMO) {
-            wmoRenderer->prepareRender();
             auto wmoStart = std::chrono::steady_clock::now();
             {
                 GpuPass pass(*vkCtx, currentCmd, "wmo");

@@ -250,7 +250,14 @@ bool WMORenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
     pushRange.size = sizeof(WMOPushConstants);
 
     std::vector<VkDescriptorSetLayout> setLayouts = { perFrameLayout, materialSetLayout_ };
-    pipelineLayout_ = createPipelineLayout(device, setLayouts, { pushRange });
+    // Vertex data occupies the first 96 bytes. Fragment settings come from
+    // the extracted frame and never update any material descriptor or buffer.
+    static_assert(sizeof(WMOPushConstants) == 96);
+    VkPushConstantRange surfaceRange{};
+    surfaceRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    surfaceRange.offset = sizeof(WMOPushConstants);
+    surfaceRange.size = sizeof(glm::vec4);
+    pipelineLayout_ = createPipelineLayout(device, setLayouts, { pushRange, surfaceRange });
     if (!pipelineLayout_) {
         core::Logger::getInstance().error("WMORenderer: failed to create pipeline layout");
         return false;
@@ -1025,25 +1032,6 @@ void WMORenderer::rebuildIndexById() {
     }
 }
 
-void WMORenderer::prepareRender() {
-    if (recording_->materialVersion == appliedMaterialVersion_) return;
-    appliedMaterialVersion_ = recording_->materialVersion;
-    // These material slots are shared by frame slots. A settings change is
-    // infrequent and must wait for every earlier draw before overwriting them.
-    vkCtx_->waitIdle();
-    for (const auto& entry : recording_->depth.drawn()) for (const auto& kept : entry.groups)
-        for (const auto& mb : kept.gpu->mergedBatches) {
-            if (!mb.materialSlot) continue;
-            auto* ubo = static_cast<WMOMaterialUBO*>(mb.materialSlot.mapped);
-            ubo->enableNormalMap = recording_->normalMap;
-            ubo->enablePOM = recording_->pom;
-            ubo->pomScale = 0.012f;
-            ubo->pomMaxSamples = recording_->samples;
-            ubo->heightMapVariance = mb.heightMapVariance;
-            ubo->normalMapStrength = recording_->normalStrength;
-        }
-}
-
 WMORenderer::GroupDraw WMORenderer::extractGroup(const GroupResources& group,
                                                const WMOInstance& instance, uint32_t index) const {
     GroupDraw out;
@@ -1093,8 +1081,6 @@ std::shared_ptr<const WMORenderer::Frame> WMORenderer::extract(const Camera& cam
     extractDepth(frame->depth);
     frameLights_ = nullptr;
     frame->wireframe = wireframeMode;
-    if (std::exchange(materialSettingsDirty_, false)) ++extractedMaterialVersion_;
-    frame->materialVersion = extractedMaterialVersion_;
     frame->normalMap = normalMappingEnabled_ ? 1 : 0;
     frame->pom = pomEnabled_ ? 1 : 0;
     frame->samples = pomSamplesFor(pomQuality_);
@@ -1248,6 +1234,10 @@ uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
                              const DrawList& list) const {
     if (list.used == 0) return 0;
     uint32_t drawCalls = 0;
+    const glm::vec4 surfaceSettings(float(recording_->normalMap), float(recording_->pom),
+                                    float(recording_->samples), recording_->normalStrength);
+    vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT,
+                       sizeof(WMOPushConstants), sizeof(surfaceSettings), &surfaceSettings);
 
     // Select pipeline based on wireframe mode
     VkPipeline activePipeline = (recording_->wireframe && wireframePipeline_) ? wireframePipeline_ : opaquePipeline_;
@@ -1683,12 +1673,7 @@ void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupR
     matData.sidnR = static_cast<float>((mb.sidnColor >> 16) & 0xffu) / 255.0f;
     matData.sidnG = static_cast<float>((mb.sidnColor >> 8) & 0xffu) / 255.0f;
     matData.sidnB = static_cast<float>(mb.sidnColor & 0xffu) / 255.0f;
-    matData.enableNormalMap = normalMappingEnabled_ ? 1 : 0;
-    matData.enablePOM = pomEnabled_ ? 1 : 0;
-    matData.pomScale = 0.012f;
-    matData.pomMaxSamples = pomSamplesFor(pomQuality_);
     matData.heightMapVariance = mb.heightMapVariance;
-    matData.normalMapStrength = normalMapStrength_;
     matData.isLava = mb.isLava ? 1 : 0;
     matData.wmoAmbientR = model.wmoAmbientColor.r;
     matData.wmoAmbientG = model.wmoAmbientColor.g;

@@ -264,7 +264,6 @@ public:
     std::shared_ptr<const Frame> extract(const Camera& camera, const glm::vec3& viewer,
                                         const std::vector<LocalLight>& lights, const SceneView* reflection = nullptr);
     void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
-    void prepareRender();
     /// The passes that draw the buildings in colour. Each culls into a draw
     /// list of its own: the water's reflection is recorded on the main thread
     /// and the view on a frame worker, and they share nothing they write.
@@ -334,10 +333,10 @@ public:
     /**
      * Normal mapping / Parallax Occlusion Mapping settings
      */
-    void setNormalMappingEnabled(bool enabled) { normalMappingEnabled_ = enabled; materialSettingsDirty_ = true; }
-    void setNormalMapStrength(float s) { normalMapStrength_ = s; materialSettingsDirty_ = true; }
-    void setPOMEnabled(bool enabled) { pomEnabled_ = enabled; materialSettingsDirty_ = true; }
-    void setPOMQuality(int q) { pomQuality_ = q; materialSettingsDirty_ = true; }
+    void setNormalMappingEnabled(bool enabled) { normalMappingEnabled_ = enabled; }
+    void setNormalMapStrength(float s) { normalMapStrength_ = s; }
+    void setPOMEnabled(bool enabled) { pomEnabled_ = enabled; }
+    void setPOMQuality(int q) { pomQuality_ = q; }
     bool isNormalMappingEnabled() const { return normalMappingEnabled_; }
     float getNormalMapStrength() const { return normalMapStrength_; }
     bool isPOMEnabled() const { return pomEnabled_; }
@@ -428,30 +427,27 @@ private:
 
     const std::vector<LocalLight>* frameLights_ = nullptr;
     // WMO material UBO - matches WMOMaterial in wmo.frag.glsl
+    // Resource properties only. Per-frame normal/POM settings are recorded
+    // separately, so queued frames never rewrite a shared material allocation.
     struct WMOMaterialUBO {
-        int32_t hasTexture;        // 0
-        int32_t alphaTest;         // 4
-        int32_t light;             // 8: WmoLight the batch is drawn with
-        int32_t transitionLight;   // 12: WmoLight under it by 1 - MOCV alpha, -1 for none
-        float specularIntensity;   // 16
-        int32_t enableNormalMap;   // 20
-        int32_t enablePOM;         // 24
-        float pomScale;            // 28 (height scale)
-        int32_t pomMaxSamples;     // 32 (max ray-march steps)
-        float heightMapVariance;   // 36 (low variance = skip POM)
-        float normalMapStrength;   // 40 (0=flat, 1=full, 2=exaggerated)
-        int32_t isLava;            // 44 (1=lava/magma UV scroll)
-        float wmoAmbientR;         // 48 (interior ambient color R)
-        float wmoAmbientG;         // 52 (interior ambient color G)
-        float wmoAmbientB;         // 56 (interior ambient color B)
-        int32_t emissive;           // 60 (0 none, 1 lamp glass, 2 firelit)
-        int32_t hasVertexColors;    // 64: the group carries MOCV (MOGP flag 0x4)
-        int32_t receivesExteriorShadows; // 68: wmoReceivesExteriorShadows
-        float sidnR;                // 72: F_SIDN glow colour, 0 without the flag
-        float sidnG;                // 76
-        float sidnB;                // 80
-        int32_t padding[3];         // 84
-    };  // 96 bytes total
+        int32_t hasTexture;
+        int32_t alphaTest;
+        int32_t light;
+        int32_t transitionLight;
+        float specularIntensity;
+        float heightMapVariance;
+        int32_t isLava;
+        int32_t emissive;
+        float wmoAmbientR;
+        float wmoAmbientG;
+        float wmoAmbientB;
+        int32_t hasVertexColors;
+        int32_t receivesExteriorShadows;
+        float sidnR;
+        float sidnG;
+        float sidnB;
+    };
+
 
     /**
      * WMO group GPU resources
@@ -821,8 +817,6 @@ private:
     float normalMapStrength_ = 0.8f;     // 0.0 = flat, 1.0 = full, 2.0 = exaggerated
     bool pomEnabled_ = true;             // on by default
     int pomQuality_ = 1;                 // 0=Low(16), 1=Medium(32), 2=High(64)
-    uint64_t extractedMaterialVersion_ = 0, appliedMaterialVersion_ = 0;
-    bool materialSettingsDirty_ = false; // rebuild UBOs when settings change
 
     // Rendering state
     bool wireframeMode = false;
@@ -914,7 +908,6 @@ public:
         void clear() noexcept;
         DrawList view, reflection, depth;
         bool wireframe = false;
-        uint64_t materialVersion = 0;
         int normalMap = 0, pom = 0, samples = 0;
         float normalStrength = 1;
     };

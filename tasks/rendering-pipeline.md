@@ -57,6 +57,13 @@ checkout remains on master with its concurrent uncommitted work preserved.
   selects three MRTs, per-sample MSAA handling and explicit transient lifetimes.
   The attachments and current-frame lighting are not yet connected to Renderer.
 
+- WMO frame settings are pushed from the immutable snapshot; materials contain
+  only resource properties. Removed the settings-change device idle and shared
+  material rewrites, including the stale settings on previously hidden groups.
+- WMO/character POM use one parameterized shader function.
+- The MSAA water continuation imports the preceding depth resolve/layout writes
+  with the same attachment dependency as the ordinary scene continuation.
+
 ## Validation so far
 
 - Native dev/no-LTO renderer, scene_render and GPU mutation fixture build passed.
@@ -75,6 +82,10 @@ checkout remains on master with its concurrent uncommitted work preserved.
 - The two graph regressions fail on the original implementation and pass after
   correction. Native GPU fill/copy/readback verifies readers retain both old and
   replaced versions; forced validation reports no renderer errors.
+- The WMO settings fixture failed on the original implementation when a hidden
+  WMO appeared after a settings change. It passes after the fix, including
+  settings changed after extraction, MSAA 4x and the water reflection path.
+  Synchronization validation exposed and verified the MSAA depth LOAD fix.
 - No branch FPS improvement is claimed. No full branch replay measured yet.
 
 ## Remaining implementation

@@ -736,7 +736,6 @@ void EditorViewport::render(VkCommandBuffer cmd) {
     }
     if (wmoRenderer_) {
         wmoRenderer_->useFrame(wmoRenderer_->extract(*camera_, camera_->getPosition(), {}));
-        wmoRenderer_->prepareRender();
         wmoRenderer_->render(cmd, perFrameSet, *camera_);
     }
 

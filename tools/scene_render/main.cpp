@@ -798,6 +798,17 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     FrameTimer timer(timing, std::min(10, frames / 3));
     const char* workerMode = std::getenv("WOWEE_RENDER_THREAD");
     core::FrameWorker recordingWorker(workerMode && std::string_view(workerMode) != "0");
+    auto changeWmoMaterials = [&](bool afterExtraction) {
+        for (const auto& change : scene.value("wmoMaterialSettings", json::array())) {
+            if (change.value("frame", 0) != frame ||
+                change.value("afterExtract", false) != afterExtraction) continue;
+            auto* wmo = renderer.getWMORenderer();
+            if (change.contains("normalMapping")) wmo->setNormalMappingEnabled(change["normalMapping"].get<bool>());
+            if (change.contains("normalStrength")) wmo->setNormalMapStrength(change["normalStrength"].get<float>());
+            if (change.contains("pom")) wmo->setPOMEnabled(change["pom"].get<bool>());
+            if (change.contains("pomQuality")) wmo->setPOMQuality(change["pomQuality"].get<int>());
+        }
+    };
     auto drawFrame = [&]() {
         const auto start = std::chrono::steady_clock::now();
         (void)renderer.takeFrameResults();
@@ -815,9 +826,11 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
             if (frame > 0) c.position += c.velocity * kStep;
             renderer.getCharacterRenderer()->setInstancePosition(c.instance, c.position);
         }
+        changeWmoMaterials(false);
         timer.call("rendererUpdate", [&] { renderer.update(kStep); });
         if (scene.value("discardFirstExtraction", false) && frame == 0) (void)renderer.extractFrameInputs();
         auto inputs = renderer.extractFrameInputs();
+        changeWmoMaterials(true);
         // Isolated cloud fixtures use the same captured inputs and GPU passes
         // as the client. White-cloud captures and a matching cloud-free
         // underlay expose coverage independently of the zone palette.
