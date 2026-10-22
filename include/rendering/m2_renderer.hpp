@@ -1,5 +1,6 @@
 #pragma once
 #include "rendering/paged_frame_buffer.hpp"
+#include "rendering/surface_identity.hpp"
 #include "rendering/range_allocator.hpp"
 
 #include "rendering/rt_instance_changes.hpp"
@@ -63,6 +64,7 @@ class VkContext;
 class VkTexture;
 class HiZSystem;
 class RtScene;
+class SurfacePass;
 
 // Ceiling on the bone matrices computed and uploaded for one M2 instance.
 // WoW models run well past a hundred bones - the largest shipped model has
@@ -90,6 +92,9 @@ struct M2ModelGPU {
         VkDescriptorSet materialSet = VK_NULL_HANDLE;  // set 1
         /// Its M2MaterialUBO, a slot of materialSlots_ (uniform_slot_pool.hpp).
         UniformSlotPool::Slot materialSlot;
+        glm::ivec4 surfaceFlags{0};
+        glm::vec4 surfaceFactors{0};
+        uint64_t surfacePublication = 0;
         uint32_t indexStart = 0;   // offset in indices (not bytes)
         uint32_t indexCount = 0;
         bool hasAlpha = false;
@@ -302,6 +307,7 @@ struct M2BoneRange {
 };
 
 struct M2Instance {
+    uint64_t surfaceLifetime = nextSurfaceIdentity();
     uint32_t id = 0;     // Unique instance ID
     /// Its own random numbers, seeded from the id (instance_random.hpp).
     InstanceRandom random;
@@ -785,6 +791,11 @@ public:
     void setCollisionWorld(collision::CollisionWorld* world) { collision_ = world; }
 
     void recreatePipelines();
+    size_t surfaceMaterialCapacity() const { return size_t(recording_->instanceEntries); }
+    void prepareSurface(SurfacePass& pass);
+    void recordSurface(VkDescriptorSet perFrameSet);
+    void executeSurface(VkCommandBuffer cmd,VkDescriptorSet perFrameSet,const Camera& camera,
+                        VkFramebuffer scene,VkSubpassContents contents);
 
     /// Build the main-pass pipelines. Called by initialize() and again by
     /// recreatePipelines() after a device loss, which is the reason it exists:
@@ -989,6 +1000,12 @@ private:
     void recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                                const StarReplacement& drawStars = {}, bool drawBakedStars = true);
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
+    VkPipelineLayout surfaceLayout_ = VK_NULL_HANDLE;
+    VkPipeline surfaceOpaque_ = VK_NULL_HANDLE, surfaceCutout_ = VK_NULL_HANDLE;
+    VkRenderPass surfacePipelinePass_ = VK_NULL_HANDLE;
+    SurfacePass* surfacePass_ = nullptr;
+    std::unordered_map<uint64_t,glm::mat4> previousSurfaceTransforms_, currentSurfaceTransforms_;
+    uint64_t surfaceRecordedFrame_ = 0;
 
     // Shadow rendering (Phase 7)
     VkPipeline shadowPipeline_ = VK_NULL_HANDLE;
@@ -1341,6 +1358,7 @@ private:
     /// no instance. A render thread working from a snapshot records from these
     /// and never from the scene the game thread is changing.
     struct DrawInstance {
+        uint64_t surfaceLifetime = 0;
         glm::mat4 modelMatrix{1.0f};
         /// Pinned by Frame::modelResources, including queued/unrecorded frames.
         const M2ModelGPU* model = nullptr;
@@ -1400,7 +1418,7 @@ private:
     void collectCullOutput(uint32_t frame);
     /// The opaque pass, from the lists cullView made; reads no instance.
     void recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                    const StarReplacement& drawStars, bool drawBakedStars);
+                    const StarReplacement& drawStars, bool drawBakedStars, bool surfaces = false);
     void recordStarReplacement(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                                const M2ModelGPU& model, const StarReplacement& drawStars);
     /// The glow sprites the opaque pass would draw of one instance at this

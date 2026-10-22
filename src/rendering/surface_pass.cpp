@@ -1,4 +1,4 @@
-#include "rendering/wmo_surface_pass.hpp"
+#include "rendering/surface_pass.hpp"
 #include "rendering/surface_rt.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_pipeline.hpp"
@@ -13,7 +13,7 @@ constexpr std::array<VkFormat,3> formats{VK_FORMAT_R16G16B16A16_SFLOAT,
     VK_FORMAT_R32G32B32A32_UINT,VK_FORMAT_R32G32B32A32_UINT};
 void requireSurface(bool ok, const char* what) {
     if (ok) return;
-    LOG_ERROR("WMO surface pass: ", what, " - frame cannot be rendered");
+    LOG_ERROR("Evaluated surface pass: ", what, " - frame cannot be rendered");
     throw std::runtime_error(what);
 }
 void viewport(VkCommandBuffer cmd,VkExtent2D extent) {
@@ -22,22 +22,22 @@ void viewport(VkCommandBuffer cmd,VkExtent2D extent) {
     vkCmdSetViewport(cmd,0,1,&v); vkCmdSetScissor(cmd,0,1,&sc);
 }
 }
-WmoSurfacePass::WmoSurfacePass(VkContext& ctx,VkDescriptorSetLayout frameLayout)
+SurfacePass::SurfacePass(VkContext& ctx,VkDescriptorSetLayout frameLayout)
     :ctx_(ctx),frameLayout_(frameLayout) {}
-WmoSurfacePass::~WmoSurfacePass() {
+SurfacePass::~SurfacePass() {
     retire();
     DeferredResources release(ctx_);
-    for (auto& commands : commands_) release.release(commands.pool, vkDestroyCommandPool);
+    for (auto& slot : commands_) for(auto& commands:slot) release.release(commands.pool, vkDestroyCommandPool);
 }
-void WmoSurfacePass::retire() {
+void SurfacePass::retire() {
     DeferredResources release(ctx_);
-    release.release(framebuffer_, vkDestroyFramebuffer); release.destroy(pipeline_); release.destroy(layout_);
+    release.release(framebuffer_, vkDestroyFramebuffer); for(auto& pipeline:pipelines_) release.destroy(pipeline); release.destroy(layout_);
     release.destroy(pool_); release.destroy(setLayout_); release.release(pass_, vkDestroyRenderPass);
     for(auto& image:images_) release.image(image);
     for(auto& buffer:buffers_) release.buffer(buffer);
     capacities_.fill(0); sets_.fill(VK_NULL_HANDLE); depth_=VK_NULL_HANDLE;
 }
-void WmoSurfacePass::create(VkExtent2D extent,VkImageView depth) {
+void SurfacePass::create(VkExtent2D extent,VkImageView depth) {
     retire(); extent_=extent; depth_=depth; samples_=ctx_.getMsaaSamples();
     depthFormat_=ctx_.getDepthFormat(); colorFormat_=ctx_.getSwapchainFormat();
     const auto device=ctx_.getDevice();
@@ -100,26 +100,28 @@ void WmoSurfacePass::create(VkExtent2D extent,VkImageView depth) {
     }
     VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT,0,80};
     layout_=createPipelineLayout(device,{frameLayout_,setLayout_},{push});
+    for(size_t family=0;family<kFamilies;++family) {
     VkShaderModule vert,frag;
     requireSurface(vert.loadFromFile(device,"assets/shaders/wmo_lighting.vert.spv") &&
-        frag.loadFromFile(device,samples_==VK_SAMPLE_COUNT_1_BIT?"assets/shaders/wmo_lighting.frag.spv":"assets/shaders/wmo_lighting_ms.frag.spv"),"lighting shaders unavailable");
-    pipeline_=PipelineBuilder().setShaders(vert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),frag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+        frag.loadFromFile(device, (std::string("assets/shaders/")+(family==0?"wmo":"m2")+"_lighting"+(samples_==VK_SAMPLE_COUNT_1_BIT?"":"_ms")+".frag.spv").c_str()),"lighting shaders unavailable");
+    pipelines_[family]=PipelineBuilder().setShaders(vert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),frag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
         .setRasterization(VK_POLYGON_MODE_FILL,VK_CULL_MODE_NONE).setNoDepthTest()
         .setColorBlendAttachment(PipelineBuilder::blendDisabled()).setMultisample(samples_)
         .setLayout(layout_).setRenderPass(ctx_.getImGuiRenderPass()).setDynamicStates(viewportAndScissorDynamic())
         .build(device,ctx_.getPipelineCache());
-    vert.destroy();frag.destroy();requireSurface(pipeline_!=VK_NULL_HANDLE,"lighting pipeline creation failed");
-    LOG_INFO("WMO evaluated surfaces: ",extent.width,"x",extent.height," samples=",int(samples_),
+    vert.destroy();frag.destroy();requireSurface(pipelines_[family]!=VK_NULL_HANDLE,"lighting pipeline creation failed");
+    }
+    LOG_INFO("Shared evaluated surfaces: ",extent.width,"x",extent.height," samples=",int(samples_),
         " transient color bytes=",uint64_t(extent.width)*extent.height*40*uint32_t(samples_));
 }
-void WmoSurfacePass::prepare(VkExtent2D extent,VkImageView depth,TargetVersion version,size_t materialCapacity,
+void SurfacePass::prepare(VkExtent2D extent,VkImageView depth,TargetVersion version,std::array<size_t,kFamilies> materialCapacities,
         RtScene* rtScene,int rtMode,const RtLighting::FrameInputs& rtInputs) {
     requireSurface(depth!=VK_NULL_HANDLE,"scene depth unavailable");
     if(!pass_ || version!=targetVersion_ || depth!=depth_ || extent.width!=extent_.width || extent.height!=extent_.height ||
        samples_!=ctx_.getMsaaSamples() || colorFormat_!=ctx_.getSwapchainFormat() || depthFormat_!=ctx_.getDepthFormat()) create(extent,depth);
     targetVersion_=version;
     const uint32_t slot=ctx_.getCurrentFrame();
-    auto& commands = commands_[slot];
+    for(auto& commands:commands_[slot]) {
     if (!commands.pool) {
         VkCommandPoolCreateInfo info{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         info.queueFamilyIndex = ctx_.getGraphicsQueueFamily();
@@ -129,7 +131,12 @@ void WmoSurfacePass::prepare(VkExtent2D extent,VkImageView depth,TargetVersion v
     requireSurface(vkResetCommandPool(ctx_.getDevice(), commands.pool, 0) == VK_SUCCESS,
                    "worker command pool reset failed");
     commands.runs.clear();
-    materialLimit_=materialCapacity; materialsWritten_=0;
+    }
+    size_t materialCapacity=0;
+    for(size_t family=0;family<kFamilies;++family) {
+        materialBegin_[family]=materialCapacity; materialsWritten_[family]=0;
+        materialLimit_[family]=materialCapacities[family]; materialCapacity+=materialCapacities[family];
+    }
     const size_t bytes=std::max(size_t(1),materialCapacity)*sizeof(Material);
     VkPhysicalDeviceProperties props{};vkGetPhysicalDeviceProperties(ctx_.getPhysicalDevice(),&props);
     requireSurface(bytes<=props.limits.maxStorageBufferRange,"surface material table exceeds device limit");
@@ -160,23 +167,29 @@ void WmoSurfacePass::prepare(VkExtent2D extent,VkImageView depth,TargetVersion v
     writes[4].pBufferInfo=&lighting;
     vkUpdateDescriptorSets(ctx_.getDevice(),5,writes,0,nullptr);
 }
-bool WmoSurfacePass::rtHistoryValid() const { return rtMode_!=0 && rt_ && rt_->hasHistory(); }
-glm::vec3 WmoSurfacePass::previousRtCamera() const { return rt_?rt_->previousCamera():glm::vec3(0); }
-uint32_t WmoSurfacePass::appendMaterial(const Material& material) {
-    requireSurface(materialsWritten_<materialLimit_,"snapshot material capacity exhausted");
-    const uint32_t index=static_cast<uint32_t>(materialsWritten_++);
+bool SurfacePass::rtHistoryValid() const { return rtMode_!=0 && rt_ && rt_->hasHistory(); }
+glm::vec3 SurfacePass::previousRtCamera() const { return rt_?rt_->previousCamera():glm::vec3(0); }
+uint32_t SurfacePass::appendMaterial(const Material& material) { return appendMaterialBytes(Family::Wmo,&material); }
+uint32_t SurfacePass::appendMaterial(const M2Material& material) {
+    static_assert(sizeof(Material)==sizeof(M2Material));
+    return appendMaterialBytes(Family::M2,&material);
+}
+uint32_t SurfacePass::appendMaterialBytes(Family kind,const void* material) {
+    const size_t family=size_t(kind);
+    requireSurface(materialsWritten_[family]<materialLimit_[family],"snapshot material capacity exhausted");
+    const uint32_t index=static_cast<uint32_t>(materialBegin_[family]+materialsWritten_[family]++);
     auto* output=static_cast<Material*>(buffers_[ctx_.getCurrentFrame()].info.pMappedData);
-    std::memcpy(output+index,&material,sizeof(material));
+    std::memcpy(output+index,material,sizeof(Material));
     return index;
 }
-void WmoSurfacePass::finishMaterials() {
+void SurfacePass::finishMaterials() {
     // Slot fence was acquired before recording. Host writes, including those
     // made after recording a draw, are flushed before this command is submitted.
     requireSurface(vmaFlushAllocation(ctx_.getAllocator(),buffers_[ctx_.getCurrentFrame()].allocation,
         0,VK_WHOLE_SIZE)==VK_SUCCESS,"surface material upload flush failed");
 }
-VkCommandBuffer WmoSurfacePass::beginRun(bool geometry) {
-    auto& commands = commands_[ctx_.getCurrentFrame()];
+VkCommandBuffer SurfacePass::beginRun(Family family,bool geometry) {
+    auto& commands = commands_[ctx_.getCurrentFrame()][size_t(family)];
     const size_t index = commands.runs.size();
     if (index == commands.buffers.size()) {
         VkCommandBufferAllocateInfo info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -200,18 +213,18 @@ VkCommandBuffer WmoSurfacePass::beginRun(bool geometry) {
     commands.runs.push_back({cmd, geometry});
     return cmd;
 }
-void WmoSurfacePass::endRun() {
-    requireSurface(vkEndCommandBuffer(commands_[ctx_.getCurrentFrame()].runs.back().command) == VK_SUCCESS,
+void SurfacePass::endRun(Family family) {
+    requireSurface(vkEndCommandBuffer(commands_[ctx_.getCurrentFrame()][size_t(family)].runs.back().command) == VK_SUCCESS,
                    "worker command recording completion failed");
 }
-void WmoSurfacePass::execute(VkCommandBuffer cmd, VkDescriptorSet frameSet, VkFramebuffer scene,
+void SurfacePass::execute(Family family,VkCommandBuffer cmd, VkDescriptorSet frameSet, VkFramebuffer scene,
         const glm::mat4& inverseViewProjection, VkSubpassContents resumeContents) {
     auto contents = resumeContents;
-    for (const auto& run : commands_[ctx_.getCurrentFrame()].runs) {
+    for (const auto& run : commands_[ctx_.getCurrentFrame()][size_t(family)].runs) {
         if (run.geometry) {
             beginGeometry(cmd);
             vkCmdExecuteCommands(cmd, 1, &run.command);
-            light(cmd, frameSet, scene, inverseViewProjection);
+            light(family,cmd, frameSet, scene, inverseViewProjection);
             contents = VK_SUBPASS_CONTENTS_INLINE;
         } else {
             if (contents != VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS) {
@@ -227,24 +240,24 @@ void WmoSurfacePass::execute(VkCommandBuffer cmd, VkDescriptorSet frameSet, VkFr
         resumeScene(cmd, scene, resumeContents);
     }
 }
-void WmoSurfacePass::beginGeometry(VkCommandBuffer cmd) {
+void SurfacePass::beginGeometry(VkCommandBuffer cmd) {
     vkCmdEndRenderPass(cmd);
     VkClearValue clear[3]{};VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     begin.renderPass=pass_;begin.framebuffer=framebuffer_;begin.renderArea.extent=extent_;
     begin.clearValueCount=3;begin.pClearValues=clear;
     vkCmdBeginRenderPass(cmd,&begin,VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
 }
-void WmoSurfacePass::resumeScene(VkCommandBuffer cmd,VkFramebuffer scene,VkSubpassContents contents) {
+void SurfacePass::resumeScene(VkCommandBuffer cmd,VkFramebuffer scene,VkSubpassContents contents) {
     VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     begin.renderPass=ctx_.getSceneContinueRenderPass();begin.framebuffer=scene;begin.renderArea.extent=extent_;
     vkCmdBeginRenderPass(cmd,&begin,contents);
     if(contents==VK_SUBPASS_CONTENTS_INLINE) viewport(cmd,extent_);
 }
-void WmoSurfacePass::light(VkCommandBuffer cmd,VkDescriptorSet frameSet,VkFramebuffer scene,const glm::mat4& inverseViewProjection) {
+void SurfacePass::light(Family family,VkCommandBuffer cmd,VkDescriptorSet frameSet,VkFramebuffer scene,const glm::mat4& inverseViewProjection) {
     vkCmdEndRenderPass(cmd);
     if(rtMode_!=0)rt_->record(cmd);
     resumeScene(cmd,scene,VK_SUBPASS_CONTENTS_INLINE);
-    vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_);
+    vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_[size_t(family)]);
     VkDescriptorSet sets[]{frameSet,sets_[ctx_.getCurrentFrame()]};
     vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,layout_,0,2,sets,0,nullptr);
     struct Push {glm::mat4 inverse;glm::vec4 extent;} push{inverseViewProjection,{extent_.width,extent_.height,rtMode_,rtDistance_}};

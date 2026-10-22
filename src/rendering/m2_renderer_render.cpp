@@ -1,6 +1,7 @@
 #include "rendering/shadow_params.hpp"
 #include "rendering/m2_material.hpp"
 #include "rendering/m2_renderer.hpp"
+#include "rendering/surface_pass.hpp"
 #include "rendering/m2_renderer_internal.h"
 #include "rendering/m2_sky_material.hpp"
 #include "rendering/m2_sway.hpp"
@@ -1474,6 +1475,7 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
             // What the passes will draw of it, so they need not come back here.
             const uint32_t draw = static_cast<uint32_t>(out.draws.size());
             out.draws.push_back(DrawInstance{
+                .surfaceLifetime = instance.surfaceLifetime,
                 .modelMatrix = instance.modelMatrix,
                 .model = instance.cachedModel,
                 .interiorLight = instance.interiorLight,
@@ -1779,8 +1781,20 @@ void M2Renderer::recordStarReplacement(VkCommandBuffer cmd, VkDescriptorSet perF
     vkCmdBindIndexBuffer(cmd, model.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 }
 
+void M2Renderer::recordSurface(VkDescriptorSet perFrameSet) {
+    if(!surfaceMaterialCapacity()) {lastDrawCallCount=0;blendedPendingAfterWater_=drawsBlendedAfterWater();return;}
+    recordView(VK_NULL_HANDLE,perFrameSet,{},true,true);
+}
+void M2Renderer::executeSurface(VkCommandBuffer cmd,VkDescriptorSet perFrameSet,const Camera& camera,
+        VkFramebuffer scene,VkSubpassContents contents) {
+    if(!surfaceMaterialCapacity())return;
+    glm::mat4 rotation=camera.getViewMatrix();rotation[3]=glm::vec4(0,0,0,1);
+    surfacePass_->execute(SurfacePass::Family::M2,cmd,perFrameSet,scene,
+        glm::inverse(camera.getProjectionMatrix()*rotation),contents);
+}
+
 void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                            const StarReplacement& drawStars, bool drawBakedStars) {
+                            const StarReplacement& drawStars, bool drawBakedStars, bool surfaces) {
     const auto& drawInstances_ = recording_->drawInstances_;
     const auto& sortedVisible_ = recording_->sortedVisible_;
 
@@ -1800,29 +1814,24 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         return;
     }
 
-    // Bind per-frame descriptor set (set 0) - shared across all draws
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            pipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
-
-    // Start with opaque pipeline
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, opaquePipeline_);
-    currentPipeline = opaquePipeline_;
-
-    // Bind dummy bone set (set 2) so non-animated draws have a valid binding.
-    // Bind mega bone SSBO instead - all instances index into one buffer via boneBase.
-    if (megaBoneSet_[frameIndex]) {
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                pipelineLayout_, 2, 1, &megaBoneSet_[frameIndex], 0, nullptr);
-    } else if (dummyBoneSet_) {
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                pipelineLayout_, 2, 1, &dummyBoneSet_, 0, nullptr);
-    }
-
-    // Bind instance data SSBO (set 3) - per-instance transforms, fade, bones
-    if (instanceSet_[frameIndex]) {
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                pipelineLayout_, 3, 1, &instanceSet_[frameIndex], 0, nullptr);
-    }
+    VkPipelineLayout activeLayout=pipelineLayout_;
+    bool geometry=false;
+    const auto bindBase=[&]() {
+        vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,activeLayout,0,1,&perFrameSet,0,nullptr);
+        const auto bones=megaBoneSet_[frameIndex]?megaBoneSet_[frameIndex]:dummyBoneSet_;
+        vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,activeLayout,2,1,&bones,0,nullptr);
+        vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,activeLayout,3,1,&instanceSet_[frameIndex],0,nullptr);
+    };
+    const auto beginRun=[&](bool nextGeometry) {
+        if(cmd)surfacePass_->endRun(SurfacePass::Family::M2);
+        cmd=surfacePass_->beginRun(SurfacePass::Family::M2,nextGeometry);
+        geometry=nextGeometry;activeLayout=geometry?surfaceLayout_:pipelineLayout_;
+        currentPipeline=VK_NULL_HANDLE;currentMaterialSet=VK_NULL_HANDLE;
+        bindBase();
+    };
+    if(surfaces)beginRun(true);else bindBase();
+    const bool previousValid=surfaces && surfacePass_->rtHistoryValid() && surfaceRecordedFrame_+1==vkCtx_->frameNumber();
+    if(surfaces) {previousSurfaceTransforms_.swap(currentSurfaceTransforms_);currentSurfaceTransforms_.clear();}
 
     // Reset instance SSBO write cursor for this frame
     instanceDataCount_ = 0;
@@ -1843,6 +1852,8 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             float fadeAlpha;
             bool useBones;
             uint16_t targetLOD;
+            glm::mat4 previousFromCurrent{1};
+            bool historyValid=false;
         };
         std::vector<PendingInstance> pending;
         pending.reserve(128);
@@ -1910,9 +1921,23 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             // Write base instance data to SSBO (no texture animation - overridden for tex-anim batches)
             uint32_t baseSSBOOffset = instanceDataCount_;
             size_t writtenInstances = 0;
-            for (const auto& p : pending) {
+            for (auto& p : pending) {
                 if (instanceDataCount_ >= instanceCapacity_[frameIndex]) break;
                 const DrawInstance& inst = drawInstances_[p.draw];
+                if(surfaces) {
+                    const auto previous=previousSurfaceTransforms_.find(inst.surfaceLifetime);
+                    M2PushConstants sway;fillSway(sway,model,false);
+                    p.historyValid=previousValid && previous!=previousSurfaceTransforms_.end() &&
+                        !p.useBones && !inst.afloat && sway.isFoliage==0;
+                    if(p.historyValid) {
+                        auto inverse=glm::inverse(inst.modelMatrix);
+                        inverse[3]=inverse*glm::vec4(recording_->cameraPosition,1);
+                        auto relative=previous->second;
+                        relative[3]-=glm::vec4(surfacePass_->previousRtCamera(),0);
+                        p.previousFromCurrent=relative*inverse;
+                    }
+                    currentSurfaceTransforms_.insert_or_assign(inst.surfaceLifetime,inst.modelMatrix);
+                }
                 auto& e = instSSBO[instanceDataCount_];
                 e.model = inst.modelMatrix;
                 e.uv = M2UVTransform{};
@@ -2080,6 +2105,13 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         ? cutoutPipeline_
                         : blendPipeline(m2BlendPipeline(drawState.drawBlendMode));
                     if (skyMode_ && drawState.drawBlendMode <= 1) desiredPipeline = scenePipes_.alpha;
+                    const bool evaluated=surfaces && (drawState.forceCutout || drawState.drawBlendMode==0);
+                    if(surfaces && geometry!=evaluated) {
+                        beginRun(evaluated);
+                        vkCmdBindVertexBuffers(cmd,0,1,&model.vertexBuffer,&vbOffset);
+                        vkCmdBindIndexBuffer(cmd,model.indexBuffer,0,VK_INDEX_TYPE_UINT16);
+                    }
+                    if(evaluated)desiredPipeline=drawState.forceCutout?surfaceCutout_:surfaceOpaque_;
                     if (desiredPipeline != currentPipeline) {
                         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
                         currentPipeline = desiredPipeline;
@@ -2089,7 +2121,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     if (!batch.materialSet) continue;
                     if (batch.materialSet != currentMaterialSet) {
                         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                                pipelineLayout_, 1, 1, &batch.materialSet, 0, nullptr);
+                                                activeLayout, 1, 1, &batch.materialSet, 0, nullptr);
                         currentMaterialSet = batch.materialSet;
                     }
 
@@ -2099,7 +2131,26 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     pc.texCoordSet2 = static_cast<int32_t>(batch.secondTexCoords);
                     fillSway(pc, model, skyMode_);
                     pc.instanceDataOffset = static_cast<int32_t>(drawOffset);
-                    vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+                    vkCmdPushConstants(cmd, activeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+                    if(evaluated) {
+                        uint32_t baseMaterial=0;
+                        for(size_t j=lodIdx;j<lodEnd;++j) {
+                            const auto& p=pending[j];const auto& inst=drawInstances_[p.draw];
+                            SurfacePass::M2Material material{};
+                            material.flags=batch.surfaceFlags;material.factors=batch.surfaceFactors;
+                            material.factors.z=inst.highlight;
+                            material.interiorAmbient=inst.interiorLight.ambient;
+                            material.interiorDirect=inst.interiorLight.direct;
+                            material.localLights=inst.localLights;
+                            material.identity={uint32_t(inst.surfaceLifetime),uint32_t(inst.surfaceLifetime>>32),
+                                uint32_t(batch.surfacePublication),uint32_t(batch.surfacePublication>>32)};
+                            material.previousFromCurrent=p.previousFromCurrent;
+                            material.history.x=p.historyValid?1u:0u;
+                            const auto index=surfacePass_->appendMaterial(material);
+                            if(j==lodIdx)baseMaterial=index;
+                        }
+                        vkCmdPushConstants(cmd,activeLayout,VK_SHADER_STAGE_VERTEX_BIT,sizeof(pc),sizeof(baseMaterial),&baseMaterial);
+                    }
                     vkCmdDrawIndexed(cmd, batch.indexCount, groupSize, batch.indexStart, 0, 0);
                     if (skyMode_) ++skyDiagDrawsOpaque_;
                     lastDrawCallCount++;
@@ -2115,7 +2166,11 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // With the water out of the scene pass, the blended half waits for it:
     // drawn now, the water would be laid over it.
     blendedPendingAfterWater_ = drawsBlendedAfterWater();
-    if (!blendedPendingAfterWater_) recordTransparentPass(cmd, perFrameSet, drawStars, drawBakedStars);
+    if (!blendedPendingAfterWater_) {
+        if(surfaces && geometry)beginRun(false);
+        recordTransparentPass(cmd, perFrameSet, drawStars, drawBakedStars);
+    }
+    if(surfaces) {surfacePass_->endRun(SurfacePass::Family::M2);surfaceRecordedFrame_=vkCtx_->frameNumber();}
 
     // How many of the sky's layers were actually drawn this frame.
     //

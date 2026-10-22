@@ -1,6 +1,6 @@
 #include "surface_rt_probe.hpp"
 #include "rendering/surface_rt.hpp"
-#include "rendering/wmo_surface_pass.hpp"
+#include "rendering/surface_pass.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_shader.hpp"
@@ -66,9 +66,9 @@ int checkSurfaceRt(VkContext& ctx) {
         vertex.destroy();fragment.destroy();require(pipeline!=VK_NULL_HANDLE,"probe pipeline failed");
         const VkDeviceSize bytes=size*size*uint32_t(samples)*8;
         auto readback=createBuffer(alloc,bytes,VK_BUFFER_USAGE_TRANSFER_DST_BIT,VMA_MEMORY_USAGE_CPU_ONLY);
-        auto materials=createBuffer(alloc,2*sizeof(WmoSurfacePass::Material),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
-        auto* data=static_cast<WmoSurfacePass::Material*>(materials.info.pMappedData);
-        data[0]=WmoSurfacePass::Material{};data[1]=WmoSurfacePass::Material{};
+        auto materials=createBuffer(alloc,2*sizeof(SurfacePass::Material),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
+        auto* data=static_cast<SurfacePass::Material*>(materials.info.pMappedData);
+        data[0]=SurfacePass::Material{};data[1]=SurfacePass::Material{};
         data[0].identity={1,0,1,0};data[1].identity={2,0,1,0};
         data[0].history.x=data[1].history.x=1;
         RtLighting::FrameInputs input{};
@@ -85,7 +85,7 @@ int checkSurfaceRt(VkContext& ctx) {
                 scene.update(cmd);
                 require(scene.hasContent(),"probe tracing scene is empty");
                 vmaFlushAllocation(alloc,materials.allocation,0,VK_WHOLE_SIZE);
-                lighting.prepare({size,size},samples,views[0],views[1],{materials.buffer,0,2*sizeof(WmoSurfacePass::Material)},mode,input);
+                lighting.prepare({size,size},samples,views[0],views[1],{materials.buffer,0,2*sizeof(SurfacePass::Material)},mode,input);
                 VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};begin.renderPass=pass;begin.framebuffer=framebuffer;begin.renderArea.extent={size,size};
                 vkCmdBeginRenderPass(cmd,&begin,VK_SUBPASS_CONTENTS_INLINE);
                 VkViewport viewport{0,0,float(size),float(size),0,1};VkRect2D scissor{{0,0},{size,size}};

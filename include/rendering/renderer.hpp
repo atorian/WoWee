@@ -1,4 +1,5 @@
 #pragma once
+#include "rendering/surface_pass.hpp"
 #include "rendering/rt_region.hpp"
 
 #include "rendering/view_distance.hpp"
@@ -496,6 +497,7 @@ private:
     /// by m2Renderer. Holds both; goes before either does.
     std::unique_ptr<CharacterEmitters> characterEmitters_;
     std::unique_ptr<WMORenderer> wmoRenderer;
+    std::unique_ptr<SurfacePass> surfacePass_;
     std::unique_ptr<M2Renderer> m2Renderer;
     std::unique_ptr<M2Renderer> skyboxModelRenderer_;
     WorldEnvironment environment_;

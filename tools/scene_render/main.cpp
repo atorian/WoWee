@@ -595,6 +595,67 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     std::vector<MovingCharacter> movingCharacters;
     // Authored-order material layers through the ordinary WMO upload/scene API.
     // Kept in scene_render only: no fixture switch in the shipping renderer.
+    // Deterministic material/instancing fixture through the production M2 API.
+    if (scene.contains("m2Layers")) {
+        const auto& layers=scene.at("m2Layers");
+        if(!layers.is_array() || layers.empty() || layers.size()>64)
+            throw std::runtime_error("m2Layers requires 1..64 rectangular layers");
+        pipeline::M2Model model{};model.name="scene_render_materials.m2";
+        model.boundMin=glm::vec3(1e10f);model.boundMax=glm::vec3(-1e10f);
+        std::unordered_map<std::string,pipeline::BLPImage> pixels;
+        for(const auto& layer:layers) {
+            const auto color=layer.at("rgba").get<std::array<uint8_t,4>>();
+            const auto rect=layer.at("rect").get<std::array<float,4>>();
+            const float x=layer.at("x").get<float>();
+            pipeline::M2Batch batch{};
+            batch.colorIndex=batch.transparencyIndex=batch.textureAnimIndex=UINT16_MAX;
+            batch.textureIndex=uint16_t(model.textureLookup.size());
+            batch.materialIndex=uint16_t(model.materials.size());
+            batch.textureCount=layer.contains("secondRgba")?2:1;
+            batch.shader=layer.value("shader",uint16_t(0));
+            model.materials.push_back({layer.value("flags",uint16_t(0)),layer.value("blend",uint16_t(0))});
+            for(uint16_t stage=0;stage<batch.textureCount;++stage) {
+                const auto rgba=stage?layer.at("secondRgba").get<std::array<uint8_t,4>>():color;
+                const auto id=uint16_t(model.textures.size());
+                const std::string texture="scene_render_m2_material_"+std::to_string(id)+".blp";
+                pipeline::BLPImage image;image.width=image.height=16;image.data.resize(16*16*4);
+                for(int y=0;y<16;++y)for(int z=0;z<16;++z) {
+                    std::copy(rgba.begin(),rgba.end(),image.data.begin()+(y*16+z)*4);
+                    if(stage==0 && layer.value("cutout",false) && ((y/4+z/4)%2))image.data[(y*16+z)*4+3]=0;
+                }
+                pixels.emplace(texture,std::move(image));model.textures.push_back({0,0,texture});model.textureLookup.push_back(id);
+            }
+            batch.vertexStart=uint32_t(model.vertices.size());batch.vertexCount=4;
+            batch.indexStart=uint32_t(model.indices.size());batch.indexCount=6;
+            const std::array<glm::vec2,4> corners{{{rect[0],rect[1]},{rect[2],rect[1]},
+                                                {rect[2],rect[3]},{rect[0],rect[3]}}};
+            for(size_t i=0;i<4;++i) {
+                pipeline::M2Vertex vertex{};vertex.position={x,corners[i].x,corners[i].y};
+                vertex.normal={-1,0,0};vertex.boneWeights[0]=255;
+                vertex.texCoords[0]={i==1||i==2?1.f:0.f,i>=2?1.f:0.f};vertex.texCoords[1]=vertex.texCoords[0];
+                model.vertices.push_back(vertex);model.boundMin=glm::min(model.boundMin,vertex.position);
+                model.boundMax=glm::max(model.boundMax,vertex.position);
+            }
+            for(uint16_t i:{0,1,2,0,2,3})model.indices.push_back(uint16_t(batch.vertexStart)+i);
+            model.batches.push_back(batch);
+        }
+        model.boundRadius=glm::length(model.boundMax-model.boundMin)*0.5f;
+        auto& m2=*renderer.getM2Renderer();m2.setPredecodedBLPCache(&pixels);
+        const bool loaded=m2.loadModel(model,modelId);m2.setPredecodedBLPCache(nullptr);
+        if(!loaded)throw std::runtime_error("scene_render M2 layers upload failed");
+        const auto instances=scene.value("m2LayerInstances",json::array({json::object()}));
+        for(const auto& instance:instances) {
+            const glm::vec3 offset=vec3(instance.value("offset",json()));
+            const uint32_t id=m2.createInstance(modelId,origin+offset,glm::vec3(0),1,false);
+            if(instance.contains("interiorAmbient"))m2.setInteriorLight(id,rendering::InteriorLight{
+                vec3(instance.at("interiorAmbient")),vec3(instance.at("interiorDirect"))});
+            placements.push_back({.instanceId=id,.modelId=modelId});
+            const auto lo=origin+offset+model.boundMin,hi=origin+offset+model.boundMax;
+            if(!bounds.valid)bounds={lo,hi,true};else {bounds.min=glm::min(bounds.min,lo);bounds.max=glm::max(bounds.max,hi);}
+        }
+        ++modelId;
+        LOG_INFO("scene_render: placed ",layers.size()," M2 material layers in ",instances.size()," instances");
+    }
     if (scene.contains("wmoLayers")) {
         const auto& layers=scene["wmoLayers"];
         if (!layers.is_array() || layers.empty() || layers.size()>64)

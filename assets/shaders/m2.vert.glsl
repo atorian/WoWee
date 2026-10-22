@@ -46,6 +46,9 @@ layout(push_constant) uniform Push {
     float swayAmp;           // Sway amplitude scale; 1.0 = the tree-sized default
     float plantHeight;       // The model's own height (model space), for the player brush
     int texCoordSet2;        // second stage: 0 UV0, 1 UV1, -1 sphere map, 2 UV0 unanimated
+#ifdef M2_GBUFFER
+    uint surfaceMaterialBase;
+#endif
 } push;
 
 layout(set = 2, binding = 0) readonly buffer BoneSSBO {
@@ -102,6 +105,9 @@ layout(location = 9) flat out vec4 vInteriorAmbient;
 layout(location = 10) flat out vec4 vInteriorDirect;
 layout(location = 11) flat out uvec4 vLocalLights;
 
+#ifdef M2_GBUFFER
+layout(location=12) flat out uint vSurfaceMaterial;
+#endif
 #include "sphere_map.glsli"
 #define WIND_PER_FRAME
 #include "wind.glsli"
@@ -116,6 +122,9 @@ vec2 uvTransform(vec4 row0, vec4 row1, vec2 uv) {
 }
 
 void main() {
+#ifdef M2_GBUFFER
+    vSurfaceMaterial=push.surfaceMaterialBase+gl_InstanceIndex;
+#endif
     // Fetch per-instance data from SSBO
     int instIdx = push.instanceDataOffset + gl_InstanceIndex;
     mat4 model = instanceData[instIdx].model;

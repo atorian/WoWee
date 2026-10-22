@@ -1,5 +1,5 @@
 // The first 80 bytes are the original evaluated WMO material contract.
-struct SurfaceMaterial {
+struct WmoSurfaceMaterial {
     int hasTexture; int alphaTest; int light; int transitionLight;
     float specularIntensity; float heightMapVariance; int isLava; int emissive;
     float ambientR; float ambientG; float ambientB; int hasVertexColors;
@@ -8,6 +8,12 @@ struct SurfaceMaterial {
     mat4 previousFromCurrent; // current camera-relative -> previous camera-relative
     uvec4 identity; // placement lifetime + immutable batch publication
     uvec4 history; // x: previous rendered placement is valid (cloth invalidates)
+};
+struct SurfaceMaterial {
+    uvec4 payload[5]; // family-specific 80-byte evaluated lighting material
+    mat4 previousFromCurrent;
+    uvec4 identity;
+    uvec4 history;
 };
 struct SurfaceHistory {
     // uvec2 alignment gives a 40-byte array stride, without uvec4 tail padding.

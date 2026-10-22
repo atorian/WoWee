@@ -1,5 +1,5 @@
 #pragma once
-#include "rendering/wmo_surface_pass.hpp"
+#include "rendering/surface_pass.hpp"
 #include "rendering/scene_view.hpp"
 
 #include "rendering/rt_instance_changes.hpp"
@@ -264,8 +264,8 @@ public:
     struct Frame;
     std::shared_ptr<const Frame> extract(const Camera& camera, const glm::vec3& viewer,
                                         const std::vector<LocalLight>& lights, const SceneView* reflection = nullptr);
-    void prepareSurface(VkImageView depth, VkExtent2D extent, WmoSurfacePass::TargetVersion version,
-                        RtScene* rtScene, int rtMode, const RtLighting::FrameInputs& rtInputs);
+    void prepareSurface(SurfacePass& pass);
+    size_t surfaceMaterialCapacity() const { return recording_->view.surfaceMaterialCapacity; }
     void recordSurface(VkDescriptorSet perFrameSet, const Camera& camera);
     void executeSurface(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
                         VkFramebuffer scene, VkSubpassContents resumeContents);
@@ -788,8 +788,7 @@ private:
 
     // Descriptor set layouts
     VkDescriptorSetLayout materialSetLayout_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout frameSetLayout_ = VK_NULL_HANDLE;
-    std::unique_ptr<WmoSurfacePass> surfacePass_;
+    SurfacePass* surfacePass_ = nullptr;
     VkPipeline surfacePipeline_ = VK_NULL_HANDLE;
     VkRenderPass surfacePipelinePass_ = VK_NULL_HANDLE;
     VkPipelineLayout surfaceLayout_ = VK_NULL_HANDLE;
@@ -821,8 +820,6 @@ private:
 
     // Active instances
     uint32_t nextInstanceId = 1;
-    uint64_t nextSurfaceInstance_ = 1;
-    mutable std::atomic<uint64_t> nextSurfaceBatch_{1};
     std::unordered_map<uint64_t,glm::mat4> previousSurfaceTransforms_, currentSurfaceTransforms_;
     uint64_t surfaceRecordedFrame_ = 0;
 

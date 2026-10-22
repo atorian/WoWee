@@ -613,6 +613,8 @@ function(compile_shaders TARGET_NAME)
         "surface_rt.comp.glsl|surface_rt_hw_ms.comp.spv|-DRT_HARDWARE --target-env=vulkan1.2 -DSURFACE_MSAA"
         "surface_rt.comp.glsl|surface_rt_extra_hw_ms.comp.spv|-DSURFACE_EXTRA -DRT_HARDWARE --target-env=vulkan1.2 -DSURFACE_MSAA"
         "surface_rt_filter.comp.glsl|surface_rt_filter_ms.comp.spv|-DSURFACE_MSAA"
+        "m2.vert.glsl|m2_surface.vert.spv|-DM2_GBUFFER"
+        "m2_lighting.frag.glsl|m2_lighting_ms.frag.spv|-DSURFACE_MSAA"
         "surface_rt_filter.comp.glsl|surface_rt_filter_wide.comp.spv|-DSURFACE_WIDE"
         "surface_rt_filter.comp.glsl|surface_rt_filter_wide_ms.comp.spv|-DSURFACE_WIDE -DSURFACE_MSAA"
         "wmo_lighting.frag.glsl|wmo_lighting_ms.frag.spv|-DSURFACE_MSAA"
@@ -627,6 +629,8 @@ function(compile_shaders TARGET_NAME)
         separate_arguments(VARIANT_ARGS UNIX_COMMAND "${VARIANT_ARGS}")
         if(VARIANT_SRC MATCHES "[.]frag[.]glsl$")
             set(VARIANT_STAGE fragment)
+        elseif(VARIANT_SRC MATCHES "[.]vert[.]glsl$")
+            set(VARIANT_STAGE vertex)
         else()
             set(VARIANT_STAGE compute)
         endif()
@@ -1083,7 +1087,7 @@ set(WOWEE_SOURCES
     src/rendering/sky_system.cpp
     src/rendering/character_renderer.cpp
     src/rendering/character_preview.cpp
-    src/rendering/wmo_surface_pass.cpp
+    src/rendering/surface_pass.cpp
     src/rendering/surface_rt.cpp
     src/rendering/wmo_renderer.cpp
     src/rendering/wmo_model_prep.cpp
@@ -2961,7 +2965,7 @@ add_executable(wowee_editor
     src/rendering/m2_renderer_particles.cpp
     src/rendering/m2_renderer_render.cpp
     src/rendering/m2_model_classifier.cpp
-    src/rendering/wmo_surface_pass.cpp
+    src/rendering/surface_pass.cpp
     src/rendering/surface_rt.cpp
     src/rendering/wmo_renderer.cpp
     src/rendering/wmo_model_prep.cpp

@@ -1,0 +1,147 @@
+struct M2LightingMaterial {
+    ivec4 flags; // unlit, foliage
+    vec4 factors; // specular, emissive, highlight
+    vec4 interiorAmbient, interiorDirect;
+    uvec4 localLights;
+};
+vec4 shadeM2Surface(vec3 FragPos,vec4 texColor,vec3 stageAdd,vec3 norm,
+        vec3 vertexNormal,vec3 receiverFace,float ModelHeight,float outAlpha,
+        float vFadeAlpha,int blendMode,M2LightingMaterial material,RtLight rt) {
+    int unlit=material.flags.x;
+    bool isFoliage=material.flags.y!=0,foliageTwoSided=isFoliage;
+    float specularIntensity=material.factors.x,emissiveBoost=material.factors.y,vHighlight=material.factors.z;
+    vec4 vInteriorAmbient=material.interiorAmbient,vInteriorDirect=material.interiorDirect;
+    uvec4 vLocalLights=material.localLights;
+    bool inside = insideInterior(vInteriorAmbient);
+    vec3 ldir = normalize(-interiorLightDir(vInteriorAmbient, lightDir.xyz));
+        float nDotL = dot(norm, ldir);
+        float diff = foliageTwoSided ? abs(nDotL) : max(nDotL, 0.0);
+
+    vec3 result;
+    if (unlit != 0) {
+        result = texColor.rgb * emissiveBoost;
+        if (emissiveBoost > 1.0) {
+            // Weighted by the texel's own brightness. Added flat it lit the
+            // whole quad, and a glow card is black everywhere but its middle,
+            // so the card's rectangle appeared as an orange panel hanging on
+            // whatever was behind the fire. Black has nothing to boost.
+            float emissiveWeight =
+                dot(texColor.rgb, vec3(0.299, 0.587, 0.114));
+            result += vec3(0.32, 0.14, 0.025) * (emissiveBoost - 1.0) *
+                      emissiveWeight;
+        }
+    } else {
+        vec3 viewDir = normalize(viewPos.xyz - FragPos);
+        vec3 sunColor = interiorDirect(vInteriorAmbient, vInteriorDirect, lightColor.rgb);
+
+        float spec = 0.0;
+        float shadow = 1.0;
+        if (!isFoliage) {
+            vec3 halfDir = normalize(ldir + viewDir);
+            spec = pow(max(dot(norm, halfDir), 0.0), 32.0) * specularIntensity;
+        }
+
+        if (!inside && shadowParams.x > 0.5 && rtSunVisibility(rt) > 0.0) {
+            // Texture relief changes lighting, not the caster geometry. Offsetting
+            // along its perturbed normal can push the lookup into the surface.
+            vec3 shadowNormal = dot(vertexNormal, ldir) >= 0.0 ? vertexNormal : -vertexNormal;
+            float normalOffset = shadowParams.w * 1.5 * (1.0 - abs(dot(shadowNormal, ldir)));
+            vec3 biasedPos = FragPos + shadowNormal * normalOffset;
+            vec4 lsPos = lightSpaceMatrix * vec4(biasedPos, 1.0);
+            vec3 proj = lsPos.xyz / lsPos.w;
+            proj.xy = proj.xy * 0.5 + 0.5;
+            vec2 receiverSlope = shadowReceiverSlope(receiverFace);
+            if (proj.x >= 0.0 && proj.x <= 1.0 &&
+                proj.y >= 0.0 && proj.y <= 1.0 &&
+                proj.z >= 0.0 && proj.z <= 1.0) {
+                shadow = sampleShadowReceiverPlane(uShadowMap, proj, receiverSlope);
+                shadow = mix(1.0, shadow, shadowMapEdgeFade(proj.xy * 2.0 - 1.0));
+            }
+        }
+
+        // Leaf subsurface scattering (foliage only) - uses stable normal, no FragPos dependency
+        vec3 sss = vec3(0.0);
+        if (isFoliage) {
+            float backLit = max(-nDotL, 0.0);
+            float viewDotLight = max(dot(viewDir, -ldir), 0.0);
+            float sssAmount = backLit * pow(viewDotLight, 4.0) * 0.35 * texColor.a;
+            sss = sssAmount * vec3(1.0, 0.9, 0.5) * sunColor;
+        }
+
+        // Sky-bounce ambient for foliage: upward-facing leaves catch more
+        // ambient than the canopy underside, giving the crown depth instead
+        // of a uniformly-lit blob.
+        if (!inside) shadow = rtShadow(rt, shadow);
+        vec3 ambientTerm = rtAmbient(rt, interiorAmbient(vInteriorAmbient, ambientColor.rgb));
+        if (isFoliage) {
+            ambientTerm *= 0.82 + 0.30 * clamp(norm.z, 0.0, 1.0);
+        }
+        // The units around the player, at full detail, as the terrain and
+        // the buildings take them: a model is ground too - a dock, a bridge,
+        // a rock. Indoors a model takes only these, kept below the player's
+        // head as the room around it does.
+        float unitShadow = shadow > 0.0 ? localShadowAt(FragPos, receiverFace) : 1.0;
+        if (inside) unitShadow = mix(unitShadow, 1.0, unitShadowAboveFade(FragPos));
+        shadow = min(shadow, unitShadow);
+        // The whole lit colour darkened alike, as the client does; the
+        // highlight is the sun's own and goes with it.
+        result = (ambientTerm + diff * sunColor) * texColor.rgb * shadowLightFactor(shadow)
+               + shadow * spec * sunColor
+               + sss;
+    }
+
+    // Canopy ambient occlusion (foliage only). ModelHeight arrives as the
+    // fraction of the plant's own height, so the shading sits in the same
+    // place on a forty-yard tree and on a knee-high fern; it used to be raw
+    // model-space z against a hardcoded eighteen, which put the darkening on
+    // the trunk of anything tall and over the whole of anything short.
+    if (isFoliage) {
+        float aoFactor = mix(0.55, 1.0, smoothstep(0.0, 0.6, ModelHeight));
+        result *= aoFactor;
+    }
+
+    if (unlit == 0) result += lightningDiffuse(FragPos, norm, texColor.rgb);
+    if (unlit == 0) result += localLightContribution(FragPos, norm, texColor.rgb, vLocalLights);
+    // What the stages add on top of the lit colour - an Add combiner's second
+    // stage, a reflection laid over - takes no light.
+    result += stageAdd;
+
+    float dist = length(viewPos.xyz - FragPos);
+    if (blendMode == 5 || blendMode == 6) {
+        // Fade toward the multiplication identity. Black would darken the
+        // background, while additive fading would wash out the base texture.
+        float visibility = aerialVisibilityAt(FragPos, dist) * vFadeAlpha;
+        if (volumetricParams.x > 0.5) visibility *= fogVolumeAt(FragPos).a;
+        float neutral = blendMode == 6 ? 0.5 : 1.0;
+        result = mix(vec3(neutral), result, clamp(visibility, 0.0, 1.0));
+    } else if (blendMode >= 3) {
+        // Additive. Mixing toward the fog colour would give the card's black
+        // corners the fog's colour, and additive then adds that to the scene -
+        // the whole quad shows up as a lit rectangle hanging in the air, which
+        // is what Orgrimmar's bonfire glow was doing to the wall behind it.
+        // Distance can only take an additive contribution away, and so can
+        // the air in front of it: its own light is already in the scene
+        // behind the card.
+        float fogFactor = aerialVisibilityAt(FragPos, dist);
+        result *= fogFactor;
+        if (volumetricParams.x > 0.5) result *= fogVolumeAt(FragPos).a;
+    } else {
+        result = applyFog(result, FragPos, dist);
+    }
+
+    // Pressed on. The real client lifts the whole model while the button is
+    // down over it, which is what says "this one, and the click landed": a
+    // warm brightening rather than a tint, so a dark door reads as lit and a
+    // pale one does not blow out.
+    if (vHighlight > 0.0) {
+        float lift = clamp(vHighlight, 0.0, 1.0);
+        result = result * (1.0 + 0.6 * lift) + vec3(0.22, 0.19, 0.10) * lift;
+    }
+
+    // NoAlphaAdd is drawn ONE, ONE: neither the texture's alpha nor the alpha
+    // written here scales it, so the distance and instance fade go into the
+    // colour.
+    if (blendMode == 3) result *= vFadeAlpha;
+
+    return vec4(result, outAlpha);
+}

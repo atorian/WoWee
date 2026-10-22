@@ -1,9 +1,10 @@
 # Surface and frame-resource contract
 
 Implementation design for `codex/gpu-scene-pipeline`. This document selects the
-target representation. WMO primary-view evaluated surfaces and RT-disabled
-lighting are connected behind `WOWEE_WMO_SURFACES=1`; current-frame RT and
-the other material families remain pending.
+target representation. Primary-view opaque/cutout WMO and M2 evaluated surfaces
+and current-frame RT are connected behind `WOWEE_MODEL_SURFACES=1` (the earlier
+`WOWEE_WMO_SURFACES` flag remains an alias). Characters, terrain, reflected views
+and ordered blended materials still use forward lighting and legacy RT.
 
 ## Surface/material boundary
 
@@ -255,3 +256,43 @@ legacy consumers remain work. Saved measurements include both RT paths in
 `tasks/performance/dalaran-wmo-current-rt.json`; the sparse follow-up is recorded
 separately. This partial WMO implementation remains opt-in and does not complete
 the all-family pipeline.
+
+
+## Shared WMO/M2 evaluated surfaces
+
+`Renderer` owns one `SurfacePass`. WMO and M2 use the same three transient
+images, raw/filtered RT buffers, occupied tile lists and frame-slot histories.
+Each family has its own per-slot command pool and a disjoint range in the
+material upload, reserved by the owner before dispatching workers. Materials
+are appended during the existing draw traversal and the owner flushes the
+upload after joining workers. No scene/model traversal is added for RT.
+
+Both material records are 176 bytes, with a typed family-specific 80-byte
+lighting payload followed by the common transform/lifetime/history header.
+The RT shader interprets only that common header. M2 retains unlit/emissive,
+specular, foliage, interior ambient/direct, highlight and local lights. Its
+surface images carry evaluated two-stage color, geometric/authored/shading
+normals, stage-add RGB, foliage height and exact raster depth. Geometry uses
+the existing skinning, wind, UV animation and alpha-to-coverage implementation;
+lighting calls the same `shadeM2Surface` function as forward rendering.
+
+M2 instancing is retained: the vertex shader derives its material index from
+one per-draw base plus `gl_InstanceIndex`. Opaque and coverage-only cutout
+batches use the geometry pass. Batches whose existing pipeline actually blends
+remain ordered forward runs, even if their source material uses an alpha key.
+The transparent/particle/ribbon water boundary is unchanged. WMO, selection,
+characters and M2 retain their execution order; no cross-family geometry merge
+is claimed when intervening draws require the current scene color/depth.
+
+Placement and material publications draw lifetimes from one non-recycling
+namespace shared by the two families. Rigid M2 instances publish the previous
+rendered transform during their existing instance-upload loop. Skinning, wind,
+cloth and water bobbing invalidate rigid temporal correspondence; these surfaces
+use fresh RT and spatial filtering until deformation-aware history is available.
+This may be noisier than rigid temporal accumulation and is not motion parity.
+
+The renderer still runs the legacy RT pass for unconverted consumers. Enabling
+M2 surfaces does not allocate another full-screen surface/RT set; it adds only
+material capacity, command buffers and family lighting pipelines. Resize peak
+budgeting, persistent material/instance tables and remaining consumers are still
+required before a complete pipeline rollout.

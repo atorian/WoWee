@@ -257,7 +257,6 @@ bool WMORenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
     surfaceRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     surfaceRange.offset = sizeof(WMOPushConstants);
     surfaceRange.size = sizeof(glm::vec4);
-    frameSetLayout_ = perFrameLayout;
     pipelineLayout_ = createPipelineLayout(device, setLayouts, { pushRange, surfaceRange });
     surfaceRange.size = 32;
     surfaceLayout_ = createPipelineLayout(device, setLayouts, { pushRange, surfaceRange });
@@ -364,7 +363,7 @@ void WMORenderer::shutdown() {
     if (materialSlots_) materialSlots_->release();
 
     // Destroy pipelines
-    surfacePass_.reset();
+    surfacePass_=nullptr;
     destroy(device, surfacePipeline_);
     surfacePipelinePass_ = VK_NULL_HANDLE;
     destroy(device, surfaceLayout_);
@@ -734,7 +733,7 @@ uint32_t WMORenderer::createInstance(uint32_t modelId, const glm::vec3& position
     }
 
     WMOInstance instance;
-    instance.surfaceLifetime = nextSurfaceInstance_++;
+    instance.surfaceLifetime = nextSurfaceIdentity();
     instance.id = reservedId != 0 ? reservedId : nextInstanceId++;
     instance.modelId = modelId;
     instance.position = position;
@@ -1052,7 +1051,7 @@ WMORenderer::GroupDraw WMORenderer::extractGroup(const GroupResources& group,
         data->groupFlags = group.groupFlags;
         data->isLOD = group.isLOD;
         data->mergedBatches = group.mergedBatches;
-        data->surfaceBatchBase = nextSurfaceBatch_.fetch_add(group.mergedBatches.size(),std::memory_order_relaxed);
+        data->surfaceBatchBase = nextSurfaceIdentity(group.mergedBatches.size());
         group.drawData = std::move(data);
     }
     out.gpu = group.drawData;
@@ -1153,15 +1152,13 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
     if (pass == Pass::View) viewDrawCallCount_ = draws;
 }
 
-void WMORenderer::prepareSurface(VkImageView depth, VkExtent2D extent,
-        WmoSurfacePass::TargetVersion version,RtScene* rtScene,int rtMode,const RtLighting::FrameInputs& rtInputs) {
+void WMORenderer::prepareSurface(SurfacePass& pass) {
     if (recording_->wireframe) {
         LOG_ERROR("WMO evaluated-surface wireframe is not implemented - refusing mismatched rendering");
         throw std::runtime_error("WMO surface wireframe unsupported");
     }
     if (recording_->view.surfaceMaterialCapacity == 0) return;
-    if (!surfacePass_) surfacePass_=std::make_unique<WmoSurfacePass>(*vkCtx_,frameSetLayout_);
-    surfacePass_->prepare(extent,depth,version,recording_->view.surfaceMaterialCapacity,rtScene,rtMode,rtInputs);
+    surfacePass_=&pass;
     if (surfacePipelinePass_!=surfacePass_->geometryPass()) {
         DeferredResources retire(*vkCtx_);retire.destroy(surfacePipeline_);
         VkShaderModule vert,frag;
@@ -1231,8 +1228,8 @@ void WMORenderer::recordSurface(VkDescriptorSet perFrameSet, const Camera& camer
                 }
                 const auto layout=opaque?surfaceLayout_:pipelineLayout_;
                 if (!cmd || opaque != geometry) {
-                    if (cmd) surfacePass_->endRun();
-                    cmd = surfacePass_->beginRun(opaque);
+                    if (cmd) surfacePass_->endRun(SurfacePass::Family::Wmo);
+                    cmd = surfacePass_->beginRun(SurfacePass::Family::Wmo,opaque);
                     geometry = opaque;
                     boundVertex = boundIndex = VK_NULL_HANDLE;
                     boundMaterial = VK_NULL_HANDLE;
@@ -1261,7 +1258,7 @@ void WMORenderer::recordSurface(VkDescriptorSet perFrameSet, const Camera& camer
                 push.cloth={batch.clothTop,batch.clothDrop,batch.clothCentreX,batch.clothCentreY};
                 vkCmdPushConstants(cmd,layout,VK_SHADER_STAGE_VERTEX_BIT,0,sizeof(push),&push);
                 if (opaque) {
-                    WmoSurfacePass::Material material{};
+                    SurfacePass::Material material{};
                     static_assert(sizeof(batch.material)==sizeof(material.words));
                     std::memcpy(material.words.data(),&batch.material,sizeof(batch.material));
                     material.localLights=kept.lights;
@@ -1277,8 +1274,7 @@ void WMORenderer::recordSurface(VkDescriptorSet perFrameSet, const Camera& camer
             }
         }
     }
-    if (cmd) surfacePass_->endRun();
-    surfacePass_->finishMaterials();
+    if (cmd) surfacePass_->endRun(SurfacePass::Family::Wmo);
     viewDrawCallCount_=draws;
     surfaceRecordedFrame_=vkCtx_->frameNumber();
 }
@@ -1291,7 +1287,7 @@ void WMORenderer::executeSurface(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     glm::mat4 rotation=camera.getViewMatrix();
     rotation[3]=glm::vec4(0,0,0,1);
     const glm::mat4 inverse=glm::inverse(camera.getProjectionMatrix()*rotation);
-    surfacePass_->execute(cmd, perFrameSet, scene, inverse, resumeContents);
+    surfacePass_->execute(SurfacePass::Family::Wmo,cmd, perFrameSet, scene, inverse, resumeContents);
 }
 
 bool WMORenderer::cullPortals(const ModelData& model, const WMOInstance& instance,

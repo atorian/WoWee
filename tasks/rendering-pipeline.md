@@ -475,3 +475,65 @@ tiles once per opaque run, extra receivers lack temporal history, and blended
 WMO, reflections and other geometry still require legacy RT. Converting those
 consumers is necessary before removing that duplicated lighting path. No new
 full-client replay was run; the last result remains 46.727 FPS at d440fce.
+
+### Opaque/cutout M2 current surfaces (2026-10-22)
+
+Previous work was already committed as ccdc66d before this stage began. The new
+`WOWEE_MODEL_SURFACES=1` path (earlier WMO flag retained as an alias) connects M2
+to current receiver lighting. `Renderer` owns one `SurfacePass`: WMO/M2 share
+surface images and RT scratch/history, while their workers own disjoint material
+ranges and command pools. Both retain snapshots, instancing, existing execution
+order and frames in flight. No additional scene/model traversal is introduced.
+
+Texture stages, UV animation, alpha-to-coverage, wind and skinning run in the
+existing geometry shader. Both forward and evaluated paths use one M2 lighting
+function. Each instanced batch supplies a material base; the vertex invocation
+adds its instance index. Blended batches keep forward lighting and their order,
+including the water boundary. A shared lifetime namespace prevents WMO and M2
+history collisions. Rigid M2 history uses the previous rendered transform;
+deformations invalidate it until deformation-aware correspondence is implemented.
+Existing RT caster geometry publication is unchanged.
+
+Builds of wowee, scene_render and rt_probe pass. GPU checks passed for:
+- Different interior lighting on instances of the same model, two texture
+  stages with additive contribution, cutout coverage and blended layers.
+- Mixed WMO/M2, serial/parallel recording, hardware/software RT, MSAA1/MSAA4,
+  and target recreation between 4x/1x/4x with FXAA.
+- Real wind-animated foliage and a skinned wolf. RT-disabled forward/surface
+  mean RGB-channel errors are 0.00283/255 and 0.00168/255 respectively.
+- Queued M2 and WMO snapshots after removing their scene sources, with MSAA4
+  and FXAA; only the next extraction changes pixels.
+- Native current-receiver/history tests and every available architecture sweep.
+
+Strict scanning of 44 GPU logs found no error except the known missing Epic
+overlay manifests. Serial and parallel captures match exactly. The surface
+geometry/RT buffers remain one shared set (133.69 MiB color and 120.48 MiB RT at
+2560x1369, MSAA1); material upload/command capacity is additional. No process or
+resize peak-memory claim is made.
+
+Measured only the new implementation, dev/no-LTO, RT3, MSAA1, FXAA, 2560x1369,
+230 GPU samples, validation off. Both runs had continuous competing-renderer
+checks (36 and 80 samples, none present). OS/browser GPU load and clocks were
+not controlled. FIFO limits presentation, so these are GPU timestamp results.
+
+| Metric | Saved WMO control (ccdc66d) | New WMO control | New WMO + M2 doodads |
+|---|---:|---:|---:|
+| GPU mean / p95, ms | 10.87 / 11.24 | 11.01 / 11.46 | 23.32 / 27.15 |
+| CPU renderWorld mean / p95, ms | 0.72 / 1.11 | 0.48 / 0.66 | 3.88 / 5.78 |
+| WMO GPU mean, ms | 6.70 | 6.81 | 7.80 |
+| M2 GPU mean including surface RT, ms | 0 | 0 | 9.31 |
+| Retained legacy RT mean, ms | 2.70 | 2.71 | 3.10 |
+| M2 draws in captured frame | 0 | 0 | 3052 |
+
+The prior WMO CPU increase did not reproduce; this does not establish its cause.
+The new mixed scene is a first saved baseline, not an optimization comparison
+against WMO-only. **No FPS increase is confirmed.** Full-client replay did not
+start: free system commit was 8.51 GiB, below the 11 GiB guard based on the prior
+9.60 GiB peak plus headroom. A user reply to the memory question is pending.
+Last full-client result remains 46.727 FPS at d440fce.
+
+[Settings, hashes, distributions, validation and raw paths](performance/dalaran-m2-surfaces.json).
+This completes the opaque/cutout M2 connection, not the full pipeline. Character,
+terrain, reflection and blended consumers still require legacy RT. The separate
+WMO/M2 runs cannot be merged across the intervening selection/character draws
+without first converting those consumers and preserving their ordering semantics.

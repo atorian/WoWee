@@ -1,8 +1,9 @@
 #include <atomic>
 #include "rendering/placement_transform.hpp"
 #include "rendering/m2_renderer.hpp"
-#include "rendering/texture_upload.hpp"
+#include "rendering/surface_pass.hpp"
 #include <stdexcept>
+#include "rendering/texture_upload.hpp"
 #include "rendering/m2_material.hpp"
 #include "rendering/m2_batch_opacity.hpp"
 #include "rendering/m2_track_sampler.hpp"
@@ -195,6 +196,33 @@ static void m2VertexInput(VkVertexInputBindingDescription& binding,
         {.location = 3, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 10 * sizeof(float)}, // boneWeights
         {.location = 4, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 14 * sizeof(float)}, // boneIndices (float)
     };
+}
+
+void M2Renderer::prepareSurface(SurfacePass& pass) {
+    surfacePass_=&pass;
+    if(surfacePipelinePass_==pass.geometryPass())return;
+    DeferredResources retire(*vkCtx_);retire.destroy(surfaceOpaque_);retire.destroy(surfaceCutout_);
+    VkShaderModule vert,frag;
+    if(!vert.loadFromFile(vkCtx_->getDevice(),"assets/shaders/m2_surface.vert.spv") ||
+       !frag.loadFromFile(vkCtx_->getDevice(),"assets/shaders/m2_surface.frag.spv")) {
+        LOG_ERROR("M2 surface shaders unavailable - frame cannot be rendered");
+        throw std::runtime_error("M2 surface shaders unavailable");
+    }
+    VkVertexInputBindingDescription binding{};std::vector<VkVertexInputAttributeDescription> attrs;
+    m2VertexInput(binding,attrs);
+    for(bool cutout:{false,true}) {
+        auto builder=PipelineBuilder().setShaders(vert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),frag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+            .setVertexInput({binding},attrs).setRasterization(VK_POLYGON_MODE_FILL,VK_CULL_MODE_NONE,kM2FrontFace)
+            .setDepthTest(true,true,VK_COMPARE_OP_LESS_OR_EQUAL)
+            .setColorBlendAttachments(std::vector<VkPipelineColorBlendAttachmentState>(3,PipelineBuilder::blendDisabled()))
+            .setMultisample(vkCtx_->getMsaaSamples()).setLayout(surfaceLayout_)
+            .setRenderPass(pass.geometryPass()).setDynamicStates(viewportAndScissorDynamic());
+        if(cutout)builder.setAlphaToCoverage(true);
+        auto& pipeline=cutout?surfaceCutout_:surfaceOpaque_;
+        pipeline=builder.build(vkCtx_->getDevice(),vkCtx_->getPipelineCache());
+        if(!pipeline) {LOG_ERROR("M2 surface pipeline creation failed");throw std::runtime_error("M2 surface pipeline creation failed");}
+    }
+    vert.destroy();frag.destroy();surfacePipelinePass_=pass.geometryPass();
 }
 
 bool M2Renderer::buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout) {
@@ -939,6 +967,10 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         ci.pushConstantRangeCount = 1;
         ci.pPushConstantRanges = &pushRange;
         vkCreatePipelineLayout(device, &ci, nullptr, &pipelineLayout_);
+        pushRange.size += sizeof(uint32_t);
+        if(vkCreatePipelineLayout(device,&ci,nullptr,&surfaceLayout_)!=VK_SUCCESS) {
+            LOG_ERROR("M2 surface pipeline layout creation failed"); return false;
+        }
     }
 
     // Particle pipeline layout: set 0 = perFrame, set 1 = particleTex
@@ -1089,6 +1121,8 @@ void M2Renderer::shutdown() {
     destroyBlendedPipelines(scenePipes_);
     destroyBlendedPipelines(afterWaterPipes_);
 
+    destroy(device, surfaceOpaque_); destroy(device, surfaceCutout_);
+    destroy(device, surfaceLayout_); surfacePipelinePass_=VK_NULL_HANDLE; surfacePass_=nullptr;
     destroy(device, pipelineLayout_);
     destroy(device, particlePipelineLayout_);
     destroy(device, ribbonPipelineLayout_);
@@ -1379,6 +1413,9 @@ void M2Renderer::writeBatchMaterial(const M2ModelGPU& model,
         batch.blendMode >= 2 && (batch.materialFlags & 0x04) == 0 ? 1 : 0;
     mat.specularIntensity = 0.5f;
     mat.emissiveBoost = batch.preserveGlowMesh ? 2.4f : 1.0f;
+    batch.surfaceFlags={mat.unlit,mat.alphaTest==2?1:0,0,0};
+    batch.surfaceFactors={mat.specularIntensity,mat.emissiveBoost,0,0};
+    batch.surfacePublication=nextSurfaceIdentity();
     std::memcpy(batch.materialSlot.mapped, &mat, sizeof(mat));
 }
 

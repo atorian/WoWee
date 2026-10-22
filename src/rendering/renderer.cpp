@@ -800,6 +800,7 @@ void Renderer::destroyPerFrameResources() {
     }
     if (skyBackground_) { skyBackground_->shutdown(); skyBackground_.reset(); }
     destroy(device, sceneDescriptorPool);
+    surfacePass_.reset();
     destroy(device, perFrameSetLayout);
     // After every renderer has let go of its geometry, which is why this is
     // here rather than beside the fog: shutdown() calls this last.
@@ -1989,7 +1990,7 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
         }
     }
 
-    if (core::envFlagEnabled("WOWEE_WMO_SURFACES",false) && frameInputs_.rtMode!=0 && rtScene_) {
+    if ((core::envFlagEnabled("WOWEE_MODEL_SURFACES",false) || core::envFlagEnabled("WOWEE_WMO_SURFACES",false)) && frameInputs_.rtMode!=0 && rtScene_) {
         GpuPass pass(*vkCtx,currentCmd,RtScene::kGpuMarkLabel);
         rtScene_->update(currentCmd);
         rtScenePreparedThisFrame_=true;
@@ -3369,20 +3370,26 @@ void Renderer::renderWorld() {
     const bool skipTerrain = envSkipTerrain || ablated(AblationPass::Terrain);
     const bool skipSky = envSkipSky || ablated(AblationPass::Sky);
     const bool skipGrass = ablated(AblationPass::Grass);
-    static const bool surfaceRequested=core::envFlagEnabled("WOWEE_WMO_SURFACES",false);
+    static const bool surfaceRequested=(core::envFlagEnabled("WOWEE_MODEL_SURFACES",false) || core::envFlagEnabled("WOWEE_WMO_SURFACES",false));
     const bool surfaceWmo=surfaceRequested && wmoRenderer && frameCamera() && !skipWMO;
-    const auto prepareWmoSurface=[&]() {
+    const bool surfaceM2=surfaceRequested && m2Renderer && frameCamera() && !skipM2;
+    const auto prepareSurfaces=[&]() {
         const bool offscreen=postProcessPipeline_ && postProcessPipeline_->getSceneFramebuffer();
         const auto depth=offscreen
             ?postProcessPipeline_->getSceneAttachmentDepthView():vkCtx->getDepthImageView();
-        const WmoSurfacePass::TargetVersion version{vkCtx->syncResetGeneration(),
+        const SurfacePass::TargetVersion version{vkCtx->syncResetGeneration(),
             offscreen?postProcessPipeline_->sceneTargetGeneration():0,offscreen};
         RtLighting::FrameInputs in{};
         in.view=frameCamera()->getViewMatrix();in.projection=frameCamera()->getProjectionMatrix();
         in.cameraPos=frameCamera()->getPosition();in.sunDir=-glm::vec3(currentFrameData.lightDir);
         in.sunColor=glm::vec3(currentFrameData.lightColor);in.skyColor=glm::vec3(currentFrameData.ambientColor);
         in.sunUp=in.sunDir.z>-0.05f;in.distance=frameInputs_.rtDistance;
-        wmoRenderer->prepareSurface(depth,activeRenderExtent_,version,rtScene_.get(),frameInputs_.rtMode,in);
+        if(!surfacePass_)surfacePass_=std::make_unique<SurfacePass>(*vkCtx,perFrameSetLayout);
+        surfacePass_->prepare(activeRenderExtent_,depth,version,
+            {surfaceWmo?wmoRenderer->surfaceMaterialCapacity():0,surfaceM2?m2Renderer->surfaceMaterialCapacity():0},
+            rtScene_.get(),frameInputs_.rtMode,in);
+        if(surfaceWmo)wmoRenderer->prepareSurface(*surfacePass_);
+        if(surfaceM2)m2Renderer->prepareSurface(*surfacePass_);
     };
     // The terrain chooses its chunks' detail by their triangles' size in the
     // image it is drawn into, which an upscaler makes smaller than the window.
@@ -3413,7 +3420,7 @@ void Renderer::renderWorld() {
     if (parallelRecordingEnabled_) {
         // --- Pre-compute state + GPU allocations on main thread (not thread-safe) ---
         auto prepStart = std::chrono::steady_clock::now();
-        if (surfaceWmo) prepareWmoSurface();
+        if (surfaceWmo || surfaceM2) prepareSurfaces();
         const auto prepWmoEnd = std::chrono::steady_clock::now();
         if (m2Renderer && frameCamera()) m2Renderer->prepareRender(frameIdx, *frameCamera());
         if (drawSkyModels && frameCamera())
@@ -3422,7 +3429,7 @@ void Renderer::renderWorld() {
         auto prepM2End = std::chrono::steady_clock::now();
         const double prepM2Ms   = std::chrono::duration<double, std::milli>(prepM2End - prepWmoEnd).count();
         CpuStageTimes& stages = vkCtx->cpuStages();
-        stages.add("renderWorld", "prepare WMO", static_cast<float>(
+        stages.add("renderWorld", "prepare surfaces", static_cast<float>(
             std::chrono::duration<double, std::milli>(prepWmoEnd - prepStart).count()));
         stages.add("renderWorld", "prepare M2", static_cast<float>(prepM2Ms));
         // From here to the wait the main thread hands work out and records its
@@ -3482,7 +3489,8 @@ void Renderer::renderWorld() {
                 VkCommandBuffer cmd = beginSecondary(SEC_M2);
                 setSecondaryViewportScissor(cmd);
                 const auto tBegin = std::chrono::steady_clock::now();
-                m2Renderer->render(cmd, perFrameSet, *frameCamera());
+                if(surfaceM2)m2Renderer->recordSurface(perFrameSet);
+                else m2Renderer->render(cmd, perFrameSet, *frameCamera());
                 const auto tModels = std::chrono::steady_clock::now();
                 // Blended things go after the water when it has a pass of its
                 // own; see M2Renderer::renderAfterWater.
@@ -3690,6 +3698,7 @@ void Renderer::renderWorld() {
                         terrainRenderer ? terrainRenderer->getChunkCount() : 0);
         }
 
+        if(surfaceWmo || surfaceM2)surfacePass_->finishMaterials();
         // --- Execute all secondary buffers in correct draw order ---
         VkCommandBuffer validCmds[NUM_SECONDARIES];
         const char* validLabels[NUM_SECONDARIES];
@@ -3725,7 +3734,11 @@ void Renderer::renderWorld() {
         for (uint32_t i = 0; i < numCmds; ++i) {
             if (!validCmds[i]) wmoRenderer->executeSurface(currentCmd, perFrameSet, *frameCamera(),
                 activeFramebuffer_, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
-            else vkCmdExecuteCommands(currentCmd, 1, &validCmds[i]);
+            else {
+                if(surfaceM2 && validCmds[i]==secondaryCmds_[SEC_M2][frameIdx])
+                    m2Renderer->executeSurface(currentCmd,perFrameSet,*frameCamera(),activeFramebuffer_,VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+                vkCmdExecuteCommands(currentCmd, 1, &validCmds[i]);
+            }
             recordSecondaryMark(i + 1, validLabels[i]);
         }
         // The world, as one mark.
@@ -3741,6 +3754,7 @@ void Renderer::renderWorld() {
 
     } else {
         // ── Fallback: single-threaded inline recording (original path) ──
+        if(surfaceWmo || surfaceM2)prepareSurfaces();
 
         if (terrainRenderer && frameCamera() && frameInputs_.terrainEnabled && !skipTerrain) {
             auto terrainStart = std::chrono::steady_clock::now();
@@ -3781,8 +3795,8 @@ void Renderer::renderWorld() {
             {
                 GpuPass pass(*vkCtx, currentCmd, "wmo");
                 if (surfaceWmo) {
-                    prepareWmoSurface();
                     wmoRenderer->recordSurface(perFrameSet, *frameCamera());
+                    surfacePass_->finishMaterials();
                     wmoRenderer->executeSurface(currentCmd, perFrameSet, *frameCamera(),
                         activeFramebuffer_, VK_SUBPASS_CONTENTS_INLINE);
                 }
@@ -3806,7 +3820,11 @@ void Renderer::renderWorld() {
             auto m2Start = std::chrono::steady_clock::now();
             {
                 GpuPass pass(*vkCtx, currentCmd, "m2");
-                m2Renderer->render(currentCmd, perFrameSet, *frameCamera());
+                if(surfaceM2) {
+                    m2Renderer->recordSurface(perFrameSet);
+                    surfacePass_->finishMaterials();
+                    m2Renderer->executeSurface(currentCmd,perFrameSet,*frameCamera(),activeFramebuffer_,VK_SUBPASS_CONTENTS_INLINE);
+                } else m2Renderer->render(currentCmd, perFrameSet, *frameCamera());
                 if (!m2Renderer->drawsBlendedAfterWater()) {
                     m2Renderer->renderM2Particles(currentCmd, perFrameSet);
                     m2Renderer->renderM2Ribbons(currentCmd, perFrameSet);

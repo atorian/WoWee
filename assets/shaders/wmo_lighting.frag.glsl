@@ -14,7 +14,7 @@ layout(set=1,binding=1) uniform usampler2D surfaceKeys;
 layout(set=1,binding=2) uniform usampler2D surfacePayload;
 #define LOAD(image) texelFetch(image, ivec2(gl_FragCoord.xy), 0)
 #endif
-layout(std430,set=1,binding=3) readonly buffer Materials { SurfaceMaterial materials[]; };
+layout(std430,set=1,binding=3) readonly buffer Materials { WmoSurfaceMaterial materials[]; };
 layout(std430,set=1,binding=4) readonly buffer CurrentLight { uvec2 currentLight[]; };
 layout(push_constant) uniform ResolveView { mat4 inverseViewProjection; vec4 extent; } resolveView;
 layout(location=0) out vec4 outColor;
@@ -31,7 +31,7 @@ void main() {
         pixel / resolveView.extent.xy * 2.0 - 1.0, uintBitsToFloat(payload.z), 1.0);
     position /= position.w;
     position.xyz += viewPos.xyz;
-    SurfaceMaterial m = materials[keys.w - 1u];
+    WmoSurfaceMaterial m = materials[keys.w - 1u];
     WmoSurface surface = WmoSurface(position.xyz, texel,
         unpackSurfaceNormal(keys.y), unpackSurfaceNormal(keys.z), unpackSurfaceNormal(keys.x),
         vec4(unpackHalf2x16(payload.x), unpackHalf2x16(payload.y)), m.localLights);

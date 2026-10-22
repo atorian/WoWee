@@ -1,0 +1,219 @@
+layout(set = 1, binding = 0) uniform sampler2D uTexture;
+layout(set = 1, binding = 3) uniform sampler2D uSecondTexture;
+
+layout(set = 1, binding = 2) uniform M2Material {
+    int hasTexture;
+    int alphaTest;
+    int unlit;
+    int blendMode;
+    int cullBackFaces;
+    float specularIntensity;
+    float emissiveBoost;
+    float tintR;
+    float tintG;
+    float tintB;
+    int combiner;           // M2Combiner
+    int hasSecondTexture;
+};
+
+
+layout(location = 0) in vec3 FragPos;
+layout(location = 1) in vec3 Normal;
+layout(location = 2) in vec2 TexCoord;
+layout(location = 3) flat in vec3 InstanceOrigin;
+layout(location = 4) in float ModelHeight;
+layout(location = 5) in float vFadeAlpha;
+layout(location = 6) flat in int vSkyMode;
+layout(location = 7) flat in float vHighlight;
+layout(location = 8) in vec2 TexCoord2;
+layout(location = 9) flat in vec4 vInteriorAmbient;
+layout(location = 10) flat in vec4 vInteriorDirect;
+layout(location = 11) flat in uvec4 vLocalLights;
+
+layout(location = 0) out vec4 outColor;
+#ifdef M2_GBUFFER
+layout(location = 12) flat in uint vSurfaceMaterial;
+layout(location = 1) out uvec4 outKeys;
+layout(location = 2) out uvec4 outPayload;
+#include "surface_encoding.glsli"
+#endif
+
+// 4x4 Bayer dither matrix (normalized to 0..1)
+float bayerDither4x4(ivec2 p) {
+    int idx = (p.x & 3) + (p.y & 3) * 4;
+    float m[16] = float[16](
+         0.0/16.0,  8.0/16.0,  2.0/16.0, 10.0/16.0,
+        12.0/16.0,  4.0/16.0, 14.0/16.0,  6.0/16.0,
+         3.0/16.0, 11.0/16.0,  1.0/16.0,  9.0/16.0,
+        15.0/16.0,  7.0/16.0, 13.0/16.0,  5.0/16.0
+    );
+    return m[idx];
+}
+
+// The air between the camera and this point, out of the fog volume: rgb is
+// the light it scatters toward the camera, a how much of the point shows
+// through it. See VolumetricFog.
+#include "m2_combiner.glsli"
+void main() {
+    const vec3 receiverFace = receiverFaceNormal(FragPos);
+    if (cullBackFaces != 0 && !gl_FrontFacing) discard;
+    // The stages as the client combines them: armour doubled by its
+    // sphere-mapped shine, a flame shaped by its mask, a layer with light
+    // of its own added on top of the lit one.
+    vec4 t0 = hasTexture != 0 ? texture(uTexture, TexCoord) : vec4(1.0);
+    vec4 t1 = hasSecondTexture != 0 ? texture(uSecondTexture, TexCoord2) : vec4(1.0);
+    vec3 stageAdd;
+    vec4 texColor = combineStages(combiner, t0, t1, stageAdd);
+    texColor.a = clamp(texColor.a, 0.0, 1.0);
+    // The batch's authored colour. A glow card is painted white and coloured
+    // here - Orgrimmar's bonfire carries (1.0, 0.329, 0.0) - so without it
+    // every fire in the world burns white. It is part of the vertex colour,
+    // which what the stages add on top is not.
+    texColor.rgb *= vec3(tintR, tintG, tintB);
+
+    // Original client sky M2s carry their authored colour and alpha, and are
+    // taken as they are. They are camera-centered and unlit, and must not be
+    // swallowed by world-distance fog.
+    //
+    // This used to sit below the three discards, which meant the sky was not
+    // taken as it is. The alpha test in particular rescales alpha by its own
+    // screen-space derivative:
+    //
+    //     float aGrad = fwidth(texColor.a);
+    //     texColor.a = clamp((texColor.a - alphaCutoff) / max(aGrad, 0.001) ...
+    //
+    // fwidth is how fast alpha changes from one pixel to the next, so it
+    // changes whenever the view does - and a nebula's alpha ramp is gentle,
+    // which makes the divisor tiny and the result a hard edge. Turning the
+    // camera moved that edge, so Hellfire's sky flickered while the view moved
+    // and stood still when it did not, on its blended layers alone. The rescale
+    // is for foliage cutouts, where a hard edge is the point.
+    if (vSkyMode != 0) {
+        // An opaque layer's alpha channel says nothing - it was never
+        // blended - so only the fade is its alpha. That matters while the
+        // sky crossfades between zones, when every layer is drawn blended.
+        float skyAlpha = (blendMode == 0) ? 1.0 : texColor.a;
+        // Behind all the air there is, as the procedural sky is. An
+        // additive layer only loses what the air hides of it; the air's own
+        // light is already in the layer it is added to.
+        vec3 skyColor = texColor.rgb + stageAdd;
+        vec3 skyDir = normalize(FragPos-viewPos.xyz);
+        if(blendMode<3) skyColor=aerialSky(skyColor,skyDir);
+        else if(aerialParams.w>0.5) skyColor*=smoothstep(0.02,0.18,max(skyDir.z,0.0));
+        if (volumetricParams.x > 0.5) {
+            vec4 clip = projection * view * vec4(FragPos, 1.0);
+            vec4 air = fogVolumeSky(clip.xy / max(clip.w, 1e-4) * 0.5 + 0.5);
+            skyColor = (blendMode >= 3) ? skyColor * air.a : skyColor * air.a + air.rgb;
+        }
+        // NoAlphaAdd is drawn ONE, ONE, so it can only fade through its colour.
+        if (blendMode == 3) skyColor *= vFadeAlpha;
+        outColor = vec4(skyColor, skyAlpha * vFadeAlpha);
+        return;
+    }
+
+
+    if (fogSkyBand1.w > 0.0 && length(FragPos.xy - viewPos.xy) >= fogSkyBand1.w) discard;
+    bool isFoliage = (alphaTest == 2);
+
+    // Fix DXT fringe: transparent edge texels have garbage (black) RGB, and
+    // bilinear drags it into the leaf's edge. The blurred high mip is the
+    // colour the edge should have been.
+    //
+    // Only where the fringe actually is. This used to run on everything below
+    // full alpha and trust the texel in proportion to it, so a leaf texel at
+    // half alpha - which is leaf, not fringe, and the canopy is full of them -
+    // came out sixty percent a blurred sixteen-pixel average of the whole
+    // sheet. That is what took the contrast and the colour out of a lit
+    // canopy and left it looking milky. A quarter alpha is where the fringe
+    // stops and the leaf starts.
+    if (alphaTest != 0 && texColor.a > 0.01 && texColor.a < 0.25) {
+        vec3 mipColor = textureLod(uTexture, TexCoord, 4.0).rgb;
+        float trust = smoothstep(0.0, 0.25, texColor.a);
+        texColor.rgb = mix(mipColor, texColor.rgb, trust);
+    }
+
+    float alphaCutoff = 0.5;
+    if (alphaTest == 2) {
+        alphaCutoff = 0.4;
+    } else if (alphaTest == 3) {
+        alphaCutoff = 0.25;
+    } else if (alphaTest == 4) {
+        // The material's own alpha key: GxBlend_AlphaKey's 224/255.
+        alphaCutoff = 224.0 / 255.0;
+    } else if (alphaTest != 0) {
+        alphaCutoff = 0.4;
+    }
+    // Mip-alpha preservation: alpha mips average downward, thinning distant
+    // canopies to skeletons. Boost alpha with mip level so perceived leaf
+    // density stays constant with distance.
+    if (isFoliage && hasTexture != 0) {
+        // Gentler than it was: at 0.18 a mip-4 canopy came back with every
+        // leaf texel above 0.23 alpha opaque, which is a solid green mass
+        // rather than a thinned one. Coverage carries the rest now.
+        float mip = textureQueryLod(uTexture, TexCoord).x;
+        texColor.a *= 1.0 + clamp(mip, 0.0, 4.0) * 0.11;
+    }
+    if (alphaTest != 0) {
+        // Screen-space sharpened alpha: rescale so the cutoff maps to the
+        // texel boundary. With MSAA + alpha-to-coverage on the cutout
+        // pipeline this dithers the edge band across samples, smoothing
+        // leaf silhouettes instead of the old hard binary discard.
+        float aGrad = fwidth(texColor.a);
+        texColor.a = clamp((texColor.a - alphaCutoff) / max(aGrad, 0.001) * 0.5 + 0.5, 0.0, 1.0);
+        if (texColor.a < 1.0 / 255.0) discard;
+    }
+    if (blendMode == 1 && texColor.a < 0.004) discard;
+
+    // Per-instance color variation (foliage only).
+    //
+    // Half what it was. A thirty-point spread in brightness is a third of the
+    // way to another time of day, and two canopies of the same tree standing
+    // in each other reads as a seam down the middle of the crown rather than
+    // as two trees. Enough to break the copy, not enough to be seen as a
+    // difference in light.
+    if (isFoliage) {
+        float hash = fract(sin(dot(InstanceOrigin.xy, vec2(127.1, 311.7))) * 43758.5453);
+        float hueShiftR = 1.0 + (hash - 0.5) * 0.10;       // ±5% red
+        float hueShiftB = 1.0 + (fract(hash * 7.13) - 0.5) * 0.10; // ±5% blue
+        float brightness = 0.93 + hash * 0.14;               // 93-107%
+        texColor.rgb *= vec3(hueShiftR, 1.0, hueShiftB) * brightness;
+    }
+
+    vec3 norm = normalize(Normal);
+    bool foliageTwoSided = (alphaTest == 2);
+    if (!foliageTwoSided && !gl_FrontFacing) norm = -norm;
+
+    vec3 vertexNormal = norm;
+
+    // Detail normal perturbation (foliage only) - UV-based only so wind doesn't cause flicker
+    if (isFoliage) {
+        float nx = sin(TexCoord.x * 12.0 + TexCoord.y * 5.3) * 0.10;
+        float ny = sin(TexCoord.y * 14.0 + TexCoord.x * 4.7) * 0.10;
+        norm = normalize(norm + vec3(nx, ny, 0.0));
+    }
+
+    float outAlpha = texColor.a * vFadeAlpha;
+    // The distance fade, for a batch drawn with no blending to fade through.
+    // Sixteen ordered steps against the fragment's own screen position: a tree
+    // at the edge of the draw distance thins out rather than switching off,
+    // and it reads the same at every sample count, where leaving the fade in
+    // the coverage alone would give two steps at 2x MSAA and none with MSAA
+    // off. Multiplying it into the coverage as well would take the leaf edges
+    // with it, so the cutout keeps its own alpha.
+    if (alphaTest != 0 && blendMode <= 1) {
+        if (vFadeAlpha <= bayerDither4x4(ivec2(gl_FragCoord.xy))) discard;
+        outAlpha = texColor.a;
+    }
+#ifdef M2_GBUFFER
+    outColor=vec4(texColor.rgb,outAlpha);
+    outKeys=uvec4(packSurfaceNormal(normalize(receiverFace)),packSurfaceNormal(norm),
+        packSurfaceNormal(vertexNormal),vSurfaceMaterial+1u);
+    outPayload=uvec4(packHalf2x16(stageAdd.xy),packHalf2x16(vec2(stageAdd.z,ModelHeight)),
+        floatBitsToUint(gl_FragCoord.z),0u);
+#else
+    M2LightingMaterial material=M2LightingMaterial(ivec4(unlit,isFoliage?1:0,0,0),
+        vec4(specularIntensity,emissiveBoost,vHighlight,0),vInteriorAmbient,vInteriorDirect,vLocalLights);
+    outColor=shadeM2Surface(FragPos,texColor,stageAdd,norm,vertexNormal,receiverFace,
+        ModelHeight,outAlpha,vFadeAlpha,blendMode,material,unlit==0?rtLightAt(FragPos,normalize(receiverFace)):RtLight(0.0,1.0,1.0,vec3(0)));
+#endif
+}

@@ -161,3 +161,5 @@
 - 2026-10-22 — The user selected a softer modern-WoW cloud reference after accepting the sharper prototype. Broad low-frequency opacity transitions, not dense flat cores and ragged fine edges, are now the visual target. Compare the same offline views, preserve weather coverage and avoid post-blurring the whole sky; update the old dense-core acceptance criterion rather than retaining an obsolete aesthetic requirement.
 
 - 2026-10-22 — After the user authorized the complete rendering pipeline, I stopped at foundation commits and then at a benchmark without fixing the remaining bottleneck. Treat benchmark/status requests as checkpoints within the authorized implementation: identify the next concrete change, implement and verify it, and keep incomplete G-buffer/current-frame RT work explicit instead of presenting infrastructure as completion.
+
+- 2026-10-22 — Before continuing a new rendering stage, the user requested committing the completed work first. Verify and report the existing checkpoint commit, stage only this session's changes, then begin the next stage; never include another session's work in that checkpoint.
