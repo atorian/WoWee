@@ -70,7 +70,8 @@ checkout remains on master with its concurrent uncommitted work preserved.
 
 ## Validation so far
 
-- Native dev/no-LTO renderer, scene_render and GPU mutation fixture build passed.
+- Native dev/no-LTO full wowee client, renderer, scene_render and GPU mutation
+  fixture builds passed.
 - Eight CTest targets passed: range_allocator, rt_instance_changes,
   scene_spatial_index, paged_frame_buffer, rt_scene_publication, terrain_depth, wind_field, render_graph.
 - A real WMO fixture initially failed `reflection cull used the primary camera`:
@@ -94,7 +95,12 @@ checkout remains on master with its concurrent uncommitted work preserved.
   Opposite primary/reflected cameras and hidden placements preserve independent
   pass membership and already queued snapshots. Water/reflection settings
   regression also passes with synchronization validation.
-- No branch FPS improvement is claimed. No full branch replay measured yet.
+- No branch FPS improvement is claimed. The replay preflight refused to start
+  because another client was running from the independent
+  `build-dev/scratch/aerial-march/checkout` worktree (PID 32644 at the check).
+  That concurrent session was preserved; no branch FPS or RAM/VRAM result was
+  collected. The prepared `replay-branch.ps1` runner checks for concurrent clients
+  and samples process memory on D: when a clean run is possible.
 
 ## Remaining implementation
 
