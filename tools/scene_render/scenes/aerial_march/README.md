@@ -1,3 +1,30 @@
+## Complete M2 silhouettes up to the cull boundary (2026-10-22)
+
+M2 geometry now draws at full coverage until its existing per-instance cull
+range. All distance opacity multipliers and the 4x4 Bayer discard were removed;
+atmosphere alone reduces contrast. Authored texture alpha, animated material
+opacity, spawn/ghost fades and the existing cull/LOD rules remain independent.
+Glow sprites use the same model cull range without a second distance fade.
+This does not introduce a translucent distance-retirement pass.
+
+The Hyjal crown exposed the defect: static foliage began thinning at 55% of
+its range, so a 6000-yard landmark already had holes at View Distance 10000.
+`check_m2_distance_visibility.py` tests the rendered crown's periodic luminance
+and also requires a visible canopy. The saved faulty capture failed first
+with phase spread 83.67 (limit 35). For boundary tests use the same isolated
+fixture with fogStrength=0, aerialRayMarching=false, clouds=false, View Distance
+8000/6500/6200/5900 and MSAA 1/4. The three in-range images must match exactly;
+the out-of-range frame must contain only the clear sky in the model region. This checks the user's chosen
+absence of distance fading with fog disabled, rather than hiding it in haze.
+
+Validation passed: the crown phase spread fell to 5.11; all three in-range
+PNG captures are byte-identical for each MSAA setting, and the out-of-range
+frame is sky only. Nine Vulkan-validation captures had no VUID errors. CTest
+passed `sweep_guard`, `m2_view_distance` and `m2_blend_mode`. The full streamed
+Hyjal view was rendered again with terrain, buildings and trees. Capture
+hashes are in `solid-model-results.json`; images are in
+`build-dev/scratch/m2-no-distance-fade/`.
+
 ## Regional physical atmosphere profiles (2026-10-22)
 
 `assets/atmosphere_profiles.json` extends the loaded Light.dbc spatial profiles.

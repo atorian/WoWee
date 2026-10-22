@@ -39,3 +39,5 @@ mode; legacy mode remains available. Validate complete Hyjal and Dalaran scenes,
 height stability, density response, boundary matching, and GPU cost.
 
 Visual preference confirmed 2026-10-22: preserve the accepted physical-atmosphere Hyjal view. Dalaran should retain a denser atmosphere than the initial sea-level-based implementation; the user disables height influence there and wants to try Thickness 1.2. Global changes must be compared against both viewpoints. The user selected extending regional profiles: author base height, scale height and density in data, blend them through the existing spatial lighting volumes, and preserve the global Fog Thickness control.
+
+User choice (2026-10-22): M2 distance retirement must not add dithering, opacity or a smooth geometric fade. Draw complete models until their existing cull range; atmosphere alone reduces their contrast with distance. Preserve material alpha and intentional instance fades. Check a distant canopy for periodic holes and compare fog-disabled captures inside the cutoff to ensure geometry does not change before culling.

@@ -1340,7 +1340,6 @@ private:
         uint32_t draw;
         uint32_t modelId;
         float distSq;
-        float effectiveMaxDistSq;
     };
     struct GlowSprite {
         glm::vec3 worldPos;
@@ -1374,9 +1373,9 @@ private:
     void recordStarReplacement(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                                const M2ModelGPU& model, const StarReplacement& drawStars);
     /// The glow sprites the opaque pass would draw of one instance at this
-    /// level of detail and distance fade.
+    /// level of detail.
     void appendGlowSprites(const M2Instance& instance, const M2ModelGPU& model, uint16_t lod,
-                           float fadeAlpha, const glm::vec3& camPos,
+                           const glm::vec3& camPos,
                            std::vector<GlowSprite>& out, float time) const;
     /// Why the opaque pass leaves a batch out at this level of detail, or
     /// null when it draws it. `onlyBatchModel` is the WOWEE_M2_ONLY_BATCH

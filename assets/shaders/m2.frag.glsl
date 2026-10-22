@@ -92,18 +92,6 @@ float shadowTexel() {
 #include "local_lights.glsli"
 #include "shadow_receiver.glsli"
 
-// 4x4 Bayer dither matrix (normalized to 0..1)
-float bayerDither4x4(ivec2 p) {
-    int idx = (p.x & 3) + (p.y & 3) * 4;
-    float m[16] = float[16](
-         0.0/16.0,  8.0/16.0,  2.0/16.0, 10.0/16.0,
-        12.0/16.0,  4.0/16.0, 14.0/16.0,  6.0/16.0,
-         3.0/16.0, 11.0/16.0,  1.0/16.0,  9.0/16.0,
-        15.0/16.0,  7.0/16.0, 13.0/16.0,  5.0/16.0
-    );
-    return m[idx];
-}
-
 // The air between the camera and this point, out of the fog volume: rgb is
 // the light it scatters toward the camera, a how much of the point shows
 // through it. See VolumetricFog.
@@ -398,18 +386,9 @@ void main() {
         result = applyFog(result, FragPos, dist);
     }
 
+    // Material/instance opacity only. Distance is handled by atmosphere and
+    // the geometric cutoff; never punch coverage holes through a silhouette.
     float outAlpha = texColor.a * vFadeAlpha;
-    // The distance fade, for a batch drawn with no blending to fade through.
-    // Sixteen ordered steps against the fragment's own screen position: a tree
-    // at the edge of the draw distance thins out rather than switching off,
-    // and it reads the same at every sample count, where leaving the fade in
-    // the coverage alone would give two steps at 2x MSAA and none with MSAA
-    // off. Multiplying it into the coverage as well would take the leaf edges
-    // with it, so the cutout keeps its own alpha.
-    if (alphaTest != 0 && blendMode <= 1) {
-        if (vFadeAlpha <= bayerDither4x4(ivec2(gl_FragCoord.xy))) discard;
-        outAlpha = texColor.a;
-    }
     // Pressed on. The real client lifts the whole model while the button is
     // down over it, which is what says "this one, and the click landed": a
     // warm brightening rather than a tint, so a dark door reads as lit and a

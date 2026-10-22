@@ -1042,9 +1042,6 @@ struct M2PushConstants {
 };
 static_assert(sizeof(M2PushConstants) == kM2PushConstantBytes, "m2.vert's Push block");
 
-// Where in its draw distance a doodad starts to fade out.
-constexpr float kFadeStartFraction = 0.75f;
-
 // The level of detail a model is drawn at this far away. Down to the nearest
 // level the model actually has, not all the way back to full detail: a model
 // carrying 0 and 1 and asked for 3 was drawn at 0 - the most expensive level
@@ -1056,15 +1053,6 @@ uint16_t m2LodFor(const M2ModelGPU& model, float distSq) {
     else if (distSq > 40.0f * 40.0f) lod = 1;
     while (lod > 0 && !(model.availableLODs & (1u << lod))) --lod;
     return lod;
-}
-
-// How far through its fade-out an instance this far away is: 1 until the
-// fade starts, 0 at the end of its draw distance.
-float m2DistanceFade(const M2ModelGPU& model, float distSq, float effectiveMaxDistSq) {
-    const float fadeFrac = model.disableAnimation ? 0.55f : kFadeStartFraction;
-    const float fadeStartDistSq = effectiveMaxDistSq * fadeFrac * fadeFrac;
-    if (distSq <= fadeStartDistSq) return 1.0f;
-    return std::clamp((effectiveMaxDistSq - distSq) / (effectiveMaxDistSq - fadeStartDistSq), 0.0f, 1.0f);
 }
 
 // WOWEE_M2_BATCH_DIAG: the model whose batches the draw diagnostics speak of,
@@ -1123,7 +1111,7 @@ const char* M2Renderer::opaqueBatchSkip(const M2ModelGPU& model, size_t batchInd
 }
 
 void M2Renderer::appendGlowSprites(const M2Instance& inst, const M2ModelGPU& model, uint16_t lod,
-                                   float fadeAlpha, const glm::vec3& camPos,
+                                   const glm::vec3& camPos,
                                    std::vector<GlowSprite>& out, float time) const {
     // The groups the opaque pass leaves out altogether.
     if (skipGroundDetail_ && model.isGroundDetail) return;
@@ -1169,9 +1157,8 @@ void M2Renderer::appendGlowSprites(const M2Instance& inst, const M2ModelGPU& mod
             gs.color = glm::vec4(1.0f, 0.28f, 0.22f, 1.10f);
         else
             gs.color = glm::vec4(1.0f, 0.82f, 0.46f, 1.15f);
-        // Match the parent M2's distance fade instead of a separate hard
-        // 180-unit cutoff, which made tunnel lights pop on.
-        gs.color.a *= fadeAlpha;
+        // Glow sprites share their parent model's cull range. Atmosphere
+        // attenuates them in the shader, without a second distance fade.
         gs.size = batch.glowSize * inst.scale * (batch.preserveGlowMesh ? 2.0f : 1.45f);
         if (batch.preserveGlowMesh) gs.color.a *= 1.25f;
 
@@ -1400,9 +1387,9 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
             float distSq;
             float effectiveMaxDistSq;
 
-            // Server game objects keep a distance floor instead of following the
-            // ambient doodad distance down; it also feeds the fade curve below,
-            // so a mailbox doesn't fade out at the doodad boundary either.
+            // Server game objects keep a distance floor instead of following
+            // the ambient doodad range down. The final range only culls geometry;
+            // atmosphere handles the visible attenuation inside it.
             const float instanceMaxDistSq = rendering::m2InstanceMaxDistSq(
                 maxRenderDistanceSq, instance.cachedEffectiveMaxDistSqFactor,
                 instance.isGameObject, rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE,
@@ -1465,7 +1452,7 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
                 .boneCount = static_cast<uint32_t>(instance.boneMatrices.size()),
                 .afloat = instance.afloat > 0,
             });
-            VisibleEntry visible{.draw = draw, .modelId = instance.modelId, .distSq = distSq, .effectiveMaxDistSq = effectiveMaxDistSq};
+            VisibleEntry visible{.draw = draw, .modelId = instance.modelId, .distSq = distSq};
             if (!faded) {
                 out.opaque.push_back(visible);
                 if (instance.cachedModel && instance.cachedModel->hasGlowSprites) {
@@ -1475,7 +1462,7 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
                         (!instance.boneMatrices.empty() && instance.megaBoneOffset != 0);
                     if (posed) {
                         appendGlowSprites(instance, model, m2LodFor(model, distSq),
-                                          m2DistanceFade(model, distSq, effectiveMaxDistSq), camPos,
+                                          camPos,
                                           out.glows, frame.time);
                     }
                 }
@@ -1792,7 +1779,6 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         struct PendingInstance {
             /// Into drawInstances_.
             uint32_t draw;
-            float fadeAlpha;
             bool useBones;
             uint16_t targetLOD;
         };
@@ -1832,19 +1818,12 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 const auto& entry = sortedVisible_[vi];
                 const DrawInstance& instance = drawInstances_[entry.draw];
 
-                // Distance-based fade alpha. Ground detail used to be held at
-                // 0.82 here. This is the opaque pass: nothing blended it, so it
-                // was a number with no effect - and now that the cutout
-                // pipeline turns alpha into coverage, keeping it would punch a
-                // fifth of the pixels out of every tuft of grass in reach.
-                const float fadeAlpha = m2DistanceFade(model, entry.distSq, entry.effectiveMaxDistSq);
-
                 // Bone readiness check
                 if (modelNeedsAnimation && instance.boneCount == 0) continue;
                 bool needsBones = modelNeedsAnimation && instance.boneCount > 0;
                 if (needsBones && instance.megaBoneOffset == 0) continue;
 
-                pending.push_back({.draw = entry.draw, .fadeAlpha = fadeAlpha, .useBones = needsBones,
+                pending.push_back({.draw = entry.draw, .useBones = needsBones,
                                    .targetLOD = m2LodFor(model, entry.distSq)});
             }
 
@@ -1870,7 +1849,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 e.uv = M2UVTransform{};
                 e.uv2 = M2UVTransform{};
                 e.localLights = inst.localLights;
-                e.fadeAlpha = p.fadeAlpha;
+                e.fadeAlpha = 1.0f;
                 e.useBones = (p.useBones && !kM2NoSkinning) ? 1 : 0;
                 e.boneBase = p.useBones ? static_cast<int32_t>(inst.megaBoneOffset) : 0;
                 e.boneCount = static_cast<int32_t>(inst.boneCount);
@@ -2002,7 +1981,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                             e.uv = uv;
                             e.uv2 = uv2;
                             e.localLights = inst.localLights;
-                            e.fadeAlpha = p.fadeAlpha * batch.batchOpacity;
+                            e.fadeAlpha = batch.batchOpacity;
                             if (skyMode_) {
                                 const uint32_t duration = model.sequences.empty() ? 0 : model.sequences[0].duration;
                                 e.fadeAlpha *= skyBatchOpacity(model.colorAlphaTracks, batch.colorTrackIndex,
@@ -2150,8 +2129,8 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
 
         const M2ModelGPU& model = *currentModel;
 
-        float instanceFadeAlpha =
-            m2DistanceFade(model, entry.distSq, entry.effectiveMaxDistSq) * instance.fade;
+        // Authored/spawn opacity remains independent of distance culling.
+        float instanceFadeAlpha = instance.fade;
         const bool instanceFaded = instance.fade < 0.999f;
         if (model.isGroundDetail) instanceFadeAlpha *= 0.82f;
 
