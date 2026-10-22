@@ -104,7 +104,7 @@ inline glm::vec3 animatedBatchLightWorldCenter(const M2Instance& instance,
 
 // ---- Constants ----
 /// The size of m2.vert's Push block (M2PushConstants in m2_renderer_render.cpp).
-inline constexpr uint32_t kM2PushConstantBytes = 32;
+inline constexpr uint32_t kM2PushConstantBytes = 36;
 
 /// m2_particle.frag's push constants.
 struct M2ParticlePush {

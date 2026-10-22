@@ -1960,6 +1960,7 @@ void Renderer::endFrame() {
     recordScreenCapture();
 
     // Submit and present
+    if(m2Renderer)m2Renderer->finishInstanceTable();
     vkCtx->endFrame(currentCmd, currentImageIndex);
     currentCmd = VK_NULL_HANDLE;
     vkCtx->cpuStages().add("Render", "endFrame", std::chrono::duration<float, std::milli>(

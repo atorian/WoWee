@@ -1434,6 +1434,7 @@ wowee_add_test(test_frustum
 wowee_add_test(test_rt_instance_changes SOURCES test_rt_instance_changes.cpp)
 wowee_add_test(test_scene_spatial_index SOURCES test_scene_spatial_index.cpp)
 wowee_add_test(test_paged_frame_buffer SOURCES test_paged_frame_buffer.cpp)
+wowee_add_test(test_versioned_render_table SOURCES test_versioned_render_table.cpp ${TEST_COMMON_SOURCES})
 wowee_add_test(test_render_graph SOURCES test_render_graph.cpp)
 target_link_libraries(test_render_graph PRIVATE wowee_render)
 wowee_add_test(test_rt_scene_publication SOURCES test_rt_scene_publication.cpp)

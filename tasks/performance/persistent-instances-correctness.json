@@ -1,0 +1,70 @@
+{
+  "date": "2026-10-23",
+  "branch": "codex/gpu-scene-pipeline",
+  "performance_measurement": false,
+  "hardware": {
+    "cpu_gpu_changed_channels": 0,
+    "gpu_compare": true,
+    "material_changes": true,
+    "all_families": true,
+    "msaa": 4,
+    "mixed": true,
+    "software": false,
+    "rebuild": true,
+    "regions": true,
+    "near_plane": false,
+    "bounded_full_changed_channels": 0,
+    "forward_surface_mean_channel_error": 0.06264676474324109,
+    "fraction_error_over_8": 0.0019204943563086991,
+    "rt_mean_channel_change": 9.057687568463072,
+    "serial_parallel_changed_channels": 0
+  },
+  "software": {
+    "cpu_gpu_changed_channels": null,
+    "gpu_compare": false,
+    "material_changes": true,
+    "all_families": true,
+    "msaa": 1,
+    "mixed": true,
+    "software": true,
+    "rebuild": false,
+    "regions": true,
+    "near_plane": false,
+    "bounded_full_changed_channels": 0,
+    "forward_surface_mean_channel_error": 0.025204181444919593,
+    "fraction_error_over_8": 0.0006242420886814595,
+    "rt_mean_channel_change": 5.321401081512989,
+    "serial_parallel_changed_channels": 0
+  },
+  "instance_uploads": "Static M2 instance records reach 0 uploaded bytes after both GPU slots catch up; draw references still update per view.",
+  "residency": "512 offscreen instances arrive and depart around a retained instance; identical pixels at frames 7 and 14; GPU storage grows and shrinks; 512/1024 requested scene events verified.",
+  "snapshot": "RT3/MSAA4/FXAA: removed M2 preserves queued captured pixels; next extraction changes.",
+  "reflection": "WMO shown after material settings changes uses new settings; queued reflection preserves captured settings; next extraction changes.",
+  "validation": "Hardware/software and reflection checks passed with Khronos synchronization validation.",
+  "unit_assertions": {
+    "versioned_render_table": 14,
+    "paged_frame_buffer": 16,
+    "render_graph": 25,
+    "rt_scene_publication": 77,
+    "frame_worker": 15,
+    "retire_queue": 14
+  },
+  "builds": [
+    "wowee",
+    "scene_render",
+    "rt_probe"
+  ],
+  "evidence_directories": [
+    "build-dev/scratch/instance-tables",
+    "build-dev/scratch/instance-residency",
+    "build-dev/scratch/instance-final-snapshot",
+    "build-dev/scratch/instance-final-software",
+    "build-dev/scratch/instance-final-reflection"
+  ],
+  "guards": {
+    "sweep_guard": "passed; unavailable FrameXML/Data probes skipped as reported",
+    "render_dependency": "95 sources, 319 reachable includes, zero forbidden dependencies",
+    "record_scene": "78 functions, zero live scene reads",
+    "dead_symbols": "zero unused members outside format headers"
+  }
+}

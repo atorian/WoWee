@@ -6,7 +6,7 @@ evaluated surfaces and one family-tagged lighting shader. An ordered command
 plan merges compatible runs. Forward/reflected receivers trace their own current
 world position against the same RT scene; the client no longer runs the legacy
 full-screen producer. `WOWEE_MODEL_SURFACES=0` is a diagnostic material-parity
-route. This migration is under correctness validation, not performance acceptance.
+route. The merged production path, persistent materials/M2 instances and current-view GPU submission are implemented. Correctness results are recorded below; full performance acceptance remains separate.
 
 ## Surface/material boundary
 
@@ -365,3 +365,42 @@ before any preview/world consumer. An absent player projection still clears the
 map instead of leaving a sampled descriptor with an undefined image layout.
 
 The general M2 instance upload is the next migration stage; no FPS acceptance yet.
+
+
+## Persistent M2 instance publication (2026-10-23)
+
+World M2 draws now address lifetime/publication-keyed 208-byte instance rows.
+Each GPU frame slot tracks its own uploaded versions, so a skipped publication,
+repeated snapshot or older captured frame cannot consume newer instance values.
+An abandoned recording invalidates its slot acknowledgment; allocation replacement
+also invalidates it. Changed rows alone are copied/flushed. Slots with unchanged
+captures reach zero instance-record upload after catch-up.
+
+Per-view draw order is a small row-reference list, separate from those values.
+It shares the existing reference SSBO with surface material references rather
+than requiring another vertex-stage storage binding. GPU compaction resolves a
+candidate index, then the draw resolves its persistent instance and material rows.
+Forward and surface draws use the same table. Sky/editor direct owners retain
+explicit direct indexing; enabling GPU submission also wires table ownership.
+
+Departed rows are reclaimed, sparse tables compact, large buffers shrink, and
+empty views release CPU metadata. Buffer retirement respects the acquired slot
+and existing snapshot/GPU lifetime contracts. Bone page copies are explicitly
+flushed on noncoherent memory as well. No fence was added between geometry, RT,
+lighting, culling or indirect draws.
+
+Verification: four opaque families / one lighting group; CPU/GPU, worker/serial
+and bounded/full images match. Static instance uploads reach zero. A retained
+object keeps identical pixels while 512 offscreen instances arrive and depart,
+including buffer growth/shrink. Software RT, reflection material changes and
+M2 mutation-after-extraction pass synchronization validation. See
+[the correctness report](../tasks/performance/persistent-instances-correctness.json).
+
+This supersedes the earlier migration-stage statements about pending material
+and M2 instance tables. Draw-local push constants and view lists remain; they
+are command metadata, not copies of the whole resident world. Shadow views,
+reflections and ordered forward layers remain distinct work. Deformed receivers
+still reject temporal history until valid previous-deformation correspondence
+exists; they use current tracing rather than stale rigid motion. Full Dalaran
+performance, long-route peak memory and frame-pacing acceptance are not claimed
+by these correctness fixtures.

@@ -121,6 +121,8 @@ def main():
             raise RuntimeError('Compatible terrain/WMO/character/M2 geometry did not share one lighting group')
         if surfaces and mode==0 and b'uploaded bytes=0' not in log:
             raise RuntimeError('Unchanged material tables were uploaded every frame')
+        if b'M2 instance table: live=' not in log or b' uploaded bytes=0' not in b'\n'.join(line for line in log.splitlines() if b'M2 instance table:' in line):
+            raise RuntimeError('Static M2 instance records never stopped uploading')
         if args.gpu_compare and label!='cpu' and b'GPU draw list: candidates=' not in log:
             raise RuntimeError('GPU draw list was not executed')
         images[label]=rgb_pixels(out/(label+'.png'))

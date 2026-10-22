@@ -791,3 +791,26 @@ pass; persistent M2 instance uploads remain next. No benchmark was run.
 
 The M2 source-removal snapshot fixture also passes with RT3, MSAA4 and FXAA:
 queued captured pixels survive removal; the next extraction changes.
+
+
+### Persistent M2 instances and merged implementation (2026-10-23)
+
+The M2 instance upload stage is implemented. Lifetime/publication-keyed GPU rows
+are versioned independently for every frame slot. Draws carry row references;
+unchanged values are not copied again. Cancelled recordings and replaced GPU
+buffers invalidate upload acknowledgments. Population drops reclaim/compact
+rows and shrink storage; changed bone pages explicitly flush noncoherent memory.
+
+Hardware all-family checks retain four geometry families / one lighting group
+and exact CPU/GPU, serial/worker and bounded/full images. Static instance uploads
+reach zero. A 512-instance arrival/departure fixture preserves retained pixels
+through buffer growth and shrink. Software RT, reflection material changes and
+M2 source removal with RT3/MSAA4/FXAA pass synchronization validation. Unit tests
+cover skipped publications, old captures, departed/reused rows, cancelled writes
+and buffer replacement. The client, scene renderer and probe build successfully.
+
+[Persistent-instance correctness report](performance/persistent-instances-correctness.json).
+The merged production implementation no longer has the duplicate legacy RT
+producer or CPU M2 visibility readback. No intermediate performance run was
+made. Full replay frame-time/peak-memory acceptance remains separate and is not
+established by deterministic graphics fixtures.

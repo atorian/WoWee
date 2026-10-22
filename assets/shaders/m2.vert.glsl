@@ -46,6 +46,7 @@ layout(push_constant) uniform Push {
     float plantHeight;       // The model's own height (model space), for the player brush
     int texCoordSet2;        // second stage: 0 UV0, 1 UV1, -1 sphere map, 2 UV0 unanimated
     int visibleOffset; // negative for direct/ordered instance ranges
+    int rowReferenceOffset; // negative for standalone direct instance storage
 #ifdef M2_GBUFFER
     uint surfaceMaterialBase;
 #endif
@@ -86,9 +87,7 @@ layout(set = 3, binding = 0) readonly buffer InstanceSSBO {
 };
 
 layout(set=3,binding=2) readonly buffer VisibleInstances { uint visibleInstances[]; };
-#ifdef M2_GBUFFER
-layout(set=3,binding=1) readonly buffer SurfaceReferences { uint surfaceReferences[]; };
-#endif
+layout(set=3,binding=1) readonly buffer DrawReferences { uint drawReferences[]; };
 
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
@@ -129,10 +128,11 @@ vec2 uvTransform(vec4 row0, vec4 row1, vec2 uv) {
 void main() {
     int sourceInstance=push.visibleOffset<0?gl_InstanceIndex:int(visibleInstances[push.visibleOffset+gl_InstanceIndex]);
 #ifdef M2_GBUFFER
-    vSurfaceMaterial=surfaceReferences[push.surfaceMaterialBase+sourceInstance];
+    vSurfaceMaterial=drawReferences[push.surfaceMaterialBase+sourceInstance];
 #endif
     // Fetch per-instance data from SSBO
-    int instIdx = push.instanceDataOffset + sourceInstance;
+    int instIdx = push.rowReferenceOffset<0?push.instanceDataOffset+sourceInstance:
+        int(drawReferences[push.rowReferenceOffset+sourceInstance]);
     mat4 model = instanceData[instIdx].model;
     float fade = instanceData[instIdx].fadeAlpha;
     int uBones = instanceData[instIdx].useBones;

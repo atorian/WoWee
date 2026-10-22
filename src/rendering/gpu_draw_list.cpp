@@ -68,6 +68,8 @@ void GpuDrawList::reserve(Buffer& buffer,size_t bytes,bool host,VkBufferUsageFla
 void GpuDrawList::prepare(uint32_t slot,size_t candidateCapacity,size_t drawCapacity) {
     slot_=slot;candidateCapacity_=candidateCapacity;drawCapacity_=drawCapacity;
     spheres_.clear();groups_.clear();draws_.clear();
+    if(!candidateCapacity) {decltype(spheres_){}.swap(spheres_);decltype(groups_){}.swap(groups_);}
+    if(!drawCapacity)decltype(draws_){}.swap(draws_);
     spheres_.reserve(candidateCapacity);groups_.reserve(candidateCapacity);draws_.reserve(drawCapacity);
     auto& state=slots_[slot];
     reserve(state.buffers[0],candidateCapacity*sizeof(glm::vec4),true,0);

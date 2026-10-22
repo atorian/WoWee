@@ -838,22 +838,23 @@ void M2Renderer::extractBones(Frame& frame) {
 
 bool M2Renderer::prepareInstanceStorage(uint32_t slot,uint64_t entries) {
     const uint64_t references=std::max(uint64_t(1),entries);
-    if(references>surfaceReferenceCapacity_[slot]) {
+    if(references>surfaceReferenceCapacity_[slot] ||
+        (surfaceReferenceCapacity_[slot]>65536 && references<surfaceReferenceCapacity_[slot]/3)) {
         VkPhysicalDeviceProperties props{};
         vkGetPhysicalDeviceProperties(vkCtx_->getPhysicalDevice(),&props);
-        if(references>props.limits.maxStorageBufferRange/sizeof(uint32_t)) {
+        if(references>props.limits.maxStorageBufferRange/(2*sizeof(uint32_t))) {
             LOG_ERROR("M2 material references exceed storage buffer range; frame aborted");
             throw std::runtime_error("M2 material reference capacity exceeded");
         }
         const uint32_t capacity=uint32_t(references);
-        auto next=createBuffer(vkCtx_->getAllocator(),VkDeviceSize(capacity)*sizeof(uint32_t),
+        auto next=createBuffer(vkCtx_->getAllocator(),VkDeviceSize(capacity)*2*sizeof(uint32_t),
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
         if(!next.info.pMappedData) {
             destroyBuffer(vkCtx_->getAllocator(),next);
             LOG_ERROR("M2 material reference allocation failed; frame aborted");
             throw std::runtime_error("M2 material reference allocation failed");
         }
-        VkDescriptorBufferInfo info{next.buffer,0,VkDeviceSize(capacity)*sizeof(uint32_t)};
+        VkDescriptorBufferInfo info{next.buffer,0,VkDeviceSize(capacity)*2*sizeof(uint32_t)};
         VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         write.dstSet=instanceSet_[slot];write.dstBinding=1;write.descriptorCount=1;
         write.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;write.pBufferInfo=&info;
@@ -861,7 +862,8 @@ bool M2Renderer::prepareInstanceStorage(uint32_t slot,uint64_t entries) {
         DeferredResources retire(*vkCtx_);retire.buffer(surfaceReferences_[slot]);
         surfaceReferences_[slot]=next;surfaceReferenceCapacity_[slot]=capacity;
     }
-    if(entries<=instanceCapacity_[slot]) return true;
+    const bool shrink=instanceCapacity_[slot]>kInitialInstanceCapacity && entries<instanceCapacity_[slot]/3;
+    if(entries<=instanceCapacity_[slot] && !shrink) return true;
     if(instanceGrowthFailed_[slot]) return false;
     VkPhysicalDeviceProperties properties{};
     vkGetPhysicalDeviceProperties(vkCtx_->getPhysicalDevice(),&properties);
@@ -870,12 +872,12 @@ bool M2Renderer::prepareInstanceStorage(uint32_t slot,uint64_t entries) {
         instanceGrowthFailed_[slot]=true;
         LOG_ERROR("M2 instance storage: need ",entries," records in slot ",slot,
             ", capacity ",instanceCapacity_[slot],", device limit ",limit,"; ",why,
-            " - M2 meshes omitted while this frame exceeds available storage");
+            "; frame aborted because instance storage is unavailable");
         return false;
     };
     if(entries>limit) return fail("storage-buffer range exceeded");
     const uint32_t capacity=static_cast<uint32_t>(std::min(limit,
-        std::max(entries,uint64_t(instanceCapacity_[slot])*2)));
+        shrink?std::max(entries,uint64_t(kInitialInstanceCapacity)):std::max(entries,uint64_t(instanceCapacity_[slot])*2)));
     const VkDeviceSize bytes=VkDeviceSize(capacity)*sizeof(M2InstanceGPU);
     VkBufferCreateInfo bci{.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bci.size=bytes; bci.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
@@ -902,13 +904,19 @@ bool M2Renderer::prepareInstanceStorage(uint32_t slot,uint64_t entries) {
     retire.buffer(instanceBuffer_[slot],instanceAlloc_[slot]);
     instanceBuffer_[slot]=next.buffer; instanceAlloc_[slot]=next.allocation;
     instanceMapped_[slot]=next.info.pMappedData; instanceCapacity_[slot]=capacity;
-    LOG_INFO("M2 instance storage: slot ",slot," grew to ",capacity," records (",bytes/1024,
+    instanceTable_.invalidate(slot);
+    LOG_INFO("M2 instance storage: slot ",slot," resized to ",capacity," records (",bytes/1024,
         " KiB), frame requires ",entries);
     return true;
 }
 
 void M2Renderer::prepareRender(uint32_t frameIndex, const Camera&) {
-    if(!prepareInstanceStorage(frameIndex,recording_->instanceEntries)) return;
+    const auto rows=sceneTablesEnabled_?instanceTable_.begin(frameIndex,recording_->instanceEntries):recording_->instanceEntries;
+    if(!prepareInstanceStorage(frameIndex,std::max(uint64_t(rows),recording_->instanceEntries)))
+        throw std::runtime_error("M2 instance table allocation failed");
+    instanceFramePrepared_=true;instanceUploadCount_=0;instanceUploadEnd_=0;
+    instanceDataCount_=0;surfaceReferenceCount_=0;
+    instanceUploadFirst_=std::numeric_limits<size_t>::max();instanceRowFlushBegin_=0;
     if(!skyMode_ && gpuDrawsEnabled_) {
         if(!gpuDraws_)gpuDraws_=std::make_unique<GpuDrawList>(*vkCtx_);
         gpuDraws_->prepare(frameIndex,recording_->drawInstances_.size(),recording_->instanceEntries);
@@ -924,9 +932,62 @@ void M2Renderer::prepareRender(uint32_t frameIndex, const Camera&) {
             [&](size_t offset,std::span<const glm::mat4> values) {
                 std::memcpy(static_cast<glm::mat4*>(megaBoneMapped_[frameIndex])+offset,
                             values.data(),values.size_bytes());
+                if(vmaFlushAllocation(vkCtx_->getAllocator(),megaBoneAlloc_[frameIndex],
+                    offset*sizeof(glm::mat4),values.size_bytes())!=VK_SUCCESS) {
+                    LOG_ERROR("M2 bone palette flush failed; frame aborted");
+                    throw std::runtime_error("M2 bone palette flush failed");
+                }
             });
 }
 
+
+// View-local references preserve draw ordering while the GPU instance rows stay
+// stable across grouping changes. Texture-animation batches own explicit variants.
+void M2Renderer::writeInstanceData(uint32_t index,uint64_t lifetime,uint64_t publication,const M2InstanceGPU& value) {
+    const auto slot=vkCtx_->getCurrentFrame();
+    const auto upload=[&](uint32_t row,const M2InstanceGPU& current) {
+        if(row>=instanceCapacity_[slot]) {
+            LOG_ERROR("M2 persistent instance row exceeds acquired slot capacity; frame aborted");
+            throw std::runtime_error("M2 instance row reservation exhausted");
+        }
+        std::memcpy(static_cast<M2InstanceGPU*>(instanceMapped_[slot])+row,&current,sizeof(current));
+        instanceUploadFirst_=std::min(instanceUploadFirst_,size_t(row));
+        instanceUploadEnd_=std::max(instanceUploadEnd_,size_t(row)+1);++instanceUploadCount_;
+    };
+    if(sceneTablesEnabled_) {
+        if(index>=surfaceReferenceCapacity_[slot]) {
+            LOG_ERROR("M2 instance reference exceeds acquired slot capacity; frame aborted");
+            throw std::runtime_error("M2 instance reference reservation exhausted");
+        }
+        const uint32_t row=instanceTable_.put({lifetime,publication},value,upload);
+        auto* references=static_cast<uint32_t*>(surfaceReferences_[slot].info.pMappedData);
+        references[surfaceReferenceCapacity_[slot]+index]=row;
+    } else upload(index,value);
+}
+void M2Renderer::flushInstanceData() {
+    const auto slot=vkCtx_->getCurrentFrame();
+    bool ok=true;
+    if(instanceUploadEnd_)ok=vmaFlushAllocation(vkCtx_->getAllocator(),instanceAlloc_[slot],
+        instanceUploadFirst_*sizeof(M2InstanceGPU),(instanceUploadEnd_-instanceUploadFirst_)*sizeof(M2InstanceGPU))==VK_SUCCESS;
+    if(sceneTablesEnabled_ && instanceDataCount_>instanceRowFlushBegin_) {
+        ok=ok && vmaFlushAllocation(vkCtx_->getAllocator(),surfaceReferences_[slot].allocation,
+            VkDeviceSize(surfaceReferenceCapacity_[slot]+instanceRowFlushBegin_)*sizeof(uint32_t),
+            VkDeviceSize(instanceDataCount_-instanceRowFlushBegin_)*sizeof(uint32_t))==VK_SUCCESS;
+    }
+    if(!ok) {LOG_ERROR("M2 instance table flush failed; frame aborted");throw std::runtime_error("M2 instance flush failed");}
+    instanceRowFlushBegin_=instanceDataCount_;
+    instanceUploadFirst_=std::numeric_limits<size_t>::max();instanceUploadEnd_=0;
+}
+void M2Renderer::finishInstanceTable() {
+    if(!instanceFramePrepared_)return;
+    flushInstanceData();
+    if(sceneTablesEnabled_) {
+        instanceTable_.finish();
+        if(core::envFlagEnabled("WOWEE_SURFACE_PLAN_CHECK",false))
+            LOG_INFO("M2 instance table: live=",instanceTable_.live()," uploaded bytes=",instanceUploadCount_*sizeof(M2InstanceGPU));
+    }
+    instanceFramePrepared_=false;
+}
 
 // Gather the camera columns once for visibility classification and publication.
 void M2Renderer::gatherCameraCandidates(const Camera& camera) {
@@ -974,6 +1035,7 @@ struct M2PushConstants {
     float plantHeight;          // The model's own height, for the player brush
     int32_t texCoordSet2;       // the second stage's: 0 UV0, 1 UV1, -1 sphere map, 2 UV0 unanimated
     int32_t visibleOffset = -1; // compact GPU list; -1 for direct/ordered draws
+    int32_t rowReferenceOffset = -1; // draw-local references into the persistent instance table
 };
 static_assert(sizeof(M2PushConstants) == kM2PushConstantBytes, "m2.vert's Push block");
 
@@ -1711,9 +1773,8 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     if(surfaces) {previousSurfaceTransforms_.swap(currentSurfaceTransforms_);currentSurfaceTransforms_.clear();}
 
     // Reset instance SSBO write cursor for this frame
-    instanceDataCount_ = 0;
+    instanceDataCount_ = 0;instanceRowFlushBegin_=0;
     surfaceReferenceCount_ = 0;
-    auto* instSSBO = static_cast<M2InstanceGPU*>(instanceMapped_[frameIndex]);
 
     // =====================================================================
     // Opaque pass - instanced draws grouped by (modelId, LOD)
@@ -1828,7 +1889,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     currentSurfaceTransforms_.insert_or_assign(inst.surfaceLifetime,inst.modelMatrix);
                 }
                 if(gpuDraws_)gpuDraws_->appendSphere(inst.cullSphere);
-                auto& e = instSSBO[instanceDataCount_];
+                M2InstanceGPU e{};
                 e.model = inst.modelMatrix;
                 e.uv = M2UVTransform{};
                 e.uv2 = M2UVTransform{};
@@ -1840,6 +1901,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 e.highlight = inst.highlight;
                 e.flags = inst.afloat ? 1 : 0;
                 e.interiorLight = inst.interiorLight;
+                writeInstanceData(instanceDataCount_,inst.surfaceLifetime,0,e);
                 instanceDataCount_++;
                 ++writtenInstances;
             }
@@ -1968,7 +2030,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                             // out of the base entry. instSSBO lives in write-combined
                             // upload memory: writing it is cheap, but reading it back is
                             // uncached and costs microseconds per instance.
-                            auto& e = instSSBO[instanceDataCount_];
+                            M2InstanceGPU e{};
                             e.model = inst.modelMatrix;
                             e.uv = uv;
                             e.uv2 = uv2;
@@ -1987,6 +2049,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                             e.highlight = inst.highlight;
                             e.flags = inst.afloat ? 1 : 0;
                             e.interiorLight = inst.interiorLight;
+                            writeInstanceData(instanceDataCount_,inst.surfaceLifetime,batch.surfacePublication,e);
                             instanceDataCount_++;
                         }
                     }
@@ -2036,6 +2099,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     pc.texCoordSet2 = static_cast<int32_t>(batch.secondTexCoords);
                     fillSway(pc, model, skyMode_);
                     pc.instanceDataOffset = static_cast<int32_t>(drawOffset);
+                    pc.rowReferenceOffset=sceneTablesEnabled_?int32_t(surfaceReferenceCapacity_[frameIndex]+drawOffset):-1;
                     pc.visibleOffset=gpuDraws_?int32_t(visibleOffset):-1;
                     vkCmdPushConstants(cmd, activeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
                     if(evaluated) {
@@ -2086,6 +2150,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     }
     if(surfaces) {surfacePass_->endRun(SurfacePass::Family::M2);surfaceRecordedFrame_=vkCtx_->frameNumber();}
 
+    flushInstanceData();
     if(surfaceReferenceCount_ && vmaFlushAllocation(vkCtx_->getAllocator(),surfaceReferences_[frameIndex].allocation,
         0,VkDeviceSize(surfaceReferenceCount_)*sizeof(uint32_t))!=VK_SUCCESS) {
         LOG_ERROR("M2 material reference flush failed; frame aborted");
@@ -2128,7 +2193,6 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
     // sorted them back to front.
     const uint32_t frameIndex = vkCtx_->getCurrentFrame();
     if(recording_->instanceEntries>instanceCapacity_[frameIndex]) return;
-    auto* instSSBO = static_cast<M2InstanceGPU*>(instanceMapped_[frameIndex]);
 
     // The sets the opaque pass bound, again: this may be a different command
     // buffer from the one it recorded into.
@@ -2281,7 +2345,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             // Write single instance entry to SSBO
             if (instanceDataCount_ >= instanceCapacity_[frameIndex]) continue;
             uint32_t drawOffset = instanceDataCount_;
-            auto& e = instSSBO[instanceDataCount_];
+            M2InstanceGPU e{};
             e.model = instance.modelMatrix;
             e.uv = uv;
             e.uv2 = uv2;
@@ -2300,6 +2364,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             e.highlight = instance.highlight;
             e.flags = instance.afloat ? 1 : 0;
             e.interiorLight = instance.interiorLight;
+            writeInstanceData(instanceDataCount_,instance.surfaceLifetime,batch.surfacePublication,e);
             instanceDataCount_++;
 
             // Earlier captures still reference these SSBO addresses. Reserve
@@ -2332,6 +2397,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             pc.texCoordSet2 = static_cast<int32_t>(batch.secondTexCoords);
             fillSway(pc, model, skyMode_);
             pc.instanceDataOffset = static_cast<int32_t>(drawOffset);
+            pc.rowReferenceOffset=sceneTablesEnabled_?int32_t(surfaceReferenceCapacity_[frameIndex]+drawOffset):-1;
             vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
             vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
             if (skyMode_) ++skyDiagDrawsTransparent_;
@@ -2339,6 +2405,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
         }
     }
 
+    flushInstanceData();
     // Render glow sprites as billboarded additive point lights
     const VkPipeline glowPipeline =
         blended().particle[static_cast<size_t>(M2BlendPipeline::AlphaAdd)];

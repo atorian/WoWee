@@ -658,6 +658,7 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
                 characters.setInstanceOpacity(id,instance.value("opacity",1.0f));
                 movingCharacters.push_back({.instance=id,.position=origin+offset,.velocity=glm::vec3(0)});
             } else {
+                if(instance.value("hidden",false))m2.setInstanceHidden(id,true);
                 if(instance.contains("interiorAmbient"))m2.setInteriorLight(id,rendering::InteriorLight{
                     vec3(instance.at("interiorAmbient")),vec3(instance.at("interiorDirect"))});
                 placements.push_back({.instanceId=id,.modelId=modelId});

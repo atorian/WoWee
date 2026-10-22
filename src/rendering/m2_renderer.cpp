@@ -122,6 +122,7 @@ M2Renderer::~M2Renderer() {
 }
 
 void M2Renderer::enableGpuDrawSubmission() {
+    sceneTablesEnabled_=true;
     gpuDrawsEnabled_=core::envFlagEnabled("WOWEE_M2_GPU_DRAW",true);
     if(!gpuDrawsEnabled_)LOG_WARNING("M2 GPU indirect submission disabled by diagnostic override; using CPU view culling");
 }
@@ -978,6 +979,7 @@ void M2Renderer::shutdown() {
     destroy(device, instanceDescPool_);
 
     gpuDraws_.reset();
+    instanceTable_={};instanceFramePrepared_=false;sceneTablesEnabled_=false;
 
     destroy(device, materialSetLayout_);
     destroy(device, boneSetLayout_);

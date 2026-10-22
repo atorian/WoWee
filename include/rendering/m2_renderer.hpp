@@ -1,6 +1,7 @@
 #pragma once
 #include "pipeline/prepared_texture.hpp"
 #include "rendering/paged_frame_buffer.hpp"
+#include "rendering/versioned_render_table.hpp"
 #include "rendering/surface_identity.hpp"
 #include "rendering/range_allocator.hpp"
 #include "rendering/vk_utils.hpp"
@@ -605,6 +606,7 @@ public:
     void enableGpuDrawSubmission();
     bool hasGpuDraws() const;
     void recordGpuDraws(VkCommandBuffer cmd,const Camera& camera);
+    void finishInstanceTable();
     /// The opaque pass, and the blended one too unless it is drawn after the
     /// water (see renderAfterWater).
     /// A replacement is recorded where a suppressed star sheet would draw,
@@ -1121,6 +1123,12 @@ private:
     AllocatedBuffer surfaceReferences_[2]{};
     uint32_t surfaceReferenceCapacity_[2]{};
     uint32_t surfaceReferenceCount_ = 0;
+    bool sceneTablesEnabled_=false,instanceFramePrepared_=false;
+    VersionedRenderTable<M2InstanceGPU> instanceTable_;
+    size_t instanceUploadFirst_=0,instanceUploadEnd_=0,instanceUploadCount_=0;
+    uint32_t instanceRowFlushBegin_=0;
+    void writeInstanceData(uint32_t index,uint64_t lifetime,uint64_t publication,const M2InstanceGPU& value);
+    void flushInstanceData();
 
     bool gpuDrawsEnabled_ = false;
     std::unique_ptr<GpuDrawList> gpuDraws_;
