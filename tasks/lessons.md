@@ -163,3 +163,5 @@
 - 2026-10-21 — For the three-way fog comparison, the user corrected the lineup: old mode at 0.8, ray marching at 1.25, and ray marching with only the far layer strengthened at base 0.8. Present exactly these three images in one row; do not substitute a ray-marched 0.8 baseline or add an unrequested fourth capture.
 
 - 2026-10-21 — The user judged the 1.25 far-density boost unhelpful and chose a runtime ray-marching toggle. Expose in-scattering separately from Fog Thickness; do not enable the experimental far-density boost or change their density when toggling it.
+
+- 2026-10-22 — The user accepted the new Hyjal atmosphere but found Dalaran too clear, even after disabling height influence. A world-sea-level aerosol datum is stable but does not establish desirable haze on elevated plateaus. Preserve the accepted Hyjal view; evaluate Dalaran density with height influence disabled and verify the actual Thickness range before proposing new controls. Treat regional base height and scale height as authored atmospheric parameters, not landmark-specific exceptions.

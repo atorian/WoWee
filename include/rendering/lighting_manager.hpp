@@ -13,6 +13,20 @@ namespace pipeline { class DBCFile; class AssetManager; }
 
 namespace rendering {
 
+// Authored in world yards, independent of the camera and local terrain.
+struct AtmosphereProfile {
+    float baseHeight = 0.0f;
+    float scaleHeight = 300.0f;
+    float densityScale = 1.0f;
+};
+
+inline AtmosphereProfile blendAtmosphere(const AtmosphereProfile& a,
+                                         const AtmosphereProfile& b, float w) {
+    return {glm::mix(a.baseHeight, b.baseHeight, w),
+            glm::mix(a.scaleHeight, b.scaleHeight, w),
+            glm::mix(a.densityScale, b.densityScale, w)};
+}
+
 /**
  * Time-of-day lighting parameters sampled from DBC curves
  */
@@ -47,6 +61,7 @@ struct LightingParams {
 
     float cloudDensity = 0.3f;                      // Cloud density/opacity
     float horizonGlow = 0.3f;                       // Horizon glow intensity
+    AtmosphereProfile atmosphere;
 
     // Value initialization uses the fallback member defaults above. A weighted
     // sum must start at zero, otherwise every zone gains a second light/sky.
@@ -66,7 +81,8 @@ struct LightingParams {
             .cloudSunlitColor = glm::vec3(0.0f),
             .cloudFillColor = glm::vec3(0.0f),
             .cloudBaseColor = glm::vec3(0.0f),
-            .cloudDensity = 0.0f, .horizonGlow = 0.0f
+            .cloudDensity = 0.0f, .horizonGlow = 0.0f,
+            .atmosphere = {0.0f, 0.0f, 0.0f}
         };
     }
 };
@@ -221,7 +237,8 @@ public:
     /**
      * Initialize lighting system and load DBCs
      */
-    bool initialize(pipeline::AssetManager* assetManager);
+    bool initialize(pipeline::AssetManager* assetManager,
+                    const std::string& atmospherePath = "assets/atmosphere_profiles.json");
 
     /**
      * Update lighting for current time and player position
@@ -329,6 +346,9 @@ public:
     void useRealTime(bool use) { manualTime_ = !use; }
 
 private:
+    void loadAtmosphereProfiles(const std::string& path);
+    AtmosphereProfile defaultAtmosphere_;
+    std::map<std::pair<uint32_t, uint32_t>, AtmosphereProfile> atmosphereProfiles_;
     /**
      * Load Light.dbc
      */

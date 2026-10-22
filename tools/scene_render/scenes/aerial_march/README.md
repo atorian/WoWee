@@ -1,3 +1,51 @@
+## Regional physical atmosphere profiles (2026-10-22)
+
+`assets/atmosphere_profiles.json` extends the loaded Light.dbc spatial profiles.
+Each row addresses a `(mapId, lightId)` pair, including map-global Light rows;
+`name` is an editorial label, never a runtime match. There are no landmark or
+zone-name conditions in the renderer. Unspecified local lights inherit their
+map-global override, otherwise `default`. Explicit rows inherit omitted fields
+from `default`. Overrides referencing absent Light.dbc rows are warned and
+ignored, allowing another expansion's data to keep its default atmosphere.
+
+- `baseHeight`: world Z in yards; below this height aerosol density is constant.
+- `scaleHeight`: yards above the base for aerosol density to fall to 1/e with
+  Fog height influence 1 (minimum 1 yard).
+- `densityScale`: positive multiplier of physical optical depth, independent
+  of Fog Thickness and height influence. The molecular constituent shares this
+  density multiplier; its separate 8000-yard scale height remains unchanged.
+
+Parameters use the existing Light.dbc volume weights and temporal smoothing.
+They describe the current region's medium throughout the view, not separate
+3D fog volumes queried along every ray. They are stable inside a region; their
+values change as the observer crosses the lighting falloff. Camera height is
+never used as the layer datum. Weather keeps its own DBC ranges and local mist.
+Legacy distance fog and underwater fog ignore these new parameters.
+
+The default 0 / 300 / 1 preserves the accepted Barrens-to-Hyjal view and all
+unmodified regions. Dalaran (map 571, Light 1802) starts at 600 / 400 / 1.2.
+These are authored visual choices, not heights reconstructed from the DBC.
+The existing Fog Thickness slider remains a global multiplier: 1.0 gives
+Dalaran x1.2, and 1.2 gives x1.44 relative to its unscaled DBC calibration.
+Height influence 0 removes aerosol height decay but retains regional density.
+Thickness 0 still removes the broad atmosphere. No additional sampling cost.
+
+`scene_render` accepts `atmosphereProfiles` as a path to an alternate profile
+file for reproducible comparisons. A missing, malformed or invalid file/row
+logs a warning and uses the documented default or remaining valid entries.
+`test_light_volume_blend` exercises loading, spatial and temporal transitions,
+world-height stability, weather independence, global inheritance and failures.
+
+Validation: nine CTest targets passed, including `sweep_guard`, lighting,
+transport math and settings. Seven static Vulkan captures reported no VUID
+errors; vacuum matches legacy exactly, weather auto/Low matches exactly and
+Thickness responds. Low/High error is 0.0618/255 mean and 1/255 at p99.
+Full streamed comparisons retained 99.917% identical pixels in Hyjal (the
+small residual appears around effects and water), while Dalaran gains visible
+haze with height influence both enabled and disabled. Results and capture
+hashes are recorded in `regional-results.json`; screenshots are under
+`build-dev/scratch/atmosphere-profiles/`.
+
 # Shared atmospheric transport (2026-10-22)
 
 The existing **Ray-marched distance fog** option now selects the shared

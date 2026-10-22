@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "default": {"baseHeight": 0, "scaleHeight": 300, "densityScale": 1},
+  "profiles": [
+    {
+      "name": "Dalaran plateau",
+      "mapId": 571,
+      "lightId": 1802,
+      "baseHeight": 600,
+      "scaleHeight": 400,
+      "densityScale": 1.2
+    }
+  ]
+}

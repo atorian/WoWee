@@ -1001,7 +1001,8 @@ int run(const json& scene, const std::string& outPath, bool timing) {
         } else {
             renderer.setShadowQualityLevel(scene.value("shadowQuality", 2));
             if (renderer.initialize(&surface) &&
-                renderer.getLightingManager()->initialize(&assets)) {
+                renderer.getLightingManager()->initialize(&assets,
+                    scene.value("atmosphereProfiles", std::string("assets/atmosphere_profiles.json")))) {
                 status = render(scene, outPath, assets, renderer, timing);
             } else {
                 std::fprintf(stderr, "scene_render: the renderer did not start\n");

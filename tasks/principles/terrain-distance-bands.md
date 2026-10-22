@@ -37,3 +37,5 @@ integration. Keep geometric retirement at View Distance separate from optical
 density. This supersedes the independent near/far layering above for the new
 mode; legacy mode remains available. Validate complete Hyjal and Dalaran scenes,
 height stability, density response, boundary matching, and GPU cost.
+
+Visual preference confirmed 2026-10-22: preserve the accepted physical-atmosphere Hyjal view. Dalaran should retain a denser atmosphere than the initial sea-level-based implementation; the user disables height influence there and wants to try Thickness 1.2. Global changes must be compared against both viewpoints. The user selected extending regional profiles: author base height, scale height and density in data, blend them through the existing spatial lighting volumes, and preserve the global Fog Thickness control.

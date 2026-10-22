@@ -1,0 +1,85 @@
+{
+  "hyjal_day": {
+    "mean_error": 0.0013013599537037037,
+    "p99_error": 0.0,
+    "changed_pixel_fraction": 0.0008311631944444445,
+    "max_error": 102
+  },
+  "dalaran_gundrak": {
+    "mean_error": 12.126260127314815,
+    "p99_error": 66.0,
+    "changed_pixel_fraction": 0.9823111979166667,
+    "max_error": 103
+  },
+  "captures": {
+    "dalaran_gundrak-flat-default": {
+      "gpu_mean_ms": 12.271600000000001,
+      "errors": [],
+      "sha256": "c3305233cf9d83c6f91155bec8f66eef8e2fd4ecaf65f8f25e7a99b73ed6016d"
+    },
+    "dalaran_gundrak-flat-regional": {
+      "gpu_mean_ms": 12.4248,
+      "errors": [],
+      "sha256": "56e6c2c2c228ca9021e8e3412ecbd1ef6d08b5882ea2c1ad740a8f47d39859df"
+    },
+    "dalaran_gundrak-regional": {
+      "gpu_mean_ms": 12.2546,
+      "errors": [],
+      "sha256": "cd0c0b6f57f86743bd8d0fc2ee5b91630412e1a9275906f7a03659f09c8da3c8"
+    },
+    "hyjal_day-regional": {
+      "gpu_mean_ms": 8.59,
+      "errors": [],
+      "sha256": "223bdc991d7bb27a7a61bf70bb3f07d36eefc79c21366893e97541eff7f6957b"
+    }
+  },
+  "conditions": {
+    "full_streamed_scenes": true,
+    "view_distance": 10000,
+    "comparison": {
+      "fog_strength": 0.8,
+      "height_influence": 1
+    },
+    "height_disabled_comparison": {
+      "fog_strength": 1,
+      "height_influence": 0
+    },
+    "regional_profile": {
+      "version": 1,
+      "default": {
+        "baseHeight": 0,
+        "scaleHeight": 300,
+        "densityScale": 1
+      },
+      "profiles": [
+        {
+          "name": "Dalaran plateau",
+          "mapId": 571,
+          "lightId": 1802,
+          "baseHeight": 600,
+          "scaleHeight": 400,
+          "densityScale": 1.2
+        }
+      ]
+    }
+  },
+  "notes": [
+    "Saved pre-change physical captures were reused; old builds were not rerun.",
+    "Hyjal: 99.917% of pixels identical; visible residuals are confined to small effects/water, no atmospheric band change.",
+    "GPU averages are separate runs, not a controlled performance benchmark.",
+    "The later worldInView guard correction affects preview frames only, not these world captures."
+  ],
+  "validation": {
+    "ctest_passed": 9,
+    "includes_sweep_guard": true,
+    "renderer_client_dependency_violations": 0,
+    "recording_live_scene_reads": 0,
+    "vulkan_capture_count": 7,
+    "vulkan_validation_errors": 0,
+    "transport": {
+      "passed": true,
+      "low_high_mean_error": 0.061797236689814815,
+      "low_high_p99_error": 1
+    }
+  }
+}

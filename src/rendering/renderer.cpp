@@ -897,12 +897,17 @@ void Renderer::updatePerFrameUBO() {
             frameInputs_.aerialRayMarching ? 1.0f : 0.0f);
         const float thickness=frameInputs_.fogStrength;
         if(frameInputs_.worldInView && (thickness>0.001f || frameInputs_.aerialRayMarching)) {
-            // The physical mode anchors its atmosphere at world sea level;
-            // the legacy curve retains its local ground-relative profile.
-            // Aerosol scale height is 300 yards at influence 1. A separate
-            // thin molecular constituent persists above the aerosol layer.
-            currentFrameData.aerialParams=glm::vec4(frameInputs_.aerialRayMarching ? 0.0f : frameInputs_.fogGround,
-                frameInputs_.fogHeightInfluence/300.f,thickness,1);
+            // Authored regional heights are stable world coordinates. Legacy
+            // retains its local ground-relative layer and 300-yard scale height.
+            const auto& air = lp.atmosphere;
+            if (frameInputs_.aerialRayMarching) {
+                currentFrameData.fogParams.x /= air.densityScale;
+                currentFrameData.fogParams.y /= air.densityScale;
+            }
+            currentFrameData.aerialParams=glm::vec4(
+                frameInputs_.aerialRayMarching ? air.baseHeight : frameInputs_.fogGround,
+                frameInputs_.fogHeightInfluence / (frameInputs_.aerialRayMarching ? air.scaleHeight : 300.f),
+                thickness,1);
         }
 
         // Shift fog to blue when camera is significantly underwater (terrain water only).
