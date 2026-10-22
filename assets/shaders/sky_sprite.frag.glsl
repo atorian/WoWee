@@ -15,12 +15,13 @@ layout(push_constant) uniform Push {
 } push;
 
 layout(location = 0) in vec2 TexCoord;
+layout(location = 1) in float Transmission;
 
 layout(location = 0) out vec4 outColor;
 
 void main() {
     vec4 texel = texture(uTexture, TexCoord);
-    float alpha = push.colour.a * texel.a;
+    float alpha = push.colour.a * texel.a * Transmission;
     if (push.horizon.z > 0.5) {
         // v runs from 0 on the top edge to 1 on the bottom one.
         float h = push.horizon.x + (0.5 - TexCoord.y) * push.horizon.y;

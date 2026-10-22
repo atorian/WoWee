@@ -37,6 +37,8 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 lightningColor;
 };
 
+layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
+
 layout(push_constant) uniform Push {
     float time;
     float intensity;
@@ -87,6 +89,8 @@ void main() {
     vFootprint = gl_PointSize;
 
     vec4 clip = projection * rotView * vec4(aPos, 1.0);
+    if (aerialLight.w > 0.5 && volumetricParams.x > 0.5 && clip.w > 0.0)
+        vBrightness *= textureLod(uFogVolume,vec3(clip.xy/clip.w*0.5+0.5,1),0).a;
     // On the far plane, so the world drawn before the sky occludes it.
     gl_Position = vec4(clip.xy, clip.w, clip.w);
 }

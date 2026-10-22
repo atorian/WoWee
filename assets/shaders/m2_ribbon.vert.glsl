@@ -41,7 +41,9 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 lightningColor;
 };
 
-layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
+#include "sky_atmosphere.glsli"
+#define AERIAL_ANALYTIC_ONLY
+#include "aerial_frame.glsli"
 
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aColor;
@@ -75,7 +77,8 @@ void main() {
     float fogStart  = fogParams.x;
     float fogEnd    = fogParams.y;
     vFogFactor      = clamp((fogEnd - dist) / max(fogEnd - fogStart, 0.001), 0.0, 1.0);
-    if (volumetricParams.x > 0.5) vFogFactor *= fogVolumeAt(aPos).a;
+    if (physicalAtmosphere()) vFogFactor = worldAtmosphere(aPos).a;
+    else if (volumetricParams.x > 0.5) vFogFactor *= fogVolumeAt(aPos).a;
 
     vColor = aColor;
     vAlpha = aAlpha;

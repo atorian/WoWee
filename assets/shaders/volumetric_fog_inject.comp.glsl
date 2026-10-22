@@ -106,6 +106,10 @@ float valueNoise3D(vec3 x) {
 }
 
 #include "volumetric_medium.glsli"
+#include "sky_atmosphere.glsli"
+#define AERIAL_ANALYTIC_ONLY
+#define AERIAL_INJECT_ONLY
+#include "aerial_frame.glsli"
 
 // Scattering and extinction per yard for the three captured constituents.
 // Only mist and dust form banks; enabling shafts must not manufacture fog.
@@ -118,7 +122,7 @@ vec4 airMedium(vec3 p, float depth) {
         banks = mix(1.0, 2.0 * n, vol.drift.w);
     }
     float far = sliceDepth(volumetricParams.w);
-    float near = 1.0 - smoothstep(0.35 * far, far, depth);
+    float near = physicalAtmosphere() ? 1.0 : 1.0 - smoothstep(0.35 * far, far, depth);
     return volumeMediumAt(above, banks, vec3(vol.lighting.y, vol.medium.x, vol.lighting.z),
                           vol.medium.z, vol.lighting.w, vol.dustAlbedo.rgb) * near;
 }
@@ -193,6 +197,14 @@ void main() {
     light += min(local, vec3(1.0)) * vol.lighting.x;
 
     vec4 result = vec4(light * medium.rgb, density);
+    if (physicalAtmosphere()) {
+        vec3 ray = -toCamera;
+        vec2 atmosphere = atmosphereAt(p.z);
+        float extinction = atmosphere.x+atmosphere.y;
+        vec3 source = atmosphereSource(p.z,ray,sunVisibility(p));
+        source += min(local,vec3(1.0))*vol.lighting.x;
+        result += vec4(source*extinction,extinction);
+    }
 
     // The same air last frame, found by projecting this point into last
     // frame's view. Anything that falls outside it is new to the view and

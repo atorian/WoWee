@@ -40,7 +40,6 @@ layout(set = 0, binding = 0) uniform PerFrame {
 #include "lightning_light.glsli"
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
-layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
 #include "sky_atmosphere.glsli"
 #include "aerial_frame.glsli"
@@ -318,6 +317,10 @@ vec4 fogVolumeAt(vec3 worldPos) {
 // everything between the camera and that, sunlit shafts and torch glow
 // included.
 vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
+    if (physicalAtmosphere()) {
+        vec4 air = worldAtmosphere(worldPos);
+        return color*air.a+air.rgb;
+    }
     float fogFactor = aerialVisibilityAt(worldPos, dist);
     color = mix(aerialColorAt(worldPos - viewPos.xyz), color, fogFactor);
     if (volumetricParams.x > 0.5) {
@@ -336,19 +339,24 @@ vec3 skyAlong(vec3 dir) {
     vec3 gradient = atmosphereSkyColor(dir, fogSkyTop.rgb, fogSkyMiddle.rgb,
                                        fogSkyBand1.rgb, fogSkyBand2.rgb,
                                        skySmogColor.rgb, fogColor.rgb);
-    if (fogSkyMiddle.w < 0.5) return aerialSky(gradient,dir);
+    gradient = aerialSky(gradient,dir);
+    if (physicalAtmosphere()) {
+        vec4 air = atmosphereFallback(dir*max(fogSkyBand1.w,1.0));
+        gradient = gradient*air.a+air.rgb;
+    }
+    if (fogSkyMiddle.w < 0.5) return gradient;
     vec4 clip = projection * view * vec4(viewPos.xyz + dir * 1000.0, 1.0);
-    if (clip.w <= 0.0) return aerialSky(gradient,dir);
+    if (clip.w <= 0.0) return gradient;
     vec2 uv = clip.xy / clip.w * 0.5 + 0.5;
     float onScreen = smoothstep(0.0, 0.05, uv.x) * smoothstep(1.0, 0.95, uv.x)
                    * smoothstep(0.0, 0.05, uv.y) * smoothstep(1.0, 0.95, uv.y);
-    if (onScreen <= 0.0) return aerialSky(gradient,dir);
+    if (onScreen <= 0.0) return gradient;
     vec3 captured=textureLod(uSceneSky,clamp(uv,vec2(0.0),vec2(1.0)),0.0).rgb;
     if(volumetricParams.x>0.5) {
         vec4 air=textureLod(uFogVolume,vec3(uv,1.0),0.0);
         captured=captured*air.a+air.rgb;
     }
-    return mix(aerialSky(gradient,dir),captured,onScreen);
+    return mix(gradient,captured,onScreen);
 }
 
 void main() {

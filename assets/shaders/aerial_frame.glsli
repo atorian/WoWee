@@ -1,4 +1,8 @@
 #include "aerial_perspective.glsli"
+#include "atmosphere_transport.glsli"
+#ifndef AERIAL_INJECT_ONLY
+layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
+#endif
 float aerialVisibilityAt(vec3 worldPos,float distance) {
     if(aerialParams.w>0.5 && fogSkyBand1.w>0.0) {
         return distanceHeightHazeVisibility(distance,length(worldPos.xy-viewPos.xy),
@@ -9,7 +13,7 @@ float aerialVisibilityAt(vec3 worldPos,float distance) {
     return distanceFogVisibility(distance,fogParams.x,fogParams.y);
 }
 vec3 aerialSky(vec3 sky,vec3 direction) {
-    if(aerialParams.w<0.5)return sky;
+    if(aerialParams.w<0.5 || physicalAtmosphere())return sky;
     float len=length(direction);
     vec3 ray=len>0.001 ? direction/len : vec3(0,0,1);
     float horizon=1.0-smoothstep(0.02,0.18,max(ray.z,0.0));
@@ -46,4 +50,6 @@ vec3 aerialBackgroundAt(vec3 direction) {
     return aerialSky(sky,ray);
 }
 
+#ifndef AERIAL_INJECT_ONLY
 #include "aerial_march.glsli"
+#endif

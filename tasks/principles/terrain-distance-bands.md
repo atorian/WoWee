@@ -27,3 +27,13 @@ or landmark exemptions.
 
 Check: verify near detail, the overlap, far terrain and a real landmark; inspect
 memory and draw counts. A new distance limit alone is not a completed LOD fix.
+
+User choice (2026-10-22): replace the experimental per-surface march with a
+shared physical atmospheric transport model. In the enabled mode, zone fog
+ranges calibrate extinction rather than retaining the old piecewise curve.
+Anchor the broad atmosphere in world coordinates, integrate attenuation and
+in-scattering together in a frustum volume, and include weather in that same
+integration. Keep geometric retirement at View Distance separate from optical
+density. This supersedes the independent near/far layering above for the new
+mode; legacy mode remains available. Validate complete Hyjal and Dalaran scenes,
+height stability, density response, boundary matching, and GPU cost.

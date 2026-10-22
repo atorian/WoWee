@@ -1,0 +1,65 @@
+{
+  "hyjal_day": {
+    "legacy": {
+      "gpu_ms_average": 8.036333333333333,
+      "sample_count": 30,
+      "source": "D:\\games\\WoWee\\build-dev\\scratch\\aerial-march\\checkout\\build-dev\\scratch\\aerial-march\\hyjal_day-before.log"
+    },
+    "prototype": {
+      "gpu_ms_average": 12.497666666666667,
+      "sample_count": 30,
+      "source": "D:\\games\\WoWee\\build-dev\\scratch\\aerial-march\\checkout\\build-dev\\scratch\\aerial-march\\hyjal_day-after.log"
+    },
+    "physical": {
+      "gpu_ms_average": 8.476,
+      "sample_count": 30,
+      "source": "D:\\games\\WoWee\\build-dev\\scratch\\aerial-march\\checkout\\build-dev\\scratch\\atmosphere\\hyjal_day-physical.log"
+    }
+  },
+  "dalaran_gundrak": {
+    "legacy": {
+      "gpu_ms_average": 12.18,
+      "sample_count": 50,
+      "source": "D:\\games\\WoWee\\build-dev\\scratch\\aerial-march\\checkout\\build-dev\\scratch\\aerial-march\\dalaran_gundrak-before.log"
+    },
+    "prototype": {
+      "gpu_ms_average": 18.4188,
+      "sample_count": 50,
+      "source": "D:\\games\\WoWee\\build-dev\\scratch\\aerial-march\\checkout\\build-dev\\scratch\\aerial-march\\dalaran_gundrak-after.log"
+    },
+    "physical": {
+      "gpu_ms_average": 12.5952,
+      "sample_count": 50,
+      "source": "D:\\games\\WoWee\\build-dev\\scratch\\aerial-march\\checkout\\build-dev\\scratch\\atmosphere\\dalaran_gundrak-physical.log"
+    }
+  },
+  "snapshot_sha256": {
+    "held_off": "764bfdf9099ba70c5ab32e75e1ddb079c017dba228b4c042b66ec4e23a463b4f",
+    "held_on": "339ffc980cd4f2452eb4db08e086d0de10f732610be3e1c953c30f50ab341b3e",
+    "next_off": "764bfdf9099ba70c5ab32e75e1ddb079c017dba228b4c042b66ec4e23a463b4f",
+    "next_on": "339ffc980cd4f2452eb4db08e086d0de10f732610be3e1c953c30f50ab341b3e",
+    "off": "764bfdf9099ba70c5ab32e75e1ddb079c017dba228b4c042b66ec4e23a463b4f",
+    "on": "339ffc980cd4f2452eb4db08e086d0de10f732610be3e1c953c30f50ab341b3e"
+  },
+  "transport_checks": {
+    "passed": true,
+    "low_high_mean_error": 0.04277018229166667,
+    "low_high_p99_error": 1
+  },
+  "validation": {
+    "cases": 9,
+    "pipeline_VUIDs": 0,
+    "environment_errors": "Stale Epic Overlay loader manifest registration (Win32 and Win64)"
+  },
+  "tests": [
+    "volumetric_fog_math",
+    "settings_schema_consistency",
+    "settings_panel_layout",
+    "settings_apply_on_load",
+    "sweep_guard",
+    "render_dependency_check",
+    "record_scene_check",
+    "runtime_snapshot_images",
+    "atmosphere_images"
+  ]
+}

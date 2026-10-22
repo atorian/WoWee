@@ -1,0 +1,21 @@
+// Extinction coefficients per yard: aerosol and a thin molecular component.
+// DBC distances calibrate half visibility at the layer datum, not a hard end.
+vec2 atmosphereDensity(float height, float base, float inverseHeight, float beta) {
+    float above = max(height - base, 0.0f);
+    return beta * vec2(0.98f * exp(-above * inverseHeight),
+                       0.02f * exp(-above / 8000.0f));
+}
+float atmosphereBeta(float scaledStart, float scaledEnd) {
+    // CPU divides authored distances by Thickness. At datum this yields
+    // T=0.5f at the scaled midpoint, and doubling Thickness doubles tau.
+    return log(2.0f) / max(0.5f * (scaledStart + scaledEnd), 1.0f);
+}
+vec4 integrateAtmosphereCell(vec4 accumulated, vec3 scattering, float extinction, float span) {
+    float tau = max(extinction, 0.0f) * max(span, 0.0f);
+    float through = exp(-tau);
+    // Stable thin-cell limit; vacuum must remain exactly transparent.
+    float integral = tau < 0.001f ? span * (1.0f - 0.5f*tau + tau*tau/6.0f)
+                                : (1.0f-through) / extinction;
+    return vec4(vec3(accumulated) + accumulated.a * scattering * integral,
+                accumulated.a * through);
+}

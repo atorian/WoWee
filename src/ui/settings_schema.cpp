@@ -86,9 +86,9 @@ constexpr SettingDesc kSchema[] = {
      "At maximum, far silhouettes nearly merge with the atmosphere.\n"
      "Surfaces blend fully into the sky at View Distance.", "", 0.4f},
     {"aerialraymarching", "Ray-marched distance fog", SettingKind::Bool, 0, 1, 1, "Graphics", "",
-     "Changes distant haze lighting with the sun direction and height.\n"
-     "Fog thickness still controls visibility. Applies immediately.\n"
-     "Experimental: can significantly reduce frame rate.", "", 0},
+     "Integrates height-dependent air and sunlight into one atmosphere volume.\n"
+     "Fog Thickness controls density; Fog Height Influence controls its falloff.\n"
+     "Uses at least Low volume quality, even with Light Shafts off.", "", 0},
     {"fogheightinfluence", "Fog height influence", SettingKind::Float, 0, 2, 0.05f, "Graphics", "",
      "How strongly distance haze thins with height.\n"
      "Lower values keep more haze around high, distant objects.\n"

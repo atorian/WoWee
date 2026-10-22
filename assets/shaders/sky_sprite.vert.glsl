@@ -41,6 +41,8 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 lightningColor;
 };
 
+layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
+
 layout(push_constant) uniform Push {
     mat4 model;
     vec4 colour;   // rgb tint, a = alpha
@@ -51,9 +53,13 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec2 aTexCoord;
 
 layout(location = 0) out vec2 TexCoord;
+layout(location = 1) out float Transmission;
 
 void main() {
     TexCoord = aTexCoord;
     vec4 clip = projection * mat4(mat3(view)) * push.model * vec4(aPos, 1.0);
+    Transmission = 1.0;
+    if (aerialLight.w > 0.5 && volumetricParams.x > 0.5 && clip.w > 0.0)
+        Transmission = textureLod(uFogVolume,vec3(clip.xy/clip.w*0.5+0.5,1),0).a;
     gl_Position = vec4(clip.xy, clip.w, clip.w);
 }

@@ -17,14 +17,14 @@ struct VolumetricMedium {
 };
 
 [[nodiscard]] inline VolumetricMedium volumetricMediumFor(
-    const WeatherMix& weather, float density, bool indoors) {
+    const WeatherMix& weather, float density, bool indoors, bool includeClearAir = true) {
     // Fog distance is an artistic visibility control, not a humidity field.
     // Clear weather has only thin scattering air. Precipitation increases
     // suspended particles; only actual fog weather adds a dense low layer.
     // Coefficients are per yard, before the player's mist-density multiplier.
     const float scale = glm::clamp(density, 0.0f, 3.0f) * (indoors ? 0.35f : 1.0f);
     return {
-        .air = (0.0002f + 0.0012f * weather.rain + 0.0008f * weather.snow) * scale,
+        .air = ((includeClearAir ? 0.0002f : 0.0f) + 0.0012f * weather.rain + 0.0008f * weather.snow) * scale,
         .mist = 0.012f * weather.mist * scale,
         .dust = 0.006f * weather.sand * scale,
     };

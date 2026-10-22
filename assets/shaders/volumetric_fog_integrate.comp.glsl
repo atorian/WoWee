@@ -74,6 +74,8 @@ vec3 rayAt(vec2 uv) {
     return mix(top, bottom, uv.y);
 }
 
+#include "atmosphere_medium.glsli"
+
 void main() {
     ivec2 column = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(column, vol.dims.xy))) return;
@@ -84,21 +86,16 @@ void main() {
 
     vec3 scattered = vec3(0.0);
     float transmittance = 1.0;
-    float front = sliceDepth(0.0);
+    float front = 0.0;
     for (int z = 0; z < vol.dims.z; ++z) {
         float back = sliceDepth(float(z + 1));
         float span = (back - front) * slant;
         front = back;
 
         vec4 cell = texelFetch(uCells, ivec3(column, z), 0);
-        float extinction = max(cell.a, 1e-6);
-        float through = exp(-extinction * span);
-        // The cell's light integrated across its own depth, each yard of it
-        // dimmed by the air in front of it within the cell, rather than all
-        // of it taken at the front - which over-brightens a thick cell and
-        // makes the result depend on how finely the depth is sliced.
-        scattered += transmittance * (cell.rgb - cell.rgb * through) / extinction;
-        transmittance *= through;
+        vec4 air = integrateAtmosphereCell(vec4(scattered,transmittance),cell.rgb,cell.a,span);
+        scattered = air.rgb;
+        transmittance = air.a;
 
         imageStore(uIntegratedOut, ivec3(column, z), vec4(scattered, transmittance));
     }

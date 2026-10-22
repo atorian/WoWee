@@ -38,7 +38,6 @@ layout(set = 0, binding = 0) uniform PerFrame {
 #include "sky_atmosphere.glsli"
 #include "aerial_frame.glsli"
 #include "terrain_distance.glsli"
-layout(set=0,binding=2) uniform sampler3D uFogVolume;
 layout(location=0) in vec3 FragPos;
 layout(location=1) in vec3 Normal;
 layout(location=2) in vec3 Color;
@@ -52,6 +51,11 @@ void main(){
     uint word=coverage.mask[bit/128][(bit/32)%4];
     if((word&(1u<<uint(bit%32)))!=0u && terrainCoverageThreshold() >= distantTerrainWeight(FragPos)) discard;
     vec3 lit=Color*(ambientColor.rgb+lightColor.rgb*max(dot(normalize(Normal),normalize(-lightDir.xyz)),0));
+    if (physicalAtmosphere()) {
+        vec4 air=worldAtmosphere(FragPos);
+        outColor=vec4(lit*air.a+air.rgb,1);
+        return;
+    }
     float t=aerialVisibilityAt(FragPos,length(FragPos-viewPos.xyz));
     vec3 color=mix(aerialColorAt(FragPos-viewPos.xyz),lit,t);
     if(volumetricParams.x>0.5) {

@@ -1,3 +1,79 @@
+# Shared atmospheric transport (2026-10-22)
+
+The existing **Ray-marched distance fog** option now selects the shared
+atmospheric volume. Off retains the legacy distance curve. This supersedes
+the per-fragment experiment documented below; historical captures and reports
+are retained rather than silently regenerated with a different model.
+
+The main view integrates the zone-calibrated atmosphere and weather in the
+existing frustum volume, reaching View Distance. Terrain, WDL, models, foliage,
+water and transparent effects consume that result once. Additive effects only
+lose transmission. Sky backgrounds take the full volume; sun and star layers
+are attenuated without adding the medium a second time.
+
+## Density and controls
+
+- The broad atmosphere has a fixed world datum at z=0 (sea level), not the
+  player's feet. At Height Influence 1 the aerosol e-fold height is 300 yards;
+  the thin molecular component has an 8000-yard scale height. Their reference
+  extinction shares are 98% and 2%. These are artistic medium parameters.
+- `beta = ln(2) / ((fogStart + fogEnd)/2)`, using the zone/time/weather ranges
+  already divided by Fog Thickness. Half visibility at the datum therefore
+  matches that midpoint. Doubling Thickness doubles optical depth, without
+  depending on View Distance. The camera-to-surface integral determines T.
+- Thickness zero makes the clear medium exactly transparent. Weather remains
+  controlled by its own captured density. Ground mist remains terrain-bound;
+  vertical player motion does not move the broad atmosphere.
+- The final 10% of horizontal View Distance retires geometry into the fully
+  integrated directional sky. This is independent of the physical density.
+- Enabling the option allocates at least Low volume quality, even when the
+  old near-volume quality setting is Off. Selecting Low again does not add
+  another layer. The setting's saved value is not changed.
+
+A high viewpoint such as Dalaran is now above much of the aerosol layer and
+is visibly clearer than the legacy curve at the same Thickness. Lower Height
+Influence spreads the aerosol higher; Thickness increases its extinction.
+
+## Implementation limits
+
+This is single-scattering transport with artist-authored DBC light colours,
+not a spectral, calibrated planetary atmosphere. Diffuse illumination uses
+hemispherical sky fill; sunlight uses a height-dependent Rayleigh/HG mixture,
+approximate vertical transmission, and available shadow-map visibility.
+Local lights illuminate the volume. There are no new multiple-scattering or
+cloud-shadow passes. Weather banks retain their existing procedural noise.
+
+Reflection views cannot sample the main camera's frustum volume. They use an
+eight-cell integration of the same smooth atmospheric field, including water's
+off-screen sky lookup. Local weather banks and local shadow/light detail are
+not integrated into this reflection approximation.
+
+## Reproduce and validate
+
+`tools/scene_render/aerial_march_preview.ps1 -Scene hyjal_day -Variant after`
+(or `dalaran_gundrak`) builds first and writes to `build-dev/scratch/atmosphere`.
+`before` explicitly renders legacy mode; `thick` uses the new mode at 1.25.
+The obsolete compile-time reference/far variants are no longer exposed by this
+script. Historical baseline runs live under `scratch/aerial-march`.
+
+- `test_volumetric_fog_math`: shared GLSL transport, subdivision invariance,
+  Beer-Lambert density scaling, zero-density limit and world-height profiles.
+- `check_aerial_march.py`: six scene captures check immutable extraction and
+  switching the option in both directions with one compiled shader set.
+- `check_atmosphere.py`: rendered vacuum neutrality, no duplicate weather
+  volume, Thickness response, and Low/High convergence.
+- Full streamed Hyjal and Dalaran captures include terrain, buildings, trees
+  and WDL. Fixed small fixtures additionally cover night and sunset water.
+
+Results for this implementation are in `physical-results.json`. Timing is
+compared against saved baselines, not a simultaneous controlled A/B session.
+Vulkan validation logs contain stale Epic Overlay manifest errors from the
+machine's loader registration; no atmosphere pipeline VUIDs were reported.
+
+---
+
+# Historical per-surface prototype
+
 # Distant in-scattering preview
 
 Branch: `codex/aerial-march-preview`. The parent snapshot commit records the

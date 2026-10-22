@@ -61,7 +61,6 @@ layout(set = 1, binding = 2) uniform sampler2D uNormalHeightMap;
 layout(set = 1, binding = 3) uniform sampler2D uSecondTexture;
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
-layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
 layout(location = 0) in vec3 FragPos;
 layout(location = 1) in vec3 Normal;
@@ -219,6 +218,10 @@ vec4 fogVolumeAt(vec3 worldPos) {
 // everything between the camera and that, sunlit shafts and torch glow
 // included.
 vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
+    if (physicalAtmosphere()) {
+        vec4 air = worldAtmosphere(worldPos);
+        return color*air.a+air.rgb;
+    }
     float fogFactor = aerialVisibilityAt(worldPos, dist);
     color = mix(aerialColorAt(worldPos - viewPos.xyz), color, fogFactor);
     if (volumetricParams.x > 0.5) {
@@ -405,8 +408,8 @@ void main() {
         // The blend multiplies by the colour and ignores alpha, so fog and the
         // fade go into the colour, toward the multiplication identity. Mixing
         // toward the fog colour would tint everything behind the layer.
-        float visibility = aerialVisibilityAt(FragPos, dist) * opacity;
-        if (volumetricParams.x > 0.5) visibility *= fogVolumeAt(FragPos).a;
+        float visibility = (physicalAtmosphere() ? worldAtmosphere(FragPos).a : aerialVisibilityAt(FragPos, dist)) * opacity;
+        if (!physicalAtmosphere() && volumetricParams.x > 0.5) visibility *= fogVolumeAt(FragPos).a;
         result = mix(vec3(modulateNeutral), result, clamp(visibility, 0.0, 1.0));
     } else {
         result = applyFog(result, FragPos, dist);

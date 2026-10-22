@@ -139,3 +139,57 @@ TEST_CASE("the corner rays are one yard deep and span the screen the right way u
     CHECK(rays[2].z < 0.0f);
     CHECK(rays[3].z < 0.0f);
 }
+
+namespace atmosphere_math {
+using vec2 = glm::vec2;
+using vec3 = glm::vec3;
+using vec4 = glm::vec4;
+using glm::exp;
+using glm::log;
+using glm::max;
+#include "../assets/shaders/atmosphere_medium.glsli"
+}
+
+TEST_CASE("atmospheric transport is independent of subdivision", "[volumetric][atmosphere]") {
+    using namespace atmosphere_math;
+    const vec3 light(.3f,.5f,.7f);
+    const float extinction = .001f;
+    const auto whole = integrateAtmosphereCell(vec4(0,0,0,1),light*extinction,extinction,2000);
+    auto split = vec4(0,0,0,1);
+    for (int i=0; i<100; ++i)
+        split = integrateAtmosphereCell(split,light*extinction,extinction,20);
+    CHECK(whole.a == Catch::Approx(std::exp(-2.f)));
+    for (int c=0;c<4;++c) CHECK(split[c] == Catch::Approx(whole[c]).margin(1e-5));
+    CHECK(whole.r == Catch::Approx(light.r*(1-std::exp(-2.f))));
+}
+
+TEST_CASE("vacuum does not manufacture fog over arbitrarily long rays", "[volumetric][atmosphere]") {
+    using namespace atmosphere_math;
+    const vec4 original(.2f,.4f,.1f,.8f);
+    CHECK(integrateAtmosphereCell(original,vec3(0),0,100000) == original);
+    const auto thin = integrateAtmosphereCell(vec4(0,0,0,1),vec3(1e-9f),1e-9f,1);
+    CHECK(thin.r == Catch::Approx(1e-9f).margin(1e-12f));
+}
+
+TEST_CASE("zone midpoint calibrates atmospheric visibility and thickness scales optical depth", "[volumetric][atmosphere]") {
+    using namespace atmosphere_math;
+    const float beta = atmosphereBeta(200,1800);
+    auto density = atmosphereDensity(0,0,1.f/300,beta);
+    auto through = integrateAtmosphereCell(vec4(0,0,0,1),vec3(0),density.x+density.y,1000);
+    CHECK(through.a == Catch::Approx(.5f));
+    density = atmosphereDensity(0,0,1.f/300,atmosphereBeta(100,900));
+    through = integrateAtmosphereCell(vec4(0,0,0,1),vec3(0),density.x+density.y,1000);
+    CHECK(through.a == Catch::Approx(.25f));
+}
+
+TEST_CASE("world height controls the medium independently of the observer", "[volumetric][atmosphere]") {
+    using namespace atmosphere_math;
+    const auto low = atmosphereDensity(100,0,1.f/300,.001f);
+    const auto high = atmosphereDensity(1000,0,1.f/300,.001f);
+    CHECK(high.x < low.x*.1f);
+    CHECK(high.y > low.y*.8f); // Thin high-altitude air remains above the aerosol layer.
+    const auto translated = atmosphereDensity(600,500,1.f/300,.001f);
+    CHECK(translated == low);
+    const auto disabled = atmosphereDensity(100,0,1.f/300,0);
+    CHECK(disabled == vec2(0));
+}

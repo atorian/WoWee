@@ -387,14 +387,13 @@ bool VolumetricFog::applyPendingQuality() {
     volumesReady_ = true;
     historyValid_ = false;
     lastRecordedFrame_ = -1;
-    LOG_WARNING("VolumetricFog: on, ", size.x, "x", size.y, "x", size.z, " cells over ",
-                kNear, "-", kFar, " yards");
+    LOG_WARNING("VolumetricFog: on, ", size.x, "x", size.y, "x", size.z, " cells");
     return true;
 }
 
-glm::vec4 VolumetricFog::frameParams() const {
+glm::vec4 VolumetricFog::frameParams(float farDistance) const {
     if (!volumesReady_) return glm::vec4(0.0f);
-    return {1.0f, kNear, 1.0f / std::log(kFar / kNear), static_cast<float>(size_.z)};
+    return {1.0f, kNear, 1.0f / std::log(std::max(farDistance, kNear + 1.0f) / kNear), static_cast<float>(size_.z)};
 }
 
 VkImageView VolumetricFog::getVolumeView(uint32_t frame) const {
@@ -421,7 +420,13 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
     // cannot have jumped. A teleport reprojects into nonsense.
     const uint32_t other = (frame + 1) % MAX_FRAMES;
     bool history = historyValid_ && lastRecordedFrame_ == static_cast<int>(other) &&
-                   glm::length(in.cameraPos - prevCameraPos_) < 30.0f;
+                   glm::length(in.cameraPos - prevCameraPos_) < 30.0f &&
+                   in.farDistance == previousInputs_.farDistance &&
+                   in.atmosphere == previousInputs_.atmosphere &&
+                   in.fogRange == previousInputs_.fogRange &&
+                   in.medium.air == previousInputs_.medium.air &&
+                   in.medium.mist == previousInputs_.medium.mist &&
+                   in.medium.dust == previousInputs_.medium.dust;
     p.prevViewProj = prevViewProj_;
 
     p.medium = glm::vec4(in.medium.mist, in.layerBase,
@@ -434,6 +439,10 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
     p.drift = glm::vec4(t * 0.9f, t * 0.45f, t * 0.12f, glm::clamp(in.noiseAmount, 0.0f, 1.0f));
     const uint32_t seq = (frameCounter_ % 16) + 1;
     p.jitter = glm::vec4(halton(seq, 2), halton(seq, 3), halton(seq, 5), history ? 0.9f : 0.0f);
+    // The smooth atmospheric field needs no stochastic noise. Fixed samples
+    // also make toggles and camera motion immediate instead of trailing history.
+    if (in.atmosphere.w > 0.5f && in.medium.mist == 0.0f && in.medium.dust == 0.0f)
+        p.jitter = glm::vec4(0.5f, 0.5f, 0.5f, 0.0f);
     p.dims = glm::ivec4(size_, 0);
     p.sunHalo = glm::vec4(in.sunHaloColor, 0.0f);
     p.sunGlare = glm::vec4(in.sunGlareDirection, in.sunGlareAmount);
@@ -484,6 +493,7 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
     dep.pMemoryBarriers = &after;
     cmdPipelineBarrier2(cmd, dep);
 
+    previousInputs_ = in;
     prevViewProj_ = in.projection * in.view;
     prevCameraPos_ = in.cameraPos;
     historyValid_ = true;

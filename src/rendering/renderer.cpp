@@ -896,13 +896,12 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.aerialLight=glm::vec4(glm::mix(glm::vec3(grey),illumination,.65f),
             frameInputs_.aerialRayMarching ? 1.0f : 0.0f);
         const float thickness=frameInputs_.fogStrength;
-        if(frameInputs_.worldInView && thickness>0.001f) {
-            // Outdoor haze retains the zone's near gradient and extends to
-            // View Distance, using the same directional colour as the sky.
-            // At influence 1, density falls by e every 300 yards above local
-            // ground. Lower influence keeps more haze aloft; 0 is uniform.
-            // The much shorter near weather volume remains independent.
-            currentFrameData.aerialParams=glm::vec4(frameInputs_.fogGround,
+        if(frameInputs_.worldInView && (thickness>0.001f || frameInputs_.aerialRayMarching)) {
+            // The physical mode anchors its atmosphere at world sea level;
+            // the legacy curve retains its local ground-relative profile.
+            // Aerosol scale height is 300 yards at influence 1. A separate
+            // thin molecular constituent persists above the aerosol layer.
+            currentFrameData.aerialParams=glm::vec4(frameInputs_.aerialRayMarching ? 0.0f : frameInputs_.fogGround,
                 frameInputs_.fogHeightInfluence/300.f,thickness,1);
         }
 
@@ -967,10 +966,13 @@ void Renderer::updatePerFrameUBO() {
     // Whether this frame builds the fog volume. Decided here, beside the
     // switch in the block the shaders read, and the frame graph dispatches by
     // the same flag - so no shader reads a volume its frame did not build.
-    volumetricThisFrame_ = volumetricFog_ && volumetricFog_->isOn() &&
-                           frameInputs_.fogDensity > 0.0f &&
+    const bool physicalAir = currentFrameData.aerialLight.w > 0.5f &&
+                             currentFrameData.aerialParams.w > 0.5f;
+    volumetricThisFrame_ = frameInputs_.worldInView && volumetricFog_ && volumetricFog_->isOn() &&
+                           ((frameInputs_.fogQuality > 0 && frameInputs_.fogDensity > 0.0f) || physicalAir) &&
                            !(passAblation_ && passAblation_->skip(AblationPass::VolumetricFog));
-    currentFrameData.volumetricParams = volumetricThisFrame_ ? volumetricFog_->frameParams()
+    currentFrameData.volumetricParams = volumetricThisFrame_ ? volumetricFog_->frameParams(
+        physicalAir ? frameInputs_.viewDistance : VolumetricFog::kFar)
                                                              : glm::vec4(0.0f);
 
     // The frame's point lights: the M2Lights of the models and units animated
@@ -1547,12 +1549,13 @@ FrameInputs Renderer::extractFrameInputs() {
     in.msaaSamples = static_cast<uint32_t>(requestedMsaaSamples_);
     if (postProcessPipeline_) in.postProcess = postProcessPipeline_->requestedSettings();
     in.fogDensity = volumetricFogDensity_;
-    in.fogMedium = volumetricMediumFor(in.weather, volumetricFogDensity_,
-                                      viewerMotion_.insideInterior);
     in.fogGround = characterPosition.z;
     in.fogStrength = lightingManager ? lightingManager->getFogStrength() : 1.f;
     in.fogHeightInfluence = lightingManager ? lightingManager->getFogHeightInfluence() : 1.f;
     in.aerialRayMarching = lightingManager && lightingManager->getAerialRayMarching();
+    in.fogMedium = volumetricMediumFor(in.weather, volumetricFogDensity_,
+        viewerMotion_.insideInterior, !in.aerialRayMarching);
+    if (in.aerialRayMarching) in.fogGround = 0.0f;
     // Apply user density after zone/time smoothing and weather blending.
     // Keep the range and its density coherent in this immutable frame: the
     // aerial shader recovers the reference profile before scaling optical depth.
@@ -1565,7 +1568,7 @@ FrameInputs Renderer::extractFrameInputs() {
         in.weatherLight.fogEnd /= strength;
     }
     if (const auto h = collision_->terrainHeight(characterPosition.x, characterPosition.y))
-        in.fogGround = std::min(in.fogGround, *h);
+        in.fogGround = in.aerialRayMarching ? *h : std::min(in.fogGround, *h);
     in.cameraWaterDepth = cameraWaterDepth();
     if (camera) {
         const auto eye = camera->getPosition();
@@ -1708,6 +1711,11 @@ FrameInputs Renderer::extractFrameInputs() {
 }
 
 void Renderer::beginFrame(const FrameInputs& inputs) {
+    if (frameInputs_.aerialRayMarching != inputs.aerialRayMarching) {
+        fogMediumValid_ = false;
+        fogLayerBaseValid_ = false;
+        if (volumetricFog_) volumetricFog_->resetHistory();
+    }
     frameInputs_ = inputs;
     recordingResult_ = FrameResults();
     recordingResult_.recording = ++recordingSequence_;
@@ -1777,7 +1785,8 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
 
     if (rtLighting_) rtLighting_->setMode(static_cast<RtLighting::Mode>(inputs.rtMode));
     if (volumetricFog_)
-        volumetricFog_->setQuality(static_cast<VolumetricFog::Quality>(inputs.fogQuality));
+        volumetricFog_->setQuality(static_cast<VolumetricFog::Quality>(
+            std::max(inputs.fogQuality, inputs.aerialRayMarching ? 1 : 0)));
     pendingMsaaSamples_ = static_cast<VkSampleCountFlagBits>(inputs.msaaSamples);
     if (postProcessPipeline_) {
         const auto req = postProcessPipeline_->applyFrameSettings(inputs.postProcess);
@@ -5543,6 +5552,11 @@ void Renderer::renderVolumetricFog() {
     in.cameraPos = glm::vec3(currentFrameData.viewPos);
     in.time = frameInputs_.time;
     in.medium = fogMedium_;
+    in.farDistance = currentFrameData.aerialLight.w > 0.5f && currentFrameData.aerialParams.w > 0.5f
+        ? frameInputs_.viewDistance : VolumetricFog::kFar;
+    in.atmosphere = currentFrameData.aerialParams;
+    in.atmosphere.w = frameInputs_.aerialRayMarching ? in.atmosphere.w : 0.0f;
+    in.fogRange = glm::vec2(currentFrameData.fogParams);
     in.layerBase = fogLayerBase_;
     if (frameInputs_.hasLighting) {
         // The air's forward glow in the light tables' sunlit-cloud colour.
@@ -5561,6 +5575,7 @@ void Renderer::renderVolumetricFog() {
         lastFogLog = frameInputs_.time;
         LOG_INFO("volumetricFog: air=", fogMedium_.air, "/yd mist=", fogMedium_.mist,
                  "/yd dust=", fogMedium_.dust, "/yd layerBase=", fogLayerBase_,
+                 " far=", in.farDistance, " physical=", frameInputs_.aerialRayMarching,
                  " lights=", currentFrameData.localLightMeta.x);
     }
 }
