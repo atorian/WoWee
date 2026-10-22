@@ -1475,7 +1475,7 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
             const uint32_t draw = static_cast<uint32_t>(out.draws.size());
             out.draws.push_back(DrawInstance{
                 .modelMatrix = instance.modelMatrix,
-                .model = models.at(instance.modelId),
+                .model = instance.cachedModel,
                 .interiorLight = instance.interiorLight,
                 .localLights = haveLights
                     ? pickLocalLights(*frameLights_, glm::vec3(instance.modelMatrix[3]), 0.0f)
@@ -1491,6 +1491,10 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
                 .boneCount = static_cast<uint32_t>(instance.boneMatrices.size()),
                 .afloat = instance.afloat > 0,
             });
+            // Capacity is determined while the instance is already in hand,
+            // rather than by walking the completed draw list a second time.
+            if (instance.cachedModel)
+                out.instanceEntries += uint64_t(1) + instance.cachedModel->batches.size();
             VisibleEntry visible{.draw = draw, .modelId = instance.modelId, .distSq = distSq, .effectiveMaxDistSq = effectiveMaxDistSq};
             if (!faded) {
                 out.opaque.push_back(visible);
@@ -1528,7 +1532,9 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
     for (uint32_t chunk = 0; chunk + 1 < chunkCount; ++chunk) visibilityFutures[chunk].get();
 
     size_t drawCount = 0, opaqueCount = 0, transparentCount = 0, glowCount = 0;
+    frame.instanceEntries = 0;
     for (const auto& chunk : chunks) {
+        frame.instanceEntries += chunk.instanceEntries;
         drawCount += chunk.draws.size(); opaqueCount += chunk.opaque.size();
         transparentCount += chunk.transparent.size(); glowCount += chunk.glows.size();
     }
@@ -1580,7 +1586,7 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
         for(const auto& inst:scene_->instances) {
             if(!inst.cachedModel || !m2BatchDiagNames(*inst.cachedModel)) continue;
             bool present=false;
-            for(const auto& d:drawInstances_) if(d.model.get()==inst.cachedModel) {present=true;break;}
+            for(const auto& d:drawInstances_) if(d.model==inst.cachedModel) {present=true;break;}
             auto [at,inserted]=selected.emplace(inst.id,present);
             if(inserted || at->second!=present) {
                 at->second=present;
@@ -1675,11 +1681,22 @@ void M2Renderer::acceptCullAnswers(const std::vector<CullAnswer>& answers) {
     }
 }
 
+std::shared_ptr<const M2Renderer::ModelResources> M2Renderer::publishModelResources() {
+    if (!modelResources_) {
+        auto resources = std::make_shared<ModelResources>();
+        resources->reserve(models.size());
+        for (const auto& [id, model] : models) resources->push_back(model);
+        modelResources_ = std::move(resources);
+    }
+    return modelResources_;
+}
+
 void M2Renderer::Frame::clear() noexcept {
     drawInstances_.clear(); sortedVisible_.clear(); transparentVisible_.clear();
     glowSprites_.clear(); ribbonDraws_.clear(); particleRuns_.clear();
     ribbonVertices.clear(); particleVertices.clear(); bones.clear();
     cullInput.clear(); cullIds.clear(); depth.clear(); solarDepth.clear(); strikeDepth.clear();
+    modelResources.reset();
     instanceEntries = 0;
     solarMatrix = overheadMatrix = strikeMatrix = glm::mat4(0.0f);
 }
@@ -1687,6 +1704,8 @@ void M2Renderer::Frame::clear() noexcept {
 std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camera, const std::vector<LocalLight>& lights, float time, const glm::mat4& shadowMatrix, float shadowRadius,
         const glm::mat4* overheadMatrix, float overheadRadius,
         const glm::mat4* strikeMatrix, float strikeRadius) {
+    CpuStageLaps timing(vkCtx_ ? &vkCtx_->gameCpuStages() : nullptr,
+                        skyMode_ ? "extract sky M2" : "extract M2");
     auto frame = framePool_.acquire();
     frame->time = time;
     frame->cameraPosition = camera.getPosition();
@@ -1695,23 +1714,25 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
     frame->skipDetail = skipGroundDetail_;
     frame->sceneIdentity = scene_->identity;
     frame->solarMatrix = shadowMatrix;
+    frame->modelResources = publishModelResources();
     frameLights_ = &lights;
+    timing.lap("frame acquisition");
     extractBones(*frame);
+    timing.lap("pose publication");
     extractCull(camera, *frame);
+    timing.lap("cull candidates");
     cullView(camera, *frame);
-    // One base record and at most one override per batch (opaque UVs or
-    // transparent draws). This bounds every pass before any command is recorded.
-    for(const auto& draw:frame->drawInstances_)
-        if(draw.model) frame->instanceEntries+=uint64_t(1)+draw.model->batches.size();
+    timing.lap("view classification");
     gatherM2Particles(*frame);
     gatherM2Ribbons(*frame);
+    timing.lap("emitters and draw capacity");
     if (shadowMatrix != glm::mat4(0.0f)) {
         gatherReusedShadowCandidates(shadowMatrix, shadowRadius);
         frame->solarDepth.reserve(shadowCandidates_.size());
         for (uint32_t index : shadowCandidates_) {
             const auto& inst = scene_->instances[index];
             if (inst.hidden || inst.finishing || !inst.cachedModel || !inst.cachedIsValid || inst.cachedIsInvisibleTrap) continue;
-            frame->solarDepth.push_back({inst.modelId, inst.modelMatrix, models.at(inst.modelId), inst.position, inst.scale});
+            frame->solarDepth.push_back({inst.modelId, inst.modelMatrix, inst.cachedModel, inst.position, inst.scale});
         }
     }
     if (overheadMatrix) {
@@ -1721,7 +1742,7 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
         for (uint32_t index : shadowCandidates_) {
             const auto& inst = scene_->instances[index];
             if (inst.hidden || inst.finishing || !inst.cachedModel || !inst.cachedIsValid || inst.cachedIsInvisibleTrap) continue;
-            frame->depth.push_back({inst.modelId, inst.modelMatrix, models.at(inst.modelId), inst.position, inst.scale});
+            frame->depth.push_back({inst.modelId, inst.modelMatrix, inst.cachedModel, inst.position, inst.scale});
         }
     }
     if (strikeMatrix) {
@@ -1731,9 +1752,10 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
         for (uint32_t index : shadowCandidates_) {
             const auto& inst = scene_->instances[index];
             if (inst.hidden || inst.finishing || !inst.cachedModel || !inst.cachedIsValid || inst.cachedIsInvisibleTrap) continue;
-            frame->strikeDepth.push_back({inst.modelId, inst.modelMatrix, models.at(inst.modelId), inst.position, inst.scale});
+            frame->strikeDepth.push_back({inst.modelId, inst.modelMatrix, inst.cachedModel, inst.position, inst.scale});
         }
     }
+    timing.lap("shadow lists");
     frameLights_ = nullptr;
     return frame;
 }
@@ -1835,7 +1857,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
             // The model the cull took from the first entry's instance, rather
             // than a models.find(groupModelId) per group.
-            const M2ModelGPU* groupModel = drawInstances_[sortedVisible_[visStart].draw].model.get();
+            const M2ModelGPU* groupModel = drawInstances_[sortedVisible_[visStart].draw].model;
             if (!groupModel) {
                 visStart = groupEnd;
                 continue;
@@ -2163,7 +2185,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
         if (entry.modelId != currentModelId) {
             currentModelId = entry.modelId;
             currentModelValid = false;
-            currentModel = instance.model.get();
+            currentModel = instance.model;
             if (!currentModel) continue;
             if (!currentModel->hasTransparentBatches) continue;
             if (!currentModel->vertexBuffer || !currentModel->indexBuffer) continue;
@@ -2687,7 +2709,7 @@ void M2Renderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& light
             std::size_t groupEnd = g;
             while (groupEnd < casters.size() && casters[groupEnd].modelId == modelId) ++groupEnd;
 
-            const M2ModelGPU* groupModel = shadowDraws_[casters[g].draw].model.get();
+            const M2ModelGPU* groupModel = shadowDraws_[casters[g].draw].model;
             if (!groupModel) { g = groupEnd; continue; }
             const M2ModelGPU& model = *groupModel;
 

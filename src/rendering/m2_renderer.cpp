@@ -1050,6 +1050,7 @@ void M2Renderer::shutdown() {
         destroyModelGPU(id, modelResource);
     }
     models.clear();
+    modelResources_.reset();
     pinnedModelIds_.clear();
     destroyPosedEmitterModels();
 
@@ -1273,6 +1274,9 @@ void M2Renderer::writeBatchDescriptors(M2ModelGPU::BatchGPU& batch) const {
 }
 
 bool M2Renderer::makeModelWritable(uint32_t modelId) {
+    // Drop the producer's publication first. Queued frames still pin it and
+    // force a new material version; with no consumers we may edit in place.
+    modelResources_.reset();
     auto& current = models.at(modelId);
     if (current.use_count() == 1) return true;
     auto next = std::make_shared<M2ModelGPU>(*current);
@@ -2375,6 +2379,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     // for every model that loaded: 26-53 ms each time something new came into
     // view in Dalaran.
     models[modelId] = std::make_shared<M2ModelGPU>(std::move(gpuModel));
+    modelResources_.reset();
     scene_->rtChanges.modelReady(modelId);
 
     LOG_DEBUG("Loaded M2 model: ", model.name, " (", models[modelId]->vertexCount, " vertices, ",

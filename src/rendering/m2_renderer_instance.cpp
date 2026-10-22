@@ -712,6 +712,7 @@ void M2Renderer::clear() {
         // Keep the pools and persistent glow/dummy/mega-bone sets alive.
     }
     models.clear();
+    modelResources_.reset();
     pinnedModelIds_.clear();
     scene_->instances.clear();
     if (collision_) collision_->clearM2();
@@ -790,6 +791,7 @@ void M2Renderer::cleanupUnusedModels() {
         if (it != models.end()) {
             destroyModelGPU(id, it->second);
             models.erase(it);
+            modelResources_.reset();
             // Record the eviction so owners caching "uploaded" model IDs can
             // drop it; otherwise their next spawn skips the load as a stale hit
             // and pushes an empty placeholder (missing doodads on revisit).
@@ -813,6 +815,7 @@ void M2Renderer::unloadModel(uint32_t modelId) {
     if (it == models.end()) return;
     destroyModelGPU(modelId, it->second);
     models.erase(it);
+    modelResources_.reset();
     modelUnusedSince_.erase(modelId);
     pinnedModelIds_.erase(modelId);
     reapedModelIds_.push_back(modelId);

@@ -145,6 +145,47 @@ Raw trace, CSV and comparison: `build-dev/scratch/scene-replay/run-20261022-1102
 Process memory and runner logs: `../replay-memory.json`, `../replay-output.log`,
 `../replay-errors.log`, relative to this checkout. The replay client has exited.
 
+## Follow-up fixes — 2026-10-22
+
+- Character texture workers now publish failed decodes as completed results.
+  An absent result remains a publication error, reported once per path. A later
+  valid result supersedes the failed source immediately rather than waiting for
+  512 unrelated texture lookups. Prepared-only uploads read the published pixels
+  directly instead of cloning the decoded image on the producer thread.
+- The GPU regression first failed on the previous implementation: a valid
+  prepared image remained white after the prior failure. It now passes with
+  synchronization validation, including a real upload.
+- M2 frames retain one immutable resource publication shared across main and
+  shadow draw lists. Draw records use its pinned model pointers, eliminating
+  per-instance model-map lookups and shared-pointer reference operations on
+  visibility workers and shadow list construction. Model load/removal/material
+  version changes invalidate the producer publication; unchanged frames reuse it.
+  Publications currently contain all loaded model versions and are rebuilt on
+  those changes, not per frame. GPU retirement still uses the existing snapshot
+  lease/fence contract.
+- Draw-buffer capacity is accumulated during visibility classification; removed
+  the second traversal of completed M2 draws. Separate CPU scopes expose pose
+  publication, candidate gathering, classification, emitters and shadow lists.
+- Full dev client, scene_render and native GPU fixture builds passed. M2/WMO
+  source-removal tests preserve the queued image and change the next frame;
+  synchronization validation reports no renderer errors. Dependency and recording
+  guards still report zero forbidden includes/live scene reads.
+
+A replay after the texture change (before the M2 resource change) aborted during
+loading with `std::bad_alloc`; **zero measured frames**, so it provides no FPS
+comparison. Before the failure the resource monitor reported system commit
+43.91/45.18 GiB, only 1.27 GiB available, despite free physical RAM. Process maxima
+sampled across this incomplete run were 4.263 GiB working set and 8.000 GiB
+private commit. System pressure is evidenced; the allocation site/stack was not
+captured, so the exact failing allocation is unknown. Do not call the OOM fixed.
+The earlier successful replay also logged low system commit during loading.
+
+Preserved failure evidence: `../replay-texture-oom.log` and
+`../replay-texture-oom-memory.json`; successful follow-up validation:
+`../verify-m2-resources.log`, `../renderer-changes.log`, `../gpu-m2/`, `../gpu-wmo/`.
+The last completed FPS result remains **41.96 FPS**, predating these fixes.
+Current-frame RT, G-buffer lighting and GPU indirect submission remain unfinished.
+
 ## Remaining implementation
 
 - [x] Finish foundation GPU snapshot/lifetime tests and guards.

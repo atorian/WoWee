@@ -1202,6 +1202,12 @@ private:
     FrameVertexBuffer glowVB_;
 
     std::unordered_map<uint32_t, std::shared_ptr<M2ModelGPU>> models;
+    // One immutable resource publication shared by all passes and queued frames.
+    // Rebuilt only when a model is loaded, removed or gets a material version;
+    // instance draw records borrow pointers from this publication.
+    using ModelResources = std::vector<std::shared_ptr<const M2ModelGPU>>;
+    std::shared_ptr<const ModelResources> modelResources_;
+    std::shared_ptr<const ModelResources> publishModelResources();
     // Grace period for model cleanup: track when a model first became instanceless.
     // Models are only evicted after 60 seconds with no instances.
     std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> modelUnusedSince_;
@@ -1336,8 +1342,8 @@ private:
     /// and never from the scene the game thread is changing.
     struct DrawInstance {
         glm::mat4 modelMatrix{1.0f};
-        /// Valid for the frame: models are unloaded only between frames.
-        std::shared_ptr<const M2ModelGPU> model;
+        /// Pinned by Frame::modelResources, including queued/unrecorded frames.
+        const M2ModelGPU* model = nullptr;
         InteriorLightGPU interiorLight;
         /// The point lights nearest its origin (local_lights.hpp).
         LocalLightSet localLights = kNoLocalLights;
@@ -1374,7 +1380,9 @@ private:
         std::vector<VisibleEntry> opaque, transparent;
         std::vector<DrawInstance> draws;
         std::vector<GlowSprite> glows;
+        uint64_t instanceEntries = 0;
         void clear() noexcept {
+            instanceEntries = 0;
             opaque.clear(); transparent.clear(); draws.clear(); glows.clear();
         }
     };
@@ -1432,7 +1440,7 @@ private:
     struct ShadowDraw {
         uint32_t modelId = 0;
         glm::mat4 modelMatrix{1.0f};
-        std::shared_ptr<const M2ModelGPU> model;
+        const M2ModelGPU* model = nullptr;
         glm::vec3 position{0.0f};
         float scale = 1.0f;
     };
@@ -1657,6 +1665,7 @@ public:
     struct Frame {
         void clear() noexcept;
         uint64_t instanceEntries = 0;
+        std::shared_ptr<const ModelResources> modelResources;
         std::vector<DrawInstance> drawInstances_;
         std::vector<VisibleEntry> sortedVisible_, transparentVisible_;
         std::vector<GlowSprite> glowSprites_;
