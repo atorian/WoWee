@@ -2907,6 +2907,20 @@ wowee_add_test(test_collision_world
     SOURCES test_collision_world.cpp)
 target_link_libraries(test_collision_world PRIVATE wowee_collision)
 
+# An offline adapter for differential tests of the production contact API.
+# Golden results come from original machine code; regeneration requires the
+# caller's verified executable, but ordinary regressions need only Python.
+add_executable(movement_contact_probe movement_contact_probe.cpp)
+target_link_libraries(movement_contact_probe PRIVATE wowee_collision)
+wowee_test_link_glm(movement_contact_probe)
+register_test_target(movement_contact_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_contact
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_collision.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_collision_12340.json
+            --probe $<TARGET_FILE:movement_contact_probe>)
+endif()
+
 # ── test_race_gender_suffix ──────────────────────────────────
 # The two-letter race code per-race models are suffixed with. Written out twice
 # - the helmet resolver and the shoulder attachment - and a wrong suffix reads
