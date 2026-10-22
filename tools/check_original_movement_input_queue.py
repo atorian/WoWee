@@ -9,7 +9,8 @@ from check_original_movement_input import cases as input_cases
 def probe_input(c):
     extra=[c['last_time'],c['heartbeat_time'],c['idle_time'],int(c['defer']),len(c['inputs'])]
     for op in c['inputs']:
-        extra.append(len(op)-3);extra.extend(op)
+        if isinstance(op,dict):extra.extend([4,op['time'],op['mode'],int(op['enabled']),op['counter']])
+        else:extra.append(len(op)-3);extra.extend(op)
     return frame_input(c).rstrip()+' '+' '.join(map(str,extra))+'\n'
 def cases():
     rng=random.Random(0x6ef860)

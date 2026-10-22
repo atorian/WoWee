@@ -1,0 +1,212 @@
+{
+  "binary_sha256": "0302a63eda5d63150f6cdb5701c5d15ee26aa3a667a8e6febb688b46707f9b81",
+  "status": "Unresolved synthetic input/unit boundary; not a passing parity fixture",
+  "explanation": "With observed (stubbed) unit/input delivery, original ApplyMovement repeatedly requests 7ms with flags 0xa00c00 and receives zero consumed time. This does not establish a hang in the complete original client. Preserve the case for real input-control/unit integration; no runtime escape or rule is inferred.",
+  "instruction_limit": 10000000,
+  "input": {
+    "name": "mode_queue_True_627",
+    "world": {
+      "name": "complete_world_627",
+      "dungeon": false,
+      "wmo": 4,
+      "area": 2,
+      "doodad_flags": 256,
+      "owner": 0,
+      "entity_flags": 6,
+      "provider": true,
+      "available": true,
+      "impassable": false,
+      "holes": 65535,
+      "flight": false,
+      "tag": 99,
+      "flags": [
+        2150826815,
+        256,
+        0
+      ],
+      "body": [
+        100,
+        100,
+        100,
+        101,
+        101,
+        101
+      ],
+      "box": [
+        -5,
+        -34,
+        -2,
+        -3,
+        -32,
+        5
+      ]
+    },
+    "position": [
+      -3.5797345638275146,
+      -37.95825958251953,
+      3.752835750579834
+    ],
+    "radius": 0.3333333432674408,
+    "height": 2.027777671813965,
+    "step_height": 1,
+    "direction": [
+      -0.983436644077301,
+      -0.1812521368265152
+    ],
+    "swim_direction": [
+      -0.6884056329727173,
+      -0.12687650322914124,
+      0.0
+    ],
+    "distance": 0,
+    "elapsed": 250,
+    "flags": 2097152,
+    "current_speed": 7,
+    "move_direction": [
+      -0.983436644077301,
+      -0.1812521368265152,
+      0.0
+    ],
+    "move_direction_2d": [
+      -0.983436644077301,
+      -0.1812521368265152
+    ],
+    "fall_start": 3.752835750579834,
+    "fall_time": 0,
+    "fall_velocity": -7.955547332763672,
+    "hover_height": 1,
+    "anchor_elapsed": 500,
+    "speeds": [
+      2.5,
+      7,
+      4.5,
+      4.72,
+      2.5,
+      7,
+      4.5
+    ],
+    "triangles": [],
+    "liquids": [],
+    "local": true,
+    "ghost": true,
+    "apply": true,
+    "active": false,
+    "move_start_delay": 1999,
+    "anchor_position": [
+      -3.5797345638275146,
+      -37.95825958251953,
+      3.752835750579834
+    ],
+    "turn_rate": 2.72248911857605,
+    "pitch_rate": 0.4803802967071533,
+    "pitch_cos": 0.9560070633888245,
+    "pitch_sin": 0.2933436632156372,
+    "flags2": 8,
+    "facing": 1.4711204767227173,
+    "anchor_facing": 1.4711204767227173,
+    "pitch": 0.2977224886417389,
+    "anchor_pitch": 0.2977224886417389,
+    "execute_input": true,
+    "time": 234,
+    "last_time": 4294967280,
+    "heartbeat_time": 484,
+    "idle_time": 4294967280,
+    "defer": false,
+    "inputs": [
+      {
+        "time": 4294967281,
+        "mode": 4,
+        "enabled": true,
+        "counter": 270545587
+      },
+      [
+        4294967281,
+        2,
+        1
+      ],
+      [
+        4294967281,
+        6,
+        10.149906158447266,
+        3216235986,
+        1
+      ],
+      [
+        4294967281,
+        3.7336881160736084,
+        1654128723,
+        0
+      ],
+      [
+        4294967281,
+        8,
+        13.273224830627441,
+        3849553880,
+        0
+      ],
+      [
+        4294967281,
+        8,
+        1
+      ],
+      [
+        4294967281,
+        1,
+        9.673196792602539,
+        1647878325,
+        1
+      ],
+      [
+        109,
+        7,
+        1
+      ],
+      [
+        109,
+        3,
+        3.739471435546875,
+        1537076114,
+        0
+      ],
+      [
+        4294967281,
+        13,
+        0
+      ],
+      [
+        4294967281,
+        5,
+        8.819777488708496,
+        4058976493,
+        1
+      ],
+      [
+        4294967281,
+        2.219109058380127,
+        809206667,
+        1
+      ],
+      [
+        4294967281,
+        7,
+        11.56793212890625,
+        1445437237,
+        1
+      ],
+      [
+        4294967288,
+        0.059696000069379807,
+        -0.9477896094322205,
+        5.573367118835449,
+        -14.945333480834961,
+        4241414600
+      ],
+      {
+        "time": 4294967281,
+        "mode": 0,
+        "enabled": false,
+        "counter": 627
+      }
+    ]
+  }
+}

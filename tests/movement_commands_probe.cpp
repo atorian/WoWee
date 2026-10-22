@@ -10,6 +10,7 @@ struct Sink final:MovementCommandSink {
     SurfaceMovementShape& shape;
     bool first=true;
     Sink(SurfaceMovementState& s,SurfaceMovementShape& h):state(s),shape(h){}
+    void movementEffect(const MovementCommandEffect&) override {throw std::logic_error("Mode effect outside height fixture");}
     bool forcedMovementChanged(uint32_t,uint32_t,float,uint32_t,bool) override {throw std::logic_error("Rate outside height-only fixture");}
     bool inputChanged(uint32_t,uint32_t,bool) override {throw std::logic_error("Input outside height-only fixture");}
     void angularInputStopped(bool) override {throw std::logic_error("Angular input outside height-only fixture");}
@@ -41,7 +42,7 @@ int main() {
                 if(!first)std::cout<<',';
                 first=false;sink.first=true;
                 std::cout<<"{\"notifications\":[";
-                const auto result=queue.process(time,flag,s,shape,sink);
+                const auto result=queue.process(time,flag,false,s,shape,sink);
                 std::cout<<"],\"result\":"<<int(result)<<",\"height\":"<<shape.height
                     <<",\"delay\":"<<s.moveStartDelayMs<<",\"flags2\":"<<s.flags2
                     <<",\"pending\":"<<queue.size()<<",\"next\":";

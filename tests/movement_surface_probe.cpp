@@ -35,7 +35,16 @@ struct ExecutionObservations final:wowee::collision::MovementExecutionSink {
     struct Heartbeat {uint32_t time;float height;glm::vec3 position;uint32_t flags;};
     std::vector<Height> heights;
     std::vector<wowee::collision::SurfaceMovementState> rateStates;
-    bool captureRates=false;
+    bool captureRates=false,captureModes=false,modeRetire=false;
+    struct ModeObservation {wowee::collision::MovementCommandEffect effect;uint32_t opcode;wowee::collision::SurfaceMovementState state;};
+    std::vector<ModeObservation> modeObservations;
+    void movementEffect(const wowee::collision::MovementCommandEffect& effect) override {
+        modeObservations.push_back({effect,0,state});
+        if(effect.kind==wowee::collision::MovementCommandEffect::Kind::Retire)modeRetire=true;
+    }
+    void observeNotification(uint32_t time,uint32_t opcode) {
+        if(captureModes)modeObservations.push_back({{static_cast<wowee::collision::MovementCommandEffect::Kind>(0),time},opcode,state});
+    }
     std::vector<Heartbeat> beats;
     std::vector<uint32_t> finished;
     std::vector<bool> stopped;
@@ -43,13 +52,16 @@ struct ExecutionObservations final:wowee::collision::MovementExecutionSink {
     bool active=false;
     ExecutionObservations(wowee::collision::SurfaceMovementState& s,wowee::collision::SurfaceMovementShape& h,wowee::collision::MovementClock& c):state(s),shape(h),clock(c){}
     void collisionHeightChanged(uint32_t time,float height,uint32_t counter,bool ack) override {
+        observeNotification(time,1303);
         heights.push_back({time,1303,counter,height,shape.height,ack,state.moveStartDelayMs,state.flags2});
     }
     bool forcedMovementChanged(uint32_t time,uint32_t opcode,float value,uint32_t counter,bool ack) override {
+        observeNotification(time,opcode);
         heights.push_back({time,opcode,counter,value,shape.height,ack,state.moveStartDelayMs,state.flags2});
         rateStates.push_back(state);return false;
     }
     bool inputChanged(uint32_t time,uint32_t opcode,bool ack) override {
+        observeNotification(time,opcode);
         heights.push_back({time,opcode,0,0,shape.height,ack,state.moveStartDelayMs,state.flags2});return false;
     }
     void angularInputStopped(bool pitch) override {stopped.push_back(pitch);}
@@ -64,6 +76,16 @@ struct ExecutionObservations final:wowee::collision::MovementExecutionSink {
             <<",\"turn_rate\":"<<s.turnRate<<",\"pitch_rate\":"<<s.pitchRate;
     }
     void print() const {
+        if(captureModes) {
+            std::cout<<",\"mode_observations\":[";
+            for(size_t i=0;i<modeObservations.size();++i) {
+                if(i)std::cout<<',';
+                const auto& n=modeObservations[i];const auto& e=n.effect;const auto& s=n.state;
+                std::cout<<'['<<int(e.kind)<<','<<e.time<<','<<e.oldFlags<<','<<e.oldFlags2<<','<<e.wasJumping<<','<<n.opcode
+                    <<','<<s.flags<<','<<s.flags2<<','<<s.fallTimeMs<<','<<s.fallVelocity<<','<<s.currentSpeed<<','<<s.anchorElapsedMs<<']';
+            }
+            std::cout<<']';
+        }
         if(captureRates) {
             std::cout<<",\"rate_states\":[";
             for(size_t i=0;i<rateStates.size();++i) {
@@ -94,8 +116,9 @@ struct ExecutionObservations final:wowee::collision::MovementExecutionSink {
 };
 
 int main(int argc, char** argv) {
-    const bool rateQueue = argc == 2 && (std::string(argv[1]) == "--world-rate-queue" || std::string(argv[1]) == "--world-rate-execute");
-    const bool executeRates = rateQueue && std::string(argv[1]) == "--world-rate-execute";
+    const bool modeQueue = argc == 2 && (std::string(argv[1]) == "--world-mode-queue" || std::string(argv[1]) == "--world-mode-execute");
+    const bool rateQueue = modeQueue || argc == 2 && (std::string(argv[1]) == "--world-rate-queue" || std::string(argv[1]) == "--world-rate-execute");
+    const bool executeRates = rateQueue && (std::string(argv[1]) == "--world-rate-execute" || std::string(argv[1]) == "--world-mode-execute");
     const bool executeInput = executeRates || argc == 2 && std::string(argv[1]) == "--world-input-execute";
     const bool queuedInput = rateQueue || executeInput || argc == 2 && std::string(argv[1]) == "--world-input-queue";
     const bool launch = argc == 2 && std::string(argv[1]) == "--world-launch";
@@ -192,7 +215,7 @@ int main(int argc, char** argv) {
         MovementRequestResult frameResult;
         MovementClock clock;
         ExecutionObservations observations(state,shape,clock);
-        observations.captureRates=rateQueue;
+        observations.captureRates=rateQueue;observations.captureModes=modeQueue;
         bool retire=false,inputAccepted=false;int queueResult=0;
         SuppliedWorld world;
         std::unique_ptr<world_fixture::Scene> scene;
@@ -214,7 +237,7 @@ int main(int argc, char** argv) {
                     launchUnattachedMovement(state,direction,speed,vertical);inputAccepted=true;
                 } else if(stateChange) {
                     uint32_t command;float value;
-                    if(!(std::cin>>command>>value)||command>17)return 2;
+                    if(!(std::cin>>command>>value)||command>19)return 2;
                     inputAccepted=command<9?applyMovementRateChange(state,static_cast<MovementRate>(command),value):
                         applyMovementStateChange(state,static_cast<MovementStateChange>(command-9),value);
                 } else if(input) {
@@ -228,8 +251,12 @@ int main(int argc, char** argv) {
                     for(uint32_t i=0;i<count;++i) {
                         if(queuedInput) {
                             uint32_t kind,eventTime;bool ack;
-                            if(!(std::cin>>kind>>eventTime)||kind>3)return 2;
-                            if(kind==3) {
+                            if(!(std::cin>>kind>>eventTime)||kind>4)return 2;
+                            if(kind==4) {
+                                uint32_t mode,counter;bool enable;
+                                if(!(std::cin>>mode>>enable>>counter)||mode>6)return 2;
+                                commands.enqueueMode(eventTime,counter,static_cast<MovementMode>(mode),enable);
+                            } else if(kind==3) {
                                 glm::vec2 direction;float speed,vertical;uint32_t counter;
                                 if(!(std::cin>>direction.x>>direction.y>>speed>>vertical>>counter))return 2;
                                 commands.enqueueLaunch(eventTime,counter,direction,speed,vertical);
@@ -252,7 +279,7 @@ int main(int argc, char** argv) {
                             commands.enqueueCollisionHeight(eventTime,height,counter,ack);
                         }
                     }
-                    if(queuedInput&&!executeInput)queueResult=int(commands.process(time,defer,state,shape,observations));
+                    if(queuedInput&&!executeInput)queueResult=int(commands.process(time,defer,active,state,shape,observations));
                     else {
                     auto execution=executeUninterpolatedMovement(world,cache,state,shape,commands,clock,observations,time,lastTime,active,local,ghost,defer);
                     frameResult=std::move(execution.movement);retire=execution.retireRequested;
@@ -288,7 +315,7 @@ int main(int argc, char** argv) {
         if(execute) {
             observations.print();number("height",shape.height);number("flags2",state.flags2);
             number("heartbeat_time",clock.heartbeatTimeMs);number("idle_time",clock.idleTimeMs);
-            number("retire",retire?"true":"false");
+            number("retire",(retire||observations.modeRetire)?"true":"false");
         }
         number("flags", state.flags);
         number("step_start", state.stepStartZ);

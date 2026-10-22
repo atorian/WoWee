@@ -24,7 +24,11 @@ class OriginalMovementInputQueue(OriginalMovementExecution):
         self.input_control=self.alloc(bytes(0x100))
         ids=[0,1,2,3,4,5,11,12,13,14,15,16,6,7,8,10]
         for op in case['inputs']:
-            if len(op)==6:
+            if isinstance(op,dict):
+                mode=op['mode'];enable=op['enabled']
+                addresses=[0x6ee690,0x6eee50,0x6eed70,0x6eeef0,0x6eeff0,0x6ef060,0x6ef150]
+                self.call(addresses[mode],[op['time'],op['counter'],int(not enable) if mode==0 else int(enable)],body)
+            elif len(op)==6:
                 time,x,y,speed,vertical,counter=op
                 bits=struct.unpack('<2I',struct.pack('<2f',speed,vertical))
                 self.call(0x6ecc80,[time,counter,self.floats([x,y]),*bits],body)

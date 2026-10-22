@@ -50,7 +50,7 @@ def trajectories(original):
             output=original.run(c)
             yield dict(input=dict(c),output=output)
             exclude={'name','elapsed','transport','fall_reset','requests','events','geometry_status',
-                'notifications','heartbeats','finished','retire','angular_stops','rate_states'}
+                'notifications','heartbeats','finished','retire','angular_stops','rate_states','mode_observations'}
             c.update({k:v for k,v in output.items() if k not in exclude});c['last_time']=c['time']
 
 def main():

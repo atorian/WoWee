@@ -449,3 +449,27 @@ with repeated launches. State visible at each ACK boundary is compared.
 Native collision/ADT selection is 52/52; all new matrices pass ASan/UBSan.
 Transport-frame conversion, attached movement and real unit/protocol effects
 remain outside these offline comparisons.
+
+
+### 2026-10-23 — Timed server modes and gravity collision phase
+
+The common queue now handles gravity, feather fall, water walk, hover, root,
+can-fly and swim/fly transition, preserving ACK order and observed unit/input
+boundaries. Shared state now compares 5872 original calls. Mode dispatch matches
+2304 mixed queues; complete server-command execution matches 1444 scenes/frames,
+including 180 consecutive trajectory frames. Native collision/ADT: 54/54.
+The mode queue and execution matrices also pass ASan/UBSan; full sweep passes.
+
+Full execution first exposed 93 mismatches: collision phase and vertical
+projection ignored gravity disabled through movement flag 0x400 or flags2 bit 4.
+Using the original CanCollideWhileFlying condition resolves all 93.
+
+An additional arbitrary local-input/server-mode sequence remains unresolved:
+original_mode_input_boundary_12340.json preserves root + swimming + descending +
+disabled gravity on an inactive mover. With unit/input handlers stubbed, original
+ApplyMovement repeatedly requests seven milliseconds without consuming time;
+the diagnostic reaches its ten-million-instruction budget. This is not evidence
+of a complete original-client hang. The diagnostic intentionally fails and is
+not part of the passing matrix. Real input admission and unit effects must be
+resolved; no invented escape or gameplay rollout was added. Retire observations
+are lifecycle requests, not proof of successful removal from the mover list.

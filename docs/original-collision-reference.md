@@ -665,3 +665,35 @@ adding it at dispatch resolves all of them. This does not establish attached
 transport semantics: the fixture has no transport GUID or moving passenger
 frame. Native Windows and ASan/UBSan match all new matrices; 52 native
 collision/ADT tests pass. Unit delivery is still an observed boundary.
+
+
+## Timed server modes and gravity collision phase (2026-10-23)
+
+The common queue now handles gravity, feather fall, water walk, hover, root,
+can-fly and swim/fly transition, preserving ACK order and observed unit/input
+boundaries. Shared state now compares 5872 original calls. Mode dispatch matches
+2304 mixed queues; complete server-command execution matches 1444 scenes/frames,
+including 180 consecutive trajectory frames. Native collision/ADT: 54/54.
+The mode queue and execution matrices also pass ASan/UBSan; full sweep passes.
+
+Full execution first exposed 93 mismatches: collision phase and vertical
+projection ignored gravity disabled through movement flag 0x400 or flags2 bit 4.
+Using the original CanCollideWhileFlying condition resolves all 93.
+
+An additional arbitrary local-input/server-mode sequence remains unresolved:
+original_mode_input_boundary_12340.json preserves root + swimming + descending +
+disabled gravity on an inactive mover. With unit/input handlers stubbed, original
+ApplyMovement repeatedly requests seven milliseconds without consuming time;
+the diagnostic reaches its ten-million-instruction budget. This is not evidence
+of a complete original-client hang. The diagnostic intentionally fails and is
+not part of the passing matrix. Real input admission and unit effects must be
+resolved; no invented escape or gameplay rollout was added. Retire observations
+are lifecycle requests, not proof of successful removal from the mover list.
+
+References: UpdatePlayerMovement 0x6ef860, GravityStateChanged 0x6eba60,
+UpdateHoverState 0x6e9920, HandlePendingActions 0x6eb3b0,
+CanCollideWhileFlying 0x75ee00. Unit callbacks are recorded synchronously but
+not executed; forced notification still returns false. Fixtures:
+original_mode_queue_12340.json and original_mode_execution_12340.json.
+The unresolved input case is reproducible with
+`tools/probe_original_movement_mode_boundary.py --binary <original WoW.exe>`.

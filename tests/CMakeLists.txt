@@ -3813,3 +3813,14 @@ if(Python3_Interpreter_FOUND)
                 --probe $<TARGET_FILE:movement_surface_probe>)
     endforeach()
 endif()
+
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_mode_queue
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_mode_queue.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_mode_queue_12340.json
+            --probe $<TARGET_FILE:movement_surface_probe>)
+    add_test(NAME original_collision_mode_execution
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_mode_queue.py --execute
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_mode_execution_12340.json
+            --probe $<TARGET_FILE:movement_surface_probe>)
+endif()

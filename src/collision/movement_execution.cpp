@@ -43,7 +43,7 @@ MovementExecutionResult executeUninterpolatedMovement(MovementFacetSource& world
             }
             processed+=step;
         }
-        const auto result=commands.process(cursor,defer,state,shape,sink);
+        const auto result=commands.process(cursor,defer,active,state,shape,sink);
         if(result!=MovementQueueResult::Pending) {
             if(result==MovementQueueResult::Idle)output.retireRequested=true;
             else if(active)clock.heartbeatTimeMs+=total-processed;

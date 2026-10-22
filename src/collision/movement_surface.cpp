@@ -101,7 +101,7 @@ struct SurfaceTraversal {
             mapX<margin || mapY<margin || mapX>=34133.332f-double(margin) || mapY>=34133.332f-double(margin)) {
             result.elapsedMs=elapsed;return result;
         }
-        const double vertical=state.flags&(MOVEMENTFLAG_SWIMMING|MOVEMENTFLAG_FLYING)?move.z:0;
+        const double vertical=CanCollideWhileFlying()?move.z:0;
         const double length=std::sqrt((double(move.y)*move.y+double(move.x)*move.x)+vertical*vertical);
         const float speed=float(length/(double(elapsed)*.001f));
         C3Vector direction{0};
@@ -124,7 +124,7 @@ struct SurfaceTraversal {
             const bool jumping=(oldFlags&MOVEMENTFLAG_FALLING) && state.fallVelocity!=0;
             const float oldSpeed=state.currentSpeed;
             uint32_t used;
-            if (state.flags&(MOVEMENTFLAG_SWIMMING|MOVEMENTFLAG_FLYING))
+            if (CanCollideWhileFlying())
                 used=Swim(world.cache.liquids,step,distance,direction);
             else if (state.flags&MOVEMENTFLAG_FALLING) used=Fall(time+consumed,step,distance,C2Vector(direction));
             else if (state.flags&0x40000000) used=HoverMove(time+consumed,step,distance,direction);
@@ -972,12 +972,13 @@ struct SurfaceTraversal {
 
     // 0x006eb3b0, state transitions for a mover with no active spline.
     // Active input/queue notification belongs to the caller's event adapter.
-    bool HandlePendingActions() {
+    bool HandlePendingActions(MovementPendingObserver* observer=nullptr) {
         const uint32_t oldFlags = state.flags;
         if (oldFlags & MOVEMENTFLAG_PENDING_STOP) {
             state.flags &= ~(MOVEMENTFLAG_FORWARD | MOVEMENTFLAG_BACKWARD | MOVEMENTFLAG_PENDING_STOP);
             CalcCurrentSpeed(0);
             UpdateAnchors(0);
+            if(observer)observer->forwardStopped();
         }
         if (state.flags & MOVEMENTFLAG_PENDING_STRAFE_STOP) {
             state.flags &= ~(MOVEMENTFLAG_STRAFE_LEFT | MOVEMENTFLAG_STRAFE_RIGHT | MOVEMENTFLAG_PENDING_STRAFE_STOP);
@@ -994,6 +995,12 @@ struct SurfaceTraversal {
         return (oldFlags ^ state.flags) & 15;
     }
 
+    // CanCollideWhileFlying 0x75ee00 / IsSplineFlyerOrFlyingOrSwimming
+    // 0x75eda0, without a spline. Disabled gravity participates independently
+    // of the explicit swim/fly flags, both in displacement and phase selection.
+    bool CanCollideWhileFlying() const {
+        return IsGravityDisabled()||(state.flags&(MOVEMENTFLAG_SWIMMING|MOVEMENTFLAG_FLYING));
+    }
     bool IsGravityDisabled() const {
         return (state.flags2 & 4) || (state.flags & 0x400);
     }
@@ -2323,6 +2330,8 @@ bool applyMovementStateChange(SurfaceMovementState& state,MovementStateChange ch
         state.flags&=~(MOVEMENTFLAG_ROOT|MOVEMENTFLAG_PENDING_ROOT);
         if(enable)t.TryStartFalling();
         break;
+    case MovementStateChange::StopFalling:t.StopFalling();break;
+    case MovementStateChange::TryStartFalling:return t.TryStartFalling();
     case MovementStateChange::StopSwimming:
         // StopSwim 0x98bff0 retains pitch when ALWAYS_ALLOW_PITCHING is set.
         state.flags&=~(MOVEMENTFLAG_SWIMMING|MOVEMENTFLAG_ASCENDING|MOVEMENTFLAG_DESCENDING);
@@ -2341,6 +2350,10 @@ bool applyMovementStateChange(SurfaceMovementState& state,MovementStateChange ch
     default:return false;
     }
     return true;
+}
+bool applyPendingMovementActions(SurfaceMovementState& state,MovementPendingObserver& observer) {
+    SurfaceTraversal t{{},state,0,0,0,true,std::nullopt,std::nullopt};
+    return t.HandlePendingActions(&observer);
 }
 void launchUnattachedMovement(SurfaceMovementState& state,const glm::vec2& direction,
     float speed,float verticalSpeed) {
