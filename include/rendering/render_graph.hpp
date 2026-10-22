@@ -6,117 +6,102 @@
 #include <vector>
 #include <functional>
 #include <cstdint>
+#include <optional>
 
-namespace wowee {
-namespace rendering {
-
+namespace wowee::rendering {
 class VkContext;
 
-// Lightweight Render Graph / Frame Graph
-// Converts hardcoded pass sequence (shadow → reflection → compute cull →
-// main → post-process → ImGui → present) into declarative graph nodes.
-// Graph auto-inserts VkImageMemoryBarrier2 between passes.
-
-// Resource handle - identifies a virtual resource (image or buffer) within the graph.
+// Logical versions are single-assignment. versionResource() orders the next
+// writer after ALL readers of the old version, even if registered out of order.
+// Physical resources are imported afresh for the acquired frame slot. The graph
+// never owns their allocation, frame fence, queue ownership or retirement.
 struct RGResource {
     uint32_t id = UINT32_MAX;
     [[nodiscard]] bool valid() const { return id != UINT32_MAX; }
 };
-
-// Image barrier descriptor for automatic synchronization between passes.
 struct RGImageBarrier {
     VkImage image;
-    VkImageLayout oldLayout;
-    VkImageLayout newLayout;
-    VkAccessFlags srcAccess;
-    VkAccessFlags dstAccess;
-    VkPipelineStageFlags srcStage;
-    VkPipelineStageFlags dstStage;
-    VkImageAspectFlags aspectMask;
+    VkImageLayout oldLayout, newLayout;
+    VkAccessFlags2 srcAccess, dstAccess;
+    VkPipelineStageFlags2 srcStage, dstStage;
+    VkImageSubresourceRange range;
 };
-
-// Buffer barrier descriptor for automatic synchronization between passes.
 struct RGBufferBarrier {
-    VkBuffer buffer;
-    VkDeviceSize offset;
-    VkDeviceSize size;
-    VkAccessFlags srcAccess;
-    VkAccessFlags dstAccess;
-    VkPipelineStageFlags srcStage;
-    VkPipelineStageFlags dstStage;
+    ::VkBuffer buffer;
+    VkDeviceSize offset, size;
+    VkAccessFlags2 srcAccess, dstAccess;
+    VkPipelineStageFlags2 srcStage, dstStage;
 };
-
-// Render pass node - wraps an execution callback with declared inputs/outputs.
+struct RGState {
+    VkPipelineStageFlags2 stage = VK_PIPELINE_STAGE_2_NONE;
+    VkAccessFlags2 access = VK_ACCESS_2_NONE;
+    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+};
+struct RGUse { RGResource resource; RGState state; };
 struct RGPass {
     std::string name;
-    std::vector<RGResource> inputs;
-    std::vector<RGResource> outputs;
-    std::function<void(VkCommandBuffer cmd)> execute;
-    bool enabled = true; // Can be dynamically disabled per-frame
-
-    // Barriers to insert before this pass executes
+    std::vector<RGResource> inputs, outputs;
+    std::function<void(VkCommandBuffer)> execute;
+    bool enabled = true;
+    std::vector<RGUse> uses;
+    // Compiled Vulkan commands, exposed for capture/debug and CPU validation.
     std::vector<RGImageBarrier> imageBarriers;
     std::vector<RGBufferBarrier> bufferBarriers;
 };
 
 class RenderGraph {
 public:
-    RenderGraph() = default;
-    ~RenderGraph() = default;
-
-    // Reset graph for a new frame (clears passes, keeps resource registry).
+    // Clears passes and physical imports; keeps logical resource names/versions.
     void reset();
-
-    // Register a virtual resource (returns handle for input/output declarations).
     RGResource registerResource(const std::string& name);
-
-    // Look up a previously registered resource by name.
+    RGResource versionResource(RGResource previous, const std::string& name);
     [[nodiscard]] RGResource findResource(const std::string& name) const;
 
-    // Add a render pass node.
-    // inputs: resources this pass reads from
-    // outputs: resources this pass writes to
-    // execute: callback invoked with the frame's command buffer
-    void addPass(const std::string& name,
-                 const std::vector<RGResource>& inputs,
-                 const std::vector<RGResource>& outputs,
-                 std::function<void(VkCommandBuffer cmd)> execute);
-
-    // Enable/disable a pass by name (for dynamic toggling, e.g. shadows off).
+    // Import a root resource after its slot's fence. Images use one declared
+    // subresource range; do not import overlapping ranges under different roots.
+    // A render pass in a callback must keep the layout declared in use().
+    void importImage(RGResource resource, VkImage image, RGState initial,
+                     VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1});
+    void importBuffer(RGResource resource, ::VkBuffer buffer, RGState initial,
+                      VkDeviceSize offset = 0, VkDeviceSize size = VK_WHOLE_SIZE);
+    uint32_t addPass(const std::string& name, const std::vector<RGResource>& inputs,
+                     const std::vector<RGResource>& outputs,
+                     std::function<void(VkCommandBuffer)> execute);
+    // Declare every physical resource access of a callback. Legacy passes with
+    // logical-only dependencies retain their own explicit barriers.
+    void use(uint32_t pass, RGResource resource, RGState state);
     void setPassEnabled(const std::string& name, bool enabled);
-
-    // Compile: topological sort by dependency order, insert barriers.
-    // Must be called after all addPass() calls and before execute().
-    void compile();
-
-    // Execute all enabled passes in compiled order on the given command buffer.
-    // Each pass's recording is timed into the context's CPU stages under
-    // `stageGroup`, and its commands are a GPU scope of the pass's name.
+    // Invalid graphs log an error and have NO executable order. Never guess an
+    // order after a cycle, missing writer, ambiguous version or invalid access.
+    bool compile();
     void execute(VkCommandBuffer cmd, VkContext& context, std::string_view stageGroup);
-
-    // Query: get the compiled execution order (pass names, for debug HUD).
+    // Same recording without frame profiling, for offscreen submissions/tools.
+    void record(VkCommandBuffer cmd);
+    [[nodiscard]] const std::string& error() const { return error_; }
     [[nodiscard]] const std::vector<uint32_t>& getExecutionOrder() const { return executionOrder_; }
     [[nodiscard]] const std::vector<RGPass>& getPasses() const { return passes_; }
-
 private:
-    // Topological sort helper (Kahn's algorithm).
-    void topologicalSort();
-
-    // Resource registry: name → id
+    bool fail(std::string message);
+    bool topologicalSort();
+    bool buildBarriers();
+    void recordPass(VkCommandBuffer cmd, const RGPass& pass);
+    uint32_t root(uint32_t resource) const;
+    struct Import {
+        VkImage image = VK_NULL_HANDLE;
+        ::VkBuffer buffer = VK_NULL_HANDLE;
+        VkImageSubresourceRange range{};
+        VkDeviceSize offset = 0, size = VK_WHOLE_SIZE;
+        RGState initial;
+    };
     struct ResourceEntry {
         std::string name;
-        uint32_t id;
+        uint32_t previous = UINT32_MAX;
+        std::optional<Import> binding;
     };
     std::vector<ResourceEntry> resources_;
-    uint32_t nextResourceId_ = 0;
-
-    // Pass storage
     std::vector<RGPass> passes_;
-
-    // Compiled execution order (indices into passes_)
     std::vector<uint32_t> executionOrder_;
     bool compiled_ = false;
+    std::string error_, reportedError_;
 };
-
-} // namespace rendering
-} // namespace wowee
+} // namespace wowee::rendering

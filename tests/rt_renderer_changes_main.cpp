@@ -10,6 +10,7 @@
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/vk_context.hpp"
+#include "rendering/render_graph.hpp"
 #include <SDL3/SDL.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
@@ -45,6 +46,52 @@ pipeline::M2Model triangle() {
     model.batches.push_back(batch);
     model.boundMin = {-5,-5,0}; model.boundMax = {5,5,10}; model.boundRadius = 10;
     return model;
+}
+void exerciseGraph(rendering::VkContext& context) {
+    using namespace rendering;
+    struct Buffers {
+        VmaAllocator allocator;
+        AllocatedBuffer source{}, readback{};
+        ~Buffers() { destroyBuffer(allocator, source); destroyBuffer(allocator, readback); }
+    } buffers{context.getAllocator()};
+    buffers.source=createBuffer(buffers.allocator,4,VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,VMA_MEMORY_USAGE_GPU_ONLY);
+    buffers.readback=createBuffer(buffers.allocator,8,VK_BUFFER_USAGE_TRANSFER_DST_BIT,VMA_MEMORY_USAGE_CPU_ONLY);
+    require(buffers.source.buffer && buffers.readback.info.pMappedData,"graph fixture buffer allocation");
+    RenderGraph graph;
+    const auto source=graph.registerResource("source");
+    const auto replaced=graph.versionResource(source,"source replaced");
+    const auto destination=graph.registerResource("readback");
+    const auto completed=graph.versionResource(destination,"readback complete");
+    graph.importBuffer(source,buffers.source.buffer,{});
+    graph.importBuffer(destination,buffers.readback.buffer,{});
+    const RGState write{VK_PIPELINE_STAGE_2_TRANSFER_BIT,VK_ACCESS_2_TRANSFER_WRITE_BIT};
+    const RGState read{VK_PIPELINE_STAGE_2_TRANSFER_BIT,VK_ACCESS_2_TRANSFER_READ_BIT};
+    // Intentionally register the overwrite BEFORE the first reader. Resource
+    // versions must retain the first result until that copy has completed.
+    auto overwrite=graph.addPass("overwrite",{}, {replaced},[&](auto cmd) {
+        vkCmdFillBuffer(cmd,buffers.source.buffer,0,4,29);
+    });
+    graph.use(overwrite,replaced,write);
+    auto first=graph.addPass("copy original",{source},{destination},[&](auto cmd) {
+        VkBufferCopy region{0,0,4}; vkCmdCopyBuffer(cmd,buffers.source.buffer,buffers.readback.buffer,1,&region);
+    });
+    graph.use(first,source,read); graph.use(first,destination,write);
+    auto initial=graph.addPass("initial fill",{}, {source},[&](auto cmd) {
+        vkCmdFillBuffer(cmd,buffers.source.buffer,0,4,17);
+    });
+    graph.use(initial,source,write);
+    auto second=graph.addPass("copy replacement",{replaced},{completed},[&](auto cmd) {
+        VkBufferCopy region{0,4,4}; vkCmdCopyBuffer(cmd,buffers.source.buffer,buffers.readback.buffer,1,&region);
+    });
+    graph.use(second,replaced,read); graph.use(second,completed,write);
+    auto host=graph.addPass("host read",{completed},{},[](auto) {});
+    graph.use(host,completed,{VK_PIPELINE_STAGE_2_HOST_BIT,VK_ACCESS_2_HOST_READ_BIT});
+    require(graph.compile(),"GPU graph did not compile");
+    context.immediateSubmit([&](auto cmd) { graph.record(cmd); });
+    require(vmaInvalidateAllocation(buffers.allocator,buffers.readback.allocation,0,VK_WHOLE_SIZE)==VK_SUCCESS,"invalidate graph readback");
+    const auto* result=static_cast<const uint32_t*>(buffers.readback.info.pMappedData);
+    require(result[0]==17 && result[1]==29,"graph overwrote a resource before its old reader finished");
+    std::puts("PASS: GPU graph readers see original and replaced versions in dependency order");
 }
 void exercise(rendering::Renderer& renderer, pipeline::AssetManager& assets) {
     auto& m2 = *renderer.getM2Renderer();
@@ -154,6 +201,7 @@ int main() {
         rendering::Renderer renderer;
         try {
             require(surface.context.initialize(window), "Vulkan initialization failed");
+            exerciseGraph(surface.context);
             const char* root = std::getenv("WOW_DATA_PATH");
             const std::string data = root ? root : "./Data";
             assets.setExpansionDataPath(data + "/expansions/wotlk");

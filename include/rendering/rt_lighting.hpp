@@ -7,6 +7,7 @@
 #include <vulkan/vulkan.h>
 
 #include "rendering/vk_context.hpp"
+#include "rendering/render_graph.hpp"
 #include "rendering/vk_utils.hpp"
 
 namespace wowee {
@@ -136,6 +137,7 @@ private:
     void writeSlotSets(uint32_t slot);
     VkImageView depthViewFor(VkImage image, bool msaa);
 
+    RenderGraph graph_;
     VkContext* ctx_ = nullptr;
     RtScene* scene_ = nullptr;
     Mode mode_ = Mode::Off;

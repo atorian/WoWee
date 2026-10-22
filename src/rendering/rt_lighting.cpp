@@ -51,53 +51,6 @@ enum Binding : uint32_t {
 
 constexpr VkFormat kFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 
-void memoryBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 src, VkAccessFlags2 srcAccess,
-                   VkPipelineStageFlags2 dst, VkAccessFlags2 dstAccess) {
-    VkMemoryBarrier2 mb{};
-    mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
-    mb.srcStageMask = src;
-    mb.srcAccessMask = srcAccess;
-    mb.dstStageMask = dst;
-    mb.dstAccessMask = dstAccess;
-    VkDependencyInfo dep{};
-    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    dep.memoryBarrierCount = 1;
-    dep.pMemoryBarriers = &mb;
-    cmdPipelineBarrier2(cmd, dep);
-}
-
-void depthBarrier(VkCommandBuffer cmd, VkImage image, bool toRead) {
-    VkImageMemoryBarrier2 b{};
-    b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-    if (toRead) {
-        b.srcStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
-                         VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
-        b.srcAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        b.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-        b.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
-        b.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        b.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-    } else {
-        b.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-        b.srcAccessMask = 0;
-        b.dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
-                         VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
-        b.dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                          VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        b.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-        b.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    }
-    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.image = image;
-    b.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
-    VkDependencyInfo dep{};
-    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    dep.imageMemoryBarrierCount = 1;
-    dep.pImageMemoryBarriers = &b;
-    cmdPipelineBarrier2(cmd, dep);
-}
-
 } // namespace
 
 RtLighting::~RtLighting() { shutdown(); }
@@ -501,52 +454,88 @@ void RtLighting::record(VkCommandBuffer cmd, VkImage sceneDepth, VkExtent2D scen
     d.misc = glm::vec4(scene_->hasContent() ? 1.0f : 0.0f, havePrev ? 1.0f : 0.0f, in.traceReflections ? 1.0f : 0.0f, in.distance);
     std::memcpy(s.ubo.info.pMappedData, &d, sizeof(d));
 
-    // The outputs of this slot were last read by the surfaces of the frame
-    // after the one that wrote them; this frame overwrites them.
-    memoryBarrier(cmd, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
-                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-    depthBarrier(cmd, sceneDepth, true);
-
     const uint32_t gx = (traceExtent_.width + 7) / 8;
     const uint32_t gy = (traceExtent_.height + 7) / 8;
     VkDescriptorSet sceneSet = scene_->descriptorSet();
-    auto bind = [&](VkPipeline p, int filterPass) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+    auto dispatch = [&](VkCommandBuffer commands, VkPipeline pipeline, int filterPass) {
+        vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
         VkDescriptorSet sets[2] = {s.sets[filterPass], sceneSet};
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_, 0, 2, sets, 0,
-                                nullptr);
-    };
-    auto computeToCompute = [&]() {
-        memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                      VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_,
+                                0, 2, sets, 0, nullptr);
+        vkCmdDispatch(commands, gx, gy, 1);
     };
 
-    bind(depthMsaa ? prepareMs_ : prepare_, 0);
-    vkCmdDispatch(cmd, gx, gy, 1);
-    computeToCompute();
-    depthBarrier(cmd, sceneDepth, false);
-
-    bind(trace_, 0);
-    vkCmdDispatch(cmd, gx, gy, 1);
-    computeToCompute();
-
-    bind(temporal_, 0);
-    vkCmdDispatch(cmd, gx, gy, 1);
-
-    const int32_t steps[3] = {1, 2, 4};
-    for (int pass = 0; pass < 3; ++pass) {
-        computeToCompute();
-        bind(filter_, pass);
-        const int32_t push[2] = {steps[pass], pass == 2 ? 1 : 0};
-        vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), push);
-        vkCmdDispatch(cmd, gx, gy, 1);
+    // Each image declares its actual producer and readers. The shared scratch
+    // targets also have readers from the preceding submission; frame-slot
+    // fences alone do not protect those images. No CPU wait is introduced.
+    graph_.reset();
+    const RGState computeRead{VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,VK_IMAGE_LAYOUT_GENERAL};
+    const RGState computeWrite{VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,VK_IMAGE_LAYOUT_GENERAL};
+    const RGState surfaceRead{VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,VK_IMAGE_LAYOUT_GENERAL};
+    const RGState depthAttachment{VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    auto target=[&](const char* name,const Target& image,RGState initial) {
+        auto resource=graph_.registerResource(name);
+        graph_.importImage(resource,image.img.image,initial);
+        return resource;
+    };
+    const auto depth=graph_.registerResource("scene depth");
+    graph_.importImage(depth,sceneDepth,depthAttachment,{VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1});
+    const auto restoredDepth=graph_.versionResource(depth,"scene depth restored");
+    const auto geometry=target("current geometry",s.gbuf,surfaceRead);
+    const auto raw=target("raw light",raw_,computeRead);
+    const auto rawGi=target("raw GI",rawGi_,computeRead);
+    const auto reflection=target("reflection",s.reflection,surfaceRead);
+    const auto history=target("current history",s.hist,computeRead);
+    const auto historyGi=target("current GI history",s.histGi,computeRead);
+    const auto& prev=slots_[(slotIndex+1)%MAX_FRAMES_IN_FLIGHT];
+    const auto oldGeometry=target("previous geometry",prev.gbuf,computeWrite);
+    const auto oldHistory=target("previous history",prev.hist,computeWrite);
+    const auto oldHistoryGi=target("previous GI history",prev.histGi,computeWrite);
+    const auto first=target("filter first",s.out,surfaceRead);
+    const auto firstGi=target("filter first GI",s.outGi,surfaceRead);
+    const auto middle=target("filter middle",tmp_,computeRead);
+    const auto middleGi=target("filter middle GI",tmpGi_,computeRead);
+    const auto final=graph_.versionResource(first,"filter final");
+    const auto finalGi=graph_.versionResource(firstGi,"filter final GI");
+    const auto prepare=graph_.addPass("prepare receivers",{depth},{geometry},[&](auto commands) {
+        dispatch(commands,depthMsaa?prepareMs_:prepare_,0);
+    });
+    graph_.use(prepare,depth,{VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL});
+    graph_.use(prepare,geometry,computeWrite);
+    const auto restore=graph_.addPass("restore depth",{},{restoredDepth},[](auto) {});
+    graph_.use(restore,restoredDepth,depthAttachment);
+    const auto trace=graph_.addPass("trace",{geometry},{raw,rawGi,reflection},[&](auto commands) {
+        dispatch(commands,trace_,0);
+    });
+    graph_.use(trace,geometry,computeRead);
+    for(auto resource:{raw,rawGi,reflection}) graph_.use(trace,resource,computeWrite);
+    const auto temporal=graph_.addPass("temporal",{geometry,raw,rawGi,oldGeometry,oldHistory,oldHistoryGi},
+        {history,historyGi},[&](auto commands) { dispatch(commands,temporal_,0); });
+    for(auto resource:{geometry,raw,rawGi,oldGeometry,oldHistory,oldHistoryGi}) graph_.use(temporal,resource,computeRead);
+    for(auto resource:{history,historyGi}) graph_.use(temporal,resource,computeWrite);
+    const RGResource sources[3][2]={{history,historyGi},{first,firstGi},{middle,middleGi}};
+    const RGResource destinations[3][2]={{first,firstGi},{middle,middleGi},{final,finalGi}};
+    for(int pass=0;pass<3;++pass) {
+        const auto filter=graph_.addPass("filter "+std::to_string(pass),
+            {geometry,sources[pass][0],sources[pass][1]}, {destinations[pass][0],destinations[pass][1]},
+            [&,pass](auto commands) {
+                const int32_t push[2]={1<<pass,pass==2?1:0};
+                vkCmdPushConstants(commands,pipelineLayout_,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(push),push);
+                dispatch(commands,filter_,pass);
+            });
+        for(auto resource:{geometry,sources[pass][0],sources[pass][1]}) graph_.use(filter,resource,computeRead);
+        for(auto resource:{destinations[pass][0],destinations[pass][1]}) graph_.use(filter,resource,computeWrite);
     }
-
-    // For the next frame's surfaces.
-    memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    const auto publish=graph_.addPass("publish light",{geometry,final,finalGi,reflection,history,historyGi},{},[](auto) {});
+    for(auto resource:{geometry,final,finalGi,reflection,history,historyGi}) graph_.use(publish,resource,surfaceRead);
+    if(!graph_.compile()) { havePrev_=false; resultFrame_=0; return; }
+    graph_.record(cmd);
 
     prevViewProj_ = relativeViewProj;
     prevCameraPos_ = in.cameraPos;

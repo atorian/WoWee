@@ -29,11 +29,28 @@ checkout remains on master with its concurrent uncommitted work preserved.
   and recording use the same reflected view. Group frustum culling is independent
   of the opt-in portal/tighter-distance diagnostics.
 
+## Frame graph
+
+- Resources are single-assignment logical versions. A later writer waits for
+  every reader of its predecessor, including callbacks registered out of order.
+- Physical images/buffers are imported for each acquired frame slot. Declared
+  stage/access/layout uses produce synchronization2 barriers; independent
+  shader stages receive visibility from the writer. Reset clears physical imports.
+- Cycles, ambiguous writers, undefined reads and undeclared accesses reject the
+  graph with an error; recording never guesses a fallback order.
+- RT prepare/trace/temporal/three filters now use physical graph imports and
+  declared accesses. Shared scratch targets include readers from the preceding
+  submission; no CPU wait was added.
+- Six M2/WMO PNGs are byte-identical before and after RT graph conversion.
+  Forced Khronos synchronization validation passed both GPU fixtures.
+- Existing other pre-passes retain their local barriers until migrated to imports.
+  This is a dependency foundation, not yet a G-buffer/RT pass conversion.
+
 ## Validation so far
 
 - Native dev/no-LTO renderer, scene_render and GPU mutation fixture build passed.
-- Seven CTest targets passed: range_allocator, rt_instance_changes,
-  scene_spatial_index, paged_frame_buffer, rt_scene_publication, terrain_depth, wind_field.
+- Eight CTest targets passed: range_allocator, rt_instance_changes,
+  scene_spatial_index, paged_frame_buffer, rt_scene_publication, terrain_depth, wind_field, render_graph.
 - A real WMO fixture initially failed `reflection cull used the primary camera`:
   the frustum check was gated by the disabled diagnostic culling flag. Corrected
   to the existing independent frustum setting; the fixture now passes.
@@ -44,6 +61,9 @@ checkout remains on master with its concurrent uncommitted work preserved.
   reports no renderer VUIDs (two pre-existing missing Epic overlay manifests).
 - render_dependency_check: zero forbidden includes. record_scene_check: zero
   live scene reads in recording. sweep_guard: every sweep within its ceiling.
+- The two graph regressions fail on the original implementation and pass after
+  correction. Native GPU fill/copy/readback verifies readers retain both old and
+  replaced versions; forced validation reports no renderer errors.
 - No branch FPS improvement is claimed. No full branch replay measured yet.
 
 ## Remaining implementation
