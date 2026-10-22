@@ -1347,9 +1347,18 @@ int lua_CheckButton_SetChecked(lua_State* L) {
         // turned off. BagSlotButton_UpdateChecked is one: it counts the open
         // container frames and passes 0 or 1 straight in, so every bag button
         // stayed lit whether or not its bag was open.
-        w->checked = lua_isnone(L, 2)    ? true
-                   : lua_isnumber(L, 2)  ? (lua_tonumber(L, 2) != 0)
-                                         : (lua_toboolean(L, 2) != 0);
+        // Stock SpellButton_UpdateSelection passes the strings "true" and
+        // "false". Lua truthiness alone would keep every spell selected.
+        if (lua_type(L, 2) == LUA_TSTRING) {
+            std::string value = lua_tostring(L, 2);
+            toLowerInPlace(value);
+            w->checked = value != "false" &&
+                (!lua_isnumber(L, 2) || lua_tonumber(L, 2) != 0);
+        } else {
+            w->checked = lua_isnone(L, 2) ? true
+                : lua_isnumber(L, 2) ? lua_tonumber(L, 2) != 0
+                                     : lua_toboolean(L, 2) != 0;
+        }
     }
     return 0;
 }

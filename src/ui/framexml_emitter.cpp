@@ -1137,17 +1137,8 @@ struct Emitter {
         // chat frame has a title region and five OnDragStart scripts, and
         // overwriting those with the generic pair would replace behaviour that
         // is deliberately more specific.
-        // A window that says it is toplevel and movable counts too, title region
-        // or not. Only three frames in FrameXML declare one, so keying on it
-        // alone left the character sheet and the spellbook - both 384x512
-        // panels declaring toplevel and movable, neither with a title region -
-        // unable to be moved, along with thirty more windows.
-        //
-        // Both attributes, not just movable: forty-nine frames declare movable
-        // and the set includes the unit frames, which declare it so that addons
-        // can reposition them. Giving those a body drag would turn a click that
-        // slipped four units from "target this party member" into "move their
-        // frame". Pairing it with toplevel narrows it to the actual windows.
+        // movable only grants permission for StartMoving/SetPoint. Stock
+        // UIPanels use it for layout; it does not register a mouse gesture.
         {
             bool ownDrag = false;
             bool titleRegion = false;
@@ -1160,8 +1151,7 @@ struct Emitter {
                     }
                 }
             }
-            const bool window = node.attrBool("toplevel") && node.attrBool("movable");
-            if (titleRegion || window) {
+            if (titleRegion) {
                 line(var + ":SetMovable(true)");
                 if (!ownDrag) {
                     line(var + ":RegisterForDrag(\"LeftButton\")");

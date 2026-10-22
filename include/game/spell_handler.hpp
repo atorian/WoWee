@@ -299,7 +299,9 @@ public:
     struct SpellBookTab {
         std::string name;
         std::string texture; // icon path
-        std::vector<uint32_t> spellIds; // spells in this tab
+        std::vector<uint32_t> spellIds; // all visible learned ranks in this tab
+        // One-based slots in the full book, for the compact highest-rank view.
+        std::vector<uint32_t> highestRankSlots;
     };
 
     // Unit cast state (aliased from handler_types.hpp)
@@ -411,7 +413,9 @@ public:
     void removeUnitAuraCache(uint64_t guid) { unitAurasCache_.erase(guid); }
 
     // Known spells mutation (formerly accessed via friend)
-    void addKnownSpell(uint32_t spellId) { knownSpells_.insert(spellId); }
+    void addKnownSpell(uint32_t spellId) {
+        if (knownSpells_.insert(spellId).second) spellBookTabsDirty_ = true;
+    }
     [[nodiscard]] bool hasKnownSpell(uint32_t spellId) const { return knownSpells_.count(spellId) > 0; }
 
     // Target aura mutation (formerly accessed via friend)
@@ -502,6 +506,7 @@ public:
 
     // Spell book tabs
     const std::vector<SpellBookTab>& getSpellBookTabs();
+    uint32_t getKnownSlotFromHighestRankSlot(uint32_t slot);
 
     // Talent wipe confirm dialog
     [[nodiscard]] bool showTalentWipeConfirmDialog() const { return talentWipePending_; }
@@ -817,6 +822,7 @@ private:
     std::vector<SpellBookTab> spellBookTabs_;
     size_t lastSpellCount_ = 0;
     bool spellBookTabsDirty_ = true;
+    std::unordered_set<uint32_t> warnedSpellBookIcons_;
 
     // Talent wipe confirm dialog
     bool talentWipePending_ = false;

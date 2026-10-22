@@ -6,6 +6,7 @@
 
 #include "game/game_events.hpp"
 
+#include <algorithm>
 #include <vector>
 
 using Catch::Matchers::WithinAbs;
@@ -298,4 +299,51 @@ TEST_CASE("a routine refusal is shown but not said", "[spell][harness]") {
 
     CHECK(errorLines == 1);
     CHECK(spoken == 0);
+}
+
+TEST_CASE("rank replacement and unlearning refresh the open spell book", "[spell][harness][book]") {
+    GameHarness h;
+    h.enterWorld();
+    auto& spells = h.game().spells();
+    spells.addKnownSpell(133);
+    const auto bookIds = [&spells] {
+        std::vector<uint32_t> ids;
+        for (const auto& tab : spells.getSpellBookTabs())
+            ids.insert(ids.end(), tab.spellIds.begin(), tab.spellIds.end());
+        return ids;
+    };
+    const auto before = bookIds();
+    REQUIRE(std::find(before.begin(), before.end(), 133) != before.end());
+    h.clearRecords();
+
+    h.receive(Opcode::SMSG_SUPERCEDED_SPELL, Body().u32(133).u32(143));
+    h.pump();
+    const auto after = bookIds();
+    CHECK(after.size() == before.size());
+    CHECK(std::find(after.begin(), after.end(), 133) == after.end());
+    CHECK(std::find(after.begin(), after.end(), 143) != after.end());
+    CHECK(h.addonEvents("SPELLS_CHANGED").size() == 1);
+    h.clearRecords();
+
+    h.receive(Opcode::SMSG_SEND_UNLEARN_SPELLS, Body().u32(1).u32(143));
+    h.pump();
+    const auto unlearned = bookIds();
+    CHECK(std::find(unlearned.begin(), unlearned.end(), 143) == unlearned.end());
+    CHECK(h.addonEvents("SPELLS_CHANGED").size() == 1);
+}
+
+TEST_CASE("the initial spell book contains only abilities sent by the realm", "[spell][harness][book]") {
+    GameHarness h;
+    h.enterWorld();
+    h.receive(Opcode::SMSG_INITIAL_SPELLS,
+              Body().u8(0).u8(1).u8(0).u32(133).u8(0).u8(0).u8(0).u8(0));
+    h.pump();
+    const auto& learned = h.game().getKnownSpells();
+    CHECK(learned.count(133) == 1);
+    CHECK(learned.count(8690) == 0); // an item effect was not a learned ability
+    CHECK(learned.count(6603) == 0); // neither was an ability absent from this packet
+    std::vector<uint32_t> shown;
+    for (const auto& tab : h.game().spells().getSpellBookTabs())
+        shown.insert(shown.end(), tab.spellIds.begin(), tab.spellIds.end());
+    CHECK(shown == std::vector<uint32_t>{133});
 }

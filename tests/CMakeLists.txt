@@ -545,6 +545,26 @@ if(WOWEE_BUILD_FRAMEXML_RUN AND EXISTS "${WOWEE_FRAMEXML_TEST_DATA}/interface/Fr
             ENVIRONMENT "WOWEE_CONFIG_ROOT=${_dir}/config")
     endfunction()
 
+    file(READ "${CMAKE_SOURCE_DIR}/tests/framexml_spellbook.lua" _spellbook_checks)
+    foreach(_case panels selection ranks contents)
+        wowee_framexml_test(framexml_spellbook_${_case}
+            --player:8 --learn-spell:143 --learn-spell:145 --learn-spell:205
+            --learn-spell:11069 --learn-spell:2385 --learn-spell:3908
+            --learn-spell:6603 --learn-spell:20598
+            "--lua:SetCVar('ShowAllSpellRanks', 0) ToggleSpellBook(BOOKTYPE_SPELL)"
+            "--lua:woweeSpellbookCase='${_case}'" "--lua:${_spellbook_checks}")
+    endforeach()
+    wowee_framexml_test(framexml_spellbook_paging
+        --player:8 --learn-spell:143 --learn-spell:145 --learn-spell:3140
+        --learn-spell:8400 --learn-spell:8401 --learn-spell:8402 --learn-spell:10148
+        --learn-spell:10149 --learn-spell:10150 --learn-spell:10151 --learn-spell:25306
+        --learn-spell:27070 --learn-spell:38692 --learn-spell:42832 --learn-spell:42833
+        "--lua:SetCVar('ShowAllSpellRanks', 1) ToggleSpellBook(BOOKTYPE_SPELL)"
+        "--lua:woweeSpellbookCase='paging'" "--lua:${_spellbook_checks}")
+    wowee_framexml_test(framexml_spellbook_warrior --player
+        "--lua:ToggleSpellBook(BOOKTYPE_SPELL)"
+        "--lua:woweeSpellbookCase='warrior'" "--lua:${_spellbook_checks}")
+
     # bindings.xml marks the action buttons runOnUp: the press pushes the
     # button and the release performs it. The release is the key's, and runs
     # the command its press ran even when shift went down in between.

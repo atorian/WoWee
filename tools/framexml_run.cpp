@@ -64,6 +64,7 @@
 #include "core/app_clock.hpp"
 #include "ui/widget_renderer.hpp"
 #include "pipeline/asset_manager.hpp"
+#include "pipeline/dbc_layout.hpp"
 #include "ui/interface_fonts.hpp"
 #include "ui/link_hit.hpp"
 #include "game/expansion_profile.hpp"
@@ -405,6 +406,13 @@ int main(int argc, char** argv) {
         }
     }
 
+    wowee::pipeline::DBCLayout layouts;
+    const std::string layoutsPath = primaryAssetPath + "/dbc_layouts.json";
+    if (!layouts.loadFromJson(layoutsPath)) {
+        std::fprintf(stderr, "framexml_run: could not load DBC layouts from %s\n", layoutsPath.c_str());
+        return 2;
+    }
+    wowee::pipeline::setActiveDBCLayout(&layouts);
     wowee::pipeline::AssetManager assets;
     // Before initialize, exactly as application.cpp does it - the fallback
     // manifest is loaded here and initialize does not clear it.
@@ -450,6 +458,7 @@ int main(int argc, char** argv) {
     relayout();
 
     int raised = 0;
+    wowee::game::GameHandler* fixtureGame = nullptr;
     for (int i = 2; i < argc; ++i) {
         const size_t before = errors.size();
         std::printf("\n== %s\n", argv[i]);
@@ -478,7 +487,11 @@ int main(int argc, char** argv) {
         // Nothing here talks to a server: the services are null pointers apart
         // from the event bus, which GameHandler requires, and the character is
         // set directly.
-        if (std::strcmp(argv[i], "--player") == 0) {
+        if (std::strcmp(argv[i], "--player") == 0 ||
+            std::strncmp(argv[i], "--player:", 9) == 0) {
+            const auto playerClass = std::strlen(argv[i]) > 8
+                ? static_cast<wowee::game::Class>(std::atoi(argv[i] + 9))
+                : wowee::game::Class::WARRIOR;
             static wowee::core::EventBus events;
             static wowee::game::GameServices svc;
             svc.events = &events;
@@ -495,6 +508,7 @@ int main(int argc, char** argv) {
             // rather than the empty they give with no assets behind them.
             if (haveAssets) svc.assetManager = &assets;
             static wowee::game::GameHandler gh(svc);
+            fixtureGame = &gh;
             constexpr uint64_t kGuid = 0x0000000000000001ull;
             gh.setPlayerGuid(kGuid);
             // Through the character list, because that is where the client
@@ -505,7 +519,7 @@ int main(int argc, char** argv) {
             ch.guid = kGuid;
             ch.name = "Headless";
             ch.race = wowee::game::Race::HUMAN;
-            ch.characterClass = wowee::game::Class::WARRIOR;
+            ch.characterClass = playerClass;
             ch.gender = wowee::game::Gender::MALE;
             ch.level = 80;
             gh.charactersRef().clear();
@@ -531,7 +545,7 @@ int main(int argc, char** argv) {
             // PickupSpell resolves slot 1 to nothing and every drag out of the
             // book is a no-op that looks like a broken drag.
             if (auto* sh = gh.getSpellHandler()) {
-                for (uint32_t id : {133u, 168u, 116u}) sh->addKnownSpell(id);
+                for (uint32_t id : {6603u, 8690u, 133u, 168u, 116u}) sh->addKnownSpell(id);
             }
             // A spell icon path for every id, so GetSpellTexture answers
             // non-empty. Without it SpellButton_UpdateButton hides the icon and
@@ -590,7 +604,7 @@ int main(int argc, char** argv) {
             player->setPosition(0.0f, 0.0f, 0.0f, 0.0f);
             {
                 const uint32_t race = static_cast<uint32_t>(wowee::game::Race::HUMAN);
-                const uint32_t klass = static_cast<uint32_t>(wowee::game::Class::WARRIOR);
+                const uint32_t klass = static_cast<uint32_t>(playerClass);
                 player->setField(
                     wowee::game::fieldIndex(wowee::game::UF::UNIT_FIELD_BYTES_0),
                     race | (klass << 8));
@@ -602,6 +616,18 @@ int main(int argc, char** argv) {
                         static_cast<unsigned>(gh.getPlayerRace()),
                         static_cast<unsigned>(gh.getPlayerClass()),
                         static_cast<unsigned>(ch.level));
+            continue;
+        }
+        // Add a learned spell through the same public API as the trainer.
+        if (std::strncmp(argv[i], "--learn-spell:", 14) == 0) {
+            if (!fixtureGame) {
+                std::fprintf(stderr, "--learn-spell needs --player first\n");
+                ++raised;
+            } else {
+                fixtureGame->spells().addKnownSpell(
+                    static_cast<uint32_t>(std::strtoul(argv[i] + 14, nullptr, 10)));
+                mgr.fireEvent("SPELLS_CHANGED");
+            }
             continue;
         }
         // --hit:X,Y says which frame the client's own hit test lands on.

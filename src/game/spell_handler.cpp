@@ -1133,137 +1133,105 @@ void SpellHandler::confirmTalentWipe() {
 }
 
 const std::vector<SpellHandler::SpellBookTab>& SpellHandler::getSpellBookTabs() {
-    // Must be an instance member, not static - a static is shared across all
-    // SpellHandler instances, so switching characters with the same spell count
-    // would skip the rebuild and return the previous character's tabs.
+    // The first book query can precede SMSG_INITIAL_SPELLS (e.g. a trainer or
+    // a headless interface). Resolve its metadata before caching the view.
+    if (!spellNameCacheLoaded_ || !skillLineDbcLoaded_ || !skillLineAbilityLoaded_)
+        spellBookTabsDirty_ = true;
+    loadSpellNameCache();
+    loadSkillLineDbc();
+    loadSkillLineAbilityDbc();
     if (lastSpellCount_ == knownSpells_.size() && !spellBookTabsDirty_)
         return spellBookTabs_;
     lastSpellCount_ = knownSpells_.size();
     spellBookTabsDirty_ = false;
     spellBookTabs_.clear();
 
-    // Which SkillLine.dbc categories earn a tab of their own.
-    //
-    // Only the class one did, so everything else fell into General - and what
-    // falls into General is not a handful of odds and ends but every recipe
-    // the character knows. A miner's General tab listed Smelt Copper, Smelt
-    // Tin, Smelt Silver and the rest beside Hearthstone, and a tailor's ran to
-    // a hundred entries. The recipes belong under the skill that makes them.
-    static constexpr uint32_t SKILLLINE_CATEGORY_CLASS     = 7;
-    static constexpr uint32_t SKILLLINE_CATEGORY_SECONDARY = 9;   // Cooking, First Aid, Fishing
-    static constexpr uint32_t SKILLLINE_CATEGORY_PROFESSION = 11; // Mining, Tailoring, ...
-    // Category 9 is not only Cooking, First Aid and Fishing: it also holds
-    // every racial and every riding skill - Dwarven Racial, Horse Riding, Kodo
-    // Riding, twenty-four lines in all. Tabbing the category wholesale would
-    // put a tab named "Kodo Riding" beside Mining. So a secondary line earns
-    // one only when the character knows something in it that is actually made:
-    // a spell with reagents or a created item. That is the same question the
-    // General tab was answering wrongly, asked once here instead.
-    const auto lineHasRecipe = [this](uint32_t skillLine) {
-        for (uint32_t known : knownSpells_) {
-            auto kslIt = spellToSkillLine_.find(known);
-            if (kslIt == spellToSkillLine_.end() ||
-                kslIt->second != skillLine) continue;
-            auto cacheIt = spellNameCache_.find(known);
-            if (cacheIt == spellNameCache_.end()) continue;
-            if (cacheIt->second.createdItemId != 0) return true;
-            for (const auto& reagent : cacheIt->second.reagents) {
-                if (reagent.itemId != 0) return true;
-            }
-        }
-        return false;
-    };
-    const auto earnsOwnTab = [&](uint32_t category, uint32_t skillLine) {
-        if (category == SKILLLINE_CATEGORY_CLASS) return true;
-        if (category == SKILLLINE_CATEGORY_PROFESSION) return true;
-        if (category == SKILLLINE_CATEGORY_SECONDARY) return lineHasRecipe(skillLine);
-        return false;
-    };
-
+    constexpr uint32_t kClassSkill = 7;
+    constexpr uint32_t kTradeRecipe = 0x20;
+    constexpr uint32_t kHiddenInUi = 0x80;
     std::map<uint32_t, std::vector<uint32_t>> bySkillLine;
     std::vector<uint32_t> general;
-
     for (uint32_t spellId : knownSpells_) {
-        auto slIt = spellToSkillLine_.find(spellId);
-        if (slIt != spellToSkillLine_.end()) {
-            uint32_t skillLineId = slIt->second;
-            auto catIt = skillLineCategories_.find(skillLineId);
-            if (catIt != skillLineCategories_.end() &&
-                earnsOwnTab(catIt->second, skillLineId)) {
-                bySkillLine[skillLineId].push_back(spellId);
+        const auto data = spellNameCache_.find(spellId);
+        if (data != spellNameCache_.end() &&
+            (data->second.attr & (kTradeRecipe | kHiddenInUi)) != 0)
+            continue;
+        const auto line = spellToSkillLine_.find(spellId);
+        if (line != spellToSkillLine_.end()) {
+            const auto category = skillLineCategories_.find(line->second);
+            if (category != skillLineCategories_.end() && category->second == kClassSkill) {
+                bySkillLine[line->second].push_back(spellId);
                 continue;
             }
         }
+        // Profession openers, weapon skills and racial abilities belong in
+        // General. Recipes are listed by the profession UI, not the book.
         general.push_back(spellId);
     }
 
-    auto byName = [this](uint32_t a, uint32_t b) {
-        return getSpellName(a) < getSpellName(b);
+    const auto byNameAndRank = [this](uint32_t a, uint32_t b) {
+        const auto& nameA = getSpellName(a);
+        const auto& nameB = getSpellName(b);
+        if (nameA != nameB) return nameA < nameB;
+        const int rankA = spellclass::rankValue(getSpellRank(a));
+        const int rankB = spellclass::rankValue(getSpellRank(b));
+        if (rankA != rankB) return rankA < rankB;
+        return a < b;
     };
-
-    if (!general.empty()) {
-        std::sort(general.begin(), general.end(), byName);
-        spellBookTabs_.push_back({.name = "General", .texture = "Interface\\Icons\\INV_Misc_Book_09", .spellIds = std::move(general)});
-    }
-
-    // Each tab's own picture, from SkillLine.dbc's icon column. Every tab used
-    // to carry the same book, so the row of tabs down the side of the
-    // spellbook was a column of identical squares that said nothing about
-    // which was which - the tooltip was the only way to tell them apart.
-    //
-    // The book stays as the fallback: a skill line with no icon, or an icon
-    // this install cannot resolve, keeps what it had rather than going blank.
     static constexpr const char* kDefaultTabIcon = "Interface\\Icons\\INV_Misc_Book_09";
-    auto tabIcon = [this](uint32_t skillLineId) -> std::string {
-        auto it = skillLineIcons_.find(skillLineId);
-        if (it == skillLineIcons_.end()) return kDefaultTabIcon;
-        std::string path = queries_.iconPath(it->second);
-        return path.empty() ? kDefaultTabIcon : path;
-    };
-
-    // Down the side of the book in the order the kinds belong in, not in one
-    // alphabetical run: General, then the class's own lines, then the crafting
-    // ones. Sorting every tab by name alone dealt them together - Affliction,
-    // Alchemy, Arms, Blacksmithing - so a warlock's specialisations and their
-    // professions read as one undifferentiated column.
-    //
-    // Alphabetical within each kind, which is what the sort was right about.
-    const auto tabRank = [&](uint32_t skillLineId) {
-        auto catIt = skillLineCategories_.find(skillLineId);
-        if (catIt == skillLineCategories_.end()) return 3;
-        switch (catIt->second) {
-            case SKILLLINE_CATEGORY_CLASS:      return 0;
-            case SKILLLINE_CATEGORY_PROFESSION: return 1;
-            case SKILLLINE_CATEGORY_SECONDARY:  return 2;
-            default:                            return 3;
-        }
-    };
-
-    struct NamedTab {
-        int rank;
-        std::string name;
+    std::sort(general.begin(), general.end(), byNameAndRank);
+    // General exists even when it has no entries: stock FrameXML selects tab 1.
+    spellBookTabs_.push_back({.name = "General", .texture = kDefaultTabIcon,
+                             .spellIds = std::move(general)});
+    for (auto& [skillLine, spells] : bySkillLine) {
+        const auto name = skillLineNames_.find(skillLine);
         std::string icon;
-        std::vector<uint32_t> spells;
-    };
-    std::vector<NamedTab> named;
-    for (auto& [skillLineId, spells] : bySkillLine) {
-        auto nameIt = skillLineNames_.find(skillLineId);
-        std::string tabName = (nameIt != skillLineNames_.end()) ? nameIt->second : "Unknown";
-        std::sort(spells.begin(), spells.end(), byName);
-        named.push_back({.rank = tabRank(skillLineId), .name = std::move(tabName), .icon = tabIcon(skillLineId),
-                         .spells = std::move(spells)});
+        if (const auto found = skillLineIcons_.find(skillLine); found != skillLineIcons_.end())
+            icon = queries_.iconPath(found->second);
+        if (icon.empty()) {
+            if (warnedSpellBookIcons_.insert(skillLine).second) {
+                LOG_WARNING("Spellbook: no icon for skill line ", skillLine,
+                            "; using the default book icon");
+            }
+            icon = kDefaultTabIcon;
+        }
+        std::sort(spells.begin(), spells.end(), byNameAndRank);
+        spellBookTabs_.push_back({.name = name != skillLineNames_.end() ? name->second : "Unknown",
+                                 .texture = std::move(icon), .spellIds = std::move(spells)});
     }
-    std::sort(named.begin(), named.end(), [](const NamedTab& a, const NamedTab& b) {
-        if (a.rank != b.rank) return a.rank < b.rank;
-        return a.name < b.name;
-    });
+    std::sort(spellBookTabs_.begin() + 1, spellBookTabs_.end(),
+        [](const SpellBookTab& a, const SpellBookTab& b) { return a.name < b.name; });
 
-    for (auto& tab : named) {
-        spellBookTabs_.push_back({.name = std::move(tab.name), .texture = std::move(tab.icon),
-                                  .spellIds = std::move(tab.spells)});
+    uint32_t offset = 0;
+    for (auto& tab : spellBookTabs_) {
+        // Numeric ranks of the same named ability share one display entry.
+        // Rankless abilities stay independent, even if their names coincide.
+        std::unordered_map<std::string, size_t> rankedEntries;
+        for (size_t i = 0; i < tab.spellIds.size(); ++i) {
+            const uint32_t id = tab.spellIds[i];
+            const uint32_t slot = offset + static_cast<uint32_t>(i) + 1;
+            if (spellclass::rankValue(getSpellRank(id)) > 0 && !getSpellName(id).empty()) {
+                const auto [entry, inserted] = rankedEntries.emplace(
+                    getSpellName(id), tab.highestRankSlots.size());
+                if (!inserted) {
+                    tab.highestRankSlots[entry->second] = slot;
+                    continue;
+                }
+            }
+            tab.highestRankSlots.push_back(slot);
+        }
+        offset += static_cast<uint32_t>(tab.spellIds.size());
     }
-
     return spellBookTabs_;
+}
+
+uint32_t SpellHandler::getKnownSlotFromHighestRankSlot(uint32_t slot) {
+    if (slot == 0) return 0;
+    for (const auto& tab : getSpellBookTabs()) {
+        if (slot <= tab.highestRankSlots.size()) return tab.highestRankSlots[slot - 1];
+        slot -= static_cast<uint32_t>(tab.highestRankSlots.size());
+    }
+    return 0;
 }
 
 void SpellHandler::loadTalentDbc() {
@@ -1542,13 +1510,13 @@ void SpellHandler::handleInitialSpells(network::Packet& packet) {
     if (!queries_.packetParsers().parseInitialSpells(packet, data)) return;
 
     knownSpells_ = {data.spellIds.begin(), data.spellIds.end()};
+    spellBookTabsDirty_ = true;
 
     LOG_DEBUG("Initial spells include: 527=", knownSpells_.count(527u),
               " 988=", knownSpells_.count(988u), " 1180=", knownSpells_.count(1180u));
 
-    // Ensure Attack and Hearthstone are always present
-    knownSpells_.insert(SPELL_ID_ATTACK);
-    knownSpells_.insert(SPELL_ID_HEARTHSTONE);
+    // The realm owns the learned set. Item effects (such as Hearthstone)
+    // are usable through inventory and must not become spellbook abilities.
     if (isPreWotlk()) {
         loadTalentDbc();
         syncPreWotlkTalentsFromKnownSpells();
@@ -2185,6 +2153,7 @@ void SpellHandler::handleRemovedSpell(network::Packet& packet) {
     if (packet.getRemainingSize() < minSz) return;
     uint32_t spellId = classicSpellId ? packet.readUInt16() : packet.readUInt32();
     knownSpells_.erase(spellId);
+    spellBookTabsDirty_ = true;
     syncPreWotlkTalentsFromKnownSpells();
     LOG_INFO("Removed spell: ", spellId);
     // Braced. The two lines below were indented as though they sat inside the
@@ -2241,6 +2210,7 @@ void SpellHandler::handleSupercededSpell(network::Packet& packet) {
     uint32_t newSpellId = classicSpellId ? packet.readUInt16() : packet.readUInt32();
 
     knownSpells_.erase(oldSpellId);
+    spellBookTabsDirty_ = true;
 
     const bool newSpellAlreadyAnnounced = knownSpells_.count(newSpellId) > 0;
 
@@ -2252,6 +2222,7 @@ void SpellHandler::handleSupercededSpell(network::Packet& packet) {
     // The new rank takes the old one's place on the buttons (ActionBarHandler).
     events_.publish(events::SpellSuperseded{.oldSpellId = oldSpellId,
                                                       .newSpellId = newSpellId});
+    frameXml_.fireFrameXmlEvent("SPELLS_CHANGED", {});
 
     if (!newSpellAlreadyAnnounced) {
         const std::string& newName = getSpellName(newSpellId);
@@ -2270,12 +2241,14 @@ void SpellHandler::handleUnlearnSpells(network::Packet& packet) {
     for (uint32_t i = 0; i < spellCount && packet.getRemainingSize() >= 4; ++i) {
         uint32_t spellId = packet.readUInt32();
         knownSpells_.erase(spellId);
+        spellBookTabsDirty_ = true;
         unlearned.push_back(spellId);
         LOG_INFO("  Unlearned spell: ", spellId);
     }
     // Off the buttons that held them (ActionBarHandler).
     if (!unlearned.empty()) {
         events_.publish(events::SpellsUnlearned{.spellIds = std::move(unlearned)});
+        frameXml_.fireFrameXmlEvent("SPELLS_CHANGED", {});
     }
 
     if (spellCount > 0) {
@@ -2460,6 +2433,7 @@ void SpellHandler::resetCastState() {
 void SpellHandler::resetAllState() {
     character_ = {};
     knownSpells_.clear();
+    spellBookTabsDirty_ = true;
     spellCooldowns_.clear();
     spellCooldownTotals_.clear();
     playerAuras_.clear();
@@ -3217,6 +3191,7 @@ const std::string* SpellHandler::spellDescriptionVariables(uint32_t variableId) 
 
 void SpellHandler::resetSpellDbcCaches() {
     spellNameCacheLoaded_ = false;
+    spellBookTabsDirty_ = true;
     spellNameCache_.clear();
     spellDescriptionVariables_.clear();
     skillLineDbcLoaded_ = false;

@@ -568,7 +568,7 @@ static int lua_IsSpellKnown(lua_State* L) {
 static int lua_GetNumSpellTabs(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnZero(L); }
-    lua_pushnumber(L, gh->getSpellBookTabs().size());
+    lua_pushnumber(L, gh->spells().getSpellBookTabs().size());
     return 1;
 }
 
@@ -612,26 +612,24 @@ static int lua_GetSpellTabInfo(lua_State* L) {
     if (!gh || tabIdx < 1) {
         return emptyTab(L);
     }
-    const auto& tabs = gh->getSpellBookTabs();
+    const auto& tabs = gh->spells().getSpellBookTabs();
     if (tabIdx > static_cast<int>(tabs.size())) {
         return emptyTab(L);
     }
     // Compute offset: sum of spells in all preceding tabs (1-based)
     int offset = 0;
-    for (int i = 0; i < tabIdx - 1; ++i)
+    int highestOffset = 0;
+    for (int i = 0; i < tabIdx - 1; ++i) {
         offset += static_cast<int>(tabs[i].spellIds.size());
+        highestOffset += static_cast<int>(tabs[i].highestRankSlots.size());
+    }
     const auto& tab = tabs[tabIdx - 1];
     lua_pushstring(L, tab.name.c_str());           // name
     lua_pushstring(L, tab.texture.c_str());        // texture
     lua_pushnumber(L, offset);                     // offset (0-based for WoW compat)
     lua_pushnumber(L, tab.spellIds.size());        // numSpells
-    // The highest-rank pair, which is what FrameXML actually reads: with
-    // ShowAllSpellRanks off - the default - SpellBook_GetTabInfo throws away
-    // the first offset and count and keeps these. Returning four values left
-    // numSpells nil and the page count divided by nothing. This client does
-    // not track ranks separately, so the whole tab is the highest rank.
-    lua_pushnumber(L, offset);                     // highestRankOffset
-    lua_pushnumber(L, tab.spellIds.size());        // highestRankNumSpells
+    lua_pushnumber(L, highestOffset);
+    lua_pushnumber(L, tab.highestRankSlots.size());
     return 6;
 }
 
@@ -645,7 +643,7 @@ static int lua_GetSpellBookItemInfo(lua_State* L) {
         lua_pushnumber(L, 0);
         return 2;
     }
-    const auto& tabs = gh->getSpellBookTabs();
+    const auto& tabs = gh->spells().getSpellBookTabs();
     int idx = slot; // 1-based
     for (const auto& tab : tabs) {
         if (idx <= static_cast<int>(tab.spellIds.size())) {
@@ -665,14 +663,14 @@ static int lua_GetSpellBookItemName(lua_State* L) {
     auto* gh = getGameHandler(L);
     int slot = static_cast<int>(luaL_checknumber(L, 1));
     if (!gh || slot < 1) { return luaReturnNil(L); }
-    const auto& tabs = gh->getSpellBookTabs();
+    const auto& tabs = gh->spells().getSpellBookTabs();
     int idx = slot;
     for (const auto& tab : tabs) {
         if (idx <= static_cast<int>(tab.spellIds.size())) {
             uint32_t spellId = tab.spellIds[idx - 1];
             const std::string& name = gh->getSpellName(spellId);
             lua_pushstring(L, name.empty() ? "Unknown" : name.c_str());
-            lua_pushstring(L, ""); // subName/rank
+            lua_pushstring(L, gh->spells().getSpellRank(spellId).c_str());
             return 2;
         }
         idx -= static_cast<int>(tab.spellIds.size());
@@ -701,7 +699,7 @@ static int lua_GetSpellName(lua_State* L) {
     if (id == 0) { return luaReturnNil(L); }
     const std::string& name = gh->getSpellName(id);
     lua_pushstring(L, name.empty() ? "Unknown" : name.c_str());
-    lua_pushstring(L, "");
+    lua_pushstring(L, gh->spells().getSpellRank(id).c_str());
     return 2;
 }
 
@@ -756,11 +754,12 @@ static int lua_GetSpellAutocast(lua_State* L) {
     lua_pushboolean(L, 0);
     return 2;
 }
-/// GetKnownSlotFromHighestRankSlot(slot) → the slot actually known. The book
-/// shows the highest rank and this maps back; with one entry per spell here
-/// the two are the same slot.
+/// Map a compact highest-rank display slot to the full learned spell book.
 static int lua_GetKnownSlotFromHighestRankSlot(lua_State* L) {
-    lua_pushnumber(L, luaL_optnumber(L, 1, 0));
+    const int slot = static_cast<int>(luaL_optnumber(L, 1, 0));
+    auto* gh = getGameHandler(L);
+    lua_pushnumber(L, gh && slot > 0
+        ? gh->spells().getKnownSlotFromHighestRankSlot(static_cast<uint32_t>(slot)) : 0);
     return 1;
 }
 
