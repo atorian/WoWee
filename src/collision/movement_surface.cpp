@@ -18,7 +18,11 @@ constexpr uint32_t MOVEMENTFLAG_FORWARD=1,MOVEMENTFLAG_BACKWARD=2,MOVEMENTFLAG_S
 MOVEMENTFLAG_PITCH_UP=0x40,MOVEMENTFLAG_PITCH_DOWN=0x80,MOVEMENTFLAG_WALKING=0x100,MOVEMENTFLAG_ONTRANSPORT=0x200,MOVEMENTFLAG_ROOT=0x800,
 MOVEMENTFLAG_FALLING=0x1000,MOVEMENTFLAG_FALLING_FAR=0x2000,MOVEMENTFLAG_PENDING_ROOT=0x100000,MOVEMENTFLAG_SWIMMING=0x200000,
 MOVEMENTFLAG_ASCENDING=0x400000,MOVEMENTFLAG_DESCENDING=0x800000,MOVEMENTFLAG_FLYING=0x2000000,MOVEMENTFLAG_SPLINE_ELEVATION=0x4000000,
-MOVEMENTFLAG_SAFE_FALL=0x20000000,MOVEMENTFLAG2_ALWAYS_ALLOW_PITCHING=0x20;
+MOVEMENTFLAG_SAFE_FALL=0x20000000,MOVEMENTFLAG2_ALWAYS_ALLOW_PITCHING=0x20,
+MOVEMENTFLAG_PENDING_STOP=0x4000,MOVEMENTFLAG_PENDING_STRAFE_STOP=0x8000,
+MOVEMENTFLAG_PENDING_FORWARD=0x10000,MOVEMENTFLAG_PENDING_BACKWARD=0x20000,
+MOVEMENTFLAG_PENDING_STRAFE_LEFT=0x40000,MOVEMENTFLAG_PENDING_STRAFE_RIGHT=0x80000,
+MOVEMENTFLAG2_NO_STRAFE=1;
 
 // Original functions retain their names for comparison with build 12340.
 // See docs/original-collision-reference.md. Explicit double intermediates and
@@ -29,6 +33,7 @@ struct SurfaceTraversal {
     float m_collisionRadius, m_collisionHeight, m_stepUpHeight;
     bool clientControlled;
     std::optional<uint64_t> transportRequest;
+    std::optional<uint32_t> fallResetTime;
     static constexpr float s_terminalVelocity = 60.148003f, s_safeFallTerminalVelocity = 7;
     static constexpr uint8_t s_volumeEdges[32] = {0,1,0,2,0,3,0,4,1,2,2,3,3,4,4,1,1,5,2,6,3,7,4,8,5,6,6,7,7,8,8,5};
     int DistanceToMove(const C3Vector& dir, float distance,
@@ -311,16 +316,16 @@ struct SurfaceTraversal {
     }
 
     // 0x0075eb00
-    float GetTimeJustFallen(float elapsed, float timeFallen, C3Vector* move, float* distance, int32_t force, float speed) {
+    double GetTimeJustFallen(float elapsed, float timeFallen, C3Vector* move, float* distance, int32_t force, float speed) {
         int32_t impact = CheckFallImpactThreshold(timeFallen, elapsed, *move, force);
         float moveTime = 0.0f;
 
         if (speed > 9.5367432e-7f) {
             C2Vector move2D(*move);
-            moveTime = sqrt(move2D.x * move2D.x + move2D.y * move2D.y) / speed * elapsed;
+            moveTime = sqrt(double(move2D.x) * move2D.x + double(move2D.y) * move2D.y) / speed * elapsed;
         }
 
-        float fallTime = CalcTimeFallen(state.fallStartZ - state.position.z - move->z, impact);
+        double fallTime = CalcTimeFallen(float(double(state.fallStartZ) - state.position.z - move->z), impact);
 
         if (!(timeFallen < fallTime)) {
             move->x = 0.0f;
@@ -330,17 +335,18 @@ struct SurfaceTraversal {
             return 0.0f;
         }
 
-        float remaining = fallTime - timeFallen;
+        double remaining = fallTime - timeFallen;
 
         if (elapsed < remaining) {
             return elapsed;
         }
 
         if (moveTime > remaining) {
-            float scale = remaining / moveTime;
-            move->x = move->x * scale;
-            move->y = scale * move->y;
-            *distance = sqrt(move->x * move->x + move->y * move->y + move->z * move->z);
+            double scale = remaining / moveTime;
+            const double x = move->x * scale, y = scale * move->y;
+            move->x = float(x);
+            move->y = float(y);
+            *distance = float(sqrt((x*x+y*y)+double(move->z)*move->z));
         }
 
         return remaining;
@@ -430,31 +436,31 @@ struct SurfaceTraversal {
         for (uint32_t i = 0; i < 3; i++) {
             const C3Vector& v = data.vertices[i];
             const C3Vector& w = data.vertices[next[i]];
-            float ex = v.x - w.x;
-            float ey = v.y - w.y;
-            float ez = v.z - w.z;
-            float length = sqrt(ez * ez + ey * ey + ex * ex);
+            double ex = double(v.x) - w.x;
+            double ey = double(v.y) - w.y;
+            double ez = double(v.z) - w.z;
+            double length = sqrt(ez * ez + ey * ey + ex * ex);
 
             if (fabs(length) < 0.00000023841858f) {
                 continue;
             }
 
-            float scale = 1.0f / length;
-            C3Vector n(ex * scale, ey * scale, scale * ez);
-            float distSq;
+            double scale = 1.0 / length;
+            glm::dvec3 n(ex * scale, ey * scale, scale * ez);
+            double distSq;
 
             if (fabs(direction.z * n.z + direction.y * n.y + direction.x * n.x - 1.0f) >= 0.00000095367432f) {
-                float cx = direction.z * n.y - direction.y * n.z;
-                float cy = n.z * direction.x - direction.z * n.x;
-                float cz = n.x * direction.y - n.y * direction.x;
-                float d = -(point.z * cz + point.y * cy + point.x * cx);
-                float dist = cz * v.z + (cx * v.x + cy * v.y) + d;
+                double cx = direction.z * n.y - direction.y * n.z;
+                double cy = n.z * direction.x - direction.z * n.x;
+                double cz = n.x * direction.y - n.y * direction.x;
+                double d = -(point.z * cz + point.y * cy + point.x * cx);
+                double dist = cz * v.z + (cx * v.x + cy * v.y) + d;
                 distSq = dist * dist;
             } else {
-                float t = (v.x - point.x) * direction.x + (v.y - point.y) * direction.y + (v.z - point.z) * direction.z;
-                float dx = v.x - (direction.x * t + point.x);
-                float dy = v.y - (direction.y * t + point.y);
-                float dz = v.z - (t * direction.z + point.z);
+                double t = ((double(v.z) - point.z) * direction.z + (double(v.y) - point.y) * direction.y) + (double(v.x) - point.x) * direction.x;
+                double dx = v.x - (direction.x * t + point.x);
+                double dy = v.y - (direction.y * t + point.y);
+                double dz = v.z - (t * direction.z + point.z);
                 distSq = dz * dz + dy * dy + dx * dx;
             }
 
@@ -534,28 +540,29 @@ struct SurfaceTraversal {
                 return C3Vector(-planes[0].normal.x, -planes[0].normal.y, -planes[0].normal.z);
             }
         } else if (count == 2) {
-            float x = planes[1].normal.z * planes[0].normal.y - planes[0].normal.z * planes[1].normal.y;
-            float y = planes[1].normal.x * planes[0].normal.z - planes[0].normal.x * planes[1].normal.z;
-            float z = planes[0].normal.x * planes[1].normal.y - planes[1].normal.x * planes[0].normal.y;
-            float scale = 1.0f / sqrt(y * y + x * x + z * z);
-            C3Vector direction(x * scale, y * scale, z * scale);
+            double x = double(planes[1].normal.z) * planes[0].normal.y - double(planes[0].normal.z) * planes[1].normal.y;
+            double y = double(planes[1].normal.x) * planes[0].normal.z - double(planes[0].normal.x) * planes[1].normal.z;
+            double z = double(planes[0].normal.x) * planes[1].normal.y - double(planes[1].normal.x) * planes[0].normal.y;
+            double scale = 1.0 / sqrt(y * y + x * x + z * z);
+            x *= scale; y *= scale; z *= scale;
+            C3Vector direction(x, y, z);
             const CFacet& data = facets[facet];
 
-            if (fabs(direction.z) >= 0.00000095367432f && fnotequal(direction.y * data.plane.normal.y + direction.z * data.plane.normal.z + direction.x * data.plane.normal.x, 0.0f) && (fabs(direction.z - 1.0f) < 0.00000095367432f || !ComputeSteepSurfacePushNormalImpl(data.plane))) {
+            if (fabs(z) >= 0.00000095367432f && fnotequal(float(y * data.plane.normal.y + z * data.plane.normal.z + x * data.plane.normal.x), 0.0f) && (fabs(double(direction.z) - 1.0f) < 0.00000095367432f || !ComputeSteepSurfacePushNormalImpl(data.plane))) {
                 C3Vector point{0};
                 IntersectPlanes(facets[facet].plane, planes[0], planes[1], point);
                 C3Vector edge{0};
                 ComputeSteepSurfacePushNormalHelper(facet, direction, edge, point);
-                C3Vector normal = glm::cross(direction, edge);
-                float length = sqrt(normal.y * normal.y + normal.z * normal.z + normal.x * normal.x);
+                C3Vector normal = glm::cross(glm::dvec3(direction), glm::dvec3(edge));
+                float length = sqrt(double(normal.y) * normal.y + double(normal.z) * normal.z + double(normal.x) * normal.x);
 
                 if (fequal(length, 0.0f)) {
                     return -planes[0].normal;
                 }
 
-                normal /= length;
+                normal = glm::dvec3(normal) * (1.0 / length);
 
-                if (planes[0].normal.x * normal.x + normal.y * planes[0].normal.y + planes[0].normal.z * normal.z <= 0.0f) {
+                if (double(planes[0].normal.x) * normal.x + double(normal.y) * planes[0].normal.y + double(planes[0].normal.z) * normal.z <= 0.0f) {
                     return normal;
                 }
 
@@ -573,22 +580,22 @@ struct SurfaceTraversal {
         if (IsFacetWall(facet)) {
             normal = GetSteepSurfacePushNormal(facet, planes, count);
         } else {
-            C3Vector point(direction.x * distance + state.position.x, direction.y * distance + state.position.y, distance * direction.z + state.position.z);
+            C3Vector point(double(direction.x) * distance + state.position.x, double(direction.y) * distance + state.position.y, double(distance) * direction.z + state.position.z);
             normal = PushOffObstacleEdge(point, direction, facet);
         }
 
-        C2Vector push(normal);
-        float lengthSq = push.y * push.y + push.x * push.x;
+        glm::dvec2 push(normal);
+        double lengthSq = push.y * push.y + push.x * push.x;
 
         if (lengthSq > 0.00000023841858f) {
-            float scale = 1.0f / sqrt(lengthSq);
+            double scale = 1.0f / sqrt(lengthSq);
             push.x = push.x * scale;
             push.y = push.y * scale;
         }
 
-        float d = (-normal.x * direction.x + -normal.y * direction.y + -normal.z * direction.z) * (maxDistance - distance);
-        float denom = normal.x * push.x + normal.y * push.y + normal.z * 0.0f;
-        float scale = fabs(denom) < 0.00000023841858f ? d : d / denom;
+        double d = (-double(normal.x) * direction.x + (-double(normal.y) * direction.y + -double(normal.z) * direction.z)) * (double(maxDistance) - distance);
+        double denom = normal.x * push.x + normal.y * push.y + normal.z * 0.0f;
+        double scale = fabs(denom) < 0.00000023841858f ? d : d / denom;
         return C2Vector(push.x * (scale + 0.001f), push.y * (scale + 0.001f));
     }
 
@@ -641,7 +648,7 @@ struct SurfaceTraversal {
             planes[i].offset = 0.0f;
         }
 
-        C3Vector direction(move->x * (1.0f / length), move->y * (1.0f / length), 1.0f / length * move->z);
+        C3Vector direction(move->x * (1.0 / length), move->y * (1.0 / length), 1.0 / length * move->z);
         uint32_t facetIndex;
         uint32_t planeCount;
 
@@ -669,7 +676,7 @@ struct SurfaceTraversal {
         }
 
         if (direction.z > 0.0f) {
-            float peak = TimeToJumpPeak() - timeFallen;
+            double peak = TimeToJumpPeak() - timeFallen;
 
             if (peak >= 0.0f && peak * state.currentSpeed >= *distance && CheckFallingConditions(planes, planeCount)) {
                 *landed = 1;
@@ -682,25 +689,118 @@ struct SurfaceTraversal {
         return 1;
     }
 
+    int32_t StartMove(int32_t forward, int32_t force) {
+        state.flags &= ~(MOVEMENTFLAG_PENDING_STOP | MOVEMENTFLAG_PENDING_FORWARD | MOVEMENTFLAG_PENDING_BACKWARD);
+        uint32_t flags = state.flags;
+        int32_t falling = 0;
+    
+        if (!force && (flags & MOVEMENTFLAG_FALLING)) {
+            if (flags & (MOVEMENTFLAG_FORWARD | MOVEMENTFLAG_BACKWARD | MOVEMENTFLAG_STRAFE_LEFT | MOVEMENTFLAG_STRAFE_RIGHT)) {
+                if (forward) {
+                    if (!(flags & MOVEMENTFLAG_FORWARD)) {
+                        state.flags = flags | MOVEMENTFLAG_PENDING_FORWARD;
+                        return 0;
+                    }
+                } else if (!(flags & MOVEMENTFLAG_BACKWARD)) {
+                    state.flags = flags | MOVEMENTFLAG_PENDING_BACKWARD;
+                }
+    
+                return 0;
+            }
+    
+            falling = 1;
+        }
+    
+        if (forward) {
+            state.flags = (flags & ~(MOVEMENTFLAG_FORWARD | MOVEMENTFLAG_BACKWARD)) | MOVEMENTFLAG_FORWARD;
+        } else {
+            state.flags = (flags & ~(MOVEMENTFLAG_FORWARD | MOVEMENTFLAG_BACKWARD)) | MOVEMENTFLAG_BACKWARD;
+        }
+    
+        UpdateAnchors(falling);
+        CalcCurrentSpeed(falling);
+        return 1;
+    }
+
+    int32_t StartStrafe(int32_t left) {
+        state.flags &= ~(MOVEMENTFLAG_PENDING_STRAFE_STOP | MOVEMENTFLAG_PENDING_STRAFE_LEFT | MOVEMENTFLAG_PENDING_STRAFE_RIGHT);
+        uint32_t flags = state.flags;
+    
+        if (state.flags2 & MOVEMENTFLAG2_NO_STRAFE) {
+            return 0;
+        }
+    
+        int32_t force = 0;
+    
+        if (flags & MOVEMENTFLAG_FALLING) {
+            if (flags & (MOVEMENTFLAG_FORWARD | MOVEMENTFLAG_BACKWARD | MOVEMENTFLAG_STRAFE_LEFT | MOVEMENTFLAG_STRAFE_RIGHT)) {
+                if (left) {
+                    if (!(flags & MOVEMENTFLAG_STRAFE_LEFT)) {
+                        state.flags = flags | MOVEMENTFLAG_PENDING_STRAFE_LEFT;
+                        return 0;
+                    }
+                } else if (!(flags & MOVEMENTFLAG_STRAFE_RIGHT)) {
+                    state.flags = flags | MOVEMENTFLAG_PENDING_STRAFE_RIGHT;
+                }
+    
+                return 0;
+            }
+    
+            force = 1;
+        }
+    
+        state.flags = (flags & ~(MOVEMENTFLAG_STRAFE_LEFT | MOVEMENTFLAG_STRAFE_RIGHT)) | (left ? MOVEMENTFLAG_STRAFE_LEFT : MOVEMENTFLAG_STRAFE_RIGHT);
+        UpdateAnchors(force);
+        CalcCurrentSpeed(force);
+        return 1;
+    }
+
+    // 0x006eb3b0, state transitions for a mover with no active spline.
+    // Active input/queue notification belongs to the caller's event adapter.
+    bool HandlePendingActions() {
+        const uint32_t oldFlags = state.flags;
+        if (oldFlags & MOVEMENTFLAG_PENDING_STOP) {
+            state.flags &= ~(MOVEMENTFLAG_FORWARD | MOVEMENTFLAG_BACKWARD | MOVEMENTFLAG_PENDING_STOP);
+            CalcCurrentSpeed(0);
+            UpdateAnchors(0);
+        }
+        if (state.flags & MOVEMENTFLAG_PENDING_STRAFE_STOP) {
+            state.flags &= ~(MOVEMENTFLAG_STRAFE_LEFT | MOVEMENTFLAG_STRAFE_RIGHT | MOVEMENTFLAG_PENDING_STRAFE_STOP);
+            CalcCurrentSpeed(0);
+            UpdateAnchors(0);
+        }
+        if (state.flags & (MOVEMENTFLAG_PENDING_FORWARD | MOVEMENTFLAG_PENDING_BACKWARD))
+            StartMove(state.flags & MOVEMENTFLAG_PENDING_FORWARD, 0);
+        if (state.flags & (MOVEMENTFLAG_PENDING_STRAFE_LEFT | MOVEMENTFLAG_PENDING_STRAFE_RIGHT))
+            StartStrafe(state.flags & MOVEMENTFLAG_PENDING_STRAFE_LEFT);
+        state.flags &= ~(MOVEMENTFLAG_PENDING_STOP | MOVEMENTFLAG_PENDING_STRAFE_STOP |
+            MOVEMENTFLAG_PENDING_FORWARD | MOVEMENTFLAG_PENDING_BACKWARD |
+            MOVEMENTFLAG_PENDING_STRAFE_LEFT | MOVEMENTFLAG_PENDING_STRAFE_RIGHT | MOVEMENTFLAG_PENDING_ROOT);
+        return (oldFlags ^ state.flags) & 15;
+    }
+
     // 0x007612b0
-    uint32_t FallDown(uint32_t elapsed, C3Vector move) {
+    uint32_t FallDown(uint32_t elapsed, C3Vector move, bool notify = false, uint32_t time = 0) {
         float timeFallen = 0.0f;
-        float totalTime = elapsed * 0.001f;
-        float startTime = 0.001f * static_cast<float>(state.fallTimeMs);
+        float totalTime = float(double(elapsed) * 0.001f);
+        float startTime = float(0.001f * double(state.fallTimeMs));
         int32_t stuck = 0;
         uint64_t transport = 0;
         C2Vector push(0.0f, 0.0f);
         int32_t slid = 0;
         int32_t flattened = 0;
         C2Vector move2D(move);
+        const auto savedDir2D = state.direction2D;
+        const auto savedDir = state.direction;
+        const auto savedSpeed = state.currentSpeed;
         int32_t landed = 0;
-        float length = sqrt(move.y * move.y + move.x * move.x + move.z * move.z);
-        float length2D = sqrt(move2D.y * move2D.y + move2D.x * move2D.x);
+        double length = float(sqrt(double(move.y) * move.y + double(move.x) * move.x + double(move.z) * move.z));
+        float length2D = sqrt(double(move2D.y) * move2D.y + double(move2D.x) * move2D.x);
         float vertical = fabs(move.z);
         C2Vector start(state.position);
         int32_t iterations = 0;
         float startLength2D = length2D;
-        float endTime;
+        double endTime;
         int32_t onSlope;
 
         while (true) {
@@ -711,22 +811,21 @@ struct SurfaceTraversal {
 
             {
                 float distance = length;
-                float scale = 1.0f / length;
+                double scale = 1.0 / length;
                 C3Vector direction(move.x * scale, move.y * scale, move.z * scale);
                 float fallTime = startTime + timeFallen;
                 int32_t result = TryFallingDown(fallTime, &move, &distance, &push, &transport, &onSlope, &landed);
 
-
-
-                float dt = result ? GetTimeJustFallen(totalTime - timeFallen, fallTime, &move, &distance, landed, length2D) : totalTime - timeFallen;
+                double dt = result ? GetTimeJustFallen(totalTime - timeFallen, fallTime, &move, &distance, landed, length2D) : double(totalTime) - timeFallen;
                 state.position.x = state.position.x + move.x;
                 state.position.y = state.position.y + move.y;
                 state.position.z = state.position.z + move.z;
-                timeFallen = timeFallen + dt;
+                const double accumulated = timeFallen + dt;
+                timeFallen = float(accumulated);
 
                 if (landed) {
                     state.flags |= MOVEMENTFLAG_FALLING_FAR;
-                    endTime = timeFallen;
+                    endTime = accumulated;
                     state.fallTimeMs = 0;
                     state.fallVelocity = 0.0f;
                     state.fallStartZ = state.position.z;
@@ -737,13 +836,13 @@ struct SurfaceTraversal {
                     goto stop;
                 }
 
-                if (timeFallen + 0.00050000002f >= totalTime) {
+                if (accumulated + 0.00050000002f >= totalTime) {
                     endTime = totalTime;
                     goto finish;
                 }
 
                 slid = 1;
-                float left = length - distance;
+                double left = double(float(length)) - distance;
 
                 if (dt > 0.00050000002f) {
                     stuck = 1;
@@ -782,15 +881,16 @@ struct SurfaceTraversal {
                 }
 
                 move2D = C2Vector(move);
-                length2D = sqrt(move2D.y * move2D.y + move2D.x * move2D.x);
+                const double flatLength = sqrt(double(move2D.y) * move2D.y + double(move2D.x) * move2D.x);
+                length2D = float(flatLength);
 
-                if (fabs(length2D) < 0.00000095367432f) {
+                if (fabs(flatLength) < 0.00000095367432f) {
                     state.currentSpeed = 0.0f;
                 } else {
-                    float inverse = 1.0f / length2D;
-                    move2D.x = move2D.x * inverse;
-                    move2D.y = move2D.y * inverse;
-                    float speed = (move2D.x * state.direction2D.x + move2D.y * state.direction2D.y) * state.currentSpeed;
+                    double inverse = 1.0 / flatLength;
+                    const double x = move2D.x * inverse, y = move2D.y * inverse;
+                    move2D = C2Vector(x,y);
+                    double speed = (x * state.direction2D.x + y * state.direction2D.y) * state.currentSpeed;
                     state.currentSpeed = speed;
 
                     if (!(speed > 0.0f) && !(0.0f == speed)) {
@@ -800,7 +900,7 @@ struct SurfaceTraversal {
 
                 iterations++;
                 state.direction2D = move2D;
-                length = sqrt(move.y * move.y + move.x * move.x + move.z * move.z);
+                length = sqrt(double(move.y) * move.y + double(move.x) * move.x + double(move.z) * move.z);
                 state.direction = C3Vector(state.direction2D.x, state.direction2D.y, 0.0f);
             }
         }
@@ -810,14 +910,34 @@ struct SurfaceTraversal {
         endTime = timeFallen;
 
     finish:
-        uint32_t used = static_cast<uint32_t>(endTime * 1000.0f);
+        uint32_t used = static_cast<uint32_t>(std::nearbyint(float(endTime * 1000.0f)));
 
         if (!landed) {
             state.fallTimeMs += used;
         }
 
-
-
+        if (notify) {
+            if (landed) fallResetTime = used + time;
+            const uint32_t flags = state.flags;
+            if (flags & MOVEMENTFLAG_FALLING) {
+                if (!(flags & (MOVEMENTFLAG_FALLING_FAR | MOVEMENTFLAG_SAFE_FALL))) {
+                    if (state.fallVelocity == 0) {
+                        if (state.fallTimeMs >= 500) state.flags = flags | MOVEMENTFLAG_FALLING_FAR;
+                    } else if (!(double(state.fallStartZ) - 0.11111111f < state.position.z)) {
+                        state.flags = flags | MOVEMENTFLAG_FALLING_FAR;
+                    }
+                }
+                if ((state.flags & MOVEMENTFLAG_FALLING) && state.fallVelocity != 0 && (state.flags & 15)) {
+                    state.currentSpeed = savedSpeed;
+                    state.direction2D = savedDir2D;
+                    state.direction = savedDir;
+                }
+                if (transport) SetTransport({transport});
+            } else {
+                if (transport) SetTransport({transport});
+                if (HandlePendingActions()) return used;
+            }
+        }
         if (slid) {
             UpdateAnchors(0);
         }
@@ -825,7 +945,27 @@ struct SurfaceTraversal {
         return used;
     }
 
-
+    // 0x007618b0, with resident geometry and no attached transport frame.
+    uint32_t Fall(uint32_t time, uint32_t elapsed, float distance, const C2Vector& direction) {
+        if (!elapsed) return 0;
+        const double fallen = RelDistanceFallen(elapsed + state.fallTimeMs);
+        const glm::dvec3 move(double(direction.x)*distance,double(distance)*direction.y,-fallen);
+        if (std::abs(std::sqrt((move.y*move.y+move.z*move.z)+move.x*move.x)) < 2.3841858e-7f) {
+            state.fallTimeMs += elapsed;
+            return elapsed;
+        }
+        uint32_t result;
+        if (!facets.empty()) {
+            result = FallDown(elapsed, C3Vector(move), true, time);
+        } else {
+            state.position = C3Vector(glm::dvec3(state.position) + move);
+            state.fallTimeMs += elapsed;
+            UpdateFallingFar();
+            result = elapsed;
+        }
+        state.groundNormal = {0,0,1};
+        return result;
+    }
 
     // 0x007619c0. Save/RestoreMoveState restores anchors and direction, not
     // the speculative position or fall origin. This routine inspects that
@@ -1159,7 +1299,7 @@ struct SurfaceTraversal {
                 moveDir.z = scale * moveDir.z;
                 float previous = length2D;
                 const double flatLength = sqrt(double(dir2D.y) * dir2D.y + double(dir2D.x) * dir2D.x);
-                length2D = float(flatLength);
+                    length2D = float(flatLength);
 
                 if (fabs(length2D) >= 0.00000023841858f) {
                     double inverse = 1.0 / flatLength;
@@ -1221,15 +1361,17 @@ struct SurfaceTraversal {
     }
 
     // 0x00986f00
-    float CalcFallDistance(float time, int32_t safeFall, float velocity) const {
-        float terminal = safeFall ? s_safeFallTerminalVelocity : s_terminalVelocity;
+    double CalcFallDistance(float inputTime, int32_t safeFall, float inputVelocity) const {
+        const double time = inputTime;
+        double velocity = inputVelocity;
+        double terminal = safeFall ? s_safeFallTerminalVelocity : s_terminalVelocity;
 
         if (velocity > terminal) {
             velocity = terminal;
         }
 
         if (19.291105f * time + velocity > terminal) {
-            float accelTime = (terminal - velocity) * 0.051837362f;
+            double accelTime = (terminal - velocity) * 0.051837362f;
             return terminal * (time - accelTime) + (velocity + 9.6455526f * accelTime) * accelTime;
         }
 
@@ -1237,10 +1379,11 @@ struct SurfaceTraversal {
     }
 
     // 0x00988220
-    float TimeToFallDistance(float distance, int32_t safeFall) const {
-        float terminal = safeFall ? s_safeFallTerminalVelocity : s_terminalVelocity;
-        float accelTime = 0.051837362f * terminal;
-        float accelDistance = accelTime * terminal * 0.5f;
+    double TimeToFallDistance(float inputDistance, int32_t safeFall) const {
+        const double distance = inputDistance;
+        double terminal = safeFall ? s_safeFallTerminalVelocity : s_terminalVelocity;
+        double accelTime = 0.051837362f * terminal;
+        double accelDistance = accelTime * terminal * 0.5f;
 
         if (distance < accelDistance) {
             if (0.0f < distance) {
@@ -1358,9 +1501,9 @@ struct SurfaceTraversal {
     }
 
     // 0x00988280
-    float CalcTimeFallen(float distance, int32_t upward) const {
-        float terminal = (state.flags & MOVEMENTFLAG_SAFE_FALL) ? s_safeFallTerminalVelocity : s_terminalVelocity;
-        float velocity = state.fallVelocity;
+    double CalcTimeFallen(float distance, int32_t upward) const {
+        double terminal = (state.flags & MOVEMENTFLAG_SAFE_FALL) ? s_safeFallTerminalVelocity : s_terminalVelocity;
+        double velocity = state.fallVelocity;
 
         if (velocity > terminal) {
             velocity = terminal;
@@ -1370,17 +1513,17 @@ struct SurfaceTraversal {
             return TimeToFallDistance(distance, state.flags & MOVEMENTFLAG_SAFE_FALL);
         }
 
-        float discriminant = velocity * velocity + 38.582211f * distance;
-        float root = 0.0f;
+        double discriminant = velocity * velocity + double(38.582211f) * distance;
+        double root = 0.0f;
 
         if (discriminant > 0.0f) {
             root = sqrt(discriminant);
         }
 
-        float timeUp = (-velocity - root) * 0.051837362f;
-        float timeDown = (root - velocity) * 0.051837362f;
-        float accelTime = 0.051837362f * (terminal - velocity);
-        float result;
+        double timeUp = (-velocity - root) * 0.051837362f;
+        double timeDown = (root - velocity) * 0.051837362f;
+        double accelTime = 0.051837362f * (terminal - velocity);
+        double result;
 
         if (timeDown <= accelTime) {
             result = timeDown;
@@ -1435,15 +1578,15 @@ struct SurfaceTraversal {
     }
 
     // 0x009870d0
-    float RelDistanceFallen(uint32_t time, float z) const {
+    double RelDistanceFallen(uint32_t time, float z) const {
         uint32_t flags = state.flags;
         float velocity = state.fallVelocity;
 
         if (flags & MOVEMENTFLAG_FALLING) {
-            return CalcFallDistance(time * 0.001f, flags & MOVEMENTFLAG_SAFE_FALL, velocity) + z - state.fallStartZ;
+            return CalcFallDistance(float(double(time) * 0.001f), flags & MOVEMENTFLAG_SAFE_FALL, velocity) + (double(z) - state.fallStartZ);
         }
 
-        return CalcFallDistance(time * 0.001f, flags & MOVEMENTFLAG_SAFE_FALL, velocity);
+        return CalcFallDistance(float(double(time) * 0.001f), flags & MOVEMENTFLAG_SAFE_FALL, velocity);
     }
 
     // 0x00988490
@@ -1466,9 +1609,9 @@ struct SurfaceTraversal {
     }
 
     // 0x00986e80
-    float TimeToJumpPeak() const {
+    double TimeToJumpPeak() const {
         if (state.flags & MOVEMENTFLAG_FALLING) {
-            return state.fallVelocity * -0.051837362f;
+            return double(state.fallVelocity) * -0.051837362f;
         }
 
         return 0.0f;
@@ -1502,7 +1645,7 @@ struct SurfaceTraversal {
     }
 
     // 0x009870d0
-    float RelDistanceFallen(uint32_t time) const {
+    double RelDistanceFallen(uint32_t time) const {
         return RelDistanceFallen(time, state.position.z);
     }
 
@@ -1532,8 +1675,16 @@ SurfaceMovementResult traceMovementSurface(std::span<const MovementFacet> facets
     SurfaceMovementState& state, const SurfaceMovementShape& shape,
     const glm::vec2& direction, float distance, uint32_t elapsedMs) {
     SurfaceTraversal traversal{facets, state, shape.radius, shape.height,
-                               shape.stepHeight, shape.clientControlled, std::nullopt};
+                               shape.stepHeight, shape.clientControlled, std::nullopt, std::nullopt};
     const auto used = traversal.TraceSurface(elapsedMs, distance, direction);
-    return {used, traversal.transportRequest};
+    return {used, traversal.transportRequest, traversal.fallResetTime};
+}
+SurfaceMovementResult traceMovementFall(std::span<const MovementFacet> facets,
+    SurfaceMovementState& state, const SurfaceMovementShape& shape,
+    const glm::vec2& direction, float distance, uint32_t timeMs, uint32_t elapsedMs) {
+    SurfaceTraversal traversal{facets, state, shape.radius, shape.height,
+                               shape.stepHeight, shape.clientControlled, std::nullopt, std::nullopt};
+    const auto used = traversal.Fall(timeMs, elapsedMs, distance, direction);
+    return {used, traversal.transportRequest, traversal.fallResetTime};
 }
 } // namespace wowee::collision

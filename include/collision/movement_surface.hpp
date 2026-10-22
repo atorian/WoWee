@@ -9,6 +9,7 @@ namespace wowee::collision {
 // come from movement state; dimensions come from the mover, not the camera.
 struct SurfaceMovementState {
     glm::vec3 position{0};
+    glm::vec3 groundNormal{0};
     glm::vec3 anchorPosition{0};
     glm::vec3 direction{0};
     glm::vec2 direction2D{0};
@@ -47,6 +48,7 @@ struct SurfaceMovementResult {
     // SetTransport request made by TraceSurface, including zero for detach.
     // No value means the routine made no transport request on this path.
     std::optional<uint64_t> transport;
+    std::optional<uint32_t> fallResetTime;
 };
 
 // Runs one original TraceSurface request on fully supplied collision facets.
@@ -56,5 +58,12 @@ struct SurfaceMovementResult {
     std::span<const MovementFacet> facets, SurfaceMovementState& state,
     const SurfaceMovementShape& shape, const glm::vec2& direction,
     float distance, uint32_t elapsedMs);
+
+// Original Fall phase (0x7618b0), including FallDown notifications. The
+// caller owns transport frames and dispatches the returned fall-reset event.
+[[nodiscard]] SurfaceMovementResult traceMovementFall(
+    std::span<const MovementFacet> facets, SurfaceMovementState& state,
+    const SurfaceMovementShape& shape, const glm::vec2& direction,
+    float distance, uint32_t timeMs, uint32_t elapsedMs);
 
 } // namespace wowee::collision

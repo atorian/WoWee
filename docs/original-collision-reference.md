@@ -208,6 +208,32 @@ These are geometry phases: whole-world instance
 ordering, M2 collection, liquid/impassable facets and streaming remain separate
 acceptance work. The exact geometry queries are not yet the player's source.
 
+## Falling phase
+
+`traceMovementFall` executes the resident-facet Fall phase (`0x7618b0`),
+including FallDown (`0x7612b0`), pending move/strafe actions on landing,
+fall-time consumption, sliding anchors and the fall-reset timestamp generated
+by upward contact. It shares the contact and surface implementation; it is
+not yet the player's frame dispatcher. Attached transport transforms, active
+splines, world queries and outgoing event delivery remain caller responsibilities.
+
+`tests/fixtures/original_fall_12340.json` contains 2993 calls executed against
+the pinned original binary. Coverage includes jumps, terminal and safe falling,
+ceilings, slope and edge contacts at rotated/continent coordinates, deferred
+input and successive frames under several timing schedules. The first port
+failed 323 of the initial 704 calls. Recovering the original x87 spill boundaries
+and its nearest-integer elapsed-time conversion removed those differences;
+the expanded cases also exposed precision loss in steep-edge normals.
+Linux, native MinGW and ASan/UBSan match every recorded binary32 state value
+and event. All ten selected native CTest regressions pass.
+The existing 1069 surface calls still match. Regenerate with:
+
+```sh
+python tools/check_original_fall.py --binary /path/to/wow_original.exe \
+  --probe /path/to/movement_surface_probe \
+  --write-reference tests/fixtures/original_fall_12340.json
+```
+
 ## Remaining acceptance work
 
 The full checklist is in `tasks/collision-original-parity.md`. World facet

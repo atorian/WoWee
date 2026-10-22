@@ -5,7 +5,7 @@ behaviour must match the original client. See
 [the governing principle](principles/original-gameplay-behaviour.md).
 
 Status: three legacy query defects fixed; original contact primitive matches
-1306 supplied-geometry reference cases; the surface phase matches 1069 calls;
+1306 supplied-geometry reference cases; the surface phase matches 1069 calls; the falling phase matches 2993 calls;
 authored WMO BSP, transformed facets and terrain queries have executable-reference
 coverage (508, 1017 and 460 cases respectively);
 full behavioural equivalence is not
@@ -139,3 +139,7 @@ model facet transforms and terrain chunk queries including holes. SSE references
 execute host RSQRTSS because the emulator's default approximation is incorrect.
 World placement ordering, M2 facets, liquids, impassable boundaries and streaming
 still need to be connected and compared before changing player simulation.
+
+Falling progress: original Fall/FallDown matches 2993 calls, including jump/landing
+sequences, ceiling resets and deferred movement actions. This remains a supplied-
+geometry phase; full frame dispatch, transports and packet delivery are pending.

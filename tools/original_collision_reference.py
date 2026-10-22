@@ -40,7 +40,16 @@ class OriginalCollision:
         self.cpu.mem_map(0x1000000, 0x1000)
         self.control_word = control_word
         self.transport_request = None
+        self.fall_reset = None
+        self.cpu.hook_add(UC_HOOK_CODE, self._observe_fall_reset, begin=0x6e9270, end=0x6e9270)
         self.cpu.hook_add(UC_HOOK_CODE, self._observe_transport, begin=0x6ec7b0, end=0x6ec7b0)
+
+    def _observe_fall_reset(self, cpu, address, size, user_data):
+        stack = cpu.reg_read(UC_X86_REG_ESP)
+        self.fall_reset = struct.unpack('<I', cpu.mem_read(stack + 4, 4))[0]
+
+    def fall_move(self, case):
+        return self.surface_move(case, routine=0x7618b0)
 
     def _observe_transport(self, cpu, address, size, user_data):
         # Observe the request at the API boundary; execute the real function.
@@ -75,7 +84,7 @@ class OriginalCollision:
             raise RuntimeError('Original routine exceeded instruction budget')
         return cpu.reg_read(UC_X86_REG_EAX)
 
-    def surface_move(self, case):
+    def surface_move(self, case, routine=0x7620f0):
         """Run TraceSurface with a real player-shaped unit and preloaded world.
 
         No collision, stepping, unit-control, falling or arithmetic function
@@ -85,6 +94,7 @@ class OriginalCollision:
         self.next = 0x2000000
         cpu = self.cpu
         self.transport_request = None
+        self.fall_reset = None
         body = self.alloc(bytes(0x500))
         unit = self.alloc(bytes(0x1000))
         fields = self.alloc(bytes(0x1000))
@@ -109,6 +119,8 @@ class OriginalCollision:
         write(body + 0x84, 'f', case.get('fall_start', 0))
         write(body + 0x8c, 'f', case.get('current_speed', 0))
         write(body + 0xb8, 'f', case.get('fall_velocity', 0))
+        write(body + 0x38, '3f', *case.get('ground_normal', [0, 0, 0]))
+        write(body + 0x90, '7f', *case.get('speeds', [0]*7))
         write(body + 0x44, 'I', case.get('flags', 1))
         write(body + 0x88, 'f', case.get('step_start', case['position'][2]))
         write(body + 0xc8, '3f', case['radius'], case['height'], case.get('step_height', 1))
@@ -122,14 +134,14 @@ class OriginalCollision:
         direction = self.floats(case['direction'][:2])
         distance_bits = struct.unpack('<I', struct.pack('<f', case['distance']))[0]
         stack = 0x30ff000
-        write(stack, '5I', 0x1000000, 1000, case.get('elapsed', 16), distance_bits, direction)
+        write(stack, '5I', 0x1000000, case.get('time', 1000), case.get('elapsed', 16), distance_bits, direction)
         cpu.reg_write(UC_X86_REG_ESP, stack)
         cpu.reg_write(UC_X86_REG_ECX, body)
         cpu.reg_write(UC_X86_REG_FPCW, self.control_word)
         cpu.reg_write(UC_X86_REG_FPSW, 0)
         cpu.reg_write(UC_X86_REG_FPTAG, 0xffff)
         try:
-            cpu.emu_start(0x7620f0, 0x1000000, count=10_000_000)
+            cpu.emu_start(routine, 0x1000000, count=10_000_000)
         except UcError as error:
             raise RuntimeError(f'Original surface failed at EIP={cpu.reg_read(UC_X86_REG_EIP):08x}: {error}') from error
         if cpu.reg_read(UC_X86_REG_EIP) != 0x1000000:
@@ -147,6 +159,9 @@ class OriginalCollision:
             values = struct.unpack('<' + fmt, cpu.mem_read(body + offset, struct.calcsize(fmt)))
             result[name] = values[0] if len(values) == 1 else list(values)
         result['transport'] = self.transport_request
+        if routine == 0x7618b0:
+            result['ground_normal'] = list(struct.unpack('<3f', cpu.mem_read(body + 0x38, 12)))
+            result['fall_reset'] = self.fall_reset
         return result
 
     def distance_to_move(self, case):

@@ -2934,6 +2934,10 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_surface.py
             --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_surface_12340.json
             --probe $<TARGET_FILE:movement_surface_probe>)
+    add_test(NAME original_collision_fall
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_fall.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_fall_12340.json
+            --probe $<TARGET_FILE:movement_surface_probe>)
 endif()
 
 # ── test_race_gender_suffix ──────────────────────────────────

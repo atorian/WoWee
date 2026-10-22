@@ -5,7 +5,8 @@
 #include <string>
 #include <vector>
 
-int main() {
+int main(int argc, char** argv) {
+    const bool falling = argc == 2 && std::string(argv[1]) == "--fall";
     using namespace wowee::collision;
     std::cout << std::setprecision(9) << std::showpoint;
     auto read3 = [](glm::vec3& v) { return bool(std::cin >> v.x >> v.y >> v.z); };
@@ -31,7 +32,12 @@ int main() {
             if (!read3(facet.plane.normal) || !(std::cin >> facet.plane.offset >> facet.owner)) return 2;
             for (auto& v : facet.vertices) if (!read3(v)) return 2;
         }
-        const auto result = traceMovementSurface(facets, state, shape, direction, distance, elapsed);
+        uint32_t time=1000;
+        if (falling && (!(std::cin>>time) || !read3(state.groundNormal) ||
+            !(std::cin>>state.walkSpeed>>state.runSpeed>>state.runBackSpeed>>state.swimSpeed
+                      >>state.swimBackSpeed>>state.flightSpeed>>state.flightBackSpeed))) return 2;
+        const auto result = falling ? traceMovementFall(facets,state,shape,direction,distance,time,elapsed)
+                                    : traceMovementSurface(facets,state,shape,direction,distance,elapsed);
         std::cout << "{\"name\":\"" << name << '"';
         auto number = [](const char* key, auto value) { std::cout << ",\"" << key << "\":" << value; };
         auto vector = [](const char* key, const glm::vec3& v) {
@@ -54,6 +60,12 @@ int main() {
         std::cout << ",\"transport\":";
         if (result.transport) std::cout << *result.transport;
         else std::cout << "null";
+        if (falling) {
+            vector("ground_normal",state.groundNormal);
+            std::cout << ",\"fall_reset\":";
+            if (result.fallResetTime) std::cout << *result.fallResetTime;
+            else std::cout << "null";
+        }
         std::cout << "}\n";
     }
     return std::cin.eof() ? 0 : 2;
