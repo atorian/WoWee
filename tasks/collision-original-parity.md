@@ -5,12 +5,14 @@ behaviour must match the original client. See
 [the governing principle](principles/original-gameplay-behaviour.md).
 
 Status: contact/surface phases and the combined supplied-state world collector
-have original-executable comparisons. The complete unattached request-to-world
-path matches 1072 cases; the native collision/ADT selection passes 37/37 tests.
-Full behavioural equivalence is not established and the player solver is not
-replaced. Production world lifecycle, input/frame dispatch, event delivery,
-transport/spline movement and outgoing packets remain open. See
-`docs/original-collision-reference.md` for the implemented boundary and checks.
+have original-executable comparisons. The unattached request-to-world path,
+frame projection/application, height-command queue and restricted frame
+scheduler are verified offline. The native collision/ADT selection passes
+41/41 tests. Full behavioural equivalence is not established and the player
+solver is not replaced. Production world lifecycle, remaining input commands,
+unit event delivery, interpolation, transport/spline movement and outgoing
+packet bytes remain open. See `docs/original-collision-reference.md` for the
+implemented boundaries and checks.
 This plan supersedes the audit's generic solver
 redesign as the acceptance target. A common collision API remains useful, but
 its behaviour must be derived from the original implementation.
@@ -311,3 +313,21 @@ checklist remains open, and ordinary gameplay still uses the previous path.
 Final frame validation: all 1444 cases, including the six thirty-frame sequences,
 pass native Windows and ASan/UBSan. All 39 native collision/ADT tests pass and
 sweep_guard remains within every ceiling (unavailable optional checks skip).
+
+
+### 2026-10-23 — Height queue and execution schedule
+
+Verified height command ordering and application-before-notification through
+36,864 original UpdatePlayerMovement calls in 768 scenarios. Verified the
+ExecuteMovement schedule joined to the frame solver and supplied-state world
+collector in 1444 cases, including six thirty-frame sequences. This includes
+250ms frame limits, rollover, timed height changes, heartbeat deadlines,
+unavailable geometry and passenger deferral. Linux ASan/UBSan and native
+Windows pass; the full native collision/ADT selection is now 41/41.
+
+Scope remains explicit: heartbeat preparation is a successful supplied service,
+not verified wire bytes. Unit events, height notification delivery and mover
+retirement are observed boundaries; their remaining side effects are not
+silently treated as implemented. No change is enabled in player control.
+Next work is the remaining original input/state commands, their synchronous
+unit/protocol effects and integration with production world ownership.

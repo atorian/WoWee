@@ -699,6 +699,8 @@ set(WOWEE_SOURCES
     src/collision/movement_dimensions.cpp
     src/collision/movement_plot.cpp
     src/collision/movement_frame.cpp
+    src/collision/movement_commands.cpp
+    src/collision/movement_execution.cpp
     src/collision/wmo_bsp_query.cpp
 
     # Core

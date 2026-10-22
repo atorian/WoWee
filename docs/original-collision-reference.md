@@ -467,3 +467,46 @@ loops indefinitely in the original ApplyMovement and is not a frame fixture.
 
 The final 1444-case frame matrix also passes ASan/UBSan. All 39 native collision/ADT
 tests and all available sweep ceilings pass for this increment.
+
+
+## Queued height changes and frame scheduling (2026-10-23)
+
+`MovementCommandQueue` reproduces the height-command portion of
+OnSetCollisionHeight/Local (0x6ee7b0/0x6ee760), Enqueue (0x6ec090) and
+UpdatePlayerMovement (0x6ef860). Insertion compares signed differences of
+wrapping 32-bit clocks and preserves arrival order for equal times. A due
+command resets extrapolation delay, changes the collision height, then calls
+the unit notification boundary. The notification carries processing time,
+not the command's original timestamp. A deferred passenger keeps the command
+queued; a future command alone does not report deferral. SetInterpolation
+(0x6ea6a0) clears interpolation bits for this local command subset.
+
+`original_commands_12340.json` contains 768 interleaved enqueue/update scenarios,
+36,864 update calls. The independent oracle executes the original allocation,
+queue insertion, recycling, height setter and dispatch. It observes arguments
+and mover state at ProcessLocalMoveEvent (0x7413f0), without asserting that
+an actual ACK was sent. Clock rollover, half-range boundaries, equal times,
+remote/local notifications, root/transport flags and passenger deferral are
+included. Linux and native Windows comparisons and ASan/UBSan pass.
+
+`executeUninterpolatedMovement` adds the ExecuteMovement (0x6f09f0) schedule:
+250ms frame cap, SkipTime, slicing at queued commands and heartbeat deadlines,
+application of the verified frame solver, due-event processing and deferred
+remainder accounting. All 1444 scenarios match bitwise float32 outputs, including
+six thirty-frame sequences with height changes, falling/swimming/flight,
+turning, long frames and clock rollover. They observe 235 heartbeat requests,
+2099 height notifications and 86 retirement requests. Native Windows and
+ASan/UBSan pass; the full collision/ADT selection passes 41/41 tests.
+
+The execution oracle runs original ApplyMovement and real world collectors.
+Original SendMovementUpdate (0x71f0c0) and UpdateHeartbeatTimerA (0x6e9b70) also
+execute, with supplied virtual facing/pitch getters and successful external
+packet preparation. Network transmission is observed; packet encoding is not
+verified by this fixture. Unit state-event delivery, ProcessLocalMoveEvent,
+OnMoveUpdate and the request to RemoveFromMoversList remain explicit external
+boundaries. In particular, acknowledging a height command may have additional
+unit/network side effects that are not supplied by the observation fixture.
+
+These APIs remain offline. The full command set, unit notification side effects,
+packet serialization, interpolation, attached transports/splines and production
+world ownership still have to be completed before ordinary gameplay can switch.

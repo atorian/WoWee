@@ -4,6 +4,7 @@
 #include "collision/movement_dimensions.hpp"
 #include "collision/movement_request.hpp"
 #include "collision/movement_frame.hpp"
+#include "collision/movement_execution.hpp"
 #include "world_facet_fixture.hpp"
 #include <iomanip>
 #include <iostream>
@@ -25,8 +26,44 @@ struct SuppliedWorld : wowee::collision::MovementFacetSource {
     }
 };
 
+struct ExecutionObservations final:wowee::collision::MovementExecutionSink {
+    wowee::collision::SurfaceMovementState& state;
+    wowee::collision::SurfaceMovementShape& shape;
+    struct Height {uint32_t time,counter;float value,applied;bool ack;uint32_t delay,flags2;};
+    struct Heartbeat {uint32_t time;float height;glm::vec3 position;uint32_t flags;};
+    std::vector<Height> heights;
+    std::vector<Heartbeat> beats;
+    std::vector<uint32_t> finished;
+    ExecutionObservations(wowee::collision::SurfaceMovementState& s,wowee::collision::SurfaceMovementShape& h):state(s),shape(h){}
+    void collisionHeightChanged(uint32_t time,float height,uint32_t counter,bool ack) override {
+        heights.push_back({time,counter,height,shape.height,ack,state.moveStartDelayMs,state.flags2});
+    }
+    bool heartbeat(uint32_t time) override {
+        beats.push_back({time,shape.height,state.position,state.flags});return true;
+    }
+    void frameFinished(uint32_t time) override {finished.push_back(time);}
+    void print() const {
+        std::cout<<",\"notifications\":[";
+        for(size_t i=0;i<heights.size();++i) {
+            if(i)std::cout<<',';
+            const auto& e=heights[i];
+            std::cout<<'['<<e.time<<",1303,"<<e.ack<<','<<e.value<<','<<e.counter<<",0,255,"<<e.applied<<','<<e.delay<<','<<e.flags2<<']';
+        }
+        std::cout<<"],\"heartbeats\":[";
+        for(size_t i=0;i<beats.size();++i) {
+            if(i)std::cout<<',';
+            const auto& e=beats[i];
+            std::cout<<'['<<e.time<<','<<e.height<<','<<e.position.x<<','<<e.position.y<<','<<e.position.z<<','<<e.flags<<']';
+        }
+        std::cout<<"],\"finished\":[";
+        for(size_t i=0;i<finished.size();++i){if(i)std::cout<<',';std::cout<<finished[i];}
+        std::cout<<']';
+    }
+};
+
 int main(int argc, char** argv) {
-    const bool apply = argc == 2 && std::string(argv[1]) == "--world-apply";
+    const bool execute = argc == 2 && std::string(argv[1]) == "--world-execute";
+    const bool apply = execute || argc == 2 && std::string(argv[1]) == "--world-apply";
     const bool fullWorld = apply || argc == 2 && std::string(argv[1]) == "--world-request";
     const bool frame = fullWorld || (argc == 2 && std::string(argv[1]) == "--request");
     const bool dimensions = argc == 2 && std::string(argv[1]) == "--dimensions";
@@ -114,6 +151,8 @@ int main(int argc, char** argv) {
         }
         if ((hovering || frame) && !(std::cin >> state.hoverHeight)) return 2;
         MovementRequestResult frameResult;
+        ExecutionObservations observations(state,shape);
+        MovementClock clock;bool retire=false;
         SuppliedWorld world;
         std::unique_ptr<world_fixture::Scene> scene;
         if (frame) {
@@ -128,7 +167,18 @@ int main(int argc, char** argv) {
             if(apply) {
                 bool active;
                 if(!(std::cin>>active>>state.moveStartDelayMs>>state.turnRate>>state.pitchRate>>state.pitchCos>>state.pitchSin))return 2;
-                frameResult=applyUninterpolatedMovement(world,cache,state,shape,time,elapsed,active,local,ghost);
+                if(execute) {
+                    uint32_t lastTime,count;bool defer;
+                    if(!(std::cin>>lastTime>>clock.heartbeatTimeMs>>clock.idleTimeMs>>defer>>count))return 2;
+                    MovementCommandQueue commands;
+                    for(uint32_t i=0;i<count;++i) {
+                        uint32_t eventTime,counter;float height;bool ack;
+                        if(!(std::cin>>eventTime>>height>>counter>>ack))return 2;
+                        commands.enqueueCollisionHeight(eventTime,height,counter,ack);
+                    }
+                    auto execution=executeUninterpolatedMovement(world,cache,state,shape,commands,clock,observations,time,lastTime,active,local,ghost,defer);
+                    frameResult=std::move(execution.movement);retire=execution.retireRequested;
+                } else frameResult=applyUninterpolatedMovement(world,cache,state,shape,time,elapsed,active,local,ghost);
             } else frameResult=traceUnattachedMovementRequest(world,cache,state,shape,swimDirection,time,elapsed,local,ghost);
         }
         if (ground) state.groundNormal = queryMovementGroundNormal(facets, MovementBody(state.position, shape.radius, shape.height));
@@ -148,6 +198,11 @@ int main(int argc, char** argv) {
         vector("move_direction", state.direction);
         std::cout << ",\"move_direction_2d\":[" << state.direction2D.x << ',' << state.direction2D.y << ']';
         if(apply) {number("pitch_cos",state.pitchCos);number("pitch_sin",state.pitchSin);number("facing",state.facing);number("pitch",state.pitch);number("move_start_delay",state.moveStartDelayMs);}
+        if(execute) {
+            observations.print();number("height",shape.height);number("flags2",state.flags2);
+            number("heartbeat_time",clock.heartbeatTimeMs);number("idle_time",clock.idleTimeMs);
+            number("retire",retire?"true":"false");
+        }
         number("flags", state.flags);
         number("step_start", state.stepStartZ);
         number("elapsed", result.elapsedMs);

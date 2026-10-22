@@ -174,6 +174,8 @@ class OriginalCollision:
             write(stack,'3I3f',0x1000000,case.get('time',1000),case.get('elapsed',16),*case['swim_direction'])
         if routine == 0x6eac40:
             write(stack,'3I',0x1000000,case.get('time',1000),case.get('elapsed',16))
+        if routine == 0x6f09f0:
+            write(stack,'3I',0x1000000,case['time'],case['last_time'])
         if routine == 0x75f0a0:
             write(stack,'I3f',0x1000000,*case['swim_direction'])
         if routine == 0x75ff90:
@@ -202,10 +204,10 @@ class OriginalCollision:
             values = struct.unpack('<' + fmt, cpu.mem_read(body + offset, struct.calcsize(fmt)))
             result[name] = values[0] if len(values) == 1 else list(values)
         result['transport'] = self.transport_request
-        if routine in (0x7618b0, 0x760b40, 0x762980, 0x75ee60, 0x762e00, 0x6eac40):
+        if routine in (0x7618b0, 0x760b40, 0x762980, 0x75ee60, 0x762e00, 0x6eac40, 0x6f09f0):
             result['ground_normal'] = list(struct.unpack('<3f', cpu.mem_read(body + 0x38, 12)))
             result['fall_reset'] = self.fall_reset
-        if routine==0x6eac40:
+        if routine in (0x6eac40,0x6f09f0):
             result['pitch_cos'],result['pitch_sin']=struct.unpack('<2f',cpu.mem_read(body+0x78,8))
             result['facing'],result['pitch']=struct.unpack('<2f',cpu.mem_read(body+0x20,8))
             result['move_start_delay']=struct.unpack('<I',cpu.mem_read(body+0x134,4))[0]

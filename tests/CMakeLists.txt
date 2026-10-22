@@ -3717,3 +3717,21 @@ if(Python3_Interpreter_FOUND)
             --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_plot_12340.json
             --probe $<TARGET_FILE:movement_plot_probe>)
 endif()
+
+add_executable(movement_commands_probe movement_commands_probe.cpp)
+target_link_libraries(movement_commands_probe PRIVATE wowee_collision)
+wowee_test_link_glm(movement_commands_probe)
+register_test_target(movement_commands_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_commands
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_commands.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_commands_12340.json
+            --probe $<TARGET_FILE:movement_commands_probe>)
+endif()
+
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_execution
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_execution.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_execution_12340.json
+            --probe $<TARGET_FILE:movement_surface_probe>)
+endif()
