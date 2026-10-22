@@ -55,6 +55,8 @@ public:
         /// bar counts whole stages, so it sat still for minutes and read as
         /// a hang. Same shape as writePack's.
         std::function<void(std::size_t done, std::size_t total)> onProgress;
+        // The window must show the same failure details as the command line.
+        std::function<void(const std::string&)> onError;
     };
 
     struct Stats {

@@ -33,6 +33,31 @@ namespace tools {
 namespace fs = std::filesystem;
 using wowee::pipeline::DBCFile;
 
+static bool extractionError(const Extractor::Options& opts, const std::string& message) {
+    std::cerr << "ERROR: " << message << "\n";
+    if (opts.onError) opts.onError(message);
+    return false;
+}
+
+static bool cacheClientFile(const Extractor::Options& opts,
+                            const fs::path& source, const fs::path& destination) {
+    std::error_code ec;
+    const bool exists = fs::exists(destination, ec);
+    if (!ec && exists)
+        fs::permissions(destination, fs::perms::owner_write, fs::perm_options::add, ec);
+    if (!ec)
+        fs::copy_file(source, destination, fs::copy_options::overwrite_existing, ec);
+    // copy_file also copies the source's read-only attribute on Windows.
+    // This is our cache; the original installation keeps its permissions.
+    if (!ec)
+        fs::permissions(destination, fs::perms::owner_write, fs::perm_options::add, ec);
+    if (ec)
+        return extractionError(opts, "Cannot cache " + source.string() + " at " +
+                               destination.string() + ": " + ec.message() +
+                               "; client integrity files are incomplete");
+    return true;
+}
+
 static std::string toLowerStr(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -736,9 +761,11 @@ bool enumerateFilesImpl(const Extractor::Options& opts,
     // Enumerate from highest priority first so first-seen files win
     for (auto it = archives.rbegin(); it != archives.rend(); ++it) {
         HANDLE hMpq = nullptr;
-        if (!SFileOpenArchive(it->c_str(), 0, 0, &hMpq)) {
-            std::cerr << "  Failed to open: " << *it << "\n";
-            continue;
+        if (!SFileOpenArchive(it->c_str(), 0, MPQ_OPEN_READ_ONLY, &hMpq)) {
+            const auto error = GetLastError();
+            return extractionError(opts, "Cannot read archive " + *it +
+                " (error " + std::to_string(error) +
+                "); extraction stopped before producing an incomplete asset set");
         }
 
         // Inject external listfile into archive's in-memory name table.
@@ -864,13 +891,17 @@ bool Extractor::run(const Options& opts) {
     std::vector<SharedArchive> sharedHandles;
     for (const auto& path : archives) {
         HANDLE h = nullptr;
-        if (SFileOpenArchive(path.c_str(), 0, 0, &h)) {
+        if (SFileOpenArchive(path.c_str(), 0, MPQ_OPEN_READ_ONLY, &h)) {
             if (!opts.listFile.empty()) {
                 SFileAddListFile(h, opts.listFile.c_str());
             }
             sharedHandles.push_back({h, path});
         } else {
-            std::cerr << "  Failed to open archive: " << path << "\n";
+            const auto error = GetLastError();
+            for (const auto& opened : sharedHandles) SFileCloseArchive(opened.handle);
+            return extractionError(opts, "Cannot read archive " + path +
+                " (error " + std::to_string(error) +
+                "); extraction stopped before producing an incomplete asset set");
         }
     }
     if (sharedHandles.empty()) {
@@ -1217,7 +1248,7 @@ bool Extractor::run(const Options& opts) {
                     auto dstDir = fs::path(effectiveOutputDir) / "misc";
                     fs::create_directories(dstDir);
                     auto dst = dstDir / name;
-                    fs::copy_file(src, dst, fs::copy_options::overwrite_existing);
+                    if (!cacheClientFile(opts, src, dst)) return false;
                     std::cout << "Cached " << name << " -> " << dst.string() << "\n";
 
                     // Legacy auth integrity hashes include companion DLLs. Keep
@@ -1229,8 +1260,7 @@ bool Extractor::run(const Options& opts) {
                         const auto companionSrc = fs::path(dir) / companion;
                         if (!fs::exists(companionSrc)) continue;
                         const auto companionDst = dstDir / companion;
-                        fs::copy_file(companionSrc, companionDst,
-                                      fs::copy_options::overwrite_existing);
+                        if (!cacheClientFile(opts, companionSrc, companionDst)) return false;
                         std::cout << "Cached " << companion << " -> "
                                   << companionDst.string() << "\n";
                     }
