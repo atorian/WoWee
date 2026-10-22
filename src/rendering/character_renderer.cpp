@@ -645,6 +645,8 @@ void CharacterRenderer::shutdown() {
     }
 
     failedTextureRetryAt_.clear();
+    failedTextureSources_.clear();
+    unpreparedTexturePaths_.clear();
     normalMapsFailed_.clear();
     textureLookupSerial_ = 0;
 
@@ -731,6 +733,8 @@ void CharacterRenderer::clear() {
     // texture next, or dropped if nothing does.
     loggedTextureLoadFails_.clear();
     failedTextureRetryAt_.clear();
+    failedTextureSources_.clear();
+    unpreparedTexturePaths_.clear();
     textureLookupSerial_ = 0;
 
     // Fallback textures, ring offsets and per-frame pools stay alive. Their
@@ -850,39 +854,40 @@ TextureRef CharacterRenderer::loadTexture(const std::string& path) {
     const TextureKey cacheKey{key, TextureForm::Decoded, 0};
     if (TextureRef cached = cache.find(cacheKey)) return cached;
     auto failIt = failedTextureRetryAt_.find(key);
-    if (failIt != failedTextureRetryAt_.end() && lookupSerial < failIt->second) {
+    if (failIt != failedTextureRetryAt_.end() && lookupSerial < failIt->second)
         return whiteTexture_;
-    }
+    if (!assetManager || !assetManager->isInitialized()) return whiteTexture_;
 
-    if (!assetManager || !assetManager->isInitialized()) {
-        return whiteTexture_;
-    }
-
-    // Check pre-decoded BLP cache first (populated by background threads)
-    pipeline::BLPImage blpImage;
+    // Presence is a completed worker result, including a failed decode. A
+    // missing entry is an invalid publication, not evidence that I/O failed.
+    const pipeline::BLPImage* prepared = nullptr;
     if (predecodedBLPCache_) {
-        auto pit = predecodedBLPCache_->find(key);
-        if (pit != predecodedBLPCache_->end()) {
-            blpImage = pit->second;
-        }
+        auto it = predecodedBLPCache_->find(key);
+        if (it != predecodedBLPCache_->end()) prepared = &it->second;
     }
-    if (preparedTexturesOnly_ && predecodedBLPCache_ && !predecodedBLPCache_->count(key)) {
-        LOG_ERROR("Unprepared character texture reached GPU consumer: ", key);
-    }
-    if (!blpImage.isValid() && !preparedTexturesOnly_) {
-        blpImage = assetManager->loadTexture(key);
-    }
-    if (!blpImage.isValid()) {
-        // Cache misses briefly to avoid repeated expensive MPQ/disk probes.
-        failedTextureRetryAt_[key] = lookupSerial + kFailedTextureRetryLookups;
-        if (loggedTextureLoadFails_.insert(key).second) {
-            core::Logger::getInstance().warning("Failed to load texture: ", path,
-                                                " - drawn white until a retry finds it");
-        }
+    if (preparedTexturesOnly_ && !prepared) {
+        if (unpreparedTexturePaths_.insert(key).second)
+            LOG_ERROR("Unprepared character texture reached GPU consumer: ", key,
+                      " - drawn white until a prepared result is published");
         return whiteTexture_;
     }
-
-    if (!preparedTexturesOnly_) applyMagentaKeyIfNeeded(blpImage, key);
+    // A new successful publication supersedes a previous failure immediately;
+    // its availability never depends on unrelated texture lookup counts.
+    if ((!prepared || !prepared->isValid()) && failedTextureSources_.contains(key))
+        return whiteTexture_;
+    pipeline::BLPImage loaded;
+    if (!prepared) loaded = assetManager->loadTexture(key);
+    else if (!preparedTexturesOnly_) loaded = *prepared; // legacy raw decoded input
+    if (!preparedTexturesOnly_ && loaded.isValid()) applyMagentaKeyIfNeeded(loaded, key);
+    const auto& blpImage = prepared && preparedTexturesOnly_ ? *prepared : loaded;
+    if (!blpImage.isValid()) {
+        failedTextureSources_.insert(key);
+        if (loggedTextureLoadFails_.insert(key).second)
+            LOG_WARNING("Failed to load texture: ", path,
+                        " - drawn white until a new prepared result is published");
+        return whiteTexture_;
+    }
+    failedTextureSources_.erase(key);
 
     // Into the shared cache under one budget. Its normal map is asked for by
     // processPendingNormalMaps once something is drawn with it, nearest first.

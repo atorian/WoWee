@@ -2026,9 +2026,8 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
                                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                         if (result.predecodedTextures.count(key)) continue;
                         auto blp = rendering::CharacterRenderer::prepareTexture(am, key);
-                        if (blp.isValid()) {
-                            result.predecodedTextures[key] = std::move(blp);
-                        }
+                        // Failed decode is a completed result, not an unprepared path.
+                        result.predecodedTextures[key] = std::move(blp);
                     }
 
                     if (def.hasComposite) {

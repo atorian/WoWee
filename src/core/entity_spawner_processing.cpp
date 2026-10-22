@@ -588,9 +588,8 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                         if (result.predecodedTextures.find(texKey) != result.predecodedTextures.end()) continue;
                         auto blp = am->loadTexture(texKey);
-                        if (blp.isValid()) {
-                            result.predecodedTextures[texKey] = std::move(blp);
-                        }
+                        // Failed decode is a completed result, not an unprepared path.
+                        result.predecodedTextures[texKey] = std::move(blp);
                     }
 
                     // Pre-decode display skin textures (skin1/skin2/skin3 from CreatureDisplayInfo)
@@ -601,9 +600,8 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                         if (result.predecodedTextures.count(key)) continue;
                         auto blp = rendering::CharacterRenderer::prepareTexture(am, key);
-                        if (blp.isValid()) {
-                            result.predecodedTextures[key] = std::move(blp);
-                        }
+                        // Failed decode is a completed result, not an unprepared path.
+                        result.predecodedTextures[key] = std::move(blp);
                     }
 
                     result.model = std::move(model);

@@ -360,7 +360,9 @@ public:
     void setShadowMap(VkTexture*, const glm::mat4&) {}
     void clearShadowMap() {}
 
-    // Pre-decoded BLP cache: set before calling loadModel() to skip main-thread BLP decode
+    // Completed worker results: a present invalid image records failure; an absent
+    // key has not been prepared. Keep failed entries when publishing the cache.
+    // Set before calling loadModel() to skip main-thread BLP decode.
     static pipeline::BLPImage prepareTexture(pipeline::AssetManager* assets, const std::string& path);
     // CPU-only preparation: safe on workers; no renderer/GPU state is accessed.
     static void prepareCompositeTextures(pipeline::AssetManager* assets,
@@ -698,8 +700,10 @@ private:
     uint32_t materialUboAlignment_ = 256;  // minUniformBufferOffsetAlignment
     static constexpr uint32_t MATERIAL_RING_CAPACITY = 4096;
 
-    /// When a path that would not load, or found no room, is next worth a read.
+    /// GPU allocation retry throttle, separate from completed source failures.
     std::unordered_map<std::string, uint64_t> failedTextureRetryAt_;
+    std::unordered_set<std::string> failedTextureSources_;
+    std::unordered_set<std::string> unpreparedTexturePaths_;
     std::unordered_set<std::string> loggedTextureLoadFails_;  // dedup warning logs
     uint64_t textureLookupSerial_ = 0;
     // Fallbacks, held in the shared cache like any other texture.

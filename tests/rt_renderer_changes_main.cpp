@@ -8,6 +8,7 @@
 #include "rendering/terrain_manager.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/wmo_renderer.hpp"
+#include "rendering/character_renderer.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/render_graph.hpp"
@@ -93,6 +94,24 @@ void exerciseGraph(rendering::VkContext& context) {
     require(result[0]==17 && result[1]==29,"graph overwrote a resource before its old reader finished");
     std::puts("PASS: GPU graph readers see original and replaced versions in dependency order");
 }
+void exercisePreparedCharacterTexture(rendering::CharacterRenderer& characters) {
+    // A completed failure and a later successful publication are different
+    // results for the same path. Unrelated texture lookups must not gate it.
+    const std::string key = "tests\\prepared-character-recovery.blp";
+    std::unordered_map<std::string, pipeline::BLPImage> prepared;
+    prepared.emplace(key, pipeline::BLPImage{});
+    characters.setPredecodedBLPCache(&prepared, true);
+    require(characters.loadTexture(key) == characters.whiteTexture(), "failed texture must use the visible fallback");
+    auto& image = prepared.at(key);
+    image.width = image.height = 2;
+    image.data = {20, 80, 160, 255, 20, 80, 160, 255,
+                  20, 80, 160, 255, 20, 80, 160, 255};
+    const auto ready = characters.loadTexture(key);
+    characters.setPredecodedBLPCache(nullptr);
+    require(ready && ready != characters.whiteTexture(), "a prepared successful texture is blocked by the old failure retry counter");
+    std::puts("PASS: prepared character texture replaces a completed failure immediately");
+}
+
 void exercise(rendering::Renderer& renderer, pipeline::AssetManager& assets) {
     auto& m2 = *renderer.getM2Renderer();
     auto& wmo = *renderer.getWMORenderer();
@@ -221,6 +240,7 @@ int main() {
             require(renderer.initialize(&surface), "renderer initialization failed");
             require(renderer.initializeRenderers(&assets, "Northrend"), "world renderers initialization failed");
             renderer.getTerrainManager()->setStreamingEnabled(false);
+            exercisePreparedCharacterTexture(*renderer.getCharacterRenderer());
             exercise(renderer, assets);
             result = 0;
         } catch (const std::exception& e) { std::fprintf(stderr, "FAIL: %s\n", e.what()); }
