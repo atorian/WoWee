@@ -27,3 +27,19 @@ or landmark exemptions.
 
 Check: verify near detail, the overlap, far terrain and a real landmark; inspect
 memory and draw counts. A new distance limit alone is not a completed LOD fix.
+
+User choice (2026-10-22): replace the experimental per-surface march with a
+shared physical atmospheric transport model. In the enabled mode, zone fog
+ranges calibrate extinction rather than retaining the old piecewise curve.
+Anchor the broad atmosphere in world coordinates, integrate attenuation and
+in-scattering together in a frustum volume, and include weather in that same
+integration. Keep geometric retirement at View Distance separate from optical
+density. This supersedes the independent near/far layering above for the new
+mode; legacy mode remains available. Validate complete Hyjal and Dalaran scenes,
+height stability, density response, boundary matching, and GPU cost.
+
+Visual preference confirmed 2026-10-22: preserve the accepted physical-atmosphere Hyjal view. Dalaran should retain a denser atmosphere than the initial sea-level-based implementation; the user disables height influence there and wants to try Thickness 1.2. Global changes must be compared against both viewpoints. The user selected extending regional profiles: author base height, scale height and density in data, blend them through the existing spatial lighting volumes, and preserve the global Fog Thickness control.
+
+User choice (2026-10-22): M2 distance retirement must not add dithering, opacity or a smooth geometric fade. Draw complete models until their existing cull range; atmosphere alone reduces their contrast with distance. Preserve material alpha and intentional instance fades. Check a distant canopy for periodic holes and compare fog-disabled captures inside the cutoff to ensure geometry does not change before culling.
+
+User choice (2026-10-22): Icecrown should have substantially denser atmosphere, with roughly 40% remaining distant visibility as a visual target, not a global opacity value. Scope this to the zone, preserve Dalaran and Hyjal, and validate a full landscape before/after comparison. The user accepted the 300-yard base / 600-yard scale height / 1.2 density profile after the full-scene comparison; its measured distant detail contrast is 33–34% of the prior view. Preserve this as the Icecrown visual baseline.

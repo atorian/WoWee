@@ -1,0 +1,68 @@
+{
+  "map": "Northrend",
+  "mapId": 571,
+  "zoneId": 2817,
+  "hour": 17.5,
+  "origin": [
+    5824,
+    -600,
+    650
+  ],
+  "streamWorld": false,
+  "models": [
+    {
+      "path": "WORLD\\WMO\\NORTHREND\\ICECROWN\\SCOURGEWALLS\\ICECROWN_CITADEL_EXTERIOR.WMO",
+      "offset": [
+        313.13932294999904,
+        3004.009440137499,
+        170.1029052734375
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        205.0
+      ],
+      "hidden": false
+    },
+    {
+      "path": "WORLD\\WMO\\NORTHREND\\DALARAN\\ND_DALARAN.WMO",
+      "offset": [
+        0.8824870124990412,
+        1266.949869824999,
+        -8.04437255859375
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        -39.0
+      ],
+      "hidden": false
+    }
+  ],
+  "camera": {
+    "offset": [
+      0,
+      0,
+      0
+    ],
+    "yaw": 87,
+    "pitch": 10
+  },
+  "viewDistance": 10000,
+  "fogStrength": 0.8,
+  "size": [
+    1280,
+    720
+  ],
+  "frames": 40,
+  "msaa": 4,
+  "bloom": 0,
+  "volumetricFog": 0,
+  "shadowQuality": 0,
+  "playerPosition": [
+    5824,
+    666,
+    650
+  ],
+  "clouds": false
+}

@@ -71,6 +71,7 @@
 //     "clouds": true,                   // procedural layer; authored sky models keep their gate
 //     "sharpStars": true,                 // point stars in place of baked star layers
 //     "viewDistance": 1900.0,             // world geometry range, in yards
+//     "aerialRayMarching": false,         // ray-marched distance fog, runtime toggle
 //     "fogStrength": 0.4,                 // the settings panel's atmosphere:
 //     "rayTracedLighting": 3,             // RT mode: 0 off, 1 shadows, 2 +AO, 3 +GI
 //     "volumetricFog": 2,                 //   volumetric quality 0-3 and density,
@@ -712,7 +713,9 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     // The atmosphere settings, as the settings panel sets them. Unset, each
     // keeps the renderer's own default, not the panel's.
     if (auto* lighting = renderer.getLightingManager()) {
+        lighting->setAerialRayMarching(scene.value("aerialRayMarching", false));
         if (scene.contains("fogStrength")) lighting->setFogStrength(scene["fogStrength"].get<float>());
+        if (scene.contains("fogHeightInfluence")) lighting->setFogHeightInfluence(scene["fogHeightInfluence"].get<float>());
         if (scene.contains("fogSkyBlend"))
             LOG_WARNING("scene_render: fogSkyBlend is obsolete; the zone's authored fog colour is used");
     }
@@ -839,6 +842,16 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
             }
         }
 
+        if (scene.contains("aerialRayMarchingAfterExtract") &&
+            frame == scene.value("mutateAtFrame", frames - 1)) {
+            renderer.getLightingManager()->setAerialRayMarching(
+                scene["aerialRayMarchingAfterExtract"].get<bool>());
+        }
+        if (scene.contains("fogHeightInfluenceAfterExtract") &&
+            frame == scene.value("mutateAtFrame", frames - 1)) {
+            renderer.getLightingManager()->setFogHeightInfluence(
+                scene["fogHeightInfluenceAfterExtract"].get<float>());
+        }
         if (interfaceFixture) {
             interfaceFixture->build();
             inputs.interface = interfaceFixture->extract();
@@ -988,7 +1001,8 @@ int run(const json& scene, const std::string& outPath, bool timing) {
         } else {
             renderer.setShadowQualityLevel(scene.value("shadowQuality", 2));
             if (renderer.initialize(&surface) &&
-                renderer.getLightingManager()->initialize(&assets)) {
+                renderer.getLightingManager()->initialize(&assets,
+                    scene.value("atmosphereProfiles", std::string("assets/atmosphere_profiles.json")))) {
                 status = render(scene, outPath, assets, renderer, timing);
             } else {
                 std::fprintf(stderr, "scene_render: the renderer did not start\n");

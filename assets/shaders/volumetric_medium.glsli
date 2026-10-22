@@ -1,0 +1,10 @@
+// RGB is the scattering coefficient, A the extinction coefficient, per yard.
+// Mist settles near the ground. Dust occupies a deeper layer. Clear air has
+// no drifting banks and stays available above either layer for light shafts.
+vec4 volumeMediumAt(float above, float banks, vec3 extinction,
+                    float inverseMistHeight, float inverseDustHeight, vec3 dustAlbedo) {
+    float air = extinction.x;
+    float mist = extinction.y * exp(-max(above, 0.0f) * inverseMistHeight) * banks;
+    float dust = extinction.z * exp(-max(above, 0.0f) * inverseDustHeight) * banks;
+    return vec4(vec3(air + mist) + dustAlbedo * dust, air + mist + dust);
+}

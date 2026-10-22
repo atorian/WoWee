@@ -13,6 +13,20 @@ namespace pipeline { class DBCFile; class AssetManager; }
 
 namespace rendering {
 
+// Authored in world yards, independent of the camera and local terrain.
+struct AtmosphereProfile {
+    float baseHeight = 0.0f;
+    float scaleHeight = 300.0f;
+    float densityScale = 1.0f;
+};
+
+inline AtmosphereProfile blendAtmosphere(const AtmosphereProfile& a,
+                                         const AtmosphereProfile& b, float w) {
+    return {glm::mix(a.baseHeight, b.baseHeight, w),
+            glm::mix(a.scaleHeight, b.scaleHeight, w),
+            glm::mix(a.densityScale, b.densityScale, w)};
+}
+
 /**
  * Time-of-day lighting parameters sampled from DBC curves
  */
@@ -47,6 +61,7 @@ struct LightingParams {
 
     float cloudDensity = 0.3f;                      // Cloud density/opacity
     float horizonGlow = 0.3f;                       // Horizon glow intensity
+    AtmosphereProfile atmosphere;
 
     // Value initialization uses the fallback member defaults above. A weighted
     // sum must start at zero, otherwise every zone gains a second light/sky.
@@ -66,7 +81,8 @@ struct LightingParams {
             .cloudSunlitColor = glm::vec3(0.0f),
             .cloudFillColor = glm::vec3(0.0f),
             .cloudBaseColor = glm::vec3(0.0f),
-            .cloudDensity = 0.0f, .horizonGlow = 0.0f
+            .cloudDensity = 0.0f, .horizonGlow = 0.0f,
+            .atmosphere = {0.0f, 0.0f, 0.0f}
         };
     }
 };
@@ -221,7 +237,8 @@ public:
     /**
      * Initialize lighting system and load DBCs
      */
-    bool initialize(pipeline::AssetManager* assetManager);
+    bool initialize(pipeline::AssetManager* assetManager,
+                    const std::string& atmospherePath = "assets/atmosphere_profiles.json");
 
     /**
      * Update lighting for current time and player position
@@ -252,12 +269,18 @@ public:
     /// takes its own light instead - see interior_light.glsli.
     void setIndoors(bool indoors) { isIndoors_ = indoors; }
     [[nodiscard]] bool isIndoors() const { return isIndoors_; }
-    /// How much distance fog, as a multiplier on the zone's own fog distances.
-    /// 1 is the DBC unchanged, above 1 is thicker, 0 is none; the default
-    /// 0.4 thins the authored fog, which reads too heavy here. See
-    /// LightingManager::update.
+    /// Distance-fog density, 0 (off) through 2. The renderer applies it after
+    /// zone/time smoothing; getLightingParams() retains the authored profile.
+    /// Outdoor haze uses 0.8 as its calibrated reference appearance.
     void setFogStrength(float strength) { fogStrength_ = strength; }
     [[nodiscard]] float getFogStrength() const { return fogStrength_; }
+    /// How strongly outdoor haze thins with height: 0 uniform, 1 calibrated.
+    void setFogHeightInfluence(float value) { fogHeightInfluence_ = glm::clamp(value, 0.0f, 2.0f); }
+    [[nodiscard]] float getFogHeightInfluence() const { return fogHeightInfluence_; }
+
+    /// Integrate distant-air illumination along the view ray. Independent of density.
+    void setAerialRayMarching(bool enabled) { aerialRayMarching_ = enabled; }
+    [[nodiscard]] bool getAerialRayMarching() const { return aerialRayMarching_; }
 
     /**
      * Get current time of day (0.0-1.0)
@@ -323,6 +346,10 @@ public:
     void useRealTime(bool use) { manualTime_ = !use; }
 
 private:
+    void loadAtmosphereProfiles(const std::string& path);
+    AtmosphereProfile defaultAtmosphere_;
+    std::map<std::pair<uint32_t, uint32_t>, AtmosphereProfile> zoneAtmosphereProfiles_;
+    std::map<std::pair<uint32_t, uint32_t>, AtmosphereProfile> atmosphereProfiles_;
     /**
      * Load Light.dbc
      */
@@ -389,6 +416,8 @@ private:
     std::vector<SkyboxLayer> skyboxLayers_;
     bool isIndoors_ = false;
     float fogStrength_ = 0.4f;
+    float fogHeightInfluence_ = 1.0f;
+    bool aerialRayMarching_ = false;
 
     // Last values the sky diagnostic reported, so it prints on a change
     // rather than every frame. See LightingManager::update.

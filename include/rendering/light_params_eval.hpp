@@ -193,6 +193,9 @@ inline std::optional<LightingParams> blendLightingParams(
         sum.fogDensity += p.fogDensity * w;
         sum.cloudDensity += p.cloudDensity * w;
         sum.horizonGlow += p.horizonGlow * w;
+        sum.atmosphere.baseHeight += p.atmosphere.baseHeight * w;
+        sum.atmosphere.scaleHeight += p.atmosphere.scaleHeight * w;
+        sum.atmosphere.densityScale += p.atmosphere.densityScale * w;
         dir += p.directionalDir * w;
         total += w;
     }
@@ -216,6 +219,9 @@ inline std::optional<LightingParams> blendLightingParams(
     sum.fogDensity *= inv;
     sum.cloudDensity *= inv;
     sum.horizonGlow *= inv;
+    sum.atmosphere.baseHeight *= inv;
+    sum.atmosphere.scaleHeight *= inv;
+    sum.atmosphere.densityScale *= inv;
 
     const float dirLenSq = glm::dot(dir, dir);
     sum.directionalDir = dirLenSq > 1e-6f ? dir * glm::inversesqrt(dirLenSq)

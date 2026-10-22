@@ -8,6 +8,7 @@ using glm::clamp;
 using glm::dot;
 using glm::exp;
 using glm::max;
+using glm::min;
 using glm::mix;
 using glm::pow;
 using glm::smoothstep;
@@ -153,6 +154,88 @@ TEST_CASE("thinning outdoor haze never adds fog at a fixed distance", "[light][f
             const float visibility = distanceHazeVisibility(d, d, 640/thickness, 889/thickness, 10000);
             CHECK(visibility <= previous);
             previous = visibility;
+        }
+    }
+}
+
+TEST_CASE("thick distance haze keeps high distant silhouettes above dense low air", "[light][fog][height]") {
+    using namespace fog_math;
+    // A low observer looking six thousand yards across a valley at a high
+    // ridge; thickness stays at the user's 0.8 in both views.
+    const float start = 641.48f / .8f, end = 888.89f / .8f;
+    const auto visible = [&](float d, float z, float range = 10000.f) {
+        return distanceHeightHazeVisibility(glm::length(glm::vec2(d, z-105)), d,
+            start, end, range, 105, z, 100, 1.f/300.f,.8f);
+    };
+    const float valley = visible(6000, 105), ridge = visible(6000, 2000);
+    CHECK(valley < .05f);
+    CHECK(ridge > .10f);
+    CHECK(ridge < .45f);
+    CHECK(ridge > valley * 4.f);
+    // Keep the zone's near-distance contrast; this is not a global reduction
+    // of the user's density setting to make one landmark stand out.
+    for (float d : {100.f, 500.f, 900.f}) {
+        CHECK(visible(d,105) == Catch::Approx(distanceHazeVisibility(d,d,start,end,10000)).margin(1e-4));
+    }
+    CHECK(visible(10000,2000) == 0);
+    CHECK(visible(11000,2000) == 0);
+    CHECK(visible(9900,2000) < visible(9000,2000));
+    for (float height : {105.f, 500.f, 2000.f}) {
+        float previous = 1;
+        for (float density : {.2f,.65f,.8f,1.f,2.f}) {
+            const float t=distanceHeightHazeVisibility(6200,6000,641.48f/density,888.89f/density,
+                10000,105,height,100,1.f/300.f,density);
+            CHECK(t >= 0);
+            CHECK(t <= previous);
+            previous=t;
+        }
+    }
+}
+
+TEST_CASE("aerosol column agrees with a sampled density field across slopes and ground", "[light][fog][height]") {
+    using namespace fog_math;
+    for (auto heights : {glm::vec2(100,100),glm::vec2(100,100.01f),glm::vec2(105,2000),
+                         glm::vec2(2000,105),glm::vec2(-100,800),glm::vec2(-500,-100)}) {
+        float integral=0;
+        for(int i=0;i<2000;++i) {
+            const float z=glm::mix(heights.x,heights.y,(i+.5f)/2000.f);
+            integral+=std::exp(-std::max(z-100.f,0.f)/300.f)/2000.f;
+        }
+        const float column=hazeColumnDensity(heights.x,heights.y,100,1.f/300.f);
+        CHECK(column == Catch::Approx(integral).margin(1e-4));
+        CHECK(column == Catch::Approx(hazeColumnDensity(heights.y,heights.x,100,1.f/300.f)));
+    }
+}
+
+TEST_CASE("fog thickness strongly controls far contrast without hiding the reference ridge", "[light][fog][response]") {
+    using namespace fog_math;
+    // Durotar, Icecrown and Dalaran: one control for all authored profiles.
+    for (auto range : {glm::vec2(641.48f,888.89f),glm::vec2(40.62f,888.89f),
+                       glm::vec2(585.75f,1527.78f)}) {
+        const auto visible=[&](float thickness,float height=2000.f,float distance=6000.f) {
+            return distanceHeightHazeVisibility(glm::length(glm::vec2(distance,height-105)),distance,
+                range.x/thickness,range.y/thickness,10000,105,height,100,1.f/300.f,thickness);
+        };
+        INFO("zone range " << range.x << " to " << range.y);
+        const float reference=visible(.8f);
+        CHECK(reference > .10f);
+        CHECK(visible(1.6f) < reference*.5f);
+        CHECK(visible(2.f) < .06f);
+        CHECK(visible(2.f) < reference*.2f);
+        // Doubling the same medium's density squares its transmission.
+        // This covers valley air as well as high ridges, and nearby surfaces.
+        for (float height : {105.f,500.f,2000.f}) {
+            for (float distance : {100.f,1000.f,3000.f,6000.f}) {
+                const float thin=visible(.4f,height,distance);
+                CHECK(visible(.8f,height,distance) == Catch::Approx(thin*thin).margin(1e-5f));
+                const float normal=visible(.8f,height,distance);
+                CHECK(visible(1.6f,height,distance) == Catch::Approx(normal*normal).margin(1e-5f));
+            }
+        }
+        for (float thickness : {.1f,.4f,.8f,1.6f,2.f}) {
+            CHECK(visible(thickness,105,10) == 1.f);
+            CHECK(visible(thickness,2000,10000) == 0.f);
+            CHECK(visible(thickness,2000,9900) > 0.f);
         }
     }
 }

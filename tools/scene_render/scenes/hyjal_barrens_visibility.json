@@ -1,0 +1,42 @@
+{
+  "map": "Kalimdor",
+  "mapId": 1,
+  "zoneId": 17,
+  "hour": 7.4167,
+  "origin": [
+    -440.732,
+    -3633.28,
+    102.297
+  ],
+  "camera": {
+    "offset": [
+      0,
+      0,
+      5
+    ],
+    "yaw": 1.1805830489903173,
+    "pitch": 5
+  },
+  "viewDistance": 10000,
+  "size": [
+    1280,
+    720
+  ],
+  "frames": 40,
+  "msaa": 4,
+  "bloom": 0,
+  "volumetricFog": 2,
+  "fogStrength": 0,
+  "playerPosition": [
+    -440.732,
+    -3633.28,
+    102.297
+  ],
+  "shadowQuality": 0,
+  "lens": false,
+  "terrain": true,
+  "terrainRadius": 5,
+  "distantTerrain": true,
+  "settleFrames": 6000,
+  "volumetricDensity": 1
+}

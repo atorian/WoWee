@@ -1,4 +1,5 @@
 #pragma once
+#include "rendering/volumetric_medium.hpp"
 
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
@@ -12,7 +13,7 @@ class VkContext;
 
 /**
  * Fog that light moves through: lit by the sun past the shadow map, so trees
- * and buildings cast shafts through it, by the zone's own fog colour where
+ * and buildings cast shafts through it, by the zone's ambient light where
  * the sun does not reach, and by the torches, braziers and lava the renderer
  * already gathers for the surfaces around them.
  *
@@ -29,11 +30,10 @@ class VkContext;
  *              depth, the light scattered toward the camera so far and how
  *              much of what lies behind still shows through.
  *
- * Every world shader then reads that volume at its own position where it used
- * to add fog alone. The zone's distance fog is kept and applied first: it is
- * the far haze the sky is painted to meet, and the volume is the air in front
- * of it - which is also what lets the sky take the volume and keep matching
- * the terrain at the horizon.
+ * In legacy mode this covers the near weather air, in front of distance fog.
+ * With the atmospheric setting enabled it spans View Distance and integrates
+ * the zone-calibrated clear atmosphere and weather together. Surfaces and sky
+ * consume this single transport result; geometry cutoff is composed separately.
  *
  * The volumes are double-buffered per frame in flight, as the shadow maps are:
  * a frame writes its own and reads the other one's cells as history.
@@ -44,16 +44,8 @@ public:
     /// file as an index, so add at the end.
     enum class Quality : int { Off = 0, Low = 1, Medium = 2, High = 3 };
 
-    /// How deep the volume reaches, in yards along the view. The air thins
-    /// to nothing over its back two thirds, so the last slice holds all of it
-    /// and stands for everything further, which is what the sky reads; the
-    /// zone's distance fog is the haze beyond.
-    ///
-    /// The near air only, on purpose. A shaft is a few yards of sunlit air,
-    /// and it shows only where those yards are a real share of all the air
-    /// the eye looks through. Air thick enough for that all the way out
-    /// whites the horizon long before a shaft reads; air that thins with
-    /// distance can be thick where the trees and doorways are.
+    /// Legacy near-volume limits. Physical atmosphere uses a captured far
+    /// distance per frame; logarithmic slices retain precision near the eye.
     static constexpr float kNear = 0.5f;
     static constexpr float kFar = 400.0f;
 
@@ -62,9 +54,11 @@ public:
         glm::mat4 view{1.0f};
         glm::mat4 projection{1.0f};
         glm::vec3 cameraPos{0.0f};
+        float farDistance = kFar;
+        glm::vec4 atmosphere{0.0f}; ///< captured base, inverse height, thickness, mode
+        glm::vec2 fogRange{0.0f};
         float time = 0.0f;           ///< seconds, for the drift of the mist
-        /// Extinction per yard at and below the layer's base.
-        float density = 0.0f;
+        VolumetricMedium medium;
         /// World height the densest air sits on.
         float layerBase = 0.0f;
         /// Yards over which the density falls by a factor of e above that.
@@ -73,10 +67,9 @@ public:
         /// air at the feet. Thirty spread it evenly through everything a
         /// player looks at, a haze with no ground to it.
         float layerHeight = 8.0f;
-        /// Share of the density still left high above the layer, so a shaft
-        /// seen from a flying mount does not vanish for want of air. Kept low:
-        /// the zenith looks through the whole depth of it.
-        float layerFloor = 0.1f;
+        /// Dust occupies a deeper layer than ground mist. Clear air is
+        /// independent of both layers, including when viewed from above.
+        float dustHeight = 80.0f;
         /// 0 is even mist; 1 lets it thin to nothing and pile to double.
         float noiseAmount = 0.6f;
         /// Brightness of lit air against a white surface in the same light, for
@@ -135,7 +128,7 @@ public:
     [[nodiscard]] bool isOn() const { return volumesReady_; }
 
     /// GPUPerFrameData::volumetricParams for a frame that builds its volume.
-    [[nodiscard]] glm::vec4 frameParams() const;
+    [[nodiscard]] glm::vec4 frameParams(float farDistance = kFar) const;
 
     [[nodiscard]] VkSampler getSampler() const { return sampler_; }
     [[nodiscard]] VkImageView getNeutralView() const { return neutral_.view; }
@@ -199,6 +192,7 @@ private:
     // Reprojection state.
     glm::mat4 prevViewProj_{1.0f};
     glm::vec3 prevCameraPos_{0.0f};
+    FrameInputs previousInputs_;
     bool historyValid_ = false;
     uint32_t frameCounter_ = 0;
     int lastRecordedFrame_ = -1;

@@ -46,7 +46,6 @@ layout(set = 0, binding = 0) uniform PerFrame {
 
 #include "lightning_light.glsli"
 
-layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
 #include "sky_atmosphere.glsli"
 #include "aerial_frame.glsli"
@@ -79,6 +78,10 @@ vec4 fogVolumeAt(vec3 worldPos) {
 // everything between the camera and that, sunlit shafts and torch glow
 // included.
 vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
+    if (physicalAtmosphere()) {
+        vec4 air = worldAtmosphere(worldPos);
+        return color*air.a+air.rgb;
+    }
     float fogFactor = aerialVisibilityAt(worldPos, dist);
     color = mix(aerialColorAt(worldPos - viewPos.xyz), color, fogFactor);
     if (volumetricParams.x > 0.5) {

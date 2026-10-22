@@ -1,0 +1,30 @@
+{
+  "before": {
+    "label": "OLD / Thickness 0.8",
+    "mean_absolute_rgb_8bit_vs_old": 0.0,
+    "gpu": [
+      "timing:   GPU, 30 frames read back: 8.04ms/frame avg, p95 10.50, worst 10.60ms across 23 passes"
+    ],
+    "errors": [],
+    "streaming_incomplete": []
+  },
+  "thick": {
+    "label": "RAY MARCH / Thickness 1.25",
+    "mean_absolute_rgb_8bit_vs_old": 2.940747974537037,
+    "gpu": [
+      "timing:   GPU, 30 frames read back: 12.18ms/frame avg, p95 12.86, worst 13.13ms across 23 passes"
+    ],
+    "errors": [],
+    "streaming_incomplete": []
+  },
+  "far": {
+    "label": "RAY MARCH / far layer boosted, base 0.8",
+    "mean_absolute_rgb_8bit_vs_old": 2.0357631655092594,
+    "gpu": [
+      "timing:   GPU, 30 frames read back: 13.38ms/frame avg, p95 13.78, worst 13.92ms across 23 passes"
+    ],
+    "errors": [],
+    "streaming_incomplete": [],
+    "near_geometry_vs_march_0_8": {}
+  }
+}

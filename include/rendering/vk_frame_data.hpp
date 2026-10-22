@@ -61,9 +61,9 @@ struct GPUPerFrameData {
     glm::vec4 windTravel{0.0f};  // x cloth phase, y grass fronts (yd), z grass swells (yd), w rustle phase
     glm::vec4 skySmogColor{0.0f}; // appended: horizon band for water sky reflections
     glm::vec4 aerialSun{0.0f};   // toward visible sun; w daylight weight
-    glm::vec4 aerialLight{0.0f}; // neutral illuminated aerosol; w reserved
+    glm::vec4 aerialLight{0.0f}; // diffuse atmospheric sky fill; w = physical atmosphere enabled
     glm::vec4 terrainLodParams{0.0f}; // WDL overlap start/end, ready, reserved
-    glm::vec4 aerialParams{0.0f}; // xyz reserved, w aerial colour correction enabled
+    glm::vec4 aerialParams{0.0f}; // x atmosphere datum (legacy: local ground), y inverse aerosol height, z fog thickness, w outdoor haze enabled
     // The current lightning source and its independent shadow view. Zero colour disables it.
     glm::mat4 lightningMatrix{0.0f};
     glm::vec4 lightningPosition{0.0f}; // xyz source, w range in yards

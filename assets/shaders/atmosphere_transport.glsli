@@ -1,0 +1,27 @@
+#include "atmosphere_medium.glsli"
+bool physicalAtmosphere() { return aerialLight.w > 0.5 && aerialParams.w > 0.5; }
+vec2 atmosphereAt(float height) {
+    return atmosphereDensity(height, aerialParams.x, aerialParams.y,
+        aerialParams.z > 0.001 ? atmosphereBeta(fogParams.x, fogParams.y) : 0.0);
+}
+vec3 atmosphereSource(float height, vec3 ray, float shadow) {
+    vec2 density = atmosphereAt(height);
+    float fraction = density.x / max(density.x+density.y, 1e-10);
+    float cosine = clamp(dot(ray, normalize(aerialSun.xyz)), -1.0, 1.0);
+    float g = 0.65;
+    float mie = (1.0-g*g) / pow(max(1.0+g*g-2.0*g*cosine, 0.001), 1.5);
+    float phase = mix(0.75*(1.0+cosine*cosine), mie, fraction);
+    // Plane-parallel sun path with a finite grazing limit. DBC colours are
+    // artistic radiance inputs; this is not a calibrated planetary model.
+    float solarTau = density.x / max(aerialParams.y, 1.0/8000.0) + density.y*8000.0;
+    vec3 solar = lightColor.rgb * aerialSun.w * 0.25;
+    // Diffuse illumination is a hemispherical sky fill, independent of the
+    // viewing ray. Using the visible sky bands here projects their horizon
+    // stripes into the air in front of mountains and valleys.
+    return max(aerialLight.rgb-solar, vec3(0.0)) +
+        solar * (phase * exp(-solarTau/max(aerialSun.z, 0.08)) * shadow);
+}
+float atmosphereBoundary(vec3 direction) {
+    float limit = max(fogSkyBand1.w, 1.0);
+    return 1.0-smoothstep(0.9*limit, limit, length(direction.xy));
+}

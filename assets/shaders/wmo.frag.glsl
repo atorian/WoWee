@@ -78,7 +78,6 @@ layout(set = 1, binding = 1) uniform WMOMaterial {
 layout(set = 1, binding = 2) uniform sampler2D uNormalHeightMap;
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
-layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
 layout(location = 0) in vec3 FragPos;
 layout(location = 1) in vec3 Normal;
@@ -189,6 +188,10 @@ vec4 fogVolumeAt(vec3 worldPos) {
 // everything between the camera and that, sunlit shafts and torch glow
 // included.
 vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
+    if (physicalAtmosphere()) {
+        vec4 air = worldAtmosphere(worldPos);
+        return color*air.a+air.rgb;
+    }
     float fogFactor = aerialVisibilityAt(worldPos, dist);
     color = mix(aerialColorAt(worldPos - viewPos.xyz), color, fogFactor);
     if (volumetricParams.x > 0.5) {

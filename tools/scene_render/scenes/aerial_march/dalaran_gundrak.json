@@ -1,0 +1,48 @@
+{
+  "map": "Northrend",
+  "mapId": 571,
+  "zoneId": 4395,
+  "hour": 12,
+  "origin": [
+    5813.89013671875,
+    449.1300048828125,
+    658.75
+  ],
+  "camera": {
+    "offset": [
+      1.8798931621274528,
+      -25.248089070244237,
+      12
+    ],
+    "lookAt": [
+      1083.759765625,
+      -4567.3599853515625,
+      -191.39999389648438
+    ]
+  },
+  "viewDistance": 10000,
+  "size": [
+    1280,
+    720
+  ],
+  "frames": 60,
+  "msaa": 4,
+  "bloom": 0,
+  "volumetricFog": 0,
+  "fogStrength": 0.8,
+  "playerPosition": [
+    5815.770029880878,
+    423.88191581256825,
+    658.75
+  ],
+  "shadowQuality": 0,
+  "lens": false,
+  "terrain": true,
+  "terrainRadius": 3,
+  "distantTerrain": true,
+  "settleFrames": 6000,
+  "volumetricDensity": 1,
+  "clouds": false,
+  "fogHeightInfluence": 1,
+  "streamWorld": true
+}

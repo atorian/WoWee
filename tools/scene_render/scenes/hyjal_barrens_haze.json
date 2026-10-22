@@ -1,0 +1,53 @@
+{
+  "map": "Kalimdor",
+  "mapId": 1,
+  "zoneId": 17,
+  "hour": 12,
+  "origin": [
+    -440.732,
+    -3633.28,
+    102.297
+  ],
+  "streamWorld": false,
+  "models": [
+    {
+      "path": "World\\Kalimdor\\Hyjal\\PassiveDoodads\\TheWorldTree\\TheWorldTree.m2",
+      "offset": [
+        5902.2853854167,
+        121.63416666670037,
+        1463.158078125
+      ],
+      "rotation": [
+        0,
+        0,
+        26.92726135253906
+      ]
+    }
+  ],
+  "camera": {
+    "offset": [
+      0,
+      0,
+      5
+    ],
+    "yaw": 1.1805830489903173,
+    "pitch": 5
+  },
+  "viewDistance": 10000,
+  "size": [
+    1280,
+    720
+  ],
+  "frames": 40,
+  "msaa": 4,
+  "bloom": 0,
+  "volumetricFog": 0,
+  "fogStrength": 0.8,
+  "playerPosition": [
+    -440.732,
+    -3633.28,
+    102.297
+  ],
+  "shadowQuality": 0,
+  "lens": false
+}

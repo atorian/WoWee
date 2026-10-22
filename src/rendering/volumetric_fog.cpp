@@ -22,13 +22,14 @@ struct VolumeParamsGPU {
     glm::vec4 rayOrigin;      // xyz = camera position
     glm::vec4 rayCorner[4];   // world rays at one yard of view depth: uv (0,0), (1,0), (0,1), (1,1)
     glm::mat4 prevViewProj;   // last frame's, for reprojecting the history
-    glm::vec4 medium;         // x = density, y = layer base z, z = 1 / layer height, w = floor
-    glm::vec4 lighting;       // x = light scatter (sun and models' lights), yzw = unused
+    glm::vec4 medium;         // x = mist, y = layer base z, z = 1 / mist height, w = unused
+    glm::vec4 lighting;       // x = light scatter, y = clear air, z = dust, w = 1 / dust height
     glm::vec4 drift;          // xyz = how far the mist has blown, w = noise amount
     glm::vec4 jitter;         // xyz = where in its cell this frame samples, w = history weight
     glm::ivec4 dims;          // xyz = volume size
     glm::vec4 sunHalo;        // rgb = the zone's glow around the sun, w = unused
     glm::vec4 sunGlare;       // xyz = toward the sun's disc, w = how much the sky round it shines
+    glm::vec4 dustAlbedo;     // rgb = sand's scattering albedo
 };
 
 constexpr uint32_t kInjectGroup = 4;     // 4x4x4, volumetric_fog_inject.comp.glsl
@@ -386,14 +387,13 @@ bool VolumetricFog::applyPendingQuality() {
     volumesReady_ = true;
     historyValid_ = false;
     lastRecordedFrame_ = -1;
-    LOG_WARNING("VolumetricFog: on, ", size.x, "x", size.y, "x", size.z, " cells over ",
-                kNear, "-", kFar, " yards");
+    LOG_WARNING("VolumetricFog: on, ", size.x, "x", size.y, "x", size.z, " cells");
     return true;
 }
 
-glm::vec4 VolumetricFog::frameParams() const {
+glm::vec4 VolumetricFog::frameParams(float farDistance) const {
     if (!volumesReady_) return glm::vec4(0.0f);
-    return {1.0f, kNear, 1.0f / std::log(kFar / kNear), static_cast<float>(size_.z)};
+    return {1.0f, kNear, 1.0f / std::log(std::max(farDistance, kNear + 1.0f) / kNear), static_cast<float>(size_.z)};
 }
 
 VkImageView VolumetricFog::getVolumeView(uint32_t frame) const {
@@ -420,17 +420,29 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
     // cannot have jumped. A teleport reprojects into nonsense.
     const uint32_t other = (frame + 1) % MAX_FRAMES;
     bool history = historyValid_ && lastRecordedFrame_ == static_cast<int>(other) &&
-                   glm::length(in.cameraPos - prevCameraPos_) < 30.0f;
+                   glm::length(in.cameraPos - prevCameraPos_) < 30.0f &&
+                   in.farDistance == previousInputs_.farDistance &&
+                   in.atmosphere == previousInputs_.atmosphere &&
+                   in.fogRange == previousInputs_.fogRange &&
+                   in.medium.air == previousInputs_.medium.air &&
+                   in.medium.mist == previousInputs_.medium.mist &&
+                   in.medium.dust == previousInputs_.medium.dust;
     p.prevViewProj = prevViewProj_;
 
-    p.medium = glm::vec4(in.density, in.layerBase, 1.0f / std::max(in.layerHeight, 1.0f),
-                         glm::clamp(in.layerFloor, 0.0f, 1.0f));
-    p.lighting = glm::vec4(in.lightScatter, 0.0f, 0.0f, 0.0f);
+    p.medium = glm::vec4(in.medium.mist, in.layerBase,
+                        1.0f / std::max(in.layerHeight, 1.0f), 0.0f);
+    p.lighting = glm::vec4(in.lightScatter, in.medium.air, in.medium.dust,
+                          1.0f / std::max(in.dustHeight, 1.0f));
+    p.dustAlbedo = glm::vec4(kSandAlbedo, 0.0f);
     // A slow breeze, a yard a second, so the mist drifts rather than sits.
     const float t = in.time;
     p.drift = glm::vec4(t * 0.9f, t * 0.45f, t * 0.12f, glm::clamp(in.noiseAmount, 0.0f, 1.0f));
     const uint32_t seq = (frameCounter_ % 16) + 1;
     p.jitter = glm::vec4(halton(seq, 2), halton(seq, 3), halton(seq, 5), history ? 0.9f : 0.0f);
+    // The smooth atmospheric field needs no stochastic noise. Fixed samples
+    // also make toggles and camera motion immediate instead of trailing history.
+    if (in.atmosphere.w > 0.5f && in.medium.mist == 0.0f && in.medium.dust == 0.0f)
+        p.jitter = glm::vec4(0.5f, 0.5f, 0.5f, 0.0f);
     p.dims = glm::ivec4(size_, 0);
     p.sunHalo = glm::vec4(in.sunHaloColor, 0.0f);
     p.sunGlare = glm::vec4(in.sunGlareDirection, in.sunGlareAmount);
@@ -481,6 +493,7 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
     dep.pMemoryBarriers = &after;
     cmdPipelineBarrier2(cmd, dep);
 
+    previousInputs_ = in;
     prevViewProj_ = in.projection * in.view;
     prevCameraPos_ = in.cameraPos;
     historyValid_ = true;

@@ -9,11 +9,71 @@
 // that slide against the trees casting them. Nothing else would say so.
 #include <catch_amalgamated.hpp>
 #include "rendering/volumetric_fog_math.hpp"
+#include "rendering/volumetric_medium.hpp"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 using wowee::rendering::froxelCornerRays;
+
+namespace medium_math {
+using vec3 = glm::vec3;
+using vec4 = glm::vec4;
+using glm::exp;
+using glm::max;
+#include "../assets/shaders/volumetric_medium.glsli"
+}
+
+TEST_CASE("clear weather supplies thin air without drifting ground fog", "[volumetric][medium]") {
+    using namespace wowee::rendering;
+    const auto medium = volumetricMediumFor({}, 1, false);
+    const auto sample = [&](float height, float banks) {
+        return medium_math::volumeMediumAt(height, banks,
+            {medium.air, medium.mist, medium.dust}, 1.0f/8, 1.0f/80, kSandAlbedo);
+    };
+    const auto ground = sample(0, 1);
+    CHECK(std::exp(-ground.a * 100) > .95f);
+    CHECK(ground.a > 0); // Sun and torch shafts still have scattering air.
+    CHECK(sample(0, .2f) == sample(0, 1.8f));
+    CHECK(sample(0, 1) == sample(80, 1));
+}
+
+TEST_CASE("fog weather adds a neutral low layer and sand adds coloured dust", "[volumetric][medium]") {
+    using namespace wowee::rendering;
+    const auto sample = [](const WeatherMix& weather, float height) {
+        const auto medium = volumetricMediumFor(weather, 1, false);
+        return medium_math::volumeMediumAt(height, 1,
+            {medium.air, medium.mist, medium.dust}, 1.0f/8, 1.0f/80, kSandAlbedo);
+    };
+    const auto wet = sample({.mist = 1}, 0);
+    CHECK(std::exp(-wet.a * 100) < .5f);
+    CHECK(wet.r == Catch::Approx(wet.b));
+    CHECK(sample({.mist = 1}, 40).a < wet.a * .1f);
+    const auto sand = sample({.sand = 1}, 0);
+    CHECK(sand.r > sand.b * 1.5f);
+    CHECK(sand.g > sand.b);
+    CHECK(sample({.sand = 1}, 40).a > sand.a * .4f);
+    CHECK(sample({.rain = 1}, 0).a > sample({}, 0).a);
+    CHECK(sample({.rain = 1}, 0).a < wet.a);
+}
+
+TEST_CASE("mixed weather conserves scattering energy and density zero clears every layer",
+          "[volumetric][medium]") {
+    using namespace wowee::rendering;
+    const WeatherMix weather{.rain = .5f, .sand = .5f, .mist = .5f};
+    for (float density : {0.0f, .65f, 1.0f, 3.0f}) {
+        const auto medium = volumetricMediumFor(weather, density, false);
+        const auto at = medium_math::volumeMediumAt(8, 1.3f,
+            {medium.air, medium.mist, medium.dust}, 1.0f/8, 1.0f/80, kSandAlbedo);
+        if (density == 0) CHECK(at == glm::vec4(0));
+        else {
+            CHECK(at.a > 0);
+            CHECK(at.r <= at.a);
+            CHECK(at.g <= at.a);
+            CHECK(at.b <= at.a);
+        }
+    }
+}
 
 namespace {
 
@@ -78,4 +138,58 @@ TEST_CASE("the corner rays are one yard deep and span the screen the right way u
     CHECK(rays[1].z > 0.0f);
     CHECK(rays[2].z < 0.0f);
     CHECK(rays[3].z < 0.0f);
+}
+
+namespace atmosphere_math {
+using vec2 = glm::vec2;
+using vec3 = glm::vec3;
+using vec4 = glm::vec4;
+using glm::exp;
+using glm::log;
+using glm::max;
+#include "../assets/shaders/atmosphere_medium.glsli"
+}
+
+TEST_CASE("atmospheric transport is independent of subdivision", "[volumetric][atmosphere]") {
+    using namespace atmosphere_math;
+    const vec3 light(.3f,.5f,.7f);
+    const float extinction = .001f;
+    const auto whole = integrateAtmosphereCell(vec4(0,0,0,1),light*extinction,extinction,2000);
+    auto split = vec4(0,0,0,1);
+    for (int i=0; i<100; ++i)
+        split = integrateAtmosphereCell(split,light*extinction,extinction,20);
+    CHECK(whole.a == Catch::Approx(std::exp(-2.f)));
+    for (int c=0;c<4;++c) CHECK(split[c] == Catch::Approx(whole[c]).margin(1e-5));
+    CHECK(whole.r == Catch::Approx(light.r*(1-std::exp(-2.f))));
+}
+
+TEST_CASE("vacuum does not manufacture fog over arbitrarily long rays", "[volumetric][atmosphere]") {
+    using namespace atmosphere_math;
+    const vec4 original(.2f,.4f,.1f,.8f);
+    CHECK(integrateAtmosphereCell(original,vec3(0),0,100000) == original);
+    const auto thin = integrateAtmosphereCell(vec4(0,0,0,1),vec3(1e-9f),1e-9f,1);
+    CHECK(thin.r == Catch::Approx(1e-9f).margin(1e-12f));
+}
+
+TEST_CASE("zone midpoint calibrates atmospheric visibility and thickness scales optical depth", "[volumetric][atmosphere]") {
+    using namespace atmosphere_math;
+    const float beta = atmosphereBeta(200,1800);
+    auto density = atmosphereDensity(0,0,1.f/300,beta);
+    auto through = integrateAtmosphereCell(vec4(0,0,0,1),vec3(0),density.x+density.y,1000);
+    CHECK(through.a == Catch::Approx(.5f));
+    density = atmosphereDensity(0,0,1.f/300,atmosphereBeta(100,900));
+    through = integrateAtmosphereCell(vec4(0,0,0,1),vec3(0),density.x+density.y,1000);
+    CHECK(through.a == Catch::Approx(.25f));
+}
+
+TEST_CASE("world height controls the medium independently of the observer", "[volumetric][atmosphere]") {
+    using namespace atmosphere_math;
+    const auto low = atmosphereDensity(100,0,1.f/300,.001f);
+    const auto high = atmosphereDensity(1000,0,1.f/300,.001f);
+    CHECK(high.x < low.x*.1f);
+    CHECK(high.y > low.y*.8f); // Thin high-altitude air remains above the aerosol layer.
+    const auto translated = atmosphereDensity(600,500,1.f/300,.001f);
+    CHECK(translated == low);
+    const auto disabled = atmosphereDensity(100,0,1.f/300,0);
+    CHECK(disabled == vec2(0));
 }

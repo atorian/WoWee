@@ -57,3 +57,62 @@ float distanceHazeVisibility(float dist, float horizontalDist,
     float limit = max(viewDistance, 0.001f);
     return visibility * (1.0f - smoothstep(limit * 0.9f, limit, horizontalDist));
 }
+
+// Mean aerosol density along a straight segment through an exponential layer.
+// Below the regional ground datum the density is bounded; the horizontal-ray
+// limit uses a series so neither flat views nor small height changes divide by 0.
+float hazeColumnDensity(float fromZ, float toZ, float groundZ, float inverseHeight) {
+    float lo = (min(fromZ, toZ) - groundZ) * inverseHeight;
+    float hi = (max(fromZ, toZ) - groundZ) * inverseHeight;
+    if (hi <= 0.0f) return 1.0f;
+    float below = clamp(-lo / max(hi - lo, 0.000001f), 0.0f, 1.0f);
+    lo = max(lo, 0.0f);
+    float span = hi - lo;
+    float mean = exp(-lo) * (span < 0.001f
+        ? 1.0f - span * 0.5f + span * span / 6.0f
+        : (1.0f - exp(-span)) / span);
+    return mix(mean, 1.0f, below);
+}
+
+// Preview switch shared by surface extinction and ray-march integration.
+#ifndef AERIAL_FAR_DENSITY_ENABLED
+#define AERIAL_FAR_DENSITY_ENABLED 0
+#endif
+float distanceHeightHazeVisibility(float dist, float horizontalDist,
+    float start, float end, float viewDistance, float eyeZ, float surfaceZ,
+    float groundZ, float inverseHeight, float thickness) {
+    float density = clamp(thickness, 0.0f, 2.0f);
+    if (density <= 0.001f) return 1.0f;
+    // Frame extraction scales the authored ranges by 1/thickness for linear
+    // fog consumers. Recover one fixed reference profile before applying
+    // density, otherwise the slider both moves and thickens the same medium.
+    // 0.8 is the calibrated long-view appearance. Preserve its near gradient
+    // and height-dependent tail; change optical depth at other settings:
+    // doubling density squares transmission instead of merely moving the tail.
+    float relativeDensity = density / 0.8f;
+    start *= relativeDensity;
+    end *= relativeDensity;
+    float nearDistance = min(dist, max(start + 0.5f * (end - start), 0.0f));
+    float opticalDistance = dist;
+    if (dist > nearDistance) {
+        float nearZ = mix(eyeZ, surfaceZ, nearDistance / max(dist, 0.001f));
+        float column = mix(0.02f, 1.0f, hazeColumnDensity(nearZ, surfaceZ, groundZ, inverseHeight));
+        opticalDistance = nearDistance + (dist - nearDistance) * column;
+    }
+#if AERIAL_FAR_DENSITY_ENABLED
+    // Preserve the authored near half of the profile. Add optical depth only
+    // beyond it, with a smooth onset over one further half-transmission.
+    // Far-air density tends to 1.25 / 0.8 times the existing density.
+    // Keep the artificial geometry-boundary fade out of this added medium.
+    float air = distanceHazeVisibility(opticalDistance, 0.0, start, end, viewDistance);
+    float nearAir = distanceHazeVisibility(nearDistance, 0.0, start, end, viewDistance);
+    float farDepth = max(log(max(nearAir, 0.000001) / max(air, 0.000001)), 0.0);
+    float extraDepth = (1.25 / 0.8 - 1.0) * farDepth * smoothstep(0.0, log(2.0), farDepth);
+    float limit = max(viewDistance, 0.001);
+    float boundary = 1.0 - smoothstep(0.9 * limit, limit, horizontalDist);
+    return pow(air * exp(-extraDepth) * boundary, relativeDensity);
+#else
+    float reference = distanceHazeVisibility(opticalDistance, horizontalDist, start, end, viewDistance);
+    return pow(reference, relativeDensity);
+#endif
+}

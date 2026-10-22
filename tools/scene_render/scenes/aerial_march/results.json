@@ -1,0 +1,60 @@
+{
+  "hyjal_day": {
+    "mean_absolute_rgb_8bit": 2.282584635416667,
+    "max_rgb_8bit": 114,
+    "changed_pixel_percent": 25.249348958333336,
+    "top_strip_max_difference": 0,
+    "before_gpu": [
+      "timing:   GPU, 30 frames read back: 8.04ms/frame avg, p95 10.50, worst 10.60ms across 23 passes"
+    ],
+    "before_errors": [],
+    "before_streaming_incomplete": [],
+    "after_gpu": [
+      "timing:   GPU, 30 frames read back: 12.50ms/frame avg, p95 13.14, worst 13.24ms across 23 passes"
+    ],
+    "after_errors": [],
+    "after_streaming_incomplete": []
+  },
+  "citadel_evening": {
+    "mean_absolute_rgb_8bit": 0.22282913773148147,
+    "max_rgb_8bit": 17,
+    "changed_pixel_percent": 6.151584201388889,
+    "top_strip_max_difference": 0,
+    "before_gpu": [
+      "timing:   GPU, 30 frames read back: 1.81ms/frame avg, p95 2.43, worst 2.44ms across 21 passes"
+    ],
+    "before_errors": [],
+    "before_streaming_incomplete": [],
+    "after_gpu": [
+      "timing:   GPU, 30 frames read back: 2.87ms/frame avg, p95 2.89, worst 6.65ms across 21 passes"
+    ],
+    "after_errors": [],
+    "after_streaming_incomplete": [],
+    "reference_gpu": [
+      "timing:   GPU, 30 frames read back: 3.68ms/frame avg, p95 4.18, worst 7.58ms across 21 passes"
+    ],
+    "reference_errors": [],
+    "reference_streaming_incomplete": [],
+    "24_vs_48_steps": {
+      "mean_absolute_rgb_8bit": 1.8446180555555556e-05,
+      "max_rgb_8bit": 1,
+      "p99_rgb_8bit": 0.0
+    }
+  },
+  "dalaran_gundrak": {
+    "mean_absolute_rgb_8bit": 1.8808778211805555,
+    "max_rgb_8bit": 62,
+    "changed_pixel_percent": 29.404947916666668,
+    "top_strip_max_difference": 4,
+    "before_gpu": [
+      "timing:   GPU, 50 frames read back: 12.18ms/frame avg, p95 13.88, worst 13.91ms across 23 passes"
+    ],
+    "before_errors": [],
+    "before_streaming_incomplete": [],
+    "after_gpu": [
+      "timing:   GPU, 50 frames read back: 18.42ms/frame avg, p95 19.86, worst 20.85ms across 23 passes"
+    ],
+    "after_errors": [],
+    "after_streaming_incomplete": []
+  }
+}

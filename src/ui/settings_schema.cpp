@@ -82,15 +82,24 @@ constexpr SettingDesc kSchema[] = {
     // which is a different thing from a player turning the feature off.
     {"fogstrength", "Fog thickness", SettingKind::Float, 0, 2, 0.05f, "Graphics", "Atmosphere",
      "How heavy the distance haze is, relative to the zone's profile.\n"
-     "Higher values bring the haze closer; 0 removes it. Distant\n"
-     "surfaces blend fully into the sky at View Distance.", "", 0.4f},
+     "Higher values strongly reduce distant contrast; 0 removes it.\n"
+     "At maximum, far silhouettes nearly merge with the atmosphere.\n"
+     "Surfaces blend fully into the sky at View Distance.", "", 0.4f},
+    {"aerialraymarching", "Ray-marched distance fog", SettingKind::Bool, 0, 1, 1, "Graphics", "",
+     "Integrates height-dependent air and sunlight into one atmosphere volume.\n"
+     "Fog Thickness controls density; Fog Height Influence controls its falloff.\n"
+     "Uses at least Low volume quality, even with Light Shafts off.", "", 0},
+    {"fogheightinfluence", "Fog height influence", SettingKind::Float, 0, 2, 0.05f, "Graphics", "",
+     "How strongly distance haze thins with height.\n"
+     "Lower values keep more haze around high, distant objects.\n"
+     "0 ignores height; 1 keeps the standard height effect.", "", 1.0f},
     // The light shafts' own thickness. Their switch and its quality are on
     // the Detail page; see there.
     {"mistdensity", "Mist density", SettingKind::Float, 0, 3, 0.1f, "Graphics", "",
-     "How thick the lit mist is, when light shafts are on (Detail).\n"
-     "At 1 the houses across a street stand in the mist and the trees\n"
-     "past them are shapes in it; lower clears the air, higher closes\n"
-     "it in. Foggy zones, their weather and the dawn thicken it further.",
+     "Density of scattering air, fog and dust when light shafts are on.\n"
+     "Clear weather keeps the air thin; fog adds low mist and sandstorms\n"
+     "add coloured dust. Higher values strengthen the current medium;\n"
+     "0 removes volumetric scattering. Distance haze is separate.",
      "", 1.0f, "lightshafts!=0"},
 
     // Labelled for what it does, with the term of art in brackets: nobody

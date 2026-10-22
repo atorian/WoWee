@@ -60,6 +60,8 @@ public:
     float pendingViewDistance = kDefaultViewDistance;
     /// How much distance fog. See LightingManager::setFogStrength.
     float pendingFogStrength = 0.4f;
+    float pendingFogHeightInfluence = 1.0f;
+    bool pendingAerialRayMarching = false;
     /// Volumetric fog: 0 off, 1-3 the volume's size. See VolumetricFog.
     int pendingVolumetricFog = 2;
     /// Ray traced lighting: 0 off, 1 sun, 2 + occlusion, 3 + bounce. See RtLighting.

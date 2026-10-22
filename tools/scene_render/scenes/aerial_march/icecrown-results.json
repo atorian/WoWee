@@ -1,0 +1,79 @@
+{
+  "profile": {
+    "mapId": 571,
+    "zoneId": 210,
+    "baseHeight": 300,
+    "scaleHeight": 600,
+    "densityScale": 1.2
+  },
+  "images": {
+    "before": {
+      "sha256": "ac5e36487f2ccaf1bce1d582047a863aaeced2e1452432ee7cdf5ad5b45db270",
+      "errors": [],
+      "geometry": [
+        "scene_render: world M2 draw calls: 2828 in the kept frame",
+        "scene_render: WMO shadow draw calls: 57 in the kept frame"
+      ]
+    },
+    "after": {
+      "sha256": "531cbadf9d7137e44997411a71747d4ab6de266c192a7670843b6cf2adb4732b",
+      "errors": [],
+      "geometry": [
+        "scene_render: world M2 draw calls: 2828 in the kept frame",
+        "scene_render: WMO shadow draw calls: 57 in the kept frame"
+      ]
+    }
+  },
+  "detail_contrast": {
+    "far_ridge": {
+      "rectangle_xyxy": [
+        850,
+        350,
+        925,
+        390
+      ],
+      "mean_adjacent_pixel_luma_difference": [
+        6.183759528759529,
+        2.010382594132594
+      ],
+      "remaining_fraction": 0.32510685203437717
+    },
+    "far_centre": {
+      "rectangle_xyxy": [
+        645,
+        355,
+        695,
+        395
+      ],
+      "mean_adjacent_pixel_luma_difference": [
+        5.715182278039421,
+        1.9257230071515787
+      ],
+      "remaining_fraction": 0.33694865945941327
+    },
+    "near_tower": {
+      "rectangle_xyxy": [
+        60,
+        100,
+        140,
+        220
+      ],
+      "mean_adjacent_pixel_luma_difference": [
+        3.0648073047784514,
+        1.6640733403065866
+      ],
+      "remaining_fraction": 0.5429618161350862
+    }
+  },
+  "scene": "icecrown_day.json",
+  "fogStrength": 1,
+  "fogHeightInfluence": 1,
+  "aerialRayMarching": true,
+  "checks": {
+    "light_volume_blend": "9 cases / 61 assertions passed; new zone behaviour failed before implementation",
+    "sweep_guard": "passed",
+    "full_scene": "completed without render errors or incomplete streaming",
+    "vulkan_validation": "full scene stopped with bad_alloc; final comparison captured without validation"
+  },
+  "metric": "Mean absolute adjacent-pixel difference of mean RGB8 in fixed image rectangles; visual detail contrast, not physical transmission or a universal visibility percentage."
+}

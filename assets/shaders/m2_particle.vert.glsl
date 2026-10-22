@@ -39,7 +39,9 @@ layout(set = 0, binding = 0) uniform PerFrame {
 
 #include "interior_light.glsli"
 
-layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
+#include "sky_atmosphere.glsli"
+#define AERIAL_ANALYTIC_ONLY
+#include "aerial_frame.glsli"
 
 // One quad per instance (M2ParticleQuad), four corners drawn as a strip.
 layout(location = 0) in vec3 aPos;     // the particle (its head)
@@ -155,6 +157,7 @@ void main() {
     vFogVisibility = clamp((fogParams.y - worldDist) / fogRange, 0.0, 1.0);
     // And thinned by the air in front of it, the way distance thins it:
     // a spark deep in a bank of mist is mostly the mist.
-    if (volumetricParams.x > 0.5) vFogVisibility *= fogVolumeAt(aPos).a;
+    if (physicalAtmosphere()) vFogVisibility = worldAtmosphere(aPos).a;
+    else if (volumetricParams.x > 0.5) vFogVisibility *= fogVolumeAt(aPos).a;
     gl_Position = projection * vec4(p, 1.0);
 }

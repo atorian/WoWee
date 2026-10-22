@@ -1,0 +1,52 @@
+{
+  "policy": "Full M2 geometry to existing cull range; atmosphere alone attenuates distance. Authored material and instance opacity retained.",
+  "regression_before_phase_spread": 83.67,
+  "regression_after_phase_spread": 5.11,
+  "ctest_passed": [
+    "sweep_guard",
+    "m2_view_distance",
+    "m2_blend_mode"
+  ],
+  "captures": {
+    "boundary-1-5900": {
+      "sha256": "da45357eecd3df478a93dba3cdccc048c33c804d6ac054e041582314515e512c",
+      "validation_errors": []
+    },
+    "boundary-1-6200": {
+      "sha256": "8c10aba3ad73dc3a4bf63de8711f58f28aa285befa2c60f3768012934f21a82c",
+      "validation_errors": []
+    },
+    "boundary-1-6500": {
+      "sha256": "8c10aba3ad73dc3a4bf63de8711f58f28aa285befa2c60f3768012934f21a82c",
+      "validation_errors": []
+    },
+    "boundary-1-8000": {
+      "sha256": "8c10aba3ad73dc3a4bf63de8711f58f28aa285befa2c60f3768012934f21a82c",
+      "validation_errors": []
+    },
+    "boundary-4-5900": {
+      "sha256": "da45357eecd3df478a93dba3cdccc048c33c804d6ac054e041582314515e512c",
+      "validation_errors": []
+    },
+    "boundary-4-6200": {
+      "sha256": "b926ea59b36c63e34e1b804741e7b8d23e5532b2e0c4e2322c9b6110b520d0c7",
+      "validation_errors": []
+    },
+    "boundary-4-6500": {
+      "sha256": "b926ea59b36c63e34e1b804741e7b8d23e5532b2e0c4e2322c9b6110b520d0c7",
+      "validation_errors": []
+    },
+    "boundary-4-8000": {
+      "sha256": "b926ea59b36c63e34e1b804741e7b8d23e5532b2e0c4e2322c9b6110b520d0c7",
+      "validation_errors": []
+    },
+    "canopy": {
+      "sha256": "2449b3af369d657445b7408ac4c0123d528b1cfb1113c33fd44531e4e876d7eb",
+      "validation_errors": []
+    },
+    "hyjal_day-final": {
+      "sha256": "8cffbd7c5dcd410839c748d949d1e23121e0c28f3eb72a75027888370afccf60",
+      "validation_errors": []
+    }
+  }
+}

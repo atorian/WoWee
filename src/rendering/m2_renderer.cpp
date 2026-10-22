@@ -1044,9 +1044,10 @@ void M2Renderer::shutdown() {
     VkDevice device = vkCtx_->getDevice();
     VmaAllocator alloc = vkCtx_->getAllocator();
 
+    scene_->rtChanges.clear(rtScene_);
     // Delete model GPU resources
     for (auto& [id, modelResource] : models) {
-        destroyModelGPU(modelResource);
+        destroyModelGPU(id, modelResource);
     }
     models.clear();
     pinnedModelIds_.clear();
@@ -1152,9 +1153,9 @@ void M2Renderer::shutdown() {
     initialized_ = false;
 }
 
-void M2Renderer::destroyModelGPU(std::shared_ptr<M2ModelGPU> retired) {
+void M2Renderer::destroyModelGPU(uint32_t modelId, std::shared_ptr<M2ModelGPU> retired) {
     if (!vkCtx_) return;
-    releaseRtModel(*retired);
+    releaseRtModel(modelId, *retired);
     // Detach ownership immediately; command buffers retain these handles until
     // every frame slot has fenced. Capture values, never this or model refs.
     VkContext* ctx = vkCtx_;
@@ -2373,6 +2374,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     // for every model that loaded: 26-53 ms each time something new came into
     // view in Dalaran.
     models[modelId] = std::make_shared<M2ModelGPU>(std::move(gpuModel));
+    scene_->rtChanges.modelReady(modelId);
 
     LOG_DEBUG("Loaded M2 model: ", model.name, " (", models[modelId]->vertexCount, " vertices, ",
               models[modelId]->indexCount / 3, " triangles, ", models[modelId]->batches.size(), " batches)");
@@ -2431,75 +2433,25 @@ void M2Renderer::registerRtModel(M2ModelGPU& gpuModel, const pipeline::M2Model& 
     gpuModel.rtMesh = rtScene_->addMesh(std::move(src));
 }
 
-void M2Renderer::releaseRtModel(M2ModelGPU& gpuModel) {
+void M2Renderer::releaseRtModel(uint32_t modelId, M2ModelGPU& gpuModel) {
     if (!rtScene_ || gpuModel.rtMesh == RtScene::kInvalid) return;
-    // Instances of it are normally gone already; any left are dropped here,
-    // and the M2Instance that still names one re-registers on the next sync
-    // if its model comes back.
-    for (size_t i = 0; i < rtOwned_.size();) {
-        const uint32_t id = rtOwned_[i];
-        if (rtMeshOf_[id] == gpuModel.rtMesh) {
-            rtScene_->removeInstance(id);
-            rtSeen_[id] = 0;
-            rtOwned_[i] = rtOwned_.back();
-            rtOwned_.pop_back();
-        } else {
-            ++i;
-        }
-    }
+    scene_->rtChanges.modelRemoved(modelId, rtScene_);
     rtScene_->removeMesh(gpuModel.rtMesh);
     gpuModel.rtMesh = RtScene::kInvalid;
 }
 
 void M2Renderer::syncRtScene() {
     if (!rtScene_) return;
-    const uint64_t gen = ++rtSyncGeneration_;
-    auto track = [&](uint32_t id, uint32_t mesh) {
-        if (id >= rtSeen_.size()) {
-            rtSeen_.resize(id + 1, 0);
-            rtMeshOf_.resize(id + 1, RtScene::kInvalid);
-        }
-        rtSeen_[id] = gen;
-        rtMeshOf_[id] = mesh;
-    };
-    for (auto& inst : scene_->instances) {
-        auto it = models.find(inst.modelId);
-        const uint32_t mesh = it != models.end() ? it->second->rtMesh : RtScene::kInvalid;
-        const bool wanted = mesh != RtScene::kInvalid && inst.fade >= 1.0f && !inst.hidden;
-        // Still ours, not claimed by another instance this pass (a copied
-        // M2Instance carries its original's id), and placing the same mesh.
-        const bool valid = inst.rtInstance != RtScene::kInvalid &&
-                           inst.rtInstance < rtSeen_.size() && rtSeen_[inst.rtInstance] != 0 &&
-                           rtSeen_[inst.rtInstance] != gen && rtMeshOf_[inst.rtInstance] == mesh;
-        if (!wanted) {
-            inst.rtInstance = RtScene::kInvalid;  // an unseen id is removed below
-            continue;
-        }
-        if (!valid) {
-            inst.rtInstance = rtScene_->addInstance(mesh, inst.modelMatrix);
-            if (inst.rtInstance == RtScene::kInvalid) continue;
-            inst.rtMatrix = inst.modelMatrix;
-            rtOwned_.push_back(inst.rtInstance);
-            track(inst.rtInstance, mesh);
-            continue;
-        }
-        if (inst.rtMatrix != inst.modelMatrix) {
-            rtScene_->setInstanceTransform(inst.rtInstance, inst.modelMatrix);
-            inst.rtMatrix = inst.modelMatrix;
-        }
-        track(inst.rtInstance, mesh);
-    }
-    for (size_t i = 0; i < rtOwned_.size();) {
-        const uint32_t id = rtOwned_[i];
-        if (rtSeen_[id] != gen) {
-            rtScene_->removeInstance(id);
-            rtSeen_[id] = 0;
-            rtOwned_[i] = rtOwned_.back();
-            rtOwned_.pop_back();
-        } else {
-            ++i;
-        }
-    }
+    scene_->rtChanges.flush(*rtScene_, [&](uint32_t id) {
+        const auto& inst = scene_->instances[scene_->instanceIndexById.at(id)];
+        const auto model = models.find(inst.modelId);
+        const uint32_t mesh = model != models.end() && inst.fade >= 1.0f && !inst.hidden
+            ? model->second->rtMesh : RtScene::kInvalid;
+        return RtInstanceChanges::State{mesh, inst.modelMatrix};
+    }, [](uint32_t id, uint32_t mesh) {
+        LOG_WARNING("M2 instance ", id, " could not register RT mesh ", mesh,
+                    "; drawn without ray-traced occlusion until its source changes");
+    });
 }
 
 } // namespace rendering

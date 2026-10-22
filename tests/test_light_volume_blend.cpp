@@ -164,3 +164,135 @@ TEST_CASE("a volume three yards across or less lights nothing", "[lighting]") {
     const glm::vec3 pos = worldOf(ZONE_X + SPECK_OFFSET * LIGHT_COORD_UNITS_PER_YARD, ZONE_Y);
     requireColour(skyAt("light_blend_speck", pos), rgb(colourOf(ZONE_PARAMS)));
 }
+
+namespace {
+struct AtmosphereWorld {
+    wowee::pipeline::AssetManager assets;
+    LightingManager lighting;
+    explicit AtmosphereWorld(const std::string& profiles) {
+        const auto root = wowee::test::makeDataRoot("atmosphere_regions", {
+            {"dbfilesclient\\light.dbc", lightDbc()},
+            {"dbfilesclient\\lightparams.dbc", lightParamsDbc()},
+            {"dbfilesclient\\lightintband.dbc", lightIntBandDbc()},
+        });
+        const auto path = root / "atmosphere.json";
+        wowee::test::writeFile(path, std::vector<uint8_t>(profiles.begin(), profiles.end()));
+        REQUIRE(assets.initialize(root.string()));
+        REQUIRE(lighting.initialize(&assets, path.string()));
+    }
+    wowee::rendering::AtmosphereProfile at(glm::vec3 pos, float weather = 0, uint32_t zone = 0) {
+        for (int i = 0; i < 16; ++i) lighting.update(.25f, pos, 0, zone, 12.f, weather);
+        return lighting.getLightingParams().atmosphere;
+    }
+};
+const std::string regionalAir = R"({"version":1,
+    "default":{"baseHeight":0,"scaleHeight":300,"densityScale":1},
+    "profiles":[{"mapId":0,"lightId":2,"baseHeight":600,"scaleHeight":400,"densityScale":1.2}]})";
+}
+
+TEST_CASE("regional atmosphere follows the lighting falloff and settles without height drift", "[lighting][atmosphere]") {
+    AtmosphereWorld world(regionalAir);
+    // Away from the hamlet, inside the region's full-weight sphere.
+    const auto centre = kZoneCentre - glm::vec3(0, 70, 0);
+    const auto inside = world.at(centre);
+    const auto raised = world.at(centre + glm::vec3(0, 0, 40));
+    CHECK(raised.baseHeight == Catch::Approx(inside.baseHeight).margin(.001));
+    CHECK(raised.scaleHeight == Catch::Approx(inside.scaleHeight).margin(.001));
+    const auto outside = world.at(kZoneCentre - glm::vec3(0, 300, 0));
+    const auto halfway = world.at(kZoneCentre - glm::vec3(0, 150, 0));
+    CHECK(halfway.baseHeight == Catch::Approx((inside.baseHeight + outside.baseHeight) * .5).margin(.001));
+    CHECK(halfway.scaleHeight == Catch::Approx((inside.scaleHeight + outside.scaleHeight) * .5).margin(.001));
+    CHECK(halfway.densityScale == Catch::Approx((inside.densityScale + outside.densityScale) * .5).margin(.001));
+    CHECK(inside.baseHeight > outside.baseHeight + 500);
+    CHECK(inside.densityScale > outside.densityScale * 1.19);
+    // A sudden move is temporally smoothed too, including density.
+    world.lighting.update(.016f, centre, 0, 0, 12.f, 0);
+    const auto moving = world.lighting.getLightingParams().atmosphere;
+    CHECK(moving.baseHeight > halfway.baseHeight);
+    CHECK(moving.baseHeight < inside.baseHeight);
+    const auto storm = world.at(centre, 1);
+    CHECK(storm.baseHeight == Catch::Approx(inside.baseHeight).margin(.001));
+    CHECK(storm.densityScale == Catch::Approx(inside.densityScale).margin(.001));
+}
+
+TEST_CASE("map atmosphere is inherited by local lights and rejected rows leave it usable", "[lighting][atmosphere]") {
+    AtmosphereWorld world(R"({"version":1,"default":{},"profiles":[
+        {"mapId":0,"lightId":1,"baseHeight":200,"scaleHeight":800,"densityScale":1.4},
+        {"mapId":0,"lightId":2,"scaleHeight":0},
+        {"mapId":0,"lightId":3,"densityScale":-1},
+        {"mapId":999,"lightId":2,"baseHeight":900},
+        {"mapId":0,"lightId":1,"baseHeight":900}
+    ]})");
+    const auto outside = world.at(kZoneCentre - glm::vec3(0, 300, 0));
+    const auto inside = world.at(kZoneCentre - glm::vec3(0, 70, 0));
+    CHECK(inside.baseHeight == Catch::Approx(outside.baseHeight).margin(.001));
+    CHECK(inside.densityScale == Catch::Approx(outside.densityScale).margin(.001));
+    CHECK(inside.baseHeight == Catch::Approx(200).margin(.001));
+    CHECK(inside.scaleHeight == Catch::Approx(800).margin(.001));
+}
+
+TEST_CASE("unreadable atmosphere data falls back to the original atmosphere", "[lighting][atmosphere]") {
+    AtmosphereWorld defaults(R"({"version":1,"default":{},"profiles":[]})");
+    const auto reference = defaults.at(kZoneCentre);
+    AtmosphereWorld broken("not json");
+    auto got = broken.at(kZoneCentre);
+    CHECK(got.baseHeight == Catch::Approx(reference.baseHeight));
+    CHECK(got.scaleHeight == Catch::Approx(reference.scaleHeight));
+    CHECK(got.densityScale == Catch::Approx(reference.densityScale));
+    REQUIRE(broken.lighting.initialize(&broken.assets, "nonexistent-atmosphere-profiles.json"));
+    got = broken.at(kZoneCentre);
+    CHECK(got.baseHeight == Catch::Approx(reference.baseHeight));
+    CHECK(got.scaleHeight == Catch::Approx(reference.scaleHeight));
+    CHECK(got.densityScale == Catch::Approx(reference.densityScale));
+}
+
+TEST_CASE("zone atmosphere survives flying above light volumes without leaking to other zones", "[lighting][atmosphere]") {
+    AtmosphereWorld world(R"({"version":1,"default":{},"profiles":[
+        {"mapId":0,"lightId":1,"baseHeight":100,"scaleHeight":300,"densityScale":1.1},
+        {"mapId":0,"zoneId":42,"baseHeight":600,"scaleHeight":600,"densityScale":1.6},
+        {"mapId":0,"lightId":2,"baseHeight":500,"scaleHeight":400,"densityScale":1.2}
+    ]})");
+    const auto outside = kZoneCentre - glm::vec3(0, 300, 0);
+    const auto inside = kZoneCentre - glm::vec3(0, 70, 0);
+    const auto other = world.at(outside, 0, 43);
+    const auto regional = world.at(outside, 0, 42);
+    CHECK(regional.baseHeight > other.baseHeight + 400);
+    CHECK(regional.densityScale > other.densityScale * 1.4);
+    const auto flying = world.at(outside + glm::vec3(0, 0, 1000), 1, 42);
+    CHECK(flying.baseHeight == Catch::Approx(regional.baseHeight).margin(.001));
+    CHECK(flying.densityScale == Catch::Approx(regional.densityScale).margin(.001));
+    const auto local = world.at(inside, 0, 42);
+    const auto localOther = world.at(inside, 0, 43);
+    CHECK(local.baseHeight == Catch::Approx(localOther.baseHeight).margin(.001));
+    CHECK(local.densityScale < regional.densityScale);
+    const auto edge = world.at(kZoneCentre - glm::vec3(0, 150, 0), 0, 42);
+    CHECK(edge.baseHeight == Catch::Approx((local.baseHeight + regional.baseHeight) * .5).margin(.001));
+    world.at(outside, 0, 42);
+    world.lighting.update(.016f, outside, 0, 43, 12.f, 0);
+    const auto crossing = world.lighting.getLightingParams().atmosphere;
+    CHECK(crossing.densityScale < regional.densityScale);
+    CHECK(crossing.densityScale > other.densityScale);
+    const auto returned = world.at(outside, 0, 43);
+    CHECK(returned.densityScale == Catch::Approx(other.densityScale).margin(.001));
+    for (int i = 0; i < 16; ++i) world.lighting.update(.25f, outside, 1, 42, 12.f, 0);
+    CHECK(world.lighting.getLightingParams().atmosphere.baseHeight < regional.baseHeight - 400);
+}
+
+TEST_CASE("invalid zone selectors cannot replace an existing atmosphere", "[lighting][atmosphere]") {
+    AtmosphereWorld world(R"({"version":1,"default":{},"profiles":[
+        {"mapId":0,"zoneId":42,"baseHeight":600,"densityScale":1.6},
+        {"mapId":0,"zoneId":42,"baseHeight":900,"densityScale":2},
+        {"mapId":0,"zoneId":43,"lightId":1,"baseHeight":900},
+        {"mapId":0,"zoneId":0,"baseHeight":900},
+        {"mapId":0,"zoneId":-1,"baseHeight":900},
+        {"mapId":0,"zoneId":43,"scaleHeight":0},
+        {"mapId":999,"zoneId":42,"baseHeight":900}
+    ]})");
+    const auto outside = kZoneCentre - glm::vec3(0, 300, 0);
+    const auto valid = world.at(outside, 0, 42);
+    const auto rejected = world.at(outside, 0, 43);
+    CHECK(valid.baseHeight == Catch::Approx(600).margin(.001));
+    CHECK(valid.densityScale == Catch::Approx(1.6).margin(.001));
+    CHECK(rejected.baseHeight == Catch::Approx(0).margin(.001));
+    CHECK(world.at(outside).baseHeight == Catch::Approx(rejected.baseHeight).margin(.001));
+}

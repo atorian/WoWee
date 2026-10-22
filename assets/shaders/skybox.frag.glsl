@@ -37,7 +37,6 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 lightningColor;
 };
 
-layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
 #include "sky_atmosphere.glsli"
 #include "aerial_frame.glsli"
