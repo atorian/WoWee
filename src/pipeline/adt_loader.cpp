@@ -60,6 +60,22 @@ ADTTerrain ADTLoader::load(const std::vector<uint8_t>& adtData) {
         if (header.magic == MVER) {
             parseMVER(chunkData, terrain);
         }
+        else if (header.magic == 0x4D484452) { // MHDR
+            if (chunkData.size() < 64) {
+                LOG_ERROR("ADT MHDR truncated: collision metadata unavailable");
+                terrain.collisionDataValid = false;
+            } else terrain.headerFlags = readUInt32(chunkData, 0);
+        }
+        else if (header.magic == 0x4D46424F) { // MFBO
+            if (chunkData.size() < 36) {
+                LOG_ERROR("ADT MFBO truncated: flight collision bounds unavailable");
+                terrain.collisionDataValid = false;
+            } else {
+                std::array<int16_t,18> bounds;
+                std::memcpy(bounds.data(), chunkData.data(), 36);
+                terrain.flightBounds = bounds;
+            }
+        }
         else if (header.magic == MTEX) {
             parseMTEX(chunkData, terrain);
         }
@@ -87,6 +103,12 @@ ADTTerrain ADTLoader::load(const std::vector<uint8_t>& adtData) {
         offset += 8 + chunkSize;
     }
 
+    if (!(terrain.headerFlags & 1)) terrain.flightBounds.reset();
+    else if (!terrain.flightBounds) {
+        LOG_ERROR("ADT MHDR requires missing MFBO: flight collision bounds unavailable");
+        terrain.collisionDataValid = false;
+    }
+    validateCollisionReferences(terrain);
     terrain.loaded = true;
 
     return terrain;
@@ -286,6 +308,42 @@ void ADTLoader::parseMODF(std::span<const uint8_t> data, ADTTerrain& terrain) {
     LOG_DEBUG("Loaded ", terrain.wmoPlacements.size(), " WMO placements");
 }
 
+void ADTLoader::parseCollisionReferences(std::span<const uint8_t> data, MapChunk& chunk, ADTTerrain& terrain) {
+    const uint32_t doodads = readUInt32(data, 16), buildings = readUInt32(data, 56);
+    const uint64_t count = uint64_t(doodads) + buildings;
+    if (!count) return;
+    const size_t offset = readUInt32(data, 32);
+    size_t header = data.size();
+    if (offset >= 136 && offset <= data.size() && readUInt32(data, offset-8) == MCRF) header = offset-8;
+    else if (offset >= 128 && offset < data.size() && readUInt32(data, offset) == MCRF) header = offset;
+    if (header > data.size() || data.size()-header < 8 ||
+        readUInt32(data, header+4) > data.size()-header-8 ||
+        count > readUInt32(data, header+4)/4) {
+        LOG_ERROR("ADT MCNK (", chunk.indexX, ",", chunk.indexY,
+                  ") has missing/truncated MCRF: collision object references unavailable");
+        terrain.collisionDataValid = false;
+        return;
+    }
+    chunk.doodadReferences.resize(doodads);
+    chunk.wmoReferences.resize(buildings);
+    for (size_t i=0; i<doodads; ++i) chunk.doodadReferences[i] = readUInt32(data, header+8+i*4);
+    for (size_t i=0; i<buildings; ++i) chunk.wmoReferences[i] = readUInt32(data, header+8+(size_t(doodads)+i)*4);
+}
+
+void ADTLoader::validateCollisionReferences(ADTTerrain& terrain) {
+    for (const auto& chunk : terrain.chunks) {
+        const bool badDoodad = std::any_of(chunk.doodadReferences.begin(),chunk.doodadReferences.end(),
+            [&](uint32_t id) { return id >= terrain.doodadPlacements.size(); });
+        const bool badWmo = std::any_of(chunk.wmoReferences.begin(),chunk.wmoReferences.end(),
+            [&](uint32_t id) { return id >= terrain.wmoPlacements.size(); });
+        if (badDoodad || badWmo) {
+            LOG_ERROR("ADT MCNK (", chunk.indexX, ",", chunk.indexY,
+                      ") references an absent MDDF/MODF placement: collision metadata invalid");
+            terrain.collisionDataValid = false;
+        }
+    }
+}
+
 void ADTLoader::parseMCNK(std::span<const uint8_t> data, int chunkIndex, ADTTerrain& terrain) {
     if (chunkIndex < 0 || chunkIndex >= 256) {
         LOG_WARNING("Invalid chunk index: ", chunkIndex);
@@ -304,6 +362,8 @@ void ADTLoader::parseMCNK(std::span<const uint8_t> data, int chunkIndex, ADTTerr
     chunk.indexX = readUInt32(data, 4);
     chunk.indexY = readUInt32(data, 8);
     chunk.areaId = readUInt32(data, 52);
+
+    parseCollisionReferences(data, chunk, terrain);
 
     // Read holes mask (at offset 0x3C = 60 in MCNK header)
     // Each bit represents a 2x2 block of the 8x8 quad grid
@@ -746,7 +806,8 @@ uint64_t heapBytes(const ADTTerrain& t) {
                      vectorBytes(t.wmoNames, string) + vectorBytes(t.doodadIds) +
                      vectorBytes(t.wmoIds) + vectorBytes(t.doodadPlacements) +
                      vectorBytes(t.wmoPlacements);
-    for (const MapChunk& c : t.chunks) total += vectorBytes(c.layers) + vectorBytes(c.alphaMap);
+    for (const MapChunk& c : t.chunks) total += vectorBytes(c.layers) + vectorBytes(c.alphaMap) +
+        vectorBytes(c.doodadReferences) + vectorBytes(c.wmoReferences);
     for (const auto& water : t.waterData) {
         total += vectorBytes(water.layers, [](const ADTTerrain::WaterLayer& l) {
             return vectorBytes(l.heights) + vectorBytes(l.mask);

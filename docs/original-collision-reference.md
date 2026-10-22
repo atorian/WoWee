@@ -297,3 +297,63 @@ world-supplied surface traversal, complete trajectories, movement-state transiti
 transports and emitted packets still need their own original-reference
 comparisons before the replacement is enabled for players. Passing this
 contact matrix is not a claim of full gameplay parity or immunity from bans.
+
+### Terrain boundaries, liquid facets and mover query envelope
+
+`CMap::CreateImpassableFacets` (0x7a43d0) agrees in 1017 original-code
+comparisons. It emits two vertical facets per selected horizontal side, in
+Y-min/Y-max/X-min/X-max order, using strict comparisons and 32000-yard edges.
+There is no extra vertical cull. The new API requires the owner to select
+impassable chunks; it does not invent an impassable flag from visual geometry.
+
+`CMap::GetChunkLiquidFacets` (0x7a3cf0), including `CChunkLiquid::GetTris`
+(0x7ce960/0x7ce5d0), agrees in 1014 x87 and host-SSE cases. These cover
+MH2O cell bits, MCLQ type nibbles, partial grids, cell ordering and Z outcodes.
+The API consumes original chunk-local vertices; grid construction, asset
+residency and WMO liquids are separate responsibilities still to integrate.
+
+`CMovement_C::GetMoveFacets` (0x75ff90) query preparation agrees in 2500
+original-code cases, including grounded/falling/swimming/flying extents,
+controlled/local flags, ghosts, water walking and flight-liquid transitions.
+The reference observes requests at `World::GetFacets`, supplying a resident
+empty world there; it does not replace any query-envelope arithmetic. There
+is no attached transport in these fixtures. Numeric spills matter: X centres,
+fall extents and expansion radii are retained in register precision where the
+original does so, while Y/Z centres are stored as binary32.
+
+`ValidateTestVsFacetQuery` (0x75f0a0) adds another 1200 query-envelope cases,
+including cache containment and expansion. `CollideRequestMove` (0x762e00)
+now has a service-driven unattached request entry: phase selection, remaining
+milliseconds, geometry refresh, liquid plane inversion and GroundNormal are
+compared together. The 3413-case matrix includes consecutive fall/jump frames,
+slopes, hover, world edges and unavailable initial/repeated queries.
+
+The matrix caught a missing FallDown failure branch: query failure must subtract
+skipped milliseconds from anchor/fall counters and call SkipTime before finishing.
+It also caught prematurely rounded step-probe normalization, even when final
+positions happened to agree. Both regressions failed before correction.
+
+The request fixture supplies world facets at World::GetFacets and observes
+CallMoveEventHandlers without executing unit/network delivery. It has no active
+spline or attached transport; transport requests are observed, not applied.
+This is not an outgoing-packet or production-integration reference. The query
+cache is explicit and retained by the dispatcher, so idle/rooted requests can
+still evaluate the last collected ground geometry.
+
+### Authored ADT references and flight bounds
+
+ADT loading now retains MCRF MDDF/MODF ordinals in authored order and MFBO's
+nine upper/nine lower signed heights. MHDR bit 1 controls participation.
+Truncated or out-of-range references and missing required bounds mark collision
+metadata invalid and log the failure. The new loader regression failed before
+the parser change. Rendering remains available when collision metadata fails.
+
+`CMap::CreateFlightBoundsFacets` at `0x7a4590` matches 1608 original calls,
+including signed-16 truncation/wrapping thresholds, sloped bounds, facet order
+and planes. Contrary to the earlier working hypothesis, `0x88b9c0` truncates;
+it is not nearest-integer FISTP rounding. The routine always uses the x87 plane
+constructor `0x7912c0`, irrespective of the facet SSE flag. Native Windows and
+ASan/UBSan comparisons pass. These retained bounds still require world wiring.
+
+The native collision/ADT selection passes 22/22 tests. The full sweep remains
+at or below its existing ceilings (optional data-dependent checks were skipped).

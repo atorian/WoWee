@@ -157,3 +157,21 @@ M2 progress: fixed the three-float authored-normal loader stride and retained
 normals through collision shape creation. Original GetCollisionFacets agrees
 in 1512 cases on Linux, native Windows and ASan/UBSan. This closes model-local
 facet generation, not whole-world collection order or movement integration.
+
+World-query progress: impassable boundaries agree in 1017 cases; terrain
+liquid facet selection agrees in 1014 x87/SSE cases; mover query extents and
+participation flags agree in 2500 cases. These APIs still need the world
+collector, repeated-query path and production dispatcher, not only phase probes.
+
+Request-dispatch progress: 3413 cases compare the unattached CollideRequestMove
+path, repeated geometry queries, liquid inversion, phase changes and event
+boundary calls. Query preparation/refresh has 3700 cases. Missing geometry in
+FallDown now follows the original skipped-time branch. Real world gathering,
+unit event delivery, active splines, transports and production integration are
+still required; this milestone does not close the overall checklist.
+
+ADT/flight progress: MCRF placement ordinals and MHDR-controlled MFBO bounds
+are retained, with explicit failure for corrupt references. Flight-bound facets
+match 1608 original calls; the native collision/ADT selection passes 22/22.
+Remaining loader gaps include original liquid vertex material formats, raw MCLQ
+participation and world links. The production movement path remains unchanged.

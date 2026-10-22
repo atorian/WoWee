@@ -2986,7 +2986,34 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_terrain.py
             --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_terrain_12340.json
             --probe $<TARGET_FILE:terrain_facet_probe>)
+    add_test(NAME original_collision_movement_request
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_request.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_movement_request_12340.json
+            --probe $<TARGET_FILE:movement_surface_probe>)
+    add_test(NAME original_collision_movement_query
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_query.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_movement_query_12340.json
+            --probe $<TARGET_FILE:movement_surface_probe>)
+    add_test(NAME original_collision_flight_bounds
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_terrain.py --flight
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_flight_bounds_12340.json
+            --probe $<TARGET_FILE:terrain_facet_probe>)
+    add_test(NAME original_collision_impassable
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_terrain.py --impassable
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_impassable_12340.json
+            --probe $<TARGET_FILE:terrain_facet_probe>)
+    add_test(NAME original_collision_liquid
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_terrain.py --liquid
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_liquid_12340.json
+            --probe $<TARGET_FILE:terrain_facet_probe>)
 endif()
+
+# Authored ADT collision references and flight-bound participation.
+wowee_add_test(test_adt_collision
+    SOURCES test_adt_collision.cpp
+            ${TEST_COMMON_SOURCES}
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
 
 # Original authored M2 collision input and facet assembly.
 wowee_add_test(test_m2_collision SOURCES test_m2_collision.cpp)

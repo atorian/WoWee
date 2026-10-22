@@ -16,4 +16,17 @@ struct TerrainFacetCells { int minX, minY, maxX, maxY; };
     std::span<const float, 145> heights, uint16_t holes, const glm::vec3& corner,
     TerrainFacetCells cells, const glm::vec3& queryMin, const glm::vec3& queryMax,
     FacetNormalization normalization);
+// Build 12340 CMap::CreateImpassableFacets (0x7a43d0). The caller selects
+// chunks carrying the impassable flag. Bounds and query use original world
+// coordinates. Selection is strictly horizontal; no vertical clipping.
+[[nodiscard]] std::vector<MovementFacet> queryImpassableTerrainFacets(
+    const glm::vec3& chunkMin, const glm::vec3& chunkMax,
+    const glm::vec3& queryMin, const glm::vec3& queryMax);
+// Build 12340 CMap::CreateFlightBoundsFacets (0x7a4590). Upper nine
+// heights precede lower nine; corner is the map area's authored top-left.
+// Original culling truncates Z+/-1 to signed 32 bits, then takes signed low 16.
+// Finite query heights must fit int32 after that adjustment.
+[[nodiscard]] std::vector<MovementFacet> queryFlightBoundsFacets(
+    std::span<const int16_t,18> heights, const glm::vec3& corner,
+    float queryMinZ, float queryMaxZ);
 } // namespace wowee::collision

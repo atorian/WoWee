@@ -105,13 +105,17 @@ class OriginalCollision:
         self.transport_request = None
         self.fall_reset = None
         body = self.alloc(bytes(0x500))
-        unit = self.alloc(bytes(0x1000))
+        unit = self.alloc(bytes(0x2000))
         fields = self.alloc(bytes(0x1000))
         object_fields = self.alloc(struct.pack('<QII', 1, 0x10 if case.get('client_controlled', True) else 0x8, 0))
         def write(address, fmt, *values):
             cpu.mem_write(address, struct.pack('<' + fmt, *values))
         write(unit + 8, 'I', object_fields)
         write(unit + 0xd0, 'I', fields)
+        write(unit + 0xa30, 'I', 0x400 if case.get('local',False) else 0)
+        player=self.alloc(bytes(16))
+        write(player+8,'I',0x10 if case.get('ghost',False) else 0)
+        write(unit+0x1008,'I',player)
         write(body + 0x144, 'I', unit)
         write(body + 0x28, 'I', object_fields)
         write(body + 0x10, '3f', *case['position'])
@@ -144,13 +148,19 @@ class OriginalCollision:
         liquid_data = self.alloc(b''.join(struct.pack('<13f', *(t['plane'] + sum(t['vertices'], []))) for t in liquid) or bytes(16))
         liquid_ids = self.alloc(b''.join(struct.pack('<Q', t.get('owner', 0)) for t in liquid) or bytes(8))
         write(0xadba54, '8I', len(liquid), len(liquid), liquid_data, 0, len(liquid), len(liquid), liquid_ids, 0)
-        write(0xca1660, '6f', -100000, -100000, -100000, 100000, 100000, 100000)
+        write(0xca1660, '6f', *case.get('cached_box',[-100000,-100000,-100000,100000,100000,100000]))
         direction = self.floats(case['direction'][:2])
         distance_bits = struct.unpack('<I', struct.pack('<f', case['distance']))[0]
         stack = 0x30ff000
         write(stack, '5I', 0x1000000, case.get('time', 1000), case.get('elapsed', 16), distance_bits, direction)
         if routine in (0x760b40, 0x762980):
             write(stack, '4I3f', 0x1000000, case.get('time', 1000), case.get('elapsed', 16), distance_bits, *case['swim_direction'])
+        if routine == 0x762e00:
+            write(stack,'3I3f',0x1000000,case.get('time',1000),case.get('elapsed',16),*case['swim_direction'])
+        if routine == 0x75f0a0:
+            write(stack,'I3f',0x1000000,*case['swim_direction'])
+        if routine == 0x75ff90:
+            write(stack,'3I3f',0x1000000,distance_bits,case.get('elapsed',16),*case['swim_direction'])
         cpu.reg_write(UC_X86_REG_ESP, stack)
         cpu.reg_write(UC_X86_REG_ECX, body)
         cpu.reg_write(UC_X86_REG_FPCW, self.control_word)
@@ -175,7 +185,7 @@ class OriginalCollision:
             values = struct.unpack('<' + fmt, cpu.mem_read(body + offset, struct.calcsize(fmt)))
             result[name] = values[0] if len(values) == 1 else list(values)
         result['transport'] = self.transport_request
-        if routine in (0x7618b0, 0x760b40, 0x762980, 0x75ee60):
+        if routine in (0x7618b0, 0x760b40, 0x762980, 0x75ee60, 0x762e00):
             result['ground_normal'] = list(struct.unpack('<3f', cpu.mem_read(body + 0x38, 12)))
             result['fall_reset'] = self.fall_reset
         return result

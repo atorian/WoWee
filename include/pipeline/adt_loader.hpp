@@ -5,6 +5,7 @@
 #include <string>
 #include <cstdint>
 #include <array>
+#include <optional>
 
 namespace wowee {
 namespace pipeline {
@@ -58,6 +59,9 @@ struct MapChunk {
     std::array<uint8_t, 16> doodadMapping{};
     float position[3] = {};  // World position (X, Y, Z)
 
+    // MCRF ordinals into the tile's MDDF/MODF tables, in authored order.
+    std::vector<uint32_t> doodadReferences;
+    std::vector<uint32_t> wmoReferences;
     HeightMap heightMap;
     std::vector<TextureLayer> layers;
     std::vector<uint8_t> alphaMap;  // Alpha blend maps for layers
@@ -161,6 +165,11 @@ struct ADTTerrain {
         [[nodiscard]] bool hasWater() const { return !layers.empty(); }
     };
 
+    uint32_t headerFlags = 0;
+    // MFBO: nine upper and nine lower authored flight-bound heights.
+    std::optional<std::array<int16_t,18>> flightBounds;
+    bool collisionDataValid = true;
+
     std::array<ChunkWater, 256> waterData;  // Water for each chunk
 
     MapChunk& getChunk(int x, int y) { return chunks[y * 16 + x]; }
@@ -228,6 +237,8 @@ private:
     static void parseMWMO(std::span<const uint8_t> data, ADTTerrain& terrain);
     static void parseMDDF(std::span<const uint8_t> data, ADTTerrain& terrain);
     static void parseMODF(std::span<const uint8_t> data, ADTTerrain& terrain);
+    static void parseCollisionReferences(std::span<const uint8_t> data, MapChunk& chunk, ADTTerrain& terrain);
+    static void validateCollisionReferences(ADTTerrain& terrain);
     static void parseMCNK(std::span<const uint8_t> data, int chunkIndex, ADTTerrain& terrain);
 
     static void parseMCVT(std::span<const uint8_t> data, MapChunk& chunk);

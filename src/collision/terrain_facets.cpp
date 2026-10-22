@@ -95,4 +95,59 @@ std::optional<std::vector<MovementFacet>> queryTerrainFacets(
     }
     return result;
 }
+std::vector<MovementFacet> queryImpassableTerrainFacets(
+    const glm::vec3& low, const glm::vec3& high,
+    const glm::vec3& queryMin, const glm::vec3& queryMax) {
+    std::vector<MovementFacet> result;
+    auto wall = [&](const glm::vec3& origin, const glm::vec3& edge, const glm::vec3& normal) {
+        const glm::dvec3 up(0, 0, 32000);
+        const auto start = glm::dvec3(origin);
+        const auto end = start + glm::dvec3(edge);
+        const MovementPlane plane{normal, float(-((double(normal.z) * origin.z +
+            double(normal.x) * origin.x) + double(normal.y) * origin.y))};
+        MovementFacet first;
+        first.plane = plane;
+        first.vertices = {origin, glm::vec3(end), glm::vec3(end + up)};
+        result.push_back(first);
+        first.vertices = {origin, glm::vec3(end + up), glm::vec3(start + up)};
+        result.push_back(first);
+    };
+    if (low.y > queryMin.y)
+        wall(low, {high.x - low.x, 0, 0}, {0, -1, 0});
+    if (high.y < queryMax.y)
+        wall({high.x, high.y, low.z}, {low.x - high.x, 0, 0}, {0, 1, 0});
+    if (low.x > queryMin.x)
+        wall({low.x, high.y, low.z}, {0, low.y - high.y, 0}, {-1, 0, 0});
+    if (high.x < queryMax.x)
+        wall({high.x, low.y, low.z}, {0, high.y - low.y, 0}, {1, 0, 0});
+    return result;
+}
+std::vector<MovementFacet> queryFlightBoundsFacets(
+    std::span<const int16_t,18> heights, const glm::vec3& corner,
+    float queryMinZ, float queryMaxZ) {
+    constexpr std::array<int,24> faces{3,0,4,0,1,4,1,2,4,2,5,4,5,8,4,8,7,4,7,6,4,6,3,4};
+    constexpr std::array<float,3> offsets{0.0f,-266.6666564941406f,-533.3333129882812f};
+    const auto cut=[](double z) {
+        assert(z >= -2147483648.0 && z < 2147483648.0);
+        return std::bit_cast<int16_t>(uint16_t(int32_t(z)));
+    };
+    const int16_t top=cut(double(queryMaxZ)+1), bottom=cut(double(queryMinZ)-1);
+    std::vector<MovementFacet> result;
+    for (int side=0;side<2;++side) {
+        for (size_t tri=0;tri<faces.size();tri+=3) {
+            auto outside=[&](int i) { return side ? bottom>heights[9+i] : top<heights[i]; };
+            if (outside(faces[tri]) && outside(faces[tri+1]) && outside(faces[tri+2])) continue;
+            MovementFacet facet;
+            for (int j=0;j<3;++j) {
+                const int i=faces[tri+j];
+                facet.vertices[side && j ? 3-j : j]={
+                    float(double(offsets[i/3])+corner.x),float(double(offsets[i%3])+corner.y),
+                    float(heights[side*9+i])};
+            }
+            facet.plane=terrainPlane(facet.vertices,FacetNormalization::X87);
+            result.push_back(facet);
+        }
+    }
+    return result;
+}
 } // namespace wowee::collision

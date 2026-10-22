@@ -1,4 +1,6 @@
 #include "collision/movement_surface.hpp"
+#include "collision/movement_query.hpp"
+#include "collision/movement_request.hpp"
 #include "collision/detail/movement_geometry.hpp"
 
 #include <algorithm>
@@ -24,6 +26,30 @@ MOVEMENTFLAG_PENDING_FORWARD=0x10000,MOVEMENTFLAG_PENDING_BACKWARD=0x20000,
 MOVEMENTFLAG_PENDING_STRAFE_LEFT=0x40000,MOVEMENTFLAG_PENDING_STRAFE_RIGHT=0x80000,
 MOVEMENTFLAG2_NO_STRAFE=1;
 
+struct RequestGeometry {
+    MovementFacetSource& source;
+    bool local,ghost;
+    MovementRequestCache& cache;
+    MovementGeometryStatus status=MovementGeometryStatus::Ready;
+    std::vector<MovementRequestEvent>* events=nullptr;
+    bool acquire(const MovementFacetRequest& request) {
+        cache.solids.clear();
+        auto next=source.query(request,request.solidFlags,cache.solids);
+        if (next!=MovementGeometryStatus::Ready) { status=next;return false; }
+        cache.liquids.clear();
+        if (request.queryLiquid) {
+            next=source.query(request,0x20000,cache.liquids);
+            if (next!=MovementGeometryStatus::Ready) status=next;
+            for (auto& facet:cache.liquids) {
+                facet.plane.normal=-facet.plane.normal;
+                facet.plane.offset=-facet.plane.offset;
+            }
+        }
+        cache.request=request;
+        return true;
+    }
+};
+
 // Original functions retain their names for comparison with build 12340.
 // See docs/original-collision-reference.md. Explicit double intermediates and
 // float stores preserve the original x87 spill boundaries; do not reassociate.
@@ -34,11 +60,25 @@ struct SurfaceTraversal {
     bool clientControlled;
     std::optional<uint64_t> transportRequest;
     std::optional<uint32_t> fallResetTime;
+    RequestGeometry* geometry=nullptr;
+    bool ValidateTestVsFacetQuery(const C3Vector& displacement) {
+        if (!geometry) return true;
+        const SurfaceMovementShape shape{m_collisionRadius,m_collisionHeight,m_stepUpHeight,clientControlled};
+        auto expanded=expandMovementFacetRequest(geometry->cache.request,state,shape,displacement,geometry->local,geometry->ghost);
+        if (!expanded) return true;
+        const bool ready=geometry->acquire(*expanded);
+        facets=geometry->cache.solids;
+        return ready;
+    }
+
     static constexpr float s_terminalVelocity = 60.148003f, s_safeFallTerminalVelocity = 7;
     static constexpr uint8_t s_volumeEdges[32] = {0,1,0,2,0,3,0,4,1,2,2,3,3,4,4,1,1,5,2,6,3,7,4,8,5,6,6,7,7,8,8,5};
     int DistanceToMove(const C3Vector& dir, float distance,
                        uint32_t* index, C4Plane* planes, uint32_t* count,
-                       float* allowed) const {
+                       float* allowed) {
+        *count=0;
+        if (std::abs(distance)>=9.5367432e-7f &&
+            !ValidateTestVsFacetQuery(dir*std::max(distance,.027777778f))) { *allowed=0;return 0; }
         const auto hit = traceMovementBody(facets,
             MovementBody(state.position, m_collisionRadius, m_collisionHeight), dir, distance);
         *index = hit.facet;
@@ -46,6 +86,129 @@ struct SurfaceTraversal {
         *allowed = hit.distance;
         std::copy_n(hit.planes.data(), hit.planeCount, planes);
         return 1;
+    }
+    MovementRequestResult CollideRequestMove(RequestGeometry& world, const C3Vector& move,
+                                             uint32_t time,uint32_t elapsed) {
+        MovementRequestResult result;
+        world.events=&result.events;
+        if (!elapsed) return result;
+        const C3Vector target=state.position+move;
+        const float margin=m_collisionRadius+71.375595f;
+        const double mapX=17066.666f-double(target.x),mapY=17066.666f-double(target.y);
+        if (!std::isfinite(target.x) || !std::isfinite(target.y) || !std::isfinite(target.z) ||
+            mapX<margin || mapY<margin || mapX>=34133.332f-double(margin) || mapY>=34133.332f-double(margin)) {
+            result.elapsedMs=elapsed;return result;
+        }
+        const double vertical=state.flags&(MOVEMENTFLAG_SWIMMING|MOVEMENTFLAG_FLYING)?move.z:0;
+        const double length=std::sqrt((double(move.y)*move.y+double(move.x)*move.x)+vertical*vertical);
+        const float speed=float(length/(double(elapsed)*.001f));
+        C3Vector direction{0};
+        if (std::abs(length)>=9.5367432e-7f)
+            direction={float(move.x*(1.0/length)),float(move.y*(1.0/length)),float(vertical*(1.0/length))};
+        uint32_t consumed=0;
+        while ((state.flags&0x40c0100f) && !(state.flags&MOVEMENTFLAG_ROOT) && consumed<elapsed) {
+            const uint32_t step=elapsed-consumed;
+            const float distance=float(double(step)*.001f*speed);
+            const auto request=GetMoveFacetRequest(direction,distance,step,world.local,world.ghost);
+            const bool ready=world.acquire(request);
+            facets=world.cache.solids;
+            if (!ready) {
+                result.events.push_back({MovementRequestEvent::Kind::SkipTime,step,0,0,0,false});
+                state.anchorElapsedMs-=step;
+                consumed=elapsed;
+                break;
+            }
+            const uint32_t oldFlags=state.flags,oldFlags2=state.flags2;
+            const bool jumping=(oldFlags&MOVEMENTFLAG_FALLING) && state.fallVelocity!=0;
+            const float oldSpeed=state.currentSpeed;
+            uint32_t used;
+            if (state.flags&(MOVEMENTFLAG_SWIMMING|MOVEMENTFLAG_FLYING))
+                used=Swim(world.cache.liquids,step,distance,direction);
+            else if (state.flags&MOVEMENTFLAG_FALLING) used=Fall(time+consumed,step,distance,C2Vector(direction));
+            else if (state.flags&0x40000000) used=HoverMove(time+consumed,step,distance,direction);
+            else used=TraceSurface(step,distance,C2Vector(direction));
+            consumed+=used;
+            result.events.push_back({MovementRequestEvent::Kind::StateChanged,time+consumed,
+                                    elapsed-consumed,oldFlags,oldFlags2,jumping});
+            if (!(state.flags&MOVEMENTFLAG_FALLING) && (oldFlags&MOVEMENTFLAG_FALLING)) {
+                const uint32_t unused=step-used;
+                state.anchorElapsedMs=state.anchorElapsedMs>=unused ? state.anchorElapsedMs-unused : 0;
+                break;
+            }
+            if (state.currentSpeed!=oldSpeed) { CalcCurrentSpeed(0);break; }
+            if (!state.anchorElapsedMs && (state.flags&15)) state.anchorElapsedMs=elapsed-consumed;
+        }
+        state.groundNormal=queryMovementGroundNormal(facets,MovementBody(state.position,m_collisionRadius,m_collisionHeight));
+        result.elapsedMs=consumed;
+        result.geometryStatus=world.status;
+        result.transportRequest=transportRequest;
+        result.fallResetTime=fallResetTime;
+        return result;
+    }
+    MovementFacetRequest BodyFacetRequest(bool local,bool ghost) const {
+        MovementFacetRequest result;
+        const auto position=state.position;
+        result.bodyMin={position.x-m_collisionRadius,position.y-m_collisionRadius,position.z};
+        result.bodyMax={position.x+m_collisionRadius,position.y+m_collisionRadius,position.z+m_collisionHeight};
+        result.solidFlags=clientControlled ? 0x100111 : 0x102111;
+        if (local) result.solidFlags|=0x80000000;
+        if ((state.flags&0x10000000) && !(state.flags&MOVEMENTFLAG_SWIMMING) &&
+            (state.pitch>-.6457718f || (state.flags2&0x200))) result.solidFlags|=0x10000;
+        if (state.flags&MOVEMENTFLAG_FLYING) {
+            result.solidFlags|=0x200;
+            if (!(state.flags2&0x4000)) result.solidFlags|=0x20000;
+        }
+        if (ghost) result.solidFlags|=0x8000;
+        result.queryLiquid=bool(state.flags&MOVEMENTFLAG_SWIMMING);
+        result.queryMin=result.bodyMin;result.queryMax=result.bodyMax;
+        return result;
+    }
+    MovementFacetRequest GetMoveFacetRequest(const C3Vector& direction, float distance,
+                                             uint32_t elapsed, bool local, bool ghost) const {
+        auto result=BodyFacetRequest(local,ghost);
+        const auto position=state.position;
+        auto& low=result.queryMin;
+        auto& high=result.queryMax;
+        low=result.bodyMin;high=result.bodyMax;
+        auto extend=[&](const C3Vector& a,const C3Vector& b) {
+            low=glm::min(low,a);high=glm::max(high,b);
+        };
+        C3Vector move=direction*distance;
+        if (state.flags & MOVEMENTFLAG_FALLING) {
+            const double vertical=double(move.z)-RelDistanceFallen(elapsed+state.fallTimeMs);
+            const glm::dvec3 delta(move.x,move.y,vertical);
+            extend(glm::vec3(glm::dvec3(low)+delta),glm::vec3(glm::dvec3(high)+delta));
+            const double spread=double(float(vertical))*-1.1866661f;
+            if (spread>0) {
+                low.x=float(low.x-spread);low.y=float(low.y-spread);
+                high.x=float(high.x+spread);high.y=float(high.y+spread);
+            }
+        } else if (state.flags & (MOVEMENTFLAG_SWIMMING|MOVEMENTFLAG_FLYING)) {
+            const double half=double(distance)*.5f;
+            glm::dvec3 center=glm::dvec3(direction)*half+glm::dvec3(position);
+            center.y=float(center.y);center.z=float(center.z);
+            const double radius=double(m_collisionRadius)*1.4142135f;
+            const double height=std::max(radius,double(m_collisionHeight));
+            extend({float(center.x-half-radius),float(center.y-half-radius),float(center.z-half)},
+                   {float(center.x+half+radius),float(center.y+half+radius),float(half+center.z+height)});
+        } else {
+            double reach=float(m_collisionRadius+0.0013888889f);
+            if (reach<double(GetStepUpHeight())*1.1917536f) reach=double(GetStepUpHeight())*1.1917536f;
+            const double extent=reach+distance;
+            const glm::dvec3 extra=glm::dvec3(direction)*extent;
+            extend(glm::vec3(glm::dvec3(low)+extra),glm::vec3(glm::dvec3(high)+extra));
+            const double half=double(distance)*.5f;
+            glm::dvec3 center=glm::dvec3(direction)*half+glm::dvec3(position);
+            center.y=float(center.y);center.z=float(center.z);
+            const double radius=half+double(m_collisionRadius)*1.4142135f;
+            extend({float(center.x-radius),float(center.y-radius),float(center.z)},
+                   {float(center.x+radius),float(center.y+radius),float(center.z)});
+            const float up=std::max(distance,GetStepUpHeight()+GetStepUpHeight());
+            high.z=up+high.z;
+            low.z=float(double(low.z)-(double(GetStepUpHeight())+double(distance)*1.1917536f));
+        }
+        for (int axis=0;axis<3;++axis) { low[axis]-=0.0013888889f;high[axis]+=0.0013888889f; }
+        return result;
     }
     void IntersectPlanes(const C4Plane& a, const C4Plane& b, const C4Plane& c, C3Vector& point) {
         const auto matrix = glm::transpose(glm::mat3(a.normal,b.normal,c.normal));
@@ -803,19 +966,26 @@ struct SurfaceTraversal {
         float remaining = distance;
         uint32_t stuck = 0;
         bool hitSolid = false, moved = false;
-        auto query = [&](std::span<const MovementFacet> input, bool liquid) {
+        bool queryReady=true;
+        auto query = [&](bool liquid) {
+            queryReady=ValidateTestVsFacetQuery(direction*std::max(remaining,.027777778f));
+            if (geometry) liquids=geometry->cache.liquids;
+            const auto input=liquid?liquids:facets;
             const float height = liquid && (state.flags & MOVEMENTFLAG_SWIMMING)
                                ? m_collisionHeight * 0.75f : m_collisionHeight;
             return traceMovementBody(input, MovementBody(state.position, m_collisionRadius, height), direction, remaining);
         };
-        auto hit = query(facets, false);
+        auto hit = query(false);
+        if (!queryReady) return elapsed;
         while (true) {
             auto input = facets;
             if (hit.facet < facets.size()) hitSolid = true;
             else {
                 if (!hitSolid && !IsGravityDisabled()) {
                     input = liquids;
-                    hit = query(liquids, true);
+                    hit = query(true);
+                    if (!queryReady) return elapsed;
+                    input=liquids;
                 }
                 if (hit.facet == input.size()) {
                     state.position += direction * hit.distance;
@@ -854,7 +1024,8 @@ struct SurfaceTraversal {
             if (fabs(length) < 0.00000095367432f) break;
             double scale = 1.0 / length;
             direction = C3Vector(x * scale, double(direction.y) * scale, double(direction.z) * scale);
-            hit = query(facets, false);
+            hit = query(false);
+            if (!queryReady) return elapsed;
         }
         if (moved) UpdateAnchors(0);
         return elapsed;
@@ -868,6 +1039,7 @@ struct SurfaceTraversal {
     // 0x0075f520, with resident geometry. Only lower body faces participate.
     bool GetCurrentHoverHeight(float* height, int32_t* noGround, uint64_t* owner) {
         const float distance = state.hoverHeight + state.hoverHeight;
+        if (!ValidateTestVsFacetQuery({0,0,-distance})) { *height=0;return false; }
         auto hit = detail::traceMovementPyramid(facets,
             MovementBody(state.position, m_collisionRadius, m_collisionHeight), C3Vector(0,0,-1), distance);
         *height = hit.distance;
@@ -1075,6 +1247,15 @@ struct SurfaceTraversal {
                 C3Vector direction(move.x * scale, move.y * scale, move.z * scale);
                 float fallTime = startTime + timeFallen;
                 int32_t result = TryFallingDown(fallTime, &move, &distance, &push, &transport, &onSlope, &landed);
+                if (result==2) {
+                    const uint32_t skip=uint32_t(std::nearbyint(float((double(totalTime)-timeFallen)*1000.0f)));
+                    state.anchorElapsedMs-=skip;
+                    state.fallTimeMs-=skip;
+                    if (geometry && geometry->events)
+                        geometry->events->push_back({MovementRequestEvent::Kind::SkipTime,skip,0,0,0,false});
+                    endTime=totalTime;
+                    goto finish;
+                }
 
                 double dt = result ? GetTimeJustFallen(totalTime - timeFallen, fallTime, &move, &distance, landed, length2D) : double(totalTime) - timeFallen;
                 state.position.x = state.position.x + move.x;
@@ -1276,7 +1457,7 @@ struct SurfaceTraversal {
         float moveDist;
 
         if (normal.z <= 0.64278764f && normal.z >= 0.0f) {
-            float scale = 1.0f / sqrt(normal.x * normal.x + normal.y * normal.y);
+            double scale = 1.0 / sqrt(double(normal.x) * normal.x + double(normal.y) * normal.y);
             move.x = -(normal.x * scale);
             move.y = -(normal.y * scale);
             C3Vector probe(move.x, move.y, 0.0f);
@@ -1963,5 +2144,39 @@ SurfaceMovementResult traceMovementHover(std::span<const MovementFacet> facets,
                                shape.stepHeight, shape.clientControlled, std::nullopt, std::nullopt};
     const auto used = traversal.HoverMove(timeMs, elapsedMs, distance, direction);
     return {used, traversal.transportRequest, traversal.fallResetTime};
+}
+MovementFacetRequest makeMovementFacetRequest(const SurfaceMovementState& state,
+    const SurfaceMovementShape& shape, const glm::vec3& direction, float distance,
+    uint32_t elapsedMs, bool locallyControlled, bool ghost) {
+    auto copy=state;
+    SurfaceTraversal traversal{{}, copy, shape.radius, shape.height,
+                               shape.stepHeight, shape.clientControlled, std::nullopt, std::nullopt};
+    return traversal.GetMoveFacetRequest(direction,distance,elapsedMs,locallyControlled,ghost);
+}
+std::optional<MovementFacetRequest> expandMovementFacetRequest(
+    const MovementFacetRequest& cached, const SurfaceMovementState& state,
+    const SurfaceMovementShape& shape, const glm::vec3& displacement,
+    bool locallyControlled, bool ghost) {
+    auto copy=state;
+    SurfaceTraversal traversal{{}, copy, shape.radius, shape.height,
+                               shape.stepHeight, shape.clientControlled, std::nullopt, std::nullopt};
+    auto result=traversal.BodyFacetRequest(locallyControlled,ghost);
+    const auto low=result.bodyMin+displacement,high=result.bodyMax+displacement;
+    if (glm::all(glm::greaterThanEqual(low,cached.queryMin)) &&
+        glm::all(glm::lessThanEqual(low,cached.queryMax)) &&
+        glm::all(glm::greaterThanEqual(high,cached.queryMin)) &&
+        glm::all(glm::lessThanEqual(high,cached.queryMax))) return std::nullopt;
+    result.queryMin=glm::min(low-glm::vec3(.16666667f),cached.queryMin);
+    result.queryMax=glm::max(high+glm::vec3(.16666667f),cached.queryMax);
+    return result;
+}
+MovementRequestResult traceUnattachedMovementRequest(MovementFacetSource& world,
+    MovementRequestCache& cache,SurfaceMovementState& state,const SurfaceMovementShape& shape,
+    const glm::vec3& displacement,uint32_t timeMs,uint32_t elapsedMs,
+    bool locallyControlled,bool ghost) {
+    RequestGeometry geometry{world,locallyControlled,ghost,cache,MovementGeometryStatus::Ready};
+    SurfaceTraversal traversal{cache.solids,state,shape.radius,shape.height,shape.stepHeight,
+        shape.clientControlled,std::nullopt,std::nullopt,&geometry};
+    return traversal.CollideRequestMove(geometry,displacement,timeMs,elapsedMs);
 }
 } // namespace wowee::collision
