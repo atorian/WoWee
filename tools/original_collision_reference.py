@@ -134,6 +134,8 @@ class OriginalCollision:
         write(body + 0x80, 'I', case.get('fall_time', 0))
         write(body + 0x84, 'f', case.get('fall_start', 0))
         write(body + 0x8c, 'f', case.get('current_speed', 0))
+        write(body + 0xac, '2f', case.get('turn_rate',0),case.get('pitch_rate',0))
+        write(body + 0x134, 'I',case.get('move_start_delay',0))
         write(body + 0xb4, 'f', case.get('hover_height', 0))
         write(body + 0xb8, 'f', case.get('fall_velocity', 0))
         write(body + 0x38, '3f', *case.get('ground_normal', [0, 0, 0]))
@@ -170,6 +172,8 @@ class OriginalCollision:
             write(stack, '4I3f', 0x1000000, case.get('time', 1000), case.get('elapsed', 16), distance_bits, *case['swim_direction'])
         if routine == 0x762e00:
             write(stack,'3I3f',0x1000000,case.get('time',1000),case.get('elapsed',16),*case['swim_direction'])
+        if routine == 0x6eac40:
+            write(stack,'3I',0x1000000,case.get('time',1000),case.get('elapsed',16))
         if routine == 0x75f0a0:
             write(stack,'I3f',0x1000000,*case['swim_direction'])
         if routine == 0x75ff90:
@@ -198,9 +202,13 @@ class OriginalCollision:
             values = struct.unpack('<' + fmt, cpu.mem_read(body + offset, struct.calcsize(fmt)))
             result[name] = values[0] if len(values) == 1 else list(values)
         result['transport'] = self.transport_request
-        if routine in (0x7618b0, 0x760b40, 0x762980, 0x75ee60, 0x762e00):
+        if routine in (0x7618b0, 0x760b40, 0x762980, 0x75ee60, 0x762e00, 0x6eac40):
             result['ground_normal'] = list(struct.unpack('<3f', cpu.mem_read(body + 0x38, 12)))
             result['fall_reset'] = self.fall_reset
+        if routine==0x6eac40:
+            result['pitch_cos'],result['pitch_sin']=struct.unpack('<2f',cpu.mem_read(body+0x78,8))
+            result['facing'],result['pitch']=struct.unpack('<2f',cpu.mem_read(body+0x20,8))
+            result['move_start_delay']=struct.unpack('<I',cpu.mem_read(body+0x134,4))[0]
         return result
 
     def distance_to_move(self, case):

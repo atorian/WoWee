@@ -3,6 +3,7 @@
 #include "collision/movement_query.hpp"
 #include "collision/movement_dimensions.hpp"
 #include "collision/movement_request.hpp"
+#include "collision/movement_frame.hpp"
 #include "world_facet_fixture.hpp"
 #include <iomanip>
 #include <iostream>
@@ -25,7 +26,8 @@ struct SuppliedWorld : wowee::collision::MovementFacetSource {
 };
 
 int main(int argc, char** argv) {
-    const bool fullWorld = argc == 2 && std::string(argv[1]) == "--world-request";
+    const bool apply = argc == 2 && std::string(argv[1]) == "--world-apply";
+    const bool fullWorld = apply || argc == 2 && std::string(argv[1]) == "--world-request";
     const bool frame = fullWorld || (argc == 2 && std::string(argv[1]) == "--request");
     const bool dimensions = argc == 2 && std::string(argv[1]) == "--dimensions";
     const bool query = dimensions || (argc == 2 && std::string(argv[1]) == "--query");
@@ -123,7 +125,11 @@ int main(int argc, char** argv) {
                 scene=std::make_unique<world_fixture::Scene>(settings);world.collection=scene->source.get();
             }
             MovementRequestCache cache;
-            frameResult=traceUnattachedMovementRequest(world,cache,state,shape,swimDirection,time,elapsed,local,ghost);
+            if(apply) {
+                bool active;
+                if(!(std::cin>>active>>state.moveStartDelayMs>>state.turnRate>>state.pitchRate>>state.pitchCos>>state.pitchSin))return 2;
+                frameResult=applyUninterpolatedMovement(world,cache,state,shape,time,elapsed,active,local,ghost);
+            } else frameResult=traceUnattachedMovementRequest(world,cache,state,shape,swimDirection,time,elapsed,local,ghost);
         }
         if (ground) state.groundNormal = queryMovementGroundNormal(facets, MovementBody(state.position, shape.radius, shape.height));
         const auto result = frame ? SurfaceMovementResult{frameResult.elapsedMs,frameResult.transportRequest,frameResult.fallResetTime}
@@ -141,6 +147,7 @@ int main(int argc, char** argv) {
         vector("anchor_position", state.anchorPosition);
         vector("move_direction", state.direction);
         std::cout << ",\"move_direction_2d\":[" << state.direction2D.x << ',' << state.direction2D.y << ']';
+        if(apply) {number("pitch_cos",state.pitchCos);number("pitch_sin",state.pitchSin);number("facing",state.facing);number("pitch",state.pitch);number("move_start_delay",state.moveStartDelayMs);}
         number("flags", state.flags);
         number("step_start", state.stepStartZ);
         number("elapsed", result.elapsedMs);

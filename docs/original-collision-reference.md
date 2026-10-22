@@ -437,3 +437,33 @@ entity collision-data provider remain external fixture boundaries. The scene is
 shared by both C++ front doors through `tests/world_facet_fixture.hpp`, whose
 members own all geometry and cross-list references. Linux and native Windows
 comparisons pass; the native collision/ADT selection now passes 37/37 tests.
+
+## Projection and application of frame movement
+
+`movement_plot` ports PlotUnitMovement `0x987b50` and its straight, circular,
+spiral and vertical modes. Its 4096 cases compare the complete displacement,
+optional facing/pitch writes and returned movement flags. `--cpu-reference`
+can execute actual host FSINCOS for the original reference; it agrees with both
+the emulator and the port in this matrix. Turn/pitch rates in these fixtures are
+finite and positive. Linux, ASan/UBSan and native Windows comparisons pass.
+
+`movement_frame` ports the unattached, uninterpolated ApplyMovement `0x6eac40`
+path, including remote GetMoveStartTime `0x6e9f50`, repeated RequestMove calls,
+world bounds and anchor elapsed-time updates. The projection's real displacement
+is fed through real GetFacets, rather than supplied directly. Both original
+thread globals and the empty transport registry are fixture services; unit
+notifications are observed. The executable's actual SkipTime clock update and
+failed SetTransport path still run. The 1444 cases include six thirty-frame trajectories and pass natively;
+552 mismatches in the initial port traced to rounding the anchor target before
+subtracting position. RequestMove `0x6e9e20` retains those x87 values despite its
+intermediate stores. Counters retain original 32-bit wrap and signed tests.
+
+These APIs are prerequisites for the frame dispatcher. They do not implement
+queued player input, interpolation, active splines, attached transports, unit
+notification delivery or outgoing packets, and remain disconnected from normal
+player control. Synthetic root states follow the original TryRoot-cleared input
+invariant; the contradictory root+forward tuple from isolated request tests
+loops indefinitely in the original ApplyMovement and is not a frame fixture.
+
+The final 1444-case frame matrix also passes ASan/UBSan. All 39 native collision/ADT
+tests and all available sweep ceilings pass for this increment.

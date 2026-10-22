@@ -286,3 +286,28 @@ reference still matches all 1072 cases after sharing its setup with this oracle.
 Validation: 37/37 native collision/ADT tests pass. The expanded 3705-case falling
 regression also passes ASan/UBSan. Dimensions and standalone combined-world
 comparisons passed their respective sanitizer probes. No live account was used.
+
+Projection/frame progress: original PlotUnitMovement (0x987b50) and its complete
+mode table agree in 4096 cases, including turning, pitching, spiral motion,
+ascent/descent, optional output pointers and 32-bit time boundaries. A separate
+host FSINCOS oracle also matches all cases; projection passes ASan/UBSan.
+
+ApplyMovement (0x6eac40) now joins projection, local/remote anchor timing,
+RequestMove and the real world collector. All 1444 cases match, including
+remote delay ramps, counter wrap and world-edge admission. A premature target
+store in the initial port caused 552 divergences; preserving the original x87
+anchor-plus-move-minus-position sequence resolves them. Thirty-frame sequences
+include landing and subsequent movement. This entry explicitly
+excludes interpolation, attached transports, splines and queued input delivery.
+The frame oracle supplies thread globals and an empty game-object registry;
+unit SkipTime/event delivery is observed at its boundary. It does not validate
+heartbeat packet scheduling or the complete ExecuteMovement loop.
+
+The earlier combined movement/world oracle also passes ASan/UBSan, and the full
+sweep remains within its ceilings. The 1444-frame/4096-projection increment
+passes the 39-test native collision/ADT selection. The overall acceptance
+checklist remains open, and ordinary gameplay still uses the previous path.
+
+Final frame validation: all 1444 cases, including the six thirty-frame sequences,
+pass native Windows and ASan/UBSan. All 39 native collision/ADT tests pass and
+sweep_guard remains within every ceiling (unavailable optional checks skip).

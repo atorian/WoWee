@@ -16,3 +16,19 @@ EXPORT uint32_t original_rsqrtss(uint32_t input) {
     std::memcpy(&result, &value, sizeof(result));
     return result;
 }
+
+// FSINCOS is also CPU-defined, so let the movement oracle check Unicorn's
+// result against the host instruction. Preserve the caller's control word.
+#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
+EXPORT uint64_t original_fsincos(uint32_t input) {
+    float angle, sine, cosine;
+    std::memcpy(&angle,&input,sizeof(angle));
+    uint16_t saved, original=0x27f;
+    asm volatile("fnstcw %0" : "=m"(saved));
+    asm volatile("fldcw %2\n\tflds %3\n\tfsincos\n\tfstps %0\n\tfstps %1\n\tfldcw %4"
+        : "=m"(cosine),"=m"(sine) : "m"(original),"m"(angle),"m"(saved) : "memory","st","st(1)");
+    uint32_t s,c;
+    std::memcpy(&s,&sine,sizeof(s));std::memcpy(&c,&cosine,sizeof(c));
+    return uint64_t(s)|(uint64_t(c)<<32);
+}
+#endif

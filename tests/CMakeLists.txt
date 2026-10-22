@@ -3031,6 +3031,10 @@ target_link_libraries(world_facet_probe PRIVATE wowee_collision)
 wowee_test_link_glm(world_facet_probe)
 register_test_target(world_facet_probe)
 if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_world_apply
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_world_movement.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_apply_12340.json
+            --probe $<TARGET_FILE:movement_surface_probe>)
     add_test(NAME original_collision_world_movement
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_world_movement.py
             --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_world_movement_12340.json
@@ -3702,3 +3706,14 @@ wowee_add_test(test_frame_pool SOURCES test_frame_pool.cpp)
 wowee_add_test(test_distant_terrain
     SOURCES test_distant_terrain.cpp ${CMAKE_SOURCE_DIR}/src/pipeline/distant_terrain.cpp
             ${TEST_COMMON_SOURCES})
+
+add_executable(movement_plot_probe movement_plot_probe.cpp)
+target_link_libraries(movement_plot_probe PRIVATE wowee_collision)
+wowee_test_link_glm(movement_plot_probe)
+register_test_target(movement_plot_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_plot
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_plot.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_plot_12340.json
+            --probe $<TARGET_FILE:movement_plot_probe>)
+endif()

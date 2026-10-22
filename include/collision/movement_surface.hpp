@@ -17,6 +17,7 @@ struct SurfaceMovementState {
     uint32_t flags2 = 0;
     uint32_t anchorElapsedMs = 0;
     uint32_t fallTimeMs = 0;
+    uint32_t moveStartDelayMs = 0;
     float facing = 0;
     float pitch = 0;
     float anchorFacing = 0;
@@ -24,6 +25,8 @@ struct SurfaceMovementState {
     float pitchCos = 1;
     float pitchSin = 0;
     float currentSpeed = 0;
+    float turnRate = 0;
+    float pitchRate = 0;
     float fallStartZ = 0;
     // Positive downward, negative at the beginning of a jump.
     float fallVelocity = 0;
