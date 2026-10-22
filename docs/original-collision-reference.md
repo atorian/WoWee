@@ -569,3 +569,35 @@ update results. All 44 native collision/ADT tests pass.
 Normal player control remains on the old path. Remaining state-change commands,
 unit effects, packet bytes, interpolation, active spline/transport handling
 and production world lifecycle are still required before enabling replacement.
+
+
+## Actual movement status bytes (2026-10-23)
+
+The original WriteMovementStatusToPacket (0x7164b0), client/shared GetMoveStatus
+(0x6e90e0/0x987140), CMovementStatus serialization (0x4f4ed0) and CDataStore
+writers now execute directly into supplied preallocated storage. No status
+field or serializer is hooked. `original_status_12340.json` records 1024
+unattached, unsplined mover payloads. Core's
+`makeUnattachedMovementStatus12340` creates the corresponding temporary protocol
+state from the collision mover; it is still an offline integration adapter.
+
+This comparison exposed two existing protocol defects. The old WotLK writer
+omitted pitch when flags2 ALWAYS_ALLOW_PITCHING (0x20) was set without swimming
+or flight. It also omitted SPLINE_ELEVATION (0x04000000), while the reader
+consumed that float without retaining it. Before fixing the writer/reader,
+512/1024 cases failed (384 pitch cases, 256 elevation cases, with overlap).
+The writer now emits both conditional fields and MovementInfo preserves the
+original elevation value. This fixes the ordinary protocol implementation;
+it does not enable the new movement solver.
+
+After the fix, all 1024 encoded payloads match byte for byte. Reading original
+payloads and writing the resulting state also preserves every byte and consumes
+the complete original input. This is an independent-original-byte test, not a
+roundtrip whose expected bytes come from our writer. It checks flags/extra flags,
+position, facing, pitch, timestamps, falling velocity/direction and elevation.
+The native Windows test, Linux test and ASan/UBSan pass. Existing movement payload
+and pre-WotLK packet regressions pass; full sweep remains within all ceilings.
+
+Scope: ordinary movement status, no attached transport or active spline. GUID,
+opcode envelopes, ACK counter/value suffixes and the full unit-to-network
+notification path remain separate work. No live player/server experiment ran.

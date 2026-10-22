@@ -995,8 +995,9 @@ void MovementPacket::writeMovementPayload(network::Packet& packet, const Movemen
         }
     }
 
-    // Write pitch if swimming/flying
-    if (info.hasFlag(MovementFlags::SWIMMING) || info.hasFlag(MovementFlags::FLYING)) {
+    // Original 3.3.5a also carries pitch when extra flags permit it on land.
+    if (info.hasFlag(MovementFlags::SWIMMING) || info.hasFlag(MovementFlags::FLYING) ||
+        (info.flags2 & 0x0020)) {
         packet.writeFloat(info.pitch);
     }
 
@@ -1014,6 +1015,9 @@ void MovementPacket::writeMovementPayload(network::Packet& packet, const Movemen
         packet.writeFloat(info.jumpCosAngle);
         packet.writeFloat(info.jumpSinAngle);
         packet.writeFloat(info.jumpXYSpeed);
+    }
+    if (info.flags & 0x04000000) { // MOVEMENTFLAG_SPLINE_ELEVATION
+        packet.writeFloat(info.splineElevation);
     }
 }
 
@@ -1062,7 +1066,7 @@ bool MovementPacket::readMovementPayload(network::Packet& packet, MovementInfo& 
 
     if (info.flags & 0x04000000) { // MOVEMENTFLAG_SPLINE_ELEVATION
         if (!packet.hasRemaining(4)) return false;
-        /*float splineElevation =*/ packet.readFloat();
+        info.splineElevation = packet.readFloat();
     }
     return true;
 }

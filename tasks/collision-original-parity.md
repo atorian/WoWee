@@ -371,3 +371,20 @@ is still supplied as a successful service. Actual outgoing packet contents and
 unit side effects are the next verification boundary. The complete original
 movement-status writer can now execute against a supplied CDataStore buffer;
 a scratch probe has produced its real bytes for a falling mover.
+
+
+### 2026-10-23 — Original movement status serialization
+
+Executed the original complete movement-status writer into CDataStore storage.
+Added an offline core adapter from the verified collision state to MovementInfo
+and 1024 original byte fixtures. The test failed in 512 cases before changing
+the existing codec: ALWAYS_ALLOW_PITCHING did not cause pitch emission, and
+SPLINE_ELEVATION was neither written nor retained by the reader. Both are fixed
+in the ordinary WotLK codec; the new movement solver remains offline.
+
+All 1024 outgoing payloads and read/rewrite checks against original bytes now
+pass on Linux, native Windows and ASan/UBSan. Existing movement payload and
+pre-WotLK packet tests pass. Full sweep passes. The preceding collision/ADT
+selection remains 44/44; this increment adds the independent wire-status test.
+Packet envelopes, ACK metadata and complete synchronous unit effects still need
+comparison and integration, alongside remaining movement/world lifecycle work.

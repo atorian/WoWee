@@ -705,6 +705,7 @@ set(WOWEE_SOURCES
 
     # Core
     src/core/application.cpp
+    src/core/movement_status.cpp
     src/core/application_world_loading.cpp
     src/core/client_main.cpp
     src/core/client_loop.cpp

@@ -3756,3 +3756,14 @@ if(Python3_Interpreter_FOUND)
             --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_input_execution_12340.json
             --probe $<TARGET_FILE:movement_surface_probe>)
 endif()
+
+add_executable(movement_status_probe movement_status_probe.cpp ${CMAKE_SOURCE_DIR}/src/core/movement_status.cpp)
+target_link_libraries(movement_status_probe PRIVATE wowee_protocol)
+wowee_test_link_glm(movement_status_probe)
+register_test_target(movement_status_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_wire_status
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_status.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_status_12340.json
+            --probe $<TARGET_FILE:movement_status_probe>)
+endif()

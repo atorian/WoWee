@@ -273,6 +273,7 @@ struct MovementInfo {
     float jumpSinAngle = 0.0f;      // Jump horizontal sin
     float jumpCosAngle = 0.0f;      // Jump horizontal cos
     float jumpXYSpeed = 0.0f;       // Jump horizontal speed
+    float splineElevation = 0.0f;  // Vertical spline/step offset when carried by flags
 
     // Transport fields (when ONTRANSPORT flag is set)
     uint64_t transportGuid = 0;     // GUID of transport (boat/zeppelin/etc)
