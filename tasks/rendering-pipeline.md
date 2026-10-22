@@ -537,3 +537,34 @@ This completes the opaque/cutout M2 connection, not the full pipeline. Character
 terrain, reflection and blended consumers still require legacy RT. The separate
 WMO/M2 runs cannot be merged across the intervening selection/character draws
 without first converting those consumers and preserving their ordering semantics.
+
+
+### Full replay on current data (2026-10-22, 0800842)
+
+Memory became available (35.18 GiB free commit). The original recording rejected
+its changed manifest: 32,824,155 captured bytes versus 37,713,221 current bytes.
+The original recording is preserved. A separate derived scene updates only the
+manifest signature; events/settings and all 24 archive signatures are unchanged.
+This supersedes the pending-memory status above, but does not establish a
+controlled comparison against d440fce. Provenance and hashes are in the report.
+
+760 samples completed normally, 759 producer intervals. Hardware RT3, MSAA1,
+FXAA, render thread 1, VSync off, dev/no-LTO. Final viewport 2560x1369, versus
+2560x1392 historically. Streaming continued after warmup; missing-asset warnings
+and 3040 residency-counter mismatches remain. No ERROR/FATAL occurred.
+
+- FPS **29.136**, frame interval mean/p95/p99 **34.322 / 63.233 / 99.104 ms**.
+  Historical result: 46.727 FPS with different resources/loading conditions.
+- GPU M2 including surface RT **10.273 ms mean / 12.848 ms p95**;
+  WMO **6.660 ms mean**; retained legacy RT **2.832 ms mean**.
+- CPU extraction **12.239 ms mean / 16.738 ms p95**; render worker wait
+  **4.070 ms mean**. Nested timings/waits are not additive CPU work.
+- Peak private bytes **15,513,673,728 (14.45 GiB)**; peak working set
+  **9,526,714,368 (8.87 GiB)**, sampled every 500ms including loading.
+
+Investigate the M2 surface/RT cost on this saved workload before claiming gains
+from converting more families. Character, terrain, reflection and blended
+conversion remains incomplete. The earlier 11 GiB replay guard no longer gives
+headroom for the observed current-data workload.
+
+[Full distributions, provenance and raw paths](performance/dalaran-m2-surfaces-replay.json).
