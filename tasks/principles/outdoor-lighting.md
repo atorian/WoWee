@@ -22,3 +22,5 @@ User choice (2026-10-21, supersedes the temporary cloud disable): start with an 
 Cloud iteration workflow (user choice, 2026-10-21): render and evaluate a dedicated offline cloud suite with scene_render. Compare fixed day/night, upward/horizon and clear/overcast captures plus opacity diagnostics. Keep prior outputs for comparison. Do not launch the full game for these iterations; launch it only when requested.
 
 Cloud appearance (user choice, 2026-10-22): use the supplied modern-WoW reference for broad, soft cloud transitions with restrained fine noise. This refines the improved-classic approach; keep DBC colours, weather coverage and the offline iteration workflow.
+
+Cloud/fog separation (user choice, 2026-10-22): preserve the accepted orange Durotar cloud palette when repairing fog. Diffuse surface haze must not project cloud imagery onto opaque geometry. Keep sky appearance separate from the fog lighting target; check fixed wall patches while changing cloud phase, and compare the sky before/after the fix.
