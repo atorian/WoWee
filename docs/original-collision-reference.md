@@ -250,6 +250,22 @@ All eleven selected native CTest regressions pass; surface and falling fixtures
 remain unchanged and pass. `tools/check_original_swim.py` regenerates the
 fixture from the pinned binary or compares a probe against the saved reference.
 
+## Hover support and ground normals
+
+`traceMovementHover` reproduces HoverMove (`0x762980`), including the lower-body
+support query (`0x75f520`), its controlled/uncontrolled slope thresholds and
+transition into Fall when support disappears. The lower-volume contact shares
+the verified clipping implementation, without the full body's extra side/top
+passes or its minimum probe extension. `queryMovementGroundNormal` reproduces
+`0x75ee60`: it clips upward facets to the mover box and averages their normals
+in input order before normalization.
+
+The first hover port disagreed with 485 of 2256 original calls; recovering
+intermediate precision and spill order removed all differences. A further 1065
+original ground-normal queries cover slope thresholds and overlapping facets.
+Both matrices match on Linux, native MinGW and ASan/UBSan. All thirteen native
+CTest regressions pass, including the unchanged earlier movement fixtures.
+
 ## Remaining acceptance work
 
 The full checklist is in `tasks/collision-original-parity.md`. World facet

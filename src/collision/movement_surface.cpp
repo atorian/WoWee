@@ -860,6 +860,185 @@ struct SurfaceTraversal {
         return elapsed;
     }
 
+    int32_t TryStartFalling() {
+        if (IsGravityDisabled() || (state.flags & (MOVEMENTFLAG_FALLING | MOVEMENTFLAG_SWIMMING | MOVEMENTFLAG_FLYING))) return 0;
+        return StartFalling(0);
+    }
+
+    // 0x0075f520, with resident geometry. Only lower body faces participate.
+    bool GetCurrentHoverHeight(float* height, int32_t* noGround, uint64_t* owner) {
+        const float distance = state.hoverHeight + state.hoverHeight;
+        auto hit = detail::traceMovementPyramid(facets,
+            MovementBody(state.position, m_collisionRadius, m_collisionHeight), C3Vector(0,0,-1), distance);
+        *height = hit.distance;
+        *noGround = hit.facet == facets.size();
+        *owner = *noGround ? 0 : facets[hit.facet].owner;
+        if (!*noGround && state.hoverHeight > *height &&
+            !(facets[hit.facet].plane.normal.z > (clientControlled ? 0.64278764f : 0.17364818f)))
+            *height = state.hoverHeight;
+        if (*height < 0.0013888889f) *height = 0;
+        return true;
+    }
+
+    // 0x00762980
+    uint32_t HoverMove(uint32_t time, uint32_t elapsed, float distance, C3Vector direction) {
+        if (!elapsed) {
+            return 0;
+        }
+
+        float hoverHeight;
+        int32_t noGround;
+        uint64_t facetId;
+
+        if (!GetCurrentHoverHeight(&hoverHeight, &noGround, &facetId)) {
+            return elapsed;
+        }
+
+        if (noGround && TryStartFalling()) {
+            uint32_t result = Fall(time, elapsed, distance, C2Vector(direction));
+
+            if (result) {
+                return result;
+            }
+        }
+
+        float total = static_cast<float>(elapsed);
+        double climb = double(elapsed) * 0.001f * 3.5f;
+        double mx = double(direction.x) * distance;
+        double my = double(direction.y) * distance;
+        double mz = double(distance) * direction.z;
+        double delta = double(state.hoverHeight) - hoverHeight;
+
+        if (-climb <= delta) {
+            if (delta < climb) {
+                climb = delta;
+            }
+        } else {
+            climb = -climb;
+        }
+
+        mz = mz + climb;
+        double length = sqrt(my * my + mx * mx + mz * mz);
+        distance = float(length);
+
+        if (fabs(length) >= 0.00000023841858f) {
+            double scale = 1.0 / length;
+            direction.x = mx * scale;
+            direction.y = my * scale;
+            direction.z = mz * scale;
+        }
+
+        if (fabs(length) < 0.00000095367432f) {
+            return elapsed;
+        }
+
+        C4Plane planes[9];
+
+        for (uint32_t i = 0; i < 7; i++) {
+            planes[i].normal = C3Vector(0.0f, 0.0f, 1.0f);
+            planes[i].offset = 0.0f;
+        }
+
+        uint32_t stuck = 0;
+        float consumed = 0.0f;
+        int32_t moved = 0;
+        uint32_t facetIndex;
+        uint32_t planeCount;
+        float moveDist;
+
+        if (!DistanceToMove(direction, distance, &facetIndex, planes, &planeCount, &moveDist)) {
+            return elapsed;
+        }
+
+        while (true) {
+            if (facetIndex >= facets.size()) {
+                C3Vector move(direction.x * moveDist, direction.y * moveDist, moveDist * direction.z);
+                state.position += move;
+                goto done;
+            }
+
+            {
+                if (facets[facetIndex].owner) {
+                    facetId = facets[facetIndex].owner;
+                }
+
+                state.position.x = double(direction.x) * moveDist + state.position.x;
+                state.position.y = double(direction.y) * moveDist + state.position.y;
+                state.position.z = double(direction.z) * moveDist + state.position.z;
+                double left = double(distance) - moveDist;
+                double progress = (double(total) - consumed) * (double(moveDist) / distance);
+                double used = consumed;
+                distance = left;
+
+                if (progress + 0.00000095367432f <= 1.0f) {
+                    if (++stuck > 5) {
+                        goto anchors;
+                    }
+                } else {
+                    stuck = 1;
+                    used += progress;
+                    consumed = float(used);
+                }
+
+                if (total - used < 1.0f) {
+                    if (fnotequal(total, float(used))) {
+                        goto anchors;
+                    }
+
+                    goto done;
+                }
+
+                C3Vector slide(direction.x * left, direction.y * left, left * direction.z);
+                C3Vector normal = facets[facetIndex].plane.normal;
+                C3Vector push;
+
+                if (UseWalkableRedirection(facetIndex, nullptr)) {
+                    const CFacet& facet = facets[facetIndex];
+                    double p = (-double(facet.plane.normal.y) * direction.y + -double(facet.plane.normal.z) * direction.z + -double(facet.plane.normal.x) * direction.x) * distance + 0.001f;
+                    push = C3Vector(facet.plane.normal.x * p, facet.plane.normal.y * p, p * facet.plane.normal.z);
+                } else {
+                    push = CalcRunWalkBlockingObstaclePush(direction, left, sqrt(double(slide.y) * slide.y + double(slide.x) * slide.x), normal);
+                }
+
+                moved = 1;
+                double x = double(slide.x) + push.x;
+                double y = double(slide.y) + push.y;
+                double z = double(slide.z) + push.z;
+                direction = C3Vector(x, y, z);
+                length = sqrt(y * y + z * z + x * x);
+                distance = float(length);
+
+                if (fabs(length) < 0.00000095367432f) {
+                    goto anchors;
+                }
+
+                double scale = 1.0 / length;
+                direction.x = x * scale;
+                direction.y = scale * direction.y;
+                direction.z = scale * direction.z;
+
+                if (!DistanceToMove(direction, distance, &facetIndex, planes, &planeCount, &moveDist)) {
+                    return elapsed;
+                }
+            }
+        }
+
+    done:
+        if (!moved) {
+            goto transport;
+        }
+
+    anchors:
+        UpdateAnchors(0);
+
+    transport:
+        WOWGUID guid;
+        guid.m_guid = facetId;
+        SetTransport(guid);
+        return elapsed;
+    }
+
+
     // 0x007612b0
     uint32_t FallDown(uint32_t elapsed, C3Vector move, bool notify = false, uint32_t time = 0) {
         float timeFallen = 0.0f;
@@ -1775,6 +1954,14 @@ SurfaceMovementResult traceMovementSwim(std::span<const MovementFacet> solids,
     SurfaceTraversal traversal{solids, state, shape.radius, shape.height,
                                shape.stepHeight, shape.clientControlled, std::nullopt, std::nullopt};
     const auto used = traversal.Swim(liquids, elapsedMs, distance, direction);
+    return {used, traversal.transportRequest, traversal.fallResetTime};
+}
+SurfaceMovementResult traceMovementHover(std::span<const MovementFacet> facets,
+    SurfaceMovementState& state, const SurfaceMovementShape& shape,
+    const glm::vec3& direction, float distance, uint32_t timeMs, uint32_t elapsedMs) {
+    SurfaceTraversal traversal{facets, state, shape.radius, shape.height,
+                               shape.stepHeight, shape.clientControlled, std::nullopt, std::nullopt};
+    const auto used = traversal.HoverMove(timeMs, elapsedMs, distance, direction);
     return {used, traversal.transportRequest, traversal.fallResetTime};
 }
 } // namespace wowee::collision

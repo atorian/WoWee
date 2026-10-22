@@ -189,21 +189,21 @@ bool extrudeMovementFace(std::span<const glm::vec3> vertices, std::span<const ui
 
 } // namespace detail
 
-MovementContact traceMovementBody(std::span<const MovementFacet> facets,
+static MovementContact traceMovementVolume(std::span<const MovementFacet> facets,
                                   const MovementBody& body,
-                                  const glm::vec3& direction, float distance) {
+                                  const glm::vec3& direction, float distance, bool lowerOnly) {
     MovementContact result;
     result.facet=static_cast<uint32_t>(facets.size());
-    if (std::abs(distance)<tiny) return result;
+    if (!lowerOnly && std::abs(distance)<tiny) return result;
     const auto volume=volumeOf(body);
-    const glm::vec3 movement=direction*std::max(distance,probeLength);
+    const glm::vec3 movement=direction*(lowerOnly ? distance : std::max(distance,probeLength));
     result.distance=distance;
     // The lower pyramid is tested before the four sides and the top.
     constexpr std::array<std::array<uint8_t,4>,9> faces{{
         {{0,1,2,0}},{{0,3,4,0}},{{0,2,3,0}},{{0,4,1,0}},
         {{1,2,6,5}},{{3,4,8,7}},{{2,3,7,6}},{{4,1,5,8}},{{5,6,7,8}}
     }};
-    for (size_t pass=0;pass<faces.size();++pass) {
+    for (size_t pass=0;pass<(lowerOnly ? 4 : faces.size());++pass) {
         const size_t face=pass<4 ? pass+5 : pass-4;
         const auto& plane=volume.planes[face];
         if (dot(plane.normal,movement)<=0) continue;
@@ -223,8 +223,48 @@ MovementContact traceMovementBody(std::span<const MovementFacet> facets,
             if (result.planeCount>1) std::swap(result.planes[0],result.planes[result.planeCount-1]);
         }
     }
-    if (result.distance<skin) result.distance=0;
+    if (!lowerOnly && result.distance<skin) result.distance=0;
     return result;
+}
+
+MovementContact traceMovementBody(std::span<const MovementFacet> facets,
+    const MovementBody& body, const glm::vec3& direction, float distance) {
+    return traceMovementVolume(facets, body, direction, distance, false);
+}
+MovementContact detail::traceMovementPyramid(std::span<const MovementFacet> facets,
+    const MovementBody& body, const glm::vec3& direction, float distance) {
+    return traceMovementVolume(facets, body, direction, distance, true);
+}
+
+glm::vec3 queryMovementGroundNormal(std::span<const MovementFacet> facets,
+                                    const MovementBody& body) {
+    const auto p = body.feet;
+    const float r = body.radius;
+    const std::array<MovementPlane, 6> planes{{
+        {{1,0,0}, -p.x-r}, {{-1,0,0}, p.x-r},
+        {{0,1,0}, -p.y-r}, {{0,-1,0}, p.y-r},
+        {{0,0,1}, -p.z-body.height}, {{0,0,-1}, p.z}
+    }};
+    glm::vec3 sum(0);
+    uint32_t hits = 0;
+    for (const auto& facet : facets) {
+        if (facet.plane.normal.z <= 0.017452406f) continue;
+        Polygon polygon{};
+        std::copy(facet.vertices.begin(), facet.vertices.end(), polygon.begin());
+        size_t count = 3;
+        for (const auto& plane : planes) {
+            clip(polygon, count, plane);
+            if (!count) break;
+        }
+        if (!count) continue;
+        ++hits;
+        sum += facet.plane.normal;
+    }
+    if (!hits) return {0,0,1};
+    const double inverse = 1.0 / hits;
+    const double x = inverse * sum.x, y = sum.y * inverse, z = inverse * sum.z;
+    const double scale = 1.0 / std::sqrt(z*z + y*y + x*x);
+    return glm::vec3(x*scale, y*scale, z*scale);
 }
 
 } // namespace wowee::collision

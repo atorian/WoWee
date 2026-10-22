@@ -27,6 +27,7 @@ struct SurfaceMovementState {
     float fallStartZ = 0;
     // Positive downward, negative at the beginning of a jump.
     float fallVelocity = 0;
+    float hoverHeight = 0;
     float stepStartZ = 0;
     float walkSpeed = 0;
     float runSpeed = 0;
@@ -72,5 +73,12 @@ struct SurfaceMovementResult {
     std::span<const MovementFacet> solids, std::span<const MovementFacet> liquids,
     SurfaceMovementState& state, const SurfaceMovementShape& shape,
     const glm::vec3& direction, float distance, uint32_t elapsedMs);
+
+// Original HoverMove phase: support is the lower collision volume, including
+// its slope restrictions. May transition to falling when support is absent.
+[[nodiscard]] SurfaceMovementResult traceMovementHover(
+    std::span<const MovementFacet> facets, SurfaceMovementState& state,
+    const SurfaceMovementShape& shape, const glm::vec3& direction,
+    float distance, uint32_t timeMs, uint32_t elapsedMs);
 
 } // namespace wowee::collision

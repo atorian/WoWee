@@ -45,4 +45,9 @@ struct MovementContact {
                                                const glm::vec3& direction,
                                                float distance);
 
+// Original GroundNormal (0x75ee60): clip upward facets to the mover box,
+// average their authored collision normals in facet order, then normalize.
+[[nodiscard]] glm::vec3 queryMovementGroundNormal(
+    std::span<const MovementFacet> facets, const MovementBody& body);
+
 } // namespace wowee::collision

@@ -48,6 +48,12 @@ class OriginalCollision:
         stack = cpu.reg_read(UC_X86_REG_ESP)
         self.fall_reset = struct.unpack('<I', cpu.mem_read(stack + 4, 4))[0]
 
+    def ground_move(self, case):
+        return self.surface_move(case, routine=0x75ee60)
+
+    def hover_move(self, case):
+        return self.surface_move(case, routine=0x762980)
+
     def swim_move(self, case):
         return self.surface_move(case, routine=0x760b40)
 
@@ -121,6 +127,7 @@ class OriginalCollision:
         write(body + 0x80, 'I', case.get('fall_time', 0))
         write(body + 0x84, 'f', case.get('fall_start', 0))
         write(body + 0x8c, 'f', case.get('current_speed', 0))
+        write(body + 0xb4, 'f', case.get('hover_height', 0))
         write(body + 0xb8, 'f', case.get('fall_velocity', 0))
         write(body + 0x38, '3f', *case.get('ground_normal', [0, 0, 0]))
         write(body + 0x90, '7f', *case.get('speeds', [0]*7))
@@ -142,7 +149,7 @@ class OriginalCollision:
         distance_bits = struct.unpack('<I', struct.pack('<f', case['distance']))[0]
         stack = 0x30ff000
         write(stack, '5I', 0x1000000, case.get('time', 1000), case.get('elapsed', 16), distance_bits, direction)
-        if routine == 0x760b40:
+        if routine in (0x760b40, 0x762980):
             write(stack, '4I3f', 0x1000000, case.get('time', 1000), case.get('elapsed', 16), distance_bits, *case['swim_direction'])
         cpu.reg_write(UC_X86_REG_ESP, stack)
         cpu.reg_write(UC_X86_REG_ECX, body)
@@ -159,7 +166,7 @@ class OriginalCollision:
                     position=list(struct.unpack('<3f', cpu.mem_read(body + 0x10, 12))),
                     flags=struct.unpack('<I', cpu.mem_read(body + 0x44, 4))[0],
                     step_start=struct.unpack('<f', cpu.mem_read(body + 0x88, 4))[0],
-                    elapsed=cpu.reg_read(UC_X86_REG_EAX))
+                    elapsed=0 if routine == 0x75ee60 else cpu.reg_read(UC_X86_REG_EAX))
         for name, offset, fmt in [('fall_time', 0x80, 'I'), ('fall_start', 0x84, 'f'),
                                   ('fall_velocity', 0xb8, 'f'), ('current_speed', 0x8c, 'f'),
                                   ('anchor_elapsed', 0x60, 'I'), ('anchor_facing', 0x58, 'f'),
@@ -168,7 +175,7 @@ class OriginalCollision:
             values = struct.unpack('<' + fmt, cpu.mem_read(body + offset, struct.calcsize(fmt)))
             result[name] = values[0] if len(values) == 1 else list(values)
         result['transport'] = self.transport_request
-        if routine in (0x7618b0, 0x760b40):
+        if routine in (0x7618b0, 0x760b40, 0x762980, 0x75ee60):
             result['ground_normal'] = list(struct.unpack('<3f', cpu.mem_read(body + 0x38, 12)))
             result['fall_reset'] = self.fall_reset
         return result

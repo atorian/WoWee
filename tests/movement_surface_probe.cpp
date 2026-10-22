@@ -6,6 +6,8 @@
 #include <vector>
 
 int main(int argc, char** argv) {
+    const bool ground = argc == 2 && std::string(argv[1]) == "--ground";
+    const bool hovering = argc == 2 && std::string(argv[1]) == "--hover";
     const bool swimming = argc == 2 && std::string(argv[1]) == "--swim";
     const bool falling = argc == 2 && std::string(argv[1]) == "--fall";
     using namespace wowee::collision;
@@ -34,12 +36,12 @@ int main(int argc, char** argv) {
             for (auto& v : facet.vertices) if (!read3(v)) return 2;
         }
         uint32_t time=1000;
-        if ((falling || swimming) && (!(std::cin>>time) || !read3(state.groundNormal) ||
+        if ((falling || swimming || hovering || ground) && (!(std::cin>>time) || !read3(state.groundNormal) ||
             !(std::cin>>state.walkSpeed>>state.runSpeed>>state.runBackSpeed>>state.swimSpeed
                       >>state.swimBackSpeed>>state.flightSpeed>>state.flightBackSpeed))) return 2;
         glm::vec3 swimDirection{};
         std::vector<MovementFacet> liquids;
-        if (swimming) {
+        if (swimming || hovering) {
             if (!read3(swimDirection) || !(std::cin >> count) || count > 100000) return 2;
             liquids.resize(count);
             for (auto& facet : liquids) {
@@ -47,7 +49,11 @@ int main(int argc, char** argv) {
                 for (auto& v : facet.vertices) if (!read3(v)) return 2;
             }
         }
-        const auto result = swimming ? traceMovementSwim(facets, liquids, state, shape, swimDirection, distance, elapsed)
+        if (hovering && !(std::cin >> state.hoverHeight)) return 2;
+        if (ground) state.groundNormal = queryMovementGroundNormal(facets, MovementBody(state.position, shape.radius, shape.height));
+        const auto result = ground ? SurfaceMovementResult{0, std::nullopt, std::nullopt}
+                          : hovering ? traceMovementHover(facets, state, shape, swimDirection, distance, time, elapsed)
+                          : swimming ? traceMovementSwim(facets, liquids, state, shape, swimDirection, distance, elapsed)
                           : falling ? traceMovementFall(facets, state, shape, direction, distance, time, elapsed)
                                     : traceMovementSurface(facets, state, shape, direction, distance, elapsed);
         std::cout << "{\"name\":\"" << name << '"';
@@ -72,7 +78,7 @@ int main(int argc, char** argv) {
         std::cout << ",\"transport\":";
         if (result.transport) std::cout << *result.transport;
         else std::cout << "null";
-        if (falling || swimming) {
+        if (falling || swimming || hovering || ground) {
             vector("ground_normal",state.groundNormal);
             std::cout << ",\"fall_reset\":";
             if (result.fallResetTime) std::cout << *result.fallResetTime;

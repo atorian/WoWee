@@ -148,3 +148,7 @@ Swimming/flight progress: resident-facet Swim matches 2848 original calls,
 including water-boundary jump restrictions, solid-contact liquid suppression
 and consecutive frames. Transport detach, active splines and the frame
 dispatcher remain outside this phase. Eleven native collision tests pass.
+
+Hover/ground progress: 2256 HoverMove calls and 1065 GroundNormal queries
+match original machine code on Linux, native MinGW and ASan/UBSan. The frame
+dispatcher, world-facet acquisition and protocol integration are still pending.

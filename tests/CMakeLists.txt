@@ -2942,6 +2942,14 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_swim.py
             --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_swim_12340.json
             --probe $<TARGET_FILE:movement_surface_probe>)
+    add_test(NAME original_collision_hover
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_hover.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_hover_12340.json
+            --probe $<TARGET_FILE:movement_surface_probe>)
+    add_test(NAME original_collision_ground
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_ground.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_ground_12340.json
+            --probe $<TARGET_FILE:movement_surface_probe>)
 endif()
 
 # ── test_race_gender_suffix ──────────────────────────────────
