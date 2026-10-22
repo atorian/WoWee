@@ -4,6 +4,7 @@
   "shortName": "WotLK",
   "version": { "major": 3, "minor": 3, "patch": 5 },
   "build": 12340,
+  "locale": "ruRU",
   "protocolVersion": 8,
   "maxLevel": 80,
   "races": [1, 2, 3, 4, 5, 6, 7, 8, 10, 11],

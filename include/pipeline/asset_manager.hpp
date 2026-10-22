@@ -74,6 +74,10 @@ public:
      * falling back to the manifest (binary DBC from extracted MPQs).
      */
     void setExpansionDataPath(const std::string& path);
+    /// Call at expansion selection, before readers start. Invalidates the DBC
+    /// cache so no table keeps the previous language's string view.
+    void setDBCLocale(const std::string& locale, uint32_t build);
+    const std::string& getLocaleDataPath() const { return localeDataPath_; }
 
     /**
      * Set a base data path to fall back to when the primary manifest does not
@@ -238,6 +242,8 @@ private:
 
     // Base manifest (loaded from dataPath/manifest.json)
     AssetManifest manifest_;
+    AssetManifest localeManifest_;
+    std::string localeDataPath_;
 
     // Optional base-path fallback: used when manifest_ doesn't contain a file.
     // Populated by setBaseFallbackPath(); ignored if baseFallbackDataPath_ is empty.
@@ -277,6 +283,8 @@ private:
                                       uint64_t generation);
     // THREAD-SAFE: protected by cacheMutex.
     uint64_t cacheGeneration_ = 0;
+    std::string dbcLocale_ = "enUS";
+    uint32_t dbcLocaleBuild_ = 0;
 
     // Guards dbcCache and cacheGeneration_. Shared lock for a cache hit,
     // exclusive for inserts and clears.

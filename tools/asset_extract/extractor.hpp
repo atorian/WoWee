@@ -19,6 +19,7 @@ public:
         std::string outputDir;    // Output directory for extracted assets
         std::string expansion;    // "classic", "turtle", "tbc", "wotlk", or "" for auto-detect
         std::string locale;       // "enUS", "deDE", etc., or "" for auto-detect
+        bool localeOnly = false; // Extract only the selected locale archives (text, fonts, speech, art)
         bool expansionSubdir = false; // Write under outputDir/expansions/<expansion>
         int threads = 0;          // 0 = auto-detect
         bool verify = false;      // CRC32 verify after extraction

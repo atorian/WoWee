@@ -187,6 +187,13 @@ std::string AssetManager::resolveOverride(const std::string& normalizedPath) con
 }
 
 std::string AssetManager::resolveExtracted(const std::string& normalizedPath) const {
+    // Locale archives also contain executables and world geometry. Only their
+    // interface, fonts and audio replace resources; DBC strings merge below.
+    if (normalizedPath.starts_with("interface\\") || normalizedPath.starts_with("fonts\\") ||
+        normalizedPath.starts_with("sound\\")) {
+        auto localized = localeManifest_.resolveFilesystemPath(normalizedPath);
+        if (!localized.empty()) return localized;
+    }
     // Primary manifest
     std::string primaryPath = manifest_.resolveFilesystemPath(normalizedPath);
     if (!primaryPath.empty()) return primaryPath;
@@ -686,7 +693,30 @@ std::shared_ptr<DBCFile> AssetManager::cacheDBC(const std::string& name,
                                                 uint64_t generation) {
     std::lock_guard<std::shared_mutex> lock(cacheMutex);
     if (generation != cacheGeneration_) return dbc;
+    selectDbcLocale(*dbc, name, dbcLocaleBuild_, dbcLocale_);
     return dbcCache.emplace(name, std::move(dbc)).first->second;
+}
+
+void AssetManager::setDBCLocale(const std::string& locale, uint32_t build) {
+    std::unique_lock<std::shared_mutex> lock(cacheMutex);
+    localeManifest_ = AssetManifest{};
+    localeDataPath_.clear();
+    const auto root = expansionDataPath_ + "/locales/" + locale;
+    const auto manifest = root + "/manifest.json";
+    std::error_code ec;
+    if (!expansionDataPath_.empty() && std::filesystem::is_regular_file(manifest, ec)) {
+        if (localeManifest_.load(manifest)) localeDataPath_ = root;
+        else LOG_WARNING("Cannot load locale manifest ", manifest, "; base language resources retained");
+    }
+    // May also be a complete extraction in the requested language; no pack is
+    // required in that case. Missing table strings are reported on selection.
+    fileCache.clear();
+    fileCacheLru_.clear();
+    fileCacheTotalBytes = 0;
+    dbcLocale_ = locale;
+    dbcLocaleBuild_ = build;
+    dbcCache.clear();
+    ++cacheGeneration_;
 }
 
 // The archive layer's diff for a table. Merged here, before the table is
@@ -694,6 +724,13 @@ std::shared_ptr<DBCFile> AssetManager::cacheDBC(const std::string& name,
 // spell names, the visual kits, the display infos - none of them knows a realm
 // added to what it reads.
 void AssetManager::mergeDbcOverrides(const std::string& name, DBCFile& dbc) const {
+    const auto path = localeManifest_.resolveFilesystemPath(normalizePath("DBFilesClient\\" + name));
+    if (!path.empty()) {
+        DBCFile source;
+        if (source.load(LooseFileReader::readFile(path)))
+            mergeDbcLocale(dbc, source, name, dbcLocaleBuild_, dbcLocale_);
+        else LOG_WARNING("Cannot read locale DBC ", path, "; original text retained for ", name);
+    }
     auto layer = archiveLayer();
     if (!layer) return;
     const std::string overPath = normalizePath("DBFilesClient\\over_" + name);

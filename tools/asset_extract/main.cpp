@@ -59,6 +59,7 @@ static void printUsage(const char* prog) {
               << "  --expansion-subdir Write into <output>/expansions/<id> so multiple clients\n"
               << "                      cannot overwrite one another\n"
               << "  --locale <id>       Locale: enUS, deDE, frFR, etc. (default: auto-detect)\n"
+              << "  --locale-only       Extract all resources supplied by the selected locale archives\n"
               << "  --only-used-dbcs    Extract only the DBCs wowee uses (no other assets)\n"
               << "  --skip-dbc          Do not extract DBFilesClient/*.dbc (visual assets only)\n"
               << "  --dbc-csv           Convert selected DBFilesClient/*.dbc to CSV under\n"
@@ -125,6 +126,8 @@ int main(int argc, char** argv) {
             expansion = argv[++i];
         } else if (std::strcmp(argv[i], "--locale") == 0 && i + 1 < argc) {
             locale = argv[++i];
+        } else if (std::strcmp(argv[i], "--locale-only") == 0) {
+            opts.localeOnly = true;
         } else if (std::strcmp(argv[i], "--expansion-subdir") == 0) {
             opts.expansionSubdir = true;
         } else if (std::strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {

@@ -6,6 +6,7 @@
 #include <string_view>
 #include <cstdint>
 #include <memory>
+#include <span>
 
 #include "pipeline/dbc_layout.hpp"
 
@@ -100,6 +101,18 @@ public:
      */
     std::string_view getStringView(uint32_t recordIndex, uint32_t fieldIndex) const;
 
+    // Select a language for explicitly described locstring base columns.
+    // Ordinary string/number columns retain their raw meaning. Empty localized
+    // strings use the primary string, reported once when configuring the table.
+    bool selectLocale(std::span<const uint32_t> bases, uint32_t locale,
+                      const std::string& tableName);
+
+    // Copy only the requested language's text for IDs already present here.
+    // Numbers, paths, other languages and the set of rows remain unchanged.
+    bool mergeLocalizedStrings(const DBCFile& source, std::span<const uint32_t> bases,
+                               uint32_t locale, const std::string& tableName);
+    std::string getStringInLocale(uint32_t row, uint32_t base, uint32_t locale) const;
+
     /**
      * Get string by offset in string block
      * @param offset Offset into string block
@@ -158,6 +171,8 @@ private:
     // Where each record's strings start in stringBlock, once a diff has been
     // merged in; empty until then, when every record's start is 0.
     std::vector<uint32_t> recordStringBase;
+    std::unordered_map<uint32_t, uint32_t> localizedStringFields;
+    std::string_view rawStringView(uint32_t recordIndex, uint32_t fieldIndex) const;
 
     // Cache for record ID -> index lookup
     mutable std::unordered_map<uint32_t, uint32_t> idToIndexCache;

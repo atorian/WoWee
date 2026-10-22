@@ -2684,6 +2684,14 @@ void SpellHandler::loadSpellNameCache() const {
             SpellNameEntry entry;
             entry.name = std::move(name);
             entry.rank = std::move(rank);
+            // Locale strings end immediately before the next locstring's
+            // flags word. Preserve names from multilingual extracted DBCs.
+            for (uint32_t locale = 0; rankField > nameField &&
+                 locale < 16 && locale + 1 < rankField - nameField; ++locale) {
+                auto localized = dbc->getStringInLocale(i, nameField, locale);
+                if (!localized.empty()) entry.localizedNames.emplace_back(
+                    std::move(localized), dbc->getStringInLocale(i, rankField, locale));
+            }
             if (descriptionField != 0xFFFFFFFF) {
                 entry.description = dbc->getString(i, descriptionField);
             }

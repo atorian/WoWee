@@ -573,6 +573,11 @@ if(WOWEE_BUILD_FRAMEXML_RUN AND EXISTS "${WOWEE_FRAMEXML_TEST_DATA}/interface/Fr
         "--lua:ToggleSpellBook(BOOKTYPE_SPELL)"
         "--lua:woweeSpellbookCase='warrior'" "--lua:${_spellbook_checks}")
 
+    wowee_framexml_test(framexml_macro_icons --player:8
+        --learn-spell:348 --learn-spell:6353 --learn-spell:29722
+        --learn-spell:686 --learn-spell:603 --learn-spell:172
+        "--lua-file:${CMAKE_SOURCE_DIR}/tests/framexml_macro_icons.lua")
+
     # bindings.xml marks the action buttons runOnUp: the press pushes the
     # button and the release performs it. The release is the key's, and runs
     # the command its press ran even when shift went down in between.

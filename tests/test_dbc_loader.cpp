@@ -62,6 +62,44 @@ TEST_CASE("DBCFile default state", "[dbc]") {
     REQUIRE(dbc.getFieldCount() == 0);
 }
 
+TEST_CASE("selected DBC language changes text, preserving asset paths and numbers", "[dbc][locale]") {
+    constexpr char text[] = "\0English\0Русский\0Interface\\Icons\\Icon\0";
+    std::string strings(text, sizeof(text) - 1);
+    // A miniature locstring starts at field 2; Russian occupies locale 8.
+    std::vector<uint32_t> row(20, 0);
+    row[0] = 17;
+    row[1] = 500;
+    row[2] = 1;
+    row[10] = 9;
+    row[19] = 24;
+    DBCFile dbc;
+    REQUIRE(dbc.load(buildSyntheticDBC(1, 20, {row}, strings)));
+    const uint32_t localized[] = {2};
+    REQUIRE(dbc.selectLocale(localized, 8, "fixture"));
+    CHECK(dbc.getString(0, 2) == "Русский");
+    CHECK(dbc.getUInt32(0, 1) == 500);
+    CHECK(dbc.getUInt32(0, 2) == 1);
+    CHECK(dbc.getString(0, 19) == "Interface\\Icons\\Icon");
+    REQUIRE(dbc.selectLocale(localized, 0, "fixture"));
+    CHECK(dbc.getString(0, 2) == "English");
+}
+
+TEST_CASE("localized strings from realm overrides retain their own string block", "[dbc][locale]") {
+    std::vector<uint32_t> row(18, 0);
+    row[0] = 5;
+    row[1] = 1;
+    DBCFile dbc, patch;
+    REQUIRE(dbc.load(buildSyntheticDBC(1, 18, {row}, std::string("\0Base\0", 6))));
+    row[9] = 7;
+    REQUIRE(patch.load(buildSyntheticDBC(1, 18, {row}, std::string("\0Patch\0Перевод\0", 22))));
+    REQUIRE(dbc.mergeOverrides(patch));
+    const uint32_t localized[] = {1};
+    REQUIRE(dbc.selectLocale(localized, 8, "fixture"));
+    CHECK(dbc.getString(0, 1) == "Перевод");
+    REQUIRE(dbc.selectLocale(localized, 3, "fixture"));
+    CHECK(dbc.getString(0, 1) == "Patch");
+}
+
 TEST_CASE("DBCFile load valid DBC", "[dbc]") {
     // 2 records, 3 fields each: [id, intVal, stringOffset]
     // String block: "\0Hello\0World\0" → offset 0="" 1="Hello" 7="World"
@@ -589,4 +627,29 @@ TEST_CASE("Reloading a merged DBC forgets the diff", "[dbc][merge]") {
     REQUIRE(dbc.getString(0, 1) == "Diff");
     REQUIRE(dbc.load(buildSyntheticDBC(1, 2, {{1, 1}}, std::string("\0Base\0", 6))));
     REQUIRE(dbc.getString(0, 1) == "Base");
+}
+
+TEST_CASE("language packs translate existing IDs without importing gameplay data", "[dbc][locale]") {
+    std::vector<uint32_t> base(20, 0), translated(20, 0);
+    base[0] = translated[0] = 5;
+    base[1] = 42; base[2] = 1; base[19] = 9;
+    translated[1] = 999; translated[10] = 1; translated[19] = 1;
+    DBCFile dbc, source, realm;
+    constexpr char original[] = "\0English\0model.m2\0";
+    constexpr char russian[] = "\0Перевод\0";
+    REQUIRE(dbc.load(buildSyntheticDBC(1, 20, {base}, std::string(original, sizeof(original)-1))));
+    // Exercise rows with rebased offsets, as produced by realm patches too.
+    REQUIRE(realm.load(buildSyntheticDBC(1, 20, {base}, std::string(original, sizeof(original)-1))));
+    REQUIRE(dbc.mergeOverrides(realm));
+    auto extra = translated; extra[0] = 777;
+    REQUIRE(source.load(buildSyntheticDBC(2, 20, {extra, translated}, std::string(russian, sizeof(russian)-1))));
+    const uint32_t fields[] = {2};
+    REQUIRE(dbc.mergeLocalizedStrings(source, fields, 8, "fixture"));
+    REQUIRE(dbc.selectLocale(fields, 8, "fixture"));
+    CHECK(dbc.getString(0, 2) == "Перевод");
+    CHECK(dbc.getStringInLocale(0, 2, 0) == "English");
+    CHECK(dbc.getUInt32(0, 1) == 42);
+    CHECK(dbc.getString(0, 19) == "model.m2");
+    CHECK(dbc.findRecordById(777) == -1);
+    CHECK(dbc.getRecordCount() == 1);
 }

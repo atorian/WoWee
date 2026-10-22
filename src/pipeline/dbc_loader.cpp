@@ -34,6 +34,7 @@ bool DBCFile::load(const std::vector<uint8_t>& dbcData) {
         return false;
     }
     recordStringBase.clear();
+    localizedStringFields.clear();
 
     // Detect CSV format: starts with '#'
     if (dbcData[0] == '#') {
@@ -173,6 +174,78 @@ std::string DBCFile::getString(uint32_t recordIndex, uint32_t fieldIndex) const 
 }
 
 std::string_view DBCFile::getStringView(uint32_t recordIndex, uint32_t fieldIndex) const {
+    if (auto selected = localizedStringFields.find(fieldIndex); selected != localizedStringFields.end()) {
+        auto text = rawStringView(recordIndex, selected->second);
+        if (!text.empty()) return text;
+    }
+    return rawStringView(recordIndex, fieldIndex);
+}
+
+bool DBCFile::selectLocale(std::span<const uint32_t> bases, uint32_t locale,
+                           const std::string& tableName) {
+    localizedStringFields.clear();
+    for (auto base : bases) {
+        if (base >= fieldCount || locale >= fieldCount - base) {
+            LOG_WARNING("DBC locale selection failed for ", tableName,
+                        ": localized column outside the table; primary language retained");
+            return false;
+        }
+    }
+    if (locale == 0) return true;
+    uint32_t fallbacks = 0;
+    for (auto base : bases) {
+        localizedStringFields.emplace(base, base + locale);
+        for (uint32_t row = 0; row < recordCount; ++row)
+            if (rawStringView(row, base + locale).empty() && !rawStringView(row, base).empty())
+                ++fallbacks;
+    }
+    if (fallbacks) LOG_WARNING("DBC ", tableName, ": ", fallbacks,
+        " localized strings missing for locale index ", locale, "; primary text shown for those entries");
+    return true;
+}
+
+std::string DBCFile::getStringInLocale(uint32_t row, uint32_t base, uint32_t locale) const {
+    return std::string(rawStringView(row, base + locale));
+}
+
+bool DBCFile::mergeLocalizedStrings(const DBCFile& source, std::span<const uint32_t> bases,
+                                    uint32_t locale, const std::string& tableName) {
+    if (!loaded || !source.loaded || fieldCount != source.fieldCount ||
+        recordSize != source.recordSize || recordSize != fieldCount * 4 || locale >= 16) {
+        LOG_WARNING("Locale DBC ", tableName, ": incompatible tables; original text retained");
+        return false;
+    }
+    for (auto base : bases) {
+        if (base >= fieldCount || locale >= fieldCount - base) {
+            LOG_WARNING("Locale DBC ", tableName, ": invalid string column; original text retained");
+            return false;
+        }
+    }
+    for (uint32_t row = 0; row < recordCount; ++row) {
+        const int32_t from = source.findRecordById(getUInt32(row, 0));
+        if (from < 0) continue;
+        for (auto base : bases) {
+            const uint32_t field = base + locale;
+            // An installed or realm-provided translation has precedence.
+            if (!rawStringView(row, field).empty()) continue;
+            const auto text = source.rawStringView(static_cast<uint32_t>(from), field);
+            if (text.empty()) continue;
+            if (stringBlock.size() + text.size() + 1 > UINT32_MAX) {
+                LOG_ERROR("Locale DBC ", tableName, ": string block too large; remaining translations omitted");
+                return false;
+            }
+            const uint32_t origin = row < recordStringBase.size() ? recordStringBase[row] : 0;
+            const uint32_t offset = static_cast<uint32_t>(stringBlock.size()) - origin;
+            stringBlock.insert(stringBlock.end(), text.begin(), text.end());
+            stringBlock.push_back(0);
+            std::memcpy(recordData.data() + size_t(row) * recordSize + field * 4, &offset, sizeof(offset));
+        }
+    }
+    stringBlockSize = static_cast<uint32_t>(stringBlock.size());
+    return true;
+}
+
+std::string_view DBCFile::rawStringView(uint32_t recordIndex, uint32_t fieldIndex) const {
     uint32_t offset = getUInt32(recordIndex, fieldIndex);
     if (recordIndex < recordStringBase.size()) {
         // A record merged from a diff table: its offsets count from the start

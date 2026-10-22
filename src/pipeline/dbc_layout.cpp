@@ -10,6 +10,53 @@
 namespace wowee {
 namespace pipeline {
 
+namespace {
+struct LocaleSchema {
+    std::string_view table;
+    uint32_t fields;
+    std::span<const uint32_t> localized;
+};
+#include "dbc_locale_fields.inc"
+}
+
+static bool applyDbcLocale(DBCFile& dbc, const DBCFile* source, const std::string& table,
+                     uint32_t build, const std::string& locale) {
+    if (locale == "enUS" || locale == "enGB") return dbc.selectLocale({}, 0, table);
+    constexpr std::string_view languages[] = {
+        "enUS", "koKR", "frFR", "deDE", "zhCN", "zhTW", "esES", "esMX", "ruRU"
+    };
+    const auto selected = std::find(std::begin(languages), std::end(languages), locale);
+    if (build != 12340 || selected == std::end(languages)) {
+        LOG_WARNING("DBC ", table, ": no locale schema for build ", build,
+                    " and language ", locale, "; primary language retained");
+        return false;
+    }
+    auto name = table.substr(0, table.find_last_of('.'));
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
+    for (const auto& schema : localeSchemas) {
+        if (schema.table != name) continue;
+        if (schema.fields != dbc.getFieldCount()) {
+            LOG_WARNING("DBC ", table, ": locale schema expects ", schema.fields,
+                        " columns, found ", dbc.getFieldCount(), "; primary language retained");
+            return false;
+        }
+        const auto index = static_cast<uint32_t>(selected - languages);
+        return source ? dbc.mergeLocalizedStrings(*source, schema.localized, index, table)
+                      : dbc.selectLocale(schema.localized, index, table);
+    }
+    return true; // This table has no locstring fields in this build.
+}
+
+bool selectDbcLocale(DBCFile& dbc, const std::string& table,
+                     uint32_t build, const std::string& locale) {
+    return applyDbcLocale(dbc, nullptr, table, build, locale);
+}
+
+bool mergeDbcLocale(DBCFile& dbc, const DBCFile& source, const std::string& table,
+                    uint32_t build, const std::string& locale) {
+    return applyDbcLocale(dbc, &source, table, build, locale);
+}
+
 static const DBCLayout* g_activeDBCLayout = nullptr;
 
 void noteMissingLayoutField(const std::string& dbc, const std::string& field) {

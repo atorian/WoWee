@@ -47,6 +47,9 @@ struct SpellReagent { uint32_t itemId = 0; uint32_t count = 0; };
 /// One row of Spell.dbc, as much of it as the client reads.
 struct SpellNameEntry {
     std::string name; std::string rank; std::string description;
+    // Additional localized names imported from the same expansion. They do
+    // not replace the active UI language or any gameplay fields.
+    std::vector<std::pair<std::string, std::string>> localizedNames;
     uint32_t schoolMask = 0; uint8_t dispelType = 0; uint32_t attrEx = 0;
     /// Spell.dbc Attributes, the base word. Bit 6 (0x40) is passive.
     uint32_t attr = 0;

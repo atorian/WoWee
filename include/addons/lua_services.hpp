@@ -13,6 +13,7 @@
 namespace wowee::core  { class Window; }
 namespace wowee::audio { class AudioCoordinator; }
 namespace wowee::game  { class ExpansionRegistry; }
+namespace wowee::game  { struct Macro; }
 
 namespace wowee::addons {
 
@@ -31,6 +32,8 @@ struct LuaServices {
     /// Run a macro body, as RunMacroText() does - one command per line,
     /// through the same path the action bar uses for a macro button.
     std::function<void(const std::string&)> runMacroText;
+    /// Shared presentation resolver, with the client's current world context.
+    std::function<std::string(const game::Macro&)> macroIconPath;
 
     /// Hold or let go of a movement command, as MoveForwardStart and
     /// MoveForwardStop do - which is how bindings.xml walks the character on

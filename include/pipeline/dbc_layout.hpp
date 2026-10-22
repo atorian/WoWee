@@ -81,6 +81,13 @@ const DBCLayout* getActiveDBCLayout();
 // Forward declaration
 class DBCFile;
 
+// Configure only schema-declared locstrings for the matching client build.
+// Raw numeric fields and nonlocalized asset-path strings are never changed.
+bool mergeDbcLocale(DBCFile& dbc, const DBCFile& source, const std::string& table,
+                    uint32_t build, const std::string& locale);
+bool selectDbcLocale(DBCFile& dbc, const std::string& table,
+                     uint32_t build, const std::string& locale);
+
 /**
  * Resolved CharSections.dbc field indices.
  *

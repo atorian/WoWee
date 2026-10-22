@@ -1,4 +1,5 @@
 #include "core/application.hpp"
+#include "ui/macro_icon.hpp"
 #include <imgui_impl_vulkan.h>
 #include "rendering/imgui_texture.hpp"
 #include "core/screen_recording.hpp"
@@ -544,6 +545,7 @@ bool Application::initialize() {
         if (profile && !profile->dataPath.empty()) {
             // Enable expansion-specific CSV DBC lookup (Data/expansions/<id>/db/*.csv).
             assetManager->setExpansionDataPath(profile->dataPath);
+            assetManager->setDBCLocale(profile->locale, profile->build);
 
             std::string expansionManifest = profile->dataPath + "/manifest.json";
             if (std::filesystem::exists(expansionManifest)) {
@@ -580,6 +582,8 @@ bool Application::initialize() {
         // --expansion-subdir keeps its fonts under expansions/<id>/, and one
         // made without keeps them in the base Data. Both exist in the wild.
         if (uiManager) {
+            if (!assetManager->getLocaleDataPath().empty())
+                uiManager->loadInterfaceFont(assetManager->getLocaleDataPath(), assetManager.get());
             uiManager->loadInterfaceFont(assetPath, assetManager.get());
             uiManager->loadInterfaceFont(dataPath, assetManager.get());
         }
@@ -972,6 +976,9 @@ bool Application::initialize() {
             if (!uim) return;
             uim->getGameScreen().getSettingsPanel().applyAudioVolumes(audioCoordinator_.get());
         };
+        luaSvc.macroIconPath = [this](const game::Macro& macro) {
+            return ui::macroIconPath(macro, *gameHandler, renderer.get());
+        };
         luaSvc.runMacroText = [uim = uiManager.get(), gh = gameHandler.get()](const std::string& body) {
             if (uim && gh) uim->getGameScreen().getChatPanel().executeMacroText(*gh, body);
         };
@@ -1200,6 +1207,14 @@ bool Application::initialize() {
                         break;
                     }
                 }
+            }
+            if (!assetManager->getLocaleDataPath().empty()) {
+                std::error_code ec;
+                const auto& localizedRoot = assetManager->getLocaleDataPath();
+                if (std::filesystem::is_directory(localizedRoot + "/interface/framexml", ec))
+                    interfaceRoot = localizedRoot;
+                else LOG_WARNING("Locale interface missing under ", localizedRoot,
+                                 "; base FrameXML retained");
             }
             std::string addonsDir = interfaceRoot + "/interface/AddOns";
             addonCatalog_->setFrameXmlDir(interfaceRoot + "/interface/FrameXML");
@@ -2694,6 +2709,7 @@ void Application::reloadExpansionData() {
         LOG_INFO("Protocol profile '", profile->id, "' using asset source '",
                  useLegacyAssets ? std::string("legacy") : assetProfile->id, "'");
         assetManager->setExpansionDataPath(profile->dataPath);
+        assetManager->setDBCLocale(profile->locale, profile->build);
         assetManager->clearDBCCache();
     }
 

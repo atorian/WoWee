@@ -65,6 +65,7 @@
 #include "ui/widget_renderer.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/spell_icon_paths.hpp"
 #include "ui/interface_fonts.hpp"
 #include "ui/link_hit.hpp"
 #include "game/expansion_profile.hpp"
@@ -168,7 +169,16 @@ int main(int argc, char** argv) {
     // what the first run had saved. The client does not do this - loadSettings
     // assigns the pending fields directly - so it was the harness undoing the
     // thing the harness exists to watch.
+    // A direct expansion folder still owns a profile (including its locale).
+    wowee::game::ExpansionRegistry assetExpansions;
+    const std::filesystem::path suppliedAssets(assetPath);
+    const auto profileRoot = std::filesystem::exists(suppliedAssets / "expansion.json")
+        ? suppliedAssets.parent_path().parent_path() : suppliedAssets;
+    assetExpansions.initialize(profileRoot.string());
+    if (std::filesystem::exists(suppliedAssets / "expansion.json"))
+        assetExpansions.setActive(suppliedAssets.filename().string());
     wowee::addons::LuaServices settingServices;
+    settingServices.expansionRegistry = &assetExpansions;
     // The macro bodies the interface asked the client to run, newest last,
     // for --ran-macro. The client hands them to its chat panel; what this
     // checks is that the interface asked, with which text.
@@ -207,9 +217,16 @@ int main(int argc, char** argv) {
     // What the client builds per character: the catalog of what is on disk,
     // and one interface over one character's interface state. No character
     // here, so no per-character saved variables.
+    std::string interfaceRoot = assetPath;
+    if (const auto* profile = assetExpansions.getActive()) {
+        const auto localizedRoot = profile->dataPath + "/locales/" + profile->locale;
+        if (std::filesystem::is_regular_file(localizedRoot + "/manifest.json") &&
+            std::filesystem::is_directory(localizedRoot + "/interface/framexml"))
+            interfaceRoot = localizedRoot;
+    }
     wowee::addons::AddonCatalog catalog;
-    catalog.setFrameXmlDir(assetPath + "/interface/FrameXML");
-    catalog.scan(assetPath + "/interface/AddOns");
+    catalog.setFrameXmlDir(interfaceRoot + "/interface/FrameXML");
+    catalog.scan(interfaceRoot + "/interface/AddOns");
     wowee::addons::InterfaceState interfaceState;
     wowee::addons::AddonManager mgr(catalog, interfaceState, nullptr, settingServices, "");
     if (!mgr.isInitialized()) {
@@ -352,7 +369,19 @@ int main(int argc, char** argv) {
         int faces = 0;
         for (const char* name : {"frizqt__.ttf", "morpheus.ttf", "skurri.ttf",
                                  "arialn.ttf", "friends.ttf"}) {
-            const std::string file = assetPath + "/misc/fonts/" + name;
+            std::string file;
+            for (const auto& root : {interfaceRoot, assetPath}) {
+                for (const char* folder : {"/fonts/", "/misc/fonts/"}) {
+                    const auto candidate = root + folder + name;
+                    if (std::filesystem::is_regular_file(candidate)) { file = candidate; break; }
+                }
+                if (!file.empty()) break;
+            }
+            if (file.empty()) {
+                LOG_WARNING("FrameXML fixture: font ", name, " missing under ", interfaceRoot,
+                            " and ", assetPath, "; fallback face used");
+                continue;
+            }
             ImFontConfig cfg;
             cfg.ExtraSizeScale = wowee::ui::fontEmSizeScaleOfFile(file);
             if (ImFont* f = io.Fonts->AddFontFromFileTTF(file.c_str(), 16.0f, &cfg)) {
@@ -389,11 +418,10 @@ int main(int argc, char** argv) {
     // replaces models or a DBC for one expansion reaches the client at all.
     // Opening the base path directly, as this used to, reads straight past
     // every such overlay and reports the unmodified game.
-    wowee::game::ExpansionRegistry assetExpansions;
     std::string primaryAssetPath = assetPath;
     std::string assetFallbackPath;
     std::string assetExpansionId;
-    if (assetExpansions.initialize(assetPath) > 0) {
+    if (assetExpansions.getActive()) {
         if (const auto* active = assetExpansions.getActive()) {
             const std::string expansionManifest = active->dataPath + "/manifest.json";
             if (!active->dataPath.empty() &&
@@ -418,6 +446,10 @@ int main(int argc, char** argv) {
     // manifest is loaded here and initialize does not clear it.
     if (!assetFallbackPath.empty())
         assets.setBaseFallbackPath(assetFallbackPath, assetExpansionId);
+    if (const auto* profile = assetExpansions.getActive()) {
+        assets.setExpansionDataPath(profile->dataPath);
+        assets.setDBCLocale(profile->locale, profile->build);
+    }
     const bool haveAssets = assets.initialize(primaryAssetPath);
     if (!haveAssets) {
         std::printf("== assets: none at %s; texture sizes are unavailable\n",
@@ -547,15 +579,28 @@ int main(int argc, char** argv) {
             if (auto* sh = gh.getSpellHandler()) {
                 for (uint32_t id : {6603u, 8690u, 133u, 168u, 116u}) sh->addKnownSpell(id);
             }
-            // A spell icon path for every id, so GetSpellTexture answers
-            // non-empty. Without it SpellButton_UpdateButton hides the icon and
-            // SpellButton_OnDrag's `not IconTexture:IsShown()` guard returns
-            // before PickupSpell - a drag that looks broken but is only a
-            // spellbook with no icons, which is what the client draws over a
-            // realm and the harness cannot. The path need not resolve to pixels;
-            // the guard only asks whether the texture is shown.
-            gh.setSpellIconPathResolver(
-                [](uint32_t) { return std::string("Interface\\Icons\\INV_Misc_QuestionMark"); });
+            // Use the dataset's actual icons: a question mark for every spell
+            // would hide macro and spellbook icon regressions.
+            std::unordered_map<uint32_t, std::string> iconPaths, spellPaths;
+            wowee::pipeline::loadSpellIconPaths(haveAssets ? &assets : nullptr, iconPaths);
+            if (haveAssets) {
+                auto dbc = assets.loadDBC("Spell.dbc");
+                const auto* layouts = wowee::pipeline::getActiveDBCLayout();
+                const auto* layout = layouts ? layouts->getLayout("Spell") : nullptr;
+                if (dbc && dbc->isLoaded() && layout) {
+                    for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
+                        auto icon = iconPaths.find(dbc->getUInt32(row, (*layout)["IconID"]));
+                        if (icon != iconPaths.end())
+                            spellPaths.emplace(dbc->getUInt32(row, (*layout)["ID"]), icon->second);
+                    }
+                } else {
+                    LOG_WARNING("FrameXML fixture: Spell.dbc/layout unavailable; spell icons unavailable");
+                }
+            }
+            gh.setSpellIconPathResolver([paths = std::move(spellPaths)](uint32_t id) {
+                const auto found = paths.find(id);
+                return found == paths.end() ? std::string{} : found->second;
+            });
             // A quest in the log, with the text the server sends only on
             // query, so the quest-log detail has something real to lay out.
             // Without it GetQuestLogQuestText answers empty and "the
@@ -757,10 +802,14 @@ int main(int argc, char** argv) {
         // ShowUIPanel(QuestLogFrame); QuestLog_SetSelection(1) is the quest log
         // opening onto its first quest, which is exactly the path a "the
         // description is blank" report walks.
-        if (std::strncmp(argv[i], "--lua:", 6) == 0) {
+        // Read UTF-8 scripts directly: Windows' narrow argv uses the system
+        // codepage and cannot faithfully carry localized Lua source text.
+        const bool luaFile = std::strncmp(argv[i], "--lua-file:", 11) == 0;
+        if (luaFile || std::strncmp(argv[i], "--lua:", 6) == 0) {
             relayout();
             if (auto* engine = mgr.getLuaEngine()) {
-                const bool ok = engine->executeString(argv[i] + 6);
+                const bool ok = luaFile ? engine->executeFile(argv[i] + 11)
+                                        : engine->executeString(argv[i] + 6);
                 if (ok && errors.size() == before) {
                     std::printf("   ran\n");
                 } else {

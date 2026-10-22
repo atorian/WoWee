@@ -1,4 +1,5 @@
 #include "core/application.hpp"
+#include "ui/macro_icon.hpp"
 #include "addons/addon_manager.hpp"
 #include "addons/lua_engine.hpp"
 #include "game/game_handler.hpp"
@@ -71,7 +72,7 @@ void Application::prepareInterfaceResources(float deltaTime) {
             for (int i = 0; i < inventory.getKeyringSize(); ++i) item(inventory.getKeyringSlot(i));
             for (bool perCharacter : {false, true})
                 for (const auto& macro : gameHandler->accountData().macros(perCharacter))
-                    if (!macro.icon.empty()) widgetRenderer_.prefetch("Interface\\Icons\\" + macro.icon, false, true);
+                    widgetRenderer_.prefetch(ui::macroIconPath(macro, *gameHandler, renderer.get()), false, true);
         }
         if (auto* addons = characterAddons(); addons && addons->getLuaEngine())
             widgetRenderer_.prefetchWidgets(addons->getLuaEngine()->widgets());

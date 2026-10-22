@@ -9,6 +9,7 @@
 #include "game/inventory_slots.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "ui/keybinding_manager.hpp"
+#include "ui/macro_icon.hpp"
 #include "ui/gamepad_controls.hpp"
 
 #include <span>
@@ -124,8 +125,34 @@ static const game::Macro* macroFromArg(lua_State* L, int arg) {
 }
 
 /// The texture an icon name is drawn from.
-static std::string macroTexture(const game::Macro& macro) {
-    return macro.icon.empty() ? std::string(kQuestionMarkIcon) : "Interface\\Icons\\" + macro.icon;
+static std::string macroTexture(lua_State* L, const game::Macro& macro) {
+    auto* services = getLuaServices(L);
+    if (services && services->macroIconPath) return services->macroIconPath(macro);
+    auto* gh = getGameHandler(L);
+    return gh ? ui::macroIconPath(macro, *gh) : kQuestionMarkIcon;
+}
+
+void refreshMacroIcons(lua_State* L, float elapsed) {
+    auto& state = interfaceState(L);
+    state.macroIconRefreshRemaining -= elapsed;
+    if (state.macroIconRefreshRemaining > 0) return;
+    state.macroIconRefreshRemaining = 0.1f;
+    auto* gh = getGameHandler(L);
+    if (!gh) return;
+    std::unordered_map<uint32_t, std::string> current;
+    for (bool character : {false, true}) {
+        for (const auto& macro : gh->accountData().macros(character))
+            current.emplace(macro.id, macroTexture(L, macro));
+    }
+    if (state.macroIcons == current) return;
+    state.macroIcons = std::move(current);
+    lua_getfield(L, LUA_REGISTRYINDEX, "wowee_lua_engine");
+    auto* engine = static_cast<LuaEngine*>(lua_touserdata(L, -1));
+    lua_pop(L, 1);
+    if (engine) {
+        engine->fireEvent("UPDATE_MACROS", {});
+        engine->fireEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
+    }
 }
 
 /// An icon argument as a texture path: the macro frame passes its picker's
@@ -254,7 +281,7 @@ static int lua_GetActionTexture(lua_State* L) {
         // The macro's own icon. Without this branch every macro button was
         // drawn as an empty slot with only its name under it.
         if (const auto* macro = gh->accountData().macro(action.id)) {
-            lua_pushstring(L, macroTexture(*macro).c_str());
+            lua_pushstring(L, macroTexture(L, *macro).c_str());
             return 1;
         }
     }
@@ -661,7 +688,7 @@ static int lua_PickupAction(lua_State* L) {
                 info ? gh->getItemIconPath(info->displayInfoId) : std::string());
         } else {
             const auto* macro = gh->accountData().macro(existing.id);
-            wowee::ui::frameXmlSetCursorItem(macro ? macroTexture(*macro) : std::string(kQuestionMarkIcon));
+            wowee::ui::frameXmlSetCursorItem(macro ? macroTexture(L, *macro) : std::string(kQuestionMarkIcon));
         }
     } else {
         clearCursorItem(L);
@@ -2372,7 +2399,7 @@ void registerActionLuaAPI(lua_State* L) {
             const game::Macro* macro = macroFromArg(L, 1);
             if (!macro) return luaReturnNil(L);
             lua_pushstring(L, macro->name.c_str());
-            lua_pushstring(L, macroTexture(*macro).c_str());
+            lua_pushstring(L, macroTexture(L, *macro).c_str());
             lua_pushstring(L, macro->body.c_str());
             lua_pushnil(L);
             return 4;
@@ -2449,7 +2476,7 @@ void registerActionLuaAPI(lua_State* L) {
             if (!macro) return 0;
             setCursorType(L, CursorType::MACRO);
             cursor(L).id = macro->id;
-            wowee::ui::frameXmlSetCursorItem(macroTexture(*macro));
+            wowee::ui::frameXmlSetCursorItem(macroTexture(L, *macro));
             return 0;
         }},
                 {"GetTradePlayerItemInfo", lua_GetTradePlayerItemInfo},

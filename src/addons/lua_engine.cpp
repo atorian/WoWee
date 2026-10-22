@@ -11510,6 +11510,7 @@ void LuaEngine::dispatchOnUpdate(float elapsed) {
 
     if (!L_) return;
 
+    refreshMacroIcons(L_, elapsed);
     drainPendingTextChanged();
     advanceWheelGlide(elapsed);
 

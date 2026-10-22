@@ -57,6 +57,10 @@ struct AuctionSortKey {
 };
 
 struct InterfaceState {
+    // Last published macro textures. Only presentation state; never saved to
+    // account data. Compare during Interface so conditional icons can change.
+    std::unordered_map<uint32_t, std::string> macroIcons;
+    float macroIconRefreshRemaining = 0;
     struct Cursor {
         CursorType type = CursorType::NONE;
         uint32_t id = 0;       ///< spellId, itemId, action slot or vendor index

@@ -713,11 +713,27 @@ std::vector<std::string> Extractor::archiveChain(const std::string& mpqDir,
 
 namespace {
 
+// Keep the same patch priority, but select only archives owned by a locale.
+// Base archives remain the responsibility of the existing expansion dataset.
+std::vector<std::string> extractionArchives(const Extractor::Options& opts) {
+    auto archives = discoverArchives(opts.mpqDir, opts.expansion, opts.locale);
+    if (!opts.localeOnly) return archives;
+    if (opts.locale.empty()) {
+        std::cerr << "--locale-only requires an explicit --locale\n";
+        return {};
+    }
+    const auto locale = toLowerStr(opts.locale);
+    std::erase_if(archives, [&](const auto& path) {
+        return toLowerStr(fs::path(path).parent_path().filename().string()) != locale;
+    });
+    return archives;
+}
+
 /// Every file the archives hold, for one extraction. Internal because only
 /// run() has ever asked: it was public API nothing outside this file called.
 bool enumerateFilesImpl(const Extractor::Options& opts,
                                std::vector<std::string>& outFiles) {
-    auto archives = discoverArchives(opts.mpqDir, opts.expansion, opts.locale);
+    auto archives = extractionArchives(opts);
     if (archives.empty()) {
         // What is in there, since what is not in there has already been said
         // and has never been enough to act on.
@@ -865,7 +881,7 @@ bool Extractor::run(const Options& opts) {
         return false;
     }
 
-    auto archives = discoverArchives(opts.mpqDir, opts.expansion, opts.locale);
+    auto archives = extractionArchives(opts);
 
     // Determine thread count
     int numThreads = opts.threads;
