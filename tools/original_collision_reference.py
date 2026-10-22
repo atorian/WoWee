@@ -48,6 +48,9 @@ class OriginalCollision:
         stack = cpu.reg_read(UC_X86_REG_ESP)
         self.fall_reset = struct.unpack('<I', cpu.mem_read(stack + 4, 4))[0]
 
+    def swim_move(self, case):
+        return self.surface_move(case, routine=0x760b40)
+
     def fall_move(self, case):
         return self.surface_move(case, routine=0x7618b0)
 
@@ -130,11 +133,17 @@ class OriginalCollision:
         ids = self.alloc(b''.join(struct.pack('<Q', t.get('owner', 0)) for t in triangles) or bytes(8))
         write(0xadba34, '8I', len(triangles), len(triangles), facets, 0,
               len(triangles), len(triangles), ids, 0)
+        liquid = case.get('liquids', [])
+        liquid_data = self.alloc(b''.join(struct.pack('<13f', *(t['plane'] + sum(t['vertices'], []))) for t in liquid) or bytes(16))
+        liquid_ids = self.alloc(b''.join(struct.pack('<Q', t.get('owner', 0)) for t in liquid) or bytes(8))
+        write(0xadba54, '8I', len(liquid), len(liquid), liquid_data, 0, len(liquid), len(liquid), liquid_ids, 0)
         write(0xca1660, '6f', -100000, -100000, -100000, 100000, 100000, 100000)
         direction = self.floats(case['direction'][:2])
         distance_bits = struct.unpack('<I', struct.pack('<f', case['distance']))[0]
         stack = 0x30ff000
         write(stack, '5I', 0x1000000, case.get('time', 1000), case.get('elapsed', 16), distance_bits, direction)
+        if routine == 0x760b40:
+            write(stack, '4I3f', 0x1000000, case.get('time', 1000), case.get('elapsed', 16), distance_bits, *case['swim_direction'])
         cpu.reg_write(UC_X86_REG_ESP, stack)
         cpu.reg_write(UC_X86_REG_ECX, body)
         cpu.reg_write(UC_X86_REG_FPCW, self.control_word)
@@ -159,7 +168,7 @@ class OriginalCollision:
             values = struct.unpack('<' + fmt, cpu.mem_read(body + offset, struct.calcsize(fmt)))
             result[name] = values[0] if len(values) == 1 else list(values)
         result['transport'] = self.transport_request
-        if routine == 0x7618b0:
+        if routine in (0x7618b0, 0x760b40):
             result['ground_normal'] = list(struct.unpack('<3f', cpu.mem_read(body + 0x38, 12)))
             result['fall_reset'] = self.fall_reset
         return result

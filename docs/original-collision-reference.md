@@ -234,6 +234,22 @@ python tools/check_original_fall.py --binary /path/to/wow_original.exe \
   --write-reference tests/fixtures/original_fall_12340.json
 ```
 
+## Swimming and flight phase
+
+`traceMovementSwim` reproduces `Swim` (`0x760b40`), which the original also
+uses for flight. Solid and liquid facets remain separate. Liquid planes face
+into the water and use 75% body height while swimming; after a solid contact,
+liquids are no longer consulted during that request. Ascending into the liquid
+boundary invokes the original jump restrictions and water-jump velocity.
+Attached transport detach and active spline rules are not covered by this API.
+
+The 2848 recorded original calls cover water boundaries, denied water jumps,
+gravity flags, wall/ceiling sliding, transformed slopes and multi-frame paths.
+Every recorded state value matches on Linux, native MinGW and ASan/UBSan.
+All eleven selected native CTest regressions pass; surface and falling fixtures
+remain unchanged and pass. `tools/check_original_swim.py` regenerates the
+fixture from the pinned binary or compares a probe against the saved reference.
+
 ## Remaining acceptance work
 
 The full checklist is in `tasks/collision-original-parity.md`. World facet

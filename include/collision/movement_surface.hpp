@@ -66,4 +66,11 @@ struct SurfaceMovementResult {
     const SurfaceMovementShape& shape, const glm::vec2& direction,
     float distance, uint32_t timeMs, uint32_t elapsedMs);
 
+// Original Swim phase is also used for flight. Liquid planes are supplied
+// facing into the water, as GetMoveFacets prepares them. No transport is attached.
+[[nodiscard]] SurfaceMovementResult traceMovementSwim(
+    std::span<const MovementFacet> solids, std::span<const MovementFacet> liquids,
+    SurfaceMovementState& state, const SurfaceMovementShape& shape,
+    const glm::vec3& direction, float distance, uint32_t elapsedMs);
+
 } // namespace wowee::collision

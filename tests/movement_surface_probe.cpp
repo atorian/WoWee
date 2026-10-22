@@ -6,6 +6,7 @@
 #include <vector>
 
 int main(int argc, char** argv) {
+    const bool swimming = argc == 2 && std::string(argv[1]) == "--swim";
     const bool falling = argc == 2 && std::string(argv[1]) == "--fall";
     using namespace wowee::collision;
     std::cout << std::setprecision(9) << std::showpoint;
@@ -33,11 +34,22 @@ int main(int argc, char** argv) {
             for (auto& v : facet.vertices) if (!read3(v)) return 2;
         }
         uint32_t time=1000;
-        if (falling && (!(std::cin>>time) || !read3(state.groundNormal) ||
+        if ((falling || swimming) && (!(std::cin>>time) || !read3(state.groundNormal) ||
             !(std::cin>>state.walkSpeed>>state.runSpeed>>state.runBackSpeed>>state.swimSpeed
                       >>state.swimBackSpeed>>state.flightSpeed>>state.flightBackSpeed))) return 2;
-        const auto result = falling ? traceMovementFall(facets,state,shape,direction,distance,time,elapsed)
-                                    : traceMovementSurface(facets,state,shape,direction,distance,elapsed);
+        glm::vec3 swimDirection{};
+        std::vector<MovementFacet> liquids;
+        if (swimming) {
+            if (!read3(swimDirection) || !(std::cin >> count) || count > 100000) return 2;
+            liquids.resize(count);
+            for (auto& facet : liquids) {
+                if (!read3(facet.plane.normal) || !(std::cin >> facet.plane.offset >> facet.owner)) return 2;
+                for (auto& v : facet.vertices) if (!read3(v)) return 2;
+            }
+        }
+        const auto result = swimming ? traceMovementSwim(facets, liquids, state, shape, swimDirection, distance, elapsed)
+                          : falling ? traceMovementFall(facets, state, shape, direction, distance, time, elapsed)
+                                    : traceMovementSurface(facets, state, shape, direction, distance, elapsed);
         std::cout << "{\"name\":\"" << name << '"';
         auto number = [](const char* key, auto value) { std::cout << ",\"" << key << "\":" << value; };
         auto vector = [](const char* key, const glm::vec3& v) {
@@ -60,7 +72,7 @@ int main(int argc, char** argv) {
         std::cout << ",\"transport\":";
         if (result.transport) std::cout << *result.transport;
         else std::cout << "null";
-        if (falling) {
+        if (falling || swimming) {
             vector("ground_normal",state.groundNormal);
             std::cout << ",\"fall_reset\":";
             if (result.fallResetTime) std::cout << *result.fallResetTime;

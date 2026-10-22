@@ -779,6 +779,87 @@ struct SurfaceTraversal {
         return (oldFlags ^ state.flags) & 15;
     }
 
+    bool IsGravityDisabled() const {
+        return (state.flags2 & 4) || (state.flags & 0x400);
+    }
+
+    // 0x009883f0, without an active spline.
+    void JumpFromWater() {
+        if ((state.flags & 0x40000000) && !(state.flags & MOVEMENTFLAG_SWIMMING)) return;
+        if (state.flags & (MOVEMENTFLAG_ROOT | MOVEMENTFLAG_FALLING | MOVEMENTFLAG_FLYING)) return;
+        if (!(state.flags2 & 4) && IsGravityDisabled()) return;
+        if (state.flags2 & 2) return;
+        StartFalling(state.flags & MOVEMENTFLAG_SWIMMING ? -9.0967484f : -7.9555473f);
+    }
+
+    // 0x00760b40. The solid hit latches for this request: after touching a
+    // wall, subsequent iterations no longer query the liquid surface.
+    uint32_t Swim(std::span<const MovementFacet> liquids, uint32_t elapsed,
+                  float distance, C3Vector direction) {
+        if (!elapsed) return 0;
+        if (fabs(distance) < 0.00000095367432f) return elapsed;
+        const float total = float(elapsed);
+        float consumed = 0;
+        float remaining = distance;
+        uint32_t stuck = 0;
+        bool hitSolid = false, moved = false;
+        auto query = [&](std::span<const MovementFacet> input, bool liquid) {
+            const float height = liquid && (state.flags & MOVEMENTFLAG_SWIMMING)
+                               ? m_collisionHeight * 0.75f : m_collisionHeight;
+            return traceMovementBody(input, MovementBody(state.position, m_collisionRadius, height), direction, remaining);
+        };
+        auto hit = query(facets, false);
+        while (true) {
+            auto input = facets;
+            if (hit.facet < facets.size()) hitSolid = true;
+            else {
+                if (!hitSolid && !IsGravityDisabled()) {
+                    input = liquids;
+                    hit = query(liquids, true);
+                }
+                if (hit.facet == input.size()) {
+                    state.position += direction * hit.distance;
+                    break;
+                }
+            }
+            state.position = C3Vector(glm::dvec3(direction) * double(hit.distance) + glm::dvec3(state.position));
+            double progress = (double(total) - consumed) * (double(hit.distance) / remaining);
+            double left = double(remaining) - hit.distance;
+            double used = consumed;
+            if (progress + 0.00000095367432f <= 1.0f) {
+                if (++stuck > 5) { UpdateAnchors(0); return elapsed; }
+            } else {
+                stuck = 1;
+                used += progress;
+                consumed = float(used);
+            }
+            if (!hitSolid && (state.flags & MOVEMENTFLAG_ASCENDING)) {
+                if (fnotequal(total, float(used))) moved = true;
+                JumpFromWater();
+                break;
+            }
+            if (total - used < 1.0f) {
+                if (fnotequal(total, float(used))) moved = true;
+                break;
+            }
+            const auto& n = input[hit.facet].plane.normal;
+            moved = true;
+            double push = (-double(n.y) * direction.y + -double(n.z) * direction.z + -double(n.x) * direction.x) * left + 0.001f;
+            double x = direction.x * left + n.x * push;
+            double y = n.y * push + direction.y * left;
+            double z = n.z * push + left * direction.z;
+            direction = C3Vector(x, y, z);
+            double length = sqrt(y * y + z * z + x * x);
+            remaining = float(length);
+            if (fabs(length) < 0.00000095367432f) break;
+            double scale = 1.0 / length;
+            direction = C3Vector(x * scale, double(direction.y) * scale, double(direction.z) * scale);
+            hit = query(facets, false);
+        }
+        if (moved) UpdateAnchors(0);
+        return elapsed;
+    }
+
     // 0x007612b0
     uint32_t FallDown(uint32_t elapsed, C3Vector move, bool notify = false, uint32_t time = 0) {
         float timeFallen = 0.0f;
@@ -1685,6 +1766,15 @@ SurfaceMovementResult traceMovementFall(std::span<const MovementFacet> facets,
     SurfaceTraversal traversal{facets, state, shape.radius, shape.height,
                                shape.stepHeight, shape.clientControlled, std::nullopt, std::nullopt};
     const auto used = traversal.Fall(timeMs, elapsedMs, distance, direction);
+    return {used, traversal.transportRequest, traversal.fallResetTime};
+}
+SurfaceMovementResult traceMovementSwim(std::span<const MovementFacet> solids,
+    std::span<const MovementFacet> liquids, SurfaceMovementState& state,
+    const SurfaceMovementShape& shape, const glm::vec3& direction,
+    float distance, uint32_t elapsedMs) {
+    SurfaceTraversal traversal{solids, state, shape.radius, shape.height,
+                               shape.stepHeight, shape.clientControlled, std::nullopt, std::nullopt};
+    const auto used = traversal.Swim(liquids, elapsedMs, distance, direction);
     return {used, traversal.transportRequest, traversal.fallResetTime};
 }
 } // namespace wowee::collision

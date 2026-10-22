@@ -143,3 +143,8 @@ still need to be connected and compared before changing player simulation.
 Falling progress: original Fall/FallDown matches 2993 calls, including jump/landing
 sequences, ceiling resets and deferred movement actions. This remains a supplied-
 geometry phase; full frame dispatch, transports and packet delivery are pending.
+
+Swimming/flight progress: resident-facet Swim matches 2848 original calls,
+including water-boundary jump restrictions, solid-contact liquid suppression
+and consecutive frames. Transport detach, active splines and the frame
+dispatcher remain outside this phase. Eleven native collision tests pass.
