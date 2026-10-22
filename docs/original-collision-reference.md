@@ -400,3 +400,40 @@ checks skip). These are collection contracts over supplied world state. Real
 placement/link lifecycle, combined world collection, the gameplay collision
 provider and movement/protocol integration remain unverified; the replacement
 is still offline.
+
+## Combined world, dimensions and falling boundaries
+
+`WorldMovementFacets` composes the verified collectors over a supplied
+collision-owned view, preserving shared doodad/entity tags, group/chunk order,
+partial output and readiness. `original_world_reference.py` runs GetFacets
+`0x7a5f20` and its real subordinate collectors: 1072 cases. Entity collision-data
+callbacks remain supplied, and fixture links are explicit; this does not verify
+production placement/link construction or streaming lifetime.
+
+`movement_dimensions` ports SetCollisionBox `0x6e9570` and SetCollisionHeight
+`0x6e9600`. The 1884-case dimension oracle compares their effects through real
+GetMoveFacets/cache expansion, including model/server updates in both orders,
+forced updates, controlled-player height preservation and reference-scale seams.
+It does not substitute immediate application for the pending original event queue.
+
+`original_fall_edges_12340.json` records 3705 original Fall `0x7618b0` executions.
+Thin sloped triangles and nearby walls at world coordinates exposed 43 errors
+in edge/plane arithmetic. The original keeps some intermediates in x87 register
+precision and rounds others at binary32 stores; uniformly using float changed
+both nearest-edge selection and support on subsequent contacts. The port now
+matches those boundaries in PushOffObstacleEdge `0x75db00`, IntersectPlanes
+`0x75d680` (including matrix determinant/adjoint/inverse stores) and the steep
+volume test `0x75d740`. Another 75 cases exposed premature FALLING_FAR at the
+height boundary in UpdateFallingFar `0x75cf80`; the threshold subtraction must
+retain register precision until comparison. Jump-peak calculations in
+CheckFallImpactThreshold `0x75e040` preserve it too. Expected states come from
+original execution; test geometry is synthetic, not recorded player traffic.
+
+`original_world_movement_reference.py` joins original CollideRequestMove and
+GetFacets in a single execution; no facet query is replaced. The 1072 movement
+cases compare resultant kinematics, state flags, query sequences, readiness and
+observed event-delivery arguments. Original unit/network delivery and the dynamic
+entity collision-data provider remain external fixture boundaries. The scene is
+shared by both C++ front doors through `tests/world_facet_fixture.hpp`, whose
+members own all geometry and cross-list references. Linux and native Windows
+comparisons pass; the native collision/ADT selection now passes 37/37 tests.

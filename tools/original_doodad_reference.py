@@ -4,22 +4,27 @@ import struct
 from original_facet_reference import OriginalFacetBuilder
 
 class OriginalDoodadQuery(OriginalFacetBuilder):
+    def build_doodad(self,p):
+        def write(at,fmt,*v):self.cpu.mem_write(at,struct.pack('<'+fmt,*v))
+        obj=self.alloc(bytes(0x200))
+        write(obj+12,'I',p['flags']);write(obj+0x7c,'I',p['static']);write(obj+0x2c,'I',p['tag'])
+        write(obj+0xb8,'Q',p['owner']);write(obj+0xc0,'6f',*p['bounds']);write(obj+0xd8,'16f',*p['matrix'])
+        if not p['present']:return obj
+        model=self.alloc(bytes(0x100));shared=self.alloc(bytes(0x200));data=self.alloc(bytes(0x200))
+        write(obj+0x34,'I',model);write(model+0x10,'I',1);write(model+0x2c,'I',shared)
+        write(shared+0x150,'I',data);write(shared+0x154,'6f',*p['model_bounds'])
+        indices=sum(p['triangles'],[])
+        points=self.floats(sum(p['vertices'],[]));normals=self.floats(sum(p['normals'],[]))
+        index_data=self.alloc(struct.pack('<'+'H'*len(indices),*indices))
+        write(data+0xd8,'6I',len(indices),index_data,len(p['vertices']),points,len(p['normals']),normals)
+        return obj
+
     def query(self,c):
         self.next=0x2000000;self.diagnostics=0;cpu=self.cpu
         def write(at,fmt,*v):cpu.mem_write(at,struct.pack('<'+fmt,*v))
         objects=[]
         for p in c['objects']:
-            obj=self.alloc(bytes(0x200));objects.append(obj)
-            write(obj+12,'I',p['flags']);write(obj+0x7c,'I',p['static']);write(obj+0x2c,'I',p['tag'])
-            write(obj+0xb8,'Q',p['owner']);write(obj+0xc0,'6f',*p['bounds']);write(obj+0xd8,'16f',*p['matrix'])
-            if not p['present']:continue
-            model=self.alloc(bytes(0x100));shared=self.alloc(bytes(0x200));data=self.alloc(bytes(0x200))
-            write(obj+0x34,'I',model);write(model+0x10,'I',1);write(model+0x2c,'I',shared)
-            write(shared+0x150,'I',data);write(shared+0x154,'6f',*p['model_bounds'])
-            indices=sum(p['triangles'],[])
-            points=self.floats(sum(p['vertices'],[]));normals=self.floats(sum(p['normals'],[]))
-            index_data=self.alloc(struct.pack('<'+'H'*len(indices),*indices))
-            write(data+0xd8,'6I',len(indices),index_data,len(p['vertices']),points,len(p['normals']),normals)
+            objects.append(self.build_doodad(p))
         count=max([len(p['vertices']) for p in c['objects']]+[1])
         positions=self.alloc(bytes(count*12));codes=self.alloc(bytes(count*4))
         write(0xd411a0,'4I',count,count,positions,0);write(0xd411b0,'4I',count,count,codes,0)

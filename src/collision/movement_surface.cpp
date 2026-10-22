@@ -211,8 +211,22 @@ struct SurfaceTraversal {
         return result;
     }
     void IntersectPlanes(const C4Plane& a, const C4Plane& b, const C4Plane& c, C3Vector& point) {
-        const auto matrix = glm::transpose(glm::mat3(a.normal,b.normal,c.normal));
-        point = glm::inverse(matrix)*C3Vector(-a.offset,-b.offset,-c.offset);
+        // 0x75d680 -> C33Matrix::Determinant/Adjoint/Inverse. Determinant,
+        // reciprocal, cofactors and inverse entries each have explicit float
+        // stores. A generic float inverse changes contacts at large positions.
+        const std::array<double,9> m{a.normal.x,a.normal.y,a.normal.z,
+            b.normal.x,b.normal.y,b.normal.z,c.normal.x,c.normal.y,c.normal.z};
+        const float determinant=float(((((m[6]*m[1]*m[5]+m[2]*m[3]*m[7])+m[8]*m[0]*m[4])-
+            m[6]*m[2]*m[4])-m[8]*m[1]*m[3])-m[0]*m[7]*m[5]);
+        const float reciprocal=float(1.0/determinant);
+        std::array<float,9> inverse{
+            float(m[4]*m[8]-m[7]*m[5]),float(-(m[8]*m[1]-m[7]*m[2])),float(m[5]*m[1]-m[4]*m[2]),
+            float(-(m[3]*m[8]-m[5]*m[6])),float(m[0]*m[8]-m[6]*m[2]),float(-(m[5]*m[0]-m[3]*m[2])),
+            float(m[7]*m[3]-m[4]*m[6]),float(-(m[7]*m[0]-m[6]*m[1])),float(m[4]*m[0]-m[3]*m[1])};
+        for (auto& value:inverse) value=float(double(value)*reciprocal);
+        for (int row=0;row<3;++row)
+            point[row]=float((double(inverse[row*3+2])*-c.offset+double(inverse[row*3+1])*-b.offset)+
+                             double(inverse[row*3])*-a.offset);
     }
     void SetTransport(WOWGUID owner) { transportRequest = owner.m_guid; }
     // 0x0075e250
@@ -254,7 +268,9 @@ struct SurfaceTraversal {
 
     // 0x0075d740
     int32_t ComputeSteepSurfacePushNormalImpl(const C4Plane& plane) const {
-        float top = m_collisionRadius * 1.849399f;
+        // Keep the x87 intermediates until the vertex store / plane comparison.
+        // Rounding the plane sum early changes edge support at world coordinates.
+        double top = double(m_collisionRadius) * 1.849399f;
         C3Vector points[5];
         points[0] = state.position;
         points[1] = C3Vector(m_collisionRadius + state.position.x, m_collisionRadius + state.position.y, state.position.z + top);
@@ -263,7 +279,7 @@ struct SurfaceTraversal {
         points[4] = C3Vector(-m_collisionRadius + state.position.x, -m_collisionRadius + state.position.y, top + state.position.z);
 
         for (uint32_t i = 0; i < 5; i++) {
-            if (fabs(fabs(points[i].x * plane.normal.x + points[i].z * plane.normal.z + points[i].y * plane.normal.y + plane.offset)) < 0.0013888889f) {
+            if (fabs(fabs(double(points[i].x) * plane.normal.x + double(points[i].z) * plane.normal.z + double(points[i].y) * plane.normal.y + plane.offset)) < 0.0013888889f) {
                 return 1;
             }
         }
@@ -306,69 +322,43 @@ struct SurfaceTraversal {
     C3Vector PushOffObstacleEdge(const C3Vector& point, const C3Vector& direction, uint32_t facet) const {
         const CFacet& data = facets[facet];
 
-        C3Vector edge = data.vertices[1] - data.vertices[0];
-        float lengthSq = edge.y * edge.y + edge.z * edge.z + edge.x * edge.x;
-
-        if (lengthSq > 0.00000023841858f) {
-            float scale = 1.0f / sqrt(lengthSq);
-            edge.x = edge.x * scale;
-            edge.y = edge.y * scale;
-            edge.z = edge.z * scale;
+        // The original keeps edge 0 in x87 registers. Later candidates have
+        // float copies used only when they replace it. A float-normalized
+        // vector throughout changes which edge wins and the resulting push.
+        const auto normalized=[](glm::dvec3 edge) {
+            const double lengthSq=(edge.y*edge.y+edge.z*edge.z)+edge.x*edge.x;
+            if (lengthSq>0.00000023841858f) edge*=1.0/std::sqrt(lengthSq);
+            return edge;
+        };
+        const auto distanceToLine=[&](const C3Vector& origin,const glm::dvec3& edge,bool roundX) {
+            glm::dvec3 delta=glm::dvec3(point)-glm::dvec3(origin);
+            if (roundX) delta.x=float(delta.x);
+            const double t=(delta.z*edge.z+delta.y*edge.y)+delta.x*edge.x;
+            const glm::dvec3 offset=glm::dvec3(point)-(edge*t+glm::dvec3(origin));
+            return (offset.y*offset.y+offset.z*offset.z)+offset.x*offset.x;
+        };
+        glm::dvec3 edge=normalized(glm::dvec3(data.vertices[1])-glm::dvec3(data.vertices[0]));
+        float best=float(distanceToLine(data.vertices[0],edge,false));
+        const glm::dvec3 edge1=normalized(glm::dvec3(data.vertices[2])-glm::dvec3(data.vertices[1]));
+        const double distance=distanceToLine(data.vertices[1],edge1,true);
+        if (best>distance) {
+            best=float(distance);
+            edge=C3Vector(edge1);
         }
-
-        float t = (point.z - data.vertices[0].z) * edge.z + (point.y - data.vertices[0].y) * edge.y + (point.x - data.vertices[0].x) * edge.x;
-        float dz = point.z - (t * edge.z + data.vertices[0].z);
-        float dy = point.y - (edge.y * t + data.vertices[0].y);
-        float dx = point.x - (t * edge.x + data.vertices[0].x);
-        float best = dx * dx + dy * dy + dz * dz;
-
-        C3Vector edge1 = data.vertices[2] - data.vertices[1];
-        lengthSq = edge1.z * edge1.z + edge1.y * edge1.y + edge1.x * edge1.x;
-
-        if (lengthSq > 0.00000023841858f) {
-            float scale = 1.0f / sqrt(lengthSq);
-            edge1.x = edge1.x * scale;
-            edge1.y = edge1.y * scale;
-            edge1.z = scale * edge1.z;
-        }
-
-        t = (point.z - data.vertices[1].z) * edge1.z + (point.y - data.vertices[1].y) * edge1.y + (point.x - data.vertices[1].x) * edge1.x;
-        dy = point.y - (edge1.y * t + data.vertices[1].y);
-        dz = point.z - (edge1.z * t + data.vertices[1].z);
-        dx = point.x - (edge1.x * t + data.vertices[1].x);
-        float distance = dx * dx + (dz * dz + dy * dy);
-
-        if (best > distance) {
-            best = distance;
-            edge = edge1;
-        }
-
-        C3Vector edge2 = data.vertices[0] - data.vertices[2];
-        lengthSq = edge2.y * edge2.y + edge2.z * edge2.z + edge2.x * edge2.x;
-
-        if (lengthSq > 0.00000023841858f) {
-            float scale = 1.0f / sqrt(lengthSq);
-            edge2.x = edge2.x * scale;
-            edge2.y = edge2.y * scale;
-            edge2.z = scale * edge2.z;
-        }
-
-        t = (point.z - data.vertices[2].z) * edge2.z + (point.y - data.vertices[2].y) * edge2.y + (point.x - data.vertices[2].x) * edge2.x;
-        dx = point.x - (edge2.x * t + data.vertices[2].x);
-        dy = point.y - (edge2.y * t + data.vertices[2].y);
-        dz = point.z - (edge2.z * t + data.vertices[2].z);
-
-        if (dx * dx + dz * dz + dy * dy < best) {
-            edge = edge2;
-        }
-
-        C3Vector push(data.plane.normal.z * edge.y - data.plane.normal.y * edge.z, edge.z * data.plane.normal.x - data.plane.normal.z * edge.x, edge.x * data.plane.normal.y - edge.y * data.plane.normal.x);
-
-        if (direction.z * push.z + direction.y * push.y + push.x * direction.x < 0.0f) {
-            push = C3Vector(-push.x, -push.y, -push.z);
-        }
-
-        return push;
+        glm::dvec3 edge2=glm::dvec3(data.vertices[0])-glm::dvec3(data.vertices[2]);
+        const double lengthSq=(edge2.y*edge2.y+edge2.z*edge2.z)+edge2.x*edge2.x;
+        if (lengthSq>0.00000023841858f) {
+            const double scale=1.0/std::sqrt(lengthSq);
+            // X remains live; Y and Z reload their stored raw differences.
+            edge2={edge2.x*scale,double(float(edge2.y))*scale,double(float(edge2.z))*scale};
+        } else edge2=C3Vector(edge2);
+        if (distanceToLine(data.vertices[2],edge2,true)<best) edge=C3Vector(edge2);
+        const auto& n=data.plane.normal;
+        glm::dvec3 push(double(n.z)*edge.y-double(n.y)*edge.z,
+            edge.z*n.x-double(n.z)*edge.x,edge.x*n.y-edge.y*n.x);
+        if ((double(direction.z)*push.z+double(direction.y)*push.y)+push.x*direction.x<0.0)
+            push=-push;
+        return C3Vector(push);
     }
 
     // 0x0075cfe0
@@ -458,9 +448,9 @@ struct SurfaceTraversal {
         }
 
         if (state.fallVelocity < 0.0f) {
-            float peak = TimeToJumpPeak();
+            double peak = TimeToJumpPeak();
 
-            if (elapsed + timeFallen < peak) {
+            if (double(elapsed) + timeFallen < peak) {
                 return 1;
             }
 
@@ -468,9 +458,9 @@ struct SurfaceTraversal {
                 return 0;
             }
 
-            float distance = (peak - timeFallen) * state.currentSpeed;
+            double distance = (peak - timeFallen) * state.currentSpeed;
 
-            if (move.x * move.x + move.y * move.y < distance * distance) {
+            if (double(move.x) * move.x + double(move.y) * move.y < distance * distance) {
                 return 1;
             }
         }
@@ -2077,7 +2067,7 @@ struct SurfaceTraversal {
         }
 
         if ((flags & MOVEMENTFLAG_FALLING) && 0.0f != state.fallVelocity) {
-            if (state.fallStartZ - 0.11111111f >= state.position.z) {
+            if (double(state.fallStartZ) - 0.11111111f >= state.position.z) {
                 state.flags = flags | MOVEMENTFLAG_FALLING_FAR;
             }
         } else if (state.fallTimeMs >= 500) {

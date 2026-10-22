@@ -88,14 +88,19 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     source=p.add_mutually_exclusive_group(required=True);source.add_argument('--binary');source.add_argument('--reference')
     output=p.add_mutually_exclusive_group(required=True);output.add_argument('--probe');output.add_argument('--actual')
-    p.add_argument('--write-reference');p.add_argument('--failures')
+    p.add_argument('--write-reference');p.add_argument('--failures');p.add_argument('--edges',action='store_true')
     args=p.parse_args()
     if args.reference:records=json.loads(Path(args.reference).read_text())['cases']
     else:
         from original_collision_reference import OriginalCollision,REFERENCE_SHA256
         original=OriginalCollision(args.binary)
-        records=[dict(input=c,output=original.fall_move(c)) for c in cases()]
-        records.extend(trajectory_cases(original))
+        selected=cases
+        if args.edges:
+            from itertools import chain
+            from fall_edge_cases import cases as edge_cases,boundary_cases
+            selected=lambda:chain(edge_cases(),boundary_cases())
+        records=[dict(input=c,output=original.fall_move(c)) for c in selected()]
+        if not args.edges:records.extend(trajectory_cases(original))
         if args.write_reference:
             header=json.dumps(dict(binary_sha256=REFERENCE_SHA256,routine='Fall 0x7618b0',fpu_control=0x27f),indent=2)
             rows=',\n'.join('    '+json.dumps(r) for r in records)

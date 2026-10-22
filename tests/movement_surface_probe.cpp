@@ -1,7 +1,9 @@
 // Offline front door for original-code comparisons. No game, device or socket.
 #include "collision/movement_surface.hpp"
 #include "collision/movement_query.hpp"
+#include "collision/movement_dimensions.hpp"
 #include "collision/movement_request.hpp"
+#include "world_facet_fixture.hpp"
 #include <iomanip>
 #include <iostream>
 #include <string>
@@ -11,9 +13,11 @@ struct SuppliedWorld : wowee::collision::MovementFacetSource {
     std::vector<wowee::collision::MovementFacet> solids,liquids;
     std::vector<std::pair<wowee::collision::MovementFacetRequest,uint32_t>> requests;
     size_t failQuery=0;
+    wowee::collision::MovementFacetSource* collection=nullptr;
     wowee::collision::MovementGeometryStatus query(const wowee::collision::MovementFacetRequest& request,
         uint32_t flags,std::vector<wowee::collision::MovementFacet>& output) override {
         requests.emplace_back(request,flags);
+        if (collection) return collection->query(request,flags,output);
         if (requests.size()==failQuery) { output.clear();return wowee::collision::MovementGeometryStatus::NotReady; }
         output=flags==0x20000?liquids:solids;
         return wowee::collision::MovementGeometryStatus::Ready;
@@ -21,8 +25,10 @@ struct SuppliedWorld : wowee::collision::MovementFacetSource {
 };
 
 int main(int argc, char** argv) {
-    const bool frame = argc == 2 && std::string(argv[1]) == "--request";
-    const bool query = argc == 2 && std::string(argv[1]) == "--query";
+    const bool fullWorld = argc == 2 && std::string(argv[1]) == "--world-request";
+    const bool frame = fullWorld || (argc == 2 && std::string(argv[1]) == "--request");
+    const bool dimensions = argc == 2 && std::string(argv[1]) == "--dimensions";
+    const bool query = dimensions || (argc == 2 && std::string(argv[1]) == "--query");
     const bool ground = argc == 2 && std::string(argv[1]) == "--ground";
     const bool hovering = argc == 2 && std::string(argv[1]) == "--hover";
     const bool swimming = argc == 2 && std::string(argv[1]) == "--swim";
@@ -71,8 +77,20 @@ int main(int argc, char** argv) {
             if (!(std::cin>>local>>ghost>>refresh)) return 2;
             bool emit=true;
             MovementFacetRequest request;
+            if (refresh && (!read3(request.queryMin) || !read3(request.queryMax))) return 2;
+            if (dimensions) {
+                size_t events;if(!(std::cin>>events)||events>100)return 2;
+                for(size_t i=0;i<events;++i) {
+                    unsigned kind;if(!(std::cin>>kind)||kind>1)return 2;
+                    if(kind) {float height;if(!(std::cin>>height))return 2;setMovementCollisionHeight(shape,height);}
+                    else {
+                        float width,height,scale,reference;bool force;
+                        if(!(std::cin>>width>>height>>scale>>reference>>force))return 2;
+                        setMovementModelDimensions(shape,width,height,scale,reference,force);
+                    }
+                }
+            }
             if (refresh) {
-                if (!read3(request.queryMin) || !read3(request.queryMax)) return 2;
                 auto expanded=expandMovementFacetRequest(request,state,shape,swimDirection,local,ghost);
                 emit=expanded.has_value();
                 if (expanded) request=*expanded;
@@ -95,10 +113,15 @@ int main(int argc, char** argv) {
         if ((hovering || frame) && !(std::cin >> state.hoverHeight)) return 2;
         MovementRequestResult frameResult;
         SuppliedWorld world;
+        std::unique_ptr<world_fixture::Scene> scene;
         if (frame) {
             bool local,ghost;
             if (!(std::cin>>local>>ghost>>world.failQuery)) return 2;
             world.solids=facets;world.liquids=liquids;
+            if(fullWorld) {
+                world_fixture::Settings settings;if(!settings.read(std::cin))return 2;
+                scene=std::make_unique<world_fixture::Scene>(settings);world.collection=scene->source.get();
+            }
             MovementRequestCache cache;
             frameResult=traceUnattachedMovementRequest(world,cache,state,shape,swimDirection,time,elapsed,local,ghost);
         }

@@ -3012,6 +3012,35 @@ if(Python3_Interpreter_FOUND)
             --probe $<TARGET_FILE:terrain_facet_probe>)
 endif()
 
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_dimensions
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_dimensions.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_dimensions_12340.json
+            --probe $<TARGET_FILE:movement_surface_probe>)
+endif()
+
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_fall_edges
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_fall.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_fall_edges_12340.json
+            --probe $<TARGET_FILE:movement_surface_probe>)
+endif()
+
+add_executable(world_facet_probe world_facet_probe.cpp)
+target_link_libraries(world_facet_probe PRIVATE wowee_collision)
+wowee_test_link_glm(world_facet_probe)
+register_test_target(world_facet_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_world_movement
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_world_movement.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_world_movement_12340.json
+            --probe $<TARGET_FILE:movement_surface_probe>)
+    add_test(NAME original_collision_world_collection
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_world.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_world_12340.json
+            --probe $<TARGET_FILE:world_facet_probe>)
+endif()
+
 add_executable(entity_facet_probe entity_facet_probe.cpp)
 target_link_libraries(entity_facet_probe PRIVATE wowee_collision)
 wowee_test_link_glm(entity_facet_probe)

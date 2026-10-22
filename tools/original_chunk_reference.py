@@ -4,11 +4,10 @@ import struct
 from original_terrain_reference import OriginalTerrainQuery
 
 class OriginalChunkQuery(OriginalTerrainQuery):
-    def query(self,case):
-        self.next=0x2000000;self.diagnostics=0
+    def build_chunk(self,case,area=None):
         cpu=self.cpu
         def write(address,fmt,*values):cpu.mem_write(address,struct.pack('<'+fmt,*values))
-        x,y=case['chunk'];area=self.alloc(bytes(0x500));chunk=self.alloc(bytes(0x200))
+        x,y=case['chunk'];area=area or self.alloc(bytes(0x500));chunk=self.alloc(bytes(0x200))
         areaIndex=(x>>4)+((y>>4)<<6)
         write(0xce48d0+areaIndex*4,'I',area)
         write(area+0xbc+((y&15)*16+(x&15))*4,'I',chunk)
@@ -43,6 +42,13 @@ class OriginalChunkQuery(OriginalTerrainQuery):
             self.call(0x7cdf80,[],liquid)
         write(chunk+0x100,'I',0x70);write(chunk+0x108,'I',nodes[0] if nodes else 0)
         for i,node in enumerate(nodes):write(node+0x74,'I',nodes[i+1] if i+1<len(nodes) else 0)
+        return area,chunk
+
+    def query(self,case):
+        self.next=0x2000000;self.diagnostics=0
+        cpu=self.cpu
+        def write(address,fmt,*values):cpu.mem_write(address,struct.pack('<'+fmt,*values))
+        x,y=case['chunk'];area,chunk=self.build_chunk(case)
         r=case['rect'];rect=self.alloc(struct.pack('<4i',r[1],r[0],r[3],r[2]))
         box=self.floats(case['box']);body=self.floats(case['box'])
         out=self.alloc(bytes(1024*52));ids=self.alloc(bytes(1024*8))

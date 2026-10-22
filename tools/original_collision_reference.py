@@ -93,6 +93,9 @@ class OriginalCollision:
             raise RuntimeError('Original routine exceeded instruction budget')
         return cpu.reg_read(UC_X86_REG_EAX)
 
+    def prepare_surface_world(self, case, body):
+        pass
+
     def surface_move(self, case, routine=0x7620f0):
         """Run TraceSurface with a real player-shaped unit and preloaded world.
 
@@ -149,6 +152,16 @@ class OriginalCollision:
         liquid_ids = self.alloc(b''.join(struct.pack('<Q', t.get('owner', 0)) for t in liquid) or bytes(8))
         write(0xadba54, '8I', len(liquid), len(liquid), liquid_data, 0, len(liquid), len(liquid), liquid_ids, 0)
         write(0xca1660, '6f', *case.get('cached_box',[-100000,-100000,-100000,100000,100000,100000]))
+        for event in case.get('dimension_events',[]):
+            # Execute real dimension changes before observing their geometry
+            # query consequences; no expected shape values come from our port.
+            values=event[1:]
+            if event[0]==0:
+                args=[struct.unpack('<I',struct.pack('<f',v))[0] for v in values[:4]]+[int(values[4])]
+                self.call(0x6e9570,args,body)
+            else:
+                self.call(0x6e9600,[struct.unpack('<I',struct.pack('<f',values[0]))[0]],body)
+        self.prepare_surface_world(case, body)
         direction = self.floats(case['direction'][:2])
         distance_bits = struct.unpack('<I', struct.pack('<f', case['distance']))[0]
         stack = 0x30ff000

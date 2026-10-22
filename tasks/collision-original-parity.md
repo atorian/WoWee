@@ -4,12 +4,12 @@ Requirement chosen by the user on 2026-10-22: graphics may change; gameplay
 behaviour must match the original client. See
 [the governing principle](principles/original-gameplay-behaviour.md).
 
-Status: three legacy query defects fixed; original contact primitive matches
-1306 supplied-geometry reference cases; the surface phase matches 1069 calls; the falling phase matches 2993 calls;
-authored WMO BSP, transformed facets and terrain queries have executable-reference
-coverage (508, 1017 and 460 cases respectively);
-full behavioural equivalence is not
-established and the player solver is not replaced. See
+Status: contact/surface phases and the combined supplied-state world collector
+have original-executable comparisons. The complete unattached request-to-world
+path matches 1072 cases; the native collision/ADT selection passes 37/37 tests.
+Full behavioural equivalence is not established and the player solver is not
+replaced. Production world lifecycle, input/frame dispatch, event delivery,
+transport/spline movement and outgoing packets remain open. See
 `docs/original-collision-reference.md` for the implemented boundary and checks.
 This plan supersedes the audit's generic solver
 redesign as the acceptance target. A common collision API remains useful, but
@@ -255,3 +255,34 @@ Validation for the object-collection increment: 33/33 native collision/ADT tests
 pass, WMO model/world host-SSE results also match on native Windows, affected
 renderer objects compile, and all available sweep_guard checks remain within
 their ceilings. No live client or player account was used.
+
+Combined supplied-world collection now matches 1072 original GetFacets calls,
+executing WMO, terrain, linked M2 and entity-list collection together. Shared
+objects occur in multiple lists, with successive query tags, missing areas and
+partial groups. The only substituted geometry service is the dynamic entity's
+collision-data callback. The real streaming/link lifecycle remains separate.
+
+Mover dimension rules now match 1884 original executions of SetCollisionBox /
+SetCollisionHeight followed by real query-envelope generation or refresh. The
+model scale, reference scale, forced height and controlled-player override rules
+are retained. Server height events still need ownership, queue timing and ACK
+integration; this is not yet a live fix for the ignored-height packet handler.
+
+Falling-edge precision: 3705 new original-code cases cover thin tilted platforms,
+nearby walls, large coordinates, jump-peak boundaries and the falling-far flag.
+Before correction, 43 edge trajectories and 75 falling-far boundary cases failed.
+Original x87 intermediate/store boundaries are now retained in edge selection,
+plane intersection, steep support evaluation and fall threshold comparisons.
+All 3705 Linux comparisons pass. This replaces rounding errors, not the original
+movement rules. Production movement and outgoing-packet parity remain open.
+
+Combined movement/world progress: 1072 cases execute CollideRequestMove and real
+GetFacets together in the original binary, comparing resulting movement state,
+query order/extents, readiness and movement-event boundary calls. These pass on
+Linux and native Windows. Synthetic authored geometry and link state are supplied;
+unit event/network delivery is observed rather than executed. The old world-query
+reference still matches all 1072 cases after sharing its setup with this oracle.
+
+Validation: 37/37 native collision/ADT tests pass. The expanded 3705-case falling
+regression also passes ASan/UBSan. Dimensions and standalone combined-world
+comparisons passed their respective sanitizer probes. No live account was used.
