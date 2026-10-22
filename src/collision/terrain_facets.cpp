@@ -150,4 +150,25 @@ std::vector<MovementFacet> queryFlightBoundsFacets(
     }
     return result;
 }
+void appendMovementBoxFacets(const glm::vec3& low, const glm::vec3& high,
+                             std::vector<MovementFacet>& output) {
+    if (high.x<=low.x || high.y<=low.y || high.z<=low.z) return;
+    const std::array<glm::vec3,8> corners{{
+        {low.x,high.y,low.z}, {high.x,high.y,low.z},
+        {high.x,low.y,low.z}, {low.x,low.y,low.z},
+        {low.x,high.y,high.z}, {high.x,high.y,high.z},
+        {high.x,low.y,high.z}, {low.x,low.y,high.z}}};
+    constexpr std::array<int,36> indices{
+        0,2,3,0,1,2, 1,6,2,1,5,6, 4,6,5,4,7,6,
+        0,7,4,0,3,7, 0,5,1,0,4,5, 2,7,3,2,6,7};
+    MovementPlane plane;
+    for (size_t i=0;i<indices.size();i+=3) {
+        MovementFacet facet;
+        facet.vertices={corners[indices[i]],corners[indices[i+1]],corners[indices[i+2]]};
+        // From3Pos always uses x87, independently of the terrain CPU path.
+        if (i%6==0) plane=terrainPlane(facet.vertices,FacetNormalization::X87);
+        facet.plane=plane;
+        output.push_back(facet);
+    }
+}
 } // namespace wowee::collision

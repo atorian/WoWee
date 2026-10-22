@@ -50,9 +50,6 @@ std::string textureFileKey(const std::string& path) {
 
 bool WMORenderer::prepareGroupResources(const pipeline::WMOGroup& group, GroupResources& resources,
                                         std::vector<WMOVertex>& vertices) {
-    if (group.vertices.empty() || group.indices.empty()) {
-        return false;
-    }
     const uint32_t groupFlags = group.flags;
 
     resources.groupFlags = groupFlags;
@@ -134,44 +131,10 @@ bool WMORenderer::prepareGroupResources(const pipeline::WMOGroup& group, GroupRe
         }
     }
 
-    // What the group is solid with: every triangle, each tagged with its MOPY
-    // flags, which decide what blocks (detail - gears, railings - does not).
-    std::vector<glm::vec3> collisionVertices;
-    collisionVertices.reserve(group.vertices.size());
-    for (const auto& v : group.vertices) collisionVertices.push_back(v.position);
-    // The floor's colour lights a unit standing on it, in an interior group
-    // that has colours.
-    std::vector<glm::vec3> vertexColors;
-    if ((groupFlags & pipeline::kWMOGroupIndoor) && (groupFlags & pipeline::kWMOGroupHasVertexColors)) {
-        vertexColors.reserve(group.vertices.size());
-        for (const auto& v : group.vertices) vertexColors.push_back(glm::vec3(v.color));
-    }
-    std::vector<uint8_t> mopyFlags;
-    if (!group.triFlags.empty()) {
-        const size_t numTris = group.indices.size() / 3;
-        mopyFlags.resize(numTris, 0);
-        for (size_t t = 0; t < numTris; t++) {
-            mopyFlags[t] = (t < group.triFlags.size()) ? group.triFlags[t] : 0;
-        }
-    }
-
-    // The box from the vertices themselves: WMO header boxes can be wrong.
-    if (!collisionVertices.empty()) {
-        resources.boundingBoxMin = collisionVertices[0];
-        resources.boundingBoxMax = collisionVertices[0];
-        for (const auto& v : collisionVertices) {
-            resources.boundingBoxMin = glm::min(resources.boundingBoxMin, v);
-            resources.boundingBoxMax = glm::max(resources.boundingBoxMax, v);
-        }
-    }
-
-    // Says at warning when the group offers no floor at all: Darkshore's
-    // bridges are WMOs whose every triangle is detail, and a floor that cannot
-    // be found shows up as nothing but falling.
-    resources.shape = collision::WmoGroupShape::build(
-        groupFlags, resources.boundingBoxMin, resources.boundingBoxMax,
-        std::move(collisionVertices), group.indices, std::move(vertexColors),
-        std::move(mopyFlags), group.collisionBsp);
+    resources.shape = collision::WmoGroupShape::build(group);
+    resources.boundingBoxMin = resources.shape->boundingBoxMin;
+    resources.boundingBoxMax = resources.shape->boundingBoxMax;
+    if (group.vertices.empty() || group.indices.empty()) return false;
 
     // Create batches
     if (!group.batches.empty()) {
@@ -280,7 +243,9 @@ std::shared_ptr<WmoModelPrep> WMORenderer::prepareModel(const pipeline::WMOModel
     for (size_t gi = 0; gi < model.groups.size(); gi++) {
         const auto& wmoGroup = model.groups[gi];
         WmoModelPrep::Group g;
-        if (!prepareGroupResources(wmoGroup, g.resources, g.vertices)) continue;
+        const bool renderable=prepareGroupResources(wmoGroup,g.resources,g.vertices);
+        prep->collisionGroups.push_back(g.resources.shape);
+        if (!renderable) continue;
         g.indices = wmoGroup.indices;
         GroupResources& resources = g.resources;
 

@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <glm/glm.hpp>
 
 namespace wowee::collision {
 
@@ -20,12 +21,21 @@ struct TerrainTileHeights {
     /// y from render X (core::coords::worldToTile).
     int tileX = 0;
     int tileY = 0;
+    bool collisionDataValid = true;
+    std::optional<std::array<int16_t,18>> flightBounds;
+    std::vector<pipeline::ADTTerrain::DoodadPlacement> doodadPlacements;
+    std::vector<pipeline::ADTTerrain::WMOPlacement> wmoPlacements;
 
     struct Chunk {
         float position[3] = {};
         pipeline::HeightMap heightMap;
         uint16_t holes = 0;
         uint32_t areaId = 0;
+        bool loaded = false;
+        glm::vec3 originalCorner{}, boundsMin{}, boundsMax{};
+        uint32_t flags = 0;
+        std::vector<uint32_t> doodadReferences, wmoReferences;
+        std::vector<pipeline::ADTTerrain::CollisionLiquidLayer> liquids;
 
         [[nodiscard]] bool hasHeights() const { return heightMap.isLoaded(); }
         /// Whether quad (y, x), 0..7 each, is a hole, in the bit order MCNK
@@ -38,7 +48,9 @@ struct TerrainTileHeights {
     /// Chunk (x, y) at [y * 16 + x], as ADTTerrain keeps them.
     std::array<Chunk, 256> chunks;
 
-    /// The ground of a parsed tile.
+    [[nodiscard]] uint64_t heapBytes() const;
+
+    /// The ground and authored collision metadata of a parsed tile.
     [[nodiscard]] static std::shared_ptr<const TerrainTileHeights> build(
         const pipeline::ADTTerrain& terrain, int tileX, int tileY);
 };

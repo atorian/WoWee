@@ -1,11 +1,14 @@
 #include "collision/wmo_shape.hpp"
 
 #include "collision/geometry.hpp"
+#include "collision/liquid_facets.hpp"
+#include "pipeline/wmo_loader.hpp"
 #include "collision/spatial_grid.hpp"
 #include "core/logger.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <unordered_set>
 
 namespace wowee::collision {
 
@@ -36,15 +39,59 @@ thread_local VisitStamps tl_visits;
 
 }  // namespace
 
+std::shared_ptr<const WmoGroupShape> WmoGroupShape::build(const pipeline::WMOGroup& group) {
+    std::vector<glm::vec3> vertices,colors;
+    vertices.reserve(group.vertices.size());
+    for (const auto& v:group.vertices) vertices.push_back(v.position);
+    if ((group.flags&pipeline::kWMOGroupIndoor) && (group.flags&pipeline::kWMOGroupHasVertexColors)) {
+        colors.reserve(group.vertices.size());
+        for (const auto& v:group.vertices) colors.push_back(glm::vec3(v.color));
+    }
+    glm::vec3 low=group.boundingBoxMin,high=group.boundingBoxMax;
+    if (!vertices.empty()) {
+        low=high=vertices.front();
+        for (const auto& v:vertices) { low=glm::min(low,v);high=glm::max(high,v); }
+    }
+    std::vector<uint8_t> flags;
+    if (!group.triFlags.empty()) {
+        flags=group.triFlags;
+        flags.resize(group.indices.size()/3,0);
+    }
+    WmoOriginalGroup original;
+    original.loadState=group.loadState;original.groupId=group.groupId;
+    original.boundsMin=group.boundingBoxMin;original.boundsMax=group.boundingBoxMax;
+    original.bsp=group.collisionBsp;original.doodadReferences=group.doodadRefs;
+    if (group.liquid.hasLiquid()) {
+        const auto& liquid=group.liquid;
+        WmoLiquidShape shape;
+        shape.xVerts=liquid.xVerts;shape.yVerts=liquid.yVerts;
+        shape.xTiles=liquid.xTiles;shape.yTiles=liquid.yTiles;
+        shape.corner=liquid.basePosition;shape.liquidType=liquid.liquidType;
+        shape.valid=liquid.xVerts==liquid.xTiles+1 && liquid.yVerts==liquid.yTiles+1 &&
+            size_t(liquid.xVerts)*liquid.yVerts<=65536 &&
+            liquid.heights.size()==size_t(liquid.xVerts)*liquid.yVerts &&
+            liquid.flags.size()==size_t(liquid.xTiles)*liquid.yTiles;
+        if (shape.valid) {
+            shape.vertices=makeWmoLiquidVertices(liquid.xVerts,liquid.yVerts,liquid.basePosition,liquid.heights);
+            shape.tiles=liquid.flags;
+        } else {
+            LOG_ERROR("WMO group ",group.groupId," '",group.name,
+                      "' has invalid liquid grid: original liquid collision unavailable");
+        }
+        original.liquid=std::move(shape);
+    }
+    return build(group.flags,low,high,std::move(vertices),group.indices,std::move(colors),std::move(flags),std::move(original));
+}
+
 std::shared_ptr<const WmoGroupShape> WmoGroupShape::build(
         uint32_t groupFlags, const glm::vec3& boundsMin, const glm::vec3& boundsMax,
         std::vector<glm::vec3> vertices, std::vector<uint16_t> indices,
         std::vector<glm::vec3> vertexColors, std::vector<uint8_t> mopyFlags,
-        std::shared_ptr<const pipeline::WmoBspData> collisionBsp) {
+        std::optional<WmoOriginalGroup> original) {
     auto shape = std::make_shared<WmoGroupShape>();
     WmoGroupShape& s = *shape;
     s.groupFlags = groupFlags;
-    s.collisionBsp = std::move(collisionBsp);
+    s.original = std::move(original);
     s.boundingBoxMin = boundsMin;
     s.boundingBoxMax = boundsMax;
     s.vertices = std::move(vertices);
@@ -64,7 +111,7 @@ std::shared_ptr<const WmoGroupShape> WmoGroupShape::build(
             if (mopy & 0x04) ++detail;
         }
         s.noBlockingTriangles = (tris > 0 && hull == 0 && renderedSolid == 0);
-        if (tris == 0 || s.noBlockingTriangles) {
+        if (s.noBlockingTriangles) {
             LOG_WARNING("WMO group offers no floor: verts=", s.vertices.size(),
                         " tris=", tris,
                         " hull(0x08)=", hull,
@@ -209,11 +256,12 @@ uint64_t WmoGroupShape::bytes() const {
                      triBounds.capacity() * sizeof(TriBounds) +
                      triNormals.capacity() * sizeof(glm::vec3) +
                      triMopyFlags.capacity();
-    if (collisionBsp) {
-        total += sizeof(pipeline::WmoBspData) +
-                 collisionBsp->nodes.capacity() * sizeof(pipeline::WmoBspNode) +
-                 collisionBsp->faces.capacity() * sizeof(uint16_t) +
-                 collisionBsp->digestEligible.capacity();
+    if (original) {
+        const auto& bsp=original->bsp;
+        if (bsp) total += sizeof(pipeline::WmoBspData) + bsp->nodes.capacity()*sizeof(pipeline::WmoBspNode) +
+                         bsp->faces.capacity()*sizeof(uint16_t) + bsp->digestEligible.capacity();
+        total+=original->doodadReferences.capacity()*sizeof(uint16_t);
+        if (original->liquid) total+=original->liquid->vertices.capacity()*sizeof(glm::vec3)+original->liquid->tiles.capacity();
     }
     for (const auto* cells : {&cellTriangles, &cellFloorTriangles, &cellWallTriangles}) {
         total += cells->capacity() * sizeof(std::vector<uint32_t>);
@@ -223,10 +271,10 @@ uint64_t WmoGroupShape::bytes() const {
 }
 
 uint64_t WmoShape::bytes() const {
-    uint64_t total = sizeof(WmoShape) + groups.capacity() * sizeof(groups[0]);
-    for (const auto& group : groups) {
-        if (group) total += group->bytes();
-    }
+    uint64_t total=sizeof(WmoShape)+(groups.capacity()+originalGroups.capacity())*sizeof(groups[0]);
+    std::unordered_set<const WmoGroupShape*> seen;
+    for (const auto* list:{&groups,&originalGroups}) for (const auto& group:*list)
+        if (group && seen.insert(group.get()).second) total+=group->bytes();
     return total;
 }
 

@@ -148,6 +148,7 @@ struct WMOBatch {
 
 // WMO Group (individual room/section)
 struct WMOGroup {
+    WmoGroupLoadState loadState = WmoGroupLoadState::NotLoaded;
     uint32_t flags;
     glm::vec3 boundingBoxMin;
     glm::vec3 boundingBoxMax;

@@ -2994,6 +2994,10 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_query.py
             --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_movement_query_12340.json
             --probe $<TARGET_FILE:movement_surface_probe>)
+    add_test(NAME original_collision_liquid_vertices
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_liquid_vertices.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_liquid_vertices_12340.json
+            --probe $<TARGET_FILE:terrain_facet_probe>)
     add_test(NAME original_collision_flight_bounds
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_terrain.py --flight
             --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_flight_bounds_12340.json
@@ -3006,6 +3010,43 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_terrain.py --liquid
             --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_liquid_12340.json
             --probe $<TARGET_FILE:terrain_facet_probe>)
+endif()
+
+add_executable(wmo_liquid_probe wmo_liquid_probe.cpp)
+target_link_libraries(wmo_liquid_probe PRIVATE wowee_collision)
+wowee_test_link_glm(wmo_liquid_probe)
+register_test_target(wmo_liquid_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_wmo_liquid
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_wmo_liquid.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_wmo_liquid_12340.json
+            --probe $<TARGET_FILE:wmo_liquid_probe>)
+endif()
+
+add_executable(terrain_chunk_probe terrain_chunk_probe.cpp)
+target_link_libraries(terrain_chunk_probe PRIVATE wowee_collision)
+wowee_test_link_glm(terrain_chunk_probe)
+register_test_target(terrain_chunk_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_chunk
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_chunk.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_chunk_12340.json
+            --probe $<TARGET_FILE:terrain_chunk_probe>)
+endif()
+
+add_executable(map_facet_probe map_facet_probe.cpp)
+target_link_libraries(map_facet_probe PRIVATE wowee_collision)
+wowee_test_link_glm(map_facet_probe)
+register_test_target(map_facet_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_streaming
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_streaming.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_streaming_12340.json
+            --probe $<TARGET_FILE:map_facet_probe>)
+    add_test(NAME original_collision_map
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_map.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_map_12340.json
+            --probe $<TARGET_FILE:map_facet_probe>)
 endif()
 
 # Authored ADT collision references and flight-bound participation.

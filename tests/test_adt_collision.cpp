@@ -72,3 +72,75 @@ TEST_CASE("ADT flight bounds obey MHDR participation and reject missing data", "
         CHECK_FALSE(data.collisionDataValid);
     }
 }
+
+TEST_CASE("authored liquid collision survives visual fallbacks and masks", "[adt][collision]") {
+    std::vector<uint8_t> mcnk(128), liquid(804*2);
+    put(mcnk,0,0x14); // Water then magma, two full SMLiquidChunk records.
+    put(mcnk,0x60,136);put(mcnk,0x64,uint32_t(liquid.size()+8));
+    const float ceiling=50.0f, magma=17.0f;
+    std::memcpy(liquid.data()+4,&ceiling,4);
+    // All-zero authored water vertices must not become maxHeight=50.
+    std::fill(liquid.begin()+656,liquid.begin()+720,0x80);
+    for (size_t i=0;i<81;++i) std::memcpy(liquid.data()+804+8+i*8+4,&magma,4);
+    std::fill(liquid.begin()+804+656,liquid.begin()+804+720,0x02);
+    chunk(mcnk,0x4d434c51,liquid);
+    std::vector<uint8_t> bytes;chunk(bytes,0x4d434e4b,mcnk);
+    const auto data=wowee::pipeline::ADTLoader::load(bytes);
+    REQUIRE(data.collisionDataValid);
+    REQUIRE(data.collisionLiquids[0].size()==2);
+    const auto& water=data.collisionLiquids[0][0];
+    CHECK(water.liquidType==1);
+    REQUIRE(water.legacyTiles);
+    CHECK((*water.legacyTiles)[0]==0x80);
+    REQUIRE(water.heights.size()==81);
+    CHECK(water.heights.front()==0.0f);
+    CHECK(water.heights.back()==0.0f);
+    const auto& lava=data.collisionLiquids[0][1];
+    CHECK(lava.liquidType==3);
+    REQUIRE(lava.heights.size()==81);
+    CHECK(lava.heights.front()==17.0f);
+    CHECK(lava.heights.back()==17.0f);
+}
+TEST_CASE("MH2O collision uses authored vertex format and packed rectangle mask", "[adt][collision]") {
+    std::vector<uint8_t> liquid(3072+24+24+1);
+    put(liquid,0,3072);put(liquid,4,1);
+    const uint16_t type=2, format=2;
+    std::memcpy(liquid.data()+3072,&type,2);
+    std::memcpy(liquid.data()+3074,&format,2);
+    const float minHeight=37.0f;
+    std::memcpy(liquid.data()+3076,&minHeight,4);
+    liquid[3084]=3;liquid[3085]=4;liquid[3086]=2;liquid[3087]=1;
+    put(liquid,3088,uint32_t(liquid.size()-1));liquid.back()=0x02;
+    std::vector<uint8_t> bytes;chunk(bytes,0x4d48324f,liquid);
+    const auto data=wowee::pipeline::ADTLoader::load(bytes);
+    REQUIRE(data.collisionDataValid);
+    REQUIRE(data.collisionLiquids[0].size()==1);
+    const auto& layer=data.collisionLiquids[0][0];
+    CHECK(layer.minX==3);CHECK(layer.minY==4);CHECK(layer.maxX==5);CHECK(layer.maxY==5);
+    CHECK(layer.cellMask==2);
+    REQUIRE(layer.heights.size()==6);
+    CHECK(layer.heights.front()==0.0f); // Format 2's original GetHeight returns zero.
+    CHECK(layer.heights.back()==0.0f);
+}
+
+TEST_CASE("ADT chunk coordinates own their collision references, independent of file order", "[adt][collision]") {
+    std::vector<uint8_t> first(128),second(128),bytes;
+    put(first,4,5);put(first,8,4);put(first,52,123);
+    put(second,52,456);
+    chunk(bytes,0x4d434e4b,first);chunk(bytes,0x4d434e4b,second);
+    const auto data=wowee::pipeline::ADTLoader::load(bytes);
+    REQUIRE(data.collisionDataValid);
+    CHECK(data.getChunk(5,4).areaId==123);
+    CHECK(data.getChunk(0,0).areaId==456);
+}
+
+TEST_CASE("MH2O rectangles outside the chunk cannot write a water mask", "[adt][collision]") {
+    std::vector<uint8_t> liquid(3072+24);
+    put(liquid,0,3072);put(liquid,4,1);
+    liquid[3084]=9;liquid[3085]=0;liquid[3086]=1;liquid[3087]=1;
+    std::vector<uint8_t> bytes;chunk(bytes,0x4d48324f,liquid);
+    const auto data=wowee::pipeline::ADTLoader::load(bytes);
+    CHECK_FALSE(data.collisionDataValid);
+    CHECK(data.collisionLiquids[0].empty());
+    CHECK(data.waterData[0].layers.empty());
+}

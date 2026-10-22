@@ -97,3 +97,27 @@ class OriginalTerrainQuery(OriginalFacetBuilder):
             values=list(struct.unpack('<13f',cpu.mem_read(out+i*52,52)))
             facets.append(dict(plane=values[:4],vertices=[values[j:j+3] for j in [4,7,10]],owner=0))
         return dict(name=case['name'],facets=facets,diagnostics=self.diagnostics)
+
+    def liquid_vertices(self,case):
+        self.next=0x2000000
+        cpu=self.cpu
+        def write(address,fmt,*values):cpu.mem_write(address,struct.pack('<'+fmt,*values))
+        chunk=self.alloc(bytes(0x100))
+        write(chunk+0x34,'2i',*case['chunk']);write(chunk+0x84,'f',case['base_z'])
+        liquid=self.alloc(bytes(0x500));write(liquid+0x5c,'I',chunk)
+        b=case['bounds'];write(liquid+0x34,'4i',b[1],b[0],b[3],b[2])
+        reader=self.alloc(bytes(0x20))
+        getter=0x8a3200 if case['legacy'] else 0x8a3130
+        vtable=self.alloc(struct.pack('<2I',0,getter));write(reader,'I',vtable)
+        write(liquid+0x44,'I',reader)
+        if case['legacy']:
+            data=self.alloc(b''.join(struct.pack('<If',0,h) for h in case['heights']))
+            write(reader+8,'2I',data,case['format'])
+        else:
+            data=self.floats(case['heights']);desc=self.alloc(bytes(24))
+            write(desc+2,'H',case['format']);write(desc+20,'I',0)
+            write(reader+8,'2I',data,desc)
+        self.call(0x7cdf80,[],liquid)
+        count=(b[2]-b[0]+1)*(b[3]-b[1]+1)
+        vertices=[list(struct.unpack('<3f',cpu.mem_read(liquid+0x78+i*12,12))) for i in range(count)]
+        return dict(name=case['name'],vertices=vertices)

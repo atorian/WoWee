@@ -175,3 +175,41 @@ are retained, with explicit failure for corrupt references. Flight-bound facets
 match 1608 original calls; the native collision/ADT selection passes 22/22.
 Remaining loader gaps include original liquid vertex material formats, raw MCLQ
 participation and world links. The production movement path remains unchanged.
+
+
+Authored liquid/world progress: retained raw MCLQ/MH2O layers separately from
+visual height fallbacks, including legacy tile flags, material vertex formats,
+rectangle masks and original layer order. MCNK identity now comes from its
+header coordinates rather than file order. Immutable terrain snapshots carry
+MCRF references, MDDF/MODF placements, flight bounds and raw liquid inputs.
+Original liquid vertex readers/CreateVertXY agree in 1800 cases. Original
+GetFacets dispatch agrees in 2130 cases, and the loaded terrain/liquid portion
+of GetChunkFacets agrees in 650 cases. The dispatcher is abstract until all
+world object sources are supplied; it is not a production movement replacement.
+
+WMO liquid progress: GenLiquidVerts/GetLiquidFacets agree in 908 cases on Linux,
+native MinGW and ASan/UBSan; host-SSE comparisons also pass. Tests cover exact
+cell seams, tile participation, transformed planes and the 8192-vertex cull
+limit. The WMO cell multiplier is one float above the terrain multiplier; using
+the terrain value failed 10 seam cases before correction. Liquid-only groups
+now survive loading and shape preparation. Every source group is retained in
+file order, with authored bounds, BSP, MODR references and liquid vertices,
+independently of renderable batches. Truncated MLIQ no longer fabricates wet
+cells; both loader regressions failed against the old loader before passing.
+
+Unavailable terrain progress: the absent/asynchronous-area branch of
+GetChunkFacets, including its AddAaBoxFacets barriers, agrees in 1254 cases on
+Linux, native Windows and ASan/UBSan. WDT presence, local-control participation,
+near-body rejection, original cell coordinates, touching bounds and facet
+order are covered. A resident area's missing chunk remains a separate failure.
+This does not validate WMO/doodad availability or the streaming owner's wiring.
+
+Validation for this increment: 29/29 native collision/ADT tests pass; changed
+WMO model preparation and renderer objects compile. The invalid MH2O rectangle
+regression first produced an ASan heap-buffer-overflow, then passed after
+rejecting the rectangle before visual mask construction. All seven ADT
+collision tests pass (174 assertions), as do WMO loader/shape regressions.
+No game account or server was used. Production movement is still the old path.
+Remaining work includes MOGI/world placement selection and order, linked doodads
+and dynamic objects, mover dimensions, transports/splines, unit event delivery
+and packet comparisons. The overall acceptance checklist remains open.

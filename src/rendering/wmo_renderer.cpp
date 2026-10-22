@@ -641,6 +641,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadPreparedIncremental(WmoModelPrep& 
         shape->boundingBoxMax = modelData.boundingBoxMax;
         shape->isLowPlatform = modelData.isLowPlatform;
         shape->ambientColor = modelData.wmoAmbientColor;
+        shape->originalGroups = prep.collisionGroups;
         shape->groups.reserve(modelData.groups.size());
         for (const auto& group : modelData.groups) shape->groups.push_back(group.shape);
         modelData.shape = std::move(shape);

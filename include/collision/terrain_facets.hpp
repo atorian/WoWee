@@ -29,4 +29,8 @@ struct TerrainFacetCells { int minX, minY, maxX, maxY; };
 [[nodiscard]] std::vector<MovementFacet> queryFlightBoundsFacets(
     std::span<const int16_t,18> heights, const glm::vec3& corner,
     float queryMinZ, float queryMaxZ);
+// World::AddAaBoxFacets (0x7a3e40), used for unavailable distant geometry.
+// Appends twelve facets in original order; nonpositive extents append nothing.
+void appendMovementBoxFacets(const glm::vec3& low, const glm::vec3& high,
+                             std::vector<MovementFacet>& output);
 } // namespace wowee::collision

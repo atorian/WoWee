@@ -7,6 +7,7 @@
 #include <vector>
 
 namespace wowee::pipeline {
+enum class WmoGroupLoadState { NotLoaded, Ready, Failed };
 
 // MOBN records and MOBR face references, in authored order. These are collision
 // topology, independent of render batches and authored shading normals.

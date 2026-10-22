@@ -2,12 +2,31 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include <glm/glm.hpp>
 #include "pipeline/wmo_bsp.hpp"
 
+namespace wowee::pipeline { struct WMOGroup; }
 namespace wowee::collision {
+struct WmoLiquidShape {
+    uint32_t xVerts=0,yVerts=0,xTiles=0,yTiles=0;
+    glm::vec3 corner{};
+    uint16_t liquidType=0;
+    bool valid=true;
+    std::vector<glm::vec3> vertices;
+    std::vector<uint8_t> tiles;
+};
+struct WmoOriginalGroup {
+    pipeline::WmoGroupLoadState loadState = pipeline::WmoGroupLoadState::NotLoaded;
+    uint32_t groupId = 0;
+    glm::vec3 boundsMin{},boundsMax{};
+    std::shared_ptr<const pipeline::WmoBspData> bsp;
+    std::vector<uint16_t> doodadReferences;
+    std::optional<WmoLiquidShape> liquid;
+};
+
 
 /// What one group of a building (a WMO) is solid with: its triangles in the
 /// building's model space, binned into a grid, with each triangle's normal,
@@ -25,10 +44,9 @@ struct WmoGroupShape {
     glm::vec3 boundingBoxMin{0.0f};
     glm::vec3 boundingBoxMax{0.0f};
 
-    // Authored collision topology, kept separately from the legacy query grids.
-    // Null means the source group supplied no BSP; it must not be synthesized
-    // from render batches or the legacy floor/wall classification.
-    std::shared_ptr<const pipeline::WmoBspData> collisionBsp;
+    // Source bounds/topology/liquids, unaffected by visual bounds repair or
+    // render-batch filtering. Absent for hand-built legacy query fixtures.
+    std::optional<WmoOriginalGroup> original;
     std::vector<glm::vec3> vertices;
     std::vector<uint16_t> indices;
     /// MOCV per vertex, for an interior group that has them: the floor's
@@ -79,7 +97,8 @@ struct WmoGroupShape {
         uint32_t groupFlags, const glm::vec3& boundsMin, const glm::vec3& boundsMax,
         std::vector<glm::vec3> vertices, std::vector<uint16_t> indices,
         std::vector<glm::vec3> vertexColors, std::vector<uint8_t> mopyFlags,
-        std::shared_ptr<const pipeline::WmoBspData> collisionBsp = {});
+        std::optional<WmoOriginalGroup> original = {});
+    [[nodiscard]] static std::shared_ptr<const WmoGroupShape> build(const pipeline::WMOGroup& group);
 
     /// The triangles of the grid a model-space XY box reaches, each once: any
     /// triangle, floors only, walls only.
@@ -116,6 +135,9 @@ struct WmoShape {
     /// ambience inside a building by.
     uint32_t modelId = 0;
     std::vector<std::shared_ptr<const WmoGroupShape>> groups;
+    // Every authored group in file order, including groups with no render
+    // batches. Shares shapes with groups above wherever they are rendered.
+    std::vector<std::shared_ptr<const WmoGroupShape>> originalGroups;
     glm::vec3 boundingBoxMin{0.0f};
     glm::vec3 boundingBoxMax{0.0f};
     /// A flat model (a dock, a platform) whose floor is searched for further

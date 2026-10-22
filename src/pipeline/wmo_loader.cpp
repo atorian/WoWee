@@ -457,17 +457,18 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
         return false;
     }
 
+    auto& group = model.groups[groupIndex];
+    group.loadState = WmoGroupLoadState::Failed;
     if (groupData.size() < 20) {
-        core::Logger::getInstance().error("WMO group file too small");
+        core::Logger::getInstance().error(groupLabel(model,groupIndex)," group file too small - group loading failed");
         return false;
     }
 
-    auto& group = model.groups[groupIndex];
     group.groupId = groupIndex;
     group.collisionBsp.reset();
     std::vector<WmoBspNode> bspNodes;
     std::vector<uint16_t> bspFaces;
-    bool sawBspNodes = false, sawBspFaces = false;
+    bool sawBspNodes = false, sawBspFaces = false, sawGroup = false;
     auto collisionError = [&](const std::string& reason) {
         core::Logger::getInstance().error(groupLabel(model, groupIndex),
             " invalid collision data: ", reason, " - group loading failed");
@@ -496,6 +497,8 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
                 return collisionError("truncated MOGP header");
             }
 
+            if (sawGroup) return collisionError("duplicate MOGP group");
+            sawGroup=true;
             // Read MOGP header
             // MOGP starts with groupName(4) + descriptiveName(4) offsets into MOGN,
             // followed by flags at offset +8.
@@ -707,42 +710,25 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
                         group.liquid.basePosition.z = read<float>(groupData, parseOffset);
                         group.liquid.materialId = read<uint16_t>(groupData, parseOffset);
 
-                        // Keep parser resilient across minor format variants:
-                        // prefer explicit per-vertex floats, otherwise fall back to flat.
-                        const size_t vertexCount =
-                            static_cast<size_t>(group.liquid.xVerts) * static_cast<size_t>(group.liquid.yVerts);
-                        const size_t tileCount =
-                            static_cast<size_t>(group.liquid.xTiles) * static_cast<size_t>(group.liquid.yTiles);
-                        const size_t bytesRemaining = (subChunkEnd > parseOffset) ? (subChunkEnd - parseOffset) : 0;
-
-                        group.liquid.heights.clear();
-                        group.liquid.flags.clear();
-
-                        // MLIQ vertex data: each vertex is 8 bytes -
-                        // 4 bytes flow/unknown data + 4 bytes float height.
-                        const size_t VERTEX_STRIDE = 8; // bytes per vertex
-                        if (vertexCount > 0 && bytesRemaining >= vertexCount * VERTEX_STRIDE) {
-                            group.liquid.heights.resize(vertexCount);
-                            for (size_t i = 0; i < vertexCount; i++) {
-                                parseOffset += 4; // skip flow/unknown data
-                                group.liquid.heights[i] = read<float>(groupData, parseOffset);
-                            }
-                        } else if (vertexCount > 0 && bytesRemaining >= vertexCount * sizeof(float)) {
-                            // Fallback: try reading as plain floats if stride doesn't fit
-                            group.liquid.heights.resize(vertexCount);
-                            for (size_t i = 0; i < vertexCount; i++) {
-                                group.liquid.heights[i] = read<float>(groupData, parseOffset);
-                            }
-                        } else if (vertexCount > 0) {
-                            group.liquid.heights.resize(vertexCount, group.liquid.basePosition.z);
+                        // Build 12340 MLIQ is an 8-byte authored vertex followed
+                        // by one byte per tile. Missing cells must not become
+                        // fabricated wet/flat collision surfaces.
+                        const auto& liquid=group.liquid;
+                        const size_t vertexCount=size_t(liquid.xVerts)*liquid.yVerts;
+                        const size_t tileCount=size_t(liquid.xTiles)*liquid.yTiles;
+                        if (uint64_t(liquid.xTiles)+1!=liquid.xVerts ||
+                            uint64_t(liquid.yTiles)+1!=liquid.yVerts || vertexCount>65536)
+                            return collisionError("MLIQ grid dimensions are invalid");
+                        const size_t bytesRemaining=subChunkEnd-parseOffset;
+                        if (vertexCount*8>bytesRemaining || tileCount>bytesRemaining-vertexCount*8)
+                            return collisionError("MLIQ vertex or tile payload is truncated");
+                        group.liquid.heights.resize(vertexCount);
+                        for (size_t i=0;i<vertexCount;++i) {
+                            parseOffset+=4;
+                            group.liquid.heights[i]=read<float>(groupData,parseOffset);
                         }
-
-                        if (tileCount > 0 && parseOffset + tileCount <= subChunkEnd) {
-                            group.liquid.flags.resize(tileCount);
-                            std::memcpy(group.liquid.flags.data(), &groupData[parseOffset], tileCount);
-                        } else if (tileCount > 0) {
-                            group.liquid.flags.resize(tileCount, 0);
-                        }
+                        group.liquid.flags.resize(tileCount);
+                        if (tileCount) std::memcpy(group.liquid.flags.data(),groupData.data()+parseOffset,tileCount);
 
                         // What liquid it is comes from the group header, not
                         // from MLIQ, whose material id indexes MOMT. It used to
@@ -757,6 +743,8 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
                         group.liquid.liquidType = wmoGroupLiquidType(
                             group.liquidType, group.flags,
                             (model.flags & WMOModel::kFlagLiquidTypeIsDbcId) != 0, tileLiquid);
+                    } else {
+                        return collisionError("MLIQ header is truncated");
                     }
                 }
 
@@ -767,6 +755,7 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
         offset = chunkEnd;
     }
 
+    if (!sawGroup) return collisionError("missing MOGP group");
     if (sawBspNodes || sawBspFaces) {
         if (!sawBspNodes || !sawBspFaces)
             return collisionError("MOBN and MOBR must both be present");
@@ -803,7 +792,8 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
                                       group.vertices.size(), " vertices, ",
                                       group.indices.size(), " indices, ",
                                       group.batches.size(), " batches");
-    return !group.vertices.empty() && !group.indices.empty();
+    group.loadState=WmoGroupLoadState::Ready;
+    return true;
 }
 
 } // namespace pipeline

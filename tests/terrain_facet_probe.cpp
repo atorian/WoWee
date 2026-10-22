@@ -5,6 +5,7 @@
 #include <string>
 
 int main(int argc, char** argv) {
+    const bool liquidVertices = argc == 2 && std::string(argv[1]) == "--liquid-vertices";
     const bool flight = argc == 2 && std::string(argv[1]) == "--flight";
     const bool liquid = argc == 2 && std::string(argv[1]) == "--liquid";
     const bool impassable = argc == 2 && std::string(argv[1]) == "--impassable";
@@ -18,6 +19,22 @@ int main(int argc, char** argv) {
         auto read=[](glm::vec3& v){return bool(std::cin>>v.x>>v.y>>v.z);};
         std::optional<std::vector<wowee::collision::MovementFacet>> facets;
         uint32_t diagnostics=0;
+        if (liquidVertices) {
+            int chunkX,chunkY;float baseZ;uint16_t format;
+            if (!(std::cin>>chunkX>>chunkY>>cells.minX>>cells.minY>>cells.maxX>>cells.maxY>>baseZ>>format)) return 2;
+            const int count=(cells.maxX-cells.minX+1)*(cells.maxY-cells.minY+1);
+            if (count<1 || count>81) return 2;
+            std::vector<float> heights(count);
+            for (auto& h:heights) if (!(std::cin>>h)) return 2;
+            const auto vertices=wowee::collision::makeTerrainLiquidVertices(chunkX,chunkY,cells,baseZ,heights,format);
+            std::cout<<"{\"name\":\""<<name<<"\",\"vertices\":[";
+            for (size_t i=0;i<vertices.size();++i) {
+                if(i)std::cout<<',';
+                const auto& v=vertices[i];std::cout<<'['<<v.x<<','<<v.y<<','<<v.z<<']';
+            }
+            std::cout<<"]}\n";
+            continue;
+        }
         if (flight) {
             std::array<int16_t,18> heights;
             if (!read(corner) || !read(low) || !read(high)) return 2;

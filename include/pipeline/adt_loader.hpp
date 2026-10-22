@@ -46,6 +46,7 @@ struct TextureLayer {
  * Map chunk (256x256 units, 1/16 of ADT)
  */
 struct MapChunk {
+    bool loaded = false;
     uint32_t flags = 0;
     uint32_t indexX = 0;
     uint32_t indexY = 0;
@@ -146,6 +147,19 @@ struct ADTTerrain {
     };
     std::vector<WMOPlacement> wmoPlacements;
 
+    // Authored collision input, before visual liquid fallback/filtering. Legacy
+    // vertex format comes from LiquidMaterial.dbc at world preparation time;
+    // MH2O stores it explicitly. Bounds use exclusive maxima in chunk cells.
+    struct CollisionLiquidLayer {
+        uint16_t liquidType = 0;
+        std::optional<uint16_t> vertexFormat;
+        uint8_t minX = 0, minY = 0, maxX = 0, maxY = 0;
+        std::vector<float> heights;
+        uint64_t cellMask = 0;
+        std::optional<std::array<uint8_t,64>> legacyTiles;
+    };
+    std::array<std::vector<CollisionLiquidLayer>,256> collisionLiquids;
+
     // Water/liquid data (from MH2O chunk)
     struct WaterLayer {
         uint16_t liquidType;      // LiquidType.dbc row (1 Water, 2 Ocean, 3 Magma, 4 Slime, ...)
@@ -245,6 +259,9 @@ private:
     static void parseMCNR(std::span<const uint8_t> data, MapChunk& chunk);
     static void parseMCLY(std::span<const uint8_t> data, MapChunk& chunk);
     static void parseMCAL(std::span<const uint8_t> data, MapChunk& chunk);
+    static void parseCollisionMH2O(std::span<const uint8_t> data, ADTTerrain& terrain);
+    static void parseCollisionMCLQ(std::span<const uint8_t> data, int chunkIndex,
+                                  uint32_t flags, ADTTerrain& terrain);
     static void parseMH2O(std::span<const uint8_t> data, ADTTerrain& terrain);
     static void parseMCLQ(std::span<const uint8_t> data, int chunkIndex,
                           uint32_t mcnkFlags, ADTTerrain& terrain);

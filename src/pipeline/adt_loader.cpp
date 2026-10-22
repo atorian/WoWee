@@ -350,13 +350,27 @@ void ADTLoader::parseMCNK(std::span<const uint8_t> data, int chunkIndex, ADTTerr
         return;
     }
 
-    MapChunk& chunk = terrain.chunks[chunkIndex];
-
-    // Read MCNK header (128 bytes)
+    // Read MCNK header (128 bytes), then use authored coordinates. File order
+    // is not the identity of a chunk (including its MCLQ and MCRF data).
     if (data.size() < 128) {
-        LOG_WARNING("MCNK chunk too small");
+        LOG_ERROR("MCNK chunk too small: collision chunk unavailable");
+        terrain.collisionDataValid=false;
         return;
     }
+    const auto x=readUInt32(data,4),y=readUInt32(data,8);
+    if (x>=16 || y>=16) {
+        LOG_ERROR("ADT MCNK coordinates (",x,",",y,") outside tile: collision chunk unavailable");
+        terrain.collisionDataValid=false;
+        return;
+    }
+    chunkIndex=int(y*16+x);
+    MapChunk& chunk = terrain.chunks[chunkIndex];
+    if (chunk.loaded) {
+        LOG_ERROR("Duplicate ADT MCNK (",x,",",y,"): collision metadata invalid");
+        terrain.collisionDataValid=false;
+        return;
+    }
+    chunk.loaded=true;
 
     chunk.flags = readUInt32(data, 0);
     chunk.indexX = readUInt32(data, 4);
@@ -472,12 +486,16 @@ void ADTLoader::parseMCNK(std::span<const uint8_t> data, int chunkIndex, ADTTerr
     // ofsLiquid at MCNK header offset 0x60, sizeLiquid at 0x64
     uint32_t ofsLiquid = readUInt32(data, 0x60);
     uint32_t sizeLiquid = readUInt32(data, 0x64);
-    if (ofsLiquid > 0 && sizeLiquid > 8 && ofsLiquid + sizeLiquid <= data.size()) {
-        uint32_t possibleMagic = readUInt32(data, ofsLiquid);
-        uint32_t skip = (possibleMagic == MCLQ) ? 8 : 0;
-        if (sizeLiquid > skip) {
-            parseMCLQ(data.subspan(ofsLiquid + skip, sizeLiquid - skip),
-                      chunkIndex, chunk.flags, terrain);
+    if (ofsLiquid > 0 && sizeLiquid > 8) {
+        size_t start=ofsLiquid, length=sizeLiquid;
+        if (ofsLiquid>=8 && readUInt32(data,ofsLiquid-8)==MCLQ) length-=8;
+        else if (readUInt32(data,ofsLiquid)==MCLQ) { start+=8;length-=8; }
+        if (start<=data.size() && length<=data.size()-start) {
+            parseMCLQ(data.subspan(start,length),chunkIndex,chunk.flags,terrain);
+        } else {
+            LOG_ERROR("ADT MCNK (",chunk.indexX,",",chunk.indexY,
+                      ") has truncated MCLQ: liquid collision unavailable");
+            terrain.collisionDataValid=false;
         }
     }
 }
@@ -562,8 +580,76 @@ void ADTLoader::parseMCAL(std::span<const uint8_t> data, MapChunk& chunk) {
     std::memcpy(chunk.alphaMap.data(), data.data(), data.size());
 }
 
+void ADTLoader::parseCollisionMCLQ(std::span<const uint8_t> data, int chunkIndex,
+                                  uint32_t flags, ADTTerrain& terrain) {
+    // CreateLiquids (0x7c5690): one 804-byte SMLiquidChunk per set type bit,
+    // water/ocean/magma/slime order, before MH2O instances. Flow data after
+    // the first 720 bytes does not participate in collision.
+    size_t offset=0, layerIndex=0;
+    auto& output=terrain.collisionLiquids[chunkIndex];
+    for (uint16_t type=1;type<=4;++type) {
+        if (!(flags & (2u<<type))) continue;
+        if (offset>data.size() || data.size()-offset<720) {
+            LOG_ERROR("ADT chunk ",chunkIndex," MCLQ type ",type,
+                      " truncated: liquid collision unavailable");
+            terrain.collisionDataValid=false;
+            return;
+        }
+        ADTTerrain::CollisionLiquidLayer layer;
+        layer.liquidType=type;layer.maxX=8;layer.maxY=8;
+        layer.heights.resize(81);
+        for (size_t i=0;i<81;++i) layer.heights[i]=readFloat(data,offset+8+i*8+4);
+        layer.legacyTiles.emplace();
+        std::memcpy(layer.legacyTiles->data(),data.data()+offset+656,64);
+        output.insert(output.begin()+layerIndex++,std::move(layer));
+        offset+=804;
+    }
+}
+
+void ADTLoader::parseCollisionMH2O(std::span<const uint8_t> data, ADTTerrain& terrain) {
+    const auto fits=[&](size_t offset,size_t length) {
+        return offset<=data.size() && length<=data.size()-offset;
+    };
+    const auto fail=[&](int chunk,const char* reason) {
+        LOG_ERROR("ADT chunk ",chunk," MH2O ",reason,": liquid collision unavailable");
+        terrain.collisionDataValid=false;
+    };
+    if (!fits(0,256*12)) { fail(-1,"header truncated");return; }
+    for (int chunk=0;chunk<256;++chunk) {
+        const size_t offset=readUInt32(data,chunk*12), count=readUInt32(data,chunk*12+4);
+        if (!count) continue;
+        if (!offset || !fits(offset,count*24)) { fail(chunk,"instances truncated");continue; }
+        for (size_t i=0;i<count;++i) {
+            const size_t at=offset+i*24;
+            const unsigned x=data[at+12],y=data[at+13],width=data[at+14],height=data[at+15];
+            if (!width || !height || x+width>8 || y+height>8) {
+                fail(chunk,"rectangle outside chunk");continue;
+            }
+            ADTTerrain::CollisionLiquidLayer layer;
+            layer.liquidType=readUInt16(data,at);layer.vertexFormat=readUInt16(data,at+2);
+            layer.minX=uint8_t(x);layer.minY=uint8_t(y);
+            layer.maxX=uint8_t(x+width);layer.maxY=uint8_t(y+height);
+            const size_t maskOffset=readUInt32(data,at+16),maskBytes=(width*height+7)/8;
+            if (maskOffset && !fits(maskOffset,maskBytes)) { fail(chunk,"mask truncated");continue; }
+            layer.cellMask=~uint64_t(0);
+            if (maskOffset) {
+                layer.cellMask=0;
+                for (size_t b=0;b<maskBytes;++b) layer.cellMask|=uint64_t(data[maskOffset+b])<<(b*8);
+            }
+            const size_t vertexOffset=readUInt32(data,at+20), vertices=(width+1)*(height+1);
+            layer.heights.resize(vertices,0.0f);
+            if (*layer.vertexFormat<=1) {
+                if (!fits(vertexOffset,vertices*4)) { fail(chunk,"heights truncated");continue; }
+                for (size_t v=0;v<vertices;++v) layer.heights[v]=readFloat(data,vertexOffset+v*4);
+            }
+            terrain.collisionLiquids[chunk].push_back(std::move(layer));
+        }
+    }
+}
+
 void ADTLoader::parseMCLQ(std::span<const uint8_t> data, int chunkIndex,
                           uint32_t mcnkFlags, ADTTerrain& terrain) {
+    parseCollisionMCLQ(data,chunkIndex,mcnkFlags,terrain);
     // MCLQ: Vanilla/TBC per-chunk liquid data (inside MCNK)
     // Layout:
     //   float minHeight, maxHeight  (8 bytes)
@@ -663,6 +749,7 @@ void ADTLoader::parseMCLQ(std::span<const uint8_t> data, int chunkIndex,
 }
 
 void ADTLoader::parseMH2O(std::span<const uint8_t> data, ADTTerrain& terrain) {
+    parseCollisionMH2O(data,terrain);
     // MH2O contains water/liquid data for all 256 map chunks
     // Structure: 256 SMLiquidChunk headers followed by instance data
 
@@ -722,16 +809,12 @@ void ADTLoader::parseMH2O(std::span<const uint8_t> data, ADTTerrain& terrain) {
             uint32_t offsetExistsBitmap = readUInt32(data, instanceOffset + 16);
             uint32_t offsetVertexData = readUInt32(data, instanceOffset + 20);
 
-            // Skip invalid layers
-            if (layer.width == 0 || layer.height == 0) {
+            // The collision reader above already reports the invalid rectangle.
+            // Clamping x>8 underflows the byte width and writes outside mask[8].
+            if (!layer.width || !layer.height ||
+                unsigned(layer.x)+layer.width>8 || unsigned(layer.y)+layer.height>8) {
                 continue;
             }
-
-            // Clamp dimensions to valid range
-            if (layer.width > 8) layer.width = 8;
-            if (layer.height > 8) layer.height = 8;
-            if (layer.x + layer.width > 8) layer.width = 8 - layer.x;
-            if (layer.y + layer.height > 8) layer.height = 8 - layer.y;
 
             // Read exists bitmap (which tiles have water).
             // The bitmap holds one bit per tile of the layer's width×height
@@ -808,6 +891,8 @@ uint64_t heapBytes(const ADTTerrain& t) {
                      vectorBytes(t.wmoPlacements);
     for (const MapChunk& c : t.chunks) total += vectorBytes(c.layers) + vectorBytes(c.alphaMap) +
         vectorBytes(c.doodadReferences) + vectorBytes(c.wmoReferences);
+    for (const auto& liquids : t.collisionLiquids)
+        total += vectorBytes(liquids, [](const ADTTerrain::CollisionLiquidLayer& l) { return vectorBytes(l.heights); });
     for (const auto& water : t.waterData) {
         total += vectorBytes(water.layers, [](const ADTTerrain::WaterLayer& l) {
             return vectorBytes(l.heights) + vectorBytes(l.mask);

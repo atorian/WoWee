@@ -50,6 +50,7 @@ struct WmoModelPrep {
     std::vector<uint32_t> materialSidnColors;
 
     std::vector<Group> groups;
+    std::vector<std::shared_ptr<const collision::WmoGroupShape>> collisionGroups;
 
     std::vector<WMORenderer::PortalData> portals;
     std::vector<glm::vec3> portalVertices;

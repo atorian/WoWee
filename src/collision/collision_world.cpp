@@ -1307,7 +1307,7 @@ uint64_t CollisionWorld::bytes() const {
         total += sizeof(p) + p.groupBounds.capacity() * sizeof(p.groupBounds[0]);
         if (counted.insert(p.shape.get()).second) total += p.shape->bytes();
     }
-    total += terrain_.size() * sizeof(TerrainTileHeights);
+    for (const auto& [key,tile] : terrain_) total += sizeof(TerrainTileHeights)+tile->heapBytes();
     for (const auto* grid : {&m2Grid_, &wmoGrid_}) {
         for (const auto& [cell, ids] : *grid) total += sizeof(cell) + ids.capacity() * sizeof(uint32_t);
     }
