@@ -1,9 +1,9 @@
 // Classic-style evolving value noise, shared by the cloud shader and CPU
 // celestial glare. Original: four cosine-interpolated octaves, noise*64+128,
 // threshold (1-cloudDensity)*255. The HD silhouette below replaces the old
-// broad exponential opacity ramp with a finite feather and dense interiors.
+// broad exponential opacity ramp with a finite, soft feather.
 // We evaluate it directly on the GPU instead of updating DNClouds textures.
-// Two low-amplitude octaves add edge detail; the first three light the cloud.
+// Fine octaves decay rapidly to avoid ragged edges; the first three light the cloud.
 // The hash and dome projection are modern replacements, not a bit-exact port.
 
 float cloudRandom(ivec3 p) {
@@ -68,16 +68,15 @@ CloudShape cloudShapeAt(vec3 dir, float density, float windOffset) {
         if (octave < 3) s.slope += transpose(basis) * vec2(n.y, n.z) * (amplitude * frequency);
         basis = rotation * basis;
         frequency *= 2.0f;
-        amplitude *= 0.5f;
+        amplitude *= 0.35f;
     }
     float value = (128.0f + field * 64.0f) / 255.0f;
     float excess = max(value - (1.0f - density), 0.0f);
-    // A bounded edge feather retains small silhouette details while the
-    // interior becomes opaque. The original-style exponential ramp left
-    // almost every visible pixel translucent, reading as unfocused smoke.
+    // A broad feather gives clear-weather clouds a soft, airy silhouette.
+    // Dense weather still moves the field past the ramp into opaque cover.
     // Density still moves the threshold (coverage); it is not a second alpha.
     // Keep the same final opacity for cloud rendering and celestial glare.
-    s.cloud = smoothstep(0.0f, 0.13f, excess) * smoothstep(0.0f, 0.12f, dir.z);
+    s.cloud = smoothstep(0.0f, 0.28f, excess) * smoothstep(0.0f, 0.12f, dir.z);
     return s;
 }
 
