@@ -104,6 +104,13 @@ void SurfaceRt::resize(VkExtent2D extent,VkSampleCountFlagBits samples) {
     requireRt(count<=UINT32_MAX && count*8<=properties.limits.maxStorageBufferRange &&
               blocks*40<=properties.limits.maxStorageBufferRange,"receiver/history table exceeds device storage range");
     requireRt(properties.limits.maxPerStageDescriptorStorageBuffers>=7,"seven compute storage buffers unsupported");
+    // No current-frame trace has been recorded yet; these buffers belong only
+    // to completed submissions, never to an extracted scene snapshot.
+    if(raw_.buffer) {
+        requireRt(ctx_.waitForSubmittedFrames("surface RT resize")==VK_SUCCESS,"receiver retirement wait failed");
+        for(auto* buffer:{&raw_,&filtered_,&queue_,&indirect_})destroyBuffer(ctx_.getAllocator(),*buffer);
+        for(auto& history:history_)destroyBuffer(ctx_.getAllocator(),history);
+    }
     retireBuffers();extent_=extent;samples_=samples;sampleCount_=uint32_t(samples);
     maxDispatch_=properties.limits.maxComputeWorkGroupCount[0];
     outputBytes_=count*8;historyBytes_=blocks*40;
@@ -120,10 +127,27 @@ void SurfaceRt::resize(VkExtent2D extent,VkSampleCountFlagBits samples) {
         " filter tile=",filtersPerTile_==1?16:8," backend=",scene_.backend()==RtScene::Backend::Hardware?"hardware":"software");
 }
 void SurfaceRt::prepare(VkExtent2D extent,VkSampleCountFlagBits samples,VkImageView keys,VkImageView payload,
-        VkDescriptorBufferInfo materials,int mode,const RtLighting::FrameInputs& in) {
+        VkDescriptorBufferInfo materials,int mode,const RtFrameInputs& in) {
     if(extent.width!=extent_.width || extent.height!=extent_.height || samples!=samples_)resize(extent,samples);
     preparedFrame_=ctx_.frameNumber();
-    historyValid_=recordedFrame_!=0 && recordedFrame_+1==preparedFrame_ && previousMode_==mode && previousDistance_==in.distance;
+    const glm::vec4 sun(glm::normalize(in.sunDir),kRtSunTanRadius);
+    const glm::vec4 sunColor(in.sunColor,in.sunUp?1.f:0.f),skyColor(in.skyColor,0);
+    // Reprojection proves receiver identity, not visibility of its light rays.
+    // Caster changes reset history. Smooth day/night interpolation may retain
+    // it within a bounded radiance/angular error, relative to the start of the
+    // accumulation period (not a drifting previous-frame comparison).
+    const auto radianceCoherent=[](glm::vec4 value,glm::vec4 anchor) {
+        return glm::all(glm::lessThanEqual(glm::abs(value-anchor),
+            glm::max(glm::abs(anchor)*0.02f,glm::vec4(0.0001f))));
+    };
+    const bool lightCoherent=sunColor.w==previousSunColor_.w &&
+        glm::dot(glm::vec3(sun),glm::vec3(previousSun_))>=1.f-0.5f*kRtSunTanRadius*kRtSunTanRadius &&
+        radianceCoherent(sunColor,previousSunColor_) && radianceCoherent(skyColor,previousSkyColor_);
+    historyValid_=recordedFrame_!=0 && recordedFrame_+1==preparedFrame_ && previousMode_==mode && previousDistance_==in.distance &&
+        previousSceneVersion_==scene_.receiverSceneVersion() && lightCoherent;
+    if(core::envFlagEnabled("WOWEE_SURFACE_PLAN_CHECK",false))
+        LOG_INFO("Surface history: valid=",historyValid_," sceneChanged=",previousSceneVersion_!=scene_.receiverSceneVersion(),
+            " lightChanged=",!lightCoherent);
     const auto slot=ctx_.getCurrentFrame(), previous=(slot+MAX_FRAMES_IN_FLIGHT-1)%MAX_FRAMES_IN_FLIGHT;
     const auto relative=in.projection*glm::mat4(glm::mat3(in.view));
     frameData_={};auto& d=frameData_;
@@ -194,5 +218,9 @@ void SurfaceRt::record(VkCommandBuffer cmd, Profile profile, VkRect2D region) {
     barrier(cmd,VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
     previousCamera_=glm::vec3(frameData_.cameraPos);previousViewProj_=glm::inverse(frameData_.invViewProj);
     previousMode_=int(frameData_.params.x);previousDistance_=frameData_.misc.w;recordedFrame_=preparedFrame_;
+    previousSceneVersion_=scene_.receiverSceneVersion();
+    if(!historyValid_) {
+        previousSun_=frameData_.sunDir;previousSunColor_=frameData_.sunColor;previousSkyColor_=frameData_.skyColor;
+    }
 }
 }

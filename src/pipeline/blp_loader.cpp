@@ -32,10 +32,10 @@ bool BLPImage::scanTransparency() const {
     }
     if (mipmaps.empty()) return false;
 
-    // Level 0 only: a mip chain is a filtered copy of it, so a level cannot
-    // introduce transparency the base does not have.
-    const std::vector<uint8_t>& blocks = mipmaps[0];
-
+    // Authored HD/DDS mip chains need not be filtered copies of level zero.
+    // A lower mip may introduce alpha; classifying the whole chain as opaque
+    // would incorrectly disable blending when that mip is sampled.
+    const auto transparentLevel = [&](const std::vector<uint8_t>& blocks) {
     if (compression == BLPCompression::DXT1) {
         // Eight bytes per block. Transparency exists only in the punch-through
         // mode, and only where a pixel actually selects index 3.
@@ -100,6 +100,8 @@ bool BLPImage::scanTransparency() const {
     }
 
     return false;
+    };
+    return std::any_of(mipmaps.begin(),mipmaps.end(),transparentLevel);
 }
 
 namespace {

@@ -1,0 +1,55 @@
+#include "rt_light_composition.glsli"
+#define RT_INLINE_RECEIVER
+#define RT_SCENE_SET 0
+#define RT_SCENE_BINDING(i) (11 + i)
+#include "rt_common.glsli"
+#ifdef RT_HARDWARE
+#include "rt_trace_hw.glsli"
+#else
+#include "rt_trace_sw.glsli"
+#endif
+vec3 rtForwardSunDirection;
+vec3 rtForwardHemisphereDirection;
+#include "rt_integrate.glsli"
+
+// A deterministic quadrature rule for receivers without temporal storage.
+// Directions are stratified on the cosine hemisphere and sun disk. Adjacent
+// fragments see the same rule, so a flat translucent layer does not turn into
+// world-cell noise, and moving a view cannot change the sample pattern.
+vec2 rtForwardDisk(uint i, uint count) {
+    float radius=sqrt((float(i)+0.5)/float(count));
+    float angle=6.28318530718*(float(bitfieldReverse(i))*2.3283064365386963e-10);
+    return radius*vec2(cos(angle),sin(angle));
+}
+
+RtLight rtLightAt(vec3 worldPos, vec3 faceNormal) {
+    RtLight result = RtLight(0.0, 1.0, 1.0, vec3(0.0));
+    float distance = length(worldPos - viewPos.xyz);
+    if (rtParams.x < 0.5 || rtParams.w < 0.5) return result;
+    result.weight = rtRangeWeight(distance);
+    if (result.weight <= 0.0) return result;
+    pass.sunDir = vec4(normalize(-lightDir.xyz), rtTraceParams.w);
+    pass.sunColor = vec4(lightColor.rgb, pass.sunDir.z > -0.05 ? 1.0 : 0.0);
+    pass.skyColor = ambientColor;
+    pass.misc = vec4(rtParams.w,0,0,rtParams.z);
+    pass.params = vec4(rtParams.x, rtTraceParams.xyz);
+    // Every authored transparent layer and reflected view traces its own
+    // current world position. No screen-space opaque receiver is substituted.
+    vec3 normal=normalize(faceNormal),nt,nb,st,sb;
+    rtBasis(normal,nt,nb);rtBasis(pass.sunDir.xyz,st,sb);
+    result.sun = 0.0; result.ao = 0.0;
+    const uint samples = 8u;
+    for (uint i=0u; i<samples; ++i) {
+        vec2 disk=rtForwardDisk(i,samples);
+        rtForwardHemisphereDirection=normalize(nt*disk.x+nb*disk.y+
+            normal*sqrt(max(0.0,1.0-dot(disk,disk))));
+        rtForwardSunDirection=normalize(pass.sunDir.xyz+pass.sunDir.w*(st*disk.y+sb*disk.x));
+        uint rng=rtHash(i);
+        float sun, ao; vec3 indirect;
+        rtIntegrate(worldPos, normalize(faceNormal), distance, uint(rtParams.x + 0.5), rng, sun, ao, indirect);
+        result.sun += sun; result.ao += ao; result.indirectDelta += indirect;
+    }
+    result.sun /= float(samples); result.ao /= float(samples);
+    result.indirectDelta /= float(samples);
+    return result;
+}

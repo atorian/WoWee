@@ -1,9 +1,12 @@
 #pragma once
-#include "rendering/rt_lighting.hpp"
+#include "rendering/rt_frame_inputs.hpp"
 #include "rendering/rt_pass_data.hpp"
 #include <array>
+#include "rendering/vk_context.hpp"
+#include "rendering/vk_utils.hpp"
 
 namespace wowee::rendering {
+class RtScene;
 // Current evaluated receivers. Scratch is shared on one graphics queue; only
 // uniforms and temporal records are per frame slot. No scene traversal here.
 class SurfaceRt {
@@ -12,7 +15,7 @@ public:
     ~SurfaceRt();
     void prepare(VkExtent2D extent, VkSampleCountFlagBits samples,
                  VkImageView keys, VkImageView payload, VkDescriptorBufferInfo materials,
-                 int mode, const RtLighting::FrameInputs& inputs);
+                 int mode, const RtFrameInputs& inputs);
     enum class Profile { None, Wmo, M2 };
     void record(VkCommandBuffer cmd, Profile profile = Profile::None, VkRect2D region = {});
     // Only samples with a nonzero current material key may be read. Completely
@@ -38,7 +41,8 @@ private:
     VkSampler sampler_ = VK_NULL_HANDLE;
     VkDeviceSize outputBytes_ = 0, historyBytes_ = 0, tileBytes_ = 0;
     uint32_t sampleCount_ = 1, maxDispatch_ = 1, filtersPerTile_ = 4;
-    uint64_t preparedFrame_ = 0, recordedFrame_ = 0;
+    uint64_t preparedFrame_ = 0, recordedFrame_ = 0, previousSceneVersion_ = 0;
+    glm::vec4 previousSun_{0}, previousSunColor_{0}, previousSkyColor_{0};
     glm::mat4 previousViewProj_{1};
     glm::vec3 previousCamera_{0};
     RtPassData frameData_{};

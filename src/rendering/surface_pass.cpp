@@ -34,13 +34,23 @@ SurfacePass::~SurfacePass() {
 }
 void SurfacePass::retire() {
     DeferredResources release(ctx_);
-    release.release(framebuffer_, vkDestroyFramebuffer); for(auto& pipeline:pipelines_) release.destroy(pipeline); release.destroy(layout_);
+    release.release(framebuffer_, vkDestroyFramebuffer); release.destroy(pipeline_); release.destroy(layout_);
     release.destroy(pool_); release.destroy(setLayout_); release.release(pass_, vkDestroyRenderPass);
     for(auto& image:images_) release.image(image);
     for(auto& buffer:buffers_) release.buffer(buffer);
     capacities_.fill(0); sets_.fill(VK_NULL_HANDLE); depth_=VK_NULL_HANDLE;
 }
 void SurfacePass::create(VkExtent2D extent,VkImageView depth) {
+    // These transient targets are not referenced by producer snapshots. This
+    // runs before this frame records any surface command. Complete only older
+    // submitted frames and free their targets before allocating replacements,
+    // avoiding two full-resolution MSAA G-buffers resident during a resize.
+    if(framebuffer_) {
+        requireSurface(ctx_.waitForSubmittedFrames("surface target resize")==VK_SUCCESS,"target retirement wait failed");
+        vkDestroyFramebuffer(ctx_.getDevice(),framebuffer_,nullptr);framebuffer_=VK_NULL_HANDLE;
+        for(auto& image:images_)destroyImage(ctx_.getDevice(),ctx_.getAllocator(),image);
+        for(auto& buffer:buffers_)destroyBuffer(ctx_.getAllocator(),buffer);
+    }
     retire(); extent_=extent; depth_=depth; samples_=ctx_.getMsaaSamples();
     depthFormat_=ctx_.getDepthFormat(); colorFormat_=ctx_.getSwapchainFormat();
     const auto device=ctx_.getDevice();
@@ -103,22 +113,22 @@ void SurfacePass::create(VkExtent2D extent,VkImageView depth) {
     }
     VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT,0,80};
     layout_=createPipelineLayout(device,{frameLayout_,setLayout_},{push});
-    for(size_t family=0;family<kFamilies;++family) {
+    {
     VkShaderModule vert,frag;
     requireSurface(vert.loadFromFile(device,"assets/shaders/wmo_lighting.vert.spv") &&
-        frag.loadFromFile(device, (std::string("assets/shaders/")+(family==0?"wmo":"m2")+"_lighting"+(samples_==VK_SAMPLE_COUNT_1_BIT?"":"_ms")+".frag.spv").c_str()),"lighting shaders unavailable");
-    pipelines_[family]=PipelineBuilder().setShaders(vert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),frag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+        frag.loadFromFile(device, (std::string("assets/shaders/")+"surface_lighting"+(samples_==VK_SAMPLE_COUNT_1_BIT?"":"_ms")+".frag.spv").c_str()),"lighting shaders unavailable");
+    pipeline_=PipelineBuilder().setShaders(vert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),frag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
         .setRasterization(VK_POLYGON_MODE_FILL,VK_CULL_MODE_NONE).setNoDepthTest()
         .setColorBlendAttachment(PipelineBuilder::blendDisabled()).setMultisample(samples_)
         .setLayout(layout_).setRenderPass(ctx_.getImGuiRenderPass()).setDynamicStates(viewportAndScissorDynamic())
         .build(device,ctx_.getPipelineCache());
-    vert.destroy();frag.destroy();requireSurface(pipelines_[family]!=VK_NULL_HANDLE,"lighting pipeline creation failed");
+    vert.destroy();frag.destroy();requireSurface(pipeline_!=VK_NULL_HANDLE,"lighting pipeline creation failed");
     }
     LOG_INFO("Shared evaluated surfaces: ",extent.width,"x",extent.height," samples=",int(samples_),
         " transient color bytes=",uint64_t(extent.width)*extent.height*40*uint32_t(samples_));
 }
 void SurfacePass::prepare(VkExtent2D extent,VkImageView depth,TargetVersion version,std::array<size_t,kFamilies> materialCapacities,
-        RtScene* rtScene,int rtMode,const RtLighting::FrameInputs& rtInputs) {
+        RtScene* rtScene,int rtMode,const RtFrameInputs& rtInputs) {
     requireSurface(depth!=VK_NULL_HANDLE,"scene depth unavailable");
     if(!pass_ || version!=targetVersion_ || depth!=depth_ || extent.width!=extent_.width || extent.height!=extent_.height ||
        samples_!=ctx_.getMsaaSamples() || colorFormat_!=ctx_.getSwapchainFormat() || depthFormat_!=ctx_.getDepthFormat()) create(extent,depth);
@@ -177,12 +187,16 @@ uint32_t SurfacePass::appendMaterial(const M2Material& material) {
     static_assert(sizeof(Material)==sizeof(M2Material));
     return appendMaterialBytes(Family::M2,&material);
 }
+uint32_t SurfacePass::appendMaterial(Family family, const M2Material& material) {
+    return appendMaterialBytes(family,&material);
+}
 uint32_t SurfacePass::appendMaterialBytes(Family kind,const void* material) {
     const size_t family=size_t(kind);
     requireSurface(materialsWritten_[family]<materialLimit_[family],"snapshot material capacity exhausted");
     const uint32_t index=static_cast<uint32_t>(materialBegin_[family]+materialsWritten_[family]++);
     auto* output=static_cast<Material*>(buffers_[ctx_.getCurrentFrame()].info.pMappedData);
     std::memcpy(output+index,material,sizeof(Material));
+    output[index].history.y=uint32_t(family);
     return index;
 }
 void SurfacePass::finishMaterials() {
@@ -255,42 +269,49 @@ void SurfacePass::endRun(Family family) {
     requireSurface(vkEndCommandBuffer(commands_[ctx_.getCurrentFrame()][size_t(family)].runs.back().command) == VK_SUCCESS,
                    "worker command recording completion failed");
 }
-void SurfacePass::execute(Family family,VkCommandBuffer cmd, VkDescriptorSet frameSet, VkFramebuffer scene,
-        const glm::mat4& inverseViewProjection, VkSubpassContents resumeContents) {
-    auto contents = resumeContents;
-    static const bool profile=core::envFlagEnabled("WOWEE_SURFACE_RT_PROFILE",false);
-    bool firstGeometry=true;
-    const auto& runs=commands_[ctx_.getCurrentFrame()][size_t(family)].runs;
-    if(profile && ctx_.frameNumber()%120==0) {
-        size_t geometryRuns=0;uint64_t pixels=0;for(const auto& run:runs)if(run.geometry){++geometryRuns;pixels+=uint64_t(run.region.extent.width)*run.region.extent.height;}
-        LOG_INFO("Surface runs: family=",family==Family::M2?"M2":"WMO",
-            " geometry=",geometryRuns," forward=",runs.size()-geometryRuns,
-            " materials=",materialsWritten_[size_t(family)]," pixels=",pixels);
-    }
-    for (const auto& run : runs) {
-        if (run.geometry) {
-            if(!run.region.extent.width || !run.region.extent.height)continue;
-            beginGeometry(cmd,run.region);
-            vkCmdExecuteCommands(cmd, 1, &run.command);
-            const bool mark=profile && firstGeometry;
-            if(mark)ctx_.gpuMark(cmd,family==Family::M2?"M2 surface geometry":"WMO surface geometry");
-            light(family,cmd, frameSet, scene, inverseViewProjection,run.region,mark);
-            if(mark)ctx_.gpuMark(cmd,family==Family::M2?"M2 surface lighting":"WMO surface lighting");
-            firstGeometry=false;
-            contents = VK_SUBPASS_CONTENTS_INLINE;
-        } else {
-            if (contents != VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS) {
-                vkCmdEndRenderPass(cmd);
-                resumeScene(cmd, scene, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
-            }
-            vkCmdExecuteCommands(cmd, 1, &run.command);
-            contents = VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS;
+void SurfacePass::executePlan(std::span<const Operation> operations,VkCommandBuffer cmd,VkDescriptorSet frameSet,
+        VkFramebuffer scene,const glm::mat4& inverseViewProjection,VkSubpassContents resumeContents) {
+    // Flatten command metadata only. Geometry and materials were recorded once
+    // by their family worker; this owner never revisits any scene instance.
+    std::vector<Run> ordered;
+    for(const auto& operation:operations) {
+        if(operation.forward)ordered.push_back({operation.forward,false,fullRegion()});
+        else if(operation.family!=Family::Count) {
+            const auto& runs=commands_[ctx_.getCurrentFrame()][size_t(operation.family)].runs;
+            ordered.insert(ordered.end(),runs.begin(),runs.end());
         }
     }
-    if (contents != resumeContents) {
-        vkCmdEndRenderPass(cmd);
-        resumeScene(cmd, scene, resumeContents);
-    } else if(contents==VK_SUBPASS_CONTENTS_INLINE) viewport(cmd,extent_);
+    uint32_t geometryRuns=0,lightingGroups=0;
+    auto contents=resumeContents;
+    for(size_t i=0;i<ordered.size();) {
+        if(ordered[i].geometry) {
+            size_t end=i;
+            VkRect2D region{};
+            while(end<ordered.size() && ordered[end].geometry) {
+                region=uniteRegions(region,ordered[end].region);++end;
+            }
+            if(region.extent.width && region.extent.height) {
+                geometryRuns+=uint32_t(end-i);++lightingGroups;
+                beginGeometry(cmd,region);
+                for(size_t j=i;j<end;++j) if(ordered[j].region.extent.width && ordered[j].region.extent.height)
+                    vkCmdExecuteCommands(cmd,1,&ordered[j].command);
+                light(Family::Wmo,cmd,frameSet,scene,inverseViewProjection,region,false);
+                contents=VK_SUBPASS_CONTENTS_INLINE;
+            }
+            i=end;
+        } else {
+            if(contents!=VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS) {
+                vkCmdEndRenderPass(cmd);resumeScene(cmd,scene,VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+            }
+            vkCmdExecuteCommands(cmd,1,&ordered[i].command);++i;
+            contents=VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS;
+        }
+    }
+    if(core::envFlagEnabled("WOWEE_SURFACE_PLAN_CHECK",false))
+        LOG_INFO("Surface plan: geometry runs=",geometryRuns," lighting groups=",lightingGroups);
+    if(contents!=resumeContents) {
+        vkCmdEndRenderPass(cmd);resumeScene(cmd,scene,resumeContents);
+    } else if(contents==VK_SUBPASS_CONTENTS_INLINE)viewport(cmd,extent_);
 }
 void SurfacePass::beginGeometry(VkCommandBuffer cmd,VkRect2D region) {
     vkCmdEndRenderPass(cmd);
@@ -311,7 +332,7 @@ void SurfacePass::light(Family family,VkCommandBuffer cmd,VkDescriptorSet frameS
         family==Family::M2?SurfaceRt::Profile::M2:SurfaceRt::Profile::Wmo,region);
     resumeScene(cmd,scene,VK_SUBPASS_CONTENTS_INLINE);
     vkCmdSetScissor(cmd,0,1,&region);
-    vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_[size_t(family)]);
+    vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_);
     VkDescriptorSet sets[]{frameSet,sets_[ctx_.getCurrentFrame()]};
     vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,layout_,0,2,sets,0,nullptr);
     struct Push {glm::mat4 inverse;glm::vec4 extent;} push{inverseViewProjection,{extent_.width,extent_.height,rtMode_,rtDistance_}};

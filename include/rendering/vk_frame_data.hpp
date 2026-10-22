@@ -35,12 +35,9 @@ struct GPUPerFrameData {
     // z = 1 / ln(far / near), w = slice count. Off in the reflection pass and
     // the character preview, which bind a neutral volume there.
     glm::vec4 volumetricParams;
-    // Last frame's ray traced lighting at set 0 bindings 3 and 4, and how to
-    // find a surface in it (rt_lighting.glsli): the view-projection and camera
-    // position it was traced with, and params.x = mode, 0 when there is no
-    // result to read. Zero in the reflection pass and the character preview.
-    glm::mat4 rtViewProj;
-    glm::vec4 rtCameraPos;
+    // Current RT estimator: AO radius, GI range, shadow range, solar cone.
+    glm::vec4 rtTraceParams;
+    // Mode, fade start, receiver distance, scene has content.
     glm::vec4 rtParams;
     // Sky colours for water reflections, followed by view-distance metadata.
     // Surface distance fog keeps the zone's start/end and shares the sky's

@@ -1,0 +1,45 @@
+vec4 shadeTerrainSurface(vec3 FragPos, vec4 finalColor, vec3 norm, vec3 vertexNormal, vec3 receiverFace, uvec4 vLocalLights, RtLight rt) {
+    float fragDist = length(viewPos.xyz-FragPos);
+    vec3 lightDir2 = normalize(-lightDir.xyz);
+    vec3 ambient = ambientColor.rgb * finalColor.rgb;
+    // Lambert, as every other surface has it. This took abs() of the angle
+    // and floored it at 0.2, so a slope turned from the sun was lit as one
+    // turned toward it, and hills had no shape at low sun. The ambient term
+    // is what keeps the shaded side from black, as it does for the models
+    // standing on it.
+    float diff = max(dot(norm, lightDir2), 0.0);
+    vec3 diffuse = diff * lightColor.rgb * finalColor.rgb;
+
+    float shadow = 1.0;
+    if (shadowParams.x > 0.5 && rtSunVisibility(rt) > 0.0) {
+        vec3 ldir = normalize(-lightDir.xyz);
+        // Texture relief changes lighting, not the caster geometry. Offsetting
+        // along its perturbed normal can push the lookup into the surface.
+        vec3 shadowNormal = dot(vertexNormal, ldir) >= 0.0 ? vertexNormal : -vertexNormal;
+        float normalOffset = shadowParams.w * 1.5 * (1.0 - abs(dot(shadowNormal, ldir)));
+        vec3 biasedPos = FragPos + shadowNormal * normalOffset;
+        vec4 lsPos = lightSpaceMatrix * vec4(biasedPos, 1.0);
+        vec3 proj = lsPos.xyz / lsPos.w;
+        proj.xy = proj.xy * 0.5 + 0.5;
+        vec2 receiverSlope = shadowReceiverSlope(receiverFace);
+        if (proj.x >= 0.0 && proj.x <= 1.0 && proj.y >= 0.0 && proj.y <= 1.0 && proj.z >= 0.0 && proj.z <= 1.0) {
+            shadow = sampleShadowReceiverPlane(uShadowMap, proj, receiverSlope);
+            shadow = mix(1.0, shadow, shadowMapEdgeFade(proj.xy * 2.0 - 1.0));
+        }
+    }
+
+    shadow = rtShadow(rt, shadow);
+    ambient = rtAmbient(rt, ambientColor.rgb) * finalColor.rgb;
+
+    // The units' map and the sun's, the darker of the two, as the client
+    // takes the dynamic map and the ground's baked one. Ground has no
+    // edge-on fade in the client; it darkens the whole lit colour.
+    if (shadow > 0.0) shadow = min(shadow, localShadowAt(FragPos, receiverFace));
+    vec3 result = (ambient + diffuse) * shadowLightFactor(shadow);
+    result += lightningDiffuse(FragPos, norm, finalColor.rgb);
+    result += localLightContribution(FragPos, norm, finalColor.rgb, vLocalLights);
+
+    result = applyFog(result, FragPos, fragDist);
+
+    return vec4(result, 1.0);
+}

@@ -1,3 +1,4 @@
+#include "rendering/surface_identity.hpp"
 #pragma once
 #include "pipeline/prepared_texture.hpp"
 
@@ -40,6 +41,7 @@ class VkContext;
 class VkTexture;
 class Frustum;
 class RtScene;
+class SurfacePass;
 
 /**
  * GPU-side terrain chunk data (Vulkan)
@@ -54,6 +56,7 @@ struct TerrainSurfacePush {
 };
 
 struct TerrainChunkGPU {
+    uint64_t surfaceIdentity = nextSurfaceIdentity();
     ::VkBuffer vertexBuffer = VK_NULL_HANDLE;
     VmaAllocation vertexAlloc = VK_NULL_HANDLE;
     ::VkBuffer indexBuffer = VK_NULL_HANDLE;
@@ -236,6 +239,7 @@ public:
         int32_t baseVertex = 0;
     };
     struct ChunkDraw {
+        uint64_t surfaceIdentity = 0;
         VkDescriptorSet material = VK_NULL_HANDLE;
         GeometryDraw geometry;
         std::array<TerrainChunkGPU::LodRange, 5> ranges{};
@@ -262,6 +266,8 @@ public:
     };
     DrawList extract(const Camera& camera, const std::vector<LocalLight>& lights);
     void recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const DrawList& list);
+    void prepareSurface(SurfacePass& pass);
+    void recordSurface(VkDescriptorSet perFrameSet, const DrawList& list, const glm::vec3& camera);
     void recordDepth(VkCommandBuffer cmd, const glm::mat4& matrix, const glm::vec3& centre,
                      float radius, const DrawList& list);
 
@@ -373,6 +379,11 @@ private:
     pipeline::AssetManager* assetManager = nullptr;
 
     // Main pipelines
+    SurfacePass* surfacePass_ = nullptr;
+    VkRenderPass surfaceRenderPass_ = VK_NULL_HANDLE;
+    VkPipeline surfacePipeline_ = VK_NULL_HANDLE;
+    void recordChunks(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const DrawList& list,
+                      SurfacePass* surfaces, const glm::vec3& camera);
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkPipeline wireframePipeline = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;

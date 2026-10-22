@@ -165,3 +165,7 @@
 - 2026-10-22 — Before continuing a new rendering stage, the user requested committing the completed work first. Verify and report the existing checkpoint commit, stage only this session's changes, then begin the next stage; never include another session's work in that checkpoint.
 
 - 2026-10-22 — DDS loads during playback were described as new resources, but the HD-asset cache audit found all 25 paths had already been read during warmup. Compare normalized paths across phases before calling a load new; separate CPU preparation rereads from GPU-cache misses, and distinguish logical reads from physical disk I/O.
+
+- 2026-10-22 — The user stopped intermediate benchmarks while the new surface RT and legacy RT still duplicated work. Finish the authorized pipeline migration and merge compatible geometry/lighting passes before another performance run. Use builds, behavioral image checks and synchronization validation during implementation; do not substitute another measured checkpoint for completion.
+
+- 2026-10-22 — A synthetic rendering comparison passed while mixed-case predecoded cache keys made its textures disappear. Fail graphics fixtures on missing required inputs, inspect the images, and fix the observer's lighting position when comparing workloads; changed model bounds can otherwise change zone lighting and mimic a draw-capacity failure.

@@ -23,7 +23,7 @@
 
 #include "core/logger.hpp"
 #include "rendering/rt_bvh.hpp"
-#include "rendering/rt_lighting.hpp"
+#include "legacy_rt_lighting.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_utils.hpp"

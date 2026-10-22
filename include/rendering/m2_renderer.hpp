@@ -99,6 +99,8 @@ struct M2ModelGPU {
         uint32_t indexStart = 0;   // offset in indices (not bytes)
         uint32_t indexCount = 0;
         bool hasAlpha = false;
+        bool secondHasAlpha = false;
+        bool surfaceAlphaOpaque = false;
         /// The alpha is a real silhouette, not an atlas leftover.
         bool alphaIsSilhouette = false;
         glm::vec3 tint{1.0f};  ///< the batch's authored colour
@@ -795,8 +797,6 @@ public:
     size_t surfaceMaterialCapacity() const { return size_t(recording_->instanceEntries); }
     void prepareSurface(SurfacePass& pass);
     void recordSurface(VkDescriptorSet perFrameSet);
-    void executeSurface(VkCommandBuffer cmd,VkDescriptorSet perFrameSet,const Camera& camera,
-                        VkFramebuffer scene,VkSubpassContents contents);
 
     /// Build the main-pass pipelines. Called by initialize() and again by
     /// recreatePipelines() after a device loss, which is the reason it exists:

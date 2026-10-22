@@ -1,4 +1,7 @@
-#version 450
+#version 460
+#ifdef RT_HARDWARE
+#extension GL_EXT_ray_query : require
+#endif
 
 layout(set = 0, binding = 0) uniform PerFrame {
     mat4 view;
@@ -15,8 +18,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 playerWake;  // xyz = trailing player position (springback reference)
     ivec4 localLightMeta;
     vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
-    mat4 rtViewProj;
-    vec4 rtCameraPos;
+    vec4 rtTraceParams;
     vec4 rtParams;
     vec4 fogSkyTop;  // rgb = zenith, w = sky tint amount (0 disables it)
     vec4 fogSkyMiddle;
@@ -44,7 +46,7 @@ layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
 #include "sky_atmosphere.glsli"
 #include "aerial_frame.glsli"
-#include "rt_lighting.glsli"
+#include "rt_current.glsli"
 #include "contact_shadows.glsli"
 
 // One texel of the shadow map, as the terrain takes it.

@@ -22,8 +22,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 playerWake;  // xyz = trailing player position (springback reference)
     ivec4 localLightMeta;
     vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
-    mat4 rtViewProj;
-    vec4 rtCameraPos;
+    vec4 rtTraceParams;
     vec4 rtParams;
     vec4 fogSkyTop;  // rgb = zenith, w = sky tint amount (0 disables it)
     vec4 fogSkyMiddle;

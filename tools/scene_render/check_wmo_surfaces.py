@@ -74,6 +74,7 @@ def main():
                                            {"frame": 6, "msaa": args.msaa, "fxaa": args.fxaa}]
             source=scratch / "rebuilt.json"
             source.write_text(json.dumps(scene),encoding="utf-8")
+        env["WOWEE_MODEL_SURFACES"]="1" if name in ("surfaces","rebuilt") else "0"
         env.pop("WOWEE_WMO_SURFACES", None)
         if name in ("surfaces", "rebuilt"):
             env["WOWEE_WMO_SURFACES"] = "1"

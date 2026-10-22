@@ -1,5 +1,6 @@
 #pragma once
 #include "rendering/frame_pool.hpp"
+#include "rendering/surface_identity.hpp"
 #include <span>
 
 #include "rendering/normal_map_builder.hpp"
@@ -36,6 +37,7 @@ namespace rendering {
 class Camera;
 class VkContext;
 class VkTexture;
+class SurfacePass;
 
 // Enchant visual (glint, glow) attached to a weapon at one of the weapon model's
 // own item-visual attachment points.
@@ -131,6 +133,9 @@ public:
     /// which rises from the feet through the body, was gone. Faded ones are
     /// drawn after the blended world instead, laid over it as the client does.
     enum class Part { All, Solid, Faded };
+    void prepareSurface(SurfacePass& pass);
+    void recordSurface(VkDescriptorSet perFrameSet);
+    size_t surfaceMaterialCapacity() const { return recording_->materialEntries; }
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
                 Part part = Part::All);
     /// The pass faded instances are drawn in when it is not the scene's - the
@@ -389,6 +394,7 @@ private:
     bool preparedTexturesOnly_ = false;
     // GPU representation of M2 model
     struct M2ModelGPU {
+        uint64_t surfaceBatchBase=0;
         VkBuffer vertexBuffer = VK_NULL_HANDLE;
         VmaAllocation vertexAlloc = VK_NULL_HANDLE;
         VkBuffer indexBuffer = VK_NULL_HANDLE;
@@ -449,6 +455,7 @@ private:
 
     // Character instance
     struct CharacterInstance {
+        uint64_t surfaceLifetime=nextSurfaceIdentity();
         uint32_t id;
         uint32_t modelId;
 
@@ -540,6 +547,7 @@ private:
     /// copied out of the scene by the cull, so the recording reads no
     /// instance. The dress is shared, not copied.
     struct DrawCharacter {
+        uint64_t surfaceLifetime=0;
         glm::mat4 modelMatrix{1.0f};
         /// Valid for the frame: models are unloaded only between frames.
         std::shared_ptr<const M2ModelGPU> model;
@@ -565,9 +573,8 @@ private:
     /// The depth-only passes', one at a time on the main thread.
 
     /// The instances this part draws, in the camera's view.
-    void cullCharacters(const Camera& camera, Part part, std::vector<DrawCharacter>& list, const Frame& frame) const;
     void recordCharacters(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, Part part,
-                          const std::vector<DrawCharacter>& list);
+                          const std::vector<DrawCharacter>& list, SurfacePass* surfaces = nullptr);
     /// The shown instances with bones within the shadow's reach.
     void recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
                              const std::vector<DrawCharacter>& list);
@@ -628,6 +635,8 @@ private:
     pipeline::AssetManager* assetManager = nullptr;
 
     // Vulkan pipelines, one per blend mode, for one render pass.
+    SurfacePass* surfacePass_ = nullptr;
+    VkRenderPass surfaceRenderPass_ = VK_NULL_HANDLE;
     struct PipelineSet {
         VkPipeline opaque = VK_NULL_HANDLE;
         VkPipeline alphaTest = VK_NULL_HANDLE;
@@ -652,8 +661,9 @@ private:
     };
     PipelineSet buildPipelineSet(VkDevice device, VkRenderPass pass, VkSampleCountFlagBits samples,
                                  wowee::rendering::VkShaderModule& charVert,
-                                 wowee::rendering::VkShaderModule& charFrag);
+                                 wowee::rendering::VkShaderModule& charFrag, bool evaluated = false);
     static void destroyPipelineSet(VkDevice device, PipelineSet& set);
+    PipelineSet surfacePipes_{};
     PipelineSet scenePipes_;          // the scene pass
     PipelineSet fadedPassPipes_;      // fadedPass_, when there is one
     VkRenderPass fadedPass_ = VK_NULL_HANDLE;
@@ -690,7 +700,6 @@ private:
     std::unordered_map<MaterialDescriptorKey, VkDescriptorSet, MaterialDescriptorKeyHash>
         materialDescriptorCache_[2];
     VkDescriptorPool boneDescPool_ = VK_NULL_HANDLE;
-    uint32_t lastMaterialPoolResetFrame_ = 0xFFFFFFFFu;
 
     // Material UBO ring buffer - pre-allocated per frame slot, sub-allocated each draw
     VkBuffer materialRingBuffer_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
@@ -699,6 +708,7 @@ private:
     uint32_t materialRingOffset_[2] = {0, 0};
     uint32_t materialUboAlignment_ = 256;  // minUniformBufferOffsetAlignment
     static constexpr uint32_t MATERIAL_RING_CAPACITY = 4096;
+    uint32_t materialRingCapacity_[2] = {MATERIAL_RING_CAPACITY, MATERIAL_RING_CAPACITY};
 
     /// GPU allocation retry throttle, separate from completed source failures.
     std::unordered_map<std::string, uint64_t> failedTextureRetryAt_;
@@ -787,20 +797,20 @@ private:
 public:
     struct Frame {
         void clear() noexcept;
-        uint32_t poseIndex(uint32_t id) const;
         bool normalMapping = false;
         float normalStrength = 1;
+        size_t materialEntries = 0;
         std::vector<DrawCharacter> drawLists[3];
         std::vector<DrawCharacter> depth;
         struct Pose { uint32_t first, count; };
         std::vector<Pose> poses;
         std::vector<glm::mat4> bones;
-        std::vector<std::pair<uint32_t, uint32_t>> poseById;
     };
 private:
     FramePool<Frame> framePool_;
     std::shared_ptr<const Frame> recording_ = std::make_shared<Frame>();
     struct PoseSlot {
+        std::vector<glm::mat4> uploadedPose;
         bool failed = false;
         VkBuffer buffer = VK_NULL_HANDLE;
         VmaAllocation allocation = VK_NULL_HANDLE;

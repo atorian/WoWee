@@ -1,48 +1,9 @@
-#version 450
+#version 460
+#ifdef RT_HARDWARE
+#extension GL_EXT_ray_query : require
+#endif
 
-layout(set = 0, binding = 0) uniform PerFrame {
-    mat4 view;
-    mat4 projection;
-    mat4 lightSpaceMatrix;
-    vec4 lightDir;
-    vec4 lightColor;
-    vec4 ambientColor;
-    vec4 viewPos;
-    vec4 fogColor;
-    vec4 fogParams;
-    vec4 shadowParams;
-    vec4 playerPos;   // xyz = player world position, w = horizontal speed
-    vec4 playerWake;  // xyz = trailing player position (springback reference)
-    ivec4 localLightMeta;
-    vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
-    mat4 rtViewProj;
-    vec4 rtCameraPos;
-    vec4 rtParams;
-    vec4 fogSkyTop;  // rgb = zenith, w = sky tint amount (0 disables it)
-    vec4 fogSkyMiddle;
-    vec4 fogSkyBand1;
-    vec4 fogSkyBand2;
-    mat4 contactSpaceMatrix;  // read by contact_shadows.glsli
-    vec4 contactParams;
-    vec4 windDirLean;
-    vec4 windPhases;
-    vec4 windTravel;
-    vec4 skySmogColor;
-    vec4 aerialSun;
-    vec4 aerialLight;
-    vec4 terrainLodParams;
-    vec4 aerialParams;
-    mat4 lightningMatrix;
-    vec4 lightningPosition;
-    vec4 lightningColor;
-};
-
-#include "lightning_light.glsli"
-
-#include "rt_lighting.glsli"
-#include "contact_shadows.glsli"
-#include "sky_atmosphere.glsli"
-#include "aerial_frame.glsli"
+#include "world_lighting_frame.glsli"
 #include "terrain_distance.glsli"
 
 #define TERRAIN_MATERIAL_SET 1
@@ -83,8 +44,6 @@ vec2 bakedAtlasUv(vec2 layerUV) {
     return (origin + terrainChunkLocal(layerUV)) / 16.0;
 }
 
-layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
-layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
 layout(location = 0) in vec3 FragPos;
 layout(location = 1) in vec3 Normal;
@@ -94,44 +53,12 @@ layout(location = 4) flat in uvec4 vLocalLights;
 
 layout(location = 0) out vec4 outColor;
 
-// One texel of the shadow map, handed in by the renderer. The map is 512,
-// 1024, 2048 or 4096 a side by the quality setting; this used to be a
-// constant for 4096, so at 512 the filter taps all landed inside one texel
-// and the bias shrank eightfold. The fallback covers a per-frame block that
-// never filled the slot in, such as the character preview's.
-float shadowTexel() {
-    return shadowParams.z > 0.0 ? shadowParams.z : 1.0 / 4096.0;
-}
-
-#include "local_lights.glsli"
-#include "shadow_receiver.glsli"
-
-// The air between the camera and this point, out of the fog volume: rgb is
-// the light it scatters toward the camera, a how much of the point shows
-// through it. See VolumetricFog.
-vec4 fogVolumeAt(vec3 worldPos) {
-    vec4 clip = projection * view * vec4(worldPos, 1.0);
-    float depth = max(clip.w, 1e-4);
-    vec2 uv = clip.xy / depth * 0.5 + 0.5;
-    float slice = log(max(depth, volumetricParams.y) / volumetricParams.y) * volumetricParams.z;
-    // Each slice holds the air up to its far edge, so a point is read half a
-    // slice back from where it stands.
-    return textureLod(uFogVolume, vec3(uv, slice - 0.5 / volumetricParams.w), 0.0);
-}
-
-// The zone's distance fog, then the air in front of it. The distance fog is
-// the far haze the sky is painted to meet, so it goes on first; the volume is
-// everything between the camera and that, sunlit shafts and torch glow
-// included.
-vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
-    float fogFactor = aerialVisibilityAt(worldPos, dist);
-    color = mix(aerialColorAt(worldPos - viewPos.xyz), color, fogFactor);
-    if (volumetricParams.x > 0.5) {
-        vec4 air = fogVolumeAt(worldPos);
-        color = color * air.a + air.rgb;
-    }
-    return color;
-}
+#include "terrain_surface_lighting.glsli"
+#ifdef TERRAIN_GBUFFER
+#include "surface_encoding.glsli"
+layout(location=1) out uvec4 outKeys;
+layout(location=2) out uvec4 outPayload;
+#endif
 
 // The ground's normal turned by its textures' relief.
 //
@@ -204,47 +131,11 @@ void main() {
     vec3 norm = relief ? reliefNormal(vertexNormal, reliefMap * 2.0 - 1.0, surface.relief.x)
                        : vertexNormal;
 
-    vec3 lightDir2 = normalize(-lightDir.xyz);
-    vec3 ambient = ambientColor.rgb * finalColor.rgb;
-    // Lambert, as every other surface has it. This took abs() of the angle
-    // and floored it at 0.2, so a slope turned from the sun was lit as one
-    // turned toward it, and hills had no shape at low sun. The ambient term
-    // is what keeps the shaded side from black, as it does for the models
-    // standing on it.
-    float diff = max(dot(norm, lightDir2), 0.0);
-    vec3 diffuse = diff * lightColor.rgb * finalColor.rgb;
-
-    RtLight rt = rtLightAt(FragPos, normalize(receiverFace));
-    float shadow = 1.0;
-    if (shadowParams.x > 0.5 && rtSunVisibility(rt) > 0.0) {
-        vec3 ldir = normalize(-lightDir.xyz);
-        // Texture relief changes lighting, not the caster geometry. Offsetting
-        // along its perturbed normal can push the lookup into the surface.
-        vec3 shadowNormal = dot(vertexNormal, ldir) >= 0.0 ? vertexNormal : -vertexNormal;
-        float normalOffset = shadowParams.w * 1.5 * (1.0 - abs(dot(shadowNormal, ldir)));
-        vec3 biasedPos = FragPos + shadowNormal * normalOffset;
-        vec4 lsPos = lightSpaceMatrix * vec4(biasedPos, 1.0);
-        vec3 proj = lsPos.xyz / lsPos.w;
-        proj.xy = proj.xy * 0.5 + 0.5;
-        vec2 receiverSlope = shadowReceiverSlope(receiverFace);
-        if (proj.x >= 0.0 && proj.x <= 1.0 && proj.y >= 0.0 && proj.y <= 1.0 && proj.z >= 0.0 && proj.z <= 1.0) {
-            shadow = sampleShadowReceiverPlane(uShadowMap, proj, receiverSlope);
-            shadow = mix(1.0, shadow, shadowMapEdgeFade(proj.xy * 2.0 - 1.0));
-        }
-    }
-
-    shadow = rtShadow(rt, shadow);
-    ambient = rtAmbient(rt, ambientColor.rgb) * finalColor.rgb;
-
-    // The units' map and the sun's, the darker of the two, as the client
-    // takes the dynamic map and the ground's baked one. Ground has no
-    // edge-on fade in the client; it darkens the whole lit colour.
-    if (shadow > 0.0) shadow = min(shadow, localShadowAt(FragPos, receiverFace));
-    vec3 result = (ambient + diffuse) * shadowLightFactor(shadow);
-    result += lightningDiffuse(FragPos, norm, finalColor.rgb);
-    result += localLightContribution(FragPos, norm, finalColor.rgb, vLocalLights);
-
-    result = applyFog(result, FragPos, fragDist);
-
-    outColor = vec4(result, 1.0);
+#ifdef TERRAIN_GBUFFER
+    outColor=vec4(finalColor.rgb,1);
+    outKeys=uvec4(packSurfaceNormal(normalize(receiverFace)),packSurfaceNormal(norm),packSurfaceNormal(vertexNormal),floatBitsToUint(surface.relief.y)+1u);
+    outPayload=uvec4(0,0,floatBitsToUint(gl_FragCoord.z),0);
+#else
+    outColor=shadeTerrainSurface(FragPos,finalColor,norm,vertexNormal,receiverFace,vLocalLights,rtLightAt(FragPos,normalize(receiverFace)));
+#endif
 }

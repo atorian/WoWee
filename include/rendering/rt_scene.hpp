@@ -64,6 +64,11 @@ public:
     void shutdown();
 
     [[nodiscard]] Backend backend() const { return backend_; }
+    // Render-owner version of the geometry/casters actually available to rays.
+    [[nodiscard]] uint64_t receiverSceneVersion() const { return sceneVersion_; }
+    void appendReceiverLayout(std::vector<VkDescriptorSetLayoutBinding>& bindings) const;
+    void appendReceiverPool(std::vector<VkDescriptorPoolSize>& sizes, uint32_t sets) const;
+    void writeReceiverDescriptors(VkDescriptorSet target, bool neutral = false) const;
 
     /// An indexed triangle mesh in object space. `surfaces` holds one packed
     /// surface (packRtSurface) per triangle, or a single one for all of them.
@@ -295,6 +300,7 @@ private:
     std::vector<VkAccelerationStructureInstanceKHR> asInstanceData_;
 
     FrameResources frames_[MAX_FRAMES_IN_FLIGHT];
+    FrameResources emptyReceiver_;
     VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
     // Bound where a real buffer does not exist yet, so every set is complete.

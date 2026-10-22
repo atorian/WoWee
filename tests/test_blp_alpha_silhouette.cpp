@@ -212,3 +212,12 @@ TEST_CASE("the decoded backing scan agrees with the block one", "[blp]") {
     for (const auto& e : examples) INFO("  " << e);
     CHECK(disagreed == 0);
 }
+
+TEST_CASE("authored compressed mip transparency prevents opaque batching", "[blp][mips]") {
+    BLPImage image;
+    image.width=4;image.height=4;image.compression=BLPCompression::DXT5;
+    image.mipmaps={dxt5Block(255,120,80,40),dxt5Block(96,120,80,40)};
+    CHECK(image.hasTransparency());
+    image.analyzeAlpha();
+    CHECK(image.hasTransparency());
+}

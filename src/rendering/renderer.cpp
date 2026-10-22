@@ -52,7 +52,7 @@
 #include "rendering/sun_shafts.hpp"
 #include "rendering/bloom.hpp"
 #include "rendering/distant_terrain.hpp"
-#include "rendering/rt_lighting.hpp"
+#include "rendering/rt_frame_inputs.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/screen_capture.hpp"
 #include "rendering/loot_sparkles.hpp"
@@ -241,21 +241,26 @@ bool Renderer::createPerFrameResources() {
         return false;
     }
 
-    // The ray traced lighting's scene and pass. They outlive the per-frame
-    // sets: the renderers register geometry with the scene as they load, and
-    // bindings 3 and 4 below take the pass's sampler as immutable.
+    // One RT scene supplies every current receiver and outlives its frame sets.
     if (!rtScene_) {
         rtScene_ = std::make_unique<RtScene>();
         if (!rtScene_->initialize(vkCtx)) {
             LOG_ERROR("Failed to create the ray tracing scene");
             return false;
         }
-        rtLighting_ = std::make_unique<RtLighting>();
-        if (!rtLighting_->initialize(vkCtx, rtScene_.get())) {
-            LOG_ERROR("Failed to create the ray traced lighting");
-            return false;
-        }
+
     }
+
+    neutralSurfaceImage_=createImage(device,vkCtx->getAllocator(),1,1,VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    if(!neutralSurfaceImage_.image) {LOG_ERROR("Neutral sky image allocation failed");return false;}
+    vkCtx->immediateSubmit([&](VkCommandBuffer cmd) {
+        transitionImageLayout(cmd,neutralSurfaceImage_.image,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkClearColorValue clear{};clear.float32[0]=clear.float32[1]=1.0f;
+        VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        vkCmdClearColorImage(cmd,neutralSurfaceImage_.image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,&clear,1,&range);
+        transitionImageLayout(cmd,neutralSurfaceImage_.image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_GENERAL);
+    });
 
     // A small local depth map for geometry contact shadows. Its footprint
     // stays fixed when the player increases distant sun-shadow coverage.
@@ -338,85 +343,29 @@ bool Renderer::createPerFrameResources() {
     for (auto& layout : contactShadowLayout_) layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     for (auto& layout : lightningShadowLayout_) layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    // --- Create descriptor set layout for set 0 (per-frame UBO + shadow sampler + fog volume
-    //     + ray traced lighting) ---
-    VkDescriptorSetLayoutBinding bindings[11]{};
-    bindings[0].binding = 0;
-    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    bindings[0].descriptorCount = 1;
-    // Compute as well: the fog volume is lit from this same block.
-    bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
-                             VK_SHADER_STAGE_COMPUTE_BIT;
-    // And the water's tessellation, which divides and moves it by the camera.
-    if (vkCtx->isTessellationSupported()) {
-        bindings[0].stageFlags |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
-                                  VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
-    }
-    bindings[1].binding = 1;
-    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    bindings[1].descriptorCount = 1;
-    bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    // Immutable, because this one compares. Portability implementations may
-    // report VkPhysicalDevicePortabilitySubsetFeaturesKHR::mutableComparisonSamplers
-    // as false -- MoltenVK does -- and then a sampler with compareEnable set is
-    // only legal here, baked into the layout, rather than written into the
-    // descriptor per frame. shadowSampler is created above this point.
-    bindings[1].pImmutableSamplers = &shadowSampler;
-    // The fog volume, read per fragment by surfaces and per vertex by
-    // particles and ribbons. Immutable like binding 1, so a set allocated
-    // anywhere else - the character preview's - only has to name a view.
-    const VkSampler fogSampler = volumetricFog_->getSampler();
-    bindings[2].binding = 2;
-    bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    bindings[2].descriptorCount = 1;
-    bindings[2].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    bindings[2].pImmutableSamplers = &fogSampler;
-    // Last frame's ray traced lighting (RtLighting), read by the terrain,
-    // building, doodad and character surfaces. Immutable samplers again, so
-    // the preview's sets only name the neutral view.
-    const VkSampler rtSampler = rtLighting_->sampler();
-    for (uint32_t b = 3; b <= 4; ++b) {
-        bindings[b].binding = b;
-        bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[b].descriptorCount = 1;
-        bindings[b].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        bindings[b].pImmutableSamplers = &rtSampler;
-    }
-
-    // Real sky color for the far atmospheric background. Linear filtering
-    // smooths the small sky image; immutable so previews need only a view.
+    // Frame resources are shared by all material families and views. Immutable
+    // comparison samplers also cover portability devices and portrait sets.
+    std::vector<VkDescriptorSetLayoutBinding> bindings;
+    const auto binding=[&](uint32_t index,VkDescriptorType type,VkShaderStageFlags stages,const VkSampler* sampler=nullptr) {
+        bindings.push_back({index,type,1,stages,sampler});
+    };
+    VkShaderStageFlags frameStages=VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT|VK_SHADER_STAGE_COMPUTE_BIT;
+    if(vkCtx->isTessellationSupported())frameStages|=VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT|VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+    binding(0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,frameStages);
+    binding(1,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,VK_SHADER_STAGE_FRAGMENT_BIT,&shadowSampler);
+    const VkSampler fogSampler=volumetricFog_->getSampler();
+    binding(2,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,&fogSampler);
     VkSamplerCreateInfo skySamplerInfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-    skySamplerInfo.magFilter = skySamplerInfo.minFilter = VK_FILTER_LINEAR;
-    skySamplerInfo.addressModeU = skySamplerInfo.addressModeV = skySamplerInfo.addressModeW =
-        VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    const VkSampler skySampler = vkCtx->getOrCreateSampler(skySamplerInfo);
-    bindings[5].binding = 5;
-    bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    bindings[5].descriptorCount = 1;
-    bindings[5].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    bindings[5].pImmutableSamplers = &skySampler;
-
-    VkDescriptorSetLayoutCreateInfo layoutInfo{};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    for (uint32_t b = 6; b <= 7; ++b) {
-        bindings[b] = bindings[3];
-        bindings[b].binding = b;
-    }
-    bindings[8] = bindings[3];
-    bindings[8].binding = 8;
-    bindings[8].pImmutableSamplers = &contactShadowSampler_;
-    // The frame's point lights (local_lights.glsli), read by surfaces and
-    // by the fog volume.
-    bindings[9].binding = 9;
-    bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[9].descriptorCount = 1;
-    bindings[9].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
-                             VK_SHADER_STAGE_COMPUTE_BIT;
-    bindings[10] = bindings[8];
-    bindings[10].binding = 10;
-    bindings[10].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
-    layoutInfo.bindingCount = 11;
-    layoutInfo.pBindings = bindings;
+    skySamplerInfo.magFilter=skySamplerInfo.minFilter=VK_FILTER_LINEAR;
+    skySamplerInfo.addressModeU=skySamplerInfo.addressModeV=skySamplerInfo.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    const VkSampler skySampler=vkCtx->getOrCreateSampler(skySamplerInfo);
+    binding(5,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,VK_SHADER_STAGE_FRAGMENT_BIT,&skySampler);
+    binding(8,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,VK_SHADER_STAGE_FRAGMENT_BIT,&contactShadowSampler_);
+    binding(9,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT|VK_SHADER_STAGE_COMPUTE_BIT);
+    binding(10,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,VK_SHADER_STAGE_FRAGMENT_BIT|VK_SHADER_STAGE_COMPUTE_BIT,&contactShadowSampler_);
+    rtScene_->appendReceiverLayout(bindings);
+    VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    layoutInfo.bindingCount=uint32_t(bindings.size());layoutInfo.pBindings=bindings.data();
 
     if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &perFrameSetLayout) != VK_SUCCESS) {
         LOG_ERROR("Failed to create per-frame descriptor set layout");
@@ -424,24 +373,43 @@ bool Renderer::createPerFrameResources() {
     }
 
     // --- Create descriptor pool for UBO + image sampler (normal frames + reflection) ---
-    VkDescriptorPoolSize poolSizes[3]{};
+    std::vector<VkDescriptorPoolSize> poolSizes(3);
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = MAX_FRAMES * 3; // world, capture and reflection sets
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = MAX_FRAMES * 3 * 9;  // shadow, fog, lighting, sky, reflection and geometry
+    poolSizes[1].descriptorCount = MAX_FRAMES * 3 * 5;  // shadow, fog, lighting, sky, reflection and geometry
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     poolSizes[2].descriptorCount = MAX_FRAMES * 3;  // the point lights
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.maxSets = MAX_FRAMES * 3; // world, capture and reflection sets
-    poolInfo.poolSizeCount = 3;
-    poolInfo.pPoolSizes = poolSizes;
+    rtScene_->appendReceiverPool(poolSizes, MAX_FRAMES * 3);
+    poolInfo.poolSizeCount = uint32_t(poolSizes.size());
+    poolInfo.pPoolSizes = poolSizes.data();
 
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &sceneDescriptorPool) != VK_SUCCESS) {
         LOG_ERROR("Failed to create scene descriptor pool");
         return false;
     }
+
+    const auto writeBaseSet=[&](VkDescriptorSet set,VkBuffer ubo,VkImageView shadow,VkImageView fog,uint32_t slot) {
+        VkDescriptorBufferInfo buffer{ubo,0,sizeof(GPUPerFrameData)};
+        VkDescriptorImageInfo images[]={
+            {VK_NULL_HANDLE,shadow,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+            {VK_NULL_HANDLE,fog,VK_IMAGE_LAYOUT_GENERAL},
+            {VK_NULL_HANDLE,neutralSurfaceImage_.imageView,VK_IMAGE_LAYOUT_GENERAL},
+            {VK_NULL_HANDLE,contactShadowImages_[slot].imageView,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+            {VK_NULL_HANDLE,lightningShadowImages_[slot].imageView,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+        constexpr uint32_t indices[]={0,1,2,5,8,10};
+        VkWriteDescriptorSet writes[6]{};
+        for(uint32_t i=0;i<6;++i) {
+            auto& w=writes[i];w.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;w.dstSet=set;w.dstBinding=indices[i];w.descriptorCount=1;
+            w.descriptorType=i?VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            if(i)w.pImageInfo=&images[i-1];else w.pBufferInfo=&buffer;
+        }
+        vkUpdateDescriptorSets(device,6,writes,0,nullptr);
+    };
 
     // --- Create per-frame UBOs and descriptor sets ---
     for (uint32_t i = 0; i < MAX_FRAMES; i++) {
@@ -475,88 +443,14 @@ bool Renderer::createPerFrameResources() {
             return false;
         }
 
-        // Write binding 0 (UBO) and binding 1 (shadow sampler)
-        VkDescriptorBufferInfo descBuf{};
-        descBuf.buffer = perFrameUBOs[i];
-        descBuf.offset = 0;
-        descBuf.range = sizeof(GPUPerFrameData);
-
-        VkDescriptorImageInfo shadowImgInfo{};
-        // sampler is ignored: binding 1 declares it immutable in the layout.
-        shadowImgInfo.imageView = shadowDepthView[i];
-        shadowImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-        // Neutral until the fog is switched on; writeFogVolumeBindings swaps
-        // in this slot's own volume then.
-        VkDescriptorImageInfo fogImgInfo{};
-        fogImgInfo.imageView = volumetricFog_->getVolumeView(i);
-        fogImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        // Neutral until the ray traced lighting is on; writeRtLightingBindings
-        // swaps in the other slot's results then.
-        VkDescriptorImageInfo rtImgInfo[4]{};
-        rtImgInfo[0].imageView = rtLighting_->lightViewForSlot(i);
-        rtImgInfo[1].imageView = rtLighting_->giViewForSlot(i);
-        rtImgInfo[2].imageView = rtLighting_->reflectionViewForSlot(i);
-        rtImgInfo[3].imageView = rtLighting_->geometryViewForSlot(i);
-        for (auto& info : rtImgInfo) info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkWriteDescriptorSet writes[10]{};
-        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = perFrameDescSets[i];
-        writes[0].dstBinding = 0;
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        writes[0].pBufferInfo = &descBuf;
-        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = perFrameDescSets[i];
-        writes[1].dstBinding = 1;
-        writes[1].descriptorCount = 1;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[1].pImageInfo = &shadowImgInfo;
-        writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[2].dstSet = perFrameDescSets[i];
-        writes[2].dstBinding = 2;
-        writes[2].descriptorCount = 1;
-        writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[2].pImageInfo = &fogImgInfo;
-        for (uint32_t b = 0; b < 2; ++b) {
-            writes[3 + b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[3 + b].dstSet = perFrameDescSets[i];
-            writes[3 + b].dstBinding = 3 + b;
-            writes[3 + b].descriptorCount = 1;
-            writes[3 + b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[3 + b].pImageInfo = &rtImgInfo[b];
-        }
-
-        writes[5] = writes[4];
-        writes[5].dstBinding = 5;
-        for (uint32_t b = 6; b <= 7; ++b) {
-            writes[b] = writes[4];
-            writes[b].dstBinding = b;
-            writes[b].pImageInfo = &rtImgInfo[b - 4];
-        }
-        VkDescriptorImageInfo contactInfo{};
-        contactInfo.imageView = contactShadowImages_[i].imageView;
-        contactInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        writes[8] = writes[1];
-        writes[8].dstBinding = 8;
-        writes[8].pImageInfo = &contactInfo;
-        VkDescriptorImageInfo lightningInfo{};
-        lightningInfo.imageView = lightningShadowImages_[i].imageView;
-        lightningInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        writes[9] = writes[1];
-        writes[9].dstBinding = 10;
-        writes[9].pImageInfo = &lightningInfo;
-        vkUpdateDescriptorSets(device, 10, writes, 0, nullptr);
+        writeBaseSet(perFrameDescSets[i],perFrameUBOs[i],shadowDepthView[i],volumetricFog_->getVolumeView(i),i);
         // Sky capture gets a separate set whose binding 5 stays neutral:
         // the M2 shader also declares the surface sampler, and must never
         // bind the image being written by this pass as a sampled image.
         setAlloc.pSetLayouts = &perFrameSetLayout;
         if (vkAllocateDescriptorSets(device, &setAlloc, &skyPerFrameDescSets[i]) != VK_SUCCESS)
             return false;
-        for (auto& write : writes) write.dstSet = skyPerFrameDescSets[i];
-        vkUpdateDescriptorSets(device, 10, writes, 0, nullptr);
+        writeBaseSet(skyPerFrameDescSets[i],perFrameUBOs[i],shadowDepthView[i],volumetricFog_->getNeutralView(),i);
     }
 
     skyBackground_ = std::make_unique<SkyBackground>();
@@ -596,79 +490,8 @@ bool Renderer::createPerFrameResources() {
             return false;
         }
 
-        // Bind each reflection descriptor to its own frame's UBO and shadow view
-        for (uint32_t i = 0; i < MAX_FRAMES; i++) {
-            VkDescriptorBufferInfo descBuf{};
-            descBuf.buffer = reflPerFrameUBO[i];
-            descBuf.offset = 0;
-            descBuf.range = sizeof(GPUPerFrameData);
-
-            VkDescriptorImageInfo shadowImgInfo{};
-            // sampler is ignored: binding 1 declares it immutable in the layout.
-            shadowImgInfo.imageView = shadowDepthView[i];
-            shadowImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-            // Always neutral: the volume is built for the camera, and the
-            // mirrored one would read it at the wrong place. The reflection's
-            // block switches the fog off.
-            VkDescriptorImageInfo fogImgInfo{};
-            fogImgInfo.imageView = volumetricFog_->getNeutralView();
-            fogImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-            // Neutral as well: the result is the camera's, and the block's
-            // switch is off in the reflection's copy.
-            VkDescriptorImageInfo rtImgInfo{};
-            rtImgInfo.imageView = rtLighting_->neutralView();
-            rtImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-            VkWriteDescriptorSet writes[10]{};
-            writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[0].dstSet = reflPerFrameDescSet[i];
-            writes[0].dstBinding = 0;
-            writes[0].descriptorCount = 1;
-            writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            writes[0].pBufferInfo = &descBuf;
-            writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[1].dstSet = reflPerFrameDescSet[i];
-            writes[1].dstBinding = 1;
-            writes[1].descriptorCount = 1;
-            writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[1].pImageInfo = &shadowImgInfo;
-            writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[2].dstSet = reflPerFrameDescSet[i];
-            writes[2].dstBinding = 2;
-            writes[2].descriptorCount = 1;
-            writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[2].pImageInfo = &fogImgInfo;
-            for (uint32_t b = 3; b <= 4; ++b) {
-                writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                writes[b].dstSet = reflPerFrameDescSet[i];
-                writes[b].dstBinding = b;
-                writes[b].descriptorCount = 1;
-                writes[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                writes[b].pImageInfo = &rtImgInfo;
-            }
-
-            writes[5] = writes[4];
-            writes[5].dstBinding = 5;
-            for (uint32_t b = 6; b <= 7; ++b) {
-                writes[b] = writes[4];
-                writes[b].dstBinding = b;
-            }
-            VkDescriptorImageInfo contactInfo{};
-            contactInfo.imageView = contactShadowImages_[i].imageView;
-            contactInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            writes[8] = writes[1];
-            writes[8].dstBinding = 8;
-            writes[8].pImageInfo = &contactInfo;
-            VkDescriptorImageInfo lightningInfo{};
-            lightningInfo.imageView = lightningShadowImages_[i].imageView;
-            lightningInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            writes[9] = writes[1];
-            writes[9].dstBinding = 10;
-            writes[9].pImageInfo = &lightningInfo;
-            vkUpdateDescriptorSets(device, 10, writes, 0, nullptr);
-        }
+        for(uint32_t i=0;i<MAX_FRAMES;++i)
+            writeBaseSet(reflPerFrameDescSet[i],reflPerFrameUBO[i],shadowDepthView[i],volumetricFog_->getNeutralView(),i);
     }
 
     // The point lights: a buffer per frame slot, grown as a frame needs, and
@@ -804,10 +627,7 @@ void Renderer::destroyPerFrameResources() {
     destroy(device, perFrameSetLayout);
     // After every renderer has let go of its geometry, which is why this is
     // here rather than beside the fog: shutdown() calls this last.
-    if (rtLighting_) {
-        rtLighting_->shutdown();
-        rtLighting_.reset();
-    }
+    destroyImage(device,vkCtx->getAllocator(),neutralSurfaceImage_);
     if (rtScene_) {
         rtScene_->shutdown();
         rtScene_.reset();
@@ -969,12 +789,9 @@ void Renderer::updatePerFrameUBO() {
     lightsStage.reset();
     const uint32_t localLightCount = static_cast<uint32_t>(currentFrameData.localLightMeta.x);
 
-    if (rtLighting_) {
-        const RtLighting::ConsumerData rt = rtLighting_->consumerData();
-        currentFrameData.rtViewProj = rt.viewProj;
-        currentFrameData.rtCameraPos = rt.cameraPos;
-        currentFrameData.rtParams = rt.params;
-    }
+    currentFrameData.rtTraceParams = glm::vec4(kRtAoRadius, kRtGiLength, kRtShadowLength, kRtSunTanRadius);
+    currentFrameData.rtParams = glm::vec4(float(frameInputs_.rtMode), frameInputs_.rtDistance * 0.8f,
+                                         frameInputs_.rtDistance, rtScene_->hasContent() ? 1.0f : 0.0f);
 
     // What the local lights are doing, a line every few seconds: how many
     // models in and around the view carry a lit light.
@@ -1087,14 +904,8 @@ bool Renderer::initialize(RenderSurface* surface) {
     // LightingManager doesn't use GL - initialize for data-only use
     lightingManager = std::make_unique<LightingManager>();
 
-    // Create secondary command buffer resources for multithreaded rendering.
-    //
-    // WOWEE_SINGLE_THREAD_RECORD takes the fallback path instead. That path
-    // records the world inline on one thread, which costs CPU time but marks
-    // every pass separately - grass included, where the parallel path records
-    // grass into the terrain secondary and so reports the two as one number.
-    // Running a frame profile both ways says how much of "terrain" is grass,
-    // and whether serialising the recording moves the frame time at all.
+    // Serial recording uses the same secondary commands and GPU plan; only
+    // CPU task scheduling changes under WOWEE_SINGLE_THREAD_RECORD.
     if (std::getenv("WOWEE_PASS_ABLATION") != nullptr) {
         passAblation_ = std::make_unique<PassAblation>();
         LOG_WARNING("Pass ablation enabled - ", PassAblation::phaseCount(),
@@ -1105,25 +916,13 @@ bool Renderer::initialize(RenderSurface* surface) {
                     "the table is logged.");
     }
 
-    static const bool forceSingleThread = std::getenv("WOWEE_SINGLE_THREAD_RECORD") != nullptr;
-    if (forceSingleThread) {
-        LOG_INFO("WOWEE_SINGLE_THREAD_RECORD set - inline recording, one pass per GPU mark");
-    } else if (!createSecondaryCommandResources()) {
-        LOG_WARNING("Failed to create secondary command buffers - falling back to single-threaded rendering");
+    if (!createSecondaryCommandResources()) {
+        LOG_ERROR("Failed to create frame recording resources");
+        return false;
     }
-
     // Create PostProcessPipeline (§4.3 - owns FSR/FXAA/FSR2/FSR3/brightness)
     postProcessPipeline_ = std::make_unique<PostProcessPipeline>();
     postProcessPipeline_->initialize(vkCtx);
-    // The ray traced lighting normally records where the water leaves the
-    // scene pass. A multisampled scene in an off-screen target never leaves
-    // it early, so the pass records here instead, as the upscaler takes over.
-    postProcessPipeline_->setSceneClosedHook([this](VkCommandBuffer) {
-        if (rtRecordedThisFrame_ || !postProcessPipeline_) return;
-        recordRtLighting(postProcessPipeline_->getSceneDepthImage(),
-                         postProcessPipeline_->getSceneRenderExtent(),
-                         postProcessPipeline_->sceneDepthIsMsaa(), "endFrame/post-process");
-    });
 
     distantTerrain_ = std::make_unique<DistantTerrain>();
     if(!distantTerrain_->initialize(*vkCtx,perFrameSetLayout)) distantTerrain_.reset();
@@ -1750,7 +1549,6 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
 
     worldDrawnThisFrame_ = false;
 
-    if (rtLighting_) rtLighting_->setMode(static_cast<RtLighting::Mode>(inputs.rtMode));
     if (volumetricFog_)
         volumetricFog_->setQuality(static_cast<VolumetricFog::Quality>(inputs.fogQuality));
     pendingMsaaSamples_ = static_cast<VkSampleCountFlagBits>(inputs.msaaSamples);
@@ -1835,15 +1633,7 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
         }
     }
 
-    // Retire replaced images; each consumer set is rewritten after its fence.
-    if (rtLighting_) {
-        rtLighting_->setDistance(inputs.rtDistance);
-        rtLighting_->prepare(sceneRenderExtent());
-    }
     targetsStage.reset();
-
-    rtRecordedThisFrame_ = false;
-    rtScenePreparedThisFrame_ = false;
 
     // Acquire swapchain image and begin command buffer. Its waits are timed
     // inside: for the GPU, for the image, for uploads.
@@ -1865,11 +1655,21 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
         if (skySystem && skySystem->getBodies()) {
             skySystem->getBodies()->beginFrameQueries(currentCmd, vkCtx->getCurrentFrame());
         }
-        writeRtLightingBindings(vkCtx->getCurrentFrame());
         writeFogVolumeBindings(vkCtx->getCurrentFrame());
 
         // FSR2 jitter pattern (§4.3 - delegates to PostProcessPipeline)
         if (postProcessPipeline_ && frameCamera()) postProcessPipeline_->applyJitter(&renderCamera_);
+    }
+    // One scene publication before every consumer, including reflections and
+    // offscreen portraits. Descriptor writes belong to this acquired slot.
+    {
+        GpuPass pass(*vkCtx, currentCmd, RtScene::kGpuMarkLabel);
+        rtScene_->setActive(frameInputs_.rtMode!=0);
+        rtScene_->update(currentCmd);
+        const uint32_t slot = vkCtx->getCurrentFrame();
+        rtScene_->writeReceiverDescriptors(perFrameDescSets[slot]);
+        rtScene_->writeReceiverDescriptors(reflPerFrameDescSet[slot]);
+        rtScene_->writeReceiverDescriptors(skyPerFrameDescSets[slot]);
     }
     // The characters' bones into this slot's buffers, once, now that its
     // fence is passed and before the shadow maps draw them: every pass after
@@ -1900,7 +1700,7 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
         // avoid sampling the attachment while drawing it.
         VkCopyDescriptorSet copies[4]{};
         uint32_t copyCount=0;
-        for (uint32_t binding : {0u,1u,3u,4u}) {
+        for (uint32_t binding : {0u,1u}) {
             auto& copy=copies[copyCount++];
             copy.sType = VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET;
             copy.srcSet = perFrameDescSets[slot];
@@ -1988,12 +1788,6 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
                 logged = true;
             }
         }
-    }
-
-    if ((core::envFlagEnabled("WOWEE_MODEL_SURFACES",false) || core::envFlagEnabled("WOWEE_WMO_SURFACES",false)) && frameInputs_.rtMode!=0 && rtScene_) {
-        GpuPass pass(*vkCtx,currentCmd,RtScene::kGpuMarkLabel);
-        rtScene_->update(currentCmd);
-        rtScenePreparedThisFrame_=true;
     }
 
     // --- Begin render pass ---
@@ -3370,26 +3164,35 @@ void Renderer::renderWorld() {
     const bool skipTerrain = envSkipTerrain || ablated(AblationPass::Terrain);
     const bool skipSky = envSkipSky || ablated(AblationPass::Sky);
     const bool skipGrass = ablated(AblationPass::Grass);
-    static const bool surfaceRequested=(core::envFlagEnabled("WOWEE_MODEL_SURFACES",false) || core::envFlagEnabled("WOWEE_WMO_SURFACES",false));
+    static const bool surfaceRequested=core::envFlagEnabled("WOWEE_MODEL_SURFACES",true);
     const bool surfaceWmo=surfaceRequested && wmoRenderer && frameCamera() && !skipWMO;
     const bool surfaceM2=surfaceRequested && m2Renderer && frameCamera() && !skipM2;
+    const bool surfaceTerrain=surfaceRequested && terrainRenderer && frameCamera() && frameInputs_.terrainEnabled &&
+        !skipTerrain && !frameInputs_.scene->terrain.wireframe;
+    const bool surfaceChars=surfaceRequested && characterRenderer && frameCamera() && !skipChars;
+    const bool anySurfaces=surfaceWmo || surfaceM2 || surfaceTerrain || surfaceChars;
+    glm::mat4 surfaceRotation=view;surfaceRotation[3]=glm::vec4(0,0,0,1);
+    const glm::mat4 surfaceInverse=glm::inverse(projection*surfaceRotation);
     const auto prepareSurfaces=[&]() {
         const bool offscreen=postProcessPipeline_ && postProcessPipeline_->getSceneFramebuffer();
         const auto depth=offscreen
             ?postProcessPipeline_->getSceneAttachmentDepthView():vkCtx->getDepthImageView();
         const SurfacePass::TargetVersion version{vkCtx->syncResetGeneration(),
             offscreen?postProcessPipeline_->sceneTargetGeneration():0,offscreen};
-        RtLighting::FrameInputs in{};
+        RtFrameInputs in{};
         in.view=frameCamera()->getViewMatrix();in.projection=frameCamera()->getProjectionMatrix();
         in.cameraPos=frameCamera()->getPosition();in.sunDir=-glm::vec3(currentFrameData.lightDir);
         in.sunColor=glm::vec3(currentFrameData.lightColor);in.skyColor=glm::vec3(currentFrameData.ambientColor);
         in.sunUp=in.sunDir.z>-0.05f;in.distance=frameInputs_.rtDistance;
         if(!surfacePass_)surfacePass_=std::make_unique<SurfacePass>(*vkCtx,perFrameSetLayout);
         surfacePass_->prepare(activeRenderExtent_,depth,version,
-            {surfaceWmo?wmoRenderer->surfaceMaterialCapacity():0,surfaceM2?m2Renderer->surfaceMaterialCapacity():0},
+            {surfaceWmo?wmoRenderer->surfaceMaterialCapacity():0,surfaceM2?m2Renderer->surfaceMaterialCapacity():0,
+             surfaceTerrain?frameInputs_.scene->terrain.view.size():0,surfaceChars?characterRenderer->surfaceMaterialCapacity():0},
             rtScene_.get(),frameInputs_.rtMode,in);
         if(surfaceWmo)wmoRenderer->prepareSurface(*surfacePass_);
         if(surfaceM2)m2Renderer->prepareSurface(*surfacePass_);
+        if(surfaceTerrain)terrainRenderer->prepareSurface(*surfacePass_);
+        if(surfaceChars)characterRenderer->prepareSurface(*surfacePass_);
     };
     // The terrain chooses its chunks' detail by their triangles' size in the
     // image it is drawn into, which an upscaler makes smaller than the window.
@@ -3413,6 +3216,13 @@ void Renderer::renderWorld() {
     const bool useOriginalSkybox = frameInputs_.hideProceduralSky;
 
 
+    const auto recordTask=[&](const char* label,auto&& function) -> std::future<double> {
+        if(!core::envFlagEnabled("WOWEE_SINGLE_THREAD_RECORD",false))
+            return core::ThreadPool::frameWorkers().submit(label,std::forward<decltype(function)>(function));
+        std::promise<double> result;auto future=result.get_future();
+        try {result.set_value(function());}catch(...){result.set_exception(std::current_exception());}
+        return future;
+    };
     // ── Multithreaded secondary command buffer recording ──
     // Terrain, WMO, and M2 record on worker threads while main thread handles
     // sky, characters, water, and effects.  prepareRender() on main thread first
@@ -3420,7 +3230,7 @@ void Renderer::renderWorld() {
     if (parallelRecordingEnabled_) {
         // --- Pre-compute state + GPU allocations on main thread (not thread-safe) ---
         auto prepStart = std::chrono::steady_clock::now();
-        if (surfaceWmo || surfaceM2) prepareSurfaces();
+        if (anySurfaces) prepareSurfaces();
         const auto prepWmoEnd = std::chrono::steady_clock::now();
         if (m2Renderer && frameCamera()) m2Renderer->prepareRender(frameIdx, *frameCamera());
         if (drawSkyModels && frameCamera())
@@ -3450,25 +3260,40 @@ void Renderer::renderWorld() {
         // ablation is the whole measurement, since the terrain phase would
         // then be reporting what terrain and grass cost together.
         const bool drawTerrain = terrainRenderer && frameCamera() && frameInputs_.terrainEnabled && !skipTerrain;
-        const bool drawGrass = grassRenderer_ && !skipGrass;
+        const bool drawGrass = grassRenderer_ && !skipGrass && frameInputs_.scene->grass.blades &&
+            !frameInputs_.scene->grass.blades->empty();
         if (drawTerrain || drawGrass) {
-            terrainFuture = core::ThreadPool::frameWorkers().submit("record: terrain", [&]() -> double {
+            terrainFuture = recordTask("record: terrain", [&]() -> double {
                 auto t0 = std::chrono::steady_clock::now();
-                VkCommandBuffer cmd = beginSecondary(SEC_TERRAIN);
-                setSecondaryViewportScissor(cmd);
-                if (drawTerrain) {
-                    if(distantTerrain_)distantTerrain_->record(cmd,perFrameSet,frameInputs_.scene->distantTerrain);
-                    terrainRenderer->recordView(cmd, perFrameSet, frameInputs_.scene->terrain);
+                if(surfaceTerrain) {
+                    if(distantTerrain_ && !frameInputs_.scene->distantTerrain.draws.empty()) {
+                        auto cmd=surfacePass_->beginRun(SurfacePass::Family::Terrain,false);
+                        distantTerrain_->record(cmd,perFrameSet,frameInputs_.scene->distantTerrain);
+                        surfacePass_->endRun(SurfacePass::Family::Terrain);
+                    }
+                    terrainRenderer->recordSurface(perFrameSet,frameInputs_.scene->terrain,frameCamera()->getPosition());
+                    if(drawGrass) {
+                        auto cmd=surfacePass_->beginRun(SurfacePass::Family::Terrain,false);
+                        grassRenderer_->record(cmd,frameIdx,perFrameSet,frameInputs_.scene->grass);
+                        surfacePass_->endRun(SurfacePass::Family::Terrain);
+                    }
+                } else {
+                    VkCommandBuffer cmd=beginSecondary(SEC_TERRAIN);
+                    setSecondaryViewportScissor(cmd);
+                    if(drawTerrain) {
+                        if(distantTerrain_)distantTerrain_->record(cmd,perFrameSet,frameInputs_.scene->distantTerrain);
+                        terrainRenderer->recordView(cmd,perFrameSet,frameInputs_.scene->terrain);
+                    }
+                    if(drawGrass)grassRenderer_->record(cmd,frameIdx,perFrameSet,frameInputs_.scene->grass);
+                    vkEndCommandBuffer(cmd);
                 }
-                if (drawGrass) grassRenderer_->record(cmd, frameIdx, perFrameSet, frameInputs_.scene->grass);
-                vkEndCommandBuffer(cmd);
                 return std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
             });
         }
 
         if (wmoRenderer && frameCamera() && !skipWMO) {
-            wmoFuture = core::ThreadPool::frameWorkers().submit("record: WMO", [&]() -> double {
+            wmoFuture = recordTask("record: WMO", [&]() -> double {
                 auto t0 = std::chrono::steady_clock::now();
                 if (surfaceWmo) {
                     wmoRenderer->recordSurface(perFrameSet, *frameCamera());
@@ -3484,7 +3309,7 @@ void Renderer::renderWorld() {
         }
 
         if (m2Renderer && frameCamera() && !skipM2) {
-            m2Future = core::ThreadPool::frameWorkers().submit("record: M2", [&]() -> double {
+            m2Future = recordTask("record: M2", [&]() -> double {
                 auto t0 = std::chrono::steady_clock::now();
                 VkCommandBuffer cmd = beginSecondary(SEC_M2);
                 setSecondaryViewportScissor(cmd);
@@ -3565,14 +3390,16 @@ void Renderer::renderWorld() {
         // The faded ones go in a buffer of their own, queued after the M2s, or
         // after the water in its pass: drawn here they would hide the effects
         // inside them. Recorded by the same worker, one after the other.
-        charFuture = core::ThreadPool::frameWorkers().submit("record: characters", [&]() -> double {
+        charFuture = recordTask("record: characters", [&]() -> double {
             auto t0 = std::chrono::steady_clock::now();
-            VkCommandBuffer cmd = beginSecondary(SEC_CHARS);
-            setSecondaryViewportScissor(cmd);
-            if (characterRenderer && frameCamera() && !skipChars) {
-                characterRenderer->render(cmd, perFrameSet, *frameCamera(), CharacterRenderer::Part::Solid);
+            if(surfaceChars)characterRenderer->recordSurface(perFrameSet);
+            else {
+                VkCommandBuffer cmd=beginSecondary(SEC_CHARS);
+                setSecondaryViewportScissor(cmd);
+                if(characterRenderer && frameCamera() && !skipChars)
+                    characterRenderer->render(cmd,perFrameSet,*frameCamera(),CharacterRenderer::Part::Solid);
+                vkEndCommandBuffer(cmd);
             }
-            vkEndCommandBuffer(cmd);
             if (!fadedCharactersAfterWater()) {
                 VkCommandBuffer faded = beginSecondary(SEC_CHARS_FADED);
                 setSecondaryViewportScissor(faded);
@@ -3588,7 +3415,7 @@ void Renderer::renderWorld() {
         // Post-world systems are disjoint from terrain/WMO/M2/characters. Start
         // this after selection recording so OverlaySystem is never used from
         // two threads at once.
-        postFuture = core::ThreadPool::frameWorkers().submit("record: post", [&]() -> double {
+        postFuture = recordTask("record: post", [&]() -> double {
             auto t0 = std::chrono::steady_clock::now();
             VkCommandBuffer cmd = beginSecondary(SEC_POST);
             setSecondaryViewportScissor(cmd);
@@ -3622,24 +3449,24 @@ void Renderer::renderWorld() {
         // propagate as an unhandled exception and terminate the process.
         dispatchStage.reset();
         std::optional<CpuStage> waitStage(std::in_place, stages, "renderWorld", "wait for workers");
-        std::exception_ptr wmoRecordingFailure;
+        std::exception_ptr recordingFailure;
         try { if (terrainFuture.valid()) lastTerrainRenderMs = terrainFuture.get(); }
-        catch (const std::exception& e) { LOG_ERROR("Terrain render worker: ", e.what()); }
+        catch (const std::exception& e) { LOG_ERROR("Terrain render worker: ", e.what(), " - frame cannot be submitted");recordingFailure=std::current_exception(); }
         try { if (wmoFuture.valid()) lastWMORenderMs = wmoFuture.get(); }
         catch (const std::exception& e) {
             LOG_ERROR("WMO render worker: ", e.what(), " - frame cannot be submitted");
-            wmoRecordingFailure = std::current_exception();
+            recordingFailure = std::current_exception();
         }
         try { if (m2Future.valid()) lastM2RenderMs = m2Future.get(); }
-        catch (const std::exception& e) { LOG_ERROR("M2 render worker: ", e.what()); }
+        catch (const std::exception& e) { LOG_ERROR("M2 render worker: ", e.what(), " - frame cannot be submitted");recordingFailure=std::current_exception(); }
         try { if (charFuture.valid()) (void)charFuture.get(); }
-        catch (const std::exception& e) { LOG_ERROR("Character render worker: ", e.what()); }
+        catch (const std::exception& e) { LOG_ERROR("Character render worker: ", e.what(), " - frame cannot be submitted");recordingFailure=std::current_exception(); }
         try { if (postFuture.valid()) (void)postFuture.get(); }
-        catch (const std::exception& e) { LOG_ERROR("Post render worker: ", e.what()); }
+        catch (const std::exception& e) { LOG_ERROR("Post render worker: ", e.what(), " - frame cannot be submitted");recordingFailure=std::current_exception(); }
         waitStage.reset();
         // Join every worker before propagating: their lambdas borrow this frame.
         // A partial WMO plan may contain an unfinished secondary and cannot execute.
-        if (wmoRecordingFailure) std::rethrow_exception(wmoRecordingFailure);
+        if (recordingFailure) std::rethrow_exception(recordingFailure);
 
         // prepareRender() does the GPU allocations that are not thread-safe, so it runs
         // on the main thread and is not covered by the worker timings. Name the culprit
@@ -3698,176 +3525,37 @@ void Renderer::renderWorld() {
                         terrainRenderer ? terrainRenderer->getChunkCount() : 0);
         }
 
-        if(surfaceWmo || surfaceM2)surfacePass_->finishMaterials();
-        // --- Execute all secondary buffers in correct draw order ---
-        VkCommandBuffer validCmds[NUM_SECONDARIES];
-        const char* validLabels[NUM_SECONDARIES];
-        uint32_t numCmds = 0;
-        // Terrain first, then the sky. Every sky layer sits on the far plane
-        // and depth-tests against what is already there, so drawing it after
-        // the ground skips the clouds' noise on every pixel a hill covers,
-        // which outdoors is most of them. Only the terrain goes ahead of it:
-        // it is the one pass that is opaque throughout. Buildings carry
-        // blended windows and doodads carry leaves and particles, and blended
-        // pixels leave no depth behind, so a sky drawn after them would paint
-        // over whichever of them stood against it.
-        const auto queue = [&](VkCommandBuffer buffer, const char* label) {
-            validLabels[numCmds] = label;
-            validCmds[numCmds++] = buffer;
-        };
-        if (drawTerrain || drawGrass)
-            queue(secondaryCmds_[SEC_TERRAIN][frameIdx], "terrain");
-        queue(secondaryCmds_[SEC_SKY][frameIdx], "sky");
-        if (wmoRenderer && frameCamera() && !skipWMO)
-            queue(surfaceWmo?VK_NULL_HANDLE:secondaryCmds_[SEC_WMO][frameIdx], "wmo");
-        queue(secondaryCmds_[SEC_SELECTION][frameIdx], "selection");
-        queue(secondaryCmds_[SEC_CHARS][frameIdx], "characters");
-        if (m2Renderer && frameCamera() && !skipM2)
-            queue(secondaryCmds_[SEC_M2][frameIdx], "m2");
-        if (!fadedCharactersAfterWater())
-            queue(secondaryCmds_[SEC_CHARS_FADED][frameIdx], "faded characters");
-        queue(secondaryCmds_[SEC_POST][frameIdx], "water/effects");
-
-        // Allocate marks on the owner in execution order. Each mark is
-        // recorded in its own inherited secondary: primary timestamp/debug
-        // commands are forbidden inside a secondary-only subpass.
-        for (uint32_t i = 0; i < numCmds; ++i) {
-            if (!validCmds[i]) wmoRenderer->executeSurface(currentCmd, perFrameSet, *frameCamera(),
-                activeFramebuffer_, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
-            else {
-                if(surfaceM2 && validCmds[i]==secondaryCmds_[SEC_M2][frameIdx])
-                    m2Renderer->executeSurface(currentCmd,perFrameSet,*frameCamera(),activeFramebuffer_,VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
-                vkCmdExecuteCommands(currentCmd, 1, &validCmds[i]);
-            }
-            recordSecondaryMark(i + 1, validLabels[i]);
-        }
-        // The world, as one mark.
-        //
-        // Every pass inside it is marked on the single-threaded path below and
-        // none of them are here, because these were recorded into secondary
-        // buffers. So on the path this machine actually takes, the next mark
-        // after shadows was post-process - and the gap to it, which is the
-        // whole scene, was being read as the cost of post-processing. 46 of a
-        // 50ms frame landed under a label that did not earn it.
-        // ...and the whole of it, for the one-line answer.
+        if(anySurfaces)surfacePass_->finishMaterials();
+        std::vector<SurfacePass::Operation> operations;
+        const auto forward=[&](uint32_t index){operations.push_back({SurfacePass::Family::Count,secondaryCmds_[index][frameIdx]});};
+        const auto family=[&](SurfacePass::Family f){operations.push_back({f,VK_NULL_HANDLE});};
+        const bool drawSky=skySystem && frameCamera() && !skipSky;
+        // Sky geometry is pinned to depth=1 and never writes depth. It can be
+        // drawn before opaque terrain, allowing one surface pass across model
+        // families. An active screen-space lens flare blends over terrain and
+        // retains the original boundary/order instead.
+        const auto& skyFrame=frameInputs_.scene->sky;
+        const bool skyBackgroundOnly=!skyFrame.flare || skyFrame.flareIntensity<=0.0f || frameInputs_.sunGlare<=0.0f;
+        const bool skyFirst=anySurfaces && skyBackgroundOnly;
+        if(drawSky && skyFirst)forward(SEC_SKY);
+        if(surfaceTerrain)family(SurfacePass::Family::Terrain);
+        else if(drawTerrain || drawGrass)forward(SEC_TERRAIN);
+        if(drawSky && !skyFirst)forward(SEC_SKY);
+        if(surfaceWmo)family(SurfacePass::Family::Wmo);
+        else if(wmoRenderer && frameCamera() && !skipWMO)forward(SEC_WMO);
+        if(frameInputs_.selection.visible)forward(SEC_SELECTION);
+        if(surfaceChars)family(SurfacePass::Family::Character);else forward(SEC_CHARS);
+        if(surfaceM2)family(SurfacePass::Family::M2);
+        if(m2Renderer && frameCamera() && !skipM2)forward(SEC_M2);
+        if(!fadedCharactersAfterWater())forward(SEC_CHARS_FADED);
+        forward(SEC_POST);
+        if(anySurfaces)surfacePass_->executePlan(operations,currentCmd,perFrameSet,activeFramebuffer_,surfaceInverse,
+            VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+        else for(const auto& operation:operations)vkCmdExecuteCommands(currentCmd,1,&operation.forward);
+        // One enclosing GPU interval for the recorded command plan. Nested
+        // RT/geometry timings, when enabled, are not independent frame costs.
         recordSecondaryMark(NUM_DRAW_SECONDARIES + 1, "world total");
 
-    } else {
-        // ── Fallback: single-threaded inline recording (original path) ──
-        if(surfaceWmo || surfaceM2)prepareSurfaces();
-
-        if (terrainRenderer && frameCamera() && frameInputs_.terrainEnabled && !skipTerrain) {
-            auto terrainStart = std::chrono::steady_clock::now();
-            {
-                GpuPass pass(*vkCtx, currentCmd, "terrain");
-                if(distantTerrain_)distantTerrain_->record(currentCmd,perFrameSet,frameInputs_.scene->distantTerrain);
-                terrainRenderer->recordView(currentCmd, perFrameSet, frameInputs_.scene->terrain);
-            }
-            lastTerrainRenderMs = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - terrainStart).count();
-        }
-
-        // After terrain, before the world's models: grass sits on the ground and
-        // is occluded by everything standing on it.
-        if (grassRenderer_ && vkCtx && !skipGrass) {
-            GpuPass pass(*vkCtx, currentCmd, "grass");
-            grassRenderer_->record(currentCmd, vkCtx->getCurrentFrame(), perFrameSet, frameInputs_.scene->grass);
-        }
-
-        // Sky after the ground, for the reason given on the parallel path.
-        if (skySystem && frameCamera() && !skipSky) {
-            GpuPass pass(*vkCtx, currentCmd, "sky");
-            rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
-                timeOfDay,
-                frameInputs_.environment.gameTime, frameInputs_.weather.strength(),
-                frameInputs_.hasLighting ? (&frameInputs_.weatherLight) : nullptr,
-                useOriginalSkybox);
-            skyParams.sunGlareVisibility =
-                frameInputs_.sunGlare * sky_celestial::weatherFade(frameInputs_.weather.strength());
-            if (drawSkyModels) skyboxModelRenderer_->prepareRender(frameIdx, *frameCamera());
-            skySystem->record(currentCmd, perFrameSet, *frameCamera(), skyParams, frameInputs_.scene->sky,
-                              drawSkyModels ? skyboxModelRenderer_.get() : nullptr);
-            logSunDiagnostic(skyParams);
-        }
-
-        if (wmoRenderer && frameCamera() && !skipWMO) {
-            auto wmoStart = std::chrono::steady_clock::now();
-            {
-                GpuPass pass(*vkCtx, currentCmd, "wmo");
-                if (surfaceWmo) {
-                    wmoRenderer->recordSurface(perFrameSet, *frameCamera());
-                    surfacePass_->finishMaterials();
-                    wmoRenderer->executeSurface(currentCmd, perFrameSet, *frameCamera(),
-                        activeFramebuffer_, VK_SUBPASS_CONTENTS_INLINE);
-                }
-                else wmoRenderer->render(currentCmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition);
-            }
-            lastWMORenderMs = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - wmoStart).count();
-        }
-
-        if (overlaySystem_) {
-            overlaySystem_->recordSelectionCircle(view, projection, currentCmd, frameInputs_.selection);
-        }
-
-        if (characterRenderer && frameCamera() && !skipChars) {
-            GpuPass pass(*vkCtx, currentCmd, "characters");
-            characterRenderer->render(currentCmd, perFrameSet, *frameCamera(), CharacterRenderer::Part::Solid);
-        }
-
-        if (m2Renderer && frameCamera() && !skipM2) {
-            m2Renderer->prepareRender(frameIdx, *frameCamera());
-            auto m2Start = std::chrono::steady_clock::now();
-            {
-                GpuPass pass(*vkCtx, currentCmd, "m2");
-                if(surfaceM2) {
-                    m2Renderer->recordSurface(perFrameSet);
-                    surfacePass_->finishMaterials();
-                    m2Renderer->executeSurface(currentCmd,perFrameSet,*frameCamera(),activeFramebuffer_,VK_SUBPASS_CONTENTS_INLINE);
-                } else m2Renderer->render(currentCmd, perFrameSet, *frameCamera());
-                if (!m2Renderer->drawsBlendedAfterWater()) {
-                    m2Renderer->renderM2Particles(currentCmd, perFrameSet);
-                    m2Renderer->renderM2Ribbons(currentCmd, perFrameSet);
-                }
-            }
-            lastM2RenderMs = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - m2Start).count();
-        }
-
-        // Faded characters over the blended world, unless they go after the
-        // water with it.
-        if (characterRenderer && frameCamera() && !skipChars && !fadedCharactersAfterWater()) {
-            GpuPass pass(*vkCtx, currentCmd, "faded characters");
-            characterRenderer->render(currentCmd, perFrameSet, *frameCamera(), CharacterRenderer::Part::Faded);
-        }
-
-        if (waterRenderer && frameCamera() && !waterDrawsInContinuePass() && !waterAblated()) {
-            GpuPass pass(*vkCtx, currentCmd, "water");
-            waterRenderer->setRenderExtent(activeRenderExtent_);
-            waterRenderer->recordView(currentCmd, perFrameSet, *frameCamera(), frameInputs_.scene->water, false, frameIdx);
-        }
-        if (precipitation_ && frameCamera() && !precipitationDrawsWithWater_) {
-            precipitation_->record(currentCmd, perFrameSet, frameIdx, frameInputs_.scene->precipitation);
-        }
-        if (lightning && frameCamera()) lightning->record(currentCmd, perFrameSet, frameInputs_.scene->lightning);
-        if (swimEffects && frameCamera() && !swimEffectsDrawWithWater_) {
-            swimEffects->record(currentCmd, perFrameSet, frameInputs_.scene->swim);
-        }
-        if (mountDust && frameCamera()) mountDust->record(currentCmd, perFrameSet, frameInputs_.scene->dust);
-        if (chargeEffect && frameCamera()) chargeEffect->record(currentCmd, perFrameSet, frameInputs_.scene->charge);
-        if (footprintRenderer && frameCamera()) footprintRenderer->record(currentCmd, perFrameSet, frameInputs_.scene->footprints);
-        if (questMarkerRenderer && frameCamera()) questMarkerRenderer->record(currentCmd, perFrameSet, frameInputs_.scene->markers);
-        drawGlares(currentCmd, perFrameSet);
-        // The same one-line total the parallel path reports, so a profile taken
-        // either way can be compared against the other.
-        if (vkCtx) vkCtx->gpuMark(currentCmd, "world total");
-    }
-
-    // Underwater overlay and minimap - in the fallback path these run inline;
-    // in the parallel path they were already recorded into SEC_POST above.
-    if (!parallelRecordingEnabled_) {
-        renderUnderwaterOverlay(currentCmd);
-        renderPostSceneOverlays(currentCmd);
     }
 
     // Water is drawn last, in a continuation of the scene pass, so that the
@@ -3891,10 +3579,6 @@ void Renderer::renderWorld() {
             sceneColor = vkCtx->getSwapchainImages()[currentImageIndex];
             sceneDepth = vkCtx->getDepthCopySourceImage();
         }
-
-        // The opaque scene is finished and out of its pass: the ray traced
-        // lighting reads its depth here, for the surfaces of the next frame.
-        recordRtLighting(sceneDepth, sceneExtent, depthIsMsaa, "renderWorld");
 
         if (sceneColor != VK_NULL_HANDLE && waterRenderer->isRefractionEnabled() && frameInputs_.scene->water.inView &&
             !waterAblated()) {
@@ -4992,7 +4676,7 @@ void Renderer::renderReflectionPass() {
     reflData.viewPos = glm::vec4(reflPos, 1.0f);
     // The fog volume is the camera's; its sets here bind the neutral one.
     reflData.volumetricParams = glm::vec4(0.0f);
-    reflData.rtParams = glm::vec4(0.0f);
+    // Ray queries use this reflected view's actual receiver position.
     reflData.fogSkyMiddle.w = 0.0f; // the main camera sky image is not a reflected view
     std::memcpy(reflPerFrameUBOMapped[frame], &reflData, sizeof(GPUPerFrameData));
 
@@ -5201,35 +4885,12 @@ void Renderer::renderShadowMap(ShadowView view) {
     if (vkCtx) vkCtx->gpuMark(currentCmd, strike ? "lightning shadows" : contact ? "contact shadows" : "shadows");
 }
 
-VkImageView Renderer::getNeutralRtLightingView() const {
-    return rtLighting_ ? rtLighting_->neutralView() : VK_NULL_HANDLE;
+VkImageView Renderer::getNeutralSurfaceView() const {
+    return neutralSurfaceImage_.imageView;
 }
 
 void Renderer::setRtLightingMode(int mode) {
     requestedRtMode_ = std::clamp(mode, 0, 3);
-}
-
-void Renderer::writeRtLightingBindings(uint32_t i) {
-    if (!rtLighting_ || !vkCtx) return;
-    // beginFrame has fenced this slot; the other slot can still be in use.
-    {
-        VkDescriptorImageInfo info[4]{};
-        info[0].imageView = rtLighting_->lightViewForSlot(i);
-        info[1].imageView = rtLighting_->giViewForSlot(i);
-        info[2].imageView = rtLighting_->reflectionViewForSlot(i);
-        info[3].imageView = rtLighting_->geometryViewForSlot(i);
-        for (auto& image : info) image.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        VkWriteDescriptorSet writes[4]{};
-        for (uint32_t b = 0; b < 4; ++b) {
-            writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[b].dstSet = perFrameDescSets[i];
-            writes[b].dstBinding = b < 2 ? 3 + b : 4 + b;
-            writes[b].descriptorCount = 1;
-            writes[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[b].pImageInfo = &info[b];
-        }
-        vkUpdateDescriptorSets(vkCtx->getDevice(), 4, writes, 0, nullptr);
-    }
 }
 
 VkExtent2D Renderer::sceneRenderExtent() const {
@@ -5237,24 +4898,6 @@ VkExtent2D Renderer::sceneRenderExtent() const {
         return postProcessPipeline_->getSceneRenderExtent();
     }
     return vkCtx->getSwapchainExtent();
-}
-
-void Renderer::recordRtLighting(VkImage sceneDepth, VkExtent2D sceneExtent, bool depthIsMsaa,
-                                std::string_view stageGroup) {
-    if (!rtLighting_ || !rtLighting_->active() || !frameCamera()) return;
-    rtRecordedThisFrame_ = true;
-    RtLighting::FrameInputs in{};
-    in.view = frameCamera()->getViewMatrix();
-    in.projection = frameCamera()->getProjectionMatrix();
-    in.cameraPos = frameCamera()->getPosition();
-    in.sunDir = -glm::vec3(currentFrameData.lightDir);
-    in.sunColor = glm::vec3(currentFrameData.lightColor);
-    in.skyColor = glm::vec3(currentFrameData.ambientColor);
-    in.sunUp = in.sunDir.z > -0.05f;
-    in.distance = frameInputs_.rtDistance;
-    GpuPass pass(*vkCtx, currentCmd, "rt_lighting");
-    CpuStage stage(vkCtx->cpuStages(), stageGroup, "rt lighting");
-    rtLighting_->record(currentCmd, sceneDepth, sceneExtent, depthIsMsaa, in, rtScenePreparedThisFrame_);
 }
 
 VkImageView Renderer::getNeutralFogVolumeView() const {

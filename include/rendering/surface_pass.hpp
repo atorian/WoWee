@@ -1,22 +1,24 @@
 #pragma once
 #include "rendering/vk_utils.hpp"
 #include "rendering/frames_in_flight.hpp"
-#include "rendering/rt_lighting.hpp"
+#include "rendering/rt_frame_inputs.hpp"
 #include <memory>
 #include <glm/glm.hpp>
 #include <array>
 #include <vector>
+#include <span>
 #include "rendering/surface_identity.hpp"
 
 namespace wowee::rendering {
 class VkContext;
 class SurfaceRt;
+class RtScene;
 // Transient evaluated surfaces, shared on the graphics queue. Each frame slot
 // owns its material upload. Family workers write disjoint material ranges and
 // command pools; shared images/RT are executed in authored order on one queue.
 class SurfacePass {
 public:
-    enum class Family : size_t { Wmo, M2, Count };
+    enum class Family : size_t { Wmo, M2, Terrain, Character, Count };
     static constexpr size_t kFamilies=size_t(Family::Count);
     struct Material {
         std::array<uint32_t,16> words;
@@ -40,11 +42,12 @@ public:
     SurfacePass(VkContext& ctx, VkDescriptorSetLayout frameLayout);
     ~SurfacePass();
     void prepare(VkExtent2D extent, VkImageView depth, TargetVersion version, std::array<size_t,kFamilies> materialCapacities,
-                 RtScene* rtScene, int rtMode, const RtLighting::FrameInputs& rtInputs);
+                 RtScene* rtScene, int rtMode, const RtFrameInputs& rtInputs);
     bool rtHistoryValid() const;
     glm::vec3 previousRtCamera() const;
     uint32_t appendMaterial(const Material& material);
     uint32_t appendMaterial(const M2Material& material);
+    uint32_t appendMaterial(Family family, const M2Material& material);
     void finishMaterials();
     VkRenderPass geometryPass() const { return pass_; }
     // prepare runs on the render owner after the slot fence; each family worker
@@ -58,8 +61,12 @@ public:
     void includeRegion(Family family, VkRect2D region);
     static VkRect2D uniteRegions(VkRect2D a, VkRect2D b);
     void endRun(Family family);
-    void execute(Family family, VkCommandBuffer cmd, VkDescriptorSet frameSet, VkFramebuffer scene,
-                 const glm::mat4& inverseViewProjection, VkSubpassContents resumeContents);
+    struct Operation {
+        Family family = Family::Count;
+        VkCommandBuffer forward = VK_NULL_HANDLE;
+    };
+    void executePlan(std::span<const Operation> operations, VkCommandBuffer cmd, VkDescriptorSet frameSet,
+                     VkFramebuffer scene, const glm::mat4& inverseViewProjection, VkSubpassContents resumeContents);
 private:
     void beginGeometry(VkCommandBuffer cmd, VkRect2D region);
     uint32_t appendMaterialBytes(Family family, const void* material);
@@ -81,7 +88,7 @@ private:
     VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool pool_ = VK_NULL_HANDLE;
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
-    std::array<VkPipeline,kFamilies> pipelines_{};
+    VkPipeline pipeline_ = VK_NULL_HANDLE;
     static constexpr size_t kSlots = MAX_FRAMES_IN_FLIGHT;
     std::array<AllocatedBuffer,kSlots> buffers_{};
     std::array<size_t,kSlots> capacities_{};

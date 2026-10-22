@@ -4,7 +4,11 @@
 // working images. Set 1 is the scene (rt_trace_sw.glsli / rt_trace_hw.glsli).
 // Must match RtPassData in rt_lighting.cpp.
 
+#ifdef RT_INLINE_RECEIVER
+struct RtPassData {
+#else
 layout(set = 0, binding = 0) uniform RtPassData {
+#endif
     mat4 invViewProj;    // this frame: NDC -> camera-relative world
     mat4 prevViewProj;   // last frame: camera-relative world -> clip
     vec4 cameraPos;      // xyz; w = frame counter
@@ -20,7 +24,12 @@ layout(set = 0, binding = 0) uniform RtPassData {
                          // y = 1 when last frame's slot holds history,
                          // z = 1 only when a consumer requests mirror reflections
                          // w = maximum receiver distance (0 unbounded)
+#ifdef RT_INLINE_RECEIVER
+};
+RtPassData pass;
+#else
 } pass;
+#endif
 
 const uint RT_MODE_SHADOWS = 1u;
 const uint RT_MODE_AO = 2u;

@@ -19,3 +19,7 @@ Checklist:
 - Retain each new report and compare timings and resources with the reference.
 - Report changes in scene, settings, mode, sample count or resident geometry.
 - Keep the original reference when writing a new comparison report.
+
+## Pipeline migration gate (user decision, 2026-10-22)
+
+During the current rendering-pipeline refactor, do not run intermediate performance benchmarks. Complete the unified RT path and merged passes first. Builds, behavioral scene/image tests and synchronization validation remain required. Only after completion use a new final measurement against the saved baseline.

@@ -55,8 +55,8 @@ bool RtScene::initialize(VkContext* ctx) {
     alive_ = std::make_shared<bool>(true);
     backend_ = ctx->hardwareRayQueryEnabled() ? Backend::Hardware : Backend::Software;
     if (backend_ == Backend::Hardware && !loadHardwareEntryPoints()) {
-        LOG_WARNING("RtScene: acceleration structure entry points missing, using the compute tracer");
-        backend_ = Backend::Software;
+        LOG_ERROR("RtScene: enabled hardware ray queries lack required entry points; renderer initialization failed");
+        return false;
     }
 
     const VkBufferUsageFlags poolUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
@@ -77,6 +77,12 @@ bool RtScene::initialize(VkContext* ctx) {
     std::memset(placeholder_.info.pMappedData, 0, 64);
 
     if (!createDescriptors()) return false;
+    // Even an RT-disabled portrait has statically used shader descriptors.
+    // Keep a tiny, built empty TLAS independent of streamed scene residency.
+    if (backend_ == Backend::Hardware) {
+        ctx_->immediateSubmit([&](VkCommandBuffer cmd) { buildTlas(cmd, emptyReceiver_); });
+        if (!emptyReceiver_.tlas) return false;
+    }
     LOG_INFO("RtScene: ", backend_ == Backend::Hardware ? "hardware" : "software", " backend");
     return true;
 }
@@ -199,6 +205,11 @@ void RtScene::shutdown() {
         destroyBuffer(alloc, fr.scratch);
         fr = FrameResources{};
     }
+    destroyBuffer(alloc, emptyReceiver_.asInstances);
+    if (emptyReceiver_.tlas) pfnDestroyAs_(dev, emptyReceiver_.tlas, nullptr);
+    destroyBuffer(alloc, emptyReceiver_.tlasBuffer);
+    destroyBuffer(alloc, emptyReceiver_.scratch);
+    emptyReceiver_ = {};
     destroyBuffer(alloc, triPool_.buffer);
     destroyBuffer(alloc, nodePool_.buffer);
     destroyBuffer(alloc, meshTable_);
@@ -739,7 +750,7 @@ void RtScene::uploadPending(VkCommandBuffer cmd) {
     toReaders.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
     toReaders.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     toReaders.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-    toReaders.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    toReaders.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
     toReaders.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
     if (backend_ == Backend::Hardware) {
         toReaders.dstStageMask |= VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
@@ -1016,7 +1027,7 @@ void RtScene::buildTlas(VkCommandBuffer cmd, FrameResources& fr) {
     mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
     mb.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
     mb.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-    mb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
     mb.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
     VkDependencyInfo dep{};
     dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
@@ -1071,6 +1082,43 @@ void RtScene::writeDescriptors(FrameResources& fr) {
     }
     vkUpdateDescriptorSets(ctx_->getDevice(), static_cast<uint32_t>(writes.size()), writes.data(),
                            0, nullptr);
+}
+
+void RtScene::appendReceiverLayout(std::vector<VkDescriptorSetLayoutBinding>& bindings) const {
+    for (uint32_t i : {0u, 2u, 3u})
+        bindings.push_back({11+i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+    if (backend_ == Backend::Software) {
+        for (uint32_t i : {1u, 4u})
+            bindings.push_back({11+i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+    } else bindings.push_back({16, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+}
+void RtScene::appendReceiverPool(std::vector<VkDescriptorPoolSize>& sizes, uint32_t sets) const {
+    sizes.push_back({VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, sets * (backend_ == Backend::Hardware ? 3u : 5u)});
+    if (backend_ == Backend::Hardware) sizes.push_back({VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, sets});
+}
+void RtScene::writeReceiverDescriptors(VkDescriptorSet target, bool neutral) const {
+    const auto& fr = neutral || !active_ ? emptyReceiver_ : frames_[ctx_->getCurrentFrame()];
+    const AllocatedBuffer* buffers[] = {&triPool_.buffer, &nodePool_.buffer, &meshTable_, &fr.instances, &fr.tlasNodes};
+    VkDescriptorBufferInfo infos[5]{};
+    std::vector<VkWriteDescriptorSet> writes;
+    for (uint32_t i=0; i<5; ++i) {
+        if (backend_ == Backend::Hardware && (i==1 || i==4)) continue;
+        infos[i] = {neutral || !active_ || !buffers[i]->buffer ? placeholder_.buffer : buffers[i]->buffer, 0, VK_WHOLE_SIZE};
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet=target; write.dstBinding=11+i; write.descriptorCount=1;
+        write.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; write.pBufferInfo=&infos[i];
+        writes.push_back(write);
+    }
+    const VkAccelerationStructureKHR tlas = fr.tlas ? fr.tlas : emptyReceiver_.tlas;
+    VkWriteDescriptorSetAccelerationStructureKHR as{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
+    if (backend_ == Backend::Hardware) {
+        as.accelerationStructureCount=1; as.pAccelerationStructures=&tlas;
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.pNext=&as; write.dstSet=target; write.dstBinding=16;
+        write.descriptorType=VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR; write.descriptorCount=1;
+        writes.push_back(write);
+    }
+    vkUpdateDescriptorSets(ctx_->getDevice(), uint32_t(writes.size()), writes.data(), 0, nullptr);
 }
 
 void RtScene::observeLastBuild() {
@@ -1130,7 +1178,7 @@ void RtScene::update(VkCommandBuffer cmd) {
         mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
         mb.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
         mb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        mb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        mb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
         mb.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
         VkDependencyInfo dep{};
         dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;

@@ -1,48 +1,9 @@
-#version 450
+#version 460
+#ifdef RT_HARDWARE
+#extension GL_EXT_ray_query : require
+#endif
 
-layout(set = 0, binding = 0) uniform PerFrame {
-    mat4 view;
-    mat4 projection;
-    mat4 lightSpaceMatrix;
-    vec4 lightDir;
-    vec4 lightColor;
-    vec4 ambientColor;
-    vec4 viewPos;
-    vec4 fogColor;
-    vec4 fogParams;
-    vec4 shadowParams;
-    vec4 playerPos;   // xyz = player world position, w = horizontal speed
-    vec4 playerWake;  // xyz = trailing player position (springback reference)
-    ivec4 localLightMeta;
-    vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
-    mat4 rtViewProj;
-    vec4 rtCameraPos;
-    vec4 rtParams;
-    vec4 fogSkyTop;  // rgb = zenith, w = sky tint amount (0 disables it)
-    vec4 fogSkyMiddle;
-    vec4 fogSkyBand1;
-    vec4 fogSkyBand2;
-    mat4 contactSpaceMatrix;  // read by contact_shadows.glsli
-    vec4 contactParams;
-    vec4 windDirLean;
-    vec4 windPhases;
-    vec4 windTravel;
-    vec4 skySmogColor;
-    vec4 aerialSun;
-    vec4 aerialLight;
-    vec4 terrainLodParams;
-    vec4 aerialParams;
-    mat4 lightningMatrix;
-    vec4 lightningPosition;
-    vec4 lightningColor;
-};
-
-#include "lightning_light.glsli"
-
-#include "rt_lighting.glsli"
-#include "contact_shadows.glsli"
-#include "sky_atmosphere.glsli"
-#include "aerial_frame.glsli"
+#include "world_lighting_frame.glsli"
 #include "interior_light.glsli"
 
 layout(push_constant) uniform Push {
@@ -60,8 +21,6 @@ layout(set = 1, binding = 0) uniform sampler2D uTexture;
 layout(set = 1, binding = 2) uniform sampler2D uNormalHeightMap;
 layout(set = 1, binding = 3) uniform sampler2D uSecondTexture;
 
-layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
-layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
 layout(location = 0) in vec3 FragPos;
 layout(location = 1) in vec3 Normal;
@@ -73,18 +32,6 @@ layout(location = 5) in vec2 TexCoord2;
 layout(location = 0) out vec4 outColor;
 
 const int PREVIEW_SIMPLE_TEXTURE_MODE = -31336;
-
-// One texel of the shadow map, handed in by the renderer. The map is 512,
-// 1024, 2048 or 4096 a side by the quality setting; this used to be a
-// constant for 4096, so at 512 the filter taps all landed inside one texel
-// and the bias shrank eightfold. The fallback covers a per-frame block that
-// never filled the slot in, such as the character preview's.
-float shadowTexel() {
-    return shadowParams.z > 0.0 ? shadowParams.z : 1.0 / 4096.0;
-}
-
-#include "local_lights.glsli"
-#include "shadow_receiver.glsli"
 
 // LOD factor from screen-space UV derivatives
 float computeLodFactor() {
@@ -156,36 +103,18 @@ vec4 samplePreviewTexture(sampler2D tex, vec2 uv) {
 
 #include "parallax_occlusion.glsli"
 
-// The air between the camera and this point, out of the fog volume: rgb is
-// the light it scatters toward the camera, a how much of the point shows
-// through it. See VolumetricFog.
-vec4 fogVolumeAt(vec3 worldPos) {
-    vec4 clip = projection * view * vec4(worldPos, 1.0);
-    float depth = max(clip.w, 1e-4);
-    vec2 uv = clip.xy / depth * 0.5 + 0.5;
-    float slice = log(max(depth, volumetricParams.y) / volumetricParams.y) * volumetricParams.z;
-    // Each slice holds the air up to its far edge, so a point is read half a
-    // slice back from where it stands.
-    return textureLod(uFogVolume, vec3(uv, slice - 0.5 / volumetricParams.w), 0.0);
-}
-
-// The zone's distance fog, then the air in front of it. The distance fog is
-// the far haze the sky is painted to meet, so it goes on first; the volume is
-// everything between the camera and that, sunlit shafts and torch glow
-// included.
-vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
-    float fogFactor = aerialVisibilityAt(worldPos, dist);
-    color = mix(aerialColorAt(worldPos - viewPos.xyz), color, fogFactor);
-    if (volumetricParams.x > 0.5) {
-        vec4 air = fogVolumeAt(worldPos);
-        color = color * air.a + air.rgb;
-    }
-    return color;
-}
+#include "m2_surface_lighting.glsli"
+#include "character_surface_lighting.glsli"
+#ifdef CHARACTER_GBUFFER
+#include "surface_encoding.glsli"
+layout(location=1) out uvec4 outKeys;
+layout(location=2) out uvec4 outPayload;
+#endif
 void main() {
     const vec3 receiverFace = receiverFaceNormal(FragPos);
     if (fogSkyBand1.w > 0.0 && length(FragPos.xy - viewPos.xy) >= fogSkyBand1.w) discard;
 
+#ifndef CHARACTER_GBUFFER
     if (enablePOM == PREVIEW_SIMPLE_TEXTURE_MODE) {
         vec4 t1 = hasSecondTexture != 0 ? texture(uSecondTexture, TexCoord2) : vec4(1.0);
         vec3 stageAdd;
@@ -207,6 +136,7 @@ void main() {
         return;
     }
 
+#endif
     float lodFactor = computeLodFactor();
     // Gradients of the authored UV, taken here where every pixel of the quad
     // still agrees on them. Parallax moves the UV by a different amount per
@@ -302,74 +232,14 @@ void main() {
         norm = safeNormalize(mix(worldNormal, vertexNormal, blendFactor), vertexNormal);
     }
 
-    vec3 result;
-
-    if (unlit != 0) {
-        // The texture as it is, as on doodads.
-        result = texColor.rgb;
-    } else {
-        bool inside = insideInterior(push.interiorAmbient);
-        vec3 ldir = normalize(-interiorLightDir(push.interiorAmbient, lightDir.xyz));
-        float diff = max(dot(norm, ldir), 0.0);
-        vec3 sunColor = interiorDirect(push.interiorAmbient, push.interiorDirect, lightColor.rgb);
-
-        vec3 viewDir = normalize(viewPos.xyz - FragPos);
-        vec3 halfDir = normalize(ldir + viewDir);
-        float spec = pow(max(dot(norm, halfDir), 0.0), 32.0) * specularIntensity;
-
-        RtLight rt = rtLightAt(FragPos, normalize(receiverFace));
-        float shadow = 1.0;
-        if (!inside && shadowParams.x > 0.5 && rtSunVisibility(rt) > 0.0) {
-            // Texture relief changes lighting, not the caster geometry. Offsetting
-            // along its perturbed normal can push the lookup into the surface.
-            vec3 shadowNormal = dot(vertexNormal, ldir) >= 0.0 ? vertexNormal : -vertexNormal;
-            float normalOffset = shadowParams.w * 1.5 * (1.0 - abs(dot(shadowNormal, ldir)));
-            vec3 biasedPos = FragPos + shadowNormal * normalOffset;
-            vec4 lsPos = lightSpaceMatrix * vec4(biasedPos, 1.0);
-            vec3 proj = lsPos.xyz / lsPos.w;
-            proj.xy = proj.xy * 0.5 + 0.5;
-            vec2 receiverSlope = shadowReceiverSlope(receiverFace);
-            if (proj.x >= 0.0 && proj.x <= 1.0 &&
-                proj.y >= 0.0 && proj.y <= 1.0 &&
-                proj.z >= 0.0 && proj.z <= 1.0) {
-                shadow = sampleShadowReceiverPlane(uShadowMap, proj, receiverSlope);
-                shadow = mix(1.0, shadow, shadowMapEdgeFade(proj.xy * 2.0 - 1.0));
-            }
-        }
-        if (!inside) shadow = rtShadow(rt, shadow);
-        // A unit takes the units' shadows too - its neighbours', a rider's on
-        // the mount - as the client's models do. Indoors only those, kept
-        // below the player's head.
-        float unitShadow = shadow > 0.0 ? localShadowAt(FragPos, receiverFace) : 1.0;
-        if (inside) unitShadow = mix(unitShadow, 1.0, unitShadowAboveFade(FragPos));
-        shadow = min(shadow, unitShadow);
-
-        result = (rtAmbient(rt, interiorAmbient(push.interiorAmbient, ambientColor.rgb))
-                  + diff * sunColor) * texColor.rgb * shadowLightFactor(shadow)
-               + shadow * spec * sunColor;
-    }
-
-    if (unlit == 0) result += lightningDiffuse(FragPos, norm, texColor.rgb);
-    if (unlit == 0) result += localLightContribution(FragPos, norm, texColor.rgb, push.localLights);
-    result += stageAdd;
-    // Not on a Mod layer: it multiplies what is behind it, and tinting that
-    // would colour the scene rather than the unit.
-    if (modulateNeutral == 0.0) result *= stateTint.rgb;
-
-    float dist = length(viewPos.xyz - FragPos);
-    if (modulateNeutral > 0.0) {
-        // The blend multiplies by the colour and ignores alpha, so fog and the
-        // fade go into the colour, toward the multiplication identity. Mixing
-        // toward the fog colour would tint everything behind the layer.
-        float visibility = aerialVisibilityAt(FragPos, dist) * opacity;
-        if (volumetricParams.x > 0.5) visibility *= fogVolumeAt(FragPos).a;
-        result = mix(vec3(modulateNeutral), result, clamp(visibility, 0.0, 1.0));
-    } else {
-        result = applyFog(result, FragPos, dist);
-    }
-    if (!finiteVec3(result)) {
-        result = texColor.rgb;
-    }
-
-    outColor = vec4(result, texColor.a * opacity);
+#ifdef CHARACTER_GBUFFER
+    outColor=vec4(texColor.rgb,texColor.a*opacity);
+    outKeys=uvec4(packSurfaceNormal(normalize(receiverFace)),packSurfaceNormal(norm),packSurfaceNormal(vertexNormal),surfaceMaterialIndex+1u);
+    outPayload=uvec4(packHalf2x16(stageAdd.xy),packHalf2x16(vec2(stageAdd.z,0)),floatBitsToUint(gl_FragCoord.z),0);
+#else
+    M2LightingMaterial lighting=M2LightingMaterial(ivec4(unlit,0,0,0),vec4(specularIntensity,stateTint.rgb),
+        push.interiorAmbient,push.interiorDirect,push.localLights);
+    outColor=shadeCharacterSurface(FragPos,texColor,stageAdd,norm,vertexNormal,receiverFace,opacity,modulateNeutral,
+        lighting,unlit==0?rtLightAt(FragPos,normalize(receiverFace)):RtLight(0.0,1.0,1.0,vec3(0)));
+#endif
 }

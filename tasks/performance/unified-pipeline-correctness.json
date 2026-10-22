@@ -1,0 +1,86 @@
+{
+  "scope": "Current receiver migration and ordered cross-family pass merging",
+  "fps_benchmarks_run": false,
+  "opaque_geometry_families": 4,
+  "opaque_lighting_groups": 1,
+  "images": {
+    "mixed_msaa4": {
+      "all_families": true,
+      "msaa": 4,
+      "mixed": true,
+      "software": false,
+      "rebuild": true,
+      "regions": true,
+      "near_plane": false,
+      "bounded_full_changed_channels": 0,
+      "forward_surface_mean_channel_error": 0.028052896646137245,
+      "fraction_error_over_8": 0.0005656176142661573,
+      "rt_mean_channel_change": 5.537696079868247,
+      "serial_parallel_changed_channels": 0
+    },
+    "opaque_msaa1": {
+      "all_families": true,
+      "msaa": 1,
+      "mixed": true,
+      "software": false,
+      "rebuild": false,
+      "regions": true,
+      "near_plane": false,
+      "bounded_full_changed_channels": 0,
+      "forward_surface_mean_channel_error": 0.02209165610883308,
+      "fraction_error_over_8": 0.0005048218630206587,
+      "rt_mean_channel_change": 5.606486472402529,
+      "serial_parallel_changed_channels": 0
+    },
+    "software_msaa1": {
+      "all_families": true,
+      "msaa": 1,
+      "mixed": true,
+      "software": true,
+      "rebuild": false,
+      "regions": true,
+      "near_plane": false,
+      "bounded_full_changed_channels": 0,
+      "forward_surface_mean_channel_error": 0.02617148527277208,
+      "fraction_error_over_8": 0.000661153794794798,
+      "rt_mean_channel_change": 5.5800435775259825,
+      "serial_parallel_changed_channels": 0
+    }
+  },
+  "surface_probe": {
+    "hardware": "passed",
+    "software": "passed",
+    "cases": [
+      "cold current receivers",
+      "missing half-resolution receiver",
+      "MSAA receiver identity",
+      "moved caster removes old shadow",
+      "changed sun rejects old light",
+      "partial edge tile after empty coverage"
+    ]
+  },
+  "snapshot_mutations": [
+    "M2",
+    "WMO",
+    "character",
+    "terrain",
+    "water"
+  ],
+  "capacity": {
+    "visible_characters": 65,
+    "batches_per_character": 64,
+    "old_behavior_changed_channels": 90,
+    "fixed_changed_channels": 0
+  },
+  "alpha_tests": {
+    "assertions": 18,
+    "cases": 8,
+    "limitation": "Optional real block-compressed BLP file scan had no local inputs; synthetic compressed-mip cases executed."
+  },
+  "guards": {
+    "render_library_forbidden_includes": 0,
+    "record_scene_reads": 0,
+    "unused_declared_members": 0
+  },
+  "remaining": "Persistent general GPU scene/material tables and indirect submission remain separate unfinished requirements; no FPS acceptance."
+}

@@ -14,6 +14,8 @@ def main():
     parser.add_argument('scratch', type=Path)
     parser.add_argument('--msaa', type=int, default=1)
     parser.add_argument('--mixed', action='store_true')
+    parser.add_argument('--all-families', action='store_true')
+    parser.add_argument('--opaque', action='store_true')
     parser.add_argument('--rebuild', action='store_true')
     parser.add_argument('--software', action='store_true')
     parser.add_argument('--regions', action='store_true')
@@ -37,9 +39,9 @@ def main():
                                    {'offset':[0,2.3,0], 'interiorAmbient':[.12,.25,.35],
                                     'interiorDirect':[.5,.2,.1]}])
     if args.regions:
-        # An opaque alpha-key batch stays in the authored forward sequence.
-        # Geometry on both sides forces separate surface runs over the same
-        # screen area, including old keys where the later layer has holes.
+        # A fully opaque alpha-key batch can merge with adjacent geometry.
+        # Its output must still match authored forward blending; cutout holes
+        # and foreground alpha layers remain visible in the comparison.
         scene['m2Layers'][2:2] = [
             {'x':1.8, 'rect':[-1.6,-2.6,1.6,2.6], 'rgba':[120,90,60,255], 'blend':1},
             {'x':1.5, 'rect':[-1.4,-2.4,1.4,2.4], 'rgba':[60,160,100,255]}]
@@ -50,6 +52,18 @@ def main():
     if args.mixed:
         scene['wmoLayers']=[{'x':4,'rect':[-6,-4,6,4],'rgba':[100,100,120,255],'flags':0},
                             {'x':-1,'rect':[-.5,-4,.5,4],'rgba':[180,80,80,100],'blend':2,'flags':0}]
+    if args.all_families:
+        scene['groundPlane']={'size':20,'height':-3.2}
+        scene['characterLayers']=[
+            {'x':2.5,'rect':[-2,-2.5,2,2.5],'rgba':[140,100,80,255],'flags':4},
+            {'x':2.2,'rect':[-1.8,-2.2,1.8,2.2],'rgba':[100,160,200,255],
+             'cutout':True,'blend':1,'flags':4},
+            {'x':2,'rect':[-.3,-2,.3,2],'rgba':[100,160,200,96],'blend':2,'flags':4}]
+        scene['characterLayerInstances']=[{'offset':[0,0,0]},{'offset':[0,5,0],'opacity':.5}]
+    if args.opaque:
+        for family in ('m2Layers','wmoLayers','characterLayers'):
+            scene[family]=[layer for layer in scene.get(family,[]) if layer.get('blend',0)<2]
+        scene['characterLayerInstances']=[{'offset':[0,0,0]}]
     if args.rebuild:
         scene['renderTargetChanges']=[{'frame':2,'msaa':4,'fxaa':True},
                                       {'frame':4,'msaa':1,'fxaa':False},
@@ -60,6 +74,7 @@ def main():
     env.pop('WOWEE_WMO_SURFACES',None)
     env.pop('WOWEE_RT_FORCE_SOFTWARE',None)
     if args.software: env['WOWEE_RT_FORCE_SOFTWARE']='1'
+    env['WOWEE_SURFACE_PLAN_CHECK']='1'
     images={}
     cases=[('forward',False,0,False),('surface',True,0,False),
            ('current',True,3,False),('serial',True,3,True)]
@@ -69,7 +84,7 @@ def main():
         if label=='full': env['WOWEE_SURFACE_FULL_EXTENT']='1'
         env.pop('WOWEE_MODEL_SURFACES',None)
         env.pop('WOWEE_SINGLE_THREAD_RECORD',None)
-        if surfaces: env['WOWEE_MODEL_SURFACES']='1'
+        env['WOWEE_MODEL_SURFACES']='1' if surfaces else '0'
         if serial: env['WOWEE_SINGLE_THREAD_RECORD']='1'
         scene['rayTracedLighting']=mode
         source=out/(label+'.json');source.write_text(json.dumps(scene),encoding='utf-8')
@@ -80,8 +95,12 @@ def main():
                  (b'loader_get_json: Failed to open JSON file ' in line and line.endswith(
                      (b'Overlay\\EOSOverlayVkLayer-Win32.json',b'Overlay\\EOSOverlayVkLayer-Win64.json')))]
         if result.returncode or any(token in line for line in checked for token in
-                                   (b'VUID-',b'SYNC-HAZARD',b'Validation Error:',b'[ERROR]')):
+                                   (b'VUID-',b'SYNC-HAZARD',b'Validation Error:',b'[ERROR]',b'Failed to load texture:',b'Texture not found:')):
             raise RuntimeError(f'{label}: render/validation failure; inspect {out/(label+".log")}')
+        if surfaces and mode and b'Surface history: valid=1' not in log:
+            raise RuntimeError('Stable scene never accumulated RT history during smooth lighting updates')
+        if args.opaque and surfaces and b'Surface plan: geometry runs=4 lighting groups=1' not in log:
+            raise RuntimeError('Compatible terrain/WMO/character/M2 geometry did not share one lighting group')
         images[label]=rgb_pixels(out/(label+'.png'))
     # Surface storage quantizes color/normals. It must not lose a texture stage,
     # instance light, alpha silhouette or the authored transparent layer.
@@ -97,7 +116,7 @@ def main():
         changed=sum(a!=b for a,b in zip(images['current'],images['full']))
         raise RuntimeError(f'bounded surface runs changed {changed} image channels')
     if rt<.01 and not args.near_plane: raise RuntimeError('current RT did not affect M2 material lighting')
-    report={'msaa':args.msaa,'mixed':args.mixed,'software':args.software,'rebuild':args.rebuild,
+    report={'all_families':args.all_families,'msaa':args.msaa,'mixed':args.mixed,'software':args.software,'rebuild':args.rebuild,
             'regions':args.regions,'near_plane':args.near_plane,
             'bounded_full_changed_channels':0 if args.regions else None,
             'forward_surface_mean_channel_error':mean,'fraction_error_over_8':substantial,

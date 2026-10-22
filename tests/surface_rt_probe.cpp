@@ -71,7 +71,7 @@ int checkSurfaceRt(VkContext& ctx) {
         data[0]=SurfacePass::Material{};data[1]=SurfacePass::Material{};
         data[0].identity={1,0,1,0};data[1].identity={2,0,1,0};
         data[0].history.x=data[1].history.x=1;
-        RtLighting::FrameInputs input{};
+        RtFrameInputs input{};
         input.cameraPos=camera;input.view=glm::lookAt(camera,camera+glm::vec3(1,0,0),glm::vec3(0,0,1));
         input.projection=glm::ortho(-8.f,8.f,-8.f,8.f,.5f,100.f);input.projection[1][1]*=-1;
         input.sunDir={-1,0,0};input.sunColor={1,1,1};input.skyColor={.2f,.2f,.2f};
@@ -124,11 +124,15 @@ int checkSurfaceRt(VkContext& ctx) {
             expect("base receiver records the caster shadow",sun(32,32,0)<.05f);
             scene.setInstanceTransform(caster,glm::translate(glm::mat4(1),camera+glm::vec3(0,40,0)));
             frame(1);
-            expect("unchanged receiver accumulates its history with the new estimate",
-                sun(32,32,0)>.1f && sun(32,32,0)<.5f);
+            expect("moving a caster removes its old shadow in the next rendered frame",
+                sun(32,32,0)>.95f);
             ++data[1].identity.x;
             frame(1);
             expect("replacement receiver rejects old lifetime's shadow history",sun(32,32,0)>.95f);
+            input.sunDir={1,0,0};
+            frame(1);
+            expect("changed sun direction does not retain the old lit estimate",sun(32,32,0)<.05f);
+            input.sunDir={-1,0,0};
             frame(3);
             bool finite=true;
             for(uint32_t y=0;y<size;++y)for(uint32_t x=0;x<size;++x)for(uint32_t s=0;s<uint32_t(samples);++s) {

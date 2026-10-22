@@ -231,7 +231,7 @@ bool M2Renderer::buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout) {
     // --- Load shaders ---
     rendering::VkShaderModule m2Vert, m2Frag;
     (void)m2Vert.loadFromFile(device, "assets/shaders/m2.vert.spv");
-    (void)m2Frag.loadFromFile(device, "assets/shaders/m2.frag.spv");
+    (void)m2Frag.loadFromFile(device, (vkCtx_->hardwareRayQueryEnabled() ? "assets/shaders/m2_hw.frag.spv" : "assets/shaders/m2.frag.spv"));
 
     if (!m2Vert.isValid() || !m2Frag.isValid()) {
         LOG_ERROR("M2: Missing required shaders, cannot build pipelines");
@@ -318,7 +318,7 @@ bool M2Renderer::buildBlendedPipelines(VkRenderPass pass, VkSampleCountFlagBits 
     rendering::VkShaderModule particleVert, particleFrag;
     rendering::VkShaderModule ribVert, ribFrag;
     (void)m2Vert.loadFromFile(device, "assets/shaders/m2.vert.spv");
-    (void)m2Frag.loadFromFile(device, "assets/shaders/m2.frag.spv");
+    (void)m2Frag.loadFromFile(device, (vkCtx_->hardwareRayQueryEnabled() ? "assets/shaders/m2_hw.frag.spv" : "assets/shaders/m2.frag.spv"));
     (void)particleVert.loadFromFile(device, "assets/shaders/m2_particle.vert.spv");
     (void)particleFrag.loadFromFile(device, "assets/shaders/m2_particle.frag.spv");
     (void)ribVert.loadFromFile(device, "assets/shaders/m2_ribbon.vert.spv");
@@ -1413,6 +1413,29 @@ void M2Renderer::writeBatchMaterial(const M2ModelGPU& model,
         batch.blendMode >= 2 && (batch.materialFlags & 0x04) == 0 ? 1 : 0;
     mat.specularIntensity = 0.5f;
     mat.emissiveBoost = batch.preserveGlowMesh ? 2.4f : 1.0f;
+    // Minimum output alpha of the actual shader combiner. An absent stage is
+    // white. The measured texture flags cover all mip levels, not the name or
+    // compression format. Fractional instance fades are handled at recording.
+    const float a=mat.hasTexture && batch.hasAlpha?0.0f:1.0f;
+    const float b=mat.hasSecondTexture && batch.secondHasAlpha?0.0f:1.0f;
+    float alpha=a;
+    switch(batch.combiner) {
+    case M2Combiner::Opaque: case M2Combiner::Decal: case M2Combiner::Add:
+    case M2Combiner::Fade: case M2Combiner::OpaqueOpaque: case M2Combiner::OpaqueAdd:
+    case M2Combiner::OpaqueMod2xNA: case M2Combiner::OpaqueAddNA:
+    case M2Combiner::OpaqueMod2xNAAlpha: case M2Combiner::OpaqueAddAlpha:
+    case M2Combiner::OpaqueAddAlphaAlpha: alpha=1;break;
+    case M2Combiner::Mod2x: alpha=2*a;break;
+    case M2Combiner::OpaqueMod: alpha=b;break;
+    case M2Combiner::OpaqueMod2x: alpha=2*b;break;
+    case M2Combiner::ModMod: alpha=a*b;break;
+    case M2Combiner::ModAdd: alpha=std::min(a+b,1.0f);break;
+    case M2Combiner::ModMod2x: alpha=2*a*b;break;
+    case M2Combiner::AddMod: alpha=std::min((1+a)*b,1.0f);break;
+    case M2Combiner::Mod2xMod2x: alpha=4*a*b;break;
+    default: break;
+    }
+    batch.surfaceAlphaOpaque=alpha>=1.0f;
     batch.surfaceFlags={mat.unlit,mat.alphaTest==2?1:0,0,0};
     batch.surfaceFactors={mat.specularIntensity,mat.emissiveBoost,0,0};
     batch.surfacePublication=nextSurfaceIdentity();
@@ -2108,6 +2131,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                     const uint16_t tex = second < model.textureLookup.size() ? model.textureLookup[second] : UINT16_MAX;
                     if (tex < allTextures.size() && tex < textureLoadFailed.size() && !textureLoadFailed[tex]) {
                         bgpu.secondTexture = allTextures[tex];
+                        bgpu.secondHasAlpha = allTextureInfo[tex].hasAlpha;
                     } else {
                         // Drawn with its second stage white: the first alone.
                         static std::unordered_set<std::string> saidMissing;

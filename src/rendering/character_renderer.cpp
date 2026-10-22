@@ -1,3 +1,4 @@
+#include "rendering/surface_pass.hpp"
 /**
  * CharacterRenderer - GPU rendering of M2 character models with skeletal animation (Vulkan)
  *
@@ -300,7 +301,7 @@ struct CharMaterialUBO {
     int32_t hasSecondTexture = 0;
     int32_t texCoordSet2 = 0;
     int32_t combiner = static_cast<int32_t>(M2Combiner::Mod);
-    int32_t padding = 0;
+    uint32_t surfaceMaterialIndex = 0;
     /// The batch's authored M2 colour, multiplied into the texture (w is padding).
     glm::vec4 batchColor{1.0f};
     /// The second stage's own texture animation.
@@ -351,7 +352,7 @@ void CharacterRenderer::buildMainPassPipelines(VkDevice device, VkRenderPass mai
 /// Every blend mode's pipeline for one render pass.
 CharacterRenderer::PipelineSet CharacterRenderer::buildPipelineSet(
         VkDevice device, VkRenderPass mainPass, VkSampleCountFlagBits samples,
-        wowee::rendering::VkShaderModule& charVert, wowee::rendering::VkShaderModule& charFrag) {
+        wowee::rendering::VkShaderModule& charVert, wowee::rendering::VkShaderModule& charFrag, bool evaluated) {
     // --- Vertex input ---
     // CharVertexGPU: vec3 pos(12) + uint8[4] boneWeights(4) + uint8[4] boneIndices(4) +
     //               vec3 normal(12) + vec2 texCoords(8) + vec4 tangent(16) +
@@ -393,6 +394,7 @@ CharacterRenderer::PipelineSet CharacterRenderer::buildPipelineSet(
             .setDepthBias(0.0f, 0.0f)
             .setColorBlendAttachment(blendState)
             .setMultisample(samples);
+        if (evaluated) builder.setColorBlendAttachments(std::vector<VkPipelineColorBlendAttachmentState>(3,PipelineBuilder::blendDisabled()));
         if (alphaToCoverage)
             builder.setAlphaToCoverage(true);
         return builder
@@ -405,6 +407,7 @@ CharacterRenderer::PipelineSet CharacterRenderer::buildPipelineSet(
     PipelineSet set;
     set.opaque = buildCharPipeline(PipelineBuilder::blendDisabled(), true);
     set.alphaTest = buildCharPipeline(PipelineBuilder::blendDisabled(), true, true);
+    if(evaluated)return set;
     set.alpha = buildCharPipeline(PipelineBuilder::blendAlpha(), false);
     set.additive = buildCharPipeline(PipelineBuilder::blendAdditive(), false);
     set.modulate = buildCharPipeline(m2ModulateBlendState(false), false);
@@ -438,7 +441,7 @@ void CharacterRenderer::setFadedPass(VkRenderPass pass, VkSampleCountFlagBits sa
     if (pass == VK_NULL_HANDLE) return;
     rendering::VkShaderModule charVert, charFrag;
     if (!charVert.loadFromFile(device, "assets/shaders/character.vert.spv") ||
-        !charFrag.loadFromFile(device, "assets/shaders/character.frag.spv")) {
+        !charFrag.loadFromFile(device, (vkCtx_->hardwareRayQueryEnabled() ? "assets/shaders/character_hw.frag.spv" : "assets/shaders/character.frag.spv"))) {
         LOG_ERROR("CharacterRenderer::setFadedPass: missing shaders; faded characters "
                   "are drawn in the scene pass, under the effects inside them");
         fadedPass_ = VK_NULL_HANDLE;
@@ -564,8 +567,11 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
             aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
             aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
             VmaAllocationInfo allocInfo{};
-            gpuCreateBuffer(ctx->getAllocator(), &bci, &aci,
-                            &materialRingBuffer_[i], &materialRingAlloc_[i], &allocInfo);
+            if(gpuCreateBuffer(ctx->getAllocator(), &bci, &aci,
+                            &materialRingBuffer_[i], &materialRingAlloc_[i], &allocInfo)!=VK_SUCCESS || !allocInfo.pMappedData) {
+                LOG_ERROR("Character material ring allocation failed for slot ", i, "; renderer initialization aborted");
+                return false;
+            }
             materialRingMapped_[i] = allocInfo.pMappedData;
         }
     }
@@ -591,7 +597,7 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
     // --- Load shaders ---
     rendering::VkShaderModule charVert, charFrag;
     if (!charVert.loadFromFile(device, "assets/shaders/character.vert.spv") ||
-        !charFrag.loadFromFile(device, "assets/shaders/character.frag.spv")) {
+        !charFrag.loadFromFile(device, (vkCtx_->hardwareRayQueryEnabled() ? "assets/shaders/character_hw.frag.spv" : "assets/shaders/character.frag.spv"))) {
         LOG_ERROR("Character: Missing required shaders, cannot initialize");
         return false;
     }
@@ -658,6 +664,9 @@ void CharacterRenderer::shutdown() {
     scene_->instances.clear();
 
     // Destroy pipelines
+    auto surface=std::exchange(surfacePipes_,PipelineSet{});
+    retired.add([device,surface]() mutable {destroyPipelineSet(device,surface);});
+    surfaceRenderPass_=VK_NULL_HANDLE;
     auto scene = std::exchange(scenePipes_, PipelineSet{});
     auto faded = std::exchange(fadedPassPipes_, PipelineSet{});
     retired.add([device, scene, faded]() mutable {
@@ -677,6 +686,7 @@ void CharacterRenderer::shutdown() {
             materialRingMapped_[i] = nullptr;
         }
         materialRingOffset_[i] = 0;
+        materialRingCapacity_[i] = MATERIAL_RING_CAPACITY;
     }
 
     // Destroy descriptor pools and layouts
@@ -1746,6 +1756,7 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
 
     M2ModelGPU gpuModel;
     gpuModel.data = model;
+    gpuModel.surfaceBatchBase=nextSurfaceIdentity(std::max(size_t(1),model.batches.size()));
     if (!model.vertices.empty()) {
         gpuModel.visualBoundMin = glm::vec3(std::numeric_limits<float>::max());
         gpuModel.visualBoundMax = glm::vec3(-std::numeric_limits<float>::max());
@@ -2524,6 +2535,40 @@ void CharacterRenderer::prepareRender(uint32_t frameIndex) {
     if (!scenePipes_.opaque) return;
     if (frameIndex >= 2 || boneDescPool_ == VK_NULL_HANDLE || boneSetLayout_ == VK_NULL_HANDLE) return;
 
+    // The producer counts the maximum draw records while extracting. Grow
+    // only the acquired slot, before any pass records references to it.
+    const size_t required = std::max(size_t(1), recording_->materialEntries);
+    const uint32_t stride = (sizeof(CharMaterialUBO) + materialUboAlignment_ - 1) & ~(materialUboAlignment_ - 1);
+    if(required > UINT32_MAX / stride) {
+        LOG_ERROR("Character material workload exceeds dynamic-offset range; frame recording aborted");
+        throw std::runtime_error("Character material offset range exceeded");
+    }
+    if(required > materialRingCapacity_[frameIndex]) {
+        const uint32_t capacity = static_cast<uint32_t>(std::min(size_t(UINT32_MAX / stride),
+            std::max(required, size_t(materialRingCapacity_[frameIndex]) * 2)));
+        auto buffer = createBuffer(vkCtx_->getAllocator(), VkDeviceSize(capacity)*stride,
+            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,capacity*3},
+                                        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,capacity}};
+        VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        ci.maxSets=capacity;ci.poolSizeCount=2;ci.pPoolSizes=sizes;
+        VkDescriptorPool pool=VK_NULL_HANDLE;
+        if(!buffer.info.pMappedData || vkCreateDescriptorPool(vkCtx_->getDevice(),&ci,nullptr,&pool)!=VK_SUCCESS) {
+            if(buffer.buffer)gpuDestroyBuffer(vkCtx_->getAllocator(),buffer.buffer,buffer.allocation);
+            LOG_ERROR("Character material allocation failed for ", required, " draws; frame recording aborted");
+            throw std::runtime_error("Character material allocation failed");
+        }
+        DeferredResources release(*vkCtx_);
+        release.buffer(materialRingBuffer_[frameIndex],materialRingAlloc_[frameIndex]);
+        release.destroy(materialDescPools_[frameIndex]);
+        materialRingBuffer_[frameIndex]=buffer.buffer;materialRingAlloc_[frameIndex]=buffer.allocation;
+        materialRingMapped_[frameIndex]=buffer.info.pMappedData;materialDescPools_[frameIndex]=pool;
+        materialRingCapacity_[frameIndex]=capacity;
+    }
+    materialRingOffset_[frameIndex]=0;
+    vkCtx_->resetDescriptorPool(materialDescPools_[frameIndex]);
+    materialDescriptorCache_[frameIndex].clear();
+
     auto& slots = poseSlots_[frameIndex];
     if (slots.size() < recording_->poses.size()) slots.resize(recording_->poses.size());
     for (size_t index = 0; index < recording_->poses.size(); ++index) {
@@ -2593,7 +2638,9 @@ void CharacterRenderer::prepareRender(uint32_t frameIndex) {
             }
         }
 
-        if (slot.mapped) {
+        if (slot.mapped && (slot.uploadedPose.size()!=pose.size() ||
+            std::memcmp(slot.uploadedPose.data(),pose.data(),pose.size_bytes())!=0)) {
+            slot.uploadedPose.assign(pose.begin(),pose.end());
             auto* dst = static_cast<glm::mat4*>(slot.mapped);
             std::memcpy(dst, pose.data(), pose.size() * sizeof(glm::mat4));
             // A slot can draw a different skeleton next frame. Bones outside
@@ -2604,21 +2651,33 @@ void CharacterRenderer::prepareRender(uint32_t frameIndex) {
     }
 }
 
+void CharacterRenderer::prepareSurface(SurfacePass& pass) {
+    surfacePass_=&pass;
+    if(surfaceRenderPass_==pass.geometryPass())return;
+    auto old=std::exchange(surfacePipes_,PipelineSet{});
+    const auto device=vkCtx_->getDevice();
+    vkCtx_->deferAfterAllFrameFences([device,old]()mutable{destroyPipelineSet(device,old);});
+    VkShaderModule vert,frag;
+    if(!vert.loadFromFile(device,"assets/shaders/character.vert.spv") ||
+       !frag.loadFromFile(device,"assets/shaders/character_surface.frag.spv"))
+        throw std::runtime_error("Character surface shaders unavailable");
+    surfacePipes_=buildPipelineSet(device,pass.geometryPass(),vkCtx_->getMsaaSamples(),vert,frag,true);
+    if(!surfacePipes_.opaque || !surfacePipes_.alphaTest) {
+        LOG_ERROR("Character surface pipeline creation failed");throw std::runtime_error("Character surface pipeline unavailable");
+    }
+    surfaceRenderPass_=pass.geometryPass();
+}
+void CharacterRenderer::recordSurface(VkDescriptorSet perFrameSet) {
+    recordCharacters(VK_NULL_HANDLE,perFrameSet,Part::Solid,recording_->drawLists[size_t(Part::Solid)],surfacePass_);
+}
+
 void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera&, Part part) {
     recordCharacters(cmd, perFrameSet, part, recording_->drawLists[static_cast<size_t>(part)]);
 }
 
 void CharacterRenderer::Frame::clear() noexcept {
     for (auto& list : drawLists) list.clear();
-    depth.clear(); poses.clear(); bones.clear(); poseById.clear();
-}
-
-uint32_t CharacterRenderer::Frame::poseIndex(uint32_t id) const {
-    const auto at = std::lower_bound(poseById.begin(), poseById.end(), id,
-        [](const auto& entry, uint32_t wanted) { return entry.first < wanted; });
-    if (at == poseById.end() || at->first != id)
-        throw std::out_of_range("Visible character has no extracted pose");
-    return at->second;
+    depth.clear(); poses.clear(); bones.clear(); materialEntries=0;
 }
 
 std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const Camera& camera,
@@ -2626,29 +2685,6 @@ std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const
     auto frame = framePool_.acquire();
     frame->normalMapping = normalMappingEnabled_;
     frame->normalStrength = normalMapStrength_;
-    frameLights_ = &lights;
-    for (const auto& [id, inst] : scene_->instances) {
-        if (!isShown(inst) || !inst.cachedModel || !inst.cachedModel->vertexBuffer) continue;
-        const uint32_t pose = static_cast<uint32_t>(frame->poses.size());
-        frame->poseById.emplace_back(id, pose);
-        const size_t count = std::min(inst.boneMatrices.size(), static_cast<size_t>(MAX_BONES));
-        const auto first = static_cast<uint32_t>(frame->bones.size());
-        frame->bones.insert(frame->bones.end(), inst.boneMatrices.begin(), inst.boneMatrices.begin() + count);
-        if (count == 0) frame->bones.emplace_back(1.0f);
-        frame->poses.push_back({first, static_cast<uint32_t>(std::max(count, size_t(1)))});
-        frame->depth.push_back({.modelMatrix = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix : getModelMatrix(inst),
-            .model = models.at(inst.modelId), .dress = inst.dress, .pose = pose, .id = inst.id, .modelId = inst.modelId});
-    }
-    std::sort(frame->poseById.begin(), frame->poseById.end());
-    cullCharacters(camera, Part::All, frame->drawLists[0], *frame);
-    for (const auto& draw : frame->drawLists[0]) frame->drawLists[draw.opacity < 0.999f ? 2 : 1].push_back(draw);
-    frameLights_ = nullptr;
-    return frame;
-}
-
-void CharacterRenderer::cullCharacters(const Camera& camera, Part part,
-                                       std::vector<DrawCharacter>& list, const Frame& frame) const {
-    list.clear();
     const float renderRadius = static_cast<float>(envSizeOrDefault("WOWEE_CHAR_RENDER_RADIUS", 130));
     const float renderRadiusSq = renderRadius * renderRadius;
     // Default frustum-cull radius when model bounds aren't available.
@@ -2660,12 +2696,20 @@ void CharacterRenderer::cullCharacters(const Camera& camera, Part part,
     Frustum frustum;
     frustum.extractFromMatrix(camera.getViewProjectionMatrix());
 
-    for (const auto& pair : scene_->instances) {
-        const auto& instance = pair.second;
-
-        // Skip invisible instances (e.g., player in first-person mode), and
-        // the weapons and armour of a body put away for a form.
-        if (!isShown(instance)) continue;
+    // One instance walk publishes both offscreen casters and main-view draws.
+    // Camera culling never removes a pose needed by the shadow views.
+    for (const auto& [id, instance] : scene_->instances) {
+        if (!isShown(instance) || !instance.cachedModel || !instance.cachedModel->vertexBuffer) continue;
+        const auto model = models.at(instance.modelId);
+        const glm::mat4 modelMatrix = instance.hasOverrideModelMatrix ? instance.overrideModelMatrix : getModelMatrix(instance);
+        const uint32_t pose = static_cast<uint32_t>(frame->poses.size());
+        const size_t count = std::min(instance.boneMatrices.size(), static_cast<size_t>(MAX_BONES));
+        const auto first = static_cast<uint32_t>(frame->bones.size());
+        frame->bones.insert(frame->bones.end(), instance.boneMatrices.begin(), instance.boneMatrices.begin() + count);
+        if (count == 0) frame->bones.emplace_back(1.0f);
+        frame->poses.push_back({first, static_cast<uint32_t>(std::max(count, size_t(1)))});
+        frame->depth.push_back({.modelMatrix = modelMatrix, .model = model, .dress = instance.dress,
+            .pose = pose, .id = instance.id, .modelId = instance.modelId});
         const CharacterInstance& look = drawnAs(instance);
 
         // Character instance culling: test both distance and frustum visibility
@@ -2678,9 +2722,8 @@ void CharacterRenderer::cullCharacters(const Camera& camera, Part part,
 
             // Compute per-instance bounding radius from model data when available.
             float cullRadius = kDefaultCharacterCullRadius;
-            auto mIt = models.find(instance.modelId);
-            if (mIt != models.end()) {
-                float modelR = mIt->second->data.boundRadius;
+            {
+                float modelR = instance.cachedModel->data.boundRadius;
                 if (modelR > 0.01f)
                     cullRadius = std::max(kDefaultCharacterCullRadius, modelR * std::max(0.001f, instance.scale));
             }
@@ -2688,12 +2731,6 @@ void CharacterRenderer::cullCharacters(const Camera& camera, Part part,
             // Frustum cull: skip if outside view frustum
             if (!frustum.intersectsSphere(instance.position, cullRadius)) continue;
         }
-
-        if (!instance.cachedModel) continue;
-        const auto& gpuModel = *instance.cachedModel;
-
-        // Skip models without GPU buffers
-        if (!gpuModel.vertexBuffer) continue;
 
         // Skip fully transparent instances. An aura's opacity caps the
         // instance's own rather than multiplying it, so a stealthed unit
@@ -2704,21 +2741,16 @@ void CharacterRenderer::cullCharacters(const Camera& camera, Part part,
         if (drawOpacity <= 0.0f) continue;
         // A faded body goes with the faded ones, after the blended world.
         const bool fadedInstance = drawOpacity < 0.999f;
-        if ((part == Part::Solid && fadedInstance) || (part == Part::Faded && !fadedInstance)) continue;
-
-        // Set model matrix (use override for weapon instances)
-        const glm::mat4 modelMatrix = instance.hasOverrideModelMatrix ? instance.overrideModelMatrix
-                                                                      : getModelMatrix(instance);
-        list.push_back(DrawCharacter{
+        DrawCharacter draw{
+            .surfaceLifetime=instance.surfaceLifetime,
             .modelMatrix = modelMatrix,
-            .model = models.at(instance.modelId),
+            .model = model,
             .dress = instance.dress,
-            .pose = frame.poseIndex(instance.id),
+            .pose = pose,
             .interiorLight = instance.interiorLight,
             // The lights nearest the unit's origin, as the client picks them
             // for any model.
-            .localLights = frameLights_ ? pickLocalLights(*frameLights_, glm::vec3(modelMatrix[3]), 0.0f)
-                                        : kNoLocalLights,
+            .localLights = pickLocalLights(lights, glm::vec3(modelMatrix[3]), 0.0f),
             .stateTint = look.stateTint,
             .opacity = drawOpacity,
             .animationTime = instance.animationTime,
@@ -2728,30 +2760,27 @@ void CharacterRenderer::cullCharacters(const Camera& camera, Part part,
             .modelId = instance.modelId,
             .isSceneModel = instance.isSceneModel,
             .hasOverrideModelMatrix = instance.hasOverrideModelMatrix,
-        });
+        };
+        frame->materialEntries += model->data.batches.size() * (fadedInstance ? 2u : 1u);
+        frame->drawLists[0].push_back(draw);
+        frame->drawLists[fadedInstance ? 2 : 1].push_back(std::move(draw));
     }
+    return frame;
 }
 
 void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, Part part,
-                                         const std::vector<DrawCharacter>& list) {
+                                         const std::vector<DrawCharacter>& list, SurfacePass* surfaces) {
+    if(list.empty())return;
+    bool geometry=true;
+    if(surfaces)cmd=surfaces->beginRun(SurfacePass::Family::Character,true);
     const PipelineSet& pipes =
         part == Part::Faded && fadedPass_ != VK_NULL_HANDLE ? fadedPassPipes_ : scenePipes_;
     uint32_t frameIndex = vkCtx_->getCurrentFrame();
     uint32_t frameSlot = frameIndex % 2u;
 
-    // Reset material ring buffer and descriptor pool once per frame slot.
-    if (lastMaterialPoolResetFrame_ != frameIndex) {
-        materialRingOffset_[frameSlot] = 0;
-        if (materialDescPools_[frameSlot]) {
-            vkCtx_->resetDescriptorPool(materialDescPools_[frameSlot]);
-        }
-        materialDescriptorCache_[frameSlot].clear();
-        lastMaterialPoolResetFrame_ = frameIndex;
-    }
-
     // Pre-compute aligned UBO stride for ring buffer sub-allocation
     const uint32_t uboStride = (sizeof(CharMaterialUBO) + materialUboAlignment_ - 1) & ~(materialUboAlignment_ - 1);
-    const uint32_t ringCapacityBytes = uboStride * MATERIAL_RING_CAPACITY;
+    const uint32_t ringCapacityBytes = uboStride * materialRingCapacity_[frameSlot];
     auto getMaterialDescriptorSet = [&](VkTexture* diffuse, uint8_t wrapFlags,
                                         VkTexture* normal, VkTexture* second = nullptr,
                                         uint8_t secondWrapFlags = BatchTexture::kRepeatBoth) -> VkDescriptorSet {
@@ -2847,7 +2876,7 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
     };
 
     // Start with opaque pipeline
-    VkPipeline currentPipeline = pipes.opaque;
+    VkPipeline currentPipeline = surfaces ? surfacePipes_.opaque : pipes.opaque;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, currentPipeline);
 
     for (const DrawCharacter& instance : list) {
@@ -3117,6 +3146,20 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
                 VkPipeline desiredPipeline = stage == 0 ? pipes.fadeDepth
                                            : fadedSolid ? pipes.fadeColor
                                                         : pipelineFor(blendPipeline);
+                const bool evaluated=surfaces && (blendPipeline==CharacterBlendPipeline::Opaque ||
+                    blendPipeline==CharacterBlendPipeline::AlphaTest);
+                if(evaluated)desiredPipeline=blendPipeline==CharacterBlendPipeline::Opaque?surfacePipes_.opaque:surfacePipes_.alphaTest;
+                if(surfaces && evaluated!=geometry) {
+                    surfaces->endRun(SurfacePass::Family::Character);
+                    geometry=evaluated;
+                    cmd=surfaces->beginRun(SurfacePass::Family::Character,geometry);
+                    currentPipeline=VK_NULL_HANDLE;
+                    vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelineLayout_,0,1,&perFrameSet,0,nullptr);
+                    vkCmdPushConstants(cmd,pipelineLayout_,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(push),&push);
+                    vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelineLayout_,2,1,&boneSet,0,nullptr);
+                    vkCmdBindVertexBuffers(cmd,0,1,&gpuModel.vertexBuffer,&offset);
+                    vkCmdBindIndexBuffer(cmd,gpuModel.indexBuffer,0,VK_INDEX_TYPE_UINT16);
+                }
                 if (desiredPipeline != currentPipeline) {
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
                     currentPipeline = desiredPipeline;
@@ -3270,16 +3313,40 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
                         " tex=", texName);
                 }
 
+                if(evaluated) {
+                    SurfacePass::M2Material material{};
+                    material.flags.x=matData.unlit;
+                    material.factors=glm::vec4(matData.specularIntensity,instance.stateTint);
+                    material.interiorAmbient=instance.interiorLight.ambient;
+                    material.interiorDirect=instance.interiorLight.direct;
+                    material.localLights=instance.localLights;
+                    // Animated receivers lack previous rendered bone positions;
+                    // reject history explicitly instead of accepting rigid motion.
+                    material.history.x=0;
+                    const uint64_t publication=gpuModel.surfaceBatchBase+bi;
+                    material.identity={uint32_t(instance.surfaceLifetime),uint32_t(instance.surfaceLifetime>>32),
+                        uint32_t(publication),uint32_t(publication>>32)};
+                    matData.surfaceMaterialIndex=surfaces->appendMaterial(SurfacePass::Family::Character,material);
+                }
+
                 // Sub-allocate material UBO from ring buffer
                 uint32_t matOffset = materialRingOffset_[frameSlot];
-                if (matOffset + uboStride > ringCapacityBytes) continue; // ring exhausted
+                if (matOffset + uboStride > ringCapacityBytes) {
+                    LOG_ERROR("Character material capacity was underestimated for instance ", instance.id,
+                              "; frame recording aborted");
+                    throw std::runtime_error("Character material ring overflow");
+                }
                 memcpy(static_cast<char*>(materialRingMapped_[frameSlot]) + matOffset, &matData, sizeof(CharMaterialUBO));
                 materialRingOffset_[frameSlot] = matOffset + uboStride;
 
                 VkTexture* bindTex = (texPtr && texPtr->isValid()) ? texPtr : whiteTexture_.get();
                 VkDescriptorSet materialSet = getMaterialDescriptorSet(bindTex, wrapFlags, normalMap,
                                                                        secondTex, secondWrapFlags);
-                if (!materialSet) continue;
+                if (!materialSet) {
+                    LOG_ERROR("Character material descriptor unavailable for instance ", instance.id,
+                              " batch ", bi, "; frame recording aborted");
+                    throw std::runtime_error("Character material descriptor unavailable");
+                }
 
                 // Bind material descriptor set (set 1)
                 const uint32_t dynamicOffset = matOffset;
@@ -3295,6 +3362,12 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
             } // end pass loop
             } // end stage loop
         }
+    }
+    if(surfaces)surfaces->endRun(SurfacePass::Family::Character);
+    if(materialRingOffset_[frameSlot] && vmaFlushAllocation(vkCtx_->getAllocator(),materialRingAlloc_[frameSlot],
+        0,materialRingOffset_[frameSlot])!=VK_SUCCESS) {
+        LOG_ERROR("Character material upload flush failed; frame recording aborted");
+        throw std::runtime_error("Character material flush failed");
     }
 }
 
@@ -4528,7 +4601,7 @@ void CharacterRenderer::recreatePipelines() {
     // --- Load shaders ---
     rendering::VkShaderModule charVert, charFrag;
     if (!charVert.loadFromFile(device, "assets/shaders/character.vert.spv") ||
-        !charFrag.loadFromFile(device, "assets/shaders/character.frag.spv")) {
+        !charFrag.loadFromFile(device, (vkCtx_->hardwareRayQueryEnabled() ? "assets/shaders/character_hw.frag.spv" : "assets/shaders/character.frag.spv"))) {
         LOG_ERROR("CharacterRenderer::recreatePipelines: missing required shaders");
         return;
     }

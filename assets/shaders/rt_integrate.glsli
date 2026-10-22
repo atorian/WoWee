@@ -6,7 +6,11 @@ void rtIntegrate(vec3 p, vec3 n, float dist, uint mode, inout uint rng,
     sun = 0.0;
     vec3 L = normalize(pass.sunDir.xyz);
     if (pass.sunColor.w > 0.5 && dot(n, L) > 0.0) {
+#ifdef RT_INLINE_RECEIVER
+        vec3 sd = rtForwardSunDirection;
+#else
         vec3 sd = rtConeSample(L, pass.sunDir.w, rng);
+#endif
         sun = rtOccluded(origin, sd, pass.params.w, rng) ? 0.0 : 1.0;
     }
 
@@ -16,7 +20,11 @@ void rtIntegrate(vec3 p, vec3 n, float dist, uint mode, inout uint rng,
         // Both estimators sample the same cosine-weighted hemisphere. The
         // closest hit out to the GI range also tells us whether anything
         // intersects the shorter AO range: do not traverse the scene twice.
+#ifdef RT_INLINE_RECEIVER
+        vec3 direction = rtForwardHemisphereDirection;
+#else
         vec3 direction = rtCosineHemisphere(n, rng);
+#endif
         float range = mode >= RT_MODE_GI ? pass.params.z : pass.params.y;
         float t;
         vec3 hn;

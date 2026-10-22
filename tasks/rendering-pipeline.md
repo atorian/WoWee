@@ -673,3 +673,84 @@ trade about 151 MiB additional peak private bytes for fewer repeated preparation
 
 The complete pipeline is still unfinished: remaining consumers use legacy RT,
 and deformed M2 and ordered forward boundaries still carry substantial GPU cost.
+
+## Unified current receiver migration — 2026-10-22 (in progress)
+
+The user has explicitly stopped intermediate performance runs until the pipeline
+migration and compatible pass merging are finished. No replay or FPS comparison
+is authorized as a substitute for this work.
+
+Current working changes (not yet accepted by the GPU regression suite):
+
+- Terrain and solid character/attachment materials join WMO/M2 in the same
+  evaluated-surface layout. One family-tagged lighting shader consumes them.
+- A single ordered command plan merges adjacent geometry runs across family
+  boundaries. Actual blended layers retain their authored order and depth
+  semantics. Serial and parallel CPU recording execute the same GPU plan.
+- Forward layers and reflected views trace from their own current receiver
+  against the same frame's RT scene. They no longer search an older screen.
+  This path currently uses eight stable world-seeded samples; noise and cost
+  remain validation/review concerns, not claimed performance improvements.
+- The RT scene is uploaded/built once before all views. Fragment consumers are
+  included in its memory dependencies. Disabled portraits bind a permanent
+  built empty TLAS rather than an uninitialized descriptor.
+- Removed the legacy full-screen RT producer from client/render-library linking,
+  its frame hooks, screen-image bindings and previous-camera frame fields. Its
+  standalone historical comparison probe remains separate from the product.
+- Fully opaque M2 alpha-key combinations can share geometry runs when the
+  texture-combiner result and every instance fade prove opaque. An authored
+  lower mip with alpha invalidates that proof. The new compressed-mip regression
+  failed both assertions before the scanner fix and passes both afterwards.
+
+Still to complete before acceptance: GPU parity/synchronization/queued-snapshot
+fixtures (including all families, transparency, reflection, MSAA, mode/target
+changes and software tracing), descriptor/API cleanup, retirement/resize review,
+and reconciliation of the remaining requirements. No new FPS numbers yet.
+
+
+### Correctness follow-up while unifying the passes
+
+- All-family colored material fixture, MSAA 4 and target recreation: mean
+  forward/surface channel error 0.02805; fraction over 8 is 0.000566; serial /
+  worker and bounded / full images match exactly. Software RT fixture also
+  passed (mean 0.02617), before the final forward quadrature/history changes.
+- Mutation-after-extraction fixtures passed for M2, WMO, characters, terrain and
+  water, MSAA 4 / FXAA / current RT: the captured frame is unchanged and the
+  next extraction changes pixels.
+- The first synthetic M2/character fixture accidentally used mixed-case cache
+  keys, hiding missing inputs behind texture warnings. It was corrected to
+  normalized keys; missing fixture textures now fail the comparison. Earlier
+  white/missing-material matches are not material validation evidence.
+- Terrain atlas LOAD synchronization failed under validation; adding color
+  attachment READ access to its transition fixes the observed hazard.
+- Character material capacity regression now uses 65 visible instances with
+  64 overlapping batches each, versus one equivalent batch per instance.
+  Reinstating the original 4096-record/drop behavior changes 90 image channels;
+  dynamic sizing passes. The initial offscreen/bounds-changing fixture was
+  discarded because it changed lighting and did not isolate capacity.
+- Current RT shadow probe reproduces stale caster history in MSAA 1 and 4.
+  Scene/illumination invalidation was added; its final GPU verification and
+  the consolidated build are currently pending.
+
+No FPS or full replay run was made during this implementation stage.
+
+
+### Unified migration correctness checkpoint
+
+The final hardware/software surface probes pass, including immediate removal of
+moved-caster shadows and abrupt sun-direction changes. Smooth lighting retains
+history within an explicitly bounded radiance/angular error from a fixed anchor;
+exact float equality was rejected after it reset history on every startup update.
+
+The opaque fixture records **four geometry families and one lighting group**.
+The colored mixed MSAA-4/resize fixture passes (mean error 0.02805, fraction over
+8 is 0.000566); serial/worker and bounded/full pixels match. Software and all five
+source-removal snapshot fixtures pass. Character capacity is red/green verified,
+and 18 alpha assertions in 8 cases pass (optional real-BLP corpus scan unavailable).
+The renderer has zero forbidden includes, recording has zero scene reads, and
+the five unused legacy consumer APIs found by sweep_guard have been removed.
+Legacy depth RT source now lives under tools/ and is linked only into rt_probe.
+
+[Correctness results](performance/unified-pipeline-correctness.json). This is not
+full performance acceptance: the general persistent GPU material/instance and
+indirect-submission gate remains open. No FPS benchmark or replay was launched.

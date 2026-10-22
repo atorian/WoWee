@@ -124,8 +124,8 @@ void main() {
     outColor = texColor;
     outKeys = uvec4(packSurfaceNormal(receiverFace), packSurfaceNormal(norm),
                     packSurfaceNormal(vertexNormal), surfaceOptions.surfaceKey.x + 1u);
-    // Stage one has no temporal history. Keep exact raster depth until the
-    // current-frame receiver/motion path owns a separate depth input.
+    // Preserve the evaluated invocation's exact depth. Lighting reconstructs
+    // the current receiver; the material record owns identity and motion.
     outPayload = uvec4(packHalf2x16(VertColor.rg), packHalf2x16(VertColor.ba),
                        floatBitsToUint(gl_FragCoord.z), 0u);
 #else

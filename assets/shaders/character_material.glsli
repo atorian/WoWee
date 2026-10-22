@@ -38,7 +38,7 @@ layout(set = 1, binding = 1) uniform CharMaterial {
     int hasSecondTexture;
     int texCoordSet2;
     int combiner;
-    int materialPad0;
+    uint surfaceMaterialIndex; // evaluated-surface record; unused by forward draws
     // The batch's authored M2 colour, multiplied into the texture (w is
     // padding). A glow card is painted white and coloured here: the riding
     // phoenix's wing glows carry red, magenta and violet, and drew white

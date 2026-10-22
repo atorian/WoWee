@@ -91,7 +91,7 @@ class HiZSystem;
 class GrassRenderer;
 class VolumetricFog;
 class RtScene;
-class RtLighting;
+
 class LootSparkles;
 class CorpseBones;
 class SunShafts;
@@ -249,7 +249,7 @@ public:
     /// volume of clear air, for a set whose block leaves the fog off.
     VkImageView getNeutralFogVolumeView() const;
     /// What a per-frame set allocated elsewhere binds at 3 and 4.
-    VkImageView getNeutralRtLightingView() const;
+    VkImageView getNeutralSurfaceView() const;
     /// What a per-frame set allocated elsewhere binds at 9: a buffer for one
     /// point light, for a set whose block says there are none.
     VkBuffer getNeutralLocalLightBuffer() const { return neutralLightBuffer_.buffer; }
@@ -602,7 +602,7 @@ public:
     /// frame. See VolumetricFog.
     void setVolumetricFogQuality(int quality);
     /// Ray traced lighting: 0 off, 1 sun shadows, 2 + ambient occlusion,
-    /// 3 + one-bounce diffuse. See RtLighting.
+    /// 3 + one-bounce diffuse, shared by evaluated and forward receivers.
     void setRtLightingMode(int mode);
     void setRtDistance(float yards) { requestedRtDistance_ = clampRtDistance(yards); }
     /// A multiplier on how thick that air is; 1 is the default mist.
@@ -792,15 +792,8 @@ private:
     // Ray traced lighting. Created with the per-frame resources and destroyed
     // after every renderer that registers geometry with the scene.
     std::unique_ptr<RtScene> rtScene_;
-    std::unique_ptr<RtLighting> rtLighting_;
-    void writeRtLightingBindings(uint32_t slot);
+    AllocatedImage neutralSurfaceImage_{};
     VkExtent2D sceneRenderExtent() const;
-    /// `stageGroup` is the renderer call it is recorded from, which its CPU
-    /// parts are timed under (CpuStageTimes).
-    void recordRtLighting(VkImage sceneDepth, VkExtent2D sceneExtent, bool depthIsMsaa,
-                          std::string_view stageGroup);
-    bool rtRecordedThisFrame_ = false;
-    bool rtScenePreparedThisFrame_ = false;
     float volumetricFogDensity_ = 1.0f;
     /// Whether this frame builds the volume, decided where the per-frame block
     /// is written so the block's switch and the dispatch cannot disagree.

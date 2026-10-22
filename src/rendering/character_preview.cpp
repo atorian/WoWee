@@ -1,3 +1,4 @@
+#include "rendering/rt_scene.hpp"
 #include "rendering/character_preview.hpp"
 #include "rendering/imgui_texture.hpp"
 #include "rendering/character_renderer.hpp"
@@ -356,18 +357,19 @@ void CharacterPreview::createFBO() {
 
     // 3. Create descriptor pool for per-frame sets (2 UBO + 2 shadow + 2 fog volume)
     {
-        VkDescriptorPoolSize sizes[3]{};
+        std::vector<VkDescriptorPoolSize> sizes(3);
         sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         sizes[0].descriptorCount = MAX_FRAMES;
         sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        sizes[1].descriptorCount = MAX_FRAMES * 9;
+        sizes[1].descriptorCount = MAX_FRAMES * 5;
         sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         sizes[2].descriptorCount = MAX_FRAMES;
 
         VkDescriptorPoolCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         ci.maxSets = MAX_FRAMES;
-        ci.poolSizeCount = 3;
-        ci.pPoolSizes = sizes;
+        core::Application::getInstance().getRenderer()->getRtScene()->appendReceiverPool(sizes, MAX_FRAMES);
+        ci.poolSizeCount = uint32_t(sizes.size());
+        ci.pPoolSizes = sizes.data();
         if (vkCreateDescriptorPool(device, &ci, nullptr, &previewDescPool_) != VK_SUCCESS) {
             LOG_ERROR("CharacterPreview: failed to create descriptor pool");
             return;
@@ -425,11 +427,10 @@ void CharacterPreview::createFBO() {
         fogImg.imageView = appRenderer->getNeutralFogVolumeView();
         fogImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-        // Bindings 3 and 4 are the world's ray traced lighting; the neutral
-        // image, with the block's switch left at zero.
-        VkDescriptorImageInfo rtImg{};
-        rtImg.imageView = appRenderer->getNeutralRtLightingView();
-        rtImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        // Portraits have no captured sky or contact receiver map.
+        VkDescriptorImageInfo neutralImg{};
+        neutralImg.imageView = appRenderer->getNeutralSurfaceView();
+        neutralImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         // Binding 9 is the world's point lights; a portrait has none, and its
         // block says so.
@@ -438,43 +439,21 @@ void CharacterPreview::createFBO() {
         lightBuf.offset = 0;
         lightBuf.range = VK_WHOLE_SIZE;
 
-        VkWriteDescriptorSet writes[11]{};
-        writes[9].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[9].dstSet = previewPerFrameSet_[i];
-        writes[9].dstBinding = 9;
-        writes[9].descriptorCount = 1;
-        writes[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[9].pBufferInfo = &lightBuf;
-        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = previewPerFrameSet_[i];
-        writes[0].dstBinding = 0;
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        writes[0].pBufferInfo = &descBuf;
-        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = previewPerFrameSet_[i];
-        writes[1].dstBinding = 1;
-        writes[1].descriptorCount = 1;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[1].pImageInfo = &shadowImg;
-        writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[2].dstSet = previewPerFrameSet_[i];
-        writes[2].dstBinding = 2;
-        writes[2].descriptorCount = 1;
-        writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[2].pImageInfo = &fogImg;
-        for (uint32_t b = 3; b <= 8; ++b) {
-            writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[b].dstSet = previewPerFrameSet_[i];
-            writes[b].dstBinding = b;
-            writes[b].descriptorCount = 1;
-            writes[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[b].pImageInfo = &rtImg;
+        constexpr uint32_t indices[]={0,1,2,5,8,9,10};
+        VkWriteDescriptorSet writes[7]{};
+        for(uint32_t n=0;n<7;++n) {
+            auto& w=writes[n];w.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w.dstSet=previewPerFrameSet_[i];w.dstBinding=indices[n];w.descriptorCount=1;
+            if(indices[n]==0 || indices[n]==9) {
+                w.descriptorType=indices[n]==0?VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                w.pBufferInfo=indices[n]==0?&descBuf:&lightBuf;
+            } else {
+                w.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                w.pImageInfo=indices[n]==1 || indices[n]==10?&shadowImg:indices[n]==2?&fogImg:&neutralImg;
+            }
         }
-
-        writes[10] = writes[1];
-        writes[10].dstBinding = 10;
-        vkUpdateDescriptorSets(device, 11, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device,7,writes,0,nullptr);
+        appRenderer->getRtScene()->writeReceiverDescriptors(previewPerFrameSet_[i], true);
     }
 
     // 5. Register the color attachment as an ImGui texture

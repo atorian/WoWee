@@ -234,7 +234,7 @@ VkPipeline WaterRenderer::buildWaterPipeline(VkRenderPass renderPass, VkSampleCo
     const char* vertPath = tessellate ? "assets/shaders/water_tess.vert.spv"
                                       : "assets/shaders/water.vert.spv";
     if (!vertShader.loadFromFile(device, vertPath) ||
-        !fragShader.loadFromFile(device, "assets/shaders/water.frag.spv") ||
+        !fragShader.loadFromFile(device, (vkCtx->hardwareRayQueryEnabled() ? "assets/shaders/water_hw.frag.spv" : "assets/shaders/water.frag.spv")) ||
         (tessellate && (!controlShader.loadFromFile(device, "assets/shaders/water.tesc.spv") ||
                         !evalShader.loadFromFile(device, "assets/shaders/water.tese.spv")))) {
         LOG_ERROR("WaterRenderer: a water shader did not load (", vertPath,

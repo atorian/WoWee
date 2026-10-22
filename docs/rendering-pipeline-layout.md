@@ -1,10 +1,12 @@
 # Surface and frame-resource contract
 
-Implementation design for `codex/gpu-scene-pipeline`. This document selects the
-target representation. Primary-view opaque/cutout WMO and M2 evaluated surfaces
-and current-frame RT are connected behind `WOWEE_MODEL_SURFACES=1` (the earlier
-`WOWEE_WMO_SURFACES` flag remains an alias). Characters, terrain, reflected views
-and ordered blended materials still use forward lighting and legacy RT.
+Implementation design for `codex/gpu-scene-pipeline`. The working branch now
+routes primary-view opaque/cutout terrain, WMO, M2 and characters through shared
+evaluated surfaces and one family-tagged lighting shader. An ordered command
+plan merges compatible runs. Forward/reflected receivers trace their own current
+world position against the same RT scene; the client no longer runs the legacy
+full-screen producer. `WOWEE_MODEL_SURFACES=0` is a diagnostic material-parity
+route. This migration is under correctness validation, not performance acceptance.
 
 ## Surface/material boundary
 
@@ -41,7 +43,7 @@ Three color attachments plus depth, 40 color bytes per sample:
 |---|---|---|
 | Albedo/coverage | R16G16B16A16_SFLOAT, 8 B | Evaluated texture RGB and original alpha; floating attachment zero preserves alpha-to-coverage |
 | Surface keys | R32G32B32A32_UINT, 16 B | Geometric, shading and authored normals (each octahedral signed 16+16 bits); material-table index |
-| Surface payload | R32G32B32A32_UINT, 16 B | Two packed half pairs: WMO vertex RGBA, or M2/character stage-add RGB plus foliage factor; stable instance token; packed half2 screen motion |
+| Surface payload | R32G32B32A32_UINT, 16 B | Two packed half pairs: WMO vertex RGBA, or M2/character stage-add RGB plus foliage factor; exact raster depth bits; reserved zero |
 | Depth | Device depth format (budget D32_SFLOAT, 4 B) | Current visibility depth |
 
 Material kind is in the material record; payload meanings are selected by that
@@ -296,3 +298,44 @@ M2 surfaces does not allocate another full-screen surface/RT set; it adds only
 material capacity, command buffers and family lighting pipelines. Resize peak
 budgeting, persistent material/instance tables and remaining consumers are still
 required before a complete pipeline rollout.
+
+
+## Unified migration: current implementation, 2026-10-22
+
+- `SurfacePass::executePlan` owns command execution for both serial and worker
+  recording. It merges adjacent opaque geometry from all four families into
+  one G-buffer / current RT / lighting group. Actual blended dependencies stay
+  in authored order. Empty selection/grass/transparent work does not split it.
+- Far-plane sky can precede opaque geometry; an active screen-space lens flare
+  retains the original terrain/sky boundary. No depth-writing model layer is
+  reordered merely to reduce the number of groups.
+- Every ordinary view uses one `RtScene::update` before recording its draws.
+  Fragment consumers bind that same acquired slot's buffers/TLAS; portraits
+  bind a built empty TLAS with RT disabled. The old `RtLighting` class remains
+  linked only into the standalone historical probe.
+- Ordered forward receivers use eight stratified hemisphere/sun samples from
+  their own position and normal. They never borrow opaque depth or an earlier
+  view. This has no temporal storage and needs visual/cost acceptance; it is
+  not claimed to match the denoising behavior of primary opaque receivers.
+- Current surface materials are 176-byte frame records, including lifetime and
+  batch publication IDs and rigid previous-rendered transform. Family is an
+  explicit field. Deformed poses reject history rather than inventing motion.
+  Caster-scene changes or abrupt lighting changes invalidate temporal light.
+  Gradual lighting stays within 2% radiance (absolute dark-channel tolerance
+  0.0001) and one sun-cone angular radius of the accumulation anchor; exceeding
+  that bound resets it. The anchor does not drift each frame.
+  These frame records are **not** the still-planned persistent GPU material table.
+- Character extraction publishes caster poses and visible draws in one walk;
+  passes receive direct pose indices. Per-slot bone uploads skip equal palettes.
+  Material ring/descriptors grow before recording from the snapshot's maximum
+  draw count. Exhaustion/allocation failure aborts visibly instead of dropping
+  arbitrary character batches.
+- Target recreation waits for older submitted frame uses, then releases only
+  the owned transient G-buffer/RT allocation before allocating its replacement.
+  This is a resize operation, not a fence between geometry, RT and lighting.
+  Queued scene leases and unrelated retirement queues are left intact.
+
+The earlier sections describing isolated WMO opt-in work are historical stages.
+The persistent instance/material table and general GPU-driven submission gates
+remain distinct from the current-receiver/pass migration. No intermediate FPS
+benchmark is run while the user-authorized pipeline work is incomplete.

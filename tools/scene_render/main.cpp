@@ -596,11 +596,13 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     // Authored-order material layers through the ordinary WMO upload/scene API.
     // Kept in scene_render only: no fixture switch in the shipping renderer.
     // Deterministic material/instancing fixture through the production M2 API.
-    if (scene.contains("m2Layers")) {
-        const auto& layers=scene.at("m2Layers");
+    for(const char* family : {"m2Layers","characterLayers"}) if(scene.contains(family)) {
+        const bool character=std::string_view(family)=="characterLayers";
+        const auto& layers=scene.at(family);
         if(!layers.is_array() || layers.empty() || layers.size()>64)
             throw std::runtime_error("m2Layers requires 1..64 rectangular layers");
         pipeline::M2Model model{};model.name="scene_render_materials.m2";
+        model.bones.resize(1);model.bones[0].parentBone=-1;
         model.boundMin=glm::vec3(1e10f);model.boundMax=glm::vec3(-1e10f);
         std::unordered_map<std::string,pipeline::BLPImage> pixels;
         for(const auto& layer:layers) {
@@ -617,7 +619,7 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
             for(uint16_t stage=0;stage<batch.textureCount;++stage) {
                 const auto rgba=stage?layer.at("secondRgba").get<std::array<uint8_t,4>>():color;
                 const auto id=uint16_t(model.textures.size());
-                const std::string texture="scene_render_m2_material_"+std::to_string(id)+".blp";
+                const std::string texture=std::string("scene_render_")+(character?"character":"m2")+"_material_"+std::to_string(id)+".blp";
                 pipeline::BLPImage image;image.width=image.height=16;image.data.resize(16*16*4);
                 for(int y=0;y<16;++y)for(int z=0;z<16;++z) {
                     std::copy(rgba.begin(),rgba.end(),image.data.begin()+(y*16+z)*4);
@@ -640,21 +642,31 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
             model.batches.push_back(batch);
         }
         model.boundRadius=glm::length(model.boundMax-model.boundMin)*0.5f;
-        auto& m2=*renderer.getM2Renderer();m2.setPredecodedBLPCache(&pixels);
-        const bool loaded=m2.loadModel(model,modelId);m2.setPredecodedBLPCache(nullptr);
-        if(!loaded)throw std::runtime_error("scene_render M2 layers upload failed");
-        const auto instances=scene.value("m2LayerInstances",json::array({json::object()}));
+        auto& m2=*renderer.getM2Renderer();
+        auto& characters=*renderer.getCharacterRenderer();
+        if(character)characters.setPredecodedBLPCache(&pixels);else m2.setPredecodedBLPCache(&pixels);
+        const bool loaded=character?characters.loadModel(model,modelId):m2.loadModel(model,modelId);
+        if(character)characters.setPredecodedBLPCache(nullptr);else m2.setPredecodedBLPCache(nullptr);
+        if(!loaded)throw std::runtime_error("scene_render material layers upload failed");
+        const auto instances=scene.value(character?"characterLayerInstances":"m2LayerInstances",json::array({json::object()}));
         for(const auto& instance:instances) {
             const glm::vec3 offset=vec3(instance.value("offset",json()));
-            const uint32_t id=m2.createInstance(modelId,origin+offset,glm::vec3(0),1,false);
-            if(instance.contains("interiorAmbient"))m2.setInteriorLight(id,rendering::InteriorLight{
-                vec3(instance.at("interiorAmbient")),vec3(instance.at("interiorDirect"))});
-            placements.push_back({.instanceId=id,.modelId=modelId});
+            const uint32_t id=character?characters.createInstance(modelId,origin+offset,glm::vec3(0),1):
+                m2.createInstance(modelId,origin+offset,glm::vec3(0),1,false);
+            if(!id)throw std::runtime_error("scene_render layer instance creation failed");
+            if(character) {
+                characters.setInstanceOpacity(id,instance.value("opacity",1.0f));
+                movingCharacters.push_back({.instance=id,.position=origin+offset,.velocity=glm::vec3(0)});
+            } else {
+                if(instance.contains("interiorAmbient"))m2.setInteriorLight(id,rendering::InteriorLight{
+                    vec3(instance.at("interiorAmbient")),vec3(instance.at("interiorDirect"))});
+                placements.push_back({.instanceId=id,.modelId=modelId});
+            }
             const auto lo=origin+offset+model.boundMin,hi=origin+offset+model.boundMax;
             if(!bounds.valid)bounds={lo,hi,true};else {bounds.min=glm::min(bounds.min,lo);bounds.max=glm::max(bounds.max,hi);}
         }
         ++modelId;
-        LOG_INFO("scene_render: placed ",layers.size()," M2 material layers in ",instances.size()," instances");
+        LOG_INFO("scene_render: placed ",layers.size()," material layers for ",family," in ",instances.size()," instances");
     }
     if (scene.contains("wmoLayers")) {
         const auto& layers=scene["wmoLayers"];

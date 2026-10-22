@@ -1,3 +1,4 @@
+#include "rendering/surface_pass.hpp"
 #include "rendering/terrain_vertex.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/terrain_renderer.hpp"
@@ -232,7 +233,7 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
         LOG_ERROR("TerrainRenderer: failed to load vertex shader");
         return false;
     }
-    if (!fragShader.loadFromFile(device, "assets/shaders/terrain.frag.spv")) {
+    if (!fragShader.loadFromFile(device, (vkCtx->hardwareRayQueryEnabled() ? "assets/shaders/terrain_hw.frag.spv" : "assets/shaders/terrain.frag.spv"))) {
         LOG_ERROR("TerrainRenderer: failed to load fragment shader");
         return false;
     }
@@ -271,6 +272,7 @@ void TerrainRenderer::recreatePipelines() {
 
     // Destroy old pipelines (keep layouts)
     destroy(device, pipeline);
+    destroy(device, surfacePipeline_);surfaceRenderPass_=VK_NULL_HANDLE;
     destroy(device, wireframePipeline);
 
     // Load shaders
@@ -279,7 +281,7 @@ void TerrainRenderer::recreatePipelines() {
         LOG_ERROR("TerrainRenderer::recreatePipelines: failed to load vertex shader");
         return;
     }
-    if (!fragShader.loadFromFile(device, "assets/shaders/terrain.frag.spv")) {
+    if (!fragShader.loadFromFile(device, (vkCtx->hardwareRayQueryEnabled() ? "assets/shaders/terrain_hw.frag.spv" : "assets/shaders/terrain.frag.spv"))) {
         LOG_ERROR("TerrainRenderer::recreatePipelines: failed to load fragment shader");
         vertShader.destroy();
         return;
@@ -319,6 +321,7 @@ void TerrainRenderer::shutdown() {
     flatNormalTexture.reset();
 
     destroy(device, pipeline);
+    destroy(device, surfacePipeline_);surfaceRenderPass_=VK_NULL_HANDLE;
     destroy(device, wireframePipeline);
     destroy(device, pipelineLayout);
     destroy(device, materialDescPool);
@@ -1033,6 +1036,7 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
         const auto& ch = chunks[i];
         const size_t level = static_cast<size_t>(levels[i]);
         ChunkDraw draw;
+        draw.surfaceIdentity = ch.surfaceIdentity;
         draw.material = ch.materialSet;
         draw.geometry = geometryOf(ch);
         draw.ranges[0] = ch.lods[level];
@@ -1080,10 +1084,37 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
     return list;
 }
 
-void TerrainRenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const DrawList& list) {
+void TerrainRenderer::prepareSurface(SurfacePass& pass) {
+    surfacePass_=&pass;
+    if(surfaceRenderPass_==pass.geometryPass())return;
+    DeferredResources release(*vkCtx);release.destroy(surfacePipeline_);
+    VkShaderModule vert,frag;
+    if(!vert.loadFromFile(vkCtx->getDevice(),"assets/shaders/terrain.vert.spv") ||
+       !frag.loadFromFile(vkCtx->getDevice(),"assets/shaders/terrain_surface.frag.spv"))
+        throw std::runtime_error("Terrain surface shaders unavailable");
+    surfacePipeline_=PipelineBuilder().setShaders(vert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),frag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+        .setVertexInput({perVertexBinding(sizeof(pipeline::TerrainVertex))},toVkAttributes(kTerrainVertexAttributes))
+        .setRasterization(VK_POLYGON_MODE_FILL,VK_CULL_MODE_NONE).setDepthTest(true,true,VK_COMPARE_OP_LESS_OR_EQUAL)
+        .setColorBlendAttachments(std::vector<VkPipelineColorBlendAttachmentState>(3,PipelineBuilder::blendDisabled()))
+        .setMultisample(vkCtx->getMsaaSamples()).setLayout(pipelineLayout).setRenderPass(pass.geometryPass())
+        .setDynamicStates(viewportAndScissorDynamic()).build(vkCtx->getDevice(),vkCtx->getPipelineCache());
+    if(!surfacePipeline_) {LOG_ERROR("Terrain surface pipeline creation failed");throw std::runtime_error("Terrain surface pipeline unavailable");}
+    surfaceRenderPass_=pass.geometryPass();
+}
+void TerrainRenderer::recordSurface(VkDescriptorSet perFrameSet,const DrawList& list,const glm::vec3& camera) {
+    if(list.view.empty())return;
+    auto cmd=surfacePass_->beginRun(SurfacePass::Family::Terrain,true);
+    recordChunks(cmd,perFrameSet,list,surfacePass_,camera);
+    surfacePass_->endRun(SurfacePass::Family::Terrain);
+}
+void TerrainRenderer::recordView(VkCommandBuffer cmd,VkDescriptorSet perFrameSet,const DrawList& list) {
+    recordChunks(cmd,perFrameSet,list,nullptr,{});
+}
+void TerrainRenderer::recordChunks(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const DrawList& list,
+                                  SurfacePass* surfaces,const glm::vec3& camera) {
     if (!pipeline || list.view.empty()) return;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      list.wireframe && wireframePipeline ? wireframePipeline : pipeline);
+                      surfaces ? surfacePipeline_ : list.wireframe && wireframePipeline ? wireframePipeline : pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                              0, 1, &perFrameSet, 0, nullptr);
     GPUPushConstants push{};
@@ -1102,10 +1133,20 @@ void TerrainRenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
                                offsetof(GPUPushConstants, localLights), sizeof(draw.lights), &draw.lights);
             pushedLights = draw.lights;
         }
-        if (!surfacePushed || draw.surface.baked != pushedSurface.baked || draw.surface.relief != pushedSurface.relief) {
+        TerrainSurfacePush surface=draw.surface;
+        if(surfaces) {
+            SurfacePass::M2Material material{};
+            material.localLights=draw.lights;
+            material.identity={uint32_t(draw.surfaceIdentity),uint32_t(draw.surfaceIdentity>>32),0,0};
+            material.previousFromCurrent[3]=glm::vec4(camera-surfaces->previousRtCamera(),1);
+            material.history.x=surfaces->rtHistoryValid()?1u:0u;
+            const uint32_t index=surfaces->appendMaterial(SurfacePass::Family::Terrain,material);
+            std::memcpy(&surface.relief.y,&index,sizeof(index));
+        }
+        if (!surfacePushed || surface.baked != pushedSurface.baked || surface.relief != pushedSurface.relief) {
             vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
-                               kSurfacePushOffset, sizeof(draw.surface), &draw.surface);
-            pushedSurface = draw.surface;
+                               kSurfacePushOffset, sizeof(surface), &surface);
+            pushedSurface = surface;
             surfacePushed = true;
         }
         if (boundVertices != draw.geometry.vertices || boundIndices != draw.geometry.indices) {

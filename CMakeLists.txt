@@ -605,6 +605,14 @@ function(compile_shaders TARGET_NAME)
     # then the extra glslc arguments. Ray queries need SPIR-V 1.4 or later,
     # hence the target environment on the hardware tracer.
     set(SHADER_VARIANTS
+        "character.frag.glsl|character_surface.frag.spv|-DCHARACTER_GBUFFER"
+        "terrain.frag.glsl|terrain_surface.frag.spv|-DTERRAIN_GBUFFER"
+        "surface_lighting.frag.glsl|surface_lighting_ms.frag.spv|-DSURFACE_MSAA"
+        "terrain.frag.glsl|terrain_hw.frag.spv|-DRT_HARDWARE --target-env=vulkan1.2"
+        "character.frag.glsl|character_hw.frag.spv|-DRT_HARDWARE --target-env=vulkan1.2"
+        "water.frag.glsl|water_hw.frag.spv|-DRT_HARDWARE --target-env=vulkan1.2"
+        "m2.frag.glsl|m2_hw.frag.spv|-DRT_HARDWARE --target-env=vulkan1.2"
+        "wmo.frag.glsl|wmo_hw.frag.spv|-DRT_HARDWARE --target-env=vulkan1.2"
         "surface_rt.comp.glsl|surface_rt_extra.comp.spv|-DSURFACE_EXTRA"
         "surface_rt.comp.glsl|surface_rt_ms.comp.spv|-DSURFACE_MSAA"
         "surface_rt.comp.glsl|surface_rt_extra_ms.comp.spv|-DSURFACE_EXTRA -DSURFACE_MSAA"
@@ -614,10 +622,8 @@ function(compile_shaders TARGET_NAME)
         "surface_rt.comp.glsl|surface_rt_extra_hw_ms.comp.spv|-DSURFACE_EXTRA -DRT_HARDWARE --target-env=vulkan1.2 -DSURFACE_MSAA"
         "surface_rt_filter.comp.glsl|surface_rt_filter_ms.comp.spv|-DSURFACE_MSAA"
         "m2.vert.glsl|m2_surface.vert.spv|-DM2_GBUFFER"
-        "m2_lighting.frag.glsl|m2_lighting_ms.frag.spv|-DSURFACE_MSAA"
         "surface_rt_filter.comp.glsl|surface_rt_filter_wide.comp.spv|-DSURFACE_WIDE"
         "surface_rt_filter.comp.glsl|surface_rt_filter_wide_ms.comp.spv|-DSURFACE_WIDE -DSURFACE_MSAA"
-        "wmo_lighting.frag.glsl|wmo_lighting_ms.frag.spv|-DSURFACE_MSAA"
         "rt_prepare.comp.glsl|rt_prepare_ms.comp.spv|-DRT_MSAA"
         "rt_trace.comp.glsl|rt_trace_hw.comp.spv|-DRT_HARDWARE --target-env=vulkan1.2"
     )
@@ -1062,7 +1068,6 @@ set(WOWEE_SOURCES
     src/rendering/frustum.cpp
     src/rendering/rt_bvh.cpp
     src/rendering/rt_scene.cpp
-    src/rendering/rt_lighting.cpp
     src/rendering/performance_hud.cpp
     src/rendering/water_renderer.cpp
     src/rendering/liquid_scene.cpp
@@ -2313,6 +2318,7 @@ endif()
 option(WOWEE_BUILD_RT_PROBE "Build the ray traced lighting probe (tools/rt_probe.cpp)" OFF)
 if(WOWEE_BUILD_RT_PROBE)
     add_executable(rt_probe
+        tools/legacy_rt_lighting.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tools/rt_probe.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/surface_rt_probe.cpp
         ${WOWEE_PLATFORM_SOURCES}
@@ -2976,7 +2982,6 @@ add_executable(wowee_editor
     src/rendering/frustum.cpp
     src/rendering/rt_bvh.cpp
     src/rendering/rt_scene.cpp
-    src/rendering/rt_lighting.cpp
     src/rendering/volumetric_fog.cpp
 
     # Core

@@ -1,4 +1,4 @@
-#include "rendering/rt_lighting.hpp"
+#include "legacy_rt_lighting.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/rt_region.hpp"
 #include "rendering/rt_pass_data.hpp"
@@ -295,26 +295,6 @@ bool RtLighting::prepare(VkExtent2D sceneExtent) {
     return true;
 }
 
-VkImageView RtLighting::lightViewForSlot(uint32_t slot) const {
-    const Slot& other = slots_[(slot + 1) % MAX_FRAMES_IN_FLIGHT];
-    return other.out.img.imageView ? other.out.img.imageView : neutral_.imageView;
-}
-
-VkImageView RtLighting::reflectionViewForSlot(uint32_t slot) const {
-    const Slot& other = slots_[(slot + 1) % MAX_FRAMES_IN_FLIGHT];
-    return other.reflection.img.imageView ? other.reflection.img.imageView : neutral_.imageView;
-}
-
-VkImageView RtLighting::geometryViewForSlot(uint32_t slot) const {
-    const Slot& other = slots_[(slot + 1) % MAX_FRAMES_IN_FLIGHT];
-    return other.gbuf.img.imageView ? other.gbuf.img.imageView : neutral_.imageView;
-}
-
-VkImageView RtLighting::giViewForSlot(uint32_t slot) const {
-    const Slot& other = slots_[(slot + 1) % MAX_FRAMES_IN_FLIGHT];
-    return other.outGi.img.imageView ? other.outGi.img.imageView : neutral_.imageView;
-}
-
 VkImageView RtLighting::depthViewFor(VkImage image, bool msaa) {
     if (image == depthImage_ && msaa == depthViewMsaa_ && depthView_) return depthView_;
     VkDevice dev = ctx_->getDevice();
@@ -528,19 +508,7 @@ void RtLighting::record(VkCommandBuffer cmd, VkImage sceneDepth, VkExtent2D scen
     prevCameraPos_ = in.cameraPos;
     havePrev_ = true;
     resultFrame_ = frameCounter_;
-    resultViewProj_ = relativeViewProj;
-    resultCameraPos_ = in.cameraPos;
     resultMode_ = mode_;
-    resultDistance_ = in.distance;
-}
-
-RtLighting::ConsumerData RtLighting::consumerData() const {
-    ConsumerData c;
-    if (!active() || resultFrame_ == 0 || resultFrame_ + 1 != frameCounter_) return c;
-    c.viewProj = resultViewProj_;
-    c.cameraPos = glm::vec4(resultCameraPos_, 1.0f);
-    c.params = glm::vec4(static_cast<float>(resultMode_), resultDistance_ * 0.8f, resultDistance_, 0.0f);
-    return c;
 }
 
 } // namespace rendering

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include "rendering/rt_frame_inputs.hpp"
 
 #include <glm/glm.hpp>
 #include <vk_mem_alloc.h>
@@ -15,28 +16,8 @@ namespace rendering {
 
 class RtScene;
 
-/**
- * Ray traced sun shadows, ambient occlusion, one-bounce diffuse light and local
- * glass reflections for
- * the forward renderer.
- *
- * There is no G-buffer to trace from, so the pass runs after the opaque
- * geometry, on the depth it left: rebuild normals from depth, share one AO/GI hemisphere
- * intersection per pixel at half resolution, accumulate over frames with
- * reprojection, and smooth with an edge-aware filter. The surface shaders
- * read the result in the *next* frame, reprojecting their own position into
- * the frame the result was traced in (rt_lighting.glsli). Where that misses -
- * a surface just revealed, or one that moved - they fall back to the shadow
- * map and the flat ambient, so the one frame of latency only ever shows as
- * the old lighting, never as a hole.
- *
- * Only what RtScene holds casts: terrain, buildings and doodads. Characters
- * receive traced light and shadow but cast only into the shadow map.
- *
- * The results are double-buffered by frame slot. Slot s writes its outputs
- * after its opaque pass; the per-frame set of slot s binds the outputs of the
- * other slot, which is the frame before it.
- */
+// Historical depth-reconstructed RT implementation, linked only by rt_probe.
+// The product renderer uses SurfaceRt and explicit current forward receivers.
 class RtLighting {
 public:
     /// Persisted as an index; add at the end.
@@ -76,11 +57,6 @@ public:
 
     /// The immutable sampler for per-frame lighting, reflection and geometry bindings.
     [[nodiscard]] VkSampler sampler() const { return linearSampler_; }
-    /// What per-frame set `slot` binds at 3 (sun, AO, distance) and 4 (bounce).
-    [[nodiscard]] VkImageView lightViewForSlot(uint32_t slot) const;
-    [[nodiscard]] VkImageView giViewForSlot(uint32_t slot) const;
-    [[nodiscard]] VkImageView reflectionViewForSlot(uint32_t slot) const;
-    [[nodiscard]] VkImageView geometryViewForSlot(uint32_t slot) const;
     [[nodiscard]] VkImage reflectionImageWrittenBy(uint32_t slot) const { return slots_[slot].reflection.img.image; }
     [[nodiscard]] VkImageView neutralView() const { return neutral_.imageView; }
     /// The images slot `slot` writes, in GENERAL layout, at the trace size.
@@ -89,19 +65,7 @@ public:
     [[nodiscard]] VkImage giImageWrittenBy(uint32_t slot) const { return slots_[slot].outGi.img.image; }
     [[nodiscard]] VkExtent2D traceExtent() const { return traceExtent_; }
 
-    struct FrameInputs {
-        glm::mat4 view;
-        glm::mat4 projection;
-        glm::vec3 cameraPos;
-        glm::vec3 sunDir;      // toward the sun
-        glm::vec3 sunColor;
-        glm::vec3 skyColor;    // what the flat ambient term stands for
-        bool sunUp = true;
-        float distance = 0; // standalone probes can trace without a camera limit
-        /// Opt in only when a material consumer will read mirror radiance.
-        /// The client currently has none; the reflection GPU probe does.
-        bool traceReflections = false;
-    };
+    using FrameInputs = RtFrameInputs;
 
     /// Record the pass. Outside a render pass, after the opaque geometry.
     /// The depth image must be in DEPTH_STENCIL_ATTACHMENT_OPTIMAL and is
@@ -109,15 +73,6 @@ public:
     void record(VkCommandBuffer cmd, VkImage sceneDepth, VkExtent2D sceneExtent, bool depthMsaa,
                 const FrameInputs& in, bool sceneAlreadyPrepared = false);
 
-    /// What the surface shaders need to find last frame's result, for the
-    /// per-frame block: the camera-relative view-projection it was traced with, the camera
-    /// position, and params (x = mode, 0 when there is no usable result).
-    struct ConsumerData {
-        glm::mat4 viewProj{1.0f};
-        glm::vec4 cameraPos{0.0f};
-        glm::vec4 params{0.0f};
-    };
-    [[nodiscard]] ConsumerData consumerData() const;
 
 private:
     struct Target {
@@ -169,10 +124,8 @@ private:
     // the one that traced it, since that is whose slot the sets bind.
     uint64_t frameCounter_ = 0;
     uint64_t resultFrame_ = 0;
-    glm::mat4 resultViewProj_{1.0f};
-    glm::vec3 resultCameraPos_{0.0f};
     Mode resultMode_ = Mode::Off;
-    float distance_ = 0, resultDistance_ = 0;
+    float distance_ = 0;
     glm::mat4 prevViewProj_{1.0f};
     glm::vec3 prevCameraPos_{0.0f};
     bool havePrev_ = false;

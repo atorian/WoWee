@@ -271,7 +271,7 @@ bool WMORenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
         core::Logger::getInstance().error("WMORenderer: failed to load vertex shader");
         return false;
     }
-    if (!fragShader.loadFromFile(device, "assets/shaders/wmo.frag.spv")) {
+    if (!fragShader.loadFromFile(device, (vkCtx_->hardwareRayQueryEnabled() ? "assets/shaders/wmo_hw.frag.spv" : "assets/shaders/wmo.frag.spv"))) {
         core::Logger::getInstance().error("WMORenderer: failed to load fragment shader");
         return false;
     }
@@ -1279,16 +1279,6 @@ void WMORenderer::recordSurface(VkDescriptorSet perFrameSet, const Camera& camer
     surfaceRecordedFrame_=vkCtx_->frameNumber();
 }
 
-void WMORenderer::executeSurface(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
-        VkFramebuffer scene, VkSubpassContents resumeContents) {
-    if (recording_->view.surfaceMaterialCapacity == 0) return;
-    // Invert around the camera. Inverting a continent-sized translation loses
-    // precision before the perspective divide, visible in specular/shadow edges.
-    glm::mat4 rotation=camera.getViewMatrix();
-    rotation[3]=glm::vec4(0,0,0,1);
-    const glm::mat4 inverse=glm::inverse(camera.getProjectionMatrix()*rotation);
-    surfacePass_->execute(SurfacePass::Family::Wmo,cmd, perFrameSet, scene, inverse, resumeContents);
-}
 
 bool WMORenderer::cullPortals(const ModelData& model, const WMOInstance& instance,
         const SceneView& camera, const glm::vec3& portalViewerPos,
@@ -2415,7 +2405,7 @@ void WMORenderer::recreatePipelines() {
     // --- Load shaders ---
     VkShaderModule vertShader, fragShader;
     if (!vertShader.loadFromFile(device, "assets/shaders/wmo.vert.spv") ||
-        !fragShader.loadFromFile(device, "assets/shaders/wmo.frag.spv")) {
+        !fragShader.loadFromFile(device, (vkCtx_->hardwareRayQueryEnabled() ? "assets/shaders/wmo_hw.frag.spv" : "assets/shaders/wmo.frag.spv"))) {
         core::Logger::getInstance().error("WMORenderer::recreatePipelines: failed to load shaders");
         return;
     }

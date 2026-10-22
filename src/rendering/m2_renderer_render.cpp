@@ -1786,13 +1786,6 @@ void M2Renderer::recordSurface(VkDescriptorSet perFrameSet) {
     if(!surfaceMaterialCapacity()) {lastDrawCallCount=0;blendedPendingAfterWater_=drawsBlendedAfterWater();return;}
     recordView(VK_NULL_HANDLE,perFrameSet,{},true,true);
 }
-void M2Renderer::executeSurface(VkCommandBuffer cmd,VkDescriptorSet perFrameSet,const Camera& camera,
-        VkFramebuffer scene,VkSubpassContents contents) {
-    if(!surfaceMaterialCapacity())return;
-    glm::mat4 rotation=camera.getViewMatrix();rotation[3]=glm::vec4(0,0,0,1);
-    surfacePass_->execute(SurfacePass::Family::M2,cmd,perFrameSet,scene,
-        glm::inverse(camera.getProjectionMatrix()*rotation),contents);
-}
 
 void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                             const StarReplacement& drawStars, bool drawBakedStars, bool surfaces) {
@@ -1994,8 +1987,10 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 uint16_t lod = pending[lodIdx].targetLOD;
                 size_t lodEnd = lodIdx + 1;
                 VkRect2D groupRegion=pending[lodIdx].surfaceRegion;
+                bool groupOpaqueFade=pending[lodIdx].fadeAlpha==1.0f;
                 while (lodEnd < pending.size() && pending[lodEnd].targetLOD == lod) {
                     if(surfaces)groupRegion=SurfacePass::uniteRegions(groupRegion,pending[lodEnd].surfaceRegion);
+                    groupOpaqueFade=groupOpaqueFade && pending[lodEnd].fadeAlpha==1.0f;
                     ++lodEnd;
                 }
                 uint32_t groupSize = static_cast<uint32_t>(lodEnd - lodIdx);
@@ -2120,7 +2115,9 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         ? cutoutPipeline_
                         : blendPipeline(m2BlendPipeline(drawState.drawBlendMode));
                     if (skyMode_ && drawState.drawBlendMode <= 1) desiredPipeline = scenePipes_.alpha;
-                    const bool evaluated=surfaces && (drawState.forceCutout || drawState.drawBlendMode==0);
+                    const bool alphaOpaque=drawState.drawBlendMode==1 && batch.surfaceAlphaOpaque &&
+                        groupOpaqueFade && batch.batchOpacity==1.0f;
+                    const bool evaluated=surfaces && (drawState.forceCutout || drawState.drawBlendMode==0 || alphaOpaque);
                     if(evaluated && (!groupRegion.extent.width || !groupRegion.extent.height))continue;
                     if(surfaces && geometry!=evaluated) {
                         beginRun(evaluated);
@@ -2186,7 +2183,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // With the water out of the scene pass, the blended half waits for it:
     // drawn now, the water would be laid over it.
     blendedPendingAfterWater_ = drawsBlendedAfterWater();
-    if (!blendedPendingAfterWater_) {
+    if (!blendedPendingAfterWater_ && (!recording_->transparentVisible_.empty() || !recording_->glowSprites_.empty())) {
         if(surfaces && geometry)beginRun(false);
         recordTransparentPass(cmd, perFrameSet, drawStars, drawBakedStars);
     }
