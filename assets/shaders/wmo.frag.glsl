@@ -198,69 +198,7 @@ vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
     return color;
 }
 
-// The surface lit by one of the client's lights, before the room's own lamps
-// and the fog.
-vec3 shadeBy(int mode, vec3 tex, vec3 norm, RtLight rt, float shadow) {
-    // F_SIDN: after dark the material's glow colour adds to the light before
-    // the texture multiplies it, as WoW.exe's c29 emissive does, and the sum
-    // stops at twice the texture (wmo_night_glow.hpp). Every light but the
-    // vertex colours alone is drawn with the shader that adds it.
-    vec3 glow = mode == LIGHT_VERTEX_COLOUR ? vec3(0.0) : vec3(sidnR, sidnG, sidnB) * lightDir.w;
-    const bool glows = max(glow.r, max(glow.g, glow.b)) > 0.0;
-
-    if (mode == LIGHT_VERTEX_COLOUR || mode == LIGHT_BUILDING_AMBIENT) {
-        // WotLK MapObj shaders modulate the texture by 2 * vertex color.
-        // MOHD is the building's base ambient; MOCV adds authored warm/cool
-        // pools to it. Using max() flattened those colors into the ambient,
-        // notably erasing Dalaran's blue portal and warm torch lighting.
-        vec3 wmoAmbient = vec3(wmoAmbientR, wmoAmbientG, wmoAmbientB);
-        vec3 baked = hasVertexColors != 0
-            ? max(wmoAmbient + 2.0 * VertColor.rgb, vec3(0.15))
-            : vec3(1.0);  // Neutral modulation when no baked colors exist.
-        if (glows) baked = min(baked + glow, vec3(2.0));
-        // The baked light is multiplied by the shadow, as the client does it.
-        return tex * baked * shadowLightFactor(shadow);
-    }
-
-    vec3 ambient = ambientColor.rgb;
-    vec3 sun = lightColor.rgb;
-    if (mode == LIGHT_WINDOW) {
-        // The client's window light (light update 0x7ee750): the sun's colour
-        // is halfway between the zone's ambient and its sun, and the ambient
-        // is that again, sixteen 255ths brighter. A window is lit about as
-        // well from inside the room as from the street.
-        sun = 0.5 * (ambientColor.rgb + lightColor.rgb);
-        ambient = min(sun + 16.0 / 255.0, vec3(1.0));
-    }
-
-    vec3 ldir = normalize(-lightDir.xyz);
-    float diff = max(dot(norm, ldir), 0.0);
-
-    vec3 viewDir = normalize(viewPos.xyz - FragPos);
-    vec3 halfDir = normalize(ldir + viewDir);
-    float spec = pow(max(dot(norm, halfDir), 0.0), 32.0) * specularIntensity;
-
-    vec3 result = rtAmbient(rt, ambient) * tex + diff * sun * tex;
-
-    // An exterior group's vertex colour is light baked into it - a lamp's
-    // pool on a wall - and it adds to the sun, as it does in the client.
-    // It was multiplied in as if it were baked shadow, floored at a
-    // quarter: Stormwind has two exterior groups with vertex colours at
-    // all, both near black, and they drew at a quarter of the light the
-    // rest of the city had, shadows on or off - and so did 278 of the 362
-    // exterior groups in the game that carry any. A group without them has
-    // white filled in by the loader, which must add nothing.
-    //
-    // At half: a handful of Icecrown exteriors ship them pure white, and
-    // added at full those would double in brightness.
-    if (hasVertexColors != 0) result += tex * VertColor.rgb * 0.5;
-
-    if (glows) result = min(result + tex * glow, tex * 2.0);
-
-    // All of it darkened alike by a shadow; the highlight is the sun's
-    // own and goes with it.
-    return result * shadowLightFactor(shadow) + shadow * spec * sun;
-}
+#include "wmo_surface_lighting.glsli"
 
 void main() {
     const vec3 receiverFace = receiverFaceNormal(FragPos);
@@ -319,117 +257,14 @@ void main() {
         norm = normalize(mix(vertexNormal, worldNormal, blend));
     }
 
-    vec3 result;
-
-    // Interior MOCV already contains the building's baked light and shade.
-    // Its roof blocks the outdoor sun; multiplying the baked term by that
-    // shadow darkened the entire room a second time. A room still takes the
-    // shadows of the units in it. Which batches the sun's map falls on is
-    // the renderer's call (wmoReceivesExteriorShadows).
-    const bool baked = light == LIGHT_VERTEX_COLOUR || light == LIGHT_BUILDING_AMBIENT;
-    const bool sunReaches = receivesExteriorShadows != 0;
-    // RT reconstructs triangle normals from depth; authored smooth normals
-    // can reject this same receiver at a corner and expose unoccluded ambient.
+    WmoLightingMaterial material = WmoLightingMaterial(light, transitionLight,
+        specularIntensity, vec3(wmoAmbientR, wmoAmbientG, wmoAmbientB),
+        vec3(sidnR, sidnG, sidnB), hasVertexColors, receivesExteriorShadows,
+        emissive, isLava);
+    WmoSurface surface = WmoSurface(FragPos, texColor, norm, vertexNormal,
+        receiverFace, VertColor, vLocalLights);
     RtLight rt = rtLightAt(FragPos, normalize(receiverFace));
-    float shadow = 1.0;
-    if (sunReaches && shadowParams.x > 0.5 && rtSunVisibility(rt) > 0.0) {
-        vec3 ldir = normalize(-lightDir.xyz);
-        // Texture relief changes lighting, not the caster geometry. Offsetting
-        // along its perturbed normal can push the lookup into the surface.
-        vec3 shadowNormal = dot(vertexNormal, ldir) >= 0.0 ? vertexNormal : -vertexNormal;
-        float normalOffset = shadowParams.w * 1.5 * (1.0 - abs(dot(shadowNormal, ldir)));
-        vec3 biasedPos = FragPos + shadowNormal * normalOffset;
-        vec4 lsPos = lightSpaceMatrix * vec4(biasedPos, 1.0);
-        vec3 proj = lsPos.xyz / lsPos.w;
-        proj.xy = proj.xy * 0.5 + 0.5;
-        vec2 receiverSlope = shadowReceiverSlope(receiverFace);
-        if (proj.x >= 0.0 && proj.x <= 1.0 &&
-            proj.y >= 0.0 && proj.y <= 1.0 &&
-            proj.z >= 0.0 && proj.z <= 1.0) {
-            shadow = sampleShadowReceiverPlane(uShadowMap, proj, receiverSlope);
-            shadow = mix(1.0, shadow, shadowMapEdgeFade(proj.xy * 2.0 - 1.0));
-        }
-    }
-    shadow = rtShadow(rt, shadow);
-    float unitShadow = shadow > 0.0 ? localShadowAt(FragPos, receiverFace) : 1.0;
-    if (baked) unitShadow = mix(unitShadow, 1.0, unitShadowAboveFade(FragPos));
-    shadow = min(shadow, unitShadow);
-
-    if (emissive == 1) {
-        // Authored luminous glass must remain bright in direct sun and shadow.
-        // A small warm bias keeps low-valued texels from reading as dark glass.
-        vec3 glass = texColor.rgb * 2.0 + vec3(0.16, 0.07, 0.015);
-
-        // Gentle guttering, weaker than the clock's open fire - these are steady
-        // lamps, not flames in the wind.
-        //
-        // Every lamp in a building shares one batch, so a uniform phase would
-        // pulse a whole street in lockstep. The phase is hashed from the lamp's
-        // world position instead, quantised into cells a few units across: large
-        // enough that one lamp's glass falls in a single cell, small enough that
-        // neighbouring lamps land in different ones.
-        vec3 cell = floor(FragPos * 0.2);
-        float h = fract(sin(dot(cell, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
-        float phase = h * 6.2831853;
-        float t = fogParams.z;
-        float flicker = 0.93
-                      + 0.05 * sin(t * 1.3 + phase)
-                      + 0.02 * sin(t * 2.9 + phase * 1.7);
-        result = glass * flicker;
-    } else if (emissive == 2) {
-        // Firelit from behind (Darkshire's clock face): the surface is still lit
-        // by the sun so it belongs to the building by day, with a warm glow
-        // seeping through it as if a fire burned in the tower.
-        vec3 ldir = normalize(-lightDir.xyz);
-        float diff = max(dot(norm, ldir), 0.0);
-        vec3 lit = texColor.rgb * (ambientColor.rgb + lightColor.rgb * diff) * shadowLightFactor(shadow);
-
-        // Three detuned sines: a slow breathing sway, a quicker wobble, and a
-        // faint fast jitter. Their periods share no common multiple over any
-        // watchable span, so the flame never visibly loops.
-        float t = fogParams.z;
-        float flicker = 0.84
-                      + 0.10 * sin(t * 1.3)
-                      + 0.05 * sin(t * 2.9 + 1.7)
-                      + 0.03 * sin(t * 6.7 + 0.6);
-
-        // Firelight only competes with daylight once the sun is down, so fade the
-        // glow up as the scene darkens. A small floor keeps it faintly visible in
-        // daytime shade rather than switching on at dusk.
-        float daylight = clamp(dot(ambientColor.rgb + lightColor.rgb,
-                                   vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
-        float night = mix(1.0, 0.22, daylight);
-
-        const vec3 kFireColor = vec3(1.0, 0.58, 0.22);
-        result = lit + kFireColor * (0.30 * flicker * night);
-
-        // Glass covering the dial: a tight sun highlight plus a Fresnel sheen
-        // that picks up sky colour at grazing angles, which is what sells a pane
-        // in front of the face rather than paint on stone. Both are additive and
-        // unaffected by the fire, since they live on the outer surface.
-        vec3 viewDir = normalize(viewPos.xyz - FragPos);
-        vec3 halfDir = normalize(ldir + viewDir);
-        float gloss  = pow(max(dot(norm, halfDir), 0.0), 96.0);
-        float fresnel = pow(1.0 - clamp(dot(norm, viewDir), 0.0, 1.0), 4.0);
-        result += lightColor.rgb * (gloss * 0.55 * shadow)
-                + ambientColor.rgb * (fresnel * 0.35);
-    } else if (isLava != 0) {
-        // Lava is self-luminous - bright emissive, no shadows
-        result = texColor.rgb * 1.5;
-    } else {
-        result = shadeBy(light, texColor.rgb, norm, rt, shadow);
-        // A transition batch is where a room meets the outside: the client
-        // draws it lit, then unlit over it, the two weighed by the vertex
-        // colour's alpha - lit where it is 1, the room's own light where it
-        // is 0.
-        if (transitionLight >= 0)
-            result = mix(shadeBy(transitionLight, texColor.rgb, norm, rt, shadow), result,
-                         VertColor.a);
-    }
-
-    if (isLava == 0) result += lightningDiffuse(FragPos, norm, texColor.rgb);
-    if (isLava == 0)
-        result +=localLightContribution(FragPos, norm, texColor.rgb, vLocalLights);
+    vec3 result = shadeWmoSurface(surface, material, rt);
 
     float dist = length(viewPos.xyz - FragPos);
 

@@ -46,6 +46,17 @@ checkout remains on master with its concurrent uncommitted work preserved.
 - Existing other pre-passes retain their local barriers until migrated to imports.
   This is a dependency foundation, not yet a G-buffer/RT pass conversion.
 
+## Material boundary
+
+- WMO geometry/texture evaluation now hands an explicit WmoSurface and
+  WmoLightingMaterial to shared lighting code. POM, alpha test and normal
+  sampling remain in geometry; nonlinear glow/transitions remain in lighting.
+- The forward shader uses that same evaluator today. Three WMO regression PNGs
+  remain byte-identical to the pre-refactor references with sync validation.
+- [Surface layout and memory contract](../docs/rendering-pipeline-layout.md)
+  selects three MRTs, per-sample MSAA handling and explicit transient lifetimes.
+  The attachments and current-frame lighting are not yet connected to Renderer.
+
 ## Validation so far
 
 - Native dev/no-LTO renderer, scene_render and GPU mutation fixture build passed.
