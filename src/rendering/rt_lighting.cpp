@@ -1,6 +1,7 @@
 #include "rendering/rt_lighting.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/rt_region.hpp"
+#include "rendering/rt_pass_data.hpp"
 #include "rendering/vk_shader.hpp"
 #include "core/logger.hpp"
 
@@ -12,20 +13,6 @@ namespace rendering {
 
 namespace {
 
-// Must match RtPassData in rt_common.glsli.
-struct RtPassData {
-    glm::mat4 invViewProj;
-    glm::mat4 prevViewProj;
-    glm::vec4 cameraPos;
-    glm::vec4 prevCameraPos;
-    glm::vec4 sunDir;
-    glm::vec4 sunColor;
-    glm::vec4 skyColor;
-    glm::vec4 params;
-    glm::vec4 extent;
-    glm::vec4 sceneExtent;
-    glm::vec4 misc;
-};
 
 enum Binding : uint32_t {
     kUbo = 0,
@@ -412,7 +399,7 @@ void RtLighting::writeSlotSets(uint32_t slotIndex) {
 }
 
 void RtLighting::record(VkCommandBuffer cmd, VkImage sceneDepth, VkExtent2D sceneExtent,
-                        bool depthMsaa, const FrameInputs& in) {
+                        bool depthMsaa, const FrameInputs& in, bool sceneAlreadyPrepared) {
     if (!active() || traceExtent_.width == 0 || sceneDepth == VK_NULL_HANDLE) return;
     if (sceneExtent.width != sceneExtent_.width || sceneExtent.height != sceneExtent_.height) {
         // The scene changed size under us; prepare() resizes next frame.
@@ -426,7 +413,7 @@ void RtLighting::record(VkCommandBuffer cmd, VkImage sceneDepth, VkExtent2D scen
     Slot& s = slots_[slotIndex];
     if (!s.wroteImages || s.boundDepth != depthImage_) writeSlotSets(slotIndex);
 
-    scene_->update(cmd);
+    if (!sceneAlreadyPrepared) scene_->update(cmd);
     // Separates building the scene from tracing it in the GPU timings.
     ctx_->gpuMark(cmd, RtScene::kGpuMarkLabel);
 

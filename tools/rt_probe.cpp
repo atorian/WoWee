@@ -41,6 +41,7 @@
 
 #include "rt_lookup_probe.hpp"
 #include "rt_residency_probe.hpp"
+#include "../tests/surface_rt_probe.hpp"
 
 using namespace wowee::rendering;
 
@@ -106,6 +107,11 @@ int main(int argc, char** argv) {
             SDL_Quit();
             std::printf("%s\n", failures == 0 ? "PASS" : "FAIL");
             return failures == 0 ? 0 : 1;
+        }
+        if (hasArgument("--surfaces")) {
+            const int failures=checkSurfaceRt(ctx);
+            ctx.flushDeferredCleanup();ctx.shutdown();SDL_DestroyWindow(window);SDL_Quit();
+            std::printf("%s\n",failures?"FAIL":"PASS");return failures?1:0;
         }
         if (hasArgument("--residency")) {
             const int failures = checkRtResidency(ctx);

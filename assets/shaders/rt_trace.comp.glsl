@@ -16,6 +16,8 @@
 #include "rt_trace_sw.glsli"
 #endif
 
+#include "rt_integrate.glsli"
+
 layout(set = 0, binding = 3) uniform sampler2D uGbufCur;
 layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D uRaw;
 layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D uRawGi;
@@ -40,46 +42,11 @@ void main() {
     vec3 n = rtGbufNormal(g);
     vec3 p = rtGbufWorld(g, px);
     vec3 origin = p + n * rtSurfaceOffset(dist);
-    uint rng = rtSeed(uvec2(px), uint(pass.cameraPos.w));
-    float sun = 0.0;
     vec3 L = normalize(pass.sunDir.xyz);
-    if (pass.sunColor.w > 0.5 && dot(n, L) > 0.0) {
-        vec3 sd = rtConeSample(L, pass.sunDir.w, rng);
-        sun = rtOccluded(origin, sd, pass.params.w, rng) ? 0.0 : 1.0;
-    }
-
-    float ao = 1.0;
-    vec3 indirectDelta = vec3(0.0);
-    if (mode >= RT_MODE_AO) {
-        // Both estimators sample the same cosine-weighted hemisphere. The
-        // closest hit out to the GI range also tells us whether anything
-        // intersects the shorter AO range: do not traverse the scene twice.
-        vec3 direction = rtCosineHemisphere(n, rng);
-        float range = mode >= RT_MODE_GI ? pass.params.z : pass.params.y;
-        float t;
-        vec3 hn;
-        vec4 hs;
-        bool hit = rtClosest(origin, direction, range, rng, t, hn, hs);
-        if (hit) ao = clamp(t / pass.params.y, 0.0, 1.0);
-
-        if (mode >= RT_MODE_GI) {
-            vec3 incoming = pass.skyColor.rgb;
-            if (hit) {
-                vec3 hp = origin + direction * t;
-                vec3 radiance = pass.skyColor.rgb;
-                float ndl = dot(hn, L);
-                if (pass.sunColor.w > 0.5 && ndl > 0.0 &&
-                    !rtOccluded(hp + hn * rtSurfaceOffset(t), L, pass.params.w, rng)) {
-                    radiance += pass.sunColor.rgb * ndl;
-                }
-                incoming = hs.rgb * radiance;
-            }
-            // Forward composition starts with sky * AO. Store the signed
-            // correction to that baseline, so AO is retained without
-            // occluding the traced one-bounce radiance a second time.
-            indirectDelta = incoming - pass.skyColor.rgb * ao;
-        }
-    }
+    uint rng = rtSeed(uvec2(px), uint(pass.cameraPos.w));
+    float sun, ao;
+    vec3 indirectDelta;
+    rtIntegrate(p, n, dist, mode, rng, sun, ao, indirectDelta);
 
     // Reflection is view-dependent: do not accumulate it in diffuse history or
     // blur it across the window frame. Only nearby non-horizontal receivers need

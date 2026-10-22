@@ -37,7 +37,13 @@ layout(set = 0, binding = 0) uniform PerFrame {
 
 #include "lightning_light.glsli"
 
+#ifdef WMO_CURRENT_RT
+vec4 currentRtParams;
+#define rtParams currentRtParams
+#include "rt_light_composition.glsli"
+#else
 #include "rt_lighting.glsli"
+#endif
 #include "contact_shadows.glsli"
 #include "sky_atmosphere.glsli"
 #include "aerial_frame.glsli"

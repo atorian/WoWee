@@ -1,0 +1,542 @@
+{
+  "implementation": "Current-frame opaque/cutout WMO RT, missing-receiver worklist, temporal identity and tiled spatial filtering",
+  "branch": "codex/gpu-scene-pipeline",
+  "parentCommit": "5d39a9b",
+  "date": "2026-10-22",
+  "scene": {
+    "map": "Northrend",
+    "mapId": 571,
+    "zoneId": 2817,
+    "hour": 9.408292770385742,
+    "origin": [
+      5824.882487012499,
+      666.949869825,
+      641.9556274414062
+    ],
+    "playerPosition": [
+      5946.4130859375,
+      623.02783203125,
+      655.4375
+    ],
+    "streamWorld": false,
+    "models": [
+      {
+        "path": "WORLD\\WMO\\NORTHREND\\DALARAN\\ND_DALARAN.WMO",
+        "rotation": [
+          0,
+          0,
+          -39
+        ]
+      }
+    ],
+    "camera": {
+      "position": [
+        5946.4130859375,
+        623.02783203125,
+        655.4375
+      ],
+      "yaw": 166.30895876598606,
+      "pitch": -18.600008189205408
+    },
+    "fov": 70.0,
+    "viewDistance": 2500,
+    "size": [
+      2560,
+      1369
+    ],
+    "frames": 240,
+    "msaa": 1,
+    "fxaa": true,
+    "bloom": 0,
+    "volumetricFog": 3,
+    "volumetricDensity": 1,
+    "shadowQuality": 2,
+    "rayTracedLighting": 3,
+    "rtDistance": 300,
+    "fogStrength": 0.85
+  },
+  "gpu": "AMD Radeon RX 7700 XT",
+  "driver": "2.0.395",
+  "build": "dev, no LTO",
+  "validationEnabled": false,
+  "vsync": "FIFO; compare GPU timestamps, not FPS",
+  "executableSha256": "0bf65c716d210d47e53061c74d10a45621164a3331bd4f6801e4b5e6563eb47a",
+  "reference": {
+    "report": "/mnt/d/games/WoWee/tasks/performance/dalaran-wmo-gpu-investigation.json",
+    "gpu": {
+      "M2 cull": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "grass cull": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "minimap_composite": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "offscreen_composites": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "terrain_bake": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "shadows": {
+        "meanMs": 0.19,
+        "p95Ms": 0.29,
+        "maxMs": 0.77
+      },
+      "contact shadows": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "volumetric fog": {
+        "meanMs": 0.29,
+        "p95Ms": 0.41,
+        "maxMs": 0.68
+      },
+      "reflection_pass": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "sky capture": {
+        "meanMs": 0.05,
+        "p95Ms": 0.07,
+        "maxMs": 0.25
+      },
+      "scene pass begin": {
+        "meanMs": 0.02,
+        "p95Ms": 0.03,
+        "maxMs": 0.44
+      },
+      "terrain": {
+        "meanMs": 0.01,
+        "p95Ms": 0.01,
+        "maxMs": 0.14
+      },
+      "sky": {
+        "meanMs": 0.63,
+        "p95Ms": 0.76,
+        "maxMs": 1.05
+      },
+      "wmo": {
+        "meanMs": 7.62,
+        "p95Ms": 11.74,
+        "maxMs": 12.34
+      },
+      "selection": {
+        "meanMs": 0.0,
+        "p95Ms": 0.01,
+        "maxMs": 0.01
+      },
+      "characters": {
+        "meanMs": 0.0,
+        "p95Ms": 0.01,
+        "maxMs": 0.01
+      },
+      "m2": {
+        "meanMs": 0.0,
+        "p95Ms": 0.01,
+        "maxMs": 0.01
+      },
+      "water/effects": {
+        "meanMs": 0.0,
+        "p95Ms": 0.01,
+        "maxMs": 0.05
+      },
+      "world total": {
+        "meanMs": 0.0,
+        "p95Ms": 0.01,
+        "maxMs": 0.04
+      },
+      "rt_scene": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.04
+      },
+      "rt_lighting": {
+        "meanMs": 2.42,
+        "p95Ms": 2.78,
+        "maxMs": 4.3
+      },
+      "post-process": {
+        "meanMs": 0.17,
+        "p95Ms": 0.21,
+        "maxMs": 0.24
+      },
+      "bloom filter": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "interface": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      }
+    },
+    "wholeGpu": {
+      "meanMs": 11.42,
+      "p95Ms": 15.31,
+      "maxMs": 16.38
+    },
+    "cpuRenderWorld": {
+      "meanMs": 0.35,
+      "p95Ms": 0.57,
+      "maxMs": 1.92
+    },
+    "measuredFrames": 230
+  },
+  "initialCurrentRt": {
+    "measuredFrames": 230,
+    "gpu": {
+      "M2 cull": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "grass cull": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "minimap_composite": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "offscreen_composites": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "terrain_bake": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "shadows": {
+        "meanMs": 0.18,
+        "p95Ms": 0.19,
+        "maxMs": 0.34
+      },
+      "contact shadows": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "volumetric fog": {
+        "meanMs": 0.26,
+        "p95Ms": 0.27,
+        "maxMs": 0.47
+      },
+      "reflection_pass": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "sky capture": {
+        "meanMs": 0.03,
+        "p95Ms": 0.07,
+        "maxMs": 0.43
+      },
+      "rt_scene": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "scene pass begin": {
+        "meanMs": 0.02,
+        "p95Ms": 0.05,
+        "maxMs": 0.15
+      },
+      "terrain": {
+        "meanMs": 0.01,
+        "p95Ms": 0.01,
+        "maxMs": 0.06
+      },
+      "sky": {
+        "meanMs": 0.77,
+        "p95Ms": 0.96,
+        "maxMs": 1.11
+      },
+      "wmo": {
+        "meanMs": 6.78,
+        "p95Ms": 7.23,
+        "maxMs": 12.07
+      },
+      "selection": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "characters": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "m2": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.01
+      },
+      "water/effects": {
+        "meanMs": 0.01,
+        "p95Ms": 0.13,
+        "maxMs": 0.3
+      },
+      "world total": {
+        "meanMs": 0.02,
+        "p95Ms": 0.13,
+        "maxMs": 0.33
+      },
+      "rt_lighting": {
+        "meanMs": 2.61,
+        "p95Ms": 2.82,
+        "maxMs": 3.02
+      },
+      "post-process": {
+        "meanMs": 0.16,
+        "p95Ms": 0.17,
+        "maxMs": 0.2
+      },
+      "bloom filter": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "interface": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      }
+    },
+    "wholeGpu": {
+      "meanMs": 10.86,
+      "p95Ms": 11.43,
+      "maxMs": 16.15
+    },
+    "cpuRenderWorld": {
+      "meanMs": 0.46,
+      "p95Ms": 0.62,
+      "maxMs": 0.7
+    },
+    "rawLog": "/mnt/d/games/WoWee/build-dev/scratch/gpu-scene-pipeline/surface-cost-current-rt-surfaces.log"
+  },
+  "currentRtTiled": {
+    "measuredFrames": 230,
+    "gpu": {
+      "M2 cull": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "grass cull": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "minimap_composite": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "offscreen_composites": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "terrain_bake": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "shadows": {
+        "meanMs": 0.18,
+        "p95Ms": 0.19,
+        "maxMs": 0.21
+      },
+      "contact shadows": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "volumetric fog": {
+        "meanMs": 0.26,
+        "p95Ms": 0.26,
+        "maxMs": 0.3
+      },
+      "reflection_pass": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "sky capture": {
+        "meanMs": 0.04,
+        "p95Ms": 0.07,
+        "maxMs": 0.07
+      },
+      "rt_scene": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "scene pass begin": {
+        "meanMs": 0.02,
+        "p95Ms": 0.02,
+        "maxMs": 0.06
+      },
+      "terrain": {
+        "meanMs": 0.01,
+        "p95Ms": 0.01,
+        "maxMs": 0.11
+      },
+      "sky": {
+        "meanMs": 0.77,
+        "p95Ms": 0.96,
+        "maxMs": 1.07
+      },
+      "wmo": {
+        "meanMs": 6.55,
+        "p95Ms": 7.05,
+        "maxMs": 12.34
+      },
+      "selection": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "characters": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "m2": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "water/effects": {
+        "meanMs": 0.02,
+        "p95Ms": 0.13,
+        "maxMs": 0.35
+      },
+      "world total": {
+        "meanMs": 0.01,
+        "p95Ms": 0.05,
+        "maxMs": 0.31
+      },
+      "rt_lighting": {
+        "meanMs": 2.68,
+        "p95Ms": 2.72,
+        "maxMs": 8.23
+      },
+      "post-process": {
+        "meanMs": 0.17,
+        "p95Ms": 0.2,
+        "maxMs": 0.42
+      },
+      "bloom filter": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      },
+      "interface": {
+        "meanMs": 0.0,
+        "p95Ms": 0.0,
+        "maxMs": 0.0
+      }
+    },
+    "wholeGpu": {
+      "meanMs": 10.72,
+      "p95Ms": 11.34,
+      "maxMs": 16.4
+    },
+    "cpuRenderWorld": {
+      "meanMs": 0.47,
+      "p95Ms": 0.64,
+      "maxMs": 0.77
+    },
+    "rawLog": "/mnt/d/games/WoWee/build-dev/scratch/gpu-scene-pipeline/surface-cost-current-rt-tiled-surfaces.log"
+  },
+  "shaderSha256": {
+    "surface_rt.comp.spv": "4ee94d607311db44876da26fb9a3c9597a38cd508821f5bdc47d776d4fc228d1",
+    "surface_rt_extra.comp.spv": "f0e26084a57aea5f5ddf22669af709782e703ee0067527ada63d7155e456c42b",
+    "surface_rt_extra_hw.comp.spv": "6bd1437069179bda5b21f106af2292736a8f4a72f72051ef641b277c4bb3a805",
+    "surface_rt_extra_hw_ms.comp.spv": "87d1de66ee8b0efb88799a5d53fc99ff2890d14fca582f2d17401d38dc994fb1",
+    "surface_rt_extra_ms.comp.spv": "5e1aac51d9f55e4b119efa08ac346f61dd42f3ea011f877cf77fd87339bbb4a8",
+    "surface_rt_filter.comp.spv": "93b5f5ffe2b8a69b7755f9c12d825077a1cb1e0fe17ac7299b5aa9e031e07529",
+    "surface_rt_filter_ms.comp.spv": "f736b76300b2f80bfe83214c71b6e61d057bfffc2d11a48dbc51007112656a3b",
+    "surface_rt_hw.comp.spv": "da1b7688e4c2acdabcb78e5a1ae90027610c1132b1b6bf8d4229785d4e3042c5",
+    "surface_rt_hw_ms.comp.spv": "b23e9caf066c9fcfc058af17fcb6eaf5d510835841846961baa708dc1e495bf7",
+    "surface_rt_ms.comp.spv": "9d1e7c4be1eee75116d79ea184254845e8c90ae8ad891bf3d7692175df1a66d5"
+  },
+  "pngSha256": "62140b0b6baba9e724de56e84e1c5867ad7a5e0ac2ddce0643a11bacee9c30ec",
+  "memory": {
+    "meaning": "Logical added buffers/images; not measured allocator/VRAM/process peaks",
+    "materialBytesPerDrawPerSlot": 176,
+    "rtScratchBytesPerSample": 20,
+    "rtIndirectBytes": 16,
+    "historyBytesPerHalfResolutionBlockPerSlot": 48,
+    "frameSlots": 2,
+    "extent": [
+      2560,
+      1369
+    ],
+    "rtAddedBytes1x": 154265616,
+    "rtAddedBytes4x": 364544016,
+    "surfaceColorBytes1x": 140185600,
+    "surfaceColorBytes4x": 560742400
+  },
+  "filterComparison": {
+    "layers1x": {
+      "changedRgbChannels": 0
+    },
+    "layers4x": {
+      "changedRgbChannels": 0
+    },
+    "dalaran640x480": {
+      "changedRgbChannels": 1,
+      "maxChannelError": 1
+    },
+    "dalaran2560x1369": {
+      "totalRgbChannels": 10513920,
+      "changedRgbChannels": 20,
+      "maxChannelError": 1
+    },
+    "source": "Saved pre-tiled captures vs new captures; integer channel error /255"
+  },
+  "validation": {
+    "hardwareSurfaceProbe": "PASS, 1x and 4x, first-frame/missed receivers, distinct MSAA normals, uncovered samples, accumulation, lifetime rejection, finite GI",
+    "softwareSurfaceProbe": "PASS, same assertions",
+    "legacyProbe": "PASS on hardware and software, --translated --sweep",
+    "negativeControl": "Reversed winding failed lit receiver assertions before normal orientation fix; ../current-rt-probe-winding-before.log",
+    "sceneRender": "RT3 serial/parallel identical; 1x/4x ordered layers, real Dalaran; RT3 queued WMO removal with MSAA4+FXAA",
+    "rtOffCompatibility": "PASS seven cases: serial/parallel, 1x/4x, night, FXAA with target recreation, interleaved layers and reorder negative control",
+    "sweepGuard": "Every available sweep at or under ceiling; unavailable data/server/FrameXML fixtures explicitly skipped",
+    "logs": "../current-rt-probe-{hardware,software}.log; ../current-rt-legacy-{hardware,software}.log; ../finish-current-rt-tiled.log; ../check-current-rt-compat.log; ../current-rt-sweep.log",
+    "currentRtTargetRecreation": "PASS: MSAA 4 -> 1 -> 4 and FXAA off/on, serial/parallel images identical, forced synchronization validation",
+    "strictLogScan": "36 logs, zero unexpected renderer/validation errors; excluded only the two exact stale Epic overlay manifest messages"
+  },
+  "limitations": [
+    "Only primary opaque/cutout WMO converted, opt-in WOWEE_WMO_SURFACES=1; default unchanged.",
+    "Legacy RT remains for other geometry families, blended layers and reflections; its full cost is included separately.",
+    "Historical comparison, not an isolated old/new A/B; clocks and background load not controlled.",
+    "Preflight refused competing renderers; authorized PID 28572 was already absent when the stop/restore wrapper ran, so no process was stopped or restarted by it. No continuous competitor monitor.",
+    "Current tracing, compaction and filtering run for each ordered opaque run; rays skip uncovered receivers but fullscreen scans remain.",
+    "Temporal accumulation covers one base receiver per half-resolution block; queued extra receivers have spatial filtering only. Last opaque run owning a block retains its history.",
+    "Rigid placement motion is captured; cloth disables history. Dedicated moving-transport image parity not established.",
+    "Storage-range limits are checked; automatic peak-memory budgeting on resize and larger MSAA/device capability policy remain unfinished.",
+    "No new full-client replay/FPS or process-memory measurement. Last full-client result: 46.727 FPS from d440fce."
+  ]
+}

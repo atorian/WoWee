@@ -605,6 +605,14 @@ function(compile_shaders TARGET_NAME)
     # then the extra glslc arguments. Ray queries need SPIR-V 1.4 or later,
     # hence the target environment on the hardware tracer.
     set(SHADER_VARIANTS
+        "surface_rt.comp.glsl|surface_rt_extra.comp.spv|-DSURFACE_EXTRA"
+        "surface_rt.comp.glsl|surface_rt_ms.comp.spv|-DSURFACE_MSAA"
+        "surface_rt.comp.glsl|surface_rt_extra_ms.comp.spv|-DSURFACE_EXTRA -DSURFACE_MSAA"
+        "surface_rt.comp.glsl|surface_rt_hw.comp.spv|-DRT_HARDWARE --target-env=vulkan1.2"
+        "surface_rt.comp.glsl|surface_rt_extra_hw.comp.spv|-DSURFACE_EXTRA -DRT_HARDWARE --target-env=vulkan1.2"
+        "surface_rt.comp.glsl|surface_rt_hw_ms.comp.spv|-DRT_HARDWARE --target-env=vulkan1.2 -DSURFACE_MSAA"
+        "surface_rt.comp.glsl|surface_rt_extra_hw_ms.comp.spv|-DSURFACE_EXTRA -DRT_HARDWARE --target-env=vulkan1.2 -DSURFACE_MSAA"
+        "surface_rt_filter.comp.glsl|surface_rt_filter_ms.comp.spv|-DSURFACE_MSAA"
         "wmo_lighting.frag.glsl|wmo_lighting_ms.frag.spv|-DSURFACE_MSAA"
         "rt_prepare.comp.glsl|rt_prepare_ms.comp.spv|-DRT_MSAA"
         "rt_trace.comp.glsl|rt_trace_hw.comp.spv|-DRT_HARDWARE --target-env=vulkan1.2"
@@ -1074,6 +1082,7 @@ set(WOWEE_SOURCES
     src/rendering/character_renderer.cpp
     src/rendering/character_preview.cpp
     src/rendering/wmo_surface_pass.cpp
+    src/rendering/surface_rt.cpp
     src/rendering/wmo_renderer.cpp
     src/rendering/wmo_model_prep.cpp
     src/rendering/imgui_texture.cpp
@@ -2299,6 +2308,7 @@ option(WOWEE_BUILD_RT_PROBE "Build the ray traced lighting probe (tools/rt_probe
 if(WOWEE_BUILD_RT_PROBE)
     add_executable(rt_probe
         ${CMAKE_CURRENT_SOURCE_DIR}/tools/rt_probe.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/surface_rt_probe.cpp
         ${WOWEE_PLATFORM_SOURCES}
     )
     target_link_libraries(rt_probe PRIVATE wowee_render)
@@ -2319,6 +2329,15 @@ if(WOWEE_BUILD_RT_PROBE)
             VERBATIM)
         add_custom_target(rt_lookup_probe_shader DEPENDS ${RT_LOOKUP_SPV})
         add_dependencies(rt_probe rt_lookup_probe_shader)
+        set(SURFACE_PROBE_SPV ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/assets/shaders/surface_rt_receivers.frag.spv)
+        add_custom_command(OUTPUT ${SURFACE_PROBE_SPV}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/assets/shaders
+            COMMAND ${GLSLC} -fshader-stage=fragment -O
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/surface_rt_receivers.frag.glsl -o ${SURFACE_PROBE_SPV}
+            DEPENDS tests/shaders/surface_rt_receivers.frag.glsl assets/shaders/surface_encoding.glsli
+            VERBATIM)
+        add_custom_target(surface_rt_probe_shader DEPENDS ${SURFACE_PROBE_SPV})
+        add_dependencies(rt_probe surface_rt_probe_shader)
     endif()
     add_dependencies(rt_probe wowee_runtime_assets)
 endif()
@@ -2941,6 +2960,7 @@ add_executable(wowee_editor
     src/rendering/m2_renderer_render.cpp
     src/rendering/m2_model_classifier.cpp
     src/rendering/wmo_surface_pass.cpp
+    src/rendering/surface_rt.cpp
     src/rendering/wmo_renderer.cpp
     src/rendering/wmo_model_prep.cpp
     src/rendering/imgui_texture.cpp

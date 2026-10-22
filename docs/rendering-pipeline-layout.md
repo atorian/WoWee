@@ -184,9 +184,55 @@ The command plan can be discarded on slot reuse; submitted command buffers
 retain their own lifetime. No producer-scene reads or additional model walk are
 introduced.
 
-This explicit order does not yet combine RT work across runs. Inserting a full
-screen trace at every opaque-to-blended boundary would multiply RT cost. The
-next receiver/resolve implementation must account for the regions and receivers
-required by each dependency, including opaque surfaces subsequently covered by
-blended layers, before connecting RT here. Motion/identity, current-frame
-resolve and history remain unimplemented.
+## Connected current-frame WMO RT
+
+`WOWEE_WMO_SURFACES=1` now accepts RT modes 1–3. Before the world pass,
+the render owner updates the acceleration structure from its already extracted
+publication. The legacy post-world RT path skips this update, so there is one
+acceleration update and no second producer/model traversal. Other families,
+blended WMO and reflected views still consume legacy RT; that work remains until
+those consumers are converted. Wireframe remains explicitly unsupported here.
+
+Each opaque run produces current material/depth/geometric-normal receivers.
+One representative per 2x2 block traces the shared sun/AO/GI estimator. Compatible
+receivers share it; other covered samples enter a worst-case-sized GPU queue
+and an indirect dispatch traces them in the same submission. Identical MSAA
+receivers are coalesced only when material, depth and geometric normal agree.
+Normals face the visible side before tracing. Empty samples are neutral, and
+receivers outside RT distance are faded by the material consumer. A central
+geometry-aware filter resolves the estimates before lighting reads one result
+per sample. Its 8x8 groups cache a 16x16 input tile including the filter halo.
+
+The material upload is now 176 bytes: the original 80-byte material/light data,
+a current-to-previous camera-relative transform, a 128-bit lifetime identity,
+and history validity. Placement IDs and immutable batch-publication IDs are
+monotonic and separate from reusable public model/instance IDs. The WMO worker
+captures previous rendered transforms during its existing traversal. History
+uses one projected location, validates identity/plane/normal/depth and averages
+only after a fresh trace; it does not search old pixels for missing receivers.
+Frame gaps, changed RT mode/distance, replaced placements/material publications,
+missing previous placement or cloth deformation invalidate correspondence.
+
+Temporal records are 48 bytes per half-resolution block per frame slot; only
+the base representative is accumulated. Additional queued receivers currently
+have spatial filtering only. When multiple opaque runs cover a block, its last
+valid representative owns the saved history. Earlier layers may therefore start
+fresh next frame. Rigid transform correspondence is implemented; a dedicated
+moving-transport image test is still required before claiming motion parity.
+
+RT scratch uses 20 bytes per full-resolution sample (raw, filtered and queue),
+plus a 16-byte indirect command. Sun/AO use unorm8 and signed GI uses three
+half-floats. At 2560x1369, scratch plus two history slots adds 147.12 MiB at 1x
+or 347.66 MiB at 4x, beyond surface images and material uploads. These are
+logical storage sizes, not allocator or measured process-memory peaks. Device
+storage-range and descriptor limits are checked; peak resize-budget policy is
+still pending. Scratch stays shared on one graphics queue, uniforms/descriptors
+and histories are per slot, and replaced resources retire behind frame fences.
+
+Run ordering is preserved: compute happens after that run's geometry and before
+its lighting/next blended run. Rays skip uncovered samples, but classification
+and filter dispatches still scan the target for each opaque run. Sparse tile
+dispatch, persistent material tables and removal of legacy consumers remain
+optimization work. The measured total, including the retained legacy RT, is
+recorded in `tasks/performance/dalaran-wmo-current-rt.json`. This partial WMO
+implementation remains opt-in and does not complete the all-family pipeline.

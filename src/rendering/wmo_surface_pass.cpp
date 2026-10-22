@@ -1,4 +1,5 @@
 #include "rendering/wmo_surface_pass.hpp"
+#include "rendering/surface_rt.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_shader.hpp"
@@ -74,7 +75,7 @@ void WmoSurfacePass::create(VkExtent2D extent,VkImageView depth) {
     deps[1].srcSubpass=0;deps[1].dstSubpass=VK_SUBPASS_EXTERNAL;
     deps[1].srcStageMask=VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     deps[1].srcAccessMask=VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    deps[1].dstStageMask=VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    deps[1].dstStageMask=VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     deps[1].dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
     VkRenderPassCreateInfo info{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
     info.attachmentCount=4;info.pAttachments=attachments;info.subpassCount=1;info.pSubpasses=&sub;
@@ -85,10 +86,10 @@ void WmoSurfacePass::create(VkExtent2D extent,VkImageView depth) {
     fb.renderPass=pass_;fb.attachmentCount=4;fb.pAttachments=views;fb.width=extent.width;fb.height=extent.height;fb.layers=1;
     requireSurface(vkCreateFramebuffer(device,&fb,nullptr,&framebuffer_)==VK_SUCCESS,"surface framebuffer creation failed");
     std::vector<VkDescriptorSetLayoutBinding> bindings;
-    for(uint32_t i=0;i<4;++i) bindings.push_back({i,i==3?VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr});
+    for(uint32_t i=0;i<5;++i) bindings.push_back({i,i>=3?VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr});
     setLayout_=createDescriptorSetLayout(device,bindings);
     requireSurface(setLayout_!=VK_NULL_HANDLE,"surface descriptor layout creation failed");
-    VkDescriptorPoolSize sizes[]{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,3*kSlots},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,kSlots}};
+    VkDescriptorPoolSize sizes[]{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,3*kSlots},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,2*kSlots}};
     VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pi.maxSets=kSlots;pi.poolSizeCount=2;pi.pPoolSizes=sizes;
     requireSurface(vkCreateDescriptorPool(device,&pi,nullptr,&pool_)==VK_SUCCESS,"surface descriptor pool creation failed");
@@ -111,7 +112,8 @@ void WmoSurfacePass::create(VkExtent2D extent,VkImageView depth) {
     LOG_INFO("WMO evaluated surfaces: ",extent.width,"x",extent.height," samples=",int(samples_),
         " transient color bytes=",uint64_t(extent.width)*extent.height*40*uint32_t(samples_));
 }
-void WmoSurfacePass::prepare(VkExtent2D extent,VkImageView depth,TargetVersion version,size_t materialCapacity) {
+void WmoSurfacePass::prepare(VkExtent2D extent,VkImageView depth,TargetVersion version,size_t materialCapacity,
+        RtScene* rtScene,int rtMode,const RtLighting::FrameInputs& rtInputs) {
     requireSurface(depth!=VK_NULL_HANDLE,"scene depth unavailable");
     if(!pass_ || version!=targetVersion_ || depth!=depth_ || extent.width!=extent_.width || extent.height!=extent_.height ||
        samples_!=ctx_.getMsaaSamples() || colorFormat_!=ctx_.getSwapchainFormat() || depthFormat_!=ctx_.getDepthFormat()) create(extent,depth);
@@ -140,15 +142,26 @@ void WmoSurfacePass::prepare(VkExtent2D extent,VkImageView depth,TargetVersion v
     VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};si.maxLod=0;
     si.magFilter=si.minFilter=VK_FILTER_NEAREST;si.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST;
     si.addressModeU=si.addressModeV=si.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    VkDescriptorImageInfo imageInfos[3]{};VkWriteDescriptorSet writes[4]{};
-    for(uint32_t i=0;i<4;++i) {
+    VkDescriptorImageInfo imageInfos[3]{};VkWriteDescriptorSet writes[5]{};
+    for(uint32_t i=0;i<5;++i) {
         auto& w=writes[i];w.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;w.dstSet=sets_[slot];w.dstBinding=i;w.descriptorCount=1;
-        w.descriptorType=i==3?VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.descriptorType=i>=3?VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         if(i<3) {imageInfos[i]={ctx_.getOrCreateSampler(si),images_[i].imageView,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};w.pImageInfo=&imageInfos[i];}
     }
     VkDescriptorBufferInfo buffer{buffers_[slot].buffer,0,bytes};writes[3].pBufferInfo=&buffer;
-    vkUpdateDescriptorSets(ctx_.getDevice(),4,writes,0,nullptr);
+    rtMode_=rtMode;rtDistance_=rtInputs.distance;
+    VkDescriptorBufferInfo lighting=buffer; // Bound but unread when RT is off.
+    if(rtMode_!=0) {
+        requireSurface(rtScene!=nullptr,"current RT scene unavailable");
+        if(!rt_)rt_=std::make_unique<SurfaceRt>(ctx_,*rtScene);
+        rt_->prepare(extent,samples_,images_[1].imageView,images_[2].imageView,buffer,rtMode_,rtInputs);
+        lighting=rt_->output();
+    }
+    writes[4].pBufferInfo=&lighting;
+    vkUpdateDescriptorSets(ctx_.getDevice(),5,writes,0,nullptr);
 }
+bool WmoSurfacePass::rtHistoryValid() const { return rtMode_!=0 && rt_ && rt_->hasHistory(); }
+glm::vec3 WmoSurfacePass::previousRtCamera() const { return rt_?rt_->previousCamera():glm::vec3(0); }
 uint32_t WmoSurfacePass::appendMaterial(const Material& material) {
     requireSurface(materialsWritten_<materialLimit_,"snapshot material capacity exhausted");
     const uint32_t index=static_cast<uint32_t>(materialsWritten_++);
@@ -228,11 +241,13 @@ void WmoSurfacePass::resumeScene(VkCommandBuffer cmd,VkFramebuffer scene,VkSubpa
     if(contents==VK_SUBPASS_CONTENTS_INLINE) viewport(cmd,extent_);
 }
 void WmoSurfacePass::light(VkCommandBuffer cmd,VkDescriptorSet frameSet,VkFramebuffer scene,const glm::mat4& inverseViewProjection) {
-    vkCmdEndRenderPass(cmd);resumeScene(cmd,scene,VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdEndRenderPass(cmd);
+    if(rtMode_!=0)rt_->record(cmd);
+    resumeScene(cmd,scene,VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_);
     VkDescriptorSet sets[]{frameSet,sets_[ctx_.getCurrentFrame()]};
     vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,layout_,0,2,sets,0,nullptr);
-    struct Push {glm::mat4 inverse;glm::vec4 extent;} push{inverseViewProjection,{extent_.width,extent_.height,0,0}};
+    struct Push {glm::mat4 inverse;glm::vec4 extent;} push{inverseViewProjection,{extent_.width,extent_.height,rtMode_,rtDistance_}};
     vkCmdPushConstants(cmd,layout_,VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(push),&push);
     vkCmdDraw(cmd,3,1,0,0);
 }

@@ -798,6 +798,7 @@ private:
     void recordRtLighting(VkImage sceneDepth, VkExtent2D sceneExtent, bool depthIsMsaa,
                           std::string_view stageGroup);
     bool rtRecordedThisFrame_ = false;
+    bool rtScenePreparedThisFrame_ = false;
     float volumetricFogDensity_ = 1.0f;
     /// Whether this frame builds the volume, decided where the per-frame block
     /// is written so the block's switch and the dispatch cannot disagree.

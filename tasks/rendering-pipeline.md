@@ -237,7 +237,8 @@ was rerun. Current-frame RT/G-buffer implementation is still pending.
 - [ ] Extend opaque/cutout G-buffer and material lighting to the other families;
       preserve forward ordering for incompatible blended materials.
 - [ ] Route current-frame receivers into RT, centralized denoise/resolve and
-      lighting; explicit motion/history and missing half-resolution samples.
+      lighting for all families; WMO opaque/cutout receiver worklist, rigid
+      motion/identity, base history and centralized filtering are implemented.
 - [ ] Complete transparent/water/reflection lighting and atmospheric composition;
       remove previous-frame recovery from converted consumers.
 - [ ] Persistent GPU instance/material tables and GPU culling/indirect commands;
@@ -364,3 +365,61 @@ full-client FPS result. Previous full-client measurement remains 46.73 FPS.
 [Saved worker measurement](performance/dalaran-wmo-workers.json) includes the
 scene, binary hash, raw log location and image comparisons. Default rendering
 is unchanged; current-frame RT and the remaining full-pipeline stages are pending.
+
+## Current-frame opaque WMO RT — 2026-10-22
+
+Connected current evaluated WMO receivers to hardware/software tracing in RT
+modes 1–3. A half-resolution representative and explicit GPU worklist cover
+current samples before material lighting. Sun/AO/GI share the existing estimator;
+AO and GI share one closest-hit traversal. The consumer performs a direct light
+load, with no previous-image recovery search. The acceleration scene is prepared
+once before world rendering. WMO placement history and immutable batch identity
+are captured during existing snapshot/recording walks; there is no new model
+walk. Per-slot uploads and queue dependencies retain the threaded frame contract.
+
+The first test exposed reversed derivative normals: unoccluded receivers became
+dark. The test failed before orienting geometric normals toward the visible side
+and passes after the fix on both tracing backends. GPU tests also cover missing
+half-resolution receivers, same-depth MSAA samples with different normals,
+uncovered samples, actual temporal accumulation, lifetime rejection and finite
+GI after a mode change. Existing translated/swept RT probes pass on both backends.
+
+Forced Khronos synchronization validation passed serial/parallel current RT,
+1x/4x layers, real Dalaran, queued source removal with 4x MSAA + FXAA, and
+current-RT MSAA/FXAA target recreation with frames in flight. RT-off
+compatibility passed seven cases including ordered transparent/cutout layers,
+night and repeated target recreation. Every available sweep is within its ceiling;
+unavailable data/server/FrameXML fixtures are explicitly skipped. The default-off
+`WOWEE_BUILD_RT_PROBE` owns the native test and its shader.
+
+Measured only the changed implementation against the saved Dalaran WMO GPU
+investigation: 2560x1369, RT3, MSAA1, FXAA, shadow quality 2, volumetrics 3,
+dev/no-LTO, validation off, 230 GPU samples after warmup. FIFO limits this fixture;
+use GPU timestamps, not its displayed FPS. No competing renderer was present at
+preflight. The user authorized stopping PID 28572, but it was already absent when
+the stop/restore wrapper ran, so that wrapper stopped/restarted no client.
+
+| Metric, ms | Saved forward RT3 | Current WMO RT3 |
+|---|---:|---:|
+| WMO GPU mean, including new trace/filter | 7.62 | 6.55 |
+| WMO GPU p95 | 11.74 | 7.05 |
+| Retained legacy RT mean | 2.42 | 2.68 |
+| WMO + both RT costs, mean | 10.04 | 9.23 |
+| Whole GPU mean | 11.42 | 10.72 |
+| Whole GPU p95 | 15.31 | 11.34 |
+| CPU renderWorld mean | 0.35 | 0.47 |
+
+Combined WMO/RT mean is 8.1% lower and whole GPU mean 6.1% lower; CPU recording
+is higher. This is one historical comparison, not controlled proof of a game FPS
+increase. A tiled filter reduced the first current-RT WMO result from 6.78 to
+6.55 ms. Its full-resolution image differs in only 20 of 10,513,920 RGB channels,
+each by 1/255; the ordered-layer captures are identical. No old binary was rerun.
+[Report, hashes, memory accounting and raw paths](performance/dalaran-wmo-current-rt.json).
+
+This remains an opt-in WMO stage. Blended/reflected WMO and other geometry still
+need the legacy RT pass. Extra RT storage is 147.12 MiB at 1x or 347.66 MiB at 4x
+for this viewport, beyond G-buffer storage; peak resize budgeting is unfinished.
+Only base representatives have temporal history, and opaque-run boundaries still
+cause fullscreen classification/filter scans. Sparse work dispatch and conversion
+of remaining consumers are the next GPU targets. Full-client replay has not been
+repeated: the last completed result remains 46.73 FPS from d440fce.

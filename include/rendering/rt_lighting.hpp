@@ -107,7 +107,7 @@ public:
     /// The depth image must be in DEPTH_STENCIL_ATTACHMENT_OPTIMAL and is
     /// returned to it.
     void record(VkCommandBuffer cmd, VkImage sceneDepth, VkExtent2D sceneExtent, bool depthMsaa,
-                const FrameInputs& in);
+                const FrameInputs& in, bool sceneAlreadyPrepared = false);
 
     /// What the surface shaders need to find last frame's result, for the
     /// per-frame block: the camera-relative view-projection it was traced with, the camera

@@ -264,7 +264,8 @@ public:
     struct Frame;
     std::shared_ptr<const Frame> extract(const Camera& camera, const glm::vec3& viewer,
                                         const std::vector<LocalLight>& lights, const SceneView* reflection = nullptr);
-    void prepareSurface(VkImageView depth, VkExtent2D extent, WmoSurfacePass::TargetVersion version);
+    void prepareSurface(VkImageView depth, VkExtent2D extent, WmoSurfacePass::TargetVersion version,
+                        RtScene* rtScene, int rtMode, const RtLighting::FrameInputs& rtInputs);
     void recordSurface(VkDescriptorSet perFrameSet, const Camera& camera);
     void executeSurface(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
                         VkFramebuffer scene, VkSubpassContents resumeContents);
@@ -548,6 +549,7 @@ private:
     /// Immutable GPU description, shared across every instance and frame until
     /// a material binding changes. Collision meshes stay in GroupResources.
     struct GroupDrawData {
+        uint64_t surfaceBatchBase = 0;
         ::VkBuffer vertexBuffer = VK_NULL_HANDLE, indexBuffer = VK_NULL_HANDLE;
         glm::vec3 boundingBoxMin{0}, boundingBoxMax{0};
         uint32_t groupFlags = 0;
@@ -627,6 +629,7 @@ private:
      * WMO instance in the world
      */
     struct WMOInstance {
+        uint64_t surfaceLifetime = 0;
         uint32_t id;
         uint32_t modelId;
         glm::vec3 position;
@@ -818,6 +821,10 @@ private:
 
     // Active instances
     uint32_t nextInstanceId = 1;
+    uint64_t nextSurfaceInstance_ = 1;
+    mutable std::atomic<uint64_t> nextSurfaceBatch_{1};
+    std::unordered_map<uint64_t,glm::mat4> previousSurfaceTransforms_, currentSurfaceTransforms_;
+    uint64_t surfaceRecordedFrame_ = 0;
 
     bool initialized_ = false;
 
@@ -858,6 +865,8 @@ private:
         LocalLightSet lights = kNoLocalLights;
     };
     struct DrawEntry {
+        uint64_t surfaceLifetime = 0;
+        glm::mat4 inverseModelMatrix{1.0f};
         glm::mat4 modelMatrix{1.0f};
         float scale = 1.0f;
         /// Valid for the frame: models are unloaded only between frames.

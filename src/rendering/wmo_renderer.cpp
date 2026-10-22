@@ -734,6 +734,7 @@ uint32_t WMORenderer::createInstance(uint32_t modelId, const glm::vec3& position
     }
 
     WMOInstance instance;
+    instance.surfaceLifetime = nextSurfaceInstance_++;
     instance.id = reservedId != 0 ? reservedId : nextInstanceId++;
     instance.modelId = modelId;
     instance.position = position;
@@ -1051,6 +1052,7 @@ WMORenderer::GroupDraw WMORenderer::extractGroup(const GroupResources& group,
         data->groupFlags = group.groupFlags;
         data->isLOD = group.isLOD;
         data->mergedBatches = group.mergedBatches;
+        data->surfaceBatchBase = nextSurfaceBatch_.fetch_add(group.mergedBatches.size(),std::memory_order_relaxed);
         group.drawData = std::move(data);
     }
     out.gpu = group.drawData;
@@ -1104,6 +1106,8 @@ std::shared_ptr<const WMORenderer::Frame> WMORenderer::extract(const Camera& cam
         auto& depthEntry = frame->depth.add();
         DrawEntry* reflectionEntry = reflection ? &frame->reflection.add() : nullptr;
         for (auto* entry : {&viewEntry, &depthEntry, reflectionEntry}) if (entry) {
+            entry->surfaceLifetime = instance.surfaceLifetime;
+            entry->inverseModelMatrix = instance.invModelMatrix;
             entry->modelMatrix = instance.modelMatrix;
             entry->scale = instance.scale;
         }
@@ -1150,14 +1154,14 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
 }
 
 void WMORenderer::prepareSurface(VkImageView depth, VkExtent2D extent,
-        WmoSurfacePass::TargetVersion version) {
+        WmoSurfacePass::TargetVersion version,RtScene* rtScene,int rtMode,const RtLighting::FrameInputs& rtInputs) {
     if (recording_->wireframe) {
         LOG_ERROR("WMO evaluated-surface wireframe is not implemented - refusing mismatched rendering");
         throw std::runtime_error("WMO surface wireframe unsupported");
     }
     if (recording_->view.surfaceMaterialCapacity == 0) return;
     if (!surfacePass_) surfacePass_=std::make_unique<WmoSurfacePass>(*vkCtx_,frameSetLayout_);
-    surfacePass_->prepare(extent,depth,version,recording_->view.surfaceMaterialCapacity);
+    surfacePass_->prepare(extent,depth,version,recording_->view.surfaceMaterialCapacity,rtScene,rtMode,rtInputs);
     if (surfacePipelinePass_!=surfacePass_->geometryPass()) {
         DeferredResources retire(*vkCtx_);retire.destroy(surfacePipeline_);
         VkShaderModule vert,frag;
@@ -1192,7 +1196,21 @@ void WMORenderer::recordSurface(VkDescriptorSet perFrameSet, const Camera& camer
     VkDescriptorSet boundMaterial = VK_NULL_HANDLE;
     bool geometry = false;
     uint32_t draws = 0;
+    previousSurfaceTransforms_.swap(currentSurfaceTransforms_);
+    currentSurfaceTransforms_.clear();
+    const bool previousValid=surfacePass_->rtHistoryValid() && surfaceRecordedFrame_+1==vkCtx_->frameNumber();
     for (const auto& entry : recording_->view.drawn()) {
+        const auto previous=previousSurfaceTransforms_.find(entry.surfaceLifetime);
+        const bool motionValid=previousValid && previous!=previousSurfaceTransforms_.end();
+        glm::mat4 previousFromCurrent(1);
+        if(motionValid) {
+            auto currentToObject=entry.inverseModelMatrix;
+            currentToObject[3]=entry.inverseModelMatrix*glm::vec4(camera.getPosition(),1);
+            auto previousRelative=previous->second;
+            previousRelative[3]-=glm::vec4(surfacePass_->previousRtCamera(),0);
+            previousFromCurrent=previousRelative*currentToObject;
+        }
+        currentSurfaceTransforms_.insert_or_assign(entry.surfaceLifetime,entry.modelMatrix);
         for (const uint32_t index : entry.groups) {
             const auto& kept=recording_->groups[index];
             const auto& group=*kept.gpu;
@@ -1202,7 +1220,9 @@ void WMORenderer::recordSurface(VkDescriptorSet perFrameSet, const Camera& camer
                 if (glm::dot(center-camera.getPosition(),center-camera.getPosition())<196.f*196.f) continue;
             }
             if (!group.vertexBuffer || !group.indexBuffer) continue;
+            uint64_t batchIdentity=group.surfaceBatchBase;
             for (const auto& batch:group.mergedBatches) {
+                const uint64_t identity=batchIdentity++;
                 if (!batch.materialSet) continue;
                 const bool opaque=!batch.isTransparent;
                 if (!opaque && !transparentPipeline_) {
@@ -1245,6 +1265,9 @@ void WMORenderer::recordSurface(VkDescriptorSet perFrameSet, const Camera& camer
                     static_assert(sizeof(batch.material)==sizeof(material.words));
                     std::memcpy(material.words.data(),&batch.material,sizeof(batch.material));
                     material.localLights=kept.lights;
+                    material.previousFromCurrent=previousFromCurrent;
+                    material.identity={uint32_t(entry.surfaceLifetime),uint32_t(entry.surfaceLifetime>>32),uint32_t(identity),uint32_t(identity>>32)};
+                    material.history.x=motionValid && batch.clothDrop==0.0f ? 1u : 0u;
                     const glm::uvec4 key(surfacePass_->appendMaterial(material),0,0,0);
                     vkCmdPushConstants(cmd,layout,VK_SHADER_STAGE_FRAGMENT_BIT,112,sizeof(key),&key);
                 }
@@ -1257,6 +1280,7 @@ void WMORenderer::recordSurface(VkDescriptorSet perFrameSet, const Camera& camer
     if (cmd) surfacePass_->endRun();
     surfacePass_->finishMaterials();
     viewDrawCallCount_=draws;
+    surfaceRecordedFrame_=vkCtx_->frameNumber();
 }
 
 void WMORenderer::executeSurface(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,

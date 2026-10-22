@@ -1,0 +1,26 @@
+// The first 80 bytes are the original evaluated WMO material contract.
+struct SurfaceMaterial {
+    int hasTexture; int alphaTest; int light; int transitionLight;
+    float specularIntensity; float heightMapVariance; int isLava; int emissive;
+    float ambientR; float ambientG; float ambientB; int hasVertexColors;
+    int receivesExteriorShadows; float sidnR; float sidnG; float sidnB;
+    uvec4 localLights;
+    mat4 previousFromCurrent; // current camera-relative -> previous camera-relative
+    uvec4 identity; // placement lifetime + immutable batch publication
+    uvec4 history; // x: previous rendered placement is valid (cloth invalidates)
+};
+struct SurfaceHistory {
+    uvec4 identity;
+    uvec4 geometry; // previous camera-relative position bits, packed geometric normal
+    uvec2 light;
+    uvec2 history; // sample count, reserved
+};
+// 8 bytes per sample: visibility/AO unorm8, three signed half GI channels.
+uvec2 packSurfaceLight(vec2 light, vec3 gi) {
+    uint visibility = packUnorm4x8(vec4(light, 0, 0)) & 65535u;
+    return uvec2(visibility | (packHalf2x16(vec2(gi.x, 0)) << 16), packHalf2x16(gi.yz));
+}
+void unpackSurfaceLight(uvec2 packed, out vec2 light, out vec3 gi) {
+    light = unpackUnorm4x8(packed.x).xy;
+    gi = vec3(unpackHalf2x16(packed.x >> 16).x, unpackHalf2x16(packed.y));
+}

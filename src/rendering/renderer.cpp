@@ -1842,6 +1842,7 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
     targetsStage.reset();
 
     rtRecordedThisFrame_ = false;
+    rtScenePreparedThisFrame_ = false;
 
     // Acquire swapchain image and begin command buffer. Its waits are timed
     // inside: for the GPU, for the image, for uploads.
@@ -1986,6 +1987,12 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
                 logged = true;
             }
         }
+    }
+
+    if (core::envFlagEnabled("WOWEE_WMO_SURFACES",false) && frameInputs_.rtMode!=0 && rtScene_) {
+        GpuPass pass(*vkCtx,currentCmd,RtScene::kGpuMarkLabel);
+        rtScene_->update(currentCmd);
+        rtScenePreparedThisFrame_=true;
     }
 
     // --- Begin render pass ---
@@ -3364,17 +3371,18 @@ void Renderer::renderWorld() {
     const bool skipGrass = ablated(AblationPass::Grass);
     static const bool surfaceRequested=core::envFlagEnabled("WOWEE_WMO_SURFACES",false);
     const bool surfaceWmo=surfaceRequested && wmoRenderer && frameCamera() && !skipWMO;
-    if (surfaceWmo && frameInputs_.rtMode!=0) {
-        LOG_ERROR("WMO surface pass currently requires RT disabled - refusing previous-frame RT substitution");
-        throw std::runtime_error("WMO surface pass current-frame RT is not connected yet");
-    }
     const auto prepareWmoSurface=[&]() {
         const bool offscreen=postProcessPipeline_ && postProcessPipeline_->getSceneFramebuffer();
         const auto depth=offscreen
             ?postProcessPipeline_->getSceneAttachmentDepthView():vkCtx->getDepthImageView();
         const WmoSurfacePass::TargetVersion version{vkCtx->syncResetGeneration(),
             offscreen?postProcessPipeline_->sceneTargetGeneration():0,offscreen};
-        wmoRenderer->prepareSurface(depth,activeRenderExtent_,version);
+        RtLighting::FrameInputs in{};
+        in.view=frameCamera()->getViewMatrix();in.projection=frameCamera()->getProjectionMatrix();
+        in.cameraPos=frameCamera()->getPosition();in.sunDir=-glm::vec3(currentFrameData.lightDir);
+        in.sunColor=glm::vec3(currentFrameData.lightColor);in.skyColor=glm::vec3(currentFrameData.ambientColor);
+        in.sunUp=in.sunDir.z>-0.05f;in.distance=frameInputs_.rtDistance;
+        wmoRenderer->prepareSurface(depth,activeRenderExtent_,version,rtScene_.get(),frameInputs_.rtMode,in);
     };
     // The terrain chooses its chunks' detail by their triangles' size in the
     // image it is drawn into, which an upscaler makes smaller than the window.
@@ -5228,7 +5236,7 @@ void Renderer::recordRtLighting(VkImage sceneDepth, VkExtent2D sceneExtent, bool
     in.distance = frameInputs_.rtDistance;
     GpuPass pass(*vkCtx, currentCmd, "rt_lighting");
     CpuStage stage(vkCtx->cpuStages(), stageGroup, "rt lighting");
-    rtLighting_->record(currentCmd, sceneDepth, sceneExtent, depthIsMsaa, in);
+    rtLighting_->record(currentCmd, sceneDepth, sceneExtent, depthIsMsaa, in, rtScenePreparedThisFrame_);
 }
 
 VkImageView Renderer::getNeutralFogVolumeView() const {
