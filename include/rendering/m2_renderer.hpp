@@ -3,6 +3,7 @@
 #include "rendering/paged_frame_buffer.hpp"
 #include "rendering/surface_identity.hpp"
 #include "rendering/range_allocator.hpp"
+#include "rendering/vk_utils.hpp"
 
 #include "rendering/rt_instance_changes.hpp"
 #include "rendering/frame_pool.hpp"
@@ -1137,6 +1138,10 @@ private:
     void* instanceMapped_[2] = {};
     VkDescriptorSet instanceSet_[2] = {};
     uint32_t instanceDataCount_ = 0; // reset each frame in render()
+    // Draw order is independent of persistent material row order.
+    AllocatedBuffer surfaceReferences_[2]{};
+    uint32_t surfaceReferenceCapacity_[2]{};
+    uint32_t surfaceReferenceCount_ = 0;
 
     // GPU Frustum Culling via Compute Shader
     // Compute shader tests each M2 instance against frustum planes + distance, writes visibility[].

@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--software', action='store_true')
     parser.add_argument('--regions', action='store_true')
     parser.add_argument('--near-plane', action='store_true')
+    parser.add_argument('--material-changes', action='store_true')
     args = parser.parse_args()
     binary, out = args.binary.resolve(), args.scratch.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -38,6 +39,14 @@ def main():
                  m2LayerInstances=[{'offset':[0,-2.3,0]},
                                    {'offset':[0,2.3,0], 'interiorAmbient':[.12,.25,.35],
                                     'interiorDirect':[.5,.2,.1]}])
+    if args.material_changes:
+        scene['m2InstanceChanges']=[
+            {'frame':3,'instance':0,'hidden':True},
+            {'frame':5,'instance':1,'hidden':True},
+            {'frame':7,'instance':1,'hidden':False},
+            {'frame':9,'instance':0,'hidden':False,'interiorAmbient':[.3,.12,.05],'interiorDirect':[.1,.6,.2]},
+            {'frame':11,'instance':1,'hidden':True},
+            {'frame':13,'instance':1,'hidden':False}]
     if args.regions:
         # A fully opaque alpha-key batch can merge with adjacent geometry.
         # Its output must still match authored forward blending; cutout holes
@@ -97,10 +106,14 @@ def main():
         if result.returncode or any(token in line for line in checked for token in
                                    (b'VUID-',b'SYNC-HAZARD',b'Validation Error:',b'[ERROR]',b'Failed to load texture:',b'Texture not found:')):
             raise RuntimeError(f'{label}: render/validation failure; inspect {out/(label+".log")}')
+        if args.material_changes and log.count(b'scene_render: applying M2 instance change')!=len(scene['m2InstanceChanges']):
+            raise RuntimeError('Fixture changes were not executed; rebuild scene_render before testing')
         if surfaces and mode and b'Surface history: valid=1' not in log:
             raise RuntimeError('Stable scene never accumulated RT history during smooth lighting updates')
         if args.opaque and surfaces and b'Surface plan: geometry runs=4 lighting groups=1' not in log:
             raise RuntimeError('Compatible terrain/WMO/character/M2 geometry did not share one lighting group')
+        if surfaces and mode==0 and b'uploaded bytes=0' not in log:
+            raise RuntimeError('Unchanged material tables were uploaded every frame')
         images[label]=rgb_pixels(out/(label+'.png'))
     # Surface storage quantizes color/normals. It must not lose a texture stage,
     # instance light, alpha silhouette or the authored transparent layer.
@@ -116,7 +129,7 @@ def main():
         changed=sum(a!=b for a,b in zip(images['current'],images['full']))
         raise RuntimeError(f'bounded surface runs changed {changed} image channels')
     if rt<.01 and not args.near_plane: raise RuntimeError('current RT did not affect M2 material lighting')
-    report={'all_families':args.all_families,'msaa':args.msaa,'mixed':args.mixed,'software':args.software,'rebuild':args.rebuild,
+    report={'material_changes':args.material_changes,'all_families':args.all_families,'msaa':args.msaa,'mixed':args.mixed,'software':args.software,'rebuild':args.rebuild,
             'regions':args.regions,'near_plane':args.near_plane,
             'bounded_full_changed_channels':0 if args.regions else None,
             'forward_surface_mean_channel_error':mean,'fraction_error_over_8':substantial,

@@ -1,0 +1,23 @@
+{
+  "material_changes": true,
+  "all_families": true,
+  "msaa": 4,
+  "mixed": true,
+  "software": false,
+  "rebuild": true,
+  "regions": true,
+  "near_plane": false,
+  "bounded_full_changed_channels": 0,
+  "forward_surface_mean_channel_error": 0.02689777737247277,
+  "fraction_error_over_8": 0.0005352197386434079,
+  "rt_mean_channel_change": 5.264313871093466,
+  "serial_parallel_changed_channels": 0,
+  "unmodified_material_upload_bytes": 0,
+  "validation": "Passed Vulkan synchronization validation; 6 instance hide/show/light changes, MSAA target recreation",
+  "builds": [
+    "wowee",
+    "scene_render",
+    "rt_probe"
+  ],
+  "performance_measurement": false
+}

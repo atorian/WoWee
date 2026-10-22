@@ -169,3 +169,5 @@
 - 2026-10-22 — The user stopped intermediate benchmarks while the new surface RT and legacy RT still duplicated work. Finish the authorized pipeline migration and merge compatible geometry/lighting passes before another performance run. Use builds, behavioral image checks and synchronization validation during implementation; do not substitute another measured checkpoint for completion.
 
 - 2026-10-22 — A synthetic rendering comparison passed while mixed-case predecoded cache keys made its textures disappear. Fail graphics fixtures on missing required inputs, inspect the images, and fix the observer's lighting position when comparing workloads; changed model bounds can otherwise change zone lighting and mimic a draw-capacity failure.
+
+- 2026-10-22 — Editing a fixture while its compilation is in progress can leave a binary whose timestamp is newer than the source but whose content is old. Finish the build before editing its inputs, rebuild changed fixtures explicitly, and assert that requested scene events actually ran before accepting an image comparison.

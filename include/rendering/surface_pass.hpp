@@ -7,6 +7,8 @@
 #include <array>
 #include <vector>
 #include <span>
+#include <unordered_map>
+#include <limits>
 #include "rendering/surface_identity.hpp"
 
 namespace wowee::rendering {
@@ -103,6 +105,33 @@ private:
     std::unique_ptr<SurfaceRt> rt_;
     int rtMode_ = 0;
     float rtDistance_ = 0;
-    std::array<size_t,kFamilies> materialBegin_{}, materialLimit_{}, materialsWritten_{};
+    struct MaterialKey {
+        uint64_t placement, publication; // publication 0: a single immutable terrain chunk
+        bool operator==(const MaterialKey&) const = default;
+    };
+    struct MaterialKeyHash {
+        size_t operator()(const MaterialKey& key) const {
+            const auto a=std::hash<uint64_t>{}(key.placement),b=std::hash<uint64_t>{}(key.publication);
+            return a^(b+0x9e3779b97f4a7c15ull+(a<<6)+(a>>2));
+        }
+    };
+    static MaterialKey materialKey(const Material& material);
+    struct MaterialRecord {
+        Material value{};
+        uint64_t version=0, seenFrame=0;
+    };
+    // Each worker owns one family registry. CPU records are authoritative;
+    // every GPU slot independently catches up to the version it actually uses.
+    struct MaterialTable {
+        std::unordered_map<MaterialKey,uint32_t,MaterialKeyHash> indices;
+        std::vector<MaterialRecord> records;
+        std::vector<uint32_t> free, previousUsed, currentUsed;
+        std::array<std::vector<uint64_t>,kSlots> uploaded;
+        uint64_t nextVersion=0;
+        size_t begin=0, capacity=0, uploadFirst=0, uploadEnd=0, uploadCount=0;
+    };
+    std::array<MaterialTable,kFamilies> materialTables_;
+    std::array<std::array<size_t,kFamilies>,kSlots> uploadedMaterialBegins_{};
+    std::array<size_t,kFamilies> materialLimit_{}, materialsWritten_{};
 };
 }

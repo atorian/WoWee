@@ -584,17 +584,14 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         vkCreateDescriptorSetLayout(device, &ci, nullptr, &boneSetLayout_);
     }
 
-    // Instance data set layout (set 3): binding 0 = STORAGE_BUFFER (per-instance data)
+    // Instance data and draw-local references into the persistent material table.
     {
-        VkDescriptorSetLayoutBinding binding{};
-        binding.binding = 0;
-        binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        binding.descriptorCount = 1;
-        binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-
-        VkDescriptorSetLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 1;
-        ci.pBindings = &binding;
+        VkDescriptorSetLayoutBinding bindings[] = {
+            {0,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,VK_SHADER_STAGE_VERTEX_BIT,nullptr},
+            {1,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,VK_SHADER_STAGE_VERTEX_BIT,nullptr}};
+        VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        ci.bindingCount = 2;
+        ci.pBindings = bindings;
         vkCreateDescriptorSetLayout(device, &ci, nullptr, &instanceSetLayout_);
     }
 
@@ -721,7 +718,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         const VkDeviceSize instBufSize = kInitialInstanceCapacity * sizeof(M2InstanceGPU);
 
         // Descriptor pool for 2 sets (double-buffered)
-        VkDescriptorPoolSize poolSize{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 2};
+        VkDescriptorPoolSize poolSize{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 4};
         VkDescriptorPoolCreateInfo poolCi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         poolCi.maxSets = 2;
         poolCi.poolSizeCount = 1;
@@ -1147,6 +1144,8 @@ void M2Renderer::shutdown() {
     // Instance data SSBO cleanup (sets freed with instanceDescPool_)
     for (int i = 0; i < 2; i++) {
         destroy(alloc, instanceBuffer_[i], instanceAlloc_[i]);
+        destroyBuffer(alloc,surfaceReferences_[i]);
+        surfaceReferenceCapacity_[i]=0;
         instanceMapped_[i] = nullptr;
         instanceSet_[i] = VK_NULL_HANDLE;
     }

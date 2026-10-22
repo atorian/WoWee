@@ -966,6 +966,17 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
                 renderer.getM2Renderer()->setInstanceHidden(placement.instanceId, false);
             }
         }
+        // Scene commands exercise material row reuse without exposing renderer internals.
+        for(const auto& change:scene.value("m2InstanceChanges",json::array())) {
+            if(change.at("frame").get<int>()!=frame)continue;
+            const auto& placement=placements.at(change.at("instance").get<size_t>());
+            if(placement.wmo)throw std::runtime_error("m2InstanceChanges addresses a WMO placement");
+            LOG_INFO("scene_render: applying M2 instance change at frame ",frame," for ",placement.instanceId);
+            auto& models=*renderer.getM2Renderer();
+            if(change.contains("hidden"))models.setInstanceHidden(placement.instanceId,change["hidden"].get<bool>());
+            if(change.contains("interiorAmbient"))models.setInteriorLight(placement.instanceId,rendering::InteriorLight{
+                vec3(change.at("interiorAmbient")),vec3(change.at("interiorDirect"))});
+        }
         environment.realmSeconds = realmTime + frame * static_cast<double>(kStep);
         renderer.setWorldEnvironment(environment);
         for (MovingCharacter& c : movingCharacters) {

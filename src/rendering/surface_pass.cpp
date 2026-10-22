@@ -39,6 +39,7 @@ void SurfacePass::retire() {
     for(auto& image:images_) release.image(image);
     for(auto& buffer:buffers_) release.buffer(buffer);
     capacities_.fill(0); sets_.fill(VK_NULL_HANDLE); depth_=VK_NULL_HANDLE;
+    for(auto& table:materialTables_)for(auto& versions:table.uploaded)versions.clear();
 }
 void SurfacePass::create(VkExtent2D extent,VkImageView depth) {
     // These transient targets are not referenced by producer snapshots. This
@@ -147,17 +148,46 @@ void SurfacePass::prepare(VkExtent2D extent,VkImageView depth,TargetVersion vers
     }
     size_t materialCapacity=0;
     for(size_t family=0;family<kFamilies;++family) {
-        materialBegin_[family]=materialCapacity; materialsWritten_[family]=0;
-        materialLimit_[family]=materialCapacities[family]; materialCapacity+=materialCapacities[family];
+        auto& table=materialTables_[family];
+        // Reclaim a departed view's table, or compact after a large population
+        // drop. Only metadata is moved; already submitted slots own their bytes.
+        if(materialCapacities[family]==0) {
+            table=MaterialTable{};
+        } else if(table.records.size()>256 && table.indices.size()<table.records.size()/3) {
+            std::vector<MaterialRecord> compact;
+            compact.reserve(table.indices.size());table.previousUsed.clear();
+            for(auto& [key,index]:table.indices) {
+                compact.push_back(table.records[index]);index=uint32_t(compact.size()-1);
+                table.previousUsed.push_back(index);
+            }
+            table.records=std::move(compact);table.free.clear();
+            for(auto& versions:table.uploaded)versions.clear();
+        }
+        table.currentUsed.clear();table.uploadCount=0;
+        table.uploadFirst=std::numeric_limits<size_t>::max();table.uploadEnd=0;
+        table.begin=materialCapacity;
+        // Reserve the worst case before workers start: all current identities
+        // may be new while the preceding frame's live keys still occupy rows.
+        const size_t newRows=materialCapacities[family]>table.free.size()?materialCapacities[family]-table.free.size():0;
+        table.capacity=table.records.size()+newRows;
+        table.records.reserve(table.capacity);
+        table.currentUsed.reserve(materialCapacities[family]);
+        table.indices.reserve(table.indices.size()+newRows);
+        if(uploadedMaterialBegins_[slot][family]!=table.begin) table.uploaded[slot].clear();
+        uploadedMaterialBegins_[slot][family]=table.begin;
+        table.uploaded[slot].resize(table.capacity,0);
+        materialsWritten_[family]=0;materialLimit_[family]=materialCapacities[family];
+        materialCapacity+=table.capacity;
     }
     const size_t bytes=std::max(size_t(1),materialCapacity)*sizeof(Material);
     VkPhysicalDeviceProperties props{};vkGetPhysicalDeviceProperties(ctx_.getPhysicalDevice(),&props);
     requireSurface(bytes<=props.limits.maxStorageBufferRange,"surface material table exceeds device limit");
-    if(capacities_[slot]<bytes) {
+    if(capacities_[slot]<bytes || (capacities_[slot]>65536 && bytes<capacities_[slot]/3)) {
         DeferredResources release(ctx_);release.buffer(buffers_[slot]);
         buffers_[slot]=createBuffer(ctx_.getAllocator(),bytes,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
         requireSurface(buffers_[slot].info.pMappedData!=nullptr,"surface material upload allocation failed");
         capacities_[slot]=bytes;
+        for(auto& table:materialTables_)std::fill(table.uploaded[slot].begin(),table.uploaded[slot].end(),0);
     }
     VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};si.maxLod=0;
     si.magFilter=si.minFilter=VK_FILTER_NEAREST;si.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST;
@@ -190,20 +220,69 @@ uint32_t SurfacePass::appendMaterial(const M2Material& material) {
 uint32_t SurfacePass::appendMaterial(Family family, const M2Material& material) {
     return appendMaterialBytes(family,&material);
 }
+SurfacePass::MaterialKey SurfacePass::materialKey(const Material& material) {
+    return {uint64_t(material.identity.x)|(uint64_t(material.identity.y)<<32),
+            uint64_t(material.identity.z)|(uint64_t(material.identity.w)<<32)};
+}
 uint32_t SurfacePass::appendMaterialBytes(Family kind,const void* material) {
     const size_t family=size_t(kind);
     requireSurface(materialsWritten_[family]<materialLimit_[family],"snapshot material capacity exhausted");
-    const uint32_t index=static_cast<uint32_t>(materialBegin_[family]+materialsWritten_[family]++);
-    auto* output=static_cast<Material*>(buffers_[ctx_.getCurrentFrame()].info.pMappedData);
-    std::memcpy(output+index,material,sizeof(Material));
-    output[index].history.y=uint32_t(family);
+    ++materialsWritten_[family];
+    auto& table=materialTables_[family];
+    Material value{};std::memcpy(&value,material,sizeof(value));value.history.y=uint32_t(family);
+    const auto key=materialKey(value);
+    requireSurface(key.placement!=0,"surface material lacks a lifetime identity");
+    auto at=table.indices.find(key);
+    uint32_t row;
+    if(at==table.indices.end()) {
+        if(table.free.empty()) {
+            row=uint32_t(table.records.size());table.records.emplace_back();
+        } else {
+            row=table.free.back();table.free.pop_back();table.records[row]=MaterialRecord{};
+        }
+        table.indices.emplace(key,row);
+    } else row=at->second;
+    requireSurface(row<table.capacity,"persistent material reservation exhausted");
+    auto& record=table.records[row];
+    const uint64_t frame=ctx_.frameNumber();
+    if(record.version==0 || std::memcmp(&record.value,&value,sizeof(value))!=0) {
+        // An earlier draw in this same frame must never see a later draw's
+        // value under the same key. A real material variant needs its own ID.
+        requireSurface(record.seenFrame!=frame,"one surface identity has conflicting frame materials");
+        record.value=value;record.version=++table.nextVersion;
+    }
+    if(record.seenFrame!=frame) {
+        table.currentUsed.push_back(row);record.seenFrame=frame;
+    }
+    const auto slot=ctx_.getCurrentFrame();
+    const uint32_t index=uint32_t(table.begin+row);
+    if(table.uploaded[slot][row]!=record.version) {
+        auto* output=static_cast<Material*>(buffers_[slot].info.pMappedData);
+        std::memcpy(output+index,&record.value,sizeof(value));
+        table.uploaded[slot][row]=record.version;
+        table.uploadFirst=std::min(table.uploadFirst,size_t(index));
+        table.uploadEnd=std::max(table.uploadEnd,size_t(index)+1);++table.uploadCount;
+    }
     return index;
 }
 void SurfacePass::finishMaterials() {
-    // Slot fence was acquired before recording. Host writes, including those
-    // made after recording a draw, are flushed before this command is submitted.
-    requireSurface(vmaFlushAllocation(ctx_.getAllocator(),buffers_[ctx_.getCurrentFrame()].allocation,
-        0,VK_WHOLE_SIZE)==VK_SUCCESS,"surface material upload flush failed");
+    const auto slot=ctx_.getCurrentFrame();const auto frame=ctx_.frameNumber();
+    size_t uploaded=0,live=0;
+    for(auto& table:materialTables_) {
+        // This is a list of previously referenced table rows, never a walk of
+        // the scene. Other slots retain their old row values until fenced.
+        for(const auto row:table.previousUsed) if(table.records[row].seenFrame!=frame) {
+            table.indices.erase(materialKey(table.records[row].value));
+            table.free.push_back(row);
+        }
+        table.previousUsed.swap(table.currentUsed);
+        if(table.uploadCount)requireSurface(vmaFlushAllocation(ctx_.getAllocator(),buffers_[slot].allocation,
+            table.uploadFirst*sizeof(Material),(table.uploadEnd-table.uploadFirst)*sizeof(Material))==VK_SUCCESS,
+            "surface material upload flush failed");
+        uploaded+=table.uploadCount;live+=table.indices.size();
+    }
+    if(core::envFlagEnabled("WOWEE_SURFACE_PLAN_CHECK",false))
+        LOG_INFO("Surface material table: live=",live," uploaded bytes=",uploaded*sizeof(Material));
 }
 VkRect2D SurfacePass::projectBounds(const glm::mat4& clipFromLocal,glm::vec3 lo,glm::vec3 hi) const {
     static const bool full=core::envFlagEnabled("WOWEE_SURFACE_FULL_EXTENT",false);

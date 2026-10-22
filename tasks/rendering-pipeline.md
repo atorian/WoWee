@@ -754,3 +754,19 @@ Legacy depth RT source now lives under tools/ and is linked only into rt_probe.
 [Correctness results](performance/unified-pipeline-correctness.json). This is not
 full performance acceptance: the general persistent GPU material/instance and
 indirect-submission gate remains open. No FPS benchmark or replay was launched.
+
+### Persistent surface material records
+
+Family workers now own lifetime-keyed material registries, with independently
+versioned uploads for every acquired GPU frame slot. Draw references are separate
+from table row order, including instanced M2 batches. Departed records are reclaimed;
+large population drops compact the table and shrinking buffers retire safely.
+
+The all-family MSAA-4/resize fixture hides and restores instances, changes their
+lighting and exercises row reuse. Forward/surface mean channel error is 0.02690,
+fraction over 8 is 0.000535; serial/parallel and bounded/full images match exactly.
+Unchanged material uploads reach zero after slot catch-up. Vulkan synchronization
+validation, renderer/recording guards and client/renderer/probe builds pass.
+[Correctness report](performance/persistent-materials-correctness.json).
+
+The GPU indirect and persistent instance stages remain in progress; no FPS test.

@@ -84,6 +84,10 @@ layout(set = 3, binding = 0) readonly buffer InstanceSSBO {
     InstanceData instanceData[];
 };
 
+#ifdef M2_GBUFFER
+layout(set=3,binding=1) readonly buffer SurfaceReferences { uint surfaceReferences[]; };
+#endif
+
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
@@ -122,7 +126,7 @@ vec2 uvTransform(vec4 row0, vec4 row1, vec2 uv) {
 
 void main() {
 #ifdef M2_GBUFFER
-    vSurfaceMaterial=push.surfaceMaterialBase+gl_InstanceIndex;
+    vSurfaceMaterial=surfaceReferences[push.surfaceMaterialBase+gl_InstanceIndex];
 #endif
     // Fetch per-instance data from SSBO
     int instIdx = push.instanceDataOffset + gl_InstanceIndex;

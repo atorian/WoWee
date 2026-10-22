@@ -837,6 +837,30 @@ void M2Renderer::extractBones(Frame& frame) {
 }
 
 bool M2Renderer::prepareInstanceStorage(uint32_t slot,uint64_t entries) {
+    const uint64_t references=std::max(uint64_t(1),entries);
+    if(references>surfaceReferenceCapacity_[slot]) {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(vkCtx_->getPhysicalDevice(),&props);
+        if(references>props.limits.maxStorageBufferRange/sizeof(uint32_t)) {
+            LOG_ERROR("M2 material references exceed storage buffer range; frame aborted");
+            throw std::runtime_error("M2 material reference capacity exceeded");
+        }
+        const uint32_t capacity=uint32_t(references);
+        auto next=createBuffer(vkCtx_->getAllocator(),VkDeviceSize(capacity)*sizeof(uint32_t),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
+        if(!next.info.pMappedData) {
+            destroyBuffer(vkCtx_->getAllocator(),next);
+            LOG_ERROR("M2 material reference allocation failed; frame aborted");
+            throw std::runtime_error("M2 material reference allocation failed");
+        }
+        VkDescriptorBufferInfo info{next.buffer,0,VkDeviceSize(capacity)*sizeof(uint32_t)};
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet=instanceSet_[slot];write.dstBinding=1;write.descriptorCount=1;
+        write.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;write.pBufferInfo=&info;
+        vkUpdateDescriptorSets(vkCtx_->getDevice(),1,&write,0,nullptr);
+        DeferredResources retire(*vkCtx_);retire.buffer(surfaceReferences_[slot]);
+        surfaceReferences_[slot]=next;surfaceReferenceCapacity_[slot]=capacity;
+    }
     if(entries<=instanceCapacity_[slot]) return true;
     if(instanceGrowthFailed_[slot]) return false;
     VkPhysicalDeviceProperties properties{};
@@ -1829,6 +1853,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
     // Reset instance SSBO write cursor for this frame
     instanceDataCount_ = 0;
+    surfaceReferenceCount_ = 0;
     auto* instSSBO = static_cast<M2InstanceGPU*>(instanceMapped_[frameIndex]);
 
     // =====================================================================
@@ -2150,7 +2175,12 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     pc.instanceDataOffset = static_cast<int32_t>(drawOffset);
                     vkCmdPushConstants(cmd, activeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
                     if(evaluated) {
-                        uint32_t baseMaterial=0;
+                        const uint32_t baseMaterial=surfaceReferenceCount_;
+                        if(uint64_t(surfaceReferenceCount_)+groupSize>surfaceReferenceCapacity_[frameIndex]) {
+                            LOG_ERROR("M2 material references exceed snapshot reservation; frame aborted");
+                            throw std::runtime_error("M2 material reference reservation exhausted");
+                        }
+                        auto* references=static_cast<uint32_t*>(surfaceReferences_[frameIndex].info.pMappedData);
                         for(size_t j=lodIdx;j<lodEnd;++j) {
                             const auto& p=pending[j];const auto& inst=drawInstances_[p.draw];
                             SurfacePass::M2Material material{};
@@ -2164,7 +2194,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                             material.previousFromCurrent=p.previousFromCurrent;
                             material.history.x=p.historyValid?1u:0u;
                             const auto index=surfacePass_->appendMaterial(material);
-                            if(j==lodIdx)baseMaterial=index;
+                            references[surfaceReferenceCount_++]=index;
                         }
                         vkCmdPushConstants(cmd,activeLayout,VK_SHADER_STAGE_VERTEX_BIT,sizeof(pc),sizeof(baseMaterial),&baseMaterial);
                     }
@@ -2188,6 +2218,12 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         recordTransparentPass(cmd, perFrameSet, drawStars, drawBakedStars);
     }
     if(surfaces) {surfacePass_->endRun(SurfacePass::Family::M2);surfaceRecordedFrame_=vkCtx_->frameNumber();}
+
+    if(surfaceReferenceCount_ && vmaFlushAllocation(vkCtx_->getAllocator(),surfaceReferences_[frameIndex].allocation,
+        0,VkDeviceSize(surfaceReferenceCount_)*sizeof(uint32_t))!=VK_SUCCESS) {
+        LOG_ERROR("M2 material reference flush failed; frame aborted");
+        throw std::runtime_error("M2 material reference flush failed");
+    }
 
     // How many of the sky's layers were actually drawn this frame.
     //
