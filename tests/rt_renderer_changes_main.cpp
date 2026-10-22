@@ -124,6 +124,17 @@ void exercise(rendering::Renderer& renderer, pipeline::AssetManager& assets) {
     const auto reversed=wmo.extract(away,away.getPosition(),{});
     require(reversed->view.used==0,"camera pointing away still draws ship groups");
     require(views->view.used>0,"next extraction mutated the queued view");
+    const auto reflectedFacing = rendering::SceneView::fromCamera(facing);
+    const auto onlyReflection = wmo.extract(away, away.getPosition(), {}, &reflectedFacing);
+    require(onlyReflection->view.used == 0, "reflection visibility leaked into the primary view");
+    require(onlyReflection->reflection.used > 0, "primary rejection removed a reflected ship");
+    wmo.setInstanceHidden(hull, true);
+    const auto hiddenViews = wmo.extract(facing, facing.getPosition(), {}, &reflectedFacing);
+    require(hiddenViews->view.used == 0 && hiddenViews->reflection.used == 0 && hiddenViews->depth.used == 0,
+            "hidden placement remains in a view or shadow pass");
+    require(onlyReflection->reflection.used > 0 && views->depth.used > 0,
+            "hide mutated an already extracted reflection or shadow");
+    wmo.setInstanceHidden(hull, false);
     wmo.setM2Renderer(&m2);
     wmo.addDoodadToInstance(hull, child, glm::translate(glm::mat4(1), glm::vec3(4,0,0)));
     auto extract = [&] {

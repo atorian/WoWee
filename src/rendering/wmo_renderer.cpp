@@ -1057,12 +1057,11 @@ WMORenderer::GroupDraw WMORenderer::extractGroup(const GroupResources& group,
         out.worldMin = centre - glm::vec3(radius);
         out.worldMax = centre + glm::vec3(radius);
     }
-    if (frameLights_) out.lights = pickLocalLights(*frameLights_, (out.worldMin + out.worldMax) * 0.5f,
-                                                 glm::length(out.worldMax - out.worldMin) * 0.5f);
     return out;
 }
 
 void WMORenderer::Frame::clear() noexcept {
+    groups.clear();
     for (auto* list : {&view, &reflection, &depth}) {
         // Keep each entry's group capacity, but no resource from the completed
         // frame. Entries past `used` can belong to an earlier, larger scene.
@@ -1075,11 +1074,55 @@ void WMORenderer::Frame::clear() noexcept {
 std::shared_ptr<const WMORenderer::Frame> WMORenderer::extract(const Camera& camera,
         const glm::vec3& viewer, const std::vector<LocalLight>& lights, const SceneView* reflection) {
     auto frame = framePool_.acquire();
-    frameLights_ = &lights;
-    cullView(SceneView::fromCamera(camera), viewer, frame->view);
-    if (reflection) cullView(*reflection, reflection->position, frame->reflection);
-    extractDepth(frame->depth);
-    frameLights_ = nullptr;
+    const SceneView primary = SceneView::fromCamera(camera);
+    Frustum primaryFrustum, reflectionFrustum;
+    primaryFrustum.extractFromMatrix(primary.viewProjection());
+    frame->view.cameraPosition = primary.position;
+    if (reflection) {
+        reflectionFrustum.extractFromMatrix(reflection->viewProjection());
+        frame->reflection.cameraPosition = reflection->position;
+    }
+    // Visit each placement/group once. Pass lists retain indices into one
+    // immutable evaluated record; neither reflection nor shadows rebuild it.
+    for (const auto& instance : scene_->instances) {
+        if (instance.hidden) continue;
+        const auto found = loadedModels.find(instance.modelId);
+        if (found == loadedModels.end()) continue;
+        const auto& model = found->second;
+        const bool primaryPortals = cullPortals(model, instance, primary, viewer,
+                                                primaryFrustum, frame->view);
+        const bool reflectionPortals = reflection && cullPortals(model, instance, *reflection,
+            reflection->position, reflectionFrustum, frame->reflection);
+        auto& viewEntry = frame->view.add();
+        auto& depthEntry = frame->depth.add();
+        DrawEntry* reflectionEntry = reflection ? &frame->reflection.add() : nullptr;
+        for (auto* entry : {&viewEntry, &depthEntry, reflectionEntry}) if (entry) {
+            entry->modelMatrix = instance.modelMatrix;
+            entry->scale = instance.scale;
+        }
+        for (uint32_t gi = 0; gi < model.groups.size(); ++gi) {
+            const auto& group = model.groups[gi];
+            if (!group.vertexBuffer || !group.indexBuffer || (group.groupFlags & 0x4000000)) continue;
+            auto kept = extractGroup(group, instance, gi);
+            const bool inView = keepGroup(kept, instance, gi, primaryPortals, primaryFrustum, frame->view);
+            const bool inReflection = reflection && keepGroup(kept, instance, gi, reflectionPortals,
+                                                               reflectionFrustum, frame->reflection);
+            const bool inDepth = !group.isLOD;
+            if (!inView && !inReflection && !inDepth) continue;
+            // Shadow-only records need geometry and bounds, never light selection.
+            if (inView || inReflection)
+                kept.lights = pickLocalLights(lights, (kept.worldMin + kept.worldMax) * 0.5f,
+                                               glm::length(kept.worldMax - kept.worldMin) * 0.5f);
+            const uint32_t index = static_cast<uint32_t>(frame->groups.size());
+            frame->groups.push_back(std::move(kept));
+            if (inView) viewEntry.groups.push_back(index);
+            if (inReflection) reflectionEntry->groups.push_back(index);
+            if (inDepth) depthEntry.groups.push_back(index);
+        }
+        if (viewEntry.groups.empty()) frame->view.dropLast();
+        if (depthEntry.groups.empty()) frame->depth.dropLast();
+        if (reflectionEntry && reflectionEntry->groups.empty()) frame->reflection.dropLast();
+    }
     frame->wireframe = wireframeMode;
     frame->normalMap = normalMappingEnabled_ ? 1 : 0;
     frame->pom = pomEnabled_ ? 1 : 0;
@@ -1096,138 +1139,109 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
     if (pass == Pass::View) viewDrawCallCount_ = draws;
 }
 
-void WMORenderer::cullView(const SceneView& camera, const glm::vec3& portalViewerPos, DrawList& list) const {
-    list.clear();
-    list.cameraPosition = camera.position;
-
-    // Extract frustum planes for proper culling
-    glm::mat4 viewProj = camera.viewProjection();
-    Frustum frustum;
-    frustum.extractFromMatrix(viewProj);
-
+bool WMORenderer::cullPortals(const ModelData& model, const WMOInstance& instance,
+        const SceneView& camera, const glm::vec3& portalViewerPos,
+        const Frustum& frustum, DrawList& list) const {
     const glm::vec3 camPos = camera.position;
     const bool doPortalCull = portalCulling && cullingEnabled_;
-    const bool doDistanceCull = distanceCulling && cullingEnabled_;
-
-    for (const WMOInstance& instance : scene_->instances) {
-        // Somewhere else entirely - see setInstanceHidden.
-        if (instance.hidden) continue;
-        auto mdlIt = loadedModels.find(instance.modelId);
-        if (mdlIt == loadedModels.end()) continue;
-        const ModelData& model = mdlIt->second;
-
-        DrawEntry& entry = list.add();
-        entry.modelMatrix = instance.modelMatrix;
-        entry.scale = instance.scale;
-
-        // Portal-based visibility, into the pass's own scratch set.
-        bool usePortalCulling = doPortalCull && !model.portals.empty() && !model.portalRefs.empty();
-        const glm::vec3 localRealCam =
-            glm::vec3(instance.invModelMatrix * glm::vec4(camPos, 1.0f));
-        if (usePortalCulling) {
-            // If the camera is outside all groups, skip portal culling entirely.
-            // This is what makes it safe for the traversal below to start from
-            // the camera: an orbiting third-person camera that has left the
-            // building never reaches the walk at all.
-            int camGroup = findContainingGroup(model, localRealCam);
-            if (camGroup < 0) {
+    // Portal-based visibility, into the pass's own scratch set.
+    bool usePortalCulling = doPortalCull && !model.portals.empty() && !model.portalRefs.empty();
+    const glm::vec3 localRealCam =
+        glm::vec3(instance.invModelMatrix * glm::vec4(camPos, 1.0f));
+    if (usePortalCulling) {
+        // If the camera is outside all groups, skip portal culling entirely.
+        // This is what makes it safe for the traversal below to start from
+        // the camera: an orbiting third-person camera that has left the
+        // building never reaches the walk at all.
+        int camGroup = findContainingGroup(model, localRealCam);
+        if (camGroup < 0) {
+            usePortalCulling = false;
+        } else {
+            // Entranceways and awnings: the best-fit AABB often claims an
+            // interior group while the camera is visually outside (interior
+            // boxes spill past the doorway). Only trust portal traversal
+            // when the camera group is interior-only - the same rule
+            // getVisibleGroupsViaPortals applies to the viewer position.
+            constexpr uint32_t WMO_GROUP_FLAG_OUTDOOR = 0x8;
+            constexpr uint32_t WMO_GROUP_FLAG_INDOOR = 0x2000;
+            const uint32_t gFlags = model.groups[camGroup].groupFlags;
+            const bool isIndoor = (gFlags & WMO_GROUP_FLAG_INDOOR) != 0;
+            const bool isOutdoor = (gFlags & WMO_GROUP_FLAG_OUTDOOR) != 0;
+            if (!isIndoor || isOutdoor) {
                 usePortalCulling = false;
             } else {
-                // Entranceways and awnings: the best-fit AABB often claims an
-                // interior group while the camera is visually outside (interior
-                // boxes spill past the doorway). Only trust portal traversal
-                // when the camera group is interior-only - the same rule
-                // getVisibleGroupsViaPortals applies to the viewer position.
-                constexpr uint32_t WMO_GROUP_FLAG_OUTDOOR = 0x8;
-                constexpr uint32_t WMO_GROUP_FLAG_INDOOR = 0x2000;
-                const uint32_t gFlags = model.groups[camGroup].groupFlags;
-                const bool isIndoor = (gFlags & WMO_GROUP_FLAG_INDOOR) != 0;
-                const bool isOutdoor = (gFlags & WMO_GROUP_FLAG_OUTDOOR) != 0;
-                if (!isIndoor || isOutdoor) {
-                    usePortalCulling = false;
-                } else {
-                    // Doorway thresholds sit inside both the interior box and
-                    // an outdoor street group's box - treat those as outdoors
-                    // too (second half of the viewer-side rule).
-                    for (size_t gi = 0; gi < model.groups.size(); ++gi) {
-                        if (static_cast<int>(gi) == camGroup) continue;
-                        const auto& g = model.groups[gi];
-                        if (!(g.groupFlags & WMO_GROUP_FLAG_OUTDOOR)) continue;
-                        if (localRealCam.x >= g.boundingBoxMin.x && localRealCam.x <= g.boundingBoxMax.x &&
-                            localRealCam.y >= g.boundingBoxMin.y && localRealCam.y <= g.boundingBoxMax.y &&
-                            localRealCam.z >= g.boundingBoxMin.z && localRealCam.z <= g.boundingBoxMax.z) {
-                            usePortalCulling = false;
-                            break;
-                        }
+                // Doorway thresholds sit inside both the interior box and
+                // an outdoor street group's box - treat those as outdoors
+                // too (second half of the viewer-side rule).
+                for (size_t gi = 0; gi < model.groups.size(); ++gi) {
+                    if (static_cast<int>(gi) == camGroup) continue;
+                    const auto& g = model.groups[gi];
+                    if (!(g.groupFlags & WMO_GROUP_FLAG_OUTDOOR)) continue;
+                    if (localRealCam.x >= g.boundingBoxMin.x && localRealCam.x <= g.boundingBoxMax.x &&
+                        localRealCam.y >= g.boundingBoxMin.y && localRealCam.y <= g.boundingBoxMax.y &&
+                        localRealCam.z >= g.boundingBoxMin.z && localRealCam.z <= g.boundingBoxMax.z) {
+                        usePortalCulling = false;
+                        break;
                     }
                 }
             }
         }
-        if (usePortalCulling) {
-            list.portalGroups.clear();
-            // Both viewpoints seed the walk. The frustum belongs to the camera,
-            // so its group is the principled start - but at a doorway or in a
-            // hallway the camera and the character stand in different groups,
-            // and seeding from one while testing doors against the other's view
-            // is how the interior emptied out. Neither is reliably right on its
-            // own, so take both.
-            //
-            // Ironforge shows this worst because of what rescues everywhere
-            // else: exterior groups are seeded unconditionally below, which in a
-            // city WMO means the streets and facades stay drawn however the walk
-            // goes. Ironforge is interior throughout, that seed contributes
-            // almost nothing, and the entire result rests on the traversal.
-            const glm::vec3 localViewer =
-                glm::vec3(instance.invModelMatrix * glm::vec4(portalViewerPos, 1.0f));
-            getVisibleGroupsViaPortals(model, localRealCam, localViewer, frustum,
-                                       instance.modelMatrix, list.portalGroups);
-            // Use the unordered_set directly - was copying into portalVisibleGroups_,
-            // sorting it, and binary-searching per group. The set lookup is O(1)
-            // per group and skips the per-instance copy + sort.
-        }
-
-        for (size_t gi = 0; gi < model.groups.size(); ++gi) {
-            if (usePortalCulling && !list.portalGroups.contains(static_cast<uint32_t>(gi))) {
-                list.portalCulled++;
-                continue;
-            }
-
-            if (gi < instance.worldGroupBounds.size()) {
-                const auto& [gMin, gMax] = instance.worldGroupBounds[gi];
-                const glm::vec2 nearest = glm::clamp(glm::vec2(camPos),
-                                                    glm::vec2(gMin), glm::vec2(gMax));
-                const glm::vec2 delta = nearest - glm::vec2(camPos);
-                if (glm::dot(delta, delta) > viewDistance_ * viewDistance_) {
-                    list.distanceCulled++;
-                    continue;
-                }
-            }
-
-            // Optional tighter 3D distance culling, independent of the shared
-            // horizontal world limit above. Keep nearby interiors unaffected.
-            if (cullingEnabled_ && gi < instance.worldGroupBounds.size()) {
-                const auto& [gMin, gMax] = instance.worldGroupBounds[gi];
-
-                glm::vec3 closestPoint = glm::clamp(camPos, gMin, gMax);
-                float distSq = glm::dot(closestPoint - camPos, closestPoint - camPos);
-                const float groupViewDistance = doDistanceCull
-                    ? std::min(viewDistance_, maxGroupDistance)
-                    : viewDistance_;
-                if (distSq > groupViewDistance * groupViewDistance) {
-                    list.distanceCulled++;
-                    continue;
-                }
-            }
-
-            auto kept = extractGroup(model.groups[gi], instance, static_cast<uint32_t>(gi));
-            if (frustumCulling && !frustum.intersectsAABB(kept.worldMin, kept.worldMax)) {
-                ++list.frustumCulled;
-                continue;
-            }
-            entry.groups.push_back(std::move(kept));
-        }
-        if (entry.groups.empty()) list.dropLast();
     }
+    if (usePortalCulling) {
+        list.portalGroups.clear();
+        // Both viewpoints seed the walk. The frustum belongs to the camera,
+        // so its group is the principled start - but at a doorway or in a
+        // hallway the camera and the character stand in different groups,
+        // and seeding from one while testing doors against the other's view
+        // is how the interior emptied out. Neither is reliably right on its
+        // own, so take both.
+        //
+        // Ironforge shows this worst because of what rescues everywhere
+        // else: exterior groups are seeded unconditionally below, which in a
+        // city WMO means the streets and facades stay drawn however the walk
+        // goes. Ironforge is interior throughout, that seed contributes
+        // almost nothing, and the entire result rests on the traversal.
+        const glm::vec3 localViewer =
+            glm::vec3(instance.invModelMatrix * glm::vec4(portalViewerPos, 1.0f));
+        getVisibleGroupsViaPortals(model, localRealCam, localViewer, frustum,
+                                   instance.modelMatrix, list.portalGroups);
+        // Use the unordered_set directly - was copying into portalVisibleGroups_,
+        // sorting it, and binary-searching per group. The set lookup is O(1)
+        // per group and skips the per-instance copy + sort.
+    }
+
+    return usePortalCulling;
+}
+
+bool WMORenderer::keepGroup(const GroupDraw& group, const WMOInstance& instance,
+        uint32_t index, bool usePortals, const Frustum& frustum, DrawList& list) const {
+    if (usePortals && !list.portalGroups.contains(index)) {
+        ++list.portalCulled;
+        return false;
+    }
+    const auto camPos = list.cameraPosition;
+    if (index < instance.worldGroupBounds.size()) {
+        const auto& [gMin, gMax] = instance.worldGroupBounds[index];
+        const glm::vec2 nearest = glm::clamp(glm::vec2(camPos), glm::vec2(gMin), glm::vec2(gMax));
+        const glm::vec2 delta = nearest - glm::vec2(camPos);
+        if (glm::dot(delta, delta) > viewDistance_ * viewDistance_) {
+            ++list.distanceCulled;
+            return false;
+        }
+        if (cullingEnabled_) {
+            const glm::vec3 delta3 = glm::clamp(camPos, gMin, gMax) - camPos;
+            const float reach = distanceCulling ? std::min(viewDistance_, maxGroupDistance) : viewDistance_;
+            if (glm::dot(delta3, delta3) > reach * reach) {
+                ++list.distanceCulled;
+                return false;
+            }
+        }
+    }
+    if (frustumCulling && !frustum.intersectsAABB(group.worldMin, group.worldMax)) {
+        ++list.frustumCulled;
+        return false;
+    }
+    return true;
 }
 
 uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const glm::vec3& camPos,
@@ -1266,7 +1280,8 @@ uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
         static constexpr float LOD_SHELL_DIST_SQ = 196.0f * 196.0f;
 
         // Render visible groups
-        for (const auto& kept : entry.groups) {
+        for (const uint32_t groupIndex : entry.groups) {
+            const auto& kept = recording_->groups[groupIndex];
             const auto& group = *kept.gpu;
 
             // Only skip antiportal geometry
@@ -1414,35 +1429,6 @@ bool WMORenderer::initializeShadow(VkRenderPass shadowRenderPass) {
     return true;
 }
 
-void WMORenderer::extractDepth(DrawList& list) const {
-    list.clear();
-    for (const WMOInstance& instance : scene_->instances) {
-        // Not in the world, so not between the sun and anything in it - a
-        // ship whose route is on the other map darkened the sea it had left.
-        if (instance.hidden) continue;
-        auto modelIt = loadedModels.find(instance.modelId);
-        if (modelIt == loadedModels.end()) continue;
-        const ModelData& model = modelIt->second;
-
-        DrawEntry& entry = list.add();
-        entry.modelMatrix = instance.modelMatrix;
-        entry.scale = instance.scale;
-        for (size_t gi = 0; gi < model.groups.size(); ++gi) {
-            const auto& group = model.groups[gi];
-            if (group.vertexBuffer == VK_NULL_HANDLE || group.indexBuffer == VK_NULL_HANDLE) continue;
-
-            // Skip antiportal geometry
-            if (group.groupFlags & 0x4000000) continue;
-
-            // Skip LOD groups in shadow pass (they overlap real geometry)
-            if (group.isLOD) continue;
-
-            entry.groups.push_back(extractGroup(group, instance, static_cast<uint32_t>(gi)));
-        }
-        if (entry.groups.empty()) list.dropLast();
-    }
-}
-
 void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
                                const glm::vec3& shadowCenter, float shadowRadius, bool resetDescriptors) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
@@ -1478,7 +1464,8 @@ void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceM
                            0, sizeof(ShadowPush), &push);
         bool cutoutBound = false;
 
-        for (const auto& kept : entry.groups) {
+        for (const uint32_t groupIndex : entry.groups) {
+            const auto& kept = recording_->groups[groupIndex];
             const glm::vec3 nearest = glm::clamp(shadowCenter, kept.worldMin, kept.worldMax);
             if (glm::dot(nearest - shadowCenter, nearest - shadowCenter) > radius * radius) continue;
             const auto& group = *kept.gpu;

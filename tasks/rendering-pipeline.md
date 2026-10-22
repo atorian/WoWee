@@ -29,6 +29,10 @@ checkout remains on master with its concurrent uncommitted work preserved.
   and recording use the same reflected view. Group frustum culling is independent
   of the opt-in portal/tighter-distance diagnostics.
 
+- WMO extracts primary, reflected and shadow lists in one placement/group
+  traversal. Evaluated group records are shared by index; shadow-only groups
+  do not select local lights. Portal visibility remains specific to each view.
+
 ## Frame graph
 
 - Resources are single-assignment logical versions. A later writer waits for
@@ -86,6 +90,10 @@ checkout remains on master with its concurrent uncommitted work preserved.
   WMO appeared after a settings change. It passes after the fix, including
   settings changed after extraction, MSAA 4x and the water reflection path.
   Synchronization validation exposed and verified the MSAA depth LOAD fix.
+- Single-traversal WMO preserves all six M2/WMO RT mutation PNGs byte for byte.
+  Opposite primary/reflected cameras and hidden placements preserve independent
+  pass membership and already queued snapshots. Water/reflection settings
+  regression also passes with synchronization validation.
 - No branch FPS improvement is claimed. No full branch replay measured yet.
 
 ## Remaining implementation

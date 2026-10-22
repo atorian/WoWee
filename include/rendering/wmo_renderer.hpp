@@ -425,7 +425,6 @@ private:
     // Holds a model's group resources before their upload.
     friend struct WmoModelPrep;
 
-    const std::vector<LocalLight>* frameLights_ = nullptr;
     // WMO material UBO - matches WMOMaterial in wmo.frag.glsl
     // Resource properties only. Per-frame normal/POM settings are recorded
     // separately, so queued frames never rewrite a shared material allocation.
@@ -852,7 +851,7 @@ private:
         float scale = 1.0f;
         /// Valid for the frame: models are unloaded only between frames.
         /// The model's groups this pass draws.
-        std::vector<GroupDraw> groups;
+        std::vector<uint32_t> groups; // indices in Frame::groups
     };
 
     /// What one pass draws, rebuilt by its cull each time it runs. Entries
@@ -887,11 +886,13 @@ private:
 
 
     /// The instances the camera sees and their groups that are drawn.
-    void cullView(const SceneView& camera, const glm::vec3& portalViewerPos, DrawList& list) const;
+    bool cullPortals(const ModelData& model, const WMOInstance& instance,
+                     const SceneView& camera, const glm::vec3& portalViewerPos,
+                     const Frustum& frustum, DrawList& list) const;
+    bool keepGroup(const GroupDraw& group, const WMOInstance& instance, uint32_t index,
+                   bool usePortals, const Frustum& frustum, DrawList& list) const;
     uint32_t recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const glm::vec3& camPos,
                     const DrawList& list) const;
-    /// The instances, shown, and groups that reach a shadow map of this centre and reach.
-    void extractDepth(DrawList& list) const;
     GroupDraw extractGroup(const GroupResources& group, const WMOInstance& instance, uint32_t groupIndex) const;
 
     struct InstanceState {
@@ -906,6 +907,7 @@ private:
 public:
     struct Frame {
         void clear() noexcept;
+        std::vector<GroupDraw> groups;
         DrawList view, reflection, depth;
         bool wireframe = false;
         int normalMap = 0, pom = 0, samples = 0;
