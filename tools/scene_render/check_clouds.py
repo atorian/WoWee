@@ -71,6 +71,7 @@ def metrics(folder):
         "fair_gap_fraction": sum(v < 8 for v in fair) / count,
         "fair_core_fraction": sum(v > 235 for v in fair) / count,
         "fair_translucent_fraction": sum(8 <= v <= 235 for v in fair) / count,
+        "fair_peak_contrast": max(fair),
         "overcast_core_fraction": sum(v > 235 for v in storm) / count,
         "motion_mean_change": sum(abs(a-b) for a, b in zip(fair, masks["mask_motion"])) / count,
         "weather_decreased_pixels": sum(b + 1 < a for a, b in zip(fair, storm)),
@@ -107,7 +108,9 @@ def main():
     failures = []
     if not result["zero_density_matches_disabled"]: failures.append("zero density does not match disabled clouds")
     if not .15 < result["fair_gap_fraction"] < .85: failures.append("fair weather must leave substantial sky gaps")
-    if result["fair_core_fraction"] < .08: failures.append("clouds have no substantial dense cores: blurred translucent stains")
+    if result["fair_translucent_fraction"] < 2 * result["fair_core_fraction"]:
+        failures.append("fair clouds have hard dense silhouettes instead of broad soft transitions")
+    if result["fair_peak_contrast"] < 220: failures.append("soft clouds lost their visible interiors")
     if result["overcast_core_fraction"] < .75: failures.append("overcast does not close the sky")
     if result["weather_decreased_pixels"]: failures.append("increasing cloud cover removes existing clouds")
     if not 0 < result["motion_mean_change"] < 2: failures.append("small animation step is static or discontinuous")
@@ -117,7 +120,7 @@ def main():
     if args.baseline:
         previous = json.loads((args.baseline / "results.json").read_text())["metrics"]
         report["change_from_baseline"] = {k: result[k] - previous[k] for k in result
-                                          if not isinstance(result[k], bool)}
+                                          if k in previous and not isinstance(result[k], bool)}
     (output / "results.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     cards = "".join('<figure><img src="' + n + '.png"><figcaption>' + html.escape(n) + '</figcaption></figure>' for n in cases)
     (output / "index.html").write_text('<!doctype html><meta charset="utf-8"><title>Cloud render test</title>'

@@ -17,7 +17,7 @@ old version again. Use `-Baseline <directory>` to select another saved run.
 
 Inspect the day/night upward and horizon views, Durotar, sunset and animation
 phase captures. The synthetic white-cloud fixtures check clear-sky gaps,
-dense interiors, overcast coverage, zero-density disable equivalence and
+broad soft transitions with visible interiors, overcast coverage, zero-density disable equivalence and
 continuity under a small animation step. Their measurements cancel the
 matching cloud-free underlay and operate in display space; they are not
 linear optical-depth measurements. Passing these checks does not establish
