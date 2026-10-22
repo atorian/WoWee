@@ -10,13 +10,20 @@
 #define FILTER_THREADS (FILTER_SIZE*FILTER_SIZE)
 #define FILTERS_PER_TILE ((16/FILTER_SIZE)*(16/FILTER_SIZE))
 layout(local_size_x=FILTER_SIZE,local_size_y=FILTER_SIZE) in;
-// Cache the output tile plus the four-pixel halo. The 16x16 variant reduces
-// overlapping receiver loads from four per output to 2.25. The owner selects
-// it only when device shared-memory capacity covers these arrays.
+// Reconstruct on the full-resolution pixel lattice. Stride-two taps keep the
+// four pixel parities disconnected and preserve 2x2 blocks after convergence.
+// Two separable, receiver-guided 9-tap steps retain the old four-pixel radius
+// (sigma=2) without 81 taps per output or a second GPU dispatch/scratch image.
 shared vec4 positions[INPUT_COUNT];
 shared vec3 normals[INPUT_COUNT];
 shared uint materialKeys[INPUT_COUNT];
 shared uvec2 estimates[INPUT_COUNT];
+shared uvec2 horizontalLight[INPUT_SIZE*FILTER_SIZE];
+bool compatible(uint center,uint tap) {
+    return materialKeys[tap]==materialKeys[center] &&
+        dot(normals[center],normals[tap])>0.99 &&
+        abs(dot(positions[center].xyz-positions[tap].xyz,normals[center]))<0.01+0.002*positions[center].w;
+}
 void main() {
     for(uint item=gl_WorkGroupID.x;item<tileCount*FILTERS_PER_TILE;item+=gl_NumWorkGroups.x) {
         uint quadrant=item%FILTERS_PER_TILE;
@@ -34,22 +41,39 @@ void main() {
                 positions[i]=vec4(r.position,r.distance);
                 normals[i]=r.normal;
                 materialKeys[i]=usable(r)?r.material:0u;
-                // Inactive tiles have no raw storage initialized in this run.
-                // They can occur in the halo; never fetch their stale estimates.
+                // A halo can overlap an inactive tile. Never read its stale light.
                 estimates[i]=usable(r)?rawLight[sampleIndex(q,s)]:packSurfaceLight(vec2(1),vec3(0));
+            }
+            barrier();
+            // Include halo rows so vertical reconstruction has the same support
+            // at workgroup boundaries. Each horizontal result has one writer.
+            for(uint i=gl_LocalInvocationIndex;i<INPUT_SIZE*FILTER_SIZE;i+=FILTER_THREADS) {
+                uint mid=(i/FILTER_SIZE)*INPUT_SIZE+(i%FILTER_SIZE)+4u;
+                uvec2 result=packSurfaceLight(vec2(1),vec3(0));
+                if(materialKeys[mid]!=0u) {
+                    vec2 light=vec2(0);vec3 gi=vec3(0);float total=0;
+                    for(int x=-4;x<=4;++x) {
+                        uint tap=uint(int(mid)+x);
+                        if(!compatible(mid,tap))continue;
+                        vec2 l;vec3 g;unpackSurfaceLight(estimates[tap],l,g);
+                        float w=exp(-float(x*x)*0.125);
+                        light+=l*w;gi+=g*w;total+=w;
+                    }
+                    result=packSurfaceLight(light/total,gi/total);
+                }
+                horizontalLight[i]=result;
             }
             barrier();
             if(covered) {
                 uvec2 result=estimates[center];
                 if(materialKeys[center]!=0u) {
                     vec2 light=vec2(0);vec3 gi=vec3(0);float total=0;
-                    for(int y=-2;y<=2;++y) for(int x=-2;x<=2;++x) {
-                        uint tap=uint(int(center)+y*2*INPUT_SIZE+x*2);
-                        if(materialKeys[tap]!=materialKeys[center] ||
-                           dot(normals[center],normals[tap])<=0.99 ||
-                           abs(dot(positions[center].xyz-positions[tap].xyz,normals[center]))>=0.01+0.002*positions[center].w)continue;
-                        vec2 l;vec3 g;unpackSurfaceLight(estimates[tap],l,g);
-                        float w=exp(-float(x*x+y*y)*0.5);
+                    for(int y=-4;y<=4;++y) {
+                        uint tap=uint(int(center)+y*INPUT_SIZE);
+                        if(!compatible(center,tap))continue;
+                        uint horizontal=uint(int(gl_LocalInvocationID.y)+4+y)*FILTER_SIZE+gl_LocalInvocationID.x;
+                        vec2 l;vec3 g;unpackSurfaceLight(horizontalLight[horizontal],l,g);
+                        float w=exp(-float(y*y)*0.125);
                         light+=l*w;gi+=g*w;total+=w;
                     }
                     result=packSurfaceLight(light/total,gi/total);

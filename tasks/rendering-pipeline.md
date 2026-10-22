@@ -814,3 +814,16 @@ The merged production implementation no longer has the duplicate legacy RT
 producer or CPU M2 visibility readback. No intermediate performance run was
 made. Full replay frame-time/peak-memory acceptance remains separate and is not
 established by deterministic graphics fixtures.
+
+
+### Shadow pixelation follow-up (2026-10-23)
+
+The user's quality report exposed a real reconstruction defect: stride-two
+filter taps kept each pixel parity separate, preserving 2x2 light blocks even
+with settled history. A new GPU image regression fails on the prior shader.
+Reconstruction now uses two full-resolution, receiver-guided 9-tap steps within
+one dispatch, preserving the prior four-pixel noise-filter radius. A narrower
+prototype was discarded after its AO/GI noise regression appeared in the scene.
+No extra tracing, world traversal or global RT scratch was added. Shadow edge
+progression, thin same-material surface separation and settled GI are covered
+by the correctness report; FPS benchmarking remains unperformed.

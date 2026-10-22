@@ -404,3 +404,27 @@ still reject temporal history until valid previous-deformation correspondence
 exists; they use current tracing rather than stale rigid motion. Full Dalaran
 performance, long-route peak memory and frame-pacing acceptance are not claimed
 by these correctness fixtures.
+
+
+## Full-resolution shadow reconstruction (2026-10-23)
+
+The receiver filter now connects adjacent pixels instead of filtering four
+independent even/odd pixel lattices. The old stride-two 5x5 taps preserved the
+half-resolution 2x2 lighting blocks even after temporal convergence. Two guided
+9-tap steps, horizontal then vertical, run inside the same compute workgroup
+and dispatch. Material identity, geometric normal and plane distance gate both
+steps; a one-pixel foreground sharing its background's material must stay separate.
+
+The four-pixel support and sigma=2 are retained for AO/GI noise suppression.
+A narrower dense 5x5 prototype was rejected because it made settled GI noisier.
+The final filter needs no extra rays, global scratch buffers or scene walks.
+The wide workgroup averages 22.5 taps/output including halo rows, versus 25 in
+the previous filter; the narrow group averages 27. These are workload counts,
+not measured GPU timing. Packed horizontal estimates add 3 KiB of workgroup
+shared storage for the wide variant; capability selection includes that cost.
+
+The regression fails before the fix for cold, settled and moving shadows in
+MSAA1/MSAA4. Final hardware/software and narrow/wide results are recorded in
+[the shadow reconstruction report](../tasks/performance/shadow-reconstruction-correctness.json).
+This fixes block reconstruction, not the separate absence of deformation-aware
+temporal history or every possible shadow-map aliasing artifact.

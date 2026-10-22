@@ -1,0 +1,68 @@
+{
+  "date": "2026-10-23",
+  "branch": "codex/gpu-scene-pipeline",
+  "baseline_commit": "9f0ca66",
+  "performance_measurement": false,
+  "bug": "Stride-two reconstruction keeps 2x2 lighting blocks unchanged within each pair, including after history convergence.",
+  "red": "Six failed shadow-edge assertions: cold/settled/moved, MSAA1/MSAA4; within-pair variation is zero.",
+  "fix": "Two receiver-guided full-resolution 9-tap steps in one compute dispatch; retains radius 4 and sigma 2, no new rays or global images.",
+  "gpu_checks": {
+    "hardware_wide": {
+      "assertions": 40,
+      "failed": false,
+      "backend_verified": true,
+      "filter_tile_verified": true
+    },
+    "hardware_narrow": {
+      "assertions": 40,
+      "failed": false,
+      "backend_verified": true,
+      "filter_tile_verified": true
+    },
+    "software_wide": {
+      "assertions": 40,
+      "failed": false,
+      "backend_verified": true,
+      "filter_tile_verified": true
+    },
+    "software_narrow": {
+      "assertions": 40,
+      "failed": false,
+      "backend_verified": true,
+      "filter_tile_verified": true
+    }
+  },
+  "validation": "Khronos synchronization validation passed; no receiver/normal/thin-depth light leaks in probe.",
+  "analytic_comparison": {
+    "reference": "Independent analytic square-caster visibility: 256 sun-disk samples and exact pixel coverage; no production filter. Fixed orthographic scene.",
+    "before_mean_absolute_shadow_error": 0.022137774691074915,
+    "after_mean_absolute_shadow_error": 0.021627595123591872
+  },
+  "scene_noise_check": {
+    "scene": "build-dev/scratch/history-settled.json",
+    "frames": 150,
+    "roi": [
+      100,
+      420,
+      500,
+      460
+    ],
+    "metric": "RMS of four-neighbor luminance Laplacian, RGB averaged in 0..255 encoded image values; spatial variation, not temporal noise or GPU cost.",
+    "saved_baseline": 0.9471998205236778,
+    "final": 0.7215675451558533
+  },
+  "limits": "This verifies reconstructed RT shadows on controlled scenes. Deformation-aware history, full Dalaran frame pacing and user-specific shadow-map aliasing are not established.",
+  "builds": [
+    "wowee",
+    "scene_render",
+    "rt_probe"
+  ],
+  "guards": [
+    "render_dependency_check",
+    "record_scene_check"
+  ],
+  "evidence": [
+    "build-dev/scratch/shadow-reconstruction-red",
+    "build-dev/scratch/shadow-reconstruction-final"
+  ]
+}

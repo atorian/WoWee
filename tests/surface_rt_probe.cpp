@@ -10,6 +10,8 @@
 #include <cstring>
 #include <cmath>
 #include <stdexcept>
+#include <cstdlib>
+#include <string>
 
 using namespace wowee::rendering;
 namespace {
@@ -140,6 +142,41 @@ int checkSurfaceRt(VkContext& ctx) {
                 finite=finite && std::isfinite(glm::unpackHalf1x16(uint16_t(packed.x>>16))) && std::isfinite(yz.x) && std::isfinite(yz.y);
             }
             expect("mode change produces finite current GI for every sample",finite);
+            // A flat receiving wall must not retain a two-pixel staircase after
+            // reconstruction. Test visible light, not a particular kernel shape.
+            push.config.y=2;push.config.z=0;
+            scene.setInstanceTransform(caster,glm::translate(glm::mat4(1),camera));
+            auto edgeQuality=[&](const char* phase) {
+                double within=0,between=0;
+                for(uint32_t y=16;y<48;++y)for(uint32_t x=16;x<48;++x) {
+                    const float dx=std::abs(sun(x+1,y,0)-sun(x,y,0));
+                    const float dy=std::abs(sun(x,y+1,0)-sun(x,y,0));
+                    (x%2?between:within)+=dx;
+                    (y%2?between:within)+=dy;
+                }
+                std::printf("shadow edge %s MSAA%u: within-pair=%g between-pair=%g\n",phase,uint32_t(samples),within,between);
+                expect("shadow edge progresses at individual pixels, not only every second pixel",within>between*.4 && between>1);
+                expect("reconstruction preserves the shadow interior and unoccluded wall",sun(33,33,0)<.05f && sun(10,33,0)>.95f);
+                if(const char* directory=std::getenv("WOWEE_SURFACE_PROBE_DUMP")) {
+                    const std::string path=std::string(directory)+"/shadow-"+phase+"-ms"+std::to_string(uint32_t(samples))+".pgm";
+                    auto* file=std::fopen(path.c_str(),"wb");require(file!=nullptr,"shadow probe output unavailable");
+                    std::fprintf(file,"P5\n%u %u\n255\n",size,size);
+                    for(uint32_t y=0;y<size;++y)for(uint32_t x=0;x<size;++x)std::fputc(int(std::round(sun(x,y,0)*255)),file);
+                    require(std::fclose(file)==0,"shadow probe output write failed");
+                }
+            };
+            push.config.y=3; // One foreground pixel, sharing the back wall's material.
+            frame(1);
+            expect("thin same-material foreground does not inherit background shadow",sun(33,33,0)>.95f);
+            expect("thin same-material foreground does not leak light onto background",sun(32,33,0)<.05f && sun(33,32,0)<.05f);
+            push.config.y=2;
+            frame(1);edgeQuality("cold");
+            for(int i=0;i<24;++i)frame(1);
+            edgeQuality("settled");
+            scene.setInstanceTransform(caster,glm::translate(glm::mat4(1),camera+glm::vec3(0,.17f,.11f))*
+                glm::rotate(glm::mat4(1),.3f,glm::vec3(1,0,0)));
+            frame(1);edgeQuality("moved");
+            push.config.y=1;
             // Move coverage between nonadjacent tiles, through an empty run.
             // The final tile is partial (67x67) and its newly visible receiver
             // must be traced even though neither prior tile lists included it.

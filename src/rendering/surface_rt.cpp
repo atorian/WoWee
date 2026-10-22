@@ -78,9 +78,10 @@ void SurfaceRt::createPipelines() {
     };
     VkPhysicalDeviceProperties properties{};
     vkGetPhysicalDeviceProperties(ctx_.getPhysicalDevice(),&properties);
-    // Conservative vec3 alignment: 576 * (vec4 + vec3 + uint + uvec2).
+    // Conservative vec3 alignment: 24x24 receivers plus 24x16 packed
+    // horizontal light estimates, all local to the same dispatch.
     // Also check the invocation limit before selecting the larger workgroup.
-    const bool wide=properties.limits.maxComputeSharedMemorySize>=576u*44u &&
+    const bool wide=properties.limits.maxComputeSharedMemorySize>=576u*44u+384u*8u &&
         properties.limits.maxComputeWorkGroupInvocations>=256 &&
         properties.limits.maxComputeWorkGroupSize[0]>=16 && properties.limits.maxComputeWorkGroupSize[1]>=16 &&
         !core::envFlagEnabled("WOWEE_SURFACE_RT_FILTER_8",false);
