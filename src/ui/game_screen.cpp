@@ -1117,22 +1117,7 @@ void GameScreen::renderPlayerInfo(game::GameHandler& gameHandler) {
 /// the same.
 VkDescriptorSet cursorTexture(pipeline::AssetManager* assets, core::Window* window,
                               const char* path) {
-    static std::unordered_map<std::string, VkDescriptorSet> loaded;
-    auto it = loaded.find(path);
-    if (it != loaded.end() && it->second != VK_NULL_HANDLE) return it->second;
-
-    ui::UiTextureLoad why = ui::UiTextureLoad::Ok;
-    VkDescriptorSet tex = ui::uploadUiTextureFromBlp(assets, path, window, &why);
-    if (tex) {
-        loaded[path] = tex;
-        return tex;
-    }
-    static std::set<std::string> said;
-    if (said.insert(path).second) {
-        LOG_WARNING("Cursor art ", path, " did not load (", static_cast<int>(why),
-                    ") - the pointer stays the plain hand there");
-    }
-    return VK_NULL_HANDLE;
+    return ui::uploadUiTextureFromBlp(assets, path, window);
 }
 
 /// Draw one in place of the pointer. The tip sits at the mouse position, the
@@ -1187,26 +1172,8 @@ bool GameScreen::drawVendorCursor(game::GameHandler& gameHandler,
     auto unit = std::static_pointer_cast<game::Unit>(entity);
     if ((unit->getNpcFlags() & game::NPC_FLAG_ANY_VENDOR) == 0) return false;
 
-    // Only a successful upload is cached, so a transient descriptor-pool
-    // failure is retried rather than leaving the cursor plain for good.
-    static VkDescriptorSet cursorTex = VK_NULL_HANDLE;
-    if (!cursorTex) {
-        ui::UiTextureLoad why = ui::UiTextureLoad::Ok;
-        cursorTex = ui::uploadUiTextureFromBlp(
-            services_.assetManager, "Interface\\Cursor\\Buy.blp", services_.window, &why);
-        // Said once. A cursor that will not load and a unit that is not a
-        // vendor both end as the plain hand, and from the chair they are the
-        // same thing - so the one that is a fault has to name itself.
-        if (!cursorTex) {
-            static bool said = false;
-            if (!said) {
-                said = true;
-                LOG_WARNING("Vendor cursor: Interface\\Cursor\\Buy.blp did not load (",
-                            static_cast<int>(why),
-                            ") - the pointer stays the plain hand over merchants");
-            }
-        }
-    }
+    const auto cursorTex = ui::uploadUiTextureFromBlp(
+        services_.assetManager, "Interface\\Cursor\\Buy.blp", services_.window);
     if (!cursorTex) return false;
 
     // Drawn in place of the pointer rather than beside it, which is what a

@@ -61,33 +61,6 @@ std::string strippedText(const std::string& in) {
 
 } // namespace
 
-void WidgetRenderer::initialize(pipeline::AssetManager* assets,
-                                rendering::VkContext* vkCtx) {
-    assets_ = assets;
-    vkCtx_ = vkCtx;
-}
-
-// Additive art is uploaded as its own image, because the same file can be
-// asked for both ways and the two differ in their alpha channel.
-static std::string cacheKey(const std::string& path, bool add) {
-    return add ? path + "|add" : path;
-}
-
-const VkDescriptorSet* WidgetRenderer::cachedTexture(const std::string& path,
-                                                     bool add) const {
-    // The suffixed key is only built for additive art, which is a handful of
-    // frames rather than the whole screen. Everything else looks the path up
-    // as it stands and allocates nothing.
-    auto it = add ? textures_.find(cacheKey(path, true)) : textures_.find(path);
-    return (it == textures_.end()) ? nullptr : &it->second;
-}
-
-VkDescriptorSet WidgetRenderer::resident(const std::string& path, bool add) const {
-    if (path.empty()) return kMissing;
-    const VkDescriptorSet* set = cachedTexture(path, add);
-    return set ? *set : kMissing;
-}
-
 std::vector<uint8_t> WidgetRenderer::readTextureFile(const std::string& path,
                                                      std::string& resolvedOut) {
     if (!assets_ || path.empty()) return {};
@@ -141,47 +114,13 @@ std::vector<uint8_t> WidgetRenderer::readTextureFile(const std::string& path,
     return data;
 }
 
-VkDescriptorSet WidgetRenderer::texture(const std::string& path, bool add) {
-    const std::string key = cacheKey(path, add);
-    auto it = textures_.find(key);
-    if (it != textures_.end()) return it->second;
-    if (!assets_ || !vkCtx_ || path.empty()) return kMissing;
-
-    std::string resolved;
-    auto data = readTextureFile(path, resolved);
-    if (data.empty()) {
-        LOG_WARNING("Widget texture not found: ", path);
-        textures_[key] = kMissing;
-        return kMissing;
-    }
-    auto image = pipeline::BLPLoader::load(data);
-    if (!image.isValid()) {
-        LOG_WARNING("Widget texture unreadable: ", resolved);
-        textures_[key] = kMissing;
-        return kMissing;
-    }
-    if (add) {
-        // Additive blending is not something a single ImGui draw list can be
-        // asked for - it has one pipeline and one blend state. But the art it
-        // is used for is a glow on black, with no alpha channel of its own, and
-        // over a dark scene "add" and "blend with alpha taken from brightness"
-        // put nearly the same pixels on the screen. Black stays invisible,
-        // which is the whole difference between a glow and a slab.
-        for (size_t i = 0; i + 3 < image.data.size(); i += 4) {
-            const uint8_t lum = std::max({image.data[i], image.data[i + 1],
-                                          image.data[i + 2]});
-            image.data[i + 3] = static_cast<uint8_t>((image.data[i + 3] * lum) / 255);
-        }
-    }
-    VkDescriptorSet set = vkCtx_->uploadImGuiTexture(image.data.data(),
-                                                     image.width, image.height);
-    textures_[key] = set;
-    return set;
-}
-
-
 bool WidgetRenderer::textureSize(const std::string& path, float& w, float& h) {
     if (path.empty()) return false;
+    if (textureCache_) {
+        textureCache_->request(path, false, true);
+        return textureCache_->size(path, w, h);
+    }
+    // Headless art diagnostics have no GPU/cache and explicitly inspect files.
     auto known = textureSizes_.find(path);
     if (known != textureSizes_.end()) {
         if (known->second.first <= 0.0f) return false;   // looked up, no good
@@ -1157,22 +1096,10 @@ void WidgetRenderer::render(WidgetTree& tree, float screenW, float screenH) {
 void WidgetRenderer::layout(WidgetTree& tree, float screenW, float screenH) {
     linkScreenH_ = screenH;
     linkScale_ = tree.uiScale();
-    // Every descriptor set in this cache belongs to the context, which frees
-    // them all together. Drawing with one afterwards is a fault the GPU answers
-    // by resetting, so the cache goes when they do - at the cost of re-uploading
-    // whatever is on screen.
-    if (vkCtx_) {
-        const uint32_t generation = vkCtx_->uiTextureGeneration();
-        if (generation != uiTextureGenerationSeen_) {
-            uiTextureGenerationSeen_ = generation;
-            if (!textures_.empty()) {
-                LOG_WARNING("The UI textures were destroyed; dropping ",
-                            textures_.size(),
-                            " cached textures rather than drawing with the "
-                            "descriptor sets that went with them");
-                textures_.clear();
-            }
-        }
+    const size_t ready = textureCount();
+    if (ready != layoutTextureCount_) {
+        layoutTextureCount_ = ready;
+        tree.markLayoutDirty();
     }
 
     static const std::vector<std::string> kSuppressed = frameXmlSuppressedFrames();
@@ -1979,7 +1906,7 @@ void WidgetRenderer::reportWidgetDiagnostics(WidgetTree& tree,
         LOG_WARNING("WidgetDump: ", order.size(), " widgets drawn on ",
                     screenW, "x", screenH, " px, ", screenW / s, "x",
                     screenH / s, " units (scale ", s, "), ",
-                    textures_.size(), " textures resident");
+                    textureCount(), " textures resident");
         for (const Widget* w : order) {
             LOG_WARNING("  ", (w->name.empty() ? "(unnamed)" : w->name),
                         " kind=", static_cast<int>(w->kind),
@@ -2151,38 +2078,9 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
     const auto& order = tree.drawOrder();
     if (order.empty()) return;
 
-    // Resolve textures before recording anything, and only a few per frame.
-    //
-    // Uploading one ends in vkDeviceWaitIdle. Doing that from inside the draw
-    // loop stalls the whole device in the middle of building a frame, which is
-    // the shape of problem this renderer has already been bitten by once -
-    // enough synchronous submits in a row and the main loop stalls, a fence wait
-    // fails, and the device is lost. Hoisting them out means the wait happens
-    // between frames instead of during one, and the budget means a screen full
-    // of new art costs several quiet frames rather than one very long one.
-    // Three, not eight.
-    //
-    // Each one is a BLP decode, a staging buffer, a copy and a wait - and the
-    // batch around them is synchronous, so the whole cost lands inside
-    // uiManager->render. A live log shows that stage reaching 186ms while the
-    // terrain was uploading M2 instances on the same queue, and the device was
-    // lost shortly after with images reported as never having left
-    // VK_IMAGE_LAYOUT_UNDEFINED.
-    //
-    // FrameXML wants far more distinct art than this client's own interface
-    // did - icons per spellbook tab, per tracking type, per dropdown entry -
-    // so the budget that was comfortable before is now reached every frame
-    // during a load. Spreading the same work over more frames costs a texture
-    // appearing a frame or two later, which is invisible, and shortens each
-    // stall to something that cannot sit across a driver's patience.
-    constexpr int kUploadsPerFrame = 3;
-    std::vector<std::pair<const std::string*, bool>> wanted;
-    wanted.reserve(kUploadsPerFrame);
+    // Drawing only requests resources; no file reads, decoding or GPU waits.
     auto want = [&](const std::string& path, bool add = false) {
-        if (static_cast<int>(wanted.size()) >= kUploadsPerFrame || path.empty()) return;
-        if (cachedTexture(path, add)) return;
-        for (const auto& p : wanted) if (*p.first == path && p.second == add) return;
-        wanted.emplace_back(&path, add);
+        if (textureCache_) textureCache_->request(path, add, true);
     };
     // An inline texture is named inside the text rather than in a field of
     // its own, so this pass never saw one: |TInterface\MoneyFrame\UI-GoldIcon|t
@@ -2190,24 +2088,18 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
     // ever asked for it to be uploaded. That is every coin on every sell
     // price, and the gap where each one belongs.
     //
-    // The strings outlive the parse because `wanted` holds pointers into them
-    // and is drained further down; a deque keeps those valid as it grows.
-    std::deque<std::string> markupPaths;
     const auto wantMarkup = [&](const std::string& text) {
         // Cheap first: almost no label carries one, and parsing every string
         // on screen each frame to learn that would not pay.
         if (text.find("|T") == std::string::npos) return;
         for (const auto& run : parseMarkup(text)) {
             if (run.texture.empty()) continue;
-            if (static_cast<int>(wanted.size()) >= kUploadsPerFrame) return;
             if (cachedTexture(run.texture, false)) continue;
-            markupPaths.push_back(run.texture);
-            want(markupPaths.back());
+            want(run.texture);
         }
     };
 
     for (const Widget* w : order) {
-        if (static_cast<int>(wanted.size()) >= kUploadsPerFrame) break;
         if (w->kind == WidgetKind::Texture && !w->solidColor)
             want(w->texturePath, w->blendAdd);
         if (!w->text.empty()) wantMarkup(w->text);
@@ -2221,10 +2113,8 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
         if (w->isSimpleHtml && looksLikeSimpleHtml(w->text)) {
             for (const HtmlBlock& b : parseSimpleHtml(w->text)) {
                 if (b.kind != HtmlBlock::Kind::Image) continue;
-                if (static_cast<int>(wanted.size()) >= kUploadsPerFrame) break;
                 if (cachedTexture(b.src, false)) continue;
-                markupPaths.push_back(b.src);
-                want(markupPaths.back());
+                want(b.src);
             }
         }
         if (w->kind == WidgetKind::Frame) {
@@ -2234,21 +2124,6 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
         }
     }
 
-    // One submit and one wait for the whole batch rather than one of each per
-    // texture. Every upload used to be its own immediate submit, and with
-    // FrameXML asking for hundreds of distinct files the seconds after a load
-    // cost 70-140ms a frame. Batched, how many go in a frame stops mattering
-    // much, which is why the budget can be larger and the burst shorter.
-    //
-    // Synchronous, because the draw below uses whatever was just uploaded; the
-    // asynchronous form would let this frame sample an image whose copy has not
-    // landed. Nothing to upload means no batch at all, so an idle frame does
-    // not allocate a command buffer to record nothing into.
-    if (!wanted.empty() && vkCtx_) {
-        vkCtx_->beginUploadBatch();
-        for (const auto& p : wanted) texture(*p.first, p.second);
-        vkCtx_->endUploadBatchSync();
-    }
     laps.lap("uploads");
 
     // Interface units to pixels. The tree is laid out against a virtual screen

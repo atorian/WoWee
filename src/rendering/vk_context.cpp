@@ -3694,9 +3694,15 @@ void VkContext::ensureBatchCmd() {
     checkpoint(l.batchCmd, "upload batch");
 }
 
-void VkContext::endUploadBatch() {
+void VkContext::endUploadBatch(UploadCompletion completion) {
     SubmitLane& l = lane();
-    if (l.uploadBatchDepth <= 0) return;
+    if (completion) l.batchCompletions.push_back(std::move(completion));
+    if (l.uploadBatchDepth <= 0) {
+        // Batching disabled: the immediate uploads have already completed.
+        for (auto& done : l.batchCompletions) done->store(1);
+        l.batchCompletions.clear();
+        return;
+    }
     l.uploadBatchDepth--;
     if (l.uploadBatchDepth > 0) return; // still inside an outer batch
 
@@ -3706,6 +3712,8 @@ void VkContext::endUploadBatch() {
     if (l.batchCmd == VK_NULL_HANDLE) {
         l.batchStaging.clear();
         l.batchRawStaging.clear();
+        for (auto& done : l.batchCompletions) done->store(1);
+        l.batchCompletions.clear();
         return;
     }
 
@@ -3718,6 +3726,8 @@ void VkContext::endUploadBatch() {
         vkEndCommandBuffer(l.batchCmd);
         vkFreeCommandBuffers(device, l.pool, 1, &l.batchCmd);
         l.batchCmd = VK_NULL_HANDLE;
+        for (auto& done : l.batchCompletions) done->store(1);
+        l.batchCompletions.clear();
         return;
     }
 
@@ -3727,7 +3737,21 @@ void VkContext::endUploadBatch() {
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     VkFence fence = VK_NULL_HANDLE;
-    vkCreateFence(device, &fenceInfo, nullptr, &fence);
+    const auto abandon = [&] {
+        for (auto& done : l.batchCompletions) done->store(-1);
+        l.batchCompletions.clear();
+        for (auto& staging : l.batchStaging) destroyBuffer(allocator, staging);
+        l.batchStaging.clear();
+        freeRawStaging(l);
+        vkFreeCommandBuffers(device, l.pool, 1, &l.batchCmd);
+        l.batchCmd = VK_NULL_HANDLE;
+    };
+    const VkResult fenceResult = vkCreateFence(device, &fenceInfo, nullptr, &fence);
+    if (fenceResult != VK_SUCCESS) {
+        LOG_ERROR("Async upload fence creation failed: ", fenceResult, "; batch not published");
+        abandon();
+        return;
+    }
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -3759,9 +3783,17 @@ void VkContext::endUploadBatch() {
         return v && *v && *v != '0';
     }();
     VkQueue targetQueue = (hasDedicatedTransfer_ && asyncUploadQueue) ? transferQueue_ : graphicsQueue;
+    VkResult submitted;
     {
         auto queues = lockQueues();
-        noteDeviceLost("async upload batch submit", vkQueueSubmit(targetQueue, 1, &submitInfo, fence));
+        submitted = vkQueueSubmit(targetQueue, 1, &submitInfo, fence);
+        noteDeviceLost("async upload batch submit", submitted);
+    }
+    if (submitted != VK_SUCCESS) {
+        LOG_ERROR("Async upload submission failed: ", submitted, "; batch not published");
+        vkDestroyFence(device, fence, nullptr);
+        abandon();
+        return;
     }
 
     // Said once, with the handle, because these are the only fences created
@@ -3781,6 +3813,7 @@ void VkContext::endUploadBatch() {
     batch.stagingBuffers = std::move(l.batchStaging);
     batch.rawStaging = std::move(l.batchRawStaging);
     batch.onTransferQueue = targetQueue != graphicsQueue;
+    batch.completions = std::move(l.batchCompletions);
     {
         std::lock_guard<std::mutex> lock(l.mutex);
         l.inFlight.push_back(std::move(batch));
@@ -3803,6 +3836,8 @@ void VkContext::endUploadBatchSync() {
     if (l.batchCmd == VK_NULL_HANDLE) {
         l.batchStaging.clear();
         l.batchRawStaging.clear();
+        for (auto& done : l.batchCompletions) done->store(1);
+        l.batchCompletions.clear();
         return;
     }
 
@@ -3810,6 +3845,8 @@ void VkContext::endUploadBatchSync() {
         vkEndCommandBuffer(l.batchCmd);
         vkFreeCommandBuffers(device, l.pool, 1, &l.batchCmd);
         l.batchCmd = VK_NULL_HANDLE;
+        for (auto& done : l.batchCompletions) done->store(1);
+        l.batchCompletions.clear();
         return;
     }
 
@@ -3864,12 +3901,15 @@ void VkContext::endUploadBatchSync() {
     // Both checked. These were the only unchecked waits between a world load
     // and the first frame's submit, so a device lost in one of them was first
     // reported by that submit, one stage later and with no name attached.
+    VkResult submitted;
     {
         auto queues = lockQueues();
-        noteDeviceLost("sync upload batch submit", vkQueueSubmit(targetQueue, 1, &submitInfo, batchFence));
+        submitted = vkQueueSubmit(targetQueue, 1, &submitInfo, batchFence);
+        noteDeviceLost("sync upload batch submit", submitted);
     }
-    noteDeviceLost("sync upload batch wait",
-                   vkWaitForFences(device, 1, &batchFence, VK_TRUE, UINT64_MAX));
+    const VkResult completed = submitted == VK_SUCCESS
+        ? vkWaitForFences(device, 1, &batchFence, VK_TRUE, UINT64_MAX) : submitted;
+    noteDeviceLost("sync upload batch wait", completed);
     if (batchFence != l.immFence) {
         vkDestroyFence(device, batchFence, nullptr);
     } else {
@@ -3885,6 +3925,8 @@ void VkContext::endUploadBatchSync() {
     l.batchStaging.clear();
     // The copies have completed by here, so the sources can go.
     freeRawStaging(l);
+    for (auto& done : l.batchCompletions) done->store(completed == VK_SUCCESS ? 1 : -1);
+    l.batchCompletions.clear();
 }
 
 void VkContext::retireBatches(SubmitLane& l, bool wait) {
@@ -3897,11 +3939,14 @@ void VkContext::retireBatches(SubmitLane& l, bool wait) {
             // saying so through a fence nobody was going to wait on.
             if (result != VK_NOT_READY) noteDeviceLost(wait ? "waitAllUploads" : "upload batch fence status",
                                                        result);
+            if (result != VK_NOT_READY)
+                for (auto& done : it->completions) done->store(-1);
             if (!wait) {
                 ++it;
                 continue;
             }
         }
+        for (auto& done : it->completions) done->store(result == VK_SUCCESS ? 1 : -1);
         // GPU finished - free resources. The command buffer goes back to its
         // pool on the lane's own thread (reclaimFinished): the pool is that
         // thread's, and it may be recording into it right now.

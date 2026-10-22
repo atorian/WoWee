@@ -144,7 +144,10 @@ public:
     /// Opens the batch command buffer on first record, so a batch that
     /// nothing writes to never allocates one.
     void ensureBatchCmd();
-    void endUploadBatch();       // Async: submits but does NOT wait for fence
+    // Optional completion: 0 pending, 1 complete, -1 failed. Nested batches
+    // carry it to the outer submit; only a signalled fence publishes success.
+    using UploadCompletion = std::shared_ptr<std::atomic<int>>;
+    void endUploadBatch(UploadCompletion completion = {});
     void endUploadBatchSync();   // Sync: submits and waits (for load screens)
     /// Whether the calling thread has a batch open.
     [[nodiscard]] bool isInUploadBatch() const;
@@ -671,6 +674,7 @@ private:
         /// Submitted to the second queue (WOWEE_VK_ASYNC_UPLOAD_QUEUE=1), where
         /// nothing orders it against the frame but a wait.
         bool onTransferQueue = false;
+        std::vector<UploadCompletion> completions;
     };
 
     /// What one thread needs to put work on the GPU: its own command pool, the
@@ -694,6 +698,7 @@ private:
         VkCommandBuffer batchCmd = VK_NULL_HANDLE;
         std::vector<AllocatedBuffer> batchStaging;
         std::vector<RawStaging> batchRawStaging;
+        std::vector<UploadCompletion> batchCompletions;
         /// Guards the two lists below: a batch may be retired by whichever
         /// thread polls first, but its command buffer goes back to the pool
         /// only on the owner, which is the one thread that uses the pool.

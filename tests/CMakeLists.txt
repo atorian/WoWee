@@ -206,6 +206,14 @@ wowee_add_test(test_texture_cache
     SOURCES test_texture_cache.cpp ${TEST_COMMON_SOURCES}
             ${CMAKE_SOURCE_DIR}/src/rendering/texture_cache.cpp)
 
+wowee_add_test(test_ui_texture_cache
+    SOURCES test_ui_texture_cache.cpp ${TEST_COMMON_SOURCES}
+            ${CMAKE_SOURCE_DIR}/src/ui/ui_texture_cache.cpp
+            ${CMAKE_SOURCE_DIR}/src/ui/interface_art.cpp
+            ${CMAKE_SOURCE_DIR}/src/ui/xml_parser.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/texture_cache.cpp)
+target_link_libraries(test_ui_texture_cache PRIVATE Vulkan::Vulkan)
+
 # Frames recorded only against a complete set of frame targets; a failure to
 # make one said once per stretch with the result, the size and the budget.
 wowee_add_test(test_frame_targets

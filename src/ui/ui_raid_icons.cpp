@@ -14,9 +14,6 @@ namespace ui {
 VkDescriptorSet getRaidTargetIcon(uint8_t icon, pipeline::AssetManager* assetManager) {
     if (icon >= kRaidTargetIconCount || !assetManager) return VK_NULL_HANDLE;
 
-    static std::array<VkDescriptorSet, kRaidTargetIconCount> cache{};
-    if (cache[icon]) return cache[icon];
-
     // Blizzard numbers the files 1-8 in the same order as the icon indices.
     const std::string path = "Interface\\TargetingFrame\\UI-RaidTargetingIcon_" +
                              std::to_string(icon + 1) + ".blp";
@@ -24,7 +21,6 @@ VkDescriptorSet getRaidTargetIcon(uint8_t icon, pipeline::AssetManager* assetMan
     // pressure) should be retried rather than blacklisting the icon for good.
     VkDescriptorSet ds = uploadUiTextureFromBlp(
         assetManager, path, core::Application::getInstance().getWindow());
-    if (ds) cache[icon] = ds;
     return ds;
 }
 

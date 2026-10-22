@@ -2384,6 +2384,7 @@ void Application::shutdown() {
     sceneReplay_.reset();
     // Close visibly before saved variables or worker lifetime fences can delay cleanup.
     if (window && window->getSDLWindow()) SDL_HideWindow(window->getSDLWindow());
+    widgetRenderer_.resetResources();
     // What watched the frames goes first, then the interface hears the
     // character leave while the world still stands; the session itself ends
     // below, with its map.
@@ -2665,6 +2666,7 @@ void Application::reloadExpansionData() {
 
     LOG_INFO("Reloading expansion data for: ", profile->name);
 
+    widgetRenderer_.resetResources();
     loadExpansionTables(*profile);
 
     // Update expansion data path for CSV DBC lookups and clear DBC cache
@@ -2695,6 +2697,8 @@ void Application::reloadExpansionData() {
         assetManager->clearDBCCache();
     }
 
+    widgetRenderer_.initialize(assetManager.get(), window ? window->getVkContext() : nullptr);
+    iconPrefetchCharacter_ = 0;
     // Reset map name cache so it reloads from new expansion's Map.dbc
     if (worldLoader_) worldLoader_->resetMapNameCache();
 
@@ -4523,6 +4527,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
     if (view == FrameView::CharacterCreation && uiManager)
         uiManager->getCharacterCreateScreen().update(deltaTime);
     if (!renderer) return;
+    prepareInterfaceResources(deltaTime);
     // Keep existing profiling keys while building UI before graphics recording.
     auto runInterfaceStage = [this](const char* stageName, auto&& fn) {
         auto stageStart = std::chrono::steady_clock::now();
@@ -6451,8 +6456,11 @@ void Application::updateRealmPatchMount() {
 void Application::applyRealmPatchLayer(std::shared_ptr<const pipeline::ArchiveLayer> layer,
                                        RealmPatchSet set) {
     const bool mounting = layer != nullptr;
+    widgetRenderer_.resetResources();
     assetManager->setArchiveLayer(std::move(layer));
     mountedRealmPatches_ = std::move(set);
+    widgetRenderer_.initialize(assetManager.get(), window ? window->getVkContext() : nullptr);
+    iconPrefetchCharacter_ = 0;
     if (mounting) {
         LOG_WARNING("Realm patches mounted for ", mountedRealmPatches_.realm, ": ",
                  mountedRealmPatches_.archives.size(), " archives above the extracted data");

@@ -686,6 +686,7 @@ set(WOWEE_SOURCES
 
     # Core
     src/core/application.cpp
+    src/core/interface_resources.cpp
     src/core/application_world_loading.cpp
     src/core/client_main.cpp
     src/core/client_loop.cpp
@@ -1147,7 +1148,6 @@ set(WOWEE_SOURCES
     # UI
     src/ui/ui_manager.cpp
     src/ui/map_window.cpp
-    src/ui/ui_upload_budget.cpp
     src/ui/widget_tree.cpp
     src/ui/xml_parser.cpp
     src/ui/framexml_emitter.cpp
@@ -1157,6 +1157,9 @@ set(WOWEE_SOURCES
     src/ui/text_edit.cpp
     src/ui/paper_ui.cpp
     src/ui/widget_renderer.cpp
+    src/ui/widget_resources.cpp
+    src/ui/ui_texture_cache.cpp
+    src/ui/interface_art.cpp
     src/ui/ui_raid_icons.cpp
     src/ui/ui_texture_load.cpp
     src/ui/auth_screen.cpp
@@ -2182,6 +2185,8 @@ if(WOWEE_BUILD_FRAMEXML_RUN)
         ${WOWEE_PLATFORM_SOURCES}
     )
     target_link_libraries(framexml_run PRIVATE wowee_client_objects)
+    add_executable(interface_prefetch_check tools/interface_prefetch_check.cpp ${WOWEE_PLATFORM_SOURCES})
+    target_link_libraries(interface_prefetch_check PRIVATE wowee_client_objects)
     # The objects are built for a link-time-optimised link in Release.
     if(_ipo_supported AND WOWEE_ENABLE_LTO)
         set_property(TARGET framexml_run PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)

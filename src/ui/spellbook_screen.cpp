@@ -1,6 +1,5 @@
 #include "ui/spellbook_screen.hpp"
 #include "ui/ui_texture_load.hpp"
-#include "ui/ui_upload_budget.hpp"
 #include "ui/ui_colors.hpp"
 #include "ui/keybinding_manager.hpp"
 #include "core/input.hpp"

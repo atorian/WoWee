@@ -4,7 +4,6 @@
 #include "rendering/cpu_stage_times.hpp"
 #include "addons/lua_api_registrations.hpp"
 #include "ui/ui_texture_load.hpp"
-#include "ui/ui_upload_budget.hpp"
 #include "core/helm_visual.hpp"
 #include "ui/ui_raid_icons.hpp"
 #include "ui/ui_colors.hpp"
@@ -845,82 +844,9 @@ void GameScreen::renderWorldMap(game::GameHandler& gameHandler) {
 // ============================================================
 
 VkDescriptorSet GameScreen::getSpellIcon(uint32_t spellId, pipeline::AssetManager* am) {
-    if (spellId == 0 || !am) return VK_NULL_HANDLE;
-
-    // Check cache first
-    auto cit = spellIconCache_.find(spellId);
-    if (cit != spellIconCache_.end()) return cit->second;
-
-    // Lazy-load SpellIcon.dbc and Spell.dbc icon IDs
-    if (!spellIconDbLoaded_) {
-        spellIconDbLoaded_ = true;
-
-        // Load SpellIcon.dbc: field 0 = ID, field 1 = icon path
-        pipeline::loadSpellIconPaths(am, spellIconPaths_);
-
-        // Load Spell.dbc: SpellIconID field
-        auto spellDbc = am->loadDBC("Spell.dbc");
-        const auto* spellL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("Spell") : nullptr;
-        if (spellDbc && spellDbc->isLoaded()) {
-            uint32_t fieldCount = spellDbc->getFieldCount();
-            // Helper to load icons for a given field layout
-            auto tryLoadIcons = [&](uint32_t idField, uint32_t iconField) {
-                spellIconIds_.clear();
-                if (iconField >= fieldCount) return;
-                for (uint32_t i = 0; i < spellDbc->getRecordCount(); i++) {
-                    uint32_t id = spellDbc->getUInt32(i, idField);
-                    uint32_t iconId = spellDbc->getUInt32(i, iconField);
-                    if (id > 0 && iconId > 0) {
-                        spellIconIds_[id] = iconId;
-                    }
-                }
-            };
-
-            // Use the active expansion layout when its fields are present in
-            // the loaded DBC. TBC/WotLK/Classic place IconID in different
-            // columns, so reading the WotLK default for every client leaves
-            // action bars and spell UI without icons.
-            uint32_t iconField = 133; // WotLK default
-            uint32_t idField = 0;
-            if (spellL) {
-                try {
-                    uint32_t layoutId = (*spellL)["ID"];
-                    uint32_t layoutIcon = (*spellL)["IconID"];
-                    if (layoutId < fieldCount && layoutIcon < fieldCount) {
-                        iconField = layoutIcon;
-                        idField = layoutId;
-                    }
-                } catch (...) {}
-            }
-            tryLoadIcons(idField, iconField);
-        }
-    }
-
-    // Rate-limit GPU uploads per frame to prevent stalls when many icons are uncached
-    // (e.g., first login, after loading screen, or many new auras appearing at once).
-    if (!claimUiTextureUpload()) return VK_NULL_HANDLE;  // defer - do NOT cache null here
-
-    // Look up spellId -> SpellIconID -> icon path
-    auto iit = spellIconIds_.find(spellId);
-    if (iit == spellIconIds_.end()) {
-        spellIconCache_[spellId] = VK_NULL_HANDLE;
-        return VK_NULL_HANDLE;
-    }
-
-    auto pit = spellIconPaths_.find(iit->second);
-    if (pit == spellIconPaths_.end()) {
-        spellIconCache_[spellId] = VK_NULL_HANDLE;
-        return VK_NULL_HANDLE;
-    }
-
-    // Path from DBC has no extension - append .blp
-    std::string iconPath = pit->second + ".blp";
-    // Cached either way, failures included: the HUD asks for this every frame
-    // an aura is up, so a missing icon must not be retried each time.
-    VkDescriptorSet ds =
-        uploadUiTextureFromBlp(am, iconPath, services_.window);
-    spellIconCache_[spellId] = ds;
-    return ds;
+    if (!spellId || !am || !services_.gameHandler) return VK_NULL_HANDLE;
+    const auto path = services_.gameHandler->getSpellIconPath(spellId);
+    return path.empty() ? VK_NULL_HANDLE : uploadUiTextureFromBlp(am, path, services_.window);
 }
 
 // ============================================================

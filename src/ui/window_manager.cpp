@@ -7,7 +7,6 @@
 #include "ui/ui_texture_load.hpp"
 #include "game/item_text.hpp"
 #include "ui/framexml_takeover.hpp"
-#include "ui/ui_upload_budget.hpp"
 #include "game/inventory_slots.hpp"
 #include "ui/chat_panel.hpp"
 #include "ui/chat/chat_utils.hpp"

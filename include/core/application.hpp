@@ -28,6 +28,7 @@
 #include "core/update_check.hpp"
 #include "pipeline/blp_loader.hpp"
 #include <memory>
+#include <unordered_set>
 #include <map>
 #include <string>
 #include <vector>
@@ -416,6 +417,10 @@ private:
     /// Draws the widget tree addons build through CreateFrame/CreateTexture.
     /// Holds the texture cache for Interface\ art, so it lives as long as the app.
     ui::WidgetRenderer widgetRenderer_;
+    void prepareInterfaceResources(float deltaTime);
+    float iconPrefetchDelay_ = 0.0f;
+    uint64_t iconPrefetchCharacter_ = 0;
+    std::unordered_set<uint32_t> prefetchedSpellIcons_, prefetchedItemIcons_;
     /// What the parts of the interface's two drawing stages cost this frame -
     /// the client's panels and the widget draw - read into the frame profile
     /// under their stage after drawInterface.

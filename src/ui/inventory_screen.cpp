@@ -1,6 +1,5 @@
 #include "game/reputation_standing.hpp"
 #include "ui/ui_texture_load.hpp"
-#include "ui/ui_upload_budget.hpp"
 #include "ui/inventory_screen.hpp"
 #include "ui/item_tooltip.hpp"
 #include "audio/ui_sound_manager.hpp"
@@ -213,14 +212,8 @@ void InventoryScreen::cancelPickup(game::Inventory& inv) {
 /// Nothing in the client used the cursor art at all, so every cursor that
 /// meant something drew whatever the calling code had to hand.
 VkDescriptorSet InventoryScreen::castCursorTexture() {
-    if (!castCursorTexture_) {
-        if (assetManager_ && assetManager_->isInitialized()) {
-            castCursorTexture_ = uploadUiTextureFromBlp(
-                assetManager_, "Interface\\Cursor\\Cast.blp",
-                core::Application::getInstance().getWindow());
-        }
-    }
-    return castCursorTexture_;
+    return uploadUiTextureFromBlp(assetManager_, "Interface\\Cursor\\Cast.blp",
+        core::Application::getInstance().getWindow());
 }
 
 void InventoryScreen::renderItemTargetCursor() {

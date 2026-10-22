@@ -39,6 +39,8 @@ enum class TextureForm : uint8_t {
     /// map, a renderer's fallback. Counted against the budget like the rest;
     /// gone when its last reference is.
     Owned,
+    /// UI art, with its original alpha or the additive conversion.
+    Interface,
     Count_,
 };
 
