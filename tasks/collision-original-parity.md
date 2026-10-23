@@ -120,6 +120,39 @@ replacement in ordinary gameplay or silently mix the two movement models.
 Deliverable: production path uses the verified behaviour; reference regressions
 remain runnable; unsupported cases remain visible in the completion report.
 
+## 7. Validate against the optimization branch
+
+User requirement (2026-10-23): after collision compatibility and production
+integration are finished, verify the changes together with the optimization
+branch, without worsening performance. This is a completion requirement.
+
+Target: `codex/gpu-scene-pipeline`, from the chat “Найти узкие места
+производительности” (`01a15f73-45c0-72b3-88f4-70e1dc72ccfc`). Its observed
+HEAD is `319e4be`; resolve and pin its then-current HEAD again at final testing.
+Do not treat today's revision as the final baseline if that work advances.
+
+- Build two isolated, otherwise identical versions on D: the pinned optimization
+  baseline and that same revision with the completed collision changes. Preserve
+  the optimization session's working files and use identical build settings,
+  graphics options, assets, scene population and movement routes.
+- Re-run collision/reference, protocol and renderer compatibility checks on the
+  combined code. A clean merge or two separately passing branches is insufficient.
+- Compare repeated runs of populated exterior/interior scenes, stairs, corners,
+  jumps/falls and movement across streaming boundaries. Include cold loading and
+  warmed runs; use offline controlled scenes before any ordinary gameplay run.
+- Measure total CPU/GPU frame time, median/p95/p99 frame time, collision/query CPU
+  cost, allocation/peak-memory behavior and loading stalls. FPS alone can hide a
+  collision CPU regression behind GPU work. Keep validation instrumentation out of
+  the performance comparison and preserve the user's active profile.
+- Record exact commits, build/configuration, hardware, scenarios and raw timings.
+  Check variation across repeats; investigate and fix reproducible regressions
+  without weakening original movement behavior. Do not report “no regression”
+  from unchanged average FPS, reduced visual quality or unmeasured scenarios.
+
+Current state: planned; combined integration and performance measurements have
+not run. The optimization chat's latest shadow-quality checks are correctness
+checks and explicitly contain no FPS measurement.
+
 ## Progress
 
 - [x] Audit current implementation and inspect selected original functions.
@@ -135,6 +168,7 @@ remain runnable; unsupported cases remain visible in the completion report.
 - [ ] Equivalent full movement trajectories and state transitions.
 - [ ] Equivalent server-visible movement.
 - [ ] Verified production integration and removal of competing heuristics.
+- [ ] Combined optimization-branch validation with no reproducible performance regression.
 
 Geometry progress: WMO MOBN/MOBR are now retained through loading and model
 preparation. Independent original-code comparisons cover BSP traversal/masks,
