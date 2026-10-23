@@ -21,14 +21,14 @@ def cases():
         yield dict(c,name=f'input_execution_{i}',execute_input=True,flags=flags,
             elapsed=elapsed,time=(last+elapsed)&0xffffffff,last_time=last,
             heartbeat_time=(last+500)&0xffffffff,idle_time=last,defer=bool(i%23==0),inputs=inputs)
-def trajectories(original):
+def trajectories(original,flags2=0):
     for mode in [0,0x1000,0x200000,0x2000000,0x800]:
         for turning in [False,True]:
             c=next(apply_cases())
             c['world']=dict(c['world'],wmo=1,area=3,dungeon=False,doodad_flags=0x80,owner=0,
                 entity_flags=2,provider=True,available=True,impassable=False,holes=0,flight=False)
             c.update(execute_input=True,active=True,local=True,position=[-5,-35,6],anchor_position=[-5,-35,6],
-                anchor_elapsed=0,flags=mode,flags2=0,fall_start=6,fall_velocity=0,
+                anchor_elapsed=0,flags=mode,flags2=flags2,fall_start=6,fall_velocity=0,
                 facing=0,anchor_facing=0,pitch=0,anchor_pitch=0,pitch_cos=1,pitch_sin=0,
                 move_direction=[0,0,0],move_direction_2d=[0,0],current_speed=0,move_start_delay=0,
                 last_time=0xfffffff0,heartbeat_time=0x100,idle_time=0xffffffef,defer=False)
@@ -43,7 +43,7 @@ def trajectories(original):
                 output=original.run(c)
                 yield dict(input=dict(c),output=output)
                 exclude={'name','elapsed','transport','fall_reset','requests','events','geometry_status',
-                    'notifications','heartbeats','finished','retire','angular_stops'}
+                    'notifications','heartbeats','finished','retire','angular_stops','rate_states','mode_observations'}
                 c.update({k:v for k,v in output.items() if k not in exclude})
                 c['last_time']=c['time']
 def main():

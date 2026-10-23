@@ -9,5 +9,5 @@ namespace wowee::collision {
 [[nodiscard]] MovementRequestResult applyUninterpolatedMovement(
     MovementFacetSource& world,MovementRequestCache& cache,SurfaceMovementState& state,
     const SurfaceMovementShape& shape,uint32_t timeMs,uint32_t elapsedMs,
-    bool activeMover,bool locallyControlled,bool ghost);
+    bool activeMover,bool locallyControlled,bool ghost,MovementPendingObserver* pendingObserver=nullptr);
 } // namespace wowee::collision

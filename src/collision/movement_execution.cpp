@@ -8,6 +8,14 @@ MovementExecutionResult executeUninterpolatedMovement(MovementFacetSource& world
     MovementRequestCache& cache,SurfaceMovementState& state,SurfaceMovementShape& shape,
     MovementCommandQueue& commands,MovementClock& clock,MovementExecutionSink& sink,
     uint32_t time,uint32_t lastTime,bool active,bool local,bool ghost,bool defer) {
+    struct Pending final:MovementPendingObserver {
+        const MovementCommandQueue& commands;MovementExecutionSink& sink;bool active;
+        Pending(const MovementCommandQueue& q,MovementExecutionSink& s,bool a):commands(q),sink(s),active(a){}
+        void forwardStopped() override {
+            if(active&&!commands.hasQueuedMoveStart())
+                sink.movementEffect({MovementCommandEffect::Kind::MoveStopped});
+        }
+    } pending(commands,sink,active);
     MovementExecutionResult output;
     auto& movement=output.movement;
     uint32_t cursor=lastTime,total=time-lastTime,processed=0;
@@ -29,7 +37,7 @@ MovementExecutionResult executeUninterpolatedMovement(MovementFacetSource& world
             if(state.flags&0x40c010ff) {
                 if(state.flags&0x200)clock.heartbeatTimeMs+=step;
                 else {
-                    auto part=applyUninterpolatedMovement(world,cache,state,shape,cursor,step,active,local,ghost);
+                    auto part=applyUninterpolatedMovement(world,cache,state,shape,cursor,step,active,local,ghost,&pending);
                     movement.elapsedMs+=part.elapsedMs;
                     if(part.geometryStatus!=MovementGeometryStatus::Ready)movement.geometryStatus=part.geometryStatus;
                     if(part.transportRequest)movement.transportRequest=part.transportRequest;

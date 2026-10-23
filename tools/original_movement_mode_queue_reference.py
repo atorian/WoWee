@@ -30,12 +30,12 @@ class OriginalMovementModeQueue(OriginalMovementRateQueue):
             if left or transport:raise RuntimeError('Unexpected queued state effect')
             self.observe(6,time,flags,flags2,jumping);self._return(cpu,24)
         else:super()._events(cpu,address,size,user)
-    def _local_event(self,cpu,address,size,user):
+    def observe_local_event(self,cpu,address,size,user):
         time,opcode=self.read(cpu.reg_read(UC_X86_REG_ESP)+4,'2I')
         self.observe(0,time,opcode=opcode)
         if opcode in (0x4d1,0x4cf,0x2cf,0x2d0,0xf6,0xe9,0xeb,0x345,0x340):
             self.rate_states.append(self.rate_state())
-        super()._local_event(cpu,address,size,user)
+        super().observe_local_event(cpu,address,size,user)
     def run(self,case):
         self.mode_observations=[]
         output=super().run(case)

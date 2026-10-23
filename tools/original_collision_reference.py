@@ -73,6 +73,13 @@ class OriginalCollision:
         self.cpu.mem_write(p, blob)
         return p
 
+    def alloc_code(self, blob):
+        address = self.alloc(blob)
+        # Fixture arenas are reused; Unicorn can retain translations of an
+        # earlier getter at the same address when host memory is overwritten.
+        self.cpu.ctl_remove_cache(address, address + len(blob))
+        return address
+
     def floats(self, values):
         return self.alloc(struct.pack('<' + 'f' * len(values), *values))
 
@@ -107,8 +114,12 @@ class OriginalCollision:
         cpu = self.cpu
         self.transport_request = None
         self.fall_reset = None
-        body = self.alloc(bytes(0x500))
-        unit = self.alloc(bytes(0x2000))
+        if case.get('inline_mover', False):
+            unit = self.alloc(bytes(0x2000))
+            body = unit + 0x788
+        else:
+            body = self.alloc(bytes(0x500))
+            unit = self.alloc(bytes(0x2000))
         fields = self.alloc(bytes(0x1000))
         object_fields = self.alloc(struct.pack('<QII', 1, 0x10 if case.get('client_controlled', True) else 0x8, 0))
         def write(address, fmt, *values):

@@ -2925,8 +2925,10 @@ if(Python3_Interpreter_FOUND)
             --probe $<TARGET_FILE:movement_contact_probe>)
 endif()
 
-add_executable(movement_surface_probe movement_surface_probe.cpp)
-target_link_libraries(movement_surface_probe PRIVATE wowee_collision)
+add_executable(movement_surface_probe movement_surface_probe.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/movement_status.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/movement_reporting.cpp)
+target_link_libraries(movement_surface_probe PRIVATE wowee_collision wowee_protocol)
 wowee_test_link_glm(movement_surface_probe)
 register_test_target(movement_surface_probe)
 if(Python3_Interpreter_FOUND)
@@ -3822,5 +3824,35 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME original_collision_mode_execution
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_mode_queue.py --execute
             --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_mode_execution_12340.json
+            --probe $<TARGET_FILE:movement_surface_probe>)
+endif()
+
+add_executable(movement_reporting_probe movement_reporting_probe.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/movement_status.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/movement_reporting.cpp)
+target_link_libraries(movement_reporting_probe PRIVATE wowee_protocol)
+wowee_test_link_glm(movement_reporting_probe)
+register_test_target(movement_reporting_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_reporting
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_reporting.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_reporting_12340.json
+            --opcodes ${CMAKE_SOURCE_DIR}/Data/expansions/wotlk/opcodes.json
+            --probe $<TARGET_FILE:movement_reporting_probe>)
+endif()
+
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_local_event
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_local_event.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_local_event_12340.json
+            --opcodes ${CMAKE_SOURCE_DIR}/Data/expansions/wotlk/opcodes.json
+            --probe $<TARGET_FILE:movement_reporting_probe>)
+endif()
+
+if(Python3_Interpreter_FOUND)
+    add_test(NAME original_collision_delivery
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_delivery.py
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_delivery_12340.json
+            --opcodes ${CMAKE_SOURCE_DIR}/Data/expansions/wotlk/opcodes.json
             --probe $<TARGET_FILE:movement_surface_probe>)
 endif()

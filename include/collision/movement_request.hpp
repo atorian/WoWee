@@ -3,6 +3,7 @@
 #include <vector>
 
 namespace wowee::collision {
+class MovementPendingObserver;
 enum class MovementGeometryStatus { Ready, NotReady, Failed };
 class MovementFacetSource {
 public:
@@ -39,5 +40,6 @@ struct MovementRequestResult {
 [[nodiscard]] MovementRequestResult traceUnattachedMovementRequest(
     MovementFacetSource& world, MovementRequestCache& cache, SurfaceMovementState& state,
     const SurfaceMovementShape& shape, const glm::vec3& displacement,
-    uint32_t timeMs, uint32_t elapsedMs, bool locallyControlled, bool ghost);
+    uint32_t timeMs, uint32_t elapsedMs, bool locallyControlled, bool ghost,
+    MovementPendingObserver* pendingObserver=nullptr);
 } // namespace wowee::collision

@@ -697,3 +697,54 @@ not executed; forced notification still returns false. Fixtures:
 original_mode_queue_12340.json and original_mode_execution_12340.json.
 The unresolved input case is reproducible with
 `tools/probe_original_movement_mode_boundary.py --binary <original WoW.exe>`.
+
+
+## Actual movement reporting and landing input notification (2026-10-23)
+
+Added offline original SendMovementUpdate and ProcessLocalMoveEvent composition.
+2560 reporting cases compare admission, exact packet bytes, unit reporting flags,
+property samples and heartbeat timing. ACKs and not-active-mover reports bypass
+ordinary active-mover admission; only an active mover advances its deadline, after
+connection submission. Another 2560 local-event cases compare synchronous unit
+callback order, pending turn/pitch messages, the strict >100 ms flush boundary,
+angle-change suppression and wrapping clocks. Unit callbacks are observed and do
+not yet perform real input or presentation effects.
+
+The full original queue/collision/reporting comparison now uses the unit's actual
+inline mover and actual packet preparation, replacing the earlier successful-send
+stub. It compares 2828 frames, including 300 consecutive trajectory frames with
+reporting state carried forward. Wire bodies are compared exactly, independently
+of the numeric tolerance used for geometry observations.
+
+Those trajectories first exposed four missing MoveStopped notifications during
+landing. Pending-stop handling now calls its observer synchronously, after the
+forward stop and anchor update but before the remaining pending actions. The
+execution owner preserves the original active-mover and queued-forward/backward
+admission rule; the gravity command uses the same queue query. No new motion or
+escape rule was added.
+
+The actual collision-state event handler and real input callbacks are still
+unimplemented boundaries. The synthetic root/swim/descend/gravity case remains
+unresolved. Transport/spline/lifecycle and production integration are still
+required; these additions do not enable the new solver for ordinary gameplay.
+
+Routines: SendMovementUpdate 0x71f0c0, PrepareMovementPacket 0x71ef80,
+ProcessLocalMoveEvent 0x7413f0, delayed turn/pitch 0x7219f0/0x721ac0,
+timed flush 0x721b90, immediate flush 0x721c20, unchanged-angle predicate
+0x71ae80 and UpdateHeartbeatTimerA 0x6e9b70. Fixtures are
+original_reporting_12340.json, original_local_event_12340.json and
+original_delivery_12340.json. All run without attached transport or active spline.
+
+Reference harness corrections: allocated property-getter code explicitly
+invalidates Unicorn's translated blocks when an arena address is reused. A
+changing immediate return value otherwise reused a previous stand-state getter;
+query properties now reside in data. Boundary observation is separated from stub
+return so executing the real routine never redirects EIP back to the same hook.
+After refactoring, 5306 original observations (all new standalone report/local
+cases and samples from prior mode queue/execution fixtures) reproduced their
+recorded results unchanged. This validates those fixtures, not real input effects.
+
+Validation after the landing fix: native collision/ADT suite 57/57; ACK/domain/
+layout/reporting selection 8/8; all 2828 delivered frames match with ASan/UBSan.
+Standalone reporting and local-event matrices also pass ASan/UBSan. Full sweep
+passes; final collision-dependency and duplicate-tool checks both report zero.

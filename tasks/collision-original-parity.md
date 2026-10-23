@@ -4,17 +4,16 @@ Requirement chosen by the user on 2026-10-22: graphics may change; gameplay
 behaviour must match the original client. See
 [the governing principle](principles/original-gameplay-behaviour.md).
 
-Status: contact/surface phases and the combined supplied-state world collector
-have original-executable comparisons. The unattached request-to-world path,
-frame projection/application, basic-input/height/rate/knockback queue and restricted
-frame scheduler are verified offline. Shared gravity, hover, water walk,
-feather-fall and root state operations are compared independently. The native
-collision/ADT selection passes 52/52 tests. Original status bytes and ordinary
-forced ACK envelopes are compared; two production codec/ACK defects are fixed.
+Status: contact/surface phases, supplied-state world collection, unattached
+frame application and the input/height/rate/knockback/server-mode queue have
+original-executable comparisons. Offline reporting now executes original local
+notification, delayed angular messages, admission, byte serialization and
+heartbeat timing. Combined frame comparisons include actual outgoing packets.
 Full behavioural equivalence is not established and the player solver is not
-replaced. Production world lifecycle, remaining queued state commands and unit
-event delivery, packet timing/admission, interpolation and transport/spline
-movement remain open. See `docs/original-collision-reference.md` for boundaries.
+replaced. Production world lifecycle, remaining input commands, real unit/input
+callbacks and collision-state notifications, interpolation and transport/spline
+movement remain open. The unresolved raw-input case is retained explicitly.
+See `docs/original-collision-reference.md` for comparison boundaries.
 This plan supersedes the audit's generic solver
 redesign as the acceptance target. A common collision API remains useful, but
 its behaviour must be derived from the original implementation.
@@ -473,3 +472,38 @@ of a complete original-client hang. The diagnostic intentionally fails and is
 not part of the passing matrix. Real input admission and unit effects must be
 resolved; no invented escape or gameplay rollout was added. Retire observations
 are lifecycle requests, not proof of successful removal from the mover list.
+
+
+### 2026-10-23 — Actual movement reporting and landing input notification
+
+Added offline original SendMovementUpdate and ProcessLocalMoveEvent composition.
+2560 reporting cases compare admission, exact packet bytes, unit reporting flags,
+property samples and heartbeat timing. ACKs and not-active-mover reports bypass
+ordinary active-mover admission; only an active mover advances its deadline, after
+connection submission. Another 2560 local-event cases compare synchronous unit
+callback order, pending turn/pitch messages, the strict >100 ms flush boundary,
+angle-change suppression and wrapping clocks. Unit callbacks are observed and do
+not yet perform real input or presentation effects.
+
+The full original queue/collision/reporting comparison now uses the unit's actual
+inline mover and actual packet preparation, replacing the earlier successful-send
+stub. It compares 2828 frames, including 300 consecutive trajectory frames with
+reporting state carried forward. Wire bodies are compared exactly, independently
+of the numeric tolerance used for geometry observations.
+
+Those trajectories first exposed four missing MoveStopped notifications during
+landing. Pending-stop handling now calls its observer synchronously, after the
+forward stop and anchor update but before the remaining pending actions. The
+execution owner preserves the original active-mover and queued-forward/backward
+admission rule; the gravity command uses the same queue query. No new motion or
+escape rule was added.
+
+The actual collision-state event handler and real input callbacks are still
+unimplemented boundaries. The synthetic root/swim/descend/gravity case remains
+unresolved. Transport/spline/lifecycle and production integration are still
+required; these additions do not enable the new solver for ordinary gameplay.
+
+Validation after the landing fix: native collision/ADT suite 57/57; ACK/domain/
+layout/reporting selection 8/8; all 2828 delivered frames match with ASan/UBSan.
+Standalone reporting and local-event matrices also pass ASan/UBSan. Full sweep
+passes; final collision-dependency and duplicate-tool checks both report zero.

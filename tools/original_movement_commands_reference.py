@@ -16,7 +16,7 @@ class OriginalMovementCommands(OriginalCollision):
         sp=cpu.reg_read(UC_X86_REG_ESP);ret=self.read(sp,'I')[0]
         cpu.reg_write(UC_X86_REG_EAX,self.globals)
         cpu.reg_write(UC_X86_REG_ESP,sp+4);cpu.reg_write(UC_X86_REG_EIP,ret)
-    def _local_event(self,cpu,address,size,user):
+    def observe_local_event(self,cpu,address,size,user):
         # ProcessLocalMoveEvent is the external unit/network boundary. Record
         # its arguments AND the mover visible at notification time; no claim
         # about actual packet bytes or acknowledgement admission is made here.
@@ -24,6 +24,9 @@ class OriginalMovementCommands(OriginalCollision):
         value=struct.unpack('<f',struct.pack('<I',args[4]))[0]
         self.notifications.append([*args[1:4],value,args[5],args[6]|args[7]<<32,args[8],
             self.read(self.body+0xcc,'f')[0],self.read(self.body+0x134,'I')[0],self.read(self.body+0x48,'H')[0]])
+    def _local_event(self,cpu,address,size,user):
+        self.observe_local_event(cpu,address,size,user)
+        sp=cpu.reg_read(UC_X86_REG_ESP);args=self.read(sp,'9I')
         cpu.reg_write(UC_X86_REG_EAX,int(bool(args[3])))
         cpu.reg_write(UC_X86_REG_ESP,sp+36);cpu.reg_write(UC_X86_REG_EIP,args[0])
     def prepare_surface_world(self,case,body):

@@ -29,7 +29,7 @@ bool validPosition(const glm::vec3& p) {
 // 0x6eac40 -> PlotUnitMovement -> RequestMove -> CollideRequestMove.
 MovementRequestResult applyUninterpolatedMovement(MovementFacetSource& world,
     MovementRequestCache& cache,SurfaceMovementState& state,const SurfaceMovementShape& shape,
-    uint32_t time,uint32_t elapsed,bool active,bool local,bool ghost) {
+    uint32_t time,uint32_t elapsed,bool active,bool local,bool ghost,MovementPendingObserver* pendingObserver) {
     MovementRequestResult result;
     if(!validPosition(state.position)||!elapsed)return result;
     while(result.elapsedMs<elapsed) {
@@ -44,7 +44,7 @@ MovementRequestResult applyUninterpolatedMovement(MovementFacetSource& world,
             (double(move.x)+state.anchorPosition.x)-state.position.x,
             (double(state.anchorPosition.y)+move.y)-state.position.y,
             (double(state.anchorPosition.z)+move.z)-state.position.z};
-        auto part=traceUnattachedMovementRequest(world,cache,state,shape,requested,time-step,step,local,ghost);
+        auto part=traceUnattachedMovementRequest(world,cache,state,shape,requested,time-step,step,local,ghost,pendingObserver);
         result.elapsedMs+=part.elapsedMs;
         if(part.geometryStatus!=MovementGeometryStatus::Ready)result.geometryStatus=part.geometryStatus;
         if(part.transportRequest)result.transportRequest=part.transportRequest;

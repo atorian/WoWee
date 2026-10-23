@@ -16,6 +16,7 @@ class OriginalMovementExecution(OriginalWorldMovement):
     read=OriginalMovementCommands.read
     prepare_queue=OriginalMovementCommands.prepare_queue
     _local_event=OriginalMovementCommands._local_event
+    observe_local_event=OriginalMovementCommands.observe_local_event
     def __init__(self,binary):
         super().__init__(binary)
         for address,callback in [(0x7413f0,self._local_event),(0x73ab20,self._finished),
@@ -55,7 +56,7 @@ class OriginalMovementExecution(OriginalWorldMovement):
         table=self.alloc(bytes(0x200));self.write(self.unit,'I',table)
         for slot,offset in [(0x38,0x20),(0x14c,0x24)]:
             # External virtual property getters: fld dword [body+offset]; ret.
-            getter=self.alloc(b'\xd9\x05'+struct.pack('<I',body+offset)+b'\xc3')
+            getter=self.alloc_code(b'\xd9\x05'+struct.pack('<I',body+offset)+b'\xc3')
             self.write(table+slot,'I',getter)
         for op in case['operations']:
             if op[0]!=0:raise ValueError('Execution fixture accepts enqueues only')

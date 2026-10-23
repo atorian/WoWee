@@ -1,5 +1,11 @@
 #include "collision/movement_state.hpp"
-// Offline front door for original-code comparisons. No game, device or socket.
+// Offline original-code comparisons. Collision + packet codec; no device or socket.
+#include "core/movement_reporting.hpp"
+#include "core/logger.hpp"
+#include "game/opcode_table.hpp"
+#include "network/packet.hpp"
+#include <sstream>
+#include <stdexcept>
 #include "collision/movement_surface.hpp"
 #include "collision/movement_query.hpp"
 #include "collision/movement_dimensions.hpp"
@@ -28,7 +34,8 @@ struct SuppliedWorld : wowee::collision::MovementFacetSource {
     }
 };
 
-struct ExecutionObservations final:wowee::collision::MovementExecutionSink {
+struct ExecutionObservations final:wowee::collision::MovementExecutionSink,
+    wowee::core::MovementReportConnection,wowee::core::MovementLocalEffects {
     wowee::collision::SurfaceMovementState& state;
     wowee::collision::SurfaceMovementShape& shape;
     struct Height {uint32_t time,opcode,counter;float value,applied;bool ack;uint32_t delay,flags2;};
@@ -49,25 +56,54 @@ struct ExecutionObservations final:wowee::collision::MovementExecutionSink {
     std::vector<uint32_t> finished;
     std::vector<bool> stopped;
     wowee::collision::MovementClock& clock;
-    bool active=false;
+    bool active=false,delivery=false,player=true;
+    wowee::core::MovementReportingState reporting;
+    const wowee::game::OpcodeTable* opcodes=nullptr;
+    std::string packets,atSend,unitEffects;
+    size_t packetCount=0;
+    void sendMovement(const wowee::network::Packet& packet) override {
+        std::ostringstream bytes;
+        for(auto b:packet.getData())bytes<<std::hex<<std::setfill('0')<<std::setw(2)<<unsigned(b);
+        if(packetCount++){packets+=",";atSend+=",";}
+        packets+="{\"opcode\":"+std::to_string(packet.getOpcode())+",\"body\":\""+bytes.str()+"\"}";
+        atSend+="["+std::to_string(reporting.unitFlags)+","+std::to_string(clock.heartbeatTimeMs)+"]";
+    }
+    void unitEffect(const std::string& event) {
+        if(!unitEffects.empty())unitEffects+=",";
+        unitEffects+="["+event+","+std::to_string(packetCount)+","+std::to_string(reporting.unitFlags)+","+
+            std::to_string(clock.heartbeatTimeMs)+"]";
+    }
+    void refreshMovementEffects() override {unitEffect("1");}
+    void standUp() override {unitEffect("2,0");}
+    void updateInput(uint32_t time) override {unitEffect("3,"+std::to_string(time)+",1");}
+    void movementBecameIdle() override {unitEffect("4");}
+    void notifyMovement(wowee::game::Opcode opcode) override {unitEffect("5,"+std::to_string(wowee::game::wireOpcode(opcode)));}
+    bool deliver(uint32_t time,uint32_t opcode,bool ack,uint32_t counter=0,float value=0) {
+        if(!delivery)return false;
+        const auto logical=opcodes->fromWire(static_cast<uint16_t>(opcode));
+        if(!logical)throw std::runtime_error("Unknown movement notification opcode");
+        return wowee::core::processLocalMovementEvent12340(state,reporting,clock,*this,*this,1,active,player,0,time,*logical,ack,counter,value);
+    }
     ExecutionObservations(wowee::collision::SurfaceMovementState& s,wowee::collision::SurfaceMovementShape& h,wowee::collision::MovementClock& c):state(s),shape(h),clock(c){}
     void collisionHeightChanged(uint32_t time,float height,uint32_t counter,bool ack) override {
         observeNotification(time,1303);
         heights.push_back({time,1303,counter,height,shape.height,ack,state.moveStartDelayMs,state.flags2});
+        (void)deliver(time,1303,ack,counter,height);
     }
     bool forcedMovementChanged(uint32_t time,uint32_t opcode,float value,uint32_t counter,bool ack) override {
         observeNotification(time,opcode);
         heights.push_back({time,opcode,counter,value,shape.height,ack,state.moveStartDelayMs,state.flags2});
-        rateStates.push_back(state);return false;
+        rateStates.push_back(state);return deliver(time,opcode,ack,counter,value);
     }
     bool inputChanged(uint32_t time,uint32_t opcode,bool ack) override {
         observeNotification(time,opcode);
-        heights.push_back({time,opcode,0,0,shape.height,ack,state.moveStartDelayMs,state.flags2});return false;
+        heights.push_back({time,opcode,0,0,shape.height,ack,state.moveStartDelayMs,state.flags2});return deliver(time,opcode,ack);
     }
     void angularInputStopped(bool pitch) override {stopped.push_back(pitch);}
     void resetHeartbeat(uint32_t time) override {if(active)clock.heartbeatTimeMs=time+500;}
     bool heartbeat(uint32_t time) override {
-        beats.push_back({time,shape.height,state.position,state.flags});return true;
+        beats.push_back({time,shape.height,state.position,state.flags});
+        return !delivery||wowee::core::reportUnattachedMovement12340(state,reporting,clock,*this,1,active,time,wowee::game::Opcode::MSG_MOVE_HEARTBEAT);
     }
     void frameFinished(uint32_t time) override {finished.push_back(time);}
     static void printRates(const wowee::collision::SurfaceMovementState& s) {
@@ -76,6 +112,11 @@ struct ExecutionObservations final:wowee::collision::MovementExecutionSink {
             <<",\"turn_rate\":"<<s.turnRate<<",\"pitch_rate\":"<<s.pitchRate;
     }
     void print() const {
+        if(delivery)std::cout<<",\"reporting\":{\"packets\":["<<packets<<"],\"at_send\":["<<atSend<<"],\"effects\":["<<unitEffects
+            <<"],\"unit_flags\":"<<reporting.unitFlags<<",\"reported_facing\":"<<reporting.facing<<",\"reported_pitch\":"<<reporting.pitch
+            <<",\"turn_time\":"<<reporting.turnTimeMs<<",\"pitch_time\":"<<reporting.pitchTimeMs
+            <<",\"pending_turn\":"<<(reporting.pendingTurn?wowee::game::wireOpcode(*reporting.pendingTurn):0)
+            <<",\"pending_pitch\":"<<(reporting.pendingPitch?wowee::game::wireOpcode(*reporting.pendingPitch):0)<<'}';
         if(captureModes) {
             std::cout<<",\"mode_observations\":[";
             for(size_t i=0;i<modeObservations.size();++i) {
@@ -116,9 +157,16 @@ struct ExecutionObservations final:wowee::collision::MovementExecutionSink {
 };
 
 int main(int argc, char** argv) {
-    const bool modeQueue = argc == 2 && (std::string(argv[1]) == "--world-mode-queue" || std::string(argv[1]) == "--world-mode-execute");
+    const bool delivery = argc == 3 && std::string(argv[1])=="--world-delivery";
+    wowee::game::OpcodeTable opcodes;
+    if(delivery) {
+        wowee::core::Logger::getInstance().setLogLevel(wowee::core::LogLevel::WARNING);
+        if(!opcodes.loadFromJson(argv[2]))return 2;
+        wowee::game::setActiveOpcodeTable(&opcodes);
+    }
+    const bool modeQueue = delivery || argc == 2 && (std::string(argv[1]) == "--world-mode-queue" || std::string(argv[1]) == "--world-mode-execute");
     const bool rateQueue = modeQueue || argc == 2 && (std::string(argv[1]) == "--world-rate-queue" || std::string(argv[1]) == "--world-rate-execute");
-    const bool executeRates = rateQueue && (std::string(argv[1]) == "--world-rate-execute" || std::string(argv[1]) == "--world-mode-execute");
+    const bool executeRates = delivery || rateQueue && (std::string(argv[1]) == "--world-rate-execute" || std::string(argv[1]) == "--world-mode-execute");
     const bool executeInput = executeRates || argc == 2 && std::string(argv[1]) == "--world-input-execute";
     const bool queuedInput = rateQueue || executeInput || argc == 2 && std::string(argv[1]) == "--world-input-queue";
     const bool launch = argc == 2 && std::string(argv[1]) == "--world-launch";
@@ -247,6 +295,10 @@ int main(int argc, char** argv) {
                     uint32_t lastTime,count;bool defer;
                     if(!(std::cin>>lastTime>>clock.heartbeatTimeMs>>clock.idleTimeMs>>defer>>count))return 2;
                     observations.active=active;
+                    observations.delivery=delivery;observations.opcodes=&opcodes;
+                    observations.player=shape.clientControlled;
+                    observations.reporting.unitFlags=local?0x400u:0u;
+                    observations.reporting.facing=state.facing;observations.reporting.pitch=state.pitch;
                     MovementCommandQueue commands;
                     for(uint32_t i=0;i<count;++i) {
                         if(queuedInput) {
@@ -278,6 +330,13 @@ int main(int argc, char** argv) {
                             if(!(std::cin>>eventTime>>height>>counter>>ack))return 2;
                             commands.enqueueCollisionHeight(eventTime,height,counter,ack);
                         }
+                    }
+                    if(delivery) {
+                        uint32_t turn,pitch;
+                        if(!(std::cin>>observations.reporting.unitFlags>>observations.reporting.facing>>observations.reporting.pitch
+                            >>observations.reporting.turnTimeMs>>observations.reporting.pitchTimeMs>>turn>>pitch))return 2;
+                        if(turn)observations.reporting.pendingTurn=opcodes.fromWire(static_cast<uint16_t>(turn));
+                        if(pitch)observations.reporting.pendingPitch=opcodes.fromWire(static_cast<uint16_t>(pitch));
                     }
                     if(queuedInput&&!executeInput)queueResult=int(commands.process(time,defer,active,state,shape,observations));
                     else {

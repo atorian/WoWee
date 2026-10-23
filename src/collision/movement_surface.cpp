@@ -63,6 +63,7 @@ struct SurfaceTraversal {
     std::optional<uint64_t> transportRequest;
     std::optional<uint32_t> fallResetTime;
     RequestGeometry* geometry=nullptr;
+    MovementPendingObserver* pendingObserver=nullptr;
     bool ValidateTestVsFacetQuery(const C3Vector& displacement) {
         if (!geometry) return true;
         const SurfaceMovementShape shape{m_collisionRadius,m_collisionHeight,m_stepUpHeight,clientControlled};
@@ -1436,7 +1437,7 @@ struct SurfaceTraversal {
                 if (transport) SetTransport({transport});
             } else {
                 if (transport) SetTransport({transport});
-                if (HandlePendingActions()) return used;
+                if (HandlePendingActions(pendingObserver)) return used;
             }
         }
         if (slid) {
@@ -2233,10 +2234,10 @@ std::optional<MovementFacetRequest> expandMovementFacetRequest(
 MovementRequestResult traceUnattachedMovementRequest(MovementFacetSource& world,
     MovementRequestCache& cache,SurfaceMovementState& state,const SurfaceMovementShape& shape,
     const glm::vec3& displacement,uint32_t timeMs,uint32_t elapsedMs,
-    bool locallyControlled,bool ghost) {
+    bool locallyControlled,bool ghost,MovementPendingObserver* pendingObserver) {
     RequestGeometry geometry{world,locallyControlled,ghost,cache,MovementGeometryStatus::Ready};
     SurfaceTraversal traversal{cache.solids,state,shape.radius,shape.height,shape.stepHeight,
-        shape.clientControlled,std::nullopt,std::nullopt,&geometry};
+        shape.clientControlled,std::nullopt,std::nullopt,&geometry,pendingObserver};
     return traversal.CollideRequestMove(geometry,displacement,timeMs,elapsedMs);
 }
 bool applyMovementInput(SurfaceMovementState& state,MovementInput input) {

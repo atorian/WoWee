@@ -35,6 +35,12 @@ std::optional<uint32_t> MovementCommandQueue::nextTime() const {
     if(commands_.empty())return std::nullopt;
     return commands_.front().timeMs;
 }
+bool MovementCommandQueue::hasQueuedMoveStart() const {
+    return std::any_of(commands_.begin(),commands_.end(),[](const Command& c) {
+        const auto* input=std::get_if<MovementInput>(&c.action);
+        return input&&(*input==MovementInput::Forward||*input==MovementInput::Backward);
+    });
+}
 MovementQueueResult MovementCommandQueue::process(uint32_t time,bool defer,bool active,
     SurfaceMovementState& state,SurfaceMovementShape& shape,MovementCommandSink& sink) {
     // UpdatePlayerMovement 0x6ef860. A deferred passenger keeps the due event
@@ -65,15 +71,11 @@ MovementQueueResult MovementCommandQueue::process(uint32_t time,bool defer,bool 
                         const uint32_t before=state.flags&~0x400u;
                         const bool jumping=(before&0x1000)&&state.fallVelocity!=0;
                         change(MovementStateChange::StopFalling);
-                        const bool queuedStart=std::any_of(commands_.begin(),commands_.end(),[](const Command& c) {
-                            const auto* input=std::get_if<MovementInput>(&c.action);
-                            return input&&(*input==MovementInput::Forward||*input==MovementInput::Backward);
-                        });
                         struct Pending final:MovementPendingObserver {
                             MovementCommandSink& sink;bool notify;
                             Pending(MovementCommandSink& s,bool n):sink(s),notify(n){}
                             void forwardStopped() override {if(notify)sink.movementEffect({Effect::Kind::MoveStopped});}
-                        } pending(sink,active&&!queuedStart);
+                        } pending(sink,active&&!hasQueuedMoveStart());
                         (void)applyPendingMovementActions(state,pending);
                         if(!(state.flags&0x1000)&&(before&0x1000))
                             sink.movementEffect({Effect::Kind::FallLand,0,before,0,jumping});

@@ -41,6 +41,9 @@ public:
     void enqueueRateChange(uint32_t timeMs,MovementRate rate,float value,uint32_t ackCounter,bool needAck);
     void enqueueInput(uint32_t timeMs,MovementInput input,bool needAck);
     [[nodiscard]] std::optional<uint32_t> nextTime() const;
+    // Original HandlePendingActions suppresses the input-stop callback if a
+    // forward/backward start remains anywhere in the queue, including future times.
+    [[nodiscard]] bool hasQueuedMoveStart() const;
     [[nodiscard]] size_t size() const { return commands_.size(); }
     [[nodiscard]] MovementQueueResult process(uint32_t timeMs,
         bool vehicleDefersMovement,bool activeMover,SurfaceMovementState& state,
