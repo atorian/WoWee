@@ -1,0 +1,1563 @@
+[
+  {
+    "slug": "01-threading-model",
+    "short": "Потоки",
+    "title": "Threading Model",
+    "subtitle": "Кто работает параллельно, через что передаёт результат и где кадр обязан ждать.",
+    "legend": "Сплошные стрелки — передача работы или данных. Пунктир — ожидание или общие ресурсы. GPU — отдельная исполнительная область, не C++-поток.",
+    "groups": [
+      {
+        "key": "incoming",
+        "title": "Сеть → главный поток",
+        "nodes": [
+          [
+            "net",
+            "WorldSocket pump · 1\nrecv / decrypt / framing"
+          ],
+          [
+            "packets",
+            "Сетевые очереди\n4096 socket → 8192 game"
+          ],
+          [
+            "main",
+            "SDL / ClientLoop\nGame + Lua + подготовка сцены"
+          ]
+        ]
+      },
+      {
+        "key": "workers",
+        "title": "Фоновые исполнители · независимые лимиты [T3]",
+        "nodes": [
+          [
+            "io",
+            "[T1] ioWorkers · 2\nFIFO задач без лимита длины"
+          ],
+          [
+            "frame",
+            "[T2] frameWorkers · 2–16\nанимация / floor / culling / secondary"
+          ],
+          [
+            "terrain",
+            "Terrain workers · обычно 4–8\nloadQueue → ADT / WMO / M2"
+          ],
+          [
+            "normals",
+            "Character NormalMapBuilder · 2\n64 ожидающих · ближние первыми"
+          ],
+          [
+            "preload",
+            "World preload · до 4\nотдельные потоки → join"
+          ],
+          [
+            "other",
+            "Задачи по необходимости\nDNS/connect · Warden · patch/hash\nwatchdog · stats · update · recorder"
+          ]
+        ]
+      },
+      {
+        "key": "returnmain",
+        "title": "Результаты → тот же главный поток",
+        "nodes": [
+          [
+            "ready",
+            "readyQueue / finalizingTiles\nqueueMutex + queueCV"
+          ],
+          [
+            "finalize",
+            "Готовые CPU-данные\nпроверка token → GPU upload"
+          ],
+          [
+            "record",
+            "Render: prepareRender\n[T2] futures.get → submit"
+          ]
+        ]
+      },
+      {
+        "key": "devices",
+        "title": "Общие ресурсы и устройства",
+        "nodes": [
+          [
+            "assets",
+            "AssetManager\nfile mutex / DBC shared_mutex"
+          ],
+          [
+            "audio",
+            "miniaudio device callback\nмикширование PCM"
+          ],
+          [
+            "gpu",
+            "Vulkan GPU\nupload fences / frame fences"
+          ]
+        ]
+      }
+    ],
+    "edges": [
+      [
+        "main",
+        "io",
+        "JobGroup / music / spell assets",
+        "flow"
+      ],
+      [
+        "net",
+        "packets",
+        "callbackMutex",
+        "flow"
+      ],
+      [
+        "packets",
+        "main",
+        "opcode dispatch",
+        "flow"
+      ],
+      [
+        "main",
+        "terrain",
+        "запрос tiles",
+        "flow"
+      ],
+      [
+        "terrain",
+        "ready",
+        "готовые PendingTile",
+        "flow"
+      ],
+      [
+        "ready",
+        "finalize",
+        "poll + token",
+        "flow"
+      ],
+      [
+        "io",
+        "finalize",
+        "future ready",
+        "flow"
+      ],
+      [
+        "normals",
+        "finalize",
+        "takeFinished",
+        "flow"
+      ],
+      [
+        "main",
+        "frame",
+        "submit",
+        "flow"
+      ],
+      [
+        "frame",
+        "record",
+        "get: барьер",
+        "wait"
+      ],
+      [
+        "finalize",
+        "gpu",
+        "асинхронные copies",
+        "flow"
+      ],
+      [
+        "record",
+        "gpu",
+        "команды кадра",
+        "flow"
+      ],
+      [
+        "gpu",
+        "record",
+        "ожидание frame slot",
+        "wait"
+      ],
+      [
+        "terrain",
+        "assets",
+        "read / parse",
+        "borrow"
+      ],
+      [
+        "io",
+        "assets",
+        "read / decode",
+        "borrow"
+      ],
+      [
+        "preload",
+        "assets",
+        "warm cache",
+        "borrow"
+      ],
+      [
+        "main",
+        "audio",
+        "управление звуками",
+        "borrow"
+      ],
+      [
+        "main",
+        "normals",
+        "submit",
+        "flow"
+      ],
+      [
+        "main",
+        "other",
+        "запуск / poll",
+        "borrow"
+      ]
+    ],
+    "issues": [
+      {
+        "code": "T1",
+        "kind": "Факт → риск",
+        "title": "Все обычные I/O-задачи делят два FIFO-воркера",
+        "body": "JobGroup отправляет map/entity preparation в тот же ioWorkers, что чтение музыки и spell assets. Очередь ThreadPool не ограничена и не имеет приоритетов. Длинный backlog может задерживать появление близких объектов или запуск музыки.",
+        "action": "Измерять время ожидания в очереди, её длину и тип задачи; затем вводить приоритеты и backpressure по общему контракту.",
+        "refs": [
+          "include/core/thread_pool.hpp:59",
+          "include/core/thread_pool.hpp:73",
+          "include/core/job_group.hpp:116",
+          "src/audio/music_manager.cpp:136"
+        ]
+      },
+      {
+        "code": "T2",
+        "kind": "Факт → риск",
+        "title": "Параллельная работа остаётся на критическом пути кадра",
+        "body": "Главный поток ждёт M2 animation в Present и окончания secondary command buffers в Render. Это необходимые барьеры: длительность кадра зависит от самого долгого незавершённого задания, даже если остальные воркеры свободны.",
+        "action": "Профилировать очередь отдельно от выполнения и ожидания get; сохранять барьер перед чтением изменяемых spatial/animation данных.",
+        "refs": [
+          "src/rendering/renderer.cpp:2394",
+          "src/rendering/renderer.cpp:3344"
+        ]
+      },
+      {
+        "code": "T3",
+        "kind": "Риск",
+        "title": "Нет единого лимита фоновой загрузки CPU",
+        "body": "Frame pool, terrain pool, preload, normal maps и std::async задают параллелизм независимо. Их одновременная активность может вытеснять главный поток. Это риск oversubscription, а не доказанный замер фриза.",
+        "action": "Снять профиль холодного входа в город: runnable threads, загрузка CPU и задержки main; учитывать все активные пулы.",
+        "refs": [
+          "src/rendering/terrain_manager.cpp:104",
+          "include/core/thread_pool.hpp:82",
+          "src/core/world_loader.cpp:600",
+          "src/rendering/character_renderer.cpp:71"
+        ]
+      }
+    ],
+    "facts": [
+      [
+        "Главный поток",
+        "SDL, сетевой dispatch, домены игры, UI/Lua, upload/finalization и Vulkan submit/present. Отдельного постоянного render thread нет."
+      ],
+      [
+        "Сеть",
+        "Опциональный pump; WOWEE_NET_ASYNC_PUMP=0 переносит чтение на main. ioMutex защищает socket/cipher, callbackMutex — очередь."
+      ],
+      [
+        "Terrain",
+        "queueMutex + queueCV; readyQueue ограничивает старт новой подготовки при глубине ≥3, есть MemoryMonitor throttling. Уже выполняемые задачи могут добавить результаты."
+      ],
+      [
+        "Frame workers",
+        "2–16 потоков, по умолчанию hardware_concurrency−1 с clamp; общий пул для анимации, коллизий, visibility и записи secondary commands."
+      ],
+      [
+        "I/O workers",
+        "2 потока; JobGroup даёт token и lifetime fence, а не собственный пул."
+      ],
+      [
+        "Normal maps",
+        "У CharacterRenderer собственный NormalMapBuilder: 2 потока, очередь 64, приоритет расстояния, completed results → main."
+      ],
+      [
+        "World preload",
+        "До 4 потоков на прогрев файлов; отдельная отмена и join, не общий ioWorkers."
+      ],
+      [
+        "Прочие роли",
+        "DNS/connect detached с shared job; Warden/patch/hash/background decode — task-scoped; watchdog и ProcessStats — отдельные потоки; recorder и встроенный asset panel — условные. Число потоков библиотек/драйвера отдельно не инвентаризировалось."
+      ]
+    ],
+    "good": "Сетевой pump не меняет EntityManager. Данные карты помечаются token, нормальные фоновые consumer-пути опрашивают готовность; GPU upload и управление Vulkan остаются у main.",
+    "ranks": [
+      [
+        "io",
+        "frame"
+      ],
+      [
+        "terrain",
+        "normals"
+      ],
+      [
+        "preload",
+        "other"
+      ]
+    ],
+    "invisible": [
+      [
+        "io",
+        "terrain"
+      ],
+      [
+        "terrain",
+        "preload"
+      ]
+    ]
+  },
+  {
+    "slug": "02-frame-lifecycle",
+    "short": "Кадр",
+    "title": "Frame Lifecycle",
+    "subtitle": "Один неизменяемый FramePlan на кадр и десять фаз в фактическом порядке.",
+    "legend": "Сплошная цепочка — порядок вызовов. Пунктир — отложенная доставка или влияние на последующую фазу. Present здесь означает подготовку сцены; показ swapchain происходит внутри Render.",
+    "groups": [
+      {
+        "key": "frameorder",
+        "title": "ClientLoop::runFrame · главный поток",
+        "nodes": [
+          [
+            "plan",
+            "FramePlan = framePlan()\nвыбирается до Input"
+          ],
+          [
+            "input",
+            "1 · Input\nSDL / pad → InterfaceInput"
+          ],
+          [
+            "network",
+            "2 · Network\nlogin / patches / world packets"
+          ],
+          [
+            "game",
+            "3 · Game\nsimulation / player / presentation requests"
+          ],
+          [
+            "events",
+            "4 · Events [F2]\nEventBus::dispatchPosted"
+          ],
+          [
+            "stream",
+            "5 · Streaming\nWorldLoader::update / progress"
+          ],
+          [
+            "interface",
+            "6 · Interface\nqueued game events → input → Lua/UI"
+          ],
+          [
+            "present",
+            "7 · Present [F1]\ncamera + renderer.update\nterrain finalize / animation → wait"
+          ],
+          [
+            "render",
+            "8 · Render\nframe-slot wait → acquire → record\nsecondary get → submit → vkQueuePresent"
+          ],
+          [
+            "transition",
+            "9 · Transitions\nstate / CharacterSession / MapScope"
+          ],
+          [
+            "pace",
+            "10 · Pace\nвыбранный cap / VSync"
+          ],
+          [
+            "next",
+            "Следующий кадр\nновый FramePlan"
+          ]
+        ]
+      },
+      {
+        "key": "channels",
+        "title": "Доставка и накопленная стоимость",
+        "nodes": [
+          [
+            "sync",
+            "[F2] EventBus::publish\nсинхронно в месте вызова"
+          ],
+          [
+            "luaqueue",
+            "Game FrameXML FIFO\nи InterfaceInput"
+          ],
+          [
+            "request",
+            "WorldTransitionQueue\nпоследние requests / leave priority"
+          ],
+          [
+            "budgets",
+            "[F3] Независимые бюджеты\nсеть + finalize + unload + record"
+          ]
+        ]
+      }
+    ],
+    "edges": [
+      [
+        "plan",
+        "input",
+        "",
+        "flow"
+      ],
+      [
+        "input",
+        "network",
+        "",
+        "flow"
+      ],
+      [
+        "network",
+        "game",
+        "",
+        "flow"
+      ],
+      [
+        "game",
+        "events",
+        "",
+        "flow"
+      ],
+      [
+        "events",
+        "stream",
+        "",
+        "flow"
+      ],
+      [
+        "stream",
+        "interface",
+        "",
+        "flow"
+      ],
+      [
+        "interface",
+        "present",
+        "",
+        "flow"
+      ],
+      [
+        "present",
+        "render",
+        "",
+        "flow"
+      ],
+      [
+        "render",
+        "transition",
+        "",
+        "flow"
+      ],
+      [
+        "transition",
+        "pace",
+        "",
+        "flow"
+      ],
+      [
+        "pace",
+        "next",
+        "",
+        "flow"
+      ],
+      [
+        "network",
+        "sync",
+        "publish",
+        "borrow"
+      ],
+      [
+        "game",
+        "sync",
+        "publish",
+        "borrow"
+      ],
+      [
+        "network",
+        "luaqueue",
+        "уведомления",
+        "borrow"
+      ],
+      [
+        "luaqueue",
+        "interface",
+        "drain FIFO",
+        "borrow"
+      ],
+      [
+        "sync",
+        "request",
+        "только request",
+        "borrow"
+      ],
+      [
+        "request",
+        "transition",
+        "применить после submit",
+        "borrow"
+      ],
+      [
+        "budgets",
+        "present",
+        "время складывается",
+        "borrow"
+      ]
+    ],
+    "issues": [
+      {
+        "code": "F1",
+        "kind": "Факт",
+        "title": "Streaming не содержит всей работы стриминга",
+        "body": "Фаза Streaming опрашивает WorldLoader и loading scene, но terrain.update → processReadyTiles выполняется в Renderer::update, вызванном из Present. Название фазы не отражает всю её стоимость; смотреть только метрику Streaming недостаточно.",
+        "action": "При анализе фризов раскрывать Present на terrain finalization, unload, animation и wait; не переносить вызовы без проверки зависимостей.",
+        "refs": [
+          "src/core/application.cpp:4071",
+          "src/core/application.cpp:4093",
+          "src/rendering/renderer.cpp:2277",
+          "src/rendering/terrain_manager.cpp:231"
+        ]
+      },
+      {
+        "code": "F2",
+        "kind": "Факт → риск",
+        "title": "Events — не единственное место выполнения подписчиков",
+        "body": "publish вызывает подписчиков сразу, например из Network или Game. Только post ждёт Events. FrameXML идёт отдельной FIFO в Interface; его обработчик может видеть более новое состояние игры, чем в момент публикации.",
+        "action": "Указывать канал и фазу у нового события; синхронные подписчики переходов должны только записывать запрос. Стоимость publish относится к фазе отправителя.",
+        "refs": [
+          "include/core/event_bus.hpp:85",
+          "include/core/event_bus.hpp:100",
+          "src/core/client_loop.cpp:341",
+          "docs/principles/client-frame-phases.md:34"
+        ]
+      },
+      {
+        "code": "F3",
+        "kind": "Факт → риск",
+        "title": "Локальные бюджеты не дают общего потолка кадра",
+        "body": "Сеть по умолчанию получает 4 мс в мире, 8 мс при входе и 12 мс при catch-up. Terrain finalize получает 2/8/16 мс, unload — ещё 8/16 мс. Это независимые лимиты; проверка между операциями не прерывает один долгий шаг. Это настройки времени, не измеренная длительность кадра.",
+        "action": "Сопоставлять суммарные CPU-фазы с целевым временем кадра и отдельно отмечать overruns одной операции и ожидания GPU.",
+        "refs": [
+          "src/game/game_handler_packets.cpp:87",
+          "src/game/game_handler_packets.cpp:101",
+          "src/rendering/terrain_manager.cpp:1529",
+          "src/rendering/terrain_manager.cpp:1591"
+        ]
+      }
+    ],
+    "facts": [
+      [
+        "Input",
+        "beginFrame вычисляет dt; FramePlan уже выбран. SDL/pad читаются, Lua-backed input копится для Interface."
+      ],
+      [
+        "Network",
+        "Auth/patch update, world socket transfer и ограниченный по времени opcode dispatch. Часть синхронных уведомлений возникает уже здесь."
+      ],
+      [
+        "Game",
+        "Симуляция, reconnect, logout timeout, player/world client logic; подготовка запросов отображения."
+      ],
+      [
+        "Events",
+        "Снимок posted queue → подписчики. Новые post из обработчика остаются до следующего dispatch."
+      ],
+      [
+        "Streaming",
+        "WorldLoader polling и прогресс, загрузочная сцена. Нет вложенного SDL/game/render цикла."
+      ],
+      [
+        "Interface",
+        "Вход интерфейса в мир, bindings, queued FrameXML, input, screens, ReloadUI, addon update, draw lists. При уходе — PLAYER_LEAVING_WORLD."
+      ],
+      [
+        "Present",
+        "PlayerView и передача мира, Renderer::update, terrain finalization/unload, animation + get, наблюдение readiness загрузки."
+      ],
+      [
+        "Render",
+        "Renderer beginFrame → frame-slot fence/timeline wait + acquire → запись проходов → secondary barriers → endFrame submit/present."
+      ],
+      [
+        "Transitions",
+        "Запросы world entry, transfer, logout, reconnect, state. Только здесь создают/заканчивают мировые lifetimes."
+      ],
+      [
+        "Pace",
+        "Единственное pacing место. Выбранный cap, VSync через presentation; затем Idle и отчёт frameFinished."
+      ]
+    ],
+    "good": "LOADING_WORLD проходит тот же цикл: сеть и simulation продолжаются, интерфейс показывает прогресс, готовность проверяется после Present. Мутации lifetime применяются после submit; Lua entry защищён фазой Interface. Закрытие окна может прервать кадр после Input или Interface."
+  },
+  {
+    "slug": "03-component-diagram",
+    "short": "Подсистемы",
+    "title": "Component Diagram",
+    "subtitle": "Направления зависимостей библиотек и связи между подсистемами клиента.",
+    "legend": "Сплошная стрелка A → B означает «A зависит от B». Пунктир внутри клиента — runtime-взаимодействие. Транзитивные и внешние библиотечные зависимости частично опущены.",
+    "groups": [
+      {
+        "key": "client",
+        "title": "wowee_client_objects / wowee_client · композиция",
+        "nodes": [
+          [
+            "app",
+            "Application + ClientLoop\nсоздание и wiring"
+          ],
+          [
+            "ui",
+            "UI + Addons / Lua\nFrameXML / screens"
+          ],
+          [
+            "presentation",
+            "PlayerView / EntitySpawner\nSpellPresentation / callbacks"
+          ],
+          [
+            "sound",
+            "AudioCoordinator\nminiaudio / managers"
+          ]
+        ]
+      },
+      {
+        "key": "gamebox",
+        "title": "wowee_game · protocol state",
+        "nodes": [
+          [
+            "gh",
+            "[C1/C2] GameHandler\nsession / queue / dispatch / facade"
+          ],
+          [
+            "domain",
+            "Доменные handlers\nchat / spell / inventory / quest / …"
+          ],
+          [
+            "old",
+            "[C1] 4 legacy handlers\nCombat / Movement / Entity / Warden"
+          ]
+        ]
+      },
+      {
+        "key": "renderbox",
+        "title": "wowee_render · сцена и GPU",
+        "nodes": [
+          [
+            "renderer",
+            "Renderer / VkContext API\nterrain / M2 / WMO / characters\nRT / water / post / overlays"
+          ],
+          [
+            "boundary",
+            "[C3] граница CMake\nне вся папка rendering — эта библиотека"
+          ]
+        ]
+      },
+      {
+        "key": "libraries",
+        "title": "Общие нижние слои",
+        "nodes": [
+          [
+            "netlib",
+            "wowee_net\nAuth / WorldSocket / HTTPS"
+          ],
+          [
+            "protocol",
+            "wowee_protocol\nPacket / opcodes / parsers / crypto"
+          ],
+          [
+            "pipeline",
+            "wowee_pipeline\nAssetManager / DBC / ADT / M2 / WMO"
+          ],
+          [
+            "base",
+            "wowee_base\nEventBus / jobs / logging / CVar / math"
+          ]
+        ]
+      }
+    ],
+    "edges": [
+      [
+        "app",
+        "ui",
+        "",
+        "flow"
+      ],
+      [
+        "app",
+        "presentation",
+        "",
+        "flow"
+      ],
+      [
+        "app",
+        "sound",
+        "",
+        "flow"
+      ],
+      [
+        "app",
+        "gh",
+        "",
+        "flow"
+      ],
+      [
+        "app",
+        "renderer",
+        "",
+        "flow"
+      ],
+      [
+        "app",
+        "pipeline",
+        "",
+        "flow"
+      ],
+      [
+        "ui",
+        "gh",
+        "",
+        "flow"
+      ],
+      [
+        "ui",
+        "renderer",
+        "",
+        "flow"
+      ],
+      [
+        "ui",
+        "pipeline",
+        "",
+        "flow"
+      ],
+      [
+        "presentation",
+        "gh",
+        "",
+        "flow"
+      ],
+      [
+        "presentation",
+        "renderer",
+        "",
+        "flow"
+      ],
+      [
+        "presentation",
+        "pipeline",
+        "",
+        "flow"
+      ],
+      [
+        "gh",
+        "domain",
+        "создаёт и делегирует",
+        "flow"
+      ],
+      [
+        "gh",
+        "old",
+        "создаёт",
+        "flow"
+      ],
+      [
+        "old",
+        "gh",
+        "GameHandler& owner_",
+        "wait"
+      ],
+      [
+        "gh",
+        "netlib",
+        "",
+        "flow"
+      ],
+      [
+        "gh",
+        "protocol",
+        "",
+        "flow"
+      ],
+      [
+        "gh",
+        "pipeline",
+        "",
+        "flow"
+      ],
+      [
+        "gh",
+        "base",
+        "",
+        "flow"
+      ],
+      [
+        "domain",
+        "base",
+        "events / queries",
+        "flow"
+      ],
+      [
+        "renderer",
+        "pipeline",
+        "",
+        "flow"
+      ],
+      [
+        "renderer",
+        "base",
+        "",
+        "flow"
+      ],
+      [
+        "boundary",
+        "renderer",
+        "список исключений",
+        "borrow"
+      ],
+      [
+        "netlib",
+        "protocol",
+        "",
+        "flow"
+      ],
+      [
+        "netlib",
+        "base",
+        "",
+        "flow"
+      ],
+      [
+        "protocol",
+        "base",
+        "",
+        "flow"
+      ],
+      [
+        "pipeline",
+        "base",
+        "",
+        "flow"
+      ],
+      [
+        "gh",
+        "presentation",
+        "уведомления: bus / callbacks",
+        "borrow"
+      ]
+    ],
+    "issues": [
+      {
+        "code": "C1",
+        "kind": "Подтверждённый долг",
+        "title": "Четыре домена всё ещё зависят от всего GameHandler",
+        "body": "Статическая проверка: 4 handlers с GameHandler&, 1206 обращений через owner_, 110 xxxRef-accessors. Имена доменов уже выделены, но часть их зависимостей и владения состоянием остаётся неявной.",
+        "action": "Переносить state к владельцу и передавать узкие PacketSender / FrameXmlEvents / Query interfaces; не добавлять новые owner_. и Ref-пути.",
+        "refs": [
+          "tools/domain_shape_check.py:54",
+          "src/game/game_handler.cpp:116",
+          "include/game/game_handler.hpp:143"
+        ]
+      },
+      {
+        "code": "C2",
+        "kind": "Долг → риск",
+        "title": "Сохраняются каналы уведомления с одним слушателем",
+        "body": "В GameHandler осталось 50 set*Callback setters. Они требуют ручного wiring и допускают замену предыдущего слушателя. Само число не доказывает потерю события сейчас, но показывает объём неявного контракта.",
+        "action": "При изменении существующего уведомления переходить на типизированное событие и RAII Subscription; FrameXML оставить отдельным контрактом Lua.",
+        "refs": [
+          "tools/domain_shape_check.py:47",
+          "src/core/client_loop.cpp:38",
+          "include/core/event_bus.hpp:38"
+        ]
+      },
+      {
+        "code": "C3",
+        "kind": "Подтверждённый долг",
+        "title": "Граница подсистемы не совпадает с путём файла",
+        "body": "CMake исключает camera_controller, animation_controller, spell visuals и другие presentation-файлы из wowee_render. В game также остаётся 6 includes общих animation/movement constants из rendering/. Это усложняет определение владельца по каталогу.",
+        "action": "Ориентироваться на CMake targets и guard checks; общие protocol/animation IDs постепенно переносить в нейтральные headers.",
+        "refs": [
+          "CMakeLists.txt:1249",
+          "tools/render_dependency_check.py:58",
+          "tools/game_dependency_check.py:46"
+        ]
+      }
+    ],
+    "facts": [
+      [
+        "Client",
+        "Application владеет и связывает game, render, assets, UI и audio; ClientLoop управляет кадром и transitions. UI, addons, audio показаны как подсистемы, а не отдельные wowee_* targets."
+      ],
+      [
+        "Game",
+        "Domain handlers владеют своими opcode/state; GameHandler сохраняет session/dispatch и legacy facade. Команды идут владельцу, queries — через interfaces, notifications — в bus."
+      ],
+      [
+        "Renderer",
+        "Получает scene/presentation state, не включает game/ui/audio/network client modules. 83 source-файла в текущей проверке; compile-time границы зависят от CMake."
+      ],
+      [
+        "Pipeline",
+        "Загрузка файлов, архивные слои, кеши и парсеры. Зависит от base, не от game/render клиента."
+      ],
+      [
+        "Network / protocol",
+        "Сеть использует protocol; game использует net и protocol. Сетевые transport-данные не вызывают GPU напрямую."
+      ],
+      [
+        "Headless validation",
+        "GameHarness ведёт real GameHandler без client; scene_render связывает wowee_render без game. ClientHarness ведёт тот же ClientLoop с front-end stand-ins."
+      ]
+    ],
+    "good": "Проверки дали 0 includes presentation из game и 0 includes клиента из wowee_render. Общие константы из rendering учитываются отдельно. Это успешная статическая проверка includes, не доказательство отсутствия всех runtime-зависимостей.",
+    "ranks": [
+      [
+        "ui",
+        "presentation",
+        "sound"
+      ],
+      [
+        "gh",
+        "renderer"
+      ],
+      [
+        "domain",
+        "old"
+      ],
+      [
+        "pipeline",
+        "netlib"
+      ]
+    ]
+  },
+  {
+    "slug": "04-data-flow",
+    "short": "Данные",
+    "title": "Data Flow Diagram",
+    "subtitle": "Два входа — сервер и ресурсы — сходятся в presentation scene перед GPU.",
+    "legend": "Сплошные стрелки показывают движение данных. Пунктир — уведомления, повторные запросы или подтверждение готовности. Логическая Entity и GPU instance имеют разных владельцев.",
+    "groups": [
+      {
+        "key": "wire",
+        "title": "Сервер → авторитетное состояние игры",
+        "nodes": [
+          [
+            "server",
+            "World server\nTCP bytes"
+          ],
+          [
+            "socket",
+            "WorldSocket pump\ndecrypt + framing"
+          ],
+          [
+            "sq",
+            "Socket callback FIFO\n4096 → overflow disconnect"
+          ],
+          [
+            "gq",
+            "[D1] Game inbound FIFO\n8192 → overflow drops packet"
+          ],
+          [
+            "dispatch",
+            "Main: budgeted dispatch\n4 / 8 / catch-up 12 мс"
+          ],
+          [
+            "state",
+            "Domain state / EntityManager\nлогический игровой мир"
+          ],
+          [
+            "ev",
+            "Bus notifications + FrameXML FIFO"
+          ]
+        ]
+      },
+      {
+        "key": "resources",
+        "title": "Ресурсы → подготовленные CPU-данные",
+        "nodes": [
+          [
+            "disk",
+            "Loose files + archive layers\nADT / M2 / WMO / BLP / DBC"
+          ],
+          [
+            "cache",
+            "[D2] AssetManager\nfile LRU + DBC cache / generations"
+          ],
+          [
+            "workers",
+            "Terrain / ioWorkers / normals\nread → parse → decode → composite"
+          ],
+          [
+            "prepared",
+            "[D3] CPU ready results\nPendingTile / prepared model / pixels"
+          ]
+        ]
+      },
+      {
+        "key": "scene",
+        "title": "Главный поток → видимый мир → GPU",
+        "nodes": [
+          [
+            "spawner",
+            "EntitySpawner / PlayerView\nGUID → model / appearance requests"
+          ],
+          [
+            "validate",
+            "Проверить map/request token\nотбросить устаревший result"
+          ],
+          [
+            "upload",
+            "GPU upload batch\nstaging → submit, без wait"
+          ],
+          [
+            "instances",
+            "Renderer instance state\nmodels + material + transform / bones"
+          ],
+          [
+            "gpu",
+            "GPU buffers / textures\nframe passes → swapchain"
+          ]
+        ]
+      }
+    ],
+    "edges": [
+      [
+        "server",
+        "socket",
+        "",
+        "flow"
+      ],
+      [
+        "socket",
+        "sq",
+        "callbackMutex",
+        "flow"
+      ],
+      [
+        "sq",
+        "gq",
+        "main transfer",
+        "flow"
+      ],
+      [
+        "gq",
+        "dispatch",
+        "",
+        "flow"
+      ],
+      [
+        "dispatch",
+        "state",
+        "",
+        "flow"
+      ],
+      [
+        "state",
+        "ev",
+        "publish / queue",
+        "flow"
+      ],
+      [
+        "ev",
+        "spawner",
+        "spawn / appearance",
+        "flow"
+      ],
+      [
+        "state",
+        "spawner",
+        "queries",
+        "borrow"
+      ],
+      [
+        "spawner",
+        "workers",
+        "запрос ресурсов",
+        "flow"
+      ],
+      [
+        "disk",
+        "cache",
+        "",
+        "flow"
+      ],
+      [
+        "cache",
+        "workers",
+        "immutable/shared CPU bytes",
+        "flow"
+      ],
+      [
+        "workers",
+        "prepared",
+        "",
+        "flow"
+      ],
+      [
+        "prepared",
+        "validate",
+        "poll готовности",
+        "flow"
+      ],
+      [
+        "validate",
+        "upload",
+        "актуальные данные",
+        "flow"
+      ],
+      [
+        "upload",
+        "instances",
+        "создать / заменить instance",
+        "flow"
+      ],
+      [
+        "spawner",
+        "instances",
+        "transform / pose",
+        "flow"
+      ],
+      [
+        "instances",
+        "gpu",
+        "record + submit",
+        "flow"
+      ],
+      [
+        "upload",
+        "gpu",
+        "copy commands",
+        "flow"
+      ],
+      [
+        "gpu",
+        "instances",
+        "poll upload fence",
+        "borrow"
+      ]
+    ],
+    "issues": [
+      {
+        "code": "D1",
+        "kind": "Подтверждённая проблема при переполнении",
+        "title": "Игровая очередь теряет пакеты и продолжает сессию",
+        "body": "При заполнении 8192 slots enqueueIncomingPacket удаляет самый старый пакет; enqueueIncomingPacketFront удаляет самый новый. Это общий протокольный поток, поэтому может пропасть не только промежуточное движение, но и изменение состояния. Socket queue при собственном overflow, напротив, закрывает соединение.",
+        "action": "Нужна явная recovery/resync политика. До доказанной безопасной coalescing-семантики нельзя произвольно отбрасывать пакеты состояния. Сценарий overflow требует отдельного поведенческого теста.",
+        "refs": [
+          "src/game/game_handler_packets.cpp:3054",
+          "src/game/game_handler_packets.cpp:3065",
+          "src/network/world_socket.cpp:791"
+        ]
+      },
+      {
+        "code": "D2",
+        "kind": "Факт → риск",
+        "title": "Параллельные cache miss одного файла могут дублировать I/O",
+        "body": "readFileShared сначала проверяет cache, затем читает источник вне lock, затем вставляет результат. In-flight request table в этом пути нет: несколько воркеров на холодном файле могут одновременно прочитать его. Generation защищает актуальность cache, но не объединяет запросы.",
+        "action": "Сначала измерить дубликаты cold reads и peak decoded bytes; если существенно — объединять одновременные запросы по нормализованному ключу и generation.",
+        "refs": [
+          "src/pipeline/asset_manager.cpp:804",
+          "src/pipeline/asset_manager.cpp:813"
+        ]
+      },
+      {
+        "code": "D3",
+        "kind": "Риск",
+        "title": "Порог readyQueue измеряет tiles, а не память всех результатов",
+        "body": "Порог 3 проверяется перед началом terrain preparation; уже работающие workers могут положить дополнительные tiles. Разные tiles содержат разное количество decoded pixels и моделей. MemoryMonitor уже замедляет загрузку, но этот порог не является жёстким byte cap всего pipeline.",
+        "action": "Наблюдать queued + preparing + ready + finalizing CPU bytes и staging bytes; оценивать backpressure по общему объёму, сохраняя прогресс хотя бы одного tile.",
+        "refs": [
+          "include/rendering/terrain_manager.hpp:522",
+          "src/rendering/terrain_manager.cpp:1439",
+          "src/rendering/terrain_manager.cpp:1462"
+        ]
+      }
+    ],
+    "facts": [
+      [
+        "Сетевой handoff",
+        "Фоновая очередь socket → main → очередь game. Первая защищена mutex; вторая — main-thread-only и бюджетирована по времени."
+      ],
+      [
+        "Домены",
+        "Packet parser + opcode handler изменяют state. EntityController владеет entities; отображение получает события и запрашивает state."
+      ],
+      [
+        "Ресурсный handoff",
+        "Workers готовят CPU-результаты. Main опрашивает future/ready queue и проверяет token карты и запроса перед использованием."
+      ],
+      [
+        "Актуальность",
+        "JobGroup::replace(channel, GUID) отменяет предыдущий запрос; map cancellation отсекает результаты старой карты, даже если GUID переиспользован."
+      ],
+      [
+        "GPU handoff",
+        "Upload batch записывает copies и submit с fence. Fence опрашивается в последующих кадрах. Наличие готовых CPU bytes не равнозначно завершённому upload."
+      ],
+      [
+        "UI / audio branches",
+        "FrameXML FIFO читается в Interface; audio callbacks и presentation-подписчики выбирают звуки на основании игровых событий. Эти ветви не превращают game в renderer."
+      ]
+    ],
+    "good": "Есть parse/read limits, bounded packet queues, packet-lag catch-up, terrain memory throttling, request tokens и асинхронные upload batches. Выявленные проблемы относятся к overflow policy и сквозному учёту нагрузки, а не к отсутствию этих механизмов."
+  },
+  {
+    "slug": "05-ownership-lifetime",
+    "short": "Владение",
+    "title": "Ownership / Lifetime Model",
+    "subtitle": "Владение, заимствованные ссылки и границы освобождения CPU/GPU объектов.",
+    "legend": "Сплошная стрелка owner → child — владение (unique_ptr или value). Пунктир — заимствованная ссылка. Пунктир с подписью retire — отложенное освобождение GPU, не владение.",
+    "groups": [
+      {
+        "key": "process",
+        "title": "Жизнь процесса · Application",
+        "nodes": [
+          [
+            "app",
+            "Application\n[O2] явный shutdown order"
+          ],
+          [
+            "bus",
+            "EventBus\nживёт дольше subscribers"
+          ],
+          [
+            "window",
+            "Window → VkContext\ndevice / swapchain / fences"
+          ],
+          [
+            "renderer",
+            "Renderer\nmodel / texture caches + render layers"
+          ],
+          [
+            "assets",
+            "AssetManager\nshared immutable file / DBC cache"
+          ],
+          [
+            "gh",
+            "GameHandler\nconnection + domains"
+          ],
+          [
+            "entities",
+            "Handlers / EntityController\ncharacter state / entities"
+          ],
+          [
+            "front",
+            "PlayerView / EntitySpawner\nWorldLoader / UI / audio"
+          ],
+          [
+            "loop",
+            "ClientLoop\nworld transitions"
+          ]
+        ]
+      },
+      {
+        "key": "character",
+        "title": "Жизнь персонажа · CharacterSession",
+        "nodes": [
+          [
+            "session",
+            "CharacterSession\nlogin → logout / exit"
+          ],
+          [
+            "character",
+            "InterfaceState + PlayerSync\nSpellPresentation + subscriptions"
+          ],
+          [
+            "lua",
+            "AddonManager / Lua state\nsave variables → close"
+          ]
+        ]
+      },
+      {
+        "key": "map",
+        "title": "Жизнь карты · MapScope",
+        "nodes": [
+          [
+            "map",
+            "MapScope\nentry → supersede / leave"
+          ],
+          [
+            "jobs",
+            "[O1] JobGroup\ntokens + tracked leases"
+          ],
+          [
+            "spawnstate",
+            "EntitySpawner::SpawnState\nper-GUID requests / pending results"
+          ],
+          [
+            "load",
+            "WorldLoader::Session\nprepared map / future"
+          ],
+          [
+            "renderSession",
+            "MapRenderSession\ninstance sessions + TerrainManager"
+          ]
+        ]
+      },
+      {
+        "key": "special",
+        "title": "За границей обычного owner lifetime",
+        "nodes": [
+          [
+            "retire",
+            "GPU retirement\nVkContext deferredCleanup[slot]"
+          ],
+          [
+            "connector",
+            "[O3] AsyncConnect detached worker\nshared Job переживает cancel"
+          ]
+        ]
+      }
+    ],
+    "edges": [
+      [
+        "app",
+        "bus",
+        "",
+        "flow"
+      ],
+      [
+        "app",
+        "window",
+        "",
+        "flow"
+      ],
+      [
+        "app",
+        "renderer",
+        "",
+        "flow"
+      ],
+      [
+        "app",
+        "assets",
+        "",
+        "flow"
+      ],
+      [
+        "app",
+        "gh",
+        "",
+        "flow"
+      ],
+      [
+        "app",
+        "front",
+        "",
+        "flow"
+      ],
+      [
+        "app",
+        "loop",
+        "",
+        "flow"
+      ],
+      [
+        "gh",
+        "entities",
+        "",
+        "flow"
+      ],
+      [
+        "loop",
+        "session",
+        "",
+        "flow"
+      ],
+      [
+        "session",
+        "character",
+        "",
+        "flow"
+      ],
+      [
+        "session",
+        "lua",
+        "",
+        "flow"
+      ],
+      [
+        "session",
+        "map",
+        "",
+        "flow"
+      ],
+      [
+        "map",
+        "jobs",
+        "",
+        "flow"
+      ],
+      [
+        "map",
+        "spawnstate",
+        "",
+        "flow"
+      ],
+      [
+        "map",
+        "load",
+        "",
+        "flow"
+      ],
+      [
+        "map",
+        "renderSession",
+        "",
+        "flow"
+      ],
+      [
+        "renderer",
+        "window",
+        "borrow VkContext",
+        "borrow"
+      ],
+      [
+        "front",
+        "spawnstate",
+        "bindMap borrowed",
+        "borrow"
+      ],
+      [
+        "front",
+        "load",
+        "WorldLoader.load_ borrowed",
+        "borrow"
+      ],
+      [
+        "renderSession",
+        "renderer",
+        "instance layers borrowed",
+        "borrow"
+      ],
+      [
+        "jobs",
+        "assets",
+        "задачи читают assets",
+        "borrow"
+      ],
+      [
+        "renderSession",
+        "retire",
+        "retire после submit",
+        "borrow"
+      ],
+      [
+        "retire",
+        "window",
+        "slot fence → cleanup",
+        "borrow"
+      ],
+      [
+        "gh",
+        "connector",
+        "connect job / socket handoff",
+        "borrow"
+      ]
+    ],
+    "issues": [
+      {
+        "code": "O1",
+        "kind": "Факт → риск",
+        "title": "Отмена задач не делает teardown мгновенным",
+        "body": "MapScope отменяет jobs, уничтожает load session, останавливает terrain и вызывает wait. JobGroup учитывает lease ещё до постановки в общую I/O FIFO. Поэтому отменённая, но ещё не запущенная задача может ждать предыдущие чужие задачи; уже идущий read/parse не прерывается токеном.",
+        "action": "Измерять Transitions и возраст отменённых jobs; при требовании ограниченной задержки нужен scheduler с удалением queued cancelled work или эквивалентный контракт fence.",
+        "refs": [
+          "src/core/map_scope.cpp:37",
+          "include/core/job_group.hpp:115",
+          "src/core/world_loader.cpp:93",
+          "include/core/thread_pool.hpp:73"
+        ]
+      },
+      {
+        "code": "O2",
+        "kind": "Долг → риск",
+        "title": "Безопасность borrowed ссылок зависит от ручного teardown order",
+        "body": "Renderer заимствует VkContext у Window; spawner — SpawnState карты, WorldLoader — Session load. Application::shutdown явно уничтожает клиентские lifetime до assets/device/window. CharacterSession также вручную сбрасывает состояние process-wide presenters. Эти связи не выражены одним owner tree.",
+        "action": "Новые подписки хранить RAII-членами; для каждого нового borrowed указателя указать lifetime. Проверять logout, same-map reconnect, superseded load и exit, сохраняя порядок stop/join → release.",
+        "refs": [
+          "include/core/window.hpp:85",
+          "include/rendering/renderer.hpp:620",
+          "src/core/application.cpp:2104",
+          "src/core/character_session.cpp:67"
+        ]
+      },
+      {
+        "code": "O3",
+        "kind": "Факт → риск",
+        "title": "AsyncConnect.cancel оставляет DNS/connect работать до возврата",
+        "body": "Detached worker удерживает shared Job, а cancel ставит abandoned. Это сохраняет память и закрывает поздний socket, но не прерывает connectBlocking / DNS. Повторные попытки могут временно перекрываться по потокам; реальная задержка здесь не измерялась.",
+        "action": "Если нужна строгая отмена и ограничение повторов — ограничивать число connect jobs и использовать отменяемый transport/resolver. Не заменять shared Job захватом сырого owner.",
+        "refs": [
+          "include/network/async_connect.hpp:41",
+          "include/network/async_connect.hpp:84"
+        ]
+      }
+    ],
+    "facts": [
+      [
+        "Создание",
+        "Application строит долгоживущие сервисы. ClientLoop в Transitions создаёт CharacterSession; CharacterSession::enterMap заменяет только MapScope."
+      ],
+      [
+        "Смена карты",
+        "Сначала уничтожается прежний MapScope, даже при повторном входе в тот же map ID. InterfaceState, Lua и остальная сессия персонажа сохраняются."
+      ],
+      [
+        "Reconnect",
+        "Сцена может стоять во время восстановления соединения. При успешном same-map reconnect MapScope передаётся releaseMap/adoptMap новой CharacterSession; новый Lua interface слышит login заново."
+      ],
+      [
+        "Деструктор карты",
+        "cancel tokens → unbind spawner → load.reset / terrain.stopWorkers → jobs.wait → detach player/transport references → render session release. Process-wide model/texture caches сохраняются."
+      ],
+      [
+        "Деструктор персонажа",
+        "MapScope уходит первым; затем AddonManager сохраняет переменные и закрывает Lua внутри Interface scope; затем остальное per-character state и subscriptions."
+      ],
+      [
+        "GPU lifetime",
+        "MapRenderSession освобождает logical instance contents; Vulkan destruction откладывается за slot fences. В обычном map teardown нет vkDeviceWaitIdle; shutdown приложения использует device idle перед освобождением device resources."
+      ],
+      [
+        "Типы владения",
+        "unique_ptr/value: единственный владелец. shared_ptr<const bytes/table>: разделяемые CPU-данные. Raw pointers/references: borrow и обязательный порядок уничтожения. Token: актуальность/отмена, не владение Renderer или AssetManager."
+      ]
+    ],
+    "good": "MapScope и CharacterSession уже объединяют основные lifetime. JobGroup fence удерживает CPU-задачи до их завершения, RAII Subscription отключает слушателя, deferred GPU cleanup защищает ещё используемые ресурсы. Кеш между картами сам по себе не является утечкой.",
+    "ranks": [
+      [
+        "bus",
+        "window"
+      ],
+      [
+        "renderer",
+        "assets"
+      ],
+      [
+        "gh",
+        "front"
+      ],
+      [
+        "jobs",
+        "spawnstate"
+      ],
+      [
+        "load",
+        "renderSession"
+      ]
+    ],
+    "invisible": [
+      [
+        "bus",
+        "renderer"
+      ],
+      [
+        "renderer",
+        "gh"
+      ],
+      [
+        "gh",
+        "loop"
+      ],
+      [
+        "jobs",
+        "load"
+      ]
+    ]
+  }
+]

@@ -1,0 +1,45 @@
+digraph atlas {
+graph [rankdir=TB, newrank=true, bgcolor="white", pad="0.2", nodesep="0.28", ranksep="0.4", compound=true, fontname="DejaVu Sans", fontsize=15];
+node [shape=box, style="rounded,filled", fillcolor="#f1f5fa", color="#c4d1e2", fontcolor="#142b45", fontname="DejaVu Sans", fontsize=13, margin="0.18,0.13"];
+edge [color="#687f98", fontcolor="#38546f", fontname="DejaVu Sans", fontsize=10, arrowsize=0.65];
+subgraph cluster_frameorder {
+label="ClientLoop::runFrame · главный поток"; style="rounded"; color="#c4d1e2"; fontcolor="#38546f";
+plan [label="FramePlan = framePlan()\nвыбирается до Input"];
+input [label="1 · Input\nSDL / pad → InterfaceInput"];
+network [label="2 · Network\nlogin / patches / world packets"];
+game [label="3 · Game\nsimulation / player / presentation requests"];
+events [label="4 · Events [F2]\nEventBus::dispatchPosted",fillcolor="#fff1e9",color="#d6a68b"];
+stream [label="5 · Streaming\nWorldLoader::update / progress"];
+interface [label="6 · Interface\nqueued game events → input → Lua/UI"];
+present [label="7 · Present [F1]\ncamera + renderer.update\nterrain finalize / animation → wait",fillcolor="#fff1e9",color="#d6a68b"];
+render [label="8 · Render\nframe-slot wait → acquire → record\nsecondary get → submit → vkQueuePresent"];
+transition [label="9 · Transitions\nstate / CharacterSession / MapScope"];
+pace [label="10 · Pace\nвыбранный cap / VSync"];
+next [label="Следующий кадр\nновый FramePlan"];
+}
+subgraph cluster_channels {
+label="Доставка и накопленная стоимость"; style="rounded"; color="#c4d1e2"; fontcolor="#38546f";
+sync [label="[F2] EventBus::publish\nсинхронно в месте вызова",fillcolor="#fff1e9",color="#d6a68b"];
+luaqueue [label="Game FrameXML FIFO\nи InterfaceInput"];
+request [label="WorldTransitionQueue\nпоследние requests / leave priority"];
+budgets [label="[F3] Независимые бюджеты\nсеть + finalize + unload + record",fillcolor="#fff1e9",color="#d6a68b"];
+}
+plan -> input [];
+input -> network [];
+network -> game [];
+game -> events [];
+events -> stream [];
+stream -> interface [];
+interface -> present [];
+present -> render [];
+render -> transition [];
+transition -> pace [];
+pace -> next [];
+network -> sync [label="publish",style=dashed,constraint=false];
+game -> sync [label="publish",style=dashed,constraint=false];
+network -> luaqueue [label="уведомления",style=dashed,constraint=false];
+luaqueue -> interface [label="drain FIFO",style=dashed,constraint=false];
+sync -> request [label="только request",style=dashed,constraint=false];
+request -> transition [label="применить после submit",style=dashed,constraint=false];
+budgets -> present [label="время складывается",style=dashed,constraint=false];
+}

@@ -1,0 +1,56 @@
+digraph atlas {
+graph [rankdir=TB, newrank=true, bgcolor="white", pad="0.2", nodesep="0.28", ranksep="0.4", compound=true, fontname="DejaVu Sans", fontsize=15];
+node [shape=box, style="rounded,filled", fillcolor="#f1f5fa", color="#c4d1e2", fontcolor="#142b45", fontname="DejaVu Sans", fontsize=13, margin="0.18,0.13"];
+edge [color="#687f98", fontcolor="#38546f", fontname="DejaVu Sans", fontsize=10, arrowsize=0.65];
+subgraph cluster_incoming {
+label="Сеть → главный поток"; style="rounded"; color="#c4d1e2"; fontcolor="#38546f";
+net [label="WorldSocket pump · 1\nrecv / decrypt / framing"];
+packets [label="Сетевые очереди\n4096 socket → 8192 game"];
+main [label="SDL / ClientLoop\nGame + Lua + подготовка сцены"];
+}
+subgraph cluster_workers {
+label="Фоновые исполнители · независимые лимиты [T3]"; style="rounded"; color="#c4d1e2"; fontcolor="#38546f";
+io [label="[T1] ioWorkers · 2\nFIFO задач без лимита длины",fillcolor="#fff1e9",color="#d6a68b"];
+frame [label="[T2] frameWorkers · 2–16\nанимация / floor / culling / secondary",fillcolor="#fff1e9",color="#d6a68b"];
+terrain [label="Terrain workers · обычно 4–8\nloadQueue → ADT / WMO / M2"];
+normals [label="Character NormalMapBuilder · 2\n64 ожидающих · ближние первыми"];
+preload [label="World preload · до 4\nотдельные потоки → join"];
+other [label="Задачи по необходимости\nDNS/connect · Warden · patch/hash\nwatchdog · stats · update · recorder"];
+}
+subgraph cluster_returnmain {
+label="Результаты → тот же главный поток"; style="rounded"; color="#c4d1e2"; fontcolor="#38546f";
+ready [label="readyQueue / finalizingTiles\nqueueMutex + queueCV"];
+finalize [label="Готовые CPU-данные\nпроверка token → GPU upload"];
+record [label="Render: prepareRender\n[T2] futures.get → submit",fillcolor="#fff1e9",color="#d6a68b"];
+}
+subgraph cluster_devices {
+label="Общие ресурсы и устройства"; style="rounded"; color="#c4d1e2"; fontcolor="#38546f";
+assets [label="AssetManager\nfile mutex / DBC shared_mutex"];
+audio [label="miniaudio device callback\nмикширование PCM"];
+gpu [label="Vulkan GPU\nupload fences / frame fences"];
+}
+main -> io [label="JobGroup / music / spell assets"];
+net -> packets [label="callbackMutex"];
+packets -> main [label="opcode dispatch"];
+main -> terrain [label="запрос tiles"];
+terrain -> ready [label="готовые PendingTile"];
+ready -> finalize [label="poll + token"];
+io -> finalize [label="future ready"];
+normals -> finalize [label="takeFinished"];
+main -> frame [label="submit"];
+frame -> record [label="get: барьер",style=dashed,constraint=false,color="#ae5b32",fontcolor="#8a4324"];
+finalize -> gpu [label="асинхронные copies"];
+record -> gpu [label="команды кадра"];
+gpu -> record [label="ожидание frame slot",style=dashed,constraint=false,color="#ae5b32",fontcolor="#8a4324"];
+terrain -> assets [label="read / parse",style=dashed,constraint=false];
+io -> assets [label="read / decode",style=dashed,constraint=false];
+preload -> assets [label="warm cache",style=dashed,constraint=false];
+main -> audio [label="управление звуками",style=dashed,constraint=false];
+main -> normals [label="submit"];
+main -> other [label="запуск / poll",style=dashed,constraint=false];
+{rank=same; io; frame;}
+{rank=same; terrain; normals;}
+{rank=same; preload; other;}
+io -> terrain [style=invis,weight=5];
+terrain -> preload [style=invis,weight=5];
+}

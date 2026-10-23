@@ -1,0 +1,49 @@
+digraph atlas {
+graph [rankdir=TB, newrank=true, bgcolor="white", pad="0.2", nodesep="0.28", ranksep="0.4", compound=true, fontname="DejaVu Sans", fontsize=15];
+node [shape=box, style="rounded,filled", fillcolor="#f1f5fa", color="#c4d1e2", fontcolor="#142b45", fontname="DejaVu Sans", fontsize=13, margin="0.18,0.13"];
+edge [color="#687f98", fontcolor="#38546f", fontname="DejaVu Sans", fontsize=10, arrowsize=0.65];
+subgraph cluster_wire {
+label="Сервер → авторитетное состояние игры"; style="rounded"; color="#c4d1e2"; fontcolor="#38546f";
+server [label="World server\nTCP bytes"];
+socket [label="WorldSocket pump\ndecrypt + framing"];
+sq [label="Socket callback FIFO\n4096 → overflow disconnect"];
+gq [label="[D1] Game inbound FIFO\n8192 → overflow drops packet",fillcolor="#fff1e9",color="#d6a68b"];
+dispatch [label="Main: budgeted dispatch\n4 / 8 / catch-up 12 мс"];
+state [label="Domain state / EntityManager\nлогический игровой мир"];
+ev [label="Bus notifications + FrameXML FIFO"];
+}
+subgraph cluster_resources {
+label="Ресурсы → подготовленные CPU-данные"; style="rounded"; color="#c4d1e2"; fontcolor="#38546f";
+disk [label="Loose files + archive layers\nADT / M2 / WMO / BLP / DBC"];
+cache [label="[D2] AssetManager\nfile LRU + DBC cache / generations",fillcolor="#fff1e9",color="#d6a68b"];
+workers [label="Terrain / ioWorkers / normals\nread → parse → decode → composite"];
+prepared [label="[D3] CPU ready results\nPendingTile / prepared model / pixels",fillcolor="#fff1e9",color="#d6a68b"];
+}
+subgraph cluster_scene {
+label="Главный поток → видимый мир → GPU"; style="rounded"; color="#c4d1e2"; fontcolor="#38546f";
+spawner [label="EntitySpawner / PlayerView\nGUID → model / appearance requests"];
+validate [label="Проверить map/request token\nотбросить устаревший result"];
+upload [label="GPU upload batch\nstaging → submit, без wait"];
+instances [label="Renderer instance state\nmodels + material + transform / bones"];
+gpu [label="GPU buffers / textures\nframe passes → swapchain"];
+}
+server -> socket [];
+socket -> sq [label="callbackMutex"];
+sq -> gq [label="main transfer"];
+gq -> dispatch [];
+dispatch -> state [];
+state -> ev [label="publish / queue"];
+ev -> spawner [label="spawn / appearance"];
+state -> spawner [label="queries",style=dashed,constraint=false];
+spawner -> workers [label="запрос ресурсов"];
+disk -> cache [];
+cache -> workers [label="immutable/shared CPU bytes"];
+workers -> prepared [];
+prepared -> validate [label="poll готовности"];
+validate -> upload [label="актуальные данные"];
+upload -> instances [label="создать / заменить instance"];
+spawner -> instances [label="transform / pose"];
+instances -> gpu [label="record + submit"];
+upload -> gpu [label="copy commands"];
+gpu -> instances [label="poll upload fence",style=dashed,constraint=false];
+}

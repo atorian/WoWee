@@ -1,0 +1,62 @@
+digraph atlas {
+graph [rankdir=TB, newrank=true, bgcolor="white", pad="0.2", nodesep="0.28", ranksep="0.4", compound=true, fontname="DejaVu Sans", fontsize=15];
+node [shape=box, style="rounded,filled", fillcolor="#f1f5fa", color="#c4d1e2", fontcolor="#142b45", fontname="DejaVu Sans", fontsize=13, margin="0.18,0.13"];
+edge [color="#687f98", fontcolor="#38546f", fontname="DejaVu Sans", fontsize=10, arrowsize=0.65];
+subgraph cluster_client {
+label="wowee_client_objects / wowee_client · композиция"; style="rounded"; color="#c4d1e2"; fontcolor="#38546f";
+app [label="Application + ClientLoop\nсоздание и wiring"];
+ui [label="UI + Addons / Lua\nFrameXML / screens"];
+presentation [label="PlayerView / EntitySpawner\nSpellPresentation / callbacks"];
+sound [label="AudioCoordinator\nminiaudio / managers"];
+}
+subgraph cluster_gamebox {
+label="wowee_game · protocol state"; style="rounded"; color="#c4d1e2"; fontcolor="#38546f";
+gh [label="[C1/C2] GameHandler\nsession / queue / dispatch / facade",fillcolor="#fff1e9",color="#d6a68b"];
+domain [label="Доменные handlers\nchat / spell / inventory / quest / …"];
+old [label="[C1] 4 legacy handlers\nCombat / Movement / Entity / Warden",fillcolor="#fff1e9",color="#d6a68b"];
+}
+subgraph cluster_renderbox {
+label="wowee_render · сцена и GPU"; style="rounded"; color="#c4d1e2"; fontcolor="#38546f";
+renderer [label="Renderer / VkContext API\nterrain / M2 / WMO / characters\nRT / water / post / overlays"];
+boundary [label="[C3] граница CMake\nне вся папка rendering — эта библиотека",fillcolor="#fff1e9",color="#d6a68b"];
+}
+subgraph cluster_libraries {
+label="Общие нижние слои"; style="rounded"; color="#c4d1e2"; fontcolor="#38546f";
+netlib [label="wowee_net\nAuth / WorldSocket / HTTPS"];
+protocol [label="wowee_protocol\nPacket / opcodes / parsers / crypto"];
+pipeline [label="wowee_pipeline\nAssetManager / DBC / ADT / M2 / WMO"];
+base [label="wowee_base\nEventBus / jobs / logging / CVar / math"];
+}
+app -> ui [];
+app -> presentation [];
+app -> sound [];
+app -> gh [];
+app -> renderer [];
+app -> pipeline [];
+ui -> gh [];
+ui -> renderer [];
+ui -> pipeline [];
+presentation -> gh [];
+presentation -> renderer [];
+presentation -> pipeline [];
+gh -> domain [label="создаёт и делегирует"];
+gh -> old [label="создаёт"];
+old -> gh [label="GameHandler& owner_",style=dashed,constraint=false,color="#ae5b32",fontcolor="#8a4324"];
+gh -> netlib [];
+gh -> protocol [];
+gh -> pipeline [];
+gh -> base [];
+domain -> base [label="events / queries"];
+renderer -> pipeline [];
+renderer -> base [];
+boundary -> renderer [label="список исключений",style=dashed,constraint=false];
+netlib -> protocol [];
+netlib -> base [];
+protocol -> base [];
+pipeline -> base [];
+gh -> presentation [label="уведомления: bus / callbacks",style=dashed,constraint=false];
+{rank=same; ui; presentation; sound;}
+{rank=same; gh; renderer;}
+{rank=same; domain; old;}
+{rank=same; pipeline; netlib;}
+}

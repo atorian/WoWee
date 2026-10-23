@@ -1,0 +1,43 @@
+flowchart TB
+  subgraph sg_incoming["Сеть → главный поток"]
+    net["WorldSocket pump · 1<br/>recv / decrypt / framing"]
+    packets["Сетевые очереди<br/>4096 socket → 8192 game"]
+    main["SDL / ClientLoop<br/>Game + Lua + подготовка сцены"]
+  end
+  subgraph sg_workers["Фоновые исполнители · независимые лимиты [T3]"]
+    io["[T1] ioWorkers · 2<br/>FIFO задач без лимита длины"]
+    frame["[T2] frameWorkers · 2–16<br/>анимация / floor / culling / secondary"]
+    terrain["Terrain workers · обычно 4–8<br/>loadQueue → ADT / WMO / M2"]
+    normals["Character NormalMapBuilder · 2<br/>64 ожидающих · ближние первыми"]
+    preload["World preload · до 4<br/>отдельные потоки → join"]
+    other["Задачи по необходимости<br/>DNS/connect · Warden · patch/hash<br/>watchdog · stats · update · recorder"]
+  end
+  subgraph sg_returnmain["Результаты → тот же главный поток"]
+    ready["readyQueue / finalizingTiles<br/>queueMutex + queueCV"]
+    finalize["Готовые CPU-данные<br/>проверка token → GPU upload"]
+    record["Render: prepareRender<br/>[T2] futures.get → submit"]
+  end
+  subgraph sg_devices["Общие ресурсы и устройства"]
+    assets["AssetManager<br/>file mutex / DBC shared_mutex"]
+    audio["miniaudio device callback<br/>микширование PCM"]
+    gpu["Vulkan GPU<br/>upload fences / frame fences"]
+  end
+  main -->|"JobGroup / music / spell assets"| io
+  net -->|"callbackMutex"| packets
+  packets -->|"opcode dispatch"| main
+  main -->|"запрос tiles"| terrain
+  terrain -->|"готовые PendingTile"| ready
+  ready -->|"poll + token"| finalize
+  io -->|"future ready"| finalize
+  normals -->|"takeFinished"| finalize
+  main -->|"submit"| frame
+  frame -.->|"get: барьер"| record
+  finalize -->|"асинхронные copies"| gpu
+  record -->|"команды кадра"| gpu
+  gpu -.->|"ожидание frame slot"| record
+  terrain -.->|"read / parse"| assets
+  io -.->|"read / decode"| assets
+  preload -.->|"warm cache"| assets
+  main -.->|"управление звуками"| audio
+  main -->|"submit"| normals
+  main -.->|"запуск / poll"| other

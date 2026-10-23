@@ -1,0 +1,38 @@
+$ python3 tools/domain_shape_check.py
+4 domain handlers built from GameHandler&:
+  CombatHandler            include/game/combat_handler.hpp
+  EntityController         include/game/entity_controller.hpp
+  MovementHandler          include/game/movement_handler.hpp
+  WardenHandler            include/game/warden_handler.hpp
+
+1206 reaches through owner_ in src/game:
+    521  src/game/entity_controller.cpp
+    368  src/game/movement_handler.cpp
+    290  src/game/combat_handler.cpp
+     27  src/game/warden_handler.cpp
+
+110 xxxRef() accessors in GameHandler
+505 calls to them through owner_ in src/game
+50 set*Callback setters in GameHandler
+
+
+$ python3 tools/game_dependency_check.py
+157 game layer files
+
+0 includes of the client's presentation from the game:
+  (none)
+
+6 includes of shared constants under rendering/ (not counted):
+  rendering/animation/animation_ids.hpp      src/game/emote_table.cpp
+  rendering/animation/animation_ids.hpp      src/game/game_handler.cpp
+  rendering/animation/animation_ids.hpp      src/game/game_handler_callbacks.cpp
+  rendering/animation/animation_ids.hpp      src/game/game_handler_packets.cpp
+  rendering/movement_limits.hpp              src/game/movement_handler.cpp
+  rendering/movement_limits.hpp              src/game/transport_manager.cpp
+
+
+$ python3 tools/render_dependency_check.py
+83 wowee_render sources, 263 files reached through their includes
+
+0 includes of the client from the renderer library:
+  (none)

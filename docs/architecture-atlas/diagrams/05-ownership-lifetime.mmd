@@ -1,0 +1,52 @@
+flowchart TB
+  subgraph sg_process["Жизнь процесса · Application"]
+    app["Application<br/>[O2] явный shutdown order"]
+    bus["EventBus<br/>живёт дольше subscribers"]
+    window["Window → VkContext<br/>device / swapchain / fences"]
+    renderer["Renderer<br/>model / texture caches + render layers"]
+    assets["AssetManager<br/>shared immutable file / DBC cache"]
+    gh["GameHandler<br/>connection + domains"]
+    entities["Handlers / EntityController<br/>character state / entities"]
+    front["PlayerView / EntitySpawner<br/>WorldLoader / UI / audio"]
+    loop["ClientLoop<br/>world transitions"]
+  end
+  subgraph sg_character["Жизнь персонажа · CharacterSession"]
+    session["CharacterSession<br/>login → logout / exit"]
+    character["InterfaceState + PlayerSync<br/>SpellPresentation + subscriptions"]
+    lua["AddonManager / Lua state<br/>save variables → close"]
+  end
+  subgraph sg_map["Жизнь карты · MapScope"]
+    map["MapScope<br/>entry → supersede / leave"]
+    jobs["[O1] JobGroup<br/>tokens + tracked leases"]
+    spawnstate["EntitySpawner::SpawnState<br/>per-GUID requests / pending results"]
+    load["WorldLoader::Session<br/>prepared map / future"]
+    renderSession["MapRenderSession<br/>instance sessions + TerrainManager"]
+  end
+  subgraph sg_special["За границей обычного owner lifetime"]
+    retire["GPU retirement<br/>VkContext deferredCleanup[slot]"]
+    connector["[O3] AsyncConnect detached worker<br/>shared Job переживает cancel"]
+  end
+  app --> bus
+  app --> window
+  app --> renderer
+  app --> assets
+  app --> gh
+  app --> front
+  app --> loop
+  gh --> entities
+  loop --> session
+  session --> character
+  session --> lua
+  session --> map
+  map --> jobs
+  map --> spawnstate
+  map --> load
+  map --> renderSession
+  renderer -.->|"borrow VkContext"| window
+  front -.->|"bindMap borrowed"| spawnstate
+  front -.->|"WorldLoader.load_ borrowed"| load
+  renderSession -.->|"instance layers borrowed"| renderer
+  jobs -.->|"задачи читают assets"| assets
+  renderSession -.->|"retire после submit"| retire
+  retire -.->|"slot fence → cleanup"| window
+  gh -.->|"connect job / socket handoff"| connector

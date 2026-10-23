@@ -1349,12 +1349,10 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
     // The instances in columns this camera may see; every one the test below
     // would keep is among them. This walked the whole resident world - ninety
     // thousand instances in Dalaran - for the few thousand it drew.
-    std::vector<uint32_t>& candidates = viewCandidates_;
+    const auto& candidates = forceNoCull_ ? viewCandidates_ : cullCandidates_;
     if (forceNoCull_) {
-        candidates.resize(scene_->instances.size());
-        for (uint32_t i = 0; i < candidates.size(); ++i) candidates[i] = i;
-    } else {
-        gatherViewCandidates(camPos, frustum, maxPossibleDistSq, candidates);
+        viewCandidates_.resize(scene_->instances.size());
+        for (uint32_t i = 0; i < viewCandidates_.size(); ++i) viewCandidates_[i] = i;
     }
     const uint32_t totalInstances = static_cast<uint32_t>(candidates.size());
     const bool haveLights = frameLights_ && !frameLights_->empty();

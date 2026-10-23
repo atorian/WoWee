@@ -1,6 +1,7 @@
 #include "game/server_extension.hpp"
 #include "game/server_extension_wire.hpp"
 #include "core/https_get.hpp"
+#include "core/data_paths.hpp"
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
 #include <array>
@@ -126,6 +127,24 @@ std::string serverExtensionKey(std::string host, uint16_t port) {
     }
     if (label.empty()) label = "server";
     return label + "-" + std::to_string(port) + "-" + hash;
+}
+ServerExtensionLocation locateServerExtension(const std::string& host, uint16_t port) {
+    ServerExtensionLocation location;
+    if (const auto* overrideRoot = std::getenv("WOWEE_SERVER_EXTENSIONS_DIR"); overrideRoot && *overrideRoot) {
+        location.searched.push_back(fs::absolute(utf8Path(overrideRoot)));
+    } else {
+        for (const auto& dataRoot : core::extractionRoots())
+            location.searched.push_back(fs::absolute(utf8Path(dataRoot) / "server_extensions"));
+    }
+    const auto key = serverExtensionKey(host, port);
+    for (const auto& root : location.searched) {
+        std::error_code ec;
+        if (fs::is_regular_file(root / key / "profile.json", ec)) {
+            location.root = root;
+            return location;
+        }
+    }
+    return location;
 }
 struct ServerExtension::Impl {
     std::string error, client;

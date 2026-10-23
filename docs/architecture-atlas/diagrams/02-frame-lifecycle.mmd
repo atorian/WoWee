@@ -1,0 +1,39 @@
+flowchart TB
+  subgraph sg_frameorder["ClientLoop::runFrame · главный поток"]
+    plan["FramePlan = framePlan()<br/>выбирается до Input"]
+    input["1 · Input<br/>SDL / pad → InterfaceInput"]
+    network["2 · Network<br/>login / patches / world packets"]
+    game["3 · Game<br/>simulation / player / presentation requests"]
+    events["4 · Events [F2]<br/>EventBus::dispatchPosted"]
+    stream["5 · Streaming<br/>WorldLoader::update / progress"]
+    interface["6 · Interface<br/>queued game events → input → Lua/UI"]
+    present["7 · Present [F1]<br/>camera + renderer.update<br/>terrain finalize / animation → wait"]
+    render["8 · Render<br/>frame-slot wait → acquire → record<br/>secondary get → submit → vkQueuePresent"]
+    transition["9 · Transitions<br/>state / CharacterSession / MapScope"]
+    pace["10 · Pace<br/>выбранный cap / VSync"]
+    next["Следующий кадр<br/>новый FramePlan"]
+  end
+  subgraph sg_channels["Доставка и накопленная стоимость"]
+    sync["[F2] EventBus::publish<br/>синхронно в месте вызова"]
+    luaqueue["Game FrameXML FIFO<br/>и InterfaceInput"]
+    request["WorldTransitionQueue<br/>последние requests / leave priority"]
+    budgets["[F3] Независимые бюджеты<br/>сеть + finalize + unload + record"]
+  end
+  plan --> input
+  input --> network
+  network --> game
+  game --> events
+  events --> stream
+  stream --> interface
+  interface --> present
+  present --> render
+  render --> transition
+  transition --> pace
+  pace --> next
+  network -.->|"publish"| sync
+  game -.->|"publish"| sync
+  network -.->|"уведомления"| luaqueue
+  luaqueue -.->|"drain FIFO"| interface
+  sync -.->|"только request"| request
+  request -.->|"применить после submit"| transition
+  budgets -.->|"время складывается"| present

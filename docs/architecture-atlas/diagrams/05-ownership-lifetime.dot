@@ -1,0 +1,69 @@
+digraph atlas {
+graph [rankdir=TB, newrank=true, bgcolor="white", pad="0.2", nodesep="0.28", ranksep="0.4", compound=true, fontname="DejaVu Sans", fontsize=15];
+node [shape=box, style="rounded,filled", fillcolor="#f1f5fa", color="#c4d1e2", fontcolor="#142b45", fontname="DejaVu Sans", fontsize=13, margin="0.18,0.13"];
+edge [color="#687f98", fontcolor="#38546f", fontname="DejaVu Sans", fontsize=10, arrowsize=0.65];
+subgraph cluster_process {
+label="Жизнь процесса · Application"; style="rounded"; color="#c4d1e2"; fontcolor="#38546f";
+app [label="Application\n[O2] явный shutdown order",fillcolor="#fff1e9",color="#d6a68b"];
+bus [label="EventBus\nживёт дольше subscribers"];
+window [label="Window → VkContext\ndevice / swapchain / fences"];
+renderer [label="Renderer\nmodel / texture caches + render layers"];
+assets [label="AssetManager\nshared immutable file / DBC cache"];
+gh [label="GameHandler\nconnection + domains"];
+entities [label="Handlers / EntityController\ncharacter state / entities"];
+front [label="PlayerView / EntitySpawner\nWorldLoader / UI / audio"];
+loop [label="ClientLoop\nworld transitions"];
+}
+subgraph cluster_character {
+label="Жизнь персонажа · CharacterSession"; style="rounded"; color="#c4d1e2"; fontcolor="#38546f";
+session [label="CharacterSession\nlogin → logout / exit"];
+character [label="InterfaceState + PlayerSync\nSpellPresentation + subscriptions"];
+lua [label="AddonManager / Lua state\nsave variables → close"];
+}
+subgraph cluster_map {
+label="Жизнь карты · MapScope"; style="rounded"; color="#c4d1e2"; fontcolor="#38546f";
+map [label="MapScope\nentry → supersede / leave"];
+jobs [label="[O1] JobGroup\ntokens + tracked leases",fillcolor="#fff1e9",color="#d6a68b"];
+spawnstate [label="EntitySpawner::SpawnState\nper-GUID requests / pending results"];
+load [label="WorldLoader::Session\nprepared map / future"];
+renderSession [label="MapRenderSession\ninstance sessions + TerrainManager"];
+}
+subgraph cluster_special {
+label="За границей обычного owner lifetime"; style="rounded"; color="#c4d1e2"; fontcolor="#38546f";
+retire [label="GPU retirement\nVkContext deferredCleanup[slot]"];
+connector [label="[O3] AsyncConnect detached worker\nshared Job переживает cancel",fillcolor="#fff1e9",color="#d6a68b"];
+}
+app -> bus [];
+app -> window [];
+app -> renderer [];
+app -> assets [];
+app -> gh [];
+app -> front [];
+app -> loop [];
+gh -> entities [];
+loop -> session [];
+session -> character [];
+session -> lua [];
+session -> map [];
+map -> jobs [];
+map -> spawnstate [];
+map -> load [];
+map -> renderSession [];
+renderer -> window [label="borrow VkContext",style=dashed,constraint=false];
+front -> spawnstate [label="bindMap borrowed",style=dashed,constraint=false];
+front -> load [label="WorldLoader.load_ borrowed",style=dashed,constraint=false];
+renderSession -> renderer [label="instance layers borrowed",style=dashed,constraint=false];
+jobs -> assets [label="задачи читают assets",style=dashed,constraint=false];
+renderSession -> retire [label="retire после submit",style=dashed,constraint=false];
+retire -> window [label="slot fence → cleanup",style=dashed,constraint=false];
+gh -> connector [label="connect job / socket handoff",style=dashed,constraint=false];
+{rank=same; bus; window;}
+{rank=same; renderer; assets;}
+{rank=same; gh; front;}
+{rank=same; jobs; spawnstate;}
+{rank=same; load; renderSession;}
+bus -> renderer [style=invis,weight=5];
+renderer -> gh [style=invis,weight=5];
+gh -> loop [style=invis,weight=5];
+jobs -> load [style=invis,weight=5];
+}

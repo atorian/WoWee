@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Threading Model · WoWee</title><style>
+:root {color-scheme:light dark;--bg:light-dark(#f4f6fa,#11151e);--fg:light-dark(#172334,#e5edf7);--panel:light-dark(#fff,#1a2230);--line:light-dark(#d9e1ec,#344153);--muted:light-dark(#53647a,#afbdd0);--blue:light-dark(#175a9c,#8fc7ff);--red:light-dark(#a03932,#ffaca6)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 system-ui,-apple-system,'Segoe UI',sans-serif}a{color:var(--blue);text-underline-offset:3px}header,main,footer{max-width:1800px;margin:auto;padding:24px 36px}header{padding-bottom:12px}h1{font-size:32px;line-height:1.15;margin:10px 0 16px;font-weight:650}h2{font-size:26px;margin:0 0 6px;line-height:1.3}h3{font-size:17px;line-height:1.4;margin:8px 0}p{margin:8px 0 14px}.meta,.legend,small{color:var(--muted)}.kicker{letter-spacing:.12em;text-transform:uppercase;font-size:12px;color:var(--blue)}nav{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0}nav a{padding:8px 14px;border:1px solid var(--line);border-radius:6px;text-decoration:none;color:var(--fg)}nav a[aria-current]{background:var(--fg);color:var(--bg)}.page{margin:24px 0 64px;scroll-margin-top:24px}.intro{max-width:1100px}.layout{display:grid;grid-template-columns:minmax(0,1fr) 370px;gap:28px;align-items:start;margin:20px 0}.diagram{background:#fff;border-radius:8px;padding:14px;overflow:auto}.diagram svg{display:block;width:100%;height:auto;min-width:640px}.figuretools{display:flex;gap:8px;margin-bottom:8px}.figuretools button{font-size:13px;background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:4px}.diagram{max-height:1100px}.legend{font-size:13px;margin:12px 0}.issue{border-top:2px solid var(--line);padding:14px 0 18px}.issue:first-child{border-color:var(--red)}.badge{font-size:12px;letter-spacing:.02em;color:var(--red)}.issue p{font-size:14px}.action{border-left:2px solid var(--line);padding-left:12px}.sources{font-size:12px;overflow-wrap:anywhere}.sources a{display:block;margin:4px 0}.good{background:var(--panel);padding:18px 22px;border-left:3px solid var(--blue);margin:24px 0}.downloads{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;margin:14px 0}.details{background:var(--panel);padding:16px 22px;margin:20px 0;border:1px solid var(--line);border-radius:6px}summary{cursor:pointer;font-weight:600}table{border-collapse:collapse;width:100%;margin-top:15px;font-size:14px}th,td{padding:12px 10px;vertical-align:top;border-top:1px solid var(--line);text-align:left}th{width:190px;font-weight:600}.findings{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;margin-top:24px}.findings a{font-weight:600}.findings p{font-size:14px}.toolbar{margin-top:12px}button{font:inherit;padding:6px 12px;cursor:pointer}footer{border-top:1px solid var(--line);font-size:13px;color:var(--muted)}@media(max-width:1100px){.layout{grid-template-columns:1fr}.notes{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}.diagram svg{max-height:none}.findings{grid-template-columns:1fr}}@media(max-width:720px){header,main,footer{padding:20px 16px}.notes{display:block}h1{font-size:27px}.diagram{padding:8px}th{width:120px}}@media print{.diagram{max-height:none;overflow:visible}body{background:white;color:#172334;font-size:11pt}nav,.toolbar,.downloads,.figuretools{display:none}header,main,footer{padding:12px}.page{break-before:page;margin-bottom:0}.layout{grid-template-columns:minmax(0,1fr) 300px;gap:18px}.diagram svg{min-width:0}.issue p{font-size:10pt}.sources{font-size:9pt}.notes{display:block}details{display:none}.good{background:transparent}a{color:inherit}.findings{display:block}}
+</style></head>
+<body><header><div class="kicker">WoWee / архитектура по исходному коду</div><h1>Threading Model</h1><p class="meta">19 октября 2026 · HEAD 9f10869 + рабочее дерево · статический разбор</p><nav aria-label="Диаграммы"><a href="index.html">Обзор</a><a href="01-threading-model.html" aria-current="page">Потоки</a><a href="02-frame-lifecycle.html">Кадр</a><a href="03-component-diagram.html">Подсистемы</a><a href="04-data-flow.html">Данные</a><a href="05-ownership-lifetime.html">Владение</a></nav></header><main><article class="page" id="01-threading-model"><h2>Threading Model</h2><p class="meta">Кто работает параллельно, через что передаёт результат и где кадр обязан ждать.</p><div class="downloads"><a href="01-threading-model.html">Отдельный артефакт</a><a href="diagrams/01-threading-model.svg">SVG</a> · <a href="diagrams/01-threading-model.png">PNG</a> · <a href="diagrams/01-threading-model.mmd">MMD</a> · <a href="diagrams/01-threading-model.dot">DOT</a></div><div class="layout"><div><div class="figuretools"><button type="button" data-zoom="in">Увеличить</button><button type="button" data-zoom="out">Уменьшить</button><button type="button" data-zoom="fit">Вписать</button></div><div class="diagram"><svg role="img" aria-label="Threading Model: Кто работает параллельно, через что передаёт результат и где кадр обязан ждать." width="1815pt" height="803pt"
+ viewBox="0.00 0.00 1814.80 802.80" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="01-threading-model-graph0" class="graph" transform="scale(1 1) rotate(0) translate(14.4 788.4)">
+<title>atlas</title>
+<polygon fill="white" stroke="transparent" points="-14.4,14.4 -14.4,-788.4 1800.4,-788.4 1800.4,14.4 -14.4,14.4"/>
+<g id="01-threading-model-clust1" class="cluster">
+<title>cluster_incoming</title>
+<path fill="white" stroke="#c4d1e2" d="M821,-505C821,-505 1071,-505 1071,-505 1077,-505 1083,-511 1083,-517 1083,-517 1083,-754 1083,-754 1083,-760 1077,-766 1071,-766 1071,-766 821,-766 821,-766 815,-766 809,-760 809,-754 809,-754 809,-517 809,-517 809,-511 815,-505 821,-505"/>
+<text text-anchor="middle" x="946" y="-750" font-family="DejaVu Sans" font-size="15.00" fill="#38546f">Сеть → главный поток</text>
+</g>
+<g id="01-threading-model-clust2" class="cluster">
+<title>cluster_workers</title>
+<path fill="white" stroke="#c4d1e2" d="M490,-184C490,-184 1009,-184 1009,-184 1015,-184 1021,-190 1021,-196 1021,-196 1021,-466 1021,-466 1021,-472 1015,-478 1009,-478 1009,-478 490,-478 490,-478 484,-478 478,-472 478,-466 478,-466 478,-196 478,-196 478,-190 484,-184 490,-184"/>
+<text text-anchor="middle" x="749.5" y="-462" font-family="DejaVu Sans" font-size="15.00" fill="#38546f">Фоновые исполнители · независимые лимиты [T3]</text>
+</g>
+<g id="01-threading-model-clust3" class="cluster">
+<title>cluster_returnmain</title>
+<path fill="white" stroke="#c4d1e2" d="M20,-96C20,-96 458,-96 458,-96 464,-96 470,-102 470,-108 470,-108 470,-266 470,-266 470,-272 464,-278 458,-278 458,-278 20,-278 20,-278 14,-278 8,-272 8,-266 8,-266 8,-108 8,-108 8,-102 14,-96 20,-96"/>
+<text text-anchor="middle" x="239" y="-262" font-family="DejaVu Sans" font-size="15.00" fill="#38546f">Результаты → тот же главный поток</text>
+</g>
+<g id="01-threading-model-clust4" class="cluster">
+<title>cluster_devices</title>
+<path fill="white" stroke="#c4d1e2" d="M1292,-8C1292,-8 1734,-8 1734,-8 1740,-8 1746,-14 1746,-20 1746,-20 1746,-754 1746,-754 1746,-760 1740,-766 1734,-766 1734,-766 1292,-766 1292,-766 1286,-766 1280,-760 1280,-754 1280,-754 1280,-20 1280,-20 1280,-14 1286,-8 1292,-8"/>
+<text text-anchor="middle" x="1513" y="-750" font-family="DejaVu Sans" font-size="15.00" fill="#38546f">Общие ресурсы и устройства</text>
+</g>
+<!-- net -->
+<g id="01-threading-model-node1" class="node">
+<title>net</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M1025.5,-733C1025.5,-733 866.5,-733 866.5,-733 860.5,-733 854.5,-727 854.5,-721 854.5,-721 854.5,-699 854.5,-699 854.5,-693 860.5,-687 866.5,-687 866.5,-687 1025.5,-687 1025.5,-687 1031.5,-687 1037.5,-693 1037.5,-699 1037.5,-699 1037.5,-721 1037.5,-721 1037.5,-727 1031.5,-733 1025.5,-733"/>
+<text text-anchor="middle" x="946" y="-713.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">WorldSocket pump · 1</text>
+<text text-anchor="middle" x="946" y="-699.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">recv / decrypt / framing</text>
+</g>
+<!-- packets -->
+<g id="01-threading-model-node2" class="node">
+<title>packets</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M1035,-646C1035,-646 857,-646 857,-646 851,-646 845,-640 845,-634 845,-634 845,-612 845,-612 845,-606 851,-600 857,-600 857,-600 1035,-600 1035,-600 1041,-600 1047,-606 1047,-612 1047,-612 1047,-634 1047,-634 1047,-640 1041,-646 1035,-646"/>
+<text text-anchor="middle" x="946" y="-626.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">Сетевые очереди</text>
+<text text-anchor="middle" x="946" y="-612.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">4096 socket → 8192 game</text>
+</g>
+<!-- net&#45;&gt;packets -->
+<g id="01-threading-model-edge2" class="edge">
+<title>net&#45;&gt;packets</title>
+<path fill="none" stroke="#687f98" d="M946,-686.67C946,-676.32 946,-663.9 946,-652.85"/>
+<polygon fill="#687f98" stroke="#687f98" points="948.28,-652.68 946,-646.18 943.73,-652.68 948.28,-652.68"/>
+<text text-anchor="middle" x="982" y="-664" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">callbackMutex</text>
+</g>
+<!-- main -->
+<g id="01-threading-model-node3" class="node">
+<title>main</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M1062.5,-559C1062.5,-559 829.5,-559 829.5,-559 823.5,-559 817.5,-553 817.5,-547 817.5,-547 817.5,-525 817.5,-525 817.5,-519 823.5,-513 829.5,-513 829.5,-513 1062.5,-513 1062.5,-513 1068.5,-513 1074.5,-519 1074.5,-525 1074.5,-525 1074.5,-547 1074.5,-547 1074.5,-553 1068.5,-559 1062.5,-559"/>
+<text text-anchor="middle" x="946" y="-539.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">SDL / ClientLoop</text>
+<text text-anchor="middle" x="946" y="-525.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">Game + Lua + подготовка сцены</text>
+</g>
+<!-- packets&#45;&gt;main -->
+<g id="01-threading-model-edge3" class="edge">
+<title>packets&#45;&gt;main</title>
+<path fill="none" stroke="#687f98" d="M946,-599.67C946,-589.32 946,-576.9 946,-565.85"/>
+<polygon fill="#687f98" stroke="#687f98" points="948.28,-565.68 946,-559.18 943.73,-565.68 948.28,-565.68"/>
+<text text-anchor="middle" x="986" y="-577" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">opcode dispatch</text>
+</g>
+<!-- io -->
+<g id="01-threading-model-node4" class="node">
+<title>io</title>
+<path fill="#fff1e9" stroke="#d6a68b" d="M1001.5,-445C1001.5,-445 794.5,-445 794.5,-445 788.5,-445 782.5,-439 782.5,-433 782.5,-433 782.5,-411 782.5,-411 782.5,-405 788.5,-399 794.5,-399 794.5,-399 1001.5,-399 1001.5,-399 1007.5,-399 1013.5,-405 1013.5,-411 1013.5,-411 1013.5,-433 1013.5,-433 1013.5,-439 1007.5,-445 1001.5,-445"/>
+<text text-anchor="middle" x="898" y="-425.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">[T1] ioWorkers · 2</text>
+<text text-anchor="middle" x="898" y="-411.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">FIFO задач без лимита длины</text>
+</g>
+<!-- main&#45;&gt;io -->
+<g id="01-threading-model-edge1" class="edge">
+<title>main&#45;&gt;io</title>
+<path fill="none" stroke="#687f98" d="M876.41,-512.84C870.38,-508.46 865.04,-503.24 861,-497 851.4,-482.19 859.54,-464.54 870.61,-450.2"/>
+<polygon fill="#687f98" stroke="#687f98" points="872.44,-451.55 874.79,-445.07 868.92,-448.67 872.44,-451.55"/>
+<text text-anchor="middle" x="936" y="-489" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">JobGroup / music / spell assets</text>
+</g>
+<!-- frame -->
+<g id="01-threading-model-node5" class="node">
+<title>frame</title>
+<path fill="#fff1e9" stroke="#d6a68b" d="M750,-445C750,-445 498,-445 498,-445 492,-445 486,-439 486,-433 486,-433 486,-411 486,-411 486,-405 492,-399 498,-399 498,-399 750,-399 750,-399 756,-399 762,-405 762,-411 762,-411 762,-433 762,-433 762,-439 756,-445 750,-445"/>
+<text text-anchor="middle" x="624" y="-425.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">[T2] frameWorkers · 2–16</text>
+<text text-anchor="middle" x="624" y="-411.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">анимация / floor / culling / secondary</text>
+</g>
+<!-- main&#45;&gt;frame -->
+<g id="01-threading-model-edge9" class="edge">
+<title>main&#45;&gt;frame</title>
+<path fill="none" stroke="#687f98" d="M868.2,-512.93C851.56,-507.92 834.14,-502.46 818,-497 772.97,-481.75 722.86,-462.58 684.84,-447.57"/>
+<polygon fill="#687f98" stroke="#687f98" points="685.25,-445.28 678.37,-445.01 683.58,-449.51 685.25,-445.28"/>
+<text text-anchor="middle" x="835" y="-489" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">submit</text>
+</g>
+<!-- terrain -->
+<g id="01-threading-model-node6" class="node">
+<title>terrain</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M999.5,-358C999.5,-358 796.5,-358 796.5,-358 790.5,-358 784.5,-352 784.5,-346 784.5,-346 784.5,-324 784.5,-324 784.5,-318 790.5,-312 796.5,-312 796.5,-312 999.5,-312 999.5,-312 1005.5,-312 1011.5,-318 1011.5,-324 1011.5,-324 1011.5,-346 1011.5,-346 1011.5,-352 1005.5,-358 999.5,-358"/>
+<text text-anchor="middle" x="898" y="-338.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">Terrain workers · обычно 4–8</text>
+<text text-anchor="middle" x="898" y="-324.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">loadQueue → ADT / WMO / M2</text>
+</g>
+<!-- main&#45;&gt;terrain -->
+<g id="01-threading-model-edge4" class="edge">
+<title>main&#45;&gt;terrain</title>
+<path fill="none" stroke="#687f98" d="M996.83,-512.87C1003.85,-508.32 1010.52,-503.05 1016,-497 1040.66,-469.78 1025.4,-401.27 1024,-399 1021.76,-395.38 984.64,-377.04 951.26,-361.07"/>
+<polygon fill="#687f98" stroke="#687f98" points="951.93,-358.87 945.08,-358.12 949.97,-362.98 951.93,-358.87"/>
+<text text-anchor="middle" x="1059" y="-419.5" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">запрос tiles</text>
+</g>
+<!-- normals -->
+<g id="01-threading-model-node7" class="node">
+<title>normals</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M750.5,-358C750.5,-358 501.5,-358 501.5,-358 495.5,-358 489.5,-352 489.5,-346 489.5,-346 489.5,-324 489.5,-324 489.5,-318 495.5,-312 501.5,-312 501.5,-312 750.5,-312 750.5,-312 756.5,-312 762.5,-318 762.5,-324 762.5,-324 762.5,-346 762.5,-346 762.5,-352 756.5,-358 750.5,-358"/>
+<text text-anchor="middle" x="626" y="-338.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">Character NormalMapBuilder · 2</text>
+<text text-anchor="middle" x="626" y="-324.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">64 ожидающих · ближние первыми</text>
+</g>
+<!-- main&#45;&gt;normals -->
+<g id="01-threading-model-edge18" class="edge">
+<title>main&#45;&gt;normals</title>
+<path fill="none" stroke="#687f98" d="M1043.38,-513C1062.36,-504.76 1080.53,-493.47 1094,-478 1125.32,-442.05 1148.97,-407.45 1116,-373 1102.89,-359.3 793.88,-359.8 775,-358 773.11,-357.82 771.2,-357.63 769.29,-357.44"/>
+<polygon fill="#687f98" stroke="#687f98" points="769.45,-355.17 762.74,-356.75 768.97,-359.69 769.45,-355.17"/>
+<text text-anchor="middle" x="1148" y="-419.5" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">submit</text>
+</g>
+<!-- other -->
+<g id="01-threading-model-node9" class="node">
+<title>other</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M754.5,-252C754.5,-252 511.5,-252 511.5,-252 505.5,-252 499.5,-246 499.5,-240 499.5,-240 499.5,-204 499.5,-204 499.5,-198 505.5,-192 511.5,-192 511.5,-192 754.5,-192 754.5,-192 760.5,-192 766.5,-198 766.5,-204 766.5,-204 766.5,-240 766.5,-240 766.5,-246 760.5,-252 754.5,-252"/>
+<text text-anchor="middle" x="633" y="-232.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">Задачи по необходимости</text>
+<text text-anchor="middle" x="633" y="-218.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">DNS/connect · Warden · patch/hash</text>
+<text text-anchor="middle" x="633" y="-204.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">watchdog · stats · update · recorder</text>
+</g>
+<!-- main&#45;&gt;other -->
+<g id="01-threading-model-edge19" class="edge">
+<title>main&#45;&gt;other</title>
+<path fill="none" stroke="#687f98" stroke-dasharray="5,2" d="M1074.67,-516.2C1117.25,-507.15 1157.1,-494.59 1170,-478 1191.55,-450.28 1194.34,-424.31 1170,-399 1149.81,-378 142.19,-379 122,-358 99.65,-334.76 104.95,-305.01 131,-286 146.44,-274.73 456.19,-281.41 475,-278 502.91,-272.95 532.53,-263.74 558.48,-254.29"/>
+<polygon fill="#687f98" stroke="#687f98" points="559.34,-256.4 564.65,-252.02 557.76,-252.13 559.34,-256.4"/>
+<text text-anchor="middle" x="928.5" y="-376" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">запуск / poll</text>
+</g>
+<!-- audio -->
+<g id="01-threading-model-node14" class="node">
+<title>audio</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M1475.5,-733C1475.5,-733 1300.5,-733 1300.5,-733 1294.5,-733 1288.5,-727 1288.5,-721 1288.5,-721 1288.5,-699 1288.5,-699 1288.5,-693 1294.5,-687 1300.5,-687 1300.5,-687 1475.5,-687 1475.5,-687 1481.5,-687 1487.5,-693 1487.5,-699 1487.5,-699 1487.5,-721 1487.5,-721 1487.5,-727 1481.5,-733 1475.5,-733"/>
+<text text-anchor="middle" x="1388" y="-713.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">miniaudio device callback</text>
+<text text-anchor="middle" x="1388" y="-699.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">микширование PCM</text>
+</g>
+<!-- main&#45;&gt;audio -->
+<g id="01-threading-model-edge17" class="edge">
+<title>main&#45;&gt;audio</title>
+<path fill="none" stroke="#687f98" stroke-dasharray="5,2" d="M1004.63,-559.18C1013.76,-563.56 1022.85,-568.53 1031,-574 1087.89,-612.18 1085.39,-649.21 1150,-672 1191.83,-686.75 1239.86,-695.63 1281.77,-700.97"/>
+<polygon fill="#687f98" stroke="#687f98" points="1281.71,-703.26 1288.44,-701.8 1282.27,-698.74 1281.71,-703.26"/>
+<text text-anchor="middle" x="1159" y="-620.5" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">управление звуками</text>
+</g>
+<!-- io&#45;&gt;terrain -->
+<!-- finalize -->
+<g id="01-threading-model-node11" class="node">
+<title>finalize</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M233.5,-150C233.5,-150 28.5,-150 28.5,-150 22.5,-150 16.5,-144 16.5,-138 16.5,-138 16.5,-116 16.5,-116 16.5,-110 22.5,-104 28.5,-104 28.5,-104 233.5,-104 233.5,-104 239.5,-104 245.5,-110 245.5,-116 245.5,-116 245.5,-138 245.5,-138 245.5,-144 239.5,-150 233.5,-150"/>
+<text text-anchor="middle" x="131" y="-130.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">Готовые CPU&#45;данные</text>
+<text text-anchor="middle" x="131" y="-116.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">проверка token → GPU upload</text>
+</g>
+<!-- io&#45;&gt;finalize -->
+<g id="01-threading-model-edge7" class="edge">
+<title>io&#45;&gt;finalize</title>
+<path fill="none" stroke="#687f98" d="M782.38,-400.3C778.88,-399.84 775.42,-399.4 772,-399 623.85,-381.59 234.48,-426.56 102,-358 67.62,-340.21 44.2,-323.69 53,-286 64.37,-237.26 93.06,-186.29 112.29,-155.85"/>
+<polygon fill="#687f98" stroke="#687f98" points="114.42,-156.74 116.01,-150.04 110.59,-154.29 114.42,-156.74"/>
+<text text-anchor="middle" x="83.5" y="-289" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">future ready</text>
+</g>
+<!-- assets -->
+<g id="01-threading-model-node13" class="node">
+<title>assets</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M1726.5,-733C1726.5,-733 1519.5,-733 1519.5,-733 1513.5,-733 1507.5,-727 1507.5,-721 1507.5,-721 1507.5,-699 1507.5,-699 1507.5,-693 1513.5,-687 1519.5,-687 1519.5,-687 1726.5,-687 1726.5,-687 1732.5,-687 1738.5,-693 1738.5,-699 1738.5,-699 1738.5,-721 1738.5,-721 1738.5,-727 1732.5,-733 1726.5,-733"/>
+<text text-anchor="middle" x="1623" y="-713.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">AssetManager</text>
+<text text-anchor="middle" x="1623" y="-699.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">file mutex / DBC shared_mutex</text>
+</g>
+<!-- io&#45;&gt;assets -->
+<g id="01-threading-model-edge15" class="edge">
+<title>io&#45;&gt;assets</title>
+<path fill="none" stroke="#687f98" stroke-dasharray="5,2" d="M944.86,-445.01C967.19,-455.31 994.34,-467.58 1019,-478 1049.33,-490.82 1060.61,-486.71 1088,-505 1129.04,-532.4 1122.81,-559.4 1165,-585 1185.2,-597.25 1195.2,-588.79 1216,-600 1259.58,-623.49 1255.2,-653.21 1301,-672 1341.62,-688.67 1454.44,-681.52 1498,-687 1498.86,-687.11 1499.72,-687.22 1500.59,-687.33"/>
+<polygon fill="#687f98" stroke="#687f98" points="1500.54,-689.62 1507.29,-688.22 1501.14,-685.11 1500.54,-689.62"/>
+<text text-anchor="middle" x="1198.5" y="-577" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">read / decode</text>
+</g>
+<!-- record -->
+<g id="01-threading-model-node12" class="node">
+<title>record</title>
+<path fill="#fff1e9" stroke="#d6a68b" d="M450,-150C450,-150 278,-150 278,-150 272,-150 266,-144 266,-138 266,-138 266,-116 266,-116 266,-110 272,-104 278,-104 278,-104 450,-104 450,-104 456,-104 462,-110 462,-116 462,-116 462,-138 462,-138 462,-144 456,-150 450,-150"/>
+<text text-anchor="middle" x="364" y="-130.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">Render: prepareRender</text>
+<text text-anchor="middle" x="364" y="-116.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">[T2] futures.get → submit</text>
+</g>
+<!-- frame&#45;&gt;record -->
+<g id="01-threading-model-edge10" class="edge">
+<title>frame&#45;&gt;record</title>
+<path fill="none" stroke="#ae5b32" stroke-dasharray="5,2" d="M762.33,-399.95C765.92,-399.6 769.48,-399.29 773,-399 800.05,-396.8 1730.96,-403.34 1750,-384 1772.45,-361.2 1770.61,-336.48 1750,-312 1667.44,-213.98 777.83,-152.46 468.93,-133.93"/>
+<polygon fill="#ae5b32" stroke="#ae5b32" points="468.82,-131.64 462.19,-133.53 468.54,-136.18 468.82,-131.64"/>
+<text text-anchor="middle" x="1757" y="-289" font-family="DejaVu Sans" font-size="10.00" fill="#8a4324">get: барьер</text>
+</g>
+<!-- preload -->
+<g id="01-threading-model-node8" class="node">
+<title>preload</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M985.5,-245C985.5,-245 810.5,-245 810.5,-245 804.5,-245 798.5,-239 798.5,-233 798.5,-233 798.5,-211 798.5,-211 798.5,-205 804.5,-199 810.5,-199 810.5,-199 985.5,-199 985.5,-199 991.5,-199 997.5,-205 997.5,-211 997.5,-211 997.5,-233 997.5,-233 997.5,-239 991.5,-245 985.5,-245"/>
+<text text-anchor="middle" x="898" y="-225.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">World preload · до 4</text>
+<text text-anchor="middle" x="898" y="-211.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">отдельные потоки → join</text>
+</g>
+<!-- terrain&#45;&gt;preload -->
+<!-- ready -->
+<g id="01-threading-model-node10" class="node">
+<title>ready</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M450,-245C450,-245 264,-245 264,-245 258,-245 252,-239 252,-233 252,-233 252,-211 252,-211 252,-205 258,-199 264,-199 264,-199 450,-199 450,-199 456,-199 462,-205 462,-211 462,-211 462,-233 462,-233 462,-239 456,-245 450,-245"/>
+<text text-anchor="middle" x="357" y="-225.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">readyQueue / finalizingTiles</text>
+<text text-anchor="middle" x="357" y="-211.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">queueMutex + queueCV</text>
+</g>
+<!-- terrain&#45;&gt;ready -->
+<g id="01-threading-model-edge5" class="edge">
+<title>terrain&#45;&gt;ready</title>
+<path fill="none" stroke="#687f98" d="M784.27,-313.68C780.47,-313.1 776.71,-312.54 773,-312 640.19,-292.81 602.04,-314.8 473,-278 448.22,-270.93 422.16,-259.03 401.03,-248.1"/>
+<polygon fill="#687f98" stroke="#687f98" points="402.02,-246.05 395.21,-245.05 399.91,-250.08 402.02,-246.05"/>
+<text text-anchor="middle" x="610" y="-289" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">готовые PendingTile</text>
+</g>
+<!-- terrain&#45;&gt;assets -->
+<g id="01-threading-model-edge14" class="edge">
+<title>terrain&#45;&gt;assets</title>
+<path fill="none" stroke="#687f98" stroke-dasharray="5,2" d="M956.93,-358.02C990.46,-370.53 1026.02,-383.77 1027,-384 1058.11,-391.3 1142.45,-382.82 1170,-399 1257.2,-450.19 1212.82,-535.52 1301,-585 1345.48,-609.95 1484.42,-577.13 1530,-600 1565.14,-617.63 1592.34,-655.03 1608.01,-681.08"/>
+<polygon fill="#687f98" stroke="#687f98" points="1606.11,-682.33 1611.36,-686.78 1610.03,-680.03 1606.11,-682.33"/>
+<text text-anchor="middle" x="1296" y="-533.5" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">read / parse</text>
+</g>
+<!-- normals&#45;&gt;finalize -->
+<g id="01-threading-model-edge8" class="edge">
+<title>normals&#45;&gt;finalize</title>
+<path fill="none" stroke="#687f98" d="M489.31,-332.53C375.87,-328.54 225.97,-315.94 180,-278 143.85,-248.16 134.13,-191.21 131.66,-156.71"/>
+<polygon fill="#687f98" stroke="#687f98" points="133.93,-156.47 131.26,-150.12 129.39,-156.75 133.93,-156.47"/>
+<text text-anchor="middle" x="211" y="-219.5" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">takeFinished</text>
+</g>
+<!-- preload&#45;&gt;assets -->
+<g id="01-threading-model-edge16" class="edge">
+<title>preload&#45;&gt;assets</title>
+<path fill="none" stroke="#687f98" stroke-dasharray="5,2" d="M859.89,-245.07C836.73,-257.25 806.11,-271.25 777,-278 747.44,-284.86 531.62,-273.42 504,-286 473.3,-299.98 456.52,-333.78 480,-358 498.76,-377.35 938.11,-371.06 965,-373 1067.17,-380.37 1093.8,-377.71 1194,-399 1347.17,-431.54 1412.72,-401.24 1530,-505 1583.38,-552.23 1607.97,-636.25 1617.66,-680.28"/>
+<polygon fill="#687f98" stroke="#687f98" points="1615.45,-680.85 1619.03,-686.74 1619.9,-679.91 1615.45,-680.85"/>
+<text text-anchor="middle" x="1550" y="-489" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">warm cache</text>
+</g>
+<!-- ready&#45;&gt;finalize -->
+<g id="01-threading-model-edge6" class="edge">
+<title>ready&#45;&gt;finalize</title>
+<path fill="none" stroke="#687f98" d="M303.44,-198.96C269.65,-185.05 225.94,-167.07 190.99,-152.68"/>
+<polygon fill="#687f98" stroke="#687f98" points="191.44,-150.41 184.57,-150.04 189.71,-154.62 191.44,-150.41"/>
+<text text-anchor="middle" x="274" y="-168" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">poll + token</text>
+</g>
+<!-- gpu -->
+<g id="01-threading-model-node15" class="node">
+<title>gpu</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M1496,-62C1496,-62 1300,-62 1300,-62 1294,-62 1288,-56 1288,-50 1288,-50 1288,-28 1288,-28 1288,-22 1294,-16 1300,-16 1300,-16 1496,-16 1496,-16 1502,-16 1508,-22 1508,-28 1508,-28 1508,-50 1508,-50 1508,-56 1502,-62 1496,-62"/>
+<text text-anchor="middle" x="1398" y="-42.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">Vulkan GPU</text>
+<text text-anchor="middle" x="1398" y="-28.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">upload fences / frame fences</text>
+</g>
+<!-- finalize&#45;&gt;gpu -->
+<g id="01-threading-model-edge11" class="edge">
+<title>finalize&#45;&gt;gpu</title>
+<path fill="none" stroke="#687f98" d="M213.28,-103.96C227.44,-100.82 242.08,-97.99 256,-96 451.13,-68.05 1030.88,-49.76 1280.99,-42.97"/>
+<polygon fill="#687f98" stroke="#687f98" points="1281.13,-45.24 1287.56,-42.79 1281,-40.69 1281.13,-45.24"/>
+<text text-anchor="middle" x="498" y="-80" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">асинхронные copies</text>
+</g>
+<!-- record&#45;&gt;gpu -->
+<g id="01-threading-model-edge12" class="edge">
+<title>record&#45;&gt;gpu</title>
+<path fill="none" stroke="#687f98" d="M462.21,-117.83C653.58,-101.91 1075.63,-66.81 1281.07,-49.73"/>
+<polygon fill="#687f98" stroke="#687f98" points="1281.39,-51.98 1287.68,-49.18 1281.02,-47.45 1281.39,-51.98"/>
+<text text-anchor="middle" x="983" y="-80" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">команды кадра</text>
+</g>
+<!-- gpu&#45;&gt;record -->
+<g id="01-threading-model-edge13" class="edge">
+<title>gpu&#45;&gt;record</title>
+<path fill="none" stroke="#ae5b32" stroke-dasharray="5,2" d="M1383.36,-62.18C1375.6,-71.95 1365.16,-82.45 1353,-88 1274.25,-123.93 706.81,-126.84 468.72,-126.45"/>
+<polygon fill="#ae5b32" stroke="#ae5b32" points="468.62,-124.18 462.12,-126.44 468.62,-128.73 468.62,-124.18"/>
+<text text-anchor="middle" x="1423" y="-80" font-family="DejaVu Sans" font-size="10.00" fill="#8a4324">ожидание frame slot</text>
+</g>
+</g>
+</svg>
+</div><p class="legend">Сплошные стрелки — передача работы или данных. Пунктир — ожидание или общие ресурсы. GPU — отдельная исполнительная область, не C++-поток.</p></div><aside class="notes" aria-label="Проблемы рядом с диаграммой"><section class="issue" id="T1"><span class="badge">T1 · Факт → риск</span><h3>Все обычные I/O-задачи делят два FIFO-воркера</h3><p>JobGroup отправляет map/entity preparation в тот же ioWorkers, что чтение музыки и spell assets. Очередь ThreadPool не ограничена и не имеет приоритетов. Длинный backlog может задерживать появление близких объектов или запуск музыки.</p><p class="action">Измерять время ожидания в очереди, её длину и тип задачи; затем вводить приоритеты и backpressure по общему контракту.</p><div class="sources"><a href="../../include/core/thread_pool.hpp#L59">include/core/thread_pool.hpp:59</a><a href="../../include/core/thread_pool.hpp#L73">include/core/thread_pool.hpp:73</a><a href="../../include/core/job_group.hpp#L116">include/core/job_group.hpp:116</a><a href="../../src/audio/music_manager.cpp#L136">src/audio/music_manager.cpp:136</a></div></section><section class="issue" id="T2"><span class="badge">T2 · Факт → риск</span><h3>Параллельная работа остаётся на критическом пути кадра</h3><p>Главный поток ждёт M2 animation в Present и окончания secondary command buffers в Render. Это необходимые барьеры: длительность кадра зависит от самого долгого незавершённого задания, даже если остальные воркеры свободны.</p><p class="action">Профилировать очередь отдельно от выполнения и ожидания get; сохранять барьер перед чтением изменяемых spatial/animation данных.</p><div class="sources"><a href="../../src/rendering/renderer.cpp#L2394">src/rendering/renderer.cpp:2394</a><a href="../../src/rendering/renderer.cpp#L3344">src/rendering/renderer.cpp:3344</a></div></section><section class="issue" id="T3"><span class="badge">T3 · Риск</span><h3>Нет единого лимита фоновой загрузки CPU</h3><p>Frame pool, terrain pool, preload, normal maps и std::async задают параллелизм независимо. Их одновременная активность может вытеснять главный поток. Это риск oversubscription, а не доказанный замер фриза.</p><p class="action">Снять профиль холодного входа в город: runnable threads, загрузка CPU и задержки main; учитывать все активные пулы.</p><div class="sources"><a href="../../src/rendering/terrain_manager.cpp#L104">src/rendering/terrain_manager.cpp:104</a><a href="../../include/core/thread_pool.hpp#L82">include/core/thread_pool.hpp:82</a><a href="../../src/core/world_loader.cpp#L600">src/core/world_loader.cpp:600</a><a href="../../src/rendering/character_renderer.cpp#L71">src/rendering/character_renderer.cpp:71</a></div></section></aside></div><p class="good"><strong>Что уже защищено.</strong> Сетевой pump не меняет EntityManager. Данные карты помечаются token, нормальные фоновые consumer-пути опрашивают готовность; GPU upload и управление Vulkan остаются у main.</p><details class="details"><summary>Обязанности, границы и точный порядок</summary><table><tr><th scope="row">Главный поток</th><td>SDL, сетевой dispatch, домены игры, UI/Lua, upload/finalization и Vulkan submit/present. Отдельного постоянного render thread нет.</td></tr><tr><th scope="row">Сеть</th><td>Опциональный pump; WOWEE_NET_ASYNC_PUMP=0 переносит чтение на main. ioMutex защищает socket/cipher, callbackMutex — очередь.</td></tr><tr><th scope="row">Terrain</th><td>queueMutex + queueCV; readyQueue ограничивает старт новой подготовки при глубине ≥3, есть MemoryMonitor throttling. Уже выполняемые задачи могут добавить результаты.</td></tr><tr><th scope="row">Frame workers</th><td>2–16 потоков, по умолчанию hardware_concurrency−1 с clamp; общий пул для анимации, коллизий, visibility и записи secondary commands.</td></tr><tr><th scope="row">I/O workers</th><td>2 потока; JobGroup даёт token и lifetime fence, а не собственный пул.</td></tr><tr><th scope="row">Normal maps</th><td>У CharacterRenderer собственный NormalMapBuilder: 2 потока, очередь 64, приоритет расстояния, completed results → main.</td></tr><tr><th scope="row">World preload</th><td>До 4 потоков на прогрев файлов; отдельная отмена и join, не общий ioWorkers.</td></tr><tr><th scope="row">Прочие роли</th><td>DNS/connect detached с shared job; Warden/patch/hash/background decode — task-scoped; watchdog и ProcessStats — отдельные потоки; recorder и встроенный asset panel — условные. Число потоков библиотек/драйвера отдельно не инвентаризировалось.</td></tr></table></details></article></main><footer>Факт — наблюдаемое поведение кода. Риск — возможное следствие без runtime-подтверждения. Долг — текущая архитектурная связанность. Числа бюджетов — настройки по умолчанию, а не результаты профилирования. Исходники и строки указаны рядом с каждым замечанием. <a href="README.md">Markdown</a> · <a href="sources.json">Снимок источников</a> · <a href="checks.txt">Статические проверки</a></footer><script>
+document.addEventListener('click', function(event) {
+ const button=event.target.closest('button[data-zoom]'); if(!button)return;
+ const svg=button.closest('article').querySelector('.diagram svg');
+ if(button.dataset.zoom==='fit'){svg.style.width='100%';return;}
+ const current=svg.getBoundingClientRect().width;
+ svg.style.width=Math.max(640, Math.min(6000,current*(button.dataset.zoom==='in'?1.25:0.8)))+'px';
+});
+</script></body></html>

@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Ownership / Lifetime Model · WoWee</title><style>
+:root {color-scheme:light dark;--bg:light-dark(#f4f6fa,#11151e);--fg:light-dark(#172334,#e5edf7);--panel:light-dark(#fff,#1a2230);--line:light-dark(#d9e1ec,#344153);--muted:light-dark(#53647a,#afbdd0);--blue:light-dark(#175a9c,#8fc7ff);--red:light-dark(#a03932,#ffaca6)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 system-ui,-apple-system,'Segoe UI',sans-serif}a{color:var(--blue);text-underline-offset:3px}header,main,footer{max-width:1800px;margin:auto;padding:24px 36px}header{padding-bottom:12px}h1{font-size:32px;line-height:1.15;margin:10px 0 16px;font-weight:650}h2{font-size:26px;margin:0 0 6px;line-height:1.3}h3{font-size:17px;line-height:1.4;margin:8px 0}p{margin:8px 0 14px}.meta,.legend,small{color:var(--muted)}.kicker{letter-spacing:.12em;text-transform:uppercase;font-size:12px;color:var(--blue)}nav{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0}nav a{padding:8px 14px;border:1px solid var(--line);border-radius:6px;text-decoration:none;color:var(--fg)}nav a[aria-current]{background:var(--fg);color:var(--bg)}.page{margin:24px 0 64px;scroll-margin-top:24px}.intro{max-width:1100px}.layout{display:grid;grid-template-columns:minmax(0,1fr) 370px;gap:28px;align-items:start;margin:20px 0}.diagram{background:#fff;border-radius:8px;padding:14px;overflow:auto}.diagram svg{display:block;width:100%;height:auto;min-width:640px}.figuretools{display:flex;gap:8px;margin-bottom:8px}.figuretools button{font-size:13px;background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:4px}.diagram{max-height:1100px}.legend{font-size:13px;margin:12px 0}.issue{border-top:2px solid var(--line);padding:14px 0 18px}.issue:first-child{border-color:var(--red)}.badge{font-size:12px;letter-spacing:.02em;color:var(--red)}.issue p{font-size:14px}.action{border-left:2px solid var(--line);padding-left:12px}.sources{font-size:12px;overflow-wrap:anywhere}.sources a{display:block;margin:4px 0}.good{background:var(--panel);padding:18px 22px;border-left:3px solid var(--blue);margin:24px 0}.downloads{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;margin:14px 0}.details{background:var(--panel);padding:16px 22px;margin:20px 0;border:1px solid var(--line);border-radius:6px}summary{cursor:pointer;font-weight:600}table{border-collapse:collapse;width:100%;margin-top:15px;font-size:14px}th,td{padding:12px 10px;vertical-align:top;border-top:1px solid var(--line);text-align:left}th{width:190px;font-weight:600}.findings{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;margin-top:24px}.findings a{font-weight:600}.findings p{font-size:14px}.toolbar{margin-top:12px}button{font:inherit;padding:6px 12px;cursor:pointer}footer{border-top:1px solid var(--line);font-size:13px;color:var(--muted)}@media(max-width:1100px){.layout{grid-template-columns:1fr}.notes{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}.diagram svg{max-height:none}.findings{grid-template-columns:1fr}}@media(max-width:720px){header,main,footer{padding:20px 16px}.notes{display:block}h1{font-size:27px}.diagram{padding:8px}th{width:120px}}@media print{.diagram{max-height:none;overflow:visible}body{background:white;color:#172334;font-size:11pt}nav,.toolbar,.downloads,.figuretools{display:none}header,main,footer{padding:12px}.page{break-before:page;margin-bottom:0}.layout{grid-template-columns:minmax(0,1fr) 300px;gap:18px}.diagram svg{min-width:0}.issue p{font-size:10pt}.sources{font-size:9pt}.notes{display:block}details{display:none}.good{background:transparent}a{color:inherit}.findings{display:block}}
+</style></head>
+<body><header><div class="kicker">WoWee / архитектура по исходному коду</div><h1>Ownership / Lifetime Model</h1><p class="meta">19 октября 2026 · HEAD 9f10869 + рабочее дерево · статический разбор</p><nav aria-label="Диаграммы"><a href="index.html">Обзор</a><a href="01-threading-model.html">Потоки</a><a href="02-frame-lifecycle.html">Кадр</a><a href="03-component-diagram.html">Подсистемы</a><a href="04-data-flow.html">Данные</a><a href="05-ownership-lifetime.html" aria-current="page">Владение</a></nav></header><main><article class="page" id="05-ownership-lifetime"><h2>Ownership / Lifetime Model</h2><p class="meta">Владение, заимствованные ссылки и границы освобождения CPU/GPU объектов.</p><div class="downloads"><a href="05-ownership-lifetime.html">Отдельный артефакт</a><a href="diagrams/05-ownership-lifetime.svg">SVG</a> · <a href="diagrams/05-ownership-lifetime.png">PNG</a> · <a href="diagrams/05-ownership-lifetime.mmd">MMD</a> · <a href="diagrams/05-ownership-lifetime.dot">DOT</a></div><div class="layout"><div><div class="figuretools"><button type="button" data-zoom="in">Увеличить</button><button type="button" data-zoom="out">Уменьшить</button><button type="button" data-zoom="fit">Вписать</button></div><div class="diagram"><svg role="img" aria-label="Ownership / Lifetime Model: Владение, заимствованные ссылки и границы освобождения CPU/GPU объектов." width="1330pt" height="843pt"
+ viewBox="0.00 0.00 1329.80 842.80" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="05-ownership-lifetime-graph0" class="graph" transform="scale(1 1) rotate(0) translate(14.4 828.4)">
+<title>atlas</title>
+<polygon fill="white" stroke="transparent" points="-14.4,14.4 -14.4,-828.4 1315.4,-828.4 1315.4,14.4 -14.4,14.4"/>
+<g id="05-ownership-lifetime-clust1" class="cluster">
+<title>cluster_process</title>
+<path fill="white" stroke="#c4d1e2" d="M99,-390C99,-390 723,-390 723,-390 729,-390 735,-396 735,-402 735,-402 735,-794 735,-794 735,-800 729,-806 723,-806 723,-806 99,-806 99,-806 93,-806 87,-800 87,-794 87,-794 87,-402 87,-402 87,-396 93,-390 99,-390"/>
+<text text-anchor="middle" x="411" y="-790" font-family="DejaVu Sans" font-size="15.00" fill="#38546f">Жизнь процесса · Application</text>
+</g>
+<g id="05-ownership-lifetime-clust2" class="cluster">
+<title>cluster_character</title>
+<path fill="white" stroke="#c4d1e2" d="M20,-163C20,-163 483,-163 483,-163 489,-163 495,-169 495,-175 495,-175 495,-351 495,-351 495,-357 489,-363 483,-363 483,-363 20,-363 20,-363 14,-363 8,-357 8,-351 8,-351 8,-175 8,-175 8,-169 14,-163 20,-163"/>
+<text text-anchor="middle" x="251.5" y="-347" font-family="DejaVu Sans" font-size="15.00" fill="#38546f">Жизнь персонажа · CharacterSession</text>
+</g>
+<g id="05-ownership-lifetime-clust3" class="cluster">
+<title>cluster_map</title>
+<path fill="white" stroke="#c4d1e2" d="M515,-8C515,-8 1021,-8 1021,-8 1027,-8 1033,-14 1033,-20 1033,-20 1033,-238 1033,-238 1033,-244 1027,-250 1021,-250 1021,-250 515,-250 515,-250 509,-250 503,-244 503,-238 503,-238 503,-20 503,-20 503,-14 509,-8 515,-8"/>
+<text text-anchor="middle" x="768" y="-234" font-family="DejaVu Sans" font-size="15.00" fill="#38546f">Жизнь карты · MapScope</text>
+</g>
+<g id="05-ownership-lifetime-clust4" class="cluster">
+<title>cluster_special</title>
+<path fill="white" stroke="#c4d1e2" d="M755,-719C755,-719 1281,-719 1281,-719 1287,-719 1293,-725 1293,-731 1293,-731 1293,-794 1293,-794 1293,-800 1287,-806 1281,-806 1281,-806 755,-806 755,-806 749,-806 743,-800 743,-794 743,-794 743,-731 743,-731 743,-725 749,-719 755,-719"/>
+<text text-anchor="middle" x="1018" y="-790" font-family="DejaVu Sans" font-size="15.00" fill="#38546f">За границей обычного owner lifetime</text>
+</g>
+<!-- app -->
+<g id="05-ownership-lifetime-node1" class="node">
+<title>app</title>
+<path fill="#fff1e9" stroke="#d6a68b" d="M712,-773C712,-773 526,-773 526,-773 520,-773 514,-767 514,-761 514,-761 514,-739 514,-739 514,-733 520,-727 526,-727 526,-727 712,-727 712,-727 718,-727 724,-733 724,-739 724,-739 724,-761 724,-761 724,-767 718,-773 712,-773"/>
+<text text-anchor="middle" x="619" y="-753.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">Application</text>
+<text text-anchor="middle" x="619" y="-739.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">[O2] явный shutdown order</text>
+</g>
+<!-- bus -->
+<g id="05-ownership-lifetime-node2" class="node">
+<title>bus</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M330.5,-685C330.5,-685 147.5,-685 147.5,-685 141.5,-685 135.5,-679 135.5,-673 135.5,-673 135.5,-651 135.5,-651 135.5,-645 141.5,-639 147.5,-639 147.5,-639 330.5,-639 330.5,-639 336.5,-639 342.5,-645 342.5,-651 342.5,-651 342.5,-673 342.5,-673 342.5,-679 336.5,-685 330.5,-685"/>
+<text text-anchor="middle" x="239" y="-665.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">EventBus</text>
+<text text-anchor="middle" x="239" y="-651.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">живёт дольше subscribers</text>
+</g>
+<!-- app&#45;&gt;bus -->
+<g id="05-ownership-lifetime-edge1" class="edge">
+<title>app&#45;&gt;bus</title>
+<path fill="none" stroke="#687f98" d="M521.63,-726.96C466.9,-714.58 398.59,-699.12 342.83,-686.5"/>
+<polygon fill="#687f98" stroke="#687f98" points="343.28,-684.27 336.44,-685.05 342.28,-688.71 343.28,-684.27"/>
+</g>
+<!-- window -->
+<g id="05-ownership-lifetime-node3" class="node">
+<title>window</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M564,-685C564,-685 378,-685 378,-685 372,-685 366,-679 366,-673 366,-673 366,-651 366,-651 366,-645 372,-639 378,-639 378,-639 564,-639 564,-639 570,-639 576,-645 576,-651 576,-651 576,-673 576,-673 576,-679 570,-685 564,-685"/>
+<text text-anchor="middle" x="471" y="-665.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">Window → VkContext</text>
+<text text-anchor="middle" x="471" y="-651.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">device / swapchain / fences</text>
+</g>
+<!-- app&#45;&gt;window -->
+<g id="05-ownership-lifetime-edge2" class="edge">
+<title>app&#45;&gt;window</title>
+<path fill="none" stroke="#687f98" d="M580.89,-726.85C560.69,-715.12 535.78,-700.64 514.79,-688.45"/>
+<polygon fill="#687f98" stroke="#687f98" points="515.75,-686.37 508.98,-685.07 513.46,-690.3 515.75,-686.37"/>
+</g>
+<!-- renderer -->
+<g id="05-ownership-lifetime-node4" class="node">
+<title>renderer</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M371,-598C371,-598 107,-598 107,-598 101,-598 95,-592 95,-586 95,-586 95,-564 95,-564 95,-558 101,-552 107,-552 107,-552 371,-552 371,-552 377,-552 383,-558 383,-564 383,-564 383,-586 383,-586 383,-592 377,-598 371,-598"/>
+<text text-anchor="middle" x="239" y="-578.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">Renderer</text>
+<text text-anchor="middle" x="239" y="-564.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">model / texture caches + render layers</text>
+</g>
+<!-- app&#45;&gt;renderer -->
+<g id="05-ownership-lifetime-edge3" class="edge">
+<title>app&#45;&gt;renderer</title>
+<path fill="none" stroke="#687f98" d="M615.13,-726.96C609.68,-698.4 598.93,-650.86 586,-639 578.19,-631.84 477.37,-614 386.4,-599.13"/>
+<polygon fill="#687f98" stroke="#687f98" points="386.66,-596.86 379.87,-598.06 385.92,-601.35 386.66,-596.86"/>
+</g>
+<!-- assets -->
+<g id="05-ownership-lifetime-node5" class="node">
+<title>assets</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M649,-598C649,-598 415,-598 415,-598 409,-598 403,-592 403,-586 403,-586 403,-564 403,-564 403,-558 409,-552 415,-552 415,-552 649,-552 649,-552 655,-552 661,-558 661,-564 661,-564 661,-586 661,-586 661,-592 655,-598 649,-598"/>
+<text text-anchor="middle" x="532" y="-578.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">AssetManager</text>
+<text text-anchor="middle" x="532" y="-564.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">shared immutable file / DBC cache</text>
+</g>
+<!-- app&#45;&gt;assets -->
+<g id="05-ownership-lifetime-edge4" class="edge">
+<title>app&#45;&gt;assets</title>
+<path fill="none" stroke="#687f98" d="M622.36,-726.56C625.44,-697.64 626.49,-647.05 603,-613 600.29,-609.07 597.02,-605.52 593.4,-602.33"/>
+<polygon fill="#687f98" stroke="#687f98" points="594.76,-600.5 588.27,-598.2 591.91,-604.05 594.76,-600.5"/>
+</g>
+<!-- gh -->
+<g id="05-ownership-lifetime-node6" class="node">
+<title>gh</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M358.5,-521C358.5,-521 205.5,-521 205.5,-521 199.5,-521 193.5,-515 193.5,-509 193.5,-509 193.5,-487 193.5,-487 193.5,-481 199.5,-475 205.5,-475 205.5,-475 358.5,-475 358.5,-475 364.5,-475 370.5,-481 370.5,-487 370.5,-487 370.5,-509 370.5,-509 370.5,-515 364.5,-521 358.5,-521"/>
+<text text-anchor="middle" x="282" y="-501.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">GameHandler</text>
+<text text-anchor="middle" x="282" y="-487.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">connection + domains</text>
+</g>
+<!-- app&#45;&gt;gh -->
+<g id="05-ownership-lifetime-edge5" class="edge">
+<title>app&#45;&gt;gh</title>
+<path fill="none" stroke="#687f98" d="M636.17,-726.88C664.88,-687.06 715.32,-602.76 671,-552 661.37,-540.97 489.42,-520.87 377.39,-508.84"/>
+<polygon fill="#687f98" stroke="#687f98" points="377.47,-506.57 370.76,-508.14 376.98,-511.09 377.47,-506.57"/>
+</g>
+<!-- front -->
+<g id="05-ownership-lifetime-node8" class="node">
+<title>front</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M692.5,-521C692.5,-521 509.5,-521 509.5,-521 503.5,-521 497.5,-515 497.5,-509 497.5,-509 497.5,-487 497.5,-487 497.5,-481 503.5,-475 509.5,-475 509.5,-475 692.5,-475 692.5,-475 698.5,-475 704.5,-481 704.5,-487 704.5,-487 704.5,-509 704.5,-509 704.5,-515 698.5,-521 692.5,-521"/>
+<text text-anchor="middle" x="601" y="-501.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">PlayerView / EntitySpawner</text>
+<text text-anchor="middle" x="601" y="-487.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">WorldLoader / UI / audio</text>
+</g>
+<!-- app&#45;&gt;front -->
+<g id="05-ownership-lifetime-edge6" class="edge">
+<title>app&#45;&gt;front</title>
+<path fill="none" stroke="#687f98" d="M673.4,-726.98C679.19,-722.53 684.31,-717.24 688,-711 727.57,-644.04 730.91,-600.87 688,-536 685.5,-532.23 682.54,-528.84 679.23,-525.79"/>
+<polygon fill="#687f98" stroke="#687f98" points="680.23,-523.67 673.77,-521.29 677.34,-527.18 680.23,-523.67"/>
+</g>
+<!-- loop -->
+<g id="05-ownership-lifetime-node9" class="node">
+<title>loop</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M442.5,-444C442.5,-444 329.5,-444 329.5,-444 323.5,-444 317.5,-438 317.5,-432 317.5,-432 317.5,-410 317.5,-410 317.5,-404 323.5,-398 329.5,-398 329.5,-398 442.5,-398 442.5,-398 448.5,-398 454.5,-404 454.5,-410 454.5,-410 454.5,-432 454.5,-432 454.5,-438 448.5,-444 442.5,-444"/>
+<text text-anchor="middle" x="386" y="-424.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">ClientLoop</text>
+<text text-anchor="middle" x="386" y="-410.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">world transitions</text>
+</g>
+<!-- app&#45;&gt;loop -->
+<g id="05-ownership-lifetime-edge7" class="edge">
+<title>app&#45;&gt;loop</title>
+<path fill="none" stroke="#687f98" d="M676.26,-726.88C701.7,-712.97 726,-692.08 726,-663 726,-663 726,-663 726,-497 726,-443.18 561.46,-427.94 461.31,-423.66"/>
+<polygon fill="#687f98" stroke="#687f98" points="461.39,-421.38 454.8,-423.39 461.21,-425.93 461.39,-421.38"/>
+</g>
+<!-- bus&#45;&gt;renderer -->
+<!-- renderer&#45;&gt;window -->
+<g id="05-ownership-lifetime-edge17" class="edge">
+<title>renderer&#45;&gt;window</title>
+<path fill="none" stroke="#687f98" stroke-dasharray="5,2" d="M299.2,-598.06C331.58,-609.92 371.57,-624.57 404.83,-636.76"/>
+<polygon fill="#687f98" stroke="#687f98" points="404.07,-638.9 410.95,-639 405.63,-634.63 404.07,-638.9"/>
+<text text-anchor="middle" x="412" y="-616" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">borrow VkContext</text>
+</g>
+<!-- renderer&#45;&gt;gh -->
+<!-- entities -->
+<g id="05-ownership-lifetime-node7" class="node">
+<title>entities</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M285,-444C285,-444 107,-444 107,-444 101,-444 95,-438 95,-432 95,-432 95,-410 95,-410 95,-404 101,-398 107,-398 107,-398 285,-398 285,-398 291,-398 297,-404 297,-410 297,-410 297,-432 297,-432 297,-438 291,-444 285,-444"/>
+<text text-anchor="middle" x="196" y="-424.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">Handlers / EntityController</text>
+<text text-anchor="middle" x="196" y="-410.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">character state / entities</text>
+</g>
+<!-- gh&#45;&gt;entities -->
+<g id="05-ownership-lifetime-edge8" class="edge">
+<title>gh&#45;&gt;entities</title>
+<path fill="none" stroke="#687f98" d="M256.66,-474.9C247.21,-466.66 236.38,-457.22 226.51,-448.61"/>
+<polygon fill="#687f98" stroke="#687f98" points="227.85,-446.76 221.45,-444.2 224.86,-450.18 227.85,-446.76"/>
+</g>
+<!-- gh&#45;&gt;loop -->
+<!-- connector -->
+<g id="05-ownership-lifetime-node19" class="node">
+<title>connector</title>
+<path fill="#fff1e9" stroke="#d6a68b" d="M1009,-773C1009,-773 763,-773 763,-773 757,-773 751,-767 751,-761 751,-761 751,-739 751,-739 751,-733 757,-727 763,-727 763,-727 1009,-727 1009,-727 1015,-727 1021,-733 1021,-739 1021,-739 1021,-761 1021,-761 1021,-767 1015,-773 1009,-773"/>
+<text text-anchor="middle" x="886" y="-753.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">[O3] AsyncConnect detached worker</text>
+<text text-anchor="middle" x="886" y="-739.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">shared Job переживает cancel</text>
+</g>
+<!-- gh&#45;&gt;connector -->
+<g id="05-ownership-lifetime-edge24" class="edge">
+<title>gh&#45;&gt;connector</title>
+<path fill="none" stroke="#687f98" stroke-dasharray="5,2" d="M370.74,-508.65C459.18,-518.33 585.08,-532.33 608,-536 642.51,-541.53 655.38,-533.45 685,-552 714,-570.17 714.43,-583.63 732,-613 756.52,-653.97 740.77,-678.78 776,-711 781.25,-715.8 787.14,-720 793.39,-723.67"/>
+<polygon fill="#687f98" stroke="#687f98" points="792.44,-725.75 799.23,-726.9 794.64,-721.76 792.44,-725.75"/>
+<text text-anchor="middle" x="805.5" y="-616" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">connect job / socket handoff</text>
+</g>
+<!-- spawnstate -->
+<g id="05-ownership-lifetime-node15" class="node">
+<title>spawnstate</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M968.5,-139C968.5,-139 729.5,-139 729.5,-139 723.5,-139 717.5,-133 717.5,-127 717.5,-127 717.5,-105 717.5,-105 717.5,-99 723.5,-93 729.5,-93 729.5,-93 968.5,-93 968.5,-93 974.5,-93 980.5,-99 980.5,-105 980.5,-105 980.5,-127 980.5,-127 980.5,-133 974.5,-139 968.5,-139"/>
+<text text-anchor="middle" x="849" y="-119.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">EntitySpawner::SpawnState</text>
+<text text-anchor="middle" x="849" y="-105.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">per&#45;GUID requests / pending results</text>
+</g>
+<!-- front&#45;&gt;spawnstate -->
+<g id="05-ownership-lifetime-edge18" class="edge">
+<title>front&#45;&gt;spawnstate</title>
+<path fill="none" stroke="#687f98" stroke-dasharray="5,2" d="M581.08,-474.75C562.96,-452.91 537.51,-417.76 527,-382 521,-361.58 486.88,-306.28 540,-258 557.23,-242.34 942.7,-266.62 959,-250 986.08,-222.4 980.43,-195.19 959,-163 953.59,-154.88 946.45,-148.19 938.39,-142.68"/>
+<polygon fill="#687f98" stroke="#687f98" points="939.39,-140.62 932.68,-139.05 936.95,-144.46 939.39,-140.62"/>
+<text text-anchor="middle" x="564.5" y="-304.5" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">bindMap borrowed</text>
+</g>
+<!-- load -->
+<g id="05-ownership-lifetime-node16" class="node">
+<title>load</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M679,-62C679,-62 529,-62 529,-62 523,-62 517,-56 517,-50 517,-50 517,-28 517,-28 517,-22 523,-16 529,-16 529,-16 679,-16 679,-16 685,-16 691,-22 691,-28 691,-28 691,-50 691,-50 691,-56 685,-62 679,-62"/>
+<text text-anchor="middle" x="604" y="-42.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">WorldLoader::Session</text>
+<text text-anchor="middle" x="604" y="-28.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">prepared map / future</text>
+</g>
+<!-- front&#45;&gt;load -->
+<g id="05-ownership-lifetime-edge19" class="edge">
+<title>front&#45;&gt;load</title>
+<path fill="none" stroke="#687f98" stroke-dasharray="5,2" d="M594.68,-474.76C588.5,-451.76 579.51,-414.71 576,-382 575.48,-377.14 572.91,-374.79 576,-371 587.18,-357.29 603.82,-376.71 615,-363 637.19,-335.79 635.71,-312.35 615,-284 602.07,-266.29 580.93,-286.71 568,-269 565.12,-265.05 564.58,-261.49 568,-258 584.19,-241.5 966.61,-265.23 984,-250 1036.81,-203.77 1037.11,-153.18 1001,-93 965.08,-33.14 1035.67,-93.38 749,-62 732.47,-60.19 714.93,-57.87 697.97,-55.42"/>
+<polygon fill="#687f98" stroke="#687f98" points="698.02,-53.13 691.26,-54.44 697.36,-57.63 698.02,-53.13"/>
+<text text-anchor="middle" x="637.5" y="-261" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">WorldLoader.load_ borrowed</text>
+</g>
+<!-- session -->
+<g id="05-ownership-lifetime-node10" class="node">
+<title>session</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M453.5,-330C453.5,-330 318.5,-330 318.5,-330 312.5,-330 306.5,-324 306.5,-318 306.5,-318 306.5,-296 306.5,-296 306.5,-290 312.5,-284 318.5,-284 318.5,-284 453.5,-284 453.5,-284 459.5,-284 465.5,-290 465.5,-296 465.5,-296 465.5,-318 465.5,-318 465.5,-324 459.5,-330 453.5,-330"/>
+<text text-anchor="middle" x="386" y="-310.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">CharacterSession</text>
+<text text-anchor="middle" x="386" y="-296.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">login → logout / exit</text>
+</g>
+<!-- loop&#45;&gt;session -->
+<g id="05-ownership-lifetime-edge9" class="edge">
+<title>loop&#45;&gt;session</title>
+<path fill="none" stroke="#687f98" d="M386,-397.87C386,-380.38 386,-355.84 386,-336.82"/>
+<polygon fill="#687f98" stroke="#687f98" points="388.28,-336.58 386,-330.08 383.73,-336.58 388.28,-336.58"/>
+</g>
+<!-- character -->
+<g id="05-ownership-lifetime-node11" class="node">
+<title>character</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M253.5,-217C253.5,-217 28.5,-217 28.5,-217 22.5,-217 16.5,-211 16.5,-205 16.5,-205 16.5,-183 16.5,-183 16.5,-177 22.5,-171 28.5,-171 28.5,-171 253.5,-171 253.5,-171 259.5,-171 265.5,-177 265.5,-183 265.5,-183 265.5,-205 265.5,-205 265.5,-211 259.5,-217 253.5,-217"/>
+<text text-anchor="middle" x="141" y="-197.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">InterfaceState + PlayerSync</text>
+<text text-anchor="middle" x="141" y="-183.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">SpellPresentation + subscriptions</text>
+</g>
+<!-- session&#45;&gt;character -->
+<g id="05-ownership-lifetime-edge10" class="edge">
+<title>session&#45;&gt;character</title>
+<path fill="none" stroke="#687f98" d="M337.3,-283.94C296.47,-265.44 238.19,-239.03 195.75,-219.8"/>
+<polygon fill="#687f98" stroke="#687f98" points="196.46,-217.63 189.6,-217.02 194.59,-221.78 196.46,-217.63"/>
+</g>
+<!-- lua -->
+<g id="05-ownership-lifetime-node12" class="node">
+<title>lua</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M474.5,-217C474.5,-217 297.5,-217 297.5,-217 291.5,-217 285.5,-211 285.5,-205 285.5,-205 285.5,-183 285.5,-183 285.5,-177 291.5,-171 297.5,-171 297.5,-171 474.5,-171 474.5,-171 480.5,-171 486.5,-177 486.5,-183 486.5,-183 486.5,-205 486.5,-205 486.5,-211 480.5,-217 474.5,-217"/>
+<text text-anchor="middle" x="386" y="-197.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">AddonManager / Lua state</text>
+<text text-anchor="middle" x="386" y="-183.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">save variables → close</text>
+</g>
+<!-- session&#45;&gt;lua -->
+<g id="05-ownership-lifetime-edge11" class="edge">
+<title>session&#45;&gt;lua</title>
+<path fill="none" stroke="#687f98" d="M386,-283.8C386,-266.56 386,-242.51 386,-223.79"/>
+<polygon fill="#687f98" stroke="#687f98" points="388.28,-223.66 386,-217.16 383.73,-223.66 388.28,-223.66"/>
+</g>
+<!-- map -->
+<g id="05-ownership-lifetime-node13" class="node">
+<title>map</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M936.5,-217C936.5,-217 761.5,-217 761.5,-217 755.5,-217 749.5,-211 749.5,-205 749.5,-205 749.5,-183 749.5,-183 749.5,-177 755.5,-171 761.5,-171 761.5,-171 936.5,-171 936.5,-171 942.5,-171 948.5,-177 948.5,-183 948.5,-183 948.5,-205 948.5,-205 948.5,-211 942.5,-217 936.5,-217"/>
+<text text-anchor="middle" x="849" y="-197.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">MapScope</text>
+<text text-anchor="middle" x="849" y="-183.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">entry → supersede / leave</text>
+</g>
+<!-- session&#45;&gt;map -->
+<g id="05-ownership-lifetime-edge12" class="edge">
+<title>session&#45;&gt;map</title>
+<path fill="none" stroke="#687f98" d="M435.28,-283.92C456.94,-274.87 482.89,-264.93 507,-258 584.71,-235.66 674.72,-219.45 742.88,-209.07"/>
+<polygon fill="#687f98" stroke="#687f98" points="743.32,-211.31 749.41,-208.09 742.64,-206.81 743.32,-211.31"/>
+</g>
+<!-- jobs -->
+<g id="05-ownership-lifetime-node14" class="node">
+<title>jobs</title>
+<path fill="#fff1e9" stroke="#d6a68b" d="M685,-139C685,-139 523,-139 523,-139 517,-139 511,-133 511,-127 511,-127 511,-105 511,-105 511,-99 517,-93 523,-93 523,-93 685,-93 685,-93 691,-93 697,-99 697,-105 697,-105 697,-127 697,-127 697,-133 691,-139 685,-139"/>
+<text text-anchor="middle" x="604" y="-119.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">[O1] JobGroup</text>
+<text text-anchor="middle" x="604" y="-105.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">tokens + tracked leases</text>
+</g>
+<!-- map&#45;&gt;jobs -->
+<g id="05-ownership-lifetime-edge13" class="edge">
+<title>map&#45;&gt;jobs</title>
+<path fill="none" stroke="#687f98" d="M777.81,-170.92C747.6,-161.55 712.32,-150.6 681.46,-141.03"/>
+<polygon fill="#687f98" stroke="#687f98" points="681.83,-138.76 674.95,-139.01 680.48,-143.11 681.83,-138.76"/>
+</g>
+<!-- map&#45;&gt;spawnstate -->
+<g id="05-ownership-lifetime-edge14" class="edge">
+<title>map&#45;&gt;spawnstate</title>
+<path fill="none" stroke="#687f98" d="M849,-170.61C849,-162.88 849,-154.1 849,-145.93"/>
+<polygon fill="#687f98" stroke="#687f98" points="851.28,-145.73 849,-139.23 846.73,-145.73 851.28,-145.73"/>
+</g>
+<!-- map&#45;&gt;load -->
+<g id="05-ownership-lifetime-edge15" class="edge">
+<title>map&#45;&gt;load</title>
+<path fill="none" stroke="#687f98" d="M948.72,-172.81C965.37,-164.97 980.59,-154.09 991,-139 1002.61,-122.17 1004.51,-108.35 991,-93 955.18,-52.3 802.69,-69.51 749,-62 732.53,-59.7 715.02,-57.13 698.08,-54.6"/>
+<polygon fill="#687f98" stroke="#687f98" points="698.13,-52.31 691.36,-53.59 697.45,-56.81 698.13,-52.31"/>
+</g>
+<!-- renderSession -->
+<g id="05-ownership-lifetime-node17" class="node">
+<title>renderSession</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M1013,-62C1013,-62 771,-62 771,-62 765,-62 759,-56 759,-50 759,-50 759,-28 759,-28 759,-22 765,-16 771,-16 771,-16 1013,-16 1013,-16 1019,-16 1025,-22 1025,-28 1025,-28 1025,-50 1025,-50 1025,-56 1019,-62 1013,-62"/>
+<text text-anchor="middle" x="892" y="-42.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">MapRenderSession</text>
+<text text-anchor="middle" x="892" y="-28.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">instance sessions + TerrainManager</text>
+</g>
+<!-- map&#45;&gt;renderSession -->
+<g id="05-ownership-lifetime-edge16" class="edge">
+<title>map&#45;&gt;renderSession</title>
+<path fill="none" stroke="#687f98" d="M948.65,-179.37C975.6,-173.54 999.65,-165.58 1008,-155 1029.48,-127.79 1028.45,-104.99 1008,-77 1005.08,-73.01 1001.74,-69.44 998.05,-66.25"/>
+<polygon fill="#687f98" stroke="#687f98" points="999.35,-64.37 992.84,-62.12 996.53,-67.94 999.35,-64.37"/>
+</g>
+<!-- jobs&#45;&gt;assets -->
+<g id="05-ownership-lifetime-edge21" class="edge">
+<title>jobs&#45;&gt;assets</title>
+<path fill="none" stroke="#687f98" stroke-dasharray="5,2" d="M697.17,-137.24C700.82,-137.87 704.44,-138.46 708,-139 735.69,-143.24 940.16,-142.27 959,-163 985.01,-191.61 985.84,-222.17 959,-250 941.94,-267.69 760.38,-247.86 738,-258 679.58,-284.47 693.63,-329.4 639,-363 628.34,-369.56 619.49,-360.97 612,-371 573.08,-423.13 688.58,-415.55 715,-475 723.3,-493.68 727.28,-504.66 715,-521 706.36,-532.49 682.49,-542.29 654.73,-550.22"/>
+<polygon fill="#687f98" stroke="#687f98" points="654.02,-548.06 648.37,-551.99 655.24,-552.44 654.02,-548.06"/>
+<text text-anchor="middle" x="669" y="-374" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">задачи читают assets</text>
+</g>
+<!-- jobs&#45;&gt;load -->
+<!-- renderSession&#45;&gt;renderer -->
+<g id="05-ownership-lifetime-edge20" class="edge">
+<title>renderSession&#45;&gt;renderer</title>
+<path fill="none" stroke="#687f98" stroke-dasharray="5,2" d="M975.11,-62.1C986.46,-66.38 997.73,-71.33 1008,-77 1017.67,-82.33 1022.34,-82.99 1027,-93 1035.62,-111.54 1030.76,-118.9 1027,-139 1017.28,-191 1026.87,-219 984,-250 969.85,-260.23 844,-253.97 827,-258 799.12,-264.62 786.19,-261.86 768,-284 699.47,-367.39 795.9,-449.56 715,-521 661.12,-568.58 464.38,-543.47 393,-552 391.99,-552.12 390.99,-552.24 389.97,-552.36"/>
+<polygon fill="#687f98" stroke="#687f98" points="389.42,-550.14 383.25,-553.19 389.97,-554.66 389.42,-550.14"/>
+<text text-anchor="middle" x="830" y="-304.5" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">instance layers borrowed</text>
+</g>
+<!-- retire -->
+<g id="05-ownership-lifetime-node18" class="node">
+<title>retire</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M1272.5,-773C1272.5,-773 1053.5,-773 1053.5,-773 1047.5,-773 1041.5,-767 1041.5,-761 1041.5,-761 1041.5,-739 1041.5,-739 1041.5,-733 1047.5,-727 1053.5,-727 1053.5,-727 1272.5,-727 1272.5,-727 1278.5,-727 1284.5,-733 1284.5,-739 1284.5,-739 1284.5,-761 1284.5,-761 1284.5,-767 1278.5,-773 1272.5,-773"/>
+<text text-anchor="middle" x="1163" y="-753.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">GPU retirement</text>
+<text text-anchor="middle" x="1163" y="-739.6" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">VkContext deferredCleanup[slot]</text>
+</g>
+<!-- renderSession&#45;&gt;retire -->
+<g id="05-ownership-lifetime-edge22" class="edge">
+<title>renderSession&#45;&gt;retire</title>
+<path fill="none" stroke="#687f98" stroke-dasharray="5,2" d="M987.37,-62.05C999.97,-66.31 1012.5,-71.27 1024,-77 1034.5,-82.23 1039.79,-82.49 1045,-93 1054.07,-111.32 1047.35,-118.69 1045,-139 1039.18,-189.33 1031.1,-200.8 1019,-250 993.77,-352.58 830.67,-634.01 903,-711 912.76,-721.39 1016.9,-716.97 1031,-719 1043.18,-720.75 1055.9,-723.04 1068.44,-725.58"/>
+<polygon fill="#687f98" stroke="#687f98" points="1068.14,-727.84 1074.97,-726.93 1069.06,-723.39 1068.14,-727.84"/>
+<text text-anchor="middle" x="1012.5" y="-418.5" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">retire после submit</text>
+</g>
+<!-- retire&#45;&gt;window -->
+<g id="05-ownership-lifetime-edge23" class="edge">
+<title>retire&#45;&gt;window</title>
+<path fill="none" stroke="#687f98" stroke-dasharray="5,2" d="M1072.76,-726.93C1058.83,-723.98 1044.57,-721.21 1031,-719 876.53,-693.82 696.11,-678.23 582.7,-670.08"/>
+<polygon fill="#687f98" stroke="#687f98" points="582.65,-667.8 576.01,-669.6 582.33,-672.33 582.65,-667.8"/>
+<text text-anchor="middle" x="1020.5" y="-703" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">slot fence → cleanup</text>
+</g>
+</g>
+</svg>
+</div><p class="legend">Сплошная стрелка owner → child — владение (unique_ptr или value). Пунктир — заимствованная ссылка. Пунктир с подписью retire — отложенное освобождение GPU, не владение.</p></div><aside class="notes" aria-label="Проблемы рядом с диаграммой"><section class="issue" id="O1"><span class="badge">O1 · Факт → риск</span><h3>Отмена задач не делает teardown мгновенным</h3><p>MapScope отменяет jobs, уничтожает load session, останавливает terrain и вызывает wait. JobGroup учитывает lease ещё до постановки в общую I/O FIFO. Поэтому отменённая, но ещё не запущенная задача может ждать предыдущие чужие задачи; уже идущий read/parse не прерывается токеном.</p><p class="action">Измерять Transitions и возраст отменённых jobs; при требовании ограниченной задержки нужен scheduler с удалением queued cancelled work или эквивалентный контракт fence.</p><div class="sources"><a href="../../src/core/map_scope.cpp#L37">src/core/map_scope.cpp:37</a><a href="../../include/core/job_group.hpp#L115">include/core/job_group.hpp:115</a><a href="../../src/core/world_loader.cpp#L93">src/core/world_loader.cpp:93</a><a href="../../include/core/thread_pool.hpp#L73">include/core/thread_pool.hpp:73</a></div></section><section class="issue" id="O2"><span class="badge">O2 · Долг → риск</span><h3>Безопасность borrowed ссылок зависит от ручного teardown order</h3><p>Renderer заимствует VkContext у Window; spawner — SpawnState карты, WorldLoader — Session load. Application::shutdown явно уничтожает клиентские lifetime до assets/device/window. CharacterSession также вручную сбрасывает состояние process-wide presenters. Эти связи не выражены одним owner tree.</p><p class="action">Новые подписки хранить RAII-членами; для каждого нового borrowed указателя указать lifetime. Проверять logout, same-map reconnect, superseded load и exit, сохраняя порядок stop/join → release.</p><div class="sources"><a href="../../include/core/window.hpp#L85">include/core/window.hpp:85</a><a href="../../include/rendering/renderer.hpp#L620">include/rendering/renderer.hpp:620</a><a href="../../src/core/application.cpp#L2104">src/core/application.cpp:2104</a><a href="../../src/core/character_session.cpp#L67">src/core/character_session.cpp:67</a></div></section><section class="issue" id="O3"><span class="badge">O3 · Факт → риск</span><h3>AsyncConnect.cancel оставляет DNS/connect работать до возврата</h3><p>Detached worker удерживает shared Job, а cancel ставит abandoned. Это сохраняет память и закрывает поздний socket, но не прерывает connectBlocking / DNS. Повторные попытки могут временно перекрываться по потокам; реальная задержка здесь не измерялась.</p><p class="action">Если нужна строгая отмена и ограничение повторов — ограничивать число connect jobs и использовать отменяемый transport/resolver. Не заменять shared Job захватом сырого owner.</p><div class="sources"><a href="../../include/network/async_connect.hpp#L41">include/network/async_connect.hpp:41</a><a href="../../include/network/async_connect.hpp#L84">include/network/async_connect.hpp:84</a></div></section></aside></div><p class="good"><strong>Что уже защищено.</strong> MapScope и CharacterSession уже объединяют основные lifetime. JobGroup fence удерживает CPU-задачи до их завершения, RAII Subscription отключает слушателя, deferred GPU cleanup защищает ещё используемые ресурсы. Кеш между картами сам по себе не является утечкой.</p><details class="details"><summary>Обязанности, границы и точный порядок</summary><table><tr><th scope="row">Создание</th><td>Application строит долгоживущие сервисы. ClientLoop в Transitions создаёт CharacterSession; CharacterSession::enterMap заменяет только MapScope.</td></tr><tr><th scope="row">Смена карты</th><td>Сначала уничтожается прежний MapScope, даже при повторном входе в тот же map ID. InterfaceState, Lua и остальная сессия персонажа сохраняются.</td></tr><tr><th scope="row">Reconnect</th><td>Сцена может стоять во время восстановления соединения. При успешном same-map reconnect MapScope передаётся releaseMap/adoptMap новой CharacterSession; новый Lua interface слышит login заново.</td></tr><tr><th scope="row">Деструктор карты</th><td>cancel tokens → unbind spawner → load.reset / terrain.stopWorkers → jobs.wait → detach player/transport references → render session release. Process-wide model/texture caches сохраняются.</td></tr><tr><th scope="row">Деструктор персонажа</th><td>MapScope уходит первым; затем AddonManager сохраняет переменные и закрывает Lua внутри Interface scope; затем остальное per-character state и subscriptions.</td></tr><tr><th scope="row">GPU lifetime</th><td>MapRenderSession освобождает logical instance contents; Vulkan destruction откладывается за slot fences. В обычном map teardown нет vkDeviceWaitIdle; shutdown приложения использует device idle перед освобождением device resources.</td></tr><tr><th scope="row">Типы владения</th><td>unique_ptr/value: единственный владелец. shared_ptr&lt;const bytes/table&gt;: разделяемые CPU-данные. Raw pointers/references: borrow и обязательный порядок уничтожения. Token: актуальность/отмена, не владение Renderer или AssetManager.</td></tr></table></details></article></main><footer>Факт — наблюдаемое поведение кода. Риск — возможное следствие без runtime-подтверждения. Долг — текущая архитектурная связанность. Числа бюджетов — настройки по умолчанию, а не результаты профилирования. Исходники и строки указаны рядом с каждым замечанием. <a href="README.md">Markdown</a> · <a href="sources.json">Снимок источников</a> · <a href="checks.txt">Статические проверки</a></footer><script>
+document.addEventListener('click', function(event) {
+ const button=event.target.closest('button[data-zoom]'); if(!button)return;
+ const svg=button.closest('article').querySelector('.diagram svg');
+ if(button.dataset.zoom==='fit'){svg.style.width='100%';return;}
+ const current=svg.getBoundingClientRect().width;
+ svg.style.width=Math.max(640, Math.min(6000,current*(button.dataset.zoom==='in'?1.25:0.8)))+'px';
+});
+</script></body></html>

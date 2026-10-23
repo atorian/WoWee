@@ -28,6 +28,22 @@ or landmark exemptions.
 Check: verify near detail, the overlap, far terrain and a real landmark; inspect
 memory and draw counts. A new distance limit alone is not a completed LOD fix.
 
+The user chose Fog Thickness 0.8 as the visual target for readable Hyjal on
+2026-10-21. Do not lower that setting to pass the comparison. Preserve dense
+low-distance air and the nearby gradient; high distant silhouettes should
+retain useful contrast through a thinner aerosol column. Apply the rule to
+all terrain and models, including other continents, and keep complete fading
+at View Distance. Judge the result at the observer’s real height.
+
+Fog Thickness must have a visibly strong density response across its full range.
+The user confirmed that maximum thickness should nearly merge distant objects
+with the atmosphere while 0.8 remains the readable reference. Validate several
+slider values in the same scene and lighting; doubling optical density should
+square transmission. Keep the authored palette and the original screenshot as
+visual references, and do not replace atmospheric fading with geometry culling.
+
+User choice (2026-10-21): expose height influence separately from Fog Thickness. Lower influence keeps more haze at altitude; 0 removes the height dependency and 1 preserves the calibrated 300-yard scale height. Save the control and apply it through the owned frame snapshot.
+
 User choice (2026-10-22): replace the experimental per-surface march with a
 shared physical atmospheric transport model. In the enabled mode, zone fog
 ranges calibrate extinction rather than retaining the old piecewise curve.

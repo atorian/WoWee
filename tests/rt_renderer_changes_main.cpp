@@ -2,7 +2,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_loader.hpp"
-#include "pipeline/wmo_paths.hpp"
+#include "pipeline/wmo_group_path.hpp"
 #include "rendering/render_surface.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/terrain_manager.hpp"

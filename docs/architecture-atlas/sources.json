@@ -1,0 +1,295 @@
+{
+  "snapshot_date": "2026-10-19",
+  "head": "9f10869",
+  "scope": "working tree, static review",
+  "sources": {
+    "include/core/thread_pool.hpp:59": {
+      "path": "include/core/thread_pool.hpp",
+      "line": 59,
+      "anchor": "static ThreadPool& ioWorkers()",
+      "sha256": "cdf1d745cd3464d8b745c33438ada8ddd59ba8ad2c8609a01299baa012596118"
+    },
+    "include/core/thread_pool.hpp:73": {
+      "path": "include/core/thread_pool.hpp",
+      "line": 73,
+      "anchor": "tasks_.emplace",
+      "sha256": "cdf1d745cd3464d8b745c33438ada8ddd59ba8ad2c8609a01299baa012596118"
+    },
+    "include/core/job_group.hpp:116": {
+      "path": "include/core/job_group.hpp",
+      "line": 116,
+      "anchor": "auto future = ThreadPool::ioWorkers().submit(",
+      "sha256": "0b9a9488ed24f806db17c9ec6016a8abc09c9e82adadafd0282381d3c74f65c5"
+    },
+    "src/audio/music_manager.cpp:136": {
+      "path": "src/audio/music_manager.cpp",
+      "line": 136,
+      "anchor": "core::ThreadPool::ioWorkers().submit",
+      "sha256": "39417f2e763330c171c92f8792176d5fe674c67a0a4532a55bc861468b8741f1"
+    },
+    "src/rendering/renderer.cpp:2394": {
+      "path": "src/rendering/renderer.cpp",
+      "line": 2394,
+      "anchor": "try { m2AnimFuture.get(); }",
+      "sha256": "e6ae0d01a3b4f5664dea3760ae347e33d5f6763a570cea126f6fbc4d32217993"
+    },
+    "src/rendering/renderer.cpp:3344": {
+      "path": "src/rendering/renderer.cpp",
+      "line": 3344,
+      "anchor": "if (terrainFuture.valid()) lastTerrainRenderMs = terrainFuture.get();",
+      "sha256": "e6ae0d01a3b4f5664dea3760ae347e33d5f6763a570cea126f6fbc4d32217993"
+    },
+    "src/rendering/terrain_manager.cpp:104": {
+      "path": "src/rendering/terrain_manager.cpp",
+      "line": 104,
+      "anchor": "int computeTerrainWorkerCount()",
+      "sha256": "29265a96c3b14314069e59d58e6b39a2681986e17657fa03e065a3a553748a69"
+    },
+    "include/core/thread_pool.hpp:82": {
+      "path": "include/core/thread_pool.hpp",
+      "line": 82,
+      "anchor": "static size_t defaultThreadCount()",
+      "sha256": "cdf1d745cd3464d8b745c33438ada8ddd59ba8ad2c8609a01299baa012596118"
+    },
+    "src/core/world_loader.cpp:600": {
+      "path": "src/core/world_loader.cpp",
+      "line": 600,
+      "anchor": "int numWorkers =",
+      "sha256": "ad571d3a8e64f00336a1109bb7be01435c0f635cc2432ee5bff95906fda24a69"
+    },
+    "src/rendering/character_renderer.cpp:71": {
+      "path": "src/rendering/character_renderer.cpp",
+      "line": 71,
+      "anchor": "constexpr size_t kNormalMapWorkers",
+      "sha256": "758aa6ce0171b94fc06c87530d3bdb319eeeb88a2945f91cc49e8013c2418c23"
+    },
+    "src/core/application.cpp:4071": {
+      "path": "src/core/application.cpp",
+      "line": 4071,
+      "anchor": "void Application::streamScene(",
+      "sha256": "49215e9c62730d4814dfcb39fc6b4371f7ec8e3381dad53530ee85b82c60134e"
+    },
+    "src/core/application.cpp:4093": {
+      "path": "src/core/application.cpp",
+      "line": 4093,
+      "anchor": "void Application::present(",
+      "sha256": "49215e9c62730d4814dfcb39fc6b4371f7ec8e3381dad53530ee85b82c60134e"
+    },
+    "src/rendering/renderer.cpp:2277": {
+      "path": "src/rendering/renderer.cpp",
+      "line": 2277,
+      "anchor": "terrainManager->update(*camera, deltaTime);",
+      "sha256": "e6ae0d01a3b4f5664dea3760ae347e33d5f6763a570cea126f6fbc4d32217993"
+    },
+    "src/rendering/terrain_manager.cpp:231": {
+      "path": "src/rendering/terrain_manager.cpp",
+      "line": 231,
+      "anchor": "processReadyTiles();",
+      "sha256": "29265a96c3b14314069e59d58e6b39a2681986e17657fa03e065a3a553748a69"
+    },
+    "include/core/event_bus.hpp:85": {
+      "path": "include/core/event_bus.hpp",
+      "line": 85,
+      "anchor": "void publish(const Event& event)",
+      "sha256": "a6b20786c889b89aa40631426e5a8e1b38e656eacb3360b8ded99baab511c5d3"
+    },
+    "include/core/event_bus.hpp:100": {
+      "path": "include/core/event_bus.hpp",
+      "line": 100,
+      "anchor": "void dispatchPosted()",
+      "sha256": "a6b20786c889b89aa40631426e5a8e1b38e656eacb3360b8ded99baab511c5d3"
+    },
+    "src/core/client_loop.cpp:341": {
+      "path": "src/core/client_loop.cpp",
+      "line": 341,
+      "anchor": "services_.game.dispatchAddonEvents();",
+      "sha256": "45cb8eea02995dae3b8a86bd312c28049068045eeb76491bb8c2d5bd1097a9ba"
+    },
+    "docs/principles/client-frame-phases.md:34": {
+      "path": "docs/principles/client-frame-phases.md",
+      "line": 34,
+      "anchor": "A handler may observe newer game state",
+      "sha256": "53609ad730c5dd48bd1334339c18c793fd08673d9a8a02e25cacd15f96f4a8bb"
+    },
+    "src/game/game_handler_packets.cpp:87": {
+      "path": "src/game/game_handler_packets.cpp",
+      "line": 87,
+      "anchor": "float incomingPacketBudgetMs(",
+      "sha256": "50cdc617c1a7da0c1b67f36f4d64bc242cea48da2ff46698135d67988d454a44"
+    },
+    "src/game/game_handler_packets.cpp:101": {
+      "path": "src/game/game_handler_packets.cpp",
+      "line": 101,
+      "anchor": "float incomingPacketCatchUpBudgetMs()",
+      "sha256": "50cdc617c1a7da0c1b67f36f4d64bc242cea48da2ff46698135d67988d454a44"
+    },
+    "src/rendering/terrain_manager.cpp:1529": {
+      "path": "src/rendering/terrain_manager.cpp",
+      "line": 1529,
+      "anchor": "const float budgetMs = taxiStreamingMode_ ? 16.0f : (nearestInView ? 8.0f : 2.0f);",
+      "sha256": "29265a96c3b14314069e59d58e6b39a2681986e17657fa03e065a3a553748a69"
+    },
+    "src/rendering/terrain_manager.cpp:1591": {
+      "path": "src/rendering/terrain_manager.cpp",
+      "line": 1591,
+      "anchor": "void TerrainManager::processPendingUnloads()",
+      "sha256": "29265a96c3b14314069e59d58e6b39a2681986e17657fa03e065a3a553748a69"
+    },
+    "tools/domain_shape_check.py:54": {
+      "path": "tools/domain_shape_check.py",
+      "line": 54,
+      "anchor": "def main()",
+      "sha256": "363a64dcaf5506ebd4d49c97897900a9f0992dbcb915ab40601aaff4d287775a"
+    },
+    "src/game/game_handler.cpp:116": {
+      "path": "src/game/game_handler.cpp",
+      "line": 116,
+      "anchor": "movementHandler_  = std::make_unique<MovementHandler>(*this);",
+      "sha256": "7fe2de3e6a849977054b50d994a3b7a2d94a761882b7af47d00ee820bfc89c6c"
+    },
+    "include/game/game_handler.hpp:143": {
+      "path": "include/game/game_handler.hpp",
+      "line": 143,
+      "anchor": "class GameHandler",
+      "sha256": "dddb013a9d8f79abf481161216c3830d345c17da1e3b0f893d824ab98810242d"
+    },
+    "tools/domain_shape_check.py:47": {
+      "path": "tools/domain_shape_check.py",
+      "line": 47,
+      "anchor": "CALLBACK_SETTER =",
+      "sha256": "363a64dcaf5506ebd4d49c97897900a9f0992dbcb915ab40601aaff4d287775a"
+    },
+    "src/core/client_loop.cpp:38": {
+      "path": "src/core/client_loop.cpp",
+      "line": 38,
+      "anchor": "services_.game.setAddonEventCallback(",
+      "sha256": "45cb8eea02995dae3b8a86bd312c28049068045eeb76491bb8c2d5bd1097a9ba"
+    },
+    "include/core/event_bus.hpp:38": {
+      "path": "include/core/event_bus.hpp",
+      "line": 38,
+      "anchor": "class Subscription",
+      "sha256": "a6b20786c889b89aa40631426e5a8e1b38e656eacb3360b8ded99baab511c5d3"
+    },
+    "CMakeLists.txt:1249": {
+      "path": "CMakeLists.txt",
+      "line": 1249,
+      "anchor": "set(WOWEE_RENDER_CLIENT_SOURCES",
+      "sha256": "0a6b239977f5ec254aab3e74c4ea9d797a5f3a064c019e28d3b58360e02e1ece"
+    },
+    "tools/render_dependency_check.py:58": {
+      "path": "tools/render_dependency_check.py",
+      "line": 58,
+      "anchor": "def library_sources()",
+      "sha256": "960cfd1f92431772748dcd34e8d16a3b2ac97357ddb1cfe0ccb50918d07ca5ef"
+    },
+    "tools/game_dependency_check.py:46": {
+      "path": "tools/game_dependency_check.py",
+      "line": 46,
+      "anchor": "SHARED_CONSTANTS =",
+      "sha256": "74a9552c1c73acf520e74567327933e1ffdce16ed4d962947106af39356e6d6c"
+    },
+    "src/game/game_handler_packets.cpp:3054": {
+      "path": "src/game/game_handler_packets.cpp",
+      "line": 3054,
+      "anchor": "void GameHandler::enqueueIncomingPacket(",
+      "sha256": "50cdc617c1a7da0c1b67f36f4d64bc242cea48da2ff46698135d67988d454a44"
+    },
+    "src/game/game_handler_packets.cpp:3065": {
+      "path": "src/game/game_handler_packets.cpp",
+      "line": 3065,
+      "anchor": "void GameHandler::enqueueIncomingPacketFront(",
+      "sha256": "50cdc617c1a7da0c1b67f36f4d64bc242cea48da2ff46698135d67988d454a44"
+    },
+    "src/network/world_socket.cpp:791": {
+      "path": "src/network/world_socket.cpp",
+      "line": 791,
+      "anchor": "if (pendingPacketCallbacks_.size() > kMaxQueuedPacketCallbacks)",
+      "sha256": "a0990c7563db635cc477dda8e0cef7165ed1d5a726097c730a1bf92aae95958b"
+    },
+    "src/pipeline/asset_manager.cpp:804": {
+      "path": "src/pipeline/asset_manager.cpp",
+      "line": 804,
+      "anchor": "AssetManager::FileBytes AssetManager::readFileShared(",
+      "sha256": "14d64741d4500d849fde4aaa236da8749786b82379df70a95a9807aaa94ef073"
+    },
+    "src/pipeline/asset_manager.cpp:813": {
+      "path": "src/pipeline/asset_manager.cpp",
+      "line": 813,
+      "anchor": "std::vector<uint8_t> data = readFromSource(normalized);",
+      "sha256": "14d64741d4500d849fde4aaa236da8749786b82379df70a95a9807aaa94ef073"
+    },
+    "include/rendering/terrain_manager.hpp:522": {
+      "path": "include/rendering/terrain_manager.hpp",
+      "line": 522,
+      "anchor": "static constexpr size_t maxReadyQueueSize_ = 3;",
+      "sha256": "a874d0233d8f0d238c58b94ba609b664f528ad2f4a00f16239c68b947cf7fae1"
+    },
+    "src/rendering/terrain_manager.cpp:1439": {
+      "path": "src/rendering/terrain_manager.cpp",
+      "line": 1439,
+      "anchor": "if (readyQueue.size() >= maxReadyQueueSize_)",
+      "sha256": "29265a96c3b14314069e59d58e6b39a2681986e17657fa03e065a3a553748a69"
+    },
+    "src/rendering/terrain_manager.cpp:1462": {
+      "path": "src/rendering/terrain_manager.cpp",
+      "line": 1462,
+      "anchor": "readyQueue.push(pending);",
+      "sha256": "29265a96c3b14314069e59d58e6b39a2681986e17657fa03e065a3a553748a69"
+    },
+    "src/core/map_scope.cpp:37": {
+      "path": "src/core/map_scope.cpp",
+      "line": 37,
+      "anchor": "MapScope::~MapScope()",
+      "sha256": "a1067e52f23e0abb98fe0fe91550454ffe6de346c0b082d348725ac5db3cf7a2"
+    },
+    "include/core/job_group.hpp:115": {
+      "path": "include/core/job_group.hpp",
+      "line": 115,
+      "anchor": "auto lease = track(t);",
+      "sha256": "0b9a9488ed24f806db17c9ec6016a8abc09c9e82adadafd0282381d3c74f65c5"
+    },
+    "src/core/world_loader.cpp:93": {
+      "path": "src/core/world_loader.cpp",
+      "line": 93,
+      "anchor": "WorldLoader::Session::~Session()",
+      "sha256": "ad571d3a8e64f00336a1109bb7be01435c0f635cc2432ee5bff95906fda24a69"
+    },
+    "include/core/window.hpp:85": {
+      "path": "include/core/window.hpp",
+      "line": 85,
+      "anchor": "std::unique_ptr<rendering::VkContext> vkContext;",
+      "sha256": "b5872587088b853efaaecb51ac3d0d02b4e1938fbea2a66c27c6fc06a4b51d35"
+    },
+    "include/rendering/renderer.hpp:620": {
+      "path": "include/rendering/renderer.hpp",
+      "line": 620,
+      "anchor": "VkContext* vkCtx = nullptr;",
+      "sha256": "4e920deed65ffc1b79f02e9eecfda2b78da2d1445f28810a80c1f092c2349ead"
+    },
+    "src/core/application.cpp:2104": {
+      "path": "src/core/application.cpp",
+      "line": 2104,
+      "anchor": "void Application::shutdown()",
+      "sha256": "49215e9c62730d4814dfcb39fc6b4371f7ec8e3381dad53530ee85b82c60134e"
+    },
+    "src/core/character_session.cpp:67": {
+      "path": "src/core/character_session.cpp",
+      "line": 67,
+      "anchor": "CharacterSession::~CharacterSession()",
+      "sha256": "a0ba23c5715937121e02001d88977cd7a927569feea540ee877d14b83758cce3"
+    },
+    "include/network/async_connect.hpp:41": {
+      "path": "include/network/async_connect.hpp",
+      "line": 41,
+      "anchor": "std::thread([job, host, port, timeoutSeconds]()",
+      "sha256": "0a63e7961635550aa84ff3082e7b195b6c3e159a026e98c9ae200b3c0bd7ac01"
+    },
+    "include/network/async_connect.hpp:84": {
+      "path": "include/network/async_connect.hpp",
+      "line": 84,
+      "anchor": "void cancel()",
+      "sha256": "0a63e7961635550aa84ff3082e7b195b6c3e159a026e98c9ae200b3c0bd7ac01"
+    }
+  }
+}

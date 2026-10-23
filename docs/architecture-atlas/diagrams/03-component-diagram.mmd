@@ -1,0 +1,50 @@
+flowchart TB
+  subgraph sg_client["wowee_client_objects / wowee_client · композиция"]
+    app["Application + ClientLoop<br/>создание и wiring"]
+    ui["UI + Addons / Lua<br/>FrameXML / screens"]
+    presentation["PlayerView / EntitySpawner<br/>SpellPresentation / callbacks"]
+    sound["AudioCoordinator<br/>miniaudio / managers"]
+  end
+  subgraph sg_gamebox["wowee_game · protocol state"]
+    gh["[C1/C2] GameHandler<br/>session / queue / dispatch / facade"]
+    domain["Доменные handlers<br/>chat / spell / inventory / quest / …"]
+    old["[C1] 4 legacy handlers<br/>Combat / Movement / Entity / Warden"]
+  end
+  subgraph sg_renderbox["wowee_render · сцена и GPU"]
+    renderer["Renderer / VkContext API<br/>terrain / M2 / WMO / characters<br/>RT / water / post / overlays"]
+    boundary["[C3] граница CMake<br/>не вся папка rendering — эта библиотека"]
+  end
+  subgraph sg_libraries["Общие нижние слои"]
+    netlib["wowee_net<br/>Auth / WorldSocket / HTTPS"]
+    protocol["wowee_protocol<br/>Packet / opcodes / parsers / crypto"]
+    pipeline["wowee_pipeline<br/>AssetManager / DBC / ADT / M2 / WMO"]
+    base["wowee_base<br/>EventBus / jobs / logging / CVar / math"]
+  end
+  app --> ui
+  app --> presentation
+  app --> sound
+  app --> gh
+  app --> renderer
+  app --> pipeline
+  ui --> gh
+  ui --> renderer
+  ui --> pipeline
+  presentation --> gh
+  presentation --> renderer
+  presentation --> pipeline
+  gh -->|"создаёт и делегирует"| domain
+  gh -->|"создаёт"| old
+  old -.->|"GameHandler&amp; owner_"| gh
+  gh --> netlib
+  gh --> protocol
+  gh --> pipeline
+  gh --> base
+  domain -->|"events / queries"| base
+  renderer --> pipeline
+  renderer --> base
+  boundary -.->|"список исключений"| renderer
+  netlib --> protocol
+  netlib --> base
+  protocol --> base
+  pipeline --> base
+  gh -.->|"уведомления: bus / callbacks"| presentation

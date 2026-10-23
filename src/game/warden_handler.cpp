@@ -206,9 +206,20 @@ void WardenHandler::reset() {
 
 bool WardenHandler::beginSession(const std::string& host, uint16_t port, uint32_t build) {
     reset();
-    const auto* overrideRoot = std::getenv("WOWEE_SERVER_EXTENSIONS_DIR");
-    const auto root = overrideRoot && *overrideRoot ? std::filesystem::path(overrideRoot)
-                                                   : std::filesystem::path("Data/server_extensions");
+    const auto location = locateServerExtension(host, port);
+    if (location.root.empty()) {
+        std::string folders;
+        for (const auto& folder : location.searched)
+            folders += (folders.empty() ? "" : ", ") + folder.string();
+        // A stock server has none. A realm that has its own Warden checks
+        // (EZWoW) holds back the character list until they are answered, and
+        // the login waits on it.
+        LOG_WARNING("No server profile for ", host, ":", port, " in ", folders,
+                    " - Warden is answered as by a stock WoW.exe; a realm that checks its own"
+                    " extension will not send the character list");
+        return true;
+    }
+    const auto root = location.root;
 #ifdef _WIN32
     const auto executable = std::filesystem::path(core::getExecutableDir()) / "wowee_extension_host.exe";
 #else
