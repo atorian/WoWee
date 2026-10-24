@@ -3,6 +3,7 @@
 //                 /clearmainassist, /raidinfo, /raidconvert, /lootmethod,
 //                 /lootthreshold, /mark, /roll
 // Moved from ChatPanel::sendChatMessage() if/else chain (Phase 3).
+#include "duel/services/duels.hpp"
 #include "game/group_defines.hpp"
 #include "ui/chat/chat_utils.hpp"
 #include "ui/chat/i_chat_command.hpp"
@@ -52,7 +53,7 @@ public:
 class YieldCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.forfeitDuel();
+        if (auto* duels = ctx.services.duels) duels->forfeitDuel();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"yield", "forfeit", "surrender"}; }

@@ -1,4 +1,4 @@
-// Groups, duels and arena teams, end to end: the server's packets, what the
+// Groups and arena teams, end to end: the server's packets, what the
 // interface reads and is told, and what the game answers with.
 #include <catch_amalgamated.hpp>
 
@@ -19,7 +19,6 @@ namespace {
 
 constexpr uint64_t kJaina = 0x21;
 constexpr uint64_t kThrall = 0x20;
-constexpr uint64_t kDuelFlag = 0xF110000000000099ull;
 
 /// SMSG_GROUP_LIST for a plain party of the player and others, as AzerothCore's
 /// Group::SendUpdate writes it.
@@ -202,27 +201,7 @@ TEST_CASE("the guild bank's balance event is the bank's figure, not a chat line"
     CHECK(h.game().getGuildBankData().money == 5326107u);
 }
 
-TEST_CASE("a duel challenge names the challenger, and accepting names the flag", "[social][harness]") {
-    GameHarness h;
-    h.enterWorld();
-    h.receive(Opcode::SMSG_NAME_QUERY_RESPONSE,
-              Body().packedGuid(kThrall).u8(0).cstr("Thrall").cstr("").u8(2).u8(0).u8(7));
-    h.pump();
-
-    h.receive(Opcode::SMSG_DUEL_REQUESTED, Body().u64(kDuelFlag).u64(kThrall));
-    h.pump();
-
-    const auto requested = h.addonEvents("DUEL_REQUESTED");
-    REQUIRE(requested.size() == 1);
-    CHECK(requested[0].args.at(0) == "Thrall");
-
-    h.game().acceptDuel();
-    auto* accepted = h.lastSent(Opcode::CMSG_DUEL_ACCEPTED);
-    REQUIRE(accepted != nullptr);
-    CHECK(accepted->readUInt64() == kDuelFlag);
-}
-
-TEST_CASE("the next character is not asked the last one's duel or invite", "[social][harness]") {
+TEST_CASE("the next character is not asked the last one's group invite", "[social][harness]") {
     wowee::test::PlayerSpec alice;
     alice.guid = 0x71;
     alice.name = "Alice";
@@ -232,19 +211,14 @@ TEST_CASE("the next character is not asked the last one's duel or invite", "[soc
 
     GameHarness h;
     h.enterWorld(alice);
-    h.receive(Opcode::SMSG_DUEL_REQUESTED, Body().u64(kDuelFlag).u64(kThrall));
     // SMSG_GROUP_INVITE, 3.3.5a: whether it can be accepted, then who asks.
     h.receive(Opcode::SMSG_GROUP_INVITE, Body().u8(1).cstr("Thrall").u32(0).u8(0).u32(0));
     h.pump();
-    REQUIRE(h.game().hasPendingDuelRequest());
     REQUIRE(h.game().hasPendingGroupInvite());
 
     h.relogAs(bob);
 
-    // Both were Alice's to answer: Bob was asked to accept a duel and a group
-    // nobody had offered him, and accepting would have sent Alice's flag.
-    CHECK_FALSE(h.game().hasPendingDuelRequest());
+    // It was Alice's to answer: Bob was asked to join a group nobody had
+    // offered him.
     CHECK_FALSE(h.game().hasPendingGroupInvite());
-    h.game().acceptDuel();
-    CHECK(h.countSent(Opcode::CMSG_DUEL_ACCEPTED) == 0);
 }

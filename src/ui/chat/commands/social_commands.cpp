@@ -2,6 +2,7 @@
 // Moved from ChatPanel::sendChatMessage() if/else chain (Phase 3).
 #include "contacts/services/contacts.hpp"
 #include "who/services/who.hpp"
+#include "duel/services/duels.hpp"
 #include "ui/chat/i_chat_command.hpp"
 #include "ui/chat_panel.hpp"
 #include "game/game_handler.hpp"
@@ -163,7 +164,7 @@ class DuelCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (ctx.gameHandler.hasTarget()) {
-            ctx.gameHandler.proposeDuel(ctx.gameHandler.getTargetGuid());
+            if (auto* duels = ctx.services.duels) duels->proposeDuel(ctx.gameHandler.getTargetGuid());
         } else {
             game::MessageChatData msg;
             msg.type = game::ChatType::SYSTEM;

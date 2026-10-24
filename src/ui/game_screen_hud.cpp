@@ -1,4 +1,5 @@
 #include "contacts/services/contacts.hpp"
+#include "duel/services/duels.hpp"
 #include "ui/game_screen.hpp"
 #include "core/screen_recording.hpp"
 #include "ui/sight_cache.hpp"
@@ -1651,7 +1652,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                     if (ImGui::MenuItem("Trade"))
                         gameHandler.initiateTrade(nameplateCtxGuid_);
                     if (ImGui::MenuItem("Duel"))
-                        gameHandler.proposeDuel(nameplateCtxGuid_);
+                        if (auto* duels = services_.duels) duels->proposeDuel(nameplateCtxGuid_);
                     if (ImGui::MenuItem("Inspect")) {
                         gameHandler.setTarget(nameplateCtxGuid_);
                         gameHandler.inspectTarget();

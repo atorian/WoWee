@@ -3,6 +3,8 @@
 #include "game/contacts_gateway.hpp"
 #include "game/who_gateway.hpp"
 #include "who/services/who_service.hpp"
+#include "game/duel_gateway.hpp"
+#include "duel/services/duel_service.hpp"
 #include "ui/macro_icon.hpp"
 #include <imgui_impl_vulkan.h>
 #include "rendering/imgui_texture.hpp"
@@ -482,6 +484,9 @@ bool Application::initialize() {
     whoGateway_ = std::make_unique<game::WhoGateway>(*gameHandler);
     who_ = std::make_unique<who::WhoService>(*whoGateway_, eventBus_);
     gameServices_.whoFeed = who_.get();
+    duelGateway_ = std::make_unique<game::DuelGateway>(*gameHandler, *gameHandler);
+    duels_ = std::make_unique<duel::DuelService>(*duelGateway_, *duelGateway_, eventBus_);
+    gameServices_.duelFeed = duels_.get();
     transportScene_ = std::make_unique<RendererTransportScene>(*renderer);
     gameHandler->getTransportManager()->setScene(transportScene_.get());
 
@@ -837,6 +842,7 @@ bool Application::initialize() {
             uiServices.expansionRegistry = expansionRegistry_.get();
             uiServices.contacts = contacts_.get();
             uiServices.who = who_.get();
+            uiServices.duels = duels_.get();
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();  // May be nullptr here, re-wire later
             uiServices.interfaceStages = &interfaceStages_;
@@ -890,6 +896,7 @@ bool Application::initialize() {
         luaSvc.expansionRegistry = expansionRegistry_.get();
         luaSvc.contacts          = contacts_.get();
         luaSvc.who               = who_.get();
+        luaSvc.duels             = duels_.get();
         // Acted on between frames - the reload destroys the state that asked.
         luaSvc.requestReloadUI = [this]() {
             if (auto* character = session()) character->requestInterfaceReload();
@@ -1606,6 +1613,7 @@ bool Application::initialize() {
             uiServices.expansionRegistry = expansionRegistry_.get();
             uiServices.contacts = contacts_.get();
             uiServices.who = who_.get();
+            uiServices.duels = duels_.get();
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();
             uiServices.interfaceStages = &interfaceStages_;
@@ -2557,10 +2565,13 @@ void Application::shutdown() {
     gameHandler.reset();
     gameServices_.contactsFeed = nullptr;
     gameServices_.whoFeed = nullptr;
+    gameServices_.duelFeed = nullptr;
     contacts_.reset();
     contactsGateway_.reset();
     who_.reset();
     whoGateway_.reset();
+    duels_.reset();
+    duelGateway_.reset();
 
     // GameHandler teardown can still publish events consumed by audio.
     if (audioCoordinator_) {

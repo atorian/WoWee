@@ -745,6 +745,11 @@ target_link_libraries(test_contacts_service PRIVATE wowee_contacts)
 wowee_add_test(test_who SOURCES test_who.cpp)
 target_link_libraries(test_who PRIVATE wowee_who)
 
+# ── duel ────────────────────────────────────────────────────────
+# Duels and their service, with only wowee_duel linked.
+wowee_add_test(test_duels SOURCES test_duels.cpp)
+target_link_libraries(test_duels PRIVATE wowee_duel)
+
 # ── module_boundaries ───────────────────────────────────────────
 # New includes must point down the layers in tools/module_boundary_check.py;
 # the ones that broke them when the check came are listed in
@@ -3357,7 +3362,7 @@ target_compile_definitions(wowee_game_harness PRIVATE WOWEE_SOURCE_DIR="${CMAKE_
 target_link_libraries(wowee_game_harness PUBLIC wowee_game catch2_main)
 wowee_test_link_glm(wowee_game_harness)
 
-foreach(_domain chat spell inventory quest social session account_data action_bar pet reputation realm_time weather contacts who)
+foreach(_domain chat spell inventory quest social session account_data action_bar pet reputation realm_time weather contacts who duel)
     wowee_add_test(test_${_domain}_domain SOURCES test_${_domain}_domain.cpp)
     target_link_libraries(test_${_domain}_domain PRIVATE wowee_game_harness)
 endforeach()

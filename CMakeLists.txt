@@ -776,6 +776,7 @@ set(WOWEE_SOURCES
     src/game/social_handler.cpp
     src/game/contacts_gateway.cpp
     src/game/who_gateway.cpp
+    src/game/duel_gateway.cpp
     src/game/account_data.cpp
     src/game/account_data_handler.cpp
     src/game/action_bar_handler.cpp
@@ -1817,6 +1818,13 @@ set(WOWEE_WHO_SOURCES
 )
 add_library(wowee_who STATIC ${WOWEE_WHO_SOURCES})
 target_link_libraries(wowee_who PUBLIC wowee_base)
+# wowee_duel: a duel the player is asked to or in, its countdown and answers.
+set(WOWEE_DUEL_SOURCES
+    src/duel/domain/duel.cpp
+    src/duel/services/duel_service.cpp
+)
+add_library(wowee_duel STATIC ${WOWEE_DUEL_SOURCES})
+target_link_libraries(wowee_duel PUBLIC wowee_base)
 
 add_library(wowee_pipeline STATIC ${WOWEE_PIPELINE_SOURCES})
 target_link_libraries(wowee_pipeline PUBLIC wowee_base)
@@ -1877,7 +1885,7 @@ target_precompile_headers(wowee_net PRIVATE
 )
 
 add_library(wowee_game STATIC ${WOWEE_GAME_SOURCES})
-target_link_libraries(wowee_game PUBLIC wowee_contacts wowee_who wowee_net wowee_protocol wowee_pipeline wowee_base)
+target_link_libraries(wowee_game PUBLIC wowee_contacts wowee_who wowee_duel wowee_net wowee_protocol wowee_pipeline wowee_base)
 target_precompile_headers(wowee_game PRIVATE
     ${WOWEE_PCH_STD}
     <glm/glm.hpp>
@@ -1892,7 +1900,7 @@ if(HAVE_UNICORN)
 endif()
 
 if(ANDROID)
-    set_target_properties(wowee_base wowee_contacts wowee_who wowee_pipeline wowee_collision wowee_render wowee_protocol
+    set_target_properties(wowee_base wowee_contacts wowee_who wowee_duel wowee_pipeline wowee_collision wowee_render wowee_protocol
                           wowee_net wowee_game PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
@@ -2030,7 +2038,7 @@ function(wowee_apply_client_flags target)
     endif()
 endfunction()
 
-foreach(_client_target wowee wowee_client_objects wowee_base wowee_contacts wowee_who wowee_pipeline wowee_collision wowee_render wowee_protocol wowee_net wowee_game)
+foreach(_client_target wowee wowee_client_objects wowee_base wowee_contacts wowee_who wowee_duel wowee_pipeline wowee_collision wowee_render wowee_protocol wowee_net wowee_game)
     wowee_apply_client_flags(${_client_target})
 endforeach()
 if(WOWEE_ENABLE_ASAN)

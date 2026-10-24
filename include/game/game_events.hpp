@@ -295,12 +295,6 @@ struct AchievementEarned {
     std::string name;
 };
 
-/// Someone challenged the player to a duel.
-struct DuelRequested {
-    uint64_t challengerGuid = 0;
-    std::string challengerName;
-};
-
 /// Someone invited the player to a group.
 struct GroupInviteReceived {
     std::string inviterName;

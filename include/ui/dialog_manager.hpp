@@ -27,7 +27,7 @@ public:
 
     /// Render "early" dialogs (group invite through LFG role check)
     /// called in render() before guild roster / social frame
-    void renderDialogs(game::GameHandler& gameHandler);
+    void renderDialogs();
 
     /// Render "late" dialogs (resurrect, talent wipe, pet unlearn)
     /// called in render() after reclaim corpse button
@@ -46,7 +46,7 @@ private:
     // ---- LFG role state ----
 
     // ---- Individual dialog renderers ----
-    void renderDuelCountdown(game::GameHandler& gameHandler);
+    void renderDuelCountdown();
     void renderPetUnlearnConfirmDialog(game::GameHandler& gameHandler);
 };
 

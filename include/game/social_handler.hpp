@@ -19,6 +19,7 @@ namespace wowee {
 namespace core { class CVarStore; }
 namespace contacts { class IContactsServerFeed; }
 namespace who { class IWhoFeed; }
+namespace duel { class IDuelsFeed; }
 namespace game {
 
 class PacketSender;
@@ -81,6 +82,8 @@ public:
     [[nodiscard]] virtual contacts::IContactsServerFeed* contactsFeed() = 0;
     /// Where SMSG_WHO's answer goes; null when the client was built without it.
     [[nodiscard]] virtual who::IWhoFeed* whoFeed() = 0;
+    /// Where the duel packets go; null when the client was built without them.
+    [[nodiscard]] virtual duel::IDuelsFeed* duelFeed() = 0;
 
     // ---- The appearance switches the realm keeps with the character ----
     [[nodiscard]] virtual bool showingHelm() const = 0;
@@ -103,13 +106,6 @@ struct SocialCharacterState {
     uint32_t totalTimePlayed_ = 0;
     uint32_t levelTimePlayed_ = 0;
 
-    // Duel
-    bool pendingDuelRequest_    = false;
-    uint64_t duelChallengerGuid_= 0;
-    uint64_t duelArbiterGuid_   = 0;   // the duel flag; both answers name it
-    std::string duelChallengerName_;
-    uint32_t duelCountdownMs_   = 0;
-    std::chrono::steady_clock::time_point duelCountdownStartedAt_{};
 
     // A join the server has not answered yet, and how long it has left.
     uint32_t bgJoinPendingType_ = 0;
@@ -447,20 +443,7 @@ public:
     [[nodiscard]] const std::string& getReadyCheckInitiator() const { return readyCheckInitiator_; }
     [[nodiscard]] const std::vector<ReadyCheckResult>& getReadyCheckResults() const { return readyCheckResults_; }
 
-    // Duel
-    void acceptDuel();
-    void forfeitDuel();
-    void proposeDuel(uint64_t targetGuid);
     void reportPlayer(uint64_t targetGuid, const std::string& reason);
-    [[nodiscard]] bool hasPendingDuelRequest() const { return pendingDuelRequest_; }
-    [[nodiscard]] const std::string& getDuelChallengerName() const { return duelChallengerName_; }
-    [[nodiscard]] float getDuelCountdownRemaining() const {
-        if (duelCountdownMs_ == 0) return 0.0f;
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - duelCountdownStartedAt_).count();
-        float rem = (static_cast<float>(duelCountdownMs_) - static_cast<float>(elapsed)) / 1000.0f;
-        return rem > 0.0f ? rem : 0.0f;
-    }
 
     // Party/Raid
     void inviteToGroup(const std::string& playerName);
@@ -730,9 +713,6 @@ private:
     void handleBattlefieldList(network::Packet& packet);
     void handleRaidInstanceInfo(network::Packet& packet);
     void handleInstanceDifficulty(network::Packet& packet);
-    void handleDuelRequested(network::Packet& packet);
-    void handleDuelComplete(network::Packet& packet);
-    void handleDuelWinner(network::Packet& packet);
     void handleLfgJoinResult(network::Packet& packet);
     void handleLfgQueueStatus(network::Packet& packet);
     void handleLfgProposalUpdate(network::Packet& packet);

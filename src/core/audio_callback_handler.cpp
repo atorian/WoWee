@@ -1,5 +1,6 @@
 #include "core/audio_callback_handler.hpp"
 #include "game/game_events.hpp"
+#include "duel/domain/duel.hpp"
 #include "core/player_view.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
@@ -132,7 +133,7 @@ void AudioCallbackHandler::subscribeGameSounds() {
     subscriptions_.push_back(bus.subscribe<ev::TrainerSpellLearned>([this](const ev::TrainerSpellLearned&) {
         playUi([](audio::UiSoundManager& sfx) { sfx.playQuestActivate(); });
     }));
-    subscriptions_.push_back(bus.subscribe<ev::DuelRequested>([this](const ev::DuelRequested&) {
+    subscriptions_.push_back(bus.subscribe<duel::DuelRequested>([this](const duel::DuelRequested&) {
         playUi([](audio::UiSoundManager& sfx) { sfx.playTargetSelect(); });
     }));
     subscriptions_.push_back(bus.subscribe<ev::GroupInviteReceived>([this](const ev::GroupInviteReceived&) {

@@ -11,6 +11,7 @@ namespace game { class ExpansionRegistry; class EmoteTable; class MovementCollis
 namespace core { class EventBus; class CVarStore; }
 namespace contacts { class IContactsServerFeed; }
 namespace who { class IWhoFeed; }
+namespace duel { class IDuelsFeed; }
 namespace network { class WorldConnection; }
 
 namespace game {
@@ -55,6 +56,8 @@ struct GameServices {
     contacts::IContactsServerFeed* contactsFeed = nullptr;
     /// Where SMSG_WHO's answer goes. Set like contactsFeed.
     who::IWhoFeed* whoFeed = nullptr;
+    /// Where the duel packets go. Set like contactsFeed.
+    duel::IDuelsFeed* duelFeed = nullptr;
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };

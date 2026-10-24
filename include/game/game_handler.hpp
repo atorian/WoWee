@@ -638,6 +638,7 @@ public:
     void addLocalChatMessage(const MessageChatData& msg) override;
     contacts::IContactsServerFeed* contactsFeed() override;
     who::IWhoFeed* whoFeed() override;
+    duel::IDuelsFeed* duelFeed() override;
 
     // Money (copper)
     uint64_t getMoneyCopper() const { return inventoryHandler_->moneyCopper(); }
@@ -1051,9 +1052,6 @@ public:
     const std::string& getReadyCheckInitiator() const;
     const std::vector<ReadyCheckResult>& getReadyCheckResults() const;
 
-    // Duel
-    void forfeitDuel();
-
     // AFK/DND status
     void toggleAfk(const std::string& message = "");
     void toggleDnd(const std::string& message = "");
@@ -1089,7 +1087,6 @@ public:
     void setSavedInstanceExtend(uint32_t mapId, uint32_t difficulty, bool extend);
 
     // Combat and Trade
-    void proposeDuel(uint64_t targetGuid);
     void initiateTrade(uint64_t targetGuid);
     void reportPlayer(uint64_t targetGuid, const std::string& reason);
     void stopCasting();
@@ -1859,14 +1856,6 @@ public:
     void setTradeItem(uint8_t tradeSlot, uint8_t bag, uint8_t bagSlot);
     void clearTradeItem(uint8_t tradeSlot);
     void setTradeGold(uint64_t copper);
-
-    // ---- Duel ----
-    bool hasPendingDuelRequest() const;
-    const std::string& getDuelChallengerName() const;
-    void acceptDuel();
-    // forfeitDuel() already declared at line ~399
-    // Returns remaining duel countdown seconds, or 0 if no active countdown
-    float getDuelCountdownRemaining() const;
 
     // Instance lockouts (aliased from handler_types.hpp)
     using InstanceLockout = game::InstanceLockout;
@@ -3663,9 +3652,6 @@ private:
 
     // ---- Instance lockout handler ----
     void resetTradeState();
-    void handleDuelRequested(network::Packet& packet);
-    void handleDuelComplete(network::Packet& packet);
-    void handleDuelWinner(network::Packet& packet);
 
     /**
      * Send CMSG_AUTH_SESSION to server

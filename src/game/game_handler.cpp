@@ -3691,18 +3691,6 @@ bool GameHandler::isInInstance() const {
            (it->second == 1 || it->second == 2);
 }
 
-bool GameHandler::hasPendingDuelRequest() const {
-    return socialHandler_->hasPendingDuelRequest();
-}
-
-const std::string& GameHandler::getDuelChallengerName() const {
-    return socialHandler_->getDuelChallengerName();
-}
-
-float GameHandler::getDuelCountdownRemaining() const {
-    return socialHandler_->getDuelCountdownRemaining();
-}
-
 const std::vector<GameHandler::InstanceLockout>& GameHandler::getInstanceLockouts() const {
     return socialHandler_->getInstanceLockouts();
 }

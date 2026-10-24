@@ -6,6 +6,7 @@
 #include "contacts/services/contacts.hpp"
 #include "who/domain/who_list.hpp"
 #include "who/services/who.hpp"
+#include "duel/services/duels.hpp"
 #include "game/emote_table.hpp"
 #include "game/reputation_standing.hpp"
 #include "game/stationery.hpp"
@@ -251,6 +252,13 @@ static contacts::IContacts* contactsOf(lua_State* L) {
 static who::IWho* whoOf(lua_State* L) {
     auto* services = getLuaServices(L);
     return services ? services->who : nullptr;
+}
+
+/// Duels as the composition root handed them to the addon layer; null without
+/// a game, like the contact lists.
+static duel::IDuels* duelsOf(lua_State* L) {
+    auto* services = getLuaServices(L);
+    return services ? services->duels : nullptr;
 }
 
 static const std::vector<contacts::Contact>& contactRows(lua_State* L) {
@@ -809,13 +817,13 @@ static int lua_DeclineResurrect(lua_State* L) {
     return 0;
 }
 static int lua_AcceptDuel(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->acceptDuel();
+    if (auto* duels = duelsOf(L)) duels->acceptDuel();
     return 0;
 }
 // A duel is refused by forfeiting it, which is the only way this client has to
 // say no and is what the server reads as a decline before it starts.
 static int lua_CancelDuel(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->forfeitDuel();
+    if (auto* duels = duelsOf(L)) duels->forfeitDuel();
     return 0;
 }
 
@@ -3635,7 +3643,8 @@ void registerSocialLuaAPI(lua_State* L) {
             if (!gh || !unit) return 0;
             std::string uid(unit);
             toLowerInPlace(uid);
-            if (const uint64_t guid = resolveUnitGuid(gh, uid)) gh->proposeDuel(guid);
+            auto* duels = duelsOf(L);
+            if (const uint64_t guid = resolveUnitGuid(gh, uid); guid && duels) duels->proposeDuel(guid);
             return 0;
         }},
                 {"RandomRoll", [](lua_State* L) -> int {

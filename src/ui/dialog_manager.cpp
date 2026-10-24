@@ -1,4 +1,5 @@
 #include "ui/dialog_manager.hpp"
+#include "duel/services/duels.hpp"
 #include "game/item_text.hpp"
 #include "game/inventory_slots.hpp"
 #include "ui/framexml_takeover.hpp"
@@ -25,7 +26,7 @@ namespace {
 // ---------------------------------------------------------------------------
 // Render early dialogs (group invite through LFG role check)
 // ---------------------------------------------------------------------------
-void DialogManager::renderDialogs(game::GameHandler& gameHandler) {
+void DialogManager::renderDialogs() {
     // The prompts uiparent.lua raises with a StaticPopup of its own, on events
     // this client fires, are gone from here: the group invite, the duel, the
     // trade request, the summon, the shared quest, the guild invite and both
@@ -36,7 +37,7 @@ void DialogManager::renderDialogs(game::GameHandler& gameHandler) {
 
     // No counterpart: FrameXML has the duel request popup and nothing that
     // counts down to the start.
-    renderDuelCountdown(gameHandler);
+    renderDuelCountdown();
 
 }
 
@@ -57,8 +58,8 @@ void DialogManager::renderLateDialogs(game::GameHandler& gameHandler) {
 // Group Invite Popup
 // ============================================================
 
-void DialogManager::renderDuelCountdown(game::GameHandler& gameHandler) {
-    float remaining = gameHandler.getDuelCountdownRemaining();
+void DialogManager::renderDuelCountdown() {
+    const float remaining = services_.duels ? services_.duels->getDuelCountdownRemaining() : 0.0f;
     if (remaining <= 0.0f) return;
 
     ImVec2 displaySize = ImGui::GetIO().DisplaySize;

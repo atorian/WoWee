@@ -1201,6 +1201,10 @@ who::IWhoFeed* GameHandler::whoFeed() {
     return services_.whoFeed;
 }
 
+duel::IDuelsFeed* GameHandler::duelFeed() {
+    return services_.duelFeed;
+}
+
 void GameHandler::setGuildBankMoney(uint64_t money) {
     inventoryHandler_->setGuildBankMoney(money);
 }
@@ -1539,14 +1543,6 @@ void GameHandler::respondToReadyCheck(bool ready) {
     socialHandler_->respondToReadyCheck(ready);
 }
 
-void GameHandler::acceptDuel() {
-    socialHandler_->acceptDuel();
-}
-
-void GameHandler::forfeitDuel() {
-    socialHandler_->forfeitDuel();
-}
-
 void GameHandler::toggleAfk(const std::string& message) {
     chatHandler_->toggleAfk(message);
 }
@@ -1627,10 +1623,6 @@ void GameHandler::requestRaidInfo() {
 
 void GameHandler::setSavedInstanceExtend(uint32_t mapId, uint32_t difficulty, bool extend) {
     socialHandler_->setSavedInstanceExtend(mapId, difficulty, extend);
-}
-
-void GameHandler::proposeDuel(uint64_t targetGuid) {
-    socialHandler_->proposeDuel(targetGuid);
 }
 
 void GameHandler::initiateTrade(uint64_t targetGuid) {

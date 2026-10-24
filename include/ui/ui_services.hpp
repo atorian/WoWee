@@ -28,6 +28,7 @@ namespace game {
 namespace addons { class AddonManager; class AddonCatalog; }
 namespace contacts { class IContacts; }
 namespace who { class IWho; }
+namespace duel { class IDuels; }
 namespace audio { class AudioCoordinator; }
 
 namespace ui {
@@ -53,6 +54,8 @@ struct UIServices {
     contacts::IContacts* contacts = nullptr;
     /// /who: the last answer, where answers go, and the query.
     who::IWho* who = nullptr;
+    /// The duel the player is asked to or in: its countdown and the answers.
+    duel::IDuels* duels = nullptr;
     /// The interface of the character in the world, in whatever state it is;
     /// null with no character in the world. Asked each time rather than held:
     /// each character has its own, and a /reload replaces it.

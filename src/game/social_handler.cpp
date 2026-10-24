@@ -4,6 +4,8 @@
 #include "game/social_handler.hpp"
 #include "game/contacts_gateway.hpp"
 #include "game/who_gateway.hpp"
+#include "game/duel_gateway.hpp"
+#include "duel/services/duels.hpp"
 #include "who/domain/who_list.hpp"
 #include "who/services/who.hpp"
 #include "contacts/services/contacts.hpp"
@@ -432,6 +434,14 @@ static who::IWhoFeed* whoFeed(SocialQueries& queries) {
     return feed;
 }
 
+static duel::IDuelsFeed* duelFeed(SocialQueries& queries) {
+    auto* feed = queries.duelFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("Duels are not wired into this client; duel packets are dropped and no challenge is shown");
+    return feed;
+}
+
 static contacts::IContactsServerFeed* contactsFeed(SocialQueries& queries) {
     auto* feed = queries.contactsFeed();
     static bool said = false;
@@ -457,6 +467,8 @@ SocialHandler::SocialHandler(PacketSender& sender, FrameXmlEvents& frameXml, cor
         subscriptions_.push_back(std::move(subscription));
     for (auto& subscription : subscribeWhoNotices(events_, chat_, frameXml_, queries_))
         subscriptions_.push_back(std::move(subscription));
+    for (auto& subscription : subscribeDuelNotices(events_, chat_, frameXml_))
+        subscriptions_.push_back(std::move(subscription));
     // The character's social state is the server's to say at every login:
     // SMSG_GROUP_LIST comes with it for a character in a party, the guild
     // and the queues with theirs. Kept, the last session's party stood for
@@ -468,6 +480,7 @@ SocialHandler::SocialHandler(PacketSender& sender, FrameXmlEvents& frameXml, cor
             static_cast<SocialCharacterState&>(*this) = SocialCharacterState{};
             if (auto* feed = contactsFeed(queries_)) feed->beginCharacter();
             if (auto* feed = whoFeed(queries_)) feed->beginCharacter();
+            if (auto* feed = duelFeed(queries_)) feed->beginCharacter();
         }));
 }
 
@@ -727,27 +740,38 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_RAID_INSTANCE_INFO] = [this](network::Packet& packet) { handleRaidInstanceInfo(packet); };
 
     // ---- Duels ----
-    table[Opcode::SMSG_DUEL_REQUESTED] = [this](network::Packet& packet) { handleDuelRequested(packet); };
-    table[Opcode::SMSG_DUEL_COMPLETE] = [this](network::Packet& packet) { handleDuelComplete(packet); };
-    table[Opcode::SMSG_DUEL_WINNER] = [this](network::Packet& packet) { handleDuelWinner(packet); };
+    table[Opcode::SMSG_DUEL_REQUESTED] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(16)) { packet.skipAll(); return; }
+        // The flag first, then the challenger. Read the other way round, the
+        // challenger was the flag - a game object no name lookup could find, so
+        // the challenge came from a hex number - and the flag, which the accept
+        // and the refusal both have to name, was thrown away.
+        const uint64_t arbiter = packet.readUInt64();
+        const uint64_t challenger = packet.readUInt64();
+        if (auto* feed = duelFeed(queries_)) feed->onRequested(arbiter, challenger);
+    };
+    table[Opcode::SMSG_DUEL_COMPLETE] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(1)) return;
+        const bool started = packet.readUInt8() != 0;
+        if (auto* feed = duelFeed(queries_)) feed->onComplete(started);
+    };
+    table[Opcode::SMSG_DUEL_WINNER] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(3)) return;
+        const bool fled = packet.readUInt8() == 1;
+        std::string winner = packet.readString();
+        std::string loser = packet.readString();
+        if (auto* feed = duelFeed(queries_)) feed->onWinner(fled, std::move(winner), std::move(loser));
+    };
     table[Opcode::SMSG_DUEL_OUTOFBOUNDS] = [this](network::Packet& /*packet*/) {
-        raiseUiError("You are out of the duel area!");
-        raiseUiError("You are out of the duel area!");
-        // The interface runs the ten-second countdown to a forfeit off this
-        // pair; the message alone says it once and never counts.
-        if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("DUEL_OUTOFBOUNDS", {});
+        if (auto* feed = duelFeed(queries_)) feed->onOutOfBounds();
     };
     table[Opcode::SMSG_DUEL_INBOUNDS] = [this](network::Packet& /*packet*/) {
-        // Stops that countdown. Handled as a no-op before, so a duellist who
-        // stepped back inside kept a timer that was no longer true.
-        if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("DUEL_INBOUNDS", {});
+        if (auto* feed = duelFeed(queries_)) feed->onInBounds();
     };
     table[Opcode::SMSG_DUEL_COUNTDOWN] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(4)) {
-            uint32_t ms = packet.readUInt32();
-            duelCountdownMs_ = (ms > 0 && ms <= 30000) ? ms : 3000;
-            duelCountdownStartedAt_ = std::chrono::steady_clock::now();
-        }
+        if (!packet.hasRemaining(4)) return;
+        const uint32_t ms = packet.readUInt32();
+        if (auto* feed = duelFeed(queries_)) feed->onCountdown(ms);
     };
     table[Opcode::SMSG_PARTYKILLLOG] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(16)) return;
@@ -1768,34 +1792,6 @@ void SocialHandler::respondToReadyCheck(bool ready) {
     chat_.addSystemChatMessage(ready ? "You are ready." : "You are not ready.");
 }
 
-// ============================================================
-// Duel
-// ============================================================
-
-void SocialHandler::acceptDuel() {
-    if (!pendingDuelRequest_ || !sender_.characterInWorld()) return;
-    pendingDuelRequest_ = false;
-    auto pkt = DuelAcceptPacket::build(duelArbiterGuid_);
-    sender_.send(pkt);
-    chat_.addSystemChatMessage("You accept the duel.");
-}
-
-void SocialHandler::forfeitDuel() {
-    if (!sender_.characterInWorld()) return;
-    pendingDuelRequest_ = false;
-    auto packet = DuelCancelPacket::build(duelArbiterGuid_);
-    sender_.send(packet);
-    chat_.addSystemChatMessage("You have forfeited the duel.");
-}
-
-void SocialHandler::proposeDuel(uint64_t targetGuid) {
-    if (!sender_.characterInWorld()) return;
-    if (targetGuid == 0) { raiseUiError("You must target a player to challenge to a duel."); return; }
-    auto packet = DuelProposedPacket::build(targetGuid);
-    sender_.send(packet);
-    chat_.addSystemChatMessage("You have challenged your target to a duel.");
-}
-
 void SocialHandler::reportPlayer(uint64_t targetGuid, const std::string& reason) {
     if (!sender_.characterInWorld()) return;
     if (targetGuid == 0) {
@@ -1806,58 +1802,6 @@ void SocialHandler::reportPlayer(uint64_t targetGuid, const std::string& reason)
     sender_.send(packet);
     chat_.addSystemChatMessage("Player report submitted.");
     LOG_INFO("Reported player: 0x", std::hex, targetGuid, std::dec, " reason=", reason);
-}
-
-void SocialHandler::handleDuelRequested(network::Packet& packet) {
-    if (!packet.hasRemaining(16)) { packet.skipAll(); return; }
-    // The flag first, then the challenger. Read the other way round, the
-    // challenger was the flag - a game object no name lookup could find, so
-    // the challenge came from a hex number - and the flag, which the accept
-    // and the refusal both have to name, was thrown away.
-    duelArbiterGuid_ = packet.readUInt64();
-    duelChallengerGuid_ = packet.readUInt64();
-    // The server sends this to both players. The one who issued the challenge
-    // keeps the flag, to be able to call it off, and is not asked to accept it.
-    if (duelChallengerGuid_ == queries_.characterGuid()) {
-        pendingDuelRequest_ = false;
-        return;
-    }
-    duelChallengerName_.clear();
-    auto entity = queries_.entities().getEntity(duelChallengerGuid_);
-    if (auto* unit = dynamic_cast<Unit*>(entity.get()))
-        duelChallengerName_ = unit->getName();
-    if (duelChallengerName_.empty()) {
-        duelChallengerName_ = queries_.playerName(duelChallengerGuid_);
-    }
-    if (duelChallengerName_.empty()) {
-        char tmp[32];
-        std::snprintf(tmp, sizeof(tmp), "0x%llX", static_cast<unsigned long long>(duelChallengerGuid_));
-        duelChallengerName_ = tmp;
-    }
-    pendingDuelRequest_ = true;
-    chat_.addSystemChatMessage(duelChallengerName_ + " challenges you to a duel!");
-    events_.publish(events::DuelRequested{duelChallengerGuid_, duelChallengerName_});
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("DUEL_REQUESTED", {duelChallengerName_});
-}
-
-void SocialHandler::handleDuelComplete(network::Packet& packet) {
-    if (!packet.hasRemaining(1)) return;
-    uint8_t started = packet.readUInt8();
-    pendingDuelRequest_ = false;
-    duelCountdownMs_ = 0;
-    if (!started) chat_.addSystemChatMessage("The duel was cancelled.");
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("DUEL_FINISHED", {});
-}
-
-void SocialHandler::handleDuelWinner(network::Packet& packet) {
-    if (!packet.hasRemaining(3)) return;
-    uint8_t duelType = packet.readUInt8();
-    std::string winner = packet.readString();
-    std::string loser  = packet.readString();
-    std::string msg = (duelType == 1)
-        ? loser + " has fled from the duel. " + winner + " wins!"
-        : winner + " has defeated " + loser + " in a duel!";
-    chat_.addSystemChatMessage(msg);
 }
 
 // ============================================================
