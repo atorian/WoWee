@@ -19,6 +19,7 @@
 #include <glm/gtx/quaternion.hpp>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <random>
 #include <limits>
 #include <set>
@@ -958,32 +959,17 @@ void M2Renderer::recordM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
             currentPipeline = desiredPipeline;
         }
 
-        // Use pre-allocated stable descriptor set; fall back to per-frame alloc only if unavailable
+        // The set loadModel allocated for the emitter. There is none only when
+        // that allocation failed, which means materialDescPool_ was exhausted;
+        // stop there rather than draw with whatever set 1 was bound last.
         VkDescriptorSet texSet = group.preAllocSet;
         if (texSet == VK_NULL_HANDLE) {
-            // Fallback: allocate per-frame (pool exhaustion risk - should not happen in practice)
-            VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-            ai.descriptorPool = materialDescPool_;
-            ai.descriptorSetCount = 1;
-            ai.pSetLayouts = &particleTexLayout_;
-            if (vkCtx_->allocateDescriptorSets(ai, &texSet) == VK_SUCCESS) {
-                VkTexture* tex = (group.texture && group.texture->isValid())
-                    ? group.texture : whiteTexture_.get();
-                if (!tex || !tex->isValid()) continue;
-                VkDescriptorImageInfo imgInfo = tex->descriptorInfo();
-                VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-                write.dstSet = texSet;
-                write.dstBinding = 0;
-                write.descriptorCount = 1;
-                write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                write.pImageInfo = &imgInfo;
-                vkUpdateDescriptorSets(vkCtx_->getDevice(), 1, &write, 0, nullptr);
-            }
+            LOG_FATAL("M2 particles: group (blend ", static_cast<int>(group.blendType),
+                      ") has no descriptor set; loadModel could not allocate one");
+            std::abort();
         }
-        if (texSet != VK_NULL_HANDLE) {
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    particlePipelineLayout_, 1, 1, &texSet, 0, nullptr);
-        }
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                particlePipelineLayout_, 1, 1, &texSet, 0, nullptr);
 
         const M2ParticlePush pc{
             .tileX = static_cast<float>(group.tilesX), .tileY = static_cast<float>(group.tilesY),
