@@ -11,6 +11,8 @@
 #include "arena/services/arena_service.hpp"
 #include "game/battleground_gateway.hpp"
 #include "battleground/services/battleground_service.hpp"
+#include "game/lfg_gateway.hpp"
+#include "lfg/services/lfg_service.hpp"
 
 #include <catch_amalgamated.hpp>  // test_support.hpp's REQUIRE
 #include "test_support.hpp"
@@ -175,6 +177,9 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     battlegrounds_ = std::make_unique<battleground::BattlegroundService>(*battlegroundGateway_, *battlegroundGateway_,
                                                                          events_);
     services_.battlegroundFeed = battlegrounds_.get();
+    lfgGateway_ = std::make_unique<game::LfgGateway>(*game_, *game_);
+    lfg_ = std::make_unique<lfg::LfgService>(*lfgGateway_, *lfgGateway_, events_);
+    services_.lfgFeed = lfg_.get();
     game::loadProtocolTables(*game_, *expansions_.getActive());
     game_->setAddonEventCallback([this](const std::string& name, const std::vector<std::string>& args) {
         addonEvents_.push_back({name, args});
@@ -189,6 +194,7 @@ duel::IDuels& GameHarness::duels() { return *duels_; }
 petition::IPetitions& GameHarness::petitions() { return *petitions_; }
 arena::IArenaTeams& GameHarness::arenaTeams() { return *arenaTeams_; }
 battleground::IBattlegrounds& GameHarness::battlegrounds() { return *battlegrounds_; }
+lfg::ILfg& GameHarness::lfg() { return *lfg_; }
 
 FakeWorldConnection& GameHarness::server() {
     if (!connection_) fail("no connection yet: connect (or enterWorld) first");

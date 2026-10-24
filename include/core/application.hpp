@@ -50,7 +50,8 @@ namespace duel { class DuelService; }
 namespace petition { class PetitionService; }
 namespace arena { class ArenaService; }
 namespace battleground { class BattlegroundService; }
-namespace game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; }
+namespace lfg { class LfgService; }
+namespace game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; }
 
 // Forward declarations
 namespace rendering {
@@ -420,6 +421,8 @@ private:
     std::unique_ptr<arena::ArenaService> arenaTeams_;
     std::unique_ptr<game::BattlegroundGateway> battlegroundGateway_;
     std::unique_ptr<battleground::BattlegroundService> battlegrounds_;
+    std::unique_ptr<game::LfgGateway> lfgGateway_;
+    std::unique_ptr<lfg::LfgService> lfg_;
     std::unique_ptr<game::GameHandler> gameHandler;
     /// The renderer's side of the transports - see game::TransportScene.
     std::unique_ptr<RendererTransportScene> transportScene_;

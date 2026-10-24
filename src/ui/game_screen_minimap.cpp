@@ -1,5 +1,6 @@
 #include "contacts/services/contacts.hpp"
 #include "battleground/services/battlegrounds.hpp"
+#include "lfg/services/lfg.hpp"
 #include "rendering/view_distance.hpp"
 #include "game/group_defines.hpp"
 #include "game/weather_handler.hpp"
@@ -446,9 +447,9 @@ void GameScreen::renderMinimapIndicators(game::GameHandler& gameHandler, float c
     }
 
     // LFG queue indicator - shown when Dungeon Finder queue is active (Queued or RoleCheck)
-    {
-        using LfgState = game::GameHandler::LfgState;
-        LfgState lfgSt = gameHandler.getLfgState();
+    if (auto* finder = services_.lfg) {
+        using LfgState = lfg::LfgState;
+        LfgState lfgSt = finder->getLfgState();
         if (lfgSt == LfgState::Queued || lfgSt == LfgState::RoleCheck) {
             ImGui::SetNextWindowPos(ImVec2(indicatorX, nextIndicatorY), ImGuiCond_Always);
             ImGui::SetNextWindowSize(ImVec2(indicatorW, kIndicatorH), ImGuiCond_Always);
@@ -457,7 +458,7 @@ void GameScreen::renderMinimapIndicators(game::GameHandler& gameHandler, float c
                     float pulse = 0.6f + 0.4f * std::sin(static_cast<float>(ImGui::GetTime()) * 3.0f);
                     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, pulse), "LFG: Role Check...");
                 } else {
-                    const uint32_t queued = gameHandler.getLfgQueuedSeconds();
+                    const uint32_t queued = finder->getLfgQueuedSeconds();
                     const int qMin = static_cast<int>(queued / 60);
                     const int qSec = static_cast<int>(queued % 60);
                     float pulse = 0.6f + 0.4f * std::sin(static_cast<float>(ImGui::GetTime()) * 1.2f);

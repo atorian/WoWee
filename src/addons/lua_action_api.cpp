@@ -1,5 +1,6 @@
 // lua_action_api.cpp - Action bar, cursor/pickup, keyboard input, key bindings, and pet actions Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
+#include "lfg/services/lfg.hpp"
 #include "game/item_text.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "addons/lua_api_registrations.hpp"
@@ -2949,7 +2950,7 @@ void registerActionLuaAPI(lua_State* L) {
                 // Both buttons matter here: declining is a vote, not a
                 // dismissal, and OnCancel sends it.
                 {"SetLFGBootVote", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->lfgSetBootVote(lua_toboolean(L, 1) != 0);
+            if (getGameHandler(L)) lfgOf(L).lfgSetBootVote(lua_toboolean(L, 1) != 0);
             return 0;
         }},
                 // CONFIRM_RESET_INSTANCES' accept, from /resetinstances and

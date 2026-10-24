@@ -168,13 +168,6 @@ struct GuildBankLogEntry {
     uint32_t secondsAgo = 0;
 };
 
-/// One dungeon of an LFG role check: its id, and the type packed into the top
-/// byte of the entry SMSG_LFG_ROLE_CHECK_UPDATE sends.
-struct LfgRoleCheckDungeon {
-    uint32_t dungeonId = 0;
-    uint8_t typeId = 0;
-};
-
 // ---- Ready check ----
 
 struct ReadyCheckResult {
@@ -212,34 +205,6 @@ struct GossipPoi {
 
 // ---- Instance lockouts ----
 
-/// What a random dungeon pays out the first time it is run each day.
-struct LfgRewardItem {
-    uint32_t itemId = 0;
-    uint32_t displayInfoId = 0;
-    uint32_t count = 0;
-};
-struct LfgReward {
-    uint32_t dungeonId = 0;
-    bool done = false;          // already claimed today
-    uint32_t money = 0;
-    uint32_t experience = 0;
-    std::vector<LfgRewardItem> items;
-};
-
-/// One row of the dungeon-ready dialog: who the proposal is offering, and
-/// whether they have answered it yet.
-///
-/// The server sends no names or levels here - only what each player is for and
-/// what they have said - so those stay empty rather than being invented.
-struct LfgProposalMember {
-    uint32_t role = 0;      // LFG role mask, same bits SetLFGRoles sends
-    bool isSelf = false;
-    bool inDungeon = false;
-    bool sameGroup = false;
-    bool answered = false;
-    bool accepted = false;
-};
-
 /// A mount or a critter the player knows, as the character sheet's pet tab
 /// lists them. Both are spells; what separates them is what the spell does.
 struct Companion {
@@ -256,27 +221,6 @@ struct Companion {
 /// map 43, Ragefire Chasm faction 0 where everything else is -1, Karazhan in
 /// the Burning Crusade raid group. The layout table only ever named ID and
 /// Name, which is why the picker had nothing to list.
-/// What a finished dungeon-finder run paid out, from SMSG_LFG_PLAYER_REWARD.
-///
-/// Kept because the alert frame reads it back rather than being handed it:
-/// LFG_COMPLETION_REWARD carries no arguments, and
-/// DungeonCompletionAlertFrame_ShowAlert then asks GetLFGCompletionReward for
-/// all nine values and GetLFGCompletionRewardItem for each item.
-struct LfgCompletionReward {
-    struct Item {
-        uint32_t itemId = 0;
-        uint32_t displayId = 0;
-        uint32_t count = 0;
-    };
-    uint32_t randomDungeonId = 0;  ///< the "Random ..." entry that was queued for
-    uint32_t dungeonId = 0;        ///< the dungeon actually finished
-    bool done = false;
-    uint32_t money = 0;            ///< copper
-    uint32_t xp = 0;
-    std::vector<Item> items;
-    bool valid = false;
-};
-
 struct LfgDungeon {
     uint32_t id = 0;
     std::string name;
@@ -312,19 +256,6 @@ struct InstanceLockout {
     uint64_t resetTime   = 0;
     bool     locked      = false;
     bool     extended    = false;
-};
-
-// ---- LFG ----
-
-enum class LfgState : uint8_t {
-    None           = 0,
-    RoleCheck      = 1,
-    Queued         = 2,
-    Proposal       = 3,
-    Boot           = 4,
-    InDungeon      = 5,
-    FinishedDungeon= 6,
-    RaidBrowser    = 7,
 };
 
 // ---- Trade ----

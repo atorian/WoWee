@@ -958,6 +958,11 @@ arena::IArenaTeams* arenaTeamsOf(lua_State* L);
 /// null without a game.
 battleground::IBattlegrounds* battlegroundsOf(lua_State* L);
 
+/// The dungeon finder as the composition root handed it to the addon layer,
+/// or one that is never queued and sends nothing when there is no game - so a
+/// binding reads it without testing for it.
+lfg::ILfg& lfgOf(lua_State* L);
+
 /// The team id at an arena team index, or zero when the index is off the end
 /// or there are no arena teams.
 ///

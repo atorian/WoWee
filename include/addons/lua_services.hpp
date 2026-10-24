@@ -20,6 +20,7 @@ namespace wowee::duel { class IDuels; }
 namespace wowee::petition { class IPetitions; }
 namespace wowee::arena { class IArenaTeams; }
 namespace wowee::battleground { class IBattlegrounds; }
+namespace wowee::lfg { class ILfg; }
 
 namespace wowee::addons {
 
@@ -46,6 +47,9 @@ struct LuaServices {
     arena::IArenaTeams*      arenaTeams        = nullptr;
     /// The battleground queues, listings, scoreboard and map positions.
     battleground::IBattlegrounds* battlegrounds    = nullptr;
+    /// The dungeon finder: the queue, the proposal, the role check and the
+    /// vote to kick, and the requests that move them.
+    lfg::ILfg*               lfg               = nullptr;
 
     /// Run a macro body, as RunMacroText() does - one command per line,
     /// through the same path the action bar uses for a macro button.

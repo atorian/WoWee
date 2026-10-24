@@ -30,6 +30,7 @@ namespace contacts { class IContacts; }
 namespace who { class IWho; }
 namespace duel { class IDuels; }
 namespace battleground { class IBattlegrounds; }
+namespace lfg { class ILfg; }
 namespace audio { class AudioCoordinator; }
 
 namespace ui {
@@ -59,6 +60,8 @@ struct UIServices {
     duel::IDuels* duels = nullptr;
     /// The battleground queues, listings, scoreboard and map positions.
     battleground::IBattlegrounds* battlegrounds = nullptr;
+    /// The dungeon finder's queue and what it is doing.
+    lfg::ILfg* lfg = nullptr;
     /// The interface of the character in the world, in whatever state it is;
     /// null with no character in the world. Asked each time rather than held:
     /// each character has its own, and a /reload replaces it.

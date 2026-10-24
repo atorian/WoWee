@@ -1,3 +1,4 @@
+#include "lfg/services/lfg.hpp"
 #include "addons/lua_engine.hpp"
 #include "ui/link_hit.hpp"
 #include "ui/text_markup.hpp"
@@ -2205,7 +2206,7 @@ int lua_Tooltip_SetLFGCompletionReward(lua_State* L) {
     auto* gh = wowee::addons::getGameHandler(L);
     const int index = static_cast<int>(luaL_optnumber(L, 2, 0));
     if (!w || !gh) { lua_pushboolean(L, 0); return 1; }
-    const auto& reward = gh->getLfgCompletionReward();
+    const auto& reward = wowee::addons::lfgOf(L).getLfgCompletionReward();
     if (!reward.valid || index < 1 ||
         index > static_cast<int>(reward.items.size())) {
         lua_pushboolean(L, 0);

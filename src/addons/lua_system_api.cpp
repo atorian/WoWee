@@ -3,6 +3,7 @@
 #include "game/action_bar_handler.hpp"
 #include "arena/services/arena.hpp"
 #include "battleground/services/battlegrounds.hpp"
+#include "lfg/services/lfg.hpp"
 #include <array>
 #include <algorithm>
 #include <optional>
@@ -3722,7 +3723,7 @@ static int lua_Screenshot(lua_State* L) {
 // way it was when the comment here said no such thing existed.
 static int lua_HasLFGRestrictions(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->isLfgInDungeon() ? 1 : 0);
+    lua_pushboolean(L, gh && lfgOf(L).isLfgInDungeon() ? 1 : 0);
     return 1;
 }
 
@@ -3735,7 +3736,7 @@ static int lua_HasLFGRestrictions(lua_State* L) {
 // an error rather than an answer of "none".
 static int lua_GetLFGProposal(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const bool pending = gh && gh->getLfgState() == game::LfgState::Proposal;
+    const bool pending = gh && lfgOf(L).getLfgState() == lfg::LfgState::Proposal;
     if (!pending) { for (int i = 0; i < 11; ++i) lua_pushnil(L); return 11; }
 
     // Nils here are not survivable, which only showed once the dialog could
@@ -3744,7 +3745,7 @@ static int lua_GetLFGProposal(lua_State* L) {
     // goes into `for i = numMembers+1, ...`, where nil is arithmetic on
     // nothing; completedEncounters is compared with > 0. The dialog was
     // unreachable before, so none of it had ever run.
-    const uint32_t dungeonId = gh->getLfgDungeonId();
+    const uint32_t dungeonId = lfgOf(L).getLfgDungeonId();
     const game::LfgDungeon* dungeon = nullptr;
     for (const auto& d : gh->getLfgDungeons()) {
         if (d.id == dungeonId) { dungeon = &d; break; }
@@ -3752,7 +3753,7 @@ static int lua_GetLFGProposal(lua_State* L) {
 
     // The role the player queued as. The dialog names it and picks its icon
     // from it, and these are the tokens GetTexCoordsForRole indexes by.
-    const uint8_t roles = gh->getLfgOfferedRoles();
+    const uint8_t roles = lfgOf(L).getLfgOfferedRoles();
     const char* role = (roles & 0x02) ? "TANK"
                      : (roles & 0x04) ? "HEALER"
                                       : "DAMAGER";
@@ -3763,7 +3764,7 @@ static int lua_GetLFGProposal(lua_State* L) {
     // dungeonID and looks the dungeon up by it.
     lua_pushnumber(L, dungeonId);                                // 3: id
     lua_pushstring(L, dungeon ? dungeon->name.c_str()
-                              : gh->getCurrentLfgDungeonName().c_str());  // 4: name
+                              : lfgOf(L).getCurrentLfgDungeonName().c_str());  // 4: name
     // TextureFilename from LFGDungeons.dbc, which is exactly the suffix that
     // path is built from.
     lua_pushstring(L, dungeon ? dungeon->texture.c_str() : "");  // 5: texture
@@ -3776,7 +3777,7 @@ static int lua_GetLFGProposal(lua_State* L) {
     lua_pushnumber(L, 0);                                        // 9: completedEncounters
     // The real count now that the roster is parsed - each row is a role icon
     // and a tick, both of which GetLFGProposalMember can answer.
-    lua_pushnumber(L, static_cast<double>(gh->getLfgProposalMembers().size()));  // 10
+    lua_pushnumber(L, static_cast<double>(lfgOf(L).getLfgProposalMembers().size()));  // 10
 
     lua_pushboolean(L, 0);                                       // 11: isLeader
     return 11;
@@ -3786,7 +3787,7 @@ static int lua_GetLFGProposal(lua_State* L) {
 //                      lfgComment, slotCount
 static int lua_GetLFGInfoServer(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const bool queued = gh && gh->isLfgQueued();
+    const bool queued = gh && lfgOf(L).isLfgQueued();
     // Answers, not blanks. LFRFrame_OnEvent does
     // `LFRQueueFrameComment:SetText(lfgComment)` and then `strtrim(lfgComment)`
     // whenever it is told the queue was joined, and nil there raised inside
@@ -3819,16 +3820,16 @@ static int lua_GetLFGInfoServer(lua_State* L) {
 // the group size behind the count the handler used to stop at.
 static int lua_GetLFGRoleUpdate(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const bool checking = gh && gh->getLfgState() == game::LfgState::RoleCheck;
+    const bool checking = gh && lfgOf(L).getLfgState() == lfg::LfgState::RoleCheck;
     if (checking) lua_pushboolean(L, 1); else lua_pushnil(L);
-    lua_pushnumber(L, gh ? static_cast<double>(gh->getLfgRoleCheckDungeons().size()) : 0.0);
-    lua_pushnumber(L, gh ? gh->getLfgRoleCheckMembers() : 0);
+    lua_pushnumber(L, gh ? static_cast<double>(lfgOf(L).getLfgRoleCheckDungeons().size()) : 0.0);
+    lua_pushnumber(L, gh ? lfgOf(L).getLfgRoleCheckMembers() : 0);
     return 3;
 }
 
 static int lua_IsListedInLFR(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->getLfgState() == game::LfgState::RaidBrowser ? 1 : 0);
+    lua_pushboolean(L, gh && lfgOf(L).getLfgState() == lfg::LfgState::RaidBrowser ? 1 : 0);
     return 1;
 }
 
@@ -3837,10 +3838,10 @@ static int lua_IsPartyLFG(lua_State* L) {
     auto* gh = getGameHandler(L);
     bool viaFinder = false;
     if (gh) {
-        const auto st = gh->getLfgState();
-        viaFinder = (st == game::LfgState::InDungeon ||
-                     st == game::LfgState::FinishedDungeon ||
-                     st == game::LfgState::Boot);
+        const auto st = lfgOf(L).getLfgState();
+        viaFinder = (st == lfg::LfgState::InDungeon ||
+                     st == lfg::LfgState::FinishedDungeon ||
+                     st == lfg::LfgState::Boot);
     }
     lua_pushboolean(L, viaFinder ? 1 : 0);
     return 1;
@@ -4086,13 +4087,13 @@ static int lua_GetNumBattlefields(lua_State* L) {
 // not tell inside from outside and offered the wrong direction.
 static int lua_IsInLFGDungeon(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->getLfgState() == game::LfgState::InDungeon ? 1 : 0);
+    lua_pushboolean(L, gh && lfgOf(L).getLfgState() == lfg::LfgState::InDungeon ? 1 : 0);
     return 1;
 }
 
 // LFGTeleport(out) - out to the dungeon's entrance, or back in.
 static int lua_LFGTeleport(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->lfgTeleport(lua_toboolean(L, 1) != 0);
+    if (getGameHandler(L)) lfgOf(L).lfgTeleport(lua_toboolean(L, 1) != 0);
     return 0;
 }
 
@@ -4423,7 +4424,7 @@ static int lua_JoinBattlefield(lua_State* L) {
 // the arithmetic above lands on the base whichever way the frame reads it.
 static int lua_GetLFGCompletionReward(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const game::LfgCompletionReward* r = gh ? &gh->getLfgCompletionReward() : nullptr;
+    const lfg::LfgCompletionReward* r = gh ? &lfgOf(L).getLfgCompletionReward() : nullptr;
     if (!r || !r->valid) {
         lua_pushnil(L);      // 1: name
         lua_pushnil(L);      // 2: typeID
@@ -4465,7 +4466,7 @@ static int lua_GetLFGCompletionReward(lua_State* L) {
 static int lua_GetLFGCompletionRewardItem(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
-    const game::LfgCompletionReward* r = gh ? &gh->getLfgCompletionReward() : nullptr;
+    const lfg::LfgCompletionReward* r = gh ? &lfgOf(L).getLfgCompletionReward() : nullptr;
     if (!r || !r->valid || index < 1 ||
         index > static_cast<int>(r->items.size())) {
         lua_pushnil(L);

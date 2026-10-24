@@ -1217,6 +1217,10 @@ battleground::IBattlegroundsFeed* GameHandler::battlegroundFeed() {
     return services_.battlegroundFeed;
 }
 
+lfg::ILfgFeed* GameHandler::lfgFeed() {
+    return services_.lfgFeed;
+}
+
 void GameHandler::setGuildBankMoney(uint64_t money) {
     inventoryHandler_->setGuildBankMoney(money);
 }
@@ -2048,44 +2052,6 @@ void GameHandler::swapRaidSubgroup(const std::string& a, const std::string& b) {
 // ---------------------------------------------------------------------------
 // LFG outgoing packets
 // ---------------------------------------------------------------------------
-
-void GameHandler::lfgJoin(const std::vector<uint32_t>& dungeonIds, uint8_t roles) {
-    socialHandler_->lfgJoin(dungeonIds, roles);
-}
-
-void GameHandler::lfgLeave() {
-    socialHandler_->lfgLeave();
-}
-
-void GameHandler::requestLfgPlayerLockInfo() {
-    if (state != WorldState::IN_WORLD || !socket) return;
-    // Payload-free requests. The dungeon finder's ready popup asks for both in
-    // its OnShow, so the rewards it is about to draw are the current ones.
-    network::Packet pkt(wireOpcode(Opcode::CMSG_LFD_PLAYER_LOCK_INFO_REQUEST));
-    socket->send(pkt);
-}
-
-void GameHandler::requestLfgPartyLockInfo() {
-    if (state != WorldState::IN_WORLD || !socket) return;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_LFD_PARTY_LOCK_INFO_REQUEST));
-    socket->send(pkt);
-}
-
-void GameHandler::lfgSetRoles(uint8_t roles) {
-    socialHandler_->lfgSetRoles(roles);
-}
-
-void GameHandler::lfgAcceptProposal(uint32_t proposalId, bool accept) {
-    socialHandler_->lfgAcceptProposal(proposalId, accept);
-}
-
-void GameHandler::lfgTeleport(bool toLfgDungeon) {
-    socialHandler_->lfgTeleport(toLfgDungeon);
-}
-
-void GameHandler::lfgSetBootVote(bool vote) {
-    socialHandler_->lfgSetBootVote(vote);
-}
 
 void GameHandler::loadAreaTriggerDbc() {
     movementHandler_->loadAreaTriggerDbc();

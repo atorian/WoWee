@@ -30,6 +30,7 @@
 // here guards, and a fabricated reward or lock reads as fact.
 #include "addons/lua_api_helpers.hpp"
 #include "addons/lua_engine.hpp"
+#include "lfg/services/lfg.hpp"
 #include "game/game_utils.hpp"
 
 #include <algorithm>
@@ -38,6 +39,69 @@
 #include <vector>
 
 namespace wowee::addons {
+
+namespace {
+
+/// The dungeon finder of a client with no game: never queued, nothing on
+/// offer, and every request dropped.
+class NoLfg final : public lfg::ILfg {
+public:
+    lfg::LfgState getLfgState() const override { return lfg::LfgState::None; }
+    bool isLfgQueued() const override { return false; }
+    bool isLfgInDungeon() const override { return false; }
+    uint32_t getLfgDungeonId() const override { return 0; }
+    std::string getCurrentLfgDungeonName() const override { return {}; }
+    uint8_t getLfgOfferedRoles() const override { return 0; }
+    const std::unordered_map<uint32_t, uint32_t>& getLfgLocks() const override { return locks_; }
+    const std::vector<lfg::LfgReward>& getLfgRewards() const override { return rewards_; }
+    const lfg::LfgCompletionReward& getLfgCompletionReward() const override { return reward_; }
+    int32_t getLfgAvgWaitSec() const override { return -1; }
+    int32_t getLfgMyWaitSec() const override { return -1; }
+    uint32_t getLfgQueuedSeconds() const override { return 0; }
+    int32_t getLfgWaitTank() const override { return -1; }
+    int32_t getLfgWaitHealer() const override { return -1; }
+    int32_t getLfgWaitDps() const override { return -1; }
+    uint8_t getLfgNeedTank() const override { return 0; }
+    uint8_t getLfgNeedHealer() const override { return 0; }
+    uint8_t getLfgNeedDps() const override { return 0; }
+    uint32_t getLfgProposalId() const override { return 0; }
+    const std::vector<lfg::LfgProposalMember>& getLfgProposalMembers() const override { return members_; }
+    const std::vector<lfg::LfgRoleCheckDungeon>& getLfgRoleCheckDungeons() const override { return dungeons_; }
+    uint8_t getLfgRoleCheckMembers() const override { return 0; }
+    bool isLfgBootInProgress() const override { return false; }
+    bool hasLfgBootVoted() const override { return false; }
+    bool getLfgBootMyVote() const override { return false; }
+    uint32_t getLfgBootVotes() const override { return 0; }
+    uint32_t getLfgBootTotal() const override { return 0; }
+    uint32_t getLfgBootTimeLeft() const override { return 0; }
+    const std::string& getLfgBootTargetName() const override { return empty_; }
+    const std::string& getLfgBootReason() const override { return empty_; }
+    void lfgJoin(const std::vector<uint32_t>&, uint8_t) override {}
+    void lfgLeave() override {}
+    void lfgSetRoles(uint8_t) override {}
+    void lfgAcceptProposal(uint32_t, bool) override {}
+    void lfgSetBootVote(bool) override {}
+    void lfgTeleport(bool) override {}
+    void requestLfgPlayerLockInfo() override {}
+    void requestLfgPartyLockInfo() override {}
+
+private:
+    std::unordered_map<uint32_t, uint32_t> locks_;
+    std::vector<lfg::LfgReward> rewards_;
+    lfg::LfgCompletionReward reward_;
+    std::vector<lfg::LfgProposalMember> members_;
+    std::vector<lfg::LfgRoleCheckDungeon> dungeons_;
+    std::string empty_;
+};
+
+NoLfg kNoLfg;
+
+} // namespace
+
+lfg::ILfg& lfgOf(lua_State* L) {
+    auto* services = getLuaServices(L);
+    return (services && services->lfg) ? *services->lfg : kNoLfg;
+}
 
 namespace {
 
@@ -106,8 +170,8 @@ int luaReturnNothing(lua_State* L) { (void)L; return 0; }
 /// The roles the player has offered. Kept on the handler now - the ready
 /// dialog names the role it found you a group for, and a static in this file
 /// was not somewhere GetLFGProposal could reach.
-uint8_t offeredRoles(game::GameHandler* gh) {
-    const uint8_t roles = gh ? gh->getLfgOfferedRoles() : 0;
+uint8_t offeredRoles(lua_State* L, game::GameHandler* gh) {
+    const uint8_t roles = gh ? lfgOf(L).getLfgOfferedRoles() : 0;
     return roles ? roles : 0x01;   // "player" is always set
 }
 
@@ -232,7 +296,7 @@ void registerLfgLuaAPI(lua_State* L) {
         auto* gh = getGameHandler(L);
         lua_newtable(L);
         if (!gh) return 1;
-        for (const auto& [dungeonId, status] : gh->getLfgLocks()) {
+        for (const auto& [dungeonId, status] : lfgOf(L).getLfgLocks()) {
             if (status == 0) continue;          // 0 is not a lock
             lua_pushboolean(L, 1);
             lua_rawseti(L, -2, static_cast<lua_Integer>(dungeonId));
@@ -263,7 +327,7 @@ void registerLfgLuaAPI(lua_State* L) {
         auto* gh = getGameHandler(L);
         const uint32_t dungeonId = static_cast<uint32_t>(luaL_optinteger(L, 1, 0));
         if (!gh || dungeonId == 0) return luaReturnNil(L);
-        const auto& locks = gh->getLfgLocks();
+        const auto& locks = lfgOf(L).getLfgLocks();
         auto it = locks.find(dungeonId);
         if (it == locks.end()) return luaReturnNil(L);
         lua_pushnil(L);
@@ -298,7 +362,7 @@ void registerLfgLuaAPI(lua_State* L) {
     // GetLFGRoles() → leader, tank, healer, damage. The client keeps the three
     // role flags; nobody here is a leader of an LFG group that does not exist.
     {"GetLFGRoles", [](lua_State* L) -> int {
-        const uint8_t roles = offeredRoles(getGameHandler(L));
+        const uint8_t roles = offeredRoles(L, getGameHandler(L));
         lua_pushboolean(L, 0);
         lua_pushboolean(L, (roles & 0x02) ? 1 : 0);   // tank
         lua_pushboolean(L, (roles & 0x04) ? 1 : 0);   // healer
@@ -313,7 +377,7 @@ void registerLfgLuaAPI(lua_State* L) {
         if (lua_toboolean(L, 2)) roles |= 0x02;
         if (lua_toboolean(L, 3)) roles |= 0x04;
         if (lua_toboolean(L, 4)) roles |= 0x08;
-        gh->lfgSetRoles(roles);
+        lfgOf(L).lfgSetRoles(roles);
         return 0;
     }},
     // Which roles this character may offer. Every class can deal damage; tank
@@ -344,7 +408,7 @@ void registerLfgLuaAPI(lua_State* L) {
         auto* gh = getGameHandler(L);
         const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
         if (!gh || index < 1) return luaReturnNil(L);
-        const auto& dungeons = gh->getLfgRoleCheckDungeons();
+        const auto& dungeons = lfgOf(L).getLfgRoleCheckDungeons();
         if (index > static_cast<int>(dungeons.size())) return luaReturnNil(L);
         const auto& d = dungeons[static_cast<size_t>(index) - 1];
         lua_pushnumber(L, d.typeId);
@@ -369,7 +433,7 @@ void registerLfgLuaAPI(lua_State* L) {
             if (on && id > 0) chosen.push_back(static_cast<uint32_t>(id));
         }
         std::sort(chosen.begin(), chosen.end());
-        gh->lfgJoin(chosen, offeredRoles(gh));
+        lfgOf(L).lfgJoin(chosen, offeredRoles(L, gh));
         return 0;
     }},
     // The two buttons on the dungeon-ready dialog, and the same pair on the
@@ -378,15 +442,15 @@ void registerLfgLuaAPI(lua_State* L) {
     // was not fired.
     {"AcceptProposal", [](lua_State* L) -> int {
         auto* gh = getGameHandler(L);
-        if (gh && gh->getLfgProposalId() != 0) {
-            gh->lfgAcceptProposal(gh->getLfgProposalId(), true);
+        if (gh && lfgOf(L).getLfgProposalId() != 0) {
+            lfgOf(L).lfgAcceptProposal(lfgOf(L).getLfgProposalId(), true);
         }
         return 0;
     }},
     {"RejectProposal", [](lua_State* L) -> int {
         auto* gh = getGameHandler(L);
-        if (gh && gh->getLfgProposalId() != 0) {
-            gh->lfgAcceptProposal(gh->getLfgProposalId(), false);
+        if (gh && lfgOf(L).getLfgProposalId() != 0) {
+            lfgOf(L).lfgAcceptProposal(lfgOf(L).getLfgProposalId(), false);
         }
         return 0;
     }},
@@ -394,8 +458,8 @@ void registerLfgLuaAPI(lua_State* L) {
     {"GetLFGQueuedList", [](lua_State* L) -> int {
         auto* gh = getGameHandler(L);
         lua_newtable(L);
-        if (gh && gh->isLfgQueued()) {
-            const uint32_t id = gh->getLfgDungeonId();
+        if (gh && lfgOf(L).isLfgQueued()) {
+            const uint32_t id = lfgOf(L).getLfgDungeonId();
             if (id != 0) {
                 lua_pushboolean(L, 1);
                 lua_rawseti(L, -2, static_cast<lua_Integer>(id));
@@ -417,8 +481,8 @@ void registerLfgLuaAPI(lua_State* L) {
     // waiting.
     {"GetLFGQueueStats", [](lua_State* L) -> int {
         auto* gh = getGameHandler(L);
-        if (!gh || !gh->isLfgQueued()) { lua_pushboolean(L, 0); return 1; }
-        const uint32_t dungeonId = gh->getLfgDungeonId();
+        if (!gh || !lfgOf(L).isLfgQueued()) { lua_pushboolean(L, 0); return 1; }
+        const uint32_t dungeonId = lfgOf(L).getLfgDungeonId();
         const game::LfgDungeon* d = nullptr;
         for (const auto& e : gh->getLfgDungeons()) {
             if (e.id == dungeonId) { d = &e; break; }
@@ -428,27 +492,27 @@ void registerLfgLuaAPI(lua_State* L) {
 
         lua_pushboolean(L, 1);                                   // 1: hasData
         lua_pushnumber(L, 0);                                    // 2: leaderNeeds
-        lua_pushnumber(L, gh->getLfgNeedTank());                 // 3: tankNeeds
-        lua_pushnumber(L, gh->getLfgNeedHealer());               // 4: healerNeeds
-        lua_pushnumber(L, gh->getLfgNeedDps());                  // 5: dpsNeeds
+        lua_pushnumber(L, lfgOf(L).getLfgNeedTank());                 // 3: tankNeeds
+        lua_pushnumber(L, lfgOf(L).getLfgNeedHealer());               // 4: healerNeeds
+        lua_pushnumber(L, lfgOf(L).getLfgNeedDps());                  // 5: dpsNeeds
         lua_pushnumber(L, d ? d->typeId : 1);                    // 6: instanceType
         lua_pushstring(L, d ? d->name.c_str() : "");             // 7: instanceName
-        lua_pushnumber(L, gh->getLfgAvgWaitSec());               // 8: averageWait
-        lua_pushnumber(L, wait(gh->getLfgWaitTank()));           // 9: tankWait
-        lua_pushnumber(L, wait(gh->getLfgWaitHealer()));         // 10: healerWait
-        lua_pushnumber(L, wait(gh->getLfgWaitDps()));            // 11: damageWait
+        lua_pushnumber(L, lfgOf(L).getLfgAvgWaitSec());               // 8: averageWait
+        lua_pushnumber(L, wait(lfgOf(L).getLfgWaitTank()));           // 9: tankWait
+        lua_pushnumber(L, wait(lfgOf(L).getLfgWaitHealer()));         // 10: healerWait
+        lua_pushnumber(L, wait(lfgOf(L).getLfgWaitDps()));            // 11: damageWait
         // The player's own estimate, which is the one the panel prints as
         // "Average Wait Time" - it was being given the time already waited, so
         // the line described the past rather than the wait. -1 passes through:
         // the panel hides the line for it, which is what the server not
         // knowing yet should look like.
-        lua_pushnumber(L, gh->getLfgMyWaitSec());                // 12: myWait
+        lua_pushnumber(L, lfgOf(L).getLfgMyWaitSec());                // 12: myWait
         // A moment, not a duration: LFDSearchStatus_Update computes
         // GetTime() - queuedTime for the timer it counts up. Handed the
         // duration, it subtracted a minute from the clock and reported a queue
         // entered when the client started.
         lua_pushnumber(L, luaGetTimeNow() -
-                          static_cast<double>(gh->getLfgQueuedSeconds())); // 13: queuedTime
+                          static_cast<double>(lfgOf(L).getLfgQueuedSeconds())); // 13: queuedTime
         return 13;
     }},
 
@@ -469,7 +533,7 @@ void registerLfgLuaAPI(lua_State* L) {
         auto* gh = getGameHandler(L);
         const int index = static_cast<int>(luaL_optinteger(L, 1, 0));
         if (!gh || index < 1) return luaReturnNil(L);
-        const auto& members = gh->getLfgProposalMembers();
+        const auto& members = lfgOf(L).getLfgProposalMembers();
         if (index > static_cast<int>(members.size())) return luaReturnNil(L);
         const auto& m = members[static_cast<size_t>(index) - 1];
         lua_pushboolean(L, 0);                       // 1: isLeader - not sent
@@ -497,20 +561,20 @@ void registerLfgLuaAPI(lua_State* L) {
     // already answered from one it has not.
     {"GetLFGBootProposal", [](lua_State* L) -> int {
         auto* gh = getGameHandler(L);
-        if (!gh || !gh->isLfgBootInProgress()) return luaReturnNil(L);
+        if (!gh || !lfgOf(L).isLfgBootInProgress()) return luaReturnNil(L);
         lua_pushboolean(L, 1);
-        lua_pushboolean(L, gh->hasLfgBootVoted() ? 1 : 0);
-        lua_pushboolean(L, gh->getLfgBootMyVote() ? 1 : 0);
+        lua_pushboolean(L, lfgOf(L).hasLfgBootVoted() ? 1 : 0);
+        lua_pushboolean(L, lfgOf(L).getLfgBootMyVote() ? 1 : 0);
         // Sent as it is even when the guid has not resolved yet. lfdframe gates
         // the popup on this being truthy, and an empty string is truthy in Lua
         // - so a name still in flight costs a blank in the question rather than
         // the vote itself, and the victim is a party member whose name the
         // roster almost always already has.
-        lua_pushstring(L, gh->getLfgBootTargetName().c_str());
-        lua_pushnumber(L, gh->getLfgBootTotal());
-        lua_pushnumber(L, gh->getLfgBootVotes());
-        lua_pushnumber(L, gh->getLfgBootTimeLeft());
-        lua_pushstring(L, gh->getLfgBootReason().c_str());
+        lua_pushstring(L, lfgOf(L).getLfgBootTargetName().c_str());
+        lua_pushnumber(L, lfgOf(L).getLfgBootTotal());
+        lua_pushnumber(L, lfgOf(L).getLfgBootVotes());
+        lua_pushnumber(L, lfgOf(L).getLfgBootTimeLeft());
+        lua_pushstring(L, lfgOf(L).getLfgBootReason().c_str());
         return 8;
     }},
     // GetLFGDungeonRewards(dungeonID) → doneToday, moneyBase, moneyVar,
@@ -527,9 +591,9 @@ void registerLfgLuaAPI(lua_State* L) {
     {"GetLFGDungeonRewards", [](lua_State* L) -> int {
         auto* gh = getGameHandler(L);
         const uint32_t dungeonId = static_cast<uint32_t>(luaL_optinteger(L, 1, 0));
-        const game::LfgReward* r = nullptr;
+        const lfg::LfgReward* r = nullptr;
         if (gh) {
-            for (const auto& e : gh->getLfgRewards()) {
+            for (const auto& e : lfgOf(L).getLfgRewards()) {
                 if (e.dungeonId == dungeonId) { r = &e; break; }
             }
         }
@@ -559,15 +623,15 @@ void registerLfgLuaAPI(lua_State* L) {
     // unbound meant clicking a header raised instead of doing nothing.
     {"SearchLFGSort", [](lua_State* L) -> int { (void)L; return 0; }},
     {"LeaveLFG", [](lua_State* L) -> int {
-        if (auto* gh = getGameHandler(L)) gh->lfgLeave();
+        if (getGameHandler(L)) lfgOf(L).lfgLeave();
         return 0;
     }},
     {"RequestLFDPlayerLockInfo", [](lua_State* L) -> int {
-        if (auto* gh = getGameHandler(L)) gh->requestLfgPlayerLockInfo();
+        if (getGameHandler(L)) lfgOf(L).requestLfgPlayerLockInfo();
         return 0;
     }},
     {"RequestLFDPartyLockInfo", [](lua_State* L) -> int {
-        if (auto* gh = getGameHandler(L)) gh->requestLfgPartyLockInfo();
+        if (getGameHandler(L)) lfgOf(L).requestLfgPartyLockInfo();
         return 0;
     }},
     // GetLFGDungeonRewardLink(dungeonID, index) → the item link for a reward,
@@ -578,7 +642,7 @@ void registerLfgLuaAPI(lua_State* L) {
         const uint32_t dungeonId = static_cast<uint32_t>(luaL_optinteger(L, 1, 0));
         const int index = static_cast<int>(luaL_optinteger(L, 2, 0));
         if (!gh || index < 1) return luaReturnNil(L);
-        for (const auto& e : gh->getLfgRewards()) {
+        for (const auto& e : lfgOf(L).getLfgRewards()) {
             if (e.dungeonId != dungeonId) continue;
             if (index > static_cast<int>(e.items.size())) return luaReturnNil(L);
             const auto& item = e.items[static_cast<size_t>(index) - 1];
@@ -596,7 +660,7 @@ void registerLfgLuaAPI(lua_State* L) {
         const uint32_t dungeonId = static_cast<uint32_t>(luaL_optinteger(L, 1, 0));
         const int index = static_cast<int>(luaL_optinteger(L, 2, 0));
         if (!gh || index < 1) return luaReturnNil(L);
-        for (const auto& e : gh->getLfgRewards()) {
+        for (const auto& e : lfgOf(L).getLfgRewards()) {
             if (e.dungeonId != dungeonId) continue;
             if (index > static_cast<int>(e.items.size())) return luaReturnNil(L);
             const auto& item = e.items[static_cast<size_t>(index) - 1];
@@ -617,8 +681,8 @@ void registerLfgLuaAPI(lua_State* L) {
     {"GetRandomDungeonBestChoice", [](lua_State* L) -> int {
         auto* gh = getGameHandler(L);
         if (!gh) return luaReturnNil(L);
-        const auto& locks = gh->getLfgLocks();
-        for (const auto& r : gh->getLfgRewards()) {
+        const auto& locks = lfgOf(L).getLfgLocks();
+        for (const auto& r : lfgOf(L).getLfgRewards()) {
             auto it = locks.find(r.dungeonId);
             if (it != locks.end() && it->second != 0) continue;
             lua_pushinteger(L, static_cast<lua_Integer>(r.dungeonId));

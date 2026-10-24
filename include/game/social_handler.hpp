@@ -10,6 +10,7 @@
 #include <array>
 #include <chrono>
 #include <functional>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -23,6 +24,7 @@ namespace duel { class IDuelsFeed; }
 namespace petition { class IPetitionsFeed; }
 namespace arena { class IArenaTeamsFeed; }
 namespace battleground { class IBattlegroundsFeed; }
+namespace lfg { class ILfgFeed; }
 namespace game {
 
 class PacketSender;
@@ -93,6 +95,8 @@ public:
     [[nodiscard]] virtual arena::IArenaTeamsFeed* arenaFeed() = 0;
     /// Where the battleground packets go; null when the client was built without them.
     [[nodiscard]] virtual battleground::IBattlegroundsFeed* battlegroundFeed() = 0;
+    /// Where the dungeon finder's packets go; null when the client was built without it.
+    [[nodiscard]] virtual lfg::ILfgFeed* lfgFeed() = 0;
 
     // ---- The appearance switches the realm keeps with the character ----
     [[nodiscard]] virtual bool showingHelm() const = 0;
@@ -170,46 +174,6 @@ struct SocialCharacterState {
     // Raid marks
     std::array<uint64_t, kRaidMarkCount> raidTargetGuids_ = {};
 
-    // LFG / Dungeon Finder
-    LfgState lfgState_        = LfgState::None;
-    LfgCompletionReward lfgCompletionReward_;
-    uint32_t lfgDungeonId_    = 0;
-    uint32_t lfgProposalId_   = 0;
-    /// The proposal the ready dialog has already been opened for. The server
-    /// resends the update as each member answers, and opening again would
-    /// reset the countdown and the ticks beside every name.
-    uint32_t shownProposalId_ = 0;
-    uint8_t  lfgOfferedRoles_ = 0;
-    // The queue's own numbers, which never arrived while the length check was
-    // longer than the packet.
-    int32_t  lfgWaitTank_ = -1;
-    int32_t  lfgWaitHealer_ = -1;
-    int32_t  lfgWaitDps_ = -1;
-    uint8_t  lfgNeedTank_ = 0;
-    uint8_t  lfgNeedHealer_ = 0;
-    uint8_t  lfgNeedDps_ = 0;
-    uint64_t lfgBootVictimGuid_ = 0;
-    /// Why the server will not let this character queue for a dungeon, by
-    /// dungeon id. Empty means nothing is locked.
-    std::unordered_map<uint32_t, uint32_t> lfgLocks_;
-    std::vector<LfgReward> lfgRewards_;
-    /// The group a proposal is offering, in the order the server lists it.
-    std::vector<LfgProposalMember> lfgProposalMembers_;
-    int32_t  lfgAvgWaitSec_   = -1;
-    int32_t  lfgMyWaitSec_    = -1;
-    uint32_t lfgQueuedSeconds_= 0;
-    uint32_t lfgBootVotes_    = 0;
-    uint32_t lfgBootTotal_    = 0;
-    uint32_t lfgBootTimeLeft_ = 0;
-    uint32_t lfgBootNeeded_   = 0;
-    /// What the role check is for, and how many are answering it.
-    std::vector<LfgRoleCheckDungeon> lfgRoleCheckDungeons_;
-    uint8_t lfgRoleCheckMembers_ = 0;
-    bool lfgBootInProgress_ = false;
-    bool lfgBootDidVote_    = false;
-    bool lfgBootMyVote_     = false;
-    std::string lfgBootTargetName_;
-    std::string lfgBootReason_;
 };
 
 class SocialHandler : private SocialCharacterState {
@@ -232,8 +196,6 @@ public:
     using ReadyCheckResult = game::ReadyCheckResult;
 
     using InstanceLockout = game::InstanceLockout;
-
-    using LfgState = game::LfgState;
 
     // ---- Public API ----
 
@@ -394,23 +356,6 @@ public:
     void setRaidMarkLocally(uint64_t guid, uint8_t icon);
     void requestRaidInfo();
     void setSavedInstanceExtend(uint32_t mapId, uint32_t difficulty, bool extend);
-    /// The roles last offered to the dungeon finder. lfgSetRoles used to send
-    /// them and keep nothing, so the panel reading its own checkboxes back, and
-    /// the ready dialog naming the role it found you a group for, had no source.
-    [[nodiscard]] uint8_t getLfgOfferedRoles() const { return lfgOfferedRoles_; }
-    [[nodiscard]] int32_t  getLfgWaitTank() const   { return lfgWaitTank_; }
-    [[nodiscard]] int32_t  getLfgWaitHealer() const { return lfgWaitHealer_; }
-    [[nodiscard]] int32_t  getLfgWaitDps() const    { return lfgWaitDps_; }
-    [[nodiscard]] uint8_t  getLfgNeedTank() const   { return lfgNeedTank_; }
-    [[nodiscard]] uint8_t  getLfgNeedHealer() const { return lfgNeedHealer_; }
-    [[nodiscard]] uint8_t  getLfgNeedDps() const    { return lfgNeedDps_; }
-    [[nodiscard]] uint64_t getLfgBootVictimGuid() const { return lfgBootVictimGuid_; }
-    [[nodiscard]] const std::unordered_map<uint32_t, uint32_t>& getLfgLocks() const { return lfgLocks_; }
-    [[nodiscard]] const std::vector<LfgReward>& getLfgRewards() const { return lfgRewards_; }
-    void handleLfgPlayerInfo(network::Packet& packet);
-    [[nodiscard]] const std::vector<LfgProposalMember>& getLfgProposalMembers() const {
-        return lfgProposalMembers_;
-    }
 
     // Instance lockouts
     [[nodiscard]] const std::vector<InstanceLockout>& getInstanceLockouts() const { return instanceLockouts_; }
@@ -531,41 +476,6 @@ public:
         return 0xFF;
     }
 
-    // LFG / Dungeon Finder
-    /// Queue for every dungeon the player ticked. CMSG_LFG_JOIN carries a
-    /// list, and the server queues for all of them at once.
-    void lfgJoin(const std::vector<uint32_t>& dungeonIds, uint8_t roles);
-    void lfgLeave();
-    void lfgSetRoles(uint8_t roles);
-    void lfgAcceptProposal(uint32_t proposalId, bool accept);
-    void lfgSetBootVote(bool vote);
-    void lfgTeleport(bool toLfgDungeon = true);
-    [[nodiscard]] LfgState getLfgState()           const { return lfgState_; }
-    /// What the last finished dungeon paid out, for GetLFGCompletionReward.
-    [[nodiscard]] const LfgCompletionReward& getLfgCompletionReward() const { return lfgCompletionReward_; }
-    [[nodiscard]] bool isLfgQueued()               const { return lfgState_ == LfgState::Queued; }
-    [[nodiscard]] bool isLfgInDungeon()            const { return lfgState_ == LfgState::InDungeon; }
-    [[nodiscard]] uint32_t getLfgDungeonId()       const { return lfgDungeonId_; }
-    [[nodiscard]] std::string getCurrentLfgDungeonName() const;
-    [[nodiscard]] uint32_t getLfgProposalId()      const { return lfgProposalId_; }
-    [[nodiscard]] int32_t  getLfgAvgWaitSec()      const { return lfgAvgWaitSec_; }
-    /// This player's own estimate, in seconds, or -1 while the server has none.
-    [[nodiscard]] int32_t  getLfgMyWaitSec()       const { return lfgMyWaitSec_; }
-    /// How long this player has been in the queue, in seconds.
-    [[nodiscard]] uint32_t getLfgQueuedSeconds()   const { return lfgQueuedSeconds_; }
-    [[nodiscard]] uint32_t getLfgBootVotes()       const { return lfgBootVotes_; }
-    [[nodiscard]] uint32_t getLfgBootTotal()       const { return lfgBootTotal_; }
-    [[nodiscard]] uint32_t getLfgBootTimeLeft()    const { return lfgBootTimeLeft_; }
-    [[nodiscard]] uint32_t getLfgBootNeeded()      const { return lfgBootNeeded_; }
-    [[nodiscard]] const std::string& getLfgBootTargetName() const { return lfgBootTargetName_; }
-    [[nodiscard]] const std::string& getLfgBootReason()     const { return lfgBootReason_; }
-    [[nodiscard]] const std::vector<LfgRoleCheckDungeon>& getLfgRoleCheckDungeons() const {
-        return lfgRoleCheckDungeons_;
-    }
-    [[nodiscard]] uint8_t getLfgRoleCheckMembers() const { return lfgRoleCheckMembers_; }
-    [[nodiscard]] bool isLfgBootInProgress() const { return lfgBootInProgress_; }
-    [[nodiscard]] bool hasLfgBootVoted()     const { return lfgBootDidVote_; }
-    [[nodiscard]] bool getLfgBootMyVote()    const { return lfgBootMyVote_; }
 
 private:
     // ---- Packet handlers ----
@@ -605,9 +515,9 @@ private:
     void handleLfgRoleCheckUpdate(network::Packet& packet);
     void handleLfgUpdatePlayer(network::Packet& packet);
     void handleLfgUpdateParty(network::Packet& packet);
-    void readLfgDungeonList(network::Packet& packet);
-    void applyLfgUpdate(uint8_t updateType, bool extraInfo, bool queued,
-                        bool inDungeon);
+    /// The first dungeon an update names, which the queue window shows.
+    std::optional<uint32_t> readLfgFirstDungeon(network::Packet& packet);
+    void handleLfgPlayerInfo(network::Packet& packet);
     void handleLfgPlayerReward(network::Packet& packet);
     void handleLfgBootProposalUpdate(network::Packet& packet);
     void handleLfgTeleportDenied(network::Packet& packet);

@@ -641,6 +641,7 @@ public:
     petition::IPetitionsFeed* petitionFeed() override;
     arena::IArenaTeamsFeed* arenaFeed() override;
     battleground::IBattlegroundsFeed* battlegroundFeed() override;
+    lfg::ILfgFeed* lfgFeed() override;
 
     // Money (copper)
     uint64_t getMoneyCopper() const { return inventoryHandler_->moneyCopper(); }
@@ -1814,60 +1815,12 @@ public:
     // Set or clear a raid mark on a guid (icon 0-7, or 0xFF to clear)
     void setRaidMark(uint64_t guid, uint8_t icon);
 
-    // ---- LFG / Dungeon Finder ----
-    // LFG state (aliased from handler_types.hpp)
-    using LfgState = game::LfgState;
-
-    // roles bitmask: 0x02=tank, 0x04=healer, 0x08=dps; pass LFGDungeonEntry ID
-    void lfgJoin(const std::vector<uint32_t>& dungeonIds, uint8_t roles);
-    void lfgLeave();
-    /// Ask the server to re-send which dungeons are locked and what they pay.
-    /// The ready popup asks for both as it opens.
-    void requestLfgPlayerLockInfo();
-    void requestLfgPartyLockInfo();
-    void lfgSetRoles(uint8_t roles);
-    void lfgAcceptProposal(uint32_t proposalId, bool accept);
-    void lfgSetBootVote(bool vote);
-    void lfgTeleport(bool toLfgDungeon = true);
-    LfgState getLfgState() const;
-    /// What the last finished dungeon-finder run paid out.
-    const LfgCompletionReward& getLfgCompletionReward() const;
-    bool isLfgQueued() const;
-    bool isLfgInDungeon() const;
-    uint32_t getLfgDungeonId() const;
-    std::string getCurrentLfgDungeonName() const;
     std::string getMapName(uint32_t mapId) const;
 
     /// How many boss encounters a map has, for the "%d of %d bosses" line.
     /// Counted from DungeonEncounter.dbc, which is the only place the total
     /// lives - the server sends which are done and never how many there are.
     uint32_t getDungeonEncounterCount(uint32_t mapId, uint32_t difficulty) const;
-    uint32_t getLfgProposalId() const;
-    uint8_t  getLfgOfferedRoles() const;
-    const std::vector<LfgProposalMember>& getLfgProposalMembers() const;
-    const std::unordered_map<uint32_t, uint32_t>& getLfgLocks() const;
-    const std::vector<LfgReward>& getLfgRewards() const;
-    int32_t  getLfgAvgWaitSec() const;
-    int32_t  getLfgMyWaitSec() const;
-    uint32_t getLfgQueuedSeconds() const;
-    int32_t  getLfgWaitTank() const;
-    int32_t  getLfgWaitHealer() const;
-    int32_t  getLfgWaitDps() const;
-    uint8_t  getLfgNeedTank() const;
-    uint8_t  getLfgNeedHealer() const;
-    uint8_t  getLfgNeedDps() const;
-    uint32_t getLfgBootVotes() const;
-    uint32_t getLfgBootTotal() const;
-    uint32_t getLfgBootTimeLeft() const;
-    uint32_t getLfgBootNeeded() const;
-    const std::string& getLfgBootTargetName() const;
-    const std::string& getLfgBootReason() const;
-    using LfgRoleCheckDungeon = game::LfgRoleCheckDungeon;
-    const std::vector<LfgRoleCheckDungeon>& getLfgRoleCheckDungeons() const;
-    uint8_t getLfgRoleCheckMembers() const;
-    bool isLfgBootInProgress() const;
-    bool hasLfgBootVoted() const;
-    bool getLfgBootMyVote() const;
 
     // ---- Loot ----
     void lootTarget(uint64_t guid) override;
