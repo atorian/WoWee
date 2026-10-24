@@ -96,6 +96,14 @@ whatever the code looks like inside.
   not internal steps that could change while the behaviour stays right.
 - **A test for a bug fails first.** Run it against the bug before the fix and
   see it fail; a test that never failed has not shown it can.
+- **A new test must be able to fail.** After writing one, break the code under
+  test (invert a condition, return a constant, drop a write) and see it fail,
+  then restore the code. Name the realistic bug it catches; a test that
+  catches none is deleted.
+- **A context is tested on its own.** Domain and service tests link only their
+  context's library; fakes implement its ports and the real `core::EventBus`
+  delivers its events. What a packet does end to end is still tested through
+  `GameHarness`.
 
 ## Layers
 
@@ -104,10 +112,21 @@ Dependencies point one way - who may include whom:
 ```
 core/       -> game/, rendering/, collision/, audio/, ui/, pipeline/   (the client: owns and wires everything)
 ui/         -> game/, rendering/, collision/, pipeline/
-game/       -> pipeline/, network/                         (not rendering/, audio/, ui/, core/application)
+game/       -> <context>/, pipeline/, network/              (not rendering/, audio/, ui/, core/application)
 rendering/  -> collision/, pipeline/                       (wowee_render: not game/, ui/, audio/, network/)
 collision/  -> pipeline/                                   (wowee_collision: nothing above it)
+<context>/  -> base only                                   (wowee_<context>: see "Game layer architecture")
 ```
+
+- **Every include points down the layers.** `tools/module_boundary_check.py`
+  assigns each file under `src/` and `include/` to a module and allows
+  includes only into lower layers; it runs as the `module_boundaries` test.
+  The includes that broke this when the check was added are listed in
+  `tools/module_boundary_baseline.txt`, and that list only shrinks. Fix a new
+  violation by moving code or inverting the dependency through an interface,
+  never by adding a baseline line. The one exception is a dependency that
+  already existed through another header and is now included directly; say
+  so in the commit. After fixing an old one, run the check with `--prune`.
 
 - **wowee_render** (`src/rendering` less the client's presentation listed in
   `WOWEE_RENDER_CLIENT_SOURCES`) draws what it is handed and knows nothing of
@@ -173,58 +192,129 @@ packet in, the state it builds, what the interface is told, and the command
 that reads that state back out. That is where a copy of the state that one
 side writes and the other reads shows up; a parser test cannot see it.
 
-## Game layer architecture (`src/game`, `include/game`)
+## Game layer architecture (`src/game`, `include/game`, `<context>/`)
 
-`GameHandler` is being taken apart into domain handlers, on `master`. Write
-new code the way the target looks, not the way the old code does.
+`GameHandler` is being taken apart. Each area of the game becomes a bounded
+context that owns its state and rules; the handlers become the protocol that
+feeds them; `GameHandler` keeps the session. Write new code the way the target
+looks, not the way the old code does.
+
+| Layer | Holds | Lives in |
+|---|---|---|
+| Domain | an area's state and the rules that change it | `<context>/domain/` |
+| Services | use cases, the ports they need, the interface consumers use | `<context>/services/` |
+| Protocol | opcodes, decoding, the socket: the handlers | `game/` |
+| Presentation | chat lines, Lua/FrameXML, sound, drawing | `core/`, `ui/`, `addons/` |
+| Composition root | creates every object and wires implementations to ports | `core/application.cpp` |
+
+### Bounded contexts
+
+- An area such as the friend list or the guild is a context with a top-level
+  directory of its own: `include/<context>/domain/`,
+  `include/<context>/services/`, the same under `src/`, namespace
+  `wowee::<context>`, and its own static library `wowee_<context>` that links
+  only `wowee_base`.
+- `<context>/domain` includes only `base` and its own headers.
+  `<context>/services` includes only `base`, its own domain and its own
+  headers. Contexts do not include each other's services; two contexts that
+  react to each other talk through the bus.
+- **Rich, not anemic.** An aggregate owns its state and exposes
+  intention-revealing operations (`applyFriendStatus`, `replaceIgnored`).
+  No generic writes such as `update(fields)` or `apply(changes)`.
+- **The server is authoritative.** The domain applies what the server
+  reported; a request to change something is a service operation that goes
+  to the server through a port.
+- **Operations return the domain events they caused**, as plain values in
+  `<context>/domain/events.hpp`. The domain never publishes, logs to chat or
+  calls out; its service publishes them on `core::EventBus`.
+- **Wire details stay out.** The domain receives decoded records, never
+  packets or opcodes. The protocol may keep its own names for those records
+  as aliases, and its headers forward-declare them; only the files that
+  decode a record include its definition.
+- **A refused request is a named outcome** (`NotAFriend`,
+  `ContactNameRequired`), published like any other event. The delivery layer
+  (chat, Lua, UI) maps outcomes to what the player sees and never re-checks
+  business rules.
+- State a context keeps for the character is assigned whole when a character
+  is logged in, as the handlers' is (below), so nothing keeps the last
+  character's value.
+
+### Services and ports
+
+- A service depends only on ports (abstract interfaces in its context's
+  `services/`), its domain and `base`. The ports are implemented outside the
+  context: the server gateway by the protocol, a name cache by whoever holds
+  it.
+- Consumers depend on the interface a service implements (for example
+  `contacts::IContacts`), never on the service class or on `GameHandler`.
+- The protocol talks to a service through a separate feed interface (for
+  example `contacts::IContactsServerFeed`).
 
 ### Who owns what
 
 - Each domain handler — `ChatHandler`, `CombatHandler`, `InventoryHandler`,
   `MovementHandler`, `QuestHandler`, `SocialHandler`, `SpellHandler`,
   `WardenHandler`, `EntityController`, `AccountDataHandler`,
-  `ActionBarHandler`, `PetHandler` — owns its state *and* the opcodes that
-  change it. A new opcode goes into that handler's `registerOpcodes`, never
+  `ActionBarHandler`, `PetHandler`, `ReputationHandler`, `RealmTimeHandler`
+  — owns the opcodes of its area. A new opcode goes into that handler's
+  `registerOpcodes`, never
   into `GameHandler::registerCoreOpcodes`/`registerRemainingOpcodes`. Domain
   handlers register last and overwrite the table, so a second registration in
   `GameHandler` is dead code.
+- Until an area moves into a context, its handler also owns the area's
+  state. When it moves, the state and rules go to the context and the handler
+  keeps only decoding and sending: it hands decoded records to the context's
+  feed and implements the context's gateway.
 - `GameHandler` keeps the session: connection, auth, Warden, character list,
-  world entry, the packet queue and dispatch, and the frame `update`. Its public
-  methods that forward to a handler are a facade kept for callers until they
-  move; do not add state, logic or opcodes to it.
+  world entry, the packet queue and dispatch, and the frame `update`. Do not
+  add state, logic, opcodes or forwarding methods to it. Call a handler or a
+  context through its accessor (`gh.actionBar()`). The forwarders that still
+  exist go with their area: when it moves, delete them and let the compiler
+  list every call site.
 - The handlers always exist (built in `GameHandler`'s constructor, never reset).
   No `if (xHandler_)`, `xHandler_ ? a : b` or fallback branches.
-- One copy of every piece of state. If the field you need lives in a handler,
-  ask that handler; never add a mirror of it to `GameHandler`, and do not add
-  new `xxxRef()` accessors — the existing ones are being removed.
+- One copy of every piece of state. If the field you need lives in a handler
+  or a context, ask its owner; never add a mirror of it to `GameHandler`, and
+  do not add new `xxxRef()` accessors — the existing ones are being removed.
 
 ### How the parts talk
 
 | Kind | Meaning | Mechanism |
 |---|---|---|
-| Query | "what is X" | an interface passed in (e.g. through `GameServices`) |
+| Query | "what is X" | an interface passed in (e.g. through `GameServices`, or a context's port) |
 | Command | "do X" | a method on whoever owns X's state |
 | Notification | "X happened" | an event on `core::EventBus` |
 
-- Events are plain structs in `include/game/game_events.hpp`, named for what
-  happened (`GhostStateChanged`, `OtherPlayerLevelUp`), carrying the values a
-  subscriber needs. A subscriber includes that header, not `game_handler.hpp`.
-- Publish from the game with `eventBus().publish(events::X{...})` (delivered
-  before it returns, main thread). From another thread use `post(...)`; the
-  queue is delivered at the start of `Application::update`.
+- A context's events live in `<context>/domain/events.hpp`; the protocol's and
+  the session's in `include/game/game_events.hpp`. Plain structs, named for
+  what happened (`GhostStateChanged`, `OtherPlayerLevelUp`), carrying the
+  values a subscriber needs. A subscriber includes the event's header, not
+  `game_handler.hpp`.
+- `core::EventBus` delivers synchronously, on the main thread, to every
+  subscriber in subscription order. Publish with
+  `eventBus().publish(events::X{...})` (delivered before it returns). From
+  another thread use `post(...)`; the queue is delivered at the start of
+  `Application::update`.
+- Subscribers are registered by the composition root. Presentation of an
+  event (a chat line, an addon event such as `FRIENDLIST_UPDATE`, a sound)
+  lives in a subscriber, never in a service or the domain. A subscriber lives
+  in the lowest module that may include everything it needs: in `game` when it
+  only needs the game, in `core` when it also reads interface settings or
+  FrameXML state.
 - Subscribe with `bus.subscribe<events::X>(handler)` and keep the returned
   `EventBus::Subscription` as a member of the object the handler captures; it
   ends the subscription when destroyed. The bus is owned by `Application` and
   outlives every subscriber.
-- Do not add new `set*Callback` setters to `GameHandler`. When you touch an
-  existing one, move it to an event. Several of them were set from two places
-  and the second silently replaced the first.
+- Do not add new `set*Callback` setters or `std::function` callback slots to
+  `GameHandler`. When you touch an existing one, move it to an event. Several
+  of them were set from two places and the second silently replaced the
+  first.
 - FrameXML/Lua events (`fireAddonEvent("UNIT_SPELLCAST_FAILED", ...)`) are the
   addon contract and stay strings; they are a separate channel from the bus.
 
-### A new domain handler
+### A handler is built from what it uses
 
-A new handler is built from what it uses, never from `GameHandler&`. The older
+A handler is built from interfaces, never from `GameHandler&`. The older
 handlers take `GameHandler& owner` and reach through `owner_.` for anything -
 the socket, another handler's state, the facade; do not copy them.
 `AccountDataHandler`, `ActionBarHandler`, `InventoryHandler`, `PetHandler`
@@ -266,21 +356,47 @@ never sees the class.
 - A handler does not take `GameHandler&`. `tools/domain_shape_check.py`
   counts the handlers that do and the reaches through `owner_.` in
   `src/game`; `sweep_guard` holds both and they only go down.
-- State the handler needs that still lives in `GameHandler` moves to its
-  owner first - a new handler if it has none, as the action bar did - and
-  `GameHandler` keeps a forwarding facade for the old callers. New code asks
-  the owner (`gh.actionBar()`), not the facade (`gh.getActionBar()`).
-- Two domains that react to each other talk through the bus, not through
-  references to each other: `AccountDataHandler` publishes `MacroDeleted` and
-  `ActionBarHandler` empties the buttons that held the macro.
 - Built in `GameHandler`'s constructor, registered in `registerDomainOpcodes`,
   reached from outside through an accessor returning a reference
   (`accountData()`, `actionBar()`).
 - Tested end to end through `GameHarness`, reading state through the
-  handler's accessor.
+  handler's or the context's accessor.
+
+### Composition root
+
+- `Application` creates services, adapters and the event bus, and passes them
+  down through constructors and the `GameServices`, `UIServices` and
+  `LuaServices` structs.
+- Do not add new uses of `Application::getInstance()`.
+- Lifetimes: an object is declared before (and so destroyed after) everything
+  that calls into it.
 
 ### Build time
 
 `game_handler.hpp` is included by ~60 translation units. Include the narrow
 header you need (`game_events.hpp`, a handler's header, a forward declaration)
 rather than `game_handler.hpp`, and keep new types out of it.
+
+- Headers include only what their declarations need. Use forward
+  declarations for types used by pointer or reference, and keep function
+  bodies that need heavy headers in `.cpp` files.
+- Prefer small interface headers for consumers over large concrete class
+  headers.
+- Never speed up the build by reducing debug information or optimisation in
+  development builds. Fix the dependency structure instead.
+
+## Dead code
+
+Code the running application does not use is deleted, together with whatever
+only it kept alive. Do not maintain, extend or test it.
+
+## Changing behaviour
+
+- A refactoring keeps behaviour unless it says otherwise. When unifying state
+  changes what the player or an addon sees, list each change in the commit
+  message.
+- The Lua and FrameXML API is a public contract: addons depend on it.
+  Function names, arguments and return values, and the events fired with
+  their arguments and order, stay as they are. A refactoring moves the C++
+  behind them and leaves what an addon sees unchanged; a fix that does change
+  it is listed in the commit as a behaviour change.
