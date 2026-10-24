@@ -47,17 +47,19 @@ private:
 };
 
 /// Stands in for an uploaded image: a distinct pointer nothing reads, whose
-/// release on the GPU is recorded by name.
+/// release on the GPU is recorded by name. The record outlives this object:
+/// a release still queued on the device runs when the device goes, after it.
 class Images {
+    std::shared_ptr<std::set<std::string>> record_ = std::make_shared<std::set<std::string>>();
 public:
     std::shared_ptr<VkTexture> make(const std::string& name) {
         auto* token = reinterpret_cast<VkTexture*>(new std::byte);
-        return {token, [this, name](VkTexture* t) {
-                    destroyed.insert(name);
+        return {token, [record = record_, name](VkTexture* t) {
+                    record->insert(name);
                     delete reinterpret_cast<std::byte*>(t);
                 }};
     }
-    std::set<std::string> destroyed;
+    const std::set<std::string>& destroyed = *record_;
 };
 
 TextureKey stored(const std::string& path) { return {normalizeTexturePath(path), TextureForm::Stored, 0}; }
