@@ -43,7 +43,8 @@ namespace wowee::contacts { class IContacts; class ContactsService; }
 namespace wowee::who { class IWho; class WhoService; }
 namespace wowee::duel { class IDuels; class DuelService; }
 namespace wowee::petition { class IPetitions; class PetitionService; }
-namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; }
+namespace wowee::arena { class IArenaTeams; class ArenaService; }
+namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; }
 
 namespace wowee::test {
 
@@ -136,6 +137,8 @@ public:
     duel::IDuels& duels();
     /// Guild and arena charters, wired as the client wires them.
     petition::IPetitions& petitions();
+    /// The player's arena teams, wired as the client wires them.
+    arena::IArenaTeams& arenaTeams();
     core::CVarStore& cvars() { return cvars_; }
 
     /// The server's side of the connection: the one the game made last. Valid
@@ -241,6 +244,8 @@ private:
     std::unique_ptr<duel::DuelService> duels_;
     std::unique_ptr<game::PetitionGateway> petitionGateway_;
     std::unique_ptr<petition::PetitionService> petitions_;
+    std::unique_ptr<game::ArenaGateway> arenaGateway_;
+    std::unique_ptr<arena::ArenaService> arenaTeams_;
     std::unique_ptr<game::GameHandler> game_;
     FakeWorldConnection* connection_ = nullptr;  // owned by the game once made
     bool pingsAnswered_ = true;

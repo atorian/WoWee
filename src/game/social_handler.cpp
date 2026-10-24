@@ -6,6 +6,8 @@
 #include "game/who_gateway.hpp"
 #include "game/duel_gateway.hpp"
 #include "game/petition_gateway.hpp"
+#include "game/arena_gateway.hpp"
+#include "arena/services/arena.hpp"
 #include "petition/services/petitions.hpp"
 #include "duel/services/duels.hpp"
 #include "who/domain/who_list.hpp"
@@ -93,36 +95,6 @@ static const char* lfgJoinResultString(uint32_t result) {
         case 15: return "Cannot join dungeon finder.";  // LFG_JOIN_INTERNAL_ERROR
         case 16: return "No spec/role available.";
         default: return "Cannot join dungeon finder.";
-    }
-}
-
-// ArenaTeamCommandErrors, as SMSG_ARENA_TEAM_COMMAND_RESULT sends them. The
-// range is sparse - the server sends 0x08 for two different refusals and skips
-// most of what lies between - so a table indexed by the value would be mostly
-// holes and would answer the wrong sentence for anything the server adds.
-static const char* arenaTeamErrorString(uint32_t error) {
-    switch (error) {
-        case 0x01: return "Internal arena team error.";
-        case 0x02: return "You are already in an arena team of that size.";
-        case 0x03: return "That player is already in an arena team of that size.";
-        case 0x04: return "You have already been invited to an arena team.";
-        case 0x05: return "That player has already been invited to an arena team.";
-        case 0x06: return "That arena team name is invalid.";
-        case 0x07: return "That arena team name already exists.";
-        // The server reuses this value for the captain leaving and for acting
-        // without the rank to do so.
-        case 0x08: return "The captain cannot leave; permissions denied.";
-        case 0x09: return "You are not in an arena team of that size.";
-        case 0x0A: return "That player is not in your arena team.";
-        case 0x0B: return "No player of that name was found.";
-        case 0x0C: return "That player is of the opposing faction.";
-        case 0x13: return "That player is ignoring you.";
-        case 0x15: return "That player's level is too low.";
-        case 0x16: return "That player's level is too high.";
-        case 0x17: return "The arena team is full.";
-        case 0x1B: return "No arena team of that name was found.";
-        case 0x1E: return "Arena teams are locked for the season.";
-        default:   return "The arena team command was refused.";
     }
 }
 
@@ -452,6 +424,14 @@ static petition::IPetitionsFeed* petitionFeed(SocialQueries& queries) {
     return feed;
 }
 
+static arena::IArenaTeamsFeed* arenaFeed(SocialQueries& queries) {
+    auto* feed = queries.arenaFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("Arena teams are not wired into this client; arena team packets are dropped");
+    return feed;
+}
+
 static contacts::IContactsServerFeed* contactsFeed(SocialQueries& queries) {
     auto* feed = queries.contactsFeed();
     static bool said = false;
@@ -481,6 +461,8 @@ SocialHandler::SocialHandler(PacketSender& sender, FrameXmlEvents& frameXml, cor
         subscriptions_.push_back(std::move(subscription));
     for (auto& subscription : subscribePetitionNotices(events_, chat_, frameXml_))
         subscriptions_.push_back(std::move(subscription));
+    for (auto& subscription : subscribeArenaNotices(events_, chat_, frameXml_))
+        subscriptions_.push_back(std::move(subscription));
     // The character's social state is the server's to say at every login:
     // SMSG_GROUP_LIST comes with it for a character in a party, the guild
     // and the queues with theirs. Kept, the last session's party stood for
@@ -494,6 +476,7 @@ SocialHandler::SocialHandler(PacketSender& sender, FrameXmlEvents& frameXml, cor
             if (auto* feed = whoFeed(queries_)) feed->beginCharacter();
             if (auto* feed = duelFeed(queries_)) feed->beginCharacter();
             if (auto* feed = petitionFeed(queries_)) feed->beginCharacter();
+            if (auto* feed = arenaFeed(queries_)) feed->beginCharacter();
         }));
 }
 
@@ -1126,13 +1109,69 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
     };
 
     // ---- Arena ----
-    table[Opcode::SMSG_ARENA_TEAM_COMMAND_RESULT] = [this](network::Packet& packet) { handleArenaTeamCommandResult(packet); };
-    table[Opcode::SMSG_ARENA_TEAM_QUERY_RESPONSE] = [this](network::Packet& packet) { handleArenaTeamQueryResponse(packet); };
-    table[Opcode::SMSG_ARENA_TEAM_ROSTER] = [this](network::Packet& packet) { handleArenaTeamRoster(packet); };
-    table[Opcode::SMSG_ARENA_TEAM_INVITE] = [this](network::Packet& packet) { handleArenaTeamInvite(packet); };
-    table[Opcode::SMSG_ARENA_TEAM_EVENT] = [this](network::Packet& packet) { handleArenaTeamEvent(packet); };
-    table[Opcode::SMSG_ARENA_TEAM_STATS] = [this](network::Packet& packet) { handleArenaTeamStats(packet); };
-    table[Opcode::SMSG_ARENA_ERROR] = [this](network::Packet& packet) { handleArenaError(packet); };
+    // command(4) + team name + player name + error(4).
+    //
+    // The player name was never read, so the error came out of the first four
+    // bytes of it - a name, so never zero, and every command result read as a
+    // failure however well it had gone. Both strings are needed anyway: the
+    // server names the team and the player separately because most of these
+    // results are about one acting on the other.
+    table[Opcode::SMSG_ARENA_TEAM_COMMAND_RESULT] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(10)) return;
+        const uint32_t command = packet.readUInt32();
+        std::string teamName = packet.readString();
+        std::string playerName = packet.readString();
+        if (!packet.hasRemaining(4)) return;
+        const uint32_t error = packet.readUInt32();
+        auto* feed = arenaFeed(queries_);
+        if (!feed) return;
+        if (error == 0) feed->onCommandSucceeded(arenaCommand(command), std::move(teamName), std::move(playerName));
+        else feed->onCommandRefused(arenaCommand(command), std::move(teamName), std::move(playerName),
+                                    arenaCommandError(error));
+    };
+    table[Opcode::SMSG_ARENA_TEAM_QUERY_RESPONSE] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(4)) return;
+        const uint32_t teamId = packet.readUInt32();
+        std::string teamName = packet.readString();
+        uint32_t teamType = 0;
+        if (packet.hasRemaining(4)) teamType = packet.readUInt32();
+        if (auto* feed = arenaFeed(queries_)) feed->onTeamNamed(teamId, std::move(teamName), teamType);
+    };
+    table[Opcode::SMSG_ARENA_TEAM_ROSTER] = [this](network::Packet& packet) {
+        auto roster = readArenaTeamRoster(packet);
+        if (!roster) return;
+        if (auto* feed = arenaFeed(queries_)) feed->onRoster(std::move(*roster));
+    };
+    table[Opcode::SMSG_ARENA_TEAM_INVITE] = [this](network::Packet& packet) {
+        std::string inviter = packet.readString();
+        std::string teamName = packet.readString();
+        if (auto* feed = arenaFeed(queries_)) feed->onInvited(std::move(inviter), std::move(teamName));
+    };
+    table[Opcode::SMSG_ARENA_TEAM_EVENT] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(1)) return;
+        const uint8_t event = packet.readUInt8();
+        uint8_t strCount = 0;
+        if (packet.hasRemaining(1)) strCount = packet.readUInt8();
+        std::string first, second;
+        if (strCount >= 1 && packet.getSize() > packet.getReadPos()) first = packet.readString();
+        if (strCount >= 2 && packet.getSize() > packet.getReadPos()) second = packet.readString();
+        if (auto* feed = arenaFeed(queries_))
+            feed->onTeamChanged(arenaTeamChange(event), std::move(first), std::move(second), event);
+    };
+    table[Opcode::SMSG_ARENA_TEAM_STATS] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(28)) return;
+        arena::ArenaTeamStats stats;
+        stats.teamId = packet.readUInt32(); stats.rating = packet.readUInt32();
+        stats.weekGames = packet.readUInt32(); stats.weekWins = packet.readUInt32();
+        stats.seasonGames = packet.readUInt32(); stats.seasonWins = packet.readUInt32();
+        stats.rank = packet.readUInt32();
+        if (auto* feed = arenaFeed(queries_)) feed->onStats(std::move(stats));
+    };
+    table[Opcode::SMSG_ARENA_ERROR] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(4)) return;
+        const uint32_t error = packet.readUInt32();
+        if (auto* feed = arenaFeed(queries_)) feed->onMatchRefused(arenaMatchError(error), error);
+    };
     table[Opcode::MSG_PVP_LOG_DATA] = [this](network::Packet& packet) { handlePvpLogData(packet); };
 
     // ---- Factions / group leader ----
@@ -1803,67 +1842,6 @@ void SocialHandler::declineGroupInvite() {
     if (!sender_.characterInWorld()) return;
     pendingGroupInvite = false;
     auto packet = GroupDeclinePacket::build();
-    sender_.send(packet);
-}
-
-void SocialHandler::acceptArenaTeamInvite() {
-    if (!sender_.characterInWorld()) return;
-    network::Packet packet(wireOpcode(Opcode::CMSG_ARENA_TEAM_ACCEPT));
-    sender_.send(packet);
-}
-
-void SocialHandler::declineArenaTeamInvite() {
-    if (!sender_.characterInWorld()) return;
-    network::Packet packet(wireOpcode(Opcode::CMSG_ARENA_TEAM_DECLINE));
-    sender_.send(packet);
-}
-
-// The four arena team commands that had no sender. Every one is the team id
-// and, for three of them, a player name - the shape AzerothCore reads in
-// ArenaTeamHandler.cpp: `recvData >> arenaTeamId >> name`. Disband and the two
-// invite answers below were already built; these four were named by the
-// interface's own popups and slash commands and reached bindings with nothing
-// behind them, so the buttons closed and nothing happened.
-void SocialHandler::arenaTeamInvite(uint32_t teamId, const std::string& name) {
-    if (teamId == 0 || name.empty()) return;
-    if (!sender_.characterInWorld()) return;
-    network::Packet packet(wireOpcode(Opcode::CMSG_ARENA_TEAM_INVITE));
-    packet.writeUInt32(teamId);
-    packet.writeString(name);
-    sender_.send(packet);
-}
-
-void SocialHandler::arenaTeamLeave(uint32_t teamId) {
-    if (teamId == 0) return;
-    if (!sender_.characterInWorld()) return;
-    network::Packet packet(wireOpcode(Opcode::CMSG_ARENA_TEAM_LEAVE));
-    packet.writeUInt32(teamId);
-    sender_.send(packet);
-}
-
-void SocialHandler::arenaTeamRemove(uint32_t teamId, const std::string& name) {
-    if (teamId == 0 || name.empty()) return;
-    if (!sender_.characterInWorld()) return;
-    network::Packet packet(wireOpcode(Opcode::CMSG_ARENA_TEAM_REMOVE));
-    packet.writeUInt32(teamId);
-    packet.writeString(name);
-    sender_.send(packet);
-}
-
-void SocialHandler::arenaTeamSetLeader(uint32_t teamId, const std::string& name) {
-    if (teamId == 0 || name.empty()) return;
-    if (!sender_.characterInWorld()) return;
-    network::Packet packet(wireOpcode(Opcode::CMSG_ARENA_TEAM_LEADER));
-    packet.writeUInt32(teamId);
-    packet.writeString(name);
-    sender_.send(packet);
-}
-
-void SocialHandler::disbandArenaTeam(uint32_t teamId) {
-    if (teamId == 0) return;
-    if (!sender_.characterInWorld()) return;
-    network::Packet packet(wireOpcode(Opcode::CMSG_ARENA_TEAM_DISBAND));
-    packet.writeUInt32(teamId);
     sender_.send(packet);
 }
 
@@ -3950,230 +3928,6 @@ void SocialHandler::lfgSetBootVote(bool vote) {
     network::Packet pkt(wireOp);
     pkt.writeUInt8(vote ? 1 : 0);
     sender_.send(pkt);
-}
-
-// ============================================================
-// Arena Handlers
-// ============================================================
-
-// command(4) + team name + player name + error(4).
-//
-// The player name was never read, so the error came out of the first four
-// bytes of it - a name, so never zero, and every command result read as a
-// failure however well it had gone. Where the server sends no player name the
-// error slid one byte instead, which is the same fault with a different value.
-// Both strings are needed anyway: the server names the team and the player
-// separately because most of these results are about one acting on the other.
-void SocialHandler::handleArenaTeamCommandResult(network::Packet& packet) {
-    if (!packet.hasRemaining(10)) return;
-    const uint32_t command = packet.readUInt32();
-    const std::string teamName = packet.readString();
-    const std::string playerName = packet.readString();
-    if (!packet.hasRemaining(4)) return;
-    const uint32_t error = packet.readUInt32();
-
-    // ArenaTeamCommandTypes, and it is not a dense range: 2, and everything
-    // between 4 and 13, are values the server never sends. The old table read
-    // it as 0..5 in a row, so a quit reported itself as a remove and a change
-    // of captain fell off the end.
-    const char* cmdName = "arena team";
-    switch (command) {
-        case 0x00: cmdName = "arena team create"; break;
-        case 0x01: cmdName = "arena team invite"; break;
-        case 0x03: cmdName = "arena team quit"; break;
-        case 0x0E: cmdName = "arena team captain"; break;
-        default: break;
-    }
-
-    // Whichever name the result is about. A create names the team, an invite
-    // names the player, and both are sent for the ones that concern both.
-    std::string about;
-    if (!teamName.empty()) about = teamName;
-    if (!playerName.empty())
-        about = about.empty() ? playerName : about + " / " + playerName;
-
-    if (error == 0) {
-        chat_.addSystemChatMessage(std::string(cmdName) + " succeeded" +
-                                    (about.empty() ? "." : ": " + about));
-        return;
-    }
-    chat_.addSystemChatMessage(std::string(cmdName) + " failed" +
-                                (about.empty() ? "" : " (" + about + ")") +
-                                ": " + arenaTeamErrorString(error));
-}
-
-void SocialHandler::handleArenaTeamQueryResponse(network::Packet& packet) {
-    if (!packet.hasRemaining(4)) return;
-    uint32_t teamId = packet.readUInt32();
-    std::string teamName = packet.readString();
-    uint32_t teamType = 0;
-    if (packet.hasRemaining(4)) teamType = packet.readUInt32();
-    bool known = false;
-    for (auto& s : arenaTeamStats_) { if (s.teamId == teamId) { s.teamName = teamName; s.teamType = teamType; known = true; break; } }
-    if (!known) {
-        ArenaTeamStats stub; stub.teamId = teamId; stub.teamName = teamName; stub.teamType = teamType;
-        arenaTeamStats_.push_back(std::move(stub));
-    }
-    // A team's name arriving is what the PvP panel redraws on. Without this the
-    // arena tabs kept whatever they were built with, so a team queried after
-    // the panel opened stayed nameless until it was closed and opened again.
-    if (frameXml_.frameXmlListening()) {
-        frameXml_.fireFrameXmlEvent("ARENA_TEAM_UPDATE", {});
-    }
-}
-
-void SocialHandler::handleArenaTeamRoster(network::Packet& packet) {
-    // teamId(4) + unk308(1) + memberCount(4) + teamType(4), then the members.
-    //
-    // The team type was never read, so the first member's guid was taken from
-    // four bytes earlier - the type plus the guid's low half - and every
-    // member after it followed from there. The roster was wrong from its first
-    // row, and nothing about it looked like a length fault: the packet is long
-    // enough either way.
-    if (!packet.hasRemaining(13)) return;
-    const uint32_t teamId = packet.readUInt32();
-    // 3.0.8 added this, and it does more than mark a version: the server writes
-    // the two trailing floats per member only when it is set.
-    const bool hasTrailingFloats = packet.readUInt8() != 0;
-    const uint32_t memberCount = std::min(packet.readUInt32(), 100u);
-    /*uint32_t teamType =*/ packet.readUInt32();
-    ArenaTeamRoster roster; roster.teamId = teamId; roster.members.reserve(memberCount);
-    for (uint32_t i = 0; i < memberCount; ++i) {
-        if (!packet.hasRemaining(12)) break;
-        ArenaTeamMember m;
-        m.guid = packet.readUInt64(); m.online = (packet.readUInt8() != 0); m.name = packet.readString();
-        // Captain flag, level and class sit between the name and the record -
-        // six bytes this went straight past, so the games played were the
-        // captain flag, the wins were the level and class with two bytes of the
-        // real figure behind them, and so on down the row.
-        if (!packet.hasRemaining(6)) break;
-        m.isCaptain = (packet.readUInt32() == 0);   // 0 captain, 1 member
-        m.level     = packet.readUInt8();
-        m.classId   = packet.readUInt8();
-        if (!packet.hasRemaining(20)) break;
-        m.weekGames = packet.readUInt32(); m.weekWins = packet.readUInt32();
-        m.seasonGames = packet.readUInt32(); m.seasonWins = packet.readUInt32(); m.personalRating = packet.readUInt32();
-        // Only when the header said so. Taking them whenever eight bytes were
-        // left ate the next member's guid on every roster of more than one.
-        if (hasTrailingFloats) {
-            if (!packet.hasRemaining(8)) break;
-            packet.readFloat(); packet.readFloat();
-        }
-        roster.members.push_back(std::move(m));
-    }
-    bool replaced = false;
-    for (auto& r : arenaTeamRosters_) { if (r.teamId == teamId) { r = std::move(roster); replaced = true; break; } }
-    if (!replaced) arenaTeamRosters_.push_back(std::move(roster));
-
-    // The roster is stored and the arena panel is told, which it was not: the
-    // team detail window redraws on this event and on nothing else, so a
-    // roster that arrived after the window opened was held here and never
-    // shown.
-    //
-    // Fired with no arguments, and that is the whole contract. pvpframe reads
-    // arg1 as "the roster you hold is stale, ask for it again" and only
-    // redraws from what arrived when arg1 is absent - so any argument at all
-    // would answer this roster by requesting another one, forever. A zero
-    // would do it too, zero being true in Lua.
-    if (frameXml_.frameXmlListening()) {
-        frameXml_.fireFrameXmlEvent("ARENA_TEAM_ROSTER_UPDATE", {});
-    }
-}
-
-void SocialHandler::sortArenaTeamRosters(const std::string& key) {
-    if (key.empty()) return;
-    // The same column twice reverses. A different one starts again in the
-    // direction that column reads best: a name from A, a number from the top.
-    if (key == arenaSortKey_) {
-        arenaSortAscending_ = !arenaSortAscending_;
-    } else {
-        arenaSortKey_ = key;
-        arenaSortAscending_ = (key == "name" || key == "class");
-    }
-    const bool asc = arenaSortAscending_;
-
-    auto value = [&key](const ArenaTeamMember& m) -> uint64_t {
-        if (key == "class")        return m.classId;
-        if (key == "played")       return m.weekGames;
-        if (key == "won")          return m.weekWins;
-        if (key == "seasonplayed") return m.seasonGames;
-        if (key == "seasonwon")    return m.seasonWins;
-        if (key == "rating")       return m.personalRating;
-        return 0;
-    };
-
-    for (auto& roster : arenaTeamRosters_) {
-        std::stable_sort(roster.members.begin(), roster.members.end(),
-            [&](const ArenaTeamMember& a, const ArenaTeamMember& b) {
-                if (key == "name") {
-                    return asc ? (a.name < b.name) : (b.name < a.name);
-                }
-                const uint64_t va = value(a), vb = value(b);
-                if (va == vb) return a.name < b.name;   // steady under ties
-                return asc ? (va < vb) : (vb < va);
-            });
-    }
-}
-
-void SocialHandler::handleArenaTeamInvite(network::Packet& packet) {
-    std::string playerName = packet.readString();
-    std::string teamName = packet.readString();
-    chat_.addSystemChatMessage(playerName + " has invited you to join " + teamName + ".");
-}
-
-void SocialHandler::handleArenaTeamEvent(network::Packet& packet) {
-    if (!packet.hasRemaining(1)) return;
-    uint8_t event = packet.readUInt8();
-    uint8_t strCount = 0;
-    if (packet.hasRemaining(1)) strCount = packet.readUInt8();
-    std::string param1, param2;
-    if (strCount >= 1 && packet.getSize() > packet.getReadPos()) param1 = packet.readString();
-    if (strCount >= 2 && packet.getSize() > packet.getReadPos()) param2 = packet.readString();
-    std::string msg;
-    switch (event) {
-        case 0: msg = param1.empty() ? "A player has joined your arena team." : param1 + " has joined your arena team."; break;
-        case 1: msg = param1.empty() ? "A player has left the arena team." : param1 + " has left the arena team."; break;
-        case 2: msg = (!param1.empty() && !param2.empty()) ? param1 + " has been removed from the arena team by " + param2 + "." : "A player has been removed from the arena team."; break;
-        case 3: msg = param1.empty() ? "The arena team captain has changed." : param1 + " is now the arena team captain."; break;
-        case 4: msg = "Your arena team has been disbanded."; break;
-        case 5: msg = param1.empty() ? "Your arena team has been created." : "Arena team \"" + param1 + "\" has been created."; break;
-        default: msg = "Arena team event " + std::to_string(event); if (!param1.empty()) msg += ": " + param1; break;
-    }
-    chat_.addSystemChatMessage(msg);
-}
-
-void SocialHandler::handleArenaTeamStats(network::Packet& packet) {
-    if (!packet.hasRemaining(28)) return;
-    ArenaTeamStats stats;
-    stats.teamId = packet.readUInt32(); stats.rating = packet.readUInt32();
-    stats.weekGames = packet.readUInt32(); stats.weekWins = packet.readUInt32();
-    stats.seasonGames = packet.readUInt32(); stats.seasonWins = packet.readUInt32();
-    stats.rank = packet.readUInt32();
-    for (auto& s : arenaTeamStats_) {
-        if (s.teamId == stats.teamId) { stats.teamName = std::move(s.teamName); stats.teamType = s.teamType; s = std::move(stats); return; }
-    }
-    arenaTeamStats_.push_back(std::move(stats));
-}
-
-void SocialHandler::requestArenaTeamRoster(uint32_t teamId) {
-    if (!sender_.connected()) return;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_ARENA_TEAM_ROSTER));
-    pkt.writeUInt32(teamId);
-    sender_.send(pkt);
-}
-
-void SocialHandler::handleArenaError(network::Packet& packet) {
-    if (!packet.hasRemaining(4)) return;
-    uint32_t error = packet.readUInt32();
-    std::string msg;
-    switch (error) {
-        case 1: msg = "The other team is not big enough."; break;
-        case 2: msg = "That team is full."; break;
-        case 3: msg = "Not enough members to start."; break;
-        case 4: msg = "Too many members."; break;
-        default: msg = "Arena error (code " + std::to_string(error) + ")"; break;
-    }
-    chat_.addSystemChatMessage(msg);
 }
 
 void SocialHandler::handlePvpLogData(network::Packet& packet) {

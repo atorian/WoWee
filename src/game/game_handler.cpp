@@ -3553,14 +3553,6 @@ bool GameHandler::hasGuildInfoData() const {
     return socialHandler_->hasGuildInfoData();
 }
 
-void GameHandler::sortArenaTeamRosters(const std::string& key) {
-    socialHandler_->sortArenaTeamRosters(key);
-}
-
-const ArenaTeamRoster* GameHandler::getArenaTeamRoster(uint32_t teamId) const {
-    return socialHandler_->getArenaTeamRoster(teamId);
-}
-
 void GameHandler::resolveGMResponse() {
     if (getState() != WorldState::IN_WORLD || !getSocket()) return;
     network::Packet packet(wireOpcode(Opcode::CMSG_GMRESPONSE_RESOLVE));
@@ -3573,30 +3565,6 @@ void GameHandler::removeGlyphFromSocket(uint32_t slot) {
     network::Packet packet(wireOpcode(Opcode::CMSG_REMOVE_GLYPH));
     packet.writeUInt32(slot);
     getSocket()->send(packet);
-}
-
-void GameHandler::acceptArenaTeamInvite() {
-    socialHandler_->acceptArenaTeamInvite();
-}
-
-void GameHandler::declineArenaTeamInvite() {
-    socialHandler_->declineArenaTeamInvite();
-}
-
-void GameHandler::arenaTeamInvite(uint32_t teamId, const std::string& name) {
-    socialHandler_->arenaTeamInvite(teamId, name);
-}
-void GameHandler::arenaTeamLeave(uint32_t teamId) {
-    socialHandler_->arenaTeamLeave(teamId);
-}
-void GameHandler::arenaTeamRemove(uint32_t teamId, const std::string& name) {
-    socialHandler_->arenaTeamRemove(teamId, name);
-}
-void GameHandler::arenaTeamSetLeader(uint32_t teamId, const std::string& name) {
-    socialHandler_->arenaTeamSetLeader(teamId, name);
-}
-void GameHandler::disbandArenaTeam(uint32_t teamId) {
-    socialHandler_->disbandArenaTeam(teamId);
 }
 
 void GameHandler::reportMailSpam(uint64_t senderGuid, uint32_t mailId) {
@@ -3752,10 +3720,6 @@ const std::string& GameHandler::getLfgBootTargetName() const {
 
 const std::string& GameHandler::getLfgBootReason() const {
     return socialHandler_->getLfgBootReason();
-}
-
-const std::vector<GameHandler::ArenaTeamStats>& GameHandler::getArenaTeamStats() const {
-    return socialHandler_->getArenaTeamStats();
 }
 
 // ---- SpellHandler delegating getters ----

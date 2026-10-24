@@ -21,6 +21,7 @@ namespace contacts { class IContactsServerFeed; }
 namespace who { class IWhoFeed; }
 namespace duel { class IDuelsFeed; }
 namespace petition { class IPetitionsFeed; }
+namespace arena { class IArenaTeamsFeed; }
 namespace game {
 
 class PacketSender;
@@ -87,6 +88,8 @@ public:
     [[nodiscard]] virtual duel::IDuelsFeed* duelFeed() = 0;
     /// Where the charter packets go; null when the client was built without them.
     [[nodiscard]] virtual petition::IPetitionsFeed* petitionFeed() = 0;
+    /// Where the arena team packets go; null when the client was built without them.
+    [[nodiscard]] virtual arena::IArenaTeamsFeed* arenaFeed() = 0;
 
     // ---- The appearance switches the realm keeps with the character ----
     [[nodiscard]] virtual bool showingHelm() const = 0;
@@ -96,8 +99,8 @@ public:
 };
 
 /// What the social side of the game keeps for one character: its party and
-/// guild, the invitations and challenges put to it, its queues, its arena
-/// teams and its saved instances. SocialHandler is this and assigns it whole
+/// guild, the invitations and challenges put to it, its queues and its saved
+/// instances. SocialHandler is this and assigns it whole
 /// when a character logs in (events::CharacterLoggingIn): the server sends
 /// the next character's own, and a duel or an invite put to the last one is
 /// not the next one's to answer.
@@ -167,10 +170,6 @@ struct SocialCharacterState {
 
     // Raid marks
     std::array<uint64_t, kRaidMarkCount> raidTargetGuids_ = {};
-
-    // Arena
-    std::vector<ArenaTeamStats>  arenaTeamStats_;
-    std::vector<ArenaTeamRoster> arenaTeamRosters_;
 
     // Battleground
     std::array<BgQueueSlot, 3> bgQueues_{};
@@ -254,12 +253,6 @@ public:
     using InstanceLockout = game::InstanceLockout;
 
     using LfgState = game::LfgState;
-
-    using ArenaTeamStats = game::ArenaTeamStats;
-
-    using ArenaTeamMember = game::ArenaTeamMember;
-
-    using ArenaTeamRoster = game::ArenaTeamRoster;
 
     // ---- Public API ----
 
@@ -415,16 +408,6 @@ public:
     void acceptGroupInvite();
     void declineGroupInvite();
 
-    // ---- Arena team invitations ----
-    // Accept and decline carry no payload: the server answers from the invite
-    // it is already holding against this character.
-    void acceptArenaTeamInvite();
-    void declineArenaTeamInvite();
-    void arenaTeamInvite(uint32_t teamId, const std::string& name);
-    void arenaTeamLeave(uint32_t teamId);
-    void arenaTeamRemove(uint32_t teamId, const std::string& name);
-    void arenaTeamSetLeader(uint32_t teamId, const std::string& name);
-    void disbandArenaTeam(uint32_t teamId);
     /// Report a mail as spam. Type 0 of CMSG_COMPLAIN; the three values after
     /// the sender are a zero, the mail's own id, and another zero.
     void reportMailSpam(uint64_t senderGuid, uint32_t mailId);
@@ -630,19 +613,6 @@ public:
     [[nodiscard]] bool hasLfgBootVoted()     const { return lfgBootDidVote_; }
     [[nodiscard]] bool getLfgBootMyVote()    const { return lfgBootMyVote_; }
 
-    // Arena
-    [[nodiscard]] const std::vector<ArenaTeamStats>& getArenaTeamStats() const { return arenaTeamStats_; }
-    void requestArenaTeamRoster(uint32_t teamId);
-    [[nodiscard]] const ArenaTeamRoster* getArenaTeamRoster(uint32_t teamId) const {
-        for (const auto& r : arenaTeamRosters_)
-            if (r.teamId == teamId) return &r;
-        return nullptr;
-    }
-    /// Every roster rather than one, because the interface asks for a sort
-    /// without saying which team - it sorts what it is showing, and it only
-    /// ever shows one at a time. The same column twice reverses.
-    void sortArenaTeamRosters(const std::string& key);
-
 private:
     // ---- Packet handlers ----
     void handleInspectResults(network::Packet& packet);
@@ -689,13 +659,6 @@ private:
     void handleLfgPlayerReward(network::Packet& packet);
     void handleLfgBootProposalUpdate(network::Packet& packet);
     void handleLfgTeleportDenied(network::Packet& packet);
-    void handleArenaTeamCommandResult(network::Packet& packet);
-    void handleArenaTeamQueryResponse(network::Packet& packet);
-    void handleArenaTeamRoster(network::Packet& packet);
-    void handleArenaTeamInvite(network::Packet& packet);
-    void handleArenaTeamEvent(network::Packet& packet);
-    void handleArenaTeamStats(network::Packet& packet);
-    void handleArenaError(network::Packet& packet);
     void handlePvpLogData(network::Packet& packet);
     void handleGroupSetLeader(network::Packet& packet);
     void handleTalentsInfo(network::Packet& packet);
@@ -739,10 +702,6 @@ private:
     // with it (resetTransferState).
     std::array<uint64_t, kMaxEncounterSlots> encounterUnitGuids_ = {};
     InstanceLockPrompt instanceLock_;
-
-    // How the arena roster is sorted - the interface's choice.
-    std::string arenaSortKey_;
-    bool arenaSortAscending_ = true;
 
     // When the last position request went out.
     std::chrono::steady_clock::time_point lastBgPositionRequest_{};

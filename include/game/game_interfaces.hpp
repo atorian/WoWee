@@ -23,8 +23,6 @@ struct BgQueueSlot;
 struct AvailableBgInfo;
 struct BgScoreboardData;
 struct BgPlayerPosition;
-struct ArenaTeamStats;
-struct ArenaTeamRoster;
 struct GuildRosterData;
 struct GuildInfoData;
 struct GuildQueryResponseData;
@@ -100,7 +98,7 @@ public:
 };
 
 // ---------------------------------------------------------------------------
-// IPvpState - battleground queues, arena teams, scoreboard
+// IPvpState - battleground queues, scoreboard
 // ---------------------------------------------------------------------------
 class IPvpState {
 public:
@@ -112,7 +110,6 @@ public:
     [[nodiscard]] virtual const std::array<BgQueueSlot, 3>& getBgQueues() const = 0;
     [[nodiscard]] virtual const std::vector<AvailableBgInfo>& getAvailableBgs() const = 0;
     [[nodiscard]] virtual const BgScoreboardData* getBgScoreboard() const = 0;
-    [[nodiscard]] virtual const std::vector<ArenaTeamStats>& getArenaTeamStats() const = 0;
 };
 
 } // namespace wowee::game

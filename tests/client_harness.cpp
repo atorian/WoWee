@@ -221,6 +221,7 @@ ClientHarness::ClientHarness()
     luaServices.who = &game_.who();
     luaServices.duels = &game_.duels();
     luaServices.petitions = &game_.petitions();
+    luaServices.arenaTeams = &game_.arenaTeams();
     playerView_->bindMovementControls(luaServices);
 
     core::ClientLoop::Services services{

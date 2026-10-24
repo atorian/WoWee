@@ -7,6 +7,8 @@
 #include "duel/services/duel_service.hpp"
 #include "game/petition_gateway.hpp"
 #include "petition/services/petition_service.hpp"
+#include "game/arena_gateway.hpp"
+#include "arena/services/arena_service.hpp"
 #include "ui/macro_icon.hpp"
 #include <imgui_impl_vulkan.h>
 #include "rendering/imgui_texture.hpp"
@@ -492,6 +494,9 @@ bool Application::initialize() {
     petitionGateway_ = std::make_unique<game::PetitionGateway>(*gameHandler);
     petitions_ = std::make_unique<petition::PetitionService>(*petitionGateway_, eventBus_);
     gameServices_.petitionFeed = petitions_.get();
+    arenaGateway_ = std::make_unique<game::ArenaGateway>(*gameHandler);
+    arenaTeams_ = std::make_unique<arena::ArenaService>(*arenaGateway_, eventBus_);
+    gameServices_.arenaFeed = arenaTeams_.get();
     transportScene_ = std::make_unique<RendererTransportScene>(*renderer);
     gameHandler->getTransportManager()->setScene(transportScene_.get());
 
@@ -903,6 +908,7 @@ bool Application::initialize() {
         luaSvc.who               = who_.get();
         luaSvc.duels             = duels_.get();
         luaSvc.petitions         = petitions_.get();
+        luaSvc.arenaTeams        = arenaTeams_.get();
         // Acted on between frames - the reload destroys the state that asked.
         luaSvc.requestReloadUI = [this]() {
             if (auto* character = session()) character->requestInterfaceReload();
@@ -2573,6 +2579,7 @@ void Application::shutdown() {
     gameServices_.whoFeed = nullptr;
     gameServices_.duelFeed = nullptr;
     gameServices_.petitionFeed = nullptr;
+    gameServices_.arenaFeed = nullptr;
     contacts_.reset();
     contactsGateway_.reset();
     who_.reset();
@@ -2581,6 +2588,8 @@ void Application::shutdown() {
     duelGateway_.reset();
     petitions_.reset();
     petitionGateway_.reset();
+    arenaTeams_.reset();
+    arenaGateway_.reset();
 
     // GameHandler teardown can still publish events consumed by audio.
     if (audioCoordinator_) {

@@ -8,6 +8,7 @@
 #include "who/services/who.hpp"
 #include "duel/services/duels.hpp"
 #include "petition/services/petitions.hpp"
+#include "arena/services/arena.hpp"
 #include "game/emote_table.hpp"
 #include "game/reputation_standing.hpp"
 #include "game/stationery.hpp"
@@ -495,9 +496,15 @@ std::vector<const who::WhoEntry*> whoResultsView(lua_State* L, game::GameHandler
 
 // Declared in lua_api_helpers.hpp: the system API asks the same question and
 // had its own copy under another name.
-uint32_t arenaTeamIdAtIndex(game::GameHandler* gh, int index) {
-    if (!gh || index < 1) return 0;
-    const auto& teams = gh->getArenaTeamStats();
+arena::IArenaTeams* arenaTeamsOf(lua_State* L) {
+    auto* services = getLuaServices(L);
+    return services ? services->arenaTeams : nullptr;
+}
+
+uint32_t arenaTeamIdAtIndex(lua_State* L, int index) {
+    auto* arenaTeams = arenaTeamsOf(L);
+    if (!arenaTeams || index < 1) return 0;
+    const auto& teams = arenaTeams->getArenaTeamStats();
     if (index > static_cast<int>(teams.size())) return 0;
     return teams[static_cast<size_t>(index) - 1].teamId;
 }
@@ -1384,16 +1391,16 @@ void registerSocialLuaAPI(lua_State* L) {
                 // interface down. Accept and decline carry no payload; the
                 // server answers from the invite it is already holding.
                 {"AcceptArenaTeam", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->acceptArenaTeamInvite();
+            if (auto* teams = arenaTeamsOf(L)) teams->acceptArenaTeamInvite();
             return 0;
         }},
                 {"DeclineArenaTeam", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->declineArenaTeamInvite();
+            if (auto* teams = arenaTeamsOf(L)) teams->declineArenaTeamInvite();
             return 0;
         }},
                 {"ArenaTeamDisband", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L))
-                gh->disbandArenaTeam(static_cast<uint32_t>(luaL_optnumber(L, 1, 0)));
+            if (auto* teams = arenaTeamsOf(L))
+                teams->disbandArenaTeam(static_cast<uint32_t>(luaL_optnumber(L, 1, 0)));
             return 0;
         }},
                 // DeclineInvite(name) - the group invite popup's Decline.
@@ -3551,30 +3558,26 @@ void registerSocialLuaAPI(lua_State* L) {
                 // is how the interface counts the three bracket sizes; the wire
                 // is addressed by the team's own id.
                 {"ArenaTeamInviteByName", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const uint32_t id = arenaTeamIdAtIndex(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+            const uint32_t id = arenaTeamIdAtIndex(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
             const char* name = luaL_optstring(L, 2, "");
-            if (gh && id) gh->arenaTeamInvite(id, name ? name : "");
+            if (id) arenaTeamsOf(L)->arenaTeamInvite(id, name ? name : "");
             return 0;
         }},
                 {"ArenaTeamLeave", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const uint32_t id = arenaTeamIdAtIndex(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
-            if (gh && id) gh->arenaTeamLeave(id);
+            const uint32_t id = arenaTeamIdAtIndex(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
+            if (id) arenaTeamsOf(L)->arenaTeamLeave(id);
             return 0;
         }},
                 {"ArenaTeamSetLeaderByName", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const uint32_t id = arenaTeamIdAtIndex(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+            const uint32_t id = arenaTeamIdAtIndex(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
             const char* name = luaL_optstring(L, 2, "");
-            if (gh && id) gh->arenaTeamSetLeader(id, name ? name : "");
+            if (id) arenaTeamsOf(L)->arenaTeamSetLeader(id, name ? name : "");
             return 0;
         }},
                 {"ArenaTeamUninviteByName", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const uint32_t id = arenaTeamIdAtIndex(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+            const uint32_t id = arenaTeamIdAtIndex(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
             const char* name = luaL_optstring(L, 2, "");
-            if (gh && id) gh->arenaTeamRemove(id, name ? name : "");
+            if (id) arenaTeamsOf(L)->arenaTeamRemove(id, name ? name : "");
             return 0;
         }},
                 {"BNGetConversationInfo",    [](lua_State* L) -> int { (void)L; return 0; }},

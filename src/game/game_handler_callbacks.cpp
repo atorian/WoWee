@@ -1209,6 +1209,10 @@ petition::IPetitionsFeed* GameHandler::petitionFeed() {
     return services_.petitionFeed;
 }
 
+arena::IArenaTeamsFeed* GameHandler::arenaFeed() {
+    return services_.arenaFeed;
+}
+
 void GameHandler::setGuildBankMoney(uint64_t money) {
     inventoryHandler_->setGuildBankMoney(money);
 }
@@ -2114,10 +2118,6 @@ void GameHandler::loadAreaTriggerDbc() {
 
 void GameHandler::checkAreaTriggers() {
     movementHandler_->checkAreaTriggers();
-}
-
-void GameHandler::requestArenaTeamRoster(uint32_t teamId) {
-    socialHandler_->requestArenaTeamRoster(teamId);
 }
 
 void GameHandler::requestPvpLog() {

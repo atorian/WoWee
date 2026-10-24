@@ -48,7 +48,8 @@ namespace contacts { class ContactsService; }
 namespace who { class WhoService; }
 namespace duel { class DuelService; }
 namespace petition { class PetitionService; }
-namespace game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; }
+namespace arena { class ArenaService; }
+namespace game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; }
 
 // Forward declarations
 namespace rendering {
@@ -414,6 +415,8 @@ private:
     std::unique_ptr<duel::DuelService> duels_;
     std::unique_ptr<game::PetitionGateway> petitionGateway_;
     std::unique_ptr<petition::PetitionService> petitions_;
+    std::unique_ptr<game::ArenaGateway> arenaGateway_;
+    std::unique_ptr<arena::ArenaService> arenaTeams_;
     std::unique_ptr<game::GameHandler> gameHandler;
     /// The renderer's side of the transports - see game::TransportScene.
     std::unique_ptr<RendererTransportScene> transportScene_;

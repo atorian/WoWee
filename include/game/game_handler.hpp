@@ -640,6 +640,7 @@ public:
     who::IWhoFeed* whoFeed() override;
     duel::IDuelsFeed* duelFeed() override;
     petition::IPetitionsFeed* petitionFeed() override;
+    arena::IArenaTeamsFeed* arenaFeed() override;
 
     // Money (copper)
     uint64_t getMoneyCopper() const { return inventoryHandler_->moneyCopper(); }
@@ -987,13 +988,6 @@ public:
     const GuildInfoData& getGuildInfoData() const;
     const GuildQueryResponseData& getGuildQueryData() const;
     bool hasGuildInfoData() const;
-    void acceptArenaTeamInvite();
-    void declineArenaTeamInvite();
-    void arenaTeamInvite(uint32_t teamId, const std::string& name);
-    void arenaTeamLeave(uint32_t teamId);
-    void arenaTeamRemove(uint32_t teamId, const std::string& name);
-    void arenaTeamSetLeader(uint32_t teamId, const std::string& name);
-    void disbandArenaTeam(uint32_t teamId);
     void reportMailSpam(uint64_t senderGuid, uint32_t mailId);
     /// Take the glyph out of a socket. Zero-based slot, as the server counts.
     void removeGlyphFromSocket(uint32_t slot);
@@ -1903,26 +1897,6 @@ public:
     bool isLfgBootInProgress() const;
     bool hasLfgBootVoted() const;
     bool getLfgBootMyVote() const;
-
-    // Arena team stats (aliased from handler_types.hpp)
-    using ArenaTeamStats = game::ArenaTeamStats;
-    const std::vector<ArenaTeamStats>& getArenaTeamStats() const override;
-    void requestArenaTeamRoster(uint32_t teamId);
-
-    // Arena team roster (aliased from handler_types.hpp)
-    using ArenaTeamMember = game::ArenaTeamMember;
-    using ArenaTeamRoster = game::ArenaTeamRoster;
-    // Returns roster for the given teamId, or nullptr if not yet received
-    /// Reorder every stored arena roster by one of the details frame's
-    /// columns: "name", "class", "played", "won", "rating", "seasonplayed" or
-    /// "seasonwon". Clicking the same column again reverses it.
-    ///
-    /// Every roster rather than one, because the interface asks for a sort
-    /// without saying which team - it sorts what it is showing, and it only
-    /// ever shows one at a time.
-    void sortArenaTeamRosters(const std::string& key);
-
-    const ArenaTeamRoster* getArenaTeamRoster(uint32_t teamId) const;
 
     // ---- Loot ----
     void lootTarget(uint64_t guid) override;

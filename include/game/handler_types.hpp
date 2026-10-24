@@ -407,41 +407,6 @@ enum class LfgState : uint8_t {
     RaidBrowser    = 7,
 };
 
-// ---- Arena teams ----
-
-struct ArenaTeamStats {
-    uint32_t teamId       = 0;
-    uint32_t rating       = 0;
-    uint32_t weekGames    = 0;
-    uint32_t weekWins     = 0;
-    uint32_t seasonGames  = 0;
-    uint32_t seasonWins   = 0;
-    uint32_t rank         = 0;
-    std::string teamName;
-    uint32_t teamType     = 0;
-};
-
-struct ArenaTeamMember {
-    uint64_t    guid            = 0;
-    std::string name;
-    bool        online          = false;
-    /// The three the roster carries between the name and the record. They were
-    /// on the wire all along and read as part of the games played.
-    bool        isCaptain       = false;
-    uint8_t     level           = 0;
-    uint8_t     classId         = 0;
-    uint32_t    weekGames       = 0;
-    uint32_t    weekWins        = 0;
-    uint32_t    seasonGames     = 0;
-    uint32_t    seasonWins      = 0;
-    uint32_t    personalRating  = 0;
-};
-
-struct ArenaTeamRoster {
-    uint32_t teamId = 0;
-    std::vector<ArenaTeamMember> members;
-};
-
 // ---- Trade ----
 
 enum class TradeStatus : uint8_t {

@@ -1,6 +1,7 @@
 // lua_system_api.cpp - System, time, sound, locale, map, addons, instances, and utilities Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include "game/action_bar_handler.hpp"
+#include "arena/services/arena.hpp"
 #include <array>
 #include <algorithm>
 #include <optional>
@@ -3888,9 +3889,8 @@ static int lua_GetPVPRankProgress(lua_State* L) { lua_pushnumber(L, 0); return 1
 // Which team an index names comes from the same list GetArenaTeam reads.
 // ArenaTeamRoster(index) - ask the server for the roster.
 static int lua_ArenaTeamRoster(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    const uint32_t teamId = arenaTeamIdAtIndex(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
-    if (gh && teamId) gh->requestArenaTeamRoster(teamId);
+    const uint32_t teamId = arenaTeamIdAtIndex(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
+    if (teamId) arenaTeamsOf(L)->requestArenaTeamRoster(teamId);
     return 0;
 }
 
@@ -3902,11 +3902,10 @@ static int lua_ArenaTeamRoster(lua_State* L) {
 // the panel does test before using, and rank and level are zero because the
 // roster carries neither.
 static int lua_GetArenaTeamRosterInfo(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    const uint32_t teamId = arenaTeamIdAtIndex(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+    const uint32_t teamId = arenaTeamIdAtIndex(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
     const int member = static_cast<int>(luaL_optnumber(L, 2, 0));
-    if (!gh || teamId == 0 || member < 1) return luaReturnNil(L);
-    const auto* roster = gh->getArenaTeamRoster(teamId);
+    if (teamId == 0 || member < 1) return luaReturnNil(L);
+    const auto* roster = arenaTeamsOf(L)->getArenaTeamRoster(teamId);
     if (!roster || member > static_cast<int>(roster->members.size())) return luaReturnNil(L);
     const auto& m = roster->members[static_cast<size_t>(member) - 1];
 
@@ -3969,10 +3968,10 @@ static int lua_HasKey(lua_State* L) { lua_pushboolean(L, 1); return 1; }
 // style and colours and nothing here reads them. Those eight answer zero rather
 // than nil, so the tabard draws black instead of raising mid-arithmetic.
 static int lua_GetArenaTeam(lua_State* L) {
-    auto* gh = getGameHandler(L);
+    auto* arenaTeams = arenaTeamsOf(L);
     const int idx = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh || idx < 1) return luaReturnNil(L);
-    const auto& teams = gh->getArenaTeamStats();
+    if (!arenaTeams || idx < 1) return luaReturnNil(L);
+    const auto& teams = arenaTeams->getArenaTeamStats();
     if (idx > static_cast<int>(teams.size())) return luaReturnNil(L);
     const auto& t = teams[static_cast<size_t>(idx) - 1];
 
@@ -5161,10 +5160,9 @@ void registerSystemLuaAPI(lua_State* L) {
                 // details called a nil global and raised before the first row
                 // was read - the reader beside it worked the whole time.
                 {"GetNumArenaTeamMembers", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
             const uint32_t teamId =
-                arenaTeamIdAtIndex(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
-            const auto* roster = (gh && teamId) ? gh->getArenaTeamRoster(teamId) : nullptr;
+                arenaTeamIdAtIndex(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
+            const auto* roster = teamId ? arenaTeamsOf(L)->getArenaTeamRoster(teamId) : nullptr;
             lua_pushnumber(L, roster
                 ? static_cast<lua_Number>(roster->members.size()) : 0);
             return 1;
@@ -5172,9 +5170,9 @@ void registerSystemLuaAPI(lua_State* L) {
                 // SortArenaTeamRoster(column) - the details frame's column
                 // headers. Unbound, every one of them raised on click.
                 {"SortArenaTeamRoster", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
+            auto* teams = arenaTeamsOf(L);
             const char* key = luaL_optstring(L, 1, "");
-            if (gh && key && *key) gh->sortArenaTeamRosters(key);
+            if (teams && key && *key) teams->sortArenaTeamRosters(key);
             return 0;
         }},
                 {"GetArenaTeamRosterSelection",  lua_GetArenaTeamRosterSelection},

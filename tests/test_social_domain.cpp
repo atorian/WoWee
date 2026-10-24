@@ -1,4 +1,4 @@
-// Groups and arena teams, end to end: the server's packets, what the
+// Groups, end to end: the server's packets, what the
 // interface reads and is told, and what the game answers with.
 #include <catch_amalgamated.hpp>
 
@@ -18,7 +18,6 @@ namespace ev = wowee::game::events;
 namespace {
 
 constexpr uint64_t kJaina = 0x21;
-constexpr uint64_t kThrall = 0x20;
 
 /// SMSG_GROUP_LIST for a plain party of the player and others, as AzerothCore's
 /// Group::SendUpdate writes it.
@@ -46,23 +45,6 @@ std::vector<uint8_t> memberAuras(uint64_t member, const std::vector<std::pair<in
     return b.bytes();
 }
 
-struct RosterMember {
-    uint64_t guid;
-    std::string name;
-    uint32_t rating;
-};
-
-/// SMSG_ARENA_TEAM_ROSTER: the team, no trailing floats, the members.
-std::vector<uint8_t> arenaRoster(uint32_t teamId, const std::vector<RosterMember>& members) {
-    Body b;
-    b.u32(teamId).u8(0).u32(static_cast<uint32_t>(members.size())).u32(2 /* 2v2 */);
-    for (const auto& m : members) {
-        b.u64(m.guid).u8(1).cstr(m.name).u32(1 /* member */).u8(80).u8(1);
-        b.u32(10).u32(5).u32(40).u32(20).u32(m.rating);
-    }
-    return b.bytes();
-}
-
 }  // namespace
 
 TEST_CASE("a party member's auras from the stats packet are the ones the frames read",
@@ -82,33 +64,6 @@ TEST_CASE("a party member's auras from the stats packet are the ones the frames 
     REQUIRE(auras->size() == 2);
     CHECK((*auras)[0].spellId == 1459);
     CHECK((*auras)[1].spellId == 10938);
-}
-
-TEST_CASE("an arena team's roster arrives, is what the interface reads, and sorts",
-          "[social][harness]") {
-    GameHarness h;
-    h.enterWorld();
-
-    h.receive(Opcode::SMSG_ARENA_TEAM_ROSTER,
-              arenaRoster(7, {{kJaina, "Jaina", 1500}, {kThrall, "Thrall", 1800}}));
-    h.pump();
-
-    // Fired with no arguments: pvpframe reads one as "ask for the roster
-    // again", so any argument would answer a roster with another request.
-    const auto updates = h.addonEvents("ARENA_TEAM_ROSTER_UPDATE");
-    REQUIRE(updates.size() == 1);
-    CHECK(updates[0].args.empty());
-
-    // The Lua roster and its sort used a GameHandler copy nothing filled.
-    const auto* roster = h.game().getArenaTeamRoster(7);
-    REQUIRE(roster != nullptr);
-    REQUIRE(roster->members.size() == 2);
-
-    h.game().sortArenaTeamRosters("rating");
-    CHECK(h.game().getArenaTeamRoster(7)->members.front().name == "Thrall");
-    // The same column again reverses it.
-    h.game().sortArenaTeamRosters("rating");
-    CHECK(h.game().getArenaTeamRoster(7)->members.front().name == "Jaina");
 }
 
 TEST_CASE("a group invitation is offered, and accepting it answers the server", "[social][harness]") {
