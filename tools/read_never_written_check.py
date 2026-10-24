@@ -22,8 +22,10 @@ never asked for.
 
 WHAT IT COMPARES
 
-Fields of the structs in world_packet_data.hpp and handler_types.hpp against every
-member access in the tree, split into reads and writes.
+Fields of the structs in world_packet_data.hpp, handler_types.hpp and the
+bounded contexts' record headers (include/<context>/domain/records.hpp, where
+the records the protocol decodes now live) against every member access in the
+tree, split into reads and writes.
 
 WHAT COUNTS AS A WRITE, AND THE THREE WAYS THAT GOES WRONG
 
@@ -58,7 +60,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 HDRS = [ROOT / "include/game/world_packet_data.hpp",
-        ROOT / "include/game/handler_types.hpp"]
+        ROOT / "include/game/handler_types.hpp"] + sorted((ROOT / "include").glob("*/domain/records.hpp"))
 HDRSET = {h.resolve() for h in HDRS}
 
 #: Fields checked once and found to be written after all, with what does it.
@@ -127,12 +129,12 @@ def scan(fields, skip=None):
 def main():
     fields = struct_fields()
 
-    # The canary. SocialHandler::handlePetitionQueryResponse is the only writer
-    # of signaturesRequired, so hiding that file must bring the field back. Two
+    # The canary. Petitions::detailsReceived is the only writer of
+    # signaturesRequired, so hiding that file must bring the field back. Two
     # of the three write-forms above were added *because* their absence made
     # this report empty while it was seeing nothing, and an empty report is
     # indistinguishable from a clean one.
-    hidden, _ = scan(fields, skip="social_handler.cpp")
+    hidden, _ = scan(fields, skip="petitions.cpp")
     if "signaturesRequired" not in hidden:
         print("  CANARY FAILED: hiding the only writer did not surface the field.")
         print("  The report below means nothing. Do not believe the zero.\n")

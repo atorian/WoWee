@@ -20,6 +20,7 @@ namespace core { class CVarStore; }
 namespace contacts { class IContactsServerFeed; }
 namespace who { class IWhoFeed; }
 namespace duel { class IDuelsFeed; }
+namespace petition { class IPetitionsFeed; }
 namespace game {
 
 class PacketSender;
@@ -84,6 +85,8 @@ public:
     [[nodiscard]] virtual who::IWhoFeed* whoFeed() = 0;
     /// Where the duel packets go; null when the client was built without them.
     [[nodiscard]] virtual duel::IDuelsFeed* duelFeed() = 0;
+    /// Where the charter packets go; null when the client was built without them.
+    [[nodiscard]] virtual petition::IPetitionsFeed* petitionFeed() = 0;
 
     // ---- The appearance switches the realm keeps with the character ----
     [[nodiscard]] virtual bool showingHelm() const = 0;
@@ -128,14 +131,6 @@ struct SocialCharacterState {
     bool pendingGuildInvite_ = false;
     std::string pendingGuildInviterName_;
     std::string pendingGuildInviteGuildName_;
-    bool showPetitionDialog_ = false;
-    /// Which of the two registrar panels is open - the offer says, not the
-    /// opcode, and closing has to name the same one that opened.
-    bool petitionIsGuildCharter_ = false;
-    std::vector<PetitionShowlistData::Charter> petitionCharters_;
-    uint32_t petitionCost_ = 0;
-    uint64_t petitionNpcGuid_ = 0;
-    PetitionInfo petitionInfo_;
 
     // Group
     GroupListData partyData;
@@ -254,10 +249,6 @@ public:
 
     using BgPlayerPosition = game::BgPlayerPosition;
 
-    using PetitionSignature = game::PetitionSignature;
-
-    using PetitionInfo = game::PetitionInfo;
-
     using ReadyCheckResult = game::ReadyCheckResult;
 
     using InstanceLockout = game::InstanceLockout;
@@ -374,9 +365,6 @@ public:
     void saveGuildRank(uint32_t rankId, uint32_t rights, const std::string& rankName,
                        uint32_t goldLimit, const uint32_t* tabRights, const uint32_t* tabSlots);
     void deleteGuildRank();
-    void requestPetitionShowlist(uint64_t npcGuid);
-    void buyPetition(uint64_t npcGuid, const std::string& guildName,
-                     uint32_t clientIndex = 1);
 
     // Guild state accessors
     [[nodiscard]] bool isInGuild() const;
@@ -407,29 +395,6 @@ public:
     [[nodiscard]] const GuildInfoData& getGuildInfoData() const { return guildInfoData_; }
     [[nodiscard]] const GuildQueryResponseData& getGuildQueryData() const { return guildQueryData_; }
     [[nodiscard]] bool hasGuildInfoData() const { return guildInfoData_.isValid(); }
-
-    // Petition
-    [[nodiscard]] bool hasPetitionShowlist() const { return showPetitionDialog_; }
-    void clearPetitionDialog() { showPetitionDialog_ = false; }
-    /// Shuts the vendor session and tells the interface. Both windows read a
-    /// different thing, so closing one has to close the other.
-    void closePetitionVendor();
-    [[nodiscard]] bool isGuildRegistrar() const { return petitionIsGuildCharter_; }
-    /// The charters on offer, in the order the vendor listed them - one from a
-    /// guild registrar, three from an arena registrar for the two, three and
-    /// five person teams.
-    [[nodiscard]] const std::vector<PetitionShowlistData::Charter>& getPetitionCharters() const {
-        return petitionCharters_;
-    }
-    [[nodiscard]] uint32_t getPetitionCost() const { return petitionCost_; }
-    [[nodiscard]] uint64_t getPetitionNpcGuid() const { return petitionNpcGuid_; }
-    [[nodiscard]] const PetitionInfo& getPetitionInfo() const { return petitionInfo_; }
-    [[nodiscard]] bool hasPetitionSignaturesUI() const { return petitionInfo_.showUI; }
-    void clearPetitionSignaturesUI() { petitionInfo_.showUI = false; }
-    void signPetition(uint64_t petitionGuid);
-    void turnInPetition(uint64_t petitionGuid);
-    /// Offer the charter to another player so they can sign it.
-    void offerPetition(uint64_t petitionGuid, uint64_t targetGuid);
 
     // Guild name lookup
     const std::string& lookupGuildName(uint32_t guildId);
@@ -708,7 +673,6 @@ private:
     void handleGuildEventLog(network::Packet& packet);
     void handlePetitionShowSignatures(network::Packet& packet);
     void handlePetitionSignResults(network::Packet& packet);
-    void handleTurnInPetitionResults(network::Packet& packet);
     void handleBattlefieldStatus(network::Packet& packet);
     void handleBattlefieldList(network::Packet& packet);
     void handleRaidInstanceInfo(network::Packet& packet);

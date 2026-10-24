@@ -12,6 +12,7 @@ namespace core { class EventBus; class CVarStore; }
 namespace contacts { class IContactsServerFeed; }
 namespace who { class IWhoFeed; }
 namespace duel { class IDuelsFeed; }
+namespace petition { class IPetitionsFeed; }
 namespace network { class WorldConnection; }
 
 namespace game {
@@ -58,6 +59,8 @@ struct GameServices {
     who::IWhoFeed* whoFeed = nullptr;
     /// Where the duel packets go. Set like contactsFeed.
     duel::IDuelsFeed* duelFeed = nullptr;
+    /// Where the charter packets go. Set like contactsFeed.
+    petition::IPetitionsFeed* petitionFeed = nullptr;
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };

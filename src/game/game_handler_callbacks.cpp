@@ -1205,6 +1205,10 @@ duel::IDuelsFeed* GameHandler::duelFeed() {
     return services_.duelFeed;
 }
 
+petition::IPetitionsFeed* GameHandler::petitionFeed() {
+    return services_.petitionFeed;
+}
+
 void GameHandler::setGuildBankMoney(uint64_t money) {
     inventoryHandler_->setGuildBankMoney(money);
 }
@@ -2345,27 +2349,6 @@ void GameHandler::addGuildRank(const std::string& rankName) {
 
 void GameHandler::deleteGuildRank() {
     socialHandler_->deleteGuildRank();
-}
-
-void GameHandler::requestPetitionShowlist(uint64_t npcGuid) {
-    socialHandler_->requestPetitionShowlist(npcGuid);
-}
-
-void GameHandler::buyPetition(uint64_t npcGuid, const std::string& guildName,
-                              uint32_t clientIndex) {
-    socialHandler_->buyPetition(npcGuid, guildName, clientIndex);
-}
-
-void GameHandler::signPetition(uint64_t petitionGuid) {
-    socialHandler_->signPetition(petitionGuid);
-}
-
-void GameHandler::turnInPetition(uint64_t petitionGuid) {
-    socialHandler_->turnInPetition(petitionGuid);
-}
-
-void GameHandler::offerPetition(uint64_t petitionGuid, uint64_t targetGuid) {
-    socialHandler_->offerPetition(petitionGuid, targetGuid);
 }
 
 // ============================================================

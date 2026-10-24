@@ -639,6 +639,7 @@ public:
     contacts::IContactsServerFeed* contactsFeed() override;
     who::IWhoFeed* whoFeed() override;
     duel::IDuelsFeed* duelFeed() override;
+    petition::IPetitionsFeed* petitionFeed() override;
 
     // Money (copper)
     uint64_t getMoneyCopper() const { return inventoryHandler_->moneyCopper(); }
@@ -941,9 +942,6 @@ public:
     void addGuildRank(const std::string& rankName);
     void delGuildRank();
     void deleteGuildRank();
-    void requestPetitionShowlist(uint64_t npcGuid);
-    void buyPetition(uint64_t npcGuid, const std::string& guildName,
-                     uint32_t clientIndex = 1);
 
     // Guild state accessors
     bool isInGuild() const override;
@@ -989,8 +987,6 @@ public:
     const GuildInfoData& getGuildInfoData() const;
     const GuildQueryResponseData& getGuildQueryData() const;
     bool hasGuildInfoData() const;
-    bool hasPetitionShowlist() const;
-    void closePetitionVendor();
     void acceptArenaTeamInvite();
     void declineArenaTeamInvite();
     void arenaTeamInvite(uint32_t teamId, const std::string& name);
@@ -1001,36 +997,9 @@ public:
     void reportMailSpam(uint64_t senderGuid, uint32_t mailId);
     /// Take the glyph out of a socket. Zero-based slot, as the server counts.
     void removeGlyphFromSocket(uint32_t slot);
-    /// Rename a charter the player is carrying. The petition is an item, so it
-    /// is named by its item guid.
-    void renamePetition(uint64_t petitionGuid, const std::string& newName);
     /// Tell the server the GM's reply has been read and closed. Empty packet;
     /// the server answers by deciding whether to offer a survey.
     void resolveGMResponse();
-    /// Clears the petition list the social handler is holding.
-    ///
-    /// This set a flag of its own, which nothing read: hasPetitionShowlist
-    /// beside it forwards to SocialHandler. The social panel reads through
-    /// that forward and cleared this one two lines later, so the petition
-    /// dialog could not be dismissed.
-    void clearPetitionDialog();
-    uint32_t getPetitionCost() const;
-    uint64_t getPetitionNpcGuid() const;
-    /// name, icon and cost of the nth charter a petition vendor is offering.
-    /// False when the vendor offered no such charter.
-    bool getPetitionCharter(int index, uint32_t& itemId, uint32_t& displayId,
-                            uint32_t& cost) const;
-
-    // Petition signatures (guild charter signing flow)
-    using PetitionSignature = game::PetitionSignature;
-    using PetitionInfo = game::PetitionInfo;
-    const PetitionInfo& getPetitionInfo() const;
-    bool hasPetitionSignaturesUI() const;
-    void clearPetitionSignaturesUI();
-    void signPetition(uint64_t petitionGuid);
-    void turnInPetition(uint64_t petitionGuid);
-    void offerPetition(uint64_t petitionGuid, uint64_t targetGuid);
-
     // Guild name lookup for other players' nameplates
     // Returns the guild name for a given guildId, or empty if unknown.
     // Automatically queries the server for unknown guild IDs.

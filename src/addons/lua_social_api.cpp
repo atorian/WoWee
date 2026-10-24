@@ -7,6 +7,7 @@
 #include "who/domain/who_list.hpp"
 #include "who/services/who.hpp"
 #include "duel/services/duels.hpp"
+#include "petition/services/petitions.hpp"
 #include "game/emote_table.hpp"
 #include "game/reputation_standing.hpp"
 #include "game/stationery.hpp"
@@ -259,6 +260,13 @@ static who::IWho* whoOf(lua_State* L) {
 static duel::IDuels* duelsOf(lua_State* L) {
     auto* services = getLuaServices(L);
     return services ? services->duels : nullptr;
+}
+
+/// Charters as the composition root handed them to the addon layer; null
+/// without a game, like the contact lists.
+static petition::IPetitions* petitionsOf(lua_State* L) {
+    auto* services = getLuaServices(L);
+    return services ? services->petitions : nullptr;
 }
 
 static const std::vector<contacts::Contact>& contactRows(lua_State* L) {
@@ -1026,10 +1034,10 @@ static int lua_GetMacroIconInfo(lua_State* L) {
 // would relabel the whole frame and ask for a team size that is not there.
 
 /// The petition currently being shown, or nullptr when there is none.
-static const game::PetitionInfo* shownPetition(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    if (!gh) return nullptr;
-    const auto& info = gh->getPetitionInfo();
+static const petition::PetitionInfo* shownPetition(lua_State* L) {
+    auto* petitions = petitionsOf(L);
+    if (!petitions) return nullptr;
+    const auto& info = petitions->getPetitionInfo();
     return info.petitionGuid != 0 ? &info : nullptr;
 }
 
@@ -1097,8 +1105,8 @@ static int lua_GetPetitionNameInfo(lua_State* L) {
 }
 
 static int lua_SignPetition(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    if (const auto* info = shownPetition(L); gh && info) gh->signPetition(info->petitionGuid);
+    auto* petitions = petitionsOf(L);
+    if (const auto* info = shownPetition(L); petitions && info) petitions->signPetition(info->petitionGuid);
     return 0;
 }
 
@@ -1115,12 +1123,13 @@ static int lua_OfferPetition(lua_State* L) {
         gh->addUIError("You have no target.");
         return 0;
     }
-    gh->offerPetition(info->petitionGuid, target);
+    petitionsOf(L)->offerPetition(info->petitionGuid, target);
     return 0;
 }
 
-static int lua_ClosePetition(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->clearPetitionSignaturesUI();
+// The frame closes itself; this side keeps nothing that says it is open. The
+// flag ClosePetition used to clear was read by nothing.
+static int lua_ClosePetition(lua_State* /*L*/) {
     return 0;
 }
 
@@ -1289,9 +1298,10 @@ void registerSocialLuaAPI(lua_State* L) {
                 // which is what happens before the item query comes back.
                 {"GetPetitionItemInfo", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
+            auto* petitions = petitionsOf(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 1)) - 1;
             uint32_t itemId = 0, displayId = 0, cost = 0;
-            if (!gh || !gh->getPetitionCharter(index, itemId, displayId, cost)) return 0;
+            if (!gh || !petitions || !petitions->getPetitionCharter(index, itemId, displayId, cost)) return 0;
             const auto* info = gh->getItemInfo(itemId);
             if (!info || !info->valid) { gh->ensureItemInfo(itemId); return 0; }
             lua_pushstring(L, info->name.c_str());
@@ -1310,8 +1320,8 @@ void registerSocialLuaAPI(lua_State* L) {
                 // whole of the request, and the colours are a client-side
                 // preview of a banner the server assigns itself.
                 {"TurnInArenaPetition", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L))
-                gh->turnInPetition(gh->getPetitionInfo().petitionGuid);
+            if (auto* petitions = petitionsOf(L))
+                petitions->turnInPetition(petitions->getPetitionInfo().petitionGuid);
             return 0;
         }},
                 // --- The guild registrar ---
@@ -1323,9 +1333,9 @@ void registerSocialLuaAPI(lua_State* L) {
                 // BuyGuildCharter takes the name typed into the frame; the
                 // vendor is whichever one this client is standing at.
                 {"BuyGuildCharter", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
+            auto* petitions = petitionsOf(L);
             const char* name = luaL_optstring(L, 1, "");
-            if (gh && name && *name) gh->buyPetition(gh->getPetitionNpcGuid(), name);
+            if (petitions && name && *name) petitions->buyPetition(petitions->getPetitionNpcGuid(), name);
             return 0;
         }},
                 // BuyPetition(index, name) - the arena registrar's Purchase.
@@ -1333,16 +1343,16 @@ void registerSocialLuaAPI(lua_State* L) {
                 // plus one, and it is the only thing telling the server a
                 // five-person charter from a two-person one.
                 {"BuyPetition", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
+            auto* petitions = petitionsOf(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 1));
             const char* name = luaL_optstring(L, 2, "");
-            if (gh && name && *name && index >= 1)
-                gh->buyPetition(gh->getPetitionNpcGuid(), name,
-                                static_cast<uint32_t>(index));
+            if (petitions && name && *name && index >= 1)
+                petitions->buyPetition(petitions->getPetitionNpcGuid(), name,
+                                       static_cast<uint32_t>(index));
             return 0;
         }},
                 {"CloseGuildRegistrar", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->closePetitionVendor();
+            if (auto* petitions = petitionsOf(L)) petitions->closePetitionVendor();
             return 0;
         }},
                 // What the charter costs, in copper, as the offer said. This
@@ -1350,8 +1360,8 @@ void registerSocialLuaAPI(lua_State* L) {
                 // one byte and there is an index in front of every charter,
                 // and reading neither put the cost three bytes out.
                 {"GetGuildCharterCost", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getPetitionCost() : 0);
+            auto* petitions = petitionsOf(L);
+            lua_pushnumber(L, petitions ? petitions->getPetitionCost() : 0);
             return 1;
         }},
                 // RenamePetition(name) - the Accept on the rename dialog,
@@ -1359,10 +1369,10 @@ void registerSocialLuaAPI(lua_State* L) {
                 // be turned in under. The petition being renamed is the one
                 // whose window is open.
                 {"RenamePetition", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
+            auto* petitions = petitionsOf(L);
             const char* newName = luaL_optstring(L, 1, "");
-            if (gh && newName && *newName) {
-                gh->renamePetition(gh->getPetitionInfo().petitionGuid, newName);
+            if (petitions && newName && *newName) {
+                petitions->renamePetition(petitions->getPetitionInfo().petitionGuid, newName);
             }
             return 0;
         }},
@@ -1434,10 +1444,10 @@ void registerSocialLuaAPI(lua_State* L) {
         }},
                 // The petition *vendor* - the guild master or arena
                 // registrar offering a charter - as opposed to the charter
-                // itself, which ClosePetition above shuts. Both windows read
-                // different state, so closing one has to close the other.
+                // itself, whose frame closes on its own. The registrar's panel
+                // is told which of the two to shut.
                 {"ClosePetitionVendor", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->closePetitionVendor();
+            if (auto* petitions = petitionsOf(L)) petitions->closePetitionVendor();
             return 0;
         }},
                 // HasFilledPetition() gates the arena registrar's turn-in

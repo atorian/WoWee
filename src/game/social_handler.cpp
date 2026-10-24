@@ -5,6 +5,8 @@
 #include "game/contacts_gateway.hpp"
 #include "game/who_gateway.hpp"
 #include "game/duel_gateway.hpp"
+#include "game/petition_gateway.hpp"
+#include "petition/services/petitions.hpp"
 #include "duel/services/duels.hpp"
 #include "who/domain/who_list.hpp"
 #include "who/services/who.hpp"
@@ -442,6 +444,14 @@ static duel::IDuelsFeed* duelFeed(SocialQueries& queries) {
     return feed;
 }
 
+static petition::IPetitionsFeed* petitionFeed(SocialQueries& queries) {
+    auto* feed = queries.petitionFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("Charters are not wired into this client; petition packets are dropped and no registrar opens");
+    return feed;
+}
+
 static contacts::IContactsServerFeed* contactsFeed(SocialQueries& queries) {
     auto* feed = queries.contactsFeed();
     static bool said = false;
@@ -469,6 +479,8 @@ SocialHandler::SocialHandler(PacketSender& sender, FrameXmlEvents& frameXml, cor
         subscriptions_.push_back(std::move(subscription));
     for (auto& subscription : subscribeDuelNotices(events_, chat_, frameXml_))
         subscriptions_.push_back(std::move(subscription));
+    for (auto& subscription : subscribePetitionNotices(events_, chat_, frameXml_))
+        subscriptions_.push_back(std::move(subscription));
     // The character's social state is the server's to say at every login:
     // SMSG_GROUP_LIST comes with it for a character in a party, the guild
     // and the queues with theirs. Kept, the last session's party stood for
@@ -481,6 +493,7 @@ SocialHandler::SocialHandler(PacketSender& sender, FrameXmlEvents& frameXml, cor
             if (auto* feed = contactsFeed(queries_)) feed->beginCharacter();
             if (auto* feed = whoFeed(queries_)) feed->beginCharacter();
             if (auto* feed = duelFeed(queries_)) feed->beginCharacter();
+            if (auto* feed = petitionFeed(queries_)) feed->beginCharacter();
         }));
 }
 
@@ -802,14 +815,18 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_GUILD_INVITE] = [this](network::Packet& packet) { handleGuildInvite(packet); };
     table[Opcode::SMSG_GUILD_COMMAND_RESULT] = [this](network::Packet& packet) { handleGuildCommandResult(packet); };
     table[Opcode::SMSG_PETITION_SHOWLIST] = [this](network::Packet& packet) { handlePetitionShowlist(packet); };
-    table[Opcode::SMSG_TURN_IN_PETITION_RESULTS] = [this](network::Packet& packet) { handleTurnInPetitionResults(packet); };
+    table[Opcode::SMSG_TURN_IN_PETITION_RESULTS] = [this](network::Packet& packet) {
+        uint32_t result = 0;
+        if (!TurnInPetitionResultsParser::parse(packet, result)) return;
+        auto* feed = petitionFeed(queries_);
+        if (!feed) return;
+        if (result == 0) feed->onTurnedIn();
+        else feed->onTurnInRefused(turnInRefusal(result), result);
+    };
     table[Opcode::SMSG_OFFER_PETITION_ERROR] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(4)) {
-            uint32_t err = packet.readUInt32();
-            if (err == 1) chat_.addSystemChatMessage("Player is already in a guild.");
-            else if (err == 2) chat_.addSystemChatMessage("Player already has a petition.");
-            else raiseUiError("Cannot offer petition to that player.");
-        }
+        if (!packet.hasRemaining(4)) return;
+        const uint32_t err = packet.readUInt32();
+        if (auto* feed = petitionFeed(queries_)) feed->onOfferRefused(offerRefusal(err));
     };
     table[Opcode::MSG_GUILD_EVENT_LOG_QUERY] = [this](network::Packet& packet) { handleGuildEventLog(packet); };
     table[Opcode::MSG_GUILD_BANK_LOG_QUERY] = [this](network::Packet& packet) { handleGuildBankLog(packet); };
@@ -1730,47 +1747,6 @@ void SocialHandler::deleteGuildRank() {
     auto packet = GuildDelRankPacket::build();
     sender_.send(packet);
     requestGuildRoster();
-}
-
-void SocialHandler::requestPetitionShowlist(uint64_t npcGuid) {
-    if (!sender_.characterInWorld()) return;
-    auto packet = PetitionShowlistPacket::build(npcGuid);
-    sender_.send(packet);
-}
-
-void SocialHandler::buyPetition(uint64_t npcGuid, const std::string& guildName,
-                                uint32_t clientIndex) {
-    if (!sender_.characterInWorld()) return;
-    auto packet = PetitionBuyPacket::build(npcGuid, guildName, clientIndex);
-    sender_.send(packet);
-}
-
-void SocialHandler::signPetition(uint64_t petitionGuid) {
-    if (!sender_.connected() || !sender_.characterInWorld()) return;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_PETITION_SIGN));
-    pkt.writeUInt64(petitionGuid);
-    pkt.writeUInt8(0);
-    sender_.send(pkt);
-}
-
-void SocialHandler::turnInPetition(uint64_t petitionGuid) {
-    if (!sender_.connected() || !sender_.characterInWorld()) return;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_TURN_IN_PETITION));
-    pkt.writeUInt64(petitionGuid);
-    sender_.send(pkt);
-}
-
-void SocialHandler::offerPetition(uint64_t petitionGuid, uint64_t targetGuid) {
-    if (!sender_.connected() || !sender_.characterInWorld()) return;
-    if (petitionGuid == 0 || targetGuid == 0) return;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_OFFER_PETITION));
-    // The leading dword is not the petition type despite where it sits - the
-    // server reads it and throws it away. Every expansion this client speaks
-    // has it, so it is written unconditionally rather than gated.
-    pkt.writeUInt32(0);
-    pkt.writeUInt64(petitionGuid);
-    pkt.writeUInt64(targetGuid);
-    sender_.send(pkt);
 }
 
 // ============================================================
@@ -2827,35 +2803,7 @@ void SocialHandler::handleGuildCommandResult(network::Packet& packet) {
 void SocialHandler::handlePetitionShowlist(network::Packet& packet) {
     PetitionShowlistData data;
     if (!PetitionShowlistParser::parse(packet, data)) return;
-    petitionNpcGuid_ = data.npcGuid;
-    petitionCost_ = data.cost;
-    // The whole offer, not just the first charter's price. An arena registrar
-    // offers three and the panel prices whichever tab is open.
-    petitionCharters_ = data.charters;
-    showPetitionDialog_ = true;
-    petitionIsGuildCharter_ = data.isGuildCharter();
-    // The vendor panel opens on this. showPetitionDialog_ is what this
-    // client's own dialog reads, and the interface's version was told
-    // nothing, so walking up to a guild master or an arena registrar opened
-    // one of the two windows and never the other.
-    //
-    // Two panels, one opcode: the guild registrar and the arena registrar are
-    // told apart by which charter is on offer, not by what was sent. Firing
-    // the arena event at a tabard designer put the wrong window on screen.
-    if (frameXml_.frameXmlListening()) {
-        frameXml_.fireFrameXmlEvent(
-            petitionIsGuildCharter_ ? "GUILD_REGISTRAR_SHOW" : "PETITION_VENDOR_SHOW", {});
-    }
-}
-
-void SocialHandler::closePetitionVendor() {
-    if (!showPetitionDialog_) return;
-    showPetitionDialog_ = false;
-    petitionNpcGuid_ = 0;
-    if (frameXml_.frameXmlListening()) {
-        frameXml_.fireFrameXmlEvent(
-            petitionIsGuildCharter_ ? "GUILD_REGISTRAR_CLOSED" : "PETITION_VENDOR_CLOSED", {});
-    }
+    if (auto* feed = petitionFeed(queries_)) feed->onVendor(toCharterOffer(data));
 }
 
 void SocialHandler::handlePetitionQueryResponse(network::Packet& packet) {
@@ -2885,89 +2833,40 @@ void SocialHandler::handlePetitionQueryResponse(network::Packet& packet) {
         arenaType = packet.readUInt32();
     }
     packet.skipAll();
-
-    if (petitionInfo_.petitionGuid != petGuid) return;
-    petitionInfo_.guildName = guildName;
-    if (needed > 0) petitionInfo_.signaturesRequired = needed;
-    petitionInfo_.isArena = arenaType != 0;
-
-    // Said again, because the frame was drawn when the signatures arrived and
-    // everything above lands after it. Without this the charter keeps the
-    // blank name and the placeholder count it opened with - the shape that
-    // reads as "only right after reopening it".
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("PETITION_SHOW", {});
+    if (auto* feed = petitionFeed(queries_))
+        feed->onDetails(petGuid, std::move(guildName), needed, arenaType != 0);
 }
 
 void SocialHandler::handlePetitionShowSignatures(network::Packet& packet) {
     auto rem = [&]() { return packet.getRemainingSize(); };
     if (rem() < 21) return;
-    petitionInfo_ = PetitionInfo{};
-    petitionInfo_.petitionGuid = packet.readUInt64();
-    petitionInfo_.ownerGuid    = packet.readUInt64();
-    const uint32_t petEntry    = packet.readUInt32();
-    uint8_t sigCount           = packet.readUInt8();
-    petitionInfo_.signatureCount = sigCount;
-    petitionInfo_.signatures.reserve(sigCount);
+    const uint64_t petitionGuid = packet.readUInt64();
+    const uint64_t ownerGuid = packet.readUInt64();
+    const uint32_t petEntry = packet.readUInt32();
+    const uint8_t sigCount = packet.readUInt8();
+    std::vector<petition::PetitionSignature> signatures;
+    signatures.reserve(sigCount);
     for (uint8_t i = 0; i < sigCount; ++i) {
         if (rem() < 12) break;
-        PetitionSignature sig;
+        petition::PetitionSignature sig;
         sig.playerGuid = packet.readUInt64();
         /*uint32_t unk =*/ packet.readUInt32();
-        petitionInfo_.signatures.push_back(sig);
+        signatures.push_back(sig);
     }
-    petitionInfo_.showUI = true;
-
-    // Ask what this charter actually is. Everything the frame needs beyond the
-    // signatures - the name, the number of signatures required, and whether it
-    // is a guild or an arena charter - comes only from the query reply, and
-    // this client never sent the query. The opcode was in the table and the
-    // reply had a handler waiting for it; nothing ever asked, so the handler
-    // never ran and the frame opened on a nameless charter needing nine
-    // signatures whatever it was.
-    if (sender_.connected()) {
-        auto query = PetitionQueryPacket::build(petEntry, petitionInfo_.petitionGuid);
-        sender_.send(query);
-    }
-
-    // The signature list frame opens on this. The petition is parsed and
-    // stored above - showUI is what this client's own window reads - and the
-    // interface's version was never told, so a charter could not be signed
-    // through it.
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("PETITION_SHOW", {});
+    if (auto* feed = petitionFeed(queries_))
+        feed->onSignatures(petitionGuid, ownerGuid, petEntry, sigCount, std::move(signatures));
 }
 
 void SocialHandler::handlePetitionSignResults(network::Packet& packet) {
     auto rem = [&]() { return packet.getRemainingSize(); };
     if (rem() < 20) return;
-    uint64_t petGuid    = packet.readUInt64();
-    uint64_t playerGuid = packet.readUInt64();
-    uint32_t result     = packet.readUInt32();
-    switch (result) {
-        case 0:
-            chat_.addSystemChatMessage("Petition signed successfully.");
-            if (petitionInfo_.petitionGuid == petGuid) {
-                petitionInfo_.signatureCount++;
-                PetitionSignature sig; sig.playerGuid = playerGuid;
-                petitionInfo_.signatures.push_back(sig);
-            }
-            break;
-        case 1: raiseUiError("You have already signed that petition."); break;
-        case 2: raiseUiError("You are already in a guild."); break;
-        case 3: raiseUiError("You cannot sign your own petition."); break;
-        default: chat_.addSystemChatMessage("Cannot sign petition (error " + std::to_string(result) + ")."); break;
-    }
-}
-
-void SocialHandler::handleTurnInPetitionResults(network::Packet& packet) {
-    uint32_t result = 0;
-    if (!TurnInPetitionResultsParser::parse(packet, result)) return;
-    switch (result) {
-        case 0: chat_.addSystemChatMessage("Guild created successfully!"); break;
-        case 1: chat_.addSystemChatMessage("Guild creation failed: already in a guild."); break;
-        case 2: chat_.addSystemChatMessage("Guild creation failed: not enough signatures."); break;
-        case 3: chat_.addSystemChatMessage("Guild creation failed: name already taken."); break;
-        default: chat_.addSystemChatMessage("Guild creation failed (error " + std::to_string(result) + ")."); break;
-    }
+    const uint64_t petGuid = packet.readUInt64();
+    const uint64_t playerGuid = packet.readUInt64();
+    const uint32_t result = packet.readUInt32();
+    auto* feed = petitionFeed(queries_);
+    if (!feed) return;
+    if (result == 0) feed->onSigned(petGuid, playerGuid);
+    else feed->onSignRefused(signRefusal(result), result);
 }
 
 // ============================================================

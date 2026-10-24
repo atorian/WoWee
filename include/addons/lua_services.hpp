@@ -17,6 +17,7 @@ namespace wowee::game  { struct Macro; }
 namespace wowee::contacts { class IContacts; }
 namespace wowee::who { class IWho; }
 namespace wowee::duel { class IDuels; }
+namespace wowee::petition { class IPetitions; }
 
 namespace wowee::addons {
 
@@ -37,6 +38,8 @@ struct LuaServices {
     who::IWho*               who               = nullptr;
     /// The duel the player is asked to or in, and the answers to it.
     duel::IDuels*            duels             = nullptr;
+    /// Guild and arena charters: the registrar's offer and the one on screen.
+    petition::IPetitions*    petitions         = nullptr;
 
     /// Run a macro body, as RunMacroText() does - one command per line,
     /// through the same path the action bar uses for a macro button.

@@ -804,13 +804,6 @@ network::Packet GuildDelRankPacket::build() {
     return packet;
 }
 
-network::Packet PetitionShowlistPacket::build(uint64_t npcGuid) {
-    network::Packet packet(wireOpcode(Opcode::CMSG_PETITION_SHOWLIST));
-    packet.writeUInt64(npcGuid);
-    LOG_DEBUG("Built CMSG_PETITION_SHOWLIST: guid=", npcGuid);
-    return packet;
-}
-
 network::Packet PetitionQueryPacket::build(uint32_t petitionId, uint64_t petitionGuid) {
     network::Packet packet(wireOpcode(Opcode::CMSG_PETITION_QUERY));
     packet.writeUInt32(petitionId);

@@ -5,6 +5,8 @@
 #include "who/services/who_service.hpp"
 #include "game/duel_gateway.hpp"
 #include "duel/services/duel_service.hpp"
+#include "game/petition_gateway.hpp"
+#include "petition/services/petition_service.hpp"
 
 #include <catch_amalgamated.hpp>  // test_support.hpp's REQUIRE
 #include "test_support.hpp"
@@ -159,6 +161,9 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     duelGateway_ = std::make_unique<game::DuelGateway>(*game_, *game_);
     duels_ = std::make_unique<duel::DuelService>(*duelGateway_, *duelGateway_, events_);
     services_.duelFeed = duels_.get();
+    petitionGateway_ = std::make_unique<game::PetitionGateway>(*game_);
+    petitions_ = std::make_unique<petition::PetitionService>(*petitionGateway_, events_);
+    services_.petitionFeed = petitions_.get();
     game::loadProtocolTables(*game_, *expansions_.getActive());
     game_->setAddonEventCallback([this](const std::string& name, const std::vector<std::string>& args) {
         addonEvents_.push_back({name, args});
@@ -170,6 +175,7 @@ GameHarness::~GameHarness() = default;
 contacts::IContacts& GameHarness::contacts() { return *contacts_; }
 who::IWho& GameHarness::who() { return *who_; }
 duel::IDuels& GameHarness::duels() { return *duels_; }
+petition::IPetitions& GameHarness::petitions() { return *petitions_; }
 
 FakeWorldConnection& GameHarness::server() {
     if (!connection_) fail("no connection yet: connect (or enterWorld) first");

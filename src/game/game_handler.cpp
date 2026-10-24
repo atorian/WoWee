@@ -3553,14 +3553,6 @@ bool GameHandler::hasGuildInfoData() const {
     return socialHandler_->hasGuildInfoData();
 }
 
-bool GameHandler::hasPetitionShowlist() const {
-    return socialHandler_->hasPetitionShowlist();
-}
-
-void GameHandler::clearPetitionDialog() {
-    socialHandler_->clearPetitionDialog();
-}
-
 void GameHandler::sortArenaTeamRosters(const std::string& key) {
     socialHandler_->sortArenaTeamRosters(key);
 }
@@ -3572,17 +3564,6 @@ const ArenaTeamRoster* GameHandler::getArenaTeamRoster(uint32_t teamId) const {
 void GameHandler::resolveGMResponse() {
     if (getState() != WorldState::IN_WORLD || !getSocket()) return;
     network::Packet packet(wireOpcode(Opcode::CMSG_GMRESPONSE_RESOLVE));
-    getSocket()->send(packet);
-}
-
-void GameHandler::renamePetition(uint64_t petitionGuid, const std::string& newName) {
-    if (petitionGuid == 0 || newName.empty()) return;
-    if (getState() != WorldState::IN_WORLD || !getSocket()) return;
-    // MSG_, not CMSG_: the server answers on the same opcode with the name it
-    // accepted, which is why the interface does not redraw from its own text.
-    network::Packet packet(wireOpcode(Opcode::MSG_PETITION_RENAME));
-    packet.writeUInt64(petitionGuid);
-    packet.writeString(newName);
     getSocket()->send(packet);
 }
 
@@ -3620,41 +3601,6 @@ void GameHandler::disbandArenaTeam(uint32_t teamId) {
 
 void GameHandler::reportMailSpam(uint64_t senderGuid, uint32_t mailId) {
     socialHandler_->reportMailSpam(senderGuid, mailId);
-}
-
-bool GameHandler::getPetitionCharter(int index, uint32_t& itemId,
-                                     uint32_t& displayId, uint32_t& cost) const {
-    if (index < 0) return false;
-    const auto& charters = socialHandler_->getPetitionCharters();
-    if (index >= static_cast<int>(charters.size())) return false;
-    itemId    = charters[static_cast<size_t>(index)].itemId;
-    displayId = charters[static_cast<size_t>(index)].displayId;
-    cost      = charters[static_cast<size_t>(index)].cost;
-    return true;
-}
-
-void GameHandler::closePetitionVendor() {
-    socialHandler_->closePetitionVendor();
-}
-
-uint32_t GameHandler::getPetitionCost() const {
-    return socialHandler_->getPetitionCost();
-}
-
-uint64_t GameHandler::getPetitionNpcGuid() const {
-    return socialHandler_->getPetitionNpcGuid();
-}
-
-const GameHandler::PetitionInfo& GameHandler::getPetitionInfo() const {
-    return socialHandler_->getPetitionInfo();
-}
-
-bool GameHandler::hasPetitionSignaturesUI() const {
-    return socialHandler_->hasPetitionSignaturesUI();
-}
-
-void GameHandler::clearPetitionSignaturesUI() {
-    socialHandler_->clearPetitionSignaturesUI();
 }
 
 bool GameHandler::hasPendingReadyCheck() const {

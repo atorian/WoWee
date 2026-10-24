@@ -633,12 +633,6 @@ public:
     static network::Packet build();
 };
 
-/** CMSG_PETITION_SHOWLIST packet builder */
-class PetitionShowlistPacket {
-public:
-    static network::Packet build(uint64_t npcGuid);
-};
-
 /** CMSG_PETITION_QUERY packet builder.
  *
  * Asks what a charter is: its name, how many signatures it needs, and whether
