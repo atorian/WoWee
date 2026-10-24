@@ -1,6 +1,8 @@
 #include "game_harness.hpp"
 #include "contacts/services/contacts_service.hpp"
 #include "game/contacts_gateway.hpp"
+#include "game/who_gateway.hpp"
+#include "who/services/who_service.hpp"
 
 #include <catch_amalgamated.hpp>  // test_support.hpp's REQUIRE
 #include "test_support.hpp"
@@ -149,6 +151,9 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     contactsGateway_ = std::make_unique<game::ContactsGateway>(*game_, *game_);
     contacts_ = std::make_unique<contacts::ContactsService>(*contactsGateway_, *contactsGateway_, events_);
     services_.contactsFeed = contacts_.get();
+    whoGateway_ = std::make_unique<game::WhoGateway>(*game_);
+    who_ = std::make_unique<who::WhoService>(*whoGateway_, events_);
+    services_.whoFeed = who_.get();
     game::loadProtocolTables(*game_, *expansions_.getActive());
     game_->setAddonEventCallback([this](const std::string& name, const std::vector<std::string>& args) {
         addonEvents_.push_back({name, args});
@@ -158,6 +163,7 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
 GameHarness::~GameHarness() = default;
 
 contacts::IContacts& GameHarness::contacts() { return *contacts_; }
+who::IWho& GameHarness::who() { return *who_; }
 
 FakeWorldConnection& GameHarness::server() {
     if (!connection_) fail("no connection yet: connect (or enterWorld) first");

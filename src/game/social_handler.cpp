@@ -3,6 +3,9 @@
 #include "game/item_text.hpp"
 #include "game/social_handler.hpp"
 #include "game/contacts_gateway.hpp"
+#include "game/who_gateway.hpp"
+#include "who/domain/who_list.hpp"
+#include "who/services/who.hpp"
 #include "contacts/services/contacts.hpp"
 #include "game/game_events.hpp"
 #include "game/character.hpp"
@@ -421,6 +424,14 @@ static const std::string kEmptyString;
 
 // The contact lists the protocol feeds. A client built without them drops
 // the contact packets, and says so once.
+static who::IWhoFeed* whoFeed(SocialQueries& queries) {
+    auto* feed = queries.whoFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("/who is not wired into this client; SMSG_WHO answers are dropped");
+    return feed;
+}
+
 static contacts::IContactsServerFeed* contactsFeed(SocialQueries& queries) {
     auto* feed = queries.contactsFeed();
     static bool said = false;
@@ -444,6 +455,8 @@ SocialHandler::SocialHandler(PacketSender& sender, FrameXmlEvents& frameXml, cor
     // friends panel's events.
     for (auto& subscription : subscribeContactNotices(events_, chat_, frameXml_))
         subscriptions_.push_back(std::move(subscription));
+    for (auto& subscription : subscribeWhoNotices(events_, chat_, frameXml_, queries_))
+        subscriptions_.push_back(std::move(subscription));
     // The character's social state is the server's to say at every login:
     // SMSG_GROUP_LIST comes with it for a character in a party, the guild
     // and the queues with theirs. Kept, the last session's party stood for
@@ -454,6 +467,7 @@ SocialHandler::SocialHandler(PacketSender& sender, FrameXmlEvents& frameXml, cor
         [this](const events::CharacterLoggingIn&) {
             static_cast<SocialCharacterState&>(*this) = SocialCharacterState{};
             if (auto* feed = contactsFeed(queries_)) feed->beginCharacter();
+            if (auto* feed = whoFeed(queries_)) feed->beginCharacter();
         }));
 }
 
@@ -533,7 +547,26 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
         if (sender_.characterInWorld()) handlePlayedTime(packet);
     };
     table[Opcode::SMSG_WHO] = [this](network::Packet& packet) {
-        if (sender_.characterInWorld()) handleWho(packet);
+        if (!sender_.characterInWorld()) return;
+        // /who belongs to the who context; this only decodes.
+        const bool hasGender = isActiveExpansion("wotlk");
+        const uint32_t found = packet.readUInt32();
+        const uint32_t onlineCount = packet.readUInt32();
+        std::vector<who::WhoEntry> entries;
+        for (uint32_t i = 0; i < found; ++i) {
+            if (packet.getReadPos() >= packet.getSize()) break;
+            who::WhoEntry entry;
+            entry.name = packet.readString();
+            entry.guildName = packet.readString();
+            if (!packet.hasRemaining(12)) break;
+            entry.level   = packet.readUInt32();
+            entry.classId = packet.readUInt32();
+            entry.raceId  = packet.readUInt32();
+            if (hasGender && packet.hasRemaining(1)) packet.readUInt8();
+            if (packet.hasRemaining(4)) entry.zoneId = packet.readUInt32();
+            entries.push_back(std::move(entry));
+        }
+        if (auto* feed = whoFeed(queries_)) feed->onAnswer(found, onlineCount, std::move(entries));
     };
     table[Opcode::SMSG_WHOIS] = [this](network::Packet& packet) {
         if (packet.getReadPos() < packet.getSize()) {
@@ -1069,10 +1102,6 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
 // Non-inline accessors requiring GameHandler
 // ============================================================
 
-std::string SocialHandler::getWhoAreaName(uint32_t zoneId) const {
-    return queries_.areaName(zoneId);
-}
-
 std::string SocialHandler::getCurrentLfgDungeonName() const {
     return queries_.lfgDungeonName(lfgDungeonId_);
 }
@@ -1458,13 +1487,6 @@ void SocialHandler::requestPlayedTime() {
     auto packet = RequestPlayedTimePacket::build(true);
     sender_.send(packet);
     LOG_INFO("Requested played time");
-}
-
-void SocialHandler::queryWho(const std::string& playerName) {
-    if (!sender_.characterInWorld()) return;
-    auto packet = WhoPacket::build(0, 0, playerName);
-    sender_.send(packet);
-    LOG_INFO("Sent WHO query", playerName.empty() ? "" : " for: " + playerName);
 }
 
 void SocialHandler::randomRoll(uint32_t minRoll, uint32_t maxRoll) {
@@ -3063,62 +3085,6 @@ void SocialHandler::handlePlayedTime(network::Packet& packet) {
         // That event is the whole answer: the hand-built lines this client
         // wrote for its own chat window went with the window.
     }
-}
-
-void SocialHandler::handleWho(network::Packet& packet) {
-    const bool hasGender = isActiveExpansion("wotlk");
-    uint32_t displayCount = packet.readUInt32();
-    uint32_t onlineCount = packet.readUInt32();
-    whoResults_.clear();
-    whoOnlineCount_ = onlineCount;
-    if (displayCount == 0) { raiseUiError("No players found."); return; }
-    for (uint32_t i = 0; i < displayCount; ++i) {
-        if (packet.getReadPos() >= packet.getSize()) break;
-        std::string playerName = packet.readString();
-        std::string guildName = packet.readString();
-        if (!packet.hasRemaining(12)) break;
-        uint32_t level   = packet.readUInt32();
-        uint32_t classId = packet.readUInt32();
-        uint32_t raceId  = packet.readUInt32();
-        if (hasGender && packet.hasRemaining(1)) packet.readUInt8();
-        uint32_t zoneId = 0;
-        if (packet.hasRemaining(4)) zoneId = packet.readUInt32();
-        WhoEntry entry;
-        entry.name = playerName; entry.guildName = guildName;
-        entry.level = level; entry.classId = classId;
-        entry.raceId = raceId; entry.zoneId = zoneId;
-        whoResults_.push_back(std::move(entry));
-    }
-    // To the chat when nobody is showing a panel, which is what a stock client
-    // does and what SetWhoToUI is for. FriendsFrame turns that on while its Who
-    // tab is up and off again on the way out, so a /who typed into chat with
-    // the panel closed printed nothing at all here: the rows were parsed,
-    // stored, and kept.
-    //
-    // The formats are WoW's own, from globalstrings - and they are the
-    // client's to print rather than the interface's, which is why no FrameXML
-    // file formats them. The count line carries a |4 escape, which resolves on
-    // the way to the screen.
-    if (!whoToUI_) {
-        for (const auto& e : whoResults_) {
-            std::string line = "|Hplayer:" + e.name + "|h[" + e.name + "]|h: Level " +
-                               std::to_string(e.level) + " " +
-                               getRaceName(static_cast<Race>(e.raceId)) + std::string(" ") +
-                               getClassName(static_cast<Class>(e.classId));
-            if (!e.guildName.empty()) line += " <" + e.guildName + ">";
-            const std::string zone = queries_.areaName(e.zoneId);
-            if (!zone.empty()) line += " - " + zone;
-            chat_.addSystemChatMessage(line);
-        }
-        chat_.addSystemChatMessage(std::to_string(whoOnlineCount_) +
-                                    " |4player:players; total");
-    }
-
-    // The who panel asked for this and redraws its rows on the answer coming
-    // back. Every row was parsed and stored and only this client's own window
-    // ever read them, so a /who through the interface filled a list nobody was
-    // told about and the panel kept showing the previous search.
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("WHO_LIST_UPDATE", {});
 }
 
 // ============================================================

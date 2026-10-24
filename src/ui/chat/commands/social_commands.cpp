@@ -1,6 +1,7 @@
 // Social commands: /friend, /removefriend, /ignore, /unignore, /invite, /inspect, /who
 // Moved from ChatPanel::sendChatMessage() if/else chain (Phase 3).
 #include "contacts/services/contacts.hpp"
+#include "who/services/who.hpp"
 #include "ui/chat/i_chat_command.hpp"
 #include "ui/chat_panel.hpp"
 #include "game/game_handler.hpp"
@@ -149,7 +150,7 @@ public:
             ctx.gameHandler.addLocalChatMessage(msg);
             return {};
         }
-        ctx.gameHandler.queryWho(query);
+        if (auto* who = ctx.services.who) who->queryWho(query);
         ctx.panel.getSlashCmds().showWho = true;
         return {};
     }

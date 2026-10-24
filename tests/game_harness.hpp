@@ -40,7 +40,8 @@
 #include <vector>
 
 namespace wowee::contacts { class IContacts; class ContactsService; }
-namespace wowee::game { class ContactsGateway; }
+namespace wowee::who { class IWho; class WhoService; }
+namespace wowee::game { class ContactsGateway; class WhoGateway; }
 
 namespace wowee::test {
 
@@ -127,6 +128,8 @@ public:
     /// The friend, ignore and mute lists, wired to the game as the client
     /// wires them.
     contacts::IContacts& contacts();
+    /// /who, wired as the client wires it.
+    who::IWho& who();
     core::CVarStore& cvars() { return cvars_; }
 
     /// The server's side of the connection: the one the game made last. Valid
@@ -226,6 +229,8 @@ private:
     game::GameServices services_;
     std::unique_ptr<game::ContactsGateway> contactsGateway_;
     std::unique_ptr<contacts::ContactsService> contacts_;
+    std::unique_ptr<game::WhoGateway> whoGateway_;
+    std::unique_ptr<who::WhoService> who_;
     std::unique_ptr<game::GameHandler> game_;
     FakeWorldConnection* connection_ = nullptr;  // owned by the game once made
     bool pingsAnswered_ = true;

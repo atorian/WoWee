@@ -27,6 +27,7 @@ namespace game {
 }
 namespace addons { class AddonManager; class AddonCatalog; }
 namespace contacts { class IContacts; }
+namespace who { class IWho; }
 namespace audio { class AudioCoordinator; }
 
 namespace ui {
@@ -50,6 +51,8 @@ struct UIServices {
     game::ExpansionRegistry* expansionRegistry = nullptr;
     /// The friend, ignore and mute lists, and the requests that change them.
     contacts::IContacts* contacts = nullptr;
+    /// /who: the last answer, where answers go, and the query.
+    who::IWho* who = nullptr;
     /// The interface of the character in the world, in whatever state it is;
     /// null with no character in the world. Asked each time rather than held:
     /// each character has its own, and a /reload replaces it.

@@ -45,7 +45,8 @@
 
 namespace wowee {
 namespace contacts { class ContactsService; }
-namespace game { class ContactsGateway; }
+namespace who { class WhoService; }
+namespace game { class ContactsGateway; class WhoGateway; }
 
 // Forward declarations
 namespace rendering {
@@ -405,6 +406,8 @@ private:
     // feeds them, so they outlive it; the gateway sends through the game.
     std::unique_ptr<game::ContactsGateway> contactsGateway_;
     std::unique_ptr<contacts::ContactsService> contacts_;
+    std::unique_ptr<game::WhoGateway> whoGateway_;
+    std::unique_ptr<who::WhoService> who_;
     std::unique_ptr<game::GameHandler> gameHandler;
     /// The renderer's side of the transports - see game::TransportScene.
     std::unique_ptr<RendererTransportScene> transportScene_;

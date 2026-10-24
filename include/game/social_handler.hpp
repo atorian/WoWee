@@ -18,6 +18,7 @@
 namespace wowee {
 namespace core { class CVarStore; }
 namespace contacts { class IContactsServerFeed; }
+namespace who { class IWhoFeed; }
 namespace game {
 
 class PacketSender;
@@ -78,6 +79,8 @@ public:
     /// The contact lists the friend, ignore and mute packets go to; null when
     /// the client was built without them.
     [[nodiscard]] virtual contacts::IContactsServerFeed* contactsFeed() = 0;
+    /// Where SMSG_WHO's answer goes; null when the client was built without it.
+    [[nodiscard]] virtual who::IWhoFeed* whoFeed() = 0;
 
     // ---- The appearance switches the realm keeps with the character ----
     [[nodiscard]] virtual bool showingHelm() const = 0;
@@ -99,10 +102,6 @@ struct SocialCharacterState {
     // Time played
     uint32_t totalTimePlayed_ = 0;
     uint32_t levelTimePlayed_ = 0;
-
-    // Who results
-    std::vector<WhoEntry> whoResults_;
-    uint32_t whoOnlineCount_ = 0;
 
     // Duel
     bool pendingDuelRequest_    = false;
@@ -246,7 +245,6 @@ public:
 
     using InspectResult = game::InspectResult;
 
-    using WhoEntry = game::WhoEntry;
 
     using BgQueueSlot = game::BgQueueSlot;
 
@@ -299,22 +297,8 @@ public:
     /// the reply is asked for once and read for the rest of the session.
     [[nodiscard]] uint32_t getSecondsUntilDailyReset() const;
     void requestPlayedTime();
-    void queryWho(const std::string& playerName = "");
     [[nodiscard]] uint32_t getTotalTimePlayed() const { return totalTimePlayed_; }
     [[nodiscard]] uint32_t getLevelTimePlayed() const { return levelTimePlayed_; }
-    [[nodiscard]] const std::vector<WhoEntry>& getWhoResults() const { return whoResults_; }
-    [[nodiscard]] uint32_t getWhoOnlineCount() const { return whoOnlineCount_; }
-
-    /// Where a /who answer goes: the panel, or the chat.
-    ///
-    /// SetWhoToUI is how the interface says which. FriendsFrame turns it on
-    /// while its Who tab is up and off again on the way out, so a search typed
-    /// into chat with the panel closed is meant to print its results there -
-    /// which is what a stock client does and what this one did not, having
-    /// treated the call as a no-op and always kept the rows to itself.
-    void setWhoToUI(bool toUI) { whoToUI_ = toUI; }
-    [[nodiscard]] bool isWhoToUI() const { return whoToUI_; }
-    [[nodiscard]] std::string getWhoAreaName(uint32_t zoneId) const;
 
     // Random roll
     void randomRoll(uint32_t minRoll = 1, uint32_t maxRoll = 100);
@@ -718,7 +702,6 @@ private:
     void sendBfMgrResponse(Opcode op, uint32_t battleId, bool accept, bool withFlag);
     void handleQueryTimeResponse(network::Packet& packet);
     void handlePlayedTime(network::Packet& packet);
-    void handleWho(network::Packet& packet);
     void handleRandomRoll(network::Packet& packet);
     void handleLogoutResponse(network::Packet& packet);
     void handleLogoutComplete(network::Packet& packet);
@@ -803,10 +786,6 @@ private:
     uint32_t dailyResetOffset_ = 0;
     time_t   dailyResetReceivedAt_ = 0;
     bool     announceServerTime_ = false;
-
-    /// Off until the interface asks otherwise, which is a stock client's
-    /// default: with no panel open the results belong in the chat.
-    bool whoToUI_ = false;
 
     // Guild names by id, which outlive any one character.
     std::unordered_map<uint32_t, std::string> guildNameCache_;

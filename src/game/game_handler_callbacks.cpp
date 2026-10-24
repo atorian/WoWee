@@ -1197,6 +1197,10 @@ contacts::IContactsServerFeed* GameHandler::contactsFeed() {
     return services_.contactsFeed;
 }
 
+who::IWhoFeed* GameHandler::whoFeed() {
+    return services_.whoFeed;
+}
+
 void GameHandler::setGuildBankMoney(uint64_t money) {
     inventoryHandler_->setGuildBankMoney(money);
 }
@@ -1443,10 +1447,6 @@ float GameHandler::getGameTime() const {
 
 void GameHandler::requestPlayedTime() {
     socialHandler_->requestPlayedTime();
-}
-
-void GameHandler::queryWho(const std::string& playerName) {
-    socialHandler_->queryWho(playerName);
 }
 
 void GameHandler::randomRoll(uint32_t minRoll, uint32_t maxRoll) {

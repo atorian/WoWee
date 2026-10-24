@@ -15,6 +15,7 @@ namespace wowee::audio { class AudioCoordinator; }
 namespace wowee::game  { class ExpansionRegistry; }
 namespace wowee::game  { struct Macro; }
 namespace wowee::contacts { class IContacts; }
+namespace wowee::who { class IWho; }
 
 namespace wowee::addons {
 
@@ -31,6 +32,8 @@ struct LuaServices {
     game::ExpansionRegistry* expansionRegistry = nullptr;
     /// The friend, ignore and mute lists, and the requests that change them.
     contacts::IContacts*     contacts          = nullptr;
+    /// /who: the last answer, where answers go, and the query.
+    who::IWho*               who               = nullptr;
 
     /// Run a macro body, as RunMacroText() does - one command per line,
     /// through the same path the action bar uses for a macro button.

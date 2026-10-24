@@ -3470,24 +3470,12 @@ uint32_t GameHandler::getLevelTimePlayed() const {
     return socialHandler_->getLevelTimePlayed();
 }
 
-const std::vector<GameHandler::WhoEntry>& GameHandler::getWhoResults() const {
-    return socialHandler_->getWhoResults();
-}
-
 bool GameHandler::isInGroup() const {
     return socialHandler_->isInGroup();
 }
 
 const GroupListData& GameHandler::getPartyData() const {
     return socialHandler_->getPartyData();
-}
-
-uint32_t GameHandler::getWhoOnlineCount() const {
-    return socialHandler_->getWhoOnlineCount();
-}
-
-void GameHandler::setWhoToUI(bool toUI) {
-    socialHandler_->setWhoToUI(toUI);
 }
 
 const std::array<GameHandler::BgQueueSlot, 3>& GameHandler::getBgQueues() const {

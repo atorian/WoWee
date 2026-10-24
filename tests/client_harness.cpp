@@ -218,6 +218,7 @@ ClientHarness::ClientHarness()
     addons::LuaServices luaServices;
     luaServices.executionPhase = [this] { return phase_; };
     luaServices.contacts = &game_.contacts();
+    luaServices.who = &game_.who();
     playerView_->bindMovementControls(luaServices);
 
     core::ClientLoop::Services services{

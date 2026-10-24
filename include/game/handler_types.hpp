@@ -139,17 +139,6 @@ struct ChannelMember {
     bool muted = false;
 };
 
-// ---- Who ----
-
-struct WhoEntry {
-    std::string name;
-    std::string guildName;
-    uint32_t level    = 0;
-    uint32_t classId  = 0;
-    uint32_t raceId   = 0;
-    uint32_t zoneId   = 0;
-};
-
 // ---- Battleground ----
 
 struct BgQueueSlot {

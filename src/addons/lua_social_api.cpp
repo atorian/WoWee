@@ -4,6 +4,8 @@
 #include <vector>
 #include "addons/lua_api_helpers.hpp"
 #include "contacts/services/contacts.hpp"
+#include "who/domain/who_list.hpp"
+#include "who/services/who.hpp"
 #include "game/emote_table.hpp"
 #include "game/reputation_standing.hpp"
 #include "game/stationery.hpp"
@@ -244,6 +246,13 @@ static contacts::IContacts* contactsOf(lua_State* L) {
     return services ? services->contacts : nullptr;
 }
 
+/// /who as the composition root handed it to the addon layer; null without a
+/// game, like the contact lists.
+static who::IWho* whoOf(lua_State* L) {
+    auto* services = getLuaServices(L);
+    return services ? services->who : nullptr;
+}
+
 static const std::vector<contacts::Contact>& contactRows(lua_State* L) {
     static const std::vector<contacts::Contact> none;
     auto* contacts = contactsOf(L);
@@ -443,12 +452,13 @@ std::vector<const game::GuildRosterMember*> guildRosterView(lua_State* L, game::
 std::string& whoSortField(lua_State* L) { return interfaceState(L).who.sortField; }
 bool& whoSortReverse(lua_State* L) { return interfaceState(L).who.sortReverse; }
 
-std::vector<const game::WhoEntry*> whoResultsView(lua_State* L, game::GameHandler* gh) {
-    std::vector<const game::WhoEntry*> view;
-    if (!gh) return view;
-    for (const auto& w : gh->getWhoResults()) view.push_back(&w);
+std::vector<const who::WhoEntry*> whoResultsView(lua_State* L, game::GameHandler* gh) {
+    std::vector<const who::WhoEntry*> view;
+    auto* who = whoOf(L);
+    if (!gh || !who) return view;
+    for (const auto& w : who->getWhoResults()) view.push_back(&w);
     const std::string& by = whoSortField(L);
-    auto less = [&](const game::WhoEntry* a, const game::WhoEntry* b) {
+    auto less = [&](const who::WhoEntry* a, const who::WhoEntry* b) {
         if (by == "level")      { if (a->level != b->level) return a->level < b->level; }
         else if (by == "class") { if (a->classId != b->classId) return a->classId < b->classId; }
         else if (by == "race")  { if (a->raceId != b->raceId) return a->raceId < b->raceId; }
@@ -2433,10 +2443,10 @@ void registerSocialLuaAPI(lua_State* L) {
             return 0;
         }},
                 {"GetNumWhoResults", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (!gh) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); return 2; }
-            lua_pushnumber(L, gh->getWhoResults().size());
-            lua_pushnumber(L, gh->getWhoOnlineCount());
+            auto* who = whoOf(L);
+            if (!who) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); return 2; }
+            lua_pushnumber(L, who->getWhoResults().size());
+            lua_pushnumber(L, who->getWhoOnlineCount());
             return 2;
         }},
                 {"GetWhoInfo", [](lua_State* L) -> int {
@@ -2465,9 +2475,8 @@ void registerSocialLuaAPI(lua_State* L) {
             return 7;
         }},
                 {"SendWho", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
             const char* query = luaL_optstring(L, 1, "");
-            if (gh) gh->queryWho(query);
+            if (auto* who = whoOf(L)) who->queryWho(query);
             return 0;
         }},
                 // SetWhoToUI(toUI) - whether a /who answer should fill the
@@ -2486,9 +2495,7 @@ void registerSocialLuaAPI(lua_State* L) {
             // A number, not a boolean: FrameXML passes 1 and 0, and zero is
             // true in Lua, so lua_toboolean would read "off" as "on" and this
             // would be a no-op with extra steps.
-            if (auto* gh = getGameHandler(L)) {
-                gh->setWhoToUI(luaOptNumberText(L, 1, 0.0) != 0.0);
-            }
+            if (auto* who = whoOf(L)) who->setWhoToUI(luaOptNumberText(L, 1, 0.0) != 0.0);
             return 0;
         }},
                 {"GetNumGossipOptions", [](lua_State* L) -> int {

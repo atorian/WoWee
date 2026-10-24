@@ -10,6 +10,7 @@ namespace pipeline { class AssetManager; }
 namespace game { class ExpansionRegistry; class EmoteTable; class MovementCollision; }
 namespace core { class EventBus; class CVarStore; }
 namespace contacts { class IContactsServerFeed; }
+namespace who { class IWhoFeed; }
 namespace network { class WorldConnection; }
 
 namespace game {
@@ -52,6 +53,8 @@ struct GameServices {
     /// Set by the composition root once the game exists: the contacts
     /// gateway sends through it.
     contacts::IContactsServerFeed* contactsFeed = nullptr;
+    /// Where SMSG_WHO's answer goes. Set like contactsFeed.
+    who::IWhoFeed* whoFeed = nullptr;
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };

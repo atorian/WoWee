@@ -637,6 +637,7 @@ public:
      */
     void addLocalChatMessage(const MessageChatData& msg) override;
     contacts::IContactsServerFeed* contactsFeed() override;
+    who::IWhoFeed* whoFeed() override;
 
     // Money (copper)
     uint64_t getMoneyCopper() const { return inventoryHandler_->moneyCopper(); }
@@ -786,16 +787,9 @@ public:
     /// Seconds until the daily quest reset, or 0 if the server has not said.
     uint32_t getSecondsUntilDailyReset() const;
     void requestPlayedTime();
-    void queryWho(const std::string& playerName = "");
     uint32_t getTotalTimePlayed() const;
     uint32_t getLevelTimePlayed() const;
 
-    using WhoEntry = game::WhoEntry;
-    const std::vector<WhoEntry>& getWhoResults() const;
-    uint32_t getWhoOnlineCount() const;
-    /// Whether the interface is showing the who panel, and so whether a /who
-    /// answer belongs there rather than in the chat.
-    void setWhoToUI(bool toUI);
     std::string getWhoAreaName(uint32_t zoneId) const { return getAreaName(zoneId); }
 
     // Random roll
