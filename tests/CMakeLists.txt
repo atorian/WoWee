@@ -731,6 +731,16 @@ target_link_libraries(test_warden_reloc PRIVATE catch2_main)
 add_test(NAME warden_reloc COMMAND test_warden_reloc)
 register_test_target(test_warden_reloc)
 
+# ── module_boundaries ───────────────────────────────────────────
+# New includes must point down the layers in tools/module_boundary_check.py;
+# the ones that broke them when the check came are listed in
+# tools/module_boundary_baseline.txt, and that list may only shrink. Instant.
+if(Python3_Interpreter_FOUND)
+    add_test(NAME module_boundaries
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_SOURCE_DIR}/tools/module_boundary_check.py)
+endif()
+
 # ── sweep_guard ──────────────────────────────────────────────────
 # The fast interface sweeps, run as a test so they stop depending on someone
 # remembering. Each fault they catch raises nothing, logs nothing and fails no
