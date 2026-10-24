@@ -550,7 +550,7 @@ private:
     PFN_vkCmdEndDebugUtilsLabelEXT cmdEndLabel_ = nullptr;
     /// Tracy's GPU context and its open zones; null outside a Tracy build.
     struct TracyGpu;
-    TracyGpu* tracyGpu_ = nullptr;
+    [[maybe_unused]] TracyGpu* tracyGpu_ = nullptr; // unread outside a Tracy build
     void createTracyGpuContext();
     void destroyTracyGpuContext();
     CpuStageTimes cpuStages_;

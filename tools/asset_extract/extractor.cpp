@@ -778,7 +778,7 @@ bool enumerateFilesImpl(const Extractor::Options& opts,
     for (auto it = archives.rbegin(); it != archives.rend(); ++it) {
         HANDLE hMpq = nullptr;
         if (!SFileOpenArchive(it->c_str(), 0, MPQ_OPEN_READ_ONLY, &hMpq)) {
-            const auto error = GetLastError();
+            const auto error = SErrGetLastError();
             return extractionError(opts, "Cannot read archive " + *it +
                 " (error " + std::to_string(error) +
                 "); extraction stopped before producing an incomplete asset set");
@@ -913,7 +913,7 @@ bool Extractor::run(const Options& opts) {
             }
             sharedHandles.push_back({h, path});
         } else {
-            const auto error = GetLastError();
+            const auto error = SErrGetLastError();
             for (const auto& opened : sharedHandles) SFileCloseArchive(opened.handle);
             return extractionError(opts, "Cannot read archive " + path +
                 " (error " + std::to_string(error) +
