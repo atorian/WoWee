@@ -44,6 +44,8 @@
 #include <atomic>
 
 namespace wowee {
+namespace contacts { class ContactsService; }
+namespace game { class ContactsGateway; }
 
 // Forward declarations
 namespace rendering {
@@ -399,6 +401,10 @@ private:
     std::unique_ptr<LoginServerRenewal> sessionRenewal_;
     /// Said over the world while the client reconnects; empty otherwise.
     std::string reconnectStatus_;
+    // The friend, ignore and mute lists. Declared before the game, which
+    // feeds them, so they outlive it; the gateway sends through the game.
+    std::unique_ptr<game::ContactsGateway> contactsGateway_;
+    std::unique_ptr<contacts::ContactsService> contacts_;
     std::unique_ptr<game::GameHandler> gameHandler;
     /// The renderer's side of the transports - see game::TransportScene.
     std::unique_ptr<RendererTransportScene> transportScene_;

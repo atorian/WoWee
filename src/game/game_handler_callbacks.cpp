@@ -1193,6 +1193,10 @@ bool GameHandler::isGuildBankOpen() const {
 const GuildBankData& GameHandler::getGuildBankData() const {
     return inventoryHandler_->getGuildBankData();
 }
+contacts::IContactsServerFeed* GameHandler::contactsFeed() {
+    return services_.contactsFeed;
+}
+
 void GameHandler::setGuildBankMoney(uint64_t money) {
     inventoryHandler_->setGuildBankMoney(money);
 }
@@ -1445,28 +1449,8 @@ void GameHandler::queryWho(const std::string& playerName) {
     socialHandler_->queryWho(playerName);
 }
 
-void GameHandler::addFriend(const std::string& playerName, const std::string& note) {
-    socialHandler_->addFriend(playerName, note);
-}
-
-void GameHandler::removeFriend(const std::string& playerName) {
-    socialHandler_->removeFriend(playerName);
-}
-
-void GameHandler::setFriendNote(const std::string& playerName, const std::string& note) {
-    socialHandler_->setFriendNote(playerName, note);
-}
-
 void GameHandler::randomRoll(uint32_t minRoll, uint32_t maxRoll) {
     socialHandler_->randomRoll(minRoll, maxRoll);
-}
-
-void GameHandler::addIgnore(const std::string& playerName) {
-    socialHandler_->addIgnore(playerName);
-}
-
-void GameHandler::removeIgnore(const std::string& playerName) {
-    socialHandler_->removeIgnore(playerName);
 }
 
 void GameHandler::faceCanonicalYaw(float canonicalYaw) {
@@ -2212,10 +2196,6 @@ void GameHandler::setGroupAssistant(uint64_t guid, bool apply) {
 
 void GameHandler::requestBattlefieldPositions() {
     socialHandler_->requestBattlefieldPositions();
-}
-
-void GameHandler::requestContactList() {
-    socialHandler_->requestContactList();
 }
 
 uint32_t GameHandler::getPlayerGuildRankIndex() const {

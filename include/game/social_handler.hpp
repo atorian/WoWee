@@ -17,6 +17,7 @@
 
 namespace wowee {
 namespace core { class CVarStore; }
+namespace contacts { class IContactsServerFeed; }
 namespace game {
 
 class PacketSender;
@@ -74,6 +75,9 @@ public:
     virtual void markOnlineEquipmentDirty() = 0;
     virtual void setGuildBankMoney(uint64_t money) = 0;
     virtual void addLocalChatMessage(const MessageChatData& message) = 0;
+    /// The contact lists the friend, ignore and mute packets go to; null when
+    /// the client was built without them.
+    [[nodiscard]] virtual contacts::IContactsServerFeed* contactsFeed() = 0;
 
     // ---- The appearance switches the realm keeps with the character ----
     [[nodiscard]] virtual bool showingHelm() const = 0;
@@ -144,16 +148,6 @@ struct SocialCharacterState {
     std::string pendingInviterName;
     /// Points on the minimap the party pinged, while they last.
     std::vector<MinimapPing> minimapPings_;
-
-    // Friends, ignores and mutes, as the server last listed them.
-    std::vector<ContactEntry> contacts_;
-    std::unordered_map<std::string, uint64_t> friendsCache_;  ///< name -> guid
-    /// Every friend's guid, so a name that arrives later finds its friend.
-    std::unordered_set<uint64_t> friendGuids_;
-    std::unordered_map<std::string, uint64_t> ignoreCache_;   ///< name -> guid
-    std::unordered_set<uint64_t> ignoreListGuids_;
-    uint32_t lastContactListMask_ = 0;
-    uint32_t lastContactListCount_ = 0;
 
     // A summon put to the player, waiting for an answer.
     bool        pendingSummonRequest_ = false;
@@ -322,13 +316,6 @@ public:
     [[nodiscard]] bool isWhoToUI() const { return whoToUI_; }
     [[nodiscard]] std::string getWhoAreaName(uint32_t zoneId) const;
 
-    // Social commands
-    void addFriend(const std::string& playerName, const std::string& note = "");
-    void removeFriend(const std::string& playerName);
-    void setFriendNote(const std::string& playerName, const std::string& note);
-    void addIgnore(const std::string& playerName);
-    void removeIgnore(const std::string& playerName);
-
     // Random roll
     void randomRoll(uint32_t minRoll = 1, uint32_t maxRoll = 100);
 
@@ -376,15 +363,6 @@ public:
     /// because the interface calls it from WorldMapFrame_OnUpdate, which is
     /// every frame the map is open.
     void requestBattlefieldPositions();
-    /// Ask the server to resend the friend, ignore and mute lists.
-    ///
-    /// The server sends them once at login and pushes a status line whenever a
-    /// friend comes or goes, so this is a refresh rather than the only way to
-    /// have them - but the friends panel asks for one every time it redraws,
-    /// which is what ShowFriends means, and a stale online column is what
-    /// happens without it.
-    void requestContactList();
-
     /// Give or take raid assistant. CMSG_GROUP_ASSISTANT_LEADER is a guid and
     /// a flag, and AzerothCore drops it unless the sender leads the group -
     /// which is the same test the unit menu makes before offering the entry.
@@ -581,10 +559,6 @@ public:
     /// Let pings age by a frame; the ones past their lifetime go.
     void ageMinimapPings(float deltaTime);
 
-    [[nodiscard]] const std::vector<ContactEntry>& contacts() const { return contacts_; }
-    [[nodiscard]] const std::unordered_map<std::string, uint64_t>& ignoreCache() const {
-        return ignoreCache_;
-    }
     [[nodiscard]] const std::string& summonerName() const { return summonerName_; }
     [[nodiscard]] float summonTimeoutSec() const { return summonTimeoutSec_; }
     [[nodiscard]] uint32_t bfMgrBattleId() const { return bfMgrBattleId_; }
@@ -745,9 +719,6 @@ private:
     void handleQueryTimeResponse(network::Packet& packet);
     void handlePlayedTime(network::Packet& packet);
     void handleWho(network::Packet& packet);
-    void handleFriendList(network::Packet& packet);
-    void handleContactList(network::Packet& packet);
-    void handleFriendStatus(network::Packet& packet);
     void handleRandomRoll(network::Packet& packet);
     void handleLogoutResponse(network::Packet& packet);
     void handleLogoutComplete(network::Packet& packet);
@@ -850,9 +821,8 @@ private:
     std::string arenaSortKey_;
     bool arenaSortAscending_ = true;
 
-    // When the last position and contact list requests went out.
+    // When the last position request went out.
     std::chrono::steady_clock::time_point lastBgPositionRequest_{};
-    std::chrono::steady_clock::time_point lastContactListRequest_{};
 
     /// What this handler hears of the session: the character's state begins
     /// anew at each login (events::CharacterLoggingIn). Last, so it goes first.

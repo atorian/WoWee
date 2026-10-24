@@ -26,6 +26,7 @@ namespace game {
     class ExpansionRegistry;
 }
 namespace addons { class AddonManager; class AddonCatalog; }
+namespace contacts { class IContacts; }
 namespace audio { class AudioCoordinator; }
 
 namespace ui {
@@ -47,6 +48,8 @@ struct UIServices {
     pipeline::AssetManager* assetManager = nullptr;
     game::GameHandler* gameHandler = nullptr;
     game::ExpansionRegistry* expansionRegistry = nullptr;
+    /// The friend, ignore and mute lists, and the requests that change them.
+    contacts::IContacts* contacts = nullptr;
     /// The interface of the character in the world, in whatever state it is;
     /// null with no character in the world. Asked each time rather than held:
     /// each character has its own, and a /reload replaces it.

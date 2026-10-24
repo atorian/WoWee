@@ -39,6 +39,9 @@
 #include <utility>
 #include <vector>
 
+namespace wowee::contacts { class IContacts; class ContactsService; }
+namespace wowee::game { class ContactsGateway; }
+
 namespace wowee::test {
 
 /// The world connection as the server end of a test sees it. Connects at once,
@@ -121,6 +124,9 @@ public:
 
     game::GameHandler& game() { return *game_; }
     core::EventBus& events() { return events_; }
+    /// The friend, ignore and mute lists, wired to the game as the client
+    /// wires them.
+    contacts::IContacts& contacts();
     core::CVarStore& cvars() { return cvars_; }
 
     /// The server's side of the connection: the one the game made last. Valid
@@ -218,6 +224,8 @@ private:
     std::unique_ptr<game::EmoteTable> emotes_;
     game::ExpansionRegistry expansions_;
     game::GameServices services_;
+    std::unique_ptr<game::ContactsGateway> contactsGateway_;
+    std::unique_ptr<contacts::ContactsService> contacts_;
     std::unique_ptr<game::GameHandler> game_;
     FakeWorldConnection* connection_ = nullptr;  // owned by the game once made
     bool pingsAnswered_ = true;

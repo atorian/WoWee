@@ -1,4 +1,6 @@
 #include "core/application.hpp"
+#include "contacts/services/contacts_service.hpp"
+#include "game/contacts_gateway.hpp"
 #include "ui/macro_icon.hpp"
 #include <imgui_impl_vulkan.h>
 #include "rendering/imgui_texture.hpp"
@@ -470,6 +472,11 @@ bool Application::initialize() {
 
     // Create game handler with explicit service dependencies
     gameHandler = std::make_unique<game::GameHandler>(gameServices_);
+    // The contact lists: the service owns them, the gateway reaches the
+    // server and the name cache through the game, and the game feeds them.
+    contactsGateway_ = std::make_unique<game::ContactsGateway>(*gameHandler, *gameHandler);
+    contacts_ = std::make_unique<contacts::ContactsService>(*contactsGateway_, *contactsGateway_, eventBus_);
+    gameServices_.contactsFeed = contacts_.get();
     transportScene_ = std::make_unique<RendererTransportScene>(*renderer);
     gameHandler->getTransportManager()->setScene(transportScene_.get());
 
@@ -823,6 +830,7 @@ bool Application::initialize() {
             uiServices.assetManager = assetManager.get();
             uiServices.gameHandler = gameHandler.get();
             uiServices.expansionRegistry = expansionRegistry_.get();
+            uiServices.contacts = contacts_.get();
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();  // May be nullptr here, re-wire later
             uiServices.interfaceStages = &interfaceStages_;
@@ -874,6 +882,7 @@ bool Application::initialize() {
         luaSvc.window            = window.get();
         luaSvc.audioCoordinator  = audioCoordinator_.get();
         luaSvc.expansionRegistry = expansionRegistry_.get();
+        luaSvc.contacts          = contacts_.get();
         // Acted on between frames - the reload destroys the state that asked.
         luaSvc.requestReloadUI = [this]() {
             if (auto* character = session()) character->requestInterfaceReload();
@@ -1588,6 +1597,7 @@ bool Application::initialize() {
             uiServices.assetManager = assetManager.get();
             uiServices.gameHandler = gameHandler.get();
             uiServices.expansionRegistry = expansionRegistry_.get();
+            uiServices.contacts = contacts_.get();
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();
             uiServices.interfaceStages = &interfaceStages_;
@@ -2537,6 +2547,9 @@ void Application::shutdown() {
 
     LOG_DEBUG("Resetting gameHandler...");
     gameHandler.reset();
+    gameServices_.contactsFeed = nullptr;
+    contacts_.reset();
+    contactsGateway_.reset();
 
     // GameHandler teardown can still publish events consumed by audio.
     if (audioCoordinator_) {

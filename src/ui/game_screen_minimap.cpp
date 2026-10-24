@@ -1,3 +1,4 @@
+#include "contacts/services/contacts.hpp"
 #include "rendering/view_distance.hpp"
 #include "game/group_defines.hpp"
 #include "game/weather_handler.hpp"
@@ -246,7 +247,8 @@ void GameScreen::renderMinimapButtons(game::GameHandler& gameHandler, float cent
 
     // Friends button at top-left of minimap
     {
-        const auto& contacts = gameHandler.getContacts();
+        static const std::vector<contacts::Contact> kNoContacts;
+        const auto& contacts = services_.contacts ? services_.contacts->contacts() : kNoContacts;
         int onlineCount = 0;
         for (const auto& c : contacts)
             if (c.isFriend() && c.isOnline()) ++onlineCount;

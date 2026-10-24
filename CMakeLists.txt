@@ -774,6 +774,7 @@ set(WOWEE_SOURCES
     src/game/spell_description_eval.cpp
     src/game/inventory_handler.cpp
     src/game/social_handler.cpp
+    src/game/contacts_gateway.cpp
     src/game/account_data.cpp
     src/game/account_data_handler.cpp
     src/game/action_bar_handler.cpp
@@ -1799,6 +1800,16 @@ if(WOWEE_ENABLE_TRACY)
     endif()
 endif()
 
+# wowee_contacts: the friend, ignore and mute lists - their domain model and
+# the service the protocol, the interface and the addon layer reach them
+# through. On wowee_base only, so its tests link nothing of the client.
+set(WOWEE_CONTACTS_SOURCES
+    src/contacts/domain/contact_list.cpp
+    src/contacts/services/contacts_service.cpp
+)
+add_library(wowee_contacts STATIC ${WOWEE_CONTACTS_SOURCES})
+target_link_libraries(wowee_contacts PUBLIC wowee_base)
+
 add_library(wowee_pipeline STATIC ${WOWEE_PIPELINE_SOURCES})
 target_link_libraries(wowee_pipeline PUBLIC wowee_base)
 target_include_directories(wowee_pipeline SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/extern)
@@ -1858,7 +1869,7 @@ target_precompile_headers(wowee_net PRIVATE
 )
 
 add_library(wowee_game STATIC ${WOWEE_GAME_SOURCES})
-target_link_libraries(wowee_game PUBLIC wowee_net wowee_protocol wowee_pipeline wowee_base)
+target_link_libraries(wowee_game PUBLIC wowee_contacts wowee_net wowee_protocol wowee_pipeline wowee_base)
 target_precompile_headers(wowee_game PRIVATE
     ${WOWEE_PCH_STD}
     <glm/glm.hpp>
@@ -1873,8 +1884,8 @@ if(HAVE_UNICORN)
 endif()
 
 if(ANDROID)
-    set_target_properties(wowee_base wowee_pipeline wowee_collision wowee_render wowee_protocol wowee_net wowee_game
-                          PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    set_target_properties(wowee_base wowee_contacts wowee_pipeline wowee_collision wowee_render wowee_protocol
+                          wowee_net wowee_game PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
 target_link_libraries(wowee_client_objects PUBLIC wowee_game wowee_render wowee_collision wowee_pipeline wowee_net wowee_protocol wowee_base)
@@ -2011,7 +2022,7 @@ function(wowee_apply_client_flags target)
     endif()
 endfunction()
 
-foreach(_client_target wowee wowee_client_objects wowee_base wowee_pipeline wowee_collision wowee_render wowee_protocol wowee_net wowee_game)
+foreach(_client_target wowee wowee_client_objects wowee_base wowee_contacts wowee_pipeline wowee_collision wowee_render wowee_protocol wowee_net wowee_game)
     wowee_apply_client_flags(${_client_target})
 endforeach()
 if(WOWEE_ENABLE_ASAN)

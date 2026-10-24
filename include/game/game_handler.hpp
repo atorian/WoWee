@@ -636,6 +636,7 @@ public:
      * Add a locally-generated chat message (e.g., emote feedback)
      */
     void addLocalChatMessage(const MessageChatData& msg) override;
+    contacts::IContactsServerFeed* contactsFeed() override;
 
     // Money (copper)
     uint64_t getMoneyCopper() const { return inventoryHandler_->moneyCopper(); }
@@ -796,16 +797,6 @@ public:
     /// answer belongs there rather than in the chat.
     void setWhoToUI(bool toUI);
     std::string getWhoAreaName(uint32_t zoneId) const { return getAreaName(zoneId); }
-
-    // Social commands
-    void addFriend(const std::string& playerName, const std::string& note = "") override;
-    void removeFriend(const std::string& playerName) override;
-    void setFriendNote(const std::string& playerName, const std::string& note);
-    void addIgnore(const std::string& playerName) override;
-    void removeIgnore(const std::string& playerName) override;
-    const std::unordered_map<std::string, uint64_t>& getIgnoreCache() const override {
-        return socialHandler_->ignoreCache();
-    }
 
     // Random roll
     void randomRoll(uint32_t minRoll = 1, uint32_t maxRoll = 100);
@@ -1826,7 +1817,6 @@ public:
     void sendSetLootMethod(uint32_t method, uint32_t threshold, uint64_t masterLooterGuid);
     bool isInGroup() const;
     const GroupListData& getPartyData() const;
-    const std::vector<ContactEntry>& getContacts() const override { return socialHandler_->contacts(); }
     bool hasPendingGroupInvite() const;
     const std::string& getPendingInviterName() const;
 
@@ -2538,7 +2528,6 @@ public:
     /// outside one. See SocialHandler::requestBattlefieldPositions.
     void requestBattlefieldPositions();
     /// Ask for the friend, ignore and mute lists again. See SocialHandler.
-    void requestContactList();
     /// Give or take raid assistant, by guid.
     void setGroupAssistant(uint64_t guid, bool apply);
     /// Whether a map id belongs to an arena. Same table, the other instance

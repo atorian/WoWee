@@ -2,6 +2,8 @@
 #include "core/local_time.hpp"
 #include "game/item_text.hpp"
 #include "game/social_handler.hpp"
+#include "game/contacts_gateway.hpp"
+#include "contacts/services/contacts.hpp"
 #include "game/game_events.hpp"
 #include "game/character.hpp"
 #include "game/chat_log.hpp"
@@ -417,6 +419,16 @@ static bool parseTbcInspectTalentPayload(network::Packet& packet,
 
 static const std::string kEmptyString;
 
+// The contact lists the protocol feeds. A client built without them drops
+// the contact packets, and says so once.
+static contacts::IContactsServerFeed* contactsFeed(SocialQueries& queries) {
+    auto* feed = queries.contactsFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("Contact lists are not wired into this client; friend, ignore and mute packets are dropped");
+    return feed;
+}
+
 SocialHandler::SocialHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
                              ChatLog& chat, SocialQueries& queries, const core::CVarStore& cvars)
     : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat), queries_(queries),
@@ -426,9 +438,12 @@ SocialHandler::SocialHandler(PacketSender& sender, FrameXmlEvents& frameXml, cor
     // came is filed under it once it is.
     subscriptions_.push_back(events_.subscribe<events::PlayerNameKnown>(
         [this](const events::PlayerNameKnown& e) {
-            if (friendGuids_.count(e.guid)) friendsCache_[e.name] = e.guid;
-            if (ignoreListGuids_.count(e.guid)) ignoreCache_[e.name] = e.guid;
+            if (auto* feed = contactsFeed(queries_)) feed->onPlayerNameResolved(e.guid, e.name);
         }));
+    // What the player sees of the contact lists: chat lines and the
+    // friends panel's events.
+    for (auto& subscription : subscribeContactNotices(events_, chat_, frameXml_))
+        subscriptions_.push_back(std::move(subscription));
     // The character's social state is the server's to say at every login:
     // SMSG_GROUP_LIST comes with it for a character in a party, the guild
     // and the queues with theirs. Kept, the last session's party stood for
@@ -438,6 +453,7 @@ SocialHandler::SocialHandler(PacketSender& sender, FrameXmlEvents& frameXml, cor
     subscriptions_.push_back(events.subscribe<events::CharacterLoggingIn>(
         [this](const events::CharacterLoggingIn&) {
             static_cast<SocialCharacterState&>(*this) = SocialCharacterState{};
+            if (auto* feed = contactsFeed(queries_)) feed->beginCharacter();
         }));
 }
 
@@ -533,27 +549,25 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
             }
         }
     };
+    // The contact lists belong to the contacts context; these only decode.
     table[Opcode::SMSG_FRIEND_STATUS] = [this](network::Packet& packet) {
-        if (sender_.characterInWorld()) handleFriendStatus(packet);
+        if (!sender_.characterInWorld()) return;
+        FriendStatusData data;
+        if (!FriendStatusParser::parse(packet, data)) return;
+        if (auto* feed = contactsFeed(queries_)) feed->onFriendStatus(toFriendStatusUpdate(data));
     };
-    table[Opcode::SMSG_CONTACT_LIST] = [this](network::Packet& packet) { handleContactList(packet); };
-    table[Opcode::SMSG_FRIEND_LIST] = [this](network::Packet& packet) { handleFriendList(packet); };
+    table[Opcode::SMSG_CONTACT_LIST] = [this](network::Packet& packet) {
+        uint32_t mask = 0;
+        auto records = readContactList(packet, mask);
+        if (auto* feed = contactsFeed(queries_); feed && records) feed->onContactList(std::move(*records), mask);
+    };
+    table[Opcode::SMSG_FRIEND_LIST] = [this](network::Packet& packet) {
+        auto records = readFriendList(packet);
+        if (auto* feed = contactsFeed(queries_); feed && records) feed->onFriendList(std::move(*records));
+    };
     table[Opcode::SMSG_IGNORE_LIST] = [this](network::Packet& packet) {
-        // Format: uint8 count + count × uint64 guid (no name strings in packet).
-        // Names are resolved via SMSG_NAME_QUERY_RESPONSE after the list arrives.
-        if (!packet.hasRemaining(1)) return;
-        uint8_t ignCount = packet.readUInt8();
-        ignoreListGuids_.clear();
-        for (uint8_t i = 0; i < ignCount; ++i) {
-            if (!packet.hasRemaining(8)) break;
-            uint64_t ignGuid = packet.readUInt64();
-            if (ignGuid != 0) {
-                ignoreListGuids_.insert(ignGuid);
-                // Query name so UI can display it later
-                queries_.requestPlayerName(ignGuid);
-            }
-        }
-        LOG_DEBUG("SMSG_IGNORE_LIST: loaded ", (int)ignCount, " ignored players");
+        auto guids = readIgnoreList(packet);
+        if (auto* feed = contactsFeed(queries_); feed && guids) feed->onIgnoreList(*guids);
     };
     table[Opcode::MSG_RANDOM_ROLL] = [this](network::Packet& packet) {
         if (sender_.characterInWorld()) handleRandomRoll(packet);
@@ -1451,71 +1465,6 @@ void SocialHandler::queryWho(const std::string& playerName) {
     auto packet = WhoPacket::build(0, 0, playerName);
     sender_.send(packet);
     LOG_INFO("Sent WHO query", playerName.empty() ? "" : " for: " + playerName);
-}
-
-void SocialHandler::addFriend(const std::string& playerName, const std::string& note) {
-    if (!sender_.characterInWorld()) return;
-    if (playerName.empty()) { raiseUiError("You must specify a player name."); return; }
-    auto packet = AddFriendPacket::build(playerName, note);
-    sender_.send(packet);
-    chat_.addSystemChatMessage("Sending friend request to " + playerName + "...");
-    LOG_INFO("Sent friend request to: ", playerName);
-}
-
-void SocialHandler::removeFriend(const std::string& playerName) {
-    if (!sender_.characterInWorld()) return;
-    if (playerName.empty()) { raiseUiError("You must specify a player name."); return; }
-    auto it = friendsCache_.find(playerName);
-    if (it == friendsCache_.end()) {
-        chat_.addSystemChatMessage(playerName + " is not in your friends list.");
-        return;
-    }
-    auto packet = DelFriendPacket::build(it->second);
-    sender_.send(packet);
-    chat_.addSystemChatMessage("Removing " + playerName + " from friends list...");
-    LOG_INFO("Sent remove friend request for: ", playerName);
-}
-
-void SocialHandler::setFriendNote(const std::string& playerName, const std::string& note) {
-    if (!sender_.characterInWorld()) return;
-    if (playerName.empty()) { raiseUiError("You must specify a player name."); return; }
-    auto it = friendsCache_.find(playerName);
-    if (it == friendsCache_.end()) {
-        chat_.addSystemChatMessage(playerName + " is not in your friends list.");
-        return;
-    }
-    auto packet = SetContactNotesPacket::build(it->second, note);
-    sender_.send(packet);
-    chat_.addSystemChatMessage("Updated note for " + playerName);
-    LOG_INFO("Set friend note for: ", playerName);
-}
-
-void SocialHandler::addIgnore(const std::string& playerName) {
-    if (!sender_.characterInWorld()) return;
-    if (playerName.empty()) { raiseUiError("You must specify a player name."); return; }
-    auto packet = AddIgnorePacket::build(playerName);
-    sender_.send(packet);
-    chat_.addSystemChatMessage("Adding " + playerName + " to ignore list...");
-    LOG_INFO("Sent ignore request for: ", playerName);
-}
-
-void SocialHandler::removeIgnore(const std::string& playerName) {
-    if (!sender_.characterInWorld()) return;
-    if (playerName.empty()) { raiseUiError("You must specify a player name."); return; }
-    auto it = ignoreCache_.find(playerName);
-    if (it == ignoreCache_.end()) {
-        chat_.addSystemChatMessage(playerName + " is not in your ignore list.");
-        return;
-    }
-    auto packet = DelIgnorePacket::build(it->second);
-    sender_.send(packet);
-    chat_.addSystemChatMessage("Removing " + playerName + " from ignore list...");
-    // Don't erase from ignoreCache here - wait for the server's SMSG_IGNORE_LIST
-    // response to confirm. Erasing optimistically desyncs the cache if the server
-    // rejects the request. (Compare with removeFriend which also waits for
-    // SMSG_FRIEND_STATUS before updating its cache.)
-    ignoreListGuids_.erase(it->second);
-    LOG_INFO("Sent remove ignore request for: ", playerName);
 }
 
 void SocialHandler::randomRoll(uint32_t minRoll, uint32_t maxRoll) {
@@ -3173,162 +3122,8 @@ void SocialHandler::handleWho(network::Packet& packet) {
 }
 
 // ============================================================
-// Social (Friend/Ignore/Random Roll) Handlers
+// Random Roll Handlers
 // ============================================================
-
-void SocialHandler::handleFriendList(network::Packet& packet) {
-    auto rem = [&]() { return packet.getRemainingSize(); };
-    if (rem() < 1) return;
-    uint8_t count = packet.readUInt8();
-    contacts_.erase(std::remove_if(contacts_.begin(), contacts_.end(),
-        [](const ContactEntry& e){ return e.isFriend(); }), contacts_.end());
-    for (uint8_t i = 0; i < count && rem() >= 9; ++i) {
-        uint64_t guid   = packet.readUInt64();
-        uint8_t  status = packet.readUInt8();
-        uint32_t area = 0, level = 0, classId = 0;
-        if (status != 0 && rem() >= 12) {
-            area    = packet.readUInt32();
-            level   = packet.readUInt32();
-            classId = packet.readUInt32();
-        }
-        friendGuids_.insert(guid);
-        std::string name = queries_.playerName(guid);
-        if (!name.empty()) {
-            friendsCache_[name] = guid;
-        } else {
-            queries_.requestPlayerName(guid);
-        }
-        ContactEntry entry;
-        entry.guid = guid; entry.name = name; entry.flags = 0x1;
-        entry.status = status; entry.areaId = area; entry.level = level; entry.classId = classId;
-        contacts_.push_back(std::move(entry));
-    }
-    // The full list arrives in reply to this client asking for it, so it is the
-    // "show" case as well as the "changed" case. SHOW additionally re-selects
-    // the tab; UPDATE only refreshes the rows. A single friend going online
-    // sends the status packet instead, and fires UPDATE alone.
-    if (frameXml_.frameXmlListening()) {
-        frameXml_.fireFrameXmlEvent("FRIENDLIST_UPDATE", {});
-        frameXml_.fireFrameXmlEvent("FRIENDLIST_SHOW", {});
-    }
-}
-
-void SocialHandler::handleContactList(network::Packet& packet) {
-    auto rem = [&]() { return packet.getRemainingSize(); };
-    if (rem() < 8) { packet.skipAll(); return; }
-    lastContactListMask_  = packet.readUInt32();
-    lastContactListCount_ = packet.readUInt32();
-    contacts_.clear();
-    for (uint32_t i = 0; i < lastContactListCount_ && rem() >= 8; ++i) {
-        uint64_t guid  = packet.readUInt64();
-        if (rem() < 4) break;
-        uint32_t flags = packet.readUInt32();
-        std::string note = packet.readString();
-        uint8_t status = 0; uint32_t areaId = 0, level = 0, classId = 0;
-        if (flags & 0x1) {
-            if (rem() < 1) break;
-            status = packet.readUInt8();
-            if (status != 0 && rem() >= 12) {
-                areaId = packet.readUInt32(); level = packet.readUInt32(); classId = packet.readUInt32();
-            }
-            friendGuids_.insert(guid);
-            if (std::string name = queries_.playerName(guid); !name.empty()) friendsCache_[name] = guid;
-            else queries_.requestPlayerName(guid);
-        }
-        ContactEntry entry;
-        entry.guid = guid; entry.flags = flags; entry.note = std::move(note);
-        entry.status = status; entry.areaId = areaId; entry.level = level; entry.classId = classId;
-        entry.name = queries_.playerName(guid);
-        contacts_.push_back(std::move(entry));
-    }
-    if (frameXml_.frameXmlListening()) {
-        frameXml_.fireFrameXmlEvent("FRIENDLIST_UPDATE", {});
-        frameXml_.fireFrameXmlEvent("FRIENDLIST_SHOW", {});
-        if (lastContactListMask_ & 0x2) frameXml_.fireFrameXmlEvent("IGNORELIST_UPDATE", {});
-    }
-}
-
-void SocialHandler::handleFriendStatus(network::Packet& packet) {
-    FriendStatusData data;
-    if (!FriendStatusParser::parse(packet, data)) return;
-
-    // Single lookup - reuse iterator for name resolution and update/erase below
-    auto cit = std::find_if(contacts_.begin(), contacts_.end(),
-        [&](const ContactEntry& e){ return e.guid == data.guid; });
-
-    // Look up player name: contacts_ (populated by SMSG_FRIEND_LIST) > playerNameCache
-    std::string playerName;
-    if (cit != contacts_.end() && !cit->name.empty()) {
-        playerName = cit->name;
-    } else {
-        playerName = queries_.playerName(data.guid);
-    }
-
-    // Only update friendsCache when we have a resolved name - inserting an empty
-    // key creates a phantom entry that masks the real one when the name arrives.
-    if (!playerName.empty()) {
-        if (data.status == 1 || data.status == 2) friendsCache_[playerName] = data.guid;
-        else if (data.status == 0) friendsCache_.erase(playerName);
-    }
-
-    // AzerothCore's FriendsResult, read off SocialMgr.h rather than guessed.
-    // The numbering here was five places out: zero is a database error and not
-    // a removal, one is a full list and not an addition, and the three results
-    // that matter most - removed, added-online, added-offline - are 5, 6 and 7
-    // where this had "already in your list", "list is full" and "is ignoring
-    // you". So adding a friend announced that the list was full, and a
-    // database error deleted them from it.
-    enum : uint8_t {
-        kDbError = 0, kListFull = 1, kOnline = 2, kOffline = 3, kNotFound = 4,
-        kRemoved = 5, kAddedOnline = 6, kAddedOffline = 7, kAlready = 8,
-        kSelf = 9, kEnemy = 10,
-    };
-    if (data.status == kRemoved) {
-        if (cit != contacts_.end())
-            contacts_.erase(cit);
-    } else if (data.status == kOnline || data.status == kOffline ||
-               data.status == kAddedOnline || data.status == kAddedOffline) {
-        const bool nowOnline =
-            (data.status == kOnline || data.status == kAddedOnline);
-        // chatFlag is the FriendStatus bitmask the packet carries, and it is
-        // what the friends list reads for away and busy. Offline results carry
-        // no body, so the flags are cleared rather than left as they were.
-        const uint8_t flags = nowOnline ? data.chatFlag : 0;
-        if (cit != contacts_.end()) {
-            if (!playerName.empty() && playerName != "Unknown") cit->name = playerName;
-            cit->status = flags;
-            if (nowOnline) {
-                cit->areaId = data.areaId;
-                cit->level = data.level;
-                cit->classId = data.classId;
-            }
-            if (!data.note.empty()) cit->note = data.note;
-        } else {
-            ContactEntry entry;
-            entry.guid = data.guid; entry.name = playerName; entry.flags = 0x1;
-            entry.status = flags;
-            entry.note = data.note;
-            entry.areaId = data.areaId; entry.level = data.level;
-            entry.classId = data.classId;
-            contacts_.push_back(std::move(entry));
-        }
-    }
-    switch (data.status) {
-        case kDbError:      chat_.addSystemChatMessage("Your friends list could not be reached."); break;
-        case kListFull:     chat_.addSystemChatMessage("Your friends list is full."); break;
-        case kOnline:       chat_.addSystemChatMessage(playerName + " is now online."); break;
-        case kOffline:      chat_.addSystemChatMessage(playerName + " is now offline."); break;
-        case kNotFound:     chat_.addSystemChatMessage("Player not found."); break;
-        case kRemoved:      chat_.addSystemChatMessage(playerName + " has been removed from your friends list."); break;
-        case kAddedOnline:
-        case kAddedOffline: chat_.addSystemChatMessage(playerName + " has been added to your friends list."); break;
-        case kAlready:      chat_.addSystemChatMessage(playerName + " is already in your friends list."); break;
-        case kSelf:         chat_.addSystemChatMessage("You cannot add yourself as a friend."); break;
-        case kEnemy:        chat_.addSystemChatMessage(playerName + " belongs to the other faction."); break;
-        default: break;
-    }
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("FRIENDLIST_UPDATE", {});
-}
 
 void SocialHandler::handleRandomRoll(network::Packet& packet) {
     RandomRollData data;
@@ -5139,36 +4934,6 @@ void SocialHandler::setGroupAssistant(uint64_t guid, bool apply) {
     packet.writeUInt64(guid);
     packet.writeUInt8(apply ? 1 : 0);
     sender_.send(packet);
-}
-
-void SocialHandler::requestContactList() {
-    if (!sender_.characterInWorld()) return;
-    // Once a second. FriendsFrame_Update calls ShowFriends every time it
-    // redraws, and it redraws on every friend status line - so an unthrottled
-    // send answers each one with a request for the whole list again.
-    const auto now = std::chrono::steady_clock::now();
-    if (now - lastContactListRequest_ < std::chrono::seconds(1)) return;
-    lastContactListRequest_ = now;
-    // Two names for one request. Vanilla calls it CMSG_FRIEND_LIST and sends
-    // it empty; TBC renamed it CMSG_CONTACT_LIST and gave it a flags word.
-    // Checked against the opcode maps: classic names only the first, TBC and
-    // WotLK only the second.
-    if (isClassicLikeExpansion()) {
-        const uint32_t wire = wireOpcode(Opcode::CMSG_FRIEND_LIST);
-        if (wire == 0xFFFF) return;
-        network::Packet pkt(static_cast<uint16_t>(wire));
-        sender_.send(pkt);
-        return;
-    }
-    const uint32_t wire = wireOpcode(Opcode::CMSG_CONTACT_LIST);
-    if (wire == 0xFFFF) return;
-    network::Packet pkt(static_cast<uint16_t>(wire));
-    // Which lists to send back. AzerothCore reads one uint32 and hands it
-    // straight to SendSocialList; SOCIAL_FLAG_ALL is friend, ignored and muted
-    // together, which is what the panel shows across its three tabs.
-    constexpr uint32_t kSocialFlagAll = 0x07;
-    pkt.writeUInt32(kSocialFlagAll);
-    sender_.send(pkt);
 }
 
 void SocialHandler::requestBattlefieldPositions() {

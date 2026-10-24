@@ -9,6 +9,7 @@ namespace wowee {
 namespace pipeline { class AssetManager; }
 namespace game { class ExpansionRegistry; class EmoteTable; class MovementCollision; }
 namespace core { class EventBus; class CVarStore; }
+namespace contacts { class IContactsServerFeed; }
 namespace network { class WorldConnection; }
 
 namespace game {
@@ -47,6 +48,10 @@ struct GameServices {
     /// own, so time passes when it says.
     std::function<std::chrono::steady_clock::time_point()> steadyNow =
         [] { return std::chrono::steady_clock::now(); };
+    /// The contact lists, which the friend, ignore and mute packets feed.
+    /// Set by the composition root once the game exists: the contacts
+    /// gateway sends through it.
+    contacts::IContactsServerFeed* contactsFeed = nullptr;
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };

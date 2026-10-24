@@ -3,6 +3,7 @@
 #include <iterator>
 #include <vector>
 #include "addons/lua_api_helpers.hpp"
+#include "contacts/services/contacts.hpp"
 #include "game/emote_table.hpp"
 #include "game/reputation_standing.hpp"
 #include "game/stationery.hpp"
@@ -235,6 +236,20 @@ static int lua_IsAddonMessagePrefixRegistered(lua_State* L) {
     return 1;
 }
 
+/// The contact lists the composition root handed to the addon layer; null in
+/// an addon layer run without a game, which reads them as empty - as every
+/// binding here answers with no game handler.
+static contacts::IContacts* contactsOf(lua_State* L) {
+    auto* services = getLuaServices(L);
+    return services ? services->contacts : nullptr;
+}
+
+static const std::vector<contacts::Contact>& contactRows(lua_State* L) {
+    static const std::vector<contacts::Contact> none;
+    auto* contacts = contactsOf(L);
+    return contacts ? contacts->contacts() : none;
+}
+
 static int lua_GetNumFriends(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); return 2; }
@@ -242,7 +257,7 @@ static int lua_GetNumFriends(lua_State* L) {
     // the same line - local _, numWoWOnline = GetNumFriends() - so returning
     // only the total leaves that arithmetic against nil.
     int count = 0, online = 0;
-    for (const auto& c : gh->getContacts()) {
+    for (const auto& c : contactRows(L)) {
         if (!c.isFriend()) continue;
         ++count;
         if (c.status != 0) ++online;   // 0 is offline; 1/2/3 are on, AFK, DND
@@ -268,7 +283,7 @@ static int lua_GetFriendInfo(lua_State* L) {
         return luaReturnNil(L);
     }
     int found = 0;
-    for (const auto& c : gh->getContacts()) {
+    for (const auto& c : contactRows(L)) {
         if (!c.isFriend()) continue;
         if (byName ? (c.name == wanted) : (++found == index)) {
             lua_pushstring(L, c.name.c_str());      // 1: name
@@ -569,7 +584,7 @@ static int lua_GetNumIgnores(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnZero(L); }
     int count = 0;
-    for (const auto& c : gh->getContacts())
+    for (const auto& c : contactRows(L))
         if (c.isIgnored()) count++;
     lua_pushnumber(L, count);
     return 1;
@@ -581,7 +596,7 @@ static int lua_GetIgnoreName(lua_State* L) {
     int index = static_cast<int>(luaL_checknumber(L, 1));
     if (!gh || index < 1) { return luaReturnNil(L); }
     int found = 0;
-    for (const auto& c : gh->getContacts()) {
+    for (const auto& c : contactRows(L)) {
         if (!c.isIgnored()) continue;
         if (++found == index) {
             lua_pushstring(L, c.name.c_str());
@@ -685,7 +700,7 @@ static int lua_GetAutoCompleteResults(lua_State* L) {
 
     for (const auto& mbr : gh->getPartyData().members) note(mbr.name, kInGroup, mbr.isOnline != 0);
     for (const auto& mbr : gh->getGuildRoster().members) note(mbr.name, kInGuild, mbr.online);
-    for (const auto& c : gh->getContacts()) {
+    for (const auto& c : contactRows(L)) {
         if (c.isFriend()) note(c.name, kFriend, c.isOnline());
     }
 
@@ -729,10 +744,10 @@ static int lua_AddOrRemoveFriend(lua_State* L) {
     const std::string name = luaL_optstring(L, 1, "");
     const std::string note = luaL_optstring(L, 2, "");
     if (!gh || name.empty()) return 0;
-    for (const auto& c : gh->getContacts()) {
-        if (c.isFriend() && c.name == name) { gh->removeFriend(name); return 0; }
+    for (const auto& c : contactRows(L)) {
+        if (c.isFriend() && c.name == name) { contactsOf(L)->removeFriend(name); return 0; }
     }
-    gh->addFriend(name, note);
+    if (auto* contacts = contactsOf(L)) contacts->addFriend(name, note);
     return 0;
 }
 
@@ -740,10 +755,10 @@ static int lua_AddOrDelIgnore(lua_State* L) {
     auto* gh = getGameHandler(L);
     const std::string name = luaL_optstring(L, 1, "");
     if (!gh || name.empty()) return 0;
-    for (const auto& c : gh->getContacts()) {
-        if (c.isIgnored() && c.name == name) { gh->removeIgnore(name); return 0; }
+    for (const auto& c : contactRows(L)) {
+        if (c.isIgnored() && c.name == name) { contactsOf(L)->removeIgnore(name); return 0; }
     }
-    gh->addIgnore(name);
+    if (auto* contacts = contactsOf(L)) contacts->addIgnore(name);
     return 0;
 }
 
@@ -2289,12 +2304,12 @@ void registerSocialLuaAPI(lua_State* L) {
             } else {
                 const int idx = static_cast<int>(luaL_optnumber(L, 1, 0));
                 int found = 0;
-                for (const auto& c : gh->getContacts()) {
+                for (const auto& c : contactRows(L)) {
                     if (!c.isFriend()) continue;
                     if (++found == idx) { name = c.name; break; }
                 }
             }
-            if (!name.empty()) gh->setFriendNote(name, note);
+            if (auto* contacts = contactsOf(L); contacts && !name.empty()) contacts->setFriendNote(name, note);
             return 0;
         }},
                 {"GetNumIgnores",           lua_GetNumIgnores},
@@ -2382,28 +2397,24 @@ void registerSocialLuaAPI(lua_State* L) {
             return 0;
         }},
                 {"AddFriend", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
             const char* name = luaL_checkstring(L, 1);
             const char* note = luaL_optstring(L, 2, "");
-            if (gh) gh->addFriend(name, note);
+            if (auto* contacts = contactsOf(L)) contacts->addFriend(name, note);
             return 0;
         }},
                 {"RemoveFriend", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
             const char* name = luaL_checkstring(L, 1);
-            if (gh) gh->removeFriend(name);
+            if (auto* contacts = contactsOf(L)) contacts->removeFriend(name);
             return 0;
         }},
                 {"AddIgnore", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
             const char* name = luaL_checkstring(L, 1);
-            if (gh) gh->addIgnore(name);
+            if (auto* contacts = contactsOf(L)) contacts->addIgnore(name);
             return 0;
         }},
                 {"DelIgnore", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
             const char* name = luaL_checkstring(L, 1);
-            if (gh) gh->removeIgnore(name);
+            if (auto* contacts = contactsOf(L)) contacts->removeIgnore(name);
             return 0;
         }},
                 // ShowFriends() - not a panel verb despite the name: it asks
@@ -2418,7 +2429,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 // CMSG_CONTACT_LIST was in all three opcode maps with nothing
                 // building it.
                 {"ShowFriends", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->requestContactList();
+            if (auto* contacts = contactsOf(L)) contacts->refresh();
             return 0;
         }},
                 {"GetNumWhoResults", [](lua_State* L) -> int {

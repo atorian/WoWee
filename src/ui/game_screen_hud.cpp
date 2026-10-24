@@ -1,3 +1,4 @@
+#include "contacts/services/contacts.hpp"
 #include "ui/game_screen.hpp"
 #include "core/screen_recording.hpp"
 #include "ui/sight_cache.hpp"
@@ -1657,10 +1658,10 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                         openInspectWindow(gameHandler);
                     }
                     ImGui::Separator();
-                    if (ImGui::MenuItem("Add Friend"))
-                        gameHandler.addFriend(ctxName);
-                    if (ImGui::MenuItem("Ignore"))
-                        gameHandler.addIgnore(ctxName);
+                    if (ImGui::MenuItem("Add Friend") && services_.contacts)
+                        services_.contacts->addFriend(ctxName);
+                    if (ImGui::MenuItem("Ignore") && services_.contacts)
+                        services_.contacts->addIgnore(ctxName);
                 }
                 ImGui::EndPopup();
             } else {

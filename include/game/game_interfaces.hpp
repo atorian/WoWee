@@ -19,7 +19,6 @@ namespace wowee::game {
 class Entity;
 class EntityManager;
 enum class WorldState;
-struct ContactEntry;
 struct BgQueueSlot;
 struct AvailableBgInfo;
 struct BgScoreboardData;
@@ -93,13 +92,6 @@ public:
 class ISocialState {
 public:
     virtual ~ISocialState() = default;
-
-    virtual void addFriend(const std::string& playerName, const std::string& note = "") = 0;
-    virtual void removeFriend(const std::string& playerName) = 0;
-    virtual void addIgnore(const std::string& playerName) = 0;
-    virtual void removeIgnore(const std::string& playerName) = 0;
-    [[nodiscard]] virtual const std::unordered_map<std::string, uint64_t>& getIgnoreCache() const = 0;
-    [[nodiscard]] virtual const std::vector<ContactEntry>& getContacts() const = 0;
 
     [[nodiscard]] virtual bool isInGuild() const = 0;
     [[nodiscard]] virtual const std::string& getGuildName() const = 0;

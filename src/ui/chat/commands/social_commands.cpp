@@ -1,5 +1,6 @@
 // Social commands: /friend, /removefriend, /ignore, /unignore, /invite, /inspect, /who
 // Moved from ChatPanel::sendChatMessage() if/else chain (Phase 3).
+#include "contacts/services/contacts.hpp"
 #include "ui/chat/i_chat_command.hpp"
 #include "ui/chat_panel.hpp"
 #include "game/game_handler.hpp"
@@ -42,15 +43,15 @@ public:
                 std::string subCmd = ctx.args.substr(0, subCmdSpace);
                 std::transform(subCmd.begin(), subCmd.end(), subCmd.begin(), ::tolower);
                 if (subCmd == "add") {
-                    ctx.gameHandler.addFriend(ctx.args.substr(subCmdSpace + 1));
+                    if (auto* contacts = ctx.services.contacts) contacts->addFriend(ctx.args.substr(subCmdSpace + 1));
                     return {};
                 } if (subCmd == "remove" || subCmd == "delete" || subCmd == "rem") {
-                    ctx.gameHandler.removeFriend(ctx.args.substr(subCmdSpace + 1));
+                    if (auto* contacts = ctx.services.contacts) contacts->removeFriend(ctx.args.substr(subCmdSpace + 1));
                     return {};
                 }
             } else {
                 // /addfriend name or /friend name (assume add)
-                ctx.gameHandler.addFriend(ctx.args);
+                if (auto* contacts = ctx.services.contacts) contacts->addFriend(ctx.args);
                 return {};
             }
         }
@@ -70,7 +71,7 @@ class RemoveFriendCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (!ctx.args.empty()) {
-            ctx.gameHandler.removeFriend(ctx.args);
+            if (auto* contacts = ctx.services.contacts) contacts->removeFriend(ctx.args);
             return {};
         }
         game::MessageChatData msg;
@@ -89,7 +90,7 @@ class IgnoreCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (!ctx.args.empty()) {
-            ctx.gameHandler.addIgnore(ctx.args);
+            if (auto* contacts = ctx.services.contacts) contacts->addIgnore(ctx.args);
             return {};
         }
         game::MessageChatData msg;
@@ -108,7 +109,7 @@ class UnignoreCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (!ctx.args.empty()) {
-            ctx.gameHandler.removeIgnore(ctx.args);
+            if (auto* contacts = ctx.services.contacts) contacts->removeIgnore(ctx.args);
             return {};
         }
         game::MessageChatData msg;
