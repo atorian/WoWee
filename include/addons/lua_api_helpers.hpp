@@ -954,6 +954,10 @@ inline void invalidateTradeSkillRows(lua_State* L) {
 /// null without a game.
 arena::IArenaTeams* arenaTeamsOf(lua_State* L);
 
+/// The battlegrounds as the composition root handed them to the addon layer;
+/// null without a game.
+battleground::IBattlegrounds* battlegroundsOf(lua_State* L);
+
 /// The team id at an arena team index, or zero when the index is off the end
 /// or there are no arena teams.
 ///

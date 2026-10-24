@@ -1475,23 +1475,13 @@ struct TrainerListData {
     [[nodiscard]] bool isValid() const { return true; }
 };
 
-/** One queue slot's worth of SMSG_BATTLEFIELD_STATUS. */
-struct BattlefieldStatusData {
-    uint32_t queueSlot = 0;
-    uint8_t  arenaType = 0;
-    uint32_t bgTypeId = 0;
-    uint8_t  minLevel = 0;
-    uint8_t  maxLevel = 0;
-    uint32_t instanceId = 0;
-    bool     isRated = false;
-    /// 0 none, 1 queued, 2 invited, 3 in progress, 4 waiting to leave.
-    uint32_t statusId = 0;
-    // Whichever of these the status carries; the rest stay zero.
-    uint32_t avgWaitMs = 0;        ///< status 1
-    uint32_t timeInQueueMs = 0;    ///< status 1
-    uint32_t mapId = 0;            ///< status 2 and 3
-    uint32_t inviteTimeoutMs = 0;  ///< status 2 - how long the invitation lasts
-};
+} // namespace game
+namespace battleground { struct BattlefieldStatus; }
+namespace game {
+
+/// One queue slot's worth of SMSG_BATTLEFIELD_STATUS, which is the battleground
+/// domain's record (battleground/domain/records.hpp).
+using BattlefieldStatusData = battleground::BattlefieldStatus;
 
 // ============================================================
 // Taxi / Flight Paths

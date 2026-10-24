@@ -3478,22 +3478,6 @@ const GroupListData& GameHandler::getPartyData() const {
     return socialHandler_->getPartyData();
 }
 
-const std::array<GameHandler::BgQueueSlot, 3>& GameHandler::getBgQueues() const {
-    return socialHandler_->getBgQueues();
-}
-
-const std::vector<GameHandler::AvailableBgInfo>& GameHandler::getAvailableBgs() const {
-    return socialHandler_->getAvailableBgs();
-}
-
-const GameHandler::BgScoreboardData* GameHandler::getBgScoreboard() const {
-    return socialHandler_->getBgScoreboard();
-}
-
-const std::vector<GameHandler::BgPlayerPosition>& GameHandler::getBgPlayerPositions() const {
-    return socialHandler_->getBgPlayerPositions();
-}
-
 bool GameHandler::isLoggingOut() const {
     return socialHandler_->isLoggingOut();
 }

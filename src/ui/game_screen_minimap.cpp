@@ -1,4 +1,5 @@
 #include "contacts/services/contacts.hpp"
+#include "battleground/services/battlegrounds.hpp"
 #include "rendering/view_distance.hpp"
 #include "game/group_defines.hpp"
 #include "game/weather_handler.hpp"
@@ -405,7 +406,9 @@ void GameScreen::renderMinimapIndicators(game::GameHandler& gameHandler, float c
     }
 
     // BG queue status indicator (when in queue but not yet invited)
-    for (const auto& slot : gameHandler.getBgQueues()) {
+    static const std::array<battleground::BgQueueSlot, 3> kNoQueues{};
+    const auto& queues = services_.battlegrounds ? services_.battlegrounds->getBgQueues() : kNoQueues;
+    for (const auto& slot : queues) {
         if (slot.statusId != 1) continue;  // STATUS_WAIT_QUEUE only
 
         std::string bgName;
@@ -1129,7 +1132,9 @@ void GameScreen::renderMinimapPartyDots(const MinimapFrame& frame, game::GameHan
 void GameScreen::renderMinimapBattlegroundPositions(const MinimapFrame& frame, game::GameHandler& gameHandler) {
     // BG flag carrier / important player positions (MSG_BATTLEGROUND_PLAYER_POSITIONS)
     {
-        const auto& bgPositions = gameHandler.getBgPlayerPositions();
+        static const std::vector<battleground::BgPlayerPosition> kNoPositions;
+        const auto& bgPositions =
+            services_.battlegrounds ? services_.battlegrounds->getBgPlayerPositions() : kNoPositions;
         if (!bgPositions.empty()) {
             for (const auto& bp : bgPositions) {
                 // Packet coords: wowX=canonical X (north), wowY=canonical Y (west)

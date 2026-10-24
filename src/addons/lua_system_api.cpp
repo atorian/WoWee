@@ -2,6 +2,7 @@
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include "game/action_bar_handler.hpp"
 #include "arena/services/arena.hpp"
+#include "battleground/services/battlegrounds.hpp"
 #include <array>
 #include <algorithm>
 #include <optional>
@@ -2783,21 +2784,27 @@ static int lua_SetScreenResolution(lua_State* L) {
 /// sends, and group 1 is the carriers. The parser has recorded which all along
 /// and the first version of these accessors ignored it, which would have drawn
 /// flag carriers as ordinary party dots.
-static const game::BgPlayerPosition* bgEntryAt(game::GameHandler* gh,
-                                               int group, int index) {
-    if (!gh || index < 1) return nullptr;
+battleground::IBattlegrounds* battlegroundsOf(lua_State* L) {
+    auto* services = getLuaServices(L);
+    return services ? services->battlegrounds : nullptr;
+}
+
+static const battleground::BgPlayerPosition* bgEntryAt(lua_State* L, int group, int index) {
+    auto* battlegrounds = battlegroundsOf(L);
+    if (!battlegrounds || index < 1) return nullptr;
     int seen = 0;
-    for (const auto& p : gh->getBgPlayerPositions()) {
+    for (const auto& p : battlegrounds->getBgPlayerPositions()) {
         if (p.group != group) continue;
         if (++seen == index) return &p;
     }
     return nullptr;
 }
 
-static int bgCount(game::GameHandler* gh, int group) {
-    if (!gh) return 0;
+static int bgCount(lua_State* L, int group) {
+    auto* battlegrounds = battlegroundsOf(L);
+    if (!battlegrounds) return 0;
     int n = 0;
-    for (const auto& p : gh->getBgPlayerPositions()) if (p.group == group) ++n;
+    for (const auto& p : battlegrounds->getBgPlayerPositions()) if (p.group == group) ++n;
     return n;
 }
 
@@ -2813,7 +2820,7 @@ static int lua_GetBattlefieldPosition(lua_State* L) {
     auto* svc = getLuaServices(L);
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
     float u = 0.0f, v = 0.0f;
-    if (const auto* p = bgEntryAt(gh, 0, index)) {
+    if (const auto* p = bgEntryAt(L, 0, index); p && gh) {
         if (svc && svc->mapUVForWorldPos &&
             svc->mapUVForWorldPos(p->wowX, p->wowY, 0.0f, u, v)) {
             lua_pushnumber(L, u);
@@ -2837,12 +2844,11 @@ static int lua_GetBattlefieldPosition(lua_State* L) {
 /// and with one carried it does not. Rather than guess, that case answers zero
 /// and the frame hides: no flag on the map is a smaller lie than the wrong one.
 static int lua_GetBattlefieldFlagPosition(lua_State* L) {
-    auto* gh = getGameHandler(L);
     auto* svc = getLuaServices(L);
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
     float u = 0.0f, v = 0.0f;
-    const auto* p = bgEntryAt(gh, 1, index);
-    if (p && bgCount(gh, 1) == 2 && svc && svc->mapUVForWorldPos &&
+    const auto* p = bgEntryAt(L, 1, index);
+    if (p && bgCount(L, 1) == 2 && svc && svc->mapUVForWorldPos &&
         svc->mapUVForWorldPos(p->wowX, p->wowY, 0.0f, u, v)) {
         lua_pushnumber(L, u);
         lua_pushnumber(L, v);
@@ -4052,10 +4058,10 @@ static int lua_GetBattlefieldInstanceInfo(lua_State* L) {
     //
     // SMSG_BATTLEFIELD_LIST carries these and they were parsed into
     // AvailableBgInfo::instanceIds all along.
-    auto* gh = getGameHandler(L);
+    auto* battlegrounds = battlegroundsOf(L);
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh || index < 1) { lua_pushnumber(L, 0); return 1; }
-    const auto& bgs = gh->getAvailableBgs();
+    if (!battlegrounds || index < 1) { lua_pushnumber(L, 0); return 1; }
+    const auto& bgs = battlegrounds->getAvailableBgs();
     if (bgs.empty()) { lua_pushnumber(L, 0); return 1; }
     const auto& ids = bgs.back().instanceIds;
     if (index > static_cast<int>(ids.size())) { lua_pushnumber(L, 0); return 1; }
@@ -4065,9 +4071,9 @@ static int lua_GetBattlefieldInstanceInfo(lua_State* L) {
 
 // GetNumBattlefields() - how many instances of it there are to choose between.
 static int lua_GetNumBattlefields(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    if (!gh) { lua_pushnumber(L, 0); return 1; }
-    const auto& bgs = gh->getAvailableBgs();
+    auto* battlegrounds = battlegroundsOf(L);
+    if (!battlegrounds) { lua_pushnumber(L, 0); return 1; }
+    const auto& bgs = battlegrounds->getAvailableBgs();
     lua_pushnumber(L, bgs.empty()
         ? 0 : static_cast<lua_Number>(bgs.back().instanceIds.size()));
     return 1;
@@ -4148,8 +4154,7 @@ static int lua_GetWorldPVPQueueStatus(lua_State* L) {
 
 // LeaveBattlefield() - walk out of the battleground currently being played.
 static int lua_LeaveBattlefield(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    if (gh) gh->leaveBattlefield();
+    if (auto* battlegrounds = battlegroundsOf(L)) battlegrounds->leaveBattlefield();
     return 0;
 }
 
@@ -4226,8 +4231,9 @@ static int lua_PlayerIsPVPInactive(lua_State* L) { lua_pushboolean(L, 0); return
 // treats a missing one as "no description" rather than raising on it.
 static int lua_GetBattlefieldInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (!gh) return luaReturnNil(L);
-    const auto& bgs = gh->getAvailableBgs();
+    auto* battlegrounds = battlegroundsOf(L);
+    if (!gh || !battlegrounds) return luaReturnNil(L);
+    const auto& bgs = battlegrounds->getAvailableBgs();
     if (bgs.empty()) return luaReturnNil(L);
     const auto* info = gh->getBattlemasterInfo(bgs.back().bgTypeId);
     if (!info || info->name.empty()) return luaReturnNil(L);
@@ -4321,7 +4327,8 @@ static int lua_RequestBattlegroundInstanceInfo(lua_State* L) {
     const auto& list = gh->getBattlegroundTypes();
     if (index < 1 || index > static_cast<int>(list.size())) return 0;
     selectedBattlegroundTypeId(L) = list[static_cast<size_t>(index - 1)].id;
-    gh->requestBattlefieldList(selectedBattlegroundTypeId(L));
+    if (auto* battlegrounds = battlegroundsOf(L))
+        battlegrounds->requestBattlefieldList(selectedBattlegroundTypeId(L));
     return 0;
 }
 
@@ -4357,11 +4364,12 @@ static int lua_SetSelectedBattlefield(lua_State* L) {
 // first available one - which is what both join buttons pass.
 static int lua_JoinBattlefield(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (!gh) return 0;
+    auto* battlegrounds = battlegroundsOf(L);
+    if (!gh || !battlegrounds) return 0;
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
     const bool asGroup = lua_toboolean(L, 2) != 0;
 
-    const auto& bgs = gh->getAvailableBgs();
+    const auto& bgs = battlegrounds->getAvailableBgs();
     uint32_t bgTypeId = selectedBattlegroundTypeId(L);
     // Nothing selected can still happen - a queue asked for before the panel
     // has told anyone what it is showing - and one battleground on offer is
@@ -4391,7 +4399,7 @@ static int lua_JoinBattlefield(lua_State* L) {
         gh->isGossipWindowOpen() ? gh->getCurrentGossip().npcGuid : 0;
     LOG_WARNING("CMSG_BATTLEMASTER_JOIN: bgTypeId=", bgTypeId, " instance=", instanceId,
              " asGroup=", asGroup, " battlemaster=0x", std::hex, battlemaster, std::dec);
-    gh->joinBattlefield(battlemaster, bgTypeId, instanceId, asGroup);
+    battlegrounds->joinBattlefield(battlemaster, bgTypeId, instanceId, asGroup);
     return 0;
 }
 
@@ -5633,14 +5641,14 @@ void registerSystemLuaAPI(lua_State* L) {
                 // both - a queue that always read as just-joined with no
                 // estimate, which is the whole content of that window.
                 {"GetBattlefieldTimeWaited", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
+            auto* battlegrounds = battlegroundsOf(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 1));
             // Counted on from the server's last word, which comes about once
             // a minute - answered as it stood, the minimap tooltip's time in
             // queue sat still for a minute and then jumped.
             double ms = 0.0;
-            if (gh && index >= 1 && index <= 3) {
-                const auto& q = gh->getBgQueues()[static_cast<size_t>(index - 1)];
+            if (battlegrounds && index >= 1 && index <= 3) {
+                const auto& q = battlegrounds->getBgQueues()[static_cast<size_t>(index - 1)];
                 ms = q.timeInQueueSec * 1000.0;
                 if (q.statusId == 1 &&
                     q.queueTimeReceivedAt != std::chrono::steady_clock::time_point{}) {
@@ -5652,11 +5660,11 @@ void registerSystemLuaAPI(lua_State* L) {
             return 1;
         }},
                 {"GetBattlefieldEstimatedWaitTime", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
+            auto* battlegrounds = battlegroundsOf(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 1));
             double ms = 0.0;
-            if (gh && index >= 1 && index <= 3)
-                ms = gh->getBgQueues()[static_cast<size_t>(index - 1)].avgWaitTimeSec * 1000.0;
+            if (battlegrounds && index >= 1 && index <= 3)
+                ms = battlegrounds->getBgQueues()[static_cast<size_t>(index - 1)].avgWaitTimeSec * 1000.0;
             lua_pushnumber(L, ms);
             return 1;
         }},
@@ -6113,7 +6121,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // count is asked for beside it and a flat zero said the
                 // positions were not there while they were.
                 {"GetNumBattlefieldPositions", [](lua_State* L) -> int {
-            lua_pushnumber(L, bgCount(getGameHandler(L), 0));
+            lua_pushnumber(L, bgCount(L, 0));
             return 1;
         }},
                 {"GetBattlefieldPosition",   lua_GetBattlefieldPosition},
@@ -6250,8 +6258,7 @@ void registerSystemLuaAPI(lua_State* L) {
             // Only when both are carried, for the reason the accessor gives:
             // one carrier cannot be told from the other, and the loop this
             // bounds draws a named flag texture per entry.
-            auto* gh = getGameHandler(L);
-            const int n = bgCount(gh, 1);
+            const int n = bgCount(L, 1);
             lua_pushnumber(L, n == 2 ? 2 : 0);
             return 1;
         }},
@@ -6569,7 +6576,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // so the list was empty for FrameXML's map and for this
                 // client's own minimap alike.
                 {"RequestBattlefieldPositions", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->requestBattlefieldPositions();
+            if (auto* battlegrounds = battlegroundsOf(L)) battlegrounds->requestBattlefieldPositions();
             return 0;
         }},
                 {"UpdateWorldMapArrowFrames",   lua_ReturnNothing},

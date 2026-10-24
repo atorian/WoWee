@@ -19,6 +19,7 @@ namespace wowee::who { class IWho; }
 namespace wowee::duel { class IDuels; }
 namespace wowee::petition { class IPetitions; }
 namespace wowee::arena { class IArenaTeams; }
+namespace wowee::battleground { class IBattlegrounds; }
 
 namespace wowee::addons {
 
@@ -43,6 +44,8 @@ struct LuaServices {
     petition::IPetitions*    petitions         = nullptr;
     /// The player's arena teams, their rosters and the team commands.
     arena::IArenaTeams*      arenaTeams        = nullptr;
+    /// The battleground queues, listings, scoreboard and map positions.
+    battleground::IBattlegrounds* battlegrounds    = nullptr;
 
     /// Run a macro body, as RunMacroText() does - one command per line,
     /// through the same path the action bar uses for a macro button.

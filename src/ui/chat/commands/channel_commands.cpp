@@ -2,6 +2,7 @@
 // Moved from ChatPanel::sendChatMessage() channel dispatch section (Phase 3).
 // These commands send messages to specific chat channels and/or switch the
 // chat-type dropdown on the panel.
+#include "battleground/services/battlegrounds.hpp"
 #include "ui/chat/i_chat_command.hpp"
 #include "ui/chat_panel.hpp"
 #include "ui/chat/chat_utils.hpp"
@@ -151,8 +152,9 @@ public:
 class JoinCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (ctx.args.empty() && ctx.gameHandler.hasPendingBgInvite()) {
-            ctx.gameHandler.acceptBattlefield();
+        if (auto* battlegrounds = ctx.services.battlegrounds;
+            ctx.args.empty() && battlegrounds && battlegrounds->hasPendingBgInvite()) {
+            battlegrounds->acceptBattlefield();
             return {};
         }
         if (!ctx.args.empty()) {

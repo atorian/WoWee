@@ -2,6 +2,7 @@
 //                /threat, /combatlog, /helm, /cloak, /follow, /stopfollow,
 //                /assist, /pvp, /unstuck*, /transport
 // Moved from ChatPanel::sendChatMessage() if/else chain (Phase 3).
+#include "battleground/services/battlegrounds.hpp"
 #include "ui/chat/i_chat_command.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "core/zone_tracker.hpp"
@@ -175,7 +176,7 @@ public:
 class ScoreCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.requestPvpLog();
+        if (auto* battlegrounds = ctx.services.battlegrounds) battlegrounds->requestPvpLog();
         ctx.panel.getSlashCmds().showBgScore = true;
         return {};
     }

@@ -1,5 +1,6 @@
 #include "contacts/services/contacts.hpp"
 #include "duel/services/duels.hpp"
+#include "battleground/services/battlegrounds.hpp"
 #include "ui/game_screen.hpp"
 #include "core/screen_recording.hpp"
 #include "ui/sight_cache.hpp"
@@ -569,8 +570,8 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
         //
         // The same two group colours the minimap uses, so a flag carrier is
         // the same colour on both.
-        {
-            for (const auto& bp : gameHandler.getBgPlayerPositions()) {
+        if (auto* battlegrounds = services_.battlegrounds) {
+            for (const auto& bp : battlegrounds->getBgPlayerPositions()) {
                 // Packet coords are canonical: wowX north, wowY west.
                 const glm::vec3 rpos =
                     core::coords::canonicalToRender(glm::vec3(bp.wowX, bp.wowY, 0.0f));

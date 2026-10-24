@@ -144,7 +144,6 @@ class GameHandler : public IConnectionState,
                      public ITargetingState,
                      public IEntityAccess,
                      public ISocialState,
-                     public IPvpState,
                      public PacketSender,
                      public FrameXmlEvents,
                      public ActionBarQueries,
@@ -641,6 +640,7 @@ public:
     duel::IDuelsFeed* duelFeed() override;
     petition::IPetitionsFeed* petitionFeed() override;
     arena::IArenaTeamsFeed* arenaFeed() override;
+    battleground::IBattlegroundsFeed* battlegroundFeed() override;
 
     // Money (copper)
     uint64_t getMoneyCopper() const { return inventoryHandler_->moneyCopper(); }
@@ -797,35 +797,6 @@ public:
 
     // Random roll
     void randomRoll(uint32_t minRoll = 1, uint32_t maxRoll = 100);
-
-    // Battleground queue slot (aliased from handler_types.hpp)
-    using BgQueueSlot = game::BgQueueSlot;
-
-    // Available BG list (aliased from handler_types.hpp)
-    using AvailableBgInfo = game::AvailableBgInfo;
-
-    // Battleground
-    bool hasPendingBgInvite() const override;
-    void acceptBattlefield(uint32_t queueSlot = 0xFFFFFFFF) override;
-    void declineBattlefield(uint32_t queueSlot = 0xFFFFFFFF) override;
-    void leaveBattlefield();
-    void requestBattlefieldList(uint32_t bgTypeId);
-    void reportPvpAfk(uint64_t playerGuid);
-    void joinBattlefield(uint64_t battlemasterGuid, uint32_t bgTypeId,
-                         uint32_t instanceId, bool asGroup);
-    const std::array<BgQueueSlot, 3>& getBgQueues() const override;
-    const std::vector<AvailableBgInfo>& getAvailableBgs() const override;
-
-    // BG scoreboard (aliased from handler_types.hpp)
-    using BgPlayerScore = game::BgPlayerScore;
-    using ArenaTeamScore = game::ArenaTeamScore;
-    using BgScoreboardData = game::BgScoreboardData;
-    void requestPvpLog();
-    const BgScoreboardData* getBgScoreboard() const override;
-
-    // BG flag carrier positions (aliased from handler_types.hpp)
-    using BgPlayerPosition = game::BgPlayerPosition;
-    const std::vector<BgPlayerPosition>& getBgPlayerPositions() const;
 
     // Network latency (milliseconds, updated each PONG response)
     uint32_t getLatencyMs() const { return lastLatency; }
@@ -2450,10 +2421,6 @@ public:
 
     /// Whether a map id belongs to a battleground, from the same table.
     bool isBattlegroundMap(uint32_t mapId);
-    /// Ask the battleground for everyone's position; throttled, and a no-op
-    /// outside one. See SocialHandler::requestBattlefieldPositions.
-    void requestBattlefieldPositions();
-    /// Ask for the friend, ignore and mute lists again. See SocialHandler.
     /// Give or take raid assistant, by guid.
     void setGroupAssistant(uint64_t guid, bool apply);
     /// Whether a map id belongs to an arena. Same table, the other instance

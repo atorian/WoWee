@@ -2,6 +2,7 @@
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include "game/shapeshift_forms.hpp"
 #include "game/bg_score_defs.hpp"
+#include "battleground/services/battlegrounds.hpp"
 #include "addons/lua_api_helpers.hpp"
 
 namespace wowee::addons {
@@ -2307,14 +2308,21 @@ static bool& battlefieldSortDescending(lua_State* L) {
     return interfaceState(L).battlefield.scoreSortDescending;
 }
 
+/// The scoreboard the battlegrounds hold, or null before one arrived or
+/// without a game.
+static const battleground::BgScoreboardData* scoreboardOf(lua_State* L) {
+    auto* battlegrounds = battlegroundsOf(L);
+    return battlegrounds ? battlegrounds->getBgScoreboard() : nullptr;
+}
+
 /// The scoreboard rows that pass the current filter, in the current order.
 ///
 /// Pointers into the scoreboard rather than copies: this is rebuilt on every
 /// GetBattlefieldScore call, once per row per redraw, and a battleground holds
 /// forty players.
-static std::vector<const game::BgPlayerScore*>
-filteredBgScores(lua_State* L, const game::BgScoreboardData& sb) {
-    std::vector<const game::BgPlayerScore*> rows;
+static std::vector<const battleground::BgPlayerScore*>
+filteredBgScores(lua_State* L, const battleground::BgScoreboardData& sb) {
+    std::vector<const battleground::BgPlayerScore*> rows;
     rows.reserve(sb.players.size());
     const int want = battlefieldScoreFaction(L);
     for (const auto& p : sb.players) {
@@ -2337,7 +2345,7 @@ filteredBgScores(lua_State* L, const game::BgScoreboardData& sb) {
     // parser reads them now and GetBattlefieldScore hands them to the frame,
     // so the two columns show real numbers - and were the only two whose
     // header did nothing when clicked.
-    auto key = [&column](const game::BgPlayerScore* p) -> double {
+    auto key = [&column](const battleground::BgPlayerScore* p) -> double {
         if (column == "kills")   return p->killingBlows;
         if (column == "deaths")  return p->deaths;
         if (column == "hk")      return p->honorableKills;
@@ -2350,7 +2358,7 @@ filteredBgScores(lua_State* L, const game::BgScoreboardData& sb) {
     const bool byName = (column == "name");
     const bool descending = battlefieldSortDescending(L);
     std::stable_sort(rows.begin(), rows.end(),
-                     [&](const game::BgPlayerScore* a, const game::BgPlayerScore* b) {
+                     [&](const battleground::BgPlayerScore* a, const battleground::BgPlayerScore* b) {
                          if (byName) {
                              return descending ? a->name > b->name : a->name < b->name;
                          }
@@ -2656,15 +2664,15 @@ void registerUnitLuaAPI(lua_State* L) {
                 // ending. Four reads as active because the battleground is
                 // still the one the player is standing in.
                 {"GetBattlefieldStatus", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
+            auto* battlegrounds = battlegroundsOf(L);
             const int idx = static_cast<int>(luaL_optnumber(L, 1, 0));
             const char* status = "none";
             std::string mapName;
             uint32_t minLevel = 0, maxLevel = 0, instanceId = 0;
             uint8_t teamSize = 0;
             bool isRated = false;
-            if (gh && idx >= 1 && idx <= 3) {
-                const auto& q = gh->getBgQueues()[static_cast<size_t>(idx) - 1];
+            if (battlegrounds && idx >= 1 && idx <= 3) {
+                const auto& q = battlegrounds->getBgQueues()[static_cast<size_t>(idx) - 1];
                 switch (q.statusId) {
                     case 1: status = "queued";  break;
                     case 2: status = "confirm"; break;
@@ -2685,7 +2693,7 @@ void registerUnitLuaAPI(lua_State* L) {
                     minLevel = q.minLevel;
                     maxLevel = q.maxLevel;
                     if (minLevel == 0 && maxLevel == 0) {
-                        for (const auto& bg : gh->getAvailableBgs()) {
+                        for (const auto& bg : battlegrounds->getAvailableBgs()) {
                             if (bg.bgTypeId != q.bgTypeId) continue;
                             minLevel = bg.minLevel;
                             maxLevel = bg.maxLevel;
@@ -2763,16 +2771,14 @@ void registerUnitLuaAPI(lua_State* L) {
             return 0;
         }},
                 {"GetNumBattlefieldScores", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const auto* sb = gh ? gh->getBgScoreboard() : nullptr;
+            const auto* sb = scoreboardOf(L);
             lua_pushnumber(L, sb ? static_cast<double>(filteredBgScores(L, *sb).size()) : 0.0);
             return 1;
         }},
                 {"GetBattlefieldScore", [](lua_State* L) -> int {
             // GetBattlefieldScore(index) → name, killingBlows, honorableKills, deaths, honorGained, faction, rank, race, class, classToken, damageDone, healingDone
-            auto* gh = getGameHandler(L);
             int index = static_cast<int>(luaL_checknumber(L, 1));
-            const auto* sb = gh ? gh->getBgScoreboard() : nullptr;
+            const auto* sb = scoreboardOf(L);
             if (!sb) return luaReturnNil(L);
             const auto rows = filteredBgScores(L, *sb);
             if (index < 1 || index > static_cast<int>(rows.size())) {
@@ -2810,8 +2816,7 @@ void registerUnitLuaAPI(lua_State* L) {
                 // from the counting stub, so the scoreboard drew the common
                 // columns and stopped.
                 {"GetNumBattlefieldStats", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const auto* sb = gh ? gh->getBgScoreboard() : nullptr;
+            const auto* sb = scoreboardOf(L);
             size_t columns = 0;
             // The widest row rather than the first: a row that arrived short
             // would otherwise decide the column count for the whole table.
@@ -2828,8 +2833,8 @@ void registerUnitLuaAPI(lua_State* L) {
                 {"GetBattlefieldStatInfo", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_checknumber(L, 1));
-            const auto* sb = gh ? gh->getBgScoreboard() : nullptr;
-            if (!sb || index < 1) return luaReturnNil(L);
+            const auto* sb = scoreboardOf(L);
+            if (!gh || !sb || index < 1) return luaReturnNil(L);
             // The label is this client's to supply. BuildObjectivesBlock
             // sends a count and that many bare numbers, so the name this used
             // to read out of the row was never on the wire - it was bytes of
@@ -2852,10 +2857,9 @@ void registerUnitLuaAPI(lua_State* L) {
                 // Always a number. The frame compares it against zero the line
                 // after it asks, so nil is not "no value" there, it is an error.
                 {"GetBattlefieldStatData", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
             const int playerIndex = static_cast<int>(luaL_checknumber(L, 1));
             const int statIndex   = static_cast<int>(luaL_checknumber(L, 2));
-            const auto* sb = gh ? gh->getBgScoreboard() : nullptr;
+            const auto* sb = scoreboardOf(L);
             double value = 0.0;
             if (sb && playerIndex >= 1 && playerIndex <= static_cast<int>(sb->players.size())) {
                 const auto& stats = sb->players[static_cast<size_t>(playerIndex - 1)].bgStats;
@@ -2876,9 +2880,8 @@ void registerUnitLuaAPI(lua_State* L) {
                 // answer for it: the frame prints "-------" for a rating it was
                 // not given, where a zero would read as a real one.
                 {"GetBattlefieldTeamInfo", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
             const int faction = static_cast<int>(luaL_checknumber(L, 1));
-            const auto* sb = gh ? gh->getBgScoreboard() : nullptr;
+            const auto* sb = scoreboardOf(L);
             if (!sb || !sb->isArena || faction < 0 || faction > 1) return luaReturnNil(L);
             const auto& team = sb->arenaTeams[faction];
             lua_pushstring(L, team.teamName.c_str());
@@ -2896,25 +2899,23 @@ void registerUnitLuaAPI(lua_State* L) {
                 // on it cannot be reported, which is also true in the real
                 // client - the report is only offered from a row.
                 {"ReportPlayerIsPVPAFK", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
+            auto* battlegrounds = battlegroundsOf(L);
             const char* name = lua_isstring(L, 1) ? lua_tostring(L, 1) : nullptr;
-            const auto* sb = gh ? gh->getBgScoreboard() : nullptr;
-            if (!gh || !sb || !name || !*name) return 0;
+            const auto* sb = scoreboardOf(L);
+            if (!battlegrounds || !sb || !name || !*name) return 0;
             for (const auto& p : sb->players) {
-                if (p.name == name) { gh->reportPvpAfk(p.guid); return 0; }
+                if (p.name == name) { battlegrounds->reportPvpAfk(p.guid); return 0; }
             }
             return 0;
         }},
                 {"GetBattlefieldWinner", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const auto* sb = gh ? gh->getBgScoreboard() : nullptr;
+            const auto* sb = scoreboardOf(L);
             if (sb && sb->hasWinner) lua_pushnumber(L, sb->winner);
             else lua_pushnil(L);
             return 1;
         }},
                 {"RequestBattlefieldScoreData", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (gh) gh->requestPvpLog();
+            if (auto* battlegrounds = battlegroundsOf(L)) battlegrounds->requestPvpLog();
             return 0;
         }},
                 {"AcceptBattlefieldPort", [](lua_State* L) -> int {
@@ -2923,14 +2924,14 @@ void registerUnitLuaAPI(lua_State* L) {
             // queue used to be dropped, which sent every answer to whichever
             // slot held an invitation - so Leave Queue on a queue that had not
             // popped found none and did nothing.
-            auto* gh = getGameHandler(L);
+            auto* battlegrounds = battlegroundsOf(L);
             const int idx = static_cast<int>(luaL_optnumber(L, 1, 0));
             const uint32_t slot = (idx >= 1 && idx <= 3) ? static_cast<uint32_t>(idx - 1)
                                                          : 0xFFFFFFFFu;
             int accept = lua_toboolean(L, 2);
-            if (gh) {
-                if (accept) gh->acceptBattlefield(slot);
-                else gh->declineBattlefield(slot);
+            if (battlegrounds) {
+                if (accept) battlegrounds->acceptBattlefield(slot);
+                else battlegrounds->declineBattlefield(slot);
             }
             return 0;
         }},

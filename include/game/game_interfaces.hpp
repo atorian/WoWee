@@ -19,10 +19,6 @@ namespace wowee::game {
 class Entity;
 class EntityManager;
 enum class WorldState;
-struct BgQueueSlot;
-struct AvailableBgInfo;
-struct BgScoreboardData;
-struct BgPlayerPosition;
 struct GuildRosterData;
 struct GuildInfoData;
 struct GuildQueryResponseData;
@@ -95,21 +91,6 @@ public:
     [[nodiscard]] virtual const std::string& getGuildName() const = 0;
     [[nodiscard]] virtual const GuildRosterData& getGuildRoster() const = 0;
     [[nodiscard]] virtual bool hasGuildRoster() const = 0;
-};
-
-// ---------------------------------------------------------------------------
-// IPvpState - battleground queues, scoreboard
-// ---------------------------------------------------------------------------
-class IPvpState {
-public:
-    virtual ~IPvpState() = default;
-
-    [[nodiscard]] virtual bool hasPendingBgInvite() const = 0;
-    virtual void acceptBattlefield(uint32_t queueSlot = 0xFFFFFFFF) = 0;
-    virtual void declineBattlefield(uint32_t queueSlot = 0xFFFFFFFF) = 0;
-    [[nodiscard]] virtual const std::array<BgQueueSlot, 3>& getBgQueues() const = 0;
-    [[nodiscard]] virtual const std::vector<AvailableBgInfo>& getAvailableBgs() const = 0;
-    [[nodiscard]] virtual const BgScoreboardData* getBgScoreboard() const = 0;
 };
 
 } // namespace wowee::game

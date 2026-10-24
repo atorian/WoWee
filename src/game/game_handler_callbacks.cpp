@@ -1213,6 +1213,10 @@ arena::IArenaTeamsFeed* GameHandler::arenaFeed() {
     return services_.arenaFeed;
 }
 
+battleground::IBattlegroundsFeed* GameHandler::battlegroundFeed() {
+    return services_.battlegroundFeed;
+}
+
 void GameHandler::setGuildBankMoney(uint64_t money) {
     inventoryHandler_->setGuildBankMoney(money);
 }
@@ -1982,14 +1986,6 @@ void GameHandler::dismount() {
 // Arena / Battleground Handlers
 // ============================================================
 
-void GameHandler::declineBattlefield(uint32_t queueSlot) {
-    socialHandler_->declineBattlefield(queueSlot);
-}
-
-bool GameHandler::hasPendingBgInvite() const {
-    return socialHandler_->hasPendingBgInvite();
-}
-
 // Seeds the staging copy from the rank as it stands, so a field the panel never
 // touches goes back to the server unchanged instead of as a zero.
 void GameHandler::setSelectedGuildRank(int index) {
@@ -2045,27 +2041,6 @@ void GameHandler::swapRaidSubgroup(const std::string& a, const std::string& b) {
     socialHandler_->swapRaidSubgroup(a, b);
 }
 
-void GameHandler::joinBattlefield(uint64_t battlemasterGuid, uint32_t bgTypeId,
-                                  uint32_t instanceId, bool asGroup) {
-    socialHandler_->joinBattlefield(battlemasterGuid, bgTypeId, instanceId, asGroup);
-}
-
-void GameHandler::leaveBattlefield() {
-    socialHandler_->leaveBattlefield();
-}
-
-void GameHandler::requestBattlefieldList(uint32_t bgTypeId) {
-    socialHandler_->requestBattlefieldList(bgTypeId);
-}
-
-void GameHandler::reportPvpAfk(uint64_t playerGuid) {
-    socialHandler_->reportPvpAfk(playerGuid);
-}
-
-void GameHandler::acceptBattlefield(uint32_t queueSlot) {
-    socialHandler_->acceptBattlefield(queueSlot);
-}
-
 // ---------------------------------------------------------------------------
 // LFG / Dungeon Finder handlers (WotLK 3.3.5a)
 // ---------------------------------------------------------------------------
@@ -2118,10 +2093,6 @@ void GameHandler::loadAreaTriggerDbc() {
 
 void GameHandler::checkAreaTriggers() {
     movementHandler_->checkAreaTriggers();
-}
-
-void GameHandler::requestPvpLog() {
-    socialHandler_->requestPvpLog();
 }
 
 // ============================================================
@@ -2188,10 +2159,6 @@ void GameHandler::resetInstances() {
 
 void GameHandler::setGroupAssistant(uint64_t guid, bool apply) {
     socialHandler_->setGroupAssistant(guid, apply);
-}
-
-void GameHandler::requestBattlefieldPositions() {
-    socialHandler_->requestBattlefieldPositions();
 }
 
 uint32_t GameHandler::getPlayerGuildRankIndex() const {

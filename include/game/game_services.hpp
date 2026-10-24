@@ -14,6 +14,7 @@ namespace who { class IWhoFeed; }
 namespace duel { class IDuelsFeed; }
 namespace petition { class IPetitionsFeed; }
 namespace arena { class IArenaTeamsFeed; }
+namespace battleground { class IBattlegroundsFeed; }
 namespace network { class WorldConnection; }
 
 namespace game {
@@ -64,6 +65,8 @@ struct GameServices {
     petition::IPetitionsFeed* petitionFeed = nullptr;
     /// Where the arena team packets go. Set like contactsFeed.
     arena::IArenaTeamsFeed* arenaFeed = nullptr;
+    /// Where the battleground packets go. Set like contactsFeed.
+    battleground::IBattlegroundsFeed* battlegroundFeed = nullptr;
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };

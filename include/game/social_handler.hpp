@@ -22,6 +22,7 @@ namespace who { class IWhoFeed; }
 namespace duel { class IDuelsFeed; }
 namespace petition { class IPetitionsFeed; }
 namespace arena { class IArenaTeamsFeed; }
+namespace battleground { class IBattlegroundsFeed; }
 namespace game {
 
 class PacketSender;
@@ -90,6 +91,8 @@ public:
     [[nodiscard]] virtual petition::IPetitionsFeed* petitionFeed() = 0;
     /// Where the arena team packets go; null when the client was built without them.
     [[nodiscard]] virtual arena::IArenaTeamsFeed* arenaFeed() = 0;
+    /// Where the battleground packets go; null when the client was built without them.
+    [[nodiscard]] virtual battleground::IBattlegroundsFeed* battlegroundFeed() = 0;
 
     // ---- The appearance switches the realm keeps with the character ----
     [[nodiscard]] virtual bool showingHelm() const = 0;
@@ -112,10 +115,6 @@ struct SocialCharacterState {
     uint32_t totalTimePlayed_ = 0;
     uint32_t levelTimePlayed_ = 0;
 
-
-    // A join the server has not answered yet, and how long it has left.
-    uint32_t bgJoinPendingType_ = 0;
-    float bgJoinWaitSec_        = 0.0f;
 
     // Guild. The last character's is not the next one's: logging out of a
     // guilded character into a guildless one used to leave the name, and
@@ -170,12 +169,6 @@ struct SocialCharacterState {
 
     // Raid marks
     std::array<uint64_t, kRaidMarkCount> raidTargetGuids_ = {};
-
-    // Battleground
-    std::array<BgQueueSlot, 3> bgQueues_{};
-    std::vector<AvailableBgInfo> availableBgs_;
-    BgScoreboardData bgScoreboard_;
-    std::vector<BgPlayerPosition> bgPlayerPositions_;
 
     // LFG / Dungeon Finder
     LfgState lfgState_        = LfgState::None;
@@ -236,18 +229,6 @@ public:
     using InspectResult = game::InspectResult;
 
 
-    using BgQueueSlot = game::BgQueueSlot;
-
-    using AvailableBgInfo = game::AvailableBgInfo;
-
-    using BgPlayerScore = game::BgPlayerScore;
-
-    using ArenaTeamScore = game::ArenaTeamScore;
-
-    using BgScoreboardData = game::BgScoreboardData;
-
-    using BgPlayerPosition = game::BgPlayerPosition;
-
     using ReadyCheckResult = game::ReadyCheckResult;
 
     using InstanceLockout = game::InstanceLockout;
@@ -283,25 +264,6 @@ public:
     // Random roll
     void randomRoll(uint32_t minRoll = 1, uint32_t maxRoll = 100);
 
-    // Battleground
-    [[nodiscard]] bool hasPendingBgInvite() const;
-    void acceptBattlefield(uint32_t queueSlot = 0xFFFFFFFF);
-    void declineBattlefield(uint32_t queueSlot = 0xFFFFFFFF);
-    void leaveBattlefield();
-    /// Ask the server which instances of one battleground are running.
-    void requestBattlefieldList(uint32_t bgTypeId);
-    /// Report a player in this battleground as not participating.
-    void reportPvpAfk(uint64_t playerGuid);
-    void joinBattlefield(uint64_t battlemasterGuid, uint32_t bgTypeId,
-                         uint32_t instanceId, bool asGroup);
-    [[nodiscard]] const std::array<BgQueueSlot, 3>& getBgQueues() const { return bgQueues_; }
-    [[nodiscard]] const std::vector<AvailableBgInfo>& getAvailableBgs() const { return availableBgs_; }
-    void requestPvpLog();
-    [[nodiscard]] const BgScoreboardData* getBgScoreboard() const {
-        return bgScoreboard_.players.empty() ? nullptr : &bgScoreboard_;
-    }
-    [[nodiscard]] const std::vector<BgPlayerPosition>& getBgPlayerPositions() const { return bgPlayerPositions_; }
-
     // Logout. exitAfterLogout distinguishes /quit and /exit, which leave the game
     // entirely, from /logout and /camp, which drop back to character select.
     void requestLogout(bool exitAfterLogout = false);
@@ -319,14 +281,6 @@ public:
     /// server means by GUILD_BANK_MAX_TABS.
     void requestGuildBankLog(uint8_t tab);
 
-    /// Ask the battleground for everyone's position.
-    ///
-    /// MSG_BATTLEGROUND_PLAYER_POSITIONS is a request the server answers with
-    /// the same opcode - the reply was already parsed here and nothing ever
-    /// asked, so the list it fills stayed empty for both maps. Throttled
-    /// because the interface calls it from WorldMapFrame_OnUpdate, which is
-    /// every frame the map is open.
-    void requestBattlefieldPositions();
     /// Give or take raid assistant. CMSG_GROUP_ASSISTANT_LEADER is a guid and
     /// a flag, and AzerothCore drops it unless the sender leads the group -
     /// which is the same test the unit menu makes before offering the entry.
@@ -643,8 +597,6 @@ private:
     void handleGuildEventLog(network::Packet& packet);
     void handlePetitionShowSignatures(network::Packet& packet);
     void handlePetitionSignResults(network::Packet& packet);
-    void handleBattlefieldStatus(network::Packet& packet);
-    void handleBattlefieldList(network::Packet& packet);
     void handleRaidInstanceInfo(network::Packet& packet);
     void handleInstanceDifficulty(network::Packet& packet);
     void handleLfgJoinResult(network::Packet& packet);
@@ -659,7 +611,6 @@ private:
     void handleLfgPlayerReward(network::Packet& packet);
     void handleLfgBootProposalUpdate(network::Packet& packet);
     void handleLfgTeleportDenied(network::Packet& packet);
-    void handlePvpLogData(network::Packet& packet);
     void handleGroupSetLeader(network::Packet& packet);
     void handleTalentsInfo(network::Packet& packet);
     void loadGuildNameCache();
@@ -702,9 +653,6 @@ private:
     // with it (resetTransferState).
     std::array<uint64_t, kMaxEncounterSlots> encounterUnitGuids_ = {};
     InstanceLockPrompt instanceLock_;
-
-    // When the last position request went out.
-    std::chrono::steady_clock::time_point lastBgPositionRequest_{};
 
     /// What this handler hears of the session: the character's state begins
     /// anew at each login (events::CharacterLoggingIn). Last, so it goes first.
