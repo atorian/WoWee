@@ -735,7 +735,7 @@ public:
     Inventory& getInventory() { return inventoryHandler_->items(); }
     const Inventory& getInventory() const { return inventoryHandler_->items(); }
     bool consumeOnlineEquipmentDirty() { return inventoryHandler_->consumeOnlineEquipmentDirty(); }
-    void markOnlineEquipmentDirty() { inventoryHandler_->markOnlineEquipmentDirty(); }
+    void markOnlineEquipmentDirty() override { inventoryHandler_->markOnlineEquipmentDirty(); }
     void resetEquipmentDirtyTracking() { inventoryHandler_->resetEquipmentDirtyTracking(); }
     void unequipToBackpack(EquipSlot equipSlot);
 
@@ -3017,7 +3017,7 @@ public:
     const GuildBankData& getGuildBankData() const;
     /// The bank's balance as SMSG_GUILD_EVENT reports it, for guild members
     /// who are not the one standing at the banker.
-    void setGuildBankMoney(uint64_t money);
+    void setGuildBankMoney(uint64_t money) override;
     uint8_t getGuildBankActiveTab() const;
     void setGuildBankActiveTab(uint8_t tab);
 

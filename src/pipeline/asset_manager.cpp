@@ -129,7 +129,7 @@ void AssetManager::setupFileCacheBudget() {
 
     fileCacheBudget = kDefaultBudgetMB * 1024ull * 1024ull;
     if (const size_t envFixedMB = parseEnvSizeMB("WOWEE_FILE_CACHE_MB"); envFixedMB > 0) {
-        fileCacheBudget = std::max(envFixedMB * 1024ull * 1024ull, kMinBudgetBytes);
+        fileCacheBudget = std::max(envFixedMB * 1024 * 1024, kMinBudgetBytes);
         LOG_WARNING("Asset file cache fixed via WOWEE_FILE_CACHE_MB=", envFixedMB,
                     " (effective ", fileCacheBudget / (1024 * 1024), " MB)");
     }

@@ -3293,8 +3293,6 @@ void GameHandler::loadTalentDbc() {
     spellHandler_->loadTalentDbc();
 }
 
-static const std::string EMPTY_STRING;
-
 const int32_t* GameHandler::getSpellEffectBasePoints(uint32_t spellId) const {
     return spellHandler_->getSpellEffectBasePoints(spellId);
 }
