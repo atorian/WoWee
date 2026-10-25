@@ -1,141 +1,12 @@
-// Groups, end to end: the server's packets, what the
-// interface reads and is told, and what the game answers with.
+// The guild, end to end: the server's packets, what the interface reads and
+// is told.
 #include <catch_amalgamated.hpp>
 
 #include "game_harness.hpp"
 
-#include "game/game_events.hpp"
-#include "game/world_packet_data.hpp"
-
-#include <string>
-#include <vector>
-
 using wowee::game::Opcode;
 using wowee::test::Body;
 using wowee::test::GameHarness;
-namespace ev = wowee::game::events;
-
-namespace {
-
-constexpr uint64_t kJaina = 0x21;
-
-/// SMSG_GROUP_LIST for a plain party of the player and others, as AzerothCore's
-/// Group::SendUpdate writes it.
-std::vector<uint8_t> party(uint64_t leader, const std::vector<std::pair<std::string, uint64_t>>& others) {
-    Body b;
-    b.u8(0 /* party */).u8(0).u8(0).u8(0);
-    b.u64(0x1234).u32(1).u32(static_cast<uint32_t>(others.size()));
-    for (const auto& [name, guid] : others) {
-        b.cstr(name).u64(guid).u8(1 /* online */).u8(0).u8(0).u8(0);
-    }
-    b.u64(leader);
-    b.u8(2).u64(leader).u8(2).u8(1).u8(0).u8(0);  // loot method, master, threshold, difficulties
-    return b.bytes();
-}
-
-/// SMSG_PARTY_MEMBER_STATS carrying only a member's auras: the aura mask, then
-/// a spell and its flags for each set bit.
-std::vector<uint8_t> memberAuras(uint64_t member, const std::vector<std::pair<int, uint32_t>>& slots) {
-    Body b;
-    b.packedGuid(member).u32(0x0200);
-    uint64_t mask = 0;
-    for (const auto& [slot, spell] : slots) mask |= (uint64_t(1) << slot);
-    b.u64(mask);
-    for (const auto& [slot, spell] : slots) b.u32(spell).u8(0);
-    return b.bytes();
-}
-
-}  // namespace
-
-TEST_CASE("a party member's auras from the stats packet are the ones the frames read",
-          "[social][harness]") {
-    GameHarness h;
-    h.enterWorld();
-
-    h.receive(Opcode::SMSG_GROUP_LIST, party(h.player().guid, {{"Jaina", kJaina}}));
-    h.receive(Opcode::SMSG_PARTY_MEMBER_STATS, memberAuras(kJaina, {{0, 1459}, {3, 10938}}));
-    h.pump();
-
-    // The party frames ask GameHandler::getUnitAuras, which is SpellHandler's
-    // cache. This packet wrote a GameHandler copy of it instead, so a member's
-    // auras from it were never shown.
-    const auto* auras = h.game().getUnitAuras(kJaina);
-    REQUIRE(auras != nullptr);
-    REQUIRE(auras->size() == 2);
-    CHECK((*auras)[0].spellId == 1459);
-    CHECK((*auras)[1].spellId == 10938);
-}
-
-TEST_CASE("a group invitation is offered, and accepting it answers the server", "[social][harness]") {
-    GameHarness h;
-    h.enterWorld();
-    std::vector<std::string> invitedBy;
-    auto sub = h.events().subscribe<ev::GroupInviteReceived>(
-        [&](const ev::GroupInviteReceived& e) { invitedBy.push_back(e.inviterName); });
-
-    h.receive(Opcode::SMSG_GROUP_INVITE, Body().u8(1).cstr("Jaina"));
-    h.pump();
-
-    const auto offered = h.addonEvents("PARTY_INVITE_REQUEST");
-    REQUIRE(offered.size() == 1);
-    CHECK(offered[0].args.at(0) == "Jaina");
-    CHECK(invitedBy == std::vector<std::string>{"Jaina"});
-
-    h.game().acceptGroupInvite();
-    CHECK(h.countSent(Opcode::CMSG_GROUP_ACCEPT) == 1);
-}
-
-TEST_CASE("an invitation that could not be offered is not offered", "[social][harness]") {
-    GameHarness h;
-    h.enterWorld();
-    size_t invites = 0;
-    auto sub = h.events().subscribe<ev::GroupInviteReceived>([&](const ev::GroupInviteReceived&) { ++invites; });
-
-    // A zero in front: the inviter tried, and the server could not offer it
-    // because the player is already in a group.
-    h.receive(Opcode::SMSG_GROUP_INVITE, Body().u8(0).cstr("Jaina"));
-    h.pump();
-
-    CHECK(h.addonEvents("PARTY_INVITE_REQUEST").empty());
-    CHECK(invites == 0);
-}
-
-TEST_CASE("a refused party command tells the player why, in the server's terms",
-          "[social][harness]") {
-    // SMSG_PARTY_COMMAND_RESULT: the operation, the name it was tried on, and
-    // the result as AzerothCore numbers it (PartyResult in SharedDefines.h).
-    // The codes step from 9 to 12, so a table off by those two reads every
-    // later refusal as the wrong one.
-    struct Case {
-        uint32_t result;
-        const char* said;
-    };
-    const Case cases[] = {
-        {1, "No player named \"Jaina\" is currently online."},
-        {7, "You are not the group leader."},
-        {9, "Jaina is ignoring you."},
-        {12, "You cannot do that while in a LFG queue."},
-        {13, "Target is not accepting group invites."},
-        {200, "Party command failed."},
-    };
-    for (const auto& c : cases) {
-        INFO("result " << c.result);
-        GameHarness h;
-        h.enterWorld();
-        h.receive(Opcode::SMSG_PARTY_COMMAND_RESULT, Body().u32(0 /* invite */).cstr("Jaina").u32(c.result));
-        h.pump();
-        const auto errors = h.addonEvents("UI_ERROR_MESSAGE");
-        REQUIRE(errors.size() == 1);
-        CHECK(errors[0].args.at(0) == c.said);
-    }
-
-    // Success says nothing.
-    GameHarness h;
-    h.enterWorld();
-    h.receive(Opcode::SMSG_PARTY_COMMAND_RESULT, Body().u32(0).cstr("Jaina").u32(0));
-    h.pump();
-    CHECK(h.addonEvents("UI_ERROR_MESSAGE").empty());
-}
 
 TEST_CASE("the guild bank's balance event is the bank's figure, not a chat line",
           "[social][harness]") {
@@ -154,26 +25,4 @@ TEST_CASE("the guild bank's balance event is the bank's figure, not a chat line"
     CHECK(h.addonEvents("CHAT_MSG_GUILD").empty());
     // 532g 61s 7c, read as hex.
     CHECK(h.game().getGuildBankData().money == 5326107u);
-}
-
-TEST_CASE("the next character is not asked the last one's group invite", "[social][harness]") {
-    wowee::test::PlayerSpec alice;
-    alice.guid = 0x71;
-    alice.name = "Alice";
-    wowee::test::PlayerSpec bob;
-    bob.guid = 0x72;
-    bob.name = "Bob";
-
-    GameHarness h;
-    h.enterWorld(alice);
-    // SMSG_GROUP_INVITE, 3.3.5a: whether it can be accepted, then who asks.
-    h.receive(Opcode::SMSG_GROUP_INVITE, Body().u8(1).cstr("Thrall").u32(0).u8(0).u32(0));
-    h.pump();
-    REQUIRE(h.game().hasPendingGroupInvite());
-
-    h.relogAs(bob);
-
-    // It was Alice's to answer: Bob was asked to join a group nobody had
-    // offered him.
-    CHECK_FALSE(h.game().hasPendingGroupInvite());
 }

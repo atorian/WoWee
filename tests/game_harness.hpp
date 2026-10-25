@@ -47,7 +47,8 @@ namespace wowee::arena { class IArenaTeams; class ArenaService; }
 namespace wowee::battleground { class IBattlegrounds; class BattlegroundService; }
 namespace wowee::lfg { class ILfg; class LfgService; }
 namespace wowee::calendar { class ICalendar; class CalendarService; }
-namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; }
+namespace wowee::group { class IGroup; class GroupService; }
+namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; }
 
 namespace wowee::test {
 
@@ -148,6 +149,8 @@ public:
     lfg::ILfg& lfg();
     /// The calendar, wired as the client wires it.
     calendar::ICalendar& calendar();
+    /// The group, wired as the client wires it.
+    group::IGroup& group();
     core::CVarStore& cvars() { return cvars_; }
 
     /// The server's side of the connection: the one the game made last. Valid
@@ -261,6 +264,8 @@ private:
     std::unique_ptr<lfg::LfgService> lfg_;
     std::unique_ptr<game::CalendarGateway> calendarGateway_;
     std::unique_ptr<calendar::CalendarService> calendar_;
+    std::unique_ptr<game::GroupGateway> groupGateway_;
+    std::unique_ptr<group::GroupService> group_;
     std::unique_ptr<game::GameHandler> game_;
     FakeWorldConnection* connection_ = nullptr;  // owned by the game once made
     bool pingsAnswered_ = true;

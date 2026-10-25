@@ -2,6 +2,7 @@
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include <iterator>
 #include <vector>
+#include "group/services/group.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "contacts/services/contacts.hpp"
 #include "who/domain/who_list.hpp"
@@ -496,6 +497,11 @@ std::vector<const who::WhoEntry*> whoResultsView(lua_State* L, game::GameHandler
 
 // Declared in lua_api_helpers.hpp: the system API asks the same question and
 // had its own copy under another name.
+group::IGroup& groupOf(lua_State* L) {
+    auto* services = getLuaServices(L);
+    return group::orNoGroup(services ? services->group : nullptr);
+}
+
 arena::IArenaTeams* arenaTeamsOf(lua_State* L) {
     auto* services = getLuaServices(L);
     return services ? services->arenaTeams : nullptr;
@@ -731,7 +737,7 @@ static int lua_GetAutoCompleteResults(lua_State* L) {
         byName[name] |= flag | (online ? kOnline : 0u);
     };
 
-    for (const auto& mbr : gh->getPartyData().members) note(mbr.name, kInGroup, mbr.isOnline != 0);
+    for (const auto& mbr : groupOf(L).getPartyData().members) note(mbr.name, kInGroup, mbr.isOnline != 0);
     for (const auto& mbr : gh->getGuildRoster().members) note(mbr.name, kInGuild, mbr.online);
     for (const auto& c : contactRows(L)) {
         if (c.isFriend()) note(c.name, kFriend, c.isOnline());
@@ -803,11 +809,11 @@ static int lua_AddOrDelIgnore(lua_State* L) {
 // because the functions behind them were never bound - so an invitation could
 // be seen and not taken.
 static int lua_AcceptGroup(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->acceptGroupInvite();
+    groupOf(L).acceptGroupInvite();
     return 0;
 }
 static int lua_DeclineGroup(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->declineGroupInvite();
+    groupOf(L).declineGroupInvite();
     return 0;
 }
 static int lua_AcceptGuild(lua_State* L) {
@@ -858,9 +864,9 @@ static void setGroupAssistantByName(lua_State* L, bool apply) {
     auto* gh = getGameHandler(L);
     const char* who = luaL_optstring(L, 1, "");
     if (!gh || !who || !*who) return;
-    for (const auto& m : gh->getPartyData().members) {
+    for (const auto& m : groupOf(L).getPartyData().members) {
         if (m.name != who) continue;
-        gh->setGroupAssistant(m.guid, apply);
+        groupOf(L).setGroupAssistant(m.guid, apply);
         return;
     }
 }
@@ -2084,7 +2090,7 @@ void registerSocialLuaAPI(lua_State* L) {
             toLowerInPlace(uid);
             const uint64_t guid = resolveUnitGuid(gh, uid);
             if (guid == 0) return luaReturnFalse(L);
-            for (const auto& mem : gh->getPartyData().members) {
+            for (const auto& mem : groupOf(L).getPartyData().members) {
                 if (mem.guid == guid) { lua_pushboolean(L, (mem.flags & 0x01) ? 1 : 0); return 1; }
             }
             return luaReturnFalse(L);
@@ -2102,7 +2108,7 @@ void registerSocialLuaAPI(lua_State* L) {
             toLowerInPlace(method);
             const uint8_t m = lootMethodFromToken(method);
 
-            const auto& pd = gh->getPartyData();
+            const auto& pd = groupOf(L).getPartyData();
             uint64_t masterGuid = 0;
             if (m == 2) {
                 // The second argument is a unit id or a name, depending on who
@@ -2115,15 +2121,15 @@ void registerSocialLuaAPI(lua_State* L) {
                     if (masterGuid == 0) masterGuid = gh->getPlayerGuid();
                 }
             }
-            gh->setLootMethod(m, masterGuid, pd.lootThreshold);
+            groupOf(L).setLootMethod(m, masterGuid, pd.lootThreshold);
             return 0;
         }},
                 {"SetLootThreshold", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
             const auto quality = static_cast<uint8_t>(luaL_optnumber(L, 1, 2));
-            const auto& pd = gh->getPartyData();
-            gh->setLootMethod(pd.lootMethod, pd.looterGuid, quality);
+            const auto& pd = groupOf(L).getPartyData();
+            groupOf(L).setLootMethod(pd.lootMethod, pd.looterGuid, quality);
             return 0;
         }},
                 // GetPartyAssignment(assignment, unit) → whether that unit
@@ -2141,7 +2147,7 @@ void registerSocialLuaAPI(lua_State* L) {
             toLowerInPlace(uid);
             const uint64_t guid = resolveUnitGuid(gh, uid);
             if (guid == 0) return luaReturnFalse(L);
-            for (const auto& mem : gh->getPartyData().members) {
+            for (const auto& mem : groupOf(L).getPartyData().members) {
                 if (mem.guid == guid) { lua_pushboolean(L, (mem.flags & bit) ? 1 : 0); return 1; }
             }
             return luaReturnFalse(L);
@@ -2157,7 +2163,7 @@ void registerSocialLuaAPI(lua_State* L) {
             std::string uid(unit);
             toLowerInPlace(uid);
             const uint64_t guid = resolveUnitGuid(gh, uid);
-            if (guid) gh->setPartyAssignment(static_cast<uint8_t>(assignment), guid, true);
+            if (guid) groupOf(L).setPartyAssignment(static_cast<uint8_t>(assignment), guid, true);
             return 0;
         }},
                 {"ClearPartyAssignment", [](lua_State* L) -> int {
@@ -2171,7 +2177,7 @@ void registerSocialLuaAPI(lua_State* L) {
             std::string uid(unit);
             toLowerInPlace(uid);
             const uint64_t guid = resolveUnitGuid(gh, uid);
-            if (guid) gh->setPartyAssignment(static_cast<uint8_t>(assignment), guid, false);
+            if (guid) groupOf(L).setPartyAssignment(static_cast<uint8_t>(assignment), guid, false);
             return 0;
         }},
                 // ---- Raid group management ----
@@ -2189,9 +2195,9 @@ void registerSocialLuaAPI(lua_State* L) {
             const int idx   = static_cast<int>(luaL_optnumber(L, 1, 0));
             const int group = static_cast<int>(luaL_optnumber(L, 2, 0));
             if (!gh || idx < 1) return 0;
-            const auto& members = gh->getPartyData().members;
+            const auto& members = groupOf(L).getPartyData().members;
             if (idx > static_cast<int>(members.size())) return 0;
-            gh->setRaidSubgroup(members[static_cast<size_t>(idx) - 1].name,
+            groupOf(L).setRaidSubgroup(members[static_cast<size_t>(idx) - 1].name,
                                 static_cast<uint8_t>(group));
             return 0;
         }},
@@ -2200,10 +2206,10 @@ void registerSocialLuaAPI(lua_State* L) {
             const int a = static_cast<int>(luaL_optnumber(L, 1, 0));
             const int b = static_cast<int>(luaL_optnumber(L, 2, 0));
             if (!gh || a < 1 || b < 1) return 0;
-            const auto& members = gh->getPartyData().members;
+            const auto& members = groupOf(L).getPartyData().members;
             const int n = static_cast<int>(members.size());
             if (a > n || b > n) return 0;
-            gh->swapRaidSubgroup(members[static_cast<size_t>(a) - 1].name,
+            groupOf(L).swapRaidSubgroup(members[static_cast<size_t>(a) - 1].name,
                                  members[static_cast<size_t>(b) - 1].name);
             return 0;
         }},
@@ -2665,7 +2671,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"AddOrDelIgnore",      lua_AddOrDelIgnore},
                 // DoReadyCheck() - what /readycheck does
                 {"DoReadyCheck", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->initiateReadyCheck();
+            groupOf(L).initiateReadyCheck();
             return 0;
         }},
                 // ConfirmReadyCheck(ready) - the Yes and No buttons on
@@ -2673,10 +2679,8 @@ void registerSocialLuaAPI(lua_State* L) {
                 // and passes NOTHING for no, so the absent argument has to read
                 // as false rather than as a missing parameter.
                 {"ConfirmReadyCheck", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) {
-                gh->respondToReadyCheck(lua_toboolean(L, 1) != 0);
-                gh->dismissReadyCheck();
-            }
+            groupOf(L).respondToReadyCheck(lua_toboolean(L, 1) != 0);
+            groupOf(L).dismissReadyCheck();
             return 0;
         }},
                 // The buttons on FrameXML's summon and talent-wipe popups.
@@ -2949,17 +2953,17 @@ void registerSocialLuaAPI(lua_State* L) {
         }},
                 {"InviteUnit", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) gh->inviteToGroup(luaL_checkstring(L, 1));
+            if (gh) groupOf(L).inviteToGroup(luaL_checkstring(L, 1));
             return 0;
         }},
                 {"UninviteUnit", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) gh->uninvitePlayer(luaL_checkstring(L, 1));
+            if (gh) groupOf(L).uninvitePlayer(luaL_checkstring(L, 1));
             return 0;
         }},
                 {"LeaveParty", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) gh->leaveGroup();
+            if (gh) groupOf(L).leaveGroup();
             return 0;
         }},
                 // FollowUnit(unit) - and this one matters more than it looks.
@@ -3109,10 +3113,10 @@ void registerSocialLuaAPI(lua_State* L) {
             std::string name(luaL_optstring(L, 1, ""));
             if (!gh || name.empty()) return 0;
             toLowerInPlace(name);
-            for (const auto& m : gh->getPartyData().members) {
+            for (const auto& m : groupOf(L).getPartyData().members) {
                 std::string n = m.name;
                 toLowerInPlace(n);
-                if (n == name) { gh->promoteToLeader(m.guid); return 0; }
+                if (n == name) { groupOf(L).promoteToLeader(m.guid); return 0; }
             }
             return 0;
         }},

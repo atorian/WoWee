@@ -1,5 +1,6 @@
 // lua_inventory_api.cpp - Items, containers, merchant, loot, equipment, trading, auction, and mail Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
+#include "group/services/group.hpp"
 #include "game/item_text.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "addons/lua_engine.hpp"
@@ -70,7 +71,7 @@ static int lua_GetSendMailPrice(lua_State* L) {
 /// ungrouped player has, and the dropdown has no entry for it.
 static int lua_GetLootThreshold(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const uint8_t t = gh ? gh->getPartyData().lootThreshold : 0;
+    const uint8_t t = gh ? groupOf(L).getPartyData().lootThreshold : 0;
     lua_pushnumber(L, t > 0 ? t : 2);
     return 1;
 }
@@ -3339,7 +3340,7 @@ static int lua_GetLootMethod(lua_State* L) {
     // Nil for the two indices here as well: no handler is no group, and a
     // zero would claim the player is the master looter of it.
     if (!gh) { lua_pushstring(L, "freeforall"); lua_pushnil(L); lua_pushnil(L); return 3; }
-    const auto& pd = gh->getPartyData();
+    const auto& pd = groupOf(L).getPartyData();
     lua_pushstring(L, pd.lootMethod < kNumLootMethods
                           ? kLootMethodTokens[pd.lootMethod]
                           : kLootMethodTokens[0]);

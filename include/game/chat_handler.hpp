@@ -22,6 +22,7 @@
 
 namespace wowee {
 namespace core { class CVarStore; }
+namespace group { struct Roster; }
 namespace game {
 
 class PacketSender;
@@ -29,7 +30,7 @@ class FrameXmlEvents;
 class PacketParsers;
 class EmoteTable;
 struct Character;
-struct GroupListData;
+using GroupListData = group::Roster;
 struct GuildRosterData;
 struct TextSubject;
 

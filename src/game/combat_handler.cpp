@@ -36,7 +36,7 @@ bool CombatHandler::threatWarningWanted() const {
     try { setting = std::stoi(stored); } catch (const std::exception&) {}
     switch (setting) {
         case 1:  return owner_.isInInstance();
-        case 2:  return !owner_.getPartyData().members.empty();
+        case 2:  return !owner_.party().members.empty();
         case 3:  return true;
         default: return false;   // 0, and anything unrecognised
     }
@@ -1354,7 +1354,7 @@ void CombatHandler::cycleTarget(bool reverse, const char* noneMessage,
 }
 
 bool CombatHandler::isGroupMemberGuid(uint64_t guid) const {
-    for (const auto& m : owner_.getPartyData().members) {
+    for (const auto& m : owner_.party().members) {
         if (m.guid == guid) return true;
     }
     return false;

@@ -1,5 +1,6 @@
 // lua_unit_api.cpp - Unit query, stats, party/raid, and player state Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
+#include "group/services/group.hpp"
 #include "game/shapeshift_forms.hpp"
 #include "game/bg_score_defs.hpp"
 #include "battleground/services/battlegrounds.hpp"
@@ -625,7 +626,7 @@ static int lua_UnitInRange(lua_State* L) {
 static int lua_IsRaidLeader(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnFalse(L); }
-    const auto& group = gh->getPartyData();
+    const auto& group = groupOf(L).getPartyData();
     lua_pushboolean(L, group.leaderGuid != 0 &&
                        group.leaderGuid == gh->getPlayerGuid() ? 1 : 0);
     return 1;
@@ -668,7 +669,7 @@ static int lua_UnitGroupRolesAssigned(lua_State* L) {
     toLowerInPlace(uidStr);
     uint64_t guid = resolveUnitGuid(gh, uidStr);
     if (guid == 0) return pushRoles(false, false, false);
-    const auto& pd = gh->getPartyData();
+    const auto& pd = groupOf(L).getPartyData();
     for (const auto& m : pd.members) {
         if (m.guid != guid) continue;
         // WotLK LFG roles bitmask (from SMSG_GROUP_LIST / SMSG_LFG_ROLE_CHECK_UPDATE).
@@ -914,14 +915,14 @@ static int lua_GetRangedAttackPower(lua_State* L) {
 
 static int lua_IsInGroup(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->isInGroup());
+    lua_pushboolean(L, gh && groupOf(L).isInGroup());
     return 1;
 }
 
 static int lua_IsInRaid(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->isInGroup() &&
-                       game::groupIsRaid(gh->getPartyData().groupType));
+    lua_pushboolean(L, gh && groupOf(L).isInGroup() &&
+                       game::groupIsRaid(groupOf(L).getPartyData().groupType));
     return 1;
 }
 
@@ -972,7 +973,7 @@ static int lua_UnitPowerType(lua_State* L) {
 
 static int lua_GetNumGroupMembers(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushnumber(L, gh ? gh->getPartyData().memberCount : 0);
+    lua_pushnumber(L, gh ? groupOf(L).getPartyData().memberCount : 0);
     return 1;
 }
 
@@ -1110,12 +1111,12 @@ static int lua_UnitPlayerOrPetInParty(lua_State* L) {
     const size_t petPos = uidStr.find("pet");
     if (petPos != std::string::npos) uidStr.erase(petPos, 3);
     if (uidStr.empty() || uidStr == "player") {
-        lua_pushboolean(L, gh->isInGroup());
+        lua_pushboolean(L, groupOf(L).isInGroup());
         return 1;
     }
     uint64_t guid = resolveUnitGuid(gh, uidStr);
     if (guid == 0) { return luaReturnFalse(L); }
-    const auto& pd = gh->getPartyData();
+    const auto& pd = groupOf(L).getPartyData();
     bool found = false;
     for (const auto& m : pd.members) {
         if (m.guid == guid) { found = true; break; }
@@ -1126,7 +1127,7 @@ static int lua_UnitPlayerOrPetInParty(lua_State* L) {
 
 static int lua_UnitPlayerOrPetInRaid(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (!gh || !game::groupIsRaid(gh->getPartyData().groupType)) { return luaReturnFalse(L); }
+    if (!gh || !game::groupIsRaid(groupOf(L).getPartyData().groupType)) { return luaReturnFalse(L); }
     return lua_UnitPlayerOrPetInParty(L);
 }
 
@@ -1959,8 +1960,8 @@ static int lua_StopAttack(lua_State* L) {
 /// drawn as a party for ever.
 static int lua_GetNumRaidMembers(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (!gh || !gh->isInGroup()) { return luaReturnZero(L); }
-    const auto& pd = gh->getPartyData();
+    if (!gh || !groupOf(L).isInGroup()) { return luaReturnZero(L); }
+    const auto& pd = groupOf(L).getPartyData();
     if (!game::groupIsRaid(pd.groupType)) { return luaReturnZero(L); }
     lua_pushnumber(L, static_cast<int>(pd.members.size()) + 1);
     return 1;
@@ -1978,8 +1979,8 @@ static int lua_GetNumRaidMembers(lua_State* L) {
 /// the party frames along the left of the screen show for a raid of one group.
 static int lua_GetNumPartyMembers(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (!gh || !gh->isInGroup()) { return luaReturnZero(L); }
-    const auto& pd = gh->getPartyData();
+    if (!gh || !groupOf(L).isInGroup()) { return luaReturnZero(L); }
+    const auto& pd = groupOf(L).getPartyData();
     if (!game::groupIsRaid(pd.groupType)) {
         lua_pushnumber(L, static_cast<int>(pd.members.size()));
         return 1;
@@ -1999,11 +2000,11 @@ static int lua_UnitInParty(lua_State* L) {
     std::string uidStr(uid);
     toLowerInPlace(uidStr);
     if (uidStr == "player") {
-        lua_pushboolean(L, gh->isInGroup());
+        lua_pushboolean(L, groupOf(L).isInGroup());
     } else {
         uint64_t guid = resolveUnitGuid(gh, uidStr);
         if (guid == 0) { return luaReturnFalse(L); }
-        const auto& pd = gh->getPartyData();
+        const auto& pd = groupOf(L).getPartyData();
         bool found = false;
         for (const auto& m : pd.members) {
             if (m.guid == guid) { found = true; break; }
@@ -2019,7 +2020,7 @@ static int lua_UnitInRaid(lua_State* L) {
     if (!gh) { return luaReturnFalse(L); }
     std::string uidStr(uid);
     toLowerInPlace(uidStr);
-    const auto& pd = gh->getPartyData();
+    const auto& pd = groupOf(L).getPartyData();
     if (!game::groupIsRaid(pd.groupType)) { return luaReturnFalse(L); }
     if (uidStr == "player") {
         lua_pushboolean(L, 1);
@@ -2039,7 +2040,7 @@ static int lua_GetRaidRosterInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
     int index = static_cast<int>(luaL_checknumber(L, 1));
     if (!gh || index < 1) { return luaReturnNil(L); }
-    const auto& pd = gh->getPartyData();
+    const auto& pd = groupOf(L).getPartyData();
     if (index > static_cast<int>(pd.members.size())) { return luaReturnNil(L); }
     const auto& m = pd.members[index - 1];
     lua_pushstring(L, m.name.c_str());       // name
@@ -2379,7 +2380,7 @@ static int lua_UnitIsConnected(lua_State* L) {
     // Player is always connected
     if (guid == gh->getPlayerGuid()) { lua_pushboolean(L, 1); return 1; }
     // Check party/raid member online status
-    const auto& pd = gh->getPartyData();
+    const auto& pd = groupOf(L).getPartyData();
     for (const auto& m : pd.members) {
         if (m.guid == guid) {
             lua_pushboolean(L, m.isOnline ? 1 : 0);
@@ -2608,7 +2609,7 @@ void registerUnitLuaAPI(lua_State* L) {
             toLowerInPlace(uidStr);
             const uint64_t guid = gh ? resolveUnitGuid(gh, uidStr) : 0;
             lua_pushboolean(L, (gh && guid != 0 &&
-                                gh->getPartyData().leaderGuid == guid) ? 1 : 0);
+                                groupOf(L).getPartyData().leaderGuid == guid) ? 1 : 0);
             return 1;
         }},
                 {"UnitIsCorpse", [](lua_State* L) -> int {

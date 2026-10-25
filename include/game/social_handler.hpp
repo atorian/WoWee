@@ -25,6 +25,7 @@ namespace arena { class IArenaTeamsFeed; }
 namespace battleground { class IBattlegroundsFeed; }
 namespace lfg { class ILfgFeed; }
 namespace calendar { class ICalendarFeed; }
+namespace group { class IGroupServerFeed; class IGroup; }
 namespace game {
 
 class PacketSender;
@@ -99,6 +100,11 @@ public:
     [[nodiscard]] virtual lfg::ILfgFeed* lfgFeed() = 0;
     /// Where the calendar's packets go; null when the client was built without it.
     [[nodiscard]] virtual calendar::ICalendarFeed* calendarFeed() = 0;
+    /// Where the party and raid packets go; null when the client was built
+    /// without the group.
+    [[nodiscard]] virtual group::IGroupServerFeed* groupFeed() = 0;
+    /// The group as it stands, for a member's stats; null as above.
+    [[nodiscard]] virtual const group::IGroup* group() const = 0;
 
     // ---- The appearance switches the realm keeps with the character ----
     [[nodiscard]] virtual bool showingHelm() const = 0;
@@ -140,10 +146,6 @@ struct SocialCharacterState {
     std::string pendingGuildInviterName_;
     std::string pendingGuildInviteGuildName_;
 
-    // Group
-    GroupListData partyData;
-    bool pendingGroupInvite = false;
-    std::string pendingInviterName;
     /// Points on the minimap the party pinged, while they last.
     std::vector<MinimapPing> minimapPings_;
 
@@ -158,13 +160,6 @@ struct SocialCharacterState {
     uint32_t bfMgrZoneId_        = 0;
     uint32_t bfMgrBattleId_      = 0;
 
-    // Ready check
-    bool        pendingReadyCheck_       = false;
-    uint32_t    readyCheckReadyCount_    = 0;
-    uint32_t    readyCheckNotReadyCount_ = 0;
-    std::string readyCheckInitiator_;
-    std::vector<ReadyCheckResult> readyCheckResults_;
-
     // Instance
     std::vector<InstanceLockout> instanceLockouts_;
     std::vector<GuildEventLogEntry> guildEventLog_;
@@ -172,9 +167,6 @@ struct SocialCharacterState {
     std::array<std::vector<GuildBankLogEntry>, 7> guildBankLogs_;
     uint32_t instanceDifficulty_ = 0;
     bool instanceIsHeroic_ = false;
-
-    // Raid marks
-    std::array<uint64_t, kRaidMarkCount> raidTargetGuids_ = {};
 
 };
 
@@ -195,7 +187,6 @@ public:
     using InspectResult = game::InspectResult;
 
 
-    using ReadyCheckResult = game::ReadyCheckResult;
 
     using InstanceLockout = game::InstanceLockout;
 
@@ -245,10 +236,6 @@ public:
     /// server means by GUILD_BANK_MAX_TABS.
     void requestGuildBankLog(uint8_t tab);
 
-    /// Give or take raid assistant. CMSG_GROUP_ASSISTANT_LEADER is a guid and
-    /// a flag, and AzerothCore drops it unless the sender leads the group -
-    /// which is the same test the unit menu makes before offering the entry.
-    void setGroupAssistant(uint64_t guid, bool apply);
     static constexpr uint8_t kGuildBankMoneyTab = 6;
     [[nodiscard]] const std::vector<GuildBankLogEntry>& getGuildBankLog(uint8_t tab) const {
         static const std::vector<GuildBankLogEntry> empty;
@@ -311,51 +298,15 @@ public:
     const std::string& lookupGuildName(uint32_t guildId);
     [[nodiscard]] uint32_t getEntityGuildId(uint64_t guid) const;
 
-    // Ready check
-    void initiateReadyCheck();
-    void respondToReadyCheck(bool ready);
-    [[nodiscard]] bool hasPendingReadyCheck() const { return pendingReadyCheck_; }
-    void dismissReadyCheck() { pendingReadyCheck_ = false; }
-    [[nodiscard]] const std::string& getReadyCheckInitiator() const { return readyCheckInitiator_; }
-    [[nodiscard]] const std::vector<ReadyCheckResult>& getReadyCheckResults() const { return readyCheckResults_; }
-
     void reportPlayer(uint64_t targetGuid, const std::string& reason);
-
-    // Party/Raid
-    void inviteToGroup(const std::string& playerName);
-    void acceptGroupInvite();
-    void declineGroupInvite();
 
     /// Report a mail as spam. Type 0 of CMSG_COMPLAIN; the three values after
     /// the sender are a zero, the mail's own id, and another zero.
     void reportMailSpam(uint64_t senderGuid, uint32_t mailId);
-    void leaveGroup();
-    void convertToRaid();
-    void sendSetLootMethod(uint32_t method, uint32_t threshold, uint64_t masterLooterGuid);
-    [[nodiscard]] bool isInGroup() const { return !partyData.isEmpty(); }
-    [[nodiscard]] const GroupListData& getPartyData() const { return partyData; }
-    [[nodiscard]] bool hasPendingGroupInvite() const { return pendingGroupInvite; }
-    [[nodiscard]] const std::string& getPendingInviterName() const { return pendingInviterName; }
     void setGuildBankTabText(uint8_t tab, const std::string& text);
     void channelModeration(Opcode op, const std::string& channelName,
                            const std::string& targetName,
                            bool allowEmptyTarget = false);
-    void promoteToLeader(uint64_t guid);
-    void uninvitePlayer(const std::string& playerName);
-    void setLootMethod(uint8_t method, uint64_t masterGuid, uint8_t threshold);
-    void setPartyAssignment(uint8_t assignment, uint64_t guid, bool apply);
-    void setRaidSubgroup(const std::string& playerName, uint8_t group);
-    void swapRaidSubgroup(const std::string& firstName, const std::string& secondName);
-    void leaveParty();
-    void setMainTank(uint64_t targetGuid);
-    void setMainAssist(uint64_t targetGuid);
-    void clearMainTank();
-    void clearMainAssist();
-    void setRaidMark(uint64_t guid, uint8_t icon);
-    // Apply a mark without the server round-trip, used when the player has no
-    // group (the server would drop the request). Grouped marking stays
-    // server-authoritative so every member sees the same icons.
-    void setRaidMarkLocally(uint64_t guid, uint8_t icon);
     void requestRaidInfo();
     void setSavedInstanceExtend(uint32_t mapId, uint32_t difficulty, bool extend);
 
@@ -407,11 +358,7 @@ public:
     // Utility methods for delegation from GameHandler
     void updateLogoutCountdown(float deltaTime);
     void resetTransferState();
-    GroupListData& mutablePartyData() { return partyData; }
     InspectResult& mutableInspectResult() { return inspectResult_; }
-    void setRaidTargetGuid(uint8_t icon, uint64_t guid) {
-        if (icon < kRaidMarkCount) raidTargetGuids_[icon] = guid;
-    }
     void setEncounterUnitGuid(uint32_t slot, uint64_t guid) {
         if (slot < kMaxEncounterSlots) encounterUnitGuids_[slot] = guid;
     }
@@ -436,17 +383,7 @@ public:
         return (slot < kMaxEncounterSlots) ? encounterUnitGuids_[slot] : 0;
     }
 
-    // Raid target markers (0-7: Star, Circle, Diamond, Triangle, Moon, Square, Cross, Skull)
-    static constexpr uint32_t kRaidMarkCount = game::kRaidMarkCount;
-    [[nodiscard]] uint64_t getRaidMarkGuid(uint32_t icon) const {
-        return (icon < kRaidMarkCount) ? raidTargetGuids_[icon] : 0;
-    }
-    [[nodiscard]] uint8_t getEntityRaidMark(uint64_t guid) const {
-        if (guid == 0) return 0xFF;
-        for (uint32_t i = 0; i < kRaidMarkCount; ++i)
-            if (raidTargetGuids_[i] == guid) return static_cast<uint8_t>(i);
-        return 0xFF;
-    }
+
 
 
 private:
@@ -460,10 +397,7 @@ private:
     void handleLogoutResponse(network::Packet& packet);
     void handleLogoutComplete(network::Packet& packet);
     void handleGroupInvite(network::Packet& packet);
-    void handleGroupDecline(network::Packet& packet);
     void handleGroupList(network::Packet& packet);
-    void handleGroupUninvite(network::Packet& packet);
-    void handlePartyCommandResult(network::Packet& packet);
     void handlePartyMemberStats(network::Packet& packet, bool isFull);
     void handleGuildInfo(network::Packet& packet);
     void handleGuildRoster(network::Packet& packet);
@@ -493,7 +427,6 @@ private:
     void handleLfgPlayerReward(network::Packet& packet);
     void handleLfgBootProposalUpdate(network::Packet& packet);
     void handleLfgTeleportDenied(network::Packet& packet);
-    void handleGroupSetLeader(network::Packet& packet);
     void handleTalentsInfo(network::Packet& packet);
     void loadGuildNameCache();
     void saveGuildNameCache() const;

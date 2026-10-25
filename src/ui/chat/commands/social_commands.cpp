@@ -3,6 +3,7 @@
 #include "contacts/services/contacts.hpp"
 #include "who/services/who.hpp"
 #include "duel/services/duels.hpp"
+#include "group/services/group.hpp"
 #include "ui/chat/i_chat_command.hpp"
 #include "ui/chat_panel.hpp"
 #include "game/game_handler.hpp"
@@ -16,7 +17,7 @@ class InviteCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (ctx.args.empty()) return {.handled = false, .clearInput = false};
-        ctx.gameHandler.inviteToGroup(ctx.args);
+        group::orNoGroup(ctx.services.group).inviteToGroup(ctx.args);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"invite"}; }

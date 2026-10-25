@@ -1,3 +1,4 @@
+#include "group/services/group.hpp"
 #include "contacts/services/contacts.hpp"
 #include "battleground/services/battlegrounds.hpp"
 #include "lfg/services/lfg.hpp"
@@ -725,7 +726,7 @@ void GameScreen::renderMinimapPlayerDots(const MinimapFrame& frame, const Entity
     // Party members are already drawn as squares above; other players get a small circle.
     if (settingsPanel_.minimapNpcDots_) {
         const uint64_t selfGuid = gameHandler.getPlayerGuid();
-        const auto& partyData = gameHandler.getPartyData();
+        const auto& partyData = group::orNoGroup(services_.group).getPartyData();
         for (const auto& entity : minimapPlayers) {
             const uint64_t guid = entity->getGuid();
             if (entity->getGuid() == selfGuid) continue;  // skip self (already drawn as arrow)
@@ -1071,7 +1072,7 @@ void GameScreen::renderMinimapPings(const MinimapFrame& frame, game::GameHandler
 void GameScreen::renderMinimapPartyDots(const MinimapFrame& frame, game::GameHandler& gameHandler) {
     // Party member dots on minimap
     {
-        const auto& partyData = gameHandler.getPartyData();
+        const auto& partyData = group::orNoGroup(services_.group).getPartyData();
         const uint64_t leaderGuid = partyData.leaderGuid;
         for (const auto& member : partyData.members) {
             if (!member.isOnline || !member.hasPartyStats) continue;
@@ -1106,8 +1107,8 @@ void GameScreen::renderMinimapPartyDots(const MinimapFrame& frame, game::GameHan
 
             // Raid mark: the marker artwork drawn small above the dot
             {
-                uint8_t pmk = gameHandler.getEntityRaidMark(member.guid);
-                if (pmk < game::GameHandler::kRaidMarkCount) {
+                uint8_t pmk = group::orNoGroup(services_.group).getEntityRaidMark(member.guid);
+                if (pmk < group::kRaidMarkCount) {
                     if (VkDescriptorSet markTex = ui::getRaidTargetIcon(pmk, services_.assetManager)) {
                         constexpr float kMarkSize = 10.0f;
                         frame.drawList->AddImage((ImTextureID)(uintptr_t)markTex,
@@ -1118,7 +1119,7 @@ void GameScreen::renderMinimapPartyDots(const MinimapFrame& frame, game::GameHan
             }
 
             if (!member.name.empty() && cursorNearBlip(sx, sy)) {
-                uint8_t pmk2 = gameHandler.getEntityRaidMark(member.guid);
+                uint8_t pmk2 = group::orNoGroup(services_.group).getEntityRaidMark(member.guid);
                 if (const char* markName = game::raidMarkName(pmk2)) {
                     ImGui::SetTooltip("%s {%s}", member.name.c_str(), markName);
                 } else {

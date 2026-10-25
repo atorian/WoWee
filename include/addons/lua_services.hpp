@@ -22,6 +22,7 @@ namespace wowee::arena { class IArenaTeams; }
 namespace wowee::battleground { class IBattlegrounds; }
 namespace wowee::lfg { class ILfg; }
 namespace wowee::calendar { class ICalendar; }
+namespace wowee::group { class IGroup; }
 
 namespace wowee::addons {
 
@@ -54,6 +55,9 @@ struct LuaServices {
     /// The calendar the server sent, the event open, and the requests that
     /// change them.
     calendar::ICalendar*     calendar          = nullptr;
+    /// The player's party or raid, its invite, ready check and markers, and
+    /// the requests that change them.
+    group::IGroup*           group             = nullptr;
 
     /// Run a macro body, as RunMacroText() does - one command per line,
     /// through the same path the action bar uses for a macro button.

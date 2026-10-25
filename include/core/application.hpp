@@ -52,7 +52,8 @@ namespace arena { class ArenaService; }
 namespace battleground { class BattlegroundService; }
 namespace lfg { class LfgService; }
 namespace calendar { class CalendarService; }
-namespace game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; }
+namespace group { class GroupService; }
+namespace game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; }
 
 // Forward declarations
 namespace rendering {
@@ -426,6 +427,8 @@ private:
     std::unique_ptr<lfg::LfgService> lfg_;
     std::unique_ptr<game::CalendarGateway> calendarGateway_;
     std::unique_ptr<calendar::CalendarService> calendar_;
+    std::unique_ptr<game::GroupGateway> groupGateway_;
+    std::unique_ptr<group::GroupService> group_;
     std::unique_ptr<game::GameHandler> gameHandler;
     /// The renderer's side of the transports - see game::TransportScene.
     std::unique_ptr<RendererTransportScene> transportScene_;

@@ -1,4 +1,5 @@
 #include "game/game_handler.hpp"
+#include "group/services/group.hpp"
 #include "core/event_bus.hpp"
 #include "game/game_events.hpp"
 #include "game/reputation_standing.hpp"
@@ -1225,6 +1226,25 @@ calendar::ICalendarFeed* GameHandler::calendarFeed() {
     return services_.calendarFeed;
 }
 
+group::IGroupServerFeed* GameHandler::groupFeed() {
+    return services_.groupFeed;
+}
+
+const group::IGroup* GameHandler::group() const {
+    return services_.group;
+}
+
+// The group's roster, for the handlers that ask who is in it - empty when
+// there is no group, or none wired in.
+const GroupListData& GameHandler::party() const {
+    static const GroupListData kNoGroup;
+    return services_.group ? services_.group->getPartyData() : kNoGroup;
+}
+
+bool GameHandler::inGroup() const {
+    return services_.group && services_.group->isInGroup();
+}
+
 void GameHandler::setGuildBankMoney(uint64_t money) {
     inventoryHandler_->setGuildBankMoney(money);
 }
@@ -1555,14 +1575,6 @@ void GameHandler::inviteToGuild(const std::string& playerName) {
     socialHandler_->inviteToGuild(playerName);
 }
 
-void GameHandler::initiateReadyCheck() {
-    socialHandler_->initiateReadyCheck();
-}
-
-void GameHandler::respondToReadyCheck(bool ready) {
-    socialHandler_->respondToReadyCheck(ready);
-}
-
 void GameHandler::toggleAfk(const std::string& message) {
     chatHandler_->toggleAfk(message);
 }
@@ -1593,50 +1605,10 @@ void GameHandler::channelModeration(Opcode op, const std::string& channelName,
                                                          allowEmptyTarget);
 }
 
-void GameHandler::promoteToLeader(uint64_t guid) {
-    socialHandler_->promoteToLeader(guid);
-}
-
-void GameHandler::uninvitePlayer(const std::string& playerName) {
-    socialHandler_->uninvitePlayer(playerName);
-}
-
-void GameHandler::leaveParty() {
-    socialHandler_->leaveParty();
-}
-
-void GameHandler::setMainTank(uint64_t targetGuid) {
-    socialHandler_->setMainTank(targetGuid);
-}
-
-void GameHandler::setMainAssist(uint64_t targetGuid) {
-    socialHandler_->setMainAssist(targetGuid);
-}
-
-void GameHandler::clearMainTank() {
-    socialHandler_->clearMainTank();
-}
-
-void GameHandler::clearMainAssist() {
-    socialHandler_->clearMainAssist();
-}
-
-void GameHandler::setRaidMark(uint64_t guid, uint8_t icon) {
-    socialHandler_->setRaidMark(guid, icon);
-}
-
 // The marks live in SocialHandler - MSG_RAID_TARGET_UPDATE writes them there.
 // GameHandler kept a second, identical array that nothing ever wrote, so every
 // caller of these (target frame, nameplates, minimap, social panel) read an
 // array of zeros and no marker icon was ever drawn.
-uint64_t GameHandler::getRaidMarkGuid(uint32_t icon) const {
-    return socialHandler_->getRaidMarkGuid(icon);
-}
-
-uint8_t GameHandler::getEntityRaidMark(uint64_t guid) const {
-    return socialHandler_->getEntityRaidMark(guid);
-}
-
 void GameHandler::requestRaidInfo() {
     socialHandler_->requestRaidInfo();
 }
@@ -2033,22 +2005,6 @@ void GameHandler::delGuildRank() {
     socialHandler_->delGuildRank();
 }
 
-void GameHandler::setLootMethod(uint8_t method, uint64_t masterGuid, uint8_t threshold) {
-    socialHandler_->setLootMethod(method, masterGuid, threshold);
-}
-
-void GameHandler::setPartyAssignment(uint8_t assignment, uint64_t guid, bool apply) {
-    socialHandler_->setPartyAssignment(assignment, guid, apply);
-}
-
-void GameHandler::setRaidSubgroup(const std::string& playerName, uint8_t group) {
-    socialHandler_->setRaidSubgroup(playerName, group);
-}
-
-void GameHandler::swapRaidSubgroup(const std::string& a, const std::string& b) {
-    socialHandler_->swapRaidSubgroup(a, b);
-}
-
 // ---------------------------------------------------------------------------
 // LFG / Dungeon Finder handlers (WotLK 3.3.5a)
 // ---------------------------------------------------------------------------
@@ -2127,10 +2083,6 @@ void GameHandler::resetInstances() {
 }
 
 
-void GameHandler::setGroupAssistant(uint64_t guid, bool apply) {
-    socialHandler_->setGroupAssistant(guid, apply);
-}
-
 uint32_t GameHandler::getPlayerGuildRankIndex() const {
     return socialHandler_->getPlayerGuildRankIndex();
 }
@@ -2168,30 +2120,6 @@ void GameHandler::sendAlterAppearance(uint32_t hairStyleEntry, uint32_t hairColo
 // ============================================================
 // Group/Party
 // ============================================================
-
-void GameHandler::inviteToGroup(const std::string& playerName) {
-    socialHandler_->inviteToGroup(playerName);
-}
-
-void GameHandler::acceptGroupInvite() {
-    socialHandler_->acceptGroupInvite();
-}
-
-void GameHandler::declineGroupInvite() {
-    socialHandler_->declineGroupInvite();
-}
-
-void GameHandler::leaveGroup() {
-    socialHandler_->leaveGroup();
-}
-
-void GameHandler::convertToRaid() {
-    socialHandler_->convertToRaid();
-}
-
-void GameHandler::sendSetLootMethod(uint32_t method, uint32_t threshold, uint64_t masterLooterGuid) {
-    socialHandler_->sendSetLootMethod(method, threshold, masterLooterGuid);
-}
 
 // ============================================================
 // Guild Handlers

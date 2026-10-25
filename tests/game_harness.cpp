@@ -15,6 +15,8 @@
 #include "lfg/services/lfg_service.hpp"
 #include "game/calendar_gateway.hpp"
 #include "calendar/services/calendar_service.hpp"
+#include "game/group_gateway.hpp"
+#include "group/services/group_service.hpp"
 
 #include <catch_amalgamated.hpp>  // test_support.hpp's REQUIRE
 #include "test_support.hpp"
@@ -185,6 +187,10 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     calendarGateway_ = std::make_unique<game::CalendarGateway>(*game_);
     calendar_ = std::make_unique<calendar::CalendarService>(*calendarGateway_, events_);
     services_.calendarFeed = calendar_.get();
+    groupGateway_ = std::make_unique<game::GroupGateway>(*game_, *game_);
+    group_ = std::make_unique<group::GroupService>(*groupGateway_, events_);
+    services_.groupFeed = group_.get();
+    services_.group = group_.get();
     game::loadProtocolTables(*game_, *expansions_.getActive());
     game_->setAddonEventCallback([this](const std::string& name, const std::vector<std::string>& args) {
         addonEvents_.push_back({name, args});
@@ -201,6 +207,7 @@ arena::IArenaTeams& GameHarness::arenaTeams() { return *arenaTeams_; }
 battleground::IBattlegrounds& GameHarness::battlegrounds() { return *battlegrounds_; }
 lfg::ILfg& GameHarness::lfg() { return *lfg_; }
 calendar::ICalendar& GameHarness::calendar() { return *calendar_; }
+group::IGroup& GameHarness::group() { return *group_; }
 
 FakeWorldConnection& GameHarness::server() {
     if (!connection_) fail("no connection yet: connect (or enterWorld) first");

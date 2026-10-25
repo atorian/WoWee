@@ -2,6 +2,7 @@
 
 #include "game_harness.hpp"
 #include "game/game_events.hpp"
+#include "group/services/group.hpp"
 #include "game/entity.hpp"
 #include "game/movement_handler.hpp"
 #include "game/movement_flags.hpp"
@@ -513,7 +514,7 @@ TEST_CASE("logging in again after a lost connection keeps nothing of the last on
     h.pump();
     REQUIRE(h.game().getSpellCooldown(kFireball) > 0.0f);
     REQUIRE_FALSE(h.game().getPlayerAuras().empty());
-    REQUIRE(h.game().isInGroup());
+    REQUIRE(h.group().isInGroup());
     REQUIRE_FALSE(h.game().getInventory().getBackpackSlot(0).empty());
 
     h.server().disconnect();
@@ -523,7 +524,7 @@ TEST_CASE("logging in again after a lost connection keeps nothing of the last on
     // The new session is the server's to fill; nothing of the last is left.
     CHECK(h.game().getSpellCooldown(kFireball) == 0.0f);
     CHECK(h.game().getPlayerAuras().empty());
-    CHECK_FALSE(h.game().isInGroup());
+    CHECK_FALSE(h.group().isInGroup());
     CHECK(h.game().getInventory().getBackpackSlot(0).empty());
     CHECK_FALSE(h.game().getEntityManager().hasEntity(kItem));
 }

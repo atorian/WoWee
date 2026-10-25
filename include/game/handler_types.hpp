@@ -14,6 +14,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "group/domain/records.hpp"
 
 namespace wowee {
 namespace game {
@@ -170,10 +171,7 @@ struct GuildBankLogEntry {
 
 // ---- Ready check ----
 
-struct ReadyCheckResult {
-    std::string name;
-    bool ready = false;
-};
+using ReadyCheckResult = group::ReadyCheckResult;
 
 // ---- Chat ----
 

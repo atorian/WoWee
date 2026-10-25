@@ -3421,14 +3421,6 @@ uint32_t GameHandler::getLevelTimePlayed() const {
     return socialHandler_->getLevelTimePlayed();
 }
 
-bool GameHandler::isInGroup() const {
-    return socialHandler_->isInGroup();
-}
-
-const GroupListData& GameHandler::getPartyData() const {
-    return socialHandler_->getPartyData();
-}
-
 bool GameHandler::isLoggingOut() const {
     return socialHandler_->isLoggingOut();
 }
@@ -3439,13 +3431,6 @@ float GameHandler::getLogoutCountdown() const {
 
 bool GameHandler::isInGuild() const {
     return socialHandler_->isInGuild();
-}
-
-bool GameHandler::hasPendingGroupInvite() const {
-    return socialHandler_->hasPendingGroupInvite();
-}
-const std::string& GameHandler::getPendingInviterName() const {
-    return socialHandler_->getPendingInviterName();
 }
 
 const std::string& GameHandler::getGuildName() const {
@@ -3504,22 +3489,6 @@ void GameHandler::removeGlyphFromSocket(uint32_t slot) {
 
 void GameHandler::reportMailSpam(uint64_t senderGuid, uint32_t mailId) {
     socialHandler_->reportMailSpam(senderGuid, mailId);
-}
-
-bool GameHandler::hasPendingReadyCheck() const {
-    return socialHandler_->hasPendingReadyCheck();
-}
-
-void GameHandler::dismissReadyCheck() {
-    socialHandler_->dismissReadyCheck();
-}
-
-const std::string& GameHandler::getReadyCheckInitiator() const {
-    return socialHandler_->getReadyCheckInitiator();
-}
-
-const std::vector<GameHandler::ReadyCheckResult>& GameHandler::getReadyCheckResults() const {
-    return socialHandler_->getReadyCheckResults();
 }
 
 uint32_t GameHandler::getInstanceDifficulty() const {

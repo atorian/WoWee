@@ -36,11 +36,11 @@ bool GameStateAdapter::isStealthed() const {
 }
 
 bool GameStateAdapter::hasPet() const   { return gameHandler_.hasPet(); }
-bool GameStateAdapter::isInGroup() const { return gameHandler_.isInGroup(); }
+bool GameStateAdapter::isInGroup() const { return gameHandler_.inGroup(); }
 
 bool GameStateAdapter::isInRaid() const {
-    return gameHandler_.isInGroup() &&
-           game::groupIsRaid(gameHandler_.getPartyData().groupType);
+    return gameHandler_.inGroup() &&
+           game::groupIsRaid(gameHandler_.party().groupType);
 }
 
 bool GameStateAdapter::isIndoors() const {

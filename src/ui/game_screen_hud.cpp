@@ -1,3 +1,4 @@
+#include "group/services/group.hpp"
 #include "contacts/services/contacts.hpp"
 #include "duel/services/duels.hpp"
 #include "battleground/services/battlegrounds.hpp"
@@ -539,8 +540,8 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
     // Party member dots on world map
     {
         std::vector<rendering::WorldMapPartyDot> dots;
-        if (gameHandler.isInGroup()) {
-            const auto& partyData = gameHandler.getPartyData();
+        if (group::orNoGroup(services_.group).isInGroup()) {
+            const auto& partyData = group::orNoGroup(services_.group).getPartyData();
             for (const auto& member : partyData.members) {
                 if (!member.isOnline || !member.hasPartyStats) continue;
                 if (member.posX == 0 && member.posY == 0) continue;
@@ -1491,8 +1492,8 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         }
 
         // Group leader crown to the right of the name on player nameplates
-        if (isPlayer && gameHandler.isInGroup() &&
-            gameHandler.getPartyData().leaderGuid == guid) {
+        if (isPlayer && group::orNoGroup(services_.group).isInGroup() &&
+            group::orNoGroup(services_.group).getPartyData().leaderGuid == guid) {
             float crownX = nameX + textSize.x + 3.0f;
             const char* crownSym = "\xe2\x99\x9b";  // ♛
             drawList->AddText(ImVec2(crownX + 1.0f, nameY + 1.0f), IM_COL32(0, 0, 0, A(160)), crownSym);
@@ -1504,8 +1505,8 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         // the name, but the ImGui font carries no skull/moon/cross code points,
         // so every mark drew as a '?' box.
         {
-            uint8_t raidMark = gameHandler.getEntityRaidMark(guid);
-            if (raidMark < game::GameHandler::kRaidMarkCount) {
+            uint8_t raidMark = group::orNoGroup(services_.group).getEntityRaidMark(guid);
+            if (raidMark < group::kRaidMarkCount) {
                 VkDescriptorSet markTex = ui::getRaidTargetIcon(raidMark, services_.assetManager);
                 if (markTex) {
                     // Sits above the name, and above the target chevron when this
@@ -1649,7 +1650,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                         chatPanel_.setWhisperTarget(ctxName);
                     }
                     if (ImGui::MenuItem("Invite to Group"))
-                        gameHandler.inviteToGroup(ctxName);
+                        group::orNoGroup(services_.group).inviteToGroup(ctxName);
                     if (ImGui::MenuItem("Trade"))
                         gameHandler.initiateTrade(nameplateCtxGuid_);
                     if (ImGui::MenuItem("Duel"))

@@ -1,5 +1,6 @@
 // lua_spell_api.cpp - Spell info, casting, auras, and targeting Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
+#include "group/services/group.hpp"
 #include "game/shapeshift_forms.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "game/item_text.hpp"
@@ -960,7 +961,7 @@ static int lua_GetRaidTargetIndex(lua_State* L) {
     toLowerInPlace(uidStr);
     uint64_t guid = resolveUnitGuid(gh, uidStr);
     if (guid == 0) { return luaReturnNil(L); }
-    uint8_t mark = gh->getEntityRaidMark(guid);
+    uint8_t mark = groupOf(L).getEntityRaidMark(guid);
     if (mark == 0xFF) { return luaReturnNil(L); }
     lua_pushnumber(L, mark + 1); // WoW uses 1-indexed (1=Star, 2=Circle, ... 8=Skull)
     return 1;
@@ -977,9 +978,9 @@ static int lua_SetRaidTarget(lua_State* L) {
     uint64_t guid = resolveUnitGuid(gh, uidStr);
     if (guid == 0) return 0;
     if (index >= 1 && index <= 8)
-        gh->setRaidMark(guid, static_cast<uint8_t>(index - 1));
+        groupOf(L).setRaidMark(guid, static_cast<uint8_t>(index - 1));
     else if (index == 0)
-        gh->setRaidMark(guid, 0xFF); // clear
+        groupOf(L).setRaidMark(guid, 0xFF); // clear
     return 0;
 }
 

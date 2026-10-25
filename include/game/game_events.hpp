@@ -295,11 +295,6 @@ struct AchievementEarned {
     std::string name;
 };
 
-/// Someone invited the player to a group.
-struct GroupInviteReceived {
-    std::string inviterName;
-};
-
 /// Another player pinged the minimap, at a point in WoW coordinates.
 struct MinimapPinged {
     uint64_t senderGuid = 0;

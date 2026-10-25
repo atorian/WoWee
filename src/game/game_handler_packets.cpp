@@ -1277,22 +1277,7 @@ void GameHandler::registerCoreOpcodes() {
         };
     }
 
-    // ---- MSG_RAID_TARGET_UPDATE ----
-    dispatchTable_[Opcode::MSG_RAID_TARGET_UPDATE] = [this](network::Packet& packet) {
-        RaidTargetUpdateData rtu;
-        if (!RaidTargetUpdateParser::parse(packet, rtu)) return;
-
-        // The full list is authoritative, so icons absent from it are gone.
-        if (rtu.fullList) {
-            for (uint32_t i = 0; i < kRaidMarkCount; ++i)
-                socialHandler_->setRaidTargetGuid(static_cast<uint8_t>(i), 0);
-        }
-        for (const auto& [icon, guid] : rtu.marks)
-            socialHandler_->setRaidTargetGuid(icon, guid);
-        LOG_DEBUG("MSG_RAID_TARGET_UPDATE: fullList=", rtu.fullList,
-                  " marks=", rtu.marks.size());
-        fireAddonEvent("RAID_TARGET_UPDATE", {});
-    };
+    // (MSG_RAID_TARGET_UPDATE and SMSG_REAL_GROUP_UPDATE → SocialHandler, which feeds the group)
 
     // ---- SMSG_CRITERIA_UPDATE ----
     dispatchTable_[Opcode::SMSG_CRITERIA_UPDATE] = [this](network::Packet& packet) {
@@ -2087,33 +2072,6 @@ void GameHandler::registerRemainingOpcodes() {
             socket->send(resp);
             LOG_DEBUG("SMSG_REALM_SPLIT splitType=", splitType, " - sent CMSG_REALM_SPLIT ack");
         }
-    };
-    dispatchTable_[Opcode::SMSG_REAL_GROUP_UPDATE] = [this](network::Packet& packet) {
-        auto rem = [&]() { return packet.getRemainingSize(); };
-        if (rem() < 1) return;
-        uint8_t newGroupType = packet.readUInt8();
-        if (rem() < 4) return;
-        uint32_t newMemberFlags = packet.readUInt32();
-        if (rem() < 8) return;
-        uint64_t newLeaderGuid = packet.readUInt64();
-
-        auto& pd = socialHandler_->mutablePartyData();
-        pd.groupType = newGroupType;
-        pd.leaderGuid = newLeaderGuid;
-
-        // Update local player's flags in the member list
-        uint64_t localGuid = playerGuid;
-        for (auto& m : pd.members) {
-            if (m.guid == localGuid) {
-                m.flags = static_cast<uint8_t>(newMemberFlags & 0xFF);
-                break;
-            }
-        }
-        LOG_DEBUG("SMSG_REAL_GROUP_UPDATE groupType=", static_cast<int>(newGroupType),
-                  " memberFlags=0x", std::hex, newMemberFlags, std::dec,
-                  " leaderGuid=", newLeaderGuid);
-        fireAddonEvent("PARTY_LEADER_CHANGED", {});
-        fireAddonEvent("GROUP_ROSTER_UPDATE", {});
     };
     dispatchTable_[Opcode::SMSG_PLAY_MUSIC] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {

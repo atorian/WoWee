@@ -363,7 +363,7 @@ inline uint64_t resolveUnitGuid(game::GameHandler* gh, const std::string& uid) {
         int idx = 0;
         try { idx = std::stoi(uid.substr(5)); } catch (...) { return 0; }
         if (idx < 1 || idx > 4) return 0;
-        const auto& pd = gh->getPartyData();
+        const auto& pd = gh->party();
         // party members exclude self; index 1-based
         int found = 0;
         for (const auto& m : pd.members) {
@@ -385,7 +385,7 @@ inline uint64_t resolveUnitGuid(game::GameHandler* gh, const std::string& uid) {
         int idx = 0;
         try { idx = std::stoi(uid.substr(4)); } catch (...) { return 0; }
         if (idx < 1 || idx > 40) return 0;
-        const auto& pd = gh->getPartyData();
+        const auto& pd = gh->party();
         if (idx <= static_cast<int>(pd.members.size()))
             return pd.members[idx - 1].guid;
         return 0;
@@ -838,7 +838,7 @@ inline bool itemUseCooldown(game::GameHandler* gh, uint32_t itemId,
 // Find GroupMember data for a GUID (for party members out of entity range)
 inline const game::GroupMember* findPartyMember(game::GameHandler* gh, uint64_t guid) {
     if (!gh || guid == 0) return nullptr;
-    for (const auto& m : gh->getPartyData().members) {
+    for (const auto& m : gh->party().members) {
         if (m.guid == guid && m.hasPartyStats) return &m;
     }
     return nullptr;
@@ -966,6 +966,10 @@ lfg::ILfg& lfgOf(lua_State* L);
 /// The calendar as the composition root handed it to the addon layer, or an
 /// empty one that sends nothing when there is no game.
 calendar::ICalendar& calendarOf(lua_State* L);
+
+/// The player's group as the composition root handed it to the addon layer,
+/// or one the player is never in that sends nothing when there is no game.
+group::IGroup& groupOf(lua_State* L);
 
 /// The team id at an arena team index, or zero when the index is off the end
 /// or there are no arena teams.

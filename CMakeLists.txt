@@ -782,6 +782,7 @@ set(WOWEE_SOURCES
     src/game/battleground_gateway.cpp
     src/game/lfg_gateway.cpp
     src/game/calendar_gateway.cpp
+    src/game/group_gateway.cpp
     src/game/account_data.cpp
     src/game/account_data_handler.cpp
     src/game/action_bar_handler.cpp
@@ -1870,6 +1871,14 @@ set(WOWEE_CALENDAR_SOURCES
 )
 add_library(wowee_calendar STATIC ${WOWEE_CALENDAR_SOURCES})
 target_link_libraries(wowee_calendar PUBLIC wowee_base)
+# wowee_group: the player's party or raid - its roster and members' stats,
+# the pending invite, the ready check and the raid target markers.
+set(WOWEE_GROUP_SOURCES
+    src/group/domain/group.cpp
+    src/group/services/group_service.cpp
+)
+add_library(wowee_group STATIC ${WOWEE_GROUP_SOURCES})
+target_link_libraries(wowee_group PUBLIC wowee_base)
 
 add_library(wowee_pipeline STATIC ${WOWEE_PIPELINE_SOURCES})
 target_link_libraries(wowee_pipeline PUBLIC wowee_base)
@@ -1930,7 +1939,7 @@ target_precompile_headers(wowee_net PRIVATE
 )
 
 add_library(wowee_game STATIC ${WOWEE_GAME_SOURCES})
-target_link_libraries(wowee_game PUBLIC wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_net wowee_protocol wowee_pipeline wowee_base)
+target_link_libraries(wowee_game PUBLIC wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_group wowee_net wowee_protocol wowee_pipeline wowee_base)
 target_precompile_headers(wowee_game PRIVATE
     ${WOWEE_PCH_STD}
     <glm/glm.hpp>
@@ -1945,7 +1954,7 @@ if(HAVE_UNICORN)
 endif()
 
 if(ANDROID)
-    set_target_properties(wowee_base wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_pipeline wowee_collision wowee_render wowee_protocol
+    set_target_properties(wowee_base wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_group wowee_pipeline wowee_collision wowee_render wowee_protocol
                           wowee_net wowee_game PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
@@ -2083,7 +2092,7 @@ function(wowee_apply_client_flags target)
     endif()
 endfunction()
 
-foreach(_client_target wowee wowee_client_objects wowee_base wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_pipeline wowee_collision wowee_render wowee_protocol wowee_net wowee_game)
+foreach(_client_target wowee wowee_client_objects wowee_base wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_group wowee_pipeline wowee_collision wowee_render wowee_protocol wowee_net wowee_game)
     wowee_apply_client_flags(${_client_target})
 endforeach()
 if(WOWEE_ENABLE_ASAN)

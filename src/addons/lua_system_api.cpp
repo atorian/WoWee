@@ -1,5 +1,6 @@
 // lua_system_api.cpp - System, time, sound, locale, map, addons, instances, and utilities Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
+#include "group/services/group.hpp"
 #include "game/action_bar_handler.hpp"
 #include "arena/services/arena.hpp"
 #include "battleground/services/battlegrounds.hpp"
@@ -3831,7 +3832,7 @@ static int lua_GetLFGInfoServer(lua_State* L) {
     //
     // This client keeps no listing comment: an empty string is what it has,
     // and it is the value the interface tests for anyway.
-    const bool inParty = gh && gh->isInGroup();
+    const bool inParty = gh && groupOf(L).isInGroup();
     lua_pushboolean(L, inParty ? 1 : 0);   // 1: inParty
     lua_pushboolean(L, queued ? 1 : 0);    // 2: joined
     lua_pushboolean(L, queued ? 1 : 0);    // 3: queued
@@ -5415,7 +5416,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"GetPartyLeaderIndex", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushnumber(L, 0); return 1; }
-            const auto& pd = gh->getPartyData();
+            const auto& pd = groupOf(L).getPartyData();
             if (pd.leaderGuid == 0 || pd.leaderGuid == gh->getPlayerGuid()) {
                 lua_pushnumber(L, 0);
                 return 1;
@@ -5712,7 +5713,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"CanJoinBattlefieldAsGroup", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushboolean(L, 0); return 1; }
-            const auto& pd = gh->getPartyData();
+            const auto& pd = groupOf(L).getPartyData();
             const bool leadsAParty = !pd.isEmpty() && pd.leaderGuid == gh->getPlayerGuid();
             lua_pushboolean(L, leadsAParty ? 1 : 0);
             return 1;
@@ -6078,7 +6079,7 @@ void registerSystemLuaAPI(lua_State* L) {
             if (!gh) { lua_pushboolean(L, 0); return 1; }
             const uint64_t self = gh->getPlayerGuid();
             constexpr uint8_t kMemberFlagAssistant = 0x01;
-            for (const auto& mem : gh->getPartyData().members) {
+            for (const auto& mem : groupOf(L).getPartyData().members) {
                 if (mem.guid == self) {
                     lua_pushboolean(L, (mem.flags & kMemberFlagAssistant) ? 1 : 0);
                     return 1;
@@ -6383,7 +6384,7 @@ void registerSystemLuaAPI(lua_State* L) {
             bool on = false;
             switch (setting) {
                 case 1: on = gh && gh->isInInstance(); break;
-                case 2: on = gh && !gh->getPartyData().members.empty(); break;
+                case 2: on = gh && !groupOf(L).getPartyData().members.empty(); break;
                 case 3: on = true; break;
                 default: on = false; break;   // 0, and anything unrecognised
             }
@@ -6431,7 +6432,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"IsPartyLeader", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushboolean(L, 0); return 1; }
-            const uint64_t leader = gh->getPartyData().leaderGuid;
+            const uint64_t leader = groupOf(L).getPartyData().leaderGuid;
             lua_pushboolean(L, leader != 0 && leader == gh->getPlayerGuid());
             return 1;
         }},

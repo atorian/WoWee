@@ -1,6 +1,7 @@
 #include "core/audio_callback_handler.hpp"
 #include "game/game_events.hpp"
 #include "duel/domain/duel.hpp"
+#include "group/domain/events.hpp"
 #include "core/player_view.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
@@ -136,7 +137,7 @@ void AudioCallbackHandler::subscribeGameSounds() {
     subscriptions_.push_back(bus.subscribe<duel::DuelRequested>([this](const duel::DuelRequested&) {
         playUi([](audio::UiSoundManager& sfx) { sfx.playTargetSelect(); });
     }));
-    subscriptions_.push_back(bus.subscribe<ev::GroupInviteReceived>([this](const ev::GroupInviteReceived&) {
+    subscriptions_.push_back(bus.subscribe<group::InviteReceived>([this](const group::InviteReceived&) {
         playUi([](audio::UiSoundManager& sfx) { sfx.playQuestActivate(); });
     }));
     subscriptions_.push_back(bus.subscribe<ev::MinimapPinged>([this](const ev::MinimapPinged&) {
@@ -278,7 +279,7 @@ void AudioCallbackHandler::setupCallbacks() {
         }
 
         // Show chat message if in group
-        if (gameHandler_.isInGroup()) {
+        if (gameHandler_.inGroup()) {
             std::string name = gameHandler_.getCachedPlayerName(guid);
             if (name.empty()) name = "A party member";
             game::MessageChatData msg;

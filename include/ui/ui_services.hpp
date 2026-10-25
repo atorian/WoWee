@@ -32,6 +32,7 @@ namespace duel { class IDuels; }
 namespace battleground { class IBattlegrounds; }
 namespace lfg { class ILfg; }
 namespace calendar { class ICalendar; }
+namespace group { class IGroup; }
 namespace audio { class AudioCoordinator; }
 
 namespace ui {
@@ -65,6 +66,8 @@ struct UIServices {
     lfg::ILfg* lfg = nullptr;
     /// The calendar, for the minimap's count of waiting invitations.
     calendar::ICalendar* calendar = nullptr;
+    /// The player's party or raid, its invite, ready check and markers.
+    group::IGroup* group = nullptr;
     /// The interface of the character in the world, in whatever state it is;
     /// null with no character in the world. Asked each time rather than held:
     /// each character has its own, and a /reload replaces it.

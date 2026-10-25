@@ -340,14 +340,14 @@ public:
     uint8_t playerClassOf(uint64_t guid) const override { return lookupPlayerClass(guid); }
     uint8_t playerRaceOf(uint64_t guid) const override { return lookupPlayerRace(guid); }
     uint8_t playerGenderOf(uint64_t guid) const override { return lookupPlayerGender(guid); }
-    const GroupListData& party() const override { return getPartyData(); }
+    const GroupListData& party() const override;
     const GuildRosterData& guildRoster() const override { return getGuildRoster(); }
     std::optional<uint32_t> guildRankRights() const override;
     std::string languageName(uint32_t languageId) const override { return getLanguageName(languageId); }
 
     // QuestQueries (the shared ones are above; closeVendor is declared with
     // the vendor's facade).
-    bool inGroup() const override { return isInGroup(); }
+    bool inGroup() const override;
     void setResting(bool resting) override;
     std::string creatureName(uint32_t entry) const override { return getCachedCreatureName(entry); }
     void requestCreatureInfo(uint32_t entry) override { queryCreatureInfo(entry, 0); }
@@ -642,6 +642,8 @@ public:
     battleground::IBattlegroundsFeed* battlegroundFeed() override;
     lfg::ILfgFeed* lfgFeed() override;
     calendar::ICalendarFeed* calendarFeed() override;
+    group::IGroupServerFeed* groupFeed() override;
+    const group::IGroup* group() const override;
 
     // Money (copper)
     uint64_t getMoneyCopper() const { return inventoryHandler_->moneyCopper(); }
@@ -941,20 +943,6 @@ public:
     // Returns the guildId for a player entity (from PLAYER_GUILDID update field).
     uint32_t getEntityGuildId(uint64_t guid) const;
 
-    using ReadyCheckResult = game::ReadyCheckResult;
-    void initiateReadyCheck();
-    void respondToReadyCheck(bool ready);
-    bool hasPendingReadyCheck() const;
-    /// Clears the ready check the social handler is holding.
-    ///
-    /// This wrote a flag of its own, which nothing read: the reader
-    /// beside it forwards to SocialHandler and always did. Dismissing a
-    /// ready check therefore cleared nothing the client asks about, and
-    /// hasPendingReadyCheck went on answering true.
-    void dismissReadyCheck();
-    const std::string& getReadyCheckInitiator() const;
-    const std::vector<ReadyCheckResult>& getReadyCheckResults() const;
-
     // AFK/DND status
     void toggleAfk(const std::string& message = "");
     void toggleDnd(const std::string& message = "");
@@ -973,18 +961,6 @@ public:
                            const std::string& targetName,
                            bool allowEmptyTarget = false);
 
-    /// Hand party leadership to another member.
-    void promoteToLeader(uint64_t guid);
-    void uninvitePlayer(const std::string& playerName);
-    void setLootMethod(uint8_t method, uint64_t masterGuid, uint8_t threshold);
-    void setPartyAssignment(uint8_t assignment, uint64_t guid, bool apply);
-    void setRaidSubgroup(const std::string& playerName, uint8_t group);
-    void swapRaidSubgroup(const std::string& firstName, const std::string& secondName);
-    void leaveParty();
-    void setMainTank(uint64_t targetGuid);
-    void setMainAssist(uint64_t targetGuid);
-    void clearMainTank();
-    void clearMainAssist();
     void requestRaidInfo();
     /// Hold a raid lockout past its reset, or let it go. Raid binds only.
     void setSavedInstanceExtend(uint32_t mapId, uint32_t difficulty, bool extend);
@@ -1702,18 +1678,6 @@ public:
     void acceptResurrect();
     void declineResurrect();
 
-    // ---- Group ----
-    void inviteToGroup(const std::string& playerName);
-    void acceptGroupInvite();
-    void declineGroupInvite();
-    void leaveGroup();
-    void convertToRaid();
-    void sendSetLootMethod(uint32_t method, uint32_t threshold, uint64_t masterLooterGuid);
-    bool isInGroup() const;
-    const GroupListData& getPartyData() const;
-    bool hasPendingGroupInvite() const;
-    const std::string& getPendingInviterName() const;
-
     // ---- Item text (books / readable items) ----
     bool isItemTextOpen() const;
     const std::string& getItemText() const;
@@ -1771,17 +1735,6 @@ public:
     // array that used to sit here was never written and answered zero for
     // every slot, so the boss frames drawn from it were always empty.
     uint64_t getEncounterUnitGuid(uint32_t slot) const;
-
-    // Raid target markers (MSG_RAID_TARGET_UPDATE)
-    // Icon indices 0-7: Star, Circle, Diamond, Triangle, Moon, Square, Cross, Skull
-    static constexpr uint32_t kRaidMarkCount = game::kRaidMarkCount;
-    // Both read SocialHandler's marks - the state MSG_RAID_TARGET_UPDATE writes.
-    // Returns the GUID marked with the given icon (0 = no mark)
-    uint64_t getRaidMarkGuid(uint32_t icon) const;
-    // Returns the raid mark icon for a given guid (0xFF = no mark)
-    uint8_t getEntityRaidMark(uint64_t guid) const;
-    // Set or clear a raid mark on a guid (icon 0-7, or 0xFF to clear)
-    void setRaidMark(uint64_t guid, uint8_t icon);
 
     std::string getMapName(uint32_t mapId) const;
 
@@ -2342,8 +2295,6 @@ public:
 
     /// Whether a map id belongs to a battleground, from the same table.
     bool isBattlegroundMap(uint32_t mapId);
-    /// Give or take raid assistant, by guid.
-    void setGroupAssistant(uint64_t guid, bool apply);
     /// Whether a map id belongs to an arena. Same table, the other instance
     /// type - the rows are loaded either way and only the battleground ones
     /// are kept in the queue list.
