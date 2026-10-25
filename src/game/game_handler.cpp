@@ -1932,10 +1932,6 @@ void GameHandler::declineSummon() {
 // Group loot roll (SMSG_LOOT_ROLL / SMSG_LOOT_ROLL_WON / CMSG_LOOT_ROLL)
 // ---------------------------------------------------------------------------
 
-void GameHandler::sendLootRoll(uint64_t objectGuid, uint32_t slot, uint8_t rollType) {
-    inventoryHandler_->sendLootRoll(objectGuid, slot, rollType);
-}
-
 // ---------------------------------------------------------------------------
 // SMSG_ACHIEVEMENT_EARNED (WotLK 3.3.5a wire 0x468)
 //   uint64 guid          - player who earned it (may be another player)

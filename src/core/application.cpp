@@ -27,6 +27,8 @@
 #include "guild_bank/services/guild_bank_service.hpp"
 #include "game/trade_gateway.hpp"
 #include "trade/services/trade_service.hpp"
+#include "game/loot_gateway.hpp"
+#include "loot/services/loot_service.hpp"
 #include "ui/macro_icon.hpp"
 #include <imgui_impl_vulkan.h>
 #include "rendering/imgui_texture.hpp"
@@ -551,6 +553,10 @@ bool Application::initialize() {
     trade_ = std::make_unique<trade::TradeService>(*tradeGateway_, *tradeGateway_, eventBus_);
     gameServices_.tradeFeed = trade_.get();
     gameServices_.trade = trade_.get();
+    lootGateway_ = std::make_unique<game::LootGateway>(*gameHandler, gameHandler->inventory(), *gameHandler);
+    loot_ = std::make_unique<loot::LootService>(*lootGateway_, *lootGateway_, eventBus_);
+    gameServices_.lootFeed = loot_.get();
+    gameServices_.loot = loot_.get();
     transportScene_ = std::make_unique<RendererTransportScene>(*renderer);
     gameHandler->getTransportManager()->setScene(transportScene_.get());
 
@@ -916,6 +922,7 @@ bool Application::initialize() {
             uiServices.mail = mail_.get();
             uiServices.guildBank = guildBank_.get();
             uiServices.trade = trade_.get();
+            uiServices.loot = loot_.get();
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();  // May be nullptr here, re-wire later
             uiServices.interfaceStages = &interfaceStages_;
@@ -981,6 +988,7 @@ bool Application::initialize() {
         luaSvc.mail              = mail_.get();
         luaSvc.guildBank         = guildBank_.get();
         luaSvc.trade             = trade_.get();
+        luaSvc.loot              = loot_.get();
         // Acted on between frames - the reload destroys the state that asked.
         luaSvc.requestReloadUI = [this]() {
             if (auto* character = session()) character->requestInterfaceReload();
@@ -1707,6 +1715,7 @@ bool Application::initialize() {
             uiServices.mail = mail_.get();
             uiServices.guildBank = guildBank_.get();
             uiServices.trade = trade_.get();
+            uiServices.loot = loot_.get();
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();
             uiServices.interfaceStages = &interfaceStages_;
@@ -2675,6 +2684,8 @@ void Application::shutdown() {
     gameServices_.guildBank = nullptr;
     gameServices_.tradeFeed = nullptr;
     gameServices_.trade = nullptr;
+    gameServices_.lootFeed = nullptr;
+    gameServices_.loot = nullptr;
     contacts_.reset();
     contactsGateway_.reset();
     who_.reset();
@@ -2691,6 +2702,8 @@ void Application::shutdown() {
     lfgGateway_.reset();
     calendar_.reset();
     calendarGateway_.reset();
+    loot_.reset();
+    lootGateway_.reset();
     trade_.reset();
     tradeGateway_.reset();
     guildBank_.reset();

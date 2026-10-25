@@ -991,6 +991,10 @@ guild_bank::IGuildBank& guildBankOf(lua_State* L);
 /// is never open and sends nothing when there is no game.
 trade::ITrade& tradeOf(lua_State* L);
 
+/// The loot window and the rolls as the composition root handed them to the
+/// addon layer, or ones never open that send nothing when there is no game.
+loot::ILoot& lootOf(lua_State* L);
+
 /// The team id at an arena team index, or zero when the index is off the end
 /// or there are no arena teams.
 ///

@@ -1,4 +1,5 @@
 #include "rendering/animation/melee_anim_chains.hpp"
+#include "loot/domain/events.hpp"
 #include "core/player_view.hpp"
 #include "core/animation_callback_handler.hpp"
 #include "game/game_events.hpp"
@@ -757,13 +758,14 @@ void AnimationCallbackHandler::setupCallbacks() {
         }
     });
 
-    // Loot window callback - play kneel/loot animation while looting
-    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::LootWindowChanged>(
-        [this](const game::events::LootWindowChanged& e) {
-            auto* ac = playerView_.getAnimationController();
-            if (!ac) return;
-            if (e.open) ac->startLooting();
-            else        ac->stopLooting();
+    // The kneel while the loot window is open.
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<loot::LootOpened>(
+        [this](const loot::LootOpened&) {
+            if (auto* ac = playerView_.getAnimationController()) ac->startLooting();
+        }));
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<loot::LootClosed>(
+        [this](const loot::LootClosed&) {
+            if (auto* ac = playerView_.getAnimationController()) ac->stopLooting();
         }));
 }
 

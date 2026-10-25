@@ -645,6 +645,8 @@ public:
     mail::IMailboxFeed* mailFeed() override;
     guild_bank::IGuildBankFeed* guildBankFeed() override;
     trade::ITradeFeed* tradeFeed() override;
+    loot::ILootFeed* lootFeed() override;
+    const loot::ILoot* loot() const override;
     const guild_bank::IGuildBank* guildBank() const override;
 
     // Money (copper)
@@ -1640,13 +1642,11 @@ public:
     uint32_t getDungeonEncounterCount(uint32_t mapId, uint32_t difficulty) const;
 
     // ---- Loot ----
+    /// Asked by the spell handler once a gather or an opening finishes, and by
+    /// the deferred open of a used game object.
     void lootTarget(uint64_t guid) override;
-    void lootItem(uint8_t slotIndex, bool confirmed = false);
-    void confirmPendingLoot();
     void confirmBindOnUse();
-    void lootMoney();
     void cancelTempEnchantment(uint8_t handIndex);
-    void closeLoot();
     void scheduleGameObjectLootOpen(uint64_t guid, float delaySeconds = 0.35f, uint8_t attempts = 1);
 
     /// True once the object is known to be a fishing school. A click on one
@@ -1661,10 +1661,6 @@ public:
     /// Remove a creature corpse client-side once it has been looted empty.
     void despawnCreatureLocally(uint64_t guid);
     void activateSpiritHealer(uint64_t npcGuid);
-    bool isLootWindowOpen() const;
-    const LootResponseData& getCurrentLoot() const;
-    void setAutoLoot(bool enabled);
-    bool isAutoLoot() const;
     /// Turn the player to face the target when an attack or a targeted spell
     /// starts. Off by default, as the original client has it: a target behind
     /// the player has to be faced first, and the server says so. A debugging
@@ -1682,19 +1678,6 @@ public:
     /// while the behaviour was unconditional.
     void setAutoSelfCast(bool enabled) { autoSelfCast_ = enabled; }
     bool isAutoSelfCast() const { return autoSelfCast_; }
-
-    // Master loot candidates (from SMSG_LOOT_MASTER_LIST)
-    const std::vector<uint64_t>& getMasterLootCandidates() const;
-    bool hasMasterLootCandidates() const;
-    void lootMasterGive(uint8_t lootSlot, uint64_t targetGuid);
-
-    // Group loot roll (aliased from handler_types.hpp)
-    using LootRollEntry = game::LootRollEntry;
-    /// One open loot roll by the id the interface knows it by, or null when
-    /// that roll has closed.
-    const LootRollEntry* getLootRoll(int rollId) const;
-    void sendLootRoll(uint64_t objectGuid, uint32_t slot, uint8_t rollType);
-    // rollType: 0=need, 1=greed, 2=disenchant, 96=pass
 
     // Equipment Sets (aliased from handler_types.hpp)
     using EquipmentSetInfo = game::EquipmentSetInfo;
@@ -3830,9 +3813,6 @@ private:
 
     // ---- PvP honor credit callback ----
     PvpHonorCallback pvpHonorCallback_;
-
-    // ---- Item loot callback ----
-
 
     // ---- Quest completion callback ----
 

@@ -38,6 +38,7 @@ namespace auction { class IAuctionHouse; }
 namespace mail { class IMailbox; }
 namespace guild_bank { class IGuildBank; }
 namespace trade { class ITrade; }
+namespace loot { class ILoot; }
 namespace audio { class AudioCoordinator; }
 
 namespace ui {
@@ -84,6 +85,8 @@ struct UIServices {
     guild_bank::IGuildBank* guildBank = nullptr;
     /// A trade with another player, for asking for one and for the window.
     trade::ITrade* trade = nullptr;
+    /// The loot window, for autoloot, Escape and right-clicking a corpse.
+    loot::ILoot* loot = nullptr;
     /// The interface of the character in the world, in whatever state it is;
     /// null with no character in the world. Asked each time rather than held:
     /// each character has its own, and a /reload replaces it.

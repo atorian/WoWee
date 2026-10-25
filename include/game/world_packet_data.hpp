@@ -1147,43 +1147,17 @@ struct GroupDeclineData {
 // Loot System
 // ============================================================
 
-/** Loot item entry */
-struct LootItem {
-    uint8_t slotIndex = 0;
-    uint32_t itemId = 0;
-    uint32_t count = 0;
-    uint32_t displayInfoId = 0;
-    uint32_t randomSuffix = 0;
-    uint32_t randomPropertyId = 0;
-    uint8_t lootSlotType = 0;
-    bool isQuestItem = false;
-    bool looted = false;
-};
+} // namespace game
+namespace loot {
+struct LootItem;
+struct LootContents;
+} // namespace loot
+namespace game {
 
-/** SMSG_LOOT_RESPONSE data */
-struct LootResponseData {
-    uint64_t lootGuid = 0;
-    uint8_t lootType = 0;
-    uint32_t gold = 0;           // In copper
-    bool goldLooted = false;     // Taken; the coin keeps its slot
-    std::vector<LootItem> items;
-
-    /// Whether display slot one is the coin, taken or not.
-    [[nodiscard]] bool hasCoinSlot() const { return gold > 0; }
-    [[nodiscard]] bool goldLeft() const { return gold > 0 && !goldLooted; }
-
-    [[nodiscard]] bool nothingLeft() const {
-        if (goldLeft()) return false;
-        for (const auto& item : items)
-            if (!item.looted) return false;
-        return true;
-    }
-
-    [[nodiscard]] bool isValid() const { return true; }
-    [[nodiscard]] uint32_t getGold() const { return gold / 10000; }
-    [[nodiscard]] uint32_t getSilver() const { return (gold / 100) % 100; }
-    [[nodiscard]] uint32_t getCopper() const { return gold % 100; }
-};
+// The loot records are the loot domain's (loot/domain/records.hpp); these are
+// their protocol names. Their definitions are included where used.
+using LootItem = loot::LootItem;
+using LootResponseData = loot::LootContents;
 
 // ============================================================
 // NPC Gossip

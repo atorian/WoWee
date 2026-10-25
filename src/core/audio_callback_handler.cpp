@@ -3,6 +3,7 @@
 #include "duel/domain/duel.hpp"
 #include "group/domain/events.hpp"
 #include "mail/domain/events.hpp"
+#include "loot/domain/events.hpp"
 #include "core/player_view.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
@@ -108,7 +109,7 @@ void AudioCallbackHandler::subscribeGameSounds() {
                          static_cast<uint8_t>(game::toServerGender(ch->gender)));
     }));
 
-    subscriptions_.push_back(bus.subscribe<ev::LootMoneyReceived>([this](const ev::LootMoneyReceived& e) {
+    subscriptions_.push_back(bus.subscribe<loot::MoneyAnnounced>([this](const loot::MoneyAnnounced& e) {
         playUi([&](audio::UiSoundManager& sfx) {
             if (e.copper >= 10000) sfx.playLootCoinLarge();
             else sfx.playLootCoinSmall();

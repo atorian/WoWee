@@ -6,6 +6,7 @@
 #include "mail/services/mail.hpp"
 #include "guild_bank/services/guild_bank.hpp"
 #include "trade/services/trade.hpp"
+#include "loot/services/loot.hpp"
 #include "core/event_bus.hpp"
 #include "game/game_events.hpp"
 #include "game/reputation_standing.hpp"
@@ -1022,19 +1023,6 @@ void GameHandler::closeItemText() {
     inventoryHandler_->closeItemText();
 }
 
-// Loot
-bool GameHandler::isLootWindowOpen() const {
-    return inventoryHandler_->isLootWindowOpen();
-}
-const LootResponseData& GameHandler::getCurrentLoot() const {
-    return inventoryHandler_->getCurrentLoot();
-}
-void GameHandler::setAutoLoot(bool enabled) {
-    inventoryHandler_->setAutoLoot(enabled);
-}
-bool GameHandler::isAutoLoot() const {
-    return inventoryHandler_->isAutoLoot();
-}
 void GameHandler::setAutoSellGrey(bool enabled) {
     inventoryHandler_->setAutoSellGrey(enabled);
 }
@@ -1047,16 +1035,6 @@ void GameHandler::setAutoRepair(bool enabled) {
 bool GameHandler::isAutoRepair() const {
     return inventoryHandler_->isAutoRepair();
 }
-const std::vector<uint64_t>& GameHandler::getMasterLootCandidates() const {
-    return inventoryHandler_->getMasterLootCandidates();
-}
-bool GameHandler::hasMasterLootCandidates() const {
-    return inventoryHandler_->hasMasterLootCandidates();
-}
-const LootRollEntry* GameHandler::getLootRoll(int rollId) const {
-    return inventoryHandler_->getLootRoll(rollId);
-}
-
 // Vendor
 bool GameHandler::isVendorWindowOpen() const {
     return inventoryHandler_->isVendorWindowOpen();
@@ -1185,6 +1163,14 @@ const guild_bank::IGuildBank* GameHandler::guildBank() const {
 
 trade::ITradeFeed* GameHandler::tradeFeed() {
     return services_.tradeFeed;
+}
+
+loot::ILootFeed* GameHandler::lootFeed() {
+    return services_.lootFeed;
+}
+
+const loot::ILoot* GameHandler::loot() const {
+    return services_.loot;
 }
 
 // The player's guild for the handlers that read it - the chat handler's
@@ -1981,31 +1967,15 @@ uint32_t GameHandler::getEntityGuildId(uint64_t guid) const {
 // ============================================================
 
 void GameHandler::lootTarget(uint64_t guid) {
-    inventoryHandler_->lootTarget(guid);
-}
-
-void GameHandler::lootItem(uint8_t slotIndex, bool confirmed) {
-    inventoryHandler_->lootItem(slotIndex, confirmed);
-}
-
-void GameHandler::confirmPendingLoot() {
-    inventoryHandler_->confirmPendingLoot();
+    loot::orNoLoot(services_.loot).lootTarget(guid);
 }
 
 void GameHandler::confirmBindOnUse() {
     inventoryHandler_->confirmBindOnUse();
 }
 
-void GameHandler::lootMoney() {
-    inventoryHandler_->lootMoney();
-}
-
 void GameHandler::cancelTempEnchantment(uint8_t handIndex) {
     inventoryHandler_->cancelTempEnchantment(handIndex);
-}
-
-void GameHandler::closeLoot() {
-    inventoryHandler_->closeLoot();
 }
 
 void GameHandler::scheduleGameObjectLootOpen(uint64_t guid, float delaySeconds, uint8_t attempts) {
@@ -2088,10 +2058,6 @@ void GameHandler::despawnGameObjectLocally(uint64_t guid) {
     tabCycleStale = true;
 
     LOG_INFO("Locally despawned game object: 0x", std::hex, guid, std::dec);
-}
-
-void GameHandler::lootMasterGive(uint8_t lootSlot, uint64_t targetGuid) {
-    inventoryHandler_->lootMasterGive(lootSlot, targetGuid);
 }
 
 void GameHandler::interactWithNpc(uint64_t guid) {

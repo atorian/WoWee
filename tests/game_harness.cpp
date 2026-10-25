@@ -27,6 +27,8 @@
 #include "guild_bank/services/guild_bank_service.hpp"
 #include "game/trade_gateway.hpp"
 #include "trade/services/trade_service.hpp"
+#include "game/loot_gateway.hpp"
+#include "loot/services/loot_service.hpp"
 
 #include <catch_amalgamated.hpp>  // test_support.hpp's REQUIRE
 #include "test_support.hpp"
@@ -232,6 +234,10 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     trade_ = std::make_unique<trade::TradeService>(*tradeGateway_, *tradeGateway_, events_);
     services_.tradeFeed = trade_.get();
     services_.trade = trade_.get();
+    lootGateway_ = std::make_unique<game::LootGateway>(*game_, game_->inventory(), *game_);
+    loot_ = std::make_unique<loot::LootService>(*lootGateway_, *lootGateway_, events_);
+    services_.lootFeed = loot_.get();
+    services_.loot = loot_.get();
     game::loadProtocolTables(*game_, *expansions_.getActive());
     game_->setAddonEventCallback([this](const std::string& name, const std::vector<std::string>& args) {
         addonEvents_.push_back({name, args});
@@ -254,6 +260,7 @@ auction::IAuctionHouse& GameHarness::auctionHouse() { return *auctionHouse_; }
 mail::IMailbox& GameHarness::mail() { return *mail_; }
 guild_bank::IGuildBank& GameHarness::guildBank() { return *guildBank_; }
 trade::ITrade& GameHarness::trade() { return *trade_; }
+loot::ILoot& GameHarness::loot() { return *loot_; }
 
 FakeWorldConnection& GameHarness::server() {
     if (!connection_) fail("no connection yet: connect (or enterWorld) first");

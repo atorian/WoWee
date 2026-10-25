@@ -18,6 +18,7 @@
 
 namespace wowee::guild { struct EventLogEntry; }
 namespace wowee::guild_bank { struct GuildBankLogEntry; }
+namespace wowee::loot { struct LootRoll; }
 
 namespace wowee {
 namespace game {
@@ -236,30 +237,8 @@ struct InstanceLockout {
     bool     extended    = false;
 };
 
-// ---- Group loot roll ----
-
-struct LootRollEntry {
-    /// What the interface calls this roll, and what it passes back to
-    /// RollOnLoot. Its own number rather than the loot slot: a dungeon rolls
-    /// several items at once and two of them can sit in the same slot of
-    /// different corpses, so the slot does not tell one roll from another.
-    int      rollId        = 0;
-    uint64_t objectGuid    = 0;
-    uint32_t slot          = 0;
-    uint32_t itemId        = 0;
-    std::string itemName;
-    uint8_t  itemQuality   = 0;
-    uint32_t rollCountdownMs = 60000;
-    uint8_t  voteMask      = 0xFF;
-    std::chrono::steady_clock::time_point rollStartedAt{};
-
-    struct PlayerRollResult {
-        std::string playerName;
-        uint8_t rollNum  = 0;
-        uint8_t rollType = 0;
-    };
-    std::vector<PlayerRollResult> playerRolls;
-};
+// ---- Group loot roll: the loot domain's ----
+using LootRollEntry = loot::LootRoll;
 
 /// A point on the minimap a party member (or the player) pinged.
 struct MinimapPing {

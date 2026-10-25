@@ -23,6 +23,7 @@ namespace auction { class IAuctionHouseFeed; }
 namespace mail { class IMailboxFeed; class IMailbox; }
 namespace guild_bank { class IGuildBankFeed; class IGuildBank; }
 namespace trade { class ITradeFeed; class ITrade; }
+namespace loot { class ILootFeed; class ILoot; }
 namespace network { class WorldConnection; }
 
 namespace game {
@@ -101,6 +102,10 @@ struct GameServices {
     /// is dealing with.
     trade::ITradeFeed* tradeFeed = nullptr;
     trade::ITrade* trade = nullptr;
+    /// Where the loot packets go, and the loot the game itself opens (a used
+    /// game object, a finished gather) and tab targeting reads.
+    loot::ILootFeed* lootFeed = nullptr;
+    loot::ILoot* loot = nullptr;
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };

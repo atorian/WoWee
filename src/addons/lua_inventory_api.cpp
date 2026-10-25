@@ -2,6 +2,8 @@
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include "group/services/group.hpp"
 #include "trade/services/trade.hpp"
+#include "loot/domain/records.hpp"
+#include "loot/services/loot.hpp"
 #include "guild_bank/domain/records.hpp"
 #include "guild_bank/services/guild_bank.hpp"
 #include "mail/domain/records.hpp"
@@ -2991,16 +2993,16 @@ static std::string lootCoinText(uint32_t copper) {
 /// looking at. The server numbers only the items, so every slot here is
 /// translated before it is sent - which LootSlot already did by carrying
 /// LootItem::slotIndex rather than the display position.
-static bool lootHasCoin(game::GameHandler* gh) {
-    return gh && gh->isLootWindowOpen() && gh->getCurrentLoot().hasCoinSlot();
+static bool lootHasCoin(lua_State* L) {
+    return lootOf(L).isLootWindowOpen() && lootOf(L).getCurrentLoot().hasCoinSlot();
 }
 
 /// The item behind a display slot, or null when the slot is the coin or past
 /// the end.
-static const game::LootItem* lootItemAtSlot(game::GameHandler* gh, int slot) {
-    if (!gh || !gh->isLootWindowOpen() || slot < 1) return nullptr;
-    const auto& loot = gh->getCurrentLoot();
-    const int itemIndex = lootHasCoin(gh) ? slot - 1 : slot;   // 1-based already
+static const game::LootItem* lootItemAtSlot(lua_State* L, int slot) {
+    if (!lootOf(L).isLootWindowOpen() || slot < 1) return nullptr;
+    const auto& loot = lootOf(L).getCurrentLoot();
+    const int itemIndex = lootHasCoin(L) ? slot - 1 : slot;   // 1-based already
     if (itemIndex < 1 || itemIndex > static_cast<int>(loot.items.size())) return nullptr;
     const auto& item = loot.items[itemIndex - 1];
     return item.looted ? nullptr : &item;
@@ -3008,15 +3010,14 @@ static const game::LootItem* lootItemAtSlot(game::GameHandler* gh, int slot) {
 
 // LootSlotIsCoin(slot) → whether this slot is the money
 static int lua_LootSlotIsCoin(lua_State* L) {
-    auto* gh = getGameHandler(L);
     const int slot = static_cast<int>(luaL_optnumber(L, 1, 0));
-    lua_pushboolean(L, (lootHasCoin(gh) && slot == 1) ? 1 : 0);
+    lua_pushboolean(L, (lootHasCoin(L) && slot == 1) ? 1 : 0);
     return 1;
 }
 
 // LootSlotIsItem(slot) → whether this slot is a real item
 static int lua_LootSlotIsItem(lua_State* L) {
-    lua_pushboolean(L, lootItemAtSlot(getGameHandler(L),
+    lua_pushboolean(L, lootItemAtSlot(L,
                                       static_cast<int>(luaL_optnumber(L, 1, 0))) ? 1 : 0);
     return 1;
 }
@@ -3025,17 +3026,17 @@ static int lua_LootSlotIsItem(lua_State* L) {
 static int lua_IsFishingLoot(lua_State* L) {
     auto* gh = getGameHandler(L);
     // LOOT_TYPE_FISHING, as the server sends it.
-    const bool fishing = gh && gh->isLootWindowOpen() &&
-                         gh->getCurrentLoot().lootType == 2;
+    const bool fishing = gh && lootOf(L).isLootWindowOpen() &&
+                         lootOf(L).getCurrentLoot().lootType == 2;
     lua_pushboolean(L, fishing ? 1 : 0);
     return 1;
 }
 
 static int lua_GetNumLootItems(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (!gh || !gh->isLootWindowOpen()) { return luaReturnZero(L); }
+    if (!gh || !lootOf(L).isLootWindowOpen()) { return luaReturnZero(L); }
     // Coin counts as a slot, which is what the loot frame iterates over.
-    lua_pushnumber(L, gh->getCurrentLoot().items.size() + (lootHasCoin(gh) ? 1 : 0));
+    lua_pushnumber(L, lootOf(L).getCurrentLoot().items.size() + (lootHasCoin(L) ? 1 : 0));
     return 1;
 }
 
@@ -3043,11 +3044,11 @@ static int lua_GetNumLootItems(lua_State* L) {
 static int lua_GetLootSlotInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
     int slot = static_cast<int>(luaL_checknumber(L, 1)); // 1-indexed
-    if (!gh || !gh->isLootWindowOpen()) {
+    if (!gh || !lootOf(L).isLootWindowOpen()) {
         return luaReturnNil(L);
     }
-    const auto& loot = gh->getCurrentLoot();
-    if (lootHasCoin(gh) && slot == 1) {
+    const auto& loot = lootOf(L).getCurrentLoot();
+    if (lootHasCoin(L) && slot == 1) {
         // Taken: the slot stays, empty, as an item's does.
         if (loot.goldLooted) return luaReturnNil(L);
         // The coin slot describes itself: the interface shows the amount as the
@@ -3072,7 +3073,7 @@ static int lua_GetLootSlotInfo(lua_State* L) {
         lua_pushboolean(L, 0);
         return 5;
     }
-    const auto* itemPtr = lootItemAtSlot(gh, slot);
+    const auto* itemPtr = lootItemAtSlot(L, slot);
     if (!itemPtr) { return luaReturnNil(L); }
     const auto& item = *itemPtr;
     const auto* info = gh->getItemInfo(item.itemId);
@@ -3111,8 +3112,8 @@ static int lua_GetLootSlotInfo(lua_State* L) {
 static int lua_GetLootSlotLink(lua_State* L) {
     auto* gh = getGameHandler(L);
     int slot = static_cast<int>(luaL_checknumber(L, 1));
-    if (!gh || !gh->isLootWindowOpen()) { return luaReturnNil(L); }
-    const auto* itemPtr = lootItemAtSlot(gh, slot);
+    if (!gh || !lootOf(L).isLootWindowOpen()) { return luaReturnNil(L); }
+    const auto* itemPtr = lootItemAtSlot(L, slot);
     if (!itemPtr) { return luaReturnNil(L); }   // coin has no link
     const auto& item = *itemPtr;
     const auto* info = gh->getItemInfo(item.itemId);
@@ -3128,14 +3129,14 @@ static int lua_GetLootSlotLink(lua_State* L) {
 static int lua_LootSlot(lua_State* L) {
     auto* gh = getGameHandler(L);
     int slot = static_cast<int>(luaL_checknumber(L, 1));
-    if (!gh || !gh->isLootWindowOpen()) return 0;
-    if (lootHasCoin(gh) && slot == 1) {
-        if (gh->getCurrentLoot().goldLeft()) gh->lootMoney();
+    if (!gh || !lootOf(L).isLootWindowOpen()) return 0;
+    if (lootHasCoin(L) && slot == 1) {
+        if (lootOf(L).getCurrentLoot().goldLeft()) lootOf(L).lootMoney();
         return 0;
     }
-    if (const auto* item = lootItemAtSlot(gh, slot)) {
+    if (const auto* item = lootItemAtSlot(L, slot)) {
         // The server's own slot number, not the position on screen.
-        gh->lootItem(item->slotIndex);
+        lootOf(L).lootItem(item->slotIndex);
     }
     return 0;
 }
@@ -3143,7 +3144,7 @@ static int lua_LootSlot(lua_State* L) {
 // CloseLoot() - close loot window
 static int lua_CloseLoot(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (gh) gh->closeLoot();
+    if (gh) lootOf(L).closeLoot();
     return 0;
 }
 
@@ -3173,8 +3174,8 @@ namespace {
 /// Every open roll is kept now. This used to compare the id against the one
 /// roll the client held - so with two windows up, one of them was asking about
 /// the other's item, and the answer was either the wrong item or nothing.
-const game::LootRollEntry* rollFor(game::GameHandler* gh, int rollId) {
-    return gh ? gh->getLootRoll(rollId) : nullptr;
+const game::LootRollEntry* rollFor(lua_State* L, int rollId) {
+    return lootOf(L).getLootRoll(rollId);
 }
 
 // Which buttons the server said it would accept. The same three bits the
@@ -3196,7 +3197,7 @@ constexpr uint8_t kRollDisenchant = 0x04;
 // told why the server refused a button, only that it did.
 static int lua_GetLootRollItemInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const auto* roll = rollFor(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+    const auto* roll = rollFor(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
     if (!roll) { return luaReturnNil(L); }
 
     const auto* info = gh->getItemInfo(roll->itemId);
@@ -3219,8 +3220,7 @@ static int lua_GetLootRollItemInfo(lua_State* L) {
 }
 
 static int lua_GetLootRollItemLink(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    const auto* roll = rollFor(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+    const auto* roll = rollFor(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
     if (!roll) { return luaReturnNil(L); }
     lua_pushstring(L, game::buildItemLink(roll->itemId, roll->itemQuality,
                                           roll->itemName).c_str());
@@ -3233,8 +3233,7 @@ static int lua_GetLootRollItemLink(lua_State* L) {
 // It is not nothing here: the bar under the item is drawn from it, so it sat
 // empty for the whole roll.
 static int lua_GetLootRollTimeLeft(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    const auto* roll = rollFor(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+    const auto* roll = rollFor(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
     if (!roll) { lua_pushnumber(L, 0); return 1; }
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - roll->rollStartedAt).count();
@@ -3249,7 +3248,7 @@ static int lua_GetLootRollTimeLeft(lua_State* L) {
 static int lua_RollOnLoot(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int rollId = static_cast<int>(luaL_optnumber(L, 1, 0));
-    const auto* roll = rollFor(gh, rollId);
+    const auto* roll = rollFor(L, rollId);
     if (!roll) return 0;
     const int type = static_cast<int>(luaL_optnumber(L, 2, 0));
     if (type < 0 || type > 3) return 0;
@@ -3272,19 +3271,18 @@ static int lua_RollOnLoot(lua_State* L) {
         }
     }
 
-    gh->sendLootRoll(roll->objectGuid, roll->slot, static_cast<uint8_t>(type));
+    lootOf(L).sendLootRoll(roll->objectGuid, roll->slot, static_cast<uint8_t>(type));
     return 0;
 }
 
 // ConfirmLootRoll(rollId, rollType) - the answer to the popup above, which is
 // the only caller. Sends without asking again, because this *is* the asking.
 static int lua_ConfirmLootRoll(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    const auto* roll = rollFor(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+    const auto* roll = rollFor(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
     if (!roll) return 0;
     const int type = static_cast<int>(luaL_optnumber(L, 2, 0));
     if (type < 0 || type > 3) return 0;
-    gh->sendLootRoll(roll->objectGuid, roll->slot, static_cast<uint8_t>(type));
+    lootOf(L).sendLootRoll(roll->objectGuid, roll->slot, static_cast<uint8_t>(type));
     return 0;
 }
 
@@ -3301,9 +3299,9 @@ static int lua_GiveMasterLoot(lua_State* L) {
     const int candidate = static_cast<int>(luaL_optnumber(L, 2, 0));
     if (!gh || slot < 1 || candidate < 1) return 0;
 
-    const auto& candidates = gh->getMasterLootCandidates();
+    const auto& candidates = lootOf(L).getMasterLootCandidates();
     if (candidate > static_cast<int>(candidates.size())) return 0;
-    gh->lootMasterGive(static_cast<uint8_t>(slot - 1),
+    lootOf(L).lootMasterGive(static_cast<uint8_t>(slot - 1),
                        candidates[static_cast<size_t>(candidate - 1)]);
     return 0;
 }
@@ -3322,7 +3320,7 @@ static int lua_GetMasterLootCandidate(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
     if (!gh || index < 1) return luaReturnNil(L);
-    const auto& candidates = gh->getMasterLootCandidates();
+    const auto& candidates = lootOf(L).getMasterLootCandidates();
     if (index > static_cast<int>(candidates.size())) return luaReturnNil(L);
 
     const uint64_t guid = candidates[static_cast<size_t>(index) - 1];
@@ -3692,7 +3690,7 @@ void registerInventoryLuaAPI(lua_State* L) {
                 // held request is sent instead, and the slot the dialog passes
                 // is not read - only one can be waiting.
                 {"ConfirmLootSlot", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->confirmPendingLoot();
+            if (getGameHandler(L)) lootOf(L).confirmPendingLoot();
             return 0;
         }},
                 // The answer to "this item will bind to you".

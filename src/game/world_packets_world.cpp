@@ -1,4 +1,5 @@
 #include "game/world_packets.hpp"
+#include "loot/domain/records.hpp"
 #include "battleground/domain/records.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/opcodes.hpp"

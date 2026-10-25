@@ -5,6 +5,9 @@
 #include "game/mail_gateway.hpp"
 #include "game/guild_bank_gateway.hpp"
 #include "game/trade_gateway.hpp"
+#include "game/loot_gateway.hpp"
+#include "loot/domain/records.hpp"
+#include "loot/services/loot.hpp"
 #include "trade/services/trade.hpp"
 #include "guild_bank/domain/records.hpp"
 #include "guild_bank/services/guild_bank.hpp"
@@ -78,6 +81,16 @@ static trade::ITradeFeed* tradeFeed(InventoryQueries& queries) {
     return feed;
 }
 
+// The loot the protocol feeds. A client built without it drops the loot
+// packets, and says so once.
+static loot::ILootFeed* lootFeed(InventoryQueries& queries) {
+    auto* feed = queries.lootFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("Looting is not wired into this client; loot packets are dropped");
+    return feed;
+}
+
 // The auction house the protocol feeds. A client built without it drops the
 // auction packets, and says so once.
 static auction::IAuctionHouseFeed* auctionFeed(InventoryQueries& queries) {
@@ -93,13 +106,15 @@ InventoryHandler::InventoryHandler(PacketSender& sender, FrameXmlEvents& frameXm
                                    InventoryQueries& queries, const core::CVarStore& cvars,
                                    pipeline::AssetManager* assets)
     : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat),
-      queries_(queries), cvars_(cvars), assets_(assets),
+      queries_(queries), assets_(assets),
       subscriptions_(subscribeAuctionNotices(events, chat, frameXml, *this)) {
     for (auto& subscription : subscribeMailNotices(events, chat, frameXml, *this))
         subscriptions_.push_back(std::move(subscription));
     for (auto& subscription : subscribeGuildBankNotices(events, chat, frameXml))
         subscriptions_.push_back(std::move(subscription));
     for (auto& subscription : subscribeTradeNotices(events, chat, frameXml, *this))
+        subscriptions_.push_back(std::move(subscription));
+    for (auto& subscription : subscribeLootNotices(events, chat, frameXml, *this, queries, cvars))
         subscriptions_.push_back(std::move(subscription));
     // A letter from a player carries a guid; its sender is named once the
     // name arrives.
@@ -125,6 +140,7 @@ void InventoryHandler::beginCharacter() {
     if (auto* feed = mailFeed(queries_)) feed->beginCharacter();
     if (auto* feed = guildBankFeed(queries_)) feed->beginCharacter();
     if (auto* feed = tradeFeed(queries_)) feed->beginCharacter();
+    if (auto* feed = lootFeed(queries_)) feed->beginCharacter();
 }
 
 void InventoryHandler::leaveWorld() {
@@ -151,7 +167,7 @@ void InventoryHandler::update(float deltaTime) {
         if (held_.pendingMoneyDeltaTimer <= 0.0f) clearExpectedMoneyDelta();
     }
 
-    tickLootMoneyFallback(deltaTime);
+    if (auto* feed = lootFeed(queries_)) feed->timePassed(deltaTime);
     sendPendingAutoInspect(deltaTime);
 }
 
@@ -326,45 +342,6 @@ uint64_t targetGuidForUseItem(const InventoryQueries& owner, const ItemQueryResp
 // Opcode Registration
 // ============================================================
 
-/// Says what was looted, once per loot.
-///
-/// Both paths that learn about looted money end here - the server's notify and
-/// the fallback timer for servers that do not send one - so the line and the
-/// coin cannot differ between them.
-void InventoryHandler::announceLootMoney(uint64_t lootGuid, uint32_t amount) {
-    if (amount == 0) return;
-    auto it = localLootState_.find(lootGuid);
-    if (it != localLootState_.end()) {
-        if (it->second.moneyTaken) return;
-        it->second.moneyTaken = true;
-    }
-    chat_.addSystemChatMessage("Looted: " + formatCopperAmount(amount));
-    events_.publish(events::LootMoneyReceived{lootGuid, amount});
-    if (lootGuid != 0) recentLootMoneyAnnounceCooldowns_[lootGuid] = 1.5f;
-}
-
-void InventoryHandler::tickLootMoneyFallback(float deltaTime) {
-    // The cooldown that keeps one corpse's coin from being announced twice.
-    // GameHandler counted down a copy of its own that nothing set, so this one
-    // never ran out: a loot guid announced once stayed silent for the session.
-    for (auto it = recentLootMoneyAnnounceCooldowns_.begin(); it != recentLootMoneyAnnounceCooldowns_.end();) {
-        it->second -= deltaTime;
-        if (it->second <= 0.0f) {
-            it = recentLootMoneyAnnounceCooldowns_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-
-    if (pendingLootMoneyNotifyTimer_ <= 0.0f) return;
-    pendingLootMoneyNotifyTimer_ -= deltaTime;
-    if (pendingLootMoneyNotifyTimer_ > 0.0f) return;
-    pendingLootMoneyNotifyTimer_ = 0.0f;
-    announceLootMoney(pendingLootMoneyGuid_, pendingLootMoneyAmount_);
-    pendingLootMoneyGuid_ = 0;
-    pendingLootMoneyAmount_ = 0;
-}
-
 void InventoryHandler::registerOpcodes(DispatchTable& table) {
     // ---- Item query response ----
     table[Opcode::SMSG_ITEM_QUERY_SINGLE_RESPONSE] = [this](network::Packet& packet) { handleItemQueryResponse(packet); };
@@ -390,58 +367,78 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_PAGE_TEXT_QUERY_RESPONSE] = [this](network::Packet& packet) { handlePageTextQueryResponse(packet); };
 
     // ---- Loot ----
-    table[Opcode::SMSG_LOOT_RESPONSE] = [this](network::Packet& packet) { handleLootResponse(packet); };
-    table[Opcode::SMSG_LOOT_RELEASE_RESPONSE] = [this](network::Packet& packet) { handleLootReleaseResponse(packet); };
-    table[Opcode::SMSG_LOOT_REMOVED] = [this](network::Packet& packet) { handleLootRemoved(packet); };
-    table[Opcode::SMSG_LOOT_ROLL] = [this](network::Packet& packet) { handleLootRoll(packet); };
-    table[Opcode::SMSG_LOOT_ROLL_WON] = [this](network::Packet& packet) { handleLootRollWon(packet); };
+    table[Opcode::SMSG_LOOT_RESPONSE] = [this](network::Packet& packet) {
+        // Read into its own record: a response that does not parse leaves the
+        // window as it was.
+        LootResponseData contents;
+        if (!LootResponseParser::parse(packet, contents, isActiveExpansion("wotlk"))) return;
+        LOG_INFO("SMSG_LOOT_RESPONSE: guid=0x", std::hex, contents.lootGuid, std::dec,
+                 " items=", contents.items.size(), " gold=", contents.gold);
+        if (auto* feed = lootFeed(queries_)) feed->onContents(std::move(contents));
+    };
+    table[Opcode::SMSG_LOOT_RELEASE_RESPONSE] = [this](network::Packet& /*packet*/) {
+        if (auto* feed = lootFeed(queries_)) feed->onReleased();
+    };
+    table[Opcode::SMSG_LOOT_REMOVED] = [this](network::Packet& packet) {
+        const uint8_t slotIndex = packet.readUInt8();
+        if (auto* feed = lootFeed(queries_)) feed->onSlotRemoved(slotIndex);
+    };
+    table[Opcode::SMSG_LOOT_ROLL] = [this](network::Packet& packet) {
+        // objectGuid(8) + lootSlot(4) + playerGuid(8) + itemId(4) + itemRandSuffix(4) +
+        // itemRandProp(4) + rollNumber(1) + rollType(1) + autoPass(1)
+        if (!packet.hasRemaining(35)) return;
+        /*uint64_t objectGuid =*/ packet.readUInt64();
+        /*uint32_t lootSlot   =*/ packet.readUInt32();
+        const uint64_t playerGuid = packet.readUInt64();
+        /*uint32_t itemId     =*/ packet.readUInt32();
+        /*uint32_t randSuffix =*/ packet.readUInt32();
+        (void)packet.readUInt32(); // random property
+        const uint8_t rollNumber = packet.readUInt8();
+        const uint8_t rollType   = packet.readUInt8();
+        /*uint8_t autoPass   =*/ packet.readUInt8();
+        if (auto* feed = lootFeed(queries_)) feed->onVote(playerGuid, rollNumber, rollType);
+    };
+    table[Opcode::SMSG_LOOT_ROLL_WON] = [this](network::Packet& packet) {
+        // objectGuid(8) + lootSlot(4) + itemId(4) + itemSuffix(4) + itemProp(4) + playerGuid(8) + rollNumber(1) + rollType(1)
+        if (!packet.hasRemaining(34)) return;
+        const uint64_t wonGuid = packet.readUInt64();
+        const uint32_t wonSlot = packet.readUInt32();
+        const uint32_t itemId  = packet.readUInt32();
+        /*uint32_t randSuffix =*/ packet.readUInt32();
+        const int32_t wonRandProp = static_cast<int32_t>(packet.readUInt32());
+        const uint64_t winnerGuid = packet.readUInt64();
+        const uint8_t rollNumber  = packet.readUInt8();
+        const uint8_t rollType    = packet.readUInt8();
+        if (auto* feed = lootFeed(queries_))
+            feed->onRollWon(wonGuid, wonSlot, itemId, wonRandProp, winnerGuid, rollNumber, rollType);
+    };
     table[Opcode::SMSG_LOOT_MASTER_LIST] = [this](network::Packet& packet) {
-        masterLootCandidates_.clear();
-        if (!packet.hasRemaining(1)) return;
-        uint8_t mlCount = packet.readUInt8();
-        masterLootCandidates_.reserve(mlCount);
+        if (!packet.hasRemaining(1)) {
+            LOG_WARNING("SMSG_LOOT_MASTER_LIST: no count; the master loot menu keeps its last list");
+            return;
+        }
+        const uint8_t mlCount = packet.readUInt8();
+        std::vector<uint64_t> candidates;
+        candidates.reserve(mlCount);
         for (uint8_t i = 0; i < mlCount; ++i) {
             if (!packet.hasRemaining(8)) break;
-            masterLootCandidates_.push_back(packet.readUInt64());
+            candidates.push_back(packet.readUInt64());
         }
-        // The candidate list arrives because the master looter picked an item,
-        // and the menu that assigns it is built from exactly this. Parsed and
-        // stored already; nothing was told it had come, so the menu never
-        // opened. Both events: one opens it, one fills it, and they are the
-        // same frame rather than two.
-        if (frameXml_.frameXmlListening()) {
-            frameXml_.fireFrameXmlEvent("OPEN_MASTER_LOOT_LIST", {});
-            frameXml_.fireFrameXmlEvent("UPDATE_MASTER_LOOT_LIST", {});
-        }
+        if (auto* feed = lootFeed(queries_)) feed->onMasterCandidates(std::move(candidates));
     };
 
-    // ---- Loot money / misc consume ----
+    // ---- Loot money ----
     table[Opcode::SMSG_LOOT_MONEY_NOTIFY] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(4)) return;
-        uint32_t amount = packet.readUInt32();
+        const uint32_t amount = packet.readUInt32();
         if (packet.hasRemaining(1))
             /*uint8_t soleLooter =*/ packet.readUInt8();
-        held_.moneyCopper += amount;
-        held_.pendingMoneyDelta = amount;
-        held_.pendingMoneyDeltaTimer = 2.0f;
-        uint64_t notifyGuid = pendingLootMoneyGuid_ != 0 ? pendingLootMoneyGuid_ : currentLoot_.lootGuid;
-        pendingLootMoneyGuid_ = 0;
-        pendingLootMoneyAmount_ = 0;
-        pendingLootMoneyNotifyTimer_ = 0.0f;
-        announceLootMoney(notifyGuid, amount);
-        if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("PLAYER_MONEY", {});
-        // Both packets report the same thing and a server may send either, so
-        // the coin goes on whichever arrives first.
-        //
-        // Only for an amount that is this corpse's whole purse, though: in a
-        // group this notify carries one player's share and reaches everyone,
-        // including someone standing over a different corpse of their own.
-        // SMSG_LOOT_CLEAR_MONEY is the one that names the loot itself, and it
-        // is what clears the coin in that case.
-        if (amount == currentLoot_.gold) clearLootMoney();
+        if (auto* feed = lootFeed(queries_)) feed->onMoneyNotify(amount);
     };
+    // Both this and the notify report the coin taken, and a server may send
+    // either: the coin goes on whichever arrives first.
     table[Opcode::SMSG_LOOT_CLEAR_MONEY] = [this](network::Packet& /*packet*/) {
-        clearLootMoney();
+        if (auto* feed = lootFeed(queries_)) feed->onMoneyCleared();
     };
 
     // ---- Read item (books) (moved from GameHandler) ----
@@ -461,58 +458,25 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         // randSuffix(4) + randProp(4) + itemCount(4) + countdown(4) + voteMask(1)
         //
         // itemCount - "items in stack" - was missing, so the countdown was read
-        // from it and the vote mask from the countdown's first byte. The
-        // countdown drives the bar that times the roll out and the mask decides
-        // which of need, greed and disenchant are even offered.
-        //
-        // Chosen by the length rather than by the expansion: WotLK is verified
-        // against Group::SendLootStartRoll, and rather than guess whether a
-        // pre-WotLK realm sends the field, take it when the packet is long
-        // enough to hold it.
+        // from it and the vote mask from the countdown's first byte. Chosen by
+        // the length rather than by the expansion: WotLK is verified against
+        // Group::SendLootStartRoll, and rather than guess whether a pre-WotLK
+        // realm sends the field, take it when the packet is long enough to
+        // hold it.
         const bool hasMapId = isActiveExpansion("wotlk");
         const size_t baseSz = hasMapId ? 33 : 29;
         if (packet.getRemainingSize() < baseSz) return;
         const bool hasItemCount = packet.getRemainingSize() >= baseSz + 4;
-        uint64_t objectGuid = packet.readUInt64();
+        const uint64_t objectGuid = packet.readUInt64();
         if (hasMapId) packet.readUInt32(); // mapId
-        uint32_t lootSlot = packet.readUInt32();
-        uint32_t itemId   = packet.readUInt32();
+        const uint32_t lootSlot = packet.readUInt32();
+        const uint32_t itemId   = packet.readUInt32();
         /*uint32_t randSuffix =*/ packet.readUInt32();
         (void)packet.readUInt32(); // random property
         if (hasItemCount) (void)packet.readUInt32(); // items in stack
-        uint32_t countdown = packet.readUInt32();
-        uint8_t  voteMask  = packet.readUInt8();
-
-        // Resolve item name from cache
-        ensureItemInfo(itemId);
-        auto* info = getItemInfo(itemId);
-        std::string itemName = (info && !info->name.empty()) ? info->name : ("Item #" + std::to_string(itemId));
-        uint8_t quality = info ? static_cast<uint8_t>(info->quality) : 1;
-
-        // Its own entry, kept alongside whatever else is being rolled for.
-        // A boss puts four of these up at once and there was one slot to hold
-        // them, so the last to arrive answered for all of them.
-        LootRollEntry& roll = beginLootRoll(objectGuid, lootSlot);
-        roll.itemId = itemId;
-        roll.itemName = itemName;
-        roll.itemQuality = quality;
-        roll.rollCountdownMs = countdown;
-        roll.voteMask = voteMask;
-        roll.rollStartedAt = std::chrono::steady_clock::now();
-        std::string link = buildItemLink(itemId, quality, itemName);
-        chat_.addSystemChatMessage("Loot roll started for " + link + ".");
-        // The roll id the interface will ask every later question by. Its own
-        // number: the slot plus one was unique only while one roll was open,
-        // and two corpses both rolling their first item shared it.
-        if (frameXml_.frameXmlListening()) {
-            // ...and the time to roll in, which the packet carried all along
-            // and this read past. GroupLootFrame_OpenNewFrame takes it as the
-            // second argument and sizes the countdown bar from it; without one
-            // the bar had no length and the window could not time out.
-            frameXml_.fireFrameXmlEvent("START_LOOT_ROLL",
-                                           {std::to_string(roll.rollId),
-                                            std::to_string(countdown)});
-        }
+        const uint32_t countdown = packet.readUInt32();
+        const uint8_t  voteMask  = packet.readUInt8();
+        if (auto* feed = lootFeed(queries_)) feed->onRollStarted(objectGuid, lootSlot, itemId, countdown, voteMask);
     };
 
     table[Opcode::SMSG_LOOT_ALL_PASSED] = [this](network::Packet& packet) {
@@ -520,16 +484,10 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         if (!packet.hasRemaining(24)) return;
         const uint64_t passedGuid = packet.readUInt64();
         const uint32_t passedSlot = packet.readUInt32();
-        uint32_t itemId     = packet.readUInt32();
+        const uint32_t itemId     = packet.readUInt32();
         /*uint32_t randSuffix =*/ packet.readUInt32();
         (void)packet.readUInt32(); // random property
-        ensureItemInfo(itemId);
-        auto* allPassInfo = getItemInfo(itemId);
-        std::string allPassName = (allPassInfo && !allPassInfo->name.empty())
-            ? allPassInfo->name : ("Item #" + std::to_string(itemId));
-        uint32_t allPassQuality = allPassInfo ? allPassInfo->quality : 1u;
-        chat_.addSystemChatMessage("Everyone passed on " + buildItemLink(itemId, allPassQuality, allPassName) + ".");
-        endLootRoll(passedGuid, passedSlot);
+        if (auto* feed = lootFeed(queries_)) feed->onAllPassed(passedGuid, passedSlot, itemId);
     };
 
     table[Opcode::SMSG_LOOT_ITEM_NOTIFY] = [this](network::Packet& packet) {
@@ -543,46 +501,14 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
             if (!packet.hasRemaining(4)) return;
             lootSlot = packet.readUInt32();
         }
-        // Try to resolve item name
-        uint32_t itemId = 0;
-        for (const auto& lootItem : currentLoot_.items) {
-            if (lootItem.slotIndex == static_cast<uint8_t>(lootSlot)) {
-                itemId = lootItem.itemId;
-                break;
-            }
-        }
-        if (itemId != 0) {
-            auto* notifInfo = getItemInfo(itemId);
-            std::string itemName = (notifInfo && !notifInfo->name.empty())
-                ? notifInfo->name : ("Item #" + std::to_string(itemId));
-            uint32_t notifyQuality = notifInfo ? notifInfo->quality : 1u;
-            std::string itemLink2 = buildItemLink(itemId, notifyQuality, itemName);
-            // Show Loot Spam, which the panel offers and nothing read - so the
-            // line went to chat for every item however it was set, which is
-            // what the setting is named after. Default on: it is what this
-            // client has always printed, and a player who does not want it
-            // has now got the switch that says so.
-            if (cvars_.get("showLootSpam", "1") != "0") {
-                chat_.addSystemChatMessage("You receive loot: " + itemLink2 + ".");
-            }
-        }
+        if (auto* feed = lootFeed(queries_)) feed->onItemNotify(static_cast<uint8_t>(lootSlot));
     };
 
     table[Opcode::SMSG_LOOT_SLOT_CHANGED] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(1)) {
-            uint8_t slotIdx = packet.readUInt8();
-            LOG_DEBUG("SMSG_LOOT_SLOT_CHANGED: slot=", (int)slotIdx);
-            // The loot frame redraws the one row from this. It carries the
-            // slot, and the slot is what the event carries - the interface
-            // reads arg1 to know which button to refresh, so a bare fire would
-            // make it redraw the wrong one.
-            //
-            // Slots are zero-based on the wire and one-based in the interface.
-            if (frameXml_.frameXmlListening()) {
-                frameXml_.fireFrameXmlEvent("LOOT_SLOT_CHANGED",
-                                               {std::to_string(slotIdx + 1)});
-            }
-        }
+        if (!packet.hasRemaining(1)) return;
+        const uint8_t slotIdx = packet.readUInt8();
+        LOG_DEBUG("SMSG_LOOT_SLOT_CHANGED: slot=", (int)slotIdx);
+        if (auto* feed = lootFeed(queries_)) feed->onSlotChanged(slotIdx);
     };
 
     // ---- Item push result ----
@@ -834,7 +760,8 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                     default: break;
                 }
         std::string msg = errMsg ? errMsg : "Inventory error (" + std::to_string(error) + ").";
-        if (error == 50 && currentLoot_.lootGuid != 0) {
+        const auto* loot = queries_.loot();
+        if (error == 50 && loot && loot->getCurrentLoot().lootGuid != 0) {
             msg = "Cannot loot item: Inventory is full.";
         }
         // The error line sounds itself (UiErrorRaised); this played the same
@@ -1266,56 +1193,12 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
 // Loot
 // ============================================================
 
-void InventoryHandler::lootTarget(uint64_t targetGuid) {
-    if (!sender_.worldCommandAllowed("loot")) return;
-    currentLoot_.items.clear();
-    LOG_INFO("Looting target 0x", std::hex, targetGuid, std::dec);
-    auto packet = LootPacket::build(targetGuid);
-    sender_.send(packet);
-}
-
-void InventoryHandler::lootItem(uint8_t slotIndex, bool confirmed) {
-    if (!sender_.worldCommandAllowed("loot")) return;
-
-    if (!confirmed) {
-        // Bind-on-pickup, and the warning neither interface gave. The slot the
-        // event carries is the one on screen, not the server's: uiparent.lua
-        // answers it with GetLootSlotInfo, which counts the coin as a slot of
-        // its own and the items after it.
-        const auto& loot = currentLoot_;
-        int display = loot.hasCoinSlot() ? 1 : 0;
-        for (const auto& item : loot.items) {
-            ++display;
-            if (item.slotIndex != slotIndex) continue;
-            const auto* info = getItemInfo(item.itemId);
-            if (info && info->valid && info->bindType == 1) {
-                pendingLootActive_ = true;
-                pendingLootSlot_ = slotIndex;
-                if (frameXml_.frameXmlListening())
-                    frameXml_.fireFrameXmlEvent("LOOT_BIND_CONFIRM",
-                                                   {std::to_string(display)});
-                return;
-            }
-            break;
-        }
-    }
-
-    pendingLootActive_ = false;
-    auto packet = AutostoreLootItemPacket::build(slotIndex);
-    sender_.send(packet);
-}
-
-void InventoryHandler::confirmPendingLoot() {
-    if (!pendingLootActive_) return;
-    const uint8_t slot = pendingLootSlot_;
-    pendingLootActive_ = false;
-    lootItem(slot, true);
-}
-
-void InventoryHandler::lootMoney() {
-    if (!sender_.characterInWorld()) return;
-    auto packet = LootMoneyPacket::build();
-    sender_.send(packet);
+// The purse moves now, and the change is expected: the field update that
+// follows is the same money, not more of it.
+void InventoryHandler::creditLootedMoney(uint32_t copper) {
+    held_.moneyCopper += copper;
+    held_.pendingMoneyDelta = copper;
+    held_.pendingMoneyDeltaTimer = 2.0f;
 }
 
 void InventoryHandler::cancelTempEnchantment(uint8_t handIndex) {
@@ -1326,310 +1209,6 @@ void InventoryHandler::cancelTempEnchantment(uint8_t handIndex) {
     network::Packet packet(wireOp);
     packet.writeUInt32(handIndex);
     sender_.send(packet);
-}
-
-void InventoryHandler::clearLootMoney() {
-    if (!currentLoot_.goldLeft()) return;
-    // Marked rather than zeroed: the coin is display slot one, and dropping it
-    // would move every item button onto the item after its own.
-    currentLoot_.goldLooted = true;
-    auto it = localLootState_.find(currentLoot_.lootGuid);
-    if (it != localLootState_.end()) it->second.data.goldLooted = true;
-    // Display slot one, which is where the coin sits whenever there is one.
-    if (lootWindowOpen_ && frameXml_.frameXmlListening()) {
-        frameXml_.fireFrameXmlEvent("LOOT_SLOT_CLEARED", {"1"});
-    }
-    // A corpse that held only money is empty now.
-    if (lootWindowOpen_ && currentLoot_.nothingLeft()) closeLoot();
-}
-
-void InventoryHandler::closeLoot() {
-    if (!lootWindowOpen_) return;
-    const uint64_t lootGuid = currentLoot_.lootGuid;
-    if (sender_.characterInWorld()) {
-        auto packet = LootReleasePacket::build(lootGuid);
-        sender_.send(packet);
-    }
-    lootWindowOpen_ = false;
-    events_.publish(events::LootWindowChanged{.open = false});
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("LOOT_CLOSED", {});
-    // Do NOT locally despawn a gather node on loot-close. Node lifetime is
-    // server-authoritative: a mineral vein / herb can still hold charges for another
-    // gatherer, and the server sends SMSG_DESTROY_OBJECT when it is truly depleted.
-    // Predicting the despawn here removed the node after a single loot, so it couldn't
-    // be shared or re-mined (it looked like one player "mined it all").
-    currentLoot_ = LootResponseData{};
-}
-
-void InventoryHandler::lootMasterGive(uint8_t lootSlot, uint64_t targetGuid) {
-    if (!sender_.characterInWorld()) return;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_LOOT_MASTER_GIVE));
-    pkt.writeUInt64(currentLoot_.lootGuid);
-    pkt.writeUInt8(lootSlot);
-    pkt.writeUInt64(targetGuid);
-    sender_.send(pkt);
-}
-
-void InventoryHandler::handleLootResponse(network::Packet& packet) {
-    const bool wotlkLoot = isActiveExpansion("wotlk");
-    if (!LootResponseParser::parse(packet, currentLoot_, wotlkLoot)) return;
-    const bool hasLoot = !currentLoot_.items.empty() || currentLoot_.gold > 0;
-    LOG_INFO("SMSG_LOOT_RESPONSE: guid=0x", std::hex, currentLoot_.lootGuid, std::dec,
-             " items=", currentLoot_.items.size(), " gold=", currentLoot_.gold);
-    if (!hasLoot && queries_.gameObjectLootPending(currentLoot_.lootGuid)) {
-        LOG_DEBUG("Ignoring empty SMSG_LOOT_RESPONSE during pending gather/open");
-        return;
-    }
-    lootWindowOpen_ = true;
-    events_.publish(events::LootWindowChanged{.open = true});
-    if (frameXml_.frameXmlListening()) {
-        // Carries whether this loot is being taken automatically. The loot
-        // frame reads it on the path where it could not show itself, and
-        // closes with CloseLoot(autoLoot == 0) - so an absent argument
-        // compares false and tells the server the window opened when it did
-        // not.
-        frameXml_.fireFrameXmlEvent("LOOT_OPENED", {autoLoot_ ? "1" : "0"});
-        frameXml_.fireFrameXmlEvent("LOOT_READY", {});
-    }
-    const bool isLastInteractedGoLoot = queries_.gameObjectLootOpened(currentLoot_.lootGuid);
-    auto& localLoot = localLootState_[currentLoot_.lootGuid];
-    localLoot.data = currentLoot_;
-
-    for (const auto& item : currentLoot_.items) {
-        queryItemInfo(item.itemId, 0);
-    }
-
-    if (currentLoot_.gold > 0) {
-        if (sender_.characterInWorld()) {
-            bool suppressFallback = false;
-            auto cooldownIt = recentLootMoneyAnnounceCooldowns_.find(currentLoot_.lootGuid);
-            if (cooldownIt != recentLootMoneyAnnounceCooldowns_.end() && cooldownIt->second > 0.0f) {
-                suppressFallback = true;
-            }
-            pendingLootMoneyGuid_ = suppressFallback ? 0 : currentLoot_.lootGuid;
-            pendingLootMoneyAmount_ = suppressFallback ? 0 : currentLoot_.gold;
-            pendingLootMoneyNotifyTimer_ = suppressFallback ? 0.0f : 0.4f;
-            auto pkt = LootMoneyPacket::build();
-            sender_.send(pkt);
-            // The coin stays in the window until the server says it is taken.
-            //
-            // Clearing it here emptied the slot the interface had just been
-            // told about: the loot frame builds its buttons on LOOT_OPENED,
-            // which fires above, and the coin is display slot one with the
-            // items after it. Dropping the coin out from under that renumbered
-            // every item - GetLootSlotInfo(2) answered the *second* item, or
-            // nothing at all - so the window went on showing a coin that had
-            // been taken and an item button that did nothing when clicked.
-        }
-    }
-
-    // Game-object quest containers are single-action pickups in normal play.
-    // Autostore their returned items even when general creature auto-loot is off;
-    // otherwise right-click opens server loot but never grants the objective item.
-    const bool autoStoreGameObjectLoot = isLastInteractedGoLoot;
-    if ((autoLoot_ || autoStoreGameObjectLoot) &&
-        sender_.characterInWorld() &&
-        !localLoot.itemAutoLootSent) {
-        for (const auto& item : currentLoot_.items) {
-            LOG_INFO("Autostoring loot slot=", static_cast<int>(item.slotIndex),
-                     " item=", item.itemId, " count=", item.count,
-                     " fromGuid=0x", std::hex, currentLoot_.lootGuid, std::dec,
-                     " gameObject=", autoStoreGameObjectLoot);
-            auto pkt = AutostoreLootItemPacket::build(item.slotIndex);
-            sender_.send(pkt);
-        }
-        localLoot.itemAutoLootSent = true;
-    }
-
-    // A corpse that held only money is already empty, so close it here rather
-    // than waiting for a slot to clear that will never clear. Only when there
-    // are no items: an item loot's slots have not been confirmed cleared yet,
-    // and releasing before the server stores them would drop them - that case
-    // closes from handleLootRemoved once the last slot is gone.
-    if (lootWindowOpen_ && currentLoot_.items.empty() && currentLoot_.gold == 0) {
-        closeLoot();
-    }
-}
-
-void InventoryHandler::handleLootReleaseResponse(network::Packet& packet) {
-    (void)packet;
-    const uint64_t lootGuid = currentLoot_.lootGuid;
-    localLootState_.erase(lootGuid);
-    lootWindowOpen_ = false;
-    events_.publish(events::LootWindowChanged{.open = false});
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("LOOT_CLOSED", {});
-    // Node lifetime is server-authoritative - see closeLoot(). The server despawns a
-    // depleted gather node via SMSG_DESTROY_OBJECT; don't predict it here or a node the
-    // server keeps (still holding charges for another gatherer) disappears locally.
-    currentLoot_ = LootResponseData{};
-}
-
-void InventoryHandler::handleLootRemoved(network::Packet& packet) {
-    uint8_t slotIndex = packet.readUInt8();
-    for (auto it = currentLoot_.items.begin(); it != currentLoot_.items.end(); ++it) {
-        if (it->slotIndex == slotIndex) {
-            // SMSG_ITEM_PUSH_RESULT is the authoritative inventory receipt and
-            // emits the single "Received item" notification. Slot removal only
-            // updates the open loot window; announcing here duplicated chat and
-            // the loot sound for the same item.
-            it->looted = true;
-            if (frameXml_.frameXmlListening())
-                frameXml_.fireFrameXmlEvent("LOOT_SLOT_CLEARED", {std::to_string(slotIndex + 1)});
-            break;
-        }
-    }
-    // An emptied corpse closes itself.
-    //
-    // The interface's loot window opens on LOOT_OPENED and closes on
-    // LOOT_CLOSED and nothing else - LOOT_SLOT_CLEARED only hides the one
-    // button. Autoloot sends an autostore for every slot at once, the server
-    // clears them one by one, and when the last one goes there is nothing left
-    // to loot but no close was ever sent: the window sat open and empty, which
-    // is what "autoloot doesn't close the bag" is. Money is grabbed and zeroed
-    // in the same breath at open, so items empty with no gold left is a corpse
-    // with nothing on it. Retail closes it here too, for a manual last-item
-    // loot as much as an automatic one.
-    if (lootWindowOpen_ && currentLoot_.nothingLeft()) {
-        closeLoot();
-    }
-}
-
-// ============================================================
-// Loot Roll
-// ============================================================
-
-/// A new roll, with the id the interface will know it by.
-///
-/// Any roll already open on the same item of the same corpse is replaced: the
-/// server restates a roll when its countdown is reset, and two windows for one
-/// item is worse than none.
-LootRollEntry& InventoryHandler::beginLootRoll(uint64_t objectGuid, uint32_t slot) {
-    for (auto& roll : lootRolls_) {
-        if (roll.objectGuid == objectGuid && roll.slot == slot) {
-            const int keptId = roll.rollId;
-            roll = LootRollEntry{};
-            roll.rollId = keptId;
-            roll.objectGuid = objectGuid;
-            roll.slot = slot;
-            return roll;
-        }
-    }
-    LootRollEntry roll;
-    roll.rollId = nextLootRollId_++;
-    roll.objectGuid = objectGuid;
-    roll.slot = slot;
-    lootRolls_.push_back(roll);
-    return lootRolls_.back();
-}
-
-/// The roll on one item of one corpse, which is how every later packet names
-/// it - the roll id is this client's own and the server has never seen it.
-LootRollEntry* InventoryHandler::findLootRoll(uint64_t objectGuid, uint32_t slot) {
-    for (auto& roll : lootRolls_) {
-        if (roll.objectGuid == objectGuid && roll.slot == slot) return &roll;
-    }
-    return nullptr;
-}
-
-/// Close one roll and take its window down with it.
-void InventoryHandler::endLootRoll(uint64_t objectGuid, uint32_t slot) {
-    for (auto it = lootRolls_.begin(); it != lootRolls_.end(); ++it) {
-        if (it->objectGuid != objectGuid || it->slot != slot) continue;
-        const int rollId = it->rollId;
-        lootRolls_.erase(it);
-        // Named, so the window that closes is the one this roll opened. It was
-        // the slot plus one here as well, which closed a different roll's
-        // window whenever two were up.
-        if (frameXml_.frameXmlListening()) {
-            frameXml_.fireFrameXmlEvent("CANCEL_LOOT_ROLL",
-                                           {std::to_string(rollId)});
-        }
-        return;
-    }
-}
-
-void InventoryHandler::sendLootRoll(uint64_t objectGuid, uint32_t slot, uint8_t rollType) {
-    if (!sender_.characterInWorld()) return;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_LOOT_ROLL));
-    pkt.writeUInt64(objectGuid);
-    pkt.writeUInt32(slot);
-    pkt.writeUInt8(rollType);
-    sender_.send(pkt);
-    // Once we've sent any choice (pass/need/greed/disenchant), close the dialog
-    // - this roll's, and only this roll's.
-    endLootRoll(objectGuid, slot);
-}
-
-void InventoryHandler::handleLootRoll(network::Packet& packet) {
-    // objectGuid(8) + lootSlot(4) + playerGuid(8) + itemId(4) + itemRandSuffix(4) +
-    // itemRandProp(4) + rollNumber(1) + rollType(1) + autoPass(1)
-    if (!packet.hasRemaining(35)) return;
-    uint64_t objectGuid = packet.readUInt64();
-    uint32_t lootSlot   = packet.readUInt32();
-    uint64_t playerGuid = packet.readUInt64();
-    /*uint32_t itemId     =*/ packet.readUInt32();
-    /*uint32_t randSuffix =*/ packet.readUInt32();
-    (void)packet.readUInt32(); // random property
-    uint8_t rollNumber  = packet.readUInt8();
-    uint8_t rollType    = packet.readUInt8();
-    /*uint8_t autoPass   =*/ packet.readUInt8();
-
-    // Resolve player name
-    std::string playerName = queries_.playerName(playerGuid);
-    if (playerName.empty()) playerName = "Player";
-
-    if (LootRollEntry* roll = findLootRoll(objectGuid, lootSlot)) {
-        LootRollEntry::PlayerRollResult result;
-        result.playerName = playerName;
-        result.rollNum = rollNumber;
-        result.rollType = rollType;
-        roll->playerRolls.push_back(result);
-    }
-
-    // RollVote enum: 0=Pass, 1=Need, 2=Greed, 3=Disenchant.
-    const char* typeStr = "passed on";
-    if (rollType == 1) typeStr = "rolled Need";
-    else if (rollType == 2) typeStr = "rolled Greed";
-    else if (rollType == 3) typeStr = "rolled Disenchant";
-    if (rollType >= 1 && rollType <= 3) {
-        chat_.addSystemChatMessage(playerName + " " + typeStr + " - " + std::to_string(rollNumber));
-    } else {
-        chat_.addSystemChatMessage(playerName + " passed.");
-    }
-}
-
-void InventoryHandler::handleLootRollWon(network::Packet& packet) {
-    // objectGuid(8) + lootSlot(4) + itemId(4) + itemSuffix(4) + itemProp(4) + playerGuid(8) + rollNumber(1) + rollType(1)
-    if (!packet.hasRemaining(34)) return;
-    const uint64_t wonGuid = packet.readUInt64();
-    const uint32_t wonSlot = packet.readUInt32();
-    uint32_t itemId     = packet.readUInt32();
-    /*uint32_t randSuffix =*/ packet.readUInt32();
-    int32_t wonRandProp = static_cast<int32_t>(packet.readUInt32());
-    uint64_t winnerGuid = packet.readUInt64();
-    uint8_t rollNumber  = packet.readUInt8();
-    uint8_t rollType    = packet.readUInt8();
-
-    std::string winnerName = queries_.playerName(winnerGuid);
-    if (winnerName.empty()) winnerName = "Player";
-
-    ensureItemInfo(itemId);
-    auto* info = getItemInfo(itemId);
-    std::string itemName = (info && !info->name.empty()) ? info->name : ("Item #" + std::to_string(itemId));
-    if (wonRandProp != 0) {
-        std::string suffix = queries_.randomPropertyName(wonRandProp);
-        if (!suffix.empty()) itemName += " " + suffix;
-    }
-    uint32_t wonQuality = info ? info->quality : 1u;
-    std::string link = buildItemLink(itemId, wonQuality, itemName);
-
-    // RollVote enum: 1=Need, 2=Greed, 3=Disenchant (0=Pass cannot win).
-    const char* typeStr = "Need";
-    if (rollType == 2) typeStr = "Greed";
-    else if (rollType == 3) typeStr = "Disenchant";
-
-    chat_.addSystemChatMessage(winnerName + " won " + link + " (" + typeStr + " - " + std::to_string(rollNumber) + ")");
-    endLootRoll(wonGuid, wonSlot);
 }
 
 // ============================================================
@@ -3469,15 +3048,7 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
         // after it has drawn - "Item #4606" against an empty square, kept for
         // as long as the corpse is open. LOOT_SLOT_CHANGED is the event the
         // loot frame redraws one button on.
-        if (lootWindowOpen_ && frameXml_.frameXmlListening()) {
-            const int coinSlots = currentLoot_.hasCoinSlot() ? 1 : 0;
-            for (size_t i = 0; i < currentLoot_.items.size(); ++i) {
-                if (currentLoot_.items[i].itemId != data.entry) continue;
-                frameXml_.fireFrameXmlEvent(
-                    "LOOT_SLOT_CHANGED",
-                    {std::to_string(coinSlots + static_cast<int>(i) + 1)});
-            }
-        }
+        if (auto* feed = lootFeed(queries_)) feed->onItemInfo(data.entry);
 
         // An objective that had no name for what it asks for now has one.
         //

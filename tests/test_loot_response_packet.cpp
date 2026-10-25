@@ -12,6 +12,7 @@
 // reads as "the realm sent nothing" rather than "we dropped what it sent".
 #include <catch_amalgamated.hpp>
 #include "game/world_packets.hpp"
+#include "loot/domain/records.hpp"
 
 using namespace wowee::game;
 

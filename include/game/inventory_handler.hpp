@@ -24,6 +24,7 @@ namespace auction { class IAuctionHouseFeed; enum class AuctionList; }
 namespace mail { class IMailboxFeed; }
 namespace guild_bank { class IGuildBankFeed; class IGuildBank; }
 namespace trade { class ITradeFeed; }
+namespace loot { class ILootFeed; class ILoot; }
 namespace pipeline { class AssetManager; }
 namespace game {
 
@@ -173,6 +174,11 @@ public:
     [[nodiscard]] virtual const guild_bank::IGuildBank* guildBank() const = 0;
     /// Where the trade status packets go; null as above.
     [[nodiscard]] virtual trade::ITradeFeed* tradeFeed() = 0;
+    /// Where the loot packets, the frame's time and an item's arrival go;
+    /// null as above.
+    [[nodiscard]] virtual loot::ILootFeed* lootFeed() = 0;
+    /// The open loot, which a full-bags refusal names; null as above.
+    [[nodiscard]] virtual const loot::ILoot* loot() const = 0;
 };
 
 class InventoryHandler {
@@ -373,60 +379,22 @@ public:
         return (it != held_.itemRefundInfo.end()) ? &it->second : nullptr;
     }
 
-    /// Whether this corpse or chest was opened and still has items in it, by
-    /// what its last loot window held. Tab targeting asks, so a corpse left
-    /// with loot on it stays in the cycle after the fight.
-    [[nodiscard]] bool hasLootLeft(uint64_t guid) const {
-        auto it = localLootState_.find(guid);
-        return it != localLootState_.end() && !it->second.data.items.empty();
-    }
-
     // ---- Item text (books / readable items) ----
     bool isItemTextOpen() const { return itemTextOpen_; }
     const std::string& getItemText() const { return itemText_; }
     void closeItemText();
     void queryItemText(uint64_t itemGuid);
 
-    // ---- Loot ----
-    void lootTarget(uint64_t targetGuid);
-    /// Take the coin on the corpse. Its own request, with no slot:
-    /// money is not one of the numbered loot slots on the wire even
-    /// though the interface shows it as one.
-    void lootMoney();
+    /// Money looted, into the purse, and shown as the change it made.
+    void creditLootedMoney(uint32_t copper);
     /// Drop a temporary weapon enchant - a sharpening stone, poison, or a
     /// shaman's weapon imbue. Slot zero is the main hand and one the off hand,
     /// which is how the request numbers them; the interface counts from one.
     void cancelTempEnchantment(uint8_t handIndex);
-    void closeLoot();
-    bool isLootWindowOpen() const { return lootWindowOpen_; }
-    const LootResponseData& getCurrentLoot() const { return currentLoot_; }
-    void setAutoLoot(bool enabled) { autoLoot_ = enabled; }
-    bool isAutoLoot() const { return autoLoot_; }
     void setAutoSellGrey(bool enabled) { autoSellGrey_ = enabled; }
     bool isAutoSellGrey() const { return autoSellGrey_; }
     void setAutoRepair(bool enabled) { autoRepair_ = enabled; }
     bool isAutoRepair() const { return autoRepair_; }
-
-    // Master loot candidates (from SMSG_LOOT_MASTER_LIST)
-    const std::vector<uint64_t>& getMasterLootCandidates() const { return masterLootCandidates_; }
-    bool hasMasterLootCandidates() const { return !masterLootCandidates_.empty(); }
-    void lootMasterGive(uint8_t lootSlot, uint64_t targetGuid);
-
-    // Group loot roll (aliased from handler_types.hpp)
-    using LootRollEntry = game::LootRollEntry;
-    /// The roll the interface means, or null when it has already closed.
-    ///
-    /// Every roll the player has open is kept. This used to hold one: a dungeon
-    /// boss puts up several at once, each new roll overwrote the last, and a
-    /// window already on screen then described the item from the roll after it
-    /// - and rolling Need on it rolled on that one instead.
-    const LootRollEntry* getLootRoll(int rollId) const {
-        for (const auto& roll : lootRolls_) {
-            if (roll.rollId == rollId) return &roll;
-        }
-        return nullptr;
-    }
-    void sendLootRoll(uint64_t objectGuid, uint32_t slot, uint8_t rollType);
 
     // ---- Equipment Sets (aliased from handler_types.hpp) ----
     using EquipmentSetInfo = game::EquipmentSetInfo;
@@ -502,17 +470,6 @@ public:
         int     slot    = 0;
         uint8_t wireSlot = 0;   ///< what the event carried, for the reply
     };
-    // ---- Looting, and the prompt before something binds ----
-    //
-    // Same shape as the equip prompt above and for the same reason: neither
-    // interface warned before taking a bind-on-pickup item.
-    void lootItem(uint8_t slotIndex, bool confirmed = false);
-    /// Send the loot request that was held back. The dialog passes the slot it
-    /// was shown for, but only one can be waiting, so the held one is enough -
-    /// and going back through lootItem with the slot would raise the prompt
-    /// again, which is a loop rather than a confirmation.
-    void confirmPendingLoot();
-
     /// Send the use that was held back by the bind-on-use prompt. USE_BIND
     /// carries no slot at all - FrameXML shows it and calls this with nothing -
     /// so the held request is the only record of what was being used.
@@ -698,23 +655,9 @@ public:
 
 private:
     // --- Packet handlers ---
-    void handleLootResponse(network::Packet& packet);
-    void handleLootReleaseResponse(network::Packet& packet);
-    void handleLootRemoved(network::Packet& packet);
     void handleListInventory(network::Packet& packet);
     void handleTrainerList(network::Packet& packet);
     void handleItemTextQueryResponse(network::Packet& packet);
-    void handleLootRoll(network::Packet& packet);
-    void handleLootRollWon(network::Packet& packet);
-
-    /// Tell the interface a roll is over, by the id it was opened with.
-    ///
-    /// The roll window hides itself on this and nothing else, so without it a
-    /// resolved roll stays on screen over a bar that has run down, offering
-    /// buttons the server has already stopped listening for.
-    LootRollEntry& beginLootRoll(uint64_t objectGuid, uint32_t slot);
-    LootRollEntry* findLootRoll(uint64_t objectGuid, uint32_t slot);
-    void endLootRoll(uint64_t objectGuid, uint32_t slot);
     void handleShowBank(network::Packet& packet);
     void handleBuyBankSlotResult(network::Packet& packet);
     /// An auction list result, for the list it names, or for the one last
@@ -742,9 +685,6 @@ private:
     /// SMSG_PAGE_TEXT_QUERY_RESPONSE: a page of the book being read.
     void handlePageTextQueryResponse(network::Packet& packet);
 
-    /// Advances the fallback that announces looted money when the server
-    /// never sends SMSG_LOOT_MONEY_NOTIFY.
-    void tickLootMoneyFallback(float deltaTime);
     /// Equipment visuals fall back on an inspect when a player's visible-item
     /// fields cannot be read; one goes out at a time, rate-limited.
     void sendPendingAutoInspect(float deltaTime);
@@ -760,13 +700,12 @@ private:
     core::EventBus& events_;
     ChatLog& chat_;
     InventoryQueries& queries_;
-    const core::CVarStore& cvars_;
     /// The client's data, for the repair cost tables. Null in a test that
     /// has none, which leaves repairs unestimated.
     pipeline::AssetManager* const assets_;
-    /// The auction house's, the mailbox's, the vault's and the trade's chat
-    /// lines and panel events, and the late names a letter waits on, for as
-    /// long as this handler lives.
+    /// The auction house's, the mailbox's, the vault's, the trade's and the
+    /// loot's chat lines and panel events, and the late names a letter waits
+    /// on, for as long as this handler lives.
     std::vector<core::EventBus::Subscription> subscriptions_;
 
     /// Everything the character holds, as the realm has described it. Its own
@@ -882,33 +821,9 @@ private:
     bool        itemTextOpen_   = false;
     std::string itemText_;
 
-    // ---- Loot state ----
-    bool lootWindowOpen_ = false;
-    bool autoLoot_ = false;
+    // ---- Merchant settings ----
     bool autoSellGrey_ = false;
     bool autoRepair_ = false;
-    LootResponseData currentLoot_;
-    std::vector<uint64_t> masterLootCandidates_;
-
-    // Group loot roll state
-    std::vector<LootRollEntry> lootRolls_;
-    /// Never reused within a session, so a window that outlives its roll finds
-    /// nothing rather than somebody else's item.
-    int           nextLootRollId_ = 1;
-    struct LocalLootState {
-        LootResponseData data;
-        bool moneyTaken = false;
-        bool itemAutoLootSent = false;
-    };
-    std::unordered_map<uint64_t, LocalLootState> localLootState_;
-    void announceLootMoney(uint64_t lootGuid, uint32_t amount);
-    /// The coin is gone from the open loot window, because the server has said
-    /// so. Idempotent: both packets that report it call this.
-    void clearLootMoney();
-    uint64_t pendingLootMoneyGuid_ = 0;
-    uint32_t pendingLootMoneyAmount_ = 0;
-    float pendingLootMoneyNotifyTimer_ = 0.0f;
-    std::unordered_map<uint64_t, float> recentLootMoneyAnnounceCooldowns_;
 
     // ---- Vendor state ----
     bool vendorWindowOpen_ = false;
@@ -958,8 +873,6 @@ private:
         PendingItemTarget request;
     };
     PendingEnchant pendingEnchant_;
-    bool pendingLootActive_ = false;
-    uint8_t pendingLootSlot_ = 0;
 
     // ---- Bank state ----
     bool bankOpen_ = false;

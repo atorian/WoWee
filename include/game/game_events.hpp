@@ -205,12 +205,6 @@ struct PlayerRefused {
     Refusal reason = Refusal::CantUseItem;
 };
 
-/// Money the player looted, in copper. Once per loot.
-struct LootMoneyReceived {
-    uint64_t lootGuid = 0;
-    uint32_t copper = 0;
-};
-
 /// An item arrived in the player's bags - looted, a reward, pushed by the
 /// server - with what it is, once its name is known.
 struct ItemReceived {
@@ -383,11 +377,6 @@ struct MacroDeleted {
 /// since 3.3.5a never sends those counts itself.
 struct CarriedItemsCounted {
     std::unordered_map<uint32_t, uint32_t> counts;
-};
-
-/// The loot window opened on a corpse or a chest, or closed.
-struct LootWindowChanged {
-    bool open = false;
 };
 
 /// The player opened a vendor's window. The position is the vendor's, in

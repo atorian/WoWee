@@ -231,6 +231,7 @@ ClientHarness::ClientHarness()
     luaServices.mail = &game_.mail();
     luaServices.guildBank = &game_.guildBank();
     luaServices.trade = &game_.trade();
+    luaServices.loot = &game_.loot();
     playerView_->bindMovementControls(luaServices);
 
     core::ClientLoop::Services services{

@@ -1,5 +1,6 @@
 #include "auction/services/auction_house.hpp"
 #include "trade/services/trade.hpp"
+#include "loot/services/loot.hpp"
 #include "mail/services/mail.hpp"
 #include "guild_bank/services/guild_bank.hpp"
 #include "ui/graphics_choices.hpp"
@@ -605,7 +606,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     }
 
     // Apply auto-loot / auto-sell settings to GameHandler every frame (cheap bool sync)
-    gameHandler.setAutoLoot(settingsPanel_.pendingAutoLoot);
+    loot::orNoLoot(services_.loot).setAutoLoot(settingsPanel_.pendingAutoLoot);
     gameHandler.setAutoFaceTarget(settingsPanel_.pendingAutoFaceTarget);
     // Pushed rather than applied once: a /reload makes a new engine.
     if (services_.characterAddons()) {
@@ -1503,7 +1504,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
             st.holdingItem           = inventoryScreen.isHoldingItem() ||
                                        !frameXmlCursorItem().empty();
             st.casting               = gameHandler.isCasting();
-            st.lootOpen              = gameHandler.isLootWindowOpen();
+            st.lootOpen              = loot::orNoLoot(services_.loot).isLootWindowOpen();
             st.gossipOpen            = gameHandler.isGossipWindowOpen();
             st.vendorOpen            = gameHandler.isVendorWindowOpen();
             st.barberShopOpen        = gameHandler.isBarberShopOpen();
@@ -1536,7 +1537,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     settingsPanel_.showSettingsWindow = false;
                     break;
                 case EscapeAction::CancelCast:             gameHandler.cancelCast(); break;
-                case EscapeAction::CloseLoot:              gameHandler.closeLoot(); break;
+                case EscapeAction::CloseLoot:              loot::orNoLoot(services_.loot).closeLoot(); break;
                 case EscapeAction::CloseGossip:            gameHandler.closeGossip(); break;
                 case EscapeAction::ReturnHeldItem:
                     if (inventoryScreen.isHoldingItem())
@@ -2118,7 +2119,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     // Check if unit is dead (health == 0) → loot, otherwise interact/attack
                     auto unit = std::static_pointer_cast<game::Unit>(target);
                     if (unit->getHealth() == 0 && unit->getMaxHealth() > 0) {
-                        gameHandler.lootTarget(target->getGuid());
+                        loot::orNoLoot(services_.loot).lootTarget(target->getGuid());
                     } else {
                         // Interact with service NPCs; otherwise treat non-interactable living units
                         // as attackable fallback (covers bad faction-template classification).

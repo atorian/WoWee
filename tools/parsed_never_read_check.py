@@ -30,10 +30,11 @@ wire side puts the two next to each other.
 
 WHAT IT COMPARES
 
-Fields of the structs in include/game/world_packet_data.hpp, against every
-mention of that name in the tree. A field counts as read when it is named
-anywhere outside that header and the parsers (world_packets.hpp and its
-sources).
+Fields of the structs in include/game/world_packet_data.hpp and in the bounded
+contexts' record headers (include/<context>/domain/records.hpp, where the
+records the protocol decodes now live), against every mention of that name in
+the tree. A field counts as read when it is named anywhere outside those
+headers and the parsers (world_packets.hpp and its sources).
 
 TWO THINGS THAT MAKE A NAIVE VERSION REPORT ZERO FOREVER
 
@@ -63,6 +64,9 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 HDR = ROOT / "include/game/world_packet_data.hpp"
+#: Every header that declares packet records: the protocol's own, and the
+#: records the bounded contexts took over from it.
+HDRS = [HDR] + sorted((ROOT / "include").glob("*/domain/records.hpp"))
 # The wire side: the builders and parsers, and the header declaring them, whose
 # inline readers (readCastResultArgs) fill fields rather than consume them.
 PARSER = re.compile(r"world_packets.*\.[ch]pp$")
@@ -122,7 +126,7 @@ EXPECTED = {
 
 def structs_and_accessors():
     """{struct: [fields]}, {field: {inline accessor names}}"""
-    text = HDR.read_text(errors="ignore")
+    text = "\n".join(h.read_text(errors="ignore") for h in HDRS)
     fields, accessors = {}, collections.defaultdict(set)
     for m in re.finditer(r"\bstruct\s+(\w+)\s*\{(?:\.\w+\s*=\s*)?", text):
         name, i, depth = m.group(1), m.end(), 1
@@ -146,12 +150,14 @@ def structs_and_accessors():
 def mentions(skip=None):
     """(parser, everywhere else): how many files in each mention a word.
 
-    Only whether a count is zero is ever asked. The header is neither.
+    Only whether a count is zero is ever asked. The declaring headers are
+    neither.
     """
     parser, other = collections.Counter(), collections.Counter()
+    declaring = {h.resolve() for h in HDRS}
     sources = list((ROOT / "src").rglob("*.cpp")) + list((ROOT / "include").rglob("*.hpp"))
     for p in sources:
-        if p.name == skip or p.resolve() == HDR.resolve():
+        if p.name == skip or p.resolve() in declaring:
             continue
         # A name that appears only in a comment is not a read.
         s = re.sub(r"//[^\n]*|/\*.*?\*/", "", p.read_text(errors="ignore"), flags=re.S)
