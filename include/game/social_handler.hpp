@@ -27,6 +27,7 @@ namespace lfg { class ILfgFeed; }
 namespace calendar { class ICalendarFeed; }
 namespace group { class IGroupServerFeed; class IGroup; }
 namespace guild { class IGuildServerFeed; }
+namespace guild_bank { class IGuildBankFeed; }
 namespace game {
 
 class PacketSender;
@@ -82,7 +83,6 @@ public:
     [[nodiscard]] virtual const std::array<uint32_t, 19>* inspectedItemEntries(uint64_t guid) const = 0;
     /// The player's own equipment is drawn again (the helm went on or off).
     virtual void markOnlineEquipmentDirty() = 0;
-    virtual void setGuildBankMoney(uint64_t money) = 0;
     virtual void addLocalChatMessage(const MessageChatData& message) = 0;
     /// The contact lists the friend, ignore and mute packets go to; null when
     /// the client was built without them.
@@ -109,6 +109,9 @@ public:
     /// Where the guild's packets go; null when the client was built without
     /// the guild.
     [[nodiscard]] virtual guild::IGuildServerFeed* guildFeed() = 0;
+    /// Where the guild bank's logs and the balance the guild reports go;
+    /// null when the client was built without the vault.
+    [[nodiscard]] virtual guild_bank::IGuildBankFeed* guildBankFeed() = 0;
 
     // ---- The appearance switches the realm keeps with the character ----
     [[nodiscard]] virtual bool showingHelm() const = 0;
@@ -148,8 +151,6 @@ struct SocialCharacterState {
 
     // Instance
     std::vector<InstanceLockout> instanceLockouts_;
-    /// Six item tabs and the money log after them.
-    std::array<std::vector<GuildBankLogEntry>, 7> guildBankLogs_;
     uint32_t instanceDifficulty_ = 0;
     bool instanceIsHeroic_ = false;
 
@@ -212,24 +213,12 @@ public:
     [[nodiscard]] float getLogoutCountdown()  const { return logoutCountdown_; }
     [[nodiscard]] bool  isLogoutToExit()      const { return exitAfterLogout_; }
 
-    // Guild bank
-    /// Ask for one bank tab's log. Tab six is the money log, which is what the
-    /// server means by GUILD_BANK_MAX_TABS.
-    void requestGuildBankLog(uint8_t tab);
-
-    static constexpr uint8_t kGuildBankMoneyTab = 6;
-    [[nodiscard]] const std::vector<GuildBankLogEntry>& getGuildBankLog(uint8_t tab) const {
-        static const std::vector<GuildBankLogEntry> empty;
-        return (tab < guildBankLogs_.size()) ? guildBankLogs_[tab] : empty;
-    }
-
     void takeInboxTextItem(uint32_t mailId);
     void reportPlayer(uint64_t targetGuid, const std::string& reason);
 
     /// Report a mail as spam. Type 0 of CMSG_COMPLAIN; the three values after
     /// the sender are a zero, the mail's own id, and another zero.
     void reportMailSpam(uint64_t senderGuid, uint32_t mailId);
-    void setGuildBankTabText(uint8_t tab, const std::string& text);
     void channelModeration(Opcode op, const std::string& channelName,
                            const std::string& targetName,
                            bool allowEmptyTarget = false);
@@ -315,7 +304,6 @@ public:
 private:
     // ---- Packet handlers ----
     void handleInspectResults(network::Packet& packet);
-    void handleGuildBankLog(network::Packet& packet);
     void sendBfMgrResponse(Opcode op, uint32_t battleId, bool accept, bool withFlag);
     void handleQueryTimeResponse(network::Packet& packet);
     void handlePlayedTime(network::Packet& packet);

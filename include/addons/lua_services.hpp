@@ -26,6 +26,7 @@ namespace wowee::group { class IGroup; }
 namespace wowee::guild { class IGuild; }
 namespace wowee::auction { class IAuctionHouse; }
 namespace wowee::mail { class IMailbox; }
+namespace wowee::guild_bank { class IGuildBank; }
 
 namespace wowee::addons {
 
@@ -70,6 +71,9 @@ struct LuaServices {
     /// The mailbox the player is at, its inbox, the letter being written and
     /// the requests that go to it.
     mail::IMailbox*          mail              = nullptr;
+    /// The guild vault the player is at, its tabs, texts and logs, and the
+    /// requests that go to the banker.
+    guild_bank::IGuildBank*  guildBank         = nullptr;
 
     /// Run a macro body, as RunMacroText() does - one command per line,
     /// through the same path the action bar uses for a macro button.

@@ -3,6 +3,9 @@
 #include "auction/services/auction_house.hpp"
 #include "game/auction_gateway.hpp"
 #include "game/mail_gateway.hpp"
+#include "game/guild_bank_gateway.hpp"
+#include "guild_bank/domain/records.hpp"
+#include "guild_bank/services/guild_bank.hpp"
 #include "mail/domain/records.hpp"
 #include "mail/services/mail.hpp"
 #include "game/spell_classification.hpp"
@@ -53,6 +56,16 @@ static mail::IMailboxFeed* mailFeed(InventoryQueries& queries) {
     return feed;
 }
 
+// The guild vault the protocol feeds. A client built without it drops the
+// vault's packets, and says so once.
+static guild_bank::IGuildBankFeed* guildBankFeed(InventoryQueries& queries) {
+    auto* feed = queries.guildBankFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("The guild bank is not wired into this client; guild bank packets are dropped");
+    return feed;
+}
+
 // The auction house the protocol feeds. A client built without it drops the
 // auction packets, and says so once.
 static auction::IAuctionHouseFeed* auctionFeed(InventoryQueries& queries) {
@@ -71,6 +84,8 @@ InventoryHandler::InventoryHandler(PacketSender& sender, FrameXmlEvents& frameXm
       queries_(queries), cvars_(cvars), assets_(assets),
       subscriptions_(subscribeAuctionNotices(events, chat, frameXml, *this)) {
     for (auto& subscription : subscribeMailNotices(events, chat, frameXml, *this))
+        subscriptions_.push_back(std::move(subscription));
+    for (auto& subscription : subscribeGuildBankNotices(events, chat, frameXml))
         subscriptions_.push_back(std::move(subscription));
     // A letter from a player carries a guid; its sender is named once the
     // name arrives.
@@ -94,6 +109,7 @@ void InventoryHandler::beginCharacter() {
     clearBuybackState();
     if (auto* feed = auctionFeed(queries_)) feed->beginCharacter();
     if (auto* feed = mailFeed(queries_)) feed->beginCharacter();
+    if (auto* feed = guildBankFeed(queries_)) feed->beginCharacter();
 }
 
 void InventoryHandler::leaveWorld() {
@@ -1004,18 +1020,25 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_BUY_BANK_SLOT_RESULT] = [this](network::Packet& packet) { handleBuyBankSlotResult(packet); };
 
     // ---- Guild Bank ----
-    table[Opcode::SMSG_GUILD_BANK_LIST] = [this](network::Packet& packet) { handleGuildBankList(packet); };
+    table[Opcode::SMSG_GUILD_BANK_LIST] = [this](network::Packet& packet) {
+        auto* feed = guildBankFeed(queries_);
+        if (!feed) return;
+        // A slots-only list leaves the tab names as they were, so it is read
+        // over what the vault already holds.
+        GuildBankData data;
+        if (const auto* bank = queries_.guildBank()) data = bank->getGuildBankData();
+        if (!GuildBankListParser::parse(packet, data)) {
+            LOG_WARNING("SMSG_GUILD_BANK_LIST: could not be read; the vault stays as it was");
+            return;
+        }
+        feed->onBankList(std::move(data));
+    };
     // The reply shares its opcode with the request: a tab id and its text.
     table[Opcode::MSG_QUERY_GUILD_BANK_TEXT] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(1)) return;
         const uint8_t tabId = packet.readUInt8();
         std::string text = packet.readString();
-        if (tabId < guildBankTabText_.size()) guildBankTabText_[tabId] = std::move(text);
-        // The panel asked for this text and was never told it arrived, so the
-        // info box kept whatever it was drawn with. Its handler reads the tab
-        // back with GetGuildBankText, counting tabs from one.
-        if (frameXml_.frameXmlListening())
-            frameXml_.fireFrameXmlEvent("GUILDBANK_UPDATE_TEXT", {std::to_string(tabId + 1)});
+        if (auto* feed = guildBankFeed(queries_)) feed->onTabText(tabId, std::move(text));
     };
 
     // ---- Auction House ----
@@ -3124,188 +3147,6 @@ void InventoryHandler::handleBuyBankSlotResult(network::Packet& packet) {
         if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("PLAYERBANKBAGSLOTS_CHANGED", {});
     } else {
         chat_.addSystemChatMessage("Failed to purchase bank slot.");
-    }
-}
-
-// ============================================================
-// Guild Bank
-// ============================================================
-
-void InventoryHandler::openGuildBank(uint64_t guid) {
-    // A vault belongs to a guild, and a player in none has nothing to open. The
-    // server answers CMSG_GUILD_BANKER_ACTIVATE from a guildless player with an
-    // error and sends no bank list, so the window this raised at the moment the
-    // object was clicked had nothing behind it and never would: tabs to click,
-    // no contents, and no way to tell that from a vault that had not loaded yet.
-    if (!queries_.inGuild()) {
-        raiseUiError("You are not in a guild.");
-        return;
-    }
-    guildBankerGuid_ = guid;
-    guildBankActiveTab_ = 0;
-    // The window opens when the vault answers, not when it is asked.
-    //
-    // Raising it here meant any refusal - a guild the client thought the player
-    // was in and the server did not, a banker out of range, a permission the
-    // rank does not carry - left an empty vault on screen with nothing coming.
-    // handleGuildBankList shows it the moment a tab list arrives, which is the
-    // server agreeing that this player may look.
-    // CMSG_GUILD_BANKER_ACTIVATE registers this session with the guild banker so
-    // the server sends the tab list + contents (SMSG_GUILD_BANK_LIST). Without it
-    // the follow-up query-tab is rejected and no bank list ever arrives, so the
-    // window opened empty (or not at all).
-    if (sender_.characterInWorld() && guid != 0) {
-        auto activate = GuildBankerActivatePacket::build(guid);
-        sender_.send(activate);
-    }
-    queryGuildBankTab(0);
-}
-
-void InventoryHandler::closeGuildBank() {
-    guildBankOpen_ = false;
-    guildBankerGuid_ = 0;
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("GUILDBANKFRAME_CLOSED", {});
-}
-
-void InventoryHandler::queryGuildBankTab(uint8_t tabId) {
-    if (!sender_.characterInWorld() || guildBankerGuid_ == 0) return;
-    // Asking for the full tab, not a slot refresh. The byte reaches
-    // SendBankList as "with content" on the cores that read it, so a false here
-    // asked the server for a tab and told it not to send what is in it. This
-    // client keeps no cached tab to refresh, so there is nothing a partial
-    // update could be for.
-    auto packet = GuildBankQueryTabPacket::build(guildBankerGuid_, tabId, true);
-    sender_.send(packet);
-}
-
-void InventoryHandler::buyGuildBankTab() {
-    if (!sender_.characterInWorld() || guildBankerGuid_ == 0) return;
-    uint8_t nextTab = static_cast<uint8_t>(guildBankData_.tabs.size());
-    auto packet = GuildBankBuyTabPacket::build(guildBankerGuid_, nextTab);
-    sender_.send(packet);
-}
-
-void InventoryHandler::depositGuildBankMoney(uint32_t amount) {
-    if (!sender_.characterInWorld() || guildBankerGuid_ == 0) return;
-    auto packet = GuildBankDepositMoneyPacket::build(guildBankerGuid_, amount);
-    sender_.send(packet);
-}
-
-void InventoryHandler::withdrawGuildBankMoney(uint32_t amount) {
-    if (!sender_.characterInWorld() || guildBankerGuid_ == 0) return;
-    auto packet = GuildBankWithdrawMoneyPacket::build(guildBankerGuid_, amount);
-    sender_.send(packet);
-}
-
-void InventoryHandler::guildBankWithdrawItem(uint8_t tabId, uint8_t bankSlot, uint8_t destBag,
-                                             uint8_t destSlot, uint32_t splitCount) {
-    if (!sender_.characterInWorld() || guildBankerGuid_ == 0) return;
-    auto packet = GuildBankSwapItemsPacket::buildBankToInventory(guildBankerGuid_, tabId, bankSlot,
-                                                                 destBag, destSlot, splitCount);
-    sender_.send(packet);
-}
-
-void InventoryHandler::queryGuildBankText(uint8_t tabId) {
-    if (!sender_.characterInWorld()) return;
-    network::Packet p(wireOpcode(Opcode::MSG_QUERY_GUILD_BANK_TEXT));
-    p.writeUInt8(tabId);
-    sender_.send(p);
-}
-
-const std::string& InventoryHandler::getGuildBankTabText(uint8_t tabId) const {
-    static const std::string kNone;
-    return tabId < guildBankTabText_.size() ? guildBankTabText_[tabId] : kNone;
-}
-
-void InventoryHandler::setGuildBankTabInfo(uint8_t tabId, const std::string& name,
-                                           const std::string& icon) {
-    if (!sender_.characterInWorld()) return;
-    if (guildBankerGuid_ == 0) return;
-    // Both or neither: the server tests them before it does anything, so a
-    // half-filled request is a packet that changes nothing and says nothing.
-    if (name.empty() || icon.empty()) return;
-    network::Packet p(wireOpcode(Opcode::CMSG_GUILD_BANK_UPDATE_TAB));
-    p.writeUInt64(guildBankerGuid_);
-    p.writeUInt8(tabId);
-    p.writeString(name);
-    p.writeString(icon);
-    sender_.send(p);
-}
-
-void InventoryHandler::guildBankDepositItem(uint8_t tabId, uint8_t bankSlot, uint8_t srcBag, uint8_t srcSlot) {
-    if (!sender_.characterInWorld() || guildBankerGuid_ == 0) return;
-    auto packet = GuildBankSwapItemsPacket::buildInventoryToBank(guildBankerGuid_, tabId, bankSlot, srcBag, srcSlot);
-    sender_.send(packet);
-}
-
-void InventoryHandler::guildBankDepositFromInventory(uint8_t srcBag, uint8_t srcSlot) {
-    if (!sender_.characterInWorld() ||
-        guildBankerGuid_ == 0 || !guildBankOpen_) return;
-    // CMSG_GUILD_BANK_SWAP_ITEMS has no server-side auto-store for the deposit
-    // direction (that path forces bank→character), so the client picks the
-    // target slot - the first empty one in the tab the player is viewing, which
-    // is what the retail client does on a right-click deposit.
-    constexpr int kTabSlots = 98; // GUILD_BANK_MAX_SLOTS
-    std::array<bool, kTabSlots> occupied{};
-    for (const auto& slot : guildBankData_.tabItems) {
-        if (slot.itemEntry != 0 && slot.slotId < kTabSlots)
-            occupied[slot.slotId] = true;
-    }
-    int freeSlot = -1;
-    for (int s = 0; s < kTabSlots; ++s) {
-        if (!occupied[s]) { freeSlot = s; break; }
-    }
-    if (freeSlot < 0) {
-        chat_.addSystemChatMessage("This guild bank tab is full.");
-        return;
-    }
-    guildBankDepositItem(guildBankActiveTab_, static_cast<uint8_t>(freeSlot), srcBag, srcSlot);
-}
-
-void InventoryHandler::setGuildBankMoney(uint64_t money) {
-    if (guildBankData_.money == money) return;
-    guildBankData_.money = money;
-    if (frameXml_.frameXmlListening())
-        frameXml_.fireFrameXmlEvent("GUILDBANK_UPDATE_MONEY", {});
-}
-
-void InventoryHandler::handleGuildBankList(network::Packet& packet) {
-    if (!GuildBankListParser::parse(packet, guildBankData_)) return;
-    // Receiving the bank list means the banker accepted us - make sure the
-    // window is shown even if the open path didn't (e.g. a server-initiated
-    // refresh, or the banker guid arrived only with the list).
-    if (guildBankerGuid_ != 0 && !guildBankOpen_) {
-        guildBankOpen_ = true;
-        if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("GUILDBANKFRAME_OPENED", {});
-    }
-    // Each list is tagged with the tab it describes. Track it so the UI
-    // highlights the right tab and item withdraw/deposit target the tab the
-    // player is actually viewing (clicking a tab only sends a query - it never
-    // updated the active tab, so operations defaulted to tab 0).
-    guildBankActiveTab_ = guildBankData_.tabId;
-    if (frameXml_.frameXmlListening()) {
-        // The three the panel listens for and this fired none of.
-        //
-        // GUILDBANK_UPDATE_TABS is the one that runs
-        // GuildBankFrame_SelectAvailableTab, which is what picks a tab the
-        // player may look in and draws it - without it the frame kept whatever
-        // tab it had and never chose one. Only when a tab list actually
-        // arrived: the event means the set of tabs changed, and a slot refresh
-        // does not change it.
-        if (guildBankData_.tabsIncluded && !guildBankData_.tabs.empty()) {
-            frameXml_.fireFrameXmlEvent("GUILDBANK_UPDATE_TABS", {});
-        }
-        frameXml_.fireFrameXmlEvent("GUILDBANKBAGSLOTS_CHANGED", {});
-        // The money line and the withdraw allowance, which are read from
-        // GetGuildBankMoney and GetGuildBankWithdrawMoney and were never asked
-        // for again after the frame first drew.
-        frameXml_.fireFrameXmlEvent("GUILDBANK_UPDATE_MONEY", {});
-        frameXml_.fireFrameXmlEvent("GUILDBANK_UPDATE_WITHDRAWMONEY", {});
-    }
-    for (const auto& tab : guildBankData_.tabs) {
-        for (const auto& item : tab.items) {
-            if (item.itemEntry != 0) ensureItemInfo(item.itemEntry);
-        }
     }
 }
 

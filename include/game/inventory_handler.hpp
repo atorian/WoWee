@@ -22,6 +22,7 @@ namespace wowee {
 namespace core { class EventBus; class CVarStore; }
 namespace auction { class IAuctionHouseFeed; enum class AuctionList; }
 namespace mail { class IMailboxFeed; }
+namespace guild_bank { class IGuildBankFeed; class IGuildBank; }
 namespace pipeline { class AssetManager; }
 namespace game {
 
@@ -164,6 +165,11 @@ public:
     [[nodiscard]] virtual auction::IAuctionHouseFeed* auctionFeed() = 0;
     /// Where the mail packets and a late name or item go; null as above.
     [[nodiscard]] virtual mail::IMailboxFeed* mailFeed() = 0;
+    /// Where the guild bank's list and tab texts go; null as above.
+    [[nodiscard]] virtual guild_bank::IGuildBankFeed* guildBankFeed() = 0;
+    /// The vault as it stands, which a slots-only list is read over; null as
+    /// above.
+    [[nodiscard]] virtual const guild_bank::IGuildBank* guildBank() const = 0;
 };
 
 class InventoryHandler {
@@ -651,15 +657,6 @@ public:
     int getEffectiveBankSlots() const { return effectiveBankSlots_; }
     int getEffectiveBankBagSlots() const { return effectiveBankBagSlots_; }
 
-    // ---- Guild Bank ----
-    void openGuildBank(uint64_t guid);
-    void closeGuildBank();
-    void queryGuildBankTab(uint8_t tabId);
-    void buyGuildBankTab();
-    void depositGuildBankMoney(uint32_t amount);
-    void withdrawGuildBankMoney(uint32_t amount);
-    void guildBankWithdrawItem(uint8_t tabId, uint8_t bankSlot, uint8_t destBag,
-                               uint8_t destSlot, uint32_t splitCount = 0);
     /// Put a glyph from a bag slot into a socket.
     ///
     /// There is no separate socketing opcode in 3.3.5: the glyph item is used
@@ -667,37 +664,6 @@ public:
     /// carries, and the server applies the item's spell to that socket. The
     /// wire's bag and slot are the same ones a plain use writes.
     void placeGlyphFromBag(uint8_t wireBag, uint8_t wireSlot, uint32_t socketIndex);
-
-    /// Ask for a tab's info text, and read back what arrived.
-    ///
-    /// MSG_QUERY_GUILD_BANK_TEXT is a request the server answers with the same
-    /// opcode: a tab id and the text. This client could already *write* the
-    /// text - SetGuildBankText has sent CMSG_SET_GUILD_BANK_TEXT all along -
-    /// and had no way to read it, so a tab's description could be saved and
-    /// never seen again.
-    void queryGuildBankText(uint8_t tabId);
-    const std::string& getGuildBankTabText(uint8_t tabId) const;
-
-    /// Rename a guild bank tab and pick its icon.
-    ///
-    /// CMSG_GUILD_BANK_UPDATE_TAB: the banker's guid, the tab counted from
-    /// zero, then the name and the icon path. AzerothCore drops it unless both
-    /// strings are non-empty and the player is standing at the bank, which is
-    /// why the empty name the popup allows is refused here rather than sent.
-    void setGuildBankTabInfo(uint8_t tabId, const std::string& name,
-                             const std::string& icon);
-    void guildBankDepositItem(uint8_t tabId, uint8_t bankSlot, uint8_t srcBag, uint8_t srcSlot);
-    // Deposit an inventory item into the first free slot of the viewed tab.
-    void guildBankDepositFromInventory(uint8_t srcBag, uint8_t srcSlot);
-    bool isGuildBankOpen() const { return guildBankOpen_; }
-    const GuildBankData& getGuildBankData() const { return guildBankData_; }
-    /// The guild bank's balance as SMSG_GUILD_EVENT reports it. The bank list
-    /// is only sent to whoever is standing at the banker; everyone else learns
-    /// the new total from the event, and GetGuildBankMoney has to answer with
-    /// it or the panel shows the figure it opened with.
-    void setGuildBankMoney(uint64_t money);
-    uint8_t getGuildBankActiveTab() const { return guildBankActiveTab_; }
-    void setGuildBankActiveTab(uint8_t tab) { guildBankActiveTab_ = tab; }
 
     // ---- Trainer ----
     struct TrainerTab {
@@ -776,7 +742,6 @@ private:
     void endLootRoll(uint64_t objectGuid, uint32_t slot);
     void handleShowBank(network::Packet& packet);
     void handleBuyBankSlotResult(network::Packet& packet);
-    void handleGuildBankList(network::Packet& packet);
     /// An auction list result, for the list it names, or for the one last
     /// asked for when it names none.
     void handleAuctionListResult(network::Packet& packet, std::optional<auction::AuctionList> list);
@@ -824,8 +789,9 @@ private:
     /// The client's data, for the repair cost tables. Null in a test that
     /// has none, which leaves repairs unestimated.
     pipeline::AssetManager* const assets_;
-    /// The auction house's and the mailbox's chat lines and panel events, and
-    /// the late names a letter waits on, for as long as this handler lives.
+    /// The auction house's, the mailbox's and the vault's chat lines and panel
+    /// events, and the late names a letter waits on, for as long as this
+    /// handler lives.
     std::vector<core::EventBus::Subscription> subscriptions_;
 
     /// Everything the character holds, as the realm has described it. Its own
@@ -1048,13 +1014,6 @@ private:
     std::vector<int> pendingBankSlotEvents_;
     int effectiveBankSlots_ = 28;
     int effectiveBankBagSlots_ = 7;
-
-    // ---- Guild Bank state ----
-    bool guildBankOpen_ = false;
-    uint64_t guildBankerGuid_ = 0;
-    std::array<std::string, 6> guildBankTabText_{};
-    GuildBankData guildBankData_;
-    uint8_t guildBankActiveTab_ = 0;
 
     // ---- Trainer state ----
     bool trainerWindowOpen_ = false;

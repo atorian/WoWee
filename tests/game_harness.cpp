@@ -23,6 +23,8 @@
 #include "auction/services/auction_service.hpp"
 #include "game/mail_gateway.hpp"
 #include "mail/services/mail_service.hpp"
+#include "game/guild_bank_gateway.hpp"
+#include "guild_bank/services/guild_bank_service.hpp"
 
 #include <catch_amalgamated.hpp>  // test_support.hpp's REQUIRE
 #include "test_support.hpp"
@@ -220,6 +222,10 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     mail_ = std::make_unique<mail::MailService>(*mailGateway_, *mailGateway_, events_);
     services_.mailFeed = mail_.get();
     services_.mail = mail_.get();
+    guildBankGateway_ = std::make_unique<game::GuildBankGateway>(*game_, game_->inventory(), *game_);
+    guildBank_ = std::make_unique<guild_bank::GuildBankService>(*guildBankGateway_, *guildBankGateway_, events_);
+    services_.guildBankFeed = guildBank_.get();
+    services_.guildBank = guildBank_.get();
     game::loadProtocolTables(*game_, *expansions_.getActive());
     game_->setAddonEventCallback([this](const std::string& name, const std::vector<std::string>& args) {
         addonEvents_.push_back({name, args});
@@ -240,6 +246,7 @@ group::IGroup& GameHarness::group() { return *group_; }
 guild::IGuild& GameHarness::guild() { return *guild_; }
 auction::IAuctionHouse& GameHarness::auctionHouse() { return *auctionHouse_; }
 mail::IMailbox& GameHarness::mail() { return *mail_; }
+guild_bank::IGuildBank& GameHarness::guildBank() { return *guildBank_; }
 
 FakeWorldConnection& GameHarness::server() {
     if (!connection_) fail("no connection yet: connect (or enterWorld) first");

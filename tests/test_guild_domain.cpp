@@ -8,6 +8,8 @@
 #include "game/update_field_table.hpp"
 #include "guild/domain/records.hpp"
 #include "guild/services/guild.hpp"
+#include "guild_bank/domain/records.hpp"
+#include "guild_bank/services/guild_bank.hpp"
 
 #include <algorithm>
 #include <string>
@@ -296,7 +298,7 @@ TEST_CASE("the guild bank's balance event is the bank's figure, not a chat line"
     CHECK(h.addonEvents("CHAT_MSG_SYSTEM").empty());
     CHECK(h.addonEvents("CHAT_MSG_GUILD").empty());
     // 532g 61s 7c, read as hex.
-    CHECK(h.game().getGuildBankData().money == 5326107u);
+    CHECK(h.guildBank().getGuildBankData().money == 5326107u);
 
     // The tab's text changed: the panel counts tabs from one.
     h.receive(Opcode::SMSG_GUILD_EVENT, event(19, {"2"}));

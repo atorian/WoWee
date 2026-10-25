@@ -36,6 +36,7 @@ namespace group { class IGroup; }
 namespace guild { class IGuild; }
 namespace auction { class IAuctionHouse; }
 namespace mail { class IMailbox; }
+namespace guild_bank { class IGuildBank; }
 namespace audio { class AudioCoordinator; }
 
 namespace ui {
@@ -77,6 +78,9 @@ struct UIServices {
     auction::IAuctionHouse* auctionHouse = nullptr;
     /// The mailbox, for the minimap's envelope and whether Escape closes it.
     mail::IMailbox* mail = nullptr;
+    /// The guild vault, for opening the bags beside it and whether Escape
+    /// closes it.
+    guild_bank::IGuildBank* guildBank = nullptr;
     /// The interface of the character in the world, in whatever state it is;
     /// null with no character in the world. Asked each time rather than held:
     /// each character has its own, and a /reload replaces it.

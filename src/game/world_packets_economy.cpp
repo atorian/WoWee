@@ -1,5 +1,6 @@
 #include "game/world_packets.hpp"
 #include "mail/domain/records.hpp"
+#include "guild_bank/domain/records.hpp"
 #include "auction/domain/records.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/opcodes.hpp"

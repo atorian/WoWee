@@ -51,7 +51,8 @@ namespace wowee::group { class IGroup; class GroupService; }
 namespace wowee::guild { class IGuild; class GuildService; class IGuildNameStore; }
 namespace wowee::auction { class IAuctionHouse; class AuctionService; }
 namespace wowee::mail { class IMailbox; class MailService; }
-namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; class AuctionGateway; class MailGateway; }
+namespace wowee::guild_bank { class IGuildBank; class GuildBankService; }
+namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; class AuctionGateway; class MailGateway; class GuildBankGateway; }
 
 namespace wowee::test {
 
@@ -162,6 +163,8 @@ public:
     auction::IAuctionHouse& auctionHouse();
     /// The mailbox, wired as the client wires it.
     mail::IMailbox& mail();
+    /// The guild vault, wired as the client wires it.
+    guild_bank::IGuildBank& guildBank();
     core::CVarStore& cvars() { return cvars_; }
 
     /// The server's side of the connection: the one the game made last. Valid
@@ -287,6 +290,8 @@ private:
     std::unique_ptr<auction::AuctionService> auctionHouse_;
     std::unique_ptr<game::MailGateway> mailGateway_;
     std::unique_ptr<mail::MailService> mail_;
+    std::unique_ptr<game::GuildBankGateway> guildBankGateway_;
+    std::unique_ptr<guild_bank::GuildBankService> guildBank_;
     std::unique_ptr<game::GameHandler> game_;
     FakeWorldConnection* connection_ = nullptr;  // owned by the game once made
     bool pingsAnswered_ = true;

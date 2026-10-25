@@ -17,6 +17,7 @@
 #include "group/domain/records.hpp"
 
 namespace wowee::guild { struct EventLogEntry; }
+namespace wowee::guild_bank { struct GuildBankLogEntry; }
 
 namespace wowee {
 namespace game {
@@ -145,19 +146,8 @@ struct ChannelMember {
 // ---- Guild event log (MSG_GUILD_EVENT_LOG_QUERY): the guild's entries ----
 using GuildEventLogEntry = guild::EventLogEntry;
 
-/// One line of a guild bank tab's log, or of the money tab's.
-///
-/// Types are AzerothCore's GuildBankEventLogTypes: 1 deposit item, 2 withdraw
-/// item, 3 move item, 4 deposit money, 5 withdraw money, 6 repair, 7 move item
-/// between tabs, 9 buy a tab. Which fields carry anything depends on which.
-struct GuildBankLogEntry {
-    uint8_t  type = 0;
-    uint64_t playerGuid = 0;
-    uint32_t itemId = 0;      ///< item types only
-    uint32_t count = 0;       ///< stack size for items, copper for money
-    uint8_t  otherTab = 0;    ///< a move's destination
-    uint32_t secondsAgo = 0;
-};
+// ---- Guild bank log (MSG_GUILD_BANK_LOG_QUERY): the vault's entries ----
+using GuildBankLogEntry = guild_bank::GuildBankLogEntry;
 
 // ---- Ready check ----
 

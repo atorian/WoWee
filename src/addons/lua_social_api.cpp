@@ -1,6 +1,8 @@
 // lua_social_api.cpp - Chat, guild, friends, ignore, gossip, party management, and emotes Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include <iterator>
+#include "guild_bank/domain/records.hpp"
+#include "guild_bank/services/guild_bank.hpp"
 #include "mail/domain/records.hpp"
 #include "mail/services/mail.hpp"
 #include <vector>
@@ -518,6 +520,11 @@ auction::IAuctionHouse& auctionOf(lua_State* L) {
 mail::IMailbox& mailOf(lua_State* L) {
     auto* services = getLuaServices(L);
     return mail::orNoMailbox(services ? services->mail : nullptr);
+}
+
+guild_bank::IGuildBank& guildBankOf(lua_State* L) {
+    auto* services = getLuaServices(L);
+    return guild_bank::orNoGuildBank(services ? services->guildBank : nullptr);
 }
 
 arena::IArenaTeams* arenaTeamsOf(lua_State* L) {
@@ -1957,7 +1964,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 // "purchase tab" button. Same story: the packet builder and
                 // the handler verb were both here already.
                 {"BuyGuildBankTab", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->buyGuildBankTab();
+            if (getGameHandler(L)) guildBankOf(L).buyGuildBankTab();
             return 0;
         }},
                 // CONFIRM_GUILD_DISBAND's accept. The verb has existed the

@@ -1,4 +1,6 @@
 #include "lfg/services/lfg.hpp"
+#include "guild_bank/domain/records.hpp"
+#include "guild_bank/services/guild_bank.hpp"
 #include "guild/services/guild.hpp"
 #include "auction/domain/records.hpp"
 #include "auction/services/auction_house.hpp"
@@ -3138,7 +3140,7 @@ int lua_Tooltip_SetGuildBankItem(lua_State* L) {
     const int slot = static_cast<int>(luaL_optnumber(L, 3, 0));
     if (!w || !gh || slot < 1) { lua_pushboolean(L, 0); return 1; }
 
-    const auto& data = gh->getGuildBankData();
+    const auto& data = guildBankOf(L).getGuildBankData();
     // The open tab is the one kept current; any other answers from whatever
     // the last full update left behind, which is what the panel draws too.
     const std::vector<game::GuildBankItemSlot>* items = nullptr;

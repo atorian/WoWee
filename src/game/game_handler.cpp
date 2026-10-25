@@ -1893,62 +1893,6 @@ void GameHandler::withdrawItem(uint8_t srcBag, uint8_t srcSlot) {
     inventoryHandler_->withdrawItem(srcBag, srcSlot);
 }
 
-// ============================================================
-// Guild Bank System
-// ============================================================
-
-void GameHandler::openGuildBank(uint64_t guid) {
-    inventoryHandler_->openGuildBank(guid);
-}
-
-void GameHandler::closeGuildBank() {
-    inventoryHandler_->closeGuildBank();
-}
-
-void GameHandler::queryGuildBankTab(uint8_t tabId) {
-    inventoryHandler_->queryGuildBankTab(tabId);
-}
-
-void GameHandler::buyGuildBankTab() {
-    inventoryHandler_->buyGuildBankTab();
-}
-
-void GameHandler::depositGuildBankMoney(uint32_t amount) {
-    inventoryHandler_->depositGuildBankMoney(amount);
-}
-
-void GameHandler::withdrawGuildBankMoney(uint32_t amount) {
-    inventoryHandler_->withdrawGuildBankMoney(amount);
-}
-
-void GameHandler::guildBankWithdrawItem(uint8_t tabId, uint8_t bankSlot, uint8_t destBag,
-                                        uint8_t destSlot, uint32_t splitCount) {
-    inventoryHandler_->guildBankWithdrawItem(tabId, bankSlot, destBag,
-                                                                   destSlot, splitCount);
-}
-
-void GameHandler::guildBankDepositItem(uint8_t tabId, uint8_t bankSlot, uint8_t srcBag, uint8_t srcSlot) {
-    inventoryHandler_->guildBankDepositItem(tabId, bankSlot, srcBag, srcSlot);
-}
-
-void GameHandler::queryGuildBankText(uint8_t tabId) {
-    inventoryHandler_->queryGuildBankText(tabId);
-}
-
-const std::string& GameHandler::getGuildBankTabText(uint8_t tabId) const {
-    static const std::string kNone;
-    return inventoryHandler_->getGuildBankTabText(tabId);
-}
-
-void GameHandler::setGuildBankTabInfo(uint8_t tabId, const std::string& name,
-                                      const std::string& icon) {
-    inventoryHandler_->setGuildBankTabInfo(tabId, name, icon);
-}
-
-void GameHandler::guildBankDepositFromInventory(uint8_t srcBag, uint8_t srcSlot) {
-    inventoryHandler_->guildBankDepositFromInventory(srcBag, srcSlot);
-}
-
 // ---------------------------------------------------------------------------
 // Item text (SMSG_ITEM_TEXT_QUERY_RESPONSE)
 //   uint64 itemGuid + uint8 isEmpty + string text (when !isEmpty)
@@ -2931,15 +2875,6 @@ void GameHandler::runInterfaceCommand(const std::string& lua) {
     // arrived" from "it arrived and the interface did nothing with it".
     LOG_DEBUG("interface command: ", lua);
     pendingAddonEvents_.command(lua);
-}
-
-void GameHandler::requestGuildBankLog(uint8_t tab) {
-    socialHandler_->requestGuildBankLog(tab);
-}
-
-const std::vector<GuildBankLogEntry>& GameHandler::getGuildBankLog(uint8_t tab) const {
-    static const std::vector<GuildBankLogEntry> empty;
-    return socialHandler_->getGuildBankLog(tab);
 }
 
 void GameHandler::requestChannelList(const std::string& channel) {

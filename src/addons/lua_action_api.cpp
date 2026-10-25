@@ -1,6 +1,8 @@
 // lua_action_api.cpp - Action bar, cursor/pickup, keyboard input, key bindings, and pet actions Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include "lfg/services/lfg.hpp"
+#include "guild_bank/domain/records.hpp"
+#include "guild_bank/services/guild_bank.hpp"
 #include "mail/domain/records.hpp"
 #include "mail/services/mail.hpp"
 #include "game/item_text.hpp"
@@ -777,7 +779,7 @@ static int lua_PickupGuildBankItem(lua_State* L) {
     // Carrying a bag item, so this is the deposit.
     uint8_t srcBag = 0, srcSlot = 0;
     if (cursorWireSlot(L, srcBag, srcSlot)) {
-        gh->guildBankDepositItem(static_cast<uint8_t>(tab - 1),
+        guildBankOf(L).guildBankDepositItem(static_cast<uint8_t>(tab - 1),
                                  static_cast<uint8_t>(slot - 1), srcBag, srcSlot);
         setCursorType(L, CursorType::NONE);
         return 0;
@@ -792,7 +794,7 @@ static int lua_PickupGuildBankItem(lua_State* L) {
     }
 
     // Otherwise pick the slot up, if there is anything in it.
-    const auto& bank = gh->getGuildBankData();
+    const auto& bank = guildBankOf(L).getGuildBankData();
     for (const auto& it : bank.tabItems) {
         if (it.slotId != slot - 1 || it.itemEntry == 0) continue;
         setCursorType(L, CursorType::GUILDBANK);
@@ -1115,7 +1117,7 @@ static int lua_PickupContainerItem(lua_State* L) {
     if (cursor(L).type == CursorType::GUILDBANK) {
         const uint8_t dstBag = containerWireBag(bag);
         const uint8_t dstSlot = containerWireSlot(bag, slot);
-        gh->guildBankWithdrawItem(static_cast<uint8_t>(cursor(L).bag - 1),
+        guildBankOf(L).guildBankWithdrawItem(static_cast<uint8_t>(cursor(L).bag - 1),
                                   static_cast<uint8_t>(cursor(L).slot - 1),
                                   dstBag, dstSlot, cursor(L).split);
         setCursorType(L, CursorType::NONE);

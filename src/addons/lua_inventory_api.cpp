@@ -1,6 +1,8 @@
 // lua_inventory_api.cpp - Items, containers, merchant, loot, equipment, trading, auction, and mail Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include "group/services/group.hpp"
+#include "guild_bank/domain/records.hpp"
+#include "guild_bank/services/guild_bank.hpp"
 #include "mail/domain/records.hpp"
 #include "mail/services/mail.hpp"
 #include "guild/services/guild.hpp"
@@ -858,9 +860,8 @@ namespace {
 /// their own copy of the tab rule: the tab currently open is the one the
 /// server keeps up to date, and any other answers from whatever the last full
 /// update left behind. Tabs and slots are 1-based from Lua and 0-based here.
-const game::GuildBankItemSlot* guildBankItemAt(game::GameHandler* gh, int tab, int slot) {
-    if (!gh) return nullptr;
-    const auto& data = gh->getGuildBankData();
+const game::GuildBankItemSlot* guildBankItemAt(lua_State* L, int tab, int slot) {
+    const auto& data = guildBankOf(L).getGuildBankData();
 
     const std::vector<game::GuildBankItemSlot>* items = nullptr;
     if (tab - 1 == data.tabId) {
@@ -954,9 +955,6 @@ void pushTimeAgo(lua_State* L, uint32_t secondsAgo) {
     lua_pushnumber(L, (secondsAgo % kMonth) / kDay);
     lua_pushnumber(L, (secondsAgo % kDay) / kHour);
 }
-
-/// Where the money log lives, matching SocialHandler's own numbering.
-constexpr uint8_t kGuildBankMoneyTab = 6;
 
 }  // namespace
 
@@ -1870,8 +1868,8 @@ static int lua_UseContainerItem(lua_State* L) {
     // that should not arise, and it is what kept the keyring out of them.
     if (isBankBagContainer(bag) || bag == kBankContainer) return 0;
 
-    if (gh->isGuildBankOpen()) {
-        gh->guildBankDepositFromInventory(wireBag, static_cast<uint8_t>(wireSlot));
+    if (guildBankOf(L).isGuildBankOpen()) {
+        guildBankOf(L).guildBankDepositFromInventory(wireBag, static_cast<uint8_t>(wireSlot));
         return 0;
     }
 
@@ -3475,7 +3473,7 @@ void registerInventoryLuaAPI(lua_State* L) {
                 // the whole of what was missing.
                 {"CanGuildBankRepair", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (!gh || gh->getGuildBankData().money == 0) { return luaReturnFalse(L); }
+            if (!gh || guildBankOf(L).getGuildBankData().money == 0) { return luaReturnFalse(L); }
             const auto& roster = guildOf(L).getGuildRoster();
             const uint64_t self = gh->getPlayerGuid();
             for (const auto& m : roster.members) {
@@ -3887,7 +3885,7 @@ void registerInventoryLuaAPI(lua_State* L) {
                 {"GetGuildBankMoney", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             lua_pushnumber(L, gh ? static_cast<double>(
-                gh->getGuildBankData().money) : 0.0);
+                guildBankOf(L).getGuildBankData().money) : 0.0);
             return 1;
         }},
                 {"GetGuildBankWithdrawMoney", [](lua_State* L) -> int {
@@ -3895,33 +3893,33 @@ void registerInventoryLuaAPI(lua_State* L) {
             // -1 is the server saying "no limit", and the panel reads that as
             // a number to compare against - a large one keeps the comparison
             // true without pretending to a figure.
-            const int32_t w = gh ? gh->getGuildBankData().withdrawAmount : 0;
+            const int32_t w = gh ? guildBankOf(L).getGuildBankData().withdrawAmount : 0;
             lua_pushnumber(L, w < 0 ? 100000000.0 : static_cast<double>(w));
             return 1;
         }},
                 {"CanWithdrawGuildBankMoney", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const int32_t w = gh ? gh->getGuildBankData().withdrawAmount : 0;
+            const int32_t w = gh ? guildBankOf(L).getGuildBankData().withdrawAmount : 0;
             lua_pushboolean(L, (w != 0) ? 1 : 0);
             return 1;
         }},
                 {"GetCurrentGuildBankTab", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? (gh->getGuildBankActiveTab() + 1) : 1);
+            lua_pushnumber(L, gh ? (guildBankOf(L).getGuildBankActiveTab() + 1) : 1);
             return 1;
         }},
                 {"SetCurrentGuildBankTab", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int tab = static_cast<int>(luaL_optnumber(L, 1, 1));
             if (gh && tab >= 1) {
-                gh->setGuildBankActiveTab(static_cast<uint8_t>(tab - 1));
+                guildBankOf(L).setGuildBankActiveTab(static_cast<uint8_t>(tab - 1));
             }
             return 0;
         }},
                 {"QueryGuildBankTab", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int tab = static_cast<int>(luaL_optnumber(L, 1, 1));
-            if (gh && tab >= 1) gh->queryGuildBankTab(static_cast<uint8_t>(tab - 1));
+            if (gh && tab >= 1) guildBankOf(L).queryGuildBankTab(static_cast<uint8_t>(tab - 1));
             return 0;
         }},
                 // How many tabs the guild has bought. blizzard_guildbankui does
@@ -3933,7 +3931,7 @@ void registerInventoryLuaAPI(lua_State* L) {
                 // indexes, so the two cannot disagree.
                 {"GetNumGuildBankTabs", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? static_cast<lua_Number>(gh->getGuildBankData().tabs.size()) : 0);
+            lua_pushnumber(L, gh ? static_cast<lua_Number>(guildBankOf(L).getGuildBankData().tabs.size()) : 0);
             return 1;
         }},
                 // GetGuildBankTabInfo(tab) → name, icon, viewable, canDeposit,
@@ -3941,7 +3939,7 @@ void registerInventoryLuaAPI(lua_State* L) {
                 {"GetGuildBankTabInfo", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int tab = static_cast<int>(luaL_optnumber(L, 1, 0));
-            const auto* tabs = gh ? &gh->getGuildBankData().tabs : nullptr;
+            const auto* tabs = gh ? &guildBankOf(L).getGuildBankData().tabs : nullptr;
             // A tab the guild has not bought answers as an empty tab rather
             // than as one nil, and the difference is a raise.
             //
@@ -3980,7 +3978,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             const int tab  = static_cast<int>(luaL_optnumber(L, 1, 0));
             const int slot = static_cast<int>(luaL_optnumber(L, 2, 0));
             if (!gh) return luaReturnNil(L);
-            const auto* found = guildBankItemAt(gh, tab, slot);
+            const auto* found = guildBankItemAt(L, tab, slot);
             if (!found) return luaReturnNil(L);   // empty slot
             const auto& it = *found;
             gh->ensureItemInfo(it.itemEntry);
@@ -3999,7 +3997,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             const int tab  = static_cast<int>(luaL_optnumber(L, 1, 0));
             const int slot = static_cast<int>(luaL_optnumber(L, 2, 0));
             if (!gh) return luaReturnNil(L);
-            const auto* found = guildBankItemAt(gh, tab, slot);
+            const auto* found = guildBankItemAt(L, tab, slot);
             if (!found) return luaReturnNil(L);   // empty slot
             const auto& it = *found;
             gh->ensureItemInfo(it.itemEntry);
@@ -4020,18 +4018,18 @@ void registerInventoryLuaAPI(lua_State* L) {
                 // from a bag. AutoStoreGuildBankItem does that and works;
                 // these two say nothing rather than half-moving something.
                 {"CloseGuildBankFrame", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->closeGuildBank();
+            if (getGameHandler(L)) guildBankOf(L).closeGuildBank();
             return 0;
         }},
                 {"DepositGuildBankMoney", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) gh->depositGuildBankMoney(
+            if (gh) guildBankOf(L).depositGuildBankMoney(
                 static_cast<uint32_t>(luaL_optnumber(L, 1, 0)));
             return 0;
         }},
                 {"WithdrawGuildBankMoney", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) gh->withdrawGuildBankMoney(
+            if (gh) guildBankOf(L).withdrawGuildBankMoney(
                 static_cast<uint32_t>(luaL_optnumber(L, 1, 0)));
             return 0;
         }},
@@ -4041,7 +4039,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             const int slot = static_cast<int>(luaL_optnumber(L, 2, 1));
             // Destination 0,0 lets the server pick the first free bag slot,
             // which is what "auto store" means.
-            if (gh) gh->guildBankWithdrawItem(static_cast<uint8_t>(tab - 1),
+            if (gh) guildBankOf(L).guildBankWithdrawItem(static_cast<uint8_t>(tab - 1),
                                               static_cast<uint8_t>(slot - 1), 0, 0);
             return 0;
         }},
@@ -4065,7 +4063,7 @@ void registerInventoryLuaAPI(lua_State* L) {
                 {"QueryGuildBankLog", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int tab = static_cast<int>(luaL_optnumber(L, 1, 1));
-            if (gh && tab >= 1) gh->requestGuildBankLog(static_cast<uint8_t>(tab - 1));
+            if (gh && tab >= 1) guildBankOf(L).requestGuildBankLog(static_cast<uint8_t>(tab - 1));
             return 0;
         }},
                 // Ask for a tab's info text. The panel calls this when a tab is
@@ -4073,7 +4071,7 @@ void registerInventoryLuaAPI(lua_State* L) {
                 {"QueryGuildBankText",  [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int tab = static_cast<int>(luaL_optnumber(L, 1, 0));
-            if (gh && tab >= 1) gh->queryGuildBankText(static_cast<uint8_t>(tab - 1));
+            if (gh && tab >= 1) guildBankOf(L).queryGuildBankText(static_cast<uint8_t>(tab - 1));
             return 0;
         }},
                 // What the query above brought back, or nil for a tab nothing
@@ -4084,7 +4082,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int tab = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (gh && tab >= 1) {
-                const std::string& text = gh->getGuildBankTabText(static_cast<uint8_t>(tab - 1));
+                const std::string& text = guildBankOf(L).getGuildBankTabText(static_cast<uint8_t>(tab - 1));
                 if (!text.empty()) { lua_pushstring(L, text.c_str()); return 1; }
             }
             lua_pushnil(L);
@@ -4100,21 +4098,21 @@ void registerInventoryLuaAPI(lua_State* L) {
             const int tab = static_cast<int>(luaL_optnumber(L, 1, 0));
             const char* text = luaL_optstring(L, 2, "");
             if (gh && tab >= 1)
-                gh->setGuildBankTabText(static_cast<uint8_t>(tab - 1), text ? text : "");
+                guildBankOf(L).setGuildBankTabText(static_cast<uint8_t>(tab - 1), text ? text : "");
             return 0;
         }},
                 {"GetNumGuildBankTransactions", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int tab = static_cast<int>(luaL_optnumber(L, 1, 1));
             lua_pushnumber(L, (gh && tab >= 1)
-                ? static_cast<lua_Number>(gh->getGuildBankLog(static_cast<uint8_t>(tab - 1)).size())
+                ? static_cast<lua_Number>(guildBankOf(L).getGuildBankLog(static_cast<uint8_t>(tab - 1)).size())
                 : 0);
             return 1;
         }},
                 {"GetNumGuildBankMoneyTransactions", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             lua_pushnumber(L, gh
-                ? static_cast<lua_Number>(gh->getGuildBankLog(kGuildBankMoneyTab).size())
+                ? static_cast<lua_Number>(guildBankOf(L).getGuildBankLog(guild_bank::kMoneyLogTab).size())
                 : 0);
             return 1;
         }},
@@ -4124,7 +4122,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             const int tab = static_cast<int>(luaL_optnumber(L, 1, 1));
             const int index = static_cast<int>(luaL_optnumber(L, 2, 0));
             if (!gh || tab < 1 || index < 1) return 0;
-            const auto& log = gh->getGuildBankLog(static_cast<uint8_t>(tab - 1));
+            const auto& log = guildBankOf(L).getGuildBankLog(static_cast<uint8_t>(tab - 1));
             if (index > static_cast<int>(log.size())) return 0;
             const auto& e = log[static_cast<size_t>(index) - 1];
 
@@ -4142,7 +4140,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh || index < 1) return 0;
-            const auto& log = gh->getGuildBankLog(kGuildBankMoneyTab);
+            const auto& log = guildBankOf(L).getGuildBankLog(guild_bank::kMoneyLogTab);
             if (index > static_cast<int>(log.size())) return 0;
             const auto& e = log[static_cast<size_t>(index) - 1];
 
@@ -4229,7 +4227,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             const char* name = luaL_optstring(L, 2, "");
             const char* icon = luaL_optstring(L, 3, "");
             if (gh && tab >= 1)
-                gh->setGuildBankTabInfo(static_cast<uint8_t>(tab - 1), name, icon);
+                guildBankOf(L).setGuildBankTabInfo(static_cast<uint8_t>(tab - 1), name, icon);
             return 0;
         }},
                 // What the next tab costs, in copper, or nil once all six are
@@ -4249,7 +4247,7 @@ void registerInventoryLuaAPI(lua_State* L) {
                 1000000u, 2500000u, 5000000u, 10000000u, 25000000u, 50000000u
             };
             auto* gh = getGameHandler(L);
-            const size_t owned = gh ? gh->getGuildBankData().tabs.size() : 0;
+            const size_t owned = gh ? guildBankOf(L).getGuildBankData().tabs.size() : 0;
             if (owned >= 6) { lua_pushnil(L); return 1; }
             lua_pushnumber(L, static_cast<lua_Number>(kTabCost[owned]));
             return 1;

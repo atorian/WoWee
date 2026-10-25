@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "game/world_packets.hpp"
+#include "guild_bank/domain/records.hpp"
 
 
 using namespace wowee::game;

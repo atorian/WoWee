@@ -1,5 +1,6 @@
 #include "auction/services/auction_house.hpp"
 #include "mail/services/mail.hpp"
+#include "guild_bank/services/guild_bank.hpp"
 #include "ui/graphics_choices.hpp"
 #include "rendering/cpu_stage_times.hpp"
 #include "core/zone_tracker.hpp"
@@ -786,7 +787,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
 
     // Auto-open bags once when the guild bank first opens, so items can be
     // right-clicked to deposit into the vault.
-    if (gameHandler.isGuildBankOpen()) {
+    if (guild_bank::orNoGuildBank(services_.guildBank).isGuildBankOpen()) {
         if (!windowManager_.guildBankBagsOpened_) {
             windowManager_.guildBankBagsOpened_ = true;
             openBagsForTrading(gameHandler);
@@ -1506,7 +1507,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
             st.vendorOpen            = gameHandler.isVendorWindowOpen();
             st.barberShopOpen        = gameHandler.isBarberShopOpen();
             st.bankOpen              = gameHandler.isBankOpen();
-            st.guildBankOpen         = gameHandler.isGuildBankOpen();
+            st.guildBankOpen         = guild_bank::orNoGuildBank(services_.guildBank).isGuildBankOpen();
             st.trainerOpen           = gameHandler.isTrainerWindowOpen();
             st.mailboxOpen           = mail::orNoMailbox(services_.mail).isMailboxOpen();
             st.auctionHouseOpen      = auction::orNoAuctionHouse(services_.auctionHouse).isAuctionHouseOpen();
@@ -1545,7 +1546,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 case EscapeAction::CloseVendor:            gameHandler.closeVendor(); break;
                 case EscapeAction::CloseBarberShop:        gameHandler.closeBarberShop(); break;
                 case EscapeAction::CloseBank:              gameHandler.closeBank(); break;
-                case EscapeAction::CloseGuildBank:         gameHandler.closeGuildBank(); break;
+                case EscapeAction::CloseGuildBank:         guild_bank::orNoGuildBank(services_.guildBank).closeGuildBank(); break;
                 case EscapeAction::CloseTrainer:           gameHandler.closeTrainer(); break;
                 case EscapeAction::CloseMailbox:           mail::orNoMailbox(services_.mail).closeMailbox(); break;
                 case EscapeAction::CloseAuctionHouse:      auction::orNoAuctionHouse(services_.auctionHouse).closeAuctionHouse(); break;

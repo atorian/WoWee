@@ -23,6 +23,8 @@
 #include "auction/services/auction_service.hpp"
 #include "game/mail_gateway.hpp"
 #include "mail/services/mail_service.hpp"
+#include "game/guild_bank_gateway.hpp"
+#include "guild_bank/services/guild_bank_service.hpp"
 #include "ui/macro_icon.hpp"
 #include <imgui_impl_vulkan.h>
 #include "rendering/imgui_texture.hpp"
@@ -538,6 +540,10 @@ bool Application::initialize() {
     mail_ = std::make_unique<mail::MailService>(*mailGateway_, *mailGateway_, eventBus_);
     gameServices_.mailFeed = mail_.get();
     gameServices_.mail = mail_.get();
+    guildBankGateway_ = std::make_unique<game::GuildBankGateway>(*gameHandler, gameHandler->inventory(), *gameHandler);
+    guildBank_ = std::make_unique<guild_bank::GuildBankService>(*guildBankGateway_, *guildBankGateway_, eventBus_);
+    gameServices_.guildBankFeed = guildBank_.get();
+    gameServices_.guildBank = guildBank_.get();
     transportScene_ = std::make_unique<RendererTransportScene>(*renderer);
     gameHandler->getTransportManager()->setScene(transportScene_.get());
 
@@ -901,6 +907,7 @@ bool Application::initialize() {
             uiServices.guild = guild_.get();
             uiServices.auctionHouse = auctionHouse_.get();
             uiServices.mail = mail_.get();
+            uiServices.guildBank = guildBank_.get();
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();  // May be nullptr here, re-wire later
             uiServices.interfaceStages = &interfaceStages_;
@@ -964,6 +971,7 @@ bool Application::initialize() {
         luaSvc.guild             = guild_.get();
         luaSvc.auctionHouse      = auctionHouse_.get();
         luaSvc.mail              = mail_.get();
+        luaSvc.guildBank         = guildBank_.get();
         // Acted on between frames - the reload destroys the state that asked.
         luaSvc.requestReloadUI = [this]() {
             if (auto* character = session()) character->requestInterfaceReload();
@@ -1688,6 +1696,7 @@ bool Application::initialize() {
             uiServices.guild = guild_.get();
             uiServices.auctionHouse = auctionHouse_.get();
             uiServices.mail = mail_.get();
+            uiServices.guildBank = guildBank_.get();
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();
             uiServices.interfaceStages = &interfaceStages_;
@@ -2652,6 +2661,8 @@ void Application::shutdown() {
     gameServices_.auctionFeed = nullptr;
     gameServices_.mailFeed = nullptr;
     gameServices_.mail = nullptr;
+    gameServices_.guildBankFeed = nullptr;
+    gameServices_.guildBank = nullptr;
     contacts_.reset();
     contactsGateway_.reset();
     who_.reset();
@@ -2668,6 +2679,8 @@ void Application::shutdown() {
     lfgGateway_.reset();
     calendar_.reset();
     calendarGateway_.reset();
+    guildBank_.reset();
+    guildBankGateway_.reset();
     mail_.reset();
     mailGateway_.reset();
     auctionHouse_.reset();

@@ -12,6 +12,8 @@
 #include "game/calendar_gateway.hpp"
 #include "game/group_gateway.hpp"
 #include "game/guild_gateway.hpp"
+#include "game/guild_bank_gateway.hpp"
+#include "guild_bank/services/guild_bank.hpp"
 #include "guild/services/guild.hpp"
 #include "group/services/group.hpp"
 #include "game/calendar_data.hpp"
@@ -410,6 +412,14 @@ static group::IGroupServerFeed* groupFeed(SocialQueries& queries) {
     return feed;
 }
 
+static guild_bank::IGuildBankFeed* guildBankFeed(SocialQueries& queries) {
+    auto* feed = queries.guildBankFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("The guild bank is not wired into this client; guild bank logs are dropped");
+    return feed;
+}
+
 static guild::IGuildServerFeed* guildFeed(SocialQueries& queries) {
     auto* feed = queries.guildFeed();
     static bool said = false;
@@ -784,7 +794,11 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
         if (!entries) return;
         if (auto* feed = guildFeed(queries_)) feed->onEventLog(std::move(*entries));
     };
-    table[Opcode::MSG_GUILD_BANK_LOG_QUERY] = [this](network::Packet& packet) { handleGuildBankLog(packet); };
+    table[Opcode::MSG_GUILD_BANK_LOG_QUERY] = [this](network::Packet& packet) {
+        auto reply = readGuildBankLog(packet);
+        if (!reply) return;
+        if (auto* feed = guildBankFeed(queries_)) feed->onLog(reply->tab, std::move(reply->entries));
+    };
     table[Opcode::SMSG_PETITION_QUERY_RESPONSE] = [this](network::Packet& packet) { handlePetitionQueryResponse(packet); };
     table[Opcode::SMSG_PETITION_SHOW_SIGNATURES] = [this](network::Packet& packet) { handlePetitionShowSignatures(packet); };
     table[Opcode::SMSG_PETITION_SIGN_RESULTS] = [this](network::Packet& packet) { handlePetitionSignResults(packet); };
@@ -1625,12 +1639,6 @@ void SocialHandler::reportMailSpam(uint64_t senderGuid, uint32_t mailId) {
     packet.writeUInt32(0);
     packet.writeUInt32(mailId);
     packet.writeUInt32(0);
-    sender_.send(packet);
-}
-
-void SocialHandler::setGuildBankTabText(uint8_t tab, const std::string& text) {
-    if (!sender_.characterInWorld()) return;
-    auto packet = GuildBankSetTabTextPacket::build(tab, text);
     sender_.send(packet);
 }
 
@@ -2524,74 +2532,6 @@ void SocialHandler::deleteGmTicket() {
     sender_.send(pkt);
     // The ticket goes when the server says it has (SMSG_GMTICKET_DELETETICKET).
     LOG_INFO("Deleting GM ticket");
-}
-
-// MSG_GUILD_EVENT_LOG_QUERY: ask, with no payload. The reply is the same
-// opcode and is parsed below.
-void SocialHandler::requestGuildBankLog(uint8_t tab) {
-    if (!sender_.characterInWorld()) return;
-    network::Packet pkt(wireOpcode(Opcode::MSG_GUILD_BANK_LOG_QUERY));
-    pkt.writeUInt8(tab);
-    sender_.send(pkt);
-    LOG_INFO("MSG_GUILD_BANK_LOG_QUERY: tab ", static_cast<int>(tab));
-}
-
-// The reply, which shares its opcode with the request.
-//
-//   uint8 tab
-//   uint8 count
-//   per entry:
-//     int8   type
-//     uint64 playerGuid
-//     the payload the type calls for - an item and a count, those plus a
-//     destination tab for a move, or a sum of money for everything else
-//     uint32 secondsAgo
-//
-// Nothing sent the query, so nothing ever arrived to parse: the guild bank's
-// log tab counted zero transactions and drew an empty page over a log the
-// server keeps.
-void SocialHandler::handleGuildBankLog(network::Packet& packet) {
-    if (!packet.hasRemaining(2)) { packet.skipAll(); return; }
-    const uint8_t tab = packet.readUInt8();
-    const uint8_t count = packet.readUInt8();
-    if (tab >= guildBankLogs_.size()) { packet.skipAll(); return; }
-
-    auto& log = guildBankLogs_[tab];
-    log.clear();
-    log.reserve(count);
-    for (uint8_t i = 0; i < count; ++i) {
-        if (!packet.hasRemaining(9)) break;
-        GuildBankLogEntry e;
-        e.type = packet.readUInt8();
-        e.playerGuid = packet.readUInt64();
-        switch (e.type) {
-            case 1: case 2:                 // deposit / withdraw an item
-                if (!packet.hasRemaining(8)) { packet.skipAll(); return; }
-                e.itemId = packet.readUInt32();
-                e.count  = packet.readUInt32();
-                break;
-            case 3: case 7:                 // moved between tabs
-                if (!packet.hasRemaining(9)) { packet.skipAll(); return; }
-                e.itemId   = packet.readUInt32();
-                e.count    = packet.readUInt32();
-                e.otherTab = packet.readUInt8();
-                break;
-            default:                        // money, in copper
-                if (!packet.hasRemaining(4)) { packet.skipAll(); return; }
-                e.count = packet.readUInt32();
-                break;
-        }
-        if (!packet.hasRemaining(4)) break;
-        e.secondsAgo = packet.readUInt32();
-        if (e.itemId) queries_.ensureItemInfo(e.itemId);
-        log.push_back(e);
-    }
-    packet.skipAll();
-    LOG_INFO("MSG_GUILD_BANK_LOG_QUERY reply: tab ", static_cast<int>(tab),
-             ", ", log.size(), " entries");
-    if (frameXml_.frameXmlListening()) {
-        frameXml_.fireFrameXmlEvent("GUILDBANKLOG_UPDATE", {});
-    }
 }
 
 // CMSG_GMTICKET_SYSTEMSTATUS: is the ticket queue open at all. The reply,

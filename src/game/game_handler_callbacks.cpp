@@ -4,6 +4,7 @@
 #include "guild/domain/records.hpp"
 #include "guild/services/guild.hpp"
 #include "mail/services/mail.hpp"
+#include "guild_bank/services/guild_bank.hpp"
 #include "core/event_bus.hpp"
 #include "game/game_events.hpp"
 #include "game/reputation_standing.hpp"
@@ -1147,13 +1148,6 @@ int GameHandler::getEffectiveBankBagSlots() const {
     return inventoryHandler_->getEffectiveBankBagSlots();
 }
 
-// Guild Bank
-bool GameHandler::isGuildBankOpen() const {
-    return inventoryHandler_->isGuildBankOpen();
-}
-const GuildBankData& GameHandler::getGuildBankData() const {
-    return inventoryHandler_->getGuildBankData();
-}
 contacts::IContactsServerFeed* GameHandler::contactsFeed() {
     return services_.contactsFeed;
 }
@@ -1206,6 +1200,14 @@ mail::IMailboxFeed* GameHandler::mailFeed() {
     return services_.mailFeed;
 }
 
+guild_bank::IGuildBankFeed* GameHandler::guildBankFeed() {
+    return services_.guildBankFeed;
+}
+
+const guild_bank::IGuildBank* GameHandler::guildBank() const {
+    return services_.guildBank;
+}
+
 // The player's guild for the handlers that read it - the chat handler's
 // officer channel and member names, the guild bank's door - answered as a
 // guild the player is not in when the client has none.
@@ -1233,16 +1235,6 @@ const GroupListData& GameHandler::party() const {
 
 bool GameHandler::inGroup() const {
     return services_.group && services_.group->isInGroup();
-}
-
-void GameHandler::setGuildBankMoney(uint64_t money) {
-    inventoryHandler_->setGuildBankMoney(money);
-}
-uint8_t GameHandler::getGuildBankActiveTab() const {
-    return inventoryHandler_->getGuildBankActiveTab();
-}
-void GameHandler::setGuildBankActiveTab(uint8_t tab) {
-    inventoryHandler_->setGuildBankActiveTab(tab);
 }
 
 // Trainer
@@ -1529,10 +1521,6 @@ std::string GameHandler::getLastWhisperSender() const {
 
 bool GameHandler::isAfk() const { return chatHandler_->isAfk(); }
 bool GameHandler::isDnd() const { return chatHandler_->isDnd(); }
-
-void GameHandler::setGuildBankTabText(uint8_t tab, const std::string& text) {
-    socialHandler_->setGuildBankTabText(tab, text);
-}
 
 void GameHandler::channelModeration(Opcode op, const std::string& channelName,
                                     const std::string& targetName,
@@ -2520,7 +2508,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
     } else if (isGuildBank) {
         // Guild vault: CMSG_GAMEOBJ_USE above is a no-op on the server; the bank
         // opens via CMSG_GUILD_BANKER_ACTIVATE, which openGuildBank() sends.
-        openGuildBank(guid);
+        guild_bank::orNoGuildBank(services_.guildBank).openGuildBank(guid);
     } else if (isReadable) {
         // A sign, a plaque, a gravestone: the client reads it.
         //

@@ -14,6 +14,7 @@
 #include "game/update_field_table.hpp"
 #include "game/world_packets.hpp"
 #include "guild/domain/events.hpp"
+#include "guild_bank/services/guild_bank.hpp"
 #include "network/packet.hpp"
 
 #include <array>
@@ -371,7 +372,7 @@ subscribeGuildNotices(core::EventBus& events, ChatLog& chat, FrameXmlEvents& fra
     // back through its own API. GuildBankFrame_OnEvent returns early unless the
     // frame is visible, so firing them while it is shut costs nothing.
     s.push_back(events.subscribe<BankMoneyChanged>([&world](const BankMoneyChanged& e) {
-        world.setGuildBankMoney(e.copper);
+        if (auto* bank = world.guildBankFeed()) bank->onMoney(e.copper);
     }));
     s.push_back(events.subscribe<TabardChanged>([addon](const auto&) { addon("GUILDTABARD_UPDATE"); }));
     s.push_back(events.subscribe<BankBagSlotsChanged>([addon](const auto&) { addon("GUILDBANKBAGSLOTS_CHANGED"); }));

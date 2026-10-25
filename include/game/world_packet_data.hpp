@@ -1456,31 +1456,19 @@ using mail::parseAuctionMailBody;
 // Guild Bank System
 // ============================================================
 
-struct GuildBankItemSlot {
-    uint8_t slotId = 0;
-    uint32_t itemEntry = 0;
-    uint32_t stackCount = 1;
-    uint32_t enchantId = 0;
-    uint32_t randomPropertyId = 0;
-};
+} // namespace game
+namespace guild_bank {
+struct GuildBankItemSlot;
+struct GuildBankTab;
+struct GuildBankData;
+} // namespace guild_bank
+namespace game {
 
-struct GuildBankTab {
-    std::string tabName;
-    std::string tabIcon;
-    std::vector<GuildBankItemSlot> items;
-};
-
-struct GuildBankData {
-    uint64_t money = 0;
-    uint8_t tabId = 0;
-    int32_t withdrawAmount = -1;  // -1 = unlimited
-    std::vector<GuildBankTab> tabs;  // Only populated on fullUpdate
-    std::vector<GuildBankItemSlot> tabItems;  // Current tab items
-    /// Whether the list just parsed carried the tab names, which is what the
-    /// panel's GUILDBANK_UPDATE_TABS means. A slots-only update leaves `tabs`
-    /// as it found them, so their contents cannot answer this.
-    bool tabsIncluded = false;
-};
+// The guild bank's records are its domain's (guild_bank/domain/records.hpp);
+// these are their protocol names. Their definitions are included where used.
+using GuildBankItemSlot = guild_bank::GuildBankItemSlot;
+using GuildBankTab = guild_bank::GuildBankTab;
+using GuildBankData = guild_bank::GuildBankData;
 
 // ============================================================
 // Auction House System

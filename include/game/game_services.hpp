@@ -21,6 +21,7 @@ namespace group { class IGroupServerFeed; class IGroup; }
 namespace guild { class IGuildServerFeed; class IGuild; }
 namespace auction { class IAuctionHouseFeed; }
 namespace mail { class IMailboxFeed; class IMailbox; }
+namespace guild_bank { class IGuildBankFeed; class IGuildBank; }
 namespace network { class WorldConnection; }
 
 namespace game {
@@ -91,6 +92,10 @@ struct GameServices {
     /// Where the mail packets go, and the mailbox a used mailbox opens.
     mail::IMailboxFeed* mailFeed = nullptr;
     mail::IMailbox* mail = nullptr;
+    /// Where the vault's packets and the guild's balance go, and the vault a
+    /// used banker opens.
+    guild_bank::IGuildBankFeed* guildBankFeed = nullptr;
+    guild_bank::IGuildBank* guildBank = nullptr;
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };

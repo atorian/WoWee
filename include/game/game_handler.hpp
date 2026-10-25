@@ -520,9 +520,6 @@ public:
     void joinChannel(const std::string& channelName, const std::string& password = "");
     void leaveChannel(const std::string& channelName);
     void requestChannelList(const std::string& channelName);
-    /// One guild bank tab's log; tab six is the money log.
-    void requestGuildBankLog(uint8_t tab);
-    const std::vector<GuildBankLogEntry>& getGuildBankLog(uint8_t tab) const;
     /// Tell the server whether to pass on every loot roll for us.
     void sendOptOutOfLoot(bool optOut);
     /// Ask an area spirit healer when the next mass resurrection is.
@@ -646,6 +643,8 @@ public:
     guild::IGuildServerFeed* guildFeed() override;
     auction::IAuctionHouseFeed* auctionFeed() override;
     mail::IMailboxFeed* mailFeed() override;
+    guild_bank::IGuildBankFeed* guildBankFeed() override;
+    const guild_bank::IGuildBank* guildBank() const override;
 
     // Money (copper)
     uint64_t getMoneyCopper() const { return inventoryHandler_->moneyCopper(); }
@@ -882,9 +881,6 @@ public:
     bool isDnd() const;
 
     // Party/Raid management
-    /// The info text on a guild bank tab. Tab is zero-based, as stored.
-    void setGuildBankTabText(uint8_t tab, const std::string& text);
-
     /// Channel moderation: invite, kick, ban, unban, mute, unmute and the
     /// moderator pair, which are one packet shape with eight opcodes.
     void channelModeration(Opcode op, const std::string& channelName,
@@ -2634,30 +2630,6 @@ public:
     uint64_t getBankerGuid() const;
     int getEffectiveBankSlots() const;
     int getEffectiveBankBagSlots() const;
-
-    // Guild Bank
-    void openGuildBank(uint64_t guid);
-    void closeGuildBank();
-    void queryGuildBankTab(uint8_t tabId);
-    void buyGuildBankTab();
-    void depositGuildBankMoney(uint32_t amount);
-    void withdrawGuildBankMoney(uint32_t amount);
-    void guildBankWithdrawItem(uint8_t tabId, uint8_t bankSlot, uint8_t destBag,
-                               uint8_t destSlot, uint32_t splitCount = 0);
-    void guildBankDepositItem(uint8_t tabId, uint8_t bankSlot, uint8_t srcBag, uint8_t srcSlot);
-    /// Rename a guild bank tab and pick its icon.
-    void setGuildBankTabInfo(uint8_t tabId, const std::string& name, const std::string& icon);
-    /// Ask for a tab's info text, and read back what arrived.
-    void queryGuildBankText(uint8_t tabId);
-    const std::string& getGuildBankTabText(uint8_t tabId) const;
-    void guildBankDepositFromInventory(uint8_t srcBag, uint8_t srcSlot);
-    bool isGuildBankOpen() const;
-    const GuildBankData& getGuildBankData() const;
-    /// The bank's balance as SMSG_GUILD_EVENT reports it, for guild members
-    /// who are not the one standing at the banker.
-    void setGuildBankMoney(uint64_t money) override;
-    uint8_t getGuildBankActiveTab() const;
-    void setGuildBankActiveTab(uint8_t tab);
 
     /// One row of a profession's recipe list (game/craft_recipe.hpp).
     using CraftRecipe = game::CraftRecipe;
