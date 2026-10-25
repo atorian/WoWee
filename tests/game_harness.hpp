@@ -49,7 +49,8 @@ namespace wowee::lfg { class ILfg; class LfgService; }
 namespace wowee::calendar { class ICalendar; class CalendarService; }
 namespace wowee::group { class IGroup; class GroupService; }
 namespace wowee::guild { class IGuild; class GuildService; class IGuildNameStore; }
-namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; }
+namespace wowee::auction { class IAuctionHouse; class AuctionService; }
+namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; class AuctionGateway; }
 
 namespace wowee::test {
 
@@ -156,6 +157,8 @@ public:
     /// The guild, wired as the client wires it, with its names kept in
     /// memory rather than in the user's file.
     guild::IGuild& guild();
+    /// The auction house, wired as the client wires it.
+    auction::IAuctionHouse& auctionHouse();
     core::CVarStore& cvars() { return cvars_; }
 
     /// The server's side of the connection: the one the game made last. Valid
@@ -274,6 +277,8 @@ private:
     std::unique_ptr<game::GuildGateway> guildGateway_;
     std::unique_ptr<guild::IGuildNameStore> guildNames_;
     std::unique_ptr<guild::GuildService> guild_;
+    std::unique_ptr<game::AuctionGateway> auctionGateway_;
+    std::unique_ptr<auction::AuctionService> auctionHouse_;
     std::unique_ptr<game::GameHandler> game_;
     FakeWorldConnection* connection_ = nullptr;  // owned by the game once made
     bool pingsAnswered_ = true;

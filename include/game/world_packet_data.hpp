@@ -15,6 +15,7 @@
 #include "game/spell_defines.hpp"
 #include "game/group_defines.hpp"
 #include "game/flat_field_map.hpp"
+#include "auction/domain/sort_key.hpp"
 #include <array>
 #include <vector>
 #include <cstdint>
@@ -1515,27 +1516,17 @@ struct GuildBankData {
 // Auction House System
 // ============================================================
 
-struct AuctionEntry {
-    uint32_t auctionId = 0;
-    uint32_t itemEntry = 0;
-    uint32_t stackCount = 1;
-    uint32_t enchantId = 0;
-    uint32_t randomPropertyId = 0;
-    uint32_t suffixFactor = 0;
-    uint64_t ownerGuid = 0;
-    uint32_t startBid = 0;
-    uint32_t minBidIncrement = 0;
-    uint32_t buyoutPrice = 0;
-    uint32_t timeLeftMs = 0;
-    uint64_t bidderGuid = 0;
-    uint32_t currentBid = 0;
-};
+} // namespace game
+namespace auction {
+struct Entry;
+struct ListResult;
+} // namespace auction
+namespace game {
 
-struct AuctionListResult {
-    std::vector<AuctionEntry> auctions;
-    uint32_t totalCount = 0;
-    uint32_t searchDelay = 0;
-};
+// The auction records are the auction domain's (auction/domain/records.hpp);
+// these are their protocol names. Their definitions are included where used.
+using AuctionEntry = auction::Entry;
+using AuctionListResult = auction::ListResult;
 
 struct AuctionCommandResult {
     uint32_t auctionId = 0;
@@ -1549,21 +1540,7 @@ struct AuctionHelloData {
     uint8_t enabled = 1;
 };
 
-/** One column of an auction search's ordering, as the wire carries it.
- *
- * `column` is AzerothCore's AuctionSortOrder - MINLEVEL 0, RARITY 1, BUYOUT 2,
- * TIMELEFT 3, ITEM 5, MINBIDBUY 6, OWNER 7, BID 8, STACK 9.
- *
- * `descending` goes across as sent. The server's comparator is not uniformly
- * ordered - it answers -1 for the *higher* required level and -1 for the
- * *lower* quality - and the original interface's per-column reverse flags were
- * written against those inversions. Normalising the flag here would undo that
- * pairing and sort half the columns backwards.
- */
-struct AuctionSortKey {
-    uint8_t column = 0;
-    bool descending = false;
-};
+using AuctionSortKey = auction::SortKey;
 
 } // namespace game
 } // namespace wowee

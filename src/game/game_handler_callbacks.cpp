@@ -1242,6 +1242,10 @@ guild::IGuildServerFeed* GameHandler::guildFeed() {
     return services_.guildFeed;
 }
 
+auction::IAuctionHouseFeed* GameHandler::auctionFeed() {
+    return services_.auctionFeed;
+}
+
 // The player's guild for the handlers that read it - the chat handler's
 // officer channel and member names, the guild bank's door - answered as a
 // guild the player is not in when the client has none.
@@ -1279,32 +1283,6 @@ uint8_t GameHandler::getGuildBankActiveTab() const {
 }
 void GameHandler::setGuildBankActiveTab(uint8_t tab) {
     inventoryHandler_->setGuildBankActiveTab(tab);
-}
-
-// Auction House
-bool GameHandler::isAuctionHouseOpen() const {
-    return inventoryHandler_->isAuctionHouseOpen();
-}
-uint64_t GameHandler::getAuctioneerGuid() const {
-    return inventoryHandler_->getAuctioneerGuid();
-}
-const AuctionListResult& GameHandler::getAuctionBrowseResults() const {
-    return inventoryHandler_->getAuctionBrowseResults();
-}
-const AuctionListResult& GameHandler::getAuctionOwnerResults() const {
-    return inventoryHandler_->getAuctionOwnerResults();
-}
-const AuctionListResult& GameHandler::getAuctionBidderResults() const {
-    return inventoryHandler_->getAuctionBidderResults();
-}
-int GameHandler::getAuctionActiveTab() const {
-    return inventoryHandler_->getAuctionActiveTab();
-}
-void GameHandler::setAuctionActiveTab(int tab) {
-    inventoryHandler_->setAuctionActiveTab(tab);
-}
-float GameHandler::getAuctionSearchDelay() const {
-    return inventoryHandler_->getAuctionSearchDelay();
 }
 
 // Trainer

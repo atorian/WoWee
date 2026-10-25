@@ -1,5 +1,7 @@
 #include "lfg/services/lfg.hpp"
 #include "guild/services/guild.hpp"
+#include "auction/domain/records.hpp"
+#include "auction/services/auction_house.hpp"
 #include "addons/lua_engine.hpp"
 #include "ui/link_hit.hpp"
 #include "ui/text_markup.hpp"
@@ -2769,9 +2771,9 @@ int lua_Tooltip_SetAuctionItem(lua_State* L) {
     if (!w || !gh || index < 1) { lua_pushboolean(L, 0); return 1; }
 
     const std::string which(list ? list : "list");
-    const auto& results = (which == "owner")  ? gh->getAuctionOwnerResults()
-                        : (which == "bidder") ? gh->getAuctionBidderResults()
-                                              : gh->getAuctionBrowseResults();
+    const auto& results = (which == "owner")  ? auctionOf(L).getAuctionOwnerResults()
+                        : (which == "bidder") ? auctionOf(L).getAuctionBidderResults()
+                                              : auctionOf(L).getAuctionBrowseResults();
     if (index > static_cast<int>(results.auctions.size())) {
         lua_pushboolean(L, 0);
         return 1;

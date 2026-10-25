@@ -2,6 +2,8 @@
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include "group/services/group.hpp"
 #include "guild/services/guild.hpp"
+#include "auction/domain/records.hpp"
+#include "auction/services/auction_house.hpp"
 #include "game/item_text.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "addons/lua_engine.hpp"
@@ -1990,12 +1992,10 @@ std::vector<game::AuctionSortKey> wireAuctionSort(lua_State* L, std::string_view
     return out;
 }
 
-game::AuctionListResult* auctionListForSort(game::GameHandler* gh,
-                                            std::string_view which) {
-    if (!gh) return nullptr;
-    if (which == "owner")  return &gh->inventory().auctionOwnerResultsRef();
-    if (which == "bidder") return &gh->inventory().auctionBidderResultsRef();
-    return &gh->inventory().auctionBrowseResultsRef();
+auction::AuctionList auctionListNamed(std::string_view which) {
+    if (which == "owner")  return auction::AuctionList::Owned;
+    if (which == "bidder") return auction::AuctionList::Bids;
+    return auction::AuctionList::Browse;
 }
 
 /// Orders two rows on one column.
@@ -2506,11 +2506,10 @@ static int lua_GetInventorySlotInfo(lua_State* L) {
 /// points into the handler, never into `which` - but it made the compiler warn
 /// that it might dangle, and a warning nobody can act on is worse than the
 /// allocation it was reporting.
-static const game::AuctionListResult& auctionListFor(game::GameHandler* gh,
-                                                     std::string_view which) {
-    if (which == "owner")  return gh->getAuctionOwnerResults();
-    if (which == "bidder") return gh->getAuctionBidderResults();
-    return gh->getAuctionBrowseResults();
+static const game::AuctionListResult& auctionListFor(lua_State* L, std::string_view which) {
+    if (which == "owner")  return auctionOf(L).getAuctionOwnerResults();
+    if (which == "bidder") return auctionOf(L).getAuctionBidderResults();
+    return auctionOf(L).getAuctionBrowseResults();
 }
 
 /// The panel's own state: which row is selected, and which bag slot is sitting
@@ -4264,8 +4263,8 @@ void registerInventoryLuaAPI(lua_State* L) {
             // getAll sweep may be. The second is always no - it asks the
             // server for every auction at once and is rate-limited to once
             // every fifteen minutes even where it is allowed.
-            const bool open = gh && gh->isAuctionHouseOpen();
-            lua_pushboolean(L, open && gh->getAuctionSearchDelay() <= 0.0f);
+            const bool open = gh && auctionOf(L).isAuctionHouseOpen();
+            lua_pushboolean(L, open && auctionOf(L).getAuctionSearchDelay() <= 0.0f);
             lua_pushboolean(L, 0);
             return 2;
         }},
@@ -4323,16 +4322,16 @@ void registerInventoryLuaAPI(lua_State* L) {
             // SortAuctionApplySort, so nothing sorts the browse list locally
             // and a query that leaves the sort block empty leaves the headers
             // inert.
-            gh->auctionSearch(name, lo, hi, quality, cls, sub, inv, usable,
+            auctionOf(L).auctionSearch(name, lo, hi, quality, cls, sub, inv, usable,
                               page * 50, wireAuctionSort(L, "list"));
             return 0;
         }},
                 {"GetOwnerAuctionItems", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->auctionListOwnerItems(0);
+            if (getGameHandler(L)) auctionOf(L).auctionListOwnerItems(0);
             return 0;
         }},
                 {"GetBidderAuctionItems", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->auctionListBidderItems(0);
+            if (getGameHandler(L)) auctionOf(L).auctionListBidderItems(0);
             return 0;
         }},
                 // PlaceAuctionBid(list, index, bid) - a bid equal to the
@@ -4343,13 +4342,13 @@ void registerInventoryLuaAPI(lua_State* L) {
             const int index = static_cast<int>(luaL_optnumber(L, 2, 0));
             const uint32_t bid = static_cast<uint32_t>(luaL_optnumber(L, 3, 0));
             if (!gh) return 0;
-            const auto& res = auctionListFor(gh, list);
+            const auto& res = auctionListFor(L, list);
             if (index < 1 || index > static_cast<int>(res.auctions.size())) return 0;
             const auto& a = res.auctions[index - 1];
             if (a.buyoutPrice != 0 && bid >= a.buyoutPrice) {
-                gh->auctionBuyout(a.auctionId, a.buyoutPrice);
+                auctionOf(L).auctionBuyout(a.auctionId, a.buyoutPrice);
             } else {
-                gh->auctionPlaceBid(a.auctionId, bid);
+                auctionOf(L).auctionPlaceBid(a.auctionId, bid);
             }
             return 0;
         }},
@@ -4357,15 +4356,15 @@ void registerInventoryLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh) return 0;
-            const auto& res = gh->getAuctionOwnerResults();
+            const auto& res = auctionOf(L).getAuctionOwnerResults();
             if (index < 1 || index > static_cast<int>(res.auctions.size())) return 0;
-            gh->auctionCancelItem(res.auctions[index - 1].auctionId);
+            auctionOf(L).auctionCancelItem(res.auctions[index - 1].auctionId);
             return 0;
         }},
                 {"CanCancelAuction", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
-            const auto* res = gh ? &gh->getAuctionOwnerResults() : nullptr;
+            const auto* res = gh ? &auctionOf(L).getAuctionOwnerResults() : nullptr;
             // Only one that has not been bid on: cancelling after a bid costs
             // a fee this client does not model, and the server refuses anyway.
             const bool ok = res && index >= 1 &&
@@ -4395,7 +4394,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             // several-item list.
             const uint32_t stack = static_cast<uint32_t>(
                 luaL_optnumber(L, 4, item->item.stackCount ? item->item.stackCount : 1));
-            gh->auctionSellItemByGuid(guid, stack, bid, buy, dur);
+            auctionOf(L).auctionSellItemByGuid(guid, stack, bid, buy, dur);
             auctionSellSlot(L) = AuctionSellSlot{};
             fireAuctionSellUpdate(gh);
             return 0;
@@ -4474,7 +4473,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             return 9;
         }},
                 {"CloseAuctionHouse", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->closeAuctionHouse();
+            if (getGameHandler(L)) auctionOf(L).closeAuctionHouse();
             return 0;
         }},
                 // SetAuctionsTabShowing(showing) - a *boolean*, not a tab index.
@@ -4500,11 +4499,11 @@ void registerInventoryLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
             if (lua_isboolean(L, 1)) {
-                gh->setAuctionActiveTab(lua_toboolean(L, 1) ? 2 : 0);
+                auctionOf(L).setAuctionActiveTab(lua_toboolean(L, 1) ? 2 : 0);
             } else if (lua_isnumber(L, 1)) {
-                gh->setAuctionActiveTab(static_cast<int>(lua_tonumber(L, 1)));
+                auctionOf(L).setAuctionActiveTab(static_cast<int>(lua_tonumber(L, 1)));
             } else if (lua_isnoneornil(L, 1)) {
-                gh->setAuctionActiveTab(0);
+                auctionOf(L).setAuctionActiveTab(0);
             }
             return 0;
         }},
@@ -4594,12 +4593,11 @@ void registerInventoryLuaAPI(lua_State* L) {
                 {"SortAuctionApplySort", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const std::string which = luaL_optstring(L, 1, "list");
-            auto* list = auctionListForSort(gh, which);
-            if (!list) return 0;
+            if (!gh) return 0;
             for (const auto& key : auctionSortState(L)[which]) {
-                std::stable_sort(list->auctions.begin(), list->auctions.end(),
-                                 [&](const game::AuctionEntry& a,
-                                     const game::AuctionEntry& b) {
+                auctionOf(L).reorderAuctionList(auctionListNamed(which),
+                                                [&](const game::AuctionEntry& a,
+                                                    const game::AuctionEntry& b) {
                     return key.reverse ? auctionLess(gh, key.column, b, a)
                                        : auctionLess(gh, key.column, a, b);
                 });
@@ -4680,9 +4678,9 @@ void registerInventoryLuaAPI(lua_State* L) {
             if (!gh) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); return 2; }
             std::string t(listType);
             const game::AuctionListResult* r = nullptr;
-            if (t == "list" || t == "browse") r = &gh->getAuctionBrowseResults();
-            else if (t == "owner") r = &gh->getAuctionOwnerResults();
-            else if (t == "bidder") r = &gh->getAuctionBidderResults();
+            if (t == "list" || t == "browse") r = &auctionOf(L).getAuctionBrowseResults();
+            else if (t == "owner") r = &auctionOf(L).getAuctionOwnerResults();
+            else if (t == "bidder") r = &auctionOf(L).getAuctionBidderResults();
             lua_pushnumber(L, r ? r->auctions.size() : 0);
             lua_pushnumber(L, r ? r->totalCount : 0);
             return 2;
@@ -4712,9 +4710,9 @@ void registerInventoryLuaAPI(lua_State* L) {
             if (!gh || index < 1) { return luaReturnNil(L); }
             std::string t(listType);
             const game::AuctionListResult* r = nullptr;
-            if (t == "list") r = &gh->getAuctionBrowseResults();
-            else if (t == "owner") r = &gh->getAuctionOwnerResults();
-            else if (t == "bidder") r = &gh->getAuctionBidderResults();
+            if (t == "list") r = &auctionOf(L).getAuctionBrowseResults();
+            else if (t == "owner") r = &auctionOf(L).getAuctionOwnerResults();
+            else if (t == "bidder") r = &auctionOf(L).getAuctionBidderResults();
             if (!r || index > static_cast<int>(r->auctions.size())) { return luaReturnNil(L); }
             const auto& a = r->auctions[index - 1];
             const auto* info = gh->getItemInfo(a.itemEntry);
@@ -4765,9 +4763,9 @@ void registerInventoryLuaAPI(lua_State* L) {
             if (!gh || index < 1) { lua_pushnumber(L, 4); return 1; }
             std::string t(listType);
             const game::AuctionListResult* r = nullptr;
-            if (t == "list") r = &gh->getAuctionBrowseResults();
-            else if (t == "owner") r = &gh->getAuctionOwnerResults();
-            else if (t == "bidder") r = &gh->getAuctionBidderResults();
+            if (t == "list") r = &auctionOf(L).getAuctionBrowseResults();
+            else if (t == "owner") r = &auctionOf(L).getAuctionOwnerResults();
+            else if (t == "bidder") r = &auctionOf(L).getAuctionBidderResults();
             if (!r || index > static_cast<int>(r->auctions.size())) { lua_pushnumber(L, 4); return 1; }
             // Return 1=short(<30m), 2=medium(<2h), 3=long(<12h), 4=very long(>12h)
             uint32_t ms = r->auctions[index - 1].timeLeftMs;
@@ -4782,9 +4780,9 @@ void registerInventoryLuaAPI(lua_State* L) {
             if (!gh || index < 1) { return luaReturnNil(L); }
             std::string t(listType);
             const game::AuctionListResult* r = nullptr;
-            if (t == "list") r = &gh->getAuctionBrowseResults();
-            else if (t == "owner") r = &gh->getAuctionOwnerResults();
-            else if (t == "bidder") r = &gh->getAuctionBidderResults();
+            if (t == "list") r = &auctionOf(L).getAuctionBrowseResults();
+            else if (t == "owner") r = &auctionOf(L).getAuctionOwnerResults();
+            else if (t == "bidder") r = &auctionOf(L).getAuctionBidderResults();
             if (!r || index > static_cast<int>(r->auctions.size())) { return luaReturnNil(L); }
             uint32_t itemId = r->auctions[index - 1].itemEntry;
             const auto* info = gh->getItemInfo(itemId);

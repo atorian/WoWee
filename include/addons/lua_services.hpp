@@ -24,6 +24,7 @@ namespace wowee::lfg { class ILfg; }
 namespace wowee::calendar { class ICalendar; }
 namespace wowee::group { class IGroup; }
 namespace wowee::guild { class IGuild; }
+namespace wowee::auction { class IAuctionHouse; }
 
 namespace wowee::addons {
 
@@ -62,6 +63,9 @@ struct LuaServices {
     /// The player's guild and the requests that change it, and other
     /// guilds' names for nameplates and tooltips.
     guild::IGuild*           guild             = nullptr;
+    /// The auction house the player is standing at, its lists and the
+    /// requests that go to the auctioneer.
+    auction::IAuctionHouse*  auctionHouse      = nullptr;
 
     /// Run a macro body, as RunMacroText() does - one command per line,
     /// through the same path the action bar uses for a macro button.

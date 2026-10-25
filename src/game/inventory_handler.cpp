@@ -1,4 +1,7 @@
 #include "game/inventory_handler.hpp"
+#include "auction/domain/records.hpp"
+#include "auction/services/auction_house.hpp"
+#include "game/auction_gateway.hpp"
 #include "game/spell_classification.hpp"
 #include "game/item_text.hpp"
 #include "game/inventory_slots.hpp"
@@ -37,12 +40,23 @@ namespace game {
 // formatCopperAmount was forward-declared here, across translation units,
 // to reach a file-scope copy in game_handler.cpp. It is in item_text.hpp now.
 
+// The auction house the protocol feeds. A client built without it drops the
+// auction packets, and says so once.
+static auction::IAuctionHouseFeed* auctionFeed(InventoryQueries& queries) {
+    auto* feed = queries.auctionFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("The auction house is not wired into this client; auction packets are dropped");
+    return feed;
+}
+
 InventoryHandler::InventoryHandler(PacketSender& sender, FrameXmlEvents& frameXml,
                                    core::EventBus& events, ChatLog& chat,
                                    InventoryQueries& queries, const core::CVarStore& cvars,
                                    pipeline::AssetManager* assets)
     : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat),
-      queries_(queries), cvars_(cvars), assets_(assets) {}
+      queries_(queries), cvars_(cvars), assets_(assets),
+      subscriptions_(subscribeAuctionNotices(events, chat, frameXml, *this)) {}
 
 void InventoryHandler::raiseUiError(const std::string& message) {
     game::raiseUiError(events_, frameXml_, message);
@@ -56,6 +70,7 @@ void InventoryHandler::beginCharacter() {
     // The buyback list persists across vendor windows within a session but is
     // the last character's, not this one's.
     clearBuybackState();
+    if (auto* feed = auctionFeed(queries_)) feed->beginCharacter();
 }
 
 void InventoryHandler::leaveWorld() {
@@ -75,7 +90,7 @@ void InventoryHandler::update(float deltaTime) {
         }
     }
 
-    tickAuctionSearchDelay(deltaTime);
+    if (auto* feed = auctionFeed(queries_)) feed->onTimePassed(deltaTime);
 
     if (held_.pendingMoneyDeltaTimer > 0.0f) {
         held_.pendingMoneyDeltaTimer -= deltaTime;
@@ -84,13 +99,6 @@ void InventoryHandler::update(float deltaTime) {
 
     tickLootMoneyFallback(deltaTime);
     sendPendingAutoInspect(deltaTime);
-}
-
-void InventoryHandler::tickAuctionSearchDelay(float deltaTime) {
-    if (auctionSearchDelayTimer_ > 0.0f) {
-        auctionSearchDelayTimer_ -= deltaTime;
-        if (auctionSearchDelayTimer_ < 0.0f) auctionSearchDelayTimer_ = 0.0f;
-    }
 }
 
 void InventoryHandler::sendPendingAutoInspect(float deltaTime) {
@@ -964,11 +972,30 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
     };
 
     // ---- Auction House ----
-    table[Opcode::MSG_AUCTION_HELLO] = [this](network::Packet& packet) { handleAuctionHello(packet); };
-    table[Opcode::SMSG_AUCTION_LIST_RESULT] = [this](network::Packet& packet) { handleAuctionListResult(packet); };
-    table[Opcode::SMSG_AUCTION_OWNER_LIST_RESULT] = [this](network::Packet& packet) { handleAuctionOwnerListResult(packet); };
-    table[Opcode::SMSG_AUCTION_BIDDER_LIST_RESULT] = [this](network::Packet& packet) { handleAuctionBidderListResult(packet); };
-    table[Opcode::SMSG_AUCTION_COMMAND_RESULT] = [this](network::Packet& packet) { handleAuctionCommandResult(packet); };
+    table[Opcode::MSG_AUCTION_HELLO] = [this](network::Packet& packet) {
+        AuctionHelloData data;
+        if (!AuctionHelloParser::parse(packet, data)) return;
+        if (auto* feed = auctionFeed(queries_)) feed->onHello(data.auctioneerGuid);
+        queries_.closeGossip();
+    };
+    // The plain list result fills whichever list was asked for last; the
+    // owner and bidder results say which they are.
+    table[Opcode::SMSG_AUCTION_LIST_RESULT] = [this](network::Packet& packet) {
+        handleAuctionListResult(packet, std::nullopt);
+    };
+    table[Opcode::SMSG_AUCTION_OWNER_LIST_RESULT] = [this](network::Packet& packet) {
+        handleAuctionListResult(packet, auction::AuctionList::Owned);
+    };
+    table[Opcode::SMSG_AUCTION_BIDDER_LIST_RESULT] = [this](network::Packet& packet) {
+        handleAuctionListResult(packet, auction::AuctionList::Bids);
+    };
+    table[Opcode::SMSG_AUCTION_COMMAND_RESULT] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(12)) return;
+        /*uint32_t auctionId =*/ packet.readUInt32();
+        const uint32_t action = packet.readUInt32();
+        const uint32_t error = packet.readUInt32();
+        if (auto* feed = auctionFeed(queries_)) feed->onCommandResult(action, error);
+    };
 
     table[Opcode::SMSG_AUCTION_OWNER_NOTIFICATION] = [this](network::Packet& packet) {
         // SendAuctionOwnerNotification writes:
@@ -3683,219 +3710,14 @@ void InventoryHandler::handleGuildBankList(network::Packet& packet) {
     }
 }
 
-// ============================================================
-// Auction House
-// ============================================================
-
-void InventoryHandler::openAuctionHouse(uint64_t guid) {
-    auctioneerGuid_ = guid;
-    auctionOpen_ = true;
-    auctionActiveTab_ = 0;
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("AUCTION_HOUSE_SHOW", {});
-}
-
-void InventoryHandler::closeAuctionHouse() {
-    auctionOpen_ = false;
-    auctioneerGuid_ = 0;
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("AUCTION_HOUSE_CLOSED", {});
-}
-
-void InventoryHandler::auctionSearch(const std::string& name, uint8_t levelMin, uint8_t levelMax,
-                                      uint32_t quality, uint32_t itemClass, uint32_t itemSubClass,
-                                      uint32_t invTypeMask, uint8_t usableOnly, uint32_t offset,
-                                      const std::vector<AuctionSortKey>& sort) {
-    if (!sender_.characterInWorld() || auctioneerGuid_ == 0) return;
-    lastAuctionSearch_ = {.name = name, .levelMin = levelMin, .levelMax = levelMax, .quality = quality, .itemClass = itemClass, .itemSubClass = itemSubClass,
-                          .invTypeMask = invTypeMask, .usableOnly = usableOnly, .offset = offset, .sort = sort};
-    hasAuctionSearch_ = true;
-    pendingAuctionTarget_ = AuctionResultTarget::BROWSE;
-    auto packet = AuctionListItemsPacket::build(auctioneerGuid_, offset, name,
-                                                  levelMin, levelMax, invTypeMask,
-                                                  itemClass, itemSubClass, quality, usableOnly, 0,
-                                                  sort);
-    sender_.send(packet);
-    // Blocks the Search button until the answer comes back. The result carries
-    // the server's own wait and replaces this with it, so five seconds is only
-    // what applies while a reply is outstanding - and on Classic and TBC, whose
-    // list result ends before that field.
-    auctionSearchDelayTimer_ = 5.0f;
-}
-
-void InventoryHandler::auctionSellItem(int backpackIndex, uint32_t bid,
-                                        uint32_t buyout, uint32_t duration) {
-    if (!sender_.characterInWorld() || auctioneerGuid_ == 0) return;
-    if (backpackIndex < 0 || backpackIndex >= held_.items.getBackpackSize()) return;
-    const auto& slot = held_.items.getBackpackSlot(backpackIndex);
-    if (slot.empty()) return;
-
-    uint64_t itemGuid = held_.backpackSlotGuids[backpackIndex];
-    if (itemGuid == 0) {
-        itemGuid = resolveOnlineItemGuid(slot.item.itemId);
-    }
-    if (itemGuid == 0) {
-        LOG_ERROR("auctionSellItem: could not resolve GUID for backpack slot ", backpackIndex);
-        return;
-    }
-
-    uint32_t stackCount = slot.item.stackCount;
-    auto packet = AuctionSellItemPacket::build(auctioneerGuid_, itemGuid, stackCount, bid, buyout, duration,
-                                                isPreWotlk());
-    sender_.send(packet);
-}
-
-void InventoryHandler::auctionSellItemByGuid(uint64_t itemGuid, uint32_t stackCount, uint32_t bid,
-                                             uint32_t buyout, uint32_t duration) {
-    if (!sender_.characterInWorld() || auctioneerGuid_ == 0) return;
-    if (itemGuid == 0) {
-        LOG_ERROR("auctionSellItemByGuid: refusing to post with a null item GUID");
-        return;
-    }
-    if (stackCount == 0) stackCount = 1;
-    auto packet = AuctionSellItemPacket::build(auctioneerGuid_, itemGuid, stackCount, bid, buyout, duration,
-                                                isPreWotlk());
-    sender_.send(packet);
-}
-
-void InventoryHandler::auctionPlaceBid(uint32_t auctionId, uint32_t amount) {
-    if (!sender_.characterInWorld() || auctioneerGuid_ == 0) return;
-    auto packet = AuctionPlaceBidPacket::build(auctioneerGuid_, auctionId, amount);
-    sender_.send(packet);
-}
-
-void InventoryHandler::auctionBuyout(uint32_t auctionId, uint32_t buyoutPrice) {
-    if (!sender_.characterInWorld() || auctioneerGuid_ == 0) return;
-    auto packet = AuctionPlaceBidPacket::build(auctioneerGuid_, auctionId, buyoutPrice);
-    sender_.send(packet);
-}
-
-void InventoryHandler::auctionCancelItem(uint32_t auctionId) {
-    if (!sender_.characterInWorld() || auctioneerGuid_ == 0) return;
-    auto packet = AuctionRemoveItemPacket::build(auctioneerGuid_, auctionId);
-    sender_.send(packet);
-}
-
-void InventoryHandler::auctionListOwnerItems(uint32_t offset) {
-    if (!sender_.characterInWorld() || auctioneerGuid_ == 0) return;
-    pendingAuctionTarget_ = AuctionResultTarget::OWNER;
-    auto packet = AuctionListOwnerItemsPacket::build(auctioneerGuid_, offset);
-    sender_.send(packet);
-}
-
-void InventoryHandler::auctionListBidderItems(uint32_t offset) {
-    if (!sender_.characterInWorld() || auctioneerGuid_ == 0) return;
-    pendingAuctionTarget_ = AuctionResultTarget::BIDDER;
-    auto packet = AuctionListBidderItemsPacket::build(auctioneerGuid_, offset);
-    sender_.send(packet);
-}
-
-void InventoryHandler::handleAuctionHello(network::Packet& packet) {
-    // Through the parser and the opener rather than reading and setting inline.
-    // Both existed and neither had a caller: this read the same two fields a
-    // second time and set the same state a second time, so the packet's layout
-    // was written down twice and openAuctionHouse was dead code that looked
-    // live. The parser also reads the trailing enabled byte, which is in the
-    // WotLK packet and not the vanilla one - this did not, and would have
-    // needed the same expansion difference written a second time to.
-    AuctionHelloData data;
-    if (!AuctionHelloParser::parse(packet, data)) return;
-    openAuctionHouse(data.auctioneerGuid);
-    queries_.closeGossip();
-}
-
-void InventoryHandler::handleAuctionListResult(network::Packet& packet) {
+void InventoryHandler::handleAuctionListResult(network::Packet& packet,
+                                               std::optional<auction::AuctionList> list) {
     AuctionListResult result;
     // Vanilla sends a single enchantId; TBC inspects 6 enchant slots per item,
     // WotLK 7 (PRISMATIC_ENCHANTMENT_SLOT joined the inspected range in 3.x).
     const int enchantSlots = isClassicLikeExpansion() ? 1 : (isPreWotlk() ? 6 : 7);
     if (!AuctionListResultParser::parse(packet, result, enchantSlots)) return;
-
-    // How long before another search may be sent - the server's own figure,
-    // which every list result carries and which was parsed and then dropped.
-    // AzerothCore's AUCTION_SEARCH_DELAY is 300, in milliseconds; the guess it
-    // replaces was five whole seconds, so the Search button sat dead for about
-    // seventeen times longer than the server ever asked for, and paging
-    // through results crawled.
-    //
-    // A zero means the field was not sent at all rather than "no wait" -
-    // Classic and TBC end the packet before it - so the old guess stays as the
-    // floor for those, where an unthrottled client is what the server would
-    // have to defend itself against.
-    if (result.searchDelay > 0) {
-        auctionSearchDelayTimer_ = static_cast<float>(result.searchDelay) / 1000.0f;
-    }
-
-    if (pendingAuctionTarget_ == AuctionResultTarget::OWNER) {
-        auctionOwnerResults_ = std::move(result);
-        if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("AUCTION_OWNED_LIST_UPDATE", {});
-    } else if (pendingAuctionTarget_ == AuctionResultTarget::BIDDER) {
-        auctionBidderResults_ = std::move(result);
-        if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("AUCTION_BIDDER_LIST_UPDATE", {});
-    } else {
-        auctionBrowseResults_ = std::move(result);
-        if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("AUCTION_ITEM_LIST_UPDATE", {});
-    }
-
-    // Ensure item info for all entries
-    auto ensureEntries = [this](const AuctionListResult& r) {
-        for (const auto& e : r.auctions) {
-            ensureItemInfo(e.itemEntry);
-            if (e.ownerGuid != 0) queries_.requestPlayerName(e.ownerGuid);
-        }
-    };
-    if (pendingAuctionTarget_ == AuctionResultTarget::OWNER) ensureEntries(auctionOwnerResults_);
-    else if (pendingAuctionTarget_ == AuctionResultTarget::BIDDER) ensureEntries(auctionBidderResults_);
-    else ensureEntries(auctionBrowseResults_);
-}
-
-void InventoryHandler::handleAuctionOwnerListResult(network::Packet& packet) {
-    pendingAuctionTarget_ = AuctionResultTarget::OWNER;
-    handleAuctionListResult(packet);
-}
-
-void InventoryHandler::handleAuctionBidderListResult(network::Packet& packet) {
-    pendingAuctionTarget_ = AuctionResultTarget::BIDDER;
-    handleAuctionListResult(packet);
-}
-
-void InventoryHandler::handleAuctionCommandResult(network::Packet& packet) {
-    if (!packet.hasRemaining(12)) return;
-    uint32_t auctionId = packet.readUInt32();
-    uint32_t action = packet.readUInt32();
-    uint32_t error  = packet.readUInt32();
-    (void)auctionId;
-
-    const char* actionNames[] = {"sell", "cancel", "bid/buyout"};
-    const char* actionStr = (action < 3) ? actionNames[action] : "unknown";
-
-    if (error == 0) {
-        std::string msg = std::string("Auction ") + actionStr + " successful.";
-        chat_.addSystemChatMessage(msg);
-        if (frameXml_.frameXmlListening()) {
-            frameXml_.fireFrameXmlEvent("PLAYER_MONEY", {});
-            fireBagUpdates();
-        }
-        // Re-query after successful buy/bid so the list reflects the change.
-        // Previously gated on name.length()>0 which skipped browse-all (empty name).
-        if (action == 2 && hasAuctionSearch_) {
-            auctionSearch(lastAuctionSearch_.name, lastAuctionSearch_.levelMin, lastAuctionSearch_.levelMax,
-                         lastAuctionSearch_.quality, lastAuctionSearch_.itemClass, lastAuctionSearch_.itemSubClass,
-                         lastAuctionSearch_.invTypeMask, lastAuctionSearch_.usableOnly,
-                         lastAuctionSearch_.offset, lastAuctionSearch_.sort);
-        }
-    } else {
-        const char* errMsg = "Unknown error.";
-        switch (error) {
-            case 1: errMsg = "Not enough money."; break;
-            case 2: errMsg = "Item not found."; break;
-            case 5: errMsg = "Bid too low."; break;
-            case 6: errMsg = "Bid increment too low."; break;
-            case 7: errMsg = "You cannot bid on your own auction."; break;
-            case 8: errMsg = "Database error."; break;
-            default: break;
-        }
-        raiseUiError(std::string("Auction ") + actionStr + " failed: " + errMsg);
-        chat_.addSystemChatMessage(std::string("Auction ") + actionStr + " failed: " + errMsg);
-    }
+    if (auto* feed = auctionFeed(queries_)) feed->onList(std::move(result), list);
 }
 
 // ============================================================
@@ -4571,23 +4393,7 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
         // keeps it. Only while the house is open, and only for a row that is
         // actually waiting on this entry: the query runs hundreds of times
         // over a login and the rest of them are nothing to do with auctions.
-        if (auctionOpen_ && frameXml_.frameXmlListening()) {
-            auto listWants = [&data](const AuctionListResult& r) {
-                for (const auto& e : r.auctions) {
-                    if (e.itemEntry == data.entry) return true;
-                }
-                return false;
-            };
-            if (listWants(auctionBrowseResults_)) {
-                frameXml_.fireFrameXmlEvent("AUCTION_ITEM_LIST_UPDATE", {});
-            }
-            if (listWants(auctionOwnerResults_)) {
-                frameXml_.fireFrameXmlEvent("AUCTION_OWNED_LIST_UPDATE", {});
-            }
-            if (listWants(auctionBidderResults_)) {
-                frameXml_.fireFrameXmlEvent("AUCTION_BIDDER_LIST_UPDATE", {});
-            }
-        }
+        if (auto* feed = auctionFeed(queries_)) feed->onItemInfo(data.entry);
 
         // The vendor list, which arrives the same way: SMSG_LIST_INVENTORY
         // gives an item id and a price per row and nothing a player can read.

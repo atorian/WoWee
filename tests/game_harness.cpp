@@ -19,6 +19,8 @@
 #include "group/services/group_service.hpp"
 #include "game/guild_gateway.hpp"
 #include "guild/services/guild_service.hpp"
+#include "game/auction_gateway.hpp"
+#include "auction/services/auction_service.hpp"
 
 #include <catch_amalgamated.hpp>  // test_support.hpp's REQUIRE
 #include "test_support.hpp"
@@ -209,6 +211,9 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     guild_ = std::make_unique<guild::GuildService>(*guildGateway_, *guildGateway_, *guildNames_, events_);
     services_.guildFeed = guild_.get();
     services_.guild = guild_.get();
+    auctionGateway_ = std::make_unique<game::AuctionGateway>(*game_, game_->inventory(), *game_);
+    auctionHouse_ = std::make_unique<auction::AuctionService>(*auctionGateway_, *auctionGateway_, events_);
+    services_.auctionFeed = auctionHouse_.get();
     game::loadProtocolTables(*game_, *expansions_.getActive());
     game_->setAddonEventCallback([this](const std::string& name, const std::vector<std::string>& args) {
         addonEvents_.push_back({name, args});
@@ -227,6 +232,7 @@ lfg::ILfg& GameHarness::lfg() { return *lfg_; }
 calendar::ICalendar& GameHarness::calendar() { return *calendar_; }
 group::IGroup& GameHarness::group() { return *group_; }
 guild::IGuild& GameHarness::guild() { return *guild_; }
+auction::IAuctionHouse& GameHarness::auctionHouse() { return *auctionHouse_; }
 
 FakeWorldConnection& GameHarness::server() {
     if (!connection_) fail("no connection yet: connect (or enterWorld) first");

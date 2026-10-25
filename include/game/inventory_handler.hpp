@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/event_bus.hpp"
 #include "game/world_packet_data.hpp"
 #include "game/opcode_table.hpp"
 #include "game/inventory.hpp"
@@ -19,6 +20,7 @@
 
 namespace wowee {
 namespace core { class EventBus; class CVarStore; }
+namespace auction { class IAuctionHouseFeed; enum class AuctionList; }
 namespace pipeline { class AssetManager; }
 namespace game {
 
@@ -154,6 +156,11 @@ public:
     [[nodiscard]] virtual bool questWantsItem(uint32_t itemId) const = 0;
     /// Run a line of the interface's own Lua.
     virtual void runInterfaceCommand(const std::string& lua) = 0;
+
+    // ---- The contexts it feeds ----
+    /// Where the auction house's packets and the client's clock go; null when
+    /// the client was built without it.
+    [[nodiscard]] virtual auction::IAuctionHouseFeed* auctionFeed() = 0;
 };
 
 class InventoryHandler {
@@ -770,39 +777,6 @@ public:
     uint8_t getGuildBankActiveTab() const { return guildBankActiveTab_; }
     void setGuildBankActiveTab(uint8_t tab) { guildBankActiveTab_ = tab; }
 
-    // ---- Auction House ----
-    void openAuctionHouse(uint64_t guid);
-    void closeAuctionHouse();
-    void auctionSearch(const std::string& name, uint8_t levelMin, uint8_t levelMax,
-                       uint32_t quality, uint32_t itemClass, uint32_t itemSubClass,
-                       uint32_t invTypeMask, uint8_t usableOnly, uint32_t offset = 0,
-                       const std::vector<AuctionSortKey>& sort = {});
-    void auctionSellItem(int backpackIndex, uint32_t bid,
-                         uint32_t buyout, uint32_t duration);
-    // Post an auction for an item identified by its server GUID, so items in any
-    // container (backpack or equipped bags) can be listed, not just the backpack.
-    void auctionSellItemByGuid(uint64_t itemGuid, uint32_t stackCount, uint32_t bid,
-                               uint32_t buyout, uint32_t duration);
-    void auctionPlaceBid(uint32_t auctionId, uint32_t amount);
-    void auctionBuyout(uint32_t auctionId, uint32_t buyoutPrice);
-    void auctionCancelItem(uint32_t auctionId);
-    void auctionListOwnerItems(uint32_t offset = 0);
-    void auctionListBidderItems(uint32_t offset = 0);
-    bool isAuctionHouseOpen() const { return auctionOpen_; }
-    uint64_t getAuctioneerGuid() const { return auctioneerGuid_; }
-    const AuctionListResult& getAuctionBrowseResults() const { return auctionBrowseResults_; }
-    const AuctionListResult& getAuctionOwnerResults() const { return auctionOwnerResults_; }
-    const AuctionListResult& getAuctionBidderResults() const { return auctionBidderResults_; }
-    /// Writable, for the one thing that reorders a result set in place: the
-    /// panel's own column sort. The server sends a list and the client sorts
-    /// it, which is what the real client does too, there is no re-query.
-    AuctionListResult& auctionBrowseResultsRef() { return auctionBrowseResults_; }
-    AuctionListResult& auctionOwnerResultsRef()  { return auctionOwnerResults_; }
-    AuctionListResult& auctionBidderResultsRef() { return auctionBidderResults_; }
-    int getAuctionActiveTab() const { return auctionActiveTab_; }
-    void setAuctionActiveTab(int tab) { auctionActiveTab_ = tab; }
-    float getAuctionSearchDelay() const { return auctionSearchDelayTimer_; }
-
     // ---- Trainer ----
     struct TrainerTab {
         std::string name;
@@ -881,11 +855,9 @@ private:
     void handleShowBank(network::Packet& packet);
     void handleBuyBankSlotResult(network::Packet& packet);
     void handleGuildBankList(network::Packet& packet);
-    void handleAuctionHello(network::Packet& packet);
-    void handleAuctionListResult(network::Packet& packet);
-    void handleAuctionOwnerListResult(network::Packet& packet);
-    void handleAuctionBidderListResult(network::Packet& packet);
-    void handleAuctionCommandResult(network::Packet& packet);
+    /// An auction list result, for the list it names, or for the one last
+    /// asked for when it names none.
+    void handleAuctionListResult(network::Packet& packet, std::optional<auction::AuctionList> list);
     void handleShowMailbox(network::Packet& packet);
     void handleMailListResult(network::Packet& packet);
     void handleSendMailResult(network::Packet& packet);
@@ -918,8 +890,6 @@ private:
     /// Advances the fallback that announces looted money when the server
     /// never sends SMSG_LOOT_MONEY_NOTIFY.
     void tickLootMoneyFallback(float deltaTime);
-    /// The auction house's search button waits this out after a search.
-    void tickAuctionSearchDelay(float deltaTime);
     /// Equipment visuals fall back on an inspect when a player's visible-item
     /// fields cannot be read; one goes out at a time, rate-limited.
     void sendPendingAutoInspect(float deltaTime);
@@ -939,6 +909,9 @@ private:
     /// The client's data, for the repair cost tables. Null in a test that
     /// has none, which leaves repairs unestimated.
     pipeline::AssetManager* const assets_;
+    /// The auction house's chat lines and panel events, for as long as this
+    /// handler lives.
+    std::vector<core::EventBus::Subscription> subscriptions_;
 
     /// Everything the character holds, as the realm has described it. Its own
     /// struct so that a new character starts from nothing in one step -
@@ -1175,33 +1148,6 @@ private:
     std::array<std::string, 6> guildBankTabText_{};
     GuildBankData guildBankData_;
     uint8_t guildBankActiveTab_ = 0;
-
-    // ---- Auction House state ----
-    bool auctionOpen_ = false;
-    uint64_t auctioneerGuid_ = 0;
-    AuctionListResult auctionBrowseResults_;
-    AuctionListResult auctionOwnerResults_;
-    AuctionListResult auctionBidderResults_;
-    int auctionActiveTab_ = 0;
-    float auctionSearchDelayTimer_ = 0.0f;
-    struct AuctionSearchParams {
-        std::string name;
-        uint8_t levelMin = 0, levelMax = 0;
-        uint32_t quality = 0xFFFFFFFF;
-        uint32_t itemClass = 0xFFFFFFFF;
-        uint32_t itemSubClass = 0xFFFFFFFF;
-        uint32_t invTypeMask = 0;
-        uint8_t usableOnly = 0;
-        uint32_t offset = 0;
-        /// Carried so the re-query after a successful bid asks for the same
-        /// ordering. Dropping it there would reorder the list under the player
-        /// at the moment they bought something.
-        std::vector<AuctionSortKey> sort;
-    };
-    AuctionSearchParams lastAuctionSearch_;
-    bool hasAuctionSearch_ = false;  // true after any search (including empty-name browse-all)
-    enum class AuctionResultTarget { BROWSE, OWNER, BIDDER };
-    AuctionResultTarget pendingAuctionTarget_ = AuctionResultTarget::BROWSE;
 
     // ---- Trainer state ----
     bool trainerWindowOpen_ = false;

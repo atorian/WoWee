@@ -644,6 +644,7 @@ public:
     group::IGroupServerFeed* groupFeed() override;
     const group::IGroup* group() const override;
     guild::IGuildServerFeed* guildFeed() override;
+    auction::IAuctionHouseFeed* auctionFeed() override;
 
     // Money (copper)
     uint64_t getMoneyCopper() const { return inventoryHandler_->moneyCopper(); }
@@ -2703,33 +2704,6 @@ public:
     uint8_t getGuildBankActiveTab() const;
     void setGuildBankActiveTab(uint8_t tab);
 
-    // Auction House
-    void openAuctionHouse(uint64_t guid);
-    void closeAuctionHouse();
-    void auctionSearch(const std::string& name, uint8_t levelMin, uint8_t levelMax,
-                       uint32_t quality, uint32_t itemClass, uint32_t itemSubClass,
-                       uint32_t invTypeMask, uint8_t usableOnly, uint32_t offset = 0,
-                       const std::vector<AuctionSortKey>& sort = {});
-    void auctionSellItem(int backpackIndex, uint32_t bid,
-                         uint32_t buyout, uint32_t duration);
-    void auctionSellItemByGuid(uint64_t itemGuid, uint32_t stackCount, uint32_t bid,
-                               uint32_t buyout, uint32_t duration);
-    void auctionPlaceBid(uint32_t auctionId, uint32_t amount);
-    void auctionBuyout(uint32_t auctionId, uint32_t buyoutPrice);
-    void auctionCancelItem(uint32_t auctionId);
-    void auctionListOwnerItems(uint32_t offset = 0);
-    void auctionListBidderItems(uint32_t offset = 0);
-    bool isAuctionHouseOpen() const;
-    uint64_t getAuctioneerGuid() const;
-    const AuctionListResult& getAuctionBrowseResults() const;
-    const AuctionListResult& getAuctionOwnerResults() const;
-    const AuctionListResult& getAuctionBidderResults() const;
-    // The panel's column sort reorders the lists in place, through
-    // inventory().auctionBrowseResultsRef() and its two siblings.
-    int getAuctionActiveTab() const;
-    void setAuctionActiveTab(int tab);
-    float getAuctionSearchDelay() const;
-
     /// One row of a profession's recipe list (game/craft_recipe.hpp).
     using CraftRecipe = game::CraftRecipe;
     /// The known recipes of the profession whose window is open.
@@ -3672,21 +3646,6 @@ private:
 
     uint32_t nextMovementTimestampMs();
     void updateClientTaxi(float deltaTime);
-
-    // Auction House
-    // Last search params for re-query (pagination, auto-refresh after bid/buyout)
-    struct AuctionSearchParams {
-        std::string name;
-        uint8_t levelMin = 0, levelMax = 0;
-        uint32_t quality = 0xFFFFFFFF;
-        uint32_t itemClass = 0xFFFFFFFF;
-        uint32_t itemSubClass = 0xFFFFFFFF;
-        uint32_t invTypeMask = 0;
-        uint8_t usableOnly = 0;
-        uint32_t offset = 0;
-    };
-    // Routing: which result vector to populate from next SMSG_AUCTION_LIST_RESULT
-    enum class AuctionResultTarget { BROWSE, OWNER, BIDDER };
 
     // Title cache: maps titleBit → title string (lazy-loaded from CharTitles.dbc)
     // The strings use "%s" as a player-name placeholder (e.g. "Commander %s", "%s the Explorer").

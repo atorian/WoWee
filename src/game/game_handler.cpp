@@ -2010,55 +2010,6 @@ void GameHandler::guildBankDepositFromInventory(uint8_t srcBag, uint8_t srcSlot)
     inventoryHandler_->guildBankDepositFromInventory(srcBag, srcSlot);
 }
 
-// ============================================================
-// Auction House System
-// ============================================================
-
-void GameHandler::openAuctionHouse(uint64_t guid) {
-    inventoryHandler_->openAuctionHouse(guid);
-}
-
-void GameHandler::closeAuctionHouse() {
-    inventoryHandler_->closeAuctionHouse();
-}
-
-void GameHandler::auctionSearch(const std::string& name, uint8_t levelMin, uint8_t levelMax,
-                                 uint32_t quality, uint32_t itemClass, uint32_t itemSubClass,
-                                 uint32_t invTypeMask, uint8_t usableOnly, uint32_t offset,
-                                 const std::vector<AuctionSortKey>& sort) {
-    inventoryHandler_->auctionSearch(name, levelMin, levelMax, quality, itemClass, itemSubClass, invTypeMask, usableOnly, offset, sort);
-}
-
-void GameHandler::auctionSellItem(int backpackIndex, uint32_t bid,
-                                    uint32_t buyout, uint32_t duration) {
-    inventoryHandler_->auctionSellItem(backpackIndex, bid, buyout, duration);
-}
-
-void GameHandler::auctionSellItemByGuid(uint64_t itemGuid, uint32_t stackCount, uint32_t bid,
-                                        uint32_t buyout, uint32_t duration) {
-    inventoryHandler_->auctionSellItemByGuid(itemGuid, stackCount, bid, buyout, duration);
-}
-
-void GameHandler::auctionPlaceBid(uint32_t auctionId, uint32_t amount) {
-    inventoryHandler_->auctionPlaceBid(auctionId, amount);
-}
-
-void GameHandler::auctionBuyout(uint32_t auctionId, uint32_t buyoutPrice) {
-    inventoryHandler_->auctionBuyout(auctionId, buyoutPrice);
-}
-
-void GameHandler::auctionCancelItem(uint32_t auctionId) {
-    inventoryHandler_->auctionCancelItem(auctionId);
-}
-
-void GameHandler::auctionListOwnerItems(uint32_t offset) {
-    inventoryHandler_->auctionListOwnerItems(offset);
-}
-
-void GameHandler::auctionListBidderItems(uint32_t offset) {
-    inventoryHandler_->auctionListBidderItems(offset);
-}
-
 // ---------------------------------------------------------------------------
 // Item text (SMSG_ITEM_TEXT_QUERY_RESPONSE)
 //   uint64 itemGuid + uint8 isEmpty + string text (when !isEmpty)

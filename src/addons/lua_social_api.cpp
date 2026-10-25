@@ -4,6 +4,7 @@
 #include <vector>
 #include "group/services/group.hpp"
 #include "guild/services/guild.hpp"
+#include "auction/services/auction_house.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "contacts/services/contacts.hpp"
 #include "who/domain/who_list.hpp"
@@ -505,6 +506,11 @@ group::IGroup& groupOf(lua_State* L) {
 guild::IGuild& guildOf(lua_State* L) {
     auto* services = getLuaServices(L);
     return guild::orNoGuild(services ? services->guild : nullptr);
+}
+
+auction::IAuctionHouse& auctionOf(lua_State* L) {
+    auto* services = getLuaServices(L);
+    return auction::orNoAuctionHouse(services ? services->auctionHouse : nullptr);
 }
 
 arena::IArenaTeams* arenaTeamsOf(lua_State* L) {

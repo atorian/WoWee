@@ -975,6 +975,10 @@ group::IGroup& groupOf(lua_State* L);
 /// or one the player is never in that sends nothing when there is no game.
 guild::IGuild& guildOf(lua_State* L);
 
+/// The auction house as the composition root handed it to the addon layer,
+/// or one that is never open and sends nothing when there is no game.
+auction::IAuctionHouse& auctionOf(lua_State* L);
+
 /// The team id at an arena team index, or zero when the index is off the end
 /// or there are no arena teams.
 ///

@@ -19,6 +19,7 @@ namespace lfg { class ILfgFeed; }
 namespace calendar { class ICalendarFeed; }
 namespace group { class IGroupServerFeed; class IGroup; }
 namespace guild { class IGuildServerFeed; class IGuild; }
+namespace auction { class IAuctionHouseFeed; }
 namespace network { class WorldConnection; }
 
 namespace game {
@@ -83,6 +84,9 @@ struct GameServices {
     /// that read its roster.
     guild::IGuildServerFeed* guildFeed = nullptr;
     guild::IGuild* guild = nullptr;
+    /// Where the auction packets and the client's clock go. Set like
+    /// contactsFeed.
+    auction::IAuctionHouseFeed* auctionFeed = nullptr;
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };

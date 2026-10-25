@@ -34,6 +34,7 @@ namespace lfg { class ILfg; }
 namespace calendar { class ICalendar; }
 namespace group { class IGroup; }
 namespace guild { class IGuild; }
+namespace auction { class IAuctionHouse; }
 namespace audio { class AudioCoordinator; }
 
 namespace ui {
@@ -71,6 +72,8 @@ struct UIServices {
     group::IGroup* group = nullptr;
     /// The player's guild, and other guilds' names for nameplates.
     guild::IGuild* guild = nullptr;
+    /// The auction house, for whether Escape closes it.
+    auction::IAuctionHouse* auctionHouse = nullptr;
     /// The interface of the character in the world, in whatever state it is;
     /// null with no character in the world. Asked each time rather than held:
     /// each character has its own, and a /reload replaces it.
