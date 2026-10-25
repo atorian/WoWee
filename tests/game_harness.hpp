@@ -50,7 +50,8 @@ namespace wowee::calendar { class ICalendar; class CalendarService; }
 namespace wowee::group { class IGroup; class GroupService; }
 namespace wowee::guild { class IGuild; class GuildService; class IGuildNameStore; }
 namespace wowee::auction { class IAuctionHouse; class AuctionService; }
-namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; class AuctionGateway; }
+namespace wowee::mail { class IMailbox; class MailService; }
+namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; class AuctionGateway; class MailGateway; }
 
 namespace wowee::test {
 
@@ -159,6 +160,8 @@ public:
     guild::IGuild& guild();
     /// The auction house, wired as the client wires it.
     auction::IAuctionHouse& auctionHouse();
+    /// The mailbox, wired as the client wires it.
+    mail::IMailbox& mail();
     core::CVarStore& cvars() { return cvars_; }
 
     /// The server's side of the connection: the one the game made last. Valid
@@ -199,6 +202,9 @@ public:
     /// Every FrameXML event fired, in order, and those with one name.
     [[nodiscard]] const std::vector<AddonEvent>& addonEvents() const { return addonEvents_; }
     [[nodiscard]] std::vector<AddonEvent> addonEvents(const std::string& name) const;
+    /// Where in that order the first event with this name (and first
+    /// argument, when one is given) was fired; the list's size when none was.
+    [[nodiscard]] size_t firedAt(const std::string& name, const std::string& firstArg = {}) const;
 
     /// Forget what was sent and fired so far, to look at one step on its own.
     void clearRecords();
@@ -279,6 +285,8 @@ private:
     std::unique_ptr<guild::GuildService> guild_;
     std::unique_ptr<game::AuctionGateway> auctionGateway_;
     std::unique_ptr<auction::AuctionService> auctionHouse_;
+    std::unique_ptr<game::MailGateway> mailGateway_;
+    std::unique_ptr<mail::MailService> mail_;
     std::unique_ptr<game::GameHandler> game_;
     FakeWorldConnection* connection_ = nullptr;  // owned by the game once made
     bool pingsAnswered_ = true;

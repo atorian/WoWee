@@ -2,6 +2,7 @@
 #include "game/game_events.hpp"
 #include "duel/domain/duel.hpp"
 #include "group/domain/events.hpp"
+#include "mail/domain/events.hpp"
 #include "core/player_view.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
@@ -122,7 +123,7 @@ void AudioCallbackHandler::subscribeGameSounds() {
     subscriptions_.push_back(bus.subscribe<ev::ItemBought>([this](const ev::ItemBought&) {
         playUi([](audio::UiSoundManager& sfx) { sfx.playPickupBag(); });
     }));
-    subscriptions_.push_back(bus.subscribe<ev::MailArrived>([this](const ev::MailArrived&) {
+    subscriptions_.push_back(bus.subscribe<mail::NewMailArrived>([this](const mail::NewMailArrived&) {
         playUi([](audio::UiSoundManager& sfx) { sfx.playMailReceived(); });
     }));
     subscriptions_.push_back(bus.subscribe<ev::QuestAccepted>([this](const ev::QuestAccepted&) {

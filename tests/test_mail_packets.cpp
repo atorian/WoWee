@@ -3,6 +3,7 @@
 #include "game/packet_parsers.hpp"
 #include "game/world_packets.hpp"
 #include "auction/domain/records.hpp"
+#include "mail/domain/records.hpp"
 
 
 using namespace wowee::game;

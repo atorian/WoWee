@@ -1,6 +1,8 @@
 // lua_action_api.cpp - Action bar, cursor/pickup, keyboard input, key bindings, and pet actions Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include "lfg/services/lfg.hpp"
+#include "mail/domain/records.hpp"
+#include "mail/services/mail.hpp"
 #include "game/item_text.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "addons/lua_api_registrations.hpp"
@@ -1198,9 +1200,9 @@ static int lua_ClickSendMailItemButton(lua_State* L) {
         // The cursor counts the backpack as bag zero and the worn bags from
         // one, with slots from one; the attach functions count both from zero.
         const bool attached = (cursor(L).bag == 0)
-            ? gh->attachItemFromBackpack(cursor(L).slot - 1)
+            ? mailOf(L).attachItemFromBackpack(cursor(L).slot - 1)
             : (cursor(L).bag > 0
-                   ? gh->attachItemFromBag(cursor(L).bag - 1, cursor(L).slot - 1)
+                   ? mailOf(L).attachItemFromBag(cursor(L).bag - 1, cursor(L).slot - 1)
                    : false);
         if (attached) clearCursorItem(L);
         return 0;
@@ -1209,7 +1211,7 @@ static int lua_ClickSendMailItemButton(lua_State* L) {
     // Nothing held: the click takes an attachment off the letter. Without an
     // index there is nothing to take off, since the caller meant a drop.
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (index >= 1) gh->detachMailAttachment(index - 1);
+    if (index >= 1) mailOf(L).detachMailAttachment(index - 1);
     return 0;
 }
 

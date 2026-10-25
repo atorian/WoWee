@@ -1440,67 +1440,6 @@ void GameHandler::updateAttachedTransportChildren(float deltaTime) {
     movementHandler_->updateAttachedTransportChildren(deltaTime);
 }
 
-// ============================================================
-// Mail System
-// ============================================================
-
-void GameHandler::openMailbox(uint64_t guid) {
-    inventoryHandler_->openMailbox(guid);
-}
-
-void GameHandler::closeMailbox() {
-    inventoryHandler_->closeMailbox();
-}
-
-void GameHandler::refreshMailList() {
-    inventoryHandler_->refreshMailList();
-}
-
-void GameHandler::sendMail(const std::string& recipient, const std::string& subject,
-                           const std::string& body, uint64_t money, uint64_t cod) {
-    inventoryHandler_->sendMail(recipient, subject, body, money, cod);
-}
-
-bool GameHandler::attachItemFromBackpack(int backpackIndex) {
-    return inventoryHandler_->attachItemFromBackpack(backpackIndex);
-}
-
-bool GameHandler::attachItemFromBag(int bagIndex, int slotIndex) {
-    return inventoryHandler_->attachItemFromBag(bagIndex, slotIndex);
-}
-
-bool GameHandler::detachMailAttachment(int attachIndex) {
-    return inventoryHandler_->detachMailAttachment(attachIndex);
-}
-
-void GameHandler::clearMailAttachments() {
-    inventoryHandler_->clearMailAttachments();
-}
-
-int GameHandler::getMailAttachmentCount() const {
-    return inventoryHandler_->getMailAttachmentCount();
-}
-
-void GameHandler::mailTakeMoney(uint32_t mailId) {
-    inventoryHandler_->mailTakeMoney(mailId);
-}
-
-void GameHandler::mailTakeItem(uint32_t mailId, uint32_t itemGuidLow) {
-    inventoryHandler_->mailTakeItem(mailId, itemGuidLow);
-}
-
-void GameHandler::mailDelete(uint32_t mailId) {
-    inventoryHandler_->mailDelete(mailId);
-}
-
-void GameHandler::mailReturnToSender(uint32_t mailId) {
-    inventoryHandler_->mailReturnToSender(mailId);
-}
-
-void GameHandler::mailMarkAsRead(uint32_t mailId) {
-    inventoryHandler_->mailMarkAsRead(mailId);
-}
-
 glm::vec3 GameHandler::getComposedWorldPosition() {
     if (playerTransportGuid_ != 0 && transportManager_) {
         auto* tr = transportManager_->getTransport(playerTransportGuid_);

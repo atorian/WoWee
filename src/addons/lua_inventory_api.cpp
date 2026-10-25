@@ -1,6 +1,8 @@
 // lua_inventory_api.cpp - Items, containers, merchant, loot, equipment, trading, auction, and mail Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include "group/services/group.hpp"
+#include "mail/domain/records.hpp"
+#include "mail/services/mail.hpp"
 #include "guild/services/guild.hpp"
 #include "auction/domain/records.hpp"
 #include "auction/services/auction_house.hpp"
@@ -1040,9 +1042,9 @@ static int lua_BankButtonIDToInvSlotID(lua_State* L) {
 // Indices are the interface's, counting from one.
 namespace {
 
-const game::MailMessage* mailAt(game::GameHandler* gh, int index) {
-    if (!gh || index < 1) return nullptr;
-    const auto& inbox = gh->getMailInbox();
+const game::MailMessage* mailAt(lua_State* L, int index) {
+    if (index < 1) return nullptr;
+    const auto& inbox = mailOf(L).getMailInbox();
     if (index > static_cast<int>(inbox.size())) return nullptr;
     return &inbox[index - 1];
 }
@@ -1059,7 +1061,7 @@ const game::MailAttachment* attachmentAt(const game::MailMessage* mail, int slot
 // GetInboxItem(index, slot) → name, texture, count, quality, canUse
 static int lua_GetInboxItem(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const auto* mail = mailAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+    const auto* mail = mailAt(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
     const auto* att = attachmentAt(mail, static_cast<int>(luaL_optnumber(L, 2, 1)));
     if (!att) { return luaReturnNil(L); }
     const auto* info = gh->getItemInfo(att->itemId);
@@ -1074,7 +1076,7 @@ static int lua_GetInboxItem(lua_State* L) {
 // GetInboxItemLink(index, slot) → the link for a tooltip
 static int lua_GetInboxItemLink(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const auto* mail = mailAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+    const auto* mail = mailAt(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
     const auto* att = attachmentAt(mail, static_cast<int>(luaL_optnumber(L, 2, 1)));
     const auto* info = att ? gh->getItemInfo(att->itemId) : nullptr;
     if (!info || info->name.empty()) { return luaReturnNil(L); }
@@ -1087,23 +1089,23 @@ static int lua_GetInboxItemLink(lua_State* L) {
 // where it sits in the list
 static int lua_TakeInboxItem(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const auto* mail = mailAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+    const auto* mail = mailAt(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
     const auto* att = attachmentAt(mail, static_cast<int>(luaL_optnumber(L, 2, 1)));
-    if (gh && mail && att) gh->mailTakeItem(mail->messageId, att->itemGuidLow);
+    if (gh && mail && att) mailOf(L).mailTakeItem(mail->messageId, att->itemGuidLow);
     return 0;
 }
 
 static int lua_TakeInboxMoney(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const auto* mail = mailAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
-    if (gh && mail) gh->mailTakeMoney(mail->messageId);
+    const auto* mail = mailAt(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
+    if (gh && mail) mailOf(L).mailTakeMoney(mail->messageId);
     return 0;
 }
 
 static int lua_DeleteInboxItem(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const auto* mail = mailAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
-    if (gh && mail) gh->mailDelete(mail->messageId);
+    const auto* mail = mailAt(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
+    if (gh && mail) mailOf(L).mailDelete(mail->messageId);
     return 0;
 }
 
@@ -1116,11 +1118,11 @@ static int lua_InboxItemCanDelete(lua_State* L) {
 // AutoLootMailItem(index) - the coin first, then every attachment
 static int lua_AutoLootMailItem(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const auto* mail = mailAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+    const auto* mail = mailAt(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
     if (!gh || !mail) return 0;
-    if (mail->money > 0) gh->mailTakeMoney(mail->messageId);
+    if (mail->money > 0) mailOf(L).mailTakeMoney(mail->messageId);
     for (const auto& att : mail->attachments) {
-        gh->mailTakeItem(mail->messageId, att.itemGuidLow);
+        mailOf(L).mailTakeItem(mail->messageId, att.itemGuidLow);
     }
     return 0;
 }
@@ -1154,16 +1156,16 @@ static int lua_GetSendMailItem(lua_State* L) {
     };
     const int slot = static_cast<int>(luaL_optnumber(L, 1, 0));
     if (!gh || slot < 1) { return emptySlot(L); }
-    const auto& attachments = gh->getMailAttachments();
+    const auto& attachments = mailOf(L).getMailAttachments();
     if (slot > static_cast<int>(attachments.size())) { return emptySlot(L); }
     const auto& att = attachments[slot - 1];
     if (!att.occupied()) { return emptySlot(L); }
 
-    const auto* info = gh->getItemInfo(att.item.itemId);
+    const auto* info = gh->getItemInfo(att.itemId);
     lua_pushstring(L, info ? info->name.c_str() : "");
     lua_pushstring(L, gh->getItemIconPath(
-        info && info->displayInfoId ? info->displayInfoId : att.item.displayInfoId).c_str());
-    lua_pushnumber(L, att.item.stackCount);
+        info && info->displayInfoId ? info->displayInfoId : att.displayInfoId).c_str());
+    lua_pushnumber(L, att.stackCount);
     lua_pushnumber(L, info ? info->quality : 1);
     return 4;
 }
@@ -1198,14 +1200,14 @@ static int lua_ReturnInboxItem(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
     if (!gh || index < 1) return 0;
-    const auto& mail = gh->getMailInbox();
+    const auto& mail = mailOf(L).getMailInbox();
     if (index > static_cast<int>(mail.size())) return 0;
-    gh->mailReturnToSender(mail[static_cast<size_t>(index - 1)].messageId);
+    mailOf(L).mailReturnToSender(mail[static_cast<size_t>(index - 1)].messageId);
     return 0;
 }
 
 static int lua_CheckInbox(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->refreshMailList();
+    if (getGameHandler(L)) mailOf(L).refreshMailList();
     return 0;
 }
 
@@ -1244,7 +1246,7 @@ uint32_t copperArg(lua_State* L, int index) {
 static int lua_CloseMail(lua_State* L) {
     sendMailMoney(L) = 0;
     sendMailCOD(L) = 0;
-    if (auto* gh = getGameHandler(L)) gh->closeMailbox();
+    if (getGameHandler(L)) mailOf(L).closeMailbox();
     return 0;
 }
 
@@ -1325,7 +1327,7 @@ static int lua_SendMail(lua_State* L) {
     const char* to = luaL_optstring(L, 1, "");
     const char* subject = luaL_optstring(L, 2, "");
     const char* body = luaL_optstring(L, 3, "");
-    if (gh && to && *to) gh->sendMail(to, subject, body, sendMailMoney(L), sendMailCOD(L));
+    if (gh && to && *to) mailOf(L).sendMail(to, subject, body, sendMailMoney(L), sendMailCOD(L));
     // Whether or not it went, the next letter starts empty. Leaving the amount
     // set would attach it again to a letter nobody meant to put money in.
     sendMailMoney(L) = 0;
@@ -1844,9 +1846,9 @@ static int lua_UseContainerItem(lua_State* L) {
     const int wireSlot = containerWireSlot(bag, slot);
     const uint8_t wireBag = containerWireBag(bag);
 
-    if (gh->isMailComposeOpen()) {
-        if (bag == 0) gh->attachItemFromBackpack(slot - 1);
-        else          gh->attachItemFromBag(bag - 1, slot - 1);
+    if (mailOf(L).isMailComposeOpen()) {
+        if (bag == 0) mailOf(L).attachItemFromBackpack(slot - 1);
+        else          mailOf(L).attachItemFromBag(bag - 1, slot - 1);
         return 0;
     }
 
@@ -2223,7 +2225,7 @@ static int lua_GetLatestThreeSenders(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { lua_pushnil(L); lua_pushnil(L); lua_pushnil(L); return 3; }
 
-    const auto& inbox = gh->getMailInbox();
+    const auto& inbox = mailOf(L).getMailInbox();
     int pushed = 0;
     for (auto it = inbox.rbegin(); it != inbox.rend() && pushed < 3; ++it) {
         if (it->read || it->senderName.empty()) continue;
@@ -3752,7 +3754,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             const int slot = static_cast<int>(luaL_optnumber(L, 1, 0));
             const bool keep = lua_toboolean(L, 2) != 0;
             if (!gh) return 0;
-            if (!keep && slot >= 1) gh->detachMailAttachment(slot - 1);
+            if (!keep && slot >= 1) mailOf(L).detachMailAttachment(slot - 1);
             gh->fireAddonEvent("MAIL_UNLOCK_SEND_ITEMS", {});
             return 0;
         }},
@@ -4799,8 +4801,7 @@ void registerInventoryLuaAPI(lua_State* L) {
                 // arrived. They are equal here: this client holds every mail it
                 // has been sent, so none is waiting out of view.
                 {"GetInboxNumItems", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const double n = gh ? static_cast<double>(gh->getMailInbox().size()) : 0.0;
+            const double n = static_cast<double>(mailOf(L).getMailInbox().size());
             lua_pushnumber(L, n);
             lua_pushnumber(L, n);
             return 2;
@@ -4810,7 +4811,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             int index = static_cast<int>(luaL_checknumber(L, 1));
             if (!gh || index < 1) { return luaReturnNil(L); }
-            const auto& inbox = gh->getMailInbox();
+            const auto& inbox = mailOf(L).getMailInbox();
             if (index > static_cast<int>(inbox.size())) { return luaReturnNil(L); }
             const auto& mail = inbox[index - 1];
             lua_pushstring(L, "Interface\\Icons\\INV_Letter_15"); // packageIcon
@@ -4819,8 +4820,8 @@ void registerInventoryLuaAPI(lua_State* L) {
             // into a name once the query comes back, and names the auction
             // house, a creature or an object for the other message types. The
             // raw field is empty for player mail until then.
-            lua_pushstring(L, gh->getMailSenderName(mail).c_str());  // sender
-            const std::string subject = gh->getMailDisplaySubject(mail);
+            lua_pushstring(L, mailOf(L).getMailSenderName(mail).c_str());  // sender
+            const std::string subject = mailOf(L).getMailDisplaySubject(mail);
             lua_pushstring(L, subject.c_str());                   // subject
             lua_pushnumber(L, mail.money);                        // money (copper)
             lua_pushnumber(L, mail.cod);                          // COD
@@ -4871,10 +4872,9 @@ void registerInventoryLuaAPI(lua_State* L) {
                 // as the letter opens, and the real client marks read at the
                 // same point.
                 {"GetInboxText", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const auto* mail = mailAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+            const auto* mail = mailAt(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
             if (!mail) { return luaReturnNil(L); }
-            if (!mail->read && mail->messageId != 0) gh->mailMarkAsRead(mail->messageId);
+            if (!mail->read && mail->messageId != 0) mailOf(L).mailMarkAsRead(mail->messageId);
             lua_pushstring(L, mail->body.c_str());
             lua_pushstring(L, game::stationeryTexture(mail->stationeryId, mail->messageType));
             lua_pushboolean(L, (mail->money > 0 || !mail->attachments.empty()) ? 1 : 0);
@@ -4908,9 +4908,9 @@ void registerInventoryLuaAPI(lua_State* L) {
                 {"HasNewMail", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { return luaReturnFalse(L); }
-            bool hasNew = gh->hasNewMail();
+            bool hasNew = mailOf(L).hasNewMail();
             if (!hasNew) {
-                for (const auto& m : gh->getMailInbox()) {
+                for (const auto& m : mailOf(L).getMailInbox()) {
                     if (!m.read) { hasNew = true; break; }
                 }
             }

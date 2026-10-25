@@ -645,6 +645,7 @@ public:
     const group::IGroup* group() const override;
     guild::IGuildServerFeed* guildFeed() override;
     auction::IAuctionHouseFeed* auctionFeed() override;
+    mail::IMailboxFeed* mailFeed() override;
 
     // Money (copper)
     uint64_t getMoneyCopper() const { return inventoryHandler_->moneyCopper(); }
@@ -903,9 +904,6 @@ public:
 
     void queryPlayerName(uint64_t guid) override;
 
-    /// Who a piece of mail is from, resolved from its GUID or entry depending on
-    /// the mail type. Resolved on demand so a late name query still shows.
-    std::string getMailSenderName(const MailMessage& mail) const;
     void queryCreatureInfo(uint32_t entry, uint64_t guid) override;
     /// A creature template entry turned into something that can be drawn, by
     /// asking the server if it has not already.
@@ -2612,7 +2610,6 @@ public:
     const ListInventoryData& getVendorItems() const;
     void setVendorCanRepair(bool v);
 
-    // Mail
     // ---- Item socketing ----
     // Flat accessors rather than the session struct: InventoryHandler is only
     // forward-declared here, and a nested type cannot cross that.
@@ -2624,48 +2621,6 @@ public:
     void closeSocketing();
     bool setSocketGem(int index, uint64_t gemGuid, uint32_t gemItemId);
     void acceptSockets();
-
-    bool isMailboxOpen() const;
-    const std::vector<MailMessage>& getMailInbox() const;
-    std::string getMailDisplaySubject(const MailMessage& mail);
-    int getSelectedMailIndex() const;
-    void setSelectedMailIndex(int idx);
-    bool isMailComposeOpen() const;
-    void openMailCompose();
-    void closeMailCompose();
-    /// Whether the compose frame is showing, without clearing the draft.
-    void setMailComposeShowing(bool showing);
-    bool hasNewMail() const;
-    void openMailbox(uint64_t guid);
-    void closeMailbox();
-    void sendMail(const std::string& recipient, const std::string& subject,
-                  const std::string& body, uint64_t money, uint64_t cod = 0);
-
-    // Mail attachments (max 12 per WotLK)
-    static constexpr int MAIL_MAX_ATTACHMENTS = 12;
-    struct MailAttachSlot {
-        uint64_t itemGuid = 0;
-        game::ItemDef item;
-        uint8_t srcBag = 0xFF;   // source container for return
-        uint8_t srcSlot = 0;
-        [[nodiscard]] bool occupied() const { return itemGuid != 0; }
-    };
-    bool attachItemFromBackpack(int backpackIndex);
-    bool attachItemFromBag(int bagIndex, int slotIndex);
-    bool detachMailAttachment(int attachIndex);
-    void clearMailAttachments();
-    const std::array<MailAttachSlot, 12>& getMailAttachments() const;
-    int getMailAttachmentCount() const;
-    /// Attachments this realm's mail packet can actually carry - one on Vanilla,
-    /// twelve from TBC on. The compose window used to offer twelve regardless
-    /// and quietly send the first.
-    void mailTakeMoney(uint32_t mailId);
-    void mailTakeItem(uint32_t mailId, uint32_t itemGuidLow);
-    void mailDelete(uint32_t mailId);
-    /// Send a letter back where it came from, with whatever is still attached.
-    void mailReturnToSender(uint32_t mailId);
-    void mailMarkAsRead(uint32_t mailId);
-    void refreshMailList();
 
     // Bank
     void openBank(uint64_t guid);

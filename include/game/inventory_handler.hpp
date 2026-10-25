@@ -21,6 +21,7 @@
 namespace wowee {
 namespace core { class EventBus; class CVarStore; }
 namespace auction { class IAuctionHouseFeed; enum class AuctionList; }
+namespace mail { class IMailboxFeed; }
 namespace pipeline { class AssetManager; }
 namespace game {
 
@@ -161,6 +162,8 @@ public:
     /// Where the auction house's packets and the client's clock go; null when
     /// the client was built without it.
     [[nodiscard]] virtual auction::IAuctionHouseFeed* auctionFeed() = 0;
+    /// Where the mail packets and a late name or item go; null as above.
+    [[nodiscard]] virtual mail::IMailboxFeed* mailFeed() = 0;
 };
 
 class InventoryHandler {
@@ -608,93 +611,12 @@ public:
     void setVendorCanRepair(bool v) { currentVendorItems_.canRepair = v; }
     uint64_t getVendorGuid() const { return currentVendorItems_.vendorGuid; }
 
-    // ---- Mail ----
-    // Slots the UI can hold. What can actually be sent depends on the wire
-    // format - see maxSendableMailAttachments().
-    static constexpr int MAIL_MAX_ATTACHMENTS = 12;
-
-    /// How many attachments this expansion's CMSG_SEND_MAIL can carry. Vanilla
-    /// writes a single item GUID, so anything past the first was silently left
-    /// in the player's bags while the UI happily accepted twelve.
-    static int maxSendableMailAttachments();
-    struct MailAttachSlot {
-        uint64_t itemGuid = 0;
-        game::ItemDef item;
-        uint8_t srcBag = 0xFF;
-        uint8_t srcSlot = 0;
-        [[nodiscard]] bool occupied() const { return itemGuid != 0; }
-    };
-    bool isMailboxOpen() const { return mailboxOpen_; }
-    const std::vector<MailMessage>& getMailInbox() const { return mailInbox_; }
-    /// Writable, for the backfill that fills in a mail's sender once the name
-    /// packet for that guid arrives.
-    std::vector<MailMessage>& mailInboxRef() { return mailInbox_; }
-    int getSelectedMailIndex() const { return selectedMailIndex_; }
-    void setSelectedMailIndex(int idx) { selectedMailIndex_ = idx; }
-    bool isMailComposeOpen() const { return showMailCompose_; }
-
-    /// Whether the compose frame is on screen, without touching the draft.
-    ///
-    /// FrameXML owns the mail window and says so through SetSendMailShowing as
-    /// its two tabs swap. openMailCompose empties the attachments, which is
-    /// right when this client's own window opens a fresh letter and wrong on a
-    /// tab switch - flipping to the inbox and back would drop what was on it.
-    void setMailComposeShowing(bool showing) { showMailCompose_ = showing; }
-    void openMailCompose() { showMailCompose_ = true; clearMailAttachments(); }
-    void closeMailCompose() { showMailCompose_ = false; clearMailAttachments(); }
-    bool hasNewMail() const { return hasNewMail_; }
-    void openMailbox(uint64_t guid);
-    void closeMailbox();
-    /// What the server's mail refusal means, in words.
-    ///
-    /// SMSG_SEND_MAIL_RESULT carries a number from MailResponseResult and the
-    /// client printed it bare - "Failed to send mail (error 19)" says nothing
-    /// about what to do differently, and 19 is the one a player can actually
-    /// act on: something on the letter cannot be mailed.
-    static const char* mailResultText(uint32_t error);
-
-    /// Put paper in the compose frame, so its Send button can be enabled.
-    void selectDefaultStationery();
-
-    /// Say why a letter is not going out, and tell the compose frame so it
-    /// puts its Send button back.
-    void refuseSend(const std::string& reason, const char* logLine);
-
-    void sendMail(const std::string& recipient, const std::string& subject,
-                  const std::string& body, uint64_t money, uint64_t cod = 0);
-    bool attachItemFromBackpack(int backpackIndex);
-    /// Raise MAIL_LOCK_SEND_ITEMS when the attachment still has a refund
-    /// window, which posting it ends.
-    void noteMailAttachRefundable(int attachIndex);
-    bool attachItemFromBag(int bagIndex, int slotIndex);
-    bool detachMailAttachment(int attachIndex);
-    void clearMailAttachments();
-
-    /// Tell the compose frame its attachments changed.
-    ///
-    /// The letter being written lives entirely on this side; the send frame
-    /// draws its twelve slots, its postage and its Send button from
-    /// GetSendMailItem and redraws them only on MAIL_SEND_INFO_UPDATE. Attaching
-    /// and detaching used to change the list without saying so, and only the
-    /// send - which clears it - announced itself. So an item clicked onto the
-    /// letter went onto it and the slot stayed empty, with the item gone from
-    /// the cursor as well: it read as the attach having been refused.
-    void notifyMailComposeChanged();
-    const std::array<MailAttachSlot, 12>& getMailAttachments() const { return mailAttachments_; }
-    int getMailAttachmentCount() const;
-    void mailTakeMoney(uint32_t mailId);
-    void mailTakeItem(uint32_t mailId, uint32_t itemGuidLow);
-    void mailDelete(uint32_t mailId);
-    void mailReturnToSender(uint32_t mailId);
-    void mailMarkAsRead(uint32_t mailId);
-    void refreshMailList();
-
     // ---- Item socketing ----
     //
     // A gem is not put into an item one at a time: the player fills the sockets
     // on screen and then commits all three at once, and until they press the
     // button nothing has happened on the server. So the pending gems are this
-    // client's own state, exactly like the mail attachment slots above.
+    // client's own state, exactly like the letter being written at a mailbox.
     struct SocketSession {
         bool     open     = false;
         uint64_t itemGuid = 0;   ///< the item whose sockets are on screen
@@ -858,13 +780,6 @@ private:
     /// An auction list result, for the list it names, or for the one last
     /// asked for when it names none.
     void handleAuctionListResult(network::Packet& packet, std::optional<auction::AuctionList> list);
-    void handleShowMailbox(network::Packet& packet);
-    void handleMailListResult(network::Packet& packet);
-    void handleSendMailResult(network::Packet& packet);
-    void handleReceivedMail(network::Packet& packet);
-    void handleQueryNextMailTime(network::Packet& packet);
-    // Update the unread-mail flag, announcing (chat + sound) once on the rising edge.
-    void setHasNewMail(bool value);
     void handleEquipmentSetList(network::Packet& packet);
 
     void categorizeTrainerSpells();
@@ -909,8 +824,8 @@ private:
     /// The client's data, for the repair cost tables. Null in a test that
     /// has none, which leaves repairs unestimated.
     pipeline::AssetManager* const assets_;
-    /// The auction house's chat lines and panel events, for as long as this
-    /// handler lives.
+    /// The auction house's and the mailbox's chat lines and panel events, and
+    /// the late names a letter waits on, for as long as this handler lives.
     std::vector<core::EventBus::Subscription> subscriptions_;
 
     /// Everything the character holds, as the realm has described it. Its own
@@ -1092,7 +1007,6 @@ private:
     /// when the window opened.
     void notifyBuybackChanged();
 
-    // ---- Mail state ----
     SocketSession socketSession_;
     PendingEquip pendingEquip_;
     /// The use held back waiting for an answer. Kept whole rather than as a
@@ -1122,13 +1036,6 @@ private:
     PendingEnchant pendingEnchant_;
     bool pendingLootActive_ = false;
     uint8_t pendingLootSlot_ = 0;
-    bool mailboxOpen_ = false;
-    uint64_t mailboxGuid_ = 0;
-    std::vector<MailMessage> mailInbox_;
-    int selectedMailIndex_ = -1;
-    bool showMailCompose_ = false;
-    bool hasNewMail_ = false;
-    std::array<MailAttachSlot, MAIL_MAX_ATTACHMENTS> mailAttachments_{};
 
     // ---- Bank state ----
     bool bankOpen_ = false;

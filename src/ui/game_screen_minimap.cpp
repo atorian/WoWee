@@ -1,4 +1,5 @@
 #include "group/services/group.hpp"
+#include "mail/services/mail.hpp"
 #include "contacts/services/contacts.hpp"
 #include "battleground/services/battlegrounds.hpp"
 #include "lfg/services/lfg.hpp"
@@ -379,7 +380,7 @@ void GameScreen::renderMinimapIndicators(game::GameHandler& gameHandler, float c
                                        ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoInputs;
 
     // "New Mail" indicator
-    if (gameHandler.hasNewMail()) {
+    if (mail::orNoMailbox(services_.mail).hasNewMail()) {
         ImGui::SetNextWindowPos(ImVec2(indicatorX, nextIndicatorY), ImGuiCond_Always);
         ImGui::SetNextWindowSize(ImVec2(indicatorW, kIndicatorH), ImGuiCond_Always);
         if (ImGui::Begin("##NewMailIndicator", nullptr, indicatorFlags)) {

@@ -1,4 +1,5 @@
 #include "auction/services/auction_house.hpp"
+#include "mail/services/mail.hpp"
 #include "ui/graphics_choices.hpp"
 #include "rendering/cpu_stage_times.hpp"
 #include "core/zone_tracker.hpp"
@@ -1507,7 +1508,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
             st.bankOpen              = gameHandler.isBankOpen();
             st.guildBankOpen         = gameHandler.isGuildBankOpen();
             st.trainerOpen           = gameHandler.isTrainerWindowOpen();
-            st.mailboxOpen           = gameHandler.isMailboxOpen();
+            st.mailboxOpen           = mail::orNoMailbox(services_.mail).isMailboxOpen();
             st.auctionHouseOpen      = auction::orNoAuctionHouse(services_.auctionHouse).isAuctionHouseOpen();
             st.questDetailsOpen      = gameHandler.isQuestDetailsOpen();
             st.questOfferRewardOpen  = gameHandler.isQuestOfferRewardOpen();
@@ -1546,7 +1547,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 case EscapeAction::CloseBank:              gameHandler.closeBank(); break;
                 case EscapeAction::CloseGuildBank:         gameHandler.closeGuildBank(); break;
                 case EscapeAction::CloseTrainer:           gameHandler.closeTrainer(); break;
-                case EscapeAction::CloseMailbox:           gameHandler.closeMailbox(); break;
+                case EscapeAction::CloseMailbox:           mail::orNoMailbox(services_.mail).closeMailbox(); break;
                 case EscapeAction::CloseAuctionHouse:      auction::orNoAuctionHouse(services_.auctionHouse).closeAuctionHouse(); break;
                 case EscapeAction::DeclineQuest:           gameHandler.declineQuest(); break;
                 case EscapeAction::CloseQuestOfferReward:  gameHandler.closeQuestOfferReward(); break;

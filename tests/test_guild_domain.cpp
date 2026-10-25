@@ -87,18 +87,6 @@ std::vector<std::string> uiErrors(GameHarness& h) {
     return out;
 }
 
-/// The index in the full addon event list of the first event with this name
-/// (and first argument, when given), or the list's size.
-size_t firedAt(GameHarness& h, const std::string& name, const std::string& arg = {}) {
-    const auto& all = h.addonEvents();
-    for (size_t i = 0; i < all.size(); ++i) {
-        if (all[i].name != name) continue;
-        if (!arg.empty() && (all[i].args.empty() || all[i].args[0] != arg)) continue;
-        return i;
-    }
-    return all.size();
-}
-
 }  // namespace
 
 TEST_CASE("a roster makes the player a member, and the guild is asked its name", "[guild][harness]") {
@@ -351,9 +339,9 @@ TEST_CASE("a disbanded guild is no longer the player's, and the interface hears 
     CHECK(h.guild().getGuildName().empty());
     CHECK(chatSaid(h, "Guild has been disbanded."));
     // PLAYER_GUILD_UPDATE, then the line, then the roster event.
-    const size_t membership = firedAt(h, "PLAYER_GUILD_UPDATE");
-    const size_t line = firedAt(h, "CHAT_MSG_SYSTEM", "Guild has been disbanded.");
-    const size_t rosterUpdate = firedAt(h, "GUILD_ROSTER_UPDATE");
+    const size_t membership = h.firedAt("PLAYER_GUILD_UPDATE");
+    const size_t line = h.firedAt("CHAT_MSG_SYSTEM", "Guild has been disbanded.");
+    const size_t rosterUpdate = h.firedAt("GUILD_ROSTER_UPDATE");
     REQUIRE(membership < h.addonEvents().size());
     CHECK(membership < line);
     CHECK(line < rosterUpdate);

@@ -231,9 +231,6 @@ struct ItemBought {
     uint32_t count = 0;
 };
 
-/// Unread mail arrived, where there was none.
-struct MailArrived {};
-
 /// A quest objective moved: a kill, an item, counted against what is needed.
 struct QuestObjectiveProgressed {
     std::string questTitle;

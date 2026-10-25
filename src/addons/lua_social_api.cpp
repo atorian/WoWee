@@ -1,6 +1,8 @@
 // lua_social_api.cpp - Chat, guild, friends, ignore, gossip, party management, and emotes Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include <iterator>
+#include "mail/domain/records.hpp"
+#include "mail/services/mail.hpp"
 #include <vector>
 #include "group/services/group.hpp"
 #include "guild/services/guild.hpp"
@@ -511,6 +513,11 @@ guild::IGuild& guildOf(lua_State* L) {
 auction::IAuctionHouse& auctionOf(lua_State* L) {
     auto* services = getLuaServices(L);
     return auction::orNoAuctionHouse(services ? services->auctionHouse : nullptr);
+}
+
+mail::IMailbox& mailOf(lua_State* L) {
+    auto* services = getLuaServices(L);
+    return mail::orNoMailbox(services ? services->mail : nullptr);
 }
 
 arena::IArenaTeams* arenaTeamsOf(lua_State* L) {
@@ -1433,7 +1440,7 @@ void registerSocialLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0)) - 1;
             if (!gh) return 0;
-            const auto& inbox = gh->getMailInbox();
+            const auto& inbox = mailOf(L).getMailInbox();
             if (index < 0 || index >= static_cast<int>(inbox.size())) return 0;
             gh->reportMailSpam(inbox[index].senderGuid, inbox[index].messageId);
             return 0;
@@ -1709,7 +1716,7 @@ void registerSocialLuaAPI(lua_State* L) {
             // with an empty vector on the other side: that ternary yields a
             // prvalue, so it copies the whole inbox on every call in the case
             // that matters and only looks like it binds a reference.
-            const auto& inbox = gh->getMailInbox();
+            const auto& inbox = mailOf(L).getMailInbox();
             if (index < 1 || index > static_cast<int>(inbox.size())) {
                 for (int i = 0; i < 10; ++i) lua_pushnil(L);
                 return 10;
@@ -1840,7 +1847,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 // item instead - the food got eaten rather than posted.
                 {"SetSendMailShowing", [](lua_State* L) -> int {
                     auto* gh = getGameHandler(L);
-                    if (gh) gh->setMailComposeShowing(lua_toboolean(L, 1) != 0);
+                    if (gh) mailOf(L).setMailComposeShowing(lua_toboolean(L, 1) != 0);
                     return 0;
                 }},
 

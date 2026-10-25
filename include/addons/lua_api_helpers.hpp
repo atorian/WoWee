@@ -979,6 +979,10 @@ guild::IGuild& guildOf(lua_State* L);
 /// or one that is never open and sends nothing when there is no game.
 auction::IAuctionHouse& auctionOf(lua_State* L);
 
+/// The mailbox as the composition root handed it to the addon layer, or one
+/// that is never open and sends nothing when there is no game.
+mail::IMailbox& mailOf(lua_State* L);
+
 /// The team id at an arena team index, or zero when the index is off the end
 /// or there are no arena teams.
 ///

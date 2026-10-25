@@ -55,7 +55,8 @@ namespace calendar { class CalendarService; }
 namespace group { class GroupService; }
 namespace guild { class GuildService; }
 namespace auction { class AuctionService; }
-namespace game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; class GuildNameFile; class AuctionGateway; }
+namespace mail { class MailService; }
+namespace game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; class GuildNameFile; class AuctionGateway; class MailGateway; }
 
 // Forward declarations
 namespace rendering {
@@ -436,6 +437,8 @@ private:
     std::unique_ptr<guild::GuildService> guild_;
     std::unique_ptr<game::AuctionGateway> auctionGateway_;
     std::unique_ptr<auction::AuctionService> auctionHouse_;
+    std::unique_ptr<game::MailGateway> mailGateway_;
+    std::unique_ptr<mail::MailService> mail_;
     std::unique_ptr<game::GameHandler> gameHandler;
     /// The renderer's side of the transports - see game::TransportScene.
     std::unique_ptr<RendererTransportScene> transportScene_;

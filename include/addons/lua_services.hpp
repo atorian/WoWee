@@ -25,6 +25,7 @@ namespace wowee::calendar { class ICalendar; }
 namespace wowee::group { class IGroup; }
 namespace wowee::guild { class IGuild; }
 namespace wowee::auction { class IAuctionHouse; }
+namespace wowee::mail { class IMailbox; }
 
 namespace wowee::addons {
 
@@ -66,6 +67,9 @@ struct LuaServices {
     /// The auction house the player is standing at, its lists and the
     /// requests that go to the auctioneer.
     auction::IAuctionHouse*  auctionHouse      = nullptr;
+    /// The mailbox the player is at, its inbox, the letter being written and
+    /// the requests that go to it.
+    mail::IMailbox*          mail              = nullptr;
 
     /// Run a macro body, as RunMacroText() does - one command per line,
     /// through the same path the action bar uses for a macro button.

@@ -20,6 +20,7 @@ namespace calendar { class ICalendarFeed; }
 namespace group { class IGroupServerFeed; class IGroup; }
 namespace guild { class IGuildServerFeed; class IGuild; }
 namespace auction { class IAuctionHouseFeed; }
+namespace mail { class IMailboxFeed; class IMailbox; }
 namespace network { class WorldConnection; }
 
 namespace game {
@@ -87,6 +88,9 @@ struct GameServices {
     /// Where the auction packets and the client's clock go. Set like
     /// contactsFeed.
     auction::IAuctionHouseFeed* auctionFeed = nullptr;
+    /// Where the mail packets go, and the mailbox a used mailbox opens.
+    mail::IMailboxFeed* mailFeed = nullptr;
+    mail::IMailbox* mail = nullptr;
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };

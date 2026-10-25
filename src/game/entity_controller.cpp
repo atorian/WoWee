@@ -2865,12 +2865,8 @@ void EntityController::handleNameQueryResponse(network::Packet& packet) {
             player->setName(data.name);
         }
 
-        // Backfill mail inbox sender names
-        for (auto& mail : owner_.inventory().mailInboxRef()) {
-            if (mail.messageType == 0 && mail.senderGuid == data.guid) {
-                mail.senderName = data.name;
-            }
-        }
+        // A letter's sender is named by the mailbox, which hears
+        // PlayerNameKnown above.
 
         // The friend and ignore lists file the name themselves (PlayerNameKnown).
 

@@ -2,6 +2,9 @@
 #include "auction/domain/records.hpp"
 #include "auction/services/auction_house.hpp"
 #include "game/auction_gateway.hpp"
+#include "game/mail_gateway.hpp"
+#include "mail/domain/records.hpp"
+#include "mail/services/mail.hpp"
 #include "game/spell_classification.hpp"
 #include "game/item_text.hpp"
 #include "game/inventory_slots.hpp"
@@ -40,6 +43,16 @@ namespace game {
 // formatCopperAmount was forward-declared here, across translation units,
 // to reach a file-scope copy in game_handler.cpp. It is in item_text.hpp now.
 
+// The mailbox the protocol feeds. A client built without it drops the mail
+// packets, and says so once.
+static mail::IMailboxFeed* mailFeed(InventoryQueries& queries) {
+    auto* feed = queries.mailFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("Mail is not wired into this client; mail packets are dropped");
+    return feed;
+}
+
 // The auction house the protocol feeds. A client built without it drops the
 // auction packets, and says so once.
 static auction::IAuctionHouseFeed* auctionFeed(InventoryQueries& queries) {
@@ -56,7 +69,16 @@ InventoryHandler::InventoryHandler(PacketSender& sender, FrameXmlEvents& frameXm
                                    pipeline::AssetManager* assets)
     : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat),
       queries_(queries), cvars_(cvars), assets_(assets),
-      subscriptions_(subscribeAuctionNotices(events, chat, frameXml, *this)) {}
+      subscriptions_(subscribeAuctionNotices(events, chat, frameXml, *this)) {
+    for (auto& subscription : subscribeMailNotices(events, chat, frameXml, *this))
+        subscriptions_.push_back(std::move(subscription));
+    // A letter from a player carries a guid; its sender is named once the
+    // name arrives.
+    subscriptions_.push_back(events.subscribe<events::PlayerNameKnown>(
+        [this](const events::PlayerNameKnown& e) {
+            if (auto* feed = mailFeed(queries_)) feed->onPlayerNameResolved(e.guid, e.name);
+        }));
+}
 
 void InventoryHandler::raiseUiError(const std::string& message) {
     game::raiseUiError(events_, frameXml_, message);
@@ -71,6 +93,7 @@ void InventoryHandler::beginCharacter() {
     // the last character's, not this one's.
     clearBuybackState();
     if (auto* feed = auctionFeed(queries_)) feed->beginCharacter();
+    if (auto* feed = mailFeed(queries_)) feed->beginCharacter();
 }
 
 void InventoryHandler::leaveWorld() {
@@ -946,11 +969,35 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_TRAINER_LIST] = [this](network::Packet& packet) { handleTrainerList(packet); };
 
     // ---- Mail ----
-    table[Opcode::SMSG_SHOW_MAILBOX] = [this](network::Packet& packet) { handleShowMailbox(packet); };
-    table[Opcode::SMSG_MAIL_LIST_RESULT] = [this](network::Packet& packet) { handleMailListResult(packet); };
-    table[Opcode::SMSG_SEND_MAIL_RESULT] = [this](network::Packet& packet) { handleSendMailResult(packet); };
-    table[Opcode::SMSG_RECEIVED_MAIL] = [this](network::Packet& packet) { handleReceivedMail(packet); };
-    table[Opcode::MSG_QUERY_NEXT_MAIL_TIME] = [this](network::Packet& packet) { handleQueryNextMailTime(packet); };
+    table[Opcode::SMSG_SHOW_MAILBOX] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(8)) return;
+        const uint64_t mailboxGuid = packet.readUInt64();
+        if (auto* feed = mailFeed(queries_)) feed->onMailboxShown(mailboxGuid);
+    };
+    table[Opcode::SMSG_MAIL_LIST_RESULT] = [this](network::Packet& packet) {
+        std::vector<MailMessage> inbox;
+        if (!queries_.packetParsers().parseMailList(packet, inbox)) return;
+        if (auto* feed = mailFeed(queries_)) feed->onInbox(std::move(inbox));
+    };
+    table[Opcode::SMSG_SEND_MAIL_RESULT] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(12)) return;
+        const uint32_t mailId = packet.readUInt32();
+        const uint32_t action = packet.readUInt32();
+        const uint32_t error  = packet.readUInt32();
+        if (auto* feed = mailFeed(queries_)) feed->onSendResult(mailId, action, error);
+    };
+    table[Opcode::SMSG_RECEIVED_MAIL] = [this](network::Packet& /*packet*/) {
+        if (auto* feed = mailFeed(queries_)) feed->onNewMail(true);
+    };
+    table[Opcode::MSG_QUERY_NEXT_MAIL_TIME] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(8)) return;
+        // readFloat() copies the bytes, so nothing reinterprets the packet's
+        // own storage as a float.
+        const float nextTime = packet.readFloat();
+        const uint32_t count = packet.readUInt32();
+        packet.skipAll();
+        if (auto* feed = mailFeed(queries_)) feed->onNewMail(nextTime >= 0.0f && count > 0);
+    };
 
     // ---- Bank ----
     table[Opcode::SMSG_SHOW_BANK] = [this](network::Packet& packet) { handleShowBank(packet); };
@@ -2998,454 +3045,6 @@ void InventoryHandler::acceptSockets() {
 }
 
 // ============================================================
-// Mail
-// ============================================================
-
-void InventoryHandler::openMailbox(uint64_t guid) {
-    mailboxGuid_ = guid;
-    mailboxOpen_ = true;
-    // Through the setter, which is the only thing that says so. Assigning the
-    // member cleared the flag and told nobody: this client's own minimap asks
-    // hasNewMail() again on every frame it draws, so it went out by itself,
-    // and an interface that is told once kept the envelope up for the rest of
-    // the session.
-    setHasNewMail(false);
-    selectedMailIndex_ = -1;
-    showMailCompose_ = false;
-    clearMailAttachments();
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("MAIL_SHOW", {});
-    selectDefaultStationery();
-    refreshMailList();
-}
-
-void InventoryHandler::selectDefaultStationery() {
-    // The paper a letter is written on, chosen the way it arrives already in
-    // the frame.
-    //
-    // SendMailFrame_CanSend counts three things before it enables the Send
-    // button, and one is that a stationery has been chosen. Nothing chooses one
-    // when the frame opens: SendMailFrame_Reset is the only thing in the whole
-    // interface that does, and it runs after a letter has been sent
-    // successfully. So the first letter of a session could never be sent - the
-    // button was disabled before it was ever pressed, which is exactly what the
-    // input log shows and what "mail not being sent" turned out to be.
-    queries_.runInterfaceCommand(
-        "if StationeryPopupFrame and not StationeryPopupFrame.selectedIndex then "
-        "StationeryPopupButton_OnClick(nil, 1) end");
-}
-
-void InventoryHandler::closeMailbox() {
-    mailboxOpen_ = false;
-    mailboxGuid_ = 0;
-    showMailCompose_ = false;
-    clearMailAttachments();
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("MAIL_CLOSED", {});
-}
-
-void InventoryHandler::refreshMailList() {
-    if (!mailboxOpen_ || mailboxGuid_ == 0) return;
-    if (!sender_.characterInWorld()) return;
-    auto packet = GetMailListPacket::build(mailboxGuid_);
-    sender_.send(packet);
-}
-
-const char* InventoryHandler::mailResultText(uint32_t error) {
-    // MailResponseResult, as the server sends it.
-    switch (error) {
-        case 1:  return "Those items cannot go in your bags.";
-        case 2:  return "You cannot send mail to yourself.";
-        case 3:  return "You do not have enough money.";
-        case 4:  return "No player by that name.";
-        case 5:  return "You cannot send mail to the other faction.";
-        case 6:  return "The server refused the letter.";
-        case 14: return "Trial accounts cannot send mail.";
-        case 15: return "That player's mailbox is full.";
-        case 16: return "A wrapped item cannot be sent cash on delivery.";
-        case 17: return "Your mail and chat are suspended.";
-        case 18: return "Too many items attached.";
-        case 19: return "One of the attached items cannot be mailed.";
-        case 21: return "One of the attached items has expired.";
-        default: return nullptr;
-    }
-}
-
-void InventoryHandler::refuseSend(const std::string& reason, const char* logLine) {
-    // The compose frame disables its Send button the moment it is pressed and
-    // re-enables it only when it hears how the send went. A refusal on this
-    // side used to return without a word, so the button stayed disabled - one
-    // silent refusal and no letter could be sent for the rest of the session,
-    // whatever was wrong the first time.
-    LOG_WARNING("sendMail: ", logLine);
-    chat_.addSystemChatMessage(reason);
-    if (frameXml_.frameXmlListening()) {
-        // Zero is "internal error" in the server's own table, which is the
-        // honest answer for a refusal that never reached it.
-        frameXml_.fireFrameXmlEvent("MAIL_FAILED", {"0"});
-    }
-}
-
-void InventoryHandler::sendMail(const std::string& recipient, const std::string& subject,
-                                const std::string& body, uint64_t money, uint64_t cod) {
-    if (!sender_.characterInWorld()) {
-        refuseSend("Cannot send mail right now.", "not in world");
-        return;
-    }
-    if (!sender_.connected()) {
-        refuseSend("Cannot send mail: not connected.", "no socket");
-        return;
-    }
-    if (mailboxGuid_ == 0) {
-        refuseSend("You are not at a mailbox.", "mailboxGuid_ is 0 (mailbox closed?)");
-        return;
-    }
-    if (recipient.empty()) {
-        refuseSend("Enter a recipient.", "no recipient");
-        return;
-    }
-    // Collect attached item GUIDs
-    std::vector<uint64_t> itemGuids;
-    for (const auto& att : mailAttachments_) {
-        if (att.occupied()) {
-            itemGuids.push_back(att.itemGuid);
-        }
-    }
-    const int sendable = maxSendableMailAttachments();
-    if (static_cast<int>(itemGuids.size()) > sendable) {
-        // Should be unreachable now that attaching is capped, but dropping
-        // attachments without saying so is how this went unnoticed.
-        LOG_ERROR("sendMail: ", itemGuids.size(), " attachments but this expansion's "
-                  "packet carries ", sendable, " - refusing to send and lose the rest");
-        refuseSend("This realm's mail carries one item per letter.", "too many attachments");
-        return;
-    }
-    auto packet = queries_.packetParsers().buildSendMail(mailboxGuid_, recipient, subject, body, money, cod, itemGuids);
-    LOG_INFO("sendMail: to='", recipient, "' subject='", subject, "' money=", money,
-             " attachments=", itemGuids.size(), " mailboxGuid=", mailboxGuid_);
-    sender_.send(packet);
-    clearMailAttachments();
-}
-
-int InventoryHandler::maxSendableMailAttachments() {
-    // Vanilla's packet has one uint64 item GUID where TBC and later have a
-    // count followed by an array.
-    return isClassicLikeExpansion() ? 1 : MAIL_MAX_ATTACHMENTS;
-}
-
-/// Warn when an attached item still has a refund window, which posting it ends.
-///
-/// Only tellable since the refund info is asked for and kept: this used to be
-/// recorded as correctly-unfired on the grounds that the window was a timer
-/// this client did not have. It has one now.
-///
-/// The interface answers with RespondMailLockSendItem(slot, keep).
-void InventoryHandler::noteMailAttachRefundable(int attachIndex) {
-    if (attachIndex < 0 || attachIndex >= maxSendableMailAttachments()) return;
-    const auto& att = mailAttachments_[static_cast<size_t>(attachIndex)];
-    if (!att.occupied()) return;
-    const auto* refund = getItemRefundInfo(att.itemGuid);
-    if (!refund) {
-        // Not asked yet. Ask, so the next attachment of the same item knows -
-        // and say nothing now rather than guess, which is what an item with no
-        // window looks like too.
-        requestItemRefundInfo(att.itemGuid);
-        return;
-    }
-    constexpr uint32_t kRefundWindow = 2 * 60 * 60;
-    if (refund->playedSincePurchase >= kRefundWindow) return;   // window is over
-    if (!frameXml_.frameXmlListening()) return;
-    const auto* info = getItemInfo(att.item.itemId);
-    frameXml_.fireFrameXmlEvent(
-        "MAIL_LOCK_SEND_ITEMS",
-        {std::to_string(attachIndex + 1),
-         info ? game::buildItemLink(att.item.itemId, info->quality, info->name)
-              : att.item.name});
-}
-
-bool InventoryHandler::attachItemFromBackpack(int backpackIndex) {
-    if (backpackIndex < 0 || backpackIndex >= held_.items.getBackpackSize()) return false;
-    const auto& slot = held_.items.getBackpackSlot(backpackIndex);
-    if (slot.empty()) return false;
-    uint64_t itemGuid = held_.backpackSlotGuids[backpackIndex];
-    if (itemGuid == 0) return false;
-    for (int i = 0; i < maxSendableMailAttachments(); ++i) {
-        if (!mailAttachments_[i].occupied()) {
-            mailAttachments_[i].itemGuid = itemGuid;
-            mailAttachments_[i].item = slot.item;
-            mailAttachments_[i].srcBag = 0xFF;
-            mailAttachments_[i].srcSlot = static_cast<uint8_t>(Inventory::NUM_EQUIP_SLOTS + backpackIndex);
-            noteMailAttachRefundable(i);
-            notifyMailComposeChanged();
-            return true;
-        }
-    }
-    return false;
-}
-
-bool InventoryHandler::attachItemFromBag(int bagIndex, int slotIndex) {
-    if (bagIndex < 0 || bagIndex >= held_.items.NUM_BAG_SLOTS) return false;
-    if (slotIndex < 0 || slotIndex >= held_.items.getBagSize(bagIndex)) return false;
-    const auto& slot = held_.items.getBagSlot(bagIndex, slotIndex);
-    if (slot.empty()) return false;
-    uint64_t bagGuid = held_.equipSlotGuids[Inventory::FIRST_BAG_EQUIP_SLOT + bagIndex];
-    if (bagGuid == 0) return false;
-    auto it = held_.containerContents.find(bagGuid);
-    if (it == held_.containerContents.end()) return false;
-    if (slotIndex >= static_cast<int>(it->second.numSlots)) return false;
-    uint64_t itemGuid = it->second.slotGuids[slotIndex];
-    if (itemGuid == 0) return false;
-    for (int i = 0; i < maxSendableMailAttachments(); ++i) {
-        if (!mailAttachments_[i].occupied()) {
-            mailAttachments_[i].itemGuid = itemGuid;
-            mailAttachments_[i].item = slot.item;
-            mailAttachments_[i].srcBag = static_cast<uint8_t>(Inventory::FIRST_BAG_EQUIP_SLOT + bagIndex);
-            mailAttachments_[i].srcSlot = static_cast<uint8_t>(slotIndex);
-            noteMailAttachRefundable(i);
-            notifyMailComposeChanged();
-            return true;
-        }
-    }
-    return false;
-}
-
-bool InventoryHandler::detachMailAttachment(int attachIndex) {
-    if (attachIndex < 0 || attachIndex >= MAIL_MAX_ATTACHMENTS) return false;
-    mailAttachments_[attachIndex] = MailAttachSlot{};
-    notifyMailComposeChanged();
-    return true;
-}
-
-void InventoryHandler::clearMailAttachments() {
-    for (auto& a : mailAttachments_) a = MailAttachSlot{};
-    notifyMailComposeChanged();
-}
-
-void InventoryHandler::notifyMailComposeChanged() {
-    // The send frame recomputes its slots, its postage and its Send button from
-    // this and from nothing else - there is no poll behind it.
-    if (frameXml_.frameXmlListening()) {
-        frameXml_.fireFrameXmlEvent("MAIL_SEND_INFO_UPDATE", {});
-    }
-}
-
-int InventoryHandler::getMailAttachmentCount() const {
-    int count = 0;
-    for (const auto& a : mailAttachments_)
-        if (a.occupied()) ++count;
-    return count;
-}
-
-void InventoryHandler::mailTakeMoney(uint32_t mailId) {
-    if (!sender_.characterInWorld() || mailboxGuid_ == 0) return;
-    auto packet = MailTakeMoneyPacket::build(mailboxGuid_, mailId);
-    sender_.send(packet);
-}
-
-void InventoryHandler::mailTakeItem(uint32_t mailId, uint32_t itemGuidLow) {
-    if (!sender_.characterInWorld() || mailboxGuid_ == 0) return;
-    auto packet = MailTakeItemPacket::build(mailboxGuid_, mailId, itemGuidLow);
-    sender_.send(packet);
-}
-
-void InventoryHandler::mailReturnToSender(uint32_t mailId) {
-    if (!sender_.characterInWorld() || mailboxGuid_ == 0) return;
-    auto packet = MailReturnToSenderPacket::build(mailboxGuid_, mailId);
-    sender_.send(packet);
-    // Same as deleting: the letter being read is this one, and the view over it
-    // hides when told which mail closed.
-    if (frameXml_.frameXmlListening()) {
-        frameXml_.fireFrameXmlEvent("CLOSE_INBOX_ITEM", {std::to_string(mailId)});
-    }
-}
-
-void InventoryHandler::mailDelete(uint32_t mailId) {
-    if (!sender_.characterInWorld() || mailboxGuid_ == 0) return;
-    auto packet = MailDeletePacket::build(mailboxGuid_, mailId, 0);
-    sender_.send(packet);
-    // The letter being read is this one, so the view over it has to go: the
-    // interface hides it when told which mail closed, and was never told.
-    if (frameXml_.frameXmlListening()) {
-        frameXml_.fireFrameXmlEvent("CLOSE_INBOX_ITEM", {std::to_string(mailId)});
-    }
-}
-
-void InventoryHandler::mailMarkAsRead(uint32_t mailId) {
-    if (!sender_.characterInWorld() || mailboxGuid_ == 0) return;
-    auto packet = MailMarkAsReadPacket::build(mailboxGuid_, mailId);
-    sender_.send(packet);
-
-    // And locally, because the server does not send the list again for this.
-    // Without it the letter stays bold and HasNewMail keeps answering true
-    // until something else refreshes the inbox - which, for a player who reads
-    // their mail and walks away, is never.
-    //
-    // The flag is set *before* the event, and that order is load-bearing:
-    // MailFrame answers MAIL_INBOX_UPDATE with OpenMail_Update, which asks
-    // GetInboxText, which is what marks a letter read. Setting the flag first
-    // makes the second pass find it already read and stop. Firing first would
-    // recur until the stack ran out.
-    bool marked = false;
-    for (auto& mail : mailInbox_) {
-        if (mail.messageId != mailId || mail.read) continue;
-        mail.read = true;
-        marked = true;
-        if (frameXml_.frameXmlListening())
-            frameXml_.fireFrameXmlEvent("MAIL_INBOX_UPDATE", {});
-        break;
-    }
-
-    // And the envelope on the minimap, which is a different event and was
-    // never fired. MAIL_INBOX_UPDATE redraws the list of letters;
-    // MiniMapMailFrame does not listen to it and answers UPDATE_PENDING_MAIL
-    // alone. So the last unread letter could be read with the list in front of
-    // the player and the notification stayed up - nothing had said the thing
-    // it was reporting had stopped being true.
-    if (marked) {
-        bool anyUnread = false;
-        for (const auto& mail : mailInbox_) {
-            if (!mail.read) { anyUnread = true; break; }
-        }
-        if (anyUnread != hasNewMail_) setHasNewMail(anyUnread);
-    }
-}
-
-void InventoryHandler::handleShowMailbox(network::Packet& packet) {
-    if (!packet.hasRemaining(8)) return;
-    mailboxGuid_ = packet.readUInt64();
-    mailboxOpen_ = true;
-    selectedMailIndex_ = -1;
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("MAIL_SHOW", {});
-    selectDefaultStationery();
-    refreshMailList();
-}
-
-void InventoryHandler::handleMailListResult(network::Packet& packet) {
-    if (!queries_.packetParsers().parseMailList(packet, mailInbox_)) return;
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("MAIL_INBOX_UPDATE", {});
-    for (const auto& mail : mailInbox_) {
-        // Player mail carries a GUID, not a name. Ask for it once here; the UI
-        // reads the name through GameHandler::getMailSenderName, so it appears
-        // as soon as the query comes back.
-        if (mail.messageType == 0 && mail.senderGuid != 0 &&
-            queries_.playerName(mail.senderGuid).empty()) {
-            queries_.requestPlayerName(mail.senderGuid);
-        }
-        if (mail.messageType == 2) {
-            AuctionMailSubject auction;
-            if (parseAuctionMailSubject(mail.subject, auction)) {
-                ensureItemInfo(auction.itemEntry);
-            }
-        }
-        for (const auto& att : mail.attachments) {
-            if (att.itemId != 0) ensureItemInfo(att.itemId);
-        }
-    }
-}
-
-void InventoryHandler::handleSendMailResult(network::Packet& packet) {
-    if (!packet.hasRemaining(12)) return;
-    uint32_t mailId = packet.readUInt32();
-    uint32_t action = packet.readUInt32();
-    uint32_t error  = packet.readUInt32();
-    // WotLK MailResponseType values from SharedDefines.h.
-    constexpr uint32_t MAIL_SEND = 0;
-    constexpr uint32_t MAIL_MONEY_TAKEN = 1;
-    constexpr uint32_t MAIL_ITEM_TAKEN = 2;
-    constexpr uint32_t MAIL_RETURNED_TO_SENDER = 3;
-    constexpr uint32_t MAIL_DELETED = 4;
-    constexpr uint32_t MAIL_MADE_PERMANENT = 5;
-
-    auto mailIt = std::find_if(mailInbox_.begin(), mailInbox_.end(),
-        [mailId](const MailMessage& mail) { return mail.messageId == mailId; });
-
-    if (action == MAIL_SEND) {
-        if (error == 0) {
-            chat_.addSystemChatMessage("Mail sent.");
-            clearMailAttachments();
-            // The frame stays where it is - WoW resets its fields and leaves it
-            // open. This used to close this client's own compose window here,
-            // and that flag now means "the interface's send tab is showing",
-            // which is what decides whether clicking an item in a bag attaches
-            // it. Clearing it made the first letter of a session the last one
-            // that could have anything attached to it.
-            // The send frame waits on these before it will clear its fields and
-            // re-enable the Send button. Without them a mail went out and the
-            // frame sat there as though it had not.
-            if (frameXml_.frameXmlListening()) {
-                frameXml_.fireFrameXmlEvent("MAIL_SEND_SUCCESS", {});
-                frameXml_.fireFrameXmlEvent("MAIL_SUCCESS", {});
-            }
-        } else {
-            const char* why = mailResultText(error);
-            chat_.addSystemChatMessage(
-                why ? std::string("Mail not sent: ") + why
-                    : "Failed to send mail (error " + std::to_string(error) + ").");
-            // Carries the error so the frame can say which refusal it was.
-            if (frameXml_.frameXmlListening()) {
-                frameXml_.fireFrameXmlEvent("MAIL_FAILED", {std::to_string(error)});
-            }
-        }
-    } else if (action == MAIL_ITEM_TAKEN) {
-        if (error == 0) {
-            chat_.addSystemChatMessage("Item taken from mail.");
-            if (frameXml_.frameXmlListening()) fireBagUpdates();
-        } else {
-            chat_.addSystemChatMessage("Failed to take item (error " + std::to_string(error) + ").");
-        }
-    } else if (action == MAIL_MONEY_TAKEN) {
-        if (error == 0) {
-            if (mailIt != mailInbox_.end()) mailIt->money = 0;
-            chat_.addSystemChatMessage("Money taken from mail.");
-            if (frameXml_.frameXmlListening()) {
-                frameXml_.fireFrameXmlEvent("PLAYER_MONEY", {});
-                frameXml_.fireFrameXmlEvent("MAIL_INBOX_UPDATE", {});
-            }
-        } else {
-            chat_.addSystemChatMessage("Failed to take money (error " + std::to_string(error) + ").");
-        }
-    } else if (action == MAIL_DELETED || action == MAIL_RETURNED_TO_SENDER) {
-        if (error == 0) {
-            chat_.addSystemChatMessage(action == MAIL_DELETED ? "Mail deleted." : "Mail returned.");
-            if (mailIt != mailInbox_.end()) {
-                const int erasedIndex = static_cast<int>(std::distance(mailInbox_.begin(), mailIt));
-                mailInbox_.erase(mailIt);
-                if (selectedMailIndex_ == erasedIndex) selectedMailIndex_ = -1;
-                else if (selectedMailIndex_ > erasedIndex) --selectedMailIndex_;
-            }
-            if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("MAIL_INBOX_UPDATE", {});
-        }
-    } else if (action == MAIL_MADE_PERMANENT && error == 0) {
-        chat_.addSystemChatMessage("Mail text copied.");
-    }
-    refreshMailList();
-}
-
-void InventoryHandler::handleReceivedMail(network::Packet& packet) {
-    (void)packet;
-    setHasNewMail(true);
-}
-
-void InventoryHandler::handleQueryNextMailTime(network::Packet& packet) {
-    if (!packet.hasRemaining(8)) return;
-    // readFloat() uses memcpy internally, avoiding the strict aliasing violation
-    // that the previous reinterpret_cast<float*> on raw packet bytes had.
-    float nextTime = packet.readFloat();
-    uint32_t count = packet.readUInt32();
-    setHasNewMail(nextTime >= 0.0f && count > 0);
-    packet.skipAll();
-}
-
-void InventoryHandler::setHasNewMail(bool value) {
-    // Announce a chat line + sound only on the rising edge (no unread -> unread), so the
-    // periodic next-mail-time poll doesn't repeat the notification while mail sits unread.
-    if (value && !hasNewMail_) {
-        chat_.addSystemChatMessage("You have new mail.");
-        events_.publish(events::MailArrived{});
-    }
-    hasNewMail_ = value;
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("UPDATE_PENDING_MAIL", {});
-}
-
-// ============================================================
 // Bank
 // ============================================================
 
@@ -4368,20 +3967,9 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
             }
         }
 
-        // Auction mail subjects contain an item entry rather than display text.
-        // Refresh FrameXML mail rows once that item's name becomes available.
-        bool resolvedAuctionSubject = false;
-        for (const auto& mail : mailInbox_) {
-            AuctionMailSubject auction;
-            if (mail.messageType == 2 && parseAuctionMailSubject(mail.subject, auction) &&
-                auction.itemEntry == data.entry) {
-                resolvedAuctionSubject = true;
-                break;
-            }
-        }
-        if (resolvedAuctionSubject && frameXml_.frameXmlListening()) {
-            frameXml_.fireFrameXmlEvent("MAIL_INBOX_UPDATE", {});
-        }
+        // Auction mail subjects contain an item entry rather than display text,
+        // so a letter's row is redrawn once that item's name becomes available.
+        if (auto* feed = mailFeed(queries_)) feed->onItemInfo(data.entry);
 
         // The auction list, for the same reason as the quest rewards above.
         //

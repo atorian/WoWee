@@ -3,6 +3,7 @@
 #include "game/guild_gateway.hpp"
 #include "guild/domain/records.hpp"
 #include "guild/services/guild.hpp"
+#include "mail/services/mail.hpp"
 #include "core/event_bus.hpp"
 #include "game/game_events.hpp"
 #include "game/reputation_standing.hpp"
@@ -1131,51 +1132,6 @@ void GameHandler::acceptSockets() {
     inventoryHandler_->acceptSockets();
 }
 
-bool GameHandler::isMailboxOpen() const {
-    return inventoryHandler_->isMailboxOpen();
-}
-const std::vector<MailMessage>& GameHandler::getMailInbox() const {
-    return inventoryHandler_->getMailInbox();
-}
-std::string GameHandler::getMailDisplaySubject(const MailMessage& mail) {
-    if (mail.messageType != 2) return mail.subject;
-
-    AuctionMailSubject auction;
-    if (!parseAuctionMailSubject(mail.subject, auction)) return mail.subject;
-
-    ensureItemInfo(auction.itemEntry);
-    const auto* info = getItemInfo(auction.itemEntry);
-    const std::string itemName = info && !info->name.empty()
-        ? info->name
-        : "Item #" + std::to_string(auction.itemEntry);
-    return formatAuctionMailSubject(auction, itemName);
-}
-int GameHandler::getSelectedMailIndex() const {
-    return inventoryHandler_->getSelectedMailIndex();
-}
-void GameHandler::setSelectedMailIndex(int idx) {
-    inventoryHandler_->setSelectedMailIndex(idx);
-}
-bool GameHandler::isMailComposeOpen() const {
-    return inventoryHandler_->isMailComposeOpen();
-}
-void GameHandler::openMailCompose() {
-    inventoryHandler_->openMailCompose();
-}
-void GameHandler::closeMailCompose() {
-    inventoryHandler_->closeMailCompose();
-}
-void GameHandler::setMailComposeShowing(bool showing) {
-    inventoryHandler_->setMailComposeShowing(showing);
-}
-bool GameHandler::hasNewMail() const {
-    return inventoryHandler_->hasNewMail();
-}
-const std::array<GameHandler::MailAttachSlot, 12>& GameHandler::getMailAttachments() const {
-    // Layout-identical structs (InventoryHandler::MailAttachSlot == GameHandler::MailAttachSlot)
-    return reinterpret_cast<const std::array<MailAttachSlot, 12>&>(inventoryHandler_->getMailAttachments());
-}
-
 
 // Bank
 bool GameHandler::isBankOpen() const {
@@ -1244,6 +1200,10 @@ guild::IGuildServerFeed* GameHandler::guildFeed() {
 
 auction::IAuctionHouseFeed* GameHandler::auctionFeed() {
     return services_.auctionFeed;
+}
+
+mail::IMailboxFeed* GameHandler::mailFeed() {
+    return services_.mailFeed;
 }
 
 // The player's guild for the handlers that read it - the chat handler's
@@ -1676,44 +1636,6 @@ const std::vector<std::string>& GameHandler::getJoinedChannels() const {
 // ============================================================
 // Name Queries (delegated to EntityController)
 // ============================================================
-
-// Who a piece of mail is from. The wire gives a player GUID for player mail and
-// an entry for everything else, and nothing resolved either - the inbox showed
-// an empty From line for every message.
-//
-// Resolved on demand rather than stored, so a name that arrives after the inbox
-// was parsed shows up on the next frame instead of staying blank.
-std::string GameHandler::getMailSenderName(const MailMessage& mail) const {
-    switch (mail.messageType) {
-        case 0: {  // from another player
-            // The name-query response backfills senderName, and Reply uses that
-            // field, so prefer it and fall back to the cache for the window
-            // between the inbox arriving and the query returning.
-            if (!mail.senderName.empty()) return mail.senderName;
-            if (mail.senderGuid == 0) break;
-            const std::string& name = lookupName(mail.senderGuid);
-            if (!name.empty()) return name;
-            return "Unknown";
-        }
-        case 2:    // the auction house, which has no creature behind it
-            return "Auction House";
-        case 3: {  // a creature
-            std::string name = getCachedCreatureName(mail.senderEntry);
-            if (!name.empty()) return name;
-            break;
-        }
-        case 4: {  // a game object
-            if (const auto* info = getCachedGameObjectInfo(mail.senderEntry);
-                info && !info->name.empty()) {
-                return info->name;
-            }
-            break;
-        }
-        default:
-            break;
-    }
-    return "Unknown";
-}
 
 void GameHandler::queryPlayerName(uint64_t guid) {
     entityController_->queryPlayerName(guid);
@@ -2594,7 +2516,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
         // click on quest containers from being lost while their query is pending.
         scheduleGameObjectLootOpen(guid, 0.35f, 8);
     } else if (isMailbox) {
-        openMailbox(guid);
+        mail::orNoMailbox(services_.mail).openMailbox(guid);
     } else if (isGuildBank) {
         // Guild vault: CMSG_GAMEOBJ_USE above is a no-op on the server; the bank
         // opens via CMSG_GUILD_BANKER_ACTIVATE, which openGuildBank() sends.
