@@ -365,12 +365,6 @@ uint32_t GameHandler::classSkillLineOf(uint32_t spellId) {
     return line;
 }
 
-std::optional<uint32_t> GameHandler::guildRankRights() const {
-    const uint32_t rank = getPlayerGuildRankIndex();
-    if (rank == 0xFFFFFFFFu || rank >= getGuildRoster().ranks.size()) return std::nullopt;
-    return getPlayerGuildRankRights();
-}
-
 void GameHandler::setFacing(float canonicalYaw) {
     setOrientation(canonicalYaw);
     sendMovement(Opcode::MSG_MOVE_SET_FACING);
@@ -3427,50 +3421,6 @@ bool GameHandler::isLoggingOut() const {
 
 float GameHandler::getLogoutCountdown() const {
     return socialHandler_->getLogoutCountdown();
-}
-
-bool GameHandler::isInGuild() const {
-    return socialHandler_->isInGuild();
-}
-
-const std::string& GameHandler::getGuildName() const {
-    return socialHandler_->getGuildName();
-}
-
-const GuildRosterData& GameHandler::getGuildRoster() const {
-    return socialHandler_->getGuildRoster();
-}
-
-bool GameHandler::hasGuildRoster() const {
-    return socialHandler_->hasGuildRoster();
-}
-
-const std::vector<std::string>& GameHandler::getGuildRankNames() const {
-    return socialHandler_->getGuildRankNames();
-}
-
-bool GameHandler::hasPendingGuildInvite() const {
-    return socialHandler_->hasPendingGuildInvite();
-}
-
-const std::string& GameHandler::getPendingGuildInviterName() const {
-    return socialHandler_->getPendingGuildInviterName();
-}
-
-const std::string& GameHandler::getPendingGuildInviteGuildName() const {
-    return socialHandler_->getPendingGuildInviteGuildName();
-}
-
-const GuildInfoData& GameHandler::getGuildInfoData() const {
-    return socialHandler_->getGuildInfoData();
-}
-
-const GuildQueryResponseData& GameHandler::getGuildQueryData() const {
-    return socialHandler_->getGuildQueryData();
-}
-
-bool GameHandler::hasGuildInfoData() const {
-    return socialHandler_->hasGuildInfoData();
 }
 
 void GameHandler::resolveGMResponse() {

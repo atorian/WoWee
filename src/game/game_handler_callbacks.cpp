@@ -1,5 +1,8 @@
 #include "game/game_handler.hpp"
 #include "group/services/group.hpp"
+#include "game/guild_gateway.hpp"
+#include "guild/domain/records.hpp"
+#include "guild/services/guild.hpp"
 #include "core/event_bus.hpp"
 #include "game/game_events.hpp"
 #include "game/reputation_standing.hpp"
@@ -374,10 +377,11 @@ void GameHandler::handleCharEnum(network::Packet& packet) {
         if (std::find(queriedGuildIds.begin(), queriedGuildIds.end(), character.guildId) != queriedGuildIds.end())
             continue;
         queriedGuildIds.push_back(character.guildId);
-        queryGuildInfo(character.guildId);
+        // Asks the server only for a name it does not already know.
+        guild::orNoGuild(services_.guild).lookupGuildName(character.guildId);
     }
     if (!queriedGuildIds.empty()) {
-        LOG_INFO("Queued guild name queries for ", queriedGuildIds.size(), " guild(s) from character list");
+        LOG_INFO("Looked up the names of ", queriedGuildIds.size(), " guild(s) from the character list");
     }
 
     LOG_INFO("========================================");
@@ -1234,6 +1238,28 @@ const group::IGroup* GameHandler::group() const {
     return services_.group;
 }
 
+guild::IGuildServerFeed* GameHandler::guildFeed() {
+    return services_.guildFeed;
+}
+
+// The player's guild for the handlers that read it - the chat handler's
+// officer channel and member names, the guild bank's door - answered as a
+// guild the player is not in when the client has none.
+bool GameHandler::inGuild() const {
+    return guild::orNoGuild(services_.guild).isInGuild();
+}
+
+const GuildRosterData& GameHandler::guildRoster() const {
+    return guild::orNoGuild(services_.guild).getGuildRoster();
+}
+
+std::optional<uint32_t> GameHandler::guildRankRights() const {
+    const auto& guild = guild::orNoGuild(services_.guild);
+    const uint32_t rank = guild.getPlayerGuildRankIndex();
+    if (rank == 0xFFFFFFFFu || rank >= guild.getGuildRoster().ranks.size()) return std::nullopt;
+    return guild.getPlayerGuildRankRights();
+}
+
 // The group's roster, for the handlers that ask who is in it - empty when
 // there is no group, or none wired in.
 const GroupListData& GameHandler::party() const {
@@ -1545,34 +1571,6 @@ void GameHandler::assistTarget() {
 
 void GameHandler::togglePvp() {
     combatHandler_->togglePvp();
-}
-
-void GameHandler::requestGuildInfo() {
-    socialHandler_->requestGuildInfo();
-}
-
-void GameHandler::requestGuildRoster() {
-    socialHandler_->requestGuildRoster();
-}
-
-void GameHandler::setGuildMotd(const std::string& motd) {
-    socialHandler_->setGuildMotd(motd);
-}
-
-void GameHandler::promoteGuildMember(const std::string& playerName) {
-    socialHandler_->promoteGuildMember(playerName);
-}
-
-void GameHandler::demoteGuildMember(const std::string& playerName) {
-    socialHandler_->demoteGuildMember(playerName);
-}
-
-void GameHandler::leaveGuild() {
-    socialHandler_->leaveGuild();
-}
-
-void GameHandler::inviteToGuild(const std::string& playerName) {
-    socialHandler_->inviteToGuild(playerName);
 }
 
 void GameHandler::toggleAfk(const std::string& message) {
@@ -1966,43 +1964,8 @@ void GameHandler::dismount() {
 // Arena / Battleground Handlers
 // ============================================================
 
-// Seeds the staging copy from the rank as it stands, so a field the panel never
-// touches goes back to the server unchanged instead of as a zero.
-void GameHandler::setSelectedGuildRank(int index) {
-    selectedGuildRank_ = index;
-    pendingGuildRank_ = PendingGuildRank{};
-    const auto& roster = getGuildRoster();
-    if (index < 1 || index > static_cast<int>(roster.ranks.size())) return;
-    const auto& r = roster.ranks[static_cast<size_t>(index) - 1];
-    pendingGuildRank_.rights    = r.rights;
-    pendingGuildRank_.goldLimit = r.goldLimit;
-    pendingGuildRank_.tabRights = r.bankTabRights;
-    pendingGuildRank_.tabSlots  = r.bankTabSlotsPerDay;
-}
-
-void GameHandler::saveGuildRank(const std::string& rankName) {
-    if (selectedGuildRank_ < 1) return;
-    const auto& p = pendingGuildRank_;
-    // Ranks are zero-based on the wire and one-based in the panel.
-    socialHandler_->saveGuildRank(static_cast<uint32_t>(selectedGuildRank_ - 1),
-                                  p.rights, rankName, p.goldLimit,
-                                  p.tabRights.data(), p.tabSlots.data());
-}
-
-void GameHandler::setGuildInfoText(const std::string& text) {
-    socialHandler_->setGuildInfoText(text);
-}
-
 void GameHandler::takeInboxTextItem(uint32_t mailId) {
     socialHandler_->takeInboxTextItem(mailId);
-}
-
-uint32_t GameHandler::getPlayerGuildRankRights() const {
-    return socialHandler_->getPlayerGuildRankRights();
-}
-
-void GameHandler::delGuildRank() {
-    socialHandler_->delGuildRank();
 }
 
 // ---------------------------------------------------------------------------
@@ -2083,10 +2046,6 @@ void GameHandler::resetInstances() {
 }
 
 
-uint32_t GameHandler::getPlayerGuildRankIndex() const {
-    return socialHandler_->getPlayerGuildRankIndex();
-}
-
 float GameHandler::getSpellCooldown(uint32_t spellId) const {
     return spellHandler_->getSpellCooldown(spellId);
 }
@@ -2121,38 +2080,6 @@ void GameHandler::sendAlterAppearance(uint32_t hairStyleEntry, uint32_t hairColo
 // Group/Party
 // ============================================================
 
-// ============================================================
-// Guild Handlers
-// ============================================================
-
-void GameHandler::kickGuildMember(const std::string& playerName) {
-    socialHandler_->kickGuildMember(playerName);
-}
-
-void GameHandler::disbandGuild() {
-    socialHandler_->disbandGuild();
-}
-
-void GameHandler::setGuildLeader(const std::string& name) {
-    socialHandler_->setGuildLeader(name);
-}
-
-void GameHandler::setGuildPublicNote(const std::string& name, const std::string& note) {
-    socialHandler_->setGuildPublicNote(name, note);
-}
-
-void GameHandler::setGuildOfficerNote(const std::string& name, const std::string& note) {
-    socialHandler_->setGuildOfficerNote(name, note);
-}
-
-void GameHandler::acceptGuildInvite() {
-    socialHandler_->acceptGuildInvite();
-}
-
-void GameHandler::declineGuildInvite() {
-    socialHandler_->declineGuildInvite();
-}
-
 void GameHandler::submitGmTicket(const std::string& text) {
     chatHandler_->submitGmTicket(text);
 }
@@ -2182,38 +2109,8 @@ void GameHandler::requestGmSystemStatus() {
     socialHandler_->requestGmSystemStatus();
 }
 
-void GameHandler::requestGuildEventLog() {
-    socialHandler_->requestGuildEventLog();
-}
-
-const std::vector<GuildEventLogEntry>& GameHandler::getGuildEventLog() const {
-    static const std::vector<GuildEventLogEntry> empty;
-    return socialHandler_->getGuildEventLog();
-}
-
-void GameHandler::queryGuildInfo(uint32_t guildId) {
-    socialHandler_->queryGuildInfo(guildId);
-}
-
-const std::string& GameHandler::lookupGuildName(uint32_t guildId) {
-    static const std::string kEmpty;
-    return socialHandler_->lookupGuildName(guildId);
-}
-
 uint32_t GameHandler::getEntityGuildId(uint64_t guid) const {
-    return socialHandler_->getEntityGuildId(guid);
-}
-
-void GameHandler::createGuild(const std::string& guildName) {
-    socialHandler_->createGuild(guildName);
-}
-
-void GameHandler::addGuildRank(const std::string& rankName) {
-    socialHandler_->addGuildRank(rankName);
-}
-
-void GameHandler::deleteGuildRank() {
-    socialHandler_->deleteGuildRank();
+    return playerGuildId(*this, guid);
 }
 
 // ============================================================

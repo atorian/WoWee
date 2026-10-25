@@ -9,6 +9,7 @@
 #include "game/packet_sender.hpp"
 #include "game/text_tokens.hpp"
 #include "game/ui_errors.hpp"
+#include "guild/domain/records.hpp"
 #include "game/game_utils.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/entity.hpp"

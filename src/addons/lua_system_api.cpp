@@ -1,6 +1,7 @@
 // lua_system_api.cpp - System, time, sound, locale, map, addons, instances, and utilities Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include "group/services/group.hpp"
+#include "guild/services/guild.hpp"
 #include "game/action_bar_handler.hpp"
 #include "arena/services/arena.hpp"
 #include "battleground/services/battlegrounds.hpp"
@@ -6112,7 +6113,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // missing at this end - and FrameXML's own call to it is
                 // commented out, which is the link missing at the other.
                 {"QueryGuildEventLog", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->requestGuildEventLog();
+            guildOf(L).requestGuildEventLog();
             return 0;
         }},
                 {"RegisterForSave",          lua_ReturnNothing},
@@ -7489,8 +7490,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // The server decides for real; this is the guild-membership
                 // half of it, which is the half that gates the button.
                 {"CanEditGuildEvent", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            lua_pushboolean(L, (gh && !gh->getGuildName().empty()) ? 1 : 0);
+            lua_pushboolean(L, !guildOf(L).getGuildName().empty() ? 1 : 0);
             return 1;
         }},
                 // Arena team events need a team. No arena team is tracked, so

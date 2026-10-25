@@ -11,6 +11,8 @@
 #include "game/lfg_gateway.hpp"
 #include "game/calendar_gateway.hpp"
 #include "game/group_gateway.hpp"
+#include "game/guild_gateway.hpp"
+#include "guild/services/guild.hpp"
 #include "group/services/group.hpp"
 #include "game/calendar_data.hpp"
 #include "calendar/domain/records.hpp"
@@ -52,22 +54,6 @@
 namespace wowee {
 namespace game {
 
-namespace {
-
-std::filesystem::path guildNameCachePath() {
-#ifdef _WIN32
-    if (const char* appData = std::getenv("APPDATA")) {
-        return std::filesystem::path(appData) / "wowee" / "guild_names.tsv";
-    }
-#else
-    if (const char* home = std::getenv("HOME")) {
-        return std::filesystem::path(home) / ".wowee" / "guild_names.tsv";
-    }
-#endif
-    return std::filesystem::path("guild_names.tsv");
-}
-
-} // namespace
 
 
 
@@ -358,8 +344,6 @@ static bool parseTbcInspectTalentPayload(network::Packet& packet,
     return false;
 }
 
-static const std::string kEmptyString;
-
 // The contact lists the protocol feeds. A client built without them drops
 // the contact packets, and says so once.
 static who::IWhoFeed* whoFeed(SocialQueries& queries) {
@@ -426,6 +410,14 @@ static group::IGroupServerFeed* groupFeed(SocialQueries& queries) {
     return feed;
 }
 
+static guild::IGuildServerFeed* guildFeed(SocialQueries& queries) {
+    auto* feed = queries.guildFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("The guild is not wired into this client; guild packets are dropped");
+    return feed;
+}
+
 static contacts::IContactsServerFeed* contactsFeed(SocialQueries& queries) {
     auto* feed = queries.contactsFeed();
     static bool said = false;
@@ -436,9 +428,7 @@ static contacts::IContactsServerFeed* contactsFeed(SocialQueries& queries) {
 
 SocialHandler::SocialHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
                              ChatLog& chat, SocialQueries& queries, const core::CVarStore& cvars)
-    : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat), queries_(queries),
-      cvars_(cvars) {
-    loadGuildNameCache();
+    : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat), queries_(queries) {
     // A friend or an ignored player whose name was not known when the list
     // came is filed under it once it is.
     subscriptions_.push_back(events_.subscribe<events::PlayerNameKnown>(
@@ -465,6 +455,8 @@ SocialHandler::SocialHandler(PacketSender& sender, FrameXmlEvents& frameXml, cor
         subscriptions_.push_back(std::move(subscription));
     for (auto& subscription : subscribeGroupNotices(events_, chat_, frameXml_))
         subscriptions_.push_back(std::move(subscription));
+    for (auto& subscription : subscribeGuildNotices(events_, chat_, frameXml_, queries_, cvars))
+        subscriptions_.push_back(std::move(subscription));
     // The character's social state is the server's to say at every login:
     // SMSG_GROUP_LIST comes with it for a character in a party, the guild
     // and the queues with theirs. Kept, the last session's party stood for
@@ -483,57 +475,8 @@ SocialHandler::SocialHandler(PacketSender& sender, FrameXmlEvents& frameXml, cor
             if (auto* feed = lfgFeed(queries_)) feed->beginCharacter();
             if (auto* feed = calendarFeed(queries_)) feed->beginCharacter();
             if (auto* feed = groupFeed(queries_)) feed->beginCharacter();
+            if (auto* feed = guildFeed(queries_)) feed->beginCharacter();
         }));
-}
-
-void SocialHandler::loadGuildNameCache() {
-    std::ifstream in(guildNameCachePath());
-    if (!in.is_open()) return;
-
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.empty() || line[0] == '#') continue;
-        const auto separator = line.find('\t');
-        if (separator == std::string::npos) continue;
-
-        try {
-            const uint32_t guildId = static_cast<uint32_t>(std::stoul(line.substr(0, separator)));
-            std::string guildName = line.substr(separator + 1);
-            if (guildId != 0 && !guildName.empty()) {
-                guildNameCache_[guildId] = std::move(guildName);
-            }
-        } catch (...) {
-            // Ignore stale or hand-edited cache lines.
-        }
-    }
-}
-
-void SocialHandler::saveGuildNameCache() const {
-    const std::filesystem::path path = guildNameCachePath();
-    std::error_code ec;
-    std::filesystem::create_directories(path.parent_path(), ec);
-
-    std::ofstream out(path);
-    if (!out.is_open()) {
-        LOG_WARNING("Could not save guild name cache to ", path.string());
-        return;
-    }
-
-    for (const auto& [guildId, guildName] : guildNameCache_) {
-        if (guildId != 0 && !guildName.empty()) {
-            out << guildId << '\t' << guildName << '\n';
-        }
-    }
-}
-
-void SocialHandler::rememberGuildName(uint32_t guildId, const std::string& guildName) {
-    if (guildId == 0 || guildName.empty()) return;
-
-    auto it = guildNameCache_.find(guildId);
-    if (it != guildNameCache_.end() && it->second == guildName) return;
-
-    guildNameCache_[guildId] = guildName;
-    saveGuildNameCache();
 }
 
 // ============================================================
@@ -792,12 +735,36 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
     };
 
     // ---- Guild ----
-    table[Opcode::SMSG_GUILD_INFO] = [this](network::Packet& packet) { handleGuildInfo(packet); };
-    table[Opcode::SMSG_GUILD_ROSTER] = [this](network::Packet& packet) { handleGuildRoster(packet); };
-    table[Opcode::SMSG_GUILD_QUERY_RESPONSE] = [this](network::Packet& packet) { handleGuildQueryResponse(packet); };
-    table[Opcode::SMSG_GUILD_EVENT] = [this](network::Packet& packet) { handleGuildEvent(packet); };
-    table[Opcode::SMSG_GUILD_INVITE] = [this](network::Packet& packet) { handleGuildInvite(packet); };
-    table[Opcode::SMSG_GUILD_COMMAND_RESULT] = [this](network::Packet& packet) { handleGuildCommandResult(packet); };
+    table[Opcode::SMSG_GUILD_INFO] = [this](network::Packet& packet) {
+        GuildInfoData data;
+        if (!GuildInfoParser::parse(packet, data)) return;
+        if (auto* feed = guildFeed(queries_)) feed->onSummary(std::move(data));
+    };
+    table[Opcode::SMSG_GUILD_ROSTER] = [this](network::Packet& packet) {
+        GuildRosterData data;
+        if (!queries_.packetParsers().parseGuildRoster(packet, data)) return;
+        if (auto* feed = guildFeed(queries_)) feed->onRoster(std::move(data));
+    };
+    table[Opcode::SMSG_GUILD_QUERY_RESPONSE] = [this](network::Packet& packet) {
+        GuildQueryResponseData data;
+        if (!queries_.packetParsers().parseGuildQueryResponse(packet, data)) return;
+        if (auto* feed = guildFeed(queries_)) feed->onIdentity(std::move(data));
+    };
+    table[Opcode::SMSG_GUILD_EVENT] = [this](network::Packet& packet) {
+        GuildEventData data;
+        if (!GuildEventParser::parse(packet, data)) return;
+        if (auto* feed = guildFeed(queries_)) feed->onEvent(toServerEvent(data));
+    };
+    table[Opcode::SMSG_GUILD_INVITE] = [this](network::Packet& packet) {
+        GuildInviteResponseData data;
+        if (!GuildInviteResponseParser::parse(packet, data)) return;
+        if (auto* feed = guildFeed(queries_)) feed->onInvite(data.inviterName, data.guildName);
+    };
+    table[Opcode::SMSG_GUILD_COMMAND_RESULT] = [this](network::Packet& packet) {
+        GuildCommandResultData data;
+        if (!GuildCommandResultParser::parse(packet, data)) return;
+        if (auto* feed = guildFeed(queries_)) feed->onCommandResult(data.command, data.errorCode, data.name);
+    };
     table[Opcode::SMSG_PETITION_SHOWLIST] = [this](network::Packet& packet) { handlePetitionShowlist(packet); };
     table[Opcode::SMSG_TURN_IN_PETITION_RESULTS] = [this](network::Packet& packet) {
         uint32_t result = 0;
@@ -812,7 +779,11 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
         const uint32_t err = packet.readUInt32();
         if (auto* feed = petitionFeed(queries_)) feed->onOfferRefused(offerRefusal(err));
     };
-    table[Opcode::MSG_GUILD_EVENT_LOG_QUERY] = [this](network::Packet& packet) { handleGuildEventLog(packet); };
+    table[Opcode::MSG_GUILD_EVENT_LOG_QUERY] = [this](network::Packet& packet) {
+        auto entries = readGuildEventLog(packet);
+        if (!entries) return;
+        if (auto* feed = guildFeed(queries_)) feed->onEventLog(std::move(*entries));
+    };
     table[Opcode::MSG_GUILD_BANK_LOG_QUERY] = [this](network::Packet& packet) { handleGuildBankLog(packet); };
     table[Opcode::SMSG_PETITION_QUERY_RESPONSE] = [this](network::Packet& packet) { handlePetitionQueryResponse(packet); };
     table[Opcode::SMSG_PETITION_SHOW_SIGNATURES] = [this](network::Packet& packet) { handlePetitionShowSignatures(packet); };
@@ -983,10 +954,9 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
 
     // ---- Guild / RAF / PvP AFK (moved from GameHandler) ----
     table[Opcode::SMSG_GUILD_DECLINE] = [this](network::Packet& packet) {
-        if (packet.hasData()) {
-            std::string name = packet.readString();
-            chat_.addSystemChatMessage(name + " declined your guild invitation.");
-        }
+        if (!packet.hasData()) return;
+        std::string name = packet.readString();
+        if (auto* feed = guildFeed(queries_)) feed->onInviteDeclined(std::move(name));
     };
     table[Opcode::SMSG_REFER_A_FRIEND_EXPIRED] = [this](network::Packet& packet) {
         chat_.addSystemChatMessage("Your Recruit-A-Friend link has expired.");
@@ -1219,48 +1189,6 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
 // ============================================================
 // Non-inline accessors requiring GameHandler
 // ============================================================
-
-uint32_t SocialHandler::ownGuildId() const {
-    // The player's own field first: it is what the server keeps current, and
-    // the character list's copy was taken at login - before any guild joined
-    // or left since.
-    if (const uint32_t live = getEntityGuildId(queries_.characterGuid())) return live;
-    const Character* ch = queries_.activeCharacter();
-    return ch ? ch->guildId : 0;
-}
-
-bool SocialHandler::isInGuild() const {
-    // Three records, and the newest wins: a guild joined this session is in
-    // none of the others until the next login.
-    if (inGuild_) return true;
-    if (!guildName_.empty()) return true;
-    return ownGuildId() != 0;
-}
-
-uint32_t SocialHandler::getEntityGuildId(uint64_t guid) const {
-    auto entity = queries_.entities().getEntity(guid);
-    if (!entity || entity->getType() != ObjectType::PLAYER) return 0;
-    const uint16_t ufUnitEnd = fieldIndex(UF::UNIT_END);
-    if (ufUnitEnd == 0xFFFF) return 0;
-    return entity->getField(ufUnitEnd + 3);
-}
-
-const std::string& SocialHandler::lookupGuildName(uint32_t guildId) {
-    if (guildId == 0) return kEmptyString;
-    auto it = guildNameCache_.find(guildId);
-    if (it != guildNameCache_.end()) return it->second;
-
-    const auto now = std::chrono::steady_clock::now();
-    auto pendingIt = pendingGuildNameQueries_.find(guildId);
-    const bool shouldQuery =
-        pendingIt == pendingGuildNameQueries_.end() ||
-        std::chrono::duration_cast<std::chrono::seconds>(now - pendingIt->second).count() >= 2;
-    if (shouldQuery) {
-        pendingGuildNameQueries_[guildId] = now;
-        queryGuildInfo(guildId);
-    }
-    return kEmptyString;
-}
 
 // ============================================================
 // Inspection
@@ -1662,38 +1590,6 @@ void SocialHandler::cancelLogout() {
     LOG_INFO("Cancelled logout");
 }
 
-// ============================================================
-// Guild
-// ============================================================
-
-void SocialHandler::requestGuildInfo() {
-    if (!sender_.characterInWorld()) return;
-    auto packet = GuildInfoPacket::build();
-    sender_.send(packet);
-}
-
-void SocialHandler::requestGuildRoster() {
-    if (!sender_.characterInWorld()) return;
-    auto packet = GuildRosterPacket::build();
-    sender_.send(packet);
-    // Said in the log, not to the player. This is asked for far more often
-    // than a person would ask for it: eight places here request a roster after
-    // a guild change, and the interface asks whenever the mail frame or the
-    // friends frame opens with an empty one. Every one of those put a line in
-    // chat that the real client never writes.
-    LOG_DEBUG("Requested guild roster");
-}
-
-// The longer "guild information" text, which is a different field from the
-// message of the day and has its own opcode.
-void SocialHandler::setGuildInfoText(const std::string& text) {
-    if (!sender_.characterInWorld()) return;
-    network::Packet packet(wireOpcode(Opcode::CMSG_GUILD_INFO_TEXT));
-    packet.writeString(text);
-    sender_.send(packet);
-    requestGuildRoster();
-}
-
 // Turn a letter into a readable item, which is what "take" does to a mail whose
 // body is the thing being kept.
 void SocialHandler::takeInboxTextItem(uint32_t mailId) {
@@ -1702,124 +1598,6 @@ void SocialHandler::takeInboxTextItem(uint32_t mailId) {
     packet.writeUInt64(0);            // mailbox guid - the server uses the open one
     packet.writeUInt32(mailId);
     sender_.send(packet);
-}
-
-void SocialHandler::setGuildMotd(const std::string& motd) {
-    if (!sender_.characterInWorld()) return;
-    auto packet = GuildMotdPacket::build(motd);
-    sender_.send(packet);
-    chat_.addSystemChatMessage("Guild MOTD updated.");
-}
-
-void SocialHandler::promoteGuildMember(const std::string& playerName) {
-    if (!sender_.characterInWorld()) return;
-    if (playerName.empty()) { raiseUiError("You must specify a player name."); return; }
-    auto packet = GuildPromotePacket::build(playerName);
-    sender_.send(packet);
-    chat_.addSystemChatMessage("Promoting " + playerName + "...");
-}
-
-void SocialHandler::demoteGuildMember(const std::string& playerName) {
-    if (!sender_.characterInWorld()) return;
-    if (playerName.empty()) { raiseUiError("You must specify a player name."); return; }
-    auto packet = GuildDemotePacket::build(playerName);
-    sender_.send(packet);
-    chat_.addSystemChatMessage("Demoting " + playerName + "...");
-}
-
-void SocialHandler::leaveGuild() {
-    if (!sender_.characterInWorld()) return;
-    auto packet = GuildLeavePacket::build();
-    sender_.send(packet);
-    chat_.addSystemChatMessage("Leaving guild...");
-}
-
-void SocialHandler::inviteToGuild(const std::string& playerName) {
-    if (!sender_.characterInWorld()) return;
-    if (playerName.empty()) { raiseUiError("You must specify a player name."); return; }
-    auto packet = GuildInvitePacket::build(playerName);
-    sender_.send(packet);
-    chat_.addSystemChatMessage("Inviting " + playerName + " to guild...");
-}
-
-void SocialHandler::kickGuildMember(const std::string& playerName) {
-    if (!sender_.characterInWorld()) return;
-    auto packet = GuildRemovePacket::build(playerName);
-    sender_.send(packet);
-}
-
-void SocialHandler::disbandGuild() {
-    if (!sender_.characterInWorld()) return;
-    auto packet = GuildDisbandPacket::build();
-    sender_.send(packet);
-}
-
-void SocialHandler::setGuildLeader(const std::string& name) {
-    if (!sender_.characterInWorld()) return;
-    auto packet = GuildLeaderPacket::build(name);
-    sender_.send(packet);
-}
-
-void SocialHandler::setGuildPublicNote(const std::string& name, const std::string& note) {
-    if (!sender_.characterInWorld()) return;
-    auto packet = GuildSetPublicNotePacket::build(name, note);
-    sender_.send(packet);
-}
-
-void SocialHandler::setGuildOfficerNote(const std::string& name, const std::string& note) {
-    if (!sender_.characterInWorld()) return;
-    auto packet = GuildSetOfficerNotePacket::build(name, note);
-    sender_.send(packet);
-}
-
-void SocialHandler::acceptGuildInvite() {
-    if (!sender_.characterInWorld()) return;
-    pendingGuildInvite_ = false;
-    // What the invite called it, until the guild names itself: the roster that
-    // confirms the join does not carry a name, and the query that does needs
-    // an id the player only has once the server has moved them.
-    joinedGuildName_ = pendingGuildInviteGuildName_;
-    auto packet = GuildAcceptPacket::build();
-    sender_.send(packet);
-    // ...and the roster, which is what fills the social window's guild tab.
-    // The server sends the join event to the guild rather than a roster to the
-    // joiner, so nothing arrived unless something asked.
-    requestGuildRoster();
-}
-
-void SocialHandler::declineGuildInvite() {
-    if (!sender_.characterInWorld()) return;
-    pendingGuildInvite_ = false;
-    auto packet = GuildDeclineInvitationPacket::build();
-    sender_.send(packet);
-}
-
-void SocialHandler::queryGuildInfo(uint32_t guildId) {
-    // Allow guild queries at the character screen too - the socket is
-    // connected and the server accepts CMSG_GUILD_QUERY before login.
-    if (!sender_.connected()) return;
-    auto packet = GuildQueryPacket::build(guildId);
-    sender_.send(packet);
-}
-
-void SocialHandler::createGuild(const std::string& guildName) {
-    if (!sender_.characterInWorld()) return;
-    auto packet = GuildCreatePacket::build(guildName);
-    sender_.send(packet);
-}
-
-void SocialHandler::addGuildRank(const std::string& rankName) {
-    if (!sender_.characterInWorld()) return;
-    auto packet = GuildAddRankPacket::build(rankName);
-    sender_.send(packet);
-    requestGuildRoster();
-}
-
-void SocialHandler::deleteGuildRank() {
-    if (!sender_.characterInWorld()) return;
-    auto packet = GuildDelRankPacket::build();
-    sender_.send(packet);
-    requestGuildRoster();
 }
 
 // ============================================================
@@ -1866,15 +1644,6 @@ void SocialHandler::channelModeration(Opcode op, const std::string& channelName,
     if (channelName.empty() || (targetName.empty() && !allowEmptyTarget)) return;
     auto packet = ChannelModerationPacket::build(op, channelName, targetName);
     sender_.send(packet);
-}
-
-// Removes the lowest rank, which is what the server does with this - it takes
-// no index, so there is nothing to get wrong about which one goes.
-void SocialHandler::delGuildRank() {
-    if (!sender_.characterInWorld()) return;
-    auto packet = GuildDelRankPacket::build();
-    sender_.send(packet);
-    requestGuildRoster();
 }
 
 void SocialHandler::setSavedInstanceExtend(uint32_t mapId, uint32_t difficulty, bool extend) {
@@ -1947,413 +1716,6 @@ void SocialHandler::handlePartyMemberStats(network::Packet& packet, bool isFull)
         queries_.mirrorAurasByGuid(stats->guid, *auras);
     }
     if (auto* feed = groupFeed(queries_)) feed->onMemberStats(*stats);
-}
-
-// ============================================================
-// Guild Handlers
-// ============================================================
-
-void SocialHandler::handleGuildInfo(network::Packet& packet) {
-    GuildInfoData data;
-    if (!GuildInfoParser::parse(packet, data)) return;
-    if (!data.guildName.empty()) {
-        if (const Character* ch = queries_.activeCharacter(); ch && ch->hasGuild()) {
-            rememberGuildName(ch->guildId, data.guildName);
-            if (guildName_.empty()) guildName_ = data.guildName;
-        }
-    }
-    // SMSG_GUILD_INFO is pushed by the server on every guild roster sync
-    // (login, member join/leave, periodic refreshes). Only print when
-    // something the user can see has actually changed; otherwise the
-    // guild banner spams chat on every tick.
-    const bool changed = (guildInfoData_.guildName != data.guildName) ||
-                         (guildInfoData_.numMembers != data.numMembers) ||
-                         (guildInfoData_.numAccounts != data.numAccounts);
-    guildInfoData_ = data;
-    if (changed) {
-        chat_.addSystemChatMessage("Guild: " + data.guildName + " (" +
-                             std::to_string(data.numMembers) + " members, " +
-                             std::to_string(data.numAccounts) + " accounts)");
-    }
-}
-
-void SocialHandler::handleGuildRoster(network::Packet& packet) {
-    GuildRosterData data;
-    if (!queries_.packetParsers().parseGuildRoster(packet, data)) return;
-    guildRoster_ = std::move(data);
-    hasGuildRoster_ = true;
-
-    // A roster is only sent to a member, so this is the server saying so.
-    //
-    // Joining mid-session left every record of membership untouched: the
-    // character list's guild id was taken at login and the guild name is only
-    // written for a character that already had one. So the social window's
-    // guild tab stayed empty for a player who had just accepted an invite, and
-    // stayed empty until the next login.
-    const bool newlyIn = !inGuild_;
-    inGuild_ = true;
-    if (guildName_.empty() && !joinedGuildName_.empty()) {
-        guildName_ = joinedGuildName_;
-    }
-    if (guildName_.empty()) {
-        // The name comes from the guild's own query, which needs the id - and
-        // the id is on the player now that the server has moved them.
-        if (const uint32_t id = ownGuildId()) queryGuildInfo(id);
-    }
-    if (newlyIn && frameXml_.frameXmlListening()) {
-        // What the social window listens for to rebuild its guild tab. Without
-        // it the frame has a roster and no idea it is meant to draw one.
-        frameXml_.fireFrameXmlEvent("PLAYER_GUILD_UPDATE", {});
-    }
-    // False: the roster in hand is the fresh one, so nothing should ask again.
-    // The argument is "you may request a roster", and every reader answers it
-    // with `if arg1 then GuildRoster() end` - friendsframe, the guild bank and
-    // the calendar all do exactly that. Sending true here would have each of
-    // them request a roster, whose reply would fire this again, forever.
-    if (frameXml_.frameXmlListening())
-        frameXml_.fireFrameXmlEvent("GUILD_ROSTER_UPDATE", {eventBool(false)});
-}
-
-// CMSG_GUILD_RANK rewrites the rank whole: id, rights, name, gold per day, then
-// six pairs of bank tab rights and slots. Everything it carries has to be sent,
-// which is why the caller stages from the rank's current values rather than
-// from nothing - a field left at zero here is not "unchanged", it is revoked.
-void SocialHandler::saveGuildRank(uint32_t rankId, uint32_t rights, const std::string& rankName,
-                                  uint32_t goldLimit, const uint32_t* tabRights,
-                                  const uint32_t* tabSlots) {
-    if (!sender_.characterInWorld()) return;
-    network::Packet packet(wireOpcode(Opcode::CMSG_GUILD_RANK));
-    packet.writeUInt32(rankId);
-    packet.writeUInt32(rights);
-    packet.writeString(rankName);
-    packet.writeUInt32(goldLimit);
-    for (int t = 0; t < 6; ++t) {
-        packet.writeUInt32(tabRights ? tabRights[t] : 0);
-        packet.writeUInt32(tabSlots ? tabSlots[t] : 0);
-    }
-    sender_.send(packet);
-    requestGuildRoster();
-}
-
-uint32_t SocialHandler::getPlayerGuildRankIndex() const {
-    if (!hasGuildRoster_) return 0xFFFFFFFFu;
-    const uint64_t me = queries_.characterGuid();
-    for (const auto& m : guildRoster_.members)
-        if (m.guid == me) return m.rankIndex;
-    return 0xFFFFFFFFu;
-}
-
-uint32_t SocialHandler::getPlayerGuildRankRights() const {
-    const uint32_t idx = getPlayerGuildRankIndex();
-    if (idx >= guildRoster_.ranks.size()) return 0;
-    return guildRoster_.ranks[idx].rights;
-}
-
-void SocialHandler::handleGuildQueryResponse(network::Packet& packet) {
-    GuildQueryResponseData data;
-    if (!queries_.packetParsers().parseGuildQueryResponse(packet, data)) return;
-    if (data.guildId != 0) {
-        pendingGuildNameQueries_.erase(data.guildId);
-        if (!data.guildName.empty()) {
-            rememberGuildName(data.guildId, data.guildName);
-        }
-    }
-    // Ours when it names the guild this character is actually in - which is
-    // the player's own field once they have joined one, not the character
-    // list's copy from login.
-    const bool isLocalGuild = (ownGuildId() != 0 && ownGuildId() == data.guildId);
-    if (isLocalGuild) {
-        const bool wasUnknown = guildName_.empty();
-        guildName_ = data.guildName;
-        guildQueryData_ = data;
-        guildRankNames_.clear();
-        for (const auto& rankName : data.rankNames) guildRankNames_.push_back(rankName);
-        if (wasUnknown && !guildName_.empty()) {
-            chat_.addSystemChatMessage("Guild: <" + guildName_ + ">");
-            if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("PLAYER_GUILD_UPDATE", {});
-        }
-    }
-}
-
-// Returns true only when the member's cached online state actually changes (and updates
-// it), so callers announce genuine online/offline transitions and silently drop the
-// redundant SIGNED_ON flood the server emits at login for already-online members.
-bool SocialHandler::guildMemberOnlineTransition(const std::string& name, bool nowOnline) {
-    for (auto& m : guildRoster_.members) {
-        if (m.name == name) {
-            if (m.online == nowOnline) return false;
-            m.online = nowOnline;
-            return true;
-        }
-    }
-    return true;  // not in the cached roster yet - announce rather than swallow
-}
-
-void SocialHandler::handleGuildEvent(network::Packet& packet) {
-    GuildEventData data;
-    if (!GuildEventParser::parse(packet, data)) return;
-
-    // What the game prints for each, in its own words (ERR_GUILD_* and the
-    // friend list's online and offline lines) and as a system line. These went
-    // out as guild chat with no sender, and the interface puts the player's own
-    // name on a local line without one: "[Guild] [You]: [Guild] Coggs has come
-    // online."
-    std::string msg;
-    switch (data.eventType) {
-        case GuildEvent::PROMOTION:
-            if (data.numStrings >= 3)
-                msg = data.strings[0] + " has promoted " + data.strings[1] + " to " + data.strings[2] + ".";
-            break;
-        case GuildEvent::DEMOTION:
-            if (data.numStrings >= 3)
-                msg = data.strings[0] + " has demoted " + data.strings[1] + " to " + data.strings[2] + ".";
-            break;
-        case GuildEvent::MOTD:
-            // Not a line from here: chatframe.lua formats GUILD_MOTD_TEMPLATE
-            // from the GUILD_MOTD event fired further down, and the chat
-            // window this client drew for itself is gone.
-            break;
-        case GuildEvent::JOINED:
-            if (data.numStrings >= 1) msg = data.strings[0] + " has joined the guild.";
-            break;
-        case GuildEvent::LEFT:
-            if (data.numStrings >= 1) msg = data.strings[0] + " has left the guild.";
-            break;
-        case GuildEvent::REMOVED:
-            // The member removed, then who removed them - the order the server
-            // sends and ERR_GUILD_REMOVE_SS reads them in.
-            if (data.numStrings >= 2) msg = data.strings[0] + " has been kicked out of the guild by " + data.strings[1] + ".";
-            break;
-        case GuildEvent::LEADER_IS:
-            if (data.numStrings >= 1) msg = data.strings[0] + " is the leader of your guild.";
-            break;
-        case GuildEvent::LEADER_CHANGED:
-            if (data.numStrings >= 2) msg = data.strings[0] + " has made " + data.strings[1] + " the new Guild Master.";
-            break;
-        case GuildEvent::DISBANDED:
-            msg = "Guild has been disbanded.";
-            guildName_.clear();
-            guildRankNames_.clear();
-            guildRoster_ = GuildRosterData{};
-            hasGuildRoster_ = false;
-            if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("PLAYER_GUILD_UPDATE", {});
-            break;
-        case GuildEvent::SIGNED_ON:
-            // Only announce a real offline→online transition. On login the server floods
-            // SIGNED_ON for members the roster already lists as online; suppressing those
-            // (state unchanged) matches the real client and stops the guild-chat spam.
-            //
-            // ...and only when the player wants to hear about it at all. Guild
-            // Member Notify is offered by the panel and was read by nothing, so
-            // a large guild announced every arrival and departure whatever it
-            // said. The transition is still tracked when the message is
-            // suppressed - the roster's idea of who is online is not the
-            // player's idea of what is worth reading.
-            if (data.numStrings >= 1 && guildMemberOnlineTransition(data.strings[0], true) &&
-                cvars_.get("guildMemberNotify", "1") != "0")
-                msg = "|Hplayer:" + data.strings[0] + "|h[" + data.strings[0] + "]|h has come online.";
-            break;
-        case GuildEvent::SIGNED_OFF:
-            if (data.numStrings >= 1 && guildMemberOnlineTransition(data.strings[0], false) &&
-                cvars_.get("guildMemberNotify", "1") != "0")
-                msg = data.strings[0] + " has gone offline.";
-            break;
-        // The bank's half of the event list. The server broadcasts these to
-        // every member whenever anyone touches the bank, so they are frequent,
-        // and not one of them is a chat line - they carry the figures the bank
-        // panel reads back through its own API. Unhandled, a guild with an
-        // active bank filled guild chat with "Guild event 17: 000000000051451B".
-        case GuildEvent::BANK_MONEY_SET:
-        case GuildEvent::BANK_TAB_AND_MONEY:
-            if (data.numStrings >= 1)
-                queries_.setGuildBankMoney(guildEventMoney(data.strings[0]));
-            break;
-        case GuildEvent::BANK_BAG_SLOTS_CHANGED:
-        case GuildEvent::BANK_TAB_PURCHASED:
-        case GuildEvent::BANK_TAB_UPDATED:
-        case GuildEvent::BANK_TEXT_CHANGED:
-        case GuildEvent::TABARD_CHANGED:
-        case GuildEvent::RANK_UPDATED:
-        case GuildEvent::RANK_DELETED:
-            // Silent here; the interface events they mean are fired below.
-            break;
-        default: {
-            // Not a chat line either: an event this client does not know is a
-            // gap in this switch, and guild chat is not where that belongs.
-            // Once per type - these arrive as often as the bank ones do, and a
-            // log that repeats itself answers nothing a single line does not.
-            static bool warned[256] = {};
-            if (!warned[data.eventType]) {
-                warned[data.eventType] = true;
-                LOG_WARNING("SMSG_GUILD_EVENT: unhandled type ", static_cast<int>(data.eventType),
-                            " strings=", static_cast<int>(data.numStrings),
-                            data.numStrings >= 1 ? (" first=" + data.strings[0]) : std::string());
-            }
-            break;
-        }
-    }
-
-    if (!msg.empty()) {
-        MessageChatData chatMsg;
-        chatMsg.type = ChatType::SYSTEM;
-        chatMsg.language = ChatLanguage::UNIVERSAL;
-        chatMsg.message = msg;
-        queries_.addLocalChatMessage(chatMsg);
-    }
-
-    // Whether this client is about to ask for a fresh roster itself, which is
-    // the switch at the end of this function. The event's argument is the
-    // negation: "nobody has asked, so you may". Working it out once and using
-    // it in both places is the point - FrameXML requesting when the client
-    // already has costs a second roster for a large guild, and FrameXML not
-    // requesting when the client has not leaves every guild panel drawing from
-    // a copy that no longer says who is online.
-    const bool clientWillRequest = hasGuildRoster_ && (
-        data.eventType == GuildEvent::PROMOTION ||
-        data.eventType == GuildEvent::DEMOTION ||
-        data.eventType == GuildEvent::JOINED ||
-        data.eventType == GuildEvent::LEFT ||
-        data.eventType == GuildEvent::REMOVED ||
-        data.eventType == GuildEvent::LEADER_CHANGED ||
-        // A rank added, renamed or deleted only reaches the client in the
-        // roster: SMSG_GUILD_ROSTER is what carries the rank list, and every
-        // panel that names a rank reads it from there.
-        data.eventType == GuildEvent::RANK_UPDATED ||
-        data.eventType == GuildEvent::RANK_DELETED);
-
-    if (frameXml_.frameXmlListening()) {
-        switch (data.eventType) {
-            case GuildEvent::MOTD:
-                frameXml_.fireFrameXmlEvent("GUILD_MOTD", {data.numStrings >= 1 ? data.strings[0] : ""});
-                break;
-            case GuildEvent::SIGNED_ON: case GuildEvent::SIGNED_OFF:
-            case GuildEvent::PROMOTION: case GuildEvent::DEMOTION:
-            case GuildEvent::JOINED: case GuildEvent::LEFT:
-            case GuildEvent::REMOVED: case GuildEvent::LEADER_CHANGED:
-            case GuildEvent::DISBANDED:
-            case GuildEvent::RANK_UPDATED: case GuildEvent::RANK_DELETED:
-                // Somebody joined, left, was promoted or signed on, and the
-                // roster this client holds no longer says so. The server sends
-                // the event and not a new roster, so the request has to come
-                // from somewhere. Signing on and off is the case nothing
-                // covered: the switch below does not request for those, so a
-                // member who had just come online stayed grey until something
-                // else asked.
-                frameXml_.fireFrameXmlEvent("GUILD_ROSTER_UPDATE",
-                                               {eventBool(!clientWillRequest)});
-                break;
-            // The bank panel's own events, which are what these types mean.
-            // GuildBankFrame_OnEvent returns early unless the frame is
-            // visible, so firing them while it is shut costs nothing.
-            case GuildEvent::TABARD_CHANGED:
-                frameXml_.fireFrameXmlEvent("GUILDTABARD_UPDATE", {});
-                break;
-            case GuildEvent::BANK_BAG_SLOTS_CHANGED:
-                frameXml_.fireFrameXmlEvent("GUILDBANKBAGSLOTS_CHANGED", {});
-                break;
-            case GuildEvent::BANK_TAB_PURCHASED:
-            case GuildEvent::BANK_TAB_UPDATED:
-            case GuildEvent::BANK_TAB_AND_MONEY:
-                // The money half of 18 went through setGuildBankMoney above,
-                // which fires GUILDBANK_UPDATE_MONEY when the figure moved.
-                frameXml_.fireFrameXmlEvent("GUILDBANK_UPDATE_TABS", {});
-                break;
-            case GuildEvent::BANK_TEXT_CHANGED:
-                // The tab, as the server counts them from zero and the panel
-                // counts them from one. It answers by querying the new text.
-                if (data.numStrings >= 1)
-                    frameXml_.fireFrameXmlEvent(
-                        "GUILDBANK_TEXT_CHANGED",
-                        {std::to_string(std::strtol(data.strings[0].c_str(), nullptr, 10) + 1)});
-                break;
-            default: break;
-        }
-    }
-
-    // A new tabard is in the guild query, not the roster, so it is the query
-    // that has to be asked again for the emblem to change.
-    if (data.eventType == GuildEvent::TABARD_CHANGED) {
-        if (const uint32_t id = ownGuildId()) queryGuildInfo(id);
-    }
-
-    if (clientWillRequest) requestGuildRoster();
-}
-
-void SocialHandler::handleGuildInvite(network::Packet& packet) {
-    GuildInviteResponseData data;
-    if (!GuildInviteResponseParser::parse(packet, data)) return;
-    pendingGuildInvite_ = true;
-    pendingGuildInviterName_ = data.inviterName;
-    pendingGuildInviteGuildName_ = data.guildName;
-    chat_.addSystemChatMessage(data.inviterName + " has invited you to join " + data.guildName + ".");
-    if (frameXml_.frameXmlListening())
-        frameXml_.fireFrameXmlEvent("GUILD_INVITE_REQUEST", {data.inviterName, data.guildName});
-}
-
-void SocialHandler::handleGuildCommandResult(network::Packet& packet) {
-    GuildCommandResultData data;
-    if (!GuildCommandResultParser::parse(packet, data)) return;
-    if (data.errorCode == 0) {
-        // Whether the player's own membership changed, which is a different
-        // question from whether the command worked: inviting someone succeeds
-        // without altering anything the panels read.
-        bool membershipChanged = false;
-        switch (data.command) {
-            case 0:
-                chat_.addSystemChatMessage("Guild created.");
-                membershipChanged = true;
-                break;
-            case 1:
-                if (!data.name.empty()) chat_.addSystemChatMessage("You have invited " + data.name + " to the guild.");
-                break;
-            case 2:
-                chat_.addSystemChatMessage("You have left the guild.");
-                guildName_.clear(); guildRankNames_.clear();
-                guildRoster_ = GuildRosterData{}; hasGuildRoster_ = false;
-                membershipChanged = true;
-                break;
-            default: break;
-        }
-        // Leaving a guild emptied the name, the ranks and the whole roster and
-        // told nobody, so the interface's guild tab kept showing the guild the
-        // player had just left - every row of it, until something else
-        // happened to fire a roster update. PLAYER_GUILD_UPDATE is what
-        // friendsframe and the paperdoll re-check IsInGuild on.
-        //
-        // The roster event carries false, which is the established contract
-        // here: every reader answers a true with `if arg1 then GuildRoster()
-        // end`, and the reply to that would fire this again without end.
-        if (membershipChanged && frameXml_.frameXmlListening()) {
-            frameXml_.fireFrameXmlEvent("PLAYER_GUILD_UPDATE", {});
-            frameXml_.fireFrameXmlEvent("GUILD_ROSTER_UPDATE", {eventBool(false)});
-        }
-        return;
-    }
-    const char* errStr = nullptr;
-    switch (data.errorCode) {
-        case 2:  errStr = "You are not in a guild."; break;
-        case 4:  errStr = "No player named \"%s\" is online."; break;
-        case 11: errStr = "\"%s\" is already in a guild."; break;
-        case 13: errStr = "You are already in a guild."; break;
-        case 14: errStr = "\"%s\" has already been invited to a guild."; break;
-        case 16: case 17: errStr = "You are not the guild leader."; break;
-        case 22: errStr = "That player is ignoring you."; break;
-        default: break;
-    }
-    std::string errorMsg;
-    if (errStr) {
-        std::string fmt = errStr;
-        auto pos = fmt.find("%s");
-        if (pos != std::string::npos && !data.name.empty()) fmt.replace(pos, 2, data.name);
-        else if (pos != std::string::npos) fmt.replace(pos, 2, "that player");
-        errorMsg = fmt;
-    } else {
-        errorMsg = "Guild command failed";
-        if (!data.name.empty()) errorMsg += " for " + data.name;
-        errorMsg += " (error " + std::to_string(data.errorCode) + ")";
-    }
-    raiseUiError(errorMsg);
-    chat_.addSystemChatMessage(errorMsg);
 }
 
 void SocialHandler::handlePetitionShowlist(network::Packet& packet) {
@@ -3230,47 +2592,6 @@ void SocialHandler::handleGuildBankLog(network::Packet& packet) {
     if (frameXml_.frameXmlListening()) {
         frameXml_.fireFrameXmlEvent("GUILDBANKLOG_UPDATE", {});
     }
-}
-
-void SocialHandler::requestGuildEventLog() {
-    if (!sender_.characterInWorld()) return;
-    network::Packet pkt(wireOpcode(Opcode::MSG_GUILD_EVENT_LOG_QUERY));
-    sender_.send(pkt);
-}
-
-// The reply. Two of the five fields are conditional, which is the whole
-// difficulty: a reader that always takes the second guid loses eight bytes on
-// every join and leave, and those are most of a guild log.
-//
-// Types, from AzerothCore's GuildEventLogTypes: 1 invite, 2 join, 3 promote,
-// 4 demote, 5 remove, 6 leave.
-void SocialHandler::handleGuildEventLog(network::Packet& packet) {
-    auto rem = [&]() { return packet.getRemainingSize(); };
-    if (rem() < 1) return;
-    const uint8_t count = packet.readUInt8();
-    guildEventLog_.clear();
-    guildEventLog_.reserve(count);
-    for (uint8_t i = 0; i < count; ++i) {
-        if (rem() < 9) break;                 // type + one guid at minimum
-        GuildEventLogEntry e;
-        e.type = packet.readUInt8();
-        e.playerGuid = packet.readUInt64();
-        // Everything but join (2) and leave (6) names a second player.
-        if (e.type != 2 && e.type != 6) {
-            if (rem() < 8) break;
-            e.otherGuid = packet.readUInt64();
-        }
-        // Promote (3) and demote (4) carry the new rank.
-        if (e.type == 3 || e.type == 4) {
-            if (rem() < 1) break;
-            e.newRank = packet.readUInt8();
-        }
-        if (rem() < 4) break;
-        e.secondsAgo = packet.readUInt32();
-        guildEventLog_.push_back(e);
-    }
-    LOG_INFO("Guild event log: ", guildEventLog_.size(), " entries");
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("GUILD_EVENT_LOG_UPDATE", {});
 }
 
 // CMSG_GMTICKET_SYSTEMSTATUS: is the ticket queue open at all. The reply,

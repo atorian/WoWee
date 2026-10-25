@@ -142,7 +142,6 @@ using WorldConnectFailureCallback = std::function<void(const std::string& reason
 class GameHandler : public IConnectionState,
                      public ITargetingState,
                      public IEntityAccess,
-                     public ISocialState,
                      public PacketSender,
                      public FrameXmlEvents,
                      public ActionBarQueries,
@@ -254,7 +253,7 @@ public:
     PacketParsers& packetParsers() override { return *packetParsers_; }
     std::string playerName(uint64_t guid) const override { return lookupName(guid); }
     void requestPlayerName(uint64_t guid) override { queryPlayerName(guid); }
-    bool inGuild() const override { return isInGuild(); }
+    bool inGuild() const override;
     std::string spellName(uint32_t spellId) const override { return getSpellName(spellId); }
     bool spellKnownToClient(uint32_t spellId) const override { return isSpellKnownToClient(spellId); }
     uint32_t spellImplicitTargetA(uint32_t spellId) const override { return getSpellImplicitTargetA(spellId); }
@@ -341,7 +340,7 @@ public:
     uint8_t playerRaceOf(uint64_t guid) const override { return lookupPlayerRace(guid); }
     uint8_t playerGenderOf(uint64_t guid) const override { return lookupPlayerGender(guid); }
     const GroupListData& party() const override;
-    const GuildRosterData& guildRoster() const override { return getGuildRoster(); }
+    const GuildRosterData& guildRoster() const override;
     std::optional<uint32_t> guildRankRights() const override;
     std::string languageName(uint32_t languageId) const override { return getLanguageName(languageId); }
 
@@ -644,6 +643,7 @@ public:
     calendar::ICalendarFeed* calendarFeed() override;
     group::IGroupServerFeed* groupFeed() override;
     const group::IGroup* group() const override;
+    guild::IGuildServerFeed* guildFeed() override;
 
     // Money (copper)
     uint64_t getMoneyCopper() const { return inventoryHandler_->moneyCopper(); }
@@ -847,23 +847,7 @@ public:
     // Minimap ping (Ctrl+click on minimap; wowX/wowY in canonical WoW coords)
     void sendMinimapPing(float wowX, float wowY);
 
-    // Guild commands
-    void requestGuildInfo();
-    void requestGuildRoster();
-    void setGuildInfoText(const std::string& text);
     void takeInboxTextItem(uint32_t mailId);
-    void setGuildMotd(const std::string& motd);
-    void promoteGuildMember(const std::string& playerName);
-    void demoteGuildMember(const std::string& playerName);
-    void leaveGuild();
-    void inviteToGuild(const std::string& playerName);
-    void kickGuildMember(const std::string& playerName);
-    void disbandGuild();
-    void setGuildLeader(const std::string& name);
-    void setGuildPublicNote(const std::string& name, const std::string& note);
-    void setGuildOfficerNote(const std::string& name, const std::string& note);
-    void acceptGuildInvite();
-    void declineGuildInvite();
 
     // GM Ticket
     void submitGmTicket(const std::string& text);
@@ -871,8 +855,6 @@ public:
     void deleteGmTicket();
     void requestGmTicket();          ///< Send CMSG_GMTICKET_GETTICKET to query open ticket
     void requestGmSystemStatus();    ///< Send CMSG_GMTICKET_SYSTEMSTATUS to query the queue
-    void requestGuildEventLog();
-    const std::vector<GuildEventLogEntry>& getGuildEventLog() const;
 
     uint32_t getBfMgrBattleId() const { return socialHandler_->bfMgrBattleId(); }
     void acceptBfMgrInvite();
@@ -880,66 +862,12 @@ public:
     void respondBfMgrQueueInvite(uint32_t battleId, bool accept);
     void requestBfMgrExit(uint32_t battleId);
 
-    void queryGuildInfo(uint32_t guildId);
-    void createGuild(const std::string& guildName);
-    void addGuildRank(const std::string& rankName);
-    void delGuildRank();
-    void deleteGuildRank();
-
-    // Guild state accessors
-    bool isInGuild() const override;
-    const std::string& getGuildName() const override;
-    const GuildRosterData& getGuildRoster() const override;
-
-    /// Where the player sits in the guild, as an index into the roster's rank
-    /// list. Rank zero is the guild master, which is what IsGuildLeader asks.
-    /// Returns 0xFFFFFFFF when the roster has not arrived or the player is not
-    /// in it - distinct from rank zero, which is the opposite answer.
-    ///
-    /// Shared because the chat handler was already doing this walk to decide
-    /// whether to show officer chat, and a second copy is how two answers to
-    /// one question start to disagree.
-    uint32_t getPlayerGuildRankIndex() const;
-    bool hasGuildRoster() const override;
-    const std::vector<std::string>& getGuildRankNames() const;
-    uint32_t getPlayerGuildRankRights() const;
-    /// Which rank the guild control panel is editing. Client-side only - the
-    /// panel picks it from a dropdown and asks for its rights with a call that
-    /// takes no argument, so the choice has to be remembered here.
-    int  getSelectedGuildRank() const { return selectedGuildRank_; }
-    void setSelectedGuildRank(int index);
-
-    /// What the guild rank editor has staged but not yet sent.
-    ///
-    /// The panel edits by parts - a checkbox stages one right, the gold box
-    /// stages the allowance, each bank tab stages three more - and only then
-    /// commits with one packet carrying all of it. Seeded from the rank's
-    /// current values when a rank is selected, so anything the panel does not
-    /// touch is sent back exactly as it arrived rather than as a zero.
-    struct PendingGuildRank {
-        uint32_t rights = 0;
-        uint32_t goldLimit = 0;
-        std::array<uint32_t, 6> tabRights{};
-        std::array<uint32_t, 6> tabSlots{};
-    };
-    PendingGuildRank& pendingGuildRankRef() { return pendingGuildRank_; }
-    void saveGuildRank(const std::string& rankName);
-    bool hasPendingGuildInvite() const;
-    const std::string& getPendingGuildInviterName() const;
-    const std::string& getPendingGuildInviteGuildName() const;
-    const GuildInfoData& getGuildInfoData() const;
-    const GuildQueryResponseData& getGuildQueryData() const;
-    bool hasGuildInfoData() const;
     void reportMailSpam(uint64_t senderGuid, uint32_t mailId);
     /// Take the glyph out of a socket. Zero-based slot, as the server counts.
     void removeGlyphFromSocket(uint32_t slot);
     /// Tell the server the GM's reply has been read and closed. Empty packet;
     /// the server answers by deciding whether to offer a survey.
     void resolveGMResponse();
-    // Guild name lookup for other players' nameplates
-    // Returns the guild name for a given guildId, or empty if unknown.
-    // Automatically queries the server for unknown guild IDs.
-    const std::string& lookupGuildName(uint32_t guildId);
     // Returns the guildId for a player entity (from PLAYER_GUILDID update field).
     uint32_t getEntityGuildId(uint64_t guid) const;
 
@@ -3678,8 +3606,6 @@ private:
     mutable bool factionNameCacheLoaded_ = false;
 
 
-    // ---- Guild state ----
-
     uint64_t activeCharacterGuid_ = 0;
     Race playerRace_ = Race::HUMAN;
 
@@ -3818,8 +3744,6 @@ private:
     std::unordered_map<uint32_t, uint32_t>    achievementPointsCache_;
     std::unordered_map<uint32_t, uint32_t>    achievementIconCache_;  // achievementId → SpellIcon.dbc ID
     std::unordered_map<uint32_t, uint32_t>    achievementFlagsCache_; // achievementId → Achievement.dbc Flags
-    int selectedGuildRank_ = 1;
-    PendingGuildRank pendingGuildRank_;
     std::vector<CurrencyType> currencyTypes_;
     bool currencyTypesLoaded_ = false;
     std::unordered_map<uint32_t, BattlemasterEntry> battlemasterList_;

@@ -18,6 +18,7 @@ namespace battleground { class IBattlegroundsFeed; }
 namespace lfg { class ILfgFeed; }
 namespace calendar { class ICalendarFeed; }
 namespace group { class IGroupServerFeed; class IGroup; }
+namespace guild { class IGuildServerFeed; class IGuild; }
 namespace network { class WorldConnection; }
 
 namespace game {
@@ -78,6 +79,10 @@ struct GameServices {
     /// the handlers that ask who is in it. Set like contactsFeed.
     group::IGroupServerFeed* groupFeed = nullptr;
     group::IGroup* group = nullptr;
+    /// Where the guild's packets go, and the player's guild for the handlers
+    /// that read its roster.
+    guild::IGuildServerFeed* guildFeed = nullptr;
+    guild::IGuild* guild = nullptr;
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };

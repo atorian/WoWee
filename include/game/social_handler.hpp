@@ -26,6 +26,7 @@ namespace battleground { class IBattlegroundsFeed; }
 namespace lfg { class ILfgFeed; }
 namespace calendar { class ICalendarFeed; }
 namespace group { class IGroupServerFeed; class IGroup; }
+namespace guild { class IGuildServerFeed; }
 namespace game {
 
 class PacketSender;
@@ -105,6 +106,9 @@ public:
     [[nodiscard]] virtual group::IGroupServerFeed* groupFeed() = 0;
     /// The group as it stands, for a member's stats; null as above.
     [[nodiscard]] virtual const group::IGroup* group() const = 0;
+    /// Where the guild's packets go; null when the client was built without
+    /// the guild.
+    [[nodiscard]] virtual guild::IGuildServerFeed* guildFeed() = 0;
 
     // ---- The appearance switches the realm keeps with the character ----
     [[nodiscard]] virtual bool showingHelm() const = 0;
@@ -128,24 +132,6 @@ struct SocialCharacterState {
     uint32_t levelTimePlayed_ = 0;
 
 
-    // Guild. The last character's is not the next one's: logging out of a
-    // guilded character into a guildless one used to leave the name, and
-    // everything that asks "am I in a guild" answered yes.
-    /// Membership the server has confirmed this session, for a guild joined
-    /// after login - which no record built at login can know about.
-    bool inGuild_ = false;
-    /// What the invite called it, kept until the guild names itself.
-    std::string joinedGuildName_;
-    std::string guildName_;
-    std::vector<std::string> guildRankNames_;
-    GuildRosterData guildRoster_;
-    GuildInfoData guildInfoData_;
-    GuildQueryResponseData guildQueryData_;
-    bool hasGuildRoster_ = false;
-    bool pendingGuildInvite_ = false;
-    std::string pendingGuildInviterName_;
-    std::string pendingGuildInviteGuildName_;
-
     /// Points on the minimap the party pinged, while they last.
     std::vector<MinimapPing> minimapPings_;
 
@@ -162,7 +148,6 @@ struct SocialCharacterState {
 
     // Instance
     std::vector<InstanceLockout> instanceLockouts_;
-    std::vector<GuildEventLogEntry> guildEventLog_;
     /// Six item tabs and the money log after them.
     std::array<std::vector<GuildBankLogEntry>, 7> guildBankLogs_;
     uint32_t instanceDifficulty_ = 0;
@@ -227,11 +212,7 @@ public:
     [[nodiscard]] float getLogoutCountdown()  const { return logoutCountdown_; }
     [[nodiscard]] bool  isLogoutToExit()      const { return exitAfterLogout_; }
 
-    // Guild
-    void requestGuildInfo();
-    void requestGuildRoster();
-    /// Ask for the guild's event log. The reply is the same opcode.
-    void requestGuildEventLog();
+    // Guild bank
     /// Ask for one bank tab's log. Tab six is the money log, which is what the
     /// server means by GUILD_BANK_MAX_TABS.
     void requestGuildBankLog(uint8_t tab);
@@ -241,63 +222,8 @@ public:
         static const std::vector<GuildBankLogEntry> empty;
         return (tab < guildBankLogs_.size()) ? guildBankLogs_[tab] : empty;
     }
-    [[nodiscard]] const std::vector<GuildEventLogEntry>& getGuildEventLog() const { return guildEventLog_; }
-    void setGuildInfoText(const std::string& text);
+
     void takeInboxTextItem(uint32_t mailId);
-    void setGuildMotd(const std::string& motd);
-    void promoteGuildMember(const std::string& playerName);
-    void demoteGuildMember(const std::string& playerName);
-    void leaveGuild();
-    void inviteToGuild(const std::string& playerName);
-    void kickGuildMember(const std::string& playerName);
-    void disbandGuild();
-    void setGuildLeader(const std::string& name);
-    void setGuildPublicNote(const std::string& name, const std::string& note);
-    void setGuildOfficerNote(const std::string& name, const std::string& note);
-    void acceptGuildInvite();
-    void declineGuildInvite();
-    void queryGuildInfo(uint32_t guildId);
-    void createGuild(const std::string& guildName);
-    void addGuildRank(const std::string& rankName);
-    void delGuildRank();
-    void saveGuildRank(uint32_t rankId, uint32_t rights, const std::string& rankName,
-                       uint32_t goldLimit, const uint32_t* tabRights, const uint32_t* tabSlots);
-    void deleteGuildRank();
-
-    // Guild state accessors
-    [[nodiscard]] bool isInGuild() const;
-    [[nodiscard]] const std::string& getGuildName() const { return guildName_; }
-    [[nodiscard]] const GuildRosterData& getGuildRoster() const { return guildRoster_; }
-    [[nodiscard]] bool hasGuildRoster() const { return hasGuildRoster_; }
-
-    /// The guild this character is in, by id, whichever record knows it.
-    ///
-    /// The character list is the record at login and goes stale the moment a
-    /// guild is joined or left mid-session; the player's own PLAYER_GUILDID
-    /// field is the one the server keeps current. Zero for a player in none.
-    [[nodiscard]] uint32_t ownGuildId() const;
-
-    [[nodiscard]] const std::vector<std::string>& getGuildRankNames() const { return guildRankNames_; }
-    /// The rights bitmask of the player's own guild rank, or 0 when it is not
-    /// known. The roster carries one per rank and the member row names which
-    /// rank each member holds; both were parsed and stored and neither was
-    /// being read.
-    /// Where the player sits in the guild, as an index into the rank list.
-    /// 0xFFFFFFFF when the roster has not arrived or the player is not in it -
-    /// distinct from rank zero, which is the guild master.
-    [[nodiscard]] uint32_t getPlayerGuildRankIndex() const;
-    [[nodiscard]] uint32_t getPlayerGuildRankRights() const;
-    [[nodiscard]] bool hasPendingGuildInvite() const { return pendingGuildInvite_; }
-    [[nodiscard]] const std::string& getPendingGuildInviterName() const { return pendingGuildInviterName_; }
-    [[nodiscard]] const std::string& getPendingGuildInviteGuildName() const { return pendingGuildInviteGuildName_; }
-    [[nodiscard]] const GuildInfoData& getGuildInfoData() const { return guildInfoData_; }
-    [[nodiscard]] const GuildQueryResponseData& getGuildQueryData() const { return guildQueryData_; }
-    [[nodiscard]] bool hasGuildInfoData() const { return guildInfoData_.isValid(); }
-
-    // Guild name lookup
-    const std::string& lookupGuildName(uint32_t guildId);
-    [[nodiscard]] uint32_t getEntityGuildId(uint64_t guid) const;
-
     void reportPlayer(uint64_t targetGuid, const std::string& reason);
 
     /// Report a mail as spam. Type 0 of CMSG_COMPLAIN; the three values after
@@ -399,18 +325,8 @@ private:
     void handleGroupInvite(network::Packet& packet);
     void handleGroupList(network::Packet& packet);
     void handlePartyMemberStats(network::Packet& packet, bool isFull);
-    void handleGuildInfo(network::Packet& packet);
-    void handleGuildRoster(network::Packet& packet);
-    void handleGuildQueryResponse(network::Packet& packet);
-    void handleGuildEvent(network::Packet& packet);
-    // Updates a roster member's cached online flag; returns true only on a real change so
-    // the login-time SIGNED_ON flood (state unchanged) is suppressed from guild chat.
-    bool guildMemberOnlineTransition(const std::string& name, bool nowOnline);
-    void handleGuildInvite(network::Packet& packet);
-    void handleGuildCommandResult(network::Packet& packet);
     void handlePetitionShowlist(network::Packet& packet);
     void handlePetitionQueryResponse(network::Packet& packet);
-    void handleGuildEventLog(network::Packet& packet);
     void handlePetitionShowSignatures(network::Packet& packet);
     void handlePetitionSignResults(network::Packet& packet);
     void handleRaidInstanceInfo(network::Packet& packet);
@@ -428,9 +344,6 @@ private:
     void handleLfgBootProposalUpdate(network::Packet& packet);
     void handleLfgTeleportDenied(network::Packet& packet);
     void handleTalentsInfo(network::Packet& packet);
-    void loadGuildNameCache();
-    void saveGuildNameCache() const;
-    void rememberGuildName(uint32_t guildId, const std::string& guildName);
 
     void raiseUiError(const std::string& message);
     /// The outdoor battlefield opcodes (Wintergrasp), and the summon's cancel.
@@ -441,7 +354,6 @@ private:
     core::EventBus& events_;
     ChatLog& chat_;
     SocialQueries& queries_;
-    const core::CVarStore& cvars_;
 
     // ---- State (the character's is SocialCharacterState) ----
 
@@ -459,10 +371,6 @@ private:
     uint32_t dailyResetOffset_ = 0;
     time_t   dailyResetReceivedAt_ = 0;
     bool     announceServerTime_ = false;
-
-    // Guild names by id, which outlive any one character.
-    std::unordered_map<uint32_t, std::string> guildNameCache_;
-    std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> pendingGuildNameQueries_;
 
     // Encounter units and the instance's bind question: the map's, ended
     // with it (resetTransferState).

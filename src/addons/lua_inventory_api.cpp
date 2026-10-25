@@ -1,6 +1,7 @@
 // lua_inventory_api.cpp - Items, containers, merchant, loot, equipment, trading, auction, and mail Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include "group/services/group.hpp"
+#include "guild/services/guild.hpp"
 #include "game/item_text.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "addons/lua_engine.hpp"
@@ -3474,7 +3475,7 @@ void registerInventoryLuaAPI(lua_State* L) {
                 {"CanGuildBankRepair", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh || gh->getGuildBankData().money == 0) { return luaReturnFalse(L); }
-            const auto& roster = gh->getGuildRoster();
+            const auto& roster = guildOf(L).getGuildRoster();
             const uint64_t self = gh->getPlayerGuid();
             for (const auto& m : roster.members) {
                 if (m.guid != self) continue;
@@ -4050,8 +4051,7 @@ void registerInventoryLuaAPI(lua_State* L) {
                 // no meant a guild master was offered none of what is theirs.
                 // Rank zero is the guild master; an unknown rank is not.
                 {"IsGuildLeader", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            lua_pushboolean(L, gh && gh->getPlayerGuildRankIndex() == 0 ? 1 : 0);
+            lua_pushboolean(L, guildOf(L).getPlayerGuildRankIndex() == 0 ? 1 : 0);
             return 1;
         }},
                 // The transaction log, the tab text and the tabard are not in
@@ -4180,7 +4180,7 @@ void registerInventoryLuaAPI(lua_State* L) {
                 {"GetGuildTabardFileNames", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
-            const auto& g = gh->getGuildQueryData();
+            const auto& g = guildOf(L).getGuildQueryData();
             if (g.guildId == 0) return 0;
             const uint32_t kBorderColors = (g.borderStyle <= 5) ? 16u : 3u;
             if (g.backgroundColor > 50 || g.emblemStyle > 169 ||
@@ -4217,8 +4217,7 @@ void registerInventoryLuaAPI(lua_State* L) {
                 // AzerothCore does not gate the rename by rank at all, so this
                 // is the client being stricter than the server, as retail is.
                 {"CanEditGuildTabInfo", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            lua_pushboolean(L, gh && gh->getPlayerGuildRankIndex() == 0 ? 1 : 0);
+            lua_pushboolean(L, guildOf(L).getPlayerGuildRankIndex() == 0 ? 1 : 0);
             return 1;
         }},
                 // SetGuildBankTabInfo(tab, name, icon) - the rename popup's

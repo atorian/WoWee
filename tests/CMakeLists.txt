@@ -784,6 +784,14 @@ target_link_libraries(test_group_model PRIVATE wowee_group)
 wowee_add_test(test_group_service SOURCES test_group_service.cpp)
 target_link_libraries(test_group_service PRIVATE wowee_group)
 
+# ── guild ───────────────────────────────────────────────────────
+# The player's guild: the domain model alone, then the service against a
+# recording gateway. Only wowee_guild is linked.
+wowee_add_test(test_guild_model SOURCES test_guild_model.cpp)
+target_link_libraries(test_guild_model PRIVATE wowee_guild)
+wowee_add_test(test_guild_service SOURCES test_guild_service.cpp)
+target_link_libraries(test_guild_service PRIVATE wowee_guild)
+
 # ── module_boundaries ───────────────────────────────────────────
 # New includes must point down the layers in tools/module_boundary_check.py;
 # the ones that broke them when the check came are listed in
@@ -3396,7 +3404,7 @@ target_compile_definitions(wowee_game_harness PRIVATE WOWEE_SOURCE_DIR="${CMAKE_
 target_link_libraries(wowee_game_harness PUBLIC wowee_game catch2_main)
 wowee_test_link_glm(wowee_game_harness)
 
-foreach(_domain chat spell inventory quest social session account_data action_bar pet reputation realm_time weather contacts who duel petition arena battleground lfg calendar group)
+foreach(_domain chat spell inventory quest session account_data action_bar pet reputation realm_time weather contacts who duel petition arena battleground lfg calendar group guild)
     wowee_add_test(test_${_domain}_domain SOURCES test_${_domain}_domain.cpp)
     target_link_libraries(test_${_domain}_domain PRIVATE wowee_game_harness)
 endforeach()

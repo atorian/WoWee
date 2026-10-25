@@ -654,107 +654,23 @@ struct PetitionShowlistData {
     [[nodiscard]] bool isValid() const { return npcGuid != 0; }
 };
 
-// Guild event type constants
-namespace GuildEvent {
-    constexpr uint8_t PROMOTION      = 0;
-    constexpr uint8_t DEMOTION       = 1;
-    constexpr uint8_t MOTD           = 2;
-    constexpr uint8_t JOINED         = 3;
-    constexpr uint8_t LEFT           = 4;
-    constexpr uint8_t REMOVED        = 5;
-    constexpr uint8_t LEADER_IS      = 6;
-    constexpr uint8_t LEADER_CHANGED = 7;
-    constexpr uint8_t DISBANDED      = 8;
-    constexpr uint8_t TABARD_CHANGED = 9;
-    constexpr uint8_t RANK_UPDATED   = 10;
-    constexpr uint8_t RANK_DELETED   = 11;
-    constexpr uint8_t SIGNED_ON      = 12;
-    constexpr uint8_t SIGNED_OFF     = 13;
-    // The bank half of the event list. These are broadcast to the whole guild
-    // every time anyone touches the bank, so they are frequent and none of
-    // them is a chat line - they carry the numbers the bank panel reads.
-    constexpr uint8_t BANK_BAG_SLOTS_CHANGED = 14;
-    constexpr uint8_t BANK_TAB_PURCHASED     = 15;
-    constexpr uint8_t BANK_TAB_UPDATED       = 16;
-    constexpr uint8_t BANK_MONEY_SET         = 17;
-    constexpr uint8_t BANK_TAB_AND_MONEY     = 18;
-    constexpr uint8_t BANK_TEXT_CHANGED      = 19;
-}
+} // namespace game
+namespace guild {
+struct Identity;
+struct Summary;
+struct RosterMember;
+struct Rank;
+struct Roster;
+} // namespace guild
+namespace game {
 
-/// The bank balance out of a BANK_MONEY_SET event, which carries it as text.
-///
-/// A 3.3.5 server writes it as sixteen zero-padded hex digits, so
-/// "000000000051451B" is 532g 61s 7c. Read as hex when the string says hex -
-/// its length, or a digit above nine - and as decimal otherwise, so a server
-/// that sends the plain number is not multiplied by sixteen.
-inline uint64_t guildEventMoney(const std::string& text) {
-    if (text.empty()) return 0;
-    const bool hex = text.size() == 16 ||
-                     text.find_first_of("abcdefABCDEFxX") != std::string::npos;
-    char* end = nullptr;
-    const unsigned long long value = std::strtoull(text.c_str(), &end, hex ? 16 : 10);
-    if (end == text.c_str()) return 0;
-    return static_cast<uint64_t>(value);
-}
-
-/** SMSG_GUILD_QUERY_RESPONSE data */
-struct GuildQueryResponseData {
-    uint32_t guildId = 0;
-    std::string guildName;
-    std::string rankNames[10];
-    uint32_t emblemStyle = 0;
-    uint32_t emblemColor = 0;
-    uint32_t borderStyle = 0;
-    uint32_t borderColor = 0;
-    uint32_t backgroundColor = 0;
-    uint32_t rankCount = 0;
-
-    [[nodiscard]] bool isValid() const { return guildId != 0 && !guildName.empty(); }
-};
-
-/** SMSG_GUILD_INFO data */
-struct GuildInfoData {
-    std::string guildName;
-    uint32_t numMembers = 0;
-    uint32_t numAccounts = 0;
-
-    [[nodiscard]] bool isValid() const { return !guildName.empty(); }
-};
-
-/** Guild roster member entry */
-struct GuildRosterMember {
-    uint64_t guid = 0;
-    bool online = false;
-    std::string name;
-    uint32_t rankIndex = 0;
-    uint8_t level = 0;
-    uint8_t classId = 0;
-    uint8_t gender = 0;
-    uint32_t zoneId = 0;
-    float lastOnline = 0.0f;
-    std::string publicNote;
-    std::string officerNote;
-};
-
-/** Guild rank info */
-struct GuildRankInfo {
-    uint32_t rights = 0;
-    uint32_t goldLimit = 0;
-    // Per guild bank tab, for this rank. The roster has always carried both -
-    // they were read to stay aligned with the packet and then thrown away.
-    std::array<uint32_t, 6> bankTabRights{};
-    std::array<uint32_t, 6> bankTabSlotsPerDay{};
-};
-
-/** SMSG_GUILD_ROSTER data */
-struct GuildRosterData {
-    std::string motd;
-    std::string guildInfo;
-    std::vector<GuildRankInfo> ranks;
-    std::vector<GuildRosterMember> members;
-
-    [[nodiscard]] bool isEmpty() const { return members.empty(); }
-};
+// The guild's records are its domain's (guild/domain/records.hpp); these are
+// their protocol names.
+using GuildQueryResponseData = guild::Identity;
+using GuildInfoData = guild::Summary;
+using GuildRosterMember = guild::RosterMember;
+using GuildRankInfo = guild::Rank;
+using GuildRosterData = guild::Roster;
 
 /// The two facts that separate SMSG_GUILD_ROSTER's three shapes.
 ///

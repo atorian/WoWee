@@ -6,6 +6,7 @@
 #include "game/game_utils.hpp"
 #include "auth/crypto.hpp"
 #include "core/logger.hpp"
+#include "guild/domain/records.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cmath>

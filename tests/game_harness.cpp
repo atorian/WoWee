@@ -17,6 +17,8 @@
 #include "calendar/services/calendar_service.hpp"
 #include "game/group_gateway.hpp"
 #include "group/services/group_service.hpp"
+#include "game/guild_gateway.hpp"
+#include "guild/services/guild_service.hpp"
 
 #include <catch_amalgamated.hpp>  // test_support.hpp's REQUIRE
 #include "test_support.hpp"
@@ -119,6 +121,17 @@ void useEmptyExtensionsDir() {
     throw std::runtime_error("GameHarness: " + what);
 }
 
+/// Guild names for one test: the client keeps them in the user's own file,
+/// which a test must neither read nor write.
+class MemoryGuildNames final : public guild::IGuildNameStore {
+public:
+    std::unordered_map<uint32_t, std::string> load() const override { return names_; }
+    void save(const std::unordered_map<uint32_t, std::string>& names) override { names_ = names; }
+
+private:
+    std::unordered_map<uint32_t, std::string> names_;
+};
+
 } // namespace
 
 GameHarness::GameHarness() : GameHarness(scratchDir("wowee_harness_account_data")) {}
@@ -191,6 +204,11 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     group_ = std::make_unique<group::GroupService>(*groupGateway_, events_);
     services_.groupFeed = group_.get();
     services_.group = group_.get();
+    guildGateway_ = std::make_unique<game::GuildGateway>(*game_, *game_);
+    guildNames_ = std::make_unique<MemoryGuildNames>();
+    guild_ = std::make_unique<guild::GuildService>(*guildGateway_, *guildGateway_, *guildNames_, events_);
+    services_.guildFeed = guild_.get();
+    services_.guild = guild_.get();
     game::loadProtocolTables(*game_, *expansions_.getActive());
     game_->setAddonEventCallback([this](const std::string& name, const std::vector<std::string>& args) {
         addonEvents_.push_back({name, args});
@@ -208,6 +226,7 @@ battleground::IBattlegrounds& GameHarness::battlegrounds() { return *battlegroun
 lfg::ILfg& GameHarness::lfg() { return *lfg_; }
 calendar::ICalendar& GameHarness::calendar() { return *calendar_; }
 group::IGroup& GameHarness::group() { return *group_; }
+guild::IGuild& GameHarness::guild() { return *guild_; }
 
 FakeWorldConnection& GameHarness::server() {
     if (!connection_) fail("no connection yet: connect (or enterWorld) first");
@@ -307,7 +326,7 @@ std::vector<uint8_t> GameHarness::charEnumBody(const std::vector<PlayerSpec>& ch
         b.u32(0).u8(0);                // skin, face, hair style and colour; facial hair
         b.u8(p.level);
         b.u32(12 /* Elwynn */).u32(p.mapId).f32(p.x).f32(p.y).f32(p.z);
-        b.u32(0);                      // guild
+        b.u32(p.guildId);
         b.u32(0);                      // character flags
         b.u32(0).u8(0);                // customization flags, first login
         b.u32(0).u32(0).u32(0);        // pet: display, level, family

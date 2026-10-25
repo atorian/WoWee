@@ -1,4 +1,5 @@
 #include "lfg/services/lfg.hpp"
+#include "guild/services/guild.hpp"
 #include "addons/lua_engine.hpp"
 #include "ui/link_hit.hpp"
 #include "ui/text_markup.hpp"
@@ -2484,7 +2485,7 @@ int lua_Tooltip_SetUnit(lua_State* L) {
 
     if (isPlayer) {
         if (const uint32_t guildId = gh->getEntityGuildId(guid); guildId != 0) {
-            const std::string& guildName = gh->lookupGuildName(guildId);
+            const std::string& guildName = guildOf(L).lookupGuildName(guildId);
             if (!guildName.empty()) addLine("<" + guildName + ">", 0.25f, 1.0f, 0.25f);
         }
     } else if (entity) {

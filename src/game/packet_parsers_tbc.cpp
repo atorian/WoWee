@@ -1,6 +1,7 @@
 #include "game/packet_parsers.hpp"
 #include "game/spline_packet.hpp"
 #include "core/logger.hpp"
+#include "guild/domain/records.hpp"
 
 namespace wowee {
 namespace game {

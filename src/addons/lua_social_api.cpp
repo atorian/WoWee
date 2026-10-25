@@ -3,6 +3,7 @@
 #include <iterator>
 #include <vector>
 #include "group/services/group.hpp"
+#include "guild/services/guild.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "contacts/services/contacts.hpp"
 #include "who/domain/who_list.hpp"
@@ -91,8 +92,7 @@ static void collectKnownLanguages(uint8_t raceId, std::vector<LanguageEntry>& ou
 /// Whether the player's guild rank holds one right. Shared by the nine Can*
 /// queries, which differ only in which bit they ask about.
 static int luaGuildRight(lua_State* L, uint32_t bit) {
-    auto* gh = getGameHandler(L);
-    lua_pushboolean(L, (gh && (gh->getPlayerGuildRankRights() & bit)) ? 1 : 0);
+    lua_pushboolean(L, (guildOf(L).getPlayerGuildRankRights() & bit) ? 1 : 0);
     return 1;
 }
 
@@ -427,7 +427,7 @@ bool& guildSortReverse(lua_State* L) { return interfaceState(L).guild.sortRevers
 std::vector<const game::GuildRosterMember*> guildRosterView(lua_State* L, game::GameHandler* gh) {
     std::vector<const game::GuildRosterMember*> view;
     if (!gh) return view;
-    const auto& roster = gh->getGuildRoster();
+    const auto& roster = guildOf(L).getGuildRoster();
     view.reserve(roster.members.size());
     for (const auto& m : roster.members) {
         if (!guildShowOffline(L) && !m.online) continue;
@@ -502,6 +502,11 @@ group::IGroup& groupOf(lua_State* L) {
     return group::orNoGroup(services ? services->group : nullptr);
 }
 
+guild::IGuild& guildOf(lua_State* L) {
+    auto* services = getLuaServices(L);
+    return guild::orNoGuild(services ? services->guild : nullptr);
+}
+
 arena::IArenaTeams* arenaTeamsOf(lua_State* L) {
     auto* services = getLuaServices(L);
     return services ? services->arenaTeams : nullptr;
@@ -517,24 +522,23 @@ uint32_t arenaTeamIdAtIndex(lua_State* L, int index) {
 
 // IsInGuild() → boolean
 static int lua_IsInGuild(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->isInGuild());
+    lua_pushboolean(L, guildOf(L).isInGuild());
     return 1;
 }
 
 // GetGuildInfo("player") → guildName, guildRankName, guildRankIndex
 static int lua_GetGuildInfoFunc(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (!gh || !gh->isInGuild()) { return luaReturnNil(L); }
-    lua_pushstring(L, gh->getGuildName().c_str());
+    if (!guildOf(L).isInGuild()) { return luaReturnNil(L); }
+    lua_pushstring(L, guildOf(L).getGuildName().c_str());
     // Get rank name for the player
-    const auto& roster = gh->getGuildRoster();
+    const auto& roster = guildOf(L).getGuildRoster();
     std::string rankName;
     uint32_t rankIndex = 0;
     for (const auto& m : roster.members) {
         if (m.guid == gh->getPlayerGuid()) {
             rankIndex = m.rankIndex;
-            const auto& rankNames = gh->getGuildRankNames();
+            const auto& rankNames = guildOf(L).getGuildRankNames();
             if (rankIndex < rankNames.size()) rankName = rankNames[rankIndex];
             break;
         }
@@ -555,7 +559,7 @@ static int lua_GetNumGuildMembers(lua_State* L) {
     // what the "N of M online" line means.
     const auto view = guildRosterView(L, gh);
     int online = 0;
-    for (const auto& m : gh->getGuildRoster().members)
+    for (const auto& m : guildOf(L).getGuildRoster().members)
         if (m.online) online++;
     lua_pushnumber(L, view.size());
     lua_pushnumber(L, online);
@@ -572,7 +576,7 @@ static int lua_GetGuildRosterInfo(lua_State* L) {
     const auto& m = *view[static_cast<size_t>(index) - 1];
 
     lua_pushstring(L, m.name.c_str());                      // 1: name
-    const auto& rankNames = gh->getGuildRankNames();
+    const auto& rankNames = guildOf(L).getGuildRankNames();
     lua_pushstring(L, m.rankIndex < rankNames.size()
         ? rankNames[m.rankIndex].c_str() : "");              // 2: rank name
     lua_pushnumber(L, m.rankIndex);                          // 3: rankIndex
@@ -614,7 +618,7 @@ static int lua_GetGuildRosterInfo(lua_State* L) {
 static int lua_GetGuildRosterMOTD(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { lua_pushstring(L, ""); return 1; }
-    lua_pushstring(L, gh->getGuildRoster().motd.c_str());
+    lua_pushstring(L, guildOf(L).getGuildRoster().motd.c_str());
     return 1;
 }
 
@@ -738,7 +742,7 @@ static int lua_GetAutoCompleteResults(lua_State* L) {
     };
 
     for (const auto& mbr : groupOf(L).getPartyData().members) note(mbr.name, kInGroup, mbr.isOnline != 0);
-    for (const auto& mbr : gh->getGuildRoster().members) note(mbr.name, kInGuild, mbr.online);
+    for (const auto& mbr : guildOf(L).getGuildRoster().members) note(mbr.name, kInGuild, mbr.online);
     for (const auto& c : contactRows(L)) {
         if (c.isFriend()) note(c.name, kFriend, c.isOnline());
     }
@@ -817,11 +821,11 @@ static int lua_DeclineGroup(lua_State* L) {
     return 0;
 }
 static int lua_AcceptGuild(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->acceptGuildInvite();
+    guildOf(L).acceptGuildInvite();
     return 0;
 }
 static int lua_DeclineGuild(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->declineGuildInvite();
+    guildOf(L).declineGuildInvite();
     return 0;
 }
 static int lua_AcceptResurrect(lua_State* L) {
@@ -1174,11 +1178,11 @@ static int lua_GetNumGuildEvents(lua_State* L) {
     // ask again every time the tab is drawn - and the next character's guild,
     // which is another guild with another log, is still asked.
     bool& asked = interfaceState(L).guild.eventLogRequested;
-    if (gh && !asked && gh->getGuildEventLog().empty() && gh->isInGuild()) {
+    if (gh && !asked && guildOf(L).getGuildEventLog().empty() && guildOf(L).isInGuild()) {
         asked = true;
-        gh->requestGuildEventLog();
+        guildOf(L).requestGuildEventLog();
     }
-    lua_pushnumber(L, gh ? static_cast<double>(gh->getGuildEventLog().size()) : 0.0);
+    lua_pushnumber(L, static_cast<double>(guildOf(L).getGuildEventLog().size()));
     return 1;
 }
 
@@ -1186,7 +1190,7 @@ static int lua_GetGuildEventInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int index = static_cast<int>(luaL_checknumber(L, 1));
     if (!gh) return luaReturnNil(L);
-    const auto& log = gh->getGuildEventLog();
+    const auto& log = guildOf(L).getGuildEventLog();
     if (index < 1 || index > static_cast<int>(log.size())) return luaReturnNil(L);
     const auto& e = log[static_cast<size_t>(index - 1)];
 
@@ -1519,13 +1523,12 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"GetGuildInfoText", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return luaReturnNil(L);
-            lua_pushstring(L, gh->getGuildRoster().guildInfo.c_str());
+            lua_pushstring(L, guildOf(L).getGuildRoster().guildInfo.c_str());
             return 1;
         }},
                 {"SetGuildInfoText", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
             const char* text = luaL_optstring(L, 1, "");
-            if (gh && text) gh->setGuildInfoText(text);
+            if (text) guildOf(L).setGuildInfoText(text);
             return 0;
         }},
                 // Whether the roster lists members who are offline. A display
@@ -1623,8 +1626,8 @@ void registerSocialLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int tab = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh || tab < 1 || tab > 6) return luaReturnNil(L);
-            const auto& roster = gh->getGuildRoster();
-            const int sel = gh->getSelectedGuildRank();
+            const auto& roster = guildOf(L).getGuildRoster();
+            const int sel = guildOf(L).getSelectedGuildRank();
             if (sel < 1 || sel > static_cast<int>(roster.ranks.size())) return luaReturnNil(L);
             const auto& rank = roster.ranks[static_cast<size_t>(sel) - 1];
             const uint32_t flags = rank.bankTabRights[static_cast<size_t>(tab) - 1];
@@ -1639,8 +1642,8 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"GetGuildBankWithdrawLimit",  [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushnumber(L, 0); return 1; }
-            const auto& roster = gh->getGuildRoster();
-            const int sel = gh->getSelectedGuildRank();
+            const auto& roster = guildOf(L).getGuildRoster();
+            const int sel = guildOf(L).getSelectedGuildRank();
             if (sel < 1 || sel > static_cast<int>(roster.ranks.size())) { lua_pushnumber(L, 0); return 1; }
             lua_pushnumber(L, roster.ranks[static_cast<size_t>(sel) - 1].goldLimit);
             return 1;
@@ -1655,7 +1658,7 @@ void registerSocialLuaAPI(lua_State* L) {
             const bool on  = lua_toboolean(L, 3) != 0;
             if (!gh || tab < 1 || tab > 6 || perm < 1 || perm > 3) return 0;
             const uint32_t bit = 1u << (perm - 1);
-            auto& p = gh->pendingGuildRankRef();
+            auto& p = guildOf(L).pendingGuildRankRef();
             if (on) p.tabRights[static_cast<size_t>(tab) - 1] |= bit;
             else    p.tabRights[static_cast<size_t>(tab) - 1] &= ~bit;
             return 0;
@@ -1665,12 +1668,11 @@ void registerSocialLuaAPI(lua_State* L) {
             const int tab = static_cast<int>(luaL_optnumber(L, 1, 0));
             const auto n  = static_cast<uint32_t>(luaL_optnumber(L, 2, 0));
             if (!gh || tab < 1 || tab > 6) return 0;
-            gh->pendingGuildRankRef().tabSlots[static_cast<size_t>(tab) - 1] = n;
+            guildOf(L).pendingGuildRankRef().tabSlots[static_cast<size_t>(tab) - 1] = n;
             return 0;
         }},
                 {"SetGuildBankWithdrawLimit", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (gh) gh->pendingGuildRankRef().goldLimit =
+            guildOf(L).pendingGuildRankRef().goldLimit =
                 static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
             return 0;
         }},
@@ -1888,12 +1890,12 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"GuildControlGetNumRanks", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return luaReturnZero(L);
-            const auto& ranks = gh->getGuildRoster().ranks;
+            const auto& ranks = guildOf(L).getGuildRoster().ranks;
             if (!ranks.empty()) {
                 lua_pushnumber(L, static_cast<double>(ranks.size()));
                 return 1;
             }
-            const auto& names = gh->getGuildRankNames();
+            const auto& names = guildOf(L).getGuildRankNames();
             size_t named = 0;
             for (size_t i = 0; i < names.size(); ++i)
                 if (!names[i].empty()) named = i + 1;
@@ -1904,7 +1906,7 @@ void registerSocialLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int idx = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh || idx < 1) return luaReturnNil(L);
-            const auto& ranks = gh->getGuildRankNames();
+            const auto& ranks = guildOf(L).getGuildRankNames();
             if (idx > static_cast<int>(ranks.size())) return luaReturnNil(L);
             lua_pushstring(L, ranks[static_cast<size_t>(idx) - 1].c_str());
             return 1;
@@ -1914,9 +1916,8 @@ void registerSocialLuaAPI(lua_State* L) {
                 // takes no argument, so this is the only thing that says which
                 // rank it is being asked about.
                 {"GuildControlSetRank", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
             const int idx = static_cast<int>(luaL_optnumber(L, 1, 0));
-            if (gh && idx >= 1) gh->setSelectedGuildRank(idx);
+            if (idx >= 1) guildOf(L).setSelectedGuildRank(idx);
             return 0;
         }},
                 // GuildControlGetRankFlags() → one boolean per permission
@@ -1932,8 +1933,8 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"GuildControlGetRankFlags", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
-            const auto& roster = gh->getGuildRoster();
-            const int sel = gh->getSelectedGuildRank();
+            const auto& roster = guildOf(L).getGuildRoster();
+            const int sel = guildOf(L).getSelectedGuildRank();
             if (sel < 1 || sel > static_cast<int>(roster.ranks.size())) return 0;
             const uint32_t rights = roster.ranks[static_cast<size_t>(sel) - 1].rights;
             for (uint32_t bit : kGuildRankFlagBits) lua_pushboolean(L, (rights & bit) ? 1 : 0);
@@ -1949,18 +1950,16 @@ void registerSocialLuaAPI(lua_State* L) {
                 // CONFIRM_GUILD_DISBAND's accept. The verb has existed the
                 // whole time; nothing named it.
                 {"GuildDisband", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->disbandGuild();
+            guildOf(L).disbandGuild();
             return 0;
         }},
                 {"GuildControlAddRank", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
             const char* name = luaL_optstring(L, 1, "");
-            if (gh && name && *name) gh->addGuildRank(name);
+            if (name && *name) guildOf(L).addGuildRank(name);
             return 0;
         }},
                 {"GuildControlDelRank", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (gh) gh->delGuildRank();
+            guildOf(L).delGuildRank();
             return 0;
         }},
                 // GuildControlSetRankFlag(checkboxIndex, checked) - stage one
@@ -1981,7 +1980,7 @@ void registerSocialLuaAPI(lua_State* L) {
             // nothing on the way in and revoke nothing on the way out, so the
             // early return keeps that accident from ever being silent.
             if (bit == 0) return 0;
-            auto& p = gh->pendingGuildRankRef();
+            auto& p = guildOf(L).pendingGuildRankRef();
             if (on) p.rights |= bit; else p.rights &= ~bit;
             return 0;
         }},
@@ -1993,9 +1992,8 @@ void registerSocialLuaAPI(lua_State* L) {
                 // seeded from the rank as it stands when the panel selects it,
                 // and only what the panel edits moves.
                 {"GuildControlSaveRank", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
             const char* name = luaL_optstring(L, 1, "");
-            if (gh && name && *name) gh->saveGuildRank(name);
+            if (name && *name) guildOf(L).saveGuildRank(name);
             return 0;
         }},
                 // JoinPermanentChannel(name, password, frameId, permanent)
@@ -2244,8 +2242,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"GetGuildInfo",            lua_GetGuildInfoFunc},
                 {"GetNumGuildMembers",      lua_GetNumGuildMembers},
                 {"GuildRoster", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (gh) gh->requestGuildRoster();
+            guildOf(L).requestGuildRoster();
             return 0;
         }},
                 // SortGuildRoster(field) - one of name, zone, level, class,
@@ -2319,13 +2316,13 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"GuildRosterSetPublicNote", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const std::string name = guildRosterNameAt(L, gh,static_cast<int>(luaL_optnumber(L, 1, 0)));
-            if (!name.empty()) gh->setGuildPublicNote(name, luaL_optstring(L, 2, ""));
+            if (!name.empty()) guildOf(L).setGuildPublicNote(name, luaL_optstring(L, 2, ""));
             return 0;
         }},
                 {"GuildRosterSetOfficerNote", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const std::string name = guildRosterNameAt(L, gh,static_cast<int>(luaL_optnumber(L, 1, 0)));
-            if (!name.empty()) gh->setGuildOfficerNote(name, luaL_optstring(L, 2, ""));
+            if (!name.empty()) guildOf(L).setGuildOfficerNote(name, luaL_optstring(L, 2, ""));
             return 0;
         }},
                 {"GetGuildRosterMOTD",      lua_GetGuildRosterMOTD},
@@ -2356,33 +2353,27 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"GetNumIgnores",           lua_GetNumIgnores},
                 {"GetIgnoreName",           lua_GetIgnoreName},
                 {"GuildInvite", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (gh) gh->inviteToGuild(luaL_checkstring(L, 1));
+            guildOf(L).inviteToGuild(luaL_checkstring(L, 1));
             return 0;
         }},
                 {"GuildUninvite", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (gh) gh->kickGuildMember(luaL_checkstring(L, 1));
+            guildOf(L).kickGuildMember(luaL_checkstring(L, 1));
             return 0;
         }},
                 {"GuildPromote", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (gh) gh->promoteGuildMember(luaL_checkstring(L, 1));
+            guildOf(L).promoteGuildMember(luaL_checkstring(L, 1));
             return 0;
         }},
                 {"GuildDemote", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (gh) gh->demoteGuildMember(luaL_checkstring(L, 1));
+            guildOf(L).demoteGuildMember(luaL_checkstring(L, 1));
             return 0;
         }},
                 {"GuildLeave", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (gh) gh->leaveGuild();
+            guildOf(L).leaveGuild();
             return 0;
         }},
                 {"GuildSetPublicNote", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (gh) gh->setGuildPublicNote(luaL_checkstring(L, 1), luaL_checkstring(L, 2));
+            guildOf(L).setGuildPublicNote(luaL_checkstring(L, 1), luaL_checkstring(L, 2));
             return 0;
         }},
                 // DoEmote(token) - every emote FrameXML offers, and there
@@ -2653,9 +2644,8 @@ void registerSocialLuaAPI(lua_State* L) {
                 // right, which is where that decision belongs while nothing
                 // here reads rank rights.
                 {"GuildSetMOTD", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
             const char* motd = luaL_optstring(L, 1, "");
-            if (gh && motd) gh->setGuildMotd(motd);
+            if (motd) guildOf(L).setGuildMotd(motd);
             return 0;
         }},
                 {"SendSystemMessage",   lua_SendSystemMessage},
@@ -3060,7 +3050,7 @@ void registerSocialLuaAPI(lua_State* L) {
             const char* name = luaL_optstring(L, 1, "");
             if (!gh || !name || !*name) { lua_pushboolean(L, 0); return 1; }
             bool found = false;
-            for (const auto& m : gh->getGuildRoster().members) {
+            for (const auto& m : guildOf(L).getGuildRoster().members) {
                 if (m.name == name) { found = true; break; }
             }
             lua_pushboolean(L, found);
@@ -3422,13 +3412,12 @@ void registerSocialLuaAPI(lua_State* L) {
             return 2;
         }},
                 {"GuildInfo", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->requestGuildInfo();
+            guildOf(L).requestGuildInfo();
             return 0;
         }},
                 {"GuildSetLeader", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
             const char* name = luaL_optstring(L, 1, "");
-            if (gh && name && *name) gh->setGuildLeader(name);
+            if (name && *name) guildOf(L).setGuildLeader(name);
             return 0;
         }},
                 // Not logging, and there is nothing to turn on - false is the

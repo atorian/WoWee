@@ -48,7 +48,8 @@ namespace wowee::battleground { class IBattlegrounds; class BattlegroundService;
 namespace wowee::lfg { class ILfg; class LfgService; }
 namespace wowee::calendar { class ICalendar; class CalendarService; }
 namespace wowee::group { class IGroup; class GroupService; }
-namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; }
+namespace wowee::guild { class IGuild; class GuildService; class IGuildNameStore; }
+namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; }
 
 namespace wowee::test {
 
@@ -116,6 +117,7 @@ struct PlayerSpec {
     uint8_t level = 10;
     uint32_t mapId = 0;  // Eastern Kingdoms
     float x = -8949.95f, y = -132.49f, z = 83.53f;  // Northshire, server coordinates
+    uint32_t guildId = 0;  // none
 };
 
 class GameHarness {
@@ -151,6 +153,9 @@ public:
     calendar::ICalendar& calendar();
     /// The group, wired as the client wires it.
     group::IGroup& group();
+    /// The guild, wired as the client wires it, with its names kept in
+    /// memory rather than in the user's file.
+    guild::IGuild& guild();
     core::CVarStore& cvars() { return cvars_; }
 
     /// The server's side of the connection: the one the game made last. Valid
@@ -266,6 +271,9 @@ private:
     std::unique_ptr<calendar::CalendarService> calendar_;
     std::unique_ptr<game::GroupGateway> groupGateway_;
     std::unique_ptr<group::GroupService> group_;
+    std::unique_ptr<game::GuildGateway> guildGateway_;
+    std::unique_ptr<guild::IGuildNameStore> guildNames_;
+    std::unique_ptr<guild::GuildService> guild_;
     std::unique_ptr<game::GameHandler> game_;
     FakeWorldConnection* connection_ = nullptr;  // owned by the game once made
     bool pingsAnswered_ = true;

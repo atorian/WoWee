@@ -19,9 +19,6 @@ namespace wowee::game {
 class Entity;
 class EntityManager;
 enum class WorldState;
-struct GuildRosterData;
-struct GuildInfoData;
-struct GuildQueryResponseData;
 struct CreatureQueryResponseData;
 struct GameObjectQueryResponseData;
 
@@ -78,19 +75,6 @@ public:
     [[nodiscard]] virtual const std::unordered_map<uint64_t, std::string>& getPlayerNameCache() const = 0;
     [[nodiscard]] virtual const std::unordered_map<uint32_t, CreatureQueryResponseData>& getCreatureInfoCache() const = 0;
     [[nodiscard]] virtual const GameObjectQueryResponseData* getCachedGameObjectInfo(uint32_t entry) const = 0;
-};
-
-// ---------------------------------------------------------------------------
-// ISocialState - friends, ignore list, contacts, guild info
-// ---------------------------------------------------------------------------
-class ISocialState {
-public:
-    virtual ~ISocialState() = default;
-
-    [[nodiscard]] virtual bool isInGuild() const = 0;
-    [[nodiscard]] virtual const std::string& getGuildName() const = 0;
-    [[nodiscard]] virtual const GuildRosterData& getGuildRoster() const = 0;
-    [[nodiscard]] virtual bool hasGuildRoster() const = 0;
 };
 
 } // namespace wowee::game

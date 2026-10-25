@@ -1,4 +1,5 @@
 #include "group/services/group.hpp"
+#include "guild/services/guild.hpp"
 #include "contacts/services/contacts.hpp"
 #include "duel/services/duels.hpp"
 #include "battleground/services/battlegrounds.hpp"
@@ -1450,7 +1451,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                 addons::storedCVarValue("unitNamePlayerGuild", "1") != "0"
                     ? gameHandler.getEntityGuildId(guid) : 0;
             if (guildId != 0) {
-                const std::string& gn = gameHandler.lookupGuildName(guildId);
+                const std::string& gn = guild::orNoGuild(services_.guild).lookupGuildName(guildId);
                 if (!gn.empty()) subLabel = "<" + gn + ">";
             }
         } else {
