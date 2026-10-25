@@ -22,6 +22,7 @@ namespace guild { class IGuildServerFeed; class IGuild; }
 namespace auction { class IAuctionHouseFeed; }
 namespace mail { class IMailboxFeed; class IMailbox; }
 namespace guild_bank { class IGuildBankFeed; class IGuildBank; }
+namespace trade { class ITradeFeed; class ITrade; }
 namespace network { class WorldConnection; }
 
 namespace game {
@@ -96,6 +97,10 @@ struct GameServices {
     /// used banker opens.
     guild_bank::IGuildBankFeed* guildBankFeed = nullptr;
     guild_bank::IGuildBank* guildBank = nullptr;
+    /// Where the trade status packets go, and the trade for who the player
+    /// is dealing with.
+    trade::ITradeFeed* tradeFeed = nullptr;
+    trade::ITrade* trade = nullptr;
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };

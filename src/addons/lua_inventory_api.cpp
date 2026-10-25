@@ -1,6 +1,7 @@
 // lua_inventory_api.cpp - Items, containers, merchant, loot, equipment, trading, auction, and mail Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include "group/services/group.hpp"
+#include "trade/services/trade.hpp"
 #include "guild_bank/domain/records.hpp"
 #include "guild_bank/services/guild_bank.hpp"
 #include "mail/domain/records.hpp"
@@ -39,13 +40,13 @@ namespace wowee::addons {
 /// coming, or that none was going.
 static int lua_GetPlayerTradeMoney(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushnumber(L, gh ? static_cast<double>(gh->getMyTradeGold()) : 0.0);
+    lua_pushnumber(L, gh ? static_cast<double>(tradeOf(L).getMyTradeGold()) : 0.0);
     return 1;
 }
 
 static int lua_GetTargetTradeMoney(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushnumber(L, gh ? static_cast<double>(gh->getPeerTradeGold()) : 0.0);
+    lua_pushnumber(L, gh ? static_cast<double>(tradeOf(L).getPeerTradeGold()) : 0.0);
     return 1;
 }
 
@@ -745,7 +746,7 @@ static int lua_AddTradeMoney(lua_State* L) {
     auto* gh = getGameHandler(L);
     const uint64_t held = cursorMoney(L);
     if (!gh || held == 0) return 0;
-    gh->setTradeGold(gh->getMyTradeGold() + held);
+    tradeOf(L).setTradeGold(tradeOf(L).getMyTradeGold() + held);
     setCursorMoney(L, 0);
     return 0;
 }
@@ -756,11 +757,11 @@ static int lua_AddTradeMoney(lua_State* L) {
 static int lua_PickupTradeMoney(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) return 0;
-    const uint64_t offered = gh->getMyTradeGold();
+    const uint64_t offered = tradeOf(L).getMyTradeGold();
     if (offered == 0) return 0;
     uint64_t take = static_cast<uint64_t>(luaL_optnumber(L, 1, 0));
     if (take == 0 || take > offered) take = offered;
-    gh->setTradeGold(offered - take);
+    tradeOf(L).setTradeGold(offered - take);
     setCursorMoney(L, take);
     return 0;
 }
@@ -3860,12 +3861,12 @@ void registerInventoryLuaAPI(lua_State* L) {
         }},
                 {"AcceptTrade", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) gh->acceptTrade();
+            if (gh) tradeOf(L).acceptTrade();
             return 0;
         }},
                 {"CancelTrade", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh && gh->isTradeOpen()) gh->cancelTrade();
+            if (gh && tradeOf(L).isTradeOpen()) tradeOf(L).cancelTrade();
             return 0;
         }},
                 {"InitiateTrade", [](lua_State* L) -> int {
@@ -3873,7 +3874,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             const char* uid = luaL_checkstring(L, 1);
             if (gh) {
                 uint64_t guid = resolveUnitGuid(gh, std::string(uid));
-                if (guid != 0) gh->initiateTrade(guid);
+                if (guid != 0) tradeOf(L).initiateTrade(guid);
             }
             return 0;
         }},

@@ -787,6 +787,7 @@ set(WOWEE_SOURCES
     src/game/auction_gateway.cpp
     src/game/mail_gateway.cpp
     src/game/guild_bank_gateway.cpp
+    src/game/trade_gateway.cpp
     src/game/account_data.cpp
     src/game/account_data_handler.cpp
     src/game/action_bar_handler.cpp
@@ -1917,6 +1918,14 @@ set(WOWEE_GUILD_BANK_SOURCES
 )
 add_library(wowee_guild_bank STATIC ${WOWEE_GUILD_BANK_SOURCES})
 target_link_libraries(wowee_guild_bank PUBLIC wowee_base)
+# wowee_trade: a trade with another player - who, how far it has got, what
+# each side has put down and which side has accepted.
+set(WOWEE_TRADE_SOURCES
+    src/trade/domain/trade.cpp
+    src/trade/services/trade_service.cpp
+)
+add_library(wowee_trade STATIC ${WOWEE_TRADE_SOURCES})
+target_link_libraries(wowee_trade PUBLIC wowee_base)
 
 add_library(wowee_pipeline STATIC ${WOWEE_PIPELINE_SOURCES})
 target_link_libraries(wowee_pipeline PUBLIC wowee_base)
@@ -1977,7 +1986,7 @@ target_precompile_headers(wowee_net PRIVATE
 )
 
 add_library(wowee_game STATIC ${WOWEE_GAME_SOURCES})
-target_link_libraries(wowee_game PUBLIC wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_group wowee_guild wowee_auction wowee_mail wowee_guild_bank wowee_net wowee_protocol wowee_pipeline wowee_base)
+target_link_libraries(wowee_game PUBLIC wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_group wowee_guild wowee_auction wowee_mail wowee_guild_bank wowee_trade wowee_net wowee_protocol wowee_pipeline wowee_base)
 target_precompile_headers(wowee_game PRIVATE
     ${WOWEE_PCH_STD}
     <glm/glm.hpp>
@@ -1992,7 +2001,7 @@ if(HAVE_UNICORN)
 endif()
 
 if(ANDROID)
-    set_target_properties(wowee_base wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_group wowee_guild wowee_auction wowee_mail wowee_guild_bank wowee_pipeline wowee_collision wowee_render wowee_protocol
+    set_target_properties(wowee_base wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_group wowee_guild wowee_auction wowee_mail wowee_guild_bank wowee_trade wowee_pipeline wowee_collision wowee_render wowee_protocol
                           wowee_net wowee_game PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
@@ -2130,7 +2139,7 @@ function(wowee_apply_client_flags target)
     endif()
 endfunction()
 
-foreach(_client_target wowee wowee_client_objects wowee_base wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_group wowee_guild wowee_auction wowee_mail wowee_guild_bank wowee_pipeline wowee_collision wowee_render wowee_protocol wowee_net wowee_game)
+foreach(_client_target wowee wowee_client_objects wowee_base wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_group wowee_guild wowee_auction wowee_mail wowee_guild_bank wowee_trade wowee_pipeline wowee_collision wowee_render wowee_protocol wowee_net wowee_game)
     wowee_apply_client_flags(${_client_target})
 endforeach()
 if(WOWEE_ENABLE_ASAN)

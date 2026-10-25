@@ -9,6 +9,7 @@
 #include "group/services/group.hpp"
 #include "guild/services/guild.hpp"
 #include "auction/services/auction_house.hpp"
+#include "trade/services/trade.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "contacts/services/contacts.hpp"
 #include "who/domain/who_list.hpp"
@@ -525,6 +526,11 @@ mail::IMailbox& mailOf(lua_State* L) {
 guild_bank::IGuildBank& guildBankOf(lua_State* L) {
     auto* services = getLuaServices(L);
     return guild_bank::orNoGuildBank(services ? services->guildBank : nullptr);
+}
+
+trade::ITrade& tradeOf(lua_State* L) {
+    auto* services = getLuaServices(L);
+    return trade::orNoTrade(services ? services->trade : nullptr);
 }
 
 arena::IArenaTeams* arenaTeamsOf(lua_State* L) {

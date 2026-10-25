@@ -23,6 +23,7 @@ namespace core { class EventBus; class CVarStore; }
 namespace auction { class IAuctionHouseFeed; enum class AuctionList; }
 namespace mail { class IMailboxFeed; }
 namespace guild_bank { class IGuildBankFeed; class IGuildBank; }
+namespace trade { class ITradeFeed; }
 namespace pipeline { class AssetManager; }
 namespace game {
 
@@ -170,6 +171,8 @@ public:
     /// The vault as it stands, which a slots-only list is read over; null as
     /// above.
     [[nodiscard]] virtual const guild_bank::IGuildBank* guildBank() const = 0;
+    /// Where the trade status packets go; null as above.
+    [[nodiscard]] virtual trade::ITradeFeed* tradeFeed() = 0;
 };
 
 class InventoryHandler {
@@ -383,30 +386,6 @@ public:
     const std::string& getItemText() const { return itemText_; }
     void closeItemText();
     void queryItemText(uint64_t itemGuid);
-
-    // ---- Trade (types in handler_types.hpp) ----
-    using TradeStatus = game::TradeStatus;
-    using TradeSlot = game::TradeSlot;
-    static constexpr int TRADE_SLOT_COUNT     = kTradeSlotCount;
-    static constexpr int TRADE_SLOT_NONTRADED = kTradeSlotNonTraded;
-
-    TradeStatus getTradeStatus() const { return tradeStatus_; }
-    bool hasPendingTradeRequest() const { return tradeStatus_ == TradeStatus::PendingIncoming; }
-    bool isTradeOpen() const { return tradeStatus_ == TradeStatus::Open || tradeStatus_ == TradeStatus::Accepted; }
-    const std::string& getTradePeerName() const { return tradePeerName_; }
-    uint64_t getTradePeerGuid() const { return tradePeerGuid_; }
-    const std::array<TradeSlot, TRADE_SLOT_COUNT>& getMyTradeSlots() const { return myTradeSlots_; }
-    const std::array<TradeSlot, TRADE_SLOT_COUNT>& getPeerTradeSlots() const { return peerTradeSlots_; }
-    uint64_t getMyTradeGold() const { return myTradeGold_; }
-    uint64_t getPeerTradeGold() const { return peerTradeGold_; }
-    void acceptTradeRequest();
-    void declineTradeRequest();
-    void acceptTrade();
-    void unacceptTrade();
-    void cancelTrade();
-    void setTradeItem(uint8_t tradeSlot, uint8_t srcBag, uint8_t srcSlot);
-    void clearTradeItem(uint8_t tradeSlot);
-    void setTradeGold(uint64_t amount);
 
     // ---- Loot ----
     void lootTarget(uint64_t targetGuid);
@@ -675,10 +654,8 @@ public:
     void trainSpell(uint32_t spellId);
     void closeTrainer();
     const std::vector<TrainerTab>& getTrainerTabs() const { return trainerTabs_; }
-    void resetTradeState();
 
     // ---- Methods moved from GameHandler ----
-    void initiateTrade(uint64_t targetGuid);
     uint32_t getTempEnchantRemainingMs(uint32_t slot) const;
     void addMoneyCopper(uint32_t amount);
 
@@ -727,8 +704,6 @@ private:
     void handleListInventory(network::Packet& packet);
     void handleTrainerList(network::Packet& packet);
     void handleItemTextQueryResponse(network::Packet& packet);
-    void handleTradeStatus(network::Packet& packet);
-    void handleTradeStatusExtended(network::Packet& packet);
     void handleLootRoll(network::Packet& packet);
     void handleLootRollWon(network::Packet& packet);
 
@@ -789,9 +764,9 @@ private:
     /// The client's data, for the repair cost tables. Null in a test that
     /// has none, which leaves repairs unestimated.
     pipeline::AssetManager* const assets_;
-    /// The auction house's, the mailbox's and the vault's chat lines and panel
-    /// events, and the late names a letter waits on, for as long as this
-    /// handler lives.
+    /// The auction house's, the mailbox's, the vault's and the trade's chat
+    /// lines and panel events, and the late names a letter waits on, for as
+    /// long as this handler lives.
     std::vector<core::EventBus::Subscription> subscriptions_;
 
     /// Everything the character holds, as the realm has described it. Its own
@@ -906,23 +881,6 @@ private:
     // ---- Item text state ----
     bool        itemTextOpen_   = false;
     std::string itemText_;
-
-    // ---- Trade state ----
-    TradeStatus tradeStatus_  = TradeStatus::None;
-    /// Which side has pressed accept, kept apart because TRADE_ACCEPT_UPDATE
-    /// carries both and tradeStatus_ can only say one thing at a time. Ours is
-    /// set when the accept goes out - the server echoes an acceptance to the
-    /// other player, not back to the one who made it, so there is nothing else
-    /// to learn it from.
-    bool tradeSelfAccepted_ = false;
-    bool tradePartnerAccepted_ = false;
-    void fireTradeAcceptUpdate();
-    uint64_t    tradePeerGuid_= 0;
-    std::string tradePeerName_;
-    std::array<TradeSlot, TRADE_SLOT_COUNT> myTradeSlots_{};
-    std::array<TradeSlot, TRADE_SLOT_COUNT> peerTradeSlots_{};
-    uint64_t myTradeGold_   = 0;
-    uint64_t peerTradeGold_ = 0;
 
     // ---- Loot state ----
     bool lootWindowOpen_ = false;

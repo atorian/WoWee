@@ -644,6 +644,7 @@ public:
     auction::IAuctionHouseFeed* auctionFeed() override;
     mail::IMailboxFeed* mailFeed() override;
     guild_bank::IGuildBankFeed* guildBankFeed() override;
+    trade::ITradeFeed* tradeFeed() override;
     const guild_bank::IGuildBank* guildBank() const override;
 
     // Money (copper)
@@ -891,8 +892,7 @@ public:
     /// Hold a raid lockout past its reset, or let it go. Raid binds only.
     void setSavedInstanceExtend(uint32_t mapId, uint32_t difficulty, bool extend);
 
-    // Combat and Trade
-    void initiateTrade(uint64_t targetGuid);
+    // Combat
     void reportPlayer(uint64_t targetGuid, const std::string& reason);
     void stopCasting();
     void resetCastState();       // force-clear all cast/craft/queue state without sending packets
@@ -1619,33 +1619,6 @@ public:
     float getSummonTimeoutSec() const { return socialHandler_->summonTimeoutSec(); }
     void acceptSummon();
     void declineSummon();
-
-    // ---- Trade (InventoryHandler's; types in handler_types.hpp) ----
-    using TradeStatus = game::TradeStatus;
-    using TradeSlot = game::TradeSlot;
-    static constexpr int TRADE_SLOT_COUNT     = kTradeSlotCount;
-    static constexpr int TRADE_SLOT_NONTRADED = kTradeSlotNonTraded;
-
-    TradeStatus getTradeStatus() const;
-    bool hasPendingTradeRequest() const;
-    bool isTradeOpen() const;
-    const std::string& getTradePeerName() const;
-
-    // My trade slots (what I'm offering)
-    const std::array<TradeSlot, TRADE_SLOT_COUNT>& getMyTradeSlots() const;
-    const std::array<TradeSlot, TRADE_SLOT_COUNT>& getPeerTradeSlots() const;
-    uint64_t getMyTradeGold() const;
-    uint64_t getPeerTradeGold() const;
-
-    void acceptTradeRequest();   // respond to incoming SMSG_TRADE_STATUS(1) with CMSG_BEGIN_TRADE
-    /// Take back an acceptance, leaving the trade open.
-    void unacceptTrade();
-    void declineTradeRequest();  // respond with CMSG_CANCEL_TRADE
-    void acceptTrade();          // lock in offer: CMSG_ACCEPT_TRADE
-    void cancelTrade();          // CMSG_CANCEL_TRADE
-    void setTradeItem(uint8_t tradeSlot, uint8_t bag, uint8_t bagSlot);
-    void clearTradeItem(uint8_t tradeSlot);
-    void setTradeGold(uint64_t copper);
 
     // Instance lockouts (aliased from handler_types.hpp)
     using InstanceLockout = game::InstanceLockout;
@@ -3262,7 +3235,6 @@ private:
     void checkAreaTriggers();
 
     // ---- Instance lockout handler ----
-    void resetTradeState();
 
     /**
      * Send CMSG_AUTH_SESSION to server

@@ -1,4 +1,5 @@
 #include "group/services/group.hpp"
+#include "trade/services/trade.hpp"
 #include "guild/services/guild.hpp"
 #include "contacts/services/contacts.hpp"
 #include "duel/services/duels.hpp"
@@ -1653,7 +1654,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                     if (ImGui::MenuItem("Invite to Group"))
                         group::orNoGroup(services_.group).inviteToGroup(ctxName);
                     if (ImGui::MenuItem("Trade"))
-                        gameHandler.initiateTrade(nameplateCtxGuid_);
+                        trade::orNoTrade(services_.trade).initiateTrade(nameplateCtxGuid_);
                     if (ImGui::MenuItem("Duel"))
                         if (auto* duels = services_.duels) duels->proposeDuel(nameplateCtxGuid_);
                     if (ImGui::MenuItem("Inspect")) {

@@ -987,6 +987,10 @@ mail::IMailbox& mailOf(lua_State* L);
 /// one that is never open and sends nothing when there is no game.
 guild_bank::IGuildBank& guildBankOf(lua_State* L);
 
+/// The trade as the composition root handed it to the addon layer, or one that
+/// is never open and sends nothing when there is no game.
+trade::ITrade& tradeOf(lua_State* L);
+
 /// The team id at an arena team index, or zero when the index is off the end
 /// or there are no arena teams.
 ///

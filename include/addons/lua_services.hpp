@@ -27,6 +27,7 @@ namespace wowee::guild { class IGuild; }
 namespace wowee::auction { class IAuctionHouse; }
 namespace wowee::mail { class IMailbox; }
 namespace wowee::guild_bank { class IGuildBank; }
+namespace wowee::trade { class ITrade; }
 
 namespace wowee::addons {
 
@@ -74,6 +75,9 @@ struct LuaServices {
     /// The guild vault the player is at, its tabs, texts and logs, and the
     /// requests that go to the banker.
     guild_bank::IGuildBank*  guildBank         = nullptr;
+    /// A trade with another player, what each side has put down, and the
+    /// requests that change it.
+    trade::ITrade*           trade             = nullptr;
 
     /// Run a macro body, as RunMacroText() does - one command per line,
     /// through the same path the action bar uses for a macro button.

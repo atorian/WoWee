@@ -1,4 +1,5 @@
 #include "auction/services/auction_house.hpp"
+#include "trade/services/trade.hpp"
 #include "mail/services/mail.hpp"
 #include "guild_bank/services/guild_bank.hpp"
 #include "ui/graphics_choices.hpp"
@@ -1048,13 +1049,13 @@ void GameScreen::render(game::GameHandler& gameHandler) {
 /// player who walked away - rather than being offered into the next one.
 void GameScreen::offerPendingTradeItem(game::GameHandler& gameHandler) {
     if (!pendingTradeItem_.active) return;
-    if (!gameHandler.isTradeOpen()) {
+    if (!trade::orNoTrade(services_.trade).isTradeOpen()) {
         // Only while the request could still be answered. Leaving the world
         // ends that, and so does putting the item somewhere else.
         if (!gameHandler.isInWorld()) pendingTradeItem_ = PendingTradeItem{};
         return;
     }
-    gameHandler.setTradeItem(0, pendingTradeItem_.bag, pendingTradeItem_.slot);
+    trade::orNoTrade(services_.trade).setTradeItem(0, pendingTradeItem_.bag, pendingTradeItem_.slot);
     pendingTradeItem_ = PendingTradeItem{};
 }
 
@@ -1514,7 +1515,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
             st.questDetailsOpen      = gameHandler.isQuestDetailsOpen();
             st.questOfferRewardOpen  = gameHandler.isQuestOfferRewardOpen();
             st.questRequestItemsOpen = gameHandler.isQuestRequestItemsOpen();
-            st.tradeOpen             = gameHandler.isTradeOpen();
+            st.tradeOpen             = trade::orNoTrade(services_.trade).isTradeOpen();
 
             const EscapeAction action = resolveEscape(st);
             // At warning, like the three in the pump it pairs with.
@@ -1553,7 +1554,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 case EscapeAction::DeclineQuest:           gameHandler.declineQuest(); break;
                 case EscapeAction::CloseQuestOfferReward:  gameHandler.closeQuestOfferReward(); break;
                 case EscapeAction::CloseQuestRequestItems: gameHandler.closeQuestRequestItems(); break;
-                case EscapeAction::CancelTrade:            gameHandler.cancelTrade(); break;
+                case EscapeAction::CancelTrade:            trade::orNoTrade(services_.trade).cancelTrade(); break;
                 case EscapeAction::None: break;
                 case EscapeAction::AskTheInterface: {
                     // Asked only here, because asking closes things. Everything
@@ -1900,7 +1901,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                                 : frameXmlCursorWireSlot(srcBag, srcSlot);
                         if (haveSource) {
                             pendingTradeItem_ = PendingTradeItem{.active = true, .bag = srcBag, .slot = srcSlot};
-                            gameHandler.initiateTrade(closestGuid);
+                            trade::orNoTrade(services_.trade).initiateTrade(closestGuid);
                             // Whichever cursor was carrying it.
                             if (inventoryScreen.isHoldingItem())
                                 inventoryScreen.releaseHeldItem();

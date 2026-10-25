@@ -1929,51 +1929,6 @@ void GameHandler::declineSummon() {
 }
 
 // ---------------------------------------------------------------------------
-// Trade (SMSG_TRADE_STATUS / SMSG_TRADE_STATUS_EXTENDED)
-// WotLK 3.3.5a status values:
-//   0=busy, 1=begin_trade(+guid), 2=open_window, 3=cancelled, 4=accepted,
-//   5=busy2, 6=no_target, 7=back_to_trade, 8=complete, 9=rejected,
-//   10=too_far, 11=wrong_faction, 12=close_window, 13=ignore,
-//   14-19=stun/dead/logout, 20=trial, 21=conjured_only
-// ---------------------------------------------------------------------------
-
-void GameHandler::acceptTradeRequest() {
-    inventoryHandler_->acceptTradeRequest();
-}
-
-void GameHandler::declineTradeRequest() {
-    inventoryHandler_->declineTradeRequest();
-}
-
-void GameHandler::acceptTrade() {
-    inventoryHandler_->acceptTrade();
-}
-
-void GameHandler::unacceptTrade() {
-    inventoryHandler_->unacceptTrade();
-}
-
-void GameHandler::cancelTrade() {
-    inventoryHandler_->cancelTrade();
-}
-
-void GameHandler::setTradeItem(uint8_t tradeSlot, uint8_t bag, uint8_t bagSlot) {
-    inventoryHandler_->setTradeItem(tradeSlot, bag, bagSlot);
-}
-
-void GameHandler::clearTradeItem(uint8_t tradeSlot) {
-    inventoryHandler_->clearTradeItem(tradeSlot);
-}
-
-void GameHandler::setTradeGold(uint64_t copper) {
-    inventoryHandler_->setTradeGold(copper);
-}
-
-void GameHandler::resetTradeState() {
-    inventoryHandler_->resetTradeState();
-}
-
-// ---------------------------------------------------------------------------
 // Group loot roll (SMSG_LOOT_ROLL / SMSG_LOOT_ROLL_WON / CMSG_LOOT_ROLL)
 // ---------------------------------------------------------------------------
 

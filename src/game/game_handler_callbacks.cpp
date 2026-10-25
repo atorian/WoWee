@@ -5,6 +5,7 @@
 #include "guild/services/guild.hpp"
 #include "mail/services/mail.hpp"
 #include "guild_bank/services/guild_bank.hpp"
+#include "trade/services/trade.hpp"
 #include "core/event_bus.hpp"
 #include "game/game_events.hpp"
 #include "game/reputation_standing.hpp"
@@ -991,32 +992,6 @@ uint32_t GameHandler::getEquipmentSetIgnoreMask(uint32_t setId) const {
     return inventoryHandler_->getEquipmentSetIgnoreMask(setId);
 }
 
-// Trade: InventoryHandler owns it.
-GameHandler::TradeStatus GameHandler::getTradeStatus() const {
-    return inventoryHandler_->getTradeStatus();
-}
-bool GameHandler::hasPendingTradeRequest() const {
-    return inventoryHandler_->hasPendingTradeRequest();
-}
-bool GameHandler::isTradeOpen() const {
-    return inventoryHandler_->isTradeOpen();
-}
-const std::string& GameHandler::getTradePeerName() const {
-    return inventoryHandler_->getTradePeerName();
-}
-const std::array<GameHandler::TradeSlot, GameHandler::TRADE_SLOT_COUNT>& GameHandler::getMyTradeSlots() const {
-    return inventoryHandler_->getMyTradeSlots();
-}
-const std::array<GameHandler::TradeSlot, GameHandler::TRADE_SLOT_COUNT>& GameHandler::getPeerTradeSlots() const {
-    return inventoryHandler_->getPeerTradeSlots();
-}
-uint64_t GameHandler::getMyTradeGold() const {
-    return inventoryHandler_->getMyTradeGold();
-}
-uint64_t GameHandler::getPeerTradeGold() const {
-    return inventoryHandler_->getPeerTradeGold();
-}
-
 bool GameHandler::supportsEquipmentSets() const {
     return inventoryHandler_->supportsEquipmentSets();
 }
@@ -1206,6 +1181,10 @@ guild_bank::IGuildBankFeed* GameHandler::guildBankFeed() {
 
 const guild_bank::IGuildBank* GameHandler::guildBank() const {
     return services_.guildBank;
+}
+
+trade::ITradeFeed* GameHandler::tradeFeed() {
+    return services_.tradeFeed;
 }
 
 // The player's guild for the handlers that read it - the chat handler's
@@ -1541,10 +1520,6 @@ void GameHandler::setSavedInstanceExtend(uint32_t mapId, uint32_t difficulty, bo
     socialHandler_->setSavedInstanceExtend(mapId, difficulty, extend);
 }
 
-void GameHandler::initiateTrade(uint64_t targetGuid) {
-    inventoryHandler_->initiateTrade(targetGuid);
-}
-
 void GameHandler::reportPlayer(uint64_t targetGuid, const std::string& reason) {
     socialHandler_->reportPlayer(targetGuid, reason);
 }
@@ -1683,7 +1658,7 @@ bool GameHandler::applyInventoryFields(const FlatFieldMap& fields) {
 }
 
 uint64_t GameHandler::getInteractNpcGuid() const {
-    if (const uint64_t peer = inventoryHandler_->getTradePeerGuid()) return peer;
+    if (const uint64_t peer = trade::orNoTrade(services_.trade).getTradePeerGuid()) return peer;
     if (const uint64_t vendor = getVendorGuid()) return vendor;
     // The trainer, which the list above this function has always named and
     // this function never asked.

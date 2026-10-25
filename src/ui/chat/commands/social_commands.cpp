@@ -1,6 +1,7 @@
 // Social commands: /friend, /removefriend, /ignore, /unignore, /invite, /inspect, /who
 // Moved from ChatPanel::sendChatMessage() if/else chain (Phase 3).
 #include "contacts/services/contacts.hpp"
+#include "trade/services/trade.hpp"
 #include "who/services/who.hpp"
 #include "duel/services/duels.hpp"
 #include "group/services/group.hpp"
@@ -184,7 +185,7 @@ class TradeCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (ctx.gameHandler.hasTarget()) {
-            ctx.gameHandler.initiateTrade(ctx.gameHandler.getTargetGuid());
+            trade::orNoTrade(ctx.services.trade).initiateTrade(ctx.gameHandler.getTargetGuid());
         } else {
             game::MessageChatData msg;
             msg.type = game::ChatType::SYSTEM;

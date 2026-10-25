@@ -4,6 +4,8 @@
 #include "game/auction_gateway.hpp"
 #include "game/mail_gateway.hpp"
 #include "game/guild_bank_gateway.hpp"
+#include "game/trade_gateway.hpp"
+#include "trade/services/trade.hpp"
 #include "guild_bank/domain/records.hpp"
 #include "guild_bank/services/guild_bank.hpp"
 #include "mail/domain/records.hpp"
@@ -66,6 +68,16 @@ static guild_bank::IGuildBankFeed* guildBankFeed(InventoryQueries& queries) {
     return feed;
 }
 
+// The trade the protocol feeds. A client built without it drops the trade
+// packets, and says so once.
+static trade::ITradeFeed* tradeFeed(InventoryQueries& queries) {
+    auto* feed = queries.tradeFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("Trading is not wired into this client; trade packets are dropped");
+    return feed;
+}
+
 // The auction house the protocol feeds. A client built without it drops the
 // auction packets, and says so once.
 static auction::IAuctionHouseFeed* auctionFeed(InventoryQueries& queries) {
@@ -86,6 +98,8 @@ InventoryHandler::InventoryHandler(PacketSender& sender, FrameXmlEvents& frameXm
     for (auto& subscription : subscribeMailNotices(events, chat, frameXml, *this))
         subscriptions_.push_back(std::move(subscription));
     for (auto& subscription : subscribeGuildBankNotices(events, chat, frameXml))
+        subscriptions_.push_back(std::move(subscription));
+    for (auto& subscription : subscribeTradeNotices(events, chat, frameXml, *this))
         subscriptions_.push_back(std::move(subscription));
     // A letter from a player carries a guid; its sender is named once the
     // name arrives.
@@ -110,6 +124,7 @@ void InventoryHandler::beginCharacter() {
     if (auto* feed = auctionFeed(queries_)) feed->beginCharacter();
     if (auto* feed = mailFeed(queries_)) feed->beginCharacter();
     if (auto* feed = guildBankFeed(queries_)) feed->beginCharacter();
+    if (auto* feed = tradeFeed(queries_)) feed->beginCharacter();
 }
 
 void InventoryHandler::leaveWorld() {
@@ -1221,8 +1236,26 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_ITEM_TEXT_QUERY_RESPONSE] = [this](network::Packet& packet) { handleItemTextQueryResponse(packet); };
 
     // ---- Trade ----
-    table[Opcode::SMSG_TRADE_STATUS] = [this](network::Packet& packet) { handleTradeStatus(packet); };
-    table[Opcode::SMSG_TRADE_STATUS_EXTENDED] = [this](network::Packet& packet) { handleTradeStatusExtended(packet); };
+    table[Opcode::SMSG_TRADE_STATUS] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(4)) return;
+        const uint32_t status = packet.readUInt32();
+        LOG_WARNING("SMSG_TRADE_STATUS: status=", status, " size=", packet.getSize());
+        const auto code = tradeStatusCode(status);
+        if (!code) {
+            LOG_DEBUG("Unhandled SMSG_TRADE_STATUS: ", status);
+            return;
+        }
+        // A request names who is asking.
+        uint64_t peer = 0;
+        if (*code == trade::StatusCode::BeginTrade && packet.hasRemaining(8)) peer = packet.readUInt64();
+        if (auto* feed = tradeFeed(queries_)) feed->onStatus(*code, peer);
+    };
+    table[Opcode::SMSG_TRADE_STATUS_EXTENDED] = [this](network::Packet& packet) {
+        auto offer = readTradeOffer(packet);
+        if (!offer) return;
+        if (auto* feed = tradeFeed(queries_))
+            feed->onOffer(offer->ownSide, offer->gold, std::move(offer->slots));
+    };
 
     // ---- Trainer buy ----
     table[Opcode::SMSG_TRAINER_BUY_SUCCEEDED] = [this](network::Packet& p) { handleTrainerBuySucceeded(p); };
@@ -3199,339 +3232,6 @@ void InventoryHandler::handleItemTextQueryResponse(network::Packet& packet) {
 }
 
 // ============================================================
-// Trade
-// ============================================================
-
-void InventoryHandler::acceptTradeRequest() {
-    if (tradeStatus_ != TradeStatus::PendingIncoming) return;
-    if (!sender_.characterInWorld()) return;
-    auto packet = BeginTradePacket::build();
-    sender_.send(packet);
-}
-
-void InventoryHandler::declineTradeRequest() {
-    if (tradeStatus_ != TradeStatus::PendingIncoming) return;
-    if (!sender_.characterInWorld()) return;
-    auto packet = CancelTradePacket::build();
-    sender_.send(packet);
-    resetTradeState();
-}
-
-/// TRADE_ACCEPT_UPDATE(playerState, targetState) - 1 for accepted, 0 for not.
-///
-/// TradeFrame_SetAcceptState reads both: the first decides whether the player's
-/// half is highlighted and whether the trade button is enabled, the second does
-/// the same for the target's. Fired with neither, both read nil, the highlights
-/// stayed off and the trade button stayed enabled after accepting.
-void InventoryHandler::fireTradeAcceptUpdate() {
-    if (!frameXml_.frameXmlListening()) return;
-    frameXml_.fireFrameXmlEvent("TRADE_ACCEPT_UPDATE",
-                                   {tradeSelfAccepted_ ? "1" : "0",
-                                    tradePartnerAccepted_ ? "1" : "0"});
-}
-
-void InventoryHandler::acceptTrade() {
-    // Open *or* Accepted. The status becomes Accepted the moment the partner
-    // presses accept, and requiring Open meant that whoever pressed second
-    // could not press at all - the trade sat with one acceptance in it and no
-    // way to add the other.
-    if (!isTradeOpen()) return;
-    if (!sender_.characterInWorld()) return;
-    auto packet = AcceptTradePacket::build();
-    sender_.send(packet);
-    tradeSelfAccepted_ = true;
-    fireTradeAcceptUpdate();
-}
-
-void InventoryHandler::unacceptTrade() {
-    // Only where there is one of *ours* to take back. The status says the
-    // trade has an acceptance in it, and TradeStatus::Accepted is set when the
-    // partner accepts - gating on that let the player withdraw an acceptance
-    // they had never made, and stopped them withdrawing one they had.
-    if (!tradeSelfAccepted_) return;
-    if (!sender_.characterInWorld()) return;
-    auto packet = UnacceptTradePacket::build();
-    sender_.send(packet);
-    tradeSelfAccepted_ = false;
-    fireTradeAcceptUpdate();
-}
-
-void InventoryHandler::cancelTrade() {
-    if (tradeStatus_ == TradeStatus::None) return;
-    if (sender_.characterInWorld()) {
-        auto packet = CancelTradePacket::build();
-        sender_.send(packet);
-    }
-    resetTradeState();
-}
-
-void InventoryHandler::setTradeItem(uint8_t tradeSlot, uint8_t srcBag, uint8_t srcSlot) {
-    if (tradeStatus_ != TradeStatus::Open) return;
-    if (!sender_.characterInWorld()) return;
-    auto packet = SetTradeItemPacket::build(tradeSlot, srcBag, srcSlot);
-    sender_.send(packet);
-}
-
-void InventoryHandler::clearTradeItem(uint8_t tradeSlot) {
-    if (tradeStatus_ != TradeStatus::Open) return;
-    if (!sender_.characterInWorld()) return;
-    auto packet = ClearTradeItemPacket::build(tradeSlot);
-    sender_.send(packet);
-}
-
-void InventoryHandler::setTradeGold(uint64_t amount) {
-    if (tradeStatus_ != TradeStatus::Open) return;
-    if (!sender_.characterInWorld()) return;
-    auto packet = SetTradeGoldPacket::build(static_cast<uint32_t>(amount));
-    sender_.send(packet);
-}
-
-void InventoryHandler::resetTradeState() {
-    tradeStatus_ = TradeStatus::None;
-    tradePeerGuid_ = 0;
-    tradePeerName_.clear();
-    myTradeSlots_ = {};
-    peerTradeSlots_ = {};
-    myTradeGold_ = 0;
-    peerTradeGold_ = 0;
-    tradeSelfAccepted_ = false;
-    tradePartnerAccepted_ = false;
-}
-
-void InventoryHandler::handleTradeStatus(network::Packet& packet) {
-    if (!packet.hasRemaining(4)) return;
-    uint32_t status = packet.readUInt32();
-    LOG_WARNING("SMSG_TRADE_STATUS: status=", status, " size=", packet.getSize());
-    switch (status) {
-        // The codes are AzerothCore's TradeStatus enum, checked against
-        // SharedDefines.h rather than against the names that used to be here.
-        // Two of those names were on the wrong cases and they were the two that
-        // matter: 7 is BACK_TO_TRADE, the trade returning to editing because
-        // somebody took their acceptance back, and 8 is TRADE_COMPLETE. Read
-        // the other way round, every finished trade left the window open with
-        // stale bags and no money update, and a partner un-accepting closed the
-        // window announcing "Trade complete".
-        case 0:   // BUSY
-        case 5:   // BUSY_2
-            resetTradeState();
-            chat_.addSystemChatMessage("Trade failed: player is busy.");
-            break;
-        case 1: { // BEGIN_TRADE - someone is asking
-            if (packet.hasRemaining(8))
-                tradePeerGuid_ = packet.readUInt64();
-            tradeStatus_ = TradeStatus::PendingIncoming;
-            // Resolve name
-            if (std::string name = queries_.playerName(tradePeerGuid_); !name.empty()) {
-                tradePeerName_ = std::move(name);
-            }
-            else tradePeerName_ = "Unknown";
-            // Block Trades, which the panel offers and nothing read: every
-            // request opened a window whatever it said. Refused before the
-            // window rather than after, and said in chat, because a request
-            // silently swallowed reads as the other player being ignored.
-            if (cvars_.get("blockTrades", "0") != "0") {
-                chat_.addSystemChatMessage(
-                    "Declined a trade from " + tradePeerName_ + " (trades are blocked).");
-                declineTradeRequest();
-                break;
-            }
-            chat_.addSystemChatMessage(tradePeerName_ + " wants to trade with you.");
-            if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("TRADE_REQUEST", {tradePeerName_});
-            break;
-        }
-        case 2:   // OPEN_WINDOW
-            tradeStatus_ = TradeStatus::Open;
-            tradeSelfAccepted_ = false;
-            tradePartnerAccepted_ = false;
-            chat_.addSystemChatMessage("Trade opened.");
-            if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("TRADE_SHOW", {});
-            break;
-        case 3:   // TRADE_CANCELED
-            resetTradeState();
-            chat_.addSystemChatMessage("Trade cancelled.");
-            if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("TRADE_CLOSED", {});
-            break;
-        case 4:   // TRADE_ACCEPT - the other side pressed accept
-            tradeStatus_ = TradeStatus::Accepted;
-            tradePartnerAccepted_ = true;
-            chat_.addSystemChatMessage("Trade partner accepted.");
-            fireTradeAcceptUpdate();
-            break;
-        case 6:   // NO_TARGET
-            resetTradeState();
-            raiseUiError("You have no target.");
-            break;
-        case 7:   // BACK_TO_TRADE - an acceptance was taken back
-            tradeStatus_ = TradeStatus::Open;
-            tradeSelfAccepted_ = false;
-            tradePartnerAccepted_ = false;
-            fireTradeAcceptUpdate();
-            break;
-        case 8:   // TRADE_COMPLETE
-            // Not reset immediately - SMSG_TRADE_STATUS_EXTENDED may arrive in
-            // the same batch and needs the trade state to read the final items
-            // and gold from.
-            tradeStatus_ = TradeStatus::None;
-            tradeSelfAccepted_ = false;
-            tradePartnerAccepted_ = false;
-            chat_.addSystemChatMessage("Trade complete.");
-            if (frameXml_.frameXmlListening()) {
-                frameXml_.fireFrameXmlEvent("TRADE_CLOSED", {});
-                fireBagUpdates();
-                frameXml_.fireFrameXmlEvent("PLAYER_MONEY", {});
-            }
-            break;
-        case 9:   // TRADE_REJECTED
-            resetTradeState();
-            chat_.addSystemChatMessage("Trade declined.");
-            if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("TRADE_CLOSED", {});
-            break;
-        case 10:  // TARGET_TO_FAR
-            resetTradeState();
-            chat_.addSystemChatMessage("Trade failed: target is too far away.");
-            break;
-        case 11:  // WRONG_FACTION
-            resetTradeState();
-            raiseUiError("You cannot trade with the enemy.");
-            break;
-        case 12:  // CLOSE_WINDOW
-            resetTradeState();
-            if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("TRADE_CLOSED", {});
-            break;
-        case 14:  // IGNORE_YOU
-            resetTradeState();
-            raiseUiError("That player is ignoring you.");
-            break;
-        case 15:  // YOU_STUNNED
-            raiseUiError("You are stunned.");
-            break;
-        case 16:  // TARGET_STUNNED
-            raiseUiError("That player is stunned.");
-            break;
-        case 17:  // YOU_DEAD
-            raiseUiError("You are dead.");
-            break;
-        case 18:  // TARGET_DEAD
-            raiseUiError("That player is dead.");
-            break;
-        case 19:  // YOU_LOGOUT
-        case 20:  // TARGET_LOGOUT
-            resetTradeState();
-            chat_.addSystemChatMessage("Trade failed: logging out.");
-            break;
-        case 23:  // NOT_ON_TAPLIST
-            raiseUiError("You do not have permission to loot that item.");
-            break;
-        default:
-            LOG_DEBUG("Unhandled SMSG_TRADE_STATUS: ", status);
-            break;
-    }
-}
-
-void InventoryHandler::handleTradeStatusExtended(network::Packet& packet) {
-    // SendUpdateTrade writes:
-    //
-    //   uint8  traderData     1 = the other player's offer, 0 = your own
-    //   uint32 tradeId
-    //   uint32 slotCount      seven, twice
-    //   uint32 slotCount
-    //   uint32 gold           the *header* carries it, not the tail
-    //   uint32 spell          cast on the lowest slot's item
-    //   per slot (seven of them):
-    //     uint8  slotIndex
-    //     uint32 entry, displayId, stackCount, wrapped
-    //     uint64 giftCreator
-    //     uint32 permEnchant, gem1, gem2, gem3
-    //     uint64 creator
-    //     uint32 charges, suffixFactor
-    //     int32  randomPropertyId
-    //     uint32 lockId, maxDurability, durability
-    //
-    // An empty slot writes eighteen zeroed uint32s, which is the same
-    // seventy-two bytes, so the stride never changes.
-    //
-    // What was here read a four-byte "whichPlayer" and a four-byte count and
-    // then walked slots of sixty-five bytes from offset eight. Every one of
-    // those is wrong: the discriminator is one byte, the item block starts at
-    // twenty-one, and a slot is seventy-three.
-    //
-    // It went unnoticed because the arithmetic came out right. The note above
-    // it read "8 + 8x65 + 4 = 532 (matches observed packet size)", and 532 is
-    // the true size - 21 + 7x73. A total that agrees says nothing about where
-    // the fields are, and every item in the trade window was read from the
-    // wrong offset with the wrong stride.
-    constexpr size_t kHeaderBytes = 1 + 4 * 5;
-    constexpr size_t kSlotBytes = 1 + 4 * 4 + 8 + 4 * 4 + 8 + 4 * 6;
-    if (!packet.hasRemaining(kHeaderBytes)) { packet.skipAll(); return; }
-
-    const uint8_t traderData = packet.readUInt8();
-    /*uint32_t tradeId    =*/ packet.readUInt32();
-    const uint32_t slotCount = packet.readUInt32();
-    /*uint32_t slotCount2 =*/ packet.readUInt32();
-    const uint32_t gold = packet.readUInt32();
-    /*uint32_t spell     =*/ packet.readUInt32();
-
-    // Zero is this player's own offer, which is the side myTradeSlots_ holds.
-    const bool ownSide = (traderData == 0);
-    auto& slots = ownSide ? myTradeSlots_ : peerTradeSlots_;
-
-    uint32_t count = slotCount;
-    if (count > TRADE_SLOT_COUNT) count = TRADE_SLOT_COUNT;
-    LOG_DEBUG("SMSG_TRADE_STATUS_EXTENDED: ", ownSide ? "own" : "trader",
-              " slots=", count, " gold=", gold);
-
-    for (uint32_t i = 0; i < count; ++i) {
-        if (!packet.hasRemaining(kSlotBytes)) { packet.skipAll(); break; }
-        const uint8_t slotNum = packet.readUInt8();
-        const uint32_t itemId    = packet.readUInt32();
-        const uint32_t displayId = packet.readUInt32();
-        const uint32_t stackCnt  = packet.readUInt32();
-        /*uint32_t wrapped     =*/ packet.readUInt32();
-        /*uint64_t giftCreator =*/ packet.readUInt64();
-        /*uint32_t permEnchant =*/ packet.readUInt32();
-        for (int g = 0; g < 3; ++g) packet.readUInt32();   // socket enchants
-        /*uint64_t creator     =*/ packet.readUInt64();
-        /*uint32_t charges     =*/ packet.readUInt32();
-        /*uint32_t suffixFactor=*/ packet.readUInt32();
-        /*int32_t randomProp   =*/ packet.readUInt32();
-        /*uint32_t lockId      =*/ packet.readUInt32();
-        /*uint32_t maxDur      =*/ packet.readUInt32();
-        /*uint32_t durability  =*/ packet.readUInt32();
-
-        if (slotNum < TRADE_SLOT_COUNT) {
-            slots[slotNum].itemId = itemId;
-            slots[slotNum].displayId = displayId;
-            slots[slotNum].stackCount = stackCnt;
-        }
-        if (itemId != 0) ensureItemInfo(itemId);
-    }
-    packet.skipAll();
-
-    uint64_t& side = ownSide ? myTradeGold_ : peerTradeGold_;
-    const bool goldChanged = (side != gold);
-    side = gold;
-
-    if (frameXml_.frameXmlListening()) {
-        frameXml_.fireFrameXmlEvent("TRADE_UPDATE", {});
-        // The trade window's own refresh redraws the item slots and nothing
-        // else; the two money frames listen for this and only this. Without it
-        // the gold on the table stays at whatever it read when the window
-        // opened, however much either side puts down.
-        //
-        // One event per side, because they are two different frames. A money
-        // frame carries a moneyType and answers only its own name:
-        // TARGET_TRADE listens for TRADE_MONEY_CHANGED, PLAYER_TRADE for
-        // PLAYER_TRADE_MONEY. Announcing the peer's event for both refreshed
-        // their side when our own gold moved and never refreshed ours - so the
-        // amount *this* player had put down never appeared.
-        if (goldChanged) {
-            frameXml_.fireFrameXmlEvent(
-                ownSide ? "PLAYER_TRADE_MONEY" : "TRADE_MONEY_CHANGED", {});
-        }
-    }
-}
-
-// ============================================================
 // Equipment Sets
 // ============================================================
 
@@ -5157,23 +4857,6 @@ void InventoryHandler::handleTrainerBuyFailed(network::Packet& packet) {
 // ============================================================
 // Methods moved from GameHandler
 // ============================================================
-
-void InventoryHandler::initiateTrade(uint64_t targetGuid) {
-    if (!sender_.worldCommandAllowed("trade")) {
-        LOG_WARNING("Cannot initiate trade: not in world or not connected");
-        return;
-    }
-
-    if (targetGuid == 0) {
-        raiseUiError("You must target a player to trade with.");
-        return;
-    }
-
-    auto packet = InitiateTradePacket::build(targetGuid);
-    sender_.send(packet);
-    chat_.addSystemChatMessage("Requesting trade with target.");
-    LOG_INFO("Initiated trade with target: 0x", std::hex, targetGuid, std::dec);
-}
 
 uint32_t InventoryHandler::getTempEnchantRemainingMs(uint32_t slot) const {
     uint64_t nowMs = static_cast<uint64_t>(

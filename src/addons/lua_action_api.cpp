@@ -1,6 +1,7 @@
 // lua_action_api.cpp - Action bar, cursor/pickup, keyboard input, key bindings, and pet actions Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include "lfg/services/lfg.hpp"
+#include "trade/services/trade.hpp"
 #include "guild_bank/domain/records.hpp"
 #include "guild_bank/services/guild_bank.hpp"
 #include "mail/domain/records.hpp"
@@ -1566,7 +1567,7 @@ static int lua_SetModifiedClick(lua_State* L) {
 // at and not touched, so clicking one does nothing rather than pretending.
 
 static int pushTradeSlot(lua_State* L, game::GameHandler* gh,
-                         const game::GameHandler::TradeSlot& slot) {
+                         const trade::TradeSlot& slot) {
     if (!slot.occupied() || slot.itemId == 0) { return luaReturnNil(L); }
     const auto* info = gh->getItemInfo(slot.itemId);
     lua_pushstring(L, info ? info->name.c_str() : "");
@@ -1581,19 +1582,19 @@ static int pushTradeSlot(lua_State* L, game::GameHandler* gh,
 static int lua_GetTradePlayerItemInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh || i < 1 || i > game::GameHandler::TRADE_SLOT_COUNT) { return luaReturnNil(L); }
-    return pushTradeSlot(L, gh, gh->getMyTradeSlots()[i - 1]);
+    if (!gh || i < 1 || i > trade::kSlotCount) { return luaReturnNil(L); }
+    return pushTradeSlot(L, gh, tradeOf(L).getMyTradeSlots()[i - 1]);
 }
 
 static int lua_GetTradeTargetItemInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh || i < 1 || i > game::GameHandler::TRADE_SLOT_COUNT) { return luaReturnNil(L); }
-    return pushTradeSlot(L, gh, gh->getPeerTradeSlots()[i - 1]);
+    if (!gh || i < 1 || i > trade::kSlotCount) { return luaReturnNil(L); }
+    return pushTradeSlot(L, gh, tradeOf(L).getPeerTradeSlots()[i - 1]);
 }
 
 static int pushTradeLink(lua_State* L, game::GameHandler* gh,
-                         const game::GameHandler::TradeSlot& slot) {
+                         const trade::TradeSlot& slot) {
     const auto* info = (gh && slot.occupied()) ? gh->getItemInfo(slot.itemId) : nullptr;
     if (!info || info->name.empty()) { return luaReturnNil(L); }
     const std::string link = game::itemChatLink(slot.itemId, static_cast<uint32_t>(info->quality), info->name);
@@ -1604,15 +1605,15 @@ static int pushTradeLink(lua_State* L, game::GameHandler* gh,
 static int lua_GetTradePlayerItemLink(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh || i < 1 || i > game::GameHandler::TRADE_SLOT_COUNT) { return luaReturnNil(L); }
-    return pushTradeLink(L, gh, gh->getMyTradeSlots()[i - 1]);
+    if (!gh || i < 1 || i > trade::kSlotCount) { return luaReturnNil(L); }
+    return pushTradeLink(L, gh, tradeOf(L).getMyTradeSlots()[i - 1]);
 }
 
 static int lua_GetTradeTargetItemLink(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh || i < 1 || i > game::GameHandler::TRADE_SLOT_COUNT) { return luaReturnNil(L); }
-    return pushTradeLink(L, gh, gh->getPeerTradeSlots()[i - 1]);
+    if (!gh || i < 1 || i > trade::kSlotCount) { return luaReturnNil(L); }
+    return pushTradeLink(L, gh, tradeOf(L).getPeerTradeSlots()[i - 1]);
 }
 
 // ClickTradeButton(slot) - put what is held into the slot, or take back what is
@@ -1620,7 +1621,7 @@ static int lua_GetTradeTargetItemLink(lua_State* L) {
 static int lua_ClickTradeButton(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh || i < 1 || i > game::GameHandler::TRADE_SLOT_COUNT) return 0;
+    if (!gh || i < 1 || i > trade::kSlotCount) return 0;
     uint8_t srcBag = 0, srcSlot = 0;
     // Through the same translation as every other send. This passed FrameXML's
     // own numbering straight to the server - bags counted 0 to 4 and slots from
@@ -1630,10 +1631,10 @@ static int lua_ClickTradeButton(lua_State* L) {
     // answers TRADE_STATUS_TRADE_CANCELED, so offering an item ended the trade.
     if (cursor(L).type == CursorType::ITEM && cursor(L).bag >= 0 &&
         cursorWireSlot(L, srcBag, srcSlot)) {
-        gh->setTradeItem(static_cast<uint8_t>(i - 1), srcBag, srcSlot);
+        tradeOf(L).setTradeItem(static_cast<uint8_t>(i - 1), srcBag, srcSlot);
         clearCursorItem(L);
     } else {
-        gh->clearTradeItem(static_cast<uint8_t>(i - 1));
+        tradeOf(L).clearTradeItem(static_cast<uint8_t>(i - 1));
     }
     return 0;
 }
@@ -1643,17 +1644,17 @@ static int lua_ClickTargetTradeButton(lua_State* L) { (void)L; return 0; }
 
 static int lua_SetTradeMoney(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (gh) gh->setTradeGold(static_cast<uint64_t>(luaL_optnumber(L, 1, 0)));
+    if (gh) tradeOf(L).setTradeGold(static_cast<uint64_t>(luaL_optnumber(L, 1, 0)));
     return 0;
 }
 
 static int lua_CloseTrade(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->cancelTrade();
+    if (getGameHandler(L)) tradeOf(L).cancelTrade();
     return 0;
 }
 
 static int lua_BeginTrade(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->acceptTradeRequest();
+    if (getGameHandler(L)) tradeOf(L).acceptTradeRequest();
     return 0;
 }
 
@@ -2496,7 +2497,7 @@ void registerActionLuaAPI(lua_State* L) {
                 // closing while the player has already accepted, so without it
                 // the only way out of an accepted trade was to end it.
                 {"CancelTradeAccept", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->unacceptTrade();
+            if (getGameHandler(L)) tradeOf(L).unacceptTrade();
             return 0;
         }},
                 {"CloseTrade",          lua_CloseTrade},
