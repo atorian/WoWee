@@ -13,6 +13,8 @@
 #include "battleground/services/battleground_service.hpp"
 #include "game/lfg_gateway.hpp"
 #include "lfg/services/lfg_service.hpp"
+#include "game/calendar_gateway.hpp"
+#include "calendar/services/calendar_service.hpp"
 #include "ui/macro_icon.hpp"
 #include <imgui_impl_vulkan.h>
 #include "rendering/imgui_texture.hpp"
@@ -508,6 +510,9 @@ bool Application::initialize() {
     lfgGateway_ = std::make_unique<game::LfgGateway>(*gameHandler, *gameHandler);
     lfg_ = std::make_unique<lfg::LfgService>(*lfgGateway_, *lfgGateway_, eventBus_);
     gameServices_.lfgFeed = lfg_.get();
+    calendarGateway_ = std::make_unique<game::CalendarGateway>(*gameHandler);
+    calendar_ = std::make_unique<calendar::CalendarService>(*calendarGateway_, eventBus_);
+    gameServices_.calendarFeed = calendar_.get();
     transportScene_ = std::make_unique<RendererTransportScene>(*renderer);
     gameHandler->getTransportManager()->setScene(transportScene_.get());
 
@@ -866,6 +871,7 @@ bool Application::initialize() {
             uiServices.duels = duels_.get();
             uiServices.battlegrounds = battlegrounds_.get();
             uiServices.lfg = lfg_.get();
+            uiServices.calendar = calendar_.get();
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();  // May be nullptr here, re-wire later
             uiServices.interfaceStages = &interfaceStages_;
@@ -924,6 +930,7 @@ bool Application::initialize() {
         luaSvc.arenaTeams        = arenaTeams_.get();
         luaSvc.battlegrounds     = battlegrounds_.get();
         luaSvc.lfg               = lfg_.get();
+        luaSvc.calendar          = calendar_.get();
         // Acted on between frames - the reload destroys the state that asked.
         luaSvc.requestReloadUI = [this]() {
             if (auto* character = session()) character->requestInterfaceReload();
@@ -1643,6 +1650,7 @@ bool Application::initialize() {
             uiServices.duels = duels_.get();
             uiServices.battlegrounds = battlegrounds_.get();
             uiServices.lfg = lfg_.get();
+            uiServices.calendar = calendar_.get();
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();
             uiServices.interfaceStages = &interfaceStages_;
@@ -2599,6 +2607,7 @@ void Application::shutdown() {
     gameServices_.arenaFeed = nullptr;
     gameServices_.battlegroundFeed = nullptr;
     gameServices_.lfgFeed = nullptr;
+    gameServices_.calendarFeed = nullptr;
     contacts_.reset();
     contactsGateway_.reset();
     who_.reset();
@@ -2613,6 +2622,8 @@ void Application::shutdown() {
     battlegroundGateway_.reset();
     lfg_.reset();
     lfgGateway_.reset();
+    calendar_.reset();
+    calendarGateway_.reset();
 
     // GameHandler teardown can still publish events consumed by audio.
     if (audioCoordinator_) {

@@ -40,7 +40,7 @@ CORE_ALLOWED = {
     "core/coordinates.hpp", "core/local_time.hpp", "core/data_paths.hpp",
     "core/memory_monitor.hpp", "core/event_bus.hpp", "core/app_clock.hpp",
     "core/config_paths.hpp", "core/https_get.hpp", "core/cvar_store.hpp",
-    "core/string_util.hpp",
+    "core/string_util.hpp", "core/packed_time.hpp",
 }
 # Data both sides read, under rendering/ for now.
 SHARED_CONSTANTS = {

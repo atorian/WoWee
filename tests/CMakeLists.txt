@@ -770,6 +770,11 @@ target_link_libraries(test_battlegrounds PRIVATE wowee_battleground)
 wowee_add_test(test_dungeon_finder SOURCES test_dungeon_finder.cpp)
 target_link_libraries(test_dungeon_finder PRIVATE wowee_lfg)
 
+# ── calendar ────────────────────────────────────────────────────
+# The calendar and its service, with only wowee_calendar linked.
+wowee_add_test(test_calendar SOURCES test_calendar.cpp)
+target_link_libraries(test_calendar PRIVATE wowee_calendar)
+
 # ── module_boundaries ───────────────────────────────────────────
 # New includes must point down the layers in tools/module_boundary_check.py;
 # the ones that broke them when the check came are listed in
@@ -2504,7 +2509,7 @@ add_executable(test_calendar_packet
 )
 target_include_directories(test_calendar_packet PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_calendar_packet SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_calendar_packet PRIVATE catch2_main SDL3::SDL3 ZLIB::ZLIB
+target_link_libraries(test_calendar_packet PRIVATE wowee_calendar catch2_main SDL3::SDL3 ZLIB::ZLIB
                                                  OpenSSL::SSL OpenSSL::Crypto)
 wowee_test_link_glm(test_calendar_packet)
 if(TARGET Vulkan::Vulkan)
@@ -3382,7 +3387,7 @@ target_compile_definitions(wowee_game_harness PRIVATE WOWEE_SOURCE_DIR="${CMAKE_
 target_link_libraries(wowee_game_harness PUBLIC wowee_game catch2_main)
 wowee_test_link_glm(wowee_game_harness)
 
-foreach(_domain chat spell inventory quest social session account_data action_bar pet reputation realm_time weather contacts who duel petition arena battleground lfg)
+foreach(_domain chat spell inventory quest social session account_data action_bar pet reputation realm_time weather contacts who duel petition arena battleground lfg calendar)
     wowee_add_test(test_${_domain}_domain SOURCES test_${_domain}_domain.cpp)
     target_link_libraries(test_${_domain}_domain PRIVATE wowee_game_harness)
 endforeach()

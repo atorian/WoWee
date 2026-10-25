@@ -54,7 +54,7 @@ private:
     void handleGameSpeed(network::Packet& packet);
     void handleServerTime(network::Packet& packet);
     /// The calendar half of a packed time, for the realm clock.
-    void takePackedDate(const WowDate& date, const char* from);
+    void takePackedDate(const core::WowDate& date, const char* from);
     void takeUnixTime(uint32_t unixSeconds, const char* from);
 
     std::function<Clock::time_point()> now_;

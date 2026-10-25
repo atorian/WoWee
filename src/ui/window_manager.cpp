@@ -22,7 +22,7 @@
 #include "core/window.hpp"
 #include "game/game_handler.hpp"
 #include "game/auction_filters.hpp"
-#include "game/packed_time.hpp"
+#include "core/packed_time.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "audio/audio_coordinator.hpp"

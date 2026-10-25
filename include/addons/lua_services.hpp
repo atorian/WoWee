@@ -21,6 +21,7 @@ namespace wowee::petition { class IPetitions; }
 namespace wowee::arena { class IArenaTeams; }
 namespace wowee::battleground { class IBattlegrounds; }
 namespace wowee::lfg { class ILfg; }
+namespace wowee::calendar { class ICalendar; }
 
 namespace wowee::addons {
 
@@ -50,6 +51,9 @@ struct LuaServices {
     /// The dungeon finder: the queue, the proposal, the role check and the
     /// vote to kick, and the requests that move them.
     lfg::ILfg*               lfg               = nullptr;
+    /// The calendar the server sent, the event open, and the requests that
+    /// change them.
+    calendar::ICalendar*     calendar          = nullptr;
 
     /// Run a macro body, as RunMacroText() does - one command per line,
     /// through the same path the action bar uses for a macro button.

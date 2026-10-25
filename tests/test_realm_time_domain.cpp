@@ -8,7 +8,7 @@
 
 #include <catch_amalgamated.hpp>
 #include "game_harness.hpp"
-#include "game/packed_time.hpp"
+#include "core/packed_time.hpp"
 #include "game/realm_time_handler.hpp"
 
 #include <chrono>
@@ -17,7 +17,7 @@
 using Catch::Approx;
 using wowee::game::Opcode;
 using wowee::game::RealmClock;
-using wowee::game::WowDate;
+using wowee::core::WowDate;
 using wowee::test::Body;
 using wowee::test::GameHarness;
 
@@ -34,7 +34,7 @@ std::vector<uint8_t> queryTimeResponse(uint32_t unixTime) {
 
 /// SMSG_LOGIN_SETTIMESPEED: a packed date and the speed, 1/60 being real time.
 std::vector<uint8_t> loginSetTimeSpeed(const WowDate& date) {
-    return Body().u32(wowee::game::packWowPackedTime(date)).f32(1.0f / 60.0f);
+    return Body().u32(wowee::core::packWowPackedTime(date)).f32(1.0f / 60.0f);
 }
 
 WowDate date(int year, int month, int day, int hour, int minute) {
@@ -106,7 +106,7 @@ TEST_CASE("The login packet's date sets the realm clock to the minute until the 
     // And a packed date after that says nothing the clock does not know
     // better: the game-time packets move the hour and leave the clock alone.
     h.receive(Opcode::SMSG_GAMETIME_SET,
-              Body().u32(wowee::game::packWowPackedTime(date(2025, 10, 9, 20, 0))));
+              Body().u32(wowee::core::packWowPackedTime(date(2025, 10, 9, 20, 0))));
     h.pump();
     CHECK(realmSeconds(h) == Approx(kUnixTime + 7200.0).margin(0.05));
     CHECK(h.game().getGameTime() == Approx(20.0f).margin(0.01f));

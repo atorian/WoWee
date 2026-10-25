@@ -3,7 +3,6 @@
 #include "game/addon_event_queue.hpp"
 
 #include "game/quest_giver_status.hpp"
-#include "game/calendar_data.hpp"
 #include "game/craft_recipe.hpp"
 #include "game/game_interfaces.hpp"
 #include "game/action_bar_handler.hpp"
@@ -642,6 +641,7 @@ public:
     arena::IArenaTeamsFeed* arenaFeed() override;
     battleground::IBattlegroundsFeed* battlegroundFeed() override;
     lfg::ILfgFeed* lfgFeed() override;
+    calendar::ICalendarFeed* calendarFeed() override;
 
     // Money (copper)
     uint64_t getMoneyCopper() const { return inventoryHandler_->moneyCopper(); }
@@ -878,38 +878,6 @@ public:
     void respondBfMgrQueueInvite(uint32_t battleId, bool accept);
     void requestBfMgrExit(uint32_t battleId);
 
-    // WotLK Calendar
-    uint32_t getCalendarPendingInvites() const { return calendarPendingInvites_; }
-    void requestCalendar(); ///< Send CMSG_CALENDAR_GET_CALENDAR to the server
-    /// The calendar the server last sent, empty until it has answered one.
-    const CalendarData& getCalendarData() const { return calendarData_; }
-    /// The event the server last sent in full, empty until one is opened.
-    const CalendarEventDetail& getCalendarEventDetail() const {
-        return calendarEventDetail_;
-    }
-    /// Invite someone to an event, or to one not yet created.
-    void inviteToCalendarEvent(uint64_t eventId, uint64_t inviteId,
-                               const std::string& name, bool isPreInvite,
-                               bool isGuildEvent);
-    /// Set another invitee's status or moderator rank.
-    void setCalendarInviteStatus(uint64_t inviteeGuid, uint64_t eventId,
-                                 uint64_t inviteId, uint8_t status);
-    void setCalendarInviteModerator(uint64_t inviteeGuid, uint64_t eventId,
-                                    uint64_t inviteId, uint8_t rank);
-    /// Edit an existing event, and delete one.
-    void updateCalendarEvent(uint64_t eventId, uint64_t inviteId,
-                             const CalendarEventDraft& draft);
-    void removeCalendarEvent(uint64_t eventId, uint64_t inviteId);
-    /// Invite the guild by level and rank filter.
-    void massInviteGuildToCalendarEvent(uint32_t minLevel, uint32_t maxLevel,
-                                        uint32_t minRank);
-    /// Ask the server for one event's detail: CMSG_CALENDAR_GET_EVENT.
-    void requestCalendarEvent(uint64_t eventId);
-    /// Send a staged event to the server.
-    void createCalendarEvent(const CalendarEventDraft& draft);
-    /// Answer an invitation. Status is a CalendarInviteStatus.
-    void respondToCalendarInvite(uint64_t eventId, uint64_t inviteId,
-                                 uint32_t status);
     void queryGuildInfo(uint32_t guildId);
     void createGuild(const std::string& guildName);
     void addGuildRank(const std::string& rankName);
@@ -4166,13 +4134,6 @@ private:
     /// window.
     void noteNpcAnswered() { pendingNpcHello_.guid = 0; }
     float       areaSpiritHealerSeconds_ = 0.0f;
-
-    // ---- WotLK Calendar: pending invite counter ----
-    uint32_t    calendarPendingInvites_ = 0; ///< Unacknowledged calendar invites (SMSG_CALENDAR_SEND_NUM_PENDING)
-    /// The whole calendar, as of the server's last answer to a request for it.
-    CalendarData calendarData_;
-    /// One event in full, as of the last one opened.
-    CalendarEventDetail calendarEventDetail_;
 
     /// What this hears from its own domains. Last, so it ends before anything
     /// a handler uses goes.

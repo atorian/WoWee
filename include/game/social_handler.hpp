@@ -5,7 +5,6 @@
 #include "game/opcodes.hpp"
 #include "game/group_defines.hpp"
 #include "game/handler_types.hpp"
-#include "game/calendar_data.hpp"
 #include "network/packet.hpp"
 #include <array>
 #include <chrono>
@@ -25,6 +24,7 @@ namespace petition { class IPetitionsFeed; }
 namespace arena { class IArenaTeamsFeed; }
 namespace battleground { class IBattlegroundsFeed; }
 namespace lfg { class ILfgFeed; }
+namespace calendar { class ICalendarFeed; }
 namespace game {
 
 class PacketSender;
@@ -97,6 +97,8 @@ public:
     [[nodiscard]] virtual battleground::IBattlegroundsFeed* battlegroundFeed() = 0;
     /// Where the dungeon finder's packets go; null when the client was built without it.
     [[nodiscard]] virtual lfg::ILfgFeed* lfgFeed() = 0;
+    /// Where the calendar's packets go; null when the client was built without it.
+    [[nodiscard]] virtual calendar::ICalendarFeed* calendarFeed() = 0;
 
     // ---- The appearance switches the realm keeps with the character ----
     [[nodiscard]] virtual bool showingHelm() const = 0;
@@ -389,36 +391,6 @@ public:
     void declineBfMgrInvite();
     void respondBfMgrQueueInvite(uint32_t battleId, bool accept);
     void requestBfMgrExit(uint32_t battleId);
-
-    // Calendar
-    void requestCalendar();
-    /// Invite someone: CMSG_CALENDAR_EVENT_INVITE. A pre-invite belongs to an
-    /// event that has not been created yet, and carries no event id.
-    void inviteToCalendarEvent(uint64_t eventId, uint64_t inviteId,
-                               const std::string& name, bool isPreInvite,
-                               bool isGuildEvent);
-    /// Set another invitee's status, or their moderator rank. Both act on
-    /// someone else; the player's own answer is respondToCalendarInvite.
-    void setCalendarInviteStatus(uint64_t inviteeGuid, uint64_t eventId,
-                                 uint64_t inviteId, uint8_t status);
-    void setCalendarInviteModerator(uint64_t inviteeGuid, uint64_t eventId,
-                                    uint64_t inviteId, uint8_t rank);
-    /// Edit an existing event: CMSG_CALENDAR_UPDATE_EVENT.
-    void updateCalendarEvent(uint64_t eventId, uint64_t inviteId,
-                             const CalendarEventDraft& draft);
-    /// Delete one: CMSG_CALENDAR_REMOVE_EVENT.
-    void removeCalendarEvent(uint64_t eventId, uint64_t inviteId);
-    /// Invite the guild by filter: CMSG_CALENDAR_GUILD_FILTER.
-    void massInviteGuildToCalendarEvent(uint32_t minLevel, uint32_t maxLevel,
-                                        uint32_t minRank);
-    /// Ask for one event's detail: CMSG_CALENDAR_GET_EVENT.
-    void requestCalendarEvent(uint64_t eventId);
-    /// Create an event: CMSG_CALENDAR_ADD_EVENT.
-    void createCalendarEvent(const CalendarEventDraft& draft);
-    /// Answer an invitation: CMSG_CALENDAR_EVENT_RSVP with a
-    /// CalendarInviteStatus (1 accepted, 2 declined, 8 tentative, 9 removed).
-    void respondToCalendarInvite(uint64_t eventId, uint64_t inviteId,
-                                 uint32_t status);
 
     // ---- Methods moved from GameHandler ----
     void sendSetDifficulty(uint32_t difficulty, bool raid = false);

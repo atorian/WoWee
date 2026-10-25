@@ -16,6 +16,7 @@ namespace petition { class IPetitionsFeed; }
 namespace arena { class IArenaTeamsFeed; }
 namespace battleground { class IBattlegroundsFeed; }
 namespace lfg { class ILfgFeed; }
+namespace calendar { class ICalendarFeed; }
 namespace network { class WorldConnection; }
 
 namespace game {
@@ -70,6 +71,8 @@ struct GameServices {
     battleground::IBattlegroundsFeed* battlegroundFeed = nullptr;
     /// Where the dungeon finder's packets go. Set like contactsFeed.
     lfg::ILfgFeed* lfgFeed = nullptr;
+    /// Where the calendar's packets go. Set like contactsFeed.
+    calendar::ICalendarFeed* calendarFeed = nullptr;
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };

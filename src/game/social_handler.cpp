@@ -9,6 +9,10 @@
 #include "game/arena_gateway.hpp"
 #include "game/battleground_gateway.hpp"
 #include "game/lfg_gateway.hpp"
+#include "game/calendar_gateway.hpp"
+#include "game/calendar_data.hpp"
+#include "calendar/domain/records.hpp"
+#include "calendar/services/calendar.hpp"
 #include "lfg/domain/records.hpp"
 #include "lfg/services/lfg.hpp"
 #include "battleground/services/battlegrounds.hpp"
@@ -404,6 +408,14 @@ static lfg::ILfgFeed* lfgFeed(SocialQueries& queries) {
     return feed;
 }
 
+static calendar::ICalendarFeed* calendarFeed(SocialQueries& queries) {
+    auto* feed = queries.calendarFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("The calendar is not wired into this client; calendar packets are dropped and it stays empty");
+    return feed;
+}
+
 static contacts::IContactsServerFeed* contactsFeed(SocialQueries& queries) {
     auto* feed = queries.contactsFeed();
     static bool said = false;
@@ -439,6 +451,8 @@ SocialHandler::SocialHandler(PacketSender& sender, FrameXmlEvents& frameXml, cor
         subscriptions_.push_back(std::move(subscription));
     for (auto& subscription : subscribeLfgNotices(events_, chat_, frameXml_, queries_))
         subscriptions_.push_back(std::move(subscription));
+    for (auto& subscription : subscribeCalendarNotices(events_, chat_, frameXml_, queries_))
+        subscriptions_.push_back(std::move(subscription));
     // The character's social state is the server's to say at every login:
     // SMSG_GROUP_LIST comes with it for a character in a party, the guild
     // and the queues with theirs. Kept, the last session's party stood for
@@ -455,6 +469,7 @@ SocialHandler::SocialHandler(PacketSender& sender, FrameXmlEvents& frameXml, cor
             if (auto* feed = arenaFeed(queries_)) feed->beginCharacter();
             if (auto* feed = battlegroundFeed(queries_)) feed->beginCharacter();
             if (auto* feed = lfgFeed(queries_)) feed->beginCharacter();
+            if (auto* feed = calendarFeed(queries_)) feed->beginCharacter();
         }));
 }
 
@@ -843,6 +858,114 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
         if (!packet.hasRemaining(8)) return;
         const uint64_t guid = packet.readUInt64();
         if (auto* feed = battlegroundFeed(queries_)) feed->onPlayerLeft(guid);
+    };
+
+    // ---- Calendar ----
+    // One event in full, in answer to opening it.
+    table[Opcode::SMSG_CALENDAR_SEND_EVENT] = [this](network::Packet& packet) {
+        calendar::CalendarEventDetail parsed;
+        if (!parseCalendarSendEvent(packet, parsed)) {
+            LOG_WARNING("SMSG_CALENDAR_SEND_EVENT: could not be read whole; "
+                        "keeping the previous event rather than a partial one");
+            packet.skipAll();
+            return;
+        }
+        LOG_INFO("SMSG_CALENDAR_SEND_EVENT: '", parsed.title, "' with ", parsed.invitees.size(), " invitee(s)");
+        packet.skipAll();
+        if (auto* feed = calendarFeed(queries_)) feed->onEvent(std::move(parsed));
+    };
+    // The whole calendar, in answer to a request for it.
+    //
+    // Six lists back to back with no length prefix on any of them, so this is
+    // parsed in one place with a test rather than read inline - a row taken
+    // one field wrong slides everything after it and the next count is read
+    // out of the middle of a string, which fails silently and completely.
+    // See parseCalendarSendCalendar.
+    table[Opcode::SMSG_CALENDAR_SEND_CALENDAR] = [this](network::Packet& packet) {
+        calendar::CalendarData parsed;
+        if (!parseCalendarSendCalendar(packet, parsed)) {
+            LOG_WARNING("SMSG_CALENDAR_SEND_CALENDAR: could not be read whole; "
+                        "keeping the previous calendar rather than a partial one");
+            packet.skipAll();
+            return;
+        }
+        LOG_INFO("SMSG_CALENDAR_SEND_CALENDAR: ", parsed.events.size(), " event(s), ",
+                 parsed.invites.size(), " invite(s), ", parsed.lockouts.size(), " raid lockout(s), ",
+                 parsed.holidays.size(), " holiday(s)");
+        packet.skipAll();
+        if (auto* feed = calendarFeed(queries_)) feed->onCalendar(std::move(parsed));
+    };
+    // uint32 numPending - the number of unanswered calendar invites.
+    table[Opcode::SMSG_CALENDAR_SEND_NUM_PENDING] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(4)) return;
+        const uint32_t numPending = packet.readUInt32();
+        LOG_DEBUG("SMSG_CALENDAR_SEND_NUM_PENDING: ", numPending, " pending invites");
+        if (auto* feed = calendarFeed(queries_)) feed->onPendingCount(numPending);
+    };
+    // uint32 command + uint8 result + cstring info. Zero is success, which the
+    // server answers with nothing else to say.
+    table[Opcode::SMSG_CALENDAR_COMMAND_RESULT] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(5)) { packet.skipAll(); return; }
+        /*uint32_t command =*/ packet.readUInt32();
+        const uint8_t result = packet.readUInt8();
+        packet.skipAll();
+        if (result == 0) return;
+        if (auto* feed = calendarFeed(queries_)) feed->onCommandRefused(calendarCommandRefusal(result));
+    };
+    table[Opcode::SMSG_CALENDAR_EVENT_INVITE_ALERT] = [this](network::Packet& packet) {
+        // eventId(8) + title(cstring) + eventTime(4, packed) + flags(4) +
+        // eventType(4) + dungeonId(4, signed) + inviteId(8) + status(1) +
+        // rank(1) + creatorGuid(packed) + senderGuid(packed).
+        //
+        // Only the id and the title are read; the rest is skipped.
+        if (!packet.hasRemaining(9)) { packet.skipAll(); return; }
+        /*uint64_t eventId =*/ packet.readUInt64();
+        std::string title = packet.hasData() ? packet.readString() : "";
+        packet.skipAll();
+        LOG_INFO("SMSG_CALENDAR_EVENT_INVITE_ALERT: title='", title, "'");
+        if (auto* feed = calendarFeed(queries_)) feed->onInviteAlert(std::move(title));
+    };
+    // The player's own answer to an invitation changed.
+    // inviteId(8) + eventId(8) + eventType(1) + flags(4) + inviteTime(8) +
+    // status(1) + rank(1) + isGuildEvent(1) + title(cstring)
+    table[Opcode::SMSG_CALENDAR_EVENT_STATUS] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(31)) { packet.skipAll(); return; }
+        /*uint64_t inviteId =*/ packet.readUInt64();
+        /*uint64_t eventId  =*/ packet.readUInt64();
+        /*uint8_t  evType   =*/ packet.readUInt8();
+        /*uint32_t flags    =*/ packet.readUInt32();
+        /*uint64_t invTime  =*/ packet.readUInt64();
+        const uint8_t status = packet.readUInt8();
+        /*uint8_t rank      =*/ packet.readUInt8();
+        /*uint8_t isGuild   =*/ packet.readUInt8();
+        std::string title = packet.hasData() ? packet.readString() : "";
+        packet.skipAll();
+        if (auto* feed = calendarFeed(queries_)) feed->onInviteStatus(status, std::move(title));
+    };
+    // uint64 inviteId + uint64 eventId + uint32 mapId + uint32 difficulty + uint64 resetTime
+    table[Opcode::SMSG_CALENDAR_RAID_LOCKOUT_ADDED] = [this](network::Packet& packet) {
+        if (packet.hasRemaining(28)) {
+            /*uint64_t inviteId =*/ packet.readUInt64();
+            /*uint64_t eventId  =*/ packet.readUInt64();
+            const uint32_t mapId = packet.readUInt32();
+            const uint32_t difficulty = packet.readUInt32();
+            /*uint64_t resetTime =*/ packet.readUInt64();
+            LOG_DEBUG("SMSG_CALENDAR_RAID_LOCKOUT_ADDED: mapId=", mapId, " difficulty=", difficulty);
+            if (auto* feed = calendarFeed(queries_)) feed->onLockoutAdded(mapId, difficulty);
+        }
+        packet.skipAll();
+    };
+    // uint64 inviteId + uint64 eventId + uint32 mapId + uint32 difficulty
+    table[Opcode::SMSG_CALENDAR_RAID_LOCKOUT_REMOVED] = [this](network::Packet& packet) {
+        if (packet.hasRemaining(20)) {
+            /*uint64_t inviteId =*/ packet.readUInt64();
+            /*uint64_t eventId  =*/ packet.readUInt64();
+            const uint32_t mapId = packet.readUInt32();
+            const uint32_t difficulty = packet.readUInt32();
+            LOG_DEBUG("SMSG_CALENDAR_RAID_LOCKOUT_REMOVED: mapId=", mapId, " difficulty=", difficulty);
+            if (auto* feed = calendarFeed(queries_)) feed->onLockoutRemoved(mapId, difficulty);
+        }
+        packet.skipAll();
     };
 
     // ---- Instance ----
@@ -3417,173 +3540,6 @@ void SocialHandler::requestBfMgrExit(uint32_t battleId) {
     sendBfMgrResponse(Opcode::CMSG_BATTLEFIELD_MGR_EXIT_REQUEST,
                       battleId, false, false);
     LOG_INFO("requestBfMgrExit: battle ", battleId);
-}
-
-// ============================================================
-// Calendar
-// ============================================================
-
-void SocialHandler::inviteToCalendarEvent(uint64_t eventId, uint64_t inviteId,
-                                          const std::string& name,
-                                          bool isPreInvite, bool isGuildEvent) {
-    if (!sender_.characterInWorld()) return;
-    // eventId, inviteId, name, isPreInvite, isGuildEvent - CalendarHandler.cpp:515.
-    // The two flags are ByteBuffer bools, which are one byte each on the wire.
-    network::Packet pkt(wireOpcode(Opcode::CMSG_CALENDAR_EVENT_INVITE));
-    pkt.writeUInt64(eventId);
-    pkt.writeUInt64(inviteId);
-    pkt.writeString(name);
-    pkt.writeUInt8(isPreInvite ? 1 : 0);
-    pkt.writeUInt8(isGuildEvent ? 1 : 0);
-    sender_.send(pkt);
-    LOG_INFO("inviteToCalendarEvent: '", name, "' to event ", eventId,
-             isPreInvite ? " (before it is created)" : "");
-}
-
-void SocialHandler::massInviteGuildToCalendarEvent(uint32_t minLevel,
-                                                   uint32_t maxLevel,
-                                                   uint32_t minRank) {
-    if (!sender_.characterInWorld()) return;
-    // Its own opcode, not an invite with the name left out: the server picks
-    // the members itself from these three bounds and never sees a name
-    // (CalendarHandler.cpp:198, and Guild::MassInviteToEvent behind it).
-    network::Packet pkt(wireOpcode(Opcode::CMSG_CALENDAR_GUILD_FILTER));
-    pkt.writeUInt32(minLevel);
-    pkt.writeUInt32(maxLevel);
-    pkt.writeUInt32(minRank);
-    sender_.send(pkt);
-    LOG_INFO("massInviteGuildToCalendarEvent: levels ", minLevel, "-", maxLevel,
-             ", rank ", minRank, " and above");
-}
-
-void SocialHandler::updateCalendarEvent(uint64_t eventId, uint64_t inviteId,
-                                        const CalendarEventDraft& draft) {
-    if (!sender_.characterInWorld()) return;
-    // The same body as adding, with the event and invite ids in front of it
-    // (CalendarHandler.cpp:360). Written out rather than shared with
-    // createCalendarEvent: the two are the same shape today and are two
-    // different opcodes, and folding them together would make the next change
-    // to one silently change the other.
-    network::Packet pkt(wireOpcode(Opcode::CMSG_CALENDAR_UPDATE_EVENT));
-    pkt.writeUInt64(eventId);
-    pkt.writeUInt64(inviteId);
-    pkt.writeString(draft.title);
-    pkt.writeString(draft.description);
-    pkt.writeUInt8(draft.type);
-    pkt.writeUInt8(draft.repeatOption);
-    pkt.writeUInt32(draft.maxInvites);
-    pkt.writeUInt32(static_cast<uint32_t>(draft.dungeonId));
-    pkt.writeUInt32(packWowPackedTime(draft.eventTime));
-    pkt.writeUInt32(packWowPackedTime(draft.eventTime));
-    pkt.writeUInt32(draft.flags);
-    sender_.send(pkt);
-    LOG_INFO("updateCalendarEvent: ", eventId, " '", draft.title, "'");
-}
-
-void SocialHandler::removeCalendarEvent(uint64_t eventId, uint64_t inviteId) {
-    if (!sender_.characterInWorld()) return;
-    // The server reads the id and discards the rest, but the rest is still
-    // written: it calls rfinish() rather than stopping, so a short packet is
-    // a short read on its side rather than a tidy one.
-    network::Packet pkt(wireOpcode(Opcode::CMSG_CALENDAR_REMOVE_EVENT));
-    pkt.writeUInt64(eventId);
-    pkt.writeUInt64(inviteId);
-    pkt.writeUInt32(0);   // flags
-    sender_.send(pkt);
-    LOG_INFO("removeCalendarEvent: ", eventId);
-}
-
-void SocialHandler::setCalendarInviteStatus(uint64_t inviteeGuid,
-                                            uint64_t eventId, uint64_t inviteId,
-                                            uint8_t status) {
-    if (!sender_.characterInWorld()) return;
-    // packedGuid invitee, eventId, inviteId, ownerInviteId, status
-    // (CalendarHandler.cpp:695). Setting someone *else's* status, which is what
-    // an event's owner does to confirm or bench them - the player's own answer
-    // is CMSG_CALENDAR_EVENT_RSVP and a different packet entirely.
-    network::Packet pkt(wireOpcode(Opcode::CMSG_CALENDAR_EVENT_STATUS));
-    pkt.writePackedGuid(inviteeGuid);
-    pkt.writeUInt64(eventId);
-    pkt.writeUInt64(inviteId);
-    pkt.writeUInt64(0);   // ownerInviteId
-    pkt.writeUInt8(status);
-    sender_.send(pkt);
-    LOG_INFO("setCalendarInviteStatus: invitee ", inviteeGuid, " status ", status);
-}
-
-void SocialHandler::setCalendarInviteModerator(uint64_t inviteeGuid,
-                                               uint64_t eventId,
-                                               uint64_t inviteId, uint8_t rank) {
-    if (!sender_.characterInWorld()) return;
-    // The same shape with a rank in place of the status
-    // (CalendarHandler.cpp:727).
-    network::Packet pkt(wireOpcode(Opcode::CMSG_CALENDAR_EVENT_MODERATOR_STATUS));
-    pkt.writePackedGuid(inviteeGuid);
-    pkt.writeUInt64(eventId);
-    pkt.writeUInt64(inviteId);
-    pkt.writeUInt64(0);   // ownerInviteId
-    pkt.writeUInt8(rank);
-    sender_.send(pkt);
-    LOG_INFO("setCalendarInviteModerator: invitee ", inviteeGuid, " rank ", rank);
-}
-
-void SocialHandler::requestCalendarEvent(uint64_t eventId) {
-    if (!sender_.characterInWorld()) return;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_CALENDAR_GET_EVENT));
-    pkt.writeUInt64(eventId);
-    sender_.send(pkt);
-    LOG_INFO("requestCalendarEvent: ", eventId);
-}
-
-void SocialHandler::createCalendarEvent(const CalendarEventDraft& draft) {
-    if (!sender_.characterInWorld()) return;
-    // title, description, type, repeatable, maxInvites, dungeonId, then two
-    // packed times and the flags - CalendarHandler.cpp:228.
-    //
-    // The second time is unused by the server (it is stored and never read),
-    // but it is read off the wire, so leaving it out shifts the flags into it
-    // and the flags off the end.
-    network::Packet pkt(wireOpcode(Opcode::CMSG_CALENDAR_ADD_EVENT));
-    pkt.writeString(draft.title);
-    pkt.writeString(draft.description);
-    pkt.writeUInt8(draft.type);
-    pkt.writeUInt8(draft.repeatOption);
-    pkt.writeUInt32(draft.maxInvites);
-    pkt.writeUInt32(static_cast<uint32_t>(draft.dungeonId));
-    pkt.writeUInt32(packWowPackedTime(draft.eventTime));
-    pkt.writeUInt32(packWowPackedTime(draft.eventTime));
-    pkt.writeUInt32(draft.flags);
-    sender_.send(pkt);
-    LOG_INFO("createCalendarEvent: '", draft.title, "' type ", draft.type,
-             " on ", draft.eventTime.day, "/", draft.eventTime.month, "/",
-             draft.eventTime.fullYear());
-}
-
-void SocialHandler::respondToCalendarInvite(uint64_t eventId, uint64_t inviteId,
-                                            uint32_t status) {
-    if (!sender_.characterInWorld()) return;
-    // uint64 eventId, uint64 inviteId, uint32 status - CalendarHandler.cpp:630.
-    // The status is a CalendarInviteStatus: 1 accepted, 2 declined, 8
-    // tentative, 9 removed. The server answers with an event-status alert and
-    // clears the pending action, so nothing is assumed here.
-    network::Packet pkt(wireOpcode(Opcode::CMSG_CALENDAR_EVENT_RSVP));
-    pkt.writeUInt64(eventId);
-    pkt.writeUInt64(inviteId);
-    pkt.writeUInt32(status);
-    sender_.send(pkt);
-    LOG_INFO("respondToCalendarInvite: event ", eventId, " invite ", inviteId,
-             " status ", status);
-}
-
-void SocialHandler::requestCalendar() {
-    if (!sender_.characterInWorld()) return;
-    // CMSG_CALENDAR_GET_CALENDAR has no payload
-    network::Packet pkt(wireOpcode(Opcode::CMSG_CALENDAR_GET_CALENDAR));
-    sender_.send(pkt);
-    LOG_INFO("requestCalendar: sent CMSG_CALENDAR_GET_CALENDAR");
-    // Also request pending invite count
-    network::Packet numPkt(wireOpcode(Opcode::CMSG_CALENDAR_GET_NUM_PENDING));
-    sender_.send(numPkt);
 }
 
 // ============================================================

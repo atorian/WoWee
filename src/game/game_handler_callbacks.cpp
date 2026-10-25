@@ -4,7 +4,7 @@
 #include "game/reputation_standing.hpp"
 #include "game/spell_description_eval.hpp"
 #include "game/gather_spells.hpp"
-#include "game/packed_time.hpp"
+#include "core/packed_time.hpp"
 #include "game/inventory_slots.hpp"
 #include "game/ui_errors.hpp"
 #include "game/game_utils.hpp"
@@ -1219,6 +1219,10 @@ battleground::IBattlegroundsFeed* GameHandler::battlegroundFeed() {
 
 lfg::ILfgFeed* GameHandler::lfgFeed() {
     return services_.lfgFeed;
+}
+
+calendar::ICalendarFeed* GameHandler::calendarFeed() {
+    return services_.calendarFeed;
 }
 
 void GameHandler::setGuildBankMoney(uint64_t money) {

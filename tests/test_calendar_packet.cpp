@@ -13,6 +13,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "game/calendar_data.hpp"
+#include "calendar/domain/records.hpp"
 #include "network/packet.hpp"
 
 #include <ctime>
@@ -20,6 +21,7 @@
 
 
 using namespace wowee::game;
+using namespace wowee::calendar;
 using wowee::network::Packet;
 
 namespace {
@@ -166,7 +168,7 @@ TEST_CASE("The event time unpacks as a date", "[calendar]") {
 
     // Same helper the achievement and guild parsers use, so the calendar
     // cannot drift into a fifth reading of the same field.
-    const WowDate expected = unpackWowPackedTime(0x09E1C000u);
+    const wowee::core::WowDate expected = wowee::core::unpackWowPackedTime(0x09E1C000u);
     CHECK(cal.events[0].eventTime.fullYear() == expected.fullYear());
     CHECK(cal.events[0].eventTime.month == expected.month);
     CHECK(cal.events[0].eventTime.day == expected.day);

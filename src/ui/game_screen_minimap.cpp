@@ -1,6 +1,7 @@
 #include "contacts/services/contacts.hpp"
 #include "battleground/services/battlegrounds.hpp"
 #include "lfg/services/lfg.hpp"
+#include "calendar/services/calendar.hpp"
 #include "rendering/view_distance.hpp"
 #include "game/group_defines.hpp"
 #include "game/weather_handler.hpp"
@@ -476,7 +477,7 @@ void GameScreen::renderMinimapIndicators(game::GameHandler& gameHandler, float c
         auto* expReg = services_.expansionRegistry;
         bool isWotLK = expReg && expReg->getActive() && expReg->getActive()->id == "wotlk";
         if (isWotLK) {
-            uint32_t calPending = gameHandler.getCalendarPendingInvites();
+            const uint32_t calPending = services_.calendar ? services_.calendar->getCalendarPendingInvites() : 0;
             if (calPending > 0) {
                 ImGui::SetNextWindowPos(ImVec2(indicatorX, nextIndicatorY), ImGuiCond_Always);
                 ImGui::SetNextWindowSize(ImVec2(indicatorW, kIndicatorH), ImGuiCond_Always);

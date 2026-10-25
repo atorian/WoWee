@@ -1,5 +1,5 @@
 #include "game/world_packets.hpp"
-#include "game/packed_time.hpp"
+#include "core/packed_time.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/opcodes.hpp"
 #include "game/character.hpp"

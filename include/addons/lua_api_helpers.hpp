@@ -963,6 +963,10 @@ battleground::IBattlegrounds* battlegroundsOf(lua_State* L);
 /// binding reads it without testing for it.
 lfg::ILfg& lfgOf(lua_State* L);
 
+/// The calendar as the composition root handed it to the addon layer, or an
+/// empty one that sends nothing when there is no game.
+calendar::ICalendar& calendarOf(lua_State* L);
+
 /// The team id at an arena team index, or zero when the index is off the end
 /// or there are no arena teams.
 ///

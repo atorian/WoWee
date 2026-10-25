@@ -101,6 +101,7 @@ BASE_HEADERS = {
     "core/local_time.hpp",
     "core/log_privacy.hpp",
     "core/logger.hpp",
+    "core/packed_time.hpp",
     "core/memory_monitor.hpp",
     "core/profiler.hpp",
     "core/thread_pool.hpp",

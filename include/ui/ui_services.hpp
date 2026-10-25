@@ -31,6 +31,7 @@ namespace who { class IWho; }
 namespace duel { class IDuels; }
 namespace battleground { class IBattlegrounds; }
 namespace lfg { class ILfg; }
+namespace calendar { class ICalendar; }
 namespace audio { class AudioCoordinator; }
 
 namespace ui {
@@ -62,6 +63,8 @@ struct UIServices {
     battleground::IBattlegrounds* battlegrounds = nullptr;
     /// The dungeon finder's queue and what it is doing.
     lfg::ILfg* lfg = nullptr;
+    /// The calendar, for the minimap's count of waiting invitations.
+    calendar::ICalendar* calendar = nullptr;
     /// The interface of the character in the world, in whatever state it is;
     /// null with no character in the world. Asked each time rather than held:
     /// each character has its own, and a /reload replaces it.

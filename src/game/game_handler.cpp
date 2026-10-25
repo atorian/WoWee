@@ -3409,55 +3409,6 @@ void GameHandler::requestBfMgrExit(uint32_t battleId) {
 
 // ---- WotLK Calendar ----
 
-void GameHandler::requestCalendar() {
-    socialHandler_->requestCalendar();
-}
-
-void GameHandler::inviteToCalendarEvent(uint64_t eventId, uint64_t inviteId,
-                                        const std::string& name,
-                                        bool isPreInvite, bool isGuildEvent) {
-    socialHandler_->inviteToCalendarEvent(eventId, inviteId, name,
-                                          isPreInvite, isGuildEvent);
-}
-
-void GameHandler::massInviteGuildToCalendarEvent(uint32_t minLevel,
-                                                 uint32_t maxLevel,
-                                                 uint32_t minRank) {
-    socialHandler_->massInviteGuildToCalendarEvent(minLevel, maxLevel, minRank);
-}
-
-void GameHandler::updateCalendarEvent(uint64_t eventId, uint64_t inviteId,
-                                      const CalendarEventDraft& draft) {
-    socialHandler_->updateCalendarEvent(eventId, inviteId, draft);
-}
-
-void GameHandler::removeCalendarEvent(uint64_t eventId, uint64_t inviteId) {
-    socialHandler_->removeCalendarEvent(eventId, inviteId);
-}
-
-void GameHandler::setCalendarInviteStatus(uint64_t inviteeGuid, uint64_t eventId,
-                                          uint64_t inviteId, uint8_t status) {
-    socialHandler_->setCalendarInviteStatus(inviteeGuid, eventId, inviteId, status);
-}
-
-void GameHandler::setCalendarInviteModerator(uint64_t inviteeGuid, uint64_t eventId,
-                                             uint64_t inviteId, uint8_t rank) {
-    socialHandler_->setCalendarInviteModerator(inviteeGuid, eventId, inviteId, rank);
-}
-
-void GameHandler::requestCalendarEvent(uint64_t eventId) {
-    socialHandler_->requestCalendarEvent(eventId);
-}
-
-void GameHandler::createCalendarEvent(const CalendarEventDraft& draft) {
-    socialHandler_->createCalendarEvent(draft);
-}
-
-void GameHandler::respondToCalendarInvite(uint64_t eventId, uint64_t inviteId,
-                                          uint32_t status) {
-    socialHandler_->respondToCalendarInvite(eventId, inviteId, status);
-}
-
 // ============================================================
 // Delegating getters - SocialHandler owns the canonical state
 // ============================================================

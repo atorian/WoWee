@@ -224,6 +224,7 @@ ClientHarness::ClientHarness()
     luaServices.arenaTeams = &game_.arenaTeams();
     luaServices.battlegrounds = &game_.battlegrounds();
     luaServices.lfg = &game_.lfg();
+    luaServices.calendar = &game_.calendar();
     playerView_->bindMovementControls(luaServices);
 
     core::ClientLoop::Services services{

@@ -3,7 +3,7 @@
 #include <cstdint>
 
 namespace wowee {
-namespace game {
+namespace core {
 
 /**
  * A date the server sent as a WoW "packed time" - one uint32 holding a whole
@@ -67,5 +67,5 @@ constexpr uint32_t packWowPackedTime(const WowDate& d) {
            (month << 20) | (year << 24);
 }
 
-}  // namespace game
+}  // namespace core
 }  // namespace wowee

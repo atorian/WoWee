@@ -76,6 +76,12 @@ EXPECTED = {
     # no assignment to them appears anywhere.
     "miscArg": "reference out-parameter of readCastResultArgs",
     "miscArg2": "reference out-parameter of readCastResultArgs",
+    # parseCalendarSendCalendar reads the holiday's texture through
+    # readTerminatedString(packet, holiday.textureFilename), which writes it by
+    # reference so a name cut off by the packet's end is refused. The calendar's
+    # records are a context's now, and this is the first time the tool reads
+    # them.
+    "textureFilename": "reference out-parameter of readTerminatedString",
 }
 
 MEMBER = re.compile(r"(?:\.|->)\s*(\w+)")
