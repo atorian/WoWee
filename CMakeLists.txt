@@ -752,6 +752,12 @@ set(WOWEE_SOURCES
     src/auth/pin_auth.cpp
     src/auth/integrity.cpp
     src/auth/client_timezone.cpp
+    src/mcp/mcp_server.cpp
+    src/mcp/http_transport.cpp
+    src/mcp/main_thread_queue.cpp
+    src/core/agent_bridge.cpp
+    src/ui/agent_controls.cpp
+    src/ui/agent_controls_apply.cpp
     src/auth/srp.cpp
     src/auth/big_num.cpp
     src/auth/crypto.cpp

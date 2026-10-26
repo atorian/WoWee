@@ -946,6 +946,36 @@ target_link_libraries(test_integrity_hash PRIVATE catch2_main OpenSSL::SSL OpenS
 add_test(NAME integrity_hash COMMAND test_integrity_hash)
 register_test_target(test_integrity_hash)
 
+# MCP over JSON-RPC, as the specification answers it.
+wowee_add_test(test_mcp_server
+    SOURCES test_mcp_server.cpp
+            ${CMAKE_SOURCE_DIR}/src/mcp/mcp_server.cpp)
+
+# The MCP endpoint over HTTP: parsing, who is let in, a real round trip.
+add_executable(test_mcp_http
+    test_mcp_http.cpp
+    ${TEST_COMMON_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/mcp/http_transport.cpp
+    ${CMAKE_SOURCE_DIR}/src/mcp/mcp_server.cpp
+)
+target_include_directories(test_mcp_http PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_mcp_http SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_mcp_http PRIVATE catch2_main Threads::Threads)
+add_test(NAME mcp_http COMMAND test_mcp_http)
+register_test_target(test_mcp_http)
+
+# Tool calls handed from the listener's thread to the frame loop.
+wowee_add_test(test_mcp_main_thread_queue
+    SOURCES test_mcp_main_thread_queue.cpp
+            ${CMAKE_SOURCE_DIR}/src/mcp/main_thread_queue.cpp
+            ${CMAKE_SOURCE_DIR}/src/mcp/mcp_server.cpp)
+target_link_libraries(test_mcp_main_thread_queue PRIVATE Threads::Threads)
+
+# An agent drives the character only while the player has handed control over.
+wowee_add_test(test_agent_controls
+    SOURCES test_agent_controls.cpp
+            ${CMAKE_SOURCE_DIR}/src/ui/agent_controls.cpp)
+
 # The LOGON_CHALLENGE timezone: the standard offset, as Wow.exe sends -Bias.
 wowee_add_test(test_client_timezone
     SOURCES test_client_timezone.cpp
