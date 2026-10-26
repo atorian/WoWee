@@ -1187,8 +1187,11 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                     std::chrono::steady_clock::now() - instanceStart).count();
                 if (instId) {
                     ft.m2InstanceIds.push_back(instId);
+                    // Counted even with no uniqueId: the instance may be one
+                    // another tile placed, and this tile's unload gives back a
+                    // reference it must have taken.
+                    placedDoodadIds.insert(p.uniqueId,instId);
                     if (p.uniqueId != 0) {
-                        placedDoodadIds.insert(p.uniqueId,instId);
                         ft.tileUniqueIds.push_back(p.uniqueId);
                     }
                     created++;

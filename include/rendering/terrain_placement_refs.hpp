@@ -6,15 +6,25 @@ namespace wowee::rendering {
 // An ADT placement may be mentioned by several tiles, including tiles at
 // different detail levels. The last resident reference owns its destruction.
 class TerrainPlacementRefs {
-    struct Entry { uint32_t uid, refs; bool detailed=false; std::vector<uint32_t> children; };
+    // Every uniqueId that resolved to the instance: the renderer hands back an
+    // instance it already has for the same model at the same spot, so two
+    // placements from neighbouring tiles can share one.
+    struct Entry { std::vector<uint32_t> uids; uint32_t refs; bool detailed=false; std::vector<uint32_t> children; };
     std::unordered_map<uint32_t,uint32_t> byUid_;
     std::unordered_map<uint32_t,Entry> byInstance_;
 public:
     size_t count(uint32_t uid) const { return byUid_.count(uid); }
     uint32_t at(uint32_t uid) const { return byUid_.at(uid); }
+    // A tile's reference to a placement it created. The instance may be one
+    // already held - the renderer deduplicated it - and is then one more
+    // reference to it, under one more uniqueId. Before, the second placement
+    // was mapped to the instance without being counted: the first tile to go
+    // destroyed the instance and left the other uniqueId pointing at nothing,
+    // which the next tile to retain it read through .at() and threw.
     void insert(uint32_t uid,uint32_t instance) {
-        byInstance_.emplace(instance,Entry{uid,1,false,{}});
-        if(uid) byUid_.emplace(uid,instance);
+        auto& entry=byInstance_.try_emplace(instance,Entry{{},0,false,{}}).first->second;
+        ++entry.refs;
+        if(uid && byUid_.emplace(uid,instance).second) entry.uids.push_back(uid);
     }
     uint32_t retain(uint32_t uid) {
         const uint32_t instance=byUid_.at(uid);
@@ -33,7 +43,7 @@ public:
         auto found=byInstance_.find(instance);
         if(found==byInstance_.end()) return true; // a non-ADT doodad owned solely by this tile
         if(--found->second.refs) return false;
-        if(found->second.uid) byUid_.erase(found->second.uid);
+        for(auto uid:found->second.uids) byUid_.erase(uid);
         byInstance_.erase(found);
         return true;
     }
