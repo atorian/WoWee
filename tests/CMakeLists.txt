@@ -932,6 +932,25 @@ target_link_libraries(test_warden_challenge PRIVATE catch2_main OpenSSL::SSL Ope
 add_test(NAME warden_challenge COMMAND test_warden_challenge)
 register_test_target(test_warden_challenge)
 
+# The LOGON_PROOF integrity hash of a 12340 client, checked against
+# TrinityCore's checksum when WOWEE_TEST_CLIENT_DIR names a client folder.
+add_executable(test_integrity_hash
+    test_integrity_hash.cpp
+    ${TEST_COMMON_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/auth/integrity.cpp
+    ${CMAKE_SOURCE_DIR}/src/auth/crypto.cpp
+)
+target_include_directories(test_integrity_hash PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_integrity_hash SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_integrity_hash PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
+add_test(NAME integrity_hash COMMAND test_integrity_hash)
+register_test_target(test_integrity_hash)
+
+# The LOGON_CHALLENGE timezone: the standard offset, as Wow.exe sends -Bias.
+wowee_add_test(test_client_timezone
+    SOURCES test_client_timezone.cpp
+            ${CMAKE_SOURCE_DIR}/src/auth/client_timezone.cpp)
+
 # Warden PE lookup must use the expansion selected by the asset manager.
 add_executable(test_warden_memory
     test_warden_memory.cpp
@@ -1299,6 +1318,10 @@ wowee_add_packet_test(test_battlefield_status_packet)
 # ── test_lfg_join_packet ─────────────────────────────────────
 # Every field of CMSG_LFG_JOIN, which was wrong in every field and silent.
 wowee_add_packet_test(test_lfg_join_packet)
+
+# ── test_auth_session_packet ─────────────────────────────────
+# The DoS proof-of-work in CMSG_AUTH_SESSION, which was sent as a constant zero.
+wowee_add_packet_test(test_auth_session_packet)
 
 # ── test_learn_talent_packet ─────────────────────────────────
 # The rank field counts from zero on the wire and from one everywhere else.

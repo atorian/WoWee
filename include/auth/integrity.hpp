@@ -24,8 +24,13 @@ bool computeIntegrityHashWin32(const std::array<uint8_t, 16>& checksumSalt,
                                std::string& outError);
 
 // Same as computeIntegrityHashWin32, but allows selecting the EXE filename used in the file set.
-// clientBuild controls which companion DLLs are included: Classic (<=6005)
-// needs fmod/ijl15/dbghelp/unicows; TBC/WotLK clients did not ship those.
+// clientBuild controls the file set: Classic (<=6005) hashes the files of the
+// exe, fmod, ijl15, dbghelp and unicows; 3.3.5a (12340) hashes the exe and
+// DivxDecoder.dll as loaded (loadedImageForIntegrity), then unicows.dll as a
+// file; other builds hash the exe file alone.
+//
+// DivxDecoder.dll is looked for beside the exe and then one folder up, where
+// the extractor leaves it.
 bool computeIntegrityHashWin32WithExe(const std::array<uint8_t, 16>& checksumSalt,
                                       const std::vector<uint8_t>& clientPublicKeyA,
                                       const std::string& miscDir,
@@ -33,6 +38,14 @@ bool computeIntegrityHashWin32WithExe(const std::array<uint8_t, 16>& checksumSal
                                       uint16_t clientBuild,
                                       std::array<uint8_t, 20>& outHash,
                                       std::string& outError);
+
+// A PE file as Wow.exe 12340 hashes a loaded module (OsVersionHash.cpp,
+// 0x871D20): the headers with e_csum cleared, then each section, each padded
+// with zeros to the section alignment; writable sections contribute zeros.
+// Returns false for a file that is not a well-formed PE image.
+bool loadedImageForIntegrity(const std::vector<uint8_t>& peFile,
+                             std::vector<uint8_t>& outImage,
+                             std::string& outError);
 
 } // namespace auth
 } // namespace wowee

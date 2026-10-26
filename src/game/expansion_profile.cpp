@@ -247,7 +247,8 @@ bool ExpansionRegistry::loadProfile(const std::string& jsonPath, const std::stri
         v = jsonValue(json, "platform"); if (!v.empty()) p.platform = v;
         v = jsonValue(json, "os"); if (!v.empty()) p.os = v;
         v = jsonValue(json, "locale"); if (!v.empty()) p.locale = v;
-        p.timezone = static_cast<uint32_t>(jsonInt(json, "timezone", static_cast<int>(p.timezone)));
+        if (!jsonValue(json, "timezone").empty())
+            p.timezone = static_cast<uint32_t>(jsonInt(json, "timezone"));
     }
     p.maxLevel = static_cast<uint32_t>(jsonInt(json, "maxLevel", 60));
 

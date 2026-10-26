@@ -45,9 +45,11 @@ std::string normalizeWowTextTokens(std::string text, const std::string& playerNa
  * Contains server seed/salt for authentication hash
  */
 struct AuthChallengeData {
-    uint32_t unknown1;      // Always seems to be 0x00000001
-    uint32_t serverSeed;    // Random seed from server
-    // Note: 3.3.5a has additional data after this
+    // WotLK only: the DoS proof-of-work the client must solve before
+    // CMSG_AUTH_SESSION (see AuthSessionPacket::solveDosChallenge).
+    uint32_t dosDifficulty = 0;
+    uint32_t serverSeed = 0;
+    std::array<uint8_t, 32> dosSeeds{};
 
     [[nodiscard]] bool isValid() const { return true; }
 };

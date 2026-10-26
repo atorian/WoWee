@@ -236,18 +236,24 @@ void GameHandler::handleAuthChallenge(network::Packet& packet) {
         return;
     }
 
-    // Store server seed
-    serverSeed = challenge.serverSeed;
-    LOG_DEBUG("Server seed: 0x", std::hex, serverSeed, std::dec);
+    LOG_DEBUG("Server seed: 0x", std::hex, challenge.serverSeed, std::dec);
 
     setState(WorldState::CHALLENGE_RECEIVED);
 
     // Send authentication session
-    sendAuthSession();
+    sendAuthSession(challenge);
 }
 
-void GameHandler::sendAuthSession() {
+void GameHandler::sendAuthSession(const AuthChallengeData& challenge) {
     LOG_INFO("Sending CMSG_AUTH_SESSION");
+
+    const auto dosResponse = AuthSessionPacket::solveDosChallenge(
+        accountName, challenge.dosSeeds, challenge.dosDifficulty);
+    if (!dosResponse) {
+        fail("SMSG_AUTH_CHALLENGE asks for an unsolvable DoS difficulty (" +
+             std::to_string(challenge.dosDifficulty) + ")");
+        return;
+    }
 
     // Build authentication packet
     auto packet = AuthSessionPacket::build(
@@ -255,8 +261,9 @@ void GameHandler::sendAuthSession() {
         accountName,
         clientSeed,
         sessionKey,
-        serverSeed,
-        realmId_
+        challenge.serverSeed,
+        realmId_,
+        *dosResponse
     );
 
     LOG_DEBUG("CMSG_AUTH_SESSION packet size: ", packet.getSize(), " bytes");
@@ -291,10 +298,16 @@ void GameHandler::handleAuthResponse(network::Packet& packet) {
     }
 
     if (!response.isSuccess()) {
+        // The code and the whole payload: a code this client has no name for
+        // is otherwise reported only as "unknown", which says nothing about
+        // what the server refused.
+        const auto& payload = packet.getData();
         char code[8];
         std::snprintf(code, sizeof(code), "0x%02X", static_cast<unsigned>(response.result));
         std::string reason = std::string("Authentication failed: ") +
-                           getAuthResultString(response.result) + " (code " + code + ")";
+                           getAuthResultString(response.result) +
+                           " (code " + code + ", payload " +
+                           core::toHexString(payload.data(), payload.size(), true) + ")";
         fail(reason);
         return;
     }
