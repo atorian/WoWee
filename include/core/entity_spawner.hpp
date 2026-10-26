@@ -674,6 +674,17 @@ private:
     void processPendingTransportRegistrations();
     void processPendingTransportDoodads();
 
+    /// A transport doodad's model, read and parsed on an I/O worker. model is
+    /// null when it cannot be used; warnings say why, and are logged on the
+    /// main thread for every doodad that asked for it.
+    struct PreparedTransportDoodad {
+        JobGroup::Token token;
+        std::shared_ptr<pipeline::M2Model> model;
+        std::vector<std::string> warnings;
+    };
+    void requestTransportDoodadModel(const std::string& m2Path);
+    const PreparedTransportDoodad* readyTransportDoodadModel(const std::string& m2Path);
+
     // --- Mount ---
     void processPendingMount();
     void processPendingRemotePlayerMounts();
@@ -827,6 +838,11 @@ public:
     std::vector<PendingWmoUpload> pendingWmoUploads_;
     std::vector<AsyncGameObjectLoad> asyncGameObjectLoads_;
     std::vector<PendingTransportDoodadBatch> pendingTransportDoodadBatches_;
+    /// Keyed by M2 path, so one read serves every doodad of that model.
+    std::unordered_map<std::string, JobGroup::Future<PreparedTransportDoodad>> asyncTransportDoodadLoads_;
+    /// Finished loads kept for the doodads still to be placed. Dropped once no
+    /// batch is pending.
+    std::unordered_map<std::string, PreparedTransportDoodad> preparedTransportDoodads_;
     uint32_t mountInstanceId_ = 0;
     uint32_t mountModelId_ = 0;
     uint32_t pendingMountDisplayId_ = 0;
