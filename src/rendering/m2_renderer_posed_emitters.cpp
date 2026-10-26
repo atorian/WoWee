@@ -36,45 +36,25 @@ void M2Renderer::setupEmitterResources(M2ModelGPU& gpuModel, const pipeline::M2M
         }
     }
 
-    // Pre-allocate one stable descriptor set per particle emitter to avoid per-frame allocation.
-    // This prevents materialDescPool_ exhaustion when many emitters are active each frame.
-    if (particleTexLayout_ && materialDescPool_ && !model.particleEmitters.empty()) {
-        VkDevice device = vkCtx_->getDevice();
+    // Each emitter's texture set, shared with every emitter of any model that
+    // draws the same texture with the same wrap mode: a set per emitter held
+    // the same image as its neighbours' and competed with the materials for
+    // materialDescPool_.
+    if (!model.particleEmitters.empty()) {
         gpuModel.particleTexSets.resize(model.particleEmitters.size(), VK_NULL_HANDLE);
         for (size_t ei = 0; ei < model.particleEmitters.size(); ei++) {
-            VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-            ai.descriptorPool = materialDescPool_;
-            ai.descriptorSetCount = 1;
-            ai.pSetLayouts = &particleTexLayout_;
-            if (vkCtx_->allocateDescriptorSets(ai, &gpuModel.particleTexSets[ei]) == VK_SUCCESS) {
-                // Valid, not merely non-null: descriptorInfo() returns the
-                // texture's handles as they are, so one whose upload failed
-                // writes a null view and sampler into a live descriptor and
-                // declares SHADER_READ_ONLY_OPTIMAL over it.
-                VkTexture* tex = gpuModel.particleTextures[ei];
-                if (!tex || !tex->isValid()) tex = whiteTexture_.get();
-                if (!tex || !tex->isValid()) continue;
-                // Wrapped as the model's slot says: the image is shared, and
-                // its own sampler is the cache's, not this emitter's.
-                const uint16_t slot = model.particleEmitters[ei].texture;
-                const uint8_t wrap = slot < model.textures.size()
-                    ? static_cast<uint8_t>(model.textures[slot].flags & 0x3) : 0;
-                VkDescriptorImageInfo imgInfo = batchImageInfo(*tex, wrap);
-                VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-                write.dstSet = gpuModel.particleTexSets[ei];
-                write.dstBinding = 0;
-                write.descriptorCount = 1;
-                write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                write.pImageInfo = &imgInfo;
-                vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-            }
+            // Wrapped as the model's slot says: the image is shared, and
+            // its own sampler is the cache's, not this emitter's.
+            const uint16_t slot = model.particleEmitters[ei].texture;
+            const uint8_t wrap = slot < model.textures.size()
+                ? static_cast<uint8_t>(model.textures[slot].flags & 0x3) : 0;
+            gpuModel.particleTexSets[ei] = acquireEmitterTexSet(gpuModel, gpuModel.particleTextures[ei], wrap);
         }
     }
 
     // Copy ribbon emitter data and resolve textures
     gpuModel.ribbonEmitters = model.ribbonEmitters;
     if (!model.ribbonEmitters.empty()) {
-        VkDevice device = vkCtx_->getDevice();
         gpuModel.ribbonTextures.resize(model.ribbonEmitters.size(), whiteTexture_.get());
         gpuModel.ribbonTexSets.resize(model.ribbonEmitters.size(), VK_NULL_HANDLE);
         gpuModel.ribbonBlendModes.resize(model.ribbonEmitters.size(), 2);
@@ -99,28 +79,9 @@ void M2Renderer::setupEmitterResources(M2ModelGPU& gpuModel, const pipeline::M2M
                 LOG_WARNING("M2 '", model.name, "' ribbon emitter[", ri, "] material ", matIdx,
                             " of ", model.materials.size(), " is out of range - ribbon alpha-blended");
             }
-            // Allocate descriptor set (reuse particleTexLayout_ = single sampler)
-            if (particleTexLayout_ && materialDescPool_) {
-                VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-                ai.descriptorPool = materialDescPool_;
-                ai.descriptorSetCount = 1;
-                ai.pSetLayouts = &particleTexLayout_;
-                if (vkCtx_->allocateDescriptorSets(ai, &gpuModel.ribbonTexSets[ri]) == VK_SUCCESS) {
-                    VkTexture* tex = gpuModel.ribbonTextures[ri];
-                    if (!tex || !tex->isValid()) tex = whiteTexture_.get();
-                    if (!tex || !tex->isValid()) continue;
-                    const uint8_t wrap = texDirect < model.textures.size()
-                        ? static_cast<uint8_t>(model.textures[texDirect].flags & 0x3) : 0;
-                    VkDescriptorImageInfo imgInfo = batchImageInfo(*tex, wrap);
-                    VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-                    write.dstSet = gpuModel.ribbonTexSets[ri];
-                    write.dstBinding = 0;
-                    write.descriptorCount = 1;
-                    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                    write.pImageInfo = &imgInfo;
-                    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-                }
-            }
+            const uint8_t wrap = texDirect < model.textures.size()
+                ? static_cast<uint8_t>(model.textures[texDirect].flags & 0x3) : 0;
+            gpuModel.ribbonTexSets[ri] = acquireEmitterTexSet(gpuModel, gpuModel.ribbonTextures[ri], wrap);
         }
         LOG_DEBUG("  Ribbon emitters loaded: ", model.ribbonEmitters.size());
     }
@@ -193,22 +154,10 @@ void M2Renderer::unloadPosedEmitterModel(uint32_t handle) {
         }
     }
 
-    // The descriptor sets may still be bound by frames in flight. They go
-    // back to the pool once every frame slot has been fenced - unless the
-    // pool has been reset or destroyed by then, which frees them already and
-    // makes freeing them again an error.
-    std::vector<VkDescriptorSet> sets;
-    for (VkDescriptorSet set : it->second.gpu.particleTexSets) if (set) sets.push_back(set);
-    for (VkDescriptorSet set : it->second.gpu.ribbonTexSets) if (set) sets.push_back(set);
+    // Its texture sets may still be bound by frames in flight; the last use
+    // of a shared one gives it back after the fences.
+    releaseEmitterTexSets(it->second.gpu);
     posedEmitterModels_.erase(it);
-    if (sets.empty() || !vkCtx_ || !materialDescPool_) return;
-    vkCtx_->deferAfterAllFrameFences(
-        [ctx = vkCtx_, pool = materialDescPool_,
-         generation = materialPoolGeneration_, expected = *materialPoolGeneration_,
-         sets = std::move(sets)]() {
-            if (*generation != expected) return;
-            ctx->freeDescriptorSets(pool, static_cast<uint32_t>(sets.size()), sets.data());
-        });
 }
 
 bool M2Renderer::hasPosedEmitterModel(uint32_t handle) const {
@@ -273,17 +222,65 @@ void M2Renderer::updatePosedEmitters(float dt) {
 void M2Renderer::destroyPosedEmitterModels() {
     // Called with the device idle, before the material pool is reset or
     // destroyed: the sets go back to it now.
-    if (vkCtx_ && materialDescPool_) {
-        for (auto& [handle, model] : posedEmitterModels_) {
-            for (VkDescriptorSet set : model.gpu.particleTexSets)
-                if (set) vkCtx_->freeDescriptorSets(materialDescPool_, 1, &set);
-            for (VkDescriptorSet set : model.gpu.ribbonTexSets)
-                if (set) vkCtx_->freeDescriptorSets(materialDescPool_, 1, &set);
-        }
-    }
+    for (auto& [handle, model] : posedEmitterModels_) releaseEmitterTexSets(model.gpu);
     scene_->posedEmitters_.clear();
     posedEmitterModels_.clear();
     ++*materialPoolGeneration_;
+}
+
+VkDescriptorSet M2Renderer::acquireEmitterTexSet(M2ModelGPU& gpu, VkTexture* texture, uint8_t wrap) {
+    // Valid, not merely non-null: descriptorInfo() returns the texture's
+    // handles as they are, so one whose upload failed writes a null view and
+    // sampler into a live descriptor and declares SHADER_READ_ONLY_OPTIMAL
+    // over it.
+    if (!texture || !texture->isValid()) texture = whiteTexture_.get();
+    if (!texture || !texture->isValid() || !particleTexLayout_ || !materialDescPool_) return VK_NULL_HANDLE;
+
+    const M2EmitterTexKey key{texture, wrap};
+    SharedEmitterSet& shared = emitterTexSets_[key];
+    if (!shared.set) {
+        VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = materialDescPool_;
+        ai.descriptorSetCount = 1;
+        ai.pSetLayouts = &particleTexLayout_;
+        if (vkCtx_->allocateDescriptorSets(ai, &shared.set) != VK_SUCCESS) {
+            LOG_WARNING("M2 emitter texture set: materialDescPool_ is exhausted");
+            emitterTexSets_.erase(key);
+            return VK_NULL_HANDLE;
+        }
+        VkDescriptorImageInfo imgInfo = batchImageInfo(*texture, wrap);
+        VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = shared.set;
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &imgInfo;
+        vkUpdateDescriptorSets(vkCtx_->getDevice(), 1, &write, 0, nullptr);
+    }
+    shared.users++;
+    gpu.emitterTexKeys.push_back(key);
+    return shared.set;
+}
+
+void M2Renderer::releaseEmitterTexSets(M2ModelGPU& gpu) {
+    std::vector<VkDescriptorSet> unused;
+    for (const M2EmitterTexKey& key : gpu.emitterTexKeys) {
+        auto it = emitterTexSets_.find(key);
+        if (it == emitterTexSets_.end()) continue;
+        if (--it->second.users > 0) continue;
+        // Out of the map at once, so a texture later made at this address
+        // gets a set of its own; the set itself after the frames in flight.
+        unused.push_back(it->second.set);
+        emitterTexSets_.erase(it);
+    }
+    // The per-emitter set vectors stay as they are: a frame still being
+    // recorded may read them, and the sets they name are freed only after
+    // the frames in flight.
+    gpu.emitterTexKeys.clear();
+    if (unused.empty() || !vkCtx_ || !materialDescPool_) return;
+    vkCtx_->deferAfterAllFrameFences([ctx = vkCtx_, pool = materialDescPool_, sets = std::move(unused)]() {
+        ctx->freeDescriptorSets(pool, static_cast<uint32_t>(sets.size()), sets.data());
+    });
 }
 
 } // namespace rendering

@@ -72,6 +72,14 @@ inline constexpr uint32_t kMaxBonesPerInstance = 512;
 /**
  * GPU representation of an M2 model
  */
+/// What an emitter's texture set (set 1) holds: the image, and the wrap mode
+/// of the model's texture slot it came from, which picks the sampler.
+struct M2EmitterTexKey {
+    const VkTexture* texture = nullptr;
+    uint8_t wrap = 0;
+    bool operator==(const M2EmitterTexKey&) const = default;
+};
+
 struct M2ModelGPU {
     struct BatchGPU {
         VkTexture* texture = nullptr;  // from cache, NOT owned
@@ -201,13 +209,16 @@ struct M2ModelGPU {
     // Particle emitter data (kept from M2Model)
     std::vector<pipeline::M2ParticleEmitter> particleEmitters;
     std::vector<VkTexture*> particleTextures;    // Resolved Vulkan textures per emitter
-    std::vector<VkDescriptorSet> particleTexSets; // Pre-allocated descriptor sets per emitter (stable, avoids per-frame alloc)
+    std::vector<VkDescriptorSet> particleTexSets; // Each emitter's set, shared with every emitter of that texture and wrap
 
     // Ribbon emitter data (kept from M2Model)
     std::vector<pipeline::M2RibbonEmitter> ribbonEmitters;
     std::vector<VkTexture*> ribbonTextures;       // Resolved texture per ribbon emitter
     std::vector<uint16_t> ribbonBlendModes;       // Blend mode of each ribbon emitter's material
     std::vector<VkDescriptorSet> ribbonTexSets;   // Descriptor sets per ribbon emitter
+    /// One entry per emitter set above that came from the renderer's shared
+    /// sets, each a use given back when the model is destroyed.
+    std::vector<M2EmitterTexKey> emitterTexKeys;
 
     /// Particles or ribbons: either needs the per-frame emitter update and
     /// an animation clock. Asking for particles alone left a model whose only
@@ -1212,6 +1223,28 @@ private:
     /// renderer is gone.
     std::shared_ptr<uint32_t> materialPoolGeneration_ = std::make_shared<uint32_t>(0);
     void destroyPosedEmitterModels();
+
+    /// The particle and ribbon texture sets, one per texture and wrap mode,
+    /// shared by every emitter of every model that draws with them. A set
+    /// lives while some model uses it - which also keeps its texture in the
+    /// cache, so the address in the key is not reused - and goes back to
+    /// materialDescPool_ after the frames in flight when the last one is
+    /// destroyed.
+    struct EmitterTexKeyHash {
+        size_t operator()(const M2EmitterTexKey& key) const {
+            return std::hash<const void*>{}(key.texture) ^ (static_cast<size_t>(key.wrap) << 1);
+        }
+    };
+    struct SharedEmitterSet {
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        uint32_t users = 0;
+    };
+    std::unordered_map<M2EmitterTexKey, SharedEmitterSet, EmitterTexKeyHash> emitterTexSets_;
+    /// The shared set for this texture and wrap, made on first use; one more
+    /// use recorded in `gpu`. Null when the pool is exhausted.
+    VkDescriptorSet acquireEmitterTexSet(M2ModelGPU& gpu, VkTexture* texture, uint8_t wrap);
+    /// Gives back every use `gpu` holds.
+    void releaseEmitterTexSets(M2ModelGPU& gpu);
 
     // O(1) dedup: key = (modelId, quantized x, quantized y, quantized z) → instanceId
     struct DedupKey {
