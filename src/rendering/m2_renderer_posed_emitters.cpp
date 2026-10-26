@@ -197,8 +197,8 @@ void M2Renderer::setPosedEmittersPose(uint32_t id, const EmitterPose& pose) {
     inst.position = glm::vec3(pose.modelMatrix[3]);
     inst.scale = pose.scale;
     inst.currentSequenceIndex = std::max(pose.sequenceIndex, 0);
-    inst.animTime = pose.animationTimeMs;
-    inst.globalSequenceTime = pose.globalSequenceTimeMs;
+    setAnimTime(inst, pose.animationTimeMs);
+    inst.globalSequenceStartMs = animClockMs_ - pose.globalSequenceTimeMs;
 
     // Only the bones an emitter hangs from; the rest stay at rest and are
     // never read.

@@ -144,8 +144,8 @@ void M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
                 continue;
             }
             const int seq = inst.currentSequenceIndex;
-            const float t = inst.animTime;
-            const float gt = inst.globalSequenceTime;
+            const float t = animTimeOf(inst);
+            const float gt = globalSequenceTimeOf(inst);
             const auto& gsd = model->globalSequenceDurations;
             // Visibility is a switch: the Dalaran lamp's is 0 until it opens.
             if (m2_track::sampleFloat(light.visibility, seq, t, gt, gsd, 1.0f) < 0.5f) continue;

@@ -2810,6 +2810,19 @@ target_link_libraries(test_m2_view_distance PRIVATE catch2_main)
 add_test(NAME m2_view_distance COMMAND test_m2_view_distance)
 register_test_target(test_m2_view_distance)
 
+# ── test_m2_anim_clock ───────────────────────────────────────
+# The sequence time an M2 instance shows, worked out from one shared clock
+# instead of a total advanced on every instance every frame.
+add_executable(test_m2_anim_clock
+    test_m2_anim_clock.cpp
+    ${TEST_COMMON_SOURCES})
+target_include_directories(test_m2_anim_clock PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_m2_anim_clock SYSTEM PRIVATE
+    ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_m2_anim_clock PRIVATE catch2_main)
+add_test(NAME m2_anim_clock COMMAND test_m2_anim_clock)
+register_test_target(test_m2_anim_clock)
+
 # ── test_light_volume_order ──────────────────────────────────
 # The client's rule for laying light volumes over each other: each one's
 # weight, the order they go down in, and what each ends up contributing.

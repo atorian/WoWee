@@ -310,8 +310,14 @@ struct M2Instance {
     glm::vec3 worldBoundsMax;
 
     // Animation state
-    float animTime = 0.0f;       // Current animation time (ms)
-    float globalSequenceTime = 0.0f; // Independent clock for global animation tracks
+    /// The renderer's animation clock reading at which the current sequence and
+    /// the global sequences were at zero; M2Renderer::animTimeOf works out the
+    /// time from them. Doubles, so hours of play keep a smooth scroll.
+    double animStartMs = 0.0;
+    double globalSequenceStartMs = 0.0;
+    /// The clock reading when it was hidden: its clocks stop while it is out
+    /// of the world and resume where they were.
+    double hiddenAtMs = 0.0;
     float animSpeed = 1.0f;      // Animation playback speed
     int currentSequenceIndex = 0;// Index into sequences array
     float animDuration = 0.0f;   // Duration of current animation (ms)
@@ -1551,6 +1557,16 @@ private:
     std::function<std::optional<float>(float, float, float)> waterHeightAt_;
     // What the sky-model clock diagnostic last reported, so it prints on a
     // restart or once a second rather than every frame. See M2Renderer::update.
+    /// One animation clock for every instance, advanced once an update. An
+    /// instance keeps the reading its sequence started at (animStartMs), so
+    /// the many nothing steps cost nothing a frame; advancing a total on each
+    /// was a pass over every instance.
+    double animClockMs_ = 0.0;
+    /// The sequence time an instance shows now (m2AnimTimeAt).
+    float animTimeOf(const M2Instance& instance) const;
+    float globalSequenceTimeOf(const M2Instance& instance) const;
+    /// Puts the instance's sequence at timeMs now.
+    void setAnimTime(M2Instance& instance, float timeMs) const;
     uint32_t skyDiagInstanceId_ = 0;
     float skyDiagAnimTime_ = 0.0f;
     /// Whether the sky model was drawn last frame, so the cull
@@ -1652,6 +1668,9 @@ private:
         std::unordered_map<uint32_t, uint32_t> boneSeedInstanceByModel_;
         InstanceIndexSet animatedInstanceIndices_;     // hasAnimation && !disableAnimation
         InstanceIndexSet particleOnlyInstanceIndices_; // !hasAnimation && hasParticleEmitters
+        /// Boats still asking whether they are on water; the rest have their
+        /// answer and are not looked at again.
+        std::vector<uint32_t> pendingAfloatIds_;
         InstanceIndexSet particleInstanceIndices_;     // ALL instances with particle emitters
         InstanceIndexSet lightInstanceIndices_;        // models that can throw a local light
         std::vector<size_t> boneWorkIndices_;        // Reused each frame
