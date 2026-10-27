@@ -1,4 +1,5 @@
 #include "game/reputation_standing.hpp"
+#include "reputation/domain/events.hpp"
 #include "core/zone_tracker.hpp"
 #include "ui/toast_manager.hpp"
 #include "game/game_events.hpp"
@@ -114,8 +115,8 @@ void ToastManager::setupCallbacks(game::GameHandler& gameHandler) {
 
     // Reputation change toast callback
     if (!repChangeSub_) {
-        repChangeSub_ = gameHandler.eventBus().subscribe<game::events::ReputationChanged>(
-            [this](const game::events::ReputationChanged& e) {
+        repChangeSub_ = gameHandler.eventBus().subscribe<reputation::StandingChanged>(
+            [this](const reputation::StandingChanged& e) {
             const std::string& name = e.factionName;
             const int32_t delta = e.delta;
             const int32_t standing = e.standing;

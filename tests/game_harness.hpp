@@ -26,6 +26,7 @@
 #include "game/opcode_table.hpp"
 #include "achievement/services/ports.hpp"
 #include "title/services/ports.hpp"
+#include "reputation/services/ports.hpp"
 #include "network/packet.hpp"
 #include "network/world_connection.hpp"
 
@@ -58,7 +59,8 @@ namespace wowee::trade { class ITrade; class TradeService; }
 namespace wowee::loot { class ILoot; class LootService; }
 namespace wowee::achievement { class IAchievements; class AchievementService; }
 namespace wowee::title { class ITitles; class TitleService; }
-namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; class AuctionGateway; class MailGateway; class GuildBankGateway; class TradeGateway; class LootGateway; class TitleGateway; }
+namespace wowee::reputation { class IReputation; class ReputationService; }
+namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; class AuctionGateway; class MailGateway; class GuildBankGateway; class TradeGateway; class LootGateway; class TitleGateway; class ReputationGateway; }
 
 namespace wowee::test {
 
@@ -202,6 +204,17 @@ public:
         std::vector<title::TitleRecord> titles() override { return rows; }
     };
     TitleFiles& titleFiles() { return titleFiles_; }
+    /// The reputation, wired as the client wires it, over factionFiles.
+    reputation::IReputation& reputation();
+    /// What Faction.dbc holds. Empty until a test writes to it, and read on
+    /// the first ask, as the client reads the file.
+    struct FactionFiles final : reputation::IFactionData {
+        std::vector<reputation::FactionRecord> rows;
+
+        [[nodiscard]] bool ready() const override { return true; }
+        std::vector<reputation::FactionRecord> factions() override { return rows; }
+    };
+    FactionFiles& factionFiles() { return factionFiles_; }
     core::CVarStore& cvars() { return cvars_; }
 
     /// The server's side of the connection: the one the game made last. Valid
@@ -338,6 +351,9 @@ private:
     TitleFiles titleFiles_;
     std::unique_ptr<game::TitleGateway> titleGateway_;
     std::unique_ptr<title::TitleService> titles_;
+    FactionFiles factionFiles_;
+    std::unique_ptr<game::ReputationGateway> reputationGateway_;
+    std::unique_ptr<reputation::ReputationService> reputation_;
     std::unique_ptr<game::GameHandler> game_;
     FakeWorldConnection* connection_ = nullptr;  // owned by the game once made
     bool pingsAnswered_ = true;

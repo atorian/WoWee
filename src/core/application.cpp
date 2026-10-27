@@ -33,6 +33,8 @@
 #include "achievement/services/achievement_service.hpp"
 #include "game/title_gateway.hpp"
 #include "title/services/title_service.hpp"
+#include "game/reputation_gateway.hpp"
+#include "reputation/services/reputation_service.hpp"
 #include "ui/macro_icon.hpp"
 #include <imgui_impl_vulkan.h>
 #include "rendering/imgui_texture.hpp"
@@ -570,6 +572,11 @@ bool Application::initialize() {
     titles_ = std::make_unique<title::TitleService>(*titleData_, *titleGateway_, eventBus_);
     gameServices_.titlesFeed = titles_.get();
     gameServices_.titles = titles_.get();
+    factionData_ = std::make_unique<game::FactionData>(assetManager.get());
+    reputationGateway_ = std::make_unique<game::ReputationGateway>(*gameHandler, *gameHandler);
+    reputation_ = std::make_unique<reputation::ReputationService>(*factionData_, *reputationGateway_, eventBus_);
+    gameServices_.reputationFeed = reputation_.get();
+    gameServices_.reputation = reputation_.get();
     transportScene_ = std::make_unique<RendererTransportScene>(*renderer);
     gameHandler->getTransportManager()->setScene(transportScene_.get());
 
@@ -1005,6 +1012,7 @@ bool Application::initialize() {
         luaSvc.loot              = loot_.get();
         luaSvc.achievements      = achievements_.get();
         luaSvc.titles            = titles_.get();
+        luaSvc.reputation        = reputation_.get();
         // Acted on between frames - the reload destroys the state that asked.
         luaSvc.requestReloadUI = [this]() {
             if (auto* character = session()) character->requestInterfaceReload();
@@ -2707,6 +2715,8 @@ void Application::shutdown() {
     gameServices_.achievements = nullptr;
     gameServices_.titlesFeed = nullptr;
     gameServices_.titles = nullptr;
+    gameServices_.reputationFeed = nullptr;
+    gameServices_.reputation = nullptr;
     contacts_.reset();
     contactsGateway_.reset();
     who_.reset();
@@ -2723,6 +2733,9 @@ void Application::shutdown() {
     lfgGateway_.reset();
     calendar_.reset();
     calendarGateway_.reset();
+    reputation_.reset();
+    reputationGateway_.reset();
+    factionData_.reset();
     titles_.reset();
     titleGateway_.reset();
     titleData_.reset();

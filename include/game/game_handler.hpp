@@ -379,15 +379,11 @@ public:
     void setShowingHelm(bool shown) override { helmVisible_ = shown; }
     void setShowingCloak(bool shown) override { cloakVisible_ = shown; }
 
-    // ReputationQueries (factionBaseReputation and refreshUnitHostility are
-    // declared with the rest of the faction table below).
-    uint32_t factionIdByRepListId(uint32_t repListId) const override {
-        return getFactionIdByRepListId(repListId);
-    }
-    std::string factionName(uint32_t factionId) const override {
-        loadFactionNameCache();
-        return getFactionName(factionId);
-    }
+    // ReputationQueries (refreshUnitHostility is declared with the rest of the
+    // faction table below).
+    reputation::IReputationFeed* reputationFeed() override;
+    uint8_t playerRace() const override { return getPlayerRace(); }
+    uint8_t playerClass() const override { return getPlayerClass(); }
 
     /**
      * Get current connection state
@@ -1893,93 +1889,6 @@ public:
         return static_cast<int32_t>(v < 0 ? 0 : v);
     }
 
-    using FactionStandingInit = game::FactionStanding;
-    // Faction flag bitmask constants (from Faction.dbc ReputationFlags / SMSG_INITIALIZE_FACTIONS)
-    static constexpr uint8_t FACTION_FLAG_VISIBLE          = kFactionFlagVisible;
-    static constexpr uint8_t FACTION_FLAG_AT_WAR           = kFactionFlagAtWar;
-    static constexpr uint8_t FACTION_FLAG_HIDDEN           = kFactionFlagHidden;
-    static constexpr uint8_t FACTION_FLAG_INVISIBLE_FORCED = kFactionFlagInvisibleForced;
-    static constexpr uint8_t FACTION_FLAG_PEACE_FORCED     = kFactionFlagPeaceForced;
-    static constexpr uint8_t FACTION_FLAG_INACTIVE         = kFactionFlagInactive;
-
-    /// A faction the player has a standing with, as the reputation panel lists
-    /// it.
-    ///
-    /// The server sends standings by *reputation index* - a dense numbering
-    /// that is not the faction id - and only Faction.dbc knows which faction
-    /// each index belongs to. Resolved here rather than in a window, because
-    /// the original interface asks the same question through GetFactionInfo.
-    struct ReputationEntry {
-        uint32_t factionId = 0;
-        uint32_t reputationIndex = 0;
-        std::string name;
-        uint8_t flags = 0;
-    };
-    /// Visible factions in the server's own order. Empty until the standings
-    /// arrive, and built once after they do.
-    const std::vector<ReputationEntry>& getReputationList() const;
-    /// The player's current standing with a faction, which moves after the
-    /// list is built and so is not stored in it.
-    int32_t getFactionStanding(uint32_t factionId) const;
-
-    /// One line of the reputation panel as it is drawn: the flat list above
-    /// grouped under the headers Faction.dbc's parent chain describes.
-    ///
-    /// The server sends standings and nothing else - no categories, no order
-    /// beyond its own list. Both the headers and the nesting come from
-    /// ParentFactionID, and a header is simply a faction that some visible
-    /// faction descends from. A header may have a standing of its own (Alliance
-    /// does), which is why hasRep is a separate answer from isHeader.
-    struct ReputationRow {
-        uint32_t factionId = 0;
-        /// The server's repListId, and 0 for a header the player has no
-        /// standing with - such a row is drawn but cannot be acted on.
-        uint32_t reputationIndex = 0;
-        std::string name;
-        uint8_t flags = 0;
-        bool isHeader = false;    ///< something below it descends from this
-        bool isChild = false;     ///< drawn indented, under a header
-        bool hasRep = false;      ///< the player has a standing to show
-    };
-    /// The rows currently on screen: headers, plus the children of every header
-    /// that is not collapsed. This is what GetNumFactions counts and what
-    /// GetFactionInfo indexes, so every binding taking a "faction index" must
-    /// resolve it through here rather than through the flat list.
-    const std::vector<ReputationRow>& getReputationRows() const;
-    bool isFactionCollapsed(uint32_t factionId) const {
-        return collapsedFactionIds_.count(factionId) > 0;
-    }
-    void setFactionCollapsed(uint32_t factionId, bool collapsed);
-    /// The faction this one is grouped under, or 0 for a top-level one.
-    uint32_t getFactionParentId(uint32_t factionId) const;
-
-    const std::unordered_map<uint32_t, int32_t>& getFactionStandings() const {
-        return reputationHandler_->standings();
-    }
-
-    // Returns true if the player has "at war" toggled for the faction at repListId
-    bool isFactionAtWar(uint32_t repListId) const {
-        return reputationHandler_->hasFlag(repListId, kFactionFlagAtWar);
-    }
-    // Returns true if war cannot be declared on this faction (peace forced by the server)
-    bool isFactionPeaceForced(uint32_t repListId) const {
-        return reputationHandler_->hasFlag(repListId, kFactionFlagPeaceForced);
-    }
-    // Returns the faction ID for a given repListId (0 if unknown)
-    uint32_t getFactionIdByRepListId(uint32_t repListId) const;
-    /// Where this character's standing with a faction starts, by race and
-    /// class, from Faction.dbc.
-    ///
-    /// The part of every standing the server leaves out. SMSG_INITIALIZE_FACTIONS
-    /// and SMSG_SET_FACTION_STANDING carry what has been earned, and the client
-    /// adds this - the server's own total is the two together. Read as the
-    /// whole, every faction with a starting value came out wrong: an Alliance
-    /// character starts at -1200 with the Kurenai, so 900 earned showed as
-    /// Neutral while the server held them at Unfriendly and Telaar would not
-    /// speak to them.
-    int32_t factionBaseReputation(uint32_t factionId) const override;
-    // Returns the repListId for a given faction ID (0xFFFFFFFF if not found)
-    uint32_t getRepListIdByFactionId(uint32_t factionId) const;
     // Shaman totems (4 slots: 0=Earth, 1=Fire, 2=Water, 3=Air), kept by the
     // spell book.
     using TotemSlot = game::TotemSlot;
@@ -1989,14 +1898,6 @@ public:
 
     const TotemSlot& getTotemSlot(int slot) const { return spellHandler_->totemSlot(slot); }
 
-    const std::string& getFactionNamePublic(uint32_t factionId) const;
-    uint32_t getWatchedFactionId() const { return reputationHandler_->watchedFaction(); }
-    void setWatchedFactionId(uint32_t factionId);
-    // Declare war / make peace with a faction (CMSG_SET_FACTION_ATWAR). No-op on
-    // peace-forced factions. Updates the local flag optimistically.
-    void setFactionAtWar(uint32_t repListId, bool atWar);
-    // Move a faction to / from the inactive list (CMSG_SET_FACTION_INACTIVE).
-    void setFactionInactive(uint32_t repListId, bool inactive);
     bool isServerMovementAllowed() const;
 
     // Quest giver status (! and ? markers)
@@ -2572,9 +2473,6 @@ public:
     /// windows that move it: loot, vendors, mail, the bank, the auction house.
     InventoryHandler& inventory() { return *inventoryHandler_; }
     const InventoryHandler& inventory() const { return *inventoryHandler_; }
-    /// The character's standing with each faction.
-    ReputationHandler& reputation() { return *reputationHandler_; }
-    const ReputationHandler& reputation() const { return *reputationHandler_; }
     /// The character's quests, the quest givers' windows and their marks.
     QuestHandler& quests() { return *questHandler_; }
     const QuestHandler& quests() const { return *questHandler_; }
@@ -2831,10 +2729,8 @@ public:
     void applyQuestStateFromFields(const FlatFieldMap& fields);
     void sanitizeMovementForTaxi();
     void loadSpellNameCache() const;
-    void loadFactionNameCache() const;
     void loadSkillLineDbc() const;
     void loadSkillLineAbilityDbc();
-    std::string getFactionName(uint32_t factionId) const;
     std::string getLfgDungeonName(uint32_t dungeonId) const;
     /// The mounts and critters the player knows, as the pet tab lists them.
     ///
@@ -2917,12 +2813,7 @@ public:
     /// says the player is at war with it, 0 when not, and -1 when it is not
     /// such a template or the standings have not arrived - the maps above,
     /// built from the starting standings, answer until then.
-    int factionAtWarLive(uint32_t factionTemplateId) const {
-        auto it = factionTemplateRepList_.find(factionTemplateId);
-        if (it == factionTemplateRepList_.end() ||
-            it->second >= reputationHandler_->factions().size()) return -1;
-        return isFactionAtWar(it->second) ? 1 : 0;
-    }
+    int factionAtWarLive(uint32_t factionTemplateId) const;
 
 private:
     // Dead: autoTargetAttacker moved to CombatHandler
@@ -3268,17 +3159,6 @@ private:
     uint64_t comboTarget_ = 0;
 
 
-    // Faction standings (factionId → absolute standing value)
-    // Faction name cache (factionId → name), populated lazily from Faction.dbc
-    mutable std::unordered_map<uint32_t, std::string> factionNameCache_;
-    // repListId → factionId mapping (populated with factionNameCache)
-    mutable std::unordered_map<uint32_t, uint32_t> factionRepListToId_;
-    // factionId → repListId reverse mapping
-    mutable std::unordered_map<uint32_t, uint32_t> factionIdToRepList_;
-    // factionId → Faction.dbc's four race masks, four class masks and four
-    // starting values, in that order. See factionBaseReputation.
-    mutable std::unordered_map<uint32_t, std::array<int32_t, 12>> factionRepBase_;
-    mutable bool factionNameCacheLoaded_ = false;
 
 
     uint64_t activeCharacterGuid_ = 0;
@@ -3371,19 +3251,6 @@ private:
     mutable std::unordered_map<uint32_t, ExtendedCostEntry> extendedCostCache_;
     mutable bool extendedCostCacheLoaded_ = false;
     mutable std::unordered_map<uint32_t, ContinentBounds> continentBoundsCache_;
-    mutable std::vector<ReputationEntry> reputationList_;
-    mutable bool reputationListBuilt_ = false;
-    /// factionId → the faction it is grouped under, from Faction.dbc field 18.
-    /// Filled by loadFactionNameCache alongside the names and the repList map.
-    mutable std::unordered_map<uint32_t, uint32_t> factionParent_;
-    /// The drawn rows, rebuilt whenever the collapse set changes rather than
-    /// on every ask - the reputation panel calls GetFactionInfo once per row
-    /// per redraw.
-    mutable std::vector<ReputationRow> reputationRows_;
-    mutable bool reputationRowsDirty_ = true;
-    /// Headers the player has closed. Client-side only: the server has no
-    /// opinion about it, so it is saved with the rest of the character config.
-    std::unordered_set<uint32_t> collapsedFactionIds_;
     std::vector<CurrencyType> currencyTypes_;
     bool currencyTypesLoaded_ = false;
     std::unordered_map<uint32_t, BattlemasterEntry> battlemasterList_;
@@ -3579,8 +3446,6 @@ private:
     PlayPositionalSoundCallback playPositionalSoundCallback_;
 
     // ---- UI error frame callback ----
-
-    // ---- Reputation change callback ----
 
     // ---- PvP honor credit callback ----
     PvpHonorCallback pvpHonorCallback_;

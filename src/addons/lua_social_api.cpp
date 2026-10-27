@@ -13,6 +13,9 @@
 #include "loot/services/loot.hpp"
 #include "achievement/services/achievements.hpp"
 #include "title/services/titles.hpp"
+#include "reputation/domain/records.hpp"
+#include "reputation/domain/standings.hpp"
+#include "reputation/services/reputation.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "contacts/services/contacts.hpp"
 #include "who/domain/who_list.hpp"
@@ -549,6 +552,71 @@ achievement::IAchievements& achievementsOf(lua_State* L) {
 title::ITitles& titlesOf(lua_State* L) {
     auto* services = getLuaServices(L);
     return title::orNoTitles(services ? services->titles : nullptr);
+}
+
+reputation::IReputation& reputationOf(lua_State* L) {
+    auto* services = getLuaServices(L);
+    return reputation::orNoReputation(services ? services->reputation : nullptr);
+}
+
+int pushFactionInfo(lua_State* L, const reputation::ReputationEntry& f,
+                    bool isHeader, bool isCollapsed, bool hasRep, bool isChild) {
+    auto& reputation = reputationOf(L);
+    const int32_t value = reputation.getFactionStanding(f.factionId);
+    const auto& band = game::reputationStandingFor(value);
+    const bool atWar = (f.flags & reputation::kFactionAtWar) != 0;
+    const bool peaceForced =
+        (f.flags & reputation::kFactionPeaceForced) != 0;
+
+    lua_pushstring(L, f.name.c_str());                          // 1: name
+    lua_pushstring(L, "");                                      // 2: description
+    lua_pushnumber(L, band.id);                                 // 3: standingId
+    lua_pushnumber(L, band.floor);                              // 4: barMin
+    // The bar's top is one past the last value still at this standing, so a
+    // faction sitting at the ceiling reads as full rather than as over.
+    lua_pushnumber(L, band.ceiling + 1);                        // 5: barMax
+    lua_pushnumber(L, value);                                   // 6: barValue
+    lua_pushboolean(L, atWar ? 1 : 0);                          // 7: atWarWith
+    lua_pushboolean(L, peaceForced ? 0 : 1);                    // 8: canToggleAtWar
+    // Whether this row is a heading, and whether it is drawn indented. Both
+    // come from Faction.dbc's parent chain, and both used to be false because
+    // the rule looked for was the wrong one: a header was taken to be a parent
+    // with no reputation of its own, and no faction in the file is that -
+    // Alliance is ReputationListID 11, Horde is 12, Classic is 96. But isHeader
+    // and hasRep are separate answers precisely so that a heading can carry a
+    // standing too, which is what Alliance is. The rule is simply "something
+    // visible descends from it", and it yields the groups the original panel
+    // draws: Classic, The Burning Crusade and Wrath of the Lich King at the
+    // top, with Alliance, Horde, Steamwheedle Cartel and the rest inside them.
+    lua_pushboolean(L, isHeader ? 1 : 0);                       // 9: isHeader
+    lua_pushboolean(L, isCollapsed ? 1 : 0);                    // 10: isCollapsed
+    lua_pushboolean(L, hasRep ? 1 : 0);                         // 11: hasRep
+    lua_pushboolean(L, f.factionId == reputation.getWatchedFactionId() ? 1 : 0);  // 12: isWatched
+    lua_pushboolean(L, isChild ? 1 : 0);                        // 13: isChild
+    return 13;
+}
+
+int factionHeaderSetCollapsed(lua_State* L, bool collapsed) {
+    auto* gh = getGameHandler(L);
+    const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
+    if (!gh || index < 1) return 0;
+    auto& reputation = reputationOf(L);
+    const auto& rows = reputation.getReputationRows();
+    if (index > static_cast<int>(rows.size())) return 0;
+    const auto& row = rows[static_cast<size_t>(index) - 1];
+    if (row.isHeader) reputation.setFactionCollapsed(row.factionId, collapsed);
+    return 0;
+}
+
+int pushFactionRow(lua_State* L, const reputation::ReputationRow& row) {
+    reputation::ReputationEntry e;
+    e.factionId = row.factionId;
+    e.reputationIndex = row.reputationIndex;
+    e.name = row.name;
+    e.flags = row.flags;
+    return pushFactionInfo(L, e, row.isHeader,
+                           row.isHeader && reputationOf(L).isFactionCollapsed(row.factionId),
+                           row.hasRep, row.isChild);
 }
 
 arena::IArenaTeams* arenaTeamsOf(lua_State* L) {
@@ -2799,7 +2867,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 // whatever faction happened to sit at that offset instead.
                 {"GetNumFactions", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? static_cast<double>(gh->getReputationRows().size()) : 0.0);
+            lua_pushnumber(L, gh ? static_cast<double>(reputationOf(L).getReputationRows().size()) : 0.0);
             return 1;
         }},
                 // name, description, standingID, barMin, barMax, barValue,
@@ -2809,9 +2877,9 @@ void registerSocialLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_checknumber(L, 1));
             if (!gh || index < 1) { return luaReturnNil(L); }
-            const auto& rows = gh->getReputationRows();
+            const auto& rows = reputationOf(L).getReputationRows();
             if (index > static_cast<int>(rows.size())) { return luaReturnNil(L); }
-            return pushFactionRow(L, gh, rows[index - 1]);
+            return pushFactionRow(L, rows[index - 1]);
         }},
                 // The reputation tab's controls. Every one of these has a verb
                 // on GameHandler and none had a binding, so the tab could show
@@ -2829,11 +2897,11 @@ void registerSocialLuaAPI(lua_State* L) {
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh) return 0;
             // Zero is FrameXML's "watch nothing", not a missing argument.
-            if (index < 1) { gh->setWatchedFactionId(0); return 0; }
-            const auto& rows = gh->getReputationRows();
+            if (index < 1) { reputationOf(L).setWatchedFactionId(0); return 0; }
+            const auto& rows = reputationOf(L).getReputationRows();
             if (index <= static_cast<int>(rows.size())) {
                 const auto& row = rows[static_cast<size_t>(index) - 1];
-                if (row.hasRep) gh->setWatchedFactionId(row.factionId);
+                if (row.hasRep) reputationOf(L).setWatchedFactionId(row.factionId);
             }
             return 0;
         }},
@@ -2841,22 +2909,22 @@ void registerSocialLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh || index < 1) return 0;
-            const auto& rows = gh->getReputationRows();
+            const auto& rows = reputationOf(L).getReputationRows();
             if (index > static_cast<int>(rows.size())) return 0;
             const auto& f = rows[static_cast<size_t>(index) - 1];
             if (!f.hasRep) return 0;
-            const bool atWar = (f.flags & game::GameHandler::FACTION_FLAG_AT_WAR) != 0;
-            gh->setFactionAtWar(f.reputationIndex, !atWar);
+            const bool atWar = (f.flags & reputation::kFactionAtWar) != 0;
+            reputationOf(L).setFactionAtWar(f.reputationIndex, !atWar);
             return 0;
         }},
                 {"SetFactionActive", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh || index < 1) return 0;
-            const auto& rows = gh->getReputationRows();
+            const auto& rows = reputationOf(L).getReputationRows();
             if (index <= static_cast<int>(rows.size())) {
                 const auto& row = rows[static_cast<size_t>(index) - 1];
-                if (row.hasRep) gh->setFactionInactive(row.reputationIndex, false);
+                if (row.hasRep) reputationOf(L).setFactionInactive(row.reputationIndex, false);
             }
             return 0;
         }},
@@ -2864,10 +2932,10 @@ void registerSocialLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh || index < 1) return 0;
-            const auto& rows = gh->getReputationRows();
+            const auto& rows = reputationOf(L).getReputationRows();
             if (index <= static_cast<int>(rows.size())) {
                 const auto& row = rows[static_cast<size_t>(index) - 1];
-                if (row.hasRep) gh->setFactionInactive(row.reputationIndex, true);
+                if (row.hasRep) reputationOf(L).setFactionInactive(row.reputationIndex, true);
             }
             return 0;
         }},
@@ -2888,10 +2956,10 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"IsFactionInactive", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_checknumber(L, 1));
-            const auto* rows = gh ? &gh->getReputationRows() : nullptr;
+            const auto* rows = gh ? &reputationOf(L).getReputationRows() : nullptr;
             const bool inactive = rows && index >= 1 &&
                 index <= static_cast<int>(rows->size()) &&
-                ((*rows)[index - 1].flags & game::GameHandler::FACTION_FLAG_INACTIVE) != 0;
+                ((*rows)[index - 1].flags & reputation::kFactionInactive) != 0;
             lua_pushboolean(L, inactive ? 1 : 0);
             return 1;
         }},

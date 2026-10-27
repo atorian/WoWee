@@ -26,6 +26,7 @@ namespace trade { class ITradeFeed; class ITrade; }
 namespace loot { class ILootFeed; class ILoot; }
 namespace achievement { class IAchievementsFeed; class IAchievements; }
 namespace title { class ITitlesFeed; class ITitles; }
+namespace reputation { class IReputationFeed; class IReputation; }
 namespace network { class WorldConnection; }
 
 namespace game {
@@ -116,6 +117,10 @@ struct GameServices {
     /// list go, and the titles the client reads CharTitles.dbc through.
     title::ITitlesFeed* titlesFeed = nullptr;
     title::ITitles* titles = nullptr;
+    /// Where the standings go, and the reputation the hostility rules and the
+    /// character's settings read.
+    reputation::IReputationFeed* reputationFeed = nullptr;
+    reputation::IReputation* reputation = nullptr;
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };

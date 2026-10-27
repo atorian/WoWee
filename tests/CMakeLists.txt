@@ -834,6 +834,12 @@ target_link_libraries(test_achievements PRIVATE wowee_achievement)
 wowee_add_test(test_titles SOURCES test_titles.cpp)
 target_link_libraries(test_titles PRIVATE wowee_title)
 
+# ── reputation ──────────────────────────────────────────────────
+# The standings, the panel's rows and Faction.dbc, against a recording gateway.
+# Only wowee_reputation is linked.
+wowee_add_test(test_reputation SOURCES test_reputation.cpp)
+target_link_libraries(test_reputation PRIVATE wowee_reputation)
+
 # ── module_boundaries ───────────────────────────────────────────
 # New includes must point down the layers in tools/module_boundary_check.py;
 # the ones that broke them when the check came are listed in

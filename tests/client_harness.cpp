@@ -234,6 +234,7 @@ ClientHarness::ClientHarness()
     luaServices.loot = &game_.loot();
     luaServices.achievements = &game_.achievements();
     luaServices.titles = &game_.titles();
+    luaServices.reputation = &game_.reputation();
     playerView_->bindMovementControls(luaServices);
 
     core::ClientLoop::Services services{

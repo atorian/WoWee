@@ -5,6 +5,8 @@
 #include "achievement/domain/catalog.hpp"
 #include "achievement/services/achievements.hpp"
 #include "title/services/titles.hpp"
+#include "reputation/domain/standings.hpp"
+#include "reputation/services/reputation.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "addons/lua_engine.hpp"
 #include "game/auction_filters.hpp"
@@ -358,8 +360,8 @@ static int lua_GetFactionInfoByID(lua_State* L) {
     auto* gh = getGameHandler(L);
     const auto id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
     if (!gh || id == 0) return luaReturnNil(L);
-    for (const auto& r : gh->getReputationList()) {
-        if (r.factionId == id) return pushFactionInfo(L, gh, r);
+    for (const auto& r : reputationOf(L).getReputationList()) {
+        if (r.factionId == id) return pushFactionInfo(L, r);
     }
     return luaReturnNil(L);
 }

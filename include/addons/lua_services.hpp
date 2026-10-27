@@ -31,6 +31,7 @@ namespace wowee::trade { class ITrade; }
 namespace wowee::loot { class ILoot; }
 namespace wowee::achievement { class IAchievements; }
 namespace wowee::title { class ITitles; }
+namespace wowee::reputation { class IReputation; }
 
 namespace wowee::addons {
 
@@ -89,6 +90,9 @@ struct LuaServices {
     achievement::IAchievements* achievements      = nullptr;
     /// The titles the player knows and wears, and their names.
     title::ITitles*          titles            = nullptr;
+    /// The standings, the reputation panel's rows and the requests that change
+    /// them.
+    reputation::IReputation* reputation        = nullptr;
 
     /// Run a macro body, as RunMacroText() does - one command per line,
     /// through the same path the action bar uses for a macro button.

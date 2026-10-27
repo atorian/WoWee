@@ -1,6 +1,7 @@
 #include "game/game_handler.hpp"
 #include "achievement/services/achievements.hpp"
 #include "title/services/titles.hpp"
+#include "reputation/services/reputation.hpp"
 #include "group/services/group.hpp"
 #include "game/guild_gateway.hpp"
 #include "guild/domain/records.hpp"
@@ -1171,6 +1172,10 @@ loot::ILootFeed* GameHandler::lootFeed() {
 
 const loot::ILoot* GameHandler::loot() const {
     return services_.loot;
+}
+
+reputation::IReputationFeed* GameHandler::reputationFeed() {
+    return services_.reputationFeed;
 }
 
 achievement::IAchievementsFeed* GameHandler::achievementsFeed() {
@@ -2823,7 +2828,7 @@ void GameHandler::preloadDBCCaches() const {
 
     loadSpellNameCache();   // Spell.dbc - largest, ~170ms cold
     title::orNoTitles(services_.titles).loadTitles();   // CharTitles.dbc
-    loadFactionNameCache(); // Faction.dbc
+    reputation::orNoReputation(services_.reputation).loadFactions();   // Faction.dbc
     loadAreaNameCache();    // WorldMapArea.dbc
     loadMapNameCache();     // Map.dbc
     loadLfgDungeonDbc();    // LFGDungeons.dbc

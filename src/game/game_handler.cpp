@@ -1,5 +1,7 @@
 #include "game/game_handler.hpp"
 #include "title/services/titles.hpp"
+#include "reputation/domain/records.hpp"
+#include "reputation/services/reputation.hpp"
 #include "core/event_bus.hpp"
 #include "game/game_events.hpp"
 #include <stdexcept>
@@ -134,14 +136,6 @@ GameHandler::GameHandler(GameServices& services)
     petHandler_ = std::make_unique<PetHandler>(*this, *this, *services_.events, *chatHandler_, *this);
     reputationHandler_ = std::make_unique<ReputationHandler>(*this, *services_.events, *chatHandler_,
                                                              *this);
-    // The reputation list is built from the factions; it is built again when
-    // they change, and for the next character.
-    subscriptions_.push_back(eventBus().subscribe<events::FactionListChanged>(
-        [this](const events::FactionListChanged&) {
-            reputationListBuilt_ = false;
-            reputationList_.clear();
-            reputationRowsDirty_ = true;
-        }));
     realmTimeHandler_ = std::make_unique<RealmTimeHandler>(*services_.events, services_.steadyNow);
     weatherHandler_ = std::make_unique<WeatherHandler>(
         *services_.events, *this, *chatHandler_,
@@ -1258,9 +1252,10 @@ void GameHandler::saveCharacterConfig() {
 
     // Which reputation headers are closed. The server has no opinion about it,
     // so this file is the only place it can survive a logout.
-    if (!collapsedFactionIds_.empty()) {
+    if (const auto& collapsed = reputation::orNoReputation(services_.reputation).getCollapsedFactions();
+        !collapsed.empty()) {
         std::string ids;
-        for (uint32_t fid : collapsedFactionIds_) {
+        for (uint32_t fid : collapsed) {
             if (!ids.empty()) ids += ',';
             ids += std::to_string(fid);
         }
@@ -1293,6 +1288,7 @@ void GameHandler::loadCharacterConfig() {
     int savedUseFemaleModel = -1;
     // The quest log's; handed to it once the file is read.
     std::unordered_set<uint32_t> trackedQuests;
+    std::unordered_set<uint32_t> collapsedFactions;
 
     std::string line;
     while (std::getline(in, line)) {
@@ -1342,9 +1338,8 @@ void GameHandler::loadCharacterConfig() {
             // key falls through to the unknown-key branch.
             auto& destination =
                   key == "tracked_quests"    ? trackedQuests
-                : key == "collapsed_factions" ? collapsedFactionIds_
+                : key == "collapsed_factions" ? collapsedFactions
                                               : collapsedSkillCategories_;
-            if (key == "collapsed_factions") reputationRowsDirty_ = true;
             destination.clear();
             size_t tqPos = 0;
             while (tqPos <= val.size()) {
@@ -1364,6 +1359,7 @@ void GameHandler::loadCharacterConfig() {
     }
 
     questHandler_->restoreTrackedQuests(std::move(trackedQuests));
+    reputation::orNoReputation(services_.reputation).restoreCollapsedFactions(std::move(collapsedFactions));
 
     // Validate guid matches current character
     if (savedGuid != 0 && savedGuid != playerGuid) {
@@ -2155,95 +2151,25 @@ void GameHandler::ensureGlyphPropertiesLoaded() {
 // Faction name cache (lazily loaded from Faction.dbc)
 // ---------------------------------------------------------------------------
 
-void GameHandler::loadFactionNameCache() const {
-    if (factionNameCacheLoaded_) return;
-
-    auto* am = services_.assetManager;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
-    factionNameCacheLoaded_ = true;
-
-    auto dbc = am->loadDBC("Faction.dbc");
-    if (!dbc || !dbc->isLoaded()) return;
-
-    // Faction.dbc WotLK 3.3.5a field layout:
-    //   0: ID
-    //   1: ReputationListID  (-1 / 0xFFFFFFFF = no reputation tracking)
-    //   2-5:  ReputationRaceMask[4]
-    //   6-9:  ReputationClassMask[4]
-    //  10-13: ReputationBase[4]
-    //  14-17: ReputationFlags[4]
-    //  18:    ParentFactionID
-    //  19-20: SpilloverRateIn, SpilloverRateOut (floats)
-    //  21-22: SpilloverMaxRankIn, SpilloverMaxRankOut
-    //  23:    Name (English locale, string ref)
-    constexpr uint32_t ID_FIELD      = 0;
-    constexpr uint32_t REPLIST_FIELD = 1;
-    constexpr uint32_t PARENT_FIELD  = 18;
-    constexpr uint32_t NAME_FIELD    = 23;  // enUS name string
-
-    // Classic/TBC have fewer fields; fall back gracefully
-    const bool hasRepListField = dbc->getFieldCount() > REPLIST_FIELD;
-    // The parent chain is what groups the reputation panel into the headers
-    // the original interface draws. Read here rather than in a second pass so
-    // there is one opinion about which field holds it.
-    const bool hasParentField = dbc->getFieldCount() > PARENT_FIELD;
-    if (dbc->getFieldCount() <= NAME_FIELD) {
-        LOG_WARNING("Faction.dbc: unexpected field count ", dbc->getFieldCount());
-        // Don't abort - still try to load names from a shorter layout
-    }
-    const uint32_t nameField = (dbc->getFieldCount() > NAME_FIELD) ? NAME_FIELD : 22u;
-
-    uint32_t count = dbc->getRecordCount();
-    for (uint32_t i = 0; i < count; ++i) {
-        uint32_t factionId = dbc->getUInt32(i, ID_FIELD);
-        if (factionId == 0) continue;
-        if (dbc->getFieldCount() > nameField) {
-            std::string name = dbc->getString(i, nameField);
-            if (!name.empty()) {
-                factionNameCache_[factionId] = std::move(name);
-            }
-        }
-        if (hasParentField) {
-            const uint32_t parentId = dbc->getUInt32(i, PARENT_FIELD);
-            if (parentId != 0 && parentId != factionId) {
-                factionParent_[factionId] = parentId;
-            }
-        }
-        // The starting standing by race and class, fields 2 to 13 in every
-        // expansion's Faction.dbc.
-        if (dbc->getFieldCount() > 13) {
-            std::array<int32_t, 12> base{};
-            for (uint32_t f = 0; f < 12; ++f) base[f] = dbc->getInt32(i, 2 + f);
-            factionRepBase_[factionId] = base;
-        }
-        // Build repListId ↔ factionId mapping (WotLK field 1)
-        if (hasRepListField) {
-            uint32_t repListId = dbc->getUInt32(i, REPLIST_FIELD);
-            if (repListId != 0xFFFFFFFFu) {
-                factionRepListToId_[repListId] = factionId;
-                factionIdToRepList_[factionId] = repListId;
-            }
-        }
-    }
-    LOG_INFO("Faction.dbc: loaded ", factionNameCache_.size(), " faction names, ",
-             factionRepListToId_.size(), " with reputation tracking");
-}
-
 int GameHandler::unitReactionToPlayer(const Unit& unit) const {
     const uint32_t ft = unit.getFactionTemplate();
-    const auto& factions = reputationHandler_->factions();
-    if (auto it = factionTemplateRepList_.find(ft);
-        it != factionTemplateRepList_.end() && it->second < factions.size()) {
-        const auto& standing = factions[it->second];
-        int rank = reputationStandingFor(standing.standing).id;
-        if (standing.flags & FACTION_FLAG_AT_WAR) rank = std::min(rank, 4);
-        return rank;
+    if (auto it = factionTemplateRepList_.find(ft); it != factionTemplateRepList_.end()) {
+        if (const auto* standing = reputation::orNoReputation(services_.reputation).getStandingAt(it->second)) {
+            int rank = reputationStandingFor(standing->standing).id;
+            if (standing->flags & reputation::kFactionAtWar) rank = std::min(rank, 4);
+            return rank;
+        }
     }
     if (unit.isHostile()) return 2;
     return isFriendlyFaction(ft) ? 5 : 4;
+}
+
+int GameHandler::factionAtWarLive(uint32_t factionTemplateId) const {
+    auto it = factionTemplateRepList_.find(factionTemplateId);
+    if (it == factionTemplateRepList_.end()) return -1;
+    const auto* standing = reputation::orNoReputation(services_.reputation).getStandingAt(it->second);
+    if (!standing) return -1;
+    return (standing->flags & reputation::kFactionAtWar) != 0 ? 1 : 0;
 }
 
 void GameHandler::refreshUnitHostility() {
@@ -2253,95 +2179,6 @@ void GameHandler::refreshUnitHostility() {
         auto* unit = static_cast<Unit*>(entity.get());
         unit->setHostile(isHostileFaction(unit->getFactionTemplate()));
     }
-}
-
-int32_t GameHandler::factionBaseReputation(uint32_t factionId) const {
-    loadFactionNameCache();
-    auto it = factionRepBase_.find(factionId);
-    if (it == factionRepBase_.end()) return 0;
-    const uint8_t race = getPlayerRace();
-    const uint8_t cls = getPlayerClass();
-    const uint32_t raceMask = race ? (1u << (race - 1)) : 0;
-    const uint32_t classMask = cls ? (1u << (cls - 1)) : 0;
-    const auto& f = it->second;
-    // The server's own rule, slot by slot: a slot for this race, or a
-    // class-only slot, whose class mask is this class or empty.
-    for (int slot = 0; slot < 4; ++slot) {
-        const uint32_t slotRaces = static_cast<uint32_t>(f[slot]);
-        const uint32_t slotClasses = static_cast<uint32_t>(f[4 + slot]);
-        if (((slotRaces & raceMask) != 0 || (slotRaces == 0 && slotClasses != 0)) &&
-            ((slotClasses & classMask) != 0 || slotClasses == 0)) {
-            return f[8 + slot];
-        }
-    }
-    return 0;
-}
-
-uint32_t GameHandler::getFactionIdByRepListId(uint32_t repListId) const {
-    loadFactionNameCache();
-    auto it = factionRepListToId_.find(repListId);
-    return (it != factionRepListToId_.end()) ? it->second : 0u;
-}
-
-uint32_t GameHandler::getRepListIdByFactionId(uint32_t factionId) const {
-    loadFactionNameCache();
-    auto it = factionIdToRepList_.find(factionId);
-    return (it != factionIdToRepList_.end()) ? it->second : 0xFFFFFFFFu;
-}
-
-void GameHandler::setWatchedFactionId(uint32_t factionId) {
-    reputationHandler_->setWatchedFaction(factionId);
-    if (!isInWorld()) return;
-    // CMSG_SET_WATCHED_FACTION: int32 repListId (-1 = unwatch)
-    int32_t repListId = -1;
-    if (factionId != 0) {
-        uint32_t rl = getRepListIdByFactionId(factionId);
-        if (rl != 0xFFFFFFFFu) repListId = static_cast<int32_t>(rl);
-    }
-    network::Packet pkt(wireOpcode(Opcode::CMSG_SET_WATCHED_FACTION));
-    pkt.writeUInt32(static_cast<uint32_t>(repListId));
-    socket->send(pkt);
-    LOG_DEBUG("CMSG_SET_WATCHED_FACTION: repListId=", repListId, " (factionId=", factionId, ")");
-}
-
-void GameHandler::setFactionAtWar(uint32_t repListId, bool atWar) {
-    // The server forbids declaring war on some factions; don't fight the flag.
-    if (atWar && isFactionPeaceForced(repListId)) return;
-    // Optimistic local update; the server echoes SMSG_SET_FACTION_ATWAR to confirm.
-    if (!reputationHandler_->setFlag(repListId, kFactionFlagAtWar, atWar)) return;
-    if (!isInWorld() || !socket) return;
-    // CMSG_SET_FACTION_ATWAR: uint32 repListId + uint8 flag
-    network::Packet pkt(wireOpcode(Opcode::CMSG_SET_FACTION_ATWAR));
-    pkt.writeUInt32(repListId);
-    pkt.writeUInt8(atWar ? 1u : 0u);
-    socket->send(pkt);
-    LOG_DEBUG("CMSG_SET_FACTION_ATWAR: repListId=", repListId, " atWar=", atWar);
-}
-
-void GameHandler::setFactionInactive(uint32_t repListId, bool inactive) {
-    // No SMSG confirmation is sent for inactive, so update the local flag directly.
-    if (!reputationHandler_->setFlag(repListId, kFactionFlagInactive, inactive)) return;
-    if (!isInWorld() || !socket) return;
-    // CMSG_SET_FACTION_INACTIVE: uint32 repListId + uint8 flag
-    network::Packet pkt(wireOpcode(Opcode::CMSG_SET_FACTION_INACTIVE));
-    pkt.writeUInt32(repListId);
-    pkt.writeUInt8(inactive ? 1u : 0u);
-    socket->send(pkt);
-    LOG_DEBUG("CMSG_SET_FACTION_INACTIVE: repListId=", repListId, " inactive=", inactive);
-}
-
-std::string GameHandler::getFactionName(uint32_t factionId) const {
-    auto it = factionNameCache_.find(factionId);
-    if (it != factionNameCache_.end()) return it->second;
-    return "faction #" + std::to_string(factionId);
-}
-
-const std::string& GameHandler::getFactionNamePublic(uint32_t factionId) const {
-    loadFactionNameCache();
-    auto it = factionNameCache_.find(factionId);
-    if (it != factionNameCache_.end()) return it->second;
-    static const std::string empty;
-    return empty;
 }
 
 // ---------------------------------------------------------------------------
@@ -2922,60 +2759,6 @@ bool GameHandler::isGossipWindowOpen() const {
 const GossipMessageData& GameHandler::getCurrentGossip() const {
     return questHandler_->getCurrentGossip();
 }
-int32_t GameHandler::getFactionStanding(uint32_t factionId) const {
-    const auto& standings = reputationHandler_->standings();
-    auto it = standings.find(factionId);
-    if (it != standings.end()) return it->second;
-    // Nothing in the by-faction map means nothing has *changed* since login:
-    // SMSG_SET_FACTION_STANDING is what writes it, and it only arrives when
-    // reputation moves. The standings the character logged in with come in
-    // SMSG_INITIALIZE_FACTIONS, indexed by ReputationListID rather than by
-    // faction, and the two were never joined - so every faction read zero and
-    // the reputation tab drew every bar empty at Neutral, whatever the
-    // character had earned, until the next point of reputation with it.
-    const uint32_t repListId = getRepListIdByFactionId(factionId);
-    const auto& factions = reputationHandler_->factions();
-    if (repListId < factions.size()) return factions[repListId].standing;
-    return 0;
-}
-
-const std::vector<GameHandler::ReputationEntry>& GameHandler::getReputationList() const {
-    // Nothing to resolve until the server has sent the standings, and building
-    // an empty list once would keep it empty for the session.
-    const auto& factions = reputationHandler_->factions();
-    if (reputationListBuilt_ || factions.empty()) return reputationList_;
-
-    // The reputation index to faction id mapping already exists: the faction
-    // name cache reads it out of Faction.dbc and keeps both directions. Reading
-    // the file a second time here would be a second opinion about which field
-    // holds the index, and the two could disagree.
-    // getFactionIdByRepListId loads the cache itself on the first ask, so there
-    // is nothing to prime here.
-    reputationListBuilt_ = true;
-
-    for (size_t repIndex = 0; repIndex < factions.size(); ++repIndex) {
-        const auto& standing = factions[repIndex];
-        // Hidden factions are never shown, and one the player has not met yet
-        // is not visible either.
-        if ((standing.flags & FACTION_FLAG_HIDDEN) != 0) continue;
-        if ((standing.flags & FACTION_FLAG_VISIBLE) == 0) continue;
-
-        const uint32_t factionId =
-            getFactionIdByRepListId(static_cast<uint32_t>(repIndex));
-        if (factionId == 0) continue;
-
-        ReputationEntry e;
-        e.factionId = factionId;
-        e.reputationIndex = static_cast<uint32_t>(repIndex);
-        e.name = getFactionNamePublic(factionId);
-        e.flags = standing.flags;
-        reputationList_.push_back(std::move(e));
-    }
-    // Walked in the server's own order already, so no sort is needed.
-    LOG_INFO("Reputation: ", reputationList_.size(), " visible factions");
-    return reputationList_;
-}
-
 const std::string& GameHandler::getLanguageName(uint32_t languageId) const {
     static const std::string kUniversal = "Universal";
     static const std::string kNone;
@@ -3025,123 +2808,6 @@ const std::string& GameHandler::getPageTextMaterialName(uint32_t materialId) con
     }
     auto it = pageTextMaterialNames_.find(materialId);
     return it != pageTextMaterialNames_.end() ? it->second : kNone;
-}
-
-uint32_t GameHandler::getFactionParentId(uint32_t factionId) const {
-    loadFactionNameCache();
-    auto it = factionParent_.find(factionId);
-    return (it != factionParent_.end()) ? it->second : 0u;
-}
-
-void GameHandler::setFactionCollapsed(uint32_t factionId, bool collapsed) {
-    if (factionId == 0) return;
-    const bool changed = collapsed ? collapsedFactionIds_.insert(factionId).second
-                                   : collapsedFactionIds_.erase(factionId) > 0;
-    // Rebuilding on a no-op would be harmless but the redraw is not: the
-    // reputation panel reads its scroll position back from the row count.
-    if (changed) reputationRowsDirty_ = true;
-}
-
-const std::vector<GameHandler::ReputationRow>& GameHandler::getReputationRows() const {
-    const auto& flat = getReputationList();
-    if (!reputationRowsDirty_) return reputationRows_;
-    reputationRows_.clear();
-    // An empty list means the standings have not arrived, not that there are
-    // none - latching that would leave the panel empty for the session.
-    if (flat.empty()) return reputationRows_;
-    reputationRowsDirty_ = false;
-
-    // Everything drawn: the visible factions, plus every faction one of them
-    // descends from. A group whose members the player has not met is not drawn
-    // at all, so its heading is not either.
-    std::unordered_map<uint32_t, const ReputationEntry*> byId;
-    std::unordered_set<uint32_t> displayed;
-    for (const auto& e : flat) { byId[e.factionId] = &e; displayed.insert(e.factionId); }
-    for (const auto& e : flat) {
-        // Faction.dbc is data, and a cycle in it would spin here. The real
-        // chain is three deep, so a small ceiling costs nothing.
-        uint32_t p = getFactionParentId(e.factionId);
-        for (int depth = 0; p != 0 && depth < 8; ++depth) {
-            displayed.insert(p);
-            p = getFactionParentId(p);
-        }
-    }
-
-    // Where each group sits: at its first member's place in the server's list.
-    // Ordering by the heading's own repListId instead would scatter the groups,
-    // since Classic is 96 while the factions inside it start at 10.
-    constexpr size_t kNoRank = static_cast<size_t>(-1);
-    std::unordered_map<uint32_t, size_t> rank;
-    for (uint32_t id : displayed) rank[id] = kNoRank;
-    for (size_t i = 0; i < flat.size(); ++i) {
-        uint32_t id = flat[i].factionId;
-        for (int depth = 0; id != 0 && depth < 9; ++depth) {
-            auto it = rank.find(id);
-            if (it != rank.end() && i < it->second) it->second = i;
-            id = getFactionParentId(id);
-        }
-    }
-
-    // The tree, with a parent outside the drawn set counting as no parent.
-    std::unordered_map<uint32_t, std::vector<uint32_t>> children;
-    for (uint32_t id : displayed) {
-        const uint32_t parent = getFactionParentId(id);
-        children[displayed.count(parent) ? parent : 0u].push_back(id);
-    }
-    const auto byRank = [&](uint32_t a, uint32_t b) {
-        if (rank[a] != rank[b]) return rank[a] < rank[b];
-        return getFactionNamePublic(a) < getFactionNamePublic(b);
-    };
-    for (auto& [parent, kids] : children) {
-        (void)parent;
-        std::sort(kids.begin(), kids.end(), byRank);
-    }
-
-    // Depth first, so a heading is immediately followed by what is under it.
-    // FrameXML draws a flat list and takes the nesting from isHeader/isChild,
-    // which means the order *is* the grouping: emitting in the server's order
-    // and relying on the flags would file each faction under whichever heading
-    // happened to be printed last.
-    std::vector<std::pair<uint32_t, int>> stack;
-    for (uint32_t child : std::views::reverse(children[0])) {
-        stack.emplace_back(child, 0);
-    }
-    while (!stack.empty()) {
-        const auto [factionId, depth] = stack.back();
-        stack.pop_back();
-
-        auto kidsIt = children.find(factionId);
-        const bool isHeader = kidsIt != children.end() && !kidsIt->second.empty();
-
-        ReputationRow row;
-        row.factionId = factionId;
-        row.isHeader = isHeader;
-        // Only two levels are drawn: FrameXML knows a heading and an indented
-        // row and nothing deeper, so everything below the top shares one indent.
-        row.isChild = depth > 0;
-        auto entry = byId.find(factionId);
-        if (entry != byId.end()) {
-            row.reputationIndex = entry->second->reputationIndex;
-            row.name = entry->second->name;
-            row.flags = entry->second->flags;
-            row.hasRep = true;
-        } else {
-            // A heading the player has no standing with - Classic and the two
-            // expansion groups are the usual ones. Drawn as a bare heading.
-            row.name = getFactionNamePublic(factionId);
-            row.hasRep = false;
-        }
-        reputationRows_.push_back(std::move(row));
-
-        // A closed group keeps its heading and loses everything under it: the
-        // panel counts rows and indexes into them, so a hidden row must not be
-        // in the list at all.
-        if (!isHeader || isFactionCollapsed(factionId)) continue;
-        for (uint32_t child : std::views::reverse(kidsIt->second)) {
-            stack.emplace_back(child, depth + 1);
-        }
-    }
-    return reputationRows_;
 }
 
 const GameHandler::ContinentBounds&

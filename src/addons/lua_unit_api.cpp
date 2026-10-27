@@ -5,6 +5,7 @@
 #include "game/bg_score_defs.hpp"
 #include "battleground/services/battlegrounds.hpp"
 #include "title/services/titles.hpp"
+#include "reputation/services/reputation.hpp"
 #include "addons/lua_api_helpers.hpp"
 
 namespace wowee::addons {
@@ -1298,9 +1299,9 @@ static int lua_GetXPExhaustion(lua_State* L) {
 static int lua_GetWatchedFactionInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) return 0;
-    const uint32_t factionId = gh->getWatchedFactionId();
+    const uint32_t factionId = reputationOf(L).getWatchedFactionId();
     if (factionId == 0) return 0;
-    const auto& standings = gh->getFactionStandings();
+    const auto& standings = reputationOf(L).getFactionStandings();
     auto it = standings.find(factionId);
     if (it == standings.end()) return 0;
     const int32_t standing = it->second;
@@ -1317,7 +1318,7 @@ static int lua_GetWatchedFactionInfo(lua_State* L) {
         if (standing < kRanks[i].max) { rank = i; break; }
     }
 
-    lua_pushstring(L, gh->getFactionNamePublic(factionId).c_str());
+    lua_pushstring(L, reputationOf(L).getFactionName(factionId).c_str());
     lua_pushnumber(L, rank + 1);
     lua_pushnumber(L, kRanks[rank].min);
     lua_pushnumber(L, kRanks[rank].max);

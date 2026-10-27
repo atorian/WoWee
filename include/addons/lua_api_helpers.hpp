@@ -17,10 +17,11 @@
 #include "game/spell_classification.hpp"
 #include "game/update_field_table.hpp"
 #include "game/inventory_slots.hpp"
-#include "game/reputation_standing.hpp"
 #include "core/logger.hpp"
 #include "core/app_clock.hpp"
 #include "ui/widget_tree.hpp"
+
+namespace wowee::reputation { class IReputation; struct ReputationEntry; struct ReputationRow; }
 
 namespace wowee::addons {
 
@@ -477,70 +478,17 @@ inline QuestSpecialItem questSpecialItemAt(game::GameHandler* gh, int questIndex
 /// The tree flags default to "a plain faction row with a standing", which is
 /// what GetFactionInfoByID answers: it is asked about one faction by id and
 /// has no row, so it has no place in the tree to report.
-inline int pushFactionInfo(lua_State* L, game::GameHandler* gh,
-                           const game::GameHandler::ReputationEntry& f,
-                           bool isHeader = false, bool isCollapsed = false,
-                           bool hasRep = true, bool isChild = false) {
-    const int32_t value = gh->getFactionStanding(f.factionId);
-    const auto& band = game::reputationStandingFor(value);
-    const bool atWar = (f.flags & game::GameHandler::FACTION_FLAG_AT_WAR) != 0;
-    const bool peaceForced =
-        (f.flags & game::GameHandler::FACTION_FLAG_PEACE_FORCED) != 0;
-
-    lua_pushstring(L, f.name.c_str());                          // 1: name
-    lua_pushstring(L, "");                                      // 2: description
-    lua_pushnumber(L, band.id);                                 // 3: standingId
-    lua_pushnumber(L, band.floor);                              // 4: barMin
-    // The bar's top is one past the last value still at this standing, so a
-    // faction sitting at the ceiling reads as full rather than as over.
-    lua_pushnumber(L, band.ceiling + 1);                        // 5: barMax
-    lua_pushnumber(L, value);                                   // 6: barValue
-    lua_pushboolean(L, atWar ? 1 : 0);                          // 7: atWarWith
-    lua_pushboolean(L, peaceForced ? 0 : 1);                    // 8: canToggleAtWar
-    // Whether this row is a heading, and whether it is drawn indented. Both
-    // come from Faction.dbc's parent chain, and both used to be false because
-    // the rule looked for was the wrong one: a header was taken to be a parent
-    // with no reputation of its own, and no faction in the file is that -
-    // Alliance is ReputationListID 11, Horde is 12, Classic is 96. But isHeader
-    // and hasRep are separate answers precisely so that a heading can carry a
-    // standing too, which is what Alliance is. The rule is simply "something
-    // visible descends from it", and it yields the groups the original panel
-    // draws: Classic, The Burning Crusade and Wrath of the Lich King at the
-    // top, with Alliance, Horde, Steamwheedle Cartel and the rest inside them.
-    lua_pushboolean(L, isHeader ? 1 : 0);                       // 9: isHeader
-    lua_pushboolean(L, isCollapsed ? 1 : 0);                    // 10: isCollapsed
-    lua_pushboolean(L, hasRep ? 1 : 0);                         // 11: hasRep
-    lua_pushboolean(L, f.factionId == gh->getWatchedFactionId() ? 1 : 0);  // 12: isWatched
-    lua_pushboolean(L, isChild ? 1 : 0);                        // 13: isChild
-    return 13;
-}
+int pushFactionInfo(lua_State* L, const reputation::ReputationEntry& f,
+                    bool isHeader = false, bool isCollapsed = false,
+                    bool hasRep = true, bool isChild = false);
 
 /// Open or close the group at a drawn-row index. Shared because the two verbs
 /// differ only in the boolean, and because the index has to be resolved the
 /// same way both times - against the rows, which is what FrameXML counted.
-inline int factionHeaderSetCollapsed(lua_State* L, bool collapsed) {
-    auto* gh = getGameHandler(L);
-    const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh || index < 1) return 0;
-    const auto& rows = gh->getReputationRows();
-    if (index > static_cast<int>(rows.size())) return 0;
-    const auto& row = rows[static_cast<size_t>(index) - 1];
-    if (row.isHeader) gh->setFactionCollapsed(row.factionId, collapsed);
-    return 0;
-}
+int factionHeaderSetCollapsed(lua_State* L, bool collapsed);
 
 /// The same thirteen for a drawn row, which knows its place in the tree.
-inline int pushFactionRow(lua_State* L, game::GameHandler* gh,
-                          const game::GameHandler::ReputationRow& row) {
-    game::GameHandler::ReputationEntry e;
-    e.factionId = row.factionId;
-    e.reputationIndex = row.reputationIndex;
-    e.name = row.name;
-    e.flags = row.flags;
-    return pushFactionInfo(L, gh, e, row.isHeader,
-                           row.isHeader && gh->isFactionCollapsed(row.factionId),
-                           row.hasRep, row.isChild);
-}
+int pushFactionRow(lua_State* L, const reputation::ReputationRow& row);
 
 /// The item behind a row of the currency list, or zero for no such row.
 ///
@@ -1002,6 +950,10 @@ achievement::IAchievements& achievementsOf(lua_State* L);
 /// The titles as the composition root handed them to the addon layer, or none
 /// known and none worn when there is no game.
 title::ITitles& titlesOf(lua_State* L);
+
+/// The reputation as the composition root handed it to the addon layer, or no
+/// standings and no names when there is no game.
+reputation::IReputation& reputationOf(lua_State* L);
 
 /// The team id at an arena team index, or zero when the index is off the end
 /// or there are no arena teams.

@@ -1,4 +1,5 @@
 #include "game/faction_hostility.hpp"
+#include "reputation/domain/records.hpp"
 #include "game/game_handler.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
@@ -80,9 +81,9 @@ void buildFactionHostilityMap(pipeline::AssetManager& assetManager, GameHandler&
                     break;
                 }
             }
-            const bool atWar = (repFlags & GameHandler::FACTION_FLAG_AT_WAR) != 0 ||
+            const bool atWar = (repFlags & reputation::kFactionAtWar) != 0 ||
                                (baseRep <= kHostileRankTop &&
-                                (repFlags & GameHandler::FACTION_FLAG_PEACE_FORCED) == 0);
+                                (repFlags & reputation::kFactionPeaceForced) == 0);
             repFactions[fDbc->getUInt32(i, facID)] = {repListId, atWar};
             if (atWar) ++atWarCount;
         }
