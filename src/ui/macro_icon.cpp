@@ -1,4 +1,5 @@
 #include "ui/macro_icon.hpp"
+#include "pet/services/pet.hpp"
 #include "core/logger.hpp"
 #include "ui/macro_text.hpp"
 #include "ui/chat/macro_evaluator.hpp"
@@ -38,7 +39,7 @@ uint32_t number(const std::string& text) {
     return error == std::errc{} && end == text.data() + text.size() ? value : 0;
 }
 
-std::string spellIcon(game::GameHandler& game, std::string name) {
+std::string spellIcon(game::GameHandler& game, const pet::IPet& pet, std::string name) {
     if (name.starts_with('!')) name = trim(name.substr(1));
     if (const auto id = number(name)) return game.getSpellIconPath(id);
     std::string rank;
@@ -71,7 +72,7 @@ std::string spellIcon(game::GameHandler& game, std::string name) {
         }
     };
     for (auto id : game.spells().getKnownSpells()) consider(id);
-    for (auto id : game.getPetSpells()) consider(id);
+    for (auto id : pet.getPetSpells()) consider(id);
     return best ? game.getSpellIconPath(best) : std::string{};
 }
 
@@ -110,7 +111,7 @@ std::string itemIcon(game::GameHandler& game, const std::string& name) {
 }
 }
 
-std::string macroIconPath(const game::Macro& macro, game::GameHandler& game,
+std::string macroIconPath(const game::Macro& macro, game::GameHandler& game, const pet::IPet& pet,
                           rendering::Renderer* renderer) {
     auto icon = macro.icon;
     std::replace(icon.begin(), icon.end(), '/', '\\');
@@ -127,8 +128,8 @@ std::string macroIconPath(const game::Macro& macro, game::GameHandler& game,
         return trim(evaluator.evaluate(text, target));
     };
     const auto resolve = [&](const std::string& text, bool itemFirst) {
-        auto path = itemFirst ? itemIcon(game, text) : spellIcon(game, text);
-        if (path.empty()) path = itemFirst ? spellIcon(game, text) : itemIcon(game, text);
+        auto path = itemFirst ? itemIcon(game, text) : spellIcon(game, pet, text);
+        if (path.empty()) path = itemFirst ? spellIcon(game, pet, text) : itemIcon(game, text);
         return path;
     };
 

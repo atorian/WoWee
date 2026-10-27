@@ -62,7 +62,8 @@ namespace loot { class LootService; }
 namespace achievement { class AchievementService; }
 namespace title { class TitleService; }
 namespace reputation { class ReputationService; }
-namespace game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; class GuildNameFile; class AuctionGateway; class MailGateway; class GuildBankGateway; class TradeGateway; class LootGateway; class AchievementData; class TitleData; class TitleGateway; class FactionData; class ReputationGateway; }
+namespace pet { class PetService; }
+namespace game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; class GuildNameFile; class AuctionGateway; class MailGateway; class GuildBankGateway; class TradeGateway; class LootGateway; class AchievementData; class TitleData; class TitleGateway; class FactionData; class ReputationGateway; class PetGateway; }
 
 // Forward declarations
 namespace rendering {
@@ -459,6 +460,8 @@ private:
     std::unique_ptr<game::FactionData> factionData_;
     std::unique_ptr<game::ReputationGateway> reputationGateway_;
     std::unique_ptr<reputation::ReputationService> reputation_;
+    std::unique_ptr<game::PetGateway> petGateway_;
+    std::unique_ptr<pet::PetService> pet_;
     std::unique_ptr<game::GameHandler> gameHandler;
     /// The renderer's side of the transports - see game::TransportScene.
     std::unique_ptr<RendererTransportScene> transportScene_;

@@ -31,7 +31,7 @@ public:
 
     /// Render "late" dialogs (resurrect, talent wipe, pet unlearn)
     /// called in render() after reclaim corpse button
-    void renderLateDialogs(game::GameHandler& gameHandler);
+    void renderLateDialogs();
 
     // UIServices injection (Phase B singleton breaking)
     void setServices(const UIServices& services) { services_ = services; }
@@ -47,7 +47,7 @@ private:
 
     // ---- Individual dialog renderers ----
     void renderDuelCountdown();
-    void renderPetUnlearnConfirmDialog(game::GameHandler& gameHandler);
+    void renderPetUnlearnConfirmDialog();
 };
 
 } // namespace ui

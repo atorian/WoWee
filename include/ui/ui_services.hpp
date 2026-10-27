@@ -40,6 +40,7 @@ namespace guild_bank { class IGuildBank; }
 namespace trade { class ITrade; }
 namespace loot { class ILoot; }
 namespace title { class ITitles; }
+namespace pet { class IPet; }
 namespace audio { class AudioCoordinator; }
 
 namespace ui {
@@ -90,6 +91,8 @@ struct UIServices {
     loot::ILoot* loot = nullptr;
     /// The titles, for another player's title over their nameplate.
     title::ITitles* titles = nullptr;
+    /// The pet, for the pet commands, the pet talent dialog and the pet frame.
+    pet::IPet* pet = nullptr;
     /// The interface of the character in the world, in whatever state it is;
     /// null with no character in the world. Asked each time rather than held:
     /// each character has its own, and a /reload replaces it.

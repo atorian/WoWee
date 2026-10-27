@@ -2,6 +2,7 @@
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include "group/services/group.hpp"
 #include "game/shapeshift_forms.hpp"
+#include "pet/services/pet.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "game/item_text.hpp"
 #include "addons/lua_engine.hpp"
@@ -279,7 +280,7 @@ static int lua_UnitAura(lua_State* L, bool wantBuff) {
                     lua_pushstring(L, "target");
                 else if (aura.casterGuid == gh->getFocusGuid())
                     lua_pushstring(L, "focus");
-                else if (aura.casterGuid == gh->getPetGuid())
+                else if (aura.casterGuid == petOf(L).getPetGuid())
                     lua_pushstring(L, "pet");
                 else {
                     char cBuf[32];

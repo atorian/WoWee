@@ -6,7 +6,7 @@
 #include "game/protocol_constants.hpp"
 #include "game/gather_spells.hpp"
 #include "game/spell_classification.hpp"
-#include "game/pet_action.hpp"
+#include "pet/domain/actions.hpp"
 #include "game/chat_log.hpp"
 #include "game/craft_recipe.hpp"
 #include "game/frame_xml_events.hpp"

@@ -32,6 +32,7 @@ namespace wowee::loot { class ILoot; }
 namespace wowee::achievement { class IAchievements; }
 namespace wowee::title { class ITitles; }
 namespace wowee::reputation { class IReputation; }
+namespace wowee::pet { class IPet; }
 
 namespace wowee::addons {
 
@@ -93,6 +94,8 @@ struct LuaServices {
     /// The standings, the reputation panel's rows and the requests that change
     /// them.
     reputation::IReputation* reputation        = nullptr;
+    /// The player's pet, its bar and spells, and the stable.
+    pet::IPet*               pet               = nullptr;
 
     /// Run a macro body, as RunMacroText() does - one command per line,
     /// through the same path the action bar uses for a macro button.

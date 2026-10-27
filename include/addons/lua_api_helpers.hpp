@@ -17,11 +17,13 @@
 #include "game/spell_classification.hpp"
 #include "game/update_field_table.hpp"
 #include "game/inventory_slots.hpp"
+#include "pet/services/pet.hpp"
 #include "core/logger.hpp"
 #include "core/app_clock.hpp"
 #include "ui/widget_tree.hpp"
 
 namespace wowee::reputation { class IReputation; struct ReputationEntry; struct ReputationRow; }
+struct lua_State;
 
 namespace wowee::addons {
 
@@ -41,6 +43,10 @@ int questLogRowForQuest(lua_State* L, game::GameHandler* gh, uint32_t questId);
 /// opened on whatever it had selected: an approximation of the ask beats
 /// nothing happening.
 void openInterfaceQuestLog(game::GameHandler& gh, uint32_t questId);
+
+/// The pet and the stable as the composition root handed them to the addon
+/// layer, or no pet and no stable when there is no game.
+pet::IPet& petOf(lua_State* L);
 
 }  // namespace wowee::addons
 
@@ -334,7 +340,7 @@ inline uint64_t resolveUnitGuid(game::GameHandler* gh, const std::string& uid) {
     if (uid == "target")      return gh->getTargetGuid();
     if (uid == "focus")       return gh->getFocusGuid();
     if (uid == "mouseover")   return gh->getMouseoverGuid();
-    if (uid == "pet")         return gh->getPetGuid();
+    if (uid == "pet")         return gh->petGuid();
     // The NPC whose window is open, which is how FrameXML titles three of
     // them: GossipFrameNpcNameText and BankFrameTitleText both read
     // UnitName("npc"), and QuestFrameNpcNameText reads UnitName("questnpc").
@@ -357,7 +363,7 @@ inline uint64_t resolveUnitGuid(game::GameHandler* gh, const std::string& uid) {
     // Compound unit IDs: targettarget, focustarget, pettarget, mouseovertarget
     if (uid == "targettarget")    return getEntityTargetGuid(gh, gh->getTargetGuid());
     if (uid == "focustarget")     return getEntityTargetGuid(gh, gh->getFocusGuid());
-    if (uid == "pettarget")       return getEntityTargetGuid(gh, gh->getPetGuid());
+    if (uid == "pettarget")       return getEntityTargetGuid(gh, gh->petGuid());
     if (uid == "mouseovertarget") return getEntityTargetGuid(gh, gh->getMouseoverGuid());
     // party1-party4, raid1-raid40
     if (uid.rfind("party", 0) == 0 && uid.size() > 5) {
@@ -721,7 +727,7 @@ inline uint32_t spellIdForCall(lua_State* L, game::GameHandler* gh) {
         // one, which is worse than none.
         const char* book = lua_tostring(L, 2);
         if (book && std::string(book) == "pet") {
-            const auto& pet = gh->getPetSpells();
+            const auto& pet = petOf(L).getPetSpells();
             if (slot < 1 || slot > static_cast<int>(pet.size())) return 0;
             return pet[static_cast<size_t>(slot - 1)];
         }

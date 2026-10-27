@@ -391,7 +391,7 @@ void CombatHandler::addCombatText(CombatTextEntry::Type type, int32_t amount, ui
     // lives in combat_text_filter.hpp so it can be tested without a settings
     // store; only the lookup is here.
     const auto rule = combatTextFilterFor(type, isPlayerSource, srcGuid, dstGuid,
-                                          owner_.getPetGuid(), owner_.getTargetGuid());
+                                          owner_.petGuid(), owner_.getTargetGuid());
     if (rule.cvar && owner_.cvars().get(rule.cvar, rule.fallback) == "0") return;
 
     CombatTextEntry entry;

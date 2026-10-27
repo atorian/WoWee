@@ -1,4 +1,5 @@
 #include "ui/dialog_manager.hpp"
+#include "pet/services/pet.hpp"
 #include "duel/services/duels.hpp"
 #include "game/item_text.hpp"
 #include "game/inventory_slots.hpp"
@@ -44,14 +45,14 @@ void DialogManager::renderDialogs() {
 // ---------------------------------------------------------------------------
 // Render late dialogs (resurrect, talent wipe, pet unlearn)
 // ---------------------------------------------------------------------------
-void DialogManager::renderLateDialogs(game::GameHandler& gameHandler) {
+void DialogManager::renderLateDialogs() {
     // The resurrect request and the talent wipe are uiparent.lua's, raised
     // from events this client fires.
     //
     // The pet unlearn is not: staticpopup.lua declares no CONFIRM_PET_UNLEARN,
     // so this client's is the only one there is and hiding it would leave the
     // confirmation with nothing to answer it.
-    renderPetUnlearnConfirmDialog(gameHandler);
+    renderPetUnlearnConfirmDialog();
 }
 
 // ============================================================
@@ -103,8 +104,8 @@ void DialogManager::renderDuelCountdown() {
 // Talent Wipe Confirm Dialog
 // ============================================================
 
-void DialogManager::renderPetUnlearnConfirmDialog(game::GameHandler& gameHandler) {
-    if (!gameHandler.showPetUnlearnDialog()) return;
+void DialogManager::renderPetUnlearnConfirmDialog() {
+    if (!pet::orNoPet(services_.pet).showPetUnlearnDialog()) return;
 
     auto* window = services_.window;
     float screenW = window ? static_cast<float>(window->getWidth()) : 1280.0f;
@@ -124,7 +125,7 @@ void DialogManager::renderPetUnlearnConfirmDialog(game::GameHandler& gameHandler
             ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar)) {
 
         ImGui::Spacing();
-        uint32_t cost = gameHandler.getPetUnlearnCost();
+        uint32_t cost = pet::orNoPet(services_.pet).getPetUnlearnCost();
         const std::string costStr = game::formatCopperPrice(cost);
 
         std::string text = std::string("Reset your pet's talents for ") + costStr + "?";
@@ -144,7 +145,7 @@ void DialogManager::renderPetUnlearnConfirmDialog(game::GameHandler& gameHandler
         ImGui::PushStyleColor(ImGuiCol_Button, colors::kBtnDkGreen);
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, colors::kBtnDkGreenHover);
         if (ImGui::Button("Confirm##petunlearn", ImVec2(btnW, 30))) {
-            gameHandler.confirmPetUnlearn();
+            pet::orNoPet(services_.pet).confirmPetUnlearn();
         }
         ImGui::PopStyleColor(2);
 
@@ -153,7 +154,7 @@ void DialogManager::renderPetUnlearnConfirmDialog(game::GameHandler& gameHandler
         ImGui::PushStyleColor(ImGuiCol_Button, colors::kBtnDkRed);
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, colors::kBtnDkRedHover);
         if (ImGui::Button("Cancel##petunlearn", ImVec2(btnW, 30))) {
-            gameHandler.cancelPetUnlearn();
+            pet::orNoPet(services_.pet).cancelPetUnlearn();
         }
         ImGui::PopStyleColor(2);
     }

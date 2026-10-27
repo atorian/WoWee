@@ -732,7 +732,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         renderMinimapMarkers(gameHandler);
     }
     laps.lap("minimap markers");
-    dialogManager_.renderLateDialogs(gameHandler);
+    dialogManager_.renderLateDialogs();
     chatPanel_.renderBubbles(gameHandler);
     laps.lap("chat bubbles");
     // Not gated on GameMenu ownership. FrameXML's own options frames are shells

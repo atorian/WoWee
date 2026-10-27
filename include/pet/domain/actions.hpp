@@ -15,9 +15,7 @@
 
 #include <cstdint>
 
-namespace wowee {
-namespace game {
-namespace pet {
+namespace wowee::pet {
 
 /// High byte: what kind of action this is.
 enum class ActionType : uint8_t {
@@ -61,6 +59,4 @@ constexpr bool isPetSpellAction(uint32_t packed) {
     return t != ActionType::Command && t != ActionType::Reaction;
 }
 
-} // namespace pet
-} // namespace game
-} // namespace wowee
+} // namespace wowee::pet

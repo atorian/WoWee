@@ -28,6 +28,7 @@
 #include "imgui.h"
 #include "achievement/services/achievements.hpp"
 #include "title/services/titles.hpp"
+#include "pet/services/pet.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "addons/chat_window_background.hpp"
 #include "ui/display_modes.hpp"
@@ -39,7 +40,7 @@
 #include "game/calendar_month.hpp"
 #include "calendar/domain/records.hpp"
 #include "calendar/services/calendar.hpp"
-#include "game/pet_action.hpp"
+#include "pet/domain/actions.hpp"
 #include "game/account_data_handler.hpp"
 #include "game/weather_handler.hpp"
 #include "audio/activity_sound_manager.hpp"
@@ -6039,18 +6040,18 @@ void registerSystemLuaAPI(lua_State* L) {
             constexpr int kCancelSlot = 2;
             if (!gh) return luaReturnNil(L);
             if (slot == 1) {
-                const uint32_t packed = gh->getPetActionSlot(0);
+                const uint32_t packed = petOf(L).getPetActionSlot(0);
                 if (packed == 0) return luaReturnNil(L);
-                const auto type = game::pet::petActionType(packed);
+                const auto type = pet::petActionType(packed);
                 // A command or a stance is not something to show here - an
                 // empty possess bar carries one of those in slot zero, and
                 // drawing its icon would put a Follow arrow where the
                 // creature's spell belongs.
-                if (type == game::pet::ActionType::Command ||
-                    type == game::pet::ActionType::Reaction) {
+                if (type == pet::ActionType::Command ||
+                    type == pet::ActionType::Reaction) {
                     return luaReturnNil(L);
                 }
-                const uint32_t spellId = game::pet::petActionId(packed);
+                const uint32_t spellId = pet::petActionId(packed);
                 if (spellId == 0) return luaReturnNil(L);
                 const std::string icon = gh->getSpellIconPath(spellId);
                 if (icon.empty()) lua_pushnil(L); else lua_pushstring(L, icon.c_str());
@@ -6454,7 +6455,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"HasPetSpells", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushnil(L); return 1; }
-            const auto& spells = gh->getPetSpells();
+            const auto& spells = petOf(L).getPetSpells();
             if (spells.empty()) { lua_pushnil(L); return 1; }
             lua_pushnumber(L, static_cast<lua_Number>(spells.size()));
             constexpr uint8_t kWarlock = 9;

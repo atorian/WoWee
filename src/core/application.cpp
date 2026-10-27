@@ -35,6 +35,8 @@
 #include "title/services/title_service.hpp"
 #include "game/reputation_gateway.hpp"
 #include "reputation/services/reputation_service.hpp"
+#include "game/pet_gateway.hpp"
+#include "pet/services/pet_service.hpp"
 #include "ui/macro_icon.hpp"
 #include <imgui_impl_vulkan.h>
 #include "rendering/imgui_texture.hpp"
@@ -577,6 +579,10 @@ bool Application::initialize() {
     reputation_ = std::make_unique<reputation::ReputationService>(*factionData_, *reputationGateway_, eventBus_);
     gameServices_.reputationFeed = reputation_.get();
     gameServices_.reputation = reputation_.get();
+    petGateway_ = std::make_unique<game::PetGateway>(*gameHandler);
+    pet_ = std::make_unique<pet::PetService>(*petGateway_, eventBus_);
+    gameServices_.petFeed = pet_.get();
+    gameServices_.pet = pet_.get();
     transportScene_ = std::make_unique<RendererTransportScene>(*renderer);
     gameHandler->getTransportManager()->setScene(transportScene_.get());
 
@@ -944,6 +950,7 @@ bool Application::initialize() {
             uiServices.trade = trade_.get();
             uiServices.loot = loot_.get();
             uiServices.titles = titles_.get();
+            uiServices.pet = pet_.get();
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();  // May be nullptr here, re-wire later
             uiServices.interfaceStages = &interfaceStages_;
@@ -1013,6 +1020,7 @@ bool Application::initialize() {
         luaSvc.achievements      = achievements_.get();
         luaSvc.titles            = titles_.get();
         luaSvc.reputation        = reputation_.get();
+        luaSvc.pet               = pet_.get();
         // Acted on between frames - the reload destroys the state that asked.
         luaSvc.requestReloadUI = [this]() {
             if (auto* character = session()) character->requestInterfaceReload();
@@ -1116,7 +1124,7 @@ bool Application::initialize() {
             uim->getGameScreen().getSettingsPanel().applyAudioVolumes(audioCoordinator_.get());
         };
         luaSvc.macroIconPath = [this](const game::Macro& macro) {
-            return ui::macroIconPath(macro, *gameHandler, renderer.get());
+            return ui::macroIconPath(macro, *gameHandler, pet::orNoPet(pet_.get()), renderer.get());
         };
         luaSvc.runMacroText = [uim = uiManager.get(), gh = gameHandler.get()](const std::string& body) {
             if (uim && gh) uim->getGameScreen().getChatPanel().executeMacroText(*gh, body);
@@ -1741,6 +1749,7 @@ bool Application::initialize() {
             uiServices.trade = trade_.get();
             uiServices.loot = loot_.get();
             uiServices.titles = titles_.get();
+            uiServices.pet = pet_.get();
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();
             uiServices.interfaceStages = &interfaceStages_;
@@ -2717,6 +2726,8 @@ void Application::shutdown() {
     gameServices_.titles = nullptr;
     gameServices_.reputationFeed = nullptr;
     gameServices_.reputation = nullptr;
+    gameServices_.petFeed = nullptr;
+    gameServices_.pet = nullptr;
     contacts_.reset();
     contactsGateway_.reset();
     who_.reset();
@@ -2733,6 +2744,8 @@ void Application::shutdown() {
     lfgGateway_.reset();
     calendar_.reset();
     calendarGateway_.reset();
+    pet_.reset();
+    petGateway_.reset();
     reputation_.reset();
     reputationGateway_.reset();
     factionData_.reset();
@@ -5127,7 +5140,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                     if (petModel && petModel->visible) {
                         std::string modelPath;
                         uint32_t petDisplayId = 0;
-                        if (const uint64_t petGuid = gameHandler->getPetGuid()) {
+                        if (const uint64_t petGuid = pet::orNoPet(pet_.get()).getPetGuid()) {
                             if (game::Unit* u = gameHandler->getUnitByGuid(petGuid)) {
                                 petDisplayId = u->getDisplayId();
                                 if (petDisplayId != 0 && entitySpawner_) {
@@ -5265,7 +5278,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                     // by it.
                     {"npc", &npcPortrait_, npcGuid, "questnpc"},
                     {"target", &targetPortrait_,   gameHandler->getTargetGuid()},
-                    {"pet",    &petPortrait_,      gameHandler->getPetGuid()},
+                    {"pet",    &petPortrait_,      pet::orNoPet(pet_.get()).getPetGuid()},
                     {"focus",  &focusPortrait_,    gameHandler->getFocusGuid()},
                     {"party1", &partyPortraits_[0], partyGuids[0]},
                     {"party2", &partyPortraits_[1], partyGuids[1]},

@@ -2,6 +2,7 @@
 #include "achievement/services/achievements.hpp"
 #include "title/services/titles.hpp"
 #include "reputation/services/reputation.hpp"
+#include "pet/services/pet.hpp"
 #include "group/services/group.hpp"
 #include "game/guild_gateway.hpp"
 #include "guild/domain/records.hpp"
@@ -1172,6 +1173,18 @@ loot::ILootFeed* GameHandler::lootFeed() {
 
 const loot::ILoot* GameHandler::loot() const {
     return services_.loot;
+}
+
+pet::IPetFeed* GameHandler::petFeed() {
+    return services_.petFeed;
+}
+
+uint64_t GameHandler::petGuid() const {
+    return pet::orNoPet(services_.pet).getPetGuid();
+}
+
+void GameHandler::openedStableMaster(uint64_t npcGuid) {
+    pet::orNoPet(services_.pet).setStableMaster(npcGuid);
 }
 
 reputation::IReputationFeed* GameHandler::reputationFeed() {
@@ -2519,7 +2532,7 @@ std::string GameHandler::guidToUnitId(uint64_t guid) const {
     if (guid == playerGuid)      return "player";
     if (guid == targetGuid)      return "target";
     if (guid == focusGuid)       return "focus";
-    if (guid == petHandler_->guid()) return "pet";
+    if (guid == petGuid()) return "pet";
     return {};
 }
 int GameHandler::findQuestLogSlotIndexFromServer(uint32_t questId) const {

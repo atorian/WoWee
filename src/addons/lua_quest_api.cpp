@@ -7,6 +7,8 @@
 #include "title/services/titles.hpp"
 #include "reputation/domain/standings.hpp"
 #include "reputation/services/reputation.hpp"
+#include "pet/domain/records.hpp"
+#include "pet/services/pet.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "addons/lua_engine.hpp"
 #include "game/auction_filters.hpp"
@@ -1204,19 +1206,19 @@ std::string achievementIconPath(lua_State* L, game::GameHandler* gh, uint32_t ac
 }
 
 /// The stabled pets, in the order they arrived, with the active one left out.
-std::vector<const game::GameHandler::StabledPet*> stabledOnly(game::GameHandler* gh) {
-    std::vector<const game::GameHandler::StabledPet*> out;
+std::vector<const pet::StabledPet*> stabledOnly(lua_State* L, game::GameHandler* gh) {
+    std::vector<const pet::StabledPet*> out;
     if (!gh) return out;
-    for (const auto& p : gh->getStabledPets()) {
+    for (const auto& p : petOf(L).getStabledPets()) {
         if (!p.isActive) out.push_back(&p);
     }
     return out;
 }
 
 /// The pet that is currently out, or null if none is.
-const game::GameHandler::StabledPet* activePet(game::GameHandler* gh) {
+const pet::StabledPet* activePet(lua_State* L, game::GameHandler* gh) {
     if (!gh) return nullptr;
-    for (const auto& p : gh->getStabledPets()) {
+    for (const auto& p : petOf(L).getStabledPets()) {
         if (p.isActive) return &p;
     }
     return nullptr;
@@ -1244,11 +1246,11 @@ static int lua_GetStablePetInfo(lua_State* L) {
     const int slot = static_cast<int>(luaL_optnumber(L, 1, -1));
     if (!gh || slot < 0) { return luaReturnNil(L); }
 
-    const game::GameHandler::StabledPet* pet = nullptr;
+    const pet::StabledPet* pet = nullptr;
     if (slot == 0) {
-        pet = activePet(gh);
+        pet = activePet(L, gh);
     } else {
-        const auto stabled = stabledOnly(gh);
+        const auto stabled = stabledOnly(L, gh);
         if (slot <= static_cast<int>(stabled.size())) {
             pet = stabled[static_cast<size_t>(slot - 1)];
         }
@@ -1266,13 +1268,13 @@ static int lua_GetStablePetInfo(lua_State* L) {
 }
 
 static int lua_GetNumStablePets(lua_State* L) {
-    lua_pushnumber(L, static_cast<double>(stabledOnly(getGameHandler(L)).size()));
+    lua_pushnumber(L, static_cast<double>(stabledOnly(L, getGameHandler(L)).size()));
     return 1;
 }
 
 static int lua_GetNumStableSlots(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushnumber(L, gh ? gh->getStableSlots() : 0);
+    lua_pushnumber(L, gh ? petOf(L).getStableSlots() : 0);
     return 1;
 }
 
@@ -1306,7 +1308,7 @@ static int lua_ClickStablePet(lua_State* L) {
 // `GetPetTalentTree() or ""`.
 static int lua_GetPetIcon(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (!gh || !activePet(gh)) { return luaReturnNil(L); }
+    if (!gh || !activePet(L, gh)) { return luaReturnNil(L); }
     lua_pushstring(L, "Interface\\Icons\\Ability_Hunter_BeastTaming");
     return 1;
 }
@@ -1341,7 +1343,7 @@ static int lua_SetPetStablePaperdoll(lua_State* L) {
     // Slots count from one and the active pet is slot zero, which the stable
     // list carries as its own entry rather than as a slot.
     const int slot = selectedStableSlot(L);
-    const auto& pets = gh->getStabledPets();
+    const auto& pets = petOf(L).getStabledPets();
     w->modelDisplayId = 0;
     if (slot >= 1 && slot <= static_cast<int>(pets.size())) {
         w->modelDisplayId = gh->getCreatureDisplayIdForEntry(
@@ -1374,13 +1376,13 @@ static int lua_GetStablePetFoodTypes(lua_State* L) {
 }
 
 static int lua_ClosePetStables(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->closeStableWindow();
+    if (getGameHandler(L)) petOf(L).closeStableWindow();
     return 0;
 }
 
 static int lua_IsAtStableMaster(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->isStableWindowOpen() ? 1 : 0);
+    lua_pushboolean(L, gh && petOf(L).isStableWindowOpen() ? 1 : 0);
     return 1;
 }
 

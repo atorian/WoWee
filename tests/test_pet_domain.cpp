@@ -6,7 +6,8 @@
 #include "game_harness.hpp"
 
 #include "game/entity.hpp"
-#include "game/pet_handler.hpp"
+#include "pet/domain/records.hpp"
+#include "pet/services/pet.hpp"
 #include "game/update_field_table.hpp"
 
 #include <memory>
@@ -34,7 +35,7 @@ std::vector<uint8_t> petSpells(uint64_t pet, uint8_t react, uint8_t command,
     b.u32(0);                               // permanent
     b.u8(react).u8(command).u8(0).u8(0);    // react, command, flags
     b.u32(kBite | 0xC1000000u);             // slot 1: Bite, autocast on
-    for (int i = 1; i < wowee::game::PetHandler::kActionBarSlots; ++i) b.u32(0);
+    for (int i = 1; i < wowee::pet::kActionBarSlots; ++i) b.u32(0);
     b.u8(static_cast<uint8_t>(spells.size()));
     for (const auto& [spell, state] : spells) b.u32(spell | (uint32_t(state) << 24));
     return b.bytes();
@@ -49,19 +50,19 @@ std::vector<uint8_t> petMode(uint64_t pet, uint8_t command, uint8_t react) {
 TEST_CASE("a summoned pet's bar and spells are what the interface reads", "[pet][harness]") {
     GameHarness h;
     h.enterWorld();
-    auto& pet = h.game().pet();
+    auto& pet = h.pet();
 
     h.receive(Opcode::SMSG_PET_SPELLS, petSpells(kWolf, 2, 1, {{kBite, 0xC1}, {kGrowl, 0x81}}));
     h.pump();
 
     REQUIRE(pet.hasPet());
-    CHECK(pet.guid() == kWolf);
-    CHECK(pet.react() == 2);
-    CHECK(pet.command() == 1);
-    CHECK((pet.actionSlot(0) & 0x00FFFFFFu) == kBite);
-    CHECK(pet.spells() == std::vector<uint32_t>{kBite, kGrowl});
-    CHECK(pet.isAutocast(kBite));
-    CHECK_FALSE(pet.isAutocast(kGrowl));
+    CHECK(pet.getPetGuid() == kWolf);
+    CHECK(pet.getPetReact() == 2);
+    CHECK(pet.getPetCommand() == 1);
+    CHECK((pet.getPetActionSlot(0) & 0x00FFFFFFu) == kBite);
+    CHECK(pet.getPetSpells() == std::vector<uint32_t>{kBite, kGrowl});
+    CHECK(pet.isPetSpellAutocast(kBite));
+    CHECK_FALSE(pet.isPetSpellAutocast(kGrowl));
     CHECK(h.addonEvents("UNIT_PET").size() == 1);
     CHECK(h.addonEvents("PET_BAR_UPDATE").size() == 1);
     // What it is called is asked for: nothing else brings the name a player
@@ -92,8 +93,8 @@ TEST_CASE("a pet sent to attack lights the attack indicator once, and puts it ou
     h.receive(Opcode::SMSG_PET_MODE, petMode(kWolf, 2, 1));
     h.receive(Opcode::SMSG_PET_MODE, petMode(kWolf, 2, 2));
     h.pump();
-    CHECK(h.game().pet().command() == 2);
-    CHECK(h.game().pet().react() == 2);
+    CHECK(h.pet().getPetCommand() == 2);
+    CHECK(h.pet().getPetReact() == 2);
     CHECK(h.addonEvents("PET_ATTACK_START").size() == 1);
 
     h.receive(Opcode::SMSG_PET_MODE, petMode(kWolf, 1, 2));
@@ -110,10 +111,10 @@ TEST_CASE("a pet that dies takes its bar and spells with it", "[pet][harness]") 
 
     h.receive(Opcode::SMSG_PET_BROKEN);
     h.pump();
-    const auto& pet = h.game().pet();
+    const auto& pet = h.pet();
     CHECK_FALSE(pet.hasPet());
-    CHECK(pet.spells().empty());
-    CHECK(pet.actionSlot(0) == 0);
+    CHECK(pet.getPetSpells().empty());
+    CHECK(pet.getPetActionSlot(0) == 0);
     CHECK(h.addonEvents("UNIT_PET").size() == 1);
     CHECK(h.addonEvents("PET_UI_UPDATE").size() == 1);
 }
@@ -129,7 +130,7 @@ TEST_CASE("the pet's own fields are the pet's stats, not the player's", "[pet][h
     fields[wowee::game::fieldIndex(wowee::game::UF::UNIT_FIELD_STAT0)] = 77;
     h.receive(Opcode::SMSG_UPDATE_OBJECT, GameHarness::valuesBody(kWolf, fields));
     h.pump();
-    CHECK(h.game().pet().stats()[0] == 77);
+    CHECK(h.pet().getPetStats()[0] == 77);
 }
 
 TEST_CASE("the stable lists the pets kept there and refreshes after each change",
@@ -145,13 +146,13 @@ TEST_CASE("the stable lists the pets kept there and refreshes after each change"
     h.receive(Opcode::MSG_LIST_STABLED_PETS, list);
     h.pump();
 
-    const auto& pet = h.game().pet();
-    REQUIRE(pet.stabledPets().size() == 2);
-    CHECK(pet.stabledPets()[0].name == "Fang");
-    CHECK(pet.stabledPets()[0].isActive);
-    CHECK(pet.stabledPets()[1].name == "Hoot");
-    CHECK_FALSE(pet.stabledPets()[1].isActive);
-    CHECK(pet.stableSlots() == 2);
+    const auto& pet = h.pet();
+    REQUIRE(pet.getStabledPets().size() == 2);
+    CHECK(pet.getStabledPets()[0].name == "Fang");
+    CHECK(pet.getStabledPets()[0].isActive);
+    CHECK(pet.getStabledPets()[1].name == "Hoot");
+    CHECK_FALSE(pet.getStabledPets()[1].isActive);
+    CHECK(pet.getStableSlots() == 2);
     CHECK(pet.isStableWindowOpen());
     CHECK(h.addonEvents("PET_STABLE_SHOW").size() == 1);
 
@@ -176,15 +177,97 @@ TEST_CASE("the next character has none of the last one's pet", "[pet][harness]")
     h.enterWorld(hunter);
     h.receive(Opcode::SMSG_PET_SPELLS, petSpells(kWolf, 1, 1, {{kBite, 0xC1}}));
     h.pump();
-    REQUIRE(h.game().pet().hasPet());
+    REQUIRE(h.pet().hasPet());
 
     h.relogAs(mage);
 
-    const auto& pet = h.game().pet();
+    const auto& pet = h.pet();
     CHECK_FALSE(pet.hasPet());
     // The wolf's bar and spells were left behind with the guid cleared, and a
     // mage's pet bar read the hunter's Bite.
-    CHECK(pet.spells().empty());
-    CHECK(pet.actionSlot(0) == 0);
-    CHECK_FALSE(pet.isAutocast(kBite));
+    CHECK(pet.getPetSpells().empty());
+    CHECK(pet.getPetActionSlot(0) == 0);
+    CHECK_FALSE(pet.isPetSpellAutocast(kBite));
+}
+
+TEST_CASE("a spell the pet learns is said and redraws the bar, and one it unlearns leaves it",
+          "[pet][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.receive(Opcode::SMSG_PET_SPELLS, petSpells(kWolf, 1, 1, {{kBite, 0xC1}}));
+    h.pump();
+    h.clearRecords();
+
+    h.receive(Opcode::SMSG_PET_LEARNED_SPELL, Body().u32(kGrowl).bytes());
+    h.pump();
+    CHECK(h.pet().getPetSpells() == std::vector<uint32_t>{kBite, kGrowl});
+    CHECK(h.addonEvents("PET_BAR_UPDATE").size() == 1);
+    const auto& history = h.game().getChatHistory();
+    REQUIRE_FALSE(history.empty());
+    CHECK(history.back().message.rfind("Your pet has learned ", 0) == 0);
+
+    h.receive(Opcode::SMSG_PET_UNLEARNED_SPELL, Body().u32(kBite).bytes());
+    h.pump();
+    CHECK(h.pet().getPetSpells() == std::vector<uint32_t>{kGrowl});
+    CHECK_FALSE(h.pet().isPetSpellAutocast(kBite));
+    CHECK(h.addonEvents("PET_BAR_UPDATE").size() == 2);
+}
+
+TEST_CASE("the pet's experience bar is told when the experience moves, and only then", "[pet][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.receive(Opcode::SMSG_PET_SPELLS, petSpells(kWolf, 1, 1, {}));
+    h.pump();
+    h.game().getEntityManager().addEntity(kWolf, std::make_shared<wowee::game::Unit>(kWolf));
+    h.clearRecords();
+
+    GameHarness::Fields xp{{wowee::game::fieldIndex(wowee::game::UF::UNIT_FIELD_PETEXPERIENCE), 500}};
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, GameHarness::valuesBody(kWolf, xp));
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, GameHarness::valuesBody(kWolf, xp));
+    h.pump();
+
+    CHECK(h.pet().getPetExperience() == 500);
+    const auto told = h.addonEvents("UNIT_PET_EXPERIENCE");
+    REQUIRE(told.size() == 1);
+    CHECK(told[0].args == std::vector<std::string>{"pet"});
+}
+
+TEST_CASE("a pet talent reset waits for the player's yes, and the line says what was asked",
+          "[pet][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.receive(Opcode::SMSG_PET_SPELLS, petSpells(kWolf, 1, 1, {}));
+    h.pump();
+
+    // SMSG_PET_UNLEARN_CONFIRM: the pet, then the cost in copper.
+    h.receive(Opcode::SMSG_PET_UNLEARN_CONFIRM, Body().u64(kWolf).u32(5000).bytes());
+    h.pump();
+    REQUIRE(h.pet().showPetUnlearnDialog());
+    CHECK(h.pet().getPetUnlearnCost() == 5000);
+    CHECK_FALSE(h.lastSent(Opcode::CMSG_PET_UNLEARN_TALENTS));
+
+    h.pet().confirmPetUnlearn();
+    h.pump();
+    CHECK(h.lastSent(Opcode::CMSG_PET_UNLEARN_TALENTS));
+    CHECK_FALSE(h.pet().showPetUnlearnDialog());
+    const auto& history = h.game().getChatHistory();
+    REQUIRE_FALSE(history.empty());
+    CHECK(history.back().message.rfind("Pet talent reset requested.", 0) == 0);
+}
+
+TEST_CASE("stabling with no pet out is refused on the error line, and nothing is sent",
+          "[pet][stable][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    constexpr uint64_t kStableMaster = 0xF130000000000201ull;
+    h.pet().setStableMaster(kStableMaster);
+    h.clearRecords();
+
+    h.pet().stablePet(1);
+    h.pump();
+
+    CHECK_FALSE(h.lastSent(Opcode::CMSG_STABLE_PET));
+    const auto errors = h.addonEvents("UI_ERROR_MESSAGE");
+    REQUIRE(errors.size() == 1);
+    CHECK(errors[0].args.at(0) == "You do not have an active pet to stable.");
 }

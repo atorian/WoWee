@@ -1,5 +1,7 @@
 #include "game/entity_controller.hpp"
 #include "title/services/titles.hpp"
+#include "pet/domain/records.hpp"
+#include "pet/services/pet.hpp"
 #include "game/emote_table.hpp"
 #include "core/event_bus.hpp"
 #include "game/game_events.hpp"
@@ -1034,8 +1036,10 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
     UnitFieldUpdateResult result;
     result.oldDisplayId = unit->getDisplayId();
     uint32_t oldHealth = unit->getHealth();
-    bool petExperienceChanged = false;
-    bool petStatsChanged = false;
+    // The pet's own fields from this update, handed over together below.
+    pet::PetFields petFields;
+    bool petFieldsArrived = false;
+    const uint64_t petGuid = owner_.petGuid();
     for (const auto& [key, val] : block.fields) {
         if (key == ufi.health) {
             unit->setHealth(val);
@@ -1251,43 +1255,45 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             }
             unit->setMountDisplayId(val);
         } else if (ufi.attackPower != 0xFFFF && key == ufi.attackPower &&
-                   block.guid == owner_.pet().guid()) {
-            owner_.pet().setAttackPower(static_cast<int32_t>(val));
-            petStatsChanged = true;
+                   block.guid == petGuid) {
+            petFields.attackPower = static_cast<int32_t>(val);
+            petFieldsArrived = true;
         } else if (ufi.minDamage != 0xFFFF && key == ufi.minDamage &&
-                   block.guid == owner_.pet().guid()) {
+                   block.guid == petGuid) {
             // A float, sent as its bits like every other float field.
             float damage = 0.0f;
             std::memcpy(&damage, &val, 4);
-            owner_.pet().setMinDamage(damage);
-            petStatsChanged = true;
+            petFields.minDamage = damage;
+            petFieldsArrived = true;
         } else if (ufi.maxDamage != 0xFFFF && key == ufi.maxDamage &&
-                   block.guid == owner_.pet().guid()) {
+                   block.guid == petGuid) {
             float damage = 0.0f;
             std::memcpy(&damage, &val, 4);
-            owner_.pet().setMaxDamage(damage);
-            petStatsChanged = true;
+            petFields.maxDamage = damage;
+            petFieldsArrived = true;
         } else if (ufi.stat0 != 0xFFFF && key >= ufi.stat0 && key < ufi.stat0 + 5 &&
-                   block.guid == owner_.pet().guid()) {
+                   block.guid == petGuid) {
             // The pet's own five, not the player's. The paperdoll's pet tab
             // reads them through UnitStat("pet"), which used to answer from the
             // player - so a hunter's pet listed its owner's Strength.
-            owner_.pet().setStat(key - ufi.stat0, static_cast<int32_t>(val));
-            petStatsChanged = true;
+            petFields.stats[key - ufi.stat0] = static_cast<int32_t>(val);
+            petFieldsArrived = true;
         } else if (ufi.resistances != 0xFFFF && key >= ufi.resistances &&
-                   key < ufi.resistances + 7 && block.guid == owner_.pet().guid()) {
+                   key < ufi.resistances + 7 && block.guid == petGuid) {
             // Armor is index zero and the six schools follow it, the same shape
             // as the player's.
-            owner_.pet().setResistance(key - ufi.resistances, static_cast<int32_t>(val));
-            petStatsChanged = true;
+            petFields.resistances[key - ufi.resistances] = static_cast<int32_t>(val);
+            petFieldsArrived = true;
         } else if (ufi.petXp != 0xFFFF && key == ufi.petXp &&
-                   block.guid == owner_.pet().guid()) {
+                   block.guid == petGuid) {
             // Only the player's own pet. Every unit carries these fields and
             // only one of them has an experience bar to draw.
-            if (owner_.pet().setExperience(val)) petExperienceChanged = true;
+            petFields.experience = val;
+            petFieldsArrived = true;
         } else if (ufi.petNextLevelXp != 0xFFFF && key == ufi.petNextLevelXp &&
-                   block.guid == owner_.pet().guid()) {
-            if (owner_.pet().setNextLevelExperience(val)) petExperienceChanged = true;
+                   block.guid == petGuid) {
+            petFields.nextLevelExperience = val;
+            petFieldsArrived = true;
         } else if (key == ufi.npcFlags) { unit->setNpcFlags(val); }
         else if (key == ufi.npcEmoteState) {
             uint32_t oldEmote = unit->getNpcEmoteState();
@@ -1359,16 +1365,9 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
         owner_.playerHealthCallbackRef()(unit->getHealth(), unit->getMaxHealth());
     }
 
-    // The pet frame's experience bar reads GetPetExperience and redraws on
-    // this; without it the bar was filled once when the pet was summoned and
-    // never moved again.
-    if (petExperienceChanged && owner_.hasAddonEventListener()) {
-        owner_.fireAddonEvent("UNIT_PET_EXPERIENCE", {"pet"});
-    }
-    // The pet tab redraws its stat block on these, named for the pet.
-    if (petStatsChanged && owner_.hasAddonEventListener()) {
-        owner_.fireAddonEvent("UNIT_STATS", {"pet"});
-        owner_.fireAddonEvent("UNIT_RESISTANCES", {"pet"});
+    // Once per update, so the pet frame and the pet tab redraw once for it.
+    if (petFieldsArrived) {
+        if (auto* feed = owner_.petFeed()) feed->onFields(petFields);
     }
 
     return result;
@@ -2264,7 +2263,7 @@ void EntityController::handleDisplayIdChange(const UpdateBlock& block,
         std::string uid;
         if (block.guid == owner_.getTargetGuid()) uid = "target";
         else if (block.guid == owner_.focusGuidRef()) uid = "focus";
-        else if (block.guid == owner_.pet().guid()) uid = "pet";
+        else if (block.guid == owner_.petGuid()) uid = "pet";
         if (!uid.empty())
             pendingEvents_.emit("UNIT_MODEL_CHANGED", {uid});
     }

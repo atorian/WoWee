@@ -1,4 +1,5 @@
 #include "core/application.hpp"
+#include "pet/services/pet_service.hpp"
 #include "ui/macro_icon.hpp"
 #include "addons/addon_manager.hpp"
 #include "addons/lua_engine.hpp"
@@ -51,7 +52,7 @@ void Application::prepareInterfaceResources(float deltaTime) {
                 widgetRenderer_.prefetch(tab.texture, false, true);
                 for (uint32_t id : tab.spellIds) spell(id);
             }
-            for (uint32_t id : gameHandler->getPetSpells()) spell(id);
+            for (uint32_t id : pet::orNoPet(pet_.get()).getPetSpells()) spell(id);
             const auto item = [this](const game::ItemSlot& slot) {
                 const uint32_t display = slot.item.displayInfoId;
                 if (slot.empty() || !display || prefetchedItemIcons_.contains(display)) return;
@@ -72,7 +73,7 @@ void Application::prepareInterfaceResources(float deltaTime) {
             for (int i = 0; i < inventory.getKeyringSize(); ++i) item(inventory.getKeyringSlot(i));
             for (bool perCharacter : {false, true})
                 for (const auto& macro : gameHandler->accountData().macros(perCharacter))
-                    widgetRenderer_.prefetch(ui::macroIconPath(macro, *gameHandler, renderer.get()), false, true);
+                    widgetRenderer_.prefetch(ui::macroIconPath(macro, *gameHandler, pet::orNoPet(pet_.get()), renderer.get()), false, true);
         }
         if (auto* addons = characterAddons(); addons && addons->getLuaEngine())
             widgetRenderer_.prefetchWidgets(addons->getLuaEngine()->widgets());

@@ -840,6 +840,12 @@ target_link_libraries(test_titles PRIVATE wowee_title)
 wowee_add_test(test_reputation SOURCES test_reputation.cpp)
 target_link_libraries(test_reputation PRIVATE wowee_reputation)
 
+# ── pet ─────────────────────────────────────────────────────────
+# The pet and the stable, against a recording gateway. Only wowee_pet is
+# linked.
+wowee_add_test(test_pet SOURCES test_pet.cpp)
+target_link_libraries(test_pet PRIVATE wowee_pet)
+
 # ── module_boundaries ───────────────────────────────────────────
 # New includes must point down the layers in tools/module_boundary_check.py;
 # the ones that broke them when the check came are listed in

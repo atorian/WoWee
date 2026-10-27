@@ -16,6 +16,7 @@
 #include "reputation/domain/records.hpp"
 #include "reputation/domain/standings.hpp"
 #include "reputation/services/reputation.hpp"
+#include "pet/services/pet.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "contacts/services/contacts.hpp"
 #include "who/domain/who_list.hpp"
@@ -552,6 +553,11 @@ achievement::IAchievements& achievementsOf(lua_State* L) {
 title::ITitles& titlesOf(lua_State* L) {
     auto* services = getLuaServices(L);
     return title::orNoTitles(services ? services->titles : nullptr);
+}
+
+pet::IPet& petOf(lua_State* L) {
+    auto* services = getLuaServices(L);
+    return pet::orNoPet(services ? services->pet : nullptr);
 }
 
 reputation::IReputation& reputationOf(lua_State* L) {
@@ -1327,11 +1333,11 @@ namespace {
 
 /// The pet spell a name refers to, or zero. Named rather than numbered because
 /// the autocast slash commands pass what the player typed.
-uint32_t petSpellByName(game::GameHandler* gh, const char* name) {
+uint32_t petSpellByName(lua_State* L, game::GameHandler* gh, const char* name) {
     if (!gh || !name || !*name) return 0;
     std::string want(name);
     toLowerInPlace(want);
-    for (uint32_t id : gh->getPetSpells()) {
+    for (uint32_t id : petOf(L).getPetSpells()) {
         std::string have = gh->getSpellName(id);
         toLowerInPlace(have);
         if (have == want) return id;
@@ -1342,9 +1348,9 @@ uint32_t petSpellByName(game::GameHandler* gh, const char* name) {
 /// Put a pet spell's autocast into a definite state.
 int setPetAutocastByName(lua_State* L, bool on) {
     auto* gh = getGameHandler(L);
-    const uint32_t id = petSpellByName(gh, luaL_optstring(L, 1, ""));
-    if (gh && id != 0 && gh->isPetSpellAutocast(id) != on) {
-        gh->togglePetSpellAutocast(id);
+    const uint32_t id = petSpellByName(L, gh, luaL_optstring(L, 1, ""));
+    if (gh && id != 0 && petOf(L).isPetSpellAutocast(id) != on) {
+        petOf(L).togglePetSpellAutocast(id);
     }
     return 0;
 }
@@ -3179,7 +3185,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 // offered it.
                 {"PetCanBeRenamed", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushboolean(L, gh && gh->isPetRenameable() ? 1 : 0);
+            lua_pushboolean(L, gh && petOf(L).isPetRenameable() ? 1 : 0);
             return 1;
         }},
                 // The other end: PETRENAMECONFIRM's accept calls this, so the
@@ -3189,7 +3195,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"PetRename", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const char* name = luaL_optstring(L, 1, "");
-            if (gh && name && *name) gh->renamePet(name);
+            if (gh && name && *name) petOf(L).renamePet(name);
             return 0;
         }},
                 {"CanGrantLevel",             [](lua_State* L) -> int { lua_pushboolean(L, 0); return 1; }},
@@ -3570,8 +3576,8 @@ void registerSocialLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const uint32_t id = (!lua_isnoneornil(L, 2) && lua_isnumber(L, 1))
                 ? spellIdForCall(L, gh)
-                : petSpellByName(gh, luaL_optstring(L, 1, ""));
-            if (gh && id != 0) gh->togglePetSpellAutocast(id);
+                : petSpellByName(L, gh, luaL_optstring(L, 1, ""));
+            if (gh && id != 0) petOf(L).togglePetSpellAutocast(id);
             return 0;
         }},
                 // The four chat-window list editors moved to

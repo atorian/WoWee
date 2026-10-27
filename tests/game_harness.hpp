@@ -60,7 +60,8 @@ namespace wowee::loot { class ILoot; class LootService; }
 namespace wowee::achievement { class IAchievements; class AchievementService; }
 namespace wowee::title { class ITitles; class TitleService; }
 namespace wowee::reputation { class IReputation; class ReputationService; }
-namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; class AuctionGateway; class MailGateway; class GuildBankGateway; class TradeGateway; class LootGateway; class TitleGateway; class ReputationGateway; }
+namespace wowee::pet { class IPet; class PetService; }
+namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; class AuctionGateway; class MailGateway; class GuildBankGateway; class TradeGateway; class LootGateway; class TitleGateway; class ReputationGateway; class PetGateway; }
 
 namespace wowee::test {
 
@@ -215,6 +216,8 @@ public:
         std::vector<reputation::FactionRecord> factions() override { return rows; }
     };
     FactionFiles& factionFiles() { return factionFiles_; }
+    /// The pet and the stable, wired as the client wires them.
+    pet::IPet& pet();
     core::CVarStore& cvars() { return cvars_; }
 
     /// The server's side of the connection: the one the game made last. Valid
@@ -354,6 +357,8 @@ private:
     FactionFiles factionFiles_;
     std::unique_ptr<game::ReputationGateway> reputationGateway_;
     std::unique_ptr<reputation::ReputationService> reputation_;
+    std::unique_ptr<game::PetGateway> petGateway_;
+    std::unique_ptr<pet::PetService> pet_;
     std::unique_ptr<game::GameHandler> game_;
     FakeWorldConnection* connection_ = nullptr;  // owned by the game once made
     bool pingsAnswered_ = true;

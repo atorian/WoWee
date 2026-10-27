@@ -34,6 +34,8 @@
 #include "title/services/title_service.hpp"
 #include "game/reputation_gateway.hpp"
 #include "reputation/services/reputation_service.hpp"
+#include "game/pet_gateway.hpp"
+#include "pet/services/pet_service.hpp"
 
 #include <catch_amalgamated.hpp>  // test_support.hpp's REQUIRE
 #include "test_support.hpp"
@@ -254,6 +256,10 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     reputation_ = std::make_unique<reputation::ReputationService>(factionFiles_, *reputationGateway_, events_);
     services_.reputationFeed = reputation_.get();
     services_.reputation = reputation_.get();
+    petGateway_ = std::make_unique<game::PetGateway>(*game_);
+    pet_ = std::make_unique<pet::PetService>(*petGateway_, events_);
+    services_.petFeed = pet_.get();
+    services_.pet = pet_.get();
     game::loadProtocolTables(*game_, *expansions_.getActive());
     game_->setAddonEventCallback([this](const std::string& name, const std::vector<std::string>& args) {
         addonEvents_.push_back({name, args});
@@ -280,6 +286,7 @@ loot::ILoot& GameHarness::loot() { return *loot_; }
 achievement::IAchievements& GameHarness::achievements() { return *achievements_; }
 title::ITitles& GameHarness::titles() { return *titles_; }
 reputation::IReputation& GameHarness::reputation() { return *reputation_; }
+pet::IPet& GameHarness::pet() { return *pet_; }
 
 FakeWorldConnection& GameHarness::server() {
     if (!connection_) fail("no connection yet: connect (or enterWorld) first");

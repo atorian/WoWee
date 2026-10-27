@@ -6,6 +6,7 @@
 #include "battleground/services/battlegrounds.hpp"
 #include "title/services/titles.hpp"
 #include "reputation/services/reputation.hpp"
+#include "pet/services/pet.hpp"
 #include "addons/lua_api_helpers.hpp"
 
 namespace wowee::addons {
@@ -800,7 +801,7 @@ static int lua_UnitStat(lua_State* L) {
     toLowerInPlace(who);
     int32_t val = 0;
     if (who == "pet") {
-        if (statIdx >= 0 && statIdx < 5) val = gh->getPetStats()[static_cast<size_t>(statIdx)];
+        if (statIdx >= 0 && statIdx < 5) val = petOf(L).getPetStats()[static_cast<size_t>(statIdx)];
     } else if (who == "player") {
         val = gh->getPlayerStat(statIdx);
     }
@@ -1165,12 +1166,12 @@ static int lua_UnitCharacterPoints(lua_State* L) {
 
 static int lua_PetHasActionBar(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->hasPet());
+    lua_pushboolean(L, gh && petOf(L).hasPet());
     return 1;
 }
 static int lua_PetCanBeDismissed(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->hasPet());
+    lua_pushboolean(L, gh && petOf(L).hasPet());
     return 1;
 }
 // Abandoning is a hunter's pet, and nothing here knows which kind it has yet.
@@ -1391,7 +1392,7 @@ static int lua_UnitAttackPower(lua_State* L) {
     std::string who(luaL_optstring(L, 1, "player"));
     toLowerInPlace(who);
     if (who == "pet") {
-        const int32_t petAp = gh ? gh->getPetAttackPower() : 0;
+        const int32_t petAp = gh ? petOf(L).getPetAttackPower() : 0;
         lua_pushnumber(L, petAp > 0 ? petAp : 0);
         lua_pushnumber(L, 0);
         lua_pushnumber(L, 0);
@@ -1480,8 +1481,8 @@ static int lua_UnitDamage(lua_State* L) {
     std::string who(luaL_optstring(L, 1, "player"));
     toLowerInPlace(who);
     if (who == "pet") {
-        const double lo = gh ? gh->getPetMinDamage() : 0.0;
-        const double hi = gh ? gh->getPetMaxDamage() : 0.0;
+        const double lo = gh ? petOf(L).getPetMinDamage() : 0.0;
+        const double hi = gh ? petOf(L).getPetMaxDamage() : 0.0;
         lua_pushnumber(L, lo);   // minDamage
         lua_pushnumber(L, hi);   // maxDamage
         lua_pushnumber(L, 0.0);  // minOffHand
@@ -2468,7 +2469,7 @@ void registerUnitLuaAPI(lua_State* L) {
             toLowerInPlace(who);
             int32_t armor = 0;
             if (gh) {
-                armor = (who == "pet") ? gh->getPetResistances()[0]
+                armor = (who == "pet") ? petOf(L).getPetResistances()[0]
                       : (who == "player") ? gh->getArmorRating() : 0;
             }
             if (armor < 0) armor = 0;
@@ -2488,7 +2489,7 @@ void registerUnitLuaAPI(lua_State* L) {
             toLowerInPlace(who);
             if (gh && school >= 0 && school <= 6) {
                 if (who == "pet") {
-                    val = gh->getPetResistances()[static_cast<size_t>(school)];
+                    val = petOf(L).getPetResistances()[static_cast<size_t>(school)];
                 } else if (who == "player") {
                     // Physical is armor, and it is index zero of the same block.
                     val = (school == 0) ? gh->getArmorRating() : gh->getResistance(school);
@@ -3201,8 +3202,8 @@ void registerUnitLuaAPI(lua_State* L) {
                 {"GetPetExperience", [](lua_State* L) -> int {
             // currXP, nextXP - off the pet unit's own fields, not the player's.
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getPetExperience() : 0);
-            lua_pushnumber(L, gh ? gh->getPetNextLevelExp() : 0);
+            lua_pushnumber(L, gh ? petOf(L).getPetExperience() : 0);
+            lua_pushnumber(L, gh ? petOf(L).getPetNextLevelExp() : 0);
             return 2;
         }},
                 // GetCompanionCooldown(mode, index) → start, duration, enabled.

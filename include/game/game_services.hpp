@@ -27,6 +27,7 @@ namespace loot { class ILootFeed; class ILoot; }
 namespace achievement { class IAchievementsFeed; class IAchievements; }
 namespace title { class ITitlesFeed; class ITitles; }
 namespace reputation { class IReputationFeed; class IReputation; }
+namespace pet { class IPetFeed; class IPet; }
 namespace network { class WorldConnection; }
 
 namespace game {
@@ -121,6 +122,10 @@ struct GameServices {
     /// character's settings read.
     reputation::IReputationFeed* reputationFeed = nullptr;
     reputation::IReputation* reputation = nullptr;
+    /// Where the pet's and the stable's packets go, and the pet the rest of
+    /// the game reads (which unit is "pet", whose fields are the pet's).
+    pet::IPetFeed* petFeed = nullptr;
+    pet::IPet* pet = nullptr;
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };

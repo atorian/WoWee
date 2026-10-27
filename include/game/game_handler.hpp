@@ -292,7 +292,8 @@ public:
     // startAutoAttack, lootTarget, addCombatText, ...) are marked override
     // where they are declared.
     uint64_t focusTargetGuid() const override { return focusGuid; }
-    uint64_t petGuid() const override { return getPetGuid(); }
+    uint64_t petGuid() const override;
+    pet::IPetFeed* petFeed() override;
     std::string unitIdFor(uint64_t guid) const override { return guidToUnitId(guid); }
     uint32_t playerLevel() const override { return getPlayerLevel(); }
     const GameObjectQueryResponseData* gameObjectInfo(uint32_t entry) const override {
@@ -352,7 +353,7 @@ public:
     void requestCreatureInfo(uint32_t entry) override { queryCreatureInfo(entry, 0); }
     void requestGameObjectInfo(uint32_t entry) override { queryGameObjectInfo(entry, 0); }
     void vendorCanRepair() override { setVendorCanRepair(true); }
-    void openedStableMaster(uint64_t npcGuid) override { petHandler_->setStableMaster(npcGuid); }
+    void openedStableMaster(uint64_t npcGuid) override;
 
     // SocialQueries (the ones shared with the other handlers are above).
     bool battlegroundMap(uint32_t mapId) override { return isBattlegroundMap(mapId); }
@@ -975,31 +976,6 @@ public:
     void cancelCast() override;
     void cancelAura(uint32_t spellId);
 
-    // ---- The pet - PetHandler's; these forward for the old callers ----
-    void dismissPet() { petHandler_->dismiss(); }
-    void renamePet(const std::string& newName) { petHandler_->rename(newName); }
-    bool hasPet() const { return petHandler_->hasPet(); }
-    /// The same flag without taking it. The unit menu asks whether a rename is
-    /// offered every time it is built.
-    bool isPetRenameable() const { return petHandler_->renameable(); }
-    uint64_t getPetGuid() const { return petHandler_->guid(); }
-    static constexpr int PET_ACTION_BAR_SLOTS = PetHandler::kActionBarSlots;
-    uint32_t getPetActionSlot(int idx) const { return petHandler_->actionSlot(idx); }
-    uint8_t getPetCommand() const { return petHandler_->command(); }   // 0=stay,1=follow,2=attack,3=dismiss
-    uint8_t getPetReact()   const { return petHandler_->react(); }     // 0=passive,1=defensive,2=aggressive
-    const std::array<int32_t, 5>& getPetStats() const { return petHandler_->stats(); }
-    const std::array<int32_t, 7>& getPetResistances() const { return petHandler_->resistances(); }
-    int32_t getPetAttackPower() const { return petHandler_->attackPower(); }
-    float getPetMinDamage() const { return petHandler_->minDamage(); }
-    float getPetMaxDamage() const { return petHandler_->maxDamage(); }
-    uint32_t getPetExperience() const { return petHandler_->experience(); }
-    uint32_t getPetNextLevelExp() const { return petHandler_->nextLevelExperience(); }
-    const std::vector<uint32_t>& getPetSpells() const { return petHandler_->spells(); }
-    bool isPetSpellAutocast(uint32_t spellId) const { return petHandler_->isAutocast(spellId); }
-    void sendPetAction(uint32_t action, uint64_t targetGuid = 0) {
-        petHandler_->sendAction(action, targetGuid);
-    }
-    void togglePetSpellAutocast(uint32_t spellId) { petHandler_->toggleAutocast(spellId); }
     const std::unordered_set<uint32_t>& getKnownSpells() const {
         static const std::unordered_set<uint32_t> empty;
         return spellHandler_->getKnownSpells();
@@ -1009,17 +985,6 @@ public:
     using SpellBookTab = SpellHandler::SpellBookTab;
     const std::vector<SpellBookTab>& getSpellBookTabs();
 
-    // ---- Pet Stable - PetHandler's ----
-    using StabledPet = game::StabledPet;
-    bool isStableWindowOpen() const { return petHandler_->isStableWindowOpen(); }
-    void closeStableWindow() { petHandler_->closeStableWindow(); }
-    uint8_t  getStableSlots() const { return petHandler_->stableSlots(); }
-    const std::vector<StabledPet>& getStabledPets() const { return petHandler_->stabledPets(); }
-    void requestStabledPetList() { petHandler_->requestStabledPetList(); }
-    void stablePet(uint8_t slot) { petHandler_->stablePet(slot); }
-    void unstablePet(uint32_t petNumber) { petHandler_->unstablePet(petNumber); }
-    void buyStableSlot() { petHandler_->buyStableSlot(); }
-    void abandonPet() { petHandler_->abandon(); }
     /// Forget a primary profession. The server refuses anything that is not
     /// one, so the skill panel's unlearn button is the only sensible caller.
     void unlearnSkill(uint32_t skillId);
@@ -1547,11 +1512,6 @@ public:
     uint32_t getTalentWipeCost() const;
     void confirmTalentWipe();
     void cancelTalentWipe();
-    // Pet talent respec confirm
-    bool showPetUnlearnDialog() const { return petHandler_->showUnlearnDialog(); }
-    uint32_t getPetUnlearnCost() const { return petHandler_->unlearnCost(); }
-    void confirmPetUnlearn() { petHandler_->confirmUnlearn(); }
-    void cancelPetUnlearn() { petHandler_->cancelUnlearn(); }
 
     // Barber shop
     bool isBarberShopOpen() const { return barberShopOpen_; }
@@ -2479,9 +2439,6 @@ public:
     /// The character's conversation: the chat log, channels, whispers, AFK.
     ChatHandler& chat() { return *chatHandler_; }
     const ChatHandler& chat() const { return *chatHandler_; }
-    /// The player's pet and the stable.
-    PetHandler& pet() { return *petHandler_; }
-    const PetHandler& pet() const { return *petHandler_; }
     /// The spell book: spells, casts, auras, talents, skills, and what
     /// Spell.dbc and the skill tables say about them.
     SpellHandler& spells() { return *spellHandler_; }
@@ -3146,8 +3103,6 @@ private:
     // Craft queue: seconds the expired cast bar has waited for SMSG_SPELL_GO
     // (which re-casts the next queued item) before giving up
     float craftCastGoGraceSec_ = 0.0f;
-
-    // The pet and the stable are PetHandler's.
 
     // Mirror timers (0=fatigue, 1=breath, 2=feigndeath)
     MirrorTimer mirrorTimers_[3];
