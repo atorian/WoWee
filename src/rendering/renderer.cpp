@@ -4495,6 +4495,18 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         }
     }
 
+    // The water's own pass, now that there is water to draw in it and the
+    // minimap, spray and blended doodads that follow it there exist.
+    //
+    // It was only ever set up when MSAA or the swapchain changed, and the
+    // sample count is applied at start-up, before the first world entry
+    // creates the water renderer. So the water stayed in the multisampled
+    // scene pass until the first resize - harmless while it was a plain draw,
+    // but its tessellation splits the pass under MoltenVK, and the samples the
+    // world had drawn into the memoryless MSAA colour were gone: a black world
+    // with the minimap over it, on the Mac, until the window was resized.
+    if (waterRenderer && !waterRenderer->hasWater1xPass()) setupWater1xPass();
+
     // Set map name on sub-renderers
     setActiveMapName(mapName);
 
