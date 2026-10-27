@@ -1,5 +1,6 @@
 #include "game/warden_handler.hpp"
 #include "game/game_handler.hpp"
+#include "title/services/titles.hpp"
 #include "game/game_utils.hpp"
 #include "game/warden_crypto.hpp"
 #include "game/warden_memory.hpp"
@@ -232,7 +233,10 @@ bool WardenHandler::beginSession(const std::string& host, uint16_t port, uint32_
             [this, root, host, port, build, executable] {
                 return serverExtension_.begin(root, host, port, build, executable,
                     {[this](const KnownTitleUpdate& update) {
-                        owner_.applyKnownTitleUpdate(update.operation, update.bits);
+                        LOG_INFO("Server known titles updated: operation=", unsigned(update.operation),
+                                 " count=", update.bits.size());
+                        if (auto* feed = owner_.services().titlesFeed)
+                            feed->onKnownTitles(update.operation, update.bits);
                     }, [this](uint64_t copper) {
                         owner_.applyServerMoney(copper);
                     }, [this](const std::vector<EzWowPatch>& patches) {

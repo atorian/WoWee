@@ -12,6 +12,7 @@
 #include "game/calendar_gateway.hpp"
 #include "game/group_gateway.hpp"
 #include "game/guild_gateway.hpp"
+#include "game/title_gateway.hpp"
 #include "game/guild_bank_gateway.hpp"
 #include "guild_bank/services/guild_bank.hpp"
 #include "guild/services/guild.hpp"
@@ -466,6 +467,8 @@ SocialHandler::SocialHandler(PacketSender& sender, FrameXmlEvents& frameXml, cor
     for (auto& subscription : subscribeGroupNotices(events_, chat_, frameXml_))
         subscriptions_.push_back(std::move(subscription));
     for (auto& subscription : subscribeGuildNotices(events_, chat_, frameXml_, queries_, cvars))
+        subscriptions_.push_back(std::move(subscription));
+    for (auto& subscription : subscribeTitleNotices(events_, chat_, frameXml_))
         subscriptions_.push_back(std::move(subscription));
     // The character's social state is the server's to say at every login:
     // SMSG_GROUP_LIST comes with it for a character in a party, the guild

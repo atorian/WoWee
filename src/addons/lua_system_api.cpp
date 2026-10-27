@@ -27,6 +27,7 @@
 #include "ui/settings_schema.hpp"
 #include "imgui.h"
 #include "achievement/services/achievements.hpp"
+#include "title/services/titles.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "addons/chat_window_background.hpp"
 #include "ui/display_modes.hpp"
@@ -7076,14 +7077,14 @@ void registerSystemLuaAPI(lua_State* L) {
         }},
                 {"GetCurrentTitle", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getChosenTitleBit() : -1);
+            lua_pushnumber(L, gh ? titlesOf(L).getChosenTitleBit() : -1);
             return 1;
         }},
                 {"GetTitleName", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             int bit = static_cast<int>(luaL_checknumber(L, 1));
             if (!gh || bit < 0) { return luaReturnNil(L); }
-            std::string title = gh->getFormattedTitle(static_cast<uint32_t>(bit));
+            std::string title = titlesOf(L).getFormattedTitle(static_cast<uint32_t>(bit));
             if (title.empty()) { return luaReturnNil(L); }
             lua_pushstring(L, title.c_str());
             return 1;
@@ -7098,7 +7099,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // better.
                 {"SetCurrentTitle", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) gh->sendSetTitle(static_cast<int32_t>(luaL_optnumber(L, 1, -1)));
+            if (gh) titlesOf(L).sendSetTitle(static_cast<int32_t>(luaL_optnumber(L, 1, -1)));
             return 0;
         }},
                 {"GetInspectSpecialization", [](lua_State* L) -> int {

@@ -1,4 +1,5 @@
 #include "game/entity_controller.hpp"
+#include "title/services/titles.hpp"
 #include "game/emote_table.hpp"
 #include "core/event_bus.hpp"
 #include "game/game_events.hpp"
@@ -1472,9 +1473,9 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
             }
         }
         else if (pfi.chosenTitle != 0xFFFF && key == pfi.chosenTitle) {
-            owner_.chosenTitleBitRef() = static_cast<int32_t>(val);
             LOG_DEBUG("PLAYER_CHOSEN_TITLE ", isCreate ? "from update fields: " : "updated: ",
-                      owner_.chosenTitleBitRef());
+                      static_cast<int32_t>(val));
+            if (auto* feed = owner_.services().titlesFeed) feed->onChosen(static_cast<int32_t>(val));
         }
         // VALUES-only fields: PLAYER_BYTES (appearance) and PLAYER_FLAGS (ghost state)
         else if (!isCreate && pfi.pBytes != 0xFFFF && key == pfi.pBytes) {

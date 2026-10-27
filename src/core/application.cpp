@@ -31,6 +31,8 @@
 #include "loot/services/loot_service.hpp"
 #include "game/achievement_data.hpp"
 #include "achievement/services/achievement_service.hpp"
+#include "game/title_gateway.hpp"
+#include "title/services/title_service.hpp"
 #include "ui/macro_icon.hpp"
 #include <imgui_impl_vulkan.h>
 #include "rendering/imgui_texture.hpp"
@@ -563,6 +565,11 @@ bool Application::initialize() {
     achievements_ = std::make_unique<achievement::AchievementService>(*achievementData_, eventBus_);
     gameServices_.achievementsFeed = achievements_.get();
     gameServices_.achievements = achievements_.get();
+    titleData_ = std::make_unique<game::TitleData>(assetManager.get());
+    titleGateway_ = std::make_unique<game::TitleGateway>(*gameHandler, *gameHandler);
+    titles_ = std::make_unique<title::TitleService>(*titleData_, *titleGateway_, eventBus_);
+    gameServices_.titlesFeed = titles_.get();
+    gameServices_.titles = titles_.get();
     transportScene_ = std::make_unique<RendererTransportScene>(*renderer);
     gameHandler->getTransportManager()->setScene(transportScene_.get());
 
@@ -929,6 +936,7 @@ bool Application::initialize() {
             uiServices.guildBank = guildBank_.get();
             uiServices.trade = trade_.get();
             uiServices.loot = loot_.get();
+            uiServices.titles = titles_.get();
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();  // May be nullptr here, re-wire later
             uiServices.interfaceStages = &interfaceStages_;
@@ -996,6 +1004,7 @@ bool Application::initialize() {
         luaSvc.trade             = trade_.get();
         luaSvc.loot              = loot_.get();
         luaSvc.achievements      = achievements_.get();
+        luaSvc.titles            = titles_.get();
         // Acted on between frames - the reload destroys the state that asked.
         luaSvc.requestReloadUI = [this]() {
             if (auto* character = session()) character->requestInterfaceReload();
@@ -1723,6 +1732,7 @@ bool Application::initialize() {
             uiServices.guildBank = guildBank_.get();
             uiServices.trade = trade_.get();
             uiServices.loot = loot_.get();
+            uiServices.titles = titles_.get();
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();
             uiServices.interfaceStages = &interfaceStages_;
@@ -2695,6 +2705,8 @@ void Application::shutdown() {
     gameServices_.loot = nullptr;
     gameServices_.achievementsFeed = nullptr;
     gameServices_.achievements = nullptr;
+    gameServices_.titlesFeed = nullptr;
+    gameServices_.titles = nullptr;
     contacts_.reset();
     contactsGateway_.reset();
     who_.reset();
@@ -2711,6 +2723,9 @@ void Application::shutdown() {
     lfgGateway_.reset();
     calendar_.reset();
     calendarGateway_.reset();
+    titles_.reset();
+    titleGateway_.reset();
+    titleData_.reset();
     achievements_.reset();
     achievementData_.reset();
     loot_.reset();

@@ -25,6 +25,7 @@ namespace guild_bank { class IGuildBankFeed; class IGuildBank; }
 namespace trade { class ITradeFeed; class ITrade; }
 namespace loot { class ILootFeed; class ILoot; }
 namespace achievement { class IAchievementsFeed; class IAchievements; }
+namespace title { class ITitlesFeed; class ITitles; }
 namespace network { class WorldConnection; }
 
 namespace game {
@@ -111,6 +112,10 @@ struct GameServices {
     /// in a CHAT_MSG_ACHIEVEMENT line.
     achievement::IAchievementsFeed* achievementsFeed = nullptr;
     achievement::IAchievements* achievements = nullptr;
+    /// Where the title packets, the worn title and a realm extension's known
+    /// list go, and the titles the client reads CharTitles.dbc through.
+    title::ITitlesFeed* titlesFeed = nullptr;
+    title::ITitles* titles = nullptr;
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };

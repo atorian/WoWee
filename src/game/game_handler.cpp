@@ -1,4 +1,5 @@
 #include "game/game_handler.hpp"
+#include "title/services/titles.hpp"
 #include "core/event_bus.hpp"
 #include "game/game_events.hpp"
 #include <stdexcept>
@@ -290,7 +291,7 @@ void GameHandler::returnToCharacterSelect() {
 void GameHandler::clearWorldState() {
     movementHandler_->cancelPendingWorldTransfer();
     activeCharacterGuid_ = 0;
-    knownTitleBits_.clear();
+    if (services_.titlesFeed) services_.titlesFeed->leftWorld();
     transportAttachments_.clear();
     pendingIncomingPackets_.clear();
     // Fire despawn callbacks so the renderer releases M2/character model resources.
@@ -1920,54 +1921,6 @@ void GameHandler::declineSummon() {
 // Group loot roll (SMSG_LOOT_ROLL / SMSG_LOOT_ROLL_WON / CMSG_LOOT_ROLL)
 // ---------------------------------------------------------------------------
 
-void GameHandler::loadTitleNameCache() const {
-    if (titleNameCacheLoaded_) return;
-
-    auto* am = services_.assetManager;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
-    titleNameCacheLoaded_ = true;
-
-    auto dbc = am->loadDBC("CharTitles.dbc");
-    if (!dbc || !dbc->isLoaded() || dbc->getFieldCount() < 5) return;
-
-    const auto* layout = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("CharTitles") : nullptr;
-
-    uint32_t titleField = layout ? layout->field("Title")    : 2;
-    uint32_t bitField   = layout ? layout->field("TitleBit") : 36;
-    if (titleField == 0xFFFFFFFF) titleField = 2;
-    if (bitField   == 0xFFFFFFFF) bitField   = static_cast<uint32_t>(dbc->getFieldCount() - 1);
-
-    for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-        const uint32_t id = dbc->getUInt32(i, 0);   // the row id a quest reward references
-        std::string name = dbc->getString(i, titleField);
-        if (name.empty()) continue;
-        // By id for a quest reward (which carries the id), and by mask bit for
-        // the worn title (which is a bit off the player's own fields).
-        if (id != 0) titleFormatById_[id] = name;
-        uint32_t bit = dbc->getUInt32(i, bitField);
-        if (bit != 0) titleNameCache_[bit] = std::move(name);
-    }
-    LOG_INFO("CharTitles: loaded ", titleNameCache_.size(), " title names from DBC");
-}
-
-std::string GameHandler::getFormattedTitle(uint32_t bit) const {
-    loadTitleNameCache();
-    auto it = titleNameCache_.find(bit);
-    if (it == titleNameCache_.end() || it->second.empty()) return {};
-    return formatTitleString(it->second);
-}
-
-std::string GameHandler::getFormattedTitleById(uint32_t id) const {
-    loadTitleNameCache();
-    auto it = titleFormatById_.find(id);
-    if (it == titleFormatById_.end() || it->second.empty()) return {};
-    return formatTitleString(it->second);
-}
-
 float GameHandler::critPercentFromGameTable(std::vector<float>& baseCache,
                                             std::vector<float>& ratioCache, bool& loaded,
                                             const char* baseDbc, const char* ratioDbc,
@@ -2079,39 +2032,6 @@ float GameHandler::getCombatRatingBonus(int cr) const {
     if (coef == 0.0f) return 0.0f;
     const float ratingValue = static_cast<float>(std::max(0, getCombatRating(cr)));
     return ratingValue * (gtClassRatingScalar_[scalarIdx] / coef);
-}
-
-std::string GameHandler::formatTitleString(const std::string& fmt) const {
-    const auto& ln2 = lookupName(playerGuid);
-    static const std::string kUnknown = "unknown";
-    return formatTitleStringFor(fmt, ln2.empty() ? kUnknown : ln2);
-}
-
-std::string GameHandler::formatTitleStringFor(const std::string& fmt,
-                                              const std::string& name) const {
-    // A title is a sentence with a hole in it - "%s the Explorer", "Sergeant
-    // %s" - so the name goes where the row says and not before it.
-    size_t pos = fmt.find("%s");
-    if (pos != std::string::npos) {
-        return fmt.substr(0, pos) + name + fmt.substr(pos + 2);
-    }
-    return fmt;
-}
-
-std::string GameHandler::getFormattedTitleFor(uint32_t bit,
-                                              const std::string& name) const {
-    loadTitleNameCache();
-    auto it = titleNameCache_.find(bit);
-    if (it == titleNameCache_.end() || it->second.empty()) return {};
-    return formatTitleStringFor(it->second, name);
-}
-
-void GameHandler::sendSetTitle(int32_t bit) {
-    if (!isInWorld()) return;
-    auto packet = SetTitlePacket::build(bit);
-    socket->send(packet);
-    chosenTitleBit_ = bit;
-    LOG_INFO("sendSetTitle: bit=", bit);
 }
 
 const GameHandler::BattlemasterEntry* GameHandler::getBattlemasterInfo(uint32_t bgTypeId) {

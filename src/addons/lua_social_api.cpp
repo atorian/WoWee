@@ -12,6 +12,7 @@
 #include "trade/services/trade.hpp"
 #include "loot/services/loot.hpp"
 #include "achievement/services/achievements.hpp"
+#include "title/services/titles.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "contacts/services/contacts.hpp"
 #include "who/domain/who_list.hpp"
@@ -543,6 +544,11 @@ loot::ILoot& lootOf(lua_State* L) {
 achievement::IAchievements& achievementsOf(lua_State* L) {
     auto* services = getLuaServices(L);
     return achievement::orNoAchievements(services ? services->achievements : nullptr);
+}
+
+title::ITitles& titlesOf(lua_State* L) {
+    auto* services = getLuaServices(L);
+    return title::orNoTitles(services ? services->titles : nullptr);
 }
 
 arena::IArenaTeams* arenaTeamsOf(lua_State* L) {

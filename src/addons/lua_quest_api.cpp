@@ -4,6 +4,7 @@
 #include "game/item_text.hpp"
 #include "achievement/domain/catalog.hpp"
 #include "achievement/services/achievements.hpp"
+#include "title/services/titles.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "addons/lua_engine.hpp"
 #include "game/auction_filters.hpp"
@@ -286,7 +287,7 @@ static int lua_GetQuestRewardTitle(lua_State* L) {
             titleId = log[static_cast<size_t>(index - 1)].rewardTitleId;
     }
     if (titleId == 0) { return luaReturnNil(L); }
-    const std::string name = gh->getFormattedTitleById(titleId);
+    const std::string name = titlesOf(L).getFormattedTitleById(titleId);
     if (name.empty()) { return luaReturnNil(L); }
     lua_pushstring(L, name.c_str());
     return 1;

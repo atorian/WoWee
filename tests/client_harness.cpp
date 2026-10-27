@@ -233,6 +233,7 @@ ClientHarness::ClientHarness()
     luaServices.trade = &game_.trade();
     luaServices.loot = &game_.loot();
     luaServices.achievements = &game_.achievements();
+    luaServices.titles = &game_.titles();
     playerView_->bindMovementControls(luaServices);
 
     core::ClientLoop::Services services{

@@ -4,6 +4,7 @@
 #include "game/shapeshift_forms.hpp"
 #include "game/bg_score_defs.hpp"
 #include "battleground/services/battlegrounds.hpp"
+#include "title/services/titles.hpp"
 #include "addons/lua_api_helpers.hpp"
 
 namespace wowee::addons {
@@ -1007,9 +1008,9 @@ static int lua_UnitPVPName(lua_State* L) {
     if (gh && uid) {
         std::string id(uid);
         toLowerInPlace(id);
-        if (id == "player" && gh->getChosenTitleBit() > 0) {
+        if (id == "player" && titlesOf(L).getChosenTitleBit() > 0) {
             const std::string titled =
-                gh->getFormattedTitle(static_cast<uint32_t>(gh->getChosenTitleBit()));
+                titlesOf(L).getFormattedTitle(static_cast<uint32_t>(titlesOf(L).getChosenTitleBit()));
             if (!titled.empty()) { lua_pushstring(L, titled.c_str()); return 1; }
         }
     }
@@ -3273,7 +3274,7 @@ void registerUnitLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int bit = static_cast<int>(luaL_optnumber(L, 1, -1));
             const bool known = gh && bit >= 0 &&
-                               gh->getKnownTitleBits().count(static_cast<uint32_t>(bit)) > 0;
+                               titlesOf(L).getKnownTitleBits().count(static_cast<uint32_t>(bit)) > 0;
             lua_pushnumber(L, known ? 1 : 0);
             return 1; }},
                 {"GetCombatRatingBonus",    lua_GetCombatRatingBonus},

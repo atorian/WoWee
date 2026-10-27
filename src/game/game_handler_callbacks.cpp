@@ -1,5 +1,6 @@
 #include "game/game_handler.hpp"
 #include "achievement/services/achievements.hpp"
+#include "title/services/titles.hpp"
 #include "group/services/group.hpp"
 #include "game/guild_gateway.hpp"
 #include "guild/domain/records.hpp"
@@ -2821,7 +2822,7 @@ void GameHandler::preloadDBCCaches() const {
     auto t0 = std::chrono::steady_clock::now();
 
     loadSpellNameCache();   // Spell.dbc - largest, ~170ms cold
-    loadTitleNameCache();   // CharTitles.dbc
+    title::orNoTitles(services_.titles).loadTitles();   // CharTitles.dbc
     loadFactionNameCache(); // Faction.dbc
     loadAreaNameCache();    // WorldMapArea.dbc
     loadMapNameCache();     // Map.dbc

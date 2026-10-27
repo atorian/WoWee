@@ -30,6 +30,7 @@ namespace wowee::guild_bank { class IGuildBank; }
 namespace wowee::trade { class ITrade; }
 namespace wowee::loot { class ILoot; }
 namespace wowee::achievement { class IAchievements; }
+namespace wowee::title { class ITitles; }
 
 namespace wowee::addons {
 
@@ -86,6 +87,8 @@ struct LuaServices {
     /// What the player has earned and is tracking, what an inspected player
     /// has earned, and what the game's files say about each achievement.
     achievement::IAchievements* achievements      = nullptr;
+    /// The titles the player knows and wears, and their names.
+    title::ITitles*          titles            = nullptr;
 
     /// Run a macro body, as RunMacroText() does - one command per line,
     /// through the same path the action bar uses for a macro button.

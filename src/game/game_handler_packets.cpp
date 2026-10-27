@@ -5,6 +5,7 @@
 #include "game/achievement_criteria.hpp"
 #include "achievement/domain/records.hpp"
 #include "achievement/services/achievements.hpp"
+#include "title/services/titles.hpp"
 #include "game/game_services.hpp"
 #include "core/packed_time.hpp"
 #include "game/protocol_constants.hpp"
@@ -65,6 +66,15 @@ namespace wowee {
 namespace game {
 
 namespace {
+
+// The titles the protocol feeds. A client built without them drops the title
+// packets, and says so once.
+title::ITitlesFeed* titlesFeedOf(const GameServices& services) {
+    static bool said = false;
+    if (!services.titlesFeed && !std::exchange(said, true))
+        LOG_WARNING("Titles are not wired into this client; title packets are dropped");
+    return services.titlesFeed;
+}
 
 // The achievements the protocol feeds. A client built without them drops the
 // achievement packets, and says so once.
@@ -155,18 +165,6 @@ void GameHandler::fireRuneUpdate(uint32_t index) {
 // session handshake, XP and exploration, corpses and combat state, guilds and
 // loot and vendors, teleports and taxis and battlegrounds, world states, action
 // buttons, levelling.
-void GameHandler::applyKnownTitleUpdate(uint8_t operation, const std::vector<uint16_t>& bits) {
-    if (operation < 1 || operation > 3) return;
-    auto titles = operation == 3 ? std::unordered_set<uint32_t>{} : knownTitleBits_;
-    for (auto bit : bits) {
-        if (operation == 2) titles.erase(bit);
-        else titles.insert(bit);
-    }
-    knownTitleBits_.swap(titles);
-    fireAddonEvent("KNOWN_TITLES_UPDATE", {});
-    LOG_INFO("Server known titles updated: operation=", unsigned(operation), " count=", bits.size());
-}
-
 void GameHandler::registerCoreOpcodes() {
     // -----------------------------------------------------------------------
     // Auth / session / pre-world handshake
@@ -372,36 +370,7 @@ void GameHandler::registerCoreOpcodes() {
         if (!packet.hasRemaining(8)) return;
         uint32_t titleBit = packet.readUInt32();
         uint32_t isLost   = packet.readUInt32();
-        loadTitleNameCache();
-        std::string titleStr;
-        auto tit = titleNameCache_.find(titleBit);
-        if (tit != titleNameCache_.end() && !tit->second.empty()) {
-            const auto& ln = lookupName(playerGuid);
-            const std::string& pName = ln.empty() ? std::string("you") : ln;
-            const std::string& fmt = tit->second;
-            size_t pos = fmt.find("%s");
-            if (pos != std::string::npos)
-                titleStr = fmt.substr(0, pos) + pName + fmt.substr(pos + 2);
-            else
-                titleStr = fmt;
-        }
-        std::string msg;
-        if (!titleStr.empty()) {
-            msg = isLost ? ("Title removed: " + titleStr + ".") : ("Title earned: " + titleStr + "!");
-        } else {
-            char buf[64];
-            std::snprintf(buf, sizeof(buf), isLost ? "Title removed (bit %u)." : "Title earned (bit %u)!", titleBit);
-            msg = buf;
-        }
-        if (isLost) knownTitleBits_.erase(titleBit);
-        else        knownTitleBits_.insert(titleBit);
-        // And announce it. The set is read by IsTitleKnown, which the character
-        // sheet's title dropdown builds itself from - but only when told to
-        // rebuild, and this is what tells it. Without it a title earned mid
-        // session did not appear in the list until the sheet was reopened.
-        fireAddonEvent("KNOWN_TITLES_UPDATE", {});
-        addSystemChatMessage(msg);
-        LOG_INFO("SMSG_TITLE_EARNED: bit=", titleBit, " lost=", isLost, " title='", titleStr, "'");
+        if (auto* feed = titlesFeedOf(services_)) feed->onEarned(titleBit, isLost != 0);
     };
     dispatchTable_[Opcode::SMSG_LEARNED_DANCE_MOVES] = [](network::Packet& packet) {
         LOG_DEBUG("SMSG_LEARNED_DANCE_MOVES: ignored (size=", packet.getSize(), ")");

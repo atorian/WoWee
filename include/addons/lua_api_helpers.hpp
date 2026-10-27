@@ -999,6 +999,10 @@ loot::ILoot& lootOf(lua_State* L);
 /// ones with nothing earned and nothing known when there is no game.
 achievement::IAchievements& achievementsOf(lua_State* L);
 
+/// The titles as the composition root handed them to the addon layer, or none
+/// known and none worn when there is no game.
+title::ITitles& titlesOf(lua_State* L);
+
 /// The team id at an arena team index, or zero when the index is off the end
 /// or there are no arena teams.
 ///

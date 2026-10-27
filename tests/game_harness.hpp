@@ -25,6 +25,7 @@
 #include "game/game_services.hpp"
 #include "game/opcode_table.hpp"
 #include "achievement/services/ports.hpp"
+#include "title/services/ports.hpp"
 #include "network/packet.hpp"
 #include "network/world_connection.hpp"
 
@@ -56,7 +57,8 @@ namespace wowee::guild_bank { class IGuildBank; class GuildBankService; }
 namespace wowee::trade { class ITrade; class TradeService; }
 namespace wowee::loot { class ILoot; class LootService; }
 namespace wowee::achievement { class IAchievements; class AchievementService; }
-namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; class AuctionGateway; class MailGateway; class GuildBankGateway; class TradeGateway; class LootGateway; }
+namespace wowee::title { class ITitles; class TitleService; }
+namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; class AuctionGateway; class MailGateway; class GuildBankGateway; class TradeGateway; class LootGateway; class TitleGateway; }
 
 namespace wowee::test {
 
@@ -189,6 +191,17 @@ public:
         std::vector<achievement::CriterionRecord> criteria() override { return criterionRows; }
     };
     AchievementFiles& achievementFiles() { return achievementFiles_; }
+    /// The titles, wired as the client wires them, over titleFiles.
+    title::ITitles& titles();
+    /// What CharTitles.dbc holds. Empty until a test writes to it, and read on
+    /// the first ask, as the client reads the file.
+    struct TitleFiles final : title::ITitleData {
+        std::vector<title::TitleRecord> rows;
+
+        [[nodiscard]] bool ready() const override { return true; }
+        std::vector<title::TitleRecord> titles() override { return rows; }
+    };
+    TitleFiles& titleFiles() { return titleFiles_; }
     core::CVarStore& cvars() { return cvars_; }
 
     /// The server's side of the connection: the one the game made last. Valid
@@ -322,6 +335,9 @@ private:
     std::unique_ptr<loot::LootService> loot_;
     AchievementFiles achievementFiles_;
     std::unique_ptr<achievement::AchievementService> achievements_;
+    TitleFiles titleFiles_;
+    std::unique_ptr<game::TitleGateway> titleGateway_;
+    std::unique_ptr<title::TitleService> titles_;
     std::unique_ptr<game::GameHandler> game_;
     FakeWorldConnection* connection_ = nullptr;  // owned by the game once made
     bool pingsAnswered_ = true;

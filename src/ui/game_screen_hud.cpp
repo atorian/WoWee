@@ -1,4 +1,5 @@
 #include "group/services/group.hpp"
+#include "title/services/titles.hpp"
 #include "trade/services/trade.hpp"
 #include "guild/services/guild.hpp"
 #include "contacts/services/contacts.hpp"
@@ -1394,7 +1395,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
             const auto& fields = entityPtr->getFields();
             auto tit = fields.find(game::fieldIndex(game::UF::PLAYER_CHOSEN_TITLE));
             if (tit != fields.end() && tit->second != 0) {
-                titledName = gameHandler.getFormattedTitleFor(tit->second, unitName);
+                titledName = title::orNoTitles(services_.titles).getFormattedTitleFor(tit->second, unitName);
             }
         }
         const std::string& shownName = titledName.empty() ? unitName : titledName;

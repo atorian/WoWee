@@ -2038,26 +2038,6 @@ public:
     /// "[<it>] " when they differ, so a number there is printed verbatim.
     const std::string& getLanguageName(uint32_t languageId) const;
 
-    // Title system - earned title bits and the currently displayed title
-    const std::unordered_set<uint32_t>& getKnownTitleBits() const { return knownTitleBits_; }
-    void applyKnownTitleUpdate(uint8_t operation, const std::vector<uint16_t>& bits);
-    int32_t getChosenTitleBit() const { return chosenTitleBit_; }
-    /// Returns the formatted title string for a given bit (replaces %s with player name), or empty.
-    std::string getFormattedTitle(uint32_t bit) const;
-    /// A title by its CharTitles.dbc id (what a quest reward carries), formatted
-    /// with the player's name where the "%s" sits - "%s the Explorer". Empty
-    /// when the id is unknown.
-    std::string getFormattedTitleById(uint32_t id) const;
-
-    /// One player's title, decorated with that player's own name.
-    ///
-    /// getFormattedTitle above answers for the local player, because the row
-    /// it reads is a sentence with the reader's name in it. Anyone else needs
-    /// their own name in that hole, which is all this adds.
-    std::string getFormattedTitleFor(uint32_t bit, const std::string& name) const;
-    /// Send CMSG_SET_TITLE to activate a title (bit >= 0) or clear it (bit = -1).
-    void sendSetTitle(int32_t bit);
-
     // Area discovery callback - fires when SMSG_EXPLORATION_EXPERIENCE is received
     using AreaDiscoveryCallback = std::function<void(const std::string& areaName, uint32_t xpGained)>;
     void setAreaDiscoveryCallback(AreaDiscoveryCallback cb) { areaDiscoveryCallback_ = std::move(cb); }
@@ -2661,7 +2641,6 @@ public:
     auto& activeCharacterGuidRef() { return activeCharacterGuid_; }
 
     // ── Character & Appearance ───────────────────────────────────────
-    auto& chosenTitleBitRef() { return chosenTitleBit_; }
     auto& cloakVisibleRef() { return cloakVisible_; }
     auto& helmVisibleRef() { return helmVisible_; }
     auto& currentMountDisplayIdRef() { return currentMountDisplayId_; }
@@ -3369,11 +3348,6 @@ private:
     uint32_t nextMovementTimestampMs();
     void updateClientTaxi(float deltaTime);
 
-    // Title cache: maps titleBit → title string (lazy-loaded from CharTitles.dbc)
-    // The strings use "%s" as a player-name placeholder (e.g. "Commander %s", "%s the Explorer").
-    mutable std::unordered_map<uint32_t, std::string> titleNameCache_;
-    mutable std::unordered_map<uint32_t, std::string> titleFormatById_;  // CharTitles id -> format
-    mutable bool titleNameCacheLoaded_ = false;
     // Combat game tables for the stat flyout: per-class base crit, and the
     // per-class-per-level Agility ratio (11 classes × 100 levels).
     mutable std::vector<float> gtMeleeCritBase_;
@@ -3392,15 +3366,6 @@ private:
                                    std::vector<float>& ratioCache, bool& loaded,
                                    const char* baseDbc, const char* ratioDbc,
                                    int statIdx) const;
-    // Substitutes the player's name into a title's "%s" slot; shared by the
-    // by-bit (worn) and by-id (quest reward) title lookups.
-    std::string formatTitleString(const std::string& fmt) const;
-    std::string formatTitleStringFor(const std::string& fmt, const std::string& name) const;
-    void loadTitleNameCache() const;
-    // Set of title bit-indices known to the player (from SMSG_TITLE_EARNED).
-    std::unordered_set<uint32_t> knownTitleBits_;
-    // Currently selected title bit, or -1 for no title. Updated from PLAYER_CHOSEN_TITLE.
-    int32_t chosenTitleBit_ = -1;
 
     /// Read once on the first ask, like the other DBC-backed caches here.
     mutable std::unordered_map<uint32_t, ExtendedCostEntry> extendedCostCache_;
