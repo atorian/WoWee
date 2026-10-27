@@ -280,12 +280,6 @@ struct TrainerSpellLearned {
     uint32_t spellId = 0;
 };
 
-/// The player earned an achievement.
-struct AchievementEarned {
-    uint32_t achievementId = 0;
-    std::string name;
-};
-
 /// Another player pinged the minimap, at a point in WoW coordinates.
 struct MinimapPinged {
     uint64_t senderGuid = 0;

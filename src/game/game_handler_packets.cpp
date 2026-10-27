@@ -3,6 +3,9 @@
 #include "core/event_bus.hpp"
 #include "game/game_events.hpp"
 #include "game/achievement_criteria.hpp"
+#include "achievement/domain/records.hpp"
+#include "achievement/services/achievements.hpp"
+#include "game/game_services.hpp"
 #include "core/packed_time.hpp"
 #include "game/protocol_constants.hpp"
 #include "game/game_utils.hpp"
@@ -40,6 +43,7 @@
 #include <cctype>
 #include <ctime>
 #include <random>
+#include <utility>
 #include <zlib.h>
 #include <chrono>
 #include <filesystem>
@@ -61,6 +65,15 @@ namespace wowee {
 namespace game {
 
 namespace {
+
+// The achievements the protocol feeds. A client built without them drops the
+// achievement packets, and says so once.
+achievement::IAchievementsFeed* achievementsFeedOf(const GameServices& services) {
+    static bool said = false;
+    if (!services.achievementsFeed && !std::exchange(said, true))
+        LOG_WARNING("Achievements are not wired into this client; achievement packets are dropped");
+    return services.achievementsFeed;
+}
 
 bool isAuthCharPipelineOpcode(LogicalOpcode op) {
     switch (op) {
@@ -650,15 +663,14 @@ void GameHandler::registerCoreOpcodes() {
     dispatchTable_[Opcode::SMSG_ACHIEVEMENT_DELETED] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             uint32_t achId = packet.readUInt32();
-            earnedAchievements_.erase(achId);
-            achievementDates_.erase(achId);
+            if (auto* feed = achievementsFeedOf(services_)) feed->onRevoked(achId);
         }
         packet.skipAll();
     };
     dispatchTable_[Opcode::SMSG_CRITERIA_DELETED] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             uint32_t critId = packet.readUInt32();
-            criteriaProgress_.erase(critId);
+            if (auto* feed = achievementsFeedOf(services_)) feed->onCriteriaReset(critId);
         }
         packet.skipAll();
     };
@@ -1131,8 +1143,33 @@ void GameHandler::registerCoreOpcodes() {
 
 
     // ---- Achievement / fishing delegates ----
+    // SMSG_ALL_ACHIEVEMENT_DATA (WotLK 3.3.5a)
+    //   Achievement records: repeated { uint32 id, uint32 packedDate } until 0xFFFFFFFF sentinel
+    //   Criteria records:    repeated { uint32 id, packed counter, ... } until 0xFFFFFFFF
     dispatchTable_[Opcode::SMSG_ALL_ACHIEVEMENT_DATA] = [this](network::Packet& packet) {
-        handleAllAchievementData(packet);
+        std::vector<achievement::EarnedAchievement> earned;
+        while (packet.hasRemaining(4)) {
+            uint32_t id = packet.readUInt32();
+            if (id == 0xFFFFFFFF) break;
+            if (!packet.hasRemaining(4)) break;
+            earned.push_back({.id = id, .date = packet.readUInt32()});
+        }
+        // The record's shape is in readCriteriaProgressTail, which
+        // SMSG_CRITERIA_UPDATE reads with too - the server builds both from the
+        // same lines.
+        std::vector<achievement::CriteriaCounter> criteria;
+        while (packet.hasRemaining(4)) {
+            uint32_t id = packet.readUInt32();
+            if (id == 0xFFFFFFFF) break;
+            CriteriaProgressRecord rec;
+            if (!readCriteriaProgressTail(packet, rec)) break;
+            criteria.push_back({.id = id, .counter = rec.counter});
+        }
+        LOG_INFO("SMSG_ALL_ACHIEVEMENT_DATA: loaded ", earned.size(), " achievements, ",
+                 criteria.size(), " criteria");
+        // The panel builds its whole tree on the list, and it arrives once at
+        // login - well before anything opens the panel.
+        if (auto* feed = achievementsFeedOf(services_)) feed->onAllData(earned, criteria);
     };
     // Both are errors rather than remarks, and the real client shows them on
     // the error line rather than in the chat log - ERR_FISH_NOT_HOOKED and
@@ -1290,36 +1327,12 @@ void GameHandler::registerCoreOpcodes() {
                 // A timed criteria whose window ran out reads as zero, which is
                 // what the server means by the flag and what the panel shows.
                 const uint64_t progress = (rec.flags == 1) ? 0 : rec.counter;
-                uint64_t oldProgress = 0;
-                auto cpit = criteriaProgress_.find(criteriaId);
-                if (cpit != criteriaProgress_.end()) oldProgress = cpit->second;
-                criteriaProgress_[criteriaId] = progress;
                 LOG_DEBUG("SMSG_CRITERIA_UPDATE: id=", criteriaId, " progress=", progress);
-                // Fire addon event for achievement tracking addons
-                if (progress != oldProgress)
-                    fireAddonEvent("CRITERIA_UPDATE", {std::to_string(criteriaId), std::to_string(progress)});
-
-                // A timed criteria also drives the tracker's countdown. The
-                // message says how far into the window the player is; how long
-                // the window is comes from the DBC, so the two have to be put
-                // together here - the interface reads the pair and works out a
-                // start time from them.
-                //
-                // Fired for any timed criteria rather than only tracked ones.
-                // The tracker stores what it is told and draws a timer only
-                // inside its tracked-achievement loop, so entries for the rest
-                // cost a table row and show nothing; the gain is that tracking
-                // an achievement part-way through its timer still shows the
-                // right countdown, instead of nothing until the next update.
-                ensureAchievementCriteriaLoaded();
-                const auto idx = getAchievementCriterionIndex(criteriaId);
-                if (idx.timeLimit != 0 && idx.achievementId != 0) {
-                    fireAddonEvent("TRACKED_ACHIEVEMENT_UPDATE",
-                                   {std::to_string(idx.achievementId),
-                                    std::to_string(criteriaId),
-                                    std::to_string(rec.timeElapsed),
-                                    std::to_string(idx.timeLimit)});
-                }
+                // A timed criteria also drives the tracker's countdown: the
+                // message says how far into the window the player is, and how
+                // long the window is comes from the DBC.
+                if (auto* feed = achievementsFeedOf(services_))
+                    feed->onCriteriaProgress(criteriaId, progress, rec.timeElapsed);
             }
         }
     };
@@ -1955,19 +1968,7 @@ void GameHandler::registerRemainingOpcodes() {
             if (packet.hasRemaining(12)) {
                 /*uint64_t guid =*/ packet.readUInt64();
                 uint32_t achievementId = packet.readUInt32();
-                loadAchievementNameCache();
-                auto nit = achievementNameCache_.find(achievementId);
-                char buf[256];
-                if (nit != achievementNameCache_.end() && !nit->second.empty()) {
-                    std::snprintf(buf, sizeof(buf),
-                        "%s is the first on the realm to earn: %s!",
-                        charName.c_str(), nit->second.c_str());
-                } else {
-                    std::snprintf(buf, sizeof(buf),
-                        "%s is the first on the realm to earn achievement #%u!",
-                        charName.c_str(), achievementId);
-                }
-                addSystemChatMessage(buf);
+                if (auto* feed = achievementsFeedOf(services_)) feed->onServerFirst(charName, achievementId);
             }
         }
         packet.skipAll();
@@ -2239,8 +2240,10 @@ void GameHandler::registerRemainingOpcodes() {
     // SMSG_REFER_A_FRIEND_EXPIRED - moved to SocialHandler::registerOpcodes
     // SMSG_REFER_A_FRIEND_FAILURE - moved to SocialHandler::registerOpcodes
     // SMSG_REPORT_PVP_AFK_RESULT - moved to SocialHandler::registerOpcodes
+    // SMSG_RESPOND_INSPECT_ACHIEVEMENTS (WotLK 3.3.5a): packed_guid (inspected
+    // player) + the same two blocks as SMSG_ALL_ACHIEVEMENT_DATA. Only the
+    // earned achievements and their dates are kept.
     dispatchTable_[Opcode::SMSG_RESPOND_INSPECT_ACHIEVEMENTS] = [this](network::Packet& packet) {
-        loadAchievementNameCache();
         if (!packet.hasRemaining(1)) return;
         uint64_t inspectedGuid = packet.readPackedGuid();
         if (inspectedGuid == 0) { packet.skipAll(); return; }
@@ -2259,12 +2262,10 @@ void GameHandler::registerRemainingOpcodes() {
             if (!packet.hasRemaining(16)) break;
             packet.readUInt64(); packet.readUInt32(); packet.readUInt32();
         }
-        inspectedPlayerAchievements_[inspectedGuid] = std::move(achievements);
         LOG_INFO("SMSG_RESPOND_INSPECT_ACHIEVEMENTS: guid=0x", std::hex, inspectedGuid, std::dec,
-                 " achievements=", inspectedPlayerAchievements_[inspectedGuid].size());
-        // The comparison tab reads its totals on this and nothing else, so
-        // without it the panel sat on whatever it had when it opened.
-        fireAddonEvent("INSPECT_ACHIEVEMENT_READY", {});
+                 " achievements=", achievements.size());
+        if (auto* feed = achievementsFeedOf(services_))
+            feed->onInspected(inspectedGuid, std::move(achievements));
     };
     dispatchTable_[Opcode::SMSG_ON_CANCEL_EXPECTED_RIDE_VEHICLE_AURA] = [this](network::Packet& packet) {
         const bool wasRiding = vehicleId_ != 0;

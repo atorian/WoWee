@@ -225,28 +225,6 @@ TEST_CASE("another unit's cast is animated from start to its end", "[spell][harn
     CHECK(h.game().spells().getUnitCastState(kCultist) != nullptr);
 }
 
-TEST_CASE("an achievement the player earns is kept and announced, another's is not",
-          "[spell][harness]") {
-    GameHarness h;
-    h.enterWorld();
-    std::vector<ev::AchievementEarned> earned;
-    auto sub = h.events().subscribe<ev::AchievementEarned>(
-        [&](const ev::AchievementEarned& e) { earned.push_back(e); });
-
-    // SMSG_ACHIEVEMENT_EARNED: who (packed), the achievement, the packed date.
-    h.receive(Opcode::SMSG_ACHIEVEMENT_EARNED, Body().packedGuid(kCultist).u32(6).u32(0x0A1B2C3D));
-    h.receive(Opcode::SMSG_ACHIEVEMENT_EARNED,
-              Body().packedGuid(h.player().guid).u32(7).u32(0x0A1B2C3D));
-    h.pump();
-
-    REQUIRE(earned.size() == 1);
-    CHECK(earned[0].achievementId == 7);
-    CHECK(h.game().getEarnedAchievements().count(7) == 1);
-    CHECK(h.game().getEarnedAchievements().count(6) == 0);
-    CHECK(h.game().getAchievementDate(7) == 0x0A1B2C3D);
-    CHECK(h.addonEvents("ACHIEVEMENT_EARNED").size() == 1);
-}
-
 TEST_CASE("a cast the server will not explain is still refused on screen", "[spell][harness]") {
     // Result 27 is DONT_REPORT: the server's way of refusing without a reason.
     // The player still pressed the key and still needs to know it did nothing.

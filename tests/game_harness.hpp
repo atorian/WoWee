@@ -24,6 +24,7 @@
 #include "game/game_handler.hpp"
 #include "game/game_services.hpp"
 #include "game/opcode_table.hpp"
+#include "achievement/services/ports.hpp"
 #include "network/packet.hpp"
 #include "network/world_connection.hpp"
 
@@ -54,6 +55,7 @@ namespace wowee::mail { class IMailbox; class MailService; }
 namespace wowee::guild_bank { class IGuildBank; class GuildBankService; }
 namespace wowee::trade { class ITrade; class TradeService; }
 namespace wowee::loot { class ILoot; class LootService; }
+namespace wowee::achievement { class IAchievements; class AchievementService; }
 namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; class AuctionGateway; class MailGateway; class GuildBankGateway; class TradeGateway; class LootGateway; }
 
 namespace wowee::test {
@@ -171,6 +173,22 @@ public:
     trade::ITrade& trade();
     /// The loot window and the rolls, wired as the client wires them.
     loot::ILoot& loot();
+    /// The achievements, wired as the client wires them, over achievementFiles.
+    achievement::IAchievements& achievements();
+    /// What the game's achievement files hold. Empty until a test writes to it,
+    /// and read once, on the first ask for each part, as the client reads the
+    /// files.
+    struct AchievementFiles final : achievement::IAchievementData {
+        achievement::AchievementTable table;
+        std::vector<achievement::CategoryRecord> categoryRows;
+        std::vector<achievement::CriterionRecord> criterionRows;
+
+        [[nodiscard]] bool ready() const override { return true; }
+        achievement::AchievementTable achievements() override { return table; }
+        std::vector<achievement::CategoryRecord> categories() override { return categoryRows; }
+        std::vector<achievement::CriterionRecord> criteria() override { return criterionRows; }
+    };
+    AchievementFiles& achievementFiles() { return achievementFiles_; }
     core::CVarStore& cvars() { return cvars_; }
 
     /// The server's side of the connection: the one the game made last. Valid
@@ -302,6 +320,8 @@ private:
     std::unique_ptr<trade::TradeService> trade_;
     std::unique_ptr<game::LootGateway> lootGateway_;
     std::unique_ptr<loot::LootService> loot_;
+    AchievementFiles achievementFiles_;
+    std::unique_ptr<achievement::AchievementService> achievements_;
     std::unique_ptr<game::GameHandler> game_;
     FakeWorldConnection* connection_ = nullptr;  // owned by the game once made
     bool pingsAnswered_ = true;

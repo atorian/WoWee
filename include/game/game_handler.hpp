@@ -328,7 +328,7 @@ public:
     uint64_t activeCritterGuid() const override { return getActiveCritterGuid(); }
     std::optional<HomeBind> homeBind() const override;
     std::string achievementName(uint32_t achievementId) override;
-    void recordAchievementEarned(uint32_t achievementId, uint32_t packedDate) override;
+    achievement::IAchievementsFeed* achievementsFeed() override;
     SpellDataInfo spellData(uint32_t spellId) const override { return getSpellData(spellId); }
     std::string iconPath(uint32_t iconId) const override { return getIconPath(iconId); }
 
@@ -2038,8 +2038,6 @@ public:
     /// "[<it>] " when they differ, so a number there is printed verbatim.
     const std::string& getLanguageName(uint32_t languageId) const;
 
-    const std::unordered_set<uint32_t>& getEarnedAchievements() const { return earnedAchievements_; }
-
     // Title system - earned title bits and the currently displayed title
     const std::unordered_set<uint32_t>& getKnownTitleBits() const { return knownTitleBits_; }
     void applyKnownTitleUpdate(uint8_t operation, const std::vector<uint16_t>& bits);
@@ -2064,13 +2062,6 @@ public:
     using AreaDiscoveryCallback = std::function<void(const std::string& areaName, uint32_t xpGained)>;
     void setAreaDiscoveryCallback(AreaDiscoveryCallback cb) { areaDiscoveryCallback_ = std::move(cb); }
 
-    const std::unordered_map<uint32_t, uint64_t>& getCriteriaProgress() const { return criteriaProgress_; }
-    /// Returns the WoW PackedTime earn date for an achievement, or 0 if unknown.
-    uint32_t getAchievementDate(uint32_t id) const {
-        auto it = achievementDates_.find(id);
-        return (it != achievementDates_.end()) ? it->second : 0u;
-    }
-    /// Returns the name of an achievement by ID, or empty string if unknown.
     /// What a vendor wants besides coin: honor, arena points, or up to five
     /// items of a given count. ItemExtendedCost.dbc, keyed by the id a vendor
     /// item carries.
@@ -2100,48 +2091,6 @@ public:
         bool valid = false;
     };
     const ContinentBounds& getContinentBounds(uint32_t mapId) const;
-
-    const std::string& getAchievementName(uint32_t id) const {
-        auto it = achievementNameCache_.find(id);
-        if (it != achievementNameCache_.end()) return it->second;
-        static const std::string kEmpty;
-        return kEmpty;
-    }
-    void ensureAchievementNamesLoaded() { loadAchievementNameCache(); }
-
-    struct AchievementCategoryInfo {
-        std::string name;
-        int32_t     parentId = -1;  // -1 is a top-level category, as WoW reports it
-        uint32_t    uiOrder  = 0;   // where it sits among its siblings
-        bool        isStatistic = false;  // lives in the Statistics tree
-    };
-    struct AchievementCriterion {
-        uint32_t    id = 0;
-        std::string description;
-        uint32_t    type = 0;
-        uint32_t    assetId = 0;
-        uint32_t    quantity = 0;
-        /// Seconds the player has, once the criteria's timer starts. Zero for
-        /// all but fifty-nine of the seven and a half thousand criteria - the
-        /// ones whose own description names the limit, "Win Warsong Gulch in
-        /// under 7 minutes" against 420 and "Kill Maexxna within 20 minutes"
-        /// against 1200. That agreement is how field 29 was identified; it is
-        /// not in dbc_layouts.json.
-        uint32_t    timeLimit = 0;
-        /// Achievement_Criteria.dbc field 26. Bit one is
-        /// ACHIEVEMENT_CRITERIA_PROGRESS_BAR, which is what makes the panel
-        /// draw a bar instead of a tick - "Complete 2000 quests" carries it,
-        /// "Axes" at four hundred does not, which is how WoW draws those two.
-        uint32_t    flags = 0;
-    };
-
-    /// Where a criteria lives, by its own id. SMSG_CRITERIA_UPDATE names a
-    /// criteria and nothing else, and everything about it - which achievement
-    /// it belongs to, whether it is timed - is in the DBC under that id.
-    struct AchievementCriterionIndex {
-        uint32_t achievementId = 0;
-        uint32_t timeLimit = 0;
-    };
 
     // ---- Battlegrounds (BattlemasterList.dbc) ----
     // Thirteen rows: ID=0, MapID=1, Name=11, MaxGroupSize=28, MinLevel=30,
@@ -2188,11 +2137,6 @@ public:
     };
     const std::vector<CurrencyType>& getCurrencyTypes();
 
-    // ---- Achievement categories and criteria (Achievement_Category.dbc,
-    // Achievement_Criteria.dbc). The panel is a tree of categories, so it needs
-    // all of this before it can draw a single row.
-    void ensureAchievementCategoriesLoaded();
-
     /// The spell a glyph is, by GlyphProperties.dbc id.
     ///
     /// The server sends glyph *properties* ids in the update fields, and every
@@ -2205,106 +2149,6 @@ public:
         auto it = glyphSpellCache_.find(glyphPropertiesId);
         return it != glyphSpellCache_.end() ? it->second : 0u;
     }
-    void ensureAchievementCriteriaLoaded();
-    /// Category ids in the order the panel shows them. The two tabs are
-    /// disjoint sets, not one list filtered at the call site: GetCategoryList
-    /// and GetStatisticsCategoryList are separate accessors in WoW because a
-    /// statistic is not a thing that can be earned, and showing the Statistics
-    /// tree under Achievements offers rows nothing can complete.
-    const std::vector<uint32_t>& getAchievementCategoryOrder() const { return achievementCategoryOrder_; }
-    const std::vector<uint32_t>& getStatisticCategoryOrder() const { return statisticCategoryOrder_; }
-    const AchievementCategoryInfo* getAchievementCategoryInfo(uint32_t categoryId) const {
-        auto it = achievementCategoryInfo_.find(categoryId);
-        return it != achievementCategoryInfo_.end() ? &it->second : nullptr;
-    }
-    const std::vector<uint32_t>& getCategoryAchievements(uint32_t categoryId) const {
-        auto it = categoryAchievements_.find(categoryId);
-        static const std::vector<uint32_t> kEmpty;
-        return it != categoryAchievements_.end() ? it->second : kEmpty;
-    }
-    uint32_t getAchievementCategory(uint32_t achievementId) const {
-        auto it = achievementCategoryCache_.find(achievementId);
-        return it != achievementCategoryCache_.end() ? it->second : 0u;
-    }
-
-    /// The achievement this one supersedes, or zero - Achievement.dbc's
-    /// Supercedes column, which chains "Level 20" behind "Level 10" and
-    /// "Expert Cook" behind "Journeyman Cook". The achievement panel walks it
-    /// backwards to build a completed chain and forwards to find the step in
-    /// progress, so both directions are kept.
-    uint32_t getAchievementSupercedes(uint32_t achievementId) const {
-        auto it = achievementSupercedes_.find(achievementId);
-        return it != achievementSupercedes_.end() ? it->second : 0u;
-    }
-    uint32_t getAchievementSupercededBy(uint32_t achievementId) const {
-        auto it = achievementSupercededBy_.find(achievementId);
-        return it != achievementSupercededBy_.end() ? it->second : 0u;
-    }
-    const std::unordered_map<uint32_t, std::vector<AchievementCriterion>>& getAchievementCriteriaMap() const {
-        return achievementCriteria_;
-    }
-    /// The achievement a criteria belongs to and its time limit, or nulls if
-    /// the DBC has no such criteria.
-    AchievementCriterionIndex getAchievementCriterionIndex(uint32_t criteriaId) const {
-        auto it = achievementCriterionById_.find(criteriaId);
-        return it != achievementCriterionById_.end() ? it->second : AchievementCriterionIndex{};
-    }
-
-    const std::vector<AchievementCriterion>& getAchievementCriteria(uint32_t achievementId) const {
-        auto it = achievementCriteria_.find(achievementId);
-        static const std::vector<AchievementCriterion> kEmpty;
-        return it != achievementCriteria_.end() ? it->second : kEmpty;
-    }
-    /// Points from every achievement the player has earned.
-    uint32_t getTotalAchievementPoints() const {
-        uint32_t total = 0;
-        for (uint32_t id : earnedAchievements_) total += getAchievementPoints(id);
-        return total;
-    }
-    const std::unordered_set<uint32_t>& getTrackedAchievements() const { return trackedAchievements_; }
-    void setAchievementTracked(uint32_t id, bool tracked) {
-        if (tracked) trackedAchievements_.insert(id); else trackedAchievements_.erase(id);
-    }
-    /// Returns the description of an achievement by ID, or empty string if unknown.
-    const std::string& getAchievementDescription(uint32_t id) const {
-        auto it = achievementDescCache_.find(id);
-        if (it != achievementDescCache_.end()) return it->second;
-        static const std::string kEmpty;
-        return kEmpty;
-    }
-    /// Returns the point value of an achievement by ID, or 0 if unknown.
-    uint32_t getAchievementPoints(uint32_t id) const {
-        auto it = achievementPointsCache_.find(id);
-        return (it != achievementPointsCache_.end()) ? it->second : 0u;
-    }
-    /// Returns the SpellIcon.dbc ID for an achievement's icon, or 0 if unknown.
-    /// Achievement.dbc's Flags column. FrameXML reads bit 0x80 to decide
-    /// whether a row draws as a progress bar instead of a list of criteria -
-    /// the Loremaster and zone-quest achievements, twenty-two of them.
-    uint32_t getAchievementFlags(uint32_t id) const {
-        auto it = achievementFlagsCache_.find(id);
-        return (it != achievementFlagsCache_.end()) ? it->second : 0u;
-    }
-    uint32_t getAchievementIconId(uint32_t id) const {
-        auto it = achievementIconCache_.find(id);
-        return (it != achievementIconCache_.end()) ? it->second : 0u;
-    }
-    /// What an inspected player has earned, from SMSG_RESPOND_INSPECT_ACHIEVEMENTS:
-    /// achievement id to the packed date it was earned. Null when nothing has
-    /// come back for that guid.
-    ///
-    /// The date is kept because the comparison tab prints it beside each row -
-    /// it was being read off the wire to stay in step and then dropped, which
-    /// is the same thing as not reading it.
-    const std::unordered_map<uint32_t, uint32_t>* getInspectedPlayerAchievements(uint64_t guid) const {
-        auto it = inspectedPlayerAchievements_.find(guid);
-        return (it != inspectedPlayerAchievements_.end()) ? &it->second : nullptr;
-    }
-
-    /// Who the achievement comparison tab is looking at, or zero.
-    uint64_t getAchievementComparisonGuid() const { return achievementComparisonGuid_; }
-    void setAchievementComparisonGuid(uint64_t guid) { achievementComparisonGuid_ = guid; }
-
     // Server-triggered music callback - fires when SMSG_PLAY_MUSIC is received.
     // The soundId corresponds to a SoundEntries.dbc record. The receiver is
     // responsible for looking up the file path and forwarding to MusicManager.
@@ -2874,9 +2718,6 @@ public:
         return spellHandler_->skillLineDescription(skillId);
     }
 
-    // ── Quests & Achievements ────────────────────────────────────────
-    auto& achievementNameCacheRef() { return achievementNameCache_; }
-
     // ── World, Map & Zones ───────────────────────────────────────────
     auto& currentMapIdRef() { return currentMapId_; }
     auto& worldStateMapIdRef() { return worldStateMapId_; }
@@ -3012,7 +2853,6 @@ public:
     void sanitizeMovementForTaxi();
     void loadSpellNameCache() const;
     void loadFactionNameCache() const;
-    void loadAchievementNameCache();
     void loadSkillLineDbc() const;
     void loadSkillLineAbilityDbc();
     std::string getFactionName(uint32_t factionId) const;
@@ -3562,8 +3402,6 @@ private:
     // Currently selected title bit, or -1 for no title. Updated from PLAYER_CHOSEN_TITLE.
     int32_t chosenTitleBit_ = -1;
 
-    // Achievement caches (lazy-loaded from Achievement.dbc on first earned event)
-    std::unordered_map<uint32_t, std::string> achievementNameCache_;
     /// Read once on the first ask, like the other DBC-backed caches here.
     mutable std::unordered_map<uint32_t, ExtendedCostEntry> extendedCostCache_;
     mutable bool extendedCostCacheLoaded_ = false;
@@ -3581,45 +3419,13 @@ private:
     /// Headers the player has closed. Client-side only: the server has no
     /// opinion about it, so it is saved with the rest of the character config.
     std::unordered_set<uint32_t> collapsedFactionIds_;
-    std::unordered_map<uint32_t, std::string> achievementDescCache_;
-    std::unordered_map<uint32_t, uint32_t>    achievementPointsCache_;
-    std::unordered_map<uint32_t, uint32_t>    achievementIconCache_;  // achievementId → SpellIcon.dbc ID
-    std::unordered_map<uint32_t, uint32_t>    achievementFlagsCache_; // achievementId → Achievement.dbc Flags
     std::vector<CurrencyType> currencyTypes_;
     bool currencyTypesLoaded_ = false;
     std::unordered_map<uint32_t, BattlemasterEntry> battlemasterList_;
     std::vector<BattlemasterEntry> battlegroundTypes_;  // arenas filtered out, id-ordered
     bool battlemasterListLoaded_ = false;
-    std::unordered_map<uint32_t, uint32_t>    achievementCategoryCache_;  // achievementId → Achievement_Category.dbc ID
-    // Achievement ids per category, in the DBC's own order - the panel lists a
-    // category by index, so the order has to be stable across calls.
-    std::unordered_map<uint32_t, std::vector<uint32_t>> categoryAchievements_;
-    std::unordered_map<uint32_t, AchievementCategoryInfo> achievementCategoryInfo_;
-    std::vector<uint32_t> achievementCategoryOrder_;
-    std::vector<uint32_t> statisticCategoryOrder_;
-    std::unordered_map<uint32_t, uint32_t> achievementSupercedes_;
-    std::unordered_map<uint32_t, uint32_t> achievementSupercededBy_;
-    bool achievementCategoriesLoaded_ = false;
     bool glyphPropertiesLoaded_ = false;
     std::unordered_map<uint32_t, uint32_t> glyphSpellCache_;
-    std::unordered_map<uint32_t, std::vector<AchievementCriterion>> achievementCriteria_;
-    std::unordered_map<uint32_t, AchievementCriterionIndex> achievementCriterionById_;
-    bool achievementCriteriaLoaded_ = false;
-    // Client-side, like the quest tracker's set - nothing is sent for it.
-    std::unordered_set<uint32_t> trackedAchievements_;
-    bool achievementNameCacheLoaded_ = false;
-    // Set of achievement IDs earned by the player (populated from SMSG_ALL_ACHIEVEMENT_DATA)
-    std::unordered_set<uint32_t> earnedAchievements_;
-    // Earn dates: achievementId → WoW PackedTime (from SMSG_ACHIEVEMENT_EARNED / SMSG_ALL_ACHIEVEMENT_DATA)
-    std::unordered_map<uint32_t, uint32_t> achievementDates_;
-    // Criteria progress: criteriaId → current value (from SMSG_CRITERIA_UPDATE)
-    std::unordered_map<uint32_t, uint64_t> criteriaProgress_;
-    void handleAllAchievementData(network::Packet& packet);
-
-    // Per-player achievement data from SMSG_RESPOND_INSPECT_ACHIEVEMENTS
-    // Key: inspected player's GUID; value: set of earned achievement IDs
-    std::unordered_map<uint64_t, std::unordered_map<uint32_t, uint32_t>> inspectedPlayerAchievements_;
-    uint64_t achievementComparisonGuid_ = 0;
 
     /// Sort moves still to send, one per tick. See sortBags.
     std::deque<Inventory::SwapOp> sortSwapQueue_;

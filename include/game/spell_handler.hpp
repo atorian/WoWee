@@ -18,6 +18,7 @@
 #include <vector>
 
 namespace wowee {
+namespace achievement { class IAchievementsFeed; }
 namespace core { class CVarStore; }
 namespace pipeline { class AssetManager; }
 namespace game {
@@ -274,8 +275,10 @@ public:
     [[nodiscard]] virtual std::optional<HomeBind> homeBind() const = 0;
 
     // ---- Achievements ----
+    /// The achievement's name, empty when it is not known.
     [[nodiscard]] virtual std::string achievementName(uint32_t achievementId) = 0;
-    virtual void recordAchievementEarned(uint32_t achievementId, uint32_t packedDate) = 0;
+    /// The achievements, or null in a client with no game.
+    [[nodiscard]] virtual achievement::IAchievementsFeed* achievementsFeed() = 0;
 
     // ---- What the client's own data resolves ----
     [[nodiscard]] virtual SpellDataInfo spellData(uint32_t spellId) const = 0;

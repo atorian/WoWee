@@ -2,6 +2,8 @@
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include "core/local_time.hpp"
 #include "game/item_text.hpp"
+#include "achievement/domain/catalog.hpp"
+#include "achievement/services/achievements.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "addons/lua_engine.hpp"
 #include "game/auction_filters.hpp"
@@ -1189,10 +1191,10 @@ namespace {
 /// The generic one stays as the fallback: eighty-seven of the 1817 rows name no
 /// icon at all, and a blank texture reads as a missing file rather than as a
 /// row without artwork.
-std::string achievementIconPath(game::GameHandler* gh, uint32_t achievementId) {
+std::string achievementIconPath(lua_State* L, game::GameHandler* gh, uint32_t achievementId) {
     static const std::string kGeneric = "Interface\\Icons\\Achievement_General";
     if (!gh) return kGeneric;
-    const uint32_t iconId = gh->getAchievementIconId(achievementId);
+    const uint32_t iconId = achievementsOf(L).getAchievementIconId(achievementId);
     if (iconId == 0) return kGeneric;
     std::string path = gh->getIconPath(iconId);
     return path.empty() ? kGeneric : path;
@@ -4319,9 +4321,9 @@ void registerQuestLuaAPI(lua_State* L) {
             // The name cache is one entry per achievement in the DBC, which is
             // the only count of "all of them" this client has. Asking for it
             // is what loads it.
-            gh->ensureAchievementNamesLoaded();
-            const size_t total = gh->achievementNameCacheRef().size();
-            const size_t earned = gh->getEarnedAchievements().size();
+            achievementsOf(L).ensureAchievementNamesLoaded();
+            const size_t total = achievementsOf(L).getAchievementCount();
+            const size_t earned = achievementsOf(L).getEarnedAchievements().size();
             // Never fewer total than earned: if the DBC did not load, saying
             // "3 of 0" is worse than saying the total is what we have seen.
             lua_pushnumber(L, static_cast<lua_Number>(total ? total : earned));
@@ -4333,9 +4335,9 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             lua_newtable(L);
             if (!gh) return 1;
-            gh->ensureAchievementCategoriesLoaded();
+            achievementsOf(L).ensureAchievementCategoriesLoaded();
             int n = 0;
-            for (uint32_t id : gh->getAchievementCategoryOrder()) {
+            for (uint32_t id : achievementsOf(L).getAchievementCategoryOrder()) {
                 lua_pushnumber(L, ++n);
                 lua_pushnumber(L, id);
                 lua_settable(L, -3);
@@ -4355,9 +4357,9 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             lua_newtable(L);
             if (!gh) return 1;
-            gh->ensureAchievementCategoriesLoaded();
+            achievementsOf(L).ensureAchievementCategoriesLoaded();
             int n = 0;
-            for (uint32_t id : gh->getStatisticCategoryOrder()) {
+            for (uint32_t id : achievementsOf(L).getStatisticCategoryOrder()) {
                 lua_pushnumber(L, ++n);
                 lua_pushnumber(L, id);
                 lua_settable(L, -3);
@@ -4369,8 +4371,8 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const auto id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
             if (!gh) return luaReturnNil(L);
-            gh->ensureAchievementCategoriesLoaded();
-            const auto* info = gh->getAchievementCategoryInfo(id);
+            achievementsOf(L).ensureAchievementCategoriesLoaded();
+            const auto* info = achievementsOf(L).getAchievementCategoryInfo(id);
             if (!info) return luaReturnNil(L);
             lua_pushstring(L, info->name.c_str());
             lua_pushnumber(L, info->parentId);
@@ -4382,9 +4384,9 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const auto id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
             if (!gh) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 0); return 3; }
-            gh->ensureAchievementCategoriesLoaded();
-            const auto& ids = gh->getCategoryAchievements(id);
-            const auto& earned = gh->getEarnedAchievements();
+            achievementsOf(L).ensureAchievementCategoriesLoaded();
+            const auto& ids = achievementsOf(L).getCategoryAchievements(id);
+            const auto& earned = achievementsOf(L).getEarnedAchievements();
             uint32_t done = 0;
             for (uint32_t a : ids) if (earned.count(a)) ++done;
             lua_pushnumber(L, static_cast<lua_Number>(ids.size()));
@@ -4396,16 +4398,16 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const auto id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
             if (!gh) return luaReturnNil(L);
-            gh->ensureAchievementCategoriesLoaded();
-            lua_pushnumber(L, gh->getAchievementCategory(id));
+            achievementsOf(L).ensureAchievementCategoriesLoaded();
+            lua_pushnumber(L, achievementsOf(L).getAchievementCategory(id));
             return 1;
         }},
                 {"GetAchievementNumCriteria", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const auto id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
             if (!gh) { lua_pushnumber(L, 0); return 1; }
-            gh->ensureAchievementCriteriaLoaded();
-            lua_pushnumber(L, static_cast<lua_Number>(gh->getAchievementCriteria(id).size()));
+            achievementsOf(L).ensureAchievementCriteriaLoaded();
+            lua_pushnumber(L, static_cast<lua_Number>(achievementsOf(L).getAchievementCriteria(id).size()));
             return 1;
         }},
                 // GetAchievementCriteriaInfo(achievementID, index) →
@@ -4417,8 +4419,8 @@ void registerQuestLuaAPI(lua_State* L) {
             const auto id  = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
             const int  idx = static_cast<int>(luaL_optnumber(L, 2, 0));
             if (!gh || idx < 1) return luaReturnNil(L);
-            gh->ensureAchievementCriteriaLoaded();
-            const auto& list = gh->getAchievementCriteria(id);
+            achievementsOf(L).ensureAchievementCriteriaLoaded();
+            const auto& list = achievementsOf(L).getAchievementCriteria(id);
             if (idx > static_cast<int>(list.size())) return luaReturnNil(L);
             const auto& c = list[static_cast<size_t>(idx) - 1];
             // Per-criterion progress is tracked after all: SMSG_ALL_ACHIEVEMENT_DATA
@@ -4426,11 +4428,11 @@ void registerQuestLuaAPI(lua_State* L) {
             // from the achievement's earned flag while that sat unread beside
             // it. A half-finished achievement now shows which of its criteria
             // are done and how far the rest have got.
-            const auto& progress = gh->getCriteriaProgress();
+            const auto& progress = achievementsOf(L).getCriteriaProgress();
             const auto pit = progress.find(c.id);
             const uint32_t have = (pit != progress.end())
                 ? static_cast<uint32_t>(pit->second) : 0u;
-            const bool earned = gh->getEarnedAchievements().count(id) > 0;
+            const bool earned = achievementsOf(L).getEarnedAchievements().count(id) > 0;
             // Earned wins over the counter: the server stops counting once an
             // achievement is complete, so a finished one can carry a criterion
             // still short of its quantity.
@@ -4459,9 +4461,9 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
             std::vector<std::pair<uint32_t, uint32_t>> byDate;  // sortKey, id
-            for (uint32_t id : gh->getEarnedAchievements()) {
+            for (uint32_t id : achievementsOf(L).getEarnedAchievements()) {
                 const core::WowDate d =
-                    core::unpackWowPackedTime(gh->getAchievementDate(id));
+                    core::unpackWowPackedTime(achievementsOf(L).getAchievementDate(id));
                 byDate.emplace_back(
                     (static_cast<uint32_t>(d.yearSince2000) << 9) |
                     (static_cast<uint32_t>(d.month) << 5) |
@@ -4482,21 +4484,21 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const auto critId = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
             if (!gh || critId == 0) return luaReturnNil(L);
-            gh->ensureAchievementCriteriaLoaded();
+            achievementsOf(L).ensureAchievementCriteriaLoaded();
             // Nothing indexes criteria by their own id - the panel asks this
             // once per link clicked, not per frame, so the walk is cheaper
             // than a second map kept in step with the first.
-            for (const auto& [achId, list] : gh->getAchievementCriteriaMap()) {
+            for (const auto& [achId, list] : achievementsOf(L).getAchievementCriteriaMap()) {
                 for (const auto& c : list) {
                     if (c.id != critId) continue;
                     // Ten, the same shape as GetAchievementInfo: the panel
                     // unpacks it into the same ten names and puts the last one
                     // on a button as its texture.
-                    const bool done = gh->getEarnedAchievements().count(achId) > 0;
-                    const uint32_t date = gh->getAchievementDate(achId);
+                    const bool done = achievementsOf(L).getEarnedAchievements().count(achId) > 0;
+                    const uint32_t date = achievementsOf(L).getAchievementDate(achId);
                     lua_pushnumber(L, achId);                                    // 1: id
-                    lua_pushstring(L, gh->getAchievementName(achId).c_str());    // 2: name
-                    lua_pushnumber(L, gh->getAchievementPoints(achId));          // 3: points
+                    lua_pushstring(L, achievementsOf(L).getAchievementName(achId).c_str());    // 2: name
+                    lua_pushnumber(L, achievementsOf(L).getAchievementPoints(achId));          // 3: points
                     lua_pushboolean(L, done ? 1 : 0);                            // 4: completed
                     const core::WowDate on = core::unpackWowPackedTime(date);
                     lua_pushnumber(L, done ? on.month : 0);                      // 5: month
@@ -4504,14 +4506,14 @@ void registerQuestLuaAPI(lua_State* L) {
                     // SHORTDATE formats the year "%02d", so it wants the short
                     // form rather than a four-digit one.
                     lua_pushnumber(L, done ? on.yearSince2000 : 0);              // 7: year
-                    lua_pushstring(L, gh->getAchievementDescription(achId).c_str()); // 8
-                    lua_pushnumber(L, gh->getAchievementFlags(achId));            // 9: flags
+                    lua_pushstring(L, achievementsOf(L).getAchievementDescription(achId).c_str()); // 8
+                    lua_pushnumber(L, achievementsOf(L).getAchievementFlags(achId));            // 9: flags
                     // A path, not the id. The panel puts this straight on a
                     // button as its texture, and a number is not a texture in
                     // 3.3.5 - the icon id was already cached, and the resolver
                     // that turns one into a path was already here for the
                     // spellbook's tabs.
-                    lua_pushstring(L, achievementIconPath(gh, achId).c_str());   // 10: icon
+                    lua_pushstring(L, achievementIconPath(L, gh, achId).c_str());   // 10: icon
                     return 10;
                 }
             }
@@ -4530,8 +4532,8 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const auto id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
             if (!gh || id == 0) return luaReturnNil(L);
-            gh->ensureAchievementCategoriesLoaded();
-            const uint32_t prev = gh->getAchievementSupercedes(id);
+            achievementsOf(L).ensureAchievementCategoriesLoaded();
+            const uint32_t prev = achievementsOf(L).getAchievementSupercedes(id);
             if (prev == 0) return luaReturnNil(L);
             lua_pushnumber(L, prev);
             return 1;
@@ -4544,11 +4546,11 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const auto id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
             if (!gh || id == 0) return luaReturnNil(L);
-            gh->ensureAchievementCategoriesLoaded();
-            const uint32_t next = gh->getAchievementSupercededBy(id);
+            achievementsOf(L).ensureAchievementCategoriesLoaded();
+            const uint32_t next = achievementsOf(L).getAchievementSupercededBy(id);
             if (next == 0) return luaReturnNil(L);
             lua_pushnumber(L, next);
-            lua_pushboolean(L, gh->getEarnedAchievements().count(next) > 0 ? 1 : 0);
+            lua_pushboolean(L, achievementsOf(L).getEarnedAchievements().count(next) > 0 ? 1 : 0);
             return 2;
         }},
                 // GetStatistic(id) → the statistic's value, as a string.
@@ -4568,10 +4570,10 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const auto id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
             if (!gh || id == 0) { lua_pushstring(L, "--"); return 1; }
-            gh->ensureAchievementCriteriaLoaded();
-            const auto& list = gh->getAchievementCriteria(id);
+            achievementsOf(L).ensureAchievementCriteriaLoaded();
+            const auto& list = achievementsOf(L).getAchievementCriteria(id);
             if (list.empty()) { lua_pushstring(L, "--"); return 1; }
-            const auto& progress = gh->getCriteriaProgress();
+            const auto& progress = achievementsOf(L).getCriteriaProgress();
             const auto pit = progress.find(list[0].id);
             if (pit == progress.end()) { lua_pushstring(L, "--"); return 1; }
             lua_pushstring(L, std::to_string(
@@ -4590,11 +4592,11 @@ void registerQuestLuaAPI(lua_State* L) {
             if (!gh || !uid || !*uid) return 0;
             std::string unit(uid);
             toLowerInPlace(unit);
-            gh->setAchievementComparisonGuid(resolveUnitGuid(gh, unit));
+            achievementsOf(L).setAchievementComparisonGuid(resolveUnitGuid(gh, unit));
             return 0;
         }},
                 {"ClearAchievementComparisonUnit", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->setAchievementComparisonGuid(0);
+            if (getGameHandler(L)) achievementsOf(L).setAchievementComparisonGuid(0);
             return 0;
         }},
                 // GetAchievementComparisonInfo(id) → completed, month, day, year.
@@ -4606,8 +4608,8 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const auto id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
             if (!gh || id == 0) return luaReturnNil(L);
-            const auto* set = gh->getInspectedPlayerAchievements(
-                gh->getAchievementComparisonGuid());
+            const auto* set = achievementsOf(L).getInspectedPlayerAchievements(
+                achievementsOf(L).getAchievementComparisonGuid());
             if (!set) return luaReturnNil(L);
             const auto it = set->find(id);
             if (it == set->end()) {
@@ -4630,29 +4632,29 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"GetComparisonAchievementPoints", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushnumber(L, 0); return 1; }
-            const auto* set = gh->getInspectedPlayerAchievements(
-                gh->getAchievementComparisonGuid());
+            const auto* set = achievementsOf(L).getInspectedPlayerAchievements(
+                achievementsOf(L).getAchievementComparisonGuid());
             if (!set) { lua_pushnumber(L, 0); return 1; }
-            gh->ensureAchievementCategoriesLoaded();
+            achievementsOf(L).ensureAchievementCategoriesLoaded();
             uint32_t total = 0;
             for (const auto& [id, when] : *set) {
                 (void)when;
-                total += gh->getAchievementPoints(id);
+                total += achievementsOf(L).getAchievementPoints(id);
             }
             lua_pushnumber(L, total);
             return 1;
         }},
                 {"GetTotalAchievementPoints", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getTotalAchievementPoints() : 0);
+            lua_pushnumber(L, gh ? achievementsOf(L).getTotalAchievementPoints() : 0);
             return 1;
         }},
                 {"GetAchievementLink", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const auto id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
             if (!gh || id == 0) return luaReturnNil(L);
-            gh->ensureAchievementNamesLoaded();
-            const std::string& name = gh->getAchievementName(id);
+            achievementsOf(L).ensureAchievementNamesLoaded();
+            const std::string& name = achievementsOf(L).getAchievementName(id);
             if (name.empty()) return luaReturnNil(L);
             std::string link = "|cffffff00|Hachievement:" + std::to_string(id) +
                                ":0:0:0:0:0:0:0:0:0|h[" + name + "]|h|r";
@@ -4663,24 +4665,24 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"IsTrackedAchievement", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const auto id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
-            lua_pushboolean(L, gh && gh->getTrackedAchievements().count(id) ? 1 : 0);
+            lua_pushboolean(L, gh && achievementsOf(L).getTrackedAchievements().count(id) ? 1 : 0);
             return 1;
         }},
                 {"AddTrackedAchievement", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const auto id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
-            if (gh && id) { gh->setAchievementTracked(id, true); gh->fireAddonEvent("TRACKED_ACHIEVEMENT_UPDATE", {std::to_string(id)}); }
+            if (gh && id) { achievementsOf(L).setAchievementTracked(id, true); gh->fireAddonEvent("TRACKED_ACHIEVEMENT_UPDATE", {std::to_string(id)}); }
             return 0;
         }},
                 {"RemoveTrackedAchievement", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const auto id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
-            if (gh && id) { gh->setAchievementTracked(id, false); gh->fireAddonEvent("TRACKED_ACHIEVEMENT_UPDATE", {std::to_string(id)}); }
+            if (gh && id) { achievementsOf(L).setAchievementTracked(id, false); gh->fireAddonEvent("TRACKED_ACHIEVEMENT_UPDATE", {std::to_string(id)}); }
             return 0;
         }},
                 {"GetNumTrackedAchievements", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? static_cast<lua_Number>(gh->getTrackedAchievements().size()) : 0);
+            lua_pushnumber(L, gh ? static_cast<lua_Number>(achievementsOf(L).getTrackedAchievements().size()) : 0);
             return 1;
         }},
                 {"GetAchievementInfo", [](lua_State* L) -> int {
@@ -4695,17 +4697,17 @@ void registerQuestLuaAPI(lua_State* L) {
             // achievement, or with nothing.
             if (!lua_isnoneornil(L, 2)) {
                 const int idx = static_cast<int>(luaL_optnumber(L, 2, 0));
-                gh->ensureAchievementCategoriesLoaded();
-                const auto& ids = gh->getCategoryAchievements(id);
+                achievementsOf(L).ensureAchievementCategoriesLoaded();
+                const auto& ids = achievementsOf(L).getCategoryAchievements(id);
                 if (idx < 1 || idx > static_cast<int>(ids.size())) return luaReturnNil(L);
                 id = ids[static_cast<size_t>(idx) - 1];
             }
-            const std::string& name = gh->getAchievementName(id);
+            const std::string& name = achievementsOf(L).getAchievementName(id);
             if (name.empty()) { return luaReturnNil(L); }
-            bool completed = gh->getEarnedAchievements().count(id) > 0;
-            uint32_t date = gh->getAchievementDate(id);
-            uint32_t points = gh->getAchievementPoints(id);
-            const std::string& desc = gh->getAchievementDescription(id);
+            bool completed = achievementsOf(L).getEarnedAchievements().count(id) > 0;
+            uint32_t date = achievementsOf(L).getAchievementDate(id);
+            uint32_t points = achievementsOf(L).getAchievementPoints(id);
+            const std::string& desc = achievementsOf(L).getAchievementDescription(id);
             const core::WowDate earned = core::unpackWowPackedTime(date);
             int month = completed ? earned.month : 0;
             int day   = completed ? earned.day : 0;
@@ -4719,8 +4721,8 @@ void registerQuestLuaAPI(lua_State* L) {
             lua_pushnumber(L, day);                // 6: day
             lua_pushnumber(L, year);               // 7: year
             lua_pushstring(L, desc.c_str());       // 8: description
-            lua_pushnumber(L, gh->getAchievementFlags(id)); // 9: flags
-            lua_pushstring(L, achievementIconPath(gh, id).c_str()); // 10: icon
+            lua_pushnumber(L, achievementsOf(L).getAchievementFlags(id)); // 9: flags
+            lua_pushstring(L, achievementIconPath(L, gh, id).c_str()); // 10: icon
             lua_pushstring(L, "");                 // 11: rewardText
             lua_pushboolean(L, 0);                 // 12: isGuildAchievement
             return 12;

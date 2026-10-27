@@ -11,6 +11,7 @@
 #include "auction/services/auction_house.hpp"
 #include "trade/services/trade.hpp"
 #include "loot/services/loot.hpp"
+#include "achievement/services/achievements.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "contacts/services/contacts.hpp"
 #include "who/domain/who_list.hpp"
@@ -537,6 +538,11 @@ trade::ITrade& tradeOf(lua_State* L) {
 loot::ILoot& lootOf(lua_State* L) {
     auto* services = getLuaServices(L);
     return loot::orNoLoot(services ? services->loot : nullptr);
+}
+
+achievement::IAchievements& achievementsOf(lua_State* L) {
+    auto* services = getLuaServices(L);
+    return achievement::orNoAchievements(services ? services->achievements : nullptr);
 }
 
 arena::IArenaTeams* arenaTeamsOf(lua_State* L) {

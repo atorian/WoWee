@@ -29,6 +29,8 @@
 #include "trade/services/trade_service.hpp"
 #include "game/loot_gateway.hpp"
 #include "loot/services/loot_service.hpp"
+#include "game/achievement_data.hpp"
+#include "achievement/services/achievement_service.hpp"
 #include "ui/macro_icon.hpp"
 #include <imgui_impl_vulkan.h>
 #include "rendering/imgui_texture.hpp"
@@ -557,6 +559,10 @@ bool Application::initialize() {
     loot_ = std::make_unique<loot::LootService>(*lootGateway_, *lootGateway_, eventBus_);
     gameServices_.lootFeed = loot_.get();
     gameServices_.loot = loot_.get();
+    achievementData_ = std::make_unique<game::AchievementData>(assetManager.get());
+    achievements_ = std::make_unique<achievement::AchievementService>(*achievementData_, eventBus_);
+    gameServices_.achievementsFeed = achievements_.get();
+    gameServices_.achievements = achievements_.get();
     transportScene_ = std::make_unique<RendererTransportScene>(*renderer);
     gameHandler->getTransportManager()->setScene(transportScene_.get());
 
@@ -989,6 +995,7 @@ bool Application::initialize() {
         luaSvc.guildBank         = guildBank_.get();
         luaSvc.trade             = trade_.get();
         luaSvc.loot              = loot_.get();
+        luaSvc.achievements      = achievements_.get();
         // Acted on between frames - the reload destroys the state that asked.
         luaSvc.requestReloadUI = [this]() {
             if (auto* character = session()) character->requestInterfaceReload();
@@ -2686,6 +2693,8 @@ void Application::shutdown() {
     gameServices_.trade = nullptr;
     gameServices_.lootFeed = nullptr;
     gameServices_.loot = nullptr;
+    gameServices_.achievementsFeed = nullptr;
+    gameServices_.achievements = nullptr;
     contacts_.reset();
     contactsGateway_.reset();
     who_.reset();
@@ -2702,6 +2711,8 @@ void Application::shutdown() {
     lfgGateway_.reset();
     calendar_.reset();
     calendarGateway_.reset();
+    achievements_.reset();
+    achievementData_.reset();
     loot_.reset();
     lootGateway_.reset();
     trade_.reset();

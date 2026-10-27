@@ -1,4 +1,6 @@
 #include "game/spell_handler.hpp"
+#include "achievement/services/achievements.hpp"
+#include "game/achievement_data.hpp"
 #include "core/event_bus.hpp"
 #include "game/game_events.hpp"
 #include "game/protocol_constants.hpp"
@@ -26,6 +28,7 @@
 #include <cstdio>
 #include <sstream>
 #include <unordered_set>
+#include <utility>
 
 namespace wowee {
 namespace game {
@@ -335,6 +338,9 @@ SpellHandler::SpellHandler(PacketSender& sender, FrameXmlEvents& frameXml, core:
     // window has redrawn from SPELLS_CHANGED.
     subscriptions_.push_back(events_.subscribe<events::TrainerSpellLearned>(
         [this](const events::TrainerSpellLearned& e) { addKnownSpell(e.spellId); }));
+    for (auto& subscription : subscribeAchievementNotices(
+             events_, chat_, frameXml_, [this](uint32_t id) { return queries_.achievementName(id); }))
+        subscriptions_.push_back(std::move(subscription));
 }
 
 void SpellHandler::raiseUiError(const std::string& message) {
@@ -2322,6 +2328,16 @@ void SpellHandler::handleTalentsInfo(network::Packet& packet) {
     }
 }
 
+// The achievements the protocol feeds. A client built without them drops the
+// achievement packets, and says so once.
+static achievement::IAchievementsFeed* achievementsFeed(SpellQueries& queries) {
+    auto* feed = queries.achievementsFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("Achievements are not wired into this client; achievement packets are dropped");
+    return feed;
+}
+
 void SpellHandler::handleAchievementEarned(network::Packet& packet) {
     // WotLK SMSG_ACHIEVEMENT_EARNED: packGUID player + uint32 achievementId + packedTime.
     // The player GUID is a PACKED guid, not a full uint64 - reading it as uint64 swallowed
@@ -2335,27 +2351,13 @@ void SpellHandler::handleAchievementEarned(network::Packet& packet) {
 
     const std::string achName = queries_.achievementName(achievementId);
 
-    bool isSelf = (guid == queries_.characterGuid());
+    // Only the player's own: what it raises - the chat line, the alert, the
+    // banner and ACHIEVEMENT_EARNED, which is what puts FrameXML's badge up -
+    // is about the player reading it. Fired for everyone, a stranger turning in
+    // a quest nearby put their achievement badge on this player's screen.
+    const bool isSelf = (guid == queries_.characterGuid());
     if (isSelf) {
-        char buf[256];
-        if (!achName.empty()) {
-            std::snprintf(buf, sizeof(buf), "Achievement earned: %s", achName.c_str());
-        } else {
-            std::snprintf(buf, sizeof(buf), "Achievement earned! (ID %u)", achievementId);
-        }
-        chat_.addSystemChatMessage(buf);
-
-        queries_.recordAchievementEarned(achievementId, earnDate);
-        events_.publish(events::AchievementEarned{achievementId, achName});
-        // Inside the branch, not after it. ACHIEVEMENT_EARNED is what raises
-        // FrameXML's badge, and it is about the player who is reading it -
-        // somebody else's is CHAT_MSG_ACHIEVEMENT, which the server sends
-        // separately and this client already handles. Fired for everyone, a
-        // stranger turning in a quest nearby put their achievement badge on
-        // this player's screen.
-        if (frameXml_.frameXmlListening())
-            frameXml_.fireFrameXmlEvent("ACHIEVEMENT_EARNED",
-                                           {std::to_string(achievementId)});
+        if (auto* feed = achievementsFeed(queries_)) feed->onEarned(achievementId, earnDate);
     }
     // No line for somebody else's, because the server has already sent one.
     // AchievementMgr::SendAchievementEarned puts a CHAT_MSG_ACHIEVEMENT through

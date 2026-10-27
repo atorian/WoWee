@@ -995,6 +995,10 @@ trade::ITrade& tradeOf(lua_State* L);
 /// addon layer, or ones never open that send nothing when there is no game.
 loot::ILoot& lootOf(lua_State* L);
 
+/// The achievements as the composition root handed them to the addon layer, or
+/// ones with nothing earned and nothing known when there is no game.
+achievement::IAchievements& achievementsOf(lua_State* L);
+
 /// The team id at an arena team index, or zero when the index is off the end
 /// or there are no arena teams.
 ///

@@ -24,6 +24,7 @@ namespace mail { class IMailboxFeed; class IMailbox; }
 namespace guild_bank { class IGuildBankFeed; class IGuildBank; }
 namespace trade { class ITradeFeed; class ITrade; }
 namespace loot { class ILootFeed; class ILoot; }
+namespace achievement { class IAchievementsFeed; class IAchievements; }
 namespace network { class WorldConnection; }
 
 namespace game {
@@ -106,6 +107,10 @@ struct GameServices {
     /// game object, a finished gather) and tab targeting reads.
     loot::ILootFeed* lootFeed = nullptr;
     loot::ILoot* loot = nullptr;
+    /// Where the achievement packets go, and the achievements the chat names
+    /// in a CHAT_MSG_ACHIEVEMENT line.
+    achievement::IAchievementsFeed* achievementsFeed = nullptr;
+    achievement::IAchievements* achievements = nullptr;
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };

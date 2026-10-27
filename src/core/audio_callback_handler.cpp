@@ -4,6 +4,7 @@
 #include "group/domain/events.hpp"
 #include "mail/domain/events.hpp"
 #include "loot/domain/events.hpp"
+#include "achievement/domain/events.hpp"
 #include "core/player_view.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
@@ -217,8 +218,8 @@ void AudioCallbackHandler::setupCallbacks() {
     }));
 
     // An achievement: its alert and the toast banner.
-    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::AchievementEarned>(
-        [this](const game::events::AchievementEarned&) {
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<achievement::AchievementEarned>(
+        [this](const achievement::AchievementEarned&) {
         playUi([](audio::UiSoundManager& sfx) { sfx.playAchievementAlert(); });
         if (uiManager_) {
             uiManager_->getGameScreen().toastManager().playAchievementEarned();

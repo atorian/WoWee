@@ -29,6 +29,7 @@ namespace wowee::mail { class IMailbox; }
 namespace wowee::guild_bank { class IGuildBank; }
 namespace wowee::trade { class ITrade; }
 namespace wowee::loot { class ILoot; }
+namespace wowee::achievement { class IAchievements; }
 
 namespace wowee::addons {
 
@@ -82,6 +83,9 @@ struct LuaServices {
     /// The loot window, the group's rolls and the master loot menu, and the
     /// requests that take from them.
     loot::ILoot*             loot              = nullptr;
+    /// What the player has earned and is tracking, what an inspected player
+    /// has earned, and what the game's files say about each achievement.
+    achievement::IAchievements* achievements      = nullptr;
 
     /// Run a macro body, as RunMacroText() does - one command per line,
     /// through the same path the action bar uses for a macro button.

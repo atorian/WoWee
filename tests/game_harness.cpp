@@ -29,6 +29,7 @@
 #include "trade/services/trade_service.hpp"
 #include "game/loot_gateway.hpp"
 #include "loot/services/loot_service.hpp"
+#include "achievement/services/achievement_service.hpp"
 
 #include <catch_amalgamated.hpp>  // test_support.hpp's REQUIRE
 #include "test_support.hpp"
@@ -238,6 +239,9 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     loot_ = std::make_unique<loot::LootService>(*lootGateway_, *lootGateway_, events_);
     services_.lootFeed = loot_.get();
     services_.loot = loot_.get();
+    achievements_ = std::make_unique<achievement::AchievementService>(achievementFiles_, events_);
+    services_.achievementsFeed = achievements_.get();
+    services_.achievements = achievements_.get();
     game::loadProtocolTables(*game_, *expansions_.getActive());
     game_->setAddonEventCallback([this](const std::string& name, const std::vector<std::string>& args) {
         addonEvents_.push_back({name, args});
@@ -261,6 +265,7 @@ mail::IMailbox& GameHarness::mail() { return *mail_; }
 guild_bank::IGuildBank& GameHarness::guildBank() { return *guildBank_; }
 trade::ITrade& GameHarness::trade() { return *trade_; }
 loot::ILoot& GameHarness::loot() { return *loot_; }
+achievement::IAchievements& GameHarness::achievements() { return *achievements_; }
 
 FakeWorldConnection& GameHarness::server() {
     if (!connection_) fail("no connection yet: connect (or enterWorld) first");

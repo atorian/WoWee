@@ -26,6 +26,7 @@
 #include "core/cvar_store.hpp"
 #include "ui/settings_schema.hpp"
 #include "imgui.h"
+#include "achievement/services/achievements.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "addons/chat_window_background.hpp"
 #include "ui/display_modes.hpp"
@@ -3897,7 +3898,7 @@ static int lua_RefreshLFGList(lua_State* L) { (void)L; return 0; }
 static int lua_GetTrackedAchievements(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) return 0;
-    const auto& tracked = gh->getTrackedAchievements();
+    const auto& tracked = achievementsOf(L).getTrackedAchievements();
     // The watch frame shows ten, but nothing here enforces that, and Lua
     // guarantees twenty free slots.
     if (!tracked.empty() && !lua_checkstack(L, static_cast<int>(tracked.size()))) {
@@ -5343,7 +5344,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // the client knew exactly which achievements were earned.
                 {"HasCompletedAnyAchievement", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushboolean(L, gh && !gh->getEarnedAchievements().empty() ? 1 : 0);
+            lua_pushboolean(L, gh && !achievementsOf(L).getEarnedAchievements().empty() ? 1 : 0);
             return 1;
         }},
                 {"TurnInGuildCharter",       lua_ReturnNothing},
@@ -5834,12 +5835,12 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const auto category = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
             if (!gh) { lua_pushnumber(L, 0); return 1; }
-            const auto* set = gh->getInspectedPlayerAchievements(
-                gh->getAchievementComparisonGuid());
+            const auto* set = achievementsOf(L).getInspectedPlayerAchievements(
+                achievementsOf(L).getAchievementComparisonGuid());
             if (!set) { lua_pushnumber(L, 0); return 1; }
-            gh->ensureAchievementCategoriesLoaded();
+            achievementsOf(L).ensureAchievementCategoriesLoaded();
             uint32_t done = 0;
-            for (uint32_t id : gh->getCategoryAchievements(category))
+            for (uint32_t id : achievementsOf(L).getCategoryAchievements(category))
                 if (set->count(id)) ++done;
             lua_pushnumber(L, done);
             return 1;

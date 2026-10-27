@@ -7,7 +7,6 @@
 #include <set>
 
 #include "game/item_text.hpp"
-#include "game/achievement_criteria.hpp"
 #include "game/game_utils.hpp"
 #include "game/chat_handler.hpp"
 #include "game/movement_handler.hpp"
@@ -377,17 +376,6 @@ uint32_t GameHandler::itemEntryByGuid(uint64_t itemGuid) const {
 std::optional<HomeBind> GameHandler::homeBind() const {
     if (!hasHomeBind_) return std::nullopt;
     return HomeBind{homeBindMapId_, homeBindPos_};
-}
-
-std::string GameHandler::achievementName(uint32_t achievementId) {
-    loadAchievementNameCache();
-    const auto it = achievementNameCache_.find(achievementId);
-    return it != achievementNameCache_.end() ? it->second : std::string();
-}
-
-void GameHandler::recordAchievementEarned(uint32_t achievementId, uint32_t packedDate) {
-    earnedAchievements_.insert(achievementId);
-    achievementDates_[achievementId] = packedDate;
 }
 
 void GameHandler::noteItemCastSpell(uint32_t spellId) {
@@ -1932,13 +1920,6 @@ void GameHandler::declineSummon() {
 // Group loot roll (SMSG_LOOT_ROLL / SMSG_LOOT_ROLL_WON / CMSG_LOOT_ROLL)
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// SMSG_ACHIEVEMENT_EARNED (WotLK 3.3.5a wire 0x468)
-//   uint64 guid          - player who earned it (may be another player)
-//   uint32 achievementId - Achievement.dbc ID
-//   PackedTime date      - uint32 bitfield (seconds since epoch)
-//   uint32 realmFirst    - how many on realm also got it (0 = realm first)
-// ---------------------------------------------------------------------------
 void GameHandler::loadTitleNameCache() const {
     if (titleNameCacheLoaded_) return;
 
@@ -2133,62 +2114,6 @@ void GameHandler::sendSetTitle(int32_t bit) {
     LOG_INFO("sendSetTitle: bit=", bit);
 }
 
-void GameHandler::loadAchievementNameCache() {
-    if (achievementNameCacheLoaded_) return;
-
-    auto* am = services_.assetManager;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
-    achievementNameCacheLoaded_ = true;
-
-    auto dbc = am->loadDBC("Achievement.dbc");
-    if (!dbc || !dbc->isLoaded() || dbc->getFieldCount() < 22) return;
-
-    const auto* achL = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("Achievement") : nullptr;
-    uint32_t titleField = achL ? achL->field("Title") : 4;
-    if (titleField == 0xFFFFFFFF) titleField = 4;
-    uint32_t descField = achL ? achL->field("Description") : 0xFFFFFFFF;
-    uint32_t ptsField  = achL ? achL->field("Points")      : 0xFFFFFFFF;
-    // IconID references SpellIcon.dbc for the achievement's artwork. Field 42 in the
-    // stock 3.3.5a Achievement.dbc when the layout doesn't name it.
-    uint32_t iconField = achL ? achL->field("IconID") : 0xFFFFFFFF;
-    if (iconField == 0xFFFFFFFF && dbc->getFieldCount() > 42) iconField = 42;
-
-    uint32_t fieldCount = dbc->getFieldCount();
-    for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-        uint32_t id = dbc->getUInt32(i, 0);
-        if (id == 0) continue;
-        std::string title = dbc->getString(i, titleField);
-        if (!title.empty()) achievementNameCache_[id] = std::move(title);
-        if (descField != 0xFFFFFFFF && descField < fieldCount) {
-            std::string desc = dbc->getString(i, descField);
-            if (!desc.empty()) achievementDescCache_[id] = std::move(desc);
-        }
-        if (ptsField != 0xFFFFFFFF && ptsField < fieldCount) {
-            uint32_t pts = dbc->getUInt32(i, ptsField);
-            if (pts > 0) achievementPointsCache_[id] = pts;
-        }
-        if (iconField != 0xFFFFFFFF && iconField < fieldCount) {
-            uint32_t iconId = dbc->getUInt32(i, iconField);
-            if (iconId > 0) achievementIconCache_[id] = iconId;
-        }
-        // Field 41 is Flags. Read here rather than in the category loader,
-        // which used to read it separately for the statistic bit alone - one
-        // pass over the file, one idea of what the column is. Confirmed twice
-        // over: bit 0x1 agrees with "does this row's category descend from
-        // Statistics" on all 1817 rows, and FrameXML's own constants.lua names
-        // that same bit ACHIEVEMENT_FLAGS_STATISTIC.
-        if (fieldCount > 41) {
-            uint32_t flags = dbc->getUInt32(i, 41);
-            if (flags != 0) achievementFlagsCache_[id] = flags;
-        }
-    }
-    LOG_INFO("Achievement: loaded ", achievementNameCache_.size(), " names from Achievement.dbc");
-}
-
 const GameHandler::BattlemasterEntry* GameHandler::getBattlemasterInfo(uint32_t bgTypeId) {
     if (!battlemasterListLoaded_) {
         auto* am = services_.assetManager;
@@ -2288,14 +2213,11 @@ const std::vector<GameHandler::CurrencyType>& GameHandler::getCurrencyTypes() {
     return currencyTypes_;
 }
 
-// Achievement.dbc field 38 is the category. It is not in the layout file, but
-// the fields either side of it are - Points at 39, Description at 21, IconID at
-// 42 - which is the stock 3.3.5a order, so 38 is where the category sits.
 void GameHandler::ensureGlyphPropertiesLoaded() {
     if (glyphPropertiesLoaded_) return;
     auto* am = services_.assetManager;
-    // Checked before the latch, like the achievement loader below: one call
-    // made before the asset manager is up would disable this for the session.
+    // Checked before the latch: one call made before the asset manager is up
+    // would disable this for the session.
     if (!am || !am->isInitialized()) return;
     glyphPropertiesLoaded_ = true;
 
@@ -2309,206 +2231,6 @@ void GameHandler::ensureGlyphPropertiesLoaded() {
     LOG_INFO("Glyphs: ", glyphSpellCache_.size(), " properties mapped to spells");
 }
 
-void GameHandler::ensureAchievementCategoriesLoaded() {
-    if (achievementCategoriesLoaded_) return;
-    auto* am = services_.assetManager;
-    // Checked before the latch, not after: one call made before the asset
-    // manager is up would otherwise disable this for the rest of the session.
-    if (!am || !am->isInitialized()) return;
-    loadAchievementNameCache();
-    achievementCategoriesLoaded_ = true;
-
-    auto dbc = am->loadDBC("Achievement.dbc");
-    if (!dbc || !dbc->isLoaded()) return;
-    const uint32_t fieldCount = dbc->getFieldCount();
-    if (fieldCount <= 38) return;
-    // Field 41 is Flags, and bit 0x1 marks a statistic rather than an
-    // achievement - verified against all 1817 rows of the 3.3.5a file by the
-    // other thing that says the same: whether the row's category descends from
-    // the top-level Statistics category. The two agree on every record, and no
-    // category holds a mixture, so either signal alone would do; the flag is
-    // used because it does not depend on a category being named in English.
-    std::unordered_set<uint32_t> statisticCategories;
-    const bool haveFlags = fieldCount > 41;
-    for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-        const uint32_t id = dbc->getUInt32(i, 0);
-        if (id == 0 || achievementNameCache_.find(id) == achievementNameCache_.end()) continue;
-        const uint32_t category = dbc->getUInt32(i, 38);
-        achievementCategoryCache_[id] = category;
-        categoryAchievements_[category].push_back(id);
-        if (haveFlags && (getAchievementFlags(id) & 0x1u) != 0)
-            statisticCategories.insert(category);
-        // Field 3 is Supercedes: the achievement this one follows on from.
-        // Checked by reading it - "Level 20" points at "Level 10" and "Expert
-        // Cook" at "Journeyman Cook", and all 176 non-zero values are ids that
-        // exist. Kept both ways round because the panel walks it backwards to
-        // list a finished chain and forwards to find the step still open.
-        const uint32_t supercedes = dbc->getUInt32(i, 3);
-        if (supercedes != 0) {
-            achievementSupercedes_[id] = supercedes;
-            achievementSupercededBy_[supercedes] = id;
-        }
-    }
-
-    // Achievement_Category.dbc: id, parent, then the localised names. A parent
-    // of -1 (0xFFFFFFFF) means the category sits at the top of the tree.
-    auto catDbc = am->loadDBC("Achievement_Category.dbc");
-    if (catDbc && catDbc->isLoaded() && catDbc->getFieldCount() >= 3) {
-        for (uint32_t i = 0; i < catDbc->getRecordCount(); ++i) {
-            const uint32_t id = catDbc->getUInt32(i, 0);
-            const uint32_t parent = catDbc->getUInt32(i, 1);
-            AchievementCategoryInfo info;
-            info.name = catDbc->getString(i, 2);
-            info.parentId = (parent == 0xFFFFFFFFu) ? -1 : static_cast<int32_t>(parent);
-            // Field 19 is where a category sits among its siblings. Sorted by
-            // it, the top level comes out General, Quests, Exploration, Player
-            // vs. Player, Dungeons & Raids, Professions, Reputation, World
-            // Events, Feats of Strength, Statistics - which is the order the
-            // real client shows. Record order is not that, so the tree would
-            // otherwise read scrambled.
-            if (catDbc->getFieldCount() > 19) info.uiOrder = catDbc->getUInt32(i, 19);
-            achievementCategoryInfo_[id] = std::move(info);
-            achievementCategoryOrder_.push_back(id);
-        }
-
-        // A category holding statistics is one, and so is every category above
-        // it: the Statistics root holds no rows of its own, so marking only the
-        // leaves would leave the tab with children and no trees to hang them
-        // on. Walking up from each marked leaf reaches exactly 34 of the 86
-        // categories, all of them descending from the one top-level Statistics
-        // category and none of them shared with an achievement category.
-        for (uint32_t leaf : statisticCategories) {
-            for (int32_t c = static_cast<int32_t>(leaf); c >= 0; ) {
-                auto it = achievementCategoryInfo_.find(static_cast<uint32_t>(c));
-                if (it == achievementCategoryInfo_.end() || it->second.isStatistic) break;
-                it->second.isStatistic = true;
-                c = it->second.parentId;
-            }
-        }
-        // Id breaks ties, so the order is total and the same on every load -
-        // siblings share a ui_order across different parents.
-        std::sort(achievementCategoryOrder_.begin(), achievementCategoryOrder_.end(),
-                  [this](uint32_t a, uint32_t b) {
-                      const uint32_t oa = achievementCategoryInfo_[a].uiOrder;
-                      const uint32_t ob = achievementCategoryInfo_[b].uiOrder;
-                      if (oa != ob) return oa < ob;
-                      return a < b;
-                  });
-        // Split into the two lists the two tabs ask for, keeping that order.
-        auto split = std::stable_partition(
-            achievementCategoryOrder_.begin(), achievementCategoryOrder_.end(),
-            [this](uint32_t c) { return !achievementCategoryInfo_[c].isStatistic; });
-        statisticCategoryOrder_.assign(split, achievementCategoryOrder_.end());
-        achievementCategoryOrder_.erase(split, achievementCategoryOrder_.end());
-    }
-    LOG_INFO("Achievement: ", achievementCategoryOrder_.size(), " categories, ",
-             statisticCategoryOrder_.size(), " statistic categories, ",
-             achievementCategoryCache_.size(), " achievements placed");
-}
-
-// Achievement_Criteria.dbc: id, achievement, type, asset, quantity, then the
-// localised descriptions. Type and asset are what the panel needs to tell a
-// "kill N" criterion from a "reach level N" one.
-void GameHandler::ensureAchievementCriteriaLoaded() {
-    if (achievementCriteriaLoaded_) return;
-    auto* am = services_.assetManager;
-    if (!am || !am->isInitialized()) return;
-    achievementCriteriaLoaded_ = true;
-
-    auto dbc = am->loadDBC("Achievement_Criteria.dbc");
-    if (!dbc || !dbc->isLoaded() || dbc->getFieldCount() < 10) return;
-
-    const auto* critL = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("AchievementCriteria") : nullptr;
-    auto fieldOr = [&](const char* name, uint32_t fallback) {
-        const uint32_t f = critL ? critL->field(name) : 0xFFFFFFFFu;
-        return (f == 0xFFFFFFFFu) ? fallback : f;
-    };
-    const uint32_t achField  = fieldOr("AchievementID", 1);
-    const uint32_t qtyField  = fieldOr("Quantity", 4);
-    const uint32_t descField = fieldOr("Description", 9);
-    // Field 29 holds the timer, where there is one. Fifty-nine criteria have a
-    // non-zero value and every one is a round number of seconds that the
-    // criteria's own description states in words - 420 against "Win Warsong
-    // Gulch in under 7 minutes", 1200 against "Kill Maexxna within 20 minutes",
-    // 60 against "Kill 100 Risen Zombies in 1 minute". No other field in the
-    // record agrees with the text that way.
-    const uint32_t limitField = fieldOr("TimeLimit", 29);
-    // Field 26, identified the same way field 29 was: the hundred and sixty
-    // rows with bit one set are the "Complete N quests" family that WoW draws
-    // as bars, and the large-quantity rows without it - weapon skills at four
-    // hundred, reputations at forty-two thousand - are the ones it draws as
-    // text. Fields 9 to 25 are the sixteen locale strings and their mask, so
-    // this is the first word past them.
-    const uint32_t flagsField = fieldOr("Flags", 26);
-    const uint32_t fieldCount = dbc->getFieldCount();
-
-    for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-        AchievementCriterion c;
-        c.id = dbc->getUInt32(i, 0);
-        const uint32_t achId = dbc->getUInt32(i, achField);
-        if (achId == 0) continue;
-        if (fieldCount > 2) c.type    = dbc->getUInt32(i, 2);
-        if (fieldCount > 3) c.assetId = dbc->getUInt32(i, 3);
-        if (qtyField  < fieldCount) c.quantity    = dbc->getUInt32(i, qtyField);
-        if (descField < fieldCount) c.description = dbc->getString(i, descField);
-        if (limitField < fieldCount) c.timeLimit = dbc->getUInt32(i, limitField);
-        if (flagsField < fieldCount) c.flags = dbc->getUInt32(i, flagsField);
-        achievementCriterionById_[c.id] = {.achievementId = achId, .timeLimit = c.timeLimit};
-        achievementCriteria_[achId].push_back(std::move(c));
-    }
-    LOG_INFO("Achievement: criteria for ", achievementCriteria_.size(), " achievements");
-}
-
-// ---------------------------------------------------------------------------
-// SMSG_ALL_ACHIEVEMENT_DATA (WotLK 3.3.5a)
-//   Achievement records: repeated { uint32 id, uint32 packedDate } until 0xFFFFFFFF sentinel
-//   Criteria records:    repeated { uint32 id, uint64 counter, uint32 packedDate, ... } until 0xFFFFFFFF
-// ---------------------------------------------------------------------------
-void GameHandler::handleAllAchievementData(network::Packet& packet) {
-    loadAchievementNameCache();
-    earnedAchievements_.clear();
-    achievementDates_.clear();
-
-    // Parse achievement entries (id + packedDate pairs, sentinel 0xFFFFFFFF)
-    while (packet.hasRemaining(4)) {
-        uint32_t id = packet.readUInt32();
-        if (id == 0xFFFFFFFF) break;
-        if (!packet.hasRemaining(4)) break;
-        uint32_t date = packet.readUInt32();
-        earnedAchievements_.insert(id);
-        achievementDates_[id] = date;
-    }
-
-    // Parse the criteria block: records until an id of -1. The record's shape
-    // is in readCriteriaProgressTail, which SMSG_CRITERIA_UPDATE reads with too
-    // - the server builds both from the same lines.
-    criteriaProgress_.clear();
-    while (packet.hasRemaining(4)) {
-        uint32_t id = packet.readUInt32();
-        if (id == 0xFFFFFFFF) break;
-        CriteriaProgressRecord rec;
-        if (!readCriteriaProgressTail(packet, rec)) break;
-        criteriaProgress_[id] = rec.counter;
-    }
-
-    LOG_INFO("SMSG_ALL_ACHIEVEMENT_DATA: loaded ", earnedAchievements_.size(),
-             " achievements, ", criteriaProgress_.size(), " criteria");
-    // The panel builds its whole tree on this, and it arrives once at login -
-    // well before anything opens the panel - so without the event a panel
-    // opened later showed the empty state it was built with.
-    if (hasAddonEventListener()) fireAddonEvent("RECEIVED_ACHIEVEMENT_LIST", {});
-}
-
-// ---------------------------------------------------------------------------
-// SMSG_RESPOND_INSPECT_ACHIEVEMENTS (WotLK 3.3.5a)
-//   Wire format: packed_guid (inspected player) + same achievement/criteria
-//   blocks as SMSG_ALL_ACHIEVEMENT_DATA:
-//     Achievement records: repeated { uint32 id, uint32 packedDate } until 0xFFFFFFFF sentinel
-//     Criteria records:    repeated { uint32 id, uint64 counter, uint32 date, uint32 unk }
-//                          until 0xFFFFFFFF sentinel
-//   We store only the earned achievement IDs (not criteria) per inspected player.
-// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // Faction name cache (lazily loaded from Faction.dbc)
 // ---------------------------------------------------------------------------

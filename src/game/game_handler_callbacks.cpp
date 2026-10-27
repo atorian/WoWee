@@ -1,4 +1,5 @@
 #include "game/game_handler.hpp"
+#include "achievement/services/achievements.hpp"
 #include "group/services/group.hpp"
 #include "game/guild_gateway.hpp"
 #include "guild/domain/records.hpp"
@@ -586,6 +587,7 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
 
     // Reset per-character state so previous character data doesn't bleed through
     inventoryHandler_->beginCharacter();
+    if (services_.achievementsFeed) services_.achievementsFeed->beginCharacter();
     lastPlayerFields_.clear();
     playerArmorRating_ = 0;
     std::fill(std::begin(playerResistances_), std::end(playerResistances_), 0);
@@ -784,9 +786,6 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     }
 
     if (initialWorldEntry) {
-        // Clear inspect caches on world entry to avoid showing stale data.
-        inspectedPlayerAchievements_.clear();
-
         // Reset talent initialization so the first SMSG_TALENTS_INFO after login
         // correctly sets the active spec (static locals don't reset across logins).
         spellHandler_->resetTalentState();
@@ -1171,6 +1170,18 @@ loot::ILootFeed* GameHandler::lootFeed() {
 
 const loot::ILoot* GameHandler::loot() const {
     return services_.loot;
+}
+
+achievement::IAchievementsFeed* GameHandler::achievementsFeed() {
+    return services_.achievementsFeed;
+}
+
+// The name the chat line and the earned notice print, empty when it is not
+// known. Asking is what reads Achievement.dbc.
+std::string GameHandler::achievementName(uint32_t achievementId) {
+    auto& achievements = achievement::orNoAchievements(services_.achievements);
+    achievements.ensureAchievementNamesLoaded();
+    return achievements.getAchievementName(achievementId);
 }
 
 // The player's guild for the handlers that read it - the chat handler's
