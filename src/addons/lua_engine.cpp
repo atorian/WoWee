@@ -2240,7 +2240,7 @@ int lua_Tooltip_SetEquipmentSet(lua_State* L) {
     if (!w || !gh || !wanted || !*wanted) { lua_pushboolean(L, 0); return 1; }
 
     const game::EquipmentSetInfo* set = nullptr;
-    for (const auto& es : gh->getEquipmentSets())
+    for (const auto& es : gh->inventory().getEquipmentSets())
         if (es.name == wanted) { set = &es; break; }
     if (!set) { lua_pushboolean(L, 0); return 1; }
 
@@ -2255,15 +2255,15 @@ int lua_Tooltip_SetEquipmentSet(lua_State* L) {
     };
     line(set->name, 1.0f, 1.0f, 1.0f);
 
-    const auto* guids = gh->getEquipmentSetItems(set->setId);
-    const uint32_t ignored = gh->getEquipmentSetIgnoreMask(set->setId);
+    const auto* guids = gh->inventory().getEquipmentSetItems(set->setId);
+    const uint32_t ignored = gh->inventory().getEquipmentSetIgnoreMask(set->setId);
     if (guids) {
         for (int slot = 0; slot < 19; ++slot) {
             if (ignored & (1u << slot)) continue;
             const uint64_t guid = (*guids)[static_cast<size_t>(slot)];
             if (guid == 0) continue;
-            const uint32_t itemId = gh->getItemIdByGuid(guid);
-            const auto* info = itemId ? gh->getItemInfo(itemId) : nullptr;
+            const uint32_t itemId = gh->inventory().getItemEntryByGuid(guid);
+            const auto* info = itemId ? gh->inventory().getItemInfo(itemId) : nullptr;
             if (info && info->valid && !info->name.empty()) {
                 line(info->name, 1.0f, 1.0f, 1.0f);
             } else {
@@ -2590,7 +2590,7 @@ static void fillItemTooltip(wowee::ui::Widget* w, const game::ItemDef& item,
     }
 
     if (gh && item.itemId != 0) {
-        if (const auto* info = gh->getItemInfo(item.itemId); info && info->valid) {
+        if (const auto* info = gh->inventory().getItemInfo(item.itemId); info && info->valid) {
             appendItemStats(w, *info);
         }
     }
@@ -2694,7 +2694,7 @@ static void appendItemStats(wowee::ui::Widget* w, const game::ItemQueryResponseD
 static bool fillItemTooltipById(wowee::ui::Widget* w, game::GameHandler* gh,
                                 uint32_t itemId) {
     if (!w || !gh || itemId == 0) return false;
-    const auto* info = gh->getItemInfo(itemId);
+    const auto* info = gh->inventory().getItemInfo(itemId);
     if (!info || info->name.empty()) return false;
     game::ItemDef def;
     def.itemId  = itemId;
@@ -2819,7 +2819,7 @@ int lua_Tooltip_SetAuctionItem(lua_State* L) {
 static void appendEnchantLines(wowee::ui::Widget* w, game::GameHandler* gh,
                                uint64_t itemGuid) {
     if (!w || !gh || itemGuid == 0) return;
-    const auto [permanentId, temporaryId] = gh->getItemEnchantIds(itemGuid);
+    const auto [permanentId, temporaryId] = gh->inventory().getItemEnchantIds(itemGuid);
 
     // Green, and after the item's own lines, which is where the real client
     // puts both of them. The permanent one was not shown at all: an enchanted
@@ -2924,11 +2924,11 @@ int lua_Tooltip_AppendItemEnchants(lua_State* L) {
     // The suffix first, because it renames the line the template put at the
     // top and the enchants below are appended after it.
     if (const game::ItemSlot* s =
-            wowee::addons::containerItemSlot(gh->getInventory(), bag, slot);
+            wowee::addons::containerItemSlot(gh->inventory().items(), bag, slot);
         s && !s->empty()) {
         appendRandomSuffix(w, gh, s->item);
     }
-    appendEnchantLines(w, gh, gh->getBagItemGuid(bag, slot - 1));
+    appendEnchantLines(w, gh, gh->inventory().getBagItemGuid(bag, slot - 1));
     return 0;
 }
 
@@ -2950,11 +2950,11 @@ int lua_Tooltip_AppendEquippedEnchants(lua_State* L) {
     // The suffix first, because it renames the line already at the top and the
     // enchants are appended below it - the order its sibling uses.
     if (const game::ItemSlot* s =
-            wowee::addons::inventorySlotItem(gh->getInventory(), slot);
+            wowee::addons::inventorySlotItem(gh->inventory().items(), slot);
         s && !s->empty()) {
         appendRandomSuffix(w, gh, s->item);
     }
-    appendEnchantLines(w, gh, gh->getEquipSlotGuid(slot - 1));
+    appendEnchantLines(w, gh, gh->inventory().getEquipSlotGuid(slot - 1));
     return 0;
 }
 
@@ -2988,7 +2988,7 @@ int lua_Tooltip_SetInventoryItem(lua_State* L) {
     // looked like it worked and did not: a bag button falls back to
     // GameTooltip:SetText(self.tooltipText) when this answers false, which is
     // the "Bank Bag" line, not the bag's own tooltip.
-    const game::ItemSlot* sp = wowee::addons::inventorySlotItem(gh->getInventory(), slot);
+    const game::ItemSlot* sp = wowee::addons::inventorySlotItem(gh->inventory().items(), slot);
     if (!sp) { lua_pushboolean(L, 0); return 1; }
     const auto& s = *sp;
     if (s.empty()) { lua_pushboolean(L, 0); return 1; }
@@ -3013,7 +3013,7 @@ int lua_Tooltip_SetInventoryItem(lua_State* L) {
     // Equipment only: the guid list behind it is one per equipped slot, and a
     // bank slot's id would read off the end of it.
     if (slot <= static_cast<int>(game::EquipSlot::NUM_SLOTS)) {
-        appendEnchantLines(w, gh, gh->getEquipSlotGuid(slot - 1));
+        appendEnchantLines(w, gh, gh->inventory().getEquipSlotGuid(slot - 1));
     }
     lua_pushboolean(L, 1);
     return 1;
@@ -3046,7 +3046,7 @@ int lua_Tooltip_SetExistingSocketGem(lua_State* L) {
     auto* gh = wowee::addons::getGameHandler(L);
     const int index = static_cast<int>(luaL_optnumber(L, 2, 1)) - 1;
     if (!widgetOf(L, 1) || !gh || index < 0 || index > 2) { lua_pushboolean(L, 0); return 1; }
-    const auto enchants = gh->getItemSocketEnchantIds(gh->getSocketItemGuid());
+    const auto enchants = gh->inventory().getItemSocketEnchantIds(gh->inventory().getSocketSession().itemGuid);
     const uint32_t gemId = gh->getEnchantGemItem(enchants[static_cast<size_t>(index)]);
     lua_pushboolean(L, fillItemTooltipById(L, gh, gemId) ? 1 : 0);
     return 1;
@@ -3057,7 +3057,7 @@ int lua_Tooltip_SetExistingSocketGem(lua_State* L) {
 int lua_Tooltip_SetSocketedItem(lua_State* L) {
     auto* gh = wowee::addons::getGameHandler(L);
     if (!widgetOf(L, 1) || !gh) { lua_pushboolean(L, 0); return 1; }
-    lua_pushboolean(L, fillItemTooltipById(L, gh, gh->getSocketItemId()) ? 1 : 0);
+    lua_pushboolean(L, fillItemTooltipById(L, gh, gh->inventory().getSocketSession().itemId) ? 1 : 0);
     return 1;
 }
 
@@ -3100,7 +3100,7 @@ int lua_Tooltip_SetBagItem(lua_State* L) {
     const int bag = static_cast<int>(luaL_optnumber(L, 2, 0));
     const int slot = static_cast<int>(luaL_optnumber(L, 3, 0));
     if (!w || !gh || slot < 1) { lua_pushboolean(L, 0); return 1; }
-    const auto& inv = gh->getInventory();
+    const auto& inv = gh->inventory().items();
     const auto& s = (bag == 0) ? inv.getBackpackSlot(slot - 1)
                                : inv.getBagSlot(bag - 1, slot - 1);
     if (s.empty()) {

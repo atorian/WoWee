@@ -399,7 +399,7 @@ bool EntitySpawner::tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t inst
         // Items arrive via SMSG_ITEM_QUERY_SINGLE_RESPONSE and are cached in
         // itemInfoCache_. Use the server-sent displayInfoId when available.
         if (!itemDbc && gameHandler_) {
-            if (const auto* info = gameHandler_->getItemInfo(rawId)) {
+            if (const auto* info = gameHandler_->inventory().getItemInfo(rawId)) {
                 uint32_t displayIdB = info->displayInfoId;
                 if (displayIdB != 0 && itemDisplayDbc->findRecordById(displayIdB) >= 0) {
                     return displayIdB;

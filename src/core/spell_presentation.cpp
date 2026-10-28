@@ -250,7 +250,7 @@ void SpellPresentation::launchRangedProjectile(uint32_t spellId, uint64_t target
     if (!unitPosition(target, end)) return;
     end.z += 1.0f;
 
-    const auto& ranged = game_.getInventory().getEquipSlot(game::EquipSlot::RANGED);
+    const auto& ranged = game_.inventory().items().getEquipSlot(game::EquipSlot::RANGED);
     std::string modelPath;
     std::string texturePath;
     bool spin = false;

@@ -290,10 +290,10 @@ public:
             iss >> bagNum >> slotNum;
             if (!iss.fail() && slotNum >= 1) {
                 if (bagNum == 0) {
-                    ctx.gameHandler.useItemBySlot(slotNum - 1, true);
+                    ctx.gameHandler.inventory().useItemBySlot(slotNum - 1, true);
                     return {};
                 } if (bagNum >= 1 && bagNum <= game::Inventory::NUM_BAG_SLOTS) {
-                    ctx.gameHandler.useItemInBag(bagNum - 1, slotNum - 1, true);
+                    ctx.gameHandler.inventory().useItemInBag(bagNum - 1, slotNum - 1, true);
                     return {};
                 }
             }
@@ -304,9 +304,9 @@ public:
             uint32_t numId = parseNumericSpellId(useArg);  // Reuse: strips '#', checks all digits
             if (numId && numId >= 1 && numId <= static_cast<uint32_t>(game::EquipSlot::BAG4) + 1) {
                 auto eslot = static_cast<game::EquipSlot>(numId - 1);
-                const auto& esl = ctx.gameHandler.getInventory().getEquipSlot(eslot);
+                const auto& esl = ctx.gameHandler.inventory().items().getEquipSlot(eslot);
                 if (!esl.empty())
-                    ctx.gameHandler.useItemById(esl.item.itemId);
+                    ctx.gameHandler.inventory().useItemById(esl.item.itemId);
                 return {};
             }
         }
@@ -316,17 +316,17 @@ public:
         for (char& c : useArgLower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
         bool found = false;
-        const auto& inv = ctx.gameHandler.getInventory();
+        const auto& inv = ctx.gameHandler.inventory().items();
         // Search backpack
         for (int s = 0; s < inv.getBackpackSize() && !found; ++s) {
             const auto& slot = inv.getBackpackSlot(s);
             if (slot.empty()) continue;
-            const auto* info = ctx.gameHandler.getItemInfo(slot.item.itemId);
+            const auto* info = ctx.gameHandler.inventory().getItemInfo(slot.item.itemId);
             if (!info) continue;
             std::string nameLow = info->name;
             for (char& c : nameLow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             if (nameLow == useArgLower) {
-                ctx.gameHandler.useItemBySlot(s, true);
+                ctx.gameHandler.inventory().useItemBySlot(s, true);
                 found = true;
             }
         }
@@ -335,12 +335,12 @@ public:
             for (int s = 0; s < inv.getBagSize(b) && !found; ++s) {
                 const auto& slot = inv.getBagSlot(b, s);
                 if (slot.empty()) continue;
-                const auto* info = ctx.gameHandler.getItemInfo(slot.item.itemId);
+                const auto* info = ctx.gameHandler.inventory().getItemInfo(slot.item.itemId);
                 if (!info) continue;
                 std::string nameLow = info->name;
                 for (char& c : nameLow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                 if (nameLow == useArgLower) {
-                    ctx.gameHandler.useItemInBag(b, s, true);
+                    ctx.gameHandler.inventory().useItemInBag(b, s, true);
                     found = true;
                 }
             }
@@ -370,16 +370,16 @@ public:
         for (char& c : equipArgLower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
         bool found = false;
-        const auto& inv = ctx.gameHandler.getInventory();
+        const auto& inv = ctx.gameHandler.inventory().items();
         for (int s = 0; s < inv.getBackpackSize() && !found; ++s) {
             const auto& slot = inv.getBackpackSlot(s);
             if (slot.empty()) continue;
-            const auto* info = ctx.gameHandler.getItemInfo(slot.item.itemId);
+            const auto* info = ctx.gameHandler.inventory().getItemInfo(slot.item.itemId);
             if (!info) continue;
             std::string nameLow = info->name;
             for (char& c : nameLow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             if (nameLow == equipArgLower) {
-                ctx.gameHandler.autoEquipItemBySlot(s);
+                ctx.gameHandler.inventory().autoEquipItemBySlot(s);
                 found = true;
             }
         }
@@ -387,12 +387,12 @@ public:
             for (int s = 0; s < inv.getBagSize(b) && !found; ++s) {
                 const auto& slot = inv.getBagSlot(b, s);
                 if (slot.empty()) continue;
-                const auto* info = ctx.gameHandler.getItemInfo(slot.item.itemId);
+                const auto* info = ctx.gameHandler.inventory().getItemInfo(slot.item.itemId);
                 if (!info) continue;
                 std::string nameLow = info->name;
                 for (char& c : nameLow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                 if (nameLow == equipArgLower) {
-                    ctx.gameHandler.autoEquipItemInBag(b, s);
+                    ctx.gameHandler.inventory().autoEquipItemInBag(b, s);
                     found = true;
                 }
             }
@@ -414,7 +414,7 @@ public:
 class EquipSetCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        const auto& sets = ctx.gameHandler.getEquipmentSets();
+        const auto& sets = ctx.gameHandler.inventory().getEquipmentSets();
         auto sysSay = [&](const std::string& msg) {
             game::MessageChatData m;
             m.type = game::ChatType::SYSTEM;
@@ -446,7 +446,7 @@ public:
             }
         }
         if (found) {
-            ctx.gameHandler.useEquipmentSet(found->setId);
+            ctx.gameHandler.inventory().useEquipmentSet(found->setId);
         } else {
             sysSay("[System] No equipment set matching '" + setName + "'.");
         }

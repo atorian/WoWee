@@ -128,7 +128,7 @@ void renderEquippedEnhancements(
         const std::unordered_map<uint32_t, std::string>& enchantNames) {
     if (!gameHandler || !equipped) return;
 
-    const uint64_t guid = gameHandler->getEquipSlotGuid(
+    const uint64_t guid = gameHandler->inventory().getEquipSlotGuid(
         static_cast<int>(equipped.equipSlot));
     if (guid == 0) return;
 
@@ -141,11 +141,11 @@ void renderEquippedEnhancements(
             ImGui::TextColored(color, "%s: Enchantment %u", label, enchantId);
     };
 
-    const auto [permanent, temporary] = gameHandler->getItemEnchantIds(guid);
+    const auto [permanent, temporary] = gameHandler->inventory().getItemEnchantIds(guid);
     renderEnchant("Enchanted", permanent, ui::colors::kCyan);
     renderEnchant("Temporary", temporary, ImVec4(0.8f, 1.0f, 0.4f, 1.0f));
 
-    const auto sockets = gameHandler->getItemSocketEnchantIds(guid);
+    const auto sockets = gameHandler->inventory().getItemSocketEnchantIds(guid);
     for (uint32_t socketEnchant : sockets)
         renderEnchant("Gem", socketEnchant, ui::colors::kSocketGreen);
 }
@@ -229,7 +229,7 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
 
     // Heroic / Unique / Unique-Equipped indicators
     if (gameHandler) {
-        const auto* qi = gameHandler->getItemInfo(item.itemId);
+        const auto* qi = gameHandler->inventory().getItemInfo(item.itemId);
         if (qi && qi->valid) {
             constexpr uint32_t kFlagHeroic         = 0x8;
             constexpr uint32_t kFlagUniqueEquipped = 0x1000000;
@@ -271,7 +271,7 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
     // Slot type
     if (item.inventoryType > 0) {
         const char* slotName = ui::getInventorySlotName(item.inventoryType);
-        const auto* qi = gameHandler ? gameHandler->getItemInfo(item.itemId) : nullptr;
+        const auto* qi = gameHandler ? gameHandler->inventory().getItemInfo(item.itemId) : nullptr;
         // Containers (bags, quivers, ammo pouches, specialty bags) show their capacity as
         // "N Slot Bag", matching the WoW bag tooltip. containerSlots comes from the item
         // template query; itemClass 1 = Container, 11 = Quiver/ammo.
@@ -314,7 +314,7 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
 
     // Elemental resistances from item query cache (fire resist gear, nature resist gear, etc.)
     if (gameHandler) {
-        const auto* qi = gameHandler->getItemInfo(item.itemId);
+        const auto* qi = gameHandler->inventory().getItemInfo(item.itemId);
         if (qi && qi->valid) {
             const int32_t resValsI[6] = { qi->holyRes, qi->fireRes, qi->natureRes,
                                           qi->frostRes, qi->shadowRes, qi->arcaneRes };
@@ -365,7 +365,7 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
     }
     // Item spell effects (Use/Equip/Chance on Hit)
     if (gameHandler) {
-        auto* info = gameHandler->getItemInfo(item.itemId);
+        auto* info = gameHandler->inventory().getItemInfo(item.itemId);
         if (info) {
             for (const auto& sp : info->spells) {
                 if (sp.spellId == 0) continue;
@@ -390,7 +390,7 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
 
     // Skill / reputation requirements from item query cache
     if (gameHandler) {
-        const auto* qInfo = gameHandler->getItemInfo(item.itemId);
+        const auto* qInfo = gameHandler->inventory().getItemInfo(item.itemId);
         if (qInfo && qInfo->valid) {
             if (qInfo->requiredSkill != 0 && qInfo->requiredSkillRank > 0) {
                 static std::unordered_map<uint32_t, std::string> s_skillNamesB;
@@ -457,14 +457,14 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
 
     // Gem socket slots and item set - look up from query cache
     if (gameHandler) {
-        const auto* qi2 = gameHandler->getItemInfo(item.itemId);
+        const auto* qi2 = gameHandler->inventory().getItemInfo(item.itemId);
         if (qi2 && qi2->valid) {
             // Gem sockets
             {
                 // Get socket gem enchant IDs for this item (filled from item update fields)
                 std::array<uint32_t, 3> sockGems{};
                 if (itemGuid != 0 && gameHandler)
-                    sockGems = gameHandler->getItemSocketEnchantIds(itemGuid);
+                    sockGems = gameHandler->inventory().getItemSocketEnchantIds(itemGuid);
 
                 bool hasSocket = false;
                 for (int i = 0; i < 3; ++i) {
@@ -575,7 +575,7 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
 
     // Weapon/armor enchant display for equipped items (reads from item update fields)
     if (itemGuid != 0 && gameHandler) {
-        auto [permId, tempId] = gameHandler->getItemEnchantIds(itemGuid);
+        auto [permId, tempId] = gameHandler->inventory().getItemEnchantIds(itemGuid);
         if (permId != 0) {
             auto it2 = s_enchLookupB.find(permId);
             const char* ename = (it2 != s_enchLookupB.end()) ? it2->second.c_str() : nullptr;
@@ -915,7 +915,7 @@ void renderItemTooltip(const game::ItemQueryResponseData& info, const game::Inve
         // Get socket gem enchant IDs for this item (filled from item update fields)
         std::array<uint32_t, 3> sockGems{};
         if (itemGuid != 0 && gameHandler)
-            sockGems = gameHandler->getItemSocketEnchantIds(itemGuid);
+            sockGems = gameHandler->inventory().getItemSocketEnchantIds(itemGuid);
 
         bool hasSocket = false;
         for (int i = 0; i < 3; ++i) {
@@ -947,7 +947,7 @@ void renderItemTooltip(const game::ItemQueryResponseData& info, const game::Inve
 
     // Weapon/armor enchant display for equipped items
     if (itemGuid != 0 && gameHandler) {
-        auto [permId, tempId] = gameHandler->getItemEnchantIds(itemGuid);
+        auto [permId, tempId] = gameHandler->inventory().getItemEnchantIds(itemGuid);
         if (permId != 0) {
             auto it2 = s_enchLookup.find(permId);
             const char* ename = (it2 != s_enchLookup.end()) ? it2->second.c_str() : nullptr;

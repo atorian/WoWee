@@ -73,7 +73,7 @@ void ChatMarkupRenderer::render(
             }
             // Show small icon before item link if available
             if (itemEntry > 0 && ctx.gameHandler && ctx.inventory) {
-                const auto* chatInfo = ctx.gameHandler->getItemInfo(itemEntry);
+                const auto* chatInfo = ctx.gameHandler->inventory().getItemInfo(itemEntry);
                 if (chatInfo && chatInfo->valid && chatInfo->displayInfoId != 0) {
                     VkDescriptorSet chatIcon = ctx.inventory->getItemIcon(chatInfo->displayInfoId);
                     if (chatIcon) {

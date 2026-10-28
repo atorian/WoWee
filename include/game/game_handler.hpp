@@ -242,7 +242,7 @@ public:
     bool frameXmlListening() const override { return hasAddonEventListener(); }
     ActionCooldown spellCooldown(uint32_t spellId) const override;
     ActionCooldown itemCooldown(uint32_t itemId) const override;
-    void requestItemInfo(uint32_t itemId) override { queryItemInfo(itemId, 0); }
+    void requestItemInfo(uint32_t itemId) override { inventoryHandler_->queryItemInfo(itemId, 0); }
     std::optional<uint32_t> playerFieldBytes() const override;
 
     // InventoryQueries
@@ -314,13 +314,13 @@ public:
     void noteMountAura(uint32_t spellId) override { mountAuraSpellId_ = spellId; }
     bool autoAttacking() const override { return isAutoAttacking(); }
     bool inCombat() const override { return isInCombat(); }
-    const ItemQueryResponseData* itemInfo(uint32_t itemId) const override { return getItemInfo(itemId); }
+    const ItemQueryResponseData* itemInfo(uint32_t itemId) const override { return inventoryHandler_->getItemInfo(itemId); }
     const std::unordered_map<uint32_t, ItemQueryResponseData>& itemTemplates() const override {
-        return getItemInfoCache();
+        return inventoryHandler_->getItemInfoCache();
     }
     uint32_t itemEntryByGuid(uint64_t itemGuid) const override;
-    uint32_t itemCountInBags(uint32_t itemId) const override { return countItemInBags(itemId); }
-    bool awaitingItemTarget() const override { return isAwaitingItemTarget(); }
+    uint32_t itemCountInBags(uint32_t itemId) const override { return inventoryHandler_->items().countItem(itemId); }
+    bool awaitingItemTarget() const override { return inventoryHandler_->isAwaitingItemTarget(); }
     uint64_t pendingGameObjectInteraction() const override { return pendingGameObjectInteractGuid_; }
     uint64_t lastInteractedGameObject() const override { return lastInteractedGoGuid_; }
     void clearPendingGameObjectInteraction() override { pendingGameObjectInteractGuid_ = 0; }
@@ -352,7 +352,7 @@ public:
     std::string creatureName(uint32_t entry) const override { return getCachedCreatureName(entry); }
     void requestCreatureInfo(uint32_t entry) override { queryCreatureInfo(entry, 0); }
     void requestGameObjectInfo(uint32_t entry) override { queryGameObjectInfo(entry, 0); }
-    void vendorCanRepair() override { setVendorCanRepair(true); }
+    void vendorCanRepair() override { inventoryHandler_->setVendorCanRepair(true); }
     void openedStableMaster(uint64_t npcGuid) override;
 
     // SocialQueries (the ones shared with the other handlers are above).
@@ -486,13 +486,6 @@ public:
     /// player walks out of range, which is the only thing these answer.
     uint64_t getBinderGuid() const { return binderGuid_; }
     uint64_t getTalentWipeNpcGuid() const;
-
-    /// What another player is visibly wearing, by ItemDisplayInfo id and
-    /// inventory type, indexed by equipment slot. False when nothing is known
-    /// yet - which is not the same as wearing nothing.
-    bool getOtherPlayerEquipment(uint64_t guid,
-                                 std::array<uint32_t, 19>& displayIds,
-                                 std::array<uint8_t, 19>& invTypes) const;
 
     /// How a player in the world looks: race, gender, the packed appearance
     /// bytes and the facial-feature byte. False for anything that is not a
@@ -646,10 +639,6 @@ public:
     const loot::ILoot* loot() const override;
     const guild_bank::IGuildBank* guildBank() const override;
 
-    // Money (copper)
-    uint64_t getMoneyCopper() const { return inventoryHandler_->moneyCopper(); }
-    void applyServerMoney(uint64_t copper) { inventoryHandler_->applyServerMoney(copper); }
-
     // PvP currency (TBC/WotLK only)
     uint32_t getHonorPoints() const { return playerHonorPoints_; }
     uint32_t getArenaPoints() const { return playerArenaPoints_; }
@@ -740,13 +729,7 @@ public:
     }
 
     // Inventory
-    // Inventory - InventoryHandler's; these forward for the old callers.
-    Inventory& getInventory() { return inventoryHandler_->items(); }
-    const Inventory& getInventory() const { return inventoryHandler_->items(); }
-    bool consumeOnlineEquipmentDirty() { return inventoryHandler_->consumeOnlineEquipmentDirty(); }
     void markOnlineEquipmentDirty() override { inventoryHandler_->markOnlineEquipmentDirty(); }
-    void resetEquipmentDirtyTracking() { inventoryHandler_->resetEquipmentDirtyTracking(); }
-    void unequipToBackpack(EquipSlot equipSlot);
 
     // Targeting
     void setTarget(uint64_t guid) override;
@@ -1560,10 +1543,6 @@ public:
     void declineResurrect();
 
     // ---- Item text (books / readable items) ----
-    bool isItemTextOpen() const;
-    const std::string& getItemText() const;
-    void closeItemText();
-    void queryItemText(uint64_t itemGuid);
 
     // ---- Shared Quest ----
     bool hasPendingSharedQuest() const;
@@ -1601,8 +1580,6 @@ public:
     /// Asked by the spell handler once a gather or an opening finishes, and by
     /// the deferred open of a used game object.
     void lootTarget(uint64_t guid) override;
-    void confirmBindOnUse();
-    void cancelTempEnchantment(uint8_t handIndex);
     void scheduleGameObjectLootOpen(uint64_t guid, float delaySeconds = 0.35f, uint8_t attempts = 1);
 
     /// True once the object is known to be a fishing school. A click on one
@@ -1623,10 +1600,6 @@ public:
     /// aid, set from the Combat page.
     void setAutoFaceTarget(bool enabled) { autoFaceTarget_ = enabled; }
     [[nodiscard]] bool isAutoFaceTarget() const { return autoFaceTarget_; }
-    void setAutoSellGrey(bool enabled);
-    bool isAutoSellGrey() const;
-    void setAutoRepair(bool enabled);
-    bool isAutoRepair() const;
 
     /// Whether a friendly spell cast with nothing friendly selected falls back
     /// to the caster. On by default, as the real client is, and turned off
@@ -1637,17 +1610,6 @@ public:
 
     // Equipment Sets (aliased from handler_types.hpp)
     using EquipmentSetInfo = game::EquipmentSetInfo;
-    const std::vector<EquipmentSetInfo>& getEquipmentSets() const;
-    /// The items a saved set holds, by slot, as the item guids the server sent.
-    const std::array<uint64_t, 19>* getEquipmentSetItems(uint32_t setId) const;
-    uint32_t getEquipmentSetIgnoreMask(uint32_t setId) const;
-    /// The item an online guid refers to, or zero when it is not known here.
-    uint32_t getItemIdByGuid(uint64_t guid) const { return inventoryHandler_->getItemEntryByGuid(guid); }
-    bool supportsEquipmentSets() const;
-    void useEquipmentSet(uint32_t setId);
-    void saveEquipmentSet(const std::string& name, const std::string& iconName = "INV_Misc_QuestionMark",
-                          uint64_t existingGuid = 0, uint32_t setIndex = 0xFFFFFFFF);
-    void deleteEquipmentSet(uint64_t setGuid);
 
     // NPC Gossip
     void interactWithNpc(uint64_t guid);
@@ -1660,7 +1622,6 @@ public:
     void closeGossip() override;
     // Quest-starting items: right-click triggers quest offer dialog via questgiver protocol
     void offerQuestFromItem(uint64_t itemGuid, uint32_t questId);
-    uint64_t getBagItemGuid(int bagIndex, int slotIndex) const;
     bool isGossipWindowOpen() const;
     const GossipMessageData& getCurrentGossip() const;
     const std::string& getNpcText(uint32_t textId) const;
@@ -1874,18 +1835,11 @@ public:
     };
 
     // Temporary weapon enchant timers (from SMSG_ITEM_ENCHANT_TIME_UPDATE), the
-    // inventory's. Returns remaining ms for a given slot, or 0 if absent/expired.
+    // inventory's.
     using TempEnchantTimer = game::TempEnchantTimer;
-    uint32_t getTempEnchantRemainingMs(uint32_t slot) const;
 
     // ---- Readable text (books / scrolls / notes) - the inventory's ----
     using BookPage = game::BookPage;
-    const std::vector<BookPage>& getBookPages() const { return inventoryHandler_->getBookPages(); }
-    void clearBook() { inventoryHandler_->clearBook(); }
-    /// What is being read, for the heading over the page.
-    const std::string& getBookTitle() const { return inventoryHandler_->getBookTitle(); }
-    /// The backing the open book's pages are drawn on.
-    uint32_t getBookMaterial() const { return inventoryHandler_->getBookMaterial(); }
     /// PageTextMaterial.dbc's name for a material id, empty for none. The
     /// interface wants the word, not the number - it picks a texture and a
     /// text colour by it.
@@ -2137,77 +2091,18 @@ public:
     void sendRequestVehicleExit();
 
     // Vendor
-    void openVendor(uint64_t npcGuid);
     void closeVendor() override;
-    void buyItem(uint64_t vendorGuid, uint32_t itemId, uint32_t slot, uint32_t count);
-    void sellItem(uint64_t vendorGuid, uint64_t itemGuid, uint32_t count);
-    void sellItemBySlot(int backpackIndex);
-    void sellItemInBag(int bagIndex, int slotIndex);
-    struct BuybackItem {
-        uint64_t itemGuid = 0;
-        ItemDef item;
-        uint32_t count = 1;
-        uint32_t wireSlot = 0;
-    };
-    void buyBackItem(uint32_t buybackSlot);
-    void repairItem(uint64_t vendorGuid, uint64_t itemGuid);
-    void repairAll(uint64_t vendorGuid, bool useGuildBank = false);
-    uint32_t estimateRepairAllCost() const;
-    const std::deque<BuybackItem>& getBuybackItems() const;
-    /// Equip a held item into a named equipment slot. See InventoryHandler.
-    void equipItemToSlot(uint64_t itemGuid, uint8_t equipSlot);
-    void autoEquipItemBySlot(int backpackIndex, bool confirmed = false);
-    void autoEquipItemInBag(int bagIndex, int slotIndex, bool confirmed = false);
-    /// Would equipping this bind it? Asked by both interfaces before they put
-    /// their own prompt up.
-    bool equipWouldBindFromBackpack(int backpackIndex) const;
-    bool equipWouldBindFromBag(int bagIndex, int slotIndex) const;
-    void equipPendingItem();
-    void cancelPendingEquip();
-    void useItemBySlot(int backpackIndex, bool confirmed = false,
-                       uint64_t unitTarget = 0);
-    void useKeyringItem(int index, bool confirmed = false);
-    void useItemInBag(int bagIndex, int slotIndex, bool confirmed = false,
-                      uint64_t unitTarget = 0);
 
     // Item-targeted item use: sharpening stones, weightstones and weapon oils enchant
     // another item, so using one arms a targeting cursor instead of casting immediately.
-    bool isAwaitingItemTarget() const;
-    /// True while a used item is waiting for the player to click a unit.
-    bool isAwaitingUnitTarget() const;
-    uint32_t getPendingUnitTargetSourceItemId() const;
-    void cancelUnitTargeting();
-    void completeItemUseOnUnit(uint64_t targetUnitGuid);
     /// Arm the item-picking cursor for a spell that must be cast at an item.
     void beginSpellItemTargeting(uint32_t spellId, const std::string& spellName) override;
-    uint32_t getPendingItemTargetSourceItemId() const;
-    void cancelItemTargeting();
-    void completeItemUseOnItem(uint64_t targetItemGuid, bool confirmed = false);
-    void replaceEnchant();
 
     /// Seconds until the server teleports the player out of an instance they
     /// are not valid for, or 0 when no such timer is running. The server sends
     /// the whole countdown once and then says nothing until it stops, so the
     /// remainder is worked out from when it arrived.
     int getInstanceBootTimeRemaining() const;
-
-    // CMSG_OPEN_ITEM - for locked containers (lockboxes); server checks keyring automatically
-    void openItemBySlot(int backpackIndex);
-    void openItemInBag(int bagIndex, int slotIndex);
-    void readItemBySlot(int backpackIndex);
-    void readItemInBag(int bagIndex, int slotIndex);
-    void destroyItem(uint8_t bag, uint8_t slot, uint8_t count = 1);
-    void splitItem(uint8_t srcBag, uint8_t srcSlot, uint8_t count);
-    void splitItemTo(uint8_t srcBag, uint8_t srcSlot,
-                     uint8_t dstBag, uint8_t dstSlot, uint8_t count);
-    void swapContainerItems(uint8_t srcBag, uint8_t srcSlot, uint8_t dstBag,
-                            uint8_t dstSlot, bool applyLocally = true);
-    /// Tell every frame that draws from a bag to read it again.
-    ///
-    /// For a change made straight to the model rather than arriving from the
-    /// server: nothing on screen holds bag contents of its own, so a layout
-    /// that changes without this is correct and invisible.
-    void notifyBagsChanged();
 
     /// Merge partial stacks, then order every bag slot, and send the moves.
     ///
@@ -2238,39 +2133,15 @@ public:
     /// pouring partials together across the bank is what Sort All is for, and
     /// doing it here would move items out of the bag being sorted.
     void sortBankBag(int bagIndex);
-    void swapBagSlots(int srcBagIndex, int dstBagIndex);
-    void useItemById(uint32_t itemId, uint64_t unitTarget = 0);
-    /// Put a glyph from a bag slot into a socket, counted from zero.
-    void placeGlyphFromBag(uint8_t wireBag, uint8_t wireSlot, uint32_t socketIndex);
-    uint32_t getItemIdForSpell(uint32_t spellId) const;
-    bool isVendorWindowOpen() const;
-    const ListInventoryData& getVendorItems() const;
-    void setVendorCanRepair(bool v);
 
     // ---- Item socketing ----
     // Flat accessors rather than the session struct: InventoryHandler is only
     // forward-declared here, and a nested type cannot cross that.
-    bool isSocketingOpen() const;
-    uint64_t getSocketItemGuid() const;
-    uint32_t getSocketItemId() const;
     uint32_t getSocketPendingGemItemId(int index) const;
-    void openSocketing(uint64_t itemGuid);
-    void closeSocketing();
-    bool setSocketGem(int index, uint64_t gemGuid, uint32_t gemItemId);
-    void acceptSockets();
 
     // Bank
-    void openBank(uint64_t guid);
-    void closeBank();
-    void buyBankSlot();
     // Copper cost of the bank bag slot at the given 0-based index (BankBagSlotPrices.dbc).
     uint32_t getBankBagSlotPrice(int slotIndex) const;
-    void depositItem(uint8_t srcBag, uint8_t srcSlot);
-    void withdrawItem(uint8_t srcBag, uint8_t srcSlot);
-    bool isBankOpen() const;
-    uint64_t getBankerGuid() const;
-    int getEffectiveBankSlots() const;
-    int getEffectiveBankBagSlots() const;
 
     /// One row of a profession's recipe list (game/craft_recipe.hpp).
     using CraftRecipe = game::CraftRecipe;
@@ -2282,13 +2153,8 @@ public:
     /// the other is a bug nobody can explain.
     std::vector<CraftRecipe> getCraftingRecipes() const;
     /// How many of an item the backpack and equipped bags hold together.
-    uint32_t countItemInBags(uint32_t itemId) const;
 
     // Trainer
-    bool isTrainerWindowOpen() const;
-    const TrainerListData& getTrainerSpells() const;
-    void trainSpell(uint32_t spellId);
-    void closeTrainer();
     const std::string& getSpellName(uint32_t spellId) const;
     const std::string& getSpellRank(uint32_t spellId) const;
     /// Returns the tooltip/description text from Spell.dbc (empty if unknown or has no text).
@@ -2321,13 +2187,6 @@ public:
     uint32_t getEnchantGemItem(uint32_t enchantId) const;
     // Refunds and held items - the inventory's; these forward for the old callers.
     using ItemRefundInfo = game::ItemRefundInfo;
-    void requestItemRefundInfo(uint64_t itemGuid) { inventoryHandler_->requestItemRefundInfo(itemGuid); }
-    void refundItem(uint64_t itemGuid) { inventoryHandler_->refundItem(itemGuid); }
-    const ItemRefundInfo* getItemRefundInfo(uint64_t itemGuid) const {
-        return inventoryHandler_->getItemRefundInfo(itemGuid);
-    }
-    bool isItemSoulbound(uint64_t guid) const { return inventoryHandler_->isItemSoulbound(guid); }
-    uint32_t getItemEntryByGuid(uint64_t guid) const { return inventoryHandler_->getItemEntryByGuid(guid); }
     /// The skill's own name, by SkillLine.dbc id.
     const std::string& getSkillLineName(uint32_t skillLineId) const;
     /// Returns the DispelType for a spell (0=none,1=magic,2=curse,3=disease,4=poison,5+=other)
@@ -2357,28 +2216,8 @@ public:
     // Spell.dbc TargetAuraState (aura state the target must be in; 0 = no requirement).
     uint32_t getSpellTargetAuraState(uint32_t spellId) const;
 
-    struct TrainerTab {
-        std::string name;
-        std::vector<const TrainerSpell*> spells;
-    };
-    const std::vector<TrainerTab>& getTrainerTabs() const;
     // Item templates and held items - the inventory's; forwarded for the old callers.
-    const ItemQueryResponseData* getItemInfo(uint32_t itemId) const {
-        return inventoryHandler_->getItemInfo(itemId);
-    }
-    const std::unordered_map<uint32_t, ItemQueryResponseData>& getItemInfoCache() const {
-        return inventoryHandler_->getItemInfoCache();
-    }
     void ensureItemInfo(uint32_t entry) override { inventoryHandler_->ensureItemInfo(entry); }
-    uint64_t getBackpackItemGuid(int index) const { return inventoryHandler_->getBackpackItemGuid(index); }
-    uint64_t getEquipSlotGuid(int slot) const { return inventoryHandler_->getEquipSlotGuid(slot); }
-    std::pair<uint32_t, uint32_t> getItemEnchantIds(uint64_t guid) const {
-        return inventoryHandler_->getItemEnchantIds(guid);
-    }
-    std::array<uint32_t, 3> getItemSocketEnchantIds(uint64_t guid) const {
-        return inventoryHandler_->getItemSocketEnchantIds(guid);
-    }
-    uint64_t getVendorGuid() const;
 
     /**
      * Set callbacks
@@ -2672,15 +2511,8 @@ public:
     void clearTransportAttachment(uint64_t childGuid);
     std::string guidToUnitId(uint64_t guid) const;
     Unit* getUnitByGuid(uint64_t guid);
-    uint64_t resolveOnlineItemGuid(uint32_t itemId) const;
-    void rebuildOnlineInventory();
-    void maybeDetectVisibleItemLayout();
-    void updateOtherPlayerVisibleItems(uint64_t guid, const FlatFieldMap& fields);
     void cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries,
                                        const std::array<uint16_t, 19>& enchantIds) override;
-    void detectInventorySlotBases(const FlatFieldMap& fields);
-    bool applyInventoryFields(const FlatFieldMap& fields);
-    void extractContainerFields(uint64_t containerGuid, const FlatFieldMap& fields);
     void extractSkillFields(const FlatFieldMap& fields);
     void extractExploredZoneFields(const FlatFieldMap& fields);
     void applyQuestStateFromFields(const FlatFieldMap& fields);
@@ -2714,7 +2546,6 @@ public:
         loadLfgDungeonDbc();
         return lfgDungeons_;
     }
-    void queryItemInfo(uint32_t entry, uint64_t guid);
 
     // --- Inner types exposed for former friend classes ---
     struct TransportAttachment {
@@ -2855,9 +2686,6 @@ private:
      */
     void handlePong(network::Packet& packet);
 
-    void emitOtherPlayerEquipment(uint64_t guid);
-    void emitAllOtherPlayerEquipment();
-
     // handleAttackStart, handleAttackStop, handleAttackerStateUpdate,
     // handleSpellDamageLog, handleSpellHealLog removed
 
@@ -2878,7 +2706,6 @@ private:
     int findQuestLogSlotIndexFromServer(uint32_t questId) const;
     void addQuestToLocalLogIfMissing(uint32_t questId, const std::string& title, const std::string& objectives);
     bool resyncQuestLogFromServerSlots(bool forceQueryMetadata);
-    void addMoneyCopper(uint32_t amount);
 
     // ---- Area trigger detection ----
     void loadAreaTriggerDbc();

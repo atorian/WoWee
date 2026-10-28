@@ -515,7 +515,7 @@ TEST_CASE("logging in again after a lost connection keeps nothing of the last on
     REQUIRE(h.game().getSpellCooldown(kFireball) > 0.0f);
     REQUIRE_FALSE(h.game().getPlayerAuras().empty());
     REQUIRE(h.group().isInGroup());
-    REQUIRE_FALSE(h.game().getInventory().getBackpackSlot(0).empty());
+    REQUIRE_FALSE(h.game().inventory().items().getBackpackSlot(0).empty());
 
     h.server().disconnect();
     h.pump();
@@ -525,6 +525,6 @@ TEST_CASE("logging in again after a lost connection keeps nothing of the last on
     CHECK(h.game().getSpellCooldown(kFireball) == 0.0f);
     CHECK(h.game().getPlayerAuras().empty());
     CHECK_FALSE(h.group().isInGroup());
-    CHECK(h.game().getInventory().getBackpackSlot(0).empty());
+    CHECK(h.game().inventory().items().getBackpackSlot(0).empty());
     CHECK_FALSE(h.game().getEntityManager().hasEntity(kItem));
 }

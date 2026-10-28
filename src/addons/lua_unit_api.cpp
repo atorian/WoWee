@@ -1453,7 +1453,7 @@ static int lua_UnitAttackSpeed(lua_State* L) {
     double offSpeed = 0.0;
     bool hasOffHand = false;
     if (gh && u == "player") {
-        const auto& inv = gh->getInventory();
+        const auto& inv = gh->inventory().items();
         const auto& mh = inv.getEquipSlot(game::EquipSlot::MAIN_HAND);
         if (!mh.empty() && mh.item.delayMs > 0) mainSpeed = mh.item.delayMs / 1000.0;
         const auto& oh = inv.getEquipSlot(game::EquipSlot::OFF_HAND);
@@ -1497,7 +1497,7 @@ static int lua_UnitDamage(lua_State* L) {
     double speed = 2.0;
     double offMin = 0.0, offMax = 0.0;
     if (gh) {
-        const auto& inv = gh->getInventory();
+        const auto& inv = gh->inventory().items();
         const auto& mh = inv.getEquipSlot(game::EquipSlot::MAIN_HAND);
         if (!mh.empty() && mh.item.damageMax > 0.0f) {
             baseMin = mh.item.damageMin;
@@ -1658,7 +1658,7 @@ static int lua_GetInventoryItemCooldown(lua_State* L) {
     const int slot = static_cast<int>(luaL_optnumber(L, 2, 0));
     double start = 0.0, duration = 0.0;
     if (gh && slot >= 1 && slot <= 19) {
-        const auto& sl = gh->getInventory().getEquipSlot(
+        const auto& sl = gh->inventory().items().getEquipSlot(
             static_cast<game::EquipSlot>(slot - 1));
         if (!sl.empty()) itemUseCooldown(gh, sl.item.itemId, start, duration);
     }
@@ -2574,9 +2574,9 @@ void registerUnitLuaAPI(lua_State* L) {
                 {"OffhandHasWeapon", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushboolean(L, 0); return 1; }
-            const auto& slot = gh->getInventory().getEquipSlot(game::EquipSlot::OFF_HAND);
+            const auto& slot = gh->inventory().items().getEquipSlot(game::EquipSlot::OFF_HAND);
             if (slot.empty()) { lua_pushboolean(L, 0); return 1; }
-            const auto* info = gh->getItemInfo(slot.item.itemId);
+            const auto* info = gh->inventory().getItemInfo(slot.item.itemId);
             const uint8_t t = info ? info->inventoryType : 0;
             // A weapon, not a shield or a held book: OFF_HAND in this table
             // is the held-in-off-hand class, which is not one.
@@ -3066,10 +3066,10 @@ void registerUnitLuaAPI(lua_State* L) {
                 {"HasWandEquipped",         [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushboolean(L, 0); return 1; }
-            const auto& sl = gh->getInventory().getEquipSlot(game::EquipSlot::RANGED);
+            const auto& sl = gh->inventory().items().getEquipSlot(game::EquipSlot::RANGED);
             bool wand = false;
             if (!sl.empty()) {
-                if (const auto* info = gh->getItemInfo(sl.item.itemId); info && info->valid) {
+                if (const auto* info = gh->inventory().getItemInfo(sl.item.itemId); info && info->valid) {
                     wand = (info->itemClass == 2 && info->subClass == 19);
                 }
             }
@@ -3096,7 +3096,7 @@ void registerUnitLuaAPI(lua_State* L) {
                 // showed an item's repair cost.
                 {"InRepairMode", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const bool active = repairCursorUp(L) && gh && gh->isVendorWindowOpen();
+            const bool active = repairCursorUp(L) && gh && gh->inventory().isVendorWindowOpen();
             lua_pushboolean(L, active ? 1 : 0);
             return 1;
         }},
@@ -3122,7 +3122,7 @@ void registerUnitLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int slotId = static_cast<int>(luaL_optnumber(L, 2, 0));
             if (!gh || slotId < 1 || slotId > 19) { lua_pushboolean(L, 0); return 1; }
-            const auto& sl = gh->getInventory().getEquipSlot(
+            const auto& sl = gh->inventory().items().getEquipSlot(
                 static_cast<game::EquipSlot>(slotId - 1));
             lua_pushboolean(L, !sl.empty() && sl.item.maxDurability > 0 &&
                                sl.item.curDurability == 0);
@@ -3143,7 +3143,7 @@ void registerUnitLuaAPI(lua_State* L) {
             const int slot = static_cast<int>(luaL_optnumber(L, 1, 0));
             const uint32_t held = cursorItemId(L);
             if (!gh || slot < 1 || held == 0) { lua_pushboolean(L, 0); return 1; }
-            const auto* info = gh->getItemInfo(held);
+            const auto* info = gh->inventory().getItemInfo(held);
             if (!info || !info->valid) { lua_pushboolean(L, 0); return 1; }
             // Paperdoll slot ids are the EquipSlot enum plus one.
             using namespace game::InvType;

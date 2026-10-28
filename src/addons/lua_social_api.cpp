@@ -1437,7 +1437,7 @@ void registerSocialLuaAPI(lua_State* L) {
             const int index = static_cast<int>(luaL_optnumber(L, 1, 1)) - 1;
             uint32_t itemId = 0, displayId = 0, cost = 0;
             if (!gh || !petitions || !petitions->getPetitionCharter(index, itemId, displayId, cost)) return 0;
-            const auto* info = gh->getItemInfo(itemId);
+            const auto* info = gh->inventory().getItemInfo(itemId);
             if (!info || !info->valid) { gh->ensureItemInfo(itemId); return 0; }
             lua_pushstring(L, info->name.c_str());
             lua_pushstring(L, gh->getItemIconPath(
@@ -1602,7 +1602,7 @@ void registerSocialLuaAPI(lua_State* L) {
             static const uint32_t kCharters[] = {5863, 23560, 23561, 23562};
             bool carrying = false;
             if (gh) {
-                const auto& inv = gh->getInventory();
+                const auto& inv = gh->inventory().items();
                 for (uint32_t id : kCharters) {
                     for (int i = 0; i < inv.getBackpackSize() && !carrying; ++i)
                         carrying = inv.getBackpackSlot(i).item.itemId == id;
@@ -1850,7 +1850,7 @@ void registerSocialLuaAPI(lua_State* L) {
             lua_pushstring(L, seller ? "seller" : "buyer");
 
             const uint32_t entry = haveSubject ? subject.itemEntry : 0;
-            const auto* info = entry ? gh->getItemInfo(entry) : nullptr;
+            const auto* info = entry ? gh->inventory().getItemInfo(entry) : nullptr;
             lua_pushstring(L, info ? info->name.c_str() : "");
 
             // The other party. Their guid low is what the invoice carries, and

@@ -1215,12 +1215,6 @@ void InventoryHandler::cancelTempEnchantment(uint8_t handIndex) {
 // Vendor
 // ============================================================
 
-void InventoryHandler::openVendor(uint64_t npcGuid) {
-    if (!sender_.characterInWorld()) return;
-    auto packet = ListInventoryPacket::build(npcGuid);
-    sender_.send(packet);
-}
-
 void InventoryHandler::closeVendor() {
     bool wasOpen = vendorWindowOpen_;
     vendorWindowOpen_ = false;
@@ -1518,13 +1512,6 @@ void InventoryHandler::repairAll(uint64_t vendorGuid, bool useGuildBank) {
     }
 }
 
-bool InventoryHandler::equipWouldBindFromBackpack(int backpackIndex) const {
-    const auto& inv = held_.items;
-    if (backpackIndex < 0 || backpackIndex >= inv.getBackpackSize()) return false;
-    const auto& slot = inv.getBackpackSlot(backpackIndex);
-    return !slot.empty() && slot.item.wouldBindOnEquip();
-}
-
 bool InventoryHandler::equipWouldBindFromBag(int bagIndex, int slotIndex) const {
     const auto& inv = held_.items;
     if (bagIndex < 0 || bagIndex >= Inventory::NUM_BAG_SLOTS) return false;
@@ -1752,10 +1739,6 @@ bool InventoryHandler::isAwaitingUnitTarget() const {
     return true;
 }
 
-uint32_t InventoryHandler::getPendingUnitTargetSourceItemId() const {
-    return isAwaitingUnitTarget() ? pendingUnitTarget_->itemId : 0;
-}
-
 void InventoryHandler::cancelUnitTargeting() {
     pendingUnitTarget_.reset();
 }
@@ -1781,10 +1764,6 @@ bool InventoryHandler::isAwaitingItemTarget() const {
         return false;
     }
     return true;
-}
-
-uint32_t InventoryHandler::getPendingItemTargetSourceItemId() const {
-    return pendingItemTarget_ ? pendingItemTarget_->itemId : 0;
 }
 
 void InventoryHandler::cancelItemTargeting() {
@@ -2129,29 +2108,6 @@ void InventoryHandler::splitItemTo(uint8_t srcBag, uint8_t srcSlot,
              ") count=", (int)count, " -> dst(bag=", (int)dstBag,
              " slot=", (int)dstSlot, ")");
     sender_.send(SplitItemPacket::build(srcBag, srcSlot, dstBag, dstSlot, count));
-}
-
-void InventoryHandler::splitItem(uint8_t srcBag, uint8_t srcSlot, uint8_t count) {
-    // No destination given: the first free slot, which is what this client's
-    // own bag window means by a split. The interface means something else and
-    // says where it wants it - see splitItemTo.
-    const int freeBp = held_.items.findFreeBackpackSlot();
-    if (freeBp >= 0) {
-        splitItemTo(srcBag, srcSlot, 0xFF,
-                    static_cast<uint8_t>(Inventory::NUM_EQUIP_SLOTS + freeBp), count);
-        return;
-    }
-    for (int b = 0; b < held_.items.NUM_BAG_SLOTS; b++) {
-        const int bagSize = held_.items.getBagSize(b);
-        for (int s = 0; s < bagSize; s++) {
-            if (!held_.items.getBagSlot(b, s).empty()) continue;
-            splitItemTo(srcBag, srcSlot,
-                        static_cast<uint8_t>(Inventory::FIRST_BAG_EQUIP_SLOT + b),
-                        static_cast<uint8_t>(s), count);
-            return;
-        }
-    }
-    raiseUiError("Cannot split: no free inventory slots.");
 }
 
 void InventoryHandler::fireBagUpdates() {
@@ -2776,18 +2732,6 @@ void InventoryHandler::handleAuctionListResult(network::Packet& packet,
 // Item Text
 // ============================================================
 
-void InventoryHandler::queryItemText(uint64_t itemGuid) {
-    if (!sender_.characterInWorld()) return;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_ITEM_TEXT_QUERY));
-    pkt.writeUInt64(itemGuid);
-    sender_.send(pkt);
-    // The read has started. The frame answers this by clearing the page and
-    // picking the material's text colour, before any words have arrived -
-    // which is why it is a separate event from ITEM_TEXT_READY and not a
-    // duplicate of it.
-    frameXml_.fireFrameXmlEvent("ITEM_TEXT_BEGIN", {});
-}
-
 void InventoryHandler::closeItemText() {
     if (!itemTextOpen_) return;
     itemTextOpen_ = false;
@@ -2813,10 +2757,6 @@ void InventoryHandler::handleItemTextQueryResponse(network::Packet& packet) {
 // ============================================================
 // Equipment Sets
 // ============================================================
-
-bool InventoryHandler::supportsEquipmentSets() const {
-    return isActiveExpansion("wotlk");
-}
 
 void InventoryHandler::useEquipmentSet(uint32_t setId) {
     if (!sender_.characterInWorld()) return;
@@ -4440,23 +4380,6 @@ uint32_t InventoryHandler::getTempEnchantRemainingMs(uint32_t slot) const {
         }
     }
     return 0u;
-}
-
-void InventoryHandler::addMoneyCopper(uint32_t amount) {
-    if (amount == 0) return;
-    held_.moneyCopper += amount;
-    const auto coins = game::splitCopper(amount);
-    const uint32_t gold = coins.gold;
-    const uint32_t silver = coins.silver;
-    const uint32_t copper = coins.copper;
-    std::string msg = "You receive ";
-    msg += std::to_string(gold) + "g ";
-    msg += std::to_string(silver) + "s ";
-    msg += std::to_string(copper) + "c.";
-    // As money, not as a system line. Both were added because the typed one
-    // raised in the interface's handler and never appeared - see
-    // ChatHandler::addLocalChatLine.
-    chat_.addLocalChatLine(ChatType::MONEY, msg);
 }
 
 // ============================================================

@@ -1069,7 +1069,7 @@ static int lua_GetQuestLogSpecialItemInfo(lua_State* L) {
     const QuestSpecialItem item = questSpecialItemAt(gh, index);
     if (!item.itemId) { return luaReturnNil(L); }
 
-    const auto* info = gh->getItemInfo(item.itemId);
+    const auto* info = gh->inventory().getItemInfo(item.itemId);
     // The name is what goes in the link, and without it there is no link to
     // return. The query was sent when the quest was read; until it answers,
     // there is honestly nothing to draw.
@@ -1096,8 +1096,8 @@ static int lua_UseQuestLogSpecialItem(lua_State* L) {
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
     const QuestSpecialItem item = questSpecialItemAt(gh, index);
     if (!item.itemId) return 0;
-    if (item.bag == 0) gh->useItemBySlot(item.slot - 1);
-    else               gh->useItemInBag(item.bag - 1, item.slot - 1);
+    if (item.bag == 0) gh->inventory().useItemBySlot(item.slot - 1);
+    else               gh->inventory().useItemInBag(item.bag - 1, item.slot - 1);
     return 0;
 }
 
@@ -1817,7 +1817,7 @@ static const game::ItemQueryResponseData* craftedItem(game::GameHandler* gh,
     const uint32_t made = recipe->createdItemId;
     if (made == 0) return nullptr;
     gh->ensureItemInfo(made);
-    const auto* info = gh->getItemInfo(made);
+    const auto* info = gh->inventory().getItemInfo(made);
     return (info && info->valid) ? info : nullptr;
 }
 
@@ -2151,7 +2151,7 @@ static std::vector<const game::TrainerSpell*> shownTrainerServices(lua_State* L,
     std::vector<const game::TrainerSpell*> shown;
     if (!gh) return shown;
     const std::string& search = trainerSearch(L);
-    for (const auto& sp : gh->getTrainerSpells().spells) {
+    for (const auto& sp : gh->inventory().getTrainerSpells().spells) {
         if (!trainerCategoryShowing(L, trainerServiceCategory(gh, sp))) continue;
         // The name only when there is something to match, so the common case
         // costs no lookups at all.
@@ -2497,7 +2497,7 @@ static int pushRewardAt(lua_State* L, game::GameHandler* gh,
     for (const auto& r : list) {
         if (r.itemId == 0) continue;
         if (++seen != index) continue;
-        const auto* info = gh->getItemInfo(r.itemId);
+        const auto* info = gh->inventory().getItemInfo(r.itemId);
         lua_pushstring(L, info ? info->name.c_str() : "");
         lua_pushstring(L, gh->getItemIconPath(
             info && info->displayInfoId ? info->displayInfoId : r.displayInfoId).c_str());
@@ -2595,7 +2595,7 @@ static int lua_GetQuestLogItemLink(lua_State* L) {
         for (const auto& r : list) {
             if (r.itemId == 0) continue;
             if (++seen != index) continue;
-            const auto* info = gh->getItemInfo(r.itemId);
+            const auto* info = gh->inventory().getItemInfo(r.itemId);
             const std::string name = info ? info->name : "";
             if (name.empty()) break;
             lua_pushstring(L, game::buildItemLink(r.itemId,
@@ -2833,7 +2833,7 @@ static int lua_GetQuestItemInfo(lua_State* L) {
     for (const auto& r : *list) {
         if (r.itemId == 0) continue;
         if (++seen != index) continue;
-        const auto* info = gh->getItemInfo(r.itemId);
+        const auto* info = gh->inventory().getItemInfo(r.itemId);
         lua_pushstring(L, info ? info->name.c_str() : "");
         lua_pushstring(L, gh->getItemIconPath(
             info && info->displayInfoId ? info->displayInfoId : r.displayInfoId).c_str());
@@ -2864,7 +2864,7 @@ static int lua_GetQuestItemLink(lua_State* L) {
     for (const auto& r : *list) {
         if (r.itemId == 0) continue;
         if (++seen != index) continue;
-        const auto* info = gh->getItemInfo(r.itemId);
+        const auto* info = gh->inventory().getItemInfo(r.itemId);
         const std::string name = info ? info->name : "";
         if (name.empty()) { return luaReturnNil(L); }
         lua_pushstring(L, game::buildItemLink(r.itemId,
@@ -3056,14 +3056,14 @@ void registerQuestLuaAPI(lua_State* L) {
             // chains through nextPageId and is collected whole before anyone
             // reads it. A book wins while one is open, because a letter cannot
             // be open at the same time.
-            const auto& pages = gh->getBookPages();
+            const auto& pages = gh->inventory().getBookPages();
             if (!pages.empty()) {
                 const size_t page = static_cast<size_t>(bookPage(L));
                 lua_pushstring(L, page < pages.size() ? pages[page].text.c_str()
                                                       : pages.back().text.c_str());
                 return 1;
             }
-            lua_pushstring(L, gh->getItemText().c_str());
+            lua_pushstring(L, gh->inventory().getItemText().c_str());
             return 1;
         }},
                 // ItemTextGetItem() - the heading over the page. The page
@@ -3075,7 +3075,7 @@ void registerQuestLuaAPI(lua_State* L) {
                 // and plaque with nothing.
                 {"ItemTextGetItem", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const std::string title = gh ? gh->getBookTitle() : std::string();
+            const std::string title = gh ? gh->inventory().getBookTitle() : std::string();
             if (title.empty()) return luaReturnNil(L);
             lua_pushstring(L, title.c_str());
             return 1;
@@ -3099,7 +3099,7 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"ItemTextGetMaterial", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return luaReturnNil(L);
-            const std::string& name = gh->getPageTextMaterialName(gh->getBookMaterial());
+            const std::string& name = gh->getPageTextMaterialName(gh->inventory().getBookMaterial());
             // Nil rather than an empty string for an unknown id: the frame
             // tests `if ( not material )` and substitutes Parchment itself.
             if (name.empty()) return luaReturnNil(L);
@@ -3117,7 +3117,7 @@ void registerQuestLuaAPI(lua_State* L) {
         }},
                 {"ItemTextHasNextPage", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const size_t pages = gh ? gh->getBookPages().size() : 0;
+            const size_t pages = gh ? gh->inventory().getBookPages().size() : 0;
             lua_pushboolean(L, static_cast<size_t>(bookPage(L) + 1) < pages ? 1 : 0);
             return 1;
         }},
@@ -3127,7 +3127,7 @@ void registerQuestLuaAPI(lua_State* L) {
         }},
                 {"ItemTextNextPage", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const size_t pages = gh ? gh->getBookPages().size() : 0;
+            const size_t pages = gh ? gh->inventory().getBookPages().size() : 0;
             if (static_cast<size_t>(bookPage(L) + 1) < pages) {
                 ++bookPage(L);
                 fireItemTextReady(L);
@@ -3138,11 +3138,11 @@ void registerQuestLuaAPI(lua_State* L) {
                 // calls it on hide as well as from its close button.
                 {"CloseItemText", [](lua_State* L) -> int {
             if (auto* gh = getGameHandler(L)) {
-                gh->closeItemText();
+                gh->inventory().closeItemText();
                 // The pages go with the book, and so does the place in it -
                 // left behind, the next book opens at whatever page the last
                 // one was left on and shows nothing until it is paged back.
-                gh->clearBook();
+                gh->inventory().clearBook();
             }
             bookPage(L) = 0;
             return 0;
@@ -3285,7 +3285,7 @@ void registerQuestLuaAPI(lua_State* L) {
             for (const auto& q : gh->getQuestLog()) {
                 if (q.questId != id) continue;
                 if (q.sourceItemId == 0) break;
-                const auto* info = gh->getItemInfo(q.sourceItemId);
+                const auto* info = gh->inventory().getItemInfo(q.sourceItemId);
                 if (!info || !info->valid || info->name.empty()) break;
                 lua_pushstring(L, info->name.c_str());
                 return 1;
@@ -3592,14 +3592,14 @@ void registerQuestLuaAPI(lua_State* L) {
                 if (r.itemId == 0) continue;
                 if (++seen != n) continue;
                 gh->ensureItemInfo(r.itemId);
-                const auto* info = gh->getItemInfo(r.itemId);
+                const auto* info = gh->inventory().getItemInfo(r.itemId);
                 lua_pushstring(L, info ? info->name.c_str() : "Reagent");
                 const std::string ricon =
                     info ? gh->getItemIconPath(info->displayInfoId) : std::string();
                 lua_pushstring(L, ricon.empty()
                     ? "Interface\\Icons\\INV_Misc_QuestionMark" : ricon.c_str());
                 lua_pushnumber(L, r.count);
-                lua_pushnumber(L, gh->countItemInBags(r.itemId));
+                lua_pushnumber(L, gh->inventory().items().countItem(r.itemId));
                 return 4;
             }
             return luaReturnNil(L);
@@ -3762,7 +3762,7 @@ void registerQuestLuaAPI(lua_State* L) {
             const uint32_t made = recipe->createdItemId;
             if (made == 0) return luaReturnNil(L);
             gh->ensureItemInfo(made);
-            const auto* info = gh->getItemInfo(made);
+            const auto* info = gh->inventory().getItemInfo(made);
             if (!info || !info->valid) return luaReturnNil(L);
             lua_pushstring(L, game::buildItemLink(made, info->quality, info->name).c_str());
             return 1;
@@ -3785,7 +3785,7 @@ void registerQuestLuaAPI(lua_State* L) {
                 if (r.itemId == 0) continue;
                 if (++seen != n) continue;
                 gh->ensureItemInfo(r.itemId);
-                const auto* info = gh->getItemInfo(r.itemId);
+                const auto* info = gh->inventory().getItemInfo(r.itemId);
                 if (!info || !info->valid) return luaReturnNil(L);
                 lua_pushstring(L,
                     game::buildItemLink(r.itemId, info->quality, info->name).c_str());
@@ -4120,14 +4120,14 @@ void registerQuestLuaAPI(lua_State* L) {
         }},
                 {"GetTrainerGreetingText", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const std::string& g = gh ? gh->getTrainerSpells().greeting
+            const std::string& g = gh ? gh->inventory().getTrainerSpells().greeting
                                       : std::string();
             lua_pushstring(L, g.c_str());
             return 1;
         }},
                 {"IsTradeskillTrainer", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushboolean(L, gh && gh->getTrainerSpells().trainerType == 2);
+            lua_pushboolean(L, gh && gh->inventory().getTrainerSpells().trainerType == 2);
             return 1;
         }},
                 {"BuyTrainerService", [](lua_State* L) -> int {
@@ -4137,11 +4137,11 @@ void registerQuestLuaAPI(lua_State* L) {
             // the one where getting it wrong buys a different spell than the
             // row that was clicked.
             const auto* svc = shownTrainerService(L, gh, i);
-            if (svc) gh->trainSpell(svc->spellId);
+            if (svc) gh->inventory().trainSpell(svc->spellId);
             return 0;
         }},
                 {"CloseTrainer", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->closeTrainer();
+            if (auto* gh = getGameHandler(L)) gh->inventory().closeTrainer();
             return 0;
         }},
                 // Selection and the type filter are the panel's own state; the

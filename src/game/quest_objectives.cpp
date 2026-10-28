@@ -53,11 +53,11 @@ std::vector<QuestObjective> questObjectives(GameHandler& gh,
         // By name; the number stands in while the item query is out, and the
         // answer lands with a QUEST_LOG_UPDATE behind it.
         std::string name;
-        const auto* info = gh.getItemInfo(item.itemId);
+        const auto* info = gh.inventory().getItemInfo(item.itemId);
         if (info && !info->name.empty()) {
             name = info->name;
         } else {
-            gh.queryItemInfo(item.itemId, 0);
+            gh.inventory().queryItemInfo(item.itemId, 0);
             name = "Item #" + std::to_string(item.itemId);
         }
         QuestObjective line;

@@ -294,7 +294,7 @@ void AppearanceComposer::loadEquippedHelm(game::Inventory& inventory) {
 
     const auto& headSlot = inventory.getEquipSlot(game::EquipSlot::HEAD);
     if (headSlot.empty()) return;
-    const auto* info = gameHandler_->getItemInfo(headSlot.item.itemId);
+    const auto* info = gameHandler_->inventory().getItemInfo(headSlot.item.itemId);
     const uint32_t displayId = info && info->valid ? info->displayInfoId
                                                    : headSlot.item.displayInfoId;
     if (displayId == 0) return;
@@ -341,7 +341,7 @@ void AppearanceComposer::loadEquippedShoulders(game::Inventory& inventory) {
 
     const auto& slot = inventory.getEquipSlot(game::EquipSlot::SHOULDERS);
     if (slot.empty()) return;
-    const auto* info = gameHandler_->getItemInfo(slot.item.itemId);
+    const auto* info = gameHandler_->inventory().getItemInfo(slot.item.itemId);
     const uint32_t displayId = info && info->valid ? info->displayInfoId
                                                    : slot.item.displayInfoId;
     if (displayId == 0) return;
@@ -373,7 +373,7 @@ void AppearanceComposer::loadEquippedShoulders(game::Inventory& inventory) {
 
 rendering::SheathSpot AppearanceComposer::sheathSpot(game::EquipSlot slot) const {
     if (!gameHandler_) return rendering::SheathSpot::NONE;
-    const auto& equipped = gameHandler_->getInventory().getEquipSlot(slot);
+    const auto& equipped = gameHandler_->inventory().items().getEquipSlot(slot);
     if (equipped.empty()) return rendering::SheathSpot::NONE;
     switch (weaponAttachment(true, slot, equipped.item.inventoryType)) {
         case kAttachHipWeaponLeft:
@@ -403,7 +403,7 @@ void AppearanceComposer::loadEquippedWeapons() {
     uint32_t charInstanceId = renderer_->getCharacterInstanceId();
     if (charInstanceId == 0) return;
 
-    auto& inventory = gameHandler_->getInventory();
+    auto& inventory = gameHandler_->inventory().items();
 
     loadEquippedHelm(inventory);
     loadEquippedShoulders(inventory);
@@ -642,12 +642,12 @@ void AppearanceComposer::showFishingPole(bool show) {
     const auto isFishingPole = [this](const game::ItemSlot& slot) {
         if (slot.empty()) return false;
         if (slot.item.subclassName == "Fishing Pole") return true;
-        const auto* info = gameHandler_->getItemInfo(slot.item.itemId);
+        const auto* info = gameHandler_->inventory().getItemInfo(slot.item.itemId);
         return info && info->valid && info->itemClass == 2 && info->subClass == 20;
     };
 
     const game::ItemSlot* pole = nullptr;
-    const auto& inventory = gameHandler_->getInventory();
+    const auto& inventory = gameHandler_->inventory().items();
     const auto& mainHand = inventory.getEquipSlot(game::EquipSlot::MAIN_HAND);
     if (isFishingPole(mainHand)) pole = &mainHand;
     for (int i = 0; !pole && i < inventory.getBackpackSize(); ++i) {
@@ -724,7 +724,7 @@ void AppearanceComposer::showRangedWeapon(bool show) {
         return;
     }
 
-    auto& inventory = gameHandler_->getInventory();
+    auto& inventory = gameHandler_->inventory().items();
     const auto& rangedSlot = inventory.getEquipSlot(game::EquipSlot::RANGED);
     if (rangedSlot.empty() || rangedSlot.item.displayInfoId == 0) return;
 

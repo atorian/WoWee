@@ -298,7 +298,7 @@ void CombatHandler::startAutoAttack(uint64_t targetGuid) {
         float dz = owner_.movementInfoRef().z - target->getLatestZ();
         float dist3d = std::sqrt(dx * dx + dy * dy + dz * dz);
         // Use longer range limit when a ranged weapon is equipped
-        const auto& rangedSlot = owner_.getInventory().getEquipSlot(game::EquipSlot::RANGED);
+        const auto& rangedSlot = owner_.inventory().items().getEquipSlot(game::EquipSlot::RANGED);
         bool hasRangedWeapon = !rangedSlot.empty() &&
             (rangedSlot.item.inventoryType == game::InvType::RANGED_BOW ||
              rangedSlot.item.inventoryType == game::InvType::RANGED_GUN ||

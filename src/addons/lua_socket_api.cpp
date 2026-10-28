@@ -55,7 +55,7 @@ const char* socketColorName(uint32_t mask) {
 /// 6, red|yellow, and fits either a red or a yellow socket.
 uint32_t gemColorMask(game::GameHandler* gh, uint32_t gemItemId) {
     if (!gh || gemItemId == 0) return 0;
-    const auto* info = gh->getItemInfo(gemItemId);
+    const auto* info = gh->inventory().getItemInfo(gemItemId);
     if (!info || info->gemProperties == 0) return 0;
 
     auto* am = gh->services().assetManager;
@@ -72,10 +72,10 @@ uint32_t gemColorMask(game::GameHandler* gh, uint32_t gemItemId) {
 
 /// The template of the item whose sockets are on screen.
 const game::ItemQueryResponseData* socketItemInfo(game::GameHandler* gh) {
-    if (!gh || !gh->isSocketingOpen()) return nullptr;
-    const uint32_t itemId = gh->getSocketItemId();
+    if (!gh || !gh->inventory().getSocketSession().open) return nullptr;
+    const uint32_t itemId = gh->inventory().getSocketSession().itemId;
     if (itemId == 0) return nullptr;
-    const auto* info = gh->getItemInfo(itemId);
+    const auto* info = gh->inventory().getItemInfo(itemId);
     return (info && info->valid) ? info : nullptr;
 }
 
@@ -97,7 +97,7 @@ int pushGemInfo(lua_State* L, game::GameHandler* gh, uint32_t gemItemId, int soc
     // are deliberate are indistinguishable from the ones that are a bug.
     auto pushEmpty = [L]() { lua_pushnil(L); lua_pushnil(L); lua_pushnil(L); return 3; };
     if (gemItemId == 0) return pushEmpty();
-    const auto* gem = gh->getItemInfo(gemItemId);
+    const auto* gem = gh->inventory().getItemInfo(gemItemId);
     if (!gem || !gem->valid) {
         // Not queried yet. Ask, and answer nothing this frame - the panel
         // redraws on the next SOCKET_INFO_UPDATE with the name filled in.
@@ -122,7 +122,7 @@ int pushGemInfo(lua_State* L, game::GameHandler* gh, uint32_t gemItemId, int soc
 /// at all only since chat began drawing links.
 int pushGemLink(lua_State* L, game::GameHandler* gh, uint32_t gemItemId) {
     if (!gh || gemItemId == 0) return 0;
-    const auto* gem = gh->getItemInfo(gemItemId);
+    const auto* gem = gh->inventory().getItemInfo(gemItemId);
     if (!gem || !gem->valid) {
         gh->ensureItemInfo(gemItemId);
         return 0;
@@ -135,8 +135,8 @@ int pushGemLink(lua_State* L, game::GameHandler* gh, uint32_t gemItemId) {
 int lua_GetExistingSocketLink(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int index = static_cast<int>(luaL_optnumber(L, 1, 1)) - 1;
-    if (!gh || !gh->isSocketingOpen() || index < 0 || index > 2) return 0;
-    const auto enchants = gh->getItemSocketEnchantIds(gh->getSocketItemGuid());
+    if (!gh || !gh->inventory().getSocketSession().open || index < 0 || index > 2) return 0;
+    const auto enchants = gh->inventory().getItemSocketEnchantIds(gh->inventory().getSocketSession().itemGuid);
     return pushGemLink(L, gh, gh->getEnchantGemItem(enchants[static_cast<size_t>(index)]));
 }
 
@@ -144,7 +144,7 @@ int lua_GetExistingSocketLink(lua_State* L) {
 int lua_GetNewSocketLink(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int index = static_cast<int>(luaL_optnumber(L, 1, 1)) - 1;
-    if (!gh || !gh->isSocketingOpen() || index < 0 || index > 2) return 0;
+    if (!gh || !gh->inventory().getSocketSession().open || index < 0 || index > 2) return 0;
     return pushGemLink(L, gh, gh->getSocketPendingGemItemId(index));
 }
 
@@ -153,7 +153,7 @@ int lua_SocketInventoryItem(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int slotId = static_cast<int>(luaL_optnumber(L, 1, 0));
     if (!gh || slotId < 1 || slotId > 19) return 0;
-    gh->openSocketing(gh->getEquipSlotGuid(slotId - 1));
+    gh->inventory().openSocketing(gh->inventory().getEquipSlotGuid(slotId - 1));
     return 0;
 }
 
@@ -163,7 +163,7 @@ int lua_SocketContainerItem(lua_State* L) {
     const int bag = static_cast<int>(luaL_optnumber(L, 1, 0));
     const int slot = static_cast<int>(luaL_optnumber(L, 2, 0));
     if (!gh) return 0;
-    gh->openSocketing(containerSlotGuid(gh, bag, slot));
+    gh->inventory().openSocketing(containerSlotGuid(gh, bag, slot));
     return 0;
 }
 
@@ -198,10 +198,10 @@ int lua_GetSocketTypes(lua_State* L) {
 int lua_GetExistingSocketInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int index = static_cast<int>(luaL_optnumber(L, 1, 1)) - 1;
-    if (!gh || !gh->isSocketingOpen() || index < 0 || index > 2) {
+    if (!gh || !gh->inventory().getSocketSession().open || index < 0 || index > 2) {
         return pushGemInfo(L, gh, 0, index);
     }
-    const auto enchants = gh->getItemSocketEnchantIds(gh->getSocketItemGuid());
+    const auto enchants = gh->inventory().getItemSocketEnchantIds(gh->inventory().getSocketSession().itemGuid);
     return pushGemInfo(L, gh, gh->getEnchantGemItem(enchants[index]), index);
 }
 
@@ -209,7 +209,7 @@ int lua_GetExistingSocketInfo(lua_State* L) {
 int lua_GetNewSocketInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int index = static_cast<int>(luaL_optnumber(L, 1, 1)) - 1;
-    if (!gh || !gh->isSocketingOpen() || index < 0 || index > 2) {
+    if (!gh || !gh->inventory().getSocketSession().open || index < 0 || index > 2) {
         return pushGemInfo(L, gh, 0, index);
     }
     return pushGemInfo(L, gh, gh->getSocketPendingGemItemId(index), index);
@@ -236,11 +236,11 @@ int lua_GetSocketItemInfo(lua_State* L) {
 int lua_ClickSocketButton(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int index = static_cast<int>(luaL_optnumber(L, 1, 1)) - 1;
-    if (!gh || !gh->isSocketingOpen() || index < 0 || index > 2) return 0;
+    if (!gh || !gh->inventory().getSocketSession().open || index < 0 || index > 2) return 0;
 
     uint8_t bag = 0, slot = 0;
     if (!wowee::ui::frameXmlCursorWireSlot(bag, slot)) {
-        gh->setSocketGem(index, 0, 0);
+        gh->inventory().setSocketGem(index, 0, 0);
         return 0;
     }
 
@@ -250,36 +250,36 @@ int lua_ClickSocketButton(lua_State* L) {
     uint64_t gemGuid = 0;
     if (bag == 0xFF) {
         const int index0 = static_cast<int>(slot) - game::slots::backpackWireSlot(0);
-        gemGuid = gh->getBackpackItemGuid(index0);
+        gemGuid = gh->inventory().getBackpackItemGuid(index0);
     } else {
         for (int b = 0; b < game::Inventory::NUM_BAG_SLOTS; ++b) {
             if (bag != static_cast<uint8_t>(game::slots::wornBagContainer(b))) continue;
-            gemGuid = gh->getBagItemGuid(b, slot);
+            gemGuid = gh->inventory().getBagItemGuid(b, slot);
             break;
         }
     }
     if (gemGuid == 0) return 0;
 
-    const uint32_t gemItemId = gh->getItemEntryByGuid(gemGuid);
+    const uint32_t gemItemId = gh->inventory().getItemEntryByGuid(gemGuid);
     // Only a gem goes in a socket. Without this any item on the cursor could be
     // dropped into one, and the request would be refused by the server with
     // nothing on screen to say why.
-    const auto* gem = gh->getItemInfo(gemItemId);
+    const auto* gem = gh->inventory().getItemInfo(gemItemId);
     if (!gem || gem->gemProperties == 0) return 0;
 
-    if (gh->setSocketGem(index, gemGuid, gemItemId)) {
+    if (gh->inventory().setSocketGem(index, gemGuid, gemItemId)) {
         wowee::ui::frameXmlPutCursorDown();
     }
     return 0;
 }
 
 int lua_AcceptSockets(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->acceptSockets();
+    if (auto* gh = getGameHandler(L)) gh->inventory().acceptSockets();
     return 0;
 }
 
 int lua_CloseSocketInfo(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->closeSocketing();
+    if (auto* gh = getGameHandler(L)) gh->inventory().closeSocketing();
     return 0;
 }
 

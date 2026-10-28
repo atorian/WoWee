@@ -21,12 +21,12 @@ void ItemTooltipRenderer::render(
     InventoryScreen& inventoryScreen,
     pipeline::AssetManager* assetMgr)
 {
-    const auto* info = gameHandler.getItemInfo(itemEntry);
+    const auto* info = gameHandler.inventory().getItemInfo(itemEntry);
     if (!info || !info->valid) return;
 
     auto findComparableEquipped = [&](uint8_t inventoryType) -> const game::ItemSlot* {
         // The same mapping the bags use, from beside the enum that names it.
-        const auto& inv = gameHandler.getInventory();
+        const auto& inv = gameHandler.inventory().items();
         for (game::EquipSlot slot : game::comparableEquipSlots(inventoryType)) {
             const auto& s = inv.getEquipSlot(slot);
             if (!s.empty()) return &s;
@@ -210,7 +210,7 @@ void ItemTooltipRenderer::render(
             }
         }
         ImGui::Spacing();
-        const auto& inv = gameHandler.getInventory();
+        const auto& inv = gameHandler.inventory().items();
         auto setIt = s_setData.find(info->itemSetId);
         if (setIt != s_setData.end()) {
             const SetEntry& se = setIt->second;

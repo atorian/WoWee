@@ -3537,8 +3537,8 @@ static int lua_GetWeaponEnchantInfo(lua_State* L) {
     for (const game::EquipSlot hand : kHands) {
         bool enchanted = false;
         if (gh) {
-            const uint64_t guid = gh->getEquipSlotGuid(static_cast<int>(hand));
-            if (guid != 0) enchanted = gh->getItemEnchantIds(guid).second != 0;
+            const uint64_t guid = gh->inventory().getEquipSlotGuid(static_cast<int>(hand));
+            if (guid != 0) enchanted = gh->inventory().getItemEnchantIds(guid).second != 0;
         }
         lua_pushboolean(L, enchanted ? 1 : 0);   // hasEnchant
         lua_pushnumber(L, 0.0);                  // expiration, not tracked
@@ -5926,7 +5926,7 @@ void registerSystemLuaAPI(lua_State* L) {
             bool consumable = false;
             if (slot < static_cast<int>(bar.size()) &&
                 bar[slot].type == game::ActionBarSlot::ITEM) {
-                const auto* info = gh->getItemInfo(bar[slot].id);
+                const auto* info = gh->inventory().getItemInfo(bar[slot].id);
                 consumable = info && info->valid && info->itemClass == 0;  // Consumable
             }
             lua_pushboolean(L, consumable);
@@ -5940,7 +5940,7 @@ void registerSystemLuaAPI(lua_State* L) {
             bool worn = false;
             if (slot < static_cast<int>(bar.size()) &&
                 bar[slot].type == game::ActionBarSlot::ITEM) {
-                const auto& inv = gh->getInventory();
+                const auto& inv = gh->inventory().items();
                 for (int e = 0; e < game::Inventory::NUM_EQUIP_SLOTS && !worn; ++e) {
                     const auto& s = inv.getEquipSlot(static_cast<game::EquipSlot>(e));
                     worn = !s.empty() && s.item.itemId == bar[slot].id;
@@ -5957,7 +5957,7 @@ void registerSystemLuaAPI(lua_State* L) {
             bool stackable = false;
             if (slot < static_cast<int>(bar.size()) &&
                 bar[slot].type == game::ActionBarSlot::ITEM) {
-                const auto* info = gh->getItemInfo(bar[slot].id);
+                const auto* info = gh->inventory().getItemInfo(bar[slot].id);
                 stackable = info && info->valid && info->maxStack > 1;
             }
             lua_pushboolean(L, stackable);

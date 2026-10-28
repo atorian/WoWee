@@ -614,8 +614,8 @@ void GameScreen::render(game::GameHandler& gameHandler) {
             engine->setWheelSensitivity(settingsPanel_.pendingScrollSpeed);
         }
     }
-    gameHandler.setAutoSellGrey(settingsPanel_.pendingAutoSellGrey);
-    gameHandler.setAutoRepair(settingsPanel_.pendingAutoRepair);
+    gameHandler.inventory().setAutoSellGrey(settingsPanel_.pendingAutoSellGrey);
+    gameHandler.inventory().setAutoRepair(settingsPanel_.pendingAutoRepair);
 
     // Sync chat auto-join settings to GameHandler
     gameHandler.chatAutoJoin.general = chatPanel_.chatAutoJoinGeneral;
@@ -778,7 +778,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     inventoryScreen.setGameHandler(&gameHandler);
 
     // Auto-open bags once when vendor window first opens
-    if (gameHandler.isVendorWindowOpen()) {
+    if (gameHandler.inventory().isVendorWindowOpen()) {
         if (!windowManager_.vendorBagsOpened_) {
             windowManager_.vendorBagsOpened_ = true;
             openBagsForTrading(gameHandler);
@@ -810,14 +810,14 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         }
     }
 
-    if (inventoryScreen.consumeEquipmentDirty() || gameHandler.consumeOnlineEquipmentDirty()) {
-        updateCharacterGeosets(gameHandler.getInventory());
-        updateCharacterTextures(gameHandler.getInventory());
+    if (inventoryScreen.consumeEquipmentDirty() || gameHandler.inventory().consumeOnlineEquipmentDirty()) {
+        updateCharacterGeosets(gameHandler.inventory().items());
+        updateCharacterTextures(gameHandler.inventory().items());
         if (appearanceComposer_) appearanceComposer_->loadEquippedWeapons();
         // Update the weapon type for animation selection
         if (services_.animationController) {
-            const auto& mh = gameHandler.getInventory().getEquipSlot(game::EquipSlot::MAIN_HAND);
-            const auto& oh = gameHandler.getInventory().getEquipSlot(game::EquipSlot::OFF_HAND);
+            const auto& mh = gameHandler.inventory().items().getEquipSlot(game::EquipSlot::MAIN_HAND);
+            const auto& oh = gameHandler.inventory().items().getEquipSlot(game::EquipSlot::OFF_HAND);
             if (mh.empty()) {
                 if (auto* ac = services_.animationController) ac->setEquippedWeaponType(0, false);
             } else {
@@ -833,7 +833,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                 if (auto* ac = services_.animationController) ac->setEquippedWeaponType(mh.item.inventoryType, is2HLoose, isFist, isDagger, hasOffHand, hasShield, offHandIsFist, offHandIsDagger);
             }
             // Detect ranged weapon type from RANGED slot
-            const auto& rangedSlot = gameHandler.getInventory().getEquipSlot(game::EquipSlot::RANGED);
+            const auto& rangedSlot = gameHandler.inventory().items().getEquipSlot(game::EquipSlot::RANGED);
             if (rangedSlot.empty()) {
                 if (auto* ac = services_.animationController) ac->setEquippedRangedType(rendering::RangedWeaponType::NONE);
             } else if (rangedSlot.item.inventoryType == game::InvType::RANGED_BOW) {
@@ -1506,11 +1506,11 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
             st.casting               = gameHandler.isCasting();
             st.lootOpen              = loot::orNoLoot(services_.loot).isLootWindowOpen();
             st.gossipOpen            = gameHandler.isGossipWindowOpen();
-            st.vendorOpen            = gameHandler.isVendorWindowOpen();
+            st.vendorOpen            = gameHandler.inventory().isVendorWindowOpen();
             st.barberShopOpen        = gameHandler.isBarberShopOpen();
-            st.bankOpen              = gameHandler.isBankOpen();
+            st.bankOpen              = gameHandler.inventory().isBankOpen();
             st.guildBankOpen         = guild_bank::orNoGuildBank(services_.guildBank).isGuildBankOpen();
-            st.trainerOpen           = gameHandler.isTrainerWindowOpen();
+            st.trainerOpen           = gameHandler.inventory().isTrainerWindowOpen();
             st.mailboxOpen           = mail::orNoMailbox(services_.mail).isMailboxOpen();
             st.auctionHouseOpen      = auction::orNoAuctionHouse(services_.auctionHouse).isAuctionHouseOpen();
             st.questDetailsOpen      = gameHandler.isQuestDetailsOpen();
@@ -1541,15 +1541,15 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 case EscapeAction::CloseGossip:            gameHandler.closeGossip(); break;
                 case EscapeAction::ReturnHeldItem:
                     if (inventoryScreen.isHoldingItem())
-                        inventoryScreen.returnHeldItem(gameHandler.getInventory());
+                        inventoryScreen.returnHeldItem(gameHandler.inventory().items());
                     else
                         frameXmlPutCursorDown();
                     break;
                 case EscapeAction::CloseVendor:            gameHandler.closeVendor(); break;
                 case EscapeAction::CloseBarberShop:        gameHandler.closeBarberShop(); break;
-                case EscapeAction::CloseBank:              gameHandler.closeBank(); break;
+                case EscapeAction::CloseBank:              gameHandler.inventory().closeBank(); break;
                 case EscapeAction::CloseGuildBank:         guild_bank::orNoGuildBank(services_.guildBank).closeGuildBank(); break;
-                case EscapeAction::CloseTrainer:           gameHandler.closeTrainer(); break;
+                case EscapeAction::CloseTrainer:           gameHandler.inventory().closeTrainer(); break;
                 case EscapeAction::CloseMailbox:           mail::orNoMailbox(services_.mail).closeMailbox(); break;
                 case EscapeAction::CloseAuctionHouse:      auction::orNoAuctionHouse(services_.auctionHouse).closeAuctionHouse(); break;
                 case EscapeAction::DeclineQuest:           gameHandler.declineQuest(); break;
@@ -1916,8 +1916,8 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 // An item waiting for a unit takes this click instead of it
                 // selecting anyone: "right-click the treat, then click the dog"
                 // is the whole of what the cursor is asking for.
-                if (closestGuid != 0 && gameHandler.isAwaitingUnitTarget()) {
-                    gameHandler.completeItemUseOnUnit(closestGuid);
+                if (closestGuid != 0 && gameHandler.inventory().isAwaitingUnitTarget()) {
+                    gameHandler.inventory().completeItemUseOnUnit(closestGuid);
                 } else if (closestGuid != 0) {
                     // A game object is used, not targeted.
                     //

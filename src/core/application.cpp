@@ -4101,7 +4101,7 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
         // combat has already started, and pre-WotLK servers briefly send
         // ATTACKSTOP while the client retains attack intent for a retry.
         const bool attackWeaponNeeded = autoAttacking || gameHandler->hasAutoAttackIntent();
-        const auto& inventory = gameHandler->getInventory();
+        const auto& inventory = gameHandler->inventory().items();
         const auto& mainHand = inventory.getEquipSlot(game::EquipSlot::MAIN_HAND);
         const auto& offHand = inventory.getEquipSlot(game::EquipSlot::OFF_HAND);
         const auto& ranged = inventory.getEquipSlot(game::EquipSlot::RANGED);
@@ -5041,7 +5041,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                             {
                                 std::array<uint32_t, 19> displayIds{};
                                 std::array<uint8_t, 19> invTypes{};
-                                if (gameHandler->getOtherPlayerEquipment(
+                                if (gameHandler->inventory().resolveOtherPlayerEquipment(
                                         self->guid, displayIds, invTypes)) {
                                     for (size_t slot = 0; slot < displayIds.size(); ++slot) {
                                         if (displayIds[slot] == 0) continue;
@@ -5187,7 +5187,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                             std::vector<game::EquipmentItem> worn;
                             std::array<uint32_t, 19> displayIds{};
                             std::array<uint8_t, 19> invTypes{};
-                            if (gameHandler->getOtherPlayerEquipment(result->guid, displayIds,
+                            if (gameHandler->inventory().resolveOtherPlayerEquipment(result->guid, displayIds,
                                                                      invTypes)) {
                                 for (size_t slot = 0; slot < displayIds.size(); ++slot) {
                                     if (displayIds[slot] == 0) continue;
@@ -5321,7 +5321,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                         std::vector<game::EquipmentItem> worn;
                         std::array<uint32_t, 19> displayIds{};
                         std::array<uint8_t, 19> invTypes{};
-                        if (gameHandler->getOtherPlayerEquipment(face.guid, displayIds,
+                        if (gameHandler->inventory().resolveOtherPlayerEquipment(face.guid, displayIds,
                                                                  invTypes)) {
                             for (size_t slot = 0; slot < displayIds.size(); ++slot) {
                                 if (displayIds[slot] == 0) continue;
@@ -5571,7 +5571,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                     !engine->mouseOverFrameXml()) {
                     const uint32_t carried = session()->interfaceState().cursor.itemId();
                     if (carried != 0 && gameHandler) {
-                        const auto* info = gameHandler->getItemInfo(carried);
+                        const auto* info = gameHandler->inventory().getItemInfo(carried);
                         const std::string name = info ? info->name : std::string();
                         const uint32_t quality = info ? info->quality : 0u;
                         gameHandler->fireAddonEvent(
@@ -6208,7 +6208,7 @@ void Application::refreshPlayerCharacterModel() {
     // Force equipment geosets/textures to be re-composited onto the fresh model
     // next frame - the respawn only builds the base body, and equipment isn't
     // "dirty" (nothing was equipped), so without this the model loses its armor.
-    if (gameHandler) gameHandler->resetEquipmentDirtyTracking();
+    if (gameHandler) gameHandler->inventory().resetEquipmentDirtyTracking();
 }
 
 void Application::buildFactionHostilityMap(uint8_t playerRace) {

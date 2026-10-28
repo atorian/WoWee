@@ -559,7 +559,7 @@ void GameScreen::renderMinimapIndicators(game::GameHandler& gameHandler, float c
 
     // Low durability warning - shown when any equipped item has < 20% durability
     if (gameHandler.getState() == game::WorldState::IN_WORLD) {
-        const auto& inv = gameHandler.getInventory();
+        const auto& inv = gameHandler.inventory().items();
         float lowestDurPct = 1.0f;
         for (int i = 0; i < game::Inventory::NUM_EQUIP_SLOTS; ++i) {
             const auto& slot = inv.getEquipSlot(static_cast<game::EquipSlot>(i));

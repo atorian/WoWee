@@ -238,7 +238,7 @@ bool WardenHandler::beginSession(const std::string& host, uint16_t port, uint32_
                         if (auto* feed = owner_.services().titlesFeed)
                             feed->onKnownTitles(update.operation, update.bits);
                     }, [this](uint64_t copper) {
-                        owner_.applyServerMoney(copper);
+                        owner_.inventory().applyServerMoney(copper);
                     }, [this](const std::vector<EzWowPatch>& patches) {
                         owner_.notifyServerPatchManifest(patches);
                     }});

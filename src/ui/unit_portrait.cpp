@@ -60,7 +60,7 @@ void UnitPortrait::update(game::GameHandler& gameHandler,
     {
         std::array<uint32_t, 19> displayIds{};
         std::array<uint8_t, 19> invTypes{};
-        if (gameHandler.getOtherPlayerEquipment(self->guid, displayIds, invTypes)) {
+        if (gameHandler.inventory().resolveOtherPlayerEquipment(self->guid, displayIds, invTypes)) {
             for (size_t slot = 0; slot < displayIds.size(); ++slot) {
                 if (displayIds[slot] == 0) continue;
                 worn.push_back({.displayModel = displayIds[slot],

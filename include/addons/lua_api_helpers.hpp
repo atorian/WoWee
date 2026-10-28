@@ -356,8 +356,8 @@ inline uint64_t resolveUnitGuid(game::GameHandler* gh, const std::string& uid) {
             return gh->getQuestDetails().npcGuid;
         if (gh->getCurrentGossip().npcGuid != 0) return gh->getCurrentGossip().npcGuid;
         if (gh->getQuestDetails().npcGuid != 0)  return gh->getQuestDetails().npcGuid;
-        if (gh->getVendorGuid() != 0)            return gh->getVendorGuid();
-        if (gh->getBankerGuid() != 0)            return gh->getBankerGuid();
+        if (gh->inventory().getVendorGuid() != 0) return gh->inventory().getVendorGuid();
+        if (gh->inventory().getBankerGuid() != 0) return gh->inventory().getBankerGuid();
         return gh->getTargetGuid();
     }
     // Compound unit IDs: targettarget, focustarget, pettarget, mouseovertarget
@@ -455,7 +455,7 @@ inline QuestSpecialItem questSpecialItemAt(game::GameHandler* gh, int questIndex
     const uint32_t itemId = ql[questIndex - 1].sourceItemId;
     if (itemId == 0) return found;
 
-    const auto& inv = gh->getInventory();
+    const auto& inv = gh->inventory().items();
     for (int i = 0; i < inv.getBackpackSize(); ++i) {
         const auto& slot = inv.getBackpackSlot(i);
         if (!slot.empty() && slot.item.itemId == itemId) {
@@ -554,8 +554,8 @@ inline uint8_t unitRaceOf(game::GameHandler* gh, const std::string& lowerUid) {
 // than doing nothing.
 inline bool completedItemTarget(lua_State* L, uint64_t targetGuid) {
     auto* gh = getGameHandler(L);
-    if (!gh || !gh->isAwaitingItemTarget()) return false;
-    if (targetGuid != 0) gh->completeItemUseOnItem(targetGuid);
+    if (!gh || !gh->inventory().isAwaitingItemTarget()) return false;
+    if (targetGuid != 0) gh->inventory().completeItemUseOnItem(targetGuid);
     return true;
 }
 
@@ -581,9 +581,9 @@ inline bool& repairCursorUp(lua_State* L) {
 /// otherwise try to repair against a vendor that is no longer there.
 inline bool repairedHeldItem(lua_State* L, game::GameHandler* gh, uint64_t itemGuid) {
     if (!gh || !repairCursorUp(L) || !itemGuid) return false;
-    const uint64_t vendor = gh->getVendorGuid();
-    if (!vendor || !gh->isVendorWindowOpen()) return false;
-    gh->repairItem(vendor, itemGuid);
+    const uint64_t vendor = gh->inventory().getVendorGuid();
+    if (!vendor || !gh->inventory().isVendorWindowOpen()) return false;
+    gh->inventory().repairItem(vendor, itemGuid);
     return true;
 }
 
@@ -748,12 +748,12 @@ inline uint32_t spellIdForCall(lua_State* L, game::GameHandler* gh) {
 
 inline uint64_t containerSlotGuid(game::GameHandler* gh, int bag, int slot) {
     if (!gh || slot < 1) return 0;
-    if (bag == 0) return gh->getBackpackItemGuid(slot - 1);
-    if (bag >= 1 && bag <= 4) return gh->getBagItemGuid(bag - 1, slot - 1);
+    if (bag == 0) return gh->inventory().getBackpackItemGuid(slot - 1);
+    if (bag >= 1 && bag <= 4) return gh->inventory().getBagItemGuid(bag - 1, slot - 1);
     // The keyring and the bank bags keep their guid on the slot rather than in
     // a side table, so these read it from the inventory directly.
     if (bag == kKeyringContainer || bag == kBankContainer || isBankBagContainer(bag)) {
-        const auto* s = containerItemSlot(gh->getInventory(), bag, slot);
+        const auto* s = containerItemSlot(gh->inventory().items(), bag, slot);
         return s ? s->item.guid : 0;
     }
     return 0;
@@ -773,7 +773,7 @@ inline uint64_t containerSlotGuid(game::GameHandler* gh, int bag, int slot) {
 inline bool itemUseCooldown(game::GameHandler* gh, uint32_t itemId,
                             double& start, double& duration) {
     if (!gh || itemId == 0) return false;
-    const auto* info = gh->getItemInfo(itemId);
+    const auto* info = gh->inventory().getItemInfo(itemId);
     if (!info || !info->valid) return false;
     for (const auto& sp : info->spells) {
         if (sp.spellId == 0 || (sp.spellTrigger != 0 && sp.spellTrigger != 5)) continue;

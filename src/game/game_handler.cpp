@@ -434,7 +434,7 @@ bool GameHandler::questWantsItem(uint32_t itemId) const {
 ActionCooldown GameHandler::itemCooldown(uint32_t itemId) const {
     // An item's cooldown is that of the spell it casts when used - a potion,
     // a trinket. SMSG_ITEM_COOLDOWN keeps it under that spell.
-    const auto* info = getItemInfo(itemId);
+    const auto* info = inventoryHandler_->getItemInfo(itemId);
     if (!info || !info->valid) return {};
     for (const auto& spell : info->spells) {
         if (spell.spellId == 0) continue;
@@ -447,7 +447,7 @@ ActionCooldown GameHandler::itemCooldown(uint32_t itemId) const {
 
 void GameHandler::sortBags() {
     if (!sortSwapQueue_.empty()) return;   // one sort at a time
-    auto& inv = getInventory();
+    auto& inv = inventoryHandler_->items();
     // Pour partial stacks together first, so the sort places one stack of
     // twenty rather than two of ten. Merging both plans and applies, so the
     // swaps below are computed from the merged layout.
@@ -463,28 +463,28 @@ void GameHandler::sortBags() {
     // forced a rebuild, which is most of what "sorting does nothing" looked
     // like. The moves queued below no longer fire it, having stopped touching
     // the model at all.
-    notifyBagsChanged();
+    inventoryHandler_->fireBagUpdates();
     for (auto& m : merges) sortSwapQueue_.push_back(m);
     for (auto& s : swaps)  sortSwapQueue_.push_back(s);
 }
 
 void GameHandler::sortBank(int mainSlotCount) {
     if (!sortSwapQueue_.empty()) return;   // one sort at a time
-    auto& inv = getInventory();
+    auto& inv = inventoryHandler_->items();
     auto merges = inv.mergeBankPartialStacks(mainSlotCount);
     auto swaps = inv.computeBankSortSwaps(mainSlotCount);
     inv.sortBank(mainSlotCount);
-    notifyBagsChanged();
+    inventoryHandler_->fireBagUpdates();
     for (auto& m : merges) sortSwapQueue_.push_back(m);
     for (auto& s : swaps)  sortSwapQueue_.push_back(s);
 }
 
 void GameHandler::sortBankBag(int bagIndex) {
     if (!sortSwapQueue_.empty()) return;   // one sort at a time
-    auto& inv = getInventory();
+    auto& inv = inventoryHandler_->items();
     auto swaps = inv.computeBankBagSortSwaps(bagIndex);
     inv.sortBankBag(bagIndex);
-    notifyBagsChanged();
+    inventoryHandler_->fireBagUpdates();
     for (auto& s : swaps) sortSwapQueue_.push_back(s);
 }
 
@@ -503,7 +503,7 @@ void GameHandler::updateNetworking() {
         // permuted that layout a second time - and a merge, which the server
         // answers by combining two stacks, would have been applied here as a
         // swap of the two slots. See swapContainerItems.
-        swapContainerItems(op.srcBag, op.srcSlot, op.dstBag, op.dstSlot, false);
+        inventoryHandler_->swapContainerItems(op.srcBag, op.srcSlot, op.dstBag, op.dstSlot, false);
     }
 
     // Reset per-tick monster-move budget tracking (Classic/Turtle flood protection).
@@ -1031,7 +1031,7 @@ void GameHandler::updateGame(float deltaTime) {
                         "or regards you as Unfriendly or worse");
             pendingNpcHello_.guid = 0;
         }
-        closeIfTooFar(isVendorWindowOpen(), getVendorItems().vendorGuid, [this]{ closeVendor(); }, "Vendor");
+        closeIfTooFar(inventoryHandler_->isVendorWindowOpen(), inventoryHandler_->getVendorItems().vendorGuid, [this]{ closeVendor(); }, "Vendor");
         closeIfTooFar(isGossipWindowOpen(), getCurrentGossip().npcGuid, [this]{ closeGossip(); }, "Gossip");
         // The movement handler's guid, not a copy of it: the one this class
         // kept was never assigned, so this asked about guid 0, found no NPC and
@@ -1040,7 +1040,7 @@ void GameHandler::updateGame(float deltaTime) {
         closeIfTooFar(isTaxiWindowOpen(),
                       movementHandler_->getTaxiNpcGuid(),
                       [this]{ closeTaxi(); }, "Taxi window");
-        closeIfTooFar(isTrainerWindowOpen(), getTrainerSpells().trainerGuid, [this]{ closeTrainer(); }, "Trainer");
+        closeIfTooFar(inventoryHandler_->isTrainerWindowOpen(), inventoryHandler_->getTrainerSpells().trainerGuid, [this]{ inventoryHandler_->closeTrainer(); }, "Trainer");
 
         updateEntityInterpolation(deltaTime);
 
@@ -1061,10 +1061,6 @@ uint32_t GameHandler::killXp(uint32_t playerLevel, uint32_t victimLevel) {
 
 void GameHandler::handleXpGain(network::Packet& packet) {
     combatHandler_->handleXpGain(packet);
-}
-
-void GameHandler::addMoneyCopper(uint32_t amount) {
-    inventoryHandler_->addMoneyCopper(amount);
 }
 
 void GameHandler::addSystemChatMessage(const std::string& message) {
@@ -1198,10 +1194,6 @@ void GameHandler::extractExploredZoneFields(const FlatFieldMap& fields) {
 
 std::string GameHandler::getCharacterConfigDir() {
     return core::getConfigRoot() + "/characters";
-}
-
-uint32_t GameHandler::countItemInBags(uint32_t itemId) const {
-    return getInventory().countItem(itemId);
 }
 
 std::vector<GameHandler::CraftRecipe> GameHandler::getCraftingRecipes() const {
@@ -1854,37 +1846,8 @@ void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
 // Bank System
 // ============================================================
 
-void GameHandler::openBank(uint64_t guid) {
-    inventoryHandler_->openBank(guid);
-}
-
-void GameHandler::closeBank() {
-    inventoryHandler_->closeBank();
-}
-
-void GameHandler::buyBankSlot() {
-    inventoryHandler_->buyBankSlot();
-}
-
 uint32_t GameHandler::getBankBagSlotPrice(int slotIndex) const {
     return InventoryHandler::getBankBagSlotPrice(slotIndex);
-}
-
-void GameHandler::depositItem(uint8_t srcBag, uint8_t srcSlot) {
-    inventoryHandler_->depositItem(srcBag, srcSlot);
-}
-
-void GameHandler::withdrawItem(uint8_t srcBag, uint8_t srcSlot) {
-    inventoryHandler_->withdrawItem(srcBag, srcSlot);
-}
-
-// ---------------------------------------------------------------------------
-// Item text (SMSG_ITEM_TEXT_QUERY_RESPONSE)
-//   uint64 itemGuid + uint8 isEmpty + string text (when !isEmpty)
-// ---------------------------------------------------------------------------
-
-void GameHandler::queryItemText(uint64_t itemGuid) {
-    inventoryHandler_->queryItemText(itemGuid);
 }
 
 // ---------------------------------------------------------------------------

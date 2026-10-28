@@ -128,8 +128,8 @@ TEST_CASE("the next character holds nothing the last one held", "[inventory][har
     h.pump();
     REQUIRE(inventory.getEquipSlotGuid(static_cast<int>(wowee::game::EquipSlot::MAIN_HAND)) == kSword);
     REQUIRE_FALSE(inventory.items().getBackpackSlot(0).empty());
-    REQUIRE(h.game().getMoneyCopper() == 12345);
-    REQUIRE(h.game().getTempEnchantRemainingMs(0) > 0);
+    REQUIRE(h.game().inventory().moneyCopper() == 12345);
+    REQUIRE(h.game().inventory().getTempEnchantRemainingMs(0) > 0);
 
     h.relogAs(bob);
 
@@ -138,10 +138,10 @@ TEST_CASE("the next character holds nothing the last one held", "[inventory][har
     CHECK(inventory.items().getBackpackSlot(0).empty());
     CHECK(inventory.getEquipSlotGuid(static_cast<int>(wowee::game::EquipSlot::MAIN_HAND)) == 0);
     CHECK_FALSE(inventory.holdsItemObject(kSword));
-    CHECK(h.game().getMoneyCopper() == 0);
+    CHECK(h.game().inventory().moneyCopper() == 0);
     // The poison was on Alice's sword. It stayed on the list the weapon
     // enchant timer reads, and Bob's main hand showed it running down.
-    CHECK(h.game().getTempEnchantRemainingMs(0) == 0);
+    CHECK(h.game().inventory().getTempEnchantRemainingMs(0) == 0);
 }
 
 TEST_CASE("a book's pages are followed to the last, and the reader is told of each",
@@ -171,8 +171,8 @@ TEST_CASE("a book's pages are followed to the last, and the reader is told of ea
     REQUIRE(pages.size() == 2);
     CHECK(pages[0].text == "Once upon");
     CHECK(pages[1].text == "a time.");
-    CHECK(h.game().getBookTitle() == "The Old Tome");
-    CHECK(h.game().getBookMaterial() == 2);
+    CHECK(h.game().inventory().getBookTitle() == "The Old Tome");
+    CHECK(h.game().inventory().getBookMaterial() == 2);
 
     // A chain that loops back is not asked for again.
     h.receive(Opcode::SMSG_PAGE_TEXT_QUERY_RESPONSE, Body().u32(101).cstr("a time.").u32(100));

@@ -383,7 +383,6 @@ public:
     bool isItemTextOpen() const { return itemTextOpen_; }
     const std::string& getItemText() const { return itemText_; }
     void closeItemText();
-    void queryItemText(uint64_t itemGuid);
 
     /// Money looted, into the purse, and shown as the change it made.
     void creditLootedMoney(uint32_t copper);
@@ -414,7 +413,6 @@ public:
         }
         return 0;
     }
-    bool supportsEquipmentSets() const;
     void useEquipmentSet(uint32_t setId);
     void saveEquipmentSet(const std::string& name, const std::string& iconName = "INV_Misc_QuestionMark",
                           uint64_t existingGuid = 0, uint32_t setIndex = 0xFFFFFFFF);
@@ -429,7 +427,6 @@ public:
         // identity, not the item's current row in the buyback UI.
         uint32_t wireSlot = 0;
     };
-    void openVendor(uint64_t npcGuid);
     void closeVendor();
     // Drop the session-persistent buyback mirror (fresh character world entry).
     void clearBuybackState();
@@ -455,9 +452,8 @@ public:
     void autoEquipItemBySlot(int backpackIndex, bool confirmed = false);
     void autoEquipItemInBag(int bagIndex, int slotIndex, bool confirmed = false);
 
-    /// Whether equipping what is in a slot would bind it - ItemDef carries
-    /// the rule; these two just find the item.
-    bool equipWouldBindFromBackpack(int backpackIndex) const;
+    /// Whether equipping what is in a bag slot would bind it - ItemDef carries
+    /// the rule; this just finds the item.
     bool equipWouldBindFromBag(int bagIndex, int slotIndex) const;
 
     /// The equip held back waiting for an answer. One at a time - FrameXML's
@@ -500,8 +496,6 @@ public:
     // ---- Item-targeted item use (sharpening stones, weightstones, weapon oils) ----
     /// True while a used item is waiting for the player to pick the item it applies to.
     bool isAwaitingItemTarget() const;
-    /// Entry of the item awaiting a target (0 if none) - drives the targeting cursor.
-    uint32_t getPendingItemTargetSourceItemId() const;
     void cancelItemTargeting();
 
     // ---- Unit-targeted item use (bandages, treats, quest items) ----
@@ -511,8 +505,6 @@ public:
     /// in WoW: the cursor changes and the next click on someone chooses them.
     /// Without this the item simply did nothing.
     bool isAwaitingUnitTarget() const;
-    /// Entry of the item awaiting a unit (0 if none) - drives the cursor.
-    uint32_t getPendingUnitTargetSourceItemId() const;
     void cancelUnitTargeting();
     /// Sends the parked CMSG_USE_ITEM against the unit the player clicked.
     void completeItemUseOnUnit(uint64_t targetUnitGuid);
@@ -528,7 +520,6 @@ public:
     void readItemBySlot(int backpackIndex);
     void readItemInBag(int bagIndex, int slotIndex);
     void destroyItem(uint8_t bag, uint8_t slot, uint8_t count = 1);
-    void splitItem(uint8_t srcBag, uint8_t srcSlot, uint8_t count);
     /// Split `count` off a stack into a named slot.
     ///
     /// The interface's SplitContainerItem does not choose a destination: it puts
@@ -614,7 +605,6 @@ public:
 
     // ---- Methods moved from GameHandler ----
     uint32_t getTempEnchantRemainingMs(uint32_t slot) const;
-    void addMoneyCopper(uint32_t amount);
 
     // ---- Inventory field / rebuild methods (moved from GameHandler) ----
     void queryItemInfo(uint32_t entry, uint64_t guid);

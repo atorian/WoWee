@@ -78,7 +78,7 @@ TEST_CASE("money the server confirms is taken, counted and announced once", "[lo
     GameHarness h;
     h.enterWorld();
     MoneyAnnounced money(h);
-    const uint64_t before = h.game().getMoneyCopper();
+    const uint64_t before = h.game().inventory().moneyCopper();
 
     h.receive(Opcode::SMSG_LOOT_RESPONSE, moneyLoot(kCorpse, 1234));
     h.pump();
@@ -90,7 +90,7 @@ TEST_CASE("money the server confirms is taken, counted and announced once", "[lo
     REQUIRE(money.seen.size() == 1);
     CHECK(money.seen[0].copper == 1234);
     CHECK(money.seen[0].lootGuid == kCorpse);
-    CHECK(h.game().getMoneyCopper() == before + 1234);
+    CHECK(h.game().inventory().moneyCopper() == before + 1234);
     CHECK(h.addonEvents("PLAYER_MONEY").size() == 1);
 
     // The fallback for a server that never confirms must not say it again.

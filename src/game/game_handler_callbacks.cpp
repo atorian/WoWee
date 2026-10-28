@@ -983,124 +983,11 @@ void GameHandler::sendRequestVehicleExit() {
     vehicleId_ = 0;  // Optimistically clear; server will confirm via SMSG_PLAYER_VEHICLE_DATA(0)
 }
 
-const std::vector<GameHandler::EquipmentSetInfo>& GameHandler::getEquipmentSets() const {
-    return inventoryHandler_->getEquipmentSets();
-}
-
-const std::array<uint64_t, 19>* GameHandler::getEquipmentSetItems(uint32_t setId) const {
-    return inventoryHandler_->getEquipmentSetItems(setId);
-}
-
-uint32_t GameHandler::getEquipmentSetIgnoreMask(uint32_t setId) const {
-    return inventoryHandler_->getEquipmentSetIgnoreMask(setId);
-}
-
-bool GameHandler::supportsEquipmentSets() const {
-    return inventoryHandler_->supportsEquipmentSets();
-}
-
-void GameHandler::useEquipmentSet(uint32_t setId) {
-    inventoryHandler_->useEquipmentSet(setId);
-}
-
-void GameHandler::saveEquipmentSet(const std::string& name, const std::string& iconName,
-                                    uint64_t existingGuid, uint32_t setIndex) {
-    inventoryHandler_->saveEquipmentSet(name, iconName, existingGuid, setIndex);
-}
-
-void GameHandler::deleteEquipmentSet(uint64_t setGuid) {
-    inventoryHandler_->deleteEquipmentSet(setGuid);
-}
-
 // --- Inventory state delegation (canonical state lives in InventoryHandler) ---
 
-// Item text
-bool GameHandler::isItemTextOpen() const {
-    return inventoryHandler_->isItemTextOpen();
-}
-const std::string& GameHandler::getItemText() const {
-    return inventoryHandler_->getItemText();
-}
-void GameHandler::closeItemText() {
-    inventoryHandler_->closeItemText();
-}
-
-void GameHandler::setAutoSellGrey(bool enabled) {
-    inventoryHandler_->setAutoSellGrey(enabled);
-}
-bool GameHandler::isAutoSellGrey() const {
-    return inventoryHandler_->isAutoSellGrey();
-}
-void GameHandler::setAutoRepair(bool enabled) {
-    inventoryHandler_->setAutoRepair(enabled);
-}
-bool GameHandler::isAutoRepair() const {
-    return inventoryHandler_->isAutoRepair();
-}
-// Vendor
-bool GameHandler::isVendorWindowOpen() const {
-    return inventoryHandler_->isVendorWindowOpen();
-}
-const ListInventoryData& GameHandler::getVendorItems() const {
-    return inventoryHandler_->getVendorItems();
-}
-void GameHandler::setVendorCanRepair(bool v) {
-    inventoryHandler_->setVendorCanRepair(v);
-}
-const std::deque<GameHandler::BuybackItem>& GameHandler::getBuybackItems() const {
-    // Layout-identical structs (InventoryHandler::BuybackItem == GameHandler::BuybackItem)
-    return reinterpret_cast<const std::deque<BuybackItem>&>(inventoryHandler_->getBuybackItems());
-}
-uint64_t GameHandler::getVendorGuid() const {
-    return inventoryHandler_->getVendorGuid();
-}
-
-// Mail
-bool GameHandler::isSocketingOpen() const {
-    return inventoryHandler_->getSocketSession().open;
-}
-
-uint64_t GameHandler::getSocketItemGuid() const {
-    return inventoryHandler_->getSocketSession().itemGuid;
-}
-
-uint32_t GameHandler::getSocketItemId() const {
-    return inventoryHandler_->getSocketSession().itemId;
-}
 uint32_t GameHandler::getSocketPendingGemItemId(int index) const {
     if (index < 0 || index > 2) return 0;
     return inventoryHandler_->getSocketSession().newGemItemId[index];
-}
-
-void GameHandler::openSocketing(uint64_t itemGuid) {
-    inventoryHandler_->openSocketing(itemGuid);
-}
-
-void GameHandler::closeSocketing() {
-    inventoryHandler_->closeSocketing();
-}
-
-bool GameHandler::setSocketGem(int index, uint64_t gemGuid, uint32_t gemItemId) {
-    return inventoryHandler_->setSocketGem(index, gemGuid, gemItemId);
-}
-
-void GameHandler::acceptSockets() {
-    inventoryHandler_->acceptSockets();
-}
-
-
-// Bank
-bool GameHandler::isBankOpen() const {
-    return inventoryHandler_->isBankOpen();
-}
-uint64_t GameHandler::getBankerGuid() const {
-    return inventoryHandler_->getBankerGuid();
-}
-int GameHandler::getEffectiveBankSlots() const {
-    return inventoryHandler_->getEffectiveBankSlots();
-}
-int GameHandler::getEffectiveBankBagSlots() const {
-    return inventoryHandler_->getEffectiveBankBagSlots();
 }
 
 contacts::IContactsServerFeed* GameHandler::contactsFeed() {
@@ -1230,18 +1117,6 @@ const GroupListData& GameHandler::party() const {
 
 bool GameHandler::inGroup() const {
     return services_.group && services_.group->isInGroup();
-}
-
-// Trainer
-bool GameHandler::isTrainerWindowOpen() const {
-    return inventoryHandler_->isTrainerWindowOpen();
-}
-const TrainerListData& GameHandler::getTrainerSpells() const {
-    return inventoryHandler_->getTrainerSpells();
-}
-const std::vector<GameHandler::TrainerTab>& GameHandler::getTrainerTabs() const {
-    // Layout-identical structs (InventoryHandler::TrainerTab == GameHandler::TrainerTab)
-    return reinterpret_cast<const std::vector<TrainerTab>&>(inventoryHandler_->getTrainerTabs());
 }
 
 void GameHandler::sendMinimapPing(float wowX, float wowY) {
@@ -1657,25 +1532,9 @@ std::string GameHandler::getCachedCreatureName(uint32_t entry) const {
 // Item Query (forwarded to InventoryHandler)
 // ============================================================
 
-void GameHandler::queryItemInfo(uint32_t entry, uint64_t guid) {
-    inventoryHandler_->queryItemInfo(entry, guid);
-}
-
-uint64_t GameHandler::resolveOnlineItemGuid(uint32_t itemId) const {
-    return inventoryHandler_->resolveOnlineItemGuid(itemId);
-}
-
-void GameHandler::detectInventorySlotBases(const FlatFieldMap& fields) {
-    inventoryHandler_->detectInventorySlotBases(fields);
-}
-
-bool GameHandler::applyInventoryFields(const FlatFieldMap& fields) {
-    return inventoryHandler_->applyInventoryFields(fields);
-}
-
 uint64_t GameHandler::getInteractNpcGuid() const {
     if (const uint64_t peer = trade::orNoTrade(services_.trade).getTradePeerGuid()) return peer;
-    if (const uint64_t vendor = getVendorGuid()) return vendor;
+    if (const uint64_t vendor = inventoryHandler_->getVendorGuid()) return vendor;
     // The trainer, which the list above this function has always named and
     // this function never asked.
     //
@@ -1687,8 +1546,8 @@ uint64_t GameHandler::getInteractNpcGuid() const {
     //
     // Above the gossip for the same reason the vendor is: a trainer is a window
     // opened from a gossip and covering it.
-    if (isTrainerWindowOpen()) {
-        if (const uint64_t trainer = getTrainerSpells().trainerGuid) return trainer;
+    if (inventoryHandler_->isTrainerWindowOpen()) {
+        if (const uint64_t trainer = inventoryHandler_->getTrainerSpells().trainerGuid) return trainer;
     }
     // From the movement handler, which owns both. GameHandler kept members of
     // the same two names that the decomposition left behind unwritten, so this
@@ -1701,39 +1560,9 @@ uint64_t GameHandler::getInteractNpcGuid() const {
     return 0;
 }
 
-bool GameHandler::getOtherPlayerEquipment(uint64_t guid,
-                                          std::array<uint32_t, 19>& displayIds,
-                                          std::array<uint8_t, 19>& invTypes) const {
-    return inventoryHandler_->resolveOtherPlayerEquipment(guid, displayIds, invTypes);
-}
-
-void GameHandler::extractContainerFields(uint64_t containerGuid, const FlatFieldMap& fields) {
-    inventoryHandler_->extractContainerFields(containerGuid, fields);
-}
-
-void GameHandler::rebuildOnlineInventory() {
-    inventoryHandler_->rebuildOnlineInventory();
-}
-
-void GameHandler::maybeDetectVisibleItemLayout() {
-    inventoryHandler_->maybeDetectVisibleItemLayout();
-}
-
-void GameHandler::updateOtherPlayerVisibleItems(uint64_t guid, const FlatFieldMap& fields) {
-    inventoryHandler_->updateOtherPlayerVisibleItems(guid, fields);
-}
-
 void GameHandler::cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries,
                                                 const std::array<uint16_t, 19>& enchantIds) {
     inventoryHandler_->cacheInspectedPlayerEquipment(guid, itemEntries, enchantIds);
-}
-
-void GameHandler::emitOtherPlayerEquipment(uint64_t guid) {
-    inventoryHandler_->emitOtherPlayerEquipment(guid);
-}
-
-void GameHandler::emitAllOtherPlayerEquipment() {
-    inventoryHandler_->emitAllOtherPlayerEquipment();
 }
 
 // ============================================================
@@ -1887,10 +1716,6 @@ void GameHandler::cancelAura(uint32_t spellId) {
     spellHandler_->cancelAura(spellId);
 }
 
-uint32_t GameHandler::getTempEnchantRemainingMs(uint32_t slot) const {
-    return inventoryHandler_->getTempEnchantRemainingMs(slot);
-}
-
 void GameHandler::dismissCritter() {
     if (activeCritterGuid_ == 0 || !getSocket() || getState() != WorldState::IN_WORLD) return;
     const uint16_t wire = wireOpcode(Opcode::CMSG_DISMISS_CRITTER);
@@ -1998,14 +1823,6 @@ uint32_t GameHandler::getEntityGuildId(uint64_t guid) const {
 
 void GameHandler::lootTarget(uint64_t guid) {
     loot::orNoLoot(services_.loot).lootTarget(guid);
-}
-
-void GameHandler::confirmBindOnUse() {
-    inventoryHandler_->confirmBindOnUse();
-}
-
-void GameHandler::cancelTempEnchantment(uint8_t handIndex) {
-    inventoryHandler_->cancelTempEnchantment(handIndex);
 }
 
 void GameHandler::scheduleGameObjectLootOpen(uint64_t guid, float delaySeconds, uint8_t attempts) {
@@ -2400,7 +2217,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
         // USE does not open a locked type-3 chest, and casting the item's spell via
         // CMSG_CAST_SPELL is rejected (the player doesn't "know" it).
         if (plan.keyItemId != 0) {
-            const ItemQueryResponseData* keyInfo = getItemInfo(plan.keyItemId);
+            const ItemQueryResponseData* keyInfo = inventoryHandler_->getItemInfo(plan.keyItemId);
             uint32_t keyUseSpell = 0;
             if (keyInfo) {
                 for (const auto& sp : keyInfo->spells)
@@ -2412,7 +2229,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
 
             // Locate the key: wire (bag, slot) + item GUID. Keyring wire slots
             // start at 86; backpack at 23 in bag 0xFF; equipped bags are 19..22.
-            const Inventory& inv = getInventory();
+            const Inventory& inv = inventoryHandler_->items();
             uint8_t keyBag = 0xFF, keySlot = 0; uint64_t keyGuid = 0; bool keyFound = false;
             for (int i = 0; i < inv.getBackpackSize() && !keyFound; ++i)
                 if (inv.getBackpackSlot(i).item.itemId == plan.keyItemId) {
@@ -2610,159 +2427,12 @@ void GameHandler::offerQuestFromItem(uint64_t itemGuid, uint32_t questId) {
     questHandler_->offerQuestFromItem(itemGuid, questId);
 }
 
-uint64_t GameHandler::getBagItemGuid(int bagIndex, int slotIndex) const {
-    return inventoryHandler_->getBagItemGuid(bagIndex, slotIndex);
-}
-
-void GameHandler::openVendor(uint64_t npcGuid) {
-    inventoryHandler_->openVendor(npcGuid);
-}
-
 void GameHandler::closeVendor() {
     inventoryHandler_->closeVendor();
 }
 
-void GameHandler::buyItem(uint64_t vendorGuid, uint32_t itemId, uint32_t slot, uint32_t count) {
-    inventoryHandler_->buyItem(vendorGuid, itemId, slot, count);
-}
-
-void GameHandler::buyBackItem(uint32_t buybackSlot) {
-    inventoryHandler_->buyBackItem(buybackSlot);
-}
-
-void GameHandler::repairItem(uint64_t vendorGuid, uint64_t itemGuid) {
-    inventoryHandler_->repairItem(vendorGuid, itemGuid);
-}
-
-void GameHandler::repairAll(uint64_t vendorGuid, bool useGuildBank) {
-    inventoryHandler_->repairAll(vendorGuid, useGuildBank);
-}
-
-uint32_t GameHandler::estimateRepairAllCost() const {
-    return inventoryHandler_->estimateRepairAllCost();
-}
-
-void GameHandler::sellItem(uint64_t vendorGuid, uint64_t itemGuid, uint32_t count) {
-    inventoryHandler_->sellItem(vendorGuid, itemGuid, count);
-}
-
-void GameHandler::sellItemBySlot(int backpackIndex) {
-    inventoryHandler_->sellItemBySlot(backpackIndex);
-}
-
-void GameHandler::equipItemToSlot(uint64_t itemGuid, uint8_t equipSlot) {
-    inventoryHandler_->equipItemToSlot(itemGuid, equipSlot);
-}
-
-void GameHandler::autoEquipItemBySlot(int backpackIndex, bool confirmed) {
-    inventoryHandler_->autoEquipItemBySlot(backpackIndex, confirmed);
-}
-
-bool GameHandler::equipWouldBindFromBackpack(int backpackIndex) const {
-    return inventoryHandler_->equipWouldBindFromBackpack(backpackIndex);
-}
-
-bool GameHandler::equipWouldBindFromBag(int bagIndex, int slotIndex) const {
-    return inventoryHandler_->equipWouldBindFromBag(bagIndex, slotIndex);
-}
-
-void GameHandler::equipPendingItem() {
-    inventoryHandler_->equipPendingItem();
-}
-
-void GameHandler::cancelPendingEquip() {
-    inventoryHandler_->cancelPendingEquip();
-}
-
-void GameHandler::autoEquipItemInBag(int bagIndex, int slotIndex, bool confirmed) {
-    inventoryHandler_->autoEquipItemInBag(bagIndex, slotIndex, confirmed);
-}
-
-void GameHandler::sellItemInBag(int bagIndex, int slotIndex) {
-    inventoryHandler_->sellItemInBag(bagIndex, slotIndex);
-}
-
-void GameHandler::unequipToBackpack(EquipSlot equipSlot) {
-    inventoryHandler_->unequipToBackpack(equipSlot);
-}
-
-void GameHandler::swapContainerItems(uint8_t srcBag, uint8_t srcSlot, uint8_t dstBag,
-                                     uint8_t dstSlot, bool applyLocally) {
-    inventoryHandler_->swapContainerItems(srcBag, srcSlot, dstBag, dstSlot, applyLocally);
-}
-
-void GameHandler::notifyBagsChanged() {
-    inventoryHandler_->fireBagUpdates();
-}
-
-void GameHandler::swapBagSlots(int srcBagIndex, int dstBagIndex) {
-    inventoryHandler_->swapBagSlots(srcBagIndex, dstBagIndex);
-}
-
-void GameHandler::destroyItem(uint8_t bag, uint8_t slot, uint8_t count) {
-    inventoryHandler_->destroyItem(bag, slot, count);
-}
-
-void GameHandler::splitItem(uint8_t srcBag, uint8_t srcSlot, uint8_t count) {
-    inventoryHandler_->splitItem(srcBag, srcSlot, count);
-}
-void GameHandler::splitItemTo(uint8_t srcBag, uint8_t srcSlot,
-                              uint8_t dstBag, uint8_t dstSlot, uint8_t count) {
-    inventoryHandler_->splitItemTo(srcBag, srcSlot, dstBag, dstSlot, count);
-}
-
-void GameHandler::useItemBySlot(int backpackIndex, bool confirmed, uint64_t unitTarget) {
-    inventoryHandler_->useItemBySlot(backpackIndex, confirmed, unitTarget);
-}
-
-void GameHandler::useKeyringItem(int index, bool confirmed) {
-    inventoryHandler_->useKeyringItem(index, confirmed);
-}
-
-void GameHandler::placeGlyphFromBag(uint8_t wireBag, uint8_t wireSlot, uint32_t socketIndex) {
-    inventoryHandler_->placeGlyphFromBag(wireBag, wireSlot, socketIndex);
-}
-
-void GameHandler::useItemInBag(int bagIndex, int slotIndex, bool confirmed,
-                               uint64_t unitTarget) {
-    inventoryHandler_->useItemInBag(bagIndex, slotIndex, confirmed,
-                                                           unitTarget);
-}
-
-bool GameHandler::isAwaitingItemTarget() const {
-    return inventoryHandler_->isAwaitingItemTarget();
-}
-
-bool GameHandler::isAwaitingUnitTarget() const {
-    return inventoryHandler_->isAwaitingUnitTarget();
-}
-
-uint32_t GameHandler::getPendingUnitTargetSourceItemId() const {
-    return inventoryHandler_->getPendingUnitTargetSourceItemId();
-}
-
-void GameHandler::cancelUnitTargeting() {
-    inventoryHandler_->cancelUnitTargeting();
-}
-
-void GameHandler::completeItemUseOnUnit(uint64_t targetUnitGuid) {
-    inventoryHandler_->completeItemUseOnUnit(targetUnitGuid);
-}
-
 void GameHandler::beginSpellItemTargeting(uint32_t spellId, const std::string& spellName) {
     inventoryHandler_->beginSpellItemTargeting(spellId, spellName);
-}
-
-uint32_t GameHandler::getPendingItemTargetSourceItemId() const {
-    return inventoryHandler_->getPendingItemTargetSourceItemId();
-}
-
-void GameHandler::cancelItemTargeting() {
-    inventoryHandler_->cancelItemTargeting();
-}
-
-void GameHandler::completeItemUseOnItem(uint64_t targetItemGuid, bool confirmed) {
-    inventoryHandler_->completeItemUseOnItem(targetItemGuid, confirmed);
 }
 
 int GameHandler::getInstanceBootTimeRemaining() const {
@@ -2770,34 +2440,6 @@ int GameHandler::getInstanceBootTimeRemaining() const {
     const auto left = *instanceBootDeadline_ - std::chrono::steady_clock::now();
     const auto secs = std::chrono::duration_cast<std::chrono::seconds>(left).count();
     return secs > 0 ? static_cast<int>(secs) : 0;
-}
-
-void GameHandler::replaceEnchant() {
-    inventoryHandler_->replaceEnchant();
-}
-
-void GameHandler::openItemBySlot(int backpackIndex) {
-    inventoryHandler_->openItemBySlot(backpackIndex);
-}
-
-void GameHandler::openItemInBag(int bagIndex, int slotIndex) {
-    inventoryHandler_->openItemInBag(bagIndex, slotIndex);
-}
-
-void GameHandler::readItemBySlot(int backpackIndex) {
-    inventoryHandler_->readItemBySlot(backpackIndex);
-}
-
-void GameHandler::readItemInBag(int bagIndex, int slotIndex) {
-    inventoryHandler_->readItemInBag(bagIndex, slotIndex);
-}
-
-void GameHandler::useItemById(uint32_t itemId, uint64_t unitTarget) {
-    inventoryHandler_->useItemById(itemId, unitTarget);
-}
-
-uint32_t GameHandler::getItemIdForSpell(uint32_t spellId) const {
-    return inventoryHandler_->itemIdForSpell(spellId);
 }
 
 void GameHandler::unstuck() {
@@ -2821,18 +2463,6 @@ void GameHandler::unstuckHearth() {
     } else {
         addSystemChatMessage("No hearthstone bind point set.");
     }
-}
-
-// ============================================================
-// Trainer
-// ============================================================
-
-void GameHandler::trainSpell(uint32_t spellId) {
-    inventoryHandler_->trainSpell(spellId);
-}
-
-void GameHandler::closeTrainer() {
-    inventoryHandler_->closeTrainer();
 }
 
 void GameHandler::preloadDBCCaches() const {

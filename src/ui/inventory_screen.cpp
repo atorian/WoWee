@@ -219,8 +219,8 @@ VkDescriptorSet InventoryScreen::castCursorTexture() {
 void InventoryScreen::renderItemTargetCursor() {
     // Both kinds of pending use: one waiting for an item to apply to, one
     // waiting for a unit. The cursor and the way out of it are the same.
-    const bool awaitingItem = gameHandler_ && gameHandler_->isAwaitingItemTarget();
-    const bool awaitingUnit = gameHandler_ && gameHandler_->isAwaitingUnitTarget();
+    const bool awaitingItem = gameHandler_ && gameHandler_->inventory().isAwaitingItemTarget();
+    const bool awaitingUnit = gameHandler_ && gameHandler_->inventory().isAwaitingUnitTarget();
     if (!awaitingItem && !awaitingUnit) {
         itemTargetArmedFrame_ = -1;
         return;
@@ -232,8 +232,8 @@ void InventoryScreen::renderItemTargetCursor() {
     if (itemTargetArmedFrame_ != ImGui::GetFrameCount() && !ImGui::GetIO().WantTextInput) {
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
             core::Input::getInstance().isKeyPressed(SDL_SCANCODE_ESCAPE)) {
-            gameHandler_->cancelItemTargeting();
-            gameHandler_->cancelUnitTargeting();
+            gameHandler_->inventory().cancelItemTargeting();
+            gameHandler_->inventory().cancelUnitTargeting();
             itemTargetArmedFrame_ = -1;
             return;
         }

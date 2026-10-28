@@ -277,7 +277,7 @@ static int lua_GetActionTexture(lua_State* L) {
             return 1;
         }
     } else if (action.type == game::ActionBarSlot::ITEM && action.id != 0) {
-        const auto* info = gh->getItemInfo(action.id);
+        const auto* info = gh->inventory().getItemInfo(action.id);
         if (info && info->displayInfoId != 0) {
             std::string icon = gh->getItemIconPath(info->displayInfoId);
             if (!icon.empty()) {
@@ -423,7 +423,7 @@ static int lua_GetActionCount(lua_State* L) {
     }
     const auto& action = bar[slot];
     if (action.type == game::ActionBarSlot::ITEM && action.id != 0) {
-        lua_pushnumber(L, gh->getInventory().countItem(action.id));
+        lua_pushnumber(L, gh->inventory().items().countItem(action.id));
     } else {
         lua_pushnumber(L, 0);
     }
@@ -519,13 +519,13 @@ static int lua_UseAction(lua_State* L) {
         // to go as CMSG_USE_ITEM rather than a cast, or the server drops it.
         // This client's own action bar did that and was the only place that
         // did; the bar is FrameXML's now and this is the path its buttons take.
-        if (const uint32_t itemForSpell = gh->getItemIdForSpell(action.id)) {
-            gh->useItemById(itemForSpell, target);
+        if (const uint32_t itemForSpell = gh->inventory().itemIdForSpell(action.id)) {
+            gh->inventory().useItemById(itemForSpell, target);
         } else {
             gh->castSpell(action.id, target);
         }
     } else if (action.type == game::ActionBarSlot::ITEM && action.id != 0) {
-        gh->useItemById(action.id);
+        gh->inventory().useItemById(action.id);
     } else if (action.type == game::ActionBarSlot::MACRO) {
         // Run as RunMacro runs one, through the client's macro runner: one
         // line at a time through the slash commands, /stopmacro honoured.
@@ -691,7 +691,7 @@ static int lua_PickupAction(lua_State* L) {
         if (existing.type == game::ActionBarSlot::SPELL) {
             wowee::ui::frameXmlSetCursorItem(gh->getSpellIconPath(existing.id));
         } else if (existing.type == game::ActionBarSlot::ITEM) {
-            const auto* info = gh->getItemInfo(existing.id);
+            const auto* info = gh->inventory().getItemInfo(existing.id);
             wowee::ui::frameXmlSetCursorItem(
                 info ? gh->getItemIconPath(info->displayInfoId) : std::string());
         } else {
@@ -756,7 +756,7 @@ static int lua_PlaceGlyphInSocket(lua_State* L) {
     if (!gh || socket < 1 || socket > game::GameHandler::MAX_GLYPH_SLOTS) return 0;
     uint8_t bag = 0, slot = 0;
     if (!cursorWireSlot(L, bag, slot)) return 0;   // nothing held: nothing to place
-    gh->placeGlyphFromBag(bag, slot, static_cast<uint32_t>(socket - 1));
+    gh->inventory().placeGlyphFromBag(bag, slot, static_cast<uint32_t>(socket - 1));
     setCursorType(L, CursorType::NONE);
     return 0;
 }
@@ -805,7 +805,7 @@ static int lua_PickupGuildBankItem(lua_State* L) {
         cursor(L).bag = tab;
         cursor(L).slot = slot;
         cursor(L).split = 0;   // the whole stack, unless SplitGuildBankItem says otherwise
-        const auto* info = gh->getItemInfo(it.itemEntry);
+        const auto* info = gh->inventory().getItemInfo(it.itemEntry);
         wowee::ui::frameXmlSetCursorItem(
             info ? gh->getItemIconPath(info->displayInfoId) : std::string());
         return 0;
@@ -936,7 +936,7 @@ void pickupMerchantItem(lua_State* L, int index) {
     // Show it on the pointer, as a bag pickup does. Without this the cursor
     // holds something invisible and the click reads as having done nothing.
     if (auto* gh = getGameHandler(L)) {
-        const auto& items = gh->getVendorItems().items;
+        const auto& items = gh->inventory().getVendorItems().items;
         if (index <= static_cast<int>(items.size())) {
             ui::frameXmlSetCursorItem(
                 gh->getItemIconPath(items[index - 1].displayInfoId));
@@ -961,9 +961,9 @@ static void soldHeldItem(lua_State* L) {
     if (!game::slots::cursorSourceIsInventory(cursor(L).bag)) return;
 
     if (cursor(L).bag == 0) {
-        gh->sellItemBySlot(cursor(L).slot - 1);
+        gh->inventory().sellItemBySlot(cursor(L).slot - 1);
     } else if (cursor(L).bag > 0) {
-        gh->sellItemInBag(cursor(L).bag - 1, cursor(L).slot - 1);
+        gh->inventory().sellItemInBag(cursor(L).bag - 1, cursor(L).slot - 1);
     } else {
         return;   // worn, and held rather than dropped on the floor
     }
@@ -975,10 +975,10 @@ bool boughtHeldMerchantItem(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int index = static_cast<int>(cursor(L).id);
     if (gh && index >= 1) {
-        const auto& items = gh->getVendorItems().items;
+        const auto& items = gh->inventory().getVendorItems().items;
         if (index <= static_cast<int>(items.size())) {
             const auto& vi = items[index - 1];
-            gh->buyItem(gh->getVendorGuid(), vi.itemId, vi.slot, 1);
+            gh->inventory().buyItem(gh->inventory().getVendorGuid(), vi.itemId, vi.slot, 1);
         }
     }
     clearCursorItem(L);
@@ -993,7 +993,7 @@ bool boughtHeldMerchantItem(lua_State* L) {
 /// cursor twice is how one of them would come to set the icon and the other not.
 static void pickupFromContainerSlot(lua_State* L, game::GameHandler* gh,
                                     int bag, int slot) {
-    const auto& inv = gh->getInventory();
+    const auto& inv = gh->inventory().items();
     // Every container this numbering reaches, not the backpack and the four
     // worn bags alone: the bank's own slots are container -1 and its bags are
     // 5 through 11, and bankframe.lua picks an item up with
@@ -1008,7 +1008,7 @@ static void pickupFromContainerSlot(lua_State* L, game::GameHandler* gh,
         cursor(L).slot = slot;
         uint32_t displayId = itemSlot->item.displayInfoId;
         if (displayId == 0) {
-            if (const auto* info = gh->getItemInfo(itemSlot->item.itemId)) {
+            if (const auto* info = gh->inventory().getItemInfo(itemSlot->item.itemId)) {
                 displayId = info->displayInfoId;
             }
         }
@@ -1077,7 +1077,7 @@ static int lua_PickupItem(lua_State* L) {
         return s.item.name == wantName;
     };
 
-    const auto& inv = gh->getInventory();
+    const auto& inv = gh->inventory().items();
     for (int i = 0; i < inv.getBackpackSize(); ++i) {
         if (matches(inv.getBackpackSlot(i))) {
             pickupFromContainerSlot(L, gh, 0, i + 1);
@@ -1170,10 +1170,10 @@ static int lua_PickupContainerItem(lua_State* L) {
         // Part of a stack moves as a split rather than a swap: a swap would
         // send the whole thing, which is not what was picked up.
         if (cursor(L).split > 0) {
-            gh->splitItemTo(srcBag, srcSlot, dstBag, dstSlot,
+            gh->inventory().splitItemTo(srcBag, srcSlot, dstBag, dstSlot,
                             static_cast<uint8_t>(cursor(L).split));
         } else {
-            gh->swapContainerItems(srcBag, srcSlot, dstBag, dstSlot);
+            gh->inventory().swapContainerItems(srcBag, srcSlot, dstBag, dstSlot);
         }
         clearCursorItem(L);
         gh->fireAddonEvent("ITEM_LOCK_CHANGED",
@@ -1264,9 +1264,9 @@ static int lua_PickupBagFromSlot(lua_State* L) {
             // Both are worn bags, which has its own verb: it swaps the bags'
             // contents locally as well as sending the move, so the bags on
             // screen do not have to wait for the server to agree.
-            gh->swapBagSlots(srcWorn, wornIndex);
+            gh->inventory().swapBagSlots(srcWorn, wornIndex);
         } else {
-            gh->swapContainerItems(srcBag, srcSlot, 0xFF,
+            gh->inventory().swapContainerItems(srcBag, srcSlot, 0xFF,
                                    static_cast<uint8_t>(game::slots::toWireSlot(slot)));
         }
         clearCursorItem(L);
@@ -1274,8 +1274,8 @@ static int lua_PickupBagFromSlot(lua_State* L) {
     }
 
     const auto& held = isBank
-        ? gh->getInventory().getBankBagItem(bankIndex)
-        : gh->getInventory().getEquipSlot(static_cast<game::EquipSlot>(
+        ? gh->inventory().items().getBankBagItem(bankIndex)
+        : gh->inventory().items().getEquipSlot(static_cast<game::EquipSlot>(
               static_cast<int>(game::EquipSlot::BAG1) + wornIndex));
     if (held.empty()) {
         // Dragging a bag that is plainly in the slot has been reported doing
@@ -1303,7 +1303,7 @@ static int lua_PickupBagFromSlot(lua_State* L) {
     // the equipped-item pickup below reads it from when the slot has none.
     uint32_t displayId = held.item.displayInfoId;
     if (displayId == 0) {
-        if (const auto* info = gh->getItemInfo(held.item.itemId)) {
+        if (const auto* info = gh->inventory().getItemInfo(held.item.itemId)) {
             displayId = info->displayInfoId;
         }
     }
@@ -1327,24 +1327,24 @@ static int lua_PickupInventoryItem(lua_State* L) {
     // Before the pickup, because the paperdoll has no SpellCanTargetItem branch
     // of its own - a left-click on a worn weapon always arrives here, and while
     // a stone or an oil is waiting for a target that click is the target.
-    if (slot <= 19 && completedItemTarget(L, gh->getEquipSlotGuid(slot - 1))) return 0;
+    if (slot <= 19 && completedItemTarget(L, gh->inventory().getEquipSlotGuid(slot - 1))) return 0;
 
     // Worn gear is what usually needs repairing, and the paperdoll has no
     // branch of its own for it either.
-    if (slot <= 19 && repairedHeldItem(L, gh, gh->getEquipSlotGuid(slot - 1))) return 0;
+    if (slot <= 19 && repairedHeldItem(L, gh, gh->inventory().getEquipSlotGuid(slot - 1))) return 0;
 
     if (droppedItemFromNowhere(L)) return 0;
 
     // Carrying something: equip it here, which is the other half of the drag.
     uint8_t srcBag = 0, srcSlot = 0;
     if (cursorWireSlot(L, srcBag, srcSlot)) {
-        gh->swapContainerItems(srcBag, srcSlot, 0xFF,
+        gh->inventory().swapContainerItems(srcBag, srcSlot, 0xFF,
                                static_cast<uint8_t>(slot - 1));
         clearCursorItem(L);
         return 0;
     }
 
-    const auto& inv = gh->getInventory();
+    const auto& inv = gh->inventory().items();
     const auto& eq = inv.getEquipSlot(static_cast<game::EquipSlot>(slot - 1));
     if (!eq.empty()) {
         setCursorType(L, CursorType::ITEM);
@@ -1358,7 +1358,7 @@ static int lua_PickupInventoryItem(lua_State* L) {
         cursor(L).item = {-1, slot, true};
         uint32_t displayId = eq.item.displayInfoId;
         if (displayId == 0) {
-            if (const auto* info = gh->getItemInfo(eq.item.itemId)) {
+            if (const auto* info = gh->inventory().getItemInfo(eq.item.itemId)) {
                 displayId = info->displayInfoId;
             }
         }
@@ -1393,7 +1393,7 @@ static int lua_DeleteCursorItem(lua_State* L) {
     if (gh && cursorWireSlot(L, bag, slot)) {
         // The whole stack: WoW asks about a partial stack before it gets here,
         // and the popup that calls this is the confirmation for all of it.
-        gh->destroyItem(bag, slot, 0);
+        gh->inventory().destroyItem(bag, slot, 0);
     }
     clearCursorItem(L);
     return 0;
@@ -1403,7 +1403,7 @@ static int lua_DeleteCursorItem(lua_State* L) {
 static int lua_AutoEquipCursorItem(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (gh && cursor(L).type == CursorType::ITEM && cursor(L).id != 0) {
-        gh->useItemById(cursor(L).id);
+        gh->inventory().useItemById(cursor(L).id);
     }
     clearCursorItem(L);
     return 0;
@@ -1571,7 +1571,7 @@ static int lua_SetModifiedClick(lua_State* L) {
 static int pushTradeSlot(lua_State* L, game::GameHandler* gh,
                          const trade::TradeSlot& slot) {
     if (!slot.occupied() || slot.itemId == 0) { return luaReturnNil(L); }
-    const auto* info = gh->getItemInfo(slot.itemId);
+    const auto* info = gh->inventory().getItemInfo(slot.itemId);
     lua_pushstring(L, info ? info->name.c_str() : "");
     lua_pushstring(L, gh->getItemIconPath(
         info && info->displayInfoId ? info->displayInfoId : slot.displayId).c_str());
@@ -1597,7 +1597,7 @@ static int lua_GetTradeTargetItemInfo(lua_State* L) {
 
 static int pushTradeLink(lua_State* L, game::GameHandler* gh,
                          const trade::TradeSlot& slot) {
-    const auto* info = (gh && slot.occupied()) ? gh->getItemInfo(slot.itemId) : nullptr;
+    const auto* info = (gh && slot.occupied()) ? gh->inventory().getItemInfo(slot.itemId) : nullptr;
     if (!info || info->name.empty()) { return luaReturnNil(L); }
     const std::string link = game::itemChatLink(slot.itemId, static_cast<uint32_t>(info->quality), info->name);
     lua_pushstring(L, link.c_str());
@@ -2716,7 +2716,7 @@ void registerActionLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int hand = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (gh && (hand == 1 || hand == 2)) {
-                gh->cancelTempEnchantment(static_cast<uint8_t>(hand - 1));
+                gh->inventory().cancelTempEnchantment(static_cast<uint8_t>(hand - 1));
             }
             return 0;
         }},

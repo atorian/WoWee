@@ -647,7 +647,7 @@ void registerLfgLuaAPI(lua_State* L) {
             if (index > static_cast<int>(e.items.size())) return luaReturnNil(L);
             const auto& item = e.items[static_cast<size_t>(index) - 1];
             gh->ensureItemInfo(item.itemId);
-            const auto* info = gh->getItemInfo(item.itemId);
+            const auto* info = gh->inventory().getItemInfo(item.itemId);
             if (!info || !info->valid) return luaReturnNil(L);
             lua_pushstring(L, game::buildItemLink(item.itemId, info->quality,
                                                   info->name).c_str());
@@ -665,7 +665,7 @@ void registerLfgLuaAPI(lua_State* L) {
             if (index > static_cast<int>(e.items.size())) return luaReturnNil(L);
             const auto& item = e.items[static_cast<size_t>(index) - 1];
             gh->ensureItemInfo(item.itemId);
-            const auto* info = gh->getItemInfo(item.itemId);
+            const auto* info = gh->inventory().getItemInfo(item.itemId);
             lua_pushstring(L, info ? info->name.c_str() : "");
             const std::string icon = gh->getItemIconPath(item.displayInfoId);
             if (icon.empty()) lua_pushnil(L); else lua_pushstring(L, icon.c_str());

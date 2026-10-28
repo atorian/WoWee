@@ -58,7 +58,7 @@ MapScope::~MapScope() {
     if (auto* transports = services_.game.getTransportManager()) transports->clearTransports();
     // The equipment is composited onto the player model, which is one of this
     // scene's instances; the next scene's model is dressed from scratch.
-    services_.game.resetEquipmentDirtyTracking();
+    services_.game.inventory().resetEquipmentDirtyTracking();
 
     // Instances retire behind the frame fences; the renderers' model and
     // texture caches stay for the next map.

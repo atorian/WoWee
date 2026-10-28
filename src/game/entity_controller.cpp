@@ -290,7 +290,7 @@ size_t EntityController::processOutOfRangeObjectsUntil(const std::vector<uint64_
     // Once per batch, not per item: a vendor sale can take several items out
     // of range together, and rebuilding per item would redraw the bags as many
     // times for one answer.
-    if (inventoryChanged) owner_.rebuildOnlineInventory();
+    if (inventoryChanged) owner_.inventory().rebuildOnlineInventory();
     return next;
 }
 
@@ -1632,7 +1632,7 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
         // Slot layouts differ on some classic-family realms and can produce
         // phantom "already accepted" quests that block quest acceptance.
     }
-    if (owner_.applyInventoryFields(fields)) slotsChanged = true;
+    if (owner_.inventory().applyInventoryFields(fields)) slotsChanged = true;
 
     // Announced only on an update, never on the create block: at create the
     // sheet has not been built yet, and every field looks like a change.
@@ -1804,7 +1804,7 @@ void EntityController::updateItemOnValuesUpdate(const UpdateBlock& block,
     // durability change and not on every stack count that moves.
     const bool durabilityChanged = change.durability;
     if (inventoryChanged) {
-        owner_.rebuildOnlineInventory();
+        owner_.inventory().rebuildOnlineInventory();
         // One per bag: the interface redraws only the bag whose id matches
         // the event's argument.
         for (int bag = 0; bag <= 4; ++bag) {
@@ -1952,13 +1952,13 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
     // For the local player, capture the full initial field state
     if (block.guid == owner_.getPlayerGuid()) {
         owner_.lastPlayerFieldsRef() = entity->getFields();
-        owner_.maybeDetectVisibleItemLayout();
+        owner_.inventory().maybeDetectVisibleItemLayout();
     }
 
     // Name query + visible items
     queryPlayerName(block.guid);
     if (block.guid != owner_.getPlayerGuid()) {
-        owner_.updateOtherPlayerVisibleItems(block.guid, entity->getFields());
+        owner_.inventory().updateOtherPlayerVisibleItems(block.guid, entity->getFields());
     }
 
     // Unit fields (PLAYER is a unit)
@@ -2020,7 +2020,7 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
         maybeDetectCoinageIndex(owner_.lastPlayerFieldsRef(), block.fields);
 
         owner_.lastPlayerFieldsRef() = block.fields;
-        owner_.detectInventorySlotBases(block.fields);
+        owner_.inventory().detectInventorySlotBases(block.fields);
 
         if (kVerboseUpdateObject) {
             uint16_t maxField = 0;
@@ -2033,8 +2033,8 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
 
         PlayerFieldIndices pfi = PlayerFieldIndices::resolve();
         bool slotsChanged = applyPlayerStatFields(block.fields, pfi, true);
-        if (slotsChanged) owner_.rebuildOnlineInventory();
-        owner_.maybeDetectVisibleItemLayout();
+        if (slotsChanged) owner_.inventory().rebuildOnlineInventory();
+        owner_.inventory().maybeDetectVisibleItemLayout();
         owner_.extractSkillFields(owner_.lastPlayerFieldsRef());
         owner_.extractExploredZoneFields(owner_.lastPlayerFieldsRef());
         owner_.applyQuestStateFromFields(owner_.lastPlayerFieldsRef());
@@ -2288,7 +2288,7 @@ void EntityController::onValuesUpdateUnit(const UpdateBlock& block, std::shared_
 void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::shared_ptr<Entity>& entity) {
     // Other player visible items
     if (block.guid != owner_.getPlayerGuid()) {
-        owner_.updateOtherPlayerVisibleItems(block.guid, entity->getFields());
+        owner_.inventory().updateOtherPlayerVisibleItems(block.guid, entity->getFields());
     }
 
     // Unit field update (player IS a unit)
@@ -2330,13 +2330,13 @@ void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::share
         if (needCoinageDetectSnapshot) {
             maybeDetectCoinageIndex(oldFieldsSnapshot, owner_.lastPlayerFieldsRef());
         }
-        owner_.maybeDetectVisibleItemLayout();
-        owner_.detectInventorySlotBases(block.fields);
+        owner_.inventory().maybeDetectVisibleItemLayout();
+        owner_.inventory().detectInventorySlotBases(block.fields);
 
         PlayerFieldIndices pfi = PlayerFieldIndices::resolve();
         bool slotsChanged = applyPlayerStatFields(block.fields, pfi, false);
         if (slotsChanged) {
-            owner_.rebuildOnlineInventory();
+            owner_.inventory().rebuildOnlineInventory();
             pendingEvents_.emit("PLAYER_EQUIPMENT_CHANGED", {});
         }
         owner_.extractSkillFields(owner_.lastPlayerFieldsRef());
@@ -2633,17 +2633,17 @@ void EntityController::finalizeUpdateObjectBatch(bool newItemCreated) {
     // Deferred rebuild: if new item objects were created in this packet, rebuild
     // the bags so that slot GUIDs updated earlier in the same packet can resolve.
     if (newItemCreated) {
-        owner_.rebuildOnlineInventory();
+        owner_.inventory().rebuildOnlineInventory();
     }
 
     // Late inventory base detection once items are known
     auto& inventory = owner_.inventory();
     if (owner_.getPlayerGuid() != 0 && !inventory.inventoryFieldBaseKnown() &&
         !owner_.lastPlayerFieldsRef().empty() && !inventory.onlineItems().empty()) {
-        owner_.detectInventorySlotBases(owner_.lastPlayerFieldsRef());
+        owner_.inventory().detectInventorySlotBases(owner_.lastPlayerFieldsRef());
         if (inventory.inventoryFieldBaseKnown()) {
-            if (owner_.applyInventoryFields(owner_.lastPlayerFieldsRef())) {
-                owner_.rebuildOnlineInventory();
+            if (owner_.inventory().applyInventoryFields(owner_.lastPlayerFieldsRef())) {
+                owner_.inventory().rebuildOnlineInventory();
             }
         }
     }
@@ -2757,7 +2757,7 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
 
     // Remove online item/container tracking
     if (owner_.inventory().forgetItemObject(data.guid)) {
-        owner_.rebuildOnlineInventory();
+        owner_.inventory().rebuildOnlineInventory();
     }
 
     // Clean up quest giver status
