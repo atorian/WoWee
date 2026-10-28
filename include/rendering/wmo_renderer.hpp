@@ -769,7 +769,8 @@ private:
     collision::CollisionWorld* collision_ = nullptr;
 
     // Vulkan pipelines
-    VkPipeline opaquePipeline_ = VK_NULL_HANDLE;
+    VkPipeline opaquePipeline_ = VK_NULL_HANDLE;     // no alpha test: the shader cannot discard it
+    VkPipeline alphaTestPipeline_ = VK_NULL_HANDLE;  // opaque with the alpha test (lattices, foliage)
     VkPipeline transparentPipeline_ = VK_NULL_HANDLE;
     VkPipeline wireframePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;

@@ -44,6 +44,13 @@ layout(set = 0, binding = 0) uniform PerFrame {
 #include "sky_atmosphere.glsli"
 #include "aerial_frame.glsli"
 
+/// Set only for the pipeline that draws alpha-tested batches. The others are
+/// built without the discard at all, not merely with it never taken: a shader
+/// that can discard keeps an Apple GPU from removing hidden pixels before it
+/// shades them, and Dalaran's walls, layered many deep, then pay for parallax
+/// on every layer.
+layout(constant_id = 0) const bool kAlphaTestPipeline = false;
+
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
 
 layout(set = 1, binding = 1) uniform WMOMaterial {
@@ -307,7 +314,7 @@ void main() {
     // A WMO material's alpha key cuts at 224/255, as the original client's
     // does, not at a half. Dalaran's lattice windows (DAL_WINDOWCUTOUT) leave
     // their holes at alpha 0.5-0.6; cut at a half, they drew as solid panes.
-    if (alphaTest != 0 && texColor.a < 224.0 / 255.0) discard;
+    if (kAlphaTestPipeline && alphaTest != 0 && texColor.a < 224.0 / 255.0) discard;
 
     // Compute normal (with normal mapping if enabled)
     vec3 norm = vertexNormal;
