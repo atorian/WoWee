@@ -240,6 +240,9 @@ public:
         std::array<TerrainChunkGPU::LodRange, 5> ranges{};
         TerrainSurfacePush surface;
         LocalLightSet lights = kNoLocalLights;
+        /// Reaches the fog band or the distant-terrain hand-over, so it is
+        /// drawn by the pipeline whose shader can discard.
+        bool reachesDiscards = true;
     };
     using DepthDraw = TerrainDepthChunk<GeometryDraw>;
     using DepthTile = TerrainDepthTile<GeometryDraw>;
@@ -373,6 +376,10 @@ private:
 
     // Main pipelines
     VkPipeline pipeline = VK_NULL_HANDLE;
+    /// The fill pipeline without the distance discards, for chunks that end
+    /// short of them. Null if it failed to build; those chunks then take the
+    /// fill pipeline.
+    VkPipeline shortOfDiscardsPipeline = VK_NULL_HANDLE;
     VkPipeline wireframePipeline = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout materialSetLayout = VK_NULL_HANDLE;

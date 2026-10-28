@@ -160,8 +160,15 @@ vec3 reliefNormal(vec3 n, vec3 mapNormal, float strength) {
     return len2 > 1e-8 ? turned * inversesqrt(len2) : n;
 }
 
+/// Off for the pipeline that draws chunks ending short of both the fog band
+/// and the distant-terrain hand-over, where neither discard below could fire.
+/// A shader that can discard keeps an Apple GPU from removing hidden pixels
+/// before it shades them, and the ground drawn first under a city is almost
+/// all hidden. See terrainChunkShortOfDiscards.
+layout(constant_id = 0) const bool kDistanceDiscards = true;
+
 void main() {
-    if (terrainCoverageThreshold() < distantTerrainWeight(FragPos)) discard;
+    if (kDistanceDiscards && terrainCoverageThreshold() < distantTerrainWeight(FragPos)) discard;
     const vec3 receiverFace = receiverFaceNormal(FragPos);
     // The gradients every texture read below takes, here where the whole quad
     // is still there: past the discard, and inside the per-pixel branches
@@ -170,7 +177,8 @@ void main() {
     const vec2 layerDx = dFdx(LayerUV), layerDy = dFdy(LayerUV);
     const vec2 atlasUv = bakedAtlasUv(LayerUV);
     const vec2 atlasDx = dFdx(atlasUv), atlasDy = dFdy(atlasUv);
-    if (fogSkyBand1.w > 0.0 && length(FragPos.xy - viewPos.xy) >= fogSkyBand1.w) discard;
+    if (kDistanceDiscards && fogSkyBand1.w > 0.0 &&
+        length(FragPos.xy - viewPos.xy) >= fogSkyBand1.w) discard;
 
     float fragDist = length(viewPos.xyz - FragPos);
 

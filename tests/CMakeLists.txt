@@ -3082,6 +3082,12 @@ wowee_add_test(test_placement_transform
     SOURCES test_placement_transform.cpp
             ${TEST_COMMON_SOURCES})
 
+# ── test_terrain_fog_band ────────────────────────────────────
+# Which terrain chunks draw with the shader that cannot discard: only those
+# no part of which reaches the fog band or the distant-terrain hand-over.
+wowee_add_test(test_terrain_fog_band
+    SOURCES test_terrain_fog_band.cpp)
+
 # ── test_wmo_batch_merge ─────────────────────────────────────
 # Which WMO group batches draw as one. A merged batch is drawn with its first
 # batch's material, so opaque and blended materials on one texture, or two

@@ -11,6 +11,7 @@
 #include "rendering/vk_utils.hpp"
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/frustum.hpp"
+#include "rendering/terrain_fog_band.hpp"
 #include "rendering/normal_map.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
@@ -70,11 +71,11 @@ TerrainRenderer::~TerrainRenderer() {
     shutdown();
 }
 
-/// Builds the fill pipeline and its wireframe derivative from a loaded shader
-/// pair.
+/// Builds the fill pipeline, its twin without the distance discards and its
+/// wireframe derivative from a loaded shader pair.
 ///
-/// initialize() and recreatePipelines() both need exactly these two in exactly
-/// these states, and each described both for itself. Answers whether the fill
+/// initialize() and recreatePipelines() both need exactly these three in
+/// exactly these states, and each described them for itself. Answers whether the fill
 /// pipeline built; the wireframe is a debug view, so its absence is a warning
 /// rather than a failure. Destroying the shader modules is left to the caller,
 /// which loaded them.
@@ -107,6 +108,33 @@ bool TerrainRenderer::buildMainPassPipelines(VkDevice device,
     if (!pipeline) {
         LOG_ERROR("TerrainRenderer: failed to create fill pipeline");
         return false;
+    }
+
+    // --- Build the fill pipeline without the distance discards (derivative) ---
+    const VkBool32 discardsOff = VK_FALSE;
+    const VkSpecializationMapEntry discardsEntry{.constantID = 0, .offset = 0,
+                                                 .size = sizeof(VkBool32)};
+    const VkSpecializationInfo discardsSpec{.mapEntryCount = 1, .pMapEntries = &discardsEntry,
+                                            .dataSize = sizeof(VkBool32), .pData = &discardsOff};
+    VkPipelineShaderStageCreateInfo noDiscardFrag = fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT);
+    noDiscardFrag.pSpecializationInfo = &discardsSpec;
+    shortOfDiscardsPipeline = PipelineBuilder()
+        .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT), noDiscardFrag)
+        .setVertexInput({ vertexBinding }, vertexAttribs)
+        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+        .setDepthTest(true, true, VK_COMPARE_OP_LESS_OR_EQUAL)
+        .setColorBlendAttachment(PipelineBuilder::blendDisabled())
+        .setMultisample(vkCtx->getMsaaSamples())
+        .setLayout(pipelineLayout)
+        .setRenderPass(mainPass)
+        .setDynamicStates(viewportAndScissorDynamic())
+        .setFlags(VK_PIPELINE_CREATE_DERIVATIVE_BIT)
+        .setBasePipeline(pipeline)
+        .build(device, vkCtx->getPipelineCache());
+
+    if (!shortOfDiscardsPipeline) {
+        LOG_WARNING("TerrainRenderer: pipeline without the distance discards not available");
     }
 
     // --- Build wireframe pipeline (derivative of fill) ---
@@ -271,6 +299,7 @@ void TerrainRenderer::recreatePipelines() {
 
     // Destroy old pipelines (keep layouts)
     destroy(device, pipeline);
+    destroy(device, shortOfDiscardsPipeline);
     destroy(device, wireframePipeline);
 
     // Load shaders
@@ -319,6 +348,7 @@ void TerrainRenderer::shutdown() {
     flatNormalTexture.reset();
 
     destroy(device, pipeline);
+    destroy(device, shortOfDiscardsPipeline);
     destroy(device, wireframePipeline);
     destroy(device, pipelineLayout);
     destroy(device, materialDescPool);
@@ -1052,6 +1082,9 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
         draw.surface.relief.x = normalMappingEnabled_ ? normalMapStrength_ : 0.0f;
         draw.lights = lights.empty() ? kNoLocalLights : pickLocalLights(lights, ch.boundingSphereCenter,
                                                                        ch.boundingSphereRadius);
+        draw.reachesDiscards = !terrainChunkShortOfDiscards(
+            glm::length(glm::vec2(ch.boundingSphereCenter - camPos)), ch.boundingSphereRadius,
+            maxViewDistance_, kDistantTerrainStart);
         if (source == TerrainSurfaceSource::Baked) ++list.baked;
         if (source == TerrainSurfaceSource::Crossfade) ++list.crossfade;
         list.view.push_back(std::move(draw));
@@ -1093,7 +1126,7 @@ void TerrainRenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     LocalLightSet pushedLights = push.localLights;
     TerrainSurfacePush pushedSurface;
     bool surfacePushed = false;
-    for (const auto& draw : list.view) {
+    auto recordChunk = [&](const ChunkDraw& draw) {
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                                 1, 1, &draw.material, 0, nullptr);
         if (draw.lights != pushedLights) {
@@ -1117,6 +1150,22 @@ void TerrainRenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
             vkCmdDrawIndexed(cmd, range.count, 1, draw.geometry.firstIndex + range.first,
                               draw.geometry.baseVertex, 0);
             renderedTriangles_ += range.count / 3;
+        }
+    };
+    // Chunks short of the distance discards first, through the pipeline whose
+    // shader cannot discard; the rest after, through the one that can.
+    // Terrain is opaque and depth-tested, so the order between chunks does
+    // not change what is drawn.
+    if (list.wireframe || !shortOfDiscardsPipeline) {
+        for (const auto& draw : list.view) recordChunk(draw);
+    } else {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shortOfDiscardsPipeline);
+        for (const auto& draw : list.view) {
+            if (!draw.reachesDiscards) recordChunk(draw);
+        }
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        for (const auto& draw : list.view) {
+            if (draw.reachesDiscards) recordChunk(draw);
         }
     }
     renderedChunks = static_cast<int>(list.view.size());
