@@ -242,12 +242,12 @@ TEST_CASE("a spell bought from a trainer is in the spell book when the interface
     GameHarness h;
     h.enterWorld();
     constexpr uint32_t kSpell = 133;  // Fireball
-    REQUIRE(h.game().getKnownSpells().count(kSpell) == 0);
+    REQUIRE(h.game().spells().getKnownSpells().count(kSpell) == 0);
 
     h.receive(Opcode::SMSG_TRAINER_BUY_SUCCEEDED, Body().u64(0xF130000000000088ull).u32(kSpell));
     h.pump();
 
-    CHECK(h.game().getKnownSpells().count(kSpell) == 1);
+    CHECK(h.game().spells().getKnownSpells().count(kSpell) == 1);
     CHECK(h.addonEvents("SPELLS_CHANGED").size() == 1);
     CHECK(h.addonEvents("TRAINER_UPDATE").size() == 1);
 }

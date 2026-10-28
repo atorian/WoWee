@@ -96,7 +96,7 @@ void SpellPresentation::onCastStarted(uint64_t caster, uint32_t spellId, uint32_
 
     if (byPlayer && castTimeMs > 0 && audio_) {
         if (auto* ssm = audio_->getSpellSoundManager()) {
-            ssm->playPrecast(magicSchool(game_.getSpellSchoolMask(spellId)),
+            ssm->playPrecast(magicSchool(game_.spells().getSpellSchoolMask(spellId)),
                              audio::SpellSoundManager::SpellPower::MEDIUM);
         }
     }
@@ -212,13 +212,13 @@ void SpellPresentation::tickRestorationSound(float deltaTime) {
 void SpellPresentation::playCastSound(uint32_t spellId) {
     if (!audio_) return;
     if (auto* ssm = audio_->getSpellSoundManager())
-        ssm->playCast(magicSchool(game_.getSpellSchoolMask(spellId)));
+        ssm->playCast(magicSchool(game_.spells().getSpellSchoolMask(spellId)));
 }
 
 void SpellPresentation::playImpactSound(uint32_t spellId) {
     if (!audio_) return;
     if (auto* ssm = audio_->getSpellSoundManager())
-        ssm->playImpact(magicSchool(game_.getSpellSchoolMask(spellId)),
+        ssm->playImpact(magicSchool(game_.spells().getSpellSchoolMask(spellId)),
                         audio::SpellSoundManager::SpellPower::MEDIUM);
 }
 
@@ -294,7 +294,7 @@ void SpellPresentation::launchRangedProjectile(uint32_t spellId, uint64_t target
 }
 
 uint32_t SpellPresentation::visualIdFor(uint32_t spellId) const {
-    return game_.getSpellVisualId(spellId);
+    return game_.spells().getSpellVisualId(spellId);
 }
 
 bool SpellPresentation::unitPosition(uint64_t guid, glm::vec3& out) const {

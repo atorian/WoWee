@@ -146,7 +146,7 @@ TEST_CASE("a party member's auras from the stats packet are the ones the frames 
 
     // The party frames ask GameHandler::getUnitAuras, which is SpellHandler's
     // cache.
-    const auto* auras = h.game().getUnitAuras(kJaina);
+    const auto* auras = h.game().spells().getUnitAuras(kJaina);
     REQUIRE(auras != nullptr);
     REQUIRE(auras->size() == 2);
     CHECK((*auras)[0].spellId == 1459);
@@ -188,7 +188,7 @@ TEST_CASE("stats for someone not in the group are not applied", "[group][harness
     h.pump();
 
     CHECK(h.addonEvents("UNIT_AURA").empty());
-    const auto* auras = h.game().getUnitAuras(kThrall);
+    const auto* auras = h.game().spells().getUnitAuras(kThrall);
     CHECK((auras == nullptr || auras->empty()));
 }
 

@@ -475,35 +475,6 @@ void SpellHandler::registerOpcodes(DispatchTable& table) {
 // Public API
 // ============================================================
 
-bool SpellHandler::isGameObjectInteractionCasting() const {
-    return casting_ && currentCastSpellId_ == 0 && queries_.pendingGameObjectInteraction() != 0;
-}
-
-bool SpellHandler::isTargetCasting() const {
-    return getUnitCastState(queries_.currentTargetGuid()) != nullptr;
-}
-
-uint32_t SpellHandler::getTargetCastSpellId() const {
-    auto* s = getUnitCastState(queries_.currentTargetGuid());
-    return s ? s->spellId : 0;
-}
-
-float SpellHandler::getTargetCastProgress() const {
-    auto* s = getUnitCastState(queries_.currentTargetGuid());
-    return (s && s->timeTotal > 0.0f)
-        ? (s->timeTotal - s->timeRemaining) / s->timeTotal : 0.0f;
-}
-
-float SpellHandler::getTargetCastTimeRemaining() const {
-    auto* s = getUnitCastState(queries_.currentTargetGuid());
-    return s ? s->timeRemaining : 0.0f;
-}
-
-bool SpellHandler::isTargetCastInterruptible() const {
-    auto* s = getUnitCastState(queries_.currentTargetGuid());
-    return s ? s->interruptible : true;
-}
-
 void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     LOG_DEBUG("castSpell: spellId=", spellId, " target=0x", std::hex, targetGuid, std::dec);
     if (!sender_.worldCommandAllowed("a cast")) return;

@@ -74,9 +74,9 @@ TEST_CASE("the server's global cooldown is what the interface reads", "[spell][h
     // of the GCD that SpellHandler never wrote, so this was always zero and
     // the sweep over every button never showed.
     CHECK(h.game().isGCDActive());
-    CHECK(h.game().getGCDRemaining() > 0.0f);
-    CHECK(h.game().getGCDRemaining() <= 1.5f);
-    CHECK_THAT(h.game().getGCDTotal(), WithinAbs(1.5, 1e-3));
+    CHECK(h.game().spells().getGCDRemaining() > 0.0f);
+    CHECK(h.game().spells().getGCDRemaining() <= 1.5f);
+    CHECK_THAT(h.game().spells().getGCDTotal(), WithinAbs(1.5, 1e-3));
 }
 
 TEST_CASE("a spell's own cooldown runs down with game time", "[spell][harness]") {
@@ -85,10 +85,10 @@ TEST_CASE("a spell's own cooldown runs down with game time", "[spell][harness]")
 
     h.receive(Opcode::SMSG_SPELL_COOLDOWN, cooldowns(h.player().guid, {{kFireball, 10000}}));
     h.pump();
-    CHECK_THAT(h.game().getSpellCooldown(kFireball), WithinAbs(10.0, 0.1));
+    CHECK_THAT(h.game().spells().getSpellCooldown(kFireball), WithinAbs(10.0, 0.1));
 
     h.advance(4.0f);
-    CHECK_THAT(h.game().getSpellCooldown(kFireball), WithinAbs(6.0, 0.1));
+    CHECK_THAT(h.game().spells().getSpellCooldown(kFireball), WithinAbs(6.0, 0.1));
     // The global cooldown is not a spell's, and the server sent none.
     CHECK_FALSE(h.game().isGCDActive());
 }
@@ -316,7 +316,7 @@ TEST_CASE("the initial spell book contains only abilities sent by the realm", "[
     h.receive(Opcode::SMSG_INITIAL_SPELLS,
               Body().u8(0).u8(1).u8(0).u32(133).u8(0).u8(0).u8(0).u8(0));
     h.pump();
-    const auto& learned = h.game().getKnownSpells();
+    const auto& learned = h.game().spells().getKnownSpells();
     CHECK(learned.count(133) == 1);
     CHECK(learned.count(8690) == 0); // an item effect was not a learned ability
     CHECK(learned.count(6603) == 0); // neither was an ability absent from this packet

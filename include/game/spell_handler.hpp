@@ -356,7 +356,6 @@ public:
     [[nodiscard]] bool isRestoring() const { return restorationActive_; }
     /// Eating rather than drinking, while isRestoring().
     [[nodiscard]] bool isRestorationFood() const { return restorationIsFood_; }
-    [[nodiscard]] bool isGameObjectInteractionCasting() const;
     [[nodiscard]] uint32_t getCurrentCastSpellId() const {
         return casting_ ? currentCastSpellId_ : restorationSpellId_;
     }
@@ -431,13 +430,6 @@ public:
     void resetPlayerAuras(size_t capacity) { playerAuras_.clear(); playerAuras_.resize(capacity); }
     AuraSlot& getPlayerAuraSlotRef(size_t slot) { return playerAuras_[slot]; }
     std::vector<AuraSlot>& getPlayerAurasMut() { return playerAuras_; }
-
-    // Target cast helpers
-    [[nodiscard]] bool isTargetCasting() const;
-    [[nodiscard]] uint32_t getTargetCastSpellId() const;
-    [[nodiscard]] float getTargetCastProgress() const;
-    [[nodiscard]] float getTargetCastTimeRemaining() const;
-    [[nodiscard]] bool isTargetCastInterruptible() const;
 
     // Talents
     [[nodiscard]] uint8_t getActiveTalentSpec() const { return activeTalentSpec_; }

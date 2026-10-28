@@ -1981,7 +1981,7 @@ static bool fillQuestTooltip(wowee::ui::Widget* w, game::GameHandler* gh,
 static bool fillSpellTooltip(wowee::ui::Widget* w, game::GameHandler* gh,
                              uint32_t spellId) {
     if (!w || !gh || spellId == 0) return false;
-    const std::string& name = gh->getSpellName(spellId);
+    const std::string& name = gh->spells().getSpellName(spellId);
     if (name.empty()) return false;
 
     auto line = [&w](std::string l, std::string r, float lr, float lg, float lb) {
@@ -2016,7 +2016,7 @@ static bool fillSpellTooltip(wowee::ui::Widget* w, game::GameHandler* gh,
     line(cast, "", 1.0f, 1.0f, 1.0f);
 
     const std::string body =
-        gh->formatSpellDescription(spellId, gh->getSpellDescription(spellId));
+        gh->formatSpellDescription(spellId, gh->spells().getSpellDescription(spellId));
     if (!body.empty()) {
         // Wrapped, as every line of prose in a tooltip is: a line that does
         // not wrap sets the tooltip's width, and a description is a sentence
@@ -2090,7 +2090,7 @@ int lua_Tooltip_SetAction(lua_State* L) {
 static void appendEnchantLineById(wowee::ui::Widget* w, game::GameHandler* gh,
                                   uint32_t enchantId) {
     if (!w || !gh || enchantId == 0) return;
-    std::string name = gh->getEnchantName(enchantId);
+    std::string name = gh->spells().getEnchantName(enchantId);
     if (name.empty()) return;
     wowee::ui::Widget::TooltipLine line;
     line.left = std::move(name);
@@ -2191,7 +2191,7 @@ int lua_Tooltip_SetGlyph(lua_State* L) {
         return 1;
     }
     const auto& glyphs = (spec >= 1 && spec <= 2)
-        ? gh->getGlyphs(static_cast<uint8_t>(spec - 1)) : gh->getGlyphs();
+        ? gh->spells().getGlyphs(static_cast<uint8_t>(spec - 1)) : gh->spells().getGlyphs();
     const uint16_t glyphId = glyphs[static_cast<size_t>(socket) - 1];
     if (glyphId == 0) { lua_pushboolean(L, 0); return 1; }
     gh->ensureGlyphPropertiesLoaded();
@@ -2316,7 +2316,7 @@ int lua_Tooltip_SetTalent(lua_State* L) {
     const auto* talent = wowee::addons::talentAt(gh, tabIndex, talentIndex);
     if (!talent) { lua_pushboolean(L, 0); return 1; }
 
-    const uint8_t rank = gh->getTalentRank(talent->talentId);
+    const uint8_t rank = gh->spells().getTalentRank(talent->talentId);
     // Rank 1's spell names the talent whatever the player has in it, and is the
     // only entry guaranteed to be filled.
     const uint32_t titleSpell = talent->rankSpells[0];
@@ -2324,7 +2324,7 @@ int lua_Tooltip_SetTalent(lua_State* L) {
     const uint32_t bodySpell = talent->rankSpells[rank > 0 ? rank - 1 : 0];
     if (titleSpell == 0) { lua_pushboolean(L, 0); return 1; }
 
-    const std::string& name = gh->getSpellName(titleSpell);
+    const std::string& name = gh->spells().getSpellName(titleSpell);
     if (name.empty()) { lua_pushboolean(L, 0); return 1; }
 
     w->isTooltip = true;
@@ -2348,7 +2348,7 @@ int lua_Tooltip_SetTalent(lua_State* L) {
     // Through the formatter for the same reason SetSpellByID is: a description
     // arrives as a template of $-tokens and reads as one if handed over raw.
     const std::string body =
-        gh->formatSpellDescription(bodySpell, gh->getSpellDescription(bodySpell));
+        gh->formatSpellDescription(bodySpell, gh->spells().getSpellDescription(bodySpell));
     if (!body.empty()) {
         wowee::ui::Widget::TooltipLine desc;
         desc.left = body;
@@ -2395,7 +2395,7 @@ int lua_Tooltip_SetTradeSkillItem(lua_State* L) {
     w->tooltipLines.push_back(std::move(title));
 
     const std::string body =
-        gh->formatSpellDescription(spellId, gh->getSpellDescription(spellId));
+        gh->formatSpellDescription(spellId, gh->spells().getSpellDescription(spellId));
     if (!body.empty()) {
         wowee::ui::Widget::TooltipLine desc;
         desc.left = body;
@@ -3047,7 +3047,7 @@ int lua_Tooltip_SetExistingSocketGem(lua_State* L) {
     const int index = static_cast<int>(luaL_optnumber(L, 2, 1)) - 1;
     if (!widgetOf(L, 1) || !gh || index < 0 || index > 2) { lua_pushboolean(L, 0); return 1; }
     const auto enchants = gh->inventory().getItemSocketEnchantIds(gh->inventory().getSocketSession().itemGuid);
-    const uint32_t gemId = gh->getEnchantGemItem(enchants[static_cast<size_t>(index)]);
+    const uint32_t gemId = gh->spells().getEnchantGemItem(enchants[static_cast<size_t>(index)]);
     lua_pushboolean(L, fillItemTooltipById(L, gh, gemId) ? 1 : 0);
     return 1;
 }

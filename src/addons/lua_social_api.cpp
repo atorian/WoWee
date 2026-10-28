@@ -1338,7 +1338,7 @@ uint32_t petSpellByName(lua_State* L, game::GameHandler* gh, const char* name) {
     std::string want(name);
     toLowerInPlace(want);
     for (uint32_t id : petOf(L).getPetSpells()) {
-        std::string have = gh->getSpellName(id);
+        std::string have = gh->spells().getSpellName(id);
         toLowerInPlace(have);
         if (have == want) return id;
     }
@@ -1971,7 +1971,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 // after and a no-op would look like the request was made.
                 {"Stuck", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) gh->castSpell(7355);
+            if (gh) gh->spells().castSpell(7355);
             return 0;
         }},
                 {"GMReportLag", [](lua_State* L) -> int { (void)L; return 0; }},
@@ -2811,7 +2811,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 // there is no DeclineTalentWipe to bind - cancelTalentWipe is
                 // this client's bookkeeping and runs when the popup goes.
                 {"ConfirmTalentWipe", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->confirmTalentWipe();
+            if (auto* gh = getGameHandler(L)) gh->spells().confirmTalentWipe();
             return 0;
         }},
                 {"AcceptGroup",         lua_AcceptGroup},
@@ -3441,7 +3441,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"CheckTalentMasterDist", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             lua_pushboolean(L,
-                gh && npcWithinInteractRange(gh, gh->getTalentWipeNpcGuid()) ? 1 : 0);
+                gh && npcWithinInteractRange(gh, gh->spells().getTalentWipeNpcGuid()) ? 1 : 0);
             return 1;
         }},
                 // ---- Reached through FrameXML's own calls, not directly ----

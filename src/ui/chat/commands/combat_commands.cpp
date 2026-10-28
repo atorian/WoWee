@@ -47,15 +47,15 @@ uint32_t resolveSpellByName(game::GameHandler& gh, const std::string& spellArg, 
 
     uint32_t bestId = 0;
     int bestRank = -1;
-    for (uint32_t sid : gh.getKnownSpells()) {
-        const std::string& sName = gh.getSpellName(sid);
+    for (uint32_t sid : gh.spells().getKnownSpells()) {
+        const std::string& sName = gh.spells().getSpellName(sid);
         if (sName.empty()) continue;
         std::string sLow = sName;
         for (char& c : sLow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (sLow != spellNameLower) continue;
 
         int sRank = 0;
-        const std::string& rk = gh.getSpellRank(sid);
+        const std::string& rk = gh.spells().getSpellRank(sid);
         if (!rk.empty()) {
             std::string rLow = rk;
             for (char& c : rLow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -111,7 +111,7 @@ public:
             uint64_t targetGuid = (castTargetOverride != static_cast<uint64_t>(-1))
                 ? castTargetOverride
                 : (ctx.gameHandler.hasTarget() ? ctx.gameHandler.getTargetGuid() : 0);
-            ctx.gameHandler.castSpell(numId, targetGuid);
+            ctx.gameHandler.spells().castSpell(numId, targetGuid);
             return {};
         }
 
@@ -121,7 +121,7 @@ public:
             uint64_t targetGuid = (castTargetOverride != static_cast<uint64_t>(-1))
                 ? castTargetOverride
                 : (ctx.gameHandler.hasTarget() ? ctx.gameHandler.getTargetGuid() : 0);
-            ctx.gameHandler.castSpell(bestSpellId, targetGuid);
+            ctx.gameHandler.spells().castSpell(bestSpellId, targetGuid);
         } else {
             // Build error message
             std::string spellName = spellArg;
@@ -255,10 +255,10 @@ public:
 
         uint32_t numId = parseNumericSpellId(ssLow);
         if (numId) {
-            ctx.gameHandler.castSpell(numId, seqTargetGuid);
+            ctx.gameHandler.spells().castSpell(numId, seqTargetGuid);
         } else {
             uint32_t best = resolveSpellByName(ctx.gameHandler, ssLow);
-            if (best) ctx.gameHandler.castSpell(best, seqTargetGuid);
+            if (best) ctx.gameHandler.spells().castSpell(best, seqTargetGuid);
         }
         return {};
     }
@@ -504,7 +504,7 @@ public:
 class StopCastingCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.stopCasting();
+        ctx.gameHandler.spells().stopCasting();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"stopcasting"}; }
@@ -515,7 +515,7 @@ public:
 class CancelQueuedSpellCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.cancelQueuedSpell();
+        ctx.gameHandler.spells().cancelQueuedSpell();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"cancelqueuedspell", "stopspellqueue"}; }

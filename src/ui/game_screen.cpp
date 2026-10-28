@@ -1503,7 +1503,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
             // an item still stuck to the pointer.
             st.holdingItem           = inventoryScreen.isHoldingItem() ||
                                        !frameXmlCursorItem().empty();
-            st.casting               = gameHandler.isCasting();
+            st.casting               = gameHandler.spells().isCasting();
             st.lootOpen              = loot::orNoLoot(services_.loot).isLootWindowOpen();
             st.gossipOpen            = gameHandler.isGossipWindowOpen();
             st.vendorOpen            = gameHandler.inventory().isVendorWindowOpen();

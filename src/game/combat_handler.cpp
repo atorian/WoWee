@@ -496,7 +496,7 @@ void CombatHandler::addCombatText(CombatTextEntry::Type type, int32_t amount, ui
         char srcBuf[32], dstBuf[32];
         snprintf(srcBuf, sizeof(srcBuf), "0x%016llX", (unsigned long long)effectiveSrc);
         snprintf(dstBuf, sizeof(dstBuf), "0x%016llX", (unsigned long long)effectiveDst);
-        std::string spellName = (spellId != 0) ? owner_.getSpellName(spellId) : std::string{};
+        std::string spellName = (spellId != 0) ? owner_.spells().getSpellName(spellId) : std::string{};
         std::string timestamp = std::to_string(static_cast<double>(std::time(nullptr)));
         owner_.fireAddonEvent("COMBAT_LOG_EVENT_UNFILTERED", {
             timestamp, subevent,

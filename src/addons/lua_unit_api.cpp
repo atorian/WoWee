@@ -1155,11 +1155,11 @@ static int lua_UnitCharacterPoints(lua_State* L) {
 
     constexpr int kMaxPrimaryProfessions = 2;
     int known = 0;
-    for (const auto& [skillId, skill] : gh->getPlayerSkills()) {
+    for (const auto& [skillId, skill] : gh->spells().playerSkills()) {
         (void)skill;
-        if (gh->getSkillCategory(skillId) == 11) ++known;
+        if (gh->spells().skillCategory(skillId) == 11) ++known;
     }
-    lua_pushinteger(L, static_cast<lua_Integer>(gh->getUnspentTalentPoints()));
+    lua_pushinteger(L, static_cast<lua_Integer>(gh->spells().getUnspentTalentPoints()));
     lua_pushinteger(L, std::max(0, kMaxPrimaryProfessions - known));
     return 2;
 }
@@ -1223,7 +1223,7 @@ static int lua_IsStealthed(lua_State* L) {
     // WoW detects stealth via unit flags: UNIT_FLAG_IMMUNE (0x02) or specific aura IDs
     // Simplified: check player auras for known stealth spell IDs
     bool stealthed = false;
-    for (const auto& a : gh->getPlayerAuras()) {
+    for (const auto& a : gh->spells().getPlayerAuras()) {
         if (a.isEmpty() || a.spellId == 0) continue;
         // Common stealth IDs: 1784 (Stealth), 5215 (Prowl), 66 (Invisibility)
         if (a.spellId == 1784 || a.spellId == 5215 || a.spellId == 66 ||
@@ -2528,7 +2528,7 @@ void registerUnitLuaAPI(lua_State* L) {
             // also read, filtered the same way. The bar walks
             // 1..GetNumShapeshiftForms() and asks about each index, so all
             // three have to be looking at the same list in the same order.
-            const auto forms = game::knownShapeshiftForms(classId, gh->getKnownSpells());
+            const auto forms = game::knownShapeshiftForms(classId, gh->spells().getKnownSpells());
             if (static_cast<size_t>(index) > forms.size()) { return luaReturnNil(L); }
             const auto& fi = forms[static_cast<size_t>(index) - 1];
             lua_pushstring(L, fi.icon);                          // icon
@@ -3230,8 +3230,8 @@ void registerUnitLuaAPI(lua_State* L) {
             float left = 0.0f, total = 0.0f;
             if (index <= static_cast<int>(list.size())) {
                 const uint32_t spellId = list[static_cast<size_t>(index) - 1].spellId;
-                left = gh->getSpellCooldown(spellId);
-                total = gh->getSpellCooldownTotal(spellId);
+                left = gh->spells().getSpellCooldown(spellId);
+                total = gh->spells().getSpellCooldownTotal(spellId);
                 if (total < left) total = left;
             }
             if (left <= 0.01f) {
@@ -3252,7 +3252,7 @@ void registerUnitLuaAPI(lua_State* L) {
             if (!gh || index < 1) return 0;
             const auto& list = gh->getCompanions(std::string(kind) == "MOUNT");
             if (index <= static_cast<int>(list.size())) {
-                gh->castSpell(list[static_cast<size_t>(index) - 1].spellId, 0);
+                gh->spells().castSpell(list[static_cast<size_t>(index) - 1].spellId, 0);
             }
             return 0;
         }},
@@ -3264,9 +3264,9 @@ void registerUnitLuaAPI(lua_State* L) {
             if (!gh) return 0;
             const auto& list = gh->getCompanions(std::string(kind) == "MOUNT");
             for (const auto& c : list) {
-                for (const auto& a : gh->getPlayerAuras()) {
+                for (const auto& a : gh->spells().getPlayerAuras()) {
                     if (a.spellId != c.spellId) continue;
-                    gh->cancelAura(c.spellId);
+                    gh->spells().cancelAura(c.spellId);
                     return 0;
                 }
             }

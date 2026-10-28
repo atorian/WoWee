@@ -302,8 +302,8 @@ void SpellbookScreen::renderSpellTooltip(const SpellInfo* info, game::GameHandle
             const char* powerName = game::powerTypeName(info->powerType);
             if (!powerName) powerName = "Mana";
             // Apply SMSG_SET_FLAT/PCT_SPELL_MODIFIER Cost modifier (SpellModOp::Cost = 14)
-            int32_t flatCost = gameHandler.getSpellFlatMod(game::GameHandler::SpellModOp::Cost);
-            int32_t pctCost  = gameHandler.getSpellPctMod(game::GameHandler::SpellModOp::Cost);
+            int32_t flatCost = gameHandler.spells().spellFlatMod(game::GameHandler::SpellModOp::Cost);
+            int32_t pctCost  = gameHandler.spells().spellPctMod(game::GameHandler::SpellModOp::Cost);
             uint32_t displayCost = static_cast<uint32_t>(
                 game::GameHandler::applySpellMod(static_cast<int32_t>(info->manaCost), flatCost, pctCost));
             std::snprintf(costBuf, sizeof(costBuf), "%u %s", displayCost, powerName);
@@ -315,8 +315,8 @@ void SpellbookScreen::renderSpellTooltip(const SpellInfo* info, game::GameHandle
             std::snprintf(castBuf, sizeof(castBuf), "Instant cast");
         } else {
             // Apply SpellModOp::CastingTime (10) modifiers
-            int32_t flatCT = gameHandler.getSpellFlatMod(game::GameHandler::SpellModOp::CastingTime);
-            int32_t pctCT  = gameHandler.getSpellPctMod(game::GameHandler::SpellModOp::CastingTime);
+            int32_t flatCT = gameHandler.spells().spellFlatMod(game::GameHandler::SpellModOp::CastingTime);
+            int32_t pctCT  = gameHandler.spells().spellPctMod(game::GameHandler::SpellModOp::CastingTime);
             int32_t modCT  = game::GameHandler::applySpellMod(
                 static_cast<int32_t>(info->castTimeMs), flatCT, pctCT);
             float secs = static_cast<float>(modCT) / 1000.0f;
@@ -349,7 +349,7 @@ void SpellbookScreen::renderSpellTooltip(const SpellInfo* info, game::GameHandle
     }
 
     // Cooldown if active
-    float cd = gameHandler.getSpellCooldown(info->spellId);
+    float cd = gameHandler.spells().getSpellCooldown(info->spellId);
     if (cd > 0.0f) {
         ImGui::TextColored(ui::colors::kRed, "Cooldown: %.1fs", cd);
     }

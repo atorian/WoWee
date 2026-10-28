@@ -59,7 +59,7 @@ void CombatUI::renderCooldownTracker(game::GameHandler& gameHandler,
                                      const SpellIconFn& getSpellIcon) {
     if (!settings.showCooldownTracker_) return;
 
-    const auto& cooldowns = gameHandler.getSpellCooldowns();
+    const auto& cooldowns = gameHandler.spells().getSpellCooldowns();
     if (cooldowns.empty()) return;
 
     // Collect spells with remaining cooldown > 0.5s (skip GCD noise)
@@ -106,7 +106,7 @@ void CombatUI::renderCooldownTracker(game::GameHandler& gameHandler,
         for (const auto& cd : active) {
             if (shown >= MAX_SHOWN) break;
 
-            const std::string& name = gameHandler.getSpellName(cd.spellId);
+            const std::string& name = gameHandler.spells().getSpellName(cd.spellId);
             if (name.empty()) continue;  // skip unnamed spells (internal/passive)
 
             // Small icon if available
@@ -380,7 +380,7 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler) {
                                  : ImVec4(0.5f, 0.9f, 1.0f, alpha);
                 break;
             case game::CombatTextEntry::REFLECT: {
-                const std::string& reflectName = entry.spellId ? gameHandler.getSpellName(entry.spellId) : "";
+                const std::string& reflectName = entry.spellId ? gameHandler.spells().getSpellName(entry.spellId) : "";
                 if (!reflectName.empty())
                     snprintf(text, sizeof(text), outgoing ? "Reflected: %s" : "Reflect: %s", reflectName.c_str());
                 else
@@ -390,7 +390,7 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler) {
                 break;
             }
             case game::CombatTextEntry::PROC_TRIGGER: {
-                const std::string& procName = entry.spellId ? gameHandler.getSpellName(entry.spellId) : "";
+                const std::string& procName = entry.spellId ? gameHandler.spells().getSpellName(entry.spellId) : "";
                 if (!procName.empty())
                     snprintf(text, sizeof(text), "%s!", procName.c_str());
                 else
@@ -400,7 +400,7 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler) {
             }
             case game::CombatTextEntry::DISPEL:
                 if (entry.spellId != 0) {
-                    const std::string& dispelledName = gameHandler.getSpellName(entry.spellId);
+                    const std::string& dispelledName = gameHandler.spells().getSpellName(entry.spellId);
                     if (!dispelledName.empty())
                         snprintf(text, sizeof(text), "Dispel %s", dispelledName.c_str());
                     else
@@ -412,7 +412,7 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler) {
                 break;
             case game::CombatTextEntry::STEAL:
                 if (entry.spellId != 0) {
-                    const std::string& stolenName = gameHandler.getSpellName(entry.spellId);
+                    const std::string& stolenName = gameHandler.spells().getSpellName(entry.spellId);
                     if (!stolenName.empty())
                         snprintf(text, sizeof(text), "Spellsteal %s", stolenName.c_str());
                     else
@@ -423,7 +423,7 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler) {
                 color = ImVec4(0.8f, 0.7f, 1.0f, alpha);
                 break;
             case game::CombatTextEntry::INTERRUPT: {
-                const std::string& interruptedName = entry.spellId ? gameHandler.getSpellName(entry.spellId) : "";
+                const std::string& interruptedName = entry.spellId ? gameHandler.spells().getSpellName(entry.spellId) : "";
                 if (!interruptedName.empty())
                     snprintf(text, sizeof(text), "Interrupt %s", interruptedName.c_str());
                 else
@@ -840,7 +840,7 @@ void CombatUI::renderCombatLog(game::GameHandler& gameHandler,
             using T = game::CombatTextEntry;
             const char* src = e.sourceName.empty() ? (e.isPlayerSource ? "You" : "?") : e.sourceName.c_str();
             const char* tgt = e.targetName.empty() ? "?" : e.targetName.c_str();
-            const std::string& spellName = (e.spellId != 0) ? gameHandler.getSpellName(e.spellId) : std::string();
+            const std::string& spellName = (e.spellId != 0) ? gameHandler.spells().getSpellName(e.spellId) : std::string();
             const char* spell = spellName.empty() ? nullptr : spellName.c_str();
 
             switch (e.type) {

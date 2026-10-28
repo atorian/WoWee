@@ -254,23 +254,23 @@ public:
     std::string playerName(uint64_t guid) const override { return lookupName(guid); }
     void requestPlayerName(uint64_t guid) override { queryPlayerName(guid); }
     bool inGuild() const override;
-    std::string spellName(uint32_t spellId) const override { return getSpellName(spellId); }
-    bool spellKnownToClient(uint32_t spellId) const override { return isSpellKnownToClient(spellId); }
-    uint32_t spellImplicitTargetA(uint32_t spellId) const override { return getSpellImplicitTargetA(spellId); }
-    uint32_t spellTargetFlags(uint32_t spellId) const override { return getSpellTargetFlags(spellId); }
+    std::string spellName(uint32_t spellId) const override { return spellHandler_->getSpellName(spellId); }
+    bool spellKnownToClient(uint32_t spellId) const override { return spellHandler_->isSpellKnownToClient(spellId); }
+    uint32_t spellImplicitTargetA(uint32_t spellId) const override { return spellHandler_->getSpellImplicitTargetA(spellId); }
+    uint32_t spellTargetFlags(uint32_t spellId) const override { return spellHandler_->getSpellTargetFlags(spellId); }
     std::array<uint32_t, 3> spellEffects(uint32_t spellId) const override;
     uint32_t classSkillLineOf(uint32_t spellId) override;
-    std::string skillLineName(uint32_t skillLineId) const override { return getSkillLineName(skillLineId); }
+    std::string skillLineName(uint32_t skillLineId) const override { return spellHandler_->getSkillLineName(skillLineId); }
     std::string itemIconPath(uint32_t displayInfoId) const override { return getItemIconPath(displayInfoId); }
     std::string randomPropertyName(int32_t id) const override { return getRandomPropertyName(id); }
     std::vector<RandomStatBonus> randomStatBonuses(int32_t id, uint32_t suffixFactor) const override {
         return getRandomStatBonuses(id, suffixFactor);
     }
-    std::string enchantName(uint32_t enchantId) const override { return getEnchantName(enchantId); }
-    bool casting() const override { return isCasting(); }
-    uint32_t currentCastSpellId() const override { return getCurrentCastSpellId(); }
-    bool restoring() const override { return isRestoring(); }
-    bool craftingWindowOpen() const override { return isCraftingWindowOpen(); }
+    std::string enchantName(uint32_t enchantId) const override { return spellHandler_->getEnchantName(enchantId); }
+    bool casting() const override { return spellHandler_->isCasting(); }
+    uint32_t currentCastSpellId() const override { return spellHandler_->getCurrentCastSpellId(); }
+    bool restoring() const override { return spellHandler_->isRestoring(); }
+    bool craftingWindowOpen() const override { return spellHandler_->isCraftingWindowOpen(); }
     bool mounted() const override { return isMounted(); }
     uint32_t mountAuraSpellId() const override { return getMountAuraSpellId(); }
     bool carriesAura(uint32_t spellId) const override { return playerCarriesAura(spellId); }
@@ -360,7 +360,7 @@ public:
     std::string mapName(uint32_t mapId) const override { return getMapName(mapId); }
     std::string areaName(uint32_t areaId) const override { return getAreaName(areaId); }
     std::string lfgDungeonName(uint32_t dungeonId) const override { return getLfgDungeonName(dungeonId); }
-    uint8_t spellDispelType(uint32_t spellId) const override { return getSpellDispelType(spellId); }
+    uint8_t spellDispelType(uint32_t spellId) const override { return spellHandler_->getSpellDispelType(spellId); }
     const std::unordered_map<uint32_t, TalentTabEntry>& talentTabs() override {
         spellHandler_->loadTalentDbc();
         return spellHandler_->getAllTalentTabs();
@@ -485,7 +485,6 @@ public:
     /// talent-wipe confirmation is. Both dialogs close themselves when the
     /// player walks out of range, which is the only thing these answer.
     uint64_t getBinderGuid() const { return binderGuid_; }
-    uint64_t getTalentWipeNpcGuid() const;
 
     /// How a player in the world looks: race, gender, the packed appearance
     /// bytes and the facial-feature byte. False for anything that is not a
@@ -876,9 +875,6 @@ public:
 
     // Combat
     void reportPlayer(uint64_t targetGuid, const std::string& reason);
-    void stopCasting();
-    void resetCastState();       // force-clear all cast/craft/queue state without sending packets
-    void clearUnitCaches();      // clear per-unit cast states and aura caches
 
     void queryPlayerName(uint64_t guid) override;
 
@@ -955,18 +951,7 @@ public:
     const std::vector<ThreatEntry>* getThreatList(uint64_t unitGuid) const;
     const std::vector<ThreatEntry>* getTargetThreatList() const;
 
-    void castSpell(uint32_t spellId, uint64_t targetGuid = 0);
     void cancelCast() override;
-    void cancelAura(uint32_t spellId);
-
-    const std::unordered_set<uint32_t>& getKnownSpells() const {
-        static const std::unordered_set<uint32_t> empty;
-        return spellHandler_->getKnownSpells();
-    }
-
-    // Spell book tabs - groups known spells by class skill line for Lua API
-    using SpellBookTab = SpellHandler::SpellBookTab;
-    const std::vector<SpellBookTab>& getSpellBookTabs();
 
     /// Forget a primary profession. The server refuses anything that is not
     /// one, so the skill panel's unlearn button is the only sensible caller.
@@ -988,80 +973,8 @@ public:
     const std::vector<MinimapPing>& getMinimapPings() const { return socialHandler_->minimapPings(); }
     void tickMinimapPings(float dt) { socialHandler_->ageMinimapPings(dt); }
 
-    bool isCasting() const { return spellHandler_->isCasting(); }
-    bool isChanneling() const { return spellHandler_->isChanneling(); }
-    bool isRestoring() const { return spellHandler_->isRestoring(); }
-    bool isGameObjectInteractionCasting() const {
-        return spellHandler_->isGameObjectInteractionCasting();
-    }
-    uint32_t getCurrentCastSpellId() const { return spellHandler_->getCurrentCastSpellId(); }
-    float getCastProgress() const { return spellHandler_->getCastProgress(); }
-    float getCastTimeRemaining() const { return spellHandler_->getCastTimeRemaining(); }
-    float getCastTimeTotal() const { return spellHandler_->getCastTimeTotal(); }
-
-    // Repeat-craft queue
-    void startCraftQueue(uint32_t spellId, int count);
-    void cancelCraftQueue();
-    int getCraftQueueRemaining() const;
-    uint32_t getCraftQueueSpellId() const;
-
-    // Crafting window (opened client-side by casting a profession spell)
-    bool isCraftingWindowOpen() const { return spellHandler_->isCraftingWindowOpen(); }
-    uint32_t getCraftingSkillLine() const { return spellHandler_->getCraftingSkillLine(); }
-    void closeCraftingWindow() { spellHandler_->closeCraftingWindow(); }
-
-    // 400ms spell-queue window: next spell to cast when current finishes
-    uint32_t getQueuedSpellId() const;
-    void cancelQueuedSpell() { spellHandler_->cancelQueuedSpell(); }
-
-    // Unit cast state (aliased from handler_types.hpp)
-    using UnitCastState = game::UnitCastState;
-    // Returns cast state for any unit by GUID (delegates to SpellHandler)
-    const UnitCastState* getUnitCastState(uint64_t guid) const {
-        return spellHandler_->getUnitCastState(guid);
-    }
-    // Convenience helpers for the current target
-    bool isTargetCasting() const { return spellHandler_->isTargetCasting(); }
-    uint32_t getTargetCastSpellId() const { return spellHandler_->getTargetCastSpellId(); }
-    float getTargetCastProgress() const { return spellHandler_->getTargetCastProgress(); }
-    float getTargetCastTimeRemaining() const { return spellHandler_->getTargetCastTimeRemaining(); }
-    bool isTargetCastInterruptible() const { return spellHandler_->isTargetCastInterruptible(); }
-
-    // Talents - delegate to SpellHandler as canonical authority
-    uint8_t getActiveTalentSpec() const { return spellHandler_->getActiveTalentSpec(); }
-    uint8_t getUnspentTalentPoints() const { return spellHandler_->getUnspentTalentPoints(); }
-    uint8_t getUnspentTalentPoints(uint8_t spec) const { return spellHandler_->getUnspentTalentPoints(spec); }
-    const std::unordered_map<uint32_t, uint8_t>& getLearnedTalents() const {
-        return spellHandler_->getLearnedTalents();
-    }
-    const std::unordered_map<uint32_t, uint8_t>& getLearnedTalents(uint8_t spec) const {
-        return spellHandler_->getLearnedTalents(spec);
-    }
-
     // Glyphs (WotLK): up to 6 glyph slots per spec (3 major + 3 minor)
     static constexpr uint8_t MAX_GLYPH_SLOTS = 6;
-    const std::array<uint16_t, MAX_GLYPH_SLOTS>& getGlyphs() const {
-        return spellHandler_->getGlyphs();
-    }
-    const std::array<uint16_t, MAX_GLYPH_SLOTS>& getGlyphs(uint8_t spec) const {
-        return spellHandler_->getGlyphs(spec);
-    }
-    uint8_t getTalentRank(uint32_t talentId) const {
-        return spellHandler_->getTalentRank(talentId);
-    }
-    void learnTalent(uint32_t talentId, uint32_t requestedRank);
-    void switchTalentSpec(uint8_t newSpec);
-
-    // Talent DBC access
-    const TalentEntry* getTalentEntry(uint32_t talentId) const {
-        return spellHandler_->getTalentEntry(talentId);
-    }
-    const TalentTabEntry* getTalentTabEntry(uint32_t tabId) const {
-        return spellHandler_->getTalentTabEntry(tabId);
-    }
-    const std::unordered_map<uint32_t, TalentEntry>& getAllTalents() const;
-    const std::unordered_map<uint32_t, TalentTabEntry>& getAllTalentTabs() const;
-    void loadTalentDbc();
 
     // Action bar - ActionBarHandler's. A facade for the callers that have
     // not moved; new code asks actionBar().
@@ -1089,21 +1002,10 @@ public:
     /// racial or a tracking buff instead.
     [[nodiscard]] bool playerCarriesAura(uint32_t spellId) const {
         if (spellId == 0) return false;
-        for (const auto& aura : getPlayerAuras()) {
+        for (const auto& aura : spellHandler_->getPlayerAuras()) {
             if (!aura.isEmpty() && aura.spellId == spellId) return true;
         }
         return false;
-    }
-
-    const std::vector<AuraSlot>& getPlayerAuras() const {
-        return spellHandler_->getPlayerAuras();
-    }
-    const std::vector<AuraSlot>& getTargetAuras() const {
-        return spellHandler_->getTargetAuras();
-    }
-    // Per-unit aura cache (populated for party members and any unit we receive updates for)
-    const std::vector<AuraSlot>* getUnitAuras(uint64_t guid) const {
-        return spellHandler_->getUnitAuras(guid);
     }
 
     // Completed quests (populated from SMSG_QUERY_QUESTS_COMPLETED_RESPONSE)
@@ -1194,10 +1096,6 @@ public:
     uint32_t getPlayerRestedXp() const { return playerRestedXp_; }
     bool isPlayerResting() const { return isResting_; }
     uint32_t getPlayerLevel() const { return serverPlayerLevel_; }
-    const std::vector<uint32_t>& getPlayerExploredZoneMasks() const {
-        return spellHandler_->exploredZoneMasks();
-    }
-    bool hasPlayerExploredZoneMasks() const { return spellHandler_->hasExploredZoneMasks(); }
     static uint32_t killXp(uint32_t playerLevel, uint32_t victimLevel);
 
     // Server game time now, in HOURS since midnight (0.0-24.0), or -1 before
@@ -1212,25 +1110,13 @@ public:
     float getGameTime() const;
 
     // Global Cooldown (GCD) - set when the server sends a spellId=0 cooldown entry
-    float getGCDRemaining() const;
-    float getGCDTotal() const;
-    bool isGCDActive() const { return getGCDRemaining() > 0.0f; }
+    bool isGCDActive() const { return spellHandler_->getGCDRemaining() > 0.0f; }
 
     // Player skills
-    const std::unordered_map<uint32_t, PlayerSkill>& getPlayerSkills() const {
-        return spellHandler_->playerSkills();
-    }
-    const std::string& getSkillName(uint32_t skillId) const;
-    /// The heading a skill is filed under, and that heading's name and place.
-    /// Zero and empty for a skill the file does not categorise.
-    const std::string& getSkillCategoryName(uint32_t categoryId) const;
-    uint32_t getSkillCategorySortIndex(uint32_t categoryId) const;
     bool isSkillCategoryCollapsed(uint32_t categoryId) const {
         return collapsedSkillCategories_.count(categoryId) > 0;
     }
     void setSkillCategoryCollapsed(uint32_t categoryId, bool collapsed);
-    uint32_t getSkillCategory(uint32_t skillId) const;
-    bool isProfessionSpell(uint32_t spellId) const;
 
     // Knockback callback: called when server sends SMSG_MOVE_KNOCK_BACK for the player.
     // Parameters: vcos, vsin (2D direction vector in server/wire coord space - the
@@ -1427,14 +1313,6 @@ public:
     bool completePlayerTransportWorldTransfer(uint64_t transportGuid,
                                               glm::vec3& worldPosition);
 
-    // Cooldowns
-    float getSpellCooldown(uint32_t spellId) const;
-    float getSpellCooldownTotal(uint32_t spellId) const;
-    const std::unordered_map<uint32_t, float>& getSpellCooldowns() const {
-        static const std::unordered_map<uint32_t, float> empty;
-        return spellHandler_->getSpellCooldowns();
-    }
-
     // Player GUID
     uint64_t getPlayerGuid() const { return playerGuid; }
 
@@ -1491,10 +1369,6 @@ public:
     bool canSelfRes() const { return selfResAvailable_; }
     /** Send CMSG_SELF_RES to use Reincarnation / Twisting Nether. */
     void useSelfRes();
-    bool showTalentWipeConfirmDialog() const;
-    uint32_t getTalentWipeCost() const;
-    void confirmTalentWipe();
-    void cancelTalentWipe();
 
     // Barber shop
     bool isBarberShopOpen() const { return barberShopOpen_; }
@@ -1799,8 +1673,6 @@ public:
     // Talent-driven spell modifiers (SMSG_SET_FLAT_SPELL_MODIFIER /
     // SMSG_SET_PCT_SPELL_MODIFIER), kept by the spell book.
     using SpellModOp = game::SpellModOp;
-    int32_t getSpellFlatMod(SpellModOp op) const { return spellHandler_->spellFlatMod(op); }
-    int32_t getSpellPctMod(SpellModOp op) const { return spellHandler_->spellPctMod(op); }
 
     // Convenience: apply flat+pct modifier to a base value.
     // result = (base + flatMod) * (1.0 + pctMod/100.0), clamped to >= 0.
@@ -1812,12 +1684,9 @@ public:
 
     // Shaman totems (4 slots: 0=Earth, 1=Fire, 2=Water, 3=Air), kept by the
     // spell book.
-    using TotemSlot = game::TotemSlot;
     static constexpr int NUM_TOTEM_SLOTS = kTotemSlots;
     /// Pull down a totem by the slot it stands in.
     void destroyTotem(int slot);
-
-    const TotemSlot& getTotemSlot(int slot) const { return spellHandler_->totemSlot(slot); }
 
     bool isServerMovementAllowed() const;
 
@@ -1834,12 +1703,7 @@ public:
         uint32_t str = 0, agi = 0, sta = 0, intel = 0, spi = 0;
     };
 
-    // Temporary weapon enchant timers (from SMSG_ITEM_ENCHANT_TIME_UPDATE), the
-    // inventory's.
-    using TempEnchantTimer = game::TempEnchantTimer;
-
-    // ---- Readable text (books / scrolls / notes) - the inventory's ----
-    using BookPage = game::BookPage;
+    // ---- Readable text (books / scrolls / notes) ----
     /// PageTextMaterial.dbc's name for a material id, empty for none. The
     /// interface wants the word, not the number - it picks a texture and a
     /// text colour by it.
@@ -2145,20 +2009,7 @@ public:
 
     /// One row of a profession's recipe list (game/craft_recipe.hpp).
     using CraftRecipe = game::CraftRecipe;
-    /// The known recipes of the profession whose window is open.
-    ///
-    /// Shared with the interface rather than rebuilt there: the difficulty
-    /// bands and the reagent arithmetic are fiddly enough that two copies
-    /// would drift, and a recipe that is orange in one window and yellow in
-    /// the other is a bug nobody can explain.
-    std::vector<CraftRecipe> getCraftingRecipes() const;
-    /// How many of an item the backpack and equipped bags hold together.
 
-    // Trainer
-    const std::string& getSpellName(uint32_t spellId) const;
-    const std::string& getSpellRank(uint32_t spellId) const;
-    /// Returns the tooltip/description text from Spell.dbc (empty if unknown or has no text).
-    const std::string& getSpellDescription(uint32_t spellId) const;
     /// Substitute WoW description tokens in `raw` using live spell data: $s/$o/$m/$M base
     /// points and $d durations (incl. cross-spell $<spellId> references), plus $l/$g
     /// plural/gender forms. Unresolvable tokens ($h proc chance, $t period) are stripped
@@ -2174,49 +2025,8 @@ public:
                      : nullptr;
     }
     std::string formatSpellDescription(uint32_t selfSpellId, const std::string& raw) const;
-    // SpellFocusObject.dbc name ("Anvil", "Cooking Fire", ...) for
-    // requires-spell-focus cast failures; empty if unknown.
-    const std::string& getSpellFocusName(uint32_t focusId) const;
-    // TotemCategory.dbc name ("Blacksmith Hammer", "Mining Pick", ...) for
-    // totem-category cast failures; empty if unknown.
-    const std::string& getTotemCategoryName(uint32_t categoryId) const;
-    const int32_t* getSpellEffectBasePoints(uint32_t spellId) const;
-    float getSpellDuration(uint32_t spellId) const;
-    std::string getEnchantName(uint32_t enchantId) const;
-    /// The gem item an enchantment came out of; 0 when it is not a gem.
-    uint32_t getEnchantGemItem(uint32_t enchantId) const;
-    // Refunds and held items - the inventory's; these forward for the old callers.
-    using ItemRefundInfo = game::ItemRefundInfo;
-    /// The skill's own name, by SkillLine.dbc id.
-    const std::string& getSkillLineName(uint32_t skillLineId) const;
-    /// Returns the DispelType for a spell (0=none,1=magic,2=curse,3=disease,4=poison,5+=other)
-    uint8_t getSpellDispelType(uint32_t spellId) const;
-    /// Returns true if the spell can be interrupted by abilities like Kick/Counterspell.
-    /// False for spells with SPELL_ATTR_EX_NOT_INTERRUPTIBLE (attrEx bit 4 = 0x10).
-    bool isSpellInterruptible(uint32_t spellId) const;
-    /// True for a spell that is never cast - a talent's passive effect, a
-    /// permanent aura. The spell book draws these without a cast border and
-    /// refuses to put them on the action bar.
-    bool isSpellPassive(uint32_t spellId) const;
-    /// Returns the school bitmask for the spell from Spell.dbc
-    /// (0x01=Physical, 0x02=Holy, 0x04=Fire, 0x08=Nature, 0x10=Frost, 0x20=Shadow, 0x40=Arcane).
-    /// Returns 0 if unknown.
-    uint32_t getSpellSchoolMask(uint32_t spellId) const;
-    uint32_t getSpellVisualId(uint32_t spellId) const;
-    /// Returns the Spell.dbc Targets bitmask (SpellCastTargetFlags) for the spell.
-    /// 0x10 = TARGET_FLAG_ITEM, meaning the spell must be cast onto another item.
-    uint32_t getSpellTargetFlags(uint32_t spellId) const;
-    /// Spell.dbc's EffectImplicitTargetA - what the spell aims at.
-    ///
-    /// Not the same question as getSpellTargetFlags: that column is zero for
-    /// most spells, bandages included, so it cannot say whether one needs a
-    /// target. This one carries it.
-    uint32_t getSpellImplicitTargetA(uint32_t spellId) const;
-    bool isSpellKnownToClient(uint32_t spellId) const;
-    // Spell.dbc TargetAuraState (aura state the target must be in; 0 = no requirement).
-    uint32_t getSpellTargetAuraState(uint32_t spellId) const;
 
-    // Item templates and held items - the inventory's; forwarded for the old callers.
+    // Item templates - the inventory's.
     void ensureItemInfo(uint32_t entry) override { inventoryHandler_->ensureItemInfo(entry); }
 
     /**
@@ -2386,11 +2196,6 @@ public:
     auto& playerXpRef() { return playerXp_; }
     auto& isRestingRef() { return isResting_; }
 
-    // ── Skills ───────────────────────────────────────────────────────
-    const std::string& getSkillDescription(uint32_t skillId) const {
-        return spellHandler_->skillLineDescription(skillId);
-    }
-
     // ── World, Map & Zones ───────────────────────────────────────────
     auto& currentMapIdRef() { return currentMapId_; }
     auto& worldStateMapIdRef() { return worldStateMapId_; }
@@ -2513,13 +2318,8 @@ public:
     Unit* getUnitByGuid(uint64_t guid);
     void cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries,
                                        const std::array<uint16_t, 19>& enchantIds) override;
-    void extractSkillFields(const FlatFieldMap& fields);
-    void extractExploredZoneFields(const FlatFieldMap& fields);
     void applyQuestStateFromFields(const FlatFieldMap& fields);
     void sanitizeMovementForTaxi();
-    void loadSpellNameCache() const;
-    void loadSkillLineDbc() const;
-    void loadSkillLineAbilityDbc();
     std::string getLfgDungeonName(uint32_t dungeonId) const;
     /// The mounts and critters the player knows, as the pet tab lists them.
     ///
@@ -2591,7 +2391,6 @@ public:
             default:         return {};
         }
     }
-    using OnlineItemInfo = game::OnlineItemInfo;
     bool isHostileFaction(uint32_t factionTemplateId) const {
         if (const int atWar = factionAtWarLive(factionTemplateId); atWar >= 0) return atWar == 1;
         auto it = factionHostileMap_.find(factionTemplateId);
@@ -2689,8 +2488,6 @@ private:
     // handleAttackStart, handleAttackStop, handleAttackerStateUpdate,
     // handleSpellDamageLog, handleSpellHealLog removed
 
-    // ---- Equipment set handler ----
-    void handleUpdateAuraDuration(uint8_t slot, uint32_t durationMs);
     // handleSetForcedReactions - dispatched via CombatHandler
 
 

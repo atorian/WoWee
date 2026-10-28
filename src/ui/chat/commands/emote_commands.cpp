@@ -99,10 +99,10 @@ public:
 class CancelFormCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        for (const auto& aura : ctx.gameHandler.getPlayerAuras()) {
+        for (const auto& aura : ctx.gameHandler.spells().getPlayerAuras()) {
             if (aura.spellId == 0) continue;
             if (aura.flags & 0x20) {
-                ctx.gameHandler.cancelAura(aura.spellId);
+                ctx.gameHandler.spells().cancelAura(aura.spellId);
                 break;
             }
         }
@@ -130,19 +130,19 @@ public:
             if (isNum) {
                 uint32_t spellId = 0;
                 try { spellId = static_cast<uint32_t>(std::stoul(numStr)); } catch (...) {}
-                if (spellId) ctx.gameHandler.cancelAura(spellId);
+                if (spellId) ctx.gameHandler.spells().cancelAura(spellId);
                 return {};
             }
         }
         // Name match against player auras
         std::string argLow = auraArg;
         for (char& c : argLow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        for (const auto& aura : ctx.gameHandler.getPlayerAuras()) {
+        for (const auto& aura : ctx.gameHandler.spells().getPlayerAuras()) {
             if (aura.spellId == 0) continue;
-            std::string sn = ctx.gameHandler.getSpellName(aura.spellId);
+            std::string sn = ctx.gameHandler.spells().getSpellName(aura.spellId);
             for (char& c : sn) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             if (sn == argLow) {
-                ctx.gameHandler.cancelAura(aura.spellId);
+                ctx.gameHandler.spells().cancelAura(aura.spellId);
                 break;
             }
         }

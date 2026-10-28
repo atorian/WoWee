@@ -1303,10 +1303,6 @@ void GameHandler::queryServerTime(bool announce) {
     socialHandler_->queryServerTime(announce);
 }
 
-uint64_t GameHandler::getTalentWipeNpcGuid() const {
-    return spellHandler_->getTalentWipeNpcGuid();
-}
-
 uint32_t GameHandler::getSecondsUntilDailyReset() const {
     return socialHandler_->getSecondsUntilDailyReset();
 }
@@ -1413,18 +1409,6 @@ void GameHandler::setSavedInstanceExtend(uint32_t mapId, uint32_t difficulty, bo
 
 void GameHandler::reportPlayer(uint64_t targetGuid, const std::string& reason) {
     socialHandler_->reportPlayer(targetGuid, reason);
-}
-
-void GameHandler::stopCasting() {
-    spellHandler_->stopCasting();
-}
-
-void GameHandler::resetCastState() {
-    spellHandler_->resetCastState();
-}
-
-void GameHandler::clearUnitCaches() {
-    spellHandler_->clearUnitCaches();
 }
 
 void GameHandler::releaseSpirit() {
@@ -1696,24 +1680,8 @@ void GameHandler::checkAreaTriggers() {
 // Spells
 // ============================================================
 
-void GameHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
-    spellHandler_->castSpell(spellId, targetGuid);
-}
-
 void GameHandler::cancelCast() {
     spellHandler_->cancelCast();
-}
-
-void GameHandler::startCraftQueue(uint32_t spellId, int count) {
-    spellHandler_->startCraftQueue(spellId, count);
-}
-
-void GameHandler::cancelCraftQueue() {
-    spellHandler_->cancelCraftQueue();
-}
-
-void GameHandler::cancelAura(uint32_t spellId) {
-    spellHandler_->cancelAura(spellId);
 }
 
 void GameHandler::dismissCritter() {
@@ -1747,31 +1715,6 @@ void GameHandler::resetInstances() {
     network::Packet pkt(wireOpcode(Opcode::CMSG_RESET_INSTANCES));
     getSocket()->send(pkt);
     LOG_INFO("Sent CMSG_RESET_INSTANCES");
-}
-
-
-float GameHandler::getSpellCooldown(uint32_t spellId) const {
-    return spellHandler_->getSpellCooldown(spellId);
-}
-
-float GameHandler::getSpellCooldownTotal(uint32_t spellId) const {
-    return spellHandler_->getSpellCooldownTotal(spellId);
-}
-
-// ============================================================
-// Talents
-// ============================================================
-
-void GameHandler::learnTalent(uint32_t talentId, uint32_t requestedRank) {
-    spellHandler_->learnTalent(talentId, requestedRank);
-}
-
-void GameHandler::switchTalentSpec(uint8_t newSpec) {
-    spellHandler_->switchTalentSpec(newSpec);
-}
-
-void GameHandler::confirmTalentWipe() {
-    spellHandler_->confirmTalentWipe();
 }
 
 void GameHandler::sendAlterAppearance(uint32_t hairStyleEntry, uint32_t hairColor,
@@ -2469,7 +2412,7 @@ void GameHandler::preloadDBCCaches() const {
     LOG_INFO("Pre-loading DBC caches during world entry...");
     auto t0 = std::chrono::steady_clock::now();
 
-    loadSpellNameCache();   // Spell.dbc - largest, ~170ms cold
+    spellHandler_->loadSpellNameCache();   // Spell.dbc - largest, ~170ms cold
     title::orNoTitles(services_.titles).loadTitles();   // CharTitles.dbc
     reputation::orNoReputation(services_.reputation).loadFactions();   // Faction.dbc
     loadAreaNameCache();    // WorldMapArea.dbc
@@ -2479,60 +2422,6 @@ void GameHandler::preloadDBCCaches() const {
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
     LOG_INFO("DBC cache pre-load complete in ", elapsed, " ms");
-}
-
-void GameHandler::loadSpellNameCache() const {
-    spellHandler_->loadSpellNameCache();
-}
-
-void GameHandler::loadSkillLineAbilityDbc() {
-    spellHandler_->loadSkillLineAbilityDbc();
-}
-
-const std::vector<GameHandler::SpellBookTab>& GameHandler::getSpellBookTabs() {
-    static const std::vector<SpellBookTab> kEmpty;
-    return spellHandler_->getSpellBookTabs();
-}
-
-
-void GameHandler::loadTalentDbc() {
-    spellHandler_->loadTalentDbc();
-}
-
-const int32_t* GameHandler::getSpellEffectBasePoints(uint32_t spellId) const {
-    return spellHandler_->getSpellEffectBasePoints(spellId);
-}
-
-float GameHandler::getSpellDuration(uint32_t spellId) const {
-    return spellHandler_->getSpellDuration(spellId);
-}
-
-const std::string& GameHandler::getSpellName(uint32_t spellId) const {
-    return spellHandler_->getSpellName(spellId);
-}
-
-uint32_t GameHandler::getSpellTargetFlags(uint32_t spellId) const {
-    return spellHandler_->getSpellTargetFlags(spellId);
-}
-
-uint32_t GameHandler::getSpellImplicitTargetA(uint32_t spellId) const {
-    return spellHandler_->getSpellImplicitTargetA(spellId);
-}
-
-bool GameHandler::isSpellKnownToClient(uint32_t spellId) const {
-    return spellHandler_->isSpellKnownToClient(spellId);
-}
-
-uint32_t GameHandler::getSpellTargetAuraState(uint32_t spellId) const {
-    return spellHandler_->getSpellTargetAuraState(spellId);
-}
-
-const std::string& GameHandler::getSpellRank(uint32_t spellId) const {
-    return spellHandler_->getSpellRank(spellId);
-}
-
-const std::string& GameHandler::getSpellDescription(uint32_t spellId) const {
-    return spellHandler_->getSpellDescription(spellId);
 }
 
 namespace {
@@ -2563,12 +2452,12 @@ SpellDescriptionContext GameHandler::descriptionContext(
     SpellDescriptionContext ctx;
     ctx.declarations = declarations;
     ctx.magnitude = [this, spellId](int index, double& out) {
-        const int32_t* bp = getSpellEffectBasePoints(spellId);
+        const int32_t* bp = spellHandler_->getSpellEffectBasePoints(spellId);
         if (!bp || index < 0 || index > 2) return false;
         out = std::abs(static_cast<double>(bp[index]) + 1.0);
         return true;
     };
-    ctx.knowsSpell = [this](uint32_t id) { return isSpellKnownToClient(id); };
+    ctx.knowsSpell = [this](uint32_t id) { return spellHandler_->isSpellKnownToClient(id); };
     return ctx;
 }
 
@@ -2583,7 +2472,7 @@ std::string GameHandler::formatSpellDescription(uint32_t selfSpellId,
 
     // Resolve a base-point magnitude ($s/$o/$m/$M) for a spell + effect index.
     auto basePoints = [&](uint32_t sid, int idx) -> long {
-        const int32_t* bp = getSpellEffectBasePoints(sid);
+        const int32_t* bp = spellHandler_->getSpellEffectBasePoints(sid);
         if (!bp || idx < 0 || idx > 2) return LONG_MIN;
         return std::labs(static_cast<long>(bp[idx]) + 1);  // stored as value-1
     };
@@ -2716,7 +2605,7 @@ std::string GameHandler::formatSpellDescription(uint32_t selfSpellId,
                 break;
             }
             case 'd': {
-                std::string dur = formatSpellDurationSec(getSpellDuration(target));
+                std::string dur = formatSpellDurationSec(spellHandler_->getSpellDuration(target));
                 if (!dur.empty()) { out += dur; resolved = true; }
                 break;
             }
@@ -2767,46 +2656,6 @@ std::string GameHandler::formatSpellDescription(uint32_t selfSpellId,
         prevSpace = isSpace;
     }
     return cleaned;
-}
-
-const std::string& GameHandler::getSpellFocusName(uint32_t focusId) const {
-    return spellHandler_->getSpellFocusName(focusId);
-}
-
-const std::string& GameHandler::getTotemCategoryName(uint32_t categoryId) const {
-    return spellHandler_->getTotemCategoryName(categoryId);
-}
-
-std::string GameHandler::getEnchantName(uint32_t enchantId) const {
-    return spellHandler_->getEnchantName(enchantId);
-}
-
-uint32_t GameHandler::getEnchantGemItem(uint32_t enchantId) const {
-    return spellHandler_->getEnchantGemItem(enchantId);
-}
-
-uint8_t GameHandler::getSpellDispelType(uint32_t spellId) const {
-    return spellHandler_->getSpellDispelType(spellId);
-}
-
-bool GameHandler::isSpellInterruptible(uint32_t spellId) const {
-    return spellHandler_->isSpellInterruptible(spellId);
-}
-
-bool GameHandler::isSpellPassive(uint32_t spellId) const {
-    return spellHandler_->isSpellPassive(spellId);
-}
-
-uint32_t GameHandler::getSpellSchoolMask(uint32_t spellId) const {
-    return spellHandler_->getSpellSchoolMask(spellId);
-}
-
-uint32_t GameHandler::getSpellVisualId(uint32_t spellId) const {
-    return spellHandler_->getSpellVisualId(spellId);
-}
-
-const std::string& GameHandler::getSkillLineName(uint32_t skillLineId) const {
-    return spellHandler_->getSkillLineName(skillLineId);
 }
 
 

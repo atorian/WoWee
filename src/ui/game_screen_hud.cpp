@@ -532,8 +532,8 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
         wm->setMapName(minimap->getMapName());
     }
     wm->setServerExplorationMask(
-        gameHandler.getPlayerExploredZoneMasks(),
-        gameHandler.hasPlayerExploredZoneMasks());
+        gameHandler.spells().exploredZoneMasks(),
+        gameHandler.spells().hasExploredZoneMasks());
     // Which zone the player is actually in, rather than which WorldMapArea box
     // they happen to sit deepest inside. The boxes are axis-aligned rectangles
     // around irregular zones and overlap their neighbours heavily, so opening
@@ -1184,13 +1184,13 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
             const bool castBarAllowed =
                 isTarget || !isHostile ||
                 addons::storedCVarValue("showVKeyCastBar", "1") != "0";
-            const auto* cs = castBarAllowed ? gameHandler.getUnitCastState(guid) : nullptr;
+            const auto* cs = castBarAllowed ? gameHandler.spells().getUnitCastState(guid) : nullptr;
             if (cs && cs->casting && cs->timeTotal > 0.0f) {
                 float castPct = std::clamp((cs->timeTotal - cs->timeRemaining) / cs->timeTotal, 0.0f, 1.0f);
                 const float cbH = 6.0f * settingsPanel_.nameplateScale_;
 
                 // Spell icon + name above the cast bar
-                const std::string& spellName = gameHandler.getSpellName(cs->spellId);
+                const std::string& spellName = gameHandler.spells().getSpellName(cs->spellId);
                 {
                     auto* castAm = services_.assetManager;
                     VkDescriptorSet castIcon = (cs->spellId && castAm)
@@ -1254,14 +1254,14 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         // player-applied auras on the current hostile target.
         // Colors: Magic=blue, Curse=purple, Disease=yellow, Poison=green, Other=grey
         if (isTarget && unit->isHostile() && !isCorpse) {
-            const auto& auras = gameHandler.getTargetAuras();
+            const auto& auras = gameHandler.spells().getTargetAuras();
             const uint64_t pguid = gameHandler.getPlayerGuid();
             const float dotSize = 6.0f * settingsPanel_.nameplateScale_;
             const float dotGap  = 2.0f;
             float dotX = barX;
             for (const auto& aura : auras) {
                 if (aura.isEmpty() || aura.casterGuid != pguid) continue;
-                uint8_t dispelType = gameHandler.getSpellDispelType(aura.spellId);
+                uint8_t dispelType = gameHandler.spells().getSpellDispelType(aura.spellId);
                 ImU32 dotCol;
                 switch (dispelType) {
                     case 1:  dotCol = IM_COL32( 64, 128, 255, A(210)); break; // Magic   - blue
@@ -1333,7 +1333,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                     ImVec2 mouse = ImGui::GetMousePos();
                     if (mouse.x >= dotX && mouse.x < dotX + dotSize &&
                         mouse.y >= nameplateBottom && mouse.y < nameplateBottom + dotSize) {
-                        const std::string& dotSpellName = gameHandler.getSpellName(aura.spellId);
+                        const std::string& dotSpellName = gameHandler.spells().getSpellName(aura.spellId);
                         if (!dotSpellName.empty()) {
                             if (remainMs > 0) {
                                 int secs = remainMs / 1000;

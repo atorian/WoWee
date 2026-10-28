@@ -570,7 +570,7 @@ void WindowManager::renderSkillsWindow(game::GameHandler& gameHandler) {
         return;
     }
 
-    const auto& skills = gameHandler.getPlayerSkills();
+    const auto& skills = gameHandler.spells().playerSkills();
     if (skills.empty()) {
         ImGui::TextDisabled("No skill data received yet.");
         ImGui::End();
@@ -585,7 +585,7 @@ void WindowManager::renderSkillsWindow(game::GameHandler& gameHandler) {
     };
     std::map<uint32_t, std::vector<SkillEntry>> byCategory;
     for (const auto& [id, sk] : skills) {
-        uint32_t cat = gameHandler.getSkillCategory(id);
+        uint32_t cat = gameHandler.spells().skillCategory(id);
         byCategory[cat].push_back({.skillId = id, .skill = &sk});
     }
 
@@ -622,12 +622,12 @@ void WindowManager::renderSkillsWindow(game::GameHandler& gameHandler) {
         auto& entries = it->second;
         // Sort alphabetically within each category
         std::sort(entries.begin(), entries.end(), [&](const SkillEntry& a, const SkillEntry& b) {
-            return gameHandler.getSkillName(a.skillId) < gameHandler.getSkillName(b.skillId);
+            return gameHandler.spells().getSkillLineName(a.skillId) < gameHandler.spells().getSkillLineName(b.skillId);
         });
 
         if (ImGui::CollapsingHeader(label, ImGuiTreeNodeFlags_DefaultOpen)) {
             for (const auto& e : entries) {
-                const std::string& name = gameHandler.getSkillName(e.skillId);
+                const std::string& name = gameHandler.spells().getSkillLineName(e.skillId);
                 const char* displayName = name.empty() ? "Unknown" : name.c_str();
                 uint16_t val = e.skill->effectiveValue();
                 uint16_t maxVal = e.skill->maxValue;

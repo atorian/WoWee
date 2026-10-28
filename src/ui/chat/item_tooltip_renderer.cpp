@@ -230,7 +230,7 @@ void ItemTooltipRenderer::render(
                 ImGui::TextColored(ui::colors::kTooltipGold, "%s", se.name.c_str());
             for (int i = 0; i < 10; ++i) {
                 if (se.spellIds[i] == 0 || se.thresholds[i] == 0) continue;
-                const std::string& bname = gameHandler.getSpellName(se.spellIds[i]);
+                const std::string& bname = gameHandler.spells().getSpellName(se.spellIds[i]);
                 bool active = (equipped >= static_cast<int>(se.thresholds[i]));
                 ImVec4 col = active ? colors::kActiveGreen : colors::kInactiveGray;
                 if (!bname.empty())
@@ -249,10 +249,10 @@ void ItemTooltipRenderer::render(
         // 4 or 6, so those spell lines were skipped entirely here.
         const char* triggerLabel = game::itemSpellTriggerText(sp.spellTrigger);
         if (!triggerLabel) continue;
-        const std::string& spDesc = gameHandler.getSpellDescription(sp.spellId);
+        const std::string& spDesc = gameHandler.spells().getSpellDescription(sp.spellId);
         std::string spText = !spDesc.empty()
             ? gameHandler.formatSpellDescription(sp.spellId, spDesc)
-            : gameHandler.getSpellName(sp.spellId);
+            : gameHandler.spells().getSpellName(sp.spellId);
         if (!spText.empty()) {
             ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 300.0f);
             ImGui::TextColored(colors::kCyan,
@@ -284,7 +284,7 @@ void ItemTooltipRenderer::render(
             }
         }
         uint32_t playerSkillVal = 0;
-        const auto& skills = gameHandler.getPlayerSkills();
+        const auto& skills = gameHandler.spells().playerSkills();
         auto skPit = skills.find(info->requiredSkill);
         if (skPit != skills.end()) playerSkillVal = skPit->second.effectiveValue();
         bool meetsSkill = (playerSkillVal == 0 || playerSkillVal >= info->requiredSkillRank);

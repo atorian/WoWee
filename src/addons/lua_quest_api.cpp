@@ -261,14 +261,14 @@ static int lua_GetQuestRewardSpell(lua_State* L) {
     if (!gh) return luaReturnNil(L);
     const uint32_t spellId = gh->getQuestDetails().rewardSpellId;
     if (spellId == 0) return luaReturnNil(L);
-    const std::string name = gh->getSpellName(spellId);
+    const std::string name = gh->spells().getSpellName(spellId);
     if (name.empty()) return luaReturnNil(L);
     const std::string icon = gh->getSpellIconPath(spellId);
     lua_pushstring(L, icon.empty() ? "Interface\\Icons\\INV_Misc_QuestionMark"
                                    : icon.c_str());
     lua_pushstring(L, name.c_str());
-    lua_pushboolean(L, gh->isProfessionSpell(spellId) ? 1 : 0);
-    lua_pushboolean(L, gh->getKnownSpells().count(spellId) > 0 ? 1 : 0);
+    lua_pushboolean(L, gh->spells().isProfessionSpell(spellId) ? 1 : 0);
+    lua_pushboolean(L, gh->spells().getKnownSpells().count(spellId) > 0 ? 1 : 0);
     return 4;
 }
 // GetQuestLogRewardTitle() → the title a quest awards, formatted with the
@@ -1116,11 +1116,11 @@ static int lua_UseQuestLogSpecialItem(lua_State* L) {
 static std::vector<uint32_t> skillOrder(game::GameHandler* gh) {
     std::vector<uint32_t> ids;
     if (!gh) return ids;
-    const auto& skills = gh->getPlayerSkills();
+    const auto& skills = gh->spells().playerSkills();
     ids.reserve(skills.size());
     for (const auto& [id, skill] : skills) ids.push_back(id);
     std::sort(ids.begin(), ids.end(), [gh](uint32_t a, uint32_t b) {
-        const std::string &na = gh->getSkillName(a), &nb = gh->getSkillName(b);
+        const std::string &na = gh->spells().getSkillLineName(a), &nb = gh->spells().getSkillLineName(b);
         if (na != nb) return na < nb;
         return a < b;
     });
@@ -1155,16 +1155,16 @@ static std::vector<SkillRow> skillRows(game::GameHandler* gh) {
     constexpr uint32_t kNotDisplayed = 12;
     std::map<std::pair<uint32_t, uint32_t>, std::vector<uint32_t>> grouped;
     for (uint32_t id : skillOrder(gh)) {
-        const uint32_t cat = gh->getSkillCategory(id);
+        const uint32_t cat = gh->spells().skillCategory(id);
         if (cat == kNotDisplayed) continue;
-        grouped[{gh->getSkillCategorySortIndex(cat), cat}].push_back(id);
+        grouped[{gh->spells().skillCategorySortIndex(cat), cat}].push_back(id);
     }
 
     for (const auto& [key, ids] : grouped) {
         const uint32_t cat = key.second;
         // A category with no name is one this build's file does not describe;
         // its skills are still listed, just without a heading over them.
-        if (cat != 0 && !gh->getSkillCategoryName(cat).empty()) {
+        if (cat != 0 && !gh->spells().skillCategoryName(cat).empty()) {
             rows.push_back({0, cat, true});
             if (gh->isSkillCategoryCollapsed(cat)) continue;
         }
@@ -1459,7 +1459,7 @@ static int lua_GetSkillLineInfo(lua_State* L) {
         // else. The costs stay nil for the same reason they are nil below -
         // zero is true in Lua and would send the heading down the
         // "Learn <skill>" branch.
-        lua_pushstring(L, gh->getSkillCategoryName(row.categoryId).c_str());
+        lua_pushstring(L, gh->spells().skillCategoryName(row.categoryId).c_str());
         lua_pushboolean(L, 1);                          // 2: isHeader
         lua_pushboolean(L, gh->isSkillCategoryCollapsed(row.categoryId) ? 0 : 1);
         for (int i = 4; i <= 7; ++i) lua_pushnumber(L, 0);
@@ -1471,11 +1471,11 @@ static int lua_GetSkillLineInfo(lua_State* L) {
         lua_pushstring(L, "");                          // 13: skillDescription
         return 13;
     }
-    const auto& skills = gh->getPlayerSkills();
+    const auto& skills = gh->spells().playerSkills();
     const auto found = skills.find(row.skillId);
     if (found == skills.end()) { return luaReturnNil(L); }
     const auto& skill = found->second;
-    std::string name = gh->getSkillName(skill.skillId);
+    std::string name = gh->spells().getSkillLineName(skill.skillId);
     if (name.empty()) name = "Skill " + std::to_string(skill.skillId);
 
     lua_pushstring(L, name.c_str());                    // 1: skillName
@@ -1514,7 +1514,7 @@ static int lua_GetSkillLineInfo(lua_State* L) {
     // string.format raises on a nil %s, so the guarded SetFormattedText fell
     // back to writing the format string itself - the lower half of the skills
     // window showed "%s %s" where the description belongs.
-    lua_pushstring(L, gh->getSkillDescription(skill.skillId).c_str());  // 13
+    lua_pushstring(L, gh->spells().skillLineDescription(skill.skillId).c_str());  // 13
     return 13;
 }
 
@@ -1550,7 +1550,7 @@ static std::vector<const game::GameHandler::TalentTabEntry*> classTalentTabs(
     std::vector<const game::GameHandler::TalentTabEntry*> tabs;
     if (!gh || classId == 0) return tabs;
     const uint32_t classMask = 1u << (classId - 1);
-    for (const auto& [tabId, tab] : gh->getAllTalentTabs()) {
+    for (const auto& [tabId, tab] : gh->spells().getAllTalentTabs()) {
         if (tab.classMask & classMask) tabs.push_back(&tab);
     }
     std::sort(tabs.begin(), tabs.end(),
@@ -1568,7 +1568,7 @@ static int talentRankFor(game::GameHandler* gh, bool inspect, uint32_t talentId)
         }
         return 0;
     }
-    return gh->getTalentRank(talentId);
+    return gh->spells().getTalentRank(talentId);
 }
 
 /// The fourth argument asks for the *pet's* tree.
@@ -1590,7 +1590,7 @@ static int lua_GetNumTalentTabs(lua_State* L) {
     uint8_t classId = talentClassId(gh, lua_toboolean(L, 1) != 0);
     uint32_t classMask = (classId > 0) ? (1u << (classId - 1)) : 0;
     int count = 0;
-    for (const auto& [tabId, tab] : gh->getAllTalentTabs()) {
+    for (const auto& [tabId, tab] : gh->spells().getAllTalentTabs()) {
         if (tab.classMask & classMask) count++;
     }
     lua_pushnumber(L, count);
@@ -1622,9 +1622,9 @@ static int lua_GetTalentTabInfo(lua_State* L) {
     const auto* inspectResult = inspect ? gh->getInspectResult() : nullptr;
     const auto& learned = inspect
         ? (inspectResult ? inspectResult->talentRanks : kNoTalents)
-        : gh->getLearnedTalents();
+        : gh->spells().getLearnedTalents();
     for (const auto& [talentId, rank] : learned) {
-        const auto* entry = gh->getTalentEntry(talentId);
+        const auto* entry = gh->spells().getTalentEntry(talentId);
         if (entry && entry->tabId == tab->tabId) pointsSpent += rank;
     }
     // Points staged in the preview but not yet learned, for this tab. The
@@ -1637,7 +1637,7 @@ static int lua_GetTalentTabInfo(lua_State* L) {
     int previewSpent = 0;
     if (!inspect) {
         for (const auto& [talentId, staged] : previewPoints(L)) {
-            const auto* entry = gh->getTalentEntry(talentId);
+            const auto* entry = gh->spells().getTalentEntry(talentId);
             if (entry && entry->tabId == tab->tabId) previewSpent += staged;
         }
     }
@@ -1666,7 +1666,7 @@ static int lua_GetNumTalents(lua_State* L) {
     }
     uint32_t targetTabId = classTabs[tabIndex - 1]->tabId;
     int count = 0;
-    for (const auto& [talentId, entry] : gh->getAllTalents()) {
+    for (const auto& [talentId, entry] : gh->spells().getAllTalents()) {
         if (entry.tabId == targetTabId) count++;
     }
     lua_pushnumber(L, count);
@@ -1704,7 +1704,7 @@ const game::TalentEntry* talentAt(game::GameHandler* gh,
 
     const uint32_t targetTabId = classTabs[tabIndex - 1]->tabId;
     std::vector<const game::GameHandler::TalentEntry*> tabTalents;
-    for (const auto& [talentId, entry] : gh->getAllTalents()) {
+    for (const auto& [talentId, entry] : gh->spells().getAllTalents()) {
         if (entry.tabId == targetTabId) tabTalents.push_back(&entry);
     }
     std::sort(tabTalents.begin(), tabTalents.end(),
@@ -1727,7 +1727,7 @@ static bool talentPrereqsMet(lua_State* L, game::GameHandler* gh,
         if (prereqId == 0) continue;
         // Counted from zero in the DBC, so the rank asked for is one more.
         const int needed = static_cast<int>(talent->prereqRank[p]) + 1;
-        int have = gh->getTalentRank(prereqId);
+        int have = gh->spells().getTalentRank(prereqId);
         if (withPreview) {
             const auto staged = previewPoints(L).find(prereqId);
             if (staged != previewPoints(L).end()) have += staged->second;
@@ -1761,7 +1761,7 @@ static int lua_GetTalentInfo(lua_State* L) {
         ? rank
         : rank + (staged == previewPoints(L).end() ? 0 : staged->second);
 
-    std::string name = gh->getSpellName(talent->rankSpells[0]);
+    std::string name = gh->spells().getSpellName(talent->rankSpells[0]);
     if (name.empty()) name = "Talent " + std::to_string(talent->talentId);
     // A nil texture is an empty slot to the interface, so every talent button
     // was drawn blank.
@@ -1843,7 +1843,7 @@ static std::pair<int, int>& tradeSkillLevelRange(lua_State* L) {
 static std::vector<std::string> tradeSkillSubClasses(game::GameHandler* gh) {
     std::vector<std::string> out;
     if (!gh) return out;
-    for (const auto& r : gh->getCraftingRecipes()) {
+    for (const auto& r : gh->spells().craftingRecipes()) {
         const auto* info = craftedItem(gh, r.spellId);
         if (!info || info->subclassName.empty()) continue;
         if (std::find(out.begin(), out.end(), info->subclassName) == out.end())
@@ -1859,7 +1859,7 @@ static std::vector<std::string> tradeSkillSubClasses(game::GameHandler* gh) {
 static std::vector<std::string> tradeSkillInvSlots(game::GameHandler* gh) {
     std::vector<std::string> out;
     if (!gh) return out;
-    for (const auto& r : gh->getCraftingRecipes()) {
+    for (const auto& r : gh->spells().craftingRecipes()) {
         const auto* info = craftedItem(gh, r.spellId);
         if (!info || info->inventoryType == 0) continue;
         for (int i = 1; i < game::kNumAuctionSlots; ++i) {
@@ -1885,7 +1885,7 @@ static std::vector<game::GameHandler::CraftRecipe> visibleCraftingRecipes(
     const auto slots = (tradeSkillInvSlotPick(L) > 0)  ? tradeSkillInvSlots(gh)
                                                       : std::vector<std::string>{};
     const auto level = tradeSkillLevelRange(L);
-    for (const auto& r : gh->getCraftingRecipes()) {
+    for (const auto& r : gh->spells().craftingRecipes()) {
         if (tradeSkillOnlyMakeable(L) && r.canMake <= 0) continue;
         if (!needle.empty()) {
             std::string name = r.name;
@@ -2156,7 +2156,7 @@ static std::vector<const game::TrainerSpell*> shownTrainerServices(lua_State* L,
         // The name only when there is something to match, so the common case
         // costs no lookups at all.
         if (!search.empty() &&
-            foldedForSearch(gh->getSpellName(sp.spellId)).find(search) ==
+            foldedForSearch(gh->spells().getSpellName(sp.spellId)).find(search) ==
                 std::string::npos) {
             continue;
         }
@@ -2185,7 +2185,7 @@ static uint32_t resolveTalentId(game::GameHandler* gh, int tabIndex, int talentI
     if (tabIndex > static_cast<int>(classTabs.size())) return 0;
 
     std::vector<const game::GameHandler::TalentEntry*> tabTalents;
-    for (const auto& [talentId, entry] : gh->getAllTalents()) {
+    for (const auto& [talentId, entry] : gh->spells().getAllTalents()) {
         if (entry.tabId == classTabs[tabIndex - 1]->tabId) tabTalents.push_back(&entry);
     }
     std::sort(tabTalents.begin(), tabTalents.end(),
@@ -2219,9 +2219,9 @@ static int lua_AddPreviewTalentPoints(lua_State* L) {
     const uint32_t id = resolveTalentId(gh, tab, index);
     if (!gh || id == 0) return 0;
 
-    const uint8_t have = gh->getTalentRank(id);
+    const uint8_t have = gh->spells().getTalentRank(id);
     uint8_t maxRank = 0;
-    for (const auto& [talentId, entry] : gh->getAllTalents()) {
+    for (const auto& [talentId, entry] : gh->spells().getAllTalents()) {
         if (talentId == id) { maxRank = entry.maxRank; break; }
     }
     int& staged = previewPoints(L)[id];
@@ -2243,7 +2243,7 @@ static int lua_AddPreviewTalentPoints(lua_State* L) {
         int stagedTotal = 0;
         for (const auto& [tid, n] : previewPoints(L)) { (void)tid; stagedTotal += n; }
         const int unspent =
-            gh->getUnspentTalentPoints(gh->getActiveTalentSpec()) - stagedTotal;
+            gh->spells().getUnspentTalentPoints(gh->spells().getActiveTalentSpec()) - stagedTotal;
         upper = std::min(upper, staged + std::max(0, unspent));
     }
     const int wanted = std::clamp(staged + delta, 0, std::max(0, upper));
@@ -2273,13 +2273,13 @@ static int lua_GetTalentPrereqs(lua_State* L) {
     for (int p = 0; p < 3; ++p) {
         const uint32_t prereqId = talent->prereqTalent[p];
         if (prereqId == 0) continue;
-        const auto* prereq = gh->getTalentEntry(prereqId);
+        const auto* prereq = gh->spells().getTalentEntry(prereqId);
         if (!prereq) continue;
 
         // The DBC counts ranks from zero, so the rank a prerequisite asks for
         // is one more than the number stored beside it.
         const int needed = static_cast<int>(talent->prereqRank[p]) + 1;
-        const int have = gh->getTalentRank(prereqId);
+        const int have = gh->spells().getTalentRank(prereqId);
         const auto staged = previewPoints(L).find(prereqId);
         const int previewHave = have + (staged == previewPoints(L).end() ? 0 : staged->second);
 
@@ -2319,10 +2319,10 @@ static int lua_LearnPreviewTalents(lua_State* L) {
     // clears this map - iterating it while that happens is not safe.
     const auto staged = previewPoints(L);
     for (const auto& [id, n] : staged) {
-        const uint8_t have = gh->getTalentRank(id);
+        const uint8_t have = gh->spells().getTalentRank(id);
         // One request per rank: the server counts them, and asking for the
         // final rank in one call is not how the protocol reads it.
-        for (int r = 1; r <= n; ++r) gh->learnTalent(id, have + r);
+        for (int r = 1; r <= n; ++r) gh->spells().learnTalent(id, have + r);
     }
     previewPoints(L).clear();
     return 0;
@@ -2337,7 +2337,7 @@ static int lua_LearnTalent(lua_State* L) {
     if (wantsPetTalents(L, 3)) return 0;
     const uint32_t id = resolveTalentId(gh, static_cast<int>(luaL_optnumber(L, 1, 0)),
                                             static_cast<int>(luaL_optnumber(L, 2, 0)));
-    if (gh && id != 0) gh->learnTalent(id, gh->getTalentRank(id) + 1);
+    if (gh && id != 0) gh->spells().learnTalent(id, gh->spells().getTalentRank(id) + 1);
     return 0;
 }
 
@@ -2347,7 +2347,7 @@ static int lua_GetUnspentTalentPoints(lua_State* L) {
     if (!gh) { lua_pushnumber(L, 0); return 1; }
     const int group = static_cast<int>(luaL_optnumber(L, 3, 0));
     const uint8_t spec = (group >= 1 && group <= 2) ? static_cast<uint8_t>(group - 1)
-                                                   : gh->getActiveTalentSpec();
+                                                   : gh->spells().getActiveTalentSpec();
     // The raw unspent total, before any staged preview points.
     //
     // The frame subtracts the preview itself: TalentFrame_UpdateTalentPoints is
@@ -2360,7 +2360,7 @@ static int lua_GetUnspentTalentPoints(lua_State* L) {
     // needs to guard it. blizzard_talentui reads this raw too, to decide
     // whether there are points left to commit - which must count the staged
     // ones, or the Learn controls vanish the moment the last point is staged.
-    const int points = gh->getUnspentTalentPoints(spec);
+    const int points = gh->spells().getUnspentTalentPoints(spec);
     lua_pushnumber(L, points);
     return 1;
 }
@@ -2380,8 +2380,8 @@ static int lua_GetNumTalentGroups(lua_State* L) {
         lua_pushnumber(L, groups);
         return 1;
     }
-    if (gh && gh->getUnspentTalentPoints(1) > 0) groups = 2;
-    if (gh && !gh->getLearnedTalents(1).empty()) groups = 2;
+    if (gh && gh->spells().getUnspentTalentPoints(1) > 0) groups = 2;
+    if (gh && !gh->spells().getLearnedTalents(1).empty()) groups = 2;
     lua_pushnumber(L, groups);
     return 1;
 }
@@ -2391,7 +2391,7 @@ static int lua_SetActiveTalentGroup(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int group = static_cast<int>(luaL_optnumber(L, 1, 1));
     if (gh && group >= 1 && group <= 2) {
-        gh->switchTalentSpec(static_cast<uint8_t>(group - 1));
+        gh->spells().switchTalentSpec(static_cast<uint8_t>(group - 1));
     }
     return 0;
 }
@@ -2403,13 +2403,13 @@ static int lua_GetTalentLink(lua_State* L) {
                                             static_cast<int>(luaL_optnumber(L, 2, 0)));
     if (!gh || id == 0) { lua_pushnil(L); return 1; }
     uint32_t rank1 = 0;
-    for (const auto& [talentId, entry] : gh->getAllTalents()) {
+    for (const auto& [talentId, entry] : gh->spells().getAllTalents()) {
         if (talentId == id) { rank1 = entry.rankSpells[0]; break; }
     }
-    std::string name = gh->getSpellName(rank1);
+    std::string name = gh->spells().getSpellName(rank1);
     if (name.empty()) name = "Talent";
     const std::string link = "|cff4e96f7|Htalent:" + std::to_string(id) + ":" +
-                             std::to_string(gh->getTalentRank(id)) + "|h[" + name +
+                             std::to_string(gh->spells().getTalentRank(id)) + "|h[" + name +
                              "]|h|r";
     lua_pushstring(L, link.c_str());
     return 1;
@@ -2425,7 +2425,7 @@ static int lua_GetActiveTalentGroup(lua_State* L) {
         lua_pushnumber(L, r ? (r->activeTalentGroup + 1) : 1);
         return 1;
     }
-    lua_pushnumber(L, gh ? (gh->getActiveTalentSpec() + 1) : 1);
+    lua_pushnumber(L, gh ? (gh->spells().getActiveTalentSpec() + 1) : 1);
     return 1;
 }
 
@@ -2477,14 +2477,14 @@ static int lua_GetQuestLogRewardSpell(lua_State* L) {
     const auto* q = selectedLogEntry(L, gh);
     const uint32_t spellId = q ? q->rewardSpellId : 0u;
     if (spellId == 0) return luaReturnNil(L);
-    const std::string name = gh->getSpellName(spellId);
+    const std::string name = gh->spells().getSpellName(spellId);
     if (name.empty()) return luaReturnNil(L);
     std::string icon = gh->getSpellIconPath(spellId);
     lua_pushstring(L, icon.empty() ? "Interface\\Icons\\INV_Misc_QuestionMark"
                                    : icon.c_str());
     lua_pushstring(L, name.c_str());
-    lua_pushboolean(L, gh->isProfessionSpell(spellId) ? 1 : 0);
-    lua_pushboolean(L, gh->getKnownSpells().count(spellId) > 0 ? 1 : 0);
+    lua_pushboolean(L, gh->spells().isProfessionSpell(spellId) ? 1 : 0);
+    lua_pushboolean(L, gh->spells().getKnownSpells().count(spellId) > 0 ? 1 : 0);
     return 4;
 }
 
@@ -3456,7 +3456,7 @@ void registerQuestLuaAPI(lua_State* L) {
                 return 4;
             }
             const auto& glyphs = (spec >= 1 && spec <= 2)
-                ? gh->getGlyphs(static_cast<uint8_t>(spec - 1)) : gh->getGlyphs();
+                ? gh->spells().getGlyphs(static_cast<uint8_t>(spec - 1)) : gh->spells().getGlyphs();
             uint16_t glyphId = glyphs[index - 1];
             // Glyph type: slots 1,2,3 = major (1), slots 4,5,6 = minor (2)
             int glyphType = (index <= 3) ? 1 : 2;
@@ -3557,7 +3557,7 @@ void registerQuestLuaAPI(lua_State* L) {
             if (!rec) return luaReturnNil(L);
             const uint32_t id = rec->spellId;
             lua_pushstring(L, gh->formatSpellDescription(
-                id, gh->getSpellDescription(id)).c_str());
+                id, gh->spells().getSpellDescription(id)).c_str());
             return 1;
         }},
                 {"GetTradeSkillNumReagents", [](lua_State* L) -> int {
@@ -3626,12 +3626,12 @@ void registerQuestLuaAPI(lua_State* L) {
                 lua_pushnumber(L, 0);
                 return 3;
             }
-            const uint32_t line = gh->getCraftingSkillLine();
-            std::string name = gh->getSkillLineName(line);
+            const uint32_t line = gh->spells().getCraftingSkillLine();
+            std::string name = gh->spells().getSkillLineName(line);
             if (name.empty()) name = "Trade Skill";
             uint32_t rank = 0, maxRank = 0;
-            auto it = gh->getPlayerSkills().find(line);
-            if (it != gh->getPlayerSkills().end()) {
+            auto it = gh->spells().playerSkills().find(line);
+            if (it != gh->spells().playerSkills().end()) {
                 rank    = it->second.effectiveValue();
                 maxRank = it->second.maxValue;
             }
@@ -3676,11 +3676,11 @@ void registerQuestLuaAPI(lua_State* L) {
             if (count < 1) count = 1;
             LOG_WARNING("DoTradeSkill: row ", i, " '", rec->name,
                         "' spell=", rec->spellId, " count=", count);
-            gh->startCraftQueue(rec->spellId, count);
+            gh->spells().startCraftQueue(rec->spellId, count);
             return 0;
         }},
                 {"CloseTradeSkill", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->closeCraftingWindow();
+            if (auto* gh = getGameHandler(L)) gh->spells().closeCraftingWindow();
             return 0;
         }},
                 {"SelectTradeSkill", [](lua_State* L) -> int {
@@ -3715,7 +3715,7 @@ void registerQuestLuaAPI(lua_State* L) {
             if (!gh || i < 1) return luaReturnNil(L);
             const auto* rec = tradeSkillRecipeAt(tradeSkillRows(L, gh), i);
             if (!rec) return luaReturnNil(L);
-            const float left = gh->getSpellCooldown(rec->spellId);
+            const float left = gh->spells().getSpellCooldown(rec->spellId);
             if (left <= 0.0f) return luaReturnNil(L);
             lua_pushnumber(L, left);
             return 1;
@@ -3910,12 +3910,12 @@ void registerQuestLuaAPI(lua_State* L) {
                 // queue is running, which is what a fresh selection should show.
                 {"GetTradeskillRepeatCount", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const int left = gh ? gh->getCraftQueueRemaining() : 0;
+            const int left = gh ? gh->spells().getCraftQueueRemaining() : 0;
             lua_pushnumber(L, left > 1 ? left : 1);
             return 1;
         }},
                 {"StopTradeSkillRepeat", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->cancelCraftQueue();
+            if (auto* gh = getGameHandler(L)) gh->spells().cancelCraftQueue();
             return 0;
         }},
                 // ---- Trainer -------------------------------------------
@@ -3939,7 +3939,7 @@ void registerQuestLuaAPI(lua_State* L) {
             const auto* svc = shownTrainerService(L, gh, i);
             if (!svc) return luaReturnNil(L);
             const auto& sp = *svc;
-            std::string name = gh->getSpellName(sp.spellId);
+            std::string name = gh->spells().getSpellName(sp.spellId);
             if (name.empty()) name = "Spell " + std::to_string(sp.spellId);
             lua_pushstring(L, name.c_str());
             // The rank, from the same place the name came from. The trainer
@@ -3952,7 +3952,7 @@ void registerQuestLuaAPI(lua_State* L) {
             // three ranks listed Fireball three times, identically. An empty
             // string still hides the line, which is right for a spell that has
             // no rank.
-            lua_pushstring(L, gh->getSpellRank(sp.spellId).c_str());   // rank
+            lua_pushstring(L, gh->spells().getSpellRank(sp.spellId).c_str());   // rank
             // The three words the panel colours by: green, grey, and already
             // trained.
             //
@@ -4015,14 +4015,14 @@ void registerQuestLuaAPI(lua_State* L) {
             }
             const auto& sp = *svc;
             if (sp.reqSkill == 0) return luaReturnNil(L);
-            const std::string skill = gh->getSkillLineName(sp.reqSkill);
+            const std::string skill = gh->spells().getSkillLineName(sp.reqSkill);
             lua_pushstring(L, skill.empty() ? "Skill" : skill.c_str());
             lua_pushnumber(L, sp.reqSkillValue);
             // Whether the player already meets it. The trainer window picks
             // between TRAINER_REQ_SKILL_RANK and its _RED twin on this, so
             // leaving it nil painted every requirement red - including the
             // ones already satisfied, next to a spell the player could train.
-            const auto& skills = gh->getPlayerSkills();
+            const auto& skills = gh->spells().playerSkills();
             const auto it = skills.find(sp.reqSkill);
             const bool met = it != skills.end() &&
                              it->second.effectiveValue() >= sp.reqSkillValue;
@@ -4050,7 +4050,7 @@ void registerQuestLuaAPI(lua_State* L) {
             }
             const uint32_t id = svc->spellId;
             const std::string desc =
-                gh->formatSpellDescription(id, gh->getSpellDescription(id));
+                gh->formatSpellDescription(id, gh->spells().getSpellDescription(id));
             lua_pushstring(L, desc.c_str());
             return 1;
         }},
@@ -4061,7 +4061,7 @@ void registerQuestLuaAPI(lua_State* L) {
             if (!svc) {
                 return luaReturnNil(L);
             }
-            const std::string skill = gh->getSkillLineName(svc->reqSkill);
+            const std::string skill = gh->spells().getSkillLineName(svc->reqSkill);
             lua_pushstring(L, skill.empty() ? "" : skill.c_str());
             return 1;
         }},
@@ -4096,10 +4096,10 @@ void registerQuestLuaAPI(lua_State* L) {
             const uint32_t chain[3] = {sp.chainNode1, sp.chainNode2, sp.chainNode3};
             if (n < 1 || n > 3 || chain[n - 1] == 0) return luaReturnNil(L);
             const uint32_t req = chain[n - 1];
-            std::string name = gh->getSpellName(req);
+            std::string name = gh->spells().getSpellName(req);
             if (name.empty()) name = "Ability";
             lua_pushstring(L, name.c_str());
-            lua_pushboolean(L, gh->getKnownSpells().count(req) ? 1 : 0);
+            lua_pushboolean(L, gh->spells().getKnownSpells().count(req) ? 1 : 0);
             return 2;
         }},
                 // GetTrainerServiceStepReq(i) → step, met.
@@ -4240,10 +4240,10 @@ void registerQuestLuaAPI(lua_State* L) {
                 return 1;
             }
             const auto& glyphs = (spec >= 1 && spec <= 2)
-                ? gh->getGlyphs(static_cast<uint8_t>(spec - 1)) : gh->getGlyphs();
+                ? gh->spells().getGlyphs(static_cast<uint8_t>(spec - 1)) : gh->spells().getGlyphs();
             const uint16_t glyphId = glyphs[index - 1];
             if (glyphId == 0) { lua_pushnil(L); return 1; }
-            std::string name = gh->getSpellName(glyphId);
+            std::string name = gh->spells().getSpellName(glyphId);
             if (name.empty()) name = "Glyph";
             const std::string link = "|cff66bbff|Hglyph:" + std::to_string(index) +
                                      ":" + std::to_string(glyphId) + "|h[" + name +

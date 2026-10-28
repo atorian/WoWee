@@ -2300,7 +2300,7 @@ static uint32_t possessAuraSpellId(wowee::game::GameHandler* gh) {
     constexpr uint32_t kModCharm = 6;
     constexpr uint32_t kModPossessPet = 128;
     constexpr uint32_t kAoeCharm = 177;
-    for (const auto& aura : gh->getPlayerAuras()) {
+    for (const auto& aura : gh->spells().getPlayerAuras()) {
         if (aura.isEmpty()) continue;
         const auto* spell = gh->spells().findSpell(aura.spellId);
         if (!spell) continue;
@@ -2325,7 +2325,7 @@ static constexpr uint32_t kAuraTrackResources = 45;
 static std::vector<uint32_t> trackingSpells(game::GameHandler* gh) {
     std::vector<uint32_t> out;
     if (!gh) return out;
-    for (uint32_t sid : gh->getKnownSpells()) {
+    for (uint32_t sid : gh->spells().getKnownSpells()) {
         const auto* spell = gh->spells().findSpell(sid);
         if (!spell) continue;
         for (uint32_t aura : spell->effectAuraIds) {
@@ -2336,7 +2336,7 @@ static std::vector<uint32_t> trackingSpells(game::GameHandler* gh) {
         }
     }
     std::sort(out.begin(), out.end(), [gh](uint32_t a, uint32_t b) {
-        return gh->getSpellName(a) < gh->getSpellName(b);
+        return gh->spells().getSpellName(a) < gh->spells().getSpellName(b);
     });
     return out;
 }
@@ -2344,7 +2344,7 @@ static std::vector<uint32_t> trackingSpells(game::GameHandler* gh) {
 /// Whether that tracking is the one currently running.
 static bool trackingActive(game::GameHandler* gh, uint32_t spellId) {
     if (!gh) return false;
-    for (const auto& aura : gh->getPlayerAuras()) {
+    for (const auto& aura : gh->spells().getPlayerAuras()) {
         if (aura.spellId == spellId) return true;
     }
     return false;
@@ -2402,7 +2402,7 @@ static int lua_GetTrackingInfo(lua_State* L) {
     const auto spells = trackingSpells(gh);
     if (index < 1 || index > static_cast<int>(spells.size())) return 0;
     const uint32_t sid = spells[static_cast<size_t>(index - 1)];
-    lua_pushstring(L, gh->getSpellName(sid).c_str());
+    lua_pushstring(L, gh->spells().getSpellName(sid).c_str());
     lua_pushstring(L, gh->getSpellIconPath(sid).c_str());
     lua_pushboolean(L, trackingActive(gh, sid) ? 1 : 0);
     lua_pushstring(L, "spell");
@@ -2435,7 +2435,7 @@ static int lua_SetTracking(lua_State* L) {
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
     const auto spells = trackingSpells(gh);
     if (index < 1 || index > static_cast<int>(spells.size())) return 0;
-    gh->castSpell(spells[static_cast<size_t>(index - 1)], 0);
+    gh->spells().castSpell(spells[static_cast<size_t>(index - 1)], 0);
     return 0;
 }
 
@@ -5598,7 +5598,7 @@ void registerSystemLuaAPI(lua_State* L) {
             // so this reads from what is actually active rather than from a
             // flag nobody sets.
             bool active = false;
-            for (const auto& a : gh->getPlayerAuras()) {
+            for (const auto& a : gh->spells().getPlayerAuras()) {
                 if (a.spellId == c.spellId) { active = true; break; }
             }
             lua_pushboolean(L, active ? 1 : 0);
@@ -6055,7 +6055,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 if (spellId == 0) return luaReturnNil(L);
                 const std::string icon = gh->getSpellIconPath(spellId);
                 if (icon.empty()) lua_pushnil(L); else lua_pushstring(L, icon.c_str());
-                lua_pushstring(L, gh->getSpellName(spellId).c_str());
+                lua_pushstring(L, gh->spells().getSpellName(spellId).c_str());
                 lua_pushboolean(L, 1);
                 return 3;
             }
@@ -6064,7 +6064,7 @@ void registerSystemLuaAPI(lua_State* L) {
             if (spellId == 0) return luaReturnNil(L);
             const std::string icon = gh->getSpellIconPath(spellId);
             if (icon.empty()) lua_pushnil(L); else lua_pushstring(L, icon.c_str());
-            lua_pushstring(L, gh->getSpellName(spellId).c_str());
+            lua_pushstring(L, gh->spells().getSpellName(spellId).c_str());
             lua_pushboolean(L, 1);
             return 3;
         }},

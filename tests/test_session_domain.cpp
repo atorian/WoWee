@@ -452,7 +452,7 @@ TEST_CASE("while the world connection is lost, what needs the server is refused 
     REQUIRE(h.game().worldConnectionLost());
     h.clearRecords();
 
-    h.game().castSpell(133, 0);
+    h.game().spells().castSpell(133, 0);
     h.game().sendChatMessage(wowee::game::ChatType::SAY, "anyone there?", "");
     h.game().lootTarget(0xF130000001000001ull);
     h.game().interactWithNpc(0xF130000001000002ull);
@@ -471,7 +471,7 @@ TEST_CASE("while the world connection is lost, what needs the server is refused 
     CHECK(h.countSent(Opcode::CMSG_LOOT) == 0);
     CHECK(h.countSent(Opcode::CMSG_GOSSIP_HELLO) == 0);
     // And a command once in again goes.
-    h.game().castSpell(133, 0);
+    h.game().spells().castSpell(133, 0);
     CHECK(h.countSent(Opcode::CMSG_CAST_SPELL) == 1);
 }
 
@@ -512,8 +512,8 @@ TEST_CASE("logging in again after a lost connection keeps nothing of the last on
                                               static_cast<uint32_t>(kItem >> 32)}},
                                             h.player().x, h.player().y, h.player().z));
     h.pump();
-    REQUIRE(h.game().getSpellCooldown(kFireball) > 0.0f);
-    REQUIRE_FALSE(h.game().getPlayerAuras().empty());
+    REQUIRE(h.game().spells().getSpellCooldown(kFireball) > 0.0f);
+    REQUIRE_FALSE(h.game().spells().getPlayerAuras().empty());
     REQUIRE(h.group().isInGroup());
     REQUIRE_FALSE(h.game().inventory().items().getBackpackSlot(0).empty());
 
@@ -522,8 +522,8 @@ TEST_CASE("logging in again after a lost connection keeps nothing of the last on
     reconnect(h);
 
     // The new session is the server's to fill; nothing of the last is left.
-    CHECK(h.game().getSpellCooldown(kFireball) == 0.0f);
-    CHECK(h.game().getPlayerAuras().empty());
+    CHECK(h.game().spells().getSpellCooldown(kFireball) == 0.0f);
+    CHECK(h.game().spells().getPlayerAuras().empty());
     CHECK_FALSE(h.group().isInGroup());
     CHECK(h.game().inventory().items().getBackpackSlot(0).empty());
     CHECK_FALSE(h.game().getEntityManager().hasEntity(kItem));

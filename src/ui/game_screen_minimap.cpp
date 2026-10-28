@@ -393,7 +393,7 @@ void GameScreen::renderMinimapIndicators(game::GameHandler& gameHandler, float c
 
     // Unspent talent points indicator
     {
-        uint8_t unspent = gameHandler.getUnspentTalentPoints();
+        uint8_t unspent = gameHandler.spells().getUnspentTalentPoints();
         if (unspent > 0) {
             ImGui::SetNextWindowPos(ImVec2(indicatorX, nextIndicatorY), ImGuiCond_Always);
             ImGui::SetNextWindowSize(ImVec2(indicatorW, kIndicatorH), ImGuiCond_Always);

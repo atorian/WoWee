@@ -582,7 +582,7 @@ TEST_CASE("a cast while the client reconnects is refused at once and never sent"
         "f:RegisterEvent('UI_ERROR_MESSAGE')\n"
         "f:SetScript('OnEvent', function(_, _, msg) ERRS = ERRS .. msg end)\n");
 
-    h.game().castSpell(kFireball, 0);
+    h.game().spells().castSpell(kFireball, 0);
     h.frame();
     CHECK(h.interfaceAnswers("ERRS == 'No connection to the server.'"));
 

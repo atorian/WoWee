@@ -400,7 +400,7 @@ void GameHandler::stopMovingForCast() {
 
 bool GameHandler::gameObjectLootPending(uint64_t lootGuid) const {
     if (lastInteractedGoGuid_ == 0 || lootGuid != lastInteractedGoGuid_) return false;
-    return (isCasting() && getCurrentCastSpellId() != 0) || hasPendingGameObjectLootOpen(lootGuid);
+    return (spellHandler_->isCasting() && spellHandler_->getCurrentCastSpellId() != 0) || hasPendingGameObjectLootOpen(lootGuid);
 }
 
 bool GameHandler::gameObjectLootOpened(uint64_t lootGuid) {
@@ -1154,50 +1154,14 @@ void GameHandler::fail(const std::string& reason) {
 // Player Skills
 // ============================================================
 
-const std::string& GameHandler::getSkillName(uint32_t skillId) const {
-    return spellHandler_->getSkillLineName(skillId);
-}
-
-uint32_t GameHandler::getSkillCategory(uint32_t skillId) const {
-    return spellHandler_->skillCategory(skillId);
-}
-
-const std::string& GameHandler::getSkillCategoryName(uint32_t categoryId) const {
-    return spellHandler_->skillCategoryName(categoryId);
-}
-
-uint32_t GameHandler::getSkillCategorySortIndex(uint32_t categoryId) const {
-    return spellHandler_->skillCategorySortIndex(categoryId);
-}
-
 void GameHandler::setSkillCategoryCollapsed(uint32_t categoryId, bool collapsed) {
     if (categoryId == 0) return;
     if (collapsed) collapsedSkillCategories_.insert(categoryId);
     else           collapsedSkillCategories_.erase(categoryId);
 }
 
-bool GameHandler::isProfessionSpell(uint32_t spellId) const {
-    return spellHandler_->isProfessionSpell(spellId);
-}
-
-void GameHandler::loadSkillLineDbc() const {
-    spellHandler_->loadSkillLineDbc();
-}
-
-void GameHandler::extractSkillFields(const FlatFieldMap& fields) {
-    spellHandler_->extractSkillFields(fields);
-}
-
-void GameHandler::extractExploredZoneFields(const FlatFieldMap& fields) {
-    spellHandler_->extractExploredZoneFields(fields);
-}
-
 std::string GameHandler::getCharacterConfigDir() {
     return core::getConfigRoot() + "/characters";
-}
-
-std::vector<GameHandler::CraftRecipe> GameHandler::getCraftingRecipes() const {
-    return spellHandler_->craftingRecipes();
 }
 
 void GameHandler::saveCharacterConfig() {
@@ -2435,7 +2399,7 @@ void GameHandler::loadLfgDungeonDbc() const {
 // creature, which is what GetCompanionInfo reports first.
 // ---------------------------------------------------------------------------
 void GameHandler::rebuildCompanions() const {
-    const auto& known = getKnownSpells();
+    const auto& known = spellHandler_->getKnownSpells();
     // Only the spellbook changing can change the answer, and it changes rarely.
     if (companionsBuiltFromSpellCount_ == known.size()) return;
     companionsBuiltFromSpellCount_ = known.size();
@@ -2471,7 +2435,7 @@ void GameHandler::rebuildCompanions() const {
 
         Companion c;
         c.spellId = spellId;
-        c.name = getSpellName(spellId);
+        c.name = spellHandler_->getSpellName(spellId);
         if (c.name.empty()) continue;
 
         bool mount = false, critter = false;
@@ -2551,7 +2515,7 @@ void GameHandler::announceCompanionChange() {
     for (bool mounts : {true, false}) {
         uint32_t active = 0;
         for (const auto& c : getCompanions(mounts)) {
-            for (const auto& a : getPlayerAuras()) {
+            for (const auto& a : spellHandler_->getPlayerAuras()) {
                 if (a.spellId == c.spellId) { active = c.spellId; break; }
             }
             if (active) break;
@@ -2588,18 +2552,6 @@ std::string GameHandler::getLfgDungeonName(uint32_t dungeonId) const {
     auto it = lfgDungeonNameCache_.find(dungeonId);
     return (it != lfgDungeonNameCache_.end()) ? it->second : std::string{};
 }
-
-// ---------------------------------------------------------------------------
-// Aura duration update
-// ---------------------------------------------------------------------------
-
-void GameHandler::handleUpdateAuraDuration(uint8_t slot, uint32_t durationMs) {
-    spellHandler_->handleUpdateAuraDuration(slot, durationMs);
-}
-
-// ---------------------------------------------------------------------------
-// Equipment set list
-// ---------------------------------------------------------------------------
 
 // ---- Battlefield Manager (WotLK Wintergrasp / outdoor battlefields) ----
 
@@ -2679,39 +2631,6 @@ bool GameHandler::isInInstance() const {
 
 const std::vector<GameHandler::InstanceLockout>& GameHandler::getInstanceLockouts() const {
     return socialHandler_->getInstanceLockouts();
-}
-
-// ---- SpellHandler delegating getters ----
-
-int GameHandler::getCraftQueueRemaining() const {
-    return spellHandler_->getCraftQueueRemaining();
-}
-uint32_t GameHandler::getCraftQueueSpellId() const {
-    return spellHandler_->getCraftQueueSpellId();
-}
-uint32_t GameHandler::getQueuedSpellId() const {
-    return spellHandler_->getQueuedSpellId();
-}
-const std::unordered_map<uint32_t, TalentEntry>& GameHandler::getAllTalents() const {
-    return spellHandler_->getAllTalents();
-}
-const std::unordered_map<uint32_t, TalentTabEntry>& GameHandler::getAllTalentTabs() const {
-    return spellHandler_->getAllTalentTabs();
-}
-float GameHandler::getGCDRemaining() const {
-    return spellHandler_->getGCDRemaining();
-}
-float GameHandler::getGCDTotal() const {
-    return spellHandler_->getGCDTotal();
-}
-bool GameHandler::showTalentWipeConfirmDialog() const {
-    return spellHandler_->showTalentWipeConfirmDialog();
-}
-uint32_t GameHandler::getTalentWipeCost() const {
-    return spellHandler_->getTalentWipeCost();
-}
-void GameHandler::cancelTalentWipe() {
-    spellHandler_->cancelTalentWipe();
 }
 
 // ---- QuestHandler delegating getters ----

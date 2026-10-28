@@ -464,7 +464,7 @@ void AnimationCallbackHandler::setupCallbacks() {
         const bool isArea     = (castType == game::SpellCastType::AREA);
 
         if (start) {
-            uint32_t currentSpell = isLocalPlayer ? gameHandler_.getCurrentCastSpellId() : 0;
+            uint32_t currentSpell = isLocalPlayer ? gameHandler_.spells().getCurrentCastSpellId() : 0;
             bool isFishing = isChannel && game::spellclass::isFishingCast(currentSpell);
 
             // Helper: pick first animation the model supports from a list
@@ -489,7 +489,7 @@ void AnimationCallbackHandler::setupCallbacks() {
                     const auto& nm = spell->name;
                     isMining = (nm == "Mining" || nm == "Smelting");
                     if (!isMining) {
-                        isGathering = gameHandler_.isProfessionSpell(currentSpell);
+                        isGathering = gameHandler_.spells().isProfessionSpell(currentSpell);
                         if (!isGathering)
                             isGathering = (nm == "Opening" || nm == "Open Lock");
                     }
@@ -754,7 +754,7 @@ void AnimationCallbackHandler::setupCallbacks() {
         // would kill that cast's animation as it starts.
         if (standState == AC::STAND_STATE_STAND) {
             ac->setSeatedLoopAnimation(0);
-            if (gameHandler_.isRestoring()) ac->stopSpellCast();
+            if (gameHandler_.spells().isRestoring()) ac->stopSpellCast();
         }
     });
 

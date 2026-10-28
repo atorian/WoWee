@@ -2133,7 +2133,7 @@ static int lua_GetItemTooltipData(lua_State* L) {
             lua_pushnumber(L, info->spells[i].spellTrigger);
             lua_setfield(L, -2, "trigger");
             // Get spell name for display
-            const std::string& sName = gh->getSpellName(info->spells[i].spellId);
+            const std::string& sName = gh->spells().getSpellName(info->spells[i].spellId);
             if (!sName.empty()) { lua_pushstring(L, sName.c_str()); lua_setfield(L, -2, "name"); }
             // Get description
             // Formatted, not raw: an item's spell carries the same $-token
@@ -2141,7 +2141,7 @@ static int lua_GetItemTooltipData(lua_State* L) {
             // "$s1 damage" on the tooltip.
             const std::string sDesc = gh->formatSpellDescription(
                 info->spells[i].spellId,
-                gh->getSpellDescription(info->spells[i].spellId));
+                gh->spells().getSpellDescription(info->spells[i].spellId));
             if (!sDesc.empty()) { lua_pushstring(L, sDesc.c_str()); lua_setfield(L, -2, "description"); }
             lua_rawseti(L, -2, spellCount);
         }
@@ -3531,13 +3531,13 @@ void registerInventoryLuaAPI(lua_State* L) {
             if (!info) return luaReturnNil(L);
             for (const auto& sp : info->spells) {
                 if (sp.spellId == 0 || sp.spellTrigger != 0) continue;
-                const std::string& name = gh->getSpellName(sp.spellId);
+                const std::string& name = gh->spells().getSpellName(sp.spellId);
                 if (name.empty()) continue;
                 lua_pushstring(L, name.c_str());
                 // The spell's rank subtext, the same string the spellbook shows
                 // - empty for the many item spells that carry no rank, the real
                 // "Rank N" for those that do. It is tracked; it was hardcoded "".
-                lua_pushstring(L, gh->getSpellRank(sp.spellId).c_str());
+                lua_pushstring(L, gh->spells().getSpellRank(sp.spellId).c_str());
                 return 2;
             }
             return luaReturnNil(L);

@@ -328,7 +328,7 @@ static int lua_IsUsableAction(lua_State* L) {
     bool usable = true;
     bool noMana = false;
     if (action.type == game::ActionBarSlot::SPELL) {
-        usable = gh->getKnownSpells().count(action.id) > 0;
+        usable = gh->spells().getKnownSpells().count(action.id) > 0;
         // Check power cost
         if (usable && action.id != 0) {
             auto spellData = gh->getSpellData(action.id);
@@ -461,8 +461,8 @@ static int lua_GetActionCooldown(lua_State* L) {
         lua_pushnumber(L, 1);
     } else if (action.type == game::ActionBarSlot::SPELL && gh->isGCDActive()) {
         // No individual cooldown but GCD is active - show GCD sweep
-        float gcdRem = gh->getGCDRemaining();
-        float gcdTotal = gh->getGCDTotal();
+        float gcdRem = gh->spells().getGCDRemaining();
+        float gcdTotal = gh->spells().getGCDTotal();
         double now = 0;
         lua_getglobal(L, "GetTime");
         if (lua_isfunction(L, -1)) { lua_call(L, 0, 1); now = lua_tonumber(L, -1); lua_pop(L, 1); }
@@ -522,7 +522,7 @@ static int lua_UseAction(lua_State* L) {
         if (const uint32_t itemForSpell = gh->inventory().itemIdForSpell(action.id)) {
             gh->inventory().useItemById(itemForSpell, target);
         } else {
-            gh->castSpell(action.id, target);
+            gh->spells().castSpell(action.id, target);
         }
     } else if (action.type == game::ActionBarSlot::ITEM && action.id != 0) {
         gh->inventory().useItemById(action.id);
@@ -2804,7 +2804,7 @@ void registerActionLuaAPI(lua_State* L) {
 
             const uint32_t spellId = action;
             if (spellId == 0) { return luaReturnNil(L); }
-            const std::string& name = gh->getSpellName(spellId);
+            const std::string& name = gh->spells().getSpellName(spellId);
             const std::string iconPath = gh->getSpellIconPath(spellId);
             lua_pushstring(L, name.empty() ? "Unknown" : name.c_str());
             lua_pushstring(L, "");
@@ -2856,7 +2856,7 @@ void registerActionLuaAPI(lua_State* L) {
             const uint32_t packed = petOf(L).getPetActionSlot(index - 1);
             // A command or a stance has no cooldown of its own.
             const float remaining = pet::isPetSpellAction(packed)
-                ? gh->getSpellCooldown(pet::petActionId(packed)) : 0.0f;
+                ? gh->spells().getSpellCooldown(pet::petActionId(packed)) : 0.0f;
             if (remaining <= 0.01f) {
                 lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 1);
                 return 3;

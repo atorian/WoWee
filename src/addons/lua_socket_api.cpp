@@ -137,7 +137,7 @@ int lua_GetExistingSocketLink(lua_State* L) {
     const int index = static_cast<int>(luaL_optnumber(L, 1, 1)) - 1;
     if (!gh || !gh->inventory().getSocketSession().open || index < 0 || index > 2) return 0;
     const auto enchants = gh->inventory().getItemSocketEnchantIds(gh->inventory().getSocketSession().itemGuid);
-    return pushGemLink(L, gh, gh->getEnchantGemItem(enchants[static_cast<size_t>(index)]));
+    return pushGemLink(L, gh, gh->spells().getEnchantGemItem(enchants[static_cast<size_t>(index)]));
 }
 
 /// GetNewSocketLink(index) - the gem waiting to go in.
@@ -202,7 +202,7 @@ int lua_GetExistingSocketInfo(lua_State* L) {
         return pushGemInfo(L, gh, 0, index);
     }
     const auto enchants = gh->inventory().getItemSocketEnchantIds(gh->inventory().getSocketSession().itemGuid);
-    return pushGemInfo(L, gh, gh->getEnchantGemItem(enchants[index]), index);
+    return pushGemInfo(L, gh, gh->spells().getEnchantGemItem(enchants[index]), index);
 }
 
 /// GetNewSocketInfo(index) → the gem the player has put in but not committed.

@@ -23,15 +23,15 @@ std::vector<uint8_t> startCast(uint64_t player, uint32_t spell) {
 
 int castingInfo(lua_State* L) {
     const auto& game = *static_cast<wowee::game::GameHandler*>(lua_touserdata(L, lua_upvalueindex(1)));
-    if (!game.isCasting()) return 0;
+    if (!game.spells().isCasting()) return 0;
     lua_pushstring(L, "Spell");
     lua_pushstring(L, "");
     lua_pushstring(L, "Spell");
     lua_pushstring(L, "icon");
     lua_pushnumber(L, 0);
-    lua_pushnumber(L, game.getCastTimeTotal() * 1000);
+    lua_pushnumber(L, game.spells().getCastTimeTotal() * 1000);
     lua_pushboolean(L, false);
-    lua_pushnumber(L, game.getCurrentCastSpellId());
+    lua_pushnumber(L, game.spells().getCurrentCastSpellId());
     lua_pushboolean(L, false);
     return 9;
 }
@@ -105,7 +105,7 @@ TEST_CASE("FrameXML castbar survives queued starts failures and replacement cast
         REQUIRE(phase == wowee::core::Phase::Interface);
         if (event.rfind("UNIT_SPELLCAST_", 0) != 0) return;
         delivered.push_back(event);
-        if (event == "UNIT_SPELLCAST_START") stateAtStart.push_back(h.game().isCasting());
+        if (event == "UNIT_SPELLCAST_START") stateAtStart.push_back(h.game().spells().isCasting());
         lua_getglobal(L, "CastingBarFrame_OnEvent");
         lua_getglobal(L, "bar");
         lua_pushstring(L, event.c_str());
@@ -138,7 +138,7 @@ TEST_CASE("FrameXML castbar survives queued starts failures and replacement cast
     h.receive(Opcode::SMSG_CAST_FAILED, failure(133));
     network();
     CHECK(delivered.empty());
-    CHECK_FALSE(h.game().isCasting());
+    CHECK_FALSE(h.game().spells().isCasting());
     interface();
     CHECK(stateAtStart == std::vector<bool>{false}); // Event sees the newer game state.
     CHECK(delivered == std::vector<std::string>{"UNIT_SPELLCAST_START", "UNIT_SPELLCAST_INTERRUPTIBLE",

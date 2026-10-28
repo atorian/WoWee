@@ -371,9 +371,9 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
                 if (sp.spellId == 0) continue;
                 const char* trigger = game::itemSpellTriggerText(sp.spellTrigger);
                 if (!trigger) continue;
-                const std::string& spDesc = gameHandler->getSpellDescription(sp.spellId);
+                const std::string& spDesc = gameHandler->spells().getSpellDescription(sp.spellId);
                 std::string spText = spDesc.empty()
-                    ? gameHandler->getSpellName(sp.spellId)
+                    ? gameHandler->spells().getSpellName(sp.spellId)
                     : gameHandler->formatSpellDescription(sp.spellId, spDesc);
                 if (!spText.empty()) {
                     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 320.0f);
@@ -412,7 +412,7 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
                     }
                 }
                 uint32_t playerSkillVal = 0;
-                const auto& skills = gameHandler->getPlayerSkills();
+                const auto& skills = gameHandler->spells().playerSkills();
                 auto skPit = skills.find(qInfo->requiredSkill);
                 if (skPit != skills.end()) playerSkillVal = skPit->second.effectiveValue();
                 bool meetsSkill = (playerSkillVal == 0 || playerSkillVal >= qInfo->requiredSkillRank);
@@ -557,7 +557,7 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
                     }
                     for (int i = 0; i < 10; ++i) {
                         if (se.spellIds[i] == 0 || se.thresholds[i] == 0) continue;
-                        const std::string& bname = gameHandler->getSpellName(se.spellIds[i]);
+                        const std::string& bname = gameHandler->spells().getSpellName(se.spellIds[i]);
                         bool active = (equipped >= static_cast<int>(se.thresholds[i]));
                         ImVec4 col = active ? ui::colors::kActiveGreen
                                            : ui::colors::kInactiveGray;
@@ -843,7 +843,7 @@ void renderItemTooltip(const game::ItemQueryResponseData& info, const game::Inve
         }
         uint32_t playerSkillVal = 0;
         if (gameHandler) {
-            const auto& skills = gameHandler->getPlayerSkills();
+            const auto& skills = gameHandler->spells().playerSkills();
             auto skPit = skills.find(info.requiredSkill);
             if (skPit != skills.end()) playerSkillVal = skPit->second.effectiveValue();
         }
@@ -896,9 +896,9 @@ void renderItemTooltip(const game::ItemQueryResponseData& info, const game::Inve
         if (gameHandler) {
             // Prefer the spell's tooltip text (the actual effect description).
             // Fall back to the spell name if the description is empty.
-            const std::string& spDesc = gameHandler->getSpellDescription(sp.spellId);
+            const std::string& spDesc = gameHandler->spells().getSpellDescription(sp.spellId);
             std::string spName = spDesc.empty()
-                ? gameHandler->getSpellName(sp.spellId)
+                ? gameHandler->spells().getSpellName(sp.spellId)
                 : gameHandler->formatSpellDescription(sp.spellId, spDesc);
             if (!spName.empty()) {
                 ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 320.0f);
@@ -1032,7 +1032,7 @@ void renderItemTooltip(const game::ItemQueryResponseData& info, const game::Inve
             if (gameHandler) {
                 for (int i = 0; i < 10; ++i) {
                     if (se.spellIds[i] == 0 || se.thresholds[i] == 0) continue;
-                    const std::string& bname = gameHandler->getSpellName(se.spellIds[i]);
+                    const std::string& bname = gameHandler->spells().getSpellName(se.spellIds[i]);
                     bool active = (equipped >= static_cast<int>(se.thresholds[i]));
                     ImVec4 col = active ? ui::colors::kActiveGreen
                                        : ui::colors::kInactiveGray;

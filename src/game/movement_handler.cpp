@@ -599,7 +599,7 @@ void MovementHandler::sendMovement(Opcode opcode) {
 
     // Cancel any timed non-channel cast, plus food/water restoration, the moment
     // the player starts moving. Other channels retain their normal behavior.
-    if (owner_.isCasting() && (!owner_.isChanneling() || owner_.isRestoring())) {
+    if (owner_.spells().isCasting() && (!owner_.spells().isChanneling() || owner_.spells().isRestoring())) {
         const bool isPositionalMove =
             opcode == Opcode::MSG_MOVE_START_FORWARD  ||
             opcode == Opcode::MSG_MOVE_START_BACKWARD ||
@@ -1072,7 +1072,7 @@ void MovementHandler::dismount() {
         owner_.getSocket()->send(pkt);
         LOG_INFO("Sent CMSG_CANCEL_AURA (mount spell ", savedMountAura, ") - Classic fallback");
     } else {
-        for (const auto& a : owner_.getPlayerAuras()) {
+        for (const auto& a : owner_.spells().getPlayerAuras()) {
             if (!a.isEmpty() && a.maxDurationMs < 0 && a.casterGuid == owner_.getPlayerGuid()) {
                 auto pkt = CancelAuraPacket::build(a.spellId);
                 owner_.getSocket()->send(pkt);
@@ -2274,7 +2274,7 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
         owner_.clearHostileAttackers();
         owner_.stopAutoAttack();
         owner_.tabCycleStaleRef() = true;
-        owner_.resetCastState();
+        owner_.spells().resetCastState();
 
         const bool deeprunTram = owner_.getCurrentMapId() == 369;
         owner_.activeAreaTriggersRef().clear();
@@ -2344,7 +2344,7 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
     owner_.areaTriggerSuppressFirstRef() = true;
     owner_.areaTriggerCooldownRef() = deeprunTram ? 1.5f : 10.0f;
     owner_.stopAutoAttack();
-    owner_.resetCastState();
+    owner_.spells().resetCastState();
 
     if (owner_.getSocket()) {
         network::Packet ack(wireOpcode(Opcode::MSG_MOVE_WORLDPORT_ACK));

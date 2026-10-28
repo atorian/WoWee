@@ -551,7 +551,7 @@ void EntityController::syncPreWotlkAurasFromFields(const std::shared_ptr<Entity>
     static bool saidAuraCount = false;
     if (!saidAuraCount) {
         saidAuraCount = true;
-        LOG_WARNING("player auras on first rebuild: ", owner_.getPlayerAuras().size());
+        LOG_WARNING("player auras on first rebuild: ", owner_.spells().getPlayerAuras().size());
     }
     pendingEvents_.emit("UNIT_AURA", {"player"});
     // The 1.12 name for the same news, carrying no unit - which is how a
@@ -623,9 +623,9 @@ void EntityController::detectPlayerMountChange(uint32_t newMountDisplayId,
 
     if (old != 0 && newMountDisplayId == 0) {
         LOG_WARNING("Authoritative mount field cleared: oldDisplay=", old,
-                    " casting=", owner_.isCasting(),
-                    " channeling=", owner_.isChanneling(),
-                    " spell=", owner_.getCurrentCastSpellId());
+                    " casting=", owner_.spells().isCasting(),
+                    " channeling=", owner_.spells().isChanneling(),
+                    " spell=", owner_.spells().getCurrentCastSpellId());
     }
     owner_.currentMountDisplayIdRef() = newMountDisplayId;
     if (newMountDisplayId != old && owner_.mountCallbackRef()) owner_.mountCallbackRef()(newMountDisplayId);
@@ -2035,8 +2035,8 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
         bool slotsChanged = applyPlayerStatFields(block.fields, pfi, true);
         if (slotsChanged) owner_.inventory().rebuildOnlineInventory();
         owner_.inventory().maybeDetectVisibleItemLayout();
-        owner_.extractSkillFields(owner_.lastPlayerFieldsRef());
-        owner_.extractExploredZoneFields(owner_.lastPlayerFieldsRef());
+        owner_.spells().extractSkillFields(owner_.lastPlayerFieldsRef());
+        owner_.spells().extractExploredZoneFields(owner_.lastPlayerFieldsRef());
         owner_.applyQuestStateFromFields(owner_.lastPlayerFieldsRef());
     }
 }
@@ -2339,8 +2339,8 @@ void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::share
             owner_.inventory().rebuildOnlineInventory();
             pendingEvents_.emit("PLAYER_EQUIPMENT_CHANGED", {});
         }
-        owner_.extractSkillFields(owner_.lastPlayerFieldsRef());
-        owner_.extractExploredZoneFields(owner_.lastPlayerFieldsRef());
+        owner_.spells().extractSkillFields(owner_.lastPlayerFieldsRef());
+        owner_.spells().extractExploredZoneFields(owner_.lastPlayerFieldsRef());
         owner_.applyQuestStateFromFields(owner_.lastPlayerFieldsRef());
     }
 }

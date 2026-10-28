@@ -696,7 +696,7 @@ inline uint8_t containerWireSlot(int bag, int slot) {
 inline uint32_t spellIdForBookSlot(game::GameHandler* gh, int slot) {
     if (!gh || slot < 1) return 0;
     int idx = slot;
-    for (const auto& tab : gh->getSpellBookTabs()) {
+    for (const auto& tab : gh->spells().getSpellBookTabs()) {
         if (idx <= static_cast<int>(tab.spellIds.size())) return tab.spellIds[idx - 1];
         idx -= static_cast<int>(tab.spellIds.size());
     }
@@ -738,8 +738,8 @@ inline uint32_t spellIdForCall(lua_State* L, game::GameHandler* gh) {
     if (!name || !*name) return 0;
     std::string nameLow(name);
     toLowerInPlace(nameLow);
-    for (uint32_t sid : gh->getKnownSpells()) {
-        std::string sn = gh->getSpellName(sid);
+    for (uint32_t sid : gh->spells().getKnownSpells()) {
+        std::string sn = gh->spells().getSpellName(sid);
         toLowerInPlace(sn);
         if (sn == nameLow) return sid;
     }
@@ -777,10 +777,10 @@ inline bool itemUseCooldown(game::GameHandler* gh, uint32_t itemId,
     if (!info || !info->valid) return false;
     for (const auto& sp : info->spells) {
         if (sp.spellId == 0 || (sp.spellTrigger != 0 && sp.spellTrigger != 5)) continue;
-        const auto& cds = gh->getSpellCooldowns();
+        const auto& cds = gh->spells().getSpellCooldowns();
         auto it = cds.find(sp.spellId);
         if (it == cds.end() || it->second <= 0.0f) continue;
-        double total = gh->getSpellCooldownTotal(sp.spellId);
+        double total = gh->spells().getSpellCooldownTotal(sp.spellId);
         if (total < it->second) total = it->second;
         start = luaGetTimeNow() - (total - it->second);
         duration = total;

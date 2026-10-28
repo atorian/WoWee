@@ -747,9 +747,9 @@ void GameHandler::registerCoreOpcodes() {
             if (serverMountDisplay != 0 && !awaitingOurOwnDismount) {
                 LOG_WARNING("Ignoring transient SMSG_DISMOUNT while authoritative mount field is ",
                             serverMountDisplay,
-                            " casting=", isCasting(),
-                            " channeling=", isChanneling(),
-                            " spell=", getCurrentCastSpellId());
+                            " casting=", spellHandler_->isCasting(),
+                            " channeling=", spellHandler_->isChanneling(),
+                            " spell=", spellHandler_->getCurrentCastSpellId());
                 return;
             }
             movementHandler_->clearDismountPending();
@@ -1372,7 +1372,7 @@ void GameHandler::registerRemainingOpcodes() {
             LOG_DEBUG("SMSG_ENCHANTMENTLOG: spellId=", enchSpellId);
             // Show enchant message if the player is involved
             if (enchTargetGuid == playerGuid || enchCasterGuid == playerGuid) {
-                const std::string& enchName = getSpellName(enchSpellId);
+                const std::string& enchName = spellHandler_->getSpellName(enchSpellId);
                 std::string casterName = lookupName(enchCasterGuid);
                 if (!enchName.empty()) {
                     std::string msg;
@@ -1475,7 +1475,7 @@ void GameHandler::registerRemainingOpcodes() {
         if (packet.hasRemaining(5)) {
             uint8_t slot       = packet.readUInt8();
             uint32_t durationMs = packet.readUInt32();
-            handleUpdateAuraDuration(slot, durationMs);
+            spellHandler_->handleUpdateAuraDuration(slot, durationMs);
         }
     };
     // A plain guid: Unit::SendMountSpecialAnim writes GetGUID(), not the
