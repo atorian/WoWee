@@ -21,7 +21,7 @@ uint64_t GameStateAdapter::getPetGuid() const    { return gameHandler_.petGuid()
 uint64_t GameStateAdapter::getMouseoverGuid() const { return gameHandler_.getMouseoverGuid(); }
 
 // --- Player state ---
-bool GameStateAdapter::isInCombat() const  { return gameHandler_.isInCombat(); }
+bool GameStateAdapter::isInCombat() const  { return gameHandler_.combat().isInCombat(); }
 bool GameStateAdapter::isMounted() const   { return gameHandler_.isMounted(); }
 bool GameStateAdapter::isSwimming() const  { return gameHandler_.isSwimming(); }
 bool GameStateAdapter::isFlying() const    { return gameHandler_.isPlayerFlying(); }

@@ -237,7 +237,6 @@ void GameHandler::registerCoreOpcodes() {
     // -----------------------------------------------------------------------
     // XP / exploration
     // -----------------------------------------------------------------------
-    registerHandler(Opcode::SMSG_LOG_XPGAIN, &GameHandler::handleXpGain);
     dispatchTable_[Opcode::SMSG_EXPLORATION_EXPERIENCE] = [this](network::Packet& packet) {
         if (packet.hasRemaining(8)) {
             uint32_t areaId   = packet.readUInt32();

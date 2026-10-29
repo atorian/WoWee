@@ -188,7 +188,7 @@ void CombatUI::playSoundsForNewChat(game::GameHandler& gameHandler) {
 // entry, which is a decision about what this interface owns rather than a fix
 // to something broken - and the client's combat text is the one on screen today.
 void CombatUI::renderCombatText(game::GameHandler& gameHandler) {
-    const auto& entries = gameHandler.getCombatText();
+    const auto& entries = gameHandler.combat().getCombatText();
     if (entries.empty()) return;
 
     auto* window = services_.window;
@@ -571,18 +571,18 @@ void CombatUI::renderDPSMeter(game::GameHandler& gameHandler,
     const float dt = ImGui::GetIO().DeltaTime;
 
     // Track combat duration for accurate DPS denominator in short fights
-    bool inCombat = gameHandler.isInCombat();
+    bool inCombat = gameHandler.combat().isInCombat();
     if (inCombat && !dpsWasInCombat_) {
         // Just entered combat - reset encounter accumulators
         dpsEncounterDamage_ = 0.0f;
         dpsEncounterHeal_   = 0.0f;
-        dpsLogSeenCount_    = gameHandler.getCombatLog().size();
+        dpsLogSeenCount_    = gameHandler.combat().getCombatLog().size();
         dpsCombatAge_       = 0.0f;
     }
     if (inCombat) {
         dpsCombatAge_ += dt;
         // Scan any new log entries since last frame
-        const auto& log = gameHandler.getCombatLog();
+        const auto& log = gameHandler.combat().getCombatLog();
         while (dpsLogSeenCount_ < log.size()) {
             const auto& e = log[dpsLogSeenCount_++];
             if (!e.isPlayerSource) continue;
@@ -610,7 +610,7 @@ void CombatUI::renderDPSMeter(game::GameHandler& gameHandler,
 
     // Sum all player-source damage and healing in the current combat-text window
     float totalDamage = 0.0f, totalHeal = 0.0f;
-    for (const auto& e : gameHandler.getCombatText()) {
+    for (const auto& e : gameHandler.combat().getCombatText()) {
         if (!e.isPlayerSource) continue;
         switch (e.type) {
             case game::CombatTextEntry::MELEE_DAMAGE:
@@ -767,7 +767,7 @@ void CombatUI::renderCombatLog(game::GameHandler& gameHandler,
                               SpellbookScreen& spellbookScreen) {
     if (!showCombatLog_) return;
 
-    const auto& log = gameHandler.getCombatLog();
+    const auto& log = gameHandler.combat().getCombatLog();
 
     ImGui::SetNextWindowSize(ImVec2(520, 320), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(160, 200), ImGuiCond_FirstUseEver);
@@ -792,7 +792,7 @@ void CombatUI::renderCombatLog(game::GameHandler& gameHandler,
     ImGui::Checkbox("Auto-scroll", &autoScroll);
     ImGui::SameLine(ImGui::GetContentRegionAvail().x - 40.0f);
     if (ImGui::SmallButton("Clear"))
-        gameHandler.clearCombatLog();
+        gameHandler.combat().clearCombatLog();
     ImGui::PopStyleVar();
     ImGui::Separator();
 

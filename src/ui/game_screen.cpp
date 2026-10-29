@@ -865,7 +865,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     // Update renderer face-target position and selection circle
     auto* renderer = services_.renderer;
     if (renderer) {
-        if (auto* ac = services_.animationController) ac->setInCombat(gameHandler.isInCombat() &&
+        if (auto* ac = services_.animationController) ac->setInCombat(gameHandler.combat().isInCombat() &&
                               !gameHandler.isPlayerDead() &&
                               !gameHandler.isPlayerGhost());
         if (renderer->getCharacterRenderer()) {
@@ -925,7 +925,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                     auto unit = std::static_pointer_cast<game::Unit>(target);
                     if (unit->getHealth() == 0 && unit->getMaxHealth() > 0) {
                         circleColor = glm::vec3(0.5f, 0.5f, 0.5f); // gray (dead)
-                    } else if (unit->isHostile() || gameHandler.isAggressiveTowardPlayer(target->getGuid())) {
+                    } else if (unit->isHostile() || gameHandler.combat().isAggressiveTowardPlayer(target->getGuid())) {
                         const ImVec4 c = ui::helpers::levelDifficultyColor(
                             gameHandler.getPlayerLevel(), unit->getLevel());
                         circleColor = glm::vec3(c.x, c.y, c.z);
@@ -1438,7 +1438,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
             !interfaceConsumedKey(ImGuiKey_Tab) &&
             input.isKeyJustPressed(SDL_SCANCODE_TAB)) {
             const auto& movement = gameHandler.getMovementInfo();
-            gameHandler.tabTarget(movement.x, movement.y, movement.z);
+            gameHandler.combat().tabTarget(movement.x, movement.y, movement.z);
         }
 
         // Escape (TOGGLE_SETTINGS) must not fire while chat input is active -

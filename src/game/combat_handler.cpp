@@ -128,6 +128,7 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
     };
     table[Opcode::SMSG_SPELLNONMELEEDAMAGELOG] = [this](network::Packet& packet) { handleSpellDamageLog(packet); };
     table[Opcode::SMSG_SPELLHEALLOG] = [this](network::Packet& packet) { handleSpellHealLog(packet); };
+    table[Opcode::SMSG_LOG_XPGAIN] = [this](network::Packet& packet) { handleXpGain(packet); };
 
     // ---- Environmental damage ----
     table[Opcode::SMSG_ENVIRONMENTAL_DAMAGE_LOG] = [this](network::Packet& packet) {
@@ -1283,11 +1284,6 @@ void CombatHandler::clearFocus() {
     owner_.fireAddonEvent("PLAYER_FOCUS_CHANGED", {});
 }
 
-std::shared_ptr<Entity> CombatHandler::getFocus() const {
-    if (owner_.focusGuidRef() == 0) return nullptr;
-    return owner_.getEntityManager().getEntity(owner_.focusGuidRef());
-}
-
 void CombatHandler::setMouseoverGuid(uint64_t guid) {
     if (owner_.mouseoverGuidRef() != guid) {
         owner_.mouseoverGuidRef() = guid;
@@ -1434,7 +1430,7 @@ void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
     // nearest enemy instead of continuing a stale rotation.
     constexpr uint64_t kCycleResetMs = 4000;
 
-    const bool playerInCombat = owner_.isInCombat();
+    const bool playerInCombat = owner_.combat().isInCombat();
 
     // Helper: returns true if the entity is a hostile that can be tab-targeted.
     // Corpses are never tab targets while fighting; out of combat they only

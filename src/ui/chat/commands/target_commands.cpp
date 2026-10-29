@@ -123,7 +123,7 @@ public:
 class TargetEnemyCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.targetEnemy(false);
+        ctx.gameHandler.combat().targetEnemy(false);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"targetenemy"}; }
@@ -134,7 +134,7 @@ public:
 class TargetFriendCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.targetFriend(false);
+        ctx.gameHandler.combat().targetFriend(false);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"targetfriend"}; }
@@ -145,7 +145,7 @@ public:
 class TargetLastTargetCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.targetLastTarget();
+        ctx.gameHandler.combat().targetLastTarget();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"targetlasttarget", "targetlast"}; }
@@ -156,7 +156,7 @@ public:
 class TargetLastEnemyCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.targetEnemy(true);
+        ctx.gameHandler.combat().targetEnemy(true);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"targetlastenemy"}; }
@@ -167,7 +167,7 @@ public:
 class TargetLastFriendCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.targetFriend(true);
+        ctx.gameHandler.combat().targetFriend(true);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"targetlastfriend"}; }

@@ -95,7 +95,6 @@ public:
     [[nodiscard]] std::shared_ptr<Entity> getTarget() const;
     void setFocus(uint64_t guid);
     void clearFocus();
-    [[nodiscard]] std::shared_ptr<Entity> getFocus() const;
     void setMouseoverGuid(uint64_t guid);
     void targetLastTarget();
     void targetEnemy(bool reverse);

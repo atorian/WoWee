@@ -302,7 +302,7 @@ public:
     bool friendlyFaction(uint32_t factionTemplateId) const override {
         return isFriendlyFaction(factionTemplateId);
     }
-    bool aggressiveTowardPlayer(uint64_t guid) const override { return isAggressiveTowardPlayer(guid); }
+    bool aggressiveTowardPlayer(uint64_t guid) const override { return combatHandler_->isAggressiveTowardPlayer(guid); }
     const MovementInfo& playerMovement() const override { return movementInfo; }
     void setFacing(float canonicalYaw) override;
     void faceTowards(float canonicalYaw) override { faceCanonicalYaw(canonicalYaw); }
@@ -312,8 +312,8 @@ public:
     bool flying() const override { return isPlayerFlying(); }
     uint32_t mountDisplayId() const override { return currentMountDisplayId_; }
     void noteMountAura(uint32_t spellId) override { mountAuraSpellId_ = spellId; }
-    bool autoAttacking() const override { return isAutoAttacking(); }
-    bool inCombat() const override { return isInCombat(); }
+    bool autoAttacking() const override { return combatHandler_->isAutoAttacking(); }
+    bool inCombat() const override { return combatHandler_->isInCombat(); }
     const ItemQueryResponseData* itemInfo(uint32_t itemId) const override { return inventoryHandler_->getItemInfo(itemId); }
     const std::unordered_map<uint32_t, ItemQueryResponseData>& itemTemplates() const override {
         return inventoryHandler_->getItemInfoCache();
@@ -736,29 +736,16 @@ public:
     uint64_t getTargetGuid() const override { return targetGuid; }
     std::shared_ptr<Entity> getTarget() const override;
     bool hasTarget() const override { return targetGuid != 0; }
-    void tabTarget(float playerX, float playerY, float playerZ);
 
     // Focus targeting
     void setFocus(uint64_t guid) override;
     void clearFocus() override;
     uint64_t getFocusGuid() const override { return focusGuid; }
-    std::shared_ptr<Entity> getFocus() const;
     bool hasFocus() const override { return focusGuid != 0; }
 
     // Mouseover targeting - set each frame by the nameplate renderer
     void setMouseoverGuid(uint64_t guid) override;
     uint64_t getMouseoverGuid() const override { return mouseoverGuid_; }
-
-    // Advanced targeting
-    void targetLastTarget();
-    void targetEnemy(bool reverse = false);
-    void targetFriend(bool reverse = false);
-    void targetNearestEnemyPlayer(bool reverse = false);
-    void targetNearestFriendPlayer(bool reverse = false);
-    void targetNearestPartyMember(bool reverse = false);
-    void targetNearestRaidMember(bool reverse = false);
-    void targetLastEnemy();
-    void targetLastFriend();
 
     // Inspection
     void inspectTarget();
@@ -822,10 +809,6 @@ public:
     // Follow/Assist
     void followTarget();
     void cancelFollow();   // Stop following current target
-    void assistTarget();
-
-    // PvP
-    void togglePvp();
 
     // Minimap ping (Ctrl+click on minimap; wowX/wowY in canonical WoW coords)
     void sendMinimapPing(float wowX, float wowY);
@@ -924,31 +907,12 @@ public:
 
     void startAutoAttack(uint64_t targetGuid) override;
     void stopAutoAttack() override;
-    bool isAutoAttacking() const;
-    bool hasAutoAttackIntent() const;
-    bool isInCombat() const;
-    bool isInCombatWith(uint64_t guid) const;
-    uint64_t getAutoAttackTargetGuid() const;
-    bool isAggressiveTowardPlayer(uint64_t guid) const;
-    // Timestamp (ms since epoch) of the most recent player melee auto-attack.
-    // Zero if no swing has occurred this session.
-    uint64_t getLastMeleeSwingMs() const;
-    const std::vector<CombatTextEntry>& getCombatText() const;
-    void clearCombatText();
-    void updateCombatText(float deltaTime);
-    void clearHostileAttackers();
-
-    // Combat log (persistent rolling history, max MAX_COMBAT_LOG entries)
-    const std::deque<CombatLogEntry>& getCombatLog() const;
-    void clearCombatLog();
-
     // Area trigger messages (SMSG_AREA_TRIGGER_MESSAGE) - drained by UI each frame
     bool hasAreaTriggerMsg() const { return chatHandler_->hasAreaTriggerMessage(); }
     std::string popAreaTriggerMsg() { return chatHandler_->takeAreaTriggerMessage(); }
 
     // Threat
     using ThreatEntry = CombatHandler::ThreatEntry;
-    const std::vector<ThreatEntry>* getThreatList(uint64_t unitGuid) const;
     const std::vector<ThreatEntry>* getTargetThreatList() const;
 
     void cancelCast() override;
@@ -1368,7 +1332,6 @@ public:
     /** True when SMSG_PRE_RESURRECT arrived - Reincarnation/Twisting Nether available. */
     bool canSelfRes() const { return selfResAvailable_; }
     /** Send CMSG_SELF_RES to use Reincarnation / Twisting Nether. */
-    void useSelfRes();
 
     // Barber shop
     bool isBarberShopOpen() const { return barberShopOpen_; }
@@ -1389,9 +1352,7 @@ public:
     bool isInInstance() const;
 
     /** True when ghost is within 40 yards of corpse position (same map). */
-    bool canReclaimCorpse() const;
     /** Seconds remaining on the PvP corpse-reclaim delay, or 0 if the reclaim is available now. */
-    float getCorpseReclaimDelaySec() const;
     /** Distance (yards) from ghost to corpse, or -1 if no corpse data. */
     float getCorpseDistance() const {
         if (!corpsePositionValid_ || currentMapId_ != corpseMapId_) return -1.0f;
@@ -1411,10 +1372,6 @@ public:
         return true;
     }
     /** Send CMSG_RECLAIM_CORPSE; noop if not a ghost or not near corpse. */
-    void reclaimCorpse();
-    void releaseSpirit();
-    void acceptResurrect();
-    void declineResurrect();
 
     // ---- Item text (books / readable items) ----
 
@@ -1467,7 +1424,6 @@ public:
     void despawnGameObjectLocally(uint64_t guid) override;
     /// Remove a creature corpse client-side once it has been looted empty.
     void despawnCreatureLocally(uint64_t guid);
-    void activateSpiritHealer(uint64_t npcGuid);
     /// Turn the player to face the target when an attack or a targeted spell
     /// starts. Off by default, as the original client has it: a target behind
     /// the player has to be faced first, and the server says so. A debugging
@@ -1891,7 +1847,6 @@ public:
 
 
     bool isMounted() const { return currentMountDisplayId_ != 0; }
-    bool isHostileAttacker(uint64_t guid) const;
     bool isHostileFactionPublic(uint32_t factionTemplateId) const { return isHostileFaction(factionTemplateId); }
     float getServerRunSpeed() const;
     float getServerWalkSpeed() const;
@@ -2057,7 +2012,6 @@ public:
     void updateTimers(float deltaTime);
     void updateEntityInterpolation(float deltaTime);
     void updateTaxiAndMountState(float deltaTime);
-    void updateAutoAttack(float deltaTime);
 
     /**
      * Reset DBC-backed caches so they reload from new expansion data.
@@ -2073,7 +2027,6 @@ public:
     network::WorldConnection* getSocket() override { return socket.get(); }
     const network::WorldConnection* getSocket() const { return socket.get(); }
     ChatHandler* getChatHandler() { return chatHandler_.get(); }
-    CombatHandler* getCombatHandler() { return combatHandler_.get(); }
     MovementHandler* getMovementHandler() { return movementHandler_.get(); }
     SpellHandler* getSpellHandler() { return spellHandler_.get(); }
     QuestHandler* getQuestHandler() { return questHandler_.get(); }
@@ -2092,6 +2045,10 @@ public:
     /// Spell.dbc and the skill tables say about them.
     SpellHandler& spells() { return *spellHandler_; }
     const SpellHandler& spells() const { return *spellHandler_; }
+    /// Combat: auto-attack, who is attacking whom, threat, targeting,
+    /// combat text, death and the spirit healer.
+    CombatHandler& combat() { return *combatHandler_; }
+    const CombatHandler& combat() const { return *combatHandler_; }
     /// Key bindings, macros and settings the server keeps for the account.
     AccountDataHandler& accountData() { return *accountDataHandler_; }
     const AccountDataHandler& accountData() const { return *accountDataHandler_; }
@@ -2493,9 +2450,6 @@ private:
 
     // ---- Character creation handler ----
     void handleCharCreateResponse(network::Packet& packet);
-
-    // ---- XP handler ----
-    void handleXpGain(network::Packet& packet);
 
     void clearPendingQuestAccept(uint32_t questId);
     void triggerQuestAcceptResync(uint32_t questId, uint64_t npcGuid, const char* reason);

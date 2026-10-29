@@ -423,7 +423,7 @@ struct ThreatStanding {
 bool threatStandingFor(game::GameHandler* gh, uint64_t unitGuid, uint64_t mobGuid,
                        ThreatStanding& out) {
     if (!gh || unitGuid == 0 || mobGuid == 0) return false;
-    const auto* list = gh->getThreatList(mobGuid);
+    const auto* list = gh->combat().getThreatList(mobGuid);
     if (!list || list->empty()) return false;
     out.topThreat = (*list)[0].threat;
     for (size_t i = 0; i < list->size(); ++i) {
@@ -482,7 +482,7 @@ static int lua_UnitThreatSituation(lua_State* L) {
         }
     }
     // Check if player is in combat (basic threat indicator)
-    if (playerUnitGuid == gh->getPlayerGuid() && gh->isInCombat()) {
+    if (playerUnitGuid == gh->getPlayerGuid() && gh->combat().isInCombat()) {
         lua_pushnumber(L, 1); // in combat but not tanking
         return 1;
     }
@@ -1179,7 +1179,7 @@ static int lua_PetCanBeAbandoned(lua_State* L) { return luaReturnFalse(L); }
 
 static int lua_InCombatLockdown(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->isInCombat());
+    lua_pushboolean(L, gh && gh->combat().isInCombat());
     return 1;
 }
 
@@ -1867,7 +1867,7 @@ static int lua_UnitAffectingCombat(lua_State* L) {
     std::string uidStr(uid);
     toLowerInPlace(uidStr);
     if (uidStr == "player") {
-        lua_pushboolean(L, gh->isInCombat());
+        lua_pushboolean(L, gh->combat().isInCombat());
     } else {
         // Check UNIT_FLAG_IN_COMBAT (0x00080000) in UNIT_FIELD_FLAGS
         uint64_t guid = resolveUnitGuid(gh, uidStr);
@@ -1918,7 +1918,7 @@ static int lua_HasFullControl(lua_State* L) {
 
 // RetrieveCorpse() - resurrect where the body is
 static int lua_RetrieveCorpse(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->reclaimCorpse();
+    if (auto* gh = getGameHandler(L)) gh->combat().reclaimCorpse();
     return 0;
 }
 

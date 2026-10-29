@@ -952,11 +952,11 @@ static int lua_AcceptResurrect(lua_State* L) {
     // button's GetID, so a button answering zero would run OnCancel instead
     // and decline the offer while looking like it accepted.
     LOG_INFO("AcceptResurrect called from the interface");
-    if (auto* gh = getGameHandler(L)) gh->acceptResurrect();
+    if (auto* gh = getGameHandler(L)) gh->combat().acceptResurrect();
     return 0;
 }
 static int lua_DeclineResurrect(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->declineResurrect();
+    if (auto* gh = getGameHandler(L)) gh->combat().declineResurrect();
     return 0;
 }
 static int lua_AcceptDuel(lua_State* L) {
@@ -2828,7 +2828,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"AcceptXPLoss", [](lua_State* L) -> int {
             if (auto* gh = getGameHandler(L)) {
                 const uint64_t healer = gh->resurrectCasterGuidRef();
-                if (healer) gh->activateSpiritHealer(healer);
+                if (healer) gh->combat().activateSpiritHealer(healer);
                 gh->resurrectRequestPendingRef() = false;
             }
             return 0;
@@ -3160,7 +3160,7 @@ void registerSocialLuaAPI(lua_State* L) {
             // The client can only toggle, so only toggle when it would land on
             // what was asked for - otherwise SetPVP(1) while already flagged
             // would turn it off.
-            if (want != on) gh->togglePvp();
+            if (want != on) gh->combat().togglePvp();
             return 0;
         }},
                 {"UnitIsInMyGuild", [](lua_State* L) -> int {
@@ -3394,7 +3394,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 // appeared - and releasing spirit from it was impossible even
                 // if it had.
                 {"RepopMe", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->releaseSpirit();
+            if (auto* gh = getGameHandler(L)) gh->combat().releaseSpirit();
             return 0;
         }},
                 // The text for the second button, or nil for no button at all.
@@ -3408,7 +3408,7 @@ void registerSocialLuaAPI(lua_State* L) {
             return 1;
         }},
                 {"UseSoulstone", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->useSelfRes();
+            if (auto* gh = getGameHandler(L)) gh->combat().useSelfRes();
             return 0;
         }},
                 // False: the corpse is always recoverable here. Answering true
@@ -3738,27 +3738,27 @@ void registerSocialLuaAPI(lua_State* L) {
                 // wiring these to the nearest thing would target the wrong
                 // unit, which is worse than not answering the command.
                 {"TargetLastEnemy", [](lua_State* L) -> int {
-                    if (auto* gh = getGameHandler(L)) gh->targetLastEnemy();
+                    if (auto* gh = getGameHandler(L)) gh->combat().targetLastEnemy();
                     return 0;
                 }},
                 {"TargetLastFriend", [](lua_State* L) -> int {
-                    if (auto* gh = getGameHandler(L)) gh->targetLastFriend();
+                    if (auto* gh = getGameHandler(L)) gh->combat().targetLastFriend();
                     return 0;
                 }},
                 {"TargetNearestEnemyPlayer", [](lua_State* L) -> int {
-                    if (auto* gh = getGameHandler(L)) gh->targetNearestEnemyPlayer(wantsReverseArg(L));
+                    if (auto* gh = getGameHandler(L)) gh->combat().targetNearestEnemyPlayer(wantsReverseArg(L));
                     return 0;
                 }},
                 {"TargetNearestFriendPlayer", [](lua_State* L) -> int {
-                    if (auto* gh = getGameHandler(L)) gh->targetNearestFriendPlayer(wantsReverseArg(L));
+                    if (auto* gh = getGameHandler(L)) gh->combat().targetNearestFriendPlayer(wantsReverseArg(L));
                     return 0;
                 }},
                 {"TargetNearestPartyMember", [](lua_State* L) -> int {
-                    if (auto* gh = getGameHandler(L)) gh->targetNearestPartyMember(wantsReverseArg(L));
+                    if (auto* gh = getGameHandler(L)) gh->combat().targetNearestPartyMember(wantsReverseArg(L));
                     return 0;
                 }},
                 {"TargetNearestRaidMember", [](lua_State* L) -> int {
-                    if (auto* gh = getGameHandler(L)) gh->targetNearestRaidMember(wantsReverseArg(L));
+                    if (auto* gh = getGameHandler(L)) gh->combat().targetNearestRaidMember(wantsReverseArg(L));
                     return 0;
                 }},
                 {"StartDuel", [](lua_State* L) -> int {

@@ -147,7 +147,7 @@ ScenePick pickScene(game::GameHandler& gameHandler,
                     // A corpse still answers isHostile(), and a hostile is picked
                     // ahead of everything - hence the liveness check above it.
                     const bool hostile = unit->isHostile() ||
-                                         gameHandler.isAggressiveTowardPlayer(guid);
+                                         gameHandler.combat().isAggressiveTowardPlayer(guid);
                     if (hostile && hitT < pick.hostileUnitT) {
                         pick.hostileUnitT = hitT;
                         pick.hostileUnitGuid = guid;

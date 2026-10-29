@@ -5403,7 +5403,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // delay text on FrameXML's corpse prompt always empty.
                 {"GetCorpseRecoveryDelay", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getCorpseReclaimDelaySec() : 0.0);
+            lua_pushnumber(L, gh ? gh->combat().getCorpseReclaimDelaySec() : 0.0);
             return 1;
         }},
                 {"GetAdjustedSkillPoints",   lua_ReturnZero},
@@ -6898,7 +6898,7 @@ void registerSystemLuaAPI(lua_State* L) {
         }},
                 {"TogglePVP", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) gh->togglePvp();
+            if (gh) gh->combat().togglePvp();
             return 0;
         }},
                 {"Minimap_Ping", [](lua_State* L) -> int {

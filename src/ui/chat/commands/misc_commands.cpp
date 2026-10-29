@@ -256,7 +256,7 @@ public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         auto assistEntityTarget = [&](uint64_t srcGuid) {
             auto srcEnt = ctx.gameHandler.getEntityManager().getEntity(srcGuid);
-            if (!srcEnt) { ctx.gameHandler.assistTarget(); return; }
+            if (!srcEnt) { ctx.gameHandler.combat().assistTarget(); return; }
             const uint64_t atkGuid = game::unitTargetGuid(*srcEnt);
             if (atkGuid != 0) {
                 ctx.gameHandler.setTarget(atkGuid);
@@ -310,10 +310,10 @@ public:
                     ctx.gameHandler.addLocalChatMessage(msg);
                 }
             } else {
-                ctx.gameHandler.assistTarget();
+                ctx.gameHandler.combat().assistTarget();
             }
         } else {
-            ctx.gameHandler.assistTarget();
+            ctx.gameHandler.combat().assistTarget();
         }
         return {};
     }
@@ -325,7 +325,7 @@ public:
 class PvpCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.togglePvp();
+        ctx.gameHandler.combat().togglePvp();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"pvp"}; }

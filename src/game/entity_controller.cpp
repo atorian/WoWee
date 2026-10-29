@@ -1045,10 +1045,10 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             unit->setHealth(val);
             result.healthChanged = true;
             if (val == 0) {
-                if (owner_.getCombatHandler() && block.guid == owner_.getCombatHandler()->getAutoAttackTargetGuid()) {
+                if (block.guid == owner_.combat().getAutoAttackTargetGuid()) {
                     owner_.stopAutoAttack();
                 }
-                if (owner_.getCombatHandler()) owner_.getCombatHandler()->removeHostileAttacker(block.guid);
+                owner_.combat().removeHostileAttacker(block.guid);
                 if (block.guid == owner_.getPlayerGuid()) {
                     markPlayerDead("health=0");
                     owner_.stopAutoAttack();
@@ -1099,8 +1099,8 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             // after this bit clears leaves the client permanently "in combat".
             if (block.guid == owner_.getPlayerGuid() &&
                 (oldFlags & UNIT_FLAG_IN_COMBAT) != 0 &&
-                (val & UNIT_FLAG_IN_COMBAT) == 0 && owner_.getCombatHandler()) {
-                owner_.getCombatHandler()->clearHostileAttackers();
+                (val & UNIT_FLAG_IN_COMBAT) == 0) {
+                owner_.combat().clearHostileAttackers();
             }
             // Entering and leaving combat, which the interface names after the
             // health regeneration that stops and starts with it. Registered for
@@ -2747,13 +2747,13 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
     }
 
     // Clean up auto-attack and target if destroyed entity was our target
-    if (owner_.getCombatHandler() && data.guid == owner_.getCombatHandler()->getAutoAttackTargetGuid()) {
+    if (data.guid == owner_.combat().getAutoAttackTargetGuid()) {
         owner_.stopAutoAttack();
     }
     if (data.guid == owner_.getTargetGuid()) {
         owner_.setTargetGuidRaw(0);
     }
-    if (owner_.getCombatHandler()) owner_.getCombatHandler()->removeHostileAttacker(data.guid);
+    owner_.combat().removeHostileAttacker(data.guid);
 
     // Remove online item/container tracking
     if (owner_.inventory().forgetItemObject(data.guid)) {
@@ -2768,7 +2768,7 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
 
     // Remove combat text entries referencing the destroyed entity so floating
     // damage numbers don't linger after the source/target despawns.
-    if (owner_.getCombatHandler()) owner_.getCombatHandler()->removeCombatTextForGuid(data.guid);
+    owner_.combat().removeCombatTextForGuid(data.guid);
 
     // Clean up unit cast owner_.getState() (cast bar) for the destroyed unit
     if (owner_.getSpellHandler()) owner_.getSpellHandler()->removeUnitCastState(data.guid);

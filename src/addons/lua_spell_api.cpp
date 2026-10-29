@@ -926,7 +926,7 @@ static int lua_AssistUnit(lua_State* L) {
 // TargetLastTarget() - re-target previous target
 static int lua_TargetLastTarget(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (gh) gh->targetLastTarget();
+    if (gh) gh->combat().targetLastTarget();
     return 0;
 }
 
@@ -942,14 +942,14 @@ static bool wantsReverse(lua_State* L) {
 
 static int lua_TargetNearestEnemy(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (gh) gh->targetEnemy(wantsReverse(L));
+    if (gh) gh->combat().targetEnemy(wantsReverse(L));
     return 0;
 }
 
 // TargetNearestFriend([reverse]) - target nearest friendly unit
 static int lua_TargetNearestFriend(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (gh) gh->targetFriend(wantsReverse(L));
+    if (gh) gh->combat().targetFriend(wantsReverse(L));
     return 0;
 }
 

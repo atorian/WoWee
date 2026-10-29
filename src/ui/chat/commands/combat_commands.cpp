@@ -231,7 +231,7 @@ public:
                 } else if (plow == "target") {
                     if (ctx.gameHandler.getTargetGuid() != seqState.lastTargetGuid) shouldReset = true;
                 } else if (plow == "combat") {
-                    if (ctx.gameHandler.isInCombat() != seqState.lastInCombat) shouldReset = true;
+                    if (ctx.gameHandler.combat().isInCombat() != seqState.lastInCombat) shouldReset = true;
                 }
                 if (slash == std::string::npos) break;
                 rpos = slash + 1;
@@ -243,7 +243,7 @@ public:
         seqState.index = (seqState.index + 1) % seqSpells.size();
         seqState.lastPressSec   = nowSec;
         seqState.lastTargetGuid = ctx.gameHandler.getTargetGuid();
-        seqState.lastInCombat   = ctx.gameHandler.isInCombat();
+        seqState.lastInCombat   = ctx.gameHandler.combat().isInCombat();
 
         // Cast the selected spell
         std::string ssLow = seqSpell;

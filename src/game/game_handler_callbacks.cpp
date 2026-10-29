@@ -1249,40 +1249,6 @@ void GameHandler::setMouseoverGuid(uint64_t guid) {
     combatHandler_->setMouseoverGuid(guid);
 }
 
-std::shared_ptr<Entity> GameHandler::getFocus() const {
-    return combatHandler_->getFocus();
-}
-
-void GameHandler::targetLastTarget() {
-    combatHandler_->targetLastTarget();
-}
-
-void GameHandler::targetEnemy(bool reverse) {
-    combatHandler_->targetEnemy(reverse);
-}
-
-void GameHandler::targetFriend(bool reverse) {
-    combatHandler_->targetFriend(reverse);
-}
-void GameHandler::targetNearestEnemyPlayer(bool reverse) {
-    combatHandler_->targetNearestEnemyPlayer(reverse);
-}
-void GameHandler::targetNearestFriendPlayer(bool reverse) {
-    combatHandler_->targetNearestFriendPlayer(reverse);
-}
-void GameHandler::targetNearestPartyMember(bool reverse) {
-    combatHandler_->targetNearestPartyMember(reverse);
-}
-void GameHandler::targetNearestRaidMember(bool reverse) {
-    combatHandler_->targetNearestRaidMember(reverse);
-}
-void GameHandler::targetLastEnemy() {
-    combatHandler_->targetLastEnemy();
-}
-void GameHandler::targetLastFriend() {
-    combatHandler_->targetLastFriend();
-}
-
 void GameHandler::inspectTarget() {
     socialHandler_->inspectTarget();
 }
@@ -1361,14 +1327,6 @@ void GameHandler::cancelFollow() {
     movementHandler_->cancelFollow();
 }
 
-void GameHandler::assistTarget() {
-    combatHandler_->assistTarget();
-}
-
-void GameHandler::togglePvp() {
-    combatHandler_->togglePvp();
-}
-
 void GameHandler::toggleAfk(const std::string& message) {
     chatHandler_->toggleAfk(message);
 }
@@ -1409,42 +1367,6 @@ void GameHandler::setSavedInstanceExtend(uint32_t mapId, uint32_t difficulty, bo
 
 void GameHandler::reportPlayer(uint64_t targetGuid, const std::string& reason) {
     socialHandler_->reportPlayer(targetGuid, reason);
-}
-
-void GameHandler::releaseSpirit() {
-    combatHandler_->releaseSpirit();
-}
-
-bool GameHandler::canReclaimCorpse() const {
-    return combatHandler_->canReclaimCorpse();
-}
-
-float GameHandler::getCorpseReclaimDelaySec() const {
-    return combatHandler_->getCorpseReclaimDelaySec();
-}
-
-void GameHandler::reclaimCorpse() {
-    combatHandler_->reclaimCorpse();
-}
-
-void GameHandler::useSelfRes() {
-    combatHandler_->useSelfRes();
-}
-
-void GameHandler::activateSpiritHealer(uint64_t npcGuid) {
-    combatHandler_->activateSpiritHealer(npcGuid);
-}
-
-void GameHandler::acceptResurrect() {
-    combatHandler_->acceptResurrect();
-}
-
-void GameHandler::declineResurrect() {
-    combatHandler_->declineResurrect();
-}
-
-void GameHandler::tabTarget(float playerX, float playerY, float playerZ) {
-    combatHandler_->tabTarget(playerX, playerY, playerZ);
 }
 
 void GameHandler::addLocalChatMessage(const MessageChatData& msg) {
@@ -1570,70 +1492,8 @@ bool GameHandler::shouldLogSpellstealAura(uint64_t casterGuid, uint64_t victimGu
     return combatHandler_->shouldLogSpellstealAura(casterGuid, victimGuid, spellId);
 }
 
-void GameHandler::updateCombatText(float deltaTime) {
-    combatHandler_->updateCombatText(deltaTime);
-}
-
-bool GameHandler::isAutoAttacking() const {
-    return combatHandler_->isAutoAttacking();
-}
-
-bool GameHandler::hasAutoAttackIntent() const {
-    return combatHandler_->hasAutoAttackIntent();
-}
-
-bool GameHandler::isInCombat() const {
-    return combatHandler_->isInCombat();
-}
-
-bool GameHandler::isInCombatWith(uint64_t guid) const {
-    return combatHandler_->isInCombatWith(guid);
-}
-
-uint64_t GameHandler::getAutoAttackTargetGuid() const {
-    return combatHandler_->getAutoAttackTargetGuid();
-}
-
-bool GameHandler::isAggressiveTowardPlayer(uint64_t guid) const {
-    return combatHandler_->isAggressiveTowardPlayer(guid);
-}
-
-uint64_t GameHandler::getLastMeleeSwingMs() const {
-    return combatHandler_->getLastMeleeSwingMs();
-}
-
-const std::vector<CombatTextEntry>& GameHandler::getCombatText() const {
-    static const std::vector<CombatTextEntry> empty;
-    return combatHandler_->getCombatText();
-}
-
-const std::deque<CombatLogEntry>& GameHandler::getCombatLog() const {
-    static const std::deque<CombatLogEntry> empty;
-    return combatHandler_->getCombatLog();
-}
-
-void GameHandler::clearCombatLog() {
-    combatHandler_->clearCombatLog();
-}
-
-void GameHandler::clearCombatText() {
-    combatHandler_->clearCombatText();
-}
-
-void GameHandler::clearHostileAttackers() {
-    combatHandler_->clearHostileAttackers();
-}
-
-const std::vector<GameHandler::ThreatEntry>* GameHandler::getThreatList(uint64_t unitGuid) const {
-    return combatHandler_->getThreatList(unitGuid);
-}
-
 const std::vector<GameHandler::ThreatEntry>* GameHandler::getTargetThreatList() const {
-    return targetGuid ? getThreatList(targetGuid) : nullptr;
-}
-
-bool GameHandler::isHostileAttacker(uint64_t guid) const {
-    return combatHandler_->isHostileAttacker(guid);
+    return targetGuid ? combatHandler_->getThreatList(targetGuid) : nullptr;
 }
 
 void GameHandler::confirmBinder() {

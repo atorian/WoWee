@@ -630,12 +630,6 @@ void GameHandler::updateTaxiAndMountState(float deltaTime) {
     }
 }
 
-void GameHandler::updateAutoAttack(float deltaTime) {
-    combatHandler_->updateAutoAttack(deltaTime);
-
-// Close NPC windows if player walks too far (15 units)
-}
-
 void GameHandler::updateEntityInterpolation(float deltaTime) {
 // Advance every server-tracked unit once per frame. This is intentionally not
 // selected-target or distance gated: the spatial query is indexed by each
@@ -666,7 +660,7 @@ void GameHandler::updateTimers(float deltaTime) {
     // without the edge that prompt could never appear and this client's own
     // button was the only way back from a corpse run.
     {
-        const bool inRange = releasedSpirit_ && canReclaimCorpse();
+        const bool inRange = releasedSpirit_ && combatHandler_->canReclaimCorpse();
         if (inRange != corpseInRangeAnnounced_) {
             corpseInRangeAnnounced_ = inRange;
             fireAddonEvent(inRange ? "CORPSE_IN_RANGE" : "CORPSE_OUT_OF_RANGE", {});
@@ -972,7 +966,7 @@ void GameHandler::updateGame(float deltaTime) {
         // it for them - there is no copy on the buttons to tick.
 
         // Update combat text (Phase 2)
-        updateCombatText(deltaTime);
+        combatHandler_->updateCombatText(deltaTime);
         tickMinimapPings(deltaTime);
         tickMirrorTimers(deltaTime);
 
@@ -986,7 +980,7 @@ void GameHandler::updateGame(float deltaTime) {
         transportManager_->update(deltaTime);
         updateAttachedTransportChildren(deltaTime);
 
-        updateAutoAttack(deltaTime);
+        combatHandler_->updateAutoAttack(deltaTime);
         auto closeIfTooFar = [&](bool windowOpen, uint64_t npcGuid, auto closeFn, const char* label) {
             if (!windowOpen || npcGuid == 0) return;
             auto npc = entityController_->getEntityManager().getEntity(npcGuid);
@@ -1057,10 +1051,6 @@ void GameHandler::updateGame(float deltaTime) {
 
 uint32_t GameHandler::killXp(uint32_t playerLevel, uint32_t victimLevel) {
     return CombatHandler::killXp(playerLevel, victimLevel);
-}
-
-void GameHandler::handleXpGain(network::Packet& packet) {
-    combatHandler_->handleXpGain(packet);
 }
 
 void GameHandler::addSystemChatMessage(const std::string& message) {

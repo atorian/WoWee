@@ -2271,7 +2271,7 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
         owner_.corpseMapIdRef()            = 0;
         owner_.corpsePositionValidRef()    = false;
         owner_.corpseGuidRef()             = 0;
-        owner_.clearHostileAttackers();
+        owner_.combat().clearHostileAttackers();
         owner_.stopAutoAttack();
         owner_.tabCycleStaleRef() = true;
         owner_.spells().resetCastState();
@@ -2331,9 +2331,9 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
     }
     owner_.inventory().leaveWorld();
     owner_.getSpellHandler()->clearUnitCaches();
-    owner_.clearCombatText();
+    owner_.combat().clearCombatText();
     owner_.getEntityManager().clear();
-    owner_.clearHostileAttackers();
+    owner_.combat().clearHostileAttackers();
     owner_.worldStatesRef().clear();
     owner_.clearGossipPois();
     owner_.worldStateMapIdRef() = mapId;

@@ -3655,7 +3655,7 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
         auto& _creatureWasWalking = entitySpawner_->getCreatureWasWalking();
         const uint64_t currentTargetGuid = gameHandler->hasTarget()
             ? gameHandler->getTargetGuid() : 0;
-        const uint64_t autoAttackGuid = gameHandler->getAutoAttackTargetGuid();
+        const uint64_t autoAttackGuid = gameHandler->combat().getAutoAttackTargetGuid();
         for (const auto& [guid, instanceId] : _creatureInstances) {
             auto entity = gameHandler->getEntityManager().getEntity(guid);
             if (!entity || entity->getType() != game::ObjectType::UNIT) continue;
@@ -3842,7 +3842,7 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
         auto& _pCreatureRenderPosCache = entitySpawner_->getCreatureRenderPosCache();
         const uint64_t playerTargetGuid = gameHandler->hasTarget()
             ? gameHandler->getTargetGuid() : 0;
-        const uint64_t playerAutoAttackGuid = gameHandler->getAutoAttackTargetGuid();
+        const uint64_t playerAutoAttackGuid = gameHandler->combat().getAutoAttackTargetGuid();
         for (const auto& [guid, instanceId] : _playerInstances) {
             auto entity = gameHandler->getEntityManager().getEntity(guid);
             if (!entity || entity->getType() != game::ObjectType::PLAYER) continue;
@@ -4095,12 +4095,12 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     inGameStep = "auto-unsheathe";
     updateCheckpoint = "in_game: auto-unsheathe";
     if (gameHandler) {
-        const bool autoAttacking = gameHandler->isAutoAttacking();
+        const bool autoAttacking = gameHandler->combat().isAutoAttacking();
         // Keep the attachment state consistent with the ongoing attack, not
         // just the initial false -> true transition. Z can be pressed after
         // combat has already started, and pre-WotLK servers briefly send
         // ATTACKSTOP while the client retains attack intent for a retry.
-        const bool attackWeaponNeeded = autoAttacking || gameHandler->hasAutoAttackIntent();
+        const bool attackWeaponNeeded = autoAttacking || gameHandler->combat().hasAutoAttackIntent();
         const auto& inventory = gameHandler->inventory().items();
         const auto& mainHand = inventory.getEquipSlot(game::EquipSlot::MAIN_HAND);
         const auto& offHand = inventory.getEquipSlot(game::EquipSlot::OFF_HAND);
