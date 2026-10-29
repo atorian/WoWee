@@ -7,6 +7,7 @@
 #include "game/game_events.hpp"
 
 #include <memory>
+#include <string>
 #include <vector>
 
 using wowee::game::Opcode;
@@ -49,4 +50,25 @@ TEST_CASE("an NPC turning hostile is announced where it stands; another reaction
     CHECK(aggro[0].x == 1.0f);
     CHECK(aggro[0].y == 2.0f);
     CHECK(aggro[0].z == 3.0f);
+}
+
+TEST_CASE("a swing at a target just out of reach says so once", "[combat][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    const auto& me = h.game().getMovementInfo();
+    // Inside the 8 yards auto-attack starts at, outside the 5.75 a sword
+    // reaches.
+    auto boar = std::make_shared<wowee::game::Unit>(0x6001);
+    boar->setPosition(me.x + 6.5f, me.y, me.z, 0.0f);
+    h.game().getEntityManager().addEntity(boar->getGuid(), boar);
+    std::vector<std::string> raised;
+    auto sub = h.events().subscribe<ev::UiErrorRaised>([&](const ev::UiErrorRaised& e) { raised.push_back(e.message); });
+
+    h.game().combat().startAutoAttack(0x6001);
+    h.pump();
+
+    std::vector<std::string> shown;
+    for (const auto& e : h.addonEvents("UI_ERROR_MESSAGE")) shown.push_back(e.args.at(0));
+    CHECK(shown == std::vector<std::string>{"Target is too far away."});
+    CHECK(raised == std::vector<std::string>{"Target is too far away."});
 }

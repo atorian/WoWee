@@ -14,9 +14,13 @@
 #include <vector>
 
 namespace wowee {
+namespace core { class EventBus; class CVarStore; }
 namespace game {
 
+class ChatLog;
+class FrameXmlEvents;
 class GameHandler;
+class PacketSender;
 class Entity;
 
 class CombatHandler {
@@ -24,7 +28,8 @@ public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
-    explicit CombatHandler(GameHandler& owner);
+    CombatHandler(GameHandler& owner, PacketSender& sender, FrameXmlEvents& frameXml,
+                  core::EventBus& events, ChatLog& chat, const core::CVarStore& cvars);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -185,6 +190,11 @@ private:
     void autoTargetAttacker(uint64_t attackerGuid);
 
     GameHandler& owner_;
+    PacketSender& sender_;
+    FrameXmlEvents& frameXml_;
+    core::EventBus& events_;
+    ChatLog& chat_;
+    const core::CVarStore& cvars_;
 
     // --- Combat state ---
     bool autoAttacking_ = false;

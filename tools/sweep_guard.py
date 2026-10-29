@@ -247,12 +247,13 @@ CHECKS = [
     # was next: 9 -> 8 handlers, 4213 -> 3184 reaches; then the pet moved out
     # of three handlers into PetHandler, 3184 -> 3041, and the action bar
     # stopped keeping a copy of the spell cooldowns, -> 3027. WardenHandler:
-    # 4 -> 3 handlers, 1087 -> 1060 reaches.
+    # 4 -> 3 handlers, 1087 -> 1060 reaches. CombatHandler's sending, FrameXML,
+    # chat, error line, bus and CVars: -> 965.
     ("domain_shape_check.py",
      r"^(\d+) domain handlers built from GameHandler&", 3,
      "domain handlers whose constructor takes GameHandler&"),
     ("domain_shape_check.py",
-     r"^(\d+) reaches through owner_ in src/game", 1060,
+     r"^(\d+) reaches through owner_ in src/game", 965,
      "reaches through owner_ into GameHandler from the domain handlers"),
     # State a domain should own, handed out of GameHandler writable, and the
     # notifications wired to a single listener instead of the bus. 218, 1324
