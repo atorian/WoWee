@@ -868,12 +868,12 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     auto* renderer = services_.renderer;
     if (renderer) {
         if (auto* ac = services_.animationController) ac->setInCombat(gameHandler.combat().isInCombat() &&
-                              !gameHandler.isPlayerDead() &&
-                              !gameHandler.isPlayerGhost());
+                              !gameHandler.combat().isPlayerDead() &&
+                              !gameHandler.combat().isPlayerGhost());
         if (renderer->getCharacterRenderer()) {
             uint32_t charInstId = renderer->getCharacterInstanceId();
             if (charInstId != 0) {
-                const bool isGhost = gameHandler.isPlayerGhost();
+                const bool isGhost = gameHandler.combat().isPlayerGhost();
                 if (!ghostOpacityStateKnown_ ||
                     ghostOpacityLastState_ != isGhost ||
                     ghostOpacityLastInstanceId_ != charInstId) {
@@ -959,7 +959,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
 
     // Screen edge damage flash - red vignette that fires on HP decrease
     {
-        const bool deadOrGhost = gameHandler.isPlayerDead() || gameHandler.isPlayerGhost();
+        const bool deadOrGhost = gameHandler.combat().isPlayerDead() || gameHandler.combat().isPlayerGhost();
         auto playerEntity = gameHandler.getEntityManager().getEntity(gameHandler.getPlayerGuid());
         uint32_t currentHp = 0;
         if (playerEntity && (playerEntity->getType() == game::ObjectType::PLAYER ||
@@ -994,7 +994,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     // Persistent low-health vignette - pulsing red edges when HP < 20%
     {
         auto playerEntity = gameHandler.getEntityManager().getEntity(gameHandler.getPlayerGuid());
-        const bool deadOrGhost = gameHandler.isPlayerDead() || gameHandler.isPlayerGhost();
+        const bool deadOrGhost = gameHandler.combat().isPlayerDead() || gameHandler.combat().isPlayerGhost();
         float hpPct = 1.0f;
         if (!deadOrGhost && playerEntity &&
             (playerEntity->getType() == game::ObjectType::PLAYER ||
@@ -2137,7 +2137,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                             return (name.find("spirit healer") != std::string::npos) ||
                                    (name.find("spirit guide") != std::string::npos);
                         };
-                        bool allowSpiritInteract = (gameHandler.isPlayerDead() || gameHandler.isPlayerGhost()) && isSpiritNpc();
+                        bool allowSpiritInteract = (gameHandler.combat().isPlayerDead() || gameHandler.combat().isPlayerGhost()) && isSpiritNpc();
                         bool canInteractNpc = unit->isInteractable() || allowSpiritInteract;
                         bool shouldAttackByFallback = !canInteractNpc;
                         if (!unit->isHostile() && canInteractNpc) {

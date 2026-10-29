@@ -614,11 +614,7 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     // resetCastState() already called inside resetAllState() above
     pendingGameObjectInteractGuid_ = 0;
     lastInteractedGoGuid_ = 0;
-    playerDead_ = false;
-    releasedSpirit_ = false;
-    corpseGuid_ = 0;
-    corpsePositionValid_ = false;
-    corpseReclaimAvailableMs_ = 0;
+    combatHandler_->beginCharacter();
     targetGuid = 0;
     focusGuid = 0;
     lastTargetGuid = 0;
@@ -733,9 +729,7 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     movementInfo.jumpSinAngle = 0.0f;
     movementInfo.jumpCosAngle = 0.0f;
     movementInfo.jumpXYSpeed = 0.0f;
-    resurrectPending_ = false;
-    resurrectRequestPending_ = false;
-    selfResAvailable_ = false;
+    combatHandler_->worldEntered();
     currentMountDisplayId_ = 0;
     vehicleId_ = 0;
     eventBus().publish(events::PlayerMountChanged{0});
@@ -895,7 +889,7 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
         // pulls them to the graveyard. Same reason every UNIT_ value above is
         // re-sent here: a frame built after the fact has missed the event that
         // would have filled it in.
-        if (isPlayerDead()) {
+        if (combatHandler_->isPlayerDead()) {
             fireAddonEvent("PLAYER_DEAD", {});
         }
         // The durability warnings hide themselves when nothing is damaged, and
@@ -1478,12 +1472,12 @@ void GameHandler::interactWithNpc(uint64_t guid) {
     // resurrection, and the client has to ask. Nothing here ever asked, so the
     // reply never came, the countdown never appeared, and the queue that
     // actually resurrects anyone was never joined.
-    if (isPlayerDead() || isPlayerGhost()) {
+    if (combatHandler_->isPlayerDead() || combatHandler_->isPlayerGhost()) {
         auto entity = getEntityManager().getEntity(guid);
         if (auto* unit = dynamic_cast<Unit*>(entity.get())) {
             constexpr uint32_t kSpiritFlags = NPC_FLAG_SPIRIT_GUIDE | NPC_FLAG_SPIRIT_HEALER;
             if (unit->getNpcFlags() & kSpiritFlags) {
-                queryAreaSpiritHealer(guid);
+                combatHandler_->queryAreaSpiritHealer(guid);
             }
         }
     }
@@ -1538,26 +1532,6 @@ void GameHandler::interactWithNpc(uint64_t guid) {
     }
     LOG_DEBUG("interactWithNpc: hello to ", pendingNpcHello_.name, " at ",
               pendingNpcHello_.distance, " yards");
-}
-
-void GameHandler::queryAreaSpiritHealer(uint64_t guid) {
-    if (!isInWorld() || !socket) return;
-    areaSpiritHealerGuid_ = guid;
-    network::Packet packet(wireOpcode(Opcode::CMSG_AREA_SPIRIT_HEALER_QUERY));
-    packet.writeUInt64(guid);
-    socket->send(packet);
-    LOG_INFO("CMSG_AREA_SPIRIT_HEALER_QUERY: 0x", std::hex, guid, std::dec);
-}
-
-void GameHandler::queueAreaSpiritHeal() {
-    // Joining the queue is what resurrects; the query only asks when the next
-    // one is. AzerothCore has no way to be told to leave it again, which is
-    // why CancelAreaSpiritHeal answers with nothing.
-    if (!isInWorld() || !socket || !areaSpiritHealerGuid_) return;
-    network::Packet packet(wireOpcode(Opcode::CMSG_AREA_SPIRIT_HEALER_QUEUE));
-    packet.writeUInt64(areaSpiritHealerGuid_);
-    socket->send(packet);
-    LOG_INFO("CMSG_AREA_SPIRIT_HEALER_QUEUE: 0x", std::hex, areaSpiritHealerGuid_, std::dec);
 }
 
 void GameHandler::interactWithGameObject(uint64_t guid) {

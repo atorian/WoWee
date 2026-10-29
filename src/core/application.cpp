@@ -4255,7 +4255,7 @@ void Application::presentWorldToRenderer(float deltaTime) {
         environment.weatherKind = weather.kind;
         environment.weatherIntensity = weather.intensity;
         environment.weatherAbrupt = weather.abrupt;
-        environment.ghost = gameHandler->isPlayerGhost();
+        environment.ghost = gameHandler->combat().isPlayerGhost();
     }
     renderer->setWorldEnvironment(environment);
 

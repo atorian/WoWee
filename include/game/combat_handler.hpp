@@ -4,6 +4,7 @@
 #include "game/opcode_table.hpp"
 #include "game/spell_defines.hpp"
 #include "network/packet.hpp"
+#include <glm/vec3.hpp>
 #include <chrono>
 #include <deque>
 #include <functional>
@@ -134,15 +135,81 @@ public:
     // --- PvP ---
     void togglePvp();
 
-    // --- Death / Resurrection ---
-    void releaseSpirit();
+    // --- The player's death ---
+    // From dying to being alive again: the corpse, the offers to bring the
+    // player back, and where a release goes.
+    [[nodiscard]] bool isPlayerDead() const { return death_.dead; }
+    [[nodiscard]] bool isPlayerGhost() const { return death_.ghost; }
+    /// The graveyard a release would send the player to, in canonical space.
+    /// False when the server has not named one, or has withdrawn it.
+    bool getDeathReleaseLocation(uint32_t& mapId, glm::vec3& canonical) const;
+    /// Distance (yards) from the player to their corpse, or -1 when its
+    /// position is not known or it lies on another map.
+    [[nodiscard]] float getCorpseDistance() const;
+    /// The corpse's position in canonical coordinates (x north, y west); false
+    /// when it is not known or lies on another map.
+    bool getCorpseCanonicalPos(float& outX, float& outY) const;
     [[nodiscard]] bool canReclaimCorpse() const;
+    /// Seconds left on the PvP corpse-reclaim delay, or 0 once it is over.
     [[nodiscard]] float getCorpseReclaimDelaySec() const;
+    /// SMSG_PRE_RESURRECT arrived: Reincarnation, Twisting Nether.
+    [[nodiscard]] bool canSelfRes() const { return death_.selfResAvailable; }
+    /// The player accepted a resurrection or a spirit healer and waits for
+    /// the server to carry it out; movement is held meanwhile.
+    [[nodiscard]] bool resurrectPending() const { return death_.resurrectPending; }
+    /// An offer to bring the player back stands, unanswered.
+    [[nodiscard]] bool resurrectOfferStanding() const { return death_.resurrectRequestPending; }
+    /// That offer is a spirit healer's (SMSG_SPIRIT_HEALER_CONFIRM), not a
+    /// player's or a creature's resurrection.
+    [[nodiscard]] bool resurrectOfferFromSpiritHealer() const { return death_.resurrectIsSpiritHealer; }
+    /// What the resurrect offer said about itself: whether accepting brings
+    /// resurrection sickness, and whether a reclaim delay applies. Both decide
+    /// which of the three dialogs the interface raises.
+    [[nodiscard]] bool resurrectHasSickness() const { return death_.resurrectHasSickness; }
+    [[nodiscard]] bool resurrectHasTimer() const { return death_.resurrectHasTimer; }
+    /// Seconds until an area spirit healer's next mass resurrection.
+    [[nodiscard]] float getAreaSpiritHealerTime() const { return death_.areaSpiritHealerSeconds; }
+
+    void releaseSpirit();
     void reclaimCorpse();
     void useSelfRes();
     void activateSpiritHealer(uint64_t npcGuid);
     void acceptResurrect();
     void declineResurrect();
+    /// The spirit healer's prompt answered: activate it and close the offer.
+    void acceptXpLoss();
+    /// Ask an area spirit healer when the next mass resurrection is.
+    void queryAreaSpiritHealer(uint64_t guid);
+    /// Join that resurrection. Nothing happens without it.
+    void queueAreaSpiritHeal();
+
+    // What the rest of the game saw of the player's death.
+    /// The player's own create block said health 0 or the dead flag.
+    void playerLoggedInDead();
+    /// The player's own create block carried the ghost flag.
+    void playerLoggedInAsGhost();
+    /// The player died where they stand: the corpse is put there.
+    void playerDied(const char* source);
+    /// Health came back above zero. True when the player was a ghost.
+    bool playerHealthReturned();
+    /// The dead flag went off the player.
+    void playerAliveAgain();
+    /// The ghost flag came on: the player released their spirit.
+    void spiritReleased();
+    /// The ghost flag went off: resurrected, and the corpse is gone.
+    void resurrectedFromGhost();
+    /// The player's own corpse came into view; with its position when the
+    /// block carried one.
+    void ownCorpseSeen(uint64_t guid, bool hasPosition, float serverX, float serverY, float serverZ);
+    /// The world was entered: offers made before it no longer stand.
+    void worldEntered();
+    /// SMSG_NEW_WORLD took the player to a new place: the same.
+    void arrivedInNewWorld();
+    /// SMSG_NEW_WORLD on the same map, answering an accepted resurrection.
+    void resurrectedInPlace();
+    /// Once a frame: say when the ghost comes within reach of the corpse,
+    /// and when it leaves it (CORPSE_IN_RANGE, CORPSE_OUT_OF_RANGE).
+    void announceCorpseRange();
 
     // --- XP ---
     static uint32_t killXp(uint32_t playerLevel, uint32_t victimLevel);
@@ -150,6 +217,8 @@ public:
 
     // State management (for resets, entity cleanup)
     void resetAllCombatState();
+    /// A character is being logged in: nothing of the last one's death stands.
+    void beginCharacter() { death_ = {}; }
     void removeHostileAttacker(uint64_t guid);
     void clearCombatText();
     void removeCombatTextForGuid(uint64_t guid);
@@ -212,6 +281,49 @@ private:
     float autoAttackRangeWarnCooldown_ = 0.0f;
     float autoAttackResendTimer_ = 0.0f;
     std::unordered_set<uint64_t> hostileAttackers_;
+
+    /// The player's death, assigned whole when a character is logged in.
+    struct PlayerDeath {
+        bool dead = false;
+        /// Released: PLAYER_FLAGS_GHOST.
+        bool ghost = false;
+        bool repopPending = false;
+        uint64_t lastRepopRequestMs = 0;
+        uint64_t pendingSpiritHealerGuid = 0;
+        // The corpse, in server coordinates (x west, y north).
+        bool corpsePositionValid = false;
+        uint32_t corpseMapId = 0;
+        float corpseX = 0.0f, corpseY = 0.0f, corpseZ = 0.0f;
+        uint64_t corpseGuid = 0;
+        /// Absolute time (ms since epoch) when the PvP reclaim delay ends;
+        /// 0 when none applies.
+        uint64_t corpseReclaimAvailableMs = 0;
+        /// The last corpse proximity announced. canReclaimCorpse() is a
+        /// predicate; CORPSE_IN_RANGE and CORPSE_OUT_OF_RANGE are its edges,
+        /// and FrameXML raises its reclaim prompt from them.
+        bool corpseInRangeAnnounced = false;
+        /// Where the server says the spirit healer is - the graveyard a
+        /// release sends the player to (SMSG_DEATH_RELEASE_LOC). Withdrawn by
+        /// map id -1, which is how a resurrect clears the marker.
+        bool deathReleaseValid = false;
+        uint32_t deathReleaseMapId = 0;
+        glm::vec3 deathReleaseCanonical{0.0f};
+        // Offers to bring the player back.
+        bool resurrectPending = false;
+        bool resurrectRequestPending = false;
+        /// true = SMSG_SPIRIT_HEALER_CONFIRM, false = SMSG_RESURRECT_REQUEST.
+        bool resurrectIsSpiritHealer = false;
+        uint64_t resurrectCasterGuid = 0;
+        std::string resurrectCasterName;
+        bool resurrectHasSickness = false;
+        bool resurrectHasTimer = true;
+        /// SMSG_PRE_RESURRECT: Reincarnation, Twisting Nether.
+        bool selfResAvailable = false;
+        uint64_t areaSpiritHealerGuid = 0;
+        float areaSpiritHealerSeconds = 0.0f;
+    };
+    PlayerDeath death_;
+
     uint8_t comboPoints_ = 0;
     /// The hostile units Tab steps through, nearest first, and where it is.
     std::vector<uint64_t> tabCycleList_;

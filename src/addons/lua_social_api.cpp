@@ -2404,7 +2404,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 // UIParent_OnEvent calls the first of them the moment the
                 // healer is in range.
                 {"AcceptAreaSpiritHeal", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->queueAreaSpiritHeal();
+            if (auto* gh = getGameHandler(L)) gh->combat().queueAreaSpiritHeal();
             return 0;
         }},
                 // There is no opcode for leaving the queue - AzerothCore drops
@@ -2414,7 +2414,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"CancelAreaSpiritHeal", [](lua_State* L) -> int { (void)L; return 0; }},
                 {"GetAreaSpiritHealerTime", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getAreaSpiritHealerTime() : 0.0f);
+            lua_pushnumber(L, gh ? gh->combat().getAreaSpiritHealerTime() : 0.0f);
             return 1;
         }},
                 {"GetGuildRosterInfo",      lua_GetGuildRosterInfo},
@@ -2826,11 +2826,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 // own gossip window, so with gossip handed over nothing could
                 // reach it and standing at a spirit healer did nothing.
                 {"AcceptXPLoss", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) {
-                const uint64_t healer = gh->resurrectCasterGuidRef();
-                if (healer) gh->combat().activateSpiritHealer(healer);
-                gh->resurrectRequestPendingRef() = false;
-            }
+            if (auto* gh = getGameHandler(L)) gh->combat().acceptXpLoss();
             return 0;
         }},
                 // The popup hides itself and closes the gossip when this turns
@@ -2840,8 +2836,8 @@ void registerSocialLuaAPI(lua_State* L) {
                 // tracking the position of.
                 {"CheckSpiritHealerDist", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushboolean(L, gh && gh->resurrectRequestPendingRef() &&
-                                gh->resurrectIsSpiritHealerRef() ? 1 : 0);
+            lua_pushboolean(L, gh && gh->combat().resurrectOfferStanding() &&
+                                gh->combat().resurrectOfferFromSpiritHealer() ? 1 : 0);
             return 1;
         }},
                 // GetResSicknessDuration() → how long the sickness lasts, as
@@ -3366,12 +3362,12 @@ void registerSocialLuaAPI(lua_State* L) {
                 // where this client was reading.
                 {"ResurrectHasSickness", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushboolean(L, (gh && gh->resurrectHasSickness()) ? 1 : 0);
+            lua_pushboolean(L, (gh && gh->combat().resurrectHasSickness()) ? 1 : 0);
             return 1;
         }},
                 {"ResurrectHasTimer", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushboolean(L, (gh && gh->resurrectHasTimer()) ? 1 : 0);
+            lua_pushboolean(L, (gh && gh->combat().resurrectHasTimer()) ? 1 : 0);
             return 1;
         }},
                 // StaticPopup_Show calls this on *every* popup, before it does
@@ -3403,7 +3399,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 // Nether is up.
                 {"HasSoulstone", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh && gh->canSelfRes()) { lua_pushstring(L, "Use Soulstone"); return 1; }
+            if (gh && gh->combat().canSelfRes()) { lua_pushstring(L, "Use Soulstone"); return 1; }
             lua_pushnil(L);
             return 1;
         }},

@@ -655,17 +655,8 @@ void GameHandler::updateTimers(float deltaTime) {
     // The quest giver marks' requery and unconfirmed accepts.
     questHandler_->update(deltaTime);
 
-    // Announce the corpse-proximity crossing. FrameXML answers CORPSE_IN_RANGE
-    // with StaticPopup "RECOVER_CORPSE", whose button calls RetrieveCorpse;
-    // without the edge that prompt could never appear and this client's own
-    // button was the only way back from a corpse run.
-    {
-        const bool inRange = releasedSpirit_ && combatHandler_->canReclaimCorpse();
-        if (inRange != corpseInRangeAnnounced_) {
-            corpseInRangeAnnounced_ = inRange;
-            fireAddonEvent(inRange ? "CORPSE_IN_RANGE" : "CORPSE_OUT_OF_RANGE", {});
-        }
-    }
+    // The corpse-proximity crossing, for FrameXML's reclaim prompt.
+    combatHandler_->announceCorpseRange();
 
     // autoAttackRangeWarnCooldown_ decrement moved into CombatHandler::updateAutoAttack()
 

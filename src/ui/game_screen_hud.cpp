@@ -738,8 +738,8 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
     // Corpse marker: show skull X on world map when ghost with unclaimed corpse
     {
         float corpseCanX = 0.0f, corpseCanY = 0.0f;
-        bool ghostWithCorpse = gameHandler.isPlayerGhost() &&
-                               gameHandler.getCorpseCanonicalPos(corpseCanX, corpseCanY);
+        bool ghostWithCorpse = gameHandler.combat().isPlayerGhost() &&
+                               gameHandler.combat().getCorpseCanonicalPos(corpseCanX, corpseCanY);
         glm::vec3 corpseRender = ghostWithCorpse
             ? core::coords::canonicalToRender(glm::vec3(corpseCanX, corpseCanY, 0.0f))
             : glm::vec3{};
@@ -750,8 +750,8 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
         // place to walk back from.
         uint32_t healerMap = 0;
         glm::vec3 healerCanonical(0.0f);
-        const bool haveHealer = gameHandler.isPlayerDead() &&
-                                gameHandler.getDeathReleaseLocation(healerMap, healerCanonical) &&
+        const bool haveHealer = gameHandler.combat().isPlayerDead() &&
+                                gameHandler.combat().getDeathReleaseLocation(healerMap, healerCanonical) &&
                                 healerMap == gameHandler.getCurrentMapId();
         wm->setGraveyardPos(haveHealer,
                             haveHealer ? core::coords::canonicalToRender(healerCanonical)

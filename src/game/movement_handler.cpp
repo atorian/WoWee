@@ -562,7 +562,7 @@ void MovementHandler::sendMovement(Opcode opcode) {
         if (!serverMovementAllowed_) heldReason = "the server has not given control of the character";
         else if (onTaxiFlight_) heldReason = "a taxi flight is in progress";
         else if (taxiMountActive_) heldReason = "a taxi mount is on";
-        else if (owner_.resurrectPendingRef()) heldReason = "a resurrection is pending";
+        else if (owner_.combat().resurrectPending()) heldReason = "a resurrection is pending";
     }
     if (heldReason) {
         if (heldReason != movementHeldReason_) {
@@ -2234,7 +2234,7 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
     }
 
     const bool isSameMap       = (mapId == owner_.currentMapIdRef());
-    const bool isResurrection  = owner_.resurrectPendingRef();
+    const bool isResurrection  = owner_.combat().resurrectPending();
     if (isSameMap && isResurrection) {
         LOG_INFO("SMSG_NEW_WORLD same-map resurrection - skipping world reload");
 
@@ -2246,16 +2246,7 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
         movementInfo.flags  = 0;
         movementInfo.flags2 = 0;
 
-        owner_.resurrectPendingRef()       = false;
-        owner_.resurrectRequestPendingRef() = false;
-        owner_.releasedSpiritRef()         = false;
-        owner_.playerDeadRef()             = false;
-        owner_.repopPendingRef()           = false;
-        owner_.pendingSpiritHealerGuidRef() = 0;
-        owner_.resurrectCasterGuidRef()    = 0;
-        owner_.corpseMapIdRef()            = 0;
-        owner_.corpsePositionValidRef()    = false;
-        owner_.corpseGuidRef()             = 0;
+        owner_.combat().resurrectedInPlace();
         owner_.combat().clearHostileAttackers();
         owner_.stopAutoAttack();
         owner_.combat().invalidateTabCycle();
@@ -2291,8 +2282,7 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
     movementInfo.flags = 0;
     movementInfo.flags2 = 0;
     serverMovementAllowed_ = true;
-    owner_.resurrectPendingRef() = false;
-    owner_.resurrectRequestPendingRef() = false;
+    owner_.combat().arrivedInNewWorld();
     onTaxiFlight_ = false;
     taxiMountActive_ = false;
     taxiActivatePending_ = false;

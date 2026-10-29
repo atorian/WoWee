@@ -226,9 +226,6 @@ private:
     void detectPlayerMountChange(uint32_t newMountDisplayId,
                                  const FlatFieldMap& blockFields);
 
-    // Shared player-death handler: caches corpse position, sets death state.
-    void markPlayerDead(const char* source);
-
     // Cached field indices resolved once per handler call to avoid repeated lookups.
     struct UnitFieldIndices {
         uint16_t health, maxHealth, powerBase, maxPowerBase;

@@ -20,6 +20,7 @@
 #include "game/game_events.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <ctime>
 #include <random>
 
@@ -49,6 +50,173 @@ bool CombatHandler::threatWarningWanted() const {
 }
 
 void CombatHandler::registerOpcodes(DispatchTable& table) {
+    // ---- The player's death ----
+    table[Opcode::SMSG_FORCED_DEATH_UPDATE] = [this](network::Packet& packet) {
+        death_.dead = true;
+        death_.corpseX = owner_.movementInfoRef().y;
+        death_.corpseY = owner_.movementInfoRef().x;
+        death_.corpseZ = owner_.movementInfoRef().z;
+        death_.corpseMapId = owner_.currentMapIdRef();
+        death_.corpsePositionValid = true;
+        events_.publish(events::GhostStateChanged{false});
+        frameXml_.fireFrameXmlEvent("PLAYER_DEAD", {});
+        chat_.addSystemChatMessage("You have been killed.");
+        LOG_INFO("SMSG_FORCED_DEATH_UPDATE: player force-killed");
+        packet.skipAll();
+    };
+    table[Opcode::SMSG_CORPSE_RECLAIM_DELAY] = [this](network::Packet& packet) {
+        if (packet.hasRemaining(4)) {
+            uint32_t delayMs = packet.readUInt32();
+            auto nowMs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            death_.corpseReclaimAvailableMs = nowMs + delayMs;
+            LOG_INFO("SMSG_CORPSE_RECLAIM_DELAY: ", delayMs, "ms");
+        }
+    };
+    table[Opcode::SMSG_DEATH_RELEASE_LOC] = [this](network::Packet& packet) {
+        if (packet.hasRemaining(16)) {
+            uint32_t relMapId = packet.readUInt32();
+            float relX = packet.readFloat(), relY = packet.readFloat(), relZ = packet.readFloat();
+            // Read and logged and nothing else, until now: this is where the
+            // server says the nearest spirit healer is, and a ghost with no
+            // marker for it has to go looking.
+            //
+            // Map id -1 is the withdrawal. ResurrectPlayer sends it to take the
+            // marker down, so it is not a graveyard at (0,0,0).
+            if (relMapId == 0xFFFFFFFFu) {
+                death_.deathReleaseValid = false;
+                LOG_INFO("SMSG_DEATH_RELEASE_LOC: spirit healer position cleared");
+            } else {
+                death_.deathReleaseValid = true;
+                death_.deathReleaseMapId = relMapId;
+                death_.deathReleaseCanonical =
+                    core::coords::serverToCanonical(glm::vec3(relX, relY, relZ));
+                LOG_INFO("SMSG_DEATH_RELEASE_LOC (graveyard spawn): map=", relMapId,
+                         " x=", relX, " y=", relY, " z=", relZ);
+            }
+        }
+    };
+    table[Opcode::MSG_CORPSE_QUERY] = [this](network::Packet& packet) {
+        // found(1) + travelMapId(4) + x,y,z(12) + corpseMapId(4) + unk(4).
+        //
+        // Two map ids, and they are not the same question. The first is where
+        // the coordinates are: for a corpse left in a dungeon the server
+        // answers with the instance's *entrance* on the outdoor map, because
+        // that is where a ghost has to walk to. The second is the map the
+        // corpse is actually lying on.
+        //
+        // This paired the coordinates with the second, and everything that
+        // reads death_.corpseMapId compares it against the map the player is
+        // standing on - every other writer sets it to exactly that. So a
+        // corpse in a dungeon gave a position on the outdoor map filed under
+        // the dungeon's id, and the check `owner_.currentMapIdRef() != death_.corpseMapId`
+        // refused to show it precisely where it would have been useful.
+        if (!packet.hasRemaining(1)) return;
+        const uint8_t found = packet.readUInt8();
+        if (!found || !packet.hasRemaining(20)) return;
+        const uint32_t travelMapId = packet.readUInt32();
+        const float cx = packet.readFloat();
+        const float cy = packet.readFloat();
+        const float cz = packet.readFloat();
+        const uint32_t corpseMapId = packet.readUInt32();
+
+        death_.corpseX = cx;
+        death_.corpseY = cy;
+        death_.corpseZ = cz;
+        death_.corpseMapId = travelMapId;
+        death_.corpsePositionValid = true;
+        LOG_INFO("MSG_CORPSE_QUERY: walk to (", cx, ",", cy, ",", cz,
+                 ") on map ", travelMapId,
+                 corpseMapId != travelMapId
+                     ? " (the corpse itself is inside map " + std::to_string(corpseMapId) + ")"
+                     : "");
+    };
+    table[Opcode::SMSG_SPIRIT_HEALER_CONFIRM] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(8)) return;
+        uint64_t npcGuid = packet.readUInt64();
+        if (npcGuid) {
+            death_.resurrectCasterGuid = npcGuid;
+            death_.resurrectCasterName = "";
+            death_.resurrectIsSpiritHealer = true;
+            death_.resurrectRequestPending = true;
+            // The spirit healer's prompt is CONFIRM_XP_LOSS, not
+            // RESURRECT_REQUEST - uiparent.lua answers it with the durability
+            // and sickness warning and its Accept calls AcceptXPLoss. Nothing
+            // fired it, and the only thing that could reach
+            // activateSpiritHealer was this client's own gossip window, so with
+            // gossip handed over there was no way left to accept at all.
+            frameXml_.fireFrameXmlEvent("CONFIRM_XP_LOSS", {});
+        }
+    };
+    table[Opcode::SMSG_RESURRECT_REQUEST] = [this](network::Packet& packet) {
+        // Spell::SendResurrectRequest writes:
+        //
+        //   uint64 casterGuid
+        //   uint32 nameLength      (the name plus its terminator)
+        //   char[] name            with that terminator
+        //   uint8  0               a second one, written explicitly
+        //   uint8  sickness        1 from a creature, 0 from a player
+        //   uint32 0               only when the spell overrides the timer
+        //
+        // The length was never read, so readString took the first byte of it
+        // as the whole name - a control character, for any name shorter than
+        // two hundred and fifty-five - and the dialog was raised offering a
+        // resurrection from that. Everything after it was out of step too, so
+        // the sickness flag was never read at all.
+        if (!packet.hasRemaining(12)) { packet.skipAll(); return; }
+        const uint64_t casterGuid = packet.readUInt64();
+        /*uint32_t nameLength =*/ packet.readUInt32();
+        std::string casterName = packet.readString();
+        if (packet.hasRemaining(1)) packet.readUInt8();   // the second terminator
+        const bool sickness = packet.hasRemaining(1) && packet.readUInt8() != 0;
+        // The trailing word is present only when the spell waives the reclaim
+        // delay, so having one means there is no timer to wait out.
+        const bool hasTimer = !packet.hasRemaining(4);
+        packet.skipAll();
+
+        if (!casterGuid) return;
+        death_.resurrectCasterGuid = casterGuid;
+        // A creature offering this is a spirit healer, and that is what the
+        // sickness flag says - it is set for every non-player caster.
+        death_.resurrectIsSpiritHealer = false;
+        death_.resurrectHasSickness = sickness;
+        death_.resurrectHasTimer = hasTimer;
+        death_.resurrectCasterName = casterName.empty() ? owner_.entityController().lookupName(casterGuid) : casterName;
+        death_.resurrectRequestPending = true;
+        frameXml_.fireFrameXmlEvent("RESURRECT_REQUEST", {death_.resurrectCasterName});
+    };
+    table[Opcode::SMSG_AREA_SPIRIT_HEALER_TIME] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(12)) { packet.skipAll(); return; }
+        const uint64_t guid = packet.readUInt64();
+        const uint32_t timeMs = packet.readUInt32();
+        death_.areaSpiritHealerGuid = guid;
+        death_.areaSpiritHealerSeconds = static_cast<float>(timeMs) / 1000.0f;
+
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "You will be able to resurrect in %u seconds.",
+                      timeMs / 1000);
+        chat_.addSystemChatMessage(buf);
+
+        // Parsed and said in chat and announced to nobody. UIParent_OnEvent
+        // answers this by joining the queue and raising the countdown dialog,
+        // and it was never told - so the reply arrived, the line was printed,
+        // and the resurrection it was counting down to was one this player had
+        // not joined.
+        frameXml_.fireFrameXmlEvent("AREA_SPIRIT_HEALER_IN_RANGE", {});
+    };
+    table[Opcode::SMSG_PRE_RESURRECT] = [this](network::Packet& packet) {
+        // SMSG_PRE_RESURRECT: packed GUID of the player who can self-resurrect.
+        // Sent when the dead player has Reincarnation (Shaman), Twisting Nether (Warlock),
+        // or Deathpact (Death Knight passive). The client must send CMSG_SELF_RES to accept.
+        uint64_t targetGuid = packet.readPackedGuid();
+        if (targetGuid == owner_.getPlayerGuid() || targetGuid == 0) {
+            death_.selfResAvailable = true;
+            LOG_INFO("SMSG_PRE_RESURRECT: self-resurrection available (guid=0x",
+                     std::hex, targetGuid, std::dec, ")");
+        }
+    };
+
     // ---- Combat clearing ----
     table[Opcode::SMSG_ATTACKSWING_DEADTARGET] = [this](network::Packet& /*packet*/) {
         autoAttacking_ = false;
@@ -1614,14 +1782,14 @@ void CombatHandler::releaseSpirit() {
     if (sender_.characterInWorld()) {
         auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        if (owner_.repopPendingRef() && now - static_cast<int64_t>(owner_.lastRepopRequestMsRef()) < 1000) {
+        if (death_.repopPending && now - static_cast<int64_t>(death_.lastRepopRequestMs) < 1000) {
             return;
         }
         auto packet = RepopRequestPacket::build();
         sender_.send(packet);
-        owner_.selfResAvailableRef() = false;
-        owner_.repopPendingRef() = true;
-        owner_.lastRepopRequestMsRef() = static_cast<uint64_t>(now);
+        death_.selfResAvailable = false;
+        death_.repopPending = true;
+        death_.lastRepopRequestMs = static_cast<uint64_t>(now);
         LOG_INFO("Sent CMSG_REPOP_REQUEST (Release Spirit)");
         network::Packet cq(wireOpcode(Opcode::MSG_CORPSE_QUERY));
         sender_.send(cq);
@@ -1629,49 +1797,49 @@ void CombatHandler::releaseSpirit() {
 }
 
 bool CombatHandler::canReclaimCorpse() const {
-    if (!owner_.releasedSpiritRef() || owner_.corpseGuidRef() == 0 ||
-        !owner_.corpsePositionValidRef()) return false;
-    if (owner_.currentMapIdRef() != owner_.corpseMapIdRef()) return false;
-    float dx = owner_.movementInfoRef().x - owner_.corpseYRef();
-    float dy = owner_.movementInfoRef().y - owner_.corpseXRef();
-    float dz = owner_.movementInfoRef().z - owner_.corpseZRef();
+    if (!death_.ghost || death_.corpseGuid == 0 ||
+        !death_.corpsePositionValid) return false;
+    if (owner_.currentMapIdRef() != death_.corpseMapId) return false;
+    float dx = owner_.movementInfoRef().x - death_.corpseY;
+    float dy = owner_.movementInfoRef().y - death_.corpseX;
+    float dz = owner_.movementInfoRef().z - death_.corpseZ;
     return (dx*dx + dy*dy + dz*dz) <= (40.0f * 40.0f);
 }
 
 float CombatHandler::getCorpseReclaimDelaySec() const {
-    if (owner_.corpseReclaimAvailableMsRef() == 0) return 0.0f;
+    if (death_.corpseReclaimAvailableMs == 0) return 0.0f;
     auto nowMs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
-    if (nowMs >= owner_.corpseReclaimAvailableMsRef()) return 0.0f;
-    return static_cast<float>(owner_.corpseReclaimAvailableMsRef() - nowMs) / 1000.0f;
+    if (nowMs >= death_.corpseReclaimAvailableMs) return 0.0f;
+    return static_cast<float>(death_.corpseReclaimAvailableMs - nowMs) / 1000.0f;
 }
 
 void CombatHandler::reclaimCorpse() {
     if (!canReclaimCorpse() || !sender_.connected()) return;
-    if (owner_.corpseGuidRef() == 0) {
+    if (death_.corpseGuid == 0) {
         LOG_WARNING("reclaimCorpse: corpse GUID not yet known (corpse object not received); cannot reclaim");
         return;
     }
-    auto packet = ReclaimCorpsePacket::build(owner_.corpseGuidRef());
+    auto packet = ReclaimCorpsePacket::build(death_.corpseGuid);
     sender_.send(packet);
-    LOG_INFO("Sent CMSG_RECLAIM_CORPSE for corpse guid=0x", std::hex, owner_.corpseGuidRef(), std::dec);
+    LOG_INFO("Sent CMSG_RECLAIM_CORPSE for corpse guid=0x", std::hex, death_.corpseGuid, std::dec);
 }
 
 void CombatHandler::useSelfRes() {
-    if (!owner_.selfResAvailableRef() || !sender_.connected()) return;
+    if (!death_.selfResAvailable || !sender_.connected()) return;
     network::Packet pkt(wireOpcode(Opcode::CMSG_SELF_RES));
     sender_.send(pkt);
-    owner_.selfResAvailableRef() = false;
+    death_.selfResAvailable = false;
     LOG_INFO("Sent CMSG_SELF_RES (Reincarnation / Twisting Nether)");
 }
 
 void CombatHandler::activateSpiritHealer(uint64_t npcGuid) {
     if (!sender_.characterInWorld()) return;
-    owner_.pendingSpiritHealerGuidRef() = npcGuid;
+    death_.pendingSpiritHealerGuid = npcGuid;
     auto packet = SpiritHealerActivatePacket::build(npcGuid);
     sender_.send(packet);
-    owner_.resurrectPendingRef() = true;
+    death_.resurrectPending = true;
     LOG_INFO("Sent CMSG_SPIRIT_HEALER_ACTIVATE for 0x", std::hex, npcGuid, std::dec);
 }
 
@@ -1681,33 +1849,195 @@ void CombatHandler::acceptResurrect() {
     // the offer had already been cleared, or the packet went out and the server
     // ignored it - and only the last of those is not this function's fault.
     if (!sender_.characterInWorld() ||
-        !owner_.resurrectRequestPendingRef()) {
+        !death_.resurrectRequestPending) {
         LOG_WARNING("acceptResurrect refused: inWorld=", sender_.characterInWorld(),
-                    " offerPending=", owner_.resurrectRequestPendingRef());
+                    " offerPending=", death_.resurrectRequestPending);
         return;
     }
-    if (owner_.resurrectIsSpiritHealerRef()) {
-        auto activate = SpiritHealerActivatePacket::build(owner_.resurrectCasterGuidRef());
+    if (death_.resurrectIsSpiritHealer) {
+        auto activate = SpiritHealerActivatePacket::build(death_.resurrectCasterGuid);
         sender_.send(activate);
         LOG_INFO("Sent CMSG_SPIRIT_HEALER_ACTIVATE for 0x",
-                 std::hex, owner_.resurrectCasterGuidRef(), std::dec);
+                 std::hex, death_.resurrectCasterGuid, std::dec);
     } else {
-        auto resp = ResurrectResponsePacket::build(owner_.resurrectCasterGuidRef(), true);
+        auto resp = ResurrectResponsePacket::build(death_.resurrectCasterGuid, true);
         sender_.send(resp);
         LOG_INFO("Sent CMSG_RESURRECT_RESPONSE (accept) for 0x",
-                 std::hex, owner_.resurrectCasterGuidRef(), std::dec);
+                 std::hex, death_.resurrectCasterGuid, std::dec);
     }
-    owner_.resurrectRequestPendingRef() = false;
-    owner_.resurrectPendingRef() = true;
+    death_.resurrectRequestPending = false;
+    death_.resurrectPending = true;
 }
 
 void CombatHandler::declineResurrect() {
-    if (!sender_.characterInWorld() || !owner_.resurrectRequestPendingRef()) return;
-    auto resp = ResurrectResponsePacket::build(owner_.resurrectCasterGuidRef(), false);
+    if (!sender_.characterInWorld() || !death_.resurrectRequestPending) return;
+    auto resp = ResurrectResponsePacket::build(death_.resurrectCasterGuid, false);
     sender_.send(resp);
     LOG_INFO("Sent CMSG_RESURRECT_RESPONSE (decline) for 0x",
-             std::hex, owner_.resurrectCasterGuidRef(), std::dec);
-    owner_.resurrectRequestPendingRef() = false;
+             std::hex, death_.resurrectCasterGuid, std::dec);
+    death_.resurrectRequestPending = false;
+}
+
+void CombatHandler::acceptXpLoss() {
+    if (death_.resurrectCasterGuid) activateSpiritHealer(death_.resurrectCasterGuid);
+    death_.resurrectRequestPending = false;
+}
+
+void CombatHandler::queryAreaSpiritHealer(uint64_t guid) {
+    if (!sender_.characterInWorld()) return;
+    death_.areaSpiritHealerGuid = guid;
+    network::Packet packet(wireOpcode(Opcode::CMSG_AREA_SPIRIT_HEALER_QUERY));
+    packet.writeUInt64(guid);
+    sender_.send(packet);
+    LOG_INFO("CMSG_AREA_SPIRIT_HEALER_QUERY: 0x", std::hex, guid, std::dec);
+}
+
+void CombatHandler::queueAreaSpiritHeal() {
+    // Joining the queue is what resurrects; the query only asks when the next
+    // one is. AzerothCore has no way to be told to leave it again, which is
+    // why CancelAreaSpiritHeal answers with nothing.
+    if (!sender_.characterInWorld() || !death_.areaSpiritHealerGuid) return;
+    network::Packet packet(wireOpcode(Opcode::CMSG_AREA_SPIRIT_HEALER_QUEUE));
+    packet.writeUInt64(death_.areaSpiritHealerGuid);
+    sender_.send(packet);
+    LOG_INFO("CMSG_AREA_SPIRIT_HEALER_QUEUE: 0x", std::hex, death_.areaSpiritHealerGuid, std::dec);
+}
+
+bool CombatHandler::getDeathReleaseLocation(uint32_t& mapId, glm::vec3& canonical) const {
+    if (!death_.deathReleaseValid) return false;
+    mapId = death_.deathReleaseMapId;
+    canonical = death_.deathReleaseCanonical;
+    return true;
+}
+
+float CombatHandler::getCorpseDistance() const {
+    if (!death_.corpsePositionValid || owner_.currentMapIdRef() != death_.corpseMapId) return -1.0f;
+    // movementInfo is canonical (x=north=server_y, y=west=server_x);
+    // corpse coords are raw server (x=west, y=north) - swap to compare.
+    const auto& me = owner_.movementInfoRef();
+    float dx = me.x - death_.corpseY;
+    float dy = me.y - death_.corpseX;
+    float dz = me.z - death_.corpseZ;
+    return std::sqrt(dx*dx + dy*dy + dz*dz);
+}
+
+bool CombatHandler::getCorpseCanonicalPos(float& outX, float& outY) const {
+    if (!death_.corpsePositionValid || owner_.currentMapIdRef() != death_.corpseMapId) return false;
+    outX = death_.corpseY;  // server Y = canonical X (north)
+    outY = death_.corpseX;  // server X = canonical Y (west)
+    return true;
+}
+
+void CombatHandler::playerLoggedInDead() {
+    death_.dead = true;
+}
+
+void CombatHandler::playerLoggedInAsGhost() {
+    death_.ghost = true;
+    death_.dead = true;
+}
+
+// Both the health==0 and the UNIT_DYNFLAG_DEAD paths come here, so they share
+// one corpse position. Classic does not send SMSG_DEATH_RELEASE_LOC, so this
+// cached position is the primary source for canReclaimCorpse().
+void CombatHandler::playerDied(const char* source) {
+    death_.dead = true;
+    death_.ghost = false;
+    // movementInfo is canonical (x=north, y=west); the corpse is kept in raw
+    // server coordinates (x=west, y=north) - swap axes.
+    const auto& me = owner_.movementInfoRef();
+    death_.corpseX = me.y;
+    death_.corpseY = me.x;
+    death_.corpseZ = me.z;
+    death_.corpseMapId = owner_.currentMapIdRef();
+    death_.corpsePositionValid = true;
+    LOG_INFO("Player died (", source, "). Corpse cached at server=(",
+             death_.corpseX, ",", death_.corpseY, ",", death_.corpseZ,
+             ") map=", death_.corpseMapId);
+}
+
+bool CombatHandler::playerHealthReturned() {
+    const bool wasGhost = death_.ghost;
+    death_.dead = false;
+    if (wasGhost) death_.ghost = false;
+    return wasGhost;
+}
+
+void CombatHandler::playerAliveAgain() {
+    death_.dead = false;
+    death_.ghost = false;
+    death_.selfResAvailable = false;
+}
+
+void CombatHandler::spiritReleased() {
+    death_.ghost = true;
+}
+
+void CombatHandler::resurrectedFromGhost() {
+    death_.ghost = false;
+    death_.dead = false;
+    death_.repopPending = false;
+    death_.resurrectPending = false;
+    death_.selfResAvailable = false;
+    // The corpse is reclaimed.
+    death_.corpseMapId = 0;
+    death_.corpsePositionValid = false;
+    death_.corpseGuid = 0;
+    death_.corpseReclaimAvailableMs = 0;
+}
+
+void CombatHandler::ownCorpseSeen(uint64_t guid, bool hasPosition,
+                                  float serverX, float serverY, float serverZ) {
+    death_.corpseGuid = guid;
+    // The position only where the block actually carried one; a stationary
+    // create may not, and overwriting a good answer from MSG_CORPSE_QUERY with
+    // three zeroes would put the corpse at the map origin and refuse the
+    // reclaim on distance instead.
+    if (hasPosition) {
+        death_.corpseX = serverX;
+        death_.corpseY = serverY;
+        death_.corpseZ = serverZ;
+        death_.corpseMapId = owner_.currentMapIdRef();
+        death_.corpsePositionValid = true;
+    }
+    LOG_INFO("Corpse object detected: guid=0x", std::hex, guid, std::dec,
+             " server=(", serverX, ", ", serverY, ", ", serverZ,
+             ") map=", death_.corpseMapId);
+}
+
+void CombatHandler::worldEntered() {
+    death_.resurrectPending = false;
+    death_.resurrectRequestPending = false;
+    death_.selfResAvailable = false;
+}
+
+void CombatHandler::arrivedInNewWorld() {
+    death_.resurrectPending = false;
+    death_.resurrectRequestPending = false;
+}
+
+void CombatHandler::resurrectedInPlace() {
+    death_.resurrectPending = false;
+    death_.resurrectRequestPending = false;
+    death_.ghost = false;
+    death_.dead = false;
+    death_.repopPending = false;
+    death_.pendingSpiritHealerGuid = 0;
+    death_.resurrectCasterGuid = 0;
+    death_.corpseMapId = 0;
+    death_.corpsePositionValid = false;
+    death_.corpseGuid = 0;
+}
+
+void CombatHandler::announceCorpseRange() {
+    // FrameXML answers CORPSE_IN_RANGE with StaticPopup "RECOVER_CORPSE", whose
+    // button calls RetrieveCorpse; without the edge that prompt could never
+    // appear.
+    const bool inRange = death_.ghost && canReclaimCorpse();
+    if (inRange != death_.corpseInRangeAnnounced) {
+        death_.corpseInRangeAnnounced = inRange;
+        frameXml_.fireFrameXmlEvent(inRange ? "CORPSE_IN_RANGE" : "CORPSE_OUT_OF_RANGE", {});
+    }
 }
 
 // ============================================================

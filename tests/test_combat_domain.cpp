@@ -149,11 +149,11 @@ TEST_CASE("a forced death leaves the player dead, the corpse where they stood", 
     h.receive(Opcode::SMSG_FORCED_DEATH_UPDATE, Body());
     h.pump();
 
-    CHECK(h.game().isPlayerDead());
-    CHECK_FALSE(h.game().isPlayerGhost());
+    CHECK(h.game().combat().isPlayerDead());
+    CHECK_FALSE(h.game().combat().isPlayerGhost());
     CHECK(h.addonEvents("PLAYER_DEAD").size() == 1);
     float corpseX = 0, corpseY = 0;
-    REQUIRE(h.game().getCorpseCanonicalPos(corpseX, corpseY));
+    REQUIRE(h.game().combat().getCorpseCanonicalPos(corpseX, corpseY));
     CHECK(corpseX == me.x);
     CHECK(corpseY == me.y);
 }
@@ -172,8 +172,8 @@ TEST_CASE("a player's resurrection is offered by name and accepted with a respon
     const auto offered = h.addonEvents("RESURRECT_REQUEST");
     REQUIRE(offered.size() == 1);
     CHECK(offered[0].args.at(0) == "Anna");
-    CHECK_FALSE(h.game().resurrectHasSickness());
-    CHECK(h.game().resurrectHasTimer());
+    CHECK_FALSE(h.game().combat().resurrectHasSickness());
+    CHECK(h.game().combat().resurrectHasTimer());
 
     h.game().combat().acceptResurrect();
     auto* sent = h.lastSent(Opcode::CMSG_RESURRECT_RESPONSE);
@@ -209,7 +209,7 @@ TEST_CASE("the graveyard the server names is where a release goes, until it with
     h.pump();
     uint32_t map = 99;
     glm::vec3 where{};
-    REQUIRE(h.game().getDeathReleaseLocation(map, where));
+    REQUIRE(h.game().combat().getDeathReleaseLocation(map, where));
     CHECK(map == 1);
     // Canonical is north, west: the server's y, x.
     CHECK(where.x == 200.0f);
@@ -218,7 +218,7 @@ TEST_CASE("the graveyard the server names is where a release goes, until it with
 
     h.receive(Opcode::SMSG_DEATH_RELEASE_LOC, Body().u32(0xFFFFFFFFu).f32(0).f32(0).f32(0));
     h.pump();
-    CHECK_FALSE(h.game().getDeathReleaseLocation(map, where));
+    CHECK_FALSE(h.game().combat().getDeathReleaseLocation(map, where));
 }
 
 TEST_CASE("the corpse query says where to walk, on the map those coordinates are on",
@@ -234,7 +234,7 @@ TEST_CASE("the corpse query says where to walk, on the map those coordinates are
     h.pump();
 
     float corpseX = 0, corpseY = 0;
-    REQUIRE(h.game().getCorpseCanonicalPos(corpseX, corpseY));
+    REQUIRE(h.game().combat().getCorpseCanonicalPos(corpseX, corpseY));
     CHECK(corpseX == 20.0f);
     CHECK(corpseY == 10.0f);
 }
@@ -242,15 +242,15 @@ TEST_CASE("the corpse query says where to walk, on the map those coordinates are
 TEST_CASE("self-resurrection is offered to the player and taken with CMSG_SELF_RES", "[combat][death][harness]") {
     GameHarness h;
     h.enterWorld();
-    REQUIRE_FALSE(h.game().canSelfRes());
+    REQUIRE_FALSE(h.game().combat().canSelfRes());
 
     h.receive(Opcode::SMSG_PRE_RESURRECT, Body().packedGuid(0x0000000000000555ull));
     h.pump();
-    CHECK_FALSE(h.game().canSelfRes());   // someone else's
+    CHECK_FALSE(h.game().combat().canSelfRes());   // someone else's
 
     h.receive(Opcode::SMSG_PRE_RESURRECT, Body().packedGuid(h.player().guid));
     h.pump();
-    CHECK(h.game().canSelfRes());
+    CHECK(h.game().combat().canSelfRes());
 
     h.game().combat().useSelfRes();
     CHECK(h.countSent(Opcode::CMSG_SELF_RES) == 1);
@@ -263,9 +263,9 @@ TEST_CASE("an area spirit healer's countdown is shown and its queue is joined", 
     // SMSG_AREA_SPIRIT_HEALER_TIME: the healer, then milliseconds to go.
     h.receive(Opcode::SMSG_AREA_SPIRIT_HEALER_TIME, Body().u64(0xF130000000004321ull).u32(25000));
     h.pump();
-    CHECK(h.game().getAreaSpiritHealerTime() == 25.0f);
+    CHECK(h.game().combat().getAreaSpiritHealerTime() == 25.0f);
 
-    h.game().queueAreaSpiritHeal();
+    h.game().combat().queueAreaSpiritHeal();
     auto* sent = h.lastSent(Opcode::CMSG_AREA_SPIRIT_HEALER_QUEUE);
     REQUIRE(sent);
     CHECK(sent->readUInt64() == 0xF130000000004321ull);
@@ -292,14 +292,14 @@ TEST_CASE("the ghost flag makes the player a ghost, and clearing it brings them 
         h.game().entityController().applyRecordedObjects(batch);
     };
     flags(0x10);   // PLAYER_FLAGS_GHOST
-    CHECK(h.game().isPlayerGhost());
+    CHECK(h.game().combat().isPlayerGhost());
 
     flags(0);
     h.pump();
-    CHECK_FALSE(h.game().isPlayerGhost());
-    CHECK_FALSE(h.game().isPlayerDead());
+    CHECK_FALSE(h.game().combat().isPlayerGhost());
+    CHECK_FALSE(h.game().combat().isPlayerDead());
     float corpseX = 0, corpseY = 0;
-    CHECK_FALSE(h.game().getCorpseCanonicalPos(corpseX, corpseY));
+    CHECK_FALSE(h.game().combat().getCorpseCanonicalPos(corpseX, corpseY));
     CHECK(h.addonEvents("PLAYER_ALIVE").size() == 1);
 }
 
@@ -311,4 +311,33 @@ TEST_CASE("a corpse reclaim delay is counted down from the server's milliseconds
     const float left = h.game().combat().getCorpseReclaimDelaySec();
     CHECK(left > 29.0f);
     CHECK(left <= 30.0f);
+}
+
+TEST_CASE("the next character starts with none of the last one's death", "[combat][death][harness]") {
+    using wowee::test::PlayerSpec;
+    PlayerSpec alice;
+    alice.guid = 0x21;
+    alice.name = "Alice";
+    PlayerSpec bob;
+    bob.guid = 0x22;
+    bob.name = "Bob";
+
+    GameHarness h;
+    h.enterWorld(alice);
+    h.receive(Opcode::SMSG_FORCED_DEATH_UPDATE, Body());
+    h.receive(Opcode::SMSG_DEATH_RELEASE_LOC, Body().u32(1).f32(100.0f).f32(200.0f).f32(30.0f));
+    h.receive(Opcode::SMSG_AREA_SPIRIT_HEALER_TIME, Body().u64(0xF130000000004321ull).u32(25000));
+    h.pump();
+    uint32_t map = 0;
+    glm::vec3 where{};
+    REQUIRE(h.game().combat().getDeathReleaseLocation(map, where));
+
+    h.relogAs(bob);
+    REQUIRE(h.game().getPlayerGuid() == bob.guid);
+
+    CHECK_FALSE(h.game().combat().isPlayerDead());
+    CHECK_FALSE(h.game().combat().getDeathReleaseLocation(map, where));
+    CHECK(h.game().combat().getAreaSpiritHealerTime() == 0.0f);
+    h.game().combat().queueAreaSpiritHeal();
+    CHECK(h.countSent(Opcode::CMSG_AREA_SPIRIT_HEALER_QUEUE) == 0);
 }

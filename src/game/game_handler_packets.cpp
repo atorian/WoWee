@@ -520,97 +520,16 @@ void GameHandler::registerCoreOpcodes() {
         uint64_t guid = packet.readUInt64();
         eventBus().publish(events::GameObjectStateChanged{guid, 0});
     };
-    dispatchTable_[Opcode::SMSG_FORCED_DEATH_UPDATE] = [this](network::Packet& packet) {
-        playerDead_ = true;
-        corpseX_ = movementInfo.y;
-        corpseY_ = movementInfo.x;
-        corpseZ_ = movementInfo.z;
-        corpseMapId_ = currentMapId_;
-        corpsePositionValid_ = true;
-        eventBus().publish(events::GhostStateChanged{false});
-        fireAddonEvent("PLAYER_DEAD", {});
-        chatHandler_->addSystemChatMessage("You have been killed.");
-        LOG_INFO("SMSG_FORCED_DEATH_UPDATE: player force-killed");
-        packet.skipAll();
-    };
     // SMSG_DEFENSE_MESSAGE - moved to ChatHandler::registerOpcodes
-    dispatchTable_[Opcode::SMSG_CORPSE_RECLAIM_DELAY] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(4)) {
-            uint32_t delayMs = packet.readUInt32();
-            auto nowMs = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count());
-            corpseReclaimAvailableMs_ = nowMs + delayMs;
-            LOG_INFO("SMSG_CORPSE_RECLAIM_DELAY: ", delayMs, "ms");
-        }
-    };
-    dispatchTable_[Opcode::SMSG_DEATH_RELEASE_LOC] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(16)) {
-            uint32_t relMapId = packet.readUInt32();
-            float relX = packet.readFloat(), relY = packet.readFloat(), relZ = packet.readFloat();
-            // Read and logged and nothing else, until now: this is where the
-            // server says the nearest spirit healer is, and a ghost with no
-            // marker for it has to go looking.
-            //
-            // Map id -1 is the withdrawal. ResurrectPlayer sends it to take the
-            // marker down, so it is not a graveyard at (0,0,0).
-            if (relMapId == 0xFFFFFFFFu) {
-                deathReleaseValid_ = false;
-                LOG_INFO("SMSG_DEATH_RELEASE_LOC: spirit healer position cleared");
-            } else {
-                deathReleaseValid_ = true;
-                deathReleaseMapId_ = relMapId;
-                deathReleaseCanonical_ =
-                    core::coords::serverToCanonical(glm::vec3(relX, relY, relZ));
-                LOG_INFO("SMSG_DEATH_RELEASE_LOC (graveyard spawn): map=", relMapId,
-                         " x=", relX, " y=", relY, " z=", relZ);
-            }
-        }
-    };
     dispatchTable_[Opcode::SMSG_ENABLE_BARBER_SHOP] = [this](network::Packet& /*packet*/) {
         LOG_INFO("SMSG_ENABLE_BARBER_SHOP: barber shop available");
         barberShopOpen_ = true;
         fireAddonEvent("BARBER_SHOP_OPEN", {});
     };
 
-    // ---- Batch 3: Corpse/gametime, combat clearing, mount, loot notify,
+    // ---- Batch 3: gametime, combat clearing, mount, loot notify,
     //                movement/speed/flags, attack, spells, group ----
 
-    dispatchTable_[Opcode::MSG_CORPSE_QUERY] = [this](network::Packet& packet) {
-        // found(1) + travelMapId(4) + x,y,z(12) + corpseMapId(4) + unk(4).
-        //
-        // Two map ids, and they are not the same question. The first is where
-        // the coordinates are: for a corpse left in a dungeon the server
-        // answers with the instance's *entrance* on the outdoor map, because
-        // that is where a ghost has to walk to. The second is the map the
-        // corpse is actually lying on.
-        //
-        // This paired the coordinates with the second, and everything that
-        // reads corpseMapId_ compares it against the map the player is
-        // standing on - every other writer sets it to exactly that. So a
-        // corpse in a dungeon gave a position on the outdoor map filed under
-        // the dungeon's id, and the check `currentMapId_ != corpseMapId_`
-        // refused to show it precisely where it would have been useful.
-        if (!packet.hasRemaining(1)) return;
-        const uint8_t found = packet.readUInt8();
-        if (!found || !packet.hasRemaining(20)) return;
-        const uint32_t travelMapId = packet.readUInt32();
-        const float cx = packet.readFloat();
-        const float cy = packet.readFloat();
-        const float cz = packet.readFloat();
-        const uint32_t corpseMapId = packet.readUInt32();
-
-        corpseX_ = cx;
-        corpseY_ = cy;
-        corpseZ_ = cz;
-        corpseMapId_ = travelMapId;
-        corpsePositionValid_ = true;
-        LOG_INFO("MSG_CORPSE_QUERY: walk to (", cx, ",", cy, ",", cz,
-                 ") on map ", travelMapId,
-                 corpseMapId != travelMapId
-                     ? " (the corpse itself is inside map " + std::to_string(corpseMapId) + ")"
-                     : "");
-    };
     dispatchTable_[Opcode::SMSG_FEIGN_DEATH_RESISTED] = [this](network::Packet& /*packet*/) {
         addUIError("Your Feign Death was resisted.");
         chatHandler_->addSystemChatMessage("Your Feign Death attempt was resisted.");
@@ -820,61 +739,7 @@ void GameHandler::registerCoreOpcodes() {
         }
     };
 
-    // Spirit healer / resurrect
-    dispatchTable_[Opcode::SMSG_SPIRIT_HEALER_CONFIRM] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(8)) return;
-        uint64_t npcGuid = packet.readUInt64();
-        if (npcGuid) {
-            resurrectCasterGuid_ = npcGuid;
-            resurrectCasterName_ = "";
-            resurrectIsSpiritHealer_ = true;
-            resurrectRequestPending_ = true;
-            // The spirit healer's prompt is CONFIRM_XP_LOSS, not
-            // RESURRECT_REQUEST - uiparent.lua answers it with the durability
-            // and sickness warning and its Accept calls AcceptXPLoss. Nothing
-            // fired it, and the only thing that could reach
-            // activateSpiritHealer was this client's own gossip window, so with
-            // gossip handed over there was no way left to accept at all.
-            fireAddonEvent("CONFIRM_XP_LOSS", {});
-        }
-    };
-    dispatchTable_[Opcode::SMSG_RESURRECT_REQUEST] = [this](network::Packet& packet) {
-        // Spell::SendResurrectRequest writes:
-        //
-        //   uint64 casterGuid
-        //   uint32 nameLength      (the name plus its terminator)
-        //   char[] name            with that terminator
-        //   uint8  0               a second one, written explicitly
-        //   uint8  sickness        1 from a creature, 0 from a player
-        //   uint32 0               only when the spell overrides the timer
-        //
-        // The length was never read, so readString took the first byte of it
-        // as the whole name - a control character, for any name shorter than
-        // two hundred and fifty-five - and the dialog was raised offering a
-        // resurrection from that. Everything after it was out of step too, so
-        // the sickness flag was never read at all.
-        if (!packet.hasRemaining(12)) { packet.skipAll(); return; }
-        const uint64_t casterGuid = packet.readUInt64();
-        /*uint32_t nameLength =*/ packet.readUInt32();
-        std::string casterName = packet.readString();
-        if (packet.hasRemaining(1)) packet.readUInt8();   // the second terminator
-        const bool sickness = packet.hasRemaining(1) && packet.readUInt8() != 0;
-        // The trailing word is present only when the spell waives the reclaim
-        // delay, so having one means there is no timer to wait out.
-        const bool hasTimer = !packet.hasRemaining(4);
-        packet.skipAll();
-
-        if (!casterGuid) return;
-        resurrectCasterGuid_ = casterGuid;
-        // A creature offering this is a spirit healer, and that is what the
-        // sickness flag says - it is set for every non-player caster.
-        resurrectIsSpiritHealer_ = false;
-        resurrectHasSickness_ = sickness;
-        resurrectHasTimer_ = hasTimer;
-        resurrectCasterName_ = casterName.empty() ? entityController_->lookupName(casterGuid) : casterName;
-        resurrectRequestPending_ = true;
-        fireAddonEvent("RESURRECT_REQUEST", {resurrectCasterName_});
-    };
+    // (The player's death, resurrection and spirit healers → CombatHandler)
 
     // Time sync
     dispatchTable_[Opcode::SMSG_TIME_SYNC_REQ] = [this](network::Packet& packet) {
@@ -905,26 +770,7 @@ void GameHandler::registerCoreOpcodes() {
         }
     };
 
-    // Spirit healer time / durability
-    dispatchTable_[Opcode::SMSG_AREA_SPIRIT_HEALER_TIME] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(12)) { packet.skipAll(); return; }
-        const uint64_t guid = packet.readUInt64();
-        const uint32_t timeMs = packet.readUInt32();
-        areaSpiritHealerGuid_ = guid;
-        areaSpiritHealerSeconds_ = static_cast<float>(timeMs) / 1000.0f;
-
-        char buf[128];
-        std::snprintf(buf, sizeof(buf), "You will be able to resurrect in %u seconds.",
-                      timeMs / 1000);
-        chatHandler_->addSystemChatMessage(buf);
-
-        // Parsed and said in chat and announced to nobody. UIParent_OnEvent
-        // answers this by joining the queue and raising the countdown dialog,
-        // and it was never told - so the reply arrived, the line was printed,
-        // and the resurrection it was counting down to was one this player had
-        // not joined.
-        fireAddonEvent("AREA_SPIRIT_HEALER_IN_RANGE", {});
-    };
+    // Durability
     dispatchTable_[Opcode::SMSG_DURABILITY_DAMAGE_DEATH] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             uint32_t pct = packet.readUInt32();
@@ -1943,20 +1789,6 @@ void GameHandler::registerRemainingOpcodes() {
                 ack.writeUInt32(seqIdx);
                 socket->send(ack);
             }
-        }
-    };
-    // SMSG_PRE_RESURRECT: packed GUID of the player who can self-resurrect.
-    // Sent when the dead player has Reincarnation (Shaman), Twisting Nether (Warlock),
-    // or Deathpact (Death Knight passive). The client must send CMSG_SELF_RES to accept.
-    dispatchTable_[Opcode::SMSG_PRE_RESURRECT] = [this](network::Packet& packet) {
-        // SMSG_PRE_RESURRECT: packed GUID of the player who can self-resurrect.
-        // Sent when the dead player has Reincarnation (Shaman), Twisting Nether (Warlock),
-        // or Deathpact (Death Knight passive). The client must send CMSG_SELF_RES to accept.
-        uint64_t targetGuid = packet.readPackedGuid();
-        if (targetGuid == playerGuid || targetGuid == 0) {
-            selfResAvailable_ = true;
-            LOG_INFO("SMSG_PRE_RESURRECT: self-resurrection available (guid=0x",
-                     std::hex, targetGuid, std::dec, ")");
         }
     };
     dispatchTable_[Opcode::SMSG_PLAYERBINDERROR] = [this](network::Packet& packet) {

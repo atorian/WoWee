@@ -1187,9 +1187,9 @@ void GameScreen::renderMinimapBattlegroundPositions(const MinimapFrame& frame, g
 // one keeps the render position rather than only the projected point.
 void GameScreen::renderMinimapCorpseMarker(const MinimapFrame& frame, game::GameHandler& gameHandler) {
     // Corpse direction indicator - shown when player is a ghost
-    if (gameHandler.isPlayerGhost()) {
+    if (gameHandler.combat().isPlayerGhost()) {
         float corpseCanX = 0.0f, corpseCanY = 0.0f;
-        if (gameHandler.getCorpseCanonicalPos(corpseCanX, corpseCanY)) {
+        if (gameHandler.combat().getCorpseCanonicalPos(corpseCanX, corpseCanY)) {
             // The render position is kept: unlike the loops above, a corpse off
             // the edge is not skipped - it gets a direction arrow at the rim,
             // and that needs the direction.
@@ -1210,7 +1210,7 @@ void GameScreen::renderMinimapCorpseMarker(const MinimapFrame& frame, game::Game
                                   IM_COL32(180, 180, 220, 255), 1.5f);
                 // Tooltip on hover
                 if (cursorNearBlip(csx, csy)) {
-                    float dist = gameHandler.getCorpseDistance();
+                    float dist = gameHandler.combat().getCorpseDistance();
                     if (dist >= 0.0f)
                         ImGui::SetTooltip("Your corpse (%.0f yd)", dist);
                     else
@@ -1246,7 +1246,7 @@ void GameScreen::renderMinimapCorpseMarker(const MinimapFrame& frame, game::Game
                     frame.drawList->AddTriangle(tip, left, right, IM_COL32(0, 0, 0, 180), 1.0f);
                     // Tooltip on hover
                     if (cursorNearBlip(ax, ay, kArrowHoverRadius)) {
-                        float dist = gameHandler.getCorpseDistance();
+                        float dist = gameHandler.combat().getCorpseDistance();
                         if (dist >= 0.0f)
                             ImGui::SetTooltip("Your corpse (%.0f yd)", dist);
                         else

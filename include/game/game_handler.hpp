@@ -487,14 +487,6 @@ public:
      */
     /// Tell the server whether to pass on every loot roll for us.
     void sendOptOutOfLoot(bool optOut);
-    /// Ask an area spirit healer when the next mass resurrection is.
-    void queryAreaSpiritHealer(uint64_t guid);
-    /// Join that resurrection. Nothing happens without it.
-    void queueAreaSpiritHeal();
-    bool resurrectHasSickness() const { return resurrectHasSickness_; }
-    bool resurrectHasTimer() const { return resurrectHasTimer_; }
-    /// Seconds until the next one, and the healer it belongs to.
-    float getAreaSpiritHealerTime() const { return areaSpiritHealerSeconds_; }
     /// Announce a rune's type and readiness to the interface.
     void fireRuneUpdate(uint32_t index);
     /// The members of a chat channel, as of the last list requested for it.
@@ -981,21 +973,6 @@ public:
     }
     void setPlayerGuid(uint64_t guid) { playerGuid = guid; }
 
-    // Player death state
-    bool isPlayerDead() const { return playerDead_; }
-    bool isPlayerGhost() const { return releasedSpirit_; }
-    /// The graveyard a release would send the player to, in canonical space.
-    /// False when the server has not named one, or has withdrawn it.
-    bool getDeathReleaseLocation(uint32_t& mapId, glm::vec3& canonical) const {
-        if (!deathReleaseValid_) return false;
-        mapId = deathReleaseMapId_;
-        canonical = deathReleaseCanonical_;
-        return true;
-    }
-    /** True when SMSG_PRE_RESURRECT arrived - Reincarnation/Twisting Nether available. */
-    bool canSelfRes() const { return selfResAvailable_; }
-    /** Send CMSG_SELF_RES to use Reincarnation / Twisting Nether. */
-
     // Barber shop
     bool isBarberShopOpen() const { return barberShopOpen_; }
     void closeBarberShop() { barberShopOpen_ = false; fireAddonEvent("BARBER_SHOP_CLOSE", {}); }
@@ -1006,28 +983,6 @@ public:
     bool getInstanceLockPrompt(float& secondsLeft, bool& previouslySaved,
                                uint32_t& completedMask) const;
     bool isInInstance() const;
-
-    /** True when ghost is within 40 yards of corpse position (same map). */
-    /** Seconds remaining on the PvP corpse-reclaim delay, or 0 if the reclaim is available now. */
-    /** Distance (yards) from ghost to corpse, or -1 if no corpse data. */
-    float getCorpseDistance() const {
-        if (!corpsePositionValid_ || currentMapId_ != corpseMapId_) return -1.0f;
-        // movementInfo is canonical (x=north=server_y, y=west=server_x);
-        // corpse coords are raw server (x=west, y=north) - swap to compare.
-        float dx = movementInfo.x - corpseY_;
-        float dy = movementInfo.y - corpseX_;
-        float dz = movementInfo.z - corpseZ_;
-        return std::sqrt(dx*dx + dy*dy + dz*dz);
-    }
-    /** Corpse position in canonical WoW coords (X=north, Y=west).
-     *  Returns false if no corpse data or on a different map. */
-    bool getCorpseCanonicalPos(float& outX, float& outY) const {
-        if (!corpsePositionValid_ || currentMapId_ != corpseMapId_) return false;
-        outX = corpseY_;  // server Y = canonical X (north)
-        outY = corpseX_;  // server X = canonical Y (west)
-        return true;
-    }
-    /** Send CMSG_RECLAIM_CORPSE; noop if not a ghost or not near corpse. */
 
     // Boss encounter unit tracking (SMSG_UPDATE_INSTANCE_ENCOUNTER_UNIT)
     static constexpr uint32_t kMaxEncounterSlots = 5;
@@ -1631,14 +1586,7 @@ public:
     auto& worldStatesRef() { return worldStates_; }
     auto& worldStateZoneIdRef() { return worldStateZoneId_; }
 
-    // ── Corpse & Home Bind ───────────────────────────────────────────
-    auto& corpseGuidRef() { return corpseGuid_; }
-    auto& corpseMapIdRef() { return corpseMapId_; }
-    auto& corpsePositionValidRef() { return corpsePositionValid_; }
-    auto& corpseReclaimAvailableMsRef() { return corpseReclaimAvailableMs_; }
-    auto& corpseXRef() { return corpseX_; }
-    auto& corpseYRef() { return corpseY_; }
-    auto& corpseZRef() { return corpseZ_; }
+    // ── Home Bind ────────────────────────────────────────────────────
 
     // ── Area Triggers ────────────────────────────────────────────────
     auto& activeAreaTriggersRef() { return activeAreaTriggers_; }
@@ -1647,18 +1595,6 @@ public:
     auto& areaTriggersRef() { return areaTriggers_; }
     auto& areaTriggerSuppressFirstRef() { return areaTriggerSuppressFirst_; }
     auto& areaTriggerCooldownRef() { return areaTriggerCooldown_; }
-
-    // ── Death & Resurrection ─────────────────────────────────────────
-    auto& playerDeadRef() { return playerDead_; }
-    auto& releasedSpiritRef() { return releasedSpirit_; }
-    auto& repopPendingRef() { return repopPending_; }
-    auto& lastRepopRequestMsRef() { return lastRepopRequestMs_; }
-    auto& pendingSpiritHealerGuidRef() { return pendingSpiritHealerGuid_; }
-    auto& resurrectCasterGuidRef() { return resurrectCasterGuid_; }
-    auto& resurrectIsSpiritHealerRef() { return resurrectIsSpiritHealer_; }
-    auto& resurrectPendingRef() { return resurrectPending_; }
-    auto& resurrectRequestPendingRef() { return resurrectRequestPending_; }
-    auto& selfResAvailableRef() { return selfResAvailable_; }
 
 
     // ── Trainer, GM & Misc ───────────────────────────────────────────
@@ -2254,30 +2190,6 @@ private:
     mutable bool languageNamesLoaded_ = false;
     uint32_t currentMountDisplayId_ = 0;
     uint32_t mountAuraSpellId_ = 0;       // Spell ID of the aura that caused mounting (for CMSG_CANCEL_AURA fallback)
-    bool playerDead_ = false;
-    bool releasedSpirit_ = false;
-    uint32_t corpseMapId_ = 0;
-    bool corpsePositionValid_ = false;
-    float corpseX_ = 0.0f, corpseY_ = 0.0f, corpseZ_ = 0.0f;
-    uint64_t corpseGuid_ = 0;
-    // Absolute time (ms since epoch) when PvP corpse-reclaim delay expires.
-    // 0 means no active delay (reclaim allowed immediately upon proximity).
-    uint64_t corpseReclaimAvailableMs_ = 0;
-    // Last announced corpse proximity. canReclaimCorpse() is a predicate this
-    // client's own button polled every frame, so the crossing was never an
-    // event; CORPSE_IN_RANGE and CORPSE_OUT_OF_RANGE are edges, and FrameXML
-    // raises its reclaim prompt from them.
-    bool corpseInRangeAnnounced_ = false;
-    // Where the server says the spirit healer is - the graveyard a release
-    // would send the player to. SMSG_DEATH_RELEASE_LOC carries it and it used
-    // to be read and logged and nothing else, so this client knew exactly where
-    // to point a ghost and never pointed anywhere.
-    //
-    // The server withdraws it by sending map id -1, which is how a resurrect
-    // clears the marker.
-    bool deathReleaseValid_ = false;
-    uint32_t deathReleaseMapId_ = 0;
-    glm::vec3 deathReleaseCanonical_{0.0f};
     // Death Knight runes (class 6): slots 0-1=Blood, 2-3=Unholy, 4-5=Frost initially
     std::array<RuneSlot, 6> playerRunes_ = [] {
         std::array<RuneSlot, 6> r{};
@@ -2286,19 +2198,10 @@ private:
         r[4].type = r[5].type = RuneType::Frost;
         return r;
     }();
-    uint64_t pendingSpiritHealerGuid_ = 0;
-    bool resurrectPending_ = false;
-    bool resurrectRequestPending_ = false;
-    bool selfResAvailable_ = false;  // SMSG_PRE_RESURRECT received - Reincarnation/Twisting Nether
     // ---- Talent wipe confirm dialog ----
     // (talent wipe confirm state lives in SpellHandler)
     // ---- Pet talent respec confirm dialog ----
     // (pet unlearn confirm state lives in SpellHandler)
-    bool resurrectIsSpiritHealer_ = false;  // true = SMSG_SPIRIT_HEALER_CONFIRM, false = SMSG_RESURRECT_REQUEST
-    uint64_t resurrectCasterGuid_ = 0;
-    std::string resurrectCasterName_;
-    bool repopPending_ = false;
-    uint64_t lastRepopRequestMs_ = 0;
 
     // ---- Equipment sets (SMSG_EQUIPMENT_SET_LIST) ----
     struct EquipmentSet {
@@ -2319,12 +2222,6 @@ private:
     float       gmTicketWaitHours_ = 0.0f;  ///< Server-estimated wait time in hours
     bool        gmSupportAvailable_ = true; ///< GM support system online (SMSG_GMTICKET_SYSTEMSTATUS)
 
-    /// What the resurrect offer said about itself: whether accepting brings
-    /// resurrection sickness, and whether a reclaim delay applies. Both decide
-    /// which of the three dialogs the interface raises.
-    bool        resurrectHasSickness_ = false;
-    bool        resurrectHasTimer_ = true;
-    uint64_t    areaSpiritHealerGuid_ = 0;
     /// The conversation last asked for, until the server answers it.
     ///
     /// A server that refuses one says nothing - out of reach, a creature that
@@ -2344,7 +2241,6 @@ private:
     /// through. Called from the dispatch for every packet that opens an NPC's
     /// window.
     void noteNpcAnswered() { pendingNpcHello_.guid = 0; }
-    float       areaSpiritHealerSeconds_ = 0.0f;
 
     /// What this hears from its own domains. Last, so it ends before anything
     /// a handler uses goes.

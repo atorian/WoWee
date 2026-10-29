@@ -276,7 +276,7 @@ static int lua_UnitIsGhost(lua_State* L) {
     std::string uidStr(uid);
     toLowerInPlace(uidStr);
     if (uidStr == "player") {
-        lua_pushboolean(L, gh->isPlayerGhost());
+        lua_pushboolean(L, gh->combat().isPlayerGhost());
     } else {
         // Check UNIT_FIELD_FLAGS for UNIT_FLAG_GHOST (0x00000100) - best approximation
         uint64_t guid = resolveUnitGuid(gh, uidStr);
@@ -304,7 +304,7 @@ static int lua_UnitIsDeadOrGhost(lua_State* L) {
     if (!dead && gh) {
         std::string uidStr(uid);
         toLowerInPlace(uidStr);
-        if (uidStr == "player") dead = gh->isPlayerGhost() || gh->isPlayerDead();
+        if (uidStr == "player") dead = gh->combat().isPlayerGhost() || gh->combat().isPlayerDead();
     }
     lua_pushboolean(L, dead);
     return 1;
