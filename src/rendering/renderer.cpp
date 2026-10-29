@@ -3495,7 +3495,8 @@ void Renderer::renderWorld() {
                 auto t0 = std::chrono::steady_clock::now();
                 VkCommandBuffer cmd = beginSecondary(SEC_WMO);
                 setSecondaryViewportScissor(cmd);
-                wmoRenderer->render(cmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition);
+                wmoRenderer->render(cmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
+                                    WMORenderer::Pass::View, WMORenderer::Layer::Opaque);
                 vkEndCommandBuffer(cmd);
                 return std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
@@ -3564,6 +3565,12 @@ void Renderer::renderWorld() {
                 skySystem->record(cmd, perFrameSet, *frameCamera(), skyParams, frameInputs_.scene->sky,
                                   drawSkyModels ? skyboxModelRenderer_.get() : nullptr);
                 logSunDiagnostic(skyParams);
+            }
+            // The buildings' blended batches, over the sky that shows through
+            // them; their opaque batches went ahead of it in SEC_WMO.
+            if (wmoRenderer && frameCamera() && !skipWMO) {
+                wmoRenderer->render(cmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
+                                    WMORenderer::Pass::View, WMORenderer::Layer::Blended);
             }
             vkEndCommandBuffer(cmd);
         }
@@ -3713,23 +3720,25 @@ void Renderer::renderWorld() {
         VkCommandBuffer validCmds[NUM_SECONDARIES];
         const char* validLabels[NUM_SECONDARIES];
         uint32_t numCmds = 0;
-        // Terrain first, then the sky. Every sky layer sits on the far plane
-        // and depth-tests against what is already there, so drawing it after
-        // the ground skips the clouds' noise on every pixel a hill covers,
-        // which outdoors is most of them. Only the terrain goes ahead of it:
-        // it is the one pass that is opaque throughout. Buildings carry
-        // blended windows and doodads carry leaves and particles, and blended
-        // pixels leave no depth behind, so a sky drawn after them would paint
-        // over whichever of them stood against it.
+        // Terrain and the buildings' opaque batches first, then the sky, then
+        // the buildings' blended batches. Every sky layer sits on the far
+        // plane and depth-tests against what is already there, so drawing it
+        // after the ground and the walls skips the clouds' noise and the sky
+        // dome on every pixel they cover: in a city that is most of the
+        // screen, and it was about 5 ms a frame in Dalaran. Blended pixels
+        // leave no depth behind, so a sky drawn after them would paint over
+        // whichever of them stood against it: the buildings' windows are
+        // drawn after it (SEC_SKY ends with them), and doodads, with their
+        // leaves and particles, still come after the sky as a whole.
         const auto queue = [&](VkCommandBuffer buffer, const char* label) {
             validLabels[numCmds] = label;
             validCmds[numCmds++] = buffer;
         };
         if (drawTerrain || drawGrass)
             queue(secondaryCmds_[SEC_TERRAIN][frameIdx], "terrain");
-        queue(secondaryCmds_[SEC_SKY][frameIdx], "sky");
         if (wmoRenderer && frameCamera() && !skipWMO)
             queue(secondaryCmds_[SEC_WMO][frameIdx], "wmo");
+        queue(secondaryCmds_[SEC_SKY][frameIdx], "sky");
         queue(secondaryCmds_[SEC_SELECTION][frameIdx], "selection");
         queue(secondaryCmds_[SEC_CHARS][frameIdx], "characters");
         if (m2Renderer && frameCamera() && !skipM2)
@@ -3777,7 +3786,20 @@ void Renderer::renderWorld() {
             grassRenderer_->record(currentCmd, vkCtx->getCurrentFrame(), perFrameSet, frameInputs_.scene->grass);
         }
 
-        // Sky after the ground, for the reason given on the parallel path.
+        // The buildings' opaque batches, then the sky, then their blended
+        // batches, for the reason given on the parallel path.
+        if (wmoRenderer && frameCamera() && !skipWMO) {
+            wmoRenderer->prepareRender();
+            auto wmoStart = std::chrono::steady_clock::now();
+            {
+                GpuPass pass(*vkCtx, currentCmd, "wmo");
+                wmoRenderer->render(currentCmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
+                                    WMORenderer::Pass::View, WMORenderer::Layer::Opaque);
+            }
+            lastWMORenderMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - wmoStart).count();
+        }
+
         if (skySystem && frameCamera() && !skipSky) {
             GpuPass pass(*vkCtx, currentCmd, "sky");
             rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
@@ -3794,14 +3816,8 @@ void Renderer::renderWorld() {
         }
 
         if (wmoRenderer && frameCamera() && !skipWMO) {
-            wmoRenderer->prepareRender();
-            auto wmoStart = std::chrono::steady_clock::now();
-            {
-                GpuPass pass(*vkCtx, currentCmd, "wmo");
-                wmoRenderer->render(currentCmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition);
-            }
-            lastWMORenderMs = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - wmoStart).count();
+            wmoRenderer->render(currentCmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
+                                WMORenderer::Pass::View, WMORenderer::Layer::Blended);
         }
 
         if (overlaySystem_) {

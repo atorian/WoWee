@@ -1137,11 +1137,17 @@ std::shared_ptr<const WMORenderer::Frame> WMORenderer::extract(const Camera& cam
 }
 
 void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
-                         const glm::vec3*, Pass pass) {
+                         const glm::vec3*, Pass pass, Layer layer) {
     if (!opaquePipeline_) return;
     const uint32_t draws = recordView(cmd, perFrameSet, camera.getPosition(),
-        pass == Pass::Reflection ? recording_->reflection : recording_->view);
-    if (pass == Pass::View) viewDrawCallCount_ = draws;
+        pass == Pass::Reflection ? recording_->reflection : recording_->view, layer);
+    if (pass != Pass::View) return;
+    if (layer == Layer::Blended) {
+        viewBlendedDrawCallCount_ = draws;
+    } else {
+        viewDrawCallCount_ = draws;
+        if (layer == Layer::All) viewBlendedDrawCallCount_ = 0;
+    }
 }
 
 void WMORenderer::cullView(const Camera& camera, const glm::vec3& portalViewerPos, DrawList& list) const {
@@ -1273,7 +1279,7 @@ void WMORenderer::cullView(const Camera& camera, const glm::vec3& portalViewerPo
 }
 
 uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const glm::vec3& camPos,
-                             const DrawList& list) const {
+                             const DrawList& list, Layer layer) const {
     if (list.used == 0) return 0;
     uint32_t drawCalls = 0;
 
@@ -1322,6 +1328,13 @@ uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
             // Skip groups with invalid GPU resources
             if (group.vertexBuffer == VK_NULL_HANDLE || group.indexBuffer == VK_NULL_HANDLE) continue;
 
+            // A batch is in the layer being recorded, or it waits for the other.
+            const auto inLayer = [layer](const auto& mb) { return wmoBatchInLayer(mb.isTransparent, layer); };
+            if (layer != Layer::All &&
+                std::none_of(group.mergedBatches.begin(), group.mergedBatches.end(), inLayer)) {
+                continue;
+            }
+
             // Bind vertex + index buffers
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &group.vertexBuffer, &offset);
@@ -1332,7 +1345,7 @@ uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
 
             // Render each merged batch
             for (const auto& mb : group.mergedBatches) {
-                if (!mb.materialSet) continue;
+                if (!mb.materialSet || !inLayer(mb)) continue;
 
                 // Determine which pipeline this batch needs
                 int neededPipeline = 0; // opaque

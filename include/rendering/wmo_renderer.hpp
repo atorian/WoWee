@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rendering/wmo_draw_layer.hpp"
 #include "rendering/rt_instance_changes.hpp"
 #include "rendering/frame_pool.hpp"
 
@@ -268,6 +269,8 @@ public:
     /// list of its own: the water's reflection is recorded on the main thread
     /// and the view on a frame worker, and they share nothing they write.
     enum class Pass : uint8_t { View, Reflection, Count };
+    /// Which of a pass's batches a call records; see WmoDrawLayer.
+    using Layer = WmoDrawLayer;
 
     /// viewerPos is the character; portal culling seeds from it as well as from
     /// the camera, because at a doorway the two stand in different groups and
@@ -276,7 +279,8 @@ public:
     /// Culls the scene into the pass's draw list, then records from that list
     /// alone: the recording reads no instance.
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
-                const glm::vec3* viewerPos = nullptr, Pass pass = Pass::View);
+                const glm::vec3* viewerPos = nullptr, Pass pass = Pass::View,
+                Layer layer = Layer::All);
 
     /**
      * Initialize shadow pipeline (Phase 7)
@@ -325,7 +329,7 @@ public:
     /**
      * Get total draw call count (last frame)
      */
-    uint32_t getDrawCallCount() const { return viewDrawCallCount_; }
+    uint32_t getDrawCallCount() const { return viewDrawCallCount_ + viewBlendedDrawCallCount_; }
     /// Draw calls the depth-only passes recorded this frame, from the frame's
     /// first one (the sun's) on.
     uint32_t getShadowDrawCallCount() const { return shadowDrawCalls_; }
@@ -895,13 +899,16 @@ private:
         [[nodiscard]] std::span<const DrawEntry> drawn() const { return {entries.data(), used}; }
     };
     uint32_t viewDrawCallCount_ = 0;
+    /// The blended layer's, kept apart: it is recorded on another thread
+    /// from the opaque layer, at the same time.
+    uint32_t viewBlendedDrawCallCount_ = 0;
     /// The depth-only passes', one at a time on the main thread.
 
 
     /// The instances the camera sees and their groups that are drawn.
     void cullView(const Camera& camera, const glm::vec3& portalViewerPos, DrawList& list) const;
     uint32_t recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const glm::vec3& camPos,
-                    const DrawList& list) const;
+                    const DrawList& list, Layer layer) const;
     /// The instances, shown, and groups that reach a shadow map of this centre and reach.
     void extractDepth(DrawList& list) const;
     GroupDraw extractGroup(const GroupResources& group, const WMOInstance& instance, uint32_t groupIndex) const;

@@ -3088,6 +3088,11 @@ wowee_add_test(test_placement_transform
 wowee_add_test(test_terrain_fog_band
     SOURCES test_terrain_fog_band.cpp)
 
+# ── test_wmo_draw_layer ──────────────────────────────────────
+# Which WMO batches the scene pass draws ahead of the sky and which after it.
+wowee_add_test(test_wmo_draw_layer
+    SOURCES test_wmo_draw_layer.cpp)
+
 # ── test_wmo_batch_merge ─────────────────────────────────────
 # Which WMO group batches draw as one. A merged batch is drawn with its first
 # batch's material, so opaque and blended materials on one texture, or two
