@@ -8,6 +8,8 @@
 #include "game/game_events.hpp"
 #include "game/update_field_table.hpp"
 
+#include <glm/vec3.hpp>
+
 #include <memory>
 #include <string>
 #include <vector>
@@ -135,4 +137,178 @@ TEST_CASE("Tab steps through enemies nearest first, and takes in one that has ju
     // From the farthest the list now goes round to the newcomer, nearest of all.
     h.game().combat().tabTarget(me.x, me.y, me.z);
     CHECK(h.game().getTargetGuid() == 0x8003);
+}
+
+// ---- The player's death ----
+
+TEST_CASE("a forced death leaves the player dead, the corpse where they stood", "[combat][death][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    const auto& me = h.game().getMovementInfo();
+
+    h.receive(Opcode::SMSG_FORCED_DEATH_UPDATE, Body());
+    h.pump();
+
+    CHECK(h.game().isPlayerDead());
+    CHECK_FALSE(h.game().isPlayerGhost());
+    CHECK(h.addonEvents("PLAYER_DEAD").size() == 1);
+    float corpseX = 0, corpseY = 0;
+    REQUIRE(h.game().getCorpseCanonicalPos(corpseX, corpseY));
+    CHECK(corpseX == me.x);
+    CHECK(corpseY == me.y);
+}
+
+TEST_CASE("a player's resurrection is offered by name and accepted with a response", "[combat][death][harness]") {
+    GameHarness h;
+    h.enterWorld();
+
+    // SMSG_RESURRECT_REQUEST: the caster, the name's length and the name, a
+    // second terminator, then sickness (0 from a player); no trailing word, so
+    // the reclaim delay applies.
+    h.receive(Opcode::SMSG_RESURRECT_REQUEST,
+              Body().u64(0x0000000000000777ull).u32(5).cstr("Anna").u8(0).u8(0));
+    h.pump();
+
+    const auto offered = h.addonEvents("RESURRECT_REQUEST");
+    REQUIRE(offered.size() == 1);
+    CHECK(offered[0].args.at(0) == "Anna");
+    CHECK_FALSE(h.game().resurrectHasSickness());
+    CHECK(h.game().resurrectHasTimer());
+
+    h.game().combat().acceptResurrect();
+    auto* sent = h.lastSent(Opcode::CMSG_RESURRECT_RESPONSE);
+    REQUIRE(sent);
+    CHECK(sent->readUInt64() == 0x777ull);
+    CHECK(sent->readUInt8() == 1);
+    CHECK(h.countSent(Opcode::CMSG_SPIRIT_HEALER_ACTIVATE) == 0);
+}
+
+TEST_CASE("a spirit healer's offer asks to confirm the loss, and accepting it activates the healer",
+          "[combat][death][harness]") {
+    GameHarness h;
+    h.enterWorld();
+
+    h.receive(Opcode::SMSG_SPIRIT_HEALER_CONFIRM, Body().u64(0xF130000000001234ull));
+    h.pump();
+    CHECK(h.addonEvents("CONFIRM_XP_LOSS").size() == 1);
+
+    h.game().combat().acceptResurrect();
+    auto* sent = h.lastSent(Opcode::CMSG_SPIRIT_HEALER_ACTIVATE);
+    REQUIRE(sent);
+    CHECK(sent->readUInt64() == 0xF130000000001234ull);
+    CHECK(h.countSent(Opcode::CMSG_RESURRECT_RESPONSE) == 0);
+}
+
+TEST_CASE("the graveyard the server names is where a release goes, until it withdraws it",
+          "[combat][death][harness]") {
+    GameHarness h;
+    h.enterWorld();
+
+    // SMSG_DEATH_RELEASE_LOC: the map, then server x, y, z.
+    h.receive(Opcode::SMSG_DEATH_RELEASE_LOC, Body().u32(1).f32(100.0f).f32(200.0f).f32(30.0f));
+    h.pump();
+    uint32_t map = 99;
+    glm::vec3 where{};
+    REQUIRE(h.game().getDeathReleaseLocation(map, where));
+    CHECK(map == 1);
+    // Canonical is north, west: the server's y, x.
+    CHECK(where.x == 200.0f);
+    CHECK(where.y == 100.0f);
+    CHECK(where.z == 30.0f);
+
+    h.receive(Opcode::SMSG_DEATH_RELEASE_LOC, Body().u32(0xFFFFFFFFu).f32(0).f32(0).f32(0));
+    h.pump();
+    CHECK_FALSE(h.game().getDeathReleaseLocation(map, where));
+}
+
+TEST_CASE("the corpse query says where to walk, on the map those coordinates are on",
+          "[combat][death][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    const uint32_t here = h.game().getCurrentMapId();
+
+    // MSG_CORPSE_QUERY: found, the map to walk on, server x, y, z, the map the
+    // corpse lies on (a dungeon behind that entrance), and a word nobody reads.
+    h.receive(Opcode::MSG_CORPSE_QUERY,
+              Body().u8(1).u32(here).f32(10.0f).f32(20.0f).f32(5.0f).u32(here + 1000).u32(0));
+    h.pump();
+
+    float corpseX = 0, corpseY = 0;
+    REQUIRE(h.game().getCorpseCanonicalPos(corpseX, corpseY));
+    CHECK(corpseX == 20.0f);
+    CHECK(corpseY == 10.0f);
+}
+
+TEST_CASE("self-resurrection is offered to the player and taken with CMSG_SELF_RES", "[combat][death][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    REQUIRE_FALSE(h.game().canSelfRes());
+
+    h.receive(Opcode::SMSG_PRE_RESURRECT, Body().packedGuid(0x0000000000000555ull));
+    h.pump();
+    CHECK_FALSE(h.game().canSelfRes());   // someone else's
+
+    h.receive(Opcode::SMSG_PRE_RESURRECT, Body().packedGuid(h.player().guid));
+    h.pump();
+    CHECK(h.game().canSelfRes());
+
+    h.game().combat().useSelfRes();
+    CHECK(h.countSent(Opcode::CMSG_SELF_RES) == 1);
+}
+
+TEST_CASE("an area spirit healer's countdown is shown and its queue is joined", "[combat][death][harness]") {
+    GameHarness h;
+    h.enterWorld();
+
+    // SMSG_AREA_SPIRIT_HEALER_TIME: the healer, then milliseconds to go.
+    h.receive(Opcode::SMSG_AREA_SPIRIT_HEALER_TIME, Body().u64(0xF130000000004321ull).u32(25000));
+    h.pump();
+    CHECK(h.game().getAreaSpiritHealerTime() == 25.0f);
+
+    h.game().queueAreaSpiritHeal();
+    auto* sent = h.lastSent(Opcode::CMSG_AREA_SPIRIT_HEALER_QUEUE);
+    REQUIRE(sent);
+    CHECK(sent->readUInt64() == 0xF130000000004321ull);
+}
+
+TEST_CASE("the ghost flag makes the player a ghost, and clearing it brings them back without a corpse",
+          "[combat][death][harness]") {
+    using namespace wowee::game;
+    GameHarness h;
+    h.enterWorld();
+    auto self = std::make_shared<Player>(h.player().guid);
+    h.game().getEntityManager().addEntity(self->getGuid(), self);
+    h.receive(Opcode::SMSG_FORCED_DEATH_UPDATE, Body());
+    h.pump();
+
+    auto flags = [&](uint32_t value) {
+        UpdateBlock block{};
+        block.guid = h.player().guid;
+        block.objectType = ObjectType::PLAYER;
+        block.updateType = UpdateType::VALUES;
+        block.fields[fieldIndex(UF::PLAYER_FLAGS)] = value;
+        UpdateObjectData batch{};
+        batch.blocks.push_back(block);
+        h.game().entityController().applyRecordedObjects(batch);
+    };
+    flags(0x10);   // PLAYER_FLAGS_GHOST
+    CHECK(h.game().isPlayerGhost());
+
+    flags(0);
+    h.pump();
+    CHECK_FALSE(h.game().isPlayerGhost());
+    CHECK_FALSE(h.game().isPlayerDead());
+    float corpseX = 0, corpseY = 0;
+    CHECK_FALSE(h.game().getCorpseCanonicalPos(corpseX, corpseY));
+    CHECK(h.addonEvents("PLAYER_ALIVE").size() == 1);
+}
+
+TEST_CASE("a corpse reclaim delay is counted down from the server's milliseconds", "[combat][death][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.receive(Opcode::SMSG_CORPSE_RECLAIM_DELAY, Body().u32(30000));
+    h.pump();
+    const float left = h.game().combat().getCorpseReclaimDelaySec();
+    CHECK(left > 29.0f);
+    CHECK(left <= 30.0f);
 }
