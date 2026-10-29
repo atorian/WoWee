@@ -66,7 +66,7 @@ public:
 class TimeCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.queryServerTime(true);  // typed by the player, so say it
+        ctx.gameHandler.social().queryServerTime(true);  // typed by the player, so say it
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"time"}; }
@@ -119,7 +119,7 @@ public:
 class PlayedCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.requestPlayedTime();
+        ctx.gameHandler.social().requestPlayedTime();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"played"}; }
@@ -210,7 +210,7 @@ public:
 class HelmCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.toggleHelm();
+        ctx.gameHandler.social().toggleHelm();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"helm", "helmet", "showhelm"}; }
@@ -221,7 +221,7 @@ public:
 class CloakCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.toggleCloak();
+        ctx.gameHandler.social().toggleCloak();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"cloak", "showcloak"}; }

@@ -1047,7 +1047,7 @@ void GameScreen::renderMinimapGossipPois(const MinimapFrame& frame, game::GameHa
 // What a party member pinged, for as long as the ping lasts.
 void GameScreen::renderMinimapPings(const MinimapFrame& frame, game::GameHandler& gameHandler) {
     // Minimap pings from party members
-    for (const auto& ping : gameHandler.getMinimapPings()) {
+    for (const auto& ping : gameHandler.social().minimapPings()) {
         float sx = 0.0f, sy = 0.0f;
         if (!frame.projectCanonical(ping.wowX, ping.wowY, sx, sy)) continue;
 
@@ -1346,7 +1346,7 @@ void GameScreen::handleMinimapInput(const MinimapFrame& frame, game::GameHandler
             const glm::vec2 d = minimapOffsetToRenderDelta(mdx, mdy, frame.view);
             glm::vec3 clickRender = frame.playerRender + glm::vec3(d.x, d.y, 0.0f);
             glm::vec3 clickCanon = core::coords::renderToCanonical(clickRender);
-            gameHandler.sendMinimapPing(clickCanon.x, clickCanon.y);
+            gameHandler.social().sendMinimapPing(clickCanon.x, clickCanon.y);
         }
     }
 
@@ -1499,7 +1499,7 @@ void GameScreen::renderMinimapReadouts(const MinimapFrame& frame, game::GameHand
 
     // Instance difficulty indicator - just below zone name, inside minimap top edge
     if (gameHandler.isInInstance()) {
-        uint32_t diff = gameHandler.getInstanceDifficulty();
+        uint32_t diff = gameHandler.social().getInstanceDifficulty();
         const char* named = game::instanceDifficultyName(diff);
         const char* label = named ? named : "Unknown";
 
@@ -1512,8 +1512,8 @@ void GameScreen::renderMinimapReadouts(const MinimapFrame& frame, game::GameHand
         float pad = 2.0f;
 
         // Color-code: heroic=orange, normal=light gray
-        ImU32 bgCol = gameHandler.isInstanceHeroic() ? IM_COL32(120, 60, 0, 180) : IM_COL32(0, 0, 0, 160);
-        ImU32 textCol = gameHandler.isInstanceHeroic() ? IM_COL32(255, 180, 50, 255) : IM_COL32(200, 200, 200, 220);
+        ImU32 bgCol = gameHandler.social().isInstanceHeroic() ? IM_COL32(120, 60, 0, 180) : IM_COL32(0, 0, 0, 160);
+        ImU32 textCol = gameHandler.social().isInstanceHeroic() ? IM_COL32(255, 180, 50, 255) : IM_COL32(200, 200, 200, 220);
 
         drawList->AddRectFilled(
             ImVec2(tx - pad, ty - pad),

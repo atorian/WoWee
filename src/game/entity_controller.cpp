@@ -1124,7 +1124,7 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
                 // restriction, not a stun: playing the stun animation over it leaves
                 // the character slumped rather than seated. Clearing the flag is still
                 // honoured, so a cancelled logout recovers.
-                if (nowStunned && owner_.isLoggingOut()) {
+                if (nowStunned && owner_.social().isLoggingOut()) {
                     nowStunned = false;
                 }
                 if (wasStunned != nowStunned) {

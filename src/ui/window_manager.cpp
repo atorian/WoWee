@@ -275,7 +275,7 @@ void WindowManager::barberApplySelection(game::GameHandler& gameHandler) {
         return index >= 0 && index < static_cast<int>(options.size())
             ? options[static_cast<size_t>(index)].entryId : 0u;
     };
-    gameHandler.sendAlterAppearance(entryOf(barberHairStyles_, barberHairStyle_),
+    gameHandler.social().sendAlterAppearance(entryOf(barberHairStyles_, barberHairStyle_),
                                     sel.hairColor,
                                     entryOf(barberFacialStyles_, barberFacialHair_),
                                     entryOf(barberSkinStyles_, barberSkinColor_));
@@ -393,7 +393,7 @@ void WindowManager::renderInstanceLockouts(game::GameHandler& gameHandler) {
         return;
     }
 
-    const auto& lockouts = gameHandler.getInstanceLockouts();
+    const auto& lockouts = gameHandler.social().getInstanceLockouts();
 
     if (lockouts.empty()) {
         ImGui::TextColored(kColorGray, "No active instance lockouts.");

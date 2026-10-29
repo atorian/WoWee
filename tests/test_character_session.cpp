@@ -138,7 +138,7 @@ TEST_CASE("a relog's session is the new character's, and so are its saved variab
     CHECK(first.name == "Alice");
 
     // Logout to the character list, then the other character in.
-    h.game().requestLogout(false);
+    h.game().social().requestLogout(false);
     h.receive(Opcode::SMSG_LOGOUT_COMPLETE);
     h.pump();
     h.game().returnToCharacterSelect();

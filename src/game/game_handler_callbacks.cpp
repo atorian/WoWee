@@ -843,7 +843,7 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
         // Asked once, read all session: the reply carries how long until the
         // daily quests reset, which is the only place that figure comes from.
         // Silently - the announcement belongs to /time.
-        queryServerTime(false);
+        socialHandler_->queryServerTime(false);
     }
 
     // Fire PLAYER_ENTERING_WORLD - THE most important event for addon initialization.
@@ -1115,10 +1115,6 @@ bool GameHandler::inGroup() const {
     return services_.group && services_.group->isInGroup();
 }
 
-void GameHandler::sendMinimapPing(float wowX, float wowY) {
-    socialHandler_->sendMinimapPing(wowX, wowY);
-}
-
 void GameHandler::handlePong(network::Packet& packet) {
     LOG_DEBUG("Handling SMSG_PONG");
 
@@ -1193,40 +1189,8 @@ void GameHandler::setMouseoverGuid(uint64_t guid) {
     combatHandler_->setMouseoverGuid(guid);
 }
 
-void GameHandler::inspectTarget() {
-    socialHandler_->inspectTarget();
-}
-
-void GameHandler::inspectUnit(uint64_t guid) {
-    socialHandler_->inspectUnit(guid);
-}
-
-void GameHandler::requestInspectHonorData(uint64_t guid) {
-    socialHandler_->requestInspectHonorData(guid);
-}
-
-const GameHandler::InspectResult* GameHandler::getInspectResult() const {
-    return socialHandler_->getInspectResult();
-}
-
-void GameHandler::queryServerTime(bool announce) {
-    socialHandler_->queryServerTime(announce);
-}
-
-uint32_t GameHandler::getSecondsUntilDailyReset() const {
-    return socialHandler_->getSecondsUntilDailyReset();
-}
-
 float GameHandler::getGameTime() const {
     return realmTimeHandler_->gameHours();
-}
-
-void GameHandler::requestPlayedTime() {
-    socialHandler_->requestPlayedTime();
-}
-
-void GameHandler::randomRoll(uint32_t minRoll, uint32_t maxRoll) {
-    socialHandler_->randomRoll(minRoll, maxRoll);
 }
 
 void GameHandler::faceCanonicalYaw(float canonicalYaw) {
@@ -1239,55 +1203,12 @@ void GameHandler::faceCanonicalYaw(float canonicalYaw) {
     sendMovement(Opcode::MSG_MOVE_SET_FACING);
 }
 
-void GameHandler::requestLogout(bool exitAfterLogout) {
-    socialHandler_->requestLogout(exitAfterLogout);
-}
-
-void GameHandler::cancelLogout() {
-    socialHandler_->cancelLogout();
-}
-
-void GameHandler::sendSetDifficulty(uint32_t difficulty, bool raid) {
-    socialHandler_->sendSetDifficulty(difficulty, raid);
-}
-
 void GameHandler::setStandState(uint8_t standState) {
     socialHandler_->setStandState(standState);
 }
 
-void GameHandler::toggleHelm() {
-    socialHandler_->toggleHelm();
-}
-
-void GameHandler::toggleCloak() {
-    socialHandler_->toggleCloak();
-}
-
 bool GameHandler::isAfk() const { return chatHandler_->isAfk(); }
 bool GameHandler::isDnd() const { return chatHandler_->isDnd(); }
-
-void GameHandler::channelModeration(Opcode op, const std::string& channelName,
-                                    const std::string& targetName,
-                                    bool allowEmptyTarget) {
-    socialHandler_->channelModeration(op, channelName, targetName,
-                                                         allowEmptyTarget);
-}
-
-// The marks live in SocialHandler - MSG_RAID_TARGET_UPDATE writes them there.
-// GameHandler kept a second, identical array that nothing ever wrote, so every
-// caller of these (target frame, nameplates, minimap, social panel) read an
-// array of zeros and no marker icon was ever drawn.
-void GameHandler::requestRaidInfo() {
-    socialHandler_->requestRaidInfo();
-}
-
-void GameHandler::setSavedInstanceExtend(uint32_t mapId, uint32_t difficulty, bool extend) {
-    socialHandler_->setSavedInstanceExtend(mapId, difficulty, extend);
-}
-
-void GameHandler::reportPlayer(uint64_t targetGuid, const std::string& reason) {
-    socialHandler_->reportPlayer(targetGuid, reason);
-}
 
 void GameHandler::addLocalChatMessage(const MessageChatData& msg) {
     chatHandler_->addLocalChatMessage(msg);
@@ -1408,10 +1329,6 @@ void GameHandler::dismount() {
 // Arena / Battleground Handlers
 // ============================================================
 
-void GameHandler::takeInboxTextItem(uint32_t mailId) {
-    socialHandler_->takeInboxTextItem(mailId);
-}
-
 // ---------------------------------------------------------------------------
 // LFG / Dungeon Finder handlers (WotLK 3.3.5a)
 // ---------------------------------------------------------------------------
@@ -1461,12 +1378,6 @@ void GameHandler::resetInstances() {
     LOG_INFO("Sent CMSG_RESET_INSTANCES");
 }
 
-void GameHandler::sendAlterAppearance(uint32_t hairStyleEntry, uint32_t hairColor,
-                                      uint32_t facialHairEntry, uint32_t skinColorEntry) {
-    socialHandler_->sendAlterAppearance(hairStyleEntry, hairColor,
-                                        facialHairEntry, skinColorEntry);
-}
-
 // ============================================================
 // Group/Party
 // ============================================================
@@ -1478,18 +1389,6 @@ void GameHandler::destroyTotem(int slot) {
     network::Packet pkt(wireOpcode(Opcode::CMSG_TOTEM_DESTROYED));
     pkt.writeUInt8(static_cast<uint8_t>(slot));
     getSocket()->send(pkt);
-}
-
-void GameHandler::deleteGmTicket() {
-    socialHandler_->deleteGmTicket();
-}
-
-void GameHandler::requestGmTicket() {
-    socialHandler_->requestGmTicket();
-}
-
-void GameHandler::requestGmSystemStatus() {
-    socialHandler_->requestGmSystemStatus();
 }
 
 uint32_t GameHandler::getEntityGuildId(uint64_t guid) const {

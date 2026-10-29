@@ -51,7 +51,7 @@ public:
 class LogoutEmoteCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.requestLogout(false);
+        ctx.gameHandler.social().requestLogout(false);
         return {};
     }
     // aliases() is the complete name list - "logout" itself was missing here, so
@@ -66,7 +66,7 @@ public:
 class QuitCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.requestLogout(true);
+        ctx.gameHandler.social().requestLogout(true);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"quit", "exit"}; }
@@ -77,7 +77,7 @@ public:
 class CancelLogoutCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.cancelLogout();
+        ctx.gameHandler.social().cancelLogout();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"cancellogout"}; }

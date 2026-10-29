@@ -582,7 +582,7 @@ void GameHarness::relogAs(const PlayerSpec& next) {
     const PlayerSpec previous = player_;
     player_ = next;
 
-    game_->requestLogout(false);
+    game_->social().requestLogout(false);
     receive(Opcode::SMSG_LOGOUT_COMPLETE);
     pump();
     game_->returnToCharacterSelect();

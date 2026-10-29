@@ -1660,7 +1660,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                         if (auto* duels = services_.duels) duels->proposeDuel(nameplateCtxGuid_);
                     if (ImGui::MenuItem("Inspect")) {
                         gameHandler.setTarget(nameplateCtxGuid_);
-                        gameHandler.inspectTarget();
+                        gameHandler.social().inspectTarget();
                         openInspectWindow(gameHandler);
                     }
                     ImGui::Separator();

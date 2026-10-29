@@ -210,7 +210,7 @@ TEST_CASE("logout, and a disconnect that cannot be ridden out, while loading or 
         h.setRenewal(Renewal::Refused, "the login server holds no session for this key");
         h.server().server().disconnect();
     } else {
-        h.game().requestLogout(false);
+        h.game().social().requestLogout(false);
         h.server().receive(Opcode::SMSG_LOGOUT_COMPLETE);
     }
     const AppState destination = disconnect ? AppState::AUTHENTICATION : AppState::CHARACTER_SELECTION;
@@ -248,7 +248,7 @@ TEST_CASE("a committed logout stops drawing the world at once, while the world s
     h.enterWorld();
     REQUIRE(h.renderedView() == wowee::core::FrameView::World);
 
-    h.game().requestLogout(false);
+    h.game().social().requestLogout(false);
     h.server().receive(Opcode::SMSG_LOGOUT_RESPONSE, Body().u32(0).u8(instant ? 1 : 0));
     h.frameUntilHandled();
     if (!instant) {
@@ -278,11 +278,11 @@ TEST_CASE("a logout cancelled during its countdown keeps the world drawn",
           "[client][harness][logout]") {
     ClientHarness h;
     h.enterWorld();
-    h.game().requestLogout(false);
+    h.game().social().requestLogout(false);
     h.server().receive(Opcode::SMSG_LOGOUT_RESPONSE, Body().u32(0).u8(0));
     h.frameUntilHandled();
     h.advance(5.0f);
-    h.game().cancelLogout();
+    h.game().social().cancelLogout();
     // Past where the countdown would have run out.
     h.advance(20.0f);
 
@@ -296,7 +296,7 @@ TEST_CASE("a committed logout the server never completes ends at the login scree
           "[client][harness][logout]") {
     ClientHarness h;
     h.enterWorld();
-    h.game().requestLogout(false);
+    h.game().social().requestLogout(false);
     h.server().receive(Opcode::SMSG_LOGOUT_RESPONSE, Body().u32(0).u8(1));
     h.frameUntilHandled();
 
@@ -363,7 +363,7 @@ TEST_CASE("logging in another character carries none of the last one's interface
     h.runInInterface("SetLFGDungeonEnabled(285, true); RELOG_MARK = 'alice'");
     REQUIRE(h.interfaceAnswers("GetLFDChoiceEnabledState()[285] == true"));
 
-    h.game().requestLogout(false);
+    h.game().social().requestLogout(false);
     h.server().receive(Opcode::SMSG_LOGOUT_COMPLETE);
     h.frameUntil([&] { return h.state() == AppState::CHARACTER_SELECTION; }, 60,
                  "the character screen");

@@ -4932,7 +4932,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                                 mm->pingX, -mm->pingY, view);
                             const glm::vec3 canon = core::coords::renderToCanonical(
                                 playerRender + glm::vec3(d.x, d.y, 0.0f));
-                            if (gameHandler) gameHandler->sendMinimapPing(canon.x, canon.y);
+                            if (gameHandler) gameHandler->social().sendMinimapPing(canon.x, canon.y);
                         }
                     } else {
                         map->clearScreenRect();
@@ -5178,7 +5178,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                     }
                     bool shown = false;
                     if (inspectModel && inspectModel->visible) {
-                        const auto* result = gameHandler->getInspectResult();
+                        const auto* result = gameHandler->social().getInspectResult();
                         uint8_t race = 0, gender = 0, facial = 0;
                         uint32_t appearance = 0;
                         if (result && result->guid != 0 &&

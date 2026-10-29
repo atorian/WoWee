@@ -187,8 +187,8 @@ public:
         // packet and arrives well after this returns, so what is printed is
         // what the last request brought back - the one the interface makes at
         // login, which is why there is something to print at all.
-        ctx.gameHandler.requestRaidInfo();
-        const auto& lockouts = ctx.gameHandler.getInstanceLockouts();
+        ctx.gameHandler.social().requestRaidInfo();
+        const auto& lockouts = ctx.gameHandler.social().getInstanceLockouts();
         if (lockouts.empty()) {
             ctx.gameHandler.chat().addSystemChatMessage("You are not saved to any instances.");
             return {};
@@ -410,7 +410,7 @@ public:
                 try { maxRoll = std::stoul(ctx.args); } catch (...) {}
             }
         }
-        ctx.gameHandler.randomRoll(minRoll, maxRoll);
+        ctx.gameHandler.social().randomRoll(minRoll, maxRoll);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"roll", "random", "rnd"}; }

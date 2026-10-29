@@ -1104,7 +1104,7 @@ int selectGossipQuestAt(lua_State* L, bool available) {
 
 // GetGMTicket() → asks the server what ticket this player has open
 static int lua_GetGMTicket(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->requestGmTicket();
+    if (auto* gh = getGameHandler(L)) gh->social().requestGmTicket();
     return 0;
 }
 
@@ -1121,7 +1121,7 @@ static int lua_NewGMTicket(lua_State* L) {
 
 // DeleteGMTicket() → withdraws it
 static int lua_DeleteGMTicket(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->deleteGmTicket();
+    if (auto* gh = getGameHandler(L)) gh->social().deleteGmTicket();
     return 0;
 }
 
@@ -1547,7 +1547,7 @@ void registerSocialLuaAPI(lua_State* L) {
             if (!gh) return 0;
             const auto& inbox = mailOf(L).getMailInbox();
             if (index < 0 || index >= static_cast<int>(inbox.size())) return 0;
-            gh->reportMailSpam(inbox[index].senderGuid, inbox[index].messageId);
+            gh->social().reportMailSpam(inbox[index].senderGuid, inbox[index].messageId);
             return 0;
         }},
                 // ComplainChat(lineID) - reporting a chat line as spam.
@@ -1574,7 +1574,7 @@ void registerSocialLuaAPI(lua_State* L) {
             const uint32_t lineId = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
             if (!gh || lineId == 0) return 0;
             const uint64_t guid = gh->chat().chatLineSender(lineId);
-            if (guid != 0) gh->reportPlayer(guid, "");
+            if (guid != 0) gh->social().reportPlayer(guid, "");
             return 0;
         }},
                 // The petition *vendor* - the guild master or arena
@@ -1938,7 +1938,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"TakeInboxTextItem", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const auto id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
-            if (gh && id) gh->takeInboxTextItem(id);
+            if (gh && id) gh->social().takeInboxTextItem(id);
             return 0;
         }},
                 // SetSendMailShowing(showing) - the send-mail tab is open, or
@@ -1983,7 +1983,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 // waits for the event, so a no-op here meant it waited forever
                 // and kept whatever it was last told.
                 {"GetGMStatus", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->requestGmSystemStatus();
+            if (auto* gh = getGameHandler(L)) gh->social().requestGmSystemStatus();
             return 0;
         }},
 
@@ -2380,15 +2380,15 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"BattlefieldMgrEntryInviteResponse", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
-            if (lua_toboolean(L, 2)) gh->acceptBfMgrInvite();
-            else                     gh->declineBfMgrInvite();
+            if (lua_toboolean(L, 2)) gh->social().acceptBfMgrInvite();
+            else                     gh->social().declineBfMgrInvite();
             return 0;
         }},
                 {"BattlefieldMgrQueueInviteResponse", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
             const auto battleId = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
-            gh->respondBfMgrQueueInvite(battleId ? battleId : gh->getBfMgrBattleId(),
+            gh->social().respondBfMgrQueueInvite(battleId ? battleId : gh->social().bfMgrBattleId(),
                                         lua_toboolean(L, 2) != 0);
             return 0;
         }},
@@ -2396,7 +2396,7 @@ void registerSocialLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
             const auto battleId = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
-            gh->requestBfMgrExit(battleId ? battleId : gh->getBfMgrBattleId());
+            gh->social().requestBfMgrExit(battleId ? battleId : gh->social().bfMgrBattleId());
             return 0;
         }},
                 // The area spirit healer, which is how anyone gets up again
@@ -2800,11 +2800,11 @@ void registerSocialLuaAPI(lua_State* L) {
                 // a capability reachable from one of this client's own windows
                 // and from nowhere else.
                 {"ConfirmSummon", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->acceptSummon();
+            if (auto* gh = getGameHandler(L)) gh->social().acceptSummon();
             return 0;
         }},
                 {"CancelSummon", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->declineSummon();
+            if (auto* gh = getGameHandler(L)) gh->social().declineSummon();
             return 0;
         }},
                 // The popup's own OnCancel only hides the talent frame, so
@@ -3115,7 +3115,7 @@ void registerSocialLuaAPI(lua_State* L) {
             if (!gh || !unit) return 0;
             std::string uid(unit);
             toLowerInPlace(uid);
-            if (const uint64_t guid = resolveUnitGuid(gh, uid)) gh->inspectUnit(guid);
+            if (const uint64_t guid = resolveUnitGuid(gh, uid)) gh->social().inspectUnit(guid);
             return 0;
         }},
                 // The achievement comparison the same menu offers. The query
@@ -3269,13 +3269,13 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"SetDungeonDifficulty", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int row = static_cast<int>(luaL_optnumber(L, 1, 1));
-            if (gh && row >= 1) gh->sendSetDifficulty(static_cast<uint32_t>(row - 1), /*raid=*/false);
+            if (gh && row >= 1) gh->social().sendSetDifficulty(static_cast<uint32_t>(row - 1), /*raid=*/false);
             return 0;
         }},
                 {"SetRaidDifficulty", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int row = static_cast<int>(luaL_optnumber(L, 1, 1));
-            if (gh && row >= 1) gh->sendSetDifficulty(static_cast<uint32_t>(row - 1), /*raid=*/true);
+            if (gh && row >= 1) gh->social().sendSetDifficulty(static_cast<uint32_t>(row - 1), /*raid=*/true);
             return 0;
         }},
                                 {"ChannelBan", [](lua_State* L) -> int {
@@ -3283,7 +3283,7 @@ void registerSocialLuaAPI(lua_State* L) {
             const char* ch = luaL_optstring(L, 1, "");
             const char* who = luaL_optstring(L, 2, "");
             if (gh && ch && who && *ch && *who)
-                gh->channelModeration(game::Opcode::CMSG_CHANNEL_BAN, ch, who);
+                gh->social().channelModeration(game::Opcode::CMSG_CHANNEL_BAN, ch, who);
             return 0;
         }},
                                 {"ChannelKick", [](lua_State* L) -> int {
@@ -3291,7 +3291,7 @@ void registerSocialLuaAPI(lua_State* L) {
             const char* ch = luaL_optstring(L, 1, "");
             const char* who = luaL_optstring(L, 2, "");
             if (gh && ch && who && *ch && *who)
-                gh->channelModeration(game::Opcode::CMSG_CHANNEL_KICK, ch, who);
+                gh->social().channelModeration(game::Opcode::CMSG_CHANNEL_KICK, ch, who);
             return 0;
         }},
                                 {"ChannelModerator", [](lua_State* L) -> int {
@@ -3299,7 +3299,7 @@ void registerSocialLuaAPI(lua_State* L) {
             const char* ch = luaL_optstring(L, 1, "");
             const char* who = luaL_optstring(L, 2, "");
             if (gh && ch && who && *ch && *who)
-                gh->channelModeration(game::Opcode::CMSG_CHANNEL_MODERATOR, ch, who);
+                gh->social().channelModeration(game::Opcode::CMSG_CHANNEL_MODERATOR, ch, who);
             return 0;
         }},
                                 {"ChannelUnmoderator", [](lua_State* L) -> int {
@@ -3307,7 +3307,7 @@ void registerSocialLuaAPI(lua_State* L) {
             const char* ch = luaL_optstring(L, 1, "");
             const char* who = luaL_optstring(L, 2, "");
             if (gh && ch && who && *ch && *who)
-                gh->channelModeration(game::Opcode::CMSG_CHANNEL_UNMODERATOR, ch, who);
+                gh->social().channelModeration(game::Opcode::CMSG_CHANNEL_UNMODERATOR, ch, who);
             return 0;
         }},
                 // SetChannelOwner(channel, name) - the same two strings the
@@ -3318,7 +3318,7 @@ void registerSocialLuaAPI(lua_State* L) {
             const char* ch = luaL_optstring(L, 1, "");
             const char* who = luaL_optstring(L, 2, "");
             if (gh && ch && who && *ch && *who)
-                gh->channelModeration(game::Opcode::CMSG_CHANNEL_SET_OWNER, ch, who);
+                gh->social().channelModeration(game::Opcode::CMSG_CHANNEL_SET_OWNER, ch, who);
             return 0;
         }},
                 {"BNSetToonBlocked",          [](lua_State* L) -> int { (void)L; return 0; }},
@@ -3333,12 +3333,12 @@ void registerSocialLuaAPI(lua_State* L) {
                 // the handover fixed a duplicate and replaced it with a raise.
                 {"GetSummonConfirmSummoner", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushstring(L, gh ? gh->getSummonerName().c_str() : "");
+            lua_pushstring(L, gh ? gh->social().summonerName().c_str() : "");
             return 1;
         }},
                 {"GetSummonConfirmTimeLeft", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getSummonTimeoutSec() : 0.0f);
+            lua_pushnumber(L, gh ? gh->social().summonTimeoutSec() : 0.0f);
             return 1;
         }},
                 // The destination is not carried in what this client parses,
@@ -3594,7 +3594,7 @@ void registerSocialLuaAPI(lua_State* L) {
             const char* ch = luaL_optstring(L, 1, "");
             const char* who = luaL_optstring(L, 2, "");
             if (gh && ch && who && *ch && *who)
-                gh->channelModeration(game::Opcode::CMSG_CHANNEL_INVITE, ch, who);
+                gh->social().channelModeration(game::Opcode::CMSG_CHANNEL_INVITE, ch, who);
             return 0;
         }},
                                 {"ChannelMute", [](lua_State* L) -> int {
@@ -3602,7 +3602,7 @@ void registerSocialLuaAPI(lua_State* L) {
             const char* ch = luaL_optstring(L, 1, "");
             const char* who = luaL_optstring(L, 2, "");
             if (gh && ch && who && *ch && *who)
-                gh->channelModeration(game::Opcode::CMSG_CHANNEL_MUTE, ch, who);
+                gh->social().channelModeration(game::Opcode::CMSG_CHANNEL_MUTE, ch, who);
             return 0;
         }},
                                 {"ChannelUnmute", [](lua_State* L) -> int {
@@ -3610,7 +3610,7 @@ void registerSocialLuaAPI(lua_State* L) {
             const char* ch = luaL_optstring(L, 1, "");
             const char* who = luaL_optstring(L, 2, "");
             if (gh && ch && who && *ch && *who)
-                gh->channelModeration(game::Opcode::CMSG_CHANNEL_UNMUTE, ch, who);
+                gh->social().channelModeration(game::Opcode::CMSG_CHANNEL_UNMUTE, ch, who);
             return 0;
         }},
                                 {"ChannelUnban", [](lua_State* L) -> int {
@@ -3618,7 +3618,7 @@ void registerSocialLuaAPI(lua_State* L) {
             const char* ch = luaL_optstring(L, 1, "");
             const char* who = luaL_optstring(L, 2, "");
             if (gh && ch && who && *ch && *who)
-                gh->channelModeration(game::Opcode::CMSG_CHANNEL_UNBAN, ch, who);
+                gh->social().channelModeration(game::Opcode::CMSG_CHANNEL_UNBAN, ch, who);
             return 0;
         }},
                 {"ChannelToggleAnnouncements", [](lua_State* L) -> int { (void)L; return 0; }},
@@ -3654,7 +3654,7 @@ void registerSocialLuaAPI(lua_State* L) {
             const char* ch = luaL_optstring(L, 1, "");
             const char* pass = luaL_optstring(L, 2, "");
             if (gh && ch && *ch)
-                gh->channelModeration(game::Opcode::CMSG_CHANNEL_PASSWORD, ch,
+                gh->social().channelModeration(game::Opcode::CMSG_CHANNEL_PASSWORD, ch,
                                       pass ? pass : "", /*allowEmptyTarget=*/true);
             return 0;
         }},
@@ -3775,7 +3775,7 @@ void registerSocialLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             int mn = static_cast<int>(luaL_optnumber(L, 1, 1));
             int mx = static_cast<int>(luaL_optnumber(L, 2, 100));
-            if (gh) gh->randomRoll(mn, mx);
+            if (gh) gh->social().randomRoll(mn, mx);
             return 0;
         }},
                 {"JoinChannelByName", [](lua_State* L) -> int {

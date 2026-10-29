@@ -50,16 +50,16 @@ TEST_CASE("network dispatch receives logout state and only Game advances its cou
           "[session][harness][frame]") {
     GameHarness h;
     h.enterWorld();
-    h.game().requestLogout();
+    h.game().social().requestLogout();
     h.receive(Opcode::SMSG_LOGOUT_RESPONSE, Body().u32(0).u8(0));
     h.game().updateNetwork(0.0f);
-    REQUIRE(h.game().isLoggingOut());
-    const float countdown = h.game().getLogoutCountdown();
+    REQUIRE(h.game().social().isLoggingOut());
+    const float countdown = h.game().social().getLogoutCountdown();
     REQUIRE(countdown > 0);
     h.game().updateNetwork(3.0f);
-    CHECK(h.game().getLogoutCountdown() == countdown);
+    CHECK(h.game().social().getLogoutCountdown() == countdown);
     h.game().updateGame(3.0f);
-    CHECK(h.game().getLogoutCountdown() == Catch::Approx(countdown - 3.0f));
+    CHECK(h.game().social().getLogoutCountdown() == Catch::Approx(countdown - 3.0f));
 }
 
 TEST_CASE("logout completion announces the destination and preserves the session during pump",
@@ -78,7 +78,7 @@ TEST_CASE("logout completion announces the destination and preserves the session
         CHECK(h.game().getEntityManager().getEntity(creatureGuid) == creature);
     });
 
-    h.game().requestLogout(exiting);
+    h.game().social().requestLogout(exiting);
     h.receive(Opcode::SMSG_LOGOUT_COMPLETE);
     h.pump();
 
@@ -195,7 +195,7 @@ TEST_CASE("logout supersedes queued world entry and a disconnect supersedes char
 TEST_CASE("forced exit remains queued when another transition arrives", "[session][harness]") {
     GameHarness h;
     wowee::core::WorldTransitionQueue transitions(h.events());
-    h.game().requestLogout(true); // no connection: local exit, no server completion
+    h.game().social().requestLogout(true); // no connection: local exit, no server completion
     transitions.leave(wowee::core::WorldTransitionQueue::Destination::Login);
     auto request = transitions.takeNext();
     REQUIRE(request);

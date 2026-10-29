@@ -29,7 +29,7 @@ public:
 class InspectCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.inspectTarget();
+        ctx.gameHandler.social().inspectTarget();
         ctx.panel.getSlashCmds().showInspect = true;
         return {};
     }

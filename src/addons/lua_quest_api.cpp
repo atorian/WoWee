@@ -1528,7 +1528,7 @@ static int lua_GetSkillLineInfo(lua_State* L) {
 /// falling back to the player's is the only thing left to do.
 static uint8_t talentClassId(game::GameHandler* gh, bool inspect) {
     if (inspect && gh) {
-        if (const auto* r = gh->getInspectResult()) {
+        if (const auto* r = gh->social().getInspectResult()) {
             if (r->classId) return r->classId;
         }
     }
@@ -1560,7 +1560,7 @@ static std::vector<const game::GameHandler::TalentTabEntry*> classTalentTabs(
 static int talentRankFor(game::GameHandler* gh, bool inspect, uint32_t talentId) {
     if (!gh) return 0;
     if (inspect) {
-        if (const auto* r = gh->getInspectResult()) {
+        if (const auto* r = gh->social().getInspectResult()) {
             auto it = r->talentRanks.find(talentId);
             return (it != r->talentRanks.end()) ? it->second : 0;
         }
@@ -1617,7 +1617,7 @@ static int lua_GetTalentTabInfo(lua_State* L) {
     // Count points spent in this tab
     int pointsSpent = 0;
     static const std::unordered_map<uint32_t, uint8_t> kNoTalents;
-    const auto* inspectResult = inspect ? gh->getInspectResult() : nullptr;
+    const auto* inspectResult = inspect ? gh->social().getInspectResult() : nullptr;
     const auto& learned = inspect
         ? (inspectResult ? inspectResult->talentRanks : kNoTalents)
         : gh->spells().getLearnedTalents();
@@ -2372,7 +2372,7 @@ static int lua_GetNumTalentGroups(lua_State* L) {
     if (gh && lua_toboolean(L, 1)) {
         // The inspected player's spec count comes with their talents; the
         // viewer's own says nothing about how many specs the target bought.
-        if (const auto* r = gh->getInspectResult()) {
+        if (const auto* r = gh->social().getInspectResult()) {
             if (r->talentGroups > 0) groups = r->talentGroups;
         }
         lua_pushnumber(L, groups);
@@ -2419,7 +2419,7 @@ static int lua_GetActiveTalentGroup(lua_State* L) {
         // Which of the target's specs the talents just read belong to. The
         // inspect frame keeps this as its talentGroup and passes it back into
         // every other talent call.
-        const auto* r = gh->getInspectResult();
+        const auto* r = gh->social().getInspectResult();
         lua_pushnumber(L, r ? (r->activeTalentGroup + 1) : 1);
         return 1;
     }
@@ -4281,7 +4281,7 @@ void registerQuestLuaAPI(lua_State* L) {
                 // reset is now", every time the tooltip is opened.
                 {"GetQuestResetTime", [](lua_State* L) -> int {
             if (auto* gh = getGameHandler(L)) {
-                if (const uint32_t left = gh->getSecondsUntilDailyReset(); left > 0) {
+                if (const uint32_t left = gh->social().getSecondsUntilDailyReset(); left > 0) {
                     lua_pushnumber(L, left);
                     return 1;
                 }

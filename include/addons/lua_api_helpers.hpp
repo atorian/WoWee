@@ -386,7 +386,7 @@ inline uint64_t resolveUnitGuid(game::GameHandler* gh, const std::string& uid) {
         int idx = 0;
         try { idx = std::stoi(uid.substr(4)); } catch (...) { return 0; }
         if (idx < 1 || idx > static_cast<int>(game::GameHandler::kMaxEncounterSlots)) return 0;
-        return gh->getEncounterUnitGuid(static_cast<uint32_t>(idx - 1));
+        return gh->social().getEncounterUnitGuid(static_cast<uint32_t>(idx - 1));
     }
     if (uid.rfind("raid", 0) == 0 && uid.size() > 4 && uid[4] != 'p') {
         int idx = 0;

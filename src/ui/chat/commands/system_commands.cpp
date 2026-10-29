@@ -203,7 +203,7 @@ public:
             msg.language = game::ChatLanguage::UNIVERSAL;
             msg.message = std::string("Setting difficulty to: ") + kDiffNames[diff];
             ctx.gameHandler.addLocalChatMessage(msg);
-            ctx.gameHandler.sendSetDifficulty(diff);
+            ctx.gameHandler.social().sendSetDifficulty(diff);
         }
         return {};
     }

@@ -722,36 +722,12 @@ public:
     void setMouseoverGuid(uint64_t guid) override;
     uint64_t getMouseoverGuid() const override { return mouseoverGuid_; }
 
-    // Inspection
-    void inspectTarget();
-    /// Inspect any player by guid, which is what FrameXML's unit menus name.
-    void inspectUnit(uint64_t guid);
-    /// See SocialHandler: the honour tab asks for these separately.
-    void requestInspectHonorData(uint64_t guid);
-
     using InspectArenaTeam = game::InspectArenaTeam;
-    using InspectResult = game::InspectResult;
-    const InspectResult* getInspectResult() const;
-
-    // Server info commands
-    void queryServerTime(bool announce = false);
-    /// Seconds until the daily quest reset, or 0 if the server has not said.
-    uint32_t getSecondsUntilDailyReset() const;
-    void requestPlayedTime();
-    uint32_t getTotalTimePlayed() const;
-    uint32_t getLevelTimePlayed() const;
 
     std::string getWhoAreaName(uint32_t zoneId) const { return getAreaName(zoneId); }
 
-    // Random roll
-    void randomRoll(uint32_t minRoll = 1, uint32_t maxRoll = 100);
-
     // Network latency (milliseconds, updated each PONG response)
     uint32_t getLatencyMs() const { return lastLatency; }
-
-    // Logout commands. exitAfterLogout: /quit and /exit leave the game; /logout and
-    // /camp drop back to character select.
-    void requestLogout(bool exitAfterLogout = false);
 
     /// Turn the character to face a canonical yaw, and tell the server.
     ///
@@ -762,12 +738,6 @@ public:
     /// before anything with a cast time completes. Turning the character makes
     /// the two agree, and keeps them agreeing.
     void faceCanonicalYaw(float canonicalYaw);
-    void cancelLogout();
-
-    // Instance difficulty
-    void sendSetDifficulty(uint32_t difficulty, bool raid = false);
-    bool  isLoggingOut() const;
-    float getLogoutCountdown() const;
 
     // Stand state
     void setStandState(uint8_t state) override;  // 0=stand, 1=sit, 2=sit_chair, 3=sleep, 4=sit_low_chair, 5=sit_medium_chair, 6=sit_high_chair, 7=dead, 8=kneel, 9=submerged
@@ -776,28 +746,9 @@ public:
     bool isDead() const { return standState_ == 7; }
 
     // Display toggles
-    void toggleHelm();
-    void toggleCloak();
     bool isHelmVisible() const { return helmVisible_; }
     bool isCloakVisible() const { return cloakVisible_; }
 
-    // Minimap ping (Ctrl+click on minimap; wowX/wowY in canonical WoW coords)
-    void sendMinimapPing(float wowX, float wowY);
-
-    void takeInboxTextItem(uint32_t mailId);
-
-    // GM Ticket
-    void deleteGmTicket();
-    void requestGmTicket();          ///< Send CMSG_GMTICKET_GETTICKET to query open ticket
-    void requestGmSystemStatus();    ///< Send CMSG_GMTICKET_SYSTEMSTATUS to query the queue
-
-    uint32_t getBfMgrBattleId() const { return socialHandler_->bfMgrBattleId(); }
-    void acceptBfMgrInvite();
-    void declineBfMgrInvite();
-    void respondBfMgrQueueInvite(uint32_t battleId, bool accept);
-    void requestBfMgrExit(uint32_t battleId);
-
-    void reportMailSpam(uint64_t senderGuid, uint32_t mailId);
     /// Take the glyph out of a socket. Zero-based slot, as the server counts.
     void removeGlyphFromSocket(uint32_t slot);
     /// Tell the server the GM's reply has been read and closed. Empty packet;
@@ -809,20 +760,6 @@ public:
     // AFK/DND status
     bool isAfk() const;
     bool isDnd() const;
-
-    // Party/Raid management
-    /// Channel moderation: invite, kick, ban, unban, mute, unmute and the
-    /// moderator pair, which are one packet shape with eight opcodes.
-    void channelModeration(Opcode op, const std::string& channelName,
-                           const std::string& targetName,
-                           bool allowEmptyTarget = false);
-
-    void requestRaidInfo();
-    /// Hold a raid lockout past its reset, or let it go. Raid binds only.
-    void setSavedInstanceExtend(uint32_t mapId, uint32_t difficulty, bool extend);
-
-    // Combat
-    void reportPlayer(uint64_t targetGuid, const std::string& reason);
 
     void queryPlayerName(uint64_t guid) override;
 
@@ -876,8 +813,6 @@ public:
 
     // Minimap pings from party members
     using MinimapPing = game::MinimapPing;
-    const std::vector<MinimapPing>& getMinimapPings() const { return socialHandler_->minimapPings(); }
-    void tickMinimapPings(float dt) { socialHandler_->ageMinimapPings(dt); }
 
     // Glyphs (WotLK): up to 6 glyph slots per spec (3 major + 3 minor)
     static constexpr uint8_t MAX_GLYPH_SLOTS = 6;
@@ -1252,19 +1187,12 @@ public:
     // Barber shop
     bool isBarberShopOpen() const { return barberShopOpen_; }
     void closeBarberShop() { barberShopOpen_ = false; fireAddonEvent("BARBER_SHOP_CLOSE", {}); }
-    void sendAlterAppearance(uint32_t hairStyleEntry, uint32_t hairColor,
-                             uint32_t facialHairEntry, uint32_t skinColorEntry);
-
-    // Instance difficulty (0=5N, 1=5H, 2=25N, 3=25H for WotLK)
-    uint32_t getInstanceDifficulty() const;
 
     /// The bind-or-leave prompt raised on entering an instance in progress.
     /// False when nothing is pending, in which case the out-params are
     /// untouched.
     bool getInstanceLockPrompt(float& secondsLeft, bool& previouslySaved,
                                uint32_t& completedMask) const;
-    void respondInstanceLock(bool accept);
-    bool isInstanceHeroic() const;
     bool isInInstance() const;
 
     /** True when ghost is within 40 yards of corpse position (same map). */
@@ -1289,24 +1217,8 @@ public:
     }
     /** Send CMSG_RECLAIM_CORPSE; noop if not a ghost or not near corpse. */
 
-    // ---- Item text (books / readable items) ----
-
-    const std::string& getSummonerName() const { return socialHandler_->summonerName(); }
-    float getSummonTimeoutSec() const { return socialHandler_->summonTimeoutSec(); }
-    void acceptSummon();
-    void declineSummon();
-
-    // Instance lockouts (aliased from handler_types.hpp)
-    using InstanceLockout = game::InstanceLockout;
-    const std::vector<InstanceLockout>& getInstanceLockouts() const;
-
     // Boss encounter unit tracking (SMSG_UPDATE_INSTANCE_ENCOUNTER_UNIT)
     static constexpr uint32_t kMaxEncounterSlots = 5;
-    // Returns boss unit guid for the given encounter slot (0 if none).
-    // The slots live on SocialHandler, which is what the packet writes to; the
-    // array that used to sit here was never written and answered zero for
-    // every slot, so the boss frames drawn from it were always empty.
-    uint64_t getEncounterUnitGuid(uint32_t slot) const;
 
     std::string getMapName(uint32_t mapId) const;
 
@@ -1870,6 +1782,11 @@ public:
     /// game objects, their names, kinds, appearance and transports.
     EntityController& entityController() { return *entityController_; }
     const EntityController& entityController() const { return *entityController_; }
+    /// The rest of the player's dealings with the world and the server: inspect,
+    /// played time, logout, summons, instances and their lockouts, the
+    /// battlefield manager, minimap pings, GM tickets and reports.
+    SocialHandler& social() { return *socialHandler_; }
+    const SocialHandler& social() const { return *socialHandler_; }
     /// Key bindings, macros and settings the server keeps for the account.
     AccountDataHandler& accountData() { return *accountDataHandler_; }
     const AccountDataHandler& accountData() const { return *accountDataHandler_; }

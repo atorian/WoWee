@@ -2487,7 +2487,7 @@ static int lua_GetInstanceInfo(lua_State* L) {
         return 7;
     }
     std::string mapName = gh->getMapName(gh->getCurrentMapId());
-    const uint32_t diff = gh->getInstanceDifficulty();
+    const uint32_t diff = gh->social().getInstanceDifficulty();
     lua_pushstring(L, mapName.c_str());                    // 1: name
     lua_pushstring(L, gh->isInInstance() ? "party" : "none"); // 2: instanceType
     // Counted from one, which is what the interface compares against.
@@ -2516,7 +2516,7 @@ static int lua_GetInstanceInfo(lua_State* L) {
 
 static int lua_GetInstanceDifficulty(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushnumber(L, gh ? (gh->getInstanceDifficulty() + 1) : 1);
+    lua_pushnumber(L, gh ? (gh->social().getInstanceDifficulty() + 1) : 1);
     return 1;
 }
 
@@ -4570,7 +4570,7 @@ static int lua_TriggerTutorial(lua_State* L) { (void)L; return 0; }
 static int lua_Quit(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (gh) {
-        gh->requestLogout(/*exitAfterLogout=*/true);
+        gh->social().requestLogout(/*exitAfterLogout=*/true);
         return 0;
     }
     // No handler to route through - the login screen, or before one exists.
@@ -4600,7 +4600,7 @@ static int lua_ForceQuit(lua_State* L) {
 
 static int lua_ForceLogout(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (gh) gh->requestLogout(/*exitAfterLogout=*/false);
+    if (gh) gh->social().requestLogout(/*exitAfterLogout=*/false);
     return 0;
 }
 
@@ -5021,7 +5021,7 @@ static int lua_GetNumVoiceSessionMembersBySessionID(lua_State* L) {
 // GetSavedInstanceInfo; nothing was asking for it.
 static int lua_RequestRaidInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (gh) gh->requestRaidInfo();
+    if (gh) gh->social().requestRaidInfo();
     return 0;
 }
 
@@ -5387,12 +5387,12 @@ void registerSystemLuaAPI(lua_State* L) {
                 // sets a raid difficulty while standing in a dungeon.
                 {"GetDungeonDifficulty", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, (gh ? gh->getInstanceDifficulty() : 0u) + 1u);
+            lua_pushnumber(L, (gh ? gh->social().getInstanceDifficulty() : 0u) + 1u);
             return 1;
         }},
                 {"GetRaidDifficulty", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, (gh ? gh->getInstanceDifficulty() : 0u) + 1u);
+            lua_pushnumber(L, (gh ? gh->social().getInstanceDifficulty() : 0u) + 1u);
             return 1;
         }},
                 {"GetChatTypeIndex",         lua_ReturnOne},
@@ -6885,7 +6885,7 @@ void registerSystemLuaAPI(lua_State* L) {
             if (!gh) return 0;
             const bool want = lua_isnumber(L, 1) ? (lua_tonumber(L, 1) != 0)
                                                  : (lua_toboolean(L, 1) != 0);
-            if (want != gh->isHelmVisible()) gh->toggleHelm();
+            if (want != gh->isHelmVisible()) gh->social().toggleHelm();
             return 0;
         }},
                 {"ShowCloak", [](lua_State* L) -> int {
@@ -6893,7 +6893,7 @@ void registerSystemLuaAPI(lua_State* L) {
             if (!gh) return 0;
             const bool want = lua_isnumber(L, 1) ? (lua_tonumber(L, 1) != 0)
                                                  : (lua_toboolean(L, 1) != 0);
-            if (want != gh->isCloakVisible()) gh->toggleCloak();
+            if (want != gh->isCloakVisible()) gh->social().toggleCloak();
             return 0;
         }},
                 {"TogglePVP", [](lua_State* L) -> int {
@@ -6905,22 +6905,22 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             float x = static_cast<float>(luaL_optnumber(L, 1, 0));
             float y = static_cast<float>(luaL_optnumber(L, 2, 0));
-            if (gh) gh->sendMinimapPing(x, y);
+            if (gh) gh->social().sendMinimapPing(x, y);
             return 0;
         }},
                 {"RequestTimePlayed", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) gh->requestPlayedTime();
+            if (gh) gh->social().requestPlayedTime();
             return 0;
         }},
                 {"Logout", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) gh->requestLogout();
+            if (gh) gh->social().requestLogout();
             return 0;
         }},
                 {"CancelLogout", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) gh->cancelLogout();
+            if (gh) gh->social().cancelLogout();
             return 0;
         }},
                 {"NumTaxiNodes", [](lua_State* L) -> int {
@@ -7105,7 +7105,7 @@ void registerSystemLuaAPI(lua_State* L) {
         }},
                 {"GetInspectSpecialization", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const auto* ir = gh ? gh->getInspectResult() : nullptr;
+            const auto* ir = gh ? gh->social().getInspectResult() : nullptr;
             lua_pushnumber(L, ir ? ir->activeTalentGroup : 0);
             return 1;
         }},
@@ -7117,7 +7117,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // parses them into InspectResult.
                 {"GetInspectArenaTeamData", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const auto* ir = gh ? gh->getInspectResult() : nullptr;
+            const auto* ir = gh ? gh->social().getInspectResult() : nullptr;
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!ir || index < 1 ||
                 index > static_cast<int>(ir->arenaTeams.size())) {
@@ -7161,7 +7161,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // claiming the player has never won anything.
                 {"HasInspectHonorData", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const auto* r = gh ? gh->getInspectResult() : nullptr;
+            const auto* r = gh ? gh->social().getInspectResult() : nullptr;
             lua_pushboolean(L, (r && r->hasHonorData) ? 1 : 0);
             return 1;
         }},
@@ -7171,8 +7171,8 @@ void registerSystemLuaAPI(lua_State* L) {
                 // was false for good.
                 {"RequestInspectHonorData", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const auto* r = gh ? gh->getInspectResult() : nullptr;
-            if (gh && r && r->guid != 0) gh->requestInspectHonorData(r->guid);
+            const auto* r = gh ? gh->social().getInspectResult() : nullptr;
+            if (gh && r && r->guid != 0) gh->social().requestInspectHonorData(r->guid);
             return 0;
         }},
                 {"GetInspectHonorData", [](lua_State* L) -> int {
@@ -7186,7 +7186,7 @@ void registerSystemLuaAPI(lua_State* L) {
             // reused rather than removed. Passed on as sent rather than
             // interpreted here.
             auto* gh = getGameHandler(L);
-            const auto* r = gh ? gh->getInspectResult() : nullptr;
+            const auto* r = gh ? gh->social().getInspectResult() : nullptr;
             if (!r || !r->hasHonorData) {
                 for (int i = 0; i < 6; ++i) lua_pushnumber(L, 0);
                 return 6;
@@ -7229,7 +7229,7 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
             const uint64_t guid = resolveUnitGuid(gh, luaL_optstring(L, 1, "target"));
-            if (guid) gh->inspectUnit(guid);
+            if (guid) gh->social().inspectUnit(guid);
             return 0;
         }},
                 {"ClearInspectPlayer", [](lua_State* L) -> int {
@@ -7261,8 +7261,8 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"GetTimePlayed", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); return 2; }
-            lua_pushnumber(L, gh->getTotalTimePlayed());
-            lua_pushnumber(L, gh->getLevelTimePlayed());
+            lua_pushnumber(L, gh->social().getTotalTimePlayed());
+            lua_pushnumber(L, gh->social().getLevelTimePlayed());
             return 2;
         }},
                 {"GetBindLocation", [](lua_State* L) -> int {
@@ -7283,15 +7283,15 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh || index < 1) return 0;
-            const auto& locks = gh->getInstanceLockouts();
+            const auto& locks = gh->social().getInstanceLockouts();
             if (index > static_cast<int>(locks.size())) return 0;
             const auto& l = locks[static_cast<size_t>(index) - 1];
-            gh->setSavedInstanceExtend(l.mapId, l.difficulty, lua_toboolean(L, 2) != 0);
+            gh->social().setSavedInstanceExtend(l.mapId, l.difficulty, lua_toboolean(L, 2) != 0);
             return 0;
         }},
                 {"GetNumSavedInstances", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getInstanceLockouts().size() : 0);
+            lua_pushnumber(L, gh ? gh->social().getInstanceLockouts().size() : 0);
             return 1;
         }},
                 {"GetSavedInstanceInfo", [](lua_State* L) -> int {
@@ -7299,7 +7299,7 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             int index = static_cast<int>(luaL_checknumber(L, 1));
             if (!gh || index < 1) { return luaReturnNil(L); }
-            const auto& lockouts = gh->getInstanceLockouts();
+            const auto& lockouts = gh->social().getInstanceLockouts();
             if (index > static_cast<int>(lockouts.size())) { return luaReturnNil(L); }
             const auto& l = lockouts[index - 1];
             // The real name, out of Map.dbc, which the client already reads for

@@ -1663,7 +1663,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 // reported three times: IsKeyPressed does not consume, so both
                 // sites saw the same press and toggled in the same frame -
                 // open, then shut, and nothing on screen.
-                if (gameHandler.isConnected()) gameHandler.requestPlayedTime();
+                if (gameHandler.isConnected()) gameHandler.social().requestPlayedTime();
             }
 
             if (KeybindingManager::getInstance().isActionPressed(KeybindingManager::Action::TOGGLE_INVENTORY)) {

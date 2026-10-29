@@ -169,7 +169,7 @@ TEST_CASE("the character list asks only for the guild names it does not know", "
     h.enterWorld(alice);
     h.receive(Opcode::SMSG_GUILD_QUERY_RESPONSE, identity(kGuildId, "Horde Inc"));
     h.pump();
-    h.game().requestLogout(false);
+    h.game().social().requestLogout(false);
     h.receive(Opcode::SMSG_LOGOUT_COMPLETE);
     h.pump();
     h.game().returnToCharacterSelect();

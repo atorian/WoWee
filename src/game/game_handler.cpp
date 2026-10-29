@@ -967,7 +967,7 @@ void GameHandler::updateGame(float deltaTime) {
 
         // Update combat text (Phase 2)
         combatHandler_->updateCombatText(deltaTime);
-        tickMinimapPings(deltaTime);
+        socialHandler_->ageMinimapPings(deltaTime);
         tickMirrorTimers(deltaTime);
 
         // Tick logout countdown
@@ -1766,14 +1766,6 @@ uint32_t GameHandler::getBankBagSlotPrice(int slotIndex) const {
 //   uint64 summonerGuid + uint32 zoneId + uint32 timeoutMs
 // ---------------------------------------------------------------------------
 
-void GameHandler::acceptSummon() {
-    socialHandler_->acceptSummon();
-}
-
-void GameHandler::declineSummon() {
-    socialHandler_->declineSummon();
-}
-
 // ---------------------------------------------------------------------------
 // Group loot roll (SMSG_LOOT_ROLL / SMSG_LOOT_ROLL_WON / CMSG_LOOT_ROLL)
 // ---------------------------------------------------------------------------
@@ -2174,10 +2166,6 @@ GameHandler::getChannelRoster(const std::string& channel) const {
     return chatHandler_->getChannelRoster(channel);
 }
 
-uint64_t GameHandler::getEncounterUnitGuid(uint32_t slot) const {
-    return socialHandler_->getEncounterUnitGuid(slot);
-}
-
 bool GameHandler::getInstanceLockPrompt(float& secondsLeft, bool& previouslySaved,
                                         uint32_t& completedMask) const {
     const auto& prompt = socialHandler_->getInstanceLockPrompt();
@@ -2186,10 +2174,6 @@ bool GameHandler::getInstanceLockPrompt(float& secondsLeft, bool& previouslySave
     previouslySaved = prompt.previouslySaved;
     completedMask = prompt.completedEncounterMask;
     return true;
-}
-
-void GameHandler::respondInstanceLock(bool accept) {
-    socialHandler_->respondInstanceLock(accept);
 }
 
 uint32_t GameHandler::getDungeonEncounterCount(uint32_t mapId, uint32_t difficulty) const {
@@ -2485,43 +2469,11 @@ std::string GameHandler::getLfgDungeonName(uint32_t dungeonId) const {
 
 // ---- Battlefield Manager (WotLK Wintergrasp / outdoor battlefields) ----
 
-void GameHandler::acceptBfMgrInvite() {
-    socialHandler_->acceptBfMgrInvite();
-}
-
-void GameHandler::declineBfMgrInvite() {
-    socialHandler_->declineBfMgrInvite();
-}
-
-void GameHandler::respondBfMgrQueueInvite(uint32_t battleId, bool accept) {
-    socialHandler_->respondBfMgrQueueInvite(battleId, accept);
-}
-
-void GameHandler::requestBfMgrExit(uint32_t battleId) {
-    socialHandler_->requestBfMgrExit(battleId);
-}
-
 // ---- WotLK Calendar ----
 
 // ============================================================
 // Delegating getters - SocialHandler owns the canonical state
 // ============================================================
-
-uint32_t GameHandler::getTotalTimePlayed() const {
-    return socialHandler_->getTotalTimePlayed();
-}
-
-uint32_t GameHandler::getLevelTimePlayed() const {
-    return socialHandler_->getLevelTimePlayed();
-}
-
-bool GameHandler::isLoggingOut() const {
-    return socialHandler_->isLoggingOut();
-}
-
-float GameHandler::getLogoutCountdown() const {
-    return socialHandler_->getLogoutCountdown();
-}
 
 void GameHandler::resolveGMResponse() {
     if (getState() != WorldState::IN_WORLD || !getSocket()) return;
@@ -2537,18 +2489,6 @@ void GameHandler::removeGlyphFromSocket(uint32_t slot) {
     getSocket()->send(packet);
 }
 
-void GameHandler::reportMailSpam(uint64_t senderGuid, uint32_t mailId) {
-    socialHandler_->reportMailSpam(senderGuid, mailId);
-}
-
-uint32_t GameHandler::getInstanceDifficulty() const {
-    return socialHandler_->getInstanceDifficulty();
-}
-
-bool GameHandler::isInstanceHeroic() const {
-    return socialHandler_->isInstanceHeroic();
-}
-
 bool GameHandler::isInInstance() const {
     // Difficulty packets advertise the player's preferred dungeon setting and
     // are also sent in the open world, so they cannot establish instance
@@ -2557,10 +2497,6 @@ bool GameHandler::isInInstance() const {
     auto it = mapInstanceTypeCache_.find(currentMapId_);
     return it != mapInstanceTypeCache_.end() &&
            (it->second == 1 || it->second == 2);
-}
-
-const std::vector<GameHandler::InstanceLockout>& GameHandler::getInstanceLockouts() const {
-    return socialHandler_->getInstanceLockouts();
 }
 
 const std::string& GameHandler::getLanguageName(uint32_t languageId) const {

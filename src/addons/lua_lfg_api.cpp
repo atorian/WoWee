@@ -783,7 +783,7 @@ void registerLfgLuaAPI(lua_State* L) {
         uint32_t complete = 0;
         for (uint32_t bit = completedMask; bit; bit &= bit - 1) ++complete;
         const uint32_t total = gh->getDungeonEncounterCount(gh->getCurrentMapId(),
-                                                            gh->getInstanceDifficulty());
+                                                            gh->social().getInstanceDifficulty());
         lua_pushnumber(L, secondsLeft);
         lua_pushboolean(L, previouslySaved ? 1 : 0);
         lua_pushinteger(L, static_cast<lua_Integer>(total));
@@ -793,7 +793,7 @@ void registerLfgLuaAPI(lua_State* L) {
     // Accept and be saved to the instance, or decline and go to the graveyard.
     // The server does neither until one of the two arrives.
     {"RespondInstanceLock", [](lua_State* L) -> int {
-        if (auto* gh = getGameHandler(L)) gh->respondInstanceLock(lua_toboolean(L, 1) != 0);
+        if (auto* gh = getGameHandler(L)) gh->social().respondInstanceLock(lua_toboolean(L, 1) != 0);
         return 0;
     }},
     // Whether the character is sitting out a deserter or random-dungeon
