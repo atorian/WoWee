@@ -978,8 +978,8 @@ void MovementHandler::forceClearTaxiAndMovementState() {
     onTaxiFlight_ = false;
 
     const bool clearingTaxiMount = taxiMountActive_;
-    if (clearingTaxiMount && owner_.mountCallbackRef()) {
-        owner_.mountCallbackRef()(0);
+    if (clearingTaxiMount) {
+        owner_.eventBus().publish(events::PlayerMountChanged{0});
     }
     taxiMountActive_ = false;
     // A normal mount is owned by its aura/update-field path. Do not silently
@@ -1054,9 +1054,7 @@ void MovementHandler::dismount() {
     dismountGraceRemaining_ = kDismountGraceSeconds;
     uint32_t savedMountAura = owner_.mountAuraSpellIdRef();
     if (owner_.currentMountDisplayIdRef() != 0 || taxiMountActive_) {
-        if (owner_.mountCallbackRef()) {
-            owner_.mountCallbackRef()(0);
-        }
+        owner_.eventBus().publish(events::PlayerMountChanged{0});
         owner_.currentMountDisplayIdRef() = 0;
         taxiMountActive_ = false;
         owner_.mountAuraSpellIdRef() = 0;
@@ -1269,9 +1267,7 @@ void MovementHandler::handleMoveKnockBack(network::Packet& packet) {
 
     if (guid != owner_.getPlayerGuid()) return;
 
-    if (owner_.knockBackCallbackRef()) {
-        owner_.knockBackCallbackRef()(vcos, vsin, hspeed, vspeed);
-    }
+    owner_.eventBus().publish(events::PlayerKnockedBack{vcos, vsin, hspeed, vspeed});
 
     if (!owner_.getSocket()) return;
     if (wireOpcode(Opcode::CMSG_MOVE_KNOCK_BACK_ACK) == 0xFFFF) return;
@@ -2304,9 +2300,7 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
     taxiClientPath_.clear();
     taxiServerCompletionPending_ = false;
     owner_.currentMountDisplayIdRef() = 0;
-    if (owner_.mountCallbackRef()) {
-        owner_.mountCallbackRef()(0);
-    }
+    owner_.eventBus().publish(events::PlayerMountChanged{0});
 
     for (const auto& [guid, entity] : owner_.getEntityManager().getEntities()) {
         if (guid == owner_.getPlayerGuid()) continue;
@@ -2521,7 +2515,7 @@ void MovementHandler::handleShowTaxiNodes(network::Packet& packet) {
 }
 
 void MovementHandler::applyTaxiMountForCurrentNode() {
-    if (taxiMountActive_ || !owner_.mountCallbackRef()) return;
+    if (taxiMountActive_) return;
     auto it = taxiNodes_.find(currentTaxiData_.nearestNode);
     if (it == taxiNodes_.end()) {
         bool isAlliance = true;
@@ -2534,7 +2528,7 @@ void MovementHandler::applyTaxiMountForCurrentNode() {
         uint32_t mountId = isAlliance ? 1210u : 1310u;
         taxiMountActive_ = true;
         LOG_INFO("Taxi mount fallback (node ", currentTaxiData_.nearestNode, " not in DBC): displayId=", mountId);
-        owner_.mountCallbackRef()(mountId);
+        owner_.eventBus().publish(events::PlayerMountChanged{mountId});
         return;
     }
 
@@ -2584,7 +2578,7 @@ void MovementHandler::applyTaxiMountForCurrentNode() {
     if (mountId != 0) {
         taxiMountActive_ = true;
         LOG_INFO("Taxi mount apply: displayId=", mountId);
-        owner_.mountCallbackRef()(mountId);
+        owner_.eventBus().publish(events::PlayerMountChanged{mountId});
     }
 }
 
@@ -2716,9 +2710,7 @@ void MovementHandler::beginTaxiFlightMotion() {
         playerEntity->setPosition(start.x, start.y, start.z, initialOrientation);
     }
 
-    if (owner_.taxiOrientationCallbackRef()) {
-        owner_.taxiOrientationCallbackRef()(initialRenderYaw, initialPitch, initialRoll);
-    }
+    owner_.eventBus().publish(events::TaxiOrientationChanged{initialRenderYaw, initialPitch, initialRoll});
 
     LOG_INFO("Taxi flight started with ", taxiClientPath_.size(), " spline waypoints");
     taxiServerCompletionPending_ = false;
@@ -2796,17 +2788,15 @@ void MovementHandler::finishClientTaxiFlight(bool snapToFinalWaypoint) {
         // is true (see its "Sync character render position" block) - by the time
         // this function returns, onTaxiFlight_/taxiMountActive_ are already false,
         // so that sync won't pick up this correction. Push it to the renderer
-        // directly instead - see playerPositionCorrectionCallbackRef()'s comment.
-        if (owner_.playerPositionCorrectionCallbackRef()) {
-            owner_.playerPositionCorrectionCallbackRef()(landingPos.x, landingPos.y, landingPos.z);
-        }
+        // directly instead - see PlayerPositionCorrected.
+        owner_.eventBus().publish(events::PlayerPositionCorrected{landingPos.x, landingPos.y, landingPos.z});
         LOG_INFO("Taxi landing: snapped to final waypoint (",
                  landingPos.x, ", ", landingPos.y, ", ", landingPos.z, ")");
     }
     taxiClientActive_ = false;
     onTaxiFlight_ = false;
-    if (taxiMountActive_ && owner_.mountCallbackRef()) {
-        owner_.mountCallbackRef()(0);
+    if (taxiMountActive_) {
+        owner_.eventBus().publish(events::PlayerMountChanged{0});
     }
     taxiMountActive_ = false;
     owner_.currentMountDisplayIdRef() = 0;
@@ -2866,8 +2856,8 @@ void MovementHandler::updateClientTaxi(float deltaTime) {
             taxiClientPath_.clear();
             taxiClientIndex_ = 0;
             taxiClientSegmentProgress_ = 0.0f;
-            if (taxiMountActive_ && owner_.mountCallbackRef()) {
-                owner_.mountCallbackRef()(0);
+            if (taxiMountActive_) {
+                owner_.eventBus().publish(events::PlayerMountChanged{0});
             }
             taxiMountActive_ = false;
             onTaxiFlight_ = false;
@@ -2979,11 +2969,9 @@ void MovementHandler::updateClientTaxi(float deltaTime) {
         return;
     }
 
-    if (owner_.taxiOrientationCallbackRef()) {
-        glm::vec3 renderTangent = core::coords::canonicalToRender(tangent);
-        float renderYaw = std::atan2(renderTangent.y, renderTangent.x);
-        owner_.taxiOrientationCallbackRef()(renderYaw, pitch, roll);
-    }
+    glm::vec3 renderTangent = core::coords::canonicalToRender(tangent);
+    float renderYaw = std::atan2(renderTangent.y, renderTangent.x);
+    owner_.eventBus().publish(events::TaxiOrientationChanged{renderYaw, pitch, roll});
 }
 
 void MovementHandler::handleActivateTaxiReply(network::Packet& packet) {
@@ -3046,8 +3034,8 @@ void MovementHandler::handleActivateTaxiReply(network::Packet& packet) {
         taxiClientIndex_ = 0;
         taxiClientSegmentProgress_ = 0.0f;
         taxiDestNodeId_ = 0;
-        if (taxiMountActive_ && owner_.mountCallbackRef()) {
-            owner_.mountCallbackRef()(0);
+        if (taxiMountActive_) {
+            owner_.eventBus().publish(events::PlayerMountChanged{0});
         }
         taxiMountActive_ = false;
         onTaxiFlight_ = false;
@@ -3067,9 +3055,9 @@ void MovementHandler::closeTaxi() {
         return;
     }
 
-    if (taxiMountActive_ && owner_.mountCallbackRef()) {
+    if (taxiMountActive_) {
         LOG_INFO("closeTaxi: clearing taxi mount");
-        owner_.mountCallbackRef()(0);
+        owner_.eventBus().publish(events::PlayerMountChanged{0});
     }
     taxiMountActive_ = false;
 
@@ -3154,7 +3142,7 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
 
     if (owner_.isMounted()) {
         LOG_INFO("Taxi activate: dismounting current mount");
-        if (owner_.mountCallbackRef()) owner_.mountCallbackRef()(0);
+        owner_.eventBus().publish(events::PlayerMountChanged{0});
         owner_.currentMountDisplayIdRef() = 0;
         dismount();
     }
@@ -3252,36 +3240,32 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
         sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
     }
 
-    if (owner_.taxiPrecacheCallbackRef()) {
-        std::vector<glm::vec3> previewPath;
-        for (size_t i = 0; i + 1 < path.size(); i++) {
-            uint32_t fromNode = path[i];
-            uint32_t toNode = path[i + 1];
-            uint32_t pathId = 0;
-            for (const auto& edge : taxiPathEdges_) {
-                if (edge.fromNode == fromNode && edge.toNode == toNode) {
-                    pathId = edge.pathId;
-                    break;
-                }
-            }
-            if (pathId == 0) continue;
-            auto pathIt = taxiPathNodes_.find(pathId);
-            if (pathIt != taxiPathNodes_.end()) {
-                for (const auto& wpNode : pathIt->second) {
-                    glm::vec3 serverPos(wpNode.x, wpNode.y, wpNode.z);
-                    glm::vec3 canonical = core::coords::serverToCanonical(serverPos);
-                    previewPath.push_back(canonical);
-                }
+    std::vector<glm::vec3> previewPath;
+    for (size_t i = 0; i + 1 < path.size(); i++) {
+        uint32_t fromNode = path[i];
+        uint32_t toNode = path[i + 1];
+        uint32_t pathId = 0;
+        for (const auto& edge : taxiPathEdges_) {
+            if (edge.fromNode == fromNode && edge.toNode == toNode) {
+                pathId = edge.pathId;
+                break;
             }
         }
-        if (previewPath.size() >= 2) {
-            owner_.taxiPrecacheCallbackRef()(previewPath);
+        if (pathId == 0) continue;
+        auto pathIt = taxiPathNodes_.find(pathId);
+        if (pathIt != taxiPathNodes_.end()) {
+            for (const auto& wpNode : pathIt->second) {
+                glm::vec3 serverPos(wpNode.x, wpNode.y, wpNode.z);
+                glm::vec3 canonical = core::coords::serverToCanonical(serverPos);
+                previewPath.push_back(canonical);
+            }
         }
+    }
+    if (previewPath.size() >= 2) {
+        owner_.eventBus().publish(events::TaxiPathPrecacheRequested{std::move(previewPath)});
     }
 
-    if (owner_.taxiFlightStartCallbackRef()) {
-        owner_.taxiFlightStartCallbackRef()();
-    }
+    owner_.eventBus().publish(events::TaxiFlightStarted{});
     startClientTaxiPath(path);
 }
 
@@ -3742,9 +3726,7 @@ void MovementHandler::followTarget() {
     owner_.followRenderPosRef() = core::coords::canonicalToRender(glm::vec3(target->getX(), target->getY(), target->getZ()));
 
     // Tell camera controller to start auto-following
-    if (owner_.autoFollowCallbackRef()) {
-        owner_.autoFollowCallbackRef()(&owner_.followRenderPosRef());
-    }
+    owner_.eventBus().publish(events::AutoFollowChanged{&owner_.followRenderPosRef()});
 
     // Get target name
     std::string targetName = "Target";
@@ -3774,9 +3756,7 @@ void MovementHandler::cancelFollow() {
         sendMovement(Opcode::MSG_MOVE_STOP);
         followMoveMoving_ = false;
     }
-    if (owner_.autoFollowCallbackRef()) {
-        owner_.autoFollowCallbackRef()(nullptr);
-    }
+    owner_.eventBus().publish(events::AutoFollowChanged{nullptr});
     owner_.chat().addSystemChatMessage("You stop following.");
     owner_.fireAddonEvent("AUTOFOLLOW_END", {});
 }

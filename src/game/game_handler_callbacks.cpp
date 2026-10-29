@@ -13,6 +13,7 @@
 #include "loot/services/loot.hpp"
 #include "core/event_bus.hpp"
 #include "game/game_events.hpp"
+#include "game/server_protocol.hpp"
 #include "game/reputation_standing.hpp"
 #include "game/spell_description_eval.hpp"
 #include "game/gather_spells.hpp"
@@ -419,9 +420,7 @@ void GameHandler::createCharacter(const CharCreateData& data) {
     // Online mode: send packet to server
     if (!socket) {
         LOG_WARNING("Cannot create character: not connected");
-        if (charCreateCallback_) {
-            charCreateCallback_(false, "Not connected to server");
-        }
+        eventBus().publish(events::CharacterCreateAnswered{false, "Not connected to server"});
         return;
     }
 
@@ -429,9 +428,7 @@ void GameHandler::createCharacter(const CharCreateData& data) {
         std::string msg = "Character list not ready yet. Wait for SMSG_CHAR_ENUM.";
         LOG_WARNING("Blocking CMSG_CHAR_CREATE in state=", worldStateName(state),
                     " (awaiting CHAR_LIST_RECEIVED)");
-        if (charCreateCallback_) {
-            charCreateCallback_(false, msg);
-        }
+        eventBus().publish(events::CharacterCreateAnswered{false, msg});
         return;
     }
 
@@ -450,9 +447,7 @@ void GameHandler::handleCharCreateResponse(network::Packet& packet) {
     if (data.result == CharCreateResult::SUCCESS || data.result == CharCreateResult::IN_PROGRESS) {
         LOG_INFO("Character created successfully (code=", static_cast<int>(data.result), ")");
         requestCharacterList();
-        if (charCreateCallback_) {
-            charCreateCallback_(true, "Character created!");
-        }
+        eventBus().publish(events::CharacterCreateAnswered{true, "Character created!"});
     } else {
         std::string msg;
         switch (data.result) {
@@ -496,15 +491,13 @@ void GameHandler::handleCharCreateResponse(network::Packet& packet) {
             default: msg = "Unknown error (code " + std::to_string(static_cast<int>(data.result)) + ")"; break;
         }
         LOG_WARNING("Character creation failed: ", msg, " (code=", static_cast<int>(data.result), ")");
-        if (charCreateCallback_) {
-            charCreateCallback_(false, msg);
-        }
+        eventBus().publish(events::CharacterCreateAnswered{false, msg});
     }
 }
 
 void GameHandler::deleteCharacter(uint64_t characterGuid) {
     if (!socket) {
-        if (charDeleteCallback_) charDeleteCallback_(false, "Delete failed: not connected to server.");
+        eventBus().publish(events::CharacterDeleteAnswered{false, "Delete failed: not connected to server."});
         return;
     }
 
@@ -553,9 +546,7 @@ void GameHandler::handleCharLoginFailed(network::Packet& packet) {
     // Allow the player to re-select a character
     setState(WorldState::CHAR_LIST_RECEIVED);
 
-    if (charLoginFailCallback_) {
-        charLoginFailCallback_(msg);
-    }
+    eventBus().publish(events::CharacterLoginFailed{msg});
 }
 
 void GameHandler::selectCharacter(uint64_t characterGuid) {
@@ -747,9 +738,7 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     selfResAvailable_ = false;
     currentMountDisplayId_ = 0;
     vehicleId_ = 0;
-    if (mountCallback_) {
-        mountCallback_(0);
-    }
+    eventBus().publish(events::PlayerMountChanged{0});
 
     // Clear boss encounter unit slots and raid marks on world transfer
     socialHandler_->resetTransferState();
@@ -1930,27 +1919,43 @@ int GameHandler::getInstanceBootTimeRemaining() const {
     return secs > 0 ? static_cast<int>(secs) : 0;
 }
 
-void GameHandler::unstuck() {
-    if (unstuckCallback_) {
-        unstuckCallback_();
-        chatHandler_->addSystemChatMessage("Unstuck: snapped upward. Use /unstuckgy for full teleport.");
+bool GameHandler::previewPlayerAppearance(uint32_t appearanceBytes, uint8_t facialFeatures) {
+    // Keyed the way the reader is keyed. The model is rebuilt from
+    // getActiveCharacter(), which finds the record by activeCharacterGuid_,
+    // so writing to any other record is a change nothing draws.
+    const uint64_t guid = activeCharacterGuid_ != 0 ? activeCharacterGuid_ : playerGuid;
+    for (auto& ch : characters) {
+        if (ch.guid != guid) continue;
+        ch.appearanceBytes = appearanceBytes;
+        ch.facialFeatures = facialFeatures;
+        eventBus().publish(events::PlayerModelRebuildRequested{});
+        return true;
     }
+    return false;
+}
+
+void GameHandler::notifyServerPatchManifest(const std::vector<EzWowPatch>& patches) {
+    eventBus().publish(events::ServerPatchManifestReceived{patches});
+}
+
+void GameHandler::notifyTransportSpawned(uint64_t guid, uint32_t entry, uint32_t displayId,
+                                         float x, float y, float z, float orientation) {
+    eventBus().publish(events::TransportSpawned{guid, entry, displayId, x, y, z, orientation});
+}
+
+void GameHandler::unstuck() {
+    eventBus().publish(events::UnstuckRequested{});
+    chatHandler_->addSystemChatMessage("Unstuck: snapped upward. Use /unstuckgy for full teleport.");
 }
 
 void GameHandler::unstuckGy() {
-    if (unstuckGyCallback_) {
-        unstuckGyCallback_();
-        chatHandler_->addSystemChatMessage("Unstuck: teleported to safe location.");
-    }
+    eventBus().publish(events::UnstuckToGraveyardRequested{});
+    chatHandler_->addSystemChatMessage("Unstuck: teleported to safe location.");
 }
 
 void GameHandler::unstuckHearth() {
-    if (unstuckHearthCallback_) {
-        unstuckHearthCallback_();
-        chatHandler_->addSystemChatMessage("Unstuck: teleported to hearthstone location.");
-    } else {
-        chatHandler_->addSystemChatMessage("No hearthstone bind point set.");
-    }
+    eventBus().publish(events::UnstuckToHearthRequested{});
+    chatHandler_->addSystemChatMessage("Unstuck: teleported to hearthstone location.");
 }
 
 void GameHandler::preloadDBCCaches() const {

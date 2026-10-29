@@ -622,9 +622,7 @@ void GameHandler::updateTaxiAndMountState(float deltaTime) {
                 LOG_INFO("Mount reconcile: server=", serverMountDisplayId,
                          " local=", currentMountDisplayId_);
                 currentMountDisplayId_ = serverMountDisplayId;
-                if (mountCallback_) {
-                    mountCallback_(serverMountDisplayId);
-                }
+                eventBus().publish(events::PlayerMountChanged{serverMountDisplayId});
             }
         }
     }
@@ -747,7 +745,7 @@ void GameHandler::update(float deltaTime) {
 void GameHandler::updateNetwork(float deltaTime) {
     // The char-create callback used to be deferred to here, out of the packet
     // handler and so out of any render pass. It is not any more: the
-    // SMSG_CHAR_CREATE handler calls charCreateCallback_ itself, and nothing
+    // SMSG_CHAR_CREATE handler publishes CharacterCreateAnswered itself, and nothing
     // had set the flag this waited on for long enough that the three members
     // behind it were never written at all. A block that cannot run, guarding a
     // deferral that no longer happens, reads as though both still do.
@@ -846,7 +844,7 @@ void GameHandler::updateNetwork(float deltaTime) {
                   "This usually happens if you recently logged out - "
                   "wait 20-30 seconds and try again.";
         }
-        if (charDeleteCallback_) charDeleteCallback_(deleted, msg);
+        eventBus().publish(events::CharacterDeleteAnswered{deleted, msg});
     }
 
 }

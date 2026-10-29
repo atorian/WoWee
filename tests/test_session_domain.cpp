@@ -639,3 +639,69 @@ TEST_CASE("sounds the server plays are passed on: music, flat, and at an object"
     CHECK(flat == std::vector<uint32_t>{8960, 6448});
     CHECK(placed == std::vector<std::pair<uint32_t, uint64_t>>{{6447, 0xF130000000004242ull}});
 }
+
+TEST_CASE("the server's answers to creating and deleting a character are passed on in words",
+          "[session][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    std::vector<std::pair<bool, std::string>> created, deleted;
+    auto createSub = h.events().subscribe<ev::CharacterCreateAnswered>(
+        [&](const ev::CharacterCreateAnswered& e) { created.emplace_back(e.success, e.message); });
+    auto deleteSub = h.events().subscribe<ev::CharacterDeleteAnswered>(
+        [&](const ev::CharacterDeleteAnswered& e) { deleted.emplace_back(e.success, e.message); });
+
+    // SMSG_CHAR_CREATE: 0x32 the name is taken, 0x2F created.
+    h.receive(Opcode::SMSG_CHAR_CREATE, Body().u8(0x32));
+    h.receive(Opcode::SMSG_CHAR_CREATE, Body().u8(0x2F));
+    // SMSG_CHAR_DELETE: 0x31 a guild leader, 0x47 deleted.
+    h.receive(Opcode::SMSG_CHAR_DELETE, Body().u8(0x31));
+    h.receive(Opcode::SMSG_CHAR_DELETE, Body().u8(0x47));
+    h.pump();
+
+    CHECK(created == std::vector<std::pair<bool, std::string>>{
+                         {false, "Name already in use"}, {true, "Character created!"}});
+    CHECK(deleted == std::vector<std::pair<bool, std::string>>{
+                         {false, "Delete failed: character is a guild leader. Transfer leadership first."},
+                         {true, "Character deleted."}});
+}
+
+TEST_CASE("a knock-back is passed on for the player and not for anyone else", "[session][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    std::vector<ev::PlayerKnockedBack> knocked;
+    auto sub = h.events().subscribe<ev::PlayerKnockedBack>(
+        [&](const ev::PlayerKnockedBack& e) { knocked.push_back(e); });
+
+    // SMSG_MOVE_KNOCK_BACK: the unit, a counter, the direction (cos, sin),
+    // then the horizontal and vertical speeds.
+    h.receive(Opcode::SMSG_MOVE_KNOCK_BACK,
+              Body().packedGuid(0xF130000000000099ull).u32(1).f32(1.0f).f32(0.0f).f32(5.0f).f32(-7.0f));
+    h.receive(Opcode::SMSG_MOVE_KNOCK_BACK,
+              Body().packedGuid(h.player().guid).u32(2).f32(0.6f).f32(0.8f).f32(10.0f).f32(-9.0f));
+    h.pump();
+
+    REQUIRE(knocked.size() == 1);
+    CHECK(knocked[0].vcos == 0.6f);
+    CHECK(knocked[0].vsin == 0.8f);
+    CHECK(knocked[0].hspeed == 10.0f);
+    CHECK(knocked[0].vspeed == -9.0f);
+}
+
+TEST_CASE("a camera shake is light for the first fifty shakes and heavy after", "[session][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    std::vector<ev::CameraShakeRequested> shakes;
+    auto sub = h.events().subscribe<ev::CameraShakeRequested>(
+        [&](const ev::CameraShakeRequested& e) { shakes.push_back(e); });
+
+    // SMSG_CAMERA_SHAKE: the CameraShakes.dbc id, then the shake type.
+    h.receive(Opcode::SMSG_CAMERA_SHAKE, Body().u32(10).u32(0));
+    h.receive(Opcode::SMSG_CAMERA_SHAKE, Body().u32(60).u32(0));
+    h.pump();
+
+    REQUIRE(shakes.size() == 2);
+    CHECK(shakes[0].magnitude == 0.04f);
+    CHECK(shakes[1].magnitude == 0.08f);
+    CHECK(shakes[1].frequency == 18.0f);
+    CHECK(shakes[1].duration == 0.5f);
+}

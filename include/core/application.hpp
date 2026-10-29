@@ -580,6 +580,8 @@ private:
     std::unique_ptr<NPCInteractionCallbackHandler> npcInteractionCallbacks_;
     std::unique_ptr<AudioCallbackHandler> audioCallbacks_;
     std::unique_ptr<EntitySpawnCallbackHandler> entitySpawnCallbacks_;
+    /// Application's own: the camera, the player's model, the realm patches.
+    std::vector<EventBus::Subscription> subscriptions_;
     std::unique_ptr<AnimationCallbackHandler> animationCallbacks_;
     std::unique_ptr<TransportCallbackHandler> transportCallbacks_;
     std::unique_ptr<WorldEntryCallbackHandler> worldEntryCallbacks_;

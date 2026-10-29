@@ -78,6 +78,7 @@
 #ifdef WOWEE_HAVE_STORMLIB
 #include "pipeline/mpq_archive_layer.hpp"
 #endif
+#include "game/game_events.hpp"
 #include "game/server_protocol.hpp"
 #include "game/spell_classification.hpp"
 #include "rendering/animation/animation_ids.hpp"
@@ -2836,29 +2837,6 @@ void Application::enteredWorld() {
                 if (appearanceComposer_) appearanceComposer_->showRangedWeapon(false);
             });
         }
-        gameHandler->setKnockBackCallback([this](float vcos, float vsin, float hspeed, float vspeed) {
-            if (getCameraController()) {
-                getCameraController()->applyKnockBack(vcos, vsin, hspeed, vspeed);
-            }
-        });
-        gameHandler->setCameraShakeCallback([this](float magnitude, float frequency, float duration) {
-            if (getCameraController()) {
-                getCameraController()->triggerShake(magnitude, frequency, duration);
-            }
-        });
-        gameHandler->setAutoFollowCallback([this](const glm::vec3* renderPos) {
-            if (getCameraController()) {
-                if (renderPos) {
-                    getCameraController()->setAutoFollow(renderPos);
-                } else {
-                    getCameraController()->cancelAutoFollow();
-                }
-            }
-        });
-        // Barber shop and other live appearance changes rebuild the model.
-        gameHandler->setPlayerModelRebuildCallback([this]() {
-            refreshPlayerCharacterModel();
-        });
     }
     // Load quest marker models
     loadQuestMarkerModels();
@@ -3031,7 +3009,7 @@ void Application::applyServerMovementState(float deltaTime) {
             const float pitchRad = getCameraController()->getFlightPitchRad();
             gameHandler->setMovementPitch(pitchRad);
             // Tilt the mount/character model to match flight direction
-            // (taxi flight uses setTaxiOrientationCallback for this instead)
+            // (taxi flight uses TaxiOrientationChanged for this instead)
             if (gameHandler->isMounted()) {
                 if (auto* ac = getAnimationController()) ac->setMountPitchRoll(pitchRad, 0.0f);
             }
@@ -5898,9 +5876,36 @@ void Application::setupUICallbacks() {
     uiScreenCallbacks_->setupCallbacks();
 
     // ── Realm patch archives (EZWoW: list over world, files over login) ──
-    gameHandler->setServerPatchManifestCallback([this](const std::vector<game::EzWowPatch>& patches) {
-        startRealmPatchSync(patches);
-    });
+    subscriptions_.push_back(eventBus_.subscribe<game::events::ServerPatchManifestReceived>(
+        [this](const game::events::ServerPatchManifestReceived& e) { startRealmPatchSync(e.patches); }));
+
+    // ── The camera and the player's model. Subscribed here, once: what
+    // enteredWorld sets up is set up again on every entry into the world.
+    subscriptions_.push_back(eventBus_.subscribe<game::events::PlayerKnockedBack>(
+        [this](const game::events::PlayerKnockedBack& e) {
+            if (getCameraController()) {
+                getCameraController()->applyKnockBack(e.vcos, e.vsin, e.hspeed, e.vspeed);
+            }
+        }));
+    subscriptions_.push_back(eventBus_.subscribe<game::events::CameraShakeRequested>(
+        [this](const game::events::CameraShakeRequested& e) {
+            if (getCameraController()) {
+                getCameraController()->triggerShake(e.magnitude, e.frequency, e.duration);
+            }
+        }));
+    subscriptions_.push_back(eventBus_.subscribe<game::events::AutoFollowChanged>(
+        [this](const game::events::AutoFollowChanged& e) {
+            if (getCameraController()) {
+                if (e.renderPos) {
+                    getCameraController()->setAutoFollow(e.renderPos);
+                } else {
+                    getCameraController()->cancelAutoFollow();
+                }
+            }
+        }));
+    // Barber shop and other live appearance changes rebuild the model.
+    subscriptions_.push_back(eventBus_.subscribe<game::events::PlayerModelRebuildRequested>(
+        [this](const game::events::PlayerModelRebuildRequested&) { refreshPlayerCharacterModel(); }));
     authHandler->setOnXferData([this](const uint8_t* data, size_t size) {
         if (realmPatchSync_) realmPatchSync_->onData(data, size);
     });

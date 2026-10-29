@@ -7,6 +7,7 @@
 #include "rendering/cpu_stage_times.hpp"
 #include "core/zone_tracker.hpp"
 #include "ui/game_screen.hpp"
+#include "game/game_events.hpp"
 #include "ui/gamepad_controls.hpp"
 #include "core/gamepad.hpp"
 
@@ -344,12 +345,12 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     chatPanel_.setupCallbacks(gameHandler);
     toastManager_.setupCallbacks(gameHandler);
 
-    // Set up appearance-changed callback to refresh inventory preview (barber shop, etc.)
-    if (!appearanceCallbackSet_) {
-        gameHandler.setAppearanceChangedCallback([this]() {
-            inventoryScreenCharGuid_ = 0;  // force preview re-sync on next frame
-        });
-        appearanceCallbackSet_ = true;
+    // A changed appearance (barber shop, etc.) refreshes the inventory preview.
+    if (!appearanceChangedSub_) {
+        appearanceChangedSub_ = gameHandler.eventBus().subscribe<game::events::PlayerAppearanceChanged>(
+            [this](const game::events::PlayerAppearanceChanged&) {
+                inventoryScreenCharGuid_ = 0;  // force preview re-sync on next frame
+            });
     }
 
     // The error line: UIErrorsFrame draws the text from UI_ERROR_MESSAGE, and

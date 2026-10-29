@@ -395,7 +395,7 @@ private:
     void offerPendingTradeItem(game::GameHandler& gameHandler);
 
 
-    bool appearanceCallbackSet_ = false;
+    core::EventBus::Subscription appearanceChangedSub_;
     bool ghostOpacityStateKnown_ = false;
     bool ghostOpacityLastState_ = false;
     uint32_t ghostOpacityLastInstanceId_ = 0;

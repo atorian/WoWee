@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/event_bus.hpp"
+
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -78,6 +80,7 @@ private:
     pipeline::AssetManager* assetManager_;
     SetStateFn setState_;
     ReconnectingFn reconnecting_;
+    std::vector<EventBus::Subscription> subscriptions_;
 
     std::string pendingCreatedCharacterName_;  // Auto-select after character creation
 

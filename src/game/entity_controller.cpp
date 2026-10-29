@@ -627,7 +627,7 @@ void EntityController::detectPlayerMountChange(uint32_t newMountDisplayId,
                     " spell=", owner_.spells().getCurrentCastSpellId());
     }
     owner_.currentMountDisplayIdRef() = newMountDisplayId;
-    if (newMountDisplayId != old && owner_.mountCallbackRef()) owner_.mountCallbackRef()(newMountDisplayId);
+    if (newMountDisplayId != old) owner_.eventBus().publish(events::PlayerMountChanged{newMountDisplayId});
     if (newMountDisplayId != old)
         pendingEvents_.emit("UNIT_MODEL_CHANGED", {"player"});
     if (old == 0 && newMountDisplayId != 0) {
@@ -1459,10 +1459,8 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
                            " bankBagSlots=", static_cast<int>(bankBagSlots),
                            " facial=", static_cast<int>(facialHair));
                 owner_.isRestingRef() = (restStateByte != 0);
-                if (owner_.appearanceChangedCallbackRef())
-                    owner_.appearanceChangedCallbackRef()();
-                if (owner_.playerModelRebuildCallbackRef())
-                    owner_.playerModelRebuildCallbackRef()();
+                owner_.eventBus().publish(events::PlayerAppearanceChanged{});
+                owner_.eventBus().publish(events::PlayerModelRebuildRequested{});
             }
         }
         else if (pfi.chosenTitle != 0xFFFF && key == pfi.chosenTitle) {
@@ -1476,10 +1474,8 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
             for (auto& ch : owner_.charactersRef()) {
                 if (ch.guid == owner_.getPlayerGuid()) { ch.appearanceBytes = val; break; }
             }
-            if (owner_.appearanceChangedCallbackRef())
-                owner_.appearanceChangedCallbackRef()();
-            if (owner_.playerModelRebuildCallbackRef())
-                owner_.playerModelRebuildCallbackRef()();
+            owner_.eventBus().publish(events::PlayerAppearanceChanged{});
+            owner_.eventBus().publish(events::PlayerModelRebuildRequested{});
         }
         else if (key == pfi.playerFlags) {
           // Resting is read on create as well as on change, because a player
@@ -2056,7 +2052,7 @@ void EntityController::onCreateGameObject(const UpdateBlock& block, std::shared_
                  " entry=", go->getEntry(),
                  " displayId=", go->getDisplayId(),
                  " pos=(", go->getX(), ", ", go->getY(), ", ", go->getZ(), ")");
-        // Note: TransportSpawnCallback will be invoked from Application after WMO instance is created
+        // TransportSpawned is published once the spawner has made its WMO instance.
     }
     announceGameObject(block.guid, *go);
 }
@@ -2094,9 +2090,9 @@ void EntityController::announceGameObject(uint64_t guid, const GameObject& go) {
     // skips the entry->DBC path remap - WotLK ship GO entries don't match
     // TransportAnimation.dbc 1:1, so they were left stationary. Only genuine
     // movement updates (onValuesUpdateGameObject / MOVEMENT blocks) set that flag.
-    if (transportGuids_.count(guid) && owner_.transportMoveCallbackRef()) {
-        owner_.transportMoveCallbackRef()(guid,
-            go.getX(), go.getY(), go.getZ(), go.getOrientation());
+    if (transportGuids_.count(guid)) {
+        owner_.eventBus().publish(events::TransportMoved{guid,
+            go.getX(), go.getY(), go.getZ(), go.getOrientation()});
     }
 }
 
@@ -2336,10 +2332,10 @@ void EntityController::onValuesUpdateItem(const UpdateBlock& block, std::shared_
 
 void EntityController::onValuesUpdateGameObject(const UpdateBlock& block, std::shared_ptr<Entity>& entity) {
     if (block.hasMovement) {
-        if (transportGuids_.count(block.guid) && owner_.transportMoveCallbackRef()) {
+        if (transportGuids_.count(block.guid)) {
             serverUpdatedTransportGuids_.insert(block.guid);
-            owner_.transportMoveCallbackRef()(block.guid, entity->getX(), entity->getY(),
-                                   entity->getZ(), entity->getOrientation());
+            owner_.eventBus().publish(events::TransportMoved{block.guid, entity->getX(), entity->getY(),
+                                                             entity->getZ(), entity->getOrientation()});
         } else {
             owner_.eventBus().publish(events::GameObjectMoved{block.guid, entity->getX(), entity->getY(),
                                                               entity->getZ(), entity->getOrientation()});
@@ -2466,10 +2462,8 @@ void EntityController::resyncPlayerIfFarFromServer(const glm::vec3& serverCanoni
     mi.x = serverCanonicalPos.x;
     mi.y = serverCanonicalPos.y;
     mi.z = serverCanonicalPos.z;
-    if (owner_.playerPositionCorrectionCallbackRef()) {
-        owner_.playerPositionCorrectionCallbackRef()(
-            serverCanonicalPos.x, serverCanonicalPos.y, serverCanonicalPos.z);
-    }
+    owner_.eventBus().publish(events::PlayerPositionCorrected{
+        serverCanonicalPos.x, serverCanonicalPos.y, serverCanonicalPos.z});
 }
 
 void EntityController::handleCreateObject(const UpdateBlock& block, bool& newItemCreated) {
@@ -2579,9 +2573,9 @@ void EntityController::handleMovementUpdate(const UpdateBlock& block) {
                 }
 
                 // Fire transport move callback if this is a known transport
-                if (transportGuids_.count(block.guid) && owner_.transportMoveCallbackRef()) {
+                if (transportGuids_.count(block.guid)) {
                     serverUpdatedTransportGuids_.insert(block.guid);
-                    owner_.transportMoveCallbackRef()(block.guid, pos.x, pos.y, pos.z, oCanonical);
+                    owner_.eventBus().publish(events::TransportMoved{block.guid, pos.x, pos.y, pos.z, oCanonical});
                 }
                 // Fire move callback for non-transport gameobjects.
                 if (entity->getType() == ObjectType::GAMEOBJECT &&

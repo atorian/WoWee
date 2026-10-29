@@ -3,6 +3,8 @@
 #include "game/refusal.hpp"
 #include "pipeline/weather_kind.hpp"
 
+#include <glm/vec3.hpp>
+
 #include <array>
 #include <cstdint>
 #include <string>
@@ -12,6 +14,8 @@
 namespace wowee::game {
 /// handler_types.hpp: DIRECTED, OMNI or AREA.
 enum class SpellCastType : uint8_t;
+/// server_protocol.hpp: a patch archive a realm extension names.
+struct EzWowPatch;
 }
 
 /// What the game tells the rest of the client has happened, delivered through
@@ -66,6 +70,30 @@ struct CharacterLoggingIn {
     uint64_t characterGuid = 0;
 };
 
+/// The answer to a character creation: SMSG_CHAR_CREATE, or the client's own
+/// refusal when it cannot ask (not connected, the list not in yet).
+struct CharacterCreateAnswered {
+    bool success = false;
+    std::string message;
+};
+
+/// The answer to a character deletion: SMSG_CHAR_DELETE, no answer in time, or
+/// the client's own refusal when it is not connected.
+struct CharacterDeleteAnswered {
+    bool success = false;
+    std::string message;
+};
+
+/// SMSG_CHARACTER_LOGIN_FAILED, and why, in the player's words.
+struct CharacterLoginFailed {
+    std::string reason;
+};
+
+/// A realm extension announced the patch archives this client should hold.
+struct ServerPatchManifestReceived {
+    std::vector<EzWowPatch> patches;
+};
+
 /// The player released to a graveyard (true) or came back to life (false).
 struct GhostStateChanged {
     bool isGhost = false;
@@ -89,6 +117,23 @@ struct UnitRespawned {
 };
 
 // ---- What is in view ----
+
+/// A transport's model is in the world: the spawner made its instance.
+/// Canonical position.
+struct TransportSpawned {
+    uint64_t guid = 0;
+    uint32_t entry = 0;
+    uint32_t displayId = 0;
+    float x = 0, y = 0, z = 0;
+    float orientation = 0;
+};
+
+/// The server moved a transport. Canonical position.
+struct TransportMoved {
+    uint64_t guid = 0;
+    float x = 0, y = 0, z = 0;
+    float orientation = 0;
+};
 
 /// A creature came into view, or its display changed in place. Canonical
 /// position; scale is OBJECT_FIELD_SCALE_X.
@@ -233,6 +278,89 @@ struct PlayerHealthChanged {
 struct VehicleStateChanged {
     bool entered = false;
     uint32_t vehicleId = 0;
+};
+
+/// The player mounted (the mount's display id) or dismounted (0) - a flight
+/// mount included.
+struct PlayerMountChanged {
+    uint32_t mountDisplayId = 0;
+};
+
+/// PLAYER_BYTES or the facial features changed (barber shop and the like).
+struct PlayerAppearanceChanged {};
+
+/// The player's model wants rebuilding with its new hair or facial hair,
+/// alongside the appearance change, without a restart.
+struct PlayerModelRebuildRequested {};
+
+/// SMSG_MOVE_KNOCK_BACK for the player. vcos, vsin: the direction in server
+/// (wire) space - the server to canonical to render swaps cancel, so the
+/// consumer uses them in render space as they are, see
+/// CameraController::applyKnockBack. hspeed and vspeed as the packet has them:
+/// vspeed is negative when the server means an upward launch, so negate it
+/// before using it as the initial vertical velocity.
+struct PlayerKnockedBack {
+    float vcos = 0, vsin = 0;
+    float hspeed = 0, vspeed = 0;
+};
+
+/// SMSG_CAMERA_SHAKE: magnitude in world units, frequency in Hz, duration in
+/// seconds.
+struct CameraShakeRequested {
+    float magnitude = 0;
+    float frequency = 0;
+    float duration = 0;
+};
+
+/// The player started following: renderPos is the render-space position to
+/// follow, which the game keeps current. Null when following stopped.
+struct AutoFollowChanged {
+    const glm::vec3* renderPos = nullptr;
+};
+
+/// /unstuck: put the player back on the floor.
+struct UnstuckRequested {};
+
+/// /unstuckgy: take the player to a safe place.
+struct UnstuckToGraveyardRequested {};
+
+/// /unstuckhearth: take the player to the hearthstone's bind point.
+struct UnstuckToHearthRequested {};
+
+/// The hearthstone was bound (SMSG_BINDPOINTUPDATE). Canonical position.
+struct BindPointChanged {
+    uint32_t mapId = 0;
+    float x = 0, y = 0, z = 0;
+};
+
+/// A flight's path, canonical, whose terrain wants loading ahead of it.
+struct TaxiPathPrecacheRequested {
+    std::vector<glm::vec3> path;
+};
+
+/// A flight is about to start: after the mounting delay, before it moves.
+struct TaxiFlightStarted {};
+
+/// The flight mount's rotation: yaw (render space), pitch and roll, in
+/// radians.
+struct TaxiOrientationChanged {
+    float yaw = 0, pitch = 0, roll = 0;
+};
+
+/// The game moved the player somewhere the renderer has not followed: a
+/// landing snapped to its node, or a server position taken over the client's.
+/// Canonical position.
+///
+/// Application's per-frame render-position sync only pulls from the game while
+/// on a flight (its "Sync character render position" block). Once
+/// finishClientTaxiFlight() clears the flight, that sync stops, so a
+/// correction applied only to movementInfo and the entity never reaches the
+/// renderer, which stays at its last (wrong) position: the landing clamp read
+/// renderer->getCharacterPosition() and kept computing from before the
+/// correction. This carries the corrected position to the renderer at the
+/// same moment.
+struct PlayerPositionCorrected {
+    float x = 0, y = 0, z = 0;
 };
 
 /// How drunk the player is, from 0 (sober, and on every character change) to

@@ -202,7 +202,7 @@ void GameHandler::registerCoreOpcodes() {
                 default:   msg = "Delete failed (server error code " + std::to_string(static_cast<int>(result)) + ")."; break;
             }
         }
-        if (charDeleteCallback_) charDeleteCallback_(success, msg);
+        eventBus().publish(events::CharacterDeleteAnswered{success, msg});
     };
     dispatchTable_[Opcode::SMSG_CHAR_ENUM] = [this](network::Packet& packet) {
         if (state == WorldState::CHAR_LIST_REQUESTED)
@@ -751,7 +751,7 @@ void GameHandler::registerCoreOpcodes() {
             movementHandler_->clearDismountPending();
         }
         currentMountDisplayId_ = 0;
-        if (mountCallback_) mountCallback_(0);
+        eventBus().publish(events::PlayerMountChanged{0});
     };
     dispatchTable_[Opcode::SMSG_MOUNTRESULT] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(4)) return;
@@ -780,8 +780,7 @@ void GameHandler::registerCoreOpcodes() {
             uint32_t shakeType = packet.readUInt32();
             (void)shakeType;
             float magnitude = (shakeId < 50) ? 0.04f : 0.08f;
-            if (cameraShakeCallback_)
-                cameraShakeCallback_(magnitude, 18.0f, 0.5f);
+            eventBus().publish(events::CameraShakeRequested{magnitude, 18.0f, 0.5f});
         }
     };
 
@@ -810,8 +809,7 @@ void GameHandler::registerCoreOpcodes() {
             homeBindMapId_ = data.mapId;
             homeBindZoneId_ = data.zoneId;
             homeBindPos_ = canonical;
-            if (bindPointCallback_)
-                bindPointCallback_(data.mapId, canonical.x, canonical.y, canonical.z);
+            eventBus().publish(events::BindPointChanged{data.mapId, canonical.x, canonical.y, canonical.z});
             if (wasSet && changed) {
                 std::string bindMsg = "Your home has been set";
                 std::string zoneName = getAreaName(data.zoneId);

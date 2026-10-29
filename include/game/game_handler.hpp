@@ -409,21 +409,7 @@ public:
     void createCharacter(const CharCreateData& data);
     void deleteCharacter(uint64_t characterGuid);
 
-    using CharCreateCallback = std::function<void(bool success, const std::string& message)>;
-    void setCharCreateCallback(CharCreateCallback cb) { charCreateCallback_ = std::move(cb); }
-
-    using CharDeleteCallback = std::function<void(bool success, const std::string& message)>;
-    void setCharDeleteCallback(CharDeleteCallback cb) { charDeleteCallback_ = std::move(cb); }
-
-    // A realm extension announced the patch archives this client should hold.
-    using ServerPatchManifestCallback = std::function<void(const std::vector<EzWowPatch>&)>;
-    void setServerPatchManifestCallback(ServerPatchManifestCallback cb) { serverPatchManifestCallback_ = std::move(cb); }
-    void notifyServerPatchManifest(const std::vector<EzWowPatch>& patches) {
-        if (serverPatchManifestCallback_) serverPatchManifestCallback_(patches);
-    }
-
-    using CharLoginFailCallback = std::function<void(const std::string& reason)>;
-    void setCharLoginFailCallback(CharLoginFailCallback cb) { charLoginFailCallback_ = std::move(cb); }
+    void notifyServerPatchManifest(const std::vector<EzWowPatch>& patches);
 
     /**
      * Select and log in with a character
@@ -839,16 +825,6 @@ public:
         return false;
     }
 
-    // Appearance changed callback - fired when PLAYER_BYTES or facial features update (barber shop, etc.)
-    using AppearanceChangedCallback = std::function<void()>;
-    void setAppearanceChangedCallback(AppearanceChangedCallback cb) { appearanceChangedCallback_ = std::move(cb); }
-
-    // Player model rebuild callback - fired alongside the appearance change so the
-    // in-world 3D character can be respawned with the new hair/facial hair without
-    // requiring a game restart.
-    using PlayerModelRebuildCallback = std::function<void()>;
-    void setPlayerModelRebuildCallback(PlayerModelRebuildCallback cb) { playerModelRebuildCallback_ = std::move(cb); }
-
     // Snap the character to face the camera's current look direction and return the
     // resulting canonical orientation. Used by fishing so the bobber lands in front of
     // where the player is looking: while standing still the character yaw does not track
@@ -876,34 +852,9 @@ public:
     }
     void setSkillCategoryCollapsed(uint32_t categoryId, bool collapsed);
 
-    // Knockback callback: called when server sends SMSG_MOVE_KNOCK_BACK for the player.
-    // Parameters: vcos, vsin (2D direction vector in server/wire coord space - the
-    //   server→canonical→render swaps cancel, so the consumer can use them directly
-    //   in render space, see CameraController::applyKnockBack),
-    //   hspeed, vspeed (raw from packet; vspeed is negative when the server intends
-    //   an upward launch - negate before applying as initial Y velocity).
-    using KnockBackCallback = std::function<void(float vcos, float vsin, float hspeed, float vspeed)>;
-    void setKnockBackCallback(KnockBackCallback cb) { knockBackCallback_ = std::move(cb); }
-
-    // Camera shake callback: called when server sends SMSG_CAMERA_SHAKE.
-    // Parameters: magnitude (world units), frequency (Hz), duration (seconds).
-    using CameraShakeCallback = std::function<void(float magnitude, float frequency, float duration)>;
-    void setCameraShakeCallback(CameraShakeCallback cb) { cameraShakeCallback_ = std::move(cb); }
-
-    // Auto-follow callback: pass render-space position pointer to start, nullptr to cancel.
-    using AutoFollowCallback = std::function<void(const glm::vec3* renderPos)>;
-    void setAutoFollowCallback(AutoFollowCallback cb) { autoFollowCallback_ = std::move(cb); }
-
-    // Unstuck callback (resets player Z to floor height)
-    using UnstuckCallback = std::function<void()>;
-    void setUnstuckCallback(UnstuckCallback cb) { unstuckCallback_ = std::move(cb); }
     void unstuck();
-    void setUnstuckGyCallback(UnstuckCallback cb) { unstuckGyCallback_ = std::move(cb); }
     void unstuckGy();
-    void setUnstuckHearthCallback(UnstuckCallback cb) { unstuckHearthCallback_ = std::move(cb); }
     void unstuckHearth();
-    using BindPointCallback = std::function<void(uint32_t mapId, float x, float y, float z)>;
-    void setBindPointCallback(BindPointCallback cb) { bindPointCallback_ = std::move(cb); }
 
     // Faction hostility map (populated from FactionTemplate.dbc by Application)
     void setFactionHostileMap(std::unordered_map<uint32_t, bool> map) { factionHostileMap_ = std::move(map); }
@@ -937,22 +888,8 @@ public:
     /// the server refuses the conversation on exactly this number.
     [[nodiscard]] int unitReactionToPlayer(const Unit& unit) const;
 
-    // Transport move callback (online mode - triggered when transport position updates)
-    // Parameters: guid, x, y, z (canonical), orientation
-    using TransportMoveCallback = std::function<void(uint64_t guid, float x, float y, float z, float orientation)>;
-    void setTransportMoveCallback(TransportMoveCallback cb) { transportMoveCallback_ = std::move(cb); }
-
-    // Transport spawn callback (online mode - triggered when transport GameObject is first detected)
-    // Parameters: guid, entry, displayId, x, y, z (canonical), orientation
-    using TransportSpawnCallback = std::function<void(uint64_t guid, uint32_t entry, uint32_t displayId, float x, float y, float z, float orientation)>;
-    void setTransportSpawnCallback(TransportSpawnCallback cb) { transportSpawnCallback_ = std::move(cb); }
-
     // Notify that a transport has been spawned (called after WMO instance creation)
-    void notifyTransportSpawned(uint64_t guid, uint32_t entry, uint32_t displayId, float x, float y, float z, float orientation) {
-        if (transportSpawnCallback_) {
-            transportSpawnCallback_(guid, entry, displayId, x, y, z, orientation);
-        }
-    }
+    void notifyTransportSpawned(uint64_t guid, uint32_t entry, uint32_t displayId, float x, float y, float z, float orientation);
 
     // Transport state for player-on-transport
     bool isOnTransport() const { return playerTransportGuid_ != 0; }
@@ -1415,41 +1352,6 @@ public:
     /// Interface phase only. Notifications produced by handlers wait for the next drain.
     void dispatchAddonEvents();
 
-
-
-    // Mount state
-    using MountCallback = std::function<void(uint32_t mountDisplayId)>;  // 0 = dismount
-    void setMountCallback(MountCallback cb) { mountCallback_ = std::move(cb); }
-
-    // Taxi terrain precaching callback
-    using TaxiPrecacheCallback = std::function<void(const std::vector<glm::vec3>&)>;
-    void setTaxiPrecacheCallback(TaxiPrecacheCallback cb) { taxiPrecacheCallback_ = std::move(cb); }
-
-    // Taxi orientation callback (for mount rotation: yaw, pitch, roll in radians)
-    using TaxiOrientationCallback = std::function<void(float yaw, float pitch, float roll)>;
-    void setTaxiOrientationCallback(TaxiOrientationCallback cb) { taxiOrientationCallback_ = std::move(cb); }
-
-    // Taxi landing position correction callback (canonical x, y, z). Application's
-    // per-frame render-position sync only pulls from game state while onTaxi (see
-    // its "Sync character render position" block) - once finishClientTaxiFlight()
-    // clears onTaxiFlight_/taxiMountActive_, that sync stops, so a position
-    // correction applied only to movementInfo/the entity (e.g. snapping to the
-    // known-correct TaxiNodes.dbc position instead of a short-landed spline) never
-    // reaches the renderer, which then stays authoritative at its last (wrong)
-    // value. Live-confirmed: the landing clamp reads renderer->getCharacterPosition()
-    // directly and kept computing from the pre-correction position even after
-    // finishClientTaxiFlight() had already fixed movementInfo/the entity. This
-    // callback lets MovementHandler push the corrected position straight to the
-    // renderer at the same moment, without MovementHandler needing direct access
-    // to rendering types.
-    using PlayerPositionCorrectionCallback = std::function<void(float x, float y, float z)>;
-    void setPlayerPositionCorrectionCallback(PlayerPositionCorrectionCallback cb) { playerPositionCorrectionCallback_ = std::move(cb); }
-
-    // Callback for when taxi flight is about to start (after mounting delay, before movement begins)
-    using TaxiFlightStartCallback = std::function<void()>;
-    void setTaxiFlightStartCallback(TaxiFlightStartCallback cb) { taxiFlightStartCallback_ = std::move(cb); }
-
-
     bool isMounted() const { return currentMountDisplayId_ != 0; }
     bool isHostileFactionPublic(uint32_t factionTemplateId) const { return isHostileFaction(factionTemplateId); }
     bool isPlayerRooted() const { return movementInfo.isPlayerRooted(); }
@@ -1663,20 +1565,7 @@ public:
     /// cannot look different.
     /// False when there is no record to write to, which is the one way this can
     /// quietly do nothing.
-    bool previewPlayerAppearance(uint32_t appearanceBytes, uint8_t facialFeatures) {
-        // Keyed the way the reader is keyed. The model is rebuilt from
-        // getActiveCharacter(), which finds the record by activeCharacterGuid_,
-        // so writing to any other record is a change nothing draws.
-        const uint64_t guid = activeCharacterGuid_ != 0 ? activeCharacterGuid_ : playerGuid;
-        for (auto& ch : characters) {
-            if (ch.guid != guid) continue;
-            ch.appearanceBytes = appearanceBytes;
-            ch.facialFeatures = facialFeatures;
-            if (playerModelRebuildCallback_) playerModelRebuildCallback_();
-            return true;
-        }
-        return false;
-    }
+    bool previewPlayerAppearance(uint32_t appearanceBytes, uint8_t facialFeatures);
     auto& updateFieldTableRef() { return updateFieldTable_; }
     auto& lastPlayerFieldsRef() { return lastPlayerFields_; }
     auto& timeSinceLastPingRef() { return timeSinceLastPing; }
@@ -1779,22 +1668,12 @@ public:
 
     // ── UI & Event Callbacks ─────────────────────────────────────────
     bool hasAddonEventListener() const { return static_cast<bool>(addonEventCallback_); }
-    auto& appearanceChangedCallbackRef() { return appearanceChangedCallback_; }
-    auto& playerModelRebuildCallbackRef() { return playerModelRebuildCallback_; }
-    auto& autoFollowCallbackRef() { return autoFollowCallback_; }
-    auto& knockBackCallbackRef() { return knockBackCallback_; }
     void suppressNextMeleeSwingAnim() override { suppressMeleeSwingAnim_ = true; }
     bool consumeSuppressMeleeSwingAnim() {
         bool v = suppressMeleeSwingAnim_;
         suppressMeleeSwingAnim_ = false;
         return v;
     }
-    auto& mountCallbackRef() { return mountCallback_; }
-    auto& taxiFlightStartCallbackRef() { return taxiFlightStartCallback_; }
-    auto& taxiOrientationCallbackRef() { return taxiOrientationCallback_; }
-    auto& playerPositionCorrectionCallbackRef() { return playerPositionCorrectionCallback_; }
-    auto& taxiPrecacheCallbackRef() { return taxiPrecacheCallback_; }
-    auto& transportMoveCallbackRef() { return transportMoveCallback_; }
 
     // ── Methods moved from private (domain handler use) ──────────────
     void addCombatText(CombatTextEntry::Type type, int32_t amount, uint32_t spellId,
@@ -2142,17 +2021,6 @@ private:
     /// names it and the answer has to go back to the same one.
     uint64_t binderGuid_ = 0;
 
-
-    KnockBackCallback knockBackCallback_;
-    CameraShakeCallback cameraShakeCallback_;
-    AutoFollowCallback autoFollowCallback_;
-    UnstuckCallback unstuckCallback_;
-    UnstuckCallback unstuckGyCallback_;
-    UnstuckCallback unstuckHearthCallback_;
-    BindPointCallback bindPointCallback_;
-    TransportMoveCallback transportMoveCallback_;
-    TransportSpawnCallback transportSpawnCallback_;
-
     // Transport tracking
     std::unordered_map<uint64_t, TransportAttachment> transportAttachments_;
     // Transport GUID tracking moved to EntityController
@@ -2340,10 +2208,6 @@ private:
     // Callbacks
     WorldConnectSuccessCallback onSuccess;
     WorldConnectFailureCallback onFailure;
-    CharCreateCallback charCreateCallback_;
-    CharDeleteCallback charDeleteCallback_;
-    ServerPatchManifestCallback serverPatchManifestCallback_;
-    CharLoginFailCallback charLoginFailCallback_;
     bool pendingCharDeleteResponse_ = false;
     uint64_t pendingDeleteGuid_ = 0;
     float pendingDeleteTimer_ = 0.0f;
@@ -2386,8 +2250,6 @@ private:
     /// Headings the player has closed. Client-side, like the reputation ones,
     /// and saved with the rest of the character config for the same reason.
     std::unordered_set<uint32_t> collapsedSkillCategories_;
-    AppearanceChangedCallback appearanceChangedCallback_;
-    PlayerModelRebuildCallback playerModelRebuildCallback_;
     FaceCameraProvider faceCameraProvider_;
     bool suppressMeleeSwingAnim_ = false;
     // lastMeleeSwingMs_ moved to CombatHandler
@@ -2399,11 +2261,6 @@ private:
     /// Languages.dbc, read once on the first ask like the caches beside it.
     mutable std::unordered_map<uint32_t, std::string> languageNames_;
     mutable bool languageNamesLoaded_ = false;
-    MountCallback mountCallback_;
-    TaxiPrecacheCallback taxiPrecacheCallback_;
-    TaxiOrientationCallback taxiOrientationCallback_;
-    PlayerPositionCorrectionCallback playerPositionCorrectionCallback_;
-    TaxiFlightStartCallback taxiFlightStartCallback_;
     uint32_t currentMountDisplayId_ = 0;
     uint32_t mountAuraSpellId_ = 0;       // Spell ID of the aura that caused mounting (for CMSG_CANCEL_AURA fallback)
     bool playerDead_ = false;
