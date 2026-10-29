@@ -289,7 +289,7 @@ void GameHandler::clearWorldState() {
     movementHandler_->cancelPendingWorldTransfer();
     activeCharacterGuid_ = 0;
     if (services_.titlesFeed) services_.titlesFeed->leftWorld();
-    transportAttachments_.clear();
+    movementHandler_->clearTransportAttachments();
     pendingIncomingPackets_.clear();
     // Say every entity left view so the renderer releases M2/character model resources.
     for (const auto& [guid, entity] : entityController_->getEntityManager().getEntities()) {
@@ -309,9 +309,7 @@ void GameHandler::clearWorldState() {
 }
 
 void GameHandler::resetDbcCaches() {
-    areaTriggerDbcLoaded_ = false;
-    areaTriggers_.clear();
-    activeAreaTriggers_.clear();
+    movementHandler_->forgetAreaTriggerTable();
     // The spell, skill, talent and taxi tables live in the sub-handlers, and
     // only there.
     spellHandler_->resetSpellDbcCaches();
@@ -853,17 +851,8 @@ void GameHandler::updateGame(float deltaTime) {
         combatHandler_->clearTarget();
     }
 
-    // Update auto-follow: refresh render position or cancel if entity disappeared
-    if (followTargetGuid_ != 0) {
-        auto followEnt = entityController_->getEntityManager().getEntity(followTargetGuid_);
-        if (followEnt) {
-            followRenderPos_ = core::coords::canonicalToRender(
-                glm::vec3(followEnt->getX(), followEnt->getY(), followEnt->getZ()));
-            movementHandler_->updateFollowMovement(deltaTime);
-        } else {
-            movementHandler_->cancelFollow();
-        }
-    }
+    // Auto-follow: refresh the followed unit's position, or stop if it is gone.
+    movementHandler_->updateFollow(deltaTime);
 
     // Entering and leaving combat is fired from the update block that carries
     // UNIT_FLAG_IN_COMBAT, in EntityController - not from here.
@@ -911,12 +900,7 @@ void GameHandler::updateGame(float deltaTime) {
         }
 
         // Check area triggers (instance portals, tavern rests, etc.)
-        if (areaTriggerCooldown_ > 0.0f) areaTriggerCooldown_ -= deltaTime;
-        areaTriggerCheckTimer_ += deltaTime;
-        if (areaTriggerCheckTimer_ >= game::AREA_TRIGGER_CHECK_INTERVAL) {
-            areaTriggerCheckTimer_ = 0.0f;
-            movementHandler_->checkAreaTriggers();
-        }
+        movementHandler_->updateAreaTriggers(deltaTime);
 
         // Cancel GO interaction cast if player enters combat (auto-attack).
         if (pendingGameObjectInteractGuid_ != 0 &&

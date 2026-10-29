@@ -3722,7 +3722,7 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                 constexpr float kMoveThreshSq = 0.03f * 0.03f;
                 const bool posChanging = planarDistSq > kMoveThreshSq || dz > 0.08f;
                 const bool transportAttached =
-                    gameHandler->transportAttachmentsRef().count(guid) != 0;
+                    gameHandler->movement().hasTransportAttachment(guid);
                 // A stationary deck passenger changes world position every
                 // frame because the parent ship moves. That parent motion is
                 // not creature locomotion and must not trigger Run. Real
@@ -3960,7 +3960,7 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                 return (moveFlags & static_cast<uint32_t>(f)) != 0;
             };
             const bool transportAttached =
-                gameHandler->transportAttachmentsRef().count(guid) != 0;
+                gameHandler->movement().hasTransportAttachment(guid);
             const bool travelling = reported
                 ? reported->isTravelling()
                 : entity->isEntityMoving() || (posChanging && !transportAttached);

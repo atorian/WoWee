@@ -2079,16 +2079,8 @@ void MovementHandler::handleTeleportAck(network::Packet& packet) {
     // Clear cast bar on teleport - SpellHandler owns the casting_ flag
     owner_.spells().resetCastState();
 
-    // Suppress area triggers briefly after teleport. A one-shot flag is not
-    // enough - the player can leave and re-enter a trigger within seconds and
-    // get teleported again before the world has finished loading. Deeprun Tram
-    // (map 369) is a narrow hallway with portal triggers close to the spawn,
-    // so keep its grace window short enough that exits remain usable.
-    const bool deeprunTram = owner_.getCurrentMapId() == 369;
-    owner_.activeAreaTriggersRef().clear();
-    owner_.areaTriggerCheckTimerRef() = deeprunTram ? -1.0f : -5.0f;
-    owner_.areaTriggerSuppressFirstRef() = true;
-    owner_.areaTriggerCooldownRef() = deeprunTram ? 1.5f : 10.0f;
+    // Suppress area triggers briefly after teleport (see holdAreaTriggersOnArrival).
+    holdAreaTriggersOnArrival(owner_.getCurrentMapId());
 
     if (sender_.connected()) {
         network::Packet ack(wireOpcode(Opcode::MSG_MOVE_TELEPORT_ACK));
@@ -2258,11 +2250,7 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
         owner_.combat().invalidateTabCycle();
         owner_.spells().resetCastState();
 
-        const bool deeprunTram = owner_.getCurrentMapId() == 369;
-        owner_.activeAreaTriggersRef().clear();
-        owner_.areaTriggerCheckTimerRef() = deeprunTram ? -1.0f : -5.0f;
-        owner_.areaTriggerSuppressFirstRef() = true;
-        owner_.areaTriggerCooldownRef() = deeprunTram ? 1.5f : 10.0f;
+        holdAreaTriggersOnArrival(owner_.getCurrentMapId());
 
         if (sender_.connected()) {
             network::Packet ack(wireOpcode(Opcode::MSG_MOVE_WORLDPORT_ACK));
@@ -2317,11 +2305,7 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
     owner_.quests().clearGossipPois();
     owner_.worldStateMapIdRef() = mapId;
     owner_.worldStateZoneIdRef() = 0;
-    owner_.activeAreaTriggersRef().clear();
-    const bool deeprunTram = mapId == 369;
-    owner_.areaTriggerCheckTimerRef() = deeprunTram ? -1.0f : -5.0f;
-    owner_.areaTriggerSuppressFirstRef() = true;
-    owner_.areaTriggerCooldownRef() = deeprunTram ? 1.5f : 10.0f;
+    holdAreaTriggersOnArrival(mapId);
     owner_.stopAutoAttack();
     owner_.spells().resetCastState();
 
@@ -3269,8 +3253,31 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
 // Area Trigger Detection (moved from GameHandler)
 // ============================================================
 
+void MovementHandler::updateAreaTriggers(float deltaTime) {
+    if (areaTriggerCooldown_ > 0.0f) areaTriggerCooldown_ -= deltaTime;
+    areaTriggerCheckTimer_ += deltaTime;
+    if (areaTriggerCheckTimer_ >= game::AREA_TRIGGER_CHECK_INTERVAL) {
+        areaTriggerCheckTimer_ = 0.0f;
+        checkAreaTriggers();
+    }
+}
+
+void MovementHandler::holdAreaTriggersOnArrival(uint32_t mapId) {
+    const bool deeprunTram = mapId == 369;
+    activeAreaTriggers_.clear();
+    areaTriggerCheckTimer_ = deeprunTram ? -1.0f : -5.0f;
+    areaTriggerSuppressFirst_ = true;
+    areaTriggerCooldown_ = deeprunTram ? 1.5f : 10.0f;
+}
+
+void MovementHandler::forgetAreaTriggerTable() {
+    areaTriggerDbcLoaded_ = false;
+    areaTriggers_.clear();
+    activeAreaTriggers_.clear();
+}
+
 void MovementHandler::loadAreaTriggerDbc() {
-    if (owner_.areaTriggerDbcLoadedRef()) return;
+    if (areaTriggerDbcLoaded_) return;
 
     auto* am = assets_;
     // Don't latch "loaded" until the asset manager is actually ready - the
@@ -3280,7 +3287,7 @@ void MovementHandler::loadAreaTriggerDbc() {
     // no warning, silently disabling every area trigger for the process's
     // lifetime.
     if (!am || !am->isInitialized()) return;
-    owner_.areaTriggerDbcLoadedRef() = true;
+    areaTriggerDbcLoaded_ = true;
 
     auto dbc = am->loadDBC("AreaTrigger.dbc");
     if (!dbc || !dbc->isLoaded()) {
@@ -3288,9 +3295,9 @@ void MovementHandler::loadAreaTriggerDbc() {
         return;
     }
 
-    owner_.areaTriggersRef().reserve(dbc->getRecordCount());
+    areaTriggers_.reserve(dbc->getRecordCount());
     for (uint32_t i = 0; i < dbc->getRecordCount(); i++) {
-        GameHandler::AreaTriggerEntry at;
+        AreaTriggerEntry at;
         at.id     = dbc->getUInt32(i, 0);
         at.mapId  = dbc->getUInt32(i, 1);
         // DBC stores positions in server/wire format (X=west, Y=north) - swap to canonical
@@ -3302,10 +3309,10 @@ void MovementHandler::loadAreaTriggerDbc() {
         at.boxWidth  = dbc->getFloat(i, 7);
         at.boxHeight = dbc->getFloat(i, 8);
         at.boxYaw    = dbc->getFloat(i, 9);
-        owner_.areaTriggersRef().push_back(at);
+        areaTriggers_.push_back(at);
     }
 
-    LOG_DEBUG("Loaded ", owner_.areaTriggersRef().size(), " area triggers from AreaTrigger.dbc");
+    LOG_DEBUG("Loaded ", areaTriggers_.size(), " area triggers from AreaTrigger.dbc");
 }
 
 void MovementHandler::checkAreaTriggers() {
@@ -3313,7 +3320,7 @@ void MovementHandler::checkAreaTriggers() {
     if (onTaxiFlight_ || taxiClientActive_) return;
 
     loadAreaTriggerDbc();
-    if (owner_.areaTriggersRef().empty()) return;
+    if (areaTriggers_.empty()) return;
 
     const float px = movementInfo.x;
     const float py = movementInfo.y;
@@ -3368,16 +3375,16 @@ void MovementHandler::checkAreaTriggers() {
     // Time-based cooldown after teleport/world entry - suppress ALL trigger
     // firing (not just the first check) to prevent re-entry from immediately
     // sending us to a wrong destination.
-    const bool cooldownActive = owner_.areaTriggerCooldownRef() > 0.0f;
+    const bool cooldownActive = areaTriggerCooldown_ > 0.0f;
 
     // On first check after map transfer, just mark which triggers we're inside
     // without firing them - prevents exit portal from immediately sending us back
-    bool suppressFirst = owner_.areaTriggerSuppressFirstRef();
+    bool suppressFirst = areaTriggerSuppressFirst_;
     if (suppressFirst) {
-        owner_.areaTriggerSuppressFirstRef() = false;
+        areaTriggerSuppressFirst_ = false;
     }
 
-    for (const auto& at : owner_.areaTriggersRef()) {
+    for (const auto& at : areaTriggers_) {
         if (at.mapId != owner_.currentMapIdRef()) continue;
 
         auto insideTrigger = [&at](float qx, float qy, float qz) -> bool {
@@ -3469,7 +3476,7 @@ void MovementHandler::checkAreaTriggers() {
         }
 
         if (inside) {
-            if (owner_.activeAreaTriggersRef().count(at.id) == 0) {
+            if (activeAreaTriggers_.count(at.id) == 0) {
                 const bool suppressCurrentTrigger =
                     suppressFirst || cooldownActive || postTransferReturnAreaTriggerId_ == at.id;
                 if (suppressFirst) {
@@ -3480,9 +3487,9 @@ void MovementHandler::checkAreaTriggers() {
                     if (postTransferReturnAreaTriggerId_ == at.id) {
                         postTransferReturnAreaTriggerSawNear_ = true;
                     }
-                    owner_.activeAreaTriggersRef().insert(at.id);
+                    activeAreaTriggers_.insert(at.id);
                     LOG_INFO("AreaTrigger armed on post-transfer spawn: AT", at.id,
-                                " cooldown=", owner_.areaTriggerCooldownRef());
+                                " cooldown=", areaTriggerCooldown_);
                 } else if (postTransferReturnAreaTriggerId_ == at.id) {
                     // After a map transfer, the destination can place or
                     // nudge the player into the paired return trigger after
@@ -3490,9 +3497,9 @@ void MovementHandler::checkAreaTriggers() {
                     // until the player leaves it once; a later re-entry can
                     // then intentionally fire it.
                     postTransferReturnAreaTriggerSawNear_ = true;
-                    owner_.activeAreaTriggersRef().insert(at.id);
+                    activeAreaTriggers_.insert(at.id);
                     LOG_WARNING("AreaTrigger armed for post-transfer return portal: AT", at.id,
-                                " cooldown=", owner_.areaTriggerCooldownRef());
+                                " cooldown=", areaTriggerCooldown_);
                 } else if (cooldownActive) {
                     // Do not mark ordinary cooldown-suppressed triggers active.
                     // If the player walks into a trigger during the cooldown,
@@ -3504,11 +3511,11 @@ void MovementHandler::checkAreaTriggers() {
                     // happens - and the window is ten seconds, which is long
                     // enough to walk into one after arriving.
                     LOG_WARNING("AreaTrigger cooldown suppressed: AT", at.id,
-                                " cooldown=", owner_.areaTriggerCooldownRef(),
+                                " cooldown=", areaTriggerCooldown_,
                                 "s left - the player is inside it and it will "
                                 "not fire until they leave and re-enter");
                 } else {
-                    owner_.activeAreaTriggersRef().insert(at.id);
+                    activeAreaTriggers_.insert(at.id);
                 }
 
                 if (suppressCurrentTrigger) {
@@ -3555,7 +3562,7 @@ void MovementHandler::checkAreaTriggers() {
                     // can report one outside tick and then drift back inside,
                     // which causes an immediate bounce. Keep the return portal
                     // armed until the player is comfortably clear.
-                    owner_.activeAreaTriggersRef().insert(at.id);
+                    activeAreaTriggers_.insert(at.id);
                     LOG_DEBUG("AreaTrigger post-transfer return portal retained near trigger: AT", at.id,
                               " dist=", std::sqrt(distSq),
                               " clear=", clearDistance);
@@ -3575,13 +3582,13 @@ void MovementHandler::checkAreaTriggers() {
                 // and a destination position arrives in one, so anything still
                 // far away after it has genuinely left.
                 if (!postTransferReturnAreaTriggerSawNear_ && distSq > 1000.0f * 1000.0f &&
-                    owner_.areaTriggerCooldownRef() > 0.0f) {
+                    areaTriggerCooldown_ > 0.0f) {
                     // During map transfer there can be a tick where the current
                     // map has switched but movementInfo still contains the old
                     // map's coordinates. That looks thousands of yards away
                     // from the destination trigger and must not clear the guard
                     // before the destination position arrives.
-                    owner_.activeAreaTriggersRef().insert(at.id);
+                    activeAreaTriggers_.insert(at.id);
                     // Fires every frame for the brief window between a map switch and
                     // the destination position arriving - routine, not exceptional.
                     LOG_DEBUG("AreaTrigger post-transfer return portal waiting for destination position: AT",
@@ -3596,7 +3603,7 @@ void MovementHandler::checkAreaTriggers() {
             }
 
             // Player left the trigger - allow re-fire on re-entry
-            owner_.activeAreaTriggersRef().erase(at.id);
+            activeAreaTriggers_.erase(at.id);
         }
     }
 }
@@ -3613,7 +3620,7 @@ void MovementHandler::setTransportAttachment(uint64_t childGuid, ObjectType type
         return;
     }
 
-    GameHandler::TransportAttachment& attachment = owner_.transportAttachmentsRef()[childGuid];
+    TransportAttachment& attachment = transportAttachments_[childGuid];
     attachment.type = type;
     attachment.transportGuid = transportGuid;
     attachment.localOffset = localOffset;
@@ -3626,11 +3633,11 @@ void MovementHandler::clearTransportAttachment(uint64_t childGuid) {
     if (childGuid == 0) {
         return;
     }
-    owner_.transportAttachmentsRef().erase(childGuid);
+    transportAttachments_.erase(childGuid);
 }
 
 void MovementHandler::updateAttachedTransportChildren(float /*deltaTime*/) {
-    if (!owner_.getTransportManager() || owner_.transportAttachmentsRef().empty()) {
+    if (!owner_.getTransportManager() || transportAttachments_.empty()) {
         return;
     }
 
@@ -3639,7 +3646,7 @@ void MovementHandler::updateAttachedTransportChildren(float /*deltaTime*/) {
     std::vector<uint64_t> stale;
     stale.reserve(8);
 
-    for (auto& [childGuid, attachment] : owner_.transportAttachmentsRef()) {
+    for (auto& [childGuid, attachment] : transportAttachments_) {
         auto entity = owner_.getEntityManager().getEntity(childGuid);
         if (!entity) {
             stale.push_back(childGuid);
@@ -3690,13 +3697,25 @@ void MovementHandler::updateAttachedTransportChildren(float /*deltaTime*/) {
     }
 
     for (uint64_t guid : stale) {
-        owner_.transportAttachmentsRef().erase(guid);
+        transportAttachments_.erase(guid);
     }
 }
 
 // ============================================================
 // Follow target (moved from GameHandler)
 // ============================================================
+
+void MovementHandler::updateFollow(float deltaTime) {
+    if (followTargetGuid_ == 0) return;
+    auto followEnt = owner_.getEntityManager().getEntity(followTargetGuid_);
+    if (followEnt) {
+        followRenderPos_ = core::coords::canonicalToRender(
+            glm::vec3(followEnt->getX(), followEnt->getY(), followEnt->getZ()));
+        updateFollowMovement(deltaTime);
+    } else {
+        cancelFollow();
+    }
+}
 
 void MovementHandler::followTarget() {
     if (owner_.getState() != WorldState::IN_WORLD) {
@@ -3716,13 +3735,13 @@ void MovementHandler::followTarget() {
     }
 
     // Set follow target
-    owner_.followTargetGuidRef() = owner_.combat().getTargetGuid();
+    followTargetGuid_ = owner_.combat().getTargetGuid();
 
     // Initialize render-space position from entity's canonical coords
-    owner_.followRenderPosRef() = core::coords::canonicalToRender(glm::vec3(target->getX(), target->getY(), target->getZ()));
+    followRenderPos_ = core::coords::canonicalToRender(glm::vec3(target->getX(), target->getY(), target->getZ()));
 
     // Tell camera controller to start auto-following
-    events_.publish(events::AutoFollowChanged{&owner_.followRenderPosRef()});
+    events_.publish(events::AutoFollowChanged{&followRenderPos_});
 
     // Get target name
     std::string targetName = "Target";
@@ -3744,10 +3763,10 @@ void MovementHandler::followTarget() {
 }
 
 void MovementHandler::cancelFollow() {
-    if (owner_.followTargetGuidRef() == 0) {
+    if (followTargetGuid_ == 0) {
         return;
     }
-    owner_.followTargetGuidRef() = 0;
+    followTargetGuid_ = 0;
     if (followMoveMoving_) {
         sendMovement(Opcode::MSG_MOVE_STOP);
         followMoveMoving_ = false;
@@ -3763,7 +3782,7 @@ void MovementHandler::cancelFollow() {
 // instead of a stored waypoint, and stops at kFollowStopDistance rather
 // than snapping onto the target.
 void MovementHandler::updateFollowMovement(float deltaTime) {
-    const uint64_t guid = owner_.followTargetGuidRef();
+    const uint64_t guid = followTargetGuid_;
     if (guid == 0) {
         return;
     }

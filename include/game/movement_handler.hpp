@@ -54,20 +54,52 @@ public:
     // Follow target (moved from GameHandler)
     void followTarget();
     void cancelFollow();
-    // Per-frame movement toward the followed target's live position, called
-    // from GameHandler::update() alongside the existing followRenderPos_
-    // refresh. A no-op when no follow target is set. Recomputes the target
-    // position fresh every call (from the live entity, not a stored point),
-    // so it doesn't need the long-distance Z-interpolation guard the
+    /// Once a frame: refresh the followed unit's position and move toward it,
+    /// or stop following when it is gone. A no-op when nothing is followed.
+    void updateFollow(float deltaTime);
+    // Movement toward the followed target's live position. Recomputes the
+    // target position fresh every call (from the live entity, not a stored
+    // point), so it doesn't need the long-distance Z-interpolation guard the
     // headless client's single-shot /movement/goto needs - there's never a
     // large stale remaining distance to interpolate across.
     void updateFollowMovement(float deltaTime);
 
     // Area trigger detection
+    struct AreaTriggerEntry {
+        uint32_t id = 0;
+        uint32_t mapId = 0;
+        float x = 0, y = 0, z = 0;
+        float radius = 0;
+        float boxLength = 0, boxWidth = 0, boxHeight = 0;
+        float boxYaw = 0;
+    };
     void loadAreaTriggerDbc();
     void checkAreaTriggers();
+    /// Once a frame: count down the hold and check the triggers every
+    /// AREA_TRIGGER_CHECK_INTERVAL.
+    void updateAreaTriggers(float deltaTime);
+    /// The player arrived on `mapId` - a login, a teleport, a transfer.
+    /// Triggers are held for a while: the player can leave and re-enter one
+    /// within seconds and be teleported again before the world has loaded.
+    /// Deeprun Tram (map 369) is a narrow hallway with portal triggers close
+    /// to the spawn, so its hold is short enough that the exits work.
+    void holdAreaTriggersOnArrival(uint32_t mapId);
+    /// AreaTrigger.dbc is read again on the next check.
+    void forgetAreaTriggerTable();
 
     // Transport attachment
+    struct TransportAttachment {
+        ObjectType type = ObjectType::OBJECT;
+        uint64_t transportGuid = 0;
+        glm::vec3 localOffset{0.0f};
+        float localOrientation = 0.0f;
+        bool hasLocalOrientation = false;
+        bool offsetNeedsTransportResolution = false;
+    };
+    [[nodiscard]] bool hasTransportAttachment(uint64_t guid) const {
+        return transportAttachments_.count(guid) != 0;
+    }
+    void clearTransportAttachments() { transportAttachments_.clear(); }
     void setTransportAttachment(uint64_t childGuid, ObjectType type, uint64_t transportGuid,
                                 const glm::vec3& localOffset, bool hasLocalOrientation,
                                 float localOrientation,
@@ -288,6 +320,19 @@ private:
 
     // Heartbeat timing
     int heartbeatLogCount_ = 0;  // periodic position audit counter
+
+    bool areaTriggerDbcLoaded_ = false;
+    std::vector<AreaTriggerEntry> areaTriggers_;
+    std::unordered_set<uint32_t> activeAreaTriggers_;  // triggers the player is inside
+    float areaTriggerCheckTimer_ = 0.0f;
+    bool areaTriggerSuppressFirst_ = false;  // suppress the first check after a transfer
+    float areaTriggerCooldown_ = 0.0f;       // seconds left in which no trigger fires
+
+    uint64_t followTargetGuid_ = 0;
+    glm::vec3 followRenderPos_{0.0f};  // render-space position of the followed unit, each frame
+
+    /// Units and objects riding a transport, by guid.
+    std::unordered_map<uint64_t, TransportAttachment> transportAttachments_;
     uint32_t lastAreaTriggerId_ = 0;
     uint32_t postTransferReturnAreaTriggerId_ = 0;
     // Previous checkAreaTriggers() sample for swept-path testing (canonical

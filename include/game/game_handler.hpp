@@ -1530,14 +1530,11 @@ public:
     // ── AFK / DND ────────────────────────────────────────────────────
 
     // ── Movement & Transport ─────────────────────────────────────────
-    auto& followRenderPosRef() { return followRenderPos_; }
-    auto& followTargetGuidRef() { return followTargetGuid_; }
     auto& vehicleIdRef() { return vehicleId_; }
     auto& playerTransportGuidRef() { return playerTransportGuid_; }
     auto& playerTransportOffsetRef() { return playerTransportOffset_; }
     auto& playerTransportStickyGuidRef() { return playerTransportStickyGuid_; }
     auto& playerTransportStickyTimerRef() { return playerTransportStickyTimer_; }
-    auto& transportAttachmentsRef() { return transportAttachments_; }
 
     // ── Combat & Player Stats ────────────────────────────────────────
     auto& playerArenaPointsRef() { return playerArenaPoints_; }
@@ -1572,15 +1569,6 @@ public:
     auto& worldStateZoneIdRef() { return worldStateZoneId_; }
 
     // ── Home Bind ────────────────────────────────────────────────────
-
-    // ── Area Triggers ────────────────────────────────────────────────
-    auto& activeAreaTriggersRef() { return activeAreaTriggers_; }
-    auto& areaTriggerCheckTimerRef() { return areaTriggerCheckTimer_; }
-    auto& areaTriggerDbcLoadedRef() { return areaTriggerDbcLoaded_; }
-    auto& areaTriggersRef() { return areaTriggers_; }
-    auto& areaTriggerSuppressFirstRef() { return areaTriggerSuppressFirst_; }
-    auto& areaTriggerCooldownRef() { return areaTriggerCooldown_; }
-
 
     // ── Trainer, GM & Misc ───────────────────────────────────────────
 
@@ -1643,23 +1631,6 @@ public:
         return lfgDungeons_;
     }
 
-    // --- Inner types exposed for former friend classes ---
-    struct TransportAttachment {
-        ObjectType type = ObjectType::OBJECT;
-        uint64_t transportGuid = 0;
-        glm::vec3 localOffset{0.0f};
-        float localOrientation = 0.0f;
-        bool hasLocalOrientation = false;
-        bool offsetNeedsTransportResolution = false;
-    };
-    struct AreaTriggerEntry {
-        uint32_t id = 0;
-        uint32_t mapId = 0;
-        float x = 0, y = 0, z = 0;
-        float radius = 0;
-        float boxLength = 0, boxWidth = 0, boxHeight = 0;
-        float boxYaw = 0;
-    };
     std::string getAreaName(uint32_t areaId) const;
 
     /// What GetZonePVPInfo answers for a zone: one of "sanctuary", "arena",
@@ -1918,11 +1889,6 @@ private:
     bool cloakVisible_ = true;
     uint8_t standState_ = 0;  // 0=stand, 1=sit, ..., 7=dead, 8=kneel (server-confirmed)
 
-    // ---- Follow state ----
-    uint64_t followTargetGuid_ = 0;
-    glm::vec3 followRenderPos_{0.0f};  // Render-space position of followed entity (updated each frame)
-
-
     // Items, coin, books and the equipment of players in view are the
     // inventory's (InventoryHandler); none of it is kept here.
     FlatFieldMap lastPlayerFields_;
@@ -1931,7 +1897,6 @@ private:
     uint64_t binderGuid_ = 0;
 
     // Transport tracking
-    std::unordered_map<uint64_t, TransportAttachment> transportAttachments_;
     // Transport GUID tracking moved to EntityController
     uint64_t playerTransportGuid_ = 0;             // Transport the player is riding (0 = none)
     glm::vec3 playerTransportOffset_ = glm::vec3(0.0f); // Player offset on transport
@@ -1955,14 +1920,6 @@ private:
     // lets the UI target/reel it even while GAMEOBJECT_QUERY metadata is pending.
     uint64_t hookedFishingBobberGuid_ = 0;
 
-
-    // ---- Area trigger detection ----
-    bool areaTriggerDbcLoaded_ = false;
-    std::vector<AreaTriggerEntry> areaTriggers_;
-    std::unordered_set<uint32_t> activeAreaTriggers_;  // triggers player is currently inside
-    float areaTriggerCheckTimer_ = 0.0f;
-    bool areaTriggerSuppressFirst_ = false;  // suppress first check after map transfer
-    float areaTriggerCooldown_ = 0.0f;       // seconds remaining - suppress ALL triggers
 
     // Craft queue: seconds the expired cast bar has waited for SMSG_SPELL_GO
     // (which re-casts the next queued item) before giving up
