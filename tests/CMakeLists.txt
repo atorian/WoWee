@@ -3082,6 +3082,13 @@ wowee_add_test(test_placement_transform
     SOURCES test_placement_transform.cpp
             ${TEST_COMMON_SOURCES})
 
+# ── test_terrain_tile_maps ───────────────────────────────────
+# A terrain tile's chunk maps as its arrays hold them: each chunk's cover and
+# normals at the layer its slot names.
+wowee_add_test(test_terrain_tile_maps
+    SOURCES test_terrain_tile_maps.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/terrain_tile_maps.cpp)
+
 # ── test_terrain_fog_band ────────────────────────────────────
 # Which terrain chunks draw with the shader that cannot discard: only those
 # no part of which reaches the fog band or the distant-terrain hand-over.

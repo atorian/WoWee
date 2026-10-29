@@ -1045,6 +1045,7 @@ set(WOWEE_SOURCES
     src/rendering/material.cpp
     src/rendering/terrain_renderer.cpp
     src/rendering/terrain_bake.cpp
+    src/rendering/terrain_tile_maps.cpp
     src/rendering/range_allocator.cpp
     src/rendering/shadow_params.cpp
     src/rendering/terrain_manager.cpp
@@ -2941,6 +2942,7 @@ add_executable(wowee_editor
     src/rendering/camera.cpp
     src/rendering/terrain_renderer.cpp
     src/rendering/terrain_bake.cpp
+    src/rendering/terrain_tile_maps.cpp
     src/rendering/range_allocator.cpp
     src/rendering/shadow_params.cpp
     src/rendering/m2_renderer.cpp

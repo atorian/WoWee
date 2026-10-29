@@ -142,6 +142,13 @@ AllocatedImage createImage(VkDevice device, VmaAllocator allocator,
     /// leak dump.
     std::source_location where = std::source_location::current());
 
+/// One image of `layers` layers, one mip each, single-sampled, with a 2D
+/// array view of all of them.
+AllocatedImage createArrayImage(VkDevice device, VmaAllocator allocator,
+    uint32_t width, uint32_t height, uint32_t layers, VkFormat format,
+    VkImageUsageFlags usage,
+    std::source_location where = std::source_location::current());
+
 void destroyImage(VkDevice device, VmaAllocator allocator, AllocatedImage& image);
 
 /// Detach resource handles now and release them, in order, only after every

@@ -75,8 +75,12 @@ void destroyBuffer(VmaAllocator allocator, AllocatedBuffer& buffer) {
     destroy(allocator, buffer.buffer, buffer.allocation);
 }
 
-AllocatedImage createImage(VkDevice device, VmaAllocator allocator,
-    uint32_t width, uint32_t height, VkFormat format,
+namespace {
+
+/// createImage and createArrayImage: an image of `layers` layers, and a view
+/// of all of them - 2D for one, 2D array for more.
+AllocatedImage createLayeredImage(VkDevice device, VmaAllocator allocator,
+    uint32_t width, uint32_t height, uint32_t layers, VkFormat format,
     VkImageUsageFlags usage, VkSampleCountFlagBits samples, uint32_t mipLevels,
     std::source_location where) {
     AllocatedImage result{};
@@ -89,7 +93,7 @@ AllocatedImage createImage(VkDevice device, VmaAllocator allocator,
     imgInfo.format = format;
     imgInfo.extent = {.width = width, .height = height, .depth = 1};
     imgInfo.mipLevels = mipLevels;
-    imgInfo.arrayLayers = 1;
+    imgInfo.arrayLayers = layers;
     imgInfo.samples = samples;
     imgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     imgInfo.usage = usage;
@@ -130,8 +134,8 @@ AllocatedImage createImage(VkDevice device, VmaAllocator allocator,
         char name[64];
         const char* file = where.file_name();
         if (const char* slash = std::strrchr(file, '/')) file = slash + 1;
-        std::snprintf(name, sizeof(name), "img %ux%u mips=%u fmt=%d from %s:%u",
-                      width, height, mipLevels, static_cast<int>(format),
+        std::snprintf(name, sizeof(name), "img %ux%ux%u mips=%u fmt=%d from %s:%u",
+                      width, height, layers, mipLevels, static_cast<int>(format),
                       file, where.line());
         vmaSetAllocationName(allocator, result.allocation, name);
         setObjectName(device, VK_OBJECT_TYPE_IMAGE,
@@ -142,7 +146,7 @@ AllocatedImage createImage(VkDevice device, VmaAllocator allocator,
     VkImageViewCreateInfo viewInfo{};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewInfo.image = result.image;
-    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.viewType = layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
     viewInfo.format = format;
 
     // Determine aspect mask from format
@@ -155,13 +159,30 @@ AllocatedImage createImage(VkDevice device, VmaAllocator allocator,
     viewInfo.subresourceRange.baseMipLevel = 0;
     viewInfo.subresourceRange.levelCount = mipLevels;
     viewInfo.subresourceRange.baseArrayLayer = 0;
-    viewInfo.subresourceRange.layerCount = 1;
+    viewInfo.subresourceRange.layerCount = layers;
 
     if (vkCreateImageView(device, &viewInfo, nullptr, &result.imageView) != VK_SUCCESS) {
         LOG_ERROR("Failed to create image view");
     }
 
     return result;
+}
+
+}  // namespace
+
+AllocatedImage createImage(VkDevice device, VmaAllocator allocator,
+    uint32_t width, uint32_t height, VkFormat format,
+    VkImageUsageFlags usage, VkSampleCountFlagBits samples, uint32_t mipLevels,
+    std::source_location where) {
+    return createLayeredImage(device, allocator, width, height, 1, format, usage, samples,
+                              mipLevels, where);
+}
+
+AllocatedImage createArrayImage(VkDevice device, VmaAllocator allocator,
+    uint32_t width, uint32_t height, uint32_t layers, VkFormat format,
+    VkImageUsageFlags usage, std::source_location where) {
+    return createLayeredImage(device, allocator, width, height, layers, format, usage,
+                              VK_SAMPLE_COUNT_1_BIT, 1, where);
 }
 
 void destroyImage(VkDevice device, VmaAllocator allocator, AllocatedImage& image) {
