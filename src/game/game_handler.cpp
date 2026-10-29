@@ -288,15 +288,15 @@ void GameHandler::clearWorldState() {
     if (services_.titlesFeed) services_.titlesFeed->leftWorld();
     transportAttachments_.clear();
     pendingIncomingPackets_.clear();
-    // Fire despawn callbacks so the renderer releases M2/character model resources.
+    // Say every entity left view so the renderer releases M2/character model resources.
     for (const auto& [guid, entity] : entityController_->getEntityManager().getEntities()) {
         if (guid == playerGuid) continue;
-        if (entity->getType() == ObjectType::UNIT && creatureDespawnCallback_)
-            creatureDespawnCallback_(guid);
-        else if (entity->getType() == ObjectType::PLAYER && playerDespawnCallback_)
-            playerDespawnCallback_(guid);
-        else if (entity->getType() == ObjectType::GAMEOBJECT && gameObjectDespawnCallback_)
-            gameObjectDespawnCallback_(guid);
+        if (entity->getType() == ObjectType::UNIT)
+            eventBus().publish(events::CreatureDespawned{guid});
+        else if (entity->getType() == ObjectType::PLAYER)
+            eventBus().publish(events::PlayerDespawned{guid});
+        else if (entity->getType() == ObjectType::GAMEOBJECT)
+            eventBus().publish(events::GameObjectDespawned{guid});
     }
     inventoryHandler_->leaveWorld();
     spellHandler_->clearUnitCastStates();

@@ -3671,7 +3671,7 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
             // avoid false-culling entities that moved while getX/Y/Z was stale.
             // Position sync still uses getX/Y/Z to preserve smooth interpolation for
             // nearby entities; distant entities (> 150u) have planarDist≈0 anyway
-            // so the renderer remains driven correctly by creatureMoveCallback_.
+            // so the renderer remains driven correctly by CreatureMoved.
             glm::vec3 latestCanonical(entity->getLatestX(), entity->getLatestY(), entity->getLatestZ());
             float canonDistSq = 0.0f;
             if (havePlayerPos) {
@@ -5913,7 +5913,7 @@ void Application::setupUICallbacks() {
 
     // ── Entity spawn/despawn (creatures, players, game objects) ──
     entitySpawnCallbacks_ = std::make_unique<EntitySpawnCallbackHandler>(
-        *entitySpawner_, renderer.get(), *gameHandler,
+        *entitySpawner_, renderer.get(), gameHandler->eventBus(),
         [this](uint64_t guid) {
             uint64_t localGuid = gameHandler ? gameHandler->getPlayerGuid() : 0;
             uint64_t activeGuid = gameHandler ? gameHandler->getActiveCharacterGuid() : 0;

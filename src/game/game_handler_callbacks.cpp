@@ -1452,7 +1452,7 @@ void GameHandler::despawnCreatureLocally(uint64_t guid) {
     auto entity = entityManager.getEntity(guid);
     if (!entity || entity->getType() != ObjectType::UNIT) return;
 
-    if (creatureDespawnCallback_) creatureDespawnCallback_(guid);
+    eventBus().publish(events::CreatureDespawned{guid});
     entityManager.removeEntity(guid);
 
     if (guid == combatHandler_->getAutoAttackTargetGuid()) stopAutoAttack();
@@ -1469,7 +1469,7 @@ void GameHandler::despawnGameObjectLocally(uint64_t guid) {
     auto entity = entityManager.getEntity(guid);
     if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return;
 
-    if (gameObjectDespawnCallback_) gameObjectDespawnCallback_(guid);
+    eventBus().publish(events::GameObjectDespawned{guid});
     entityManager.removeEntity(guid);
 
     clearPendingGameObjectLootOpen(guid);

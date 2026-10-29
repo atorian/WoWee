@@ -130,10 +130,11 @@ TEST_CASE("NEW_WORLD waits for the client boundary and holds subsequent packets"
     auto creature = std::make_shared<wowee::game::Unit>(0x1234);
     h.game().getEntityManager().addEntity(creature->getGuid(), creature);
     auto despawns = std::make_shared<unsigned>(0);
-    h.game().setCreatureDespawnCallback([despawns, creatureGuid = creature->getGuid()](uint64_t guid) {
-        CHECK(guid == creatureGuid);
-        ++*despawns;
-    });
+    auto despawnSub = h.events().subscribe<ev::CreatureDespawned>(
+        [despawns, creatureGuid = creature->getGuid()](const ev::CreatureDespawned& e) {
+            CHECK(e.guid == creatureGuid);
+            ++*despawns;
+        });
     h.receive(Opcode::SMSG_NEW_WORLD, Body().u32(1).f32(1000).f32(2000).f32(300).f32(1));
     h.receive(Opcode::SMSG_TIME_SYNC_REQ, Body().u32(91));
     h.game().update(1.0f / 60.0f);
@@ -304,25 +305,25 @@ TEST_CASE("a new map scope is shown every object already in view, once, without 
     std::vector<std::pair<uint64_t, uint32_t>> mounts;
     std::vector<std::pair<uint64_t, uint8_t>> doorStates;
     std::vector<uint64_t> objects;
-    h.game().setCreatureSpawnCallback([&](uint64_t guid, uint32_t displayId, float x, float y, float z,
-                                          float orientation, float) {
-        creatures.push_back(guid);
-        if (guid == creature->getGuid()) {
-            CHECK(displayId == 4321);
-            CHECK(x == 10.0f);
-            CHECK(y == 20.0f);
-            CHECK(z == 30.0f);
-            CHECK(orientation == 1.5f);
+    auto creatureSub = h.events().subscribe<ev::CreatureSpawned>([&](const ev::CreatureSpawned& e) {
+        creatures.push_back(e.guid);
+        if (e.guid == creature->getGuid()) {
+            CHECK(e.displayId == 4321);
+            CHECK(e.x == 10.0f);
+            CHECK(e.y == 20.0f);
+            CHECK(e.z == 30.0f);
+            CHECK(e.orientation == 1.5f);
         }
     });
     auto deathSub = h.events().subscribe<ev::UnitDied>([&](const ev::UnitDied& e) { deaths.push_back(e.guid); });
-    h.game().setOtherPlayerMountCallback([&](uint64_t guid, uint32_t display) { mounts.emplace_back(guid, display); });
-    h.game().setGameObjectStateCallback([&](uint64_t guid, uint8_t state) { doorStates.emplace_back(guid, state); });
-    h.game().setGameObjectSpawnCallback([&](uint64_t guid, uint32_t entry, uint32_t displayId,
-                                            float, float, float, float, float) {
-        objects.push_back(guid);
-        CHECK(entry == 77);
-        CHECK(displayId == 411);
+    auto mountSub = h.events().subscribe<ev::OtherPlayerMounted>(
+        [&](const ev::OtherPlayerMounted& e) { mounts.emplace_back(e.guid, e.mountDisplayId); });
+    auto stateSub = h.events().subscribe<ev::GameObjectStateChanged>(
+        [&](const ev::GameObjectStateChanged& e) { doorStates.emplace_back(e.guid, e.goState); });
+    auto objectSub = h.events().subscribe<ev::GameObjectSpawned>([&](const ev::GameObjectSpawned& e) {
+        objects.push_back(e.guid);
+        CHECK(e.entry == 77);
+        CHECK(e.displayId == 411);
     });
     h.server().clearSent();
 
@@ -337,6 +338,61 @@ TEST_CASE("a new map scope is shown every object already in view, once, without 
     CHECK(h.sentOpcodes().empty());
 }
 
+TEST_CASE("an object the server destroys leaves view as what it is", "[session][harness]") {
+    using namespace wowee::game;
+    GameHarness h;
+    h.enterWorld();
+    auto creature = std::make_shared<Unit>(0x2001);
+    auto player = std::make_shared<Player>(0x2002);
+    auto chest = std::make_shared<GameObject>(0x2003);
+    for (const auto& entity : std::initializer_list<std::shared_ptr<Entity>>{creature, player, chest})
+        h.game().getEntityManager().addEntity(entity->getGuid(), entity);
+
+    std::vector<std::pair<char, uint64_t>> left;
+    auto creatureSub = h.events().subscribe<ev::CreatureDespawned>(
+        [&](const ev::CreatureDespawned& e) { left.emplace_back('c', e.guid); });
+    auto playerSub = h.events().subscribe<ev::PlayerDespawned>(
+        [&](const ev::PlayerDespawned& e) { left.emplace_back('p', e.guid); });
+    auto objectSub = h.events().subscribe<ev::GameObjectDespawned>(
+        [&](const ev::GameObjectDespawned& e) { left.emplace_back('g', e.guid); });
+
+    // SMSG_DESTROY_OBJECT: the guid, and whether it died (WotLK).
+    h.receive(Opcode::SMSG_DESTROY_OBJECT, Body().u64(0x2001).u8(0));
+    h.receive(Opcode::SMSG_DESTROY_OBJECT, Body().u64(0x2002).u8(0));
+    h.receive(Opcode::SMSG_DESTROY_OBJECT, Body().u64(0x2003).u8(0));
+    h.pump();
+
+    CHECK(left == std::vector<std::pair<char, uint64_t>>{{'c', 0x2001}, {'p', 0x2002}, {'g', 0x2003}});
+    CHECK_FALSE(h.game().getEntityManager().hasEntity(0x2002));
+}
+
+TEST_CASE("a game object's custom animation is played; the player's own bobber plays its bite",
+          "[session][harness]") {
+    using namespace wowee::game;
+    GameHarness h;
+    h.enterWorld();
+    auto chest = std::make_shared<GameObject>(0x3001);
+    auto bobber = std::make_shared<GameObject>(0x3002);
+    // OBJECT_FIELD_CREATED_BY, as two words: the player cast it.
+    bobber->setField(6, static_cast<uint32_t>(h.player().guid & 0xFFFFFFFFu));
+    bobber->setField(7, static_cast<uint32_t>(h.player().guid >> 32));
+    h.game().getEntityManager().addEntity(chest->getGuid(), chest);
+    h.game().getEntityManager().addEntity(bobber->getGuid(), bobber);
+
+    std::vector<std::pair<uint64_t, uint32_t>> played;
+    auto sub = h.events().subscribe<ev::GameObjectCustomAnimPlayed>(
+        [&](const ev::GameObjectCustomAnimPlayed& e) { played.emplace_back(e.guid, e.animId); });
+
+    // SMSG_GAMEOBJECT_CUSTOM_ANIM: the object, then an animation id - for a
+    // bobber, AzerothCore's animation progress (100), not a sequence.
+    h.receive(Opcode::SMSG_GAMEOBJECT_CUSTOM_ANIM, Body().u64(0x3001).u32(2));
+    h.receive(Opcode::SMSG_GAMEOBJECT_CUSTOM_ANIM, Body().u64(0x3002).u32(100));
+    h.pump();
+
+    // G_FishingBobber.m2's bite and splash is sequence 153.
+    CHECK(played == std::vector<std::pair<uint64_t, uint32_t>>{{0x3001, 2}, {0x3002, 153}});
+}
+
 TEST_CASE("an empty view announces nothing, and the local player is never presented as another",
           "[session][harness][mapscope]") {
     using namespace wowee::game;
@@ -346,9 +402,8 @@ TEST_CASE("an empty view announces nothing, and the local player is never presen
     self->setDisplayId(49);
     h.game().getEntityManager().addEntity(self->getGuid(), self);
     unsigned spawns = 0;
-    h.game().setPlayerSpawnCallback([&](uint64_t, uint32_t, uint8_t, uint8_t, uint32_t, uint8_t,
-                                        float, float, float, float) { ++spawns; });
-    h.game().setCreatureSpawnCallback([&](uint64_t, uint32_t, float, float, float, float, float) { ++spawns; });
+    auto playerSub = h.events().subscribe<ev::PlayerSpawned>([&](const ev::PlayerSpawned&) { ++spawns; });
+    auto creatureSub = h.events().subscribe<ev::CreatureSpawned>([&](const ev::CreatureSpawned&) { ++spawns; });
     h.game().entityController().announceObjectsInView();
     CHECK(spawns == 0);
 }

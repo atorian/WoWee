@@ -512,13 +512,13 @@ void GameHandler::registerCoreOpcodes() {
         if (!packet.hasRemaining(8)) return;
         uint64_t guid = packet.readUInt64();
         // Trigger a CLOSE animation / freeze before the object is removed
-        if (gameObjectStateCallback_) gameObjectStateCallback_(guid, 0);
+        eventBus().publish(events::GameObjectStateChanged{guid, 0});
     };
     // Game object reset state - return to READY(closed) state
     dispatchTable_[Opcode::SMSG_GAMEOBJECT_RESET_STATE] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(8)) return;
         uint64_t guid = packet.readUInt64();
-        if (gameObjectStateCallback_) gameObjectStateCallback_(guid, 0);
+        eventBus().publish(events::GameObjectStateChanged{guid, 0});
     };
     dispatchTable_[Opcode::SMSG_FORCED_DEATH_UPDATE] = [this](network::Packet& packet) {
         playerDead_ = true;
@@ -676,9 +676,7 @@ void GameHandler::registerCoreOpcodes() {
         if (dismountGuid != playerGuid) {
             LOG_DEBUG("Remote SMSG_DISMOUNT: guid=0x", std::hex,
                       dismountGuid, std::dec);
-            if (otherPlayerMountCallback_) {
-                otherPlayerMountCallback_(dismountGuid, 0);
-            }
+            eventBus().publish(events::OtherPlayerMounted{dismountGuid, 0});
             return;
         }
 
@@ -1065,8 +1063,7 @@ void GameHandler::registerCoreOpcodes() {
                 // G_FishingBobber.m2 sequence 153 is its authored 1.33s bite/splash
                 // animation; sequence 0 is the normal three-second idle bob.
                 constexpr uint32_t kFishingBobberBiteAnimation = 153;
-                if (gameObjectCustomAnimCallback_)
-                    gameObjectCustomAnimCallback_(guid, kFishingBobberBiteAnimation);
+                eventBus().publish(events::GameObjectCustomAnimPlayed{guid, kFishingBobberBiteAnimation});
                 addUIError("A fish is on your line! Right-click to reel it in.");
                 chatHandler_->addSystemChatMessage("A fish is on your line! Right-click to reel it in.");
                 eventBus().publish(events::FishingBite{guid});
@@ -1074,8 +1071,8 @@ void GameHandler::registerCoreOpcodes() {
                             " serverAnimProgress=", animId);
             }
         }
-        if (!ownedFishingBite && gameObjectCustomAnimCallback_)
-            gameObjectCustomAnimCallback_(guid, animId);
+        if (!ownedFishingBite)
+            eventBus().publish(events::GameObjectCustomAnimPlayed{guid, animId});
     };
 
     // Item refund / socket gems / item time

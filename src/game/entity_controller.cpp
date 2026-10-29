@@ -261,20 +261,20 @@ size_t EntityController::processOutOfRangeObjectsUntil(const std::vector<uint64_
         const ObjectType type = entity->getType();
         const int kind = type == ObjectType::UNIT ? 0 : type == ObjectType::PLAYER ? 1
                        : type == ObjectType::GAMEOBJECT ? 2 : 3;
-        if (entity->getType() == ObjectType::UNIT && owner_.creatureDespawnCallbackRef()) {
-            owner_.creatureDespawnCallbackRef()(guid);
+        if (entity->getType() == ObjectType::UNIT) {
+            owner_.eventBus().publish(events::CreatureDespawned{guid});
         } else if (entity->getType() == ObjectType::PLAYER) {
-            if (owner_.playerDespawnCallbackRef()) owner_.playerDespawnCallbackRef()(guid);
+            owner_.eventBus().publish(events::PlayerDespawned{guid});
             // What they wore is decoded again if they come back: forgotten
             // whether or not anything draws them.
             owner_.inventory().forgetPlayerEquipment(guid);
             // Clear pending name query so the query is re-sent when this player
             // comes back into range (entity is recreated as a new object).
             pendingNameQueries.erase(guid);
-        } else if (entity->getType() == ObjectType::GAMEOBJECT && owner_.gameObjectDespawnCallbackRef()) {
-            owner_.gameObjectDespawnCallbackRef()(guid);
-        } else if (entity->getType() == ObjectType::CORPSE && owner_.playerDespawnCallbackRef()) {
-            owner_.playerDespawnCallbackRef()(guid);
+        } else if (entity->getType() == ObjectType::GAMEOBJECT) {
+            owner_.eventBus().publish(events::GameObjectDespawned{guid});
+        } else if (entity->getType() == ObjectType::CORPSE) {
+            owner_.eventBus().publish(events::PlayerDespawned{guid});
         }
         transportGuids_.erase(guid);
         serverUpdatedTransportGuids_.erase(guid);
@@ -988,9 +988,8 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
         else if (key == ufi.mountDisplayId) {
             if (block.guid == owner_.getPlayerGuid()) {
                 detectPlayerMountChange(val, block.fields);
-            } else if (block.objectType == ObjectType::PLAYER &&
-                       owner_.otherPlayerMountCallbackRef()) {
-                owner_.otherPlayerMountCallbackRef()(block.guid, val);
+            } else if (block.objectType == ObjectType::PLAYER) {
+                owner_.eventBus().publish(events::OtherPlayerMounted{block.guid, val});
             }
             unit->setMountDisplayId(val);
         }
@@ -1245,9 +1244,8 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             if (block.guid == owner_.getPlayerGuid()) {
                 detectPlayerMountChange(val, block.fields);
             } else if (entity->getType() == ObjectType::PLAYER &&
-                       val != unit->getMountDisplayId() &&
-                       owner_.otherPlayerMountCallbackRef()) {
-                owner_.otherPlayerMountCallbackRef()(block.guid, val);
+                       val != unit->getMountDisplayId()) {
+                owner_.eventBus().publish(events::OtherPlayerMounted{block.guid, val});
             }
             unit->setMountDisplayId(val);
         } else if (ufi.attackPower != 0xFFFF && key == ufi.attackPower &&
@@ -1694,19 +1692,17 @@ void EntityController::announceUnit(uint64_t guid, ObjectType objectType,
         return;  // Skip local player - spawned separately via spawnPlayerCharacter()
     }
     if (objectType == ObjectType::PLAYER) {
-        if (owner_.playerSpawnCallbackRef()) {
-            uint8_t race = 0, gender = 0, facial = 0;
-            uint32_t appearanceBytes = 0;
-            if (extractPlayerAppearance(entity->getFields(), race, gender, appearanceBytes, facial)) {
-                owner_.playerSpawnCallbackRef()(guid, unit->getDisplayId(), race, gender,
-                                    appearanceBytes, facial,
-                                    unit->getX(), unit->getY(), unit->getZ(), unit->getOrientation());
-            } else {
-                LOG_WARNING("[Spawn] PLAYER guid=0x", std::hex, guid, std::dec,
-                          " displayId=", unit->getDisplayId(), " appearance extraction failed - model will not render");
-            }
+        uint8_t race = 0, gender = 0, facial = 0;
+        uint32_t appearanceBytes = 0;
+        if (extractPlayerAppearance(entity->getFields(), race, gender, appearanceBytes, facial)) {
+            owner_.eventBus().publish(events::PlayerSpawned{
+                guid, unit->getDisplayId(), race, gender, appearanceBytes, facial,
+                unit->getX(), unit->getY(), unit->getZ(), unit->getOrientation()});
+        } else {
+            LOG_WARNING("[Spawn] PLAYER guid=0x", std::hex, guid, std::dec,
+                      " displayId=", unit->getDisplayId(), " appearance extraction failed - model will not render");
         }
-    } else if (owner_.creatureSpawnCallbackRef()) {
+    } else {
         LOG_DEBUG("[Spawn] UNIT guid=0x", std::hex, guid, std::dec,
                   " displayId=", unit->getDisplayId(), " at (",
                   unit->getX(), ",", unit->getY(), ",", unit->getZ(), ")");
@@ -1721,8 +1717,8 @@ void EntityController::announceUnit(uint64_t guid, ObjectType objectType,
                 if (unitScale <= 0.01f || unitScale > 100.0f) unitScale = 1.0f;
             }
         }
-        owner_.creatureSpawnCallbackRef()(guid, unit->getDisplayId(),
-            unit->getX(), unit->getY(), unit->getZ(), unit->getOrientation(), unitScale);
+        owner_.eventBus().publish(events::CreatureSpawned{guid, unit->getDisplayId(),
+            unit->getX(), unit->getY(), unit->getZ(), unit->getOrientation(), unitScale});
     }
     if (isDead) owner_.eventBus().publish(events::UnitDied{guid});
 }
@@ -1741,8 +1737,8 @@ void EntityController::announceObjectsInView() {
             announceUnit(guid, entity->getType(), entity, unit, dead);
             if (entity->getType() == ObjectType::PLAYER && guid != owner_.getPlayerGuid()) {
                 ++players;
-                if (unit->getMountDisplayId() != 0 && owner_.otherPlayerMountCallbackRef())
-                    owner_.otherPlayerMountCallbackRef()(guid, unit->getMountDisplayId());
+                if (unit->getMountDisplayId() != 0)
+                    owner_.eventBus().publish(events::OtherPlayerMounted{guid, unit->getMountDisplayId()});
             } else if (entity->getType() == ObjectType::UNIT) {
                 ++units;
             }
@@ -2073,10 +2069,11 @@ void EntityController::announceGameObject(uint64_t guid, const GameObject& go) {
     // here and nowhere else. Only the update path read it, so every object came
     // into view in its closed pose and stayed there until something changed it.
     const uint16_t ufBytes1 = fieldIndex(UF::GAMEOBJECT_BYTES_1);
-    if (ufBytes1 != 0xFFFF && go.hasField(ufBytes1) && owner_.gameObjectStateCallbackRef()) {
-        owner_.gameObjectStateCallbackRef()(guid, static_cast<uint8_t>(go.getField(ufBytes1) & 0xFF));
+    if (ufBytes1 != 0xFFFF && go.hasField(ufBytes1)) {
+        owner_.eventBus().publish(events::GameObjectStateChanged{
+            guid, static_cast<uint8_t>(go.getField(ufBytes1) & 0xFF)});
     }
-    if (go.getDisplayId() != 0 && owner_.gameObjectSpawnCallbackRef()) {
+    if (go.getDisplayId() != 0) {
         float goScale = 1.0f;
         {
             uint16_t scaleIdx = fieldIndex(UF::OBJECT_FIELD_SCALE_X);
@@ -2088,8 +2085,8 @@ void EntityController::announceGameObject(uint64_t guid, const GameObject& go) {
                 }
             }
         }
-        owner_.gameObjectSpawnCallbackRef()(guid, go.getEntry(), go.getDisplayId(),
-            go.getX(), go.getY(), go.getZ(), go.getOrientation(), goScale);
+        owner_.eventBus().publish(events::GameObjectSpawned{guid, go.getEntry(), go.getDisplayId(),
+            go.getX(), go.getY(), go.getZ(), go.getOrientation(), goScale});
     }
     // Fire transport move callback for transports (position update on re-creation).
     // NOTE: do NOT mark the guid as server-updated here. A CREATE only carries the
@@ -2180,14 +2177,14 @@ void EntityController::announceCorpse(uint64_t guid, const Entity& corpse) {
         // under the corpse GUID, then force the queued instance into DEATH.
         auto characterIt = std::find_if(owner_.charactersRef().begin(), owner_.charactersRef().end(),
             [&](const Character& character) { return character.guid == owner_.getPlayerGuid(); });
-        if (characterIt != owner_.charactersRef().end() && owner_.playerSpawnCallbackRef()) {
-            owner_.playerSpawnCallbackRef()(
+        if (characterIt != owner_.charactersRef().end()) {
+            owner_.eventBus().publish(events::PlayerSpawned{
                 guid, 0,
                 static_cast<uint8_t>(characterIt->race),
                 static_cast<uint8_t>(characterIt->gender),
                 characterIt->appearanceBytes,
                 characterIt->facialFeatures,
-                corpse.getX(), corpse.getY(), corpse.getZ(), corpse.getOrientation());
+                corpse.getX(), corpse.getY(), corpse.getZ(), corpse.getOrientation()});
 
             events::PlayerEquipmentResolved worn{.guid = guid};
             const size_t count = std::min<size_t>(19, characterIt->equipment.size());
@@ -2211,14 +2208,14 @@ void EntityController::announceCorpse(uint64_t guid, const Entity& corpse) {
     const uint32_t bytes2 = field(UF::CORPSE_FIELD_BYTES_2);
     const auto race = static_cast<uint8_t>((bytes1 >> 8) & 0xFF);
     const auto gender = static_cast<uint8_t>((bytes1 >> 16) & 0xFF);
-    if (!hasPlayerModel(static_cast<Race>(race)) || !owner_.playerSpawnCallbackRef()) return;
+    if (!hasPlayerModel(static_cast<Race>(race))) return;
     // Laid out as PLAYER_BYTES is: skin, face, hair style, hair colour.
     const uint32_t appearance = ((bytes1 >> 24) & 0xFF) | ((bytes2 & 0xFF) << 8) |
                                 (((bytes2 >> 8) & 0xFF) << 16) | (((bytes2 >> 16) & 0xFF) << 24);
     const auto facialHair = static_cast<uint8_t>((bytes2 >> 24) & 0xFF);
-    owner_.playerSpawnCallbackRef()(guid, field(UF::CORPSE_FIELD_DISPLAY_ID), race, gender,
-                                    appearance, facialHair, corpse.getX(), corpse.getY(), corpse.getZ(),
-                                    corpse.getOrientation());
+    owner_.eventBus().publish(events::PlayerSpawned{guid, field(UF::CORPSE_FIELD_DISPLAY_ID), race, gender,
+                                                    appearance, facialHair, corpse.getX(), corpse.getY(),
+                                                    corpse.getZ(), corpse.getOrientation()});
     {
         events::PlayerEquipmentResolved worn{.guid = guid};
         for (uint32_t i = 0; i < 19; ++i) {
@@ -2345,9 +2342,9 @@ void EntityController::onValuesUpdateGameObject(const UpdateBlock& block, std::s
             serverUpdatedTransportGuids_.insert(block.guid);
             owner_.transportMoveCallbackRef()(block.guid, entity->getX(), entity->getY(),
                                    entity->getZ(), entity->getOrientation());
-        } else if (owner_.gameObjectMoveCallbackRef()) {
-            owner_.gameObjectMoveCallbackRef()(block.guid, entity->getX(), entity->getY(),
-                                    entity->getZ(), entity->getOrientation());
+        } else {
+            owner_.eventBus().publish(events::GameObjectMoved{block.guid, entity->getX(), entity->getY(),
+                                                              entity->getZ(), entity->getOrientation()});
         }
     }
 
@@ -2357,8 +2354,7 @@ void EntityController::onValuesUpdateGameObject(const UpdateBlock& block, std::s
         auto itB = block.fields.find(ufGoBytes1);
         if (itB != block.fields.end()) {
             uint8_t goState = static_cast<uint8_t>(itB->second & 0xFF);
-            if (owner_.gameObjectStateCallbackRef())
-                owner_.gameObjectStateCallbackRef()(block.guid, goState);
+            owner_.eventBus().publish(events::GameObjectStateChanged{block.guid, goState});
         }
     }
 
@@ -2591,10 +2587,9 @@ void EntityController::handleMovementUpdate(const UpdateBlock& block) {
                 }
                 // Fire move callback for non-transport gameobjects.
                 if (entity->getType() == ObjectType::GAMEOBJECT &&
-                    transportGuids_.count(block.guid) == 0 &&
-                    owner_.gameObjectMoveCallbackRef()) {
-                    owner_.gameObjectMoveCallbackRef()(block.guid, entity->getX(), entity->getY(),
-                                            entity->getZ(), entity->getOrientation());
+                    transportGuids_.count(block.guid) == 0) {
+                    owner_.eventBus().publish(events::GameObjectMoved{block.guid, entity->getX(), entity->getY(),
+                                                                      entity->getZ(), entity->getOrientation()});
                 }
                 // Fire move callback for non-player units (creatures).
                 // SMSG_MONSTER_MOVE handles smooth interpolated movement, but many
@@ -2602,9 +2597,8 @@ void EntityController::handleMovementUpdate(const UpdateBlock& block) {
                 // via MOVEMENT blocks instead. Use duration=0 for an instant snap.
                 if (block.guid != owner_.getPlayerGuid() &&
                     entity->getType() == ObjectType::UNIT &&
-                    transportGuids_.count(block.guid) == 0 &&
-                    owner_.creatureMoveCallbackRef()) {
-                    owner_.creatureMoveCallbackRef()(block.guid, pos.x, pos.y, pos.z, 0);
+                    transportGuids_.count(block.guid) == 0) {
+                    owner_.eventBus().publish(events::CreatureMoved{block.guid, pos.x, pos.y, pos.z, 0});
                 }
             } else {
                 LOG_WARNING("MOVEMENT update for unknown entity: 0x", std::hex, block.guid, std::dec);
@@ -2703,17 +2697,17 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
         // Mirror out-of-range handling: invoke render-layer despawn callbacks before entity removal.
         auto entity = entityManager.getEntity(data.guid);
         if (entity) {
-            if (entity->getType() == ObjectType::UNIT && owner_.creatureDespawnCallbackRef()) {
-                owner_.creatureDespawnCallbackRef()(data.guid);
+            if (entity->getType() == ObjectType::UNIT) {
+                owner_.eventBus().publish(events::CreatureDespawned{data.guid});
             } else if (entity->getType() == ObjectType::PLAYER) {
                 // Player entities also need renderer cleanup on DESTROY_OBJECT, not just out-of-range.
-                if (owner_.playerDespawnCallbackRef()) owner_.playerDespawnCallbackRef()(data.guid);
+                owner_.eventBus().publish(events::PlayerDespawned{data.guid});
                 owner_.inventory().forgetPlayerEquipment(data.guid);
                 pendingNameQueries.erase(data.guid);
-            } else if (entity->getType() == ObjectType::GAMEOBJECT && owner_.gameObjectDespawnCallbackRef()) {
-                owner_.gameObjectDespawnCallbackRef()(data.guid);
-            } else if (entity->getType() == ObjectType::CORPSE && owner_.playerDespawnCallbackRef()) {
-                owner_.playerDespawnCallbackRef()(data.guid);
+            } else if (entity->getType() == ObjectType::GAMEOBJECT) {
+                owner_.eventBus().publish(events::GameObjectDespawned{data.guid});
+            } else if (entity->getType() == ObjectType::CORPSE) {
+                owner_.eventBus().publish(events::PlayerDespawned{data.guid});
             }
         }
         if (transportGuids_.count(data.guid) > 0) {

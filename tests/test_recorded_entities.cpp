@@ -1,6 +1,7 @@
 #include <catch_amalgamated.hpp>
 #include "game_harness.hpp"
 #include "game/entity_controller.hpp"
+#include "game/game_events.hpp"
 #include "core/coordinates.hpp"
 
 using namespace wowee;
@@ -10,10 +11,10 @@ TEST_CASE("recorded entities use the normal create, appearance update and despaw
     h.enterWorld();
     std::vector<uint32_t> displays;
     std::vector<uint64_t> removed;
-    h.game().setCreatureSpawnCallback([&](uint64_t, uint32_t display, float,float,float,float,float) {
-        displays.push_back(display);
-    });
-    h.game().setCreatureDespawnCallback([&](uint64_t guid) { removed.push_back(guid); });
+    auto spawnSub = h.events().subscribe<game::events::CreatureSpawned>(
+        [&](const game::events::CreatureSpawned& e) { displays.push_back(e.displayId); });
+    auto despawnSub = h.events().subscribe<game::events::CreatureDespawned>(
+        [&](const game::events::CreatureDespawned& e) { removed.push_back(e.guid); });
     game::UpdateBlock object{};
     object.guid=0xf130000000000077ULL;
     object.objectType=game::ObjectType::UNIT;

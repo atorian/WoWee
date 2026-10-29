@@ -1801,30 +1801,23 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
                                 orientation, data.duration / 1000.0f);
         }
 
-        if (owner_.creatureMoveCallbackRef()) {
-            owner_.creatureMoveCallbackRef()(data.guid,
-                destCanonical.x, destCanonical.y, destCanonical.z,
-                data.duration);
-        }
+        owner_.eventBus().publish(events::CreatureMoved{data.guid,
+            destCanonical.x, destCanonical.y, destCanonical.z, data.duration});
     } else if (data.moveType == 1) {
         glm::vec3 posCanonical = core::coords::serverToCanonical(
             glm::vec3(data.x, data.y, data.z));
         entity->setPosition(posCanonical.x, posCanonical.y, posCanonical.z,
                             entity->getOrientation());
 
-        if (owner_.creatureMoveCallbackRef()) {
-            owner_.creatureMoveCallbackRef()(data.guid,
-                posCanonical.x, posCanonical.y, posCanonical.z, 0);
-        }
+        owner_.eventBus().publish(events::CreatureMoved{data.guid,
+            posCanonical.x, posCanonical.y, posCanonical.z, 0});
     } else if (data.moveType == 4) {
         float orientation = core::coords::serverToCanonicalYaw(data.facingAngle);
         glm::vec3 posCanonical = core::coords::serverToCanonical(
             glm::vec3(data.x, data.y, data.z));
         entity->setPosition(posCanonical.x, posCanonical.y, posCanonical.z, orientation);
-        if (owner_.creatureMoveCallbackRef()) {
-            owner_.creatureMoveCallbackRef()(data.guid,
-                posCanonical.x, posCanonical.y, posCanonical.z, 0);
-        }
+        owner_.eventBus().publish(events::CreatureMoved{data.guid,
+            posCanonical.x, posCanonical.y, posCanonical.z, 0});
     } else if (data.moveType == 3 && data.facingTarget != 0) {
         auto target = owner_.getEntityManager().getEntity(data.facingTarget);
         if (target) {
@@ -1858,8 +1851,8 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
             owner_.movement().setTransportAttachment(moverGuid, entity->getType(), transportGuid, localCanonical, false, 0.0f);
             glm::vec3 worldPos = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, localCanonical);
             entity->setPosition(worldPos.x, worldPos.y, worldPos.z, entity->getOrientation());
-            if (entity->getType() == ObjectType::UNIT && owner_.creatureMoveCallbackRef())
-                owner_.creatureMoveCallbackRef()(moverGuid, worldPos.x, worldPos.y, worldPos.z, 0);
+            if (entity->getType() == ObjectType::UNIT)
+                owner_.eventBus().publish(events::CreatureMoved{moverGuid, worldPos.x, worldPos.y, worldPos.z, 0});
         }
         return;
     }
@@ -1874,8 +1867,8 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
             owner_.movement().setTransportAttachment(moverGuid, entity->getType(), transportGuid, localCanonical, false, 0.0f);
             glm::vec3 worldPos = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, localCanonical);
             entity->setPosition(worldPos.x, worldPos.y, worldPos.z, entity->getOrientation());
-            if (entity->getType() == ObjectType::UNIT && owner_.creatureMoveCallbackRef())
-                owner_.creatureMoveCallbackRef()(moverGuid, worldPos.x, worldPos.y, worldPos.z, 0);
+            if (entity->getType() == ObjectType::UNIT)
+                owner_.eventBus().publish(events::CreatureMoved{moverGuid, worldPos.x, worldPos.y, worldPos.z, 0});
         }
         return;
     }
@@ -1954,8 +1947,8 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
         owner_.movement().setTransportAttachment(moverGuid, entity->getType(), transportGuid, destLocalCanonical, false, 0.0f);
         entity->startMoveTo(destWorld.x, destWorld.y, destWorld.z, facingAngle, duration / 1000.0f);
 
-        if (entity->getType() == ObjectType::UNIT && owner_.creatureMoveCallbackRef())
-            owner_.creatureMoveCallbackRef()(moverGuid, destWorld.x, destWorld.y, destWorld.z, duration);
+        if (entity->getType() == ObjectType::UNIT)
+            owner_.eventBus().publish(events::CreatureMoved{moverGuid, destWorld.x, destWorld.y, destWorld.z, duration});
 
         LOG_DEBUG("SMSG_MONSTER_MOVE_TRANSPORT: mover=0x", std::hex, moverGuid,
                   " transport=0x", transportGuid, std::dec,
@@ -1964,8 +1957,8 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
         glm::vec3 startWorld = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, startLocalCanonical);
         owner_.movement().setTransportAttachment(moverGuid, entity->getType(), transportGuid, startLocalCanonical, false, 0.0f);
         entity->setPosition(startWorld.x, startWorld.y, startWorld.z, facingAngle);
-        if (entity->getType() == ObjectType::UNIT && owner_.creatureMoveCallbackRef())
-            owner_.creatureMoveCallbackRef()(moverGuid, startWorld.x, startWorld.y, startWorld.z, 0);
+        if (entity->getType() == ObjectType::UNIT)
+            owner_.eventBus().publish(events::CreatureMoved{moverGuid, startWorld.x, startWorld.y, startWorld.z, 0});
     }
 }
 
@@ -2321,12 +2314,12 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
 
     for (const auto& [guid, entity] : owner_.getEntityManager().getEntities()) {
         if (guid == owner_.getPlayerGuid()) continue;
-        if (entity->getType() == ObjectType::UNIT && owner_.creatureDespawnCallbackRef()) {
-            owner_.creatureDespawnCallbackRef()(guid);
-        } else if (entity->getType() == ObjectType::PLAYER && owner_.playerDespawnCallbackRef()) {
-            owner_.playerDespawnCallbackRef()(guid);
-        } else if (entity->getType() == ObjectType::GAMEOBJECT && owner_.gameObjectDespawnCallbackRef()) {
-            owner_.gameObjectDespawnCallbackRef()(guid);
+        if (entity->getType() == ObjectType::UNIT) {
+            owner_.eventBus().publish(events::CreatureDespawned{guid});
+        } else if (entity->getType() == ObjectType::PLAYER) {
+            owner_.eventBus().publish(events::PlayerDespawned{guid});
+        } else if (entity->getType() == ObjectType::GAMEOBJECT) {
+            owner_.eventBus().publish(events::GameObjectDespawned{guid});
         }
     }
     owner_.inventory().leaveWorld();
@@ -3713,13 +3706,10 @@ void MovementHandler::updateAttachedTransportChildren(float /*deltaTime*/) {
         entity->setPosition(composed.x, composed.y, composed.z, composedOrientation);
 
         if (attachment.type == ObjectType::UNIT) {
-            if (owner_.creatureMoveCallbackRef()) {
-                owner_.creatureMoveCallbackRef()(childGuid, composed.x, composed.y, composed.z, 0);
-            }
+            owner_.eventBus().publish(events::CreatureMoved{childGuid, composed.x, composed.y, composed.z, 0});
         } else if (attachment.type == ObjectType::GAMEOBJECT) {
-            if (owner_.gameObjectMoveCallbackRef()) {
-                owner_.gameObjectMoveCallbackRef()(childGuid, composed.x, composed.y, composed.z, composedOrientation);
-            }
+            owner_.eventBus().publish(events::GameObjectMoved{
+                childGuid, composed.x, composed.y, composed.z, composedOrientation});
         }
     }
 

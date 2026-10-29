@@ -196,7 +196,7 @@ ClientHarness::ClientHarness()
     spawner_ = std::make_unique<core::EntitySpawner>(nullptr, nullptr, &game(), nullptr,
                                                      playerView_.get());
     spawnCallbacks_ = std::make_unique<core::EntitySpawnCallbackHandler>(
-        *spawner_, nullptr, game(), [this](uint64_t guid) {
+        *spawner_, nullptr, game().eventBus(), [this](uint64_t guid) {
             return guid != 0 &&
                    (guid == game().getPlayerGuid() || guid == game().getActiveCharacterGuid());
         });

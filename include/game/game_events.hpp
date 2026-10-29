@@ -88,6 +88,92 @@ struct UnitRespawned {
     uint64_t guid = 0;
 };
 
+// ---- What is in view ----
+
+/// A creature came into view, or its display changed in place. Canonical
+/// position; scale is OBJECT_FIELD_SCALE_X.
+struct CreatureSpawned {
+    uint64_t guid = 0;
+    uint32_t displayId = 0;
+    float x = 0, y = 0, z = 0;
+    float orientation = 0;
+    float scale = 1.0f;
+};
+
+/// A creature left view.
+struct CreatureDespawned {
+    uint64_t guid = 0;
+};
+
+/// A unit is moving to a canonical position over durationMs (0 = at once).
+struct CreatureMoved {
+    uint64_t guid = 0;
+    float x = 0, y = 0, z = 0;
+    uint32_t durationMs = 0;
+};
+
+/// Another player - or a player's corpse - came into view, with the
+/// appearance the renderer builds the body and hair textures from.
+struct PlayerSpawned {
+    uint64_t guid = 0;
+    uint32_t displayId = 0;
+    uint8_t raceId = 0;
+    uint8_t genderId = 0;
+    uint32_t appearanceBytes = 0;
+    uint8_t facialFeatures = 0;
+    float x = 0, y = 0, z = 0;
+    float orientation = 0;
+};
+
+/// A player or a corpse left view.
+struct PlayerDespawned {
+    uint64_t guid = 0;
+};
+
+/// A player in view other than the local character mounted (the mount's
+/// display id) or dismounted (0).
+struct OtherPlayerMounted {
+    uint64_t guid = 0;
+    uint32_t mountDisplayId = 0;
+};
+
+/// A game object came into view. Canonical position; scale is
+/// OBJECT_FIELD_SCALE_X.
+struct GameObjectSpawned {
+    uint64_t guid = 0;
+    uint32_t entry = 0;
+    uint32_t displayId = 0;
+    float x = 0, y = 0, z = 0;
+    float orientation = 0;
+    float scale = 1.0f;
+};
+
+/// A game object moved to a canonical position.
+struct GameObjectMoved {
+    uint64_t guid = 0;
+    float x = 0, y = 0, z = 0;
+    float orientation = 0;
+};
+
+/// A game object left view.
+struct GameObjectDespawned {
+    uint64_t guid = 0;
+};
+
+/// A game object plays a one-shot animation: SMSG_GAMEOBJECT_CUSTOM_ANIM, or a
+/// fishing bobber's bite.
+struct GameObjectCustomAnimPlayed {
+    uint64_t guid = 0;
+    uint32_t animId = 0;
+};
+
+/// A game object's state byte (GAMEOBJECT_BYTES_1) changed: 0 ready (closed),
+/// 1 open, 2 destroyed.
+struct GameObjectStateChanged {
+    uint64_t guid = 0;
+    uint8_t goState = 0;
+};
+
 // ---- The player ----
 
 /// How drunk the player is, from 0 (sober, and on every character change) to

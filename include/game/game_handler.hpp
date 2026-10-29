@@ -952,51 +952,6 @@ public:
     using BindPointCallback = std::function<void(uint32_t mapId, float x, float y, float z)>;
     void setBindPointCallback(BindPointCallback cb) { bindPointCallback_ = std::move(cb); }
 
-    // Creature spawn callback (online mode - triggered when creature enters view)
-    // Parameters: guid, displayId, x, y, z (canonical), orientation, scale (OBJECT_FIELD_SCALE_X)
-    using CreatureSpawnCallback = std::function<void(uint64_t guid, uint32_t displayId, float x, float y, float z, float orientation, float scale)>;
-    void setCreatureSpawnCallback(CreatureSpawnCallback cb) { creatureSpawnCallback_ = std::move(cb); }
-
-    // Creature despawn callback (online mode - triggered when creature leaves view)
-    using CreatureDespawnCallback = std::function<void(uint64_t guid)>;
-    void setCreatureDespawnCallback(CreatureDespawnCallback cb) { creatureDespawnCallback_ = std::move(cb); }
-
-    // Player spawn callback (online mode - triggered when a player enters view).
-    // Players need appearance data so the renderer can build the right body/hair textures.
-    using PlayerSpawnCallback = std::function<void(uint64_t guid,
-                                                   uint32_t displayId,
-                                                   uint8_t raceId,
-                                                   uint8_t genderId,
-                                                   uint32_t appearanceBytes,
-                                                   uint8_t facialFeatures,
-                                                   float x, float y, float z, float orientation)>;
-    void setPlayerSpawnCallback(PlayerSpawnCallback cb) { playerSpawnCallback_ = std::move(cb); }
-
-    using PlayerDespawnCallback = std::function<void(uint64_t guid)>;
-    void setPlayerDespawnCallback(PlayerDespawnCallback cb) { playerDespawnCallback_ = std::move(cb); }
-
-    // GameObject spawn callback (online mode - triggered when gameobject enters view)
-    // Parameters: guid, entry, displayId, x, y, z (canonical), orientation, scale (OBJECT_FIELD_SCALE_X)
-    using GameObjectSpawnCallback = std::function<void(uint64_t guid, uint32_t entry, uint32_t displayId, float x, float y, float z, float orientation, float scale)>;
-    void setGameObjectSpawnCallback(GameObjectSpawnCallback cb) { gameObjectSpawnCallback_ = std::move(cb); }
-
-    // GameObject move callback (online mode - triggered when gameobject position updates)
-    // Parameters: guid, x, y, z (canonical), orientation
-    using GameObjectMoveCallback = std::function<void(uint64_t guid, float x, float y, float z, float orientation)>;
-    void setGameObjectMoveCallback(GameObjectMoveCallback cb) { gameObjectMoveCallback_ = std::move(cb); }
-
-    // GameObject despawn callback (online mode - triggered when gameobject leaves view)
-    using GameObjectDespawnCallback = std::function<void(uint64_t guid)>;
-    void setGameObjectDespawnCallback(GameObjectDespawnCallback cb) { gameObjectDespawnCallback_ = std::move(cb); }
-
-    using GameObjectCustomAnimCallback = std::function<void(uint64_t guid, uint32_t animId)>;
-    void setGameObjectCustomAnimCallback(GameObjectCustomAnimCallback cb) { gameObjectCustomAnimCallback_ = std::move(cb); }
-
-    // GameObject state change callback (triggered when GAMEOBJECT_BYTES_1 updates - state byte changes)
-    // goState: 0=READY(closed), 1=OPEN, 2=DESTROYED
-    using GameObjectStateCallback = std::function<void(uint64_t guid, uint8_t goState)>;
-    void setGameObjectStateCallback(GameObjectStateCallback cb) { gameObjectStateCallback_ = std::move(cb); }
-
     // Vehicle state callback - fired when player enters/exits a vehicle
     using VehicleStateCallback = std::function<void(bool entered, uint32_t vehicleId)>;
     void setVehicleStateCallback(VehicleStateCallback cb) { vehicleStateCallback_ = std::move(cb); }
@@ -1032,11 +987,6 @@ public:
     /// any standing, but at Unfriendly they will not talk to one either, and
     /// the server refuses the conversation on exactly this number.
     [[nodiscard]] int unitReactionToPlayer(const Unit& unit) const;
-
-    // Creature move callback (online mode - triggered by SMSG_MONSTER_MOVE)
-    // Parameters: guid, x, y, z (canonical), duration_ms (0 = instant)
-    using CreatureMoveCallback = std::function<void(uint64_t guid, float x, float y, float z, uint32_t durationMs)>;
-    void setCreatureMoveCallback(CreatureMoveCallback cb) { creatureMoveCallback_ = std::move(cb); }
 
     // Transport move callback (online mode - triggered when transport position updates)
     // Parameters: guid, x, y, z (canonical), orientation
@@ -1537,10 +1487,6 @@ public:
     using MountCallback = std::function<void(uint32_t mountDisplayId)>;  // 0 = dismount
     void setMountCallback(MountCallback cb) { mountCallback_ = std::move(cb); }
 
-    // Mount display changes for visible players other than the local character.
-    using OtherPlayerMountCallback = std::function<void(uint64_t guid, uint32_t mountDisplayId)>;
-    void setOtherPlayerMountCallback(OtherPlayerMountCallback cb) { otherPlayerMountCallback_ = std::move(cb); }
-
     // Taxi terrain precaching callback
     using TaxiPrecacheCallback = std::function<void(const std::vector<glm::vec3>&)>;
     void setTaxiPrecacheCallback(TaxiPrecacheCallback cb) { taxiPrecacheCallback_ = std::move(cb); }
@@ -1902,13 +1848,6 @@ public:
     auto& appearanceChangedCallbackRef() { return appearanceChangedCallback_; }
     auto& playerModelRebuildCallbackRef() { return playerModelRebuildCallback_; }
     auto& autoFollowCallbackRef() { return autoFollowCallback_; }
-    auto& creatureDespawnCallbackRef() { return creatureDespawnCallback_; }
-    auto& creatureMoveCallbackRef() { return creatureMoveCallback_; }
-    auto& creatureSpawnCallbackRef() { return creatureSpawnCallback_; }
-    auto& gameObjectDespawnCallbackRef() { return gameObjectDespawnCallback_; }
-    auto& gameObjectMoveCallbackRef() { return gameObjectMoveCallback_; }
-    auto& gameObjectSpawnCallbackRef() { return gameObjectSpawnCallback_; }
-    auto& gameObjectStateCallbackRef() { return gameObjectStateCallback_; }
     auto& hitReactionCallbackRef() { return hitReactionCallback_; }
     auto& knockBackCallbackRef() { return knockBackCallback_; }
     void suppressNextMeleeSwingAnim() override { suppressMeleeSwingAnim_ = true; }
@@ -1919,10 +1858,7 @@ public:
     }
     auto& mountCallbackRef() { return mountCallback_; }
     auto& npcAggroCallbackRef() { return npcAggroCallback_; }
-    auto& otherPlayerMountCallbackRef() { return otherPlayerMountCallback_; }
-    auto& playerDespawnCallbackRef() { return playerDespawnCallback_; }
     auto& playerHealthCallbackRef() { return playerHealthCallback_; }
-    auto& playerSpawnCallbackRef() { return playerSpawnCallback_; }
     auto& stealthStateCallbackRef() { return stealthStateCallback_; }
     auto& stunStateCallbackRef() { return stunStateCallback_; }
     auto& taxiFlightStartCallbackRef() { return taxiFlightStartCallback_; }
@@ -2287,18 +2223,8 @@ private:
     UnstuckCallback unstuckGyCallback_;
     UnstuckCallback unstuckHearthCallback_;
     BindPointCallback bindPointCallback_;
-    CreatureSpawnCallback creatureSpawnCallback_;
-    CreatureDespawnCallback creatureDespawnCallback_;
-    PlayerSpawnCallback playerSpawnCallback_;
-    PlayerDespawnCallback playerDespawnCallback_;
-    CreatureMoveCallback creatureMoveCallback_;
     TransportMoveCallback transportMoveCallback_;
     TransportSpawnCallback transportSpawnCallback_;
-    GameObjectSpawnCallback gameObjectSpawnCallback_;
-    GameObjectMoveCallback gameObjectMoveCallback_;
-    GameObjectDespawnCallback gameObjectDespawnCallback_;
-    GameObjectCustomAnimCallback gameObjectCustomAnimCallback_;
-    GameObjectStateCallback gameObjectStateCallback_;
     VehicleStateCallback vehicleStateCallback_;
 
     // Transport tracking
@@ -2555,7 +2481,6 @@ private:
     /// Languages.dbc, read once on the first ask like the caches beside it.
     mutable std::unordered_map<uint32_t, std::string> languageNames_;
     mutable bool languageNamesLoaded_ = false;
-    OtherPlayerMountCallback otherPlayerMountCallback_;
     MountCallback mountCallback_;
     TaxiPrecacheCallback taxiPrecacheCallback_;
     TaxiOrientationCallback taxiOrientationCallback_;
