@@ -144,8 +144,8 @@ void M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
                 continue;
             }
             const int seq = inst.currentSequenceIndex;
-            const float t = inst.animTime;
-            const float gt = inst.globalSequenceTime;
+            const float t = animTimeOf(inst);
+            const float gt = globalSequenceTimeOf(inst);
             const auto& gsd = model->globalSequenceDurations;
             // Visibility is a switch: the Dalaran lamp's is 0 until it opens.
             if (m2_track::sampleFloat(light.visibility, seq, t, gt, gsd, 1.0f) < 0.5f) continue;
@@ -1156,6 +1156,8 @@ void M2Renderer::shutdown() {
 void M2Renderer::destroyModelGPU(uint32_t modelId, std::shared_ptr<M2ModelGPU> retired) {
     if (!vkCtx_) return;
     releaseRtModel(modelId, *retired);
+    // The shared emitter texture sets it used; the last use frees one.
+    releaseEmitterTexSets(*retired);
     // Detach ownership immediately; command buffers retain these handles until
     // every frame slot has fenced. Capture values, never this or model refs.
     VkContext* ctx = vkCtx_;
@@ -1167,12 +1169,6 @@ void M2Renderer::destroyModelGPU(uint32_t modelId, std::shared_ptr<M2ModelGPU> r
         for (auto& batch : retired->batches) {
             if (batch.materialSet) ctx->freeDescriptorSets(pool, 1, &batch.materialSet);
             if (slots) slots->free(batch.materialSlot);
-        }
-        for (auto set : retired->particleTexSets) {
-            if (set) ctx->freeDescriptorSets(pool, 1, &set);
-        }
-        for (auto set : retired->ribbonTexSets) {
-            if (set) ctx->freeDescriptorSets(pool, 1, &set);
         }
     });
 }

@@ -81,10 +81,10 @@ WMORenderer::~WMORenderer() {
     shutdown();
 }
 
-/// Builds the three main-pass pipelines from an already-loaded shader pair.
+/// Builds the four main-pass pipelines from an already-loaded shader pair.
 ///
-/// initialize() and recreatePipelines() both need exactly these three, in
-/// exactly these states, and each described all three for itself. They only
+/// initialize() and recreatePipelines() both need exactly these four, in
+/// exactly these states, and each described all four for itself. They only
 /// differ in what happens when one fails to build: the first cannot continue,
 /// the second is a rebuild after a settings change and leaves the renderer
 /// with whatever it managed.
@@ -96,6 +96,17 @@ bool WMORenderer::buildMainPassPipelines(VkDevice device,
         perVertexBinding(sizeof(WMOVertex));
     const std::vector<VkVertexInputAttributeDescription> vertexAttribs =
         toVkAttributes(kWmoVertexAttributes);
+
+    // The fragment shader with its alpha test compiled in (kAlphaTestPipeline).
+    // Every pipeline but the opaque one takes it, so they draw as before; the
+    // opaque one leaves it out so that the shader cannot discard at all.
+    const VkBool32 alphaTestOn = VK_TRUE;
+    const VkSpecializationMapEntry alphaTestEntry{.constantID = 0, .offset = 0,
+                                                  .size = sizeof(VkBool32)};
+    const VkSpecializationInfo alphaTestSpec{.mapEntryCount = 1, .pMapEntries = &alphaTestEntry,
+                                             .dataSize = sizeof(VkBool32), .pData = &alphaTestOn};
+    VkPipelineShaderStageCreateInfo alphaTestFrag = fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT);
+    alphaTestFrag.pSpecializationInfo = &alphaTestSpec;
 
     // --- Build opaque pipeline (base for derivatives - shared state optimization) ---
     VkRenderPass mainPass = vkCtx_->getImGuiRenderPass();
@@ -120,10 +131,29 @@ bool WMORenderer::buildMainPassPipelines(VkDevice device,
         return false;
     }
 
+    // --- Build alpha-test pipeline (derivative - opaque state, shader can discard) ---
+    alphaTestPipeline_ = PipelineBuilder()
+        .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT), alphaTestFrag)
+        .setVertexInput({ vertexBinding }, vertexAttribs)
+        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, kWmoFrontFace)
+        .setDepthTest(true, true, VK_COMPARE_OP_LESS_OR_EQUAL)
+        .setColorBlendAttachment(PipelineBuilder::blendDisabled())
+        .setMultisample(vkCtx_->getMsaaSamples())
+        .setLayout(pipelineLayout_)
+        .setRenderPass(mainPass)
+        .setDynamicStates(viewportAndScissorDynamic())
+        .setFlags(VK_PIPELINE_CREATE_DERIVATIVE_BIT)
+        .setBasePipeline(opaquePipeline_)
+        .build(device, vkCtx_->getPipelineCache());
+
+    if (!alphaTestPipeline_) {
+        core::Logger::getInstance().error("WMORenderer: alpha-test pipeline not available");
+    }
+
     // --- Build transparent pipeline (derivative of opaque) ---
     transparentPipeline_ = PipelineBuilder()
-        .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
-                    fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+        .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT), alphaTestFrag)
         .setVertexInput({ vertexBinding }, vertexAttribs)
         .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
         .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, kWmoFrontFace)
@@ -143,8 +173,7 @@ bool WMORenderer::buildMainPassPipelines(VkDevice device,
 
     // --- Build wireframe pipeline (derivative of opaque) ---
     wireframePipeline_ = PipelineBuilder()
-        .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
-                    fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+        .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT), alphaTestFrag)
         .setVertexInput({ vertexBinding }, vertexAttribs)
         .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
         .setRasterization(VK_POLYGON_MODE_LINE, VK_CULL_MODE_NONE, kWmoFrontFace)
@@ -354,6 +383,7 @@ void WMORenderer::shutdown() {
 
     // Destroy pipelines
     destroy(device, opaquePipeline_);
+    destroy(device, alphaTestPipeline_);
     destroy(device, transparentPipeline_);
     destroy(device, wireframePipeline_);
     destroy(device, pipelineLayout_);
@@ -500,6 +530,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadPreparedIncremental(WmoModelPrep& 
         modelData.boundingBoxMax = prep.boundingBoxMax;
         modelData.wmoAmbientColor = prep.ambientColor;
         modelData.isLowPlatform = prep.isLowPlatform;
+        modelData.minimap = prep.minimap;
         modelData.textureNames = prep.textureNames;
         modelData.materialTextureIndices = prep.materialTextureIndices;
         modelData.materialBlendModes = prep.materialBlendModes;
@@ -711,7 +742,8 @@ void WMORenderer::cleanupUnusedModels() {
 }
 
 uint32_t WMORenderer::createInstance(uint32_t modelId, const glm::vec3& position,
-                                     const glm::vec3& rotation, float scale, uint32_t reservedId) {
+                                     const glm::vec3& rotation, float scale, uint32_t reservedId,
+                                     uint16_t nameSet) {
     // Check if model is loaded
     if (loadedModels.find(modelId) == loadedModels.end()) {
         core::Logger::getInstance().error("Cannot create instance of unloaded WMO model ", modelId);
@@ -724,6 +756,7 @@ uint32_t WMORenderer::createInstance(uint32_t modelId, const glm::vec3& position
     instance.position = position;
     instance.rotation = rotation;
     instance.scale = scale;
+    instance.nameSet = nameSet;
     instance.updateModelMatrix();
     const ModelData& model = loadedModels[modelId];
     transformAABB(instance.modelMatrix, model.boundingBoxMin, model.boundingBoxMax,
@@ -747,6 +780,16 @@ uint32_t WMORenderer::createInstance(uint32_t modelId, const glm::vec3& position
     markContentChanged();
     core::Logger::getInstance().debug("Created WMO instance ", instance.id, " (model ", modelId, ")");
     return instance.id;
+}
+
+std::optional<WmoMinimapPlacement> WMORenderer::minimapPlacement(uint32_t instanceId) const {
+    const WMOInstance* instance = findInstance(instanceId);
+    if (!instance) return std::nullopt;
+    const auto model = loadedModels.find(instance->modelId);
+    if (model == loadedModels.end() || !model->second.minimap) return std::nullopt;
+    return WmoMinimapPlacement{.instance = instanceId, .model = model->second.minimap,
+                               .modelToWorld = instance->modelMatrix, .worldToModel = instance->invModelMatrix,
+                               .nameSet = instance->nameSet};
 }
 
 /// Recomputes an instance's world bounds from its model matrix.
@@ -1107,11 +1150,17 @@ std::shared_ptr<const WMORenderer::Frame> WMORenderer::extract(const Camera& cam
 }
 
 void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
-                         const glm::vec3*, Pass pass) {
+                         const glm::vec3*, Pass pass, Layer layer) {
     if (!opaquePipeline_) return;
     const uint32_t draws = recordView(cmd, perFrameSet, camera.getPosition(),
-        pass == Pass::Reflection ? recording_->reflection : recording_->view);
-    if (pass == Pass::View) viewDrawCallCount_ = draws;
+        pass == Pass::Reflection ? recording_->reflection : recording_->view, layer);
+    if (pass != Pass::View) return;
+    if (layer == Layer::Blended) {
+        viewBlendedDrawCallCount_ = draws;
+    } else {
+        viewDrawCallCount_ = draws;
+        if (layer == Layer::All) viewBlendedDrawCallCount_ = 0;
+    }
 }
 
 void WMORenderer::cullView(const Camera& camera, const glm::vec3& portalViewerPos, DrawList& list) const {
@@ -1243,7 +1292,7 @@ void WMORenderer::cullView(const Camera& camera, const glm::vec3& portalViewerPo
 }
 
 uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const glm::vec3& camPos,
-                             const DrawList& list) const {
+                             const DrawList& list, Layer layer) const {
     if (list.used == 0) return 0;
     uint32_t drawCalls = 0;
 
@@ -1255,7 +1304,8 @@ uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
                              0, 1, &perFrameSet, 0, nullptr);
 
-    // Track which pipeline is currently bound: 0=opaque, 1=transparent, 2=glass
+    // Track which pipeline is currently bound: 0=opaque, 1=transparent,
+    // 3=alpha-tested
     int currentPipelineKind = 0;
 
     for (const DrawEntry& entry : list.drawn()) {
@@ -1291,6 +1341,13 @@ uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
             // Skip groups with invalid GPU resources
             if (group.vertexBuffer == VK_NULL_HANDLE || group.indexBuffer == VK_NULL_HANDLE) continue;
 
+            // A batch is in the layer being recorded, or it waits for the other.
+            const auto inLayer = [layer](const auto& mb) { return wmoBatchInLayer(mb.isTransparent, layer); };
+            if (layer != Layer::All &&
+                std::none_of(group.mergedBatches.begin(), group.mergedBatches.end(), inLayer)) {
+                continue;
+            }
+
             // Bind vertex + index buffers
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &group.vertexBuffer, &offset);
@@ -1301,12 +1358,14 @@ uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
 
             // Render each merged batch
             for (const auto& mb : group.mergedBatches) {
-                if (!mb.materialSet) continue;
+                if (!mb.materialSet || !inLayer(mb)) continue;
 
                 // Determine which pipeline this batch needs
                 int neededPipeline = 0; // opaque
                 if (mb.isTransparent && transparentPipeline_) {
                     neededPipeline = 1; // transparent (alpha blend, no depth write)
+                } else if (mb.alphaTest && !recording_->wireframe) {
+                    neededPipeline = 3; // opaque, with the alpha test compiled in
                 }
 
                 // Switch pipeline if needed (descriptor sets and push constants
@@ -1314,6 +1373,7 @@ uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
                 if (neededPipeline != currentPipelineKind) {
                     VkPipeline targetPipeline = activePipeline;
                     if (neededPipeline == 1) targetPipeline = transparentPipeline_;
+                    else if (neededPipeline == 3) targetPipeline = alphaTestPipeline_;
                     if (targetPipeline == VK_NULL_HANDLE) continue;
 
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, targetPipeline);
@@ -2286,6 +2346,7 @@ void WMORenderer::recreatePipelines() {
 
     // Destroy old main-pass pipelines (NOT shadow, NOT pipeline layout)
     destroy(device, opaquePipeline_);
+    destroy(device, alphaTestPipeline_);
     destroy(device, transparentPipeline_);
     destroy(device, wireframePipeline_);
 

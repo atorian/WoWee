@@ -72,6 +72,14 @@ inline constexpr uint32_t kMaxBonesPerInstance = 512;
 /**
  * GPU representation of an M2 model
  */
+/// What an emitter's texture set (set 1) holds: the image, and the wrap mode
+/// of the model's texture slot it came from, which picks the sampler.
+struct M2EmitterTexKey {
+    const VkTexture* texture = nullptr;
+    uint8_t wrap = 0;
+    bool operator==(const M2EmitterTexKey&) const = default;
+};
+
 struct M2ModelGPU {
     struct BatchGPU {
         VkTexture* texture = nullptr;  // from cache, NOT owned
@@ -201,13 +209,16 @@ struct M2ModelGPU {
     // Particle emitter data (kept from M2Model)
     std::vector<pipeline::M2ParticleEmitter> particleEmitters;
     std::vector<VkTexture*> particleTextures;    // Resolved Vulkan textures per emitter
-    std::vector<VkDescriptorSet> particleTexSets; // Pre-allocated descriptor sets per emitter (stable, avoids per-frame alloc)
+    std::vector<VkDescriptorSet> particleTexSets; // Each emitter's set, shared with every emitter of that texture and wrap
 
     // Ribbon emitter data (kept from M2Model)
     std::vector<pipeline::M2RibbonEmitter> ribbonEmitters;
     std::vector<VkTexture*> ribbonTextures;       // Resolved texture per ribbon emitter
     std::vector<uint16_t> ribbonBlendModes;       // Blend mode of each ribbon emitter's material
     std::vector<VkDescriptorSet> ribbonTexSets;   // Descriptor sets per ribbon emitter
+    /// One entry per emitter set above that came from the renderer's shared
+    /// sets, each a use given back when the model is destroyed.
+    std::vector<M2EmitterTexKey> emitterTexKeys;
 
     /// Particles or ribbons: either needs the per-frame emitter update and
     /// an animation clock. Asking for particles alone left a model whose only
@@ -299,8 +310,14 @@ struct M2Instance {
     glm::vec3 worldBoundsMax;
 
     // Animation state
-    float animTime = 0.0f;       // Current animation time (ms)
-    float globalSequenceTime = 0.0f; // Independent clock for global animation tracks
+    /// The renderer's animation clock reading at which the current sequence and
+    /// the global sequences were at zero; M2Renderer::animTimeOf works out the
+    /// time from them. Doubles, so hours of play keep a smooth scroll.
+    double animStartMs = 0.0;
+    double globalSequenceStartMs = 0.0;
+    /// The clock reading when it was hidden: its clocks stop while it is out
+    /// of the world and resume where they were.
+    double hiddenAtMs = 0.0;
     float animSpeed = 1.0f;      // Animation playback speed
     int currentSequenceIndex = 0;// Index into sequences array
     float animDuration = 0.0f;   // Duration of current animation (ms)
@@ -1213,6 +1230,28 @@ private:
     std::shared_ptr<uint32_t> materialPoolGeneration_ = std::make_shared<uint32_t>(0);
     void destroyPosedEmitterModels();
 
+    /// The particle and ribbon texture sets, one per texture and wrap mode,
+    /// shared by every emitter of every model that draws with them. A set
+    /// lives while some model uses it - which also keeps its texture in the
+    /// cache, so the address in the key is not reused - and goes back to
+    /// materialDescPool_ after the frames in flight when the last one is
+    /// destroyed.
+    struct EmitterTexKeyHash {
+        size_t operator()(const M2EmitterTexKey& key) const {
+            return std::hash<const void*>{}(key.texture) ^ (static_cast<size_t>(key.wrap) << 1);
+        }
+    };
+    struct SharedEmitterSet {
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        uint32_t users = 0;
+    };
+    std::unordered_map<M2EmitterTexKey, SharedEmitterSet, EmitterTexKeyHash> emitterTexSets_;
+    /// The shared set for this texture and wrap, made on first use; one more
+    /// use recorded in `gpu`. Null when the pool is exhausted.
+    VkDescriptorSet acquireEmitterTexSet(M2ModelGPU& gpu, VkTexture* texture, uint8_t wrap);
+    /// Gives back every use `gpu` holds.
+    void releaseEmitterTexSets(M2ModelGPU& gpu);
+
     // O(1) dedup: key = (modelId, quantized x, quantized y, quantized z) → instanceId
     struct DedupKey {
         uint32_t modelId;
@@ -1518,6 +1557,16 @@ private:
     std::function<std::optional<float>(float, float, float)> waterHeightAt_;
     // What the sky-model clock diagnostic last reported, so it prints on a
     // restart or once a second rather than every frame. See M2Renderer::update.
+    /// One animation clock for every instance, advanced once an update. An
+    /// instance keeps the reading its sequence started at (animStartMs), so
+    /// the many nothing steps cost nothing a frame; advancing a total on each
+    /// was a pass over every instance.
+    double animClockMs_ = 0.0;
+    /// The sequence time an instance shows now (m2AnimTimeAt).
+    float animTimeOf(const M2Instance& instance) const;
+    float globalSequenceTimeOf(const M2Instance& instance) const;
+    /// Puts the instance's sequence at timeMs now.
+    void setAnimTime(M2Instance& instance, float timeMs) const;
     uint32_t skyDiagInstanceId_ = 0;
     float skyDiagAnimTime_ = 0.0f;
     /// Whether the sky model was drawn last frame, so the cull
@@ -1619,6 +1668,9 @@ private:
         std::unordered_map<uint32_t, uint32_t> boneSeedInstanceByModel_;
         InstanceIndexSet animatedInstanceIndices_;     // hasAnimation && !disableAnimation
         InstanceIndexSet particleOnlyInstanceIndices_; // !hasAnimation && hasParticleEmitters
+        /// Boats still asking whether they are on water; the rest have their
+        /// answer and are not looked at again.
+        std::vector<uint32_t> pendingAfloatIds_;
         InstanceIndexSet particleInstanceIndices_;     // ALL instances with particle emitters
         InstanceIndexSet lightInstanceIndices_;        // models that can throw a local light
         std::vector<size_t> boneWorkIndices_;        // Reused each frame

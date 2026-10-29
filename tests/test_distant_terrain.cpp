@@ -65,6 +65,33 @@ TEST_CASE("a landmark survives unloading one of the tiles sharing it", "[terrain
     CHECK(refs.at(1001)==42);
 }
 
+TEST_CASE("two placements the renderer merged into one instance each hold it", "[terrain][distant]") {
+    wowee::rendering::TerrainPlacementRefs refs;
+    // Neighbouring tiles place the same model at the same spot under their
+    // own uniqueIds, and the renderer hands both the one instance, 30.
+    refs.insert(1001,30);
+    refs.insert(2002,30);
+    // The first tile goes: the instance stays for the second.
+    CHECK_FALSE(refs.release(30));
+    CHECK(refs.count(2002)==1);
+    // A third tile mentioning the second placement shares it.
+    CHECK(refs.retain(2002)==30);
+    CHECK_FALSE(refs.release(30));
+    // The last reference destroys it, and neither uniqueId is left behind.
+    CHECK(refs.release(30));
+    CHECK(refs.count(1001)==0);
+    CHECK(refs.count(2002)==0);
+}
+
+TEST_CASE("a placement with no uniqueId still holds a merged instance", "[terrain][distant]") {
+    wowee::rendering::TerrainPlacementRefs refs;
+    refs.insert(1001,30);
+    refs.insert(0,30);  // the same spot, from a placement with no uniqueId
+    CHECK_FALSE(refs.release(30));
+    CHECK(refs.at(1001)==30);
+    CHECK(refs.release(30));
+}
+
 TEST_CASE("promoting a shared far hull retains its detailed resources until the last reference", "[terrain][distant]") {
     wowee::rendering::TerrainPlacementRefs refs;
     refs.insert(27,200);

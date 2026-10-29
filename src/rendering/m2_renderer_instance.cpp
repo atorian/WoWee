@@ -246,6 +246,8 @@ void M2Renderer::setInstancesHidden(const std::vector<uint32_t>& instanceIds, bo
         scene_->rtChanges.changed(id);
         if (collision_) collision_->setM2Hidden(id, hidden);
         if (hidden) {
+            // Its clocks stop while it is away and resume where they were.
+            inst.hiddenAtMs = animClockMs_;
             dropFromIndexSets(idxIt->second);
             scene_->cullGrid_.remove(id);
             // What it had emitted goes with it rather than hanging where it
@@ -254,6 +256,9 @@ void M2Renderer::setInstancesHidden(const std::vector<uint32_t>& instanceIds, bo
             inst.particleReach = 0.0f;
             for (auto& ribbon : inst.ribbons) ribbon = M2Instance::RibbonState{};
         } else {
+            const double away = animClockMs_ - inst.hiddenAtMs;
+            inst.animStartMs += away;
+            inst.globalSequenceStartMs += away;
             fileInCullGrid(inst);
             // Back as if newly placed: no cull verdict to trust, and its bone
             // slots were handed to others while it was away, so the bones are
@@ -286,7 +291,7 @@ void M2Renderer::setInstanceAnimationFrozen(uint32_t instanceId, bool frozen) {
     inst.holdAtEnd = false;
     inst.nextAnimation.reset();
     if (frozen) {
-        inst.animTime = 0.0f;  // Reset to bind pose
+        setAnimTime(inst, 0.0f);  // Reset to bind pose
     }
 }
 
@@ -294,8 +299,10 @@ void M2Renderer::restartInstanceAnimation(uint32_t instanceId) {
     auto idxIt = scene_->instanceIndexById.find(instanceId);
     if (idxIt == scene_->instanceIndexById.end()) return;
     auto& inst = scene_->instances[idxIt->second];
-    inst.animTime = 0.0f;
-    if (inst.cachedModel) computeBoneMatrices(*inst.cachedModel, inst, &cachedView_);
+    setAnimTime(inst, 0.0f);
+    if (inst.cachedModel) {
+        computeBoneMatrices(*inst.cachedModel, inst, animTimeOf(inst), globalSequenceTimeOf(inst), &cachedView_);
+    }
 }
 
 void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animationId,
@@ -313,10 +320,10 @@ void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animatio
         inst.holdAtEnd = true;
         inst.nextAnimation.reset();
         if (skipToEnd) {
-            inst.animTime = inst.animDuration;
+            setAnimTime(inst, inst.animDuration);
             inst.animSpeed = 0.0f;
         } else {
-            inst.animTime = 0.0f;
+            setAnimTime(inst, 0.0f);
             inst.animSpeed = 1.0f;
         }
         return;
@@ -326,7 +333,8 @@ void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animatio
 namespace {
 
 // Put one planned animation on an instance. False when the model lacks it.
-bool startPlannedAnimation(M2Instance& inst, const M2AnimationPlay& play) {
+// The sequence time it starts at goes to `startTime`, for the caller to set.
+bool startPlannedAnimation(M2Instance& inst, const M2AnimationPlay& play, float& startTime) {
     const auto& seqs = inst.cachedModel->sequences;
     for (int i = 0; i < static_cast<int>(seqs.size()); ++i) {
         if (seqs[i].id != play.animationId) continue;
@@ -341,11 +349,11 @@ bool startPlannedAnimation(M2Instance& inst, const M2AnimationPlay& play) {
         const float start = play.reversed ? inst.animDuration : 0.0f;
         const float end = play.reversed ? 0.0f : inst.animDuration;
         if (play.frozen || play.startAtEnd) {
-            inst.animTime = play.frozen ? start : end;
+            startTime = play.frozen ? start : end;
             inst.animSpeed = 0.0f;
             inst.holdAtEnd = true;
         } else {
-            inst.animTime = start;
+            startTime = start;
             inst.animSpeed = play.reversed ? -1.0f : 1.0f;
         }
         return true;
@@ -361,7 +369,9 @@ bool M2Renderer::playInstanceAnimation(uint32_t instanceId, const M2AnimationPla
     if (idxIt == scene_->instanceIndexById.end()) return false;
     auto& inst = scene_->instances[idxIt->second];
     if (!inst.cachedModel) return false;
-    if (!startPlannedAnimation(inst, now)) return false;
+    float startTime = 0.0f;
+    if (!startPlannedAnimation(inst, now, startTime)) return false;
+    setAnimTime(inst, startTime);
     inst.nextAnimation = now.end == M2AnimationPlay::End::Next ? next : std::nullopt;
     return true;
 }
@@ -369,7 +379,10 @@ bool M2Renderer::playInstanceAnimation(uint32_t instanceId, const M2AnimationPla
 void M2Renderer::advanceToNextAnimation(M2Instance& inst) {
     const M2AnimationPlay next = *inst.nextAnimation;
     inst.nextAnimation.reset();
-    if (!startPlannedAnimation(inst, next)) {
+    float startTime = 0.0f;
+    if (startPlannedAnimation(inst, next, startTime)) {
+        setAnimTime(inst, startTime);
+    } else {
         LOG_WARNING("M2: '", inst.cachedModel->name, "' has no animation ", next.animationId,
                     " to go on to; holding where it is");
         inst.animSpeed = 0.0f;
@@ -388,7 +401,7 @@ void M2Renderer::setInstanceAnimation(uint32_t instanceId, uint32_t animationId,
         if (seqs[i].id == animationId) {
             inst.currentSequenceIndex = i;
             inst.animDuration = static_cast<float>(seqs[i].duration);
-            inst.animTime = 0.0f;
+            setAnimTime(inst, 0.0f);
             inst.animSpeed = 1.0f;
             // Use playingVariation=true for one-shot (returns to idle when done)
             inst.playingVariation = !loop;
@@ -607,7 +620,7 @@ void M2Renderer::finishInstance(uint32_t instanceId) {
     if (inst.cachedModel) {
         for (const auto& em : inst.cachedModel->particleEmitters) {
             longestLife = std::max(longestLife,
-                interpFloat(em.lifespan, inst.animTime, inst.globalSequenceTime,
+                interpFloat(em.lifespan, animTimeOf(inst), globalSequenceTimeOf(inst),
                             inst.currentSequenceIndex, inst.cachedModel->globalSequenceDurations));
         }
     }

@@ -751,6 +751,13 @@ set(WOWEE_SOURCES
     src/auth/auth_packets.cpp
     src/auth/pin_auth.cpp
     src/auth/integrity.cpp
+    src/auth/client_timezone.cpp
+    src/mcp/mcp_server.cpp
+    src/mcp/http_transport.cpp
+    src/mcp/main_thread_queue.cpp
+    src/core/agent_bridge.cpp
+    src/ui/agent_controls.cpp
+    src/ui/agent_controls_apply.cpp
     src/auth/srp.cpp
     src/auth/big_num.cpp
     src/auth/crypto.cpp
@@ -1023,6 +1030,7 @@ set(WOWEE_SOURCES
 
     src/pipeline/terrain_mesh.cpp
     src/pipeline/distant_terrain.cpp
+    src/pipeline/minimap_tile_index.cpp
 
     # Rendering (Vulkan infrastructure)
     src/rendering/pass_ablation.cpp
@@ -1056,6 +1064,7 @@ set(WOWEE_SOURCES
     src/rendering/material.cpp
     src/rendering/terrain_renderer.cpp
     src/rendering/terrain_bake.cpp
+    src/rendering/terrain_tile_maps.cpp
     src/rendering/range_allocator.cpp
     src/rendering/shadow_params.cpp
     src/rendering/terrain_manager.cpp
@@ -1122,6 +1131,7 @@ set(WOWEE_SOURCES
     src/rendering/quest_marker_renderer.cpp
     src/rendering/footprint_renderer.cpp
     src/rendering/minimap.cpp
+    src/rendering/wmo_minimap.cpp
     src/rendering/aux_swapchain.cpp
     src/rendering/world_map/coordinate_projection.cpp
     src/rendering/world_map/map_resolver.cpp
@@ -1248,6 +1258,7 @@ set(WOWEE_SOURCES
     src/addons/lua_socket_api.cpp
     src/addons/lua_social_api.cpp
     src/addons/lua_system_api.cpp
+    src/addons/minimap_zoom.cpp
     src/addons/lua_action_api.cpp
     src/addons/lua_movement_api.cpp
     src/addons/toc_parser.cpp
@@ -3108,6 +3119,7 @@ add_executable(wowee_editor
     src/rendering/camera.cpp
     src/rendering/terrain_renderer.cpp
     src/rendering/terrain_bake.cpp
+    src/rendering/terrain_tile_maps.cpp
     src/rendering/range_allocator.cpp
     src/rendering/shadow_params.cpp
     src/rendering/m2_renderer.cpp

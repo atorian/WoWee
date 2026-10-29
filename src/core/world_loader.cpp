@@ -192,6 +192,7 @@ std::shared_ptr<WorldLoader::PreparedMap> WorldLoader::prepareMap(pipeline::Asse
     if (!token.current()) return result;
     if (data.empty()) { result->error = "Cannot read root WMO " + path; return result; }
     model = pipeline::WMOLoader::load(data);
+    model.sourcePath = path;
     for (uint32_t group = 0; group < model.nGroups; ++group) {
         if (!token.current()) return result;
         bool found = false;
@@ -373,7 +374,8 @@ const WorldLoadStatus& WorldLoader::update(float /*deltaTime*/) {
                     }
                     if (result == rendering::WMORenderer::ModelLoadResult::InProgress) return status();
                     if (!renderer_->scene().worldModels().createInstance(modelId, prepared.position,
-                                                                         prepared.rotation, 1.0f)) {
+                                                                         prepared.rotation, 1.0f,
+                                                                         prepared.wdt.nameSet)) {
                         fail("Root WMO instance creation failed"); return status();
                     }
                     load.rootPlaced = true;

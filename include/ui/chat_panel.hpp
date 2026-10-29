@@ -99,6 +99,9 @@ public:
         /// /record: start, stop, or whichever it is not doing.
         enum class Recording { None, Toggle, Start, Stop };
         Recording recording = Recording::None;
+        /// /ai: hand the character to the agent, take it back, or flip.
+        enum class AgentControl { None, Toggle, On, Off };
+        AgentControl agentControl = AgentControl::None;
     };
 
     /** Return accumulated slash-command flags and reset them. */

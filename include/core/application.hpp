@@ -71,7 +71,7 @@ class SpellVisualSystem;
 namespace world_map { class WorldMapFacade; }
 using WorldMap = world_map::WorldMapFacade;
 }
-namespace ui { class UIManager; class MapWindow; class WeatherPanel; }
+namespace ui { class UIManager; class MapWindow; class WeatherPanel; class AgentControls; }
 namespace auth { class AuthHandler; }
 namespace game { class GameHandler; class ExpansionRegistry; struct ExpansionProfile; struct EzWowPatch; }
 namespace pipeline { class AssetManager; class ArchiveLayer; class DBCLayout; struct M2Model; struct WMOModel; }
@@ -83,6 +83,7 @@ namespace core {
 class Window;
 class EntitySpawner;
 class AppearanceComposer;
+class AgentBridge;
 
 // Handler forward declarations
 class NPCInteractionCallbackHandler;
@@ -403,6 +404,9 @@ private:
     /// What the emotes are, for the game, the interface and the animation.
     std::unique_ptr<game::EmoteTable> emoteTable_;
 
+    // What an agent connected over MCP holds down; ahead of everything that
+    // reads it, so it is destroyed after them.
+    std::unique_ptr<ui::AgentControls> agentControls_;
     std::unique_ptr<Window> window;
     std::unique_ptr<rendering::Renderer> renderer;
     std::unique_ptr<rendering::FrameInputs> renderInputs_;
@@ -648,6 +652,11 @@ private:
     void updateQuestMarkers();     // Updates billboard positions
     void updateLootSparkles();     // The glitter over corpses with loot
     void updateCorpseBones();      // Players' bones, as their race's skeleton
+    /// Opens the MCP endpoint when WOWEE_MCP_PORT names a port.
+    void startAgentBridge();
+    // The MCP endpoint. Near the end, so it stops before anything its tools
+    // call into is destroyed.
+    std::unique_ptr<AgentBridge> agentBridge_;
 
     /// The frame and the world transitions, and with them the character in
     /// the world. Last, so it goes before everything it borrows; shutdown()

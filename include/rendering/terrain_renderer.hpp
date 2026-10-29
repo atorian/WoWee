@@ -12,6 +12,7 @@
 #include "rendering/local_lights.hpp"
 #include "rendering/range_allocator.hpp"
 #include "rendering/terrain_bake.hpp"
+#include "rendering/terrain_tile_maps.hpp"
 #include "pipeline/distant_terrain.hpp"
 #include "rendering/uniform_slot_pool.hpp"
 #include "rendering/vk_utils.hpp"
@@ -52,6 +53,24 @@ struct TerrainSurfacePush {
     glm::vec4 baked{0.0f};
 };
 
+/// A tile's chunk maps on the GPU: what every chunk's three blended layers
+/// cover and every chunk's normals, one array layer to a chunk
+/// (TerrainChunkSlot). Two images for the tile instead of up to four small
+/// ones for each of its 256 chunks, which a driver keeps an object and a
+/// descriptor's worth of bookkeeping for apiece.
+struct TerrainTileMaps {
+    /// RGBA8 64x64 by TerrainChunkSlot::kCount: TerrainTileMapPixels::cover.
+    AllocatedImage cover;
+    /// RGBA8 17x17 by TerrainChunkSlot::kCount: TerrainTileMapPixels::normals.
+    AllocatedImage normals;
+};
+
+/// Where a chunk's maps are: its tile's arrays, and its layer in them.
+struct TerrainChunkMaps {
+    std::shared_ptr<const TerrainTileMaps> tile;
+    TerrainChunkSlot slot;
+};
+
 struct TerrainChunkGPU {
     ::VkBuffer vertexBuffer = VK_NULL_HANDLE;
     VmaAllocation vertexAlloc = VK_NULL_HANDLE;
@@ -73,9 +92,9 @@ struct TerrainChunkGPU {
     /// How far each level strays from the ground, in yards (ChunkMesh::lodError).
     std::array<float, pipeline::kTerrainLodLevels> lodErrors{};
     uint32_t offeredLods = 1u;
-    /// The chunk's normals as an image (ChunkMesh::normalGrid), which the
-    /// ground is lit from at every level.
-    TextureRef normalGrid;
+    /// What its layers cover and its normals, which the ground is lit from at
+    /// every level: a layer of its tile's maps.
+    TerrainChunkMaps maps;
 
     // Material descriptor set (set 1: 7 samplers, params UBO, 4 normal maps)
     VkDescriptorSet materialSet = VK_NULL_HANDLE;
@@ -85,10 +104,9 @@ struct TerrainChunkGPU {
     UniformSlotPool::Slot paramsSlot;
 
     // The chunk's textures, held: what its material set names stays resident
-    // as long as the chunk does. The alpha maps are its own.
+    // as long as the chunk does.
     TextureRef baseTexture;
     TextureRef layerTextures[3];
-    TextureRef alphaTextures[3];
     /// The relief of the base and layer textures, derived from their colours;
     /// empty where none could be had, which binds a flat one.
     TextureRef baseNormalMap;
@@ -240,6 +258,9 @@ public:
         std::array<TerrainChunkGPU::LodRange, 5> ranges{};
         TerrainSurfacePush surface;
         LocalLightSet lights = kNoLocalLights;
+        /// Reaches the fog band or the distant-terrain hand-over, so it is
+        /// drawn by the pipeline whose shader can discard.
+        bool reachesDiscards = true;
     };
     using DepthDraw = TerrainDepthChunk<GeometryDraw>;
     using DepthTile = TerrainDepthTile<GeometryDraw>;
@@ -338,10 +359,14 @@ private:
     /// loading worker made it; when the cache let it go since, it is derived
     /// again here, on this thread. Empty when it cannot be had.
     TextureRef loadNormalMap(const std::string& path);
-    TextureRef createAlphaTexture(const std::vector<uint8_t>& alphaData);
-    /// The chunk's normal image; the flat normal when it has none, which the
-    /// log says once.
-    TextureRef createNormalGridTexture(const std::vector<uint8_t>& normalGrid);
+    /// The tile's chunk maps, made and uploaded from the whole mesh the first
+    /// time one of its chunks is, before any of them is drawn. Inside an
+    /// upload batch. The fallback maps when the tile's cannot be made, which
+    /// the log says once.
+    std::shared_ptr<const TerrainTileMaps> tileMapsFor(int tileX, int tileY,
+                                                       const pipeline::TerrainMesh& mesh);
+    /// Lets the tile's maps go once the frames that may draw them are done.
+    void releaseTileMaps(int tileX, int tileY);
     bool isChunkVisible(const TerrainChunkGPU& chunk, const Frustum& frustum);
     void calculateBoundingSphere(TerrainChunkGPU& chunk, const pipeline::ChunkMesh& meshChunk);
     VkDescriptorSet allocateMaterialSet();
@@ -373,6 +398,10 @@ private:
 
     // Main pipelines
     VkPipeline pipeline = VK_NULL_HANDLE;
+    /// The fill pipeline without the distance discards, for chunks that end
+    /// short of them. Null if it failed to build; those chunks then take the
+    /// fill pipeline.
+    VkPipeline shortOfDiscardsPipeline = VK_NULL_HANDLE;
     VkPipeline wireframePipeline = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout materialSetLayout = VK_NULL_HANDLE;
@@ -404,8 +433,16 @@ private:
 
     // Fallback textures, held in the shared cache like any other.
     TextureRef whiteTexture;
-    TextureRef opaqueAlphaTexture;
     TextureRef flatNormalTexture;
+    /// Each resident tile's chunk maps, by tile (chunkMapKey).
+    std::unordered_map<uint64_t, std::shared_ptr<TerrainTileMaps>> tileMaps_;
+    /// One layer that covers everything and is lit flat, for a tile whose
+    /// maps could not be made: its layers drawn over its base, as a chunk
+    /// whose alpha map failed was.
+    std::shared_ptr<TerrainTileMaps> fallbackTileMaps_;
+    /// Linear, clamped to the edge, for both arrays.
+    VkSampler tileMapSampler_ = VK_NULL_HANDLE;
+    bool tileMapsFailureSaid_ = false;
     /// Tileset paths whose relief could not be derived, said once each.
     std::unordered_set<std::string> loggedNormalMapFails_;
 

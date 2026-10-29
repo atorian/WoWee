@@ -1582,7 +1582,21 @@ void EntitySpawner::processPendingTransportRegistrations() {
 }
 
 void EntitySpawner::processPendingTransportDoodads() {
-    if (spawns_->pendingTransportDoodadBatches_.empty()) return;
+    if (spawns_->pendingTransportDoodadBatches_.empty()) {
+        // Nothing left to place, so the models read for the last batches go.
+        // A load still running is left to finish and is picked up if another
+        // batch asks for it; the map's JobGroup joins it on a map change.
+        spawns_->preparedTransportDoodads_.clear();
+        for (auto lit = spawns_->asyncTransportDoodadLoads_.begin();
+             lit != spawns_->asyncTransportDoodadLoads_.end();) {
+            if (lit->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                lit = spawns_->asyncTransportDoodadLoads_.erase(lit);
+            } else {
+                ++lit;
+            }
+        }
+        return;
+    }
     if (!renderer_ || !assetManager_) return;
 
     auto* wmoRenderer = renderer_->getWMORenderer();
@@ -1620,51 +1634,41 @@ void EntitySpawner::processPendingTransportDoodads() {
         }
 
         const size_t maxIndex = std::min(it->doodadBudget, doodadTemplates->size());
+        // Start the reads for every model this batch still needs, so they run
+        // on the I/O workers while the earlier doodads are placed.
+        for (size_t i = it->nextIndex; i < maxIndex; ++i) {
+            requestTransportDoodadModel((*doodadTemplates)[i].m2Path);
+        }
         while (it->nextIndex < maxIndex && budgetLeft > 0) {
-            // Per-doodad time budget (each does synchronous file I/O + parse + GPU upload)
+            // Per-doodad time budget (a model not yet on the GPU is uploaded here)
             float innerMs = std::chrono::duration<float, std::milli>(
                 std::chrono::steady_clock::now() - startTime).count();
             if (innerMs >= kDoodadBudgetMs) { budgetLeft = 0; break; }
 
             const auto& doodadTemplate = (*doodadTemplates)[it->nextIndex];
-            it->nextIndex++;
-            budgetLeft--;
-
-            // Every failure below used to be a silent continue, so a transport
-            // that lost a doodad lost it without a trace - the ship rendered,
-            // minus its sails or its paddlewheel, and nothing said why. A v264
-            // model carries no indices of its own, so a .skin that does not
-            // resolve leaves isValid() false and drops the piece; that is the
-            // one worth naming loudly.
             uint32_t doodadModelId = static_cast<uint32_t>(std::hash<std::string>{}(doodadTemplate.m2Path));
-            auto m2Data = assetManager_->readFile(doodadTemplate.m2Path);
-            if (m2Data.empty()) {
-                LOG_WARNING("Transport doodad missing: ", doodadTemplate.m2Path);
-                continue;
-            }
+            if (!m2Renderer->hasModel(doodadModelId)) {
+                const PreparedTransportDoodad* prepared = readyTransportDoodadModel(doodadTemplate.m2Path);
+                // Still being read: the doodads are placed in order, so this
+                // batch waits for it and tries again next frame.
+                if (!prepared) break;
 
-            pipeline::M2Model m2Model = pipeline::M2Loader::load(m2Data);
-            if (m2Model.name.empty()) m2Model.name = doodadTemplate.m2Path;
-            std::string skinPath = pipeline::skinPathForM2(doodadTemplate.m2Path);
-            std::vector<uint8_t> skinData = assetManager_->readFile(skinPath);
-            if (!skinData.empty() && m2Model.version >= 264) {
-                pipeline::M2Loader::loadSkin(skinData, m2Model);
-            } else if (skinData.empty() && m2Model.version >= 264) {
-                LOG_WARNING("Transport doodad ", doodadTemplate.m2Path, " is version ",
-                            m2Model.version, " and its skin '", skinPath,
-                            "' did not resolve - it has no indices and will be skipped");
-            }
-            if (!m2Model.isValid()) {
-                LOG_WARNING("Transport doodad unusable: ", doodadTemplate.m2Path,
-                            " version=", m2Model.version,
-                            " verts=", m2Model.vertices.size(),
-                            " indices=", m2Model.indices.size());
-                continue;
-            }
-
-            if (!m2Renderer->loadModel(m2Model, doodadModelId)) {
-                LOG_WARNING("Transport doodad failed to upload: ", doodadTemplate.m2Path);
-                continue;
+                it->nextIndex++;
+                budgetLeft--;
+                // Every failure below used to be a silent continue, so a
+                // transport that lost a doodad lost it without a trace - the
+                // ship rendered, minus its sails or its paddlewheel, and
+                // nothing said why. The worker says why; each doodad that
+                // asked repeats it.
+                for (const std::string& warning : prepared->warnings) LOG_WARNING(warning);
+                if (!prepared->model) continue;
+                if (!m2Renderer->loadModel(*prepared->model, doodadModelId)) {
+                    LOG_WARNING("Transport doodad failed to upload: ", doodadTemplate.m2Path);
+                    continue;
+                }
+            } else {
+                it->nextIndex++;
+                budgetLeft--;
             }
             // Created at the origin and moved into place by the parent WMO's
             // transform, so its position here is a placeholder. An instance
@@ -1725,6 +1729,74 @@ void EntitySpawner::processPendingTransportDoodads() {
 
     // Finalize the upload batch - submit all GPU copies in one shot (async, no wait).
     if (vkCtx) vkCtx->endUploadBatch();
+}
+
+void EntitySpawner::requestTransportDoodadModel(const std::string& m2Path) {
+    auto* m2Renderer = renderer_ ? renderer_->getM2Renderer() : nullptr;
+    if (!m2Renderer || !assetManager_) return;
+    if (m2Renderer->hasModel(static_cast<uint32_t>(std::hash<std::string>{}(m2Path)))) return;
+    if (spawns_->preparedTransportDoodads_.count(m2Path) != 0) return;
+    if (spawns_->asyncTransportDoodadLoads_.count(m2Path) != 0) return;
+
+    auto* am = assetManager_;
+    spawns_->asyncTransportDoodadLoads_.emplace(m2Path, spawns_->jobs_.submit(
+        [am, m2Path](const JobGroup::Token& jobToken) {
+            PreparedTransportDoodad result;
+            result.token = jobToken;
+            if (!jobToken.current()) return result;
+            auto m2Data = am->readFile(m2Path);
+            if (m2Data.empty()) {
+                result.warnings.push_back("Transport doodad missing: " + m2Path);
+                return result;
+            }
+
+            auto m2Model = std::make_shared<pipeline::M2Model>(pipeline::M2Loader::load(m2Data));
+            if (m2Model->name.empty()) m2Model->name = m2Path;
+            // A v264 model carries no indices of its own, so a .skin that does
+            // not resolve leaves isValid() false and drops the piece; that is
+            // the one worth naming loudly.
+            std::string skinPath = pipeline::skinPathForM2(m2Path);
+            std::vector<uint8_t> skinData = am->readFile(skinPath);
+            if (!skinData.empty() && m2Model->version >= 264) {
+                pipeline::M2Loader::loadSkin(skinData, *m2Model);
+            } else if (skinData.empty() && m2Model->version >= 264) {
+                result.warnings.push_back(
+                    "Transport doodad " + m2Path + " is version " + std::to_string(m2Model->version) +
+                    " and its skin '" + skinPath + "' did not resolve - it has no indices and will be skipped");
+            }
+            if (!m2Model->isValid()) {
+                result.warnings.push_back(
+                    "Transport doodad unusable: " + m2Path +
+                    " version=" + std::to_string(m2Model->version) +
+                    " verts=" + std::to_string(m2Model->vertices.size()) +
+                    " indices=" + std::to_string(m2Model->indices.size()));
+                return result;
+            }
+            result.model = std::move(m2Model);
+            return result;
+        }));
+}
+
+const EntitySpawner::PreparedTransportDoodad* EntitySpawner::readyTransportDoodadModel(const std::string& m2Path) {
+    if (auto pit = spawns_->preparedTransportDoodads_.find(m2Path);
+        pit != spawns_->preparedTransportDoodads_.end()) {
+        return &pit->second;
+    }
+    auto lit = spawns_->asyncTransportDoodadLoads_.find(m2Path);
+    if (lit == spawns_->asyncTransportDoodadLoads_.end()) {
+        // Never asked for, or dropped while the batch was idle: ask now.
+        requestTransportDoodadModel(m2Path);
+        return nullptr;
+    }
+    if (lit->second.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return nullptr;
+    PreparedTransportDoodad prepared = lit->second.get();
+    spawns_->asyncTransportDoodadLoads_.erase(lit);
+    // Cancelled: the map it was read for is being left. Ask again.
+    if (!spawns_->jobs_.accepts(prepared.token)) {
+        requestTransportDoodadModel(m2Path);
+        return nullptr;
+    }
+    return &spawns_->preparedTransportDoodads_.emplace(m2Path, std::move(prepared)).first->second;
 }
 
 void EntitySpawner::processPendingMount() {

@@ -4,6 +4,7 @@
 #include "wmo_model_prep.hpp"
 
 #include "core/logger.hpp"
+#include "rendering/wmo_minimap.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "rendering/wmo_lighting.hpp"
@@ -203,6 +204,7 @@ std::shared_ptr<WmoModelPrep> WMORenderer::prepareModel(const pipeline::WMOModel
     prep->boundingBoxMin = model.boundingBoxMin;
     prep->boundingBoxMax = model.boundingBoxMax;
     prep->ambientColor = model.ambientColor;
+    prep->minimap = WmoMinimapModel::from(model);
     {
         glm::vec3 ext = model.boundingBoxMax - model.boundingBoxMin;
         float horiz = std::max(ext.x, ext.y);

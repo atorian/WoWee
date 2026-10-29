@@ -11,24 +11,27 @@ layout(set = TERRAIN_MATERIAL_SET, binding = 0) uniform sampler2D uBaseTexture;
 layout(set = TERRAIN_MATERIAL_SET, binding = 1) uniform sampler2D uLayer1Texture;
 layout(set = TERRAIN_MATERIAL_SET, binding = 2) uniform sampler2D uLayer2Texture;
 layout(set = TERRAIN_MATERIAL_SET, binding = 3) uniform sampler2D uLayer3Texture;
-layout(set = TERRAIN_MATERIAL_SET, binding = 4) uniform sampler2D uLayer1Alpha;
-layout(set = TERRAIN_MATERIAL_SET, binding = 5) uniform sampler2D uLayer2Alpha;
-layout(set = TERRAIN_MATERIAL_SET, binding = 6) uniform sampler2D uLayer3Alpha;
+// What the three layers cover, for every chunk of the tile (TerrainTileMaps):
+// the chunk's at layer mapLayer, the first layer's cover in r, the second's
+// in g, the third's in b.
+layout(set = TERRAIN_MATERIAL_SET, binding = 4) uniform sampler2DArray uTileCover;
 
-layout(set = TERRAIN_MATERIAL_SET, binding = 7) uniform TerrainParams {
+layout(set = TERRAIN_MATERIAL_SET, binding = 5) uniform TerrainParams {
     int layerCount;
     int hasLayer1;
     int hasLayer2;
     int hasLayer3;
+    // The chunk's layer in its tile's maps (TerrainChunkSlot).
+    int mapLayer;
 };
 
 // Each texture's relief, derived from its colours when the tile loaded
 // (TerrainRenderer::deriveNormalMap): the normal in rgb, along the texture's
 // u and v and out of it.
-layout(set = TERRAIN_MATERIAL_SET, binding = 8) uniform sampler2D uBaseNormal;
-layout(set = TERRAIN_MATERIAL_SET, binding = 9) uniform sampler2D uLayer1Normal;
-layout(set = TERRAIN_MATERIAL_SET, binding = 10) uniform sampler2D uLayer2Normal;
-layout(set = TERRAIN_MATERIAL_SET, binding = 11) uniform sampler2D uLayer3Normal;
+layout(set = TERRAIN_MATERIAL_SET, binding = 6) uniform sampler2D uBaseNormal;
+layout(set = TERRAIN_MATERIAL_SET, binding = 7) uniform sampler2D uLayer1Normal;
+layout(set = TERRAIN_MATERIAL_SET, binding = 8) uniform sampler2D uLayer2Normal;
+layout(set = TERRAIN_MATERIAL_SET, binding = 9) uniform sampler2D uLayer3Normal;
 
 // Every read below takes its gradients from the caller - the coordinate's
 // dFdx and dFdy, taken in uniform control flow - so a pixel may skip the
@@ -47,10 +50,10 @@ struct TerrainCoverage {
 
 TerrainCoverage terrainCoverage(vec2 layerUV, vec2 dx, vec2 dy) {
     TerrainCoverage c;
-    c.layers = vec3(0.0);
-    if (hasLayer1 != 0) c.layers.x = textureGrad(uLayer1Alpha, layerUV, dx, dy).r;
-    if (hasLayer2 != 0) c.layers.y = textureGrad(uLayer2Alpha, layerUV, dx, dy).r;
-    if (hasLayer3 != 0) c.layers.z = textureGrad(uLayer3Alpha, layerUV, dx, dy).r;
+    vec3 cover = textureGrad(uTileCover, vec3(layerUV, float(mapLayer)), dx, dy).rgb;
+    c.layers = vec3(hasLayer1 != 0 ? cover.r : 0.0,
+                    hasLayer2 != 0 ? cover.g : 0.0,
+                    hasLayer3 != 0 ? cover.b : 0.0);
     float total = c.layers.x + c.layers.y + c.layers.z;
     c.layers /= max(total, 1.0);
     c.base = max(1.0 - total, 0.0);

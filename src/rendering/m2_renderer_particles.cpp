@@ -19,6 +19,7 @@
 #include <glm/gtx/quaternion.hpp>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <random>
 #include <limits>
 #include <set>
@@ -125,9 +126,9 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
         const auto& em = gpu.particleEmitters[ei];
         if (!em.enabled) continue;
 
-        const float authoredRate = interpFloat(em.emissionRate, inst.animTime, inst.globalSequenceTime,
+        const float authoredRate = interpFloat(em.emissionRate, animTimeOf(inst), globalSequenceTimeOf(inst),
                                                inst.currentSequenceIndex, gpu.globalSequenceDurations);
-        float life = interpFloat(em.lifespan, inst.animTime, inst.globalSequenceTime,
+        float life = interpFloat(em.lifespan, animTimeOf(inst), globalSequenceTimeOf(inst),
                                  inst.currentSequenceIndex, gpu.globalSequenceDurations);
         // As the client emits (CParticleEmitter2, 0x97d8c0): the rate give or
         // take its variation, thinned by the density setting and by the
@@ -151,9 +152,9 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
                 if (reported.insert(gpu.name).second) {
                     LOG_WARNING("Flame emitter idle: '", gpu.name, "' emitter=", ei,
                                 " rate=", rate, " life=", life,
-                                " animTime=", inst.animTime,
+                                " animTime=", animTimeOf(inst),
                                 " seqIdx=", inst.currentSequenceIndex,
-                                " gsTime=", inst.globalSequenceTime,
+                                " gsTime=", globalSequenceTimeOf(inst),
                                 " rateSeqs=", em.emissionRate.sequences.size(),
                                 " lifeSeqs=", em.lifespan.sequences.size(),
                                 " rateGlobalSeq=", em.emissionRate.globalSequence);
@@ -187,7 +188,7 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
             p.twinkleOffset = static_cast<uint32_t>(inst.random()) & (kM2TwinkleSlots - 1);
 
             const auto track = [&](const pipeline::M2AnimationTrack& t) {
-                return interpFloat(t, inst.animTime, inst.globalSequenceTime,
+                return interpFloat(t, animTimeOf(inst), globalSequenceTimeOf(inst),
                                    inst.currentSequenceIndex, gpu.globalSequenceDurations);
             };
 
@@ -309,7 +310,7 @@ void M2Renderer::updateParticles(M2Instance& inst, float dt) {
     for (size_t e = 0; e < numEm; ++e) {
         const auto& pem = gpu.particleEmitters[e];
         const auto track = [&](const pipeline::M2AnimationTrack& t) {
-            return interpFloat(t, inst.animTime, inst.globalSequenceTime,
+            return interpFloat(t, animTimeOf(inst), globalSequenceTimeOf(inst),
                                inst.currentSequenceIndex, gpu.globalSequenceDurations);
         };
         emitterMotion[e] = {.gravity = track(pem.gravity)};
@@ -376,15 +377,15 @@ void M2Renderer::updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt
         const size_t capacity = static_cast<size_t>(std::ceil(lifetime * edgesPerSecond)) + 2;
 
         const auto sample = [&](const pipeline::M2AnimationTrack& track) {
-            return m2_track::sampleFloat(track, inst.currentSequenceIndex, inst.animTime,
-                                         inst.globalSequenceTime, gpu.globalSequenceDurations, 1.0f);
+            return m2_track::sampleFloat(track, inst.currentSequenceIndex, animTimeOf(inst),
+                                         globalSequenceTimeOf(inst), gpu.globalSequenceDurations, 1.0f);
         };
         const bool visible = sample(em.visibilityTrack) > 0.5f;
         const float above = sample(em.heightAboveTrack);
         const float below = sample(em.heightBelowTrack);
         const float alpha = sample(em.alphaTrack);
         const glm::vec3 color = m2_track::sampleVec3(em.colorTrack, inst.currentSequenceIndex,
-            inst.animTime, inst.globalSequenceTime, gpu.globalSequenceDurations, glm::vec3(1.0f));
+            animTimeOf(inst), globalSequenceTimeOf(inst), gpu.globalSequenceDurations, glm::vec3(1.0f));
 
         // The emitter's frame: model, bone, then its own offset on the bone.
         const glm::mat4 bone = em.bone < inst.boneMatrices.size()
@@ -958,32 +959,17 @@ void M2Renderer::recordM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
             currentPipeline = desiredPipeline;
         }
 
-        // Use pre-allocated stable descriptor set; fall back to per-frame alloc only if unavailable
+        // The set loadModel allocated for the emitter. There is none only when
+        // that allocation failed, which means materialDescPool_ was exhausted;
+        // stop there rather than draw with whatever set 1 was bound last.
         VkDescriptorSet texSet = group.preAllocSet;
         if (texSet == VK_NULL_HANDLE) {
-            // Fallback: allocate per-frame (pool exhaustion risk - should not happen in practice)
-            VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-            ai.descriptorPool = materialDescPool_;
-            ai.descriptorSetCount = 1;
-            ai.pSetLayouts = &particleTexLayout_;
-            if (vkCtx_->allocateDescriptorSets(ai, &texSet) == VK_SUCCESS) {
-                VkTexture* tex = (group.texture && group.texture->isValid())
-                    ? group.texture : whiteTexture_.get();
-                if (!tex || !tex->isValid()) continue;
-                VkDescriptorImageInfo imgInfo = tex->descriptorInfo();
-                VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-                write.dstSet = texSet;
-                write.dstBinding = 0;
-                write.descriptorCount = 1;
-                write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                write.pImageInfo = &imgInfo;
-                vkUpdateDescriptorSets(vkCtx_->getDevice(), 1, &write, 0, nullptr);
-            }
+            LOG_FATAL("M2 particles: group (blend ", static_cast<int>(group.blendType),
+                      ") has no descriptor set; loadModel could not allocate one");
+            std::abort();
         }
-        if (texSet != VK_NULL_HANDLE) {
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    particlePipelineLayout_, 1, 1, &texSet, 0, nullptr);
-        }
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                particlePipelineLayout_, 1, 1, &texSet, 0, nullptr);
 
         const M2ParticlePush pc{
             .tileX = static_cast<float>(group.tilesX), .tileY = static_cast<float>(group.tilesY),

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rendering/wmo_draw_layer.hpp"
 #include "rendering/rt_instance_changes.hpp"
 #include "rendering/frame_pool.hpp"
 
@@ -12,6 +13,7 @@
 #include "rendering/local_lights.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/wmo_lighting.hpp"
+#include "rendering/wmo_minimap.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/uniform_slot_pool.hpp"
 
@@ -173,7 +175,11 @@ public:
      */
     uint32_t createInstance(uint32_t modelId, const glm::vec3& position,
                            const glm::vec3& rotation = glm::vec3(0.0f),
-                           float scale = 1.0f, uint32_t reservedId = 0);
+                           float scale = 1.0f, uint32_t reservedId = 0, uint16_t nameSet = 0);
+
+    /// A placed building as the minimap draws it. Nothing for an instance
+    /// that is not here or a model with no minimap description.
+    [[nodiscard]] std::optional<WmoMinimapPlacement> minimapPlacement(uint32_t instanceId) const;
     /// An id no instance has, for one SceneCommands will create at the apply
     /// point (createInstance's reservedId): the caller has it now, the
     /// instance from then on.
@@ -268,6 +274,8 @@ public:
     /// list of its own: the water's reflection is recorded on the main thread
     /// and the view on a frame worker, and they share nothing they write.
     enum class Pass : uint8_t { View, Reflection, Count };
+    /// Which of a pass's batches a call records; see WmoDrawLayer.
+    using Layer = WmoDrawLayer;
 
     /// viewerPos is the character; portal culling seeds from it as well as from
     /// the camera, because at a doorway the two stand in different groups and
@@ -276,7 +284,8 @@ public:
     /// Culls the scene into the pass's draw list, then records from that list
     /// alone: the recording reads no instance.
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
-                const glm::vec3* viewerPos = nullptr, Pass pass = Pass::View);
+                const glm::vec3* viewerPos = nullptr, Pass pass = Pass::View,
+                Layer layer = Layer::All);
 
     /**
      * Initialize shadow pipeline (Phase 7)
@@ -325,7 +334,7 @@ public:
     /**
      * Get total draw call count (last frame)
      */
-    uint32_t getDrawCallCount() const { return viewDrawCallCount_; }
+    uint32_t getDrawCallCount() const { return viewDrawCallCount_ + viewBlendedDrawCallCount_; }
     /// Draw calls the depth-only passes recorded this frame, from the frame's
     /// first one (the sun's) on.
     uint32_t getShadowDrawCallCount() const { return shadowDrawCalls_; }
@@ -561,6 +570,9 @@ private:
         glm::vec3 boundingBoxMax;
         glm::vec3 wmoAmbientColor{0.5f, 0.5f, 0.5f};  // From MOHD, used for interior lighting
         bool isLowPlatform = false;
+        /// Its groups and portals as the minimap reads them; null for a
+        /// model with no path to name its minimap tiles by.
+        std::shared_ptr<const WmoMinimapModel> minimap;
         /// Its groups' shapes, gathered for the collision world once every
         /// group is uploaded and the model is resident.
         std::shared_ptr<const collision::WmoShape> shape;
@@ -631,6 +643,8 @@ private:
         glm::vec3 position;
         glm::vec3 rotation;  // Euler angles (radians)
         float scale;
+        /// The placement's NameSetID: which WMOAreaTable rows name it.
+        uint16_t nameSet = 0;
         glm::mat4 modelMatrix;
         glm::mat4 invModelMatrix;  // Cached inverse for collision
         glm::vec3 worldBoundsMin;
@@ -769,7 +783,8 @@ private:
     collision::CollisionWorld* collision_ = nullptr;
 
     // Vulkan pipelines
-    VkPipeline opaquePipeline_ = VK_NULL_HANDLE;
+    VkPipeline opaquePipeline_ = VK_NULL_HANDLE;     // no alpha test: the shader cannot discard it
+    VkPipeline alphaTestPipeline_ = VK_NULL_HANDLE;  // opaque with the alpha test (lattices, foliage)
     VkPipeline transparentPipeline_ = VK_NULL_HANDLE;
     VkPipeline wireframePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
@@ -894,13 +909,16 @@ private:
         [[nodiscard]] std::span<const DrawEntry> drawn() const { return {entries.data(), used}; }
     };
     uint32_t viewDrawCallCount_ = 0;
+    /// The blended layer's, kept apart: it is recorded on another thread
+    /// from the opaque layer, at the same time.
+    uint32_t viewBlendedDrawCallCount_ = 0;
     /// The depth-only passes', one at a time on the main thread.
 
 
     /// The instances the camera sees and their groups that are drawn.
     void cullView(const Camera& camera, const glm::vec3& portalViewerPos, DrawList& list) const;
     uint32_t recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const glm::vec3& camPos,
-                    const DrawList& list) const;
+                    const DrawList& list, Layer layer) const;
     /// The instances, shown, and groups that reach a shadow map of this centre and reach.
     void extractDepth(DrawList& list) const;
     GroupDraw extractGroup(const GroupResources& group, const WMOInstance& instance, uint32_t groupIndex) const;

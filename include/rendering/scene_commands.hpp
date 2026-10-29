@@ -160,7 +160,8 @@ public:
     public:
         /// 0, and logged, when the model is not loaded.
         uint32_t createInstance(uint32_t modelId, const glm::vec3& position,
-                                const glm::vec3& rotation = glm::vec3(0.0f), float scale = 1.0f);
+                                const glm::vec3& rotation = glm::vec3(0.0f), float scale = 1.0f,
+                                uint16_t nameSet = 0);
         void removeInstance(uint32_t instanceId);
         void setInstanceTransform(uint32_t instanceId, const glm::mat4& transform);
         void addDoodadToInstance(uint32_t instanceId, uint32_t m2InstanceId, const glm::mat4& localTransform);

@@ -459,6 +459,13 @@ bool ClientHarness::interfaceAnswers(const std::string& expression) {
     return addons->interfaceCommandBoolean(expression);
 }
 
+void ClientHarness::withInterface(const std::function<void(addons::LuaEngine&)>& body) {
+    auto* addons = loop_->characterAddons();
+    if (!addons) fail("no interface to tell");
+    core::ScopedPhase interfacePhase(phase_, core::Phase::Interface);
+    body(*addons->getLuaEngine());
+}
+
 void ClientHarness::layOutInterface() {
     auto* addons = loop_->characterAddons();
     if (!addons) fail("no interface to lay out");

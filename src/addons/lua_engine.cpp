@@ -29,6 +29,7 @@
 #include "addons/lua_handler_globals.hpp"
 #include "addons/lua_event_args.hpp"
 #include "addons/lua_api_registrations.hpp"
+#include "addons/minimap_zoom.hpp"
 #include "addons/toc_parser.hpp"
 #include "core/window.hpp"
 #include <imgui.h>
@@ -3246,37 +3247,28 @@ int lua_Region_GetNumPoints(lua_State* L) {
     return 1;
 }
 
-// Minimap zoom. Five levels, as in WoW, and the level is kept on the widget so
-// the buttons that step it can read back what they set - Minimap_Update
-// compares GetZoom() against GetZoomLevels() - 1 to decide whether to grey the
-// zoom-in button out, and nil there is arithmetic on nothing.
+// Minimap zoom: the level of the zoom for what the map shows now, terrain or a
+// building's own tiles - see addons/minimap_zoom.hpp. Minimap_Update compares
+// GetZoom() against GetZoomLevels() - 1 to decide whether to grey the zoom-in
+// button out.
+//
+// Only for the map itself. SetZoom sits on the frame metatable, so any frame
+// can be sent one, and a stray call on another frame must not move the map.
 int lua_Minimap_SetZoom(lua_State* L) {
-    if (auto* w = widgetOf(L, 1)) {
-        int z = static_cast<int>(luaL_optnumber(L, 2, 0));
-        w->zoomLevel = (z < 0) ? 0 : (z > 4 ? 4 : z);
-        // And kept, because the player set it by using the map rather than by
-        // setting a setting, and it was gone at every start: the ring came back
-        // at its widest however far in it had been left. Written to the CVar
-        // store, which is saved as it changes - see setStoredCVar - and read
-        // back once FrameXML has a Minimap to put it on.
-        //
-        // Only for the map itself. SetZoom sits on the frame metatable, so any
-        // frame can be sent one, and a stray call on another frame must not be
-        // what the minimap opens at next time.
-        if (w->name == "Minimap") {
-            setStoredCVar("wowee_minimapZoom", std::to_string(w->zoomLevel));
-        }
+    const auto* w = widgetOf(L, 1);
+    // The client does nothing for a level that is not a number.
+    if (w && w->name == "Minimap" && lua_isnumber(L, 2)) {
+        setMinimapZoom(*w, lua_tonumber(L, 2));
     }
     return 0;
 }
 int lua_Minimap_GetZoom(lua_State* L) {
     const auto* w = widgetOf(L, 1);
-    lua_pushnumber(L, w ? w->zoomLevel : 0);
+    lua_pushnumber(L, w && w->name == "Minimap" ? minimapZoom(*w) : 0);
     return 1;
 }
 int lua_Minimap_GetZoomLevels(lua_State* L) {
-    (void)L;
-    lua_pushnumber(L, 5);
+    lua_pushnumber(L, kMinimapZoomLevels);
     return 1;
 }
 /// Minimap_OnClick's whole body: a click inside the circle pings that spot for

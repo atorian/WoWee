@@ -1666,8 +1666,16 @@ FrameInputs Renderer::extractFrameInputs() {
     extraction.lap("M2");
     if (minimap && in.minimapEnabled) {
         const auto centre = in.viewer.thirdPerson ? in.characterPosition : in.camera.getPosition();
+        std::optional<WmoMinimapPlacement> building;
+        if (wmoRenderer) {
+            if (const auto instance = collision_->wmoInstanceAt(collision::Reach::everywhere(),
+                                                                centre.x, centre.y, centre.z)) {
+                building = wmoRenderer->minimapPlacement(*instance);
+            }
+        }
         scene->minimap = minimap->extract(in.camera, centre, in.windowWidth, in.windowHeight,
-                                          glm::radians(in.characterYaw), true);
+                                          glm::radians(in.characterYaw), true,
+                                          building ? &*building : nullptr);
     }
     extraction.lap("minimap");
     if (skyboxModelRenderer_) {
@@ -3495,7 +3503,8 @@ void Renderer::renderWorld() {
                 auto t0 = std::chrono::steady_clock::now();
                 VkCommandBuffer cmd = beginSecondary(SEC_WMO);
                 setSecondaryViewportScissor(cmd);
-                wmoRenderer->render(cmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition);
+                wmoRenderer->render(cmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
+                                    WMORenderer::Pass::View, WMORenderer::Layer::Opaque);
                 vkEndCommandBuffer(cmd);
                 return std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
@@ -3564,6 +3573,12 @@ void Renderer::renderWorld() {
                 skySystem->record(cmd, perFrameSet, *frameCamera(), skyParams, frameInputs_.scene->sky,
                                   drawSkyModels ? skyboxModelRenderer_.get() : nullptr);
                 logSunDiagnostic(skyParams);
+            }
+            // The buildings' blended batches, over the sky that shows through
+            // them; their opaque batches went ahead of it in SEC_WMO.
+            if (wmoRenderer && frameCamera() && !skipWMO) {
+                wmoRenderer->render(cmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
+                                    WMORenderer::Pass::View, WMORenderer::Layer::Blended);
             }
             vkEndCommandBuffer(cmd);
         }
@@ -3713,23 +3728,29 @@ void Renderer::renderWorld() {
         VkCommandBuffer validCmds[NUM_SECONDARIES];
         const char* validLabels[NUM_SECONDARIES];
         uint32_t numCmds = 0;
-        // Terrain first, then the sky. Every sky layer sits on the far plane
-        // and depth-tests against what is already there, so drawing it after
-        // the ground skips the clouds' noise on every pixel a hill covers,
-        // which outdoors is most of them. Only the terrain goes ahead of it:
-        // it is the one pass that is opaque throughout. Buildings carry
-        // blended windows and doodads carry leaves and particles, and blended
-        // pixels leave no depth behind, so a sky drawn after them would paint
-        // over whichever of them stood against it.
+        // The buildings' opaque batches first, then the terrain, then the
+        // sky, then the buildings' blended batches. Walls and floors go ahead
+        // of the ground so that the ground under and behind a city fails the
+        // depth test before it is shaded: Dalaran hangs over Crystalsong, and
+        // drawn first the forest floor was shaded under the whole city and
+        // then covered. Every sky layer sits on the far
+        // plane and depth-tests against what is already there, so drawing it
+        // after the ground and the walls skips the clouds' noise and the sky
+        // dome on every pixel they cover: in a city that is most of the
+        // screen, and it was about 5 ms a frame in Dalaran. Blended pixels
+        // leave no depth behind, so a sky drawn after them would paint over
+        // whichever of them stood against it: the buildings' windows are
+        // drawn after it (SEC_SKY ends with them), and doodads, with their
+        // leaves and particles, still come after the sky as a whole.
         const auto queue = [&](VkCommandBuffer buffer, const char* label) {
             validLabels[numCmds] = label;
             validCmds[numCmds++] = buffer;
         };
+        if (wmoRenderer && frameCamera() && !skipWMO)
+            queue(secondaryCmds_[SEC_WMO][frameIdx], "wmo");
         if (drawTerrain || drawGrass)
             queue(secondaryCmds_[SEC_TERRAIN][frameIdx], "terrain");
         queue(secondaryCmds_[SEC_SKY][frameIdx], "sky");
-        if (wmoRenderer && frameCamera() && !skipWMO)
-            queue(secondaryCmds_[SEC_WMO][frameIdx], "wmo");
         queue(secondaryCmds_[SEC_SELECTION][frameIdx], "selection");
         queue(secondaryCmds_[SEC_CHARS][frameIdx], "characters");
         if (m2Renderer && frameCamera() && !skipM2)
@@ -3759,6 +3780,21 @@ void Renderer::renderWorld() {
     } else {
         // ── Fallback: single-threaded inline recording (original path) ──
 
+        // The buildings' opaque batches, the terrain, the sky, then the
+        // buildings' blended batches, for the reasons given on the parallel
+        // path.
+        if (wmoRenderer && frameCamera() && !skipWMO) {
+            wmoRenderer->prepareRender();
+            auto wmoStart = std::chrono::steady_clock::now();
+            {
+                GpuPass pass(*vkCtx, currentCmd, "wmo");
+                wmoRenderer->render(currentCmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
+                                    WMORenderer::Pass::View, WMORenderer::Layer::Opaque);
+            }
+            lastWMORenderMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - wmoStart).count();
+        }
+
         if (terrainRenderer && frameCamera() && frameInputs_.terrainEnabled && !skipTerrain) {
             auto terrainStart = std::chrono::steady_clock::now();
             {
@@ -3777,7 +3813,6 @@ void Renderer::renderWorld() {
             grassRenderer_->record(currentCmd, vkCtx->getCurrentFrame(), perFrameSet, frameInputs_.scene->grass);
         }
 
-        // Sky after the ground, for the reason given on the parallel path.
         if (skySystem && frameCamera() && !skipSky) {
             GpuPass pass(*vkCtx, currentCmd, "sky");
             rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
@@ -3794,14 +3829,8 @@ void Renderer::renderWorld() {
         }
 
         if (wmoRenderer && frameCamera() && !skipWMO) {
-            wmoRenderer->prepareRender();
-            auto wmoStart = std::chrono::steady_clock::now();
-            {
-                GpuPass pass(*vkCtx, currentCmd, "wmo");
-                wmoRenderer->render(currentCmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition);
-            }
-            lastWMORenderMs = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - wmoStart).count();
+            wmoRenderer->render(currentCmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
+                                WMORenderer::Pass::View, WMORenderer::Layer::Blended);
         }
 
         if (overlaySystem_) {
@@ -4494,6 +4523,18 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
             minimap->setAssetManager(assetManager);
         }
     }
+
+    // The water's own pass, now that there is water to draw in it and the
+    // minimap, spray and blended doodads that follow it there exist.
+    //
+    // It was only ever set up when MSAA or the swapchain changed, and the
+    // sample count is applied at start-up, before the first world entry
+    // creates the water renderer. So the water stayed in the multisampled
+    // scene pass until the first resize - harmless while it was a plain draw,
+    // but its tessellation splits the pass under MoltenVK, and the samples the
+    // world had drawn into the memoryless MSAA colour were gone: a black world
+    // with the minimap over it, on the Mac, until the window was resized.
+    if (waterRenderer && !waterRenderer->hasWater1xPass()) setupWater1xPass();
 
     // Set map name on sub-renderers
     setActiveMapName(mapName);

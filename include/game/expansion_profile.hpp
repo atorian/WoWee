@@ -28,7 +28,7 @@ struct ExpansionProfile {
     std::string platform = "x86";
     std::string os = "Win";
     std::string locale = "enUS";
-    uint32_t timezone = 0;
+    std::optional<uint32_t> timezone;  // empty: this machine's standard offset
     std::string dataPath;      // Absolute path to expansion data dir
     uint32_t maxLevel = 60;
     std::vector<uint32_t> races;

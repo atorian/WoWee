@@ -22,6 +22,7 @@
 #include "rendering/frustum.hpp"
 #include "rendering/render_constants.hpp"
 #include "rendering/m2_view_distance.hpp"
+#include "rendering/m2_anim_clock.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "core/logger.hpp"
@@ -49,6 +50,20 @@
 namespace wowee {
 namespace rendering {
 
+float M2Renderer::animTimeOf(const M2Instance& instance) const {
+    const bool stepped = instance.cachedHasAnimation && !instance.cachedDisableAnimation;
+    return m2AnimTimeAt(animClockMs_, instance.animStartMs, instance.animDuration, stepped,
+                        !stepped && instance.cachedHasEmitters);
+}
+
+float M2Renderer::globalSequenceTimeOf(const M2Instance& instance) const {
+    return static_cast<float>(animClockMs_ - instance.globalSequenceStartMs);
+}
+
+void M2Renderer::setAnimTime(M2Instance& instance, float timeMs) const {
+    instance.animStartMs = animClockMs_ - timeMs;
+}
+
 /// Starts a new instance's animation and gives it bones to draw with now.
 ///
 /// Both spawn paths need this: the one that takes a position and the one that
@@ -65,7 +80,7 @@ void M2Renderer::seedInstanceAnimation(const M2ModelGPU& model, uint32_t modelId
             instance.currentSequenceIndex = 0;
             instance.idleSequenceIndex = 0;
             instance.animDuration = static_cast<float>(model.sequences[0].duration);
-            instance.animTime = static_cast<float>(instance.random.below(std::max(1u, model.sequences[0].duration)));
+            setAnimTime(instance, static_cast<float>(instance.random.below(std::max(1u, model.sequences[0].duration))));
             instance.variationTimer = instance.random.uniform(rendering::M2_VARIATION_TIMER_MIN_MS, rendering::M2_VARIATION_TIMER_MAX_MS);
         }
 
@@ -86,7 +101,8 @@ void M2Renderer::seedInstanceAnimation(const M2ModelGPU& model, uint32_t modelId
 
     // No sibling to copy from, so pay for the bones now.
     if (instance.boneMatrices.empty()) {
-        computeBoneMatrices(model, instance, &cachedView_);
+        computeBoneMatrices(model, instance, animTimeOf(instance),
+                            globalSequenceTimeOf(instance), &cachedView_);
     }
     if (!instance.boneMatrices.empty()) {
         scene_->boneSeedInstanceByModel_.emplace(modelId, instance.id);
@@ -103,7 +119,7 @@ void M2Renderer::seedUnanimatedSequence(const M2ModelGPU& model, M2Instance& ins
     instance.currentSequenceIndex = 0;
     instance.idleSequenceIndex = 0;
     instance.animDuration = static_cast<float>(model.sequences[0].duration);
-    instance.animTime = static_cast<float>(instance.random.below(model.sequences[0].duration));
+    setAnimTime(instance, static_cast<float>(instance.random.below(model.sequences[0].duration)));
 }
 
 uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
@@ -171,6 +187,9 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     instance.cachedIsValid = mdlRef.isValid();
     instance.cachedModel = &mdlRef;
     instance.recomputeCachedCullFactors();
+    // Both clocks start now; the seeding below may move the sequence's.
+    instance.animStartMs = animClockMs_;
+    instance.globalSequenceStartMs = animClockMs_;
 
     // Initialize animation: play first sequence (usually Stand/Idle)
     const auto& mdl = mdlRef;
@@ -199,6 +218,7 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     const M2Instance& placed = scene_->instances[idx];
     // Track special instances for fast-path iteration
     fileInIndexSets(idx);
+    if (scene_->instances[idx].cachedIsBoat) scene_->pendingAfloatIds_.push_back(scene_->instances[idx].id);
     scene_->instanceIndexById[placed.id] = idx;
     scene_->rtChanges.add(placed.id, placed.modelId);
     fileInCullGrid(scene_->instances[idx]);
@@ -265,6 +285,9 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     instance.cachedIsValid = mdl2.isValid();
     instance.cachedModel = &mdl2;
     instance.recomputeCachedCullFactors();
+    // Both clocks start now; the seeding below may move the sequence's.
+    instance.animStartMs = animClockMs_;
+    instance.globalSequenceStartMs = animClockMs_;
 
     // Initialize animation
     if (mdl2.hasAnimation && !mdl2.disableAnimation) {
@@ -276,7 +299,7 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
         // so the phase is spread.
         //
         // createInstance above now does the same.
-        instance.animTime = instance.random.uniform(0.0f, 10000.0f);
+        setAnimTime(instance, instance.random.uniform(0.0f, 10000.0f));
         seedUnanimatedSequence(mdl2, instance);
     }
 
@@ -297,6 +320,7 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     const size_t idx = scene_->instances.size() - 1;
     const M2Instance& placed = scene_->instances[idx];
     fileInIndexSets(idx);
+    if (scene_->instances[idx].cachedIsBoat) scene_->pendingAfloatIds_.push_back(scene_->instances[idx].id);
     scene_->instanceIndexById[placed.id] = idx;
     scene_->rtChanges.add(placed.id, placed.modelId);
     fileInCullGrid(scene_->instances[idx]);
@@ -352,40 +376,52 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
     updateFrustum.extractFromMatrix(viewProjection);
 
     // --- Normal M2 animation update ---
-    // Advance animTime for ALL instances (needed for texture UV animation on static doodads).
-    // This is a tight loop touching only one float per instance - no hash lookups.
+    // One clock for every instance. An instance keeps the reading at which its
+    // sequence started and its time is worked out when something reads it
+    // (animTimeOf), so the instances the bone loop below does not step - most
+    // of a city - cost nothing here. Advancing a total on each of them was a
+    // pass over every instance every frame.
     //
-    // An instance the bone loop below does not step is wrapped here, at the
-    // length of its own sequence. A texture track is sampled against this
-    // time and holds its last key once the time runs past the end, so a
-    // waterfall with no bones of its own scrolled once after it loaded and
-    // then stood still, and one with emitters - wrapped at a fixed 3.3 s
-    // below, whatever its sequence - stopped for the rest of each lap.
-    for (auto& instance : scene_->instances) {
-        // A hidden instance's clock stops, so it resumes where it was shown.
-        if (instance.hidden) continue;
-        instance.animTime += dtMs;
-        instance.globalSequenceTime += dtMs;
-        // A boat asks once whether it is on water - the canal may stream in
-        // after it does, so it keeps asking for a while - and rides it if so.
-        // A rowboat pulled up on a beach is the same model and stays put.
-        if (instance.cachedIsBoat && instance.afloat < 0 && waterHeightAt_) {
-            instance.afloatRecheck -= deltaTime;
-            if (instance.afloatRecheck <= 0.0f) {
-                instance.afloatRecheck = 1.0f;
-                const auto water = waterHeightAt_(instance.position.x, instance.position.y,
-                                                  instance.position.z);
-                if (water && std::abs(*water - instance.position.z) < 1.5f) {
-                    instance.afloat = 1;
-                } else if (++instance.afloatTries >= 15) {
-                    instance.afloat = 0;
+    // An instance the bone loop does not step loops at the length of its own
+    // sequence (see m2AnimTimeAt). A texture track is sampled against that time
+    // and holds its last key once the time runs past the end, so a waterfall
+    // with no bones of its own scrolled once after it loaded and then stood
+    // still, and one with emitters - wrapped at a fixed 3.3 s whatever its
+    // sequence - stopped for the rest of each lap. A hidden instance's clocks
+    // stop (setInstancesHidden), so it resumes where it was shown.
+    animClockMs_ += dtMs;
+
+    // A boat asks once whether it is on water - the canal may stream in after
+    // it does, so it keeps asking for a while - and rides it if so. A rowboat
+    // pulled up on a beach is the same model and stays put. Only boats with
+    // the question still open are on the list.
+    if (waterHeightAt_) {
+        auto& pending = scene_->pendingAfloatIds_;
+        for (size_t k = 0; k < pending.size();) {
+            auto idxIt = scene_->instanceIndexById.find(pending[k]);
+            if (idxIt != scene_->instanceIndexById.end() && idxIt->second < scene_->instances.size()) {
+                auto& instance = scene_->instances[idxIt->second];
+                if (!instance.hidden) {
+                    instance.afloatRecheck -= deltaTime;
+                    if (instance.afloatRecheck <= 0.0f) {
+                        instance.afloatRecheck = 1.0f;
+                        const auto water = waterHeightAt_(instance.position.x, instance.position.y,
+                                                          instance.position.z);
+                        if (water && std::abs(*water - instance.position.z) < 1.5f) {
+                            instance.afloat = 1;
+                        } else if (++instance.afloatTries >= 15) {
+                            instance.afloat = 0;
+                        }
+                    }
+                }
+                if (instance.afloat < 0) {
+                    ++k;
+                    continue;
                 }
             }
-        }
-        const bool steppedBelow = instance.cachedHasAnimation && !instance.cachedDisableAnimation;
-        if (!steppedBelow && instance.animDuration > 0.0f &&
-            instance.animTime >= instance.animDuration) {
-            instance.animTime = std::fmod(instance.animTime, instance.animDuration);
+            // Answered, or the boat is gone.
+            pending[k] = pending.back();
+            pending.pop_back();
         }
     }
 
@@ -404,31 +440,16 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
     // is quiet unless asked for with WOWEE_LOG_LEVEL=info.
     if (skyMode_ && !scene_->instances.empty()) {
         const auto& sky = scene_->instances.front();
-        const bool restarted = sky.animTime < skyDiagAnimTime_;
+        const float skyAnimTime = animTimeOf(sky);
+        const bool restarted = skyAnimTime < skyDiagAnimTime_;
         if (restarted || sky.id != skyDiagInstanceId_ ||
-            sky.animTime - skyDiagAnimTime_ > 1000.0f) {
+            skyAnimTime - skyDiagAnimTime_ > 1000.0f) {
             LOG_INFO("skyM2: instance=", sky.id, " instances=", scene_->instances.size(),
-                     " animTime=", sky.animTime, " duration=", sky.animDuration,
-                     " gsTime=", sky.globalSequenceTime, " dtMs=", dtMs,
+                     " animTime=", skyAnimTime, " duration=", sky.animDuration,
+                     " gsTime=", globalSequenceTimeOf(sky), " dtMs=", dtMs,
                      restarted ? " RESTARTED" : "");
             skyDiagInstanceId_ = sky.id;
-            skyDiagAnimTime_ = sky.animTime;
-        }
-    }
-    // Wrap animTime for particle-only instances so emission rate tracks keep looping.
-    // 3333ms chosen as a safe wrap period: long enough to cover the longest known M2
-    // particle emission cycle (~3s for torch/campfire effects) while preventing float
-    // precision loss that accumulates over hours of runtime.
-    static constexpr float kParticleWrapMs = 3333.0f;
-    // Only for those with no sequence length to wrap at; the rest were
-    // wrapped at their own above.
-    for (size_t idx : scene_->particleOnlyInstanceIndices_) {
-        if (idx >= scene_->instances.size()) continue;
-        auto& instance = scene_->instances[idx];
-        if (instance.animDuration > 0.0f) continue;
-        // Use iterative subtraction instead of fmod() to preserve precision
-        while (instance.animTime > kParticleWrapMs) {
-            instance.animTime -= kParticleWrapMs;
+            skyDiagAnimTime_ = skyAnimTime;
         }
     }
 
@@ -436,8 +457,8 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
     scene_->boneWorkIndices_.reserve(scene_->animatedInstanceIndices_.size());
 
     // Update animated instances (full animation state + bone computation culling)
-    // Note: animTime was already advanced by dtMs in the global loop above.
-    // Here we apply the speed factor: subtract the base dtMs and add dtMs*speed.
+    // The clock above moves every instance at speed 1. Here an instance's own
+    // speed moves its start: back for faster, forward for slower or held.
     // Ground clutter stops being stepped once it is past the distance it draws
     // at. There are hundreds of tufts to a tile and each one plays a sequence of
     // its own, so this list is mostly grass that nothing can see; the sequences
@@ -455,7 +476,7 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
             if (glm::dot(toCam, toCam) > clutterAnimCutoffSq) continue;
         }
 
-        instance.animTime += dtMs * (instance.animSpeed - 1.0f);
+        instance.animStartMs -= static_cast<double>(dtMs) * (instance.animSpeed - 1.0f);
 
         // For animation looping/variation, we need the actual model data.
         if (!instance.cachedModel) continue;
@@ -476,22 +497,23 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
         }
         // Played backwards (a GameObject's Close standing in for a missing
         // Open), a one-shot ends at its start.
-        if (instance.animSpeed < 0.0f && instance.animTime <= 0.0f) {
-            instance.animTime = 0.0f;
+        if (instance.animSpeed < 0.0f && animTimeOf(instance) <= 0.0f) {
+            setAnimTime(instance, 0.0f);
             if (instance.nextAnimation) {
                 advanceToNextAnimation(instance);
             } else {
                 instance.animSpeed = 0.0f;
             }
         }
-        if (instance.animDuration > 0.0f && instance.animTime >= instance.animDuration &&
+        const float animTime = animTimeOf(instance);
+        if (instance.animDuration > 0.0f && animTime >= instance.animDuration &&
             instance.nextAnimation) {
             advanceToNextAnimation(instance);
-        } else if (instance.animDuration > 0.0f && instance.animTime >= instance.animDuration) {
+        } else if (instance.animDuration > 0.0f && animTime >= instance.animDuration) {
             if (instance.holdAtEnd) {
                 // Stay on the last frame. A door's open sequence ends with the
                 // door open, and that is the pose the server is describing.
-                instance.animTime = instance.animDuration;
+                setAnimTime(instance, instance.animDuration);
                 instance.animSpeed = 0.0f;
             } else if (instance.playingVariation) {
                 instance.playingVariation = false;
@@ -499,14 +521,14 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
                 if (instance.idleSequenceIndex < static_cast<int>(model.sequences.size())) {
                     instance.animDuration = static_cast<float>(model.sequences[instance.idleSequenceIndex].duration);
                 }
-                instance.animTime = 0.0f;
+                setAnimTime(instance, 0.0f);
                 instance.variationTimer = instance.random.uniform(rendering::M2_LOOP_VARIATION_TIMER_MIN_MS, rendering::M2_LOOP_VARIATION_TIMER_MAX_MS);
             } else {
-                // Use iterative subtraction instead of fmod() to preserve precision
-                float duration = std::max(1.0f, instance.animDuration);
-                while (instance.animTime >= duration) {
-                    instance.animTime -= duration;
-                }
+                // Whole laps: the start moves on by them, and the time keeps
+                // its place within the sequence.
+                const double duration = std::max(1.0f, instance.animDuration);
+                const double elapsed = animClockMs_ - instance.animStartMs;
+                instance.animStartMs += std::floor(elapsed / duration) * duration;
             }
         }
 
@@ -521,7 +543,7 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
                     instance.playingVariation = true;
                     instance.currentSequenceIndex = newSeq;
                     instance.animDuration = static_cast<float>(model.sequences[newSeq].duration);
-                    instance.animTime = 0.0f;
+                    setAnimTime(instance, 0.0f);
                 } else {
                     instance.variationTimer = instance.random.uniform(rendering::M2_IDLE_VARIATION_TIMER_MIN_MS, rendering::M2_IDLE_VARIATION_TIMER_MAX_MS);
                 }
@@ -580,7 +602,7 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
                 if (i >= scene_->instances.size()) continue;
                 auto& inst = scene_->instances[i];
                 if (!inst.cachedModel) continue;
-                computeBoneMatrices(*inst.cachedModel, inst, &cachedView_);
+                computeBoneMatrices(*inst.cachedModel, inst, animTimeOf(inst), globalSequenceTimeOf(inst), &cachedView_);
             }
         } else {
             // Parallel - dispatch across worker threads
@@ -594,7 +616,7 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
                     if (i >= scene_->instances.size()) continue;
                     auto& inst = scene_->instances[i];
                     if (!inst.cachedModel) continue;
-                    computeBoneMatrices(*inst.cachedModel, inst, &cachedView_);
+                    computeBoneMatrices(*inst.cachedModel, inst, animTimeOf(inst), globalSequenceTimeOf(inst), &cachedView_);
                 }
             } else {
                 const size_t chunkSize = animCount / numThreads;
@@ -606,7 +628,7 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
                         if (idx >= scene_->instances.size()) continue;
                         auto& inst = scene_->instances[idx];
                         if (!inst.cachedModel) continue;
-                        computeBoneMatrices(*inst.cachedModel, inst, &cachedView_);
+                        computeBoneMatrices(*inst.cachedModel, inst, animTimeOf(inst), globalSequenceTimeOf(inst), &cachedView_);
                     }
                 };
 
@@ -680,7 +702,7 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
                             " live=", instance.particles.size(),
                             " first at (", offset.x, ", ", offset.y, ", ", offset.z, ") from the instance",
                             " bones=", instance.boneMatrices.size(),
-                            " seq=", instance.currentSequenceIndex, " animTime=", instance.animTime,
+                            " seq=", instance.currentSequenceIndex, " animTime=", animTimeOf(instance),
                             " scale=", instance.scale,
                             distSq > cachedMaxRenderDistSq_ ? "  SKIPPED: beyond render distance" : "");
             }
@@ -707,7 +729,7 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
         float longestLife = 0.0f;
         for (const auto& em : model.particleEmitters) {
             longestLife = std::max(longestLife,
-                interpFloat(em.lifespan, instance.animTime, instance.globalSequenceTime,
+                interpFloat(em.lifespan, animTimeOf(instance), globalSequenceTimeOf(instance),
                             instance.currentSequenceIndex, model.globalSequenceDurations) +
                 em.lifespanVary);
         }
@@ -1443,8 +1465,8 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
                 .scale = instance.scale,
                 .fade = instance.fade,
                 .highlight = instance.highlight,
-                .animTime = instance.animTime,
-                .globalSequenceTime = instance.globalSequenceTime,
+                .animTime = animTimeOf(instance),
+                .globalSequenceTime = globalSequenceTimeOf(instance),
                 .sequenceIndex = instance.currentSequenceIndex,
                 .megaBoneOffset = instance.megaBoneOffset,
                 .boneCount = static_cast<uint32_t>(instance.boneMatrices.size()),

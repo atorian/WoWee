@@ -9,6 +9,8 @@
 #include "ui/game_screen.hpp"
 #include "game/game_events.hpp"
 #include "ui/gamepad_controls.hpp"
+#include "ui/agent_controls.hpp"
+#include "game/chat_handler.hpp"
 #include "core/gamepad.hpp"
 
 #include <set>
@@ -674,6 +676,18 @@ void GameScreen::render(game::GameHandler& gameHandler) {
             case ChatPanel::SlashCommands::Recording::Stop:   stopRecording();   break;
             case ChatPanel::SlashCommands::Recording::None:   break;
         }
+        if (cmds.agentControl != ChatPanel::SlashCommands::AgentControl::None && services_.agentControls) {
+            using AgentControl = ChatPanel::SlashCommands::AgentControl;
+            auto& agent = *services_.agentControls;
+            const bool give = cmds.agentControl == AgentControl::On ||
+                              (cmds.agentControl == AgentControl::Toggle && !agent.hasControl());
+            if (give) agent.grant(); else agent.release();
+            LOG_WARNING("Agent control ", give ? "handed to the agent" : "taken back", " by /ai");
+            gameHandler.chat().addSystemChatMessage(give
+                ? "The agent has control. Any key, click or Ctrl+Shift+H takes it back."
+                : "You have control.");
+        }
+        if (services_.agentControls) services_.agentControls->drawIndicator();
     }
     reportRecordingFailure();
     reportScreenshotResults();

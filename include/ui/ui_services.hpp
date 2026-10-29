@@ -44,6 +44,7 @@ namespace pet { class IPet; }
 namespace audio { class AudioCoordinator; }
 
 namespace ui {
+class AgentControls;
 
 /**
  * UI Services - Dependency injection container for UI components.
@@ -121,6 +122,7 @@ struct UIServices {
     core::EntitySpawner* entitySpawner = nullptr;
     core::AppearanceComposer* appearanceComposer = nullptr;
     core::WorldLoader* worldLoader = nullptr;
+    AgentControls* agentControls = nullptr;
     
     // Helper to check if core services are wired
     [[nodiscard]] bool isValid() const {

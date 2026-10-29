@@ -161,6 +161,29 @@ public:
     }
 };
 
+// --- /ai ---
+// Hand the character to the agent connected over MCP, or take it back. Any
+// key, click or wheel of the player's own takes it back as well, as does Ctrl+Shift+H.
+class AiCommand : public IChatCommand {
+public:
+    ChatCommandResult execute(ChatCommandContext& ctx) override {
+        std::string arg = ctx.args;
+        for (char& c : arg) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        while (!arg.empty() && arg.back() == ' ') arg.pop_back();
+        while (!arg.empty() && arg.front() == ' ') arg.erase(arg.begin());
+        using AgentControl = ChatPanel::SlashCommands::AgentControl;
+        auto& cmds = ctx.panel.getSlashCmds();
+        if (arg == "on") cmds.agentControl = AgentControl::On;
+        else if (arg == "off") cmds.agentControl = AgentControl::Off;
+        else cmds.agentControl = AgentControl::Toggle;
+        return {};
+    }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"ai"}; }
+    [[nodiscard]] std::string helpText() const override {
+        return "Hand the character to the connected agent: /ai [on|off]";
+    }
+};
+
 // --- /ticket, /gmticket, /gm ---
 class TicketCommand : public IChatCommand {
 public:
@@ -425,6 +448,7 @@ void registerMiscCommands(ChatCommandRegistry& reg) {
     reg.registerCommand(std::make_unique<PlayedCommand>());
     reg.registerCommand(std::make_unique<ScreenshotCommand>());
     reg.registerCommand(std::make_unique<RecordCommand>());
+    reg.registerCommand(std::make_unique<AiCommand>());
     reg.registerCommand(std::make_unique<TicketCommand>());
     reg.registerCommand(std::make_unique<ScoreCommand>());
     reg.registerCommand(std::make_unique<ThreatCommand>());

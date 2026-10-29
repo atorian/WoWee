@@ -10,6 +10,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <iterator>
 #include <sstream>
 #include <iomanip>
 #include <zlib.h>
@@ -124,20 +125,63 @@ std::string normalizeWowTextTokens(std::string text, const std::string& playerNa
     return text;
 }
 
+namespace {
+
+std::string upperAccountName(const std::string& accountName) {
+    std::string upper = accountName;
+    std::transform(upper.begin(), upper.end(), upper.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    return upper;
+}
+
+unsigned leadingZeroBitsWowStyle(const std::vector<uint8_t>& digest) {
+    unsigned count = 0;
+    for (uint8_t byte : digest) {
+        if (byte == 0) {
+            count += 8;
+            continue;
+        }
+        while ((byte & 1) == 0) {
+            byte >>= 1;
+            ++count;
+        }
+        break;
+    }
+    return count;
+}
+
+} // namespace
+
+std::optional<uint64_t> AuthSessionPacket::solveDosChallenge(const std::string& accountName,
+                                                             const std::array<uint8_t, 32>& seeds,
+                                                             uint32_t difficulty) {
+    if (difficulty > 160) return std::nullopt;  // more zero bits than a SHA1 digest has
+
+    const std::string upperAccount = upperAccountName(accountName);
+    std::vector<uint8_t> input(upperAccount.begin(), upperAccount.end());
+    input.insert(input.end(), seeds.begin(), seeds.end());
+    const size_t nonceAt = input.size();
+    input.resize(nonceAt + 8);
+
+    for (uint64_t nonce = 0;; ++nonce) {
+        for (int i = 0; i < 8; ++i) input[nonceAt + i] = static_cast<uint8_t>(nonce >> (8 * i));
+        if (leadingZeroBitsWowStyle(auth::Crypto::sha1(input)) >= difficulty) return nonce;
+        if (nonce == UINT64_MAX) return std::nullopt;
+    }
+}
+
 network::Packet AuthSessionPacket::build(uint32_t build,
                                           const std::string& accountName,
                                           uint32_t clientSeed,
                                           const std::vector<uint8_t>& sessionKey,
                                           uint32_t serverSeed,
-                                          uint32_t realmId) {
+                                          uint32_t realmId,
+                                          uint64_t dosResponse) {
     if (sessionKey.size() != 40) {
         LOG_ERROR("Invalid session key size: ", sessionKey.size(), " (expected 40)");
     }
 
-    // Convert account name to uppercase
-    std::string upperAccount = accountName;
-    std::transform(upperAccount.begin(), upperAccount.end(),
-                   upperAccount.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    const std::string upperAccount = upperAccountName(accountName);
 
     LOG_INFO("Building CMSG_AUTH_SESSION for account: ", upperAccount);
 
@@ -176,8 +220,8 @@ network::Packet AuthSessionPacket::build(uint32_t build,
         packet.writeUInt32(0);                 // BattlegroupID
         packet.writeUInt32(realmId);           // RealmID
         LOG_DEBUG("  Realm ID: ", realmId);
-        packet.writeUInt32(0);                 // DOS response (uint64)
-        packet.writeUInt32(0);
+        packet.writeUInt64(dosResponse);
+        LOG_DEBUG("  DoS response: ", dosResponse);
     }
 
     // Authentication hash/digest (20 bytes)
@@ -215,10 +259,34 @@ network::Packet AuthSessionPacket::build(uint32_t build,
             addonData.push_back(0); addonData.push_back(0);
         }
     } else {
-        // WotLK: uint32 addonCount + entries + uint32 clientTime
-        // Send 0 addons
-        addonData = { 0, 0, 0, 0,  // addonCount = 0
-                      0, 0, 0, 0 }; // clientTime = 0
+        // WotLK: uint32 addonCount + entries + uint32 clientTime.
+        // Wow.exe 12340 (0x5F5440) lists the addons whose TOC says
+        // "## Secure: 1" - these 23 - each with the CRC32 of the key from its
+        // .pub file. After one session on Isengard the original client holds the
+        // standard Blizzard key for all of them and no .url files.
+        static const char* secureAddons[] = {
+            "Blizzard_AchievementUI", "Blizzard_ArenaUI", "Blizzard_AuctionUI",
+            "Blizzard_BarbershopUI", "Blizzard_BattlefieldMinimap", "Blizzard_BindingUI",
+            "Blizzard_Calendar", "Blizzard_CombatLog", "Blizzard_CombatText",
+            "Blizzard_DebugTools", "Blizzard_GlyphUI", "Blizzard_GMChatUI",
+            "Blizzard_GMSurveyUI", "Blizzard_GuildBankUI", "Blizzard_InspectUI",
+            "Blizzard_ItemSocketingUI", "Blizzard_MacroUI", "Blizzard_RaidUI",
+            "Blizzard_TalentUI", "Blizzard_TimeManager", "Blizzard_TokenUI",
+            "Blizzard_TradeSkillUI", "Blizzard_TrainerUI"
+        };
+        static constexpr uint32_t standardKeyCRC = 0x4C1C776D;
+        auto pushU32 = [&addonData](uint32_t value) {
+            for (int i = 0; i < 4; ++i) addonData.push_back(static_cast<uint8_t>(value >> (8 * i)));
+        };
+        pushU32(static_cast<uint32_t>(std::size(secureAddons)));
+        for (const char* name : secureAddons) {
+            addonData.insert(addonData.end(), reinterpret_cast<const uint8_t*>(name),
+                             reinterpret_cast<const uint8_t*>(name) + strlen(name) + 1);
+            addonData.push_back(0x01);   // hasKey
+            pushU32(standardKeyCRC);
+            pushU32(0);                  // CRC32 of the .url, none
+        }
+        pushU32(0);                      // clientTime: newest banned-addon stamp
     }
     uint32_t decompressedSize = static_cast<uint32_t>(addonData.size());
 
@@ -233,7 +301,7 @@ network::Packet AuthSessionPacket::build(uint32_t build,
         packet.writeBytes(compressed.data(), compressed.size());
         LOG_DEBUG("Addon info: decompressedSize=", decompressedSize,
                   " compressedSize=", compressedSize, " addons=",
-                  isTbc ? "12 vanilla" : "0 wotlk");
+                  isTbc ? "12 vanilla" : "23 wotlk");
     } else {
         LOG_ERROR("zlib compress failed with code: ", ret);
         packet.writeUInt32(0);
@@ -313,21 +381,20 @@ bool AuthChallengeParser::parse(network::Packet& packet, AuthChallengeData& data
 
     if (packet.getSize() <= 4) {
         // Original vanilla/TBC format: just the server seed (4 bytes)
-        data.unknown1 = 0;
         data.serverSeed = packet.readUInt32();
         LOG_INFO("SMSG_AUTH_CHALLENGE: TBC format (", packet.getSize(), " bytes)");
     } else if (packet.getSize() < 40) {
         // Vanilla with encryption seeds (36 bytes): serverSeed + 32 bytes seeds
-        // No "unknown1" prefix - first uint32 IS the server seed
-        data.unknown1 = 0;
+        // No difficulty prefix - first uint32 IS the server seed
         data.serverSeed = packet.readUInt32();
         LOG_INFO("SMSG_AUTH_CHALLENGE: Classic+seeds format (", packet.getSize(), " bytes)");
     } else {
-        // WotLK format (40+ bytes): unknown1 + serverSeed + 32 bytes encryption seeds
-        data.unknown1 = packet.readUInt32();
+        // WotLK format (40+ bytes): DoS difficulty + serverSeed + 32 DoS seed bytes
+        data.dosDifficulty = packet.readUInt32();
         data.serverSeed = packet.readUInt32();
+        for (auto& seed : data.dosSeeds) seed = packet.readUInt8();
         LOG_INFO("SMSG_AUTH_CHALLENGE: WotLK format (", packet.getSize(), " bytes)");
-        LOG_DEBUG("  Unknown1: 0x", std::hex, data.unknown1, std::dec);
+        LOG_DEBUG("  DoS difficulty: ", data.dosDifficulty);
     }
 
     LOG_DEBUG("  Server seed: 0x", std::hex, data.serverSeed, std::dec);

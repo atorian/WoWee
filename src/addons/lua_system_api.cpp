@@ -36,6 +36,7 @@
 #include "rendering/camera_controller.hpp"
 #include "rendering/view_distance.hpp"
 #include "addons/lua_engine.hpp"
+#include "addons/minimap_zoom.hpp"
 #include "game/bg_score_defs.hpp"
 #include "game/calendar_month.hpp"
 #include "calendar/domain/records.hpp"
@@ -759,6 +760,9 @@ static void pushCvarDefault(lua_State* L, const std::string& n) {
     else if (n == "sound_numchannels") lua_pushstring(L, "64");
     else if (n == "sound_outputquality") lua_pushstring(L, "2");
     else if (n == "uiscale") lua_pushstring(L, "1");
+    else if (n == "minimapzoom" || n == "minimapinsidezoom") {
+        lua_pushstring(L, std::to_string(kMinimapDefaultZoom).c_str());
+    }
     else if (n == "useuiscale") lua_pushstring(L, "1");
     else if (n == "screenwidth" || n == "gxresolution") {
         auto* svc = getLuaServices(L);
@@ -1502,6 +1506,11 @@ static void applyCVarSideEffects(lua_State* L, const std::string& key,
     // A sound CVar is a setting, not a note. Without this the interface's
     // volume keys and its Sound options both wrote to a map nobody read, so
     // turning music off left it playing.
+    // Either of the minimap's zooms, which Minimap:SetZoom keeps in range;
+    // a value set here or in the file is said once, as it arrives.
+    if (key == "minimapzoom" || key == "minimapinsidezoom") {
+        noteMinimapZoomCVar(key, value);
+    }
     // The interface's own scale, which is the widget tree's to keep - not a
     // client setting, and not the ImGui window scale beside it in the settings
     // window. Those are two different interfaces that happen to share a word.
@@ -1512,31 +1521,6 @@ static void applyCVarSideEffects(lua_State* L, const std::string& key,
             const std::string useIt = cvarValueOr(L, "useuiscale", "1");
             if (useIt != "0") {
                 tree->setUserScale(static_cast<float>(std::atof(value.c_str())));
-            }
-        }
-    }
-    // The minimap's zoom, put back where the player left it.
-    //
-    // Not a setting anyone sets in a panel: it is where the +/- buttons and the
-    // wheel over the ring were left, and the real client remembers that across
-    // a session. Minimap:SetZoom writes it here on the way past; this is the
-    // way back, and it runs after FrameXML is up, which is the first moment
-    // there is a Minimap to put it on.
-    //
-    // Straight onto the widget rather than through Minimap:SetZoom, so it does
-    // not write back what it just read. MINIMAP_UPDATE_ZOOM is what the real
-    // client fires when the zoom changes under the interface, and it is what
-    // greys the button that can no longer go any further - without it a map
-    // restored at full zoom offers a zoom-in that does nothing.
-    if (key == "wowee_minimapzoom") {
-        if (auto* tree = getWidgetTree(L)) {
-            if (auto* mm = tree->findByName("Minimap")) {
-                const int z = std::atoi(value.c_str());
-                mm->zoomLevel = (z < 0) ? 0 : (z > 4 ? 4 : z);
-                lua_getfield(L, LUA_REGISTRYINDEX, "wowee_lua_engine");
-                auto* engine = static_cast<LuaEngine*>(lua_touserdata(L, -1));
-                lua_pop(L, 1);
-                if (engine) engine->fireEvent("MINIMAP_UPDATE_ZOOM", {});
             }
         }
     }

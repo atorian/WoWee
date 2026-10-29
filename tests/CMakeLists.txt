@@ -1057,6 +1057,55 @@ target_link_libraries(test_warden_challenge PRIVATE catch2_main OpenSSL::SSL Ope
 add_test(NAME warden_challenge COMMAND test_warden_challenge)
 register_test_target(test_warden_challenge)
 
+# The LOGON_PROOF integrity hash of a 12340 client, checked against
+# TrinityCore's checksum when WOWEE_TEST_CLIENT_DIR names a client folder.
+add_executable(test_integrity_hash
+    test_integrity_hash.cpp
+    ${TEST_COMMON_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/auth/integrity.cpp
+    ${CMAKE_SOURCE_DIR}/src/auth/crypto.cpp
+)
+target_include_directories(test_integrity_hash PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_integrity_hash SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_integrity_hash PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
+add_test(NAME integrity_hash COMMAND test_integrity_hash)
+register_test_target(test_integrity_hash)
+
+# MCP over JSON-RPC, as the specification answers it.
+wowee_add_test(test_mcp_server
+    SOURCES test_mcp_server.cpp
+            ${CMAKE_SOURCE_DIR}/src/mcp/mcp_server.cpp)
+
+# The MCP endpoint over HTTP: parsing, who is let in, a real round trip.
+add_executable(test_mcp_http
+    test_mcp_http.cpp
+    ${TEST_COMMON_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/mcp/http_transport.cpp
+    ${CMAKE_SOURCE_DIR}/src/mcp/mcp_server.cpp
+)
+target_include_directories(test_mcp_http PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_mcp_http SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_mcp_http PRIVATE catch2_main Threads::Threads)
+add_test(NAME mcp_http COMMAND test_mcp_http)
+register_test_target(test_mcp_http)
+
+# Tool calls handed from the listener's thread to the frame loop.
+wowee_add_test(test_mcp_main_thread_queue
+    SOURCES test_mcp_main_thread_queue.cpp
+            ${CMAKE_SOURCE_DIR}/src/mcp/main_thread_queue.cpp
+            ${CMAKE_SOURCE_DIR}/src/mcp/mcp_server.cpp)
+target_link_libraries(test_mcp_main_thread_queue PRIVATE Threads::Threads)
+
+# An agent drives the character only while the player has handed control over.
+wowee_add_test(test_agent_controls
+    SOURCES test_agent_controls.cpp
+            ${CMAKE_SOURCE_DIR}/src/ui/agent_controls.cpp)
+
+# The LOGON_CHALLENGE timezone: the standard offset, as Wow.exe sends -Bias.
+wowee_add_test(test_client_timezone
+    SOURCES test_client_timezone.cpp
+            ${CMAKE_SOURCE_DIR}/src/auth/client_timezone.cpp)
+
 # Warden PE lookup must use the expansion selected by the asset manager.
 add_executable(test_warden_memory
     test_warden_memory.cpp
@@ -1424,6 +1473,10 @@ wowee_add_packet_test(test_battlefield_status_packet)
 # ── test_lfg_join_packet ─────────────────────────────────────
 # Every field of CMSG_LFG_JOIN, which was wrong in every field and silent.
 wowee_add_packet_test(test_lfg_join_packet)
+
+# ── test_auth_session_packet ─────────────────────────────────
+# The DoS proof-of-work in CMSG_AUTH_SESSION, which was sent as a constant zero.
+wowee_add_packet_test(test_auth_session_packet)
 
 # ── test_learn_talent_packet ─────────────────────────────────
 # The rank field counts from zero on the wire and from one everywhere else.
@@ -2884,6 +2937,19 @@ target_link_libraries(test_m2_view_distance PRIVATE catch2_main)
 add_test(NAME m2_view_distance COMMAND test_m2_view_distance)
 register_test_target(test_m2_view_distance)
 
+# ── test_m2_anim_clock ───────────────────────────────────────
+# The sequence time an M2 instance shows, worked out from one shared clock
+# instead of a total advanced on every instance every frame.
+add_executable(test_m2_anim_clock
+    test_m2_anim_clock.cpp
+    ${TEST_COMMON_SOURCES})
+target_include_directories(test_m2_anim_clock PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_m2_anim_clock SYSTEM PRIVATE
+    ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_m2_anim_clock PRIVATE catch2_main)
+add_test(NAME m2_anim_clock COMMAND test_m2_anim_clock)
+register_test_target(test_m2_anim_clock)
+
 # ── test_light_volume_order ──────────────────────────────────
 # The client's rule for laying light volumes over each other: each one's
 # weight, the order they go down in, and what each ends up contributing.
@@ -3142,6 +3208,24 @@ target_compile_definitions(test_wmo_lighting PRIVATE WOWEE_SOURCE_DIR="${CMAKE_S
 wowee_add_test(test_placement_transform
     SOURCES test_placement_transform.cpp
             ${TEST_COMMON_SOURCES})
+
+# ── test_terrain_tile_maps ───────────────────────────────────
+# A terrain tile's chunk maps as its arrays hold them: each chunk's cover and
+# normals at the layer its slot names.
+wowee_add_test(test_terrain_tile_maps
+    SOURCES test_terrain_tile_maps.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/terrain_tile_maps.cpp)
+
+# ── test_terrain_fog_band ────────────────────────────────────
+# Which terrain chunks draw with the shader that cannot discard: only those
+# no part of which reaches the fog band or the distant-terrain hand-over.
+wowee_add_test(test_terrain_fog_band
+    SOURCES test_terrain_fog_band.cpp)
+
+# ── test_wmo_draw_layer ──────────────────────────────────────
+# Which WMO batches the scene pass draws ahead of the sky and which after it.
+wowee_add_test(test_wmo_draw_layer
+    SOURCES test_wmo_draw_layer.cpp)
 
 # ── test_wmo_batch_merge ─────────────────────────────────────
 # Which WMO group batches draw as one. A merged batch is drawn with its first
@@ -3533,6 +3617,10 @@ if(_ipo_supported AND WOWEE_ENABLE_LTO)
     set_property(TARGET test_interface_frame_scripts PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
 
+# The Minimap frame's two zooms, outdoor and indoor, through the interface.
+wowee_add_test(test_minimap_zoom SOURCES test_minimap_zoom.cpp)
+target_link_libraries(test_minimap_zoom PRIVATE wowee_client_harness)
+
 # ── wowee_loading_test_client ────────────────────────────────
 option(WOWEE_BUILD_RENDER_CLIENT_PROBE "Build native interface/render lifecycle GPU probe" OFF)
 wowee_add_test(test_frame_results SOURCES test_frame_results.cpp)
@@ -3636,3 +3724,10 @@ wowee_add_test(test_frame_pool SOURCES test_frame_pool.cpp)
 wowee_add_test(test_distant_terrain
     SOURCES test_distant_terrain.cpp ${CMAKE_SOURCE_DIR}/src/pipeline/distant_terrain.cpp
             ${TEST_COMMON_SOURCES})
+
+wowee_add_test(test_minimap_tile_index
+    SOURCES test_minimap_tile_index.cpp ${CMAKE_SOURCE_DIR}/src/pipeline/minimap_tile_index.cpp)
+
+wowee_add_test(test_wmo_minimap
+    SOURCES test_wmo_minimap.cpp ${CMAKE_SOURCE_DIR}/src/rendering/wmo_minimap.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp ${TEST_COMMON_SOURCES})

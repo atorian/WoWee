@@ -136,6 +136,7 @@
 #include "audio/audio_engine.hpp"
 #include "rendering/lightning.hpp"
 #include "addons/lua_api_registrations.hpp"
+#include "addons/minimap_zoom.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "addons/addon_manager.hpp"
 #include "addons/lua_api_helpers.hpp"
@@ -150,6 +151,8 @@
 #include "ui/map_window.hpp"
 #include "ui/touch_controls.hpp"
 #include "ui/gamepad_controls.hpp"
+#include "ui/agent_controls.hpp"
+#include "core/agent_bridge.hpp"
 #include "core/gamepad.hpp"
 #include "addons/lua_api_registrations.hpp"
 #include "core/data_paths.hpp"
@@ -977,7 +980,10 @@ bool Application::initialize() {
             uiServices.entitySpawner = entitySpawner_.get();
             uiServices.appearanceComposer = appearanceComposer_.get();
             uiServices.worldLoader = worldLoader_.get();
+            agentControls_ = std::make_unique<ui::AgentControls>();
+            uiServices.agentControls = agentControls_.get();
             uiManager->setServices(uiServices);
+            startAgentBridge();
         }
 
         // Ensure the main in-world CharacterRenderer can load textures immediately.
@@ -1776,6 +1782,7 @@ bool Application::initialize() {
             uiServices.entitySpawner = entitySpawner_.get();
             uiServices.appearanceComposer = appearanceComposer_.get();
             uiServices.worldLoader = worldLoader_.get();
+            uiServices.agentControls = agentControls_.get();
             uiManager->setServices(uiServices);
         }
 
@@ -2283,6 +2290,42 @@ void Application::pump(float deltaTime, const FramePlan& plan, InterfaceInput& f
 
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
+        // Ctrl+Shift+G hands control to an agent, Ctrl+Shift+H takes it
+        // back; two combos rather than one toggle, so a press always does
+        // what it says whatever state the player believes it is in. Ahead
+        // of everything else, so the press is neither the player's input
+        // that would end control again nor a key the interface sees. G and
+        // H because movement reads its keys from the keyboard state, past
+        // this queue: on A the character turned while the combo was held.
+        if (agentControls_ && event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
+            (event.key.key == SDLK_G || event.key.key == SDLK_H) &&
+            (event.key.mod & SDL_KMOD_CTRL) && (event.key.mod & SDL_KMOD_SHIFT)) {
+            const bool give = event.key.key == SDLK_G;
+            if (give) agentControls_->grant();
+            else agentControls_->release();
+            LOG_WARNING("Agent control ", give ? "given by Ctrl+Shift+G" : "taken back by Ctrl+Shift+H");
+            continue;
+        }
+        // A key, a click or the wheel of the player's own takes control
+        // back from an agent at once - while the game has the focus. Not
+        // the mouse moving: the player talks to the agent in another
+        // window, and the pointer crossing this one on the way there is
+        // not taking the wheel; nor is the Cmd of the Cmd+Tab.
+        if (agentControls_ && agentControls_->hasControl() && SDL_GetKeyboardFocus() != nullptr) {
+            const bool modifierOnly = event.type == SDL_EVENT_KEY_DOWN &&
+                event.key.scancode >= SDL_SCANCODE_LCTRL && event.key.scancode <= SDL_SCANCODE_RGUI;
+            const bool playerInput =
+                (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat && !modifierOnly) ||
+                event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_WHEEL;
+            if (playerInput) {
+                agentControls_->onPlayerInput();
+                LOG_WARNING("Agent control taken back by player input (SDL event 0x", std::hex,
+                            static_cast<unsigned>(event.type), std::dec,
+                            event.type == SDL_EVENT_KEY_DOWN ? ", key " : "",
+                            event.type == SDL_EVENT_KEY_DOWN ? SDL_GetScancodeName(event.key.scancode) : "",
+                            ")");
+            }
+        }
         // Sound in Background. Off in the real client and off here: losing
         // focus silences the client rather than playing on behind whatever
         // the player switched to. Read at the moment focus changes, so
@@ -2409,6 +2452,23 @@ void Application::pump(float deltaTime, const FramePlan& plan, InterfaceInput& f
     } else {
         ui::gamepadControls().setCameraController(nullptr);
         ui::gamepadControls().update(deltaTime);
+    }
+    // The agent after the pad, for the same reason the pad precedes the
+    // keyboard: its keys must be down before Input::update reads them.
+    if (agentBridge_) agentBridge_->pump(deltaTime);
+    if (agentControls_) {
+        auto* cam = getCameraController();
+        const auto frame = agentControls_->update(deltaTime, cam);
+        if (frame.setKeys) {
+            using Move = ui::AgentControls::Move;
+            auto& input = Input::getInstance();
+            input.setVirtualKey(SDL_SCANCODE_W, frame.held[static_cast<size_t>(Move::Forward)]);
+            input.setVirtualKey(SDL_SCANCODE_S, frame.held[static_cast<size_t>(Move::Backward)]);
+            input.setVirtualKey(SDL_SCANCODE_Q, frame.held[static_cast<size_t>(Move::StrafeLeft)]);
+            input.setVirtualKey(SDL_SCANCODE_E, frame.held[static_cast<size_t>(Move::StrafeRight)]);
+            input.setVirtualKey(SDL_SCANCODE_SPACE, frame.jump);
+        }
+        if (cam) cam->setSteering(ui::gamepadControls().isSteering() || agentControls_->isSteering());
     }
 
     // Update input
@@ -4872,26 +4932,32 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                         mm = widgets.findByName("Minimap");
                         minimapWidgetId_ = mm ? mm->id : 0;
                     }
+                    if (mm) {
+                        // SetZoom and GetZoom reach the indoor zoom while the
+                        // map draws a building's own tiles, and the map is
+                        // drawn at the levels the interface keeps.
+                        addons::setMinimapIndoors(*engine, *mm, map->isShowingBuilding());
+                        static_assert(rendering::kMinimapOutdoorRadius.size() == addons::kMinimapZoomLevels &&
+                                      rendering::kWmoMinimapRadius.size() == addons::kMinimapZoomLevels);
+                        const int outdoor = addons::minimapZoomLevel(false);
+                        const int indoor = addons::minimapZoomLevel(true);
+                        // On a change only: this client's own zoom buttons in
+                        // the settings window step the map as well.
+                        static int appliedOutdoor = -1, appliedIndoor = -1;
+                        if (outdoor != appliedOutdoor) {
+                            appliedOutdoor = outdoor;
+                            map->setViewRadius(rendering::kMinimapOutdoorRadius[outdoor]);
+                        }
+                        if (indoor != appliedIndoor) {
+                            appliedIndoor = indoor;
+                            map->setIndoorZoom(indoor);
+                        }
+                    }
                     if (mm && mm->visible && mm->rectW > 0.0f && mm->rectH > 0.0f) {
                         const float sc = widgets.uiScale();
                         map->setScreenRect(mm->left * sc,
                                            io.DisplaySize.y - (mm->bottom + mm->rectH) * sc,
                                            mm->rectW * sc, mm->rectH * sc);
-
-                        // The zoom buttons move a number on the frame, and the
-                        // map has to be told: Minimap:SetZoom is the interface
-                        // saying what it wants, not the map changing. Five
-                        // levels as WoW has them, zero furthest out.
-                        static int appliedZoom = -1;
-                        if (mm->zoomLevel != appliedZoom) {
-                            appliedZoom = mm->zoomLevel;
-                            static const float kRadius[5] = {
-                                800.0f, 620.0f, 460.0f, 320.0f, 200.0f
-                            };
-                            const int lvl = (mm->zoomLevel < 0) ? 0
-                                          : (mm->zoomLevel > 4 ? 4 : mm->zoomLevel);
-                            map->setViewRadius(kRadius[lvl]);
-                        }
 
                         // Minimap:PingLocation, which is all Minimap_OnClick
                         // does. The offsets are minimap-local interface units
@@ -6799,5 +6865,23 @@ void Application::updateConnectionAndPatches(float deltaTime, const FramePlan& p
         else uiManager->getCharacterScreen().setStatus("", false);
     }
 }
+void Application::startAgentBridge() {
+    const char* value = std::getenv("WOWEE_MCP_PORT");
+    if (!value || !*value) return;
+    const int port = std::atoi(value);
+    if (port <= 0 || port > 65535) {
+        LOG_WARNING("WOWEE_MCP_PORT: not a port: ", value);
+        return;
+    }
+    agentBridge_ = std::make_unique<AgentBridge>(
+        AgentBridge::Dependencies{renderer.get(), gameHandler.get(), agentControls_.get(),
+                                  getCameraController(), audioCoordinator_.get()});
+    std::string error;
+    if (!agentBridge_->start(static_cast<uint16_t>(port), error)) {
+        LOG_WARNING("MCP endpoint not started: ", error);
+        agentBridge_.reset();
+    }
+}
+
 } // namespace core
 } // namespace wowee

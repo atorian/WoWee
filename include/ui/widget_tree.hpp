@@ -22,6 +22,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -608,9 +609,10 @@ struct Widget {
     /// multi-line label in a fixed box sits differently for each.
     std::string justifyV = "MIDDLE";
 
-    /// Minimap zoom step, 0 to 4. Kept here rather than in Lua because the
-    /// interface sets it through one button and reads it back through another.
-    int zoomLevel = 0;
+    /// Whether the map shows a building's own tiles, as the client last told
+    /// the Minimap: which of its two zooms SetZoom and GetZoom reach (see
+    /// addons/minimap_zoom.hpp). Empty until it is first told.
+    std::optional<bool> minimapIndoors;
 
     /// Whether a link drawn in this frame answers a click. FCF_SetUninteractable
     /// turns it off for a chat window the player has made click-through, and the
