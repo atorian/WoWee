@@ -73,7 +73,7 @@ private:
     PacketSender& sender_;
     WardenSession& session_;
     core::EventBus& events_;
-    pipeline::AssetManager* assets_;
+    pipeline::AssetManager* const assets_;
     const ExpansionRegistry* expansions_;
 
     // --- Warden state ---

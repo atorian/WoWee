@@ -335,7 +335,7 @@ private:
     FrameXmlEvents& frameXml_;
     core::EventBus& events_;
     ChatLog& chat_;
-    pipeline::AssetManager* assets_;
+    pipeline::AssetManager* const assets_;
 
     // --- Movement state ---
     // Reference to GameHandler's movementInfo to avoid desync
