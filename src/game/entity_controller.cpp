@@ -502,7 +502,7 @@ void EntityController::updateNonPlayerTransportAttachment(const UpdateBlock& blo
 //     Normalises pre-WotLK harmful bit (0x02) to WotLK debuff bit (0x80) so
 //     downstream code checking for 0x80 works consistently across expansions.
 void EntityController::syncPreWotlkAurasFromFields(const std::shared_ptr<Entity>& entity) {
-    if (!isPreWotlk() || !owner_.getSpellHandler()) return;
+    if (!isPreWotlk()) return;
 
     const uint16_t ufAuras     = fieldIndex(UF::UNIT_FIELD_AURAS);
     const uint16_t ufAuraFlags = fieldIndex(UF::UNIT_FIELD_AURAFLAGS);
@@ -515,14 +515,14 @@ void EntityController::syncPreWotlkAurasFromFields(const std::shared_ptr<Entity>
     }
     if (!hasAuraField) return;
 
-    owner_.getSpellHandler()->resetPlayerAuras(48);
+    owner_.spells().resetPlayerAuras(48);
     uint64_t nowMs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
     for (int slot = 0; slot < 48; ++slot) {
         auto it = allFields.find(static_cast<uint16_t>(ufAuras + slot));
         if (it != allFields.end() && it->second != 0) {
-            AuraSlot& a = owner_.getSpellHandler()->getPlayerAuraSlotRef(slot);
+            AuraSlot& a = owner_.spells().getPlayerAuraSlotRef(slot);
             a.spellId = it->second;
             // Read aura flag byte: packed 4-per-uint32 at ufAuraFlags
             uint8_t aFlag = 0;
@@ -543,7 +543,7 @@ void EntityController::syncPreWotlkAurasFromFields(const std::shared_ptr<Entity>
         }
     }
     LOG_DEBUG("[pre-WotLK] Rebuilt playerAuras from UNIT_FIELD_AURAS");
-    owner_.getSpellHandler()->refreshRestorationState();
+    owner_.spells().refreshRestorationState();
     // How many the player actually has, said once. "BuffButton1 - NOT BUILT"
     // means the interface asked UnitAura for the first buff and got nothing,
     // and a character with no buffs is the correct reason for that - this
@@ -637,17 +637,14 @@ void EntityController::detectPlayerMountChange(uint32_t newMountDisplayId,
         // buff as the mount, and the id has to be right or pressing the mount
         // again cannot be recognised as a dismount.
         owner_.mountAuraSpellIdRef() = 0;
-        uint32_t justCast = 0;
-        if (owner_.getSpellHandler()) {
-            justCast = owner_.getSpellHandler()->getLastGroundCastSpellId();
-            for (const auto& a : owner_.getSpellHandler()->getPlayerAuras()) {
-                if (!a.isEmpty() && a.maxDurationMs < 0 && a.casterGuid == owner_.getPlayerGuid()) {
-                    if (justCast != 0 && a.spellId == justCast) {
-                        owner_.mountAuraSpellIdRef() = a.spellId;
-                        break;
-                    }
+        const uint32_t justCast = owner_.spells().getLastGroundCastSpellId();
+        for (const auto& a : owner_.spells().getPlayerAuras()) {
+            if (!a.isEmpty() && a.maxDurationMs < 0 && a.casterGuid == owner_.getPlayerGuid()) {
+                if (justCast != 0 && a.spellId == justCast) {
                     owner_.mountAuraSpellIdRef() = a.spellId;
+                    break;
                 }
+                owner_.mountAuraSpellIdRef() = a.spellId;
             }
         }
         // The spell that was cast, before either blind scan gets a turn.
@@ -681,8 +678,8 @@ void EntityController::detectPlayerMountChange(uint32_t newMountDisplayId,
         // would strip racial passives, tracking, and zone buffs on dismount.
         uint32_t mountSpell = owner_.mountAuraSpellIdRef();
         owner_.mountAuraSpellIdRef() = 0;
-        if (mountSpell != 0 && owner_.getSpellHandler()) {
-            for (auto& a : owner_.getSpellHandler()->getPlayerAurasMut()) {
+        if (mountSpell != 0) {
+            for (auto& a : owner_.spells().getPlayerAurasMut()) {
                 if (!a.isEmpty() && a.spellId == mountSpell) {
                     a = AuraSlot{};
                     break;
@@ -2402,8 +2399,7 @@ void EntityController::trackActiveCritter(const UpdateBlock& block) {
     // Attribute it to the spell just cast from the ground, the same way the
     // mount aura is identified - a blind guess at "some spell" would make the
     // toggle fire on the wrong button.
-    uint32_t summonedBy = 0;
-    if (owner_.getSpellHandler()) summonedBy = owner_.getSpellHandler()->getLastGroundCastSpellId();
+    const uint32_t summonedBy = owner_.spells().getLastGroundCastSpellId();
     owner_.setActiveCritter(critterGuid, summonedBy);
     LOG_INFO("Companion summoned: guid=0x", std::hex, critterGuid, std::dec,
              " by spell=", summonedBy);
@@ -2764,9 +2760,9 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
     owner_.combat().removeCombatTextForGuid(data.guid);
 
     // Clean up unit cast owner_.getState() (cast bar) for the destroyed unit
-    if (owner_.getSpellHandler()) owner_.getSpellHandler()->removeUnitCastState(data.guid);
+    owner_.spells().removeUnitCastState(data.guid);
     // Clean up cached auras
-    if (owner_.getSpellHandler()) owner_.getSpellHandler()->removeUnitAuraCache(data.guid);
+    owner_.spells().removeUnitAuraCache(data.guid);
 
     owner_.tabCycleStaleRef() = true;
 }

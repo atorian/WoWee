@@ -1734,7 +1734,6 @@ public:
     // ── Handler & Subsystem Accessors (unique_ptr → raw pointer) ─────
     network::WorldConnection* getSocket() override { return socket.get(); }
     const network::WorldConnection* getSocket() const { return socket.get(); }
-    SpellHandler* getSpellHandler() { return spellHandler_.get(); }
     /// What the character holds - bags, equipment, coin, books - and the
     /// windows that move it: loot, vendors, mail, the bank, the auction house.
     InventoryHandler& inventory() { return *inventoryHandler_; }

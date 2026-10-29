@@ -2123,7 +2123,7 @@ static std::string foldedForSearch(std::string v) {
 /// learning something fires TRAINER_UPDATE without a fresh one arriving.
 static const char* trainerServiceCategory(game::GameHandler* gh,
                                           const game::TrainerSpell& sp) {
-    if (gh && gh->getSpellHandler() && gh->getSpellHandler()->hasKnownSpell(sp.spellId))
+    if (gh && gh->spells().hasKnownSpell(sp.spellId))
         return "used";
     return sp.state == 0 ? "available" : sp.state == 2 ? "used" : "unavailable";
 }

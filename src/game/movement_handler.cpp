@@ -2086,7 +2086,7 @@ void MovementHandler::handleTeleportAck(network::Packet& packet) {
     }
 
     // Clear cast bar on teleport - SpellHandler owns the casting_ flag
-    if (owner_.getSpellHandler()) owner_.getSpellHandler()->resetCastState();
+    owner_.spells().resetCastState();
 
     // Suppress area triggers briefly after teleport. A one-shot flag is not
     // enough - the player can leave and re-enter a trigger within seconds and
@@ -2330,7 +2330,7 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
         }
     }
     owner_.inventory().leaveWorld();
-    owner_.getSpellHandler()->clearUnitCaches();
+    owner_.spells().clearUnitCaches();
     owner_.combat().clearCombatText();
     owner_.getEntityManager().clear();
     owner_.combat().clearHostileAttackers();

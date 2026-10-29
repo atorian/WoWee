@@ -172,7 +172,7 @@ void SpellPresentation::syncAuraLooks(float deltaTime) {
     if (auraLookTimer_ < 0.2f) return;
     auraLookTimer_ = 0.0f;
 
-    const auto& spells = *game_.getSpellHandler();
+    const auto& spells = game_.spells();
     std::vector<rendering::SpellVisualSystem::UnitStateVisuals> units;
     units.reserve(spells.getUnitAurasByGuid().size() + 1);
     auto addUnit = [&](uint64_t guid, const std::vector<game::AuraSlot>& auras) {
@@ -194,7 +194,7 @@ void SpellPresentation::syncAuraLooks(float deltaTime) {
 void SpellPresentation::tickRestorationSound(float deltaTime) {
     // Eating and drinking munch and gulp for the whole restoration aura,
     // matching the real client's looping consume sound - the first at once.
-    const auto& spells = *game_.getSpellHandler();
+    const auto& spells = game_.spells();
     const bool restoring = spells.isRestoring();
     if (restoring && !wasRestoring_) restorationSoundTimer_ = 0.0f;
     wasRestoring_ = restoring;
