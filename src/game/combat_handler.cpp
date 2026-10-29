@@ -120,10 +120,10 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
         if (!packet.hasRemaining(12)) return;
         uint64_t guid = packet.readUInt64();
         uint32_t reaction = packet.readUInt32();
-        if (reaction == 2 && owner_.npcAggroCallbackRef()) {
+        if (reaction == 2) {
             auto entity = owner_.getEntityManager().getEntity(guid);
             if (entity)
-                owner_.npcAggroCallbackRef()(guid, glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
+                owner_.eventBus().publish(events::NpcAggroed{guid, entity->getX(), entity->getY(), entity->getZ()});
         }
     };
     table[Opcode::SMSG_SPELLNONMELEEDAMAGELOG] = [this](network::Packet& packet) { handleSpellDamageLog(packet); };
@@ -579,8 +579,8 @@ void CombatHandler::handleAttackStart(network::Packet& packet) {
         auto unit = std::static_pointer_cast<Unit>(entity);
         if (!unit->hasCreepVisibility()) return;
         unit->clearCreepVisibility();
-        if (guid == owner_.getPlayerGuid() && owner_.stealthStateCallbackRef()) {
-            owner_.stealthStateCallbackRef()(false);
+        if (guid == owner_.getPlayerGuid()) {
+            owner_.eventBus().publish(events::StealthStateChanged{false});
         }
     };
     revealCombatant(data.attackerGuid);
@@ -598,12 +598,10 @@ void CombatHandler::handleAttackStart(network::Packet& packet) {
         autoTargetAttacker(data.attackerGuid);
 
         // Play aggro sound when NPC attacks player
-        if (owner_.npcAggroCallbackRef()) {
-            auto entity = owner_.getEntityManager().getEntity(data.attackerGuid);
-            if (entity && entity->getType() == ObjectType::UNIT) {
-                glm::vec3 pos(entity->getX(), entity->getY(), entity->getZ());
-                owner_.npcAggroCallbackRef()(data.attackerGuid, pos);
-            }
+        auto entity = owner_.getEntityManager().getEntity(data.attackerGuid);
+        if (entity && entity->getType() == ObjectType::UNIT) {
+            owner_.eventBus().publish(events::NpcAggroed{
+                data.attackerGuid, entity->getX(), entity->getY(), entity->getZ()});
         }
     }
 
@@ -720,14 +718,14 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
     }
 
     // Fire hit reaction animation on the victim
-    if (owner_.hitReactionCallbackRef() && !data.isMiss()) {
-        using HR = GameHandler::HitReaction;
+    if (!data.isMiss()) {
+        using HR = events::HitReaction;
         HR reaction = HR::WOUND;
         if (data.victimState == 1) reaction = HR::DODGE;
         else if (data.victimState == 2) reaction = HR::PARRY;
         else if (data.victimState == 4) reaction = HR::BLOCK;
         else if (data.isCrit()) reaction = HR::CRIT_WOUND;
-        owner_.hitReactionCallbackRef()(data.targetGuid, reaction);
+        owner_.eventBus().publish(events::UnitHitReacted{data.targetGuid, reaction});
     }
 
 }

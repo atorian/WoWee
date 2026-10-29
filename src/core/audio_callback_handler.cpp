@@ -230,41 +230,44 @@ void AudioCallbackHandler::setupCallbacks() {
 
     // Server-triggered music callback (SMSG_PLAY_MUSIC)
     // Resolves soundId → SoundEntries.dbc → MPQ path → MusicManager.
-    gameHandler_.setPlayMusicCallback([this](uint32_t soundId) {
-        if (!renderer_) return;
-        auto* music = audioCoordinator_ ? audioCoordinator_->getMusicManager() : nullptr;
-        if (!music) return;
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::MusicRequested>(
+        [this](const game::events::MusicRequested& e) {
+            if (!renderer_) return;
+            auto* music = audioCoordinator_ ? audioCoordinator_->getMusicManager() : nullptr;
+            if (!music) return;
 
-        auto path = resolveSoundEntryPath(soundId);
-        if (path) {
-            music->playMusic(*path, /*loop=*/false);
-        }
-    });
+            auto path = resolveSoundEntryPath(e.soundId);
+            if (path) {
+                music->playMusic(*path, /*loop=*/false);
+            }
+        }));
 
     // SMSG_PLAY_SOUND: look up SoundEntries.dbc and play 2-D sound effect
-    gameHandler_.setPlaySoundCallback([this](uint32_t soundId) {
-        auto path = resolveSoundEntryPath(soundId);
-        if (path) {
-            audio::AudioEngine::instance().playSound2D(*path);
-        }
-    });
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::SoundRequested>(
+        [this](const game::events::SoundRequested& e) {
+            auto path = resolveSoundEntryPath(e.soundId);
+            if (path) {
+                audio::AudioEngine::instance().playSound2D(*path);
+            }
+        }));
 
     // SMSG_PLAY_OBJECT_SOUND / SMSG_PLAY_SPELL_IMPACT: play as 3D positional sound at source entity
-    gameHandler_.setPlayPositionalSoundCallback([this](uint32_t soundId, uint64_t sourceGuid) {
-        auto path = resolveSoundEntryPath(soundId);
-        if (!path) return;
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::PositionalSoundRequested>(
+        [this](const game::events::PositionalSoundRequested& e) {
+            auto path = resolveSoundEntryPath(e.soundId);
+            if (!path) return;
 
-        // Play as 3D sound if source entity position is available.
-        // Entity stores canonical coords; listener uses render coords (camera).
-        auto entity = gameHandler_.getEntityManager().getEntity(sourceGuid);
-        if (entity) {
-            glm::vec3 canonical{entity->getLatestX(), entity->getLatestY(), entity->getLatestZ()};
-            glm::vec3 pos = core::coords::canonicalToRender(canonical);
-            audio::AudioEngine::instance().playSound3D(*path, pos);
-        } else {
-            audio::AudioEngine::instance().playSound2D(*path);
-        }
-    });
+            // Play as 3D sound if source entity position is available.
+            // Entity stores canonical coords; listener uses render coords (camera).
+            auto entity = gameHandler_.getEntityManager().getEntity(e.sourceGuid);
+            if (entity) {
+                glm::vec3 canonical{entity->getLatestX(), entity->getLatestY(), entity->getLatestZ()};
+                glm::vec3 pos = core::coords::canonicalToRender(canonical);
+                audio::AudioEngine::instance().playSound3D(*path, pos);
+            } else {
+                audio::AudioEngine::instance().playSound2D(*path);
+            }
+        }));
 
     // Other player level-up callback - trigger 3D effect + chat notification
     subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::OtherPlayerLevelUp>(

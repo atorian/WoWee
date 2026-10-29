@@ -143,8 +143,8 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
             return [this, synthFlags, mask](network::Packet& packet) {
                 if (!packet.hasRemaining(1)) return;
                 uint64_t guid = packet.readPackedGuid();
-                if (guid == 0 || guid == owner_.getPlayerGuid() || !owner_.unitMoveFlagsCallbackRef()) return;
-                owner_.unitMoveFlagsCallbackRef()(guid, synthFlags, mask);
+                if (guid == 0 || guid == owner_.getPlayerGuid()) return;
+                owner_.eventBus().publish(events::UnitMoveFlagsChanged{guid, synthFlags, mask});
             };
         };
         // These are this client's own movement flags, not wire values: the
@@ -333,13 +333,13 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
         // PackedGuid + synthesised move-flags=0 → clears flying animation.
         if (!packet.hasRemaining(1)) return;
         uint64_t guid = packet.readPackedGuid();
-        if (guid == 0 || guid == owner_.getPlayerGuid() || !owner_.unitMoveFlagsCallbackRef()) return;
+        if (guid == 0 || guid == owner_.getPlayerGuid()) return;
         // Only the flying bits: this opcode says nothing about walking or
         // swimming.
-        owner_.unitMoveFlagsCallbackRef()(
+        owner_.eventBus().publish(events::UnitMoveFlagsChanged{
             guid, 0u,
             static_cast<uint32_t>(MovementFlags::CAN_FLY) |
-                static_cast<uint32_t>(MovementFlags::FLYING));
+                static_cast<uint32_t>(MovementFlags::FLYING)});
     };
 
     // Remaining spline speed opcodes - same factory as above.
@@ -1406,9 +1406,7 @@ void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
         }
     }
 
-    if (owner_.unitMoveFlagsCallbackRef()) {
-        owner_.unitMoveFlagsCallbackRef()(moverGuid, info.flags, ~0u);
-    }
+    owner_.eventBus().publish(events::UnitMoveFlagsChanged{moverGuid, info.flags, ~0u});
 }
 
 void MovementHandler::handleCompressedMoves(network::Packet& packet) {
@@ -1730,13 +1728,12 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
     const bool usesPreWotlkSplineFlags = isActiveExpansion("classic") ||
                                           isActiveExpansion("turtle") ||
                                           isActiveExpansion("tbc");
-    if (usesPreWotlkSplineFlags && entity->getType() == ObjectType::UNIT &&
-        owner_.unitMoveFlagsCallbackRef()) {
+    if (usesPreWotlkSplineFlags && entity->getType() == ObjectType::UNIT) {
         const uint32_t locomotionFlags =
             isPreWotlkSplineWalking(data.splineFlags)
                 ? static_cast<uint32_t>(MovementFlags::WALKING)
                 : 0u;
-        owner_.unitMoveFlagsCallbackRef()(data.guid, locomotionFlags, ~0u);
+        owner_.eventBus().publish(events::UnitMoveFlagsChanged{data.guid, locomotionFlags, ~0u});
     }
 
     if (data.hasDest) {
@@ -1914,13 +1911,12 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
     const bool usesPreWotlkSplineFlags = isActiveExpansion("classic") ||
                                           isActiveExpansion("turtle") ||
                                           isActiveExpansion("tbc");
-    if (usesPreWotlkSplineFlags && entity->getType() == ObjectType::UNIT &&
-        owner_.unitMoveFlagsCallbackRef()) {
+    if (usesPreWotlkSplineFlags && entity->getType() == ObjectType::UNIT) {
         const uint32_t locomotionFlags =
             isPreWotlkSplineWalking(splineFlags)
                 ? static_cast<uint32_t>(MovementFlags::WALKING)
                 : 0u;
-        owner_.unitMoveFlagsCallbackRef()(moverGuid, locomotionFlags, ~0u);
+        owner_.eventBus().publish(events::UnitMoveFlagsChanged{moverGuid, locomotionFlags, ~0u});
     }
 
     if (!owner_.getTransportManager()) {

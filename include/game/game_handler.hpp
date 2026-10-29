@@ -839,17 +839,6 @@ public:
         return false;
     }
 
-
-
-    using NpcAggroCallback = std::function<void(uint64_t guid, const glm::vec3& position)>;
-    void setNpcAggroCallback(NpcAggroCallback cb) { npcAggroCallback_ = std::move(cb); }
-
-
-    // Stand state animation callback - fired when SMSG_STANDSTATE_UPDATE confirms a new state
-    // standState: 0=stand, 1-6=sit variants, 7=dead, 8=kneel
-    using StandStateCallback = std::function<void(uint8_t standState)>;
-    void setStandStateCallback(StandStateCallback cb) { standStateCallback_ = std::move(cb); }
-
     // Appearance changed callback - fired when PLAYER_BYTES or facial features update (barber shop, etc.)
     using AppearanceChangedCallback = std::function<void()>;
     void setAppearanceChangedCallback(AppearanceChangedCallback cb) { appearanceChangedCallback_ = std::move(cb); }
@@ -869,42 +858,6 @@ public:
     float faceCameraDirection() {
         return faceCameraProvider_ ? faceCameraProvider_() : getMovementInfo().orientation;
     }
-
-    // Unit animation hint: signal jump (animId=38) for other players/NPCs
-    using UnitAnimHintCallback = std::function<void(uint64_t guid, uint32_t animId)>;
-    void setUnitAnimHintCallback(UnitAnimHintCallback cb) { unitAnimHintCallback_ = std::move(cb); }
-
-    // Unit move-flags callback: fired on every MSG_MOVE_* for other players with the raw flags field.
-    // Drives Walk(4) vs Run(5) selection and swim state initialization from heartbeat packets.
-    /// A unit's movement flags changed.
-    ///
-    /// `mask` says which flags this update actually speaks about, because most
-    /// of the opcodes that reach here speak about one. A full movement block
-    /// is authoritative and passes ~0u; SMSG_SPLINE_MOVE_START_SWIM knows only
-    /// about swimming and passes SWIMMING, so it cannot take the flying
-    /// animation off a creature that is doing both.
-    using UnitMoveFlagsCallback =
-        std::function<void(uint64_t guid, uint32_t moveFlags, uint32_t mask)>;
-    void setUnitMoveFlagsCallback(UnitMoveFlagsCallback cb) { unitMoveFlagsCallback_ = std::move(cb); }
-
-
-    // Hit reaction callback - triggers victim animation (dodge, block, wound, crit wound)
-    enum class HitReaction : uint8_t { WOUND, CRIT_WOUND, DODGE, PARRY, BLOCK, SHIELD_BLOCK };
-    using HitReactionCallback = std::function<void(uint64_t victimGuid, HitReaction reaction)>;
-    void setHitReactionCallback(HitReactionCallback cb) { hitReactionCallback_ = std::move(cb); }
-
-    // Stun state callback - fires when UNIT_FLAG_STUNNED changes on the local player
-    using StunStateCallback = std::function<void(bool stunned)>;
-    void setStunStateCallback(StunStateCallback cb) { stunStateCallback_ = std::move(cb); }
-
-    // Stealth state callback - fires when UNIT_FLAG_SNEAKING changes on the local player
-    using StealthStateCallback = std::function<void(bool stealthed)>;
-    void setStealthStateCallback(StealthStateCallback cb) { stealthStateCallback_ = std::move(cb); }
-
-    // Player health changed callback - fires when local player HP changes
-    using PlayerHealthCallback = std::function<void(uint32_t health, uint32_t maxHealth)>;
-    void setPlayerHealthCallback(PlayerHealthCallback cb) { playerHealthCallback_ = std::move(cb); }
-
 
     // XP tracking
     uint32_t getPlayerXp() const { return playerXp_; }
@@ -951,10 +904,6 @@ public:
     void unstuckHearth();
     using BindPointCallback = std::function<void(uint32_t mapId, float x, float y, float z)>;
     void setBindPointCallback(BindPointCallback cb) { bindPointCallback_ = std::move(cb); }
-
-    // Vehicle state callback - fired when player enters/exits a vehicle
-    using VehicleStateCallback = std::function<void(bool entered, uint32_t vehicleId)>;
-    void setVehicleStateCallback(VehicleStateCallback cb) { vehicleStateCallback_ = std::move(cb); }
 
     // Faction hostility map (populated from FactionTemplate.dbc by Application)
     void setFactionHostileMap(std::unordered_map<uint32_t, bool> map) { factionHostileMap_ = std::move(map); }
@@ -1441,21 +1390,6 @@ public:
         auto it = glyphSpellCache_.find(glyphPropertiesId);
         return it != glyphSpellCache_.end() ? it->second : 0u;
     }
-    // Server-triggered music callback - fires when SMSG_PLAY_MUSIC is received.
-    // The soundId corresponds to a SoundEntries.dbc record. The receiver is
-    // responsible for looking up the file path and forwarding to MusicManager.
-    using PlayMusicCallback = std::function<void(uint32_t soundId)>;
-    void setPlayMusicCallback(PlayMusicCallback cb) { playMusicCallback_ = std::move(cb); }
-
-    // Server-triggered 2-D sound effect callback - fires when SMSG_PLAY_SOUND is received.
-    // The soundId corresponds to a SoundEntries.dbc record.
-    using PlaySoundCallback = std::function<void(uint32_t soundId)>;
-    void setPlaySoundCallback(PlaySoundCallback cb) { playSoundCallback_ = std::move(cb); }
-
-    // Server-triggered 3-D positional sound callback - fires for SMSG_PLAY_OBJECT_SOUND and
-    // SMSG_PLAY_SPELL_IMPACT. Includes sourceGuid so the receiver can look up world position.
-    using PlayPositionalSoundCallback = std::function<void(uint32_t soundId, uint64_t sourceGuid)>;
-    void setPlayPositionalSoundCallback(PlayPositionalSoundCallback cb) { playPositionalSoundCallback_ = std::move(cb); }
 
     /// A line for the error frame (spell can't be cast, etc.): UI_ERROR_MESSAGE
     /// for the interface, which draws it, and UiErrorRaised for the client,
@@ -1848,7 +1782,6 @@ public:
     auto& appearanceChangedCallbackRef() { return appearanceChangedCallback_; }
     auto& playerModelRebuildCallbackRef() { return playerModelRebuildCallback_; }
     auto& autoFollowCallbackRef() { return autoFollowCallback_; }
-    auto& hitReactionCallbackRef() { return hitReactionCallback_; }
     auto& knockBackCallbackRef() { return knockBackCallback_; }
     void suppressNextMeleeSwingAnim() override { suppressMeleeSwingAnim_ = true; }
     bool consumeSuppressMeleeSwingAnim() {
@@ -1857,17 +1790,11 @@ public:
         return v;
     }
     auto& mountCallbackRef() { return mountCallback_; }
-    auto& npcAggroCallbackRef() { return npcAggroCallback_; }
-    auto& playerHealthCallbackRef() { return playerHealthCallback_; }
-    auto& stealthStateCallbackRef() { return stealthStateCallback_; }
-    auto& stunStateCallbackRef() { return stunStateCallback_; }
     auto& taxiFlightStartCallbackRef() { return taxiFlightStartCallback_; }
     auto& taxiOrientationCallbackRef() { return taxiOrientationCallback_; }
     auto& playerPositionCorrectionCallbackRef() { return playerPositionCorrectionCallback_; }
     auto& taxiPrecacheCallbackRef() { return taxiPrecacheCallback_; }
     auto& transportMoveCallbackRef() { return transportMoveCallback_; }
-    auto& unitAnimHintCallbackRef() { return unitAnimHintCallback_; }
-    auto& unitMoveFlagsCallbackRef() { return unitMoveFlagsCallback_; }
 
     // ── Methods moved from private (domain handler use) ──────────────
     void addCombatText(CombatTextEntry::Type type, int32_t amount, uint32_t spellId,
@@ -2225,7 +2152,6 @@ private:
     BindPointCallback bindPointCallback_;
     TransportMoveCallback transportMoveCallback_;
     TransportSpawnCallback transportSpawnCallback_;
-    VehicleStateCallback vehicleStateCallback_;
 
     // Transport tracking
     std::unordered_map<uint64_t, TransportAttachment> transportAttachments_;
@@ -2460,19 +2386,11 @@ private:
     /// Headings the player has closed. Client-side, like the reputation ones,
     /// and saved with the rest of the character config for the same reason.
     std::unordered_set<uint32_t> collapsedSkillCategories_;
-    NpcAggroCallback npcAggroCallback_;
-    StandStateCallback standStateCallback_;
     AppearanceChangedCallback appearanceChangedCallback_;
     PlayerModelRebuildCallback playerModelRebuildCallback_;
     FaceCameraProvider faceCameraProvider_;
     bool suppressMeleeSwingAnim_ = false;
     // lastMeleeSwingMs_ moved to CombatHandler
-    UnitAnimHintCallback unitAnimHintCallback_;
-    UnitMoveFlagsCallback unitMoveFlagsCallback_;
-    HitReactionCallback hitReactionCallback_;
-    StunStateCallback stunStateCallback_;
-    StealthStateCallback stealthStateCallback_;
-    PlayerHealthCallback playerHealthCallback_;
     LevelUpDeltas lastLevelUpDeltas_;
     /// PageTextMaterial.dbc is seven rows and is read once on the first ask,
     /// like the other DBC-backed caches here.
@@ -2544,13 +2462,7 @@ private:
         std::array<uint64_t, 19> itemGuids{};
     };
 
-    // ---- Server-triggered audio ----
-    PlayMusicCallback playMusicCallback_;
-    PlaySoundCallback playSoundCallback_;
-    PlayPositionalSoundCallback playPositionalSoundCallback_;
-
     // ---- UI error frame callback ----
-
 
     // ---- Quest completion callback ----
 

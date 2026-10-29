@@ -598,3 +598,44 @@ TEST_CASE("exploration experience is announced; an area found for nothing is not
     REQUIRE(found.size() == 1);
     CHECK(found[0].xpGained == 170);
 }
+
+TEST_CASE("a stand state the server confirms is announced once", "[session][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    std::vector<int> states;
+    auto sub = h.events().subscribe<ev::StandStateChanged>(
+        [&](const ev::StandStateChanged& e) { states.push_back(e.standState); });
+
+    // SMSG_STANDSTATE_UPDATE: sit, sit again, stand.
+    h.receive(Opcode::SMSG_STANDSTATE_UPDATE, Body().u8(1));
+    h.receive(Opcode::SMSG_STANDSTATE_UPDATE, Body().u8(1));
+    h.receive(Opcode::SMSG_STANDSTATE_UPDATE, Body().u8(0));
+    h.pump();
+
+    CHECK(states == std::vector<int>{1, 0});
+}
+
+TEST_CASE("sounds the server plays are passed on: music, flat, and at an object", "[session][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    std::vector<uint32_t> music, flat;
+    std::vector<std::pair<uint32_t, uint64_t>> placed;
+    auto musicSub = h.events().subscribe<ev::MusicRequested>(
+        [&](const ev::MusicRequested& e) { music.push_back(e.soundId); });
+    auto flatSub = h.events().subscribe<ev::SoundRequested>(
+        [&](const ev::SoundRequested& e) { flat.push_back(e.soundId); });
+    auto placedSub = h.events().subscribe<ev::PositionalSoundRequested>(
+        [&](const ev::PositionalSoundRequested& e) { placed.emplace_back(e.soundId, e.sourceGuid); });
+
+    h.receive(Opcode::SMSG_PLAY_MUSIC, Body().u32(2532));
+    h.receive(Opcode::SMSG_PLAY_SOUND, Body().u32(8960));
+    // SMSG_PLAY_OBJECT_SOUND: the sound, then the object it comes from; a
+    // server that leaves the object out has it played flat.
+    h.receive(Opcode::SMSG_PLAY_OBJECT_SOUND, Body().u32(6447).u64(0xF130000000004242ull));
+    h.receive(Opcode::SMSG_PLAY_OBJECT_SOUND, Body().u32(6448));
+    h.pump();
+
+    CHECK(music == std::vector<uint32_t>{2532});
+    CHECK(flat == std::vector<uint32_t>{8960, 6448});
+    CHECK(placed == std::vector<std::pair<uint32_t, uint64_t>>{{6447, 0xF130000000004242ull}});
+}

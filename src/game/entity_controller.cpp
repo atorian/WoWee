@@ -1112,7 +1112,7 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             }
             // Detect stun state change on local player
             constexpr uint32_t UNIT_FLAG_STUNNED = 0x00040000;
-            if (block.guid == owner_.getPlayerGuid() && owner_.stunStateCallbackRef()) {
+            if (block.guid == owner_.getPlayerGuid()) {
                 bool wasStunned = (oldFlags & UNIT_FLAG_STUNNED) != 0;
                 bool nowStunned = (val & UNIT_FLAG_STUNNED) != 0;
                 // The server stuns the player for the logout countdown, to root them
@@ -1124,7 +1124,7 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
                     nowStunned = false;
                 }
                 if (wasStunned != nowStunned) {
-                    owner_.stunStateCallbackRef()(nowStunned);
+                    owner_.eventBus().publish(events::StunStateChanged{nowStunned});
                 }
             }
         }
@@ -1139,8 +1139,8 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             if (block.guid == owner_.getPlayerGuid()) {
                 const bool wasStealthed = (oldVisibilityFlags & UNIT_VIS_FLAG_CREEP) != 0;
                 const bool nowStealthed = (newVisibilityFlags & UNIT_VIS_FLAG_CREEP) != 0;
-                if (wasStealthed != nowStealthed && owner_.stealthStateCallbackRef()) {
-                    owner_.stealthStateCallbackRef()(nowStealthed);
+                if (wasStealthed != nowStealthed) {
+                    owner_.eventBus().publish(events::StealthStateChanged{nowStealthed});
                 }
 
                 uint8_t newForm = static_cast<uint8_t>((val >> 24) & 0xFF);
@@ -1354,9 +1354,9 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
         }
     }
 
-    // Fire player health callback for wounded-idle animation
-    if (result.healthChanged && block.guid == owner_.getPlayerGuid() && owner_.playerHealthCallbackRef()) {
-        owner_.playerHealthCallbackRef()(unit->getHealth(), unit->getMaxHealth());
+    // For the wounded-idle animation.
+    if (result.healthChanged && block.guid == owner_.getPlayerGuid()) {
+        owner_.eventBus().publish(events::PlayerHealthChanged{unit->getHealth(), unit->getMaxHealth()});
     }
 
     // Once per update, so the pet frame and the pet tab redraw once for it.
@@ -1929,9 +1929,8 @@ void EntityController::onCreateUnit(const UpdateBlock& block, std::shared_ptr<En
     }
     if (unit->getDisplayId() != 0) {
         dispatchEntitySpawn(block.guid, block.objectType, entity, unit, unitInitiallyDead);
-        if (block.hasMovement && block.moveFlags != 0 && owner_.unitMoveFlagsCallbackRef() &&
-            block.guid != owner_.getPlayerGuid()) {
-            owner_.unitMoveFlagsCallbackRef()(block.guid, block.moveFlags, ~0u);
+        if (block.hasMovement && block.moveFlags != 0 && block.guid != owner_.getPlayerGuid()) {
+            owner_.eventBus().publish(events::UnitMoveFlagsChanged{block.guid, block.moveFlags, ~0u});
         }
     }
 }
@@ -1998,9 +1997,8 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
     // Spawn dispatch
     if (unit->getDisplayId() != 0) {
         dispatchEntitySpawn(block.guid, block.objectType, entity, unit, unitInitiallyDead);
-        if (block.hasMovement && block.moveFlags != 0 && owner_.unitMoveFlagsCallbackRef() &&
-            block.guid != owner_.getPlayerGuid()) {
-            owner_.unitMoveFlagsCallbackRef()(block.guid, block.moveFlags, ~0u);
+        if (block.hasMovement && block.moveFlags != 0 && block.guid != owner_.getPlayerGuid()) {
+            owner_.eventBus().publish(events::UnitMoveFlagsChanged{block.guid, block.moveFlags, ~0u});
         }
     }
 

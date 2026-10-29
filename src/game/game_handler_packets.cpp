@@ -959,7 +959,7 @@ void GameHandler::registerCoreOpcodes() {
     dispatchTable_[Opcode::SMSG_PLAY_SOUND] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             uint32_t soundId = packet.readUInt32();
-            if (playSoundCallback_) playSoundCallback_(soundId);
+            eventBus().publish(events::SoundRequested{soundId});
         }
     };
 
@@ -1028,7 +1028,7 @@ void GameHandler::registerCoreOpcodes() {
             // wrong state here is indistinguishable, in-game, from a wrong animation.
             // At warning level: the file log filters info out by default.
             LOG_WARNING("SMSG_STANDSTATE_UPDATE: standState=", static_cast<int>(standState_));
-            if (standStateCallback_) standStateCallback_(standState_);
+            eventBus().publish(events::StandStateChanged{standState_});
         }
     };
     dispatchTable_[Opcode::SMSG_NEW_TAXI_PATH] = [this](network::Packet& /*packet*/) {
@@ -1436,7 +1436,7 @@ void GameHandler::registerRemainingOpcodes() {
         bool nowInVehicle = newVehicleId != 0;
         vehicleId_ = newVehicleId;
         if (wasInVehicle != nowInVehicle) {
-            if (vehicleStateCallback_) vehicleStateCallback_(nowInVehicle, newVehicleId);
+            eventBus().publish(events::VehicleStateChanged{nowInVehicle, newVehicleId});
             // Announced as well as stored. The state was kept and handed to
             // this client's own bar, and the interface heard nothing - so the
             // leave-vehicle button, which redraws on VEHICLE_UPDATE, never
@@ -2041,7 +2041,7 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_PLAY_MUSIC] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             uint32_t soundId = packet.readUInt32();
-            if (playMusicCallback_) playMusicCallback_(soundId);
+            eventBus().publish(events::MusicRequested{soundId});
         }
     };
     dispatchTable_[Opcode::SMSG_PLAY_OBJECT_SOUND] = [this](network::Packet& packet) {
@@ -2050,11 +2050,10 @@ void GameHandler::registerRemainingOpcodes() {
             uint32_t soundId = packet.readUInt32();
             uint64_t srcGuid = packet.readUInt64();
             LOG_DEBUG("SMSG_PLAY_OBJECT_SOUND: id=", soundId, " src=0x", std::hex, srcGuid, std::dec);
-            if (playPositionalSoundCallback_) playPositionalSoundCallback_(soundId, srcGuid);
-            else if (playSoundCallback_) playSoundCallback_(soundId);
+            eventBus().publish(events::PositionalSoundRequested{soundId, srcGuid});
         } else if (packet.hasRemaining(4)) {
             uint32_t soundId = packet.readUInt32();
-            if (playSoundCallback_) playSoundCallback_(soundId);
+            eventBus().publish(events::SoundRequested{soundId});
         }
     };
     // SMSG_READ_ITEM_OK - moved to InventoryHandler::registerOpcodes
@@ -2234,9 +2233,7 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_ON_CANCEL_EXPECTED_RIDE_VEHICLE_AURA] = [this](network::Packet& packet) {
         const bool wasRiding = vehicleId_ != 0;
         vehicleId_ = 0;  // Vehicle ride cancelled; clear UI
-        if (vehicleStateCallback_) {
-            vehicleStateCallback_(false, 0);
-        }
+        eventBus().publish(events::VehicleStateChanged{false, 0});
         if (wasRiding) {
             fireAddonEvent("VEHICLE_UPDATE", {});
             fireAddonEvent("UNIT_EXITED_VEHICLE", {"player"});
@@ -2629,7 +2626,7 @@ void GameHandler::handlePacket(network::Packet& packet) {
         if (packet.getRemainingSize() == 4) {
             uint32_t soundId = packet.readUInt32();
             LOG_INFO("SMSG_PLAY_MUSIC (0x0103 alias): soundId=", soundId);
-            if (playMusicCallback_) playMusicCallback_(soundId);
+            eventBus().publish(events::MusicRequested{soundId});
             return;
         }
     }

@@ -174,7 +174,66 @@ struct GameObjectStateChanged {
     uint8_t goState = 0;
 };
 
+/// A unit other than the player said what its movement flags are - Walk(4)
+/// against Run(5), swimming, flying.
+///
+/// `mask` says which flags this update actually speaks about, because most
+/// of the opcodes that reach here speak about one. A full movement block
+/// is authoritative and passes ~0u; SMSG_SPLINE_MOVE_START_SWIM knows only
+/// about swimming and passes SWIMMING, so it cannot take the flying
+/// animation off a creature that is doing both.
+struct UnitMoveFlagsChanged {
+    uint64_t guid = 0;
+    uint32_t moveFlags = 0;
+    uint32_t mask = 0;
+};
+
+/// How a unit took a melee hit, for the animation it plays.
+enum class HitReaction : uint8_t { WOUND, CRIT_WOUND, DODGE, PARRY, BLOCK, SHIELD_BLOCK };
+
+/// A unit took a melee hit that did not miss.
+struct UnitHitReacted {
+    uint64_t victimGuid = 0;
+    HitReaction reaction = HitReaction::WOUND;
+};
+
+/// An NPC turned on the player (SMSG_AI_REACTION, or its first swing at
+/// them), for its aggro line. Canonical position.
+struct NpcAggroed {
+    uint64_t guid = 0;
+    float x = 0, y = 0, z = 0;
+};
+
 // ---- The player ----
+
+/// SMSG_STANDSTATE_UPDATE confirmed a stand state: 0 stand, 1-6 sit
+/// variants, 7 dead, 8 kneel.
+struct StandStateChanged {
+    uint8_t standState = 0;
+};
+
+/// UNIT_FLAG_STUNNED came on or went off the player. The logout countdown's
+/// stun is not one.
+struct StunStateChanged {
+    bool stunned = false;
+};
+
+/// The player started or stopped sneaking.
+struct StealthStateChanged {
+    bool stealthed = false;
+};
+
+/// The player's health changed.
+struct PlayerHealthChanged {
+    uint32_t health = 0;
+    uint32_t maxHealth = 0;
+};
+
+/// The player got into a vehicle (its id) or out of one.
+struct VehicleStateChanged {
+    bool entered = false;
+    uint32_t vehicleId = 0;
+};
 
 /// How drunk the player is, from 0 (sober, and on every character change) to
 /// 1 (completely smashed).
@@ -507,6 +566,26 @@ struct WeatherChanged {
     bool abrupt = false;
     /// The kind it was before.
     pipeline::WeatherKind previous = pipeline::WeatherKind::Clear;
+};
+
+// ---- Sound ----
+
+/// SMSG_PLAY_MUSIC: a SoundEntries.dbc record, which the receiver looks up
+/// and hands to the music player.
+struct MusicRequested {
+    uint32_t soundId = 0;
+};
+
+/// SMSG_PLAY_SOUND: a SoundEntries.dbc record, played flat.
+struct SoundRequested {
+    uint32_t soundId = 0;
+};
+
+/// SMSG_PLAY_OBJECT_SOUND: a SoundEntries.dbc record, played where
+/// sourceGuid stands.
+struct PositionalSoundRequested {
+    uint32_t soundId = 0;
+    uint64_t sourceGuid = 0;
 };
 
 } // namespace wowee::game::events
