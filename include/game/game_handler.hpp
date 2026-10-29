@@ -1186,8 +1186,6 @@ public:
         }
     }
 
-    // Combo points
-    uint8_t  getComboPoints() const { return comboPoints_; }
     uint8_t  getShapeshiftFormId() const { return shapeshiftFormId_; }
     /// Which extra action bar the current form or stance uses, or 0 for none.
     ///
@@ -1602,8 +1600,6 @@ public:
     auto& transportAttachmentsRef() { return transportAttachments_; }
 
     // ── Combat & Player Stats ────────────────────────────────────────
-    auto& comboPointsRef() { return comboPoints_; }
-    auto& comboTargetRef() { return comboTarget_; }
     auto& playerArenaPointsRef() { return playerArenaPoints_; }
     auto& playerArmorRatingRef() { return playerArmorRating_; }
     auto& playerBlockPctRef() { return playerBlockPct_; }
@@ -1666,11 +1662,6 @@ public:
 
 
     // ── Trainer, GM & Misc ───────────────────────────────────────────
-
-    // ── Tab Cycling ──────────────────────────────────────────────────
-    auto& tabCycleIndexRef() { return tabCycleIndex; }
-    auto& tabCycleListRef() { return tabCycleList; }
-    auto& tabCycleStaleRef() { return tabCycleStale; }
 
     // ── UI & Event Callbacks ─────────────────────────────────────────
     bool hasAddonEventListener() const { return static_cast<bool>(addonEventCallback_); }
@@ -1978,9 +1969,6 @@ private:
     uint64_t focusGuid = 0;              // Focus target
     uint64_t lastTargetGuid = 0;         // Previous target
     uint64_t mouseoverGuid_ = 0;         // Set each frame by nameplate renderer
-    std::vector<uint64_t> tabCycleList;
-    int tabCycleIndex = -1;
-    bool tabCycleStale = true;
 
     // Heartbeat
     uint32_t pingSequence = 0;               // Ping sequence number (increments)
@@ -2070,9 +2058,6 @@ private:
 
     // Shapeshift form (from UNIT_FIELD_BYTES_1 byte 3)
     uint8_t  shapeshiftFormId_ = 0;
-    // Combo points (rogues/druids)
-    uint8_t  comboPoints_ = 0;
-    uint64_t comboTarget_ = 0;
 
 
 

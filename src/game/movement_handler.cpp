@@ -2258,7 +2258,7 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
         owner_.corpseGuidRef()             = 0;
         owner_.combat().clearHostileAttackers();
         owner_.stopAutoAttack();
-        owner_.tabCycleStaleRef() = true;
+        owner_.combat().invalidateTabCycle();
         owner_.spells().resetCastState();
 
         const bool deeprunTram = owner_.getCurrentMapId() == 369;

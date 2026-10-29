@@ -2253,7 +2253,7 @@ static int lua_UnitClassification(lua_State* L) {
 // GetComboPoints("player"|"vehicle", "target") → number
 static int lua_GetComboPoints(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushnumber(L, gh ? gh->getComboPoints() : 0);
+    lua_pushnumber(L, gh ? gh->combat().comboPoints() : 0);
     return 1;
 }
 

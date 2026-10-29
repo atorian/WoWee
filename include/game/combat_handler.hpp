@@ -48,6 +48,12 @@ public:
     [[nodiscard]] bool isAggressiveTowardPlayer(uint64_t guid) const { return hostileAttackers_.count(guid) > 0; }
     [[nodiscard]] uint64_t getLastMeleeSwingMs() const { return lastMeleeSwingMs_; }
 
+    /// The rogue's or druid's combo points, as SMSG_UPDATE_COMBO_POINTS last
+    /// said.
+    [[nodiscard]] uint8_t comboPoints() const { return comboPoints_; }
+    /// What is in view changed, so Tab builds its list of targets afresh.
+    void invalidateTabCycle() { tabCycleStale_ = true; }
+
     // Floating combat text
     [[nodiscard]] const std::vector<CombatTextEntry>& getCombatText() const { return combatText_; }
     void updateCombatText(float deltaTime);
@@ -206,6 +212,11 @@ private:
     float autoAttackRangeWarnCooldown_ = 0.0f;
     float autoAttackResendTimer_ = 0.0f;
     std::unordered_set<uint64_t> hostileAttackers_;
+    uint8_t comboPoints_ = 0;
+    /// The hostile units Tab steps through, nearest first, and where it is.
+    std::vector<uint64_t> tabCycleList_;
+    int tabCycleIndex_ = -1;
+    bool tabCycleStale_ = true;
     std::vector<CombatTextEntry> combatText_;
     static constexpr size_t MAX_COMBAT_LOG = 500;
     std::deque<CombatLogEntry> combatLog_;

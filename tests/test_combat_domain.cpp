@@ -4,7 +4,9 @@
 
 #include "game_harness.hpp"
 #include "game/entity.hpp"
+#include "game/entity_controller.hpp"
 #include "game/game_events.hpp"
+#include "game/update_field_table.hpp"
 
 #include <memory>
 #include <string>
@@ -71,4 +73,66 @@ TEST_CASE("a swing at a target just out of reach says so once", "[combat][harnes
     for (const auto& e : h.addonEvents("UI_ERROR_MESSAGE")) shown.push_back(e.args.at(0));
     CHECK(shown == std::vector<std::string>{"Target is too far away."});
     CHECK(raised == std::vector<std::string>{"Target is too far away."});
+}
+
+TEST_CASE("combo points are the ones the server last stated", "[combat][harness]") {
+    GameHarness h;
+    h.enterWorld();
+
+    // SMSG_UPDATE_COMBO_POINTS: the target, then the points on it.
+    h.receive(Opcode::SMSG_UPDATE_COMBO_POINTS, Body().packedGuid(0x7001).u8(3));
+    h.pump();
+    CHECK(h.game().combat().comboPoints() == 3);
+    CHECK(h.addonEvents("PLAYER_COMBO_POINTS").size() == 1);
+
+    h.receive(Opcode::SMSG_UPDATE_COMBO_POINTS, Body().packedGuid(0x7001).u8(0));
+    h.pump();
+    CHECK(h.game().combat().comboPoints() == 0);
+}
+
+namespace {
+std::shared_ptr<wowee::game::Unit> hostileAt(GameHarness& h, uint64_t guid, float yardsAway) {
+    const auto& me = h.game().getMovementInfo();
+    auto unit = std::make_shared<wowee::game::Unit>(guid);
+    unit->setPosition(me.x + yardsAway, me.y, me.z, 0.0f);
+    unit->setMaxHealth(100);
+    unit->setHealth(100);
+    unit->setHostile(true);
+    return unit;
+}
+}  // namespace
+
+TEST_CASE("Tab steps through enemies nearest first, and takes in one that has just come into view",
+          "[combat][harness]") {
+    using namespace wowee::game;
+    GameHarness h;
+    h.enterWorld();
+    const auto& me = h.game().getMovementInfo();
+    for (const auto& unit : {hostileAt(h, 0x8001, 5.0f), hostileAt(h, 0x8002, 10.0f)})
+        h.game().getEntityManager().addEntity(unit->getGuid(), unit);
+
+    h.game().combat().tabTarget(me.x, me.y, me.z);
+    CHECK(h.game().getTargetGuid() == 0x8001);
+    h.game().combat().tabTarget(me.x, me.y, me.z);
+    CHECK(h.game().getTargetGuid() == 0x8002);
+
+    // A third, nearer than both, arrives in an update from the server.
+    UpdateBlock block{};
+    block.guid = 0x8003;
+    block.objectType = ObjectType::UNIT;
+    block.updateType = UpdateType::CREATE_OBJECT;
+    block.fields[fieldIndex(UF::UNIT_FIELD_DISPLAYID)] = 1234;
+    block.fields[fieldIndex(UF::UNIT_FIELD_HEALTH)] = 100;
+    block.fields[fieldIndex(UF::UNIT_FIELD_MAXHEALTH)] = 100;
+    UpdateObjectData batch{};
+    batch.blocks.push_back(block);
+    h.game().entityController().applyRecordedObjects(batch);
+    auto arrived = std::static_pointer_cast<Unit>(h.game().getEntityManager().getEntity(0x8003));
+    REQUIRE(arrived);
+    arrived->setPosition(me.x + 3.0f, me.y, me.z, 0.0f);
+    arrived->setHostile(true);
+
+    // From the farthest the list now goes round to the newcomer, nearest of all.
+    h.game().combat().tabTarget(me.x, me.y, me.z);
+    CHECK(h.game().getTargetGuid() == 0x8003);
 }

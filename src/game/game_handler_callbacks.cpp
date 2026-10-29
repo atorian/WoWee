@@ -622,7 +622,7 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     targetGuid = 0;
     focusGuid = 0;
     lastTargetGuid = 0;
-    tabCycleStale = true;
+    combatHandler_->invalidateTabCycle();
     entityController_->clearAll();
     accountDataHandler_->characterSelected(characterGuid);
     // The domains that keep what the server will send again end it on this.
@@ -1446,7 +1446,7 @@ void GameHandler::despawnCreatureLocally(uint64_t guid) {
 
     if (guid == combatHandler_->getAutoAttackTargetGuid()) stopAutoAttack();
     if (getTargetGuid() == guid) setTargetGuidRaw(0);
-    tabCycleStale = true;
+    combatHandler_->invalidateTabCycle();
 
     LOG_INFO("Locally despawned looted corpse: 0x", std::hex, guid, std::dec);
 }
@@ -1465,7 +1465,7 @@ void GameHandler::despawnGameObjectLocally(uint64_t guid) {
     if (lastInteractedGoGuid_ == guid) lastInteractedGoGuid_ = 0;
     if (pendingGameObjectInteractGuid_ == guid) pendingGameObjectInteractGuid_ = 0;
     if (getTargetGuid() == guid) setTargetGuidRaw(0);
-    tabCycleStale = true;
+    combatHandler_->invalidateTabCycle();
 
     LOG_INFO("Locally despawned game object: 0x", std::hex, guid, std::dec);
 }

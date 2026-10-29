@@ -955,10 +955,9 @@ void CombatHandler::handleUpdateComboPoints(network::Packet& packet) {
     if (!packet.hasRemaining(cpTbc ? 8u : 2u) ) return;
     uint64_t target = cpTbc ? packet.readUInt64() : packet.readPackedGuid();
     if (!packet.hasRemaining(1)) return;
-    owner_.comboPointsRef() = packet.readUInt8();
-    owner_.comboTargetRef() = target;
+    comboPoints_ = packet.readUInt8();
     LOG_DEBUG("SMSG_UPDATE_COMBO_POINTS: target=0x", std::hex, target,
-              std::dec, " points=", static_cast<int>(owner_.comboPointsRef()));
+              std::dec, " points=", static_cast<int>(comboPoints_));
     frameXml_.fireFrameXmlEvent("PLAYER_COMBO_POINTS", {});
 }
 
@@ -1246,8 +1245,8 @@ void CombatHandler::clearTarget() {
     } else {
         owner_.setTargetGuidRaw(0);
     }
-    owner_.tabCycleIndexRef() = -1;
-    owner_.tabCycleStaleRef() = true;
+    tabCycleIndex_ = -1;
+    tabCycleStale_ = true;
 }
 
 std::shared_ptr<Entity> CombatHandler::getTarget() const {
@@ -1429,7 +1428,7 @@ void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
     // nearest enemy instead of continuing a stale rotation.
     constexpr uint64_t kCycleResetMs = 4000;
 
-    const bool playerInCombat = owner_.combat().isInCombat();
+    const bool playerInCombat = isInCombat();
 
     // Helper: returns true if the entity is a hostile that can be tab-targeted.
     // Corpses are never tab targets while fighting; out of combat they only
@@ -1457,13 +1456,13 @@ void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
     if (nowMs - lastTabTargetMs_ > kCycleResetMs)
-        owner_.tabCycleStaleRef() = true;
+        tabCycleStale_ = true;
     lastTabTargetMs_ = nowMs;
 
     // Rebuild cycle list if stale (entity added/removed since last tab press).
-    if (owner_.tabCycleStaleRef()) {
-        owner_.tabCycleListRef().clear();
-        owner_.tabCycleIndexRef() = -1;
+    if (tabCycleStale_) {
+        tabCycleList_.clear();
+        tabCycleIndex_ = -1;
 
         struct EntityDist { uint64_t guid; float distSq; bool dead; };
         std::vector<EntityDist> sortable;
@@ -1492,14 +1491,14 @@ void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
                       return a.distSq < b.distSq;
                   });
 
-        owner_.tabCycleListRef().reserve(sortable.size());
+        tabCycleList_.reserve(sortable.size());
         for (const auto& ed : sortable) {
-            owner_.tabCycleListRef().push_back(ed.guid);
+            tabCycleList_.push_back(ed.guid);
         }
-        owner_.tabCycleStaleRef() = false;
+        tabCycleStale_ = false;
     }
 
-    if (owner_.tabCycleListRef().empty()) {
+    if (tabCycleList_.empty()) {
         clearTarget();
         return;
     }
@@ -1510,10 +1509,10 @@ void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
     {
         const uint64_t curTarget = owner_.getTargetGuid();
         if (curTarget != 0) {
-            const auto& list = owner_.tabCycleListRef();
+            const auto& list = tabCycleList_;
             for (size_t i = 0; i < list.size(); ++i) {
                 if (list[i] == curTarget) {
-                    owner_.tabCycleIndexRef() = static_cast<int>(i);
+                    tabCycleIndex_ = static_cast<int>(i);
                     break;
                 }
             }
@@ -1522,10 +1521,10 @@ void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
 
     // Advance through the cycle, skipping any entry that has since died or
     // turned friendly (e.g. NPC killed between two tab presses).
-    int tries = static_cast<int>(owner_.tabCycleListRef().size());
+    int tries = static_cast<int>(tabCycleList_.size());
     while (tries-- > 0) {
-        owner_.tabCycleIndexRef() = (owner_.tabCycleIndexRef() + 1) % static_cast<int>(owner_.tabCycleListRef().size());
-        uint64_t guid = owner_.tabCycleListRef()[owner_.tabCycleIndexRef()];
+        tabCycleIndex_ = (tabCycleIndex_ + 1) % static_cast<int>(tabCycleList_.size());
+        uint64_t guid = tabCycleList_[tabCycleIndex_];
         auto entity = owner_.getEntityManager().getEntity(guid);
         if (isValidTabTarget(entity)) {
             setTarget(guid);
@@ -1534,7 +1533,7 @@ void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
     }
 
     // All cached entries are stale - clear target and force a fresh rebuild next time.
-    owner_.tabCycleStaleRef() = true;
+    tabCycleStale_ = true;
     clearTarget();
 }
 
