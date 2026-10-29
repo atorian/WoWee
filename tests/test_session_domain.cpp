@@ -315,7 +315,7 @@ TEST_CASE("a new map scope is shown every object already in view, once, without 
             CHECK(orientation == 1.5f);
         }
     });
-    h.game().setNpcDeathCallback([&](uint64_t guid) { deaths.push_back(guid); });
+    auto deathSub = h.events().subscribe<ev::UnitDied>([&](const ev::UnitDied& e) { deaths.push_back(e.guid); });
     h.game().setOtherPlayerMountCallback([&](uint64_t guid, uint32_t display) { mounts.emplace_back(guid, display); });
     h.game().setGameObjectStateCallback([&](uint64_t guid, uint8_t state) { doorStates.emplace_back(guid, state); });
     h.game().setGameObjectSpawnCallback([&](uint64_t guid, uint32_t entry, uint32_t displayId,
@@ -527,4 +527,19 @@ TEST_CASE("logging in again after a lost connection keeps nothing of the last on
     CHECK_FALSE(h.group().isInGroup());
     CHECK(h.game().inventory().items().getBackpackSlot(0).empty());
     CHECK_FALSE(h.game().getEntityManager().hasEntity(kItem));
+}
+
+TEST_CASE("exploration experience is announced; an area found for nothing is not", "[session][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    std::vector<ev::AreaDiscovered> found;
+    auto sub = h.events().subscribe<ev::AreaDiscovered>([&](const ev::AreaDiscovered& e) { found.push_back(e); });
+
+    // SMSG_EXPLORATION_EXPERIENCE: the area, then the experience it gave.
+    h.receive(Opcode::SMSG_EXPLORATION_EXPERIENCE, Body().u32(12).u32(170).bytes());
+    h.receive(Opcode::SMSG_EXPLORATION_EXPERIENCE, Body().u32(40).u32(0).bytes());
+    h.pump();
+
+    REQUIRE(found.size() == 1);
+    CHECK(found[0].xpGained == 170);
 }

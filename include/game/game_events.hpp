@@ -77,6 +77,17 @@ struct OtherPlayerLevelUp {
     uint32_t newLevel = 0;
 };
 
+/// A creature or a player in view died: its health or its dead flag said so,
+/// it came into view dead, or its corpse appeared.
+struct UnitDied {
+    uint64_t guid = 0;
+};
+
+/// A creature or a player in view came back to life.
+struct UnitRespawned {
+    uint64_t guid = 0;
+};
+
 // ---- The player ----
 
 /// How drunk the player is, from 0 (sober, and on every character change) to
@@ -90,6 +101,19 @@ struct PlayerIntoxicationChanged {
 /// checks the cast's arc against what the client then reports.
 struct PlayerFacingSet {
     float canonicalYaw = 0.0f;
+};
+
+/// The player found an area, and the experience it gave.
+struct AreaDiscovered {
+    std::string areaName;  ///< Empty when the area has no name in the client's tables.
+    uint32_t xpGained = 0;
+};
+
+/// The player was credited honor for a kill (SMSG_PVP_CREDIT).
+struct HonorGained {
+    uint32_t honor = 0;
+    uint64_t victimGuid = 0;
+    uint32_t victimRank = 0;
 };
 
 // ---- Spells ----

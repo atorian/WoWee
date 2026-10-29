@@ -839,17 +839,11 @@ public:
         return false;
     }
 
-    // NPC death callback (for animations)
-    using NpcDeathCallback = std::function<void(uint64_t guid)>;
-    void setNpcDeathCallback(NpcDeathCallback cb) { npcDeathCallback_ = std::move(cb); }
 
 
     using NpcAggroCallback = std::function<void(uint64_t guid, const glm::vec3& position)>;
     void setNpcAggroCallback(NpcAggroCallback cb) { npcAggroCallback_ = std::move(cb); }
 
-    // NPC respawn callback (health 0 → >0, resets animation to idle)
-    using NpcRespawnCallback = std::function<void(uint64_t guid)>;
-    void setNpcRespawnCallback(NpcRespawnCallback cb) { npcRespawnCallback_ = std::move(cb); }
 
     // Stand state animation callback - fired when SMSG_STANDSTATE_UPDATE confirms a new state
     // standState: 0=stand, 1-6=sit variants, 7=dead, 8=kneel
@@ -893,9 +887,6 @@ public:
         std::function<void(uint64_t guid, uint32_t moveFlags, uint32_t mask)>;
     void setUnitMoveFlagsCallback(UnitMoveFlagsCallback cb) { unitMoveFlagsCallback_ = std::move(cb); }
 
-    // NPC swing callback (plays attack animation on NPC)
-    using NpcSwingCallback = std::function<void(uint64_t guid)>;
-    void setNpcSwingCallback(NpcSwingCallback cb) { npcSwingCallback_ = std::move(cb); }
 
     // Hit reaction callback - triggers victim animation (dodge, block, wound, crit wound)
     enum class HitReaction : uint8_t { WOUND, CRIT_WOUND, DODGE, PARRY, BLOCK, SHIELD_BLOCK };
@@ -1412,9 +1403,6 @@ public:
     /// "[<it>] " when they differ, so a number there is printed verbatim.
     const std::string& getLanguageName(uint32_t languageId) const;
 
-    // Area discovery callback - fires when SMSG_EXPLORATION_EXPERIENCE is received
-    using AreaDiscoveryCallback = std::function<void(const std::string& areaName, uint32_t xpGained)>;
-    void setAreaDiscoveryCallback(AreaDiscoveryCallback cb) { areaDiscoveryCallback_ = std::move(cb); }
 
     /// What a vendor wants besides coin: honor, arena points, or up to five
     /// items of a given count. ItemExtendedCost.dbc, keyed by the id a vendor
@@ -1544,9 +1532,6 @@ public:
     void dispatchAddonEvents();
 
 
-    // PvP honor credit callback (honorable kill or BG reward)
-    using PvpHonorCallback = std::function<void(uint32_t honorAmount, uint64_t victimGuid, uint32_t victimRank)>;
-    void setPvpHonorCallback(PvpHonorCallback cb) { pvpHonorCallback_ = std::move(cb); }
 
     // Mount state
     using MountCallback = std::function<void(uint32_t mountDisplayId)>;  // 0 = dismount
@@ -1934,14 +1919,10 @@ public:
     }
     auto& mountCallbackRef() { return mountCallback_; }
     auto& npcAggroCallbackRef() { return npcAggroCallback_; }
-    auto& npcDeathCallbackRef() { return npcDeathCallback_; }
-    auto& npcRespawnCallbackRef() { return npcRespawnCallback_; }
-    auto& npcSwingCallbackRef() { return npcSwingCallback_; }
     auto& otherPlayerMountCallbackRef() { return otherPlayerMountCallback_; }
     auto& playerDespawnCallbackRef() { return playerDespawnCallback_; }
     auto& playerHealthCallbackRef() { return playerHealthCallback_; }
     auto& playerSpawnCallbackRef() { return playerSpawnCallback_; }
-    auto& pvpHonorCallbackRef() { return pvpHonorCallback_; }
     auto& stealthStateCallbackRef() { return stealthStateCallback_; }
     auto& stunStateCallbackRef() { return stunStateCallback_; }
     auto& taxiFlightStartCallbackRef() { return taxiFlightStartCallback_; }
@@ -2553,9 +2534,7 @@ private:
     /// Headings the player has closed. Client-side, like the reputation ones,
     /// and saved with the rest of the character config for the same reason.
     std::unordered_set<uint32_t> collapsedSkillCategories_;
-    NpcDeathCallback npcDeathCallback_;
     NpcAggroCallback npcAggroCallback_;
-    NpcRespawnCallback npcRespawnCallback_;
     StandStateCallback standStateCallback_;
     AppearanceChangedCallback appearanceChangedCallback_;
     PlayerModelRebuildCallback playerModelRebuildCallback_;
@@ -2564,7 +2543,6 @@ private:
     // lastMeleeSwingMs_ moved to CombatHandler
     UnitAnimHintCallback unitAnimHintCallback_;
     UnitMoveFlagsCallback unitMoveFlagsCallback_;
-    NpcSwingCallback npcSwingCallback_;
     HitReactionCallback hitReactionCallback_;
     StunStateCallback stunStateCallback_;
     StealthStateCallback stealthStateCallback_;
@@ -2578,7 +2556,6 @@ private:
     mutable std::unordered_map<uint32_t, std::string> languageNames_;
     mutable bool languageNamesLoaded_ = false;
     OtherPlayerMountCallback otherPlayerMountCallback_;
-    AreaDiscoveryCallback areaDiscoveryCallback_;
     MountCallback mountCallback_;
     TaxiPrecacheCallback taxiPrecacheCallback_;
     TaxiOrientationCallback taxiOrientationCallback_;
@@ -2649,8 +2626,6 @@ private:
 
     // ---- UI error frame callback ----
 
-    // ---- PvP honor credit callback ----
-    PvpHonorCallback pvpHonorCallback_;
 
     // ---- Quest completion callback ----
 

@@ -216,55 +216,59 @@ void AnimationCallbackHandler::setupCallbacks() {
     }));
 
 
-    // NPC/player death callback (online mode) - play death animation
-    gameHandler_.setNpcDeathCallback([this](uint64_t guid) {
-        entitySpawner_.markCreatureDead(guid);
-        if (!renderer_.getCharacterRenderer()) return;
-        uint32_t instanceId = entitySpawner_.getCreatureInstanceId(guid);
-        if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(guid);
-        if (instanceId != 0) {
-            renderer_.scene().characters().playAnimation(instanceId, rendering::anim::DEATH, false);
-        }
-    });
+    // A creature or player died - play the death animation
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::UnitDied>(
+        [this](const game::events::UnitDied& e) {
+            entitySpawner_.markCreatureDead(e.guid);
+            if (!renderer_.getCharacterRenderer()) return;
+            uint32_t instanceId = entitySpawner_.getCreatureInstanceId(e.guid);
+            if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(e.guid);
+            if (instanceId != 0) {
+                renderer_.scene().characters().playAnimation(instanceId, rendering::anim::DEATH, false);
+            }
+        }));
 
-    // NPC/player respawn callback (online mode) - play rise animation then idle
-    gameHandler_.setNpcRespawnCallback([this](uint64_t guid) {
-        entitySpawner_.unmarkCreatureDead(guid);
-        if (!renderer_.getCharacterRenderer()) return;
-        uint32_t instanceId = entitySpawner_.getCreatureInstanceId(guid);
-        if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(guid);
-        if (instanceId != 0) {
-            auto& characters = renderer_.scene().characters();
-            // Play RISE one-shot (auto-returns to STAND when finished), fall back to STAND
-            if (characters.hasAnimation(instanceId, rendering::anim::RISE))
-                characters.playAnimation(instanceId, rendering::anim::RISE, false);
-            else
-                characters.playAnimation(instanceId, rendering::anim::STAND, true);
-        }
-    });
+    // A creature or player came back to life - play the rise animation, then idle
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::UnitRespawned>(
+        [this](const game::events::UnitRespawned& e) {
+            entitySpawner_.unmarkCreatureDead(e.guid);
+            if (!renderer_.getCharacterRenderer()) return;
+            uint32_t instanceId = entitySpawner_.getCreatureInstanceId(e.guid);
+            if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(e.guid);
+            if (instanceId != 0) {
+                auto& characters = renderer_.scene().characters();
+                // Play RISE one-shot (auto-returns to STAND when finished), fall back to STAND
+                if (characters.hasAnimation(instanceId, rendering::anim::RISE))
+                    characters.playAnimation(instanceId, rendering::anim::RISE, false);
+                else
+                    characters.playAnimation(instanceId, rendering::anim::STAND, true);
+            }
+        }));
 
-    // NPC/player swing callback (online mode) - play attack animation
+    // Someone other than the player swung in melee - play an attack animation
     // Probes the model for the best available attack animation:
     //   ATTACK_1H(17) → ATTACK_2H(18) → ATTACK_2H_LOOSE(19) → ATTACK_UNARMED(16)
-    gameHandler_.setNpcSwingCallback([this](uint64_t guid) {
-        if (!renderer_.getCharacterRenderer()) return;
-        uint32_t instanceId = entitySpawner_.getCreatureInstanceId(guid);
-        if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(guid);
-        if (instanceId != 0) {
-            auto& characters = renderer_.scene().characters();
-            const auto attackAnims =
-                rendering::anim::meleeAnimChain(rendering::anim::MeleeChain::Generic);
-            bool played = false;
-            for (uint32_t anim : attackAnims) {
-                if (characters.hasAnimation(instanceId, anim)) {
-                    characters.playAnimation(instanceId, anim, false);
-                    played = true;
-                    break;
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::MeleeSwingResolved>(
+        [this](const game::events::MeleeSwingResolved& e) {
+            if (e.attackerIsPlayer) return;
+            if (!renderer_.getCharacterRenderer()) return;
+            uint32_t instanceId = entitySpawner_.getCreatureInstanceId(e.attackerGuid);
+            if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(e.attackerGuid);
+            if (instanceId != 0) {
+                auto& characters = renderer_.scene().characters();
+                const auto attackAnims =
+                    rendering::anim::meleeAnimChain(rendering::anim::MeleeChain::Generic);
+                bool played = false;
+                for (uint32_t anim : attackAnims) {
+                    if (characters.hasAnimation(instanceId, anim)) {
+                        characters.playAnimation(instanceId, anim, false);
+                        played = true;
+                        break;
+                    }
                 }
+                if (!played) characters.playAnimation(instanceId, rendering::anim::ATTACK_UNARMED, false);
             }
-            if (!played) characters.playAnimation(instanceId, rendering::anim::ATTACK_UNARMED, false);
-        }
-    });
+        }));
 
     // Hit reaction callback - plays one-shot dodge/block/wound animation on the victim
     gameHandler_.setHitReactionCallback([this](uint64_t victimGuid, game::GameHandler::HitReaction reaction) {

@@ -26,14 +26,14 @@ void ToastManager::setupCallbacks(game::GameHandler& gameHandler) {
     // (which also triggers the 3D level-up effect).  Application routes to
     // triggerDing() / triggerAchievementToast() via the public API.
 
-    // Area discovery toast callback
-    if (!areaDiscoveryCallbackSet_) {
-        gameHandler.setAreaDiscoveryCallback([this](const std::string& areaName, uint32_t xpGained) {
-            discoveryToastName_ = areaName.empty() ? "New Area" : areaName;
-            discoveryToastXP_   = xpGained;
-            discoveryToastTimer_ = DISCOVERY_TOAST_DURATION;
-        });
-        areaDiscoveryCallbackSet_ = true;
+    // Area discovery toast
+    if (!areaDiscoveredSub_) {
+        areaDiscoveredSub_ = gameHandler.eventBus().subscribe<game::events::AreaDiscovered>(
+            [this](const game::events::AreaDiscovered& e) {
+                discoveryToastName_ = e.areaName.empty() ? "New Area" : e.areaName;
+                discoveryToastXP_   = e.xpGained;
+                discoveryToastTimer_ = DISCOVERY_TOAST_DURATION;
+            });
     }
 
     // Quest objective progress toast callback
@@ -74,15 +74,15 @@ void ToastManager::setupCallbacks(game::GameHandler& gameHandler) {
         });
     }
 
-    // PvP honor credit toast callback
-    if (!pvpHonorCallbackSet_) {
-        gameHandler.setPvpHonorCallback([this](uint32_t honor, uint64_t /*victimGuid*/, uint32_t rank) {
-            if (honor == 0) return;
-            pvpHonorToasts_.push_back({.honor = honor, .victimRank = rank, .age = 0.0f});
-            if (pvpHonorToasts_.size() > 4)
-                pvpHonorToasts_.erase(pvpHonorToasts_.begin());
-        });
-        pvpHonorCallbackSet_ = true;
+    // PvP honor credit toast
+    if (!honorGainedSub_) {
+        honorGainedSub_ = gameHandler.eventBus().subscribe<game::events::HonorGained>(
+            [this](const game::events::HonorGained& e) {
+                if (e.honor == 0) return;
+                pvpHonorToasts_.push_back({.honor = e.honor, .victimRank = e.victimRank, .age = 0.0f});
+                if (pvpHonorToasts_.size() > 4)
+                    pvpHonorToasts_.erase(pvpHonorToasts_.begin());
+            });
     }
 
     // Item loot toasts

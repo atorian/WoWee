@@ -1050,8 +1050,8 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
                     owner_.stopAutoAttack();
                     pendingEvents_.emit("PLAYER_DEAD", {});
                 }
-                if ((entity->getType() == ObjectType::UNIT || entity->getType() == ObjectType::PLAYER) && owner_.npcDeathCallbackRef()) {
-                    owner_.npcDeathCallbackRef()(block.guid);
+                if (entity->getType() == ObjectType::UNIT || entity->getType() == ObjectType::PLAYER) {
+                    owner_.eventBus().publish(events::UnitDied{block.guid});
                     result.npcDeathNotified = true;
                 }
             } else if (oldHealth == 0 && val > 0) {
@@ -1067,8 +1067,8 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
                         pendingEvents_.emit("PLAYER_UNGHOST", {});
                     }
                 }
-                if ((entity->getType() == ObjectType::UNIT || entity->getType() == ObjectType::PLAYER) && owner_.npcRespawnCallbackRef()) {
-                    owner_.npcRespawnCallbackRef()(block.guid);
+                if (entity->getType() == ObjectType::UNIT || entity->getType() == ObjectType::PLAYER) {
+                    owner_.eventBus().publish(events::UnitRespawned{block.guid});
                     result.npcRespawnNotified = true;
                 }
             }
@@ -1197,13 +1197,13 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
                 bool wasDead = (oldDyn & UNIT_DYNFLAG_DEAD) != 0;
                 bool nowDead = (val & UNIT_DYNFLAG_DEAD) != 0;
                 if (!wasDead && nowDead) {
-                    if (!result.npcDeathNotified && owner_.npcDeathCallbackRef()) {
-                        owner_.npcDeathCallbackRef()(block.guid);
+                    if (!result.npcDeathNotified) {
+                        owner_.eventBus().publish(events::UnitDied{block.guid});
                         result.npcDeathNotified = true;
                     }
                 } else if (wasDead && !nowDead) {
-                    if (!result.npcRespawnNotified && owner_.npcRespawnCallbackRef()) {
-                        owner_.npcRespawnCallbackRef()(block.guid);
+                    if (!result.npcRespawnNotified) {
+                        owner_.eventBus().publish(events::UnitRespawned{block.guid});
                         result.npcRespawnNotified = true;
                     }
                 }
@@ -1724,9 +1724,7 @@ void EntityController::announceUnit(uint64_t guid, ObjectType objectType,
         owner_.creatureSpawnCallbackRef()(guid, unit->getDisplayId(),
             unit->getX(), unit->getY(), unit->getZ(), unit->getOrientation(), unitScale);
     }
-    if (isDead && owner_.npcDeathCallbackRef()) {
-        owner_.npcDeathCallbackRef()(guid);
-    }
+    if (isDead) owner_.eventBus().publish(events::UnitDied{guid});
 }
 
 void EntityController::announceObjectsInView() {
@@ -2199,9 +2197,7 @@ void EntityController::announceCorpse(uint64_t guid, const Entity& corpse) {
             }
             owner_.eventBus().publish(worn);
         }
-        if (owner_.npcDeathCallbackRef()) {
-            owner_.npcDeathCallbackRef()(guid);
-        }
+        owner_.eventBus().publish(events::UnitDied{guid});
         return;
     }
     if (bones || !corpse.hasPosition()) return;
@@ -2236,7 +2232,7 @@ void EntityController::announceCorpse(uint64_t guid, const Entity& corpse) {
         if (corpseFlags & CORPSE_FLAG_HIDE_CLOAK) { worn.displayIds[kBack] = 0; worn.inventoryTypes[kBack] = 0; }
         owner_.eventBus().publish(worn);
     }
-    if (owner_.npcDeathCallbackRef()) owner_.npcDeathCallbackRef()(guid);
+    owner_.eventBus().publish(events::UnitDied{guid});
 }
 
 // ============================================================

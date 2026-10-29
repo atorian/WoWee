@@ -658,9 +658,6 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
             owner_.eventBus().publish(events::PlayerMeleeSwing{0});
         }
     }
-    if (!isPlayerAttacker && owner_.npcSwingCallbackRef()) {
-        owner_.npcSwingCallbackRef()(data.attackerGuid);
-    }
 
     if (isPlayerTarget && data.attackerGuid != 0) {
         hostileAttackers_.insert(data.attackerGuid);
@@ -972,7 +969,7 @@ void CombatHandler::handlePvpCredit(network::Packet& packet) {
         std::string msg = "You gain " + std::to_string(honor) + " honor points.";
         owner_.chat().addLocalChatLine(ChatType::COMBAT_HONOR_GAIN, msg);
         if (honor > 0) addCombatText(CombatTextEntry::HONOR_GAIN, static_cast<int32_t>(honor), 0, true);
-        if (owner_.pvpHonorCallbackRef()) owner_.pvpHonorCallbackRef()(honor, victimGuid, rank);
+        owner_.eventBus().publish(events::HonorGained{honor, victimGuid, rank});
     }
 }
 
