@@ -36,6 +36,16 @@ std::string MinimapTileIndex::terrainTileName(std::string_view map, int x, int y
     std::snprintf(tile, sizeof(tile), "\\map%d_%02d", x, y);
     return std::string(map) + tile;
 }
+// "%s_%03d_%02d_%02d.blp" (wow.exe 3.3.5a, 0x979df8).
+std::string MinimapTileIndex::buildingTileName(std::string_view stem, int group, int x, int y) {
+    char tile[32];
+    std::snprintf(tile, sizeof(tile), "_%03d_%02d_%02d", group, x, y);
+    return std::string(stem) + tile;
+}
+const std::string* MinimapTileIndex::buildingTile(std::string_view stem, int group, int x, int y) const {
+    const auto found = files_.find(lowered(buildingTileName(stem, group, x, y)));
+    return found == files_.end() ? nullptr : &found->second;
+}
 const std::string* MinimapTileIndex::terrainTile(std::string_view map, int x, int y) const {
     const auto found = files_.find(lowered(terrainTileName(map, x, y)));
     return found == files_.end() ? nullptr : &found->second;

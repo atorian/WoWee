@@ -530,6 +530,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadPreparedIncremental(WmoModelPrep& 
         modelData.boundingBoxMax = prep.boundingBoxMax;
         modelData.wmoAmbientColor = prep.ambientColor;
         modelData.isLowPlatform = prep.isLowPlatform;
+        modelData.minimap = prep.minimap;
         modelData.textureNames = prep.textureNames;
         modelData.materialTextureIndices = prep.materialTextureIndices;
         modelData.materialBlendModes = prep.materialBlendModes;
@@ -741,7 +742,8 @@ void WMORenderer::cleanupUnusedModels() {
 }
 
 uint32_t WMORenderer::createInstance(uint32_t modelId, const glm::vec3& position,
-                                     const glm::vec3& rotation, float scale, uint32_t reservedId) {
+                                     const glm::vec3& rotation, float scale, uint32_t reservedId,
+                                     uint16_t nameSet) {
     // Check if model is loaded
     if (loadedModels.find(modelId) == loadedModels.end()) {
         core::Logger::getInstance().error("Cannot create instance of unloaded WMO model ", modelId);
@@ -754,6 +756,7 @@ uint32_t WMORenderer::createInstance(uint32_t modelId, const glm::vec3& position
     instance.position = position;
     instance.rotation = rotation;
     instance.scale = scale;
+    instance.nameSet = nameSet;
     instance.updateModelMatrix();
     const ModelData& model = loadedModels[modelId];
     transformAABB(instance.modelMatrix, model.boundingBoxMin, model.boundingBoxMax,
@@ -777,6 +780,16 @@ uint32_t WMORenderer::createInstance(uint32_t modelId, const glm::vec3& position
     markContentChanged();
     core::Logger::getInstance().debug("Created WMO instance ", instance.id, " (model ", modelId, ")");
     return instance.id;
+}
+
+std::optional<WmoMinimapPlacement> WMORenderer::minimapPlacement(uint32_t instanceId) const {
+    const WMOInstance* instance = findInstance(instanceId);
+    if (!instance) return std::nullopt;
+    const auto model = loadedModels.find(instance->modelId);
+    if (model == loadedModels.end() || !model->second.minimap) return std::nullopt;
+    return WmoMinimapPlacement{.instance = instanceId, .model = model->second.minimap,
+                               .modelToWorld = instance->modelMatrix, .worldToModel = instance->invModelMatrix,
+                               .nameSet = instance->nameSet};
 }
 
 /// Recomputes an instance's world bounds from its model matrix.

@@ -151,6 +151,9 @@ public:
     /// model holds it.
     [[nodiscard]] bool insideWmo(const Reach& reach, float x, float y, float z,
                                  uint32_t* outModelId = nullptr) const;
+    /// The instance of the building insideWmo finds there; nothing outside
+    /// every building.
+    [[nodiscard]] std::optional<uint32_t> wmoInstanceAt(const Reach& reach, float x, float y, float z) const;
     /// Whether a point is inside one of a building's interior groups - which
     /// is what decides whether the sky and the outdoor light are drawn.
     /// Stormwind's streets are exterior groups of one city-wide WMO.

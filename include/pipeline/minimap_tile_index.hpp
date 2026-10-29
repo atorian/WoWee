@@ -16,6 +16,11 @@ public:
     [[nodiscard]] const std::string* terrainTile(std::string_view map, int x, int y) const;
     /// The name terrainTile looks up, for messages about it.
     [[nodiscard]] static std::string terrainTileName(std::string_view map, int x, int y);
+    /// The hashed file of a building's minimap tile: group, then the tile's
+    /// column and row in it. `stem` is the model path without "World\" and
+    /// ".wmo". Null when the index has none.
+    [[nodiscard]] const std::string* buildingTile(std::string_view stem, int group, int x, int y) const;
+    [[nodiscard]] static std::string buildingTileName(std::string_view stem, int group, int x, int y);
     [[nodiscard]] bool empty() const { return files_.empty(); }
 private:
     std::unordered_map<std::string, std::string> files_;

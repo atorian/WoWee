@@ -9,6 +9,8 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/minimap_tile_index.hpp"
+#include "pipeline/dbc_loader.hpp"
+#include "pipeline/dbc_layout.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include <imgui.h>
@@ -21,9 +23,12 @@
 namespace wowee {
 namespace rendering {
 
-// Push constant for tile composite vertex shader
+// Push constant for tile composite vertex shader: where the image goes in the
+// composite (see MinimapQuad).
 struct MinimapTilePush {
-    glm::vec2 gridOffset;  // 8 bytes
+    glm::vec2 corner;
+    glm::vec2 down;
+    glm::vec2 across;
 };
 
 using MinimapDisplayPush = Minimap::Display;
@@ -124,28 +129,27 @@ bool Minimap::initialize(VkContext* ctx, VkDescriptorSetLayout /*perFrameLayout*
     vkCreateDescriptorPool(device, &poolInfo, nullptr, &descPool);
 
     // --- Allocate all descriptor sets ---
-    // 18 tile sets (2 frames × 9 tiles) + 1 display set = 19 total
-    std::vector<VkDescriptorSetLayout> layouts(19, samplerSetLayout);
+    // A set per tile drawn per frame in flight, and the display's.
+    std::vector<VkDescriptorSetLayout> layouts(MAX_DESC_SETS, samplerSetLayout);
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocInfo.descriptorPool = descPool;
-    allocInfo.descriptorSetCount = 19;
+    allocInfo.descriptorSetCount = MAX_DESC_SETS;
     allocInfo.pSetLayouts = layouts.data();
 
     // Checked, not assumed. On failure allSets holds nothing this code put
-    // there, and every one of the nineteen is then written and bound - which
-    // is an invalid handle in a live descriptor rather than a minimap that
-    // does not draw.
-    VkDescriptorSet allSets[19];
-    if (vkAllocateDescriptorSets(device, &allocInfo, allSets) != VK_SUCCESS) {
+    // there, and every one of them is then written and bound - which is an
+    // invalid handle in a live descriptor rather than a minimap that does
+    // not draw.
+    std::vector<VkDescriptorSet> allSets(MAX_DESC_SETS);
+    if (vkAllocateDescriptorSets(device, &allocInfo, allSets.data()) != VK_SUCCESS) {
         LOG_ERROR("Minimap: failed to allocate descriptor sets");
         return false;
     }
 
-    for (int f = 0; f < 2; f++)
-        for (int t = 0; t < 9; t++)
-            tileDescSets[f][t] = allSets[f * 9 + t];
-    displayDescSet = allSets[18];
+    for (uint32_t f = 0; f < 2; f++)
+        tileDescSets[f].assign(allSets.begin() + f * MAX_TILE_DRAWS, allSets.begin() + (f + 1) * MAX_TILE_DRAWS);
+    displayDescSet = allSets[2 * MAX_TILE_DRAWS];
 
     // --- Write display descriptor set → composite render target ---
     VkDescriptorImageInfo compositeImgInfo = compositeTarget->descriptorInfo();
@@ -158,7 +162,7 @@ bool Minimap::initialize(VkContext* ctx, VkDescriptorSetLayout /*perFrameLayout*
     displayWrite.pImageInfo = &compositeImgInfo;
     vkUpdateDescriptorSets(device, 1, &displayWrite, 0, nullptr);
 
-    // --- Tile pipeline layout: samplerSetLayout + 8-byte push constant (vertex) ---
+    // --- Tile pipeline layout: samplerSetLayout + the tile's place (vertex) ---
     VkPushConstantRange tilePush{};
     tilePush.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     tilePush.offset = 0;
@@ -198,7 +202,9 @@ bool Minimap::initialize(VkContext* ctx, VkDescriptorSetLayout /*perFrameLayout*
             .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
             .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
             .setNoDepthTest()
-            .setColorBlendAttachment(PipelineBuilder::blendDisabled())
+            // A building's tiles are cut-outs laid over one another; the
+            // terrain's are opaque, so blending leaves them as they were.
+            .setColorBlendAttachment(PipelineBuilder::blendAlpha())
             .setLayout(tilePipelineLayout)
             .setRenderPass(compositeTarget->getRenderPass())
             .setDynamicStates(viewportAndScissorDynamic())
@@ -289,50 +295,85 @@ void Minimap::recreatePipelines() {
 void Minimap::setMapName(const std::string& name) {
     if (mapName != name) {
         mapName = name;
-        requestedMap_.clear();
+        requested_.reset();
     }
 }
+
+namespace {
+
+std::shared_ptr<VkTexture> uploadTile(VkContext* ctx, const pipeline::BLPImage& image, const std::string& path) {
+    auto texture = std::shared_ptr<VkTexture>(new VkTexture, [ctx](VkTexture* tex) {
+        ctx->deferAfterAllFrameFences([tex] { delete tex; });
+    });
+    if (!texture->upload(*ctx, image.data.data(), image.width, image.height, VK_FORMAT_R8G8B8A8_UNORM, false) ||
+        !texture->createSampler(ctx->getDevice(), VK_FILTER_LINEAR, VK_FILTER_LINEAR,
+                                VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 1)) {
+        LOG_ERROR("Minimap tile ", path, " GPU upload failed; shown as no data");
+        return nullptr;
+    }
+    return texture;
+}
+
+}  // namespace
 
 // A bounded background request reads/decodes the lookup and tile files and
 // uploads new images using its own submit lane. The producer only polls ready
 // results; recording never reads archives or waits for uploads.
-void Minimap::prepareTiles(int x, int y) {
+void Minimap::prepareTiles(const Request& request, const WmoMinimapPlacement* building, const glm::vec3& centre) {
     if (pendingTiles_.valid() && pendingTiles_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         const bool current = pendingTiles_.current();
         auto tiles = pendingTiles_.get();
-        if (current && tiles.map == mapName && tiles.x == x && tiles.y == y) {
-            trsLookup = tiles.lookup;
-            for (size_t i = 0; i < tiles.images.size(); ++i) {
-                const auto& image = tiles.images[i];
-                const auto& key = tiles.hashes[i];
-                if (key.empty()) continue;
-                auto found = tileTextureCache.find(key);
+        if (tiles.lookup) trsLookup = tiles.lookup;
+        if (tiles.areaFlagsRead) { areaFlags_ = tiles.areaFlags; areaFlagsRead_ = true; }
+        if (current && tiles.request == request) {
+            for (const auto& tile : tiles.tiles) {
+                if (tile.file.empty()) continue;
+                auto found = tileTextureCache.find(tile.file);
                 if (found != tileTextureCache.end()) {
                     if (found->second.texture) tileLru_.splice(tileLru_.begin(), tileLru_, found->second.lru);
-                } else if (image) {
-                    tileLru_.push_front(key); tileTextureCache.emplace(key, CachedTile{image, tileLru_.begin()});
-                } else tileTextureCache.emplace(key, CachedTile{nullptr, tileLru_.end()});
+                } else if (tile.image) {
+                    tileLru_.push_front(tile.file);
+                    tileTextureCache.emplace(tile.file, CachedTile{tile.image, tileLru_.begin()});
+                } else tileTextureCache.emplace(tile.file, CachedTile{nullptr, tileLru_.end()});
             }
             while (tileLru_.size() > MAX_TILE_CACHE) {
                 tileTextureCache.erase(tileLru_.back());
                 tileLru_.pop_back();
             }
+            if (!tiles.missing.empty() && building && reportedMissing_.insert(building->model->tileStem).second) {
+                LOG_INFO("Minimap: ", building->model->tileStem, " has no minimap image for ", tiles.missing.size(),
+                         " of its tiles here (first ", tiles.missing.front(),
+                         "); drawn without them, as the client does");
+            }
+            if (tiles.request.instance != shownInstance_) {
+                shownInstance_ = tiles.request.instance;
+                if (tiles.building() && building) {
+                    LOG_INFO("Minimap: drawing ", building->model->tileStem, " from its own tiles (",
+                             tiles.tiles.size(), " here, group ", tiles.request.group,
+                             tiles.request.indoors ? ", indoors)" : ", outdoors)");
+                } else {
+                    LOG_INFO("Minimap: drawing the terrain of ", tiles.request.map);
+                }
+            }
             tiles.revision = ++tileRevision_;
             readyTiles_ = std::make_shared<Tiles>(std::move(tiles));
         }
     }
-    if (pendingTiles_.valid() || !assetManager ||
-        (requestedMap_ == mapName && requestedX_ == x && requestedY_ == y)) return;
-    requestedMap_ = mapName; requestedX_ = x; requestedY_ = y;
+    if (pendingTiles_.valid() || !assetManager || requested_ == request) return;
+    requested_ = request;
     auto* assets = assetManager;
     auto* ctx = vkCtx;
-    const auto map = mapName;
     const auto lookup = trsLookup;
+    const bool areaFlagsRead = areaFlagsRead_;
+    std::optional<WmoMinimapPlacement> placement;
+    if (building && request.instance != 0) placement = *building;
     std::unordered_map<std::string, std::shared_ptr<VkTexture>> existing;
     for (const auto& [hash, entry] : tileTextureCache) existing.emplace(hash, entry.texture);
-    pendingTiles_ = tileJobs_.submit([assets, ctx, map, x, y, lookup, existing = std::move(existing)](const core::JobGroup::Token& token) {
+    pendingTiles_ = tileJobs_.submit([assets, ctx, request, centre, lookup, areaFlagsRead, placement,
+                                      existing = std::move(existing)](const core::JobGroup::Token& token) {
         Tiles result;
-        result.map = map; result.x = x; result.y = y; result.lookup = lookup;
+        result.request = request;
+        result.lookup = lookup;
         if (!token.current()) return result;
         if (!result.lookup) {
             auto data = assets->readFile("Textures\\Minimap\\md5translate.trs");
@@ -340,65 +381,88 @@ void Minimap::prepareTiles(int x, int y) {
             result.lookup = std::make_shared<const pipeline::MinimapTileIndex>(
                 pipeline::MinimapTileIndex::parse(data));
         }
-        int slot = 0;
-        for (int dr = -1; dr <= 1; ++dr) for (int dc = -1; dc <= 1; ++dc, ++slot) {
+        if (!areaFlagsRead) {
+            result.areaFlagsRead = true;
+            pipeline::DBCFile dbc;
+            const auto data = assets->readFile("DBFilesClient\\WMOAreaTable.dbc");
+            const auto* layout = pipeline::getActiveDBCLayout()
+                ? pipeline::getActiveDBCLayout()->getLayout("WMOAreaTable") : nullptr;
+            std::optional<WmoAreaFlags> table;
+            if (!data.empty() && dbc.load(data)) table = WmoAreaFlags::read(dbc, layout);
+            if (table) result.areaFlags = std::make_shared<const WmoAreaFlags>(std::move(*table));
+            else LOG_WARNING("Minimap: WMOAreaTable.dbc ", data.empty() ? "is missing" : "has an unknown layout",
+                             "; outdoors in a building such as Dalaran the minimap shows the ground below");
+        }
+        // Each image once: from the cache, or loaded and uploaded here.
+        auto loaded = existing;
+        const auto image = [&](const std::string& file, const std::string& name) -> std::shared_ptr<VkTexture> {
+            if (auto cached = loaded.find(file); cached != loaded.end()) return cached->second;
+            const auto path = "Textures\\Minimap\\" + file + ".blp";
+            const auto blp = assets->loadTexture(path);
+            if (!blp.isValid()) {
+                LOG_WARNING("Minimap tile ", name, " (", path, ") failed to load; shown as no data");
+                loaded.emplace(file, nullptr);
+                return nullptr;
+            }
+            auto texture = uploadTile(ctx, blp, path);
+            loaded.emplace(file, texture);
+            return texture;
+        };
+        if (placement) {
+            const auto& model = *placement->model;
+            const float radius = kWmoMinimapRadius[request.zoom];
+            result.area = wmoMinimapGatherBox(centre, radius);
+            auto tiles = wmoMinimapTiles(model, request.group, request.indoors,
+                                         wmoMinimapModelBox(result.area, placement->worldToModel));
+            const glm::vec3 local = glm::vec3(placement->worldToModel * glm::vec4(centre, 1.0f));
+            wmoMinimapDrawOrder(tiles, request.group, local.z);
+            for (const auto& tile : tiles) {
+                if (!token.current()) return result;
+                const auto name = pipeline::MinimapTileIndex::buildingTileName(model.tileStem, tile.group, tile.x, tile.y);
+                const auto* file = result.lookup->buildingTile(model.tileStem, tile.group, tile.x, tile.y);
+                if (!file) { result.missing.push_back(name); continue; }
+                auto texture = image(*file, name);
+                if (!texture) continue;
+                result.tiles.push_back({.image = texture, .file = *file,
+                                        .quad = wmoMinimapQuad(tile, static_cast<int>(texture->getWidth()),
+                                                               static_cast<int>(texture->getHeight()),
+                                                               placement->modelToWorld, result.area)});
+            }
+            return result;
+        }
+        for (int dr = -1; dr <= 1; ++dr) for (int dc = -1; dc <= 1; ++dc) {
             if (!token.current()) return result;
-            const auto* file = result.lookup->terrainTile(map, x + dr, y + dc);
-            if (!file) continue;
-            result.hashes[slot] = *file;
-            if (auto cached = existing.find(*file); cached != existing.end()) {
-                result.images[slot] = cached->second;
-                continue;
+            DrawnTile drawn;
+            drawn.quad = {.corner = glm::vec2(dc + 1, dr + 1) / 3.0f, .down = {1.0f / 3.0f, 0.0f},
+                          .across = {0.0f, 1.0f / 3.0f}};
+            if (const auto* file = result.lookup->terrainTile(request.map, request.x + dr, request.y + dc)) {
+                drawn.file = *file;
+                drawn.image = image(*file, pipeline::MinimapTileIndex::terrainTileName(
+                                               request.map, request.x + dr, request.y + dc));
             }
-            const auto path = "Textures\\Minimap\\" + *file + ".blp";
-            const auto image = assets->loadTexture(path);
-            if (!image.isValid()) {
-                LOG_WARNING("Minimap tile ", pipeline::MinimapTileIndex::terrainTileName(map, x + dr, y + dc),
-                            " (", path, ") failed to load; shown as no data");
-                continue;
-            }
-            auto texture = std::shared_ptr<VkTexture>(new VkTexture, [ctx](VkTexture* tex) {
-                ctx->deferAfterAllFrameFences([tex] { delete tex; });
-            });
-            if (!texture->upload(*ctx, image.data.data(), image.width, image.height,
-                                 VK_FORMAT_R8G8B8A8_UNORM, false) ||
-                !texture->createSampler(ctx->getDevice(), VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                                       VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 1)) {
-                LOG_ERROR("Minimap tile ", path, " GPU upload failed; shown as no data");
-                continue;
-            }
-            result.images[slot] = std::move(texture);
+            result.tiles.push_back(std::move(drawn));
         }
         return result;
     });
 }
 
 void Minimap::updateTileDescriptors(uint32_t frameIdx, const Tiles& tiles) {
-    constexpr int kTileCount = 9; // 3x3 grid
-    VkDevice device = vkCtx->getDevice();
-    std::array<VkDescriptorImageInfo, kTileCount> imgInfos{};
-    std::array<VkWriteDescriptorSet, kTileCount> writes{};
-    int slot = 0;
-
-    for (int dr = -1; dr <= 1; dr++) {
-        for (int dc = -1; dc <= 1; dc++) {
-            VkTexture* tileTex = tiles.images[slot].get();
-            if (!tileTex || !tileTex->isValid()) tileTex = noDataTexture.get();
-
-            imgInfos[slot] = tileTex->descriptorInfo();
-
-            writes[slot] = {};
-            writes[slot].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[slot].dstSet = tileDescSets[frameIdx][slot];
-            writes[slot].dstBinding = 0;
-            writes[slot].descriptorCount = 1;
-            writes[slot].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[slot].pImageInfo = &imgInfos[slot];
-            slot++;
-        }
+    const size_t count = std::min<size_t>(tiles.tiles.size(), MAX_TILE_DRAWS);
+    std::vector<VkDescriptorImageInfo> imgInfos(count);
+    std::vector<VkWriteDescriptorSet> writes(count);
+    for (size_t i = 0; i < count; ++i) {
+        VkTexture* tileTex = tiles.tiles[i].image.get();
+        if (!tileTex || !tileTex->isValid()) tileTex = noDataTexture.get();
+        imgInfos[i] = tileTex->descriptorInfo();
+        writes[i] = {};
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = tileDescSets[frameIdx][i];
+        writes[i].dstBinding = 0;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[i].pImageInfo = &imgInfos[i];
     }
-
-    vkUpdateDescriptorSets(device, kTileCount, writes.data(), 0, nullptr);
+    if (count) vkUpdateDescriptorSets(vkCtx->getDevice(), static_cast<uint32_t>(count), writes.data(), 0, nullptr);
 }
 
 // --------------------------------------------------------
@@ -420,23 +484,14 @@ void Minimap::recordComposite(VkCommandBuffer cmd, const Frame& frame) {
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &quadVB, &offset);
 
-    // Draw 3x3 tile grid
-    int slot = 0;
-    for (int dr = -1; dr <= 1; dr++) {
-        for (int dc = -1; dc <= 1; dc++) {
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    tilePipelineLayout, 0, 1,
-                                    &tileDescSets[frameIdx][slot], 0, nullptr);
-
-            MinimapTilePush push{};
-            push.gridOffset = glm::vec2(static_cast<float>(dc + 1),
-                                        static_cast<float>(dr + 1));
-            vkCmdPushConstants(cmd, tilePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-                               0, sizeof(push), &push);
-
-            vkCmdDraw(cmd, 6, 1, 0, 0);
-            slot++;
-        }
+    const size_t count = std::min<size_t>(frame.tiles->tiles.size(), MAX_TILE_DRAWS);
+    for (size_t i = 0; i < count; ++i) {
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tilePipelineLayout, 0, 1,
+                                &tileDescSets[frameIdx][i], 0, nullptr);
+        const auto& quad = frame.tiles->tiles[i].quad;
+        const MinimapTilePush push{.corner = quad.corner, .down = quad.down, .across = quad.across};
+        vkCmdPushConstants(cmd, tilePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
+        vkCmdDraw(cmd, 6, 1, 0, 0);
     }
 
     compositeTarget->endPass(cmd);
@@ -451,13 +506,35 @@ void Minimap::recordComposite(VkCommandBuffer cmd, const Frame& frame) {
 
 Minimap::Frame Minimap::extract(const Camera& playerCamera, const glm::vec3& centerWorldPos,
                                   int screenWidth, int screenHeight,
-                                  float playerOrientation, bool hasPlayerOrientation) {
+                                  float playerOrientation, bool hasPlayerOrientation,
+                                  const WmoMinimapPlacement* building) {
     Frame frame;
     if (!enabled || !vkCtx || screenWidth <= 0 || screenHeight <= 0) return frame;
     auto [centreX, centreY] = core::coords::worldToTile(centerWorldPos.x, centerWorldPos.y);
-    prepareTiles(centreX, centreY);
+    Request request{.map = mapName, .x = centreX, .y = centreY};
+    // The client's choice between the ground and a building's own tiles
+    // (wow.exe 3.3.5a, 0x75d6c2): see wmoMinimapShown.
+    if (building && building->model) {
+        const auto& model = *building->model;
+        const glm::vec3 local = glm::vec3(building->worldToModel * glm::vec4(centerWorldPos, 1.0f));
+        const int group = model.groupAt(local);
+        if (group >= 0) {
+            const bool indoors = (model.groups[group].flags & kWmoGroupInterior) != 0;
+            const uint32_t rootFlags = areaFlags_ ? areaFlags_->rootFlags(model.wmoId, building->nameSet) : 0;
+            if (wmoMinimapShown(indoors, rootFlags)) {
+                const float radius = kWmoMinimapRadius[indoorZoom_];
+                request.instance = building->instance;
+                request.group = group;
+                request.indoors = indoors;
+                request.zoom = indoorZoom_;
+                request.cell = glm::ivec2(std::floor(centerWorldPos.x / radius), std::floor(centerWorldPos.y / radius));
+            }
+        }
+    }
+    prepareTiles(request, request.instance ? building : nullptr, centerWorldPos);
     frame.tiles = readyTiles_;
     frame.enabled = frame.tiles != nullptr;
+    showingBuilding_ = frame.tiles && frame.tiles->building();
 
     // Top-right corner, unless something asked for a particular rect - which
     // is what happens when FrameXML owns the minimap and the map has to sit
@@ -477,17 +554,23 @@ Minimap::Frame Minimap::extract(const Camera& playerCamera, const glm::vec3& cen
     }
 
     // Compute player's UV in the composite texture
-    constexpr float TILE_SIZE = core::coords::TILE_SIZE;
-    const int tileX = frame.tiles ? frame.tiles->x : centreX;
-    const int tileY = frame.tiles ? frame.tiles->y : centreY;
-
-    float fracNS = 32.0f - static_cast<float>(tileX) - centerWorldPos.y / TILE_SIZE;
-    float fracEW = 32.0f - static_cast<float>(tileY) - centerWorldPos.x / TILE_SIZE;
-
-    float playerU = (1.0f + fracEW) / 3.0f;
-    float playerV = (1.0f + fracNS) / 3.0f;
-
-    float zoomRadius = viewRadius / (TILE_SIZE * 3.0f);
+    float playerU = 0.0f, playerV = 0.0f, zoomRadius = 0.0f;
+    if (showingBuilding_) {
+        const auto& area = frame.tiles->area;
+        const glm::vec2 uv = wmoMinimapAreaUV(centerWorldPos, area);
+        playerU = uv.x;
+        playerV = uv.y;
+        zoomRadius = kWmoMinimapRadius[frame.tiles->request.zoom] / (area.max.x - area.min.x);
+    } else {
+        constexpr float TILE_SIZE = core::coords::TILE_SIZE;
+        const int tileX = frame.tiles ? frame.tiles->request.x : centreX;
+        const int tileY = frame.tiles ? frame.tiles->request.y : centreY;
+        const float fracNS = 32.0f - static_cast<float>(tileX) - centerWorldPos.y / TILE_SIZE;
+        const float fracEW = 32.0f - static_cast<float>(tileY) - centerWorldPos.x / TILE_SIZE;
+        playerU = (1.0f + fracEW) / 3.0f;
+        playerV = (1.0f + fracNS) / 3.0f;
+        zoomRadius = viewRadius / (TILE_SIZE * 3.0f);
+    }
 
     // Rotating with the camera is off everywhere: the saved setting is read and
     // dropped in loadSettings, since "Stabilize transports and correct minimap

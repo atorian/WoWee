@@ -13,6 +13,7 @@
 #include "rendering/local_lights.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/wmo_lighting.hpp"
+#include "rendering/wmo_minimap.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/uniform_slot_pool.hpp"
 
@@ -174,7 +175,11 @@ public:
      */
     uint32_t createInstance(uint32_t modelId, const glm::vec3& position,
                            const glm::vec3& rotation = glm::vec3(0.0f),
-                           float scale = 1.0f, uint32_t reservedId = 0);
+                           float scale = 1.0f, uint32_t reservedId = 0, uint16_t nameSet = 0);
+
+    /// A placed building as the minimap draws it. Nothing for an instance
+    /// that is not here or a model with no minimap description.
+    [[nodiscard]] std::optional<WmoMinimapPlacement> minimapPlacement(uint32_t instanceId) const;
     /// An id no instance has, for one SceneCommands will create at the apply
     /// point (createInstance's reservedId): the caller has it now, the
     /// instance from then on.
@@ -565,6 +570,9 @@ private:
         glm::vec3 boundingBoxMax;
         glm::vec3 wmoAmbientColor{0.5f, 0.5f, 0.5f};  // From MOHD, used for interior lighting
         bool isLowPlatform = false;
+        /// Its groups and portals as the minimap reads them; null for a
+        /// model with no path to name its minimap tiles by.
+        std::shared_ptr<const WmoMinimapModel> minimap;
         /// Its groups' shapes, gathered for the collision world once every
         /// group is uploaded and the model is resident.
         std::shared_ptr<const collision::WmoShape> shape;
@@ -635,6 +643,8 @@ private:
         glm::vec3 position;
         glm::vec3 rotation;  // Euler angles (radians)
         float scale;
+        /// The placement's NameSetID: which WMOAreaTable rows name it.
+        uint16_t nameSet = 0;
         glm::mat4 modelMatrix;
         glm::mat4 invModelMatrix;  // Cached inverse for collision
         glm::vec3 worldBoundsMin;

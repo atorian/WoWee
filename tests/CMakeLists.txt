@@ -3589,3 +3589,7 @@ wowee_add_test(test_distant_terrain
 
 wowee_add_test(test_minimap_tile_index
     SOURCES test_minimap_tile_index.cpp ${CMAKE_SOURCE_DIR}/src/pipeline/minimap_tile_index.cpp)
+
+wowee_add_test(test_wmo_minimap
+    SOURCES test_wmo_minimap.cpp ${CMAKE_SOURCE_DIR}/src/rendering/wmo_minimap.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp ${TEST_COMMON_SOURCES})

@@ -865,6 +865,13 @@ bool CollisionWorld::insideWmo(const Reach& reach, float x, float y, float z,
     return holding.has_value();
 }
 
+std::optional<uint32_t> CollisionWorld::wmoInstanceAt(const Reach& reach, float x, float y, float z) const {
+    QueryTimer timer(wmoQueryMs_, wmoQueryCalls_);
+    const auto holding = findGroupHolding(reach, x, y, z, /*interiorOnly=*/false);
+    if (!holding) return std::nullopt;
+    return holding->placement->id;
+}
+
 bool CollisionWorld::insideInteriorWmo(const Reach& reach, float x, float y, float z) const {
     return findGroupHolding(reach, x, y, z, /*interiorOnly=*/true).has_value();
 }

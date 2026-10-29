@@ -943,6 +943,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
                 ready.rotation = rot;
                 ready.scale = placement.scale > 0
                     ? static_cast<float>(placement.scale) / 1024.0f : 1.0f;
+                ready.nameSet = placement.nameSet;
                 pending->wmoModels.push_back(std::move(ready));
             }
         }
@@ -1285,7 +1286,8 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                             continue;
                         }
                         uint32_t wmoInstId = wmoRenderer->createInstance(
-                            wmoReady.modelId, wmoReady.position, wmoReady.rotation, wmoReady.scale);
+                            wmoReady.modelId, wmoReady.position, wmoReady.rotation, wmoReady.scale,
+                            0, wmoReady.nameSet);
                         if (!wmoInstId) {
                             ft.wmoInstanceIndex++;
                             continue;

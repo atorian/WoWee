@@ -211,6 +211,8 @@ struct WMOModel {
     uint32_t nDoodadSets;
 
     glm::vec3 ambientColor;     // MOHD ambient color (used for interior group lighting)
+    /// MOHD wmoID: the WMOID WMOAreaTable.dbc names this building by.
+    uint32_t wmoId = 0;
     glm::vec3 boundingBoxMin;
     glm::vec3 boundingBoxMax;
     /// MOHD flags. 0x2: the client's unified path (kWMOModelUnifiedRenderPath).

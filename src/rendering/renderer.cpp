@@ -1666,8 +1666,16 @@ FrameInputs Renderer::extractFrameInputs() {
     extraction.lap("M2");
     if (minimap && in.minimapEnabled) {
         const auto centre = in.viewer.thirdPerson ? in.characterPosition : in.camera.getPosition();
+        std::optional<WmoMinimapPlacement> building;
+        if (wmoRenderer) {
+            if (const auto instance = collision_->wmoInstanceAt(collision::Reach::everywhere(),
+                                                                centre.x, centre.y, centre.z)) {
+                building = wmoRenderer->minimapPlacement(*instance);
+            }
+        }
         scene->minimap = minimap->extract(in.camera, centre, in.windowWidth, in.windowHeight,
-                                          glm::radians(in.characterYaw), true);
+                                          glm::radians(in.characterYaw), true,
+                                          building ? &*building : nullptr);
     }
     extraction.lap("minimap");
     if (skyboxModelRenderer_) {

@@ -1111,6 +1111,7 @@ set(WOWEE_SOURCES
     src/rendering/quest_marker_renderer.cpp
     src/rendering/footprint_renderer.cpp
     src/rendering/minimap.cpp
+    src/rendering/wmo_minimap.cpp
     src/rendering/aux_swapchain.cpp
     src/rendering/world_map/coordinate_projection.cpp
     src/rendering/world_map/map_resolver.cpp
