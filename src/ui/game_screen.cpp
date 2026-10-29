@@ -885,8 +885,8 @@ void GameScreen::render(game::GameHandler& gameHandler) {
             }
         }
         static glm::vec3 targetGLPos;
-        if (gameHandler.hasTarget()) {
-            auto target = gameHandler.getTarget();
+        if (gameHandler.combat().hasTarget()) {
+            auto target = gameHandler.combat().getTarget();
             if (target) {
                 // Prefer the renderer's actual instance position so the selection
                 // circle tracks the rendered model (not a parallel entity-space
@@ -1935,7 +1935,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     if (picked && picked->getType() == game::ObjectType::GAMEOBJECT) {
                         gameHandler.interactWithGameObject(closestGuid);
                     } else {
-                        gameHandler.setTarget(closestGuid);
+                        gameHandler.combat().setTarget(closestGuid);
                     }
                 } else if (addons::storedCVarValue("deselectOnClick", "1") != "0") {
                     // Clicked empty space - deselect current target, unless the
@@ -1948,7 +1948,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     // target went anyway. The default is the clearing this
                     // client already did, so nobody's targeting changes by the
                     // switch beginning to work.
-                    gameHandler.clearTarget();
+                    gameHandler.combat().clearTarget();
                 }
             }
         }
@@ -2007,15 +2007,15 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
         // instead of re-picking under cursor (which can hit nearby decorative GOs).
         // Exclude chair-type GOs (type 7): otherwise any right-click (including the
         // start of a camera rotate) auto-sits the player whenever a chair is targeted.
-        if (gameHandler.hasTarget()) {
-            auto target = gameHandler.getTarget();
+        if (gameHandler.combat().hasTarget()) {
+            auto target = gameHandler.combat().getTarget();
             if (target && target->getType() == game::ObjectType::GAMEOBJECT) {
                 auto go = std::static_pointer_cast<game::GameObject>(target);
                 auto* goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
                 if (!goInfo || goInfo->type != 7) {
                     LOG_DEBUG("[GO-DIAG] Right-click: re-interacting with targeted GO 0x",
                                 std::hex, target->getGuid(), std::dec);
-                    gameHandler.setTarget(target->getGuid());
+                    gameHandler.combat().setTarget(target->getGuid());
                     gameHandler.interactWithGameObject(target->getGuid());
                     return;
                 }
@@ -2106,16 +2106,16 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     if (closestType == game::ObjectType::GAMEOBJECT) {
                         LOG_DEBUG("[GO-DIAG] Right-click: raypick hit GO 0x",
                                     std::hex, closestGuid, std::dec);
-                        gameHandler.setTarget(closestGuid);
+                        gameHandler.combat().setTarget(closestGuid);
                         gameHandler.interactWithGameObject(closestGuid);
                         return;
                     }
-                    gameHandler.setTarget(closestGuid);
+                    gameHandler.combat().setTarget(closestGuid);
                 }
             }
         }
-        if (gameHandler.hasTarget()) {
-            auto target = gameHandler.getTarget();
+        if (gameHandler.combat().hasTarget()) {
+            auto target = gameHandler.combat().getTarget();
             if (target) {
                 if (target->getType() == game::ObjectType::UNIT) {
                     // Check if unit is dead (health == 0) → loot, otherwise interact/attack

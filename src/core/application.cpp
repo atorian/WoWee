@@ -3641,8 +3641,8 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
         auto& _creatureWasSwimming = entitySpawner_->getCreatureWasSwimming();
         auto& _creatureWasFlying = entitySpawner_->getCreatureWasFlying();
         auto& _creatureWasWalking = entitySpawner_->getCreatureWasWalking();
-        const uint64_t currentTargetGuid = gameHandler->hasTarget()
-            ? gameHandler->getTargetGuid() : 0;
+        const uint64_t currentTargetGuid = gameHandler->combat().hasTarget()
+            ? gameHandler->combat().getTargetGuid() : 0;
         const uint64_t autoAttackGuid = gameHandler->combat().getAutoAttackTargetGuid();
         for (const auto& [guid, instanceId] : _creatureInstances) {
             auto entity = gameHandler->getEntityManager().getEntity(guid);
@@ -3828,8 +3828,8 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
         auto& _pCreatureWalkingState = entitySpawner_->getCreatureWalkingState();
         auto& _pCreatureFlyingState = entitySpawner_->getCreatureFlyingState();
         auto& _pCreatureRenderPosCache = entitySpawner_->getCreatureRenderPosCache();
-        const uint64_t playerTargetGuid = gameHandler->hasTarget()
-            ? gameHandler->getTargetGuid() : 0;
+        const uint64_t playerTargetGuid = gameHandler->combat().hasTarget()
+            ? gameHandler->combat().getTargetGuid() : 0;
         const uint64_t playerAutoAttackGuid = gameHandler->combat().getAutoAttackTargetGuid();
         for (const auto& [guid, instanceId] : _playerInstances) {
             auto entity = gameHandler->getEntityManager().getEntity(guid);
@@ -5265,9 +5265,9 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                     // the second only in questframe and means nothing different
                     // by it.
                     {"npc", &npcPortrait_, npcGuid, "questnpc"},
-                    {"target", &targetPortrait_,   gameHandler->getTargetGuid()},
+                    {"target", &targetPortrait_,   gameHandler->combat().getTargetGuid()},
                     {"pet",    &petPortrait_,      pet::orNoPet(pet_.get()).getPetGuid()},
-                    {"focus",  &focusPortrait_,    gameHandler->getFocusGuid()},
+                    {"focus",  &focusPortrait_,    gameHandler->combat().getFocusGuid()},
                     {"party1", &partyPortraits_[0], partyGuids[0]},
                     {"party2", &partyPortraits_[1], partyGuids[1]},
                     {"party3", &partyPortraits_[2], partyGuids[2]},

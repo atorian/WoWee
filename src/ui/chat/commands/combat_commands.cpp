@@ -110,7 +110,7 @@ public:
         if (numId) {
             uint64_t targetGuid = (castTargetOverride != static_cast<uint64_t>(-1))
                 ? castTargetOverride
-                : (ctx.gameHandler.hasTarget() ? ctx.gameHandler.getTargetGuid() : 0);
+                : (ctx.gameHandler.combat().hasTarget() ? ctx.gameHandler.combat().getTargetGuid() : 0);
             ctx.gameHandler.spells().castSpell(numId, targetGuid);
             return {};
         }
@@ -120,7 +120,7 @@ public:
         if (bestSpellId) {
             uint64_t targetGuid = (castTargetOverride != static_cast<uint64_t>(-1))
                 ? castTargetOverride
-                : (ctx.gameHandler.hasTarget() ? ctx.gameHandler.getTargetGuid() : 0);
+                : (ctx.gameHandler.combat().hasTarget() ? ctx.gameHandler.combat().getTargetGuid() : 0);
             ctx.gameHandler.spells().castSpell(bestSpellId, targetGuid);
         } else {
             // Build error message
@@ -229,7 +229,7 @@ public:
                     try { rSec = std::stof(plow); } catch (...) {}
                     if (rSec > 0.0f && nowSec - seqState.lastPressSec > rSec) shouldReset = true;
                 } else if (plow == "target") {
-                    if (ctx.gameHandler.getTargetGuid() != seqState.lastTargetGuid) shouldReset = true;
+                    if (ctx.gameHandler.combat().getTargetGuid() != seqState.lastTargetGuid) shouldReset = true;
                 } else if (plow == "combat") {
                     if (ctx.gameHandler.combat().isInCombat() != seqState.lastInCombat) shouldReset = true;
                 }
@@ -242,7 +242,7 @@ public:
         const std::string& seqSpell = seqSpells[seqState.index];
         seqState.index = (seqState.index + 1) % seqSpells.size();
         seqState.lastPressSec   = nowSec;
-        seqState.lastTargetGuid = ctx.gameHandler.getTargetGuid();
+        seqState.lastTargetGuid = ctx.gameHandler.combat().getTargetGuid();
         seqState.lastInCombat   = ctx.gameHandler.combat().isInCombat();
 
         // Cast the selected spell
@@ -251,7 +251,7 @@ public:
         if (!ssLow.empty() && ssLow.front() == '!') ssLow.erase(ssLow.begin());
 
         uint64_t seqTargetGuid = (seqTgtOver != static_cast<uint64_t>(-1) && seqTgtOver != 0)
-            ? seqTgtOver : (ctx.gameHandler.hasTarget() ? ctx.gameHandler.getTargetGuid() : 0);
+            ? seqTgtOver : (ctx.gameHandler.combat().hasTarget() ? ctx.gameHandler.combat().getTargetGuid() : 0);
 
         uint32_t numId = parseNumericSpellId(ssLow);
         if (numId) {
@@ -472,7 +472,7 @@ public:
         }
         if (condPass) {
             uint64_t atkTarget = (saOverride != static_cast<uint64_t>(-1) && saOverride != 0)
-                ? saOverride : (ctx.gameHandler.hasTarget() ? ctx.gameHandler.getTargetGuid() : 0);
+                ? saOverride : (ctx.gameHandler.combat().hasTarget() ? ctx.gameHandler.combat().getTargetGuid() : 0);
             if (atkTarget != 0) {
                 ctx.gameHandler.startAutoAttack(atkTarget);
             } else {

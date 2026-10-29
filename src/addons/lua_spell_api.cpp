@@ -276,9 +276,9 @@ static int lua_UnitAura(lua_State* L, bool wantBuff) {
             if (aura.casterGuid != 0) {
                 if (aura.casterGuid == gh->getPlayerGuid())
                     lua_pushstring(L, "player");
-                else if (aura.casterGuid == gh->getTargetGuid())
+                else if (aura.casterGuid == gh->combat().getTargetGuid())
                     lua_pushstring(L, "target");
-                else if (aura.casterGuid == gh->getFocusGuid())
+                else if (aura.casterGuid == gh->combat().getFocusGuid())
                     lua_pushstring(L, "focus");
                 else if (aura.casterGuid == petOf(L).getPetGuid())
                     lua_pushstring(L, "pet");
@@ -551,7 +551,7 @@ static int lua_CastSpellByName(lua_State* L) {
             toLowerInPlace(u);
             target = resolveUnitGuid(gh, u);
         }
-        if (target == 0 && gh->hasTarget()) target = gh->getTargetGuid();
+        if (target == 0 && gh->combat().hasTarget()) target = gh->combat().getTargetGuid();
         gh->spells().castSpell(bestId, target);
     }
     return 0;
@@ -713,7 +713,7 @@ static int lua_CastSpell(lua_State* L) {
     // resolved through the player's tabs cast whichever of the player's spells
     // sat at that index.
     const uint32_t id = spellIdForCall(L, gh);
-    if (id != 0) gh->spells().castSpell(id, gh->getTargetGuid());
+    if (id != 0) gh->spells().castSpell(id, gh->combat().getTargetGuid());
     return 0;
 }
 
@@ -866,7 +866,7 @@ static int lua_GetSpellCooldown(lua_State* L) {
 
 static int lua_HasTarget(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->hasTarget());
+    lua_pushboolean(L, gh && gh->combat().hasTarget());
     return 1;
 }
 
@@ -878,14 +878,14 @@ static int lua_TargetUnit(lua_State* L) {
     std::string uidStr(uid);
     toLowerInPlace(uidStr);
     uint64_t guid = resolveUnitGuid(gh, uidStr);
-    if (guid != 0) gh->setTarget(guid);
+    if (guid != 0) gh->combat().setTarget(guid);
     return 0;
 }
 
 // ClearTarget() - clear current target
 static int lua_ClearTarget(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (gh) gh->clearTarget();
+    if (gh) gh->combat().clearTarget();
     return 0;
 }
 
@@ -898,14 +898,14 @@ static int lua_FocusUnit(lua_State* L) {
     std::string uidStr(uid);
     toLowerInPlace(uidStr);
     uint64_t guid = resolveUnitGuid(gh, uidStr);
-    if (guid != 0) gh->setFocus(guid);
+    if (guid != 0) gh->combat().setFocus(guid);
     return 0;
 }
 
 // ClearFocus() - clear focus target
 static int lua_ClearFocus(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (gh) gh->clearFocus();
+    if (gh) gh->combat().clearFocus();
     return 0;
 }
 
@@ -919,7 +919,7 @@ static int lua_AssistUnit(lua_State* L) {
     uint64_t guid = resolveUnitGuid(gh, uidStr);
     if (guid == 0) return 0;
     uint64_t theirTarget = getEntityTargetGuid(gh, guid);
-    if (theirTarget != 0) gh->setTarget(theirTarget);
+    if (theirTarget != 0) gh->combat().setTarget(theirTarget);
     return 0;
 }
 
@@ -1146,7 +1146,7 @@ static int lua_CastSpellByID(lua_State* L) {
         toLowerInPlace(u);
         target = resolveUnitGuid(gh, u);
     }
-    if (target == 0 && gh->hasTarget()) target = gh->getTargetGuid();
+    if (target == 0 && gh->combat().hasTarget()) target = gh->combat().getTargetGuid();
     gh->spells().castSpell(spellId, target);
     return 0;
 }

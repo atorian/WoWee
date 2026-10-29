@@ -165,8 +165,8 @@ public:
 class DuelCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (ctx.gameHandler.hasTarget()) {
-            if (auto* duels = ctx.services.duels) duels->proposeDuel(ctx.gameHandler.getTargetGuid());
+        if (ctx.gameHandler.combat().hasTarget()) {
+            if (auto* duels = ctx.services.duels) duels->proposeDuel(ctx.gameHandler.combat().getTargetGuid());
         } else {
             game::MessageChatData msg;
             msg.type = game::ChatType::SYSTEM;
@@ -184,8 +184,8 @@ public:
 class TradeCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (ctx.gameHandler.hasTarget()) {
-            trade::orNoTrade(ctx.services.trade).initiateTrade(ctx.gameHandler.getTargetGuid());
+        if (ctx.gameHandler.combat().hasTarget()) {
+            trade::orNoTrade(ctx.services.trade).initiateTrade(ctx.gameHandler.combat().getTargetGuid());
         } else {
             game::MessageChatData msg;
             msg.type = game::ChatType::SYSTEM;

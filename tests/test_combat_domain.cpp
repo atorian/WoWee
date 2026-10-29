@@ -114,9 +114,9 @@ TEST_CASE("Tab steps through enemies nearest first, and takes in one that has ju
         h.game().getEntityManager().addEntity(unit->getGuid(), unit);
 
     h.game().combat().tabTarget(me.x, me.y, me.z);
-    CHECK(h.game().getTargetGuid() == 0x8001);
+    CHECK(h.game().combat().getTargetGuid() == 0x8001);
     h.game().combat().tabTarget(me.x, me.y, me.z);
-    CHECK(h.game().getTargetGuid() == 0x8002);
+    CHECK(h.game().combat().getTargetGuid() == 0x8002);
 
     // A third, nearer than both, arrives in an update from the server.
     UpdateBlock block{};
@@ -136,7 +136,7 @@ TEST_CASE("Tab steps through enemies nearest first, and takes in one that has ju
 
     // From the farthest the list now goes round to the newcomer, nearest of all.
     h.game().combat().tabTarget(me.x, me.y, me.z);
-    CHECK(h.game().getTargetGuid() == 0x8003);
+    CHECK(h.game().combat().getTargetGuid() == 0x8003);
 }
 
 // ---- The player's death ----
@@ -340,4 +340,28 @@ TEST_CASE("the next character starts with none of the last one's death", "[comba
     CHECK(h.game().combat().getAreaSpiritHealerTime() == 0.0f);
     h.game().combat().queueAreaSpiritHeal();
     CHECK(h.countSent(Opcode::CMSG_AREA_SPIRIT_HEALER_QUEUE) == 0);
+}
+
+TEST_CASE("the server breaking off or clearing the target drops it, and only that one",
+          "[combat][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    for (const auto& unit : {hostileAt(h, 0x9001, 5.0f), hostileAt(h, 0x9002, 6.0f)})
+        h.game().getEntityManager().addEntity(unit->getGuid(), unit);
+    h.game().combat().setTarget(0x9001);
+    REQUIRE(h.game().combat().getTargetGuid() == 0x9001);
+
+    // SMSG_BREAK_TARGET names a unit by packed guid; another unit's leaves ours.
+    h.receive(Opcode::SMSG_BREAK_TARGET, Body().packedGuid(0x9002));
+    h.pump();
+    CHECK(h.game().combat().getTargetGuid() == 0x9001);
+    h.receive(Opcode::SMSG_BREAK_TARGET, Body().packedGuid(0x9001));
+    h.pump();
+    CHECK(h.game().combat().getTargetGuid() == 0);
+
+    // SMSG_CLEAR_TARGET with no guid clears whatever is targeted.
+    h.game().combat().setTarget(0x9002);
+    h.receive(Opcode::SMSG_CLEAR_TARGET, Body().u64(0));
+    h.pump();
+    CHECK(h.game().combat().getTargetGuid() == 0);
 }

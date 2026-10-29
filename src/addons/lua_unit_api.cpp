@@ -1936,7 +1936,7 @@ static int lua_Dismount(lua_State* L) {
 static int lua_StartAttack(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) return 0;
-    const uint64_t target = gh->getTargetGuid();
+    const uint64_t target = gh->combat().getTargetGuid();
     if (target != 0) gh->startAutoAttack(target);
     return 0;
 }
@@ -3330,7 +3330,7 @@ void registerUnitLuaAPI(lua_State* L) {
                 {"GetRestState",            lua_GetRestState},
                 {"HasFocus", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushboolean(L, gh && gh->hasFocus() ? 1 : 0);
+            lua_pushboolean(L, gh && gh->combat().hasFocus() ? 1 : 0);
             return 1;
         }},
     };

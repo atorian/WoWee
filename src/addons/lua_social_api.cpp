@@ -1253,7 +1253,7 @@ static int lua_OfferPetition(lua_State* L) {
     auto* gh = getGameHandler(L);
     const auto* info = shownPetition(L);
     if (!gh || !info) return 0;
-    const uint64_t target = gh->getTargetGuid();
+    const uint64_t target = gh->combat().getTargetGuid();
     if (target == 0) {
         gh->addUIError("You have no target.");
         return 0;
@@ -2534,7 +2534,7 @@ void registerSocialLuaAPI(lua_State* L) {
             const char* aimedAt = luaL_optstring(L, 2, "");
             uint64_t target = (aimedAt && *aimedAt) ? resolveUnitOrName(gh, aimedAt) : 0;
             if (target == 0 && (!aimedAt || !*aimedAt)) {
-                target = gh->hasTarget() ? gh->getTargetGuid() : 0;
+                target = gh->combat().hasTarget() ? gh->combat().getTargetGuid() : 0;
             }
             gh->chat().sendTextEmote(emoteId, target);
             // And the animation, which this did not do. Telling the server is
@@ -3093,11 +3093,11 @@ void registerSocialLuaAPI(lua_State* L) {
                 // A typed name that happens to be the target, which is what
                 // "/follow Bob" is when Bob is already selected.
                 [&] {
-                    std::string n = gh->entityController().lookupName(gh->getTargetGuid());
+                    std::string n = gh->entityController().lookupName(gh->combat().getTargetGuid());
                     toLowerInPlace(n);
                     return !n.empty() && n == who;
                 }();
-            if (meansTarget && gh->getTargetGuid() != 0) gh->movement().followTarget();
+            if (meansTarget && gh->combat().getTargetGuid() != 0) gh->movement().followTarget();
             return 0;
         }},
                 // Inspect and duel, both of which unitpopup.lua calls straight

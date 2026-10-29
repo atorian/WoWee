@@ -259,7 +259,7 @@ public:
             if (!srcEnt) { ctx.gameHandler.combat().assistTarget(); return; }
             const uint64_t atkGuid = game::unitTargetGuid(*srcEnt);
             if (atkGuid != 0) {
-                ctx.gameHandler.setTarget(atkGuid);
+                ctx.gameHandler.combat().setTarget(atkGuid);
             } else {
                 std::string sn = game::entityDisplayName(srcEnt);
                 game::MessageChatData msg;

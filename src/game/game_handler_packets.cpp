@@ -561,22 +561,7 @@ void GameHandler::registerCoreOpcodes() {
         packet.skipAll();
     };
 
-    // Combat clearing
-    dispatchTable_[Opcode::SMSG_BREAK_TARGET] = [this](network::Packet& packet) {
-        // Packed, not plain: Unit::BreakTarget sizes the packet with
-        // GetPackGUID().size() and writes GetPackGUID(). Read as a uint64 the
-        // guid never matched the target, so the target was never dropped.
-        if (packet.hasRemaining(1)) {
-            uint64_t bGuid = packet.readPackedGuid();
-            if (bGuid == targetGuid) targetGuid = 0;
-        }
-    };
-    dispatchTable_[Opcode::SMSG_CLEAR_TARGET] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(8)) {
-            uint64_t cGuid = packet.readUInt64();
-            if (cGuid == 0 || cGuid == targetGuid) targetGuid = 0;
-        }
-    };
+    // (SMSG_BREAK_TARGET, SMSG_CLEAR_TARGET → CombatHandler)
 
     // Mount/dismount
     dispatchTable_[Opcode::SMSG_DISMOUNT] = [this](network::Packet& packet) {

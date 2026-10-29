@@ -3698,19 +3698,19 @@ void MovementHandler::followTarget() {
         return;
     }
 
-    if (owner_.getTargetGuid() == 0) {
+    if (owner_.combat().getTargetGuid() == 0) {
         owner_.raiseUiError("You must target someone to follow.");
         return;
     }
 
-    auto target = owner_.getTarget();
+    auto target = owner_.combat().getTarget();
     if (!target) {
         owner_.raiseUiError("Invalid target.");
         return;
     }
 
     // Set follow target
-    owner_.followTargetGuidRef() = owner_.getTargetGuid();
+    owner_.followTargetGuidRef() = owner_.combat().getTargetGuid();
 
     // Initialize render-space position from entity's canonical coords
     owner_.followRenderPosRef() = core::coords::canonicalToRender(glm::vec3(target->getX(), target->getY(), target->getZ()));
@@ -3731,7 +3731,7 @@ void MovementHandler::followTarget() {
     }
 
     owner_.chat().addSystemChatMessage("Now following " + targetName + ".");
-    LOG_INFO("Following target: ", targetName, " (GUID: 0x", std::hex, owner_.getTargetGuid(), std::dec, ")");
+    LOG_INFO("Following target: ", targetName, " (GUID: 0x", std::hex, owner_.combat().getTargetGuid(), std::dec, ")");
     // The name goes with it: the status text is formatted from this argument,
     // and without one it formats a nil.
     owner_.fireAddonEvent("AUTOFOLLOW_BEGIN", {targetName});

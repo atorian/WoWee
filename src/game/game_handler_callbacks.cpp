@@ -615,9 +615,6 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     pendingGameObjectInteractGuid_ = 0;
     lastInteractedGoGuid_ = 0;
     combatHandler_->beginCharacter();
-    targetGuid = 0;
-    focusGuid = 0;
-    lastTargetGuid = 0;
     combatHandler_->invalidateTabCycle();
     entityController_->clearAll();
     accountDataHandler_->characterSelected(characterGuid);
@@ -1148,30 +1145,6 @@ void GameHandler::autoJoinDefaultChannels() {
     chatHandler_->autoJoinDefaultChannels();
 }
 
-void GameHandler::setTarget(uint64_t guid) {
-    combatHandler_->setTarget(guid);
-}
-
-void GameHandler::clearTarget() {
-    combatHandler_->clearTarget();
-}
-
-std::shared_ptr<Entity> GameHandler::getTarget() const {
-    return combatHandler_->getTarget();
-}
-
-void GameHandler::setFocus(uint64_t guid) {
-    combatHandler_->setFocus(guid);
-}
-
-void GameHandler::clearFocus() {
-    combatHandler_->clearFocus();
-}
-
-void GameHandler::setMouseoverGuid(uint64_t guid) {
-    combatHandler_->setMouseoverGuid(guid);
-}
-
 void GameHandler::faceCanonicalYaw(float canonicalYaw) {
     movementInfo.orientation = canonicalYaw;
 
@@ -1289,7 +1262,8 @@ bool GameHandler::shouldLogSpellstealAura(uint64_t casterGuid, uint64_t victimGu
 }
 
 const std::vector<GameHandler::ThreatEntry>* GameHandler::getTargetThreatList() const {
-    return targetGuid ? combatHandler_->getThreatList(targetGuid) : nullptr;
+    const uint64_t target = combatHandler_->getTargetGuid();
+    return target ? combatHandler_->getThreatList(target) : nullptr;
 }
 
 void GameHandler::confirmBinder() {
@@ -1439,7 +1413,7 @@ void GameHandler::despawnCreatureLocally(uint64_t guid) {
     entityManager.removeEntity(guid);
 
     if (guid == combatHandler_->getAutoAttackTargetGuid()) stopAutoAttack();
-    if (getTargetGuid() == guid) setTargetGuidRaw(0);
+    if (combatHandler_->getTargetGuid() == guid) combatHandler_->targetGone();
     combatHandler_->invalidateTabCycle();
 
     LOG_INFO("Locally despawned looted corpse: 0x", std::hex, guid, std::dec);
@@ -1458,7 +1432,7 @@ void GameHandler::despawnGameObjectLocally(uint64_t guid) {
     clearPendingGameObjectLootOpen(guid);
     if (lastInteractedGoGuid_ == guid) lastInteractedGoGuid_ = 0;
     if (pendingGameObjectInteractGuid_ == guid) pendingGameObjectInteractGuid_ = 0;
-    if (getTargetGuid() == guid) setTargetGuidRaw(0);
+    if (combatHandler_->getTargetGuid() == guid) combatHandler_->targetGone();
     combatHandler_->invalidateTabCycle();
 
     LOG_INFO("Locally despawned game object: 0x", std::hex, guid, std::dec);
@@ -1868,8 +1842,8 @@ Unit* GameHandler::getUnitByGuid(uint64_t guid) {
 
 std::string GameHandler::guidToUnitId(uint64_t guid) const {
     if (guid == playerGuid)      return "player";
-    if (guid == targetGuid)      return "target";
-    if (guid == focusGuid)       return "focus";
+    if (guid == combatHandler_->getTargetGuid()) return "target";
+    if (guid == combatHandler_->getFocusGuid())  return "focus";
     if (guid == petGuid()) return "pet";
     return {};
 }

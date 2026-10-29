@@ -2198,8 +2198,8 @@ void EntityController::handleDisplayIdChange(const UpdateBlock& block,
                         isDeadNow && !result.npcDeathNotified);
     if (owner_.hasAddonEventListener()) {
         std::string uid;
-        if (block.guid == owner_.getTargetGuid()) uid = "target";
-        else if (block.guid == owner_.focusGuidRef()) uid = "focus";
+        if (block.guid == owner_.combat().getTargetGuid()) uid = "target";
+        else if (block.guid == owner_.combat().getFocusGuid()) uid = "focus";
         else if (block.guid == owner_.petGuid()) uid = "pet";
         if (!uid.empty())
             pendingEvents_.emit("UNIT_MODEL_CHANGED", {uid});
@@ -2675,8 +2675,8 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
     if (data.guid == owner_.combat().getAutoAttackTargetGuid()) {
         owner_.stopAutoAttack();
     }
-    if (data.guid == owner_.getTargetGuid()) {
-        owner_.setTargetGuidRaw(0);
+    if (data.guid == owner_.combat().getTargetGuid()) {
+        owner_.combat().targetGone();
     }
     owner_.combat().removeHostileAttacker(data.guid);
 
@@ -2798,8 +2798,8 @@ void EntityController::handleNameQueryResponse(network::Packet& packet) {
         // Fire UNIT_NAME_UPDATE so nameplate/unit frame addons know the name is available
         if (owner_.hasAddonEventListener()) {
             std::string unitId;
-            if (data.guid == owner_.getTargetGuid()) unitId = "target";
-            else if (data.guid == owner_.focusGuidRef()) unitId = "focus";
+            if (data.guid == owner_.combat().getTargetGuid()) unitId = "target";
+            else if (data.guid == owner_.combat().getFocusGuid()) unitId = "focus";
             else if (data.guid == owner_.getPlayerGuid()) unitId = "player";
             if (!unitId.empty())
                 owner_.fireAddonEvent("UNIT_NAME_UPDATE", {unitId});

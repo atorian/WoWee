@@ -873,7 +873,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
     if (gameHandler.getState() != game::WorldState::IN_WORLD) return;
 
     // Reset mouseover each frame; we'll set it below when the cursor is over a nameplate
-    gameHandler.setMouseoverGuid(0);
+    gameHandler.combat().setMouseoverGuid(0);
 
     auto* appRenderer = services_.renderer;
     if (!appRenderer) return;
@@ -889,7 +889,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
     const glm::mat4 viewProj = camera->getProjectionMatrix() * camera->getViewMatrix();
     const glm::vec3 camPos   = camera->getPosition();
     const uint64_t  playerGuid = gameHandler.getPlayerGuid();
-    const uint64_t  targetGuid = gameHandler.getTargetGuid();
+    const uint64_t  targetGuid = gameHandler.combat().getTargetGuid();
 
     refreshQuestObjectiveCache(gameHandler);
     const auto& questKillEntries = minimapQuestCreatureEntries_;
@@ -1563,7 +1563,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
             float nx1 = hitRight;
             if (mouse.x >= nx0 && mouse.x <= nx1 && mouse.y >= ny0 && mouse.y <= ny1) {
                 // Track mouseover for [target=mouseover] macro conditionals
-                gameHandler.setMouseoverGuid(guid);
+                gameHandler.combat().setMouseoverGuid(guid);
                 // Hover tooltip: name, level/class, guild
                 ImGui::BeginTooltip();
                 ImGui::TextUnformatted(unitName.c_str());
@@ -1576,7 +1576,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                 if (!subLabel.empty()) ImGui::TextColored(ImVec4(0.7f,0.7f,0.7f,1.0f), "%s", subLabel.c_str());
                 ImGui::EndTooltip();
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                    gameHandler.setTarget(guid);
+                    gameHandler.combat().setTarget(guid);
                 } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
                     nameplateCtxGuid_ = guid;
                     nameplateCtxPos_  = mouse;
@@ -1644,9 +1644,9 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                     ImGui::Separator();
                 }
                 if (ImGui::MenuItem("Target"))
-                    gameHandler.setTarget(nameplateCtxGuid_);
+                    gameHandler.combat().setTarget(nameplateCtxGuid_);
                 if (ImGui::MenuItem("Set Focus"))
-                    gameHandler.setFocus(nameplateCtxGuid_);
+                    gameHandler.combat().setFocus(nameplateCtxGuid_);
                 bool isPlayer = entityPtr && entityPtr->getType() == game::ObjectType::PLAYER;
                 if (isPlayer && !ctxName.empty()) {
                     ImGui::Separator();
@@ -1660,7 +1660,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                     if (ImGui::MenuItem("Duel"))
                         if (auto* duels = services_.duels) duels->proposeDuel(nameplateCtxGuid_);
                     if (ImGui::MenuItem("Inspect")) {
-                        gameHandler.setTarget(nameplateCtxGuid_);
+                        gameHandler.combat().setTarget(nameplateCtxGuid_);
                         gameHandler.social().inspectTarget();
                         openInspectWindow(gameHandler);
                     }

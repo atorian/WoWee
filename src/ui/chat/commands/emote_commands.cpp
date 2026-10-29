@@ -156,7 +156,7 @@ public:
 class PetAttackCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        uint64_t target = ctx.gameHandler.hasTarget() ? ctx.gameHandler.getTargetGuid() : 0;
+        uint64_t target = ctx.gameHandler.combat().hasTarget() ? ctx.gameHandler.combat().getTargetGuid() : 0;
         pet::orNoPet(ctx.services.pet).sendPetAction(
             pet::packPetAction(pet::ActionType::Command, pet::kAttack), target);
         return {};

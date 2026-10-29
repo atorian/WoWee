@@ -236,7 +236,7 @@ void SpellPresentation::playImpactVisual(uint32_t spellId, uint64_t target) {
 }
 
 void SpellPresentation::launchRangedProjectile(uint32_t spellId, uint64_t target) {
-    if (target == 0) target = game_.getTargetGuid();
+    if (target == 0) target = game_.combat().getTargetGuid();
     if (target == 0 || !visuals_) return;
     auto* characters = renderer_.getCharacterRenderer();
     if (!characters) return;

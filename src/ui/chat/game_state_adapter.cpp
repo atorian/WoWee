@@ -15,10 +15,10 @@ GameStateAdapter::GameStateAdapter(game::GameHandler& gameHandler,
 
 // --- GUIDs ---
 uint64_t GameStateAdapter::getPlayerGuid() const { return gameHandler_.getPlayerGuid(); }
-uint64_t GameStateAdapter::getTargetGuid() const { return gameHandler_.getTargetGuid(); }
-uint64_t GameStateAdapter::getFocusGuid() const  { return gameHandler_.getFocusGuid(); }
+uint64_t GameStateAdapter::getTargetGuid() const { return gameHandler_.combat().getTargetGuid(); }
+uint64_t GameStateAdapter::getFocusGuid() const  { return gameHandler_.combat().getFocusGuid(); }
 uint64_t GameStateAdapter::getPetGuid() const    { return gameHandler_.petGuid(); }
-uint64_t GameStateAdapter::getMouseoverGuid() const { return gameHandler_.getMouseoverGuid(); }
+uint64_t GameStateAdapter::getMouseoverGuid() const { return gameHandler_.combat().getMouseoverGuid(); }
 
 // --- Player state ---
 bool GameStateAdapter::isInCombat() const  { return gameHandler_.combat().isInCombat(); }

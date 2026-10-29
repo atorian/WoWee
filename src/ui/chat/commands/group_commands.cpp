@@ -123,8 +123,8 @@ public:
 class MainTankCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (ctx.gameHandler.hasTarget()) {
-            group::orNoGroup(ctx.services.group).setMainTank(ctx.gameHandler.getTargetGuid());
+        if (ctx.gameHandler.combat().hasTarget()) {
+            group::orNoGroup(ctx.services.group).setMainTank(ctx.gameHandler.combat().getTargetGuid());
         } else {
             game::MessageChatData msg;
             msg.type = game::ChatType::SYSTEM;
@@ -142,8 +142,8 @@ public:
 class MainAssistCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (ctx.gameHandler.hasTarget()) {
-            group::orNoGroup(ctx.services.group).setMainAssist(ctx.gameHandler.getTargetGuid());
+        if (ctx.gameHandler.combat().hasTarget()) {
+            group::orNoGroup(ctx.services.group).setMainAssist(ctx.gameHandler.combat().getTargetGuid());
         } else {
             game::MessageChatData msg;
             msg.type = game::ChatType::SYSTEM;
@@ -336,7 +336,7 @@ public:
 class MarkCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (!ctx.gameHandler.hasTarget()) {
+        if (!ctx.gameHandler.combat().hasTarget()) {
             game::MessageChatData noTgt;
             noTgt.type = game::ChatType::SYSTEM;
             noTgt.language = game::ChatLanguage::UNIVERSAL;
@@ -356,7 +356,7 @@ public:
             std::string argLow = ui::chat_utils::toLower(ctx.args);
             while (!argLow.empty() && argLow.front() == ' ') argLow.erase(argLow.begin());
             if (argLow == "clear" || argLow == "0" || argLow == "none") {
-                group::orNoGroup(ctx.services.group).setRaidMark(ctx.gameHandler.getTargetGuid(), 0xFF);
+                group::orNoGroup(ctx.services.group).setRaidMark(ctx.gameHandler.combat().getTargetGuid(), 0xFF);
                 return {};
             }
             bool found = false;
@@ -380,7 +380,7 @@ public:
                 return {};
             }
         }
-        group::orNoGroup(ctx.services.group).setRaidMark(ctx.gameHandler.getTargetGuid(), icon);
+        group::orNoGroup(ctx.services.group).setRaidMark(ctx.gameHandler.combat().getTargetGuid(), icon);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"mark", "marktarget", "raidtarget"}; }

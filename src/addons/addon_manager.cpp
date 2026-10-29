@@ -1721,7 +1721,7 @@ void AddonManager::fireEvent(const std::string& event, const std::vector<std::st
     // this one had been diagnosed from readings taken when nothing was
     // selected, where correct and broken look identical.
     if (event == "PLAYER_TARGET_CHANGED" && !targetCheckRequested_ &&
-        gameHandler_ && gameHandler_->getTargetGuid() != 0) {
+        gameHandler_ && gameHandler_->combat().getTargetGuid() != 0) {
         targetCheckRequested_ = true;
         ui::frameXmlRequestCheck();
     }

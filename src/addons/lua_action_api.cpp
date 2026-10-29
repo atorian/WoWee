@@ -368,7 +368,7 @@ static int lua_IsActionInRange(lua_State* L) {
         lua_pushnil(L);
         return 1;
     }
-    return pushSpellRangeAnswer(L, gh, spellId, gh->getTargetGuid());
+    return pushSpellRangeAnswer(L, gh, spellId, gh->combat().getTargetGuid());
 }
 
 // GetActionInfo(slot) → actionType, id, subType
@@ -509,7 +509,7 @@ static int lua_UseAction(lua_State* L) {
         // unit is not treated as "cast on nobody" - a raid frame naming a
         // member who has gone out of range should still cast at the target
         // rather than silently at nothing.
-        uint64_t target = gh->hasTarget() ? gh->getTargetGuid() : 0;
+        uint64_t target = gh->combat().hasTarget() ? gh->combat().getTargetGuid() : 0;
         if (const char* unit = lua_tostring(L, 2); unit && *unit) {
             std::string uid(unit);
             toLowerInPlace(uid);
@@ -2868,10 +2868,10 @@ void registerActionLuaAPI(lua_State* L) {
         }},
                 {"PetAttack", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh && petOf(L).hasPet() && gh->hasTarget())
+            if (gh && petOf(L).hasPet() && gh->combat().hasTarget())
                 petOf(L).sendPetAction(
                     pet::packPetAction(pet::ActionType::Command, pet::kAttack),
-                    gh->getTargetGuid());
+                    gh->combat().getTargetGuid());
             return 0;
         }},
                 {"PetFollow", [](lua_State* L) -> int {
@@ -2913,7 +2913,7 @@ void registerActionLuaAPI(lua_State* L) {
                     target = resolveUnitGuid(gh, u);
                 }
                 if (target == 0)
-                    target = gh->hasTarget() ? gh->getTargetGuid() : petOf(L).getPetGuid();
+                    target = gh->combat().hasTarget() ? gh->combat().getTargetGuid() : petOf(L).getPetGuid();
                 petOf(L).sendPetAction(packed, target);
             }
             return 0;

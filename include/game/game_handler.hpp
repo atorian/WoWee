@@ -141,7 +141,6 @@ using WorldConnectFailureCallback = std::function<void(const std::string& reason
  * - Game packets
  */
 class GameHandler : public IConnectionState,
-                     public ITargetingState,
                      public IEntityAccess,
                      public PacketSender,
                      public FrameXmlEvents,
@@ -254,7 +253,7 @@ public:
 
     // InventoryQueries
     uint64_t characterGuid() const override { return getPlayerGuid(); }
-    uint64_t currentTargetGuid() const override { return getTargetGuid(); }
+    uint64_t currentTargetGuid() const override { return combatHandler_->getTargetGuid(); }
     const EntityManager& entities() const override { return getEntityManager(); }
     const FlatFieldMap& playerFields() const override { return lastPlayerFields_; }
     PacketParsers& packetParsers() override { return *packetParsers_; }
@@ -298,7 +297,7 @@ public:
     // already had under the same name (sendMovement, setStandState,
     // startAutoAttack, lootTarget, addCombatText, ...) are marked override
     // where they are declared.
-    uint64_t focusTargetGuid() const override { return focusGuid; }
+    uint64_t focusTargetGuid() const override { return combatHandler_->getFocusGuid(); }
     uint64_t petGuid() const override;
     pet::IPetFeed* petFeed() override;
     std::string unitIdFor(uint64_t guid) const override { return guidToUnitId(guid); }
@@ -688,23 +687,6 @@ public:
 
     // Inventory
     void markOnlineEquipmentDirty() override { inventoryHandler_->markOnlineEquipmentDirty(); }
-
-    // Targeting
-    void setTarget(uint64_t guid) override;
-    void clearTarget() override;
-    uint64_t getTargetGuid() const override { return targetGuid; }
-    std::shared_ptr<Entity> getTarget() const override;
-    bool hasTarget() const override { return targetGuid != 0; }
-
-    // Focus targeting
-    void setFocus(uint64_t guid) override;
-    void clearFocus() override;
-    uint64_t getFocusGuid() const override { return focusGuid; }
-    bool hasFocus() const override { return focusGuid != 0; }
-
-    // Mouseover targeting - set each frame by the nameplate renderer
-    void setMouseoverGuid(uint64_t guid) override;
-    uint64_t getMouseoverGuid() const override { return mouseoverGuid_; }
 
     using InspectArenaTeam = game::InspectArenaTeam;
 
@@ -1505,10 +1487,6 @@ public:
     const WeatherHandler& weather() const { return *weatherHandler_; }
 
     // ── Mutable Accessors for Members with Existing Const Getters ────
-    void setTargetGuidRaw(uint64_t g) { targetGuid = g; }
-    uint64_t& lastTargetGuidRef() { return lastTargetGuid; }
-    uint64_t& focusGuidRef() { return focusGuid; }
-    uint64_t& mouseoverGuidRef() { return mouseoverGuid_; }
     MovementInfo& movementInfoRef() { return movementInfo; }
 
     // ── Core / Session ───────────────────────────────────────────────
@@ -1899,12 +1877,6 @@ private:
     SpellDataResolver spellDataResolver_;
     RandomPropertyNameResolver randomPropertyNameResolver_;
     RandomStatResolver randomStatResolver_;
-
-    // Targeting
-    uint64_t targetGuid = 0;
-    uint64_t focusGuid = 0;              // Focus target
-    uint64_t lastTargetGuid = 0;         // Previous target
-    uint64_t mouseoverGuid_ = 0;         // Set each frame by nameplate renderer
 
     // Heartbeat
     uint32_t pingSequence = 0;               // Ping sequence number (increments)

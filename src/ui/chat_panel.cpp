@@ -287,8 +287,8 @@ void ChatPanel::sendChatMessage(game::GameHandler& gameHandler) {
         {
             std::string targetName;
             const std::string* targetNamePtr = nullptr;
-            if (gameHandler.hasTarget()) {
-                auto targetEntity = gameHandler.getTarget();
+            if (gameHandler.combat().hasTarget()) {
+                auto targetEntity = gameHandler.combat().getTarget();
                 if (targetEntity) {
                     targetName = game::entityDisplayName(targetEntity);
                     if (!targetName.empty()) targetNamePtr = &targetName;
@@ -304,7 +304,7 @@ void ChatPanel::sendChatMessage(game::GameHandler& gameHandler) {
 
                 uint32_t dbcId = gameHandler.emotes().dbcIdFor(cmdLower);
                 if (dbcId != 0) {
-                    uint64_t targetGuid = gameHandler.hasTarget() ? gameHandler.getTargetGuid() : 0;
+                    uint64_t targetGuid = gameHandler.combat().hasTarget() ? gameHandler.combat().getTargetGuid() : 0;
                     gameHandler.chat().sendTextEmote(dbcId, targetGuid);
                 }
 

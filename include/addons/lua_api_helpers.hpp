@@ -321,7 +321,7 @@ inline LuaServices* getLuaServices(lua_State* L) {
 inline uint64_t getEntityTargetGuid(game::GameHandler* gh, uint64_t guid) {
     if (guid == 0) return 0;
     // If asking for the player's target, use direct accessor
-    if (guid == gh->getPlayerGuid()) return gh->getTargetGuid();
+    if (guid == gh->getPlayerGuid()) return gh->combat().getTargetGuid();
     auto entity = gh->getEntityManager().getEntity(guid);
     if (!entity) return 0;
     const auto& fields = entity->getFields();
@@ -337,9 +337,9 @@ inline uint64_t getEntityTargetGuid(game::GameHandler* gh, uint64_t guid) {
 // Resolve WoW unit IDs to GUID
 inline uint64_t resolveUnitGuid(game::GameHandler* gh, const std::string& uid) {
     if (uid == "player")      return gh->getPlayerGuid();
-    if (uid == "target")      return gh->getTargetGuid();
-    if (uid == "focus")       return gh->getFocusGuid();
-    if (uid == "mouseover")   return gh->getMouseoverGuid();
+    if (uid == "target")      return gh->combat().getTargetGuid();
+    if (uid == "focus")       return gh->combat().getFocusGuid();
+    if (uid == "mouseover")   return gh->combat().getMouseoverGuid();
     if (uid == "pet")         return gh->petGuid();
     // The NPC whose window is open, which is how FrameXML titles three of
     // them: GossipFrameNpcNameText and BankFrameTitleText both read
@@ -358,13 +358,13 @@ inline uint64_t resolveUnitGuid(game::GameHandler* gh, const std::string& uid) {
         if (gh->quests().getQuestDetails().npcGuid != 0)  return gh->quests().getQuestDetails().npcGuid;
         if (gh->inventory().getVendorGuid() != 0) return gh->inventory().getVendorGuid();
         if (gh->inventory().getBankerGuid() != 0) return gh->inventory().getBankerGuid();
-        return gh->getTargetGuid();
+        return gh->combat().getTargetGuid();
     }
     // Compound unit IDs: targettarget, focustarget, pettarget, mouseovertarget
-    if (uid == "targettarget")    return getEntityTargetGuid(gh, gh->getTargetGuid());
-    if (uid == "focustarget")     return getEntityTargetGuid(gh, gh->getFocusGuid());
+    if (uid == "targettarget")    return getEntityTargetGuid(gh, gh->combat().getTargetGuid());
+    if (uid == "focustarget")     return getEntityTargetGuid(gh, gh->combat().getFocusGuid());
     if (uid == "pettarget")       return getEntityTargetGuid(gh, gh->petGuid());
-    if (uid == "mouseovertarget") return getEntityTargetGuid(gh, gh->getMouseoverGuid());
+    if (uid == "mouseovertarget") return getEntityTargetGuid(gh, gh->combat().getMouseoverGuid());
     // party1-party4, raid1-raid40
     if (uid.rfind("party", 0) == 0 && uid.size() > 5) {
         int idx = 0;

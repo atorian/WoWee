@@ -104,10 +104,19 @@ public:
     [[nodiscard]] bool isSelectableUnit(uint64_t guid) const;
     void setTarget(uint64_t guid);
     void clearTarget();
+    [[nodiscard]] uint64_t getTargetGuid() const { return targetGuid_; }
+    [[nodiscard]] bool hasTarget() const { return targetGuid_ != 0; }
+    /// The target left view, was destroyed or looted away: forget it without
+    /// telling the server or the interface, which see it go on their own.
+    void targetGone() { targetGuid_ = 0; }
     [[nodiscard]] std::shared_ptr<Entity> getTarget() const;
     void setFocus(uint64_t guid);
     void clearFocus();
+    [[nodiscard]] uint64_t getFocusGuid() const { return focusGuid_; }
+    [[nodiscard]] bool hasFocus() const { return focusGuid_ != 0; }
+    /// Set each frame by the nameplate renderer.
     void setMouseoverGuid(uint64_t guid);
+    [[nodiscard]] uint64_t getMouseoverGuid() const { return mouseoverGuid_; }
     void targetLastTarget();
     void targetEnemy(bool reverse);
     void targetFriend(bool reverse);
@@ -217,8 +226,14 @@ public:
 
     // State management (for resets, entity cleanup)
     void resetAllCombatState();
-    /// A character is being logged in: nothing of the last one's death stands.
-    void beginCharacter() { death_ = {}; }
+    /// A character is being logged in: nothing of the last one's death or
+    /// targets stands.
+    void beginCharacter() {
+        death_ = {};
+        targetGuid_ = 0;
+        focusGuid_ = 0;
+        lastTargetGuid_ = 0;
+    }
     void removeHostileAttacker(uint64_t guid);
     void clearCombatText();
     void removeCombatTextForGuid(uint64_t guid);
@@ -233,6 +248,11 @@ private:
     // this one rather than this one.
     uint64_t lastEnemyTargetGuid_ = 0;
     uint64_t lastFriendTargetGuid_ = 0;
+    uint64_t targetGuid_ = 0;
+    uint64_t focusGuid_ = 0;
+    /// What targetLastTarget flips back to.
+    uint64_t lastTargetGuid_ = 0;
+    uint64_t mouseoverGuid_ = 0;
 
     /// The walk both cycles do: everything alive within range that `wanted`
     /// accepts, nearest first, then step to the next one past the current

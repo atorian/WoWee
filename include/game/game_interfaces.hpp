@@ -37,28 +37,6 @@ public:
 };
 
 // ---------------------------------------------------------------------------
-// ITargetingState - target, focus, and mouseover management
-// ---------------------------------------------------------------------------
-class ITargetingState {
-public:
-    virtual ~ITargetingState() = default;
-
-    virtual void setTarget(uint64_t guid) = 0;
-    virtual void clearTarget() = 0;
-    [[nodiscard]] virtual uint64_t getTargetGuid() const = 0;
-    [[nodiscard]] virtual std::shared_ptr<Entity> getTarget() const = 0;
-    [[nodiscard]] virtual bool hasTarget() const = 0;
-
-    virtual void setFocus(uint64_t guid) = 0;
-    virtual void clearFocus() = 0;
-    [[nodiscard]] virtual uint64_t getFocusGuid() const = 0;
-    [[nodiscard]] virtual bool hasFocus() const = 0;
-
-    virtual void setMouseoverGuid(uint64_t guid) = 0;
-    [[nodiscard]] virtual uint64_t getMouseoverGuid() const = 0;
-};
-
-// ---------------------------------------------------------------------------
 // IEntityAccess - entity queries and name/info caching
 // ---------------------------------------------------------------------------
 class IEntityAccess {

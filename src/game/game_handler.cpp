@@ -847,8 +847,9 @@ void GameHandler::updateGame(float deltaTime) {
         state == WorldState::FAILED || movementHandler_->hasPendingWorldTransfer()) return;
 
     // Validate target still exists
-    if (targetGuid != 0 && !entityController_->getEntityManager().hasEntity(targetGuid)) {
-        clearTarget();
+    if (const uint64_t target = combatHandler_->getTargetGuid();
+        target != 0 && !entityController_->getEntityManager().hasEntity(target)) {
+        combatHandler_->clearTarget();
     }
 
     // Update auto-follow: refresh render position or cancel if entity disappeared

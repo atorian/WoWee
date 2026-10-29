@@ -73,7 +73,7 @@ public:
 
         // If conditionals resolved to a specific GUID, target it directly
         if (targetCmdOverride != static_cast<uint64_t>(-1) && targetCmdOverride != 0) {
-            ctx.gameHandler.setTarget(targetCmdOverride);
+            ctx.gameHandler.combat().setTarget(targetCmdOverride);
             return {};
         }
 
@@ -84,7 +84,7 @@ public:
 
         uint64_t bestGuid = findNearestByName(ctx.gameHandler, targetArgLower);
         if (bestGuid) {
-            ctx.gameHandler.setTarget(bestGuid);
+            ctx.gameHandler.combat().setTarget(bestGuid);
         } else {
             game::MessageChatData sysMsg;
             sysMsg.type = game::ChatType::SYSTEM;
@@ -112,7 +112,7 @@ public:
                 condPass = !(res.empty() && ctOver == static_cast<uint64_t>(-1));
             }
         }
-        if (condPass) ctx.gameHandler.clearTarget();
+        if (condPass) ctx.gameHandler.combat().clearTarget();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"cleartarget"}; }
@@ -190,13 +190,13 @@ public:
             }
 
             if (focusCmdOverride != static_cast<uint64_t>(-1) && focusCmdOverride != 0) {
-                ctx.gameHandler.setFocus(focusCmdOverride);
+                ctx.gameHandler.combat().setFocus(focusCmdOverride);
             } else if (!focusArg.empty()) {
                 std::string focusArgLower = focusArg;
                 for (char& c : focusArgLower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                 uint64_t bestGuid = findNearestByName(ctx.gameHandler, focusArgLower);
                 if (bestGuid) {
-                    ctx.gameHandler.setFocus(bestGuid);
+                    ctx.gameHandler.combat().setFocus(bestGuid);
                 } else {
                     game::MessageChatData msg;
                     msg.type = game::ChatType::SYSTEM;
@@ -205,8 +205,8 @@ public:
                     ctx.gameHandler.addLocalChatMessage(msg);
                 }
             }
-        } else if (ctx.gameHandler.hasTarget()) {
-            ctx.gameHandler.setFocus(ctx.gameHandler.getTargetGuid());
+        } else if (ctx.gameHandler.combat().hasTarget()) {
+            ctx.gameHandler.combat().setFocus(ctx.gameHandler.combat().getTargetGuid());
         } else {
             game::MessageChatData msg;
             msg.type = game::ChatType::SYSTEM;
@@ -224,7 +224,7 @@ public:
 class ClearFocusCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.clearFocus();
+        ctx.gameHandler.combat().clearFocus();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"clearfocus"}; }

@@ -218,6 +218,21 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
     };
 
     // ---- Combat clearing ----
+    table[Opcode::SMSG_BREAK_TARGET] = [this](network::Packet& packet) {
+        // Packed, not plain: Unit::BreakTarget sizes the packet with
+        // GetPackGUID().size() and writes GetPackGUID(). Read as a uint64 the
+        // guid never matched the target, so the target was never dropped.
+        if (packet.hasRemaining(1)) {
+            uint64_t bGuid = packet.readPackedGuid();
+            if (bGuid == targetGuid_) targetGuid_ = 0;
+        }
+    };
+    table[Opcode::SMSG_CLEAR_TARGET] = [this](network::Packet& packet) {
+        if (packet.hasRemaining(8)) {
+            uint64_t cGuid = packet.readUInt64();
+            if (cGuid == 0 || cGuid == targetGuid_) targetGuid_ = 0;
+        }
+    };
     table[Opcode::SMSG_ATTACKSWING_DEADTARGET] = [this](network::Packet& /*packet*/) {
         autoAttacking_ = false;
         autoAttackTarget_ = 0;
@@ -565,7 +580,7 @@ void CombatHandler::addCombatText(CombatTextEntry::Type type, int32_t amount, ui
     // lives in combat_text_filter.hpp so it can be tested without a settings
     // store; only the lookup is here.
     const auto rule = combatTextFilterFor(type, isPlayerSource, srcGuid, dstGuid,
-                                          owner_.petGuid(), owner_.getTargetGuid());
+                                          owner_.petGuid(), targetGuid_);
     if (rule.cvar && cvars_.get(rule.cvar, rule.fallback) == "0") return;
 
     CombatTextEntry entry;
@@ -639,9 +654,9 @@ void CombatHandler::addCombatText(CombatTextEntry::Type type, int32_t amount, ui
     // preserve "unknown/no source" (e.g. environmental damage) instead of
     // backfilling from current target.
     uint64_t effectiveSrc = (srcGuid != 0) ? srcGuid
-                          : ((dstGuid != 0) ? 0 : (isPlayerSource ? owner_.getPlayerGuid() : owner_.getTargetGuid()));
+                          : ((dstGuid != 0) ? 0 : (isPlayerSource ? owner_.getPlayerGuid() : targetGuid_));
     uint64_t effectiveDst = (dstGuid != 0) ? dstGuid
-                          : (isPlayerSource ? owner_.getTargetGuid() : owner_.getPlayerGuid());
+                          : (isPlayerSource ? targetGuid_ : owner_.getPlayerGuid());
     log.sourceName = owner_.entityController().lookupName(effectiveSrc);
     log.targetName = (effectiveDst != 0) ? owner_.entityController().lookupName(effectiveDst) : std::string{};
     // Held for the addon event below. log is moved into combatLog_ here, which
@@ -723,9 +738,9 @@ void CombatHandler::updateCombatText(float deltaTime) {
 
 void CombatHandler::autoTargetAttacker(uint64_t attackerGuid) {
     if (attackerGuid == 0 || attackerGuid == owner_.getPlayerGuid()) return;
-    if (owner_.getTargetGuid() != 0) return;
+    if (targetGuid_ != 0) return;
     if (!owner_.getEntityManager().hasEntity(attackerGuid)) return;
-    owner_.setTarget(attackerGuid);
+    setTarget(attackerGuid);
 }
 
 void CombatHandler::handleAttackStart(network::Packet& packet) {
@@ -1331,7 +1346,7 @@ bool CombatHandler::isSelectableUnit(uint64_t guid) const {
 }
 
 void CombatHandler::setTarget(uint64_t guid) {
-    if (guid == owner_.getTargetGuid()) return;
+    if (guid == targetGuid_) return;
     // Looted-out, unskinnable corpses cannot be selected.
     if (!isSelectableUnit(guid)) return;
 
@@ -1339,9 +1354,9 @@ void CombatHandler::setTarget(uint64_t guid) {
     // what TargetLastTarget flips back to, and once under its kind, which is
     // what makes TargetLastEnemy and TargetLastFriend worth having: a healer's
     // last friendly target survives half a fight's worth of tab-targeting.
-    if (owner_.getTargetGuid() != 0) {
-        const uint64_t previous = owner_.getTargetGuid();
-        owner_.lastTargetGuidRef() = previous;
+    if (targetGuid_ != 0) {
+        const uint64_t previous = targetGuid_;
+        lastTargetGuid_ = previous;
         auto entity = owner_.getEntityManager().getEntity(previous);
         if (auto* unit = dynamic_cast<Unit*>(entity.get())) {
             if (unit->isHostile() || isAggressiveTowardPlayer(previous)) {
@@ -1359,12 +1374,12 @@ void CombatHandler::setTarget(uint64_t guid) {
     // Only when the target actually changes, and only when something is being
     // swung at: re-selecting the same unit is not a change, and stopping an
     // attack nobody started would send a cancel for nothing.
-    if (guid != owner_.getTargetGuid() && autoAttacking_ &&
+    if (guid != targetGuid_ && autoAttacking_ &&
         cvars_.get("stopAutoAttackOnTargetChange", "0") != "0") {
         stopAutoAttack();
     }
 
-    owner_.setTargetGuidRaw(guid);
+    targetGuid_ = guid;
 
     // Clear stale aura data from the previous target so the buff bar shows
     // an empty state until the server sends SMSG_AURA_UPDATE_ALL for the new target.
@@ -1403,27 +1418,27 @@ void CombatHandler::setTarget(uint64_t guid) {
 }
 
 void CombatHandler::clearTarget() {
-    if (owner_.getTargetGuid() != 0) {
+    if (targetGuid_ != 0) {
         LOG_INFO("Target cleared");
         // Zero the GUID before firing the event so callbacks/addons that query
         // the current target see null (consistent with setTarget which updates
         // targetGuid before the event).
-        owner_.setTargetGuidRaw(0);
+        targetGuid_ = 0;
         frameXml_.fireFrameXmlEvent("PLAYER_TARGET_CHANGED", {});
     } else {
-        owner_.setTargetGuidRaw(0);
+        targetGuid_ = 0;
     }
     tabCycleIndex_ = -1;
     tabCycleStale_ = true;
 }
 
 std::shared_ptr<Entity> CombatHandler::getTarget() const {
-    if (owner_.getTargetGuid() == 0) return nullptr;
-    return owner_.getEntityManager().getEntity(owner_.getTargetGuid());
+    if (targetGuid_ == 0) return nullptr;
+    return owner_.getEntityManager().getEntity(targetGuid_);
 }
 
 void CombatHandler::setFocus(uint64_t guid) {
-    owner_.focusGuidRef() = guid;
+    focusGuid_ = guid;
     frameXml_.fireFrameXmlEvent("PLAYER_FOCUS_CHANGED", {});
     if (guid != 0) {
         auto entity = owner_.getEntityManager().getEntity(guid);
@@ -1442,31 +1457,31 @@ void CombatHandler::setFocus(uint64_t guid) {
 }
 
 void CombatHandler::clearFocus() {
-    if (owner_.focusGuidRef() != 0) {
+    if (focusGuid_ != 0) {
         chat_.addSystemChatMessage("Focus cleared.");
         LOG_INFO("Focus cleared");
     }
-    owner_.focusGuidRef() = 0;
+    focusGuid_ = 0;
     frameXml_.fireFrameXmlEvent("PLAYER_FOCUS_CHANGED", {});
 }
 
 void CombatHandler::setMouseoverGuid(uint64_t guid) {
-    if (owner_.mouseoverGuidRef() != guid) {
-        owner_.mouseoverGuidRef() = guid;
+    if (mouseoverGuid_ != guid) {
+        mouseoverGuid_ = guid;
         frameXml_.fireFrameXmlEvent("UPDATE_MOUSEOVER_UNIT", {});
     }
 }
 
 void CombatHandler::targetLastTarget() {
-    if (owner_.lastTargetGuidRef() == 0) {
+    if (lastTargetGuid_ == 0) {
         chat_.addSystemChatMessage("No previous target.");
         return;
     }
 
     // Swap current and last target
-    uint64_t temp = owner_.getTargetGuid();
-    setTarget(owner_.lastTargetGuidRef());
-    owner_.lastTargetGuidRef() = temp;
+    uint64_t temp = targetGuid_;
+    setTarget(lastTargetGuid_);
+    lastTargetGuid_ = temp;
 }
 
 void CombatHandler::cycleTarget(bool reverse, const char* noneMessage,
@@ -1503,7 +1518,7 @@ void CombatHandler::cycleTarget(bool reverse, const char* noneMessage,
     for (const auto& c : cands) order.push_back(c.guid);
 
     // Not on the list: start at the near end, or the far one going backwards.
-    auto it = std::find(order.begin(), order.end(), owner_.getTargetGuid());
+    auto it = std::find(order.begin(), order.end(), targetGuid_);
     if (it == order.end()) {
         setTarget(reverse ? order.back() : order.front());
         return;
@@ -1675,7 +1690,7 @@ void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
     // the cycle from its position so tab advances to the NEXT enemy instead of
     // jumping back to wherever the old rotation left off.
     {
-        const uint64_t curTarget = owner_.getTargetGuid();
+        const uint64_t curTarget = targetGuid_;
         if (curTarget != 0) {
             const auto& list = tabCycleList_;
             for (size_t i = 0; i < list.size(); ++i) {
@@ -1711,7 +1726,7 @@ void CombatHandler::assistTarget() {
         return;
     }
 
-    if (owner_.getTargetGuid() == 0) {
+    if (targetGuid_ == 0) {
         raiseUiError(events_, frameXml_, "You must target someone to assist.");
         return;
     }
