@@ -326,7 +326,7 @@ TEST_CASE("a new map scope is shown every object already in view, once, without 
     });
     h.server().clearSent();
 
-    h.game().getEntityController()->announceObjectsInView();
+    h.game().entityController().announceObjectsInView();
 
     std::sort(creatures.begin(), creatures.end());
     CHECK(creatures == std::vector<uint64_t>{creature->getGuid(), corpse->getGuid()});
@@ -349,7 +349,7 @@ TEST_CASE("an empty view announces nothing, and the local player is never presen
     h.game().setPlayerSpawnCallback([&](uint64_t, uint32_t, uint8_t, uint8_t, uint32_t, uint8_t,
                                         float, float, float, float) { ++spawns; });
     h.game().setCreatureSpawnCallback([&](uint64_t, uint32_t, float, float, float, float, float) { ++spawns; });
-    h.game().getEntityController()->announceObjectsInView();
+    h.game().entityController().announceObjectsInView();
     CHECK(spawns == 0);
 }
 

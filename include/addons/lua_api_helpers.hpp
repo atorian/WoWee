@@ -536,7 +536,7 @@ inline uint8_t unitRaceOf(game::GameHandler* gh, const std::string& lowerUid) {
             entity->getField(game::fieldIndex(game::UF::UNIT_FIELD_BYTES_0));
         raceId = static_cast<uint8_t>(bytes0 & 0xFF);
     }
-    if (raceId == 0) raceId = gh->lookupPlayerRace(guid);
+    if (raceId == 0) raceId = gh->entityController().lookupPlayerRace(guid);
     return raceId;
 }
 

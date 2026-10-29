@@ -43,7 +43,7 @@ public:
                 if (i<2) block.fields[game::fieldIndex(game::UF::UNIT_FIELD_MOUNTDISPLAYID)]=2409;
                 source.blocks.push_back(std::move(block));
             }
-            game->getEntityController()->applyRecordedObjects(source);
+            game->entityController().applyRecordedObjects(source);
             const auto items=app_.getAssetManager()->loadDBC("ItemDisplayInfo.dbc");
             uint32_t weapon=0;
             if (items) for (uint32_t row=0;row<items->getRecordCount();++row) {
@@ -73,7 +73,7 @@ public:
         if (!removed_ && elapsed>6) {
             removed_=true;
             game::UpdateObjectData gone{}; gone.outOfRangeGuids={first_+7};
-            game->getEntityController()->applyRecordedObjects(gone);
+            game->entityController().applyRecordedObjects(gone);
             std::puts("SCENE FIXTURE: one real player despawned");
         }
         if (!emoted_ && elapsed>7) {

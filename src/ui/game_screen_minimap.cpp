@@ -689,7 +689,7 @@ void GameScreen::renderMinimapRares(const MinimapFrame& frame, const EntityList&
             auto unit = std::static_pointer_cast<game::Unit>(entity);
             if (!unit || unit->getHealth() == 0) continue;
 
-            const int rank = gameHandler.getCreatureRank(unit->getEntry());
+            const int rank = gameHandler.entityController().getCreatureRank(unit->getEntry());
             if (rank != 2 && rank != 4) continue; // 2 = Rare Elite, 4 = Rare
 
             float sx = 0.0f, sy = 0.0f;

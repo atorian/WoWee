@@ -469,8 +469,8 @@ void CombatHandler::addCombatText(CombatTextEntry::Type type, int32_t amount, ui
                           : ((dstGuid != 0) ? 0 : (isPlayerSource ? owner_.getPlayerGuid() : owner_.getTargetGuid()));
     uint64_t effectiveDst = (dstGuid != 0) ? dstGuid
                           : (isPlayerSource ? owner_.getTargetGuid() : owner_.getPlayerGuid());
-    log.sourceName = owner_.lookupName(effectiveSrc);
-    log.targetName = (effectiveDst != 0) ? owner_.lookupName(effectiveDst) : std::string{};
+    log.sourceName = owner_.entityController().lookupName(effectiveSrc);
+    log.targetName = (effectiveDst != 0) ? owner_.entityController().lookupName(effectiveDst) : std::string{};
     // Held for the addon event below. log is moved into combatLog_ here, which
     // leaves both name strings empty, so reading them afterwards sent every
     // COMBAT_LOG_EVENT_UNFILTERED to Lua with a blank source and target.
@@ -1267,7 +1267,7 @@ void CombatHandler::setFocus(uint64_t guid) {
             if (unit && !unit->getName().empty()) {
                 name = unit->getName();
             }
-            if (name.empty()) name = owner_.lookupName(guid);
+            if (name.empty()) name = owner_.entityController().lookupName(guid);
             if (name.empty()) name = "Unknown";
             owner_.chat().addSystemChatMessage("Focus set: " + name);
             LOG_INFO("Focus set: 0x", std::hex, guid, std::dec);
@@ -1747,7 +1747,7 @@ void CombatHandler::handleXpGain(network::Packet& packet) {
 
     std::string msg;
     if (data.victimGuid != 0 && data.type == 0) {
-        std::string victimName = owner_.lookupName(data.victimGuid);
+        std::string victimName = owner_.entityController().lookupName(data.victimGuid);
         if (!victimName.empty())
             msg = victimName + " dies, you gain " + std::to_string(data.totalXp) + " experience.";
         else

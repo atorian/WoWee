@@ -1322,10 +1322,6 @@ uint32_t GameHandler::getCreatureDisplayIdForEntry(uint32_t entry) {
     return 0;
 }
 
-void GameHandler::queryGameObjectInfo(uint32_t entry, uint64_t guid) {
-    entityController_->queryGameObjectInfo(entry, guid);
-}
-
 std::string GameHandler::getCachedPlayerName(uint64_t guid) const {
     return entityController_->getCachedPlayerName(guid);
 }

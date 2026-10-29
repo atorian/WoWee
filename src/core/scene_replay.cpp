@@ -297,7 +297,7 @@ void SceneReplay::beforeGame(Application& app) {
         for (const auto& field : object.at("fields")) block.fields[field.at(0).get<uint16_t>()]=field.at(1);
         update.blocks.push_back(std::move(block));
     }
-    if (s.appliedSample != s.sample) app.gameHandler->getEntityController()->applyRecordedObjects(update);
+    if (s.appliedSample != s.sample) app.gameHandler->entityController().applyRecordedObjects(update);
     game::UpdateObjectData objectMotion;
     for (const auto& pose : frame.at("poses")) {
         const uint64_t guid = pose.at(0);
@@ -321,7 +321,7 @@ void SceneReplay::beforeGame(Application& app) {
             }
         } else { throw std::runtime_error("scene pose refers to absent entity " + std::to_string(guid)); }
     }
-    if (!objectMotion.blocks.empty()) app.gameHandler->getEntityController()->applyRecordedObjects(objectMotion);
+    if (!objectMotion.blocks.empty()) app.gameHandler->entityController().applyRecordedObjects(objectMotion);
     const auto applyGear = [&app,&s](const Json& value) {
         const uint64_t guid=value.at("guid");
         if (guid==app.gameHandler->getPlayerGuid() || !app.gameHandler->getEntityManager().hasEntity(guid)) {
@@ -408,7 +408,7 @@ void SceneReplay::toggleCapture(Application& app) {
             {"limitations",{"Existing transient spell particles and animation phase are not keyframed; interface and network load are not replayed. Compare scene counters and control images before accepting an A/B."}}};
         auto character=*app.gameHandler->getActiveCharacter();
         uint8_t race=0,gender=0,facial=0; uint32_t appearance=0;
-        if (app.gameHandler->getEntityController()->getPlayerAppearance(character.guid,race,gender,appearance,facial)) {
+        if (app.gameHandler->entityController().getPlayerAppearance(character.guid,race,gender,appearance,facial)) {
             character.race=static_cast<game::Race>(race); character.gender=static_cast<game::Gender>(gender);
             character.appearanceBytes=appearance; character.facialFeatures=facial;
         }

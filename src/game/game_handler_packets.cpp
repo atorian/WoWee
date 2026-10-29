@@ -433,7 +433,7 @@ void GameHandler::registerCoreOpcodes() {
         // Who is asking. StaticPopup_Show("CONFIRM_BINDER", arg1) puts the name
         // into "Do you want to make <name> your new home?" - without it the
         // question had a hole where the innkeeper should be.
-        fireAddonEvent("CONFIRM_BINDER", {lookupName(binderGuid_)});
+        fireAddonEvent("CONFIRM_BINDER", {entityController_->lookupName(binderGuid_)});
     };
     registerSkipHandler(Opcode::SMSG_SET_PHASE_SHIFT);
     dispatchTable_[Opcode::SMSG_TOGGLE_XP_GAIN] = [this](network::Packet& packet) {
@@ -875,7 +875,7 @@ void GameHandler::registerCoreOpcodes() {
         resurrectIsSpiritHealer_ = false;
         resurrectHasSickness_ = sickness;
         resurrectHasTimer_ = hasTimer;
-        resurrectCasterName_ = casterName.empty() ? lookupName(casterGuid) : casterName;
+        resurrectCasterName_ = casterName.empty() ? entityController_->lookupName(casterGuid) : casterName;
         resurrectRequestPending_ = true;
         fireAddonEvent("RESURRECT_REQUEST", {resurrectCasterName_});
     };
@@ -1371,7 +1371,7 @@ void GameHandler::registerRemainingOpcodes() {
             // Show enchant message if the player is involved
             if (enchTargetGuid == playerGuid || enchCasterGuid == playerGuid) {
                 const std::string& enchName = spellHandler_->getSpellName(enchSpellId);
-                std::string casterName = lookupName(enchCasterGuid);
+                std::string casterName = entityController_->lookupName(enchCasterGuid);
                 if (!enchName.empty()) {
                     std::string msg;
                     if (enchCasterGuid == playerGuid)
@@ -1596,7 +1596,7 @@ void GameHandler::registerRemainingOpcodes() {
         // uint64 memberGuid - a player was added to your group via meeting stone
         if (packet.hasRemaining(8)) {
             uint64_t memberGuid = packet.readUInt64();
-            const auto& memberName = lookupName(memberGuid);
+            const auto& memberName = entityController_->lookupName(memberGuid);
             if (!memberName.empty()) {
                 chatHandler_->addSystemChatMessage("Meeting Stone: " + memberName +
                                      " has been added to your group.");
@@ -2197,7 +2197,7 @@ void GameHandler::registerRemainingOpcodes() {
             std::string mentorName;
             auto ent = entityController_->getEntityManager().getEntity(mentorGuid);
             if (auto* unit = dynamic_cast<Unit*>(ent.get())) mentorName = unit->getName();
-            if (mentorName.empty()) mentorName = lookupName(mentorGuid);
+            if (mentorName.empty()) mentorName = entityController_->lookupName(mentorGuid);
             chatHandler_->addSystemChatMessage(mentorName.empty()
                 ? "A player is offering to grant you a level."
                 : (mentorName + " is offering to grant you a level."));

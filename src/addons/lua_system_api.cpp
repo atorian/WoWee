@@ -2865,7 +2865,7 @@ static int lua_GetBattlefieldPosition(lua_State* L) {
             svc->mapUVForWorldPos(p->wowX, p->wowY, 0.0f, u, v)) {
             lua_pushnumber(L, u);
             lua_pushnumber(L, v);
-            lua_pushstring(L, gh->lookupName(p->guid).c_str());
+            lua_pushstring(L, gh->entityController().lookupName(p->guid).c_str());
             return 3;
         }
     }
@@ -7533,7 +7533,7 @@ void registerSystemLuaAPI(lua_State* L) {
             if (ev.eventId == 0) return 0;
             lua_pushstring(L, ev.title.c_str());
             lua_pushstring(L, ev.description.c_str());
-            lua_pushstring(L, gh->lookupName(ev.creatorGuid).c_str());
+            lua_pushstring(L, gh->entityController().lookupName(ev.creatorGuid).c_str());
             lua_pushnumber(L, ev.type + 1);          // wire counts from zero
             lua_pushnumber(L, ev.repeatOption + 1);  // and so does this
             lua_pushnumber(L, ev.maxInvites);
@@ -7614,7 +7614,7 @@ void registerSystemLuaAPI(lua_State* L) {
             const auto& list = calendarOf(L).getCalendarEventDetail().invitees;
             if (index < 1 || static_cast<size_t>(index) > list.size()) return 0;
             const auto& inv = list[static_cast<size_t>(index) - 1];
-            lua_pushstring(L, gh->lookupName(inv.guid).c_str());
+            lua_pushstring(L, gh->entityController().lookupName(inv.guid).c_str());
             lua_pushnumber(L, inv.level);
             lua_pushstring(L, "");              // className
             lua_pushstring(L, "");              // classFilename

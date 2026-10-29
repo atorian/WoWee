@@ -893,7 +893,7 @@ void ToastManager::renderPlayerLevelUpToasts(game::GameHandler& gameHandler) {
         t.age += dt;
         // Lazy name resolution - fill in once the name cache has it
         if (t.playerName.empty() && t.guid != 0) {
-            t.playerName = gameHandler.lookupName(t.guid);
+            t.playerName = gameHandler.entityController().lookupName(t.guid);
         }
     }
     playerLevelUpToasts_.erase(

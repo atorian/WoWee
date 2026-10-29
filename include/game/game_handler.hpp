@@ -251,7 +251,7 @@ public:
     const EntityManager& entities() const override { return getEntityManager(); }
     const FlatFieldMap& playerFields() const override { return lastPlayerFields_; }
     PacketParsers& packetParsers() override { return *packetParsers_; }
-    std::string playerName(uint64_t guid) const override { return lookupName(guid); }
+    std::string playerName(uint64_t guid) const override { return entityController_->lookupName(guid); }
     void requestPlayerName(uint64_t guid) override { queryPlayerName(guid); }
     bool inGuild() const override;
     std::string spellName(uint32_t spellId) const override { return spellHandler_->getSpellName(spellId); }
@@ -337,9 +337,9 @@ public:
     // packetParsers, playerMovement and achievementName are above).
     const Character* activeCharacter() const override { return getActiveCharacter(); }
     uint32_t currentMapId() const override { return currentMapId_; }
-    uint8_t playerClassOf(uint64_t guid) const override { return lookupPlayerClass(guid); }
-    uint8_t playerRaceOf(uint64_t guid) const override { return lookupPlayerRace(guid); }
-    uint8_t playerGenderOf(uint64_t guid) const override { return lookupPlayerGender(guid); }
+    uint8_t playerClassOf(uint64_t guid) const override { return entityController_->lookupPlayerClass(guid); }
+    uint8_t playerRaceOf(uint64_t guid) const override { return entityController_->lookupPlayerRace(guid); }
+    uint8_t playerGenderOf(uint64_t guid) const override { return entityController_->lookupPlayerGender(guid); }
     const GroupListData& party() const override;
     const GuildRosterData& guildRoster() const override;
     std::optional<uint32_t> guildRankRights() const override;
@@ -351,7 +351,7 @@ public:
     void setResting(bool resting) override;
     std::string creatureName(uint32_t entry) const override { return getCachedCreatureName(entry); }
     void requestCreatureInfo(uint32_t entry) override { queryCreatureInfo(entry, 0); }
-    void requestGameObjectInfo(uint32_t entry) override { queryGameObjectInfo(entry, 0); }
+    void requestGameObjectInfo(uint32_t entry) override { entityController_->queryGameObjectInfo(entry, 0); }
     void vendorCanRepair() override { inventoryHandler_->setVendorCanRepair(true); }
     void openedStableMaster(uint64_t npcGuid) override;
 
@@ -484,14 +484,6 @@ public:
     /// player walks out of range, which is the only thing these answer.
     uint64_t getBinderGuid() const { return binderGuid_; }
 
-    /// How a player in the world looks: race, gender, the packed appearance
-    /// bytes and the facial-feature byte. False for anything that is not a
-    /// player, or a player whose fields have not arrived.
-    bool getPlayerAppearance(uint64_t guid, uint8_t& race, uint8_t& gender,
-                             uint32_t& appearanceBytes, uint8_t& facial) const {
-        return entityController_->getPlayerAppearance(guid, race, gender,
-                                                      appearanceBytes, facial);
-    }
     EntityManager& getEntityManager() override { return entityController_->getEntityManager(); }
     const EntityManager& getEntityManager() const override { return entityController_->getEntityManager(); }
 
@@ -847,7 +839,6 @@ public:
     /// answers zero the first time and the query fills the cache for the next
     /// frame to find.
     uint32_t getCreatureDisplayIdForEntry(uint32_t entry);
-    void queryGameObjectInfo(uint32_t entry, uint64_t guid);
     const GameObjectQueryResponseData* getCachedGameObjectInfo(uint32_t entry) const override {
         return entityController_->getCachedGameObjectInfo(entry);
     }
@@ -860,24 +851,6 @@ public:
     const std::unordered_map<uint32_t, CreatureQueryResponseData>& getCreatureInfoCache() const override {
         return entityController_->getCreatureInfoCache();
     }
-    // Returns the creature subname/title (e.g. "<Warchief of the Horde>"), empty if not cached
-    std::string getCachedCreatureSubName(uint32_t entry) const {
-        return entityController_->getCachedCreatureSubName(entry);
-    }
-    // Returns the creature rank (0=Normal,1=Elite,2=RareElite,3=Boss,4=Rare)
-    // or -1 if not cached yet
-    int getCreatureRank(uint32_t entry) const {
-        return entityController_->getCreatureRank(entry);
-    }
-    // Returns creature type (1=Beast,2=Dragonkin,...,7=Humanoid,...) or 0 if not cached
-    uint32_t getCreatureType(uint32_t entry) const {
-        return entityController_->getCreatureType(entry);
-    }
-    // Returns creature family (e.g. pet family for beasts) or 0
-    uint32_t getCreatureFamily(uint32_t entry) const {
-        return entityController_->getCreatureFamily(entry);
-    }
-
     void startAutoAttack(uint64_t targetGuid) override;
     void stopAutoAttack() override;
     // Threat
@@ -1182,9 +1155,6 @@ public:
     uint64_t getPlayerTransportGuid() const { return playerTransportGuid_; }
     glm::vec3 getPlayerTransportOffset() const { return playerTransportOffset_; }
 
-    // Check if a GUID is a known transport
-    bool isTransportGuid(uint64_t guid) const { return entityController_->isTransportGuid(guid); }
-    bool hasServerTransportUpdate(uint64_t guid) const { return entityController_->hasServerTransportUpdate(guid); }
     glm::vec3 getComposedWorldPosition();  // Compose transport transform * local offset
     TransportManager* getTransportManager() { return transportManager_.get(); }
     // Client-side transport board/disembark check by proximity to the live deck.
@@ -1193,7 +1163,7 @@ public:
     void setPlayerOnTransport(uint64_t transportGuid, const glm::vec3& localOffset) {
         // Validate transport is registered before attaching player
         // (defer if transport not yet registered to prevent desyncs)
-        if (transportGuid != 0 && !isTransportGuid(transportGuid)) {
+        if (transportGuid != 0 && !entityController_->isTransportGuid(transportGuid)) {
             // Said, rather than dropped in silence.
             //
             // This is the one decision between the server saying the player
@@ -1242,23 +1212,6 @@ public:
 
     // Player GUID
     uint64_t getPlayerGuid() const { return playerGuid; }
-
-    // Look up class/race for a player GUID from name query cache. Returns 0 if unknown.
-    uint8_t lookupPlayerClass(uint64_t guid) const {
-        return entityController_->lookupPlayerClass(guid);
-    }
-    uint8_t lookupPlayerRace(uint64_t guid) const {
-        return entityController_->lookupPlayerRace(guid);
-    }
-    uint8_t lookupPlayerGender(uint64_t guid) const {
-        return entityController_->lookupPlayerGender(guid);
-    }
-
-    // Look up a display name for any guid: checks playerNameCache then entity manager.
-    // Returns empty string if unknown. Used by chat display to resolve names at render time.
-    const std::string& lookupName(uint64_t guid) const {
-        return entityController_->lookupName(guid);
-    }
 
     uint8_t getPlayerClass() const {
         const Character* ch = getActiveCharacter();
@@ -1891,7 +1844,6 @@ public:
     network::WorldConnection* getSocket() override { return socket.get(); }
     const network::WorldConnection* getSocket() const { return socket.get(); }
     SpellHandler* getSpellHandler() { return spellHandler_.get(); }
-    EntityController* getEntityController() { return entityController_.get(); }
     /// What the character holds - bags, equipment, coin, books - and the
     /// windows that move it: loot, vendors, mail, the bank, the auction house.
     InventoryHandler& inventory() { return *inventoryHandler_; }
@@ -1914,6 +1866,10 @@ public:
     /// following, area triggers and taxi flights.
     MovementHandler& movement() { return *movementHandler_; }
     const MovementHandler& movement() const { return *movementHandler_; }
+    /// The objects in view as the server describes them: creatures, players,
+    /// game objects, their names, kinds, appearance and transports.
+    EntityController& entityController() { return *entityController_; }
+    const EntityController& entityController() const { return *entityController_; }
     /// Key bindings, macros and settings the server keeps for the account.
     AccountDataHandler& accountData() { return *accountDataHandler_; }
     const AccountDataHandler& accountData() const { return *accountDataHandler_; }

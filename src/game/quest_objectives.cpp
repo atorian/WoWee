@@ -22,7 +22,7 @@ std::string targetName(GameHandler& gh, int32_t npcOrGoId) {
     }
     const auto* info = gh.getCachedGameObjectInfo(entry);
     if (!info || info->name.empty()) {
-        gh.queryGameObjectInfo(entry, 0);
+        gh.entityController().queryGameObjectInfo(entry, 0);
         return {};
     }
     return info->name;

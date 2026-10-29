@@ -22,7 +22,7 @@ MapScope::MapScope(const Services& services, uint32_t mapId)
     // time, and a create that arrived before this scope existed - in the same
     // frame as the login, or kept across a far teleport - had no scene to go
     // to. The entities are the authority; present them once, here.
-    services_.game.getEntityController()->announceObjectsInView();
+    services_.game.entityController().announceObjectsInView();
 }
 
 MapScope::MapScope(const Services& services, WorldLoader& loader, WorldLoader::Entry entry)

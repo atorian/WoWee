@@ -1183,7 +1183,7 @@ static int lua_GetPetitionInfo(lua_State* L) {
     const auto* info = shownPetition(L);
     if (!gh || !info) return 0;
     const bool isOwner = info->ownerGuid == gh->getPlayerGuid();
-    const std::string& owner = gh->lookupName(info->ownerGuid);
+    const std::string& owner = gh->entityController().lookupName(info->ownerGuid);
     // The heading and both confirmations branch on this, so a charter called
     // a guild charter when it is an arena one is wrong twice over. The query
     // reply says which; until it lands, guild is the commoner answer.
@@ -1234,7 +1234,7 @@ static int lua_GetPetitionNameInfo(lua_State* L) {
         lua_pushnil(L);
         return 1;
     }
-    const std::string& name = gh->lookupName(info->signatures[static_cast<size_t>(index - 1)].playerGuid);
+    const std::string& name = gh->entityController().lookupName(info->signatures[static_cast<size_t>(index - 1)].playerGuid);
     lua_pushstring(L, name.empty() ? "Unknown" : name.c_str());
     return 1;
 }
@@ -1316,8 +1316,8 @@ static int lua_GetGuildEventInfo(lua_State* L) {
         "", "invite", "join", "promote", "demote", "remove", "quit"
     };
     lua_pushstring(L, (e.type < 7) ? kTypes[e.type] : "");
-    lua_pushstring(L, gh->lookupName(e.playerGuid).c_str());
-    lua_pushstring(L, e.otherGuid ? gh->lookupName(e.otherGuid).c_str() : "");
+    lua_pushstring(L, gh->entityController().lookupName(e.playerGuid).c_str());
+    lua_pushstring(L, e.otherGuid ? gh->entityController().lookupName(e.otherGuid).c_str() : "");
     lua_pushnumber(L, e.newRank);
 
     // Whole units of age, largest first, each within its parent.
@@ -3097,7 +3097,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 // A typed name that happens to be the target, which is what
                 // "/follow Bob" is when Bob is already selected.
                 [&] {
-                    std::string n = gh->lookupName(gh->getTargetGuid());
+                    std::string n = gh->entityController().lookupName(gh->getTargetGuid());
                     toLowerInPlace(n);
                     return !n.empty() && n == who;
                 }();

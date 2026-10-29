@@ -2456,7 +2456,7 @@ int lua_Tooltip_SetUnit(lua_State* L) {
     for (char& c : uidStr) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     const uint64_t guid = wowee::addons::resolveUnitGuid(gh, uidStr);
     if (guid == 0) { lua_pushboolean(L, 0); return 1; }
-    const std::string name = gh->lookupName(guid);
+    const std::string name = gh->entityController().lookupName(guid);
     if (name.empty()) { lua_pushboolean(L, 0); return 1; }
 
     w->isTooltip = true;
@@ -2497,7 +2497,7 @@ int lua_Tooltip_SetUnit(lua_State* L) {
         // guard: <Auctioneer>, <Innkeeper>, <Reagent Vendor>.
         const auto unit = std::dynamic_pointer_cast<game::Unit>(entity);
         if (unit) {
-            const std::string sub = gh->getCachedCreatureSubName(unit->getEntry());
+            const std::string sub = gh->entityController().getCachedCreatureSubName(unit->getEntry());
             if (!sub.empty()) addLine("<" + sub + ">", 1.0f, 1.0f, 1.0f);
         }
     }

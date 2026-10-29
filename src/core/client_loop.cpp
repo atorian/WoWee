@@ -421,7 +421,7 @@ void ClientLoop::beginCharacterSession() {
     // The name keys the per-character saved variables; see characterIdentityOf.
     session_ = std::make_unique<CharacterSession>(
         characterSessionServices(),
-        characterIdentityOf(guid, services_.game.getCharacters(), services_.game.lookupName(guid)),
+        characterIdentityOf(guid, services_.game.getCharacters(), services_.game.entityController().lookupName(guid)),
         services_.sessionInterface);
 }
 

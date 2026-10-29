@@ -5182,7 +5182,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                         uint8_t race = 0, gender = 0, facial = 0;
                         uint32_t appearance = 0;
                         if (result && result->guid != 0 &&
-                            gameHandler->getPlayerAppearance(result->guid, race, gender,
+                            gameHandler->entityController().getPlayerAppearance(result->guid, race, gender,
                                                              appearance, facial)) {
                             std::vector<game::EquipmentItem> worn;
                             std::array<uint32_t, 19> displayIds{};
@@ -5310,7 +5310,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                     uint8_t race = 0, gender = 0, facial = 0;
                     uint32_t appearance = 0;
                     if (face.guid != 0 &&
-                        gameHandler->getPlayerAppearance(face.guid, race, gender,
+                        gameHandler->entityController().getPlayerAppearance(face.guid, race, gender,
                                                          appearance, facial)) {
                         // What they are visibly wearing, where it is known.
                         // Empty means the item queries have not come back, and

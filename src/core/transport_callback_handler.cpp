@@ -206,7 +206,7 @@ void TransportCallbackHandler::setupCallbacks() {
                 auto it = goInstances3.find(guid);
                 if (it != goInstances3.end()) {
                     uint32_t wmoInstanceId = it->second.instanceId;
-                    const bool preferServerData = gameHandler_.hasServerTransportUpdate(guid);
+                    const bool preferServerData = gameHandler_.entityController().hasServerTransportUpdate(guid);
                     // Coordinates are already canonical (converted in game_handler.cpp)
                     glm::vec3 canonicalSpawnPos(x, y, z);
                     const bool isM2Transport = !it->second.isWmo;

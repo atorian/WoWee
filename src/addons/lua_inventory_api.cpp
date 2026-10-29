@@ -3324,7 +3324,7 @@ static int lua_GetMasterLootCandidate(lua_State* L) {
     if (index > static_cast<int>(candidates.size())) return luaReturnNil(L);
 
     const uint64_t guid = candidates[static_cast<size_t>(index) - 1];
-    std::string name = gh->lookupName(guid);
+    std::string name = gh->entityController().lookupName(guid);
     // A name this client has not learned yet would come back empty, and an
     // empty string is true in Lua - the menu would show a blank row that gives
     // the item to someone unnamed. Nil skips the row instead.
@@ -4126,7 +4126,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             const auto& e = log[static_cast<size_t>(index) - 1];
 
             lua_pushstring(L, bankLogTypeName(e.type));
-            lua_pushstring(L, gh->lookupName(e.playerGuid).c_str());
+            lua_pushstring(L, gh->entityController().lookupName(e.playerGuid).c_str());
             pushItemLinkOrNil(L, gh, e.itemId);
             lua_pushnumber(L, e.count);
             lua_pushnumber(L, tab);                  // the tab it happened on
@@ -4144,7 +4144,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             const auto& e = log[static_cast<size_t>(index) - 1];
 
             lua_pushstring(L, bankLogTypeName(e.type));
-            lua_pushstring(L, gh->lookupName(e.playerGuid).c_str());
+            lua_pushstring(L, gh->entityController().lookupName(e.playerGuid).c_str());
             lua_pushnumber(L, e.count);              // copper
             pushTimeAgo(L, e.secondsAgo);
             return 7;
@@ -4750,7 +4750,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             // drawn twice this has an answer; before that it is empty, which
             // is what an unknown seller looks like anyway.
             const std::string ownerName =
-                a.ownerGuid ? gh->lookupName(a.ownerGuid) : std::string();
+                a.ownerGuid ? gh->entityController().lookupName(a.ownerGuid) : std::string();
             lua_pushstring(L, ownerName.c_str());   // owner
             lua_pushnumber(L, 0);                   // saleStatus
             return 13;

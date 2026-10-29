@@ -580,7 +580,7 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
                 const glm::vec3 rpos =
                     core::coords::canonicalToRender(glm::vec3(bp.wowX, bp.wowY, 0.0f));
                 dots.push_back({ .renderPos = rpos, .color = ui::bgGroupColor(bp.group),
-                                 .name = gameHandler.lookupName(bp.guid) });
+                                 .name = gameHandler.entityController().lookupName(bp.guid) });
             }
         }
         wm->setPartyDots(std::move(dots));
@@ -766,7 +766,7 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
         for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
             if (!entity || entity->getType() != game::ObjectType::UNIT) continue;
             auto unit = std::static_pointer_cast<game::Unit>(entity);
-            const int rank = gameHandler.getCreatureRank(unit->getEntry());
+            const int rank = gameHandler.entityController().getCreatureRank(unit->getEntry());
             if (rank != 2 && rank != 4) continue;      // 2 = Rare Elite, 4 = Rare
             if (unit->getHealth() == 0) continue;       // skip dead/looted rares
             rendering::WorldMapRareMark m;
@@ -966,7 +966,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         // An entry whose creature info has not arrived yet answers 0, which is
         // not 11, so an unknown unit keeps its plate rather than losing it.
         const bool isTotem =
-            !isPlayer && gameHandler.getCreatureType(unit->getEntry()) == 11;
+            !isPlayer && gameHandler.entityController().getCreatureType(unit->getEntry()) == 11;
 
         // Pets and guardians, which the panels separate and which separate the
         // same way the game does: both are summons carrying a summoner, and
@@ -1106,7 +1106,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         }
         // Creature rank for border styling (Elite=gold double border, Boss=red, Rare=silver)
         int creatureRank = -1;
-        if (!isPlayer) creatureRank = gameHandler.getCreatureRank(unit->getEntry());
+        if (!isPlayer) creatureRank = gameHandler.entityController().getCreatureRank(unit->getEntry());
 
         // Border: gold = currently selected, orange = targeting player, dark = default
         ImU32 borderColor = isTarget
@@ -1458,7 +1458,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
             }
         } else {
             // NPC subtitle (e.g. "<Reagent Vendor>", "<Innkeeper>")
-            std::string sub = gameHandler.getCachedCreatureSubName(unit->getEntry());
+            std::string sub = gameHandler.entityController().getCachedCreatureSubName(unit->getEntry());
             if (!sub.empty()) subLabel = "<" + sub + ">";
         }
         if (!subLabel.empty()) nameY -= 10.0f;  // shift name up for sub-label line
