@@ -1934,8 +1934,12 @@ bool GameHandler::previewPlayerAppearance(uint32_t appearanceBytes, uint8_t faci
     return false;
 }
 
-void GameHandler::notifyServerPatchManifest(const std::vector<EzWowPatch>& patches) {
-    eventBus().publish(events::ServerPatchManifestReceived{patches});
+void GameHandler::serverMoneyReported(uint64_t copper) {
+    inventoryHandler_->applyServerMoney(copper);
+}
+
+void GameHandler::knownTitlesReported(const KnownTitleUpdate& update) {
+    if (auto* feed = services_.titlesFeed) feed->onKnownTitles(update.operation, update.bits);
 }
 
 void GameHandler::notifyTransportSpawned(uint64_t guid, uint32_t entry, uint32_t displayId,

@@ -3,6 +3,7 @@
 #include "game/opcode_table.hpp"
 #include "network/packet.hpp"
 #include "game/server_extension.hpp"
+#include "game/warden_session.hpp"
 #include <cstdint>
 #include <functional>
 #include <future>
@@ -14,9 +15,12 @@
 #include <vector>
 
 namespace wowee {
+namespace core { class EventBus; }
+namespace pipeline { class AssetManager; }
 namespace game {
 
-class GameHandler;
+class ExpansionRegistry;
+class PacketSender;
 class WardenCrypto;
 class WardenMemory;
 class WardenModule;
@@ -26,7 +30,12 @@ public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
-    explicit WardenHandler(GameHandler& owner);
+    /// @param assets Null in a client without game data: the door and file
+    ///        checks then answer from the known hashes alone.
+    /// @param expansions Null without an expansion registry: a module's
+    ///        signature is then checked against the built-in key.
+    WardenHandler(PacketSender& sender, WardenSession& session, core::EventBus& events,
+                  pipeline::AssetManager* assets, const ExpansionRegistry* expansions);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -39,8 +48,6 @@ public:
     bool takeCharacterListRetryRequest();
     bool takeEarlyCharacterListRetryRequest();
     bool handleProtocolPacket(network::Packet& packet);
-
-    /** Initialize warden module manager (called once from GameHandler ctor). */
 
     /** Whether the server requires Warden (gates char enum / create). */
     [[nodiscard]] bool requiresWarden() const { return requiresWarden_; }
@@ -63,7 +70,11 @@ private:
     bool loadClientImage();
     bool readIntegrityMemory(const std::string& module, uint32_t address, uint8_t length, uint8_t* output);
 
-    GameHandler& owner_;
+    PacketSender& sender_;
+    WardenSession& session_;
+    core::EventBus& events_;
+    pipeline::AssetManager* assets_;
+    const ExpansionRegistry* expansions_;
 
     // --- Warden state ---
     bool requiresWarden_ = false;

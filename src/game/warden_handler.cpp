@@ -1,6 +1,9 @@
 #include "game/warden_handler.hpp"
-#include "game/game_handler.hpp"
-#include "title/services/titles.hpp"
+#include "game/packet_sender.hpp"
+#include "game/opcodes.hpp"
+#include "game/game_events.hpp"
+#include "game/server_protocol.hpp"
+#include "core/event_bus.hpp"
 #include "game/game_utils.hpp"
 #include "game/warden_crypto.hpp"
 #include "game/warden_memory.hpp"
@@ -147,8 +150,9 @@ const std::unordered_map<std::string, std::array<uint8_t, 20>>& knownDoorHashes(
 // Construction / init
 // ---------------------------------------------------------------------------
 
-WardenHandler::WardenHandler(GameHandler& owner)
-    : owner_(owner) {}
+WardenHandler::WardenHandler(PacketSender& sender, WardenSession& session, core::EventBus& events,
+                             pipeline::AssetManager* assets, const ExpansionRegistry* expansions)
+    : sender_(sender), session_(session), events_(events), assets_(assets), expansions_(expansions) {}
 
 // ---------------------------------------------------------------------------
 // Opcode registration
@@ -235,12 +239,11 @@ bool WardenHandler::beginSession(const std::string& host, uint16_t port, uint32_
                     {[this](const KnownTitleUpdate& update) {
                         LOG_INFO("Server known titles updated: operation=", unsigned(update.operation),
                                  " count=", update.bits.size());
-                        if (auto* feed = owner_.services().titlesFeed)
-                            feed->onKnownTitles(update.operation, update.bits);
+                        session_.knownTitlesReported(update);
                     }, [this](uint64_t copper) {
-                        owner_.inventory().applyServerMoney(copper);
+                        session_.serverMoneyReported(copper);
                     }, [this](const std::vector<EzWowPatch>& patches) {
-                        owner_.notifyServerPatchManifest(patches);
+                        events_.publish(events::ServerPatchManifestReceived{patches});
                     }});
             });
         extensionPreparationPending_ = true;
@@ -284,9 +287,9 @@ bool WardenHandler::handleProtocolPacket(network::Packet& packet) {
     }
     return serverExtension_.packet(packet.getOpcode(), packet.getData(),
         [this](uint16_t opcode, const std::vector<uint8_t>& bytes) {
-            if (owner_.getSocket() && owner_.getSocket()->isConnected()) {
+            if (sender_.connected()) {
                 network::Packet outgoing(opcode, bytes);
-                owner_.getSocket()->send(outgoing);
+                sender_.send(outgoing);
             }
         }) != ProtocolResult::Unhandled;
 }
@@ -294,8 +297,8 @@ bool WardenHandler::handleProtocolPacket(network::Packet& packet) {
 bool WardenHandler::loadClientImage() {
     if (!serverExtension_.clientPath().empty())
         return wardenMemory_->loadFromFile(serverExtension_.clientPath());
-    return wardenMemory_->load(static_cast<uint16_t>(owner_.getBuild()), isActiveExpansion("turtle"),
-        owner_.services().assetManager ? owner_.services().assetManager->getDataPath() : std::string());
+    return wardenMemory_->load(static_cast<uint16_t>(session_.clientBuild()), isActiveExpansion("turtle"),
+        assets_ ? assets_->getDataPath() : std::string());
 }
 
 bool WardenHandler::readIntegrityMemory(const std::string& module, uint32_t address, uint8_t length, uint8_t* output) {
@@ -340,19 +343,19 @@ void WardenHandler::update(float deltaTime) {
             for (uint8_t byte : encrypted) {
                 response.writeUInt8(byte);
             }
-            if (owner_.getSocket() && owner_.getSocket()->isConnected()) {
-                owner_.getSocket()->send(response);
+            if (sender_.connected()) {
+                sender_.send(response);
                 LOG_DEBUG("Warden: Sent CHEAT_CHECKS_RESULT (", plaintext.size(), " bytes plaintext)");
             }
         }
     }
 
     // Post-gate visibility
-    if (wardenGateSeen_ && owner_.getSocket() && owner_.getSocket()->isConnected()) {
+    if (wardenGateSeen_ && sender_.connected()) {
         wardenGateElapsed_ += deltaTime;
         if (wardenGateElapsed_ >= wardenGateNextStatusLog_) {
             LOG_DEBUG("Warden gate status: elapsed=", wardenGateElapsed_,
-                     "s connected=", owner_.getSocket()->isConnected() ? "yes" : "no",
+                     "s connected=", sender_.connected() ? "yes" : "no",
                      " packetsAfterGate=", wardenPacketsAfterGate_);
             wardenGateNextStatusLog_ += 30.0f;
         }
@@ -461,12 +464,12 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
     // Initialize Warden crypto from session key on first packet
     if (!wardenCrypto_) {
         wardenCrypto_ = std::make_unique<WardenCrypto>();
-        if (owner_.getSessionKey().size() != 40) {
-            LOG_ERROR("Warden: No valid session key (size=", owner_.getSessionKey().size(), "), cannot init crypto");
+        if (session_.loginSessionKey().size() != 40) {
+            LOG_ERROR("Warden: No valid session key (size=", session_.loginSessionKey().size(), "), cannot init crypto");
             wardenCrypto_.reset();
             return;
         }
-        if (!wardenCrypto_->initFromSessionKey(owner_.getSessionKey())) {
+        if (!wardenCrypto_->initFromSessionKey(session_.loginSessionKey())) {
             LOG_ERROR("Warden: Failed to initialize crypto from session key");
             wardenCrypto_.reset();
             return;
@@ -510,8 +513,8 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
         for (uint8_t byte : encrypted) {
             response.writeUInt8(byte);
         }
-        if (owner_.getSocket() && owner_.getSocket()->isConnected()) {
-            owner_.getSocket()->send(response);
+        if (sender_.connected()) {
+            sender_.send(response);
             LOG_DEBUG("Warden: Sent response (", plaintext.size(), " bytes plaintext)");
         }
     };
@@ -650,7 +653,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                     wardenLoadedModule_ = std::make_shared<WardenModule>();
                     // Check the signature against the key this realm actually
                     // signs with, when its profile names one.
-                    if (auto* reg = owner_.services().expansionRegistry) {
+                    if (const auto* reg = expansions_) {
                         if (const auto* profile = reg->getActive();
                             profile && !profile->wardenRsaModulus.empty()) {
                             wardenLoadedModule_->setRsaModulus(profile->wardenRsaModulus);
@@ -661,12 +664,12 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                     wardenLoadedModule_->setCallbackDependencies(
                         wardenCrypto_.get(),
                         [this](const uint8_t* data, size_t len) {
-                            if (!wardenCrypto_ || !owner_.getSocket()) return;
+                            if (!wardenCrypto_ || !sender_.connected()) return;
                             std::vector<uint8_t> plaintext(data, data + len);
                             auto encrypted = wardenCrypto_->encrypt(plaintext);
                             network::Packet pkt(wireOpcode(Opcode::CMSG_WARDEN_DATA));
                             for (uint8_t b : encrypted) pkt.writeUInt8(b);
-                            owner_.getSocket()->send(pkt);
+                            sender_.send(pkt);
                             LOG_DEBUG("Warden: Module sendPacket callback sent ", len, " bytes");
                         });
                     if (wardenLoadedModule_->load(wardenModuleData_, wardenModuleHash_, wardenModuleKey_)) { // codeql[cpp/weak-cryptographic-algorithm]
@@ -763,7 +766,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                 for (auto b : seed) { char s[4]; snprintf(s, 4, "%02x", b); seedHex += s; }
 
                 bool isTurtle = isActiveExpansion("turtle");
-                bool isClassic = (owner_.getBuild() <= 6005) && !isTurtle;
+                bool isClassic = (session_.clientBuild() <= 6005) && !isTurtle;
                 const char* turtleFallbackEnv = std::getenv("WOWEE_WARDEN_TURTLE_NO_CR");
                 const bool turtleFallbackAllowed =
                     turtleFallbackEnv && std::string(turtleFallbackEnv) == "fallback";
@@ -1042,7 +1045,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                                         std::replace(np.begin(), np.end(), '/', '\\');
                                         auto knownIt = knownDoorHashes().find(np);
                                         if (knownIt != knownDoorHashes().end()) { found = true; hash.assign(knownIt->second.begin(), knownIt->second.end()); }
-                                        auto* am = owner_.services().assetManager;
+                                        auto* am = assets_;
                                         if (am && am->isInitialized() && !found) {
                                             std::vector<uint8_t> fd;
                                             std::string rp = resolveCaseInsensitiveDataPath(am->getDataPath(), filePath);
@@ -1454,7 +1457,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                                         hash.assign(knownIt->second.begin(), knownIt->second.end());
                                     }
 
-                                    auto* am = owner_.services().assetManager;
+                                    auto* am = assets_;
                                     if (am && am->isInitialized() && !found) {
                                         std::vector<uint8_t> fileData;
                                         std::string resolvedFsPath =

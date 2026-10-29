@@ -25,6 +25,7 @@
 #include "game/reputation_handler.hpp"
 #include "game/social_handler.hpp"
 #include "game/movement_handler.hpp"
+#include "game/warden_session.hpp"
 #include "game/entity_controller.hpp"
 #include "game/game_services.hpp"
 #include "game/world_login.hpp"
@@ -151,7 +152,8 @@ class GameHandler : public IConnectionState,
                      public ChatQueries,
                      public QuestQueries,
                      public ReputationQueries,
-                     public SocialQueries {
+                     public SocialQueries,
+                     public WardenSession {
 public:
     // Talent data structures (aliased from handler_types.hpp)
     using TalentEntry = game::TalentEntry;
@@ -231,6 +233,11 @@ public:
     // rest of the game (ActionBarQueries, InventoryQueries). See AGENTS.md,
     // "A new domain handler".
     bool connected() const override { return isConnected(); }
+    // WardenSession
+    uint32_t clientBuild() const override { return build; }
+    const std::vector<uint8_t>& loginSessionKey() const override { return sessionKey; }
+    void serverMoneyReported(uint64_t copper) override;
+    void knownTitlesReported(const KnownTitleUpdate& update) override;
     bool characterInWorld() const override { return isInWorld(); }
     /// Refused with "No connection to the server." while worldConnectionLost().
     bool worldCommandAllowed(const char* command) override;
@@ -409,7 +416,6 @@ public:
     void createCharacter(const CharCreateData& data);
     void deleteCharacter(uint64_t characterGuid);
 
-    void notifyServerPatchManifest(const std::vector<EzWowPatch>& patches);
 
     /**
      * Select and log in with a character

@@ -121,7 +121,6 @@ GameHandler::GameHandler(GameServices& services)
                                                         *this, *services_.cvars);
     questHandler_     = std::make_unique<QuestHandler>(*this, *this, *services_.events, *chatHandler_,
                                                        *this, services_.assetManager);
-    wardenHandler_    = std::make_unique<WardenHandler>(*this);
     // Built from what they use rather than from this class (AGENTS.md, "A new
     // domain handler").
     spellHandler_ = std::make_unique<SpellHandler>(
@@ -133,6 +132,8 @@ GameHandler::GameHandler(GameServices& services)
     accountDataHandler_ = std::make_unique<AccountDataHandler>(
         *this, *this, *services_.events, services_.accountDataDir);
     actionBarHandler_ = std::make_unique<ActionBarHandler>(*this, *this, *services_.events, *this);
+    wardenHandler_ = std::make_unique<WardenHandler>(
+        *this, *this, *services_.events, services_.assetManager, services_.expansionRegistry);
     petHandler_ = std::make_unique<PetHandler>(*this, *this, *services_.events, *chatHandler_, *this);
     reputationHandler_ = std::make_unique<ReputationHandler>(*this, *services_.events, *chatHandler_,
                                                              *this);
