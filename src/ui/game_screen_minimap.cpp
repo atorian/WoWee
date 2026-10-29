@@ -19,6 +19,7 @@
 #include "ui/minimap_projection.hpp"
 #include "rendering/vk_context.hpp"
 #include "core/application.hpp"
+#include "core/window.hpp"
 #include "core/appearance_composer.hpp"
 #include "addons/addon_manager.hpp"
 #include "core/coordinates.hpp"

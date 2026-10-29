@@ -1,5 +1,6 @@
 #include "core/scene_replay.hpp"
 #include "core/application.hpp"
+#include "core/window.hpp"
 #include "core/config_paths.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"

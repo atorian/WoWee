@@ -1,4 +1,7 @@
 #include "core/application.hpp"
+#include "core/appearance_composer.hpp"
+#include "core/input.hpp"
+#include "core/window.hpp"
 #include "contacts/services/contacts_service.hpp"
 #include "game/contacts_gateway.hpp"
 #include "game/who_gateway.hpp"
@@ -317,6 +320,13 @@ Application* Application::instance = nullptr;
 Application::Application() {
     instance = this;
 }
+
+const std::string& Application::getBodySkinPath() const { return appearanceComposer_ ? appearanceComposer_->getBodySkinPath() : emptyString_; }
+const std::vector<std::string>& Application::getUnderwearPaths() const { return appearanceComposer_ ? appearanceComposer_->getUnderwearPaths() : emptyStringVec_; }
+uint32_t Application::getSkinTextureSlotIndex() const { return appearanceComposer_ ? appearanceComposer_->getSkinTextureSlotIndex() : 0; }
+uint32_t Application::getCloakTextureSlotIndex() const { return appearanceComposer_ ? appearanceComposer_->getCloakTextureSlotIndex() : 0; }
+uint32_t Application::getGryphonDisplayId() const { return entitySpawner_ ? entitySpawner_->getGryphonDisplayId() : 0; }
+uint32_t Application::getWyvernDisplayId() const { return entitySpawner_ ? entitySpawner_->getWyvernDisplayId() : 0; }
 
 Application::~Application() {
     shutdown();

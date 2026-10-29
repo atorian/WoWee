@@ -1,4 +1,6 @@
 #include "core/application.hpp"
+#include "core/appearance_composer.hpp"
+#include "core/window.hpp"
 #include "collision/collision_world.hpp"
 #include "core/map_scope.hpp"
 #include "core/frame_phase.hpp"

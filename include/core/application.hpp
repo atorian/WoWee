@@ -1,15 +1,11 @@
 #pragma once
 
-#include "core/window.hpp"
 #include "core/frame_worker.hpp"
 #include <chrono>
 #include "core/gamepad.hpp"
 #include "ui/unit_portrait.hpp"
 #include "ui/widget_renderer.hpp"
 #include "rendering/cpu_stage_times.hpp"
-#include "core/input.hpp"
-#include "core/entity_spawner.hpp"
-#include "core/appearance_composer.hpp"
 #include "core/world_loader.hpp"
 #include "core/map_scope.hpp"
 #include "core/character_session.hpp"
@@ -26,7 +22,6 @@
 #include "game/reported_movement.hpp"
 #include "pipeline/asset_inventory.hpp"
 #include "core/update_check.hpp"
-#include "pipeline/blp_loader.hpp"
 #include <memory>
 #include <unordered_set>
 #include <map>
@@ -84,6 +79,10 @@ namespace audio { enum class VoiceType; class AudioCoordinator; }
 namespace addons { class AddonManager; class AddonCatalog; class LuaErrorReport; }
 
 namespace core {
+
+class Window;
+class EntitySpawner;
+class AppearanceComposer;
 
 // Handler forward declarations
 class NPCInteractionCallbackHandler;
@@ -190,12 +189,12 @@ public:
     bool getRenderPositionForGuid(uint64_t guid, glm::vec3& outPos) const;
 
     // Character skin composite state - delegated to AppearanceComposer
-    [[nodiscard]] const std::string& getBodySkinPath() const { return appearanceComposer_ ? appearanceComposer_->getBodySkinPath() : emptyString_; }
-    [[nodiscard]] const std::vector<std::string>& getUnderwearPaths() const { return appearanceComposer_ ? appearanceComposer_->getUnderwearPaths() : emptyStringVec_; }
-    [[nodiscard]] uint32_t getSkinTextureSlotIndex() const { return appearanceComposer_ ? appearanceComposer_->getSkinTextureSlotIndex() : 0; }
-    [[nodiscard]] uint32_t getCloakTextureSlotIndex() const { return appearanceComposer_ ? appearanceComposer_->getCloakTextureSlotIndex() : 0; }
-    [[nodiscard]] uint32_t getGryphonDisplayId() const { return entitySpawner_ ? entitySpawner_->getGryphonDisplayId() : 0; }
-    [[nodiscard]] uint32_t getWyvernDisplayId() const { return entitySpawner_ ? entitySpawner_->getWyvernDisplayId() : 0; }
+    [[nodiscard]] const std::string& getBodySkinPath() const;
+    [[nodiscard]] const std::vector<std::string>& getUnderwearPaths() const;
+    [[nodiscard]] uint32_t getSkinTextureSlotIndex() const;
+    [[nodiscard]] uint32_t getCloakTextureSlotIndex() const;
+    [[nodiscard]] uint32_t getGryphonDisplayId() const;
+    [[nodiscard]] uint32_t getWyvernDisplayId() const;
 
     // Entity spawner access
     EntitySpawner* getEntitySpawner() { return entitySpawner_.get(); }

@@ -95,7 +95,9 @@ src/ui/chat_panel.cpp -> core/application.hpp
 src/ui/chat_panel.cpp -> core/input.hpp
 src/ui/combat_ui.cpp -> addons/lua_api_registrations.hpp
 src/ui/combat_ui.cpp -> core/application.hpp
+src/ui/combat_ui.cpp -> core/window.hpp
 src/ui/dialog_manager.cpp -> core/application.hpp
+src/ui/dialog_manager.cpp -> core/window.hpp
 src/ui/first_run_screen.cpp -> core/application.hpp
 src/ui/game_screen.cpp -> addons/addon_manager.hpp
 src/ui/game_screen.cpp -> addons/lua_api_registrations.hpp
@@ -104,6 +106,7 @@ src/ui/game_screen.cpp -> core/application.hpp
 src/ui/game_screen.cpp -> core/click_drag.hpp
 src/ui/game_screen.cpp -> core/gamepad.hpp
 src/ui/game_screen.cpp -> core/input.hpp
+src/ui/game_screen.cpp -> core/window.hpp
 src/ui/game_screen.cpp -> core/zone_tracker.hpp
 src/ui/game_screen_frames.cpp -> addons/addon_manager.hpp
 src/ui/game_screen_frames.cpp -> core/appearance_composer.hpp
@@ -118,10 +121,12 @@ src/ui/game_screen_hud.cpp -> core/geoset_rules.hpp
 src/ui/game_screen_hud.cpp -> core/helm_visual.hpp
 src/ui/game_screen_hud.cpp -> core/input.hpp
 src/ui/game_screen_hud.cpp -> core/screen_recording.hpp
+src/ui/game_screen_hud.cpp -> core/window.hpp
 src/ui/game_screen_minimap.cpp -> addons/addon_manager.hpp
 src/ui/game_screen_minimap.cpp -> core/appearance_composer.hpp
 src/ui/game_screen_minimap.cpp -> core/application.hpp
 src/ui/game_screen_minimap.cpp -> core/input.hpp
+src/ui/game_screen_minimap.cpp -> core/window.hpp
 src/ui/game_screen_minimap.cpp -> core/zone_tracker.hpp
 src/ui/gamepad_bindings.cpp -> core/gamepad.hpp
 src/ui/gamepad_controls.cpp -> core/gamepad.hpp
@@ -139,10 +144,12 @@ src/ui/settings_panel.cpp -> addons/lua_api_registrations.hpp
 src/ui/settings_panel.cpp -> core/application.hpp
 src/ui/settings_panel.cpp -> core/gamepad.hpp
 src/ui/settings_panel.cpp -> core/version.hpp
+src/ui/settings_panel.cpp -> core/window.hpp
 src/ui/settings_panel.cpp -> core/zone_tracker.hpp
 src/ui/spellbook_screen.cpp -> core/application.hpp
 src/ui/spellbook_screen.cpp -> core/input.hpp
 src/ui/toast_manager.cpp -> core/application.hpp
+src/ui/toast_manager.cpp -> core/window.hpp
 src/ui/toast_manager.cpp -> core/zone_tracker.hpp
 src/ui/ui_manager.cpp -> core/application.hpp
 src/ui/ui_manager.cpp -> core/window.hpp

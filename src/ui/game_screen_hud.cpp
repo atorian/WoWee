@@ -18,6 +18,7 @@
 #include "ui/nameplate_stacking.hpp"
 #include "rendering/vk_context.hpp"
 #include "core/application.hpp"
+#include "core/window.hpp"
 #include "core/appearance_composer.hpp"
 #include "ui/map_window.hpp"
 #include "addons/addon_manager.hpp"

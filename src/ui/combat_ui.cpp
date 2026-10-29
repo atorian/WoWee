@@ -15,6 +15,7 @@
 #include "ui/ui_colors.hpp"
 #include "ui/ui_helpers.hpp"
 #include "core/application.hpp"
+#include "core/window.hpp"
 #include "core/logger.hpp"
 #include "core/coordinates.hpp"
 #include "rendering/renderer.hpp"

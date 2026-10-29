@@ -5,6 +5,7 @@
 #include "game/game_events.hpp"
 #include "game/game_handler.hpp"
 #include "core/application.hpp"
+#include "core/window.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/animation_controller.hpp"
 #include "audio/audio_coordinator.hpp"

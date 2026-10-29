@@ -10,6 +10,7 @@
 #include "ui/ui_colors.hpp"
 #include "game/game_handler.hpp"
 #include "core/application.hpp"
+#include "core/window.hpp"
 
 #include <imgui.h>
 #include <algorithm>
