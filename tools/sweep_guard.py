@@ -251,12 +251,13 @@ CHECKS = [
     # chat, error line, bus and CVars: -> 965; its Tab cycle and combo points
     # moved in from GameHandler: -> 942; the player's death: -> 875;
     # the target, focus and mouseover: -> 847. CombatHandler built from
-    # CombatQueries: 3 -> 2 handlers, -> 736.
+    # CombatQueries: 3 -> 2 handlers, -> 736. MovementHandler's sending,
+    # FrameXML, chat, error line, bus and assets: -> 621.
     ("domain_shape_check.py",
      r"^(\d+) domain handlers built from GameHandler&", 2,
      "domain handlers whose constructor takes GameHandler&"),
     ("domain_shape_check.py",
-     r"^(\d+) reaches through owner_ in src/game", 736,
+     r"^(\d+) reaches through owner_ in src/game", 621,
      "reaches through owner_ into GameHandler from the domain handlers"),
     # State a domain should own, handed out of GameHandler writable, and the
     # notifications wired to a single listener instead of the bus. 218, 1324

@@ -1,5 +1,9 @@
 #include "game/movement_handler.hpp"
 #include "game/game_handler.hpp"
+#include "game/chat_log.hpp"
+#include "game/frame_xml_events.hpp"
+#include "game/packet_sender.hpp"
+#include "game/ui_errors.hpp"
 #include "game/game_events.hpp"
 #include "core/event_bus.hpp"
 #include "game/game_utils.hpp"
@@ -83,8 +87,10 @@ uint32_t findKnownReturnAreaTrigger(uint32_t triggerId) {
 
 } // namespace
 
-MovementHandler::MovementHandler(GameHandler& owner)
-    : owner_(owner), movementInfo(owner.movementInfoRef()) {}
+MovementHandler::MovementHandler(GameHandler& owner, PacketSender& sender, FrameXmlEvents& frameXml,
+                                 core::EventBus& events, ChatLog& chat, pipeline::AssetManager* assets)
+    : owner_(owner), sender_(sender), frameXml_(frameXml), events_(events), chat_(chat), assets_(assets),
+      movementInfo(owner.movementInfoRef()) {}
 
 void MovementHandler::applyServerMovementSpeeds(float walk, float run, float runBack,
                                                  float swim, float swimBack, float flight,
@@ -116,7 +122,7 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
         }
         const auto mapId = packet.readUInt32();
         packet.skipAll();
-        owner_.eventBus().publish(events::WorldTransferStarted{mapId});
+        events_.publish(events::WorldTransferStarted{mapId});
     };
     // Creature movement
     table[Opcode::SMSG_MONSTER_MOVE] = [this](network::Packet& packet) { handleMonsterMove(packet); };
@@ -144,7 +150,7 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
                 if (!packet.hasRemaining(1)) return;
                 uint64_t guid = packet.readPackedGuid();
                 if (guid == 0 || guid == owner_.getPlayerGuid()) return;
-                owner_.eventBus().publish(events::UnitMoveFlagsChanged{guid, synthFlags, mask});
+                events_.publish(events::UnitMoveFlagsChanged{guid, synthFlags, mask});
             };
         };
         // These are this client's own movement flags, not wire values: the
@@ -336,7 +342,7 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
         if (guid == 0 || guid == owner_.getPlayerGuid()) return;
         // Only the flying bits: this opcode says nothing about walking or
         // swimming.
-        owner_.eventBus().publish(events::UnitMoveFlagsChanged{
+        events_.publish(events::UnitMoveFlagsChanged{
             guid, 0u,
             static_cast<uint32_t>(MovementFlags::CAN_FLY) |
                 static_cast<uint32_t>(MovementFlags::FLYING)});
@@ -424,15 +430,15 @@ void MovementHandler::handleClientControlUpdate(network::Packet& packet) {
                                     static_cast<uint32_t>(MovementFlags::STRAFE_RIGHT) |
                                     static_cast<uint32_t>(MovementFlags::TURN_LEFT) |
                                     static_cast<uint32_t>(MovementFlags::TURN_RIGHT));
-            owner_.sendMovement(Opcode::MSG_MOVE_STOP);
-            owner_.sendMovement(Opcode::MSG_MOVE_STOP_STRAFE);
-            owner_.sendMovement(Opcode::MSG_MOVE_STOP_TURN);
-            owner_.sendMovement(Opcode::MSG_MOVE_STOP_SWIM);
-            owner_.chat().addSystemChatMessage("Movement disabled by server.");
-            owner_.fireAddonEvent("PLAYER_CONTROL_LOST", {});
+            sendMovement(Opcode::MSG_MOVE_STOP);
+            sendMovement(Opcode::MSG_MOVE_STOP_STRAFE);
+            sendMovement(Opcode::MSG_MOVE_STOP_TURN);
+            sendMovement(Opcode::MSG_MOVE_STOP_SWIM);
+            chat_.addSystemChatMessage("Movement disabled by server.");
+            frameXml_.fireFrameXmlEvent("PLAYER_CONTROL_LOST", {});
         } else if (changed && allowMovement) {
-            owner_.chat().addSystemChatMessage("Movement re-enabled.");
-            owner_.fireAddonEvent("PLAYER_CONTROL_GAINED", {});
+            chat_.addSystemChatMessage("Movement re-enabled.");
+            frameXml_.fireFrameXmlEvent("PLAYER_CONTROL_GAINED", {});
         }
     }
 }
@@ -748,10 +754,10 @@ void MovementHandler::sendMovement(Opcode opcode) {
     // Fire PLAYER_STARTED/STOPPED_MOVING on movement state transitions
     {
         const bool isMoving = (movementInfo.flags & kMoveMask) != 0;
-        if (isMoving && !wasMoving && owner_.hasAddonEventListener())
-            owner_.fireAddonEvent("PLAYER_STARTED_MOVING", {});
-        else if (!isMoving && wasMoving && owner_.hasAddonEventListener())
-            owner_.fireAddonEvent("PLAYER_STOPPED_MOVING", {});
+        if (isMoving && !wasMoving && frameXml_.frameXmlListening())
+            frameXml_.fireFrameXmlEvent("PLAYER_STARTED_MOVING", {});
+        else if (!isMoving && wasMoving && frameXml_.frameXmlListening())
+            frameXml_.fireFrameXmlEvent("PLAYER_STOPPED_MOVING", {});
     }
 
     if (opcode == Opcode::MSG_MOVE_SET_FACING) {
@@ -918,7 +924,7 @@ void MovementHandler::sendMovement(Opcode opcode) {
     auto packet = owner_.getPacketParsers()
         ? owner_.getPacketParsers()->buildMovementPacket(opcode, wireInfo, owner_.getPlayerGuid())
         : MovementPacket::build(opcode, wireInfo, owner_.getPlayerGuid());
-    owner_.getSocket()->send(packet);
+    sender_.send(packet);
     lastSentPos_ = glm::vec3(movementInfo.x, movementInfo.y, movementInfo.z);
     hasSentMovement_ = true;
     if (movementHeldReason_) {
@@ -979,7 +985,7 @@ void MovementHandler::forceClearTaxiAndMovementState() {
 
     const bool clearingTaxiMount = taxiMountActive_;
     if (clearingTaxiMount) {
-        owner_.eventBus().publish(events::PlayerMountChanged{0});
+        events_.publish(events::PlayerMountChanged{0});
     }
     taxiMountActive_ = false;
     // A normal mount is owned by its aura/update-field path. Do not silently
@@ -1001,7 +1007,7 @@ void MovementHandler::forceClearTaxiAndMovementState() {
     movementInfo.transportGuid = 0;
     owner_.clearPlayerTransport();
 
-    if (owner_.getSocket() && owner_.getState() == WorldState::IN_WORLD) {
+    if (sender_.characterInWorld()) {
         sendMovement(Opcode::MSG_MOVE_STOP);
         sendMovement(Opcode::MSG_MOVE_STOP_STRAFE);
         sendMovement(Opcode::MSG_MOVE_STOP_TURN);
@@ -1043,7 +1049,7 @@ void MovementHandler::setOrientation(float orientation) {
 // ============================================================
 
 void MovementHandler::dismount() {
-    if (!owner_.getSocket()) return;
+    if (!sender_.connected()) return;
     // The player's mount field goes on reading its old value for a few frames
     // after the request goes out. Believing it re-mounts the player behind their
     // back, and that stale value then makes the server's own SMSG_DISMOUNT look
@@ -1054,7 +1060,7 @@ void MovementHandler::dismount() {
     dismountGraceRemaining_ = kDismountGraceSeconds;
     uint32_t savedMountAura = owner_.mountAuraSpellIdRef();
     if (owner_.currentMountDisplayIdRef() != 0 || taxiMountActive_) {
-        owner_.eventBus().publish(events::PlayerMountChanged{0});
+        events_.publish(events::PlayerMountChanged{0});
         owner_.currentMountDisplayIdRef() = 0;
         taxiMountActive_ = false;
         owner_.mountAuraSpellIdRef() = 0;
@@ -1063,17 +1069,17 @@ void MovementHandler::dismount() {
     uint16_t cancelMountWire = wireOpcode(Opcode::CMSG_CANCEL_MOUNT_AURA);
     if (cancelMountWire != 0xFFFF) {
         network::Packet pkt(cancelMountWire);
-        owner_.getSocket()->send(pkt);
+        sender_.send(pkt);
         LOG_INFO("Sent CMSG_CANCEL_MOUNT_AURA");
     } else if (savedMountAura != 0) {
         auto pkt = CancelAuraPacket::build(savedMountAura);
-        owner_.getSocket()->send(pkt);
+        sender_.send(pkt);
         LOG_INFO("Sent CMSG_CANCEL_AURA (mount spell ", savedMountAura, ") - Classic fallback");
     } else {
         for (const auto& a : owner_.spells().getPlayerAuras()) {
             if (!a.isEmpty() && a.maxDurationMs < 0 && a.casterGuid == owner_.getPlayerGuid()) {
                 auto pkt = CancelAuraPacket::build(a.spellId);
-                owner_.getSocket()->send(pkt);
+                sender_.send(pkt);
                 LOG_INFO("Sent CMSG_CANCEL_AURA (spell ", a.spellId, ") - brute force dismount");
             }
         }
@@ -1161,10 +1167,10 @@ void MovementHandler::handleForceSpeedChange(network::Packet& packet, const char
         return;
     }
 
-    if (owner_.getSocket()) {
+    if (sender_.connected()) {
         auto ack = buildForceAck(ackOpcode, counter);
         ack.writeFloat(newSpeed);
-        owner_.getSocket()->send(ack);
+        sender_.send(ack);
     }
 
     if (speedStorage) *speedStorage = newSpeed;
@@ -1195,10 +1201,10 @@ void MovementHandler::handleForceMoveRootState(network::Packet& packet, bool roo
         movementInfo.flags &= ~static_cast<uint32_t>(MovementFlags::ROOT);
     }
 
-    if (!owner_.getSocket()) return;
+    if (!sender_.connected()) return;
     Opcode ackOp = rooted ? Opcode::CMSG_FORCE_MOVE_ROOT_ACK : Opcode::CMSG_FORCE_MOVE_UNROOT_ACK;
     if (wireOpcode(ackOp) == 0xFFFF) return;
-    owner_.getSocket()->send(buildForceAck(ackOp, counter));
+    sender_.send(buildForceAck(ackOp, counter));
 }
 
 void MovementHandler::handleForceMoveFlagChange(network::Packet& packet, const char* name,
@@ -1222,9 +1228,9 @@ void MovementHandler::handleForceMoveFlagChange(network::Packet& packet, const c
         }
     }
 
-    if (!owner_.getSocket()) return;
+    if (!sender_.connected()) return;
     if (wireOpcode(ackOpcode) == 0xFFFF) return;
-    owner_.getSocket()->send(buildForceAck(ackOpcode, counter));
+    sender_.send(buildForceAck(ackOpcode, counter));
 }
 
 void MovementHandler::handleMoveSetCollisionHeight(network::Packet& packet) {
@@ -1239,14 +1245,14 @@ void MovementHandler::handleMoveSetCollisionHeight(network::Packet& packet) {
              " counter=", counter, " height=", height);
 
     if (guid != owner_.getPlayerGuid()) return;
-    if (!owner_.getSocket()) return;
+    if (!sender_.connected()) return;
 
     if (wireOpcode(Opcode::CMSG_MOVE_SET_COLLISION_HGT_ACK) == 0xFFFF) return;
     // buildForceAck now handles transport coordinate conversion, fixing the
     // previous omission that caused desync when riding boats/zeppelins.
     auto ack = buildForceAck(Opcode::CMSG_MOVE_SET_COLLISION_HGT_ACK, counter);
     ack.writeFloat(height);
-    owner_.getSocket()->send(ack);
+    sender_.send(ack);
 }
 
 void MovementHandler::handleMoveKnockBack(network::Packet& packet) {
@@ -1267,11 +1273,11 @@ void MovementHandler::handleMoveKnockBack(network::Packet& packet) {
 
     if (guid != owner_.getPlayerGuid()) return;
 
-    owner_.eventBus().publish(events::PlayerKnockedBack{vcos, vsin, hspeed, vspeed});
+    events_.publish(events::PlayerKnockedBack{vcos, vsin, hspeed, vspeed});
 
-    if (!owner_.getSocket()) return;
+    if (!sender_.connected()) return;
     if (wireOpcode(Opcode::CMSG_MOVE_KNOCK_BACK_ACK) == 0xFFFF) return;
-    owner_.getSocket()->send(buildForceAck(Opcode::CMSG_MOVE_KNOCK_BACK_ACK, counter));
+    sender_.send(buildForceAck(Opcode::CMSG_MOVE_KNOCK_BACK_ACK, counter));
 }
 
 // ============================================================
@@ -1370,13 +1376,13 @@ void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
         // by the transport between them.
         glm::vec3 localCanonical = owner_.getTransportManager()->serverToTransportLocal(
             info.transportGuid, glm::vec3(info.transportX, info.transportY, info.transportZ));
-        owner_.movement().setTransportAttachment(moverGuid, entity->getType(), info.transportGuid, localCanonical, true,
+        setTransportAttachment(moverGuid, entity->getType(), info.transportGuid, localCanonical, true,
                                core::coords::serverToCanonicalYaw(info.transportO));
         glm::vec3 worldPos = owner_.getTransportManager()->getPlayerWorldPosition(info.transportGuid, localCanonical);
         unit->setPosition(worldPos.x, worldPos.y, worldPos.z,
                           core::coords::serverToCanonicalYaw(info.orientation));
     } else {
-        if (!onTransport) owner_.movement().clearTransportAttachment(moverGuid);
+        if (!onTransport) clearTransportAttachment(moverGuid);
         MovementReport report;
         report.moverTime = info.time;
         report.position = glm::vec3(info.x, info.y, info.z);
@@ -1402,7 +1408,7 @@ void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
         }
     }
 
-    owner_.eventBus().publish(events::UnitMoveFlagsChanged{moverGuid, info.flags, ~0u});
+    events_.publish(events::UnitMoveFlagsChanged{moverGuid, info.flags, ~0u});
 }
 
 void MovementHandler::handleCompressedMoves(network::Packet& packet) {
@@ -1729,7 +1735,7 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
             isPreWotlkSplineWalking(data.splineFlags)
                 ? static_cast<uint32_t>(MovementFlags::WALKING)
                 : 0u;
-        owner_.eventBus().publish(events::UnitMoveFlagsChanged{data.guid, locomotionFlags, ~0u});
+        events_.publish(events::UnitMoveFlagsChanged{data.guid, locomotionFlags, ~0u});
     }
 
     if (data.hasDest) {
@@ -1794,7 +1800,7 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
                                 orientation, data.duration / 1000.0f);
         }
 
-        owner_.eventBus().publish(events::CreatureMoved{data.guid,
+        events_.publish(events::CreatureMoved{data.guid,
             destCanonical.x, destCanonical.y, destCanonical.z, data.duration});
     } else if (data.moveType == 1) {
         glm::vec3 posCanonical = core::coords::serverToCanonical(
@@ -1802,14 +1808,14 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
         entity->setPosition(posCanonical.x, posCanonical.y, posCanonical.z,
                             entity->getOrientation());
 
-        owner_.eventBus().publish(events::CreatureMoved{data.guid,
+        events_.publish(events::CreatureMoved{data.guid,
             posCanonical.x, posCanonical.y, posCanonical.z, 0});
     } else if (data.moveType == 4) {
         float orientation = core::coords::serverToCanonicalYaw(data.facingAngle);
         glm::vec3 posCanonical = core::coords::serverToCanonical(
             glm::vec3(data.x, data.y, data.z));
         entity->setPosition(posCanonical.x, posCanonical.y, posCanonical.z, orientation);
-        owner_.eventBus().publish(events::CreatureMoved{data.guid,
+        events_.publish(events::CreatureMoved{data.guid,
             posCanonical.x, posCanonical.y, posCanonical.z, 0});
     } else if (data.moveType == 3 && data.facingTarget != 0) {
         auto target = owner_.getEntityManager().getEntity(data.facingTarget);
@@ -1841,11 +1847,11 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
         if (owner_.getTransportManager()) {
             glm::vec3 localCanonical = owner_.getTransportManager()->serverToTransportLocal(
                 transportGuid, glm::vec3(localX, localY, localZ));
-            owner_.movement().setTransportAttachment(moverGuid, entity->getType(), transportGuid, localCanonical, false, 0.0f);
+            setTransportAttachment(moverGuid, entity->getType(), transportGuid, localCanonical, false, 0.0f);
             glm::vec3 worldPos = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, localCanonical);
             entity->setPosition(worldPos.x, worldPos.y, worldPos.z, entity->getOrientation());
             if (entity->getType() == ObjectType::UNIT)
-                owner_.eventBus().publish(events::CreatureMoved{moverGuid, worldPos.x, worldPos.y, worldPos.z, 0});
+                events_.publish(events::CreatureMoved{moverGuid, worldPos.x, worldPos.y, worldPos.z, 0});
         }
         return;
     }
@@ -1857,11 +1863,11 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
         if (owner_.getTransportManager()) {
             glm::vec3 localCanonical = owner_.getTransportManager()->serverToTransportLocal(
                 transportGuid, glm::vec3(localX, localY, localZ));
-            owner_.movement().setTransportAttachment(moverGuid, entity->getType(), transportGuid, localCanonical, false, 0.0f);
+            setTransportAttachment(moverGuid, entity->getType(), transportGuid, localCanonical, false, 0.0f);
             glm::vec3 worldPos = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, localCanonical);
             entity->setPosition(worldPos.x, worldPos.y, worldPos.z, entity->getOrientation());
             if (entity->getType() == ObjectType::UNIT)
-                owner_.eventBus().publish(events::CreatureMoved{moverGuid, worldPos.x, worldPos.y, worldPos.z, 0});
+                events_.publish(events::CreatureMoved{moverGuid, worldPos.x, worldPos.y, worldPos.z, 0});
         }
         return;
     }
@@ -1912,7 +1918,7 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
             isPreWotlkSplineWalking(splineFlags)
                 ? static_cast<uint32_t>(MovementFlags::WALKING)
                 : 0u;
-        owner_.eventBus().publish(events::UnitMoveFlagsChanged{moverGuid, locomotionFlags, ~0u});
+        events_.publish(events::UnitMoveFlagsChanged{moverGuid, locomotionFlags, ~0u});
     }
 
     if (!owner_.getTransportManager()) {
@@ -1936,21 +1942,21 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
                 facingAngle = std::atan2(-dy, dx);
         }
 
-        owner_.movement().setTransportAttachment(moverGuid, entity->getType(), transportGuid, destLocalCanonical, false, 0.0f);
+        setTransportAttachment(moverGuid, entity->getType(), transportGuid, destLocalCanonical, false, 0.0f);
         entity->startMoveTo(destWorld.x, destWorld.y, destWorld.z, facingAngle, duration / 1000.0f);
 
         if (entity->getType() == ObjectType::UNIT)
-            owner_.eventBus().publish(events::CreatureMoved{moverGuid, destWorld.x, destWorld.y, destWorld.z, duration});
+            events_.publish(events::CreatureMoved{moverGuid, destWorld.x, destWorld.y, destWorld.z, duration});
 
         LOG_DEBUG("SMSG_MONSTER_MOVE_TRANSPORT: mover=0x", std::hex, moverGuid,
                   " transport=0x", transportGuid, std::dec,
                   " dur=", duration, "ms dest=(", destWorld.x, ",", destWorld.y, ",", destWorld.z, ")");
     } else {
         glm::vec3 startWorld = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, startLocalCanonical);
-        owner_.movement().setTransportAttachment(moverGuid, entity->getType(), transportGuid, startLocalCanonical, false, 0.0f);
+        setTransportAttachment(moverGuid, entity->getType(), transportGuid, startLocalCanonical, false, 0.0f);
         entity->setPosition(startWorld.x, startWorld.y, startWorld.z, facingAngle);
         if (entity->getType() == ObjectType::UNIT)
-            owner_.eventBus().publish(events::CreatureMoved{moverGuid, startWorld.x, startWorld.y, startWorld.z, 0});
+            events_.publish(events::CreatureMoved{moverGuid, startWorld.x, startWorld.y, startWorld.z, 0});
     }
 }
 
@@ -2084,7 +2090,7 @@ void MovementHandler::handleTeleportAck(network::Packet& packet) {
     owner_.areaTriggerSuppressFirstRef() = true;
     owner_.areaTriggerCooldownRef() = deeprunTram ? 1.5f : 10.0f;
 
-    if (owner_.getSocket()) {
+    if (sender_.connected()) {
         network::Packet ack(wireOpcode(Opcode::MSG_MOVE_TELEPORT_ACK));
         const bool legacyGuidAck =
             isActiveExpansion("classic") || isActiveExpansion("tbc") || isActiveExpansion("turtle");
@@ -2095,7 +2101,7 @@ void MovementHandler::handleTeleportAck(network::Packet& packet) {
         }
         ack.writeUInt32(counter);
         ack.writeUInt32(moveTime);
-        owner_.getSocket()->send(ack);
+        sender_.send(ack);
         LOG_INFO("Sent MSG_MOVE_TELEPORT_ACK response");
 
         // Immediately tell the server our position so it doesn't keep using
@@ -2107,7 +2113,7 @@ void MovementHandler::handleTeleportAck(network::Packet& packet) {
     // Only where the destination was taken. A misfire leaves the player where
     // they are, so there is no world entry to announce.
     if (!originMisfire) {
-        owner_.eventBus().publish(events::WorldEntered{
+        events_.publish(events::WorldEntered{
             owner_.getCurrentMapId(), serverX, serverY, serverZ, false});
     }
 }
@@ -2121,7 +2127,7 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
     pendingNewWorld_ = packet;
     const auto mapId = packet.readUInt32();
     packet.skipAll();
-    owner_.eventBus().publish(events::WorldTransferStarted{mapId});
+    events_.publish(events::WorldTransferStarted{mapId});
 }
 
 void MovementHandler::applyPendingWorldTransfer() {
@@ -2258,9 +2264,9 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
         owner_.areaTriggerSuppressFirstRef() = true;
         owner_.areaTriggerCooldownRef() = deeprunTram ? 1.5f : 10.0f;
 
-        if (owner_.getSocket()) {
+        if (sender_.connected()) {
             network::Packet ack(wireOpcode(Opcode::MSG_MOVE_WORLDPORT_ACK));
-            owner_.getSocket()->send(ack);
+            sender_.send(ack);
             LOG_INFO("Sent MSG_MOVE_WORLDPORT_ACK (resurrection)");
 
             sendMovement(Opcode::MSG_MOVE_STOP);
@@ -2270,7 +2276,7 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
     }
 
     owner_.currentMapIdRef() = mapId;
-    if (owner_.getSocket()) {
+    if (sender_.connected()) {
         owner_.getSocket()->tracePacketsFor(std::chrono::seconds(12), "new_world");
     }
 
@@ -2290,16 +2296,16 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
     taxiClientPath_.clear();
     taxiServerCompletionPending_ = false;
     owner_.currentMountDisplayIdRef() = 0;
-    owner_.eventBus().publish(events::PlayerMountChanged{0});
+    events_.publish(events::PlayerMountChanged{0});
 
     for (const auto& [guid, entity] : owner_.getEntityManager().getEntities()) {
         if (guid == owner_.getPlayerGuid()) continue;
         if (entity->getType() == ObjectType::UNIT) {
-            owner_.eventBus().publish(events::CreatureDespawned{guid});
+            events_.publish(events::CreatureDespawned{guid});
         } else if (entity->getType() == ObjectType::PLAYER) {
-            owner_.eventBus().publish(events::PlayerDespawned{guid});
+            events_.publish(events::PlayerDespawned{guid});
         } else if (entity->getType() == ObjectType::GAMEOBJECT) {
-            owner_.eventBus().publish(events::GameObjectDespawned{guid});
+            events_.publish(events::GameObjectDespawned{guid});
         }
     }
     owner_.inventory().leaveWorld();
@@ -2319,9 +2325,9 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
     owner_.stopAutoAttack();
     owner_.spells().resetCastState();
 
-    if (owner_.getSocket()) {
+    if (sender_.connected()) {
         network::Packet ack(wireOpcode(Opcode::MSG_MOVE_WORLDPORT_ACK));
-        owner_.getSocket()->send(ack);
+        sender_.send(ack);
         LOG_INFO("Sent MSG_MOVE_WORLDPORT_ACK");
 
         // Sync position immediately so the server doesn't keep stale coordinates.
@@ -2330,16 +2336,16 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
     }
 
     owner_.timeSinceLastPingRef() = 0.0f;
-    if (owner_.getSocket()) {
+    if (sender_.connected()) {
         LOG_WARNING("World transfer keepalive: sending immediate ping after MSG_MOVE_WORLDPORT_ACK");
         owner_.sendPing();
     }
 
-    owner_.eventBus().publish(events::WorldEntered{mapId, serverX, serverY, serverZ, false});
+    events_.publish(events::WorldEntered{mapId, serverX, serverY, serverZ, false});
 
-    if (owner_.hasAddonEventListener()) {
-        owner_.fireAddonEvent("PLAYER_ENTERING_WORLD", {"0"});
-        owner_.fireAddonEvent("ZONE_CHANGED_NEW_AREA", {});
+    if (frameXml_.frameXmlListening()) {
+        frameXml_.fireFrameXmlEvent("PLAYER_ENTERING_WORLD", {"0"});
+        frameXml_.fireFrameXmlEvent("ZONE_CHANGED_NEW_AREA", {});
     }
 }
 
@@ -2350,7 +2356,7 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
 void MovementHandler::loadTaxiDbc() {
     if (taxiDbcLoaded_) return;
 
-    auto* am = owner_.services().assetManager;
+    auto* am = assets_;
     // Not an attempt: the assets are not there to read yet, and a
     // caller can reach this before they are. Marking it loaded here
     // meant one early call disabled this file for the whole session.
@@ -2475,7 +2481,7 @@ void MovementHandler::handleShowTaxiNodes(network::Packet& packet) {
                     uint32_t nodeId = i * 32 + bit + 1;
                     auto it = taxiNodes_.find(nodeId);
                     if (it != taxiNodes_.end()) {
-                        owner_.chat().addSystemChatMessage("Discovered flight path: " + it->second.name);
+                        chat_.addSystemChatMessage("Discovered flight path: " + it->second.name);
                     }
                 }
             }
@@ -2501,7 +2507,7 @@ void MovementHandler::handleShowTaxiNodes(network::Packet& packet) {
     // The flight map opens on this and closes on its pair. Neither was fired,
     // so the original interface's map could not appear however complete the
     // functions behind it were.
-    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("TAXIMAP_OPENED", {});
+    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("TAXIMAP_OPENED", {});
 }
 
 void MovementHandler::applyTaxiMountForCurrentNode() {
@@ -2518,7 +2524,7 @@ void MovementHandler::applyTaxiMountForCurrentNode() {
         uint32_t mountId = isAlliance ? 1210u : 1310u;
         taxiMountActive_ = true;
         LOG_INFO("Taxi mount fallback (node ", currentTaxiData_.nearestNode, " not in DBC): displayId=", mountId);
-        owner_.eventBus().publish(events::PlayerMountChanged{mountId});
+        events_.publish(events::PlayerMountChanged{mountId});
         return;
     }
 
@@ -2568,7 +2574,7 @@ void MovementHandler::applyTaxiMountForCurrentNode() {
     if (mountId != 0) {
         taxiMountActive_ = true;
         LOG_INFO("Taxi mount apply: displayId=", mountId);
-        owner_.eventBus().publish(events::PlayerMountChanged{mountId});
+        events_.publish(events::PlayerMountChanged{mountId});
     }
 }
 
@@ -2700,7 +2706,7 @@ void MovementHandler::beginTaxiFlightMotion() {
         playerEntity->setPosition(start.x, start.y, start.z, initialOrientation);
     }
 
-    owner_.eventBus().publish(events::TaxiOrientationChanged{initialRenderYaw, initialPitch, initialRoll});
+    events_.publish(events::TaxiOrientationChanged{initialRenderYaw, initialPitch, initialRoll});
 
     LOG_INFO("Taxi flight started with ", taxiClientPath_.size(), " spline waypoints");
     taxiServerCompletionPending_ = false;
@@ -2779,14 +2785,14 @@ void MovementHandler::finishClientTaxiFlight(bool snapToFinalWaypoint) {
         // this function returns, onTaxiFlight_/taxiMountActive_ are already false,
         // so that sync won't pick up this correction. Push it to the renderer
         // directly instead - see PlayerPositionCorrected.
-        owner_.eventBus().publish(events::PlayerPositionCorrected{landingPos.x, landingPos.y, landingPos.z});
+        events_.publish(events::PlayerPositionCorrected{landingPos.x, landingPos.y, landingPos.z});
         LOG_INFO("Taxi landing: snapped to final waypoint (",
                  landingPos.x, ", ", landingPos.y, ", ", landingPos.z, ")");
     }
     taxiClientActive_ = false;
     onTaxiFlight_ = false;
     if (taxiMountActive_) {
-        owner_.eventBus().publish(events::PlayerMountChanged{0});
+        events_.publish(events::PlayerMountChanged{0});
     }
     taxiMountActive_ = false;
     owner_.currentMountDisplayIdRef() = 0;
@@ -2799,7 +2805,7 @@ void MovementHandler::finishClientTaxiFlight(bool snapToFinalWaypoint) {
     taxiServerCompletionPending_ = false;
     movementInfo.flags = 0;
     movementInfo.flags2 = 0;
-    if (owner_.getSocket()) {
+    if (sender_.connected()) {
         sendMovement(Opcode::MSG_MOVE_STOP);
         sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
     }
@@ -2847,7 +2853,7 @@ void MovementHandler::updateClientTaxi(float deltaTime) {
             taxiClientIndex_ = 0;
             taxiClientSegmentProgress_ = 0.0f;
             if (taxiMountActive_) {
-                owner_.eventBus().publish(events::PlayerMountChanged{0});
+                events_.publish(events::PlayerMountChanged{0});
             }
             taxiMountActive_ = false;
             onTaxiFlight_ = false;
@@ -2961,7 +2967,7 @@ void MovementHandler::updateClientTaxi(float deltaTime) {
 
     glm::vec3 renderTangent = core::coords::canonicalToRender(tangent);
     float renderYaw = std::atan2(renderTangent.y, renderTangent.x);
-    owner_.eventBus().publish(events::TaxiOrientationChanged{renderYaw, pitch, roll});
+    events_.publish(events::TaxiOrientationChanged{renderYaw, pitch, roll});
 }
 
 void MovementHandler::handleActivateTaxiReply(network::Packet& packet) {
@@ -2993,8 +2999,8 @@ void MovementHandler::handleActivateTaxiReply(network::Packet& packet) {
         // and setting the flag alone left FrameXML's open for the whole flight.
         const bool taxiWasOpen = taxiWindowOpen_;
         taxiWindowOpen_ = false;
-        if (taxiWasOpen && owner_.hasAddonEventListener()) {
-            owner_.fireAddonEvent("TAXIMAP_CLOSED", {});
+        if (taxiWasOpen && frameXml_.frameXmlListening()) {
+            frameXml_.fireFrameXmlEvent("TAXIMAP_CLOSED", {});
         }
         taxiActivatePending_ = false;
         taxiActivateTimer_ = 0.0f;
@@ -3002,7 +3008,7 @@ void MovementHandler::handleActivateTaxiReply(network::Packet& packet) {
         // Now that the server has confirmed, actually move the player to the path
         // start and start advancing the spline (see activateTaxi()'s comment).
         beginTaxiFlightMotion();
-        if (owner_.getSocket()) {
+        if (sender_.connected()) {
             sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
         }
         LOG_INFO("Taxi flight started!");
@@ -3014,7 +3020,7 @@ void MovementHandler::handleActivateTaxiReply(network::Packet& packet) {
             return;
         }
         LOG_WARNING("Taxi activation failed, result=", data.result);
-        owner_.raiseUiError("Cannot take that flight path.");
+        raiseUiError(events_, frameXml_, "Cannot take that flight path.");
         taxiActivatePending_ = false;
         taxiActivateTimer_ = 0.0f;
         // Clear the pending path data built speculatively by activateTaxi() -
@@ -3025,7 +3031,7 @@ void MovementHandler::handleActivateTaxiReply(network::Packet& packet) {
         taxiClientSegmentProgress_ = 0.0f;
         taxiDestNodeId_ = 0;
         if (taxiMountActive_) {
-            owner_.eventBus().publish(events::PlayerMountChanged{0});
+            events_.publish(events::PlayerMountChanged{0});
         }
         taxiMountActive_ = false;
         onTaxiFlight_ = false;
@@ -3037,8 +3043,8 @@ void MovementHandler::closeTaxi() {
     taxiWindowOpen_ = false;
     // Only when it was actually open: closeTaxi is also reached on paths that
     // never opened a window, and the flight map hides itself on this.
-    if (wasOpen && owner_.hasAddonEventListener()) {
-        owner_.fireAddonEvent("TAXIMAP_CLOSED", {});
+    if (wasOpen && frameXml_.frameXmlListening()) {
+        frameXml_.fireFrameXmlEvent("TAXIMAP_CLOSED", {});
     }
 
     if (taxiActivatePending_ || onTaxiFlight_ || taxiClientActive_) {
@@ -3047,7 +3053,7 @@ void MovementHandler::closeTaxi() {
 
     if (taxiMountActive_) {
         LOG_INFO("closeTaxi: clearing taxi mount");
-        owner_.eventBus().publish(events::PlayerMountChanged{0});
+        events_.publish(events::PlayerMountChanged{0});
     }
     taxiMountActive_ = false;
 
@@ -3119,7 +3125,7 @@ std::vector<uint32_t> MovementHandler::getTaxiRouteTo(uint32_t destNodeId) const
 }
 
 void MovementHandler::activateTaxi(uint32_t destNodeId) {
-    if (!owner_.getSocket() || owner_.getState() != WorldState::IN_WORLD) return;
+    if (!sender_.characterInWorld()) return;
 
     if (taxiActivatePending_ || onTaxiFlight_) {
         return;
@@ -3132,7 +3138,7 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
 
     if (owner_.isMounted()) {
         LOG_INFO("Taxi activate: dismounting current mount");
-        owner_.eventBus().publish(events::PlayerMountChanged{0});
+        events_.publish(events::PlayerMountChanged{0});
         owner_.currentMountDisplayIdRef() = 0;
         dismount();
     }
@@ -3141,10 +3147,10 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
         auto destIt = taxiNodes_.find(destNodeId);
         if (destIt != taxiNodes_.end() && !destIt->second.name.empty()) {
             taxiDestName_ = destIt->second.name;
-            owner_.chat().addSystemChatMessage("Requesting flight to " + destIt->second.name + "...");
+            chat_.addSystemChatMessage("Requesting flight to " + destIt->second.name + "...");
         } else {
             taxiDestName_.clear();
-            owner_.chat().addSystemChatMessage("Taxi: requesting flight...");
+            chat_.addSystemChatMessage("Taxi: requesting flight...");
         }
     }
 
@@ -3162,7 +3168,7 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
     if (path.size() < 2) {
         LOG_WARNING("No taxi route through discovered nodes from ", startNode,
                     " to ", destNodeId);
-        owner_.chat().addSystemChatMessage("No flight path available to that destination.");
+        chat_.addSystemChatMessage("No flight path available to that destination.");
         return;
     }
 
@@ -3196,12 +3202,12 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
     if (path.size() > 2) {
         auto expressPkt =
             ActivateTaxiExpressPacket::build(taxiNpcGuid_, path);
-        owner_.getSocket()->send(expressPkt);
+        sender_.send(expressPkt);
         LOG_WARNING("Taxi activate: sent EXPRESS for ", path.size(),
                     " nodes (a multi-hop route has no single path to ask for)");
     } else {
         auto basicPkt = ActivateTaxiPacket::build(taxiNpcGuid_, startNode, destNodeId);
-        owner_.getSocket()->send(basicPkt);
+        sender_.send(basicPkt);
     }
 
     // The window closes on the request, not on the reply, and FrameXML's taxi
@@ -3211,8 +3217,8 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
     // because its guard reads the flag this line has already cleared.
     const bool taxiWasOpen = taxiWindowOpen_;
     taxiWindowOpen_ = false;
-    if (taxiWasOpen && owner_.hasAddonEventListener()) {
-        owner_.fireAddonEvent("TAXIMAP_CLOSED", {});
+    if (taxiWasOpen && frameXml_.frameXmlListening()) {
+        frameXml_.fireFrameXmlEvent("TAXIMAP_CLOSED", {});
     }
     taxiActivatePending_ = true;
     taxiActivateTimer_ = 0.0f;
@@ -3226,7 +3232,7 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
     // success branch of handleActivateTaxiReply(), once the server confirms.
     // taxiClientPath_ is still built below as pending data - see
     // startClientTaxiPath()'s comment.
-    if (owner_.getSocket()) {
+    if (sender_.connected()) {
         sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
     }
 
@@ -3252,10 +3258,10 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
         }
     }
     if (previewPath.size() >= 2) {
-        owner_.eventBus().publish(events::TaxiPathPrecacheRequested{std::move(previewPath)});
+        events_.publish(events::TaxiPathPrecacheRequested{std::move(previewPath)});
     }
 
-    owner_.eventBus().publish(events::TaxiFlightStarted{});
+    events_.publish(events::TaxiFlightStarted{});
     startClientTaxiPath(path);
 }
 
@@ -3266,7 +3272,7 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
 void MovementHandler::loadAreaTriggerDbc() {
     if (owner_.areaTriggerDbcLoadedRef()) return;
 
-    auto* am = owner_.services().assetManager;
+    auto* am = assets_;
     // Don't latch "loaded" until the asset manager is actually ready - the
     // first checkAreaTriggers() tick can land well before asset manager
     // init finishes (observed in headless mode), and latching here first
@@ -3303,7 +3309,7 @@ void MovementHandler::loadAreaTriggerDbc() {
 }
 
 void MovementHandler::checkAreaTriggers() {
-    if (!owner_.isInWorld()) return;
+    if (!sender_.characterInWorld()) return;
     if (onTaxiFlight_ || taxiClientActive_) return;
 
     loadAreaTriggerDbc();
@@ -3519,7 +3525,7 @@ void MovementHandler::checkAreaTriggers() {
                             glm::vec3(dest->serverX, dest->serverY, dest->serverZ);
                         pendingAreaTriggerDestinationServerO_ = dest->serverO;
                     }
-                    owner_.getSocket()->send(pkt);
+                    sender_.send(pkt);
                     const float dx = checkedPx - at.x;
                     const float dy = checkedPy - at.y;
                     LOG_WARNING("Fired CMSG_AREATRIGGER: id=", at.id,
@@ -3676,9 +3682,9 @@ void MovementHandler::updateAttachedTransportChildren(float /*deltaTime*/) {
         entity->setPosition(composed.x, composed.y, composed.z, composedOrientation);
 
         if (attachment.type == ObjectType::UNIT) {
-            owner_.eventBus().publish(events::CreatureMoved{childGuid, composed.x, composed.y, composed.z, 0});
+            events_.publish(events::CreatureMoved{childGuid, composed.x, composed.y, composed.z, 0});
         } else if (attachment.type == ObjectType::GAMEOBJECT) {
-            owner_.eventBus().publish(events::GameObjectMoved{
+            events_.publish(events::GameObjectMoved{
                 childGuid, composed.x, composed.y, composed.z, composedOrientation});
         }
     }
@@ -3699,13 +3705,13 @@ void MovementHandler::followTarget() {
     }
 
     if (owner_.combat().getTargetGuid() == 0) {
-        owner_.raiseUiError("You must target someone to follow.");
+        raiseUiError(events_, frameXml_, "You must target someone to follow.");
         return;
     }
 
     auto target = owner_.combat().getTarget();
     if (!target) {
-        owner_.raiseUiError("Invalid target.");
+        raiseUiError(events_, frameXml_, "Invalid target.");
         return;
     }
 
@@ -3716,7 +3722,7 @@ void MovementHandler::followTarget() {
     owner_.followRenderPosRef() = core::coords::canonicalToRender(glm::vec3(target->getX(), target->getY(), target->getZ()));
 
     // Tell camera controller to start auto-following
-    owner_.eventBus().publish(events::AutoFollowChanged{&owner_.followRenderPosRef()});
+    events_.publish(events::AutoFollowChanged{&owner_.followRenderPosRef()});
 
     // Get target name
     std::string targetName = "Target";
@@ -3730,11 +3736,11 @@ void MovementHandler::followTarget() {
         targetName = unit->getName();
     }
 
-    owner_.chat().addSystemChatMessage("Now following " + targetName + ".");
+    chat_.addSystemChatMessage("Now following " + targetName + ".");
     LOG_INFO("Following target: ", targetName, " (GUID: 0x", std::hex, owner_.combat().getTargetGuid(), std::dec, ")");
     // The name goes with it: the status text is formatted from this argument,
     // and without one it formats a nil.
-    owner_.fireAddonEvent("AUTOFOLLOW_BEGIN", {targetName});
+    frameXml_.fireFrameXmlEvent("AUTOFOLLOW_BEGIN", {targetName});
 }
 
 void MovementHandler::cancelFollow() {
@@ -3746,9 +3752,9 @@ void MovementHandler::cancelFollow() {
         sendMovement(Opcode::MSG_MOVE_STOP);
         followMoveMoving_ = false;
     }
-    owner_.eventBus().publish(events::AutoFollowChanged{nullptr});
-    owner_.chat().addSystemChatMessage("You stop following.");
-    owner_.fireAddonEvent("AUTOFOLLOW_END", {});
+    events_.publish(events::AutoFollowChanged{nullptr});
+    chat_.addSystemChatMessage("You stop following.");
+    frameXml_.fireFrameXmlEvent("AUTOFOLLOW_END", {});
 }
 
 // Same straight-line step used by the headless client's single-shot

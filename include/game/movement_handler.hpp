@@ -16,9 +16,14 @@
 #include <vector>
 
 namespace wowee {
+namespace core { class EventBus; }
+namespace pipeline { class AssetManager; }
 namespace game {
 
+class ChatLog;
+class FrameXmlEvents;
 class GameHandler;
+class PacketSender;
 
 class MovementHandler {
 public:
@@ -29,7 +34,10 @@ public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
-    explicit MovementHandler(GameHandler& owner);
+    /// @param assets Null in a client without game data: no taxi path or
+    ///        area trigger table is read.
+    MovementHandler(GameHandler& owner, PacketSender& sender, FrameXmlEvents& frameXml,
+                    core::EventBus& events, ChatLog& chat, pipeline::AssetManager* assets);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -259,6 +267,11 @@ private:
     bool restoreWorldTransferFallbackIfNearOrigin(const char* context);
 
     GameHandler& owner_;
+    PacketSender& sender_;
+    FrameXmlEvents& frameXml_;
+    core::EventBus& events_;
+    ChatLog& chat_;
+    pipeline::AssetManager* assets_;
 
     // --- Movement state ---
     // Reference to GameHandler's movementInfo to avoid desync

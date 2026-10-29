@@ -115,7 +115,8 @@ GameHandler::GameHandler(GameServices& services)
     entityController_ = std::make_unique<EntityController>(*this);
     chatHandler_      = std::make_unique<ChatHandler>(*this, *this, *services_.events, *this,
                                                       *services_.cvars, *services_.emotes);
-    movementHandler_  = std::make_unique<MovementHandler>(*this);
+    movementHandler_  = std::make_unique<MovementHandler>(*this, *this, *this, *services_.events, *chatHandler_,
+                                                          services_.assetManager);
     combatHandler_    = std::make_unique<CombatHandler>(*this, *this, *services_.events, *chatHandler_,
                                                         *services_.cvars, *this);
     socialHandler_    = std::make_unique<SocialHandler>(*this, *this, *services_.events, *chatHandler_,
