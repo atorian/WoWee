@@ -423,7 +423,7 @@ bool GameHandler::nameUnitInView(uint64_t guid, const std::string& name) {
 }
 
 bool GameHandler::questWantsItem(uint32_t itemId) const {
-    for (const auto& quest : getQuestLog()) {
+    for (const auto& quest : questHandler_->getQuestLog()) {
         for (const auto& obj : quest.itemObjectives) {
             if (obj.itemId == itemId && obj.required > 0) return true;
         }
@@ -671,7 +671,7 @@ void GameHandler::updateTimers(float deltaTime) {
 
     if (pendingLoginQuestResync_) {
         pendingLoginQuestResyncTimeout_ -= deltaTime;
-        if (resyncQuestLogFromServerSlots(true)) {
+        if (questHandler_->resyncQuestLogFromServerSlots(true)) {
             pendingLoginQuestResync_ = false;
             pendingLoginQuestResyncTimeout_ = 0.0f;
             // trackedQuestIds_ was restored from the character config earlier
@@ -1026,7 +1026,7 @@ void GameHandler::updateGame(float deltaTime) {
             pendingNpcHello_.guid = 0;
         }
         closeIfTooFar(inventoryHandler_->isVendorWindowOpen(), inventoryHandler_->getVendorItems().vendorGuid, [this]{ closeVendor(); }, "Vendor");
-        closeIfTooFar(isGossipWindowOpen(), getCurrentGossip().npcGuid, [this]{ closeGossip(); }, "Gossip");
+        closeIfTooFar(questHandler_->isGossipWindowOpen(), questHandler_->getCurrentGossip().npcGuid, [this]{ closeGossip(); }, "Gossip");
         // The movement handler's guid, not a copy of it: the one this class
         // kept was never assigned, so this asked about guid 0, found no NPC and
         // returned - the only one of these four windows that stayed open when
@@ -1808,14 +1808,6 @@ uint32_t GameHandler::getBankBagSlotPrice(int slotIndex) const {
 // SMSG_QUEST_CONFIRM_ACCEPT (shared quest from group member)
 //   uint32 questId + string questTitle + uint64 sharerGuid
 // ---------------------------------------------------------------------------
-
-void GameHandler::acceptSharedQuest() {
-    questHandler_->acceptSharedQuest();
-}
-
-void GameHandler::declineSharedQuest() {
-    questHandler_->declineSharedQuest();
-}
 
 // ---------------------------------------------------------------------------
 // SMSG_SUMMON_REQUEST
@@ -2623,14 +2615,6 @@ const std::vector<GameHandler::InstanceLockout>& GameHandler::getInstanceLockout
     return socialHandler_->getInstanceLockouts();
 }
 
-// ---- QuestHandler delegating getters ----
-
-bool GameHandler::isGossipWindowOpen() const {
-    return questHandler_->isGossipWindowOpen();
-}
-const GossipMessageData& GameHandler::getCurrentGossip() const {
-    return questHandler_->getCurrentGossip();
-}
 const std::string& GameHandler::getLanguageName(uint32_t languageId) const {
     static const std::string kUniversal = "Universal";
     static const std::string kNone;
@@ -2751,88 +2735,11 @@ GameHandler::getExtendedCost(uint32_t extendedCostId) const {
     return it == extendedCostCache_.end() ? nullptr : &it->second;
 }
 
-const std::string& GameHandler::getQuestGreeting() const {
-    static const std::string empty;
-    return questHandler_->getQuestGreeting();
-}
-const std::string& GameHandler::getNpcText(uint32_t textId) const {
-    static const std::string empty;
-    return questHandler_->getNpcText(textId);
-}
-bool GameHandler::isQuestDetailsOpen() {
-    return questHandler_->isQuestDetailsOpen();
-}
-bool GameHandler::questDetailsItemInfoReady() const {
-    return questHandler_->questDetailsItemInfoReady();
-}
-const QuestDetailsData& GameHandler::getQuestDetails() const {
-    return questHandler_->getQuestDetails();
-}
-
-const std::vector<GossipPoi>& GameHandler::getGossipPois() const {
-    return questHandler_->getGossipPois();
-}
-
-void GameHandler::clearGossipPois() {
-    questHandler_->clearGossipPois();
-}
-const std::unordered_map<uint64_t, QuestGiverStatus>& GameHandler::getNpcQuestStatuses() const {
-    return questHandler_->getNpcQuestStatuses();
-}
-QuestGiverStatus GameHandler::getQuestGiverStatus(uint64_t guid) const {
-    return questHandler_->getQuestGiverStatus(guid);
-}
-std::vector<std::pair<uint32_t, uint32_t>> GameHandler::getQuestTimers() const {
-    return questHandler_->getQuestTimers();
-}
-
-const std::vector<GameHandler::QuestLogEntry>& GameHandler::getQuestLog() const {
-    return questHandler_->getQuestLog();
-}
-
-const std::string& GameHandler::getQuestSortName(uint32_t sortId) const {
-    static const std::string empty;
-    return questHandler_->getQuestSortName(sortId);
-}
-bool GameHandler::isQuestOfferRewardOpen() const {
-    return questHandler_->isQuestOfferRewardOpen();
-}
-const QuestOfferRewardData& GameHandler::getQuestOfferReward() const {
-    return questHandler_->getQuestOfferReward();
-}
-bool GameHandler::isQuestRequestItemsOpen() const {
-    return questHandler_->isQuestRequestItemsOpen();
-}
-const QuestRequestItemsData& GameHandler::getQuestRequestItems() const {
-    return questHandler_->getQuestRequestItems();
-}
-int GameHandler::getSelectedQuestLogIndex() const {
-    return questHandler_->getSelectedQuestLogIndex();
-}
-void GameHandler::setSelectedQuestLogIndex(int idx) {
-    questHandler_->setSelectedQuestLogIndex(idx);
-}
-uint32_t GameHandler::getSharedQuestId() const {
-    return questHandler_->getSharedQuestId();
-}
-const std::string& GameHandler::getSharedQuestSharerName() const {
-    return questHandler_->getSharedQuestSharerName();
-}
-const std::string& GameHandler::getSharedQuestTitle() const {
-    return questHandler_->getSharedQuestTitle();
-}
-const std::unordered_set<uint32_t>& GameHandler::getTrackedQuestIds() const {
-    return questHandler_->trackedQuests();
-}
-
 void GameHandler::setResting(bool resting) {
     if (resting == isResting_) return;
     isResting_ = resting;
     addSystemChatMessage(resting ? "You are now resting." : "You are no longer resting.");
     if (hasAddonEventListener()) fireAddonEvent("PLAYER_UPDATE_RESTING", {});
-}
-bool GameHandler::hasPendingSharedQuest() const {
-    return questHandler_->hasPendingSharedQuest();
 }
 
 // ---- MovementHandler delegating getters ----

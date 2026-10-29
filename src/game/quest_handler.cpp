@@ -1752,6 +1752,9 @@ void QuestHandler::abandonQuest(uint32_t questId) {
         std::remove_if(journal_.gossipPois.begin(), journal_.gossipPois.end(),
             [questId](const GossipPoi& p) { return p.data == questId; }),
         journal_.gossipPois.end());
+
+    // A quest no longer held is no longer watched.
+    setQuestTracked(questId, false);
 }
 
 void QuestHandler::shareQuestWithParty(uint32_t questId) {
@@ -1785,11 +1788,6 @@ void QuestHandler::acceptSharedQuest() {
     // Auto-track the accepted shared quest, same as a normal accept.
     setQuestTracked(journal_.sharedQuestId, true);
     chat_.addSystemChatMessage("Accepted: " + journal_.sharedQuestTitle);
-}
-
-void QuestHandler::declineSharedQuest() {
-    journal_.pendingSharedQuest = false;
-    // No response packet needed - just dismiss the UI
 }
 
 // ---------------------------------------------------------------------------

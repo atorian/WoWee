@@ -352,10 +352,10 @@ inline uint64_t resolveUnitGuid(game::GameHandler* gh, const std::string& uid) {
     // giver it came from, the gossip its own npc, and a vendor or a banker
     // theirs. The target is the last resort, and is usually the same NPC.
     if (uid == "npc" || uid == "questnpc") {
-        if (uid == "questnpc" && gh->getQuestDetails().npcGuid != 0)
-            return gh->getQuestDetails().npcGuid;
-        if (gh->getCurrentGossip().npcGuid != 0) return gh->getCurrentGossip().npcGuid;
-        if (gh->getQuestDetails().npcGuid != 0)  return gh->getQuestDetails().npcGuid;
+        if (uid == "questnpc" && gh->quests().getQuestDetails().npcGuid != 0)
+            return gh->quests().getQuestDetails().npcGuid;
+        if (gh->quests().getCurrentGossip().npcGuid != 0) return gh->quests().getCurrentGossip().npcGuid;
+        if (gh->quests().getQuestDetails().npcGuid != 0)  return gh->quests().getQuestDetails().npcGuid;
         if (gh->inventory().getVendorGuid() != 0) return gh->inventory().getVendorGuid();
         if (gh->inventory().getBankerGuid() != 0) return gh->inventory().getBankerGuid();
         return gh->getTargetGuid();
@@ -450,7 +450,7 @@ struct QuestSpecialItem {
 inline QuestSpecialItem questSpecialItemAt(game::GameHandler* gh, int questIndex) {
     QuestSpecialItem found;
     if (!gh || questIndex < 1) return found;
-    const auto& ql = gh->getQuestLog();
+    const auto& ql = gh->quests().getQuestLog();
     if (questIndex > static_cast<int>(ql.size())) return found;
     const uint32_t itemId = ql[questIndex - 1].sourceItemId;
     if (itemId == 0) return found;

@@ -632,7 +632,7 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
     // Quest objective and quest-giver markers on the world map.
     {
         std::vector<rendering::WorldMap::QuestPoi> qpois;
-        const auto& questStatuses = gameHandler.getNpcQuestStatuses();
+        const auto& questStatuses = gameHandler.quests().getNpcQuestStatuses();
         // Add authoritative NPC statuses first. Some servers also emit a
         // generic POI at the NPC's position; that duplicate is filtered below
         // so it cannot leave a teal objective circle on a quest giver.
@@ -664,11 +664,11 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
         // for that quest, and abandoning one never comes with an answer - so
         // without this an abandoned quest's objectives stay on the map.
         std::unordered_set<uint32_t> questsInLog;
-        for (const auto& quest : gameHandler.getQuestLog()) {
+        for (const auto& quest : gameHandler.quests().getQuestLog()) {
             if (quest.questId != 0) questsInLog.insert(quest.questId);
         }
         size_t objectivePois = 0;
-        for (const auto& poi : gameHandler.getGossipPois()) {
+        for (const auto& poi : gameHandler.quests().getGossipPois()) {
             // Keep ordinary gossip navigation POIs, and quest points for a
             // quest in the log.
             //
@@ -710,7 +710,7 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
                 // not an objective area. Completed quests use a yellow ?,
                 // while in-progress endpoints use a gray ?.
                 qp.kind = rendering::WorldMap::QuestPoi::Kind::INCOMPLETE;
-                for (const auto& quest : gameHandler.getQuestLog()) {
+                for (const auto& quest : gameHandler.quests().getQuestLog()) {
                     if (quest.questId != poi.data) continue;
                     if (quest.complete) {
                         qp.kind = rendering::WorldMap::QuestPoi::Kind::REWARD;
@@ -1538,7 +1538,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
             // Quest giver indicator: "!" for available quests, "?" for completable/incomplete
             if (!isPlayer) {
                 const auto mark = game::questGiverMarker(
-                    gameHandler.getQuestGiverStatus(guid));
+                    gameHandler.quests().getQuestGiverStatus(guid));
                 const char* qSym = mark.symbol;
                 const ImU32 qCol = mark.dim ? IM_COL32(160, 160, 160, A(220))
                                             : IM_COL32(255, 210, 0, A(255));

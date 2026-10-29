@@ -972,12 +972,6 @@ public:
         return false;
     }
 
-    // Completed quests (populated from SMSG_QUERY_QUESTS_COMPLETED_RESPONSE)
-    bool isQuestCompleted(uint32_t questId) const { return questHandler_->isQuestCompleted(questId); }
-    const std::unordered_set<uint32_t>& getCompletedQuests() const {
-        return questHandler_->completedQuests();
-    }
-
     // NPC death callback (for animations)
     using NpcDeathCallback = std::function<void(uint64_t guid)>;
     void setNpcDeathCallback(NpcDeathCallback cb) { npcDeathCallback_ = std::move(cb); }
@@ -1375,14 +1369,6 @@ public:
 
     // ---- Item text (books / readable items) ----
 
-    // ---- Shared Quest ----
-    bool hasPendingSharedQuest() const;
-    uint32_t getSharedQuestId() const;
-    const std::string& getSharedQuestTitle() const;
-    const std::string& getSharedQuestSharerName() const;
-    void acceptSharedQuest();
-    void declineSharedQuest();
-
     const std::string& getSummonerName() const { return socialHandler_->summonerName(); }
     float getSummonTimeoutSec() const { return socialHandler_->summonTimeoutSec(); }
     void acceptSummon();
@@ -1445,62 +1431,10 @@ public:
     void interactWithNpc(uint64_t guid);
     void interactWithGameObject(uint64_t guid);
     uint64_t getHookedFishingBobberGuid() const { return hookedFishingBobberGuid_; }
-    void selectGossipOption(uint32_t optionId, const std::string& code = "");
-    void selectGossipQuest(uint32_t questId);
-    void acceptQuest();
-    void declineQuest(bool announce = true);
     void closeGossip() override;
-    // Quest-starting items: right-click triggers quest offer dialog via questgiver protocol
-    void offerQuestFromItem(uint64_t itemGuid, uint32_t questId);
-    bool isGossipWindowOpen() const;
-    const GossipMessageData& getCurrentGossip() const;
-    const std::string& getNpcText(uint32_t textId) const;
-    /// What a quest giver says over its list of quests, when the window came
-    /// from SMSG_QUESTGIVER_QUEST_LIST rather than from gossip.
-    const std::string& getQuestGreeting() const;
-    bool isQuestDetailsOpen();
-    /// Whether the reward item names asked for when the details arrived have
-    /// had time to come back. Only this client's own quest window asks - see
-    /// QuestHandler::questDetailsItemInfoReady.
-    bool questDetailsItemInfoReady() const;
-    const QuestDetailsData& getQuestDetails() const;
-
-    // Gossip POI (aliased from handler_types.hpp)
-    using GossipPoi = game::GossipPoi;
-    const std::vector<GossipPoi>& getGossipPois() const;
-
-    // Quest turn-in
-    bool isQuestRequestItemsOpen() const;
-    const QuestRequestItemsData& getQuestRequestItems() const;
-    void completeQuest();       // Send CMSG_QUESTGIVER_COMPLETE_QUEST
-    void closeQuestRequestItems(bool announce = true);
-
-    bool isQuestOfferRewardOpen() const;
-    const QuestOfferRewardData& getQuestOfferReward() const;
-    void chooseQuestReward(uint32_t rewardIndex);  // Send CMSG_QUESTGIVER_CHOOSE_REWARD
-    void closeQuestOfferReward(bool announce = true);
 
     // Quest log
     using QuestLogEntry = QuestHandler::QuestLogEntry;
-    const std::vector<QuestLogEntry>& getQuestLog() const;
-    // Seconds left on each timed quest, paired with its quest id.
-    std::vector<std::pair<uint32_t, uint32_t>> getQuestTimers() const;
-    // QuestSort.dbc name for negative ZoneOrSort values (class/profession/seasonal)
-    const std::string& getQuestSortName(uint32_t sortId) const;
-    int getSelectedQuestLogIndex() const;
-    // Writes through to the QuestHandler, which is where getSelectedQuestLogIndex
-    // reads it from. The two used to touch different variables - the setter this
-    // GameHandler's own copy, the getter the decomposed QuestHandler's - so
-    // SelectQuestLogEntry set a selection the quest log never saw: the index
-    // read back 0, GetQuestLogQuestText answered nil for both description and
-    // objectives, and every quest's detail pane drew blank.
-    void setSelectedQuestLogIndex(int idx);
-    void abandonQuest(uint32_t questId);
-    void shareQuestWithParty(uint32_t questId);  // CMSG_PUSHQUESTTOPARTY
-    bool requestQuestQuery(uint32_t questId, bool force = false);
-    bool isQuestTracked(uint32_t questId) const { return questHandler_->isQuestTracked(questId); }
-    void setQuestTracked(uint32_t questId, bool tracked) { questHandler_->setQuestTracked(questId, tracked); }
-    const std::unordered_set<uint32_t>& getTrackedQuestIds() const;
     /// The quests whose objective areas the world map shades.
     ///
     /// Set by WorldMapBlobFrame:DrawQuestBlob, which FrameXML calls with false
@@ -1645,12 +1579,6 @@ public:
     void destroyTotem(int slot);
 
     bool isServerMovementAllowed() const;
-
-    // Quest giver status (! and ? markers)
-    QuestGiverStatus getQuestGiverStatus(uint64_t guid) const;
-    const std::unordered_map<uint64_t, QuestGiverStatus>& getNpcQuestStatuses() const;
-
-
 
     // Stat deltas from the last SMSG_LEVELUP_INFO (valid until next level-up)
     struct LevelUpDeltas {
@@ -2029,7 +1957,6 @@ public:
     ChatHandler* getChatHandler() { return chatHandler_.get(); }
     MovementHandler* getMovementHandler() { return movementHandler_.get(); }
     SpellHandler* getSpellHandler() { return spellHandler_.get(); }
-    QuestHandler* getQuestHandler() { return questHandler_.get(); }
     EntityController* getEntityController() { return entityController_.get(); }
     /// What the character holds - bags, equipment, coin, books - and the
     /// windows that move it: loot, vendors, mail, the bank, the auction house.
@@ -2158,12 +2085,6 @@ public:
     auto& worldStateMapIdRef() { return worldStateMapId_; }
     auto& worldStatesRef() { return worldStates_; }
     auto& worldStateZoneIdRef() { return worldStateZoneId_; }
-    /// Drops the points of interest the quest handler is holding.
-    ///
-    /// This handed out a reference to a list of its own. getGossipPois
-    /// forwards to QuestHandler, so clearing through the reference left
-    /// the markers the map draws exactly where they were.
-    void clearGossipPois();
 
     // ── Corpse & Home Bind ───────────────────────────────────────────
     auto& corpseGuidRef() { return corpseGuid_; }
@@ -2275,7 +2196,6 @@ public:
     Unit* getUnitByGuid(uint64_t guid);
     void cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries,
                                        const std::array<uint16_t, 19>& enchantIds) override;
-    void applyQuestStateFromFields(const FlatFieldMap& fields);
     void sanitizeMovementForTaxi();
     std::string getLfgDungeonName(uint32_t dungeonId) const;
     /// The mounts and critters the player knows, as the pet tab lists them.
@@ -2450,13 +2370,6 @@ private:
 
     // ---- Character creation handler ----
     void handleCharCreateResponse(network::Packet& packet);
-
-    void clearPendingQuestAccept(uint32_t questId);
-    void triggerQuestAcceptResync(uint32_t questId, uint64_t npcGuid, const char* reason);
-    bool hasQuestInLog(uint32_t questId) const;
-    int findQuestLogSlotIndexFromServer(uint32_t questId) const;
-    void addQuestToLocalLogIfMissing(uint32_t questId, const std::string& title, const std::string& objectives);
-    bool resyncQuestLogFromServerSlots(bool forceQueryMetadata);
 
     // ---- Area trigger detection ----
     void loadAreaTriggerDbc();
@@ -2880,10 +2793,6 @@ private:
     /// Headings the player has closed. Client-side, like the reputation ones,
     /// and saved with the rest of the character config for the same reason.
     std::unordered_set<uint32_t> collapsedSkillCategories_;
-    // Apply packed kill counts from player update fields to a quest entry that has
-    // already had its killObjectives populated from SMSG_QUEST_QUERY_RESPONSE.
-    void applyPackedKillCountsFromFields(QuestLogEntry& quest);
-
     NpcDeathCallback npcDeathCallback_;
     NpcAggroCallback npcAggroCallback_;
     NpcRespawnCallback npcRespawnCallback_;

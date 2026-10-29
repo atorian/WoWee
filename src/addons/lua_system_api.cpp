@@ -4436,7 +4436,7 @@ static int lua_JoinBattlefield(lua_State* L) {
     // spoken to - a vendor, a flight master - which is not a battlemaster and
     // is not what the real client sends. Nought is.
     const uint64_t battlemaster =
-        gh->isGossipWindowOpen() ? gh->getCurrentGossip().npcGuid : 0;
+        gh->quests().isGossipWindowOpen() ? gh->quests().getCurrentGossip().npcGuid : 0;
     LOG_WARNING("CMSG_BATTLEMASTER_JOIN: bgTypeId=", bgTypeId, " instance=", instanceId,
              " asGroup=", asGroup, " battlemaster=0x", std::hex, battlemaster, std::dec);
     battlegrounds->joinBattlefield(battlemaster, bgTypeId, instanceId, asGroup);

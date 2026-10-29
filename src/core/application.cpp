@@ -6322,7 +6322,7 @@ void Application::updateQuestMarkers() {
         return;
     }
 
-    const auto& questStatuses = gameHandler->getNpcQuestStatuses();
+    const auto& questStatuses = gameHandler->quests().getNpcQuestStatuses();
 
     // Clear all markers (we'll re-add active ones)
     questMarkerRenderer->clear();

@@ -1913,7 +1913,7 @@ static int lua_UseContainerItem(lua_State* L) {
     if (itemSlot->item.startQuestId != 0) {
         const uint64_t itemGuid = containerSlotGuid(gh, bag, slot);
         if (itemGuid != 0) {
-            gh->offerQuestFromItem(itemGuid, itemSlot->item.startQuestId);
+            gh->quests().offerQuestFromItem(itemGuid, itemSlot->item.startQuestId);
             return 0;
         }
     }

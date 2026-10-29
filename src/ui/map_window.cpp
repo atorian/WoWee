@@ -398,11 +398,11 @@ void MapWindow::drawQuestPanel(float x, float width, float height, uint64_t now)
         return;
     }
 
-    const auto& log = gh->getQuestLog();
+    const auto& log = gh->quests().getQuestLog();
     const ImVec4 gold(1.0f, 0.82f, 0.0f, 1.0f);
     ImGui::TextColored(gold, "Quest Log");
     ImGui::SameLine();
-    const int slots = gh->getQuestHandler() ? gh->getQuestHandler()->maxQuestLogSlots() : 25;
+    const int slots = gh->quests().maxQuestLogSlots();
     ImGui::TextDisabled("%d/%d", static_cast<int>(log.size()), slots);
     ImGui::Separator();
     if (log.empty()) ImGui::TextDisabled("No quests.");
@@ -420,7 +420,7 @@ void MapWindow::drawQuestPanel(float x, float width, float height, uint64_t now)
         Group& group = groups[quest.zoneOrSort];
         if (group.name.empty()) {
             if (quest.zoneOrSort > 0) group.name = gh->getAreaName(static_cast<uint32_t>(quest.zoneOrSort));
-            else if (quest.zoneOrSort < 0) group.name = gh->getQuestSortName(static_cast<uint32_t>(-quest.zoneOrSort));
+            else if (quest.zoneOrSort < 0) group.name = gh->quests().getQuestSortName(static_cast<uint32_t>(-quest.zoneOrSort));
             if (group.name.empty()) group.name = "Other";
         }
         group.quests.push_back(&quest);
@@ -443,8 +443,8 @@ void MapWindow::drawQuestPanel(float x, float width, float height, uint64_t now)
 
             // Tracked, the same set the objectives tracker on the game's screen
             // shows; changing it here changes it there.
-            bool tracked = gh->isQuestTracked(quest->questId);
-            if (ImGui::Checkbox("##track", &tracked)) gh->setQuestTracked(quest->questId, tracked);
+            bool tracked = gh->quests().isQuestTracked(quest->questId);
+            if (ImGui::Checkbox("##track", &tracked)) gh->quests().setQuestTracked(quest->questId, tracked);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Track this quest");
             ImGui::SameLine();
 

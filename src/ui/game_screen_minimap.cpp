@@ -119,9 +119,9 @@ void GameScreen::refreshQuestObjectiveCache(game::GameHandler& gameHandler) {
         signature ^= value;
         signature *= 1099511628211ull;
     };
-    const auto& tracked = gameHandler.getTrackedQuestIds();
+    const auto& tracked = gameHandler.quests().trackedQuests();
     mix(tracked.size());
-    for (const auto& quest : gameHandler.getQuestLog()) {
+    for (const auto& quest : gameHandler.quests().getQuestLog()) {
         if (quest.complete || quest.questId == 0 ||
             !tracked.count(quest.questId)) continue;
         mix(quest.questId);
@@ -140,7 +140,7 @@ void GameScreen::refreshQuestObjectiveCache(game::GameHandler& gameHandler) {
     minimapQuestCacheSignature_ = signature;
     minimapQuestCreatureEntries_.clear();
     minimapQuestGameObjectEntries_.clear();
-    for (const auto& quest : gameHandler.getQuestLog()) {
+    for (const auto& quest : gameHandler.quests().getQuestLog()) {
         if (quest.complete || quest.questId == 0 ||
             !tracked.count(quest.questId)) continue;
         for (const auto& objective : quest.killObjectives) {
@@ -954,8 +954,8 @@ void GameScreen::renderMinimapQuestKills(const MinimapFrame& frame, const Entity
         // Tracked, not every quest in the log: this highlights live NPCs in
         // the world, and a player with twenty quests wants the ones they are
         // watching lit up rather than all of them.
-        const auto& trackedIds = gameHandler.getTrackedQuestIds();
-        for (const auto& quest : gameHandler.getQuestLog()) {
+        const auto& trackedIds = gameHandler.quests().trackedQuests();
+        for (const auto& quest : gameHandler.quests().getQuestLog()) {
             if (quest.complete) continue;
             if (!trackedIds.count(quest.questId)) continue;
             for (const auto& obj : quest.killObjectives) {
@@ -1014,9 +1014,9 @@ void GameScreen::renderMinimapQuestKills(const MinimapFrame& frame, const Entity
 // The points a gossip window has pointed at - quest and service targets.
 void GameScreen::renderMinimapGossipPois(const MinimapFrame& frame, game::GameHandler& gameHandler) {
     // Gossip POI markers (quest / NPC navigation targets)
-    for (const auto& poi : gameHandler.getGossipPois()) {
+    for (const auto& poi : gameHandler.quests().getGossipPois()) {
         // A gossip target always, a quest's points while it is tracked.
-        if (poi.questObjectiveIndex != -2 && !gameHandler.isQuestTracked(poi.data)) {
+        if (poi.questObjectiveIndex != -2 && !gameHandler.quests().isQuestTracked(poi.data)) {
             continue;
         }
         // Convert WoW canonical coords to render coords for minimap projection
@@ -1594,7 +1594,7 @@ void GameScreen::renderMinimapReadouts(const MinimapFrame& frame, game::GameHand
 }
 
 void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
-    const auto& statuses = gameHandler.getNpcQuestStatuses();
+    const auto& statuses = gameHandler.quests().getNpcQuestStatuses();
     auto* renderer = services_.renderer;
     auto* camera = renderer ? renderer->getCamera() : nullptr;
     auto* minimap = renderer ? renderer->getMinimap() : nullptr;

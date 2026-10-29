@@ -1944,7 +1944,7 @@ static bool fillQuestTooltip(wowee::ui::Widget* w, game::GameHandler* gh,
     // Through the public log rather than the private finder beside it: this
     // wants the same entry the quest log itself draws from.
     const game::GameHandler::QuestLogEntry* q = nullptr;
-    for (const auto& e : gh->getQuestLog()) {
+    for (const auto& e : gh->quests().getQuestLog()) {
         if (e.questId == questId) { q = &e; break; }
     }
     if (!q) return false;
@@ -2289,7 +2289,7 @@ int lua_Tooltip_SetQuestLogRewardSpell(lua_State* L) {
     if (gh) {
         // Through the row mapper: the selected index is a display index into a
         // log grouped under zone headers, not a position in getQuestLog().
-        if (const auto* q = wowee::addons::questAtLogRow(L, gh, gh->getSelectedQuestLogIndex()))
+        if (const auto* q = wowee::addons::questAtLogRow(L, gh, gh->quests().getSelectedQuestLogIndex()))
             spellId = q->rewardSpellId;
     }
     lua_pushboolean(L, spellId && fillSpellTooltip(w, gh, spellId) ? 1 : 0);

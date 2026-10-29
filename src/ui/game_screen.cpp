@@ -1505,7 +1505,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                                        !frameXmlCursorItem().empty();
             st.casting               = gameHandler.spells().isCasting();
             st.lootOpen              = loot::orNoLoot(services_.loot).isLootWindowOpen();
-            st.gossipOpen            = gameHandler.isGossipWindowOpen();
+            st.gossipOpen            = gameHandler.quests().isGossipWindowOpen();
             st.vendorOpen            = gameHandler.inventory().isVendorWindowOpen();
             st.barberShopOpen        = gameHandler.isBarberShopOpen();
             st.bankOpen              = gameHandler.inventory().isBankOpen();
@@ -1513,9 +1513,9 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
             st.trainerOpen           = gameHandler.inventory().isTrainerWindowOpen();
             st.mailboxOpen           = mail::orNoMailbox(services_.mail).isMailboxOpen();
             st.auctionHouseOpen      = auction::orNoAuctionHouse(services_.auctionHouse).isAuctionHouseOpen();
-            st.questDetailsOpen      = gameHandler.isQuestDetailsOpen();
-            st.questOfferRewardOpen  = gameHandler.isQuestOfferRewardOpen();
-            st.questRequestItemsOpen = gameHandler.isQuestRequestItemsOpen();
+            st.questDetailsOpen      = gameHandler.quests().isQuestDetailsOpen();
+            st.questOfferRewardOpen  = gameHandler.quests().isQuestOfferRewardOpen();
+            st.questRequestItemsOpen = gameHandler.quests().isQuestRequestItemsOpen();
             st.tradeOpen             = trade::orNoTrade(services_.trade).isTradeOpen();
 
             const EscapeAction action = resolveEscape(st);
@@ -1552,9 +1552,9 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 case EscapeAction::CloseTrainer:           gameHandler.inventory().closeTrainer(); break;
                 case EscapeAction::CloseMailbox:           mail::orNoMailbox(services_.mail).closeMailbox(); break;
                 case EscapeAction::CloseAuctionHouse:      auction::orNoAuctionHouse(services_.auctionHouse).closeAuctionHouse(); break;
-                case EscapeAction::DeclineQuest:           gameHandler.declineQuest(); break;
-                case EscapeAction::CloseQuestOfferReward:  gameHandler.closeQuestOfferReward(); break;
-                case EscapeAction::CloseQuestRequestItems: gameHandler.closeQuestRequestItems(); break;
+                case EscapeAction::DeclineQuest:           gameHandler.quests().declineQuest(); break;
+                case EscapeAction::CloseQuestOfferReward:  gameHandler.quests().closeQuestOfferReward(); break;
+                case EscapeAction::CloseQuestRequestItems: gameHandler.quests().closeQuestRequestItems(); break;
                 case EscapeAction::CancelTrade:            trade::orNoTrade(services_.trade).cancelTrade(); break;
                 case EscapeAction::None: break;
                 case EscapeAction::AskTheInterface: {
@@ -2030,7 +2030,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 // hostile units so quest pickups (e.g. "Bundle of Wood") are reliable.
                 std::unordered_set<uint32_t> questObjectiveGoEntries;
                 {
-                    const auto& ql = gameHandler.getQuestLog();
+                    const auto& ql = gameHandler.quests().getQuestLog();
                     questObjectiveGoEntries.reserve(32);
                     for (const auto& q : ql) {
                         if (q.complete) continue;

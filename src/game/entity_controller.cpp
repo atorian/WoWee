@@ -2037,7 +2037,7 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
         owner_.inventory().maybeDetectVisibleItemLayout();
         owner_.spells().extractSkillFields(owner_.lastPlayerFieldsRef());
         owner_.spells().extractExploredZoneFields(owner_.lastPlayerFieldsRef());
-        owner_.applyQuestStateFromFields(owner_.lastPlayerFieldsRef());
+        owner_.quests().applyQuestStateFromFields(owner_.lastPlayerFieldsRef());
     }
 }
 
@@ -2341,7 +2341,7 @@ void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::share
         }
         owner_.spells().extractSkillFields(owner_.lastPlayerFieldsRef());
         owner_.spells().extractExploredZoneFields(owner_.lastPlayerFieldsRef());
-        owner_.applyQuestStateFromFields(owner_.lastPlayerFieldsRef());
+        owner_.quests().applyQuestStateFromFields(owner_.lastPlayerFieldsRef());
     }
 }
 
@@ -2947,7 +2947,7 @@ void EntityController::handleCreatureQueryResponse(network::Packet& packet) {
         }
         // An objective that had no name for what it is about now has one.
         if (owner_.hasAddonEventListener() &&
-            questObjectiveNames(owner_.getQuestLog(), data.entry, false)) {
+            questObjectiveNames(owner_.quests().getQuestLog(), data.entry, false)) {
             owner_.fireAddonEvent("QUEST_LOG_UPDATE", {});
         }
     }
@@ -3000,7 +3000,7 @@ void EntityController::handleGameObjectQueryResponse(network::Packet& packet) {
         // And the same for an objective that names this one - a chest to open
         // rather than a creature to kill.
         if (owner_.hasAddonEventListener() &&
-            questObjectiveNames(owner_.getQuestLog(), data.entry, true)) {
+            questObjectiveNames(owner_.quests().getQuestLog(), data.entry, true)) {
             owner_.fireAddonEvent("QUEST_LOG_UPDATE", {});
         }
 

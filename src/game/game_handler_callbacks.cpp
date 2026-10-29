@@ -2125,22 +2125,6 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
     }
 }
 
-void GameHandler::selectGossipOption(uint32_t optionId, const std::string& code) {
-    questHandler_->selectGossipOption(optionId, code);
-}
-
-void GameHandler::selectGossipQuest(uint32_t questId) {
-    questHandler_->selectGossipQuest(questId);
-}
-
-bool GameHandler::requestQuestQuery(uint32_t questId, bool force) {
-    return questHandler_->requestQuestQuery(questId, force);
-}
-
-bool GameHandler::hasQuestInLog(uint32_t questId) const {
-    return questHandler_->hasQuestInLog(questId);
-}
-
 Unit* GameHandler::getUnitByGuid(uint64_t guid) {
     auto entity = entityController_->getEntityManager().getEntity(guid);
     // Use the type tag to skip RTTI - both UNIT and PLAYER object types derive from Unit.
@@ -2155,79 +2139,9 @@ std::string GameHandler::guidToUnitId(uint64_t guid) const {
     if (guid == petGuid()) return "pet";
     return {};
 }
-int GameHandler::findQuestLogSlotIndexFromServer(uint32_t questId) const {
-    return questHandler_->findQuestLogSlotIndexFromServer(questId);
-}
-
-void GameHandler::addQuestToLocalLogIfMissing(uint32_t questId, const std::string& title, const std::string& objectives) {
-    questHandler_->addQuestToLocalLogIfMissing(questId, title, objectives);
-}
-
-bool GameHandler::resyncQuestLogFromServerSlots(bool forceQueryMetadata) {
-    return questHandler_->resyncQuestLogFromServerSlots(forceQueryMetadata);
-}
-
-// Apply quest completion state from player update fields to already-tracked local quests.
-// Called from VALUES update handler so quests that complete mid-session (or that were
-// complete on login) get quest.complete=true without waiting for SMSG_QUESTUPDATE_COMPLETE.
-void GameHandler::applyQuestStateFromFields(const FlatFieldMap& fields) {
-    questHandler_->applyQuestStateFromFields(fields);
-}
-
-// Extract expansion-specific kill/objective counters from quest-log update fields
-// and populate quest.killCounts using the structured objectives obtained from a prior
-// SMSG_QUEST_QUERY_RESPONSE. Silently does nothing if objectives are absent.
-void GameHandler::applyPackedKillCountsFromFields(QuestLogEntry& quest) {
-    questHandler_->applyPackedKillCountsFromFields(quest);
-}
-
-void GameHandler::clearPendingQuestAccept(uint32_t questId) {
-    questHandler_->clearPendingQuestAccept(questId);
-}
-
-void GameHandler::triggerQuestAcceptResync(uint32_t questId, uint64_t npcGuid, const char* reason) {
-    questHandler_->triggerQuestAcceptResync(questId, npcGuid, reason);
-}
-
-void GameHandler::acceptQuest() {
-    questHandler_->acceptQuest();
-}
-
-void GameHandler::declineQuest(bool announce) {
-    questHandler_->declineQuest(announce);
-}
-
-void GameHandler::abandonQuest(uint32_t questId) {
-    questHandler_->abandonQuest(questId);
-    setQuestTracked(questId, false);
-}
-
-void GameHandler::shareQuestWithParty(uint32_t questId) {
-    questHandler_->shareQuestWithParty(questId);
-}
-
-void GameHandler::completeQuest() {
-    questHandler_->completeQuest();
-}
-
-void GameHandler::closeQuestRequestItems(bool announce) {
-    questHandler_->closeQuestRequestItems(announce);
-}
-
-void GameHandler::chooseQuestReward(uint32_t rewardIndex) {
-    questHandler_->chooseQuestReward(rewardIndex);
-}
-
-void GameHandler::closeQuestOfferReward(bool announce) {
-    questHandler_->closeQuestOfferReward(announce);
-}
 
 void GameHandler::closeGossip() {
     questHandler_->closeGossip();
-}
-
-void GameHandler::offerQuestFromItem(uint64_t itemGuid, uint32_t questId) {
-    questHandler_->offerQuestFromItem(itemGuid, questId);
 }
 
 void GameHandler::closeVendor() {

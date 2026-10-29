@@ -1049,7 +1049,7 @@ const game::GossipQuestItem* gossipQuestAt(lua_State* L, bool available, int ind
     auto* gh = getGameHandler(L);
     if (!gh || index < 1) return nullptr;
     int seen = 0;
-    for (const auto& q : gh->getCurrentGossip().quests) {
+    for (const auto& q : gh->quests().getCurrentGossip().quests) {
         const bool matches = available ? gossipQuestIsAvailable(q.questIcon)
                                        : gossipQuestIsActive(q.questIcon);
         if (matches && ++seen == index) return &q;
@@ -1061,7 +1061,7 @@ int countGossipQuests(lua_State* L, bool available) {
     auto* gh = getGameHandler(L);
     if (!gh) return 0;
     int n = 0;
-    for (const auto& q : gh->getCurrentGossip().quests) {
+    for (const auto& q : gh->quests().getCurrentGossip().quests) {
         if (available ? gossipQuestIsAvailable(q.questIcon)
                       : gossipQuestIsActive(q.questIcon)) ++n;
     }
@@ -1083,12 +1083,12 @@ int selectGossipQuestAt(lua_State* L, bool available) {
     const int index = static_cast<int>(luaL_checknumber(L, 1));
     if (!gh || index < 1) return 0;
     int seen = 0;
-    for (const auto& q : gh->getCurrentGossip().quests) {
+    for (const auto& q : gh->quests().getCurrentGossip().quests) {
         const bool matches = available ? gossipQuestIsAvailable(q.questIcon)
                                        : gossipQuestIsActive(q.questIcon);
         if (!matches) continue;
         if (++seen != index) continue;
-        gh->selectGossipQuest(q.questId);
+        gh->quests().selectGossipQuest(q.questId);
         return 0;
     }
     return 0;
@@ -2640,7 +2640,7 @@ void registerSocialLuaAPI(lua_State* L) {
         }},
                 {"GetNumGossipOptions", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getCurrentGossip().options.size() : 0);
+            lua_pushnumber(L, gh ? gh->quests().getCurrentGossip().options.size() : 0);
             return 1;
         }},
                 // The gossip window's two quest lists. Both are flat runs of
@@ -2653,11 +2653,11 @@ void registerSocialLuaAPI(lua_State* L) {
             // first: pushing past the stack top corrupts the heap rather than
             // raising.
             if (!lua_checkstack(
-                    L, static_cast<int>(gh->getCurrentGossip().quests.size()) * 5 + 1)) {
+                    L, static_cast<int>(gh->quests().getCurrentGossip().quests.size()) * 5 + 1)) {
                 return 0;
             }
             int n = 0;
-            for (const auto& q : gh->getCurrentGossip().quests) {
+            for (const auto& q : gh->quests().getCurrentGossip().quests) {
                 if (!gossipQuestIsAvailable(q.questIcon)) continue;
                 lua_pushstring(L, q.title.c_str());
                 lua_pushnumber(L, q.questLevel);
@@ -2677,11 +2677,11 @@ void registerSocialLuaAPI(lua_State* L) {
             // first: pushing past the stack top corrupts the heap rather than
             // raising.
             if (!lua_checkstack(
-                    L, static_cast<int>(gh->getCurrentGossip().quests.size()) * 5 + 1)) {
+                    L, static_cast<int>(gh->quests().getCurrentGossip().quests.size()) * 5 + 1)) {
                 return 0;
             }
             int n = 0;
-            for (const auto& q : gh->getCurrentGossip().quests) {
+            for (const auto& q : gh->quests().getCurrentGossip().quests) {
                 if (!gossipQuestIsActive(q.questIcon)) continue;
                 lua_pushstring(L, q.title.c_str());
                 lua_pushnumber(L, q.questLevel);
@@ -2703,7 +2703,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 // asks for it a quest at a time rather than all at once.
                 {"GetGreetingText", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushstring(L, gh ? gh->getQuestGreeting().c_str() : "");
+            lua_pushstring(L, gh ? gh->quests().getQuestGreeting().c_str() : "");
             return 1;
         }},
                 {"GetNumAvailableQuests", [](lua_State* L) -> int {
@@ -2985,7 +2985,7 @@ void registerSocialLuaAPI(lua_State* L) {
             // Returns pairs of (text, type) for each option
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
-            const auto& opts = gh->getCurrentGossip().options;
+            const auto& opts = gh->quests().getCurrentGossip().options;
             // Two values per option, and the option count is the server's.
             // Room first: pushing past the stack top corrupts the heap rather
             // than raising.
@@ -3014,7 +3014,7 @@ void registerSocialLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             int index = static_cast<int>(luaL_checknumber(L, 1));
             if (!gh || index < 1) return 0;
-            const auto& opts = gh->getCurrentGossip().options;
+            const auto& opts = gh->quests().getCurrentGossip().options;
             if (index > static_cast<int>(opts.size())) return 0;
             const auto& opt = opts[static_cast<size_t>(index - 1)];
             const bool confirmed = lua_toboolean(L, 3) != 0;
@@ -3033,14 +3033,14 @@ void registerSocialLuaAPI(lua_State* L) {
                                     std::to_string(opt.boxMoney)});
                 return 0;
             }
-            gh->selectGossipOption(opt.id, luaL_optstring(L, 2, ""));
+            gh->quests().selectGossipOption(opt.id, luaL_optstring(L, 2, ""));
             return 0;
         }},
                 {"GetNumGossipAvailableQuests", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { return luaReturnZero(L); }
             int count = 0;
-            for (const auto& q : gh->getCurrentGossip().quests)
+            for (const auto& q : gh->quests().getCurrentGossip().quests)
                 if (q.questIcon != 4) ++count; // 4 = active/in-progress
             lua_pushnumber(L, count);
             return 1;
@@ -3049,7 +3049,7 @@ void registerSocialLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             if (!gh) { return luaReturnZero(L); }
             int count = 0;
-            for (const auto& q : gh->getCurrentGossip().quests)
+            for (const auto& q : gh->quests().getCurrentGossip().quests)
                 if (q.questIcon == 4) ++count;
             lua_pushnumber(L, count);
             return 1;

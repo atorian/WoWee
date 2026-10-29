@@ -269,7 +269,6 @@ public:
     [[nodiscard]] const std::string& getSharedQuestTitle() const { return journal_.sharedQuestTitle; }
     [[nodiscard]] const std::string& getSharedQuestSharerName() const { return journal_.sharedQuestSharerName; }
     void acceptSharedQuest();
-    void declineSharedQuest();
 
     // --- Internal helpers called from GameHandler ---
     [[nodiscard]] bool hasQuestInLog(uint32_t questId) const;
