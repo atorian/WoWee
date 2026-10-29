@@ -379,7 +379,7 @@ public:
             if (tm) {
                 uint64_t testTransportGuid = 0x1000000000000001ULL;
                 glm::vec3 deckCenter(0.0f, 0.0f, 5.0f);
-                ctx.gameHandler.setPlayerOnTransport(testTransportGuid, deckCenter);
+                ctx.gameHandler.movement().setPlayerOnTransport(testTransportGuid, deckCenter);
                 game::MessageChatData msg;
                 msg.type = game::ChatType::SYSTEM;
                 msg.language = game::ChatLanguage::UNIVERSAL;
@@ -394,8 +394,8 @@ public:
             }
             return {};
         } if (sub == "leave") {
-            if (ctx.gameHandler.isOnTransport()) {
-                ctx.gameHandler.clearPlayerTransport();
+            if (ctx.gameHandler.movement().isOnTransport()) {
+                ctx.gameHandler.movement().clearPlayerTransport();
                 game::MessageChatData msg;
                 msg.type = game::ChatType::SYSTEM;
                 msg.language = game::ChatLanguage::UNIVERSAL;

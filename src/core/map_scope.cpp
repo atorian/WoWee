@@ -54,7 +54,7 @@ MapScope::~MapScope() {
     // Transport GUIDs are reused across maps (an Undercity elevator's GUID
     // becomes a Deeprun tram's), and each transport is bound to an instance
     // of this scene, so the logical transports end with it.
-    services_.game.clearPlayerTransport();
+    services_.game.movement().clearPlayerTransport();
     if (auto* transports = services_.game.getTransportManager()) transports->clearTransports();
     // The equipment is composited onto the player model, which is one of this
     // scene's instances; the next scene's model is dressed from scratch.

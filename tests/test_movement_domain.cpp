@@ -97,14 +97,14 @@ TEST_CASE("the player rides the transport the server names, and steps off when i
     // Server offsets are x west, y north; on a transport this client has not
     // placed, canonical is the swap.
     playerMoves(h, kBoat, 1.0f, 2.0f, 3.0f);
-    REQUIRE(h.game().isOnTransport());
-    CHECK(h.game().getPlayerTransportGuid() == kBoat);
-    CHECK(h.game().getPlayerTransportOffset() == glm::vec3(2.0f, 1.0f, 3.0f));
+    REQUIRE(h.game().movement().isOnTransport());
+    CHECK(h.game().movement().getPlayerTransportGuid() == kBoat);
+    CHECK(h.game().movement().getPlayerTransportOffset() == glm::vec3(2.0f, 1.0f, 3.0f));
     CHECK(h.game().getMovementInfo().transportGuid == kBoat);
 
     playerMoves(h, 0);
-    CHECK_FALSE(h.game().isOnTransport());
-    CHECK(h.game().getPlayerTransportOffset() == glm::vec3(0.0f));
+    CHECK_FALSE(h.game().movement().isOnTransport());
+    CHECK(h.game().movement().getPlayerTransportOffset() == glm::vec3(0.0f));
     CHECK(h.game().getMovementInfo().transportGuid == 0);
 }
 
@@ -113,7 +113,7 @@ TEST_CASE("a transport the client has not seen yet does not carry the player", "
     enterWorldAsEntity(h);
 
     playerMoves(h, kBoat, 1.0f, 2.0f, 3.0f);
-    CHECK_FALSE(h.game().isOnTransport());
+    CHECK_FALSE(h.game().movement().isOnTransport());
 }
 
 TEST_CASE("a transport just stepped off survives being destroyed for a moment, and not after",

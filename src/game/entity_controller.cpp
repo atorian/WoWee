@@ -245,8 +245,8 @@ size_t EntityController::processOutOfRangeObjectsUntil(const std::vector<uint64_
             // Keep transports alive across out-of-range flapping.
             // Boats/zeppelins are global movers and removing them here can make
             // them disappear until a later movement snapshot happens to recreate them.
-            const bool playerAboardNow = (owner_.playerTransportGuidRef() == guid);
-            const bool stickyAboard = (owner_.playerTransportStickyGuidRef() == guid && owner_.playerTransportStickyTimerRef() > 0.0f);
+            const bool playerAboardNow = (owner_.movement().getPlayerTransportGuid() == guid);
+            const bool stickyAboard = owner_.movement().recentlyAboard(guid);
             const bool movementSaysAboard = (owner_.movementInfoRef().transportGuid == guid);
             LOG_INFO("Preserving transport on out-of-range: 0x",
                      std::hex, guid, std::dec,
@@ -279,8 +279,8 @@ size_t EntityController::processOutOfRangeObjectsUntil(const std::vector<uint64_
         transportGuids_.erase(guid);
         serverUpdatedTransportGuids_.erase(guid);
         owner_.movement().clearTransportAttachment(guid);
-        if (owner_.playerTransportGuidRef() == guid) {
-            owner_.clearPlayerTransport();
+        if (owner_.movement().getPlayerTransportGuid() == guid) {
+            owner_.movement().clearPlayerTransport();
         }
         entity.reset();
         entityManager.removeEntity(guid);
@@ -823,9 +823,9 @@ void EntityController::applyPlayerTransportState(const UpdateBlock& block,
         glm::vec3 canonicalOffset = owner_.getTransportManager()
             ? owner_.getTransportManager()->serverToTransportLocal(block.transportGuid, serverOffset)
             : core::coords::serverToCanonical(serverOffset);
-        owner_.setPlayerOnTransport(block.transportGuid, canonicalOffset);
-        if (owner_.getTransportManager() && owner_.getTransportManager()->getTransport(owner_.playerTransportGuidRef())) {
-            glm::vec3 composed = owner_.getTransportManager()->getPlayerWorldPosition(owner_.playerTransportGuidRef(), owner_.playerTransportOffsetRef());
+        owner_.movement().setPlayerOnTransport(block.transportGuid, canonicalOffset);
+        if (owner_.getTransportManager() && owner_.getTransportManager()->getTransport(owner_.movement().getPlayerTransportGuid())) {
+            glm::vec3 composed = owner_.getTransportManager()->getPlayerWorldPosition(owner_.movement().getPlayerTransportGuid(), owner_.movement().getPlayerTransportOffset());
             entity->setPosition(composed.x, composed.y, composed.z, oCanonical);
             owner_.movementInfoRef().x = composed.x;
             owner_.movementInfoRef().y = composed.y;
@@ -840,9 +840,9 @@ void EntityController::applyPlayerTransportState(const UpdateBlock& block,
                 owner_.movementInfoRef().z = canonicalPos.z;
             }
         }
-        LOG_INFO("Player on transport: 0x", std::hex, owner_.playerTransportGuidRef(), std::dec,
-                " offset=(", owner_.playerTransportOffsetRef().x, ", ", owner_.playerTransportOffsetRef().y,
-                ", ", owner_.playerTransportOffsetRef().z, ")");
+        LOG_INFO("Player on transport: 0x", std::hex, owner_.movement().getPlayerTransportGuid(), std::dec,
+                " offset=(", owner_.movement().getPlayerTransportOffset().x, ", ", owner_.movement().getPlayerTransportOffset().y,
+                ", ", owner_.movement().getPlayerTransportOffset().z, ")");
     } else {
         if (updateMovementInfoPos) {
             if (positionIsBad(canonicalPos.x, canonicalPos.y, canonicalPos.z)) {
@@ -858,16 +858,16 @@ void EntityController::applyPlayerTransportState(const UpdateBlock& block,
         // about locally animated M2 trams or TaxiPathNode WMO ships until our next
         // movement heartbeat publishes the attachment.
         bool isClientAnimatedTransport = false;
-        if (owner_.playerTransportGuidRef() != 0 && owner_.getTransportManager()) {
-            auto* tr = owner_.getTransportManager()->getTransport(owner_.playerTransportGuidRef());
+        if (owner_.movement().getPlayerTransportGuid() != 0 && owner_.getTransportManager()) {
+            auto* tr = owner_.getTransportManager()->getTransport(owner_.movement().getPlayerTransportGuid());
             // The same question the boarding check asks, asked the same way:
             // these three used to spell the condition out separately and a
             // rider admitted by one would be thrown off by another.
             isClientAnimatedTransport = tr && tr->carriesRiders();
         }
-        if (owner_.playerTransportGuidRef() != 0 && !isClientAnimatedTransport) {
+        if (owner_.movement().getPlayerTransportGuid() != 0 && !isClientAnimatedTransport) {
             LOG_INFO("Player left transport");
-            owner_.clearPlayerTransport();
+            owner_.movement().clearPlayerTransport();
         }
     }
 }
@@ -2401,7 +2401,7 @@ void EntityController::resyncPlayerIfFarFromServer(const glm::vec3& serverCanoni
     // seconds of running. Snapping on a smaller gap would fight the client's
     // own movement and rubber-band.
     constexpr float kResyncDistance = 50.0f;
-    if (owner_.isOnTransport()) return;
+    if (owner_.movement().isOnTransport()) return;
     if (owner_.movement().isOnTaxiFlight()) return;
     auto& mi = owner_.movementInfoRef();
     const glm::vec3 clientPos(mi.x, mi.y, mi.z);
@@ -2623,8 +2623,8 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
     // Remove entity
     if (entityManager.hasEntity(data.guid)) {
         if (transportGuids_.count(data.guid) > 0) {
-            const bool playerAboardNow = (owner_.playerTransportGuidRef() == data.guid);
-            const bool stickyAboard = (owner_.playerTransportStickyGuidRef() == data.guid && owner_.playerTransportStickyTimerRef() > 0.0f);
+            const bool playerAboardNow = (owner_.movement().getPlayerTransportGuid() == data.guid);
+            const bool stickyAboard = owner_.movement().recentlyAboard(data.guid);
             const bool movementSaysAboard = (owner_.movementInfoRef().transportGuid == data.guid);
             // CMaNGOS judges visibility using the transport's static DB spawn
             // coordinate, which can be far from where a client-animated transport
@@ -2659,8 +2659,8 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
         if (transportGuids_.count(data.guid) > 0) {
             transportGuids_.erase(data.guid);
             serverUpdatedTransportGuids_.erase(data.guid);
-            if (owner_.playerTransportGuidRef() == data.guid) {
-                owner_.clearPlayerTransport();
+            if (owner_.movement().getPlayerTransportGuid() == data.guid) {
+                owner_.movement().clearPlayerTransport();
             }
         }
         owner_.movement().clearTransportAttachment(data.guid);

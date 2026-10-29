@@ -493,7 +493,7 @@ bool MovementHandler::restoreWorldTransferFallbackIfNearOrigin(const char* conte
     movementInfo.transportGuid = 0;
     movementInfo.transportSeat = -1;
     movementInfo.flags &= ~static_cast<uint32_t>(MovementFlags::ONTRANSPORT);
-    owner_.clearPlayerTransport();
+    clearPlayerTransport();
 
     if (auto player = owner_.getEntityManager().getEntity(owner_.getPlayerGuid())) {
         player->setPosition(movementInfo.x, movementInfo.y, movementInfo.z, movementInfo.orientation);
@@ -783,9 +783,9 @@ void MovementHandler::sendMovement(Opcode opcode) {
         sanitizeMovementForTaxi();
     }
 
-    bool includeTransportInWire = owner_.isOnTransport();
+    bool includeTransportInWire = isOnTransport();
     if (includeTransportInWire && owner_.getTransportManager()) {
-        if (auto* tr = owner_.getTransportManager()->getTransport(owner_.playerTransportGuidRef()); tr && tr->isM2) {
+        if (auto* tr = owner_.getTransportManager()->getTransport(playerTransportGuid_); tr && tr->isM2) {
             includeTransportInWire = false;
         }
     }
@@ -794,10 +794,10 @@ void MovementHandler::sendMovement(Opcode opcode) {
     if (includeTransportInWire) {
         bool transportResolved = false;
         if (owner_.getTransportManager()) {
-            auto* tr = owner_.getTransportManager()->getTransport(owner_.playerTransportGuidRef());
+            auto* tr = owner_.getTransportManager()->getTransport(playerTransportGuid_);
             if (tr) {
                 transportResolved = true;
-                glm::vec3 composed = owner_.getTransportManager()->getPlayerWorldPosition(owner_.playerTransportGuidRef(), owner_.playerTransportOffsetRef());
+                glm::vec3 composed = owner_.getTransportManager()->getPlayerWorldPosition(playerTransportGuid_, playerTransportOffset_);
                 movementInfo.x = composed.x;
                 movementInfo.y = composed.y;
                 movementInfo.z = composed.z;
@@ -807,25 +807,25 @@ void MovementHandler::sendMovement(Opcode opcode) {
             // Transport not tracked - don't send ONTRANSPORT to the server.
             // Sending stale transport GUID + local offset causes the server to
             // compute a bad world position and teleport us to map origin.
-            LOG_WARNING("sendMovement: transport 0x", std::hex, owner_.playerTransportGuidRef(),
+            LOG_WARNING("sendMovement: transport 0x", std::hex, playerTransportGuid_,
                         std::dec, " not found - clearing transport state");
             includeTransportInWire = false;
-            owner_.clearPlayerTransport();
+            clearPlayerTransport();
         }
     }
     if (includeTransportInWire) {
         movementInfo.flags |= static_cast<uint32_t>(MovementFlags::ONTRANSPORT);
-        movementInfo.transportGuid = owner_.playerTransportGuidRef();
-        movementInfo.transportX = owner_.playerTransportOffsetRef().x;
-        movementInfo.transportY = owner_.playerTransportOffsetRef().y;
-        movementInfo.transportZ = owner_.playerTransportOffsetRef().z;
+        movementInfo.transportGuid = playerTransportGuid_;
+        movementInfo.transportX = playerTransportOffset_.x;
+        movementInfo.transportY = playerTransportOffset_.y;
+        movementInfo.transportZ = playerTransportOffset_.z;
         movementInfo.transportTime = movementInfo.time;
         movementInfo.transportSeat = -1;
         movementInfo.transportTime2 = movementInfo.time;
 
         float transportYawCanonical = 0.0f;
         if (owner_.getTransportManager()) {
-            if (auto* tr = owner_.getTransportManager()->getTransport(owner_.playerTransportGuidRef()); tr) {
+            if (auto* tr = owner_.getTransportManager()->getTransport(playerTransportGuid_); tr) {
                 if (tr->hasServerYaw) {
                     transportYawCanonical = tr->serverYaw;
                 } else {
@@ -887,8 +887,8 @@ void MovementHandler::sendMovement(Opcode opcode) {
         if (!restoreWorldTransferFallbackIfNearOrigin("sendMovement")) {
             LOG_WARNING("sendMovement: BLOCKED near-origin heartbeat canonical=(",
                         movementInfo.x, ", ", movementInfo.y, ", ", movementInfo.z,
-                        ") onTransport=", owner_.isOnTransport(),
-                        " transportGuid=0x", std::hex, owner_.playerTransportGuidRef(), std::dec,
+                        ") onTransport=", isOnTransport(),
+                        " transportGuid=0x", std::hex, playerTransportGuid_, std::dec,
                         " flags=0x", std::hex, movementInfo.flags, std::dec);
             return;
         }
@@ -1005,7 +1005,7 @@ void MovementHandler::forceClearTaxiAndMovementState() {
     movementInfo.flags = 0;
     movementInfo.flags2 = 0;
     movementInfo.transportGuid = 0;
-    owner_.clearPlayerTransport();
+    clearPlayerTransport();
 
     if (sender_.characterInWorld()) {
         sendMovement(Opcode::MSG_MOVE_STOP);
@@ -2139,14 +2139,14 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
     float serverY = packet.readFloat();
     float serverZ = packet.readFloat();
     float orientation = packet.readFloat();
-    const bool crossMapTransportTransfer = owner_.isOnTransport() &&
+    const bool crossMapTransportTransfer = isOnTransport() &&
         mapId != owner_.getCurrentMapId();
     if (crossMapTransportTransfer) {
         // While riding a cross-continent transport, SMSG_NEW_WORLD carries the
         // player's transport-local coordinates. They are not a world position
         // near map origin. Hold them until the same ship is registered on the
         // destination map, then compose them through its new transform.
-        owner_.beginPlayerTransportWorldTransfer(
+        beginPlayerTransportWorldTransfer(
             mapId, core::coords::serverToCanonical(glm::vec3(serverX, serverY, serverZ)));
     }
     const uint32_t transferAreaTriggerId = lastAreaTriggerId_;
@@ -3333,8 +3333,8 @@ void MovementHandler::checkAreaTriggers() {
         if (!restoreWorldTransferFallbackIfNearOrigin("checkAreaTriggers")) {
             LOG_WARNING("checkAreaTriggers: position near map origin (", px, ", ", py, ", ", pz,
                         ") on map 0 - skipping to avoid rogue teleport. onTransport=",
-                        owner_.isOnTransport(), " transportGuid=0x", std::hex,
-                        owner_.playerTransportGuidRef(), std::dec);
+                        isOnTransport(), " transportGuid=0x", std::hex,
+                        playerTransportGuid_, std::dec);
             return;
         }
     }
@@ -3834,6 +3834,484 @@ void MovementHandler::updateFollowMovement(float deltaTime) {
     const float t = distance > 0.001f ? (step / distance) : 0.0f;
     setPosition(movementInfo.x + dx * t, movementInfo.y + dy * t, movementInfo.z + dz * t);
     sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
+}
+
+// ============================================================
+// The player's transport
+// ============================================================
+
+void MovementHandler::setPlayerOnTransport(uint64_t transportGuid, const glm::vec3& localOffset) {
+    // Validate transport is registered before attaching player
+    // (defer if transport not yet registered to prevent desyncs)
+    if (transportGuid != 0 && !owner_.entityController().isTransportGuid(transportGuid)) {
+        // Said, rather than dropped in silence.
+        //
+        // This is the one decision between the server saying the player
+        // has boarded and the client agreeing, and taking it means the
+        // player stands still while the transport leaves without them -
+        // with nothing logged, nothing raised, and no retry. If the
+        // zeppelin sails off and the player does not, this line is the
+        // first place to look.
+        static uint64_t saidFor = 0;
+        if (saidFor != transportGuid) {
+            saidFor = transportGuid;
+            LOG_WARNING("Transport attach refused: guid=0x", std::hex,
+                        transportGuid, std::dec,
+                        " is not a registered transport yet - the player "
+                        "will not move with it");
+        }
+        return;  // Transport not yet registered; skip attachment
+    }
+    playerTransportGuid_ = transportGuid;
+    playerTransportOffset_ = localOffset;
+    playerTransportStickyGuid_ = transportGuid;
+    playerTransportStickyTimer_ = 8.0f;
+    movementInfo.transportGuid = transportGuid;
+}
+
+void MovementHandler::clearPlayerTransport() {
+    if (playerTransportGuid_ != 0) {
+        playerTransportStickyGuid_ = playerTransportGuid_;
+        playerTransportStickyTimer_ = std::max(playerTransportStickyTimer_, 1.5f);
+    }
+    playerTransportGuid_ = 0;
+    playerTransportOffset_ = glm::vec3(0.0f);
+    movementInfo.transportGuid = 0;
+}
+
+void MovementHandler::updatePlayerTransportHold(float deltaTime) {
+    if (playerTransportStickyTimer_ > 0.0f) {
+        playerTransportStickyTimer_ -= deltaTime;
+        if (playerTransportStickyTimer_ <= 0.0f) {
+            playerTransportStickyTimer_ = 0.0f;
+            playerTransportStickyGuid_ = 0;
+        }
+    }
+}
+
+glm::vec3 MovementHandler::getComposedWorldPosition() {
+    if (playerTransportGuid_ != 0 && owner_.getTransportManager()) {
+        auto* tr = owner_.getTransportManager()->getTransport(playerTransportGuid_);
+        if (tr) {
+            return owner_.getTransportManager()->getPlayerWorldPosition(playerTransportGuid_, playerTransportOffset_);
+        }
+        // Transport not tracked - fall through to normal position
+    }
+    // Not on transport, return normal movement position
+    return glm::vec3(movementInfo.x, movementInfo.y, movementInfo.z);
+}
+
+void MovementHandler::beginPlayerTransportWorldTransfer(
+    uint32_t destinationMapId, const glm::vec3& localOffset) {
+    if (playerTransportGuid_ == 0) return;
+
+    pendingPlayerTransportTransfer_ = true;
+    pendingPlayerTransportGuid_ = playerTransportGuid_;
+    pendingPlayerTransportMapId_ = destinationMapId;
+    pendingPlayerTransportOffset_ = localOffset;
+    pendingPlayerTransportEntry_ = 0;
+    if (const auto* transport = owner_.getTransportManager()->getTransport(playerTransportGuid_)) {
+        pendingPlayerTransportEntry_ = transport->entry;
+    }
+
+    LOG_WARNING("Transport world transfer armed: guid=0x", std::hex,
+                pendingPlayerTransportGuid_, std::dec,
+                " entry=", pendingPlayerTransportEntry_,
+                " destinationMap=", destinationMapId,
+                " local=(", localOffset.x, ",", localOffset.y, ",", localOffset.z, ")");
+}
+
+bool MovementHandler::completePlayerTransportWorldTransfer(
+    uint64_t transportGuid, glm::vec3& worldPosition) {
+    if (!pendingPlayerTransportTransfer_ ||
+        owner_.getCurrentMapId() != pendingPlayerTransportMapId_) {
+        return false;
+    }
+
+    auto* transport = owner_.getTransportManager()->getTransport(transportGuid);
+    if (!transport) return false;
+    const bool matchingTransport = transportGuid == pendingPlayerTransportGuid_ ||
+        (pendingPlayerTransportEntry_ != 0 &&
+         transport->entry == pendingPlayerTransportEntry_);
+    if (!matchingTransport) return false;
+
+    setPlayerOnTransport(transportGuid, pendingPlayerTransportOffset_);
+    worldPosition = owner_.getTransportManager()->getPlayerWorldPosition(
+        transportGuid, pendingPlayerTransportOffset_);
+    setPosition(worldPosition.x, worldPosition.y, worldPosition.z);
+
+    LOG_WARNING("Transport world transfer restored: guid=0x", std::hex,
+                transportGuid, std::dec,
+                " entry=", transport->entry,
+                " map=", owner_.getCurrentMapId(),
+                " local=(", pendingPlayerTransportOffset_.x, ",",
+                pendingPlayerTransportOffset_.y, ",",
+                pendingPlayerTransportOffset_.z, ") world=(",
+                worldPosition.x, ",", worldPosition.y, ",", worldPosition.z, ")");
+
+    pendingPlayerTransportTransfer_ = false;
+    pendingPlayerTransportGuid_ = 0;
+    pendingPlayerTransportEntry_ = 0;
+    pendingPlayerTransportMapId_ = 0xFFFFFFFFu;
+    return true;
+}
+
+// Client-side transport boarding/disembark detection for locally animated transports.
+// This includes M2 trams/lifts and TaxiPathNode WMO ships: once the client owns a
+// ship's route, the server's static spawn cannot provide timely attachment data.
+// Shared between the GUI Application's
+// per-frame update loop and any other driver (e.g. a headless harness) that knows the
+// player's current canonical world position but has no renderer/camera of its own.
+void MovementHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
+    auto* tm = owner_.getTransportManager();
+    if (!tm) return;
+
+    if (!isOnTransport()) {
+        // Thunder Bluff elevators use model origins that can be far from the deck
+        // the player stands on, so they need wider attachment bounds.
+        constexpr float kM2BoardHorizDistSq = 12.0f * 12.0f;
+        constexpr float kM2BoardVertDist = 15.0f;
+        constexpr float kTbLiftBoardHorizDistSq = 22.0f * 22.0f;
+        constexpr float kTbLiftBoardVertDist = 14.0f;
+        // Deeprun's capture radius has swung twice on the horizontal axis already:
+        // 18/18 (too wide - boarding triggered far enough away that the rider ended up
+        // floating off to the side) down to 7/6 (too tight - stopped attaching at all).
+        // 9.5 horizontal turned out fine - live diagnostic data (logged every second
+        // while no candidate is in range) showed horizDist getting down to ~1-2 units
+        // repeatedly, well inside the box. But boarding *still* never fired, because the
+        // vertical threshold was the real problem all along: vertDist sat consistently
+        // around 10.4-11.9 units at every one of those close-horizontal-approach samples,
+        // across all three different cars tested, far outside the old 8.0 vertical
+        // window. That's not noise - it's SubwayCar.m2's model origin sitting well below
+        // the deck the player actually stands on (same root cause already called out for
+        // Thunder Bluff lifts above: kTbLiftBoardVertDist=14 exists for exactly this
+        // reason). Widen vertical to comfortably clear the observed ~11.9 max.
+        constexpr float kDeeprunTramBoardVertDist = 13.0f;
+        // An isotropic horizontal radius from the car's center can't tell "on this car"
+        // from "on the neighboring car" (adjacent cars are only ~20 units apart along the
+        // track - a 9.5 radius from each center overlaps its neighbor) or from "still
+        // standing on the platform, several units to the side" (the platform-to-deck
+        // vertical gap is nearly identical on the platform as on the actual car, so vert
+        // distance alone can't disambiguate either). Live logs caught both: walking along
+        // the platform re-boarded the adjacent car in the same train, and walking across
+        // one car's width boarded on one side then rode with a lateral offset of ~9.5 -
+        // effectively standing on empty platform on the *other* side of the car body
+        // (SubwayCar.m2's real half-width from its own mesh is only 5.68). Test against
+        // the car's actual oriented footprint instead: transform the player into the
+        // car's local model space (same invTransform already computed every frame for
+        // collision) and bound against the real mesh extents (X ~9.18 half-length along
+        // the direction of travel, Y ~5.68 half-width across it), not a radius from a
+        // point. Small margin added on top for the "about to step across from the
+        // platform" approach.
+        constexpr float kDeeprunTramBoardHalfLength = 9.18f + 1.5f;  // along direction of travel
+        constexpr float kDeeprunTramBoardHalfWidth = 5.68f + 1.5f;   // across the car's width
+        constexpr float kShipBoardHalfLength = 65.0f;
+        constexpr float kShipBoardHalfWidth = 30.0f;
+        // Down as well as up, because a deck is not always above the origin.
+        //
+        // A boat's model origin sits at the waterline with its deck above, so
+        // a floor of +1 fitted every ship this was written against. A zeppelin
+        // hangs its gondola under a balloon and puts the origin up in the
+        // envelope: standing on the Tirisfal deck measures -16.4 locally, well
+        // under the old floor, so the boarding test rejected a player who was
+        // demonstrably standing on it - isPointOnTransportDeck said 1 in the
+        // same breath. Same shape of fault as SubwayCar and the Thunder Bluff
+        // lifts above, whose origins sit below their decks instead.
+        //
+        // The real guard here is the deck query, which traces actual collision;
+        // these bounds only keep a swimmer under a hull or a bird over one from
+        // being picked up, and -34 is still well inside the gondola.
+        constexpr float kShipBoardMinZ = -34.0f;
+        constexpr float kShipBoardMaxZ = 35.0f;
+
+        uint64_t bestGuid = 0;
+        float bestScore = 1e30f;
+        // Tracks the closest Deeprun tram car even when it's outside the capture
+        // radius, purely so a rejection can be logged with real distance numbers -
+        // the capture radius has been re-tuned blind twice already (18/18, then 7/6)
+        // from user reports alone with no actual miss-distance data to tune against.
+        uint64_t nearestDeeprunGuid = 0;
+        float nearestDeeprunLocalX = 0.0f;
+        float nearestDeeprunLocalY = 0.0f;
+        float nearestDeeprunLocalDistSq = 1e30f;
+        float nearestDeeprunVertDist = 0.0f;
+        const glm::vec3 playerRenderPos = core::coords::canonicalToRender(playerCanonical);
+        for (auto& [guid, transport] : tm->getTransports()) {
+            const bool isClientShip = !transport.isM2 && transport.carriesRiders();
+            if (!transport.isM2 && !isClientShip) {
+                // Said once per transport, because this is where a rider is
+                // lost. Boarding is decided entirely on the client - the
+                // server never tells you that you stepped aboard your own
+                // transport - so a WMO ship that fails this test can sail
+                // away with the player standing where the deck used to be,
+                // and nothing anywhere reports it.
+                static std::set<uint64_t> saidSkip;
+                if (saidSkip.insert(guid).second) {
+                    LOG_WARNING("Transport not eligible for boarding: guid=0x",
+                                std::hex, guid, std::dec,
+                                " entry=", transport.entry,
+                                " isM2=", transport.isM2 ? 1 : 0,
+                                " worldCoords=", transport.worldCoords ? 1 : 0,
+                                " useClientAnimation=",
+                                transport.useClientAnimation ? 1 : 0);
+                }
+                continue;
+            }
+            const bool isThunderBluffLift =
+                (transport.entry >= 20649u && transport.entry <= 20657u);
+            const bool isDeeprunTram =
+                TransportManager::isDeeprunTramTransport(transport);
+            glm::vec3 diff = playerCanonical - transport.position;
+            float vertDist = std::abs(diff.z);
+
+            if (isClientShip) {
+                const glm::vec3 local(transport.invTransform * glm::vec4(playerRenderPos, 1.0f));
+                if (std::abs(local.x) < kShipBoardHalfLength &&
+                    std::abs(local.y) < kShipBoardHalfWidth &&
+                    local.z > kShipBoardMinZ && local.z < kShipBoardMaxZ &&
+                    tm->isPointOnTransportDeck(guid, playerCanonical)) {
+                    const float score = local.x * local.x + local.y * local.y;
+                    if (score < bestScore) {
+                        bestScore = score;
+                        bestGuid = guid;
+                    }
+                }
+                continue;
+            }
+
+            if (isDeeprunTram) {
+                const glm::vec4 local4 = transport.invTransform * glm::vec4(playerRenderPos, 1.0f);
+                const glm::vec3 local(local4);
+                const float localDistSq = local.x * local.x + local.y * local.y;
+                if (localDistSq < nearestDeeprunLocalDistSq) {
+                    nearestDeeprunLocalDistSq = localDistSq;
+                    nearestDeeprunLocalX = local.x;
+                    nearestDeeprunLocalY = local.y;
+                    nearestDeeprunVertDist = vertDist;
+                    nearestDeeprunGuid = guid;
+                }
+                if (std::abs(local.x) < kDeeprunTramBoardHalfLength &&
+                    std::abs(local.y) < kDeeprunTramBoardHalfWidth &&
+                    vertDist < kDeeprunTramBoardVertDist) {
+                    const float score = localDistSq + vertDist * vertDist;
+                    if (score < bestScore) {
+                        bestScore = score;
+                        bestGuid = guid;
+                    }
+                }
+                continue;
+            }
+
+            const float maxHorizDistSq = isThunderBluffLift
+                ? kTbLiftBoardHorizDistSq
+                : kM2BoardHorizDistSq;
+            const float maxVertDist = isThunderBluffLift
+                ? kTbLiftBoardVertDist
+                : kM2BoardVertDist;
+            float horizDistSq = diff.x * diff.x + diff.y * diff.y;
+            // Over the car, not merely near it.
+            //
+            // The radius alone is twelve yards across and fifteen tall, and an
+            // Undercity lift car is about fifteen wide - so it reaches past the
+            // deck into the shaft, and walking by one attached the player to
+            // it. The lift then carried them down through the floor: reported
+            // live as falling at the elevator while standing beside it, with
+            // the log showing onTransport=1 on the frame the fall began and a
+            // descent that wandered twenty yards sideways, which gravity does
+            // not do.
+            //
+            // The footprint is the renderer's own collision bounds for the
+            // car. Where it has none the radius stands, as before.
+            const std::optional<bool> overDeck =
+                tm->isPointOverM2Footprint(guid, playerCanonical);
+            if (horizDistSq < maxHorizDistSq && vertDist < maxVertDist &&
+                overDeck.value_or(true)) {
+                float score = horizDistSq + vertDist * vertDist;
+                if (score < bestScore) {
+                    bestScore = score;
+                    bestGuid = guid;
+                }
+            }
+        }
+        if (bestGuid == 0 && nearestDeeprunGuid != 0) {
+            // Boarding/disembark are now on a well-tested oriented-footprint check
+            // (verified live) rather than the blind-tuned isotropic radius this was
+            // originally added to debug. Routine while just walking around Deeprun not
+            // boarded - demoted to DEBUG. Still throttled to ~1/sec since this runs
+            // every frame while not boarded.
+            static double lastLogTime = -1000.0;
+            const double now = static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count()) / 1000.0;
+            if (now - lastLogTime >= 1.0) {
+                lastLogTime = now;
+                LOG_DEBUG("Deeprun tram boarding: no candidate in range, nearest car guid=0x",
+                            std::hex, nearestDeeprunGuid, std::dec,
+                            " localX=", nearestDeeprunLocalX,
+                            " localY=", nearestDeeprunLocalY,
+                            " vertDist=", nearestDeeprunVertDist);
+            }
+        }
+        if (bestGuid != 0) {
+            auto* tr = tm->getTransport(bestGuid);
+            if (tr) {
+                const bool isDeeprunTram =
+                    TransportManager::isDeeprunTramTransport(*tr);
+                const glm::vec3 offset = tr->isM2
+                    ? playerCanonical - tr->position
+                    : glm::vec3(tr->invTransform * glm::vec4(playerRenderPos, 1.0f));
+                setPlayerOnTransport(bestGuid, offset);
+                if (isDeeprunTram) {
+                    const bool attached = getPlayerTransportGuid() == bestGuid;
+                    LOG_INFO("Deeprun tram boarding candidate ", (attached ? "accepted" : "rejected"),
+                                ": guid=0x", std::hex, bestGuid, std::dec,
+                                " entry=", tr->entry,
+                                " pathId=", tr->pathId,
+                                " player=(", playerCanonical.x, ",", playerCanonical.y, ",", playerCanonical.z, ")",
+                                " tram=(", tr->position.x, ",", tr->position.y, ",", tr->position.z, ")",
+                                " offset=(", offset.x, ",", offset.y, ",", offset.z, ")");
+                } else if (!tr->isM2) {
+                    LOG_WARNING("Client ship boarding accepted: guid=0x", std::hex, bestGuid, std::dec,
+                                " entry=", tr->entry,
+                                " local=(", offset.x, ",", offset.y, ",", offset.z, ")");
+                } else {
+                    LOG_DEBUG("M2 transport boarding: guid=0x", std::hex, bestGuid, std::dec);
+                }
+            }
+        }
+        return;
+    }
+
+    // M2 transport disembark: player walked far enough from transport center.
+    auto* tr = tm->getTransport(getPlayerTransportGuid());
+    if (!tr) return;
+    glm::vec3 diff = playerCanonical - tr->position;
+    float horizDistSq = diff.x * diff.x + diff.y * diff.y;
+
+    // Sanity guard against a transient bad position sample rather than a real disembark.
+    // Live data caught one: player=(-44.9,2309.03,..) vs tram=(2309.83,-45.4,..) - the
+    // player's X and Y are each within ~1 unit of the tram's Y and X respectively (an
+    // axis swap, not a real position), giving horizDist~3330 in a single frame despite
+    // riding smoothly for the prior ~70 seconds. Nothing can legitimately move that far
+    // between frames; whatever produced that sample (suspected: a raw server-coordinate
+    // movement update landing without the usual serverToCanonical swap, since that
+    // conversion has the exact same X/Y-swap shape as the corruption seen - possibly
+    // tied to a packet glitch, a "MSG_MOVE_TELEPORT_ACK: not enough data for movement
+    // info" was logged moments later in the same session) shouldn't be trusted enough to
+    // eject the player over open track - "kicked me off when I almost got to the other
+    // station" reported live. Skip disembark entirely this frame on an implausible jump;
+    // it'll re-evaluate next frame against (presumably) good data instead.
+    constexpr float kImplausibleDisembarkDistSq = 200.0f * 200.0f;
+    if (horizDistSq > kImplausibleDisembarkDistSq) {
+        LOG_WARNING("Deeprun tram disembark check skipped - implausible jump: guid=0x",
+                    std::hex, getPlayerTransportGuid(), std::dec,
+                    " horizDist=", std::sqrt(horizDistSq),
+                    " player=(", playerCanonical.x, ",", playerCanonical.y, ",", playerCanonical.z, ")",
+                    " tram=(", tr->position.x, ",", tr->position.y, ",", tr->position.z, ")");
+        return;
+    }
+
+    const bool isThunderBluffLift =
+        (tr->entry >= 20649u && tr->entry <= 20657u);
+    const bool isDeeprunTram = TransportManager::isDeeprunTramTransport(*tr);
+
+    if (!tr->isM2 && tr->carriesRiders()) {
+        constexpr float kShipDisembarkHalfLength = 70.0f;
+        constexpr float kShipDisembarkHalfWidth = 35.0f;
+        // Wider than the boarding floor, and for the same reason.
+        //
+        // Boarding accepts a deck below the model origin - a zeppelin's
+        // gondola measures about -17 - and this said anything under -3 had
+        // walked off the ship. So the player was attached by one check and
+        // thrown off by the other in the same breath: the log shows
+        // onTransport flipping 1/0 every twenty milliseconds until they fell.
+        //
+        // Kept a little looser than the boarding window, so the two do not
+        // fight over a player standing exactly on the boundary.
+        constexpr float kShipDisembarkMinZ = -40.0f;
+        constexpr float kShipDisembarkMaxZ = 45.0f;
+        const glm::vec3 playerRenderPos = core::coords::canonicalToRender(playerCanonical);
+        const glm::vec3 local(tr->invTransform * glm::vec4(playerRenderPos, 1.0f));
+        const bool outsideBounds =
+            std::abs(local.x) > kShipDisembarkHalfLength ||
+            std::abs(local.y) > kShipDisembarkHalfWidth ||
+            local.z < kShipDisembarkMinZ || local.z > kShipDisembarkMaxZ;
+        const bool hasDeckSupport =
+            tm->isPointOnTransportDeck(getPlayerTransportGuid(), playerCanonical, 3.0f);
+
+        // The footprint above is deliberately generous - larger than any hull -
+        // so it only catches someone clearly away from the ship. Stepping off
+        // onto the pier alongside leaves the rider well inside it, which is why
+        // they stayed attached while standing on the dock. Losing the deck is
+        // what actually tells the two apart, and it was already being measured
+        // here and used for nothing but the log line.
+        //
+        // Counted over several frames rather than acted on at once, because a
+        // jump also leaves the deck for a moment and must not put the rider
+        // ashore in mid-air.
+        constexpr int kFramesAshore = 20;
+        if (hasDeckSupport) {
+            shipNoDeckSupportFrames_ = 0;
+        } else if (shipNoDeckSupportFrames_ < kFramesAshore) {
+            ++shipNoDeckSupportFrames_;
+        }
+        const bool ashore = shipNoDeckSupportFrames_ >= kFramesAshore;
+
+        if (outsideBounds || ashore) {
+            LOG_WARNING("Client ship disembark: guid=0x", std::hex,
+                        getPlayerTransportGuid(), std::dec,
+                        " outsideBounds=", outsideBounds,
+                        " ashore=", ashore,
+                        " local=(", local.x, ",", local.y, ",", local.z, ")");
+            shipNoDeckSupportFrames_ = 0;
+            clearPlayerTransport();
+        }
+        return;
+    }
+
+    if (isDeeprunTram) {
+        // Same oriented-footprint reasoning as the boarding scan above: an isotropic
+        // radius from the car's center can't tell "still on the car" from "walked off
+        // the far side onto open platform." Live data caught exactly that - a rider's
+        // lateral offset swung from +9.5 to -9.5 (fully across and off SubwayCar.m2's
+        // real 5.68-unit half-width) while still reading as "on board" the whole way,
+        // because the old 18-unit isotropic radius didn't clear until well past the
+        // real car body in every direction. Test the player's position in the car's own
+        // local space instead, with a modest margin over the real mesh extents (X 9.18,
+        // Y 5.68) so ordinary standing/shifting on the deck doesn't hair-trigger an
+        // eject, without allowing a full walk-through before releasing.
+        constexpr float kDeeprunTramDisembarkHalfLength = 9.18f + 3.0f;
+        constexpr float kDeeprunTramDisembarkHalfWidth = 5.68f + 3.0f;
+        constexpr float kDeeprunTramDisembarkVertDist = 22.0f;
+        const glm::vec3 playerRenderPos = core::coords::canonicalToRender(playerCanonical);
+        const glm::vec4 local4 = tr->invTransform * glm::vec4(playerRenderPos, 1.0f);
+        const glm::vec3 local(local4);
+        if (std::abs(local.x) > kDeeprunTramDisembarkHalfLength ||
+            std::abs(local.y) > kDeeprunTramDisembarkHalfWidth ||
+            std::abs(diff.z) > kDeeprunTramDisembarkVertDist) {
+            LOG_INFO("Deeprun tram disembark: guid=0x", std::hex, getPlayerTransportGuid(), std::dec,
+                        " localX=", local.x, " localY=", local.y, " vertDist=", std::abs(diff.z),
+                        " player=(", playerCanonical.x, ",", playerCanonical.y, ",", playerCanonical.z, ")",
+                        " tram=(", tr->position.x, ",", tr->position.y, ",", tr->position.z, ")");
+            clearPlayerTransport();
+            LOG_DEBUG("M2 transport disembark");
+        }
+        return;
+    }
+
+    constexpr float kM2DisembarkHorizDistSq = 15.0f * 15.0f;
+    constexpr float kTbLiftDisembarkHorizDistSq = 28.0f * 28.0f;
+    constexpr float kM2DisembarkVertDist = 18.0f;
+    constexpr float kTbLiftDisembarkVertDist = 16.0f;
+    const float disembarkHorizDistSq = isThunderBluffLift
+        ? kTbLiftDisembarkHorizDistSq
+        : kM2DisembarkHorizDistSq;
+    const float disembarkVertDist = isThunderBluffLift
+        ? kTbLiftDisembarkVertDist
+        : kM2DisembarkVertDist;
+    if (horizDistSq > disembarkHorizDistSq || std::abs(diff.z) > disembarkVertDist) {
+        clearPlayerTransport();
+        LOG_DEBUG("M2 transport disembark");
+    }
 }
 
 } // namespace game

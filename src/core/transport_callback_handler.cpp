@@ -242,13 +242,13 @@ void TransportCallbackHandler::setupCallbacks() {
             transportManager->updateServerTransport(e.guid, canonicalPos, e.orientation);
 
             // Move player with transport if riding it
-            if (gameHandler_.isOnTransport() && gameHandler_.getPlayerTransportGuid() == e.guid) {
+            if (gameHandler_.movement().isOnTransport() && gameHandler_.movement().getPlayerTransportGuid() == e.guid) {
                 auto* cc = playerView_.getCameraController();
                 if (cc) {
                     glm::vec3* ft = cc->getFollowTargetMutable();
                     if (ft) {
                         // Get player world position from TransportManager (handles transform properly)
-                        glm::vec3 offset = gameHandler_.getPlayerTransportOffset();
+                        glm::vec3 offset = gameHandler_.movement().getPlayerTransportOffset();
                         glm::vec3 worldPos = transportManager->getPlayerWorldPosition(e.guid, offset);
                         *ft = worldPos;
                     }

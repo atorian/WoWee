@@ -1556,7 +1556,7 @@ void EntitySpawner::processPendingTransportRegistrations() {
             }
 
             glm::vec3 restoredWorldPosition(0.0f);
-            if (gameHandler_->completePlayerTransportWorldTransfer(
+            if (gameHandler_->movement().completePlayerTransportWorldTransfer(
                     pending.guid, restoredWorldPosition)) {
                 const glm::vec3 renderPosition =
                     core::coords::canonicalToRender(restoredWorldPosition);

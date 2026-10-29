@@ -3057,13 +3057,13 @@ void Application::applyServerMovementState(float deltaTime) {
     bool actuallyFlying = gameHandler &&
                           (gameHandler->movement().isOnTaxiFlight() ||
                            gameHandler->movement().isTaxiMountActive());
-    bool onTransportNow = gameHandler && gameHandler->isOnTransport();
+    bool onTransportNow = gameHandler && gameHandler->movement().isOnTransport();
     // Clear stale client-side transport state when the tracked transport no longer exists.
     if (onTransportNow && gameHandler->getTransportManager()) {
         auto* currentTracked = gameHandler->getTransportManager()->getTransport(
-            gameHandler->getPlayerTransportGuid());
+            gameHandler->movement().getPlayerTransportGuid());
         if (!currentTracked) {
-            gameHandler->clearPlayerTransport();
+            gameHandler->movement().clearPlayerTransport();
             onTransportNow = false;
         }
     }
@@ -3072,7 +3072,7 @@ void Application::applyServerMovementState(float deltaTime) {
     // Only WMO transports (ships) use full external-driven mode.
     bool isM2Transport = false;
     if (onTransportNow && gameHandler->getTransportManager()) {
-        auto* tr = gameHandler->getTransportManager()->getTransport(gameHandler->getPlayerTransportGuid());
+        auto* tr = gameHandler->getTransportManager()->getTransport(gameHandler->movement().getPlayerTransportGuid());
         isM2Transport = (tr && tr->isM2);
     }
     bool onWMOTransport = onTransportNow && !isM2Transport;
@@ -3099,7 +3099,7 @@ void Application::applyServerMovementState(float deltaTime) {
     // hasn't loaded yet - prevents gravity from pulling player through void.
     bool hearthFreeze = worldEntryCallbacks_ && worldEntryCallbacks_->isHearthTeleportPending();
     const bool transportTransferFreeze = gameHandler &&
-        gameHandler->hasPendingPlayerTransportWorldTransfer();
+        gameHandler->movement().hasPendingPlayerTransportWorldTransfer();
     bool landingClampActive = !onTaxi && worldEntryCallbacks_ && worldEntryCallbacks_->getTaxiLandingClampTimer() > 0.0f &&
                               worldEntryCallbacks_->getWorldEntryMovementGraceTimer() <= 0.0f &&
                               !gameHandler->isMounted();
@@ -3263,7 +3263,7 @@ void Application::applyServerMovementState(float deltaTime) {
     bool onTransport = onWMOTransport;
 
     static bool wasOnTransport = false;
-    bool onTransportNowDbg = gameHandler->isOnTransport();
+    bool onTransportNowDbg = gameHandler->movement().isOnTransport();
     if (onTransportNowDbg != wasOnTransport) {
         // At warning, not debug. Whether the player is attached to a transport
         // decides which movement branch runs, and "the zeppelin leaves without
@@ -3271,7 +3271,7 @@ void Application::applyServerMovementState(float deltaTime) {
         // and nothing anywhere says whether the attachment was ever made.
         LOG_WARNING("Transport state changed: onTransport=", onTransportNowDbg,
                  " isM2=", isM2Transport,
-                 " guid=0x", std::hex, gameHandler->getPlayerTransportGuid(), std::dec);
+                 " guid=0x", std::hex, gameHandler->movement().getPlayerTransportGuid(), std::dec);
         wasOnTransport = onTransportNowDbg;
     }
 
@@ -3307,10 +3307,10 @@ void Application::applyServerMovementState(float deltaTime) {
         // boarding-time offset forever, freezing the player in a
         // running pose at the point where they stepped aboard.
         auto* tm = gameHandler->getTransportManager();
-        auto* tr = tm ? tm->getTransport(gameHandler->getPlayerTransportGuid()) : nullptr;
+        auto* tr = tm ? tm->getTransport(gameHandler->movement().getPlayerTransportGuid()) : nullptr;
         if (tr) {
-            const uint64_t transportGuid = gameHandler->getPlayerTransportGuid();
-            glm::vec3 localOffset = gameHandler->getPlayerTransportOffset();
+            const uint64_t transportGuid = gameHandler->movement().getPlayerTransportGuid();
+            glm::vec3 localOffset = gameHandler->movement().getPlayerTransportOffset();
             const glm::vec3 tentativeRender = renderer->getCharacterPosition();
             const glm::vec3 expectedRender(
                 tr->transform * glm::vec4(localOffset, 1.0f));
@@ -3389,15 +3389,15 @@ void Application::applyServerMovementState(float deltaTime) {
 
             localOffset = glm::vec3(
                 tr->invTransform * glm::vec4(intendedRender, 1.0f));
-            gameHandler->setPlayerTransportOffset(localOffset);
+            gameHandler->movement().setPlayerTransportOffset(localOffset);
         }
 
-        glm::vec3 canonical = gameHandler->getComposedWorldPosition();
+        glm::vec3 canonical = gameHandler->movement().getComposedWorldPosition();
         glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
         renderer->getCharacterPosition() = renderPos;
         ride.wmoLockedRender = renderPos;
         ride.hasWmoLock = true;
-        ride.wmoTransportGuid = gameHandler->getPlayerTransportGuid();
+        ride.wmoTransportGuid = gameHandler->movement().getPlayerTransportGuid();
         gameHandler->movement().setPosition(canonical.x, canonical.y, canonical.z);
         if (getCameraController()) {
             glm::vec3* followTarget = getCameraController()->getFollowTargetMutable();
@@ -3405,7 +3405,7 @@ void Application::applyServerMovementState(float deltaTime) {
                 *followTarget = renderPos;
             }
         }
-        gameHandler->updateM2TransportBoarding(canonical);
+        gameHandler->movement().updateM2TransportBoarding(canonical);
     } else if (animationCallbacks_ && animationCallbacks_->isCharging()) {
         // Warrior Charge: interpolation delegated to AnimationCallbackHandler
         animationCallbacks_->updateCharge(deltaTime);
@@ -3419,7 +3419,7 @@ void Application::applyServerMovementState(float deltaTime) {
         // This avoids visible jitter from mixed render/canonical delta application.
         if (isM2Transport && gameHandler->getTransportManager()) {
             auto* tr = gameHandler->getTransportManager()->getTransport(
-                gameHandler->getPlayerTransportGuid());
+                gameHandler->movement().getPlayerTransportGuid());
             if (tr) {
                 // Ride along at a fixed offset from the transport's current position
                 // (set once at boarding - see GameHandler::updateM2TransportBoarding),
@@ -3437,7 +3437,7 @@ void Application::applyServerMovementState(float deltaTime) {
                 // traveled underneath.
                 const bool isDeeprunTram =
                     game::TransportManager::isDeeprunTramTransport(*tr);
-                glm::vec3 localOffset = gameHandler->getPlayerTransportOffset();
+                glm::vec3 localOffset = gameHandler->movement().getPlayerTransportOffset();
                 glm::vec3 tentativeCanonical = core::coords::renderToCanonical(renderPos);
                 if (ride.hasM2Lock) {
                     glm::vec3 walkDelta = tentativeCanonical - ride.m2LockedCanonical;
@@ -3505,7 +3505,7 @@ void Application::applyServerMovementState(float deltaTime) {
                     // player is jumping, which makes lifts appear to not move vertically.
                     localOffset.z = tentativeCanonical.z - tr->position.z;
                 }
-                gameHandler->setPlayerTransportOffset(localOffset);
+                gameHandler->movement().setPlayerTransportOffset(localOffset);
 
                 glm::vec3 lockedCanonical = tr->position + localOffset;
                 renderPos = core::coords::canonicalToRender(lockedCanonical);
@@ -3594,7 +3594,7 @@ void Application::applyServerMovementState(float deltaTime) {
         // GameHandler::updateM2TransportBoarding).
         if (gameHandler->getTransportManager()) {
             glm::vec3 playerCanonical = core::coords::renderToCanonical(renderPos);
-            gameHandler->updateM2TransportBoarding(playerCanonical);
+            gameHandler->movement().updateM2TransportBoarding(playerCanonical);
         }
     }
     }

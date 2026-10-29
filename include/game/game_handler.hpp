@@ -878,65 +878,7 @@ public:
     // Notify that a transport has been spawned (called after WMO instance creation)
     void notifyTransportSpawned(uint64_t guid, uint32_t entry, uint32_t displayId, float x, float y, float z, float orientation);
 
-    // Transport state for player-on-transport
-    bool isOnTransport() const { return playerTransportGuid_ != 0; }
-    uint64_t getPlayerTransportGuid() const { return playerTransportGuid_; }
-    glm::vec3 getPlayerTransportOffset() const { return playerTransportOffset_; }
-
-    glm::vec3 getComposedWorldPosition();  // Compose transport transform * local offset
     TransportManager* getTransportManager() { return transportManager_.get(); }
-    // Client-side transport board/disembark check by proximity to the live deck.
-    // Covers M2 trams/lifts and client-animated TaxiPathNode WMO ships.
-    void updateM2TransportBoarding(const glm::vec3& playerCanonical);
-    void setPlayerOnTransport(uint64_t transportGuid, const glm::vec3& localOffset) {
-        // Validate transport is registered before attaching player
-        // (defer if transport not yet registered to prevent desyncs)
-        if (transportGuid != 0 && !entityController_->isTransportGuid(transportGuid)) {
-            // Said, rather than dropped in silence.
-            //
-            // This is the one decision between the server saying the player
-            // has boarded and the client agreeing, and taking it means the
-            // player stands still while the transport leaves without them -
-            // with nothing logged, nothing raised, and no retry. If the
-            // zeppelin sails off and the player does not, this line is the
-            // first place to look.
-            static uint64_t saidFor = 0;
-            if (saidFor != transportGuid) {
-                saidFor = transportGuid;
-                LOG_WARNING("Transport attach refused: guid=0x", std::hex,
-                            transportGuid, std::dec,
-                            " is not a registered transport yet - the player "
-                            "will not move with it");
-            }
-            return;  // Transport not yet registered; skip attachment
-        }
-        playerTransportGuid_ = transportGuid;
-        playerTransportOffset_ = localOffset;
-        playerTransportStickyGuid_ = transportGuid;
-        playerTransportStickyTimer_ = 8.0f;
-        movementInfo.transportGuid = transportGuid;
-    }
-    void setPlayerTransportOffset(const glm::vec3& offset) {
-        playerTransportOffset_ = offset;
-    }
-    void clearPlayerTransport() {
-        if (playerTransportGuid_ != 0) {
-            playerTransportStickyGuid_ = playerTransportGuid_;
-            playerTransportStickyTimer_ = std::max(playerTransportStickyTimer_, 1.5f);
-        }
-        playerTransportGuid_ = 0;
-        playerTransportOffset_ = glm::vec3(0.0f);
-        movementInfo.transportGuid = 0;
-    }
-    // Preserve an authoritative on-deck offset while a continent transfer tears
-    // down the origin map's transport and constructs its destination instance.
-    void beginPlayerTransportWorldTransfer(uint32_t destinationMapId,
-                                           const glm::vec3& localOffset);
-    bool hasPendingPlayerTransportWorldTransfer() const {
-        return pendingPlayerTransportTransfer_;
-    }
-    bool completePlayerTransportWorldTransfer(uint64_t transportGuid,
-                                              glm::vec3& worldPosition);
 
     // Player GUID
     uint64_t getPlayerGuid() const { return playerGuid; }
@@ -1531,10 +1473,6 @@ public:
 
     // ── Movement & Transport ─────────────────────────────────────────
     auto& vehicleIdRef() { return vehicleId_; }
-    auto& playerTransportGuidRef() { return playerTransportGuid_; }
-    auto& playerTransportOffsetRef() { return playerTransportOffset_; }
-    auto& playerTransportStickyGuidRef() { return playerTransportStickyGuid_; }
-    auto& playerTransportStickyTimerRef() { return playerTransportStickyTimer_; }
 
     // ── Combat & Player Stats ────────────────────────────────────────
     auto& playerArenaPointsRef() { return playerArenaPoints_; }
@@ -1897,21 +1835,6 @@ private:
     uint64_t binderGuid_ = 0;
 
     // Transport tracking
-    // Transport GUID tracking moved to EntityController
-    uint64_t playerTransportGuid_ = 0;             // Transport the player is riding (0 = none)
-    glm::vec3 playerTransportOffset_ = glm::vec3(0.0f); // Player offset on transport
-    uint64_t playerTransportStickyGuid_ = 0;       // Last transport player was on (temporary retention)
-    float playerTransportStickyTimer_ = 0.0f;      // Seconds to keep sticky transport alive after transient clears
-    // Consecutive frames a ship rider has had no deck beneath them. Walking off
-    // onto the pier leaves the rider well inside the ship's boarding footprint,
-    // so losing the deck is what actually distinguishes "ashore" from "aboard".
-    // Counted rather than tested instantly so a jump is not a disembark.
-    int shipNoDeckSupportFrames_ = 0;
-    bool pendingPlayerTransportTransfer_ = false;
-    uint64_t pendingPlayerTransportGuid_ = 0;
-    uint32_t pendingPlayerTransportEntry_ = 0;
-    uint32_t pendingPlayerTransportMapId_ = 0xFFFFFFFFu;
-    glm::vec3 pendingPlayerTransportOffset_ = glm::vec3(0.0f);
     std::unique_ptr<TransportManager> transportManager_;  // Transport movement manager
     uint32_t weaponProficiency_ = 0;  // bitmask from SMSG_SET_PROFICIENCY itemClass=2
     uint32_t armorProficiency_  = 0;  // bitmask from SMSG_SET_PROFICIENCY itemClass=4

@@ -96,6 +96,38 @@ public:
         bool hasLocalOrientation = false;
         bool offsetNeedsTransportResolution = false;
     };
+    // --- The player's transport ---
+    [[nodiscard]] bool isOnTransport() const { return playerTransportGuid_ != 0; }
+    [[nodiscard]] uint64_t getPlayerTransportGuid() const { return playerTransportGuid_; }
+    [[nodiscard]] glm::vec3 getPlayerTransportOffset() const { return playerTransportOffset_; }
+    /// The player was on `guid` a moment ago, or is: the hold that keeps a
+    /// transport alive across the out-of-range flapping of its last rider.
+    [[nodiscard]] bool recentlyAboard(uint64_t guid) const {
+        return playerTransportStickyGuid_ == guid && playerTransportStickyTimer_ > 0.0f;
+    }
+    /// Compose the transport's transform with the player's local offset.
+    glm::vec3 getComposedWorldPosition();
+    /// Client-side transport board/disembark check by proximity to the live
+    /// deck. Covers M2 trams/lifts and client-animated TaxiPathNode WMO ships.
+    void updateM2TransportBoarding(const glm::vec3& playerCanonical);
+    /// Board `transportGuid` at a canonical local offset - refused, and said,
+    /// while the transport is not yet registered.
+    void setPlayerOnTransport(uint64_t transportGuid, const glm::vec3& localOffset);
+    void setPlayerTransportOffset(const glm::vec3& offset) { playerTransportOffset_ = offset; }
+    void clearPlayerTransport();
+    /// Once a frame: count the hold down.
+    void updatePlayerTransportHold(float deltaTime);
+    // Preserve an authoritative on-deck offset while a continent transfer
+    // tears down the origin map's transport and constructs its destination
+    // instance.
+    void beginPlayerTransportWorldTransfer(uint32_t destinationMapId,
+                                           const glm::vec3& localOffset);
+    [[nodiscard]] bool hasPendingPlayerTransportWorldTransfer() const {
+        return pendingPlayerTransportTransfer_;
+    }
+    bool completePlayerTransportWorldTransfer(uint64_t transportGuid,
+                                              glm::vec3& worldPosition);
+
     [[nodiscard]] bool hasTransportAttachment(uint64_t guid) const {
         return transportAttachments_.count(guid) != 0;
     }
@@ -333,6 +365,22 @@ private:
 
     /// Units and objects riding a transport, by guid.
     std::unordered_map<uint64_t, TransportAttachment> transportAttachments_;
+
+    // The player's transport.
+    uint64_t playerTransportGuid_ = 0;                  // the transport ridden (0 = none)
+    glm::vec3 playerTransportOffset_ = glm::vec3(0.0f); // the player's offset on it
+    uint64_t playerTransportStickyGuid_ = 0;            // the last one ridden (temporary retention)
+    float playerTransportStickyTimer_ = 0.0f;           // seconds to keep it after transient clears
+    // Consecutive frames a ship rider has had no deck beneath them. Walking off
+    // onto the pier leaves the rider well inside the ship's boarding footprint,
+    // so losing the deck is what actually distinguishes "ashore" from "aboard".
+    // Counted rather than tested instantly so a jump is not a disembark.
+    int shipNoDeckSupportFrames_ = 0;
+    bool pendingPlayerTransportTransfer_ = false;
+    uint64_t pendingPlayerTransportGuid_ = 0;
+    uint32_t pendingPlayerTransportEntry_ = 0;
+    uint32_t pendingPlayerTransportMapId_ = 0xFFFFFFFFu;
+    glm::vec3 pendingPlayerTransportOffset_ = glm::vec3(0.0f);
     uint32_t lastAreaTriggerId_ = 0;
     uint32_t postTransferReturnAreaTriggerId_ = 0;
     // Previous checkAreaTriggers() sample for swept-path testing (canonical
