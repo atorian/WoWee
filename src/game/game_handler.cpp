@@ -515,7 +515,7 @@ void GameHandler::updateNetworking() {
     if (!pacedChatQueue_.empty()) {
         const std::string line = std::move(pacedChatQueue_.front());
         pacedChatQueue_.pop_front();
-        sendChatMessage(ChatType::SAY, line, "");
+        chatHandler_->sendChatMessage(ChatType::SAY, line, "");
     }
 
     // Anything still waiting on a name query that never came back. After the
@@ -931,7 +931,7 @@ void GameHandler::updateGame(float deltaTime) {
             pendingGameObjectInteractGuid_ = 0;
             spellHandler_->resetCastState();
             addUIError("Interrupted.");
-            addSystemChatMessage("Interrupted.");
+            chatHandler_->addSystemChatMessage("Interrupted.");
         }
         // Check if client-side cast timer expired (tick-down is in SpellHandler::updateTimers).
         // Three paths depending on whether this is a GO interaction or craft-queue cast:
@@ -1051,13 +1051,6 @@ void GameHandler::updateGame(float deltaTime) {
 
 uint32_t GameHandler::killXp(uint32_t playerLevel, uint32_t victimLevel) {
     return CombatHandler::killXp(playerLevel, victimLevel);
-}
-
-void GameHandler::addSystemChatMessage(const std::string& message) {
-    chatHandler_->addSystemChatMessage(message);
-}
-void GameHandler::addLocalChatLine(game::ChatType type, const std::string& message) {
-    chatHandler_->addLocalChatLine(type, message);
 }
 
 void GameHandler::raiseUiError(const std::string& message) {
@@ -2175,10 +2168,6 @@ void GameHandler::runInterfaceCommand(const std::string& lua) {
     pendingAddonEvents_.command(lua);
 }
 
-void GameHandler::requestChannelList(const std::string& channel) {
-    chatHandler_->requestChannelList(channel);
-}
-
 const std::vector<ChannelMember>&
 GameHandler::getChannelRoster(const std::string& channel) const {
     static const std::vector<ChannelMember> empty;
@@ -2697,7 +2686,7 @@ GameHandler::getExtendedCost(uint32_t extendedCostId) const {
 void GameHandler::setResting(bool resting) {
     if (resting == isResting_) return;
     isResting_ = resting;
-    addSystemChatMessage(resting ? "You are now resting." : "You are no longer resting.");
+    chatHandler_->addSystemChatMessage(resting ? "You are now resting." : "You are no longer resting.");
     if (hasAddonEventListener()) fireAddonEvent("PLAYER_UPDATE_RESTING", {});
 }
 

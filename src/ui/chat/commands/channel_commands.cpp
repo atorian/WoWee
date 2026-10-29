@@ -32,13 +32,13 @@ bool sendWhisperOrPortBot(wowee::game::GameHandler& gameHandler,
             gameHandler.addLocalChatMessage(msg);
             return true;
         }
-        gameHandler.sendChatMessage(wowee::game::ChatType::SAY, cmd, "");
+        gameHandler.chat().sendChatMessage(wowee::game::ChatType::SAY, cmd, "");
         msg.message = "PortBot executed: " + cmd;
         gameHandler.addLocalChatMessage(msg);
         return true;
     }
     if (!message.empty()) {
-        gameHandler.sendChatMessage(wowee::game::ChatType::WHISPER, message, target);
+        gameHandler.chat().sendChatMessage(wowee::game::ChatType::WHISPER, message, target);
     }
     return true;
 }
@@ -53,7 +53,7 @@ static ChatCommandResult sendAndSwitch(ChatCommandContext& ctx,
                                         int switchIdx,
                                         const std::string& target = "") {
     if (!ctx.args.empty())
-        ctx.gameHandler.sendChatMessage(chatType, ctx.args, target);
+        ctx.gameHandler.chat().sendChatMessage(chatType, ctx.args, target);
     ctx.panel.setSelectedChatType(switchIdx);
     return {};
 }
@@ -161,7 +161,7 @@ public:
             size_t pwStart = ctx.args.find(' ');
             std::string channelName = (pwStart != std::string::npos) ? ctx.args.substr(0, pwStart) : ctx.args;
             std::string password = (pwStart != std::string::npos) ? ctx.args.substr(pwStart + 1) : "";
-            ctx.gameHandler.joinChannel(channelName, password);
+            ctx.gameHandler.chat().joinChannel(channelName, password);
         }
         return {};
     }
@@ -176,7 +176,7 @@ class LeaveChannelCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (!ctx.args.empty()) {
-            ctx.gameHandler.leaveChannel(ctx.args);
+            ctx.gameHandler.chat().leaveChannel(ctx.args);
         }
         // If no args, the group LeaveCommand will handle /leave (leave party)
         // so we return not-handled to allow fallthrough
@@ -194,7 +194,7 @@ public:
         if (ctx.args.empty()) return {.handled = false, .clearInput = false};
         const std::string tag = (ctx.fullCommand == "wts") ? "[WTS] " : "[WTB] ";
         std::string tradeChan;
-        for (const auto& ch : ctx.gameHandler.getJoinedChannels()) {
+        for (const auto& ch : ctx.gameHandler.chat().getJoinedChannels()) {
             std::string chLow = ch;
             for (char& c : chLow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             if (chLow.rfind("trade", 0) == 0) { tradeChan = ch; break; }
@@ -207,7 +207,7 @@ public:
             ctx.gameHandler.addLocalChatMessage(errMsg);
             return {};
         }
-        ctx.gameHandler.sendChatMessage(game::ChatType::CHANNEL, tag + ctx.args, tradeChan);
+        ctx.gameHandler.chat().sendChatMessage(game::ChatType::CHANNEL, tag + ctx.args, tradeChan);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"wts", "wtb"}; }
@@ -219,7 +219,7 @@ class ChannelNumberCommand : public IChatCommand {
 public:
     explicit ChannelNumberCommand(int num) : num_(num), alias_(std::to_string(num)) {}
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        std::string channelName = ctx.gameHandler.getChannelByIndex(num_);
+        std::string channelName = ctx.gameHandler.chat().getChannelByIndex(num_);
         if (channelName.empty()) {
             game::MessageChatData errMsg;
             errMsg.type = game::ChatType::SYSTEM;
@@ -228,7 +228,7 @@ public:
             return {};
         }
         if (!ctx.args.empty()) {
-            ctx.gameHandler.sendChatMessage(game::ChatType::CHANNEL, ctx.args, channelName);
+            ctx.gameHandler.chat().sendChatMessage(game::ChatType::CHANNEL, ctx.args, channelName);
         }
         return {};
     }
@@ -275,7 +275,7 @@ class ReplyCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         ctx.panel.setSelectedChatType(4);
-        std::string lastSender = ctx.gameHandler.getLastWhisperSender();
+        std::string lastSender = ctx.gameHandler.chat().getLastWhisperSender();
         if (lastSender.empty()) {
             game::MessageChatData sysMsg;
             sysMsg.type = game::ChatType::SYSTEM;

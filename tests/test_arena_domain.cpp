@@ -45,7 +45,7 @@ std::vector<uint8_t> teamStats(uint32_t teamId, uint32_t rating) {
 }
 
 bool chatSaid(GameHarness& h, const std::string& text) {
-    const auto& history = h.game().getChatHistory();
+    const auto& history = h.game().chat().getChatHistory();
     return std::any_of(history.begin(), history.end(),
                        [&](const auto& line) { return line.message == text; });
 }

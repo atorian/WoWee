@@ -77,15 +77,15 @@ TEST_CASE("a whisper from a stranger waits for the name, then reaches the interf
     CHECK(whispers[0].args.at(0) == "lok'tar");
     CHECK(whispers[0].args.at(1) == "Thrall");
 
-    const auto& history = h.game().getChatHistory();
+    const auto& history = h.game().chat().getChatHistory();
     REQUIRE_FALSE(history.empty());
     CHECK(history.back().message == "lok'tar");
     CHECK(history.back().senderName == "Thrall");
 
     // /r answers whoever whispered last - the name the line arrived with.
-    CHECK(h.game().getLastWhisperSender() == "Thrall");
+    CHECK(h.game().chat().getLastWhisperSender() == "Thrall");
     h.clearRecords();
-    h.game().sendChatMessage(ChatType::WHISPER, "for the horde", h.game().getLastWhisperSender());
+    h.game().chat().sendChatMessage(ChatType::WHISPER, "for the horde", h.game().chat().getLastWhisperSender());
     auto* sent = h.lastSent(Opcode::CMSG_MESSAGECHAT);
     REQUIRE(sent != nullptr);
     const SentWhisper reply = readWhisper(*sent);
@@ -103,7 +103,7 @@ TEST_CASE("while away, each whisperer is answered once and the player stays away
     h.receive(Opcode::SMSG_NAME_QUERY_RESPONSE, nameResponse(kJaina, "Jaina"));
     h.pump();
 
-    h.game().toggleAfk("back soon");
+    h.game().chat().toggleAfk("back soon");
     h.clearRecords();
 
     h.receive(Opcode::SMSG_MESSAGECHAT, playerLine(ChatType::WHISPER, kThrall, h.player().guid, "hey"));
@@ -129,7 +129,7 @@ TEST_CASE("while away, each whisperer is answered once and the player stays away
     CHECK(replies[1].target == "Jaina");
 
     // Typing is coming back, though: autoClearAFK takes the player out of it.
-    h.game().sendChatMessage(ChatType::SAY, "I'm back");
+    h.game().chat().sendChatMessage(ChatType::SAY, "I'm back");
     CHECK_FALSE(h.game().isAfk());
 }
 
@@ -138,7 +138,7 @@ TEST_CASE("an addon's whisper goes to the addons and not into chat", "[chat][har
     h.enterWorld();
     h.receive(Opcode::SMSG_NAME_QUERY_RESPONSE, nameResponse(kJaina, "Jaina"));
     h.pump();
-    const size_t linesBefore = h.game().getChatHistory().size();
+    const size_t linesBefore = h.game().chat().getChatHistory().size();
 
     SECTION("in LANG_ADDON") {
         h.receive(Opcode::SMSG_MESSAGECHAT,
@@ -158,9 +158,9 @@ TEST_CASE("an addon's whisper goes to the addons and not into chat", "[chat][har
     CHECK(addon[0].args.at(3) == "Jaina");
 
     CHECK(h.addonEvents("CHAT_MSG_WHISPER").empty());
-    CHECK(h.game().getChatHistory().size() == linesBefore);
+    CHECK(h.game().chat().getChatHistory().size() == linesBefore);
     // Nor is the sender's addon taken for someone to /r.
-    CHECK(h.game().getLastWhisperSender().empty());
+    CHECK(h.game().chat().getLastWhisperSender().empty());
 }
 
 TEST_CASE("an ordinary line, tab or not, is chat and not an addon's", "[chat][harness]") {
@@ -199,27 +199,27 @@ TEST_CASE("the next character hears none of the last one's conversation", "[chat
     // SMSG_CHANNEL_NOTIFY YOU_JOINED: the kind, then the channel.
     h.receive(Opcode::SMSG_CHANNEL_NOTIFY, Body().u8(0x02).cstr("AliceGuild"));
     h.pump();
-    h.game().toggleDnd("busy");
-    REQUIRE(h.game().getLastWhisperSender() == "Thrall");
-    REQUIRE(h.game().getChannelIndex("AliceGuild") == 1);
+    h.game().chat().toggleDnd("busy");
+    REQUIRE(h.game().chat().getLastWhisperSender() == "Thrall");
+    REQUIRE(h.game().chat().getChannelIndex("AliceGuild") == 1);
 
     h.relogAs(bob);
 
     // /r went to whoever had whispered the last character: Bob answered
     // Thrall, who had never spoken to him.
-    CHECK(h.game().getLastWhisperSender().empty());
-    h.game().replyToLastWhisper("hello?");
+    CHECK(h.game().chat().getLastWhisperSender().empty());
+    h.game().chat().replyToLastWhisper("hello?");
     CHECK(h.countSent(Opcode::CMSG_MESSAGECHAT) == 0);
 
     bool alicesLine = false;
-    for (const auto& line : h.game().getChatHistory())
+    for (const auto& line : h.game().chat().getChatHistory())
         if (line.message == "for alice") alicesLine = true;
     CHECK_FALSE(alicesLine);
     CHECK_FALSE(h.game().isDnd());
     CHECK_FALSE(h.game().isAfk());
     // The server joins Bob to his own channels; Alice's are not his.
-    CHECK(h.game().getChannelIndex("AliceGuild") == 0);
-    CHECK(h.game().getJoinedChannels().empty());
+    CHECK(h.game().chat().getChannelIndex("AliceGuild") == 0);
+    CHECK(h.game().chat().getJoinedChannels().empty());
 }
 
 TEST_CASE("a chat refusal is put on the error line once", "[chat][harness]") {
@@ -240,15 +240,15 @@ TEST_CASE("the server's echo of the player's own line is not a second line", "[c
     GameHarness h;
     h.enterWorld();
 
-    h.game().sendChatMessage(ChatType::SAY, "hello world");
+    h.game().chat().sendChatMessage(ChatType::SAY, "hello world");
     h.pump(); // Interface delivers the optimistic local line before the echo.
-    const size_t afterOwn = h.game().getChatHistory().size();
+    const size_t afterOwn = h.game().chat().getChatHistory().size();
     const size_t saysAfterOwn = h.addonEvents("CHAT_MSG_SAY").size();
 
     h.receive(Opcode::SMSG_MESSAGECHAT,
               playerLine(ChatType::SAY, h.player().guid, h.player().guid, "hello world"));
     h.pump();
 
-    CHECK(h.game().getChatHistory().size() == afterOwn);
+    CHECK(h.game().chat().getChatHistory().size() == afterOwn);
     CHECK(h.addonEvents("CHAT_MSG_SAY").size() == saysAfterOwn);
 }

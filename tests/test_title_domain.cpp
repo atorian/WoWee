@@ -42,7 +42,7 @@ std::vector<uint8_t> titleEarned(uint32_t bit, bool lost) {
 }
 
 size_t linesSaying(GameHarness& h, const std::string& text) {
-    const auto& history = h.game().getChatHistory();
+    const auto& history = h.game().chat().getChatHistory();
     return static_cast<size_t>(std::count_if(history.begin(), history.end(),
                                               [&](const auto& line) { return line.message == text; }));
 }

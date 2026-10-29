@@ -428,10 +428,10 @@ void MovementHandler::handleClientControlUpdate(network::Packet& packet) {
             owner_.sendMovement(Opcode::MSG_MOVE_STOP_STRAFE);
             owner_.sendMovement(Opcode::MSG_MOVE_STOP_TURN);
             owner_.sendMovement(Opcode::MSG_MOVE_STOP_SWIM);
-            owner_.addSystemChatMessage("Movement disabled by server.");
+            owner_.chat().addSystemChatMessage("Movement disabled by server.");
             owner_.fireAddonEvent("PLAYER_CONTROL_LOST", {});
         } else if (changed && allowMovement) {
-            owner_.addSystemChatMessage("Movement re-enabled.");
+            owner_.chat().addSystemChatMessage("Movement re-enabled.");
             owner_.fireAddonEvent("PLAYER_CONTROL_GAINED", {});
         }
     }
@@ -2502,7 +2502,7 @@ void MovementHandler::handleShowTaxiNodes(network::Packet& packet) {
                     uint32_t nodeId = i * 32 + bit + 1;
                     auto it = taxiNodes_.find(nodeId);
                     if (it != taxiNodes_.end()) {
-                        owner_.addSystemChatMessage("Discovered flight path: " + it->second.name);
+                        owner_.chat().addSystemChatMessage("Discovered flight path: " + it->second.name);
                     }
                 }
             }
@@ -3174,10 +3174,10 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
         auto destIt = taxiNodes_.find(destNodeId);
         if (destIt != taxiNodes_.end() && !destIt->second.name.empty()) {
             taxiDestName_ = destIt->second.name;
-            owner_.addSystemChatMessage("Requesting flight to " + destIt->second.name + "...");
+            owner_.chat().addSystemChatMessage("Requesting flight to " + destIt->second.name + "...");
         } else {
             taxiDestName_.clear();
-            owner_.addSystemChatMessage("Taxi: requesting flight...");
+            owner_.chat().addSystemChatMessage("Taxi: requesting flight...");
         }
     }
 
@@ -3195,7 +3195,7 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
     if (path.size() < 2) {
         LOG_WARNING("No taxi route through discovered nodes from ", startNode,
                     " to ", destNodeId);
-        owner_.addSystemChatMessage("No flight path available to that destination.");
+        owner_.chat().addSystemChatMessage("No flight path available to that destination.");
         return;
     }
 
@@ -3772,7 +3772,7 @@ void MovementHandler::followTarget() {
         targetName = unit->getName();
     }
 
-    owner_.addSystemChatMessage("Now following " + targetName + ".");
+    owner_.chat().addSystemChatMessage("Now following " + targetName + ".");
     LOG_INFO("Following target: ", targetName, " (GUID: 0x", std::hex, owner_.getTargetGuid(), std::dec, ")");
     // The name goes with it: the status text is formatted from this argument,
     // and without one it formats a nil.
@@ -3791,7 +3791,7 @@ void MovementHandler::cancelFollow() {
     if (owner_.autoFollowCallbackRef()) {
         owner_.autoFollowCallbackRef()(nullptr);
     }
-    owner_.addSystemChatMessage("You stop following.");
+    owner_.chat().addSystemChatMessage("You stop following.");
     owner_.fireAddonEvent("AUTOFOLLOW_END", {});
 }
 

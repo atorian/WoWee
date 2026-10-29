@@ -210,6 +210,7 @@ void ChatHandler::logChatMessage(const MessageChatData& msg, const char* source)
 }
 
 void ChatHandler::registerOpcodes(DispatchTable& table) {
+    table[Opcode::SMSG_MOTD] = [this](network::Packet& packet) { handleMotd(packet); };
     table[Opcode::SMSG_MESSAGECHAT] = [this](network::Packet& packet) {
         if (sender_.characterInWorld()) handleMessageChat(packet);
     };

@@ -1748,10 +1748,10 @@ void GameScreen::startRecording() {
     std::string error;
     if (recording->start(path, error)) {
         recordingPath_ = path;
-        services_.gameHandler->addSystemChatMessage(
+        services_.gameHandler->chat().addSystemChatMessage(
             "Recording to " + path + ". Type /record again to stop.");
     } else {
-        services_.gameHandler->addSystemChatMessage("Could not start recording: " + error + ".");
+        services_.gameHandler->chat().addSystemChatMessage("Could not start recording: " + error + ".");
     }
 }
 
@@ -1767,7 +1767,7 @@ void GameScreen::stopRecording() {
     if (stats.framesDropped > 0) {
         message += ", " + std::to_string(stats.framesDropped) + " frames dropped";
     }
-    services_.gameHandler->addSystemChatMessage(message + ").");
+    services_.gameHandler->chat().addSystemChatMessage(message + ").");
 }
 
 void GameScreen::toggleRecording() {
@@ -1785,7 +1785,7 @@ void GameScreen::reportRecordingFailure() {
     if (!recording || !services_.gameHandler) return;
     const std::string failure = recording->takeFailure();
     if (failure.empty()) return;
-    services_.gameHandler->addSystemChatMessage(
+    services_.gameHandler->chat().addSystemChatMessage(
         "Recording stopped: " + failure + ". What was recorded is saved in " + recordingPath_ + ".");
 }
 
@@ -1807,7 +1807,7 @@ void GameScreen::takeScreenshot() {
 void GameScreen::reportScreenshotResults() {
     if (!services_.renderer || !services_.gameHandler) return;
     for (const auto& [path, saved] : services_.renderer->takeScreenshotResults())
-        services_.gameHandler->addSystemChatMessage(
+        services_.gameHandler->chat().addSystemChatMessage(
             std::string(saved ? "Screenshot saved: " : "Screenshot failed: ") + path);
 }
 

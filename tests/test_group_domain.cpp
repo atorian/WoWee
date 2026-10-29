@@ -59,7 +59,7 @@ void knowName(GameHarness& h, uint64_t guid, const std::string& name) {
 }
 
 bool chatSaid(GameHarness& h, const std::string& text) {
-    const auto& history = h.game().getChatHistory();
+    const auto& history = h.game().chat().getChatHistory();
     return std::any_of(history.begin(), history.end(),
                        [&](const auto& line) { return line.message == text; });
 }
@@ -95,7 +95,7 @@ TEST_CASE("the party the server lists is what the interface reads, and joining i
     h.pump();
     CHECK(chatSaid(h, "Loot method changed to Master Looter."));
     CHECK(h.addonEvents("PARTY_LOOT_METHOD_CHANGED").size() == 1);
-    const auto& history = h.game().getChatHistory();
+    const auto& history = h.game().chat().getChatHistory();
     CHECK(std::count_if(history.begin(), history.end(), [](const auto& line) {
               return line.message == "You joined a group with: Jaina";
           }) == 1);

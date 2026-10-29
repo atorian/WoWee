@@ -183,7 +183,7 @@ static int lua_SendChatMessage(lua_State* L) {
     // here, so a bare number has to be turned into the name before it is sent.
     if (ct == game::ChatType::CHANNEL && lua_isnumber(L, 4)) {
         const int index = static_cast<int>(lua_tonumber(L, 4));
-        const auto& joined = gh->getJoinedChannels();
+        const auto& joined = gh->chat().getJoinedChannels();
         if (index >= 1 && index <= static_cast<int>(joined.size())) {
             targetStr = joined[static_cast<size_t>(index) - 1];
         } else {
@@ -192,7 +192,7 @@ static int lua_SendChatMessage(lua_State* L) {
             return 0;
         }
     }
-    gh->sendChatMessage(ct, msg, targetStr);
+    gh->chat().sendChatMessage(ct, msg, targetStr);
     return 0;
 }
 
@@ -220,7 +220,7 @@ static int lua_SendAddonMessage(lua_State* L) {
     // Encode as prefix\ttext (WoW addon message format)
     std::string encoded = std::string(prefix) + "\t" + text;
     std::string targetStr(target && *target ? target : "");
-    gh->sendAddonMessage(ct, encoded, targetStr);
+    gh->chat().sendAddonMessage(ct, encoded, targetStr);
     return 0;
 }
 
@@ -891,7 +891,7 @@ static int& selectedIgnore(lua_State* L) { return interfaceState(L).selectedIgno
 static int lua_SendSystemMessage(lua_State* L) {
     auto* gh = getGameHandler(L);
     const char* msg = luaL_optstring(L, 1, "");
-    if (gh && msg && *msg) gh->addSystemChatMessage(msg);
+    if (gh && msg && *msg) gh->chat().addSystemChatMessage(msg);
     return 0;
 }
 
@@ -1115,7 +1115,7 @@ static int lua_NewGMTicket(lua_State* L) {
     const char* text = luaL_checkstring(L, 1);
     // needResponse is not carried by the packet this client sends, so it is
     // read and dropped rather than quietly changing what is submitted.
-    gh->submitGmTicket(text);
+    gh->chat().submitGmTicket(text);
     return 0;
 }
 
@@ -1402,7 +1402,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"UpdateGMTicket", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const char* text = luaL_optstring(L, 1, "");
-            if (gh && text && *text) gh->updateGmTicket(text);
+            if (gh && text && *text) gh->chat().updateGmTicket(text);
             return 0;
         }},
                 {"GetNumMacroIcons",    lua_GetNumMacroIcons},
@@ -1573,7 +1573,7 @@ void registerSocialLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const uint32_t lineId = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
             if (!gh || lineId == 0) return 0;
-            const uint64_t guid = gh->chatLineSender(lineId);
+            const uint64_t guid = gh->chat().chatLineSender(lineId);
             if (guid != 0) gh->reportPlayer(guid, "");
             return 0;
         }},
@@ -2129,7 +2129,7 @@ void registerSocialLuaAPI(lua_State* L) {
             const char* name = luaL_optstring(L, 1, "");
             const char* pass = luaL_optstring(L, 2, "");
             if (!gh || !name || !*name) return luaReturnNil(L);
-            gh->joinChannel(name, pass ? pass : "");
+            gh->chat().joinChannel(name, pass ? pass : "");
             lua_pushnil(L);
             lua_pushstring(L, name);
             return 2;
@@ -2152,7 +2152,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"GetChannelList", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
-            const auto& joined = gh->getJoinedChannels();
+            const auto& joined = gh->chat().getJoinedChannels();
             const int per = interfaceVersion(L) >= 40000 ? 3 : 2;
             // Lua guarantees a C function twenty free slots and no more, so
             // seven channels ran past the end of three-value answers and ten
@@ -2536,7 +2536,7 @@ void registerSocialLuaAPI(lua_State* L) {
             if (target == 0 && (!aimedAt || !*aimedAt)) {
                 target = gh->hasTarget() ? gh->getTargetGuid() : 0;
             }
-            gh->sendTextEmote(emoteId, target);
+            gh->chat().sendTextEmote(emoteId, target);
             // And the animation, which this did not do. Telling the server is
             // the half that is seen by everyone else; playing it is the half
             // seen by the player, and standing still while the room is told you
@@ -3205,7 +3205,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"CanComplainChat", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const uint32_t lineId = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
-            const uint64_t guid = (gh && lineId) ? gh->chatLineSender(lineId) : 0;
+            const uint64_t guid = (gh && lineId) ? gh->chat().chatLineSender(lineId) : 0;
             lua_pushboolean(L, (guid != 0 && guid != gh->getPlayerGuid()) ? 1 : 0);
             return 1;
         }},
@@ -3634,13 +3634,13 @@ void registerSocialLuaAPI(lua_State* L) {
                     // is in one, and the server is never asked.
                     auto* gh = getGameHandler(L);
                     if (!gh) return 0;
-                    const auto& joined = gh->getJoinedChannels();
+                    const auto& joined = gh->chat().getJoinedChannels();
                     if (joined.empty()) {
-                        gh->addSystemChatMessage("You are not in any channels.");
+                        gh->chat().addSystemChatMessage("You are not in any channels.");
                         return 0;
                     }
                     for (size_t i = 0; i < joined.size(); ++i) {
-                        gh->addSystemChatMessage(
+                        gh->chat().addSystemChatMessage(
                             std::to_string(i + 1) + ". " + joined[i]);
                     }
                     return 0;
@@ -3782,13 +3782,13 @@ void registerSocialLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const char* name = luaL_checkstring(L, 1);
             const char* pw = luaL_optstring(L, 2, "");
-            if (gh) gh->joinChannel(name, pw);
+            if (gh) gh->chat().joinChannel(name, pw);
             return 0;
         }},
                 {"LeaveChannelByName", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const char* name = luaL_checkstring(L, 1);
-            if (gh) gh->leaveChannel(name);
+            if (gh) gh->chat().leaveChannel(name);
             return 0;
         }},
                 // GetChannelName(indexOrName) → id, name, instanceID
@@ -3806,7 +3806,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"GetChannelName", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushnumber(L, 0); lua_pushnil(L); lua_pushnumber(L, 0); return 3; }
-            const auto& joined = gh->getJoinedChannels();
+            const auto& joined = gh->chat().getJoinedChannels();
 
             int index = 0;
             if (lua_isnumber(L, 1)) {

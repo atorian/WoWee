@@ -66,7 +66,7 @@ std::vector<uint8_t> standingMoved(uint32_t index, int32_t earned) {
 }
 
 size_t linesSaying(GameHarness& h, const std::string& text, wowee::game::ChatType type) {
-    const auto& history = h.game().getChatHistory();
+    const auto& history = h.game().chat().getChatHistory();
     return static_cast<size_t>(std::count_if(history.begin(), history.end(), [&](const auto& line) {
         return line.message == text && line.type == type;
     }));

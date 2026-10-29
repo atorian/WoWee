@@ -6150,7 +6150,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // panel shows nothing.
                 {"GetNumDisplayChannels", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? static_cast<double>(gh->getJoinedChannels().size()) : 0.0);
+            lua_pushnumber(L, gh ? static_cast<double>(gh->chat().getJoinedChannels().size()) : 0.0);
             return 1;
         }},
                 {"GetNumMapOverlays",        lua_GetNumMapOverlays},
@@ -6359,7 +6359,7 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh || index < 1) { lua_pushnil(L); return 1; }
-            const auto& joined = gh->getJoinedChannels();
+            const auto& joined = gh->chat().getJoinedChannels();
             if (index > static_cast<int>(joined.size())) { lua_pushnil(L); return 1; }
             lua_pushstring(L, joined[static_cast<size_t>(index) - 1].c_str());
             lua_pushboolean(L, 0);      // header - flat list, no categories
@@ -6526,9 +6526,9 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int sel = selectedDisplayChannel(L);
             if (!gh || sel < 1) { lua_pushboolean(L, 0); return 1; }
-            const auto& joined = gh->getJoinedChannels();
+            const auto& joined = gh->chat().getJoinedChannels();
             if (sel > static_cast<int>(joined.size())) { lua_pushboolean(L, 0); return 1; }
-            lua_pushboolean(L, gh->ownsChatChannel(joined[static_cast<size_t>(sel) - 1]) ? 1 : 0);
+            lua_pushboolean(L, gh->chat().ownsChannel(joined[static_cast<size_t>(sel) - 1]) ? 1 : 0);
             return 1;
         }},
                 {"SetSelectedDisplayChannel", [](lua_State* L) -> int {
@@ -6551,10 +6551,10 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int channel = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh || channel < 1) { lua_pushnumber(L, 0); return 1; }
-            const auto& joined = gh->getJoinedChannels();
+            const auto& joined = gh->chat().getJoinedChannels();
             if (channel > static_cast<int>(joined.size())) { lua_pushnumber(L, 0); return 1; }
             const auto& name = joined[static_cast<size_t>(channel) - 1];
-            gh->requestChannelList(name);
+            gh->chat().requestChannelList(name);
             lua_pushnumber(L, static_cast<lua_Number>(gh->getChannelRoster(name).size()));
             return 1;
         }},
@@ -6570,7 +6570,7 @@ void registerSystemLuaAPI(lua_State* L) {
             const int channel = static_cast<int>(luaL_optnumber(L, 1, 0));
             const int member = static_cast<int>(luaL_optnumber(L, 2, 0));
             if (!gh || channel < 1 || member < 1) { return luaReturnNil(L); }
-            const auto& joined = gh->getJoinedChannels();
+            const auto& joined = gh->chat().getJoinedChannels();
             if (channel > static_cast<int>(joined.size())) { return luaReturnNil(L); }
             const auto& roster = gh->getChannelRoster(joined[static_cast<size_t>(channel) - 1]);
             if (member > static_cast<int>(roster.size())) { return luaReturnNil(L); }

@@ -202,7 +202,7 @@ TEST_CASE("a spell the pet learns is said and redraws the bar, and one it unlear
     h.pump();
     CHECK(h.pet().getPetSpells() == std::vector<uint32_t>{kBite, kGrowl});
     CHECK(h.addonEvents("PET_BAR_UPDATE").size() == 1);
-    const auto& history = h.game().getChatHistory();
+    const auto& history = h.game().chat().getChatHistory();
     REQUIRE_FALSE(history.empty());
     CHECK(history.back().message.rfind("Your pet has learned ", 0) == 0);
 
@@ -250,7 +250,7 @@ TEST_CASE("a pet talent reset waits for the player's yes, and the line says what
     h.pump();
     CHECK(h.lastSent(Opcode::CMSG_PET_UNLEARN_TALENTS));
     CHECK_FALSE(h.pet().showPetUnlearnDialog());
-    const auto& history = h.game().getChatHistory();
+    const auto& history = h.game().chat().getChatHistory();
     REQUIRE_FALSE(history.empty());
     CHECK(history.back().message.rfind("Pet talent reset requested.", 0) == 0);
 }

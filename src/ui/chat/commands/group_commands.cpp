@@ -65,7 +65,7 @@ public:
 class AfkCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.toggleAfk(ctx.args);
+        ctx.gameHandler.chat().toggleAfk(ctx.args);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"afk", "away"}; }
@@ -76,7 +76,7 @@ public:
 class DndCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.toggleDnd(ctx.args);
+        ctx.gameHandler.chat().toggleDnd(ctx.args);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"dnd", "busy"}; }
@@ -109,7 +109,7 @@ public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (!ctx.args.empty()) {
             // /leave ChannelName - leave a chat channel
-            ctx.gameHandler.leaveChannel(ctx.args);
+            ctx.gameHandler.chat().leaveChannel(ctx.args);
         } else {
             group::orNoGroup(ctx.services.group).leaveGroup();
         }
@@ -190,10 +190,10 @@ public:
         ctx.gameHandler.requestRaidInfo();
         const auto& lockouts = ctx.gameHandler.getInstanceLockouts();
         if (lockouts.empty()) {
-            ctx.gameHandler.addSystemChatMessage("You are not saved to any instances.");
+            ctx.gameHandler.chat().addSystemChatMessage("You are not saved to any instances.");
             return {};
         }
-        ctx.gameHandler.addSystemChatMessage("Saved instances:");
+        ctx.gameHandler.chat().addSystemChatMessage("Saved instances:");
         const auto now = static_cast<uint64_t>(std::time(nullptr));
         for (const auto& lo : lockouts) {
             std::string name = ctx.gameHandler.getMapName(lo.mapId);
@@ -214,7 +214,7 @@ public:
                 when = days > 0 ? std::to_string(days) + "d " + std::to_string(hours) + "h"
                                 : std::to_string(hours) + "h";
             }
-            ctx.gameHandler.addSystemChatMessage(
+            ctx.gameHandler.chat().addSystemChatMessage(
                 "  " + name + " - resets in " + when +
                 (lo.extended ? " (extended)" : ""));
         }

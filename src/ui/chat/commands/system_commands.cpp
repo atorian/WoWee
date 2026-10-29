@@ -157,7 +157,7 @@ public:
 class ClearCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.clearChatHistory();
+        ctx.gameHandler.chat().clearChatHistory();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"clear"}; }

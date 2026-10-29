@@ -111,8 +111,8 @@ void WorldEntryCallbackHandler::forceServerTeleportCommand(const glm::vec3& rend
     }
 
     // Server-authoritative reset first, then teleport.
-    gameHandler_.sendChatMessage(game::ChatType::SAY, ".revive", "");
-    gameHandler_.sendChatMessage(game::ChatType::SAY, ".dismount", "");
+    gameHandler_.chat().sendChatMessage(game::ChatType::SAY, ".revive", "");
+    gameHandler_.chat().sendChatMessage(game::ChatType::SAY, ".dismount", "");
 
     glm::vec3 canonical = core::coords::renderToCanonical(renderPos);
     glm::vec3 serverPos = core::coords::canonicalToServer(canonical);
@@ -125,7 +125,7 @@ void WorldEntryCallbackHandler::forceServerTeleportCommand(const glm::vec3& rend
         << serverPos.z << " "
         << gameHandler_.getCurrentMapId() << " "
         << gameHandler_.getMovementInfo().orientation;
-    gameHandler_.sendChatMessage(game::ChatType::SAY, cmd.str(), "");
+    gameHandler_.chat().sendChatMessage(game::ChatType::SAY, cmd.str(), "");
 }
 
 // Precache tiles in a radius around a position (eliminates repeated tile-loop code)

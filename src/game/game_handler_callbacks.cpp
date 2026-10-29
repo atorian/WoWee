@@ -943,16 +943,12 @@ void GameHandler::handleTutorialFlags(network::Packet& packet) {
              flags[4], ", ", flags[5], ", ", flags[6], ", ", flags[7], "]");
 }
 
-void GameHandler::handleMotd(network::Packet& packet) {
-    chatHandler_->handleMotd(packet);
-}
-
 void GameHandler::handleNotification(network::Packet& packet) {
     // SMSG_NOTIFICATION: single null-terminated string
     std::string message = packet.readString();
     if (!message.empty()) {
         LOG_INFO("Server notification: ", message);
-        addSystemChatMessage(message);
+        chatHandler_->addSystemChatMessage(message);
     }
 }
 
@@ -1164,34 +1160,6 @@ void GameHandler::sendMovement(Opcode opcode) {
 // applyUpdateObjectBlock, finalizeUpdateObjectBatch, handleCompressedUpdateObject,
 // handleDestroyObject) moved to EntityController - see entity_controller.cpp
 
-void GameHandler::sendChatMessage(ChatType type, const std::string& message, const std::string& target) {
-    chatHandler_->sendChatMessage(type, message, target);
-}
-
-void GameHandler::sendAddonMessage(ChatType type, const std::string& message, const std::string& target) {
-    chatHandler_->sendAddonMessage(type, message, target);
-}
-
-void GameHandler::sendTextEmote(uint32_t textEmoteId, uint64_t targetGuid) {
-    chatHandler_->sendTextEmote(textEmoteId, targetGuid);
-}
-
-void GameHandler::joinChannel(const std::string& channelName, const std::string& password) {
-    chatHandler_->joinChannel(channelName, password);
-}
-
-void GameHandler::leaveChannel(const std::string& channelName) {
-    chatHandler_->leaveChannel(channelName);
-}
-
-std::string GameHandler::getChannelByIndex(int index) const {
-    return chatHandler_->getChannelByIndex(index);
-}
-
-int GameHandler::getChannelIndex(const std::string& channelName) const {
-    return chatHandler_->getChannelIndex(channelName);
-}
-
 void GameHandler::autoJoinDefaultChannels() {
     chatHandler_->chatAutoJoin.general = chatAutoJoin.general;
     chatHandler_->chatAutoJoin.trade = chatAutoJoin.trade;
@@ -1295,22 +1263,6 @@ void GameHandler::toggleCloak() {
     socialHandler_->toggleCloak();
 }
 
-void GameHandler::toggleAfk(const std::string& message) {
-    chatHandler_->toggleAfk(message);
-}
-
-void GameHandler::toggleDnd(const std::string& message) {
-    chatHandler_->toggleDnd(message);
-}
-
-void GameHandler::replyToLastWhisper(const std::string& message) {
-    chatHandler_->replyToLastWhisper(message);
-}
-
-std::string GameHandler::getLastWhisperSender() const {
-    return chatHandler_->getLastWhisperSender();
-}
-
 bool GameHandler::isAfk() const { return chatHandler_->isAfk(); }
 bool GameHandler::isDnd() const { return chatHandler_->isDnd(); }
 
@@ -1339,26 +1291,6 @@ void GameHandler::reportPlayer(uint64_t targetGuid, const std::string& reason) {
 
 void GameHandler::addLocalChatMessage(const MessageChatData& msg) {
     chatHandler_->addLocalChatMessage(msg);
-}
-
-const std::deque<MessageChatData>& GameHandler::getChatHistory() const {
-    return chatHandler_->getChatHistory();
-}
-
-void GameHandler::clearChatHistory() {
-    chatHandler_->clearChatHistory();
-}
-
-bool GameHandler::ownsChatChannel(const std::string& name) const {
-    return chatHandler_->ownsChannel(name);
-}
-
-uint64_t GameHandler::chatLineSender(uint32_t lineId) const {
-    return chatHandler_->chatLineSender(lineId);
-}
-
-const std::vector<std::string>& GameHandler::getJoinedChannels() const {
-    return chatHandler_->getJoinedChannels();
 }
 
 // ============================================================
@@ -1542,14 +1474,6 @@ void GameHandler::sendAlterAppearance(uint32_t hairStyleEntry, uint32_t hairColo
 // ============================================================
 // Group/Party
 // ============================================================
-
-void GameHandler::submitGmTicket(const std::string& text) {
-    chatHandler_->submitGmTicket(text);
-}
-
-void GameHandler::updateGmTicket(const std::string& text) {
-    chatHandler_->updateGmTicket(text);
-}
 
 void GameHandler::destroyTotem(int slot) {
     // CMSG_TOTEM_DESTROYED carries the slot and nothing else on these
@@ -1860,7 +1784,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
             if (goType == 5 && !goName.empty()) {
                 std::string lower = lowerCopy(goName);
                 if (lower.rfind("doodad_", 0) != 0) {
-                    addSystemChatMessage(goName);
+                    chatHandler_->addSystemChatMessage(goName);
                 }
             }
         }
@@ -1935,7 +1859,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
     if (gatherBaseSpellId != 0) {
         const uint32_t gatherSpellId = knownGatherRank(spellHandler_.get(), gatherBaseSpellId);
         if (gatherSpellId == 0) {
-            addSystemChatMessage(gatherBaseSpellId == kMiningBaseSpellId ? "Requires Mining."
+            chatHandler_->addSystemChatMessage(gatherBaseSpellId == kMiningBaseSpellId ? "Requires Mining."
                                                     : "Requires Herbalism.");
             LOG_INFO("GO gather skipped: no known rank for base spell=", gatherBaseSpellId,
                      " guid=0x", std::hex, guid, std::dec, " name='", goName, "'");
@@ -2118,23 +2042,23 @@ int GameHandler::getInstanceBootTimeRemaining() const {
 void GameHandler::unstuck() {
     if (unstuckCallback_) {
         unstuckCallback_();
-        addSystemChatMessage("Unstuck: snapped upward. Use /unstuckgy for full teleport.");
+        chatHandler_->addSystemChatMessage("Unstuck: snapped upward. Use /unstuckgy for full teleport.");
     }
 }
 
 void GameHandler::unstuckGy() {
     if (unstuckGyCallback_) {
         unstuckGyCallback_();
-        addSystemChatMessage("Unstuck: teleported to safe location.");
+        chatHandler_->addSystemChatMessage("Unstuck: teleported to safe location.");
     }
 }
 
 void GameHandler::unstuckHearth() {
     if (unstuckHearthCallback_) {
         unstuckHearthCallback_();
-        addSystemChatMessage("Unstuck: teleported to hearthstone location.");
+        chatHandler_->addSystemChatMessage("Unstuck: teleported to hearthstone location.");
     } else {
-        addSystemChatMessage("No hearthstone bind point set.");
+        chatHandler_->addSystemChatMessage("No hearthstone bind point set.");
     }
 }
 

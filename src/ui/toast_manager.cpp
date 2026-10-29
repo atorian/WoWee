@@ -389,9 +389,9 @@ void ToastManager::renderZoneToasts(float deltaTime) {
 // ─── Area Trigger Message Toasts ─────────────────────────────────────────────
 void ToastManager::renderAreaTriggerToasts(float deltaTime, game::GameHandler& gameHandler) {
     // Drain any pending messages from GameHandler
-    while (gameHandler.hasAreaTriggerMsg()) {
+    while (gameHandler.chat().hasAreaTriggerMessage()) {
         AreaTriggerToast t;
-        t.text = gameHandler.popAreaTriggerMsg();
+        t.text = gameHandler.chat().takeAreaTriggerMessage();
         t.age  = 0.0f;
         areaTriggerToasts_.push_back(std::move(t));
         if (areaTriggerToasts_.size() > 4)

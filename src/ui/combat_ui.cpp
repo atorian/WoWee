@@ -158,7 +158,7 @@ void CombatUI::renderCooldownTracker(game::GameHandler& gameHandler,
 // new chat lines stayed, because the whisper sound was being played from
 // inside it and belongs to no element - FrameXML plays none for a whisper.
 void CombatUI::playSoundsForNewChat(game::GameHandler& gameHandler) {
-    const auto& chatHistory = gameHandler.getChatHistory();
+    const auto& chatHistory = gameHandler.chat().getChatHistory();
     const size_t newCount = chatHistory.size();
     if (newCount <= raidWarnChatSeenCount_) return;
 

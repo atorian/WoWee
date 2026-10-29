@@ -970,7 +970,7 @@ void CombatHandler::handlePvpCredit(network::Packet& packet) {
         uint32_t rank       = packet.readUInt32();
         LOG_INFO("SMSG_PVP_CREDIT: honor=", honor, " victim=0x", std::hex, victimGuid, std::dec, " rank=", rank);
         std::string msg = "You gain " + std::to_string(honor) + " honor points.";
-        owner_.addLocalChatLine(ChatType::COMBAT_HONOR_GAIN, msg);
+        owner_.chat().addLocalChatLine(ChatType::COMBAT_HONOR_GAIN, msg);
         if (honor > 0) addCombatText(CombatTextEntry::HONOR_GAIN, static_cast<int32_t>(honor), 0, true);
         if (owner_.pvpHonorCallbackRef()) owner_.pvpHonorCallbackRef()(honor, victimGuid, rank);
     }
@@ -1119,7 +1119,7 @@ void CombatHandler::handleResurrectFailed(network::Packet& packet) {
                         : (reason == 2) ? "Cannot resurrect in this area."
                         : "Resurrection failed.";
         owner_.addUIError(msg);
-        owner_.addSystemChatMessage(msg);
+        owner_.chat().addSystemChatMessage(msg);
     }
 }
 
@@ -1269,7 +1269,7 @@ void CombatHandler::setFocus(uint64_t guid) {
             }
             if (name.empty()) name = owner_.lookupName(guid);
             if (name.empty()) name = "Unknown";
-            owner_.addSystemChatMessage("Focus set: " + name);
+            owner_.chat().addSystemChatMessage("Focus set: " + name);
             LOG_INFO("Focus set: 0x", std::hex, guid, std::dec);
         }
     }
@@ -1277,7 +1277,7 @@ void CombatHandler::setFocus(uint64_t guid) {
 
 void CombatHandler::clearFocus() {
     if (owner_.focusGuidRef() != 0) {
-        owner_.addSystemChatMessage("Focus cleared.");
+        owner_.chat().addSystemChatMessage("Focus cleared.");
         LOG_INFO("Focus cleared");
     }
     owner_.focusGuidRef() = 0;
@@ -1293,7 +1293,7 @@ void CombatHandler::setMouseoverGuid(uint64_t guid) {
 
 void CombatHandler::targetLastTarget() {
     if (owner_.lastTargetGuidRef() == 0) {
-        owner_.addSystemChatMessage("No previous target.");
+        owner_.chat().addSystemChatMessage("No previous target.");
         return;
     }
 
@@ -1328,7 +1328,7 @@ void CombatHandler::cycleTarget(bool reverse, const char* noneMessage,
               [](const Cand& a, const Cand& b) { return a.distSq < b.distSq; });
 
     if (cands.empty()) {
-        owner_.addSystemChatMessage(noneMessage);
+        owner_.chat().addSystemChatMessage(noneMessage);
         return;
     }
 
@@ -1408,7 +1408,7 @@ void CombatHandler::targetNearestRaidMember(bool reverse) {
 
 void CombatHandler::targetLastEnemy() {
     if (lastEnemyTargetGuid_ == 0) {
-        owner_.addSystemChatMessage("No previous enemy target.");
+        owner_.chat().addSystemChatMessage("No previous enemy target.");
         return;
     }
     setTarget(lastEnemyTargetGuid_);
@@ -1416,7 +1416,7 @@ void CombatHandler::targetLastEnemy() {
 
 void CombatHandler::targetLastFriend() {
     if (lastFriendTargetGuid_ == 0) {
-        owner_.addSystemChatMessage("No previous friendly target.");
+        owner_.chat().addSystemChatMessage("No previous friendly target.");
         return;
     }
     setTarget(lastFriendTargetGuid_);
@@ -1572,7 +1572,7 @@ void CombatHandler::assistTarget() {
     const uint64_t assistTargetGuid = unitTargetGuid(target);
 
     if (assistTargetGuid == 0) {
-        owner_.addSystemChatMessage(targetName + " has no target.");
+        owner_.chat().addSystemChatMessage(targetName + " has no target.");
         LOG_INFO("Assist: ", targetName, " has no target");
         return;
     }
@@ -1601,9 +1601,9 @@ void CombatHandler::togglePvp() {
         currentlyPvp = (entity->getField(59) & 0x00001000) != 0;
     }
     if (currentlyPvp) {
-        owner_.addSystemChatMessage("PvP flag disabled.");
+        owner_.chat().addSystemChatMessage("PvP flag disabled.");
     } else {
-        owner_.addSystemChatMessage("PvP flag enabled.");
+        owner_.chat().addSystemChatMessage("PvP flag enabled.");
     }
     LOG_INFO("Toggled PvP flag");
 }
@@ -1758,7 +1758,7 @@ void CombatHandler::handleXpGain(network::Packet& packet) {
     if (data.groupBonus > 0) {
         msg += " (+" + std::to_string(data.groupBonus) + " group bonus)";
     }
-    owner_.addLocalChatLine(ChatType::COMBAT_XP_GAIN, msg);
+    owner_.chat().addLocalChatLine(ChatType::COMBAT_XP_GAIN, msg);
 }
 
 } // namespace game

@@ -38,13 +38,13 @@ std::vector<uint8_t> calendarWithEvent(const std::string& title) {
 }
 
 bool chatSaid(GameHarness& h, const std::string& text) {
-    const auto& history = h.game().getChatHistory();
+    const auto& history = h.game().chat().getChatHistory();
     return std::any_of(history.begin(), history.end(),
                        [&](const auto& line) { return line.message == text; });
 }
 
 size_t chatCount(GameHarness& h, const std::string& text) {
-    const auto& history = h.game().getChatHistory();
+    const auto& history = h.game().chat().getChatHistory();
     return static_cast<size_t>(std::count_if(history.begin(), history.end(),
                                              [&](const auto& line) { return line.message == text; }));
 }
@@ -96,11 +96,11 @@ TEST_CASE("the waiting invites light the minimap when their count changes", "[ca
 TEST_CASE("a refused command says why, and one that went through says nothing", "[calendar][harness]") {
     GameHarness h;
     h.enterWorld();
-    const size_t linesBefore = h.game().getChatHistory().size();
+    const size_t linesBefore = h.game().chat().getChatHistory().size();
 
     h.receive(Opcode::SMSG_CALENDAR_COMMAND_RESULT, Body().u32(7).u8(0).cstr("").bytes());
     h.pump();
-    CHECK(h.game().getChatHistory().size() == linesBefore);
+    CHECK(h.game().chat().getChatHistory().size() == linesBefore);
 
     h.receive(Opcode::SMSG_CALENDAR_COMMAND_RESULT, Body().u32(7).u8(7).cstr("").bytes());
     h.receive(Opcode::SMSG_CALENDAR_COMMAND_RESULT, Body().u32(7).u8(40).cstr("").bytes());

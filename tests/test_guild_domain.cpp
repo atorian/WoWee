@@ -78,7 +78,7 @@ void inGuildField(GameHarness& h, uint32_t guildId) {
 }
 
 bool chatSaid(GameHarness& h, const std::string& text) {
-    const auto& history = h.game().getChatHistory();
+    const auto& history = h.game().chat().getChatHistory();
     return std::any_of(history.begin(), history.end(),
                        [&](const auto& line) { return line.message == text; });
 }
@@ -193,7 +193,7 @@ TEST_CASE("the guild's figures are said when they change", "[guild][harness]") {
     h.receive(Opcode::SMSG_GUILD_INFO, info(40));
     h.pump();
 
-    const auto& history = h.game().getChatHistory();
+    const auto& history = h.game().chat().getChatHistory();
     CHECK(std::count_if(history.begin(), history.end(), [](const auto& line) {
               return line.message == "Guild: Horde Inc (40 members, 12 accounts)";
           }) == 1);
@@ -272,7 +272,7 @@ TEST_CASE("a member coming online is said once, and not at all when the player d
 TEST_CASE("the message of the day goes to the interface, not into chat from here", "[guild][harness]") {
     GameHarness h;
     h.enterWorld();
-    const size_t linesBefore = h.game().getChatHistory().size();
+    const size_t linesBefore = h.game().chat().getChatHistory().size();
 
     h.receive(Opcode::SMSG_GUILD_EVENT, event(2 /* motd */, {"Raid at eight"}));
     h.pump();
@@ -280,13 +280,13 @@ TEST_CASE("the message of the day goes to the interface, not into chat from here
     const auto motd = h.addonEvents("GUILD_MOTD");
     REQUIRE(motd.size() == 1);
     CHECK(motd[0].args == std::vector<std::string>{"Raid at eight"});
-    CHECK(h.game().getChatHistory().size() == linesBefore);
+    CHECK(h.game().chat().getChatHistory().size() == linesBefore);
 }
 
 TEST_CASE("the guild bank's balance event is the bank's figure, not a chat line", "[guild][harness]") {
     GameHarness h;
     h.enterWorld();
-    const size_t linesBefore = h.game().getChatHistory().size();
+    const size_t linesBefore = h.game().chat().getChatHistory().size();
 
     // Type 17, one string: the balance as sixteen zero-padded hex digits,
     // broadcast to every member whenever anyone touches the bank. Unhandled,
@@ -294,7 +294,7 @@ TEST_CASE("the guild bank's balance event is the bank's figure, not a chat line"
     h.receive(Opcode::SMSG_GUILD_EVENT, event(17, {"000000000051451B"}));
     h.pump();
 
-    CHECK(h.game().getChatHistory().size() == linesBefore);
+    CHECK(h.game().chat().getChatHistory().size() == linesBefore);
     CHECK(h.addonEvents("CHAT_MSG_SYSTEM").empty());
     CHECK(h.addonEvents("CHAT_MSG_GUILD").empty());
     // 532g 61s 7c, read as hex.

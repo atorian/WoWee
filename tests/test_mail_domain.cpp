@@ -63,7 +63,7 @@ void atMailbox(GameHarness& h) {
 }
 
 bool chatSaid(GameHarness& h, const std::string& text) {
-    const auto& history = h.game().getChatHistory();
+    const auto& history = h.game().chat().getChatHistory();
     return std::any_of(history.begin(), history.end(),
                        [&](const auto& line) { return line.message == text; });
 }
@@ -160,7 +160,7 @@ TEST_CASE("new mail is said once while it waits, and the poll clears it", "[mail
 
     CHECK(h.mail().hasNewMail());
     CHECK(sounds == 1);
-    const auto& history = h.game().getChatHistory();
+    const auto& history = h.game().chat().getChatHistory();
     CHECK(std::count_if(history.begin(), history.end(),
                         [](const auto& l) { return l.message == "You have new mail."; }) == 1);
     CHECK(h.addonEvents("UPDATE_PENDING_MAIL").size() == 2);

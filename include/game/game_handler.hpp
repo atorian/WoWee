@@ -501,12 +501,6 @@ public:
      * @param message Message text
      * @param target Target name (for whispers, empty otherwise)
      */
-    void sendChatMessage(ChatType type, const std::string& message, const std::string& target = "");
-    void sendAddonMessage(ChatType type, const std::string& message, const std::string& target = "");
-    void sendTextEmote(uint32_t textEmoteId, uint64_t targetGuid = 0);
-    void joinChannel(const std::string& channelName, const std::string& password = "");
-    void leaveChannel(const std::string& channelName);
-    void requestChannelList(const std::string& channelName);
     /// Tell the server whether to pass on every loot roll for us.
     void sendOptOutOfLoot(bool optOut);
     /// Ask an area spirit healer when the next mass resurrection is.
@@ -519,15 +513,8 @@ public:
     float getAreaSpiritHealerTime() const { return areaSpiritHealerSeconds_; }
     /// Announce a rune's type and readiness to the interface.
     void fireRuneUpdate(uint32_t index);
-    const std::vector<std::string>& getJoinedChannels() const;
-    /// Whether the player owns this chat channel. See ChatHandler.
-    bool ownsChatChannel(const std::string& name) const;
-    /// Who sent the chat line with this id, or zero. See ChatHandler.
-    uint64_t chatLineSender(uint32_t lineId) const;
     /// The members of a chat channel, as of the last list requested for it.
     const std::vector<ChannelMember>& getChannelRoster(const std::string& channel) const;
-    std::string getChannelByIndex(int index) const;
-    int getChannelIndex(const std::string& channelName) const;
 
     // Chat auto-join settings (aliased from handler_types.hpp)
     using ChatAutoJoin = game::ChatAutoJoin;
@@ -610,8 +597,6 @@ public:
      * @param maxMessages Maximum number of messages to return (0 = all)
      * @return Vector of chat messages
      */
-    const std::deque<MessageChatData>& getChatHistory() const;
-    void clearChatHistory();
 
     /**
      * Add a locally-generated chat message (e.g., emote feedback)
@@ -810,8 +795,6 @@ public:
     void takeInboxTextItem(uint32_t mailId);
 
     // GM Ticket
-    void submitGmTicket(const std::string& text);
-    void updateGmTicket(const std::string& text);
     void deleteGmTicket();
     void requestGmTicket();          ///< Send CMSG_GMTICKET_GETTICKET to query open ticket
     void requestGmSystemStatus();    ///< Send CMSG_GMTICKET_SYSTEMSTATUS to query the queue
@@ -832,10 +815,6 @@ public:
     uint32_t getEntityGuildId(uint64_t guid) const;
 
     // AFK/DND status
-    void toggleAfk(const std::string& message = "");
-    void toggleDnd(const std::string& message = "");
-    void replyToLastWhisper(const std::string& message);
-    std::string getLastWhisperSender() const;
     bool isAfk() const;
     bool isDnd() const;
 
@@ -901,10 +880,6 @@ public:
 
     void startAutoAttack(uint64_t targetGuid) override;
     void stopAutoAttack() override;
-    // Area trigger messages (SMSG_AREA_TRIGGER_MESSAGE) - drained by UI each frame
-    bool hasAreaTriggerMsg() const { return chatHandler_->hasAreaTriggerMessage(); }
-    std::string popAreaTriggerMsg() { return chatHandler_->takeAreaTriggerMessage(); }
-
     // Threat
     using ThreatEntry = CombatHandler::ThreatEntry;
     const std::vector<ThreatEntry>* getTargetThreatList() const;
@@ -1915,7 +1890,6 @@ public:
     // ── Handler & Subsystem Accessors (unique_ptr → raw pointer) ─────
     network::WorldConnection* getSocket() override { return socket.get(); }
     const network::WorldConnection* getSocket() const { return socket.get(); }
-    ChatHandler* getChatHandler() { return chatHandler_.get(); }
     SpellHandler* getSpellHandler() { return spellHandler_.get(); }
     EntityController* getEntityController() { return entityController_.get(); }
     /// What the character holds - bags, equipment, coin, books - and the
@@ -2132,11 +2106,6 @@ public:
                        bool isPlayerSource, uint8_t powerType = 0,
                        uint64_t srcGuid = 0, uint64_t dstGuid = 0) override;
     bool shouldLogSpellstealAura(uint64_t casterGuid, uint64_t victimGuid, uint32_t spellId) override;
-    void addSystemChatMessage(const std::string& message);
-    /// A chat line of a given kind - money looted, experience gained, a
-    /// reputation change. These are chat messages and must be added as such:
-    /// see ChatHandler::addLocalChatLine.
-    void addLocalChatLine(game::ChatType type, const std::string& message);
 
     /// An error the player should see: "Target is too far away", "You have no
     /// target", and their kind.
@@ -2301,16 +2270,6 @@ private:
      * Handle SMSG_TUTORIAL_FLAGS from server
      */
     void handleTutorialFlags(network::Packet& packet);
-
-    /**
-     * Handle SMSG_WARDEN_DATA gate packet from server.
-     * We do not implement anti-cheat exchange for third-party realms.
-     */
-
-    /**
-     * Handle SMSG_MOTD from server
-     */
-    void handleMotd(network::Packet& packet);
 
     /** Handle SMSG_NOTIFICATION (vanilla/classic server notification string) */
     void handleNotification(network::Packet& packet);

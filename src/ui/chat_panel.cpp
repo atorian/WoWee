@@ -189,7 +189,7 @@ void ChatPanel::sendChatMessage(game::GameHandler& gameHandler) {
     // GM dot-prefix commands (.gm, .tele, .additem, etc.)
     if (input.size() > 1 && input[0] == '.') {
         LOG_INFO("GM command: '", input, "' - sending as SAY to server");
-        gameHandler.sendChatMessage(game::ChatType::SAY, input, "");
+        gameHandler.chat().sendChatMessage(game::ChatType::SAY, input, "");
 
         std::string dotCmd = input;
         size_t sp = dotCmd.find(' ');
@@ -305,7 +305,7 @@ void ChatPanel::sendChatMessage(game::GameHandler& gameHandler) {
                 uint32_t dbcId = gameHandler.emotes().dbcIdFor(cmdLower);
                 if (dbcId != 0) {
                     uint64_t targetGuid = gameHandler.hasTarget() ? gameHandler.getTargetGuid() : 0;
-                    gameHandler.sendTextEmote(dbcId, targetGuid);
+                    gameHandler.chat().sendTextEmote(dbcId, targetGuid);
                 }
 
                 game::MessageChatData msg;
@@ -336,7 +336,7 @@ void ChatPanel::sendChatMessage(game::GameHandler& gameHandler) {
         case 8: type = game::ChatType::RAID_WARNING; break;
         case 9: type = game::ChatType::PARTY; break;
         case 10: {
-            const auto& chans = gameHandler.getJoinedChannels();
+            const auto& chans = gameHandler.chat().getJoinedChannels();
             if (!chans.empty() && selectedChannelIdx_ < static_cast<int>(chans.size())) {
                 type = game::ChatType::CHANNEL;
                 target = chans[selectedChannelIdx_];
@@ -359,7 +359,7 @@ void ChatPanel::sendChatMessage(game::GameHandler& gameHandler) {
             return;
         }
 
-        gameHandler.sendChatMessage(game::ChatType::SAY, cmd, "");
+        gameHandler.chat().sendChatMessage(game::ChatType::SAY, cmd, "");
         msg.message = "PortBot executed: " + cmd;
         gameHandler.addLocalChatMessage(msg);
         chatInputBuffer_[0] = '\0';
@@ -378,7 +378,7 @@ void ChatPanel::sendChatMessage(game::GameHandler& gameHandler) {
     }
 
     if (!message.empty()) {
-        gameHandler.sendChatMessage(type, message, target);
+        gameHandler.chat().sendChatMessage(type, message, target);
     }
     chatInputBuffer_[0] = '\0';
 }

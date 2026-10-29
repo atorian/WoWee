@@ -453,7 +453,7 @@ TEST_CASE("while the world connection is lost, what needs the server is refused 
     h.clearRecords();
 
     h.game().spells().castSpell(133, 0);
-    h.game().sendChatMessage(wowee::game::ChatType::SAY, "anyone there?", "");
+    h.game().chat().sendChatMessage(wowee::game::ChatType::SAY, "anyone there?", "");
     h.game().lootTarget(0xF130000001000001ull);
     h.game().interactWithNpc(0xF130000001000002ull);
     h.pump();

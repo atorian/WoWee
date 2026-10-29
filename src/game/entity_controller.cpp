@@ -3084,7 +3084,7 @@ void EntityController::showGameObjectPageText(uint64_t guid) {
     }
 
     if (!info.name.empty()) {
-        owner_.addSystemChatMessage(info.name);
+        owner_.chat().addSystemChatMessage(info.name);
     }
 }
 

@@ -36,7 +36,7 @@ std::vector<uint8_t> whoAnswer(uint32_t online, const std::vector<Found>& player
 }
 
 bool chatHas(GameHarness& h, const std::string& text) {
-    const auto& history = h.game().getChatHistory();
+    const auto& history = h.game().chat().getChatHistory();
     return std::any_of(history.begin(), history.end(),
                        [&](const auto& line) { return line.message.find(text) != std::string::npos; });
 }
@@ -63,13 +63,13 @@ TEST_CASE("an answer with the who panel up goes to the panel alone", "[who][harn
     GameHarness h;
     h.enterWorld();
     h.who().setWhoToUI(true);
-    const size_t linesBefore = h.game().getChatHistory().size();
+    const size_t linesBefore = h.game().chat().getChatHistory().size();
 
     h.receive(Opcode::SMSG_WHO, whoAnswer(40, {{"Ann", "", 80}}));
     h.pump();
 
     CHECK(h.who().getWhoResults().size() == 1);
-    CHECK(h.game().getChatHistory().size() == linesBefore);
+    CHECK(h.game().chat().getChatHistory().size() == linesBefore);
     CHECK(h.addonEvents("WHO_LIST_UPDATE").size() == 1);
 }
 

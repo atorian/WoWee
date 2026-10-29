@@ -219,7 +219,6 @@ void GameHandler::registerCoreOpcodes() {
     };
     registerHandler(Opcode::SMSG_CLIENTCACHE_VERSION, &GameHandler::handleClientCacheVersion);
     registerHandler(Opcode::SMSG_TUTORIAL_FLAGS, &GameHandler::handleTutorialFlags);
-    registerHandler(Opcode::SMSG_MOTD, &GameHandler::handleMotd);
     registerHandler(Opcode::SMSG_NOTIFICATION, &GameHandler::handleNotification);
     registerHandler(Opcode::SMSG_PONG, &GameHandler::handlePong);
 
@@ -251,7 +250,7 @@ void GameHandler::registerCoreOpcodes() {
                     std::snprintf(buf, sizeof(buf), "Discovered new area! Gained %u experience.", xpGained);
                     msg = buf;
                 }
-                addLocalChatLine(game::ChatType::COMBAT_XP_GAIN, msg);
+                chatHandler_->addLocalChatLine(game::ChatType::COMBAT_XP_GAIN, msg);
                 addCombatText(CombatTextEntry::XP_GAIN, static_cast<int32_t>(xpGained), 0, true);
                 if (areaDiscoveryCallback_) areaDiscoveryCallback_(areaName, xpGained);
             }
@@ -390,7 +389,7 @@ void GameHandler::registerCoreOpcodes() {
                 newName = packet.readString();
             }
             if (result == 0) {
-                addSystemChatMessage("Character name changed to: " + newName);
+                chatHandler_->addSystemChatMessage("Character name changed to: " + newName);
             } else {
                 static const char* kRenameErrors[] = {
                     nullptr, "Name already in use.", "Name too short.", "Name too long.",
@@ -399,7 +398,7 @@ void GameHandler::registerCoreOpcodes() {
                 };
                 const char* errMsg = (result < 8) ? kRenameErrors[result] : nullptr;
                 std::string renameErr = errMsg ? std::string("Rename failed: ") + errMsg : "Character rename failed.";
-                addUIError(renameErr); addSystemChatMessage(renameErr);
+                addUIError(renameErr); chatHandler_->addSystemChatMessage(renameErr);
             }
             LOG_INFO("SMSG_CHAR_RENAME: result=", static_cast<int>(result),
                      " newName=", newName);
@@ -422,7 +421,7 @@ void GameHandler::registerCoreOpcodes() {
         std::string zoneName = getAreaName(zoneId);
         if (!zoneName.empty()) pbMsg += " to " + zoneName;
         pbMsg += '.';
-        addSystemChatMessage(pbMsg);
+        chatHandler_->addSystemChatMessage(pbMsg);
     };
     // The innkeeper asking whether to make this the player's home. It was
     // skipped because this client's own gossip window never waited for it - it
@@ -440,12 +439,12 @@ void GameHandler::registerCoreOpcodes() {
     dispatchTable_[Opcode::SMSG_TOGGLE_XP_GAIN] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(1)) return;
         uint8_t enabled = packet.readUInt8();
-        addSystemChatMessage(enabled ? "XP gain enabled." : "XP gain disabled.");
+        chatHandler_->addSystemChatMessage(enabled ? "XP gain enabled." : "XP gain disabled.");
     };
     dispatchTable_[Opcode::SMSG_BINDZONEREPLY] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             uint32_t result = packet.readUInt32();
-            if (result == 0) addSystemChatMessage("Your home is now set to this location.");
+            if (result == 0) chatHandler_->addSystemChatMessage("Your home is now set to this location.");
             else { raiseUiError("You are too far from the innkeeper."); }
         }
     };
@@ -453,7 +452,7 @@ void GameHandler::registerCoreOpcodes() {
         if (packet.hasRemaining(4)) {
             uint32_t result = packet.readUInt32();
             if (result == 0) {
-                addSystemChatMessage("Difficulty changed.");
+                chatHandler_->addSystemChatMessage("Difficulty changed.");
             } else {
                 static const char* reasons[] = {
                     "", "Error", "Too many members", "Already in dungeon",
@@ -462,13 +461,13 @@ void GameHandler::registerCoreOpcodes() {
                 };
                 const char* msg = (result < 8) ? reasons[result] : "Difficulty change failed.";
                 addUIError(std::string("Cannot change difficulty: ") + msg);
-                addSystemChatMessage(std::string("Cannot change difficulty: ") + msg);
+                chatHandler_->addSystemChatMessage(std::string("Cannot change difficulty: ") + msg);
             }
         }
     };
     dispatchTable_[Opcode::SMSG_CORPSE_NOT_IN_INSTANCE] = [this](network::Packet& /*packet*/) {
         addUIError("Your corpse is outside this instance.");
-        addSystemChatMessage("Your corpse is outside this instance. Release spirit to retrieve it.");
+        chatHandler_->addSystemChatMessage("Your corpse is outside this instance. Release spirit to retrieve it.");
     };
     dispatchTable_[Opcode::SMSG_CROSSED_INEBRIATION_THRESHOLD] = [this](network::Packet& packet) {
         if (packet.hasRemaining(16)) {
@@ -477,10 +476,10 @@ void GameHandler::registerCoreOpcodes() {
             uint32_t itemId    = packet.readUInt32();
             if (guid == playerGuid) {
                 const float amount = static_cast<float>(std::min(threshold, 3u)) / 3.0f;
-                if (threshold == 1) addSystemChatMessage("You feel tipsy.");
-                else if (threshold == 2) addSystemChatMessage("You feel drunk.");
-                else if (threshold >= 3) addSystemChatMessage("You feel completely smashed.");
-                else addSystemChatMessage("You feel sober again.");
+                if (threshold == 1) chatHandler_->addSystemChatMessage("You feel tipsy.");
+                else if (threshold == 2) chatHandler_->addSystemChatMessage("You feel drunk.");
+                else if (threshold >= 3) chatHandler_->addSystemChatMessage("You feel completely smashed.");
+                else chatHandler_->addSystemChatMessage("You feel sober again.");
                 eventBus().publish(events::PlayerIntoxicationChanged{amount});
             }
             LOG_DEBUG("SMSG_CROSSED_INEBRIATION_THRESHOLD: guid=0x", std::hex, guid,
@@ -530,7 +529,7 @@ void GameHandler::registerCoreOpcodes() {
         corpsePositionValid_ = true;
         eventBus().publish(events::GhostStateChanged{false});
         fireAddonEvent("PLAYER_DEAD", {});
-        addSystemChatMessage("You have been killed.");
+        chatHandler_->addSystemChatMessage("You have been killed.");
         LOG_INFO("SMSG_FORCED_DEATH_UPDATE: player force-killed");
         packet.skipAll();
     };
@@ -614,7 +613,7 @@ void GameHandler::registerCoreOpcodes() {
     };
     dispatchTable_[Opcode::SMSG_FEIGN_DEATH_RESISTED] = [this](network::Packet& /*packet*/) {
         addUIError("Your Feign Death was resisted.");
-        addSystemChatMessage("Your Feign Death attempt was resisted.");
+        chatHandler_->addSystemChatMessage("Your Feign Death attempt was resisted.");
     };
     dispatchTable_[Opcode::SMSG_CHANNEL_MEMBER_COUNT] = [](network::Packet& packet) {
         std::string chanName = packet.readString();
@@ -764,7 +763,7 @@ void GameHandler::registerCoreOpcodes() {
                                    "Too far away to mount.", "Already mounted." };
             std::string mountErr = result < 4 ? msgs[result] : "Cannot mount.";
             addUIError(mountErr);
-            addSystemChatMessage(mountErr);
+            chatHandler_->addSystemChatMessage(mountErr);
         }
     };
     dispatchTable_[Opcode::SMSG_DISMOUNTRESULT] = [this](network::Packet& packet) {
@@ -820,7 +819,7 @@ void GameHandler::registerCoreOpcodes() {
                 std::string zoneName = getAreaName(data.zoneId);
                 if (!zoneName.empty()) bindMsg += " to " + zoneName;
                 bindMsg += '.';
-                addSystemChatMessage(bindMsg);
+                chatHandler_->addSystemChatMessage(bindMsg);
             }
         }
     };
@@ -921,7 +920,7 @@ void GameHandler::registerCoreOpcodes() {
         char buf[128];
         std::snprintf(buf, sizeof(buf), "You will be able to resurrect in %u seconds.",
                       timeMs / 1000);
-        addSystemChatMessage(buf);
+        chatHandler_->addSystemChatMessage(buf);
 
         // Parsed and said in chat and announced to nobody. UIParent_OnEvent
         // answers this by joining the queue and raising the countdown dialog,
@@ -937,7 +936,7 @@ void GameHandler::registerCoreOpcodes() {
             std::snprintf(buf, sizeof(buf),
                 "You have lost %u%% of your gear's durability due to death.", pct);
             addUIError(buf);
-            addSystemChatMessage(buf);
+            chatHandler_->addSystemChatMessage(buf);
         }
     };
 
@@ -1014,7 +1013,7 @@ void GameHandler::registerCoreOpcodes() {
         }
         packet.skipAll();
         addUIError(abortMsg);
-        addSystemChatMessage(abortMsg);
+        chatHandler_->addSystemChatMessage(abortMsg);
         LOG_WARNING("SMSG_TRANSFER_ABORTED: reason 0x", std::hex,
                     static_cast<int>(reason), std::dec, " - ", abortMsg);
     };
@@ -1035,7 +1034,7 @@ void GameHandler::registerCoreOpcodes() {
         }
     };
     dispatchTable_[Opcode::SMSG_NEW_TAXI_PATH] = [this](network::Packet& /*packet*/) {
-        addSystemChatMessage("New flight path discovered!");
+        chatHandler_->addSystemChatMessage("New flight path discovered!");
     };
 
     // (MSG_TALENT_WIPE_CONFIRM → registered by SpellHandler, which owns the
@@ -1069,7 +1068,7 @@ void GameHandler::registerCoreOpcodes() {
                 if (gameObjectCustomAnimCallback_)
                     gameObjectCustomAnimCallback_(guid, kFishingBobberBiteAnimation);
                 addUIError("A fish is on your line! Right-click to reel it in.");
-                addSystemChatMessage("A fish is on your line! Right-click to reel it in.");
+                chatHandler_->addSystemChatMessage("A fish is on your line! Right-click to reel it in.");
                 eventBus().publish(events::FishingBite{guid});
                 LOG_WARNING("Fishing bite ready: guid=0x", std::hex, guid, std::dec,
                             " serverAnimProgress=", animId);
@@ -1084,7 +1083,7 @@ void GameHandler::registerCoreOpcodes() {
         if (packet.hasRemaining(12)) {
             packet.readUInt64(); // itemGuid
             uint32_t result = packet.readUInt32();
-            addSystemChatMessage(result == 0 ? "Item returned. Refund processed."
+            chatHandler_->addSystemChatMessage(result == 0 ? "Item returned. Refund processed."
                                              : "Could not return item for refund.");
         }
     };
@@ -1097,7 +1096,7 @@ void GameHandler::registerCoreOpcodes() {
         // gem always reported that it had failed.
         if (!packet.hasRemaining(8)) return;
         const uint64_t itemGuid = packet.readUInt64();
-        addSystemChatMessage("Gems socketed successfully.");
+        chatHandler_->addSystemChatMessage("Gems socketed successfully.");
         LOG_DEBUG("SMSG_SOCKET_GEMS_RESULT: itemGuid=0x", std::hex, itemGuid, std::dec);
     };
     dispatchTable_[Opcode::SMSG_ITEM_TIME_UPDATE] = [](network::Packet& packet) {
@@ -1311,7 +1310,7 @@ void GameHandler::registerCoreOpcodes() {
         if (packet.hasRemaining(4)) {
             uint32_t result = packet.readUInt32();
             if (result == 0) {
-                addSystemChatMessage("Hairstyle changed.");
+                chatHandler_->addSystemChatMessage("Hairstyle changed.");
                 barberShopOpen_ = false;
                 fireAddonEvent("BARBER_SHOP_CLOSE", {});
             } else {
@@ -1319,7 +1318,7 @@ void GameHandler::registerCoreOpcodes() {
                                 : (result == 2) ? "You are not at a barber shop."
                                 : "Barber shop unavailable.";
                 addUIError(msg);
-                addSystemChatMessage(msg);
+                chatHandler_->addSystemChatMessage(msg);
             }
             LOG_DEBUG("SMSG_BARBER_SHOP_RESULT: result=", result);
         }
@@ -1355,7 +1354,7 @@ void GameHandler::registerRemainingOpcodes() {
         // Server-script text message - display in system chat
         std::string msg = packet.readString();
         if (!msg.empty()) {
-            addSystemChatMessage(msg);
+            chatHandler_->addSystemChatMessage(msg);
             LOG_INFO("SMSG_SCRIPT_MESSAGE: ", msg);
         }
     };
@@ -1381,7 +1380,7 @@ void GameHandler::registerRemainingOpcodes() {
                         msg = casterName + " enchants your item with " + enchName + ".";
                     else
                         msg = "Your item has been enchanted with " + enchName + ".";
-                    addSystemChatMessage(msg);
+                    chatHandler_->addSystemChatMessage(msg);
                 }
             }
         }
@@ -1457,7 +1456,7 @@ void GameHandler::registerRemainingOpcodes() {
         // Clear cached talent data so the talent screen reflects the reset.
         spellHandler_->resetTalentState();
         addUIError("Your talents have been reset by the server.");
-        addSystemChatMessage("Your talents have been reset by the server.");
+        chatHandler_->addSystemChatMessage("Your talents have been reset by the server.");
         // The talent frame rebuilds from this; the cached state was cleared
         // above and nothing told it to redraw, so it kept the old trees.
         if (hasAddonEventListener()) fireAddonEvent("TALENTS_INVOLUNTARILY_RESET", {});
@@ -1485,7 +1484,7 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_CHAR_CUSTOMIZE] = [this](network::Packet& packet) {
         if (packet.hasRemaining(1)) {
             uint8_t result = packet.readUInt8();
-            addSystemChatMessage(result == 0 ? "Character customization complete."
+            chatHandler_->addSystemChatMessage(result == 0 ? "Character customization complete."
                                              : "Character customization failed.");
         }
         packet.skipAll();
@@ -1493,7 +1492,7 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_CHAR_FACTION_CHANGE] = [this](network::Packet& packet) {
         if (packet.hasRemaining(1)) {
             uint8_t result = packet.readUInt8();
-            addSystemChatMessage(result == 0 ? "Faction change complete."
+            chatHandler_->addSystemChatMessage(result == 0 ? "Faction change complete."
                                              : "Faction change failed.");
         }
         packet.skipAll();
@@ -1520,14 +1519,14 @@ void GameHandler::registerRemainingOpcodes() {
     // Server-side LFG invite timed out (no response within time limit)
     dispatchTable_[Opcode::SMSG_LFG_TIMEDOUT] = [this](network::Packet& packet) {
         // Server-side LFG invite timed out (no response within time limit)
-        addSystemChatMessage("Dungeon Finder: Invite timed out.");
+        chatHandler_->addSystemChatMessage("Dungeon Finder: Invite timed out.");
         eventBus().publish(events::DungeonFinderOpened{});
         packet.skipAll();
     };
     // Another party member failed to respond to a LFG role-check in time
     dispatchTable_[Opcode::SMSG_LFG_OTHER_TIMEDOUT] = [this](network::Packet& packet) {
         // Another party member failed to respond to a LFG role-check in time
-        addSystemChatMessage("Dungeon Finder: Another player's invite timed out.");
+        chatHandler_->addSystemChatMessage("Dungeon Finder: Another player's invite timed out.");
         eventBus().publish(events::DungeonFinderOpened{});
         packet.skipAll();
     };
@@ -1539,20 +1538,20 @@ void GameHandler::registerRemainingOpcodes() {
             (void)result;
         }
         addUIError("Dungeon Finder: Auto-join failed.");
-        addSystemChatMessage("Dungeon Finder: Auto-join failed.");
+        chatHandler_->addSystemChatMessage("Dungeon Finder: Auto-join failed.");
         packet.skipAll();
     };
     // No eligible players found for auto-join
     dispatchTable_[Opcode::SMSG_LFG_AUTOJOIN_FAILED_NO_PLAYER] = [this](network::Packet& packet) {
         // No eligible players found for auto-join
         addUIError("Dungeon Finder: No players available for auto-join.");
-        addSystemChatMessage("Dungeon Finder: No players available for auto-join.");
+        chatHandler_->addSystemChatMessage("Dungeon Finder: No players available for auto-join.");
         packet.skipAll();
     };
     // Party leader is currently set to Looking for More (LFM) mode
     dispatchTable_[Opcode::SMSG_LFG_LEADER_IS_LFM] = [this](network::Packet& packet) {
         // Party leader is currently set to Looking for More (LFM) mode
-        addSystemChatMessage("Your party leader is currently Looking for More.");
+        chatHandler_->addSystemChatMessage("Your party leader is currently Looking for More.");
         packet.skipAll();
     };
     // uint32 zoneId + uint8 level_min + uint8 level_max - player queued for meeting stone
@@ -1572,7 +1571,7 @@ void GameHandler::registerRemainingOpcodes() {
                 std::snprintf(buf, sizeof(buf),
                     "You are now in the Meeting Stone queue for zone %u (levels %u-%u).",
                     zoneId, levelMin, levelMax);
-            addSystemChatMessage(buf);
+            chatHandler_->addSystemChatMessage(buf);
             LOG_INFO("SMSG_MEETINGSTONE_SETQUEUE: zone=", zoneId,
                      " levels=", static_cast<int>(levelMin), "-", static_cast<int>(levelMax));
         }
@@ -1581,14 +1580,14 @@ void GameHandler::registerRemainingOpcodes() {
     // Server confirms group found and teleport summon is ready
     dispatchTable_[Opcode::SMSG_MEETINGSTONE_COMPLETE] = [this](network::Packet& packet) {
         // Server confirms group found and teleport summon is ready
-        addSystemChatMessage("Meeting Stone: Your group is ready! Use the Meeting Stone to summon.");
+        chatHandler_->addSystemChatMessage("Meeting Stone: Your group is ready! Use the Meeting Stone to summon.");
         LOG_INFO("SMSG_MEETINGSTONE_COMPLETE");
         packet.skipAll();
     };
     // Meeting stone search is still ongoing
     dispatchTable_[Opcode::SMSG_MEETINGSTONE_IN_PROGRESS] = [this](network::Packet& packet) {
         // Meeting stone search is still ongoing
-        addSystemChatMessage("Meeting Stone: Searching for group members...");
+        chatHandler_->addSystemChatMessage("Meeting Stone: Searching for group members...");
         LOG_DEBUG("SMSG_MEETINGSTONE_IN_PROGRESS");
         packet.skipAll();
     };
@@ -1599,10 +1598,10 @@ void GameHandler::registerRemainingOpcodes() {
             uint64_t memberGuid = packet.readUInt64();
             const auto& memberName = lookupName(memberGuid);
             if (!memberName.empty()) {
-                addSystemChatMessage("Meeting Stone: " + memberName +
+                chatHandler_->addSystemChatMessage("Meeting Stone: " + memberName +
                                      " has been added to your group.");
             } else {
-                addSystemChatMessage("Meeting Stone: A new player has been added to your group.");
+                chatHandler_->addSystemChatMessage("Meeting Stone: A new player has been added to your group.");
             }
             LOG_INFO("SMSG_MEETINGSTONE_MEMBER_ADDED: guid=0x", std::hex, memberGuid, std::dec);
         }
@@ -1622,14 +1621,14 @@ void GameHandler::registerRemainingOpcodes() {
             uint8_t reason = packet.readUInt8();
             const char* msg = (reason < 4) ? kMeetingstoneErrors[reason]
                                            : "Meeting Stone: Could not join group.";
-            addSystemChatMessage(msg);
+            chatHandler_->addSystemChatMessage(msg);
             LOG_INFO("SMSG_MEETINGSTONE_JOINFAILED: reason=", static_cast<int>(reason));
         }
     };
     // Player was removed from the meeting stone queue (left, or group disbanded)
     dispatchTable_[Opcode::SMSG_MEETINGSTONE_LEAVE] = [this](network::Packet& packet) {
         // Player was removed from the meeting stone queue (left, or group disbanded)
-        addSystemChatMessage("You have left the Meeting Stone queue.");
+        chatHandler_->addSystemChatMessage("You have left the Meeting Stone queue.");
         LOG_DEBUG("SMSG_MEETINGSTONE_LEAVE");
         packet.skipAll();
     };
@@ -1643,7 +1642,7 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_GMTICKET_CREATE] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             const uint32_t res = packet.readUInt32();
-            addSystemChatMessage(
+            chatHandler_->addSystemChatMessage(
                 res == kTicketCreated       ? "GM ticket submitted."
               : res == kTicketAlreadyExists ? "You already have a GM ticket open."
                                             : "Failed to submit GM ticket.");
@@ -1652,7 +1651,7 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_GMTICKET_UPDATETEXT] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             const uint32_t res = packet.readUInt32();
-            addSystemChatMessage(res == kTicketUpdated ? "GM ticket updated."
+            chatHandler_->addSystemChatMessage(res == kTicketUpdated ? "GM ticket updated."
                                                        : "Failed to update GM ticket.");
         }
     };
@@ -1660,7 +1659,7 @@ void GameHandler::registerRemainingOpcodes() {
         if (packet.hasRemaining(4)) {
             const uint32_t res = packet.readUInt32();
             if (res == kTicketDeleted) gmTicketText_.clear();
-            addSystemChatMessage(res == kTicketDeleted ? "GM ticket deleted."
+            chatHandler_->addSystemChatMessage(res == kTicketDeleted ? "GM ticket deleted."
                                                        : "No ticket to delete.");
         }
     };
@@ -1699,7 +1698,7 @@ void GameHandler::registerRemainingOpcodes() {
                     "You have an open GM ticket (submitted %um ago). Estimated wait: %.1f hours.",
                     ageMin, gmTicketWaitHours_);
             }
-            addSystemChatMessage(buf);
+            chatHandler_->addSystemChatMessage(buf);
             LOG_INFO("SMSG_GMTICKET_GETTICKET: open ticket age=", ageSec,
                      "s wait=", gmTicketWaitHours_, "h");
 
@@ -1728,7 +1727,7 @@ void GameHandler::registerRemainingOpcodes() {
             });
         } else if (gmStatus == 3) {
             gmTicketText_.clear();
-            addSystemChatMessage("Your GM ticket has been closed.");
+            chatHandler_->addSystemChatMessage("Your GM ticket has been closed.");
             LOG_INFO("SMSG_GMTICKET_GETTICKET: ticket closed");
             // No arguments at all is how the interface is told there is no
             // ticket: it reads the first one and stops if it is absent.
@@ -1754,7 +1753,7 @@ void GameHandler::registerRemainingOpcodes() {
         if (packet.hasRemaining(4)) {
             uint32_t sysStatus = packet.readUInt32();
             gmSupportAvailable_ = (sysStatus != 0);
-            addSystemChatMessage(gmSupportAvailable_
+            chatHandler_->addSystemChatMessage(gmSupportAvailable_
                 ? "GM support is currently available."
                 : "GM support is currently unavailable.");
             LOG_INFO("SMSG_GMTICKET_SYSTEMSTATUS: available=", gmSupportAvailable_);
@@ -1837,7 +1836,7 @@ void GameHandler::registerRemainingOpcodes() {
         if (packet.hasRemaining(1)) {
             uint8_t result = packet.readUInt8();
             if (result == 0)
-                addSystemChatMessage("Your complaint has been submitted.");
+                chatHandler_->addSystemChatMessage("Your complaint has been submitted.");
             else if (result == 2)
                 addUIError("Report a Player is currently disabled.");
         }
@@ -1970,10 +1969,10 @@ void GameHandler::registerRemainingOpcodes() {
             uint32_t error = packet.readUInt32();
             if (error == 0) {
                 addUIError("Your hearthstone is not bound.");
-                addSystemChatMessage("Your hearthstone is not bound.");
+                chatHandler_->addSystemChatMessage("Your hearthstone is not bound.");
             } else {
                 addUIError("Hearthstone bind failed.");
-                addSystemChatMessage("Hearthstone bind failed.");
+                chatHandler_->addSystemChatMessage("Hearthstone bind failed.");
             }
         }
     };
@@ -2009,15 +2008,15 @@ void GameHandler::registerRemainingOpcodes() {
                                 "teleported out in " + std::to_string(timerMs / 1000) +
                                 " seconds.";
         addUIError(msg);
-        addSystemChatMessage(msg);
+        chatHandler_->addSystemChatMessage(msg);
         fireAddonEvent("INSTANCE_BOOT_START", {});
     };
     dispatchTable_[Opcode::SMSG_RAID_READY_CHECK_ERROR] = [this](network::Packet& packet) {
         if (packet.hasRemaining(1)) {
             uint8_t err = packet.readUInt8();
-            if (err == 0) { addUIError("Ready check failed: not in a group."); addSystemChatMessage("Ready check failed: not in a group."); }
-            else if (err == 1) { addUIError("Ready check failed: in instance."); addSystemChatMessage("Ready check failed: in instance."); }
-            else { addUIError("Ready check failed."); addSystemChatMessage("Ready check failed."); }
+            if (err == 0) { addUIError("Ready check failed: not in a group."); chatHandler_->addSystemChatMessage("Ready check failed: not in a group."); }
+            else if (err == 1) { addUIError("Ready check failed: in instance."); chatHandler_->addSystemChatMessage("Ready check failed: in instance."); }
+            else { addUIError("Ready check failed."); chatHandler_->addSystemChatMessage("Ready check failed."); }
         }
     };
     dispatchTable_[Opcode::SMSG_RESET_FAILED_NOTIFY] = [this](network::Packet& packet) {
@@ -2199,7 +2198,7 @@ void GameHandler::registerRemainingOpcodes() {
             auto ent = entityController_->getEntityManager().getEntity(mentorGuid);
             if (auto* unit = dynamic_cast<Unit*>(ent.get())) mentorName = unit->getName();
             if (mentorName.empty()) mentorName = lookupName(mentorGuid);
-            addSystemChatMessage(mentorName.empty()
+            chatHandler_->addSystemChatMessage(mentorName.empty()
                 ? "A player is offering to grant you a level."
                 : (mentorName + " is offering to grant you a level."));
         }
@@ -2267,7 +2266,7 @@ void GameHandler::registerRemainingOpcodes() {
             } else {
                 std::snprintf(buf, sizeof(buf), "%sYou have been playing for a long time.", severity);
             }
-            addSystemChatMessage(buf);
+            chatHandler_->addSystemChatMessage(buf);
             addUIError(buf);
         }
     };
@@ -2338,7 +2337,7 @@ void GameHandler::registerRemainingOpcodes() {
             msg = "You have been removed from the group for being AFK.";
         else if (reasonType == 2)
             msg = "You have been removed from the group by vote.";
-        addSystemChatMessage(msg);
+        chatHandler_->addSystemChatMessage(msg);
         addUIError(msg);
         LOG_INFO("SMSG_KICK_REASON: reasonType=", reasonType,
                  " reason='", reason, "'");
@@ -2356,7 +2355,7 @@ void GameHandler::registerRemainingOpcodes() {
             } else {
                 std::snprintf(buf, sizeof(buf), "Group action throttled.");
             }
-            addSystemChatMessage(buf);
+            chatHandler_->addSystemChatMessage(buf);
             LOG_DEBUG("SMSG_GROUPACTION_THROTTLED: throttleMs=", throttleMs);
         }
     };
@@ -2394,7 +2393,7 @@ void GameHandler::registerRemainingOpcodes() {
             msg = "[GM Response] " + subject;
         else
             msg = "[GM Response] Your ticket has been answered.";
-        addSystemChatMessage(msg);
+        chatHandler_->addSystemChatMessage(msg);
         addUIError(msg);
         // The help frame takes the ticket's own text and the reply, and opens
         // the panel that lets the answer be accepted or more help asked for.
@@ -2424,7 +2423,7 @@ void GameHandler::registerRemainingOpcodes() {
             char buf[128];
             std::snprintf(buf, sizeof(buf),
                           "[GM Ticket #%u] Status: %s.", ticketId, statusStr);
-            addSystemChatMessage(buf);
+            chatHandler_->addSystemChatMessage(buf);
             LOG_DEBUG("SMSG_GMRESPONSE_STATUS_UPDATE: ticketId=", ticketId,
                       " status=", static_cast<int>(status));
         }

@@ -64,13 +64,13 @@ std::vector<uint8_t> bootVote(bool inProgress, uint32_t votes, uint32_t needed) 
 }
 
 bool chatSaid(GameHarness& h, const std::string& text) {
-    const auto& history = h.game().getChatHistory();
+    const auto& history = h.game().chat().getChatHistory();
     return std::any_of(history.begin(), history.end(),
                        [&](const auto& line) { return line.message == text; });
 }
 
 size_t chatCount(GameHarness& h, const std::string& text) {
-    const auto& history = h.game().getChatHistory();
+    const auto& history = h.game().chat().getChatHistory();
     return static_cast<size_t>(std::count_if(history.begin(), history.end(),
                                              [&](const auto& line) { return line.message == text; }));
 }

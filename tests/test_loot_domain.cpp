@@ -61,7 +61,7 @@ struct MoneyAnnounced {
 };
 
 size_t linesStarting(GameHarness& h, const std::string& prefix) {
-    const auto& history = h.game().getChatHistory();
+    const auto& history = h.game().chat().getChatHistory();
     return static_cast<size_t>(std::count_if(history.begin(), history.end(), [&](const auto& line) {
         return line.message.rfind(prefix, 0) == 0;
     }));
