@@ -817,16 +817,6 @@ public:
     // Glyphs (WotLK): up to 6 glyph slots per spec (3 major + 3 minor)
     static constexpr uint8_t MAX_GLYPH_SLOTS = 6;
 
-    // Action bar - ActionBarHandler's. A facade for the callers that have
-    // not moved; new code asks actionBar().
-    static constexpr int SLOTS_PER_BAR    = kActionBarSlotsPerBar;
-    static constexpr int ACTION_BARS      = kActionBars;
-    static constexpr int ACTION_BAR_SLOTS = kActionBarSlots;
-    const ActionBar& getActionBar() const { return actionBarHandler_->slots(); }
-    void setActionBarSlot(int slot, ActionBarSlot::Type type, uint32_t id) {
-        actionBarHandler_->setSlot(slot, type, id);
-    }
-
     void saveCharacterConfig();
     void loadCharacterConfig();
     static std::string getCharacterConfigDir();

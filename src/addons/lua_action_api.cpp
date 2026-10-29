@@ -250,7 +250,7 @@ static int lua_HasAction(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnFalse(L); }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1; // WoW uses 1-indexed slots
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot < 0 || slot >= static_cast<int>(bar.size())) {
         lua_pushboolean(L, 0);
         return 1;
@@ -264,7 +264,7 @@ static int lua_GetActionTexture(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnNil(L); }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) {
         lua_pushnil(L);
         return 1;
@@ -310,7 +310,7 @@ static int lua_IsUsableAction(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { lua_pushboolean(L, 0); lua_pushboolean(L, 0); return 2; }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) {
         lua_pushboolean(L, 0);
         lua_pushboolean(L, 0);
@@ -354,7 +354,7 @@ static int lua_IsActionInRange(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnNil(L); }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) {
         lua_pushnil(L);
         return 1;
@@ -376,7 +376,7 @@ static int lua_GetActionInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return 0; }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) {
         return 0;
     }
@@ -416,7 +416,7 @@ static int lua_GetActionCount(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnZero(L); }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) {
         lua_pushnumber(L, 0);
         return 1;
@@ -435,7 +435,7 @@ static int lua_GetActionCooldown(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 1); return 3; }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) {
         lua_pushnumber(L, 0);
         lua_pushnumber(L, 0);
@@ -492,7 +492,7 @@ static int lua_UseAction(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) return 0;
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) return 0;
     const auto& action = bar[slot];
     // The end of the chain a click travels, and the last place it can stop
@@ -635,7 +635,7 @@ static int lua_PickupAction(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) return 0;
     int slot = static_cast<int>(luaL_checknumber(L, 1));
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot < 1 || slot > static_cast<int>(bar.size())) return 0;
 
     // Read before anything is written: setActionBarSlot rewrites the entry
@@ -655,11 +655,11 @@ static int lua_PickupAction(lua_State* L) {
                           held == CursorType::MACRO);
 
     if (holding) {
-        gh->setActionBarSlot(slot - 1, typeForCursor(held), heldId);
+        gh->actionBar().setSlot(slot - 1, typeForCursor(held), heldId);
     } else if (hadAction) {
         // Nothing held, so the slot empties. This is the fire that redraws the
         // button: setActionBarSlot raises ACTIONBAR_SLOT_CHANGED for it.
-        gh->setActionBarSlot(slot - 1, game::ActionBarSlot::EMPTY, 0);
+        gh->actionBar().setSlot(slot - 1, game::ActionBarSlot::EMPTY, 0);
     }
 
     if (hadAction) {
@@ -2328,7 +2328,7 @@ void registerActionLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int slot = static_cast<int>(luaL_optnumber(L, 1, 0)) - 1;
             if (!gh || slot < 0) { lua_pushnil(L); return 1; }
-            const auto& bar = gh->getActionBar();
+            const auto& bar = gh->actionBar().slots();
             if (slot >= static_cast<int>(bar.size())) { lua_pushnil(L); return 1; }
             const auto& action = bar[static_cast<size_t>(slot)];
             if (action.type != game::ActionBarSlot::MACRO) { lua_pushnil(L); return 1; }

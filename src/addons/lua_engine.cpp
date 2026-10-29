@@ -2034,7 +2034,7 @@ int lua_Tooltip_SetAction(lua_State* L) {
     auto* gh = wowee::addons::getGameHandler(L);
     const int slot = static_cast<int>(luaL_optnumber(L, 2, 0)) - 1;
     if (!w || !gh || slot < 0) { lua_pushboolean(L, 0); return 1; }
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) {
         lua_pushboolean(L, 0);
         return 1;

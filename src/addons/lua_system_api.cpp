@@ -5909,7 +5909,7 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int slot = static_cast<int>(luaL_optnumber(L, 1, 0)) - 1;
             if (!gh || slot < 0) { lua_pushboolean(L, 0); return 1; }
-            const auto& bar = gh->getActionBar();
+            const auto& bar = gh->actionBar().slots();
             // 6603 is Auto Attack, the one action that flashes the button red
             // for as long as the swing keeps going.
             constexpr uint32_t kAutoAttack = game::SPELL_ID_ATTACK;
@@ -5922,7 +5922,7 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int slot = static_cast<int>(luaL_optnumber(L, 1, 0)) - 1;
             if (!gh || slot < 0) { lua_pushboolean(L, 0); return 1; }
-            const auto& bar = gh->getActionBar();
+            const auto& bar = gh->actionBar().slots();
             bool consumable = false;
             if (slot < static_cast<int>(bar.size()) &&
                 bar[slot].type == game::ActionBarSlot::ITEM) {
@@ -5936,7 +5936,7 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int slot = static_cast<int>(luaL_optnumber(L, 1, 0)) - 1;
             if (!gh || slot < 0) { lua_pushboolean(L, 0); return 1; }
-            const auto& bar = gh->getActionBar();
+            const auto& bar = gh->actionBar().slots();
             bool worn = false;
             if (slot < static_cast<int>(bar.size()) &&
                 bar[slot].type == game::ActionBarSlot::ITEM) {
@@ -5953,7 +5953,7 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int slot = static_cast<int>(luaL_optnumber(L, 1, 0)) - 1;
             if (!gh || slot < 0) { lua_pushboolean(L, 0); return 1; }
-            const auto& bar = gh->getActionBar();
+            const auto& bar = gh->actionBar().slots();
             bool stackable = false;
             if (slot < static_cast<int>(bar.size()) &&
                 bar[slot].type == game::ActionBarSlot::ITEM) {
@@ -6405,7 +6405,7 @@ void registerSystemLuaAPI(lua_State* L) {
             const int slot = static_cast<int>(luaL_optnumber(L, 1, 0)) - 1;
             bool repeating = false;
             if (gh && slot >= 0) {
-                const auto& bar = gh->getActionBar();
+                const auto& bar = gh->actionBar().slots();
                 if (slot < static_cast<int>(bar.size()) &&
                     bar[slot].type == game::ActionBarSlot::SPELL) {
                     constexpr uint32_t kAutoShot = 75, kShoot = 5019;
