@@ -124,6 +124,10 @@ public:
     void runInInterface(const std::string& code);
     /// The same for an expression, answered as a boolean.
     bool interfaceAnswers(const std::string& expression);
+    /// Run `body` on the character's interface in an Interface scope, as the
+    /// client does what it tells the interface from C++ each frame. Fails the
+    /// test when there is no interface.
+    void withInterface(const std::function<void(addons::LuaEngine&)>& body);
     /// What the client does with the interface's frames each frame after its
     /// scripts ran, short of drawing them: lay them out on a 1920x1080 screen,
     /// then tell the interface what appeared, went away and changed size

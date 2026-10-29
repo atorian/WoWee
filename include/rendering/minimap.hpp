@@ -21,6 +21,12 @@ namespace wowee {
 namespace pipeline { class AssetManager; class MinimapTileIndex; }
 namespace rendering {
 
+/// The radius in yards each step of the outdoor zoom (minimapZoom) shows, as
+/// wow.exe 3.3.5a works it out (0x75b743): {14, 12, 10, 8, 6, 4} from
+/// 0x979e6c, halved, times 33 1/3. The indoor steps are kWmoMinimapRadius.
+inline constexpr std::array<float, 6> kMinimapOutdoorRadius = {
+    233.33333f, 200.0f, 166.66667f, 133.33333f, 100.0f, 66.666664f};
+
 class Camera;
 class VkContext;
 class VkTexture;
@@ -113,6 +119,14 @@ public:
     void toggle() { enabled = !enabled; }
 
     void setViewRadius(float radius) { viewRadius = radius; }
+    /// The step of the indoor zoom (kWmoMinimapRadius) a building's own tiles
+    /// are drawn at.
+    void setIndoorZoom(int level) {
+        indoorZoom_ = std::clamp<int>(level, 0, kWmoMinimapRadius.size() - 1);
+    }
+    /// Whether the tiles on show are a building's own rather than the terrain:
+    /// the client's indoor mode, in which the indoor zoom applies.
+    [[nodiscard]] bool isShowingBuilding() const { return showingBuilding_; }
     void setRotateWithCamera(bool rotate) { rotateWithCamera = rotate; }
     [[nodiscard]] bool isRotateWithCamera() const { return rotateWithCamera; }
 

@@ -3483,6 +3483,10 @@ if(_ipo_supported AND WOWEE_ENABLE_LTO)
     set_property(TARGET test_interface_frame_scripts PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
 
+# The Minimap frame's two zooms, outdoor and indoor, through the interface.
+wowee_add_test(test_minimap_zoom SOURCES test_minimap_zoom.cpp)
+target_link_libraries(test_minimap_zoom PRIVATE wowee_client_harness)
+
 # ── wowee_loading_test_client ────────────────────────────────
 option(WOWEE_BUILD_RENDER_CLIENT_PROBE "Build native interface/render lifecycle GPU probe" OFF)
 wowee_add_test(test_frame_results SOURCES test_frame_results.cpp)

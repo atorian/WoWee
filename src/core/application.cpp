@@ -94,6 +94,7 @@
 #include "audio/audio_engine.hpp"
 #include "rendering/lightning.hpp"
 #include "addons/lua_api_registrations.hpp"
+#include "addons/minimap_zoom.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "addons/addon_manager.hpp"
 #include "addons/lua_api_helpers.hpp"
@@ -4711,26 +4712,32 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                         mm = widgets.findByName("Minimap");
                         minimapWidgetId_ = mm ? mm->id : 0;
                     }
+                    if (mm) {
+                        // SetZoom and GetZoom reach the indoor zoom while the
+                        // map draws a building's own tiles, and the map is
+                        // drawn at the levels the interface keeps.
+                        addons::setMinimapIndoors(*engine, *mm, map->isShowingBuilding());
+                        static_assert(rendering::kMinimapOutdoorRadius.size() == addons::kMinimapZoomLevels &&
+                                      rendering::kWmoMinimapRadius.size() == addons::kMinimapZoomLevels);
+                        const int outdoor = addons::minimapZoomLevel(false);
+                        const int indoor = addons::minimapZoomLevel(true);
+                        // On a change only: this client's own zoom buttons in
+                        // the settings window step the map as well.
+                        static int appliedOutdoor = -1, appliedIndoor = -1;
+                        if (outdoor != appliedOutdoor) {
+                            appliedOutdoor = outdoor;
+                            map->setViewRadius(rendering::kMinimapOutdoorRadius[outdoor]);
+                        }
+                        if (indoor != appliedIndoor) {
+                            appliedIndoor = indoor;
+                            map->setIndoorZoom(indoor);
+                        }
+                    }
                     if (mm && mm->visible && mm->rectW > 0.0f && mm->rectH > 0.0f) {
                         const float sc = widgets.uiScale();
                         map->setScreenRect(mm->left * sc,
                                            io.DisplaySize.y - (mm->bottom + mm->rectH) * sc,
                                            mm->rectW * sc, mm->rectH * sc);
-
-                        // The zoom buttons move a number on the frame, and the
-                        // map has to be told: Minimap:SetZoom is the interface
-                        // saying what it wants, not the map changing. Five
-                        // levels as WoW has them, zero furthest out.
-                        static int appliedZoom = -1;
-                        if (mm->zoomLevel != appliedZoom) {
-                            appliedZoom = mm->zoomLevel;
-                            static const float kRadius[5] = {
-                                800.0f, 620.0f, 460.0f, 320.0f, 200.0f
-                            };
-                            const int lvl = (mm->zoomLevel < 0) ? 0
-                                          : (mm->zoomLevel > 4 ? 4 : mm->zoomLevel);
-                            map->setViewRadius(kRadius[lvl]);
-                        }
 
                         // Minimap:PingLocation, which is all Minimap_OnClick
                         // does. The offsets are minimap-local interface units
