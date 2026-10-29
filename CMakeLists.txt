@@ -1011,6 +1011,7 @@ set(WOWEE_SOURCES
 
     src/pipeline/terrain_mesh.cpp
     src/pipeline/distant_terrain.cpp
+    src/pipeline/minimap_tile_index.cpp
 
     # Rendering (Vulkan infrastructure)
     src/rendering/pass_ablation.cpp

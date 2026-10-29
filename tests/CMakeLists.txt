@@ -3586,3 +3586,6 @@ wowee_add_test(test_frame_pool SOURCES test_frame_pool.cpp)
 wowee_add_test(test_distant_terrain
     SOURCES test_distant_terrain.cpp ${CMAKE_SOURCE_DIR}/src/pipeline/distant_terrain.cpp
             ${TEST_COMMON_SOURCES})
+
+wowee_add_test(test_minimap_tile_index
+    SOURCES test_minimap_tile_index.cpp ${CMAKE_SOURCE_DIR}/src/pipeline/minimap_tile_index.cpp)

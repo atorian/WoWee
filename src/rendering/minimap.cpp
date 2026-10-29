@@ -8,6 +8,7 @@
 #include "rendering/camera.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
+#include "pipeline/minimap_tile_index.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include <imgui.h>
@@ -15,7 +16,6 @@
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <array>
-#include <sstream>
 #include <cmath>
 
 namespace wowee {
@@ -335,37 +335,26 @@ void Minimap::prepareTiles(int x, int y) {
         result.map = map; result.x = x; result.y = y; result.lookup = lookup;
         if (!token.current()) return result;
         if (!result.lookup) {
-            auto parsed = std::make_shared<std::unordered_map<std::string, std::string>>();
             auto data = assets->readFile("Textures\\Minimap\\md5translate.trs");
             if (data.empty()) LOG_WARNING("Minimap lookup md5translate.trs is unavailable; tiles show no data");
-            std::istringstream stream(std::string(reinterpret_cast<const char*>(data.data()), data.size()));
-            std::string line;
-            while (std::getline(stream, line)) {
-                if (!line.empty() && line.back() == '\r') line.pop_back();
-                const auto tab = line.find('\t');
-                if (tab == std::string::npos) continue;
-                auto key = line.substr(0, tab), hash = line.substr(tab + 1);
-                if (key.ends_with(".blp")) key.resize(key.size() - 4);
-                if (hash.ends_with(".blp")) hash.resize(hash.size() - 4);
-                (*parsed)[std::move(key)] = std::move(hash);
-            }
-            result.lookup = std::move(parsed);
+            result.lookup = std::make_shared<const pipeline::MinimapTileIndex>(
+                pipeline::MinimapTileIndex::parse(data));
         }
         int slot = 0;
         for (int dr = -1; dr <= 1; ++dr) for (int dc = -1; dc <= 1; ++dc, ++slot) {
             if (!token.current()) return result;
-            const auto key = map + "\\map" + std::to_string(x + dr) + "_" + std::to_string(y + dc);
-            const auto found = result.lookup->find(key);
-            if (found == result.lookup->end()) continue;
-            result.hashes[slot] = found->second;
-            if (auto cached = existing.find(found->second); cached != existing.end()) {
+            const auto* file = result.lookup->terrainTile(map, x + dr, y + dc);
+            if (!file) continue;
+            result.hashes[slot] = *file;
+            if (auto cached = existing.find(*file); cached != existing.end()) {
                 result.images[slot] = cached->second;
                 continue;
             }
-            const auto path = "Textures\\Minimap\\" + found->second + ".blp";
+            const auto path = "Textures\\Minimap\\" + *file + ".blp";
             const auto image = assets->loadTexture(path);
             if (!image.isValid()) {
-                LOG_WARNING("Minimap tile ", key, " (", path, ") failed to load; shown as no data");
+                LOG_WARNING("Minimap tile ", pipeline::MinimapTileIndex::terrainTileName(map, x + dr, y + dc),
+                            " (", path, ") failed to load; shown as no data");
                 continue;
             }
             auto texture = std::shared_ptr<VkTexture>(new VkTexture, [ctx](VkTexture* tex) {

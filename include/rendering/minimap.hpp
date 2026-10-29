@@ -14,7 +14,7 @@
 #include <array>
 
 namespace wowee {
-namespace pipeline { class AssetManager; }
+namespace pipeline { class AssetManager; class MinimapTileIndex; }
 namespace rendering {
 
 class Camera;
@@ -63,7 +63,7 @@ public:
     struct Tiles {
         std::array<std::shared_ptr<VkTexture>, 9> images;
         std::array<std::string, 9> hashes;
-        std::shared_ptr<const std::unordered_map<std::string, std::string>> lookup;
+        std::shared_ptr<const pipeline::MinimapTileIndex> lookup;
         std::string map;
         int x = 0, y = 0;
         uint64_t revision = 0;
@@ -128,8 +128,8 @@ private:
     pipeline::AssetManager* assetManager = nullptr;
     std::string mapName = "Azeroth";
 
-    // TRS lookup: "Azeroth\map32_49" → "e7f0dea73ee6baca78231aaf4b7e772a"
-    std::shared_ptr<const std::unordered_map<std::string, std::string>> trsLookup;
+    // md5translate.trs: "Azeroth\map32_49" → "e7f0dea73ee6baca78231aaf4b7e772a"
+    std::shared_ptr<const pipeline::MinimapTileIndex> trsLookup;
     core::JobGroup tileJobs_;
     core::JobGroup::Future<Tiles> pendingTiles_;
     std::shared_ptr<const Tiles> readyTiles_;
