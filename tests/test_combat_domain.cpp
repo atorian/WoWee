@@ -365,3 +365,23 @@ TEST_CASE("the server breaking off or clearing the target drops it, and only tha
     h.pump();
     CHECK(h.game().combat().getTargetGuid() == 0);
 }
+
+TEST_CASE("auto-attack reaches 8 yards bare-handed and 40 with a bow in the ranged slot",
+          "[combat][harness]") {
+    using namespace wowee::game;
+    GameHarness h;
+    h.enterWorld();
+    h.game().getEntityManager().addEntity(0xA001, hostileAt(h, 0xA001, 20.0f));
+
+    h.game().combat().startAutoAttack(0xA001);
+    h.pump();
+    CHECK(h.countSent(Opcode::CMSG_ATTACKSWING) == 0);
+    CHECK(h.addonEvents("UI_ERROR_MESSAGE").size() == 1);
+
+    ItemDef bow;
+    bow.itemId = 2504;
+    bow.inventoryType = InvType::RANGED_BOW;
+    REQUIRE(h.game().inventory().items().setEquipSlot(EquipSlot::RANGED, bow));
+    h.game().combat().startAutoAttack(0xA001);
+    CHECK(h.countSent(Opcode::CMSG_ATTACKSWING) == 1);
+}

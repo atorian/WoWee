@@ -1882,6 +1882,15 @@ bool GameHandler::previewPlayerAppearance(uint32_t appearanceBytes, uint8_t faci
     return false;
 }
 
+bool GameHandler::corpseHoldsLoot(uint64_t guid) const {
+    return loot::orNoLoot(services_.loot).corpseHeldItems(guid);
+}
+
+uint8_t GameHandler::rangedWeaponInventoryType() const {
+    const auto& ranged = inventoryHandler_->items().getEquipSlot(EquipSlot::RANGED);
+    return ranged.empty() ? 0 : ranged.item.inventoryType;
+}
+
 void GameHandler::serverMoneyReported(uint64_t copper) {
     inventoryHandler_->applyServerMoney(copper);
 }

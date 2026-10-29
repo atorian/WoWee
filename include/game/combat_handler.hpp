@@ -16,21 +16,69 @@
 
 namespace wowee {
 namespace core { class EventBus; class CVarStore; }
+namespace group { struct Roster; }
 namespace game {
 
 class ChatLog;
+class EntityManager;
 class FrameXmlEvents;
-class GameHandler;
+class PacketParsers;
 class PacketSender;
 class Entity;
+class Unit;
+using GroupListData = group::Roster;
+
+/// What the fight, the targets and the player's death ask of the rest of the
+/// game. GameHandler implements it; several answers it already gives other
+/// handlers under the same names.
+class CombatQueries {
+public:
+    virtual ~CombatQueries() = default;
+
+    // ---- The player and the world in view ----
+    [[nodiscard]] virtual uint64_t characterGuid() const = 0;
+    [[nodiscard]] virtual const EntityManager& entities() const = 0;
+    [[nodiscard]] virtual PacketParsers& packetParsers() = 0;
+    /// "player", "target", "party2", ... - the unit id FrameXML knows a guid
+    /// by, or empty.
+    [[nodiscard]] virtual std::string unitIdFor(uint64_t guid) const = 0;
+    [[nodiscard]] virtual std::string playerName(uint64_t guid) const = 0;
+    [[nodiscard]] virtual uint64_t petGuid() const = 0;
+    [[nodiscard]] virtual std::string spellName(uint32_t spellId) const = 0;
+    [[nodiscard]] virtual const GroupListData& party() const = 0;
+    [[nodiscard]] virtual uint32_t currentMapId() const = 0;
+    /// On a party or raid map, as Map.dbc says.
+    [[nodiscard]] virtual bool inInstance() const = 0;
+    /// A creature corpse that still holds loot, so it stays a target.
+    [[nodiscard]] virtual bool corpseHoldsLoot(uint64_t guid) const = 0;
+    /// The InvType of what is in the ranged slot, or 0 when it is empty.
+    [[nodiscard]] virtual uint8_t rangedWeaponInventoryType() const = 0;
+
+    // ---- Where the player stands and faces, and on what ----
+    [[nodiscard]] virtual const MovementInfo& playerMovement() const = 0;
+    /// Set the character's facing (canonical yaw) and tell the server.
+    virtual void setFacing(float canonicalYaw) = 0;
+    [[nodiscard]] virtual bool autoFaceTarget() const = 0;
+    [[nodiscard]] virtual bool flying() const = 0;
+    [[nodiscard]] virtual bool mounted() const = 0;
+    [[nodiscard]] virtual bool taxiMountActive() const = 0;
+    virtual void dismount() = 0;
+
+    // ---- What other parts keep of the fight ----
+    /// The target changed: the auras shown for the last one go.
+    virtual void forgetTargetAuras() = 0;
+    /// Whether the next melee swing should play no animation of its own,
+    /// because a spell already played one; asking clears it.
+    virtual bool consumeSuppressMeleeSwingAnim() = 0;
+};
 
 class CombatHandler {
 public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
-    CombatHandler(GameHandler& owner, PacketSender& sender, FrameXmlEvents& frameXml,
-                  core::EventBus& events, ChatLog& chat, const core::CVarStore& cvars);
+    CombatHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
+                  ChatLog& chat, const core::CVarStore& cvars, CombatQueries& queries);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -284,12 +332,15 @@ private:
 
     void autoTargetAttacker(uint64_t attackerGuid);
 
-    GameHandler& owner_;
     PacketSender& sender_;
     FrameXmlEvents& frameXml_;
     core::EventBus& events_;
     ChatLog& chat_;
     const core::CVarStore& cvars_;
+    CombatQueries& queries_;
+
+    /// The unit a guid names, or null.
+    [[nodiscard]] Unit* unitByGuid(uint64_t guid) const;
 
     // --- Combat state ---
     bool autoAttacking_ = false;

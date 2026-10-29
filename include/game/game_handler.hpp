@@ -152,7 +152,8 @@ class GameHandler : public IConnectionState,
                      public QuestQueries,
                      public ReputationQueries,
                      public SocialQueries,
-                     public WardenSession {
+                     public WardenSession,
+                     public CombatQueries {
 public:
     // Talent data structures (aliased from handler_types.hpp)
     using TalentEntry = game::TalentEntry;
@@ -232,6 +233,12 @@ public:
     // rest of the game (ActionBarQueries, InventoryQueries). See AGENTS.md,
     // "A new domain handler".
     bool connected() const override { return isConnected(); }
+    // CombatQueries (the rest it shares with the other handlers' queries)
+    bool inInstance() const override { return isInInstance(); }
+    bool corpseHoldsLoot(uint64_t guid) const override;
+    uint8_t rangedWeaponInventoryType() const override;
+    bool taxiMountActive() const override { return movementHandler_->isTaxiMountActive(); }
+    void forgetTargetAuras() override { spellHandler_->clearTargetAuras(); }
     // WardenSession
     uint32_t clientBuild() const override { return build; }
     const std::vector<uint8_t>& loginSessionKey() const override { return sessionKey; }
@@ -1580,7 +1587,7 @@ public:
     // ── UI & Event Callbacks ─────────────────────────────────────────
     bool hasAddonEventListener() const { return static_cast<bool>(addonEventCallback_); }
     void suppressNextMeleeSwingAnim() override { suppressMeleeSwingAnim_ = true; }
-    bool consumeSuppressMeleeSwingAnim() {
+    bool consumeSuppressMeleeSwingAnim() override {
         bool v = suppressMeleeSwingAnim_;
         suppressMeleeSwingAnim_ = false;
         return v;
