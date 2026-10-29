@@ -923,17 +923,6 @@ public:
     uint32_t getPlayerLevel() const { return serverPlayerLevel_; }
     static uint32_t killXp(uint32_t playerLevel, uint32_t victimLevel);
 
-    // Server game time now, in HOURS since midnight (0.0-24.0), or -1 before
-    // the server has sent it.
-    //
-    // The unit is stated because four things disagreed about it: the wire
-    // format is a packed bitfield, the sky divided by 86400 as though it were
-    // seconds, GetGameTime split it as hours, and SMSG_SERVERTIME wrote a unix
-    // timestamp into the same field.
-    //
-    // RealmTimeHandler's; a facade for the callers that have not moved.
-    float getGameTime() const;
-
     // Global Cooldown (GCD) - set when the server sends a spellId=0 cooldown entry
     bool isGCDActive() const { return spellHandler_->getGCDRemaining() > 0.0f; }
 

@@ -4259,7 +4259,7 @@ void Application::presentWorldToRenderer(float deltaTime) {
     environment.areaId = zoneTracker_->areaId();
     if (gameHandler) {
         environment.mapId = gameHandler->getCurrentMapId();
-        environment.gameTime = gameHandler->getGameTime();
+        environment.gameTime = gameHandler->realmTime().gameHours();
         if (const auto realm = gameHandler->realmTime().realmSeconds()) {
             environment.realmSeconds = *realm;
         }

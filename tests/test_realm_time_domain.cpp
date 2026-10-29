@@ -92,7 +92,7 @@ TEST_CASE("The login packet's date sets the realm clock to the minute until the 
     CHECK(realmSeconds(h) == Approx(1759999980.0).margin(0.05));
     CHECK(h.game().realmTime().realmClockSource() == RealmClock::Source::PackedDate);
     // The same packet still sets the world's hour.
-    CHECK(h.game().getGameTime() == Approx(8.0f + 53.0f / 60.0f).margin(0.01f));
+    CHECK(h.game().realmTime().gameHours() == Approx(8.0f + 53.0f / 60.0f).margin(0.01f));
 
     const double before = realmSeconds(h);
     h.advance(5.0f);
@@ -109,7 +109,7 @@ TEST_CASE("The login packet's date sets the realm clock to the minute until the 
               Body().u32(wowee::core::packWowPackedTime(date(2025, 10, 9, 20, 0))));
     h.pump();
     CHECK(realmSeconds(h) == Approx(kUnixTime + 7200.0).margin(0.05));
-    CHECK(h.game().getGameTime() == Approx(20.0f).margin(0.01f));
+    CHECK(h.game().realmTime().gameHours() == Approx(20.0f).margin(0.01f));
 }
 
 TEST_CASE("A login packet carrying no date leaves the realm clock unknown", "[realm_time]") {

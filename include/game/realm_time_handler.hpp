@@ -41,6 +41,11 @@ public:
     // --- Queries -------------------------------------------------------------
 
     /// The world's hour, 0-24, or -1 before the server has said.
+    ///
+    /// Hours since midnight, stated because four things disagreed about it:
+    /// the wire format is a packed bitfield, the sky divided by 86400 as
+    /// though it were seconds, GetGameTime split it as hours, and
+    /// SMSG_SERVERTIME wrote a unix timestamp into the same field.
     [[nodiscard]] float gameHours() const { return gameClock_.hours(now_()); }
 
     /// Seconds since 1970 on the realm, or empty before the server has said

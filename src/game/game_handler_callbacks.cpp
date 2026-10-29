@@ -1189,10 +1189,6 @@ void GameHandler::setMouseoverGuid(uint64_t guid) {
     combatHandler_->setMouseoverGuid(guid);
 }
 
-float GameHandler::getGameTime() const {
-    return realmTimeHandler_->gameHours();
-}
-
 void GameHandler::faceCanonicalYaw(float canonicalYaw) {
     movementInfo.orientation = canonicalYaw;
 

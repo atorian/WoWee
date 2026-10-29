@@ -43,6 +43,7 @@
 #include "pet/domain/actions.hpp"
 #include "game/account_data_handler.hpp"
 #include "game/weather_handler.hpp"
+#include "game/realm_time_handler.hpp"
 #include "audio/activity_sound_manager.hpp"
 #include "audio/ambient_sound_manager.hpp"
 #include "audio/audio_coordinator.hpp"
@@ -2443,7 +2444,7 @@ static int lua_SetTracking(lua_State* L) {
 static int lua_GetGameTime(lua_State* L) {
     // Returns server game time as hours, minutes
     auto* gh = getGameHandler(L);
-    float gt = gh ? gh->getGameTime() : -1.0f;
+    float gt = gh ? gh->realmTime().gameHours() : -1.0f;
     if (gt < 0.0f) {
         // The server has not said yet. Answer with the local clock rather than
         // a negative hour, which is what the interface's own clock would then
