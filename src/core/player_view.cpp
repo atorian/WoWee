@@ -94,7 +94,7 @@ void PlayerView::connectMovement(game::GameHandler& game) {
     // one callback slot for it. A second registration here replaced or was
     // replaced by that one depending on which was built last, which is how
     // the seated flag stopped arriving.
-    cc->setAutoFollowCancelCallback([&game]() { game.cancelFollow(); });
+    cc->setAutoFollowCancelCallback([&game]() { game.movement().cancelFollow(); });
     cc->setUseWoWSpeed(true);
 }
 

@@ -2999,14 +2999,14 @@ void Application::showDisconnectNotice(const std::string& notice) {
 // about it lands.
 void Application::applyServerMovementState(float deltaTime) {
     if (renderer && gameHandler && getCameraController()) {
-        getCameraController()->setRunSpeedOverride(gameHandler->getServerRunSpeed());
-        getCameraController()->setWalkSpeedOverride(gameHandler->getServerWalkSpeed());
-        getCameraController()->setSwimSpeedOverride(gameHandler->getServerSwimSpeed());
-        getCameraController()->setSwimBackSpeedOverride(gameHandler->getServerSwimBackSpeed());
-        getCameraController()->setFlightSpeedOverride(gameHandler->getServerFlightSpeed());
-        getCameraController()->setFlightBackSpeedOverride(gameHandler->getServerFlightBackSpeed());
-        getCameraController()->setRunBackSpeedOverride(gameHandler->getServerRunBackSpeed());
-        getCameraController()->setTurnRateOverride(gameHandler->getServerTurnRate());
+        getCameraController()->setRunSpeedOverride(gameHandler->movement().getServerRunSpeed());
+        getCameraController()->setWalkSpeedOverride(gameHandler->movement().getServerWalkSpeed());
+        getCameraController()->setSwimSpeedOverride(gameHandler->movement().getServerSwimSpeed());
+        getCameraController()->setSwimBackSpeedOverride(gameHandler->movement().getServerSwimBackSpeed());
+        getCameraController()->setFlightSpeedOverride(gameHandler->movement().getServerFlightSpeed());
+        getCameraController()->setFlightBackSpeedOverride(gameHandler->movement().getServerFlightBackSpeed());
+        getCameraController()->setRunBackSpeedOverride(gameHandler->movement().getServerRunBackSpeed());
+        getCameraController()->setTurnRateOverride(gameHandler->movement().getServerTurnRate());
         getCameraController()->setMovementRooted(gameHandler->isPlayerRooted());
         getCameraController()->setGravityDisabled(gameHandler->isGravityDisabled());
         getCameraController()->setFeatherFallActive(gameHandler->isFeatherFalling());
@@ -3017,7 +3017,7 @@ void Application::applyServerMovementState(float deltaTime) {
         getCameraController()->setFlyingActive(gameHandler->canFly());
         // And whether the player is up in it, which the camera worked out
         // last frame: take-off and landing are decided where the floor is.
-        gameHandler->setFlightAirborne(getCameraController()->isFlightAirborne());
+        gameHandler->movement().setFlightAirborne(getCameraController()->isFlightAirborne());
         getCameraController()->setHoverActive(gameHandler->isHovering());
 
         // Sync camera forward pitch to movement packets during flight / swimming.
@@ -3051,9 +3051,9 @@ void Application::applyServerMovementState(float deltaTime) {
     }
 
     bool onTaxi = gameHandler &&
-                  (gameHandler->isOnTaxiFlight() ||
-                   gameHandler->isTaxiMountActive() ||
-                   gameHandler->isTaxiActivationPending());
+                  (gameHandler->movement().isOnTaxiFlight() ||
+                   gameHandler->movement().isTaxiMountActive() ||
+                   gameHandler->movement().isTaxiActivationPending());
     // Deliberately narrower than onTaxi: only true once the flight is
     // actually happening (mounted/flying), not merely pending a reply.
     // A rejected CMSG_ACTIVATETAXI sets isTaxiActivationPending() true
@@ -3067,8 +3067,8 @@ void Application::applyServerMovementState(float deltaTime) {
     // level below, with a "Cannot take that flight path" chat message
     // and zero actual movement in between.
     bool actuallyFlying = gameHandler &&
-                          (gameHandler->isOnTaxiFlight() ||
-                           gameHandler->isTaxiMountActive());
+                          (gameHandler->movement().isOnTaxiFlight() ||
+                           gameHandler->movement().isTaxiMountActive());
     bool onTransportNow = gameHandler && gameHandler->isOnTransport();
     // Clear stale client-side transport state when the tracked transport no longer exists.
     if (onTransportNow && gameHandler->getTransportManager()) {
@@ -3219,7 +3219,7 @@ void Application::applyServerMovementState(float deltaTime) {
                     p.z = targetZ;
                     renderer->getCharacterPosition() = p;
                     glm::vec3 canonical = core::coords::renderToCanonical(p);
-                    gameHandler->setPosition(canonical.x, canonical.y, canonical.z);
+                    gameHandler->movement().setPosition(canonical.x, canonical.y, canonical.z);
                     gameHandler->sendMovement(game::Opcode::MSG_MOVE_HEARTBEAT);
                 }
                 float clampTimer = worldEntryCallbacks_ ? worldEntryCallbacks_->getTaxiLandingClampTimer() : 0.0f;
@@ -3410,7 +3410,7 @@ void Application::applyServerMovementState(float deltaTime) {
         ride.wmoLockedRender = renderPos;
         ride.hasWmoLock = true;
         ride.wmoTransportGuid = gameHandler->getPlayerTransportGuid();
-        gameHandler->setPosition(canonical.x, canonical.y, canonical.z);
+        gameHandler->movement().setPosition(canonical.x, canonical.y, canonical.z);
         if (getCameraController()) {
             glm::vec3* followTarget = getCameraController()->getFollowTargetMutable();
             if (followTarget) {
@@ -3569,7 +3569,7 @@ void Application::applyServerMovementState(float deltaTime) {
         }
 
         glm::vec3 canonical = core::coords::renderToCanonical(renderPos);
-        gameHandler->setPosition(canonical.x, canonical.y, canonical.z);
+        gameHandler->movement().setPosition(canonical.x, canonical.y, canonical.z);
 
         // Sync orientation: camera yaw (degrees) → WoW orientation (radians)
         float yawDeg = renderer->getCharacterYaw();
@@ -3578,7 +3578,7 @@ void Application::applyServerMovementState(float deltaTime) {
         // canonical<->server mapping (serverYaw = PI/2 - canonicalYaw), the
         // equivalent canonical yaw is radians(180 - yawDeg).
         float canonicalYaw = core::coords::characterYawDegToCanonical(yawDeg);
-        gameHandler->setOrientation(canonicalYaw);
+        gameHandler->movement().setOrientation(canonicalYaw);
 
         // Send MSG_MOVE_SET_FACING when the player changes facing direction
         // (e.g. via mouse-look). Without this, the server predicts movement in

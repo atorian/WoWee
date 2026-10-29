@@ -360,7 +360,7 @@ uint32_t GameHandler::classSkillLineOf(uint32_t spellId) {
 }
 
 void GameHandler::setFacing(float canonicalYaw) {
-    setOrientation(canonicalYaw);
+    movementHandler_->setOrientation(canonicalYaw);
     sendMovement(Opcode::MSG_MOVE_SET_FACING);
 }
 
@@ -600,7 +600,7 @@ void GameHandler::loseWorldConnection() {
 void GameHandler::updateTaxiAndMountState(float deltaTime) {
     // The flight itself - path, mount, landing and the activation timeout - is
     // MovementHandler's, and advances there.
-    updateClientTaxi(deltaTime);
+    movementHandler_->updateClientTaxi(deltaTime);
 
     if (playerTransportStickyTimer_ > 0.0f) {
         playerTransportStickyTimer_ -= deltaTime;
@@ -868,7 +868,7 @@ void GameHandler::updateGame(float deltaTime) {
                 glm::vec3(followEnt->getX(), followEnt->getY(), followEnt->getZ()));
             movementHandler_->updateFollowMovement(deltaTime);
         } else {
-            cancelFollow();
+            movementHandler_->cancelFollow();
         }
     }
 
@@ -922,7 +922,7 @@ void GameHandler::updateGame(float deltaTime) {
         areaTriggerCheckTimer_ += deltaTime;
         if (areaTriggerCheckTimer_ >= game::AREA_TRIGGER_CHECK_INTERVAL) {
             areaTriggerCheckTimer_ = 0.0f;
-            checkAreaTriggers();
+            movementHandler_->checkAreaTriggers();
         }
 
         // Cancel GO interaction cast if player enters combat (auto-attack).
@@ -978,7 +978,7 @@ void GameHandler::updateGame(float deltaTime) {
         // Update transport manager
         transportManager_->setRiderTransport(playerTransportGuid_);
         transportManager_->update(deltaTime);
-        updateAttachedTransportChildren(deltaTime);
+        movementHandler_->updateAttachedTransportChildren(deltaTime);
 
         combatHandler_->updateAutoAttack(deltaTime);
         auto closeIfTooFar = [&](bool windowOpen, uint64_t npcGuid, auto closeFn, const char* label) {
@@ -1031,9 +1031,9 @@ void GameHandler::updateGame(float deltaTime) {
         // kept was never assigned, so this asked about guid 0, found no NPC and
         // returned - the only one of these four windows that stayed open when
         // the player walked away from it.
-        closeIfTooFar(isTaxiWindowOpen(),
+        closeIfTooFar(movementHandler_->isTaxiWindowOpen(),
                       movementHandler_->getTaxiNpcGuid(),
-                      [this]{ closeTaxi(); }, "Taxi window");
+                      [this]{ movementHandler_->closeTaxi(); }, "Taxi window");
         closeIfTooFar(inventoryHandler_->isTrainerWindowOpen(), inventoryHandler_->getTrainerSpells().trainerGuid, [this]{ inventoryHandler_->closeTrainer(); }, "Trainer");
 
         updateEntityInterpolation(deltaTime);
@@ -1081,30 +1081,6 @@ void GameHandler::raiseUiError(const std::string& message) {
 // ============================================================
 // Taxi / Flight Path Handlers
 // ============================================================
-
-void GameHandler::updateClientTaxi(float deltaTime) {
-    movementHandler_->updateClientTaxi(deltaTime);
-}
-
-void GameHandler::closeTaxi() {
-    movementHandler_->closeTaxi();
-}
-
-uint32_t GameHandler::getTaxiCostTo(uint32_t destNodeId) const {
-    return movementHandler_->getTaxiCostTo(destNodeId);
-}
-
-bool GameHandler::hasTaxiRouteTo(uint32_t destNodeId) const {
-    return movementHandler_->hasTaxiRouteTo(destNodeId);
-}
-
-std::vector<uint32_t> GameHandler::getTaxiRouteTo(uint32_t destNodeId) const {
-    return movementHandler_->getTaxiRouteTo(destNodeId);
-}
-
-void GameHandler::activateTaxi(uint32_t destNodeId) {
-    movementHandler_->activateTaxi(destNodeId);
-}
 
 // ============================================================
 // Server Info Command Handlers
@@ -1354,23 +1330,6 @@ void GameHandler::loadCharacterConfig() {
     }
 }
 
-void GameHandler::setTransportAttachment(uint64_t childGuid, ObjectType type, uint64_t transportGuid,
-                                         const glm::vec3& localOffset, bool hasLocalOrientation,
-                                         float localOrientation,
-                                         bool offsetNeedsTransportResolution) {
-    movementHandler_->setTransportAttachment(
-        childGuid, type, transportGuid, localOffset, hasLocalOrientation,
-        localOrientation, offsetNeedsTransportResolution);
-}
-
-void GameHandler::clearTransportAttachment(uint64_t childGuid) {
-    movementHandler_->clearTransportAttachment(childGuid);
-}
-
-void GameHandler::updateAttachedTransportChildren(float deltaTime) {
-    movementHandler_->updateAttachedTransportChildren(deltaTime);
-}
-
 glm::vec3 GameHandler::getComposedWorldPosition() {
     if (playerTransportGuid_ != 0 && transportManager_) {
         auto* tr = transportManager_->getTransport(playerTransportGuid_);
@@ -1420,7 +1379,7 @@ bool GameHandler::completePlayerTransportWorldTransfer(
     setPlayerOnTransport(transportGuid, pendingPlayerTransportOffset_);
     worldPosition = transportManager_->getPlayerWorldPosition(
         transportGuid, pendingPlayerTransportOffset_);
-    setPosition(worldPosition.x, worldPosition.y, worldPosition.z);
+    movementHandler_->setPosition(worldPosition.x, worldPosition.y, worldPosition.z);
 
     LOG_WARNING("Transport world transfer restored: guid=0x", std::hex,
                 transportGuid, std::dec,
@@ -2743,63 +2702,6 @@ void GameHandler::setResting(bool resting) {
 }
 
 // ---- MovementHandler delegating getters ----
-
-float GameHandler::getServerRunSpeed() const {
-    return movementHandler_->getServerRunSpeed();
-}
-float GameHandler::getServerWalkSpeed() const {
-    return movementHandler_->getServerWalkSpeed();
-}
-float GameHandler::getServerSwimSpeed() const {
-    return movementHandler_->getServerSwimSpeed();
-}
-float GameHandler::getServerSwimBackSpeed() const {
-    return movementHandler_->getServerSwimBackSpeed();
-}
-float GameHandler::getServerFlightSpeed() const {
-    return movementHandler_->getServerFlightSpeed();
-}
-float GameHandler::getServerFlightBackSpeed() const {
-    return movementHandler_->getServerFlightBackSpeed();
-}
-float GameHandler::getServerRunBackSpeed() const {
-    return movementHandler_->getServerRunBackSpeed();
-}
-float GameHandler::getServerTurnRate() const {
-    return movementHandler_->getServerTurnRate();
-}
-bool GameHandler::isTaxiWindowOpen() const {
-    return movementHandler_->isTaxiWindowOpen();
-}
-bool GameHandler::isOnTaxiFlight() const {
-    return movementHandler_->isOnTaxiFlight();
-}
-bool GameHandler::isTaxiMountActive() const {
-    return movementHandler_->isTaxiMountActive();
-}
-bool GameHandler::isTaxiActivationPending() const {
-    return movementHandler_->isTaxiActivationPending();
-}
-const std::string& GameHandler::getTaxiDestName() const {
-    return movementHandler_->getTaxiDestName();
-}
-const ShowTaxiNodesData& GameHandler::getTaxiData() const {
-    return movementHandler_->getTaxiData();
-}
-uint32_t GameHandler::getTaxiCurrentNode() const {
-    return movementHandler_->getTaxiData().nearestNode;
-}
-const std::unordered_map<uint32_t, GameHandler::TaxiNode>& GameHandler::getTaxiNodes() const {
-    return movementHandler_->getTaxiNodes();
-}
-bool GameHandler::isKnownTaxiNode(uint32_t nodeId) const {
-    // Was reading a GameHandler-local knownTaxiMask_ that nothing ever wrote
-    // to (handleShowTaxiNodes only updates MovementHandler's own copy), so
-    // this always returned false - broke the world map's discovered-node
-    // display and the Lua IsTaxiNodeKnown-equivalent. Delegate like the
-    // other taxi accessors above.
-    return movementHandler_->isKnownTaxiNode(nodeId);
-}
 
 } // namespace game
 } // namespace wowee

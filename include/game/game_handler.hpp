@@ -459,13 +459,11 @@ public:
      * @param y Y coordinate
      * @param z Z coordinate
      */
-    void setPosition(float x, float y, float z);
 
     /**
      * Update player orientation
      * @param orientation Facing direction in radians
      */
-    void setOrientation(float orientation);
 
     /**
      * Get entity manager (for accessing entities in view)
@@ -805,10 +803,6 @@ public:
     void toggleCloak();
     bool isHelmVisible() const { return helmVisible_; }
     bool isCloakVisible() const { return cloakVisible_; }
-
-    // Follow/Assist
-    void followTarget();
-    void cancelFollow();   // Stop following current target
 
     // Minimap ping (Ctrl+click on minimap; wowX/wowY in canonical WoW coords)
     void sendMinimapPing(float wowX, float wowY);
@@ -1578,8 +1572,6 @@ public:
     /// Pull down a totem by the slot it stands in.
     void destroyTotem(int slot);
 
-    bool isServerMovementAllowed() const;
-
     // Stat deltas from the last SMSG_LEVELUP_INFO (valid until next level-up)
     struct LevelUpDeltas {
         uint32_t hp   = 0;
@@ -1776,14 +1768,6 @@ public:
 
     bool isMounted() const { return currentMountDisplayId_ != 0; }
     bool isHostileFactionPublic(uint32_t factionTemplateId) const { return isHostileFaction(factionTemplateId); }
-    float getServerRunSpeed() const;
-    float getServerWalkSpeed() const;
-    float getServerSwimSpeed() const;
-    float getServerSwimBackSpeed() const;
-    float getServerFlightSpeed() const;
-    float getServerFlightBackSpeed() const;
-    float getServerRunBackSpeed() const;
-    float getServerTurnRate() const;
     bool isPlayerRooted() const { return movementInfo.isPlayerRooted(); }
     bool isGravityDisabled() const { return movementInfo.isGravityDisabled(); }
     bool isFeatherFalling() const { return movementInfo.isFeatherFalling(); }
@@ -1801,36 +1785,13 @@ public:
     // Positive = nose up, negative = nose down.
     void setMovementPitch(float radians) { movementInfo.pitch = radians; }
     void dismount() override;
-    /// In the air on a flying mount or not - see MovementHandler::setFlightAirborne.
-    void setFlightAirborne(bool airborne);
 
     /// Accept the innkeeper's offer to make this the player's home. The prompt
     /// arrives as SMSG_BINDER_CONFIRM and this is the reply.
     void confirmBinder();
 
     // Taxi / Flight Paths
-    bool isTaxiWindowOpen() const;
-    void closeTaxi();
-    void activateTaxi(uint32_t destNodeId);
-    bool isOnTaxiFlight() const;
-    bool isTaxiMountActive() const;
-    bool isTaxiActivationPending() const;
-    void forceClearTaxiAndMovementState();
-    const std::string& getTaxiDestName() const;
-    const ShowTaxiNodesData& getTaxiData() const;
-    uint32_t getTaxiCurrentNode() const;
-
-    using TaxiNode = MovementHandler::TaxiNode;
-    using TaxiPathEdge = MovementHandler::TaxiPathEdge;
     using TaxiPathNode = MovementHandler::TaxiPathNode;
-    const std::unordered_map<uint32_t, TaxiNode>& getTaxiNodes() const;
-    bool isKnownTaxiNode(uint32_t nodeId) const;
-    uint32_t getTaxiCostTo(uint32_t destNodeId) const;
-    bool hasTaxiRouteTo(uint32_t destNodeId) const;
-    std::vector<uint32_t> getTaxiRouteTo(uint32_t destNodeId) const;
-    bool taxiNpcHasRoutes(uint64_t guid) const {
-        return movementHandler_->taxiNpcHasRoutes(guid);
-    }
 
     // Vehicle (WotLK)
     bool isInVehicle() const { return vehicleId_ != 0; }
@@ -1955,7 +1916,6 @@ public:
     network::WorldConnection* getSocket() override { return socket.get(); }
     const network::WorldConnection* getSocket() const { return socket.get(); }
     ChatHandler* getChatHandler() { return chatHandler_.get(); }
-    MovementHandler* getMovementHandler() { return movementHandler_.get(); }
     SpellHandler* getSpellHandler() { return spellHandler_.get(); }
     EntityController* getEntityController() { return entityController_.get(); }
     /// What the character holds - bags, equipment, coin, books - and the
@@ -1976,6 +1936,10 @@ public:
     /// combat text, death and the spirit healer.
     CombatHandler& combat() { return *combatHandler_; }
     const CombatHandler& combat() const { return *combatHandler_; }
+    /// Where the player is and how they move: position, speeds, transports,
+    /// following, area triggers and taxi flights.
+    MovementHandler& movement() { return *movementHandler_; }
+    const MovementHandler& movement() const { return *movementHandler_; }
     /// Key bindings, macros and settings the server keeps for the account.
     AccountDataHandler& accountData() { return *accountDataHandler_; }
     const AccountDataHandler& accountData() const { return *accountDataHandler_; }
@@ -2187,16 +2151,10 @@ public:
     /// now" arrive once per rejected keypress.
     void raiseUiError(const std::string& message);
     void sendPing();
-    void setTransportAttachment(uint64_t childGuid, ObjectType type,
-                                uint64_t transportGuid, const glm::vec3& localOffset,
-                                bool hasLocalOrientation, float localOrientation,
-                                bool offsetNeedsTransportResolution = false);
-    void clearTransportAttachment(uint64_t childGuid);
     std::string guidToUnitId(uint64_t guid) const;
     Unit* getUnitByGuid(uint64_t guid);
     void cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries,
                                        const std::array<uint16_t, 19>& enchantIds) override;
-    void sanitizeMovementForTaxi();
     std::string getLfgDungeonName(uint32_t dungeonId) const;
     /// The mounts and critters the player knows, as the pet tab lists them.
     ///
@@ -2371,10 +2329,6 @@ private:
     // ---- Character creation handler ----
     void handleCharCreateResponse(network::Packet& packet);
 
-    // ---- Area trigger detection ----
-    void loadAreaTriggerDbc();
-    void checkAreaTriggers();
-
     // ---- Instance lockout handler ----
 
     /**
@@ -2396,7 +2350,6 @@ private:
      * Fail connection with reason
      */
     void fail(const std::string& reason);
-    void updateAttachedTransportChildren(float deltaTime);
 
     // Explicit service dependencies (owned by Application)
     GameServices& services_;
@@ -2670,9 +2623,6 @@ private:
 
     // Vehicle (WotLK): non-zero when player is seated in a vehicle
     uint32_t vehicleId_ = 0;
-
-    uint32_t nextMovementTimestampMs();
-    void updateClientTaxi(float deltaTime);
 
     // Combat game tables for the stat flyout: per-class base crit, and the
     // per-class-per-level Agility ratio (11 classes × 100 levels).

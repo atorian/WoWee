@@ -72,7 +72,7 @@ bool AnimationCallbackHandler::updateCharge(float deltaTime) {
 
     // Sync to game handler
     glm::vec3 canonical = core::coords::renderToCanonical(renderPos);
-    gameHandler_.setPosition(canonical.x, canonical.y, canonical.z);
+    gameHandler_.movement().setPosition(canonical.x, canonical.y, canonical.z);
 
     // Update camera follow target
     if (playerView_.getCameraController()) {
@@ -103,7 +103,7 @@ bool AnimationCallbackHandler::updateCharge(float deltaTime) {
                     glm::vec3 snapPos = targetRender - toTarget * (1.5f * glm::inversesqrt(dSq));
                     renderer_.getCharacterPosition() = snapPos;
                     glm::vec3 snapCanonical = core::coords::renderToCanonical(snapPos);
-                    gameHandler_.setPosition(snapCanonical.x, snapCanonical.y, snapCanonical.z);
+                    gameHandler_.movement().setPosition(snapCanonical.x, snapCanonical.y, snapCanonical.z);
                     if (playerView_.getCameraController()) {
                         glm::vec3* ft = playerView_.getCameraController()->getFollowTargetMutable();
                         if (ft) *ft = snapPos;
@@ -186,7 +186,7 @@ void AnimationCallbackHandler::setupCallbacks() {
         renderer_.setCharacterYaw(yawDeg);
         // Sync canonical orientation to server so it knows we turned
         float canonicalYaw = core::coords::characterYawDegToCanonical(yawDeg);
-        gameHandler_.setOrientation(canonicalYaw);
+        gameHandler_.movement().setOrientation(canonicalYaw);
         gameHandler_.sendMovement(game::Opcode::MSG_MOVE_SET_FACING);
 
         // Set charge state

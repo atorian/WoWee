@@ -182,7 +182,7 @@ void Application::placeOnInstanceFloor(const WorldLoader::Entry& entry) {
             renderer->getCharacterPosition() = position;
             if (gameHandler) {
                 const auto canonical = coords::renderToCanonical(position);
-                gameHandler->setPosition(canonical.x, canonical.y, canonical.z);
+                gameHandler->movement().setPosition(canonical.x, canonical.y, canonical.z);
             }
         } else LOG_WARNING("Instance spawn floor unavailable on map ", entry.mapId,
                            "; retaining server spawn height until warmup");

@@ -3101,7 +3101,7 @@ void registerSocialLuaAPI(lua_State* L) {
                     toLowerInPlace(n);
                     return !n.empty() && n == who;
                 }();
-            if (meansTarget && gh->getTargetGuid() != 0) gh->followTarget();
+            if (meansTarget && gh->getTargetGuid() != 0) gh->movement().followTarget();
             return 0;
         }},
                 // Inspect and duel, both of which unitpopup.lua calls straight

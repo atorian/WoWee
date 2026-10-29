@@ -5069,8 +5069,8 @@ static std::vector<uint32_t> taxiNodeOrder(game::GameHandler* gh) {
     std::vector<uint32_t> ids;
     if (!gh) return ids;
 
-    const auto& nodes = gh->getTaxiNodes();
-    const auto current = nodes.find(gh->getTaxiCurrentNode());
+    const auto& nodes = gh->movement().getTaxiNodes();
+    const auto current = nodes.find(gh->movement().getTaxiCurrentNode());
     if (current == nodes.end()) return ids;
 
     const uint32_t mapId = current->second.mapId;
@@ -5104,7 +5104,7 @@ static uint32_t taxiNodeAt(game::GameHandler* gh, int index) {
 static bool taxiNodeMapPos(game::GameHandler* gh, uint32_t nodeId,
                            float& outU, float& outV) {
     if (!gh) return false;
-    const auto& nodes = gh->getTaxiNodes();
+    const auto& nodes = gh->movement().getTaxiNodes();
     const auto it = nodes.find(nodeId);
     if (it == nodes.end()) return false;
 
@@ -5150,7 +5150,7 @@ static int lua_TaxiLegCoord(lua_State* L) {
     const int hop = static_cast<int>(luaL_optnumber(L, 2, 0));
     if (dest == 0 || hop < 1 || !gh) { lua_pushnumber(L, 0); return 1; }
 
-    const auto route = gh->getTaxiRouteTo(dest);
+    const auto route = gh->movement().getTaxiRouteTo(dest);
     // Hop N runs from route[N-1] to route[N], so the last hop is size-1.
     if (hop >= static_cast<int>(route.size())) { lua_pushnumber(L, 0); return 1; }
 
@@ -6931,7 +6931,7 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const uint32_t id = taxiNodeAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
             if (id == 0) { lua_pushstring(L, ""); return 1; }
-            const auto& nodes = gh->getTaxiNodes();
+            const auto& nodes = gh->movement().getTaxiNodes();
             const auto it = nodes.find(id);
             lua_pushstring(L, it != nodes.end() ? it->second.name.c_str() : "");
             return 1;
@@ -6947,18 +6947,18 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const uint32_t id = taxiNodeAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
             if (id == 0) { lua_pushstring(L, "NONE"); return 1; }
-            if (id == gh->getTaxiCurrentNode())  { lua_pushstring(L, "CURRENT"); return 1; }
-            if (!gh->isKnownTaxiNode(id))        { lua_pushstring(L, "NONE"); return 1; }
+            if (id == gh->movement().getTaxiCurrentNode())  { lua_pushstring(L, "CURRENT"); return 1; }
+            if (!gh->movement().isKnownTaxiNode(id))        { lua_pushstring(L, "NONE"); return 1; }
             // Known, but nothing flies there from where the player is standing:
             // shown in yellow rather than hidden, so it reads as somewhere they
             // have been rather than somewhere that does not exist.
-            lua_pushstring(L, gh->hasTaxiRouteTo(id) ? "REACHABLE" : "DISTANT");
+            lua_pushstring(L, gh->movement().hasTaxiRouteTo(id) ? "REACHABLE" : "DISTANT");
             return 1;
         }},
                 {"TakeTaxiNode", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const uint32_t id = taxiNodeAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
-            if (id != 0) gh->activateTaxi(id);
+            if (id != 0) gh->movement().activateTaxi(id);
             return 0;
         }},
                 // TaxiNodePosition(index) → x, y as fractions of the map.
@@ -6977,7 +6977,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"TaxiNodeSetCurrent", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const uint32_t id = taxiNodeAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
-            taxiRouteShown(L) = (id != 0 && gh) ? gh->getTaxiRouteTo(id)
+            taxiRouteShown(L) = (id != 0 && gh) ? gh->movement().getTaxiRouteTo(id)
                                                : std::vector<uint32_t>{};
             return 0;
         }},
@@ -6991,7 +6991,7 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const uint32_t id = taxiNodeAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
             if (id == 0 || !gh) { lua_pushnumber(L, 0); return 1; }
-            const auto route = gh->getTaxiRouteTo(id);
+            const auto route = gh->movement().getTaxiRouteTo(id);
             // A route of N nodes is N-1 hops; one of fewer than two is no
             // journey at all.
             lua_pushnumber(L, route.size() >= 2
@@ -7057,14 +7057,14 @@ void registerSystemLuaAPI(lua_State* L) {
             return 0;
         }},
                 {"CloseTaxiMap", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->closeTaxi();
+            if (auto* gh = getGameHandler(L)) gh->movement().closeTaxi();
             return 0;
         }},
                 // TaxiNodeCost(index) → the fare in copper, for the tooltip.
                 {"TaxiNodeCost", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const uint32_t id = taxiNodeAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
-            lua_pushnumber(L, id != 0 ? static_cast<double>(gh->getTaxiCostTo(id)) : 0.0);
+            lua_pushnumber(L, id != 0 ? static_cast<double>(gh->movement().getTaxiCostTo(id)) : 0.0);
             return 1;
         }},
                 {"GetNetStats", [](lua_State* L) -> int {

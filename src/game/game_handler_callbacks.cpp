@@ -680,7 +680,7 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     // is where they logged in. Any of these arriving mid-flight is a duplicate
     // whatever the distance says: the server moves a passenger along the
     // spline, not by sending them into the world again.
-    const bool flying = isOnTaxiFlight();
+    const bool flying = movementHandler_->isOnTaxiFlight();
     if (!initialWorldEntry && sameMap &&
         (flying || distSqCurrent <= (5.0f * 5.0f))) {
         LOG_INFO("Ignoring duplicate SMSG_LOGIN_VERIFY_WORLD while already in world: mapId=",
@@ -734,7 +734,7 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     movementInfo.flags = 0;
     movementInfo.flags2 = 0;
     movementHandler_->resetMovementClock();
-    movementInfo.time = nextMovementTimestampMs();
+    movementInfo.time = movementHandler_->nextMovementTimestampMs();
     movementHandler_->setFalling(false);
     movementHandler_->setFallStartMs(0);
     movementInfo.fallTime = 0;
@@ -1156,32 +1156,8 @@ void GameHandler::handlePong(network::Packet& packet) {
               " latencyMs=", lastLatency);
 }
 
-bool GameHandler::isServerMovementAllowed() const {
-    return movementHandler_->isServerMovementAllowed();
-}
-
-uint32_t GameHandler::nextMovementTimestampMs() {
-    return movementHandler_->nextMovementTimestampMs();
-}
-
 void GameHandler::sendMovement(Opcode opcode) {
     movementHandler_->sendMovement(opcode);
-}
-
-void GameHandler::sanitizeMovementForTaxi() {
-    movementHandler_->sanitizeMovementForTaxi();
-}
-
-void GameHandler::forceClearTaxiAndMovementState() {
-    movementHandler_->forceClearTaxiAndMovementState();
-}
-
-void GameHandler::setPosition(float x, float y, float z) {
-    movementHandler_->setPosition(x, y, z);
-}
-
-void GameHandler::setOrientation(float orientation) {
-    movementHandler_->setOrientation(orientation);
 }
 
 // Entity lifecycle methods (handleUpdateObject, processOutOfRangeObjectsUntil,
@@ -1317,14 +1293,6 @@ void GameHandler::toggleHelm() {
 
 void GameHandler::toggleCloak() {
     socialHandler_->toggleCloak();
-}
-
-void GameHandler::followTarget() {
-    movementHandler_->followTarget();
-}
-
-void GameHandler::cancelFollow() {
-    movementHandler_->cancelFollow();
 }
 
 void GameHandler::toggleAfk(const std::string& message) {
@@ -1504,10 +1472,6 @@ void GameHandler::confirmBinder() {
              std::hex, binderGuid_, std::dec);
 }
 
-void GameHandler::setFlightAirborne(bool airborne) {
-    movementHandler_->setFlightAirborne(airborne);
-}
-
 void GameHandler::dismount() {
     movementHandler_->dismount();
 }
@@ -1527,14 +1491,6 @@ void GameHandler::takeInboxTextItem(uint32_t mailId) {
 // ---------------------------------------------------------------------------
 // LFG outgoing packets
 // ---------------------------------------------------------------------------
-
-void GameHandler::loadAreaTriggerDbc() {
-    movementHandler_->loadAreaTriggerDbc();
-}
-
-void GameHandler::checkAreaTriggers() {
-    movementHandler_->checkAreaTriggers();
-}
 
 // ============================================================
 // Spells
@@ -1818,7 +1774,7 @@ void GameHandler::interactWithGameObject(uint64_t guid) {
     // then, and they fell out of the sky. The same rule casting follows: with
     // Auto Dismount in Flight off - the default - it is refused, and the
     // player stays up.
-    if (isMounted() && !isTaxiMountActive() && isPlayerFlying() &&
+    if (isMounted() && !movementHandler_->isTaxiMountActive() && isPlayerFlying() &&
         cvars().get("autoDismountFlying", "0") == "0") {
         addUIError("You can't do that while flying.");
         return;
@@ -1836,7 +1792,7 @@ void GameHandler::interactWithGameObject(uint64_t guid) {
     //
     // Not on a taxi: the flight's mount is not the player's to dismiss, and
     // there is nothing to interact with mid-flight anyway.
-    if (isMounted() && !isTaxiMountActive()) {
+    if (isMounted() && !movementHandler_->isTaxiMountActive()) {
         constexpr float kGameObjectReach = 12.0f;
         bool inReach = true;
         if (auto entity = getEntityManager().getEntity(guid)) {

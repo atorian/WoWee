@@ -1374,13 +1374,13 @@ void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
         // by the transport between them.
         glm::vec3 localCanonical = owner_.getTransportManager()->serverToTransportLocal(
             info.transportGuid, glm::vec3(info.transportX, info.transportY, info.transportZ));
-        owner_.setTransportAttachment(moverGuid, entity->getType(), info.transportGuid, localCanonical, true,
+        owner_.movement().setTransportAttachment(moverGuid, entity->getType(), info.transportGuid, localCanonical, true,
                                core::coords::serverToCanonicalYaw(info.transportO));
         glm::vec3 worldPos = owner_.getTransportManager()->getPlayerWorldPosition(info.transportGuid, localCanonical);
         unit->setPosition(worldPos.x, worldPos.y, worldPos.z,
                           core::coords::serverToCanonicalYaw(info.orientation));
     } else {
-        if (!onTransport) owner_.clearTransportAttachment(moverGuid);
+        if (!onTransport) owner_.movement().clearTransportAttachment(moverGuid);
         MovementReport report;
         report.moverTime = info.time;
         report.position = glm::vec3(info.x, info.y, info.z);
@@ -1855,7 +1855,7 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
         if (owner_.getTransportManager()) {
             glm::vec3 localCanonical = owner_.getTransportManager()->serverToTransportLocal(
                 transportGuid, glm::vec3(localX, localY, localZ));
-            owner_.setTransportAttachment(moverGuid, entity->getType(), transportGuid, localCanonical, false, 0.0f);
+            owner_.movement().setTransportAttachment(moverGuid, entity->getType(), transportGuid, localCanonical, false, 0.0f);
             glm::vec3 worldPos = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, localCanonical);
             entity->setPosition(worldPos.x, worldPos.y, worldPos.z, entity->getOrientation());
             if (entity->getType() == ObjectType::UNIT && owner_.creatureMoveCallbackRef())
@@ -1871,7 +1871,7 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
         if (owner_.getTransportManager()) {
             glm::vec3 localCanonical = owner_.getTransportManager()->serverToTransportLocal(
                 transportGuid, glm::vec3(localX, localY, localZ));
-            owner_.setTransportAttachment(moverGuid, entity->getType(), transportGuid, localCanonical, false, 0.0f);
+            owner_.movement().setTransportAttachment(moverGuid, entity->getType(), transportGuid, localCanonical, false, 0.0f);
             glm::vec3 worldPos = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, localCanonical);
             entity->setPosition(worldPos.x, worldPos.y, worldPos.z, entity->getOrientation());
             if (entity->getType() == ObjectType::UNIT && owner_.creatureMoveCallbackRef())
@@ -1951,7 +1951,7 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
                 facingAngle = std::atan2(-dy, dx);
         }
 
-        owner_.setTransportAttachment(moverGuid, entity->getType(), transportGuid, destLocalCanonical, false, 0.0f);
+        owner_.movement().setTransportAttachment(moverGuid, entity->getType(), transportGuid, destLocalCanonical, false, 0.0f);
         entity->startMoveTo(destWorld.x, destWorld.y, destWorld.z, facingAngle, duration / 1000.0f);
 
         if (entity->getType() == ObjectType::UNIT && owner_.creatureMoveCallbackRef())
@@ -1962,7 +1962,7 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
                   " dur=", duration, "ms dest=(", destWorld.x, ",", destWorld.y, ",", destWorld.z, ")");
     } else {
         glm::vec3 startWorld = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, startLocalCanonical);
-        owner_.setTransportAttachment(moverGuid, entity->getType(), transportGuid, startLocalCanonical, false, 0.0f);
+        owner_.movement().setTransportAttachment(moverGuid, entity->getType(), transportGuid, startLocalCanonical, false, 0.0f);
         entity->setPosition(startWorld.x, startWorld.y, startWorld.z, facingAngle);
         if (entity->getType() == ObjectType::UNIT && owner_.creatureMoveCallbackRef())
             owner_.creatureMoveCallbackRef()(moverGuid, startWorld.x, startWorld.y, startWorld.z, 0);

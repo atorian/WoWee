@@ -278,7 +278,7 @@ size_t EntityController::processOutOfRangeObjectsUntil(const std::vector<uint64_
         }
         transportGuids_.erase(guid);
         serverUpdatedTransportGuids_.erase(guid);
-        owner_.clearTransportAttachment(guid);
+        owner_.movement().clearTransportAttachment(guid);
         if (owner_.playerTransportGuidRef() == guid) {
             owner_.clearPlayerTransport();
         }
@@ -484,7 +484,7 @@ void EntityController::updateNonPlayerTransportAttachment(const UpdateBlock& blo
             : serverOffset;
         const bool hasLocalOrientation = (block.updateFlags & 0x0020) != 0; // UPDATEFLAG_LIVING
         float localOriCanonical = core::coords::normalizeAngleRad(-block.transportO);
-        owner_.setTransportAttachment(block.guid, entityType, block.transportGuid,
+        owner_.movement().setTransportAttachment(block.guid, entityType, block.transportGuid,
                                localOffset, hasLocalOrientation, localOriCanonical,
                                !transportResolved);
         if (owner_.getTransportManager() && owner_.getTransportManager()->getTransport(block.transportGuid)) {
@@ -492,7 +492,7 @@ void EntityController::updateNonPlayerTransportAttachment(const UpdateBlock& blo
             entity->setPosition(composed.x, composed.y, composed.z, entity->getOrientation());
         }
     } else {
-        owner_.clearTransportAttachment(block.guid);
+        owner_.movement().clearTransportAttachment(block.guid);
     }
 }
 
@@ -584,7 +584,7 @@ void EntityController::detectPlayerMountChange(uint32_t newMountDisplayId,
     // same as the SMSG_DISMOUNT guard: still set means premature (ignore,
     // let the client spline finish naturally); already cleared means the
     // server considers the flight over (honor it now).
-    const bool onRealTaxiFlight = owner_.getMovementHandler() && owner_.getMovementHandler()->isOnTaxiFlight();
+    const bool onRealTaxiFlight = owner_.movement().isOnTaxiFlight();
     if (onRealTaxiFlight && newMountDisplayId == 0) {
         bool serverStillTaxiing = false;
         auto playerEntity = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
@@ -592,9 +592,9 @@ void EntityController::detectPlayerMountChange(uint32_t newMountDisplayId,
         if (playerUnit) {
             serverStillTaxiing = (playerUnit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0;
         }
-        const bool nearDestination = owner_.getMovementHandler()->isNearTaxiDestination();
+        const bool nearDestination = owner_.movement().isNearTaxiDestination();
         if (serverStillTaxiing || !nearDestination) {
-            owner_.getMovementHandler()->deferServerTaxiCompletion();
+            owner_.movement().deferServerTaxiCompletion();
             if (!nearDestination) {
                 LOG_WARNING("Deferring premature taxi mount clear until landing zone");
             }
@@ -603,7 +603,7 @@ void EntityController::detectPlayerMountChange(uint32_t newMountDisplayId,
         // Authoritative server completion ahead of our own spline - stop the
         // client flight now rather than snapping to a final waypoint that may
         // not match where the server actually stopped us.
-        owner_.getMovementHandler()->finishClientTaxiFlight(/*snapToFinalWaypoint=*/false);
+        owner_.movement().finishClientTaxiFlight(/*snapToFinalWaypoint=*/false);
         return;
     }
     uint32_t old = owner_.currentMountDisplayIdRef();
@@ -614,12 +614,11 @@ void EntityController::detectPlayerMountChange(uint32_t newMountDisplayId,
     // own SMSG_DISMOUNT read as transient and get discarded - so the mount
     // blinked off, back on, and off again, with the character left holding the
     // seated rider pose in between.
-    auto* mh = owner_.getMovementHandler();
-    if (newMountDisplayId != 0 && mh && mh->isDismountPending()) {
+    if (newMountDisplayId != 0 && owner_.movement().isDismountPending()) {
         return;
     }
     // The server agrees: nothing left to wait for.
-    if (newMountDisplayId == 0 && mh) mh->clearDismountPending();
+    if (newMountDisplayId == 0) owner_.movement().clearDismountPending();
 
     if (old != 0 && newMountDisplayId == 0) {
         LOG_WARNING("Authoritative mount field cleared: oldDisplay=", old,
@@ -1970,10 +1969,10 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
     if (block.guid == owner_.getPlayerGuid()) {
         // The server has us on a flight the client did not start - entering
         // the world mid-flight. Show it as one: no walking flags, on the mount.
-        auto* movement = owner_.getMovementHandler();
-        if ((unit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0 && !movement->isOnTaxiFlight()) {
-            owner_.sanitizeMovementForTaxi();
-            movement->applyTaxiMountForCurrentNode();
+        auto& movement = owner_.movement();
+        if ((unit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0 && !movement.isOnTaxiFlight()) {
+            owner_.movement().sanitizeMovementForTaxi();
+            movement.applyTaxiMountForCurrentNode();
         }
     }
     if (block.guid == owner_.getPlayerGuid() &&
@@ -2315,12 +2314,10 @@ void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::share
             // Speed is independent of mount ownership: slows and ordinary movement
             // snapshots may report base-speed values while UNIT_FIELD_MOUNTDISPLAYID
             // still authoritatively says the player is mounted.
-            if (auto* movement = owner_.getMovementHandler()) {
-                movement->applyServerMovementSpeeds(
-                    block.walkSpeed, block.runSpeed, block.runBackSpeed,
-                    block.swimSpeed, block.swimBackSpeed, block.flightSpeed,
-                    block.flightBackSpeed, block.turnRate, block.pitchRate);
-            }
+            owner_.movement().applyServerMovementSpeeds(
+                block.walkSpeed, block.runSpeed, block.runBackSpeed,
+                block.swimSpeed, block.swimBackSpeed, block.flightSpeed,
+                block.flightBackSpeed, block.turnRate, block.pitchRate);
         }
         // Merge block fields into the persistent snapshot. Both are sorted, so
         // a simple insert_or_assign per key keeps the invariant intact.
@@ -2469,9 +2466,7 @@ void EntityController::resyncPlayerIfFarFromServer(const glm::vec3& serverCanoni
     // own movement and rubber-band.
     constexpr float kResyncDistance = 50.0f;
     if (owner_.isOnTransport()) return;
-    if (auto* movement = owner_.getMovementHandler()) {
-        if (movement->isOnTaxiFlight()) return;
-    }
+    if (owner_.movement().isOnTaxiFlight()) return;
     auto& mi = owner_.movementInfoRef();
     const glm::vec3 clientPos(mi.x, mi.y, mi.z);
     const float gap = glm::length(serverCanonicalPos - clientPos);
@@ -2506,12 +2501,10 @@ void EntityController::handleCreateObject(const UpdateBlock& block, bool& newIte
         LOG_DEBUG("  Position: (", pos.x, ", ", pos.y, ", ", pos.z, ")");
         applyBlockMovementSpeeds(block, *entity);
         if (block.guid == owner_.getPlayerGuid() && block.runSpeed > 0.1f && block.runSpeed < 100.0f) {
-            if (auto* movement = owner_.getMovementHandler()) {
-                movement->applyServerMovementSpeeds(
-                    block.walkSpeed, block.runSpeed, block.runBackSpeed,
-                    block.swimSpeed, block.swimBackSpeed, block.flightSpeed,
-                    block.flightBackSpeed, block.turnRate, block.pitchRate);
-            }
+            owner_.movement().applyServerMovementSpeeds(
+                block.walkSpeed, block.runSpeed, block.runBackSpeed,
+                block.swimSpeed, block.swimBackSpeed, block.flightSpeed,
+                block.flightBackSpeed, block.turnRate, block.pitchRate);
         }
         // 3b: Track player-on-transport state
         if (block.guid == owner_.getPlayerGuid()) {
@@ -2738,7 +2731,7 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
                 owner_.clearPlayerTransport();
             }
         }
-        owner_.clearTransportAttachment(data.guid);
+        owner_.movement().clearTransportAttachment(data.guid);
         entityManager.removeEntity(data.guid);
         LOG_INFO("Destroyed entity: 0x", std::hex, data.guid, std::dec,
                  " (", (data.isDeath ? "death" : "despawn"), ")");

@@ -589,12 +589,12 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
     // Taxi node markers on world map
     {
         std::vector<rendering::WorldMapTaxiNode> taxiNodes;
-        const auto& nodes = gameHandler.getTaxiNodes();
-        uint32_t currentTaxiNode = gameHandler.getTaxiCurrentNode();
+        const auto& nodes = gameHandler.movement().getTaxiNodes();
+        uint32_t currentTaxiNode = gameHandler.movement().getTaxiCurrentNode();
         const bool playerAlliance = gameHandler.isPlayerAlliance();
         taxiNodes.reserve(nodes.size());
         for (const auto& [id, node] : nodes) {
-            const bool known = gameHandler.isKnownTaxiNode(id);
+            const bool known = gameHandler.movement().isKnownTaxiNode(id);
             // Undiscovered nodes are shown so the player can see where flight
             // paths exist, but only ones their faction can actually use. A node's
             // faction is inferred from which taxi mount TaxiNodes.dbc lists:
@@ -621,9 +621,9 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
             wtn.wowZ  = canonical.z;
             wtn.name  = node.name;
             wtn.known = known;
-            wtn.costCopper = gameHandler.getTaxiCostTo(id);
+            wtn.costCopper = gameHandler.movement().getTaxiCostTo(id);
             wtn.current    = (id == currentTaxiNode);
-            wtn.reachable  = gameHandler.hasTaxiRouteTo(id);
+            wtn.reachable  = gameHandler.movement().hasTaxiRouteTo(id);
             taxiNodes.push_back(std::move(wtn));
         }
         wm->setTaxiNodes(std::move(taxiNodes));
@@ -807,14 +807,14 @@ void GameScreen::renderWorldMap(game::GameHandler& gameHandler) {
     // list a few lines up already stands aside for that element; this mode did
     // not, so talking to a flight master put both on screen at once - TaxiFrame
     // over this client's own map, each with its own set of pins.
-    const bool taxiWanted = gameHandler.isTaxiWindowOpen() &&
+    const bool taxiWanted = gameHandler.movement().isTaxiWindowOpen() &&
                             !frameXmlOwns(UiElement::Taxi);
     if (taxiWanted && !wm->isTaxiMapOpen()) {
         auto* gh = &gameHandler;
         wm->openTaxiMap(
-            [gh](uint32_t dest) { return gh->getTaxiRouteTo(dest); },
-            [gh](uint32_t dest) { gh->activateTaxi(dest); },
-            [gh]() { gh->closeTaxi(); });
+            [gh](uint32_t dest) { return gh->movement().getTaxiRouteTo(dest); },
+            [gh](uint32_t dest) { gh->movement().activateTaxi(dest); },
+            [gh]() { gh->movement().closeTaxi(); });
     } else if (!taxiWanted && wm->isTaxiMapOpen()) {
         wm->closeTaxiMap();
     }

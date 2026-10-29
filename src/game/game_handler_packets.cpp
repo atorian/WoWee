@@ -888,7 +888,7 @@ void GameHandler::registerCoreOpcodes() {
         if (socket) {
             network::Packet resp(wireOpcode(Opcode::CMSG_TIME_SYNC_RESP));
             resp.writeUInt32(counter);
-            resp.writeUInt32(nextMovementTimestampMs());
+            resp.writeUInt32(movementHandler_->nextMovementTimestampMs());
             socket->send(resp);
         }
     };

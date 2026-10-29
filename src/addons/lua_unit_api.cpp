@@ -760,7 +760,7 @@ static int lua_UnitOnTaxi(lua_State* L) {
     std::string uidStr(uid);
     toLowerInPlace(uidStr);
     if (uidStr == "player") {
-        lua_pushboolean(L, gh->isOnTaxiFlight());
+        lua_pushboolean(L, gh->movement().isOnTaxiFlight());
     } else {
         lua_pushboolean(L, 0); // Can't determine for other units
     }
@@ -1244,7 +1244,7 @@ static int lua_GetUnitSpeed(lua_State* L) {
         lua_pushnumber(L, 0);
         return 1;
     }
-    lua_pushnumber(L, gh->getServerRunSpeed());
+    lua_pushnumber(L, gh->movement().getServerRunSpeed());
     return 1;
 }
 

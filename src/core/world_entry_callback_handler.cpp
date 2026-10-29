@@ -65,7 +65,7 @@ void WorldEntryCallbackHandler::clearStuckMovement() {
     if (playerView_.getCameraController()) {
         playerView_.getCameraController()->clearMovementInputs();
     }
-    gameHandler_.forceClearTaxiAndMovementState();
+    gameHandler_.movement().forceClearTaxiAndMovementState();
     gameHandler_.sendMovement(game::Opcode::MSG_MOVE_STOP);
     gameHandler_.sendMovement(game::Opcode::MSG_MOVE_STOP_STRAFE);
     gameHandler_.sendMovement(game::Opcode::MSG_MOVE_STOP_TURN);
@@ -95,7 +95,7 @@ void WorldEntryCallbackHandler::clearMountForUnstuck() {
 // Sync teleported render position to server
 void WorldEntryCallbackHandler::syncTeleportedPositionToServer(const glm::vec3& renderPos) {
     glm::vec3 canonical = core::coords::renderToCanonical(renderPos);
-    gameHandler_.setPosition(canonical.x, canonical.y, canonical.z);
+    gameHandler_.movement().setPosition(canonical.x, canonical.y, canonical.z);
     gameHandler_.sendMovement(game::Opcode::MSG_MOVE_STOP);
     gameHandler_.sendMovement(game::Opcode::MSG_MOVE_STOP_STRAFE);
     gameHandler_.sendMovement(game::Opcode::MSG_MOVE_STOP_TURN);

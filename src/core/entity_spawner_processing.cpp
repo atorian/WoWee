@@ -1805,7 +1805,7 @@ void EntitySpawner::processPendingMount() {
     if (auto* ac = playerView_ ? playerView_->getAnimationController() : nullptr) ac->setMounted(instanceId, mountDisplayId, heightOffset, m2Path);
 
     // For taxi mounts, start with flying animation; for ground mounts, start with stand
-    bool isTaxi = gameHandler_ && gameHandler_->isOnTaxiFlight();
+    bool isTaxi = gameHandler_ && gameHandler_->movement().isOnTaxiFlight();
     uint32_t startAnim = rendering::anim::STAND;
     if (isTaxi) {
         // Try WotLK fly anims first, then Vanilla-friendly fallbacks

@@ -27,7 +27,7 @@ TEST_CASE("suspending client movement sends stop packets before controls are fro
     h.game().sendMovement(Opcode::MSG_MOVE_START_PITCH_UP);
     h.game().sendMovement(Opcode::MSG_MOVE_START_ASCEND);
     h.server().clearSent();
-    h.game().getMovementHandler()->stopInputMovement();
+    h.game().movement().stopInputMovement();
     CHECK(h.sentOpcodes() == std::vector<wowee::game::LogicalOpcode>{Opcode::MSG_MOVE_STOP,
         Opcode::MSG_MOVE_STOP_STRAFE, Opcode::MSG_MOVE_STOP_TURN, Opcode::MSG_MOVE_STOP_PITCH, Opcode::MSG_MOVE_STOP_ASCEND});
     // The heartbeat the server reads after loading must carry the stopped state.
@@ -42,7 +42,7 @@ TEST_CASE("suspending client movement sends stop packets before controls are fro
                     static_cast<uint32_t>(F::TURN_RIGHT) | static_cast<uint32_t>(F::PITCH_UP) |
                     static_cast<uint32_t>(F::ASCENDING))) == 0);
     h.server().clearSent();
-    h.game().getMovementHandler()->stopInputMovement();
+    h.game().movement().stopInputMovement();
     CHECK(h.sentOpcodes().empty());
 }
 
@@ -148,7 +148,7 @@ TEST_CASE("NEW_WORLD waits for the client boundary and holds subsequent packets"
     REQUIRE(request);
     REQUIRE(std::holds_alternative<ev::WorldTransferStarted>(*request));
     CHECK(std::get<ev::WorldTransferStarted>(*request).mapId == 1);
-    h.game().getMovementHandler()->applyPendingWorldTransfer();
+    h.game().movement().applyPendingWorldTransfer();
 
     CHECK(h.game().getCurrentMapId() == 1);
     CHECK_FALSE(h.game().getEntityManager().hasEntity(creature->getGuid()));
@@ -224,7 +224,7 @@ TEST_CASE("a disconnect at the NEW_WORLD boundary cancels entry before client cl
           wowee::core::WorldTransitionQueue::Destination::Reconnect);
     CHECK(transitions.empty());
     h.game().disconnect();
-    CHECK_FALSE(h.game().getMovementHandler()->hasPendingWorldTransfer());
+    CHECK_FALSE(h.game().movement().hasPendingWorldTransfer());
 }
 
 TEST_CASE("a malformed NEW_WORLD leaves the current map usable and does not block the stream",
@@ -436,7 +436,7 @@ TEST_CASE("a quiet server that answers the ping, a long frame and a map change a
         h.setPingsAnswered(false);
         h.receive(Opcode::SMSG_NEW_WORLD, Body().u32(1).f32(1.0f).f32(2.0f).f32(3.0f).f32(0.0f));
         h.pump();
-        REQUIRE(h.game().getMovementHandler()->hasPendingWorldTransfer());
+        REQUIRE(h.game().movement().hasPendingWorldTransfer());
         h.advance(40.0f);
     }
     CHECK(heard.seen.empty());

@@ -77,7 +77,7 @@ void LoadingFrameProbe::streamingDone(const FramePlan& plan) {
         app_.getGameHandler()->getEntityManager().addEntity(entryGuid, entity);
         app_.getEntitySpawner()->queueCreatureSpawn(entryGuid, display, pos.x + 4, pos.y, pos.z, 0);
         app_.getGameHandler()->currentMapIdRef() = 0;
-        app_.getGameHandler()->setPosition(destination.x, destination.y, destination.z);
+        app_.getGameHandler()->movement().setPosition(destination.x, destination.y, destination.z);
         events_.post(game::events::WorldEntered{0, destination.x, destination.y, destination.z, false});
     }
     if (action_ == "entry-spawn" && entrySpawnQueued_ && plan.loading) inWorld_ = true;
@@ -130,7 +130,7 @@ void LoadingFrameProbe::streamingDone(const FramePlan& plan) {
         else if (action_ == "transfer") {
             const auto entry = loader->entry();
             worldPosition_ = coords::canonicalToRender(coords::serverToCanonical(glm::vec3(entry.x + 100, entry.y, entry.z)));
-            app_.getGameHandler()->setPosition(entry.x + 100, entry.y, entry.z);
+            app_.getGameHandler()->movement().setPosition(entry.x + 100, entry.y, entry.z);
             events_.post(game::events::WorldEntered{entry.mapId, entry.x + 100, entry.y, entry.z, false});
         }
     }

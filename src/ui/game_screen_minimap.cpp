@@ -497,11 +497,11 @@ void GameScreen::renderMinimapIndicators(game::GameHandler& gameHandler, float c
     }
 
     // Taxi flight indicator - shown while on a flight path
-    if (gameHandler.isOnTaxiFlight()) {
+    if (gameHandler.movement().isOnTaxiFlight()) {
         ImGui::SetNextWindowPos(ImVec2(indicatorX, nextIndicatorY), ImGuiCond_Always);
         ImGui::SetNextWindowSize(ImVec2(indicatorW, kIndicatorH), ImGuiCond_Always);
         if (ImGui::Begin("##TaxiIndicator", nullptr, indicatorFlags)) {
-            const std::string& dest = gameHandler.getTaxiDestName();
+            const std::string& dest = gameHandler.movement().getTaxiDestName();
             float pulse = 0.7f + 0.3f * std::sin(static_cast<float>(ImGui::GetTime()) * 1.0f);
             if (dest.empty()) {
                 ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, pulse), "\xe2\x9c\x88 In Flight");

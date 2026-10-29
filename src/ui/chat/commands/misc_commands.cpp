@@ -232,7 +232,7 @@ public:
 class FollowCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.followTarget();
+        ctx.gameHandler.movement().followTarget();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"follow", "f"}; }
@@ -243,7 +243,7 @@ public:
 class StopFollowCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.cancelFollow();
+        ctx.gameHandler.movement().cancelFollow();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"stopfollow"}; }
