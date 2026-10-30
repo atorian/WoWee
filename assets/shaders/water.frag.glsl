@@ -86,7 +86,7 @@ layout(push_constant) uniform Push {
     float sceneValid; // 1 once the refraction capture holds a frame, 0 before it
     float meshStep;   // yards between the mesh's vertices (the vertex stage's)
     float exposed;    // 1 where the wind reaches the surface, 0 indoors where it lies still
-    float pad2;
+    float mirrored;   // 1 where the surface reflects the planar image, 0 where only the sky
 } push;
 
 layout(set = 1, binding = 0) uniform WaterMaterial {
@@ -631,8 +631,10 @@ void main() {
     float reflValidity = 0.0;
     vec3 planarReflect = vec3(0.0);
 
+    // Only water on the reflection's plane reads its image: the mirror of
+    // one plane shows water on another the wrong place (WaterReflectionView).
     vec4 reflClip = reflViewProj * vec4(FragPos, 1.0);
-    if (reflClip.w > 0.1) {
+    if (push.mirrored > 0.5 && reflClip.w > 0.1) {
         // Match the reflection pass's positive-height Vulkan viewport;
         // reflViewProj already includes the projection's Y inversion.
         vec2 reflUV = reflClip.xy / reflClip.w * 0.5 + 0.5;

@@ -3,6 +3,7 @@
 #include "rendering/liquid_scene.hpp"
 #include "rendering/ocean_waves.hpp"
 #include "rendering/water_wake.hpp"
+#include "rendering/water_reflection.hpp"
 
 #include <array>
 #include <vector>
@@ -92,6 +93,9 @@ public:
         VkDescriptorSet materialSet = VK_NULL_HANDLE;
         uint32_t indexCount = 0;
         float waveAmp = 0, waveFreq = 0, waveSpeed = 0, basicType = 0, meshStep = 0, exposed = 0;
+        /// 1 where the surface lies on the reflection's plane and reflects
+        /// its image, 0 where it reflects the sky alone.
+        float mirrored = 0;
     };
     struct DrawList {
         std::vector<SurfaceDraw> surfaces;
@@ -99,6 +103,9 @@ public:
         OceanWaves::Frame ocean;
         WaterWake::Frame wake;
         bool inView = false;
+        /// The planar reflection, for the water in view that fills most of
+        /// the picture; none when no water in view lies below the camera.
+        std::optional<WaterReflectionView> reflection;
     };
     DrawList extract(const Camera& camera);
     void recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
@@ -112,7 +119,9 @@ public:
 
     // --- Planar reflection pass ---
     // Call sequence: beginReflectionPass → [render scene] → endReflectionPass
-    bool beginReflectionPass(VkCommandBuffer cmd);
+    /// `area` is the part of the image the scene is drawn into
+    /// (WaterReflectionView::area); the rest is only cleared.
+    bool beginReflectionPass(VkCommandBuffer cmd, const glm::vec4& area);
     void endReflectionPass(VkCommandBuffer cmd);
 
     // The mirrored camera's matrices: water_reflection.hpp.

@@ -11,6 +11,7 @@
 #include "rendering/vk_utils.hpp"
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/frustum.hpp"
+#include "rendering/water_reflection.hpp"
 #include "rendering/terrain_fog_band.hpp"
 #include "rendering/normal_map.hpp"
 #include "pipeline/asset_manager.hpp"
@@ -1095,7 +1096,8 @@ pipeline::TerrainCoverage TerrainRenderer::detailedCoverage() const {
     return result;
 }
 
-TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const std::vector<LocalLight>& lights) {
+TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const std::vector<LocalLight>& lights,
+                                                   const WaterReflectionView* mirror) {
     DrawList list;
     list.wireframe = wireframe;
     Frustum frustum;
@@ -1105,7 +1107,7 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
     const float focalPixels = std::abs(camera.getProjectionMatrix()[1][1]) * static_cast<float>(height) * 0.5f;
     const TerrainBakeBand band = terrainBakeBand(core::coords::TILE_SIZE / 16.0f, focalPixels);
     std::vector<int8_t> levels(chunks.size(), -1);
-    std::vector<uint32_t> visible;
+    std::vector<uint32_t> visible, mirrored;
     list.depth.reserve(shadowTiles_.size());
     for (auto& tile : shadowTiles_) {
         list.depth.push_back(tile.depth.extract(tile.chunks, [&](uint32_t index) {
@@ -1120,18 +1122,25 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
         const glm::vec2 step = glm::vec2(ch.boundingSphereCenter - camPos);
         const float distanceSq = glm::dot(step, step);
         const float limit = maxViewDistance_ + ch.boundingSphereRadius;
-        if (distanceSq > limit * limit || (frustumCullingEnabled && !isChunkVisible(ch, frustum))) {
-            ++list.culled;
-            continue;
-        }
+        const bool inReach = distanceSq <= limit * limit;
+        const bool inView = inReach && (!frustumCullingEnabled || isChunkVisible(ch, frustum));
+        // The water's reflection draws what its mirror can show, which the
+        // camera may not see itself: the far side of a hill over a lake.
+        const bool inMirror = inReach && mirror &&
+                              mirror->canSee(ch.boundingSphereCenter, ch.boundingSphereRadius);
+        if (!inView) ++list.culled;
+        if (!inView && !inMirror) continue;
         const float nearest = glm::length(ch.boundingSphereCenter - camPos) - ch.boundingSphereRadius;
         levels[i] = static_cast<int8_t>(lodEnabled_ ? pipeline::terrainLodFor(ch.lodErrors, ch.offeredLods,
                                                      nearest, focalPixels, kLodMaxErrorPixels) : 0);
-        visible.push_back(i);
-        list.furthestSq = std::max(list.furthestSq, distanceSq);
+        if (inView) {
+            visible.push_back(i);
+            list.furthestSq = std::max(list.furthestSq, distanceSq);
+        }
+        if (inMirror) mirrored.push_back(i);
     }
-    list.view.reserve(visible.size());
-    for (const uint32_t i : visible) {
+    // A chunk's draw, and where its surface is read from.
+    const auto drawOf = [&](uint32_t i) -> std::pair<ChunkDraw, TerrainSurfaceSource> {
         const auto& ch = chunks[i];
         const size_t level = static_cast<size_t>(levels[i]);
         ChunkDraw draw;
@@ -1158,10 +1167,17 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
         draw.reachesDiscards = !terrainChunkShortOfDiscards(
             glm::length(glm::vec2(ch.boundingSphereCenter - camPos)), ch.boundingSphereRadius,
             maxViewDistance_, kDistantTerrainStart);
+        return {draw, source};
+    };
+    list.view.reserve(visible.size());
+    for (const uint32_t i : visible) {
+        auto [draw, source] = drawOf(i);
         if (source == TerrainSurfaceSource::Baked) ++list.baked;
         if (source == TerrainSurfaceSource::Crossfade) ++list.crossfade;
         list.view.push_back(std::move(draw));
     }
+    list.reflection.reserve(mirrored.size());
+    for (const uint32_t i : mirrored) list.reflection.push_back(drawOf(i).first);
     if (bakeEnabled_) {
         list.atlases = bake_.extractNewAtlases();
         // A skipped frame keeps its jobs pending. Recording acknowledges them
@@ -1186,15 +1202,29 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
 }
 
 void TerrainRenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const DrawList& list) {
-    if (!pipeline || list.view.empty()) return;
+    renderedTriangles_ = recordChunks(cmd, perFrameSet, list.view, list.wireframe);
+    renderedChunks = static_cast<int>(list.view.size());
+    culledChunks = list.culled;
+    furthestDrawnSq_ = list.furthestSq;
+    bakedDrawnChunks_ = list.baked;
+    crossfadeDrawnChunks_ = list.crossfade;
+}
+
+void TerrainRenderer::recordReflection(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const DrawList& list) {
+    recordChunks(cmd, perFrameSet, list.reflection, list.wireframe);
+}
+
+uint32_t TerrainRenderer::recordChunks(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                                       const std::vector<ChunkDraw>& draws, bool wireframe) {
+    if (!pipeline || draws.empty()) return 0;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      list.wireframe && wireframePipeline ? wireframePipeline : pipeline);
+                      wireframe && wireframePipeline ? wireframePipeline : pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                              0, 1, &perFrameSet, 0, nullptr);
     GPUPushConstants push{};
     push.model = glm::mat4(1.0f);
     vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
-    renderedTriangles_ = 0;
+    uint32_t triangles = 0;
     ::VkBuffer boundVertices = VK_NULL_HANDLE, boundIndices = VK_NULL_HANDLE;
     LocalLightSet pushedLights = push.localLights;
     TerrainSurfacePush pushedSurface;
@@ -1222,30 +1252,26 @@ void TerrainRenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
             if (!range.count) continue;
             vkCmdDrawIndexed(cmd, range.count, 1, draw.geometry.firstIndex + range.first,
                               draw.geometry.baseVertex, 0);
-            renderedTriangles_ += range.count / 3;
+            triangles += range.count / 3;
         }
     };
     // Chunks short of the distance discards first, through the pipeline whose
     // shader cannot discard; the rest after, through the one that can.
     // Terrain is opaque and depth-tested, so the order between chunks does
     // not change what is drawn.
-    if (list.wireframe || !shortOfDiscardsPipeline) {
-        for (const auto& draw : list.view) recordChunk(draw);
+    if (wireframe || !shortOfDiscardsPipeline) {
+        for (const auto& draw : draws) recordChunk(draw);
     } else {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shortOfDiscardsPipeline);
-        for (const auto& draw : list.view) {
+        for (const auto& draw : draws) {
             if (!draw.reachesDiscards) recordChunk(draw);
         }
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-        for (const auto& draw : list.view) {
+        for (const auto& draw : draws) {
             if (draw.reachesDiscards) recordChunk(draw);
         }
     }
-    renderedChunks = static_cast<int>(list.view.size());
-    culledChunks = list.culled;
-    furthestDrawnSq_ = list.furthestSq;
-    bakedDrawnChunks_ = list.baked;
-    crossfadeDrawnChunks_ = list.crossfade;
+    return triangles;
 }
 
 void TerrainRenderer::addChunk(TerrainChunkGPU&& chunk) {

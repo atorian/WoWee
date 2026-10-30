@@ -25,6 +25,7 @@
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/frustum.hpp"
+#include "rendering/water_reflection.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "core/logger.hpp"
@@ -47,6 +48,16 @@ namespace rendering {
 
 
 namespace {
+
+/// How far a banner hanging `clothDrop` units below its bar can move from
+/// where its vertices sit, in the building's units. wmo.vert.glsl swings the
+/// hem by up to 5% of the drop, times clothWindSway's reach: along the wind
+/// at most 2 x 0.3 lean + 0.95 x 2.5 swing, across it 0.8 x 2.5 and in and
+/// out 0.3 (WindField caps the lean below 0.3 and the swing at 2.5), which is
+/// under 3.6 together.
+float clothSwayReach(float clothDrop) {
+    return clothDrop * 0.05f * 3.6f;
+}
 /// The strength a building's normal map is derived with (Sobel gradient
 /// scale), and so the variant its cache key carries: the character renderer
 /// derives from the same files at another strength.
@@ -623,6 +634,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadPreparedIncremental(WmoModelPrep& 
             mb.emissiveLevel = state.emissiveLevel;
             mb.clothTop = state.clothTop;
             mb.clothDrop = state.clothDrop;
+            resources.swayReach = std::max(resources.swayReach, clothSwayReach(mb.clothDrop));
             mb.clothCentreX = state.clothCentreX;
             mb.clothCentreY = state.clothCentreY;
             mb.lighting = state.lighting;
@@ -1132,11 +1144,10 @@ void WMORenderer::Frame::clear() noexcept {
 }
 
 std::shared_ptr<const WMORenderer::Frame> WMORenderer::extract(const Camera& camera,
-        const glm::vec3& viewer, const std::vector<LocalLight>& lights, bool reflection) {
+        const glm::vec3& viewer, const std::vector<LocalLight>& lights, const WaterReflectionView* mirror) {
     auto frame = framePool_.acquire();
     frameLights_ = &lights;
-    cullView(camera, viewer, frame->view);
-    if (reflection) cullView(camera, camera.getPosition(), frame->reflection);
+    cullView(camera, viewer, frame->view, mirror, &frame->reflection);
     extractDepth(frame->depth);
     frameLights_ = nullptr;
     frame->wireframe = wireframeMode;
@@ -1163,8 +1174,11 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
     }
 }
 
-void WMORenderer::cullView(const Camera& camera, const glm::vec3& portalViewerPos, DrawList& list) const {
+void WMORenderer::cullView(const Camera& camera, const glm::vec3& portalViewerPos, DrawList& list,
+                           const WaterReflectionView* mirror, DrawList* mirrorList) const {
     list.clear();
+    if (mirrorList) mirrorList->clear();
+    if (!mirror) mirrorList = nullptr;
 
     // Extract frustum planes for proper culling
     glm::mat4 viewProj = camera.getProjectionMatrix() * camera.getViewMatrix();
@@ -1185,6 +1199,11 @@ void WMORenderer::cullView(const Camera& camera, const glm::vec3& portalViewerPo
         DrawEntry& entry = list.add();
         entry.modelMatrix = instance.modelMatrix;
         entry.scale = instance.scale;
+        DrawEntry* mirrored = mirrorList ? &mirrorList->add() : nullptr;
+        if (mirrored) {
+            mirrored->modelMatrix = instance.modelMatrix;
+            mirrored->scale = instance.scale;
+        }
 
         // Portal-based visibility, into the pass's own scratch set.
         bool usePortalCulling = doPortalCull && !model.portals.empty() && !model.portalRefs.empty();
@@ -1286,7 +1305,15 @@ void WMORenderer::cullView(const Camera& camera, const glm::vec3& portalViewerPo
             }
 
             entry.groups.push_back(extractGroup(model.groups[gi], instance, static_cast<uint32_t>(gi)));
+            // The reflection: what of the group stands where the mirror
+            // shows it, banners swung as far as they go.
+            if (mirrored && gi < instance.worldGroupBounds.size()) {
+                const auto& [gMin, gMax] = instance.worldGroupBounds[gi];
+                const glm::vec3 sway(model.groups[gi].swayReach * instance.scale);
+                if (mirror->canSee(gMin - sway, gMax + sway)) mirrored->groups.push_back(entry.groups.back());
+            }
         }
+        if (mirrored && mirrored->groups.empty()) mirrorList->dropLast();
         if (entry.groups.empty()) list.dropLast();
     }
 }

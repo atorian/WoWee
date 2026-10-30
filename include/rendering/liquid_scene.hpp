@@ -177,9 +177,6 @@ public:
     [[nodiscard]] std::optional<pipeline::LiquidBasic> basicTypeAt(float x, float y) const;
     /// Whether a point falls inside a WMO's liquid grid.
     [[nodiscard]] bool isWmoLiquidAt(float x, float y) const;
-    /// The height of the water (not magma or slime) whose surface centre is
-    /// nearest the camera, which the planar reflection mirrors about.
-    [[nodiscard]] std::optional<float> dominantWaterHeight(const glm::vec3& cameraPos) const;
 
     /// The body the highest liquid over a point belongs to.
     [[nodiscard]] std::optional<LiquidBody> bodyAt(float x, float y) const;

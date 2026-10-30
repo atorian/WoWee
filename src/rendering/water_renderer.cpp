@@ -41,7 +41,7 @@ struct WaterPushConstants {
     float sceneValid = 0.0f; // 1 once captureSceneHistory has run; the shader used to guess this per pixel
     float meshStep = 0.0f;   // yards between the surface's vertices: the waves the mesh can carry
     float exposed = 0.0f;    // 1 where the wind reaches the surface, 0 indoors where it lies still
-    float pad2 = 0.0f;
+    float mirrored = 0.0f;   // 1 where the surface reflects the planar image, 0 where only the sky
 };
 static_assert(sizeof(WaterPushConstants) == 112, "the two shader declarations of this range are laid out for 112 bytes");
 
@@ -815,10 +815,16 @@ WaterRenderer::DrawList WaterRenderer::extract(const Camera& camera) {
     list.water = gameUBO_;
     Frustum frustum;
     frustum.extractFromMatrix(camera.getViewProjectionMatrix());
+    // Water and sea in view, as the reflection is chosen from; magma and
+    // slime are not mirrors. Indexed as list.surfaces, -1 for the rest.
+    std::vector<WaterInView> mirrors;
+    std::vector<int> mirrorOf;
     if (renderingEnabled) for (const auto& s : drawn_) {
         if (!s.vertexBuffer || !s.indexCount || !s.materialSet) continue;
         const Bounds bounds = boundsOf(s);
         if (!frustum.intersectsAABB(bounds.min, bounds.max)) continue;
+        mirrorOf.push_back(s.basicType <= 1 ? static_cast<int>(mirrors.size()) : -1);
+        if (s.basicType <= 1) mirrors.push_back({bounds.min, bounds.max, s.minHeight});
         const bool wmo = s.wmoId != 0, canal = wmo || s.liquidType == 5;
         list.surfaces.push_back({s.vertexBuffer, s.indexBuffer, s.materialSet, static_cast<uint32_t>(s.indexCount),
             wmo ? 0.0f : (s.basicType == 1 ? 0.35f : 0.08f),
@@ -827,6 +833,14 @@ WaterRenderer::DrawList WaterRenderer::extract(const Camera& camera) {
             std::max(glm::length(s.stepX), glm::length(s.stepY)), s.shelter == LiquidShelter::Open ? 1.0f : 0.0f});
     }
     list.inView = !list.surfaces.empty();
+    list.reflection = waterReflectionView({camera.getPosition(), camera.getForward(), camera.getViewMatrix(),
+                                           camera.getProjectionMatrix()}, mirrors);
+    if (list.reflection) {
+        for (size_t i = 0; i < list.surfaces.size(); ++i) {
+            if (mirrorOf[i] >= 0 && list.reflection->mirrors(mirrors[static_cast<size_t>(mirrorOf[i])]))
+                list.surfaces[i].mirrored = 1.0f;
+        }
+    }
     if (list.inView) {
         list.ocean = ocean_.extract();
         list.wake = wake_.extract();
@@ -880,6 +894,7 @@ void WaterRenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         // it meets its quays, piers and walls the sea bed's map has no depth
         // under it and its waves lie down there. Indoors it lies still.
         push.exposed = surface.exposed;
+        push.mirrored = surface.mirrored;
 
         vkCmdPushConstants(cmd, pipelineLayout, pushStages_,
                             0, sizeof(WaterPushConstants), &push);
@@ -1408,7 +1423,7 @@ void WaterRenderer::destroyReflectionResources() {
 // Reflection pass begin/end
 // ==============================================================
 
-bool WaterRenderer::beginReflectionPass(VkCommandBuffer cmd) {
+bool WaterRenderer::beginReflectionPass(VkCommandBuffer cmd, const glm::vec4& area) {
     if (!reflectionRenderPass || !reflectionFramebuffer || !cmd) return false;
 
     VkRenderPassBeginInfo rpInfo{};
@@ -1427,7 +1442,15 @@ bool WaterRenderer::beginReflectionPass(VkCommandBuffer cmd) {
 
     VkViewport vp{.x = 0, .y = 0, .width = static_cast<float>(reflectionExtent.width), .height = static_cast<float>(reflectionExtent.height), .minDepth = 0.0f, .maxDepth = 1.0f};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc{.offset = {.x = 0, .y = 0}, .extent = reflectionExtent};
+    // The scene goes only where the water can show it; the clear above
+    // covers the rest, which nothing reads.
+    const auto x0 = static_cast<int32_t>(std::floor(area.x * static_cast<float>(reflectionExtent.width)));
+    const auto y0 = static_cast<int32_t>(std::floor(area.y * static_cast<float>(reflectionExtent.height)));
+    const auto x1 = static_cast<int32_t>(std::ceil(area.z * static_cast<float>(reflectionExtent.width)));
+    const auto y1 = static_cast<int32_t>(std::ceil(area.w * static_cast<float>(reflectionExtent.height)));
+    VkRect2D sc{.offset = {.x = std::max(x0, 0), .y = std::max(y0, 0)},
+                .extent = {.width = static_cast<uint32_t>(std::max(x1 - std::max(x0, 0), 0)),
+                           .height = static_cast<uint32_t>(std::max(y1 - std::max(y0, 0), 0))}};
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     return true;
