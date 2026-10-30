@@ -255,8 +255,8 @@ looks, not the way the old code does.
 - Each domain handler — `ChatHandler`, `CombatHandler`, `InventoryHandler`,
   `MovementHandler`, `QuestHandler`, `SocialHandler`, `SpellHandler`,
   `WardenHandler`, `EntityController`, `AccountDataHandler`,
-  `ActionBarHandler`, `PetHandler`, `ReputationHandler`, `RealmTimeHandler`
-  — owns the opcodes of its area. A new opcode goes into that handler's
+  `ActionBarHandler`, `PetHandler`, `ReputationHandler`, `RealmTimeHandler`,
+  `PlayerHandler` — owns the opcodes of its area. A new opcode goes into that handler's
   `registerOpcodes`, never
   into `GameHandler::registerCoreOpcodes`/`registerRemainingOpcodes`. Domain
   handlers register last and overwrite the table, so a second registration in

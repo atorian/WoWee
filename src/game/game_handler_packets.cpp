@@ -1045,68 +1045,6 @@ void GameHandler::registerCoreOpcodes() {
 
     // SMSG_ACTION_BUTTONS - moved to ActionBarHandler::registerOpcodes
 
-    // ---- SMSG_LEVELUP_INFO / SMSG_LEVELUP_INFO_ALT (shared body) ----
-    for (auto op : {Opcode::SMSG_LEVELUP_INFO, Opcode::SMSG_LEVELUP_INFO_ALT}) {
-        dispatchTable_[op] = [this](network::Packet& packet) {
-            // Server-authoritative level-up event.
-            // WotLK layout: uint32 newLevel + uint32 hpDelta + uint32 manaDelta + 5x uint32 statDeltas
-            if (packet.hasRemaining(4)) {
-                uint32_t newLevel = packet.readUInt32();
-                if (newLevel > 0) {
-                    // Parse stat deltas (WotLK layout has 7 more uint32s)
-                    lastLevelUpDeltas_ = {};
-                    if (packet.hasRemaining(28)) {
-                        lastLevelUpDeltas_.hp    = packet.readUInt32();
-                        lastLevelUpDeltas_.mana  = packet.readUInt32();
-                        lastLevelUpDeltas_.str   = packet.readUInt32();
-                        lastLevelUpDeltas_.agi   = packet.readUInt32();
-                        lastLevelUpDeltas_.sta   = packet.readUInt32();
-                        lastLevelUpDeltas_.intel = packet.readUInt32();
-                        lastLevelUpDeltas_.spi   = packet.readUInt32();
-                    }
-                    uint32_t oldLevel = serverPlayerLevel_;
-                    serverPlayerLevel_ = std::max(serverPlayerLevel_, newLevel);
-                    // Update the character-list entry so the selection screen
-                    // shows the correct level if the player logs out and back.
-                    for (auto& ch : characters) {
-                        if (ch.guid == playerGuid) {
-                            ch.level = serverPlayerLevel_;
-                            break;  // was 'return' - must NOT exit here or level-up notification is skipped
-                        }
-                    }
-                    if (newLevel > oldLevel) {
-                        // The sound, the ding banner, the glow and the client's
-                        // own chat line all answer this. FrameXML's chat writes
-                        // its line from PLAYER_LEVEL_UP below instead.
-                        eventBus().publish(events::PlayerLevelUp{oldLevel, newLevel});
-                        // All nine, in the order the interface reads them:
-                        // level, health, power, talent points, then the five
-                        // stats. The chat frame tests the third against zero
-                        // to decide whether to mention mana, so sending only
-                        // the level was an error on every level gained - and
-                        // every one of these was already parsed above.
-                        //
-                        // Talent points are zero: the packet carries no such
-                        // delta, and zero is what stops the interface claiming
-                        // a point was gained.
-                        fireAddonEvent("PLAYER_LEVEL_UP", {
-                            std::to_string(newLevel),
-                            std::to_string(lastLevelUpDeltas_.hp),
-                            std::to_string(lastLevelUpDeltas_.mana),
-                            "0",
-                            std::to_string(lastLevelUpDeltas_.str),
-                            std::to_string(lastLevelUpDeltas_.agi),
-                            std::to_string(lastLevelUpDeltas_.sta),
-                            std::to_string(lastLevelUpDeltas_.intel),
-                            std::to_string(lastLevelUpDeltas_.spi),
-                        });
-                    }
-                }
-            }
-            packet.skipAll();
-        };
-    }
-
     // (MSG_RAID_TARGET_UPDATE and SMSG_REAL_GROUP_UPDATE → SocialHandler, which feeds the group)
 
     // ---- SMSG_CRITERIA_UPDATE ----
@@ -2382,6 +2320,7 @@ void GameHandler::registerDomainOpcodes() {
     reputationHandler_->registerOpcodes(dispatchTable_);
     realmTimeHandler_->registerOpcodes(dispatchTable_);
     weatherHandler_->registerOpcodes(dispatchTable_);
+    playerHandler_->registerOpcodes(dispatchTable_);
 }
 
 void GameHandler::registerOpcodeHandlers() {

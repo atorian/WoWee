@@ -42,6 +42,7 @@
 
 #include "core/env.hpp"
 #include "game/entity.hpp"
+#include "game/entity_controller.hpp"
 #include "game/protocol_tables.hpp"
 #include "game/update_field_table.hpp"
 #include "game/world_packet_data.hpp"
@@ -501,6 +502,18 @@ std::vector<uint8_t> GameHarness::valuesBody(uint64_t guid, const Fields& fields
 void GameHarness::playerInView() {
     const uint64_t guid = player_.guid;
     game_->getEntityManager().addEntity(guid, std::make_shared<game::Player>(guid));
+}
+
+void GameHarness::playerFields(const std::map<uint16_t, uint32_t>& fields, bool create) {
+    game::UpdateBlock block{};
+    block.guid = player_.guid;
+    block.objectType = game::ObjectType::PLAYER;
+    block.updateType = create ? game::UpdateType::CREATE_OBJECT : game::UpdateType::VALUES;
+    for (const auto& [k, v] : fields) block.fields[k] = v;
+    game::UpdateObjectData batch{};
+    batch.blocks.push_back(block);
+    game_->entityController().applyRecordedObjects(batch);
+    pump();
 }
 
 void GameHarness::enterWorld(const PlayerSpec& player) {

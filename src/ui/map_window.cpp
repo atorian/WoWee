@@ -434,7 +434,7 @@ void MapWindow::drawQuestPanel(float x, float width, float height, uint64_t now)
         return a->second.name < b->second.name;
     });
 
-    const int playerLevel = static_cast<int>(gh->getPlayerLevel());
+    const int playerLevel = static_cast<int>(gh->player().level());
     for (const auto* entry : order) {
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(0.85f, 0.75f, 0.55f, 1.0f), "%s", entry->second.name.c_str());

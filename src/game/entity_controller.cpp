@@ -623,43 +623,6 @@ EntityController::UnitFieldIndices EntityController::UnitFieldIndices::resolve()
     };
 }
 
-EntityController::PlayerFieldIndices EntityController::PlayerFieldIndices::resolve() {
-    return PlayerFieldIndices{
-        .xp = fieldIndex(UF::PLAYER_XP),
-        .nextXp = fieldIndex(UF::PLAYER_NEXT_LEVEL_XP),
-        .restedXp = fieldIndex(UF::PLAYER_REST_STATE_EXPERIENCE),
-        .level = fieldIndex(UF::UNIT_FIELD_LEVEL),
-        .coinage = fieldIndex(UF::PLAYER_FIELD_COINAGE),
-        .honor = fieldIndex(UF::PLAYER_FIELD_HONOR_CURRENCY),
-        .arena = fieldIndex(UF::PLAYER_FIELD_ARENA_CURRENCY),
-        .playerFlags = fieldIndex(UF::PLAYER_FLAGS),
-        .armor = fieldIndex(UF::UNIT_FIELD_RESISTANCES),
-        .pBytes = fieldIndex(UF::PLAYER_BYTES),
-        .pBytes2 = fieldIndex(UF::PLAYER_BYTES_2),
-        .chosenTitle = fieldIndex(UF::PLAYER_CHOSEN_TITLE),
-        .stats = {fieldIndex(UF::UNIT_FIELD_STAT0), fieldIndex(UF::UNIT_FIELD_STAT1),
-         fieldIndex(UF::UNIT_FIELD_STAT2), fieldIndex(UF::UNIT_FIELD_STAT3),
-         fieldIndex(UF::UNIT_FIELD_STAT4)},
-        .meleeAP = fieldIndex(UF::UNIT_FIELD_ATTACK_POWER),
-        .rangedAP = fieldIndex(UF::UNIT_FIELD_RANGED_ATTACK_POWER),
-        .spDmg1 = fieldIndex(UF::PLAYER_FIELD_MOD_DAMAGE_DONE_POS),
-        .healBonus = fieldIndex(UF::PLAYER_FIELD_MOD_HEALING_DONE_POS),
-        .blockPct = fieldIndex(UF::PLAYER_BLOCK_PERCENTAGE),
-        .dodgePct = fieldIndex(UF::PLAYER_DODGE_PERCENTAGE),
-        .parryPct = fieldIndex(UF::PLAYER_PARRY_PERCENTAGE),
-        .critPct = fieldIndex(UF::PLAYER_CRIT_PERCENTAGE),
-        .rangedCritPct = fieldIndex(UF::PLAYER_RANGED_CRIT_PERCENTAGE),
-        .sCrit1 = fieldIndex(UF::PLAYER_SPELL_CRIT_PERCENTAGE1),
-        .rating1 = fieldIndex(UF::PLAYER_FIELD_COMBAT_RATING_1),
-        .expertise = fieldIndex(UF::PLAYER_EXPERTISE),
-        .offhandExpertise = fieldIndex(UF::PLAYER_OFFHAND_EXPERTISE),
-        // Mana is power index 0, so the flat modifier and its interrupted
-        // (while-casting) twin sit at the base of each seven-wide array.
-        .manaRegen = fieldIndex(UF::UNIT_FIELD_POWER_REGEN_FLAT_MODIFIER),
-        .manaRegenCasting = fieldIndex(UF::UNIT_FIELD_POWER_REGEN_INTERRUPTED_FLAT_MODIFIER)
-    };
-}
-
 // Create the appropriate Entity subclass from the block's object type.
 std::shared_ptr<Entity> EntityController::createEntityFromBlock(const UpdateBlock& block) {
     switch (block.objectType) {
@@ -905,21 +868,8 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
                     owner_.eventBus().publish(events::StealthStateChanged{nowStealthed});
                 }
 
-                uint8_t newForm = static_cast<uint8_t>((val >> 24) & 0xFF);
-                if (newForm != owner_.shapeshiftFormIdRef()) {
-                    owner_.shapeshiftFormIdRef() = newForm;
-                    LOG_INFO("Shapeshift form changed: ", static_cast<int>(newForm));
-                    pendingEvents_.emit("UPDATE_SHAPESHIFT_FORM", {});
-                    pendingEvents_.emit("UPDATE_SHAPESHIFT_FORMS", {});
-                    // The stance bar and the action bar are two different
-                    // things. These two move the stance bar; the extra action
-                    // bar a form brings with it is shown and hidden by
-                    // UPDATE_BONUS_ACTIONBAR, and actionbutton.lua repages on
-                    // the same event. Neither was fired, so the bar never
-                    // appeared and the buttons kept reading page one.
-                    pendingEvents_.emit("UPDATE_BONUS_ACTIONBAR", {});
-                    pendingEvents_.emit("ACTIONBAR_PAGE_CHANGED", {});
-                }
+                owner_.player().shapeshiftFormArrived(static_cast<uint8_t>((val >> 24) & 0xFF),
+                                                      pendingEvents_);
             }
         }
         else if (key == ufi.dynFlags) {
@@ -1104,268 +1054,6 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
 
 //     Apply player stat fields (XP, coinage, combat stats, etc.).
 //     Shared between CREATE and VALUES - isCreate controls event firing differences.
-void EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
-                                               const PlayerFieldIndices& pfi,
-                                               bool isCreate) {
-    // Whether anything the character sheet prints actually moved. The sheet
-    // refreshes on events, not on a timer, so a stat that changes without one
-    // being fired leaves the panel showing the old number until something else
-    // happens to redraw it.
-    bool statsChanged = false;
-    bool ratingsChanged = false;
-    bool powerChanged = false;
-    bool rangedPowerChanged = false;
-    bool resistancesChanged = false;
-    bool spellBonusChanged = false;
-    for (const auto& [key, val] : fields) {
-        if (key == pfi.xp) {
-            owner_.playerXpRef() = val;
-            if (!isCreate) {
-                LOG_DEBUG("XP updated: ", val);
-                pendingEvents_.emit("PLAYER_XP_UPDATE", {std::to_string(val)});
-            }
-        }
-        else if (key == pfi.nextXp) {
-            owner_.playerNextLevelXpRef() = val;
-            if (!isCreate) LOG_DEBUG("Next level XP updated: ", val);
-        }
-        else if (pfi.restedXp != 0xFFFF && key == pfi.restedXp) {
-            owner_.playerRestedXpRef() = val;
-            if (!isCreate) pendingEvents_.emit("UPDATE_EXHAUSTION", {});
-        }
-        else if (key == pfi.level) {
-            owner_.serverPlayerLevelRef() = val;
-            if (!isCreate) LOG_DEBUG("Level updated: ", val);
-            for (auto& ch : owner_.charactersRef()) {
-                if (ch.guid == owner_.getPlayerGuid()) { ch.level = val; break; }
-            }
-        }
-        else if (key == pfi.coinage) {
-            owner_.inventory().moneyFieldArrived(val, pendingEvents_);
-        }
-        else if (pfi.honor != 0xFFFF && key == pfi.honor) {
-            owner_.playerHonorPointsRef() = val;
-            LOG_DEBUG("Honor points ", isCreate ? "from update fields: " : "updated: ", val);
-        }
-        else if (pfi.arena != 0xFFFF && key == pfi.arena) {
-            owner_.playerArenaPointsRef() = val;
-            LOG_DEBUG("Arena points ", isCreate ? "from update fields: " : "updated: ", val);
-        }
-        else if (pfi.armor != 0xFFFF && key == pfi.armor) {
-            const int32_t armorVal = static_cast<int32_t>(val);
-            if (owner_.playerArmorRatingRef() != armorVal) resistancesChanged = true;
-            owner_.playerArmorRatingRef() = armorVal;
-            if (isCreate) LOG_DEBUG("Armor rating from update fields: ", owner_.playerArmorRatingRef());
-        }
-        else if (pfi.armor != 0xFFFF && key > pfi.armor && key <= pfi.armor + 6) {
-            const int32_t resVal = static_cast<int32_t>(val);
-            // Armor is the first of the seven - pfi.armor is
-            // UNIT_FIELD_RESISTANCES and the six schools follow it - which is
-            // why one event covers the block.
-            if (owner_.playerResistancesArr()[key - pfi.armor - 1] != resVal) resistancesChanged = true;
-            owner_.playerResistancesArr()[key - pfi.armor - 1] = resVal;
-        }
-        else if (pfi.pBytes2 != 0xFFFF && key == pfi.pBytes2) {
-            uint8_t bankBagSlots = static_cast<uint8_t>((val >> 16) & 0xFF);
-            owner_.inventory().setPurchasedBankBagSlots(bankBagSlots);
-            // Byte 3 (bits 24-31): REST_STATE
-            // 0 = not resting, 1 = REST_TYPE_IN_TAVERN, 2 = REST_TYPE_IN_CITY
-            uint8_t restStateByte = static_cast<uint8_t>((val >> 24) & 0xFF);
-            if (isCreate) {
-                LOG_DEBUG("PLAYER_BYTES_2 (CREATE): raw=0x", std::hex, val, std::dec,
-                           " bankBagSlots=", static_cast<int>(bankBagSlots));
-                bool wasResting = owner_.isRestingRef();
-                owner_.isRestingRef() = (restStateByte != 0);
-                if (owner_.isRestingRef() != wasResting) {
-                    pendingEvents_.emit("UPDATE_EXHAUSTION", {});
-                    pendingEvents_.emit("PLAYER_UPDATE_RESTING", {});
-                }
-            } else {
-                // Byte 0 (bits 0-7): facial hair / piercings
-                uint8_t facialHair = static_cast<uint8_t>(val & 0xFF);
-                for (auto& ch : owner_.charactersRef()) {
-                    if (ch.guid == owner_.getPlayerGuid()) { ch.facialFeatures = facialHair; break; }
-                }
-                LOG_DEBUG("PLAYER_BYTES_2 (VALUES): raw=0x", std::hex, val, std::dec,
-                           " bankBagSlots=", static_cast<int>(bankBagSlots),
-                           " facial=", static_cast<int>(facialHair));
-                owner_.isRestingRef() = (restStateByte != 0);
-                owner_.eventBus().publish(events::PlayerAppearanceChanged{});
-                owner_.eventBus().publish(events::PlayerModelRebuildRequested{});
-            }
-        }
-        else if (pfi.chosenTitle != 0xFFFF && key == pfi.chosenTitle) {
-            LOG_DEBUG("PLAYER_CHOSEN_TITLE ", isCreate ? "from update fields: " : "updated: ",
-                      static_cast<int32_t>(val));
-            if (auto* feed = owner_.services().titlesFeed) feed->onChosen(static_cast<int32_t>(val));
-        }
-        // VALUES-only fields: PLAYER_BYTES (appearance) and PLAYER_FLAGS (ghost state)
-        else if (!isCreate && pfi.pBytes != 0xFFFF && key == pfi.pBytes) {
-            // PLAYER_BYTES changed (barber shop, polymorph, etc.)
-            for (auto& ch : owner_.charactersRef()) {
-                if (ch.guid == owner_.getPlayerGuid()) { ch.appearanceBytes = val; break; }
-            }
-            owner_.eventBus().publish(events::PlayerAppearanceChanged{});
-            owner_.eventBus().publish(events::PlayerModelRebuildRequested{});
-        }
-        else if (key == pfi.playerFlags) {
-          // Resting is read on create as well as on change, because a player
-          // who logs in inside an inn is already resting and there is no later
-          // transition to notice. The ghost handling below stays on updates
-          // only: it drives release and resurrection, which are transitions.
-          constexpr uint32_t PLAYER_FLAGS_RESTING = 0x00000020;
-          const bool nowResting = (val & PLAYER_FLAGS_RESTING) != 0;
-          if (nowResting != owner_.isRestingRef()) {
-              owner_.isRestingRef() = nowResting;
-              pendingEvents_.emit("PLAYER_UPDATE_RESTING", {});
-          }
-          // The helm and cloak switches, which the realm keeps and this client
-          // never read back. Both are set by CMSG_SHOWING_HELM/CLOAK and come
-          // home in PLAYER_FLAGS, so the realm had them right the whole time -
-          // helmVisible_ simply started true every session and was written by
-          // nothing but the toggle. Hide the helm, log out, and it was back.
-          //
-          // On create as well as on change, for the reason resting is: the
-          // flags arrive with the player and there is no later transition.
-          //
-          // The flag says *hide*, so it is inverted here.
-          {
-            constexpr uint32_t PLAYER_FLAGS_HIDE_HELM  = 0x00000400;
-            constexpr uint32_t PLAYER_FLAGS_HIDE_CLOAK = 0x00000800;
-            const bool helm  = (val & PLAYER_FLAGS_HIDE_HELM) == 0;
-            const bool cloak = (val & PLAYER_FLAGS_HIDE_CLOAK) == 0;
-            if (helm != owner_.helmVisibleRef() || cloak != owner_.cloakVisibleRef()) {
-                owner_.helmVisibleRef() = helm;
-                owner_.cloakVisibleRef() = cloak;
-                // The same rebuild the toggle asks for: the flag on its own
-                // changes nothing on screen, and the hair under a helm has to
-                // come back with it.
-                owner_.markOnlineEquipmentDirty();
-                LOG_INFO("PLAYER_FLAGS: helm ", helm ? "shown" : "hidden",
-                         ", cloak ", cloak ? "shown" : "hidden");
-            }
-          }
-          owner_.combat().playerFlagsArrived(val, pendingEvents_);
-          {
-            // Which unit's flags, because that is the only thing the
-            // handlers do with it: TargetFrame compares arg1 against its
-            // own unit before redrawing the away and busy markers, so an
-            // absent one matched no frame and none of them ever redrew.
-            // The event only where something changed. A create block is the
-            // interface being told what is, not what moved, and every frame
-            // reads the current values when it is built.
-            if (!isCreate) pendingEvents_.emit("PLAYER_FLAGS_CHANGED", {"player"});
-          }
-        }
-        else if (pfi.meleeAP  != 0xFFFF && key == pfi.meleeAP)  {
-            const int32_t ap = static_cast<int32_t>(val);
-            if (owner_.playerMeleeAPRef() != ap) powerChanged = true;
-            owner_.playerMeleeAPRef() = ap;
-        }
-        else if (pfi.rangedAP != 0xFFFF && key == pfi.rangedAP) {
-            const int32_t ap = static_cast<int32_t>(val);
-            // Its own flag, because its own event is the one that lands.
-            if (owner_.playerRangedAPRef() != ap) rangedPowerChanged = true;
-            owner_.playerRangedAPRef() = ap;
-        }
-        else if (pfi.spDmg1   != 0xFFFF && key >= pfi.spDmg1 && key < pfi.spDmg1 + 7) {
-            const int32_t dmgVal = static_cast<int32_t>(val);
-            if (owner_.playerSpellDmgBonusArr()[key - pfi.spDmg1] != dmgVal)
-                spellBonusChanged = true;
-            owner_.playerSpellDmgBonusArr()[key - pfi.spDmg1] = dmgVal;
-        }
-        else if (pfi.healBonus != 0xFFFF && key == pfi.healBonus) {
-            const int32_t healVal = static_cast<int32_t>(val);
-            if (owner_.playerHealBonusRef() != healVal) spellBonusChanged = true;
-            owner_.playerHealBonusRef() = healVal;
-        }
-        // Percentage stats are stored as IEEE 754 floats packed into uint32 update fields.
-        // memcpy reinterprets the bits; clamp to [0..100] to guard against NaN/Inf from
-        // corrupted packets reaching the UI (display-only, no gameplay logic depends on these).
-        // Points, not a percentage, so read straight rather than through the
-        // float reinterpretation the lines below need.
-        // Mana regen per second, sent already computed by the server (spirit,
-        // intellect, mp5 from gear and any while-casting talent are all folded
-        // in) as float bits, one figure while not casting and one during the
-        // five-second rule. A change refreshes the stat panel like any stat.
-        else if (pfi.manaRegen != 0xFFFF && key == pfi.manaRegen) {
-            float mr; std::memcpy(&mr, &val, 4);
-            if (owner_.playerManaRegenRef() != mr) statsChanged = true;
-            owner_.playerManaRegenRef() = mr;
-        }
-        else if (pfi.manaRegenCasting != 0xFFFF && key == pfi.manaRegenCasting) {
-            float mr; std::memcpy(&mr, &val, 4);
-            if (owner_.playerManaRegenCastingRef() != mr) statsChanged = true;
-            owner_.playerManaRegenCastingRef() = mr;
-        }
-        else if (pfi.expertise != 0xFFFF && key == pfi.expertise) { owner_.playerExpertiseRef() = static_cast<int32_t>(val); }
-        else if (pfi.offhandExpertise != 0xFFFF && key == pfi.offhandExpertise) { owner_.playerOffhandExpertiseRef() = static_cast<int32_t>(val); }
-        else if (pfi.blockPct != 0xFFFF && key == pfi.blockPct) { std::memcpy(&owner_.playerBlockPctRef(), &val, 4); owner_.playerBlockPctRef() = std::clamp(owner_.playerBlockPctRef(), 0.0f, 100.0f); }
-        else if (pfi.dodgePct != 0xFFFF && key == pfi.dodgePct) { std::memcpy(&owner_.playerDodgePctRef(), &val, 4); owner_.playerDodgePctRef() = std::clamp(owner_.playerDodgePctRef(), 0.0f, 100.0f); }
-        else if (pfi.parryPct != 0xFFFF && key == pfi.parryPct) { std::memcpy(&owner_.playerParryPctRef(), &val, 4); owner_.playerParryPctRef() = std::clamp(owner_.playerParryPctRef(), 0.0f, 100.0f); }
-        else if (pfi.critPct  != 0xFFFF && key == pfi.critPct)  { std::memcpy(&owner_.playerCritPctRef(),  &val, 4); owner_.playerCritPctRef()  = std::clamp(owner_.playerCritPctRef(),  0.0f, 100.0f); }
-        else if (pfi.rangedCritPct != 0xFFFF && key == pfi.rangedCritPct) { std::memcpy(&owner_.playerRangedCritPctRef(), &val, 4); owner_.playerRangedCritPctRef() = std::clamp(owner_.playerRangedCritPctRef(), 0.0f, 100.0f); }
-        else if (pfi.sCrit1   != 0xFFFF && key >= pfi.sCrit1 && key < pfi.sCrit1 + 7) {
-            std::memcpy(&owner_.playerSpellCritPctArr()[key - pfi.sCrit1], &val, 4);
-        }
-        else if (pfi.rating1  != 0xFFFF && key >= pfi.rating1 && key < pfi.rating1 + 25) {
-            const int32_t r = static_cast<int32_t>(val);
-            if (owner_.playerCombatRatingsRef()[key - pfi.rating1] != r) ratingsChanged = true;
-            owner_.playerCombatRatingsRef()[key - pfi.rating1] = r;
-        }
-        else {
-            for (int si = 0; si < 5; ++si) {
-                if (pfi.stats[si] != 0xFFFF && key == pfi.stats[si]) {
-                    const int32_t sv = static_cast<int32_t>(val);
-                    if (owner_.playerStatsArr()[si] != sv) statsChanged = true;
-                    owner_.playerStatsArr()[si] = sv;
-                    break;
-                }
-            }
-        }
-        // Do not synthesize quest-log entries from raw update-field slots.
-        // Slot layouts differ on some classic-family realms and can produce
-        // phantom "already accepted" quests that block quest acceptance.
-    }
-
-    // Announced only on an update, never on the create block: at create the
-    // sheet has not been built yet, and every field looks like a change.
-    //
-    // PaperDollFrame listens for these and calls PaperDollFrame_UpdateStats
-    // from each. Without them the panels were filled once at login and then
-    // never again - a new weapon or a stat buff left the old numbers on screen
-    // with nothing to say they were stale.
-    if (!isCreate) {
-        if (statsChanged)   pendingEvents_.emit("UNIT_STATS", {"player"});
-        if (ratingsChanged) pendingEvents_.emit("COMBAT_RATING_UPDATE", {});
-        if (powerChanged)   pendingEvents_.emit("UNIT_ATTACK_POWER", {"player"});
-        // The ranged half separately, because the two are not
-        // interchangeable to the sheet. PaperDollFrame registers
-        // UNIT_ATTACK_POWER and then handles it nowhere - it is absent from
-        // the branch that calls PaperDollFrame_UpdateStats and from every
-        // other branch in the file, in this FrameXML and in the pet one. So
-        // sending it for a ranged change refreshed nothing at all: a hunter
-        // could gain or lose ranged attack power and the character sheet went
-        // on showing the old number.
-        //
-        // UNIT_RANGED_ATTACK_POWER is in that branch, and is what the value
-        // actually changed, so it is both the effective event and the true
-        // one.
-        if (rangedPowerChanged) {
-            pendingEvents_.emit("UNIT_RANGED_ATTACK_POWER", {"player"});
-        }
-        // Armor with the six resistances behind it, and the spell power and
-        // healing bonus. The paperdoll refreshes its resistance panel from
-        // UNIT_RESISTANCES alone - UNIT_DEFENSE is the *pet* sheet's event, not
-        // this one - and its spell-power panel shares a branch with UNIT_STATS,
-        // which only fires when one of the five base stats moves. So a spell
-        // power buff that touched no stat, or a resistance aura, left the old
-        // number on the sheet until the next login.
-        if (resistancesChanged) pendingEvents_.emit("UNIT_RESISTANCES", {"player"});
-        if (spellBonusChanged)  pendingEvents_.emit("PLAYER_DAMAGE_DONE_MODS", {"player"});
-    }
-}
-
 //     Dispatch entity spawn callbacks for units/players.
 //     Consolidates player/creature spawn callback invocation from CREATE and VALUES handlers.
 //     isDead = unitInitiallyDead (CREATE) or computed isDeadNow && !npcDeathNotified (VALUES).
@@ -1666,8 +1354,7 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
                      " fields (max index=", maxField, ")");
         }
 
-        PlayerFieldIndices pfi = PlayerFieldIndices::resolve();
-        applyPlayerStatFields(block.fields, pfi, true);
+        owner_.player().playerFieldsArrived(block.fields, true, pendingEvents_);
         owner_.inventory().inventoryFieldsArrived(block.fields, true, pendingEvents_);
         owner_.inventory().maybeDetectVisibleItemLayout();
         owner_.spells().extractSkillFields(owner_.lastPlayerFieldsRef());
@@ -1951,8 +1638,7 @@ void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::share
         owner_.inventory().maybeDetectVisibleItemLayout();
         owner_.inventory().detectInventorySlotBases(block.fields);
 
-        PlayerFieldIndices pfi = PlayerFieldIndices::resolve();
-        applyPlayerStatFields(block.fields, pfi, false);
+        owner_.player().playerFieldsArrived(block.fields, false, pendingEvents_);
         owner_.inventory().inventoryFieldsArrived(block.fields, false, pendingEvents_);
         owner_.spells().extractSkillFields(owner_.lastPlayerFieldsRef());
         owner_.spells().extractExploredZoneFields(owner_.lastPlayerFieldsRef());

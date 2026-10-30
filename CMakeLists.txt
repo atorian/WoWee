@@ -807,6 +807,7 @@ set(WOWEE_SOURCES
     src/game/realm_clock.cpp
     src/game/realm_time_handler.cpp
     src/game/weather_handler.cpp
+    src/game/player_handler.cpp
     src/game/ui_errors.cpp
     src/game/quest_handler.cpp
     src/game/reputation_handler.cpp

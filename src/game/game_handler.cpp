@@ -143,6 +143,7 @@ GameHandler::GameHandler(GameServices& services)
     weatherHandler_ = std::make_unique<WeatherHandler>(
         *services_.events, *this, *chatHandler_,
         [] { return isClassicLikeExpansion() ? WeatherNumbering::Classic : WeatherNumbering::WeatherState; });
+    playerHandler_ = std::make_unique<PlayerHandler>(*this, *services_.events, *chatHandler_, *this);
 
     // The character's own settings, read once its spells have arrived - the
     // first thing the realm sends of a character entering the world.
@@ -1325,7 +1326,7 @@ float GameHandler::critPercentFromGameTable(std::vector<float>& baseCache,
                                             const char* baseDbc, const char* ratioDbc,
                                             int statIdx) const {
     const uint8_t pclass = getPlayerClass();
-    uint32_t level = getPlayerLevel();
+    uint32_t level = playerHandler_->level();
     if (pclass == 0 || pclass > 11 || level == 0) return 0.0f;
     constexpr uint32_t kGtMaxLevel = 100;
     if (level > kGtMaxLevel) level = kGtMaxLevel;
@@ -1345,7 +1346,7 @@ float GameHandler::critPercentFromGameTable(std::vector<float>& baseCache,
     const size_t baseIdx  = static_cast<size_t>(pclass - 1);
     const size_t ratioIdx = static_cast<size_t>(pclass - 1) * kGtMaxLevel + (level - 1);
     if (baseIdx >= baseCache.size() || ratioIdx >= ratioCache.size()) return 0.0f;
-    const float stat = static_cast<float>(std::max(0, getPlayerStat(statIdx)));
+    const float stat = static_cast<float>(std::max(0, playerHandler_->stat(statIdx)));
     return (baseCache[baseIdx] + stat * ratioCache[ratioIdx]) * 100.0f;  // the sheet reads a percent
 }
 
@@ -1371,7 +1372,7 @@ void loadFloatColumn(pipeline::AssetManager* am, const char* dbc, std::vector<fl
 
 float GameHandler::getHealthRegenFromSpirit() const {
     const uint8_t pclass = getPlayerClass();
-    uint32_t level = getPlayerLevel();
+    uint32_t level = playerHandler_->level();
     if (pclass == 0 || pclass > 11 || level == 0) return 0.0f;
     constexpr uint32_t kGtMaxLevel = 100;
     if (level > kGtMaxLevel) level = kGtMaxLevel;
@@ -1385,7 +1386,7 @@ float GameHandler::getHealthRegenFromSpirit() const {
     }
     const size_t idx = static_cast<size_t>(pclass - 1) * kGtMaxLevel + (level - 1);
     if (idx >= gtOctRegenHp_.size() || idx >= gtRegenHpPerSpt_.size()) return 0.0f;
-    const float spirit = static_cast<float>(std::max(0, getPlayerStat(4 /* SPIRIT */)));
+    const float spirit = static_cast<float>(std::max(0, playerHandler_->stat(4 /* SPIRIT */)));
     const float baseSpirit = std::min(spirit, 50.0f);
     const float moreSpirit = spirit - baseSpirit;
     return (baseSpirit * gtOctRegenHp_[idx] + moreSpirit * gtRegenHpPerSpt_[idx]) * 2.0f;
@@ -1393,20 +1394,20 @@ float GameHandler::getHealthRegenFromSpirit() const {
 
 float GameHandler::getManaRegenFromSpirit() const {
     const uint8_t pclass = getPlayerClass();
-    uint32_t level = getPlayerLevel();
+    uint32_t level = playerHandler_->level();
     if (pclass == 0 || pclass > 11 || level == 0) return 0.0f;
     constexpr uint32_t kGtMaxLevel = 100;
     if (level > kGtMaxLevel) level = kGtMaxLevel;
     if (!gtRegenLoaded_) { getHealthRegenFromSpirit(); }  // shares the same lazy load
     const size_t idx = static_cast<size_t>(pclass - 1) * kGtMaxLevel + (level - 1);
     if (idx >= gtRegenMpPerSpt_.size()) return 0.0f;
-    const float spirit = static_cast<float>(std::max(0, getPlayerStat(4 /* SPIRIT */)));
+    const float spirit = static_cast<float>(std::max(0, playerHandler_->stat(4 /* SPIRIT */)));
     return spirit * gtRegenMpPerSpt_[idx];
 }
 
 float GameHandler::getCombatRatingBonus(int cr) const {
     const uint8_t pclass = getPlayerClass();
-    uint32_t level = getPlayerLevel();
+    uint32_t level = playerHandler_->level();
     constexpr uint32_t kGtMaxLevel = 100, kGtMaxRating = 32;
     if (pclass == 0 || pclass > 11 || level == 0 || cr < 0 ||
         cr >= static_cast<int>(kGtMaxRating)) return 0.0f;
@@ -1429,7 +1430,7 @@ float GameHandler::getCombatRatingBonus(int cr) const {
     if (coefIdx >= gtCombatRatings_.size() || scalarIdx >= gtClassRatingScalar_.size()) return 0.0f;
     const float coef = gtCombatRatings_[coefIdx];
     if (coef == 0.0f) return 0.0f;
-    const float ratingValue = static_cast<float>(std::max(0, getCombatRating(cr)));
+    const float ratingValue = static_cast<float>(std::max(0, playerHandler_->combatRating(cr)));
     return ratingValue * (gtClassRatingScalar_[scalarIdx] / coef);
 }
 
@@ -1947,7 +1948,7 @@ void GameHandler::rebuildCompanions() const {
 }
 
 uint32_t GameHandler::getBonusActionBarOffset() const {
-    const uint8_t form = shapeshiftFormId_;
+    const uint8_t form = playerHandler_->shapeshiftForm();
     if (form == 0) return 0;
 
     // Cached per form: the file does not change, and this is asked on every
@@ -2167,13 +2168,6 @@ GameHandler::getExtendedCost(uint32_t extendedCostId) const {
     }
     auto it = extendedCostCache_.find(extendedCostId);
     return it == extendedCostCache_.end() ? nullptr : &it->second;
-}
-
-void GameHandler::setResting(bool resting) {
-    if (resting == isResting_) return;
-    isResting_ = resting;
-    chatHandler_->addSystemChatMessage(resting ? "You are now resting." : "You are no longer resting.");
-    if (hasAddonEventListener()) fireAddonEvent("PLAYER_UPDATE_RESTING", {});
 }
 
 // ---- MovementHandler delegating getters ----

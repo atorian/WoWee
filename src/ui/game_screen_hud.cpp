@@ -269,8 +269,8 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
     // and turning the helm off left the player bald under nothing.
     bool helmShown = true, cloakShown = true;
     if (auto* gh = app.getGameHandler()) {
-        helmShown = gh->isHelmVisible();
-        cloakShown = gh->isCloakVisible();
+        helmShown = gh->player().helmVisible();
+        cloakShown = gh->player().cloakVisible();
     }
 
     // Back/Cloak: inventoryType 16 → group 15
@@ -1416,7 +1416,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                     snprintf(labelBuf, sizeof(labelBuf), "Player");
             }
         } else if (level > 0) {
-            uint32_t playerLevel = gameHandler.getPlayerLevel();
+            uint32_t playerLevel = gameHandler.player().level();
             // Show skull for units more than 10 levels above the player
             if (playerLevel > 0 && level > playerLevel + 10)
                 snprintf(labelBuf, sizeof(labelBuf), "?? %s", unitName.c_str());

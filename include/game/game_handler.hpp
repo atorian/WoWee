@@ -20,6 +20,7 @@
 #include "game/group_defines.hpp"
 #include "game/handler_types.hpp"
 #include "game/combat_handler.hpp"
+#include "game/player_handler.hpp"
 #include "game/spell_handler.hpp"
 #include "game/quest_handler.hpp"
 #include "game/reputation_handler.hpp"
@@ -110,7 +111,8 @@ class GameHandler : public IConnectionState,
                      public SocialQueries,
                      public WardenSession,
                      public CombatQueries,
-                     public MovementQueries {
+                     public MovementQueries,
+                     public PlayerQueries {
 public:
     // Talent data structures (aliased from handler_types.hpp)
     using TalentEntry = game::TalentEntry;
@@ -286,7 +288,7 @@ public:
     uint64_t petGuid() const override;
     pet::IPetFeed* petFeed() override;
     std::string unitIdFor(uint64_t guid) const override { return guidToUnitId(guid); }
-    uint32_t playerLevel() const override { return getPlayerLevel(); }
+    uint32_t playerLevel() const override { return playerHandler_->level(); }
     const GameObjectQueryResponseData* gameObjectInfo(uint32_t entry) const override {
         return getCachedGameObjectInfo(entry);
     }
@@ -339,7 +341,7 @@ public:
     // QuestQueries (the shared ones are above; closeVendor is declared with
     // the vendor's facade).
     bool inGroup() const override;
-    void setResting(bool resting) override;
+    void setResting(bool resting) override { playerHandler_->restStateArrived(resting); }
     std::string creatureName(uint32_t entry) const override { return getCachedCreatureName(entry); }
     void requestCreatureInfo(uint32_t entry) override { queryCreatureInfo(entry, 0); }
     void requestGameObjectInfo(uint32_t entry) override { entityController_->queryGameObjectInfo(entry, 0); }
@@ -366,10 +368,17 @@ public:
     const std::array<uint32_t, 19>* inspectedItemEntries(uint64_t guid) const override {
         return inventoryHandler_->inspectedItemEntries(guid);
     }
-    bool showingHelm() const override { return helmVisible_; }
-    bool showingCloak() const override { return cloakVisible_; }
-    void setShowingHelm(bool shown) override { helmVisible_ = shown; }
-    void setShowingCloak(bool shown) override { cloakVisible_ = shown; }
+    bool showingHelm() const override { return playerHandler_->helmVisible(); }
+    bool showingCloak() const override { return playerHandler_->cloakVisible(); }
+    void setShowingHelm(bool shown) override { playerHandler_->showHelm(shown); }
+    void setShowingCloak(bool shown) override { playerHandler_->showCloak(shown); }
+
+    // PlayerQueries (markOnlineEquipmentDirty is the inventory's, below)
+    Character* listedCharacter() override;
+    void moneyFieldArrived(uint32_t copper, FrameXmlEvents& packetEvents) override;
+    void bankBagSlotsArrived(uint8_t slots) override;
+    void chosenTitleArrived(int32_t title) override;
+    void playerFlagsArrived(uint32_t flags, FrameXmlEvents& packetEvents) override;
 
     // ReputationQueries (refreshUnitHostility is declared with the rest of the
     // faction table below).
@@ -581,27 +590,6 @@ public:
     const loot::ILoot* loot() const override;
     const guild_bank::IGuildBank* guildBank() const override;
 
-    // PvP currency (TBC/WotLK only)
-    uint32_t getHonorPoints() const { return playerHonorPoints_; }
-    uint32_t getArenaPoints() const { return playerArenaPoints_; }
-
-    // Server-authoritative armor (UNIT_FIELD_RESISTANCES[0])
-    int32_t getArmorRating() const { return playerArmorRating_; }
-
-    // Server-authoritative elemental resistances (UNIT_FIELD_RESISTANCES[1-6]).
-    // school: 1=Holy, 2=Fire, 3=Nature, 4=Frost, 5=Shadow, 6=Arcane. Returns 0 if not received.
-    int32_t getResistance(int school) const {
-        if (school < 1 || school > 6) return 0;
-        return playerResistances_[school - 1];
-    }
-
-    // Server-authoritative primary stats (UNIT_FIELD_STAT0-4: STR, AGI, STA, INT, SPI).
-    // Returns -1 if the server hasn't sent the value yet.
-    int32_t getPlayerStat(int idx) const {
-        if (idx < 0 || idx > 4) return -1;
-        return playerStats_[idx];
-    }
-
     /// Melee critical-strike chance the player's Agility grants, as a percent,
     /// the way the character sheet's stat flyout reads it: the class base plus
     /// Agility times the per-class-per-level ratio, both from the combat game
@@ -623,52 +611,6 @@ public:
     /// same as AzerothCore's OCTRegen*PerSpirit. Zero for a class with no mana.
     float getHealthRegenFromSpirit() const;
     float getManaRegenFromSpirit() const;
-
-    // Server-authoritative attack power (WotLK: UNIT_FIELD_ATTACK_POWER / RANGED).
-    // Returns -1 if not yet received.
-    int32_t getMeleeAttackPower()  const { return playerMeleeAP_; }
-    int32_t getRangedAttackPower() const { return playerRangedAP_; }
-
-    // Server-authoritative spell damage / healing bonus (WotLK: PLAYER_FIELD_MOD_*).
-    // getSpellPower returns the max damage bonus across magic schools 1-6 (Holy/Fire/Nature/Frost/Shadow/Arcane).
-    // Returns -1 if not yet received.
-    int32_t getSpellPower() const {
-        int32_t sp = -1;
-        for (int i = 1; i <= 6; ++i) {
-            if (playerSpellDmgBonus_[i] > sp) sp = playerSpellDmgBonus_[i];
-        }
-        return sp;
-    }
-    int32_t getHealingPower() const { return playerHealBonus_; }
-
-    // Server-authoritative combat chance percentages (WotLK: PLAYER_* float fields).
-    // Returns -1.0f if not yet received.
-    float getDodgePct()  const { return playerDodgePct_; }
-    float getParryPct()  const { return playerParryPct_; }
-    float getBlockPct()  const { return playerBlockPct_; }
-    /// Expertise in points, main hand and off hand. Zero until the server
-    /// says otherwise, which is also the right answer for a class that has
-    /// none - unlike the percentages above, where -1 has to mean "not told".
-    int32_t getExpertise() const { return playerExpertise_; }
-    int32_t getOffhandExpertise() const { return playerOffhandExpertise_; }
-    /// Mana regen per second, not-casting and while-casting - the server sends
-    /// both already computed. GetManaRegen returns them for the mana-regen stat.
-    float getManaRegen() const { return playerManaRegen_; }
-    float getManaRegenCasting() const { return playerManaRegenCasting_; }
-    float getCritPct()   const { return playerCritPct_; }
-    float getRangedCritPct() const { return playerRangedCritPct_; }
-    // Spell crit by school (0=Physical,1=Holy,2=Fire,3=Nature,4=Frost,5=Shadow,6=Arcane)
-    float getSpellCritPct(int school = 1) const {
-        if (school < 0 || school > 6) return -1.0f;
-        return playerSpellCritPct_[school];
-    }
-
-    // Server-authoritative combat ratings (WotLK: PLAYER_FIELD_COMBAT_RATING_1+idx).
-    // Returns -1 if not yet received. Indices match AzerothCore CombatRating enum.
-    int32_t getCombatRating(int cr) const {
-        if (cr < 0 || cr > 24) return -1;
-        return playerCombatRatings_[cr];
-    }
 
     // Inventory
     void markOnlineEquipmentDirty() override { inventoryHandler_->markOnlineEquipmentDirty(); }
@@ -695,10 +637,6 @@ public:
     uint8_t getStandState() const { return standState_; }
     bool isSitting() const { return standState_ >= 1 && standState_ <= 6; }
     bool isDead() const { return standState_ == 7; }
-
-    // Display toggles
-    bool isHelmVisible() const { return helmVisible_; }
-    bool isCloakVisible() const { return cloakVisible_; }
 
     /// Take the glyph out of a socket. Zero-based slot, as the server counts.
     void removeGlyphFromSocket(uint32_t slot);
@@ -801,11 +739,6 @@ public:
     }
 
     // XP tracking
-    uint32_t getPlayerXp() const { return playerXp_; }
-    uint32_t getPlayerNextLevelXp() const { return playerNextLevelXp_; }
-    uint32_t getPlayerRestedXp() const { return playerRestedXp_; }
-    bool isPlayerResting() const { return isResting_; }
-    uint32_t getPlayerLevel() const { return serverPlayerLevel_; }
     static uint32_t killXp(uint32_t playerLevel, uint32_t victimLevel);
 
     // Global Cooldown (GCD) - set when the server sends a spellId=0 cooldown entry
@@ -1050,7 +983,6 @@ public:
         }
     }
 
-    uint8_t  getShapeshiftFormId() const { return shapeshiftFormId_; }
     /// Which extra action bar the current form or stance uses, or 0 for none.
     ///
     /// SpellShapeshiftForm.dbc carries it per form - cat 1, bear 3, moonkin 4,
@@ -1085,13 +1017,6 @@ public:
     static constexpr int NUM_TOTEM_SLOTS = kTotemSlots;
     /// Pull down a totem by the slot it stands in.
     void destroyTotem(int slot);
-
-    // Stat deltas from the last SMSG_LEVELUP_INFO (valid until next level-up)
-    struct LevelUpDeltas {
-        uint32_t hp   = 0;
-        uint32_t mana = 0;
-        uint32_t str = 0, agi = 0, sta = 0, intel = 0, spi = 0;
-    };
 
     // ---- Readable text (books / scrolls / notes) ----
     /// PageTextMaterial.dbc's name for a material id, empty for none. The
@@ -1412,6 +1337,9 @@ public:
     /// The weather where the character stands, as the realm says it.
     WeatherHandler& weather() { return *weatherHandler_; }
     const WeatherHandler& weather() const { return *weatherHandler_; }
+    /// The character in the world: experience, level, rest, the sheet.
+    PlayerHandler& player() { return *playerHandler_; }
+    const PlayerHandler& player() const { return *playerHandler_; }
 
     // ── Mutable Accessors for Members with Existing Const Getters ────
     MovementInfo& movementInfoRef() { return movementInfo; }
@@ -1434,45 +1362,17 @@ public:
     auto& lastPlayerFieldsRef() { return lastPlayerFields_; }
 
     // ── Character & Appearance ───────────────────────────────────────
-    auto& cloakVisibleRef() { return cloakVisible_; }
-    auto& helmVisibleRef() { return helmVisible_; }
     auto& currentMountDisplayIdRef() { return currentMountDisplayId_; }
     auto& mountAuraSpellIdRef() { return mountAuraSpellId_; }
     /// Spell of the aura currently keeping the player mounted, 0 when on foot.
     /// Pressing this one again is a dismount, not a second mount.
     uint32_t getMountAuraSpellId() const { return mountAuraSpellId_; }
-    auto& shapeshiftFormIdRef() { return shapeshiftFormId_; }
-    auto& serverPlayerLevelRef() { return serverPlayerLevel_; }
 
     // ── AFK / DND ────────────────────────────────────────────────────
 
     // ── Movement & Transport ─────────────────────────────────────────
 
     // ── Combat & Player Stats ────────────────────────────────────────
-    auto& playerArenaPointsRef() { return playerArenaPoints_; }
-    auto& playerArmorRatingRef() { return playerArmorRating_; }
-    auto& playerBlockPctRef() { return playerBlockPct_; }
-    auto& playerExpertiseRef() { return playerExpertise_; }
-    auto& playerOffhandExpertiseRef() { return playerOffhandExpertise_; }
-    auto& playerManaRegenRef() { return playerManaRegen_; }
-    auto& playerManaRegenCastingRef() { return playerManaRegenCasting_; }
-    auto& playerCombatRatingsRef() { return playerCombatRatings_; }
-    auto& playerCritPctRef() { return playerCritPct_; }
-    auto& playerDodgePctRef() { return playerDodgePct_; }
-    auto& playerHealBonusRef() { return playerHealBonus_; }
-    auto& playerHonorPointsRef() { return playerHonorPoints_; }
-    auto& playerMeleeAPRef() { return playerMeleeAP_; }
-    auto& playerNextLevelXpRef() { return playerNextLevelXp_; }
-    auto& playerParryPctRef() { return playerParryPct_; }
-    auto& playerRangedAPRef() { return playerRangedAP_; }
-    auto& playerRangedCritPctRef() { return playerRangedCritPct_; }
-    auto* playerResistancesArr() { return playerResistances_; }
-    auto& playerRestedXpRef() { return playerRestedXp_; }
-    auto* playerSpellCritPctArr() { return playerSpellCritPct_; }
-    auto* playerSpellDmgBonusArr() { return playerSpellDmgBonus_; }
-    auto& playerStatsArr() { return playerStats_; }
-    auto& playerXpRef() { return playerXp_; }
-    auto& isRestingRef() { return isResting_; }
 
     // ── World, Map & Zones ───────────────────────────────────────────
     auto& currentMapIdRef() { return currentMapId_; }
@@ -1700,6 +1600,7 @@ private:
     std::unique_ptr<ReputationHandler> reputationHandler_;
     std::unique_ptr<RealmTimeHandler> realmTimeHandler_;
     std::unique_ptr<WeatherHandler> weatherHandler_;
+    std::unique_ptr<PlayerHandler> playerHandler_;
 
     // Opcode dispatch table - built once in registerOpcodeHandlers(), called by handlePacket()
     using PacketHandler = std::function<void(network::Packet&)>;
@@ -1793,8 +1694,6 @@ private:
     std::unordered_map<uint32_t, uint32_t> worldStates_;
 
     // ---- Display state ----
-    bool helmVisible_ = true;
-    bool cloakVisible_ = true;
     uint8_t standState_ = 0;  // 0=stand, 1=sit, ..., 7=dead, 8=kneel (server-confirmed)
 
     // Items, coin, books and the equipment of players in view are the
@@ -1821,8 +1720,6 @@ private:
     // Mirror timers (0=fatigue, 1=breath, 2=feigndeath)
     MirrorTimer mirrorTimers_[3];
 
-    // Shapeshift form (from UNIT_FIELD_BYTES_1 byte 3)
-    uint8_t  shapeshiftFormId_ = 0;
 
 
 
@@ -1846,28 +1743,6 @@ private:
     // Tracks the last GO we sent CMSG_GAMEOBJ_USE to; used in handleSpellGo
     // to send CMSG_LOOT after a gather cast (mining/herbalism) completes.
     uint64_t lastInteractedGoGuid_ = 0;
-    uint32_t playerHonorPoints_ = 0;
-    uint32_t playerArenaPoints_ = 0;
-    int32_t playerArmorRating_ = 0;
-    int32_t playerResistances_[6] = {};  // [0]=Holy,[1]=Fire,[2]=Nature,[3]=Frost,[4]=Shadow,[5]=Arcane
-    // Server-authoritative primary stats: [0]=STR [1]=AGI [2]=STA [3]=INT [4]=SPI; -1 = not received yet
-    int32_t playerStats_[5] = {-1, -1, -1, -1, -1};
-    // WotLK secondary combat stats (-1 = not yet received)
-    int32_t playerMeleeAP_    = -1;
-    int32_t playerRangedAP_   = -1;
-    int32_t playerSpellDmgBonus_[7] = {-1,-1,-1,-1,-1,-1,-1}; // per school 0-6
-    int32_t playerHealBonus_  = -1;
-    float playerDodgePct_     = -1.0f;
-    float playerParryPct_     = -1.0f;
-    float playerBlockPct_     = -1.0f;
-    int32_t playerExpertise_        = 0;
-    int32_t playerOffhandExpertise_ = 0;
-    float playerManaRegen_          = 0.0f;  // per second, while not casting
-    float playerManaRegenCasting_   = 0.0f;  // per second, during the five-second rule
-    float playerCritPct_      = -1.0f;
-    float playerRangedCritPct_ = -1.0f;
-    float playerSpellCritPct_[7] = {-1.0f,-1.0f,-1.0f,-1.0f,-1.0f,-1.0f,-1.0f};
-    int32_t playerCombatRatings_[25] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
 
     void performGameObjectInteractionNow(uint64_t guid);
 
@@ -1993,13 +1868,6 @@ private:
     /// Whether a ping has gone out to ask about the silence.
     bool worldSilenceProbed_ = false;
 
-    // ---- XP tracking ----
-    uint32_t playerXp_ = 0;
-    uint32_t playerNextLevelXp_ = 0;
-    uint32_t playerRestedXp_ = 0;
-    bool isResting_ = false;
-    uint32_t serverPlayerLevel_ = 1;
-
     // ---- Light override (SMSG_OVERRIDE_LIGHT) ----
 
     // ---- Player skills (the skills themselves are the spell book's) ----
@@ -2009,7 +1877,6 @@ private:
     FaceCameraProvider faceCameraProvider_;
     bool suppressMeleeSwingAnim_ = false;
     // lastMeleeSwingMs_ moved to CombatHandler
-    LevelUpDeltas lastLevelUpDeltas_;
     /// PageTextMaterial.dbc is seven rows and is read once on the first ask,
     /// like the other DBC-backed caches here.
     mutable std::unordered_map<uint32_t, std::string> pageTextMaterialNames_;

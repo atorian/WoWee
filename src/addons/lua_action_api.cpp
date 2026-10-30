@@ -2548,7 +2548,7 @@ void registerActionLuaAPI(lua_State* L) {
                 // the player's level down to it.
                 {"GetQuestGreenRange", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const int lvl = gh ? static_cast<int>(gh->getPlayerLevel()) : 1;
+            const int lvl = gh ? static_cast<int>(gh->player().level()) : 1;
             int gray;
             if (lvl <= 5)       gray = 0;
             else if (lvl <= 39) gray = lvl - 5 - lvl / 10;

@@ -290,7 +290,7 @@ void AppearanceComposer::loadEquippedHelm(game::Inventory& inventory) {
 
     // Hiding the helm is a display choice, not an unequip: the item stays on,
     // the model comes off, and the hair comes back.
-    if (!gameHandler_->isHelmVisible()) return;
+    if (!gameHandler_->player().helmVisible()) return;
 
     const auto& headSlot = inventory.getEquipSlot(game::EquipSlot::HEAD);
     if (headSlot.empty()) return;

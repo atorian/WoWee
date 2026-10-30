@@ -943,7 +943,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                         circleColor = glm::vec3(0.5f, 0.5f, 0.5f); // gray (dead)
                     } else if (unit->isHostile() || gameHandler.combat().isAggressiveTowardPlayer(target->getGuid())) {
                         const ImVec4 c = ui::helpers::levelDifficultyColor(
-                            gameHandler.getPlayerLevel(), unit->getLevel());
+                            gameHandler.player().level(), unit->getLevel());
                         circleColor = glm::vec3(c.x, c.y, c.z);
                     } else {
                         circleColor = glm::vec3(0.3f, 1.0f, 0.3f); // green (friendly)

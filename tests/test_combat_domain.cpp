@@ -390,18 +390,6 @@ TEST_CASE("auto-attack reaches 8 yards bare-handed and 40 with a bow in the rang
 namespace {
 /// A block for the player's own object, as an update or as the create a login
 /// brings.
-void playerFields(GameHarness& h, std::map<uint16_t, uint32_t> fields, bool create = false) {
-    using namespace wowee::game;
-    UpdateBlock block{};
-    block.guid = h.player().guid;
-    block.objectType = ObjectType::PLAYER;
-    block.updateType = create ? UpdateType::CREATE_OBJECT : UpdateType::VALUES;
-    for (const auto& [k, v] : fields) block.fields[k] = v;
-    UpdateObjectData batch{};
-    batch.blocks.push_back(block);
-    h.game().entityController().applyRecordedObjects(batch);
-    h.pump();
-}
 uint16_t uf(wowee::game::UF f) { return static_cast<uint16_t>(wowee::game::fieldIndex(f)); }
 }  // namespace
 
@@ -411,14 +399,14 @@ TEST_CASE("the player's health reaching zero is a death, and coming back from it
     GameHarness h;
     h.enterWorld();
     h.playerInView();
-    playerFields(h, {{uf(UF::UNIT_FIELD_HEALTH), 100}, {uf(UF::UNIT_FIELD_MAXHEALTH), 100}});
+    h.playerFields({{uf(UF::UNIT_FIELD_HEALTH), 100}, {uf(UF::UNIT_FIELD_MAXHEALTH), 100}});
     h.clearRecords();
 
-    playerFields(h, {{uf(UF::UNIT_FIELD_HEALTH), 0}});
+    h.playerFields({{uf(UF::UNIT_FIELD_HEALTH), 0}});
     CHECK(h.game().combat().isPlayerDead());
     CHECK(h.addonEvents("PLAYER_DEAD").size() == 1);
 
-    playerFields(h, {{uf(UF::UNIT_FIELD_HEALTH), 50}});
+    h.playerFields({{uf(UF::UNIT_FIELD_HEALTH), 50}});
     CHECK_FALSE(h.game().combat().isPlayerDead());
     CHECK(h.addonEvents("PLAYER_ALIVE").size() == 1);
 }
@@ -428,12 +416,12 @@ TEST_CASE("health coming back to a ghost is the spirit taking form, not life", "
     GameHarness h;
     h.enterWorld();
     h.playerInView();
-    playerFields(h, {{uf(UF::UNIT_FIELD_HEALTH), 0}});
-    playerFields(h, {{uf(UF::PLAYER_FLAGS), 0x10}});   // released: a ghost
+    h.playerFields({{uf(UF::UNIT_FIELD_HEALTH), 0}});
+    h.playerFields({{uf(UF::PLAYER_FLAGS), 0x10}});   // released: a ghost
     REQUIRE(h.game().combat().isPlayerGhost());
     h.clearRecords();
 
-    playerFields(h, {{uf(UF::UNIT_FIELD_HEALTH), 1}});
+    h.playerFields({{uf(UF::UNIT_FIELD_HEALTH), 1}});
     CHECK(h.addonEvents("PLAYER_UNGHOST").size() == 1);
     CHECK(h.addonEvents("PLAYER_ALIVE").empty());
 }
@@ -445,11 +433,11 @@ TEST_CASE("the dead flag alone is a death, and clearing it is life", "[combat][d
     h.playerInView();
     h.clearRecords();
 
-    playerFields(h, {{uf(UF::UNIT_DYNAMIC_FLAGS), wowee::game::UNIT_DYNFLAG_DEAD}});
+    h.playerFields({{uf(UF::UNIT_DYNAMIC_FLAGS), wowee::game::UNIT_DYNFLAG_DEAD}});
     CHECK(h.game().combat().isPlayerDead());
     CHECK(h.addonEvents("PLAYER_DEAD").size() == 1);
 
-    playerFields(h, {{uf(UF::UNIT_DYNAMIC_FLAGS), 0}});
+    h.playerFields({{uf(UF::UNIT_DYNAMIC_FLAGS), 0}});
     CHECK_FALSE(h.game().combat().isPlayerDead());
     CHECK(h.addonEvents("PLAYER_ALIVE").size() == 1);
 }
@@ -463,7 +451,7 @@ TEST_CASE("a player who logs in as a ghost is one, and the corpse is asked for",
         [&](const ev::GhostStateChanged& e) { ghostStates.push_back(e.isGhost); });
     h.clearRecords();
 
-    playerFields(h, {{uf(UF::UNIT_FIELD_HEALTH), 1}, {uf(UF::PLAYER_FLAGS), 0x10}}, /*create=*/true);
+    h.playerFields({{uf(UF::UNIT_FIELD_HEALTH), 1}, {uf(UF::PLAYER_FLAGS), 0x10}}, /*create=*/true);
 
     CHECK(h.game().combat().isPlayerGhost());
     CHECK(h.game().combat().isPlayerDead());
@@ -477,13 +465,13 @@ TEST_CASE("a player who logs in with no health is dead, and one whose block says
     {
         GameHarness h;
         h.enterWorld();
-        playerFields(h, {{uf(UF::UNIT_FIELD_HEALTH), 0}}, /*create=*/true);
+        h.playerFields({{uf(UF::UNIT_FIELD_HEALTH), 0}}, /*create=*/true);
         CHECK(h.game().combat().isPlayerDead());
     }
     {
         GameHarness h;
         h.enterWorld();
-        playerFields(h, {{uf(UF::UNIT_FIELD_MAXHEALTH), 100}}, /*create=*/true);
+        h.playerFields({{uf(UF::UNIT_FIELD_MAXHEALTH), 100}}, /*create=*/true);
         CHECK_FALSE(h.game().combat().isPlayerDead());
     }
 }

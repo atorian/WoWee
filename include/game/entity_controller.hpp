@@ -245,20 +245,6 @@ private:
         uint16_t attackPower, minDamage, maxDamage;
         static UnitFieldIndices resolve();
     };
-    struct PlayerFieldIndices {
-        uint16_t xp, nextXp, restedXp, level;
-        uint16_t coinage, honor, arena;
-        uint16_t playerFlags, armor;
-        uint16_t pBytes, pBytes2, chosenTitle;
-        uint16_t stats[5];
-        uint16_t meleeAP, rangedAP;
-        uint16_t spDmg1, healBonus;
-        uint16_t blockPct, dodgePct, parryPct, critPct, rangedCritPct;
-        uint16_t sCrit1, rating1;
-        uint16_t expertise, offhandExpertise;
-        uint16_t manaRegen, manaRegenCasting;
-        static PlayerFieldIndices resolve();
-    };
     struct UnitFieldUpdateResult {
         bool healthChanged = false;
         /// Separately, because a frame registers for the two apart: the value
@@ -295,9 +281,6 @@ private:
                                                     const std::shared_ptr<Entity>& entity,
                                                     std::shared_ptr<Unit>& unit,
                                                     const UnitFieldIndices& ufi);
-    // Apply player stat fields (XP, inventory, skills, etc.). isCreate=true for CREATE path.
-    void applyPlayerStatFields(const FlatFieldMap& fields,
-                                const PlayerFieldIndices& pfi, bool isCreate);
     // Dispatch spawn callbacks (creature/player) - deduplicates CREATE and VALUES paths.
     void dispatchEntitySpawn(uint64_t guid, ObjectType objectType,
                               const std::shared_ptr<Entity>& entity,

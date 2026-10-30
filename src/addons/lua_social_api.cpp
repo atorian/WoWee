@@ -2735,7 +2735,7 @@ void registerSocialLuaAPI(lua_State* L) {
             const int index = static_cast<int>(luaL_checknumber(L, 1));
             const auto* q = gossipQuestAt(L, /*available=*/false, index);
             lua_pushboolean(L, (gh && q &&
-                questIsTrivial(static_cast<int>(gh->getPlayerLevel()), q->questLevel)) ? 1 : 0);
+                questIsTrivial(static_cast<int>(gh->player().level()), q->questLevel)) ? 1 : 0);
             return 1;
         }},
                 // isTrivial, isDaily, isRepeatable - which icon the greeting
@@ -2745,7 +2745,7 @@ void registerSocialLuaAPI(lua_State* L) {
             const auto* q = gossipQuestAt(L, /*available=*/true, index);
             auto* gh = getGameHandler(L);
             lua_pushboolean(L, (gh && q &&
-                questIsTrivial(static_cast<int>(gh->getPlayerLevel()), q->questLevel)) ? 1 : 0);
+                questIsTrivial(static_cast<int>(gh->player().level()), q->questLevel)) ? 1 : 0);
             lua_pushboolean(L, q && (q->questFlags & kQuestFlagsDaily) ? 1 : 0);
             lua_pushboolean(L, q && q->isRepeatable ? 1 : 0);
             return 3;
@@ -2850,7 +2850,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 // no-sickness wording rather than printing "0 min".
                 {"GetResSicknessDuration", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const uint32_t level = gh ? gh->getPlayerLevel() : 0;
+            const uint32_t level = gh ? gh->player().level() : 0;
             constexpr uint32_t kSicknessLevel = 11;
             if (level < kSicknessLevel) { lua_pushnil(L); return 1; }
             const uint32_t minutes = level >= kSicknessLevel + 9

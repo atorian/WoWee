@@ -352,7 +352,7 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
     }
 
     if (item.requiredLevel > 1) {
-        uint32_t playerLvl = gameHandler ? gameHandler->getPlayerLevel() : 0;
+        uint32_t playerLvl = gameHandler ? gameHandler->player().level() : 0;
         bool meetsReq = (playerLvl >= item.requiredLevel);
         ImVec4 reqColor = meetsReq ? ImVec4(1.0f, 1.0f, 1.0f, 0.75f) : ui::colors::kPaleRed;
         ImGui::TextColored(reqColor, "Requires Level %u", item.requiredLevel);
@@ -814,7 +814,7 @@ void renderItemTooltip(const game::ItemQueryResponseData& info, const game::Inve
     }
 
     if (info.requiredLevel > 1) {
-        uint32_t playerLvl = gameHandler ? gameHandler->getPlayerLevel() : 0;
+        uint32_t playerLvl = gameHandler ? gameHandler->player().level() : 0;
         bool meetsReq = (playerLvl >= info.requiredLevel);
         ImVec4 reqColor = meetsReq ? ImVec4(1.0f, 1.0f, 1.0f, 0.75f) : ui::colors::kPaleRed;
         ImGui::TextColored(reqColor, "Requires Level %u", info.requiredLevel);

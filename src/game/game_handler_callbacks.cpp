@@ -596,30 +596,12 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     inventoryHandler_->beginCharacter();
     if (services_.achievementsFeed) services_.achievementsFeed->beginCharacter();
     lastPlayerFields_.clear();
-    playerArmorRating_ = 0;
-    std::fill(std::begin(playerResistances_), std::end(playerResistances_), 0);
-    std::fill(std::begin(playerStats_), std::end(playerStats_), -1);
-    playerMeleeAP_ = -1;
-    playerRangedAP_ = -1;
-    std::fill(std::begin(playerSpellDmgBonus_), std::end(playerSpellDmgBonus_), -1);
-    playerHealBonus_ = -1;
-    playerDodgePct_ = -1.0f;
-    playerParryPct_ = -1.0f;
-    playerBlockPct_ = -1.0f;
-    playerExpertise_ = 0;
-    playerOffhandExpertise_ = 0;
-    playerCritPct_  = -1.0f;
-    playerRangedCritPct_ = -1.0f;
-    std::fill(std::begin(playerSpellCritPct_), std::end(playerSpellCritPct_), -1.0f);
-    std::fill(std::begin(playerCombatRatings_), std::end(playerCombatRatings_), -1);
+    playerHandler_->beginCharacter();
     spellHandler_->resetAllState();
     eventBus().publish(events::PlayerIntoxicationChanged{0.0f});
     actionBarHandler_->clear();
     petHandler_->beginCharacter();
     weatherHandler_->beginCharacter();
-    playerXp_ = 0;
-    playerNextLevelXp_ = 0;
-    serverPlayerLevel_ = 1;
     // The quest log begins again with CharacterLoggingIn, below.
     pendingLoginQuestResync_ = false;
     pendingLoginQuestResyncTimeout_ = 0.0f;
@@ -1916,6 +1898,29 @@ void GameHandler::resurrectedInPlace() {
     stopAutoAttack();
     combatHandler_->invalidateTabCycle();
     spellHandler_->resetCastState();
+}
+
+Character* GameHandler::listedCharacter() {
+    for (auto& ch : characters) {
+        if (ch.guid == playerGuid) return &ch;
+    }
+    return nullptr;
+}
+
+void GameHandler::moneyFieldArrived(uint32_t copper, FrameXmlEvents& packetEvents) {
+    inventoryHandler_->moneyFieldArrived(copper, packetEvents);
+}
+
+void GameHandler::bankBagSlotsArrived(uint8_t slots) {
+    inventoryHandler_->setPurchasedBankBagSlots(slots);
+}
+
+void GameHandler::chosenTitleArrived(int32_t title) {
+    if (auto* feed = services_.titlesFeed) feed->onChosen(title);
+}
+
+void GameHandler::playerFlagsArrived(uint32_t flags, FrameXmlEvents& packetEvents) {
+    combatHandler_->playerFlagsArrived(flags, packetEvents);
 }
 
 bool GameHandler::actionBarHoldsItem() const {

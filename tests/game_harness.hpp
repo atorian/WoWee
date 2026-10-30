@@ -311,6 +311,9 @@ public:
     /// Put the player's own object in view - what the realm's fields for the
     /// character are applied to.
     void playerInView();
+    /// The realm's fields for the player's own object, as an update block -
+    /// `create` the one that puts it in the world - applied and pumped.
+    void playerFields(const std::map<uint16_t, uint32_t>& fields, bool create = false);
     /// Read the world as expansion `id` does from here on: its update field
     /// and opcode tables, and the rules that ask which expansion is active.
     /// The login has already happened on WotLK's wire, so this is for what

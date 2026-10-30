@@ -4270,7 +4270,7 @@ static int lua_GetBattlefieldInfo(lua_State* L) {
     // the level bracket the server sent, whether this is the week's call to
     // arms, and whether it is the random battleground rather than a named one
     // - type 32, which is what BattlefieldFrame keys the rewards block on.
-    const uint32_t level = gh->getPlayerLevel();
+    const uint32_t level = gh->player().level();
     const bool inBracket = (bg.minLevel == 0 || level >= bg.minLevel) &&
                            (bg.maxLevel == 0 || level <= bg.maxLevel);
     constexpr uint32_t kRandomBattleground = 32;
@@ -4312,7 +4312,7 @@ static int lua_GetBattlegroundInfo(lua_State* L) {
 
     // A row naming no level range - the random battleground is the only one -
     // is not a row saying nobody qualifies.
-    const uint32_t level = gh->getPlayerLevel();
+    const uint32_t level = gh->player().level();
     const bool hasRange = bg.minLevel != 0 || bg.maxLevel != 0;
     const bool canEnter = !hasRange || (level >= bg.minLevel && level <= bg.maxLevel);
 
@@ -6840,12 +6840,12 @@ void registerSystemLuaAPI(lua_State* L) {
                 // the Display panel was built.
                 {"ShowingHelm", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushboolean(L, (gh && gh->isHelmVisible()) ? 1 : 0);
+            lua_pushboolean(L, (gh && gh->player().helmVisible()) ? 1 : 0);
             return 1;
         }},
                 {"ShowingCloak", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushboolean(L, (gh && gh->isCloakVisible()) ? 1 : 0);
+            lua_pushboolean(L, (gh && gh->player().cloakVisible()) ? 1 : 0);
             return 1;
         }},
                 // The equipment manager exists here - GetNumEquipmentSets and
@@ -6870,7 +6870,7 @@ void registerSystemLuaAPI(lua_State* L) {
             if (!gh) return 0;
             const bool want = lua_isnumber(L, 1) ? (lua_tonumber(L, 1) != 0)
                                                  : (lua_toboolean(L, 1) != 0);
-            if (want != gh->isHelmVisible()) gh->social().toggleHelm();
+            if (want != gh->player().helmVisible()) gh->social().toggleHelm();
             return 0;
         }},
                 {"ShowCloak", [](lua_State* L) -> int {
@@ -6878,7 +6878,7 @@ void registerSystemLuaAPI(lua_State* L) {
             if (!gh) return 0;
             const bool want = lua_isnumber(L, 1) ? (lua_tonumber(L, 1) != 0)
                                                  : (lua_toboolean(L, 1) != 0);
-            if (want != gh->isCloakVisible()) gh->social().toggleCloak();
+            if (want != gh->player().cloakVisible()) gh->social().toggleCloak();
             return 0;
         }},
                 {"TogglePVP", [](lua_State* L) -> int {
@@ -7233,13 +7233,13 @@ void registerSystemLuaAPI(lua_State* L) {
                 // overflow, which is exactly what they are right for.
                 {"GetHonorCurrency", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getHonorPoints() : 0);
+            lua_pushnumber(L, gh ? gh->player().honorPoints() : 0);
             lua_pushnumber(L, 75000);
             return 2;
         }},
                 {"GetArenaCurrency", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getArenaPoints() : 0);
+            lua_pushnumber(L, gh ? gh->player().arenaPoints() : 0);
             lua_pushnumber(L, 5000);
             return 2;
         }},
