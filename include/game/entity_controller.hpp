@@ -285,12 +285,7 @@ private:
     /// Take the server's position for the player when the two have diverged
     /// beyond anything lag can explain. Does nothing in the ordinary case,
     /// where the client owns its position and the server echoes it back.
-    void resyncPlayerIfFarFromServer(const glm::vec3& serverCanonicalPos);
 
-    void applyPlayerTransportState(const UpdateBlock& block,
-                                    const std::shared_ptr<Entity>& entity,
-                                    const glm::vec3& canonicalPos, float oCanonical,
-                                    bool updateMovementInfoPos);
     // Apply unit fields during CREATE - returns true if entity is initially dead.
     bool applyUnitFieldsOnCreate(const UpdateBlock& block,
                                   std::shared_ptr<Unit>& unit,

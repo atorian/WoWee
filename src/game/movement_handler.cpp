@@ -3818,6 +3818,145 @@ void MovementHandler::updateFollowMovement(float deltaTime) {
 }
 
 // ============================================================
+// The server's word on where the player is
+// ============================================================
+
+void MovementHandler::resyncPlayerIfFarFromServer(const glm::vec3& serverCanonicalPos) {
+    // The client owns its own position and the server echoes it back, so these
+    // agree to within a step and this does nothing almost always. What it
+    // catches is the case where they stop agreeing at all.
+    //
+    // Only the orientation was ever taken from these blocks. The position went
+    // onto the player's entity and never into movementInfo, which is what the
+    // client moves by and sends - so once the two diverged there was no way
+    // back: the client kept walking from where it thought it was, the server
+    // kept answering about where it thought the player was, and a relog put
+    // the player wherever the server had them. Creatures arrive around the
+    // server's position, which is why none of them are where the player is
+    // standing.
+    //
+    // Far enough that ordinary lag cannot reach it: fifty yards is seven
+    // seconds of running. Snapping on a smaller gap would fight the client's
+    // own movement and rubber-band.
+    constexpr float kResyncDistance = 50.0f;
+    if (isOnTransport()) return;
+    if (isOnTaxiFlight()) return;
+    auto& mi = movementInfo;
+    const glm::vec3 clientPos(mi.x, mi.y, mi.z);
+    const float gap = glm::length(serverCanonicalPos - clientPos);
+    if (gap <= kResyncDistance) return;
+
+    LOG_WARNING("Player position desync: the server places the player ", gap,
+                " yards away, at canonical ", serverCanonicalPos.x, ", ",
+                serverCanonicalPos.y, ", ", serverCanonicalPos.z,
+                " rather than ", clientPos.x, ", ", clientPos.y, ", ",
+                clientPos.z, " - taking the server's");
+    mi.x = serverCanonicalPos.x;
+    mi.y = serverCanonicalPos.y;
+    mi.z = serverCanonicalPos.z;
+    events_.publish(events::PlayerPositionCorrected{
+        serverCanonicalPos.x, serverCanonicalPos.y, serverCanonicalPos.z});
+}
+
+//     Track player-on-transport state from movement blocks.
+//     Consolidates near-identical logic from CREATE and MOVEMENT handlers.
+//     When updateMovementInfoPos is true (MOVEMENT), movementInfo.x/y/z are set
+//     to the raw canonical position when not on a resolved transport.
+//     When false (CREATE), movementInfo is only set for resolved transport positions.
+std::optional<glm::vec3> MovementHandler::applyPlayerTransportState(const UpdateBlock& block,
+                                                                     const glm::vec3& canonicalPos,
+                                                                     bool updateMovementInfoPos) {
+    std::optional<glm::vec3> aboard;
+    // Reject server-pushed position corrections to near-origin on map 0.
+    // The server stores a corrupted position from a faulty area-trigger
+    // destination; accepting it lets heartbeats reinforce the bad save.
+    auto positionIsBad = [&](float x, float y, float z) {
+        return isCorruptOriginPosition(queries_.currentMapId(), x, y, z);
+    };
+
+    // What the server says about the player and transports, when it changes.
+    //
+    // The attach below is the only way a WMO transport ever picks the player
+    // up, and it is gated entirely on this flag. "The zeppelin leaves without
+    // me" is either this flag never arriving or the attach being refused
+    // underneath it, and neither said anything at all.
+    {
+        static uint32_t lastFlags = 0xFFFFFFFFu;
+        if (block.moveFlags != lastFlags) {
+            lastFlags = block.moveFlags;
+            LOG_WARNING("Player moveFlags=0x", std::hex, block.moveFlags, std::dec,
+                        " onTransport=", block.onTransport ? 1 : 0,
+                        " transportGuid=0x", std::hex, block.transportGuid, std::dec);
+        }
+    }
+
+    if (block.onTransport) {
+        // Convert transport offset from server → canonical coordinates
+        glm::vec3 serverOffset(block.transportX, block.transportY, block.transportZ);
+        glm::vec3 canonicalOffset = queries_.transports()
+            ? queries_.transports()->serverToTransportLocal(block.transportGuid, serverOffset)
+            : core::coords::serverToCanonical(serverOffset);
+        setPlayerOnTransport(block.transportGuid, canonicalOffset);
+        if (queries_.transports() && queries_.transports()->getTransport(getPlayerTransportGuid())) {
+            glm::vec3 composed = queries_.transports()->getPlayerWorldPosition(getPlayerTransportGuid(), getPlayerTransportOffset());
+            aboard = composed;
+            movementInfo.x = composed.x;
+            movementInfo.y = composed.y;
+            movementInfo.z = composed.z;
+        } else if (updateMovementInfoPos) {
+            if (positionIsBad(canonicalPos.x, canonicalPos.y, canonicalPos.z)) {
+                LOG_WARNING("REJECTED player UPDATE_OBJECT to near-origin canonical=(",
+                            canonicalPos.x, ", ", canonicalPos.y, ", ", canonicalPos.z, ")");
+            } else {
+                movementInfo.x = canonicalPos.x;
+                movementInfo.y = canonicalPos.y;
+                movementInfo.z = canonicalPos.z;
+            }
+        }
+        LOG_INFO("Player on transport: 0x", std::hex, getPlayerTransportGuid(), std::dec,
+                " offset=(", getPlayerTransportOffset().x, ", ", getPlayerTransportOffset().y,
+                ", ", getPlayerTransportOffset().z, ")");
+    } else {
+        if (updateMovementInfoPos) {
+            if (positionIsBad(canonicalPos.x, canonicalPos.y, canonicalPos.z)) {
+                LOG_WARNING("REJECTED player UPDATE_OBJECT to near-origin canonical=(",
+                            canonicalPos.x, ", ", canonicalPos.y, ", ", canonicalPos.z, ")");
+            } else {
+                movementInfo.x = canonicalPos.x;
+                movementInfo.y = canonicalPos.y;
+                movementInfo.z = canonicalPos.z;
+            }
+        }
+        // Don't clear client-detected transport boarding. The server does not know
+        // about locally animated M2 trams or TaxiPathNode WMO ships until our next
+        // movement heartbeat publishes the attachment.
+        bool isClientAnimatedTransport = false;
+        if (getPlayerTransportGuid() != 0 && queries_.transports()) {
+            auto* tr = queries_.transports()->getTransport(getPlayerTransportGuid());
+            // The same question the boarding check asks, asked the same way:
+            // these three used to spell the condition out separately and a
+            // rider admitted by one would be thrown off by another.
+            isClientAnimatedTransport = tr && tr->carriesRiders();
+        }
+        if (getPlayerTransportGuid() != 0 && !isClientAnimatedTransport) {
+            LOG_INFO("Player left transport");
+            clearPlayerTransport();
+        }
+    }
+    return aboard;
+}
+
+std::optional<glm::vec3> MovementHandler::serverPlacedPlayer(const UpdateBlock& block,
+                                                             const glm::vec3& canonicalPos,
+                                                             float canonicalOrientation,
+                                                             bool movementUpdate) {
+    if (!movementUpdate) return applyPlayerTransportState(block, canonicalPos, false);
+    movementInfo.orientation = canonicalOrientation;
+    resyncPlayerIfFarFromServer(canonicalPos);
+    return applyPlayerTransportState(block, canonicalPos, true);
+}
+
+// ============================================================
 // The player's transport
 // ============================================================
 

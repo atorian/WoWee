@@ -164,6 +164,15 @@ public:
         bool hasLocalOrientation = false;
         bool offsetNeedsTransportResolution = false;
     };
+    /// The server's own word on where the player is: a MOVEMENT block
+    /// (`movementUpdate`), which also turns the player and catches a client
+    /// that has drifted far from it, or the movement part of the player's
+    /// create block. Says whether the player rides a transport. Returns the
+    /// player's world position when they ride one this client has placed,
+    /// for the player's entity.
+    std::optional<glm::vec3> serverPlacedPlayer(const UpdateBlock& block, const glm::vec3& canonicalPos,
+                                                float canonicalOrientation, bool movementUpdate);
+
     // --- The player's transport ---
     [[nodiscard]] bool isOnTransport() const { return playerTransportGuid_ != 0; }
     [[nodiscard]] uint64_t getPlayerTransportGuid() const { return playerTransportGuid_; }
@@ -358,6 +367,16 @@ public:
     void handleForceMoveFlagChange(network::Packet& packet, const char* name, Opcode ackOpcode, uint32_t flag, bool set);
     void handleMoveSetCollisionHeight(network::Packet& packet);
     void applyTaxiMountForCurrentNode();
+
+private:
+    //     Track player-on-transport state from movement blocks: the CREATE and
+    //     MOVEMENT paths share it. With updateMovementInfoPos (MOVEMENT) the
+    //     player's position is taken from the block when they are not on a
+    //     placed transport; without it (CREATE) only a placed transport's
+    //     composed position is.
+    std::optional<glm::vec3> applyPlayerTransportState(const UpdateBlock& block, const glm::vec3& canonicalPos,
+                                                       bool updateMovementInfoPos);
+    void resyncPlayerIfFarFromServer(const glm::vec3& serverCanonicalPos);
 
 private:
     // --- Packet handlers ---

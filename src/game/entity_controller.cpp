@@ -677,93 +677,6 @@ std::shared_ptr<Entity> EntityController::createEntityFromBlock(const UpdateBloc
     }
 }
 
-//     Track player-on-transport state from movement blocks.
-//     Consolidates near-identical logic from CREATE and MOVEMENT handlers.
-//     When updateMovementInfoPos is true (MOVEMENT), movementInfo.x/y/z are set
-//     to the raw canonical position when not on a resolved transport.
-//     When false (CREATE), movementInfo is only set for resolved transport positions.
-void EntityController::applyPlayerTransportState(const UpdateBlock& block,
-                                                   const std::shared_ptr<Entity>& entity,
-                                                   const glm::vec3& canonicalPos, float oCanonical,
-                                                   bool updateMovementInfoPos) {
-    // Reject server-pushed position corrections to near-origin on map 0.
-    // The server stores a corrupted position from a faulty area-trigger
-    // destination; accepting it lets heartbeats reinforce the bad save.
-    auto positionIsBad = [&](float x, float y, float z) {
-        return isCorruptOriginPosition(owner_.getCurrentMapId(), x, y, z);
-    };
-
-    // What the server says about the player and transports, when it changes.
-    //
-    // The attach below is the only way a WMO transport ever picks the player
-    // up, and it is gated entirely on this flag. "The zeppelin leaves without
-    // me" is either this flag never arriving or the attach being refused
-    // underneath it, and neither said anything at all.
-    {
-        static uint32_t lastFlags = 0xFFFFFFFFu;
-        if (block.moveFlags != lastFlags) {
-            lastFlags = block.moveFlags;
-            LOG_WARNING("Player moveFlags=0x", std::hex, block.moveFlags, std::dec,
-                        " onTransport=", block.onTransport ? 1 : 0,
-                        " transportGuid=0x", std::hex, block.transportGuid, std::dec);
-        }
-    }
-
-    if (block.onTransport) {
-        // Convert transport offset from server → canonical coordinates
-        glm::vec3 serverOffset(block.transportX, block.transportY, block.transportZ);
-        glm::vec3 canonicalOffset = owner_.getTransportManager()
-            ? owner_.getTransportManager()->serverToTransportLocal(block.transportGuid, serverOffset)
-            : core::coords::serverToCanonical(serverOffset);
-        owner_.movement().setPlayerOnTransport(block.transportGuid, canonicalOffset);
-        if (owner_.getTransportManager() && owner_.getTransportManager()->getTransport(owner_.movement().getPlayerTransportGuid())) {
-            glm::vec3 composed = owner_.getTransportManager()->getPlayerWorldPosition(owner_.movement().getPlayerTransportGuid(), owner_.movement().getPlayerTransportOffset());
-            entity->setPosition(composed.x, composed.y, composed.z, oCanonical);
-            owner_.movementInfoRef().x = composed.x;
-            owner_.movementInfoRef().y = composed.y;
-            owner_.movementInfoRef().z = composed.z;
-        } else if (updateMovementInfoPos) {
-            if (positionIsBad(canonicalPos.x, canonicalPos.y, canonicalPos.z)) {
-                LOG_WARNING("REJECTED player UPDATE_OBJECT to near-origin canonical=(",
-                            canonicalPos.x, ", ", canonicalPos.y, ", ", canonicalPos.z, ")");
-            } else {
-                owner_.movementInfoRef().x = canonicalPos.x;
-                owner_.movementInfoRef().y = canonicalPos.y;
-                owner_.movementInfoRef().z = canonicalPos.z;
-            }
-        }
-        LOG_INFO("Player on transport: 0x", std::hex, owner_.movement().getPlayerTransportGuid(), std::dec,
-                " offset=(", owner_.movement().getPlayerTransportOffset().x, ", ", owner_.movement().getPlayerTransportOffset().y,
-                ", ", owner_.movement().getPlayerTransportOffset().z, ")");
-    } else {
-        if (updateMovementInfoPos) {
-            if (positionIsBad(canonicalPos.x, canonicalPos.y, canonicalPos.z)) {
-                LOG_WARNING("REJECTED player UPDATE_OBJECT to near-origin canonical=(",
-                            canonicalPos.x, ", ", canonicalPos.y, ", ", canonicalPos.z, ")");
-            } else {
-                owner_.movementInfoRef().x = canonicalPos.x;
-                owner_.movementInfoRef().y = canonicalPos.y;
-                owner_.movementInfoRef().z = canonicalPos.z;
-            }
-        }
-        // Don't clear client-detected transport boarding. The server does not know
-        // about locally animated M2 trams or TaxiPathNode WMO ships until our next
-        // movement heartbeat publishes the attachment.
-        bool isClientAnimatedTransport = false;
-        if (owner_.movement().getPlayerTransportGuid() != 0 && owner_.getTransportManager()) {
-            auto* tr = owner_.getTransportManager()->getTransport(owner_.movement().getPlayerTransportGuid());
-            // The same question the boarding check asks, asked the same way:
-            // these three used to spell the condition out separately and a
-            // rider admitted by one would be thrown off by another.
-            isClientAnimatedTransport = tr && tr->carriesRiders();
-        }
-        if (owner_.movement().getPlayerTransportGuid() != 0 && !isClientAnimatedTransport) {
-            LOG_INFO("Player left transport");
-            owner_.movement().clearPlayerTransport();
-        }
-    }
-}
-
 //     Apply unit fields during CREATE - sets health/power/level/flags/displayId/etc.
 //     Returns true if the entity is initially dead (health=0 or DYNFLAG_DEAD).
 bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
@@ -2226,43 +2139,6 @@ void EntityController::applyTransportRouteClock(const UpdateBlock& block) {
 // Update type handlers
 // ============================================================
 
-void EntityController::resyncPlayerIfFarFromServer(const glm::vec3& serverCanonicalPos) {
-    // The client owns its own position and the server echoes it back, so these
-    // agree to within a step and this does nothing almost always. What it
-    // catches is the case where they stop agreeing at all.
-    //
-    // Only the orientation was ever taken from these blocks. The position went
-    // onto the player's entity and never into movementInfo, which is what the
-    // client moves by and sends - so once the two diverged there was no way
-    // back: the client kept walking from where it thought it was, the server
-    // kept answering about where it thought the player was, and a relog put
-    // the player wherever the server had them. Creatures arrive around the
-    // server's position, which is why none of them are where the player is
-    // standing.
-    //
-    // Far enough that ordinary lag cannot reach it: fifty yards is seven
-    // seconds of running. Snapping on a smaller gap would fight the client's
-    // own movement and rubber-band.
-    constexpr float kResyncDistance = 50.0f;
-    if (owner_.movement().isOnTransport()) return;
-    if (owner_.movement().isOnTaxiFlight()) return;
-    auto& mi = owner_.movementInfoRef();
-    const glm::vec3 clientPos(mi.x, mi.y, mi.z);
-    const float gap = glm::length(serverCanonicalPos - clientPos);
-    if (gap <= kResyncDistance) return;
-
-    LOG_WARNING("Player position desync: the server places the player ", gap,
-                " yards away, at canonical ", serverCanonicalPos.x, ", ",
-                serverCanonicalPos.y, ", ", serverCanonicalPos.z,
-                " rather than ", clientPos.x, ", ", clientPos.y, ", ",
-                clientPos.z, " - taking the server's");
-    mi.x = serverCanonicalPos.x;
-    mi.y = serverCanonicalPos.y;
-    mi.z = serverCanonicalPos.z;
-    owner_.eventBus().publish(events::PlayerPositionCorrected{
-        serverCanonicalPos.x, serverCanonicalPos.y, serverCanonicalPos.z});
-}
-
 void EntityController::handleCreateObject(const UpdateBlock& block, bool& newItemCreated) {
     trackActiveCritter(block);
     pendingEvents_.clear();
@@ -2285,7 +2161,8 @@ void EntityController::handleCreateObject(const UpdateBlock& block, bool& newIte
         }
         // 3b: Track player-on-transport state
         if (block.guid == owner_.getPlayerGuid()) {
-            applyPlayerTransportState(block, entity, pos, oCanonical, false);
+            if (auto aboard = owner_.movement().serverPlacedPlayer(block, pos, oCanonical, false))
+                entity->setPosition(aboard->x, aboard->y, aboard->z, oCanonical);
         }
         // 3i: Track transport-relative children so they follow parent transport motion.
         updateNonPlayerTransportAttachment(block, entity, block.objectType);
@@ -2364,9 +2241,8 @@ void EntityController::handleMovementUpdate(const UpdateBlock& block) {
 
                 // 3b: Track player-on-transport state from MOVEMENT updates
                 if (block.guid == owner_.getPlayerGuid()) {
-                    owner_.movementInfoRef().orientation = oCanonical;
-                    resyncPlayerIfFarFromServer(pos);
-                    applyPlayerTransportState(block, entity, pos, oCanonical, true);
+                    if (auto aboard = owner_.movement().serverPlacedPlayer(block, pos, oCanonical, true))
+                        entity->setPosition(aboard->x, aboard->y, aboard->z, oCanonical);
                 }
 
                 // Fire transport move callback if this is a known transport

@@ -193,3 +193,36 @@ TEST_CASE("a resurrection on the same map brings the player back where they are,
     CHECK(h.game().getEntityManager().hasEntity(0xC002));
     CHECK(h.countSent(Opcode::MSG_MOVE_WORLDPORT_ACK) == 1);
 }
+
+TEST_CASE("the server's position wins when it puts the player far from where the client thinks",
+          "[movement][harness]") {
+    GameHarness h;
+    enterWorldAsEntity(h);
+    std::vector<ev::PlayerPositionCorrected> corrected;
+    auto sub = h.events().subscribe<ev::PlayerPositionCorrected>(
+        [&](const ev::PlayerPositionCorrected& e) { corrected.push_back(e); });
+    auto serverPuts = [&](float canonicalX, float canonicalY, float z) {
+        UpdateBlock self{};
+        self.guid = h.player().guid;
+        self.objectType = ObjectType::PLAYER;
+        self.updateType = UpdateType::MOVEMENT;
+        self.hasMovement = true;
+        // Server x is canonical y (west), server y canonical x (north).
+        self.x = canonicalY; self.y = canonicalX; self.z = z;
+        UpdateObjectData batch{};
+        batch.blocks.push_back(self);
+        h.game().entityController().applyRecordedObjects(batch);
+    };
+    const auto me = h.game().getMovementInfo();
+
+    // A step away is lag, and the client's own movement stands.
+    serverPuts(me.x + 3.0f, me.y, me.z);
+    CHECK(corrected.empty());
+
+    // Two hundred yards is not lag.
+    serverPuts(me.x + 200.0f, me.y, me.z);
+    REQUIRE(corrected.size() == 1);
+    CHECK(corrected[0].x == me.x + 200.0f);
+    CHECK(corrected[0].y == me.y);
+    CHECK(h.game().getMovementInfo().x == me.x + 200.0f);
+}
