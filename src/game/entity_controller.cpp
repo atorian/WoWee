@@ -705,10 +705,6 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
                  block.objectType == ObjectType::PLAYER) && val == 0) {
                 unitInitiallyDead = true;
             }
-            if (block.guid == owner_.getPlayerGuid() && val == 0) {
-                owner_.combat().playerLoggedInDead();
-                LOG_INFO("Player logged in dead");
-            }
         } else if (key == ufi.maxHealth) {
             unit->setMaxHealth(val);
             emitForUnit("UNIT_MAXHEALTH");
@@ -825,31 +821,13 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
         if (key == ufi.health) {
             unit->setHealth(val);
             result.healthChanged = true;
+            owner_.combat().unitHealthArrived(block.guid, oldHealth, val, pendingEvents_);
             if (val == 0) {
-                if (block.guid == owner_.combat().getAutoAttackTargetGuid()) {
-                    owner_.stopAutoAttack();
-                }
-                owner_.combat().removeHostileAttacker(block.guid);
-                if (block.guid == owner_.getPlayerGuid()) {
-                    owner_.combat().playerDied("health=0");
-                    owner_.stopAutoAttack();
-                    pendingEvents_.emit("PLAYER_DEAD", {});
-                }
                 if (entity->getType() == ObjectType::UNIT || entity->getType() == ObjectType::PLAYER) {
                     owner_.eventBus().publish(events::UnitDied{block.guid});
                     result.npcDeathNotified = true;
                 }
             } else if (oldHealth == 0 && val > 0) {
-                if (block.guid == owner_.getPlayerGuid()) {
-                    const bool wasGhost = owner_.combat().playerHealthReturned();
-                    if (!wasGhost) {
-                        LOG_INFO("Player resurrected!");
-                        pendingEvents_.emit("PLAYER_ALIVE", {});
-                    } else {
-                        LOG_INFO("Player entered ghost form");
-                        pendingEvents_.emit("PLAYER_UNGHOST", {});
-                    }
-                }
                 if (entity->getType() == ObjectType::UNIT || entity->getType() == ObjectType::PLAYER) {
                     owner_.eventBus().publish(events::UnitRespawned{block.guid});
                     result.npcRespawnNotified = true;
@@ -948,32 +926,7 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             uint32_t oldDyn = unit->getDynamicFlags();
             unit->setDynamicFlags(val);
             if (block.guid == owner_.getPlayerGuid()) {
-                bool wasDead = (oldDyn & UNIT_DYNFLAG_DEAD) != 0;
-                bool nowDead = (val & UNIT_DYNFLAG_DEAD) != 0;
-                if (!wasDead && nowDead) {
-                    owner_.combat().playerDied("dynFlags");
-                    // And tell the interface, which the health=0 path did and
-                    // this one did not. The server marks a death either way -
-                    // sometimes by dropping health to zero, sometimes by
-                    // setting UNIT_DYNFLAG_DEAD, and not always both - and only
-                    // the health path fired PLAYER_DEAD. When death came by the
-                    // flag alone, the player was dead in every internal sense
-                    // (could not attack, health read zero) but the interface
-                    // never heard it: no release-spirit popup, until the server
-                    // gave up waiting and pulled the corpse to the graveyard.
-                    // FrameXML guards the popup on its own visibility, so a
-                    // second PLAYER_DEAD from the health path is harmless.
-                    owner_.stopAutoAttack();
-                    pendingEvents_.emit("PLAYER_DEAD", {});
-                } else if (wasDead && !nowDead) {
-                    owner_.combat().playerAliveAgain();
-                    LOG_INFO("Player resurrected (dynamic flags)");
-                    // The other side of the same signal. PLAYER_ALIVE is what
-                    // hides the death popup and restores the interface, and
-                    // firing PLAYER_DEAD without ever firing this left the
-                    // popup up through a resurrection that came by the flag.
-                    pendingEvents_.emit("PLAYER_ALIVE", {});
-                }
+                owner_.combat().playerDynamicFlagsArrived(oldDyn, val, pendingEvents_);
             } else if (entity->getType() == ObjectType::UNIT || entity->getType() == ObjectType::PLAYER) {
                 bool wasDead = (oldDyn & UNIT_DYNFLAG_DEAD) != 0;
                 bool nowDead = (val & UNIT_DYNFLAG_DEAD) != 0;
@@ -1292,26 +1245,8 @@ void EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
                          ", cloak ", cloak ? "shown" : "hidden");
             }
           }
+          owner_.combat().playerFlagsArrived(val, pendingEvents_);
           {
-            // Not gated on !isCreate, and that is the whole of a bug: logging
-            // in already dead delivers the player as a CREATE block, so the
-            // ghost flag it carries was never read. releasedSpirit_ stayed
-            // false, canReclaimCorpse refused, and a player who logged in
-            // standing on their own corpse could not take it back - the one
-            // case where the flag arrives without a transition to notice.
-            constexpr uint32_t PLAYER_FLAGS_GHOST = 0x00000010;
-            bool wasGhost = owner_.combat().isPlayerGhost();
-            bool nowGhost = (val & PLAYER_FLAGS_GHOST) != 0;
-            if (!wasGhost && nowGhost) {
-                owner_.combat().spiritReleased();
-                LOG_INFO("Player entered ghost form (PLAYER_FLAGS)");
-                owner_.eventBus().publish(events::GhostStateChanged{true});
-            } else if (wasGhost && !nowGhost) {
-                owner_.combat().resurrectedFromGhost();
-                LOG_INFO("Player resurrected (PLAYER_FLAGS ghost cleared)");
-                pendingEvents_.emit("PLAYER_ALIVE", {});
-                owner_.eventBus().publish(events::GhostStateChanged{false});
-            }
             // Which unit's flags, because that is the only thing the
             // handlers do with it: TargetFrame compares arg1 against its
             // own unit before redrawing the away and busy markers, so an
@@ -1689,25 +1624,14 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
             movement.applyTaxiMountForCurrentNode();
         }
     }
-    if (block.guid == owner_.getPlayerGuid() &&
-        (unit->getDynamicFlags() & UNIT_DYNFLAG_DEAD) != 0) {
-        owner_.combat().playerLoggedInDead();
-        LOG_INFO("Player logged in dead (dynamic flags)");
-    }
-    // Detect ghost state on login via PLAYER_FLAGS
     if (block.guid == owner_.getPlayerGuid()) {
-        constexpr uint32_t PLAYER_FLAGS_GHOST = 0x00000010;
-        auto pfIt = block.fields.find(fieldIndex(UF::PLAYER_FLAGS));
-        if (pfIt != block.fields.end() && (pfIt->second & PLAYER_FLAGS_GHOST) != 0) {
-            owner_.combat().playerLoggedInAsGhost();
-            LOG_INFO("Player logged in as ghost (PLAYER_FLAGS)");
-            owner_.eventBus().publish(events::GhostStateChanged{true});
-            // Query corpse position so minimap marker is accurate on reconnect
-            if (owner_.getSocket()) {
-                network::Packet cq(wireOpcode(Opcode::MSG_CORPSE_QUERY));
-                owner_.getSocket()->send(cq);
-            }
-        }
+        const auto field = [&](UF f) -> std::optional<uint32_t> {
+            auto it = block.fields.find(fieldIndex(f));
+            if (it == block.fields.end()) return std::nullopt;
+            return it->second;
+        };
+        owner_.combat().playerCreated(field(UF::UNIT_FIELD_HEALTH), unit->getDynamicFlags(),
+                                      field(UF::PLAYER_FLAGS));
     }
     // Pre-WotLK aura sync on initial object create
     if (block.guid == owner_.getPlayerGuid()) {

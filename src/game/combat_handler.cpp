@@ -1947,6 +1947,101 @@ bool CombatHandler::getCorpseCanonicalPos(float& outX, float& outY) const {
     return true;
 }
 
+void CombatHandler::unitHealthArrived(uint64_t guid, uint32_t previous, uint32_t health,
+                                      FrameXmlEvents& packetEvents) {
+    if (health == 0) {
+        if (guid == getAutoAttackTargetGuid()) stopAutoAttack();
+        removeHostileAttacker(guid);
+        if (guid == queries_.characterGuid()) {
+            playerDied("health=0");
+            stopAutoAttack();
+            packetEvents.fireFrameXmlEvent("PLAYER_DEAD", {});
+        }
+    } else if (previous == 0 && guid == queries_.characterGuid()) {
+        if (!playerHealthReturned()) {
+            LOG_INFO("Player resurrected!");
+            packetEvents.fireFrameXmlEvent("PLAYER_ALIVE", {});
+        } else {
+            LOG_INFO("Player entered ghost form");
+            packetEvents.fireFrameXmlEvent("PLAYER_UNGHOST", {});
+        }
+    }
+}
+
+void CombatHandler::playerDynamicFlagsArrived(uint32_t previous, uint32_t flags,
+                                              FrameXmlEvents& packetEvents) {
+    const bool wasDead = (previous & UNIT_DYNFLAG_DEAD) != 0;
+    const bool nowDead = (flags & UNIT_DYNFLAG_DEAD) != 0;
+    if (!wasDead && nowDead) {
+        playerDied("dynFlags");
+        // And tell the interface, which the health=0 path did and this one
+        // did not. The server marks a death either way - sometimes by
+        // dropping health to zero, sometimes by setting UNIT_DYNFLAG_DEAD, and
+        // not always both - and only the health path fired PLAYER_DEAD. When
+        // death came by the flag alone, the player was dead in every internal
+        // sense (could not attack, health read zero) but the interface never
+        // heard it: no release-spirit popup, until the server gave up waiting
+        // and pulled the corpse to the graveyard. FrameXML guards the popup on
+        // its own visibility, so a second PLAYER_DEAD from the health path is
+        // harmless.
+        stopAutoAttack();
+        packetEvents.fireFrameXmlEvent("PLAYER_DEAD", {});
+    } else if (wasDead && !nowDead) {
+        playerAliveAgain();
+        LOG_INFO("Player resurrected (dynamic flags)");
+        // The other side of the same signal. PLAYER_ALIVE is what hides the
+        // death popup and restores the interface, and firing PLAYER_DEAD
+        // without ever firing this left the popup up through a resurrection
+        // that came by the flag.
+        packetEvents.fireFrameXmlEvent("PLAYER_ALIVE", {});
+    }
+}
+
+void CombatHandler::playerFlagsArrived(uint32_t flags, FrameXmlEvents& packetEvents) {
+    // Not gated on an update, and that is the whole of a bug: logging in
+    // already dead delivers the player as a CREATE block, so the ghost flag it
+    // carries was never read. The ghost flag stayed false, canReclaimCorpse
+    // refused, and a player who logged in standing on their own corpse could
+    // not take it back - the one case where the flag arrives without a
+    // transition to notice.
+    constexpr uint32_t PLAYER_FLAGS_GHOST = 0x00000010;
+    const bool wasGhost = isPlayerGhost();
+    const bool nowGhost = (flags & PLAYER_FLAGS_GHOST) != 0;
+    if (!wasGhost && nowGhost) {
+        spiritReleased();
+        LOG_INFO("Player entered ghost form (PLAYER_FLAGS)");
+        events_.publish(events::GhostStateChanged{true});
+    } else if (wasGhost && !nowGhost) {
+        resurrectedFromGhost();
+        LOG_INFO("Player resurrected (PLAYER_FLAGS ghost cleared)");
+        packetEvents.fireFrameXmlEvent("PLAYER_ALIVE", {});
+        events_.publish(events::GhostStateChanged{false});
+    }
+}
+
+void CombatHandler::playerCreated(std::optional<uint32_t> health, uint32_t dynamicFlags,
+                                  std::optional<uint32_t> playerFlags) {
+    if (health && *health == 0) {
+        playerLoggedInDead();
+        LOG_INFO("Player logged in dead");
+    }
+    if ((dynamicFlags & UNIT_DYNFLAG_DEAD) != 0) {
+        playerLoggedInDead();
+        LOG_INFO("Player logged in dead (dynamic flags)");
+    }
+    constexpr uint32_t PLAYER_FLAGS_GHOST = 0x00000010;
+    if (playerFlags && (*playerFlags & PLAYER_FLAGS_GHOST) != 0) {
+        playerLoggedInAsGhost();
+        LOG_INFO("Player logged in as ghost (PLAYER_FLAGS)");
+        events_.publish(events::GhostStateChanged{true});
+        // Ask where the corpse is, so the minimap marker is right on reconnect.
+        if (sender_.connected()) {
+            network::Packet cq(wireOpcode(Opcode::MSG_CORPSE_QUERY));
+            sender_.send(cq);
+        }
+    }
+}
+
 void CombatHandler::playerLoggedInDead() {
     death_.dead = true;
 }
