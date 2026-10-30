@@ -269,6 +269,8 @@ public:
     bool gameObjectLootOpened(uint64_t lootGuid) override;
     bool npcDialogOpen() const override;
     bool questWantsItem(uint32_t itemId) const override;
+    bool actionBarHoldsItem() const override;
+    void coinageFieldFoundAt(uint16_t index) override;
     // cancelCast, dismount, closeGossip and runInterfaceCommand are
     // InventoryQueries' too, declared with the rest of their kind below.
 

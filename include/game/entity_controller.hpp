@@ -1,5 +1,7 @@
 #pragma once
 
+#include "game/frame_xml_events.hpp"
+
 #include "game/world_packet_data.hpp"
 #include "game/entity.hpp"
 #include "game/opcode_table.hpp"
@@ -200,8 +202,6 @@ public:
                              uint32_t& outAppearanceBytes, uint8_t& outFacial) const;
 
 private:
-    void maybeDetectCoinageIndex(const FlatFieldMap& oldFields,
-                                 const FlatFieldMap& newFields);
 
     void handleCreateObject(const UpdateBlock& block, bool& newItemCreated);
     void handleValuesUpdate(const UpdateBlock& block);
@@ -302,7 +302,7 @@ private:
                                                     std::shared_ptr<Unit>& unit,
                                                     const UnitFieldIndices& ufi);
     // Apply player stat fields (XP, inventory, skills, etc.). isCreate=true for CREATE path.
-    bool applyPlayerStatFields(const FlatFieldMap& fields,
+    void applyPlayerStatFields(const FlatFieldMap& fields,
                                 const PlayerFieldIndices& pfi, bool isCreate);
     // Dispatch spawn callbacks (creature/player) - deduplicates CREATE and VALUES paths.
     void dispatchEntitySpawn(uint64_t guid, ObjectType objectType,
@@ -352,13 +352,20 @@ private:
     void onValuesUpdateItem(const UpdateBlock& block, std::shared_ptr<Entity>& entity);
     void onValuesUpdateGameObject(const UpdateBlock& block, std::shared_ptr<Entity>& entity);
 
-    // Collects addon events during block processing, flushes at the end.
-    struct PendingEvents {
+    // Collects addon events during block processing, flushes at the end. The
+    // owners a packet's fields are handed to raise theirs here too, so they
+    // reach the interface in the order they happened.
+    struct PendingEvents final : FrameXmlEvents {
         std::vector<std::pair<std::string, std::vector<std::string>>> events;
         void emit(const std::string& name, const std::vector<std::string>& args = {}) {
             events.emplace_back(name, args);
         }
         void clear() { events.clear(); }
+        void fireFrameXmlEvent(const std::string& name, const std::vector<std::string>& args) override {
+            emit(name, args);
+        }
+        // Queued: the flush drops them when no interface is listening.
+        [[nodiscard]] bool frameXmlListening() const override { return true; }
     };
     PendingEvents pendingEvents_;
     void flushPendingEvents();

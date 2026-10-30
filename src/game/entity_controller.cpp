@@ -399,46 +399,6 @@ bool EntityController::extractPlayerAppearance(const FlatFieldMap& fields,
     return true;
 }
 
-void EntityController::maybeDetectCoinageIndex(const FlatFieldMap& oldFields,
-                                               const FlatFieldMap& newFields) {
-    const uint32_t expectedDelta = owner_.inventory().expectedMoneyDelta();
-    if (expectedDelta == 0) return;
-    if (oldFields.empty() || newFields.empty()) return;
-
-    constexpr uint32_t kMaxPlausibleCoinage = 2147483647u;
-    std::vector<uint16_t> candidates;
-    candidates.reserve(8);
-
-    for (const auto& [idx, newVal] : newFields) {
-        auto itOld = oldFields.find(idx);
-        if (itOld == oldFields.end()) continue;
-        uint32_t oldVal = itOld->second;
-        if (newVal < oldVal) continue;
-        uint32_t delta = newVal - oldVal;
-        if (delta != expectedDelta) continue;
-        if (newVal > kMaxPlausibleCoinage) continue;
-        candidates.push_back(idx);
-    }
-
-    if (candidates.empty()) return;
-
-    uint16_t current = fieldIndex(UF::PLAYER_FIELD_COINAGE);
-    uint16_t chosen = candidates[0];
-    if (std::find(candidates.begin(), candidates.end(), current) != candidates.end()) {
-        chosen = current;
-    } else {
-        std::sort(candidates.begin(), candidates.end());
-        chosen = candidates[0];
-    }
-
-    if (chosen != current && current != 0xFFFF) {
-        owner_.updateFieldTableRef().setIndex(UF::PLAYER_FIELD_COINAGE, chosen);
-        LOG_WARNING("Auto-detected PLAYER_FIELD_COINAGE index: ", chosen, " (was ", current, ")");
-    }
-
-    owner_.inventory().clearExpectedMoneyDelta();
-}
-
 // ============================================================
 // Update type dispatch
 // ============================================================
@@ -1346,10 +1306,9 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
 
 //     Apply player stat fields (XP, coinage, combat stats, etc.).
 //     Shared between CREATE and VALUES - isCreate controls event firing differences.
-bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
+void EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
                                                const PlayerFieldIndices& pfi,
                                                bool isCreate) {
-    bool slotsChanged = false;
     // Whether anything the character sheet prints actually moved. The sheet
     // refreshes on events, not on a timer, so a stat that changes without one
     // being fired leaves the panel showing the old number until something else
@@ -1384,10 +1343,7 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
             }
         }
         else if (key == pfi.coinage) {
-            const bool moneyChanged = owner_.inventory().setMoneyFromFields(val);
-            LOG_DEBUG("Money ", isCreate ? "set from update fields: " : "updated via VALUES: ", val, " copper");
-            if (moneyChanged)
-                pendingEvents_.emit("PLAYER_MONEY", {});
+            owner_.inventory().moneyFieldArrived(val, pendingEvents_);
         }
         else if (pfi.honor != 0xFFFF && key == pfi.honor) {
             owner_.playerHonorPointsRef() = val;
@@ -1591,7 +1547,6 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
         // Slot layouts differ on some classic-family realms and can produce
         // phantom "already accepted" quests that block quest acceptance.
     }
-    if (owner_.inventory().applyInventoryFields(fields)) slotsChanged = true;
 
     // Announced only on an update, never on the create block: at create the
     // sheet has not been built yet, and every field looks like a change.
@@ -1629,7 +1584,6 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
         if (resistancesChanged) pendingEvents_.emit("UNIT_RESISTANCES", {"player"});
         if (spellBonusChanged)  pendingEvents_.emit("PLAYER_DAMAGE_DONE_MODS", {"player"});
     }
-    return slotsChanged;
 }
 
 //     Dispatch entity spawn callbacks for units/players.
@@ -1750,48 +1704,8 @@ void EntityController::trackItemOnCreate(const UpdateBlock& block, bool& newItem
 // Update item stack count / durability / enchants for existing items during VALUES.
 void EntityController::updateItemOnValuesUpdate(const UpdateBlock& block,
                                                   const std::shared_ptr<Entity>& entity) {
-    // The inventory reads the fields; what changed decides the events here,
-    // which go out with the rest of the packet's.
-    const auto change = owner_.inventory().updateItemObject(
-        block.guid, entity && entity->getType() == ObjectType::CONTAINER, block.fields);
-    const bool inventoryChanged = change.inventory;
-    // Apart from inventoryChanged so the durability events fire on a
-    // durability change and not on every stack count that moves.
-    const bool durabilityChanged = change.durability;
-    if (inventoryChanged) {
-        owner_.inventory().rebuildOnlineInventory();
-        // One per bag: the interface redraws only the bag whose id matches
-        // the event's argument.
-        for (int bag = 0; bag <= 4; ++bag) {
-            pendingEvents_.emit("BAG_UPDATE", {std::to_string(bag)});
-        }
-        LOG_WARNING("BAG_UPDATE fired for bags 0-4 (inventory fields changed)");
-        pendingEvents_.emit("UNIT_INVENTORY_CHANGED", {"player"});
-        // An item on the action bar shows how many are left, and nothing in
-        // FrameXML recomputes that from a bag change: ActionButton_UpdateCount
-        // runs only from ActionButton_Update, which BAG_UPDATE does not reach.
-        // So a stack of bandages went down and the bar kept the number it had
-        // when the button was last drawn - usually the count at login.
-        //
-        // Slot zero means every button, which is what the interface reads it
-        // as. Only sent when something on the bar is an item, so a bag change
-        // does not rebuild a hundred and twenty buttons for nothing.
-        for (const auto& action : owner_.actionBar().slots()) {
-            if (action.type == ActionBarSlot::ITEM && action.id != 0) {
-                pendingEvents_.emit("ACTIONBAR_SLOT_CHANGED", {"0"});
-                break;
-            }
-        }
-    }
-    if (durabilityChanged) {
-        // The armour indicator is DurabilityFrame, which listens for
-        // UPDATE_INVENTORY_ALERTS; the merchant's repair buttons listen for
-        // UPDATE_INVENTORY_DURABILITY. Neither was fired anywhere but at world
-        // entry, so the indicator showed the durability the player logged in
-        // with -- a repair changed nothing on screen, and neither did damage.
-        pendingEvents_.emit("UPDATE_INVENTORY_ALERTS", {});
-        pendingEvents_.emit("UPDATE_INVENTORY_DURABILITY", {});
-    }
+    owner_.inventory().itemObjectChanged(
+        block.guid, entity && entity->getType() == ObjectType::CONTAINER, block.fields, pendingEvents_);
 }
 
 // ============================================================
@@ -1969,7 +1883,7 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
     // Player stat fields (self only)
     if (block.guid == owner_.getPlayerGuid()) {
         // Auto-detect coinage index using the previous snapshot vs this full snapshot.
-        maybeDetectCoinageIndex(owner_.lastPlayerFieldsRef(), block.fields);
+        owner_.inventory().detectCoinageField(owner_.lastPlayerFieldsRef(), block.fields);
 
         owner_.lastPlayerFieldsRef() = block.fields;
         owner_.inventory().detectInventorySlotBases(block.fields);
@@ -1984,8 +1898,8 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
         }
 
         PlayerFieldIndices pfi = PlayerFieldIndices::resolve();
-        bool slotsChanged = applyPlayerStatFields(block.fields, pfi, true);
-        if (slotsChanged) owner_.inventory().rebuildOnlineInventory();
+        applyPlayerStatFields(block.fields, pfi, true);
+        owner_.inventory().inventoryFieldsArrived(block.fields, true, pendingEvents_);
         owner_.inventory().maybeDetectVisibleItemLayout();
         owner_.spells().extractSkillFields(owner_.lastPlayerFieldsRef());
         owner_.spells().extractExploredZoneFields(owner_.lastPlayerFieldsRef());
@@ -2263,17 +2177,14 @@ void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::share
             owner_.lastPlayerFieldsRef().insert_or_assign(key, val);
         }
         if (needCoinageDetectSnapshot) {
-            maybeDetectCoinageIndex(oldFieldsSnapshot, owner_.lastPlayerFieldsRef());
+            owner_.inventory().detectCoinageField(oldFieldsSnapshot, owner_.lastPlayerFieldsRef());
         }
         owner_.inventory().maybeDetectVisibleItemLayout();
         owner_.inventory().detectInventorySlotBases(block.fields);
 
         PlayerFieldIndices pfi = PlayerFieldIndices::resolve();
-        bool slotsChanged = applyPlayerStatFields(block.fields, pfi, false);
-        if (slotsChanged) {
-            owner_.inventory().rebuildOnlineInventory();
-            pendingEvents_.emit("PLAYER_EQUIPMENT_CHANGED", {});
-        }
+        applyPlayerStatFields(block.fields, pfi, false);
+        owner_.inventory().inventoryFieldsArrived(block.fields, false, pendingEvents_);
         owner_.spells().extractSkillFields(owner_.lastPlayerFieldsRef());
         owner_.spells().extractExploredZoneFields(owner_.lastPlayerFieldsRef());
         owner_.quests().applyQuestStateFromFields(owner_.lastPlayerFieldsRef());
@@ -2555,23 +2466,7 @@ void EntityController::finalizeUpdateObjectBatch(bool newItemCreated) {
     owner_.combat().invalidateTabCycle();
     // Entity count logging disabled
 
-    // Deferred rebuild: if new item objects were created in this packet, rebuild
-    // the bags so that slot GUIDs updated earlier in the same packet can resolve.
-    if (newItemCreated) {
-        owner_.inventory().rebuildOnlineInventory();
-    }
-
-    // Late inventory base detection once items are known
-    auto& inventory = owner_.inventory();
-    if (owner_.getPlayerGuid() != 0 && !inventory.inventoryFieldBaseKnown() &&
-        !owner_.lastPlayerFieldsRef().empty() && !inventory.onlineItems().empty()) {
-        owner_.inventory().detectInventorySlotBases(owner_.lastPlayerFieldsRef());
-        if (inventory.inventoryFieldBaseKnown()) {
-            if (owner_.inventory().applyInventoryFields(owner_.lastPlayerFieldsRef())) {
-                owner_.inventory().rebuildOnlineInventory();
-            }
-        }
-    }
+    owner_.inventory().updateBatchFinished(newItemCreated, owner_.lastPlayerFieldsRef());
 }
 
 void EntityController::handleCompressedUpdateObject(network::Packet& packet) {

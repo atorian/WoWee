@@ -4724,6 +4724,102 @@ void InventoryHandler::forgetPlayerEquipment(uint64_t guid) {
 // Money
 // ============================================================
 
+void InventoryHandler::itemObjectChanged(uint64_t guid, bool isContainer, const FlatFieldMap& fields,
+                                         FrameXmlEvents& packetEvents) {
+    const ItemObjectChange change = updateItemObject(guid, isContainer, fields);
+    if (change.inventory) {
+        // The rebuild redraws every bag and the character sheet itself
+        // (fireBagUpdates).
+        rebuildOnlineInventory();
+        // An item on the action bar shows how many are left, and nothing in
+        // FrameXML recomputes that from a bag change: ActionButton_UpdateCount
+        // runs only from ActionButton_Update, which BAG_UPDATE does not reach.
+        // So a stack of bandages went down and the bar kept the number it had
+        // when the button was last drawn - usually the count at login.
+        //
+        // Slot zero means every button, which is what the interface reads it
+        // as. Only sent when something on the bar is an item, so a bag change
+        // does not rebuild a hundred and twenty buttons for nothing.
+        if (queries_.actionBarHoldsItem()) packetEvents.fireFrameXmlEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
+    }
+    // Apart from the inventory change, so the durability events fire on a
+    // durability change and not on every stack count that moves.
+    if (change.durability) {
+        // The armour indicator is DurabilityFrame, which listens for
+        // UPDATE_INVENTORY_ALERTS; the merchant's repair buttons listen for
+        // UPDATE_INVENTORY_DURABILITY. Neither was fired anywhere but at world
+        // entry, so the indicator showed the durability the player logged in
+        // with -- a repair changed nothing on screen, and neither did damage.
+        packetEvents.fireFrameXmlEvent("UPDATE_INVENTORY_ALERTS", {});
+        packetEvents.fireFrameXmlEvent("UPDATE_INVENTORY_DURABILITY", {});
+    }
+}
+
+void InventoryHandler::inventoryFieldsArrived(const FlatFieldMap& fields, bool isCreate,
+                                              FrameXmlEvents& packetEvents) {
+    if (!applyInventoryFields(fields)) return;
+    rebuildOnlineInventory();
+    if (!isCreate) packetEvents.fireFrameXmlEvent("PLAYER_EQUIPMENT_CHANGED", {});
+}
+
+void InventoryHandler::updateBatchFinished(bool newItemCreated, const FlatFieldMap& playerFields) {
+    // Deferred rebuild: if new item objects were created in this packet, rebuild
+    // the bags so that slot GUIDs updated earlier in the same packet can resolve.
+    if (newItemCreated) rebuildOnlineInventory();
+
+    // Late inventory base detection once items are known
+    if (queries_.characterGuid() != 0 && !inventoryFieldBaseKnown() &&
+        !playerFields.empty() && !held_.onlineItems.empty()) {
+        detectInventorySlotBases(playerFields);
+        if (inventoryFieldBaseKnown() && applyInventoryFields(playerFields)) rebuildOnlineInventory();
+    }
+}
+
+void InventoryHandler::moneyFieldArrived(uint64_t copper, FrameXmlEvents& packetEvents) {
+    const bool moneyChanged = setMoneyFromFields(copper);
+    LOG_DEBUG("Money from update fields: ", copper, " copper");
+    if (moneyChanged) packetEvents.fireFrameXmlEvent("PLAYER_MONEY", {});
+}
+
+void InventoryHandler::detectCoinageField(const FlatFieldMap& before, const FlatFieldMap& after) {
+    const uint32_t expectedDelta = expectedMoneyDelta();
+    if (expectedDelta == 0) return;
+    if (before.empty() || after.empty()) return;
+
+    constexpr uint32_t kMaxPlausibleCoinage = 2147483647u;
+    std::vector<uint16_t> candidates;
+    candidates.reserve(8);
+
+    for (const auto& [idx, newVal] : after) {
+        auto itOld = before.find(idx);
+        if (itOld == before.end()) continue;
+        uint32_t oldVal = itOld->second;
+        if (newVal < oldVal) continue;
+        uint32_t delta = newVal - oldVal;
+        if (delta != expectedDelta) continue;
+        if (newVal > kMaxPlausibleCoinage) continue;
+        candidates.push_back(idx);
+    }
+
+    if (candidates.empty()) return;
+
+    uint16_t current = fieldIndex(UF::PLAYER_FIELD_COINAGE);
+    uint16_t chosen = candidates[0];
+    if (std::find(candidates.begin(), candidates.end(), current) != candidates.end()) {
+        chosen = current;
+    } else {
+        std::sort(candidates.begin(), candidates.end());
+        chosen = candidates[0];
+    }
+
+    if (chosen != current && current != 0xFFFF) {
+        queries_.coinageFieldFoundAt(chosen);
+        LOG_WARNING("Auto-detected PLAYER_FIELD_COINAGE index: ", chosen, " (was ", current, ")");
+    }
+
+    clearExpectedMoneyDelta();
+}
+
 bool InventoryHandler::setMoneyFromFields(uint64_t copper) {
     const uint64_t old = held_.moneyCopper;
     held_.moneyCopper = copper;

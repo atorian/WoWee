@@ -1918,6 +1918,17 @@ void GameHandler::resurrectedInPlace() {
     spellHandler_->resetCastState();
 }
 
+bool GameHandler::actionBarHoldsItem() const {
+    for (const auto& action : actionBarHandler_->slots()) {
+        if (action.type == ActionBarSlot::ITEM && action.id != 0) return true;
+    }
+    return false;
+}
+
+void GameHandler::coinageFieldFoundAt(uint16_t index) {
+    updateFieldTable_.setIndex(UF::PLAYER_FIELD_COINAGE, index);
+}
+
 bool GameHandler::corpseHoldsLoot(uint64_t guid) const {
     return loot::orNoLoot(services_.loot).corpseHeldItems(guid);
 }

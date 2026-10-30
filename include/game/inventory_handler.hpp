@@ -160,6 +160,11 @@ public:
     [[nodiscard]] virtual bool questWantsItem(uint32_t itemId) const = 0;
     /// Run a line of the interface's own Lua.
     virtual void runInterfaceCommand(const std::string& lua) = 0;
+    /// Whether a button on the action bar holds an item, whose count a bag
+    /// change moves.
+    [[nodiscard]] virtual bool actionBarHoldsItem() const = 0;
+    /// The coinage field turned out to be at `index` on this realm.
+    virtual void coinageFieldFoundAt(uint16_t index) = 0;
 
     // ---- The contexts it feeds ----
     /// Where the auction house's packets and the client's clock go; null when
@@ -276,6 +281,20 @@ public:
     };
     /// A held item's fields changed (a VALUES block).
     ItemObjectChange updateItemObject(uint64_t guid, bool isContainer, const FlatFieldMap& fields);
+    /// A held item's fields changed, as the object updates report it: the
+    /// bags are rebuilt and redrawn, and the rest of what the change means -
+    /// an item count on the action bar, the durability indicator - goes out
+    /// on `packetEvents`, among the other events of the packet it came in.
+    void itemObjectChanged(uint64_t guid, bool isContainer, const FlatFieldMap& fields,
+                           FrameXmlEvents& packetEvents);
+    /// The player's fields arrived (`isCreate` for the create block): the item
+    /// slots they hold are read, and a change is redrawn - on an update with
+    /// PLAYER_EQUIPMENT_CHANGED on `packetEvents` as well.
+    void inventoryFieldsArrived(const FlatFieldMap& fields, bool isCreate, FrameXmlEvents& packetEvents);
+    /// A packet's blocks are all applied: the bags are rebuilt once for the
+    /// item objects it created, and the slot layout is worked out late, once
+    /// both the player's fields and the items are known.
+    void updateBatchFinished(bool newItemCreated, const FlatFieldMap& playerFields);
     /// An item object left the client's view - destroyed, traded, mailed.
     /// Returns whether it was one the player held.
     bool forgetItemObject(uint64_t guid);
@@ -314,6 +333,13 @@ public:
     /// changed, which the caller announces (PLAYER_MONEY) with the rest of
     /// the update it came in.
     bool setMoneyFromFields(uint64_t copper);
+    /// PLAYER_FIELD_COINAGE arrived: PLAYER_MONEY goes out on `packetEvents`
+    /// when the coin moved.
+    void moneyFieldArrived(uint64_t copper, FrameXmlEvents& packetEvents);
+    /// The player's fields before and after an update. While a coin change is
+    /// expected and the coinage field's index is not known, the field that
+    /// moved by exactly that much is it.
+    void detectCoinageField(const FlatFieldMap& before, const FlatFieldMap& after);
     /// A realm's own authoritative extended balance.
     void applyServerMoney(uint64_t copper);
     /// The coin the client is waiting to see added to a field, while the

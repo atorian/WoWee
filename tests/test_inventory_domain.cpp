@@ -7,6 +7,7 @@
 
 #include "game/entity.hpp"
 #include "game/game_events.hpp"
+#include "game/action_bar_handler.hpp"
 #include "game/inventory_handler.hpp"
 #include "game/update_field_table.hpp"
 
@@ -350,4 +351,93 @@ TEST_CASE("the player's own weapon shows a poison over its enchant, and the ench
     h.receive(Opcode::SMSG_UPDATE_OBJECT, values(kSword, {{kTemporaryEnchantField, 0}}));
     h.pump();
     CHECK(inventory.shownEnchantId(held) == kCrusader);
+}
+
+namespace {
+/// The FrameXML events a packet fired, by name, in the order they went out.
+std::vector<std::string> eventNames(GameHarness& h) {
+    std::vector<std::string> names;
+    for (const auto& e : h.addonEvents()) names.push_back(e.name);
+    return names;
+}
+
+void clothInBackpack(GameHarness& h) {
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, createItem(kCloth, 2589, 7));
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, values(h.player().guid, inBackpack(0, kCloth)));
+    h.pump();
+    h.clearRecords();
+}
+}  // namespace
+
+TEST_CASE("a stack that changes redraws each bag once, then the unit once", "[inventory][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    clothInBackpack(h);
+
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, values(kCloth, Fields{{fieldIndex(UF::ITEM_FIELD_STACK_COUNT), 3}}));
+    h.pump();
+
+    // The backpack, the four worn bags and the seven bank bags, each once.
+    std::vector<std::string> bags;
+    for (const auto& e : h.addonEvents("BAG_UPDATE")) bags.push_back(e.args.at(0));
+    CHECK(bags == std::vector<std::string>{"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"});
+    CHECK(h.addonEvents("UNIT_INVENTORY_CHANGED").size() == 1);
+    CHECK(eventNames(h).back() == "UNIT_INVENTORY_CHANGED");
+}
+
+TEST_CASE("an item on the action bar has its buttons recounted when the bags change", "[inventory][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    clothInBackpack(h);
+    h.game().actionBar().setSlot(5, wowee::game::ActionBarSlot::ITEM, 2589);
+    h.pump();
+    h.clearRecords();
+
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, values(kCloth, Fields{{fieldIndex(UF::ITEM_FIELD_STACK_COUNT), 2}}));
+    h.pump();
+
+    const auto recount = h.addonEvents("ACTIONBAR_SLOT_CHANGED");
+    REQUIRE(recount.size() == 1);
+    CHECK(recount[0].args.at(0) == "0");
+    CHECK(eventNames(h).back() == "ACTIONBAR_SLOT_CHANGED");
+}
+
+TEST_CASE("durability that changes is announced to the armour indicator and the repair buttons",
+          "[inventory][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    clothInBackpack(h);
+
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, values(kCloth, Fields{{fieldIndex(UF::ITEM_FIELD_DURABILITY), 20}}));
+    h.pump();
+    CHECK(h.addonEvents("UPDATE_INVENTORY_ALERTS").size() == 1);
+    CHECK(h.addonEvents("UPDATE_INVENTORY_DURABILITY").size() == 1);
+    h.clearRecords();
+
+    // A stack count moving is not a durability change.
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, values(kCloth, Fields{{fieldIndex(UF::ITEM_FIELD_STACK_COUNT), 5}}));
+    h.pump();
+    CHECK(h.addonEvents("UPDATE_INVENTORY_ALERTS").empty());
+    CHECK(h.addonEvents("UPDATE_INVENTORY_DURABILITY").empty());
+}
+
+TEST_CASE("the player's coin is what the money field says, and a change is announced once",
+          "[inventory][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    h.clearRecords();
+
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, values(h.player().guid, Fields{{fieldIndex(UF::PLAYER_FIELD_COINAGE), 12345}}));
+    h.pump();
+    CHECK(h.game().inventory().moneyCopper() == 12345);
+    CHECK(h.addonEvents("PLAYER_MONEY").size() == 1);
+    h.clearRecords();
+
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, values(h.player().guid, Fields{{fieldIndex(UF::PLAYER_FIELD_COINAGE), 12345}}));
+    h.pump();
+    CHECK(h.addonEvents("PLAYER_MONEY").empty());
 }
