@@ -311,6 +311,11 @@ public:
     /// Put the player's own object in view - what the realm's fields for the
     /// character are applied to.
     void playerInView();
+    /// Read the world as expansion `id` does from here on: its update field
+    /// and opcode tables, and the rules that ask which expansion is active.
+    /// The login has already happened on WotLK's wire, so this is for what
+    /// is fed in decoded (applyRecordedObjects), not for packets.
+    void useExpansion(const std::string& id);
 
 private:
     core::EventBus events_;

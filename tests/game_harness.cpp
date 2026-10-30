@@ -266,6 +266,11 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     });
 }
 
+void GameHarness::useExpansion(const std::string& id) {
+    if (!expansions_.setActive(id)) fail("no expansion profile named " + id);
+    game::loadProtocolTables(*game_, *expansions_.getActive());
+}
+
 GameHarness::~GameHarness() = default;
 
 contacts::IContacts& GameHarness::contacts() { return *contacts_; }

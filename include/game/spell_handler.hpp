@@ -610,6 +610,12 @@ public:
     // Skill DBC
     void loadSkillLineDbc() const;
     void extractSkillFields(const FlatFieldMap& fields);
+    /// Before WotLK the player's auras are fields, not packets: UNIT_FIELD_AURAS
+    /// holds a spell per slot and UNIT_FIELD_AURAFLAGS a flag byte per slot.
+    /// `fields` are all the player's fields; when they carry any aura slot the
+    /// list is rebuilt from them, and the interface told on `packetEvents`,
+    /// among the other events of the packet they came in.
+    void playerAuraFieldsArrived(const FlatFieldMap& fields, FrameXmlEvents& packetEvents);
     void extractExploredZoneFields(const FlatFieldMap& fields);
 
     // Update per-frame timers (call from GameHandler::update)

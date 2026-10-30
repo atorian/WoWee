@@ -461,74 +461,6 @@ void EntityController::updateNonPlayerTransportAttachment(const UpdateBlock& blo
 //     entity->getFields() is used for reading the full accumulated state.
 //     Normalises pre-WotLK harmful bit (0x02) to WotLK debuff bit (0x80) so
 //     downstream code checking for 0x80 works consistently across expansions.
-void EntityController::syncPreWotlkAurasFromFields(const std::shared_ptr<Entity>& entity) {
-    if (!isPreWotlk()) return;
-
-    const uint16_t ufAuras     = fieldIndex(UF::UNIT_FIELD_AURAS);
-    const uint16_t ufAuraFlags = fieldIndex(UF::UNIT_FIELD_AURAFLAGS);
-    if (ufAuras == 0xFFFF) return;
-
-    const auto& allFields = entity->getFields();
-    bool hasAuraField = false;
-    for (const auto& [fk, fv] : allFields) {
-        if (fk >= ufAuras && fk < ufAuras + 48) { hasAuraField = true; break; }
-    }
-    if (!hasAuraField) return;
-
-    owner_.spells().resetPlayerAuras(48);
-    uint64_t nowMs = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count());
-    for (int slot = 0; slot < 48; ++slot) {
-        auto it = allFields.find(static_cast<uint16_t>(ufAuras + slot));
-        if (it != allFields.end() && it->second != 0) {
-            AuraSlot& a = owner_.spells().getPlayerAuraSlotRef(slot);
-            a.spellId = it->second;
-            // Read aura flag byte: packed 4-per-uint32 at ufAuraFlags
-            uint8_t aFlag = 0;
-            if (ufAuraFlags != 0xFFFF) {
-                auto fit = allFields.find(static_cast<uint16_t>(ufAuraFlags + slot / 4));
-                if (fit != allFields.end())
-                    aFlag = static_cast<uint8_t>((fit->second >> ((slot % 4) * 8)) & 0xFF);
-            }
-            // Normalize pre-WotLK harmful bit (0x02) to WotLK debuff bit (0x80)
-            // so downstream code checking for 0x80 works consistently.
-            if (aFlag & 0x02)
-                aFlag = (aFlag & ~0x02) | 0x80;
-            a.flags = aFlag;
-            a.durationMs = -1;
-            a.maxDurationMs = -1;
-            a.casterGuid = owner_.getPlayerGuid();
-            a.receivedAtMs = nowMs;
-        }
-    }
-    LOG_DEBUG("[pre-WotLK] Rebuilt playerAuras from UNIT_FIELD_AURAS");
-    owner_.spells().refreshRestorationState();
-    // How many the player actually has, said once. "BuffButton1 - NOT BUILT"
-    // means the interface asked UnitAura for the first buff and got nothing,
-    // and a character with no buffs is the correct reason for that - this
-    // separates it from the interface never having asked.
-    static bool saidAuraCount = false;
-    if (!saidAuraCount) {
-        saidAuraCount = true;
-        LOG_WARNING("player auras on first rebuild: ", owner_.spells().getPlayerAuras().size());
-    }
-    pendingEvents_.emit("UNIT_AURA", {"player"});
-    // The 1.12 name for the same news, carrying no unit - which is how a
-    // vanilla interface hears that its buffs changed at all.
-    pendingEvents_.emit("PLAYER_AURAS_CHANGED", {});
-    owner_.announceCompanionChange();
-    // Tracking is one of these auras, and the minimap's tracking icon is drawn
-    // from whichever tracking spell is active - GetTrackingTexture walks the
-    // player's tracking spells and asks exactly this aura list. The icon
-    // updates on MINIMAP_UPDATE_TRACKING and nothing else, so it never changed.
-    //
-    // Here rather than at SetTracking, and that is what makes it complete
-    // rather than half: both routes end in the aura arriving, whether the
-    // spell was cast from the interface's dropdown or from a button.
-    pendingEvents_.emit("MINIMAP_UPDATE_TRACKING", {});
-}
-
 // Detect player mount/dismount from UNIT_FIELD_MOUNTDISPLAYID changes
 void EntityController::detectPlayerMountChange(uint32_t newMountDisplayId,
                                                 const FlatFieldMap& blockFields) {
@@ -1866,7 +1798,7 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
     }
     // Pre-WotLK aura sync on initial object create
     if (block.guid == owner_.getPlayerGuid()) {
-        syncPreWotlkAurasFromFields(entity);
+        owner_.spells().playerAuraFieldsArrived(entity->getFields(), pendingEvents_);
     }
 
     // Hostility
@@ -2149,7 +2081,7 @@ void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::share
 
     // Pre-WotLK aura sync from UNIT_FIELD_AURAS when those fields are updated
     if (block.guid == owner_.getPlayerGuid()) {
-        syncPreWotlkAurasFromFields(entity);
+        owner_.spells().playerAuraFieldsArrived(entity->getFields(), pendingEvents_);
     }
 
     // Display ID changed - re-spawn/model-change

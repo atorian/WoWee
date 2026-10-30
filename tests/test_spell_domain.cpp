@@ -4,7 +4,10 @@
 
 #include "game_harness.hpp"
 
+#include "game/entity.hpp"
+#include "game/entity_controller.hpp"
 #include "game/game_events.hpp"
+#include "game/update_field_table.hpp"
 
 #include <algorithm>
 #include <vector>
@@ -324,4 +327,42 @@ TEST_CASE("the initial spell book contains only abilities sent by the realm", "[
     for (const auto& tab : h.game().spells().getSpellBookTabs())
         shown.insert(shown.end(), tab.spellIds.begin(), tab.spellIds.end());
     CHECK(shown == std::vector<uint32_t>{133});
+}
+
+TEST_CASE("before WotLK the player's auras are the aura fields, harmful ones marked as debuffs",
+          "[spell][harness]") {
+    using namespace wowee::game;
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    h.useExpansion("classic");
+    h.clearRecords();
+
+    // UNIT_FIELD_AURAS holds a spell id per slot; UNIT_FIELD_AURAFLAGS packs a
+    // flag byte per slot, four to a field. Slot 3 is harmful (0x02 before
+    // WotLK).
+    UpdateBlock block{};
+    block.guid = h.player().guid;
+    block.objectType = ObjectType::PLAYER;
+    block.updateType = UpdateType::VALUES;
+    block.fields[fieldIndex(UF::UNIT_FIELD_AURAS) + 0] = 1243;
+    block.fields[fieldIndex(UF::UNIT_FIELD_AURAS) + 3] = 172;
+    block.fields[fieldIndex(UF::UNIT_FIELD_AURAFLAGS)] = 0x02u << 24;
+    UpdateObjectData batch{};
+    batch.blocks.push_back(block);
+    h.game().entityController().applyRecordedObjects(batch);
+    h.pump();
+
+    const auto& auras = h.game().spells().getPlayerAuras();
+    REQUIRE(auras.size() >= 4);
+    CHECK(auras[0].spellId == 1243);
+    CHECK((auras[0].flags & 0x80) == 0);
+    CHECK(auras[3].spellId == 172);
+    // Normalised to WotLK's debuff bit, which everything downstream reads.
+    CHECK((auras[3].flags & 0x80) != 0);
+    CHECK((auras[3].flags & 0x02) == 0);
+    CHECK(auras[3].casterGuid == h.player().guid);
+    CHECK(h.addonEvents("UNIT_AURA").size() == 1);
+    CHECK(h.addonEvents("PLAYER_AURAS_CHANGED").size() == 1);
+    CHECK(h.addonEvents("MINIMAP_UPDATE_TRACKING").size() == 1);
 }
