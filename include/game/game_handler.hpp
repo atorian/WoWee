@@ -26,6 +26,7 @@
 #include "game/social_handler.hpp"
 #include "game/movement_handler.hpp"
 #include "game/warden_session.hpp"
+#include "game/world_state.hpp"
 #include "game/entity_controller.hpp"
 #include "game/game_services.hpp"
 #include "game/world_login.hpp"
@@ -79,51 +80,6 @@ struct EzWowPatch;
  * Quest giver status values (WoW 3.3.5a)
  */
 /**
- * World connection state
- */
-enum class WorldState {
-    DISCONNECTED,           // Not connected
-    CONNECTING,             // TCP connection in progress
-    CONNECTED,              // Connected, waiting for challenge
-    CHALLENGE_RECEIVED,     // Received SMSG_AUTH_CHALLENGE
-    AUTH_SENT,              // Sent CMSG_AUTH_SESSION, encryption initialized
-    AUTHENTICATED,          // Received SMSG_AUTH_RESPONSE success
-    READY,                  // Ready for character/world operations
-    CHAR_LIST_REQUESTED,    // CMSG_CHAR_ENUM sent
-    CHAR_LIST_RECEIVED,     // SMSG_CHAR_ENUM received
-    ENTERING_WORLD,         // CMSG_PLAYER_LOGIN sent
-    IN_WORLD,               // In game world
-    FAILED                  // Connection or authentication failed
-};
-
-/// The state's own name, for a log line.
-///
-/// Four files kept an identical copy of this in their own anonymous namespace -
-/// the three GameHandler was split into and the entity controller - so adding a
-/// state meant remembering four switches, and a switch that was not updated
-/// answers "UNKNOWN" for the new one rather than failing to compile.
-///
-/// Beside the enum, so the two are read together. No default case, so adding a
-/// state to the list above is a warning here rather than a silent "UNKNOWN".
-inline const char* worldStateName(WorldState state) {
-    switch (state) {
-        case WorldState::DISCONNECTED:        return "DISCONNECTED";
-        case WorldState::CONNECTING:          return "CONNECTING";
-        case WorldState::CONNECTED:           return "CONNECTED";
-        case WorldState::CHALLENGE_RECEIVED:  return "CHALLENGE_RECEIVED";
-        case WorldState::AUTH_SENT:           return "AUTH_SENT";
-        case WorldState::AUTHENTICATED:       return "AUTHENTICATED";
-        case WorldState::READY:               return "READY";
-        case WorldState::CHAR_LIST_REQUESTED: return "CHAR_LIST_REQUESTED";
-        case WorldState::CHAR_LIST_RECEIVED:  return "CHAR_LIST_RECEIVED";
-        case WorldState::ENTERING_WORLD:      return "ENTERING_WORLD";
-        case WorldState::IN_WORLD:            return "IN_WORLD";
-        case WorldState::FAILED:              return "FAILED";
-    }
-    return "UNKNOWN";
-}
-
-/**
  * World connection callbacks
  */
 using WorldConnectSuccessCallback = std::function<void()>;
@@ -153,7 +109,8 @@ class GameHandler : public IConnectionState,
                      public ReputationQueries,
                      public SocialQueries,
                      public WardenSession,
-                     public CombatQueries {
+                     public CombatQueries,
+                     public MovementQueries {
 public:
     // Talent data structures (aliased from handler_types.hpp)
     using TalentEntry = game::TalentEntry;
@@ -233,6 +190,25 @@ public:
     // rest of the game (ActionBarQueries, InventoryQueries). See AGENTS.md,
     // "A new domain handler".
     bool connected() const override { return isConnected(); }
+    // MovementQueries (the rest it shares with the other handlers' queries)
+    WorldState worldState() const override { return state; }
+    Race characterRace() const override { return playerRace_; }
+    bool isTransport(uint64_t guid) const override { return entityController_->isTransportGuid(guid); }
+    TransportManager* transports() override { return transportManager_.get(); }
+    uint32_t gryphonDisplayId() const override { return services_.gryphonDisplayId; }
+    uint32_t wyvernDisplayId() const override { return services_.wyvernDisplayId; }
+    bool resurrectPending() const override { return combatHandler_->resurrectPending(); }
+    bool channeling() const override { return spellHandler_->isChanneling(); }
+    const std::vector<AuraSlot>& playerAuras() const override { return spellHandler_->getPlayerAuras(); }
+    void resetCastState() override { spellHandler_->resetCastState(); }
+    void forgetMount() override { currentMountDisplayId_ = 0; }
+    void forgetMountAura() override { mountAuraSpellId_ = 0; }
+    void leftVehicle() override { vehicleId_ = 0; }
+    void arrivedOnMap(uint32_t mapId) override { currentMapId_ = mapId; }
+    void traceWorldPackets(std::chrono::seconds duration, const char* label) override;
+    void tearDownWorldForTransfer(uint32_t mapId) override;
+    void resurrectedInPlace() override;
+    void resetPingTimer() override { timeSinceLastPing = 0.0f; }
     // CombatQueries (the rest it shares with the other handlers' queries)
     bool inInstance() const override { return isInInstance(); }
     bool corpseHoldsLoot(uint64_t guid) const override;
@@ -1454,8 +1430,6 @@ public:
     bool previewPlayerAppearance(uint32_t appearanceBytes, uint8_t facialFeatures);
     auto& updateFieldTableRef() { return updateFieldTable_; }
     auto& lastPlayerFieldsRef() { return lastPlayerFields_; }
-    auto& timeSinceLastPingRef() { return timeSinceLastPing; }
-    auto& activeCharacterGuidRef() { return activeCharacterGuid_; }
 
     // ── Character & Appearance ───────────────────────────────────────
     auto& cloakVisibleRef() { return cloakVisible_; }
@@ -1466,13 +1440,11 @@ public:
     /// Pressing this one again is a dismount, not a second mount.
     uint32_t getMountAuraSpellId() const { return mountAuraSpellId_; }
     auto& shapeshiftFormIdRef() { return shapeshiftFormId_; }
-    auto& playerRaceRef() { return playerRace_; }
     auto& serverPlayerLevelRef() { return serverPlayerLevel_; }
 
     // ── AFK / DND ────────────────────────────────────────────────────
 
     // ── Movement & Transport ─────────────────────────────────────────
-    auto& vehicleIdRef() { return vehicleId_; }
 
     // ── Combat & Player Stats ────────────────────────────────────────
     auto& playerArenaPointsRef() { return playerArenaPoints_; }
@@ -1502,9 +1474,6 @@ public:
 
     // ── World, Map & Zones ───────────────────────────────────────────
     auto& currentMapIdRef() { return currentMapId_; }
-    auto& worldStateMapIdRef() { return worldStateMapId_; }
-    auto& worldStatesRef() { return worldStates_; }
-    auto& worldStateZoneIdRef() { return worldStateZoneId_; }
 
     // ── Home Bind ────────────────────────────────────────────────────
 
@@ -1537,7 +1506,7 @@ public:
     /// mattered: "Not ready", "Not enough rage" and "You can't do that right
     /// now" arrive once per rejected keypress.
     void raiseUiError(const std::string& message);
-    void sendPing();
+    void sendPing() override;
     std::string guidToUnitId(uint64_t guid) const;
     Unit* getUnitByGuid(uint64_t guid);
     void cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries,

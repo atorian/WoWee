@@ -254,12 +254,12 @@ CHECKS = [
     # CombatQueries: 3 -> 2 handlers, -> 736. MovementHandler's sending,
     # FrameXML, chat, error line, bus and assets: -> 621; its area triggers,
     # following and transport attachments: -> 578; the player's transport:
-    # -> 566.
+    # -> 566. MovementHandler built from MovementQueries: 2 -> 1 handler, -> 411.
     ("domain_shape_check.py",
-     r"^(\d+) domain handlers built from GameHandler&", 2,
+     r"^(\d+) domain handlers built from GameHandler&", 1,
      "domain handlers whose constructor takes GameHandler&"),
     ("domain_shape_check.py",
-     r"^(\d+) reaches through owner_ in src/game", 566,
+     r"^(\d+) reaches through owner_ in src/game", 411,
      "reaches through owner_ into GameHandler from the domain handlers"),
     # State a domain should own, handed out of GameHandler writable, and the
     # notifications wired to a single listener instead of the bus. 218, 1324

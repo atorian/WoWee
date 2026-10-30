@@ -21,9 +21,76 @@ namespace pipeline { class AssetManager; }
 namespace game {
 
 class ChatLog;
+class EntityManager;
 class FrameXmlEvents;
-class GameHandler;
+class PacketParsers;
 class PacketSender;
+class TransportManager;
+struct AuraSlot;
+enum class Race : uint8_t;
+enum class WorldState;
+
+/// What movement, taxis and transports ask of the rest of the game, and the
+/// few things they make happen there. GameHandler implements it; several of
+/// its answers it already gives other handlers under the same names.
+class MovementQueries {
+public:
+    virtual ~MovementQueries() = default;
+
+    // ---- The session and the world in view ----
+    [[nodiscard]] virtual WorldState worldState() const = 0;
+    [[nodiscard]] virtual uint64_t characterGuid() const = 0;
+    /// The race of the character logged in, for the taxi mount's faction;
+    /// Human before one is.
+    [[nodiscard]] virtual Race characterRace() const = 0;
+    [[nodiscard]] virtual uint32_t currentMapId() const = 0;
+    [[nodiscard]] virtual const EntityManager& entities() const = 0;
+    /// A game object that came into view as a transport.
+    [[nodiscard]] virtual bool isTransport(uint64_t guid) const = 0;
+    /// The transports' own motion. Never null in a running game.
+    [[nodiscard]] virtual TransportManager* transports() = 0;
+    [[nodiscard]] virtual PacketParsers& packetParsers() = 0;
+    /// The taxi mounts' display ids, once the spawner has read them.
+    [[nodiscard]] virtual uint32_t gryphonDisplayId() const = 0;
+    [[nodiscard]] virtual uint32_t wyvernDisplayId() const = 0;
+
+    // ---- The target and the cast ----
+    [[nodiscard]] virtual uint64_t currentTargetGuid() const = 0;
+    /// An accepted resurrection the server has yet to carry out.
+    [[nodiscard]] virtual bool resurrectPending() const = 0;
+    [[nodiscard]] virtual bool casting() const = 0;
+    [[nodiscard]] virtual bool channeling() const = 0;
+    /// Eating or drinking.
+    [[nodiscard]] virtual bool restoring() const = 0;
+    [[nodiscard]] virtual const std::vector<AuraSlot>& playerAuras() const = 0;
+    virtual void cancelCast() = 0;
+    virtual void resetCastState() = 0;
+
+    // ---- The mount and the vehicle ----
+    [[nodiscard]] virtual bool mounted() const = 0;
+    [[nodiscard]] virtual uint32_t mountDisplayId() const = 0;
+    [[nodiscard]] virtual uint32_t mountAuraSpellId() const = 0;
+    /// The player is off their mount; PlayerMountChanged is the caller's to
+    /// publish.
+    virtual void forgetMount() = 0;
+    virtual void forgetMountAura() = 0;
+    virtual void leftVehicle() = 0;
+
+    // ---- Arriving somewhere ----
+    /// SMSG_NEW_WORLD moved the player to `mapId`.
+    virtual void arrivedOnMap(uint32_t mapId) = 0;
+    /// Keep the world connection's packets for a while, under `label`.
+    virtual void traceWorldPackets(std::chrono::seconds duration, const char* label) = 0;
+    /// What a new map leaves behind: the units in view and their casts and
+    /// auras, the fight, the world states, the gossip markers, the cast.
+    virtual void tearDownWorldForTransfer(uint32_t mapId) = 0;
+    /// SMSG_NEW_WORLD on the same map, answering an accepted resurrection:
+    /// the death, the fight and the cast end.
+    virtual void resurrectedInPlace() = 0;
+    virtual void resetPingTimer() = 0;
+    virtual void sendPing() = 0;
+    virtual void closeGossip() = 0;
+};
 
 class MovementHandler {
 public:
@@ -36,8 +103,9 @@ public:
 
     /// @param assets Null in a client without game data: no taxi path or
     ///        area trigger table is read.
-    MovementHandler(GameHandler& owner, PacketSender& sender, FrameXmlEvents& frameXml,
-                    core::EventBus& events, ChatLog& chat, pipeline::AssetManager* assets);
+    MovementHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
+                    ChatLog& chat, pipeline::AssetManager* assets, MovementQueries& queries,
+                    MovementInfo& movementInfo);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -330,12 +398,12 @@ private:
     void beginTaxiFlightMotion();
     bool restoreWorldTransferFallbackIfNearOrigin(const char* context);
 
-    GameHandler& owner_;
     PacketSender& sender_;
     FrameXmlEvents& frameXml_;
     core::EventBus& events_;
     ChatLog& chat_;
     pipeline::AssetManager* const assets_;
+    MovementQueries& queries_;
 
     // --- Movement state ---
     // Reference to GameHandler's movementInfo to avoid desync

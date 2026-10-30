@@ -1891,6 +1891,33 @@ bool GameHandler::previewPlayerAppearance(uint32_t appearanceBytes, uint8_t faci
     return false;
 }
 
+void GameHandler::traceWorldPackets(std::chrono::seconds duration, const char* label) {
+    if (socket) socket->tracePacketsFor(duration, label);
+}
+
+void GameHandler::tearDownWorldForTransfer(uint32_t mapId) {
+    combatHandler_->arrivedInNewWorld();
+    inventoryHandler_->leaveWorld();
+    spellHandler_->clearUnitCaches();
+    combatHandler_->clearCombatText();
+    entityController_->getEntityManager().clear();
+    combatHandler_->clearHostileAttackers();
+    worldStates_.clear();
+    questHandler_->clearGossipPois();
+    worldStateMapId_ = mapId;
+    worldStateZoneId_ = 0;
+    stopAutoAttack();
+    spellHandler_->resetCastState();
+}
+
+void GameHandler::resurrectedInPlace() {
+    combatHandler_->resurrectedInPlace();
+    combatHandler_->clearHostileAttackers();
+    stopAutoAttack();
+    combatHandler_->invalidateTabCycle();
+    spellHandler_->resetCastState();
+}
+
 bool GameHandler::corpseHoldsLoot(uint64_t guid) const {
     return loot::orNoLoot(services_.loot).corpseHeldItems(guid);
 }

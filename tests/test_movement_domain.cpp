@@ -139,3 +139,57 @@ TEST_CASE("a transport just stepped off survives being destroyed for a moment, a
     h.pump();
     CHECK_FALSE(h.game().getEntityManager().hasEntity(kBoat));
 }
+
+TEST_CASE("arriving on a new map ends what the old one left: offers, world states, units in view",
+          "[movement][harness]") {
+    using wowee::game::Opcode;
+    using wowee::test::Body;
+    GameHarness h;
+    h.enterWorld();
+    const uint32_t oldMap = h.game().getCurrentMapId();
+    const uint32_t newMap = oldMap + 1;
+    auto creature = std::make_shared<wowee::game::Unit>(0xC001);
+    h.game().getEntityManager().addEntity(creature->getGuid(), creature);
+    // A resurrection offered, and a battleground score showing.
+    h.receive(Opcode::SMSG_RESURRECT_REQUEST, Body().u64(0x777).u32(5).cstr("Anna").u8(0).u8(0));
+    h.receive(Opcode::SMSG_UPDATE_WORLD_STATE, Body().u32(1581).u32(42));
+    h.pump();
+    REQUIRE(h.game().combat().resurrectOfferStanding());
+    REQUIRE(h.game().getWorldState(1581));
+
+    h.receive(Opcode::SMSG_NEW_WORLD, Body().u32(newMap).f32(10.0f).f32(20.0f).f32(30.0f).f32(0.0f));
+    h.pump();
+    h.game().movement().applyPendingWorldTransfer();
+
+    CHECK(h.game().getCurrentMapId() == newMap);
+    CHECK_FALSE(h.game().combat().resurrectOfferStanding());
+    CHECK_FALSE(h.game().getWorldState(1581));
+    CHECK(h.game().getWorldStateMapId() == newMap);
+    CHECK_FALSE(h.game().getEntityManager().hasEntity(0xC001));
+    CHECK(h.countSent(Opcode::MSG_MOVE_WORLDPORT_ACK) == 1);
+}
+
+TEST_CASE("a resurrection on the same map brings the player back where they are, keeping the world",
+          "[movement][harness]") {
+    using wowee::game::Opcode;
+    using wowee::test::Body;
+    GameHarness h;
+    h.enterWorld();
+    const uint32_t here = h.game().getCurrentMapId();
+    auto creature = std::make_shared<wowee::game::Unit>(0xC002);
+    h.game().getEntityManager().addEntity(creature->getGuid(), creature);
+    h.receive(Opcode::SMSG_FORCED_DEATH_UPDATE, Body());
+    h.receive(Opcode::SMSG_SPIRIT_HEALER_CONFIRM, Body().u64(0xF130000000001234ull));
+    h.pump();
+    h.game().combat().acceptResurrect();
+    REQUIRE(h.game().combat().resurrectPending());
+
+    h.receive(Opcode::SMSG_NEW_WORLD, Body().u32(here).f32(10.0f).f32(20.0f).f32(30.0f).f32(0.0f));
+    h.pump();
+    h.game().movement().applyPendingWorldTransfer();
+
+    CHECK_FALSE(h.game().combat().isPlayerDead());
+    CHECK_FALSE(h.game().combat().resurrectPending());
+    CHECK(h.game().getEntityManager().hasEntity(0xC002));
+    CHECK(h.countSent(Opcode::MSG_MOVE_WORLDPORT_ACK) == 1);
+}
