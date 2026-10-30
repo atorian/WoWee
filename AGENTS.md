@@ -72,6 +72,10 @@
   for both leaves its caller retrying a failure every frame with no trace. Give
   failure its own result, log it once, and stop retrying.
 - Log a failure once per id/path, not once per frame.
+- User decision (2026-10-30): a DBC the game needs that cannot be read stops
+  the game - `LOG_FATAL` naming the file and what needed it, then
+  `std::abort()`. No default value, built-in table or zero in its place.
+  The same for a DBC too short for what it is asked.
 
 ## Tests test behaviour
 

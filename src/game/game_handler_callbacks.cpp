@@ -595,7 +595,6 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     // Reset per-character state so previous character data doesn't bleed through
     inventoryHandler_->beginCharacter();
     if (services_.achievementsFeed) services_.achievementsFeed->beginCharacter();
-    lastPlayerFields_.clear();
     playerHandler_->beginCharacter();
     spellHandler_->resetAllState();
     eventBus().publish(events::PlayerIntoxicationChanged{0.0f});

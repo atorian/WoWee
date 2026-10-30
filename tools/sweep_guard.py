@@ -269,12 +269,13 @@ CHECKS = [
     # State a domain should own, handed out of GameHandler writable, and the
     # notifications wired to a single listener instead of the bus. 218, 1324
     # and 65 before the inventory's state moved to InventoryHandler; lowered
-    # to what stood when the player's sheet moved to PlayerHandler.
+    # to what stood when the player's sheet moved to PlayerHandler; its field
+    # snapshot followed: 7 -> 6, 29 -> 16.
     ("domain_shape_check.py",
-     r"^(\d+) xxxRef\(\) accessors in GameHandler", 7,
+     r"^(\d+) xxxRef\(\) accessors in GameHandler", 6,
      "writable accessors to GameHandler's state"),
     ("domain_shape_check.py",
-     r"^(\d+) calls to them through owner_ in src/game", 29,
+     r"^(\d+) calls to them through owner_ in src/game", 16,
      "domain handlers editing GameHandler's state through its accessors"),
     ("domain_shape_check.py",
      r"^(\d+) set\*Callback setters in GameHandler", 2,

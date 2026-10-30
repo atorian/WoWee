@@ -240,7 +240,7 @@ public:
     uint64_t characterGuid() const override { return getPlayerGuid(); }
     uint64_t currentTargetGuid() const override { return combatHandler_->getTargetGuid(); }
     const EntityManager& entities() const override { return getEntityManager(); }
-    const FlatFieldMap& playerFields() const override { return lastPlayerFields_; }
+    const FlatFieldMap& playerFields() const override { return playerHandler_->fields(); }
     PacketParsers& packetParsers() override { return *packetParsers_; }
     std::string playerName(uint64_t guid) const override { return entityController_->lookupName(guid); }
     void requestPlayerName(uint64_t guid) override { queryPlayerName(guid); }
@@ -590,28 +590,6 @@ public:
     const loot::ILoot* loot() const override;
     const guild_bank::IGuildBank* guildBank() const override;
 
-    /// Melee critical-strike chance the player's Agility grants, as a percent,
-    /// the way the character sheet's stat flyout reads it: the class base plus
-    /// Agility times the per-class-per-level ratio, both from the combat game
-    /// tables. Zero until the tables and the player's stats are available.
-    float getMeleeCritFromAgility() const;
-    /// Spell critical-strike chance the player's Intellect grants, as a percent -
-    /// the spell-side twin of getMeleeCritFromAgility, read the same way from the
-    /// spell-crit game tables. Zero for a class with no spell crit (a warrior).
-    float getSpellCritFromIntellect() const;
-    /// The percent a combat rating grants - dodge, parry, haste, defense and the
-    /// rest of the rating-based stats the flyout shows. rating × (class scalar ÷
-    /// the level's coefficient), from gtCombatRatings and the class scalar table,
-    /// exactly as AzerothCore's GetRatingBonusValue reads it. Zero for an
-    /// out-of-range index or a rating the player has none of.
-    float getCombatRatingBonus(int cr) const;
-    /// Health and mana regenerated per second from Spirit, as the stat flyout
-    /// shows them. Health splits Spirit at 50 across two tables (gtOCTRegenHP,
-    /// gtRegenHPPerSpt) then doubles; mana is Spirit × gtRegenMPPerSpt - the
-    /// same as AzerothCore's OCTRegen*PerSpirit. Zero for a class with no mana.
-    float getHealthRegenFromSpirit() const;
-    float getManaRegenFromSpirit() const;
-
     // Inventory
     void markOnlineEquipmentDirty() override { inventoryHandler_->markOnlineEquipmentDirty(); }
 
@@ -737,9 +715,6 @@ public:
     float faceCameraDirection() {
         return faceCameraProvider_ ? faceCameraProvider_() : getMovementInfo().orientation;
     }
-
-    // XP tracking
-    static uint32_t killXp(uint32_t playerLevel, uint32_t victimLevel);
 
     // Global Cooldown (GCD) - set when the server sends a spellId=0 cooldown entry
     bool isGCDActive() const { return spellHandler_->getGCDRemaining() > 0.0f; }
@@ -1359,7 +1334,6 @@ public:
     /// quietly do nothing.
     bool previewPlayerAppearance(uint32_t appearanceBytes, uint8_t facialFeatures);
     auto& updateFieldTableRef() { return updateFieldTable_; }
-    auto& lastPlayerFieldsRef() { return lastPlayerFields_; }
 
     // ── Character & Appearance ───────────────────────────────────────
     auto& currentMountDisplayIdRef() { return currentMountDisplayId_; }
@@ -1698,7 +1672,6 @@ private:
 
     // Items, coin, books and the equipment of players in view are the
     // inventory's (InventoryHandler); none of it is kept here.
-    FlatFieldMap lastPlayerFields_;
     /// The innkeeper that asked "make this your home?". SMSG_BINDER_CONFIRM
     /// names it and the answer has to go back to the same one.
     uint64_t binderGuid_ = 0;
@@ -1765,25 +1738,6 @@ private:
 
     // Vehicle (WotLK): non-zero when player is seated in a vehicle
     uint32_t vehicleId_ = 0;
-
-    // Combat game tables for the stat flyout: per-class base crit, and the
-    // per-class-per-level Agility ratio (11 classes × 100 levels).
-    mutable std::vector<float> gtMeleeCritBase_;
-    mutable std::vector<float> gtMeleeCrit_;
-    mutable bool gtMeleeCritLoaded_ = false;
-    mutable std::vector<float> gtSpellCritBase_;
-    mutable std::vector<float> gtSpellCrit_;
-    mutable bool gtSpellCritLoaded_ = false;
-    mutable std::vector<float> gtCombatRatings_;       // 32 ratings × 100 levels
-    mutable std::vector<float> gtClassRatingScalar_;   // 11 classes × 32 ratings (ratio column)
-    mutable bool gtCombatRatingsLoaded_ = false;
-    mutable std::vector<float> gtOctRegenHp_, gtRegenHpPerSpt_, gtRegenMpPerSpt_;
-    mutable bool gtRegenLoaded_ = false;
-    // Shared: class base + stat × per-class-per-level ratio, ×100 for a percent.
-    float critPercentFromGameTable(std::vector<float>& baseCache,
-                                   std::vector<float>& ratioCache, bool& loaded,
-                                   const char* baseDbc, const char* ratioDbc,
-                                   int statIdx) const;
 
     /// Read once on the first ask, like the other DBC-backed caches here.
     mutable std::unordered_map<uint32_t, ExtendedCostEntry> extendedCostCache_;

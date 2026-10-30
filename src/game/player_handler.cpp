@@ -70,8 +70,8 @@ struct PlayerFieldIndices {
 }  // namespace
 
 PlayerHandler::PlayerHandler(FrameXmlEvents& frameXml, core::EventBus& events, ChatLog& chat,
-                             PlayerQueries& queries)
-    : frameXml_(frameXml), events_(events), chat_(chat), queries_(queries) {}
+                             PlayerQueries& queries, const StatTables& tables)
+    : frameXml_(frameXml), events_(events), chat_(chat), queries_(queries), tables_(tables) {}
 
 void PlayerHandler::registerOpcodes(DispatchTable& table) {
     for (auto op : {Opcode::SMSG_LEVELUP_INFO, Opcode::SMSG_LEVELUP_INFO_ALT}) {
@@ -139,6 +139,61 @@ void PlayerHandler::handleLevelUp(network::Packet& packet) {
         }
     }
     packet.skipAll();
+}
+
+void PlayerHandler::fieldsUpdated(const FlatFieldMap& fields) {
+    // Both are sorted, so a simple insert_or_assign per key keeps the
+    // invariant intact.
+    for (const auto& [key, val] : fields) sheet_.fields.insert_or_assign(key, val);
+}
+
+uint32_t PlayerHandler::tableLevel() const {
+    return std::min(sheet_.level, StatTables::kMaxLevel);
+}
+
+float PlayerHandler::critFromStat(StatTables::Table base, StatTables::Table perStat, int statIdx) const {
+    const uint8_t cls = queries_.playerClass();
+    if (cls == 0) return 0.0f;
+    const float stat = static_cast<float>(std::max(0, sheet_.stats[statIdx]));
+    return (tables_.perClass(base, cls) + stat * tables_.perClassAndLevel(perStat, cls, tableLevel())) *
+           100.0f;  // the sheet reads a percent
+}
+
+float PlayerHandler::meleeCritFromAgility() const {
+    return critFromStat(StatTables::Table::MeleeCritBase, StatTables::Table::MeleeCritPerAgility,
+                        1 /* STAT_AGILITY */);
+}
+
+float PlayerHandler::spellCritFromIntellect() const {
+    return critFromStat(StatTables::Table::SpellCritBase, StatTables::Table::SpellCritPerIntellect,
+                        3 /* STAT_INTELLECT */);
+}
+
+float PlayerHandler::healthRegenFromSpirit() const {
+    const uint8_t cls = queries_.playerClass();
+    if (cls == 0) return 0.0f;
+    const float spirit = static_cast<float>(std::max(0, sheet_.stats[4 /* SPIRIT */]));
+    const float baseSpirit = std::min(spirit, 50.0f);
+    const float moreSpirit = spirit - baseSpirit;
+    return (baseSpirit * tables_.perClassAndLevel(StatTables::Table::OctRegenHp, cls, tableLevel()) +
+            moreSpirit * tables_.perClassAndLevel(StatTables::Table::RegenHpPerSpirit, cls, tableLevel())) *
+           2.0f;
+}
+
+float PlayerHandler::manaRegenFromSpirit() const {
+    const uint8_t cls = queries_.playerClass();
+    if (cls == 0) return 0.0f;
+    const float spirit = static_cast<float>(std::max(0, sheet_.stats[4 /* SPIRIT */]));
+    return spirit * tables_.perClassAndLevel(StatTables::Table::RegenMpPerSpirit, cls, tableLevel());
+}
+
+float PlayerHandler::combatRatingBonus(int cr) const {
+    const uint8_t cls = queries_.playerClass();
+    if (cls == 0 || cr < 0 || cr >= static_cast<int>(StatTables::kRatings)) return 0.0f;
+    const float coef = tables_.ratingAtLevel(static_cast<uint32_t>(cr), tableLevel());
+    if (coef == 0.0f) return 0.0f;
+    const float ratingValue = static_cast<float>(std::max(0, combatRating(cr)));
+    return ratingValue * (tables_.classRatingScalar(cls, static_cast<uint32_t>(cr)) / coef);
 }
 
 void PlayerHandler::restStateArrived(bool resting) {

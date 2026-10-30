@@ -1424,7 +1424,7 @@ static int lua_UnitDefense(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int level = gh ? static_cast<int>(gh->player().level()) : 1;
     constexpr int kCrDefenseSkill = 1;  // 0-based CombatRating enum
-    const int modifier = gh ? static_cast<int>(gh->getCombatRatingBonus(kCrDefenseSkill)) : 0;
+    const int modifier = gh ? static_cast<int>(gh->player().combatRatingBonus(kCrDefenseSkill)) : 0;
     lua_pushnumber(L, level * 5);
     lua_pushnumber(L, modifier);
     return 2;
@@ -1584,7 +1584,7 @@ static int lua_ZeroPercent(lua_State* L) {
 // flyout read "0.00% from Agility" for every character.
 static int lua_GetCritChanceFromAgility(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushnumber(L, gh ? gh->getMeleeCritFromAgility() : 0.0);
+    lua_pushnumber(L, gh ? gh->player().meleeCritFromAgility() : 0.0);
     return 1;
 }
 
@@ -1592,7 +1592,7 @@ static int lua_GetCritChanceFromAgility(lua_State* L) {
 // gives, from the spell-crit game tables. Was a flat zero.
 static int lua_GetSpellCritChanceFromIntellect(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushnumber(L, gh ? gh->getSpellCritFromIntellect() : 0.0);
+    lua_pushnumber(L, gh ? gh->player().spellCritFromIntellect() : 0.0);
     return 1;
 }
 
@@ -1603,7 +1603,7 @@ static int lua_GetCombatRatingBonus(lua_State* L) {
     auto* gh = getGameHandler(L);
     // Same 1-based CR_* → 0-based table convention as GetCombatRating above.
     const int cr = static_cast<int>(luaL_optnumber(L, 1, 0)) - 1;
-    lua_pushnumber(L, gh ? gh->getCombatRatingBonus(cr) : 0.0);
+    lua_pushnumber(L, gh ? gh->player().combatRatingBonus(cr) : 0.0);
     return 1;
 }
 
@@ -1616,7 +1616,7 @@ static int lua_GetCombatRatingBonus(lua_State* L) {
 static int lua_GetArmorPenetration(lua_State* L) {
     auto* gh = getGameHandler(L);
     constexpr int kCrArmorPenetration = 24;  // 0-based CombatRating enum
-    lua_pushnumber(L, gh ? gh->getCombatRatingBonus(kCrArmorPenetration) : 0.0);
+    lua_pushnumber(L, gh ? gh->player().combatRatingBonus(kCrArmorPenetration) : 0.0);
     return 1;
 }
 
@@ -1627,14 +1627,14 @@ static int lua_GetUnitHealthRegenRateFromSpirit(lua_State* L) {
     auto* gh = getGameHandler(L);
     std::string unit(luaL_optstring(L, 1, "player"));
     toLowerInPlace(unit);
-    lua_pushnumber(L, (gh && unit == "player") ? gh->getHealthRegenFromSpirit() : 0.0);
+    lua_pushnumber(L, (gh && unit == "player") ? gh->player().healthRegenFromSpirit() : 0.0);
     return 1;
 }
 static int lua_GetUnitManaRegenRateFromSpirit(lua_State* L) {
     auto* gh = getGameHandler(L);
     std::string unit(luaL_optstring(L, 1, "player"));
     toLowerInPlace(unit);
-    lua_pushnumber(L, (gh && unit == "player") ? gh->getManaRegenFromSpirit() : 0.0);
+    lua_pushnumber(L, (gh && unit == "player") ? gh->player().manaRegenFromSpirit() : 0.0);
     return 1;
 }
 

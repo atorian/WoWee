@@ -1,6 +1,8 @@
 #pragma once
 
+#include "game/flat_field_map.hpp"
 #include "game/opcode_table.hpp"
+#include "game/stat_tables.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -12,7 +14,6 @@ namespace wowee::network { class Packet; }
 namespace wowee::game {
 
 class ChatLog;
-class FlatFieldMap;
 class FrameXmlEvents;
 struct Character;
 
@@ -25,6 +26,8 @@ public:
     virtual ~PlayerQueries() = default;
     /// The character list's entry for the character in the world, or null.
     virtual Character* listedCharacter() = 0;
+    /// The class of the character in the world, 0 before it is known.
+    [[nodiscard]] virtual uint8_t playerClass() const = 0;
     /// PLAYER_FIELD_COINAGE, for the inventory.
     virtual void moneyFieldArrived(uint32_t copper, FrameXmlEvents& packetEvents) = 0;
     /// The bank bag slots bought, from PLAYER_BYTES_2, for the inventory.
@@ -47,7 +50,7 @@ public:
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
     PlayerHandler(FrameXmlEvents& frameXml, core::EventBus& events, ChatLog& chat,
-                  PlayerQueries& queries);
+                  PlayerQueries& queries, const StatTables& tables);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -55,6 +58,14 @@ public:
     /// A create block leaves out every field that is zero, so what is not
     /// cleared here would be kept.
     void beginCharacter();
+
+    /// Every field the server has said of the player's object: what the
+    /// create block held, with each update since laid over it.
+    [[nodiscard]] const FlatFieldMap& fields() const { return sheet_.fields; }
+    /// The player's object was created with these fields: all there is.
+    void fieldsCreated(const FlatFieldMap& fields) { sheet_.fields = fields; }
+    /// These of the player's fields moved.
+    void fieldsUpdated(const FlatFieldMap& fields);
 
     /// The player's own fields: at create (`isCreate`) what is, in an update
     /// what moved. Events go into `packetEvents`, with the packet's others.
@@ -138,6 +149,28 @@ public:
         return sheet_.combatRatings[cr];
     }
 
+    /// Melee critical-strike chance the player's Agility grants, as a percent,
+    /// the way the character sheet's stat flyout reads it: the class base plus
+    /// Agility times the per-class-per-level ratio, both from the combat game
+    /// tables. Zero until the class is known.
+    [[nodiscard]] float meleeCritFromAgility() const;
+    /// Spell critical-strike chance the player's Intellect grants, as a percent -
+    /// the spell-side twin of meleeCritFromAgility, read the same way from the
+    /// spell-crit game tables.
+    [[nodiscard]] float spellCritFromIntellect() const;
+    /// The percent a combat rating grants - dodge, parry, haste, defense and the
+    /// rest of the rating-based stats the flyout shows. rating × (class scalar ÷
+    /// the level's coefficient), from gtCombatRatings and the class scalar table,
+    /// exactly as AzerothCore's GetRatingBonusValue reads it. Zero for an
+    /// out-of-range index or a rating the player has none of.
+    [[nodiscard]] float combatRatingBonus(int cr) const;
+    /// Health and mana regenerated per second from Spirit, as the stat flyout
+    /// shows them. Health splits Spirit at 50 across two tables (gtOCTRegenHP,
+    /// gtRegenHPPerSpt) then doubles; mana is Spirit × gtRegenMPPerSpt - the
+    /// same as AzerothCore's OCTRegen*PerSpirit.
+    [[nodiscard]] float healthRegenFromSpirit() const;
+    [[nodiscard]] float manaRegenFromSpirit() const;
+
     [[nodiscard]] bool helmVisible() const { return sheet_.helmVisible; }
     [[nodiscard]] bool cloakVisible() const { return sheet_.cloakVisible; }
     [[nodiscard]] uint8_t shapeshiftForm() const { return sheet_.shapeshiftForm; }
@@ -175,14 +208,21 @@ private:
         bool helmVisible = true;
         bool cloakVisible = true;
         uint8_t shapeshiftForm = 0;
+        FlatFieldMap fields;
     };
 
     void handleLevelUp(network::Packet& packet);
+    /// The level a per-level game table is read at: the player's, the last
+    /// row past it.
+    [[nodiscard]] uint32_t tableLevel() const;
+    [[nodiscard]] float critFromStat(StatTables::Table base, StatTables::Table perStat,
+                                     int statIdx) const;
 
     FrameXmlEvents& frameXml_;
     core::EventBus& events_;
     ChatLog& chat_;
     PlayerQueries& queries_;
+    const StatTables& tables_;
     Sheet sheet_;
 };
 

@@ -92,6 +92,9 @@ GameHandler::GameHandler(GameServices& services)
     if (!services_.emotes) {
         throw std::invalid_argument("GameHandler needs GameServices::emotes");
     }
+    if (!services_.statTables) {
+        throw std::invalid_argument("GameHandler needs GameServices::statTables");
+    }
     if (!services_.cvars) {
         throw std::invalid_argument("GameHandler needs GameServices::cvars");
     }
@@ -143,7 +146,8 @@ GameHandler::GameHandler(GameServices& services)
     weatherHandler_ = std::make_unique<WeatherHandler>(
         *services_.events, *this, *chatHandler_,
         [] { return isClassicLikeExpansion() ? WeatherNumbering::Classic : WeatherNumbering::WeatherState; });
-    playerHandler_ = std::make_unique<PlayerHandler>(*this, *services_.events, *chatHandler_, *this);
+    playerHandler_ = std::make_unique<PlayerHandler>(*this, *services_.events, *chatHandler_, *this,
+                                                    *services_.statTables);
 
     // The character's own settings, read once its spells have arrived - the
     // first thing the realm sends of a character entering the world.
@@ -1017,14 +1021,6 @@ void GameHandler::updateGame(float deltaTime) {
 // Single-player local combat
 // ============================================================
 
-// ============================================================
-// XP tracking
-// ============================================================
-
-uint32_t GameHandler::killXp(uint32_t playerLevel, uint32_t victimLevel) {
-    return CombatHandler::killXp(playerLevel, victimLevel);
-}
-
 void GameHandler::raiseUiError(const std::string& message) {
     // On screen and nowhere else, which is where the real client puts these.
     //
@@ -1320,119 +1316,6 @@ uint32_t GameHandler::getBankBagSlotPrice(int slotIndex) const {
 // ---------------------------------------------------------------------------
 // Group loot roll (SMSG_LOOT_ROLL / SMSG_LOOT_ROLL_WON / CMSG_LOOT_ROLL)
 // ---------------------------------------------------------------------------
-
-float GameHandler::critPercentFromGameTable(std::vector<float>& baseCache,
-                                            std::vector<float>& ratioCache, bool& loaded,
-                                            const char* baseDbc, const char* ratioDbc,
-                                            int statIdx) const {
-    const uint8_t pclass = getPlayerClass();
-    uint32_t level = playerHandler_->level();
-    if (pclass == 0 || pclass > 11 || level == 0) return 0.0f;
-    constexpr uint32_t kGtMaxLevel = 100;
-    if (level > kGtMaxLevel) level = kGtMaxLevel;
-    if (!loaded) {
-        loaded = true;
-        auto* am = services_.assetManager;
-        if (am && am->isInitialized()) {
-            // Single-column float game tables; getFloat reads that one column.
-            if (auto base = am->loadDBC(baseDbc); base && base->isLoaded())
-                for (uint32_t i = 0; i < base->getRecordCount(); ++i)
-                    baseCache.push_back(base->getFloat(i, 0));
-            if (auto ratio = am->loadDBC(ratioDbc); ratio && ratio->isLoaded())
-                for (uint32_t i = 0; i < ratio->getRecordCount(); ++i)
-                    ratioCache.push_back(ratio->getFloat(i, 0));
-        }
-    }
-    const size_t baseIdx  = static_cast<size_t>(pclass - 1);
-    const size_t ratioIdx = static_cast<size_t>(pclass - 1) * kGtMaxLevel + (level - 1);
-    if (baseIdx >= baseCache.size() || ratioIdx >= ratioCache.size()) return 0.0f;
-    const float stat = static_cast<float>(std::max(0, playerHandler_->stat(statIdx)));
-    return (baseCache[baseIdx] + stat * ratioCache[ratioIdx]) * 100.0f;  // the sheet reads a percent
-}
-
-float GameHandler::getMeleeCritFromAgility() const {
-    return critPercentFromGameTable(gtMeleeCritBase_, gtMeleeCrit_, gtMeleeCritLoaded_,
-                                    "gtChanceToMeleeCritBase.dbc", "gtChanceToMeleeCrit.dbc",
-                                    1 /* STAT_AGILITY */);
-}
-
-float GameHandler::getSpellCritFromIntellect() const {
-    return critPercentFromGameTable(gtSpellCritBase_, gtSpellCrit_, gtSpellCritLoaded_,
-                                    "gtChanceToSpellCritBase.dbc", "gtChanceToSpellCrit.dbc",
-                                    3 /* STAT_INTELLECT */);
-}
-
-namespace {
-// A single-column float game table into a flat vector.
-void loadFloatColumn(pipeline::AssetManager* am, const char* dbc, std::vector<float>& out) {
-    if (auto t = am->loadDBC(dbc); t && t->isLoaded())
-        for (uint32_t i = 0; i < t->getRecordCount(); ++i) out.push_back(t->getFloat(i, 0));
-}
-}  // namespace
-
-float GameHandler::getHealthRegenFromSpirit() const {
-    const uint8_t pclass = getPlayerClass();
-    uint32_t level = playerHandler_->level();
-    if (pclass == 0 || pclass > 11 || level == 0) return 0.0f;
-    constexpr uint32_t kGtMaxLevel = 100;
-    if (level > kGtMaxLevel) level = kGtMaxLevel;
-    if (!gtRegenLoaded_) {
-        gtRegenLoaded_ = true;
-        if (auto* am = services_.assetManager; am && am->isInitialized()) {
-            loadFloatColumn(am, "gtOCTRegenHP.dbc", gtOctRegenHp_);
-            loadFloatColumn(am, "gtRegenHPPerSpt.dbc", gtRegenHpPerSpt_);
-            loadFloatColumn(am, "gtRegenMPPerSpt.dbc", gtRegenMpPerSpt_);
-        }
-    }
-    const size_t idx = static_cast<size_t>(pclass - 1) * kGtMaxLevel + (level - 1);
-    if (idx >= gtOctRegenHp_.size() || idx >= gtRegenHpPerSpt_.size()) return 0.0f;
-    const float spirit = static_cast<float>(std::max(0, playerHandler_->stat(4 /* SPIRIT */)));
-    const float baseSpirit = std::min(spirit, 50.0f);
-    const float moreSpirit = spirit - baseSpirit;
-    return (baseSpirit * gtOctRegenHp_[idx] + moreSpirit * gtRegenHpPerSpt_[idx]) * 2.0f;
-}
-
-float GameHandler::getManaRegenFromSpirit() const {
-    const uint8_t pclass = getPlayerClass();
-    uint32_t level = playerHandler_->level();
-    if (pclass == 0 || pclass > 11 || level == 0) return 0.0f;
-    constexpr uint32_t kGtMaxLevel = 100;
-    if (level > kGtMaxLevel) level = kGtMaxLevel;
-    if (!gtRegenLoaded_) { getHealthRegenFromSpirit(); }  // shares the same lazy load
-    const size_t idx = static_cast<size_t>(pclass - 1) * kGtMaxLevel + (level - 1);
-    if (idx >= gtRegenMpPerSpt_.size()) return 0.0f;
-    const float spirit = static_cast<float>(std::max(0, playerHandler_->stat(4 /* SPIRIT */)));
-    return spirit * gtRegenMpPerSpt_[idx];
-}
-
-float GameHandler::getCombatRatingBonus(int cr) const {
-    const uint8_t pclass = getPlayerClass();
-    uint32_t level = playerHandler_->level();
-    constexpr uint32_t kGtMaxLevel = 100, kGtMaxRating = 32;
-    if (pclass == 0 || pclass > 11 || level == 0 || cr < 0 ||
-        cr >= static_cast<int>(kGtMaxRating)) return 0.0f;
-    if (level > kGtMaxLevel) level = kGtMaxLevel;
-    if (!gtCombatRatingsLoaded_) {
-        gtCombatRatingsLoaded_ = true;
-        auto* am = services_.assetManager;
-        if (am && am->isInitialized()) {
-            if (auto t = am->loadDBC("gtCombatRatings.dbc"); t && t->isLoaded())
-                for (uint32_t i = 0; i < t->getRecordCount(); ++i)
-                    gtCombatRatings_.push_back(t->getFloat(i, 0));
-            // The scalar table is id + ratio; the ratio is the second column.
-            if (auto s = am->loadDBC("gtOCTClassCombatRatingScalar.dbc"); s && s->isLoaded())
-                for (uint32_t i = 0; i < s->getRecordCount(); ++i)
-                    gtClassRatingScalar_.push_back(s->getFloat(i, 1));
-        }
-    }
-    const size_t coefIdx   = static_cast<size_t>(cr) * kGtMaxLevel + (level - 1);
-    const size_t scalarIdx = static_cast<size_t>(pclass - 1) * kGtMaxRating + cr;
-    if (coefIdx >= gtCombatRatings_.size() || scalarIdx >= gtClassRatingScalar_.size()) return 0.0f;
-    const float coef = gtCombatRatings_[coefIdx];
-    if (coef == 0.0f) return 0.0f;
-    const float ratingValue = static_cast<float>(std::max(0, playerHandler_->combatRating(cr)));
-    return ratingValue * (gtClassRatingScalar_[scalarIdx] / coef);
-}
 
 const GameHandler::BattlemasterEntry* GameHandler::getBattlemasterInfo(uint32_t bgTypeId) {
     if (!battlemasterListLoaded_) {

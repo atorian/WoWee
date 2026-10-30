@@ -23,6 +23,7 @@
 #include "game/expansion_profile.hpp"
 #include "game/game_handler.hpp"
 #include "game/game_services.hpp"
+#include "game/stat_tables.hpp"
 #include "game/opcode_table.hpp"
 #include "achievement/services/ports.hpp"
 #include "title/services/ports.hpp"
@@ -314,6 +315,9 @@ public:
     /// The realm's fields for the player's own object, as an update block -
     /// `create` the one that puts it in the world - applied and pumped.
     void playerFields(const std::map<uint16_t, uint32_t>& fields, bool create = false);
+    /// What the game reads for column `column` of the game table `dbc`. A
+    /// table the test has not given fails the test when it is read.
+    void gameTable(const std::string& dbc, uint32_t column, std::vector<float> rows);
     /// Read the world as expansion `id` does from here on: its update field
     /// and opcode tables, and the rules that ask which expansion is active.
     /// The login has already happened on WotLK's wire, so this is for what
@@ -324,6 +328,8 @@ private:
     core::EventBus events_;
     core::CVarStore cvars_;
     std::unique_ptr<game::EmoteTable> emotes_;
+    std::map<std::pair<std::string, uint32_t>, std::vector<float>> gameTables_;
+    std::unique_ptr<game::StatTables> statTables_;
     game::ExpansionRegistry expansions_;
     game::GameServices services_;
     std::unique_ptr<game::ContactsGateway> contactsGateway_;

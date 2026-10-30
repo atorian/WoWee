@@ -279,3 +279,112 @@ TEST_CASE("entering an inn says the player is resting, once", "[player][harness]
               return line.message == "You are now resting.";
           }) == 1);
 }
+
+namespace {
+// A per-class table where only the warrior's row is the one asked for: any
+// other row read gives a number far from what the test expects.
+std::vector<float> perClass(float warrior) {
+    std::vector<float> rows(11, 9.0f);
+    rows[0] = warrior;
+    return rows;
+}
+// A per-class-per-level table (11 classes x 100 levels), the warrior's row at
+// `level` set.
+std::vector<float> perClassAndLevel(uint32_t level, float value) {
+    std::vector<float> rows(11 * 100, 9.0f);
+    rows[level - 1] = value;
+    return rows;
+}
+}  // namespace
+
+TEST_CASE("crit from Agility and Intellect is the class base plus the stat at the level's ratio",
+          "[player][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    h.gameTable("gtChanceToMeleeCritBase.dbc", 0, perClass(0.05f));
+    h.gameTable("gtChanceToMeleeCrit.dbc", 0, perClassAndLevel(10, 0.0005f));
+    h.gameTable("gtChanceToSpellCritBase.dbc", 0, perClass(0.01f));
+    h.gameTable("gtChanceToSpellCrit.dbc", 0, perClassAndLevel(10, 0.0002f));
+    h.playerFields({{uf(UF::UNIT_FIELD_LEVEL), 10}, {uf(UF::UNIT_FIELD_STAT1), 40}, {uf(UF::UNIT_FIELD_STAT3), 100}},
+                   /*create=*/true);
+    // (0.05 + 40 x 0.0005) x 100, and (0.01 + 100 x 0.0002) x 100.
+    CHECK(h.game().player().meleeCritFromAgility() == Catch::Approx(7.0f));
+    CHECK(h.game().player().spellCritFromIntellect() == Catch::Approx(3.0f));
+}
+
+TEST_CASE("a level past the tables reads their last row", "[player][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    h.gameTable("gtChanceToMeleeCritBase.dbc", 0, perClass(0.05f));
+    h.gameTable("gtChanceToMeleeCrit.dbc", 0, perClassAndLevel(100, 0.001f));
+    h.playerFields({{uf(UF::UNIT_FIELD_LEVEL), 120}, {uf(UF::UNIT_FIELD_STAT1), 40}}, /*create=*/true);
+    CHECK(h.game().player().meleeCritFromAgility() == Catch::Approx(9.0f));
+}
+
+TEST_CASE("regen from Spirit splits health at fifty Spirit and doubles it", "[player][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    h.gameTable("gtOCTRegenHP.dbc", 0, perClassAndLevel(10, 0.5f));
+    h.gameTable("gtRegenHPPerSpt.dbc", 0, perClassAndLevel(10, 0.25f));
+    h.gameTable("gtRegenMPPerSpt.dbc", 0, perClassAndLevel(10, 0.1f));
+    h.playerFields({{uf(UF::UNIT_FIELD_LEVEL), 10}, {uf(UF::UNIT_FIELD_STAT4), 70}}, /*create=*/true);
+    // (50 x 0.5 + 20 x 0.25) x 2, and 70 x 0.1.
+    CHECK(h.game().player().healthRegenFromSpirit() == Catch::Approx(60.0f));
+    CHECK(h.game().player().manaRegenFromSpirit() == Catch::Approx(7.0f));
+}
+
+TEST_CASE("a combat rating is worth the class scalar over the level's coefficient", "[player][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    std::vector<float> coefficients(32 * 100, 9.0f);
+    coefficients[2 * 100 + 9] = 2.5f;  // dodge at level 10
+    coefficients[3 * 100 + 9] = 0.0f;  // parry at level 10: worth nothing
+    h.gameTable("gtCombatRatings.dbc", 0, coefficients);
+    std::vector<float> scalars(11 * 32, 9.0f);
+    scalars[2] = 1.0f;  // the warrior's dodge
+    // The scalar table is id then ratio: the ratio is what is read.
+    h.gameTable("gtOCTClassCombatRatingScalar.dbc", 1, scalars);
+    h.playerFields({{uf(UF::UNIT_FIELD_LEVEL), 10},
+                    {static_cast<uint16_t>(uf(UF::PLAYER_FIELD_COMBAT_RATING_1) + 2), 25},
+                    {static_cast<uint16_t>(uf(UF::PLAYER_FIELD_COMBAT_RATING_1) + 3), 25}},
+                   /*create=*/true);
+    // 25 x (1.0 / 2.5).
+    CHECK(h.game().player().combatRatingBonus(2) == Catch::Approx(10.0f));
+    CHECK(h.game().player().combatRatingBonus(3) == 0.0f);
+    // A rating that does not exist is worth nothing, and reads no table.
+    CHECK(h.game().player().combatRatingBonus(-1) == 0.0f);
+    CHECK(h.game().player().combatRatingBonus(32) == 0.0f);
+}
+
+TEST_CASE("before the character is known nothing is read from the tables", "[player][harness]") {
+    GameHarness h;
+    // No character in the world, and no tables given: reading one would fail.
+    CHECK(h.game().player().meleeCritFromAgility() == 0.0f);
+    CHECK(h.game().player().healthRegenFromSpirit() == 0.0f);
+    CHECK(h.game().player().combatRatingBonus(2) == 0.0f);
+}
+
+TEST_CASE("the player's fields are what the create block held, with each update over it",
+          "[player][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    h.playerFields({{uf(UF::PLAYER_XP), 300}, {uf(UF::UNIT_FIELD_LEVEL), 10}}, /*create=*/true);
+    h.playerFields({{uf(UF::PLAYER_XP), 420}});
+    const auto& fields = h.game().player().fields();
+    CHECK(fields.find(uf(UF::PLAYER_XP))->second == 420);
+    CHECK(fields.find(uf(UF::UNIT_FIELD_LEVEL))->second == 10);
+
+    // The next character's are its own.
+    PlayerSpec bob;
+    bob.guid = 0x11;
+    bob.name = "Bob";
+    h.relogAs(bob);
+    h.playerInView();
+    h.playerFields({{uf(UF::UNIT_FIELD_LEVEL), 12}}, /*create=*/true);
+    CHECK(h.game().player().fields().find(uf(UF::PLAYER_XP)) == h.game().player().fields().end());
+}

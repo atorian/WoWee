@@ -1287,7 +1287,7 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
 
     // For the local player, capture the full initial field state
     if (block.guid == owner_.getPlayerGuid()) {
-        owner_.lastPlayerFieldsRef() = entity->getFields();
+        owner_.player().fieldsCreated(entity->getFields());
         owner_.inventory().maybeDetectVisibleItemLayout();
     }
 
@@ -1340,9 +1340,9 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
     // Player stat fields (self only)
     if (block.guid == owner_.getPlayerGuid()) {
         // Auto-detect coinage index using the previous snapshot vs this full snapshot.
-        owner_.inventory().detectCoinageField(owner_.lastPlayerFieldsRef(), block.fields);
+        owner_.inventory().detectCoinageField(owner_.player().fields(), block.fields);
 
-        owner_.lastPlayerFieldsRef() = block.fields;
+        owner_.player().fieldsCreated(block.fields);
         owner_.inventory().detectInventorySlotBases(block.fields);
 
         if (kVerboseUpdateObject) {
@@ -1357,9 +1357,9 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
         owner_.player().playerFieldsArrived(block.fields, true, pendingEvents_);
         owner_.inventory().inventoryFieldsArrived(block.fields, true, pendingEvents_);
         owner_.inventory().maybeDetectVisibleItemLayout();
-        owner_.spells().extractSkillFields(owner_.lastPlayerFieldsRef());
-        owner_.spells().extractExploredZoneFields(owner_.lastPlayerFieldsRef());
-        owner_.quests().applyQuestStateFromFields(owner_.lastPlayerFieldsRef());
+        owner_.spells().extractSkillFields(owner_.player().fields());
+        owner_.spells().extractExploredZoneFields(owner_.player().fields());
+        owner_.quests().applyQuestStateFromFields(owner_.player().fields());
     }
 }
 
@@ -1616,7 +1616,7 @@ void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::share
         const bool needCoinageDetectSnapshot = owner_.inventory().expectedMoneyDelta() != 0;
         FlatFieldMap oldFieldsSnapshot;
         if (needCoinageDetectSnapshot) {
-            oldFieldsSnapshot = owner_.lastPlayerFieldsRef();
+            oldFieldsSnapshot = owner_.player().fields();
         }
         if (block.hasMovement && block.runSpeed > 0.1f && block.runSpeed < 100.0f) {
             // Speed is independent of mount ownership: slows and ordinary movement
@@ -1627,22 +1627,18 @@ void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::share
                 block.swimSpeed, block.swimBackSpeed, block.flightSpeed,
                 block.flightBackSpeed, block.turnRate, block.pitchRate);
         }
-        // Merge block fields into the persistent snapshot. Both are sorted, so
-        // a simple insert_or_assign per key keeps the invariant intact.
-        for (const auto& [key, val] : block.fields) {
-            owner_.lastPlayerFieldsRef().insert_or_assign(key, val);
-        }
+        owner_.player().fieldsUpdated(block.fields);
         if (needCoinageDetectSnapshot) {
-            owner_.inventory().detectCoinageField(oldFieldsSnapshot, owner_.lastPlayerFieldsRef());
+            owner_.inventory().detectCoinageField(oldFieldsSnapshot, owner_.player().fields());
         }
         owner_.inventory().maybeDetectVisibleItemLayout();
         owner_.inventory().detectInventorySlotBases(block.fields);
 
         owner_.player().playerFieldsArrived(block.fields, false, pendingEvents_);
         owner_.inventory().inventoryFieldsArrived(block.fields, false, pendingEvents_);
-        owner_.spells().extractSkillFields(owner_.lastPlayerFieldsRef());
-        owner_.spells().extractExploredZoneFields(owner_.lastPlayerFieldsRef());
-        owner_.quests().applyQuestStateFromFields(owner_.lastPlayerFieldsRef());
+        owner_.spells().extractSkillFields(owner_.player().fields());
+        owner_.spells().extractExploredZoneFields(owner_.player().fields());
+        owner_.quests().applyQuestStateFromFields(owner_.player().fields());
     }
 }
 
@@ -1884,7 +1880,7 @@ void EntityController::finalizeUpdateObjectBatch(bool newItemCreated) {
     owner_.combat().invalidateTabCycle();
     // Entity count logging disabled
 
-    owner_.inventory().updateBatchFinished(newItemCreated, owner_.lastPlayerFieldsRef());
+    owner_.inventory().updateBatchFinished(newItemCreated, owner_.player().fields());
 }
 
 void EntityController::handleCompressedUpdateObject(network::Packet& packet) {

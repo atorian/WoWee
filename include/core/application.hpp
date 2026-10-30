@@ -403,6 +403,7 @@ private:
     game::GameServices gameServices_;
     /// What the emotes are, for the game, the interface and the animation.
     std::unique_ptr<game::EmoteTable> emoteTable_;
+    std::unique_ptr<game::StatTables> statTables_;
 
     // What an agent connected over MCP holds down; ahead of everything that
     // reads it, so it is destroyed after them.

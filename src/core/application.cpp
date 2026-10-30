@@ -52,6 +52,7 @@
 #include "network/world_socket.hpp"
 #include "game/protocol_tables.hpp"
 #include "game/emote_table.hpp"
+#include "game/stat_tables.hpp"
 #include "audio/ambient_sound_manager.hpp"
 #include "core/zone_tracker.hpp"
 #include "core/frame_pacer.hpp"
@@ -510,6 +511,8 @@ bool Application::initialize() {
         animation->setEmoteTable(emoteTable_.get());
     }
     gameServices_.emotes = emoteTable_.get();
+    statTables_ = std::make_unique<game::StatTables>(game::StatTables::fromAssets(assetManager.get()));
+    gameServices_.statTables = statTables_.get();
     gameServices_.assetManager = assetManager.get();
     gameServices_.expansionRegistry = expansionRegistry_.get();
     gameServices_.events = &eventBus_;

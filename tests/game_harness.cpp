@@ -165,6 +165,13 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     emotes_ = std::make_unique<game::EmoteTable>(nullptr);
     services_.expansionRegistry = &expansions_;
     services_.emotes = emotes_.get();
+    statTables_ = std::make_unique<game::StatTables>([this](const std::string& dbc, uint32_t column) {
+        const auto it = gameTables_.find({dbc, column});
+        if (it == gameTables_.end()) fail("the game read " + dbc + " column " + std::to_string(column) +
+                                          ", which the test did not give");
+        return it->second;
+    });
+    services_.statTables = statTables_.get();
     services_.events = &events_;
     services_.cvars = &cvars_;
     services_.steadyNow = [this] { return now_; };
@@ -514,6 +521,10 @@ void GameHarness::playerFields(const std::map<uint16_t, uint32_t>& fields, bool 
     batch.blocks.push_back(block);
     game_->entityController().applyRecordedObjects(batch);
     pump();
+}
+
+void GameHarness::gameTable(const std::string& dbc, uint32_t column, std::vector<float> rows) {
+    gameTables_[{dbc, column}] = std::move(rows);
 }
 
 void GameHarness::enterWorld(const PlayerSpec& player) {
