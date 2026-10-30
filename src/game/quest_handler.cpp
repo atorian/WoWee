@@ -21,6 +21,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <limits>
 #include <set>
@@ -2063,6 +2064,25 @@ bool QuestHandler::resyncQuestLogFromServerSlots(bool forceQueryMetadata) {
              " localBefore=", localBefore, " removed=", removed, " added=", added,
              " markedComplete=", marked);
     return true;
+}
+
+// The log and the tracker draw an objective as "<name> slain: 3/8", and the
+// name is whatever the creature or game object query answers. Both are drawn
+// long before the answer arrives, and neither looks again on its own - so an
+// objective built while the query was out kept the bare word "Creature" until
+// something else happened to that quest. This is what tells them to look.
+void QuestHandler::objectiveTargetNamed(uint32_t entry, bool isGameObject) {
+    if (!frameXml_.frameXmlListening()) return;
+    for (const auto& quest : journal_.questLog) {
+        for (const auto& obj : quest.killObjectives) {
+            if (obj.npcOrGoId == 0 || obj.required == 0) continue;
+            if ((obj.npcOrGoId < 0) != isGameObject) continue;
+            if (static_cast<uint32_t>(std::abs(obj.npcOrGoId)) == entry) {
+                frameXml_.fireFrameXmlEvent("QUEST_LOG_UPDATE", {});
+                return;
+            }
+        }
+    }
 }
 
 void QuestHandler::applyQuestStateFromFields(const FlatFieldMap& fields) {

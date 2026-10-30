@@ -291,6 +291,10 @@ public:
     /// A quest giver left view: its mark goes with it.
     void forgetQuestGiver(uint64_t guid) { journal_.npcQuestStatus.erase(guid); }
 
+    /// The name of a creature or (isGameObject) game object template
+    /// arrived: the log is told to look again if an objective is about it.
+    void objectiveTargetNamed(uint32_t entry, bool isGameObject);
+
     /// Tell the interface a quest moved - see the definition for why the
     /// three events go together.
     void announceQuestLogChanged(uint32_t questId);

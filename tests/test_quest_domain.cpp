@@ -43,7 +43,8 @@ const wowee::game::QuestHandler::QuestLogEntry& logEntry(GameHarness& h, uint32_
 /// writes it on 3.3.5a: sixty-five numeric fields, then the strings - title,
 /// objectives, details, area description, completion text.
 std::vector<uint8_t> questQuery(uint32_t questId, const std::vector<std::string>& strings,
-                                uint32_t collectItem = 0, uint32_t collectCount = 0) {
+                                uint32_t collectItem = 0, uint32_t collectCount = 0,
+                                int32_t killTarget = 0, uint32_t killCount = 0) {
     Body b;
     b.u32(questId).u32(2).u32(50).u32(45).u32(38);   // id, method, level, min level, zone
     b.u32(0).u32(0);                                  // type, suggested players
@@ -58,10 +59,12 @@ std::vector<uint8_t> questQuery(uint32_t questId, const std::vector<std::string>
     b.zeros(5 * 3 * 4);                               // five reputations: ids, values, overrides
     b.u32(0).u32(0).u32(0).u32(0);                    // point of interest
     for (const auto& s : strings) b.cstr(s);
-    if (collectItem != 0) {
+    if (collectItem != 0 || killTarget != 0) {
         // The objectives: four {creature or object, count, dropped item,
-        // count} records, then six {required item, count}.
-        b.zeros(4 * 4 * 4);
+        // count} records - an object's id negative - then six {required
+        // item, count}.
+        b.u32(static_cast<uint32_t>(killTarget)).u32(killCount).u32(0).u32(0);
+        b.zeros(3 * 4 * 4);
         b.u32(collectItem).u32(collectCount);
         b.zeros(5 * 2 * 4);
     }
@@ -248,4 +251,30 @@ TEST_CASE("the next character is offered none of the last one's quests", "[quest
     CHECK_FALSE(h.game().quests().hasPendingSharedQuest());
     CHECK_FALSE(h.game().quests().isQuestDetailsOpen());
     CHECK_FALSE(h.game().quests().isQuestTracked(11));
+}
+
+TEST_CASE("an objective's target named at last has the quest log redrawn, and only then",
+          "[quest][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.receive(Opcode::SMSG_QUESTGIVER_QUEST_DETAILS, offer(kMarshal, 11, "Riverpaw Gnoll Bounty"));
+    h.pump();
+    h.game().quests().acceptQuest();
+    // Kill ten of creature 117.
+    h.receive(Opcode::SMSG_QUEST_QUERY_RESPONSE,
+              questQuery(11, {"Riverpaw Gnoll Bounty", "Kill 10 Riverpaw Gnolls.", "", "", ""}, 0, 0, 117, 10));
+    h.pump();
+    h.clearRecords();
+
+    // A creature no objective is about: nothing to redraw.
+    h.receive(Opcode::SMSG_CREATURE_QUERY_RESPONSE,
+              Body().u32(299).cstr("Young Wolf").cstr("").cstr("").cstr("").cstr("").cstr("").zeros(16).bytes());
+    h.pump();
+    CHECK(h.addonEvents("QUEST_LOG_UPDATE").empty());
+
+    // The objective's own creature: the log and the tracker look again.
+    h.receive(Opcode::SMSG_CREATURE_QUERY_RESPONSE,
+              Body().u32(117).cstr("Riverpaw Gnoll").cstr("").cstr("").cstr("").cstr("").cstr("").zeros(16).bytes());
+    h.pump();
+    CHECK(h.addonEvents("QUEST_LOG_UPDATE").size() == 1);
 }
