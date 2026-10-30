@@ -1,5 +1,7 @@
 #include "rendering/water_reflection.hpp"
 
+#include "rendering/camera.hpp"
+
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/matrix.hpp>
 
@@ -38,6 +40,18 @@ glm::mat4 obliqueReflectionProjection(const glm::mat4& projection, const glm::ma
     result[2][2] = m.z;
     result[3][2] = m.w;
     return result;
+}
+
+std::optional<WaterReflectionView> waterReflectionView(const Camera& camera,
+                                                      std::optional<float> waterHeight) {
+    if (!waterHeight) return std::nullopt;
+    // Under the water, or on it, the camera would see the mirrored world
+    // from inside the plane it is mirrored in.
+    if (camera.getPosition().z < *waterHeight + 0.5f) return std::nullopt;
+    WaterReflectionView out;
+    out.view = mirroredView(camera.getPosition(), camera.getForward(), *waterHeight);
+    out.projection = obliqueReflectionProjection(camera.getProjectionMatrix(), out.view, *waterHeight);
+    return out;
 }
 
 } // namespace rendering

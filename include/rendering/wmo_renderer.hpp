@@ -24,6 +24,7 @@
 #include <glm/glm.hpp>
 #include <atomic>
 #include <memory>
+#include <optional>
 #include <span>
 #include <unordered_map>
 #include <unordered_set>
@@ -266,8 +267,12 @@ public:
      */
     /** Pre-update mutable state (frame ID, material UBOs) on main thread before parallel render. */
     struct Frame;
+    /// `reflection` is the view-projection the water's reflection is drawn
+    /// with (waterReflectionView), none when no reflection is drawn; each
+    /// colour pass keeps only the groups its own eye can see.
     std::shared_ptr<const Frame> extract(const Camera& camera, const glm::vec3& viewer,
-                                        const std::vector<LocalLight>& lights, bool reflection = false);
+                                        const std::vector<LocalLight>& lights,
+                                        std::optional<glm::mat4> reflection = std::nullopt);
     void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
     void prepareRender();
     /// The passes that draw the buildings in colour. Each culls into a draw
@@ -890,13 +895,15 @@ private:
         size_t used = 0;
         uint32_t portalCulled = 0;
         uint32_t distanceCulled = 0;
+        /// Groups outside the pass's view volume.
+        uint32_t frustumCulled = 0;
         uint32_t drawCalls = 0;
         /// The portal walk's result for the instance being culled.
         std::unordered_set<uint32_t> portalGroups;
 
         void clear() {
             used = 0;
-            portalCulled = distanceCulled = drawCalls = 0;
+            portalCulled = distanceCulled = frustumCulled = drawCalls = 0;
         }
         DrawEntry& add() {
             if (used == entries.size()) entries.emplace_back();
@@ -916,7 +923,10 @@ private:
 
 
     /// The instances the camera sees and their groups that are drawn.
-    void cullView(const Camera& camera, const glm::vec3& portalViewerPos, DrawList& list) const;
+    /// `eye` is the view-projection the pass draws with - the camera's, or
+    /// the reflection's - and a group outside its volume is left out.
+    void cullView(const Camera& camera, const glm::vec3& portalViewerPos, const glm::mat4& eye,
+                  DrawList& list) const;
     uint32_t recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const glm::vec3& camPos,
                     const DrawList& list, Layer layer) const;
     /// The instances, shown, and groups that reach a shadow map of this centre and reach.

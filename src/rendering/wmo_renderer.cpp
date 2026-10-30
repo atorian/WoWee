@@ -1132,11 +1132,11 @@ void WMORenderer::Frame::clear() noexcept {
 }
 
 std::shared_ptr<const WMORenderer::Frame> WMORenderer::extract(const Camera& camera,
-        const glm::vec3& viewer, const std::vector<LocalLight>& lights, bool reflection) {
+        const glm::vec3& viewer, const std::vector<LocalLight>& lights, std::optional<glm::mat4> reflection) {
     auto frame = framePool_.acquire();
     frameLights_ = &lights;
-    cullView(camera, viewer, frame->view);
-    if (reflection) cullView(camera, camera.getPosition(), frame->reflection);
+    cullView(camera, viewer, camera.getViewProjectionMatrix(), frame->view);
+    if (reflection) cullView(camera, camera.getPosition(), *reflection, frame->reflection);
     extractDepth(frame->depth);
     frameLights_ = nullptr;
     frame->wireframe = wireframeMode;
@@ -1163,13 +1163,18 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
     }
 }
 
-void WMORenderer::cullView(const Camera& camera, const glm::vec3& portalViewerPos, DrawList& list) const {
+void WMORenderer::cullView(const Camera& camera, const glm::vec3& portalViewerPos, const glm::mat4& eye,
+                           DrawList& list) const {
     list.clear();
 
     // Extract frustum planes for proper culling
     glm::mat4 viewProj = camera.getProjectionMatrix() * camera.getViewMatrix();
     Frustum frustum;
     frustum.extractFromMatrix(viewProj);
+    // What the pass draws from: the camera's volume for the view, the
+    // mirrored one for the reflection. The portal walk keeps the camera's.
+    Frustum eyeVolume;
+    eyeVolume.extractFromMatrix(eye);
 
     const glm::vec3 camPos = camera.getPosition();
     const bool doPortalCull = portalCulling && cullingEnabled_;
@@ -1281,6 +1286,18 @@ void WMORenderer::cullView(const Camera& camera, const glm::vec3& portalViewerPo
                     : viewDistance_;
                 if (distSq > groupViewDistance * groupViewDistance) {
                     list.distanceCulled++;
+                    continue;
+                }
+            }
+
+            // Outside the volume the pass draws, the GPU would clip every
+            // triangle of it; recording it costs the draws and their
+            // vertices. Outside a city's buildings, with no portal walk,
+            // two of every three groups were behind or beside the camera.
+            if (gi < instance.worldGroupBounds.size()) {
+                const auto& [gMin, gMax] = instance.worldGroupBounds[gi];
+                if (!eyeVolume.intersectsAABB(gMin, gMax)) {
+                    list.frustumCulled++;
                     continue;
                 }
             }

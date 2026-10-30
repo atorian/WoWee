@@ -117,7 +117,7 @@ Json statistics(const rendering::RenderStatistics& s) {
     return {{"terrainDrawn", s.terrainDrawn}, {"terrainCulled", s.terrainCulled},
         {"terrainTriangles",s.terrainTriangles}, {"m2Draws",s.m2Draws}, {"wmoDraws",s.wmoDraws},
         {"wmoShadows",s.wmoShadows}, {"wmoDistanceCulled",s.wmoDistanceCulled},
-        {"wmoPortalCulled",s.wmoPortalCulled}, {"rtInstances",s.rtInstances}, {"rtMeshes",s.rtMeshes},
+        {"wmoPortalCulled",s.wmoPortalCulled}, {"wmoFrustumCulled",s.wmoFrustumCulled}, {"rtInstances",s.rtInstances}, {"rtMeshes",s.rtMeshes},
         {"rtTriangles",s.rtTriangles}, {"rtGpuBytes",s.rtGpuBytes}, {"rtSourceBytes",s.rtSourceBytes},
         {"width",s.width}, {"height",s.height}};
 }

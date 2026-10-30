@@ -1654,6 +1654,18 @@ if(WOWEE_BUILD_RT_RENDERER_CHANGES_TEST AND NOT ANDROID)
     register_test_target(rt_renderer_changes_test)
 endif()
 
+option(WOWEE_BUILD_WMO_VIEW_CULL_TEST "Build the native GPU test of the WMO view and reflection cull" OFF)
+if(WOWEE_BUILD_WMO_VIEW_CULL_TEST AND NOT ANDROID)
+    add_executable(wmo_view_cull_test wmo_view_cull_main.cpp)
+    target_link_libraries(wmo_view_cull_test PRIVATE wowee_render)
+    wowee_test_link_glm(wmo_view_cull_test)
+    wowee_apply_client_flags(wmo_view_cull_test)
+    add_test(NAME wmo_view_cull COMMAND wmo_view_cull_test
+             WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+    set_tests_properties(wmo_view_cull PROPERTIES SKIP_RETURN_CODE 77)
+    register_test_target(wmo_view_cull_test)
+endif()
+
 wowee_add_test(test_terrain_depth
     SOURCES test_terrain_depth.cpp
             ${CMAKE_SOURCE_DIR}/src/rendering/frustum.cpp)
@@ -2546,6 +2558,7 @@ wowee_add_test(test_ocean_fft
 wowee_add_test(test_water_reflection
     SOURCES test_water_reflection.cpp
             ${CMAKE_SOURCE_DIR}/src/rendering/water_reflection.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/camera.cpp
             ${TEST_COMMON_SOURCES})
 
 # ── test_sphere_map ──────────────────────────────────────────

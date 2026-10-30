@@ -1647,7 +1647,14 @@ FrameInputs Renderer::extractFrameInputs() {
     extraction.lap("water");
     if (wmoRenderer) {
         wmoRenderer->setViewDistance(in.viewDistance);
-        scene->buildings = wmoRenderer->extract(in.camera, in.characterPosition, in.localLights, scene->water.inView);
+        // The reflection's eye, worked out as renderReflectionPass works it
+        // out, from the same camera and water.
+        std::optional<glm::mat4> reflection;
+        if (scene->water.inView) {
+            if (const auto mirrored = waterReflectionView(in.camera, in.reflectionWaterHeight))
+                reflection = mirrored->projection * mirrored->view;
+        }
+        scene->buildings = wmoRenderer->extract(in.camera, in.characterPosition, in.localLights, reflection);
     }
     extraction.lap("WMO");
     if (characterRenderer) scene->characters = characterRenderer->extract(in.camera, in.localLights);
@@ -4999,19 +5006,13 @@ void Renderer::renderReflectionPass() {
     // which requires matching sample counts. Only render scene into reflection when MSAA is off.
     bool canRenderScene = (vkCtx->getMsaaSamples() == VK_SAMPLE_COUNT_1_BIT);
 
-    // Find dominant water height near camera
+    // The dominant water near the camera, mirrored in; none under it.
     const glm::vec3 camPos = frameCamera()->getPosition();
-    auto waterH = frameInputs_.reflectionWaterHeight;
-    if (!waterH) return;
-
-    float waterHeight = *waterH;
-
-    // Skip reflection if camera is underwater (Z is up)
-    if (camPos.z < waterHeight + 0.5f) return;
-
-    // Compute reflected view and oblique projection
-    glm::mat4 reflView = mirroredView(frameCamera()->getPosition(), frameCamera()->getForward(), waterHeight);
-    glm::mat4 reflProj = obliqueReflectionProjection(frameCamera()->getProjectionMatrix(), reflView, waterHeight);
+    const auto mirrored = waterReflectionView(*frameCamera(), frameInputs_.reflectionWaterHeight);
+    if (!mirrored) return;
+    const float waterHeight = *frameInputs_.reflectionWaterHeight;
+    const glm::mat4& reflView = mirrored->view;
+    const glm::mat4& reflProj = mirrored->projection;
 
     // Update water renderer's reflection UBO with the reflected viewProj
     waterRenderer->updateReflectionUBO(reflProj * reflView);

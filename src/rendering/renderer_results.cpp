@@ -86,6 +86,7 @@ void Renderer::publishFrameResults() {
         const auto& view = frameInputs_.scene->buildings->view;
         result.statistics.wmoDistanceCulled = view.distanceCulled;
         result.statistics.wmoPortalCulled = view.portalCulled;
+        result.statistics.wmoFrustumCulled = view.frustumCulled;
     }
     if (rtScene_) {
         const auto stats = rtScene_->stats();
