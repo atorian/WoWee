@@ -30,14 +30,26 @@ option(WOWEE_ENABLE_ASAN "Enable AddressSanitizer + UBSan (applied to all build 
 option(WOWEE_ENABLE_TRACY "Enable Tracy profiler instrumentation" OFF)
 option(WOWEE_ENABLE_LTO "Link-time optimisation for the client in Release builds" ON)
 
-# ccache, when it is installed. A fresh worktree or a CI runner otherwise
-# compiles all of the client from nothing.
+# ccache, when it is installed. It serves a build directory again what that
+# directory compiled before: a rebuild after switching branches and back, a
+# clean rebuild, a CI runner whose cache is restored to the same path. It does
+# not serve one worktree what another compiled, and must not.
 #
 # The client compiles every file against a precompiled header, and ccache
 # refuses to cache those unless told the PCH's defines and timestamps may be
 # ignored - without the sloppiness below almost nothing would hit. Clang also
 # stamps the PCH with its build time, which -fno-pch-timestamp turns off
 # (see WOWEE_COMPILER_CACHE where the PCH is declared).
+#
+# base_dir is switched off for these calls, whatever the user's ccache.conf
+# says. It rewrites paths so that two directories compile to the same key,
+# but what they compile is not the same: a clang PCH, and the generated
+# cmake_pch.hxx it is built from, hold the absolute paths of the headers in
+# it. With base_dir covering two worktrees, a PCH built in one was served to
+# the other, which then included logger.hpp from its own tree a second time
+# and stopped on "redefinition of 'LogLevel'". Debug information keeps the
+# directory it was compiled in as well, so an object from another worktree
+# would point the debugger at that worktree's sources.
 #
 # Not on MSVC: Debug there uses /ZI, which ccache cannot cache.
 option(WOWEE_USE_CCACHE "Use ccache as the compiler launcher when found" ON)
@@ -49,6 +61,7 @@ if(WOWEE_USE_CCACHE AND NOT MSVC AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
         set(_wowee_ccache_launcher
             ${CMAKE_COMMAND} -E env
             CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime
+            CCACHE_BASEDIR=
             ${WOWEE_CCACHE_PROGRAM})
         set(CMAKE_C_COMPILER_LAUNCHER ${_wowee_ccache_launcher})
         set(CMAKE_CXX_COMPILER_LAUNCHER ${_wowee_ccache_launcher})
