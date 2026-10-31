@@ -241,6 +241,11 @@ ClientHarness::ClientHarness()
     luaServices.titles = &game_.titles();
     luaServices.reputation = &game_.reputation();
     luaServices.pet = &game_.pet();
+    // As Application wires it: acted on between frames, because the reload
+    // destroys the Lua state that asked.
+    luaServices.requestReloadUI = [this]() {
+        if (auto* character = session()) character->requestInterfaceReload();
+    };
     playerView_->bindMovementControls(luaServices);
 
     core::ClientLoop::Services services{

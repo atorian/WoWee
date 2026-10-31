@@ -36,13 +36,16 @@ void writeHoliday(Packet& p, uint32_t id, const std::string& texture,
     p.writeUInt32(1);    // looping
     p.writeUInt32(7);    // priority
     p.writeUInt32(3);    // calendarFilterType
-    for (int i = 0; i < CalendarHoliday::kNumDates; ++i) {
+    // The server's MAX_HOLIDAY_DATES, MAX_HOLIDAY_DURATIONS and
+    // MAX_HOLIDAY_FLAGS, written as numbers: taken from the reader they would
+    // agree with it whatever it got wrong.
+    for (int i = 0; i < 26; ++i) {
         p.writeUInt32(i == 0 ? firstDate : 0);
     }
-    for (int i = 0; i < CalendarHoliday::kNumDurations; ++i) {
+    for (int i = 0; i < 10; ++i) {
         p.writeUInt32(i == 0 ? 24u : 0u);
     }
-    for (int i = 0; i < CalendarHoliday::kNumFlags; ++i) {
+    for (int i = 0; i < 10; ++i) {
         p.writeUInt32(i == 0 ? 0x10u : 0u);
     }
     p.writeString(texture);

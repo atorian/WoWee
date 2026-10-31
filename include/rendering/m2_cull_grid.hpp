@@ -133,6 +133,19 @@ private:
     std::unordered_map<uint32_t, uint32_t> cellOfId_;
 };
 
+/// The shadow pass's per-instance test against an orthographic light-space
+/// matrix: whether a caster at `position` with this bounding radius (already
+/// scaled) can land in the shadow map. The bounding sphere is converted to NDC
+/// against `shadowRadius`, the box's half-extent, and inflated by half again;
+/// overshoot only costs a draw.
+inline bool instanceInShadowFootprint(const glm::mat4& lightSpace, const glm::vec3& position,
+                                      float boundRadiusTimesScale, float shadowRadius) {
+    const glm::vec4 clip = lightSpace * glm::vec4(position, 1.0f);
+    const float margin = boundRadiusTimesScale / shadowRadius * 1.5f;
+    if (std::abs(clip.x) > 1.0f + margin || std::abs(clip.y) > 1.0f + margin) return false;
+    return clip.z >= -margin && clip.z <= 1.0f + margin;
+}
+
 /// Whether any position inside [posMin, posMax] could pass the shadow pass's
 /// per-instance test against this light-space (orthographic) matrix with a
 /// margin of up to maxMarginNdc: |x|,|y| <= 1 + m and -m <= z <= 1 + m.

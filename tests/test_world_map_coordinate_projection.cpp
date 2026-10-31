@@ -68,7 +68,7 @@ TEST_CASE("renderPosToMapUV: top-left corner maps to (0, ~0)", "[world_map][coor
     REQUIRE(uv.y == Catch::Approx(0.0f).margin(0.01f));
 }
 
-TEST_CASE("renderPosToMapUV: continent applies vertical offset", "[world_map][coordinate_projection]") {
+TEST_CASE("renderPosToMapUV: a continent is projected like a zone, with no offset", "[world_map][coordinate_projection]") {
     ZoneBounds bounds;
     bounds.locLeft = 1000.0f;
     bounds.locRight = -1000.0f;

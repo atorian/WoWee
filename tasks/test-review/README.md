@@ -251,6 +251,29 @@
   `test_texture_cache`, `test_uniform_slot_pool`: публичный API, независимый
   оракул, проверяются исходы, а не журнал вызовов.
 
+## Статус шагов 3, 5 и 6 (2026-10-31)
+
+Сделано, и каждый новый или переписанный тест проверен мутацией продукта:
+копии кода в тестах заменены входом через `GameHarness`, `ClientHarness`,
+настоящий `AssetManager` и `LightingManager`; тесты констант удалены или
+заменены поведением; set-then-get и значения по умолчанию удалены, ожидания
+из таблиц под тестом заменены литералами из требования.
+
+Открыто, с причиной:
+
+- `test_settings_panel_layout`: честная проверка раскладки требует шаблонов
+  Blizzard FrameXML из `Data/interface`, их нет в репозитории.
+- `test_inventory_slots`: номера слотов банка лучше проверить пакетом обмена
+  через `GameHarness`.
+- Задержка heartbeat у стоящего игрока в classic: `GameHarness` входит в мир
+  только по протоколу WotLK, после `useExpansion("classic")` пакеты не
+  уходят. Тест констант `test_movement_flag_bits` удалён без замены.
+- TBC и Classic в `test_movement_payload_layout` всё ещё сверяются со своим
+  писателем.
+- `test_transport_components:121`, `test_zone_tiles`,
+  `test_world_map_zone_metadata`, `test_framexml_takeover`, `test_dbc_layouts`
+  оставлены: граничные случаи из данных клиента или охрана перебора enum.
+
 ## Порядок работы, который я бы предложил
 
 1. Удалить мёртвый код вместе с тестами (класс 2). Это механическая работа,

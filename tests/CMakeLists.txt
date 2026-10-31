@@ -677,12 +677,6 @@ if(WOWEE_BUILD_FRAMEXML_RUN AND EXISTS "${WOWEE_FRAMEXML_TEST_DATA}/interface/Fr
         "--lua:assert(select(2, GetActionBarToggles()), 'the bottom right bar is not kept as shown')")
 endif()
 
-# ── test_taxi_map_projection ────────────────────────────────
-# The order of the coordinate conversions behind a flight map marker. Silent
-# when wrong - every marker still lands somewhere, just not where it belongs.
-wowee_add_test(test_taxi_map_projection
-    SOURCES test_taxi_map_projection.cpp)
-target_link_libraries(test_taxi_map_projection PRIVATE wowee_client)
 
 # ── test_inventory_slots ─────────────────────────────────────────
 # Where the bank, its bags and the keyring sit. A wrong slot here moves an
@@ -893,13 +887,6 @@ if(Python3_Interpreter_FOUND)
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_SOURCE_DIR}/tools/android/test_data_profiles.py)
 endif()
-
-# ── test_chat_types ─────────────────────────────────────────────
-# A chat type is a byte off the wire and the event name is built from it, so a
-# value missing from the enum is a line of chat that never appears - no error,
-# no log. The whole run between LOOT and the battleground block was absent once.
-wowee_add_test(test_chat_types
-    SOURCES test_chat_types.cpp)
 
 # ── test_chat_window_background ─────────────────────────────────
 # The chat panel is a white image the interface tints, so the colour this client
@@ -1201,20 +1188,6 @@ target_include_directories(test_opcode_table SYSTEM PRIVATE ${TEST_SYSTEM_INCLUD
 target_link_libraries(test_opcode_table PRIVATE catch2_main)
 add_test(NAME opcode_table COMMAND test_opcode_table)
 register_test_target(test_opcode_table)
-
-# ── test_equipment_set_packets ───────────────────────────────
-# Every guid in the equipment-set family is packed and all twenty were read and
-# written as fixed eight-byte values - plus an ignore mask that the server does
-# not send at all. Saving a set could never have worked.
-add_executable(test_equipment_set_packets
-    test_equipment_set_packets.cpp
-    ${CMAKE_SOURCE_DIR}/src/network/packet.cpp
-)
-target_include_directories(test_equipment_set_packets PRIVATE ${TEST_INCLUDE_DIRS})
-target_include_directories(test_equipment_set_packets SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_equipment_set_packets PRIVATE catch2_main)
-add_test(NAME equipment_set_packets COMMAND test_equipment_set_packets)
-register_test_target(test_equipment_set_packets)
 
 # ── test_auction_sort_packet ─────────────────────────────────
 # The sort block on CMSG_AUCTION_LIST_ITEMS was a hardcoded zero, and the
@@ -1727,21 +1700,6 @@ register_test_target(test_activity_fsm)
 
 # NPC animator tests removed - NpcAnimator replaced by generic CharacterAnimator
 
-# ── test_anim_capability ─────────────────────────────────────
-# Header-only struct tests - no source files needed
-add_executable(test_anim_capability
-    test_anim_capability.cpp
-)
-target_include_directories(test_anim_capability PRIVATE ${TEST_INCLUDE_DIRS})
-target_include_directories(test_anim_capability SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_anim_capability PRIVATE catch2_main)
-add_test(NAME anim_capability COMMAND test_anim_capability)
-register_test_target(test_anim_capability)
-
-# ── test_indoor_shadows ──────────────────────────────────────
-wowee_add_test(test_indoor_shadows
-    SOURCES test_indoor_shadows.cpp)
-
 # ── test_zone_tiles ────────────────────────────────────────────
 wowee_add_test(test_zone_tiles
     SOURCES test_zone_tiles.cpp)
@@ -1753,10 +1711,6 @@ wowee_add_test(test_transport_components
             ${CMAKE_SOURCE_DIR}/src/game/transport_clock_sync.cpp
             ${CMAKE_SOURCE_DIR}/src/game/transport_animator.cpp
             ${CMAKE_SOURCE_DIR}/src/math/spline.cpp)
-
-# ── test_world_map ────────────────────────────────────────────
-wowee_add_test(test_world_map
-    SOURCES test_world_map.cpp)
 
 # ── test_world_map_coordinate_projection ──────────────────────
 wowee_add_test(test_world_map_coordinate_projection
@@ -1828,7 +1782,7 @@ target_include_directories(test_link_hit PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_link_hit SYSTEM PRIVATE
     ${TEST_SYSTEM_INCLUDE_DIRS}
 )
-target_link_libraries(test_link_hit PRIVATE catch2_main)
+target_link_libraries(test_link_hit PRIVATE wowee_client catch2_main)
 add_test(NAME link_hit COMMAND test_link_hit)
 register_test_target(test_link_hit)
 
@@ -1884,12 +1838,6 @@ target_include_directories(test_interface_text_lines SYSTEM PRIVATE
 target_link_libraries(test_interface_text_lines PRIVATE catch2_main imgui)
 add_test(NAME interface_text_lines COMMAND test_interface_text_lines)
 register_test_target(test_interface_text_lines)
-
-# ── test_npc_flags ───────────────────────────────────────────
-# UNIT_NPC_FLAGS bit by bit. A wrong one is invisible - the mask just always
-# answers no - and NPC_FLAG_VENDOR was 0x04, a bit nothing sets, so no merchant
-# ever read as one.
-wowee_add_test(test_npc_flags SOURCES test_npc_flags.cpp)
 
 # ── test_scene_pick ──────────────────────────────────────────
 # Which of ScenePick's answers a caller wants. closestGuid and resolve()
@@ -2706,6 +2654,19 @@ wowee_test_link_glm(test_zone_light)
 add_test(NAME zone_light COMMAND test_zone_light)
 register_test_target(test_zone_light)
 
+# ── test_light_channels ──────────────────────────────────────
+# Which LightIntBand and LightFloatBand channel lights what: one global light
+# with a colour of its own on every channel, read back from LightingManager.
+add_executable(test_light_channels
+    test_light_channels.cpp)
+target_link_libraries(test_light_channels PRIVATE wowee_render)
+target_include_directories(test_light_channels PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_light_channels SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_light_channels PRIVATE catch2_main wowee_pipeline wowee_base)
+wowee_test_link_glm(test_light_channels)
+add_test(NAME light_channels COMMAND test_light_channels)
+register_test_target(test_light_channels)
+
 # ── test_light_volume_blend ──────────────────────────────────
 # A point lit as WoW.exe lights it: its map's global light with the volumes
 # it stands in laid over it, farthest first, each by its linear falloff.
@@ -2906,14 +2867,6 @@ target_compile_definitions(test_opcode_tables PRIVATE
 target_link_libraries(test_opcode_tables PRIVATE catch2_main)
 add_test(NAME opcode_tables COMMAND test_opcode_tables)
 register_test_target(test_opcode_tables)
-
-# ── test_movement_flag_bits ──────────────────────────────────
-# Movement flag bits against AzerothCore's UnitDefines.h. FEATHER_FALL and
-# WATER_WALK sat on PENDING_STOP and PENDING_STRAFE_STOP, so the client
-# asserted a pending stop in every packet while those states were active.
-wowee_add_test(test_movement_flag_bits
-    SOURCES test_movement_flag_bits.cpp
-            ${TEST_COMMON_SOURCES})
 
 # ── test_spell_icon_columns ──────────────────────────────────
 # SpellIcon.dbc through the loader every caller uses, over the install's data.
@@ -3160,14 +3113,6 @@ wowee_add_test(test_blp_truncation
     SOURCES test_blp_truncation.cpp
             ${TEST_COMMON_SOURCES})
 target_link_libraries(test_blp_truncation PRIVATE wowee_pipeline)
-
-# ── test_grass_blade_layout ────────────────────────────
-# The C++ and GLSL views of a grass blade have to agree byte for byte, and a
-# disagreement is silent: it compiles, passes validation, and renders the wrong
-# thing. Header-only on purpose -- grass_blade.hpp needs nothing but glm, so
-# this stays a fast test rather than one that drags in a Vulkan context.
-wowee_add_test(test_grass_blade_layout
-    SOURCES test_grass_blade_layout.cpp)
 
 # ── test_adt_alpha ─────────────────────────────────────
 # MCAL alpha maps, and the row and column at the end of a four-bit one that are
@@ -3449,6 +3394,17 @@ endif()
 # The Minimap frame's two zooms, outdoor and indoor, through the interface.
 wowee_add_test(test_minimap_zoom SOURCES test_minimap_zoom.cpp)
 target_link_libraries(test_minimap_zoom PRIVATE wowee_client_harness)
+
+# TaxiNodePosition, as the flight map asks it: TaxiNodes.dbc and the
+# continent's WorldMapArea.dbc row in, a fraction of the map out. Silent when
+# wrong - every marker still lands somewhere, just not where it belongs.
+wowee_add_test(test_taxi_map_projection SOURCES test_taxi_map_projection.cpp)
+target_link_libraries(test_taxi_map_projection PRIVATE wowee_client_harness)
+
+# Widgets as the interface's Lua sees them: what a chat frame keeps of the
+# lines AddMessage hands it, and the type a widget answers.
+wowee_add_test(test_interface_widgets SOURCES test_interface_widgets.cpp)
+target_link_libraries(test_interface_widgets PRIVATE wowee_client_harness)
 
 # ── wowee_loading_test_client ────────────────────────────────
 option(WOWEE_BUILD_RENDER_CLIENT_PROBE "Build native interface/render lifecycle GPU probe" OFF)

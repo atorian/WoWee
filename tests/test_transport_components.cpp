@@ -73,8 +73,8 @@ TEST_CASE("ClockSync: client animation advances localClockMs", "[transport_clock
     uint32_t pathTimeMs = 0;
     bool result = sync.computePathTime(t, path.spline, 1.0, 0.016f, pathTimeMs);
     REQUIRE(result);
-    REQUIRE(t.localClockMs > 0);  // Should have advanced
-    REQUIRE(pathTimeMs == t.localClockMs % path.spline.durationMs());
+    // A 16 ms frame from the start of a 4000 ms path is 16 ms into it.
+    REQUIRE(pathTimeMs == 16);
 }
 
 TEST_CASE("ClockSync: server clock mode wraps correctly", "[transport_clock_sync]") {

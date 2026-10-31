@@ -10,40 +10,38 @@ using namespace wowee::game;
 // client draws and once for the original interface's GetFactionInfo. They
 // agreed only because someone checked, and the top of the last band did not:
 // exalted was given the width of revered, so a faction at exalted drew an
-// almost empty bar. There is one table now, and this is what pins it.
+// almost empty bar.
+//
+// The expected values are WoW's own standings, numbered 1..8 as
+// GetFactionInfo hands them to the interface, which indexes its colours and
+// names by that number.
 
-TEST_CASE("Each standing claims the value at its own floor", "[reputation]") {
-    for (const auto& band : kReputationStandings) {
-        INFO(band.name);
-        REQUIRE(reputationStandingFor(band.floor).id == band.id);
-        REQUIRE(reputationStandingFor(band.ceiling).id == band.id);
-    }
-}
-
-TEST_CASE("The bands meet without a gap or an overlap", "[reputation]") {
-    for (int i = 0; i < 7; ++i) {
-        INFO(kReputationStandings[i].name);
-        // One past the top of a band is the bottom of the next. A gap would
-        // leave a value in no standing at all; an overlap would put it in two.
-        REQUIRE(kReputationStandings[i].ceiling + 1 == kReputationStandings[i + 1].floor);
-    }
-}
-
-TEST_CASE("Standings are numbered as the interface numbers them",
-          "[reputation]") {
-    // GetFactionInfo hands the id straight to the interface, which indexes its
-    // own colours and names by it, so one-based and in order is not cosmetic.
-    for (int i = 0; i < 8; ++i) {
-        REQUIRE(kReputationStandings[i].id == i + 1);
+TEST_CASE("each value falls in WoW's standing for it, at both edges", "[reputation]") {
+    struct Edge { int value; int id; const char* name; };
+    const Edge edges[] = {
+        {-42000, 1, "Hated"},    {-6001, 1, "Hated"},
+        {-6000, 2, "Hostile"},   {-3001, 2, "Hostile"},
+        {-3000, 3, "Unfriendly"}, {-1, 3, "Unfriendly"},
+        {0, 4, "Neutral"},       {2999, 4, "Neutral"},
+        {3000, 5, "Friendly"},   {8999, 5, "Friendly"},
+        {9000, 6, "Honored"},    {20999, 6, "Honored"},
+        {21000, 7, "Revered"},   {41999, 7, "Revered"},
+        {42000, 8, "Exalted"},   {42999, 8, "Exalted"},
+    };
+    for (const Edge& e : edges) {
+        INFO("value " << e.value);
+        const auto& standing = reputationStandingFor(e.value);
+        CHECK(standing.id == e.id);
+        CHECK(std::string(standing.name) == e.name);
     }
 }
 
 TEST_CASE("Exalted is a thousand wide, not open-ended", "[reputation]") {
     // The bar reads out of a thousand. Giving exalted the width of revered
     // drew a faction that had earned it as though it had barely started.
-    const auto& exalted = kReputationStandings[7];
-    REQUIRE(exalted.id == 8);
-    REQUIRE(exalted.ceiling - exalted.floor + 1 == 1000);
+    const auto& exalted = reputationStandingFor(42000);
+    CHECK(exalted.floor == 42000);
+    CHECK(exalted.ceiling == 42999);
 }
 
 TEST_CASE("Below hated is still hated", "[reputation]") {
@@ -67,12 +65,12 @@ TEST_CASE("a standing's name by an item's rank index", "[reputation]") {
     CHECK(std::string(reputationRankName(3)) == "Neutral");
     CHECK(std::string(reputationRankName(7)) == "Exalted");
 
-    SECTION("and the id is one more than the index it lives at") {
+    SECTION("every rank, in order") {
+        const char* names[] = {"Hated", "Hostile", "Unfriendly", "Neutral",
+                               "Friendly", "Honored", "Revered", "Exalted"};
         for (uint32_t i = 0; i < 8; ++i) {
             INFO("index " << i);
-            CHECK(kReputationStandings[i].id == static_cast<int>(i) + 1);
-            CHECK(std::string(reputationRankName(i)) ==
-                  kReputationStandings[i].name);
+            CHECK(std::string(reputationRankName(i)) == names[i]);
         }
     }
 

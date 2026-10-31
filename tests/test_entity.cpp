@@ -7,30 +7,6 @@
 
 using namespace wowee::game;
 
-TEST_CASE("Entity default construction", "[entity]") {
-    Entity e;
-    REQUIRE(e.getGuid() == 0);
-    REQUIRE(e.getType() == ObjectType::OBJECT);
-    REQUIRE(e.getX() == 0.0f);
-    REQUIRE(e.getY() == 0.0f);
-    REQUIRE(e.getZ() == 0.0f);
-    REQUIRE(e.getOrientation() == 0.0f);
-}
-
-TEST_CASE("Entity GUID constructor", "[entity]") {
-    Entity e(0xDEADBEEF);
-    REQUIRE(e.getGuid() == 0xDEADBEEF);
-}
-
-TEST_CASE("Entity position set/get", "[entity]") {
-    Entity e;
-    e.setPosition(1.0f, 2.0f, 3.0f, 1.57f);
-    REQUIRE(e.getX() == Catch::Approx(1.0f));
-    REQUIRE(e.getY() == Catch::Approx(2.0f));
-    REQUIRE(e.getZ() == Catch::Approx(3.0f));
-    REQUIRE(e.getOrientation() == Catch::Approx(1.57f));
-}
-
 TEST_CASE("Entity ignores positive-duration movement without displacement",
           "[entity][movement]") {
     Entity e;
@@ -260,49 +236,6 @@ TEST_CASE("A unit that reports its movement leaves it for a server path", "[enti
     REQUIRE(u.getX() == Catch::Approx(20.0f));
 }
 
-TEST_CASE("Entity field set/get/has", "[entity]") {
-    Entity e;
-    REQUIRE_FALSE(e.hasField(10));
-
-    e.setField(10, 0xCAFE);
-    REQUIRE(e.hasField(10));
-    REQUIRE(e.getField(10) == 0xCAFE);
-
-    // Overwrite
-    e.setField(10, 0xBEEF);
-    REQUIRE(e.getField(10) == 0xBEEF);
-
-    // Non-existent returns 0
-    REQUIRE(e.getField(999) == 0);
-}
-
-TEST_CASE("Unit construction and type", "[entity]") {
-    Unit u;
-    REQUIRE(u.getType() == ObjectType::UNIT);
-
-    Unit u2(0x123);
-    REQUIRE(u2.getGuid() == 0x123);
-    REQUIRE(u2.getType() == ObjectType::UNIT);
-}
-
-TEST_CASE("Unit name", "[entity]") {
-    Unit u;
-    REQUIRE(u.getName().empty());
-    u.setName("Hogger");
-    REQUIRE(u.getName() == "Hogger");
-}
-
-TEST_CASE("Unit health", "[entity]") {
-    Unit u;
-    REQUIRE(u.getHealth() == 0);
-    REQUIRE(u.getMaxHealth() == 0);
-
-    u.setHealth(500);
-    u.setMaxHealth(1000);
-    REQUIRE(u.getHealth() == 500);
-    REQUIRE(u.getMaxHealth() == 1000);
-}
-
 TEST_CASE("Unit power by type", "[entity]") {
     Unit u;
     u.setPowerType(0); // mana
@@ -323,19 +256,6 @@ TEST_CASE("Unit power by type", "[entity]") {
     // Out of bounds clamps
     REQUIRE(u.getPowerByType(7) == 0);
     REQUIRE(u.getMaxPowerByType(7) == 0);
-}
-
-TEST_CASE("Unit level, entry, displayId", "[entity]") {
-    Unit u;
-    REQUIRE(u.getLevel() == 1); // default
-    u.setLevel(80);
-    REQUIRE(u.getLevel() == 80);
-
-    u.setEntry(1234);
-    REQUIRE(u.getEntry() == 1234);
-
-    u.setDisplayId(5678);
-    REQUIRE(u.getDisplayId() == 5678);
 }
 
 TEST_CASE("Unit flags", "[entity]") {
@@ -363,31 +283,16 @@ TEST_CASE("Unit flags", "[entity]") {
 }
 
 TEST_CASE("Corpse state uses the real dynamic dead bit", "[entity][corpse]") {
+    // UNIT_DYNAMIC_FLAGS as 3.3.5a's server sets them: 0x01 lootable, 0x08
+    // tapped by the player, 0x20 dead. Written as the numbers the server
+    // sends, so a constant that moved shows here.
     REQUIRE(isUnitCorpseState(0, 100, 0));
-    REQUIRE(isUnitCorpseState(0, 0, UNIT_DYNFLAG_DEAD));
-    REQUIRE(isUnitCorpseState(0, 0, UNIT_DYNFLAG_LOOTABLE));
+    REQUIRE(isUnitCorpseState(0, 0, 0x20));
+    REQUIRE(isUnitCorpseState(0, 0, 0x01));
 
     REQUIRE_FALSE(isUnitCorpseState(100, 100, 0));
     // Regression: 0x08 is tapped-by-player, not dead.
-    REQUIRE_FALSE(isUnitCorpseState(100, 100, UNIT_DYNFLAG_TAPPED_BY_PLAYER));
-    REQUIRE(UNIT_DYNFLAG_DEAD == 0x00000020);
-}
-
-TEST_CASE("Unit faction and hostility", "[entity]") {
-    Unit u;
-    u.setFactionTemplate(14); // Undercity
-    REQUIRE(u.getFactionTemplate() == 14);
-
-    REQUIRE_FALSE(u.isHostile());
-    u.setHostile(true);
-    REQUIRE(u.isHostile());
-}
-
-TEST_CASE("Unit mount display ID", "[entity]") {
-    Unit u;
-    REQUIRE(u.getMountDisplayId() == 0);
-    u.setMountDisplayId(14374);
-    REQUIRE(u.getMountDisplayId() == 14374);
+    REQUIRE_FALSE(isUnitCorpseState(100, 100, 0x08));
 }
 
 TEST_CASE("Player inherits Unit", "[entity]") {
@@ -401,21 +306,6 @@ TEST_CASE("Player inherits Unit", "[entity]") {
 
     p.setLevel(80);
     REQUIRE(p.getLevel() == 80);
-}
-
-TEST_CASE("GameObject construction", "[entity]") {
-    GameObject go(0x999);
-    REQUIRE(go.getType() == ObjectType::GAMEOBJECT);
-    REQUIRE(go.getGuid() == 0x999);
-
-    go.setName("Mailbox");
-    REQUIRE(go.getName() == "Mailbox");
-
-    go.setEntry(42);
-    REQUIRE(go.getEntry() == 42);
-
-    go.setDisplayId(100);
-    REQUIRE(go.getDisplayId() == 100);
 }
 
 TEST_CASE("EntityManager add/get/has/remove", "[entity]") {

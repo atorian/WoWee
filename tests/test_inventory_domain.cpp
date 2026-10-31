@@ -534,3 +534,103 @@ TEST_CASE("a sign the server offers is read, its page asked for at once", "[inve
     h.pump();
     CHECK(pageAsked(h) == std::pair<uint32_t, uint64_t>{kPage, kSign});
 }
+
+// ---------------------------------------------------------------------------
+// Equipment sets.
+//
+// Every guid in this family is packed - a mask byte and then only the non-zero
+// bytes - and all of them were read and written as fixed eight-byte values. A
+// set guid of one is two bytes on the wire, so the incoming read ate the set id
+// and the front of the name, and with more than one set the loop lost its place
+// entirely. The outgoing save was worse: a fixed eight bytes where the server
+// calls readPackGUID leaves seven behind.
+//
+// There was also a field on the incoming side that the server does not send: an
+// ignore mask read as a uint32 between the icon name and the slots. An ignored
+// slot is written as an item guid of literal one, and that is the mask.
+//
+// The packets are built the way AzerothCore's Player::SendEquipmentSetList
+// writes them and read the way HandleEquipmentSetSave reads them.
+
+namespace {
+
+constexpr uint64_t kHelm = 0x40000000000001ull;
+constexpr uint64_t kMace = 0x40000000000002ull;
+
+/// One set: packed set guid, index, name, icon, then nineteen packed item
+/// guids, one meaning "leave this slot alone". Head, chest ignored, main hand.
+void appendSet(Body& body, uint64_t setGuid, uint32_t index, const std::string& name,
+               const std::string& icon) {
+    body.packedGuid(setGuid).u32(index).cstr(name).cstr(icon);
+    for (int slot = 0; slot < 19; ++slot) {
+        if (slot == 0) body.packedGuid(kHelm);
+        else if (slot == 4) body.packedGuid(1);
+        else if (slot == 15) body.packedGuid(kMace);
+        else body.packedGuid(0);
+    }
+}
+
+}  // namespace
+
+TEST_CASE("three equipment sets from the server are three sets in the manager",
+          "[inventory][equipment_sets][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.clearRecords();
+
+    Body list;
+    list.u32(3);
+    appendSet(list, 1, 0, "Tanking", "Interface\\Icons\\INV_Shield_06");
+    appendSet(list, 0x1234, 1, "Healing", "iconB");
+    appendSet(list, 0xFFFFFFFFFFull, 2, "Damage", "iconC");
+    h.receive(Opcode::SMSG_EQUIPMENT_SET_LIST, list);
+    h.pump();
+
+    const auto& inventory = h.game().inventory();
+    const auto& sets = inventory.getEquipmentSets();
+    REQUIRE(sets.size() == 3);
+    CHECK(sets[0].setGuid == 1);
+    CHECK(sets[0].setId == 0);
+    CHECK(sets[0].name == "Tanking");
+    CHECK(sets[0].iconName == "Interface\\Icons\\INV_Shield_06");
+    CHECK(sets[1].name == "Healing");
+    CHECK(sets[1].setGuid == 0x1234);
+    CHECK(sets[2].name == "Damage");
+    CHECK(sets[2].setGuid == 0xFFFFFFFFFFull);
+    CHECK(sets[2].setId == 2);
+
+    const auto* items = inventory.getEquipmentSetItems(2);
+    REQUIRE(items);
+    CHECK((*items)[0] == kHelm);
+    CHECK((*items)[15] == kMace);
+    // The chest is ignored, not "an item whose guid is one".
+    CHECK((*items)[4] == 0);
+    CHECK(inventory.getEquipmentSetIgnoreMask(2) == (1u << 4));
+
+    CHECK(h.addonEvents("EQUIPMENT_SETS_CHANGED").size() == 1);
+}
+
+TEST_CASE("a new equipment set is saved the way the server reads it",
+          "[inventory][equipment_sets][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.clearRecords();
+
+    h.game().inventory().saveEquipmentSet("Farming", "iconD");
+    auto* save = h.lastSent(Opcode::CMSG_EQUIPMENT_SET_SAVE);
+    REQUIRE(save);
+    // HandleEquipmentSetSave: readPackGUID, index, name, icon, nineteen packed
+    // item guids. A new set has no guid yet, which packs to one mask byte of
+    // zero; eight zero bytes would leave the server reading the index out of
+    // the padding.
+    const std::vector<uint8_t> expectedHead = {
+        0x00,                    // packed guid 0
+        0x00, 0x00, 0x00, 0x00,  // index 0: the first free one
+        'F', 'a', 'r', 'm', 'i', 'n', 'g', 0x00,
+        'i', 'c', 'o', 'n', 'D', 0x00,
+    };
+    const auto& body = save->getData();
+    REQUIRE(body.size() == expectedHead.size() + 19);  // nothing worn: 19 empty guids
+    CHECK(std::vector<uint8_t>(body.begin(), body.begin() + expectedHead.size()) == expectedHead);
+    for (size_t i = expectedHead.size(); i < body.size(); ++i) CHECK(body[i] == 0x00);
+}
