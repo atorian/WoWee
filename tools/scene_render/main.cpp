@@ -827,18 +827,26 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         // In when nothing is waiting and nothing more has arrived for a second
         // of frames: the manager asks for the tiles round the scene over its
         // first frames, so an empty queue on the first one is not yet the end.
+        // Nor are the tiles all of it: a tile's models arrive after it, as
+        // their files load. One that came in during the kept frames started
+        // its animation and its particles that many frames late, so a torch
+        // differed from one run of the same scene to the next.
         constexpr int kSettledFrames = 30;
         int waited = 0;
         int settled = 0;
         int lastLoaded = -1;
+        uint64_t lastModels = ~0ull;
         for (; waited < scene.value("settleFrames",600) && settled < kSettledFrames; ++waited) {
             renderer.update(0.0f);
             renderer.beginFrame(renderer.extractFrameInputs());
             renderer.renderWorld();
             renderer.endFrame();
             const int loaded = terrain->getLoadedTileCount();
-            settled = terrain->getRemainingTileCount() == 0 && (!scene.value("distantTerrain",false) || renderer.extractFrameInputs().distantTerrainReady) && loaded == lastLoaded ? settled + 1 : 0;
+            const uint64_t models = (uint64_t{renderer.getM2Renderer()->getInstanceCount()} << 32) |
+                                    renderer.getWMORenderer()->getInstanceCount();
+            settled = terrain->getRemainingTileCount() == 0 && (!scene.value("distantTerrain",false) || renderer.extractFrameInputs().distantTerrainReady) && loaded == lastLoaded && models == lastModels ? settled + 1 : 0;
             lastLoaded = loaded;
+            lastModels = models;
         }
         if (terrain->getRemainingTileCount() > 0) {
             std::fprintf(stderr, "scene_render: %d terrain tiles still streaming after %d frames; "

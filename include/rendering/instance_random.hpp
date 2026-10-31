@@ -6,11 +6,19 @@
 //
 // The M2 renderer drew them from one generator for the whole scene, so no two
 // instances could be updated at once: they would race on its state. Each
-// instance carrying eight bytes of state, seeded from its id, makes an
-// instance's draws depend on that instance alone, on whichever thread it is
-// updated and in whatever order.
+// instance carrying eight bytes of state makes an instance's draws depend on
+// that instance alone, on whichever thread it is updated and in whatever
+// order.
+//
+// A model placed in the world is seeded from where it stands (at), not from
+// its id: ids are handed out in the order streamed tiles finish loading, which
+// differs from run to run, so a torch's flames came out differently each time
+// the same place was drawn.
 
+#include <bit>
 #include <cstdint>
+
+#include <glm/vec3.hpp>
 
 namespace wowee {
 namespace rendering {
@@ -23,6 +31,14 @@ public:
 
     InstanceRandom() = default;
     explicit InstanceRandom(uint64_t seed) : state_(mix(seed)) {}
+    /// For a model placed in the world: seeded from where it stands, the same
+    /// whenever and in whatever order it is loaded.
+    static InstanceRandom at(const glm::vec3& place) {
+        const uint64_t x = std::bit_cast<uint32_t>(place.x);
+        const uint64_t y = std::bit_cast<uint32_t>(place.y);
+        const uint64_t z = std::bit_cast<uint32_t>(place.z);
+        return InstanceRandom(mix(mix(x) ^ y) ^ (z << 32 | z));
+    }
 
     static constexpr result_type min() { return 0; }
     static constexpr result_type max() { return 0xffffffffu; }
