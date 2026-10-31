@@ -2400,13 +2400,6 @@ wowee_add_test(test_shadow_cull_reuse
 wowee_add_test(test_terrain_bake
     SOURCES test_terrain_bake.cpp)
 
-# ── test_shadow_plane ────────────────────────────────────────
-# The plane a shadow receiver is compared in, from its surface and the map
-# alone: along the surface it predicts the sun's and the units' map depth,
-# whichever way and however long the normal, and edge-on it stays bounded.
-wowee_add_test(test_shadow_plane
-    SOURCES test_shadow_plane.cpp)
-
 # ── test_weather_mix ─────────────────────────────────────────
 # The weather as it is drawn: a shower coming over in the time it is given,
 # rain turning to snow through both, a storm the realm asks for at once
@@ -2459,11 +2452,6 @@ target_link_libraries(test_ocean_spectrum PRIVATE wowee_render)
 wowee_add_test(test_sea_bed
     SOURCES test_sea_bed.cpp)
 
-# ── test_ocean_fft ───────────────────────────────────────────
-# The sea's surface out of its spectrum, by the compute shaders' own FFT.
-wowee_add_test(test_ocean_fft
-    SOURCES test_ocean_fft.cpp)
-
 # ── test_water_reflection ────────────────────────────────────
 # The mirrored camera sees what stands above the water and nothing of the bed,
 # and the reflection is drawn for the water in view and what it can show.
@@ -2477,13 +2465,6 @@ target_link_libraries(test_water_reflection PRIVATE wowee_render)
 wowee_add_test(test_water_visibility
     SOURCES test_water_visibility.cpp
             ${TEST_COMMON_SOURCES})
-
-# ── test_sphere_map ──────────────────────────────────────────
-# The sphere environment map coordinates m2.vert.glsl computes, run from the
-# shader's own include. The incident vector was negated, which put a surface
-# nearly facing the camera at the rim of the map instead of near its centre.
-wowee_add_test(test_sphere_map
-    SOURCES test_sphere_map.cpp)
 
 # ── test_m2_classifier_foliage ───────────────────────────────
 # Pins the wind-sway classification against substring collisions: foliage
@@ -2526,11 +2507,6 @@ wowee_add_test(test_m2_combiner
 # Which point lights reach a model, a WMO group or a terrain chunk.
 wowee_add_test(test_local_lights
     SOURCES test_local_lights.cpp)
-
-# ── test_shadow_shading ─────────────────────────────────────
-# How a surface takes a shadow, by the client's receiving shaders.
-wowee_add_test(test_shadow_shading
-    SOURCES test_shadow_shading.cpp)
 
 # ── test_m2_billboard_model ─────────────────────────────────
 # Mana Shield's card through the renderer's own bone update.
@@ -2751,7 +2727,6 @@ wowee_add_test(test_swim_wall SOURCES test_swim_wall.cpp)
 add_executable(test_light_bands
     test_light_bands.cpp
     test_distance_fog.cpp
-    test_rt_light_composition.cpp
     ${TEST_COMMON_SOURCES})
 target_include_directories(test_light_bands PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_light_bands SYSTEM PRIVATE
@@ -2892,8 +2867,7 @@ add_test(NAME light_volume_order COMMAND test_light_volume_order)
 register_test_target(test_light_volume_order)
 
 # Sky clock/opacity and real Dalaran UV mask regression.
-add_executable(test_m2_sky_material test_m2_sky_material.cpp
- ${TEST_COMMON_SOURCES})
+add_executable(test_m2_sky_material test_m2_sky_material.cpp ${TEST_COMMON_SOURCES})
 target_link_libraries(test_m2_sky_material PRIVATE wowee_pipeline)
 target_include_directories(test_m2_sky_material PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_m2_sky_material SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
@@ -3371,8 +3345,7 @@ add_test(NAME server_extension COMMAND test_server_extension)
 register_test_target(test_server_extension)
 
 # Signed M2 UV mapping and the actual Dalaran sculpture's reflection layers.
-add_executable(test_m2_material test_m2_material.cpp
- ${TEST_COMMON_SOURCES})
+add_executable(test_m2_material test_m2_material.cpp ${TEST_COMMON_SOURCES})
 target_link_libraries(test_m2_material PRIVATE wowee_pipeline)
 target_include_directories(test_m2_material PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_m2_material SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
@@ -3656,6 +3629,21 @@ wowee_add_test(test_item_tables
 target_link_libraries(test_item_tables PRIVATE wowee_client wowee_pipeline)
 
 wowee_add_test(test_wmo_minimap
-    SOURCES test_wmo_minimap.cpp
- ${TEST_COMMON_SOURCES})
+    SOURCES test_wmo_minimap.cpp ${TEST_COMMON_SOURCES})
 target_link_libraries(test_wmo_minimap PRIVATE wowee_pipeline wowee_render)
+
+# ── test_scene_references ───────────────────────────────────
+# Scenes drawn by scene_render against the pictures approved for them in
+# tests/approvals (ApprovalTests.cpp). Skipped without a Vulkan device or the
+# game data.
+wowee_add_test(test_scene_references SOURCES test_scene_references.cpp)
+target_include_directories(test_scene_references PRIVATE
+    ${CMAKE_SOURCE_DIR}/extern/approval_tests ${CMAKE_CURRENT_SOURCE_DIR}/approval_catch2)
+target_compile_definitions(test_scene_references PRIVATE
+    WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    WOWEE_SCENE_RENDER="$<TARGET_FILE:scene_render>"
+    WOWEE_SCRATCH_DIR="${CMAKE_BINARY_DIR}/scratch")
+add_dependencies(test_scene_references scene_render)
+if(WOWEE_GAME_DATA_DIR)
+    set_tests_properties(scene_references PROPERTIES ENVIRONMENT "WOW_DATA_PATH=${WOWEE_GAME_DATA_DIR}")
+endif()

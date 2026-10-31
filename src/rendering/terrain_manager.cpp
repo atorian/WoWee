@@ -420,7 +420,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
             return nullptr;
         }
 
-        *terrainPtr = pipeline::ADTLoader::load(*adtData);
+        terrainPtr = pipeline::ADTLoader::load(*adtData);
         if (!terrainPtr->isLoaded()) {
             LOG_ERROR("Failed to parse ADT terrain: ", adtPath);
             return nullptr;
@@ -436,7 +436,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
                           std::to_string(coord.x) + "_" + std::to_string(coord.y) + "_obj0.adt";
     const auto objData = assetManager->readFileShared(objPath);
     if (objData) {
-        auto objTerrain = std::make_unique<pipeline::ADTTerrain>(pipeline::ADTLoader::load(*objData));
+        auto objTerrain = pipeline::ADTLoader::load(*objData);
         if (objTerrain->isLoaded()) {
             const uint32_t doodadNameBase = static_cast<uint32_t>(terrainPtr->doodadNames.size());
             const uint32_t wmoNameBase = static_cast<uint32_t>(terrainPtr->wmoNames.size());

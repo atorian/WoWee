@@ -1,0 +1,64 @@
+// The shadows scene under full ray traced lighting (mode 3): the traced sun
+// shadow joined with the shadow map's, the farmhouse's ambient occluded where
+// it meets the ground, and the light the ground throws back onto its walls.
+{
+  "map": "Azeroth",
+  "mapId": 0,
+  "zoneId": 12,
+  "hour": 17.0,
+  "server": [
+    -9440.0,
+    70.0,
+    56.5
+  ],
+  "groundPlane": {
+    "size": 120,
+    "height": 0
+  },
+  "models": [
+    {
+      "path": "World\\Azeroth\\Elwynn\\PassiveDoodads\\LampPost\\LampPost.m2",
+      "offset": [
+        -10,
+        8,
+        0
+      ]
+    },
+    {
+      "path": "World\\wmo\\Azeroth\\Buildings\\Human_Farm\\Farm.wmo",
+      "offset": [
+        8,
+        8,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        30
+      ]
+    }
+  ],
+  "camera": {
+    "offset": [
+      -22,
+      -22,
+      12
+    ],
+    "lookAt": [
+      2,
+      2,
+      2
+    ]
+  },
+  "size": [
+    1024,
+    576
+  ],
+  "frames": 60,
+  "shadowQuality": 2,
+  "clouds": false,
+  "bloom": 0,
+  "sunShafts": false,
+  "volumetricFog": 0,
+  "rayTracedLighting": 3
+}

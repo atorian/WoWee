@@ -2407,8 +2407,21 @@ target_precompile_headers(scene_render REUSE_FROM wowee_render)
 wowee_apply_client_flags(scene_render)
 
 # Scenes drawn as tests: what the world's M2 renderer drew in the kept frame,
-# as scene_render reports it. They need a Vulkan device and the game data in
-# bin/Data, and are skipped without either.
+# as scene_render reports it. They need a Vulkan device and the game data, and
+# are skipped without either.
+#
+# The game data is bin/Data unless WOWEE_GAME_DATA_DIR names it. On macOS the
+# asset extractor writes to the per-user folder the client's application
+# bundle reads (core/data_paths.hpp), while bin/Data is the tree's own Data/
+# with the expansion profiles alone; when that folder exists it is the default.
+set(_wowee_mac_data "$ENV{HOME}/Library/Application Support/Wowee/Data")
+if(APPLE AND EXISTS "${_wowee_mac_data}/expansions")
+    set(_wowee_default_data "${_wowee_mac_data}")
+else()
+    set(_wowee_default_data "")
+endif()
+set(WOWEE_GAME_DATA_DIR "${_wowee_default_data}" CACHE PATH
+    "Extracted game data the scene tests draw from; empty for bin/Data")
 if(WOWEE_BUILD_TESTS)
     file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/scratch)
     function(wowee_add_scene_test name scene pass_regex)
@@ -2485,6 +2498,16 @@ if(WOWEE_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/frame-inputs-rain --weather rain)
         set_tests_properties(scene_frame_inputs_rain PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
+    # Every scene test draws from the same game data, the checks' as well:
+    # they hand their environment to scene_render whole.
+    if(WOWEE_GAME_DATA_DIR)
+        get_property(_wowee_tests DIRECTORY PROPERTY TESTS)
+        foreach(_test IN LISTS _wowee_tests)
+            if(_test MATCHES "^scene_")
+                set_tests_properties(${_test} PROPERTIES ENVIRONMENT "WOW_DATA_PATH=${WOWEE_GAME_DATA_DIR}")
+            endif()
+        endforeach()
     endif()
 endif()
 
