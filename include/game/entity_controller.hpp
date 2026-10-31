@@ -18,6 +18,7 @@
 namespace wowee {
 namespace game {
 
+class GameData;
 class GameHandler;
 
 class EntityController {
@@ -25,7 +26,9 @@ public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
-    explicit EntityController(GameHandler& owner);
+    /// `data` is what stops the game when the expansion's update_fields.json
+    /// lacks a field the entities are read by.
+    EntityController(GameHandler& owner, const GameData& data);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -120,6 +123,7 @@ public:
 
 private:
     GameHandler& owner_;
+    const GameData& data_;
 
     // --- Entity tracking ---
     EntityManager entityManager;              // Manages all entities in view

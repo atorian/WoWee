@@ -119,7 +119,7 @@ GameHandler::GameHandler(GameServices& services)
     // Initialize Warden module manager
 
     // Initialize domain handlers
-    entityController_ = std::make_unique<EntityController>(*this);
+    entityController_ = std::make_unique<EntityController>(*this, *services_.gameData);
     chatHandler_      = std::make_unique<ChatHandler>(*this, *this, *services_.events, *this,
                                                       *services_.cvars, *services_.emotes);
     movementHandler_  = std::make_unique<MovementHandler>(*this, *this, *services_.events, *chatHandler_,

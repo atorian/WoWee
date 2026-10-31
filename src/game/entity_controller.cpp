@@ -1,4 +1,5 @@
 #include "game/entity_controller.hpp"
+#include "game/game_data.hpp"
 #include "title/services/titles.hpp"
 #include "pet/domain/records.hpp"
 #include "pet/services/pet.hpp"
@@ -59,8 +60,8 @@ void applyBlockMovementSpeeds(const UpdateBlock& block, Entity& entity) {
 
 } // anonymous namespace
 
-EntityController::EntityController(GameHandler& owner)
-    : owner_(owner) { initTypeHandlers(); }
+EntityController::EntityController(GameHandler& owner, const GameData& data)
+    : owner_(owner), data_(data) { initTypeHandlers(); }
 
 void EntityController::registerOpcodes(DispatchTable& table) {
     // World object updates - accept during ENTERING_WORLD too so that entity
@@ -304,15 +305,8 @@ bool EntityController::getPlayerAppearance(uint64_t guid, uint8_t& outRace,
                                            uint8_t& outFacial) const {
     auto entity = const_cast<EntityController*>(this)->getEntityManager().getEntity(guid);
     if (!entity) return false;
-    // Players only, and this is not a formality. extractPlayerAppearance falls
-    // back to scanning the fields for something that *looks* like packed
-    // appearance when the named ones are absent, and the test is loose - any
-    // field whose four bytes are small enough. On a creature it matches almost
-    // immediately, and the answer is race zero with somebody's health for hair.
-    //
-    // That fallback is safe where it was written, because the spawn path only
-    // reaches it after deciding the object is a player. This is a second
-    // caller, and it has to decide the same thing for itself.
+    // Players only: a creature carries no PLAYER_BYTES, and its UNIT_FIELD_BYTES_0
+    // is not a player's race and gender.
     if (entity->getType() != ObjectType::PLAYER) return false;
     return extractPlayerAppearance(entity->getFields(), outRace, outGender,
                                    outAppearanceBytes, outFacial);
@@ -328,8 +322,15 @@ bool EntityController::extractPlayerAppearance(const FlatFieldMap& fields,
     outAppearanceBytes = 0;
     outFacial = 0;
 
-    auto readField = [&](uint16_t idx, uint32_t& out) -> bool {
-        if (idx == 0xFFFF) return false;
+    // The three are named in every expansion's update_fields.json; one that is
+    // not is a broken file, not a reason to guess which field looks packed.
+    // A field the object's update has not carried yet is only not known yet.
+    auto readField = [&](UF field, const char* name, uint32_t& out) -> bool {
+        const uint16_t idx = fieldIndex(field);
+        if (idx == 0xFFFF) {
+            data_.stop("update_fields.json", "a player's race, gender and looks",
+                       std::string("names no ") + name);
+        }
         auto it = fields.find(idx);
         if (it == fields.end()) return false;
         out = it->second;
@@ -339,56 +340,9 @@ bool EntityController::extractPlayerAppearance(const FlatFieldMap& fields,
     uint32_t bytes0 = 0;
     uint32_t pbytes = 0;
     uint32_t pbytes2 = 0;
-
-    const uint16_t ufBytes0 = fieldIndex(UF::UNIT_FIELD_BYTES_0);
-    const uint16_t ufPbytes = fieldIndex(UF::PLAYER_BYTES);
-    const uint16_t ufPbytes2 = fieldIndex(UF::PLAYER_BYTES_2);
-
-    bool haveBytes0 = readField(ufBytes0, bytes0);
-    bool havePbytes = readField(ufPbytes, pbytes);
-    bool havePbytes2 = readField(ufPbytes2, pbytes2);
-
-    // Heuristic fallback: Turtle can run with unusual build numbers; if the JSON table is missing,
-    // try to locate plausible packed fields by scanning.
-    if (!haveBytes0) {
-        for (const auto& [idx, v] : fields) {
-            uint8_t race = static_cast<uint8_t>(v & 0xFF);
-            uint8_t cls = static_cast<uint8_t>((v >> 8) & 0xFF);
-            uint8_t gender = static_cast<uint8_t>((v >> 16) & 0xFF);
-            uint8_t power = static_cast<uint8_t>((v >> 24) & 0xFF);
-            if (race >= 1 && race <= 20 &&
-                cls >= 1 && cls <= 20 &&
-                gender <= 1 &&
-                power <= 10) {
-                bytes0 = v;
-                haveBytes0 = true;
-                break;
-            }
-        }
-    }
-    if (!havePbytes) {
-        for (const auto& [idx, v] : fields) {
-            uint8_t skin = static_cast<uint8_t>(v & 0xFF);
-            uint8_t face = static_cast<uint8_t>((v >> 8) & 0xFF);
-            uint8_t hair = static_cast<uint8_t>((v >> 16) & 0xFF);
-            uint8_t color = static_cast<uint8_t>((v >> 24) & 0xFF);
-            if (skin <= 50 && face <= 50 && hair <= 100 && color <= 50) {
-                pbytes = v;
-                havePbytes = true;
-                break;
-            }
-        }
-    }
-    if (!havePbytes2) {
-        for (const auto& [idx, v] : fields) {
-            uint8_t facial = static_cast<uint8_t>(v & 0xFF);
-            if (facial <= 100) {
-                pbytes2 = v;
-                havePbytes2 = true;
-                break;
-            }
-        }
-    }
+    const bool haveBytes0 = readField(UF::UNIT_FIELD_BYTES_0, "UNIT_FIELD_BYTES_0", bytes0);
+    const bool havePbytes = readField(UF::PLAYER_BYTES, "PLAYER_BYTES", pbytes);
+    const bool havePbytes2 = readField(UF::PLAYER_BYTES_2, "PLAYER_BYTES_2", pbytes2);
 
     if (!haveBytes0 || !havePbytes) return false;
 

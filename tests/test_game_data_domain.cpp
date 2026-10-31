@@ -6,6 +6,7 @@
 #include "game_harness.hpp"
 
 #include "game/game_data.hpp"
+#include "game/entity_controller.hpp"
 #include "game/game_handler.hpp"
 #include "game/player_handler.hpp"
 #include "game/title_gateway.hpp"
@@ -173,4 +174,39 @@ TEST_CASE("the titles are CharTitles.dbc's names by their bit", "[game_data][har
     REQUIRE(titles.size() == 1);
     CHECK(titles[0].format == "Private %s");
     CHECK(titles[0].bit == 1);
+}
+
+TEST_CASE("another player's race and looks are their own fields, never guessed from others",
+          "[game_data][harness]") {
+    using wowee::game::fieldIndex;
+    using wowee::game::Opcode;
+    using wowee::game::UF;
+    constexpr uint64_t kOther = 0x0000000000000777ull;
+    GameHarness h;
+    h.enterWorld();
+
+    // A player whose update has not carried its appearance yet, with a
+    // faction that reads, byte for byte, like a packed race, class and gender.
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(kOther, wowee::game::ObjectType::PLAYER,
+                                            {{fieldIndex(UF::UNIT_FIELD_HEALTH), 100},
+                                             {fieldIndex(UF::UNIT_FIELD_MAXHEALTH), 100},
+                                             {fieldIndex(UF::UNIT_FIELD_FACTIONTEMPLATE), 0x00010101u}},
+                                            h.player().x + 5.0f, h.player().y, h.player().z));
+    h.pump();
+    uint8_t race = 0, gender = 0, facial = 0;
+    uint32_t looks = 0;
+    CHECK_FALSE(h.game().entityController().getPlayerAppearance(kOther, race, gender, looks, facial));
+
+    // Race 5 (undead), female; skin 2, face 3, hair 4, colour 1; beard 6.
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::valuesBody(kOther, {{fieldIndex(UF::UNIT_FIELD_BYTES_0), 0x01010805u},
+                                               {fieldIndex(UF::PLAYER_BYTES), 0x01040302u},
+                                               {fieldIndex(UF::PLAYER_BYTES_2), 0x00000006u}}));
+    h.pump();
+    REQUIRE(h.game().entityController().getPlayerAppearance(kOther, race, gender, looks, facial));
+    CHECK(race == 5);
+    CHECK(gender == 1);
+    CHECK(looks == 0x01040302u);
+    CHECK(facial == 6);
 }
