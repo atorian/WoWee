@@ -297,7 +297,7 @@ bool WardenHandler::handleProtocolPacket(network::Packet& packet) {
 bool WardenHandler::loadClientImage() {
     if (!serverExtension_.clientPath().empty())
         return wardenMemory_->loadFromFile(serverExtension_.clientPath());
-    return wardenMemory_->load(static_cast<uint16_t>(session_.clientBuild()), isActiveExpansion("turtle"),
+    return wardenMemory_->load(static_cast<uint16_t>(session_.clientBuild()),
         assets_ ? assets_->getDataPath() : std::string());
 }
 
@@ -765,25 +765,9 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                 std::string seedHex;
                 for (auto b : seed) { char s[4]; snprintf(s, 4, "%02x", b); seedHex += s; }
 
-                bool isTurtle = isActiveExpansion("turtle");
-                bool isClassic = (session_.clientBuild() <= 6005) && !isTurtle;
-                const char* turtleFallbackEnv = std::getenv("WOWEE_WARDEN_TURTLE_NO_CR");
-                const bool turtleFallbackAllowed =
-                    turtleFallbackEnv && std::string(turtleFallbackEnv) == "fallback";
+                const bool isClassic = session_.clientBuild() <= 6005;
 
-                if (isTurtle && !turtleFallbackAllowed) {
-                    // Turtle-derived servers close the world connection when given an
-                    // invented HASH_RESULT. Without a verified .cr entry, preserving
-                    // the cipher state and waiting for follow-up checks is the only
-                    // safe protocol behavior.
-                    LOG_WARNING("Warden: HASH_REQUEST seed=", seedHex,
-                                " - no CR match, skipping response for Turtle "
-                                "(set WOWEE_WARDEN_TURTLE_NO_CR=fallback to test the legacy fallback)");
-                    wardenState_ = WardenState::WAIT_CHECKS;
-                    break;
-                }
-
-                if (!isTurtle && !isClassic) {
+                if (!isClassic) {
                     // WotLK/TBC: don't respond to HASH_REQUEST without a valid CR match.
                     // ChromieCraft/AzerothCore tolerates the silence (no ban, no kick),
                     // but REJECTS a wrong hash and closes the connection immediately.
@@ -1002,13 +986,11 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                                     uint32_t off = uint32_t(p[24])|(uint32_t(p[25])<<8)|(uint32_t(p[26])<<16)|(uint32_t(p[27])<<24);
                                     uint8_t patLen = p[28];
                                     bool found = false;
-                                    bool turtleFallback = false;
                                     if (isKnownWantedCodeScan(seed, sha1, off, patLen)) {
                                         found = true;
                                     } else if (wardenMemory_ && wardenMemory_->isLoaded() && patLen > 0) {
-                                        bool hintOnly = (ct == CT_PAGE_A && isActiveExpansion("turtle"));
-                                        found = wardenMemory_->searchCodePattern(seed, sha1, patLen, isImageOnly, off, hintOnly);
-                                        if (!found && !hintOnly && wardenLoadedModule_ && wardenLoadedModule_->isLoaded()) {
+                                        found = wardenMemory_->searchCodePattern(seed, sha1, patLen, isImageOnly, off);
+                                        if (!found && wardenLoadedModule_ && wardenLoadedModule_->isLoaded()) {
                                             const uint8_t* modMem = static_cast<const uint8_t*>(wardenLoadedModule_->getModuleMemory());
                                             size_t modSize = wardenLoadedModule_->getModuleSize();
                                             if (modMem && modSize >= patLen) {
@@ -1020,15 +1002,10 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                                             }
                                         }
                                     }
-                                    if (!found && ct == CT_PAGE_A && isActiveExpansion("turtle") && off < 0x600000) {
-                                        found = true;
-                                        turtleFallback = true;
-                                    }
                                     uint8_t pageResult = found ? 0x4A : 0x00;
                                     LOG_WARNING("Warden:   ", pageName, " offset=0x",
                                                 [&]{char s[12];snprintf(s,12,"%08x",off);return std::string(s);}(),
-                                                " patLen=", (int)patLen, " found=", found ? "yes" : "no",
-                                                turtleFallback ? " (turtle-fallback)" : "");
+                                                " patLen=", (int)patLen, " found=", found ? "yes" : "no");
                                     pos += kPageSize;
                                     resultData.push_back(pageResult);
                                     break;
@@ -1375,13 +1352,6 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                                     } else if (wardenMemory_ && wardenMemory_->isLoaded() && len > 0) {
                                         if (wardenMemory_->searchCodePattern(seedBytes, reqHash, len, true, off))
                                             pageResult = 0x4A;
-                                    }
-                                    // Turtle PAGE_A fallback: runtime-patched offsets aren't in the
-                                    // on-disk PE. Server expects "found" for code integrity checks.
-                                    if (pageResult == 0x00 && isActiveExpansion("turtle") && off < 0x600000) {
-                                        pageResult = 0x4A;
-                                        LOG_WARNING("Warden:   PAGE_A turtle-fallback for offset=0x",
-                                                    [&]{char s[12];snprintf(s,12,"%08x",off);return std::string(s);}());
                                     }
                                 }
                                 if (consume >= 29) {

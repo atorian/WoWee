@@ -191,7 +191,7 @@ private:
 
 /**
  * Build the 8-element texture region field index array for ItemDisplayInfo.dbc.
- * Classic/Turtle 23-field DBCs have textures at 14-21;
+ * Classic 23-field DBCs have textures at 14-21;
  * TBC/WotLK 25-field DBCs have textures at 15-22.
  * Detects automatically from the loaded DBC's field count.
  */
@@ -199,7 +199,7 @@ inline void getItemDisplayInfoTextureFields(const DBCFile& dbc,
     const DBCFieldMap* layout,
     uint32_t (&out)[8])
 {
-    // 25-field DBCs (TBC/WotLK) shift textures +1 vs 23-field (Classic/Turtle):
+    // 25-field DBCs (TBC/WotLK) shift textures +1 vs 23-field (Classic):
     // vanilla has one InventoryIcon where the later files have two.
     //
     // The layouts say 15 and 14 respectively and have since 2026-08-13; before

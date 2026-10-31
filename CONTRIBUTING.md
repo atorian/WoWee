@@ -82,12 +82,8 @@ is expected for gameplay-affecting changes.
 `opcodes.json`, `update_fields.json`, `dbc_layouts.json`, plus the
 `db/` CSV fallback and DBC overlay).
 
-- `opcodes.json` supports `_extends` / `_remove` (see
-  `src/game/opcode_table.cpp` `loadOpcodeJsonRecursive`). The turtle
-  profile uses this to inherit from classic.
-- `update_fields.json` does **not** currently support `_extends` - the
-  classic and turtle files must be kept byte-identical by hand. Update
-  both together when changing vanilla field indices.
+- `opcodes.json` and `update_fields.json` are flat: every expansion's file
+  lists all of its own values.
 - Authoritative source for vanilla 1.12 field indices: vmangos
   `UpdateFields_1_12_1.h`. For 2.4.3 and 3.3.5a, use vmangos
   `UpdateFields_2_4_3.h` and AzerothCore / TrinityCore `UpdateFields.h`

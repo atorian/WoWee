@@ -22,7 +22,7 @@ namespace {
 constexpr uint32_t kMissing = 0xFFFFFFFF;
 
 const std::vector<std::string>& expansions() {
-    static const std::vector<std::string> kExpansions{"classic", "tbc", "wotlk", "turtle"};
+    static const std::vector<std::string> kExpansions{"classic", "tbc", "wotlk"};
     return kExpansions;
 }
 
@@ -64,7 +64,7 @@ TEST_CASE("Spell layout exposes the fields the spell logic reads", "[dbc][layout
         // Duration drives aura timers.
         REQUIRE(spell->field("DurationIndex") != kMissing);
 
-        // School is per-expansion: a bitmask on TBC/WotLK, a 0-6 enum on Classic/Turtle.
+        // School is per-expansion: a bitmask on TBC/WotLK, a 0-6 enum on Classic.
         const bool hasSchool = spell->field("SchoolMask") != kMissing ||
                                spell->field("SchoolEnum") != kMissing;
         REQUIRE(hasSchool);
@@ -178,7 +178,7 @@ TEST_CASE("Pre-WotLK expansions publish no companion field", "[update_fields]") 
     // The field did not exist before WotLK, and neither did CMSG_DISMISS_CRITTER.
     // Claiming an index here would read some unrelated field and hand the dismiss
     // toggle a guid that is not a companion.
-    for (const char* expansion : {"classic", "tbc", "turtle"}) {
+    for (const char* expansion : {"classic", "tbc"}) {
         const std::string path = (std::filesystem::path(WOWEE_SOURCE_DIR) /
             "Data" / "expansions" / expansion / "update_fields.json").string();
         std::ifstream in(path);

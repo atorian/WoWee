@@ -106,7 +106,7 @@ TEST_CASE("every expansion declares the band fields where they are",
     // Both files are the id, a count, sixteen times and sixteen values: 34
     // fields. Declaring the count at 2 reads the first time key, and 1440 -
     // noon - is not a keyframe count.
-    for (const char* expansion : {"classic", "tbc", "wotlk", "turtle"}) {
+    for (const char* expansion : {"classic", "tbc", "wotlk"}) {
         const std::string json =
             wowee::test::slurp(std::string("Data/expansions/") + expansion +
                   "/dbc_layouts.json");
@@ -130,7 +130,7 @@ TEST_CASE("every expansion reads Light.dbc's weather columns in file order",
     // The columns after the clear light are clear under water, storm, storm
     // under water. Field 8 was read as rain and 9 as under water, so rain drew
     // the under-water light and diving drew the storm.
-    for (const char* expansion : {"classic", "tbc", "wotlk", "turtle"}) {
+    for (const char* expansion : {"classic", "tbc", "wotlk"}) {
         const std::string json =
             wowee::test::slurp(std::string("Data/expansions/") + expansion +
                   "/dbc_layouts.json");

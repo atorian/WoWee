@@ -1097,7 +1097,7 @@ void MovementHandler::dismount() {
 network::Packet MovementHandler::buildForceAck(Opcode ackOpcode, uint32_t counter) {
     network::Packet ack(wireOpcode(ackOpcode));
     const bool legacyGuid =
-        isActiveExpansion("classic") || isActiveExpansion("tbc") || isActiveExpansion("turtle");
+        isActiveExpansion("classic") || isActiveExpansion("tbc");
     if (legacyGuid) {
         ack.writeUInt64(queries_.characterGuid());
     } else {
@@ -1595,7 +1595,7 @@ void MovementHandler::handleCompressedMoves(network::Packet& packet) {
 // ============================================================
 
 void MovementHandler::handleMonsterMove(network::Packet& packet) {
-    if (isActiveExpansion("classic") || isActiveExpansion("turtle")) {
+    if (isActiveExpansion("classic")) {
         constexpr uint32_t kMaxMonsterMovesPerTick = 256;
         ++monsterMovePacketsThisTick_;
         if (monsterMovePacketsThisTick_ > kMaxMonsterMovesPerTick) {
@@ -1639,59 +1639,7 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
     };
 
     const auto& rawData = packet.getData();
-    const bool allowTurtleMoveCompression = isActiveExpansion("turtle");
-    bool isCompressed = allowTurtleMoveCompression &&
-                        rawData.size() >= 6 &&
-                        rawData[4] == 0x78 &&
-                        (rawData[5] == 0x01 || rawData[5] == 0x9C ||
-                         rawData[5] == 0xDA || rawData[5] == 0x5E);
-    if (isCompressed) {
-        uint32_t decompSize = static_cast<uint32_t>(rawData[0]) |
-                              (static_cast<uint32_t>(rawData[1]) << 8) |
-                              (static_cast<uint32_t>(rawData[2]) << 16) |
-                              (static_cast<uint32_t>(rawData[3]) << 24);
-        if (decompSize == 0 || decompSize > 65536) {
-            LOG_WARNING("SMSG_MONSTER_MOVE: bad decompSize=", decompSize);
-            return;
-        }
-        std::vector<uint8_t> decompressed(decompSize);
-        uLongf destLen = decompSize;
-        int ret = uncompress(decompressed.data(), &destLen,
-                             rawData.data() + 4, rawData.size() - 4);
-        if (ret != Z_OK) {
-            LOG_WARNING("SMSG_MONSTER_MOVE: zlib error ", ret);
-            return;
-        }
-        decompressed.resize(destLen);
-        std::vector<uint8_t> stripped;
-        bool hasWrappedForm = stripWrappedSubpacket(decompressed, stripped);
-
-        bool parsed = false;
-        if (hasWrappedForm) {
-            network::Packet wrappedPacket(packet.getOpcode(), stripped);
-            if (queries_.packetParsers().parseMonsterMove(wrappedPacket, data)) {
-                parsed = true;
-            }
-        }
-        if (!parsed) {
-            network::Packet decompPacket(packet.getOpcode(), decompressed);
-            if (queries_.packetParsers().parseMonsterMove(decompPacket, data)) {
-                parsed = true;
-            }
-        }
-
-        if (!parsed) {
-            if (hasWrappedForm) {
-                logMonsterMoveParseFailure("Failed to parse SMSG_MONSTER_MOVE (decompressed " +
-                                           std::to_string(destLen) + " bytes, wrapped payload " +
-                                           std::to_string(stripped.size()) + " bytes)");
-            } else {
-                logMonsterMoveParseFailure("Failed to parse SMSG_MONSTER_MOVE (decompressed " +
-                                           std::to_string(destLen) + " bytes)");
-            }
-            return;
-        }
-    } else if (!queries_.packetParsers().parseMonsterMove(packet, data)) {
+    if (!queries_.packetParsers().parseMonsterMove(packet, data)) {
         std::vector<uint8_t> stripped;
         if (stripWrappedSubpacket(rawData, stripped)) {
             network::Packet wrappedPacket(packet.getOpcode(), stripped);
@@ -1724,7 +1672,6 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
     // the render callback. WotLK uses the separate spline mode opcodes already
     // registered above, and 0x100 means DONE there, so do not reinterpret it.
     const bool usesPreWotlkSplineFlags = isActiveExpansion("classic") ||
-                                          isActiveExpansion("turtle") ||
                                           isActiveExpansion("tbc");
     if (usesPreWotlkSplineFlags && entity->getType() == ObjectType::UNIT) {
         const uint32_t locomotionFlags =
@@ -1907,7 +1854,6 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
     bool hasDest = spline.hasDest;
 
     const bool usesPreWotlkSplineFlags = isActiveExpansion("classic") ||
-                                          isActiveExpansion("turtle") ||
                                           isActiveExpansion("tbc");
     if (usesPreWotlkSplineFlags && entity->getType() == ObjectType::UNIT) {
         const uint32_t locomotionFlags =
@@ -2081,7 +2027,7 @@ void MovementHandler::handleTeleportAck(network::Packet& packet) {
     if (sender_.connected()) {
         network::Packet ack(wireOpcode(Opcode::MSG_MOVE_TELEPORT_ACK));
         const bool legacyGuidAck =
-            isActiveExpansion("classic") || isActiveExpansion("tbc") || isActiveExpansion("turtle");
+            isActiveExpansion("classic") || isActiveExpansion("tbc");
         if (legacyGuidAck) {
             ack.writeUInt64(queries_.characterGuid());
         } else {

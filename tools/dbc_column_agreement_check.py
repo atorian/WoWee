@@ -28,8 +28,8 @@ expansion's layout declares has to agree with the reference file's more than any
 column near it does.
 
 Absolute agreement is the wrong test. A private server's DBCs are edited -
-Turtle's Spell.dbc is edited enough that the *right* column agrees on four
-spells in five - so a threshold tuned to one file is wrong for the next. What
+enough that the *right* column can agree on four spells in five - so a
+threshold tuned to one file is wrong for the next. What
 separates right from wrong is the margin: the right column wins its
 neighbourhood by a mile, 77% against 11% for the one beside it.
 
@@ -47,8 +47,7 @@ WHAT IT CANNOT SEE
   * A table only one expansion ships. There is nothing to compare against.
   * A column both layouts get wrong in the same way. They agree, and agreement
     is all this measures.
-  * Classic, which ships no DBCs of its own here - its layout is compared
-    through Turtle's, which uses the same numbers.
+  * Classic, which ships no DBCs of its own here.
   * A field one layout names and the other does not.
 """
 import argparse
@@ -61,7 +60,6 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 REFERENCE = ROOT / "Data" / "db"
 OVERLAYS = {
     "tbc": ROOT / "Data/expansions/tbc/overlay/db",
-    "turtle": ROOT / "Data/expansions/turtle/overlay/db",
 }
 REFERENCE_LAYOUT = "wotlk"
 
@@ -76,10 +74,10 @@ MIN_ROWS = 200
 # outside that.
 MARGIN = 1.5
 # And it has to agree on a real share of the rows, not merely on more of them
-# than a column that agrees on none. Turtle's Talent.dbc and TaxiPathNode.dbc
-# are rewritten rather than edited, so no column of theirs corresponds to the
-# reference: the declared one agreed on nothing and its neighbour on three rows
-# in nine hundred, which is not evidence of anything.
+# than a column that agrees on none. A table a server rewrote rather than
+# edited has no column that corresponds to the reference: the declared one
+# agrees on nothing and its neighbour on a handful of rows, which is not
+# evidence of anything.
 MIN_SHARE = 0.20
 # Records read per file. Statistics, not completeness - and Spell.dbc has fifty
 # thousand rows.
@@ -218,11 +216,11 @@ def scan():
 
 def canary():
     """Move a column that is known right and confirm the scan names it."""
-    path = ROOT / "Data/expansions/turtle/dbc_layouts.json"
+    path = ROOT / "Data/expansions/tbc/dbc_layouts.json"
     original = path.read_text()
     try:
         doc = json.loads(original)
-        doc["Spell"]["Effect0"] = 71      # the WotLK column, wrong for vanilla
+        doc["Spell"]["Effect0"] = 71      # the WotLK column, wrong for TBC
         path.write_text(json.dumps(doc, indent=2) + "\n")
         hits, _, _ = scan()
         named = [h for h in hits if h[1] == "Spell" and h[2] == "Effect0"]
@@ -231,7 +229,7 @@ def canary():
     if not named:
         print("CANARY FAILED: the moved column was not reported")
         return 1
-    print(f"canary ok: reported turtle Spell.Effect0, best column "
+    print(f"canary ok: reported tbc Spell.Effect0, best column "
           f"{named[0][5]}")
     return 0
 

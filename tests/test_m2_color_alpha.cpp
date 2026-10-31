@@ -15,7 +15,7 @@
 // animation (the second only appears while the bundle is dropped during the
 // Death sequence). If the loader stops parsing these tracks, the character
 // renderer draws both bundles at once - the "carrying two bundles of wood"
-// bug. Both the WotLK (v264, array-of-arrays tracks) and vanilla/Turtle
+// bug. Both the WotLK (v264, array-of-arrays tracks) and vanilla
 // (v256, flat tracks with ranges) encodings must produce usable tracks.
 
 using wowee::pipeline::M2Loader;
@@ -145,9 +145,9 @@ TEST_CASE("WotLK peasant wood model parses per-animation color alpha", "[m2][col
 
 TEST_CASE("Vanilla peasant wood model parses color alpha ranges", "[m2][color]") {
     auto data = wowee::test::readFile(
-        "Data/expansions/turtle/overlay/creature/humanmalepeasant/HumanMalePeasantWood.m2");
+        "Data/expansions/classic/creature/humanmalepeasant/HumanMalePeasantWood.m2");
     if (data.empty()) {
-        SUCCEED("turtle overlay asset not extracted; optional real-asset coverage skipped");
+        SUCCEED("classic asset not extracted; optional real-asset coverage skipped");
         return;
     }
     M2Model model = M2Loader::load(data);

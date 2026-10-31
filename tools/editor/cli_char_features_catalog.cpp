@@ -275,9 +275,9 @@ int handleValidate(int& i, int argc, char** argv) {
                 errors.push_back(ctx + ": sexId " +
                     std::to_string(e.sexId) + " not in 0..1");
             }
-            if (e.requiresExpansion > wowee::pipeline::WoweeCharFeature::TurtleWoW) {
+            if (e.requiresExpansion > wowee::pipeline::WoweeCharFeature::WotLK) {
                 errors.push_back(ctx + ": requiresExpansion " +
-                    std::to_string(e.requiresExpansion) + " not in 0..3");
+                    std::to_string(e.requiresExpansion) + " not in 0..2");
             }
             if (e.texturePath.empty()) {
                 errors.push_back(ctx +

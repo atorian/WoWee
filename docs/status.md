@@ -37,7 +37,7 @@ Implemented (working in normal use):
 - Bags: FrameXML's container frames, or the bundled `WoweeAllBags` combined window (carried bags, keyring and bank, with a Sort button); "Separate bag windows" under Interface > Bags chooses between them
 - Controllers: SDL3 gamepads on every platform, with buttons named per pad family (Xbox, PlayStation, Nintendo, Steam Deck and others), back paddles on action slots 7-10, a pointer mode on Back, and the scheme seeded into the game's Key Bindings panel
 - DBC auto-detection: CharSections.dbc field layout auto-detected at runtime (handles stock WotLK vs HD-textured clients)
-- Multi-expansion: Classic/Vanilla, TBC, WotLK, and Turtle WoW (1.18) protocol and asset variants
+- Multi-expansion: Classic/Vanilla, TBC and WotLK protocol and asset variants
 - CI: GitHub Actions for Linux (x86-64, ARM64), Windows (MSYS2 x86-64 + ARM64), macOS (ARM64, x86-64), Android (arm64); container builds via Podman
 
 Recent refactors (PRs #59-63, April 2026):
@@ -53,7 +53,7 @@ Recent refactors (PRs #59-63, April 2026):
 Recent fixes (July 2026):
 
 - Login pipeline hardened: login-critical opcodes have hardcoded fallback when opcode table lookup fails; OpcodeTable::loadFromJson() is now safe against failed reloads (issue #87)
-- Integrity hash is build-aware: Classic-era DLLs only required for builds <=6005 or Turtle; TBC/WotLK hash only the .exe
+- Integrity hash is build-aware: Classic-era DLLs only required for builds <=6005; TBC/WotLK hash only the .exe
 - Strafing reworked: torso-twist via SpineLow bone rotation instead of dedicated strafe animations
 - Camera smoothing snaps 1:1 during active drag/keyboard turn to reduce input lag
 - Mount strafing uses MOUNT_RUN_LEFT/RIGHT when available

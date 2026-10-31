@@ -129,7 +129,7 @@ void SpellbookScreen::loadSpellDBC(pipeline::AssetManager* assetManager) {
             }
             if (schoolField_ < fc) {
                 uint32_t raw = dbc->getUInt32(i, schoolField_);
-                // Classic/Turtle use a 0-6 school enum; TBC/WotLK use a bitmask.
+                // Classic use a 0-6 school enum; TBC/WotLK use a bitmask.
                 // enum→mask: schoolEnum N maps to bit (1u << N), e.g. 0→1 (physical), 4→16 (frost).
                 info.schoolMask = isSchoolEnum_ ? (raw <= 6 ? (1u << raw) : 0u) : raw;
             }
@@ -157,12 +157,12 @@ void SpellbookScreen::loadSpellDBC(pipeline::AssetManager* assetManager) {
         try { powerTypeField   = (*spellL)["PowerType"]; } catch (...) {}
         try { manaCostField    = (*spellL)["ManaCost"]; } catch (...) {}
         // From the file's own shape rather than the expansion's name for it:
-        // Classic and Turtle named this 15, which is RequiresSpellFocus.
+        // Classic named this 15, which is RequiresSpellFocus.
         castTimeIdxField = pipeline::detectSpellTimingFields(dbc.get(), spellL).castingTimeIndex;
         try { rangeIdxField    = (*spellL)["RangeIndex"]; } catch (...) {}
         try { casterAuraStateField = (*spellL)["CasterAuraState"]; } catch (...) {}
         try { casterAuraStateNotField = (*spellL)["CasterAuraStateNot"]; } catch (...) {}
-        // Try SchoolMask (TBC/WotLK bitmask) then SchoolEnum (Classic/Turtle 0-6 value)
+        // Try SchoolMask (TBC/WotLK bitmask) then SchoolEnum (Classic 0-6 value)
         //
         // Asked for rather than read, so a 1.12 layout is not reported as
         // missing SchoolMask: it never had the column, and the warning that

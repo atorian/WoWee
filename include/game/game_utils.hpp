@@ -12,7 +12,7 @@ inline bool isActiveExpansion(const char* expansionId) {
 }
 
 inline bool isClassicLikeExpansion() {
-    return isActiveExpansion("classic") || isActiveExpansion("turtle");
+    return isActiveExpansion("classic");
 }
 
 inline bool isPreWotlk() {

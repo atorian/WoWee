@@ -118,7 +118,7 @@ same extractor:
   ./extract_assets.sh /path/to/WoW/Data wotlk
   ```
 
-  Supports `classic`, `turtle`, `tbc`, `wotlk` targets (auto-detected if omitted).
+  Supports `classic`, `tbc`, `wotlk` targets (auto-detected if omitted).
 
 The builder and `wowee_assets` write to the per-user data directory by
 default, `$XDG_DATA_HOME/wowee/Data` (or `~/.local/share/wowee/Data`). The
@@ -195,7 +195,7 @@ It automatically detects Homebrew and passes the correct paths to CMake.
 ./extract_assets.sh /path/to/WoW/Data wotlk
 ```
 
-Supports `classic`, `turtle`, `tbc`, `wotlk` targets (auto-detected if omitted).
+Supports `classic`, `tbc`, `wotlk` targets (auto-detected if omitted).
 
 The builder and `wowee_assets` write to
 `~/Library/Application Support/Wowee/Data` by default; the script writes to

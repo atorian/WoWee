@@ -43,7 +43,7 @@ TEST_CASE("every game can be built") {
 
 TEST_CASE("the upgrades are offered on every game they can improve") {
     // The point of the change: these are not Wrath-only, and never were.
-    for (const char* base : {"classic", "tbc", "wotlk", "cata", "turtle"}) {
+    for (const char* base : {"classic", "tbc", "wotlk", "cata"}) {
         INFO(base);
         CHECK(offers(base, "sharper"));
         CHECK(offers(base, "legion-models"));

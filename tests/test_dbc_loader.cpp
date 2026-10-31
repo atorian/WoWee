@@ -486,7 +486,7 @@ TEST_CASE("Spell.dbc's timing columns come from the file's shape", "[dbc][spell]
         return wowee::pipeline::detectSpellTimingFields(&dbc, nullptr);
     };
 
-    SECTION("Vanilla 1.12 and Turtle") {
+    SECTION("Vanilla 1.12") {
         const auto f = shapeOf(173);
         CHECK(f.castingTimeIndex == 18);
         CHECK(f.recoveryTime == 19);
@@ -506,7 +506,7 @@ TEST_CASE("Spell.dbc's timing columns come from the file's shape", "[dbc][spell]
     }
 
     SECTION("a layout that disagrees with the shape is not followed") {
-        // Classic's and Turtle's both named CastingTimeIndex 15, which is
+        // Classic's named CastingTimeIndex 15, which is
         // RequiresSpellFocus and reads zero for every spell in the game.
         wowee::pipeline::DBCFieldMap wrong;
         wrong.fields["CastingTimeIndex"] = 15;

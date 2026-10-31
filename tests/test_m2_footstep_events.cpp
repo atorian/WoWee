@@ -72,7 +72,7 @@ TEST_CASE("WotLK human male has alternating biped footfall events", "[m2][footst
 }
 
 TEST_CASE("Vanilla model buckets global-timeline footfall events per sequence", "[m2][footstep]") {
-    auto data = wowee::test::readFile("Data/expansions/turtle/overlay/creature/orcmalewarriorlight/OrcMaleWarriorLight.m2");
+    auto data = wowee::test::readFile("Data/expansions/classic/creature/orcmalewarriorlight/OrcMaleWarriorLight.m2");
     if (data.empty()) {
         SUCCEED("model asset not extracted; optional real-asset coverage skipped");
         return;

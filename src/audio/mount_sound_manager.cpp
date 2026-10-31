@@ -586,7 +586,7 @@ MountFamily MountSoundManager::detectMountFamily(uint32_t creatureDisplayId) con
         creatureDisplayId == 10180 || creatureDisplayId == 14584)
         return MountFamily::MECHANOSTRIDER;
 
-    // Tallstriders (plainstrider mounts - Turtle WoW custom or future)
+    // Tallstriders (plainstrider mounts - custom or future)
     // 1961-1964
     if (creatureDisplayId >= 1961 && creatureDisplayId <= 1964)
         return MountFamily::TALLSTRIDER;

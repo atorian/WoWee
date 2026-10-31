@@ -516,7 +516,7 @@ void GameHandler::updateNetworking() {
         inventoryHandler_->swapContainerItems(op.srcBag, op.srcSlot, op.dstBag, op.dstSlot, false);
     }
 
-    // Reset per-tick monster-move budget tracking (Classic/Turtle flood protection).
+    // Reset per-tick monster-move budget tracking (Classic flood protection).
     movementHandler_->monsterMovePacketsThisTickRef() = 0;
     movementHandler_->monsterMovePacketsDroppedThisTickRef() = 0;
 

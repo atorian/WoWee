@@ -27,7 +27,6 @@ enum : uint8_t {
     kExpansionClassic = 0,
     kExpansionTBC = 1,
     kExpansionWotLK = 2,
-    kExpansionTurtleWoW = 3,
 };
 
 /// The word a sidecar carries for this value.
@@ -41,7 +40,6 @@ inline const char* expansionName(uint8_t e) {
         case kExpansionClassic:   return "classic";
         case kExpansionTBC:       return "tbc";
         case kExpansionWotLK:     return "wotlk";
-        case kExpansionTurtleWoW: return "turtle";
         default:                  return "unknown";
     }
 }
@@ -58,7 +56,7 @@ inline const char* expansionName(uint8_t e) {
 /// most of them.
 ///
 /// What made the expansion words shareable is that all three formats that use
-/// them number identically, 0 to 3. That is a property of those three, not a
+/// them number identically, 0 to 2. That is a property of those three, not a
 /// rule about .w* formats, and it was checked rather than assumed.
 
 /// The value behind that word. Anything unrecognised reads as Classic.
@@ -69,7 +67,6 @@ inline const char* expansionName(uint8_t e) {
 inline uint8_t expansionFromName(std::string_view name) {
     if (name == "tbc")    return kExpansionTBC;
     if (name == "wotlk")  return kExpansionWotLK;
-    if (name == "turtle") return kExpansionTurtleWoW;
     return kExpansionClassic;
 }
 

@@ -1818,7 +1818,7 @@ void EntityController::handleMovementUpdate(const UpdateBlock& block) {
                 }
                 // Fire move callback for non-player units (creatures).
                 // SMSG_MONSTER_MOVE handles smooth interpolated movement, but many
-                // servers (especially vanilla/Turtle WoW) communicate NPC positions
+                // servers (especially vanilla) communicate NPC positions
                 // via MOVEMENT blocks instead. Use duration=0 for an instant snap.
                 if (block.guid != owner_.getPlayerGuid() &&
                     entity->getType() == ObjectType::UNIT &&

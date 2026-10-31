@@ -563,7 +563,7 @@ static QuestQueryObjectives extractQuestQueryObjectives(const std::vector<uint8_
         return tryParseQuestObjectivesAt(data, base + 63u * 4u, 5, true);  // WotLK
     if (questLogStride == 4)
         return tryParseQuestObjectivesAt(data, base + 41u * 4u, 4, false); // TBC
-    return tryParseQuestObjectivesAt(data, base + 37u * 4u, 4, false);     // Classic/Turtle
+    return tryParseQuestObjectivesAt(data, base + 37u * 4u, 4, false);     // Classic
 }
 
 // Quest log reward extraction lives in QuestQueryRewardsParser

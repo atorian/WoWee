@@ -2616,7 +2616,7 @@ void SpellHandler::loadSpellNameCache() const {
     const uint32_t targetAuraStateField = spellL ? spellL->field("TargetAuraState") : 0xFFFFFFFF;
     const uint32_t spellVisualIdField = spellL ? spellL->field("SpellVisualID") : 0xFFFFFFFF;
     // Read off the file's own shape. Only TBC's layout named these two, so on
-    // WotLK, Classic and Turtle every cooldown this client worked out for itself
+    // WotLK and Classic every cooldown this client worked out for itself
     // came back zero - which is most of them, since the server sends a cooldown
     // only when it is correcting one the client should already have.
     const auto timing = pipeline::detectSpellTimingFields(dbc.get(), spellL);
@@ -4124,7 +4124,7 @@ void SpellHandler::handleExtraAuraInfo(network::Packet& packet, bool isInit) {
 }
 
 void SpellHandler::handleSpellDispelLog(network::Packet& packet) {
-    // WotLK/Classic/Turtle: packed casterGuid + packed victimGuid + uint32 dispelSpell + uint8 isStolen
+    // WotLK/Classic: packed casterGuid + packed victimGuid + uint32 dispelSpell + uint8 isStolen
     // TBC:                  full uint64 casterGuid + full uint64 victimGuid + ...
     // + uint32 count + count × (uint32 dispelled_spellId + uint32 unk)
     const bool dispelUsesFullGuid = isActiveExpansion("tbc");
@@ -4214,7 +4214,7 @@ void SpellHandler::handleSpellDispelLog(network::Packet& packet) {
 void SpellHandler::handleSpellStealLog(network::Packet& packet) {
     // Sent to the CASTER (Mage) when Spellsteal succeeds.
     // Wire format mirrors SPELLDISPELLOG:
-    // WotLK/Classic/Turtle: packed victim + packed caster + uint32 spellId + uint8 isStolen + uint32 count
+    // WotLK/Classic: packed victim + packed caster + uint32 spellId + uint8 isStolen + uint32 count
     //                        + count × (uint32 stolenSpellId + uint8 isPositive)
     // TBC:                   full uint64 victim + full uint64 caster + same tail
     const bool stealUsesFullGuid = isActiveExpansion("tbc");
@@ -4283,7 +4283,7 @@ void SpellHandler::handleSpellStealLog(network::Packet& packet) {
 }
 
 void SpellHandler::handleSpellChanceProcLog(network::Packet& packet) {
-    // WotLK/Classic/Turtle: packed_guid target + packed_guid caster + uint32 spellId + ...
+    // WotLK/Classic: packed_guid target + packed_guid caster + uint32 spellId + ...
     // TBC:                  uint64 target + uint64 caster + uint32 spellId + ...
     const bool procChanceUsesFullGuid = isActiveExpansion("tbc");
     auto readProcChanceGuid = [&]() -> uint64_t {
@@ -4314,7 +4314,7 @@ void SpellHandler::handleSpellChanceProcLog(network::Packet& packet) {
 
 void SpellHandler::handleSpellInstaKillLog(network::Packet& packet) {
     // Sent when a unit is killed by a spell with SPELL_ATTR_EX2_INSTAKILL (e.g. Execute, Obliterate, etc.)
-    // WotLK/Classic/Turtle: packed_guid caster + packed_guid victim + uint32 spellId
+    // WotLK/Classic: packed_guid caster + packed_guid victim + uint32 spellId
     // TBC:                  full uint64 caster + full uint64 victim + uint32 spellId
     const bool ikUsesFullGuid = isActiveExpansion("tbc");
     auto ik_rem = [&]() { return packet.getRemainingSize(); };
@@ -4510,7 +4510,7 @@ void SpellHandler::parseEffectFeedPet(network::Packet& packet, uint32_t effectLo
 }
 
 void SpellHandler::handleSpellLogExecute(network::Packet& packet) {
-    // WotLK/Classic/Turtle: packed_guid caster + uint32 spellId + uint32 effectCount
+    // WotLK/Classic: packed_guid caster + uint32 spellId + uint32 effectCount
     // TBC:                  uint64 caster + uint32 spellId + uint32 effectCount
     // Per-effect: uint8 effectType + uint32 effectLogCount + effect-specific data
     // Effect 10 = POWER_DRAIN:   packed_guid target + uint32 amount + uint32 powerType + float multiplier

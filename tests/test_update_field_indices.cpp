@@ -82,7 +82,7 @@ TEST_CASE("the target field moved between vanilla and WotLK",
     // The difference that was missed. WotLK inserts UNIT_FIELD_CRITTER among
     // the guid fields before TARGET, so a value correct for one is wrong for
     // the other - and both are plausible slot numbers.
-    for (const char* expansion : {"classic", "tbc", "turtle"}) {
+    for (const char* expansion : {"classic", "tbc"}) {
         const auto fields = declaredFields(expansion);
         INFO(expansion);
         REQUIRE(fields.count("UNIT_FIELD_TARGET_LO") == 1);
@@ -98,7 +98,7 @@ TEST_CASE("the target field moved between vanilla and WotLK",
 TEST_CASE("the two halves of a guid field are adjacent", "[update-fields]") {
     // A guid occupies two slots. Any pair that is not consecutive is reading
     // half of one field and half of another.
-    for (const char* expansion : {"classic", "tbc", "wotlk", "turtle"}) {
+    for (const char* expansion : {"classic", "tbc", "wotlk"}) {
         const auto fields = declaredFields(expansion);
         INFO(expansion);
         REQUIRE(fields.count("UNIT_FIELD_TARGET_LO") == 1);
@@ -120,7 +120,7 @@ TEST_CASE("the summoner field sits where the target field says it does",
     // zero for every unit, which is indistinguishable from "nobody summoned
     // it", and every pet in the world would quietly become an ordinary
     // creature.
-    for (const char* expansion : {"classic", "tbc", "wotlk", "turtle"}) {
+    for (const char* expansion : {"classic", "tbc", "wotlk"}) {
         const auto fields = declaredFields(expansion);
         INFO(expansion);
         REQUIRE(fields.count("UNIT_FIELD_SUMMONEDBY_LO") == 1);
@@ -158,7 +158,7 @@ TEST_CASE("the corpse fields are where the client reads them", "[update-fields]"
     // The older layouts carry the corpse's facing and position as fields too,
     // four slots WotLK dropped for the party guid's two. The items still
     // follow the display id, nineteen of them, then the two appearance words.
-    for (const char* expansion : {"classic", "tbc", "wotlk", "turtle"}) {
+    for (const char* expansion : {"classic", "tbc", "wotlk"}) {
         const auto fields = declaredFields(expansion);
         INFO(expansion);
         REQUIRE(fields.count("CORPSE_FIELD_ITEM") == 1);

@@ -533,7 +533,7 @@ bool WardenModule::parseExecutableFormat(const std::vector<uint8_t>& exeData) {
         return false;
     }
 
-    // Turtle-derived realms use the native Warden image format, not the older
+    // Some realms use the native Warden image format, not the older
     // copy/skip stream assumed below. Its fixed header is followed by 12-byte
     // section descriptors; those descriptors are metadata and are not copied
     // into the image. The copy stream alternates copied and zero-filled spans.

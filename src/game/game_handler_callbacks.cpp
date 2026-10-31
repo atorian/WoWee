@@ -380,8 +380,7 @@ void GameHandler::handleCharEnum(network::Packet& packet) {
     LOG_INFO("Handling SMSG_CHAR_ENUM");
 
     CharEnumResponse response;
-    // IMPORTANT: Do not infer packet formats from numeric build alone.
-    // Turtle WoW uses a "high" build but classic-era world packet formats.
+    // The expansion's parsers decide the format, never the numeric build.
     bool parsed = packetParsers_->parseCharEnum(packet, response);
     if (!parsed) {
         fail("Failed to parse SMSG_CHAR_ENUM");

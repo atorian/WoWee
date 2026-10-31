@@ -196,7 +196,7 @@ Wowee follows a modular architecture with clear separation of concerns:
 
 **OpcodeTable** - Expansion-agnostic opcode mapping
 - `LogicalOpcode` enum → wire opcode via JSON config per expansion
-- Runtime remapping for Classic/TBC/WotLK/Turtle protocol differences
+- Runtime remapping for Classic/TBC/WotLK protocol differences
 
 **Entity / EntityManager** - Entity lifecycle
 - Shared entity base class with update fields (sparse index → uint32, `FlatFieldMap`)
@@ -228,8 +228,8 @@ Wowee follows a modular architecture with clear separation of concerns:
 
 **Expansion Helpers** (`game_utils.hpp`):
 - `isActiveExpansion("classic")` / `isActiveExpansion("tbc")` / `isActiveExpansion("wotlk")`
-- `isClassicLikeExpansion()` (Classic or Turtle WoW)
-- `isPreWotlk()` (Classic, Turtle, or TBC)
+- `isClassicLikeExpansion()` (Classic)
+- `isPreWotlk()` (Classic or TBC)
 
 ### 6. Asset Pipeline (`src/pipeline/`)
 

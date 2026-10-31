@@ -69,7 +69,7 @@ TEST_CASE("Ship machinery is classified for distant bone updates", "[m2][animati
 }
 
 TEST_CASE("Steam Tonk vehicles are not steam VFX", "[m2][classification]") {
-    // The TBC/Turtle SteamTonk overlay is a tiny proxy that slips under the
+    // The TBC SteamTonk overlay is a tiny proxy that slips under the
     // low-poly vertex gate; combined with a smoke emitter it was mis-classified
     // as an additive spell effect (glowing translucent). A "tonk"/"tank" name
     // must never be treated as steam VFX regardless of geometry.

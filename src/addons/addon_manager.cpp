@@ -661,8 +661,8 @@ bool AddonManager::loadFrameXml(const std::string& frameXmlDir) {
     //
     // Read off the manifest rather than off the active expansion profile,
     // because it is a fact about the files about to be loaded and the two can
-    // disagree: a Turtle install is 1.12's interface whichever profile is
-    // selected.
+    // disagree: an install's interface is whatever its files are, whichever
+    // profile is selected.
     //
     // A manifest that does not say gets the older convention. The two ways of
     // being wrong are not the same size - publishing three globals for an

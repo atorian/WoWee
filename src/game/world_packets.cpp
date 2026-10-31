@@ -504,7 +504,7 @@ network::Packet CharCreatePacket::build(const CharCreateData& data) {
     packet.writeUInt8(data.hairColor);
     packet.writeUInt8(data.facialHair);
     packet.writeUInt8(0);  // outfitId, always 0
-    // Turtle WoW / 1.12.1 clients send 4 extra zero bytes after outfitId.
+    // 1.12.1 clients send 4 extra zero bytes after outfitId.
     // Servers may validate packet length and silently drop undersized packets.
     packet.writeUInt32(0);
 

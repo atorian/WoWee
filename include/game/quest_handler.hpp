@@ -213,7 +213,7 @@ public:
     // order. The last field of each PLAYER_QUEST_LOG slot is when the quest
     // fails, as a Unix timestamp; zero means the quest is not timed.
     [[nodiscard]] std::vector<std::pair<uint32_t, uint32_t>> getQuestTimers() const;
-    // Server-side quest log capacity: 20 slots in Vanilla/Turtle, 25 from TBC on
+    // Server-side quest log capacity: 20 slots in Vanilla, 25 from TBC on
     [[nodiscard]] int maxQuestLogSlots() const;
     // QuestSort.dbc name ("Seasonal", class/profession sorts, ...) for negative
     // ZoneOrSort values; empty if unknown

@@ -26,9 +26,9 @@ PLAYER_END. That header is what the server writes from, so it is the wire.
 WOTLK ONLY, AND WHY
 
 There is one server here and it is 3.3.5a, so only the WotLK layout can be
-checked. The Classic, TBC and Turtle files carry different values for the same
+checked. The Classic and TBC files carry different values for the same
 names - plausible ones, and unverifiable from here. Checking them against this
-header would report three expansions of noise, which is the mistake the DBC
+header would report two expansions of noise, which is the mistake the DBC
 check made before it learned to pick one.
 
 WHAT IT CANNOT SEE

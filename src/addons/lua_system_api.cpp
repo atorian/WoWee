@@ -3417,7 +3417,7 @@ static int expansionLevelZeroBased(lua_State* L) {
     if (!prof) return 2;
     if (prof->id == "wotlk") return 2;
     if (prof->id == "tbc") return 1;
-    return 0;   // classic and turtle
+    return 0;   // classic
 }
 
 static int lua_GetExpansionLevel(lua_State* L) {

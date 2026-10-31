@@ -1027,7 +1027,7 @@ void CombatHandler::updateAutoAttack(float deltaTime) {
                 if (allowResync) {
                     autoAttackResendTimer_ += deltaTime;
 
-                    // Classic/Turtle servers do not tolerate steady attack-start
+                    // Classic servers do not tolerate steady attack-start
                     // reissues well. Only retry once after local start or an
                     // explicit server-side attack stop while intent is still set.
                     const float resendInterval = classicLike ? 1.0f : 0.50f;
@@ -1225,7 +1225,7 @@ void CombatHandler::handleSpellDamageShield(network::Packet& packet) {
 }
 
 void CombatHandler::handleSpellOrDamageImmune(network::Packet& packet) {
-    // WotLK/Classic/Turtle: packed casterGuid + packed victimGuid + uint32 spellId + uint8 saveType
+    // WotLK/Classic: packed casterGuid + packed victimGuid + uint32 spellId + uint8 saveType
     // TBC:                  full uint64 casterGuid + full uint64 victimGuid + uint32 + uint8
     const bool immuneUsesFullGuid = isActiveExpansion("tbc");
     const size_t minSz = immuneUsesFullGuid ? 21u : 2u;
@@ -1254,7 +1254,7 @@ void CombatHandler::handleSpellOrDamageImmune(network::Packet& packet) {
 }
 
 void CombatHandler::handleResistLog(network::Packet& packet) {
-    // WotLK/Classic/Turtle: uint32 hitInfo + packed_guid attacker + packed_guid victim + uint32 spellId
+    // WotLK/Classic: uint32 hitInfo + packed_guid attacker + packed_guid victim + uint32 spellId
     //                      + float resistFactor + uint32 targetRes + uint32 resistedValue + ...
     // TBC:                 same layout but full uint64 GUIDs
     // Show RESIST combat text when player resists an incoming spell.

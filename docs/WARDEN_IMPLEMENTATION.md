@@ -1,7 +1,7 @@
 # Warden Implementation
 
 **Status**: Partial - the module is loaded, decrypted, unpacked, relocated, its imports bound and its entry point run under Unicorn, and the `WardenFuncList` it returns is read back. The module's own packet handler is not used for checks: `WardenModule::processCheckRequest` has no caller, and `WardenHandler` builds every reply itself (see Check Responses).
-**WoW Version**: 3.3.5a (build 12340); the handler also has paths for 1.12.1 and Turtle WoW-derived realms
+**WoW Version**: 3.3.5a (build 12340); the handler also has paths for 1.12.1 realms
 
 ---
 
@@ -25,7 +25,7 @@ are built by the client rather than by the module: memory reads are served from 
 2. RC4       - Decrypt module payload
 3. RSA-2048  - Verify module signature (Blizzard's key, or the realm's - see Crypto Layer below)
 4. zlib      - Decompress module
-5. Parse     - Unpack Warden's own image format (copy/skip pair stream, or the native header Turtle-derived realms use)
+5. Parse     - Unpack Warden's own image format (copy/skip pair stream, or the native header some realms use)
 6. Relocate  - Apply base relocations to load address
 7. Bind      - Resolve imports (Windows API stubs + Warden callbacks)
 8. Init      - Call module entry point via Unicorn Engine
@@ -145,9 +145,8 @@ in `$WOWEE_INTEGRITY_DIR`, a few home-directory locations, and `Data/misc` /
 `Data/expansions/<id>/misc`, and fakes `KUSER_SHARED_DATA`. Without it, memory checks
 answer `0xE9`.
 
-A `HASH_REQUEST` with no matching `.cr` entry gets no reply on WotLK/TBC and Turtle
-(AzerothCore tolerates the silence and rejects a wrong hash; Turtle-derived realms
-close the connection) - `WOWEE_WARDEN_TURTLE_NO_CR=fallback` overrides that for Turtle.
+A `HASH_REQUEST` with no matching `.cr` entry gets no reply on WotLK/TBC
+(AzerothCore tolerates the silence and rejects a wrong hash).
 1.12.1 realms are sent a SHA1 of the module image as a fallback.
 
 ---

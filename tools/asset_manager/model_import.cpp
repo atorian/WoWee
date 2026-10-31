@@ -309,7 +309,7 @@ tableSkinsByModel(const std::string& expansionDir) {
     // WDBC: a 20-byte header, fixed-size records of 32-bit fields, then the
     // strings the records point into. The columns read here are where every
     // expansion this client knows keeps them - dbc_layouts.json agrees for
-    // classic, tbc, wotlk and turtle: CreatureModelData's path is field 2,
+    // classic, tbc and wotlk: CreatureModelData's path is field 2,
     // CreatureDisplayInfo's model is field 1 and its skins fields 6 to 8.
     struct Table {
         std::vector<uint8_t> blob;

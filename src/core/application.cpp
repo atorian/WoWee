@@ -1551,7 +1551,7 @@ bool Application::initialize() {
                         const auto* spL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("Spell") : nullptr;
                         if (sDbc && sDbc->isLoaded()) {
                             uint32_t idF = spL ? (*spL)["ID"] : 0;
-                            // From the file's shape - Classic and Turtle named
+                            // From the file's shape - Classic named
                             // this 15, which is RequiresSpellFocus and zero for
                             // every spell.
                             uint32_t ctF = pipeline::detectSpellTimingFields(sDbc.get(), spL)
@@ -1614,7 +1614,7 @@ bool Application::initialize() {
                     if (!*propLoaded && amPtr->isInitialized()) {
                         *propLoaded = true;
                         // Both DBCs carry the display name ("of the Bear" / "of Strength") as
-                        // the first string column, field 1, across classic/tbc/wotlk/turtle.
+                        // the first string column, field 1, across classic/tbc/wotlk.
                         constexpr uint32_t kNameField = 1;
                         // ItemRandomProperties.dbc: ID=0, Name=1 (positive IDs)
                         if (auto dbc = amPtr->loadDBC("ItemRandomProperties.dbc"); dbc && dbc->isLoaded()) {
@@ -1668,7 +1668,7 @@ bool Application::initialize() {
                             const uint32_t nameF = pipeline::detectEnchantmentNameField(dbc.get(), sieL);
                             if (nameF >= 12 && nameF < fc) {
                                 const uint32_t argBase = nameF - 3;
-                                const bool singleAmount = fc < 34;  // Vanilla/Turtle: no separate Max array
+                                const bool singleAmount = fc < 34;  // Vanilla: no separate Max array
                                 const uint32_t effBase = argBase - (singleAmount ? 6u : 9u);
                                 const uint32_t minBase = effBase + 3u;
                                 for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {

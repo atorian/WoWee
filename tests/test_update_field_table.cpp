@@ -25,7 +25,7 @@ std::string fieldsPath(const std::string& expansion) {
 } // namespace
 
 TEST_CASE("Every expansion ships a loadable update-field table", "[updatefields]") {
-    for (const auto& expansion : {"classic", "tbc", "wotlk", "turtle"}) {
+    for (const auto& expansion : {"classic", "tbc", "wotlk"}) {
         INFO("expansion: " << expansion);
         UpdateFieldTable table;
         REQUIRE(table.loadFromJson(fieldsPath(expansion)));

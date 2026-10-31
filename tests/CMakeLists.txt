@@ -3053,7 +3053,7 @@ register_test_target(test_update_field_indices)
 # ── test_opcode_tables ───────────────────────────────────────
 # Opcode numbers and the structure around them. All 1306 WotLK numbers were
 # checked against AzerothCore's Opcodes.h and agreed; this holds them there
-# and pins the _extends inheritance the smaller tables rely on.
+# and holds every table free of two names on one number.
 add_executable(test_opcode_tables
     test_opcode_tables.cpp
     ${TEST_COMMON_SOURCES})
