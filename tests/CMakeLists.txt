@@ -3756,3 +3756,19 @@ wowee_add_test(test_wmo_minimap
     SOURCES test_wmo_minimap.cpp ${CMAKE_SOURCE_DIR}/src/rendering/wmo_minimap.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/required_table.cpp ${TEST_COMMON_SOURCES})
+
+# ── test_scene_references ───────────────────────────────────
+# Scenes drawn by scene_render against the pictures approved for them in
+# tests/approvals (ApprovalTests.cpp). Skipped without a Vulkan device or the
+# game data.
+wowee_add_test(test_scene_references SOURCES test_scene_references.cpp)
+target_include_directories(test_scene_references PRIVATE
+    ${CMAKE_SOURCE_DIR}/extern/approval_tests ${CMAKE_CURRENT_SOURCE_DIR}/approval_catch2)
+target_compile_definitions(test_scene_references PRIVATE
+    WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    WOWEE_SCENE_RENDER="$<TARGET_FILE:scene_render>"
+    WOWEE_SCRATCH_DIR="${CMAKE_BINARY_DIR}/scratch")
+add_dependencies(test_scene_references scene_render)
+if(WOWEE_GAME_DATA_DIR)
+    set_tests_properties(scene_references PROPERTIES ENVIRONMENT "WOW_DATA_PATH=${WOWEE_GAME_DATA_DIR}")
+endif()

@@ -81,6 +81,7 @@ cscope.out
 extern/*
 !extern/.gitkeep
 !extern/catch2
+!extern/approval_tests
 !extern/imgui
 !extern/vk-bootstrap
 !extern/FidelityFX-SDK
