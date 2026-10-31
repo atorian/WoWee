@@ -1,5 +1,5 @@
 #include "game/entity_controller.hpp"
-#include "game/game_data.hpp"
+#include "game/player_appearance.hpp"
 #include "title/services/titles.hpp"
 #include "pet/domain/records.hpp"
 #include "pet/services/pet.hpp"
@@ -60,8 +60,8 @@ void applyBlockMovementSpeeds(const UpdateBlock& block, Entity& entity) {
 
 } // anonymous namespace
 
-EntityController::EntityController(GameHandler& owner, const GameData& data)
-    : owner_(owner), data_(data) { initTypeHandlers(); }
+EntityController::EntityController(GameHandler& owner)
+    : owner_(owner) { initTypeHandlers(); }
 
 void EntityController::registerOpcodes(DispatchTable& table) {
     // World object updates - accept during ENTERING_WORLD too so that entity
@@ -84,30 +84,10 @@ void EntityController::registerOpcodes(DispatchTable& table) {
         if (inWorldOrEntering()) handleDestroyObject(packet);
     };
 
-    // Entity queries
-    table[Opcode::SMSG_NAME_QUERY_RESPONSE] = [this](network::Packet& packet) {
-        handleNameQueryResponse(packet);
-    };
-    table[Opcode::SMSG_CREATURE_QUERY_RESPONSE] = [this](network::Packet& packet) {
-        handleCreatureQueryResponse(packet);
-    };
-    table[Opcode::SMSG_GAMEOBJECT_QUERY_RESPONSE] = [this](network::Packet& packet) {
-        handleGameObjectQueryResponse(packet);
-    };
-    table[Opcode::SMSG_GAMEOBJECT_PAGETEXT] = [this](network::Packet& packet) {
-        handleGameObjectPageText(packet);
-    };
 }
 
 void EntityController::clearAll() {
     pendingUpdateObjectWork_.clear();
-    playerNameCache.clear();
-    playerClassRaceCache_.clear();
-    pendingNameQueries.clear();
-    creatureInfoCache.clear();
-    pendingCreatureQueries.clear();
-    gameObjectInfoCache_.clear();
-    pendingGameObjectQueries_.clear();
     transportGuids_.clear();
     serverUpdatedTransportGuids_.clear();
     entityManager.clear();
@@ -269,9 +249,7 @@ size_t EntityController::processOutOfRangeObjectsUntil(const std::vector<uint64_
             // What they wore is decoded again if they come back: forgotten
             // whether or not anything draws them.
             owner_.inventory().forgetPlayerEquipment(guid);
-            // Clear pending name query so the query is re-sent when this player
-            // comes back into range (entity is recreated as a new object).
-            pendingNameQueries.erase(guid);
+            owner_.queryCache().playerLeftView(guid);
         } else if (entity->getType() == ObjectType::GAMEOBJECT) {
             owner_.eventBus().publish(events::GameObjectDespawned{guid});
         } else if (entity->getType() == ObjectType::CORPSE) {
@@ -299,63 +277,11 @@ size_t EntityController::processOutOfRangeObjectsUntil(const std::vector<uint64_
 // Extracted helper methods
 // ============================================================
 
-bool EntityController::getPlayerAppearance(uint64_t guid, uint8_t& outRace,
-                                           uint8_t& outGender,
-                                           uint32_t& outAppearanceBytes,
-                                           uint8_t& outFacial) const {
-    auto entity = const_cast<EntityController*>(this)->getEntityManager().getEntity(guid);
-    if (!entity) return false;
-    // Players only: a creature carries no PLAYER_BYTES, and its UNIT_FIELD_BYTES_0
-    // is not a player's race and gender.
-    if (entity->getType() != ObjectType::PLAYER) return false;
-    return extractPlayerAppearance(entity->getFields(), outRace, outGender,
-                                   outAppearanceBytes, outFacial);
+std::optional<PlayerAppearance> EntityController::appearanceOf(uint64_t guid) const {
+    auto entity = entityManager.getEntity(guid);
+    if (!entity || entity->getType() != ObjectType::PLAYER) return std::nullopt;
+    return playerAppearance(entity->getFields());
 }
-
-bool EntityController::extractPlayerAppearance(const FlatFieldMap& fields,
-                                               uint8_t& outRace,
-                                               uint8_t& outGender,
-                                               uint32_t& outAppearanceBytes,
-                                               uint8_t& outFacial) const {
-    outRace = 0;
-    outGender = 0;
-    outAppearanceBytes = 0;
-    outFacial = 0;
-
-    // The three are named in every expansion's update_fields.json; one that is
-    // not is a broken file, not a reason to guess which field looks packed.
-    // A field the object's update has not carried yet is only not known yet.
-    auto readField = [&](UF field, const char* name, uint32_t& out) -> bool {
-        const uint16_t idx = fieldIndex(field);
-        if (idx == 0xFFFF) {
-            data_.stop("update_fields.json", "a player's race, gender and looks",
-                       std::string("names no ") + name);
-        }
-        auto it = fields.find(idx);
-        if (it == fields.end()) return false;
-        out = it->second;
-        return true;
-    };
-
-    uint32_t bytes0 = 0;
-    uint32_t pbytes = 0;
-    uint32_t pbytes2 = 0;
-    const bool haveBytes0 = readField(UF::UNIT_FIELD_BYTES_0, "UNIT_FIELD_BYTES_0", bytes0);
-    const bool havePbytes = readField(UF::PLAYER_BYTES, "PLAYER_BYTES", pbytes);
-    const bool havePbytes2 = readField(UF::PLAYER_BYTES_2, "PLAYER_BYTES_2", pbytes2);
-
-    if (!haveBytes0 || !havePbytes) return false;
-
-    outRace = static_cast<uint8_t>(bytes0 & 0xFF);
-    outGender = static_cast<uint8_t>((bytes0 >> 16) & 0xFF);
-    outAppearanceBytes = pbytes;
-    outFacial = havePbytes2 ? static_cast<uint8_t>(pbytes2 & 0xFF) : 0;
-    return true;
-}
-
-// ============================================================
-// Update type dispatch
-// ============================================================
 
 void EntityController::applyUpdateObjectBlock(const UpdateBlock& block, bool& newItemCreated) {
     switch (block.updateType) {
@@ -869,15 +795,13 @@ void EntityController::announceUnit(uint64_t guid, ObjectType objectType,
         return;  // Skip local player - spawned separately via spawnPlayerCharacter()
     }
     if (objectType == ObjectType::PLAYER) {
-        uint8_t race = 0, gender = 0, facial = 0;
-        uint32_t appearanceBytes = 0;
-        if (extractPlayerAppearance(entity->getFields(), race, gender, appearanceBytes, facial)) {
+        if (const auto look = playerAppearance(entity->getFields())) {
             owner_.eventBus().publish(events::PlayerSpawned{
-                guid, unit->getDisplayId(), race, gender, appearanceBytes, facial,
-                unit->getX(), unit->getY(), unit->getZ(), unit->getOrientation()});
+                guid, unit->getDisplayId(), look->race, look->gender, look->appearanceBytes,
+                look->facialFeatures, unit->getX(), unit->getY(), unit->getZ(), unit->getOrientation()});
         } else {
             LOG_WARNING("[Spawn] PLAYER guid=0x", std::hex, guid, std::dec,
-                      " displayId=", unit->getDisplayId(), " appearance extraction failed - model will not render");
+                      " displayId=", unit->getDisplayId(), " has no UNIT_FIELD_BYTES_0 - no race, model will not render");
         }
     } else {
         LOG_DEBUG("[Spawn] UNIT guid=0x", std::hex, guid, std::dec,
@@ -1043,11 +967,11 @@ void EntityController::onCreateUnit(const UpdateBlock& block, std::shared_ptr<En
     if (it != block.fields.end() && it->second != 0) {
         auto unit = std::static_pointer_cast<Unit>(entity);
         unit->setEntry(it->second);
-        std::string cached = getCachedCreatureName(it->second);
+        std::string cached = owner_.queryCache().getCachedCreatureName(it->second);
         if (!cached.empty()) {
             unit->setName(cached);
         }
-        queryCreatureInfo(it->second, block.guid);
+        owner_.queryCache().queryCreatureInfo(it->second, block.guid);
     }
 
     // Unit fields
@@ -1081,8 +1005,17 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
         owner_.inventory().maybeDetectVisibleItemLayout();
     }
 
-    // Name query + visible items
-    queryPlayerName(block.guid);
+    // The name, known from an earlier sighting or asked for, and the visible
+    // items. An object that left view and came back is a new one with no
+    // name of its own.
+    {
+        const auto& names = owner_.queryCache().getPlayerNameCache();
+        if (auto it = names.find(block.guid); it != names.end()) {
+            auto player = std::static_pointer_cast<Player>(entity);
+            if (player->getName().empty()) player->setName(it->second);
+        }
+        owner_.queryCache().queryPlayerName(block.guid);
+    }
     if (block.guid != owner_.getPlayerGuid()) {
         owner_.inventory().updateOtherPlayerVisibleItems(block.guid, entity->getFields());
     }
@@ -1162,11 +1095,10 @@ void EntityController::onCreateGameObject(const UpdateBlock& block, std::shared_
     auto itEntry = block.fields.find(fieldIndex(UF::OBJECT_FIELD_ENTRY));
     if (itEntry != block.fields.end() && itEntry->second != 0) {
         go->setEntry(itEntry->second);
-        auto cacheIt = gameObjectInfoCache_.find(itEntry->second);
-        if (cacheIt != gameObjectInfoCache_.end()) {
-            go->setName(cacheIt->second.name);
+        if (const auto* info = owner_.queryCache().getCachedGameObjectInfo(itEntry->second)) {
+            go->setName(info->name);
         }
-        queryGameObjectInfo(itEntry->second, block.guid);
+        owner_.queryCache().queryGameObjectInfo(itEntry->second, block.guid);
     }
 
     // Detect transport GameObjects via UPDATEFLAG_TRANSPORT (0x0002)
@@ -1712,7 +1644,7 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
                 // Player entities also need renderer cleanup on DESTROY_OBJECT, not just out-of-range.
                 owner_.eventBus().publish(events::PlayerDespawned{data.guid});
                 owner_.inventory().forgetPlayerEquipment(data.guid);
-                pendingNameQueries.erase(data.guid);
+                owner_.queryCache().playerLeftView(data.guid);
             } else if (entity->getType() == ObjectType::GAMEOBJECT) {
                 owner_.eventBus().publish(events::GameObjectDespawned{data.guid});
             } else if (entity->getType() == ObjectType::CORPSE) {
@@ -1769,295 +1701,49 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
 // Name Queries
 // ============================================================
 
-void EntityController::queryPlayerName(uint64_t guid) {
-    // If already cached, apply the name to the entity (handles entity recreation after
-    // moving out/in range - the entity object is new but the cached name is valid).
-    auto cacheIt = playerNameCache.find(guid);
-    if (cacheIt != playerNameCache.end()) {
-        auto entity = entityManager.getEntity(guid);
-        if (entity && entity->getType() == ObjectType::PLAYER) {
-            auto player = std::static_pointer_cast<Player>(entity);
-            if (player->getName().empty()) {
-                player->setName(cacheIt->second);
-            }
-        }
-        return;
-    }
-    if (pendingNameQueries.count(guid)) return;
-    if (!owner_.isInWorld()) {
-        LOG_INFO("queryPlayerName: skipped guid=0x", std::hex, guid, std::dec,
-                 " owner_.getState()=", worldStateName(owner_.getState()), " owner_.getSocket()=", (owner_.getSocket() ? "yes" : "no"));
-        return;
-    }
-
-    LOG_INFO("queryPlayerName: sending CMSG_NAME_QUERY for guid=0x", std::hex, guid, std::dec);
-    pendingNameQueries.insert(guid);
-    auto packet = NameQueryPacket::build(guid);
-    owner_.getSocket()->send(packet);
-}
-
-void EntityController::queryCreatureInfo(uint32_t entry, uint64_t guid) {
-    if (creatureInfoCache.count(entry) || pendingCreatureQueries.count(entry)) return;
-    if (!owner_.isInWorld()) return;
-
-    pendingCreatureQueries.insert(entry);
-    auto packet = CreatureQueryPacket::build(entry, guid);
-    owner_.getSocket()->send(packet);
-}
-
-void EntityController::queryGameObjectInfo(uint32_t entry, uint64_t guid) {
-    if (gameObjectInfoCache_.count(entry) || pendingGameObjectQueries_.count(entry)) return;
-    if (!owner_.isInWorld()) return;
-
-    pendingGameObjectQueries_.insert(entry);
-    auto packet = GameObjectQueryPacket::build(entry, guid);
-    owner_.getSocket()->send(packet);
-}
-
-std::string EntityController::getCachedPlayerName(uint64_t guid) const {
-    return std::string(lookupName(guid));
-}
-
-std::string EntityController::getCachedCreatureName(uint32_t entry) const {
-    auto it = creatureInfoCache.find(entry);
-    return (it != creatureInfoCache.end()) ? it->second.name : "";
-}
-void EntityController::handleNameQueryResponse(network::Packet& packet) {
-    NameQueryResponseData data;
-    if (!owner_.getPacketParsers() || !owner_.getPacketParsers()->parseNameQueryResponse(packet, data)) {
-        LOG_WARNING("Failed to parse SMSG_NAME_QUERY_RESPONSE (size=", packet.getSize(), ")");
-        return;
-    }
-
-    pendingNameQueries.erase(data.guid);
-
-    LOG_INFO("Name query response: guid=0x", std::hex, data.guid, std::dec,
-             " found=", static_cast<int>(data.found), " name='", data.name, "'",
-             " race=", static_cast<int>(data.race), " class=", static_cast<int>(data.classId));
-
-    if (data.isValid()) {
-        playerNameCache[data.guid] = data.name;
-        // Cache class/race from name query for UnitClass/UnitRace fallback,
-        // and the gender an NPC's $g switch chooses by.
-        if (data.classId != 0 || data.race != 0) {
-            playerClassRaceCache_[data.guid] = {.classId = data.classId, .raceId = data.race,
-                                                .gender = data.gender};
-        }
-        // After the cache above: chat releases the lines it held back for this
-        // name, and a held NPC line reads the cache for its $-tokens.
-        owner_.eventBus().publish(events::PlayerNameKnown{data.guid, data.name});
-        // Update entity name
-        auto entity = entityManager.getEntity(data.guid);
-        if (entity && entity->getType() == ObjectType::PLAYER) {
-            auto player = std::static_pointer_cast<Player>(entity);
-            player->setName(data.name);
-        }
-
-        // A letter's sender is named by the mailbox, which hears
-        // PlayerNameKnown above.
-
-        // The friend and ignore lists file the name themselves (PlayerNameKnown).
-
-        // Fire UNIT_NAME_UPDATE so nameplate/unit frame addons know the name is available
-        if (owner_.hasAddonEventListener()) {
-            std::string unitId;
-            if (data.guid == owner_.combat().getTargetGuid()) unitId = "target";
-            else if (data.guid == owner_.combat().getFocusGuid()) unitId = "focus";
-            else if (data.guid == owner_.getPlayerGuid()) unitId = "player";
-            if (!unitId.empty())
-                owner_.fireAddonEvent("UNIT_NAME_UPDATE", {unitId});
-        }
-    }
-}
-
-void EntityController::handleCreatureQueryResponse(network::Packet& packet) {
-    CreatureQueryResponseData data;
-    if (!owner_.getPacketParsers()->parseCreatureQueryResponse(packet, data)) return;
-
-    pendingCreatureQueries.erase(data.entry);
-
-    if (data.isValid()) {
-        creatureInfoCache[data.entry] = data;
-        // Update all unit entities with this entry
-        for (auto& [guid, entity] : entityManager.getEntities()) {
-            if (entity->getType() == ObjectType::UNIT) {
-                auto unit = std::static_pointer_cast<Unit>(entity);
-                if (unit->getEntry() == data.entry) {
-                    unit->setName(data.name);
-                    // The rank came with this response, and UnitClassification
-                    // reads it from the cache just filled. A unit targeted
-                    // before its query came back answered "normal" until now -
-                    // so an elite or a rare drew a plain border and kept it,
-                    // because the frame only rechecks when told to.
-                    //
-                    // Only for a unit the interface has a token for: the frame
-                    // compares the argument against its own unit and ignores
-                    // anything else, and most of a zone is neither targeted nor
-                    // focused.
-                    const std::string unitId = owner_.guidToUnitId(guid);
-                    if (!unitId.empty() && owner_.hasAddonEventListener()) {
-                        owner_.fireAddonEvent("UNIT_CLASSIFICATION_CHANGED", {unitId});
-                    }
-                }
-            }
-        }
-        // A companion may have been waiting on exactly this. A companion's
-        // creature id is a template entry and the model frame needs a display
-        // id, so GetCompanionInfo answers zero until the query comes back -
-        // and the tab only re-reads when told. Without this the model appeared
-        // on the next login and not before.
-        //
-        // With the kind, because the event carries it and the tab re-reads the
-        // list it names: a mount's answer announced as a critter's left the
-        // mount tab holding the zero it started with.
-        const std::string kind = owner_.companionKindForCreature(data.entry);
-        if (!kind.empty() && owner_.hasAddonEventListener()) {
-            owner_.fireAddonEvent("COMPANION_UPDATE", {kind});
-        }
-        // An objective that had no name for what it is about now has one.
-        owner_.quests().objectiveTargetNamed(data.entry, false);
-    }
-}
-
-// ============================================================
-// GameObject Query
-// ============================================================
-
-void EntityController::handleGameObjectQueryResponse(network::Packet& packet) {
-    GameObjectQueryResponseData data;
-    bool ok = owner_.getPacketParsers() ? owner_.getPacketParsers()->parseGameObjectQueryResponse(packet, data)
-                             : GameObjectQueryResponseParser::parse(packet, data);
-    if (!ok) return;
-
-    pendingGameObjectQueries_.erase(data.entry);
-
-    if (data.isValid()) {
-        gameObjectInfoCache_[data.entry] = data;
-        // Update all gameobject entities with this entry
-        for (auto& [guid, entity] : entityManager.getEntities()) {
-            if (entity->getType() == ObjectType::GAMEOBJECT) {
-                auto go = std::static_pointer_cast<GameObject>(entity);
-                if (go->getEntry() == data.entry) {
-                    go->setName(data.name);
-                }
-            }
-        }
-
-        // A sign somebody clicked while this was in flight: the click was
-        // kept rather than dropped, so it is answered now.
-        if (!pendingPageTextGuids_.empty()) {
-            std::vector<uint64_t> ready;
-            for (uint64_t waiting : pendingPageTextGuids_) {
-                auto entity = entityManager.getEntity(waiting);
-                if (!entity || entity->getType() != ObjectType::GAMEOBJECT) {
-                    ready.push_back(waiting);   // gone; drop it
-                    continue;
-                }
-                if (std::static_pointer_cast<GameObject>(entity)->getEntry() == data.entry) {
-                    ready.push_back(waiting);
-                }
-            }
-            for (uint64_t guid : ready) {
-                pendingPageTextGuids_.erase(guid);
-                if (entityManager.getEntity(guid)) showGameObjectPageText(guid);
-            }
-        }
-
-        // And the same for an objective that names this one - a chest to open
-        // rather than a creature to kill.
-        owner_.quests().objectiveTargetNamed(data.entry, true);
-
-        // MO_TRANSPORT (type 15): assign TaxiPathNode path if available.
-        //
-        // This is the only route a zeppelin or a continent ship ever gets -
-        // none of them has a TransportAnimation.dbc entry - so every way it
-        // can fail leaves a transport standing at its dock, and every one of
-        // them used to be silent or at debug level. Said once per entry.
-        const uint32_t mapId = owner_.getCurrentMapId();
-        if (data.type == 15 && owner_.getTransportManager()) {
-            static std::set<uint32_t> saidRoute;
-            const bool sayThis = saidRoute.insert(data.entry).second;
-            const uint32_t taxiPathId = data.hasData ? data.data[0] : 0u;
-            if (taxiPathId == 0) {
-                if (sayThis) {
-                    LOG_WARNING("MO_TRANSPORT entry=", data.entry,
-                                " carries no taxiPathId (hasData=", data.hasData ? 1 : 0,
-                                ") - it has no route to fly and will stay docked");
-                }
-            } else if (!owner_.getTransportManager()->hasTaxiPathForMap(taxiPathId, mapId)) {
-                if (sayThis) {
-                    LOG_WARNING("MO_TRANSPORT entry=", data.entry, " taxiPathId=", taxiPathId,
-                                " has no TaxiPathNode segment on map ", mapId,
-                                " (the path exists on some map: ",
-                                owner_.getTransportManager()->hasTaxiPath(taxiPathId) ? 1 : 0, ")");
-                }
-            } else if (owner_.getTransportManager()->assignTaxiPathToTransport(
-                           data.entry, taxiPathId, mapId)) {
-                if (sayThis) {
-                    LOG_WARNING("MO_TRANSPORT entry=", data.entry, " assigned TaxiPathNode path ",
-                                taxiPathId, " on map ", mapId);
-                }
-            } else if (sayThis) {
-                LOG_WARNING("MO_TRANSPORT entry=", data.entry, " has TaxiPathNode path ",
-                            taxiPathId, " on map ", mapId,
-                            " but no transport registered under that entry took it");
-            }
-        }
-    }
-}
-
-void EntityController::handleGameObjectPageText(network::Packet& packet) {
-    if (!packet.hasRemaining(8)) return;
-    showGameObjectPageText(packet.readUInt64());
-}
-
-void EntityController::showGameObjectPageText(uint64_t guid) {
+void EntityController::playerNamed(uint64_t guid, const std::string& name) {
     auto entity = entityManager.getEntity(guid);
-    if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return;
-
-    auto go = std::static_pointer_cast<GameObject>(entity);
-    uint32_t entry = go->getEntry();
-    if (entry == 0) return;
-
-    auto cacheIt = gameObjectInfoCache_.find(entry);
-    if (cacheIt == gameObjectInfoCache_.end()) {
-        pendingPageTextGuids_.insert(guid);
-        queryGameObjectInfo(entry, guid);
-        LOG_WARNING("Read object 0x", std::hex, guid, std::dec, " entry=", entry,
-                    ": no metadata yet, asked for it and will read when it lands");
-        return;
+    if (entity && entity->getType() == ObjectType::PLAYER) {
+        std::static_pointer_cast<Player>(entity)->setName(name);
     }
-
-    const GameObjectQueryResponseData& info = cacheIt->second;
-    uint32_t pageId = 0;
-    // AzerothCore layout:
-    // type 9 (TEXT): data[0]=pageID
-    // type 10 (GOOBER): data[7]=pageId
-    // The backing sits two words behind the page in both layouts, which is the
-    // whole of what tells a stone tablet from a parchment letter on screen.
-    uint32_t pageMaterial = 0;
-    if (info.type == 9)       { pageId = info.data[0]; pageMaterial = info.data[2]; }
-    else if (info.type == 10) { pageId = info.data[7]; pageMaterial = info.data[9]; }
-
-    // At warning, because this is the whole of why a sign says nothing: the
-    // type decides where the page id is, and an object that is not a 9 or a 10
-    // has none to find. The default log carries warnings only, so an INFO line
-    // here answers nobody.
-    LOG_WARNING("Read object '", info.name, "' entry=", entry, " type=", info.type,
-                " pageId=", pageId, " hasData=", info.hasData);
-
-    if (pageId != 0 && owner_.getSocket() && owner_.getState() == WorldState::IN_WORLD) {
-        owner_.inventory().beginBook(info.name, pageMaterial);  // a fresh book for this interaction
-        auto req = PageTextQueryPacket::build(pageId, guid);
-        owner_.getSocket()->send(req);
-        return;
-    }
-
-    if (!info.name.empty()) {
-        owner_.chat().addSystemChatMessage(info.name);
+    // UNIT_NAME_UPDATE so nameplate/unit frame addons know the name is available
+    if (owner_.hasAddonEventListener()) {
+        std::string unitId;
+        if (guid == owner_.combat().getTargetGuid()) unitId = "target";
+        else if (guid == owner_.combat().getFocusGuid()) unitId = "focus";
+        else if (guid == owner_.getPlayerGuid()) unitId = "player";
+        if (!unitId.empty()) owner_.fireAddonEvent("UNIT_NAME_UPDATE", {unitId});
     }
 }
 
+void EntityController::creatureNamed(const CreatureQueryResponseData& data) {
+    for (auto& [guid, entity] : entityManager.getEntities()) {
+        if (entity->getType() != ObjectType::UNIT) continue;
+        auto unit = std::static_pointer_cast<Unit>(entity);
+        if (unit->getEntry() != data.entry) continue;
+        unit->setName(data.name);
+        // The rank came with this response, and UnitClassification reads it
+        // from the cache just filled. A unit targeted before its query came
+        // back answered "normal" until now - so an elite or a rare drew a plain
+        // border and kept it, because the frame only rechecks when told to.
+        //
+        // Only for a unit the interface has a token for: the frame compares the
+        // argument against its own unit and ignores anything else, and most of
+        // a zone is neither targeted nor focused.
+        const std::string unitId = owner_.guidToUnitId(guid);
+        if (!unitId.empty() && owner_.hasAddonEventListener()) {
+            owner_.fireAddonEvent("UNIT_CLASSIFICATION_CHANGED", {unitId});
+        }
+    }
+}
+
+void EntityController::gameObjectNamed(const GameObjectQueryResponseData& data) {
+    for (auto& [guid, entity] : entityManager.getEntities()) {
+        if (entity->getType() != ObjectType::GAMEOBJECT) continue;
+        auto go = std::static_pointer_cast<GameObject>(entity);
+        if (go->getEntry() == data.entry) go->setName(data.name);
+    }
+}
 
 } // namespace game
 } // namespace wowee

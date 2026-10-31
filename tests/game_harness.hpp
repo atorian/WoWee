@@ -37,6 +37,7 @@
 #include <deque>
 #include <filesystem>
 #include <functional>
+#include <array>
 #include <map>
 #include <memory>
 #include <optional>
@@ -316,6 +317,14 @@ public:
     /// rest a plain item with no stats, spells or sockets.
     static std::vector<uint8_t> itemTemplateBody(uint32_t entry, const std::string& name,
                                                  uint32_t displayInfoId, uint32_t inventoryType);
+    /// SMSG_NAME_QUERY_RESPONSE as 3.3.5a writes it for a player who exists:
+    /// a Tauren (2) male shaman (7).
+    static std::vector<uint8_t> nameResponseBody(uint64_t guid, const std::string& name);
+    /// SMSG_GAMEOBJECT_QUERY_RESPONSE as 3.3.5a writes it: the type, a name,
+    /// and the type's 24 data words.
+    static std::vector<uint8_t> gameObjectTemplateBody(uint32_t entry, uint32_t type,
+                                                       const std::string& name,
+                                                       const std::array<uint32_t, 24>& data = {});
     /// SMSG_UPDATE_OBJECT with one VALUES block for an object.
     static std::vector<uint8_t> valuesBody(uint64_t guid, const Fields& fields);
     /// Put the player's own object in view - what the realm's fields for the

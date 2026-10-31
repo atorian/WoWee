@@ -64,7 +64,7 @@ ScenePick pickScene(game::GameHandler& gameHandler,
         const game::GameObjectQueryResponseData* goInfo = nullptr;
         if (type == game::ObjectType::GAMEOBJECT) {
             auto go = std::static_pointer_cast<game::GameObject>(entity);
-            goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
+            goInfo = gameHandler.queryCache().getCachedGameObjectInfo(go->getEntry());
             if (params.skipChairs && goInfo && goInfo->type == kGoTypeChair) continue;
         }
 

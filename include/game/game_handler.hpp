@@ -21,6 +21,7 @@
 #include "game/handler_types.hpp"
 #include "game/combat_handler.hpp"
 #include "game/player_handler.hpp"
+#include "game/query_cache_handler.hpp"
 #include "game/spell_handler.hpp"
 #include "game/quest_handler.hpp"
 #include "game/reputation_handler.hpp"
@@ -98,7 +99,7 @@ using WorldConnectFailureCallback = std::function<void(const std::string& reason
  * - Game packets
  */
 class GameHandler : public IConnectionState,
-                     public IEntityAccess,
+                     public QueryCacheQueries,
                      public PacketSender,
                      public FrameXmlEvents,
                      public ActionBarQueries,
@@ -242,8 +243,8 @@ public:
     const EntityManager& entities() const override { return getEntityManager(); }
     const FlatFieldMap& playerFields() const override { return playerHandler_->fields(); }
     PacketParsers& packetParsers() override { return *packetParsers_; }
-    std::string playerName(uint64_t guid) const override { return entityController_->lookupName(guid); }
-    void requestPlayerName(uint64_t guid) override { queryPlayerName(guid); }
+    std::string playerName(uint64_t guid) const override { return queryCacheHandler_->lookupName(guid); }
+    void requestPlayerName(uint64_t guid) override { queryCacheHandler_->queryPlayerName(guid); }
     bool inGuild() const override;
     std::string spellName(uint32_t spellId) const override { return spellHandler_->getSpellName(spellId); }
     bool spellKnownToClient(uint32_t spellId) const override { return spellHandler_->isSpellKnownToClient(spellId); }
@@ -290,7 +291,7 @@ public:
     std::string unitIdFor(uint64_t guid) const override { return guidToUnitId(guid); }
     uint32_t playerLevel() const override { return playerHandler_->level(); }
     const GameObjectQueryResponseData* gameObjectInfo(uint32_t entry) const override {
-        return getCachedGameObjectInfo(entry);
+        return queryCacheHandler_->getCachedGameObjectInfo(entry);
     }
     bool friendlyFaction(uint32_t factionTemplateId) const override {
         return isFriendlyFaction(factionTemplateId);
@@ -328,9 +329,9 @@ public:
     // packetParsers, playerMovement and achievementName are above).
     const Character* activeCharacter() const override { return getActiveCharacter(); }
     uint32_t currentMapId() const override { return currentMapId_; }
-    uint8_t playerClassOf(uint64_t guid) const override { return entityController_->lookupPlayerClass(guid); }
-    uint8_t playerRaceOf(uint64_t guid) const override { return entityController_->lookupPlayerRace(guid); }
-    uint8_t playerGenderOf(uint64_t guid) const override { return entityController_->lookupPlayerGender(guid); }
+    uint8_t playerClassOf(uint64_t guid) const override { return queryCacheHandler_->lookupPlayerClass(guid); }
+    uint8_t playerRaceOf(uint64_t guid) const override { return queryCacheHandler_->lookupPlayerRace(guid); }
+    uint8_t playerGenderOf(uint64_t guid) const override { return queryCacheHandler_->lookupPlayerGender(guid); }
     const GroupListData& party() const override;
     const GuildRosterData& guildRoster() const override;
     std::optional<uint32_t> guildRankRights() const override;
@@ -340,9 +341,12 @@ public:
     // the vendor's facade).
     bool inGroup() const override;
     void setResting(bool resting) override { playerHandler_->restStateArrived(resting); }
-    std::string creatureName(uint32_t entry) const override { return getCachedCreatureName(entry); }
-    void requestCreatureInfo(uint32_t entry) override { queryCreatureInfo(entry, 0); }
-    void requestGameObjectInfo(uint32_t entry) override { entityController_->queryGameObjectInfo(entry, 0); }
+    std::string creatureName(uint32_t entry) const override { return queryCacheHandler_->getCachedCreatureName(entry); }
+    void requestCreatureInfo(uint32_t entry) override { queryCacheHandler_->queryCreatureInfo(entry, 0); }
+    void requestGameObjectInfo(uint32_t entry) override { queryCacheHandler_->queryGameObjectInfo(entry, 0); }
+    void requestGameObjectInfo(uint32_t entry, uint64_t guid) override {
+        queryCacheHandler_->queryGameObjectInfo(entry, guid);
+    }
     void vendorCanRepair() override { inventoryHandler_->setVendorCanRepair(true); }
     void openedStableMaster(uint64_t npcGuid) override;
 
@@ -377,6 +381,11 @@ public:
     void bankBagSlotsArrived(uint8_t slots) override;
     void chosenTitleArrived(int32_t title) override;
     void playerFlagsArrived(uint32_t flags, FrameXmlEvents& packetEvents) override;
+
+    // QueryCacheQueries (packetParsers and entities are above)
+    void playerNameArrived(uint64_t guid, const std::string& name) override;
+    void creatureTemplateArrived(const CreatureQueryResponseData& data) override;
+    void gameObjectTemplateArrived(const GameObjectQueryResponseData& data) override;
     bool loggingOut() const override;
 
     // ReputationQueries (refreshUnitHostility is declared with the rest of the
@@ -468,8 +477,8 @@ public:
     /// player walks out of range, which is the only thing these answer.
     uint64_t getBinderGuid() const { return binderGuid_; }
 
-    EntityManager& getEntityManager() override { return entityController_->getEntityManager(); }
-    const EntityManager& getEntityManager() const override { return entityController_->getEntityManager(); }
+    EntityManager& getEntityManager() { return entityController_->getEntityManager(); }
+    const EntityManager& getEntityManager() const { return entityController_->getEntityManager(); }
 
     /**
      * Send a chat message
@@ -624,9 +633,6 @@ public:
     bool isAfk() const;
     bool isDnd() const;
 
-    void queryPlayerName(uint64_t guid) override;
-
-    void queryCreatureInfo(uint32_t entry, uint64_t guid) override;
     /// A creature template entry turned into something that can be drawn, by
     /// asking the server if it has not already.
     ///
@@ -639,18 +645,6 @@ public:
     /// answers zero the first time and the query fills the cache for the next
     /// frame to find.
     uint32_t getCreatureDisplayIdForEntry(uint32_t entry);
-    const GameObjectQueryResponseData* getCachedGameObjectInfo(uint32_t entry) const override {
-        return entityController_->getCachedGameObjectInfo(entry);
-    }
-    std::string getCachedPlayerName(uint64_t guid) const override;
-    std::string getCachedCreatureName(uint32_t entry) const override;
-    // Read-only cache access forwarded from EntityController
-    const std::unordered_map<uint64_t, std::string>& getPlayerNameCache() const override {
-        return entityController_->getPlayerNameCache();
-    }
-    const std::unordered_map<uint32_t, CreatureQueryResponseData>& getCreatureInfoCache() const override {
-        return entityController_->getCreatureInfoCache();
-    }
     void startAutoAttack(uint64_t targetGuid) override;
     void stopAutoAttack() override;
     // Threat
@@ -1280,6 +1274,8 @@ public:
     /// The objects in view as the server describes them: creatures, players,
     /// game objects, their names, kinds, appearance and transports.
     EntityController& entityController() { return *entityController_; }
+    QueryCacheHandler& queryCache() { return *queryCacheHandler_; }
+    const QueryCacheHandler& queryCache() const { return *queryCacheHandler_; }
     const EntityController& entityController() const { return *entityController_; }
     /// The rest of the player's dealings with the world and the server: inspect,
     /// played time, logout, summons, instances and their lockouts, the
@@ -1541,6 +1537,7 @@ private:
     GameServices& services_;
 
     // Domain handlers - each manages a specific concern extracted from GameHandler
+    std::unique_ptr<QueryCacheHandler> queryCacheHandler_;
     std::unique_ptr<ChatHandler>      chatHandler_;
     std::unique_ptr<MovementHandler>  movementHandler_;
     std::unique_ptr<CombatHandler>    combatHandler_;

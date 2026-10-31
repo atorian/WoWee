@@ -30,7 +30,7 @@ static int lua_UnitName(lua_State* L) {
             lua_pushstring(L, pm->name.c_str());
         } else if (gh && guid != 0) {
             // Try player name cache
-            const std::string& cached = gh->entityController().lookupName(guid);
+            const std::string& cached = gh->queryCache().lookupName(guid);
             if (!cached.empty()) {
                 lua_pushstring(L, cached.c_str());
             } else {
@@ -234,7 +234,7 @@ static int lua_UnitClass(lua_State* L) {
             }
             // Fallback: check name query class/race cache
             if (classId == 0 && guid != 0) {
-                classId = gh->entityController().lookupPlayerClass(guid);
+                classId = gh->queryCache().lookupPlayerClass(guid);
             }
         }
         // Nothing at all when the class is not known, because that is what WoW
@@ -736,7 +736,7 @@ static int lua_UnitCreatureFamily(lua_State* L) {
     if (!entity || entity->getType() == game::ObjectType::PLAYER) { return luaReturnNil(L); }
     auto unit = std::dynamic_pointer_cast<game::Unit>(entity);
     if (!unit) { return luaReturnNil(L); }
-    uint32_t family = gh->entityController().getCreatureFamily(unit->getEntry());
+    uint32_t family = gh->queryCache().getCreatureFamily(unit->getEntry());
     if (family == 0) { return luaReturnNil(L); }
     static constexpr const char* kFamilies[] = {
         "", "Wolf", "Cat", "Spider", "Bear", "Boar", "Crocolisk", "Carrion Bird",
@@ -2168,7 +2168,7 @@ static int lua_UnitCreatureType(lua_State* L) {
     }
     auto unit = std::dynamic_pointer_cast<game::Unit>(entity);
     if (!unit) { lua_pushstring(L, "Unknown"); return 1; }
-    uint32_t ct = gh->entityController().getCreatureType(unit->getEntry());
+    uint32_t ct = gh->queryCache().getCreatureType(unit->getEntry());
     static constexpr const char* kTypes[] = {
         "Unknown", "Beast", "Dragonkin", "Demon", "Elemental",
         "Giant", "Undead", "Humanoid", "Critter", "Mechanical",
@@ -2196,7 +2196,7 @@ static int lua_GetPlayerInfoByGUID(lua_State* L) {
     if (guid == 0) { for (int i = 0; i < 7; i++) lua_pushnil(L); return 7; }
 
     // Look up entity name
-    std::string name = gh->entityController().lookupName(guid);
+    std::string name = gh->queryCache().lookupName(guid);
     if (name.empty() && guid == gh->getPlayerGuid()) {
         const auto& chars = gh->getCharacters();
         for (const auto& c : chars)
@@ -2239,7 +2239,7 @@ static int lua_UnitClassification(lua_State* L) {
     }
     auto unit = std::dynamic_pointer_cast<game::Unit>(entity);
     if (!unit) { lua_pushstring(L, "normal"); return 1; }
-    int rank = gh->entityController().getCreatureRank(unit->getEntry());
+    int rank = gh->queryCache().getCreatureRank(unit->getEntry());
     switch (rank) {
         case 1:  lua_pushstring(L, "elite"); break;
         case 2:  lua_pushstring(L, "rareelite"); break;

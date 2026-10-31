@@ -746,3 +746,53 @@ TEST_CASE("a continent's map rectangle is its own WorldMapArea.dbc row, not a zo
     CHECK(bounds.bottom == -6000.0f);
     CHECK_FALSE(h.game().getContinentBounds(1).valid);
 }
+
+TEST_CASE("another player is drawn as their fields say, a field left out being zero",
+          "[session][harness]") {
+    using wowee::game::ObjectType;
+    using wowee::game::UF;
+    auto uf = [](UF f) { return static_cast<uint16_t>(wowee::game::fieldIndex(f)); };
+    constexpr uint64_t kOther = 0x0000000000000777ull;
+    GameHarness h;
+    h.enterWorld();
+    std::vector<ev::PlayerSpawned> spawned;
+    auto sub = h.events().subscribe<ev::PlayerSpawned>(
+        [&](const ev::PlayerSpawned& e) { spawned.push_back(e); });
+
+    // A Tauren (race 6) woman, a druid (class 11). Her skin, face, hair style,
+    // hair colour and markings are all the first: PLAYER_BYTES and
+    // PLAYER_BYTES_2 are zero, and a create block leaves a zero field out.
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(kOther, ObjectType::PLAYER,
+                                            {{uf(UF::UNIT_FIELD_BYTES_0), 6u | (11u << 8) | (1u << 16)},
+                                             {uf(UF::UNIT_FIELD_HEALTH), 100},
+                                             {uf(UF::UNIT_FIELD_DISPLAYID), 2589}}));
+    h.pump();
+
+    REQUIRE(spawned.size() == 1);
+    CHECK(spawned[0].raceId == 6);
+    CHECK(spawned[0].genderId == 1);
+    CHECK(spawned[0].appearanceBytes == 0u);
+    CHECK(spawned[0].facialFeatures == 0);
+}
+
+TEST_CASE("a player whose fields carry no race is not drawn as one", "[session][harness]") {
+    using wowee::game::ObjectType;
+    using wowee::game::UF;
+    auto uf = [](UF f) { return static_cast<uint16_t>(wowee::game::fieldIndex(f)); };
+    GameHarness h;
+    h.enterWorld();
+    std::vector<ev::PlayerSpawned> spawned;
+    auto sub = h.events().subscribe<ev::PlayerSpawned>(
+        [&](const ev::PlayerSpawned& e) { spawned.push_back(e); });
+
+    // No UNIT_FIELD_BYTES_0, but plenty of small fields a guess could take
+    // for one.
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(0x778, ObjectType::PLAYER,
+                                            {{uf(UF::UNIT_FIELD_HEALTH), 100},
+                                             {uf(UF::UNIT_FIELD_LEVEL), 0x00010106},
+                                             {uf(UF::UNIT_FIELD_DISPLAYID), 2589}}));
+    h.pump();
+    CHECK(spawned.empty());
+}

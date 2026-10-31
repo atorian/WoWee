@@ -408,10 +408,9 @@ void SceneReplay::toggleCapture(Application& app) {
             {"gear",Json::array()}, {"config",Json::object()},
             {"limitations",{"Existing transient spell particles and animation phase are not keyframed; interface and network load are not replayed. Compare scene counters and control images before accepting an A/B."}}};
         auto character=*app.gameHandler->getActiveCharacter();
-        uint8_t race=0,gender=0,facial=0; uint32_t appearance=0;
-        if (app.gameHandler->entityController().getPlayerAppearance(character.guid,race,gender,appearance,facial)) {
-            character.race=static_cast<game::Race>(race); character.gender=static_cast<game::Gender>(gender);
-            character.appearanceBytes=appearance; character.facialFeatures=facial;
+        if (const auto look=app.gameHandler->entityController().appearanceOf(character.guid)) {
+            character.race=static_cast<game::Race>(look->race); character.gender=static_cast<game::Gender>(look->gender);
+            character.appearanceBytes=look->appearanceBytes; character.facialFeatures=look->facialFeatures;
         }
         std::array<uint32_t,19> displays{}; std::array<uint8_t,19> types{};
         if (app.gameHandler->inventory().resolvePlayerEquipment(displays,types)) {

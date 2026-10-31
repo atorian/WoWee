@@ -11,6 +11,7 @@
 #include "game/inventory_handler.hpp"
 #include "game/update_field_table.hpp"
 
+#include <array>
 #include <memory>
 #include <optional>
 #include <string>
@@ -472,4 +473,64 @@ TEST_CASE("a book's background is the material PageTextMaterial.dbc names", "[in
     CHECK(h.game().getPageTextMaterialName(2) == "Stone");
     CHECK(h.game().getPageTextMaterialName(1) == "Parchment");
     CHECK(h.game().getPageTextMaterialName(9).empty());
+}
+
+namespace {
+constexpr uint64_t kSign = 0xF110000400000001ull;
+constexpr uint32_t kSignEntry = 1234;
+constexpr uint32_t kPage = 55;
+constexpr uint32_t kStone = 2;   // PageTextMaterial: the tablet the page is drawn on
+
+void signInView(GameHarness& h) {
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(kSign, wowee::game::ObjectType::GAMEOBJECT,
+                                            {{static_cast<uint16_t>(fieldIndex(UF::OBJECT_FIELD_ENTRY)), kSignEntry},
+                                             {static_cast<uint16_t>(fieldIndex(UF::GAMEOBJECT_DISPLAYID)), 0xD15}}));
+    h.pump();
+}
+
+/// A type 9 (TEXT) object: the page in data[0], the material in data[2].
+std::vector<uint8_t> signTemplate() {
+    std::array<uint32_t, 24> data{};
+    data[0] = kPage;
+    data[2] = kStone;
+    return GameHarness::gameObjectTemplateBody(kSignEntry, 9, "Stormwind Notice", data);
+}
+
+/// The page CMSG_PAGE_TEXT_QUERY asked for, and of which object.
+std::pair<uint32_t, uint64_t> pageAsked(GameHarness& h) {
+    auto* query = h.lastSent(Opcode::CMSG_PAGE_TEXT_QUERY);
+    REQUIRE(query);
+    const uint32_t page = query->readUInt32();
+    return {page, query->readUInt64()};
+}
+}  // namespace
+
+TEST_CASE("a sign clicked before its template came is read when it comes", "[inventory][book][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    signInView(h);
+    h.clearRecords();
+
+    h.game().inventory().readGameObject(kSign);
+    CHECK_FALSE(h.lastSent(Opcode::CMSG_PAGE_TEXT_QUERY));
+
+    h.receive(Opcode::SMSG_GAMEOBJECT_QUERY_RESPONSE, signTemplate());
+    h.pump();
+    CHECK(pageAsked(h) == std::pair<uint32_t, uint64_t>{kPage, kSign});
+    CHECK(h.game().inventory().getBookTitle() == "Stormwind Notice");
+    CHECK(h.game().inventory().getBookMaterial() == kStone);
+}
+
+TEST_CASE("a sign the server offers is read, its page asked for at once", "[inventory][book][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    signInView(h);
+    h.receive(Opcode::SMSG_GAMEOBJECT_QUERY_RESPONSE, signTemplate());
+    h.pump();
+    h.clearRecords();
+
+    h.receive(Opcode::SMSG_GAMEOBJECT_PAGETEXT, Body().u64(kSign).bytes());
+    h.pump();
+    CHECK(pageAsked(h) == std::pair<uint32_t, uint64_t>{kPage, kSign});
 }

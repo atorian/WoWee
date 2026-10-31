@@ -1511,7 +1511,7 @@ void EntitySpawner::processPendingTransportRegistrations() {
         // never applied and the boat fell back to an unrelated route. If the template
         // isn't cached yet, the GO-query response hook assigns it when it arrives.
         {
-            auto goData = gameHandler_->getCachedGameObjectInfo(pending.entry);
+            auto goData = gameHandler_->queryCache().getCachedGameObjectInfo(pending.entry);
             if (goData && goData->type == 15 && goData->hasData && goData->data[0] != 0) {
                 uint32_t taxiPathId = goData->data[0];
                 const uint32_t mapId = gameHandler_->getCurrentMapId();
@@ -2277,7 +2277,7 @@ void EntitySpawner::applyGameObjectState(uint64_t guid, uint8_t goState) {
                 const auto go = std::static_pointer_cast<game::GameObject>(entity);
                 goEntry = go->getEntry();
                 goDisplayId = go->getDisplayId();
-                if (const auto* info = gameHandler_->getCachedGameObjectInfo(goEntry)) {
+                if (const auto* info = gameHandler_->queryCache().getCachedGameObjectInfo(goEntry)) {
                     goType = info->type;
                 }
             }

@@ -3,7 +3,7 @@
 #include "core/logger.hpp"
 #include "game/chat_log.hpp"
 #include "game/frame_xml_events.hpp"
-#include "game/game_interfaces.hpp"
+#include "game/query_cache_handler.hpp"
 #include "game/game_utils.hpp"
 #include "game/inventory.hpp"
 #include "game/inventory_handler.hpp"

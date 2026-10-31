@@ -4,12 +4,14 @@
 
 #include "game/world_packet_data.hpp"
 #include "game/entity.hpp"
+#include "game/player_appearance.hpp"
 #include "game/opcode_table.hpp"
 #include "network/packet.hpp"
 #include <chrono>
 #include <deque>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -18,7 +20,6 @@
 namespace wowee {
 namespace game {
 
-class GameData;
 class GameHandler;
 
 class EntityController {
@@ -26,9 +27,7 @@ public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
-    /// `data` is what stops the game when the expansion's update_fields.json
-    /// lacks a field the entities are read by.
-    EntityController(GameHandler& owner, const GameData& data);
+    explicit EntityController(GameHandler& owner);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -48,65 +47,16 @@ public:
     /// The caller owns the sampled clock and supplies positions separately.
     void applyRecordedObjects(const UpdateObjectData& data);
 
-    // --- Name / info cache queries ---
-    void queryPlayerName(uint64_t guid);
-    void queryCreatureInfo(uint32_t entry, uint64_t guid);
-    void queryGameObjectInfo(uint32_t entry, uint64_t guid);
-    [[nodiscard]] std::string getCachedPlayerName(uint64_t guid) const;
-    [[nodiscard]] std::string getCachedCreatureName(uint32_t entry) const;
-    void invalidatePlayerName(uint64_t guid) { playerNameCache.erase(guid); }
-
-    // Read-only cache access for other handlers
-    [[nodiscard]] const std::unordered_map<uint64_t, std::string>& getPlayerNameCache() const { return playerNameCache; }
-    [[nodiscard]] const std::unordered_map<uint32_t, CreatureQueryResponseData>& getCreatureInfoCache() const { return creatureInfoCache; }
-    [[nodiscard]] std::string getCachedCreatureSubName(uint32_t entry) const {
-        auto it = creatureInfoCache.find(entry);
-        return (it != creatureInfoCache.end()) ? it->second.subName : "";
-    }
-    [[nodiscard]] int getCreatureRank(uint32_t entry) const {
-        auto it = creatureInfoCache.find(entry);
-        return (it != creatureInfoCache.end()) ? static_cast<int>(it->second.rank) : -1;
-    }
-    [[nodiscard]] uint32_t getCreatureType(uint32_t entry) const {
-        auto it = creatureInfoCache.find(entry);
-        return (it != creatureInfoCache.end()) ? it->second.creatureType : 0;
-    }
-    [[nodiscard]] uint32_t getCreatureFamily(uint32_t entry) const {
-        auto it = creatureInfoCache.find(entry);
-        return (it != creatureInfoCache.end()) ? it->second.family : 0;
-    }
-    [[nodiscard]] const GameObjectQueryResponseData* getCachedGameObjectInfo(uint32_t entry) const {
-        auto it = gameObjectInfoCache_.find(entry);
-        return (it != gameObjectInfoCache_.end()) ? &it->second : nullptr;
-    }
-
-    // Name lookup (checks cache then entity manager)
-    [[nodiscard]] const std::string& lookupName(uint64_t guid) const {
-        static const std::string kEmpty;
-        auto it = playerNameCache.find(guid);
-        if (it != playerNameCache.end()) return it->second;
-        auto entity = entityManager.getEntity(guid);
-        if (entity && entity->isUnit()) {
-            // isUnit() is the type-tag check; skip dynamic_cast since the tag
-            // already guarantees the Unit subclass.
-            const auto* unit = static_cast<const Unit*>(entity.get());
-            if (!unit->getName().empty()) return unit->getName();
-        }
-        return kEmpty;
-    }
-    [[nodiscard]] uint8_t lookupPlayerClass(uint64_t guid) const {
-        auto it = playerClassRaceCache_.find(guid);
-        return it != playerClassRaceCache_.end() ? it->second.classId : 0;
-    }
-    [[nodiscard]] uint8_t lookupPlayerRace(uint64_t guid) const {
-        auto it = playerClassRaceCache_.find(guid);
-        return it != playerClassRaceCache_.end() ? it->second.raceId : 0;
-    }
-    /// 0 male, 1 female, as the name query answers; 0xFF when not known.
-    [[nodiscard]] uint8_t lookupPlayerGender(uint64_t guid) const {
-        auto it = playerClassRaceCache_.find(guid);
-        return it != playerClassRaceCache_.end() ? it->second.gender : 0xFF;
-    }
+    // --- What the query caches learned, for the objects in view ---
+    /// A player's name arrived: the player in view takes it, and the
+    /// interface is told for a unit it has a token for.
+    void playerNamed(uint64_t guid, const std::string& name);
+    /// A creature template arrived: every unit of it in view takes its name,
+    /// and the frames showing one redraw its classification.
+    void creatureNamed(const CreatureQueryResponseData& data);
+    /// A game object template arrived: every object of it in view takes its
+    /// name.
+    void gameObjectNamed(const GameObjectQueryResponseData& data);
 
     // --- Transport GUID tracking ---
     [[nodiscard]] bool isTransportGuid(uint64_t guid) const { return transportGuids_.count(guid) > 0; }
@@ -123,29 +73,10 @@ public:
 
 private:
     GameHandler& owner_;
-    const GameData& data_;
 
     // --- Entity tracking ---
     EntityManager entityManager;              // Manages all entities in view
 
-    // ---- Name caches ----
-    std::unordered_map<uint64_t, std::string> playerNameCache;
-    // Class/race cache from SMSG_NAME_QUERY_RESPONSE (guid → {classId, raceId})
-    struct PlayerClassRace { uint8_t classId = 0; uint8_t raceId = 0; uint8_t gender = 0xFF; };
-    std::unordered_map<uint64_t, PlayerClassRace> playerClassRaceCache_;
-    std::unordered_set<uint64_t> pendingNameQueries;
-    std::unordered_map<uint32_t, CreatureQueryResponseData> creatureInfoCache;
-    std::unordered_set<uint32_t> pendingCreatureQueries;
-    std::unordered_map<uint32_t, GameObjectQueryResponseData> gameObjectInfoCache_;
-    /// Objects clicked to be read before their metadata arrived.
-    ///
-    /// The page id lives in the query response, so a sign clicked in the first
-    /// moments after it spawns has nothing to read from yet. The click is kept
-    /// here and answered when the response lands, rather than dropped - which
-    /// is a sign that does nothing the first time it is clicked and works the
-    /// second.
-    std::unordered_set<uint64_t> pendingPageTextGuids_;
-    std::unordered_set<uint32_t> pendingGameObjectQueries_;
 
     // --- Update Object work queue ---
     struct PendingUpdateObjectWork {
@@ -166,20 +97,7 @@ private:
     void handleUpdateObject(network::Packet& packet);
     void handleCompressedUpdateObject(network::Packet& packet);
     void handleDestroyObject(network::Packet& packet);
-    void handleNameQueryResponse(network::Packet& packet);
-    void handleCreatureQueryResponse(network::Packet& packet);
-    void handleGameObjectQueryResponse(network::Packet& packet);
-    void handleGameObjectPageText(network::Packet& packet);
 
-public:
-    /// Read what is written on a game object: a sign, a plaque, a gravestone.
-    ///
-    /// Public because the click is where this starts. SMSG_GAMEOBJECT_PAGETEXT
-    /// is the server *offering* a page, which not every server sends and no
-    /// server sends for a plain sign - the real client reads the page id out of
-    /// the object's own data and asks for the text itself. Both ends arrive
-    /// here.
-    void showGameObjectPageText(uint64_t guid);
 
 private:
 
@@ -193,17 +111,11 @@ private:
     void applyUpdateObjectBlock(const UpdateBlock& block, bool& newItemCreated);
     void finalizeUpdateObjectBatch(bool newItemCreated);
 
-    bool extractPlayerAppearance(const FlatFieldMap& fields,
-                                 uint8_t& outRace, uint8_t& outGender,
-                                 uint32_t& outAppearanceBytes, uint8_t& outFacial) const;
-
 public:
-    /// The same, for a player already in the world, read from the fields the
-    /// entity is still holding. The spawn path takes this once and hands it to
-    /// a callback; anything wanting it later - a portrait, an inspect window -
-    /// has nowhere to ask, and the fields are right there.
-    bool getPlayerAppearance(uint64_t guid, uint8_t& outRace, uint8_t& outGender,
-                             uint32_t& outAppearanceBytes, uint8_t& outFacial) const;
+    /// What a player in view looks like, read from the fields their object
+    /// holds. The spawn path reads it once for the model; a portrait or an
+    /// inspect window asks here later. Null for anything not a player.
+    [[nodiscard]] std::optional<PlayerAppearance> appearanceOf(uint64_t guid) const;
 
 private:
 

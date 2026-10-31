@@ -119,7 +119,8 @@ GameHandler::GameHandler(GameServices& services)
     // Initialize Warden module manager
 
     // Initialize domain handlers
-    entityController_ = std::make_unique<EntityController>(*this, *services_.gameData);
+    queryCacheHandler_ = std::make_unique<QueryCacheHandler>(*this, *services_.events, *this);
+    entityController_ = std::make_unique<EntityController>(*this);
     chatHandler_      = std::make_unique<ChatHandler>(*this, *this, *services_.events, *this,
                                                       *services_.cvars, *services_.emotes);
     movementHandler_  = std::make_unique<MovementHandler>(*this, *this, *services_.events, *chatHandler_,
@@ -315,6 +316,7 @@ void GameHandler::clearWorldState() {
     spellHandler_->clearUnitAurasCache();
     combatHandler_->clearCombatText();
     entityController_->clearAll();
+    queryCacheHandler_->clear();
 }
 
 void GameHandler::resetDbcCaches() {
@@ -710,7 +712,7 @@ void GameHandler::updateTimers(float deltaTime) {
                 auto player = std::static_pointer_cast<Player>(entity);
                 if (!player->getName().empty()) continue;
                 // Player entity exists with empty name and no pending query - resend.
-                entityController_->queryPlayerName(guid);
+                queryCacheHandler_->queryPlayerName(guid);
             }
         }
     }

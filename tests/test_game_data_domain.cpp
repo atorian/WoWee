@@ -194,9 +194,7 @@ TEST_CASE("another player's race and looks are their own fields, never guessed f
                                              {fieldIndex(UF::UNIT_FIELD_FACTIONTEMPLATE), 0x00010101u}},
                                             h.player().x + 5.0f, h.player().y, h.player().z));
     h.pump();
-    uint8_t race = 0, gender = 0, facial = 0;
-    uint32_t looks = 0;
-    CHECK_FALSE(h.game().entityController().getPlayerAppearance(kOther, race, gender, looks, facial));
+    CHECK_FALSE(h.game().entityController().appearanceOf(kOther).has_value());
 
     // Race 5 (undead), female; skin 2, face 3, hair 4, colour 1; beard 6.
     h.receive(Opcode::SMSG_UPDATE_OBJECT,
@@ -204,9 +202,10 @@ TEST_CASE("another player's race and looks are their own fields, never guessed f
                                                {fieldIndex(UF::PLAYER_BYTES), 0x01040302u},
                                                {fieldIndex(UF::PLAYER_BYTES_2), 0x00000006u}}));
     h.pump();
-    REQUIRE(h.game().entityController().getPlayerAppearance(kOther, race, gender, looks, facial));
-    CHECK(race == 5);
-    CHECK(gender == 1);
-    CHECK(looks == 0x01040302u);
-    CHECK(facial == 6);
+    const auto looks = h.game().entityController().appearanceOf(kOther);
+    REQUIRE(looks.has_value());
+    CHECK(looks->race == 5);
+    CHECK(looks->gender == 1);
+    CHECK(looks->appearanceBytes == 0x01040302u);
+    CHECK(looks->facialFeatures == 6);
 }
