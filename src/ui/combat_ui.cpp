@@ -7,7 +7,6 @@
 #include "core/local_time.hpp"
 #include "ui/combat_ui.hpp"
 #include "addons/lua_api_registrations.hpp"
-#include "ui/buff_bar_layout.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "ui/settings_panel.hpp"
 #include "ui/spellbook_screen.hpp"

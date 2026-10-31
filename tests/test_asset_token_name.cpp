@@ -23,9 +23,7 @@
 
 #include "pipeline/m2_model_classifier.hpp"
 
-using wowee::pipeline::assetNameHasToken;
 using wowee::pipeline::assetTokenName;
-using wowee::pipeline::assetNameHasWordToken;
 
 TEST_CASE("the token name is the file, not the path", "[asset-token]") {
     CHECK(assetTokenName("World\\Azeroth\\Elwynn\\Trees\\ElwynnTree01.m2") ==
@@ -46,81 +44,8 @@ TEST_CASE("the extension is not part of the name", "[asset-token]") {
     CHECK(assetTokenName("a\\b\\Notes.txt") == "notes.txt");
 }
 
-TEST_CASE("a directory cannot make an asset something it is not",
-          "[asset-token]") {
-    // The case that named this. Every leg and boot texture component sits
-    // under a directory whose name contains "glow".
-    CHECK_FALSE(assetNameHasToken(
-        "Item\\TextureComponents\\LegLowerTexture\\Cloth_A_01Black_Boot_LL_F.blp",
-        "glow"));
-
-    // A zone directory is not a description of a doodad either.
-    CHECK_FALSE(assetNameHasToken(
-        "World\\Expansion01\\Doodads\\HellfirePeninsula\\Trees\\Tree01.blp",
-        "fire"));
-    CHECK_FALSE(assetNameHasToken(
-        "World\\Azeroth\\BurningSteppes\\PassiveDoodads\\Bonfire\\Wood08.blp",
-        "fire"));
-    CHECK_FALSE(assetNameHasToken(
-        "World\\Lordaeron\\Scholomance\\PassiveDoodads\\Candles\\Candelabras.blp",
-        "candle"));
-    CHECK_FALSE(assetNameHasToken(
-        "World\\Generic\\Dwarf\\Passive Doodads\\Braziers\\WallTrim01.blp",
-        "brazier"));
-    CHECK_FALSE(assetNameHasToken(
-        "Interface\\WorldMap\\Hellfire\\FalconWatch1.blp", "fire"));
-}
-
-TEST_CASE("an asset named for what it is still matches", "[asset-token]") {
-    // The other direction, which is what the token check is for.
-    CHECK(assetNameHasToken(
-        "World\\Azeroth\\BurningSteppes\\PassiveDoodads\\Bonfire\\Fire01.blp",
-        "fire"));
-    CHECK(assetNameHasToken("Spells\\Fire_Glow_01.blp", "glow"));
-    CHECK(assetNameHasToken("a\\b\\StormwindLampGlass.blp", "lamp"));
-    CHECK(assetNameHasToken("a\\b\\Torch_Wall_01.m2", "torch"));
-
-    // Case does not matter: paths arrive in whatever the artist typed.
-    CHECK(assetNameHasToken("A\\B\\CANDLE_01.BLP", "candle"));
-    CHECK(assetNameHasToken("a/b/Candle_01.blp", "candle"));
-}
-
-TEST_CASE("a token spanning the separator does not match", "[asset-token]") {
-    // "fire" is not present in either component, only across the join. Reading
-    // the file name makes that impossible, which is the point.
-    CHECK_FALSE(assetNameHasToken("a\\elf\\iresomething.blp", "fire"));
-    CHECK(assetNameHasToken("a\\elf\\firesomething.blp", "fire"));
-}
-
 // ---------------------------------------------------------------------------
-// A token that is only the tail of a longer word.
-//
-// Outland's sky is Environment\Stars\HellFireSkyNebula01.blp, and "fire" is in
-// "hellfire". Matched as a substring, every layer of the Hellfire sky was read
-// as a flame texture and given the black colour key - which discards each
-// fragment darker than a threshold, and most of a nebula is. Turning the
-// camera moves each fragment's sampled luminance across that threshold, so
-// pixels dropped in and out: the sky flickered whenever the view moved and
-// held still when it did not, in one zone, on the blended layers only.
-//
-// Reading the file name rather than the path does not help here. The name
-// itself contains the token; it is the word boundary that is missing.
-TEST_CASE("a token is not matched as the tail of a longer word",
-          "[asset-token]") {
-    CHECK_FALSE(assetNameHasWordToken("environment\\stars\\hellfireskynebula01.blp", "fire"));
-    CHECK_FALSE(assetNameHasWordToken("world\\hellfirecitadel\\door.blp", "fire"));
-
-    // Still matched where the token starts a word, or follows a separator or a
-    // digit. A rule that fixed the sky by refusing everything would be worse
-    // than the fault.
-    CHECK(assetNameHasWordToken("spells\\firebeam.blp", "fire"));
-    CHECK(assetNameHasWordToken("doodads\\stone_fire01.blp", "fire"));
-    CHECK(assetNameHasWordToken("fire.blp", "fire"));
-    CHECK(assetNameHasWordToken("a\\b\\2fire.blp", "fire"));
-}
-
-// ---------------------------------------------------------------------------
-// The model-name half of the same fault.
+// The same fault in a model name: "fire" inside "hellfire".
 //
 // classifyM2Model asked has(name, "fire"), so HellfireSkyBox classified as a
 // brazier - and the renderer gives an additive batch of a brazier a lamp

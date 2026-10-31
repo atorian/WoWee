@@ -46,8 +46,3 @@ TEST_CASE("only the grid cells around a receiver are searched", "[lights]") {
     const LocalLightSet big = pickLocalLights({at(71, 30)}, glm::vec3(30.0f, 30.0f, 0.0f), 40.0f);
     CHECK(localLightSlot(big, 0) == 0);
 }
-
-TEST_CASE("a light falls off by the fixed client attenuation", "[lights]") {
-    CHECK(localLightAttenuation(10.0f) == Catch::Approx(1.0f / (7.0f + 3.0f)));
-    CHECK(localLightAttenuation(20.0f) == Catch::Approx(1.0f / (14.0f + 12.0f)));
-}

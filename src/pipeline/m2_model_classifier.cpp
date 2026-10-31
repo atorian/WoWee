@@ -164,24 +164,6 @@ std::string assetTokenName(const std::string& path) {
     return name;
 }
 
-bool assetNameHasToken(const std::string& path, std::string_view token) {
-    return assetTokenName(path).find(token) != std::string::npos;
-}
-
-bool assetNameHasWordToken(const std::string& path, std::string_view token) {
-    const std::string name = assetTokenName(path);
-    for (std::size_t at = name.find(token); at != std::string::npos;
-         at = name.find(token, at + 1)) {
-        // Preceded by a letter means this is the tail of a longer word:
-        // `fire` inside `hellfire`. A digit or a separator is a boundary,
-        // so `fire2` and `stone_fire` still match.
-        if (at == 0 || !std::isalpha(static_cast<unsigned char>(name[at - 1]))) {
-            return true;
-        }
-    }
-    return false;
-}
-
 M2ClassificationResult classifyM2Model(
     const std::string& name,
     const glm::vec3&   boundsMin,

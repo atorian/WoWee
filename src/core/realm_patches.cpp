@@ -1,6 +1,5 @@
 #include "core/realm_patches.hpp"
 
-#include <nlohmann/json.hpp>
 #include <openssl/sha.h>
 
 #include <array>
@@ -32,16 +31,6 @@ bool isWindowsDeviceName(std::string_view stem) {
         if (stem == d) return true;
     }
     return false;
-}
-
-bool isHexLower(const std::string& s, std::size_t expected) {
-    if (s.size() != expected) return false;
-    for (char c : s) {
-        const bool digit = c >= '0' && c <= '9';
-        const bool hex = c >= 'a' && c <= 'f';
-        if (!digit && !hex) return false;
-    }
-    return true;
 }
 
 }  // namespace
@@ -126,97 +115,6 @@ std::string realmPatchDirName(const std::string& host, int port) {
     if (readable.empty()) readable = "realm";
 
     return readable + "-" + std::to_string(port) + "-" + suffix;
-}
-
-PatchManifest parsePatchManifest(const std::string& json) {
-    PatchManifest out;
-    // Built here and handed over only on success. Returning a half-filled
-    // list beside ok=false invites a caller to use the part that parsed,
-    // which is the thing refusing the manifest whole was meant to prevent.
-    std::vector<PatchEntry> accepted;
-
-    nlohmann::json doc;
-    try {
-        // No exceptions escaping: the document arrived over the network and
-        // being unparseable is an ordinary outcome, not a fault.
-        doc = nlohmann::json::parse(json);
-    } catch (const std::exception& e) {
-        out.error = std::string("manifest is not JSON: ") + e.what();
-        return out;
-    }
-
-    if (!doc.is_object()) {
-        out.error = "manifest is not an object";
-        return out;
-    }
-
-    // Versioned so that a later format can be refused cleanly by a client too
-    // old to read it, rather than half-understood.
-    const auto version = doc.value("version", 0);
-    if (version != 1) {
-        out.error = "manifest version " + std::to_string(version) + " is not supported";
-        return out;
-    }
-
-    const auto patches = doc.find("patches");
-    if (patches == doc.end() || !patches->is_array()) {
-        out.error = "manifest has no patches array";
-        return out;
-    }
-    if (patches->size() > kMaxPatchEntries) {
-        out.error = "manifest lists more than " + std::to_string(kMaxPatchEntries) + " patches";
-        return out;
-    }
-
-    std::uint64_t total = 0;
-    for (const auto& item : *patches) {
-        if (!item.is_object()) {
-            out.error = "patch entry is not an object";
-            return out;
-        }
-        PatchEntry entry;
-        entry.file = item.value("file", std::string());
-        entry.sha256 = toLowerAscii(item.value("sha256", std::string()));
-        // Read as a signed value first: a negative in the document would wrap
-        // to something enormous read straight into the unsigned field, and
-        // the cap below would be the only thing that noticed.
-        const auto declared = item.value("size", std::int64_t{-1});
-
-        if (!isSafePatchFileName(entry.file)) {
-            out.error = "refused patch file name: '" + entry.file + "'";
-            return out;
-        }
-        if (!isHexLower(entry.sha256, 64)) {
-            out.error = "patch '" + entry.file + "' has no usable sha256";
-            return out;
-        }
-        if (declared <= 0 || static_cast<std::uint64_t>(declared) > kMaxPatchBytes) {
-            out.error = "patch '" + entry.file + "' declares an unusable size";
-            return out;
-        }
-        entry.size = static_cast<std::uint64_t>(declared);
-
-        // Case-insensitively, because the archives land in one directory and
-        // two entries differing only in case are one file on Windows and
-        // macOS - so the second would silently overwrite the first.
-        for (const PatchEntry& seen : accepted) {
-            if (toLowerAscii(seen.file) == toLowerAscii(entry.file)) {
-                out.error = "patch '" + entry.file + "' is listed twice";
-                return out;
-            }
-        }
-
-        total += entry.size;
-        if (total > kMaxTotalPatchBytes) {
-            out.error = "manifest declares more than the total patch size allowed";
-            return out;
-        }
-        accepted.push_back(std::move(entry));
-    }
-
-    out.entries = std::move(accepted);
-    out.ok = true;
-    return out;
 }
 
 }  // namespace wowee::core

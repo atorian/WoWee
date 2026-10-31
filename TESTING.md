@@ -147,7 +147,6 @@ tests/
   test_world_map_zone_metadata.cpp        - Zone level ranges and faction labels
 
   # Chat
-  test_chat_markup_parser.cpp             - Item link and markup parsing
   test_gm_commands.cpp                    - GM command data table and dispatch
   test_macro_evaluator.cpp                - Macro conditional evaluation
 ```

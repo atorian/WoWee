@@ -4,15 +4,6 @@
 
 #include <cmath>
 
-TEST_CASE("stock hill climbing limits are shared by all surfaces") {
-    using namespace wowee::rendering::movement;
-    REQUIRE(kMaxWalkableSlopeDegrees == 50.0f);
-    REQUIRE(isWalkableNormal(kMinWalkableNormalZ));
-    REQUIRE_FALSE(isWalkableNormal(kMinWalkableNormalZ - 0.001f));
-    REQUIRE(isReachableStep(kMaxStepUp));
-    REQUIRE_FALSE(isReachableStep(kMaxStepUp + 0.001f));
-}
-
 // A walkable slope can rise faster than the step-up budget allows for, which is
 // why grounding cannot rely on the budget alone. At the steepest walkable angle
 // a mounted player crosses more ground per frame than kMaxStepUp covers as soon

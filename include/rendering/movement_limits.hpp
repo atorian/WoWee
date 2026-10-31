@@ -9,17 +9,12 @@ namespace wowee::rendering::movement {
 // The retail client rejects ground steeper than 50 degrees and steps higher
 // than roughly 0.6 yards. Keep these limits shared by terrain, WMO, and M2
 // collision paths so release builds cannot silently diverge by surface type.
-inline constexpr float kMaxWalkableSlopeDegrees = 50.0f;
 inline constexpr float kMinWalkableNormalZ = 0.642787635f; // cos(50 degrees)
 inline constexpr float kMaxStepUp = 0.60f;
 /// How fast a jump leaves the ground, yards a second. The 3.3.5a client
 /// reports it negated in a movement packet's fall block (its zspeed), as the
 /// server's knockback is: down is positive on the wire.
 inline constexpr float kJumpUpSpeed = 7.955547f;
-
-inline bool isWalkableNormal(float normalZ) {
-    return normalZ >= kMinWalkableNormalZ;
-}
 
 /// The upward component of the heightfield's normal at a point, from four
 /// samples around it.
@@ -101,10 +96,6 @@ glm::vec3 flightStepAgainstGround(SampleFn&& sample, const glm::vec3& from,
     glm::vec3 end = contact + rest;
     if (const auto ground = sample(end.x, end.y); ground && end.z < *ground) end.z = *ground;
     return end;
-}
-
-inline bool isReachableStep(float deltaZ) {
-    return deltaZ >= -0.25f && deltaZ <= kMaxStepUp;
 }
 
 /// Whether the outdoor heightfield at this spot is a roof rather than a floor.

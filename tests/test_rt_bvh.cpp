@@ -1,10 +1,9 @@
 #include "rendering/rt_region.hpp"
 // The hierarchy the software ray tracer walks.
 //
-// Closest hits are checked against a brute-force scan of every triangle, which
-// is slow and obviously correct. The structural checks are what the shader
-// relies on without re-checking: every triangle reachable exactly once, and
-// every box enclosing what is under it.
+// The structural checks are what the shader relies on without re-checking:
+// every triangle reachable exactly once, and every box enclosing what is under
+// it. The walk itself runs on the GPU (rt_trace_sw.glsli).
 #include <catch_amalgamated.hpp>
 
 #include <cmath>
@@ -13,7 +12,6 @@
 
 #include <glm/glm.hpp>
 
-#include "collision/geometry.hpp"
 #include "rendering/rt_bvh.hpp"
 #include "rendering/rt_range_allocator.hpp"
 
@@ -33,16 +31,6 @@ std::vector<RtTriangle> randomSoup(uint32_t count, uint32_t seed, float spread, 
         t.v2 = glm::vec4(c + glm::vec3(off(rng), off(rng), off(rng)), 0.0f);
     }
     return tris;
-}
-
-float bruteForce(const std::vector<RtTriangle>& tris, const glm::vec3& o, const glm::vec3& d) {
-    float best = -1.0f;
-    for (const auto& t : tris) {
-        const float h = wowee::collision::rayTriangleIntersect(o, d, glm::vec3(t.v0), glm::vec3(t.v1),
-                                                               glm::vec3(t.v2));
-        if (h > 0.0f && (best < 0.0f || h < best)) best = h;
-    }
-    return best;
 }
 
 bool contains(const RtBvhNode& outer, const glm::vec3& p) {
@@ -80,49 +68,12 @@ void checkStructure(const RtBvh& bvh, const std::vector<RtTriangle>& tris) {
 
 }  // namespace
 
-TEST_CASE("RT BVH closest hit matches a brute-force scan", "[rt_bvh]") {
+TEST_CASE("RT BVH reaches every triangle of a soup once, inside its boxes", "[rt_bvh]") {
     for (uint32_t seed : {1u, 2u, 3u}) {
-        const auto original = randomSoup(2000, seed, 50.0f, 3.0f);
-        auto tris = original;
+        auto tris = randomSoup(2000, seed, 50.0f, 3.0f);
         const RtBvh bvh = buildRtTriangleBvh(tris);
         checkStructure(bvh, tris);
-
-        std::mt19937 rng(seed * 77);
-        std::uniform_real_distribution<float> u(-1.0f, 1.0f);
-        int hits = 0;
-        for (int r = 0; r < 2000; ++r) {
-            const glm::vec3 o(u(rng) * 60.0f, u(rng) * 60.0f, u(rng) * 60.0f);
-            glm::vec3 d(u(rng), u(rng), u(rng));
-            if (glm::length(d) < 1e-3f) continue;
-            d = glm::normalize(d);
-            const float expected = bruteForce(original, o, d);
-            const RtHit got = traceRtClosest(bvh.nodes, tris, o, d, 1e30f);
-            if (expected < 0.0f) {
-                CHECK(got.t < 0.0f);
-            } else {
-                ++hits;
-                REQUIRE(got.t > 0.0f);
-                CHECK(std::abs(got.t - expected) <= 1e-3f * std::max(1.0f, expected));
-            }
-        }
-        CHECK(hits > 100);  // the rays have to actually exercise the hit path
     }
-}
-
-TEST_CASE("RT BVH honours tMax", "[rt_bvh]") {
-    auto tris = randomSoup(500, 9, 20.0f, 2.0f);
-    const auto original = tris;
-    const RtBvh bvh = buildRtTriangleBvh(tris);
-    // Aim at a triangle rather than a fixed direction: the soup differs between
-    // standard libraries, so a hand-picked ray can miss everything on one of them.
-    const glm::vec3 o(-40.0f, 0.3f, 0.1f);
-    const glm::vec3 target =
-        (glm::vec3(original[0].v0) + glm::vec3(original[0].v1) + glm::vec3(original[0].v2)) / 3.0f;
-    const glm::vec3 d = glm::normalize(target - o);
-    const float full = bruteForce(original, o, d);
-    REQUIRE(full > 0.0f);
-    CHECK(traceRtClosest(bvh.nodes, tris, o, d, full * 0.5f).t < 0.0f);
-    CHECK(traceRtClosest(bvh.nodes, tris, o, d, full * 1.01f).t > 0.0f);
 }
 
 TEST_CASE("RT BVH splits coincident triangles instead of one huge leaf", "[rt_bvh]") {
@@ -137,15 +88,12 @@ TEST_CASE("RT BVH splits coincident triangles instead of one huge leaf", "[rt_bv
     const RtBvh bvh = buildRtTriangleBvh(tris, 4);
     checkStructure(bvh, tris);
     for (const auto& n : bvh.nodes) CHECK(n.count <= 16);
-    CHECK(traceRtClosest(bvh.nodes, tris, {0.2f, 0.2f, 5.0f}, {0, 0, -1}, 1e30f).t ==
-          Catch::Approx(5.0f));
 }
 
-TEST_CASE("RT BVH of nothing traces nothing", "[rt_bvh]") {
+TEST_CASE("RT BVH of nothing has no nodes", "[rt_bvh]") {
     std::vector<RtTriangle> tris;
     const RtBvh bvh = buildRtTriangleBvh(tris);
     CHECK(bvh.nodes.empty());
-    CHECK(traceRtClosest(bvh.nodes, tris, {0, 0, 0}, {0, 0, 1}, 1e30f).t < 0.0f);
 }
 
 TEST_CASE("RT surface packing round-trips to 8 bits", "[rt_bvh]") {

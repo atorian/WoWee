@@ -114,13 +114,6 @@ public:
     std::string getStringInLocale(uint32_t row, uint32_t base, uint32_t locale) const;
 
     /**
-     * Get string by offset in string block
-     * @param offset Offset into string block
-     * @return String value
-     */
-    std::string getStringByOffset(uint32_t offset) const;
-
-    /**
      * Get string by offset as a view (no allocation; valid while this DBCFile lives)
      */
     std::string_view getStringViewByOffset(uint32_t offset) const;

@@ -306,12 +306,10 @@ FrameXML calls into, plus what the client draws in the world.
   (`setWhisperTarget`, `insertChatLink`). Does not render a chat window
 - `ChatCommandRegistry` - Slash command dispatch with `IChatCommand` interface.
   FrameXML's edit box routes unknown commands here via `runClientChatCommand`
-- `ChatMarkupParser` / `ChatMarkupRenderer` - Item link parsing and colored rich-text rendering
 - `ChatBubbleManager` - Floating chat bubbles above entities
 - `ChatSettings` - Timestamps, font size, auto-joined channels, speech bubbles
 - `MacroEvaluator` - WoW-style macro conditional evaluation (`[mod:shift]`, `[target=focus]`, etc.)
 - `GameStateAdapter` / `InputModifierAdapter` - Testable abstractions over game state
-- `ItemTooltipRenderer` - Chat-embedded item tooltip rendering
 - `CastSequenceTracker` - `/castsequence` state tracking
 - 11 command modules under `commands/`: channel, combat, emote, GM, group, guild, help, misc, social, system, target
 - 206-command GM data table with dot-prefix interception and `/gmhelp`
