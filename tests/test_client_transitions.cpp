@@ -360,8 +360,10 @@ TEST_CASE("logging in another character carries none of the last one's interface
     ClientHarness h;
     h.enterWorld(alice);
     // Alice ticks a dungeon in the finder and leaves something in her Lua state.
-    h.runInInterface("SetLFGDungeonEnabled(285, true); RELOG_MARK = 'alice'");
+    h.runInInterface("SetLFGDungeonEnabled(285, true); SetLFGHeaderCollapsed(261, true); "
+                     "RELOG_MARK = 'alice'");
     REQUIRE(h.interfaceAnswers("GetLFDChoiceEnabledState()[285] == true"));
+    REQUIRE(h.interfaceAnswers("GetLFDChoiceCollapseState()[261] == true"));
 
     h.game().social().requestLogout(false);
     h.server().receive(Opcode::SMSG_LOGOUT_COMPLETE);
@@ -373,10 +375,22 @@ TEST_CASE("logging in another character carries none of the last one's interface
     REQUIRE(h.session());
     CHECK(h.session()->identity().name == "Bob");
     CHECK(h.interfaceAnswers("next(GetLFDChoiceEnabledState()) == nil"));
+    CHECK(h.interfaceAnswers("next(GetLFDChoiceCollapseState()) == nil"));
     CHECK(h.interfaceAnswers("RELOG_MARK == nil"));
     const auto bobHeard = h.interfaceEventsOf("Bob");
     CHECK(std::count(bobHeard.begin(), bobHeard.end(), "PLAYER_ENTERING_WORLD") >= 1);
     CHECK(std::count(bobHeard.begin(), bobHeard.end(), "PLAYER_LEAVING_WORLD") == 0);
+}
+
+TEST_CASE("a reload keeps the character's dungeon finder choices and nothing else",
+          "[client][harness][charactersession]") {
+    ClientHarness h;
+    h.enterWorld();
+    h.runInInterface("SetLFGDungeon(285); RELOAD_MARK = 'before'; ReloadUI()");
+    // The reload is taken at the next frame, as /reload is.
+    h.frame();
+    CHECK(h.interfaceAnswers("RELOAD_MARK == nil"));
+    CHECK(h.interfaceAnswers("GetLFDChoiceEnabledState()[285] == true"));
 }
 
 // ---- A world connection lost and restored --------------------------------------

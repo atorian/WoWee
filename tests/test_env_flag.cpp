@@ -12,8 +12,17 @@
 #include <catch_amalgamated.hpp>
 
 #include "core/env_flag.hpp"
+#include "core/env.hpp"
 
 using wowee::core::envValueEnables;
+
+using wowee::core::setEnvVar;
+
+namespace {
+
+constexpr const char* kBudget = "WOWEE_TEST_ENV_INT_CLAMPED";
+
+}  // namespace
 
 TEST_CASE("the four ways of writing off", "[env-flag]") {
     for (const char* off : {"0", "false", "off", "no"}) {
@@ -68,19 +77,22 @@ TEST_CASE("a value that merely starts with a no-word is on", "[env-flag]") {
 // back the stall the budget exists to prevent.
 
 TEST_CASE("a number in range is taken as written", "[env-flag]") {
-    CHECK(wowee::core::envIntClamped(nullptr, 24, 1, 512) == 24);
+    setEnvVar(kBudget, "24");
+    CHECK(wowee::core::envIntClamped(kBudget, 7, 1, 512) == 24);
 }
 
 TEST_CASE("the range is a floor and a ceiling", "[env-flag]") {
-    // Checked through the pure part below rather than by setting a variable,
-    // which is not portable to every platform this builds on.
-    const auto clamp = [](long v, int lo, int hi) {
-        return v < lo ? lo : (v > hi ? hi : static_cast<int>(v));
-    };
-    CHECK(clamp(0, 1, 512) == 1);
-    CHECK(clamp(-5, 1, 512) == 1);
-    CHECK(clamp(99999, 1, 512) == 512);
-    CHECK(clamp(24, 1, 512) == 24);
+    setEnvVar(kBudget, "0");
+    CHECK(wowee::core::envIntClamped(kBudget, 7, 1, 512) == 1);
+    setEnvVar(kBudget, "-5");
+    CHECK(wowee::core::envIntClamped(kBudget, 7, 1, 512) == 1);
+    setEnvVar(kBudget, "99999");
+    CHECK(wowee::core::envIntClamped(kBudget, 7, 1, 512) == 512);
+}
+
+TEST_CASE("a value that is not a number takes the default, not zero", "[env-flag]") {
+    setEnvVar(kBudget, "lots");
+    CHECK(wowee::core::envIntClamped(kBudget, 7, 1, 512) == 7);
 }
 
 TEST_CASE("an unset key takes the default", "[env-flag]") {

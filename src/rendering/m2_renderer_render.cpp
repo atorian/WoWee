@@ -2609,13 +2609,8 @@ void M2Renderer::cullShadowCasters(const glm::mat4& lightSpaceMatrix, float shad
     if (perspective) lightFrustum.extractFromMatrix(lightSpaceMatrix);
     auto insideFootprint = [&](const glm::vec3& position, float scale, const M2ModelGPU& model) {
         if (perspective) return lightFrustum.intersectsSphere(position, model.boundRadius * scale * 1.5f);
-        const glm::vec4 clip = lightSpaceMatrix * glm::vec4(position, 1.0f);
-        // Orthographic projection: w == 1, NDC directly comparable.
-        // Inflate by the model's bounding sphere converted to NDC
-        // (shadowRadius ≈ frustum half-extent; overshoot is harmless).
-        const float margin = (model.boundRadius * scale) / shadowRadius * 1.5f;
-        if (std::abs(clip.x) > 1.0f + margin || std::abs(clip.y) > 1.0f + margin) return false;
-        return clip.z >= -margin && clip.z <= 1.0f + margin;
+        return instanceInShadowFootprint(lightSpaceMatrix, position, model.boundRadius * scale,
+                                         shadowRadius);
     };
 
 
