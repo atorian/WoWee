@@ -5,8 +5,8 @@ when upgrading any dependency so maintainers can track drift.
 
 | Library | Version | Source | Notes |
 |---------|---------|--------|-------|
-| Dear ImGui | 1.92.6 WIP | https://github.com/ocornut/imgui | Git submodule |
-| vk-bootstrap | v1.3.302 | https://github.com/charles-lunarg/vk-bootstrap | Git submodule |
+| Dear ImGui | 1.92.6 WIP (814c6a19) | https://github.com/ocornut/imgui | Copied: the core, `LICENSE.txt` and the SDL3, Vulkan and SDLRenderer3 backends |
+| vk-bootstrap | v1.3.302 (2e7c8e83) | https://github.com/charles-lunarg/vk-bootstrap | Copied: `src/` and `LICENSE.txt` |
 | FidelityFX-FSR2 | v2.2.1-1-g3d22aef | https://github.com/GPUOpen-Effects/FidelityFX-FSR2 | Git submodule |
 | FidelityFX-SDK | tracks `main` (ce81c67…) | https://github.com/Kelsidavis/FidelityFX-SDK | Git submodule (fork pinned by build scripts) |
 | Vulkan Memory Allocator | 3.4.0 | https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator | Single header |

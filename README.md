@@ -171,7 +171,7 @@ For Windows/MSYS2, Visual Studio, and platform-specific notes, see the
 ### 2. Clone and build
 
 ```bash
-git clone --recurse-submodules https://github.com/Kelsidavis/WoWee.git
+git clone https://github.com/Kelsidavis/WoWee.git
 cd WoWee
 
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release

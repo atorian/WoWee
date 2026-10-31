@@ -641,40 +641,31 @@ endfunction()
 find_library(STORMLIB_LIBRARY NAMES StormLib stormlib storm)
 find_path(STORMLIB_INCLUDE_DIR StormLib.h PATH_SUFFIXES StormLib)
 
-# Include ImGui as a static library (Vulkan backend)
+# Dear ImGui (Vulkan backend) and vk-bootstrap (Vulkan device/instance setup).
+# Copies of the files the build uses, not submodules: see extern/VERSIONS.md.
 set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extern/imgui)
-if(EXISTS ${IMGUI_DIR})
-    add_library(imgui STATIC
-        ${IMGUI_DIR}/imgui.cpp
-        ${IMGUI_DIR}/imgui_draw.cpp
-        ${IMGUI_DIR}/imgui_tables.cpp
-        ${IMGUI_DIR}/imgui_widgets.cpp
-        ${IMGUI_DIR}/imgui_demo.cpp
-        ${IMGUI_DIR}/backends/imgui_impl_sdl3.cpp
-        ${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
-    )
-    # SYSTEM: vendored, so -Werror on wowee does not police it.
-    target_include_directories(imgui SYSTEM PUBLIC
-        ${IMGUI_DIR}
-        ${IMGUI_DIR}/backends
-    )
-    target_link_libraries(imgui PUBLIC SDL3::SDL3 Vulkan::Vulkan ${CMAKE_DL_LIBS})
-else()
-    message(WARNING "ImGui not found in extern/imgui. Clone it with:")
-    message(WARNING "  git clone https://github.com/ocornut/imgui.git extern/imgui")
-endif()
+add_library(imgui STATIC
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/imgui_demo.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_sdl3.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
+)
+# SYSTEM: vendored, so -Werror on wowee does not police it.
+target_include_directories(imgui SYSTEM PUBLIC
+    ${IMGUI_DIR}
+    ${IMGUI_DIR}/backends
+)
+target_link_libraries(imgui PUBLIC SDL3::SDL3 Vulkan::Vulkan ${CMAKE_DL_LIBS})
 
-# vk-bootstrap (Vulkan device/instance setup)
 set(VK_BOOTSTRAP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extern/vk-bootstrap)
-if(EXISTS ${VK_BOOTSTRAP_DIR})
-    add_library(vk-bootstrap STATIC
-        ${VK_BOOTSTRAP_DIR}/src/VkBootstrap.cpp
-    )
-    target_include_directories(vk-bootstrap SYSTEM PUBLIC ${VK_BOOTSTRAP_DIR}/src)
-    target_link_libraries(vk-bootstrap PUBLIC Vulkan::Vulkan)
-else()
-    message(FATAL_ERROR "vk-bootstrap not found in extern/vk-bootstrap")
-endif()
+add_library(vk-bootstrap STATIC
+    ${VK_BOOTSTRAP_DIR}/src/VkBootstrap.cpp
+)
+target_include_directories(vk-bootstrap SYSTEM PUBLIC ${VK_BOOTSTRAP_DIR}/src)
+target_link_libraries(vk-bootstrap PUBLIC Vulkan::Vulkan)
 
 # Source files
 set(WOWEE_SOURCES
@@ -1755,15 +1746,8 @@ if(WIN32)
     target_link_libraries(wowee_client_objects PRIVATE ws2_32 winmm)
 endif()
 
-# Link ImGui if available
-if(TARGET imgui)
-    target_link_libraries(wowee_client_objects PUBLIC imgui)
-endif()
-
-# Link vk-bootstrap
-if(TARGET vk-bootstrap)
-    target_link_libraries(wowee_client_objects PRIVATE vk-bootstrap)
-endif()
+target_link_libraries(wowee_client_objects PUBLIC imgui)
+target_link_libraries(wowee_client_objects PRIVATE vk-bootstrap)
 
 if(TARGET wowee_fsr2_amd_vk)
     target_link_libraries(wowee_client_objects PRIVATE wowee_fsr2_amd_vk)
@@ -2586,7 +2570,7 @@ endif()
 #
 # SDL's own renderer rather than Vulkan or GL: this draws a form and a log, and
 # the backend that needs no API choice is the one that builds everywhere.
-if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR AND SDL3_FOUND AND EXISTS ${IMGUI_DIR}/imgui.cpp)
+if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR AND SDL3_FOUND)
     add_library(imgui_sdlrenderer STATIC
         ${IMGUI_DIR}/imgui.cpp
         ${IMGUI_DIR}/imgui_draw.cpp
@@ -2666,7 +2650,7 @@ if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR AND SDL3_FOUND AND EXISTS ${IMGUI_D
     install(TARGETS wowee_assets RUNTIME DESTINATION bin)
     message(STATUS "  wowee_assets window: ENABLED")
 else()
-    message(STATUS "  wowee_assets window: DISABLED (needs StormLib, SDL3 and extern/imgui)")
+    message(STATUS "  wowee_assets window: DISABLED (needs StormLib and SDL3)")
 endif()
 
 # ---- The same panel, inside the client ----
@@ -2681,7 +2665,7 @@ endif()
 # Gated on what the window is gated on. Without StormLib there is nothing to
 # extract with, and a client built without it should still be a client - the
 # screen is compiled out and the old behaviour stands.
-if(TARGET wowee_client_objects AND STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR AND EXISTS ${IMGUI_DIR}/imgui.cpp)
+if(TARGET wowee_client_objects AND STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
     target_sources(wowee_client_objects PRIVATE
         tools/asset_manager/panel.cpp
         tools/asset_manager/profiles.cpp
@@ -2729,7 +2713,7 @@ if(TARGET wowee_client_objects AND STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR AND
     wowee_link_stormlib(wowee_client_objects)
     message(STATUS "  asset panel in the client: ENABLED")
 else()
-    message(STATUS "  asset panel in the client: DISABLED (needs StormLib and extern/imgui)")
+    message(STATUS "  asset panel in the client: DISABLED (needs StormLib)")
 endif()
 
 # ---- Realm patch archives, read in place ----
