@@ -83,3 +83,12 @@ TEST_CASE("sphere map", "[scene][m2]") {
     draw("sphere_map.json", picture);
     verifyPicture(picture);
 }
+
+TEST_CASE("ray traced lighting", "[scene][rt]") {
+    // The shadows scene under full ray traced lighting (mode 3): the traced
+    // sun shadow joined with the shadow map's, ambient occluded where the
+    // house meets the ground, and the light the ground throws back.
+    const fs::path picture = fs::path(WOWEE_SCRATCH_DIR) / "scene_references" / "rt_lighting.png";
+    draw("rt_lighting.json", picture);
+    verifyPicture(picture);
+}
