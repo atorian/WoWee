@@ -3736,7 +3736,24 @@ wowee_add_test(test_wmo_minimap
 # Scenes drawn by scene_render against the pictures approved for them in
 # tests/approvals (ApprovalTests.cpp). Skipped without a Vulkan device or the
 # game data.
-wowee_add_test(test_scene_references SOURCES test_scene_references.cpp)
+# Built as wowee_add_test builds a test, but entered into ctest once per
+# scene, so the scenes draw side by side under -j rather than one after
+# another in a single entry.
+add_executable(test_scene_references test_scene_references.cpp)
+target_include_directories(test_scene_references PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_scene_references SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_scene_references PRIVATE catch2_main)
+wowee_test_link_glm(test_scene_references)
+register_test_target(test_scene_references)
+foreach(_scene IN ITEMS "water wake" "shadows" "sphere map" "ray traced lighting" "ocean")
+    string(REPLACE " " "_" _scene_name "${_scene}")
+    add_test(NAME scene_reference_${_scene_name} COMMAND test_scene_references "${_scene}")
+    set_tests_properties(scene_reference_${_scene_name} PROPERTIES SKIP_RETURN_CODE 4)
+    if(WOWEE_GAME_DATA_DIR)
+        set_tests_properties(scene_reference_${_scene_name} PROPERTIES
+            ENVIRONMENT "WOW_DATA_PATH=${WOWEE_GAME_DATA_DIR}")
+    endif()
+endforeach()
 target_include_directories(test_scene_references PRIVATE
     ${CMAKE_SOURCE_DIR}/extern/approval_tests ${CMAKE_CURRENT_SOURCE_DIR}/approval_catch2)
 target_compile_definitions(test_scene_references PRIVATE
@@ -3744,6 +3761,3 @@ target_compile_definitions(test_scene_references PRIVATE
     WOWEE_SCENE_RENDER="$<TARGET_FILE:scene_render>"
     WOWEE_SCRATCH_DIR="${CMAKE_BINARY_DIR}/scratch")
 add_dependencies(test_scene_references scene_render)
-if(WOWEE_GAME_DATA_DIR)
-    set_tests_properties(scene_references PROPERTIES ENVIRONMENT "WOW_DATA_PATH=${WOWEE_GAME_DATA_DIR}")
-endif()
