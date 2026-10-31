@@ -11,22 +11,7 @@
 
 #include <nlohmann/json.hpp>
 
-// One translation unit per binary compiles stb_image_write, and which one
-// that is depends on the binary: in the extractor and the asset manager it is
-// this file, and in the client it is renderer.cpp, which was already writing
-// screenshots long before this file joined it there. The client defines the
-// macro below so the two do not both provide it and collide at link time.
-#ifndef WOWEE_STB_IMAGE_WRITE_PROVIDED
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#endif
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-#endif
-#include "stb_image_write.h"
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#endif
+#include "stb_image_write.h"   // its code is wowee_pipeline's
 
 #include <algorithm>
 #include <atomic>

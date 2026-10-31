@@ -19,7 +19,7 @@
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/grass_clearing.hpp"
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 #include "rendering/m2_blend_mode.hpp"
 #include "rendering/m2_uv_transform.hpp"
 #include "rendering/frames_in_flight.hpp"
@@ -171,7 +171,7 @@ struct M2ModelGPU {
     bool isGroundFire = false;      // Ground fire whose halo follows its lowest flame emitter
     bool isTorch = false;           // Wall-mounted or standing torch
     bool isForge = false;           // Smithy forge (contained fire, lights its surroundings)
-    AmbientEmitterType ambientEmitterType = AmbientEmitterType::None;
+    pipeline::AmbientEmitterType ambientEmitterType = pipeline::AmbientEmitterType::None;
 
     /// What the model is solid with, shared with the collision world; none
     /// for a model without a collision mesh, an invisible trap or a spell

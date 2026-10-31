@@ -6,7 +6,7 @@
 #include <cstddef>
 
 namespace wowee {
-namespace rendering {
+namespace pipeline {
 
 /// The file name of an asset path, lower case, without its extension.
 ///
@@ -135,5 +135,5 @@ M2BatchTexClassification classifyBatchTexture(const std::string& lowerTexKey);
  */
 AmbientEmitterType classifyAmbientEmitter(const std::string& lowerName);
 
-} // namespace rendering
+} // namespace pipeline
 } // namespace wowee

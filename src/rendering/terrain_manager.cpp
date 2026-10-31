@@ -10,7 +10,7 @@
 #include "rendering/vk_context.hpp"
 #include "rendering/liquid_scene.hpp"
 #include "rendering/m2_renderer.hpp"
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/camera.hpp"
 #include "core/coordinates.hpp"
@@ -861,18 +861,18 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
                             doodadLogCount++;
                         }
 
-                        auto emitterType = rendering::classifyAmbientEmitter(m2PathLower);
-                        if (emitterType != rendering::AmbientEmitterType::None) {
+                        auto emitterType = pipeline::classifyAmbientEmitter(m2PathLower);
+                        if (emitterType != pipeline::AmbientEmitterType::None) {
                             PendingTile::AmbientEmitter emitter;
                             emitter.position = worldPos;
                             // Map classifier enum to AmbientSoundManager type codes
                             switch (emitterType) {
-                                case rendering::AmbientEmitterType::FireplaceSmall: emitter.type = 0; break;
-                                case rendering::AmbientEmitterType::FireplaceLarge: emitter.type = 1; break;
-                                case rendering::AmbientEmitterType::Torch:          emitter.type = 2; break;
-                                case rendering::AmbientEmitterType::Fountain:       emitter.type = 3; break;
-                                case rendering::AmbientEmitterType::Waterfall:      emitter.type = 6; break;
-                                case rendering::AmbientEmitterType::Forge:          emitter.type = 1; break; // Forge → large fire
+                                case pipeline::AmbientEmitterType::FireplaceSmall: emitter.type = 0; break;
+                                case pipeline::AmbientEmitterType::FireplaceLarge: emitter.type = 1; break;
+                                case pipeline::AmbientEmitterType::Torch:          emitter.type = 2; break;
+                                case pipeline::AmbientEmitterType::Fountain:       emitter.type = 3; break;
+                                case pipeline::AmbientEmitterType::Waterfall:      emitter.type = 6; break;
+                                case pipeline::AmbientEmitterType::Forge:          emitter.type = 1; break; // Forge → large fire
                                 default: emitter.type = 0; break;
                             }
                             pending->ambientEmitters.push_back(emitter);

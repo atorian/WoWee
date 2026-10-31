@@ -1,7 +1,7 @@
 // M2 struct layout and field tests (header-only, no loader source)
 #include <catch_amalgamated.hpp>
 #include "pipeline/m2_loader.hpp"
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 #include "rendering/m2_renderer_internal.h"
 #include <cstring>
 
@@ -50,7 +50,7 @@ TEST_CASE("Hanging lantern light pools project from suspension to animated tip",
 }
 
 TEST_CASE("Lighthouse beams are classified for distant bone updates", "[m2][animation]") {
-    const auto beam = wowee::rendering::classifyM2Model(
+    const auto beam = wowee::pipeline::classifyM2Model(
         "World\\Generic\\Human\\Passive Doodads\\Stormwind\\Stormwind_LighthouseBeam_01.m2",
         glm::vec3(-1.0f), glm::vec3(1.0f), 100, 0);
     REQUIRE(beam.isLightBeam);
@@ -58,10 +58,10 @@ TEST_CASE("Lighthouse beams are classified for distant bone updates", "[m2][anim
 }
 
 TEST_CASE("Ship machinery is classified for distant bone updates", "[m2][animation][transport]") {
-    const auto sails = wowee::rendering::classifyM2Model(
+    const auto sails = wowee::pipeline::classifyM2Model(
         "World\\Generic\\PassiveDoodads\\Ships\\ShipAnimation\\TransportShip_Sails.m2",
         glm::vec3(-40.0f), glm::vec3(40.0f), 161, 0);
-    const auto paddle = wowee::rendering::classifyM2Model(
+    const auto paddle = wowee::pipeline::classifyM2Model(
         "World\\Generic\\PassiveDoodads\\Ships\\ShipAnimation\\PaddleWheel\\Icebreaker_Paddlewheel.m2",
         glm::vec3(-14.0f), glm::vec3(14.0f), 2676, 4);
     REQUIRE(sails.isTransportDoodad);
@@ -73,17 +73,17 @@ TEST_CASE("Steam Tonk vehicles are not steam VFX", "[m2][classification]") {
     // low-poly vertex gate; combined with a smoke emitter it was mis-classified
     // as an additive spell effect (glowing translucent). A "tonk"/"tank" name
     // must never be treated as steam VFX regardless of geometry.
-    const auto tonkLow = wowee::rendering::classifyM2Model(
+    const auto tonkLow = wowee::pipeline::classifyM2Model(
         "Creature\\SteamTonk\\SteamTonk.m2",
         glm::vec3(-1.0f), glm::vec3(1.0f), 23, 2);
     REQUIRE_FALSE(tonkLow.isSpellEffect);
-    const auto tonkHi = wowee::rendering::classifyM2Model(
+    const auto tonkHi = wowee::pipeline::classifyM2Model(
         "Creature\\SteamTonk\\SteamTonk.m2",
         glm::vec3(-1.0f), glm::vec3(1.0f), 606, 1);
     REQUIRE_FALSE(tonkHi.isSpellEffect);
 
     // A genuine low-poly steam emitter is still a spell effect.
-    const auto steam = wowee::rendering::classifyM2Model(
+    const auto steam = wowee::pipeline::classifyM2Model(
         "Spells\\Steam.m2",
         glm::vec3(-1.0f), glm::vec3(1.0f), 40, 2);
     REQUIRE(steam.isSpellEffect);

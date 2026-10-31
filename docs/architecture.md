@@ -371,8 +371,7 @@ See `docs/threading.md` for the full inventory.
 
 **Dependencies:**
 - SDL3, Vulkan SDK (1.3), OpenSSL, GLM, zlib (system; Android fetches SDL3 and GLM)
-- ImGui, vk-bootstrap (submodules in extern/)
-- VMA, stb_image, miniaudio, nlohmann/json, Lua 5.1.5 (vendored in extern/)
+- ImGui, vk-bootstrap, VMA, stb_image, miniaudio, nlohmann/json, Lua 5.1.5 (vendored in extern/)
 - StormLib (system, optional - for the asset tools and the client's asset builder)
 - Unicorn Engine (system, optional - only for Warden emulation)
 - FFmpeg (system, optional - for video playback)

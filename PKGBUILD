@@ -19,7 +19,7 @@ depends=(
   'stormlib'          # AUR - MPQ extraction (wowee-extract-assets uses libstorm.so)
 )
 makedepends=(
-  'git'               # Clone submodules (imgui, vk-bootstrap)
+  'git'               # Clone the repository
   'cmake'             # Build system
   'pkgconf'           # Dependency detection
   'glm'               # Header-only math library (vectors, matrices, quaternions)
@@ -29,22 +29,12 @@ makedepends=(
 )
 provides=('wowee')
 conflicts=('wowee')
-source=("${pkgname}::git+https://github.com/Kelsidavis/WoWee.git#branch=master"
-        "git+https://github.com/ocornut/imgui.git"
-        "git+https://github.com/charles-lunarg/vk-bootstrap.git")
-sha256sums=('SKIP' 'SKIP' 'SKIP')
+source=("${pkgname}::git+https://github.com/Kelsidavis/WoWee.git#branch=master")
+sha256sums=('SKIP')
 
 pkgver() {
   cd "${pkgname}"
   printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
-}
-
-prepare() {
-  cd "${pkgname}"
-  git submodule init
-  git config submodule.extern/imgui.url "${srcdir}/imgui"
-  git config submodule.extern/vk-bootstrap.url "${srcdir}/vk-bootstrap"
-  git -c protocol.file.allow=always submodule update
 }
 
 build() {

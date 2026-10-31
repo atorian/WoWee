@@ -13,7 +13,7 @@
 #include "rendering/m2_blend_mode.hpp"
 #include "pipeline/model_bounds.hpp"
 #include "rendering/render_constants.hpp"
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/bone_slots.hpp"
 #include "rendering/vk_buffer.hpp"
@@ -1503,7 +1503,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     }
 
     // Classify model from name and geometry - pure function, no GPU dependencies.
-    auto cls = classifyM2Model(model.name, tightMin, tightMax,
+    auto cls = pipeline::classifyM2Model(model.name, tightMin, tightMax,
                                 model.vertices.size(),
                                 model.particleEmitters.size());
     const bool isInvisibleTrap   = cls.isInvisibleTrap;
@@ -2006,7 +2006,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                 }
             }
             bgpu.texture = tex;
-            const auto tcls = classifyBatchTexture(batchTexKeyLower);
+            const auto tcls = pipeline::classifyBatchTexture(batchTexKeyLower);
             bgpu.starLayer = tcls.starPointLayer;
             const bool modelLanternFamily = gpuModel.isLanternLike;
             const bool torchGlowCard = gpuModel.isTorch &&
