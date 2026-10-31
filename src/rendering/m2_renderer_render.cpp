@@ -160,7 +160,7 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
 
     M2Instance instance;
     instance.id = reservedId != 0 ? reservedId : nextInstanceId++;
-    instance.random = InstanceRandom(instance.id);
+    instance.random = InstanceRandom::at(position);
     instance.modelId = modelId;
     instance.position = position;
     if (mdlRef.isGroundDetail) {
@@ -260,7 +260,7 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
 
     M2Instance instance;
     instance.id = reservedId != 0 ? reservedId : nextInstanceId++;
-    instance.random = InstanceRandom(instance.id);
+    instance.random = InstanceRandom::at(position);
     instance.modelId = modelId;
     instance.position = position;  // Used for frustum culling
     instance.rotation = glm::vec3(0.0f);
