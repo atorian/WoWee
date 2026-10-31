@@ -29,6 +29,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <tuple>
 #include <vector>
 
 namespace wowee::rendering {
@@ -83,9 +84,17 @@ inline LocalLightSet pickLocalLights(const std::vector<LocalLight>& lights, cons
         if (cx < rx[0] || cx > rx[1] || cy < ry[0] || cy > ry[1]) continue;
         const glm::vec3 d = p - center;
         const Near n{glm::dot(d, d), i};
-        // Insertion into the sorted few, as AddLight keeps them.
+        // Insertion into the sorted few, as AddLight keeps them. Equally near
+        // ones by where they stand, not by their place in the list: the list
+        // follows the order the models were loaded in, and two lamps of a
+        // symmetric model are often exactly as near as each other.
+        const auto after = [&](const Near& a) {
+            if (a.distSq != n.distSq) return a.distSq > n.distSq;
+            const glm::vec3& q = lights[a.index].position;
+            return std::tie(q.x, q.y, q.z) > std::tie(p.x, p.y, p.z);
+        };
         int at = count;
-        while (at > 0 && best[at - 1].distSq > n.distSq) --at;
+        while (at > 0 && after(best[at - 1])) --at;
         if (at >= cap) continue;
         for (int k = std::min(count, cap - 1); k > at; --k) best[k] = best[k - 1];
         best[at] = n;

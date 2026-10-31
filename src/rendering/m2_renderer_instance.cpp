@@ -730,7 +730,6 @@ void M2Renderer::clear() {
     if (collision_) collision_->clearM2();
     scene_->instanceIndexById.clear();
     scene_->cullGrid_.clear();
-    scene_->boneSeedInstanceByModel_.clear();
     scene_->instanceDedupMap_.clear();
     scene_->animatedInstanceIndices_.clear();
     scene_->particleOnlyInstanceIndices_.clear();

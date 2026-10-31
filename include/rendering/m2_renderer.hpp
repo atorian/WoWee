@@ -446,8 +446,9 @@ struct M2Instance {
 
     void recomputeCachedCullFactors();
 
-    // Frame-skip optimization (update distant animations less frequently)
-    uint8_t frameSkipCounter = 0;
+    /// The animation clock when its bones were last posed: a distant one is
+    /// posed again only once the clock has moved on far enough.
+    double bonesPosedAtMs = 0.0;
 
     // Per-instance bone SSBO (double-buffered) - legacy; see mega bone SSBO in M2Renderer
     ::VkBuffer boneBuffer[2] = {};
@@ -1526,12 +1527,12 @@ private:
     };
     /// The particles in view, written into this frame's buffer as runs.
     /// Reads the scene; returns how many particles went in.
-    size_t gatherM2Particles(Frame& frame);
+    size_t gatherM2Particles(Frame& frame, const glm::vec3& eye);
     /// The runs gatherM2Particles wrote; reads no instance.
     void recordM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
     /// The ribbon trails, written into this frame's buffer with a draw each.
     /// Reads the scene; returns how many vertices went in.
-    size_t gatherM2Ribbons(Frame& frame);
+    size_t gatherM2Ribbons(Frame& frame, const glm::vec3& eye);
     /// The draws gatherM2Ribbons made; reads no instance.
     void recordM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
     /// Quads the particle buffer holds: a whole frame's, a particle that is
@@ -1552,6 +1553,18 @@ private:
     // draws its particles' randomness from its own generator.
     /// Particles drawn per emitter of the instance being written; scratch.
     std::vector<uint32_t> drawnPerEmitter_;
+    /// An instance whose particles or ribbons are gathered, and how far it is
+    /// from the eye. The gathers take them nearest first, so a full buffer
+    /// loses the farthest, and draw them farthest first, as blending needs.
+    struct EmitterInView {
+        const M2Instance* inst;
+        float distSq;
+    };
+    std::vector<EmitterInView> emittersInView_;
+    /// Where each instance's runs or draws start; scratch for the reversal.
+    std::vector<size_t> emitterBlocks_;
+    std::vector<ParticleRun> reorderedRuns_;
+    std::vector<RibbonDrawCall> reorderedRibbons_;
     bool skyMode_ = false;
     float skyTimeOfDayHours_ = 12.0f;
     std::function<std::optional<float>(float, float, float)> waterHeightAt_;
@@ -1642,11 +1655,9 @@ private:
     // Helper to destroy instance bone buffers.
     // When defer=true, destruction is scheduled via deferAfterAllFrameFences so
     // in-flight command buffers are not invalidated (use for streaming unload).
-    /// Starts a new instance's animation and seeds its bones from a
-    /// sibling of the same model, so it draws on the frame it spawns.
-    /// Both spawn paths need it and each used to have its own copy.
-    void seedInstanceAnimation(const M2ModelGPU& model, uint32_t modelId,
-                               M2Instance& instance);
+    /// Starts a new instance's animation and computes its bones, so it draws
+    /// on the frame it spawns. Both spawn paths need it.
+    void startInstanceAnimation(const M2ModelGPU& model, M2Instance& instance);
     void seedUnanimatedSequence(const M2ModelGPU& model, M2Instance& instance);
 
     void destroyInstanceBones(M2Instance& inst, bool defer = true);
@@ -1665,7 +1676,6 @@ private:
         /// kMaxShadowRefiled it gives up listing and the cull starts over.
         std::vector<uint32_t> shadowRefiledIds;
         bool shadowRefiledOverflow = false;
-        std::unordered_map<uint32_t, uint32_t> boneSeedInstanceByModel_;
         InstanceIndexSet animatedInstanceIndices_;     // hasAnimation && !disableAnimation
         InstanceIndexSet particleOnlyInstanceIndices_; // !hasAnimation && hasParticleEmitters
         /// Boats still asking whether they are on water; the rest have their
