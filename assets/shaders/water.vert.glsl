@@ -57,7 +57,7 @@ layout(push_constant) uniform Push {
     float sceneValid;
     float meshStep;   // yards between the mesh's vertices
     float exposed;    // 1 where the wind reaches the surface, 0 indoors where it lies still
-    float pad2;
+    float mirrored;   // 1 where the surface reflects the planar image, 0 where only the sky
 } push;
 
 const int MAX_WAKE_POINTS = 32;

@@ -41,7 +41,7 @@ struct WaterPushConstants {
     float sceneValid = 0.0f; // 1 once captureSceneHistory has run; the shader used to guess this per pixel
     float meshStep = 0.0f;   // yards between the surface's vertices: the waves the mesh can carry
     float exposed = 0.0f;    // 1 where the wind reaches the surface, 0 indoors where it lies still
-    float pad2 = 0.0f;
+    float mirrored = 0.0f;   // 1 where the surface reflects the planar image, 0 where only the sky
 };
 static_assert(sizeof(WaterPushConstants) == 112, "the two shader declarations of this range are laid out for 112 bytes");
 
@@ -197,6 +197,16 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
     // Create reflection resources FIRST so reflectionUBO exists when
     // createSceneHistoryResources writes descriptor binding 3
     createReflectionResources();
+
+    VkQueryPoolCreateInfo queryInfo{};
+    queryInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    queryInfo.queryType = VK_QUERY_TYPE_OCCLUSION;
+    queryInfo.queryCount = MAX_FRAMES_IN_FLIGHT * kQueriedSurfaces;
+    if (vkCreateQueryPool(device, &queryInfo, nullptr, &visibilityQueries_) != VK_SUCCESS) {
+        visibilityQueries_ = VK_NULL_HANDLE;
+        LOG_ERROR("WaterRenderer: no occlusion queries - all water in view counts as seen, and the "
+                  "reflection may be drawn for water hidden behind the scene");
+    }
 
     createSceneHistoryResources(refractionCaptureExtent(),
                                 vkCtx->getSwapchainFormat(),
@@ -403,6 +413,10 @@ void WaterRenderer::shutdown() {
     // runs them against a dead pool.
     vkCtx->flushDeferredCleanup();
 
+    if (visibilityQueries_) vkDestroyQueryPool(device, visibilityQueries_, nullptr);
+    visibilityQueries_ = VK_NULL_HANDLE;
+    for (auto& ids : queried_) ids.clear();
+    queriesReset_ = {};
     destroyWater1xResources();
     destroyReflectionResources();
     destroySceneHistoryResources();
@@ -797,12 +811,16 @@ void WaterRenderer::liquidSurfaceRemoved(LiquidSurfaceId id) {
         if (it->id != id) continue;
         destroyWaterMesh(*it);
         drawn_.erase(it);
+        visibility_.forget(id);
         return;
     }
 }
 
 void WaterRenderer::destroyAllDrawn() {
-    for (auto& drawn : drawn_) destroyWaterMesh(drawn);
+    for (auto& drawn : drawn_) {
+        destroyWaterMesh(drawn);
+        visibility_.forget(drawn.id);
+    }
     drawn_.clear();
 }
 
@@ -815,18 +833,33 @@ WaterRenderer::DrawList WaterRenderer::extract(const Camera& camera) {
     list.water = gameUBO_;
     Frustum frustum;
     frustum.extractFromMatrix(camera.getViewProjectionMatrix());
+    // Water and sea in view, as the reflection is chosen from; magma and
+    // slime are not mirrors. Indexed as list.surfaces, -1 for the rest.
+    std::vector<WaterInView> mirrors;
+    std::vector<int> mirrorOf;
     if (renderingEnabled) for (const auto& s : drawn_) {
         if (!s.vertexBuffer || !s.indexCount || !s.materialSet) continue;
         const Bounds bounds = boundsOf(s);
         if (!frustum.intersectsAABB(bounds.min, bounds.max)) continue;
+        mirrorOf.push_back(s.basicType <= 1 ? static_cast<int>(mirrors.size()) : -1);
+        if (s.basicType <= 1) mirrors.push_back({bounds.min, bounds.max, s.minHeight, visibility_.seen(s.id)});
         const bool wmo = s.wmoId != 0, canal = wmo || s.liquidType == 5;
         list.surfaces.push_back({s.vertexBuffer, s.indexBuffer, s.materialSet, static_cast<uint32_t>(s.indexCount),
             wmo ? 0.0f : (s.basicType == 1 ? 0.35f : 0.08f),
             canal ? 0.35f : (s.basicType == 1 ? 0.20f : 0.30f),
             canal ? 1.00f : (s.basicType == 1 ? 1.20f : 1.40f), static_cast<float>(s.basicType),
-            std::max(glm::length(s.stepX), glm::length(s.stepY)), s.shelter == LiquidShelter::Open ? 1.0f : 0.0f});
+            std::max(glm::length(s.stepX), glm::length(s.stepY)), s.shelter == LiquidShelter::Open ? 1.0f : 0.0f,
+            0.0f, s.id});
     }
     list.inView = !list.surfaces.empty();
+    list.reflection = waterReflectionView({camera.getPosition(), camera.getForward(), camera.getViewMatrix(),
+                                           camera.getProjectionMatrix()}, mirrors);
+    if (list.reflection) {
+        for (size_t i = 0; i < list.surfaces.size(); ++i) {
+            if (mirrorOf[i] >= 0 && list.reflection->mirrors(mirrors[static_cast<size_t>(mirrorOf[i])]))
+                list.surfaces[i].mirrored = 1.0f;
+        }
+    }
     if (list.inView) {
         list.ocean = ocean_.extract();
         list.wake = wake_.extract();
@@ -861,6 +894,14 @@ void WaterRenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                              2, 1, &activeSceneSet, 0, nullptr);
 
+    const uint32_t queryFrame = vkCtx->getCurrentFrame() % MAX_FRAMES_IN_FLIGHT;
+    // The water is asked about all together, one frame in kQueryEveryFrames:
+    // on the Mac a frame that runs occlusion queries costs some 1.2 ms of GPU
+    // more (Booty Bay in scene_render), however few it runs, and visibility
+    // is not needed every frame. Nor at all while the reflection draws no
+    // scene to choose it for.
+    const bool askThisFrame = reflectionDrawsScene() && queriesReset_[queryFrame] &&
+                              vkCtx->frameNumber() % kQueryEveryFrames == 0;
     for (const auto& surface : list.surfaces) {
         WaterPushConstants push{};
         push.model = glm::mat4(1.0f);
@@ -880,6 +921,7 @@ void WaterRenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         // it meets its quays, piers and walls the sea bed's map has no depth
         // under it and its waves lie down there. Indoors it lies still.
         push.exposed = surface.exposed;
+        push.mirrored = surface.mirrored;
 
         vkCmdPushConstants(cmd, pipelineLayout, pushStages_,
                             0, sizeof(WaterPushConstants), &push);
@@ -891,8 +933,65 @@ void WaterRenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         vkCmdBindVertexBuffers(cmd, 0, 1, &surface.vertexBuffer, &offset);
         vkCmdBindIndexBuffer(cmd, surface.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
+        // Whether any of it reaches the screen, for the reflections chosen
+        // from the frame its answer is read on (beginFrameQueries).
+        std::vector<LiquidSurfaceId>& asked = queried_[queryFrame];
+        const bool query = askThisFrame && visibilityQueries_ && asked.size() < kQueriedSurfaces;
+        if (askThisFrame && !query && visibilityQueries_ && !queryOverflowSaid_) {
+            queryOverflowSaid_ = true;
+            LOG_WARNING("WaterRenderer: more than ", kQueriedSurfaces, " water surfaces drawn in a frame - "
+                        "the rest count as seen, and the reflection may be drawn for water hidden behind the scene");
+        }
+        const uint32_t queryIndex = queryFrame * kQueriedSurfaces + static_cast<uint32_t>(asked.size());
+        if (query) vkCmdBeginQuery(cmd, visibilityQueries_, queryIndex, 0);
         vkCmdDrawIndexed(cmd, static_cast<uint32_t>(surface.indexCount), 1, 0, 0, 0);
+        if (query) {
+            vkCmdEndQuery(cmd, visibilityQueries_, queryIndex);
+            asked.push_back(surface.id);
+            queriesReset_[queryFrame] = false;
+        }
     }
+}
+
+void WaterRenderer::beginFrameQueries(VkCommandBuffer cmd, uint32_t frame) {
+    if (!visibilityQueries_ || !vkCtx || frame >= MAX_FRAMES_IN_FLIGHT) return;
+    std::vector<LiquidSurfaceId>& asked = queried_[frame];
+    if (!asked.empty()) {
+        // Each answer and whether it is in. This slot's fence has been waited
+        // on, and nearly always every answer with it; on the Mac a whole
+        // frame's are now and then not marked in yet (a dozen or two a minute
+        // while the world loads). Waiting would stall the frame, so those are
+        // let go, and that water keeps the visibility it had a frame longer.
+        std::vector<uint64_t> answers(asked.size() * 2);
+        const VkResult r = vkGetQueryPoolResults(
+            vkCtx->getDevice(), visibilityQueries_, frame * kQueriedSurfaces, static_cast<uint32_t>(asked.size()),
+            answers.size() * sizeof(uint64_t), answers.data(), 2 * sizeof(uint64_t),
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        size_t missing = 0;
+        if (r == VK_SUCCESS || r == VK_NOT_READY) {
+            for (size_t i = 0; i < asked.size(); ++i) {
+                if (answers[i * 2 + 1]) visibility_.answer(asked[i], answers[i * 2]);
+                else ++missing;
+            }
+        } else {
+            missing = asked.size();
+        }
+        if (missing && !queryReadFailSaid_) {
+            queryReadFailSaid_ = true;
+            LOG_WARNING("WaterRenderer: ", missing, " of ", asked.size(), " water occlusion answers were not in "
+                        "when read (", static_cast<int>(r), ", frame ", vkCtx->frameNumber(), ") - that water "
+                        "keeps the visibility it had a frame longer for choosing the reflection; said once");
+        }
+        asked.clear();
+    }
+    if (!queriesReset_[frame]) {
+        vkCmdResetQueryPool(cmd, visibilityQueries_, frame * kQueriedSurfaces, kQueriedSurfaces);
+        queriesReset_[frame] = true;
+    }
+}
+
+bool WaterRenderer::reflectionDrawsScene() const {
+    return vkCtx && vkCtx->getMsaaSamples() == VK_SAMPLE_COUNT_1_BIT;
 }
 
 void WaterRenderer::captureSceneHistory(VkCommandBuffer cmd,
@@ -1408,7 +1507,7 @@ void WaterRenderer::destroyReflectionResources() {
 // Reflection pass begin/end
 // ==============================================================
 
-bool WaterRenderer::beginReflectionPass(VkCommandBuffer cmd) {
+bool WaterRenderer::beginReflectionPass(VkCommandBuffer cmd, const glm::vec4& area) {
     if (!reflectionRenderPass || !reflectionFramebuffer || !cmd) return false;
 
     VkRenderPassBeginInfo rpInfo{};
@@ -1427,7 +1526,15 @@ bool WaterRenderer::beginReflectionPass(VkCommandBuffer cmd) {
 
     VkViewport vp{.x = 0, .y = 0, .width = static_cast<float>(reflectionExtent.width), .height = static_cast<float>(reflectionExtent.height), .minDepth = 0.0f, .maxDepth = 1.0f};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc{.offset = {.x = 0, .y = 0}, .extent = reflectionExtent};
+    // The scene goes only where the water can show it; the clear above
+    // covers the rest, which nothing reads.
+    const auto x0 = static_cast<int32_t>(std::floor(area.x * static_cast<float>(reflectionExtent.width)));
+    const auto y0 = static_cast<int32_t>(std::floor(area.y * static_cast<float>(reflectionExtent.height)));
+    const auto x1 = static_cast<int32_t>(std::ceil(area.z * static_cast<float>(reflectionExtent.width)));
+    const auto y1 = static_cast<int32_t>(std::ceil(area.w * static_cast<float>(reflectionExtent.height)));
+    VkRect2D sc{.offset = {.x = std::max(x0, 0), .y = std::max(y0, 0)},
+                .extent = {.width = static_cast<uint32_t>(std::max(x1 - std::max(x0, 0), 0)),
+                           .height = static_cast<uint32_t>(std::max(y1 - std::max(y0, 0), 0))}};
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     return true;

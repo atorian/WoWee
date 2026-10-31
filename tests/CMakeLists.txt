@@ -2543,10 +2543,18 @@ wowee_add_test(test_ocean_fft
     SOURCES test_ocean_fft.cpp)
 
 # ── test_water_reflection ────────────────────────────────────
-# The mirrored camera sees what stands above the water and nothing of the bed.
+# The mirrored camera sees what stands above the water and nothing of the bed,
+# and the reflection is drawn for the water in view and what it can show.
 wowee_add_test(test_water_reflection
     SOURCES test_water_reflection.cpp
             ${CMAKE_SOURCE_DIR}/src/rendering/water_reflection.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/frustum.cpp
+            ${TEST_COMMON_SOURCES})
+
+# ── test_water_visibility ────────────────────────────────────
+# Which water reached the screen, from the GPU's occlusion answers.
+wowee_add_test(test_water_visibility
+    SOURCES test_water_visibility.cpp
             ${TEST_COMMON_SOURCES})
 
 # ── test_sphere_map ──────────────────────────────────────────

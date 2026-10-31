@@ -1576,7 +1576,6 @@ FrameInputs Renderer::extractFrameInputs() {
     in.cameraWaterDepth = cameraWaterDepth();
     if (camera) {
         const auto eye = camera->getPosition();
-        in.reflectionWaterHeight = liquidScene_.dominantWaterHeight(eye);
         in.waterHeight = liquidScene_.nearestHeightAt(eye.x, eye.y, eye.z, 400.0f);
         in.waterIsWmo = liquidScene_.isWmoLiquidAt(eye.x, eye.y);
         if (const auto type = liquidScene_.typeAt(eye.x, eye.y))
@@ -1625,14 +1624,8 @@ FrameInputs Renderer::extractFrameInputs() {
     scene->sequence = ++extractedSceneSequence_;
     if (vkCtx) scene->resources = vkCtx->holdSnapshotResources();
     extraction.lap("motion and resource lease");
-    if (terrainRenderer) {
-        terrainRenderer->setViewDistance(in.distantTerrainReady ? std::min(in.viewDistance,kDistantTerrainEnd) : in.viewDistance);
-        terrainRenderer->setLodViewportHeight(sceneRenderExtent().height);
-        scene->terrain = terrainRenderer->extract(in.camera, in.localLights);
-    }
-    if(distantTerrain_ && terrainRenderer && in.terrainEnabled)
-        scene->distantTerrain=distantTerrain_->extract(in.camera,in.viewDistance,terrainRenderer->detailedCoverage());
-    extraction.lap("terrain");
+    // The water first: the terrain and the buildings cull what its
+    // reflection can show along with their own view.
     if (waterRenderer) {
         scene->water = waterRenderer->extract(in.camera);
         if (in.hasLighting) {
@@ -1644,9 +1637,18 @@ FrameInputs Renderer::extractFrameInputs() {
         }
     }
     extraction.lap("water");
+    const WaterReflectionView* mirror = scene->water.reflection ? &*scene->water.reflection : nullptr;
+    if (terrainRenderer) {
+        terrainRenderer->setViewDistance(in.distantTerrainReady ? std::min(in.viewDistance,kDistantTerrainEnd) : in.viewDistance);
+        terrainRenderer->setLodViewportHeight(sceneRenderExtent().height);
+        scene->terrain = terrainRenderer->extract(in.camera, in.localLights, mirror);
+    }
+    if(distantTerrain_ && terrainRenderer && in.terrainEnabled)
+        scene->distantTerrain=distantTerrain_->extract(in.camera,in.viewDistance,terrainRenderer->detailedCoverage());
+    extraction.lap("terrain");
     if (wmoRenderer) {
         wmoRenderer->setViewDistance(in.viewDistance);
-        scene->buildings = wmoRenderer->extract(in.camera, in.characterPosition, in.localLights, scene->water.inView);
+        scene->buildings = wmoRenderer->extract(in.camera, in.characterPosition, in.localLights, mirror);
     }
     extraction.lap("WMO");
     if (characterRenderer) scene->characters = characterRenderer->extract(in.camera, in.localLights);
@@ -1910,6 +1912,8 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
         if (skySystem && skySystem->getBodies()) {
             skySystem->getBodies()->beginFrameQueries(currentCmd, vkCtx->getCurrentFrame());
         }
+        // So are the water's, which say what of it reached the screen.
+        if (waterRenderer) waterRenderer->beginFrameQueries(currentCmd, vkCtx->getCurrentFrame());
         writeRtLightingBindings(vkCtx->getCurrentFrame());
         writeFogVolumeBindings(vkCtx->getCurrentFrame());
 
@@ -5003,21 +5007,17 @@ void Renderer::renderReflectionPass() {
 
     // Reflection pass uses 1x MSAA. Scene pipelines must be render-pass-compatible,
     // which requires matching sample counts. Only render scene into reflection when MSAA is off.
-    bool canRenderScene = (vkCtx->getMsaaSamples() == VK_SAMPLE_COUNT_1_BIT);
+    const bool canRenderScene = waterRenderer->reflectionDrawsScene();
 
-    // Find dominant water height near camera
+    // The water in view that fills most of the picture, and the part of the
+    // mirror it shows (WaterRenderer::extract). Without one, no water reads
+    // the image this frame.
+    const auto& mirror = frameInputs_.scene->water.reflection;
+    if (!mirror) return;
     const glm::vec3 camPos = frameCamera()->getPosition();
-    auto waterH = frameInputs_.reflectionWaterHeight;
-    if (!waterH) return;
-
-    float waterHeight = *waterH;
-
-    // Skip reflection if camera is underwater (Z is up)
-    if (camPos.z < waterHeight + 0.5f) return;
-
-    // Compute reflected view and oblique projection
-    glm::mat4 reflView = mirroredView(frameCamera()->getPosition(), frameCamera()->getForward(), waterHeight);
-    glm::mat4 reflProj = obliqueReflectionProjection(frameCamera()->getProjectionMatrix(), reflView, waterHeight);
+    const float waterHeight = mirror->height;
+    const glm::mat4& reflView = mirror->view;
+    const glm::mat4& reflProj = mirror->projection;
 
     // Update water renderer's reflection UBO with the reflected viewProj
     waterRenderer->updateReflectionUBO(reflProj * reflView);
@@ -5037,7 +5037,7 @@ void Renderer::renderReflectionPass() {
     std::memcpy(reflPerFrameUBOMapped[frame], &reflData, sizeof(GPUPerFrameData));
 
     // Begin reflection render pass (clears to black; scene rendered if pipeline-compatible)
-    if (!waterRenderer->beginReflectionPass(currentCmd)) return;
+    if (!waterRenderer->beginReflectionPass(currentCmd, mirror->area)) return;
 
     if (canRenderScene) {
         // What stands above the water: the ground and the buildings. Not the
@@ -5045,10 +5045,11 @@ void Renderer::renderReflectionPass() {
         // reflected ray, from the sky the camera sees (skyAlong in
         // water.frag). The sky drawn here was a procedural one with no sky
         // model and no weather, and where the reflection held it, it stood
-        // in for the real one as a grey wash over the sea.
+        // in for the real one as a grey wash over the sea. Each draws what
+        // the mirror can show, culled with the camera's view.
         if (terrainRenderer && frameInputs_.terrainEnabled) {
             if(distantTerrain_)distantTerrain_->record(currentCmd,reflDescSet,frameInputs_.scene->distantTerrain);
-            terrainRenderer->recordView(currentCmd, reflDescSet, frameInputs_.scene->terrain);
+            terrainRenderer->recordReflection(currentCmd, reflDescSet, frameInputs_.scene->terrain);
         }
         if (wmoRenderer) {
             wmoRenderer->render(currentCmd, reflDescSet, *frameCamera(), nullptr, WMORenderer::Pass::Reflection);
