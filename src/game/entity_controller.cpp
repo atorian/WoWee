@@ -814,26 +814,8 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
         } else if (key == ufi.flags) {
             uint32_t oldFlags = unit->getUnitFlags();
             unit->setUnitFlags(val);
-            // UNIT_FIELD_FLAGS is the server's authoritative combat state. Spell-only
-            // attackers do not necessarily produce SMSG_ATTACKSTOP, so retaining them
-            // after this bit clears leaves the client permanently "in combat".
-            if (block.guid == owner_.getPlayerGuid() &&
-                (oldFlags & UNIT_FLAG_IN_COMBAT) != 0 &&
-                (val & UNIT_FLAG_IN_COMBAT) == 0) {
-                owner_.combat().clearHostileAttackers();
-            }
-            // Entering and leaving combat, which the interface names after the
-            // health regeneration that stops and starts with it. Registered for
-            // seven times across FrameXML and the addons and fired by nothing:
-            // it is how a panel knows to lock itself, and how anything that
-            // must not change mid-fight finds out the fight has started.
             if (block.guid == owner_.getPlayerGuid()) {
-                const bool was = (oldFlags & UNIT_FLAG_IN_COMBAT) != 0;
-                const bool now = (val & UNIT_FLAG_IN_COMBAT) != 0;
-                if (was != now) {
-                    pendingEvents_.emit(now ? "PLAYER_REGEN_DISABLED"
-                                            : "PLAYER_REGEN_ENABLED", {});
-                }
+                owner_.combat().playerUnitFlagsArrived(oldFlags, val, pendingEvents_);
             }
             // Detect stun state change on local player
             constexpr uint32_t UNIT_FLAG_STUNNED = 0x00040000;

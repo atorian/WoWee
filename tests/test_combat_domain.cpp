@@ -475,3 +475,30 @@ TEST_CASE("a player who logs in with no health is dead, and one whose block says
         CHECK_FALSE(h.game().combat().isPlayerDead());
     }
 }
+
+TEST_CASE("the combat flag starts and ends the fight the interface sees, and its end drops the attackers",
+          "[combat][harness]") {
+    using wowee::game::UF;
+    constexpr uint32_t kInCombat = 0x00080000;
+    constexpr uint64_t kWolf = 0xF130000001000001ull;
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    // A wolf swings at the player.
+    h.receive(Opcode::SMSG_ATTACKSTART, Body().u64(kWolf).u64(h.player().guid).bytes());
+    h.pump();
+    REQUIRE(h.game().combat().isHostileAttacker(kWolf));
+    h.clearRecords();
+
+    h.playerFields({{uf(UF::UNIT_FIELD_FLAGS), kInCombat}});
+    CHECK(h.addonEvents("PLAYER_REGEN_DISABLED").size() == 1);
+    CHECK(h.game().combat().isHostileAttacker(kWolf));
+
+    h.playerFields({{uf(UF::UNIT_FIELD_FLAGS), kInCombat | 0x1}});   // another flag: no news
+    CHECK(h.addonEvents("PLAYER_REGEN_DISABLED").size() == 1);
+    CHECK(h.addonEvents("PLAYER_REGEN_ENABLED").empty());
+
+    h.playerFields({{uf(UF::UNIT_FIELD_FLAGS), 0}});
+    CHECK(h.addonEvents("PLAYER_REGEN_ENABLED").size() == 1);
+    CHECK_FALSE(h.game().combat().isHostileAttacker(kWolf));
+}
