@@ -1323,12 +1323,12 @@ uint32_t GameHandler::getBankBagSlotPrice(int slotIndex) const {
 
 const GameHandler::BattlemasterEntry* GameHandler::getBattlemasterInfo(uint32_t bgTypeId) {
     if (!battlemasterListLoaded_) {
-        auto* am = services_.assetManager;
-        // Checked before the latch, as with the other DBC caches here.
-        if (!am || !am->isInitialized()) return nullptr;
         battlemasterListLoaded_ = true;
-        auto dbc = am->loadDBC("BattlemasterList.dbc");
-        if (dbc && dbc->isLoaded() && dbc->getFieldCount() > 31) {
+        // Read at the WotLK file's columns, verified against it; an expansion
+        // that does not list the table has no battleground list to offer.
+        if (services_.gameData->has("BattlemasterList.dbc")) {
+            const auto dbc = services_.gameData->table("BattlemasterList.dbc", 32,
+                                                       "the battleground list");
             for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
                 const uint32_t id = dbc->getUInt32(i, 0);
                 if (id == 0) continue;
@@ -1401,14 +1401,11 @@ const std::vector<GameHandler::BattlemasterEntry>& GameHandler::getBattlegroundT
 // item, so the row itself needs nothing else.
 const std::vector<GameHandler::CurrencyType>& GameHandler::getCurrencyTypes() {
     if (currencyTypesLoaded_) return currencyTypes_;
-    auto* am = services_.assetManager;
-    // Checked before the latch: an early ask would otherwise leave the tab
-    // permanently empty for the session.
-    if (!am || !am->isInitialized()) return currencyTypes_;
     currencyTypesLoaded_ = true;
+    // Currencies came with WotLK: before it there is no tab to fill.
+    if (!services_.gameData->has("CurrencyTypes.dbc")) return currencyTypes_;
 
-    auto dbc = am->loadDBC("CurrencyTypes.dbc");
-    if (!dbc || !dbc->isLoaded() || dbc->getFieldCount() < 2) return currencyTypes_;
+    const auto dbc = services_.gameData->table("CurrencyTypes.dbc", 2, "the currency tab");
     for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
         CurrencyType c;
         c.id     = dbc->getUInt32(i, 0);
@@ -1422,14 +1419,11 @@ const std::vector<GameHandler::CurrencyType>& GameHandler::getCurrencyTypes() {
 
 void GameHandler::ensureGlyphPropertiesLoaded() {
     if (glyphPropertiesLoaded_) return;
-    auto* am = services_.assetManager;
-    // Checked before the latch: one call made before the asset manager is up
-    // would disable this for the session.
-    if (!am || !am->isInitialized()) return;
     glyphPropertiesLoaded_ = true;
+    // Glyphs came with WotLK.
+    if (!services_.gameData->has("GlyphProperties.dbc")) return;
 
-    auto dbc = am->loadDBC("GlyphProperties.dbc");
-    if (!dbc || !dbc->isLoaded() || dbc->getFieldCount() < 2) return;
+    const auto dbc = services_.gameData->table("GlyphProperties.dbc", 2, "the glyphs' spells");
     for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
         const uint32_t id = dbc->getUInt32(i, 0);
         const uint32_t spellId = dbc->getUInt32(i, 1);
@@ -1603,14 +1597,11 @@ bool GameHandler::getInstanceLockPrompt(float& secondsLeft, bool& previouslySave
 
 uint32_t GameHandler::getDungeonEncounterCount(uint32_t mapId, uint32_t difficulty) const {
     if (!dungeonEncounterCacheLoaded_) {
-        auto* am = services_.assetManager;
-        // Not an attempt: the assets are not there to read yet, and a caller
-        // can reach this before they are.
-        if (!am || !am->isInitialized()) return 0;
         dungeonEncounterCacheLoaded_ = true;
-
-        auto dbc = am->loadDBC("DungeonEncounter.dbc");
-        if (dbc && dbc->isLoaded()) {
+        // Encounters are counted from WotLK on; before it there are none.
+        if (services_.gameData->has("DungeonEncounter.dbc")) {
+            const auto dbc = services_.gameData->table("DungeonEncounter.dbc", 3,
+                                                       "how many bosses an instance has");
             // ID, MapID, Difficulty, OrderIndex, Bit, Name[17], SpellIconID.
             // Verified against record 0: id 464, map 33 (Shadowfang Keep),
             // difficulty 0, order 0, bit 0.
@@ -1640,16 +1631,9 @@ uint32_t GameHandler::getDungeonEncounterCount(uint32_t mapId, uint32_t difficul
 
 void GameHandler::loadLfgDungeonDbc() const {
     if (lfgDungeonNameCacheLoaded_) return;
-
-    auto* am = services_.assetManager;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
     lfgDungeonNameCacheLoaded_ = true;
-
-    auto dbc = am->loadDBC("LFGDungeons.dbc");
-    if (!dbc || !dbc->isLoaded()) return;
+    // The dungeon finder is WotLK's.
+    if (!services_.gameData->has("LFGDungeons.dbc")) return;
 
     const auto* layout = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("LFGDungeons") : nullptr;
@@ -1673,11 +1657,8 @@ void GameHandler::loadLfgDungeonDbc() const {
     // Coren Direbrew and the Crown Chemical Co. - and nothing else. The file
     // has no holiday flag of its own; the group is the flag.
     constexpr uint32_t kHolidayGroup = 11;
-    const bool wideEnough = dbc->getFieldCount() > kGroupId;
-    if (!wideEnough) {
-        LOG_WARNING("LFGDungeons.dbc has only ", dbc->getFieldCount(),
-                    " fields - the dungeon finder will list names only");
-    }
+    const auto dbc = services_.gameData->table(
+        "LFGDungeons.dbc", std::max({idField, nameField, kGroupId}) + 1, "the dungeon finder");
 
     for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
         uint32_t id = dbc->getUInt32(i, idField);
@@ -1685,7 +1666,6 @@ void GameHandler::loadLfgDungeonDbc() const {
         std::string name = dbc->getString(i, nameField);
         if (name.empty()) continue;
         lfgDungeonNameCache_[id] = name;
-        if (!wideEnough) continue;
 
         LfgDungeon d;
         d.id          = id;
@@ -2026,27 +2006,27 @@ const GameHandler::ExtendedCostEntry*
 GameHandler::getExtendedCost(uint32_t extendedCostId) const {
     if (!extendedCostCacheLoaded_) {
         extendedCostCacheLoaded_ = true;
-        auto* am = services_.assetManager;
-        if (am && am->isInitialized()) {
-            if (auto dbc = am->loadDBC("ItemExtendedCost.dbc"); dbc && dbc->isLoaded()) {
-                // WotLK layout: 0=ID, 1=honorPoints, 2=arenaPoints,
-                // 3=arenaSlotRestrictions, 4-8=itemId[5], 9-13=itemCount[5],
-                // 14=reqRating, 15=purchaseGroup
-                for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-                    const uint32_t id = dbc->getUInt32(i, 0);
-                    if (id == 0) continue;
-                    ExtendedCostEntry e;
-                    e.honorPoints = dbc->getUInt32(i, 1);
-                    e.arenaPoints = dbc->getUInt32(i, 2);
-                    for (int j = 0; j < 5; ++j) {
-                        e.itemId[j]    = dbc->getUInt32(i, 4 + j);
-                        e.itemCount[j] = dbc->getUInt32(i, 9 + j);
-                    }
-                    extendedCostCache_[id] = e;
+        // Prices in honor, arena points and tokens came with TBC.
+        if (services_.gameData->has("ItemExtendedCost.dbc")) {
+            const auto dbc = services_.gameData->table("ItemExtendedCost.dbc", 14,
+                                                       "a vendor's prices in honor, arena points and tokens");
+            // WotLK layout: 0=ID, 1=honorPoints, 2=arenaPoints,
+            // 3=arenaSlotRestrictions, 4-8=itemId[5], 9-13=itemCount[5],
+            // 14=reqRating, 15=purchaseGroup
+            for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+                const uint32_t id = dbc->getUInt32(i, 0);
+                if (id == 0) continue;
+                ExtendedCostEntry e;
+                e.honorPoints = dbc->getUInt32(i, 1);
+                e.arenaPoints = dbc->getUInt32(i, 2);
+                for (int j = 0; j < 5; ++j) {
+                    e.itemId[j]    = dbc->getUInt32(i, 4 + j);
+                    e.itemCount[j] = dbc->getUInt32(i, 9 + j);
                 }
-                LOG_INFO("ItemExtendedCost.dbc: loaded ", extendedCostCache_.size(),
-                         " entries");
+                extendedCostCache_[id] = e;
             }
+            LOG_INFO("ItemExtendedCost.dbc: loaded ", extendedCostCache_.size(),
+                     " entries");
         }
     }
     auto it = extendedCostCache_.find(extendedCostId);

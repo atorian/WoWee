@@ -33,6 +33,12 @@ struct ExpansionProfile {
     uint32_t maxLevel = 60;
     std::vector<uint32_t> races;
     std::vector<uint32_t> classes;
+    /// The game data this expansion uses (AGENTS.md, "Game data: what an
+    /// expansion uses is required"): its own files in dataPath, and the DBC
+    /// tables by file name. GameData reads nothing else and stops the game
+    /// when one of these cannot be read.
+    std::vector<std::string> files;
+    std::vector<std::string> tables;
 
     /// The RSA public key this realm signs its Warden module with, 256 bytes.
     ///

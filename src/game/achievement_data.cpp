@@ -6,7 +6,7 @@
 #include "core/logger.hpp"
 #include "game/chat_log.hpp"
 #include "game/frame_xml_events.hpp"
-#include "pipeline/asset_manager.hpp"
+#include "game/game_data.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "pipeline/dbc_loader.hpp"
 
@@ -16,18 +16,11 @@ namespace {
 constexpr uint32_t kNoField = 0xFFFFFFFFu;
 }
 
-bool AchievementData::ready() const {
-    return assets_ && assets_->isInitialized();
-}
 
 achievement::AchievementTable AchievementData::achievements() {
     achievement::AchievementTable table;
-    auto dbc = assets_->loadDBC("Achievement.dbc");
-    if (!dbc || !dbc->isLoaded() || dbc->getFieldCount() < 22) {
-        LOG_WARNING("Achievement.dbc: missing or narrower than 22 fields - achievements show with no "
-                    "names, points or icons");
-        return table;
-    }
+    if (!data_.has("Achievement.dbc")) return table;
+    const auto dbc = data_.table("Achievement.dbc", 22, "the achievements' names, points and icons");
 
     const auto* achL = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("Achievement") : nullptr;
@@ -73,12 +66,8 @@ achievement::AchievementTable AchievementData::achievements() {
 std::vector<achievement::CategoryRecord> AchievementData::categories() {
     std::vector<achievement::CategoryRecord> out;
     // Achievement_Category.dbc: id, parent, then the localised names.
-    auto dbc = assets_->loadDBC("Achievement_Category.dbc");
-    if (!dbc || !dbc->isLoaded() || dbc->getFieldCount() < 3) {
-        LOG_WARNING("Achievement_Category.dbc: missing or narrower than 3 fields - the achievement "
-                    "panel has no categories");
-        return out;
-    }
+    if (!data_.has("Achievement_Category.dbc")) return out;
+    const auto dbc = data_.table("Achievement_Category.dbc", 3, "the achievement panel's categories");
     for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
         achievement::CategoryRecord c;
         c.id = dbc->getUInt32(i, 0);
@@ -95,12 +84,9 @@ std::vector<achievement::CategoryRecord> AchievementData::categories() {
 
 std::vector<achievement::CriterionRecord> AchievementData::criteria() {
     std::vector<achievement::CriterionRecord> out;
-    auto dbc = assets_->loadDBC("Achievement_Criteria.dbc");
-    if (!dbc || !dbc->isLoaded() || dbc->getFieldCount() < 10) {
-        LOG_WARNING("Achievement_Criteria.dbc: missing or narrower than 10 fields - achievements show "
-                    "no criteria, statistics no values and timed criteria no countdown");
-        return out;
-    }
+    if (!data_.has("Achievement_Criteria.dbc")) return out;
+    const auto dbc = data_.table("Achievement_Criteria.dbc", 10,
+                                 "the achievements' criteria, statistics and timers");
 
     const auto* critL = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("AchievementCriteria") : nullptr;

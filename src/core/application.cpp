@@ -507,13 +507,14 @@ bool Application::initialize() {
     assetManager = std::make_unique<pipeline::AssetManager>();
 
     // Populate game services - all subsystems now available
-    gameData_ = std::make_unique<game::GameData>(game::GameData::fromAssets(assetManager.get()));
+    gameData_ = std::make_unique<game::GameData>(game::GameData::fromAssets(assetManager.get()),
+                                                 *expansionRegistry_);
     emoteTable_ = std::make_unique<game::EmoteTable>(*gameData_);
     if (auto* animation = playerView_->getAnimationController()) {
         animation->setEmoteTable(emoteTable_.get());
     }
     gameServices_.emotes = emoteTable_.get();
-    statTables_ = std::make_unique<game::StatTables>(game::StatTables::fromData(*gameData_));
+    statTables_ = std::make_unique<game::StatTables>(*gameData_);
     gameServices_.statTables = statTables_.get();
     gameServices_.gameData = gameData_.get();
     gameServices_.assetManager = assetManager.get();
@@ -585,11 +586,11 @@ bool Application::initialize() {
     loot_ = std::make_unique<loot::LootService>(*lootGateway_, *lootGateway_, eventBus_);
     gameServices_.lootFeed = loot_.get();
     gameServices_.loot = loot_.get();
-    achievementData_ = std::make_unique<game::AchievementData>(assetManager.get());
+    achievementData_ = std::make_unique<game::AchievementData>(*gameData_);
     achievements_ = std::make_unique<achievement::AchievementService>(*achievementData_, eventBus_);
     gameServices_.achievementsFeed = achievements_.get();
     gameServices_.achievements = achievements_.get();
-    titleData_ = std::make_unique<game::TitleData>(assetManager.get());
+    titleData_ = std::make_unique<game::TitleData>(*gameData_);
     titleGateway_ = std::make_unique<game::TitleGateway>(*gameHandler, *gameHandler);
     titles_ = std::make_unique<title::TitleService>(*titleData_, *titleGateway_, eventBus_);
     gameServices_.titlesFeed = titles_.get();
@@ -666,9 +667,7 @@ bool Application::initialize() {
 
     // Load the tables this expansion's protocol is described by.
     if (gameHandler && expansionRegistry_) {
-        if (auto* profile = expansionRegistry_->getActive()) {
-            loadExpansionTables(*profile);
-        }
+        if (expansionRegistry_->getActive()) loadExpansionTables();
     }
 
     // Try expansion-specific asset path first, fall back to base Data/
@@ -698,6 +697,9 @@ bool Application::initialize() {
     LOG_INFO("Attempting to load WoW assets from: ", assetPath);
     if (assetManager->initialize(assetPath)) {
         LOG_INFO("Asset manager initialized successfully");
+        // Everything the expansion uses, read now: a broken install stops
+        // here rather than when a window first asks for a table.
+        gameData_->checkAll();
         zoneTracker_->loadZoneTable(*gameData_, *assetManager);
 
         // Fonts, now the archives are open and still before any frame is
@@ -1804,6 +1806,10 @@ bool Application::initialize() {
     } else {
         LOG_WARNING("Failed to initialize asset manager - asset loading will be unavailable");
         LOG_WARNING("Set WOW_DATA_PATH environment variable to your WoW Data directory");
+        // Data that is there and does not open is a broken install, and stops
+        // the game naming the first table; with none at all the asset
+        // builder opens instead.
+        if (assetInventory_.anyUsable()) gameData_->checkAll();
     }
 
     // If the archives never opened, the fonts were not tried at all. Loose
@@ -2943,18 +2949,17 @@ bool Application::setAssetExpansionOverride(const std::string& id) {
 /// on exactly one of the two paths, and which one depends on which copy was
 /// edited.
 ///
-/// Each table is set active as it loads, because a failed load leaves the
-/// previous expansion's table in place rather than none at all, and a wrong
-/// table reads better than a null one.
-void Application::loadExpansionTables(const game::ExpansionProfile& profile) {
+/// Each is one of the running expansion's own files, from its list in
+/// expansion.json; one that is not there or does not load stops the game.
+void Application::loadExpansionTables() {
     if (!gameHandler) return;
 
-    game::loadProtocolTables(*gameHandler, profile);
+    game::loadProtocolTables(*gameHandler, *gameData_);
 
     if (dbcLayout_) {
-        const std::string dbcLayoutsPath = profile.dataPath + "/dbc_layouts.json";
+        const std::string dbcLayoutsPath = gameData_->file("dbc_layouts.json", "the DBC column layouts");
         if (!dbcLayout_->loadFromJson(dbcLayoutsPath)) {
-            LOG_ERROR("Failed to load DBC layouts from ", dbcLayoutsPath);
+            gameData_->stop(dbcLayoutsPath, "the DBC column layouts", "could not be read");
         }
         pipeline::setActiveDBCLayout(dbcLayout_.get());
     }
@@ -2968,7 +2973,7 @@ void Application::reloadExpansionData() {
     LOG_INFO("Reloading expansion data for: ", profile->name);
 
     widgetRenderer_.resetResources();
-    loadExpansionTables(*profile);
+    loadExpansionTables();
 
     // Update expansion data path for CSV DBC lookups and clear DBC cache
     if (assetManager && !profile->dataPath.empty()) {
@@ -2997,6 +3002,7 @@ void Application::reloadExpansionData() {
         assetManager->setExpansionDataPath(profile->dataPath);
         assetManager->setDBCLocale(profile->locale, profile->build);
         assetManager->clearDBCCache();
+        gameData_->checkAll();
     }
 
     widgetRenderer_.initialize(assetManager.get(), window ? window->getVkContext() : nullptr);

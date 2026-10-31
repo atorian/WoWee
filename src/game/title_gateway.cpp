@@ -9,25 +9,18 @@
 #include "game/packet_sender.hpp"
 #include "game/social_handler.hpp"
 #include "game/world_packets.hpp"
-#include "pipeline/asset_manager.hpp"
+#include "game/game_data.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "title/domain/events.hpp"
 
 namespace wowee::game {
 
-bool TitleData::ready() const {
-    return assets_ && assets_->isInitialized();
-}
 
 std::vector<title::TitleRecord> TitleData::titles() {
     std::vector<title::TitleRecord> out;
-    auto dbc = assets_->loadDBC("CharTitles.dbc");
-    if (!dbc || !dbc->isLoaded() || dbc->getFieldCount() < 5) {
-        LOG_WARNING("CharTitles.dbc: missing or narrower than 5 fields - titles show by their bit "
-                    "and no name has one");
-        return out;
-    }
+    if (!data_.has("CharTitles.dbc")) return out;
+    const auto dbc = data_.table("CharTitles.dbc", 5, "the titles' names");
 
     const auto* layout = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("CharTitles") : nullptr;

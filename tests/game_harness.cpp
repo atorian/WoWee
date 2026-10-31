@@ -171,20 +171,20 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     auto noRows = std::make_shared<pipeline::DBCFile>();
     if (!noRows->load(wdbcFile(512, {}, std::string(1, '\0')))) fail("an empty table does not load");
     noRows_ = std::move(noRows);
-    gameData_ = std::make_unique<game::GameData>([this](const std::string& dbc) {
-        const auto it = dbcs_.find(dbc);
-        return it != dbcs_.end() ? it->second : noRows_;
-    });
+    gameData_ = std::make_unique<game::GameData>(
+        [this](const std::string& dbc) {
+            dbcsRead_.insert(dbc);
+            const auto it = dbcs_.find(dbc);
+            return it != dbcs_.end() ? it->second : noRows_;
+        },
+        expansions_,
+        // Where the client logs the line and aborts, a test sees it thrown.
+        [](const std::string& line) { throw GameStopped(line); });
     services_.gameData = gameData_.get();
     emotes_ = std::make_unique<game::EmoteTable>(*gameData_);
     services_.expansionRegistry = &expansions_;
     services_.emotes = emotes_.get();
-    statTables_ = std::make_unique<game::StatTables>([this](const std::string& dbc, uint32_t column) {
-        const auto it = gameTables_.find({dbc, column});
-        if (it == gameTables_.end()) fail("the game read " + dbc + " column " + std::to_string(column) +
-                                          ", which the test did not give");
-        return it->second;
-    });
+    statTables_ = std::make_unique<game::StatTables>(*gameData_);
     services_.statTables = statTables_.get();
     services_.events = &events_;
     services_.cvars = &cvars_;
@@ -282,7 +282,7 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     pet_ = std::make_unique<pet::PetService>(*petGateway_, events_);
     services_.petFeed = pet_.get();
     services_.pet = pet_.get();
-    game::loadProtocolTables(*game_, *expansions_.getActive());
+    game::loadProtocolTables(*game_, *gameData_);
     game_->setAddonEventCallback([this](const std::string& name, const std::vector<std::string>& args) {
         addonEvents_.push_back({name, args});
     });
@@ -290,7 +290,7 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
 
 void GameHarness::useExpansion(const std::string& id) {
     if (!expansions_.setActive(id)) fail("no expansion profile named " + id);
-    game::loadProtocolTables(*game_, *expansions_.getActive());
+    game::loadProtocolTables(*game_, *gameData_);
 }
 
 GameHarness::~GameHarness() = default;
@@ -538,7 +538,14 @@ void GameHarness::playerFields(const std::map<uint16_t, uint32_t>& fields, bool 
 }
 
 void GameHarness::gameTable(const std::string& dbc, uint32_t column, std::vector<float> rows) {
-    gameTables_[{dbc, column}] = std::move(rows);
+    std::vector<DbcRow> table;
+    table.reserve(rows.size());
+    for (float value : rows) table.push_back({{column, value}});
+    this->dbc(dbc, column + 1, table);
+}
+
+void GameHarness::unreadableDbc(const std::string& dbc) {
+    dbcs_[dbc] = nullptr;
 }
 
 GameHarness::DbcCell::DbcCell(float v) : number(std::bit_cast<uint32_t>(v)) {}

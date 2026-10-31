@@ -8,26 +8,29 @@
 #include "achievement/services/ports.hpp"
 #include "core/event_bus.hpp"
 
-namespace wowee::pipeline { class AssetManager; }
-
 namespace wowee::game {
 
+class GameData;
 class ChatLog;
 class FrameXmlEvents;
 
 /// The achievements' reference data, read from Achievement.dbc,
-/// Achievement_Category.dbc and Achievement_Criteria.dbc.
+/// Achievement_Category.dbc and Achievement_Criteria.dbc through the game's
+/// tables. An expansion without achievements (before WotLK) has none of them
+/// and answers empty; one that has them and cannot read them stops the game.
 class AchievementData final : public achievement::IAchievementData {
 public:
-    explicit AchievementData(pipeline::AssetManager* assets) : assets_(assets) {}
+    explicit AchievementData(const GameData& data) : data_(data) {}
 
-    [[nodiscard]] bool ready() const override;
+    /// Always: the tables are there whenever they are asked for, or the game
+    /// stops.
+    [[nodiscard]] bool ready() const override { return true; }
     achievement::AchievementTable achievements() override;
     std::vector<achievement::CategoryRecord> categories() override;
     std::vector<achievement::CriterionRecord> criteria() override;
 
 private:
-    pipeline::AssetManager* assets_;
+    const GameData& data_;
 };
 
 /// What the player and the interface are told when the achievements change:

@@ -88,6 +88,20 @@ std::vector<uint32_t> jsonUintArray(const std::string& json, const std::string& 
     return result;
 }
 
+std::vector<std::string> jsonStringArray(const std::string& json, const std::string& key) {
+    std::vector<std::string> result;
+    std::string arr = jsonValue(json, key);
+    if (arr.empty() || arr.front() != '[') return result;
+    arr = arr.substr(1, arr.size() - 2);
+    std::istringstream ss(arr);
+    std::string tok;
+    while (std::getline(ss, tok, ',')) {
+        std::string t = trim(tok);
+        if (!t.empty()) result.push_back(std::move(t));
+    }
+    return result;
+}
+
 } // namespace
 
 namespace wowee {
@@ -282,6 +296,8 @@ bool ExpansionRegistry::loadProfile(const std::string& jsonPath, const std::stri
     }
     p.races = jsonUintArray(json, "races");
     p.classes = jsonUintArray(json, "classes");
+    p.files = jsonStringArray(json, "files");
+    p.tables = jsonStringArray(json, "tables");
 
     if (p.id.empty() || p.build == 0) {
         LOG_WARNING("ExpansionRegistry: skipping invalid profile at ", jsonPath);

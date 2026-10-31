@@ -149,8 +149,8 @@ LockOpenPlan planGameObjectOpen(const GameData& data,
     const uint32_t effect0Field = spellL ? spellL->field("Effect0") : 71;
     const uint32_t misc0Field   = spellL ? spellL->field("EffectMiscValue0") : 110;
     if (effect0Field == 0xFFFFFFFF || misc0Field == 0xFFFFFFFF) {
-        GameData::stop("Spell.dbc", "how a locked object is opened",
-                       "has no Effect0 or EffectMiscValue0 in its layout");
+        data.stop("Spell.dbc", "how a locked object is opened",
+                  "has no Effect0 or EffectMiscValue0 in its layout");
     }
     const auto lockDbc = data.table("Lock.dbc", 33, "how a locked object is opened");
     const auto spellDbc = data.table("Spell.dbc", std::max(effect0Field, misc0Field) + 3,

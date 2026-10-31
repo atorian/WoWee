@@ -173,7 +173,7 @@ public:
     /// The opcode table, update fields, packet parsers and DBC layouts a
     /// protocol profile brings with it. Loaded at startup and on every
     /// expansion change, which used to be two copies.
-    void loadExpansionTables(const game::ExpansionProfile& profile); // Reload DBC layouts, opcodes, etc. after expansion change
+    void loadExpansionTables(); // Reload DBC layouts, opcodes, etc. after expansion change
 
     // Singleton access
     static Application& getInstance() { return *instance; }

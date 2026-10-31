@@ -533,11 +533,11 @@ int main(int argc, char** argv) {
             static wowee::game::GameServices svc;
             svc.events = &events;
             static wowee::game::GameData gameData(
-                wowee::game::GameData::fromAssets(haveAssets ? &assets : nullptr));
+                wowee::game::GameData::fromAssets(haveAssets ? &assets : nullptr), assetExpansions);
             svc.gameData = &gameData;
             static wowee::game::EmoteTable emotes(gameData);
             svc.emotes = &emotes;
-            static wowee::game::StatTables statTables(wowee::game::StatTables::fromData(gameData));
+            static wowee::game::StatTables statTables(gameData);
             svc.statTables = &statTables;
             // The two more GameHandler refuses to be built without. A store
             // in memory, so a run writes no CVar file, and a connection
@@ -570,8 +570,8 @@ int main(int argc, char** argv) {
             // Base stats, so the character-sheet stat conversions (crit from
             // agility, etc.) have something to read, given as the realm gives
             // them: the player's fields at create, in the expansion's layout.
-            if (const auto* profile = assetExpansions.getActive()) {
-                wowee::game::loadProtocolTables(gh, *profile);
+            if (assetExpansions.getActive()) {
+                wowee::game::loadProtocolTables(gh, gameData);
                 using wowee::game::UF;
                 const auto at = [](UF f) { return wowee::game::fieldIndex(f); };
                 const auto bitsOf = [](float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; };

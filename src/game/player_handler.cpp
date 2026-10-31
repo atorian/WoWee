@@ -153,7 +153,8 @@ uint32_t PlayerHandler::tableLevel() const {
 
 float PlayerHandler::critFromStat(StatTables::Table base, StatTables::Table perStat, int statIdx) const {
     const uint8_t cls = queries_.playerClass();
-    if (cls == 0) return 0.0f;
+    // Classic has no game tables: its sheet has no crit from a stat to show.
+    if (cls == 0 || !tables_.has(base) || !tables_.has(perStat)) return 0.0f;
     const float stat = static_cast<float>(std::max(0, sheet_.stats[statIdx]));
     return (tables_.perClass(base, cls) + stat * tables_.perClassAndLevel(perStat, cls, tableLevel())) *
            100.0f;  // the sheet reads a percent
@@ -171,7 +172,10 @@ float PlayerHandler::spellCritFromIntellect() const {
 
 float PlayerHandler::healthRegenFromSpirit() const {
     const uint8_t cls = queries_.playerClass();
-    if (cls == 0) return 0.0f;
+    if (cls == 0 || !tables_.has(StatTables::Table::OctRegenHp) ||
+        !tables_.has(StatTables::Table::RegenHpPerSpirit)) {
+        return 0.0f;
+    }
     const float spirit = static_cast<float>(std::max(0, sheet_.stats[4 /* SPIRIT */]));
     const float baseSpirit = std::min(spirit, 50.0f);
     const float moreSpirit = spirit - baseSpirit;
@@ -182,7 +186,7 @@ float PlayerHandler::healthRegenFromSpirit() const {
 
 float PlayerHandler::manaRegenFromSpirit() const {
     const uint8_t cls = queries_.playerClass();
-    if (cls == 0) return 0.0f;
+    if (cls == 0 || !tables_.has(StatTables::Table::RegenMpPerSpirit)) return 0.0f;
     const float spirit = static_cast<float>(std::max(0, sheet_.stats[4 /* SPIRIT */]));
     return spirit * tables_.perClassAndLevel(StatTables::Table::RegenMpPerSpirit, cls, tableLevel());
 }
@@ -190,10 +194,15 @@ float PlayerHandler::manaRegenFromSpirit() const {
 float PlayerHandler::combatRatingBonus(int cr) const {
     const uint8_t cls = queries_.playerClass();
     if (cls == 0 || cr < 0 || cr >= static_cast<int>(StatTables::kRatings)) return 0.0f;
+    if (!tables_.has(StatTables::Table::CombatRatings)) return 0.0f;  // Classic: no ratings
     const float coef = tables_.ratingAtLevel(static_cast<uint32_t>(cr), tableLevel());
     if (coef == 0.0f) return 0.0f;
     const float ratingValue = static_cast<float>(std::max(0, combatRating(cr)));
-    return ratingValue * (tables_.classRatingScalar(cls, static_cast<uint32_t>(cr)) / coef);
+    // The class scalar came with WotLK; TBC divides by the coefficient alone.
+    const float scalar = tables_.has(StatTables::Table::ClassRatingScalar)
+        ? tables_.classRatingScalar(cls, static_cast<uint32_t>(cr))
+        : 1.0f;
+    return ratingValue * (scalar / coef);
 }
 
 void PlayerHandler::restStateArrived(bool resting) {

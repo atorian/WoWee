@@ -40,6 +40,8 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -114,6 +116,12 @@ private:
     std::function<void(const network::Packet&)> callback_;
     std::deque<network::Packet> inbound_;
     std::vector<network::Packet> sent_;
+};
+
+/// The game stopped: what the client logs as LOG_FATAL before it aborts,
+/// thrown in a test instead.
+struct GameStopped : std::runtime_error {
+    using std::runtime_error::runtime_error;
 };
 
 /// One FrameXML event the game fired, with its arguments.
@@ -316,8 +324,9 @@ public:
     /// The realm's fields for the player's own object, as an update block -
     /// `create` the one that puts it in the world - applied and pumped.
     void playerFields(const std::map<uint16_t, uint32_t>& fields, bool create = false);
-    /// What the game reads for column `column` of the game table `dbc`. A
-    /// table the test has not given fails the test when it is read.
+    /// What the game reads for column `column` of the game table `dbc`, one
+    /// float per row. A table the test has not given has no rows, which the
+    /// sheet stops the game over.
     void gameTable(const std::string& dbc, uint32_t column, std::vector<float> rows);
     /// One cell of a table a test gives: a number, a float or a string.
     struct DbcCell {
@@ -334,6 +343,10 @@ public:
     /// The table the game reads as `dbc`: `fields` columns wide, these rows in
     /// order. A table the test has not given has no rows.
     void dbc(const std::string& dbc, uint32_t fields, const std::vector<DbcRow>& rows);
+    /// `dbc` is there and cannot be read: what a broken install looks like.
+    void unreadableDbc(const std::string& dbc);
+    /// Whether the game opened `dbc` at all.
+    [[nodiscard]] bool dbcWasRead(const std::string& dbc) const { return dbcsRead_.count(dbc) != 0; }
     /// The tables the game reads, as the client hands them to what it builds
     /// outside the game (buildFactionHostilityMap).
     [[nodiscard]] const game::GameData& gameData() const { return *gameData_; }
@@ -348,9 +361,9 @@ private:
     core::CVarStore cvars_;
     std::map<std::string, game::GameData::Table> dbcs_;
     game::GameData::Table noRows_;
+    std::set<std::string> dbcsRead_;
     std::unique_ptr<game::GameData> gameData_;
     std::unique_ptr<game::EmoteTable> emotes_;
-    std::map<std::pair<std::string, uint32_t>, std::vector<float>> gameTables_;
     std::unique_ptr<game::StatTables> statTables_;
     game::ExpansionRegistry expansions_;
     game::GameServices services_;

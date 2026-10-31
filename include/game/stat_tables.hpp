@@ -37,13 +37,12 @@ public:
     static constexpr uint32_t kMaxLevel = 100;
     static constexpr uint32_t kRatings = 32;
 
-    /// One column of a DBC as floats, its rows in order. Returns the table or
-    /// does not return: a table that cannot be read stops the game in it.
-    using ReadColumn = std::function<std::vector<float>(const std::string& dbc, uint32_t column)>;
+    /// Read through the game's tables, which outlive this.
+    explicit StatTables(const GameData& data);
 
-    explicit StatTables(ReadColumn read);
-    /// Read from the game's tables, which outlive this.
-    static ReadColumn fromData(const GameData& data);
+    /// Whether the running expansion has `table` at all. The sheet's numbers
+    /// derived from one it lacks are a feature that expansion does not have.
+    [[nodiscard]] bool has(Table table) const;
 
     /// A table's row for a class (1-11).
     [[nodiscard]] float perClass(Table table, uint8_t classId) const;
@@ -57,7 +56,7 @@ public:
 private:
     [[nodiscard]] float row(Table table, size_t index) const;
 
-    ReadColumn read_;
+    const GameData& data_;
     mutable std::array<std::optional<std::vector<float>>, static_cast<size_t>(Table::Count)> tables_;
 };
 

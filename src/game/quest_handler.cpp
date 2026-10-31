@@ -1840,8 +1840,8 @@ uint32_t QuestHandler::getQuestRewardXP(int32_t level, uint32_t xpDifficulty) {
     }
     auto it = questXpByLevel_.find(level);
     if (it == questXpByLevel_.end()) {
-        GameData::stop("QuestXP.dbc", "the experience a quest rewards",
-                       "has no row for level " + std::to_string(level));
+        data_.stop("QuestXP.dbc", "the experience a quest rewards",
+                   "has no row for level " + std::to_string(level));
     }
     // The same column AzerothCore's Quest::XPValue reads: Exp[xpDifficulty].
     return it->second[xpDifficulty];
@@ -1875,8 +1875,8 @@ int32_t QuestHandler::getQuestRewardReputation(int32_t valueId, int32_t override
     if (field > 9) return 0;
     auto it = questFactionRew_.find(rowId);
     if (it == questFactionRew_.end()) {
-        GameData::stop("QuestFactionReward.dbc", "the reputation a quest rewards",
-                       "has no row " + std::to_string(rowId));
+        data_.stop("QuestFactionReward.dbc", "the reputation a quest rewards",
+                   "has no row " + std::to_string(rowId));
     }
     return it->second[field] * 100;
 }
