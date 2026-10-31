@@ -33,9 +33,55 @@ namespace rendering {
 /// would have accepted. Bounds only grow while a column is in use (a removal
 /// leaves them as they were), which keeps them conservative; an emptied column
 /// starts over.
+///
+/// A column lists its instances by their index in the instance list, which a
+/// pass reads directly; the instance id once had to be looked up in a hash
+/// map for each of the tens of thousands of candidates. The list is kept in
+/// step with the instance list's swap-remove (removeSwapLast), as the
+/// renderer's other index sets are. Each index also has its Record: what the
+/// per-instance tests read, in a dense array of its own.
 class M2CullGrid {
 public:
     static constexpr float kCellSize = 64.0f;
+
+    /// What the passes' per-instance tests read of instance `index`, apart
+    /// from the rest of it: 48 bytes, where the instance is 600. A cull over
+    /// the candidates of a city reads these, one or two to a cache line, and
+    /// the instance only for those it keeps. M2Renderer::fileInCullGrid
+    /// writes the instance's part from the instance whenever it changes; the
+    /// GPU cull's verdict is the cull's own and lives only here.
+    struct Record {
+        glm::vec3 position{0.0f};
+        /// The cull sphere: the visual bounds' centre and padded radius.
+        float paddedRadius = 0.0f;
+        glm::vec3 cullCenter{0.0f};
+        /// Times the frame's render distance squared: its own range.
+        float maxDistSqFactor = 1.0f;
+        uint32_t id = 0;
+        /// How far beyond its position the shadow pass lets it cast: its
+        /// bound radius at its scale, times 1.5.
+        float shadowRadius = 0.0f;
+        /// The render() call whose GPU verdict lastVisible is; a verdict from
+        /// another call is not this frame's.
+        uint32_t verdictSerial = 0;
+        uint16_t flags = 0;
+        /// The last GPU verdict that covered it. Visible until one says not,
+        /// so a new instance is drawn at once.
+        uint8_t lastVisible = 1;
+        /// Frames in a row the GPU culled it, capped at 3, for the HiZ test's
+        /// hysteresis. A new one counts as not recently seen.
+        uint8_t culledFrames = 2;
+    };
+    enum Flag : uint16_t {
+        kValid = 1 << 0,          ///< its model is valid
+        kHasModel = 1 << 1,
+        kInvisibleTrap = 1 << 2,
+        kGroundDetail = 1 << 3,
+        kAnimatedSkyBird = 1 << 4, ///< a sky bird that animates: a range of its own
+        kGameObject = 1 << 5,
+        kHidden = 1 << 6,          ///< out of the world, and in no column
+        kFinishing = 1 << 7,       ///< ended: its mesh is not drawn
+    };
 
     struct Cell {
         glm::vec3 viewMin{std::numeric_limits<float>::max()};
@@ -43,59 +89,90 @@ public:
         glm::vec3 posMin{std::numeric_limits<float>::max()};
         glm::vec3 posMax{std::numeric_limits<float>::lowest()};
         float maxShadowRadius = 0.0f;
-        std::vector<uint32_t> ids;
-    };
-
-    struct Entry {
-        glm::vec3 position;
-        glm::vec3 cullCenter;
-        float cullRadius;
-        float shadowRadius;
+        /// The instances filed here, by their index in the instance list.
+        std::vector<uint32_t> members;
     };
 
     void clear() {
         cells_.clear();
         cellIndex_.clear();
-        cellOfId_.clear();
+        records_.clear();
+        cellOf_.clear();
+        slotOf_.clear();
     }
 
-    void insert(uint32_t id, const Entry& e) {
-        const uint32_t c = cellFor(e.position);
-        Cell& cell = cells_[c];
-        cell.ids.push_back(id);
-        grow(cell, e);
-        cellOfId_[id] = c;
+    /// A record for the instance just added at the end of the list.
+    void add() {
+        records_.emplace_back();
+        cellOf_.push_back(kNone);
+        slotOf_.push_back(0);
     }
 
-    void remove(uint32_t id) {
-        const auto it = cellOfId_.find(id);
-        if (it == cellOfId_.end()) return;
-        Cell& cell = cells_[it->second];
-        for (size_t k = 0; k < cell.ids.size(); ++k) {
-            if (cell.ids[k] != id) continue;
-            cell.ids[k] = cell.ids.back();
-            cell.ids.pop_back();
-            break;
-        }
-        if (cell.ids.empty()) reset(cell);
-        cellOfId_.erase(it);
-    }
+    [[nodiscard]] size_t size() const { return records_.size(); }
+    [[nodiscard]] Record& record(uint32_t index) { return records_[index]; }
+    [[nodiscard]] const Record& record(uint32_t index) const { return records_[index]; }
 
-    /// After an instance moved or its cull data changed.
-    void update(uint32_t id, const Entry& e) {
-        const auto it = cellOfId_.find(id);
-        if (it != cellOfId_.end() && it->second == cellFor(e.position)) {
-            grow(cells_[it->second], e);
+    /// Files instance `index` in the column its record's position is in, or
+    /// keeps it where it is and grows the column's bounds; a hidden one goes
+    /// out of any column.
+    void file(uint32_t index) {
+        const Record& r = records_[index];
+        if (r.flags & kHidden) {
+            unfile(index);
             return;
         }
-        remove(id);
-        insert(id, e);
+        const uint32_t c = cellFor(r.position);
+        if (cellOf_[index] != c) {
+            unfile(index);
+            Cell& cell = cells_[c];
+            cellOf_[index] = c;
+            slotOf_[index] = static_cast<uint32_t>(cell.members.size());
+            cell.members.push_back(index);
+        }
+        grow(cells_[c], r);
+    }
+
+    /// The instance at `index` is gone and the last one takes its place, as
+    /// the instance list does it (swap-remove).
+    void removeSwapLast(uint32_t index) {
+        const auto last = static_cast<uint32_t>(records_.size() - 1);
+        unfile(index);
+        if (index != last) {
+            records_[index] = records_[last];
+            const uint32_t c = cellOf_[last];
+            cellOf_[index] = c;
+            slotOf_[index] = slotOf_[last];
+            if (c != kNone) cells_[c].members[slotOf_[last]] = index;
+        }
+        records_.pop_back();
+        cellOf_.pop_back();
+        slotOf_.pop_back();
     }
 
     [[nodiscard]] const std::vector<Cell>& cells() const { return cells_; }
-    [[nodiscard]] size_t size() const { return cellOfId_.size(); }
+    /// How many instances are in a column.
+    [[nodiscard]] size_t filed() const {
+        size_t n = 0;
+        for (const uint32_t c : cellOf_) n += c != kNone;
+        return n;
+    }
 
 private:
+    static constexpr uint32_t kNone = ~0u;
+
+    void unfile(uint32_t index) {
+        const uint32_t c = cellOf_[index];
+        if (c == kNone) return;
+        Cell& cell = cells_[c];
+        const uint32_t slot = slotOf_[index];
+        const uint32_t moved = cell.members.back();
+        cell.members[slot] = moved;
+        slotOf_[moved] = slot;
+        cell.members.pop_back();
+        if (cell.members.empty()) reset(cell);
+        cellOf_[index] = kNone;
+    }
+
     static uint64_t keyFor(const glm::vec3& p) {
         const auto x = static_cast<int32_t>(std::floor(p.x / kCellSize));
         const auto y = static_cast<int32_t>(std::floor(p.y / kCellSize));
@@ -112,26 +189,31 @@ private:
         return index;
     }
 
-    static void grow(Cell& cell, const Entry& e) {
-        const glm::vec3 r(e.cullRadius);
-        cell.viewMin = glm::min(cell.viewMin, glm::min(e.position, e.cullCenter - r));
-        cell.viewMax = glm::max(cell.viewMax, glm::max(e.position, e.cullCenter + r));
-        cell.posMin = glm::min(cell.posMin, e.position);
-        cell.posMax = glm::max(cell.posMax, e.position);
-        cell.maxShadowRadius = std::max(cell.maxShadowRadius, e.shadowRadius);
+    static void grow(Cell& cell, const Record& r) {
+        const glm::vec3 radius(r.paddedRadius);
+        cell.viewMin = glm::min(cell.viewMin, glm::min(r.position, r.cullCenter - radius));
+        cell.viewMax = glm::max(cell.viewMax, glm::max(r.position, r.cullCenter + radius));
+        cell.posMin = glm::min(cell.posMin, r.position);
+        cell.posMax = glm::max(cell.posMax, r.position);
+        cell.maxShadowRadius = std::max(cell.maxShadowRadius, r.shadowRadius);
     }
 
     static void reset(Cell& cell) {
-        std::vector<uint32_t> ids;
-        ids.swap(cell.ids);
+        std::vector<uint32_t> members;
+        members.swap(cell.members);
         cell = Cell{};
-        cell.ids.swap(ids);
+        cell.members.swap(members);
     }
 
     std::vector<Cell> cells_;
     std::unordered_map<uint64_t, uint32_t> cellIndex_;
-    std::unordered_map<uint32_t, uint32_t> cellOfId_;
+    /// By instance index: its record, its column (kNone for none) and its
+    /// place in that column's members.
+    std::vector<Record> records_;
+    std::vector<uint32_t> cellOf_;
+    std::vector<uint32_t> slotOf_;
 };
+static_assert(sizeof(M2CullGrid::Record) == 48, "two to three records to a 128-byte cache line");
 
 /// Whether any position inside [posMin, posMax] could pass the shadow pass's
 /// per-instance test against this light-space (orthographic) matrix with a

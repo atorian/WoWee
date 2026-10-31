@@ -222,7 +222,8 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     if (scene_->instances[idx].cachedIsBoat) scene_->pendingAfloatIds_.push_back(scene_->instances[idx].id);
     scene_->instanceIndexById[placed.id] = idx;
     scene_->rtChanges.add(placed.id, placed.modelId);
-    fileInCullGrid(scene_->instances[idx]);
+    scene_->cullGrid_.add();
+    fileInCullGrid(idx);
     placeInCollision(placed);
 
     return placed.id;
@@ -324,7 +325,8 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     if (scene_->instances[idx].cachedIsBoat) scene_->pendingAfloatIds_.push_back(scene_->instances[idx].id);
     scene_->instanceIndexById[placed.id] = idx;
     scene_->rtChanges.add(placed.id, placed.modelId);
-    fileInCullGrid(scene_->instances[idx]);
+    scene_->cullGrid_.add();
+    fileInCullGrid(idx);
     placeInCollision(placed);
 
     return placed.id;
@@ -924,19 +926,24 @@ void M2Renderer::extractCull(const Camera& camera, Frame& frame) {
 
     frame.maxPossibleDistSq = maxPossibleDistSq;
     frame.cullIds.reserve(numInstances);
+    frame.cullIndices.reserve(numInstances);
     frame.cullInput.reserve(numInstances);
+    using G = M2CullGrid;
     for (uint32_t i = 0; i < numInstances; ++i) {
-        const auto& inst = scene_->instances[cullCandidates_[i]];
+        const uint32_t index = cullCandidates_[i];
+        const G::Record& r = scene_->cullGrid_.record(index);
+        const bool gameObject = (r.flags & G::kGameObject) != 0;
         float distanceSq = rendering::m2InstanceMaxDistSq(maxRenderDistanceSq,
-            inst.cachedEffectiveMaxDistSqFactor, inst.isGameObject,
+            r.maxDistSqFactor, gameObject,
             rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE, cappedViewDistance(),
-            inst.cachedIsGroundDetail, groundDetailMaxDistance_);
-        if (inst.cachedIsSkyBird && inst.cachedHasAnimation && !inst.cachedDisableAnimation)
+            (r.flags & G::kGroundDetail) != 0, groundDetailMaxDistance_);
+        if (r.flags & G::kAnimatedSkyBird)
             distanceSq = std::min(distanceSq, rendering::M2_SKY_BIRD_MAX_RENDER_DISTANCE * rendering::M2_SKY_BIRD_MAX_RENDER_DISTANCE);
-        frame.cullIds.push_back(inst.id);
-        frame.cullInput.push_back({glm::vec4(inst.cachedCullCenter, inst.cachedPaddedRadius), distanceSq,
-                                   (inst.cachedIsValid ? 1u : 0u) | (inst.cachedIsInvisibleTrap ? 4u : 0u) |
-                                   (inst.hizPrevCulledFrames < 2 && !inst.isGameObject ? 8u : 0u), {0.0f, 0.0f}});
+        frame.cullIds.push_back(r.id);
+        frame.cullIndices.push_back(index);
+        frame.cullInput.push_back({glm::vec4(r.cullCenter, r.paddedRadius), distanceSq,
+                                   ((r.flags & G::kValid) ? 1u : 0u) | ((r.flags & G::kInvisibleTrap) ? 4u : 0u) |
+                                   (r.culledFrames < 2 && !gameObject ? 8u : 0u), {0.0f, 0.0f}});
     }
 }
 
@@ -1006,6 +1013,7 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
 
     collectCullOutput(frameIndex);
     submittedCullIds_[frameIndex] = recording_->cullIds;
+    submittedCullIndices_[frameIndex] = recording_->cullIndices;
     submittedCullScenes_[frameIndex] = recording_->sceneIdentity;
     submittedCullFrames_[frameIndex] = vkCtx_->frameNumber();
 
@@ -1342,8 +1350,10 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
     // Emit only when the reason changes; this is opt-in, never per-frame noise.
     if (!m2BatchDiagModel().empty()) {
         static std::unordered_map<uint32_t, uint32_t> reasons;
-        for (const auto& inst : scene_->instances) {
+        for (size_t index = 0; index < scene_->instances.size(); ++index) {
+            const auto& inst = scene_->instances[index];
             if (!inst.cachedModel || !m2BatchDiagNames(*inst.cachedModel)) continue;
+            const bool lastCullVisible = scene_->cullGrid_.record(static_cast<uint32_t>(index)).lastVisible != 0;
             const float distanceSq=glm::dot(inst.position-camPos,inst.position-camPos);
             const float centreSq=glm::dot(inst.cachedCullCenter-camPos,inst.cachedCullCenter-camPos);
             const float effective=m2InstanceMaxDistSq(maxRenderDistanceSq,inst.cachedEffectiveMaxDistSqFactor,
@@ -1352,7 +1362,7 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
             const bool inFrustum=frustum.intersectsSphere(inst.cachedCullCenter,inst.cachedPaddedRadius);
             const uint32_t reason=(distanceSq>maxPossibleDistSq ? 1u:0u) |
                 (centreSq>maxPossibleDistSq ? 2u:0u) | (distanceSq>effective ? 4u:0u) |
-                (!inFrustum ? 8u:0u) | (!inst.lastCullVisible ? 16u:0u) | (inst.hidden ? 32u:0u) |
+                (!inFrustum ? 8u:0u) | (!lastCullVisible ? 16u:0u) | (inst.hidden ? 32u:0u) |
                 (!inst.cachedIsValid ? 64u:0u) | (inst.cachedIsInvisibleTrap ? 128u:0u) |
                 (inst.cachedModel->hasAnimation && !inst.cachedModel->disableAnimation && inst.boneMatrices.empty() ? 256u:0u);
             auto [at,inserted]=reasons.emplace(inst.id,reason);
@@ -1398,13 +1408,17 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
         auto& out = into[chunk];
         reserveGrowing(out.opaque, (end - begin) / 3);
         reserveGrowing(out.transparent, (end - begin) / 12);
+        using G = M2CullGrid;
+        const G& grid = scene_->cullGrid_;
         for (uint32_t k = begin; k < end; ++k) {
             const uint32_t i = list[k];
-            const auto& instance = scene_->instances[i];
+            // The tests read the instance's cull record; the instance itself
+            // only once it is kept.
+            const G::Record& r = grid.record(i);
             // A finished effect shows only the particles it has left. A
             // hidden one is in no column; this keeps it out of the walks
             // over every instance (forceNoCull_, the cull check) as well.
-            if (instance.finishing || instance.hidden) continue;
+            if (r.flags & (G::kFinishing | G::kHidden)) continue;
             float distSq;
             float effectiveMaxDistSq;
 
@@ -1412,42 +1426,42 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
             // the ambient doodad range down. The final range only culls geometry;
             // atmosphere handles the visible attenuation inside it.
             const float instanceMaxDistSq = rendering::m2InstanceMaxDistSq(
-                maxRenderDistanceSq, instance.cachedEffectiveMaxDistSqFactor,
-                instance.isGameObject, rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE,
+                maxRenderDistanceSq, r.maxDistSqFactor,
+                (r.flags & G::kGameObject) != 0, rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE,
                 cappedViewDistance(),
-                instance.cachedIsGroundDetail, groundDetailMaxDistance_);
+                (r.flags & G::kGroundDetail) != 0, groundDetailMaxDistance_);
 
             if (forceNoCull_) {
-                if (!instance.cachedIsValid) continue;
-                glm::vec3 toCam = instance.position - camPos;
+                if (!(r.flags & G::kValid)) continue;
+                glm::vec3 toCam = r.position - camPos;
                 distSq = glm::dot(toCam, toCam);
                 effectiveMaxDistSq = instanceMaxDistSq;
-            } else if (gpuCullAvailable && instance.cullVerdictSerial == verdictSerial) {
+            } else if (gpuCullAvailable && r.verdictSerial == verdictSerial) {
                 // Per-instance verdict scattered above - indexing visibility[]
                 // directly here would read the slot of whichever instance held
                 // this array position when the dispatch was recorded.
-                if (!instance.lastCullVisible) continue;
-                glm::vec3 toCam = instance.position - camPos;
+                if (!r.lastVisible) continue;
+                glm::vec3 toCam = r.position - camPos;
                 distSq = glm::dot(toCam, toCam);
                 effectiveMaxDistSq = instanceMaxDistSq;
             } else {
-                if (!instance.cachedIsValid || instance.cachedIsInvisibleTrap) continue;
-                glm::vec3 toCam = instance.position - camPos;
+                if (!(r.flags & G::kValid) || (r.flags & G::kInvisibleTrap)) continue;
+                glm::vec3 toCam = r.position - camPos;
                 distSq = glm::dot(toCam, toCam);
                 if (distSq > maxPossibleDistSq) continue;
                 effectiveMaxDistSq = instanceMaxDistSq;
                 if (distSq > effectiveMaxDistSq) continue;
-                float paddedRadius = instance.cachedPaddedRadius;
-                if (paddedRadius > 0.0f && !frustum.intersectsSphere(instance.cachedCullCenter, paddedRadius)) continue;
+                if (r.paddedRadius > 0.0f && !frustum.intersectsSphere(r.cullCenter, r.paddedRadius)) continue;
             }
 
-            if (instance.cachedIsSkyBird && instance.cachedHasAnimation && !instance.cachedDisableAnimation) {
+            if (r.flags & G::kAnimatedSkyBird) {
                 constexpr float kBirdMaxDistSq =
                     rendering::M2_SKY_BIRD_MAX_RENDER_DISTANCE *
                     rendering::M2_SKY_BIRD_MAX_RENDER_DISTANCE;
                 effectiveMaxDistSq = std::min(effectiveMaxDistSq, kBirdMaxDistSq);
                 if (distSq > effectiveMaxDistSq) continue;
             }
+            const auto& instance = scene_->instances[i];
 
             // A faded instance is drawn blended, all of it - see M2Instance::fade.
             const bool faded = instance.fade < 0.999f;
@@ -1634,7 +1648,9 @@ void M2Renderer::collectCullOutput(uint32_t frame) {
     if (!visibility) return;
     std::lock_guard<std::mutex> lock(cullResultMutex_);
     for (size_t k = 0; k < submittedCullIds_[frame].size(); ++k)
-        collectedCull_.push_back({submittedCullIds_[frame][k], visibility[k] != 0, submittedCullScenes_[frame], submittedCullFrames_[frame]});
+        collectedCull_.push_back({.id = submittedCullIds_[frame][k], .index = submittedCullIndices_[frame][k],
+                                  .visible = visibility[k] != 0, .sceneIdentity = submittedCullScenes_[frame],
+                                  .gpuFrame = submittedCullFrames_[frame]});
 }
 
 std::vector<CullAnswer> M2Renderer::takeCullAnswers() {
@@ -1646,14 +1662,20 @@ std::vector<CullAnswer> M2Renderer::takeCullAnswers() {
 
 void M2Renderer::acceptCullAnswers(const std::vector<CullAnswer>& answers) {
     ++cullVerdictSerial_;
+    auto& grid = scene_->cullGrid_;
     for (const auto& result : answers) {
         if (result.sceneIdentity != scene_->identity) continue;
-        const auto found = scene_->instanceIndexById.find(result.id);
-        if (found == scene_->instanceIndexById.end()) continue;
-        auto& inst = scene_->instances[found->second];
-        inst.cullVerdictSerial = cullVerdictSerial_;
-        inst.lastCullVisible = result.visible ? 1 : 0;
-        inst.hizPrevCulledFrames = result.visible ? 0 : std::min(inst.hizPrevCulledFrames + 1u, 3u);
+        // Where it was when it was culled; a removal since may have moved it.
+        uint32_t index = result.index;
+        if (index >= grid.size() || grid.record(index).id != result.id) {
+            const auto found = scene_->instanceIndexById.find(result.id);
+            if (found == scene_->instanceIndexById.end()) continue;
+            index = static_cast<uint32_t>(found->second);
+        }
+        auto& record = grid.record(index);
+        record.verdictSerial = cullVerdictSerial_;
+        record.lastVisible = result.visible ? 1 : 0;
+        record.culledFrames = static_cast<uint8_t>(result.visible ? 0 : std::min(record.culledFrames + 1u, 3u));
     }
 }
 
@@ -1661,7 +1683,7 @@ void M2Renderer::Frame::clear() noexcept {
     drawInstances_.clear(); sortedVisible_.clear(); transparentVisible_.clear();
     glowSprites_.clear(); ribbonDraws_.clear(); particleRuns_.clear();
     ribbonVertices.clear(); particleVertices.clear(); bones.clear();
-    cullInput.clear(); cullIds.clear(); depth.clear(); solarDepth.clear(); strikeDepth.clear();
+    cullInput.clear(); cullIds.clear(); cullIndices.clear(); depth.clear(); solarDepth.clear(); strikeDepth.clear();
     instanceEntries = 0;
     solarMatrix = overheadMatrix = strikeMatrix = glm::mat4(0.0f);
 }

@@ -131,7 +131,8 @@ void M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
         const M2ModelGPU* model = inst.cachedModel;
         if (!model || model->lights.empty() || !inst.cachedIsValid) continue;
         const glm::vec3 toCam = inst.position - cameraPos;
-        if (!inst.lastCullVisible && glm::dot(toCam, toCam) > kNearDoodadSq) continue;
+        const bool culled = !scene_->cullGrid_.record(static_cast<uint32_t>(index)).lastVisible;
+        if (culled && glm::dot(toCam, toCam) > kNearDoodadSq) continue;
 
         for (const auto& light : model->lights) {
             if (light.type != 1) {
@@ -1301,10 +1302,12 @@ bool M2Renderer::makeModelWritable(uint32_t modelId) {
     }
     retireMaterials(current);
     current = std::move(next);
-    for (auto& inst : scene_->instances) if (inst.modelId == modelId) {
+    for (size_t i = 0; i < scene_->instances.size(); ++i) {
+        auto& inst = scene_->instances[i];
+        if (inst.modelId != modelId) continue;
         inst.cachedModel = current.get();
         inst.recomputeCachedCullFactors();
-        fileInCullGrid(inst);
+        fileInCullGrid(i);
     }
     return true;
 }

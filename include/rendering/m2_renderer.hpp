@@ -423,21 +423,7 @@ struct M2Instance {
     float cachedPaddedRadius = 0.0f;              // sphere radius used by the cull compute
     const M2ModelGPU* cachedModel = nullptr;  // Avoid per-frame hash lookups
 
-    // Result of the most recent GPU cull dispatch that actually covered this
-    // instance, matched back by instance ID (never by array index - see
-    // cullSubmittedIds_).  Defaults to visible so an instance created after the
-    // in-flight dispatch draws immediately instead of waiting ~2 frames for its
-    // first cull result.
-    uint8_t lastCullVisible = 1;
-    // Consecutive frames this instance has been culled (capped at 3), used for
-    // the HiZ `previouslyVisible` hysteresis.  Defaults to 2 ("not recently
-    // visible") so a freshly spawned instance skips the HiZ test rather than
-    // being judged against depth data that never contained it.
-    uint8_t hizPrevCulledFrames = 2;
-    // Which render() call last scattered a GPU verdict onto this instance.
-    // Only a verdict from the call reading it counts: the dispatch covers the
-    // instances the camera's columns held then, not a fixed prefix of the array.
-    uint32_t cullVerdictSerial = 0;
+    // The GPU cull's verdict on it is the cull's own: M2CullGrid::Record.
     // Server game object (mailbox, chest, node, door): exempt from the adaptive
     // ambient-doodad distance, which collapses to ~200 units in a city and hid
     // interactable objects long before the server stopped sending them.
@@ -1305,9 +1291,10 @@ private:
 
     /// Instances by 64-yard column, for the view and shadow passes to reject
     /// whole regions before looking at any instance in them. See M2CullGrid.
-    /// Files (or refiles) an instance in cullGrid_ from its current position
-    /// and cull data. Called wherever those change.
-    void fileInCullGrid(const M2Instance& instance);
+    /// Writes instance `index`'s cull record from the instance and files it
+    /// in its column (M2CullGrid::Record): wherever its position, cull data,
+    /// model, hidden or finished state, or game-object flag change.
+    void fileInCullGrid(size_t index);
     /// Indices of the instances in the columns this camera may see within
     /// maxPossibleDistSq. Every instance the per-instance view test would keep
     /// is among them.
@@ -1692,6 +1679,9 @@ public:
         std::vector<glm::mat4> bones;
         std::vector<CullInstanceGPU> cullInput;
         std::vector<uint32_t> cullIds;
+        /// Where each was in the instance list, as a hint: checked against
+        /// its id when the verdict comes back.
+        std::vector<uint32_t> cullIndices;
         std::vector<ShadowDraw> depth, solarDepth, strikeDepth;
         glm::mat4 solarMatrix{0.0f}, overheadMatrix{0.0f}, strikeMatrix{0.0f};
         float maxPossibleDistSq = 0, time = 0;
@@ -1706,6 +1696,7 @@ private:
     std::mutex cullResultMutex_;
     std::vector<CullAnswer> collectedCull_;
     std::vector<uint32_t> submittedCullIds_[2];
+    std::vector<uint32_t> submittedCullIndices_[2];
     uint64_t submittedCullScenes_[2]{};
     uint64_t submittedCullFrames_[2]{};
 

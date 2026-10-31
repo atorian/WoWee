@@ -16,6 +16,8 @@ struct FrameStage {
 
 struct CullAnswer {
     uint32_t id = 0;
+    /// Its place in the renderer's instance list when it was culled.
+    uint32_t index = 0;
     bool visible = false;
     uint64_t sceneIdentity = 0, gpuFrame = 0;
 };
