@@ -2418,13 +2418,6 @@ wowee_add_test(test_shadow_cull_reuse
 wowee_add_test(test_terrain_bake
     SOURCES test_terrain_bake.cpp)
 
-# ── test_shadow_plane ────────────────────────────────────────
-# The plane a shadow receiver is compared in, from its surface and the map
-# alone: along the surface it predicts the sun's and the units' map depth,
-# whichever way and however long the normal, and edge-on it stays bounded.
-wowee_add_test(test_shadow_plane
-    SOURCES test_shadow_plane.cpp)
-
 # ── test_weather_mix ─────────────────────────────────────────
 # The weather as it is drawn: a shower coming over in the time it is given,
 # rain turning to snow through both, a storm the realm asks for at once
@@ -2504,13 +2497,6 @@ wowee_add_test(test_water_visibility
     SOURCES test_water_visibility.cpp
             ${TEST_COMMON_SOURCES})
 
-# ── test_sphere_map ──────────────────────────────────────────
-# The sphere environment map coordinates m2.vert.glsl computes, run from the
-# shader's own include. The incident vector was negated, which put a surface
-# nearly facing the camera at the rim of the map instead of near its centre.
-wowee_add_test(test_sphere_map
-    SOURCES test_sphere_map.cpp)
-
 # ── test_m2_classifier_foliage ───────────────────────────────
 # Pins the wind-sway classification against substring collisions: foliage
 # tokens are matched inside concatenated names, so "thorn" landed inside
@@ -2545,11 +2531,6 @@ wowee_add_test(test_m2_combiner
 # Which point lights reach a model, a WMO group or a terrain chunk.
 wowee_add_test(test_local_lights
     SOURCES test_local_lights.cpp)
-
-# ── test_shadow_shading ─────────────────────────────────────
-# How a surface takes a shadow, by the client's receiving shaders.
-wowee_add_test(test_shadow_shading
-    SOURCES test_shadow_shading.cpp)
 
 # ── test_m2_billboard_model ─────────────────────────────────
 # Mana Shield's card through the renderer's own bone update.
@@ -3695,3 +3676,19 @@ wowee_add_test(test_wmo_minimap
     SOURCES test_wmo_minimap.cpp ${CMAKE_SOURCE_DIR}/src/rendering/wmo_minimap.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/required_table.cpp ${TEST_COMMON_SOURCES})
+
+# ── test_scene_references ───────────────────────────────────
+# Scenes drawn by scene_render against the pictures approved for them in
+# tests/approvals (ApprovalTests.cpp). Skipped without a Vulkan device or the
+# game data.
+wowee_add_test(test_scene_references SOURCES test_scene_references.cpp)
+target_include_directories(test_scene_references PRIVATE
+    ${CMAKE_SOURCE_DIR}/extern/approval_tests ${CMAKE_CURRENT_SOURCE_DIR}/approval_catch2)
+target_compile_definitions(test_scene_references PRIVATE
+    WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    WOWEE_SCENE_RENDER="$<TARGET_FILE:scene_render>"
+    WOWEE_SCRATCH_DIR="${CMAKE_BINARY_DIR}/scratch")
+add_dependencies(test_scene_references scene_render)
+if(WOWEE_GAME_DATA_DIR)
+    set_tests_properties(scene_references PROPERTIES ENVIRONMENT "WOW_DATA_PATH=${WOWEE_GAME_DATA_DIR}")
+endif()

@@ -260,7 +260,8 @@ static bool writeWhmWot(const pipeline::ADTTerrain& terrain,
 bool emitTerrainFromAdt(const std::string& adtPath, const std::string& outBase) {
     auto bytes = readBytes(adtPath);
     if (bytes.empty()) return false;
-    auto terrain = pipeline::ADTLoader::load(bytes);
+    const auto terrainTile = pipeline::ADTLoader::load(bytes);
+    auto& terrain = *terrainTile;
     if (!terrain.loaded) return false;
 
     // Parse "<map>_<x>_<y>.adt" tile coords from the filename so the WOT

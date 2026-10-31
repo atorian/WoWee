@@ -941,7 +941,7 @@ void EditorApp::loadADT(const std::string& mapName, int tileX, int tileY) {
             return;
         }
 
-        terrain_ = pipeline::ADTLoader::load(adtData);
+        terrain_ = std::move(*pipeline::ADTLoader::load(adtData));
         if (!terrain_.isLoaded()) {
             LOG_ERROR("Failed to parse ADT: ", path.str());
             showToast("Failed to load zone (corrupt or unsupported format)");

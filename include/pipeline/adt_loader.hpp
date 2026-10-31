@@ -1,6 +1,7 @@
 #pragma once
 
 #include <span>
+#include <memory>
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -186,7 +187,8 @@ public:
      * @param adtData Raw ADT file data
      * @return Loaded terrain (check isLoaded())
      */
-    static ADTTerrain load(const std::vector<uint8_t>& adtData);
+    /// Never null; an ADT that does not parse comes back not `loaded`.
+    static std::unique_ptr<ADTTerrain> load(const std::vector<uint8_t>& adtData);
 
 private:
     // Chunk identifiers (as they appear in file when read as little-endian uint32)
