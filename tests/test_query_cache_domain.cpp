@@ -54,13 +54,6 @@ std::vector<uint8_t> creatureResponse(uint32_t entry, const std::string& name, u
         .u32(0).u32(7).u32(0).u32(rank).bytes();
 }
 
-/// SMSG_GAMEOBJECT_QUERY_RESPONSE as 3.3.5a writes it, a plain sign (type 5).
-std::vector<uint8_t> gameObjectResponse(uint32_t entry, const std::string& name) {
-    Body b;
-    b.u32(entry).u32(5).u32(0xD15).cstr(name).cstr("").cstr("").cstr("").cstr("").cstr("").cstr("");
-    for (int i = 0; i < 24; ++i) b.u32(0);
-    return b.bytes();
-}
 }  // namespace
 
 TEST_CASE("a player's name is asked for once, and not again once it is known", "[querycache][harness]") {
@@ -156,7 +149,7 @@ TEST_CASE("a game object template names the objects of it in view", "[querycache
     h.pump();
     REQUIRE(sent(h, Opcode::CMSG_GAMEOBJECT_QUERY) == 1);
 
-    h.receive(Opcode::SMSG_GAMEOBJECT_QUERY_RESPONSE, gameObjectResponse(1234, "Wanted Poster"));
+    h.receive(Opcode::SMSG_GAMEOBJECT_QUERY_RESPONSE, GameHarness::gameObjectTemplateBody(1234, 5, "Wanted Poster"));
     h.pump();
     auto sign = h.game().getEntityManager().getEntity(kSign);
     REQUIRE(sign);

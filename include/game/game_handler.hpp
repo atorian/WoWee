@@ -344,6 +344,9 @@ public:
     std::string creatureName(uint32_t entry) const override { return queryCacheHandler_->getCachedCreatureName(entry); }
     void requestCreatureInfo(uint32_t entry) override { queryCacheHandler_->queryCreatureInfo(entry, 0); }
     void requestGameObjectInfo(uint32_t entry) override { queryCacheHandler_->queryGameObjectInfo(entry, 0); }
+    void requestGameObjectInfo(uint32_t entry, uint64_t guid) override {
+        queryCacheHandler_->queryGameObjectInfo(entry, guid);
+    }
     void vendorCanRepair() override { inventoryHandler_->setVendorCanRepair(true); }
     void openedStableMaster(uint64_t npcGuid) override;
 

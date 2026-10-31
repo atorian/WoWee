@@ -83,14 +83,10 @@ void EntityController::registerOpcodes(DispatchTable& table) {
         if (inWorldOrEntering()) handleDestroyObject(packet);
     };
 
-    table[Opcode::SMSG_GAMEOBJECT_PAGETEXT] = [this](network::Packet& packet) {
-        handleGameObjectPageText(packet);
-    };
 }
 
 void EntityController::clearAll() {
     pendingUpdateObjectWork_.clear();
-    pendingPageTextGuids_.clear();
     transportGuids_.clear();
     serverUpdatedTransportGuids_.clear();
     entityManager.clear();
@@ -1847,80 +1843,7 @@ void EntityController::gameObjectNamed(const GameObjectQueryResponseData& data) 
         auto go = std::static_pointer_cast<GameObject>(entity);
         if (go->getEntry() == data.entry) go->setName(data.name);
     }
-
-    // A sign somebody clicked while this was in flight: the click was
-    // kept rather than dropped, so it is answered now.
-    if (!pendingPageTextGuids_.empty()) {
-        std::vector<uint64_t> ready;
-        for (uint64_t waiting : pendingPageTextGuids_) {
-            auto entity = entityManager.getEntity(waiting);
-            if (!entity || entity->getType() != ObjectType::GAMEOBJECT) {
-                ready.push_back(waiting);   // gone; drop it
-                continue;
-            }
-            if (std::static_pointer_cast<GameObject>(entity)->getEntry() == data.entry) {
-                ready.push_back(waiting);
-            }
-        }
-        for (uint64_t guid : ready) {
-            pendingPageTextGuids_.erase(guid);
-            if (entityManager.getEntity(guid)) showGameObjectPageText(guid);
-        }
-    }
 }
-
-void EntityController::handleGameObjectPageText(network::Packet& packet) {
-    if (!packet.hasRemaining(8)) return;
-    showGameObjectPageText(packet.readUInt64());
-}
-
-void EntityController::showGameObjectPageText(uint64_t guid) {
-    auto entity = entityManager.getEntity(guid);
-    if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return;
-
-    auto go = std::static_pointer_cast<GameObject>(entity);
-    uint32_t entry = go->getEntry();
-    if (entry == 0) return;
-
-    const GameObjectQueryResponseData* cached = owner_.queryCache().getCachedGameObjectInfo(entry);
-    if (!cached) {
-        pendingPageTextGuids_.insert(guid);
-        owner_.queryCache().queryGameObjectInfo(entry, guid);
-        LOG_WARNING("Read object 0x", std::hex, guid, std::dec, " entry=", entry,
-                    ": no metadata yet, asked for it and will read when it lands");
-        return;
-    }
-
-    const GameObjectQueryResponseData& info = *cached;
-    uint32_t pageId = 0;
-    // AzerothCore layout:
-    // type 9 (TEXT): data[0]=pageID
-    // type 10 (GOOBER): data[7]=pageId
-    // The backing sits two words behind the page in both layouts, which is the
-    // whole of what tells a stone tablet from a parchment letter on screen.
-    uint32_t pageMaterial = 0;
-    if (info.type == 9)       { pageId = info.data[0]; pageMaterial = info.data[2]; }
-    else if (info.type == 10) { pageId = info.data[7]; pageMaterial = info.data[9]; }
-
-    // At warning, because this is the whole of why a sign says nothing: the
-    // type decides where the page id is, and an object that is not a 9 or a 10
-    // has none to find. The default log carries warnings only, so an INFO line
-    // here answers nobody.
-    LOG_WARNING("Read object '", info.name, "' entry=", entry, " type=", info.type,
-                " pageId=", pageId, " hasData=", info.hasData);
-
-    if (pageId != 0 && owner_.getSocket() && owner_.getState() == WorldState::IN_WORLD) {
-        owner_.inventory().beginBook(info.name, pageMaterial);  // a fresh book for this interaction
-        auto req = PageTextQueryPacket::build(pageId, guid);
-        owner_.getSocket()->send(req);
-        return;
-    }
-
-    if (!info.name.empty()) {
-        owner_.chat().addSystemChatMessage(info.name);
-    }
-}
-
 
 } // namespace game
 } // namespace wowee

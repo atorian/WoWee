@@ -343,6 +343,11 @@ uint64_t targetGuidForUseItem(const InventoryQueries& owner, const ItemQueryResp
 // ============================================================
 
 void InventoryHandler::registerOpcodes(DispatchTable& table) {
+    // The server offering a page of a game object.
+    table[Opcode::SMSG_GAMEOBJECT_PAGETEXT] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(8)) return;
+        readGameObject(packet.readUInt64());
+    };
     // ---- Item query response ----
     table[Opcode::SMSG_ITEM_QUERY_SINGLE_RESPONSE] = [this](network::Packet& packet) { handleItemQueryResponse(packet); };
     table[Opcode::SMSG_ITEM_QUERY_MULTIPLE_RESPONSE] = [this](network::Packet& packet) { handleItemQueryResponse(packet); };
@@ -4836,6 +4841,74 @@ void InventoryHandler::applyServerMoney(uint64_t copper) {
 // ============================================================
 // Books
 // ============================================================
+
+void InventoryHandler::readGameObject(uint64_t guid) {
+    auto entity = queries_.entities().getEntity(guid);
+    if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return;
+
+    auto go = std::static_pointer_cast<GameObject>(entity);
+    uint32_t entry = go->getEntry();
+    if (entry == 0) return;
+
+    const GameObjectQueryResponseData* cached = queries_.gameObjectInfo(entry);
+    if (!cached) {
+        held_.pendingReads.insert(guid);
+        queries_.requestGameObjectInfo(entry, guid);
+        LOG_WARNING("Read object 0x", std::hex, guid, std::dec, " entry=", entry,
+                    ": no metadata yet, asked for it and will read when it lands");
+        return;
+    }
+
+    const GameObjectQueryResponseData& info = *cached;
+    uint32_t pageId = 0;
+    // AzerothCore layout:
+    // type 9 (TEXT): data[0]=pageID
+    // type 10 (GOOBER): data[7]=pageId
+    // The backing sits two words behind the page in both layouts, which is the
+    // whole of what tells a stone tablet from a parchment letter on screen.
+    uint32_t pageMaterial = 0;
+    if (info.type == 9)       { pageId = info.data[0]; pageMaterial = info.data[2]; }
+    else if (info.type == 10) { pageId = info.data[7]; pageMaterial = info.data[9]; }
+
+    // At warning, because this is the whole of why a sign says nothing: the
+    // type decides where the page id is, and an object that is not a 9 or a 10
+    // has none to find. The default log carries warnings only, so an INFO line
+    // here answers nobody.
+    LOG_WARNING("Read object '", info.name, "' entry=", entry, " type=", info.type,
+                " pageId=", pageId, " hasData=", info.hasData);
+
+    if (pageId != 0 && sender_.characterInWorld()) {
+        beginBook(info.name, pageMaterial);  // a fresh book for this interaction
+        sender_.send(PageTextQueryPacket::build(pageId, guid));
+        return;
+    }
+
+    if (!info.name.empty()) {
+        chat_.addSystemChatMessage(info.name);
+    }
+}
+
+void InventoryHandler::gameObjectTemplateArrived(const GameObjectQueryResponseData& data) {
+    // A sign somebody clicked while this was in flight: the click was
+    // kept rather than dropped, so it is answered now.
+    if (!held_.pendingReads.empty()) {
+        std::vector<uint64_t> ready;
+        for (uint64_t waiting : held_.pendingReads) {
+            auto entity = queries_.entities().getEntity(waiting);
+            if (!entity || entity->getType() != ObjectType::GAMEOBJECT) {
+                ready.push_back(waiting);   // gone; drop it
+                continue;
+            }
+            if (std::static_pointer_cast<GameObject>(entity)->getEntry() == data.entry) {
+                ready.push_back(waiting);
+            }
+        }
+        for (uint64_t guid : ready) {
+            held_.pendingReads.erase(guid);
+            if (queries_.entities().getEntity(guid)) readGameObject(guid);
+        }
+    }
+}
 
 void InventoryHandler::beginBook(std::string title, uint32_t material) {
     held_.bookPages.clear();

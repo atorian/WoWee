@@ -1186,6 +1186,7 @@ void GameHandler::creatureTemplateArrived(const CreatureQueryResponseData& data)
 
 void GameHandler::gameObjectTemplateArrived(const GameObjectQueryResponseData& data) {
     entityController_->gameObjectNamed(data);
+    inventoryHandler_->gameObjectTemplateArrived(data);
     // And the same for an objective that names this one - a chest to open
     // rather than a creature to kill.
     questHandler_->objectiveTargetNamed(data.entry, true);
@@ -1810,7 +1811,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
         // for a type 9 the server has nothing to offer, the page id being in
         // the object's own data where the real client reads it from. Stormwind
         // is full of signs that answered a click with silence.
-        entityController_->showGameObjectPageText(guid);
+        inventoryHandler_->readGameObject(guid);
     }
 
     // CMSG_GAMEOBJ_REPORT_USE triggers GO AI scripts (SmartAI, ScriptAI) which

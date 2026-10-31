@@ -156,6 +156,10 @@ public:
     /// A gossip or quest window is on screen.
     [[nodiscard]] virtual bool npcDialogOpen() const = 0;
     virtual void closeGossip() = 0;
+    /// A game object's template; null until the realm has said it.
+    [[nodiscard]] virtual const GameObjectQueryResponseData* gameObjectInfo(uint32_t entry) const = 0;
+    /// Ask for a game object's template, for the object `guid`.
+    virtual void requestGameObjectInfo(uint32_t entry, uint64_t guid) = 0;
     /// Whether a quest in the log asks for this item.
     [[nodiscard]] virtual bool questWantsItem(uint32_t itemId) const = 0;
     /// Run a line of the interface's own Lua.
@@ -393,6 +397,17 @@ public:
     /// A new book is opened - an item read, an object used - before its first
     /// page is asked for. SMSG_PAGE_TEXT_QUERY_RESPONSE fills it, here.
     void beginBook(std::string title, uint32_t material);
+    /// Read what is written on a game object: a sign, a plaque, a gravestone.
+    ///
+    /// Public because the click is where this starts. SMSG_GAMEOBJECT_PAGETEXT
+    /// is the server *offering* a page, which not every server sends and no
+    /// server sends for a plain sign - the real client reads the page id out of
+    /// the object's own data and asks for the text itself. Both ends arrive
+    /// here.
+    void readGameObject(uint64_t guid);
+    /// A game object template arrived: a sign clicked before it came is read
+    /// now.
+    void gameObjectTemplateArrived(const GameObjectQueryResponseData& data);
 
     // ---- Refunds -------------------------------------------------------------
 
@@ -757,6 +772,14 @@ private:
         std::vector<BookPage> bookPages;
         std::string bookTitle;
         uint32_t bookMaterial = 0;
+        /// Objects clicked to be read before their template arrived.
+        ///
+        /// The page id lives in the query response, so a sign clicked in the
+        /// first moments after it spawns has nothing to read from yet. The
+        /// click is kept here and answered when the response lands, rather
+        /// than dropped - which is a sign that does nothing the first time it
+        /// is clicked and works the second.
+        std::unordered_set<uint64_t> pendingReads;
         std::unordered_map<uint64_t, ItemRefundInfo> itemRefundInfo;
         /// Items whose refund has been asked about, so it is asked once.
         std::set<uint64_t> itemRefundAsked;

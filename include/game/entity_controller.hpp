@@ -53,7 +53,7 @@ public:
     /// and the frames showing one redraw its classification.
     void creatureNamed(const CreatureQueryResponseData& data);
     /// A game object template arrived: every object of it in view takes its
-    /// name, and a sign clicked before it came is read now.
+    /// name.
     void gameObjectNamed(const GameObjectQueryResponseData& data);
 
     // --- Transport GUID tracking ---
@@ -75,14 +75,6 @@ private:
     // --- Entity tracking ---
     EntityManager entityManager;              // Manages all entities in view
 
-    /// Objects clicked to be read before their metadata arrived.
-    ///
-    /// The page id lives in the query response, so a sign clicked in the first
-    /// moments after it spawns has nothing to read from yet. The click is kept
-    /// here and answered when the response lands, rather than dropped - which
-    /// is a sign that does nothing the first time it is clicked and works the
-    /// second.
-    std::unordered_set<uint64_t> pendingPageTextGuids_;
 
     // --- Update Object work queue ---
     struct PendingUpdateObjectWork {
@@ -103,17 +95,7 @@ private:
     void handleUpdateObject(network::Packet& packet);
     void handleCompressedUpdateObject(network::Packet& packet);
     void handleDestroyObject(network::Packet& packet);
-    void handleGameObjectPageText(network::Packet& packet);
 
-public:
-    /// Read what is written on a game object: a sign, a plaque, a gravestone.
-    ///
-    /// Public because the click is where this starts. SMSG_GAMEOBJECT_PAGETEXT
-    /// is the server *offering* a page, which not every server sends and no
-    /// server sends for a plain sign - the real client reads the page id out of
-    /// the object's own data and asks for the text itself. Both ends arrive
-    /// here.
-    void showGameObjectPageText(uint64_t guid);
 
 private:
 

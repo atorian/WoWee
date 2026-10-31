@@ -511,6 +511,16 @@ void GameHarness::playerInView() {
     game_->getEntityManager().addEntity(guid, std::make_shared<game::Player>(guid));
 }
 
+std::vector<uint8_t> GameHarness::gameObjectTemplateBody(uint32_t entry, uint32_t type,
+                                                         const std::string& name,
+                                                         const std::array<uint32_t, 24>& data) {
+    Body b;
+    // display id, the four names, then icon, cast bar caption and unk1.
+    b.u32(entry).u32(type).u32(0xD15).cstr(name).cstr("").cstr("").cstr("").cstr("").cstr("").cstr("");
+    for (uint32_t word : data) b.u32(word);
+    return b.bytes();
+}
+
 std::vector<uint8_t> GameHarness::nameResponseBody(uint64_t guid, const std::string& name) {
     return Body().packedGuid(guid).u8(0 /* found */).cstr(name).cstr("").u8(2).u8(0).u8(7);
 }
