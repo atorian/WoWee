@@ -3577,17 +3577,21 @@ target_link_libraries(test_wmo_minimap PRIVATE wowee_pipeline wowee_render)
 # game data.
 # Built as wowee_add_test builds a test, but entered into ctest once per
 # scene, so the scenes draw side by side under -j rather than one after
-# another in a single entry.
+# another in a single entry - two at a time, no more (AGENTS.md): each scene
+# takes one of two locks in turn, and a lock's scenes draw one after another.
 add_executable(test_scene_references test_scene_references.cpp)
 target_include_directories(test_scene_references PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_scene_references SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_scene_references PRIVATE catch2_main)
 wowee_test_link_glm(test_scene_references)
 register_test_target(test_scene_references)
-foreach(_scene IN ITEMS "water wake" "shadows" "sphere map" "ray traced lighting" "ocean")
+set(_scene_lane 0)
+foreach(_scene IN ITEMS "water wake" "shadows" "sphere map" "ray traced lighting" "sea bed" "ocean")
     string(REPLACE " " "_" _scene_name "${_scene}")
     add_test(NAME scene_reference_${_scene_name} COMMAND test_scene_references "${_scene}")
-    set_tests_properties(scene_reference_${_scene_name} PROPERTIES SKIP_RETURN_CODE 4)
+    set_tests_properties(scene_reference_${_scene_name} PROPERTIES SKIP_RETURN_CODE 4
+        RESOURCE_LOCK scene_render_${_scene_lane})
+    math(EXPR _scene_lane "1 - ${_scene_lane}")
     if(WOWEE_GAME_DATA_DIR)
         set_tests_properties(scene_reference_${_scene_name} PROPERTIES
             ENVIRONMENT "WOW_DATA_PATH=${WOWEE_GAME_DATA_DIR}")

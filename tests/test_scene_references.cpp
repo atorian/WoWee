@@ -101,3 +101,13 @@ TEST_CASE("ocean", "[scene][water]") {
     draw("ocean.json", picture);
     verifyPicture(picture);
 }
+
+TEST_CASE("sea bed", "[scene][water]") {
+    // Booty Bay's harbour under a strong wind: the waves lie down where the
+    // bed comes up to the quays and the shore, and run long where the fetch
+    // to the shore upwind lets the wind raise them. Streamed: its tiles and
+    // models load in a different order every run, and draw the same.
+    const fs::path picture = fs::path(WOWEE_SCRATCH_DIR) / "scene_references" / "sea_bed.png";
+    draw("sea_bed.json", picture);
+    verifyPicture(picture);
+}

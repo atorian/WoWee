@@ -206,6 +206,9 @@ built shaders and the rest of `assets/` into `build-dev/bin`, where it loads
 them from - build it before every run. Use it before reaching for the client,
 and keep it building: nothing in `wowee_render` may need the game to link.
 
+User decision (2026-10-31): at most two `scene_render` runs at once. Six in
+parallel overloaded the Mac. To compare runs, render two, then two more.
+
 ### Testing the game without the client
 
 `tests/game_harness.hpp` (`GameHarness`) runs the real `GameHandler` from

@@ -1,0 +1,38 @@
+// Booty Bay's harbour from its docks: the water over the quays and the
+// ground shallow and lit through to the bed, the water under the ships'
+// hulls deep - a hull is not the bed.
+{
+  "map": "Azeroth",
+  "mapId": 0,
+  "zoneId": 33,
+  "hour": 13.0,
+  "server": [
+    -14297.0,
+    530.0,
+    8.7
+  ],
+  "terrain": true,
+  "camera": {
+    "offset": [
+      0,
+      0,
+      14
+    ],
+    "yaw": 220,
+    "pitch": -25
+  },
+  "size": [
+    1024,
+    576
+  ],
+  "frames": 300,
+  "clouds": false,
+  "bloom": 0,
+  "sunShafts": false,
+  "volumetricFog": 0,
+  "wind": {
+    "direction": 0.0,
+    "speed": 9.0
+  },
+  "settleFrames": 20000
+}
