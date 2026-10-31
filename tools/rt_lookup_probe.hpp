@@ -6,10 +6,12 @@
 // GPU regression for the surface consumer, separate from rt_probe's tracing
 // checks. A foreground mask is the silhouette in the previous frame. Queries
 // cover its shifted edge, uncovered background, a sloping receiver, and places
-// where no matching surface exists. Uses the actual rt_lighting.glsli lookup.
+// where no matching surface exists. Uses the actual rt_lighting.glsli lookup,
+// with the other surfaces found by the actual rt_seed.comp from the same frame.
 inline int checkRtLookup(wowee::rendering::VkContext& ctx, bool benchmark = false,
                          const char* shaderPath = "assets/shaders/rt_lookup_probe.comp.spv",
-                         const char* workload = "mixed") {
+                         const char* workload = "mixed",
+                         const char* seedShaderPath = "assets/shaders/rt_seed.comp.spv") {
     using namespace wowee::rendering;
     constexpr uint32_t size = 64;
     struct Sample { glm::vec4 point, settings, normal{0.0f}; };
@@ -58,7 +60,7 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx, bool benchmark = fals
     auto output = createBuffer(alloc, sizeof(Result) * samples.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                VMA_MEMORY_USAGE_CPU_ONLY);
     const size_t imageBytes = size * size * sizeof(glm::vec4);
-    auto upload = createBuffer(alloc, imageBytes * 2, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+    auto upload = createBuffer(alloc, imageBytes * 3, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                VMA_MEMORY_USAGE_CPU_TO_GPU);
     std::memcpy(input.info.pMappedData, samples.data(), sizeof(Sample) * samples.size());
     auto* texels = static_cast<glm::vec4*>(upload.info.pMappedData);
@@ -76,6 +78,8 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx, bool benchmark = fals
                 texels[i] = glm::vec4(.2f + .01f * x, .1f + .01f * x, 0, 30);
                 texels[size * size + i] = glm::vec4(.02f, .03f, .04f, 1) * (.1f + .01f * x);
             }
+            // The tracer's G-buffer: a +Z normal and the distance.
+            texels[2 * size * size + i] = glm::vec4(0, 0, texels[i].w, 0);
         }
     }
     vmaFlushAllocation(alloc, input.allocation, 0, VK_WHOLE_SIZE);
@@ -83,6 +87,9 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx, bool benchmark = fals
     const auto usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     auto light = createImage(dev, alloc, size, size, VK_FORMAT_R32G32B32A32_SFLOAT, usage);
     auto gi = createImage(dev, alloc, size, size, VK_FORMAT_R32G32B32A32_SFLOAT, usage);
+    auto gbuf = createImage(dev, alloc, size, size, VK_FORMAT_R32G32B32A32_SFLOAT, usage);
+    auto seeds = createImage(dev, alloc, size, size, VK_FORMAT_R16G16B16A16_SFLOAT,
+                             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
     VkSampler sampler = VK_NULL_HANDLE;
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
@@ -95,6 +102,7 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx, bool benchmark = fals
         VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         VkDescriptorSetLayoutBinding{7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        VkDescriptorSetLayoutBinding{12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
     };
     VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayoutCreateInfo slci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
@@ -115,13 +123,36 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx, bool benchmark = fals
     const auto pipelineStatus = vkCreateComputePipelines(dev, ctx.getPipelineCache(), 1, &pci, nullptr, &pipeline);
     shader.destroy();
     if (pipelineStatus != VK_SUCCESS) return 1;
+
+    // The other surfaces, found from the G-buffer the way RtLighting finds them.
+    const std::array seedBindings{
+        VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        VkDescriptorSetLayoutBinding{18, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+    };
+    VkDescriptorSetLayout seedSetLayout = VK_NULL_HANDLE;
+    slci.bindingCount = uint32_t(seedBindings.size());
+    slci.pBindings = seedBindings.data();
+    if (vkCreateDescriptorSetLayout(dev, &slci, nullptr, &seedSetLayout) != VK_SUCCESS) return 1;
+    VkPipelineLayout seedLayout = VK_NULL_HANDLE;
+    plci.pSetLayouts = &seedSetLayout;
+    if (vkCreatePipelineLayout(dev, &plci, nullptr, &seedLayout) != VK_SUCCESS) return 1;
+    wowee::rendering::VkShaderModule seedShader;
+    if (!seedShader.loadFromFile(dev, seedShaderPath)) return 1;
+    VkPipeline seedPipeline = VK_NULL_HANDLE;
+    pci.stage = seedShader.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
+    pci.layout = seedLayout;
+    const auto seedStatus = vkCreateComputePipelines(dev, ctx.getPipelineCache(), 1, &pci, nullptr, &seedPipeline);
+    seedShader.destroy();
+    if (seedStatus != VK_SUCCESS) return 1;
+
     const std::array poolSizes{
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2},
-        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 5},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1},
     };
     VkDescriptorPool pool = VK_NULL_HANDLE;
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpci.maxSets = 1;
+    dpci.maxSets = 2;
     dpci.poolSizeCount = uint32_t(poolSizes.size());
     dpci.pPoolSizes = poolSizes.data();
     if (vkCreateDescriptorPool(dev, &dpci, nullptr, &pool) != VK_SUCCESS) return 1;
@@ -131,6 +162,9 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx, bool benchmark = fals
     dsai.descriptorSetCount = 1;
     dsai.pSetLayouts = &setLayout;
     if (vkAllocateDescriptorSets(dev, &dsai, &set) != VK_SUCCESS) return 1;
+    VkDescriptorSet seedSet = VK_NULL_HANDLE;
+    dsai.pSetLayouts = &seedSetLayout;
+    if (vkAllocateDescriptorSets(dev, &dsai, &seedSet) != VK_SUCCESS) return 1;
     const std::array bufferInfos{
         VkDescriptorBufferInfo{input.buffer, 0, VK_WHOLE_SIZE},
         VkDescriptorBufferInfo{output.buffer, 0, VK_WHOLE_SIZE},
@@ -138,10 +172,10 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx, bool benchmark = fals
     const std::array imageInfos{
         VkDescriptorImageInfo{sampler, light.imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
         VkDescriptorImageInfo{sampler, gi.imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-        // gi.xy are near zero, which decodes to a +Z geometric normal.
-        VkDescriptorImageInfo{sampler, gi.imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        VkDescriptorImageInfo{sampler, gbuf.imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        VkDescriptorImageInfo{sampler, seeds.imageView, VK_IMAGE_LAYOUT_GENERAL},
     };
-    std::array<VkWriteDescriptorSet, 5> writes{};
+    std::array<VkWriteDescriptorSet, 6> writes{};
     for (size_t i = 0; i < writes.size(); ++i) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = set;
@@ -152,9 +186,20 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx, bool benchmark = fals
         else writes[i].pImageInfo = &imageInfos[i - 2];
     }
     vkUpdateDescriptorSets(dev, uint32_t(writes.size()), writes.data(), 0, nullptr);
+    const VkDescriptorImageInfo seedStore{VK_NULL_HANDLE, seeds.imageView, VK_IMAGE_LAYOUT_GENERAL};
+    std::array<VkWriteDescriptorSet, 2> seedWrites{};
+    for (size_t i = 0; i < seedWrites.size(); ++i) {
+        seedWrites[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        seedWrites[i].dstSet = seedSet;
+        seedWrites[i].dstBinding = seedBindings[i].binding;
+        seedWrites[i].descriptorCount = 1;
+        seedWrites[i].descriptorType = seedBindings[i].descriptorType;
+        seedWrites[i].pImageInfo = i == 0 ? &imageInfos[2] : &seedStore;
+    }
+    vkUpdateDescriptorSets(dev, uint32_t(seedWrites.size()), seedWrites.data(), 0, nullptr);
     ctx.immediateSubmit([&](VkCommandBuffer cmd) {
-        for (int i = 0; i < 2; ++i) {
-            const auto& img = i == 0 ? light : gi;
+        for (int i = 0; i < 3; ++i) {
+            const auto& img = i == 0 ? light : i == 1 ? gi : gbuf;
             VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
             b.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
             b.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
@@ -180,6 +225,33 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx, bool benchmark = fals
             b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
             b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             cmdPipelineBarrier2(cmd, dep);
+        }
+        {
+            VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+            b.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+            b.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            b.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.image = seeds.image;
+            b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            dep.imageMemoryBarrierCount = 1;
+            dep.pImageMemoryBarriers = &b;
+            cmdPipelineBarrier2(cmd, dep);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, seedPipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, seedLayout, 0, 1, &seedSet, 0, nullptr);
+            vkCmdDispatch(cmd, (size + 7) / 8, (size + 7) / 8, 1);
+            VkMemoryBarrier2 written{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+            written.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            written.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            written.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            written.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+            VkDependencyInfo writtenDep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            writtenDep.memoryBarrierCount = 1;
+            writtenDep.pMemoryBarriers = &written;
+            cmdPipelineBarrier2(cmd, writtenDep);
         }
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &set, 0, nullptr);
@@ -270,11 +342,16 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx, bool benchmark = fals
     }
     destroy(dev, pipeline);
     destroy(dev, layout);
+    destroy(dev, seedPipeline);
+    destroy(dev, seedLayout);
     destroy(dev, pool);
     destroy(dev, setLayout);
+    destroy(dev, seedSetLayout);
     destroy(dev, sampler);
     destroyImage(dev, alloc, light);
     destroyImage(dev, alloc, gi);
+    destroyImage(dev, alloc, gbuf);
+    destroyImage(dev, alloc, seeds);
     destroyBuffer(alloc, input);
     destroyBuffer(alloc, output);
     destroyBuffer(alloc, upload);

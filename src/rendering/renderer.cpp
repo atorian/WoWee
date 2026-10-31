@@ -338,7 +338,7 @@ bool Renderer::createPerFrameResources() {
 
     // --- Create descriptor set layout for set 0 (per-frame UBO + shadow sampler + fog volume
     //     + ray traced lighting) ---
-    VkDescriptorSetLayoutBinding bindings[12]{};
+    VkDescriptorSetLayoutBinding bindings[13]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -415,7 +415,10 @@ bool Renderer::createPerFrameResources() {
     bindings[10].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
     bindings[11] = bindings[5];
     bindings[11].binding = 11; // atmosphere without celestial imagery
-    layoutInfo.bindingCount = 12;
+    // Where the ray traced lighting's other surfaces are (RtLighting).
+    bindings[12] = bindings[3];
+    bindings[12].binding = 12;
+    layoutInfo.bindingCount = 13;
     layoutInfo.pBindings = bindings;
 
     if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &perFrameSetLayout) != VK_SUCCESS) {
@@ -428,7 +431,7 @@ bool Renderer::createPerFrameResources() {
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = MAX_FRAMES * 3; // world, capture and reflection sets
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = MAX_FRAMES * 3 * 10;  // shadow, fog, lighting, sky, reflection and geometry
+    poolSizes[1].descriptorCount = MAX_FRAMES * 3 * 11;  // shadow, fog, lighting, sky, reflection, geometry and seeds
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     poolSizes[2].descriptorCount = MAX_FRAMES * 3;  // the point lights
 
@@ -494,14 +497,15 @@ bool Renderer::createPerFrameResources() {
 
         // Neutral until the ray traced lighting is on; writeRtLightingBindings
         // swaps in the other slot's results then.
-        VkDescriptorImageInfo rtImgInfo[4]{};
+        VkDescriptorImageInfo rtImgInfo[5]{};
         rtImgInfo[0].imageView = rtLighting_->lightViewForSlot(i);
         rtImgInfo[1].imageView = rtLighting_->giViewForSlot(i);
         rtImgInfo[2].imageView = rtLighting_->reflectionViewForSlot(i);
         rtImgInfo[3].imageView = rtLighting_->geometryViewForSlot(i);
+        rtImgInfo[4].imageView = rtLighting_->seedViewForSlot(i);
         for (auto& info : rtImgInfo) info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-        VkWriteDescriptorSet writes[11]{};
+        VkWriteDescriptorSet writes[12]{};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[0].dstSet = perFrameDescSets[i];
         writes[0].dstBinding = 0;
@@ -550,7 +554,10 @@ bool Renderer::createPerFrameResources() {
         writes[9].pImageInfo = &lightningInfo;
         writes[10] = writes[5];
         writes[10].dstBinding = 11;
-        vkUpdateDescriptorSets(device, 11, writes, 0, nullptr);
+        writes[11] = writes[4];
+        writes[11].dstBinding = 12;
+        writes[11].pImageInfo = &rtImgInfo[4];
+        vkUpdateDescriptorSets(device, 12, writes, 0, nullptr);
         // Sky capture gets a separate set whose bindings 5 and 11 stay neutral:
         // the M2 shader also declares the surface sampler, and must never
         // bind the image being written by this pass as a sampled image.
@@ -558,7 +565,7 @@ bool Renderer::createPerFrameResources() {
         if (vkAllocateDescriptorSets(device, &setAlloc, &skyPerFrameDescSets[i]) != VK_SUCCESS)
             return false;
         for (auto& write : writes) write.dstSet = skyPerFrameDescSets[i];
-        vkUpdateDescriptorSets(device, 11, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 12, writes, 0, nullptr);
     }
 
     skyBackground_ = std::make_unique<SkyBackground>();
@@ -624,7 +631,7 @@ bool Renderer::createPerFrameResources() {
             rtImgInfo.imageView = rtLighting_->neutralView();
             rtImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-            VkWriteDescriptorSet writes[11]{};
+            VkWriteDescriptorSet writes[12]{};
             writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[0].dstSet = reflPerFrameDescSet[i];
             writes[0].dstBinding = 0;
@@ -672,7 +679,9 @@ bool Renderer::createPerFrameResources() {
             writes[9].pImageInfo = &lightningInfo;
             writes[10] = writes[5];
             writes[10].dstBinding = 11;
-            vkUpdateDescriptorSets(device, 11, writes, 0, nullptr);
+            writes[11] = writes[4];
+            writes[11].dstBinding = 12;
+            vkUpdateDescriptorSets(device, 12, writes, 0, nullptr);
         }
     }
 
@@ -5253,22 +5262,24 @@ void Renderer::writeRtLightingBindings(uint32_t i) {
     if (!rtLighting_ || !vkCtx) return;
     // beginFrame has fenced this slot; the other slot can still be in use.
     {
-        VkDescriptorImageInfo info[4]{};
+        VkDescriptorImageInfo info[5]{};
         info[0].imageView = rtLighting_->lightViewForSlot(i);
         info[1].imageView = rtLighting_->giViewForSlot(i);
         info[2].imageView = rtLighting_->reflectionViewForSlot(i);
         info[3].imageView = rtLighting_->geometryViewForSlot(i);
+        info[4].imageView = rtLighting_->seedViewForSlot(i);
         for (auto& image : info) image.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        VkWriteDescriptorSet writes[4]{};
-        for (uint32_t b = 0; b < 4; ++b) {
+        constexpr uint32_t kBindings[5] = {3, 4, 6, 7, 12};
+        VkWriteDescriptorSet writes[5]{};
+        for (uint32_t b = 0; b < 5; ++b) {
             writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[b].dstSet = perFrameDescSets[i];
-            writes[b].dstBinding = b < 2 ? 3 + b : 4 + b;
+            writes[b].dstBinding = kBindings[b];
             writes[b].descriptorCount = 1;
             writes[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             writes[b].pImageInfo = &info[b];
         }
-        vkUpdateDescriptorSets(vkCtx->getDevice(), 4, writes, 0, nullptr);
+        vkUpdateDescriptorSets(vkCtx->getDevice(), 5, writes, 0, nullptr);
     }
 }
 
