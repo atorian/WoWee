@@ -116,6 +116,9 @@ function(wowee_add_test target)
     wowee_test_link_glm(${target})
     string(REGEX REPLACE "^test_" "" _name ${target})
     add_test(NAME ${_name} COMMAND ${target})
+    # Catch2 exits 4 when every test case in the binary skipped - the data it
+    # reads is not on this machine. That is a skip, not a failure.
+    set_tests_properties(${_name} PROPERTIES SKIP_RETURN_CODE 4)
     register_test_target(${target})
 endfunction()
 
@@ -135,6 +138,9 @@ function(wowee_add_packet_test target)
     endif()
     string(REGEX REPLACE "^test_" "" _name ${target})
     add_test(NAME ${_name} COMMAND ${target})
+    # Catch2 exits 4 when every test case in the binary skipped - the data it
+    # reads is not on this machine. That is a skip, not a failure.
+    set_tests_properties(${_name} PROPERTIES SKIP_RETURN_CODE 4)
     register_test_target(${target})
 endfunction()
 
