@@ -264,7 +264,7 @@ CHECKS = [
      r"^(\d+) domain handlers built from GameHandler&", 1,
      "domain handlers whose constructor takes GameHandler&"),
     ("domain_shape_check.py",
-     r"^(\d+) reaches through owner_ in src/game", 243,
+     r"^(\d+) reaches through owner_ in src/game", 239,
      "reaches through owner_ into GameHandler from the domain handlers"),
     # State a domain should own, handed out of GameHandler writable, and the
     # notifications wired to a single listener instead of the bus. 218, 1324

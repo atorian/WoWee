@@ -10,6 +10,7 @@
 #include "game/update_field_table.hpp"
 
 #include <algorithm>
+#include <map>
 #include <vector>
 
 using Catch::Matchers::WithinAbs;
@@ -365,4 +366,51 @@ TEST_CASE("before WotLK the player's auras are the aura fields, harmful ones mar
     CHECK(h.addonEvents("UNIT_AURA").size() == 1);
     CHECK(h.addonEvents("PLAYER_AURAS_CHANGED").size() == 1);
     CHECK(h.addonEvents("MINIMAP_UPDATE_TRACKING").size() == 1);
+}
+
+namespace {
+/// The player's UNIT_FIELD_CRITTER, the companion's guid low word first.
+std::map<uint16_t, uint32_t> critterFields(uint64_t guid) {
+    const auto f = static_cast<uint16_t>(wowee::game::fieldIndex(wowee::game::UF::UNIT_FIELD_CRITTER));
+    return {{f, static_cast<uint32_t>(guid)}, {static_cast<uint16_t>(f + 1), static_cast<uint32_t>(guid >> 32)}};
+}
+constexpr uint32_t kMechanicalSquirrel = 4055;
+constexpr uint64_t kSquirrel = 0xF130000B2A000042ull;
+}  // namespace
+
+TEST_CASE("casting the spell that called the companion out puts it away instead",
+          "[spells][companion][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    h.game().spells().noteGroundCastSpell(kMechanicalSquirrel);
+    h.playerFields(critterFields(kSquirrel));
+    h.clearRecords();
+
+    h.game().spells().castSpell(kMechanicalSquirrel, 0);
+    auto* dismiss = h.lastSent(Opcode::CMSG_DISMISS_CRITTER);
+    REQUIRE(dismiss);
+    CHECK(dismiss->readUInt64() == kSquirrel);
+    CHECK_FALSE(h.lastSent(Opcode::CMSG_CAST_SPELL));
+
+    // The server puts it away by clearing the field; the spell summons again.
+    h.playerFields(critterFields(0));
+    h.clearRecords();
+    h.game().spells().castSpell(kMechanicalSquirrel, 0);
+    CHECK_FALSE(h.lastSent(Opcode::CMSG_DISMISS_CRITTER));
+}
+
+TEST_CASE("the next character has none of the last one's companion out", "[spells][companion][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    h.game().spells().noteGroundCastSpell(kMechanicalSquirrel);
+    h.playerFields(critterFields(kSquirrel));
+
+    PlayerSpec bob;
+    bob.guid = 0x11;
+    bob.name = "Bob";
+    h.relogAs(bob);
+    h.game().spells().castSpell(kMechanicalSquirrel, 0);
+    CHECK_FALSE(h.lastSent(Opcode::CMSG_DISMISS_CRITTER));
 }

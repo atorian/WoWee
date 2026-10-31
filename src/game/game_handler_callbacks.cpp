@@ -1288,18 +1288,6 @@ void GameHandler::cancelCast() {
     spellHandler_->cancelCast();
 }
 
-void GameHandler::dismissCritter() {
-    if (activeCritterGuid_ == 0 || !getSocket() || getState() != WorldState::IN_WORLD) return;
-    const uint16_t wire = wireOpcode(Opcode::CMSG_DISMISS_CRITTER);
-    if (wire == 0xFFFF) return;   // expansion has no such opcode
-    auto pkt = DismissCritterPacket::build(activeCritterGuid_);
-    getSocket()->send(pkt);
-    LOG_INFO("Dismissing companion: guid=0x", std::hex, activeCritterGuid_, std::dec,
-             " summonedBy=", activeCritterSpellId_);
-    // The server confirms by clearing the critter field; leave the local state
-    // alone so a refused dismiss does not leave the client thinking it worked.
-}
-
 // CMSG_UNLEARN_SKILL carries the skill line and nothing else.
 // HandleUnlearnSkillOpcode drops anything that is not a primary profession, so
 // a mistaken call costs nothing, but the confirmation dialog in front of it is
