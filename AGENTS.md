@@ -72,10 +72,27 @@
   for both leaves its caller retrying a failure every frame with no trace. Give
   failure its own result, log it once, and stop retrying.
 - Log a failure once per id/path, not once per frame.
-- User decision (2026-10-30): a DBC the game needs that cannot be read stops
-  the game - `LOG_FATAL` naming the file and what needed it, then
-  `std::abort()`. No default value, built-in table or zero in its place.
-  The same for a DBC too short for what it is asked.
+
+## Game data: what an expansion uses is required
+
+User decision (2026-10-30, widened 2026-10-31). It holds in every layer that
+reads game data - `game`, `core`, `ui`, `rendering`, `audio`, `pipeline`.
+
+- Each expansion declares the game data it uses: every DBC table and every
+  file of its own in `Data/expansions/<expansion>/` (`dbc_layouts.json`,
+  `opcodes.json`, `update_fields.json`). The client reads nothing outside
+  that list.
+- Data on the running expansion's list that is missing, cannot be read, or
+  is narrower than the columns read stops the game: `LOG_FATAL` naming the
+  file, the expansion and what needed it, then `std::abort()`. No default
+  value, built-in copy, zero, guess or "not loaded" branch in its place.
+- The list is checked when the expansion's data is opened, so a broken
+  install stops at start, not when a player first opens the window that
+  reads the table.
+- A table the running expansion does not have is not on its list and is
+  never opened: no load, no warning. What needs it is a feature that
+  expansion does not have, and the code that offers it asks the expansion
+  whether it has the feature - never whether a file happened to load.
 
 ## Tests test behaviour
 
