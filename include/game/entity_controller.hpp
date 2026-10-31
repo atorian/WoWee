@@ -4,12 +4,14 @@
 
 #include "game/world_packet_data.hpp"
 #include "game/entity.hpp"
+#include "game/player_appearance.hpp"
 #include "game/opcode_table.hpp"
 #include "network/packet.hpp"
 #include <chrono>
 #include <deque>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -109,17 +111,11 @@ private:
     void applyUpdateObjectBlock(const UpdateBlock& block, bool& newItemCreated);
     void finalizeUpdateObjectBatch(bool newItemCreated);
 
-    bool extractPlayerAppearance(const FlatFieldMap& fields,
-                                 uint8_t& outRace, uint8_t& outGender,
-                                 uint32_t& outAppearanceBytes, uint8_t& outFacial) const;
-
 public:
-    /// The same, for a player already in the world, read from the fields the
-    /// entity is still holding. The spawn path takes this once and hands it to
-    /// a callback; anything wanting it later - a portrait, an inspect window -
-    /// has nowhere to ask, and the fields are right there.
-    bool getPlayerAppearance(uint64_t guid, uint8_t& outRace, uint8_t& outGender,
-                             uint32_t& outAppearanceBytes, uint8_t& outFacial) const;
+    /// What a player in view looks like, read from the fields their object
+    /// holds. The spawn path reads it once for the model; a portrait or an
+    /// inspect window asks here later. Null for anything not a player.
+    [[nodiscard]] std::optional<PlayerAppearance> appearanceOf(uint64_t guid) const;
 
 private:
 

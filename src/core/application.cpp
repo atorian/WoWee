@@ -5236,11 +5236,10 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                     bool shown = false;
                     if (inspectModel && inspectModel->visible) {
                         const auto* result = gameHandler->social().getInspectResult();
-                        uint8_t race = 0, gender = 0, facial = 0;
-                        uint32_t appearance = 0;
-                        if (result && result->guid != 0 &&
-                            gameHandler->entityController().getPlayerAppearance(result->guid, race, gender,
-                                                             appearance, facial)) {
+                        const auto look = result && result->guid != 0
+                                              ? gameHandler->entityController().appearanceOf(result->guid)
+                                              : std::nullopt;
+                        if (look) {
                             std::vector<game::EquipmentItem> worn;
                             std::array<uint32_t, 19> displayIds{};
                             std::array<uint8_t, 19> invTypes{};
@@ -5256,7 +5255,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                             sizeFor(inspectModel_, inspectModel);
                             inspectModel_.setFraming(ui::UnitPortrait::Framing::FullBody);
                             shown = inspectModel_.updatePlayer(
-                                race, gender, appearance, facial, worn,
+                                look->race, look->gender, look->appearanceBytes, look->facialFeatures, worn,
                                 assetManager.get(), renderer.get(), io.DeltaTime);
                         }
                     }
@@ -5364,11 +5363,8 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                     // naked race model, with none of their skin, face or hair.
                     // The world already reads all three off their update
                     // fields, and now so does this.
-                    uint8_t race = 0, gender = 0, facial = 0;
-                    uint32_t appearance = 0;
-                    if (face.guid != 0 &&
-                        gameHandler->entityController().getPlayerAppearance(face.guid, race, gender,
-                                                         appearance, facial)) {
+                    const auto look = gameHandler->entityController().appearanceOf(face.guid);
+                    if (look) {
                         // What they are visibly wearing, where it is known.
                         // Empty means the item queries have not come back, and
                         // the portrait leaves the model dressed as it was
@@ -5392,7 +5388,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                         // last unit's face, and a frame that has just changed
                         // unit would go on showing it.
                         built = face.portrait->updatePlayer(
-                            race, gender, appearance, facial, worn,
+                            look->race, look->gender, look->appearanceBytes, look->facialFeatures, worn,
                             assetManager.get(), renderer.get(), io.DeltaTime);
                     } else {
                         uint32_t displayId = 0;

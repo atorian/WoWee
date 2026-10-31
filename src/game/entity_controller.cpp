@@ -1,4 +1,5 @@
 #include "game/entity_controller.hpp"
+#include "game/player_appearance.hpp"
 #include "title/services/titles.hpp"
 #include "pet/domain/records.hpp"
 #include "pet/services/pet.hpp"
@@ -276,110 +277,11 @@ size_t EntityController::processOutOfRangeObjectsUntil(const std::vector<uint64_
 // Extracted helper methods
 // ============================================================
 
-bool EntityController::getPlayerAppearance(uint64_t guid, uint8_t& outRace,
-                                           uint8_t& outGender,
-                                           uint32_t& outAppearanceBytes,
-                                           uint8_t& outFacial) const {
-    auto entity = const_cast<EntityController*>(this)->getEntityManager().getEntity(guid);
-    if (!entity) return false;
-    // Players only, and this is not a formality. extractPlayerAppearance falls
-    // back to scanning the fields for something that *looks* like packed
-    // appearance when the named ones are absent, and the test is loose - any
-    // field whose four bytes are small enough. On a creature it matches almost
-    // immediately, and the answer is race zero with somebody's health for hair.
-    //
-    // That fallback is safe where it was written, because the spawn path only
-    // reaches it after deciding the object is a player. This is a second
-    // caller, and it has to decide the same thing for itself.
-    if (entity->getType() != ObjectType::PLAYER) return false;
-    return extractPlayerAppearance(entity->getFields(), outRace, outGender,
-                                   outAppearanceBytes, outFacial);
+std::optional<PlayerAppearance> EntityController::appearanceOf(uint64_t guid) const {
+    auto entity = entityManager.getEntity(guid);
+    if (!entity || entity->getType() != ObjectType::PLAYER) return std::nullopt;
+    return playerAppearance(entity->getFields());
 }
-
-bool EntityController::extractPlayerAppearance(const FlatFieldMap& fields,
-                                               uint8_t& outRace,
-                                               uint8_t& outGender,
-                                               uint32_t& outAppearanceBytes,
-                                               uint8_t& outFacial) const {
-    outRace = 0;
-    outGender = 0;
-    outAppearanceBytes = 0;
-    outFacial = 0;
-
-    auto readField = [&](uint16_t idx, uint32_t& out) -> bool {
-        if (idx == 0xFFFF) return false;
-        auto it = fields.find(idx);
-        if (it == fields.end()) return false;
-        out = it->second;
-        return true;
-    };
-
-    uint32_t bytes0 = 0;
-    uint32_t pbytes = 0;
-    uint32_t pbytes2 = 0;
-
-    const uint16_t ufBytes0 = fieldIndex(UF::UNIT_FIELD_BYTES_0);
-    const uint16_t ufPbytes = fieldIndex(UF::PLAYER_BYTES);
-    const uint16_t ufPbytes2 = fieldIndex(UF::PLAYER_BYTES_2);
-
-    bool haveBytes0 = readField(ufBytes0, bytes0);
-    bool havePbytes = readField(ufPbytes, pbytes);
-    bool havePbytes2 = readField(ufPbytes2, pbytes2);
-
-    // Heuristic fallback: Turtle can run with unusual build numbers; if the JSON table is missing,
-    // try to locate plausible packed fields by scanning.
-    if (!haveBytes0) {
-        for (const auto& [idx, v] : fields) {
-            uint8_t race = static_cast<uint8_t>(v & 0xFF);
-            uint8_t cls = static_cast<uint8_t>((v >> 8) & 0xFF);
-            uint8_t gender = static_cast<uint8_t>((v >> 16) & 0xFF);
-            uint8_t power = static_cast<uint8_t>((v >> 24) & 0xFF);
-            if (race >= 1 && race <= 20 &&
-                cls >= 1 && cls <= 20 &&
-                gender <= 1 &&
-                power <= 10) {
-                bytes0 = v;
-                haveBytes0 = true;
-                break;
-            }
-        }
-    }
-    if (!havePbytes) {
-        for (const auto& [idx, v] : fields) {
-            uint8_t skin = static_cast<uint8_t>(v & 0xFF);
-            uint8_t face = static_cast<uint8_t>((v >> 8) & 0xFF);
-            uint8_t hair = static_cast<uint8_t>((v >> 16) & 0xFF);
-            uint8_t color = static_cast<uint8_t>((v >> 24) & 0xFF);
-            if (skin <= 50 && face <= 50 && hair <= 100 && color <= 50) {
-                pbytes = v;
-                havePbytes = true;
-                break;
-            }
-        }
-    }
-    if (!havePbytes2) {
-        for (const auto& [idx, v] : fields) {
-            uint8_t facial = static_cast<uint8_t>(v & 0xFF);
-            if (facial <= 100) {
-                pbytes2 = v;
-                havePbytes2 = true;
-                break;
-            }
-        }
-    }
-
-    if (!haveBytes0 || !havePbytes) return false;
-
-    outRace = static_cast<uint8_t>(bytes0 & 0xFF);
-    outGender = static_cast<uint8_t>((bytes0 >> 16) & 0xFF);
-    outAppearanceBytes = pbytes;
-    outFacial = havePbytes2 ? static_cast<uint8_t>(pbytes2 & 0xFF) : 0;
-    return true;
-}
-
-// ============================================================
-// Update type dispatch
-// ============================================================
 
 void EntityController::applyUpdateObjectBlock(const UpdateBlock& block, bool& newItemCreated) {
     switch (block.updateType) {
@@ -893,15 +795,13 @@ void EntityController::announceUnit(uint64_t guid, ObjectType objectType,
         return;  // Skip local player - spawned separately via spawnPlayerCharacter()
     }
     if (objectType == ObjectType::PLAYER) {
-        uint8_t race = 0, gender = 0, facial = 0;
-        uint32_t appearanceBytes = 0;
-        if (extractPlayerAppearance(entity->getFields(), race, gender, appearanceBytes, facial)) {
+        if (const auto look = playerAppearance(entity->getFields())) {
             owner_.eventBus().publish(events::PlayerSpawned{
-                guid, unit->getDisplayId(), race, gender, appearanceBytes, facial,
-                unit->getX(), unit->getY(), unit->getZ(), unit->getOrientation()});
+                guid, unit->getDisplayId(), look->race, look->gender, look->appearanceBytes,
+                look->facialFeatures, unit->getX(), unit->getY(), unit->getZ(), unit->getOrientation()});
         } else {
             LOG_WARNING("[Spawn] PLAYER guid=0x", std::hex, guid, std::dec,
-                      " displayId=", unit->getDisplayId(), " appearance extraction failed - model will not render");
+                      " displayId=", unit->getDisplayId(), " has no UNIT_FIELD_BYTES_0 - no race, model will not render");
         }
     } else {
         LOG_DEBUG("[Spawn] UNIT guid=0x", std::hex, guid, std::dec,
