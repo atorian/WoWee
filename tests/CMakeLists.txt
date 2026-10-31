@@ -2551,13 +2551,6 @@ wowee_add_test(test_water_visibility
     SOURCES test_water_visibility.cpp
             ${TEST_COMMON_SOURCES})
 
-# ── test_sphere_map ──────────────────────────────────────────
-# The sphere environment map coordinates m2.vert.glsl computes, run from the
-# shader's own include. The incident vector was negated, which put a surface
-# nearly facing the camera at the rim of the map instead of near its centre.
-wowee_add_test(test_sphere_map
-    SOURCES test_sphere_map.cpp)
-
 # ── test_m2_classifier_foliage ───────────────────────────────
 # Pins the wind-sway classification against substring collisions: foliage
 # tokens are matched inside concatenated names, so "thorn" landed inside

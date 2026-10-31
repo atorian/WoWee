@@ -74,3 +74,12 @@ TEST_CASE("shadows", "[scene][shadow]") {
     draw("shadows.json", picture);
     verifyPicture(picture);
 }
+
+TEST_CASE("sphere map", "[scene][m2]") {
+    // Models whose shine is a sphere environment map (texture coordinate set
+    // -1): a mage-hunter crystal and Murloc's great pearl, the pearl's whole
+    // surface the map.
+    const fs::path picture = fs::path(WOWEE_SCRATCH_DIR) / "scene_references" / "sphere_map.png";
+    draw("sphere_map.json", picture);
+    verifyPicture(picture);
+}
