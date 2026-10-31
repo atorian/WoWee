@@ -21,11 +21,11 @@
 
 #include <string>
 
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 
-using wowee::rendering::assetNameHasToken;
-using wowee::rendering::assetTokenName;
-using wowee::rendering::assetNameHasWordToken;
+using wowee::pipeline::assetNameHasToken;
+using wowee::pipeline::assetTokenName;
+using wowee::pipeline::assetNameHasWordToken;
 
 TEST_CASE("the token name is the file, not the path", "[asset-token]") {
     CHECK(assetTokenName("World\\Azeroth\\Elwynn\\Trees\\ElwynnTree01.m2") ==
@@ -135,15 +135,15 @@ TEST_CASE("a sky is not a brazier because its name ends in fire",
           "[asset-token][classifier]") {
     const glm::vec3 lo(-181.0f, -181.0f, -110.0f);
     const glm::vec3 hi(181.0f, 181.0f, 145.0f);
-    const auto sky = wowee::rendering::classifyM2Model(
+    const auto sky = wowee::pipeline::classifyM2Model(
         "Environment\\Stars\\HellfireSkyBox.mdx", lo, hi, 1761, 0);
     CHECK_FALSE(sky.isBrazierOrFire);
 
     // Something actually named for a fire still is one.
     const glm::vec3 small(-1.0f, -1.0f, 0.0f);
     const glm::vec3 big(1.0f, 1.0f, 2.0f);
-    CHECK(wowee::rendering::classifyM2Model(
+    CHECK(wowee::pipeline::classifyM2Model(
         "World\\Doodads\\Campfire01.m2", small, big, 200, 1).isBrazierOrFire);
-    CHECK(wowee::rendering::classifyM2Model(
+    CHECK(wowee::pipeline::classifyM2Model(
         "World\\Doodads\\Fire_Large.m2", small, big, 200, 1).isBrazierOrFire);
 }

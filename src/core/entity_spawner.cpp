@@ -1,6 +1,6 @@
 #include "core/entity_spawner.hpp"
 #include "core/thread_pool.hpp"
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 #include "core/appearance_composer.hpp"
 #include "pipeline/char_sections.hpp"
 #include "core/geoset_rules.hpp"

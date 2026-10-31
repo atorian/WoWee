@@ -1,17 +1,17 @@
 #include <catch_amalgamated.hpp>
 
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 
 #include <string>
 
-using wowee::rendering::classifyM2Model;
+using wowee::pipeline::classifyM2Model;
 
 namespace {
 
 // Bounds and counts stand in for a mid-size doodad. None of the cases below
 // turn on geometry - they are all decided by the name - but the classifier
 // needs something plausible to reason about.
-wowee::rendering::M2ClassificationResult classify(const std::string& name,
+wowee::pipeline::M2ClassificationResult classify(const std::string& name,
                                                   float horiz = 3.0f,
                                                   float vert = 3.0f) {
     return classifyM2Model(name,
@@ -362,9 +362,9 @@ TEST_CASE("a fire whose name runs its words together is still a fire",
 // could be drawn as flame and play no fire, or the reverse.
 TEST_CASE("the fire sound and the fire rendering agree on what a fire is",
           "[m2][classifier][fire]") {
-    using wowee::rendering::AmbientEmitterType;
+    using wowee::pipeline::AmbientEmitterType;
     const auto emitter = [](const char* name) {
-        return wowee::rendering::classifyAmbientEmitter(name);
+        return wowee::pipeline::classifyAmbientEmitter(name);
     };
     for (const char* name : {"orcbonfire", "orcpvpbonfirelarge", "blackrockorccampfire",
                              "largefirepit01", "valgarde_fire"}) {

@@ -38,7 +38,7 @@
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/frustum.hpp"
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "core/env_flag.hpp"
@@ -1751,7 +1751,7 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
         gpuModel.visualBoundRadius =
             glm::length(gpuModel.visualBoundMax - gpuModel.visualBoundMin) * 0.5f;
     }
-    const auto classification = classifyM2Model(
+    const auto classification = pipeline::classifyM2Model(
         model.name, model.boundMin, model.boundMax,
         model.vertices.size(), model.particleEmitters.size());
     gpuModel.isSkyBird = classification.isSkyBird;

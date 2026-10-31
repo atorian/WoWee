@@ -1,4 +1,4 @@
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 
 #include <algorithm>
 #include <array>
@@ -6,7 +6,7 @@
 #include <string_view>
 
 namespace wowee {
-namespace rendering {
+namespace pipeline {
 
 namespace {
 
@@ -638,5 +638,5 @@ AmbientEmitterType classifyAmbientEmitter(const std::string& lowerName)
     return AmbientEmitterType::None;
 }
 
-} // namespace rendering
+} // namespace pipeline
 } // namespace wowee

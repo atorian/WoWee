@@ -5,7 +5,7 @@
 #include "core/enchant_visual.hpp"
 
 #include <set>
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 #include "game/transport_path_repository.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"

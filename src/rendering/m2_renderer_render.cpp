@@ -8,7 +8,7 @@
 #include "rendering/m2_glow_card.hpp"
 #include "rendering/m2_particle_emission.hpp"
 #include "core/thread_pool.hpp"
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 #include "rendering/hiz_system.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/cpu_stage_times.hpp"

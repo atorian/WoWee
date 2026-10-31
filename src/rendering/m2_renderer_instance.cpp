@@ -3,7 +3,7 @@
 #include "rendering/m2_renderer.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/m2_renderer_internal.h"
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 #include "rendering/texture_upload.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_buffer.hpp"
