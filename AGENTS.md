@@ -335,11 +335,12 @@ looks, not the way the old code does.
 
 ### A handler is built from what it uses
 
-A handler is built from interfaces, never from `GameHandler&`. The older
-handlers take `GameHandler& owner` and reach through `owner_.` for anything -
-the socket, another handler's state, the facade; do not copy them.
-`AccountDataHandler`, `ActionBarHandler`, `InventoryHandler`, `PetHandler`
-and `SpellHandler` are the pattern:
+A handler is built from interfaces, never from `GameHandler&`. Since
+2026-10-31 none is: the last, `WorldHandler`, takes `WorldQueries`. Do not
+bring one back by reaching through a `GameHandler& owner_` for the socket,
+another handler's state or the facade. `AccountDataHandler`,
+`ActionBarHandler`, `InventoryHandler`, `PetHandler` and `SpellHandler` are
+the pattern:
 
 ```cpp
 AccountDataHandler(PacketSender& sender, FrameXmlEvents& frameXml,
@@ -377,7 +378,7 @@ never sees the class.
 
 - A handler does not take `GameHandler&`. `tools/domain_shape_check.py`
   counts the handlers that do and the reaches through `owner_.` in
-  `src/game`; `sweep_guard` holds both and they only go down.
+  `src/game`; `sweep_guard` holds both at zero.
 - Built in `GameHandler`'s constructor, registered in `registerDomainOpcodes`,
   reached from outside through an accessor returning a reference
   (`accountData()`, `actionBar()`).

@@ -7,7 +7,9 @@
 #include "core/event_bus.hpp"
 #include "game/game_events.hpp"
 #include "core/env_flag.hpp"
-#include "game/game_handler.hpp"
+#include "game/packet_sender.hpp"
+#include "game/world_state.hpp"
+#include "game/character.hpp"
 #include "game/protocol_constants.hpp"
 #include "game/game_utils.hpp"
 #include "game/packet_parsers.hpp"
@@ -60,8 +62,11 @@ void applyBlockMovementSpeeds(const UpdateBlock& block, Entity& entity) {
 
 } // anonymous namespace
 
-WorldHandler::WorldHandler(GameHandler& owner)
-    : owner_(owner) { initTypeHandlers(); }
+WorldHandler::WorldHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
+                           WorldQueries& queries, const EmoteTable& emotes)
+    : sender_(sender), frameXml_(frameXml), events_(events), queries_(queries), emotes_(emotes) {
+    initTypeHandlers();
+}
 
 void WorldHandler::registerOpcodes(DispatchTable& table) {
     // World object updates - accept during ENTERING_WORLD too so that entity
@@ -69,15 +74,15 @@ void WorldHandler::registerOpcodes(DispatchTable& table) {
     // rather than silently dropped (the budget system processes them later once
     // the state transitions to IN_WORLD).
     auto inWorldOrEntering = [this]() {
-        auto s = owner_.getState();
+        auto s = queries_.worldState();
         return s == WorldState::IN_WORLD || s == WorldState::ENTERING_WORLD;
     };
     table[Opcode::SMSG_UPDATE_OBJECT] = [this, inWorldOrEntering](network::Packet& packet) {
-        LOG_DEBUG("Received SMSG_UPDATE_OBJECT, state=", static_cast<int>(owner_.getState()), " size=", packet.getSize());
+        LOG_DEBUG("Received SMSG_UPDATE_OBJECT, state=", static_cast<int>(queries_.worldState()), " size=", packet.getSize());
         if (inWorldOrEntering()) handleUpdateObject(packet);
     };
     table[Opcode::SMSG_COMPRESSED_UPDATE_OBJECT] = [this, inWorldOrEntering](network::Packet& packet) {
-        LOG_DEBUG("Received SMSG_COMPRESSED_UPDATE_OBJECT, state=", static_cast<int>(owner_.getState()), " size=", packet.getSize());
+        LOG_DEBUG("Received SMSG_COMPRESSED_UPDATE_OBJECT, state=", static_cast<int>(queries_.worldState()), " size=", packet.getSize());
         if (inWorldOrEntering()) handleCompressedUpdateObject(packet);
     };
     table[Opcode::SMSG_DESTROY_OBJECT] = [this, inWorldOrEntering](network::Packet& packet) {
@@ -178,12 +183,12 @@ void WorldHandler::processPendingUpdateObjectWork(const std::chrono::steady_cloc
         const auto& work = pendingUpdateObjectWork_.front();
         LOG_DEBUG("GameHandler update-object budget reached (remainingBatches=",
                   pendingUpdateObjectWork_.size(), ", nextBlockIndex=", work.nextBlockIndex,
-                  "/", work.data.blocks.size(), ", owner_.getState()=", worldStateName(owner_.getState()), ")");
+                  "/", work.data.blocks.size(), ", queries_.worldState()=", worldStateName(queries_.worldState()), ")");
     }
 }
 void WorldHandler::handleUpdateObject(network::Packet& packet) {
     UpdateObjectData data;
-    if (!owner_.getPacketParsers()->parseUpdateObject(packet, data)) {
+    if (!queries_.packetParsers().parseUpdateObject(packet, data)) {
         static int updateObjErrors = 0;
         if (++updateObjErrors <= 5)
             LOG_WARNING("Failed to parse SMSG_UPDATE_OBJECT");
@@ -216,7 +221,7 @@ size_t WorldHandler::processOutOfRangeObjectsUntil(const std::vector<uint64_t>& 
         // manager at all: the partial updates that carry them are tracked in
         // onlineItems_ alone, which is why the values path has a branch for
         // exactly that case.
-        if (owner_.inventory().forgetItemObject(guid)) inventoryChanged = true;
+        if (queries_.forgetItemObject(guid)) inventoryChanged = true;
 
         auto entity = entityManager.getEntity(guid);
         if (!entity) continue;
@@ -226,9 +231,9 @@ size_t WorldHandler::processOutOfRangeObjectsUntil(const std::vector<uint64_t>& 
             // Keep transports alive across out-of-range flapping.
             // Boats/zeppelins are global movers and removing them here can make
             // them disappear until a later movement snapshot happens to recreate them.
-            const bool playerAboardNow = (owner_.movement().getPlayerTransportGuid() == guid);
-            const bool stickyAboard = owner_.movement().recentlyAboard(guid);
-            const bool movementSaysAboard = (owner_.movementInfoRef().transportGuid == guid);
+            const bool playerAboardNow = (queries_.playerTransportGuid() == guid);
+            const bool stickyAboard = queries_.recentlyAboard(guid);
+            const bool movementSaysAboard = (queries_.movementTransportGuid() == guid);
             LOG_INFO("Preserving transport on out-of-range: 0x",
                      std::hex, guid, std::dec,
                      " now=", playerAboardNow,
@@ -243,23 +248,23 @@ size_t WorldHandler::processOutOfRangeObjectsUntil(const std::vector<uint64_t>& 
         const int kind = type == ObjectType::UNIT ? 0 : type == ObjectType::PLAYER ? 1
                        : type == ObjectType::GAMEOBJECT ? 2 : 3;
         if (entity->getType() == ObjectType::UNIT) {
-            owner_.eventBus().publish(events::CreatureDespawned{guid});
+            events_.publish(events::CreatureDespawned{guid});
         } else if (entity->getType() == ObjectType::PLAYER) {
-            owner_.eventBus().publish(events::PlayerDespawned{guid});
+            events_.publish(events::PlayerDespawned{guid});
             // What they wore is decoded again if they come back: forgotten
             // whether or not anything draws them.
-            owner_.inventory().forgetPlayerEquipment(guid);
-            owner_.queryCache().playerLeftView(guid);
+            queries_.forgetPlayerEquipment(guid);
+            queries_.playerLeftView(guid);
         } else if (entity->getType() == ObjectType::GAMEOBJECT) {
-            owner_.eventBus().publish(events::GameObjectDespawned{guid});
+            events_.publish(events::GameObjectDespawned{guid});
         } else if (entity->getType() == ObjectType::CORPSE) {
-            owner_.eventBus().publish(events::PlayerDespawned{guid});
+            events_.publish(events::PlayerDespawned{guid});
         }
         transportGuids_.erase(guid);
         serverUpdatedTransportGuids_.erase(guid);
-        owner_.movement().clearTransportAttachment(guid);
-        if (owner_.movement().getPlayerTransportGuid() == guid) {
-            owner_.movement().clearPlayerTransport();
+        queries_.clearTransportAttachment(guid);
+        if (queries_.playerTransportGuid() == guid) {
+            queries_.clearPlayerTransport();
         }
         entity.reset();
         entityManager.removeEntity(guid);
@@ -269,7 +274,7 @@ size_t WorldHandler::processOutOfRangeObjectsUntil(const std::vector<uint64_t>& 
     // Once per batch, not per item: a vendor sale can take several items out
     // of range together, and rebuilding per item would redraw the bags as many
     // times for one answer.
-    if (inventoryChanged) owner_.inventory().rebuildOnlineInventory();
+    if (inventoryChanged) queries_.rebuildOnlineInventory();
     return next;
 }
 
@@ -308,31 +313,31 @@ void WorldHandler::applyUpdateObjectBlock(const UpdateBlock& block, bool& newIte
 void WorldHandler::updateNonPlayerTransportAttachment(const UpdateBlock& block,
                                                            const std::shared_ptr<Entity>& entity,
                                                            ObjectType entityType) {
-    if (block.guid == owner_.getPlayerGuid()) return;
+    if (block.guid == queries_.characterGuid()) return;
     if (entityType != ObjectType::UNIT && entityType != ObjectType::GAMEOBJECT) return;
 
     if (block.onTransport && block.transportGuid != 0) {
         const glm::vec3 serverOffset(block.transportX, block.transportY, block.transportZ);
-        const bool transportResolved = owner_.getTransportManager() &&
-            owner_.getTransportManager()->getTransport(block.transportGuid);
+        const bool transportResolved = queries_.transports() &&
+            queries_.transports()->getTransport(block.transportGuid);
         // Preserve the raw wire offset if the child arrives before its parent
         // transport during a map load. Its coordinate convention depends on
         // whether that parent is an M2 or WMO and can only be decided once the
         // transport has registered.
         glm::vec3 localOffset = transportResolved
-            ? owner_.getTransportManager()->serverToTransportLocal(block.transportGuid, serverOffset)
+            ? queries_.transports()->serverToTransportLocal(block.transportGuid, serverOffset)
             : serverOffset;
         const bool hasLocalOrientation = (block.updateFlags & 0x0020) != 0; // UPDATEFLAG_LIVING
         float localOriCanonical = core::coords::normalizeAngleRad(-block.transportO);
-        owner_.movement().setTransportAttachment(block.guid, entityType, block.transportGuid,
+        queries_.setTransportAttachment(block.guid, entityType, block.transportGuid,
                                localOffset, hasLocalOrientation, localOriCanonical,
                                !transportResolved);
-        if (owner_.getTransportManager() && owner_.getTransportManager()->getTransport(block.transportGuid)) {
-            glm::vec3 composed = owner_.getTransportManager()->getPlayerWorldPosition(block.transportGuid, localOffset);
+        if (queries_.transports() && queries_.transports()->getTransport(block.transportGuid)) {
+            glm::vec3 composed = queries_.transports()->getPlayerWorldPosition(block.transportGuid, localOffset);
             entity->setPosition(composed.x, composed.y, composed.z, entity->getOrientation());
         }
     } else {
-        owner_.movement().clearTransportAttachment(block.guid);
+        queries_.clearTransportAttachment(block.guid);
     }
 }
 
@@ -411,8 +416,8 @@ bool WorldHandler::applyUnitFieldsOnCreate(const UpdateBlock& block,
         // as its first argument, which is how a frame knows whether the change
         // was to the unit it is showing.
         auto emitForUnit = [&](const char* event) {
-            if (!owner_.hasAddonEventListener()) return;
-            const auto uid = owner_.guidToUnitId(block.guid);
+            if (!frameXml_.frameXmlListening()) return;
+            const auto uid = queries_.unitIdFor(block.guid);
             if (!uid.empty()) pendingEvents_.emit(event, {uid});
         };
 
@@ -432,16 +437,16 @@ bool WorldHandler::applyUnitFieldsOnCreate(const UpdateBlock& block,
             emitForUnit("UNIT_LEVEL");
         } else if (key == ufi.faction) {
             unit->setFactionTemplate(val);
-            if (owner_.hasAddonEventListener()) {
-                auto uid = owner_.guidToUnitId(block.guid);
+            if (frameXml_.frameXmlListening()) {
+                auto uid = queries_.unitIdFor(block.guid);
                 if (!uid.empty())
                     pendingEvents_.emit("UNIT_FACTION", {uid});
             }
         }
         else if (key == ufi.flags) {
             unit->setUnitFlags(val);
-            if (owner_.hasAddonEventListener()) {
-                auto uid = owner_.guidToUnitId(block.guid);
+            if (frameXml_.frameXmlListening()) {
+                auto uid = queries_.unitIdFor(block.guid);
                 if (!uid.empty())
                     pendingEvents_.emit("UNIT_FLAGS", {uid});
             }
@@ -459,8 +464,8 @@ bool WorldHandler::applyUnitFieldsOnCreate(const UpdateBlock& block,
             unit->setCombatReach(bitsToFloat(val));
         } else if (key == ufi.displayId) {
             unit->setDisplayId(val);
-            if (owner_.hasAddonEventListener()) {
-                auto uid = owner_.guidToUnitId(block.guid);
+            if (frameXml_.frameXmlListening()) {
+                auto uid = queries_.unitIdFor(block.guid);
                 if (!uid.empty()) {
                     pendingEvents_.emit("UNIT_MODEL_CHANGED", {uid});
                     // The portrait is drawn from the display id, so a unit that
@@ -505,10 +510,10 @@ bool WorldHandler::applyUnitFieldsOnCreate(const UpdateBlock& block,
                 emitForUnit(kMaxPowerEvents[t]);
         }
         else if (key == ufi.mountDisplayId) {
-            if (block.guid == owner_.getPlayerGuid()) {
-                owner_.movement().playerMountFieldArrived(val, block.fields, pendingEvents_);
+            if (block.guid == queries_.characterGuid()) {
+                queries_.playerMountFieldArrived(val, block.fields, pendingEvents_);
             } else if (block.objectType == ObjectType::PLAYER) {
-                owner_.eventBus().publish(events::OtherPlayerMounted{block.guid, val});
+                events_.publish(events::OtherPlayerMounted{block.guid, val});
             }
             unit->setMountDisplayId(val);
         }
@@ -534,20 +539,20 @@ WorldHandler::UnitFieldUpdateResult WorldHandler::applyUnitFieldsOnUpdate(
     // The pet's own fields from this update, handed over together below.
     pet::PetFields petFields;
     bool petFieldsArrived = false;
-    const uint64_t petGuid = owner_.petGuid();
+    const uint64_t petGuid = queries_.petGuid();
     for (const auto& [key, val] : block.fields) {
         if (key == ufi.health) {
             unit->setHealth(val);
             result.healthChanged = true;
-            owner_.combat().unitHealthArrived(block.guid, oldHealth, val, pendingEvents_);
+            queries_.unitHealthArrived(block.guid, oldHealth, val, pendingEvents_);
             if (val == 0) {
                 if (entity->getType() == ObjectType::UNIT || entity->getType() == ObjectType::PLAYER) {
-                    owner_.eventBus().publish(events::UnitDied{block.guid});
+                    events_.publish(events::UnitDied{block.guid});
                     result.npcDeathNotified = true;
                 }
             } else if (oldHealth == 0 && val > 0) {
                 if (entity->getType() == ObjectType::UNIT || entity->getType() == ObjectType::PLAYER) {
-                    owner_.eventBus().publish(events::UnitRespawned{block.guid});
+                    events_.publish(events::UnitRespawned{block.guid});
                     result.npcRespawnNotified = true;
                 }
             }
@@ -562,16 +567,15 @@ WorldHandler::UnitFieldUpdateResult WorldHandler::applyUnitFieldsOnUpdate(
             uint8_t oldPT = unit->getPowerType();
             unit->setPowerType(static_cast<uint8_t>((val >> 24) & 0xFF));
             if (unit->getPowerType() != oldPT) {
-                auto uid = owner_.guidToUnitId(block.guid);
+                auto uid = queries_.unitIdFor(block.guid);
                 if (!uid.empty())
                     pendingEvents_.emit("UNIT_DISPLAYPOWER", {uid});
             }
         } else if (key == ufi.flags) {
             uint32_t oldFlags = unit->getUnitFlags();
             unit->setUnitFlags(val);
-            if (block.guid == owner_.getPlayerGuid()) {
-                owner_.combat().playerUnitFlagsArrived(oldFlags, val, pendingEvents_);
-                owner_.player().unitFlagsArrived(oldFlags, val);
+            if (block.guid == queries_.characterGuid()) {
+                queries_.playerUnitFlagsArrived(oldFlags, val, pendingEvents_);
             }
         }
         else if (ufi.auraState != 0xFFFF && key == ufi.auraState) {
@@ -582,28 +586,28 @@ WorldHandler::UnitFieldUpdateResult WorldHandler::applyUnitFieldsOnUpdate(
             const uint8_t newVisibilityFlags = static_cast<uint8_t>((val >> 16) & 0xFF);
             unit->setVisibilityFlags(newVisibilityFlags);
 
-            if (block.guid == owner_.getPlayerGuid()) {
-                owner_.player().visibilityFlagsArrived(oldVisibilityFlags, newVisibilityFlags);
-                owner_.player().shapeshiftFormArrived(static_cast<uint8_t>((val >> 24) & 0xFF),
+            if (block.guid == queries_.characterGuid()) {
+                queries_.playerVisibilityFlagsArrived(oldVisibilityFlags, newVisibilityFlags);
+                queries_.shapeshiftFormArrived(static_cast<uint8_t>((val >> 24) & 0xFF),
                                                       pendingEvents_);
             }
         }
         else if (key == ufi.dynFlags) {
             uint32_t oldDyn = unit->getDynamicFlags();
             unit->setDynamicFlags(val);
-            if (block.guid == owner_.getPlayerGuid()) {
-                owner_.combat().playerDynamicFlagsArrived(oldDyn, val, pendingEvents_);
+            if (block.guid == queries_.characterGuid()) {
+                queries_.playerDynamicFlagsArrived(oldDyn, val, pendingEvents_);
             } else if (entity->getType() == ObjectType::UNIT || entity->getType() == ObjectType::PLAYER) {
                 bool wasDead = (oldDyn & UNIT_DYNFLAG_DEAD) != 0;
                 bool nowDead = (val & UNIT_DYNFLAG_DEAD) != 0;
                 if (!wasDead && nowDead) {
                     if (!result.npcDeathNotified) {
-                        owner_.eventBus().publish(events::UnitDied{block.guid});
+                        events_.publish(events::UnitDied{block.guid});
                         result.npcDeathNotified = true;
                     }
                 } else if (wasDead && !nowDead) {
                     if (!result.npcRespawnNotified) {
-                        owner_.eventBus().publish(events::UnitRespawned{block.guid});
+                        events_.publish(events::UnitRespawned{block.guid});
                         result.npcRespawnNotified = true;
                     }
                 }
@@ -617,19 +621,19 @@ WorldHandler::UnitFieldUpdateResult WorldHandler::applyUnitFieldsOnUpdate(
             uint32_t oldLvl = unit->getLevel();
             unit->setLevel(val);
             if (val != oldLvl) {
-                auto uid = owner_.guidToUnitId(block.guid);
+                auto uid = queries_.unitIdFor(block.guid);
                 if (!uid.empty())
                     pendingEvents_.emit("UNIT_LEVEL", {uid});
             }
-            if (block.guid != owner_.getPlayerGuid() &&
+            if (block.guid != queries_.characterGuid() &&
                 entity->getType() == ObjectType::PLAYER &&
                 val > oldLvl && oldLvl > 0) {
-                owner_.eventBus().publish(events::OtherPlayerLevelUp{block.guid, val});
+                events_.publish(events::OtherPlayerLevelUp{block.guid, val});
             }
         }
         else if (key == ufi.faction) {
             unit->setFactionTemplate(val);
-            unit->setHostile(owner_.isHostileFaction(val));
+            unit->setHostile(queries_.hostileFaction(val));
         } else if (key == ufi.boundingRadius) {
             unit->setBoundingRadius(bitsToFloat(val));
         } else if (key == ufi.combatReach) {
@@ -642,11 +646,11 @@ WorldHandler::UnitFieldUpdateResult WorldHandler::applyUnitFieldsOnUpdate(
         } else if (key == ufi.nativeDisplayId) {
             unit->setNativeDisplayId(val);
         } else if (key == ufi.mountDisplayId) {
-            if (block.guid == owner_.getPlayerGuid()) {
-                owner_.movement().playerMountFieldArrived(val, block.fields, pendingEvents_);
+            if (block.guid == queries_.characterGuid()) {
+                queries_.playerMountFieldArrived(val, block.fields, pendingEvents_);
             } else if (entity->getType() == ObjectType::PLAYER &&
                        val != unit->getMountDisplayId()) {
-                owner_.eventBus().publish(events::OtherPlayerMounted{block.guid, val});
+                events_.publish(events::OtherPlayerMounted{block.guid, val});
             }
             unit->setMountDisplayId(val);
         } else if (ufi.attackPower != 0xFFFF && key == ufi.attackPower &&
@@ -695,11 +699,11 @@ WorldHandler::UnitFieldUpdateResult WorldHandler::applyUnitFieldsOnUpdate(
             unit->setNpcEmoteState(val);
             // Fire emote animation callback so entity_spawner can update the NPC's idle anim
             if (val != oldEmote) {
-                uint32_t animId = val != 0 ? owner_.emotes().animByEmotesId(val) : 0;
+                uint32_t animId = val != 0 ? emotes_.animByEmotesId(val) : 0;
                 if (val == 0 || animId != 0) {
                     // UNIT_NPC_EMOTESTATE is persistent by definition - a zero
                     // here genuinely clears the state loop.
-                    owner_.eventBus().publish(events::UnitEmotePlayed{block.guid, animId, true});
+                    events_.publish(events::UnitEmotePlayed{block.guid, animId, true});
                 } else {
                     LOG_DEBUG("UNIT_NPC_EMOTESTATE emoteId=", val, " had no Emotes.dbc animation mapping");
                 }
@@ -719,7 +723,7 @@ WorldHandler::UnitFieldUpdateResult WorldHandler::applyUnitFieldsOnUpdate(
 
     // Fire UNIT_HEALTH / UNIT_POWER events for Lua addons
     if ((result.healthChanged || result.powerChanged)) {
-        auto unitId = owner_.guidToUnitId(block.guid);
+        auto unitId = queries_.unitIdFor(block.guid);
         if (!unitId.empty()) {
             if (result.healthChanged) pendingEvents_.emit("UNIT_HEALTH", {unitId});
             if (result.maxHealthChanged) pendingEvents_.emit("UNIT_MAXHEALTH", {unitId});
@@ -747,7 +751,7 @@ WorldHandler::UnitFieldUpdateResult WorldHandler::applyUnitFieldsOnUpdate(
                     pendingEvents_.emit(kMaxPowerEvents[result.maxPowerTypeChanged], {unitId});
                 pendingEvents_.emit("UNIT_POWER", {unitId});
                 // When player power changes, action bar usability may change
-                if (block.guid == owner_.getPlayerGuid()) {
+                if (block.guid == queries_.characterGuid()) {
                     pendingEvents_.emit("ACTIONBAR_UPDATE_USABLE", {});
                     pendingEvents_.emit("SPELL_UPDATE_USABLE", {});
                 }
@@ -756,13 +760,13 @@ WorldHandler::UnitFieldUpdateResult WorldHandler::applyUnitFieldsOnUpdate(
     }
 
     // For the wounded-idle animation.
-    if (result.healthChanged && block.guid == owner_.getPlayerGuid()) {
-        owner_.eventBus().publish(events::PlayerHealthChanged{unit->getHealth(), unit->getMaxHealth()});
+    if (result.healthChanged && block.guid == queries_.characterGuid()) {
+        events_.publish(events::PlayerHealthChanged{unit->getHealth(), unit->getMaxHealth()});
     }
 
     // Once per update, so the pet frame and the pet tab redraw once for it.
     if (petFieldsArrived) {
-        if (auto* feed = owner_.petFeed()) feed->onFields(petFields);
+        if (auto* feed = queries_.petFeed()) feed->onFields(petFields);
     }
 
     return result;
@@ -780,10 +784,10 @@ void WorldHandler::dispatchEntitySpawn(uint64_t guid, ObjectType objectType,
     announceUnit(guid, objectType, entity, unit, isDead);
     // Query quest giver status for NPCs with questgiver flag (0x02)
     if (objectType == ObjectType::UNIT && (unit->getNpcFlags() & NPC_FLAG_QUESTGIVER) &&
-        owner_.getSocket()) {
+        sender_.connected()) {
         network::Packet qsPkt(wireOpcode(Opcode::CMSG_QUESTGIVER_STATUS_QUERY));
         qsPkt.writeUInt64(guid);
-        owner_.getSocket()->send(qsPkt);
+        sender_.send(qsPkt);
     }
 }
 
@@ -791,12 +795,12 @@ void WorldHandler::announceUnit(uint64_t guid, ObjectType objectType,
                                      const std::shared_ptr<Entity>& entity,
                                      const std::shared_ptr<Unit>& unit,
                                      bool isDead) {
-    if (objectType == ObjectType::PLAYER && guid == owner_.getPlayerGuid()) {
+    if (objectType == ObjectType::PLAYER && guid == queries_.characterGuid()) {
         return;  // Skip local player - spawned separately via spawnPlayerCharacter()
     }
     if (objectType == ObjectType::PLAYER) {
         if (const auto look = playerAppearance(entity->getFields())) {
-            owner_.eventBus().publish(events::PlayerSpawned{
+            events_.publish(events::PlayerSpawned{
                 guid, unit->getDisplayId(), look->race, look->gender, look->appearanceBytes,
                 look->facialFeatures, unit->getX(), unit->getY(), unit->getZ(), unit->getOrientation()});
         } else {
@@ -818,10 +822,10 @@ void WorldHandler::announceUnit(uint64_t guid, ObjectType objectType,
                 if (unitScale <= 0.01f || unitScale > 100.0f) unitScale = 1.0f;
             }
         }
-        owner_.eventBus().publish(events::CreatureSpawned{guid, unit->getDisplayId(),
+        events_.publish(events::CreatureSpawned{guid, unit->getDisplayId(),
             unit->getX(), unit->getY(), unit->getZ(), unit->getOrientation(), unitScale});
     }
-    if (isDead) owner_.eventBus().publish(events::UnitDied{guid});
+    if (isDead) events_.publish(events::UnitDied{guid});
 }
 
 void WorldHandler::announceObjectsInView() {
@@ -836,10 +840,10 @@ void WorldHandler::announceObjectsInView() {
             const bool dead = isUnitCorpseState(unit->getHealth(), unit->getMaxHealth(),
                                                 unit->getDynamicFlags());
             announceUnit(guid, entity->getType(), entity, unit, dead);
-            if (entity->getType() == ObjectType::PLAYER && guid != owner_.getPlayerGuid()) {
+            if (entity->getType() == ObjectType::PLAYER && guid != queries_.characterGuid()) {
                 ++players;
                 if (unit->getMountDisplayId() != 0)
-                    owner_.eventBus().publish(events::OtherPlayerMounted{guid, unit->getMountDisplayId()});
+                    events_.publish(events::OtherPlayerMounted{guid, unit->getMountDisplayId()});
             } else if (entity->getType() == ObjectType::UNIT) {
                 ++units;
             }
@@ -859,7 +863,7 @@ void WorldHandler::announceObjectsInView() {
     }
     // Other players' clothes come from their visible items, kept beside the
     // entities by the inventory domain.
-    owner_.inventory().emitAllOtherPlayerEquipment();
+    queries_.emitAllOtherPlayerEquipment();
     LOG_INFO("Presented objects in view: units=", units, " players=", players,
              " gameobjects=", objects, " corpses=", corpses);
 }
@@ -877,7 +881,7 @@ void WorldHandler::applyRecordedObjects(const UpdateObjectData& data) {
 void WorldHandler::trackItemOnCreate(const UpdateBlock& block, bool& newItemCreated) {
     // The inventory reads what an item object's fields say; this rebuilds the
     // bags once for the whole packet.
-    if (owner_.inventory().trackItemObject(block.guid, block.objectType == ObjectType::CONTAINER,
+    if (queries_.trackItemObject(block.guid, block.objectType == ObjectType::CONTAINER,
                                            block.fields)) {
         newItemCreated = true;
     }
@@ -886,7 +890,7 @@ void WorldHandler::trackItemOnCreate(const UpdateBlock& block, bool& newItemCrea
 // Update item stack count / durability / enchants for existing items during VALUES.
 void WorldHandler::updateItemOnValuesUpdate(const UpdateBlock& block,
                                                   const std::shared_ptr<Entity>& entity) {
-    owner_.inventory().itemObjectChanged(
+    queries_.itemObjectChanged(
         block.guid, entity && entity->getType() == ObjectType::CONTAINER, block.fields, pendingEvents_);
 }
 
@@ -952,7 +956,7 @@ WorldHandler::IObjectTypeHandler* WorldHandler::getTypeHandler(ObjectType type) 
 
 void WorldHandler::flushPendingEvents() {
     for (const auto& [name, args] : pendingEvents_.events) {
-        owner_.fireAddonEvent(name, args);
+        frameXml_.fireFrameXmlEvent(name, args);
     }
     pendingEvents_.clear();
 }
@@ -967,11 +971,11 @@ void WorldHandler::onCreateUnit(const UpdateBlock& block, std::shared_ptr<Entity
     if (it != block.fields.end() && it->second != 0) {
         auto unit = std::static_pointer_cast<Unit>(entity);
         unit->setEntry(it->second);
-        std::string cached = owner_.queryCache().getCachedCreatureName(it->second);
+        std::string cached = queries_.creatureName(it->second);
         if (!cached.empty()) {
             unit->setName(cached);
         }
-        owner_.queryCache().queryCreatureInfo(it->second, block.guid);
+        queries_.requestCreatureInfo(it->second, block.guid);
     }
 
     // Unit fields
@@ -980,7 +984,7 @@ void WorldHandler::onCreateUnit(const UpdateBlock& block, std::shared_ptr<Entity
     bool unitInitiallyDead = applyUnitFieldsOnCreate(block, unit, ufi);
 
     // Hostility
-    unit->setHostile(owner_.isHostileFaction(unit->getFactionTemplate()));
+    unit->setHostile(queries_.hostileFaction(unit->getFactionTemplate()));
 
     // Spawn dispatch
     if (unit->getDisplayId() == 0) {
@@ -990,8 +994,8 @@ void WorldHandler::onCreateUnit(const UpdateBlock& block, std::shared_ptr<Entity
     }
     if (unit->getDisplayId() != 0) {
         dispatchEntitySpawn(block.guid, block.objectType, entity, unit, unitInitiallyDead);
-        if (block.hasMovement && block.moveFlags != 0 && block.guid != owner_.getPlayerGuid()) {
-            owner_.eventBus().publish(events::UnitMoveFlagsChanged{block.guid, block.moveFlags, ~0u});
+        if (block.hasMovement && block.moveFlags != 0 && block.guid != queries_.characterGuid()) {
+            events_.publish(events::UnitMoveFlagsChanged{block.guid, block.moveFlags, ~0u});
         }
     }
 }
@@ -1000,24 +1004,24 @@ void WorldHandler::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<Enti
     static const bool kVerboseUpdateObject = core::envFlagEnabled("WOWEE_LOG_UPDATE_OBJECT_VERBOSE", false);
 
     // For the local player, capture the full initial field state
-    if (block.guid == owner_.getPlayerGuid()) {
-        owner_.player().fieldsCreated(entity->getFields());
-        owner_.inventory().maybeDetectVisibleItemLayout();
+    if (block.guid == queries_.characterGuid()) {
+        queries_.playerFieldsCreated(entity->getFields());
+        queries_.maybeDetectVisibleItemLayout();
     }
 
     // The name, known from an earlier sighting or asked for, and the visible
     // items. An object that left view and came back is a new one with no
     // name of its own.
     {
-        const auto& names = owner_.queryCache().getPlayerNameCache();
+        const auto& names = queries_.playerNameCache();
         if (auto it = names.find(block.guid); it != names.end()) {
             auto player = std::static_pointer_cast<Player>(entity);
             if (player->getName().empty()) player->setName(it->second);
         }
-        owner_.queryCache().queryPlayerName(block.guid);
+        queries_.requestPlayerName(block.guid);
     }
-    if (block.guid != owner_.getPlayerGuid()) {
-        owner_.inventory().updateOtherPlayerVisibleItems(block.guid, entity->getFields());
+    if (block.guid != queries_.characterGuid()) {
+        queries_.updateOtherPlayerVisibleItems(block.guid, entity->getFields());
     }
 
     // Unit fields (PLAYER is a unit)
@@ -1026,47 +1030,43 @@ void WorldHandler::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<Enti
     bool unitInitiallyDead = applyUnitFieldsOnCreate(block, unit, ufi);
 
     // Self-player post-unit-field handling
-    if (block.guid == owner_.getPlayerGuid()) {
+    if (block.guid == queries_.characterGuid()) {
         // The server has us on a flight the client did not start - entering
         // the world mid-flight. Show it as one: no walking flags, on the mount.
-        auto& movement = owner_.movement();
-        if ((unit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0 && !movement.isOnTaxiFlight()) {
-            owner_.movement().sanitizeMovementForTaxi();
-            movement.applyTaxiMountForCurrentNode();
-        }
+        if ((unit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0) queries_.playerCreatedInFlight();
     }
-    if (block.guid == owner_.getPlayerGuid()) {
+    if (block.guid == queries_.characterGuid()) {
         const auto field = [&](UF f) -> std::optional<uint32_t> {
             auto it = block.fields.find(fieldIndex(f));
             if (it == block.fields.end()) return std::nullopt;
             return it->second;
         };
-        owner_.combat().playerCreated(field(UF::UNIT_FIELD_HEALTH), unit->getDynamicFlags(),
+        queries_.playerObjectCreated(field(UF::UNIT_FIELD_HEALTH), unit->getDynamicFlags(),
                                       field(UF::PLAYER_FLAGS));
     }
     // Pre-WotLK aura sync on initial object create
-    if (block.guid == owner_.getPlayerGuid()) {
-        owner_.spells().playerAuraFieldsArrived(entity->getFields(), pendingEvents_);
+    if (block.guid == queries_.characterGuid()) {
+        queries_.playerAuraFieldsArrived(entity->getFields(), pendingEvents_);
     }
 
     // Hostility
-    unit->setHostile(owner_.isHostileFaction(unit->getFactionTemplate()));
+    unit->setHostile(queries_.hostileFaction(unit->getFactionTemplate()));
 
     // Spawn dispatch
     if (unit->getDisplayId() != 0) {
         dispatchEntitySpawn(block.guid, block.objectType, entity, unit, unitInitiallyDead);
-        if (block.hasMovement && block.moveFlags != 0 && block.guid != owner_.getPlayerGuid()) {
-            owner_.eventBus().publish(events::UnitMoveFlagsChanged{block.guid, block.moveFlags, ~0u});
+        if (block.hasMovement && block.moveFlags != 0 && block.guid != queries_.characterGuid()) {
+            events_.publish(events::UnitMoveFlagsChanged{block.guid, block.moveFlags, ~0u});
         }
     }
 
     // Player stat fields (self only)
-    if (block.guid == owner_.getPlayerGuid()) {
+    if (block.guid == queries_.characterGuid()) {
         // Auto-detect coinage index using the previous snapshot vs this full snapshot.
-        owner_.inventory().detectCoinageField(owner_.player().fields(), block.fields);
+        queries_.detectCoinageField(queries_.playerFields(), block.fields);
 
-        owner_.player().fieldsCreated(block.fields);
-        owner_.inventory().detectInventorySlotBases(block.fields);
+        queries_.playerFieldsCreated(block.fields);
+        queries_.detectInventorySlotBases(block.fields);
 
         if (kVerboseUpdateObject) {
             uint16_t maxField = 0;
@@ -1077,12 +1077,12 @@ void WorldHandler::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<Enti
                      " fields (max index=", maxField, ")");
         }
 
-        owner_.player().playerFieldsArrived(block.fields, true, pendingEvents_);
-        owner_.inventory().inventoryFieldsArrived(block.fields, true, pendingEvents_);
-        owner_.inventory().maybeDetectVisibleItemLayout();
-        owner_.spells().extractSkillFields(owner_.player().fields());
-        owner_.spells().extractExploredZoneFields(owner_.player().fields());
-        owner_.quests().applyQuestStateFromFields(owner_.player().fields());
+        queries_.playerFieldsArrived(block.fields, true, pendingEvents_);
+        queries_.inventoryFieldsArrived(block.fields, true, pendingEvents_);
+        queries_.maybeDetectVisibleItemLayout();
+        queries_.skillFieldsArrived(queries_.playerFields());
+        queries_.exploredZoneFieldsArrived(queries_.playerFields());
+        queries_.questFieldsArrived(queries_.playerFields());
     }
 }
 
@@ -1095,10 +1095,10 @@ void WorldHandler::onCreateGameObject(const UpdateBlock& block, std::shared_ptr<
     auto itEntry = block.fields.find(fieldIndex(UF::OBJECT_FIELD_ENTRY));
     if (itEntry != block.fields.end() && itEntry->second != 0) {
         go->setEntry(itEntry->second);
-        if (const auto* info = owner_.queryCache().getCachedGameObjectInfo(itEntry->second)) {
+        if (const auto* info = queries_.gameObjectInfo(itEntry->second)) {
             go->setName(info->name);
         }
-        owner_.queryCache().queryGameObjectInfo(itEntry->second, block.guid);
+        queries_.requestGameObjectInfo(itEntry->second, block.guid);
     }
 
     // Detect transport GameObjects via UPDATEFLAG_TRANSPORT (0x0002)
@@ -1124,7 +1124,7 @@ void WorldHandler::announceGameObject(uint64_t guid, const GameObject& go) {
     // into view in its closed pose and stayed there until something changed it.
     const uint16_t ufBytes1 = fieldIndex(UF::GAMEOBJECT_BYTES_1);
     if (ufBytes1 != 0xFFFF && go.hasField(ufBytes1)) {
-        owner_.eventBus().publish(events::GameObjectStateChanged{
+        events_.publish(events::GameObjectStateChanged{
             guid, static_cast<uint8_t>(go.getField(ufBytes1) & 0xFF)});
     }
     if (go.getDisplayId() != 0) {
@@ -1139,7 +1139,7 @@ void WorldHandler::announceGameObject(uint64_t guid, const GameObject& go) {
                 }
             }
         }
-        owner_.eventBus().publish(events::GameObjectSpawned{guid, go.getEntry(), go.getDisplayId(),
+        events_.publish(events::GameObjectSpawned{guid, go.getEntry(), go.getDisplayId(),
             go.getX(), go.getY(), go.getZ(), go.getOrientation(), goScale});
     }
     // Fire transport move callback for transports (position update on re-creation).
@@ -1151,7 +1151,7 @@ void WorldHandler::announceGameObject(uint64_t guid, const GameObject& go) {
     // TransportAnimation.dbc 1:1, so they were left stationary. Only genuine
     // movement updates (onValuesUpdateGameObject / MOVEMENT blocks) set that flag.
     if (transportGuids_.count(guid)) {
-        owner_.eventBus().publish(events::TransportMoved{guid,
+        events_.publish(events::TransportMoved{guid,
             go.getX(), go.getY(), go.getZ(), go.getOrientation()});
     }
 }
@@ -1188,7 +1188,7 @@ struct CorpseFields {
 
 void WorldHandler::onCreateCorpse(const UpdateBlock& block, const Entity& corpse) {
     const CorpseFields field{corpse};
-    const bool own = field.ownedBy(owner_.getPlayerGuid());
+    const bool own = field.ownedBy(queries_.characterGuid());
 
     // Detect player's own corpse object so we have the position even when
     // SMSG_DEATH_RELEASE_LOC hasn't been received (e.g. login as ghost).
@@ -1202,7 +1202,7 @@ void WorldHandler::onCreateCorpse(const UpdateBlock& block, const Entity& corpse
     // meant a ghost who walked back to a corpse that arrived without one
     // could never take it, however close they stood.
     if (own && !field.bones()) {
-        owner_.combat().ownCorpseSeen(block.guid, block.hasMovement, block.x, block.y, block.z);
+        queries_.ownCorpseSeen(block.guid, block.hasMovement, block.x, block.y, block.z);
     }
     announceCorpse(block.guid, corpse);
 }
@@ -1210,15 +1210,13 @@ void WorldHandler::onCreateCorpse(const UpdateBlock& block, const Entity& corpse
 void WorldHandler::announceCorpse(uint64_t guid, const Entity& corpse) {
     const CorpseFields field{corpse};
     const bool bones = field.bones();
-    if (field.ownedBy(owner_.getPlayerGuid())) {
+    if (field.ownedBy(queries_.characterGuid())) {
         if (bones) return;
         // Corpse objects carry ownership and position but not a standalone
         // render model. Reuse the owning character's appearance and equipment
         // under the corpse GUID, then force the queued instance into DEATH.
-        auto characterIt = std::find_if(owner_.charactersRef().begin(), owner_.charactersRef().end(),
-            [&](const Character& character) { return character.guid == owner_.getPlayerGuid(); });
-        if (characterIt != owner_.charactersRef().end()) {
-            owner_.eventBus().publish(events::PlayerSpawned{
+        if (const Character* characterIt = queries_.listedCharacter()) {
+            events_.publish(events::PlayerSpawned{
                 guid, 0,
                 static_cast<uint8_t>(characterIt->race),
                 static_cast<uint8_t>(characterIt->gender),
@@ -1232,9 +1230,9 @@ void WorldHandler::announceCorpse(uint64_t guid, const Entity& corpse) {
                 worn.displayIds[i] = characterIt->equipment[i].displayModel;
                 worn.inventoryTypes[i] = characterIt->equipment[i].inventoryType;
             }
-            owner_.eventBus().publish(worn);
+            events_.publish(worn);
         }
-        owner_.eventBus().publish(events::UnitDied{guid});
+        events_.publish(events::UnitDied{guid});
         return;
     }
     if (bones || !corpse.hasPosition()) return;
@@ -1253,7 +1251,7 @@ void WorldHandler::announceCorpse(uint64_t guid, const Entity& corpse) {
     const uint32_t appearance = ((bytes1 >> 24) & 0xFF) | ((bytes2 & 0xFF) << 8) |
                                 (((bytes2 >> 8) & 0xFF) << 16) | (((bytes2 >> 16) & 0xFF) << 24);
     const auto facialHair = static_cast<uint8_t>((bytes2 >> 24) & 0xFF);
-    owner_.eventBus().publish(events::PlayerSpawned{guid, field(UF::CORPSE_FIELD_DISPLAY_ID), race, gender,
+    events_.publish(events::PlayerSpawned{guid, field(UF::CORPSE_FIELD_DISPLAY_ID), race, gender,
                                                     appearance, facialHair, corpse.getX(), corpse.getY(),
                                                     corpse.getZ(), corpse.getOrientation()});
     {
@@ -1267,9 +1265,9 @@ void WorldHandler::announceCorpse(uint64_t guid, const Entity& corpse) {
         constexpr auto kBack = static_cast<size_t>(EquipSlot::BACK);
         if (corpseFlags & CORPSE_FLAG_HIDE_HELM) { worn.displayIds[kHead] = 0; worn.inventoryTypes[kHead] = 0; }
         if (corpseFlags & CORPSE_FLAG_HIDE_CLOAK) { worn.displayIds[kBack] = 0; worn.inventoryTypes[kBack] = 0; }
-        owner_.eventBus().publish(worn);
+        events_.publish(worn);
     }
-    owner_.eventBus().publish(events::UnitDied{guid});
+    events_.publish(events::UnitDied{guid});
 }
 
 // ============================================================
@@ -1288,11 +1286,11 @@ void WorldHandler::handleDisplayIdChange(const UpdateBlock& block,
         unit->getHealth(), unit->getMaxHealth(), unit->getDynamicFlags());
     dispatchEntitySpawn(block.guid, entity->getType(), entity, unit,
                         isDeadNow && !result.npcDeathNotified);
-    if (owner_.hasAddonEventListener()) {
+    if (frameXml_.frameXmlListening()) {
         std::string uid;
-        if (block.guid == owner_.combat().getTargetGuid()) uid = "target";
-        else if (block.guid == owner_.combat().getFocusGuid()) uid = "focus";
-        else if (block.guid == owner_.petGuid()) uid = "pet";
+        if (block.guid == queries_.currentTargetGuid()) uid = "target";
+        else if (block.guid == queries_.focusTargetGuid()) uid = "focus";
+        else if (block.guid == queries_.petGuid()) uid = "pet";
         if (!uid.empty())
             pendingEvents_.emit("UNIT_MODEL_CHANGED", {uid});
     }
@@ -1310,14 +1308,14 @@ void WorldHandler::onValuesUpdateUnit(const UpdateBlock& block, std::shared_ptr<
     constexpr uint32_t UNIT_FLAG_SKINNABLE = 0x04000000;
     if (result.lootableCleared && unit->getHealth() == 0 &&
         (unit->getUnitFlags() & UNIT_FLAG_SKINNABLE) == 0) {
-        owner_.despawnCreatureLocally(block.guid);
+        queries_.despawnCreatureLocally(block.guid);
     }
 }
 
 void WorldHandler::onValuesUpdatePlayer(const UpdateBlock& block, std::shared_ptr<Entity>& entity) {
     // Other player visible items
-    if (block.guid != owner_.getPlayerGuid()) {
-        owner_.inventory().updateOtherPlayerVisibleItems(block.guid, entity->getFields());
+    if (block.guid != queries_.characterGuid()) {
+        queries_.updateOtherPlayerVisibleItems(block.guid, entity->getFields());
     }
 
     // Unit field update (player IS a unit)
@@ -1326,41 +1324,41 @@ void WorldHandler::onValuesUpdatePlayer(const UpdateBlock& block, std::shared_pt
     UnitFieldUpdateResult result = applyUnitFieldsOnUpdate(block, entity, unit, ufi);
 
     // Pre-WotLK aura sync from UNIT_FIELD_AURAS when those fields are updated
-    if (block.guid == owner_.getPlayerGuid()) {
-        owner_.spells().playerAuraFieldsArrived(entity->getFields(), pendingEvents_);
+    if (block.guid == queries_.characterGuid()) {
+        queries_.playerAuraFieldsArrived(entity->getFields(), pendingEvents_);
     }
 
     // Display ID changed - re-spawn/model-change
     handleDisplayIdChange(block, entity, unit, result);
 
     // Self-player stat/inventory/quest field updates
-    if (block.guid == owner_.getPlayerGuid()) {
-        const bool needCoinageDetectSnapshot = owner_.inventory().expectedMoneyDelta() != 0;
+    if (block.guid == queries_.characterGuid()) {
+        const bool needCoinageDetectSnapshot = queries_.expectedMoneyDelta() != 0;
         FlatFieldMap oldFieldsSnapshot;
         if (needCoinageDetectSnapshot) {
-            oldFieldsSnapshot = owner_.player().fields();
+            oldFieldsSnapshot = queries_.playerFields();
         }
         if (block.hasMovement && block.runSpeed > 0.1f && block.runSpeed < 100.0f) {
             // Speed is independent of mount ownership: slows and ordinary movement
             // snapshots may report base-speed values while UNIT_FIELD_MOUNTDISPLAYID
             // still authoritatively says the player is mounted.
-            owner_.movement().applyServerMovementSpeeds(
+            queries_.applyServerMovementSpeeds(
                 block.walkSpeed, block.runSpeed, block.runBackSpeed,
                 block.swimSpeed, block.swimBackSpeed, block.flightSpeed,
                 block.flightBackSpeed, block.turnRate, block.pitchRate);
         }
-        owner_.player().fieldsUpdated(block.fields);
+        queries_.playerFieldsUpdated(block.fields);
         if (needCoinageDetectSnapshot) {
-            owner_.inventory().detectCoinageField(oldFieldsSnapshot, owner_.player().fields());
+            queries_.detectCoinageField(oldFieldsSnapshot, queries_.playerFields());
         }
-        owner_.inventory().maybeDetectVisibleItemLayout();
-        owner_.inventory().detectInventorySlotBases(block.fields);
+        queries_.maybeDetectVisibleItemLayout();
+        queries_.detectInventorySlotBases(block.fields);
 
-        owner_.player().playerFieldsArrived(block.fields, false, pendingEvents_);
-        owner_.inventory().inventoryFieldsArrived(block.fields, false, pendingEvents_);
-        owner_.spells().extractSkillFields(owner_.player().fields());
-        owner_.spells().extractExploredZoneFields(owner_.player().fields());
-        owner_.quests().applyQuestStateFromFields(owner_.player().fields());
+        queries_.playerFieldsArrived(block.fields, false, pendingEvents_);
+        queries_.inventoryFieldsArrived(block.fields, false, pendingEvents_);
+        queries_.skillFieldsArrived(queries_.playerFields());
+        queries_.exploredZoneFieldsArrived(queries_.playerFields());
+        queries_.questFieldsArrived(queries_.playerFields());
     }
 }
 
@@ -1372,10 +1370,10 @@ void WorldHandler::onValuesUpdateGameObject(const UpdateBlock& block, std::share
     if (block.hasMovement) {
         if (transportGuids_.count(block.guid)) {
             serverUpdatedTransportGuids_.insert(block.guid);
-            owner_.eventBus().publish(events::TransportMoved{block.guid, entity->getX(), entity->getY(),
+            events_.publish(events::TransportMoved{block.guid, entity->getX(), entity->getY(),
                                                              entity->getZ(), entity->getOrientation()});
         } else {
-            owner_.eventBus().publish(events::GameObjectMoved{block.guid, entity->getX(), entity->getY(),
+            events_.publish(events::GameObjectMoved{block.guid, entity->getX(), entity->getY(),
                                                               entity->getZ(), entity->getOrientation()});
         }
     }
@@ -1386,7 +1384,7 @@ void WorldHandler::onValuesUpdateGameObject(const UpdateBlock& block, std::share
         auto itB = block.fields.find(ufGoBytes1);
         if (itB != block.fields.end()) {
             uint8_t goState = static_cast<uint8_t>(itB->second & 0xFF);
-            owner_.eventBus().publish(events::GameObjectStateChanged{block.guid, goState});
+            events_.publish(events::GameObjectStateChanged{block.guid, goState});
         }
     }
 
@@ -1406,7 +1404,7 @@ void WorldHandler::applyTransportRouteClock(const UpdateBlock& block) {
     //
     // Both fields are WotLK-only. Nothing earlier published a transport's phase,
     // so on those expansions fieldIndex returns 0xFFFF and this does nothing.
-    auto* tm = owner_.getTransportManager();
+    auto* tm = queries_.transports();
     if (!tm || !tm->getTransport(block.guid)) return;
 
     const uint16_t ufLevel = fieldIndex(UF::GAMEOBJECT_LEVEL);
@@ -1432,7 +1430,7 @@ void WorldHandler::applyTransportRouteClock(const UpdateBlock& block) {
 // ============================================================
 
 void WorldHandler::handleCreateObject(const UpdateBlock& block, bool& newItemCreated) {
-    if (block.guid == owner_.getPlayerGuid()) owner_.spells().companionFieldsArrived(block.fields);
+    if (block.guid == queries_.characterGuid()) queries_.companionFieldsArrived(block.fields);
     pendingEvents_.clear();
 
     // 3a: Create entity from block type
@@ -1445,15 +1443,15 @@ void WorldHandler::handleCreateObject(const UpdateBlock& block, bool& newItemCre
         entity->setPosition(pos.x, pos.y, pos.z, oCanonical);
         LOG_DEBUG("  Position: (", pos.x, ", ", pos.y, ", ", pos.z, ")");
         applyBlockMovementSpeeds(block, *entity);
-        if (block.guid == owner_.getPlayerGuid() && block.runSpeed > 0.1f && block.runSpeed < 100.0f) {
-            owner_.movement().applyServerMovementSpeeds(
+        if (block.guid == queries_.characterGuid() && block.runSpeed > 0.1f && block.runSpeed < 100.0f) {
+            queries_.applyServerMovementSpeeds(
                 block.walkSpeed, block.runSpeed, block.runBackSpeed,
                 block.swimSpeed, block.swimBackSpeed, block.flightSpeed,
                 block.flightBackSpeed, block.turnRate, block.pitchRate);
         }
         // 3b: Track player-on-transport state
-        if (block.guid == owner_.getPlayerGuid()) {
-            if (auto aboard = owner_.movement().serverPlacedPlayer(block, pos, oCanonical, false))
+        if (block.guid == queries_.characterGuid()) {
+            if (auto aboard = queries_.serverPlacedPlayer(block, pos, oCanonical, false))
                 entity->setPosition(aboard->x, aboard->y, aboard->z, oCanonical);
         }
         // 3i: Track transport-relative children so they follow parent transport motion.
@@ -1476,13 +1474,13 @@ void WorldHandler::handleCreateObject(const UpdateBlock& block, bool& newItemCre
 }
 
 void WorldHandler::handleValuesUpdate(const UpdateBlock& block) {
-    if (block.guid == owner_.getPlayerGuid()) owner_.spells().companionFieldsArrived(block.fields);
+    if (block.guid == queries_.characterGuid()) queries_.companionFieldsArrived(block.fields);
     auto entity = entityManager.getEntity(block.guid);
     if (!entity) {
         // Item/container entities may be absent from entityManager (e.g. server
         // only sent a partial update) but the inventory still holds them.
         // Process field updates so durability/stack changes from repair aren't lost.
-        if (owner_.inventory().holdsItemObject(block.guid)) {
+        if (queries_.holdsItemObject(block.guid)) {
             pendingEvents_.clear();
             updateItemOnValuesUpdate(block, entity);
             flushPendingEvents();
@@ -1532,30 +1530,30 @@ void WorldHandler::handleMovementUpdate(const UpdateBlock& block) {
                 updateNonPlayerTransportAttachment(block, entity, entity->getType());
 
                 // 3b: Track player-on-transport state from MOVEMENT updates
-                if (block.guid == owner_.getPlayerGuid()) {
-                    if (auto aboard = owner_.movement().serverPlacedPlayer(block, pos, oCanonical, true))
+                if (block.guid == queries_.characterGuid()) {
+                    if (auto aboard = queries_.serverPlacedPlayer(block, pos, oCanonical, true))
                         entity->setPosition(aboard->x, aboard->y, aboard->z, oCanonical);
                 }
 
                 // Fire transport move callback if this is a known transport
                 if (transportGuids_.count(block.guid)) {
                     serverUpdatedTransportGuids_.insert(block.guid);
-                    owner_.eventBus().publish(events::TransportMoved{block.guid, pos.x, pos.y, pos.z, oCanonical});
+                    events_.publish(events::TransportMoved{block.guid, pos.x, pos.y, pos.z, oCanonical});
                 }
                 // Fire move callback for non-transport gameobjects.
                 if (entity->getType() == ObjectType::GAMEOBJECT &&
                     transportGuids_.count(block.guid) == 0) {
-                    owner_.eventBus().publish(events::GameObjectMoved{block.guid, entity->getX(), entity->getY(),
+                    events_.publish(events::GameObjectMoved{block.guid, entity->getX(), entity->getY(),
                                                                       entity->getZ(), entity->getOrientation()});
                 }
                 // Fire move callback for non-player units (creatures).
                 // SMSG_MONSTER_MOVE handles smooth interpolated movement, but many
                 // servers (especially vanilla) communicate NPC positions
                 // via MOVEMENT blocks instead. Use duration=0 for an instant snap.
-                if (block.guid != owner_.getPlayerGuid() &&
+                if (block.guid != queries_.characterGuid() &&
                     entity->getType() == ObjectType::UNIT &&
                     transportGuids_.count(block.guid) == 0) {
-                    owner_.eventBus().publish(events::CreatureMoved{block.guid, pos.x, pos.y, pos.z, 0});
+                    events_.publish(events::CreatureMoved{block.guid, pos.x, pos.y, pos.z, 0});
                 }
             } else {
                 LOG_WARNING("MOVEMENT update for unknown entity: 0x", std::hex, block.guid, std::dec);
@@ -1563,10 +1561,10 @@ void WorldHandler::handleMovementUpdate(const UpdateBlock& block) {
 }
 
 void WorldHandler::finalizeUpdateObjectBatch(bool newItemCreated) {
-    owner_.combat().invalidateTabCycle();
+    queries_.invalidateTabCycle();
     // Entity count logging disabled
 
-    owner_.inventory().updateBatchFinished(newItemCreated, owner_.player().fields());
+    queries_.updateBatchFinished(newItemCreated, queries_.playerFields());
 }
 
 void WorldHandler::handleCompressedUpdateObject(network::Packet& packet) {
@@ -1618,9 +1616,9 @@ void WorldHandler::handleDestroyObject(network::Packet& packet) {
     // Remove entity
     if (entityManager.hasEntity(data.guid)) {
         if (transportGuids_.count(data.guid) > 0) {
-            const bool playerAboardNow = (owner_.movement().getPlayerTransportGuid() == data.guid);
-            const bool stickyAboard = owner_.movement().recentlyAboard(data.guid);
-            const bool movementSaysAboard = (owner_.movementInfoRef().transportGuid == data.guid);
+            const bool playerAboardNow = (queries_.playerTransportGuid() == data.guid);
+            const bool stickyAboard = queries_.recentlyAboard(data.guid);
+            const bool movementSaysAboard = (queries_.movementTransportGuid() == data.guid);
             // CMaNGOS judges visibility using the transport's static DB spawn
             // coordinate, which can be far from where a client-animated transport
             // currently is - keep all transports alive unconditionally on pre-WotLK.
@@ -1639,26 +1637,26 @@ void WorldHandler::handleDestroyObject(network::Packet& packet) {
         auto entity = entityManager.getEntity(data.guid);
         if (entity) {
             if (entity->getType() == ObjectType::UNIT) {
-                owner_.eventBus().publish(events::CreatureDespawned{data.guid});
+                events_.publish(events::CreatureDespawned{data.guid});
             } else if (entity->getType() == ObjectType::PLAYER) {
                 // Player entities also need renderer cleanup on DESTROY_OBJECT, not just out-of-range.
-                owner_.eventBus().publish(events::PlayerDespawned{data.guid});
-                owner_.inventory().forgetPlayerEquipment(data.guid);
-                owner_.queryCache().playerLeftView(data.guid);
+                events_.publish(events::PlayerDespawned{data.guid});
+                queries_.forgetPlayerEquipment(data.guid);
+                queries_.playerLeftView(data.guid);
             } else if (entity->getType() == ObjectType::GAMEOBJECT) {
-                owner_.eventBus().publish(events::GameObjectDespawned{data.guid});
+                events_.publish(events::GameObjectDespawned{data.guid});
             } else if (entity->getType() == ObjectType::CORPSE) {
-                owner_.eventBus().publish(events::PlayerDespawned{data.guid});
+                events_.publish(events::PlayerDespawned{data.guid});
             }
         }
         if (transportGuids_.count(data.guid) > 0) {
             transportGuids_.erase(data.guid);
             serverUpdatedTransportGuids_.erase(data.guid);
-            if (owner_.movement().getPlayerTransportGuid() == data.guid) {
-                owner_.movement().clearPlayerTransport();
+            if (queries_.playerTransportGuid() == data.guid) {
+                queries_.clearPlayerTransport();
             }
         }
-        owner_.movement().clearTransportAttachment(data.guid);
+        queries_.clearTransportAttachment(data.guid);
         entityManager.removeEntity(data.guid);
         LOG_INFO("Destroyed entity: 0x", std::hex, data.guid, std::dec,
                  " (", (data.isDeath ? "death" : "despawn"), ")");
@@ -1667,35 +1665,35 @@ void WorldHandler::handleDestroyObject(network::Packet& packet) {
     }
 
     // Clean up auto-attack and target if destroyed entity was our target
-    if (data.guid == owner_.combat().getAutoAttackTargetGuid()) {
-        owner_.stopAutoAttack();
+    if (data.guid == queries_.autoAttackTargetGuid()) {
+        queries_.stopAutoAttack();
     }
-    if (data.guid == owner_.combat().getTargetGuid()) {
-        owner_.combat().targetGone();
+    if (data.guid == queries_.currentTargetGuid()) {
+        queries_.targetGone();
     }
-    owner_.combat().removeHostileAttacker(data.guid);
+    queries_.removeHostileAttacker(data.guid);
 
     // Remove online item/container tracking
-    if (owner_.inventory().forgetItemObject(data.guid)) {
-        owner_.inventory().rebuildOnlineInventory();
+    if (queries_.forgetItemObject(data.guid)) {
+        queries_.rebuildOnlineInventory();
     }
 
     // Clean up quest giver status
     // QuestHandler's map, which is the one every reader forwards to.
     // GameHandler's same-named member is dead, so erasing there left a
     // despawned quest giver's mark behind on whatever took its place.
-    owner_.quests().forgetQuestGiver(data.guid);
+    queries_.forgetQuestGiver(data.guid);
 
     // Remove combat text entries referencing the destroyed entity so floating
     // damage numbers don't linger after the source/target despawns.
-    owner_.combat().removeCombatTextForGuid(data.guid);
+    queries_.removeCombatTextForGuid(data.guid);
 
-    // Clean up unit cast owner_.getState() (cast bar) for the destroyed unit
-    owner_.spells().removeUnitCastState(data.guid);
+    // Clean up unit cast state (cast bar) for the destroyed unit
+    queries_.forgetUnitCast(data.guid);
     // Clean up cached auras
-    owner_.spells().removeUnitAuraCache(data.guid);
+    queries_.forgetUnitAuras(data.guid);
 
-    owner_.combat().invalidateTabCycle();
+    queries_.invalidateTabCycle();
 }
 
 // Name Queries
@@ -1707,12 +1705,12 @@ void WorldHandler::playerNamed(uint64_t guid, const std::string& name) {
         std::static_pointer_cast<Player>(entity)->setName(name);
     }
     // UNIT_NAME_UPDATE so nameplate/unit frame addons know the name is available
-    if (owner_.hasAddonEventListener()) {
+    if (frameXml_.frameXmlListening()) {
         std::string unitId;
-        if (guid == owner_.combat().getTargetGuid()) unitId = "target";
-        else if (guid == owner_.combat().getFocusGuid()) unitId = "focus";
-        else if (guid == owner_.getPlayerGuid()) unitId = "player";
-        if (!unitId.empty()) owner_.fireAddonEvent("UNIT_NAME_UPDATE", {unitId});
+        if (guid == queries_.currentTargetGuid()) unitId = "target";
+        else if (guid == queries_.focusTargetGuid()) unitId = "focus";
+        else if (guid == queries_.characterGuid()) unitId = "player";
+        if (!unitId.empty()) frameXml_.fireFrameXmlEvent("UNIT_NAME_UPDATE", {unitId});
     }
 }
 
@@ -1730,9 +1728,9 @@ void WorldHandler::creatureNamed(const CreatureQueryResponseData& data) {
         // Only for a unit the interface has a token for: the frame compares the
         // argument against its own unit and ignores anything else, and most of
         // a zone is neither targeted nor focused.
-        const std::string unitId = owner_.guidToUnitId(guid);
-        if (!unitId.empty() && owner_.hasAddonEventListener()) {
-            owner_.fireAddonEvent("UNIT_CLASSIFICATION_CHANGED", {unitId});
+        const std::string unitId = queries_.unitIdFor(guid);
+        if (!unitId.empty() && frameXml_.frameXmlListening()) {
+            frameXml_.fireFrameXmlEvent("UNIT_CLASSIFICATION_CHANGED", {unitId});
         }
     }
 }

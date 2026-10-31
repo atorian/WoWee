@@ -259,12 +259,14 @@ CHECKS = [
     # the pre-WotLK aura fields to the spells: -> 396; where the server puts the
     # player, to movement: -> 364; what the fields say of death, to combat: -> 344;
     # the objective a template names, to quests: -> 340; the player's
-    # experience, level, rest and sheet to PlayerHandler: -> 271.
+    # experience, level, rest and sheet to PlayerHandler: -> 271; the rest of
+    # EntityController moved out or became WorldHandler: -> 216. WorldHandler
+    # built from WorldQueries: 1 -> 0 handlers, -> 0.
     ("domain_shape_check.py",
-     r"^(\d+) domain handlers built from GameHandler&", 1,
+     r"^(\d+) domain handlers built from GameHandler&", 0,
      "domain handlers whose constructor takes GameHandler&"),
     ("domain_shape_check.py",
-     r"^(\d+) reaches through owner_ in src/game", 216,
+     r"^(\d+) reaches through owner_ in src/game", 0,
      "reaches through owner_ into GameHandler from the domain handlers"),
     # State a domain should own, handed out of GameHandler writable, and the
     # notifications wired to a single listener instead of the bus. 218, 1324
@@ -276,7 +278,7 @@ CHECKS = [
      r"^(\d+) xxxRef\(\) accessors in GameHandler", 4,
      "writable accessors to GameHandler's state"),
     ("domain_shape_check.py",
-     r"^(\d+) calls to them through owner_ in src/game", 5,
+     r"^(\d+) calls to them through owner_ in src/game", 0,
      "domain handlers editing GameHandler's state through its accessors"),
     ("domain_shape_check.py",
      r"^(\d+) set\*Callback setters in GameHandler", 2,

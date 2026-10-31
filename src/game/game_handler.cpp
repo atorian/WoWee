@@ -120,7 +120,7 @@ GameHandler::GameHandler(GameServices& services)
 
     // Initialize domain handlers
     queryCacheHandler_ = std::make_unique<QueryCacheHandler>(*this, *services_.events, *this);
-    worldHandler_ = std::make_unique<WorldHandler>(*this);
+    worldHandler_ = std::make_unique<WorldHandler>(*this, *this, *services_.events, *this, *services_.emotes);
     chatHandler_      = std::make_unique<ChatHandler>(*this, *this, *services_.events, *this,
                                                       *services_.cvars, *services_.emotes);
     movementHandler_  = std::make_unique<MovementHandler>(*this, *this, *services_.events, *chatHandler_,

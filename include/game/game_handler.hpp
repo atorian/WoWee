@@ -100,6 +100,7 @@ using WorldConnectFailureCallback = std::function<void(const std::string& reason
  */
 class GameHandler : public IConnectionState,
                      public QueryCacheQueries,
+                     public WorldQueries,
                      public PacketSender,
                      public FrameXmlEvents,
                      public ActionBarQueries,
@@ -386,6 +387,121 @@ public:
     void playerNameArrived(uint64_t guid, const std::string& name) override;
     void creatureTemplateArrived(const CreatureQueryResponseData& data) override;
     void gameObjectTemplateArrived(const GameObjectQueryResponseData& data) override;
+
+    // WorldQueries. The session's, the caches' and some of the fight's
+    // answers are above, under the names other handlers ask them by; these
+    // hand the rest to their owners.
+    bool hostileFaction(uint32_t factionTemplateId) const override { return isHostileFaction(factionTemplateId); }
+    uint64_t movementTransportGuid() const override { return movementInfo.transportGuid; }
+    uint64_t playerTransportGuid() const override { return movementHandler_->getPlayerTransportGuid(); }
+    bool recentlyAboard(uint64_t guid) const override { return movementHandler_->recentlyAboard(guid); }
+    void clearPlayerTransport() override { movementHandler_->clearPlayerTransport(); }
+    void setTransportAttachment(uint64_t childGuid, ObjectType type, uint64_t transportGuid,
+                                const glm::vec3& localOffset, bool hasLocalOrientation,
+                                float localOrientation, bool offsetNeedsTransportResolution) override {
+        movementHandler_->setTransportAttachment(childGuid, type, transportGuid, localOffset,
+                                                 hasLocalOrientation, localOrientation,
+                                                 offsetNeedsTransportResolution);
+    }
+    void clearTransportAttachment(uint64_t childGuid) override { movementHandler_->clearTransportAttachment(childGuid); }
+    std::optional<glm::vec3> serverPlacedPlayer(const UpdateBlock& block, const glm::vec3& canonicalPos,
+                                                float canonicalOrientation, bool movementUpdate) override {
+        return movementHandler_->serverPlacedPlayer(block, canonicalPos, canonicalOrientation, movementUpdate);
+    }
+    void applyServerMovementSpeeds(float walk, float run, float runBack, float swim, float swimBack,
+                                   float flight, float flightBack, float turn, float pitch) override {
+        movementHandler_->applyServerMovementSpeeds(walk, run, runBack, swim, swimBack, flight,
+                                                    flightBack, turn, pitch);
+    }
+    void playerCreatedInFlight() override { movementHandler_->playerCreatedInFlight(); }
+    void playerMountFieldArrived(uint32_t displayId, const FlatFieldMap& blockFields,
+                                 FrameXmlEvents& packetEvents) override {
+        movementHandler_->playerMountFieldArrived(displayId, blockFields, packetEvents);
+    }
+    void playerFieldsCreated(const FlatFieldMap& fields) override { playerHandler_->fieldsCreated(fields); }
+    void playerFieldsUpdated(const FlatFieldMap& fields) override { playerHandler_->fieldsUpdated(fields); }
+    void playerFieldsArrived(const FlatFieldMap& fields, bool isCreate, FrameXmlEvents& packetEvents) override {
+        playerHandler_->playerFieldsArrived(fields, isCreate, packetEvents);
+    }
+    void shapeshiftFormArrived(uint8_t form, FrameXmlEvents& packetEvents) override {
+        playerHandler_->shapeshiftFormArrived(form, packetEvents);
+    }
+    void playerUnitFlagsArrived(uint32_t previous, uint32_t flags, FrameXmlEvents& packetEvents) override {
+        combatHandler_->playerUnitFlagsArrived(previous, flags, packetEvents);
+        playerHandler_->unitFlagsArrived(previous, flags);
+    }
+    void playerVisibilityFlagsArrived(uint8_t previous, uint8_t flags) override {
+        playerHandler_->visibilityFlagsArrived(previous, flags);
+    }
+    void playerDynamicFlagsArrived(uint32_t previous, uint32_t flags, FrameXmlEvents& packetEvents) override {
+        combatHandler_->playerDynamicFlagsArrived(previous, flags, packetEvents);
+    }
+    void playerObjectCreated(std::optional<uint32_t> health, uint32_t dynamicFlags,
+                             std::optional<uint32_t> playerFlags) override {
+        combatHandler_->playerCreated(health, dynamicFlags, playerFlags);
+    }
+    void unitHealthArrived(uint64_t guid, uint32_t previous, uint32_t health,
+                           FrameXmlEvents& packetEvents) override {
+        combatHandler_->unitHealthArrived(guid, previous, health, packetEvents);
+    }
+    void ownCorpseSeen(uint64_t guid, bool hasPosition, float serverX, float serverY, float serverZ) override {
+        combatHandler_->ownCorpseSeen(guid, hasPosition, serverX, serverY, serverZ);
+    }
+    void playerAuraFieldsArrived(const FlatFieldMap& fields, FrameXmlEvents& packetEvents) override {
+        spellHandler_->playerAuraFieldsArrived(fields, packetEvents);
+    }
+    void skillFieldsArrived(const FlatFieldMap& fields) override { spellHandler_->extractSkillFields(fields); }
+    void exploredZoneFieldsArrived(const FlatFieldMap& fields) override {
+        spellHandler_->extractExploredZoneFields(fields);
+    }
+    void companionFieldsArrived(const FlatFieldMap& blockFields) override {
+        spellHandler_->companionFieldsArrived(blockFields);
+    }
+    void questFieldsArrived(const FlatFieldMap& fields) override { questHandler_->applyQuestStateFromFields(fields); }
+    uint64_t autoAttackTargetGuid() const override { return combatHandler_->getAutoAttackTargetGuid(); }
+    void targetGone() override { combatHandler_->targetGone(); }
+    void invalidateTabCycle() override { combatHandler_->invalidateTabCycle(); }
+    void removeHostileAttacker(uint64_t guid) override { combatHandler_->removeHostileAttacker(guid); }
+    void removeCombatTextForGuid(uint64_t guid) override { combatHandler_->removeCombatTextForGuid(guid); }
+    void forgetUnitAuras(uint64_t guid) override { spellHandler_->removeUnitAuraCache(guid); }
+    void forgetUnitCast(uint64_t guid) override { spellHandler_->removeUnitCastState(guid); }
+    void forgetQuestGiver(uint64_t guid) override { questHandler_->forgetQuestGiver(guid); }
+    const std::unordered_map<uint64_t, std::string>& playerNameCache() const override {
+        return queryCacheHandler_->getPlayerNameCache();
+    }
+    void requestCreatureInfo(uint32_t entry, uint64_t guid) override {
+        queryCacheHandler_->queryCreatureInfo(entry, guid);
+    }
+    void playerLeftView(uint64_t guid) override { queryCacheHandler_->playerLeftView(guid); }
+    bool holdsItemObject(uint64_t guid) const override { return inventoryHandler_->holdsItemObject(guid); }
+    bool trackItemObject(uint64_t guid, bool isContainer, const FlatFieldMap& fields) override {
+        return inventoryHandler_->trackItemObject(guid, isContainer, fields);
+    }
+    void itemObjectChanged(uint64_t guid, bool isContainer, const FlatFieldMap& fields,
+                           FrameXmlEvents& packetEvents) override {
+        inventoryHandler_->itemObjectChanged(guid, isContainer, fields, packetEvents);
+    }
+    bool forgetItemObject(uint64_t guid) override { return inventoryHandler_->forgetItemObject(guid); }
+    void inventoryFieldsArrived(const FlatFieldMap& fields, bool isCreate, FrameXmlEvents& packetEvents) override {
+        inventoryHandler_->inventoryFieldsArrived(fields, isCreate, packetEvents);
+    }
+    void detectInventorySlotBases(const FlatFieldMap& fields) override {
+        inventoryHandler_->detectInventorySlotBases(fields);
+    }
+    void detectCoinageField(const FlatFieldMap& before, const FlatFieldMap& after) override {
+        inventoryHandler_->detectCoinageField(before, after);
+    }
+    uint32_t expectedMoneyDelta() const override { return inventoryHandler_->expectedMoneyDelta(); }
+    void maybeDetectVisibleItemLayout() override { inventoryHandler_->maybeDetectVisibleItemLayout(); }
+    void rebuildOnlineInventory() override { inventoryHandler_->rebuildOnlineInventory(); }
+    void updateBatchFinished(bool newItemCreated, const FlatFieldMap& playerFields) override {
+        inventoryHandler_->updateBatchFinished(newItemCreated, playerFields);
+    }
+    void updateOtherPlayerVisibleItems(uint64_t guid, const FlatFieldMap& fields) override {
+        inventoryHandler_->updateOtherPlayerVisibleItems(guid, fields);
+    }
+    void forgetPlayerEquipment(uint64_t guid) override { inventoryHandler_->forgetPlayerEquipment(guid); }
+    void emitAllOtherPlayerEquipment() override { inventoryHandler_->emitAllOtherPlayerEquipment(); }
     bool loggingOut() const override;
 
     // ReputationQueries (refreshUnitHostility is declared with the rest of the
@@ -817,7 +933,7 @@ public:
     bool isGatherGameObject(uint64_t guid) const;
     void despawnGameObjectLocally(uint64_t guid) override;
     /// Remove a creature corpse client-side once it has been looted empty.
-    void despawnCreatureLocally(uint64_t guid);
+    void despawnCreatureLocally(uint64_t guid) override;
     /// Turn the player to face the target when an attack or a targeted spell
     /// starts. Off by default, as the original client has it: a target behind
     /// the player has to be faced first, and the server says so. A debugging

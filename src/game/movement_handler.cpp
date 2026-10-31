@@ -4660,5 +4660,11 @@ void MovementHandler::transportTemplateArrived(const GameObjectQueryResponseData
     }
 }
 
+void MovementHandler::playerCreatedInFlight() {
+    if (isOnTaxiFlight()) return;
+    sanitizeMovementForTaxi();
+    applyTaxiMountForCurrentNode();
+}
+
 } // namespace game
 } // namespace wowee

@@ -358,6 +358,10 @@ public:
     [[nodiscard]] bool isNearTaxiDestination(float maxDistance = 24.0f) const;
     uint32_t nextMovementTimestampMs();
     void sanitizeMovementForTaxi();
+    /// The player's create block has them on a taxi flight the client did not
+    /// start - entering the world mid-flight. Shown as one: no walking flags,
+    /// on the mount.
+    void playerCreatedInFlight();
 
     // Heartbeat / movement timing (for GameHandler::update())
     float& timeSinceLastMoveHeartbeatRef() { return timeSinceLastMoveHeartbeat_; }

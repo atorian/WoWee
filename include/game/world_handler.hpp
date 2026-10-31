@@ -17,10 +17,134 @@
 #include <unordered_set>
 #include <glm/vec3.hpp>
 
+namespace wowee::core { class EventBus; }
+namespace wowee::pet { class IPetFeed; }
+
 namespace wowee {
 namespace game {
 
-class GameHandler;
+class EmoteTable;
+class PacketParsers;
+class PacketSender;
+class TransportManager;
+struct Character;
+enum class WorldState;
+
+/// What the objects in view ask of the rest of the game, and whom they tell
+/// of the parts of a field update another area owns. GameHandler implements
+/// it and hands each call to the owner, so the interface hears of one update
+/// in the order of its fields.
+class WorldQueries {
+public:
+    virtual ~WorldQueries() = default;
+
+    // ---- The session ----
+    [[nodiscard]] virtual WorldState worldState() const = 0;
+    [[nodiscard]] virtual uint64_t characterGuid() const = 0;
+    /// The character list's entry for the character in the world, or null.
+    virtual Character* listedCharacter() = 0;
+    [[nodiscard]] virtual PacketParsers& packetParsers() = 0;
+    /// "target", "focus", "party1"... for a guid the interface has a token for.
+    [[nodiscard]] virtual std::string unitIdFor(uint64_t guid) const = 0;
+    [[nodiscard]] virtual bool hostileFaction(uint32_t factionTemplateId) const = 0;
+    /// The transports' own motion. Never null in a running game.
+    [[nodiscard]] virtual TransportManager* transports() = 0;
+
+    // ---- The player's movement and mount ----
+    /// The transport the player's movement says they are on, 0 for none.
+    [[nodiscard]] virtual uint64_t movementTransportGuid() const = 0;
+    [[nodiscard]] virtual uint64_t playerTransportGuid() const = 0;
+    /// The player left `guid` within the last moments: a server update that
+    /// still has them aboard is late, not news.
+    [[nodiscard]] virtual bool recentlyAboard(uint64_t guid) const = 0;
+    virtual void clearPlayerTransport() = 0;
+    virtual void setTransportAttachment(uint64_t childGuid, ObjectType type, uint64_t transportGuid,
+                                        const glm::vec3& localOffset, bool hasLocalOrientation,
+                                        float localOrientation, bool offsetNeedsTransportResolution) = 0;
+    virtual void clearTransportAttachment(uint64_t childGuid) = 0;
+    /// Where the server put the player, when the client must take it.
+    virtual std::optional<glm::vec3> serverPlacedPlayer(const UpdateBlock& block, const glm::vec3& canonicalPos,
+                                                        float canonicalOrientation, bool movementUpdate) = 0;
+    virtual void applyServerMovementSpeeds(float walk, float run, float runBack, float swim,
+                                           float swimBack, float flight, float flightBack,
+                                           float turn, float pitch) = 0;
+    /// The player's create block has them on a taxi flight the client did
+    /// not start.
+    virtual void playerCreatedInFlight() = 0;
+    virtual void playerMountFieldArrived(uint32_t displayId, const FlatFieldMap& blockFields,
+                                         FrameXmlEvents& packetEvents) = 0;
+
+    // ---- The player's sheet and body ----
+    [[nodiscard]] virtual const FlatFieldMap& playerFields() const = 0;
+    virtual void playerFieldsCreated(const FlatFieldMap& fields) = 0;
+    virtual void playerFieldsUpdated(const FlatFieldMap& fields) = 0;
+    virtual void playerFieldsArrived(const FlatFieldMap& fields, bool isCreate, FrameXmlEvents& packetEvents) = 0;
+    virtual void shapeshiftFormArrived(uint8_t form, FrameXmlEvents& packetEvents) = 0;
+    /// UNIT_FIELD_FLAGS on the player, in an update: the fight and the stun.
+    virtual void playerUnitFlagsArrived(uint32_t previous, uint32_t flags, FrameXmlEvents& packetEvents) = 0;
+    virtual void playerVisibilityFlagsArrived(uint8_t previous, uint8_t flags) = 0;
+    virtual void playerDynamicFlagsArrived(uint32_t previous, uint32_t flags, FrameXmlEvents& packetEvents) = 0;
+    virtual void playerObjectCreated(std::optional<uint32_t> health, uint32_t dynamicFlags,
+                                     std::optional<uint32_t> playerFlags) = 0;
+    virtual void unitHealthArrived(uint64_t guid, uint32_t previous, uint32_t health,
+                                   FrameXmlEvents& packetEvents) = 0;
+    virtual void ownCorpseSeen(uint64_t guid, bool hasPosition, float serverX, float serverY,
+                               float serverZ) = 0;
+    virtual void playerAuraFieldsArrived(const FlatFieldMap& fields, FrameXmlEvents& packetEvents) = 0;
+    virtual void skillFieldsArrived(const FlatFieldMap& fields) = 0;
+    virtual void exploredZoneFieldsArrived(const FlatFieldMap& fields) = 0;
+    virtual void companionFieldsArrived(const FlatFieldMap& blockFields) = 0;
+    virtual void questFieldsArrived(const FlatFieldMap& fields) = 0;
+
+    // ---- The fight ----
+    [[nodiscard]] virtual uint64_t currentTargetGuid() const = 0;
+    [[nodiscard]] virtual uint64_t focusTargetGuid() const = 0;
+    [[nodiscard]] virtual uint64_t autoAttackTargetGuid() const = 0;
+    virtual void stopAutoAttack() = 0;
+    /// The target left view.
+    virtual void targetGone() = 0;
+    /// The units in view changed: Tab's cycle is built again.
+    virtual void invalidateTabCycle() = 0;
+    virtual void removeHostileAttacker(uint64_t guid) = 0;
+    virtual void removeCombatTextForGuid(uint64_t guid) = 0;
+
+    // ---- What other parts keep of an object ----
+    virtual void forgetUnitAuras(uint64_t guid) = 0;
+    virtual void forgetUnitCast(uint64_t guid) = 0;
+    virtual void forgetQuestGiver(uint64_t guid) = 0;
+    [[nodiscard]] virtual uint64_t petGuid() const = 0;
+    /// Where the pet's fields go; null when the client was built without it.
+    virtual pet::IPetFeed* petFeed() = 0;
+    /// Take a creature out of view without the server saying so.
+    virtual void despawnCreatureLocally(uint64_t guid) = 0;
+
+    // ---- The query caches ----
+    [[nodiscard]] virtual const std::unordered_map<uint64_t, std::string>& playerNameCache() const = 0;
+    [[nodiscard]] virtual std::string creatureName(uint32_t entry) const = 0;
+    [[nodiscard]] virtual const GameObjectQueryResponseData* gameObjectInfo(uint32_t entry) const = 0;
+    virtual void requestPlayerName(uint64_t guid) = 0;
+    virtual void requestCreatureInfo(uint32_t entry, uint64_t guid) = 0;
+    virtual void requestGameObjectInfo(uint32_t entry, uint64_t guid) = 0;
+    /// A player left view: a name asked for and not answered is asked again.
+    virtual void playerLeftView(uint64_t guid) = 0;
+
+    // ---- Items and what other players wear ----
+    [[nodiscard]] virtual bool holdsItemObject(uint64_t guid) const = 0;
+    virtual bool trackItemObject(uint64_t guid, bool isContainer, const FlatFieldMap& fields) = 0;
+    virtual void itemObjectChanged(uint64_t guid, bool isContainer, const FlatFieldMap& fields,
+                                   FrameXmlEvents& packetEvents) = 0;
+    virtual bool forgetItemObject(uint64_t guid) = 0;
+    virtual void inventoryFieldsArrived(const FlatFieldMap& fields, bool isCreate, FrameXmlEvents& packetEvents) = 0;
+    virtual void detectInventorySlotBases(const FlatFieldMap& fields) = 0;
+    virtual void detectCoinageField(const FlatFieldMap& before, const FlatFieldMap& after) = 0;
+    [[nodiscard]] virtual uint32_t expectedMoneyDelta() const = 0;
+    virtual void maybeDetectVisibleItemLayout() = 0;
+    virtual void rebuildOnlineInventory() = 0;
+    virtual void updateBatchFinished(bool newItemCreated, const FlatFieldMap& playerFields) = 0;
+    virtual void updateOtherPlayerVisibleItems(uint64_t guid, const FlatFieldMap& fields) = 0;
+    virtual void forgetPlayerEquipment(uint64_t guid) = 0;
+    virtual void emitAllOtherPlayerEquipment() = 0;
+};
 
 /// The objects in view, as SMSG_UPDATE_OBJECT, its compressed form and
 /// SMSG_DESTROY_OBJECT describe them: their lifetime, their fields, and how
@@ -32,7 +156,8 @@ public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
-    explicit WorldHandler(GameHandler& owner);
+    WorldHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
+                 WorldQueries& queries, const EmoteTable& emotes);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -77,7 +202,11 @@ public:
     void clearAll();
 
 private:
-    GameHandler& owner_;
+    PacketSender& sender_;
+    FrameXmlEvents& frameXml_;
+    core::EventBus& events_;
+    WorldQueries& queries_;
+    const EmoteTable& emotes_;
 
     // --- Entity tracking ---
     EntityManager entityManager;              // Manages all entities in view
