@@ -456,131 +456,6 @@ void EntityController::updateNonPlayerTransportAttachment(const UpdateBlock& blo
     }
 }
 
-//     Rebuild playerAuras from UNIT_FIELD_AURAS (Classic/TBC-era clients).
-//     blockFields is used to check if any aura field was updated in this packet.
-//     entity->getFields() is used for reading the full accumulated state.
-//     Normalises pre-WotLK harmful bit (0x02) to WotLK debuff bit (0x80) so
-//     downstream code checking for 0x80 works consistently across expansions.
-// Detect player mount/dismount from UNIT_FIELD_MOUNTDISPLAYID changes
-void EntityController::detectPlayerMountChange(uint32_t newMountDisplayId,
-                                                const FlatFieldMap& blockFields) {
-    // Live-confirmed: CMaNGOS can push a player values-update mid-taxi-flight
-    // that zeroes UNIT_FIELD_MOUNTDISPLAYID before the client's own flight
-    // simulation actually finishes (same early-completion behavior already
-    // seen and guarded for SMSG_DISMOUNT) - obeying it here cut the mount
-    // animation while MovementHandler::updateClientTaxi() kept flying the
-    // real path for several more seconds. But some cores finalize taxi
-    // flights server-side, so a bare "ignore while flying" guard could let
-    // the client fly past a genuine server landing if local spline timing
-    // ever drifts. Distinguish using the server's own UNIT_FLAG_TAXI_FLIGHT,
-    // same as the SMSG_DISMOUNT guard: still set means premature (ignore,
-    // let the client spline finish naturally); already cleared means the
-    // server considers the flight over (honor it now).
-    const bool onRealTaxiFlight = owner_.movement().isOnTaxiFlight();
-    if (onRealTaxiFlight && newMountDisplayId == 0) {
-        bool serverStillTaxiing = false;
-        auto playerEntity = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
-        auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity);
-        if (playerUnit) {
-            serverStillTaxiing = (playerUnit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0;
-        }
-        const bool nearDestination = owner_.movement().isNearTaxiDestination();
-        if (serverStillTaxiing || !nearDestination) {
-            owner_.movement().deferServerTaxiCompletion();
-            if (!nearDestination) {
-                LOG_WARNING("Deferring premature taxi mount clear until landing zone");
-            }
-            return;
-        }
-        // Authoritative server completion ahead of our own spline - stop the
-        // client flight now rather than snapping to a final waypoint that may
-        // not match where the server actually stopped us.
-        owner_.movement().finishClientTaxiFlight(/*snapToFinalWaypoint=*/false);
-        return;
-    }
-    uint32_t old = owner_.currentMountDisplayIdRef();
-
-    // A dismount the player just asked for has not reached this field yet: it
-    // keeps its old value for a few frames. Taking that at face value put them
-    // straight back on the mount, and the restored value then made the server's
-    // own SMSG_DISMOUNT read as transient and get discarded - so the mount
-    // blinked off, back on, and off again, with the character left holding the
-    // seated rider pose in between.
-    if (newMountDisplayId != 0 && owner_.movement().isDismountPending()) {
-        return;
-    }
-    // The server agrees: nothing left to wait for.
-    if (newMountDisplayId == 0) owner_.movement().clearDismountPending();
-
-    if (old != 0 && newMountDisplayId == 0) {
-        LOG_WARNING("Authoritative mount field cleared: oldDisplay=", old,
-                    " casting=", owner_.spells().isCasting(),
-                    " channeling=", owner_.spells().isChanneling(),
-                    " spell=", owner_.spells().getCurrentCastSpellId());
-    }
-    owner_.currentMountDisplayIdRef() = newMountDisplayId;
-    if (newMountDisplayId != old) owner_.eventBus().publish(events::PlayerMountChanged{newMountDisplayId});
-    if (newMountDisplayId != old)
-        pendingEvents_.emit("UNIT_MODEL_CHANGED", {"player"});
-    if (old == 0 && newMountDisplayId != 0) {
-        // Just mounted - find the mount aura (indefinite duration, self-cast).
-        // Prefer the spell the player just cast: the blind scan below keeps the
-        // last matching aura, which is as likely to be a racial or a tracking
-        // buff as the mount, and the id has to be right or pressing the mount
-        // again cannot be recognised as a dismount.
-        owner_.mountAuraSpellIdRef() = 0;
-        const uint32_t justCast = owner_.spells().getLastGroundCastSpellId();
-        for (const auto& a : owner_.spells().getPlayerAuras()) {
-            if (!a.isEmpty() && a.maxDurationMs < 0 && a.casterGuid == owner_.getPlayerGuid()) {
-                if (justCast != 0 && a.spellId == justCast) {
-                    owner_.mountAuraSpellIdRef() = a.spellId;
-                    break;
-                }
-                owner_.mountAuraSpellIdRef() = a.spellId;
-            }
-        }
-        // The spell that was cast, before either blind scan gets a turn.
-        //
-        // Both scans keep whichever indefinite aura they happen to see last,
-        // which is as likely to be a racial or a tracking buff as the mount -
-        // and on the pre-WotLK path the aura list this checks is often empty, so
-        // the cast id was being discarded in favour of a guess. Getting it wrong
-        // is not cosmetic: pressing the mount again is recognised as a dismount
-        // by comparing against exactly this, so a wrong id dismounted the player
-        // and put them straight back on, and the button appeared to do nothing.
-        if (justCast != 0) owner_.mountAuraSpellIdRef() = justCast;
-
-        // Pre-WotLK fallback: scan UNIT_FIELD_AURAS from same update block
-        if (owner_.mountAuraSpellIdRef() == 0) {
-            const uint16_t ufAuras = fieldIndex(UF::UNIT_FIELD_AURAS);
-            if (ufAuras != 0xFFFF) {
-                for (const auto& [fk, fv] : blockFields) {
-                    if (fk >= ufAuras && fk < ufAuras + 48 && fv != 0) {
-                        owner_.mountAuraSpellIdRef() = fv;
-                        break;
-                    }
-                }
-            }
-        }
-        LOG_INFO("Mount detected: displayId=", newMountDisplayId, " auraSpellId=", owner_.mountAuraSpellIdRef());
-    }
-    if (old != 0 && newMountDisplayId == 0) {
-        // Only clear the specific mount aura, not all indefinite auras.
-        // Previously this cleared every aura with maxDurationMs < 0, which
-        // would strip racial passives, tracking, and zone buffs on dismount.
-        uint32_t mountSpell = owner_.mountAuraSpellIdRef();
-        owner_.mountAuraSpellIdRef() = 0;
-        if (mountSpell != 0) {
-            for (auto& a : owner_.spells().getPlayerAurasMut()) {
-                if (!a.isEmpty() && a.spellId == mountSpell) {
-                    a = AuraSlot{};
-                    break;
-                }
-            }
-        }
-    }
-}
-
 namespace {
 /// A float field arrives as the raw uint32 its bits spell. Named once rather
 /// than written out at each of the scale fields -- which two of them still
@@ -751,7 +626,7 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
         }
         else if (key == ufi.mountDisplayId) {
             if (block.guid == owner_.getPlayerGuid()) {
-                detectPlayerMountChange(val, block.fields);
+                owner_.movement().playerMountFieldArrived(val, block.fields, pendingEvents_);
             } else if (block.objectType == ObjectType::PLAYER) {
                 owner_.eventBus().publish(events::OtherPlayerMounted{block.guid, val});
             }
@@ -888,7 +763,7 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             unit->setNativeDisplayId(val);
         } else if (key == ufi.mountDisplayId) {
             if (block.guid == owner_.getPlayerGuid()) {
-                detectPlayerMountChange(val, block.fields);
+                owner_.movement().playerMountFieldArrived(val, block.fields, pendingEvents_);
             } else if (entity->getType() == ObjectType::PLAYER &&
                        val != unit->getMountDisplayId()) {
                 owner_.eventBus().publish(events::OtherPlayerMounted{block.guid, val});

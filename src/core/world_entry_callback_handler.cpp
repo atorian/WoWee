@@ -80,7 +80,7 @@ void WorldEntryCallbackHandler::clearMountForUnstuck() {
     const bool hasRenderedMount =
         (entitySpawner_ && entitySpawner_->getMountInstanceId() != 0) ||
         (playerView_.getAnimationController() && playerView_.getAnimationController()->isMounted());
-    if (gameHandler_.isMounted() || hasRenderedMount) {
+    if (gameHandler_.movement().isMounted() || hasRenderedMount) {
         gameHandler_.dismount();
     }
     if (entitySpawner_) {

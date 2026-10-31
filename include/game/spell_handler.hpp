@@ -429,7 +429,9 @@ public:
     // Player aura mutation (formerly accessed via friend)
     void resetPlayerAuras(size_t capacity) { playerAuras_.clear(); playerAuras_.resize(capacity); }
     AuraSlot& getPlayerAuraSlotRef(size_t slot) { return playerAuras_[slot]; }
-    std::vector<AuraSlot>& getPlayerAurasMut() { return playerAuras_; }
+    /// Take this spell's aura off the player's buff bar, where the server's
+    /// own word on it will not come.
+    void forgetPlayerAura(uint32_t spellId);
 
     // Talents
     [[nodiscard]] uint8_t getActiveTalentSpec() const { return activeTalentSpec_; }

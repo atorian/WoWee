@@ -4771,5 +4771,14 @@ void SpellHandler::handleChannelUpdate(network::Packet& packet) {
     }
 }
 
+void SpellHandler::forgetPlayerAura(uint32_t spellId) {
+    for (auto& a : playerAuras_) {
+        if (!a.isEmpty() && a.spellId == spellId) {
+            a = AuraSlot{};
+            break;
+        }
+    }
+}
+
 } // namespace game
 } // namespace wowee

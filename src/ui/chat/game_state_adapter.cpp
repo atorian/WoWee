@@ -22,7 +22,7 @@ uint64_t GameStateAdapter::getMouseoverGuid() const { return gameHandler_.combat
 
 // --- Player state ---
 bool GameStateAdapter::isInCombat() const  { return gameHandler_.combat().isInCombat(); }
-bool GameStateAdapter::isMounted() const   { return gameHandler_.isMounted(); }
+bool GameStateAdapter::isMounted() const   { return gameHandler_.movement().isMounted(); }
 bool GameStateAdapter::isSwimming() const  { return gameHandler_.isSwimming(); }
 bool GameStateAdapter::isFlying() const    { return gameHandler_.isPlayerFlying(); }
 bool GameStateAdapter::isCasting() const   { return gameHandler_.spells().isCasting(); }

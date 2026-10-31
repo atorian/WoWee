@@ -596,6 +596,7 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     inventoryHandler_->beginCharacter();
     if (services_.achievementsFeed) services_.achievementsFeed->beginCharacter();
     playerHandler_->beginCharacter();
+    movementHandler_->beginCharacter();
     spellHandler_->resetAllState();
     eventBus().publish(events::PlayerIntoxicationChanged{0.0f});
     actionBarHandler_->clear();
@@ -721,9 +722,8 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     movementInfo.jumpCosAngle = 0.0f;
     movementInfo.jumpXYSpeed = 0.0f;
     combatHandler_->worldEntered();
-    currentMountDisplayId_ = 0;
     vehicleId_ = 0;
-    eventBus().publish(events::PlayerMountChanged{0});
+    movementHandler_->enteredWorld();
 
     // Clear boss encounter unit slots and raid marks on world transfer
     socialHandler_->resetTransferState();
@@ -1516,7 +1516,7 @@ void GameHandler::interactWithGameObject(uint64_t guid) {
     // then, and they fell out of the sky. The same rule casting follows: with
     // Auto Dismount in Flight off - the default - it is refused, and the
     // player stays up.
-    if (isMounted() && !movementHandler_->isTaxiMountActive() && isPlayerFlying() &&
+    if (movementHandler_->isMounted() && !movementHandler_->isTaxiMountActive() && isPlayerFlying() &&
         cvars().get("autoDismountFlying", "0") == "0") {
         addUIError("You can't do that while flying.");
         return;
@@ -1534,7 +1534,7 @@ void GameHandler::interactWithGameObject(uint64_t guid) {
     //
     // Not on a taxi: the flight's mount is not the player's to dismiss, and
     // there is nothing to interact with mid-flight anyway.
-    if (isMounted() && !movementHandler_->isTaxiMountActive()) {
+    if (movementHandler_->isMounted() && !movementHandler_->isTaxiMountActive()) {
         constexpr float kGameObjectReach = 12.0f;
         bool inReach = true;
         if (auto entity = getEntityManager().getEntity(guid)) {
