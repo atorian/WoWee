@@ -7,10 +7,13 @@
 #include "game/entity_controller.hpp"
 #include "game/game_events.hpp"
 #include "game/transport_manager.hpp"
+#include "game/game_handler.hpp"
+#include "game/update_field_table.hpp"
 
 #include <glm/vec3.hpp>
 
 #include <memory>
+#include <string>
 #include <vector>
 
 using wowee::test::GameHarness;
@@ -310,4 +313,94 @@ TEST_CASE("a ship sails the path TransportAnimation.dbc gives its entry, and a b
     CHECK_FALSE(transports.hasPathForEntry(20809));
     CHECK(transports.hasTaxiPath(99));
     CHECK_FALSE(transports.hasTaxiPath(98));
+}
+
+namespace {
+uint16_t mountField() {
+    return static_cast<uint16_t>(wowee::game::fieldIndex(wowee::game::UF::UNIT_FIELD_MOUNTDISPLAYID));
+}
+}  // namespace
+
+TEST_CASE("the mount field puts the player on the mount just cast, and clearing it takes them off",
+          "[movement][mount][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    std::vector<uint32_t> mounts;
+    auto sub = h.events().subscribe<ev::PlayerMountChanged>(
+        [&](const ev::PlayerMountChanged& e) { mounts.push_back(e.mountDisplayId); });
+    h.game().spells().noteGroundCastSpell(458);   // Brown Horse
+    h.clearRecords();
+
+    h.playerFields({{mountField(), 14338}});
+    CHECK(h.game().movement().isMounted());
+    CHECK(h.game().movement().mountDisplayId() == 14338);
+    CHECK(h.game().movement().mountAuraSpellId() == 458);
+    CHECK(h.addonEvents("UNIT_MODEL_CHANGED").size() == 1);
+
+    h.playerFields({{mountField(), 0}});
+    CHECK_FALSE(h.game().movement().isMounted());
+    CHECK(h.game().movement().mountAuraSpellId() == 0);
+    CHECK(mounts == std::vector<uint32_t>{14338, 0});
+}
+
+TEST_CASE("a dismount for someone else is theirs, and one the mount field contradicts is not ours",
+          "[movement][mount][harness]") {
+    using wowee::game::Opcode;
+    using wowee::test::Body;
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    std::vector<uint64_t> others;
+    auto sub = h.events().subscribe<ev::OtherPlayerMounted>(
+        [&](const ev::OtherPlayerMounted& e) { if (e.mountDisplayId == 0) others.push_back(e.guid); });
+    h.playerFields({{mountField(), 14338}});
+    std::vector<uint32_t> mounts;
+    auto mine = h.events().subscribe<ev::PlayerMountChanged>(
+        [&](const ev::PlayerMountChanged& e) { mounts.push_back(e.mountDisplayId); });
+
+    h.receive(Opcode::SMSG_DISMOUNT, Body().packedGuid(0x77).bytes());
+    h.pump();
+    CHECK(others == std::vector<uint64_t>{0x77});
+    CHECK(h.game().movement().isMounted());
+
+    // Ours, while the field still says mounted: a transient the realm sends
+    // mid-fight, not a dismount.
+    h.receive(Opcode::SMSG_DISMOUNT, Body().packedGuid(h.player().guid).bytes());
+    h.pump();
+    CHECK(h.game().movement().isMounted());
+    CHECK(mounts.empty());   // not even for a frame
+
+    h.playerFields({{mountField(), 0}});
+    CHECK_FALSE(h.game().movement().isMounted());
+    CHECK(mounts == std::vector<uint32_t>{0});
+}
+
+TEST_CASE("a refused dismount is said once", "[movement][mount][harness]") {
+    using wowee::game::Opcode;
+    using wowee::test::Body;
+    GameHarness h;
+    h.enterWorld();
+    h.receive(Opcode::SMSG_DISMOUNTRESULT, Body().u32(1).bytes());
+    h.pump();
+
+    const auto errors = h.addonEvents("UI_ERROR_MESSAGE");
+    REQUIRE(errors.size() == 1);
+    CHECK(errors[0].args == std::vector<std::string>{"Cannot dismount here."});
+}
+
+TEST_CASE("the next character is not on the last one's mount", "[movement][mount][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    h.game().spells().noteGroundCastSpell(458);
+    h.playerFields({{mountField(), 14338}});
+    REQUIRE(h.game().movement().mountAuraSpellId() == 458);
+
+    wowee::test::PlayerSpec bob;
+    bob.guid = 0x11;
+    bob.name = "Bob";
+    h.relogAs(bob);
+    CHECK_FALSE(h.game().movement().isMounted());
+    CHECK(h.game().movement().mountAuraSpellId() == 0);
 }

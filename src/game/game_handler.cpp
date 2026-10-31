@@ -150,7 +150,7 @@ GameHandler::GameHandler(GameServices& services)
     weatherHandler_ = std::make_unique<WeatherHandler>(
         *services_.events, *this, *chatHandler_,
         [] { return isClassicLikeExpansion() ? WeatherNumbering::Classic : WeatherNumbering::WeatherState; });
-    playerHandler_ = std::make_unique<PlayerHandler>(*this, *services_.events, *chatHandler_, *this,
+    playerHandler_ = std::make_unique<PlayerHandler>(*this, *this, *services_.events, *chatHandler_, *this,
                                                     *services_.statTables);
 
     // The character's own settings, read once its spells have arrived - the
@@ -614,22 +614,7 @@ void GameHandler::updateTaxiAndMountState(float deltaTime) {
 
     movementHandler_->updatePlayerTransportHold(deltaTime);
 
-    // Keep non-taxi mount state server-authoritative.
-    // Some server paths don't emit explicit mount field updates in lockstep
-    // with local visual state changes, so reconcile continuously.
-    if (!movementHandler_->isOnTaxiFlight()) {
-        auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
-        auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity);
-        if (playerUnit) {
-            uint32_t serverMountDisplayId = playerUnit->getMountDisplayId();
-            if (serverMountDisplayId != currentMountDisplayId_) {
-                LOG_INFO("Mount reconcile: server=", serverMountDisplayId,
-                         " local=", currentMountDisplayId_);
-                currentMountDisplayId_ = serverMountDisplayId;
-                eventBus().publish(events::PlayerMountChanged{serverMountDisplayId});
-            }
-        }
-    }
+    movementHandler_->reconcileMount();
 }
 
 void GameHandler::updateEntityInterpolation(float deltaTime) {

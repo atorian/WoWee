@@ -15,6 +15,7 @@ namespace wowee::game {
 
 class ChatLog;
 class FrameXmlEvents;
+class PacketSender;
 struct Character;
 
 /// What PlayerHandler asks of the rest of the game: the character list's
@@ -38,19 +39,22 @@ public:
     virtual void playerFlagsArrived(uint32_t flags, FrameXmlEvents& packetEvents) = 0;
     /// The helm or cloak was shown or hidden: the equipment is drawn again.
     virtual void markOnlineEquipmentDirty() = 0;
+    /// The logout countdown is running.
+    [[nodiscard]] virtual bool loggingOut() const = 0;
 };
 
 /// The character in the world as the server describes it: experience, level,
 /// rest, PvP currency, the character sheet's numbers, the helm and cloak
-/// switches and the shapeshift form. The server is authoritative for all of
+/// switches, the shapeshift form, and how the character stands: sitting,
+/// stunned, stealthed. The server is authoritative for all of
 /// it; this keeps what it last said and tells the interface what moved.
 class PlayerHandler {
 public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
-    PlayerHandler(FrameXmlEvents& frameXml, core::EventBus& events, ChatLog& chat,
-                  PlayerQueries& queries, const StatTables& tables);
+    PlayerHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
+                  ChatLog& chat, PlayerQueries& queries, const StatTables& tables);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -74,6 +78,14 @@ public:
     void shapeshiftFormArrived(uint8_t form, FrameXmlEvents& packetEvents);
     /// WotLK's SMSG_SET_REST_START: in or out of an inn or a city.
     void restStateArrived(bool resting);
+    /// UNIT_FIELD_FLAGS on the player, in an update: UNIT_FLAG_STUNNED.
+    void unitFlagsArrived(uint32_t previous, uint32_t flags);
+    /// The visibility byte of UNIT_FIELD_BYTES_1 on the player, in an update:
+    /// UNIT_VIS_FLAG_CREEP is stealth.
+    void visibilityFlagsArrived(uint8_t previous, uint8_t flags);
+    /// Ask the server to sit, stand, kneel...: CMSG_STANDSTATECHANGE. The
+    /// state changes when it answers.
+    void requestStandState(uint8_t standState);
     /// The helm and cloak switches, as the player sets them.
     void showHelm(bool shown) { sheet_.helmVisible = shown; }
     void showCloak(bool shown) { sheet_.cloakVisible = shown; }
@@ -174,6 +186,9 @@ public:
     [[nodiscard]] bool helmVisible() const { return sheet_.helmVisible; }
     [[nodiscard]] bool cloakVisible() const { return sheet_.cloakVisible; }
     [[nodiscard]] uint8_t shapeshiftForm() const { return sheet_.shapeshiftForm; }
+    /// As the server last confirmed it: 0 stand, 1 sit, 2-6 sitting on
+    /// something, 7 dead, 8 kneel.
+    [[nodiscard]] uint8_t standState() const { return sheet_.standState; }
 
 private:
     /// Everything this keeps of the character, assigned whole by
@@ -208,16 +223,19 @@ private:
         bool helmVisible = true;
         bool cloakVisible = true;
         uint8_t shapeshiftForm = 0;
+        uint8_t standState = 0;
         FlatFieldMap fields;
     };
 
     void handleLevelUp(network::Packet& packet);
+    void handleStandStateUpdate(network::Packet& packet);
     /// The level a per-level game table is read at: the player's, the last
     /// row past it.
     [[nodiscard]] uint32_t tableLevel() const;
     [[nodiscard]] float critFromStat(StatTables::Table base, StatTables::Table perStat,
                                      int statIdx) const;
 
+    PacketSender& sender_;
     FrameXmlEvents& frameXml_;
     core::EventBus& events_;
     ChatLog& chat_;

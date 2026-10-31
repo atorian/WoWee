@@ -264,18 +264,19 @@ CHECKS = [
      r"^(\d+) domain handlers built from GameHandler&", 1,
      "domain handlers whose constructor takes GameHandler&"),
     ("domain_shape_check.py",
-     r"^(\d+) reaches through owner_ in src/game", 271,
+     r"^(\d+) reaches through owner_ in src/game", 239,
      "reaches through owner_ into GameHandler from the domain handlers"),
     # State a domain should own, handed out of GameHandler writable, and the
     # notifications wired to a single listener instead of the bus. 218, 1324
     # and 65 before the inventory's state moved to InventoryHandler; lowered
     # to what stood when the player's sheet moved to PlayerHandler; its field
-    # snapshot followed: 7 -> 6, 29 -> 16.
+    # snapshot followed: 7 -> 6, 29 -> 16; the mount went to MovementHandler:
+    # 6 -> 4, 16 -> 5.
     ("domain_shape_check.py",
-     r"^(\d+) xxxRef\(\) accessors in GameHandler", 6,
+     r"^(\d+) xxxRef\(\) accessors in GameHandler", 4,
      "writable accessors to GameHandler's state"),
     ("domain_shape_check.py",
-     r"^(\d+) calls to them through owner_ in src/game", 16,
+     r"^(\d+) calls to them through owner_ in src/game", 5,
      "domain handlers editing GameHandler's state through its accessors"),
     ("domain_shape_check.py",
      r"^(\d+) set\*Callback setters in GameHandler", 2,

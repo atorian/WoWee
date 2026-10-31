@@ -262,7 +262,6 @@ public:
     void sendSetDifficulty(uint32_t difficulty, bool raid = false);
     void toggleHelm();
     void toggleCloak();
-    void setStandState(uint8_t standState);
     void sendAlterAppearance(uint32_t hairStyleEntry, uint32_t hairColor,
                              uint32_t facialHairEntry, uint32_t skinColorEntry);
     void deleteGmTicket();

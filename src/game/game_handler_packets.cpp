@@ -563,119 +563,7 @@ void GameHandler::registerCoreOpcodes() {
 
     // (SMSG_BREAK_TARGET, SMSG_CLEAR_TARGET → CombatHandler)
 
-    // Mount/dismount
-    dispatchTable_[Opcode::SMSG_DISMOUNT] = [this](network::Packet& packet) {
-        // TBC/WotLK identify the dismounting unit with a packed GUID. Applying
-        // every nearby unit's dismount to the local player made an enemy
-        // dismounting to attack knock us off our own mount. Classic variants
-        // may send the legacy empty packet, which is implicitly local.
-        uint64_t dismountGuid = playerGuid;
-        if (packet.hasRemaining(1)) {
-            dismountGuid = packet.readPackedGuid();
-            if (dismountGuid == 0) {
-                LOG_WARNING("Ignoring SMSG_DISMOUNT with an invalid packed GUID");
-                return;
-            }
-        }
-        if (dismountGuid != playerGuid) {
-            LOG_DEBUG("Remote SMSG_DISMOUNT: guid=0x", std::hex,
-                      dismountGuid, std::dec);
-            eventBus().publish(events::OtherPlayerMounted{dismountGuid, 0});
-            return;
-        }
-
-        // Live-confirmed: CMaNGOS sends this partway through a taxi flight (its
-        // own server-side flight-completion estimate firing early, well before
-        // the client-simulated path actually finishes) - obeying it unconditionally
-        // cancelled the taxi mount animation while updateClientTaxi() kept flying
-        // the real path for several more seconds, seen as "walking in the air".
-        // But other cores (e.g. AzerothCore) finalize taxi flights server-side -
-        // dismounting/stopping the player is the *authoritative* completion
-        // signal there, not a premature estimate - so a blanket "ignore while
-        // flying" guard could let the client fly past a real landing if local
-        // spline timing ever drifts from the server's. Distinguish the two using
-        // the server's own UNIT_FLAG_TAXI_FLIGHT: still set means this is the
-        // premature-estimate quirk (ignore, let updateClientTaxi() finish
-        // naturally); already cleared means the server considers the flight
-        // genuinely over (honor it now instead of waiting on our own spline).
-        const bool onTaxiFlight = movementHandler_->isOnTaxiFlight();
-        bool serverStillTaxiing = false;
-        if (onTaxiFlight) {
-            auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
-            auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity);
-            if (playerUnit) {
-                serverStillTaxiing = (playerUnit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0;
-            }
-        }
-        const bool nearDestination = onTaxiFlight && movementHandler_->isNearTaxiDestination();
-        LOG_INFO("SMSG_DISMOUNT received: onTaxiFlight=", onTaxiFlight,
-                 " serverStillTaxiing=", serverStillTaxiing,
-                 " nearDestination=", nearDestination);
-        if (onTaxiFlight && (serverStillTaxiing || !nearDestination)) {
-            movementHandler_->deferServerTaxiCompletion();
-            LOG_WARNING("Deferring premature SMSG_DISMOUNT until taxi landing zone");
-            return;
-        }
-        if (onTaxiFlight && movementHandler_) {
-            // Authoritative server completion ahead of our own spline - stop the
-            // client flight now rather than snapping to a final waypoint that may
-            // not match where the server actually stopped us.
-            movementHandler_->finishClientTaxiFlight(/*snapToFinalWaypoint=*/false);
-            return;
-        }
-
-        // UNIT_FIELD_MOUNTDISPLAYID is the authoritative persistent mount
-        // state.  Some realms emit an isolated SMSG_DISMOUNT while processing
-        // damage (notably periodic poison) without actually removing the mount
-        // aura or clearing the update field.  Treating that transient packet as
-        // state made the local model dismount even though the player remained
-        // mounted server-side.  A real dismount also clears the update field;
-        // let that values update drive the visual when the two signals disagree.
-        if (isActiveExpansion("wotlk")) {
-            const uint16_t mountField = fieldIndex(UF::UNIT_FIELD_MOUNTDISPLAYID);
-            auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
-            const uint32_t serverMountDisplay =
-                (playerEntity && mountField != 0xFFFF && playerEntity->hasField(mountField))
-                    ? playerEntity->getField(mountField)
-                    : 0;
-            // ...unless the player asked to dismount, in which case a still-set
-            // field is exactly the staleness this packet is arriving to correct.
-            // Discarding it there threw away the one authoritative confirmation
-            // the dismount had.
-            const bool awaitingOurOwnDismount =
-                movementHandler_->isDismountPending();
-            if (serverMountDisplay != 0 && !awaitingOurOwnDismount) {
-                LOG_WARNING("Ignoring transient SMSG_DISMOUNT while authoritative mount field is ",
-                            serverMountDisplay,
-                            " casting=", spellHandler_->isCasting(),
-                            " channeling=", spellHandler_->isChanneling(),
-                            " spell=", spellHandler_->getCurrentCastSpellId());
-                return;
-            }
-            movementHandler_->clearDismountPending();
-        }
-        currentMountDisplayId_ = 0;
-        eventBus().publish(events::PlayerMountChanged{0});
-    };
-    dispatchTable_[Opcode::SMSG_MOUNTRESULT] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(4)) return;
-        uint32_t result = packet.readUInt32();
-        if (result != 4) {
-            const char* msgs[] = { "Cannot mount here.", "Invalid mount spell.",
-                                   "Too far away to mount.", "Already mounted." };
-            std::string mountErr = result < 4 ? msgs[result] : "Cannot mount.";
-            addUIError(mountErr);
-            chatHandler_->addSystemChatMessage(mountErr);
-        }
-    };
-    dispatchTable_[Opcode::SMSG_DISMOUNTRESULT] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(4)) return;
-        uint32_t result = packet.readUInt32();
-        if (result != 0) {
-            addUIError("Cannot dismount here.");
-            raiseUiError("Cannot dismount here.");
-        }
-    };
+    // (SMSG_DISMOUNT, SMSG_MOUNTRESULT, SMSG_DISMOUNTRESULT → MovementHandler)
 
     // Camera shake
     dispatchTable_[Opcode::SMSG_CAMERA_SHAKE] = [this](network::Packet& packet) {
@@ -846,20 +734,6 @@ void GameHandler::registerCoreOpcodes() {
     };
 
     // Taxi
-    dispatchTable_[Opcode::SMSG_STANDSTATE_UPDATE] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(1)) {
-            const uint8_t newStandState = packet.readUInt8();
-            if (newStandState == standState_) {
-                return;
-            }
-            standState_ = newStandState;
-            // 0=stand, 1=sit, 2-6=sit variants, 7=dead, 8=kneel. Logged because a
-            // wrong state here is indistinguishable, in-game, from a wrong animation.
-            // At warning level: the file log filters info out by default.
-            LOG_WARNING("SMSG_STANDSTATE_UPDATE: standState=", static_cast<int>(standState_));
-            eventBus().publish(events::StandStateChanged{standState_});
-        }
-    };
     dispatchTable_[Opcode::SMSG_NEW_TAXI_PATH] = [this](network::Packet& /*packet*/) {
         chatHandler_->addSystemChatMessage("New flight path discovered!");
     };

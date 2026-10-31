@@ -252,6 +252,9 @@ public:
     /// UNIT_DYNFLAG_DEAD on the player: the server marks a death by health,
     /// by this flag or by both, so either alone is one.
     void playerDynamicFlagsArrived(uint32_t previous, uint32_t flags, FrameXmlEvents& packetEvents);
+    /// UNIT_FIELD_FLAGS on the player, in an update: UNIT_FLAG_IN_COMBAT is
+    /// the server's word on whether the player is in a fight.
+    void playerUnitFlagsArrived(uint32_t previous, uint32_t flags, FrameXmlEvents& packetEvents);
     /// PLAYER_FLAGS, on a create as on an update: PLAYER_FLAGS_GHOST coming on
     /// is the spirit released, going off a resurrection.
     void playerFlagsArrived(uint32_t flags, FrameXmlEvents& packetEvents);

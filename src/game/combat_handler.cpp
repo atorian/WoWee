@@ -1997,6 +1997,24 @@ void CombatHandler::playerDynamicFlagsArrived(uint32_t previous, uint32_t flags,
     }
 }
 
+void CombatHandler::playerUnitFlagsArrived(uint32_t previous, uint32_t flags,
+                                           FrameXmlEvents& packetEvents) {
+    const bool was = (previous & UNIT_FLAG_IN_COMBAT) != 0;
+    const bool now = (flags & UNIT_FLAG_IN_COMBAT) != 0;
+    // The server's authoritative combat state. Spell-only attackers do not
+    // necessarily produce SMSG_ATTACKSTOP, so retaining them after this bit
+    // clears leaves the client permanently "in combat".
+    if (was && !now) clearHostileAttackers();
+    // Entering and leaving combat, which the interface names after the health
+    // regeneration that stops and starts with it. Registered for seven times
+    // across FrameXML and the addons and fired by nothing else: it is how a
+    // panel knows to lock itself, and how anything that must not change
+    // mid-fight finds out the fight has started.
+    if (was != now) {
+        packetEvents.fireFrameXmlEvent(now ? "PLAYER_REGEN_DISABLED" : "PLAYER_REGEN_ENABLED", {});
+    }
+}
+
 void CombatHandler::playerFlagsArrived(uint32_t flags, FrameXmlEvents& packetEvents) {
     // Not gated on an update, and that is the whole of a bug: logging in
     // already dead delivers the player as a CREATE block, so the ghost flag it

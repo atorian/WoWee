@@ -5,6 +5,8 @@
 #include "core/event_bus.hpp"
 #include "game/game_events.hpp"
 #include "game/protocol_constants.hpp"
+#include "game/update_field_table.hpp"
+#include "game/world_packets.hpp"
 #include "game/gather_spells.hpp"
 #include "game/spell_classification.hpp"
 #include "pet/domain/actions.hpp"
@@ -559,9 +561,9 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     // no aura, so there is nothing in the buff bar to right-click and this is
     // the only way to send one back - without it the button could only ever
     // summon, which is why pressing it again just produced the same critter.
-    if (spellId != 0 && spellId == queries_.activeCritterSpellId() &&
-        queries_.activeCritterGuid() != 0) {
-        queries_.dismissCritter();
+    if (spellId != 0 && spellId == character_.companionSpellId &&
+        character_.companionGuid != 0) {
+        dismissCompanion();
         return;
     }
 
@@ -4713,6 +4715,62 @@ void SpellHandler::handleChannelUpdate(network::Packet& packet) {
         if (!unitId.empty())
             frameXml_.fireFrameXmlEvent("UNIT_SPELLCAST_CHANNEL_STOP", {unitId});
     }
+}
+
+void SpellHandler::forgetPlayerAura(uint32_t spellId) {
+    for (auto& a : playerAuras_) {
+        if (!a.isEmpty() && a.spellId == spellId) {
+            a = AuraSlot{};
+            break;
+        }
+    }
+}
+
+void SpellHandler::companionFieldsArrived(const FlatFieldMap& blockFields) {
+    // A non-combat companion is announced only by this field on the player: it
+    // gets no aura, so there is nothing in the buff bar to cancel and nothing
+    // else to notice it by. Remembering which spell called it is what lets
+    // casting that spell again put it away rather than summon a second one.
+    const uint16_t critterIdx = fieldIndex(UF::UNIT_FIELD_CRITTER);
+    if (critterIdx == 0xFFFF) return;   // pre-WotLK: no such field, no dismiss opcode
+
+    auto loIt = blockFields.find(critterIdx);
+    auto hiIt = blockFields.find(static_cast<uint16_t>(critterIdx + 1));
+    if (loIt == blockFields.end() && hiIt == blockFields.end()) return;
+
+    const uint32_t lo = (loIt != blockFields.end()) ? loIt->second
+                                                     : static_cast<uint32_t>(character_.companionGuid);
+    const uint32_t hi = (hiIt != blockFields.end())
+                            ? hiIt->second
+                            : static_cast<uint32_t>(character_.companionGuid >> 32);
+    const uint64_t critterGuid = (static_cast<uint64_t>(hi) << 32) | lo;
+    if (critterGuid == character_.companionGuid) return;
+
+    if (critterGuid == 0) {
+        LOG_INFO("Companion dismissed: was guid=0x", std::hex,
+                 character_.companionGuid, std::dec);
+        character_.companionGuid = 0;
+        character_.companionSpellId = 0;
+        return;
+    }
+    // Attribute it to the spell just cast from the ground, the same way the
+    // mount aura is identified - a blind guess at "some spell" would make the
+    // toggle fire on the wrong button.
+    const uint32_t summonedBy = lastGroundCastSpellId_;
+    character_.companionGuid = critterGuid;
+    character_.companionSpellId = summonedBy;
+    LOG_INFO("Companion summoned: guid=0x", std::hex, critterGuid, std::dec,
+             " by spell=", summonedBy);
+}
+
+void SpellHandler::dismissCompanion() {
+    if (!sender_.characterInWorld()) return;
+    if (wireOpcode(Opcode::CMSG_DISMISS_CRITTER) == 0xFFFF) return;   // expansion has no such opcode
+    sender_.send(DismissCritterPacket::build(character_.companionGuid));
+    LOG_INFO("Dismissing companion: guid=0x", std::hex, character_.companionGuid, std::dec,
+             " summonedBy=", character_.companionSpellId);
+    // The server confirms by clearing the critter field; leave the local state
+    // alone so a refused dismiss does not leave the client thinking it worked.
 }
 
 } // namespace game

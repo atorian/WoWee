@@ -3092,7 +3092,7 @@ void Application::applyServerMovementState(float deltaTime) {
             gameHandler->setMovementPitch(pitchRad);
             // Tilt the mount/character model to match flight direction
             // (taxi flight uses TaxiOrientationChanged for this instead)
-            if (gameHandler->isMounted()) {
+            if (gameHandler->movement().isMounted()) {
                 if (auto* ac = getAnimationController()) ac->setMountPitchRoll(pitchRad, 0.0f);
             }
         } else if (gameHandler->isSwimming()) {
@@ -3104,7 +3104,7 @@ void Application::applyServerMovementState(float deltaTime) {
                     gameHandler->setMovementPitch(std::asin(std::clamp(fwd.z / len, -1.0f, 1.0f)));
                 }
             }
-        } else if (gameHandler->isMounted()) {
+        } else if (gameHandler->movement().isMounted()) {
             // Reset mount pitch when not flying
             if (auto* ac = getAnimationController()) ac->setMountPitchRoll(0.0f, 0.0f);
         }
@@ -3174,7 +3174,7 @@ void Application::applyServerMovementState(float deltaTime) {
         gameHandler->movement().hasPendingPlayerTransportWorldTransfer();
     bool landingClampActive = !onTaxi && worldEntryCallbacks_ && worldEntryCallbacks_->getTaxiLandingClampTimer() > 0.0f &&
                               worldEntryCallbacks_->getWorldEntryMovementGraceTimer() <= 0.0f &&
-                              !gameHandler->isMounted();
+                              !gameHandler->movement().isMounted();
     getCameraController()->setExternalFollow(
         externallyDrivenMotion || landingClampActive || hearthFreeze ||
         transportTransferFreeze || ride.deckFloorPending);

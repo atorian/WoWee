@@ -84,10 +84,10 @@ void PlayerView::connectMovement(game::GameHandler& game) {
         game.sendMovement(static_cast<game::Opcode>(opcode));
     });
     cc->setStandUpCallback([&game]() {
-        game.setStandState(rendering::AnimationController::STAND_STATE_STAND);
+        game.player().requestStandState(rendering::AnimationController::STAND_STATE_STAND);
     });
     cc->setSitDownCallback([this, &game]() {
-        game.setStandState(rendering::AnimationController::STAND_STATE_SIT);
+        game.player().requestStandState(rendering::AnimationController::STAND_STATE_SIT);
         animationController_->setStandState(rendering::AnimationController::STAND_STATE_SIT);
     });
     // The stand state is carried by AnimationCallbackHandler, which owns the

@@ -203,8 +203,8 @@ public:
     bool channeling() const override { return spellHandler_->isChanneling(); }
     const std::vector<AuraSlot>& playerAuras() const override { return spellHandler_->getPlayerAuras(); }
     void resetCastState() override { spellHandler_->resetCastState(); }
-    void forgetMount() override { currentMountDisplayId_ = 0; }
-    void forgetMountAura() override { mountAuraSpellId_ = 0; }
+    uint32_t lastGroundCastSpellId() const override { return spellHandler_->getLastGroundCastSpellId(); }
+    void forgetPlayerAura(uint32_t spellId) override { spellHandler_->forgetPlayerAura(spellId); }
     void leftVehicle() override { vehicleId_ = 0; }
     void arrivedOnMap(uint32_t mapId) override { currentMapId_ = mapId; }
     void traceWorldPackets(std::chrono::seconds duration, const char* label) override;
@@ -262,8 +262,8 @@ public:
     uint32_t currentCastSpellId() const override { return spellHandler_->getCurrentCastSpellId(); }
     bool restoring() const override { return spellHandler_->isRestoring(); }
     bool craftingWindowOpen() const override { return spellHandler_->isCraftingWindowOpen(); }
-    bool mounted() const override { return isMounted(); }
-    uint32_t mountAuraSpellId() const override { return getMountAuraSpellId(); }
+    bool mounted() const override { return movementHandler_->isMounted(); }
+    uint32_t mountAuraSpellId() const override { return movementHandler_->mountAuraSpellId(); }
     bool carriesAura(uint32_t spellId) const override { return playerCarriesAura(spellId); }
     void noteItemCastSpell(uint32_t spellId) override;
     void stopMovingForCast() override;
@@ -303,8 +303,8 @@ public:
     bool autoFaceTarget() const override { return isAutoFaceTarget(); }
     bool autoSelfCast() const override { return isAutoSelfCast(); }
     bool flying() const override { return isPlayerFlying(); }
-    uint32_t mountDisplayId() const override { return currentMountDisplayId_; }
-    void noteMountAura(uint32_t spellId) override { mountAuraSpellId_ = spellId; }
+    uint32_t mountDisplayId() const override { return movementHandler_->mountDisplayId(); }
+    void noteMountAura(uint32_t spellId) override { movementHandler_->noteMountAura(spellId); }
     bool autoAttacking() const override { return combatHandler_->isAutoAttacking(); }
     bool inCombat() const override { return combatHandler_->isInCombat(); }
     const ItemQueryResponseData* itemInfo(uint32_t itemId) const override { return inventoryHandler_->getItemInfo(itemId); }
@@ -318,8 +318,6 @@ public:
     uint64_t lastInteractedGameObject() const override { return lastInteractedGoGuid_; }
     void clearPendingGameObjectInteraction() override { pendingGameObjectInteractGuid_ = 0; }
     void clearLastInteractedGameObject() override { lastInteractedGoGuid_ = 0; }
-    uint32_t activeCritterSpellId() const override { return getActiveCritterSpellId(); }
-    uint64_t activeCritterGuid() const override { return getActiveCritterGuid(); }
     std::optional<HomeBind> homeBind() const override;
     std::string achievementName(uint32_t achievementId) override;
     achievement::IAchievementsFeed* achievementsFeed() override;
@@ -379,6 +377,7 @@ public:
     void bankBagSlotsArrived(uint8_t slots) override;
     void chosenTitleArrived(int32_t title) override;
     void playerFlagsArrived(uint32_t flags, FrameXmlEvents& packetEvents) override;
+    bool loggingOut() const override;
 
     // ReputationQueries (refreshUnitHostility is declared with the rest of the
     // faction table below).
@@ -612,9 +611,6 @@ public:
 
     // Stand state
     void setStandState(uint8_t state) override;  // 0=stand, 1=sit, 2=sit_chair, 3=sleep, 4=sit_low_chair, 5=sit_medium_chair, 6=sit_high_chair, 7=dead, 8=kneel, 9=submerged
-    uint8_t getStandState() const { return standState_; }
-    bool isSitting() const { return standState_ >= 1 && standState_ <= 6; }
-    bool isDead() const { return standState_ == 7; }
 
     /// Take the glyph out of a socket. Zero-based slot, as the server counts.
     void removeGlyphFromSocket(uint32_t slot);
@@ -693,7 +689,7 @@ public:
     ///
     /// The reliable way to ask "am I already riding the mount this button
     /// summons": the mount you are on put its own aura on you, and no other
-    /// mount's aura is there. mountAuraSpellId_ is a guess by comparison - it
+    /// mount's aura is there. Movement's mountAuraSpellId is a guess by comparison - it
     /// is whatever the client could work out at the moment the mount appeared,
     /// and when the player did not cast it themselves (a login already mounted,
     /// a taxi, a server-applied aura) the blind scan behind it can land on a
@@ -873,15 +869,6 @@ public:
     }
     uint32_t getWorldStateMapId() const { return worldStateMapId_; }
     uint32_t getWorldStateZoneId() const { return worldStateZoneId_; }
-    uint64_t getActiveCritterGuid() const { return activeCritterGuid_; }
-    uint32_t getActiveCritterSpellId() const { return activeCritterSpellId_; }
-    void setActiveCritter(uint64_t guid, uint32_t spellId) {
-        activeCritterGuid_ = guid;
-        activeCritterSpellId_ = spellId;
-    }
-    /// Send the active companion away. No-op when none is out or the expansion
-    /// has no opcode for it.
-    void dismissCritter() override;
 
     // Mirror timers (0=fatigue, 1=breath, 2=feigndeath)
     //
@@ -1120,7 +1107,6 @@ public:
     /// Interface phase only. Notifications produced by handlers wait for the next drain.
     void dispatchAddonEvents();
 
-    bool isMounted() const { return currentMountDisplayId_ != 0; }
     bool isHostileFactionPublic(uint32_t factionTemplateId) const { return isHostileFaction(factionTemplateId); }
     bool isPlayerRooted() const { return movementInfo.isPlayerRooted(); }
     bool isGravityDisabled() const { return movementInfo.isGravityDisabled(); }
@@ -1336,11 +1322,6 @@ public:
     auto& updateFieldTableRef() { return updateFieldTable_; }
 
     // ── Character & Appearance ───────────────────────────────────────
-    auto& currentMountDisplayIdRef() { return currentMountDisplayId_; }
-    auto& mountAuraSpellIdRef() { return mountAuraSpellId_; }
-    /// Spell of the aura currently keeping the player mounted, 0 when on foot.
-    /// Pressing this one again is a dismount, not a second mount.
-    uint32_t getMountAuraSpellId() const { return mountAuraSpellId_; }
 
     // ── AFK / DND ────────────────────────────────────────────────────
 
@@ -1663,12 +1644,9 @@ private:
     // that spell dismisses rather than re-summons, which is how a companion is
     // put away: it has no aura to cancel from the buff bar, so this toggle is
     // the only way to send it back.
-    uint64_t activeCritterGuid_ = 0;
-    uint32_t activeCritterSpellId_ = 0;
     std::unordered_map<uint32_t, uint32_t> worldStates_;
 
     // ---- Display state ----
-    uint8_t standState_ = 0;  // 0=stand, 1=sit, ..., 7=dead, 8=kneel (server-confirmed)
 
     // Items, coin, books and the equipment of players in view are the
     // inventory's (InventoryHandler); none of it is kept here.
@@ -1838,8 +1816,6 @@ private:
     /// Languages.dbc, read once on the first ask like the caches beside it.
     mutable std::unordered_map<uint32_t, std::string> languageNames_;
     mutable bool languageNamesLoaded_ = false;
-    uint32_t currentMountDisplayId_ = 0;
-    uint32_t mountAuraSpellId_ = 0;       // Spell ID of the aura that caused mounting (for CMSG_CANCEL_AURA fallback)
     // Death Knight runes (class 6): slots 0-1=Blood, 2-3=Unholy, 4-5=Frost initially
     std::array<RuneSlot, 6> playerRunes_ = [] {
         std::array<RuneSlot, 6> r{};

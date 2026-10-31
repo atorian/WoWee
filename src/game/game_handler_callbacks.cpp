@@ -595,6 +595,7 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     inventoryHandler_->beginCharacter();
     if (services_.achievementsFeed) services_.achievementsFeed->beginCharacter();
     playerHandler_->beginCharacter();
+    movementHandler_->beginCharacter();
     spellHandler_->resetAllState();
     eventBus().publish(events::PlayerIntoxicationChanged{0.0f});
     actionBarHandler_->clear();
@@ -720,9 +721,8 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     movementInfo.jumpCosAngle = 0.0f;
     movementInfo.jumpXYSpeed = 0.0f;
     combatHandler_->worldEntered();
-    currentMountDisplayId_ = 0;
     vehicleId_ = 0;
-    eventBus().publish(events::PlayerMountChanged{0});
+    movementHandler_->enteredWorld();
 
     // Clear boss encounter unit slots and raid marks on world transfer
     socialHandler_->resetTransferState();
@@ -1145,7 +1145,7 @@ void GameHandler::faceCanonicalYaw(float canonicalYaw) {
 }
 
 void GameHandler::setStandState(uint8_t standState) {
-    socialHandler_->setStandState(standState);
+    playerHandler_->requestStandState(standState);
 }
 
 bool GameHandler::isAfk() const { return chatHandler_->isAfk(); }
@@ -1285,18 +1285,6 @@ void GameHandler::dismount() {
 
 void GameHandler::cancelCast() {
     spellHandler_->cancelCast();
-}
-
-void GameHandler::dismissCritter() {
-    if (activeCritterGuid_ == 0 || !getSocket() || getState() != WorldState::IN_WORLD) return;
-    const uint16_t wire = wireOpcode(Opcode::CMSG_DISMISS_CRITTER);
-    if (wire == 0xFFFF) return;   // expansion has no such opcode
-    auto pkt = DismissCritterPacket::build(activeCritterGuid_);
-    getSocket()->send(pkt);
-    LOG_INFO("Dismissing companion: guid=0x", std::hex, activeCritterGuid_, std::dec,
-             " summonedBy=", activeCritterSpellId_);
-    // The server confirms by clearing the critter field; leave the local state
-    // alone so a refused dismiss does not leave the client thinking it worked.
 }
 
 // CMSG_UNLEARN_SKILL carries the skill line and nothing else.
@@ -1515,7 +1503,7 @@ void GameHandler::interactWithGameObject(uint64_t guid) {
     // then, and they fell out of the sky. The same rule casting follows: with
     // Auto Dismount in Flight off - the default - it is refused, and the
     // player stays up.
-    if (isMounted() && !movementHandler_->isTaxiMountActive() && isPlayerFlying() &&
+    if (movementHandler_->isMounted() && !movementHandler_->isTaxiMountActive() && isPlayerFlying() &&
         cvars().get("autoDismountFlying", "0") == "0") {
         addUIError("You can't do that while flying.");
         return;
@@ -1533,7 +1521,7 @@ void GameHandler::interactWithGameObject(uint64_t guid) {
     //
     // Not on a taxi: the flight's mount is not the player's to dismiss, and
     // there is nothing to interact with mid-flight anyway.
-    if (isMounted() && !movementHandler_->isTaxiMountActive()) {
+    if (movementHandler_->isMounted() && !movementHandler_->isTaxiMountActive()) {
         constexpr float kGameObjectReach = 12.0f;
         bool inReach = true;
         if (auto entity = getEntityManager().getEntity(guid)) {
@@ -1897,6 +1885,8 @@ void GameHandler::resurrectedInPlace() {
     combatHandler_->invalidateTabCycle();
     spellHandler_->resetCastState();
 }
+
+bool GameHandler::loggingOut() const { return socialHandler_->isLoggingOut(); }
 
 Character* GameHandler::listedCharacter() {
     for (auto& ch : characters) {

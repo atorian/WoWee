@@ -405,3 +405,80 @@ TEST_CASE("a form's bonus action bar is the one SpellShapeshiftForm.dbc gives it
     h.playerFields({{uf(UF::UNIT_FIELD_BYTES_1), 3u << 24}});
     CHECK(h.game().getBonusActionBarOffset() == 0);
 }
+
+TEST_CASE("a stand state the server confirms is announced once; the next character stands",
+          "[player][harness]") {
+    namespace ev = wowee::game::events;
+    GameHarness h;
+    h.enterWorld();
+    std::vector<int> states;
+    auto sub = h.events().subscribe<ev::StandStateChanged>(
+        [&](const ev::StandStateChanged& e) { states.push_back(e.standState); });
+
+    // SMSG_STANDSTATE_UPDATE: sit, sit again, stand, sit.
+    for (uint8_t s : {1, 1, 0, 1}) h.receive(Opcode::SMSG_STANDSTATE_UPDATE, Body().u8(s));
+    h.pump();
+    CHECK(states == std::vector<int>{1, 0, 1});
+    CHECK(h.game().player().standState() == 1);
+
+    // Logged out seated. The next character stands until told otherwise, so
+    // its server's "sit" is news.
+    PlayerSpec bob;
+    bob.guid = 0x11;
+    bob.name = "Bob";
+    h.relogAs(bob);
+    CHECK(h.game().player().standState() == 0);
+    h.receive(Opcode::SMSG_STANDSTATE_UPDATE, Body().u8(1));
+    h.pump();
+    CHECK(states == std::vector<int>{1, 0, 1, 1});
+}
+
+TEST_CASE("sitting down is asked of the server, and the player sits when it answers",
+          "[player][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.game().player().requestStandState(1);
+
+    auto* sent = h.lastSent(Opcode::CMSG_STANDSTATECHANGE);
+    REQUIRE(sent);
+    CHECK(sent->readUInt32() == 1u);
+    CHECK(h.game().player().standState() == 0);
+}
+
+TEST_CASE("the stun flag on the player is a stun, except as the logout's root",
+          "[player][harness]") {
+    namespace ev = wowee::game::events;
+    constexpr uint32_t kStunned = 0x00040000;
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    std::vector<bool> stuns;
+    auto sub = h.events().subscribe<ev::StunStateChanged>(
+        [&](const ev::StunStateChanged& e) { stuns.push_back(e.stunned); });
+
+    h.playerFields({{uf(UF::UNIT_FIELD_FLAGS), kStunned}});
+    h.playerFields({{uf(UF::UNIT_FIELD_FLAGS), kStunned | 0x1}});   // still stunned: no news
+    h.playerFields({{uf(UF::UNIT_FIELD_FLAGS), 0}});
+    CHECK(stuns == std::vector<bool>{true, false});
+
+    // The server roots the player for the logout countdown with the same flag.
+    h.game().social().requestLogout(false);
+    h.playerFields({{uf(UF::UNIT_FIELD_FLAGS), kStunned}});
+    CHECK(stuns == std::vector<bool>{true, false});
+}
+
+TEST_CASE("the player is stealthed while the creep flag is on", "[player][harness]") {
+    namespace ev = wowee::game::events;
+    constexpr uint32_t kCreep = 0x02u << 16;   // the visibility byte of UNIT_FIELD_BYTES_1
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    std::vector<bool> stealth;
+    auto sub = h.events().subscribe<ev::StealthStateChanged>(
+        [&](const ev::StealthStateChanged& e) { stealth.push_back(e.stealthed); });
+
+    h.playerFields({{uf(UF::UNIT_FIELD_BYTES_1), kCreep}});
+    h.playerFields({{uf(UF::UNIT_FIELD_BYTES_1), kCreep | 1}});   // stand state moved, not stealth
+    h.playerFields({{uf(UF::UNIT_FIELD_BYTES_1), 0}});
+    CHECK(stealth == std::vector<bool>{true, false});
+}

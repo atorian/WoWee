@@ -1,5 +1,6 @@
 #pragma once
 
+#include "game/flat_field_map.hpp"
 #include "game/world_packet_data.hpp"
 #include "core/coordinates.hpp"
 #include "game/opcodes.hpp"
@@ -64,17 +65,15 @@ public:
     /// Eating or drinking.
     [[nodiscard]] virtual bool restoring() const = 0;
     [[nodiscard]] virtual const std::vector<AuraSlot>& playerAuras() const = 0;
+    [[nodiscard]] virtual uint32_t currentCastSpellId() const = 0;
+    /// The spell the player last cast from the ground, not from a mount.
+    [[nodiscard]] virtual uint32_t lastGroundCastSpellId() const = 0;
+    /// The mount's aura is gone with the mount: take it off the buff bar.
+    virtual void forgetPlayerAura(uint32_t spellId) = 0;
     virtual void cancelCast() = 0;
     virtual void resetCastState() = 0;
 
-    // ---- The mount and the vehicle ----
-    [[nodiscard]] virtual bool mounted() const = 0;
-    [[nodiscard]] virtual uint32_t mountDisplayId() const = 0;
-    [[nodiscard]] virtual uint32_t mountAuraSpellId() const = 0;
-    /// The player is off their mount; PlayerMountChanged is the caller's to
-    /// publish.
-    virtual void forgetMount() = 0;
-    virtual void forgetMountAura() = 0;
+    // ---- The vehicle ----
     virtual void leftVehicle() = 0;
 
     // ---- Arriving somewhere ----
@@ -109,6 +108,26 @@ public:
                     MovementInfo& movementInfo);
 
     void registerOpcodes(DispatchTable& table);
+
+    /// A character is entering the world: not on the last one's mount.
+    void beginCharacter() { mount_ = Mount{}; }
+
+    // --- The player's mount ---
+    [[nodiscard]] bool isMounted() const { return mount_.displayId != 0; }
+    /// UNIT_FIELD_MOUNTDISPLAYID as the client holds it, 0 on foot.
+    [[nodiscard]] uint32_t mountDisplayId() const { return mount_.displayId; }
+    /// The aura the mount came with, as far as it could be told: what
+    /// cancelling the mount cancels.
+    [[nodiscard]] uint32_t mountAuraSpellId() const { return mount_.auraSpellId; }
+    /// The spell cast was a mount's.
+    void noteMountAura(uint32_t spellId) { mount_.auraSpellId = spellId; }
+    /// UNIT_FIELD_MOUNTDISPLAYID on the player, at create or in an update.
+    void playerMountFieldArrived(uint32_t displayId, const FlatFieldMap& blockFields,
+                                 FrameXmlEvents& packetEvents);
+    /// Entering the world, or a far teleport: on foot.
+    void enteredWorld();
+    /// Once a frame, off a taxi: the mount is what the player's field says.
+    void reconcileMount();
 
     // --- Public API (delegated from GameHandler) ---
 
@@ -378,6 +397,9 @@ private:
     std::optional<glm::vec3> applyPlayerTransportState(const UpdateBlock& block, const glm::vec3& canonicalPos,
                                                        bool updateMovementInfoPos);
     void resyncPlayerIfFarFromServer(const glm::vec3& serverCanonicalPos);
+    void handleDismount(network::Packet& packet);
+    void handleMountResult(network::Packet& packet);
+    void handleDismountResult(network::Packet& packet);
 
 private:
     // --- Packet handlers ---
@@ -539,6 +561,12 @@ private:
     // taxi path's own waypoint trace doesn't necessarily terminate exactly on
     // the node's registered coordinate the way GM teleports/.gps do.
     uint32_t taxiDestNodeId_ = 0;
+    /// The player's own mount, assigned whole by beginCharacter.
+    struct Mount {
+        uint32_t displayId = 0;
+        uint32_t auraSpellId = 0;  // what CMSG_CANCEL_AURA cancels where there is no CMSG_CANCEL_MOUNT_AURA
+    };
+    Mount mount_;
     bool taxiMountActive_ = false;
     bool taxiActivatePending_ = false;
     float taxiActivateTimer_ = 0.0f;

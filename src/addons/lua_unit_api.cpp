@@ -1185,7 +1185,7 @@ static int lua_InCombatLockdown(lua_State* L) {
 
 static int lua_IsMounted(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->isMounted());
+    lua_pushboolean(L, gh && gh->movement().isMounted());
     return 1;
 }
 

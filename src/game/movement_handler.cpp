@@ -8,6 +8,8 @@
 #include "game/game_events.hpp"
 #include "core/event_bus.hpp"
 #include "game/game_utils.hpp"
+#include "game/update_field_table.hpp"
+#include "game/protocol_constants.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/spline_packet.hpp"
 #include "game/transport_manager.hpp"
@@ -117,6 +119,9 @@ void MovementHandler::applyServerMovementSpeeds(float walk, float run, float run
 }
 
 void MovementHandler::registerOpcodes(DispatchTable& table) {
+    table[Opcode::SMSG_DISMOUNT] = [this](network::Packet& packet) { handleDismount(packet); };
+    table[Opcode::SMSG_MOUNTRESULT] = [this](network::Packet& packet) { handleMountResult(packet); };
+    table[Opcode::SMSG_DISMOUNTRESULT] = [this](network::Packet& packet) { handleDismountResult(packet); };
     table[Opcode::SMSG_TRANSFER_PENDING] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(4)) {
             LOG_WARNING("SMSG_TRANSFER_PENDING too short; player remains in the current world");
@@ -993,7 +998,7 @@ void MovementHandler::forceClearTaxiAndMovementState() {
     // mount behind and reconciliation spawns a duplicate. Unstuck explicitly
     // dismounts normal mounts before calling this movement reset.
     if (clearingTaxiMount) {
-        queries_.forgetMount();
+        mount_.displayId = 0;
     }
     queries_.leftVehicle();
     // Death/resurrect state is intentionally NOT cleared here.
@@ -1058,12 +1063,12 @@ void MovementHandler::dismount() {
     // holding the seated rider pose in between.
     constexpr float kDismountGraceSeconds = 1.5f;
     dismountGraceRemaining_ = kDismountGraceSeconds;
-    uint32_t savedMountAura = queries_.mountAuraSpellId();
-    if (queries_.mountDisplayId() != 0 || taxiMountActive_) {
+    uint32_t savedMountAura = mount_.auraSpellId;
+    if (mount_.displayId != 0 || taxiMountActive_) {
         events_.publish(events::PlayerMountChanged{0});
-        queries_.forgetMount();
+        mount_.displayId = 0;
         taxiMountActive_ = false;
-        queries_.forgetMountAura();
+        mount_.auraSpellId = 0;
         LOG_INFO("Dismount: cleared local mount state, onTaxiFlight=", onTaxiFlight_);
     }
     uint16_t cancelMountWire = wireOpcode(Opcode::CMSG_CANCEL_MOUNT_AURA);
@@ -2220,7 +2225,7 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
     taxiClientActive_ = false;
     taxiClientPath_.clear();
     taxiServerCompletionPending_ = false;
-    queries_.forgetMount();
+    mount_.displayId = 0;
     events_.publish(events::PlayerMountChanged{0});
 
     for (const auto& [guid, entity] : queries_.entities().getEntities()) {
@@ -2701,7 +2706,7 @@ void MovementHandler::finishClientTaxiFlight(bool snapToFinalWaypoint) {
         events_.publish(events::PlayerMountChanged{0});
     }
     taxiMountActive_ = false;
-    queries_.forgetMount();
+    mount_.displayId = 0;
     // Some WotLK servers expose the taxi mount through vehicle data.
     // Clear that cached ID at landing so the dismount control does not
     // remain visible after the flight has completed.
@@ -3042,10 +3047,10 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
 
     taxiDestNodeId_ = destNodeId;
 
-    if (queries_.mounted()) {
+    if (isMounted()) {
         LOG_INFO("Taxi activate: dismounting current mount");
         events_.publish(events::PlayerMountChanged{0});
-        queries_.forgetMount();
+        mount_.displayId = 0;
         dismount();
     }
 
@@ -4361,6 +4366,257 @@ void MovementHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical
     if (horizDistSq > disembarkHorizDistSq || std::abs(diff.z) > disembarkVertDist) {
         clearPlayerTransport();
         LOG_DEBUG("M2 transport disembark");
+    }
+}
+
+// Detect player mount/dismount from UNIT_FIELD_MOUNTDISPLAYID changes
+void MovementHandler::playerMountFieldArrived(uint32_t newMountDisplayId,
+                                              const FlatFieldMap& blockFields,
+                                              FrameXmlEvents& packetEvents) {
+    // Live-confirmed: CMaNGOS can push a player values-update mid-taxi-flight
+    // that zeroes UNIT_FIELD_MOUNTDISPLAYID before the client's own flight
+    // simulation actually finishes (same early-completion behavior already
+    // seen and guarded for SMSG_DISMOUNT) - obeying it here cut the mount
+    // animation while updateClientTaxi() kept flying the
+    // real path for several more seconds. But some cores finalize taxi
+    // flights server-side, so a bare "ignore while flying" guard could let
+    // the client fly past a genuine server landing if local spline timing
+    // ever drifts. Distinguish using the server's own UNIT_FLAG_TAXI_FLIGHT,
+    // same as the SMSG_DISMOUNT guard: still set means premature (ignore,
+    // let the client spline finish naturally); already cleared means the
+    // server considers the flight over (honor it now).
+    const bool onRealTaxiFlight = isOnTaxiFlight();
+    if (onRealTaxiFlight && newMountDisplayId == 0) {
+        bool serverStillTaxiing = false;
+        auto playerEntity = queries_.entities().getEntity(queries_.characterGuid());
+        auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity);
+        if (playerUnit) {
+            serverStillTaxiing = (playerUnit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0;
+        }
+        const bool nearDestination = isNearTaxiDestination();
+        if (serverStillTaxiing || !nearDestination) {
+            deferServerTaxiCompletion();
+            if (!nearDestination) {
+                LOG_WARNING("Deferring premature taxi mount clear until landing zone");
+            }
+            return;
+        }
+        // Authoritative server completion ahead of our own spline - stop the
+        // client flight now rather than snapping to a final waypoint that may
+        // not match where the server actually stopped us.
+        finishClientTaxiFlight(/*snapToFinalWaypoint=*/false);
+        return;
+    }
+    uint32_t old = mount_.displayId;
+
+    // A dismount the player just asked for has not reached this field yet: it
+    // keeps its old value for a few frames. Taking that at face value put them
+    // straight back on the mount, and the restored value then made the server's
+    // own SMSG_DISMOUNT read as transient and get discarded - so the mount
+    // blinked off, back on, and off again, with the character left holding the
+    // seated rider pose in between.
+    if (newMountDisplayId != 0 && isDismountPending()) {
+        return;
+    }
+    // The server agrees: nothing left to wait for.
+    if (newMountDisplayId == 0) clearDismountPending();
+
+    if (old != 0 && newMountDisplayId == 0) {
+        LOG_WARNING("Authoritative mount field cleared: oldDisplay=", old,
+                    " casting=", queries_.casting(),
+                    " channeling=", queries_.channeling(),
+                    " spell=", queries_.currentCastSpellId());
+    }
+    mount_.displayId = newMountDisplayId;
+    if (newMountDisplayId != old) events_.publish(events::PlayerMountChanged{newMountDisplayId});
+    if (newMountDisplayId != old)
+        packetEvents.fireFrameXmlEvent("UNIT_MODEL_CHANGED", {"player"});
+    if (old == 0 && newMountDisplayId != 0) {
+        // Just mounted - find the mount aura (indefinite duration, self-cast).
+        // Prefer the spell the player just cast: the blind scan below keeps the
+        // last matching aura, which is as likely to be a racial or a tracking
+        // buff as the mount, and the id has to be right or pressing the mount
+        // again cannot be recognised as a dismount.
+        mount_.auraSpellId = 0;
+        const uint32_t justCast = queries_.lastGroundCastSpellId();
+        for (const auto& a : queries_.playerAuras()) {
+            if (!a.isEmpty() && a.maxDurationMs < 0 && a.casterGuid == queries_.characterGuid()) {
+                if (justCast != 0 && a.spellId == justCast) {
+                    mount_.auraSpellId = a.spellId;
+                    break;
+                }
+                mount_.auraSpellId = a.spellId;
+            }
+        }
+        // The spell that was cast, before either blind scan gets a turn.
+        //
+        // Both scans keep whichever indefinite aura they happen to see last,
+        // which is as likely to be a racial or a tracking buff as the mount -
+        // and on the pre-WotLK path the aura list this checks is often empty, so
+        // the cast id was being discarded in favour of a guess. Getting it wrong
+        // is not cosmetic: pressing the mount again is recognised as a dismount
+        // by comparing against exactly this, so a wrong id dismounted the player
+        // and put them straight back on, and the button appeared to do nothing.
+        if (justCast != 0) mount_.auraSpellId = justCast;
+
+        // Pre-WotLK fallback: scan UNIT_FIELD_AURAS from same update block
+        if (mount_.auraSpellId == 0) {
+            const uint16_t ufAuras = fieldIndex(UF::UNIT_FIELD_AURAS);
+            if (ufAuras != 0xFFFF) {
+                for (const auto& [fk, fv] : blockFields) {
+                    if (fk >= ufAuras && fk < ufAuras + 48 && fv != 0) {
+                        mount_.auraSpellId = fv;
+                        break;
+                    }
+                }
+            }
+        }
+        LOG_INFO("Mount detected: displayId=", newMountDisplayId, " auraSpellId=", mount_.auraSpellId);
+    }
+    if (old != 0 && newMountDisplayId == 0) {
+        // Only clear the specific mount aura, not all indefinite auras.
+        // Previously this cleared every aura with maxDurationMs < 0, which
+        // would strip racial passives, tracking, and zone buffs on dismount.
+        uint32_t mountSpell = mount_.auraSpellId;
+        mount_.auraSpellId = 0;
+        if (mountSpell != 0) queries_.forgetPlayerAura(mountSpell);
+    }
+}
+
+
+void MovementHandler::handleDismount(network::Packet& packet) {
+    // TBC/WotLK identify the dismounting unit with a packed GUID. Applying
+    // every nearby unit's dismount to the local player made an enemy
+    // dismounting to attack knock us off our own mount. Classic variants
+    // may send the legacy empty packet, which is implicitly local.
+    uint64_t dismountGuid = queries_.characterGuid();
+    if (packet.hasRemaining(1)) {
+        dismountGuid = packet.readPackedGuid();
+        if (dismountGuid == 0) {
+            LOG_WARNING("Ignoring SMSG_DISMOUNT with an invalid packed GUID");
+            return;
+        }
+    }
+    if (dismountGuid != queries_.characterGuid()) {
+        LOG_DEBUG("Remote SMSG_DISMOUNT: guid=0x", std::hex,
+                  dismountGuid, std::dec);
+        events_.publish(events::OtherPlayerMounted{dismountGuid, 0});
+        return;
+    }
+
+    // Live-confirmed: CMaNGOS sends this partway through a taxi flight (its
+    // own server-side flight-completion estimate firing early, well before
+    // the client-simulated path actually finishes) - obeying it unconditionally
+    // cancelled the taxi mount animation while updateClientTaxi() kept flying
+    // the real path for several more seconds, seen as "walking in the air".
+    // But other cores (e.g. AzerothCore) finalize taxi flights server-side -
+    // dismounting/stopping the player is the *authoritative* completion
+    // signal there, not a premature estimate - so a blanket "ignore while
+    // flying" guard could let the client fly past a real landing if local
+    // spline timing ever drifts from the server's. Distinguish the two using
+    // the server's own UNIT_FLAG_TAXI_FLIGHT: still set means this is the
+    // premature-estimate quirk (ignore, let updateClientTaxi() finish
+    // naturally); already cleared means the server considers the flight
+    // genuinely over (honor it now instead of waiting on our own spline).
+    const bool onTaxiFlight = isOnTaxiFlight();
+    bool serverStillTaxiing = false;
+    if (onTaxiFlight) {
+        auto playerEntity = queries_.entities().getEntity(queries_.characterGuid());
+        auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity);
+        if (playerUnit) {
+            serverStillTaxiing = (playerUnit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0;
+        }
+    }
+    const bool nearDestination = onTaxiFlight && isNearTaxiDestination();
+    LOG_INFO("SMSG_DISMOUNT received: onTaxiFlight=", onTaxiFlight,
+             " serverStillTaxiing=", serverStillTaxiing,
+             " nearDestination=", nearDestination);
+    if (onTaxiFlight && (serverStillTaxiing || !nearDestination)) {
+        deferServerTaxiCompletion();
+        LOG_WARNING("Deferring premature SMSG_DISMOUNT until taxi landing zone");
+        return;
+    }
+    if (onTaxiFlight) {
+        // Authoritative server completion ahead of our own spline - stop the
+        // client flight now rather than snapping to a final waypoint that may
+        // not match where the server actually stopped us.
+        finishClientTaxiFlight(/*snapToFinalWaypoint=*/false);
+        return;
+    }
+
+    // UNIT_FIELD_MOUNTDISPLAYID is the authoritative persistent mount
+    // state.  Some realms emit an isolated SMSG_DISMOUNT while processing
+    // damage (notably periodic poison) without actually removing the mount
+    // aura or clearing the update field.  Treating that transient packet as
+    // state made the local model dismount even though the player remained
+    // mounted server-side.  A real dismount also clears the update field;
+    // let that values update drive the visual when the two signals disagree.
+    if (isActiveExpansion("wotlk")) {
+        const uint16_t mountField = fieldIndex(UF::UNIT_FIELD_MOUNTDISPLAYID);
+        auto playerEntity = queries_.entities().getEntity(queries_.characterGuid());
+        const uint32_t serverMountDisplay =
+            (playerEntity && mountField != 0xFFFF && playerEntity->hasField(mountField))
+                ? playerEntity->getField(mountField)
+                : 0;
+        // ...unless the player asked to dismount, in which case a still-set
+        // field is exactly the staleness this packet is arriving to correct.
+        // Discarding it there threw away the one authoritative confirmation
+        // the dismount had.
+        const bool awaitingOurOwnDismount =
+            isDismountPending();
+        if (serverMountDisplay != 0 && !awaitingOurOwnDismount) {
+            LOG_WARNING("Ignoring transient SMSG_DISMOUNT while authoritative mount field is ",
+                        serverMountDisplay,
+                        " casting=", queries_.casting(),
+                        " channeling=", queries_.channeling(),
+                        " spell=", queries_.currentCastSpellId());
+            return;
+        }
+        clearDismountPending();
+    }
+    mount_.displayId = 0;
+    events_.publish(events::PlayerMountChanged{0});
+}
+
+void MovementHandler::handleMountResult(network::Packet& packet) {
+    if (!packet.hasRemaining(4)) return;
+    uint32_t result = packet.readUInt32();
+    if (result != 4) {
+        const char* msgs[] = { "Cannot mount here.", "Invalid mount spell.",
+                               "Too far away to mount.", "Already mounted." };
+        std::string mountErr = result < 4 ? msgs[result] : "Cannot mount.";
+        raiseUiError(events_, frameXml_, mountErr);
+        chat_.addSystemChatMessage(mountErr);
+    }
+}
+
+void MovementHandler::handleDismountResult(network::Packet& packet) {
+    if (!packet.hasRemaining(4)) return;
+    uint32_t result = packet.readUInt32();
+    if (result != 0) raiseUiError(events_, frameXml_, "Cannot dismount here.");
+}
+
+void MovementHandler::enteredWorld() {
+    mount_.displayId = 0;
+    events_.publish(events::PlayerMountChanged{0});
+}
+
+void MovementHandler::reconcileMount() {
+    // Keep non-taxi mount state server-authoritative.
+    // Some server paths don't emit explicit mount field updates in lockstep
+    // with local visual state changes, so reconcile continuously.
+    if (!onTaxiFlight_) {
+        auto playerEntity = queries_.entities().getEntity(queries_.characterGuid());
+        auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity);
+        if (playerUnit) {
+            uint32_t serverMountDisplayId = playerUnit->getMountDisplayId();
+            if (serverMountDisplayId != mount_.displayId) {
+                LOG_INFO("Mount reconcile: server=", serverMountDisplayId,
+                         " local=", mount_.displayId);
+                mount_.displayId = serverMountDisplayId;
+                events_.publish(events::PlayerMountChanged{serverMountDisplayId});
+            }
+        }
     }
 }
 
