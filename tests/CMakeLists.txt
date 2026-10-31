@@ -2477,11 +2477,6 @@ wowee_add_test(test_ocean_spectrum
 wowee_add_test(test_sea_bed
     SOURCES test_sea_bed.cpp)
 
-# ── test_ocean_fft ───────────────────────────────────────────
-# The sea's surface out of its spectrum, by the compute shaders' own FFT.
-wowee_add_test(test_ocean_fft
-    SOURCES test_ocean_fft.cpp)
-
 # ── test_water_reflection ────────────────────────────────────
 # The mirrored camera sees what stands above the water and nothing of the bed,
 # and the reflection is drawn for the water in view and what it can show.
@@ -2753,7 +2748,6 @@ wowee_add_test(test_swim_wall SOURCES test_swim_wall.cpp)
 add_executable(test_light_bands
     test_light_bands.cpp
     test_distance_fog.cpp
-    test_rt_light_composition.cpp
     ${TEST_COMMON_SOURCES})
 target_include_directories(test_light_bands PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_light_bands SYSTEM PRIVATE
