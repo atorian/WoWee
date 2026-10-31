@@ -261,7 +261,11 @@ public:
         std::ifstream in(expansionPath + "/expansion.json");
         if (!in) stop(expansionPath + "/expansion.json", "the scene's tables", "cannot be opened");
         try {
-            for (const auto& t : json::parse(in).at("tables")) listed_.insert(t.get<std::string>());
+            // The document is held for the loop: ranging over a reference into
+            // the temporary parse(in) returns iterates a destroyed object, which
+            // read as an empty list and stopped every scene at its first table.
+            const json doc = json::parse(in);
+            for (const auto& t : doc.at("tables")) listed_.insert(t.get<std::string>());
         } catch (const std::exception& e) {
             stop(expansionPath + "/expansion.json", "the scene's tables", e.what());
         }
@@ -269,7 +273,11 @@ public:
     [[nodiscard]] bool has(const std::string& dbc) const override { return listed_.count(dbc) != 0; }
     [[nodiscard]] Table table(const std::string& dbc, uint32_t fields,
                               std::string_view neededFor) const override {
-        if (!has(dbc)) stop(dbc, neededFor, "is not on the expansion's list of tables it uses");
+        if (!has(dbc)) {
+            stop(dbc, neededFor, "is not on the expansion's list of tables it uses (" +
+                                     std::to_string(listed_.size()) + " tables listed in " + expansion_ +
+                                     "/expansion.json)");
+        }
         Table t = assets_->loadDBC(dbc);
         if (!t || !t->isLoaded()) stop(dbc, neededFor, "could not be read");
         if (t->getFieldCount() < fields) {
