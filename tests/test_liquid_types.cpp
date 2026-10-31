@@ -231,7 +231,8 @@ TEST_CASE("an MCLQ ocean is the sea, not a lake", "[liquid]") {
     std::memcpy(adt.data() + 4, &size, 4);
     adt.insert(adt.end(), mcnk.begin(), mcnk.end());
 
-    const ADTTerrain loaded = ADTLoader::load(adt);
+    const auto loadedTile = ADTLoader::load(adt);
+    const ADTTerrain& loaded = *loadedTile;
     REQUIRE(loaded.waterData[0].hasWater());
 
     const LiquidTypeTable table = tableOf(kStockRows);

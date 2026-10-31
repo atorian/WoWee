@@ -65,3 +65,12 @@ TEST_CASE("water wake", "[scene][water]") {
     draw("water_wake.json", picture);
     verifyPicture(picture);
 }
+
+TEST_CASE("shadows", "[scene][shadow]") {
+    // A lamppost and a farmhouse on open ground in the late afternoon: each
+    // casts its shadow on the ground, which keeps 70% of the light and is
+    // soft at its edge, the lamppost's sharp to its lantern.
+    const fs::path picture = fs::path(WOWEE_SCRATCH_DIR) / "scene_references" / "shadows.png";
+    draw("shadows.json", picture);
+    verifyPicture(picture);
+}
