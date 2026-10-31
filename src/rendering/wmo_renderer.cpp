@@ -1,6 +1,7 @@
 #include "collision/collision_world.hpp"
 #include "collision/geometry.hpp"
 #include "pipeline/heap_bytes.hpp"
+#include "rendering/face_culling.hpp"
 #include "rendering/pom_quality.hpp"
 #include "rendering/placement_transform.hpp"
 #include "rendering/wmo_vertex.hpp"
@@ -60,9 +61,10 @@ constexpr uint8_t kWmoNormalMapStrengthKey = static_cast<uint8_t>(kWmoNormalMapS
 // face and was lit with its normal turned inward - the sunlit side dark and
 // the shaded side lit.
 //
-// The water reflection draws through these same pipelines with a mirrored
-// view, which reverses every triangle there. That pass only draws the scene
-// with multisampling off.
+// The water reflection draws through these same pipelines from a camera under
+// the water looking up (mirroredView): a view like any other, not a mirror, so
+// its triangles wind as the camera's do; the water flips the picture when it
+// samples it. That pass only draws the scene with multisampling off.
 constexpr VkFrontFace kWmoFrontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 
 // Where an alpha-keyed WMO material (MOMT blend mode 1) is cut, in 255ths: the
@@ -122,7 +124,7 @@ bool WMORenderer::buildMainPassPipelines(VkDevice device,
         .setMultisample(vkCtx_->getMsaaSamples())
         .setLayout(pipelineLayout_)
         .setRenderPass(mainPass)
-        .setDynamicStates(viewportAndScissorDynamic())
+        .setDynamicStates(faceCullingDynamicStates(*vkCtx_))
         .setFlags(VK_PIPELINE_CREATE_ALLOW_DERIVATIVES_BIT)
         .build(device, vkCtx_->getPipelineCache());
 
@@ -142,7 +144,7 @@ bool WMORenderer::buildMainPassPipelines(VkDevice device,
         .setMultisample(vkCtx_->getMsaaSamples())
         .setLayout(pipelineLayout_)
         .setRenderPass(mainPass)
-        .setDynamicStates(viewportAndScissorDynamic())
+        .setDynamicStates(faceCullingDynamicStates(*vkCtx_))
         .setFlags(VK_PIPELINE_CREATE_DERIVATIVE_BIT)
         .setBasePipeline(opaquePipeline_)
         .build(device, vkCtx_->getPipelineCache());
@@ -162,7 +164,7 @@ bool WMORenderer::buildMainPassPipelines(VkDevice device,
         .setMultisample(vkCtx_->getMsaaSamples())
         .setLayout(pipelineLayout_)
         .setRenderPass(mainPass)
-        .setDynamicStates(viewportAndScissorDynamic())
+        .setDynamicStates(faceCullingDynamicStates(*vkCtx_))
         .setFlags(VK_PIPELINE_CREATE_DERIVATIVE_BIT)
         .setBasePipeline(opaquePipeline_)
         .build(device, vkCtx_->getPipelineCache());
@@ -182,7 +184,7 @@ bool WMORenderer::buildMainPassPipelines(VkDevice device,
         .setMultisample(vkCtx_->getMsaaSamples())
         .setLayout(pipelineLayout_)
         .setRenderPass(mainPass)
-        .setDynamicStates(viewportAndScissorDynamic())
+        .setDynamicStates(faceCullingDynamicStates(*vkCtx_))
         .setFlags(VK_PIPELINE_CREATE_DERIVATIVE_BIT)
         .setBasePipeline(opaquePipeline_)
         .build(device, vkCtx_->getPipelineCache());
@@ -618,6 +620,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadPreparedIncremental(WmoModelPrep& 
             mb.hasTexture = tex != whiteTexture_.get();
             mb.alphaTest = state.blendMode == 1;
             mb.isTransparent = state.blendMode >= 2;
+            mb.twoSided = state.twoSided;
             mb.sidnColor = state.sidnColor;
             mb.isLava = state.isLava;
             mb.emissiveLevel = state.emissiveLevel;
@@ -1312,6 +1315,7 @@ uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
                              const DrawList& list, Layer layer) const {
     if (list.used == 0) return 0;
     uint32_t drawCalls = 0;
+    FaceCulling faces(*vkCtx_, cmd);
 
     // Select pipeline based on wireframe mode
     VkPipeline activePipeline = (recording_->wireframe && wireframePipeline_) ? wireframePipeline_ : opaquePipeline_;
@@ -1394,8 +1398,10 @@ uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
                     if (targetPipeline == VK_NULL_HANDLE) continue;
 
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, targetPipeline);
+                    faces.pipelineBound();
                     currentPipelineKind = neededPipeline;
                 }
+                faces.show(mb.twoSided);
 
                 // Bind material descriptor set (set 1)
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,

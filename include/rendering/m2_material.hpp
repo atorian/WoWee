@@ -32,6 +32,12 @@ inline std::vector<size_t> m2MaterialDrawOrder(const std::vector<Batch>& batches
     return order;
 }
 
+// M2Material flags 0x04: both faces shown. Without it the client culls the
+// back faces of the batch, opaque or blended, and so does the renderer.
+inline bool m2MaterialTwoSided(uint16_t materialFlags) {
+    return (materialFlags & 0x04) != 0;
+}
+
 // Only opaque/cutout geometry casts a directional shadow. Blended reflection
 // overlays and luminous cones do not become opaque blockers in the depth pass.
 inline bool m2BatchCastsShadow(uint16_t blendMode, float opacity,

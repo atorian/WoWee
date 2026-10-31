@@ -1,4 +1,5 @@
 #include <atomic>
+#include "rendering/face_culling.hpp"
 #include "rendering/placement_transform.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/texture_upload.hpp"
@@ -240,7 +241,7 @@ bool M2Renderer::buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout) {
         return builder
             .setLayout(pipelineLayout_)
             .setRenderPass(mainPass)
-            .setDynamicStates(viewportAndScissorDynamic())
+            .setDynamicStates(faceCullingDynamicStates(*vkCtx_))
             .setFlags(flags)
             .setBasePipeline(basePipeline)
             .build(device, vkCtx_->getPipelineCache());
@@ -317,7 +318,7 @@ bool M2Renderer::buildBlendedPipelines(VkRenderPass pass, VkSampleCountFlagBits 
             .setMultisample(samples)
             .setLayout(pipelineLayout_)
             .setRenderPass(pass)
-            .setDynamicStates(viewportAndScissorDynamic())
+            .setDynamicStates(faceCullingDynamicStates(*vkCtx_))
             .setFlags(flags)
             .setBasePipeline(base)
             .build(device, vkCtx_->getPipelineCache());
@@ -1366,8 +1367,6 @@ void M2Renderer::writeBatchMaterial(const M2ModelGPU& model,
     mat.blendMode = batch.blendMode;
     mat.combiner = static_cast<int32_t>(batch.combiner);
     mat.hasSecondTexture = batch.secondTexture && batch.secondTexture->isValid() ? 1 : 0;
-    mat.cullBackFaces = !skyMode_ &&
-        batch.blendMode >= 2 && (batch.materialFlags & 0x04) == 0 ? 1 : 0;
     mat.specularIntensity = 0.5f;
     mat.emissiveBoost = batch.preserveGlowMesh ? 2.4f : 1.0f;
     std::memcpy(batch.materialSlot.mapped, &mat, sizeof(mat));

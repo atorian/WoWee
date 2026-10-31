@@ -468,7 +468,6 @@ struct M2MaterialUBO {
     int32_t alphaTest;
     int32_t unlit;
     int32_t blendMode;
-    int32_t cullBackFaces; // authored single-sided transparent material
     float specularIntensity;
     float emissiveBoost;
     // The batch's authored colour, from the M2's colour track, with any

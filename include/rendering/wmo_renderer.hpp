@@ -510,6 +510,7 @@ private:
             bool hasTexture = false;
             bool alphaTest = false;
             bool isTransparent = false;     // blendMode >= 2
+            bool twoSided = false;          // F_UNCULLED: back faces shown too
             uint32_t sidnColor = 0;         // F_SIDN glow colour (BGRA), 0 without
             bool isLava = false;            // lava/magma texture (UV scroll)
             /// Cloth hung in the building's own mesh: where the bar is, how

@@ -1018,6 +1018,19 @@ bool VkContext::createLogicalDevice() {
     }
     setPipelineBarrier2Fn(cmdPipelineBarrier2_);
 
+    // The cull mode as command-buffer state, core at 1.3: a batch shows the
+    // faces its material shows without a second set of pipelines.
+    cmdSetCullMode_ = reinterpret_cast<PFN_vkCmdSetCullMode>(vkGetDeviceProcAddr(device, "vkCmdSetCullMode"));
+    if (!cmdSetCullMode_) {
+        LOG_WARNING("vkCmdSetCullMode did not resolve on a Vulkan 1.3 device: "
+                    "buildings and doodads draw their back faces too");
+    }
+    faceCullingEnabled_ = true;
+    if (const char* v = std::getenv("WOWEE_FACE_CULLING"); v && std::string(v) == "0") {
+        faceCullingEnabled_ = false;
+        LOG_INFO("Face culling off (WOWEE_FACE_CULLING=0): every face of the world's models is drawn");
+    }
+
     // Only present with VK_EXT_debug_utils (createInstance). When it is
     // absent naming and labels are no-ops.
     setObjectNameFn(reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(

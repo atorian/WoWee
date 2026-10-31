@@ -1069,6 +1069,7 @@ set(WOWEE_SOURCES
     src/rendering/shadow_params.cpp
     src/rendering/terrain_manager.cpp
     src/rendering/frustum.cpp
+    src/rendering/face_culling.cpp
     src/rendering/rt_bvh.cpp
     src/rendering/rt_scene.cpp
     src/rendering/rt_lighting.cpp
@@ -2444,6 +2445,12 @@ if(WOWEE_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_rt_radius.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/rt-radius/scene)
         set_tests_properties(scene_rt_radius PROPERTIES SKIP_RETURN_CODE 77)
+        # A one-sided material shows its front faces only, a two-sided one both,
+        # in the view and in the water's reflection.
+        add_test(NAME scene_face_culling
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_face_culling.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/face-culling)
+        set_tests_properties(scene_face_culling PROPERTIES SKIP_RETURN_CODE 77)
         foreach(object m2 wmo character terrain water)
             add_test(NAME scene_frame_scene_${object}
                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py
@@ -3135,6 +3142,7 @@ add_executable(wowee_editor
     src/rendering/bone_slots.cpp
     src/rendering/normal_map.cpp
     src/rendering/frustum.cpp
+    src/rendering/face_culling.cpp
     src/rendering/rt_bvh.cpp
     src/rendering/rt_scene.cpp
     src/rendering/rt_lighting.cpp

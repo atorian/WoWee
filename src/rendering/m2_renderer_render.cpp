@@ -1,4 +1,5 @@
 #include "rendering/shadow_params.hpp"
+#include "rendering/face_culling.hpp"
 #include "rendering/m2_material.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_renderer_internal.h"
@@ -1766,6 +1767,8 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // Start with opaque pipeline
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, opaquePipeline_);
     currentPipeline = opaquePipeline_;
+    // The sky model is seen from inside, so it shows every face.
+    FaceCulling faces(*vkCtx_, cmd);
 
     // Bind dummy bone set (set 2) so non-animated draws have a valid binding.
     // Bind mega bone SSBO instead - all instances index into one buffer via boneBase.
@@ -2033,8 +2036,10 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     if (skyMode_ && drawState.drawBlendMode <= 1) desiredPipeline = scenePipes_.alpha;
                     if (desiredPipeline != currentPipeline) {
                         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
+                        faces.pipelineBound();
                         currentPipeline = desiredPipeline;
                     }
+                    faces.show(skyMode_ || m2MaterialTwoSided(batch.materialFlags));
 
                     // Bind material descriptor set (set 1)
                     if (!batch.materialSet) continue;
@@ -2127,6 +2132,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
     bool currentModelValid = false;
     VkPipeline currentPipeline = VK_NULL_HANDLE;
     VkDescriptorSet currentMaterialSet = VK_NULL_HANDLE;
+    FaceCulling faces(*vkCtx_, cmd);
 
     for (const auto& entry : transparentVisible_) {
         const DrawInstance& instance = drawInstances_[entry.draw];
@@ -2292,8 +2298,12 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             }
             if (desiredPipeline != currentPipeline) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
+                faces.pipelineBound();
                 currentPipeline = desiredPipeline;
             }
+            // A faded opaque layer is blended and writes no depth: culled,
+            // its far side no longer shows through its near one.
+            faces.show(skyMode_ || m2MaterialTwoSided(batch.materialFlags));
 
             if (!batch.materialSet) continue;
             if (batch.materialSet != currentMaterialSet) {

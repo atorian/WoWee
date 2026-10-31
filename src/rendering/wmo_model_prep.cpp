@@ -407,6 +407,7 @@ std::shared_ptr<WmoModelPrep> WMORenderer::prepareModel(const pipeline::WMOModel
             }
 
             batchStates.push_back({ .texture = texture, .blendMode = blendMode,
+                                    .twoSided = (matFlags & 0x04) != 0,
                                     .lighting = wmoBatchLighting(model.flags, resources.groupFlags,
                                                                  batch.kind, matFlags),
                                     .sidnColor = sidnColor, .isLava = isLava,

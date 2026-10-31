@@ -424,6 +424,14 @@ public:
     [[nodiscard]] bool useDynamicRendering() const;
     [[nodiscard]] PFN_vkCmdPipelineBarrier2KHR cmdPipelineBarrier2Fn() const { return cmdPipelineBarrier2_; }
 
+    /// Whether the world's models show only the faces their materials show:
+    /// back faces culled per batch with the cull mode set on the command
+    /// buffer (core in 1.3; see FaceCulling). WOWEE_FACE_CULLING=0 keeps every
+    /// face, to compare against, and so does a driver whose entry points do
+    /// not resolve - which is said once, at startup.
+    [[nodiscard]] bool faceCulling() const { return cmdSetCullMode_ != nullptr && faceCullingEnabled_; }
+    void cmdSetCullMode(VkCommandBuffer cmd, VkCullModeFlags mode) const { cmdSetCullMode_(cmd, mode); }
+
     /// Whether a texture can be uploaded without a staging buffer.
     [[nodiscard]] bool isHostImageCopySupported() const { return hostImageCopySupported_; }
     /// Whether a single-level texture of `format` should go up by host image
@@ -607,6 +615,8 @@ private:
     bool dynamicRenderingSupported_ = false;
     /// Whether it came from core 1.3 rather than the extension. Decides which
     PFN_vkCmdPipelineBarrier2KHR cmdPipelineBarrier2_ = nullptr;
+    PFN_vkCmdSetCullMode cmdSetCullMode_ = nullptr;
+    bool faceCullingEnabled_ = true;
 
     /// VK_EXT_host_image_copy. When present, pixels go from host memory into
     /// the image directly - no staging buffer, no transfer submission, no
