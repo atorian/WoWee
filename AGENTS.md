@@ -125,6 +125,13 @@ whatever the code looks like inside.
   context's library; fakes implement its ports and the real `core::EventBus`
   delivers its events. What a packet does end to end is still tested through
   `GameHarness`.
+- **What runs on the GPU is tested on the GPU.** User decision (2026-10-31):
+  a shader's behaviour is not tested by compiling it, or a copy of the
+  pipeline around it, for the CPU - that tests a replica, and misses what the
+  GPU does differently (dispatch order, barriers, formats, precision). It is
+  an acceptance test: a scene drawn by `scene_render` and the picture checked
+  (`tools/scene_render/check_*.py`). Those are slow and run apart from the
+  unit tests.
 
 ## Layers
 
