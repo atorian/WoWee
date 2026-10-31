@@ -3549,7 +3549,9 @@ register_test_target(test_rt_build_budget)
 add_library(wowee_game_harness STATIC game_harness.cpp)
 target_include_directories(wowee_game_harness PUBLIC ${TEST_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(wowee_game_harness SYSTEM PUBLIC ${TEST_SYSTEM_INCLUDE_DIRS})
-target_compile_definitions(wowee_game_harness PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+# PUBLIC: test_support.hpp's inline sourceRoot() reads it, and a test that
+# includes the header without it would define a second, empty one.
+target_compile_definitions(wowee_game_harness PUBLIC WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(wowee_game_harness PUBLIC wowee_game catch2_main)
 wowee_test_link_glm(wowee_game_harness)
 

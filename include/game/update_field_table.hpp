@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 #include <unordered_map>
 
 namespace wowee {
@@ -179,6 +180,10 @@ public:
 
     /** Check if a field is mapped. */
     [[nodiscard]] bool hasField(UF field) const;
+
+    /// The fields every expansion's protocol carries and the client reads
+    /// wherever it runs, that the table loaded does not name.
+    [[nodiscard]] std::vector<std::string> missingRequiredFields() const;
 
     /** Number of mapped fields. */
     [[nodiscard]] size_t size() const { return fieldMap_.size(); }

@@ -4,14 +4,20 @@
 #include <catch_amalgamated.hpp>
 
 #include "game_harness.hpp"
+#include "test_support.hpp"
 
 #include "game/game_data.hpp"
 #include "game/entity_controller.hpp"
 #include "game/game_handler.hpp"
 #include "game/player_handler.hpp"
+#include "game/protocol_tables.hpp"
 #include "game/title_gateway.hpp"
 #include "game/update_field_table.hpp"
 
+#include <filesystem>
+#include <fstream>
+#include <regex>
+#include <sstream>
 #include <string>
 
 using Catch::Matchers::ContainsSubstring;
@@ -208,4 +214,61 @@ TEST_CASE("another player's race and looks are their own fields, never guessed f
     CHECK(looks->gender == 1);
     CHECK(looks->appearanceBytes == 0x01040302u);
     CHECK(looks->facialFeatures == 6);
+}
+
+namespace {
+/// WotLK's profile and files under a fresh directory, its update_fields.json
+/// without `dropped`: what an install with a broken field table holds.
+std::filesystem::path wotlkWithout(const char* scratch, const std::string& dropped) {
+    namespace fs = std::filesystem;
+    const fs::path root = wowee::test::scratchDir(scratch);
+    const fs::path from = fs::path(wowee::test::sourceRoot()) / "Data" / "expansions" / "wotlk";
+    const fs::path to = root / "expansions" / "wotlk";
+    fs::create_directories(to);
+    for (const char* file : {"expansion.json", "opcodes.json", "dbc_layouts.json"}) {
+        fs::copy_file(from / file, to / file);
+    }
+    std::ifstream in(from / "update_fields.json");
+    std::stringstream text;
+    text << in.rdbuf();
+    const std::string fields =
+        std::regex_replace(text.str(), std::regex("\\s*\"" + dropped + "\"\\s*:\\s*[0-9]+,?"), "");
+    REQUIRE(fields != text.str());
+    std::ofstream(to / "update_fields.json") << fields;
+    return root;
+}
+
+/// Load the protocol tables from `root` as the client does when it starts.
+void loadFrom(GameHarness& h, const std::filesystem::path& root) {
+    wowee::game::ExpansionRegistry expansions;
+    REQUIRE(expansions.initialize(root.string()) == 1);
+    REQUIRE(expansions.setActive("wotlk"));
+    const wowee::game::GameData data([](const std::string&) { return wowee::game::GameData::Table{}; },
+                                     expansions,
+                                     [](const std::string& line) { throw GameStopped(line); });
+    wowee::game::loadProtocolTables(h.game(), data);
+}
+}  // namespace
+
+TEST_CASE("an update field table without a field every expansion carries stops the game, naming it",
+          "[game_data][harness]") {
+    GameHarness h;
+    const auto root = wotlkWithout("wowee_update_fields_no_player_bytes", "PLAYER_BYTES");
+    CHECK_THROWS_MATCHES(loadFrom(h, root), GameStopped,
+                         Catch::Matchers::MessageMatches(ContainsSubstring("update_fields.json") &&
+                                                     ContainsSubstring("names no PLAYER_BYTES")));
+}
+
+TEST_CASE("a field only some expansions carry may be missing from the table", "[game_data][harness]") {
+    GameHarness h;
+    // Before WotLK there is no UNIT_FIELD_CRITTER; what reads it asks first.
+    const auto root = wotlkWithout("wowee_update_fields_no_critter", "UNIT_FIELD_CRITTER");
+    CHECK_NOTHROW(loadFrom(h, root));
+}
+
+TEST_CASE("Classic's and TBC's update field tables carry every field the client reads everywhere",
+          "[game_data][harness]") {
+    GameHarness h;
+    CHECK_NOTHROW(h.useExpansion("classic"));
+    CHECK_NOTHROW(h.useExpansion("tbc"));
 }

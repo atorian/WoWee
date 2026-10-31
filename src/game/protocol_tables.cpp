@@ -25,6 +25,11 @@ void loadProtocolTables(GameHandler& game, const GameData& data) {
     if (!game.getUpdateFieldTable().loadFromJson(updateFieldsPath)) {
         data.stop(updateFieldsPath, "the objects' update fields", "could not be read");
     }
+    if (const auto missing = game.getUpdateFieldTable().missingRequiredFields(); !missing.empty()) {
+        std::string names;
+        for (const auto& name : missing) names += (names.empty() ? "" : ", ") + name;
+        data.stop(updateFieldsPath, "the objects' update fields", "names no " + names);
+    }
     setActiveUpdateFieldTable(&game.getUpdateFieldTable());
 
     // An id with no parser set is a profile this build cannot read the wire
