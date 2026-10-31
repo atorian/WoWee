@@ -142,6 +142,10 @@ void LootService::onContents(LootContents contents) {
     if (window_.isOpen() && loot.items.empty() && loot.gold == 0) closeLoot();
 }
 
+void LootService::onReleased() {
+    apply(window_.released());
+}
+
 void LootService::onSlotRemoved(uint8_t slot) {
     apply(window_.slotRemoved(slot));
     closeIfEmptied();
@@ -169,6 +173,10 @@ void LootService::onItemNotify(uint8_t slot) {
 
 void LootService::onSlotChanged(uint8_t slot) {
     events_.publish(LootSlotChanged{slot + 1});
+}
+
+void LootService::onItemInfo(uint32_t itemId) {
+    apply(window_.itemInfoArrived(itemId));
 }
 
 void LootService::onRollStarted(uint64_t objectGuid, uint32_t slot, uint32_t itemId,
@@ -203,6 +211,10 @@ void LootService::onRollWon(uint64_t objectGuid, uint32_t slot, uint32_t itemId,
     world_.requestItem(itemId);
     events_.publish(RollWon{winner, itemId, randomPropertyId, rollNumber, rollType});
     apply(rolls_.ended(objectGuid, slot));
+}
+
+void LootService::timePassed(float seconds) {
+    apply(window_.timePassed(seconds));
 }
 
 } // namespace wowee::loot
