@@ -1,12 +1,14 @@
 #pragma once
 
+#include "pipeline/game_tables.hpp"
+
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
 
-namespace wowee::pipeline { class AssetManager; class DBCFile; }
+namespace wowee::pipeline { class AssetManager; }
 
 namespace wowee::game {
 
@@ -28,10 +30,10 @@ struct ExpansionProfile;
 ///     so a broken install stops at start.
 ///
 /// Game data, like the emote and stat tables: the client owns one and hands it
-/// over (GameServices::gameData). A test hands over the tables it gives.
-class GameData {
+/// over (GameServices::gameData), and to the layers below the game as the
+/// pipeline::GameTables it is. A test hands over the tables it gives.
+class GameData final : public pipeline::GameTables {
 public:
-    using Table = std::shared_ptr<const pipeline::DBCFile>;
     /// A table by its file name; nullptr, or a table that did not load, when
     /// it cannot be read.
     using Read = std::function<Table(const std::string& dbc)>;
@@ -48,12 +50,12 @@ public:
     [[nodiscard]] const ExpansionProfile& expansion() const;
     /// Whether the running expansion uses `dbc`: what the code that offers a
     /// feature asks before offering it.
-    [[nodiscard]] bool has(const std::string& dbc) const;
+    [[nodiscard]] bool has(const std::string& dbc) const override;
 
     /// `dbc`, at least `fields` columns wide. `neededFor` names what asked, for
     /// the line that stops the game when the table cannot answer it.
     [[nodiscard]] Table table(const std::string& dbc, uint32_t fields,
-                              std::string_view neededFor) const;
+                              std::string_view neededFor) const override;
     /// The path of one of the running expansion's own files, which must be on
     /// its list and be there.
     [[nodiscard]] std::string file(const std::string& name, std::string_view neededFor) const;
@@ -63,7 +65,7 @@ public:
 
     /// Stops the game: `what` cannot give `neededFor` what it asked, for `why`.
     [[noreturn]] void stop(const std::string& what, std::string_view neededFor,
-                           const std::string& why) const;
+                           const std::string& why) const override;
 
 private:
     Read read_;
