@@ -65,6 +65,7 @@
 #include "ui/widget_renderer.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "pipeline/spell_icon_paths.hpp"
 #include "ui/interface_fonts.hpp"
 #include "ui/link_hit.hpp"
@@ -606,19 +607,14 @@ int main(int argc, char** argv) {
             // Use the dataset's actual icons: a question mark for every spell
             // would hide macro and spellbook icon regressions.
             std::unordered_map<uint32_t, std::string> iconPaths, spellPaths;
-            wowee::pipeline::loadSpellIconPaths(haveAssets ? &assets : nullptr, iconPaths);
             if (haveAssets) {
-                auto dbc = assets.loadDBC("Spell.dbc");
-                const auto* layouts = wowee::pipeline::getActiveDBCLayout();
-                const auto* layout = layouts ? layouts->getLayout("Spell") : nullptr;
-                if (dbc && dbc->isLoaded() && layout) {
-                    for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
-                        auto icon = iconPaths.find(dbc->getUInt32(row, (*layout)["IconID"]));
-                        if (icon != iconPaths.end())
-                            spellPaths.emplace(dbc->getUInt32(row, (*layout)["ID"]), icon->second);
-                    }
-                } else {
-                    LOG_WARNING("FrameXML fixture: Spell.dbc/layout unavailable; spell icons unavailable");
+                wowee::pipeline::loadSpellIconPaths(gameData, iconPaths);
+                const wowee::pipeline::RequiredTable dbc(gameData, "Spell.dbc", "the fixture's spell icons");
+                const uint32_t iconField = dbc.column("IconID");
+                const uint32_t idField = dbc.column("ID");
+                for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
+                    auto icon = iconPaths.find(dbc->getUInt32(row, iconField));
+                    if (icon != iconPaths.end()) spellPaths.emplace(dbc->getUInt32(row, idField), icon->second);
                 }
             }
             gh.setSpellIconPathResolver([paths = std::move(spellPaths)](uint32_t id) {

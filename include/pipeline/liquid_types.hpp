@@ -8,8 +8,7 @@
 namespace wowee {
 namespace pipeline {
 
-class DBCFile;
-struct DBCFieldMap;
+class RequiredTable;
 
 /// The four kinds every liquid is one of: what it is to swim in, what the
 /// camera sees under it, how it is drawn.
@@ -54,13 +53,12 @@ struct LiquidTypeInfo {
 /// LiquidType.dbc: what each liquid id in the map data is.
 class LiquidTypeTable {
 public:
-    /// Rows of the table, read through the expansion's column layout. A
-    /// layout that does not name a column, or a row with a type outside the
-    /// four basic kinds, is reported once and that row is left out.
-    static LiquidTypeTable fromDbc(const DBCFile& dbc, const DBCFieldMap* layout,
-                                   const std::string& source);
-    /// The four basic rows alone, without textures, for data that ships no
-    /// LiquidType.dbc. Said once, by whoever chooses it.
+    /// Rows of the table, read through the expansion's column layout, which
+    /// must name every column read. A row with a type outside the four basic
+    /// kinds is reported and left out.
+    static LiquidTypeTable fromDbc(const RequiredTable& liquidTypes);
+    /// The four basic rows alone, without textures, for an expansion that
+    /// does not use LiquidType.dbc.
     static LiquidTypeTable basicOnly();
 
     [[nodiscard]] const LiquidTypeInfo* find(uint32_t id) const;

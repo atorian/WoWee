@@ -104,6 +104,8 @@
 #include "core/logger.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/dbc_loader.hpp"
+#include "pipeline/game_tables.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_group_path.hpp"
 #include "pipeline/wmo_loader.hpp"
@@ -136,7 +138,9 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <cstdlib>
 #include <fstream>
+#include <set>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -244,9 +248,52 @@ std::string lowered(std::string s) {
     return s;
 }
 
+/// The expansion's tables, as the client reads them but with no game to own
+/// them: the expansion's list from its expansion.json, read through the asset
+/// manager, and a table on it that cannot be read stops the run the way it
+/// stops the client.
+class SceneTables final : public pipeline::GameTables {
+public:
+    void open(pipeline::AssetManager& assets, const std::string& expansionPath) {
+        assets_ = &assets;
+        expansion_ = expansionPath;
+        listed_.clear();
+        std::ifstream in(expansionPath + "/expansion.json");
+        if (!in) stop(expansionPath + "/expansion.json", "the scene's tables", "cannot be opened");
+        try {
+            for (const auto& t : json::parse(in).at("tables")) listed_.insert(t.get<std::string>());
+        } catch (const std::exception& e) {
+            stop(expansionPath + "/expansion.json", "the scene's tables", e.what());
+        }
+    }
+    [[nodiscard]] bool has(const std::string& dbc) const override { return listed_.count(dbc) != 0; }
+    [[nodiscard]] Table table(const std::string& dbc, uint32_t fields,
+                              std::string_view neededFor) const override {
+        if (!has(dbc)) stop(dbc, neededFor, "is not on the expansion's list of tables it uses");
+        Table t = assets_->loadDBC(dbc);
+        if (!t || !t->isLoaded()) stop(dbc, neededFor, "could not be read");
+        if (t->getFieldCount() < fields) {
+            stop(dbc, neededFor, "has " + std::to_string(t->getFieldCount()) + " columns, " +
+                                     std::to_string(fields) + " are read");
+        }
+        return t;
+    }
+    [[noreturn]] void stop(const std::string& what, std::string_view neededFor,
+                           const std::string& why) const override {
+        LOG_FATAL(what, " ", why, "; ", neededFor, " needs it on ", expansion_,
+                  ", and the scene cannot be drawn without it");
+        std::abort();
+    }
+
+private:
+    pipeline::AssetManager* assets_ = nullptr;
+    std::string expansion_;
+    std::set<std::string> listed_;
+};
+
 /// The asset tree the client reads: the expansion's own when it has a
 /// manifest, with the base Data/ behind it.
-bool openAssets(pipeline::AssetManager& assets) {
+bool openAssets(pipeline::AssetManager& assets, SceneTables& tables) {
     const char* env = std::getenv("WOW_DATA_PATH");
     const std::string dataPath = env && *env ? env : "./Data";
     const char* expansionEnv = std::getenv("WOWEE_SCENE_EXPANSION");
@@ -260,16 +307,16 @@ bool openAssets(pipeline::AssetManager& assets) {
     if (!assets.initialize(assetPath)) return false;
     if (assetPath != dataPath) assets.setBaseFallbackPath(dataPath, expansion);
 
-    // The expansion's DBC column layouts, as the client sets them: the
-    // renderer reads tables through them (LiquidType.dbc among them).
+    // The expansion's DBC column layouts and its list of tables, as the client
+    // sets them: the renderer reads tables through them (Light.dbc,
+    // LiquidType.dbc among them), and either one missing stops the run.
     static pipeline::DBCLayout layouts;
     const std::string layoutsPath = expansionPath + "/dbc_layouts.json";
-    if (layouts.loadFromJson(layoutsPath)) {
-        pipeline::setActiveDBCLayout(&layouts);
-    } else {
-        std::fprintf(stderr, "scene_render: no DBC layouts at %s - tables are read without "
-                             "them\n", layoutsPath.c_str());
+    tables.open(assets, expansionPath);
+    if (!layouts.loadFromJson(layoutsPath)) {
+        tables.stop(layoutsPath, "the scene's tables", "could not be read");
     }
+    pipeline::setActiveDBCLayout(&layouts);
     return true;
 }
 
@@ -993,16 +1040,18 @@ int run(const json& scene, const std::string& outPath, bool timing) {
     {
         SceneSurface surface(window, width, height);
         pipeline::AssetManager assets;
+        SceneTables tables;
         rendering::Renderer renderer;
         if (!surface.ready()) {
             std::fprintf(stderr, "scene_render: no Vulkan device\n");
-        } else if (!openAssets(assets)) {
+        } else if (!openAssets(assets, tables)) {
             std::fprintf(stderr, "scene_render: no assets under WOW_DATA_PATH or ./Data\n");
         } else {
             renderer.setShadowQualityLevel(scene.value("shadowQuality", 2));
-            if (renderer.initialize(&surface) &&
-                renderer.getLightingManager()->initialize(&assets,
-                    scene.value("atmosphereProfiles", std::string("assets/atmosphere_profiles.json")))) {
+            renderer.setGameTables(tables);
+            if (renderer.initialize(&surface)) {
+                renderer.getLightingManager()->initialize(tables,
+                    scene.value("atmosphereProfiles", std::string("assets/atmosphere_profiles.json")));
                 status = render(scene, outPath, assets, renderer, timing);
             } else {
                 std::fprintf(stderr, "scene_render: the renderer did not start\n");

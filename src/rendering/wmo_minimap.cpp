@@ -1,7 +1,7 @@
 #include "rendering/wmo_minimap.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/dbc_loader.hpp"
-#include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -198,18 +198,12 @@ MinimapQuad wmoMinimapQuad(const WmoMinimapTile& tile, int imageWidth, int image
             .across = at(tile.origin.x + wide, tile.origin.y + high) - topLeft};
 }
 
-std::optional<WmoAreaFlags> WmoAreaFlags::read(const pipeline::DBCFile& dbc, const pipeline::DBCFieldMap* layout) {
-    uint32_t wmoId = 1, nameSet = 2, group = 3, flags = 9;
-    if (layout && layout->tryField("Flags") != 0xFFFFFFFFu) {
-        wmoId = layout->tryField("WMOID");
-        nameSet = layout->tryField("NameSetID");
-        group = layout->tryField("WMOGroupID");
-        flags = layout->tryField("Flags");
-    } else if (dbc.getFieldCount() != 28) {
-        return std::nullopt;
-    }
-    const uint32_t fields = dbc.getFieldCount();
-    if (wmoId >= fields || nameSet >= fields || group >= fields || flags >= fields) return std::nullopt;
+WmoAreaFlags WmoAreaFlags::read(const pipeline::RequiredTable& wmoAreaTable) {
+    const pipeline::DBCFile& dbc = *wmoAreaTable;
+    const uint32_t wmoId = wmoAreaTable.column("WMOID");
+    const uint32_t nameSet = wmoAreaTable.column("NameSetID");
+    const uint32_t group = wmoAreaTable.column("WMOGroupID");
+    const uint32_t flags = wmoAreaTable.column("Flags");
     WmoAreaFlags table;
     for (uint32_t row = 0; row < dbc.getRecordCount(); ++row) {
         if (static_cast<int32_t>(dbc.getUInt32(row, group)) != -1) continue;

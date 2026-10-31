@@ -10,7 +10,7 @@
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/animation_controller.hpp"
-#include "pipeline/asset_manager.hpp"
+#include "pipeline/game_tables.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "game/game_handler.hpp"
 #include "audio/audio_coordinator.hpp"
@@ -28,13 +28,13 @@
 namespace wowee { namespace core {
 
 AudioCallbackHandler::AudioCallbackHandler(
-    pipeline::AssetManager& assetManager,
+    const pipeline::GameTables& tables,
     audio::AudioCoordinator* audioCoordinator,
     rendering::Renderer* renderer,
     PlayerView* playerView,
     ui::UIManager* uiManager,
     game::GameHandler& gameHandler)
-    : assetManager_(assetManager)
+    : tables_(tables)
     , audioCoordinator_(audioCoordinator)
     , renderer_(renderer)
     , playerView_(playerView)
@@ -185,8 +185,8 @@ void AudioCallbackHandler::subscribeGameSounds() {
 }
 
 std::optional<std::string> AudioCallbackHandler::resolveSoundEntryPath(uint32_t soundId) const {
-    auto dbc = assetManager_.loadDBC("SoundEntries.dbc");
-    if (!dbc || !dbc->isLoaded()) return std::nullopt;
+    // File[0..9] at 3..12, DirectoryBase at 23.
+    const auto dbc = tables_.table("SoundEntries.dbc", 24, "the game's sound effects by id");
 
     int32_t idx = dbc->findRecordById(soundId);
     if (idx < 0) return std::nullopt;

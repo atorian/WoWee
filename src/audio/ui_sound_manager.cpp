@@ -1,4 +1,5 @@
 #include "audio/ui_sound_manager.hpp"
+#include "pipeline/game_tables.hpp"
 #include "audio/sample_load.hpp"
 #include "audio/audio_engine.hpp"
 #include "pipeline/asset_manager.hpp"
@@ -7,13 +8,14 @@
 namespace wowee {
 namespace audio {
 
-bool UiSoundManager::initialize(pipeline::AssetManager* assets) {
+bool UiSoundManager::initialize(pipeline::AssetManager* assets, const pipeline::GameTables& tables) {
     if (!assets) {
         LOG_ERROR("UISoundManager: AssetManager is null");
         return false;
     }
 
     assets_ = assets;
+    gameTables_ = &tables;
     LOG_INFO("UISoundManager: Initializing...");
 
     // Load window sounds
@@ -175,22 +177,12 @@ bool UiSoundManager::loadSound(const std::string& path, UISample& sample, pipeli
 void UiSoundManager::ensureSoundEntriesLoaded() {
     if (soundEntriesBuilt_) return;
     soundEntriesBuilt_ = true;          // once, whether or not it works
-    if (!assets_) return;
+    if (!gameTables_) return;
 
-    auto dbc = assets_->loadDBC("SoundEntries.dbc");
-    if (!dbc || !dbc->isLoaded()) {
-        LOG_WARNING("UISoundManager: SoundEntries.dbc not available; "
-                    "PlaySound falls back to the names mapped by hand");
-        return;
-    }
     // 3.3.5a layout: 0 ID, 1 SoundType, 2 Name, 3..12 File[0..9],
     // 13..22 Freq[0..9], 23 DirectoryBase. The same reading zone_manager and
     // npc_voice_manager already make of this table.
-    if (dbc->getFieldCount() < 24) {
-        LOG_WARNING("UISoundManager: SoundEntries.dbc has ", dbc->getFieldCount(),
-                    " fields, expected at least 24");
-        return;
-    }
+    const auto dbc = gameTables_->table("SoundEntries.dbc", 24, "the interface's sounds by name (PlaySound)");
     for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
         std::string name = dbc->getString(row, 2);
         if (name.empty()) continue;

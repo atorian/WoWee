@@ -37,7 +37,7 @@ void UnitPortrait::update(game::GameHandler& gameHandler,
         preview_ = std::make_shared<rendering::CharacterPreview>();
         // Small: this is drawn into a circle a few dozen pixels across, and the
         // cost of the pass scales with the target.
-        initialized_ = preview_->initialize(assets, targetWidth_, targetHeight_);
+        initialized_ = preview_->initialize(assets, renderer->gameTables(), targetWidth_, targetHeight_);
         if (!initialized_) {
             LOG_WARNING("UnitPortrait: could not build the offscreen view");
             preview_.reset();
@@ -124,7 +124,7 @@ bool UnitPortrait::updatePlayer(uint8_t race, uint8_t gender,
     if (!preview_) {
         renderer->drainFrames();
         preview_ = std::make_shared<rendering::CharacterPreview>();
-        initialized_ = preview_->initialize(assets, targetWidth_, targetHeight_);
+        initialized_ = preview_->initialize(assets, renderer->gameTables(), targetWidth_, targetHeight_);
         if (!initialized_) {
             LOG_WARNING("UnitPortrait: could not build the offscreen view");
             preview_.reset();
@@ -192,7 +192,7 @@ bool UnitPortrait::updateCreature(const std::string& m2Path,
     if (!preview_) {
         renderer->drainFrames();
         preview_ = std::make_shared<rendering::CharacterPreview>();
-        initialized_ = preview_->initialize(assets, targetWidth_, targetHeight_);
+        initialized_ = preview_->initialize(assets, renderer->gameTables(), targetWidth_, targetHeight_);
         if (!initialized_) {
             LOG_WARNING("UnitPortrait: could not build the offscreen view");
             preview_.reset();

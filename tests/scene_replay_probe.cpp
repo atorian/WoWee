@@ -8,6 +8,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/item_textures.hpp"
+#include "pipeline/required_table.hpp"
 #include "rendering/renderer.hpp"
 #include <chrono>
 #include <cstdio>
@@ -44,10 +45,10 @@ public:
                 source.blocks.push_back(std::move(block));
             }
             game->entityController().applyRecordedObjects(source);
-            const auto items=app_.getAssetManager()->loadDBC("ItemDisplayInfo.dbc");
+            const pipeline::RequiredTable items(app_.getRenderer()->gameTables(),"ItemDisplayInfo.dbc","the replay's weapon");
             uint32_t weapon=0;
-            if (items) for (uint32_t row=0;row<items->getRecordCount();++row) {
-                const auto art=pipeline::readItemDisplayArt(*items,row);
+            for (uint32_t row=0;row<items->getRecordCount();++row) {
+                const auto art=pipeline::readItemDisplayArt(items,row);
                 if (!art.modelFile.empty() && app_.getAssetManager()->fileExists("Item\\ObjectComponents\\Weapon\\"+art.modelFile)) {
                     weapon=items->getUInt32(row,0); break;
                 }

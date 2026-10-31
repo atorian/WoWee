@@ -1,4 +1,6 @@
 #include "core/world_entry_callback_handler.hpp"
+#include "pipeline/game_tables.hpp"
+#include "pipeline/dbc_loader.hpp"
 #include "collision/collision_world.hpp"
 #include "game/game_events.hpp"
 #include "core/frame_phase.hpp"
@@ -31,6 +33,7 @@ WorldEntryCallbackHandler::WorldEntryCallbackHandler(
     WorldLoader* worldLoader,
     EntitySpawner* entitySpawner,
     pipeline::AssetManager* assetManager,
+    const pipeline::GameTables& tables,
     const Phase& currentPhase)
     : renderer_(renderer)
     , playerView_(playerView)
@@ -38,6 +41,7 @@ WorldEntryCallbackHandler::WorldEntryCallbackHandler(
     , worldLoader_(worldLoader)
     , entitySpawner_(entitySpawner)
     , assetManager_(assetManager)
+    , tables_(tables)
     , currentPhase_(currentPhase)
 {
 }
@@ -163,7 +167,8 @@ void WorldEntryCallbackHandler::enterWorld(uint32_t mapId, float x, float y, flo
     // The game did this, which had it reach into the animation code it
     // has no use for.
     if (isInitialEntry && assetManager_) {
-        rendering::anim::validateAgainstDBC(assetManager_->loadDBC("AnimationData.dbc"));
+        rendering::anim::validateAgainstDBC(
+            *tables_.table("AnimationData.dbc", 1, "checking the animation ids against the client's"));
     }
 
     // A login is always a new map scope, even onto the map just left: the
@@ -441,15 +446,13 @@ void WorldEntryCallbackHandler::setupCallbacks() {
         auto* terrainMgr = renderer_ ? renderer_->getTerrainManager() : nullptr;
         if (!terrainMgr || !assetManager_) return;
 
-        // Resolve map name from the cached Map.dbc table
-        std::string mapName;
-        if (worldLoader_) {
-            mapName = worldLoader_->getMapNameById(mapId);
-        }
+        if (!worldLoader_) return;
+        const std::string mapName = worldLoader_->mapNameFor(mapId);
         if (mapName.empty()) {
-            mapName = WorldLoader::mapIdToName(mapId);
+            LOG_WARNING("Hearthstone preload: Map.dbc has no map ", mapId,
+                        "; the bind point's terrain is loaded on arrival instead");
+            return;
         }
-        if (mapName.empty()) mapName = "Azeroth";
 
         uint32_t currentLoadedMap = worldLoader_ ? worldLoader_->getLoadedMapId() : 0xFFFFFFFF;
         if (mapId == currentLoadedMap) {

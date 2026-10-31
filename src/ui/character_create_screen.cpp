@@ -6,6 +6,7 @@
 #include "core/application.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include <imgui.h>
 #include <algorithm>
 
@@ -175,13 +176,13 @@ void CharacterCreateScreen::reset() {
 }
 
 void CharacterCreateScreen::initializePreview(pipeline::AssetManager* am) {
-    assetManager_ = am;
     if (!preview_) {
         preview_ = std::make_shared<rendering::CharacterPreview>();
-        if (auto* renderer = core::Application::getInstance().getRenderer()) renderer->drainFrames();
-        if (preview_->initialize(am)) {
-            auto* renderer = core::Application::getInstance().getRenderer();
-            if (renderer) renderer->registerComposite(preview_);
+        auto* renderer = core::Application::getInstance().getRenderer();
+        if (renderer) renderer->drainFrames();
+        if (renderer) gameTables_ = &renderer->gameTables();
+        if (renderer && preview_->initialize(am, renderer->gameTables())) {
+            renderer->registerComposite(preview_);
         }
     }
     if (preview_) preview_->resetView();
@@ -291,16 +292,14 @@ void CharacterCreateScreen::updateAppearanceRanges() {
     hairColorIds_.clear();
     facialHairIds_.clear();
 
-    if (!assetManager_ || availableRaces_.empty()) return;
-    auto dbc = assetManager_->loadDBC("CharSections.dbc");
-    if (!dbc) return;
+    if (!gameTables_ || availableRaces_.empty()) return;
+    const pipeline::RequiredTable dbc(*gameTables_, "CharSections.dbc", "the character creation choices");
 
     uint32_t targetRaceId = static_cast<uint32_t>(availableRaces_[raceIndex]);
     const bool useFemaleModel = genderIndex == 1 || (genderIndex == 2 && bodyTypeIndex == 1);
     uint32_t targetSexId = useFemaleModel ? 1u : 0u;
 
-    const auto* csL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
-    auto csF = pipeline::detectCharSectionsFields(dbc.get(), csL);
+    auto csF = pipeline::detectCharSectionsFields(dbc.get(), &dbc.layout());
     for (uint32_t r = 0; r < dbc->getRecordCount(); r++) {
         uint32_t raceId = dbc->getUInt32(r, csF.raceId);
         uint32_t sexId = dbc->getUInt32(r, csF.sexId);
@@ -356,14 +355,17 @@ void CharacterCreateScreen::updateAppearanceRanges() {
     face = std::clamp(face, 0, maxFace);
     hairColor = std::clamp(hairColor, 0, maxHairColor);
 
-    auto facialDbc = assetManager_->loadDBC("CharacterFacialHairStyles.dbc");
-    const auto* fhL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("CharacterFacialHairStyles") : nullptr;
-    if (facialDbc) {
+    {
+        const pipeline::RequiredTable facialDbc(*gameTables_, "CharacterFacialHairStyles.dbc",
+                                                "the character creation choices");
+        const uint32_t raceField = facialDbc.column("RaceID");
+        const uint32_t sexField = facialDbc.column("SexID");
+        const uint32_t variationField = facialDbc.column("Variation");
         for (uint32_t r = 0; r < facialDbc->getRecordCount(); r++) {
-            uint32_t raceId = facialDbc->getUInt32(r, fhL ? (*fhL)["RaceID"] : 0);
-            uint32_t sexId = facialDbc->getUInt32(r, fhL ? (*fhL)["SexID"] : 1);
+            uint32_t raceId = facialDbc->getUInt32(r, raceField);
+            uint32_t sexId = facialDbc->getUInt32(r, sexField);
             if (raceId != targetRaceId || sexId != targetSexId) continue;
-            uint32_t variation = facialDbc->getUInt32(r, fhL ? (*fhL)["Variation"] : 2);
+            uint32_t variation = facialDbc->getUInt32(r, variationField);
             if (variation <= 255) {
                 facialHairIds_.push_back(static_cast<uint8_t>(variation));
             }

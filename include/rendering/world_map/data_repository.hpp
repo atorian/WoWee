@@ -11,17 +11,18 @@
 #include <cstdint>
 
 namespace wowee {
-namespace pipeline { class AssetManager; }
+namespace pipeline { class AssetManager; class GameTables; }
 namespace rendering {
 namespace world_map {
 
 class DataRepository {
 public:
     /// Load all zone data from DBC files for the given map name.
-    void loadZones(const std::string& mapName, pipeline::AssetManager& assetManager);
+    void loadZones(const std::string& mapName, pipeline::AssetManager& assetManager,
+                   const pipeline::GameTables& tables);
 
     /// Load area POI markers from AreaPOI.dbc.
-    void loadPOIs(pipeline::AssetManager& assetManager);
+    void loadPOIs(const pipeline::GameTables& tables);
 
     /// Build cosmic view entries for the active expansion (uses isActiveExpansion).
     void buildCosmicView(int expansionLevel = 0);

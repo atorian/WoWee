@@ -673,3 +673,19 @@ TEST_CASE("control and F10 open the weather panel and reach nothing in the inter
         "  if command ~= '' then SetBinding(key, command) else SetBinding(key) end\n"
         "end\n");
 }
+
+TEST_CASE("the map to enter is found in Map.dbc and nowhere else", "[client][harness][tables]") {
+    // The harness's Map.dbc has Eastern Kingdoms and Kalimdor. The client kept
+    // a list of map directories of its own to fall back on, so a map the
+    // table did not have - Northrend here - was entered by that list's name.
+    ClientHarness h;
+    CHECK(h.loader().mapNameFor(1) == "Kalimdor");
+    CHECK(h.loader().mapNameFor(571).empty());
+}
+
+TEST_CASE("a Map.dbc that cannot be read stops the game when a map is to be entered",
+          "[client][harness][tables]") {
+    ClientHarness h;
+    h.server().unreadableDbc("Map.dbc");
+    CHECK_THROWS_AS(h.loader().mapNameFor(0), wowee::test::GameStopped);
+}

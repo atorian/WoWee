@@ -524,16 +524,11 @@ const char* nameFromId(uint32_t id) {
     if (id < ANIM_COUNT) return names[id];
     return "UNKNOWN";
 }
-void validateAgainstDBC(const std::shared_ptr<wowee::pipeline::DBCFile>& dbc) {
-    if (!dbc || !dbc->isLoaded()) {
-        LOG_WARNING("AnimationData.dbc not available - skipping animation ID validation");
-        return;
-    }
-
+void validateAgainstDBC(const wowee::pipeline::DBCFile& dbc) {
     // Collect all IDs present in the DBC (first field is the animation ID)
     std::unordered_set<uint32_t> dbcIds;
-    for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-        uint32_t id = dbc->getUInt32(i, 0);
+    for (uint32_t i = 0; i < dbc.getRecordCount(); ++i) {
+        uint32_t id = dbc.getUInt32(i, 0);
         dbcIds.insert(id);
     }
 
@@ -566,7 +561,7 @@ void validateAgainstDBC(const std::shared_ptr<wowee::pipeline::DBCFile>& dbc) {
         }
     }
 
-    LOG_INFO("AnimationData.dbc validation: ", dbc->getRecordCount(), " DBC records, ",
+    LOG_INFO("AnimationData.dbc validation: ", dbc.getRecordCount(), " DBC records, ",
              ANIM_COUNT, " constants, ",
              missingInDbc, " missing from DBC, ",
              extraInDbc, " DBC-only IDs beyond constant range");

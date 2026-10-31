@@ -12,6 +12,10 @@
 
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/spell_icon_paths.hpp"
+#include "test_game_tables.hpp"
+
+#include <fstream>
+#include <sstream>
 
 #include <cctype>
 #include <string>
@@ -36,8 +40,16 @@ TEST_CASE("the loader reads every icon id to its icon path", "[spell-icon]") {
         return;
     }
 
+    // Through WotLK's own layout, as the client reads it.
+    std::ifstream layoutFile(wowee::test::sourceRoot() + "Data/expansions/wotlk/dbc_layouts.json");
+    std::stringstream layoutText;
+    layoutText << layoutFile.rdbuf();
+    const wowee::test::GivenLayouts layouts(layoutText.str());
+    wowee::test::GivenTables tables;
+    tables.giveFile("SpellIcon.dbc", assets.readFile("DBFilesClient\\SpellIcon.dbc"));
+
     std::unordered_map<uint32_t, std::string> paths;
-    wowee::pipeline::loadSpellIconPaths(&assets, paths);
+    wowee::pipeline::loadSpellIconPaths(tables, paths);
     REQUIRE(paths.size() > 100);
 
     size_t icons = 0;

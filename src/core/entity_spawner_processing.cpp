@@ -26,6 +26,7 @@
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "pipeline/char_sections.hpp"
 #include "pipeline/m2_asset_loader.hpp"
 #include "pipeline/item_textures.hpp"
@@ -402,7 +403,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
 
             AsyncCreatureLoad load;
             load.future = spawns_->jobs_.submit(s.token, 
-                [am, m2Path, modelId, s, displayCopy, extraCopy](const JobGroup::Token& jobToken) -> PreparedCreatureModel {
+                [am, tables = &tables_, m2Path, modelId, s, displayCopy, extraCopy](const JobGroup::Token& jobToken) -> PreparedCreatureModel {
                     PreparedCreatureModel result{};
                     result.token = jobToken;
                     result.guid = s.guid; result.displayId = s.displayId;
@@ -458,11 +459,10 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                                 // never collected the skin row's second texture,
                                 // so the head detail sheet was always decoded on
                                 // the main thread at spawn time.
-                                auto csDbc = am->loadDBC("CharSections.dbc");
-                                if (csDbc) {
-                                    const auto* csL = pipeline::getActiveDBCLayout()
-                                        ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
-                                    const auto csF = pipeline::detectCharSectionsFields(csDbc.get(), csL);
+                                {
+                                    const pipeline::RequiredTable csDbc(*tables, "CharSections.dbc",
+                                                                        "humanoid creatures' skin and face");
+                                    const auto csF = pipeline::detectCharSectionsFields(csDbc.get(), &csDbc.layout());
                                     pipeline::CharacterAppearance who;
                                     who.raceId = he.raceId;
                                     who.sexId = he.sexId;
@@ -490,10 +490,9 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                                     for (const auto& uw : sections.underwear) displaySkinPaths.push_back(uw);
                                 }
                                 // Equipment region textures
-                                auto idiDbc = am->loadDBC("ItemDisplayInfo.dbc");
-                                if (idiDbc) {
-                                    const auto* idiL = pipeline::getActiveDBCLayout()
-                                        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
+                                {
+                                    const pipeline::RequiredTable idiDbc(*tables, "ItemDisplayInfo.dbc",
+                                                                         "humanoid creatures' equipment textures");
                                     // Through the shared resolver, which reconciles
                                     // the layout against the file's own field count.
                                     // Written out here instead, this path read the
@@ -504,7 +503,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                                     // the other reader of the same eight columns
                                     // went through the resolver and was right.
                                     uint32_t trf[8];
-                                    pipeline::getItemDisplayInfoTextureFields(*idiDbc, idiL, trf);
+                                    pipeline::getItemDisplayInfoTextureFields(idiDbc, trf);
                                     const bool isFem = (he.sexId == 1);
                                     for (uint32_t did : he.equipDisplayId) {
                                         if (did == 0) continue;
@@ -742,7 +741,7 @@ void EntitySpawner::processPlayerSpawnQueue() {
         auto cached = assets_.preparedPlayerModels_.find(key);
         auto model = cached != assets_.preparedPlayerModels_.end() ? cached->second : nullptr;
         spawns_->asyncPlayerLoads_.push_back(spawns_->jobs_.submit(request.token, 
-            [assets, request, model = std::move(model)](const JobGroup::Token& jobToken) mutable {
+            [assets, tables = &tables_, request, model = std::move(model)](const JobGroup::Token& jobToken) mutable {
                 PreparedPlayerSpawn ready{};
                 ready.request = request;
                 if (!jobToken.current()) return ready;
@@ -762,16 +761,16 @@ void EntitySpawner::processPlayerSpawnQueue() {
                 }
                 ready.model = model;
                 ready.bodySkinPath = defaultBodySkinPath(request.raceId, request.genderId);
-                if (auto dbc = assets->loadDBC("CharSections.dbc")) {
-                    const auto* layout = pipeline::getActiveDBCLayout()
-                        ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
+                {
+                    const pipeline::RequiredTable dbc(*tables, "CharSections.dbc",
+                                                      "other players' skin, face and hair");
                     const auto look = unpackAppearanceBytes(request.appearanceBytes);
                     pipeline::CharacterAppearance who;
                     who.raceId = request.raceId; who.sexId = request.genderId;
                     who.skinId = look.skinId; who.faceId = look.faceId;
                     who.hairStyleId = look.hairStyleId; who.hairColorId = look.hairColorId;
                     auto sections = pipeline::resolveCharacterSections(dbc.get(),
-                        pipeline::detectCharSectionsFields(dbc.get(), layout), who,
+                        pipeline::detectCharSectionsFields(dbc.get(), &dbc.layout()), who,
                         [](const std::string& path, void* ctx) {
                             return static_cast<pipeline::AssetManager*>(ctx)->fileExists(path);
                         }, assets);
@@ -855,7 +854,7 @@ void EntitySpawner::processDeferredEquipmentQueue() {
     const auto token = spawns_->jobs_.request(JobGroup::Channel::Equipment, guid);
     auto* assets = assetManager_;
     AsyncEquipmentLoad load;
-    load.future = spawns_->jobs_.submit(token, [assets, guid, equipment, snapshot](const JobGroup::Token& jobToken) {
+    load.future = spawns_->jobs_.submit(token, [assets, tables = &tables_, guid, equipment, snapshot](const JobGroup::Token& jobToken) {
         PreparedEquipmentUpdate ready;
         ready.guid = guid; ready.instanceId = snapshot.instanceId; ready.token = jobToken;
         if (!jobToken.current()) return ready;
@@ -883,14 +882,13 @@ void EntitySpawner::processDeferredEquipmentQueue() {
             ready.models[key] = std::move(model);
         };
         if (displayInfoIds[0]) {
-            const auto helm = resolveHelmVisual(*assets, displayInfoIds[0], snapshot.raceId, snapshot.genderId);
+            const auto helm = resolveHelmVisual(*assets, *tables, displayInfoIds[0], snapshot.raceId, snapshot.genderId);
             prepareModel(helm.racialModelPath); prepareModel(helm.baseModelPath);
             paths.push_back(helm.texturePath);
         }
-        if (auto dbc = assets->loadDBC("ItemDisplayInfo.dbc")) {
-            const auto* layout = pipeline::getActiveDBCLayout()
-                ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-            uint32_t fields[8]; pipeline::getItemDisplayInfoTextureFields(*dbc, layout, fields);
+        {
+            const pipeline::RequiredTable dbc(*tables, "ItemDisplayInfo.dbc", "other players' equipment");
+            uint32_t fields[8]; pipeline::getItemDisplayInfoTextureFields(dbc, fields);
             for (int slot = 0; slot < 19; ++slot) {
                 const auto row = dbc->findRecordById(displayInfoIds[slot]);
                 if (row < 0 || displayInfoIds[slot] == 0) continue;
@@ -902,13 +900,13 @@ void EntitySpawner::processDeferredEquipmentQueue() {
                 }
                 if (slot == 2) {
                     for (int side = 0; side < 2; ++side) {
-                        auto name = dbc->getString(row, layout ? (*layout)[side ? "RightModel" : "LeftModel"] : 1u + side);
+                        auto name = dbc->getString(row, dbc.column(side ? "RightModel" : "LeftModel"));
                         if (auto dot = name.rfind('.'); dot != std::string::npos) name.resize(dot);
                         if (name.empty()) continue;
                         const auto base = "Item\\ObjectComponents\\Shoulder\\" + name;
                         const auto suffix = raceGenderSuffix(snapshot.raceId, snapshot.genderId);
                         prepareModel(base + suffix + ".m2"); prepareModel(base + ".m2");
-                        const auto tex = dbc->getString(row, layout ? (*layout)[side ? "RightModelTexture" : "LeftModelTexture"] : 3u + side);
+                        const auto tex = dbc->getString(row, dbc.column(side ? "RightModelTexture" : "LeftModelTexture"));
                         if (!tex.empty()) {
                             paths.push_back("Item\\ObjectComponents\\Shoulder\\" + tex + suffix + ".blp");
                             paths.push_back("Item\\ObjectComponents\\Shoulder\\" + tex + ".blp");
@@ -916,15 +914,14 @@ void EntitySpawner::processDeferredEquipmentQueue() {
                     }
                 }
                 if (slot == 14) {
-                    for (const auto field : {layout ? (*layout)["LeftModelTexture"] : 3u,
-                                             layout ? (*layout)["RightModelTexture"] : 4u}) {
+                    for (const auto field : {dbc.column("LeftModelTexture"), dbc.column("RightModelTexture")}) {
                         const auto name = dbc->getString(row, field);
                         const auto candidates = pipeline::capeTextureCandidates(name, snapshot.genderId == 1);
                         paths.insert(paths.end(), candidates.begin(), candidates.end());
                     }
                 }
                 if (slot == 15 || slot == 16) {
-                    const auto art = pipeline::readItemDisplayArt(*dbc, row);
+                    const auto art = pipeline::readItemDisplayArt(dbc, row);
                     if (!art.modelFile.empty()) {
                         prepareModel("Item\\ObjectComponents\\Weapon\\" + art.modelFile);
                         prepareModel("Item\\ObjectComponents\\Shield\\" + art.modelFile);
@@ -935,7 +932,7 @@ void EntitySpawner::processDeferredEquipmentQueue() {
                     }
                     // The enchant's glow, read here with the weapon so that
                     // attaching it on the main thread reads nothing.
-                    for (const auto& path : resolveEnchantVisualModels(*assets, ready.equipment.enchantIds[slot]))
+                    for (const auto& path : resolveEnchantVisualModels(*tables, ready.equipment.enchantIds[slot]))
                         prepareModel(path);
                 }
             }

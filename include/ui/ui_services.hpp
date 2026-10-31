@@ -20,7 +20,7 @@ class CameraController;
 class AnimationController;
 namespace world_map { class WorldMapFacade; }
 }
-namespace pipeline { class AssetManager; }
+namespace pipeline { class AssetManager; class GameTables; }
 namespace game { 
     class GameHandler;
     class ExpansionRegistry;
@@ -61,6 +61,9 @@ struct UIServices {
     core::Window* window = nullptr;
     rendering::Renderer* renderer = nullptr;
     pipeline::AssetManager* assetManager = nullptr;
+    /// The running expansion's tables, which the interface reads names,
+    /// icons and appearances from.
+    const pipeline::GameTables* gameTables = nullptr;
     game::GameHandler* gameHandler = nullptr;
     game::ExpansionRegistry* expansionRegistry = nullptr;
     /// The friend, ignore and mute lists, and the requests that change them.

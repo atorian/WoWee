@@ -12,7 +12,7 @@
 namespace wowee {
 
 namespace rendering { class Renderer; }
-namespace pipeline { class AssetManager; class DBCLayout; struct M2Model; }
+namespace pipeline { class AssetManager; class DBCLayout; class GameTables; struct M2Model; }
 namespace game { class GameHandler; class Inventory; }
 
 namespace core {
@@ -41,6 +41,7 @@ public:
     AppearanceComposer(rendering::Renderer* renderer,
                        PlayerView* playerView,
                        pipeline::AssetManager* assetManager,
+                       const pipeline::GameTables& tables,
                        game::GameHandler* gameHandler,
                        EntitySpawner* entitySpawner);
 
@@ -109,6 +110,7 @@ private:
 
     PlayerView* playerView_;
     pipeline::AssetManager* assetManager_;
+    const pipeline::GameTables& tables_;
     game::GameHandler* gameHandler_;
     EntitySpawner* entitySpawner_;
 

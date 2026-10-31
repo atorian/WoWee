@@ -89,7 +89,10 @@ bool DBCLayout::loadFromJson(const std::string& path) {
     }
 
     std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return loadFromJsonText(json, path);
+}
 
+bool DBCLayout::loadFromJsonText(const std::string& json, const std::string& source) {
     layouts_.clear();
     size_t loaded = 0;
     size_t pos = 0;
@@ -156,7 +159,7 @@ bool DBCLayout::loadFromJson(const std::string& path) {
         pos = objEnd + 1;
     }
 
-    LOG_INFO("DBCLayout: loaded ", loaded, " layouts from ", path);
+    LOG_INFO("DBCLayout: loaded ", loaded, " layouts from ", source);
     return loaded > 0;
 }
 

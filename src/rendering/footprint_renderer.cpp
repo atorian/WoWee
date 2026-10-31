@@ -6,6 +6,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/dbc_loader.hpp"
+#include "pipeline/required_table.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/frustum.hpp"
 #include "rendering/m2_renderer.hpp"
@@ -70,7 +71,7 @@ bool FootprintRenderer::initialize(Renderer* owner, VkContext* ctx,
     vkCtx_ = ctx;
     perFrameLayout_ = perFrameLayout;
     if (!createDescriptorResources() || !createPipeline() || !createQuad() ||
-        !loadFootprintData(assetManager)) {
+        !loadFootprintData(owner->gameTables(), assetManager)) {
         LOG_WARNING("FootprintRenderer: initialization incomplete");
         shutdown();
         return false;
@@ -195,17 +196,22 @@ bool FootprintRenderer::createQuad() {
     return quadVB_ != VK_NULL_HANDLE;
 }
 
-bool FootprintRenderer::loadFootprintData(pipeline::AssetManager* assets) {
+bool FootprintRenderer::loadFootprintData(const pipeline::GameTables& tables,
+                                          pipeline::AssetManager* assets) {
     // FootprintTextures IDs are sparse. These six rows are the original masks.
     const std::array<uint32_t, kTextureCount> textureIds{1, 4, 5, 3, 6, 7};
     std::unordered_map<uint32_t, uint8_t> indexById;
-    auto textureDbc = assets->loadDBC("FootprintTextures.dbc");
-    if (!textureDbc || !textureDbc->isLoaded()) return false;
+    // ID, then the mask's path.
+    const auto textureDbc = tables.table("FootprintTextures.dbc", 2, "footprints");
 
     VkDevice device = vkCtx_->getDevice();
     for (size_t i = 0; i < kTextureCount; ++i) {
         const int32_t row = textureDbc->findRecordById(textureIds[i]);
-        if (row < 0) return false;
+        if (row < 0) {
+            LOG_WARNING("FootprintRenderer: FootprintTextures.dbc has no row ", textureIds[i],
+                        "; no footprints are drawn");
+            return false;
+        }
         std::string path = textureDbc->getString(static_cast<uint32_t>(row), 1);
         if (path.find('.') == std::string::npos) path += ".blp";
         pipeline::BLPImage image = assets->loadTexture(path);
@@ -235,17 +241,20 @@ bool FootprintRenderer::loadFootprintData(pipeline::AssetManager* assets) {
         indexById[textureIds[i]] = static_cast<uint8_t>(i);
     }
 
-    auto modelDbc = assets->loadDBC("CreatureModelData.dbc");
-    if (!modelDbc || !modelDbc->isLoaded() || modelDbc->getFieldCount() <= 8) return false;
+    const pipeline::RequiredTable modelDbc(tables, "CreatureModelData.dbc", "footprints");
+    const uint32_t pathCol = modelDbc.column("ModelPath");
+    const uint32_t textureCol = modelDbc.column("FootprintTextureID");
+    const uint32_t lengthCol = modelDbc.column("FootprintTextureLength");
+    const uint32_t widthCol = modelDbc.column("FootprintTextureWidth");
     for (uint32_t row = 0; row < modelDbc->getRecordCount(); ++row) {
-        auto textureIt = indexById.find(modelDbc->getUInt32(row, 6));
+        auto textureIt = indexById.find(modelDbc->getUInt32(row, textureCol));
         if (textureIt == indexById.end()) continue;
-        std::string path = normalizeModelPath(modelDbc->getString(row, 2));
+        std::string path = normalizeModelPath(modelDbc->getString(row, pathCol));
         // FootprintTextureLength/Width are inches; world units are yards, so the
         // conversion is /36.  Dividing by 12 yields feet and renders every print
         // three times its real size - a human's came out a yard long.
-        const float length = modelDbc->getFloat(row, 7) / 36.0f;
-        const float width = modelDbc->getFloat(row, 8) / 36.0f;
+        const float length = modelDbc->getFloat(row, lengthCol) / 36.0f;
+        const float width = modelDbc->getFloat(row, widthCol) / 36.0f;
         // Reject degenerate rows on the raw inches, so the /36 correction doesn't
         // also quietly raise the cutoff and drop small creatures that used to
         // resolve a profile.

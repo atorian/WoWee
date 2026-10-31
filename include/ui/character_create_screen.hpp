@@ -13,7 +13,7 @@
 
 namespace wowee {
 namespace game { class GameHandler; }
-namespace pipeline { class AssetManager; }
+namespace pipeline { class AssetManager; class GameTables; }
 namespace rendering { class CharacterPreview; }
 
 namespace ui {
@@ -71,7 +71,7 @@ private:
 
     // 3D model preview
     std::shared_ptr<rendering::CharacterPreview> preview_;
-    pipeline::AssetManager* assetManager_ = nullptr;
+    const pipeline::GameTables* gameTables_ = nullptr;
     int prevRaceIndex_ = -1;
     int prevGenderIndex_ = -1;
     int prevBodyTypeIndex_ = -1;

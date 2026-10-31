@@ -18,7 +18,7 @@
 #include <array>
 
 namespace wowee {
-namespace pipeline { class AssetManager; class MinimapTileIndex; }
+namespace pipeline { class AssetManager; class GameTables; class MinimapTileIndex; }
 namespace rendering {
 
 /// The radius in yards each step of the outdoor zoom (minimapZoom) shows, as
@@ -61,6 +61,7 @@ public:
     }
 
     void setAssetManager(pipeline::AssetManager* am) { assetManager = am; }
+    void setGameTables(const pipeline::GameTables& tables) { gameTables_ = &tables; }
     void setMapName(const std::string& name);
 
     struct Display {
@@ -186,6 +187,7 @@ private:
     VkRenderPass targetPass_ = VK_NULL_HANDLE;
     VkSampleCountFlagBits targetSamples_ = VK_SAMPLE_COUNT_1_BIT;
     pipeline::AssetManager* assetManager = nullptr;
+    const pipeline::GameTables* gameTables_ = nullptr;
     std::string mapName = "Azeroth";
 
     // md5translate.trs: "Azeroth\map32_49" → "e7f0dea73ee6baca78231aaf4b7e772a"

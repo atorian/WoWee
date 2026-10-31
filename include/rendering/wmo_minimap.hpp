@@ -8,7 +8,7 @@
 #include <vector>
 #include <glm/glm.hpp>
 
-namespace wowee::pipeline { struct WMOModel; class DBCFile; struct DBCFieldMap; }
+namespace wowee::pipeline { struct WMOModel; class RequiredTable; }
 
 namespace wowee::rendering {
 
@@ -146,10 +146,8 @@ struct WmoMinimapPlacement {
 /// WMOGroupID -1, by WMOID and NameSetID.
 class WmoAreaFlags {
 public:
-    /// Columns from `layout` when it names them, else those of the 3.3.5a
-    /// file, whose rows have 28 fields. Nothing when neither applies.
-    [[nodiscard]] static std::optional<WmoAreaFlags> read(const pipeline::DBCFile& dbc,
-                                                          const pipeline::DBCFieldMap* layout);
+    /// The columns the expansion's layout names, every one of which it must.
+    [[nodiscard]] static WmoAreaFlags read(const pipeline::RequiredTable& wmoAreaTable);
     /// The building row's flags; zero when the table has no such row.
     [[nodiscard]] uint32_t rootFlags(uint32_t wmoId, uint16_t nameSet) const;
     void set(uint32_t wmoId, uint16_t nameSet, uint32_t flags);

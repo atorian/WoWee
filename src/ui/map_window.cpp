@@ -208,7 +208,7 @@ bool MapWindow::open(SDL_Window* gameWindow, rendering::Renderer* renderer,
     // places. Its textures are made under this window's context.
     map_ = std::make_shared<rendering::world_map::WorldMapFacade>();
     withContext([&] {
-        if (!map_->initialize(ctx, assets)) {
+        if (!map_->initialize(ctx, assets, renderer->gameTables())) {
             LOG_WARNING("Map window: the map did not initialise");
         }
         map_->setPersistent(true);

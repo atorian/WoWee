@@ -191,21 +191,26 @@ ClientHarness::ClientHarness()
     imgui_ = ImGui::CreateContext();
     ImGui::GetIO().DisplaySize = ImVec2(1280.0f, 720.0f);
 
+    // The maps the tests enter, by the directories the client loads them from.
+    game_.dbc("Map.dbc", 5, {{{0, 0}, {1, "Azeroth"}, {4, "Eastern Kingdoms"}},
+                             {{0, 1}, {1, "Kalimdor"}, {4, "Kalimdor"}}});
+
     playerView_ = std::make_unique<core::PlayerView>(viewCamera_, nullptr, nullptr, nullptr,
                                                      game_.events());
-    spawner_ = std::make_unique<core::EntitySpawner>(nullptr, nullptr, &game(), nullptr,
-                                                     playerView_.get());
+    spawner_ = std::make_unique<core::EntitySpawner>(nullptr, nullptr, game_.gameData(), &game(),
+                                                     nullptr, playerView_.get());
     spawnCallbacks_ = std::make_unique<core::EntitySpawnCallbackHandler>(
         *spawner_, nullptr, game().eventBus(), [this](uint64_t guid) {
             return guid != 0 &&
                    (guid == game().getPlayerGuid() || guid == game().getActiveCharacterGuid());
         });
     spawnCallbacks_->setupCallbacks();
-    loader_ = std::make_unique<core::WorldLoader>(phase_, nullptr, nullptr,
+    loader_ = std::make_unique<core::WorldLoader>(phase_, nullptr, nullptr, game_.gameData(),
                                                   scratch_ / "last_world.cfg",
                                                   [this] { return now_; });
     worldEntry_ = std::make_unique<core::WorldEntryCallbackHandler>(
-        nullptr, *playerView_, game(), loader_.get(), spawner_.get(), nullptr, phase_);
+        nullptr, *playerView_, game(), loader_.get(), spawner_.get(), nullptr, game_.gameData(),
+        phase_);
     catalog_ = std::make_unique<addons::AddonCatalog>();
     catalog_->setFrameXmlDir((scratch_ / "FrameXML").string());
     catalog_->scan((scratch_ / "AddOns").string());

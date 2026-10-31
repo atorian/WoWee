@@ -61,6 +61,8 @@ class DBCLayout {
 public:
     /** Load from JSON file. Returns true if successful. */
     bool loadFromJson(const std::string& path);
+    /// The same, from the file's text; `source` names it in the log.
+    bool loadFromJsonText(const std::string& json, const std::string& source);
 
     /** Get the field map for a DBC file. Returns nullptr if unknown. */
     [[nodiscard]] const DBCFieldMap* getLayout(const std::string& dbcName) const;

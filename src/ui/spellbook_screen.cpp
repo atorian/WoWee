@@ -8,6 +8,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "core/logger.hpp"
 #include "pipeline/spell_icon_paths.hpp"
 #include <algorithm>
@@ -18,30 +19,17 @@ namespace wowee { namespace ui {
 
 void SpellbookScreen::loadSpellDBC(pipeline::AssetManager* assetManager) {
     if (dbcLoadAttempted) return;
+    // Not yet: no tables handed over, or no data mounted to read them from.
+    if (!gameTables_ || !assetManager || !assetManager->isInitialized()) return;
     dbcLoadAttempted = true;
 
-    if (!assetManager || !assetManager->isInitialized()) return;
+    constexpr std::string_view kNeededFor = "the spellbook";
+    const pipeline::RequiredTable dbc(*gameTables_, "Spell.dbc", kNeededFor);
 
-    auto dbc = assetManager->loadDBC("Spell.dbc");
-    if (!dbc || !dbc->isLoaded()) {
-        LOG_WARNING("Spellbook: Could not load Spell.dbc");
-        return;
-    }
-
-    uint32_t fieldCount = dbc->getFieldCount();
-    // Classic 1.12 Spell.dbc has 148 fields (Tooltip at index 147), TBC has ~220+ (SchoolMask at 215), WotLK has 234.
-    // Require at least 148 fields so all expansions can load spell names/icons via the DBC layout.
-    if (fieldCount < 148) {
-        LOG_WARNING("Spellbook: Spell.dbc has ", fieldCount, " fields, too few to load");
-        return;
-    }
-
-    const auto* spellL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("Spell") : nullptr;
-
-    // Load SpellCastTimes.dbc: field 0=ID, field 1=Base(ms), field 2=PerLevel, field 3=Minimum
+    // SpellCastTimes.dbc: ID, base cast time in ms.
     std::unordered_map<uint32_t, uint32_t> castTimeMap;  // index → base ms
-    auto castTimeDbc = assetManager->loadDBC("SpellCastTimes.dbc");
-    if (castTimeDbc && castTimeDbc->isLoaded()) {
+    {
+        const auto castTimeDbc = gameTables_->table("SpellCastTimes.dbc", 2, kNeededFor);
         for (uint32_t i = 0; i < castTimeDbc->getRecordCount(); ++i) {
             uint32_t id   = castTimeDbc->getUInt32(i, 0);
             int32_t  base = static_cast<int32_t>(castTimeDbc->getUInt32(i, 1));
@@ -50,150 +38,83 @@ void SpellbookScreen::loadSpellDBC(pipeline::AssetManager* assetManager) {
         }
     }
 
-    // Load SpellRange.dbc.  Field layout differs by expansion:
-    //   Classic 1.12:  0=ID, 1=MinRange, 2=MaxRange, 3=Flags, 4+=strings
-    //   TBC / WotLK:   0=ID, 1=MinRangeFriendly, 2=MinRangeHostile,
-    //                  3=MaxRangeFriendly, 4=MaxRangeHostile, 5=Flags, 6+=strings
-    // The correct field is declared in each expansion's dbc_layouts.json.
-    uint32_t spellRangeMaxField = 4;  // WotLK / TBC default: MaxRangeHostile
-    const auto* spellRangeL = pipeline::getActiveDBCLayout()
-                              ? pipeline::getActiveDBCLayout()->getLayout("SpellRange")
-                              : nullptr;
-    if (spellRangeL) {
-        try { spellRangeMaxField = (*spellRangeL)["MaxRange"]; } catch (...) {}
-    }
+    // SpellRange.dbc: ID, then the hostile maximum where the expansion's
+    // layout puts it (Classic has one maximum, TBC and WotLK two).
     std::unordered_map<uint32_t, float> rangeMap;  // index → max yards
-    auto rangeDbc = assetManager->loadDBC("SpellRange.dbc");
-    if (rangeDbc && rangeDbc->isLoaded()) {
-        uint32_t rangeFieldCount = rangeDbc->getFieldCount();
-        if (rangeFieldCount > spellRangeMaxField) {
-            for (uint32_t i = 0; i < rangeDbc->getRecordCount(); ++i) {
-                uint32_t id = rangeDbc->getUInt32(i, 0);
-                float maxRange = rangeDbc->getFloat(i, spellRangeMaxField);
-                if (id > 0 && maxRange > 0.0f)
-                    rangeMap[id] = maxRange;
-            }
+    {
+        const pipeline::RequiredTable rangeDbc(*gameTables_, "SpellRange.dbc", kNeededFor);
+        const uint32_t maxRangeField = rangeDbc.column("MaxRange");
+        for (uint32_t i = 0; i < rangeDbc->getRecordCount(); ++i) {
+            uint32_t id = rangeDbc->getUInt32(i, 0);
+            float maxRange = rangeDbc->getFloat(i, maxRangeField);
+            if (id > 0 && maxRange > 0.0f)
+                rangeMap[id] = maxRange;
         }
     }
 
-    // schoolField / isSchoolEnum are declared before the lambda so the WotLK fallback path
-    // can override them before the second tryLoad call.
-    uint32_t schoolField_  = UINT32_MAX;
-    bool     isSchoolEnum_ = false;
+    // TBC and WotLK keep a school bitmask, Classic a 0-6 school
+    // number; each expansion's layout names the one its file has.
+    uint32_t schoolField = dbc.optionalColumn("SchoolMask");
+    const bool isSchoolEnum = schoolField == pipeline::RequiredTable::kAbsent;
+    if (isSchoolEnum) schoolField = dbc.column("SchoolEnum");
 
-    auto tryLoad = [&](uint32_t idField, uint32_t attrField, uint32_t iconField,
-                       uint32_t nameField, uint32_t rankField, uint32_t tooltipField,
-                       uint32_t descriptionField,
-                       uint32_t powerTypeField, uint32_t manaCostField,
-                       uint32_t castTimeIndexField, uint32_t rangeIndexField,
-                       uint32_t casterAuraStateField, uint32_t casterAuraStateNotField,
-                       const char* label) {
-        spellData.clear();
-        uint32_t count = dbc->getRecordCount();
-        const uint32_t fc = dbc->getFieldCount();
-        for (uint32_t i = 0; i < count; ++i) {
-            uint32_t spellId = dbc->getUInt32(i, idField);
-            if (spellId == 0) continue;
+    const uint32_t idField = dbc.column("ID");
+    const uint32_t attrField = dbc.column("Attributes");
+    const uint32_t iconField = dbc.column("IconID");
+    const uint32_t nameField = dbc.column("Name");
+    const uint32_t rankField = dbc.column("Rank");
+    const uint32_t tooltipField = dbc.column("Tooltip");
+    const uint32_t descriptionField = dbc.column("Description");
+    const uint32_t powerTypeField = dbc.column("PowerType");
+    const uint32_t manaCostField = dbc.column("ManaCost");
+    const uint32_t rangeIndexField = dbc.column("RangeIndex");
+    // From the file's own shape rather than the expansion's name for it:
+    // Classic named this 15, which is RequiresSpellFocus.
+    const uint32_t castTimeIndexField =
+        pipeline::detectSpellTimingFields(dbc.get(), &dbc.layout()).castingTimeIndex;
+    // WotLK's; the older files have no aura-state requirement.
+    const uint32_t casterAuraStateField = dbc.optionalColumn("CasterAuraState");
+    const uint32_t casterAuraStateNotField = dbc.optionalColumn("CasterAuraStateNot");
+    constexpr uint32_t kAbsent = pipeline::RequiredTable::kAbsent;
 
-            SpellInfo info;
-            info.spellId = spellId;
-            info.attributes = dbc->getUInt32(i, attrField);
-            info.iconId = dbc->getUInt32(i, iconField);
-            info.name = dbc->getString(i, nameField);
-            if (rankField < fc)    info.rank = dbc->getString(i, rankField);
-            // Prefer the fuller Description (mentions e.g. the "well fed" food buff) and
-            // fall back to the short Tooltip; $-tokens are resolved at render time.
-            if (descriptionField < fc) info.description = dbc->getString(i, descriptionField);
-            if (info.description.empty() && tooltipField < fc)
-                info.description = dbc->getString(i, tooltipField);
-            // Optional fields: only read if field index is valid for this DBC version
-            if (powerTypeField < fc)   info.powerType = dbc->getUInt32(i, powerTypeField);
-            if (manaCostField  < fc)   info.manaCost  = dbc->getUInt32(i, manaCostField);
-            if (casterAuraStateField < fc)
-                info.casterAuraState = dbc->getUInt32(i, casterAuraStateField);
-            if (casterAuraStateNotField < fc)
-                info.casterAuraStateNot = dbc->getUInt32(i, casterAuraStateNotField);
-            if (castTimeIndexField < fc) {
-                uint32_t ctIdx = dbc->getUInt32(i, castTimeIndexField);
-                if (ctIdx > 0) {
-                    auto ctIt = castTimeMap.find(ctIdx);
-                    if (ctIt != castTimeMap.end()) info.castTimeMs = ctIt->second;
-                }
-            }
-            if (rangeIndexField < fc) {
-                uint32_t rangeIdx = dbc->getUInt32(i, rangeIndexField);
-                if (rangeIdx > 0) {
-                    auto rangeIt = rangeMap.find(rangeIdx);
-                    if (rangeIt != rangeMap.end()) info.rangeIndex = static_cast<uint32_t>(rangeIt->second);
-                }
-            }
-            if (schoolField_ < fc) {
-                uint32_t raw = dbc->getUInt32(i, schoolField_);
-                // Classic use a 0-6 school enum; TBC/WotLK use a bitmask.
-                // enum→mask: schoolEnum N maps to bit (1u << N), e.g. 0→1 (physical), 4→16 (frost).
-                info.schoolMask = isSchoolEnum_ ? (raw <= 6 ? (1u << raw) : 0u) : raw;
-            }
+    spellData.clear();
+    for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+        uint32_t spellId = dbc->getUInt32(i, idField);
+        if (spellId == 0) continue;
 
-            if (!info.name.empty()) {
-                spellData[spellId] = std::move(info);
-            }
+        SpellInfo info;
+        info.spellId = spellId;
+        info.attributes = dbc->getUInt32(i, attrField);
+        info.iconId = dbc->getUInt32(i, iconField);
+        info.name = dbc->getString(i, nameField);
+        info.rank = dbc->getString(i, rankField);
+        // Prefer the fuller Description (mentions e.g. the "well fed" food buff) and
+        // fall back to the short Tooltip; $-tokens are resolved at render time.
+        info.description = dbc->getString(i, descriptionField);
+        if (info.description.empty()) info.description = dbc->getString(i, tooltipField);
+        info.powerType = dbc->getUInt32(i, powerTypeField);
+        info.manaCost  = dbc->getUInt32(i, manaCostField);
+        if (casterAuraStateField != kAbsent)
+            info.casterAuraState = dbc->getUInt32(i, casterAuraStateField);
+        if (casterAuraStateNotField != kAbsent)
+            info.casterAuraStateNot = dbc->getUInt32(i, casterAuraStateNotField);
+        if (uint32_t ctIdx = dbc->getUInt32(i, castTimeIndexField); ctIdx > 0) {
+            auto ctIt = castTimeMap.find(ctIdx);
+            if (ctIt != castTimeMap.end()) info.castTimeMs = ctIt->second;
         }
-        LOG_INFO("Spellbook: Loaded ", spellData.size(), " spells from Spell.dbc (", label, ")");
-    };
+        if (uint32_t rangeIdx = dbc->getUInt32(i, rangeIndexField); rangeIdx > 0) {
+            auto rangeIt = rangeMap.find(rangeIdx);
+            if (rangeIt != rangeMap.end()) info.rangeIndex = static_cast<uint32_t>(rangeIt->second);
+        }
+        const uint32_t raw = dbc->getUInt32(i, schoolField);
+        // enum→mask: schoolEnum N maps to bit (1u << N), e.g. 0→1 (physical), 4→16 (frost).
+        info.schoolMask = isSchoolEnum ? (raw <= 6 ? (1u << raw) : 0u) : raw;
 
-    if (spellL) {
-        // Default to UINT32_MAX for optional fields; tryLoad will skip them if >= fieldCount.
-        // Avoids reading wrong data from expansion DBCs that lack these fields (e.g. Classic/TBC).
-        uint32_t tooltipField      = UINT32_MAX;
-        uint32_t descriptionField  = UINT32_MAX;
-        uint32_t powerTypeField    = UINT32_MAX;
-        uint32_t manaCostField     = UINT32_MAX;
-        uint32_t castTimeIdxField  = UINT32_MAX;
-        uint32_t rangeIdxField     = UINT32_MAX;
-        uint32_t casterAuraStateField = UINT32_MAX;
-        uint32_t casterAuraStateNotField = UINT32_MAX;
-        try { tooltipField     = (*spellL)["Tooltip"]; } catch (...) {}
-        try { descriptionField = (*spellL)["Description"]; } catch (...) {}
-        try { powerTypeField   = (*spellL)["PowerType"]; } catch (...) {}
-        try { manaCostField    = (*spellL)["ManaCost"]; } catch (...) {}
-        // From the file's own shape rather than the expansion's name for it:
-        // Classic named this 15, which is RequiresSpellFocus.
-        castTimeIdxField = pipeline::detectSpellTimingFields(dbc.get(), spellL).castingTimeIndex;
-        try { rangeIdxField    = (*spellL)["RangeIndex"]; } catch (...) {}
-        try { casterAuraStateField = (*spellL)["CasterAuraState"]; } catch (...) {}
-        try { casterAuraStateNotField = (*spellL)["CasterAuraStateNot"]; } catch (...) {}
-        // Try SchoolMask (TBC/WotLK bitmask) then SchoolEnum (Classic 0-6 value)
-        //
-        // Asked for rather than read, so a 1.12 layout is not reported as
-        // missing SchoolMask: it never had the column, and the warning that
-        // came of it told people with a perfectly good extraction to go and
-        // re-extract. Neither name is a real gap and still says so.
-        schoolField_  = spellL->tryField("SchoolMask");
-        isSchoolEnum_ = false;
-        if (schoolField_ == UINT32_MAX) {
-            schoolField_ = spellL->tryField("SchoolEnum");
-            isSchoolEnum_ = schoolField_ != UINT32_MAX;
+        if (!info.name.empty()) {
+            spellData[spellId] = std::move(info);
         }
-        if (schoolField_ == UINT32_MAX) {
-            pipeline::noteMissingLayoutField("Spell", "SchoolMask or SchoolEnum");
-        }
-        tryLoad((*spellL)["ID"], (*spellL)["Attributes"], (*spellL)["IconID"],
-                (*spellL)["Name"], (*spellL)["Rank"], tooltipField, descriptionField,
-                powerTypeField, manaCostField, castTimeIdxField, rangeIdxField,
-                casterAuraStateField, casterAuraStateNotField,
-                "expansion layout");
     }
-
-    // If dbc_layouts.json was missing or its field names didn't match, retry with
-    // hard-coded WotLK field indices as a safety net. fieldCount >= 200 distinguishes
-    // WotLK (234 fields) from Classic (148) to avoid misreading shorter DBCs.
-    if (spellData.empty() && fieldCount >= 200) {
-        LOG_INFO("Spellbook: Retrying with WotLK field indices (DBC has ", fieldCount, " fields)");
-        schoolField_  = 225;
-        isSchoolEnum_ = false;
-        tryLoad(0, 4, 133, 136, 153, 187, 170, 41, 42, 28, 46, 20, 22, "WotLK fallback");
-    }
-
+    LOG_INFO("Spellbook: Loaded ", spellData.size(), " spells from Spell.dbc");
     dbcLoaded = !spellData.empty();
 }
 

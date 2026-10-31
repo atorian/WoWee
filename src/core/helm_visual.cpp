@@ -1,7 +1,8 @@
 #include "core/helm_visual.hpp"
 
 #include "pipeline/asset_manager.hpp"
-#include "pipeline/dbc_layout.hpp"
+#include "pipeline/dbc_loader.hpp"
+#include "pipeline/required_table.hpp"
 
 #include <algorithm>
 #include <unordered_map>
@@ -23,22 +24,19 @@ std::string stripExtension(std::string name) {
 
 // One model-and-texture column pair of an ItemDisplayInfo row, in `dir`: the
 // race and gender cut first, the shared one after it.
-HelmVisual resolveItemModel(pipeline::AssetManager& assets, uint32_t itemDisplayInfoId,
+HelmVisual resolveItemModel(pipeline::AssetManager& assets, const pipeline::GameTables& tables,
+                            uint32_t itemDisplayInfoId,
                             uint8_t raceId, uint8_t genderId, const char* dir,
-                            const char* modelColumn, uint32_t modelFallback,
-                            const char* textureColumn, uint32_t textureFallback) {
+                            const char* modelColumn, const char* textureColumn) {
     HelmVisual out;
     if (itemDisplayInfoId == 0) return out;
 
-    auto dbc = assets.loadDBC("ItemDisplayInfo.dbc");
-    if (!dbc) return out;
+    const pipeline::RequiredTable dbc(tables, "ItemDisplayInfo.dbc", "helms and shoulders");
     const int32_t row = dbc->findRecordById(itemDisplayInfoId);
     if (row < 0) return out;
 
-    const auto* layout = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-    const uint32_t modelField = layout ? (*layout)[modelColumn] : modelFallback;
-    const uint32_t textureField = layout ? (*layout)[textureColumn] : textureFallback;
+    const uint32_t modelField = dbc.column(modelColumn);
+    const uint32_t textureField = dbc.column(textureColumn);
 
     const std::string modelName =
         stripExtension(dbc->getString(static_cast<uint32_t>(row), modelField));
@@ -64,22 +62,24 @@ HelmVisual resolveItemModel(pipeline::AssetManager& assets, uint32_t itemDisplay
 } // namespace
 
 HelmVisual resolveHelmVisual(pipeline::AssetManager& assets,
+                             const pipeline::GameTables& tables,
                              uint32_t itemDisplayInfoId,
                              uint8_t raceId,
                              uint8_t genderId) {
-    return resolveItemModel(assets, itemDisplayInfoId, raceId, genderId, kHeadDir,
-                            "LeftModel", 1u, "LeftModelTexture", 3u);
+    return resolveItemModel(assets, tables, itemDisplayInfoId, raceId, genderId, kHeadDir,
+                            "LeftModel", "LeftModelTexture");
 }
 
 ShoulderVisual resolveShoulderVisual(pipeline::AssetManager& assets,
+                                     const pipeline::GameTables& tables,
                                      uint32_t itemDisplayInfoId,
                                      uint8_t raceId,
                                      uint8_t genderId) {
     ShoulderVisual out;
-    out.left = resolveItemModel(assets, itemDisplayInfoId, raceId, genderId, kShoulderDir,
-                                "LeftModel", 1u, "LeftModelTexture", 3u);
-    out.right = resolveItemModel(assets, itemDisplayInfoId, raceId, genderId, kShoulderDir,
-                                 "RightModel", 2u, "RightModelTexture", 4u);
+    out.left = resolveItemModel(assets, tables, itemDisplayInfoId, raceId, genderId, kShoulderDir,
+                                "LeftModel", "LeftModelTexture");
+    out.right = resolveItemModel(assets, tables, itemDisplayInfoId, raceId, genderId, kShoulderDir,
+                                 "RightModel", "RightModelTexture");
     return out;
 }
 
@@ -95,7 +95,7 @@ namespace {
 /// visibility table.
 struct VisColumns { uint32_t male = 0xFFFFFFFFu; uint32_t female = 0xFFFFFFFFu; };
 
-VisColumns findVisColumns(pipeline::DBCFile& displayInfo, pipeline::DBCFile& visData) {
+VisColumns findVisColumns(const pipeline::DBCFile& displayInfo, const pipeline::DBCFile& visData) {
     VisColumns out;
     std::unordered_set<uint32_t> ids;
     for (uint32_t r = 0; r < visData.getRecordCount(); ++r) {
@@ -124,14 +124,14 @@ VisColumns findVisColumns(pipeline::DBCFile& displayInfo, pipeline::DBCFile& vis
 
 } // namespace
 
-bool helmHidesHair(pipeline::AssetManager& assets,
+bool helmHidesHair(const pipeline::GameTables& tables,
                    uint32_t itemDisplayInfoId,
                    uint8_t genderId) {
     if (itemDisplayInfoId == 0) return false;
 
-    auto displayInfo = assets.loadDBC("ItemDisplayInfo.dbc");
-    auto visData = assets.loadDBC("HelmetGeosetVisData.dbc");
-    if (!displayInfo || !visData) return true;  // no data: keep the old behaviour
+    constexpr std::string_view kNeededFor = "whether a helm covers the hair";
+    const auto displayInfo = tables.table("ItemDisplayInfo.dbc", 1, kNeededFor);
+    const auto visData = tables.table("HelmetGeosetVisData.dbc", 2, kNeededFor);
 
     static VisColumns columns = findVisColumns(*displayInfo, *visData);
     const uint32_t column = (genderId == 0) ? columns.male : columns.female;

@@ -231,6 +231,7 @@ void GameScreen::setAntiAliasingIndex(int index) {
 
 void GameScreen::setServices(const UIServices& services) {
     services_ = services;
+    spellbookScreen.setGameTables(services_.gameTables);
     // Settings are loaded by the constructor before services are injected.
     // Apply the saved display pacing as soon as the actual window is available.
     if (services_.window &&

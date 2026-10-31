@@ -80,7 +80,7 @@ void ChatMarkupRenderer::render(
                         ImGui::Image((ImTextureID)(uintptr_t)chatIcon, ImVec2(12, 12));
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-                            ItemTooltipRenderer::render(itemEntry, *ctx.gameHandler, *ctx.inventory, ctx.assetMgr);
+                            ItemTooltipRenderer::render(itemEntry, *ctx.gameHandler, *ctx.inventory);
                         }
                         ImGui::SameLine(0, 2);
                     }
@@ -94,7 +94,7 @@ void ChatMarkupRenderer::render(
             if (ImGui::IsItemHovered()) {
                 ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
                 if (itemEntry > 0 && ctx.gameHandler && ctx.inventory) {
-                    ItemTooltipRenderer::render(itemEntry, *ctx.gameHandler, *ctx.inventory, ctx.assetMgr);
+                    ItemTooltipRenderer::render(itemEntry, *ctx.gameHandler, *ctx.inventory);
                 }
             }
             // Shift-click: insert entire link back into chat input

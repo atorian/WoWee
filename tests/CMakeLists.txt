@@ -2517,6 +2517,7 @@ wowee_add_test(test_liquid_types
             ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/required_table.cpp
             ${TEST_COMMON_SOURCES})
 
 # ── test_ocean_spectrum ──────────────────────────────────────
@@ -2838,8 +2839,8 @@ register_test_target(test_light_bands)
 # ── test_sky_model_gate ──────────────────────────────────────
 # When the original client's sky models stand in for its own stars, sun,
 # moons and clouds, and when they are drawn over them: LightingManager over
-# Light, LightParams and LightSkybox files made up in a data root. Links the
-# pipeline library for the AssetManager and the DBC reader.
+# Light, LightParams and LightSkybox tables made up under the expansion's
+# layouts. Links the pipeline library for the DBC reader.
 add_executable(test_sky_model_gate
     test_sky_model_gate.cpp
     ${CMAKE_SOURCE_DIR}/src/rendering/lighting_manager.cpp)
@@ -3728,6 +3729,19 @@ wowee_add_test(test_distant_terrain
 wowee_add_test(test_minimap_tile_index
     SOURCES test_minimap_tile_index.cpp ${CMAKE_SOURCE_DIR}/src/pipeline/minimap_tile_index.cpp)
 
+# ── test_item_tables ─────────────────────────────────────────
+# What an item tooltip reads from the expansion's tables: names through the
+# expansion's layout, ItemSet.dbc only where the expansion uses it, and a
+# column the layout does not name stopping the game.
+wowee_add_test(test_item_tables
+    SOURCES test_item_tables.cpp
+            ${CMAKE_SOURCE_DIR}/src/ui/item_tables.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/required_table.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp
+            ${TEST_COMMON_SOURCES})
+
 wowee_add_test(test_wmo_minimap
     SOURCES test_wmo_minimap.cpp ${CMAKE_SOURCE_DIR}/src/rendering/wmo_minimap.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp ${TEST_COMMON_SOURCES})
+            ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/required_table.cpp ${TEST_COMMON_SOURCES})

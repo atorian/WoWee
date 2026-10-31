@@ -63,8 +63,7 @@
 #include "pipeline/m2_loader.hpp"
 #include <algorithm>
 #include "pipeline/asset_manager.hpp"
-#include "pipeline/dbc_loader.hpp"
-#include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/adt_loader.hpp"
 #include "pipeline/terrain_mesh.hpp"
@@ -4292,6 +4291,14 @@ void Renderer::setActiveMapName(const std::string& name) {
     if (minimap) minimap->setMapName(name);
 }
 
+const pipeline::GameTables& Renderer::gameTables() const {
+    if (!gameTables_) {
+        LOG_FATAL("Renderer: a table was read before the client handed over the expansion's tables");
+        std::abort();
+    }
+    return *gameTables_;
+}
+
 bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const std::string& mapName) {
     drainFrames();
     if (!assetManager) {
@@ -4339,15 +4346,13 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
     // by it. Before any tile or building is loaded.
     if (!liquidTypesLoaded_) {
         liquidTypesLoaded_ = true;
-        const auto dbc = assetManager->loadDBC("LiquidType.dbc");
-        const pipeline::DBCLayout* layouts = pipeline::getActiveDBCLayout();
-        if (dbc && dbc->isLoaded()) {
+        // Only WotLK's layout names the table's columns; the other
+        // expansions do not use it and know the four basic liquids alone.
+        if (gameTables().has("LiquidType.dbc")) {
             liquidTypes_ = pipeline::LiquidTypeTable::fromDbc(
-                *dbc, layouts ? layouts->getLayout("LiquidType") : nullptr, "LiquidType.dbc");
+                pipeline::RequiredTable(gameTables(), "LiquidType.dbc", "the kinds of liquid in the map data"));
             LOG_INFO("Liquid types: ", liquidTypes_.size(), " from LiquidType.dbc");
         } else {
-            LOG_WARNING("Liquid types: LiquidType.dbc did not load - only the four basic "
-                        "liquids are known, drawn without their textures");
             liquidTypes_ = pipeline::LiquidTypeTable::basicOnly();
         }
         liquidScene_.setLiquidTypes(&liquidTypes_);
@@ -4485,7 +4490,7 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         standaloneTerrain_ = std::make_unique<TerrainManager>();
         terrainManager = standaloneTerrain_.get();
         if (mapJobToken_.current()) terrainManager->setJobToken(mapJobToken_);
-        if (!terrainManager->initialize(assetManager, terrainRenderer.get())) {
+        if (!terrainManager->initialize(assetManager, terrainRenderer.get(), gameTables())) {
             LOG_ERROR("Failed to initialize terrain manager");
             standaloneTerrain_.reset();
             terrainManager = nullptr;
@@ -4521,6 +4526,7 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         // Wire asset manager to minimap for tile texture loading
         if (minimap) {
             minimap->setAssetManager(assetManager);
+            minimap->setGameTables(gameTables());
         }
     }
 

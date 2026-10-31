@@ -2,7 +2,8 @@
 #include "ui/ui_texture_load.hpp"
 
 #include "pipeline/asset_manager.hpp"
-#include "pipeline/dbc_layout.hpp"
+#include "pipeline/dbc_loader.hpp"
+#include "pipeline/required_table.hpp"
 #include "core/logger.hpp"
 #include <unordered_set>
 
@@ -46,8 +47,9 @@ VkDescriptorSet cachedIconTexture(uint32_t iconId, pipeline::AssetManager* asset
 
 VkDescriptorSet itemIconTexture(uint32_t displayInfoId,
                                 pipeline::AssetManager* assetManager,
+                                const pipeline::GameTables* tables,
                                 core::Window* window) {
-    if (displayInfoId == 0 || !assetManager) return VK_NULL_HANDLE;
+    if (displayInfoId == 0 || !assetManager || !tables) return VK_NULL_HANDLE;
 
     const auto registered = caches.find(assetManager);
     if (registered == caches.end()) return VK_NULL_HANDLE;
@@ -55,14 +57,7 @@ VkDescriptorSet itemIconTexture(uint32_t displayInfoId,
     if (const auto it = paths.find(displayInfoId); it != paths.end())
         return it->second.empty() ? VK_NULL_HANDLE : uploadUiTextureFromBlp(assetManager, it->second, window);
 
-    auto dbc = assetManager->loadDBC("ItemDisplayInfo.dbc");
-    if (!dbc) {
-        core::Logger::getInstance().warning(
-            "itemIconTexture: ItemDisplayInfo.dbc not loadable for displayInfoId=",
-            displayInfoId);
-        paths[displayInfoId] = {};
-        return VK_NULL_HANDLE;
-    }
+    const pipeline::RequiredTable dbc(*tables, "ItemDisplayInfo.dbc", "item icons");
 
     const int32_t recIdx = dbc->findRecordById(displayInfoId);
     if (recIdx < 0) {
@@ -73,11 +68,8 @@ VkDescriptorSet itemIconTexture(uint32_t displayInfoId,
         return VK_NULL_HANDLE;
     }
 
-    const auto* layout = pipeline::getActiveDBCLayout()
-                             ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo")
-                             : nullptr;
     const std::string iconName =
-        dbc->getString(static_cast<uint32_t>(recIdx), layout ? (*layout)["InventoryIcon"] : 5);
+        dbc->getString(static_cast<uint32_t>(recIdx), dbc.column("InventoryIcon"));
     if (iconName.empty()) {
         core::Logger::getInstance().warning(
             "itemIconTexture: displayInfoId=", displayInfoId, " recIdx=", recIdx,

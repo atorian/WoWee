@@ -141,14 +141,6 @@ public:
      */
     std::shared_ptr<DBCFile> loadDBC(const std::string& name);
 
-    /**
-     * Load a DBC file that is optional (not all expansions ship it).
-     * Returns nullptr quietly (debug-level log only) when the file is absent.
-     * @param name DBC file name (e.g., "Item.dbc")
-     * @return Loaded DBC file, or nullptr if not available
-     */
-    std::shared_ptr<DBCFile> loadDBCOptional(const std::string& name);
-
 
     /**
      * Check if a file exists

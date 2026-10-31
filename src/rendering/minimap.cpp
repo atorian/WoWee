@@ -10,7 +10,7 @@
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/minimap_tile_index.hpp"
 #include "pipeline/dbc_loader.hpp"
-#include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include <imgui.h>
@@ -362,6 +362,7 @@ void Minimap::prepareTiles(const Request& request, const WmoMinimapPlacement* bu
     if (pendingTiles_.valid() || !assetManager || requested_ == request) return;
     requested_ = request;
     auto* assets = assetManager;
+    const auto* tables = gameTables_;
     auto* ctx = vkCtx;
     const auto lookup = trsLookup;
     const bool areaFlagsRead = areaFlagsRead_;
@@ -369,7 +370,7 @@ void Minimap::prepareTiles(const Request& request, const WmoMinimapPlacement* bu
     if (building && request.instance != 0) placement = *building;
     std::unordered_map<std::string, std::shared_ptr<VkTexture>> existing;
     for (const auto& [hash, entry] : tileTextureCache) existing.emplace(hash, entry.texture);
-    pendingTiles_ = tileJobs_.submit([assets, ctx, request, centre, lookup, areaFlagsRead, placement,
+    pendingTiles_ = tileJobs_.submit([assets, tables, ctx, request, centre, lookup, areaFlagsRead, placement,
                                       existing = std::move(existing)](const core::JobGroup::Token& token) {
         Tiles result;
         result.request = request;
@@ -383,15 +384,12 @@ void Minimap::prepareTiles(const Request& request, const WmoMinimapPlacement* bu
         }
         if (!areaFlagsRead) {
             result.areaFlagsRead = true;
-            pipeline::DBCFile dbc;
-            const auto data = assets->readFile("DBFilesClient\\WMOAreaTable.dbc");
-            const auto* layout = pipeline::getActiveDBCLayout()
-                ? pipeline::getActiveDBCLayout()->getLayout("WMOAreaTable") : nullptr;
-            std::optional<WmoAreaFlags> table;
-            if (!data.empty() && dbc.load(data)) table = WmoAreaFlags::read(dbc, layout);
-            if (table) result.areaFlags = std::make_shared<const WmoAreaFlags>(std::move(*table));
-            else LOG_WARNING("Minimap: WMOAreaTable.dbc ", data.empty() ? "is missing" : "has an unknown layout",
-                             "; outdoors in a building such as Dalaran the minimap shows the ground below");
+            // Only WotLK's layout names the table's columns. Without it a
+            // building's minimap outdoors - Dalaran's - shows the ground below.
+            if (tables && tables->has("WMOAreaTable.dbc")) {
+                result.areaFlags = std::make_shared<const WmoAreaFlags>(WmoAreaFlags::read(
+                    pipeline::RequiredTable(*tables, "WMOAreaTable.dbc", "the minimap of a building seen from outside")));
+            }
         }
         // Each image once: from the cache, or loaded and uploaded here.
         auto loaded = existing;

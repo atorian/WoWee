@@ -4,7 +4,6 @@
 
 namespace wowee {
 namespace game { class GameHandler; }
-namespace pipeline { class AssetManager; }
 namespace ui {
 
 class InventoryScreen;
@@ -20,8 +19,7 @@ class ItemTooltipRenderer {
 public:
     static void render(uint32_t itemEntry,
                        game::GameHandler& gameHandler,
-                       InventoryScreen& inventoryScreen,
-                       pipeline::AssetManager* assetMgr);
+                       InventoryScreen& inventoryScreen);
 };
 
 } // namespace ui

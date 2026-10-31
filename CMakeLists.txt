@@ -1029,6 +1029,7 @@ set(WOWEE_SOURCES
     src/pipeline/item_textures.cpp
     src/pipeline/m2_asset_loader.cpp
     src/pipeline/dbc_layout.cpp
+    src/pipeline/required_table.cpp
     src/pipeline/spell_icon_paths.cpp
 
     src/pipeline/terrain_mesh.cpp
@@ -1245,6 +1246,7 @@ set(WOWEE_SOURCES
     src/ui/bis_gear_data.cpp
     src/ui/inventory_screen.cpp
     src/ui/item_tooltip.cpp
+    src/ui/item_tables.cpp
     src/ui/spellbook_screen.cpp
     src/ui/keybinding_manager.cpp
 

@@ -13,7 +13,7 @@
 #include "game/game_handler.hpp"
 #include "game/spell_handler.hpp"
 #include "pipeline/asset_manager.hpp"
-#include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/renderer.hpp"
@@ -40,10 +40,9 @@ audio::SpellSoundManager::MagicSchool magicSchool(uint32_t schoolMask) {
 SpellPresentation::SpellPresentation(EventBus& events, game::GameHandler& game,
                                      rendering::Renderer& renderer, EntitySpawner& spawner,
                                      rendering::SpellVisualSystem* visuals,
-                                     audio::AudioCoordinator* audio,
-                                     pipeline::AssetManager& assets)
+                                     audio::AudioCoordinator* audio)
     : game_(game), renderer_(renderer), spawner_(spawner), visuals_(visuals),
-      audio_(audio), assets_(assets) {
+      audio_(audio) {
     namespace ev = game::events;
     subscriptions_.push_back(events.subscribe<ev::SpellCastStarted>([this](const ev::SpellCastStarted& e) {
         onCastStarted(e.casterGuid, e.spellId, e.castTimeMs, e.byPlayer, e.isProfession,
@@ -258,24 +257,21 @@ void SpellPresentation::launchRangedProjectile(uint32_t spellId, uint64_t target
     if (spellId == 2764 || (!ranged.empty() && ranged.item.inventoryType == game::InvType::THROWN)) {
         spin = true;
         if (!ranged.empty() && ranged.item.displayInfoId != 0) {
-            auto displayDbc = assets_.loadDBC("ItemDisplayInfo.dbc");
-            if (displayDbc && displayDbc->isLoaded()) {
-                const int32_t row = displayDbc->findRecordById(ranged.item.displayInfoId);
-                if (row >= 0) {
-                    const auto* layout = pipeline::getActiveDBCLayout()
-                        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-                    std::string model = displayDbc->getString(
-                        static_cast<uint32_t>(row), layout ? (*layout)["LeftModel"] : 1);
-                    std::string texture = displayDbc->getString(
-                        static_cast<uint32_t>(row), layout ? (*layout)["LeftModelTexture"] : 3);
-                    if (!model.empty()) {
-                        const size_t dot = model.rfind('.');
-                        if (dot != std::string::npos) model = model.substr(0, dot);
-                        modelPath = "Item\\ObjectComponents\\Weapon\\" + model + ".m2";
-                    }
-                    if (!texture.empty())
-                        texturePath = "Item\\ObjectComponents\\Weapon\\" + texture + ".blp";
+            const pipeline::RequiredTable displayDbc(renderer_.gameTables(), "ItemDisplayInfo.dbc",
+                                                     "a thrown weapon's model");
+            const int32_t row = displayDbc->findRecordById(ranged.item.displayInfoId);
+            if (row >= 0) {
+                std::string model = displayDbc->getString(
+                    static_cast<uint32_t>(row), displayDbc.column("LeftModel"));
+                std::string texture = displayDbc->getString(
+                    static_cast<uint32_t>(row), displayDbc.column("LeftModelTexture"));
+                if (!model.empty()) {
+                    const size_t dot = model.rfind('.');
+                    if (dot != std::string::npos) model = model.substr(0, dot);
+                    modelPath = "Item\\ObjectComponents\\Weapon\\" + model + ".m2";
                 }
+                if (!texture.empty())
+                    texturePath = "Item\\ObjectComponents\\Weapon\\" + texture + ".blp";
             }
         }
         if (modelPath.empty())

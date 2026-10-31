@@ -51,6 +51,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "core/geoset_rules.hpp"
 #include "pipeline/item_textures.hpp"
 
@@ -100,21 +101,16 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
     auto* charRenderer = renderer->getCharacterRenderer();
     if (!charRenderer) return;
 
-    auto* assetManager = app.getAssetManager();
+    if (!services_.gameTables) return;
+    const pipeline::GameTables& tables = *services_.gameTables;
 
-    // Load ItemDisplayInfo.dbc for geosetGroup lookup
-    std::shared_ptr<pipeline::DBCFile> displayInfoDbc;
-    if (assetManager) {
-        displayInfoDbc = assetManager->loadDBC("ItemDisplayInfo.dbc");
-    }
-    const auto* idiL = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-    const uint32_t geosetGroup1Field = idiL ? (*idiL)["GeosetGroup1"] : 7;
-    const uint32_t geosetGroup2Field = idiL ? (*idiL)["GeosetGroup2"] : 8;
-    const uint32_t geosetGroup3Field = idiL ? (*idiL)["GeosetGroup3"] : 9;
+    const pipeline::RequiredTable displayInfoDbc(tables, "ItemDisplayInfo.dbc", "the player's equipment");
+    const uint32_t geosetGroup1Field = displayInfoDbc.column("GeosetGroup1");
+    const uint32_t geosetGroup2Field = displayInfoDbc.column("GeosetGroup2");
+    const uint32_t geosetGroup3Field = displayInfoDbc.column("GeosetGroup3");
 
     auto getGeosetGroup = [&](uint32_t displayInfoId, uint32_t fieldIdx) -> uint32_t {
-        if (!displayInfoDbc || displayInfoId == 0) return 0;
+        if (displayInfoId == 0) return 0;
         int32_t recIdx = displayInfoDbc->findRecordById(displayInfoId);
         if (recIdx < 0) return 0;
         return displayInfoDbc->getUInt32(static_cast<uint32_t>(recIdx), fieldIdx);
@@ -313,8 +309,7 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
         }
         // A circlet, tiara or crown sits over the hair rather than covering it,
         // and the data says which does what - see core::helmHidesHair.
-        if (auto* assets = app.getAssetManager();
-            assets && core::helmHidesHair(*assets, headDisplayId, genderId)) {
+        if (core::helmHidesHair(tables, headDisplayId, genderId)) {
             for (auto it = geosets.begin(); it != geosets.end();) {
                 if (*it != 0 && (*it / 100) == 0) it = geosets.erase(it);
                 else ++it;
@@ -387,7 +382,7 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
     if (!charRenderer) return;
 
     auto* assetManager = app.getAssetManager();
-    if (!assetManager) return;
+    if (!assetManager || !services_.gameTables) return;
 
     const auto& bodySkinPath = app.getBodySkinPath();
     const auto& underwearPaths = app.getUnderwearPaths();
@@ -398,12 +393,10 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
     // Component directory names indexed by region
 
     // Load ItemDisplayInfo.dbc
-    auto displayInfoDbc = assetManager->loadDBC("ItemDisplayInfo.dbc");
-    if (!displayInfoDbc) return;
-    const auto* idiL = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
+    const pipeline::RequiredTable displayInfoDbc(*services_.gameTables, "ItemDisplayInfo.dbc",
+                                                 "the player's equipment textures");
     uint32_t texRegionFields[8];
-    pipeline::getItemDisplayInfoTextureFields(*displayInfoDbc, idiL, texRegionFields);
+    pipeline::getItemDisplayInfoTextureFields(displayInfoDbc, texRegionFields);
 
     // Collect equipment texture regions from all equipped items
     std::vector<std::pair<int, std::string>> regionLayers;
@@ -478,9 +471,8 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
         if (cloakDisplayId > 0) {
             int32_t recIdx = displayInfoDbc->findRecordById(cloakDisplayId);
             if (recIdx >= 0) {
-                // DBC field 3 = modelTexture_1 (cape texture name)
-                const auto* dispL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-                std::string capeName = displayInfoDbc->getString(static_cast<uint32_t>(recIdx), dispL ? (*dispL)["LeftModelTexture"] : 3);
+                std::string capeName = displayInfoDbc->getString(static_cast<uint32_t>(recIdx),
+                                                                 displayInfoDbc.column("LeftModelTexture"));
                 if (!capeName.empty()) {
                     // This asked for one path only - ObjectComponents, no
                     // suffix - and a cape whose art is filed anywhere else

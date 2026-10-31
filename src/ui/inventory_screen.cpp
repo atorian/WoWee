@@ -9,6 +9,7 @@
 #include "ui/ui_colors.hpp"
 #include "ui/keybinding_manager.hpp"
 #include "game/game_handler.hpp"
+#include "game/game_data.hpp"
 #include "core/application.hpp"
 #include "core/world_loader.hpp"
 #include "rendering/vk_context.hpp"
@@ -105,6 +106,7 @@ VkDescriptorSet InventoryScreen::getItemIcon(uint32_t displayInfoId) {
     // The shared cache, so an item drawn here and on the action bar is
     // uploaded once. See itemIconTexture.
     return itemIconTexture(displayInfoId, assetManager_,
+                           gameHandler_ ? gameHandler_->services().gameData : nullptr,
                            core::Application::getInstance().getWindow());
 }
 

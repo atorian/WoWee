@@ -172,6 +172,7 @@
 #include "pipeline/asset_inventory.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "pipeline/spell_icon_paths.hpp"
 
 #include <SDL3/SDL.h>
@@ -517,6 +518,7 @@ bool Application::initialize() {
     statTables_ = std::make_unique<game::StatTables>(*gameData_);
     gameServices_.statTables = statTables_.get();
     gameServices_.gameData = gameData_.get();
+    if (renderer) renderer->setGameTables(*gameData_);
     gameServices_.assetManager = assetManager.get();
     gameServices_.expansionRegistry = expansionRegistry_.get();
     gameServices_.events = &eventBus_;
@@ -725,9 +727,8 @@ bool Application::initialize() {
 
         // Renderer creation precedes AssetManager creation, so DBC-driven
         // lighting must be initialized here rather than in Renderer::initialize.
-        if (renderer && renderer->getLightingManager() &&
-            !renderer->getLightingManager()->initialize(assetManager.get())) {
-            LOG_WARNING("Lighting manager initialization failed; using fallback lighting");
+        if (renderer && renderer->getLightingManager()) {
+            renderer->getLightingManager()->initialize(*gameData_);
         }
 
         // Offline GPU regression: load the real Dalaran sky without connecting
@@ -865,13 +866,14 @@ bool Application::initialize() {
                     if (const char* weapon = std::getenv("WOWEE_PROBE_WEAPON"); weapon && *weapon) {
                         constexpr uint32_t kRightHand = 1;
                         const auto displayId = static_cast<uint32_t>(std::stoul(weapon));
-                        auto items = assetManager->loadDBC("ItemDisplayInfo.dbc");
-                        const int32_t row = items ? items->findRecordById(displayId) : -1;
+                        const pipeline::RequiredTable items(*gameData_, "ItemDisplayInfo.dbc",
+                                                            "the model probe's weapon");
+                        const int32_t row = items->findRecordById(displayId);
                         if (row < 0) {
                             LOG_ERROR("Model probe: weapon display ", displayId, " is not in ItemDisplayInfo");
                             return false;
                         }
-                        const auto art = pipeline::readItemDisplayArt(*items, static_cast<uint32_t>(row));
+                        const auto art = pipeline::readItemDisplayArt(items, static_cast<uint32_t>(row));
                         const std::string weaponPath = "Item\\ObjectComponents\\Weapon\\" + art.modelFile;
                         pipeline::M2Model weaponModel;
                         if (art.modelFile.empty() ||
@@ -892,7 +894,7 @@ bool Application::initialize() {
                             enchant = static_cast<uint32_t>(std::stoul(e));
                         uint32_t nextEffectModel = 0xFFFF0310;
                         attachEnchantVisuals(
-                            renderer->scene().characters(), *assetManager, instance, kRightHand, enchant,
+                            renderer->scene().characters(), *gameData_, instance, kRightHand, enchant,
                             [&](const std::string& p, pipeline::M2Model& m) {
                                 return pipeline::loadM2WithSkin(*assetManager, p, m);
                             },
@@ -939,12 +941,12 @@ bool Application::initialize() {
 
         // Eagerly load creature display DBC lookups so first spawn doesn't stall
         entitySpawner_ = std::make_unique<EntitySpawner>(
-            renderer.get(), assetManager.get(), gameHandler.get(), &gameServices_,
+            renderer.get(), assetManager.get(), *gameData_, gameHandler.get(), &gameServices_,
             playerView_.get());
         entitySpawner_->initialize();
 
         appearanceComposer_ = std::make_unique<AppearanceComposer>(
-            renderer.get(), playerView_.get(), assetManager.get(), gameHandler.get(),
+            renderer.get(), playerView_.get(), assetManager.get(), *gameData_, gameHandler.get(),
             entitySpawner_.get());
 
         // Wire AppearanceComposer to UI components (Phase A singleton breaking)
@@ -956,6 +958,7 @@ bool Application::initialize() {
             uiServices.window = window.get();
             uiServices.renderer = renderer.get();
             uiServices.assetManager = assetManager.get();
+            uiServices.gameTables = gameData_.get();
             uiServices.gameHandler = gameHandler.get();
             uiServices.expansionRegistry = expansionRegistry_.get();
             uiServices.contacts = contacts_.get();
@@ -1425,35 +1428,22 @@ bool Application::initialize() {
                 // asked for one would have found the table empty and answered
                 // nothing, which is the sort of thing that only shows up when
                 // the tabs happen to be built first.
+                const game::GameData* data = gameData_.get();
                 auto ensureLoaded = std::make_shared<std::function<void()>>(
-                    [spellIconPaths, spellIconIds, loaded, am]() {
+                    [spellIconPaths, spellIconIds, loaded, am, data]() {
                     if (!am || !am->isInitialized() || *loaded) return;
-                    // Initialised, not merely present: loadDBC answers nullptr
-                    // before the assets are up, and latching on that left both
-                    // tables empty for the rest of the session.
+                    // Initialised, not merely present: before the assets are
+                    // up there is nothing to read yet, and latching on that
+                    // left both tables empty for the rest of the session.
                     *loaded = true;
-                    pipeline::loadSpellIconPaths(am, *spellIconPaths);
-                    auto spellDbc = am->loadDBC("Spell.dbc");
-                    const auto* spellL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("Spell") : nullptr;
-                    if (spellDbc && spellDbc->isLoaded()) {
-                        uint32_t fieldCount = spellDbc->getFieldCount();
-                        uint32_t iconField = 133; // WotLK default
-                        uint32_t idField = 0;
-                        if (spellL) {
-                            try {
-                                uint32_t layoutId = (*spellL)["ID"];
-                                uint32_t layoutIcon = (*spellL)["IconID"];
-                                if (layoutId < fieldCount && layoutIcon < fieldCount) {
-                                    iconField = layoutIcon;
-                                    idField = layoutId;
-                                }
-                            } catch (...) {}
-                        }
-                        for (uint32_t i = 0; i < spellDbc->getRecordCount(); i++) {
-                            uint32_t id = spellDbc->getUInt32(i, idField);
-                            uint32_t iconId = spellDbc->getUInt32(i, iconField);
-                            if (id > 0 && iconId > 0) (*spellIconIds)[id] = iconId;
-                        }
+                    pipeline::loadSpellIconPaths(*data, *spellIconPaths);
+                    const pipeline::RequiredTable spellDbc(*data, "Spell.dbc", "spell icons");
+                    const uint32_t idField = spellDbc.column("ID");
+                    const uint32_t iconField = spellDbc.column("IconID");
+                    for (uint32_t i = 0; i < spellDbc->getRecordCount(); i++) {
+                        uint32_t id = spellDbc->getUInt32(i, idField);
+                        uint32_t iconId = spellDbc->getUInt32(i, iconField);
+                        if (id > 0 && iconId > 0) (*spellIconIds)[id] = iconId;
                     }
                 });
 
@@ -1483,24 +1473,23 @@ bool Application::initialize() {
                 auto iconNames = std::make_shared<std::unordered_map<uint32_t, std::string>>();
                 auto loaded    = std::make_shared<bool>(false);
                 auto* am = assetManager.get();
-                gameHandler->setItemIconPathResolver([iconNames, loaded, am](uint32_t displayInfoId) -> std::string {
+                const game::GameData* data = gameData_.get();
+                gameHandler->setItemIconPathResolver([iconNames, loaded, am, data](uint32_t displayInfoId) -> std::string {
                     if (!am || displayInfoId == 0) return {};
                     if (!*loaded && am->isInitialized()) {
-                        // Initialised, not merely present: loadDBC answers
-                        // nullptr before the assets are up, and latching on
+                        // Initialised, not merely present: before the assets
+                        // are up there is nothing to read yet, and latching on
                         // that left this table empty for the session.
                         *loaded = true;
-                        auto dbc = am->loadDBC("ItemDisplayInfo.dbc");
-                        const auto* dispL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-                        if (dbc && dbc->isLoaded()) {
-                            uint32_t iconField = dispL ? (*dispL)["InventoryIcon"] : 5;
-                            for (uint32_t i = 0; i < dbc->getRecordCount(); i++) {
-                                uint32_t id = dbc->getUInt32(i, 0); // field 0 = ID
-                                std::string name = dbc->getString(i, iconField);
-                                if (id > 0 && !name.empty()) (*iconNames)[id] = name;
-                            }
-                            LOG_INFO("Loaded ", iconNames->size(), " item icon names from ItemDisplayInfo.dbc");
+                        const pipeline::RequiredTable dbc(*data, "ItemDisplayInfo.dbc", "item icons");
+                        const uint32_t idField = dbc.column("ID");
+                        const uint32_t iconField = dbc.column("InventoryIcon");
+                        for (uint32_t i = 0; i < dbc->getRecordCount(); i++) {
+                            uint32_t id = dbc->getUInt32(i, idField);
+                            std::string name = dbc->getString(i, iconField);
+                            if (id > 0 && !name.empty()) (*iconNames)[id] = name;
                         }
+                        LOG_INFO("Loaded ", iconNames->size(), " item icon names from ItemDisplayInfo.dbc");
                     }
                     auto it = iconNames->find(displayInfoId);
                     if (it == iconNames->end()) return {};
@@ -1517,64 +1506,53 @@ bool Application::initialize() {
                 auto spellCostMap = std::make_shared<std::unordered_map<uint32_t, SpellCostEntry>>();
                 auto loaded = std::make_shared<bool>(false);
                 auto* am = assetManager.get();
-                gameHandler->setSpellDataResolver([castTimeMap, rangeMap, spellCastIdx, spellRangeIdx, spellCostMap, loaded, am](uint32_t spellId) -> game::GameHandler::SpellDataInfo {
+                const game::GameData* data = gameData_.get();
+                gameHandler->setSpellDataResolver([castTimeMap, rangeMap, spellCastIdx, spellRangeIdx, spellCostMap, loaded, am, data](uint32_t spellId) -> game::GameHandler::SpellDataInfo {
                     if (!am) return {};
                     if (!*loaded && am->isInitialized()) {
-                        // Initialised, not merely present: loadDBC answers
-                        // nullptr before the assets are up, and latching on
+                        // Initialised, not merely present: before the assets
+                        // are up there is nothing to read yet, and latching on
                         // that left this table empty for the session.
                         *loaded = true;
-                        // Load SpellCastTimes.dbc
-                        auto ctDbc = am->loadDBC("SpellCastTimes.dbc");
-                        if (ctDbc && ctDbc->isLoaded()) {
-                            for (uint32_t i = 0; i < ctDbc->getRecordCount(); ++i) {
-                                uint32_t id = ctDbc->getUInt32(i, 0);
-                                int32_t base = static_cast<int32_t>(ctDbc->getUInt32(i, 1));
-                                if (id > 0 && base > 0) (*castTimeMap)[id] = static_cast<uint32_t>(base);
-                            }
+                        constexpr std::string_view kNeededFor = "spells' cast times, ranges and costs";
+                        // SpellCastTimes.dbc: ID, base cast time in ms.
+                        const auto ctDbc = data->table("SpellCastTimes.dbc", 2, kNeededFor);
+                        for (uint32_t i = 0; i < ctDbc->getRecordCount(); ++i) {
+                            uint32_t id = ctDbc->getUInt32(i, 0);
+                            int32_t base = static_cast<int32_t>(ctDbc->getUInt32(i, 1));
+                            if (id > 0 && base > 0) (*castTimeMap)[id] = static_cast<uint32_t>(base);
                         }
-                        // Load SpellRange.dbc
-                        const auto* srL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("SpellRange") : nullptr;
-                        uint32_t minRField = srL ? (*srL)["MinRange"] : 1;
-                        uint32_t maxRField = srL ? (*srL)["MaxRange"] : 4;
-                        auto rDbc = am->loadDBC("SpellRange.dbc");
-                        if (rDbc && rDbc->isLoaded()) {
-                            for (uint32_t i = 0; i < rDbc->getRecordCount(); ++i) {
-                                uint32_t id = rDbc->getUInt32(i, 0);
-                                float minR = rDbc->getFloat(i, minRField);
-                                float maxR = rDbc->getFloat(i, maxRField);
-                                if (id > 0) (*rangeMap)[id] = {minR, maxR};
-                            }
+                        // SpellRange.dbc: ID, then the ranges where the layout puts them.
+                        const pipeline::RequiredTable rDbc(*data, "SpellRange.dbc", kNeededFor);
+                        const uint32_t minRField = rDbc.column("MinRange");
+                        const uint32_t maxRField = rDbc.column("MaxRange");
+                        for (uint32_t i = 0; i < rDbc->getRecordCount(); ++i) {
+                            uint32_t id = rDbc->getUInt32(i, 0);
+                            float minR = rDbc->getFloat(i, minRField);
+                            float maxR = rDbc->getFloat(i, maxRField);
+                            if (id > 0) (*rangeMap)[id] = {minR, maxR};
                         }
-                        // Load Spell.dbc: extract castTimeIndex and rangeIndex per spell
-                        auto sDbc = am->loadDBC("Spell.dbc");
-                        const auto* spL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("Spell") : nullptr;
-                        if (sDbc && sDbc->isLoaded()) {
-                            uint32_t idF = spL ? (*spL)["ID"] : 0;
-                            // From the file's shape - Classic named
-                            // this 15, which is RequiresSpellFocus and zero for
-                            // every spell.
-                            uint32_t ctF = pipeline::detectSpellTimingFields(sDbc.get(), spL)
-                                               .castingTimeIndex;
-                            uint32_t rF  = spL ? (*spL)["RangeIndex"] : 132;
-                            uint32_t ptF = UINT32_MAX, mcF = UINT32_MAX;
-                            if (spL) {
-                                try { ptF = (*spL)["PowerType"]; } catch (...) {}
-                                try { mcF = (*spL)["ManaCost"]; } catch (...) {}
-                            }
-                            uint32_t fc = sDbc->getFieldCount();
-                            for (uint32_t i = 0; i < sDbc->getRecordCount(); ++i) {
-                                uint32_t id = sDbc->getUInt32(i, idF);
-                                if (id == 0) continue;
-                                uint32_t ct = sDbc->getUInt32(i, ctF);
-                                uint32_t ri = sDbc->getUInt32(i, rF);
-                                if (ct > 0) (*spellCastIdx)[id] = ct;
-                                if (ri > 0) (*spellRangeIdx)[id] = ri;
-                                // Extract power cost
-                                uint32_t mc = (mcF < fc) ? sDbc->getUInt32(i, mcF) : 0;
-                                uint8_t  pt = (ptF < fc) ? static_cast<uint8_t>(sDbc->getUInt32(i, ptF)) : 0;
-                                if (mc > 0) (*spellCostMap)[id] = {.manaCost = mc, .powerType = pt};
-                            }
+                        // Spell.dbc: each spell's cast time and range index, and its cost.
+                        const pipeline::RequiredTable sDbc(*data, "Spell.dbc", kNeededFor);
+                        const uint32_t idF = sDbc.column("ID");
+                        // From the file's shape - Classic named this
+                        // 15, which is RequiresSpellFocus and zero for
+                        // every spell.
+                        const uint32_t ctF = pipeline::detectSpellTimingFields(sDbc.get(), &sDbc.layout())
+                                                 .castingTimeIndex;
+                        const uint32_t rF = sDbc.column("RangeIndex");
+                        const uint32_t ptF = sDbc.column("PowerType");
+                        const uint32_t mcF = sDbc.column("ManaCost");
+                        for (uint32_t i = 0; i < sDbc->getRecordCount(); ++i) {
+                            uint32_t id = sDbc->getUInt32(i, idF);
+                            if (id == 0) continue;
+                            uint32_t ct = sDbc->getUInt32(i, ctF);
+                            uint32_t ri = sDbc->getUInt32(i, rF);
+                            if (ct > 0) (*spellCastIdx)[id] = ct;
+                            if (ri > 0) (*spellRangeIdx)[id] = ri;
+                            uint32_t mc = sDbc->getUInt32(i, mcF);
+                            uint8_t pt = static_cast<uint8_t>(sDbc->getUInt32(i, ptF));
+                            if (mc > 0) (*spellCostMap)[id] = {.manaCost = mc, .powerType = pt};
                         }
                         LOG_INFO("SpellDataResolver: loaded ", spellCastIdx->size(), " cast indices, ",
                                  spellRangeIdx->size(), " range indices");
@@ -1606,26 +1584,31 @@ bool Application::initialize() {
                 auto propNames   = std::make_shared<std::unordered_map<int32_t, std::string>>();
                 auto propLoaded  = std::make_shared<bool>(false);
                 auto* amPtr = assetManager.get();
-                gameHandler->setRandomPropertyNameResolver([propNames, propLoaded, amPtr](int32_t id) -> std::string {
+                const game::GameData* data = gameData_.get();
+                gameHandler->setRandomPropertyNameResolver([propNames, propLoaded, amPtr, data](int32_t id) -> std::string {
                     if (!amPtr || id == 0) return {};
-                    // Initialised, not merely present: loadDBC answers nullptr
-                    // before the assets are up, and latching on that left the
-                    // suffix names empty for the rest of the session.
+                    // Initialised, not merely present: before the assets are up
+                    // there is nothing to read yet, and latching on that left
+                    // the suffix names empty for the rest of the session.
                     if (!*propLoaded && amPtr->isInitialized()) {
                         *propLoaded = true;
                         // Both DBCs carry the display name ("of the Bear" / "of Strength") as
                         // the first string column, field 1, across classic/tbc/wotlk.
                         constexpr uint32_t kNameField = 1;
+                        constexpr std::string_view kNeededFor = "the names of items' random bonuses";
                         // ItemRandomProperties.dbc: ID=0, Name=1 (positive IDs)
-                        if (auto dbc = amPtr->loadDBC("ItemRandomProperties.dbc"); dbc && dbc->isLoaded()) {
+                        {
+                            const auto dbc = data->table("ItemRandomProperties.dbc", kNameField + 1, kNeededFor);
                             for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
                                 int32_t rid = static_cast<int32_t>(dbc->getUInt32(r, 0));
                                 std::string name = dbc->getString(r, kNameField);
                                 if (!name.empty() && rid > 0) (*propNames)[rid] = name;
                             }
                         }
-                        // ItemRandomSuffix.dbc: ID=0, Name=1 - keyed as negative IDs
-                        if (auto dbc = amPtr->loadDBC("ItemRandomSuffix.dbc"); dbc && dbc->isLoaded()) {
+                        // ItemRandomSuffix.dbc: ID=0, Name=1 - keyed as negative IDs.
+                        // TBC's; Classic has random properties alone.
+                        if (data->has("ItemRandomSuffix.dbc")) {
+                            const auto dbc = data->table("ItemRandomSuffix.dbc", kNameField + 1, kNeededFor);
                             for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
                                 int32_t rid = static_cast<int32_t>(dbc->getUInt32(r, 0));
                                 std::string name = dbc->getString(r, kNameField);
@@ -1648,24 +1631,25 @@ bool Application::initialize() {
                 auto enchMap   = std::make_shared<std::unordered_map<uint32_t, std::vector<EnchEffect>>>();
                 auto loaded    = std::make_shared<bool>(false);
                 auto* amPtr = assetManager.get();
+                const game::GameData* data = gameData_.get();
                 gameHandler->setRandomStatResolver(
-                    [suffixMap, propMap, enchMap, loaded, amPtr](int32_t id, uint32_t suffixFactor)
+                    [suffixMap, propMap, enchMap, loaded, amPtr, data](int32_t id, uint32_t suffixFactor)
                         -> std::vector<game::GameHandler::RandomStatBonus> {
                     std::vector<game::GameHandler::RandomStatBonus> out;
                     if (!amPtr || id == 0) return out;
                     if (!*loaded && amPtr->isInitialized()) {
-                        // Initialised, not merely present: loadDBC answers
-                        // nullptr before the assets are up, and latching on
+                        // Initialised, not merely present: before the assets
+                        // are up there is nothing to read yet, and latching on
                         // that left this table empty for the session.
                         *loaded = true;
+                        constexpr std::string_view kNeededFor = "the stats of items' random bonuses";
                         // SpellItemEnchantment: enchId -> up to 3 (type, statArg, minAmount).
                         // Arg (stat type) is the 3 fields before Name; the effect-type array
                         // precedes the amount block(s) - 2 blocks (Min+Max) on TBC/WotLK, 1 on Vanilla.
-                        if (auto dbc = amPtr->loadDBC("SpellItemEnchantment.dbc"); dbc && dbc->isLoaded()) {
-                            const auto* sieL = pipeline::getActiveDBCLayout()
-                                ? pipeline::getActiveDBCLayout()->getLayout("SpellItemEnchantment") : nullptr;
+                        {
+                            const pipeline::RequiredTable dbc(*data, "SpellItemEnchantment.dbc", kNeededFor);
                             const uint32_t fc = dbc->getFieldCount();
-                            const uint32_t nameF = pipeline::detectEnchantmentNameField(dbc.get(), sieL);
+                            const uint32_t nameF = pipeline::detectEnchantmentNameField(dbc.get(), &dbc.layout());
                             if (nameF >= 12 && nameF < fc) {
                                 const uint32_t argBase = nameF - 3;
                                 const bool singleAmount = fc < 34;  // Vanilla: no separate Max array
@@ -1687,36 +1671,40 @@ bool Application::initialize() {
                             }
                         }
                         // ItemRandomSuffix: enchant array at field 19, AllocationPct follows; N=(fc-19)/2.
-                        if (auto dbc = amPtr->loadDBC("ItemRandomSuffix.dbc"); dbc && dbc->isLoaded()) {
+                        // TBC's; Classic has random properties alone.
+                        if (data->has("ItemRandomSuffix.dbc")) {
+                            const auto dbc = data->table("ItemRandomSuffix.dbc", 22, kNeededFor);
                             const uint32_t fc = dbc->getFieldCount();
-                            if (fc > 21 && (fc - 19u) % 2u == 0u) {
-                                const uint32_t n = (fc - 19u) / 2u;
-                                for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
-                                    int32_t sid = static_cast<int32_t>(dbc->getUInt32(r, 0));
-                                    if (sid <= 0) continue;
-                                    std::vector<std::pair<uint32_t,uint32_t>> ens;
-                                    for (uint32_t k = 0; k < n; ++k) {
-                                        uint32_t ench = dbc->getUInt32(r, 19u + k);
-                                        uint32_t pct  = dbc->getUInt32(r, 19u + n + k);
-                                        if (ench != 0) ens.emplace_back(ench, pct);
-                                    }
-                                    if (!ens.empty()) (*suffixMap)[sid] = std::move(ens);
+                            if ((fc - 19u) % 2u != 0u) {
+                                data->stop("ItemRandomSuffix.dbc", kNeededFor,
+                                           "is " + std::to_string(fc) +
+                                               " columns wide, which is not an enchant list and its shares");
+                            }
+                            const uint32_t n = (fc - 19u) / 2u;
+                            for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+                                int32_t sid = static_cast<int32_t>(dbc->getUInt32(r, 0));
+                                if (sid <= 0) continue;
+                                std::vector<std::pair<uint32_t,uint32_t>> ens;
+                                for (uint32_t k = 0; k < n; ++k) {
+                                    uint32_t ench = dbc->getUInt32(r, 19u + k);
+                                    uint32_t pct  = dbc->getUInt32(r, 19u + n + k);
+                                    if (ench != 0) ens.emplace_back(ench, pct);
                                 }
+                                if (!ens.empty()) (*suffixMap)[sid] = std::move(ens);
                             }
                         }
                         // ItemRandomProperties: up to 5 enchant ids at fields 2..6 (fixed amount).
-                        if (auto dbc = amPtr->loadDBC("ItemRandomProperties.dbc"); dbc && dbc->isLoaded()) {
-                            if (dbc->getFieldCount() > 6) {
-                                for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
-                                    int32_t pid = static_cast<int32_t>(dbc->getUInt32(r, 0));
-                                    if (pid <= 0) continue;
-                                    std::vector<uint32_t> ens;
-                                    for (uint32_t k = 2; k <= 6; ++k) {
-                                        uint32_t ench = dbc->getUInt32(r, k);
-                                        if (ench != 0) ens.push_back(ench);
-                                    }
-                                    if (!ens.empty()) (*propMap)[pid] = std::move(ens);
+                        {
+                            const auto dbc = data->table("ItemRandomProperties.dbc", 7, kNeededFor);
+                            for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+                                int32_t pid = static_cast<int32_t>(dbc->getUInt32(r, 0));
+                                if (pid <= 0) continue;
+                                std::vector<uint32_t> ens;
+                                for (uint32_t k = 2; k <= 6; ++k) {
+                                    uint32_t ench = dbc->getUInt32(r, k);
+                                    if (ench != 0) ens.push_back(ench);
                                 }
+                                if (!ens.empty()) (*propMap)[pid] = std::move(ens);
                             }
                         }
                     }
@@ -1750,7 +1738,7 @@ bool Application::initialize() {
 
         // Initialize world loader (handles terrain streaming, world preload, map transitions)
         worldLoader_ = std::make_unique<WorldLoader>(
-            currentPhase_, renderer.get(), assetManager.get());
+            currentPhase_, renderer.get(), assetManager.get(), *gameData_);
 
         // Re-wire UIServices now that all services (addonCatalog_, worldLoader_) are available
         if (uiManager) {
@@ -1758,6 +1746,7 @@ bool Application::initialize() {
             uiServices.window = window.get();
             uiServices.renderer = renderer.get();
             uiServices.assetManager = assetManager.get();
+            uiServices.gameTables = gameData_.get();
             uiServices.gameHandler = gameHandler.get();
             uiServices.expansionRegistry = expansionRegistry_.get();
             uiServices.contacts = contacts_.get();
@@ -4293,7 +4282,7 @@ void Application::onWorldRenderersReady() {
     }
     if (!worldMap_ && assetManager) {
         auto map = std::make_shared<rendering::WorldMap>();
-        if (map->initialize(renderer->getVkContext(), assetManager.get())) {
+        if (map->initialize(renderer->getVkContext(), assetManager.get(), *gameData_)) {
             worldMap_ = std::move(map);
             renderer->registerComposite(worldMap_);
         } else {
@@ -4521,11 +4510,11 @@ void Application::prepareFrame() {
             }
             std::array<uint32_t, 19> equipment{};
             std::array<uint8_t, 19> types{};
-            if (auto dbc = assetManager->loadDBC("ItemDisplayInfo.dbc")) {
-                const auto* layout = pipeline::getActiveDBCLayout()
-                    ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
+            {
+                const pipeline::RequiredTable dbc(*gameData_, "ItemDisplayInfo.dbc",
+                                                  "the entity stream probe's equipment");
                 uint32_t fields[8];
-                pipeline::getItemDisplayInfoTextureFields(*dbc, layout, fields);
+                pipeline::getItemDisplayInfoTextureFields(dbc, fields);
                 for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
                     const std::string torso = dbc->getString(row, fields[3]);
                     if (!torso.empty() && !pipeline::resolveItemRegionTexture(
@@ -4536,7 +4525,7 @@ void Application::prepareFrame() {
                     }
                 }
                 for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
-                    const auto art = pipeline::readItemDisplayArt(*dbc, row);
+                    const auto art = pipeline::readItemDisplayArt(dbc, row);
                     if (!art.modelFile.empty() && assetManager->fileExists(
                             "Item\\ObjectComponents\\Weapon\\" + art.modelFile)) {
                         equipment[15] = dbc->getUInt32(row, 0);
@@ -4555,7 +4544,9 @@ void Application::prepareFrame() {
             if (const char* enchant = std::getenv("WOWEE_PROBE_ENCHANT"); enchant && *enchant)
                 fixtureEnchants[15] = static_cast<uint32_t>(std::stoul(enchant));
             if (expanded) {
-                if (auto dbc = assetManager->loadDBC("CreatureDisplayInfo.dbc")) {
+                {
+                    const auto dbc = gameData_->table("CreatureDisplayInfo.dbc", 1,
+                                                      "the entity stream probe's mount");
                     for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
                         const auto id = dbc->getUInt32(row, 0);
                         const auto path = entitySpawner_->getModelPathForDisplayId(id);
@@ -6001,7 +5992,7 @@ void Application::setupUICallbacks() {
     // ── World entry, unstuck, hearthstone, bind point ──
     worldEntryCallbacks_ = std::make_unique<WorldEntryCallbackHandler>(
         renderer.get(), *playerView_, *gameHandler, worldLoader_.get(), entitySpawner_.get(),
-        assetManager.get(), currentPhase_);
+        assetManager.get(), *gameData_, currentPhase_);
     worldEntryCallbacks_->setupCallbacks();
 
     // ── Entity spawn/despawn (creatures, players, game objects) ──
@@ -6034,7 +6025,7 @@ void Application::setupUICallbacks() {
 
     // ── Audio: music, sound effects, level-up, achievement, LFG ──
     audioCallbacks_ = std::make_unique<AudioCallbackHandler>(
-        *assetManager, audioCoordinator_.get(), renderer.get(), playerView_.get(),
+        *gameData_, audioCoordinator_.get(), renderer.get(), playerView_.get(),
         uiManager.get(), *gameHandler);
     audioCallbacks_->setupCallbacks();
 

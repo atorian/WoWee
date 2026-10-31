@@ -5,9 +5,8 @@
 #include "ui/ui_colors.hpp"
 #include "ui/inventory_screen.hpp"
 #include "game/game_handler.hpp"
-#include "pipeline/asset_manager.hpp"
-#include "pipeline/dbc_loader.hpp"
-#include "pipeline/dbc_layout.hpp"
+#include "game/game_data.hpp"
+#include "ui/item_tables.hpp"
 #include <imgui.h>
 #include <cstring>
 #include <unordered_map>
@@ -18,11 +17,11 @@ namespace wowee { namespace ui {
 void ItemTooltipRenderer::render(
     uint32_t itemEntry,
     game::GameHandler& gameHandler,
-    InventoryScreen& inventoryScreen,
-    pipeline::AssetManager* assetMgr)
+    InventoryScreen& inventoryScreen)
 {
     const auto* info = gameHandler.inventory().getItemInfo(itemEntry);
     if (!info || !info->valid) return;
+    const pipeline::GameTables& tables = *gameHandler.services().gameData;
 
     auto findComparableEquipped = [&](uint8_t inventoryType) -> const game::ItemSlot* {
         // The same mapping the bags use, from beside the enum that names it.
@@ -147,24 +146,7 @@ void ItemTooltipRenderer::render(
             }
         }
         if (hasSocket && info->socketBonus != 0) {
-            static std::unordered_map<uint32_t, std::string> s_enchantNames;
-            static bool s_enchantNamesLoaded = false;
-            if (!s_enchantNamesLoaded && assetMgr && assetMgr->isInitialized()) {
-                s_enchantNamesLoaded = true;
-                auto dbc = assetMgr->loadDBC("SpellItemEnchantment.dbc");
-                if (dbc && dbc->isLoaded()) {
-                    const auto* lay = pipeline::getActiveDBCLayout()
-                        ? pipeline::getActiveDBCLayout()->getLayout("SpellItemEnchantment") : nullptr;
-                    uint32_t nameField = pipeline::detectEnchantmentNameField(dbc.get(), lay);
-                    uint32_t fc = dbc->getFieldCount();
-                    for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
-                        uint32_t eid = dbc->getUInt32(r, 0);
-                        if (eid == 0 || nameField >= fc) continue;
-                        std::string ename = dbc->getString(r, nameField);
-                        if (!ename.empty()) s_enchantNames[eid] = std::move(ename);
-                    }
-                }
-            }
+            const auto& s_enchantNames = enchantmentNames(tables);
             auto enchIt = s_enchantNames.find(info->socketBonus);
             if (enchIt != s_enchantNames.end())
                 ImGui::TextColored(colors::kSocketGreen, "Socket Bonus: %s", enchIt->second.c_str());
@@ -174,46 +156,12 @@ void ItemTooltipRenderer::render(
     }
     // Item set membership
     if (info->itemSetId != 0) {
-        struct SetEntry {
-            std::string name;
-            std::array<uint32_t, 10> itemIds{};
-            std::array<uint32_t, 10> spellIds{};
-            std::array<uint32_t, 10> thresholds{};
-        };
-        static std::unordered_map<uint32_t, SetEntry> s_setData;
-        static bool s_setDataLoaded = false;
-        if (!s_setDataLoaded && assetMgr && assetMgr->isInitialized()) {
-            s_setDataLoaded = true;
-            auto dbc = assetMgr->loadDBC("ItemSet.dbc");
-            if (dbc && dbc->isLoaded()) {
-                const auto* layout = pipeline::getActiveDBCLayout()
-                    ? pipeline::getActiveDBCLayout()->getLayout("ItemSet") : nullptr;
-                auto lf = [&](const char* k, uint32_t def) -> uint32_t {
-                    return layout ? (*layout)[k] : def;
-                };
-                uint32_t idF = lf("ID", 0), nameF = lf("Name", 1);
-                const auto& itemKeys = ui::kItemSetItemKeys;
-                const auto& spellKeys = ui::kItemSetSpellKeys;
-                const auto& thrKeys = ui::kItemSetThresholdKeys;
-                for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
-                    uint32_t id = dbc->getUInt32(r, idF);
-                    if (!id) continue;
-                    SetEntry e;
-                    e.name = dbc->getString(r, nameF);
-                    for (int i = 0; i < 10; ++i) {
-                        e.itemIds[i]    = dbc->getUInt32(r, layout ? (*layout)[itemKeys[i]]  : uint32_t(18 + i));
-                        e.spellIds[i]   = dbc->getUInt32(r, layout ? (*layout)[spellKeys[i]] : uint32_t(28 + i));
-                        e.thresholds[i] = dbc->getUInt32(r, layout ? (*layout)[thrKeys[i]]   : uint32_t(38 + i));
-                    }
-                    s_setData[id] = std::move(e);
-                }
-            }
-        }
+        const auto& s_setData = itemSets(tables);
         ImGui::Spacing();
         const auto& inv = gameHandler.inventory().items();
         auto setIt = s_setData.find(info->itemSetId);
         if (setIt != s_setData.end()) {
-            const SetEntry& se = setIt->second;
+            const ItemSetData& se = setIt->second;
             int equipped = 0, total = 0;
             for (int i = 0; i < 10; ++i) {
                 if (se.itemIds[i] == 0) continue;
@@ -265,24 +213,7 @@ void ItemTooltipRenderer::render(
         ImGui::TextDisabled("Requires Level %u", info->requiredLevel);
     // Required skill
     if (info->requiredSkill != 0 && info->requiredSkillRank > 0) {
-        static std::unordered_map<uint32_t, std::string> s_skillNames;
-        static bool s_skillNamesLoaded = false;
-        if (!s_skillNamesLoaded && assetMgr && assetMgr->isInitialized()) {
-            s_skillNamesLoaded = true;
-            auto dbc = assetMgr->loadDBC("SkillLine.dbc");
-            if (dbc && dbc->isLoaded()) {
-                const auto* layout = pipeline::getActiveDBCLayout()
-                    ? pipeline::getActiveDBCLayout()->getLayout("SkillLine") : nullptr;
-                uint32_t idF   = layout ? (*layout)["ID"]   : 0u;
-                uint32_t nameF = layout ? (*layout)["Name"] : 2u;
-                for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
-                    uint32_t sid = dbc->getUInt32(r, idF);
-                    if (!sid) continue;
-                    std::string sname = dbc->getString(r, nameF);
-                    if (!sname.empty()) s_skillNames[sid] = std::move(sname);
-                }
-            }
-        }
+        const auto& s_skillNames = skillLineNames(tables);
         uint32_t playerSkillVal = 0;
         const auto& skills = gameHandler.spells().playerSkills();
         auto skPit = skills.find(info->requiredSkill);
@@ -297,24 +228,7 @@ void ItemTooltipRenderer::render(
     }
     // Required reputation
     if (info->requiredReputationFaction != 0 && info->requiredReputationRank > 0) {
-        static std::unordered_map<uint32_t, std::string> s_factionNames;
-        static bool s_factionNamesLoaded = false;
-        if (!s_factionNamesLoaded && assetMgr && assetMgr->isInitialized()) {
-            s_factionNamesLoaded = true;
-            auto dbc = assetMgr->loadDBC("Faction.dbc");
-            if (dbc && dbc->isLoaded()) {
-                const auto* layout = pipeline::getActiveDBCLayout()
-                    ? pipeline::getActiveDBCLayout()->getLayout("Faction") : nullptr;
-                uint32_t idF   = layout ? (*layout)["ID"]   : 0u;
-                uint32_t nameF = layout ? (*layout)["Name"] : 20u;
-                for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
-                    uint32_t fid = dbc->getUInt32(r, idF);
-                    if (!fid) continue;
-                    std::string fname = dbc->getString(r, nameF);
-                    if (!fname.empty()) s_factionNames[fid] = std::move(fname);
-                }
-            }
-        }
+        const auto& s_factionNames = factionNames(tables);
         const char* rankName = game::reputationRankName(info->requiredReputationRank);
         auto fIt = s_factionNames.find(info->requiredReputationFaction);
         ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 0.75f), "Requires %s with %s",

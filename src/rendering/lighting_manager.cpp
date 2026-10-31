@@ -8,9 +8,8 @@
 #include "rendering/light_volume_order.hpp"
 #include "rendering/sky_celestial.hpp"
 #include <glm/gtc/constants.hpp>
-#include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
-#include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "core/logger.hpp"
 #include <algorithm>
 #include <array>
@@ -45,25 +44,17 @@ LightingManager::LightingManager() {
 LightingManager::~LightingManager() {
 }
 
-bool LightingManager::initialize(pipeline::AssetManager* assetManager,
+void LightingManager::initialize(const pipeline::GameTables& tables,
                                  const std::string& atmospherePath) {
-    if (!assetManager) {
-        LOG_ERROR("LightingManager::initialize: null AssetManager");
-        return false;
-    }
-
-
-    // Load DBCs (non-fatal if missing, will use fallback lighting)
-    loadLightDbc(assetManager);
-    loadLightParamsDbc(assetManager);
-    loadLightSkyboxDbc(assetManager);
-    loadLightBandDbcs(assetManager);
+    loadLightDbc(tables);
+    loadLightParamsDbc(tables);
+    loadLightSkyboxDbc(tables);
+    loadLightBandDbcs(tables);
 
     loadAtmosphereProfiles(atmospherePath);
 
     initialized_ = true;
     LOG_INFO("LightingManager initialized: ", lightVolumesByMap_.size(), " maps with lighting");
-    return true;
 }
 
 void LightingManager::loadAtmosphereProfiles(const std::string& path) {
@@ -138,18 +129,8 @@ void LightingManager::loadAtmosphereProfiles(const std::string& path) {
              zoneAtmosphereProfiles_.size(), " zone overrides from ", path);
 }
 
-bool LightingManager::loadLightDbc(pipeline::AssetManager* assetManager) {
-    auto dbcData = assetManager->readFile("DBFilesClient\\Light.dbc");
-    if (dbcData.empty()) {
-        LOG_WARNING("Light.dbc not found, using fallback lighting");
-        return false;
-    }
-
-    auto dbc = std::make_unique<pipeline::DBCFile>();
-    if (!dbc->load(dbcData)) {
-        LOG_ERROR("Failed to load Light.dbc");
-        return false;
-    }
+void LightingManager::loadLightDbc(const pipeline::GameTables& tables) {
+    const pipeline::RequiredTable dbc(tables, "Light.dbc", "the sky's light volumes");
 
     uint32_t recordCount = dbc->getRecordCount();
     LOG_INFO("Loading Light.dbc: ", recordCount, " light volumes");
@@ -175,36 +156,43 @@ bool LightingManager::loadLightDbc(pipeline::AssetManager* assetManager) {
     // the fix, so a dbc_layouts.json copied before it reports the missing
     // fields instead of carrying the old columns on.
 
-    const auto* activeLayout = pipeline::getActiveDBCLayout();
-    const auto* lL = activeLayout ? activeLayout->getLayout("Light") : nullptr;
+    const uint32_t idCol = dbc.column("ID");
+    const uint32_t mapCol = dbc.column("MapID");
+    const uint32_t xCol = dbc.column("X");
+    const uint32_t yCol = dbc.column("Y");
+    const uint32_t zCol = dbc.column("Z");
+    const uint32_t innerCol = dbc.column("InnerRadius");
+    const uint32_t outerCol = dbc.column("OuterRadius");
+    const uint32_t clearCol = dbc.column("LightParamsID");
+    const uint32_t clearWaterCol = dbc.column("LightParamsIDClearUnderwater");
+    const uint32_t stormCol = dbc.column("LightParamsIDStorm");
+    const uint32_t stormWaterCol = dbc.column("LightParamsIDStormUnderwater");
 
     for (uint32_t i = 0; i < recordCount; ++i) {
         LightVolume volume;
-        volume.lightId = dbc->getUInt32(i, lL ? (*lL)["ID"] : 0);
-        volume.mapId = dbc->getUInt32(i, lL ? (*lL)["MapID"] : 1);
+        volume.lightId = dbc->getUInt32(i, idCol);
+        volume.mapId = dbc->getUInt32(i, mapCol);
 
         // Into world space: thirty-sixths of a yard on the tile grid's axes,
         // which are mirrored and swapped against the world's. Checked against
         // six zones whose world coordinates are known - Tirisfal, Undercity,
         // Stormwind, Ironforge, Westfall and Booty Bay - each of which lands
         // inside a volume only under this mapping.
-        const float dbcX = dbc->getFloat(i, lL ? (*lL)["X"] : 2);
-        const float dbcZ = dbc->getFloat(i, lL ? (*lL)["Z"] : 3);
-        const float dbcY = dbc->getFloat(i, lL ? (*lL)["Y"] : 4);
+        const float dbcX = dbc->getFloat(i, xCol);
+        const float dbcZ = dbc->getFloat(i, zCol);
+        const float dbcY = dbc->getFloat(i, yCol);
         volume.position = lightPositionToWorld(dbcX, dbcY, dbcZ);
 
         volume.innerRadius =
-            dbc->getFloat(i, lL ? (*lL)["InnerRadius"] : 5) / LIGHT_COORD_UNITS_PER_YARD;
+            dbc->getFloat(i, innerCol) / LIGHT_COORD_UNITS_PER_YARD;
         volume.outerRadius =
-            dbc->getFloat(i, lL ? (*lL)["OuterRadius"] : 6) / LIGHT_COORD_UNITS_PER_YARD;
+            dbc->getFloat(i, outerCol) / LIGHT_COORD_UNITS_PER_YARD;
 
         // LightParams IDs for different conditions
-        volume.lightParamsId = dbc->getUInt32(i, lL ? (*lL)["LightParamsID"] : 7);
-        volume.lightParamsIdUnderwater =
-            dbc->getUInt32(i, lL ? (*lL)["LightParamsIDClearUnderwater"] : 8);
-        volume.lightParamsIdStorm = dbc->getUInt32(i, lL ? (*lL)["LightParamsIDStorm"] : 9);
-        volume.lightParamsIdStormUnderwater =
-            dbc->getUInt32(i, lL ? (*lL)["LightParamsIDStormUnderwater"] : 10);
+        volume.lightParamsId = dbc->getUInt32(i, clearCol);
+        volume.lightParamsIdUnderwater = dbc->getUInt32(i, clearWaterCol);
+        volume.lightParamsIdStorm = dbc->getUInt32(i, stormCol);
+        volume.lightParamsIdStormUnderwater = dbc->getUInt32(i, stormWaterCol);
 
         // A row at the origin is the map's global light, not a volume: the
         // light the map has everywhere, which the volumes are laid over and
@@ -226,163 +214,126 @@ bool LightingManager::loadLightDbc(pipeline::AssetManager* assetManager) {
 
     LOG_INFO("Loaded ", lightVolumesByMap_.size(), " maps with lighting volumes, ",
              globalLightByMap_.size(), " with a global light");
-    return true;
 }
 
-bool LightingManager::loadLightParamsDbc(pipeline::AssetManager* assetManager) {
-    auto dbcData = assetManager->readFile("DBFilesClient\\LightParams.dbc");
-    if (dbcData.empty()) {
-        LOG_WARNING("LightParams.dbc not found");
-        return false;
-    }
-
-    auto dbc = std::make_unique<pipeline::DBCFile>();
-    if (!dbc->load(dbcData)) {
-        LOG_ERROR("Failed to load LightParams.dbc");
-        return false;
-    }
+void LightingManager::loadLightParamsDbc(const pipeline::GameTables& tables) {
+    const pipeline::RequiredTable dbc(tables, "LightParams.dbc", "the sky's light profiles");
 
     uint32_t recordCount = dbc->getRecordCount();
     LOG_INFO("Loaded LightParams.dbc: ", recordCount, " profiles");
 
     // Create profile entries (will be populated by band loading)
-    const auto* lpL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("LightParams") : nullptr;
+    const uint32_t idCol = dbc.column("LightParamsID");
+    const uint32_t skyboxCol = dbc.column("LightSkyboxID");
     for (uint32_t i = 0; i < recordCount; ++i) {
-        uint32_t paramId = dbc->getUInt32(i, lpL ? (*lpL)["LightParamsID"] : 0);
+        uint32_t paramId = dbc->getUInt32(i, idCol);
         LightParamsProfile profile;
         profile.lightParamsId = paramId;
-        if (dbc->getFieldCount() > 2) {
-            profile.lightSkyboxId = dbc->getUInt32(i, 2);
-        }
+        profile.lightSkyboxId = dbc->getUInt32(i, skyboxCol);
         lightParamsProfiles_[paramId] = profile;
     }
-
-    return true;
 }
 
-bool LightingManager::loadLightSkyboxDbc(pipeline::AssetManager* assetManager) {
-    auto dbcData = assetManager->readFile("DBFilesClient\\LightSkybox.dbc");
-    if (dbcData.empty()) {
-        LOG_WARNING("LightSkybox.dbc not found");
-        return false;
-    }
+void LightingManager::loadLightSkyboxDbc(const pipeline::GameTables& tables) {
+    const pipeline::RequiredTable dbc(tables, "LightSkybox.dbc", "the skies drawn as models");
 
-    pipeline::DBCFile dbc;
-    if (!dbc.load(dbcData) || dbc.getFieldCount() < 2) {
-        LOG_ERROR("Failed to load LightSkybox.dbc");
-        return false;
-    }
-
-    // ID, model path, flags. The flags column is WotLK's; a file without it
-    // reads as every sky standing in for the client's own.
-    const bool hasFlags = dbc.getFieldCount() > 2;
+    // ID, model path, flags. The flags column is WotLK's; an expansion whose
+    // file has none draws every sky standing in for the client's own.
+    const uint32_t idCol = dbc.column("ID");
+    const uint32_t pathCol = dbc.column("Path");
+    const uint32_t flagsCol = dbc.optionalColumn("Flags");
+    const bool hasFlags = flagsCol != pipeline::RequiredTable::kAbsent;
     lightSkyboxes_.clear();
     size_t combining = 0;
-    for (uint32_t i = 0; i < dbc.getRecordCount(); ++i) {
-        const uint32_t id = dbc.getUInt32(i, 0);
-        std::string path = dbc.getString(i, 1);
+    for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+        const uint32_t id = dbc->getUInt32(i, idCol);
+        std::string path = dbc->getString(i, pathCol);
         if (id == 0 || path.empty()) continue;
-        const uint32_t flags = hasFlags ? dbc.getUInt32(i, 2) : 0;
+        const uint32_t flags = hasFlags ? dbc->getUInt32(i, flagsCol) : 0;
         if (flags & LIGHT_SKYBOX_COMBINE_PROCEDURAL) ++combining;
         lightSkyboxes_[id] = {.path = std::move(path), .flags = flags};
     }
     LOG_INFO("Loaded LightSkybox.dbc: ", lightSkyboxes_.size(), " model paths, ", combining,
              " drawn over the client's own sky", hasFlags ? "" : " (no flags column)");
-    return !lightSkyboxes_.empty();
 }
 
-bool LightingManager::loadLightBandDbcs(pipeline::AssetManager* assetManager) {
-    // Load LightIntBand.dbc for RGB color curves (18 channels per LightParams)
-    auto intBandData = assetManager->readFile("DBFilesClient\\LightIntBand.dbc");
-    if (!intBandData.empty()) {
-        auto dbc = std::make_unique<pipeline::DBCFile>();
-        if (dbc->load(intBandData)) {
-            LOG_INFO("Loaded LightIntBand.dbc: ", dbc->getRecordCount(), " color bands");
+void LightingManager::loadLightBandDbcs(const pipeline::GameTables& tables) {
+    // Each band is ID, block index, keyframe count, 16 time keys, 16 values.
+    // Block index = LightParamsID * channels + channel.
+    struct BandColumns {
+        uint32_t block, count, time0, value0;
+    };
+    const auto columnsOf = [](const pipeline::RequiredTable& dbc) {
+        return BandColumns{.block = dbc.column("BlockIndex"),
+                           .count = dbc.column("NumKeyframes"),
+                           .time0 = dbc.column("TimeKey0", 16),
+                           .value0 = dbc.column("Value0", 16)};
+    };
 
-            // Parse int bands
-            // Structure: ID, Entry (block index), NumValues, Time[16], Color[16]
-            // Block index = LightParamsID * 18 + channel
-            const auto* libL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("LightIntBand") : nullptr;
-            for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-                const uint32_t blockIndex =
-                    dbc->getUInt32(i, libL ? (*libL)["BlockIndex"] : 0);
-                const LightBandSlot slot =
-                    lightBandSlot(blockIndex, LIGHT_INT_CHANNELS);
-                if (!slot.valid) continue;
+    // LightIntBand.dbc: RGB colour curves, 18 channels per LightParams.
+    {
+        const pipeline::RequiredTable dbc(tables, "LightIntBand.dbc", "the sky's colour curves");
+        LOG_INFO("Loaded LightIntBand.dbc: ", dbc->getRecordCount(), " color bands");
+        const BandColumns col = columnsOf(dbc);
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            const LightBandSlot slot = lightBandSlot(dbc->getUInt32(i, col.block), LIGHT_INT_CHANNELS);
+            if (!slot.valid) continue;
 
-                auto it = lightParamsProfiles_.find(slot.lightParamsId);
-                if (it == lightParamsProfiles_.end()) continue;
+            auto it = lightParamsProfiles_.find(slot.lightParamsId);
+            if (it == lightParamsProfiles_.end()) continue;
 
-                const uint32_t channelIndex = slot.channel;
-                if (channelIndex >= LightParamsProfile::COLOR_CHANNEL_COUNT) continue;
+            const uint32_t channelIndex = slot.channel;
+            if (channelIndex >= LightParamsProfile::COLOR_CHANNEL_COUNT) continue;
 
-                ColorBand& band = it->second.colorBands[channelIndex];
-                band.numKeyframes = dbc->getUInt32(i, libL ? (*libL)["NumKeyframes"] : 1);
-                if (band.numKeyframes > 16) band.numKeyframes = 16;
+            ColorBand& band = it->second.colorBands[channelIndex];
+            band.numKeyframes = dbc->getUInt32(i, col.count);
+            if (band.numKeyframes > 16) band.numKeyframes = 16;
 
-                // Read time keys (field 3-18) - stored as uint16 half-minutes
-                uint32_t timeKeyBase = libL ? (*libL)["TimeKey0"] : 2;
-                for (uint8_t k = 0; k < band.numKeyframes && k < 16; ++k) {
-                    uint32_t timeValue = dbc->getUInt32(i, timeKeyBase + k);
-                    band.times[k] = static_cast<uint16_t>(timeValue % kHalfMinutesPerDay);  // Clamp to valid range
-                }
+            // Time keys are half-minutes.
+            for (uint8_t k = 0; k < band.numKeyframes && k < 16; ++k) {
+                uint32_t timeValue = dbc->getUInt32(i, col.time0 + k);
+                band.times[k] = static_cast<uint16_t>(timeValue % kHalfMinutesPerDay);  // Clamp to valid range
+            }
 
-                // Read color values (field 19-34) - stored as BGRA packed uint32
-                uint32_t valueBase = libL ? (*libL)["Value0"] : 18;
-                for (uint8_t k = 0; k < band.numKeyframes && k < 16; ++k) {
-                    uint32_t colorBGRA = dbc->getUInt32(i, valueBase + k);
-                    band.colors[k] = dbcColorToVec3(colorBGRA);
-                }
+            // Colours are BGRA packed into a uint32.
+            for (uint8_t k = 0; k < band.numKeyframes && k < 16; ++k) {
+                uint32_t colorBGRA = dbc->getUInt32(i, col.value0 + k);
+                band.colors[k] = dbcColorToVec3(colorBGRA);
             }
         }
     }
 
-    // Load LightFloatBand.dbc for fog/intensity curves (6 channels per LightParams)
-    auto floatBandData = assetManager->readFile("DBFilesClient\\LightFloatBand.dbc");
-    if (!floatBandData.empty()) {
-        auto dbc = std::make_unique<pipeline::DBCFile>();
-        if (dbc->load(floatBandData)) {
-            LOG_INFO("Loaded LightFloatBand.dbc: ", dbc->getRecordCount(), " float bands");
+    // LightFloatBand.dbc: fog and intensity curves, 6 channels per LightParams.
+    {
+        const pipeline::RequiredTable dbc(tables, "LightFloatBand.dbc", "the sky's fog curves");
+        LOG_INFO("Loaded LightFloatBand.dbc: ", dbc->getRecordCount(), " float bands");
+        const BandColumns col = columnsOf(dbc);
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            const LightBandSlot slot = lightBandSlot(dbc->getUInt32(i, col.block), LIGHT_FLOAT_CHANNELS);
+            if (!slot.valid) continue;
 
-            // Parse float bands
-            // Structure: ID, Entry (block index), NumValues, Time[16], Value[16]
-            // Block index = LightParamsID * 6 + channel
-            const auto* lfbL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("LightFloatBand") : nullptr;
-            for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-                const uint32_t blockIndex =
-                    dbc->getUInt32(i, lfbL ? (*lfbL)["BlockIndex"] : 0);
-                const LightBandSlot slot =
-                    lightBandSlot(blockIndex, LIGHT_FLOAT_CHANNELS);
-                if (!slot.valid) continue;
+            auto it = lightParamsProfiles_.find(slot.lightParamsId);
+            if (it == lightParamsProfiles_.end()) continue;
 
-                auto it = lightParamsProfiles_.find(slot.lightParamsId);
-                if (it == lightParamsProfiles_.end()) continue;
+            const uint32_t channelIndex = slot.channel;
+            if (channelIndex >= LightParamsProfile::FLOAT_CHANNEL_COUNT) continue;
 
-                const uint32_t channelIndex = slot.channel;
-                if (channelIndex >= LightParamsProfile::FLOAT_CHANNEL_COUNT) continue;
+            FloatBand& band = it->second.floatBands[channelIndex];
+            band.numKeyframes = dbc->getUInt32(i, col.count);
+            if (band.numKeyframes > 16) band.numKeyframes = 16;
 
-                FloatBand& band = it->second.floatBands[channelIndex];
-                band.numKeyframes = dbc->getUInt32(i, lfbL ? (*lfbL)["NumKeyframes"] : 1);
-                if (band.numKeyframes > 16) band.numKeyframes = 16;
+            for (uint8_t k = 0; k < band.numKeyframes && k < 16; ++k) {
+                uint32_t timeValue = dbc->getUInt32(i, col.time0 + k);
+                band.times[k] = static_cast<uint16_t>(timeValue % kHalfMinutesPerDay);  // Clamp to valid range
+            }
 
-                // Read time keys (field 3-18)
-                uint32_t timeKeyBase = lfbL ? (*lfbL)["TimeKey0"] : 2;
-                for (uint8_t k = 0; k < band.numKeyframes && k < 16; ++k) {
-                    uint32_t timeValue = dbc->getUInt32(i, timeKeyBase + k);
-                    band.times[k] = static_cast<uint16_t>(timeValue % kHalfMinutesPerDay);  // Clamp to valid range
-                }
-
-                // Read float values (field 19-34)
-                uint32_t valueBase = lfbL ? (*lfbL)["Value0"] : 18;
-                for (uint8_t k = 0; k < band.numKeyframes && k < 16; ++k) {
-                    band.values[k] = dbc->getFloat(i, valueBase + k);
-                }
+            for (uint8_t k = 0; k < band.numKeyframes && k < 16; ++k) {
+                band.values[k] = dbc->getFloat(i, col.value0 + k);
             }
         }
     }
 
     LOG_INFO("Loaded bands for ", lightParamsProfiles_.size(), " LightParams profiles");
-    return true;
 }
 
 void LightingManager::update(float deltaTime, const glm::vec3& playerPos, uint32_t mapId, uint32_t zoneId,

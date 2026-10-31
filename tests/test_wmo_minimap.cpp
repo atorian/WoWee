@@ -5,7 +5,9 @@
 #include <catch_amalgamated.hpp>
 #include "rendering/wmo_minimap.hpp"
 #include "pipeline/dbc_loader.hpp"
+#include "pipeline/required_table.hpp"
 #include "pipeline/wmo_loader.hpp"
+#include "test_game_tables.hpp"
 #include <algorithm>
 #include <cstring>
 #include <set>
@@ -158,28 +160,36 @@ TEST_CASE("the player stands in the interior group before the street around it",
     CHECK(inShop.groupAt({50, 20, 50}) == -1);
 }
 
+/// WotLK's columns, as its dbc_layouts.json names them.
+constexpr const char* kWmoAreaLayout =
+    R"({"WMOAreaTable": {"Flags": 9, "ID": 0, "NameSetID": 2, "WMOGroupID": 3, "WMOID": 1}})";
+
 TEST_CASE("a building whose WMOAreaTable row has flag 1 is drawn from its own tiles outdoors", "[minimap][wmo]") {
     // Dalaran: WMOID 5164, its building row (WMOGroupID -1) has Flags 9; a
     // room row of it has none. Stormwind (61) has no flag.
-    wowee::pipeline::DBCFile dbc;
-    REQUIRE(dbc.load(wmoAreaTable({areaRow(43381, 5164, 0, -1, 9), areaRow(43382, 5164, 0, 5, 0),
-                                   areaRow(100, 61, 0, -1, 0)})));
-    const auto table = WmoAreaFlags::read(dbc, nullptr);
-    REQUIRE(table);
-    CHECK(wmoMinimapShown(false, table->rootFlags(5164, 0)));
-    CHECK_FALSE(wmoMinimapShown(false, table->rootFlags(61, 0)));
-    CHECK_FALSE(wmoMinimapShown(false, table->rootFlags(5164, 7)));
-    CHECK(wmoMinimapShown(true, table->rootFlags(61, 0)));
+    const wowee::test::GivenLayouts layouts(kWmoAreaLayout);
+    wowee::test::GivenTables tables;
+    tables.giveFile("WMOAreaTable.dbc", wmoAreaTable({areaRow(43381, 5164, 0, -1, 9), areaRow(43382, 5164, 0, 5, 0),
+                                                      areaRow(100, 61, 0, -1, 0)}));
+    const auto table = WmoAreaFlags::read(wowee::pipeline::RequiredTable(tables, "WMOAreaTable.dbc", "the test"));
+    CHECK(wmoMinimapShown(false, table.rootFlags(5164, 0)));
+    CHECK_FALSE(wmoMinimapShown(false, table.rootFlags(61, 0)));
+    CHECK_FALSE(wmoMinimapShown(false, table.rootFlags(5164, 7)));
+    CHECK(wmoMinimapShown(true, table.rootFlags(61, 0)));
 }
 
-TEST_CASE("a WMOAreaTable of another shape is not read by guesswork", "[minimap][wmo]") {
-    std::vector<uint8_t> bytes(20 + 4 * 10 + 1);
+TEST_CASE("a WMOAreaTable narrower than its layout stops the game rather than be read by guesswork",
+          "[minimap][wmo]") {
+    // Nine columns: no Flags where the layout puts it.
+    std::vector<uint8_t> bytes(20 + 4 * 9 + 1);
     std::memcpy(bytes.data(), "WDBC", 4);
-    const uint32_t header[4] = {1, 10, 40, 1};
+    const uint32_t header[4] = {1, 9, 36, 1};
     std::memcpy(bytes.data() + 4, header, sizeof(header));
-    wowee::pipeline::DBCFile dbc;
-    REQUIRE(dbc.load(bytes));
-    CHECK_FALSE(WmoAreaFlags::read(dbc, nullptr).has_value());
+    const wowee::test::GivenLayouts layouts(kWmoAreaLayout);
+    wowee::test::GivenTables tables;
+    tables.giveFile("WMOAreaTable.dbc", bytes);
+    CHECK_THROWS_AS(WmoAreaFlags::read(wowee::pipeline::RequiredTable(tables, "WMOAreaTable.dbc", "the test")),
+                    wowee::test::TablesStopped);
 }
 
 TEST_CASE("a building's tiles are filed under its path without World and .wmo", "[minimap][wmo]") {

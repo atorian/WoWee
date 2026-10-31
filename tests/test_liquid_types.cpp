@@ -11,6 +11,8 @@
 #include "pipeline/dbc_layout.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/liquid_types.hpp"
+#include "pipeline/required_table.hpp"
+#include "test_game_tables.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "rendering/liquid_scene.hpp"
 
@@ -20,7 +22,6 @@
 
 using wowee::pipeline::ADTLoader;
 using wowee::pipeline::ADTTerrain;
-using wowee::pipeline::DBCFieldMap;
 using wowee::pipeline::DBCFile;
 using wowee::pipeline::LiquidBasic;
 using wowee::pipeline::LiquidTypeTable;
@@ -70,17 +71,21 @@ std::vector<uint8_t> liquidTypeDbc(const std::vector<Row>& rows) {
     return out;
 }
 
-DBCFieldMap wotlkLayout() {
-    DBCFieldMap map;
-    map.fields = {{"ID", 0}, {"Name", 1}, {"Type", 3}, {"MaterialID", 14}, {"Texture", 15}};
-    return map;
+/// The WotLK columns, as Data/expansions/wotlk/dbc_layouts.json names them.
+constexpr const char* kWotlkLayout =
+    R"({"LiquidType": {"ID": 0, "MaterialID": 14, "Name": 1, "Texture": 15, "Type": 3}})";
+
+/// LiquidType.dbc on the expansion's list, holding these rows.
+wowee::test::GivenTables liquidTables(const std::vector<Row>& rows) {
+    wowee::test::GivenTables tables;
+    tables.giveFile("LiquidType.dbc", liquidTypeDbc(rows));
+    return tables;
 }
 
 LiquidTypeTable tableOf(const std::vector<Row>& rows) {
-    DBCFile dbc;
-    REQUIRE(dbc.load(liquidTypeDbc(rows)));
-    const DBCFieldMap layout = wotlkLayout();
-    return LiquidTypeTable::fromDbc(dbc, &layout, "test LiquidType.dbc");
+    const wowee::test::GivenLayouts layouts(kWotlkLayout);
+    const auto tables = liquidTables(rows);
+    return LiquidTypeTable::fromDbc(wowee::pipeline::RequiredTable(tables, "LiquidType.dbc", "the test"));
 }
 
 const std::vector<Row> kStockRows = {
@@ -150,16 +155,13 @@ TEST_CASE("a row of no basic kind is left out, and its liquid taken for water", 
     CHECK(table.basicOf(1234) == LiquidBasic::Water);
 }
 
-TEST_CASE("a layout without the type column falls back to the four basic rows", "[liquid]") {
-    DBCFile dbc;
-    REQUIRE(dbc.load(liquidTypeDbc(kStockRows)));
-    DBCFieldMap layout;
-    layout.fields = {{"ID", 0}};
-    const LiquidTypeTable table = LiquidTypeTable::fromDbc(dbc, &layout, "test");
-    CHECK(table.basicOf(2) == LiquidBasic::Ocean);
-    CHECK(table.basicOf(4) == LiquidBasic::Slime);
-    REQUIRE(table.find(2));
-    CHECK(table.find(2)->texturePattern.empty());
+TEST_CASE("a layout without the type column stops the game rather than guess the kinds", "[liquid]") {
+    // Before, this answered the four basic rows without their textures: every
+    // liquid drew untextured and liquid 21 drew as water, with a warning.
+    const wowee::test::GivenLayouts layouts(R"({"LiquidType": {"ID": 0, "Name": 1}})");
+    const auto tables = liquidTables(kStockRows);
+    CHECK_THROWS_AS(LiquidTypeTable::fromDbc(wowee::pipeline::RequiredTable(tables, "LiquidType.dbc", "the test")),
+                    wowee::test::TablesStopped);
 }
 
 TEST_CASE("a building's liquid is what its group header says, by the client's rule", "[liquid]") {

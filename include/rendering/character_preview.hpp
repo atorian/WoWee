@@ -15,7 +15,7 @@
 #include <vector>
 
 namespace wowee {
-namespace pipeline { class AssetManager; struct M2Model; }
+namespace pipeline { class AssetManager; class GameTables; struct M2Model; }
 namespace rendering {
 
 class CharacterRenderer;
@@ -36,7 +36,8 @@ public:
     /// and the paperdoll's 640x800 is enormously oversized for a portrait
     /// drawn into a circle fifty pixels across. Defaults to the paperdoll's,
     /// which is what every caller wanted before there was a choice.
-    bool initialize(pipeline::AssetManager* am, int width = 640, int height = 800);
+    bool initialize(pipeline::AssetManager* am, const pipeline::GameTables& tables,
+                    int width = 640, int height = 800);
     void shutdown();
 
     bool loadCharacter(game::Race race, game::Gender gender,
@@ -125,6 +126,7 @@ private:
     void applyPreviewView();
 
     pipeline::AssetManager* assetManager_ = nullptr;
+    const pipeline::GameTables* gameTables_ = nullptr;
     VkContext* vkCtx_ = nullptr;
     std::unique_ptr<CharacterRenderer> charRenderer_;
     std::unique_ptr<Camera> camera_;

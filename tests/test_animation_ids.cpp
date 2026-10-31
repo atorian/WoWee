@@ -81,18 +81,6 @@ TEST_CASE("nameFromId covers first and last IDs", "[animation]") {
 
 // ── validateAgainstDBC tests ────────────────────────────────────────────────
 
-TEST_CASE("validateAgainstDBC handles null DBC", "[animation][dbc]") {
-    // Should not crash - just logs a warning
-    anim::validateAgainstDBC(nullptr);
-}
-
-TEST_CASE("validateAgainstDBC handles unloaded DBC", "[animation][dbc]") {
-    auto dbc = std::make_shared<DBCFile>();
-    REQUIRE_FALSE(dbc->isLoaded());
-    // Should not crash - just logs a warning
-    anim::validateAgainstDBC(dbc);
-}
-
 TEST_CASE("validateAgainstDBC with perfect match", "[animation][dbc]") {
     // Build a DBC containing IDs 0..ANIM_COUNT-1 (exact match)
     std::vector<uint32_t> allIds;
@@ -106,7 +94,7 @@ TEST_CASE("validateAgainstDBC with perfect match", "[animation][dbc]") {
     REQUIRE(dbc->getRecordCount() == anim::ANIM_COUNT);
 
     // Should complete without crashing - all IDs match
-    anim::validateAgainstDBC(dbc);
+    anim::validateAgainstDBC(*dbc);
 }
 
 TEST_CASE("validateAgainstDBC with missing IDs in DBC", "[animation][dbc]") {
@@ -119,7 +107,7 @@ TEST_CASE("validateAgainstDBC with missing IDs in DBC", "[animation][dbc]") {
     REQUIRE(dbc->getRecordCount() == 5);
 
     // Should log warnings for missing IDs but not crash
-    anim::validateAgainstDBC(dbc);
+    anim::validateAgainstDBC(*dbc);
 }
 
 TEST_CASE("validateAgainstDBC with extra IDs beyond range", "[animation][dbc]") {
@@ -132,7 +120,7 @@ TEST_CASE("validateAgainstDBC with extra IDs beyond range", "[animation][dbc]") 
     REQUIRE(dbc->getRecordCount() == 5);
 
     // Should log info about extra DBC-only IDs but not crash
-    anim::validateAgainstDBC(dbc);
+    anim::validateAgainstDBC(*dbc);
 }
 
 TEST_CASE("validateAgainstDBC with empty DBC", "[animation][dbc]") {
@@ -144,7 +132,7 @@ TEST_CASE("validateAgainstDBC with empty DBC", "[animation][dbc]") {
     REQUIRE(dbc->getRecordCount() == 0);
 
     // Should log warnings for all ANIM_COUNT missing IDs but not crash
-    anim::validateAgainstDBC(dbc);
+    anim::validateAgainstDBC(*dbc);
 }
 
 TEST_CASE("validateAgainstDBC with single ID", "[animation][dbc]") {
@@ -155,7 +143,7 @@ TEST_CASE("validateAgainstDBC with single ID", "[animation][dbc]") {
     REQUIRE(dbc->load(data));
     REQUIRE(dbc->getRecordCount() == 1);
 
-    anim::validateAgainstDBC(dbc);
+    anim::validateAgainstDBC(*dbc);
 }
 
 TEST_CASE("ANIM_COUNT matches expected value", "[animation]") {

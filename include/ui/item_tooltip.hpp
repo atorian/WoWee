@@ -32,9 +32,5 @@ void renderItemTooltip(const game::ItemQueryResponseData& info, const game::Inve
                        uint64_t itemGuid, game::GameHandler* gameHandler,
                        pipeline::AssetManager* assetManager);
 
-/// Enchantment id to name, read once from SpellItemEnchantment.dbc.
-const std::unordered_map<uint32_t, std::string>& enchantmentNames(
-    pipeline::AssetManager* assetManager);
-
 }  // namespace ui
 }  // namespace wowee

@@ -22,7 +22,7 @@ CharacterSession::CharacterSession(const Services& services, Identity identity, 
     if (services_.renderer && services_.assets) {
         spellPresentation_ = std::make_unique<SpellPresentation>(
             services_.events, services_.game, *services_.renderer, services_.spawner,
-            services_.spellVisuals, services_.audio, *services_.assets);
+            services_.spellVisuals, services_.audio);
     } else {
         LOG_WARNING("Character session '", identity_.name, "': no ",
                     services_.renderer ? "game data" : "renderer",

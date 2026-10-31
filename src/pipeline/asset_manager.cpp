@@ -758,56 +758,6 @@ std::shared_ptr<DBCFile> AssetManager::loadDbcOverridesAlone(const std::string& 
     return dbc;
 }
 
-std::shared_ptr<DBCFile> AssetManager::loadDBCOptional(const std::string& name) {
-    uint64_t generation = 0;
-    if (auto cached = cachedDBC(name, &generation)) return cached;
-
-    // Try binary DBC
-    std::vector<uint8_t> dbcData;
-    {
-        std::string dbcPath = "DBFilesClient\\" + name;
-        // The parsed table is cached (dbcCache); its file's bytes are not.
-        dbcData = readFileNotKept(normalizePath(dbcPath));
-    }
-
-    // Fall back to expansion-specific CSV
-    if (dbcData.empty() && !expansionDataPath_.empty()) {
-        std::string baseName = name;
-        auto dot = baseName.rfind('.');
-        if (dot != std::string::npos) baseName = baseName.substr(0, dot);
-        std::string csvPath = expansionDataPath_ + "/db/" + baseName + ".csv";
-        if (std::filesystem::exists(csvPath)) {
-            std::ifstream f(csvPath, std::ios::binary | std::ios::ate);
-            if (f) {
-                auto size = f.tellg();
-                if (size > 0) {
-                    f.seekg(0);
-                    dbcData.resize(static_cast<size_t>(size));
-                    f.read(reinterpret_cast<char*>(dbcData.data()), size);
-                    LOG_INFO("Binary DBC not found, using CSV fallback: ", csvPath);
-                }
-            }
-        }
-    }
-
-    if (dbcData.empty()) {
-        if (auto alone = loadDbcOverridesAlone(name)) return cacheDBC(name, std::move(alone), generation);
-        // Expected on some expansions - log at debug level only.
-        LOG_DEBUG("Optional DBC not found (expected on some expansions): ", name);
-        return nullptr;
-    }
-
-    auto dbc = std::make_shared<DBCFile>();
-    if (!dbc->load(dbcData)) {
-        LOG_ERROR("Failed to load DBC: ", name);
-        return nullptr;
-    }
-    mergeDbcOverrides(name, *dbc);
-
-    dbc = cacheDBC(name, std::move(dbc), generation);
-    LOG_INFO("Loaded optional DBC: ", name, " (", dbc->getRecordCount(), " records)");
-    return dbc;
-}
 bool AssetManager::fileExists(const std::string& path) const {
     if (!initialized) {
         return false;

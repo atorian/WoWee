@@ -24,8 +24,8 @@
 #include "game/inventory_slots.hpp"
 #include "game/game_utils.hpp"
 #include "addons/lua_engine.hpp"
-#include "pipeline/asset_manager.hpp"
-#include "pipeline/dbc_layout.hpp"
+#include "game/game_data.hpp"
+#include "pipeline/dbc_loader.hpp"
 #include "ui/framexml_takeover.hpp"
 
 #include <array>
@@ -58,15 +58,14 @@ uint32_t gemColorMask(game::GameHandler* gh, uint32_t gemItemId) {
     const auto* info = gh->inventory().getItemInfo(gemItemId);
     if (!info || info->gemProperties == 0) return 0;
 
-    auto* am = gh->services().assetManager;
-    if (!am || !am->isInitialized()) return 0;
-    auto dbc = am->loadDBC("GemProperties.dbc");
-    if (!dbc || !dbc->isLoaded()) return 0;
-    const int32_t row = dbc->findRecordById(info->gemProperties);
-    if (row < 0) return 0;
+    // Gems are TBC's; an expansion without the table has none to fit.
+    const game::GameData* tables = gh->services().gameData;
+    if (!tables || !tables->has("GemProperties.dbc")) return 0;
     // ID, Enchant_Id, MaxCountInv, MaxCountItem, Type - five columns in every
     // shape that has gems at all, so the last one is the colour.
-    if (dbc->getFieldCount() < 5) return 0;
+    const auto dbc = tables->table("GemProperties.dbc", 5, "which sockets a gem fits");
+    const int32_t row = dbc->findRecordById(info->gemProperties);
+    if (row < 0) return 0;
     return dbc->getUInt32(static_cast<uint32_t>(row), 4);
 }
 

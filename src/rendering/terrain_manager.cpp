@@ -1,4 +1,5 @@
 #include "rendering/terrain_manager.hpp"
+#include "pipeline/game_tables.hpp"
 #include "collision/collision_world.hpp"
 
 #include <vector>
@@ -151,8 +152,10 @@ void TerrainManager::setWMORenderer(WMORenderer* renderer) {
     if (renderer) wmoNormalMapFormat_ = renderer->normalMapFormat();
 }
 
-bool TerrainManager::initialize(pipeline::AssetManager* assets, TerrainRenderer* renderer) {
+bool TerrainManager::initialize(pipeline::AssetManager* assets, TerrainRenderer* renderer,
+                                const pipeline::GameTables& tables) {
     assetManager = assets;
+    gameTables_ = &tables;
     terrainRenderer = renderer;
     if (renderer) terrainNormalMapFormat_ = renderer->normalMapFormat();
 
@@ -1978,15 +1981,12 @@ std::string TerrainManager::getADTPath(const TileCoord& coord) const {
 }
 
 void TerrainManager::ensureGroundEffectTablesLoaded() {
-    if (groundEffectsLoaded_ || !assetManager) return;
+    if (groundEffectsLoaded_ || !gameTables_) return;
     groundEffectsLoaded_ = true;
 
-    auto groundEffectTex = assetManager->loadDBC("GroundEffectTexture.dbc");
-    auto groundEffectDoodad = assetManager->loadDBC("GroundEffectDoodad.dbc");
-    if (!groundEffectTex || !groundEffectDoodad) {
-        LOG_WARNING("Ground clutter DBCs missing; skipping procedural ground effects");
-        return;
-    }
+    // ID, 4 doodad ids, 4 weights, density; ID, model name.
+    const auto groundEffectTex = gameTables_->table("GroundEffectTexture.dbc", 10, "ground clutter");
+    const auto groundEffectDoodad = gameTables_->table("GroundEffectDoodad.dbc", 2, "ground clutter");
 
     // GroundEffectTexture: id + 4 doodad IDs + 4 weights + density + sound
     for (uint32_t i = 0; i < groundEffectTex->getRecordCount(); ++i) {

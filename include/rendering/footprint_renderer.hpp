@@ -13,7 +13,7 @@
 #include "rendering/vk_texture.hpp"
 
 namespace wowee {
-namespace pipeline { class AssetManager; }
+namespace pipeline { class AssetManager; class GameTables; }
 namespace rendering {
 
 class Camera;
@@ -89,7 +89,7 @@ private:
     bool createPipeline();
     bool createDescriptorResources();
     bool createQuad();
-    bool loadFootprintData(pipeline::AssetManager* assetManager);
+    bool loadFootprintData(const pipeline::GameTables& tables, pipeline::AssetManager* assetManager);
     [[nodiscard]] Profile resolveProfile(const std::string& modelName, FootprintFallback fallback) const;
     [[nodiscard]] float resolveFloorHeight(const glm::vec3& position) const;
 };

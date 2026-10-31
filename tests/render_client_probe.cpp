@@ -108,7 +108,7 @@ rendering::FrameInputs extract(rendering::Renderer& renderer, Draw&& draw) {
 void previewTest(core::Application& app) {
     auto& renderer = *app.getRenderer();
     auto preview = std::make_shared<rendering::CharacterPreview>();
-    require(preview->initialize(app.getAssetManager(), 160, 200), "Preview initialization failed");
+    require(preview->initialize(app.getAssetManager(), renderer.gameTables(), 160, 200), "Preview initialization failed");
     require(preview->loadCreature("Creature\\Wolf\\Wolf.m2",
         {{11, "Creature\\Wolf\\WolfSkinBlack.blp"}}), "Preview creature did not load");
     renderer.registerComposite(preview);
