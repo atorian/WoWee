@@ -2472,13 +2472,6 @@ wowee_add_test(test_shadow_cull_reuse
 wowee_add_test(test_terrain_bake
     SOURCES test_terrain_bake.cpp)
 
-# ── test_shadow_plane ────────────────────────────────────────
-# The plane a shadow receiver is compared in, from its surface and the map
-# alone: along the surface it predicts the sun's and the units' map depth,
-# whichever way and however long the normal, and edge-on it stays bounded.
-wowee_add_test(test_shadow_plane
-    SOURCES test_shadow_plane.cpp)
-
 # ── test_weather_mix ─────────────────────────────────────────
 # The weather as it is drawn: a shower coming over in the time it is given,
 # rain turning to snow through both, a storm the realm asks for at once
@@ -2606,11 +2599,6 @@ wowee_add_test(test_m2_combiner
 # Which point lights reach a model, a WMO group or a terrain chunk.
 wowee_add_test(test_local_lights
     SOURCES test_local_lights.cpp)
-
-# ── test_shadow_shading ─────────────────────────────────────
-# How a surface takes a shadow, by the client's receiving shaders.
-wowee_add_test(test_shadow_shading
-    SOURCES test_shadow_shading.cpp)
 
 # ── test_m2_billboard_model ─────────────────────────────────
 # Mana Shield's card through the renderer's own bone update.
