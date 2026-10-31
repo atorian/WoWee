@@ -102,14 +102,6 @@ void InventoryScreen::renderItemTooltip(const game::ItemQueryResponseData& info,
     ui::renderItemTooltip(info, inventory, itemGuid, gameHandler_, assetManager_);
 }
 
-VkDescriptorSet InventoryScreen::getItemIcon(uint32_t displayInfoId) {
-    // The shared cache, so an item drawn here and on the action bar is
-    // uploaded once. See itemIconTexture.
-    return itemIconTexture(displayInfoId, assetManager_,
-                           gameHandler_ ? gameHandler_->services().gameData : nullptr,
-                           core::Application::getInstance().getWindow());
-}
-
 // ============================================================
 // Equip slot helpers
 // ============================================================

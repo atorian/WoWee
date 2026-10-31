@@ -819,7 +819,6 @@ set(WOWEE_SOURCES
     src/game/world_handler.cpp
     src/game/warden_handler.cpp
     src/game/warden_crypto.cpp
-    src/game/cata_movement.cpp
     src/game/warden_module.cpp
     src/game/warden_emulator.cpp
     src/game/warden_memory.cpp
@@ -1214,12 +1213,9 @@ set(WOWEE_SOURCES
     src/ui/chat/chat_settings.cpp
     src/ui/chat/chat_utils.cpp
     src/ui/chat/chat_bubble_manager.cpp
-    src/ui/chat/chat_markup_parser.cpp
     src/ui/plural_escape.cpp
-    src/ui/chat/chat_markup_renderer.cpp
     src/core/open_url.cpp
     src/core/click_drag.cpp
-    src/ui/chat/item_tooltip_renderer.cpp
     src/ui/chat/chat_command_registry.cpp
     src/ui/chat/macro_evaluator.cpp
     src/ui/chat/macro_eval_convenience.cpp

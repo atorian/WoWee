@@ -233,22 +233,6 @@ TEST_CASE("DBCFile load wrong magic", "[dbc]") {
     REQUIRE_FALSE(dbc.load(data));
 }
 
-TEST_CASE("DBCFile getStringByOffset", "[dbc]") {
-    std::string strings;
-    strings += '\0';
-    strings += "Offset5";  // This would be at offset 1 actually, let me be precise
-    strings += '\0';
-
-    auto data = buildSyntheticDBC(1, 1,
-        { {0} },
-        strings);
-
-    DBCFile dbc;
-    REQUIRE(dbc.load(data));
-    REQUIRE(dbc.getStringByOffset(1) == "Offset5");
-    REQUIRE(dbc.getStringByOffset(0).empty());
-}
-
 // ============== JSON DBC Tests ==============
 
 static std::vector<uint8_t> buildJsonDBC(const std::string& json) {

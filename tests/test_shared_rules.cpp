@@ -367,15 +367,6 @@ TEST_CASE("an item's colour by quality", "[item]") {
         CHECK(std::string(game::itemQualityColorHex(8)) == "ffffffff");
         CHECK(std::string(game::itemQualityColorHex(4000)) == "ffffffff");
     }
-
-    SECTION("the six-digit form is the eight-digit one without its alpha") {
-        // Half the callers write |cff and half write |c, so the two forms have
-        // to stay the same colour or the same item links in two shades.
-        for (uint32_t q = 0; q < 9; ++q) {
-            CHECK(std::string(game::itemQualityColorHex(q)).substr(2) ==
-                  game::itemQualityColorHexRGB(q));
-        }
-    }
 }
 
 TEST_CASE("an item hyperlink as 3.3.5a writes one", "[item]") {

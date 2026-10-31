@@ -74,16 +74,6 @@ void Frustum::normalizePlane(Plane& plane) {
     }
 }
 
-bool Frustum::containsPoint(const glm::vec3& point) const {
-    // Point must be in front of all planes
-    for (const auto& plane : planes) {
-        if (plane.distanceToPoint(point) < 0.0f) {
-            return false;
-        }
-    }
-    return true;
-}
-
 bool Frustum::intersectsSphere(const glm::vec3& center, float radius) const {
     // Sphere is visible if distance from center to any plane is >= -radius
     for (const auto& plane : planes) {

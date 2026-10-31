@@ -1075,7 +1075,7 @@ void MovementPacket::writeMovementPayload(network::Packet& packet, const Movemen
     // are four floats - and this was written sine first, after the order of
     // the fields in MovementInfo, so other clients saw our jumps go off at
     // right angles. Their own packets settle it: the first of the two follows
-    // cos(orientation), as cata_movement's layout has it too.
+    // cos(orientation), as the 4.3.4 core's movement layout has it too.
     if (info.hasFlag(MovementFlags::FALLING)) {
         packet.writeFloat(info.jumpVelocity);
         packet.writeFloat(info.jumpCosAngle);

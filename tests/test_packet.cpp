@@ -234,3 +234,29 @@ TEST_CASE("Packet sized string, length-prefixed with a terminator", "[packet]") 
         CHECK_FALSE(q.readSizedString(out));
     }
 }
+
+TEST_CASE("integers go on the wire little-endian, in the order written", "[packet]") {
+    Packet p(0);
+    p.writeUInt8(0x01);
+    p.writeUInt16(0x0302);
+    p.writeUInt32(0x07060504);
+    p.writeUInt64(0x0F0E0D0C0B0A0908ull);
+    p.writeFloat(1.5f);
+    p.writeString("ab");
+    p.writePackedGuid(0x0000000000FF00FFull);
+
+    const uint8_t expectedHead[] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                                    0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+                                    0x0F};
+    REQUIRE(p.getSize() >= sizeof(expectedHead));
+    for (size_t i = 0; i < sizeof(expectedHead); ++i)
+        CHECK(p.getData()[i] == expectedHead[i]);
+
+    CHECK(p.readUInt8() == 0x01);
+    CHECK(p.readUInt16() == 0x0302);
+    CHECK(p.readUInt32() == 0x07060504);
+    CHECK(p.readUInt64() == 0x0F0E0D0C0B0A0908ull);
+    CHECK(p.readFloat() == 1.5f);
+    CHECK(p.readString() == "ab");
+    CHECK(p.readPackedGuid() == 0x0000000000FF00FFull);
+}

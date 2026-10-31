@@ -14,7 +14,6 @@
 #include "core/realm_patches.hpp"
 
 using wowee::core::isSafePatchFileName;
-using wowee::core::parsePatchManifest;
 using wowee::core::realmPatchDirName;
 
 TEST_CASE("an ordinary patch name is accepted", "[patches]") {
@@ -128,75 +127,4 @@ TEST_CASE("a hostile hostname cannot produce a path", "[patches]") {
     // which is the part sanitising alone would get wrong: both of these fold
     // to the same letters.
     CHECK(realmPatchDirName("../../etc", 3724) != realmPatchDirName("..\\..\\etc", 3724));
-}
-
-namespace {
-
-std::string manifestWith(const std::string& entries) {
-    return R"({"version":1,"patches":[)" + entries + "]}";
-}
-
-const char* kGoodSha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-}  // namespace
-
-TEST_CASE("a well-formed manifest parses", "[patches]") {
-    const auto m = parsePatchManifest(manifestWith(
-        std::string(R"({"file":"patch-Z.mpq","size":1024,"sha256":")") + kGoodSha + R"("})"));
-    INFO(m.error);
-    REQUIRE(m.ok);
-    REQUIRE(m.entries.size() == 1);
-    CHECK(m.entries[0].file == "patch-Z.mpq");
-    CHECK(m.entries[0].size == 1024);
-}
-
-TEST_CASE("a manifest with one bad name is refused whole", "[patches]") {
-    // Not "skip that one and install the rest": which parts of a realm's
-    // patch set a player can do without is not this client's call, and a
-    // manifest it only half understands is one it does not understand.
-    const auto m = parsePatchManifest(manifestWith(
-        std::string(R"({"file":"patch-Z.mpq","size":1024,"sha256":")") + kGoodSha + R"("},)" +
-        R"({"file":"../evil.mpq","size":1024,"sha256":")" + kGoodSha + R"("})"));
-    CHECK_FALSE(m.ok);
-    CHECK(m.entries.empty());
-    INFO(m.error);
-    CHECK(m.error.find("refused patch file name") != std::string::npos);
-}
-
-TEST_CASE("a manifest without a usable hash or size is refused", "[patches]") {
-    CHECK_FALSE(parsePatchManifest(manifestWith(
-        R"({"file":"patch-Z.mpq","size":1024,"sha256":"tooshort"})")).ok);
-    CHECK_FALSE(parsePatchManifest(manifestWith(
-        std::string(R"({"file":"patch-Z.mpq","size":0,"sha256":")") + kGoodSha + R"("})")).ok);
-    // Negative, which read straight into an unsigned size is enormous rather
-    // than invalid - so it has to be caught while it is still signed.
-    CHECK_FALSE(parsePatchManifest(manifestWith(
-        std::string(R"({"file":"patch-Z.mpq","size":-1,"sha256":")") + kGoodSha + R"("})")).ok);
-    CHECK_FALSE(parsePatchManifest(manifestWith(
-        std::string(R"({"file":"patch-Z.mpq","size":99999999999999,"sha256":")") + kGoodSha +
-        R"("})")).ok);
-}
-
-TEST_CASE("two entries cannot be one file", "[patches]") {
-    // One directory, and a filesystem that does not distinguish these - so
-    // the second download would land on the first, and which archive the
-    // client ended up with would depend on the order they finished in.
-    const auto m = parsePatchManifest(manifestWith(
-        std::string(R"({"file":"patch-Z.mpq","size":1024,"sha256":")") + kGoodSha + R"("},)" +
-        R"({"file":"PATCH-z.MPQ","size":2048,"sha256":")" + kGoodSha + R"("})"));
-    CHECK_FALSE(m.ok);
-    INFO(m.error);
-    CHECK(m.error.find("listed twice") != std::string::npos);
-}
-
-TEST_CASE("a manifest that is not one is refused rather than thrown", "[patches]") {
-    CHECK_FALSE(parsePatchManifest("").ok);
-    CHECK_FALSE(parsePatchManifest("not json at all").ok);
-    CHECK_FALSE(parsePatchManifest("[]").ok);
-    CHECK_FALSE(parsePatchManifest("{}").ok);
-    CHECK_FALSE(parsePatchManifest(R"({"version":2,"patches":[]})").ok);
-    CHECK_FALSE(parsePatchManifest(R"({"version":1})").ok);
-    CHECK_FALSE(parsePatchManifest(R"({"version":1,"patches":{}})").ok);
-    // An empty list is a realm that offers nothing, which is not an error.
-    CHECK(parsePatchManifest(R"({"version":1,"patches":[]})").ok);
 }

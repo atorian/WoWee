@@ -127,7 +127,6 @@ Data/expansions/*/*
 !Data/expansions/*/opcodes.json
 !Data/expansions/*/update_fields.json
 !Data/expansions/*/dbc_layouts.json
-!Data/expansions/*/movement_sequences.json
 
 ingest/
 

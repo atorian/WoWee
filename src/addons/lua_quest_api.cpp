@@ -155,16 +155,6 @@ int questLogRowForQuest(lua_State* L, game::GameHandler* gh, uint32_t questId) {
     return 0;
 }
 
-void openInterfaceQuestLog(game::GameHandler& gh, uint32_t questId) {
-    // The row is worked out inside the interface, by GetQuestLogIndexByID:
-    // which groups are collapsed is the interface's own state, and the
-    // character's, so only its Lua state can say what row a quest is on.
-    const std::string id = std::to_string(questId);
-    gh.runInterfaceCommand("local row = GetQuestLogIndexByID(" + id + ") "
-                           "if row and row > 0 then QuestLog_OpenToQuest(row) "
-                           "else ToggleFrame(QuestLogFrame) end");
-}
-
 namespace {
 
 /// The quest at a display index, or null when that row is a header or the index
