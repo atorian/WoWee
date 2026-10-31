@@ -2550,6 +2550,12 @@ wowee_add_test(test_water_reflection
             ${CMAKE_SOURCE_DIR}/src/rendering/frustum.cpp
             ${TEST_COMMON_SOURCES})
 
+# ── test_water_visibility ────────────────────────────────────
+# Which water reached the screen, from the GPU's occlusion answers.
+wowee_add_test(test_water_visibility
+    SOURCES test_water_visibility.cpp
+            ${TEST_COMMON_SOURCES})
+
 # ── test_sphere_map ──────────────────────────────────────────
 # The sphere environment map coordinates m2.vert.glsl computes, run from the
 # shader's own include. The incident vector was negated, which put a surface

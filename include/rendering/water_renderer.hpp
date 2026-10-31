@@ -4,6 +4,8 @@
 #include "rendering/ocean_waves.hpp"
 #include "rendering/water_wake.hpp"
 #include "rendering/water_reflection.hpp"
+#include "rendering/water_visibility.hpp"
+#include "rendering/frames_in_flight.hpp"
 
 #include <array>
 #include <vector>
@@ -96,6 +98,8 @@ public:
         /// 1 where the surface lies on the reflection's plane and reflects
         /// its image, 0 where it reflects the sky alone.
         float mirrored = 0;
+        /// Which surface it is, for the occlusion answer its draw gets.
+        LiquidSurfaceId id = 0;
     };
     struct DrawList {
         std::vector<SurfaceDraw> surfaces;
@@ -139,6 +143,16 @@ public:
     VkRenderPass getReflectionRenderPass() const { return reflectionRenderPass; }
     VkExtent2D getReflectionExtent() const { return reflectionExtent; }
     bool hasReflectionPass() const { return reflectionRenderPass != VK_NULL_HANDLE; }
+    /// Whether the reflection pass draws the scene: its target is single
+    /// sampled, and the scene's pipelines draw into it only when they are
+    /// too. Multisampled, it holds nothing and the water reflects the sky.
+    bool reflectionDrawsScene() const;
+
+    /// Outside any render pass, once the frame slot's fence is passed: the
+    /// occlusion answers for the water this slot drew last time, into what
+    /// the reflection is chosen from (WaterVisibility), and the slot's
+    /// queries reset for this frame's draw.
+    void beginFrameQueries(VkCommandBuffer cmd, uint32_t frame);
     bool hasSurfaces() const { return !drawn_.empty(); }
 
     void setEnabled(bool enabled) { renderingEnabled = enabled; }
@@ -332,6 +346,20 @@ private:
     std::vector<DrawnSurface> drawn_;
     bool renderingEnabled = true;
     bool inView_ = false;
+    /// Which surfaces reached the screen, from the occlusion query each
+    /// surface's draw in recordView is wrapped in one frame in
+    /// kQueryEveryFrames: kQueriedSurfaces a frame slot, the ids asked about
+    /// in queried_. Water that comes out from behind something reflects up
+    /// to that many frames, and two more, late.
+    static constexpr uint32_t kQueriedSurfaces = 512;
+    static constexpr uint64_t kQueryEveryFrames = 4;
+    VkQueryPool visibilityQueries_ = VK_NULL_HANDLE;
+    std::array<std::vector<LiquidSurfaceId>, MAX_FRAMES_IN_FLIGHT> queried_;
+    WaterVisibility visibility_;
+    /// Whether a slot's queries have been reset since they were last used.
+    std::array<bool, MAX_FRAMES_IN_FLIGHT> queriesReset_{};
+    bool queryOverflowSaid_ = false;
+    bool queryReadFailSaid_ = false;
     // On from the start. The renderer keeps it always on, but did so only when
     // the interface applied its saved settings, so until then - and in a
     // renderer with no interface, scene_render - the water had no capture of

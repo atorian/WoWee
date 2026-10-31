@@ -25,11 +25,14 @@ namespace rendering {
                                                     const glm::mat4& view, float waterHeight);
 
 /// A water surface in the camera's view, as the reflection is chosen from:
-/// the box its waves can carry it through, and the height it lies at.
+/// the box its waves can carry it through, the height it lies at, and
+/// whether any of it reached the screen (WaterVisibility) - in the view and
+/// hidden behind something, it shows no mirror.
 struct WaterInView {
     glm::vec3 min{0.0f};
     glm::vec3 max{0.0f};
     float height = 0.0f;
+    bool seen = true;
 };
 
 /// The camera's view, as the reflection is made from it.
@@ -71,7 +74,8 @@ struct WaterReflectionView {
 
 /// The reflection for a camera over `water`, the surfaces in its view: on the
 /// plane whose water covers most of the picture, among the planes below the
-/// camera. None when no water in view lies below it.
+/// camera, of the water that reaches the screen. None when no such water
+/// lies below it.
 [[nodiscard]] std::optional<WaterReflectionView> waterReflectionView(const ReflectedCamera& camera,
                                                                      std::span<const WaterInView> water);
 

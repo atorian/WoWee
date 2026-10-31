@@ -119,7 +119,7 @@ std::optional<WaterReflectionView> waterReflectionView(const ReflectedCamera& ca
     std::vector<float> covers(water.size(), 0.0f);
     for (size_t i = 0; i < water.size(); ++i) {
         const WaterInView& w = water[i];
-        if (camera.position.z < w.height + kCameraAbovePlane) continue;
+        if (!w.seen || camera.position.z < w.height + kCameraAbovePlane) continue;
         if (const auto e = imageExtent(cameraViewProj, glm::vec2(w.min), glm::vec2(w.max), w.height))
             covers[i] = extentArea(*e);
     }
@@ -150,7 +150,7 @@ std::optional<WaterReflectionView> waterReflectionView(const ReflectedCamera& ca
     const glm::mat4 mirroredViewProj = camera.projection * out.view;
     std::optional<glm::vec4> extent;
     for (const WaterInView& w : water) {
-        if (!out.mirrors(w)) continue;
+        if (!w.seen || !out.mirrors(w)) continue;
         for (const float z : {w.min.z, w.max.z}) {
             if (const auto e = imageExtent(mirroredViewProj, glm::vec2(w.min), glm::vec2(w.max), z))
                 extent = unite(extent, *e);

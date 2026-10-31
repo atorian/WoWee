@@ -1913,6 +1913,8 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
         if (skySystem && skySystem->getBodies()) {
             skySystem->getBodies()->beginFrameQueries(currentCmd, vkCtx->getCurrentFrame());
         }
+        // So are the water's, which say what of it reached the screen.
+        if (waterRenderer) waterRenderer->beginFrameQueries(currentCmd, vkCtx->getCurrentFrame());
         writeRtLightingBindings(vkCtx->getCurrentFrame());
         writeFogVolumeBindings(vkCtx->getCurrentFrame());
 
@@ -4999,7 +5001,7 @@ void Renderer::renderReflectionPass() {
 
     // Reflection pass uses 1x MSAA. Scene pipelines must be render-pass-compatible,
     // which requires matching sample counts. Only render scene into reflection when MSAA is off.
-    bool canRenderScene = (vkCtx->getMsaaSamples() == VK_SAMPLE_COUNT_1_BIT);
+    const bool canRenderScene = waterRenderer->reflectionDrawsScene();
 
     // The water in view that fills most of the picture, and the part of the
     // mirror it shows (WaterRenderer::extract). Without one, no water reads

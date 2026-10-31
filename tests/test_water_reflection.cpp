@@ -152,3 +152,33 @@ TEST_CASE("standing in a lake, the water near the feet still reflects", "[water]
     // A post in the water a few yards ahead, at the bottom of the picture.
     CHECK(mirror->canSee(glm::vec3(-0.5f, 12.0f, 0.0f), glm::vec3(0.5f, 13.0f, 1.5f)));
 }
+
+TEST_CASE("water hidden behind something holds no reflection", "[water][reflection]") {
+    // Canals under a city's streets, in the camera's view and covered by
+    // them, and a fountain basin up on a terrace that the camera does see.
+    WaterInView canals = pool(-60.0f, 60.0f, 10.0f, 120.0f, 0.0f);
+    canals.seen = false;
+    const WaterInView water[] = {canals, pool(-2.0f, 2.0f, 30.0f, 33.0f, 4.0f)};
+    const auto mirror = waterReflectionView(cameraOverWater(), water);
+    REQUIRE(mirror);
+    CHECK(mirror->height == 4.0f);
+}
+
+TEST_CASE("with no water seen there is no reflection", "[water][reflection]") {
+    WaterInView canals = pool(-60.0f, 60.0f, 10.0f, 120.0f, 0.0f);
+    canals.seen = false;
+    const WaterInView water[] = {canals};
+    CHECK_FALSE(waterReflectionView(cameraOverWater(), water));
+}
+
+TEST_CASE("the reflection is drawn where the water seen shows it, not the hidden water beside it",
+          "[water][reflection]") {
+    // One plane: a pool seen off to the left and a stretch of the same water
+    // behind a wall on the right.
+    WaterInView hidden = pool(8.0f, 14.0f, 20.0f, 26.0f, 0.0f);
+    hidden.seen = false;
+    const WaterInView water[] = {pool(-14.0f, -8.0f, 20.0f, 26.0f, 0.0f), hidden};
+    const auto mirror = waterReflectionView(cameraOverWater(), water);
+    REQUIRE(mirror);
+    CHECK(mirror->area.z < 0.5f);
+}
