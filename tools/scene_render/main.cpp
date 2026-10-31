@@ -503,6 +503,13 @@ public:
         for (const auto& part : parts) {
             if (counted) budget_.noteStage(std::string(part.group) + "/" + std::string(part.name), part.milliseconds);
         }
+        // The game thread's parts too: the renderer's update and the scene's
+        // extraction, the M2 cull among it. Renderer::update starts them over.
+        if (counted) {
+            for (const auto& part : vk.gameCpuStages().entries()) {
+                budget_.noteStage(std::string(part.group) + "/" + std::string(part.name), part.milliseconds);
+            }
+        }
         std::sort(parts.begin(), parts.end(),
                   [](const auto& a, const auto& b) { return a.milliseconds > b.milliseconds; });
         line += " [";
