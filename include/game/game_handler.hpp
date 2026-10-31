@@ -379,6 +379,7 @@ public:
     void bankBagSlotsArrived(uint8_t slots) override;
     void chosenTitleArrived(int32_t title) override;
     void playerFlagsArrived(uint32_t flags, FrameXmlEvents& packetEvents) override;
+    bool loggingOut() const override;
 
     // ReputationQueries (refreshUnitHostility is declared with the rest of the
     // faction table below).
@@ -612,9 +613,6 @@ public:
 
     // Stand state
     void setStandState(uint8_t state) override;  // 0=stand, 1=sit, 2=sit_chair, 3=sleep, 4=sit_low_chair, 5=sit_medium_chair, 6=sit_high_chair, 7=dead, 8=kneel, 9=submerged
-    uint8_t getStandState() const { return standState_; }
-    bool isSitting() const { return standState_ >= 1 && standState_ <= 6; }
-    bool isDead() const { return standState_ == 7; }
 
     /// Take the glyph out of a socket. Zero-based slot, as the server counts.
     void removeGlyphFromSocket(uint32_t slot);
@@ -1668,7 +1666,6 @@ private:
     std::unordered_map<uint32_t, uint32_t> worldStates_;
 
     // ---- Display state ----
-    uint8_t standState_ = 0;  // 0=stand, 1=sit, ..., 7=dead, 8=kneel (server-confirmed)
 
     // Items, coin, books and the equipment of players in view are the
     // inventory's (InventoryHandler); none of it is kept here.

@@ -146,7 +146,7 @@ GameHandler::GameHandler(GameServices& services)
     weatherHandler_ = std::make_unique<WeatherHandler>(
         *services_.events, *this, *chatHandler_,
         [] { return isClassicLikeExpansion() ? WeatherNumbering::Classic : WeatherNumbering::WeatherState; });
-    playerHandler_ = std::make_unique<PlayerHandler>(*this, *services_.events, *chatHandler_, *this,
+    playerHandler_ = std::make_unique<PlayerHandler>(*this, *this, *services_.events, *chatHandler_, *this,
                                                     *services_.statTables);
 
     // The character's own settings, read once its spells have arrived - the

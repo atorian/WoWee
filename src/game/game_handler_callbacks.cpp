@@ -1146,7 +1146,7 @@ void GameHandler::faceCanonicalYaw(float canonicalYaw) {
 }
 
 void GameHandler::setStandState(uint8_t standState) {
-    socialHandler_->setStandState(standState);
+    playerHandler_->requestStandState(standState);
 }
 
 bool GameHandler::isAfk() const { return chatHandler_->isAfk(); }
@@ -1898,6 +1898,8 @@ void GameHandler::resurrectedInPlace() {
     combatHandler_->invalidateTabCycle();
     spellHandler_->resetCastState();
 }
+
+bool GameHandler::loggingOut() const { return socialHandler_->isLoggingOut(); }
 
 Character* GameHandler::listedCharacter() {
     for (auto& ch : characters) {

@@ -6,6 +6,9 @@
 #include "game/frame_xml_events.hpp"
 #include "game/game_events.hpp"
 #include "game/opcodes.hpp"
+#include "game/packet_sender.hpp"
+#include "game/protocol_constants.hpp"
+#include "game/world_packets.hpp"
 #include "game/update_field_table.hpp"
 #include "core/event_bus.hpp"
 #include "core/logger.hpp"
@@ -69,14 +72,58 @@ struct PlayerFieldIndices {
 
 }  // namespace
 
-PlayerHandler::PlayerHandler(FrameXmlEvents& frameXml, core::EventBus& events, ChatLog& chat,
-                             PlayerQueries& queries, const StatTables& tables)
-    : frameXml_(frameXml), events_(events), chat_(chat), queries_(queries), tables_(tables) {}
+PlayerHandler::PlayerHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
+                             ChatLog& chat, PlayerQueries& queries, const StatTables& tables)
+    : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat), queries_(queries),
+      tables_(tables) {}
 
 void PlayerHandler::registerOpcodes(DispatchTable& table) {
     for (auto op : {Opcode::SMSG_LEVELUP_INFO, Opcode::SMSG_LEVELUP_INFO_ALT}) {
         table[op] = [this](network::Packet& packet) { handleLevelUp(packet); };
     }
+    table[Opcode::SMSG_STANDSTATE_UPDATE] = [this](network::Packet& packet) {
+        handleStandStateUpdate(packet);
+    };
+}
+
+void PlayerHandler::handleStandStateUpdate(network::Packet& packet) {
+    if (!packet.hasRemaining(1)) return;
+    const uint8_t standState = packet.readUInt8();
+    if (standState == sheet_.standState) return;
+    sheet_.standState = standState;
+    // 0=stand, 1=sit, 2-6=sit variants, 7=dead, 8=kneel. Logged because a
+    // wrong state here is indistinguishable, in-game, from a wrong animation.
+    // At warning level: the file log filters info out by default.
+    LOG_WARNING("SMSG_STANDSTATE_UPDATE: standState=", static_cast<int>(standState));
+    events_.publish(events::StandStateChanged{standState});
+}
+
+void PlayerHandler::requestStandState(uint8_t standState) {
+    if (!sender_.characterInWorld()) {
+        LOG_WARNING("Cannot change stand state: not in world or not connected");
+        return;
+    }
+    sender_.send(StandStateChangePacket::build(standState));
+    LOG_INFO("Changed stand state to: ", static_cast<int>(standState));
+}
+
+void PlayerHandler::unitFlagsArrived(uint32_t previous, uint32_t flags) {
+    constexpr uint32_t UNIT_FLAG_STUNNED = 0x00040000;
+    const bool wasStunned = (previous & UNIT_FLAG_STUNNED) != 0;
+    bool nowStunned = (flags & UNIT_FLAG_STUNNED) != 0;
+    // The server stuns the player for the logout countdown, to root them in
+    // place - it sits them down in the same breath. That is a movement
+    // restriction, not a stun: playing the stun animation over it leaves the
+    // character slumped rather than seated. Clearing the flag is still
+    // honoured, so a cancelled logout recovers.
+    if (nowStunned && queries_.loggingOut()) nowStunned = false;
+    if (wasStunned != nowStunned) events_.publish(events::StunStateChanged{nowStunned});
+}
+
+void PlayerHandler::visibilityFlagsArrived(uint8_t previous, uint8_t flags) {
+    const bool wasStealthed = (previous & UNIT_VIS_FLAG_CREEP) != 0;
+    const bool nowStealthed = (flags & UNIT_VIS_FLAG_CREEP) != 0;
+    if (wasStealthed != nowStealthed) events_.publish(events::StealthStateChanged{nowStealthed});
 }
 
 void PlayerHandler::beginCharacter() {

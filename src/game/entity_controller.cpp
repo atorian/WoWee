@@ -816,23 +816,7 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             unit->setUnitFlags(val);
             if (block.guid == owner_.getPlayerGuid()) {
                 owner_.combat().playerUnitFlagsArrived(oldFlags, val, pendingEvents_);
-            }
-            // Detect stun state change on local player
-            constexpr uint32_t UNIT_FLAG_STUNNED = 0x00040000;
-            if (block.guid == owner_.getPlayerGuid()) {
-                bool wasStunned = (oldFlags & UNIT_FLAG_STUNNED) != 0;
-                bool nowStunned = (val & UNIT_FLAG_STUNNED) != 0;
-                // The server stuns the player for the logout countdown, to root them
-                // in place - it sits them down in the same breath. That is a movement
-                // restriction, not a stun: playing the stun animation over it leaves
-                // the character slumped rather than seated. Clearing the flag is still
-                // honoured, so a cancelled logout recovers.
-                if (nowStunned && owner_.social().isLoggingOut()) {
-                    nowStunned = false;
-                }
-                if (wasStunned != nowStunned) {
-                    owner_.eventBus().publish(events::StunStateChanged{nowStunned});
-                }
+                owner_.player().unitFlagsArrived(oldFlags, val);
             }
         }
         else if (ufi.auraState != 0xFFFF && key == ufi.auraState) {
@@ -844,12 +828,7 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             unit->setVisibilityFlags(newVisibilityFlags);
 
             if (block.guid == owner_.getPlayerGuid()) {
-                const bool wasStealthed = (oldVisibilityFlags & UNIT_VIS_FLAG_CREEP) != 0;
-                const bool nowStealthed = (newVisibilityFlags & UNIT_VIS_FLAG_CREEP) != 0;
-                if (wasStealthed != nowStealthed) {
-                    owner_.eventBus().publish(events::StealthStateChanged{nowStealthed});
-                }
-
+                owner_.player().visibilityFlagsArrived(oldVisibilityFlags, newVisibilityFlags);
                 owner_.player().shapeshiftFormArrived(static_cast<uint8_t>((val >> 24) & 0xFF),
                                                       pendingEvents_);
             }

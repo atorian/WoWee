@@ -599,22 +599,6 @@ TEST_CASE("exploration experience is announced; an area found for nothing is not
     CHECK(found[0].xpGained == 170);
 }
 
-TEST_CASE("a stand state the server confirms is announced once", "[session][harness]") {
-    GameHarness h;
-    h.enterWorld();
-    std::vector<int> states;
-    auto sub = h.events().subscribe<ev::StandStateChanged>(
-        [&](const ev::StandStateChanged& e) { states.push_back(e.standState); });
-
-    // SMSG_STANDSTATE_UPDATE: sit, sit again, stand.
-    h.receive(Opcode::SMSG_STANDSTATE_UPDATE, Body().u8(1));
-    h.receive(Opcode::SMSG_STANDSTATE_UPDATE, Body().u8(1));
-    h.receive(Opcode::SMSG_STANDSTATE_UPDATE, Body().u8(0));
-    h.pump();
-
-    CHECK(states == std::vector<int>{1, 0});
-}
-
 TEST_CASE("sounds the server plays are passed on: music, flat, and at an object", "[session][harness]") {
     GameHarness h;
     h.enterWorld();

@@ -2507,17 +2507,6 @@ void SocialHandler::toggleCloak() {
     LOG_INFO("Cloak visibility toggled: ", shown);
 }
 
-void SocialHandler::setStandState(uint8_t standState) {
-    if (!sender_.characterInWorld()) {
-        LOG_WARNING("Cannot change stand state: not in world or not connected");
-        return;
-    }
-
-    auto packet = StandStateChangePacket::build(standState);
-    sender_.send(packet);
-    LOG_INFO("Changed stand state to: ", static_cast<int>(standState));
-}
-
 void SocialHandler::sendAlterAppearance(uint32_t hairStyleEntry, uint32_t hairColor,
                                         uint32_t facialHairEntry, uint32_t skinColorEntry) {
     if (!sender_.characterInWorld()) return;
