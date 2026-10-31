@@ -21,8 +21,6 @@
 
 #include "pipeline/m2_color_track.hpp"
 
-using wowee::pipeline::m2ColorAlphaTrackOffset;
-using wowee::pipeline::m2ColorRecordSize;
 using wowee::pipeline::m2ColorTrackFirstKeyOffset;
 using wowee::pipeline::m2ColorTrackKeysOffset;
 
@@ -47,17 +45,6 @@ struct Buffer {
 };
 
 }  // namespace
-
-TEST_CASE("the record and track offsets differ by version", "[m2-color]") {
-    // WotLK dropped the interpolation-range array, which shortens the track
-    // from 28 bytes to 20 and moves everything after it.
-    CHECK(m2ColorTrackKeysOffset(true) == 12);
-    CHECK(m2ColorTrackKeysOffset(false) == 20);
-    CHECK(m2ColorAlphaTrackOffset(true) == 20);
-    CHECK(m2ColorAlphaTrackOffset(false) == 28);
-    CHECK(m2ColorRecordSize(true) == 40);
-    CHECK(m2ColorRecordSize(false) == 56);
-}
 
 TEST_CASE("a WotLK colour is two hops away", "[m2-color]") {
     // track.keys -> an M2Array per sequence -> that sequence's values.

@@ -83,8 +83,6 @@ src/ui/character_create_screen.cpp -> core/application.hpp
 src/ui/character_screen.cpp -> addons/addon_manager.hpp
 src/ui/character_screen.cpp -> core/application.hpp
 src/ui/chat/chat_bubble_manager.cpp -> core/window.hpp
-src/ui/chat/chat_markup_renderer.cpp -> addons/lua_api_helpers.hpp
-src/ui/chat/chat_markup_renderer.cpp -> core/open_url.hpp
 src/ui/chat/commands/misc_commands.cpp -> core/zone_tracker.hpp
 src/ui/chat/commands/system_commands.cpp -> addons/addon_manager.hpp
 src/ui/chat/commands/system_commands.cpp -> core/application.hpp

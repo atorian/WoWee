@@ -82,13 +82,4 @@ RtBvh buildRtTriangleBvh(std::vector<RtTriangle>& tris, uint32_t maxLeafSize = 4
 float packRtSurface(const glm::vec3& albedo, float opacity);
 glm::vec4 unpackRtSurface(float packed);
 
-struct RtHit {
-    float t = -1.0f;
-    uint32_t prim = 0;  // sorted slot of the triangle that was hit
-};
-
-/// Reference closest-hit traversal over one bottom-level hierarchy.
-RtHit traceRtClosest(std::span<const RtBvhNode> nodes, std::span<const RtTriangle> tris,
-                     const glm::vec3& origin, const glm::vec3& dir, float tMax);
-
 }  // namespace wowee::rendering

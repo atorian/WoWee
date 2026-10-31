@@ -50,11 +50,6 @@ public:
     void extractFromMatrix(const glm::mat4& viewProjection);
 
     /**
-     * Test if point is inside frustum
-     */
-    [[nodiscard]] bool containsPoint(const glm::vec3& point) const;
-
-    /**
      * Test if sphere is inside or intersecting frustum
      * @param center Sphere center
      * @param radius Sphere radius

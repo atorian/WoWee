@@ -94,8 +94,6 @@ Azeroth has **two moons** visible in the night sky, both significant to the worl
   - Placement: `sunPosition = -directionalDir * 800` (light comes FROM sun)
   - `Celestial::renderSun` draws the disc along `directionalDir` instead when
     `-directionalDir` points below the horizon
-  - The lens flare uses `sunDirectionFromLightDir()` (`sun_direction.hpp`),
-    which keeps a sun below the horizon below it
   - Without a lighting manager, `SkyParams`' default `directionalDir` is used
 - **Color**: Uses `LightingManager::diffuseColor` (DBC-driven, changes with time-of-day),
   mixed 52% toward a warm (1.0, 0.88, 0.55)

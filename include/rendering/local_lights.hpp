@@ -52,17 +52,6 @@ inline constexpr uint32_t kMaxAddressableLocalLights = 0xFFFEu;
 /// The scene grid's cell, in yards.
 inline constexpr float kLocalLightCellSize = 20.0f;
 
-/// The constant, linear and quadratic attenuation every M2 light keeps.
-inline constexpr float kLocalLightAttenConstant = 0.0f;
-inline constexpr float kLocalLightAttenLinear = 0.7f;
-inline constexpr float kLocalLightAttenQuadratic = 0.03f;
-
-inline float localLightAttenuation(float distance) {
-    const float denom = kLocalLightAttenConstant + kLocalLightAttenLinear * distance +
-                        kLocalLightAttenQuadratic * distance * distance;
-    return denom > 1e-4f ? 1.0f / denom : 1e4f;
-}
-
 /// The cells a receiver at `center` with bounding radius `radius` gathers
 /// from, along one axis: floor((c - r)/20 - 0.5) .. floor((c + r)/20 + 0.5).
 inline std::array<int, 2> localLightCellRange(float center, float radius) {

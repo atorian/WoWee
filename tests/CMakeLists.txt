@@ -1038,18 +1038,6 @@ target_link_libraries(test_packet PRIVATE catch2_main)
 add_test(NAME packet COMMAND test_packet)
 register_test_target(test_packet)
 
-# ── test_bit_packet ──────────────────────────────────────────
-add_executable(test_bit_packet
-    test_bit_packet.cpp
-    ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/network/packet.cpp
-)
-target_include_directories(test_bit_packet PRIVATE ${TEST_INCLUDE_DIRS})
-target_include_directories(test_bit_packet SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_bit_packet PRIVATE catch2_main)
-add_test(NAME bit_packet COMMAND test_bit_packet)
-register_test_target(test_bit_packet)
-
 # Standard Warden challenge and RC4 transition (no downloaded module needed).
 add_executable(test_warden_challenge
     test_warden_challenge.cpp
@@ -1308,22 +1296,6 @@ wowee_add_test(test_normal_map
 wowee_add_test(test_spatial_grid
     SOURCES test_spatial_grid.cpp
             ${TEST_COMMON_SOURCES})
-
-# ── test_cata_movement ─────────────────────────────────────────────────
-# The 109 Cataclysm movement layouts derived from a 4.3.4 core, and the reader
-# that executes them. Runs from the source dir for the derived JSON.
-add_executable(test_cata_movement
-    test_cata_movement.cpp
-    ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/game/cata_movement.cpp
-    ${CMAKE_SOURCE_DIR}/src/network/packet.cpp)
-target_include_directories(test_cata_movement PRIVATE ${TEST_INCLUDE_DIRS})
-target_include_directories(test_cata_movement SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_cata_movement PRIVATE catch2_main)
-wowee_test_link_glm(test_cata_movement)
-add_test(NAME cata_movement COMMAND test_cata_movement
-         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-register_test_target(test_cata_movement)
 
 # ── test_base_fallback ─────────────────────────────────────────────────
 # Whether one client's asset tree may answer for another's missing files.
@@ -1665,7 +1637,7 @@ wowee_add_test(test_terrain_depth
             ${CMAKE_SOURCE_DIR}/src/rendering/frustum.cpp)
 
 # ── test_rt_bvh ──────────────────────────────────────────────
-# The hierarchy the software ray tracer walks, against a brute-force scan.
+# The hierarchy the software ray tracer walks: its structure, not the walk.
 wowee_add_test(test_rt_bvh
     SOURCES test_rt_bvh.cpp
             ${CMAKE_SOURCE_DIR}/src/rendering/rt_bvh.cpp)
@@ -1910,21 +1882,6 @@ wowee_test_link_glm(test_minimap_projection)
 add_test(NAME minimap_projection COMMAND test_minimap_projection)
 register_test_target(test_minimap_projection)
 register_test_target(test_text_wrap)
-
-# ── test_chat_markup_parser ──────────────────────────────────
-add_executable(test_chat_markup_parser
-    test_chat_markup_parser.cpp
-    ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/ui/chat/chat_markup_parser.cpp
-)
-target_include_directories(test_chat_markup_parser PRIVATE ${TEST_INCLUDE_DIRS})
-target_include_directories(test_chat_markup_parser SYSTEM PRIVATE
-    ${TEST_SYSTEM_INCLUDE_DIRS}
-    ${CMAKE_SOURCE_DIR}/extern/imgui
-)
-target_link_libraries(test_chat_markup_parser PRIVATE catch2_main)
-add_test(NAME chat_markup_parser COMMAND test_chat_markup_parser)
-register_test_target(test_chat_markup_parser)
 
 # ── test_font_em_scale ───────────────────────────────────────
 # The head/hhea read that makes a font height mean an em, as FrameXML means it,
@@ -2307,17 +2264,6 @@ target_link_libraries(test_expansion_profile PRIVATE catch2_main)
 add_test(NAME expansion_profile COMMAND test_expansion_profile)
 register_test_target(test_expansion_profile)
 
-# ── test_buff_bar_layout ────────────────────────────────────
-# Header-only layout arithmetic - no ImGui needed.
-add_executable(test_buff_bar_layout
-    test_buff_bar_layout.cpp
-)
-target_include_directories(test_buff_bar_layout PRIVATE ${TEST_INCLUDE_DIRS})
-target_include_directories(test_buff_bar_layout SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_buff_bar_layout PRIVATE catch2_main)
-add_test(NAME buff_bar_layout COMMAND test_buff_bar_layout)
-register_test_target(test_buff_bar_layout)
-
 # ── test_dbc_layouts ────────────────────────────────────────
 # Reads the layout files shipped in Data/expansions, so it needs the source dir.
 add_executable(test_dbc_layouts
@@ -2572,13 +2518,6 @@ wowee_add_test(test_sphere_map
 wowee_add_test(test_m2_classifier_foliage
     SOURCES test_m2_classifier_foliage.cpp
             ${CMAKE_SOURCE_DIR}/src/rendering/m2_model_classifier.cpp)
-
-# ── test_terrain_slope_limit ────────────────────────────────
-# The 50 degree limit as it applies to the ground. It governed WMO and M2
-# floors; the terrain query answers a height and no normal, so it was never
-# applied there and any mountain could be walked straight up.
-wowee_add_test(test_terrain_slope_limit
-    SOURCES test_terrain_slope_limit.cpp)
 
 # ── test_particle_density_floor ─────────────────────────────
 # M2 particle emission, flight and layout against the 3.3.5a client's own

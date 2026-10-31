@@ -257,10 +257,6 @@ std::string_view DBCFile::rawStringView(uint32_t recordIndex, uint32_t fieldInde
     return getStringViewByOffset(offset);
 }
 
-std::string DBCFile::getStringByOffset(uint32_t offset) const {
-    return std::string(getStringViewByOffset(offset));
-}
-
 std::string_view DBCFile::getStringViewByOffset(uint32_t offset) const {
     if (!loaded || offset >= stringBlockSize) {
         return {};

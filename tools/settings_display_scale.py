@@ -45,7 +45,7 @@ DATA = ROOT / "Data"
 INTERFACE = ROOT / "Data/interface"
 CONFIG_ROOT = ROOT / "logs/settings_display_scale_config"
 
-# The buff bar's rule, from BuffBarMetrics: the height over a reference height,
+# SettingsPanel::recommendedPixelScale: the height over a reference height,
 # held between the bounds it uses. Written here because this checks the client
 # against the rule rather than against itself.
 REFERENCE_HEIGHT = 1080.0

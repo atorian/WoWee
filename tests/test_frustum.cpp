@@ -28,10 +28,10 @@ TEST_CASE("Frustum extractFromMatrix with identity", "[frustum]") {
 
     // Identity matrix gives clip-space frustum: [-1,1]^3 (or [0,1] for z)
     // The origin should be inside
-    REQUIRE(f.containsPoint(glm::vec3(0.0f, 0.0f, 0.5f)));
+    REQUIRE(f.intersectsSphere(glm::vec3(0.0f, 0.0f, 0.5f), 0.0f));
 }
 
-TEST_CASE("Frustum containsPoint perspective", "[frustum]") {
+TEST_CASE("Frustum perspective: a point is a sphere of no radius", "[frustum]") {
     // Create a typical perspective projection and look-at
     glm::mat4 proj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 100.0f);
     glm::mat4 view = glm::lookAt(
@@ -45,16 +45,16 @@ TEST_CASE("Frustum containsPoint perspective", "[frustum]") {
     f.extractFromMatrix(vp);
 
     // Point in front (at -Z)
-    REQUIRE(f.containsPoint(glm::vec3(0, 0, -10)));
+    REQUIRE(f.intersectsSphere(glm::vec3(0, 0, -10), 0.0f));
 
     // Point behind camera (at +Z) should be outside
-    REQUIRE_FALSE(f.containsPoint(glm::vec3(0, 0, 10)));
+    REQUIRE_FALSE(f.intersectsSphere(glm::vec3(0, 0, 10), 0.0f));
 
     // Point very far away inside the frustum
-    REQUIRE(f.containsPoint(glm::vec3(0, 0, -50)));
+    REQUIRE(f.intersectsSphere(glm::vec3(0, 0, -50), 0.0f));
 
     // Point beyond far plane
-    REQUIRE_FALSE(f.containsPoint(glm::vec3(0, 0, -200)));
+    REQUIRE_FALSE(f.intersectsSphere(glm::vec3(0, 0, -200), 0.0f));
 }
 
 TEST_CASE("Frustum intersectsSphere", "[frustum]") {
