@@ -53,6 +53,29 @@ n_handlers = int(re.search(r'^(\d+) domain handlers',domain).group(1))
 n_reaches = int(re.search(r'(\d+) reaches through owner_',domain).group(1))
 n_refs = int(re.search(r'(\d+) xxxRef',domain).group(1))
 n_callbacks = int(re.search(r'(\d+) set\*Callback',domain).group(1))
+render_sources = int(re.search(r'^(\d+) wowee_render sources',checks['render_dependency_check'],re.M).group(1))
+shared_constants = int(re.search(r'^(\d+) includes of shared constants',checks['game_dependency_check'],re.M).group(1))
+legacy = re.findall(r'^  (\w+)\s+include/', domain.split('reaches through owner_')[0], re.M)
+if legacy:
+    legacy_title = (f'{legacy[0]} всё ещё зависит от всего GameHandler' if len(legacy) == 1
+                    else f'{len(legacy)} домена всё ещё зависят от всего GameHandler')
+    legacy_node = f'[C1] legacy: {n_handlers} на GameHandler&\n' + ' / '.join(legacy)
+    legacy_edge = 'GameHandler& owner_'
+    legacy_body = (f'Статическая проверка: {n_handlers} handlers с GameHandler&, {n_reaches} обращений через owner_, '
+                   f'{n_refs} xxxRef-accessors. Имена доменов уже выделены, но часть их зависимостей и владения '
+                   'состоянием остаётся неявной.')
+    legacy_action = ('Переносить state к владельцу и передавать узкие PacketSender / FrameXmlEvents / Query interfaces; '
+                     'не добавлять новые owner_. и Ref-пути.')
+else:
+    legacy_title = 'GameHandler остаётся узлом, через который домены спрашивают друг друга'
+    legacy_node = '[C1] XxxQueries\nGameHandler реализует и пересылает'
+    legacy_edge = 'реализует: пересылка владельцу'
+    legacy_body = (f'Статическая проверка: {n_handlers} handlers с GameHandler&, {n_reaches} обращений через owner_. '
+                   'Каждый handler строится из своих interfaces, но реализует их GameHandler: вопрос одного домена '
+                   'к другому проходит через его пересылку, а порядок вызовов в ней держит порядок событий '
+                   f'FrameXML. Ещё {n_refs} xxxRef-accessors открывают его состояние наружу.')
+    legacy_action = ('Переносить оставшееся состояние (movementInfo, characters, currentMapId, update field table) '
+                     'к владельцам; уведомления между контекстами вести через bus, а не через пересылку.')
 
 sections = []
 sections.append(dict(slug='01-threading-model', short='Потоки', title='Threading Model', subtitle='Кто работает параллельно, через что передаёт результат и где кадр обязан ждать.',
@@ -71,6 +94,7 @@ sections.append(dict(slug='01-threading-model', short='Потоки', title='Thr
             node('frame','[T2] frameWorkers · 2–16\nанимация / floor / culling / secondary'),
             node('normals','Character NormalMapBuilder · 2\n64 ожидающих · ближние первыми'),
             node('preload','World preload · до 4\nотдельные потоки → join'),
+            node('release','background · 1\nосвобождение tiles / моделей'),
             node('other','Задачи по необходимости\nDNS/connect · Warden · patch/hash\nwatchdog · stats · update · recorder')]),
         group('external','Устройства и общие ресурсы',[
             node('assets','AssetManager\nfile mutex / DBC shared_mutex'),
@@ -82,12 +106,12 @@ sections.append(dict(slug='01-threading-model', short='Потоки', title='Thr
         edge('normals','finalize','takeFinished'),edge('main','frame','submit'),edge('frame','record','get: барьер','wait'),
         edge('finalize','gpu','асинхронные copies'),edge('record','gpu','команды кадра'),edge('gpu','record','ожидание frame slot','wait'),
         edge('terrain','assets','read / parse','borrow'),edge('io','assets','read / decode','borrow'),edge('preload','assets','warm cache','borrow'),
-        edge('main','audio','управление звуками'),edge('main','normals','submit'),edge('main','other','запуск / poll')],
+        edge('main','audio','управление звуками'),edge('main','normals','submit'),edge('main','other','запуск / poll'),edge('main','release','releaseInBackground')],
     issues=[
         issue('T1','Факт → риск','Все обычные I/O-задачи делят два FIFO-воркера',
             'JobGroup отправляет map/entity preparation в тот же ioWorkers, что чтение музыки и spell assets. Очередь ThreadPool не ограничена и не имеет приоритетов. Длинный backlog может задерживать появление близких объектов или запуск музыки.',
-            'Измерять время ожидания в очереди, её длину и тип задачи; затем вводить приоритеты и backpressure по общему контракту.',
-            evidence(('include/core/thread_pool.hpp','static ThreadPool& ioWorkers()'),('include/core/thread_pool.hpp','tasks_.emplace'),('include/core/job_group.hpp','auto future = ThreadPool::ioWorkers().submit('),('src/audio/music_manager.cpp','core::ThreadPool::ioWorkers().submit'))),
+            'ThreadPool уже записывает по метке задачи время в очереди и выполнения, но frame profile включает это только для frameWorkers. Включить то же для ioWorkers, добавить длину очереди; затем вводить приоритеты и backpressure по общему контракту.',
+            evidence(('include/core/thread_pool.hpp','static ThreadPool& ioWorkers()'),('include/core/thread_pool.hpp','tasks_.push(Queued{'),('include/core/job_group.hpp','auto future = ThreadPool::ioWorkers().submit('),('src/audio/music_manager.cpp','core::ThreadPool::ioWorkers().submit'))),
         issue('T2','Факт → риск','Параллельная работа остаётся на критическом пути кадра',
             'Главный поток ждёт M2 animation в Present и окончания secondary command buffers в Render. Это необходимые барьеры: длительность кадра зависит от самого долгого незавершённого задания, даже если остальные воркеры свободны.',
             'Профилировать очередь отдельно от выполнения и ожидания get; сохранять барьер перед чтением изменяемых spatial/animation данных.',
@@ -102,6 +126,7 @@ sections.append(dict(slug='01-threading-model', short='Потоки', title='Thr
         ('Terrain','queueMutex + queueCV; readyQueue ограничивает старт новой подготовки при глубине ≥3, есть MemoryMonitor throttling. Уже выполняемые задачи могут добавить результаты.'),
         ('Frame workers','2–16 потоков, по умолчанию hardware_concurrency−1 с clamp; общий пул для анимации, коллизий, visibility и записи secondary commands.'),
         ('I/O workers','2 потока; JobGroup даёт token и lifetime fence, а не собственный пул.'),
+        ('Background','1 поток для работы, которую не ждёт ни кадр, ни вызывающий: освобождение разобранных tiles и вытесненных моделей (releaseInBackground).'),
         ('Normal maps','У CharacterRenderer собственный NormalMapBuilder: 2 потока, очередь 64, приоритет расстояния, completed results → main.'),
         ('World preload','До 4 потоков на прогрев файлов; отдельная отмена и join, не общий ioWorkers.'),
         ('Прочие роли','DNS/connect detached с shared job; Warden/patch/hash/background decode — task-scoped; watchdog и ProcessStats — отдельные потоки; recorder и встроенный asset panel — условные. Число потоков библиотек/драйвера отдельно не инвентаризировалось.')],
@@ -158,7 +183,7 @@ sections.append(dict(slug='03-component-diagram',short='Подсистемы',ti
         node('presentation','PlayerView / EntitySpawner\nSpellPresentation / callbacks'),node('sound','AudioCoordinator\nminiaudio / managers')]),
         group('gamebox','wowee_game · protocol state',[
             node('gh','[C1/C2] GameHandler\nsession / queue / dispatch / facade'),node('domain','Доменные handlers\nchat / spell / inventory / quest / …'),
-            node('old','[C1] 4 legacy handlers\nCombat / Movement / Entity / Warden')]),
+            node('old',legacy_node)]),
         group('renderbox','wowee_render · сцена и GPU',[
             node('renderer','Renderer / VkContext API\nterrain / M2 / WMO / characters\nRT / water / post / overlays'),node('boundary','[C3] граница CMake\nне вся папка rendering — эта библиотека')]),
         group('libraries','Общие нижние слои',[
@@ -166,27 +191,25 @@ sections.append(dict(slug='03-component-diagram',short='Подсистемы',ti
             node('pipeline','wowee_pipeline\nAssetManager / DBC / ADT / M2 / WMO'),node('base','wowee_base\nEventBus / jobs / logging / CVar / math')])],
     edges=[edge('app','ui'),edge('app','presentation'),edge('app','sound'),edge('app','gh'),edge('app','renderer'),edge('app','pipeline'),
         edge('ui','gh'),edge('ui','renderer'),edge('ui','pipeline'),edge('presentation','gh'),edge('presentation','renderer'),edge('presentation','pipeline'),
-        edge('gh','domain','создаёт и делегирует','borrow'),edge('gh','old','создаёт','borrow'),edge('old','gh','GameHandler& owner_','wait'),
+        edge('gh','domain','создаёт и делегирует','borrow'),*([edge('gh','old','создаёт','borrow')] if legacy else []),edge('old','gh',legacy_edge,'wait'),
         edge('gh','netlib'),edge('gh','protocol'),edge('gh','pipeline'),edge('gh','base'),edge('domain','base','events / queries'),
         edge('renderer','pipeline'),edge('renderer','base'),edge('boundary','renderer','список исключений','borrow'),edge('netlib','protocol'),
         edge('netlib','base'),edge('protocol','base'),edge('pipeline','base'),edge('gh','presentation','уведомления: bus / callbacks','borrow')],
     issues=[
-        issue('C1','Подтверждённый долг','Четыре домена всё ещё зависят от всего GameHandler',
-            f'Статическая проверка: {n_handlers} handlers с GameHandler&, {n_reaches} обращений через owner_, {n_refs} xxxRef-accessors. Имена доменов уже выделены, но часть их зависимостей и владения состоянием остаётся неявной.',
-            'Переносить state к владельцу и передавать узкие PacketSender / FrameXmlEvents / Query interfaces; не добавлять новые owner_. и Ref-пути.',
-            evidence(('tools/domain_shape_check.py','def main()'),('src/game/game_handler.cpp','movementHandler_  = std::make_unique<MovementHandler>(*this);'),('include/game/game_handler.hpp','class GameHandler'))),
+        issue('C1','Подтверждённый долг',legacy_title,legacy_body,legacy_action,
+            evidence(('tools/domain_shape_check.py','def main()'),('src/game/game_handler.cpp','worldHandler_ = std::make_unique<WorldHandler>('),('include/game/world_handler.hpp','class WorldQueries'),('include/game/game_handler.hpp','class GameHandler'))),
         issue('C2','Долг → риск','Сохраняются каналы уведомления с одним слушателем',
             f'В GameHandler осталось {n_callbacks} set*Callback setters. Они требуют ручного wiring и допускают замену предыдущего слушателя. Само число не доказывает потерю события сейчас, но показывает объём неявного контракта.',
             'При изменении существующего уведомления переходить на типизированное событие и RAII Subscription; FrameXML оставить отдельным контрактом Lua.',
             evidence(('tools/domain_shape_check.py','CALLBACK_SETTER ='),('src/core/client_loop.cpp','services_.game.setAddonEventCallback('),('include/core/event_bus.hpp','class Subscription'))),
         issue('C3','Подтверждённый долг','Граница подсистемы не совпадает с путём файла',
-            'CMake исключает camera_controller, animation_controller, spell visuals и другие presentation-файлы из wowee_render. В game также остаётся 6 includes общих animation/movement constants из rendering/. Это усложняет определение владельца по каталогу.',
+            f'CMake исключает camera_controller, animation_controller, spell visuals и другие presentation-файлы из wowee_render. В game также остаётся {shared_constants} includes общих animation/movement constants из rendering/. Это усложняет определение владельца по каталогу.',
             'Ориентироваться на CMake targets и guard checks; общие protocol/animation IDs постепенно переносить в нейтральные headers.',
             evidence(('CMakeLists.txt','set(WOWEE_RENDER_CLIENT_SOURCES'),('tools/render_dependency_check.py','def library_sources()'),('tools/game_dependency_check.py','SHARED_CONSTANTS =')))
     ],
     facts=[('Client','Application владеет и связывает game, render, assets, UI и audio; ClientLoop управляет кадром и transitions. UI, addons, audio показаны как подсистемы, а не отдельные wowee_* targets.'),
         ('Game','Domain handlers владеют своими opcode/state; GameHandler сохраняет session/dispatch и legacy facade. Команды идут владельцу, queries — через interfaces, notifications — в bus.'),
-        ('Renderer','Получает scene/presentation state, не включает game/ui/audio/network client modules. 83 source-файла в текущей проверке; compile-time границы зависят от CMake.'),
+        ('Renderer',f'Получает scene/presentation state, не включает game/ui/audio/network client modules. {render_sources} source-файлов в текущей проверке; compile-time границы зависят от CMake.'),
         ('Pipeline','Загрузка файлов, архивные слои, кеши и парсеры. Зависит от base, не от game/render клиента.'),
         ('Network / protocol','Сеть использует protocol; game использует net и protocol. Сетевые transport-данные не вызывают GPU напрямую.'),
         ('Headless validation','GameHarness ведёт real GameHandler без client; scene_render связывает wowee_render без game. ClientHarness ведёт тот же ClientLoop с front-end stand-ins.')],
@@ -228,7 +251,7 @@ sections.append(dict(slug='04-data-flow',short='Данные',title='Data Flow D
             evidence(('include/rendering/terrain_manager.hpp','static constexpr size_t maxReadyQueueSize_ = 3;'),('src/rendering/terrain_manager.cpp','if (readyQueue.size() >= maxReadyQueueSize_)'),('src/rendering/terrain_manager.cpp','readyQueue.push(pending);')))
     ],
     facts=[('Сетевой handoff','Фоновая очередь socket → main → очередь game. Первая защищена mutex; вторая — main-thread-only и бюджетирована по времени.'),
-        ('Домены','Packet parser + opcode handler изменяют state. EntityController владеет entities; отображение получает события и запрашивает state.'),
+        ('Домены','Packet parser + opcode handler изменяют state. WorldHandler владеет объектами в зоне видимости, QueryCacheHandler — кэшами имён и шаблонов; отображение получает события и запрашивает state.'),
         ('Ресурсный handoff','Workers готовят CPU-результаты. Main опрашивает future/ready queue и проверяет token карты и запроса перед использованием.'),
         ('Актуальность','JobGroup::replace(channel, GUID) отменяет предыдущий запрос; map cancellation отсекает результаты старой карты, даже если GUID переиспользован.'),
         ('GPU handoff','Upload batch записывает copies и submit с fence. Fence опрашивается в последующих кадрах. Наличие готовых CPU bytes не равнозначно завершённому upload.'),
@@ -241,7 +264,7 @@ sections.append(dict(slug='05-ownership-lifetime',short='Владение',title
     groups=[group('process','Жизнь процесса · Application',[
         node('app','Application\n[O2] явный shutdown order'),node('bus','EventBus\nживёт дольше subscribers'),node('window','Window → VkContext\ndevice / swapchain / fences'),
         node('renderer','Renderer\nmodel / texture caches + render layers'),node('assets','AssetManager\nshared immutable file / DBC cache'),
-        node('gh','GameHandler\nconnection + domains'),node('entities','Handlers / EntityController\ncharacter state / entities'),node('front','PlayerView / EntitySpawner\nWorldLoader / UI / audio'),
+        node('gh','GameHandler\nconnection + domains'),node('entities','Handlers / WorldHandler\ncharacter state / entities'),node('front','PlayerView / EntitySpawner\nWorldLoader / UI / audio'),
         node('loop','ClientLoop\nworld transitions')]),
         group('character','Жизнь персонажа · CharacterSession',[
             node('session','CharacterSession\nlogin → logout / exit'),node('character','InterfaceState + PlayerSync\nSpellPresentation + subscriptions'),
@@ -262,7 +285,7 @@ sections.append(dict(slug='05-ownership-lifetime',short='Владение',title
         issue('O1','Факт → риск','Отмена задач не делает teardown мгновенным',
             'MapScope отменяет jobs, уничтожает load session, останавливает terrain и вызывает wait. JobGroup учитывает lease ещё до постановки в общую I/O FIFO. Поэтому отменённая, но ещё не запущенная задача может ждать предыдущие чужие задачи; уже идущий read/parse не прерывается токеном.',
             'Измерять Transitions и возраст отменённых jobs; при требовании ограниченной задержки нужен scheduler с удалением queued cancelled work или эквивалентный контракт fence.',
-            evidence(('src/core/map_scope.cpp','MapScope::~MapScope()'),('include/core/job_group.hpp','auto lease = track(t);'),('src/core/world_loader.cpp','WorldLoader::Session::~Session()'),('include/core/thread_pool.hpp','tasks_.emplace'))),
+            evidence(('src/core/map_scope.cpp','MapScope::~MapScope()'),('include/core/job_group.hpp','auto lease = track(t);'),('src/core/world_loader.cpp','WorldLoader::Session::~Session()'),('include/core/thread_pool.hpp','tasks_.push(Queued{'))),
         issue('O2','Долг → риск','Безопасность borrowed ссылок зависит от ручного teardown order',
             'Renderer заимствует VkContext у Window; spawner — SpawnState карты, WorldLoader — Session load. Application::shutdown явно уничтожает клиентские lifetime до assets/device/window. CharacterSession также вручную сбрасывает состояние process-wide presenters. Эти связи не выражены одним owner tree.',
             'Новые подписки хранить RAII-членами; для каждого нового borrowed указателя указать lifetime. Проверять logout, same-map reconnect, superseded load и exit, сохраняя порядок stop/join → release.',
@@ -288,14 +311,14 @@ thread = sections[0]
 thread_nodes = {key: label for g in thread['groups'] for key,label in g['nodes']}
 thread['groups'] = [
     group('incoming','Сеть → главный поток',[node(k,thread_nodes[k]) for k in ('net','packets','main')]),
-    group('workers','Фоновые исполнители · независимые лимиты [T3]',[node(k,thread_nodes[k]) for k in ('io','frame','terrain','normals','preload','other')]),
+    group('workers','Фоновые исполнители · независимые лимиты [T3]',[node(k,thread_nodes[k]) for k in ('io','frame','terrain','normals','preload','release','other')]),
     group('returnmain','Результаты → тот же главный поток',[node(k,thread_nodes[k]) for k in ('ready','finalize','record')]),
     group('devices','Общие ресурсы и устройства',[node(k,thread_nodes[k]) for k in ('assets','audio','gpu')]),
 ]
 thread['ranks'] = [('io','frame'),('terrain','normals'),('preload','other')]
 thread['invisible'] = [('io','terrain'),('terrain','preload')]
 thread['edges'] = [e for e in thread['edges'] if not (e[0]=='main' and e[1]=='net')]
-thread['edges'] = [(a,b,label,'borrow' if a in ('preload',) or b in ('other','audio') else kind) for a,b,label,kind in thread['edges']]
+thread['edges'] = [(a,b,label,'borrow' if a in ('preload',) or b in ('other','audio','release') else kind) for a,b,label,kind in thread['edges']]
 owner = sections[4]
 owner['ranks'] = [('bus','window'),('renderer','assets'),('gh','front'),('jobs','spawnstate'),('load','renderSession')]
 owner['invisible'] = [('bus','renderer'),('renderer','gh'),('gh','loop'),('jobs','load')]
@@ -371,7 +394,7 @@ def wrap(title, content, selected=None):
     nav+=''.join(f'<a href="{s["slug"]}.html"'+(' aria-current="page"' if selected==s['slug'] else '')+'>'+h(s['short'])+'</a>' for s in sections)
     return f'''<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>{h(title)} · WoWee</title><style>{CSS}</style></head>
-<body><header><div class="kicker">WoWee / архитектура по исходному коду</div><h1>{h(title)}</h1><p class="meta">19 октября 2026 · HEAD {revision} + рабочее дерево · статический разбор</p><nav aria-label="Диаграммы">{nav}</nav></header><main>{content}</main><footer>Факт — наблюдаемое поведение кода. Риск — возможное следствие без runtime-подтверждения. Долг — текущая архитектурная связанность. Числа бюджетов — настройки по умолчанию, а не результаты профилирования. Исходники и строки указаны рядом с каждым замечанием. <a href="README.md">Markdown</a> · <a href="sources.json">Снимок источников</a> · <a href="checks.txt">Статические проверки</a></footer><script>
+<body><header><div class="kicker">WoWee / архитектура по исходному коду</div><h1>{h(title)}</h1><p class="meta">31 октября 2026 · HEAD {revision} + рабочее дерево · статический разбор</p><nav aria-label="Диаграммы">{nav}</nav></header><main>{content}</main><footer>Факт — наблюдаемое поведение кода. Риск — возможное следствие без runtime-подтверждения. Долг — текущая архитектурная связанность. Числа бюджетов — настройки по умолчанию, а не результаты профилирования. Исходники и строки указаны рядом с каждым замечанием. <a href="README.md">Markdown</a> · <a href="sources.json">Снимок источников</a> · <a href="checks.txt">Статические проверки</a></footer><script>
 document.addEventListener('click', function(event) {{
  const button=event.target.closest('button[data-zoom]'); if(!button)return;
  const svg=button.closest('article').querySelector('.diagram svg');
@@ -396,10 +419,10 @@ for s in sections:
 intro='''<div class="intro"><p>Пять представлений текущей архитектуры. Коды T/F/C/D/O на узлах связывают диаграмму с пояснениями справа. Для каждого замечания указаны наблюдение, возможное последствие, следующий шаг и место в исходниках.</p><p>Это разбор реализации: подтверждённые ограничения отделены от рисков. Фризы, утечки и гонки не объявляются воспроизведёнными без отдельного запуска. Диаграммы обзорные; все методы и все потоки сторонних библиотек не перечислены.</p></div><div class="findings"><div><a href="#D1">D1 · Потеря сетевого состояния</a><p>При overflow игровой очереди удаляется пакет, сессия продолжается. Нужна явная recovery-политика.</p></div><div><a href="#F1">F1 · Скрытая стоимость Present</a><p>Часть terrain streaming и ожидание анимации происходят после фазы Streaming.</p></div><div><a href="#O1">O1 · Отмена с ожиданием</a><p>Transitions может ждать cancelled jobs, стоящие за другой работой общего I/O-пула.</p></div></div>'''
 (HERE/'index.html').write_text(wrap('Пять взглядов на движок',intro+''.join(article(s) for s in sections)))
 
-md=['# WoWee — архитектурный атлас',f'\nСнимок: 2026-10-19, HEAD `{revision}` + рабочее дерево. Все выводы основаны на статическом чтении кода; runtime-профиль не снимался.',
+md=['# WoWee — архитектурный атлас',f'\nСнимок: 2026-10-31, HEAD `{revision}` + рабочее дерево. Все выводы основаны на статическом чтении кода; runtime-профиль не снимался.',
     '\n[Открыть общий обзор](index.html). Пять отдельных HTML-артефактов работают без сети. В каждом диаграмма находится рядом с проблемами и ссылками на код. SVG/PNG предназначены для просмотра и экспорта, Mermaid/DOT — для редактирования.',
     '\nОбозначения: **Факт** — проверено в коде; **Риск** — возможное следствие, требующее воспроизведения/замера; **Долг** — текущая архитектурная связанность. Это описание реализации, не проект исправлений. Номера строк относятся к снимку; хеши исходников сохранены в `sources.json`.',
-    '\nСуществовавшие локальные изменения server_extension и warden не изменялись. Результаты проверок относятся к прочитанному рабочему дереву. `docs/threading.md` использовался только как ориентир: его описания detached normal-map tasks и самостоятельных loading frames расходятся с текущей реализацией.',
+    '\nРезультаты проверок относятся к прочитанному рабочему дереву. `docs/threading.md` использовался только как ориентир: его описания detached normal-map tasks и самостоятельных loading frames расходятся с текущей реализацией.',
     '\n## Артефакты\n']
 for s in sections:
     md.append(f'- [{s["title"]}]({s["slug"]}.html) · [SVG](diagrams/{s["slug"]}.svg) · [PNG](diagrams/{s["slug"]}.png) · [Mermaid](diagrams/{s["slug"]}.mmd)')
@@ -407,11 +430,11 @@ for s in sections:
     md += [f'\n## {s["title"]}', '\n'+s['subtitle'],'\n```mermaid\n'+mermaid_for(s)+'```','\n'+s['legend'],'\n### Что подсвечивает\n']
     for i in s['issues']:
         md += [f'**{i["code"]} · {i["kind"]} · {i["title"]}**\n',i['body']+'\n','Следующий шаг: '+i['action']+'\n']
-        # Relative source links resolve from this directory; absolute links are
-        # also supplied for Codex readers, since that UI supports line targets.
+        # Relative, as the HTML's are: an absolute path names the checkout the
+        # atlas was built in, and stops resolving when that checkout goes.
         for key in i['refs']:
             r=source_map[key]
-            md.append(f'- [{key}]({ROOT/r["path"]}:{r["line"]})')
+            md.append(f'- [{key}](../../{r["path"]}#L{r["line"]})')
         md.append('')
     md += ['\n### Обязанности и границы\n','| Область | Поведение |','|---|---|']
     md += [f'| {k} | {v} |' for k,v in s['facts']]
@@ -420,6 +443,6 @@ md += ['\n## Проверки и воспроизведение\n','`checks.txt`
     '\nГенерация: `python3 docs/architecture-atlas/generate.py` (Python 3 + Graphviz `dot`). Генератор пишет только в эту папку; TMP/TEMP/TMPDIR дочерних процессов направлены в `build-dev/tmp` на D:. PNG и SVG строятся из DOT; Mermaid передаёт тот же набор узлов и связей, его layout может отличаться.',
     '\nHTML не использует CDN, шрифты из сети или внешние скрипты. SVG/PNG содержат саму схему; пояснения рядом и ссылки доступны в HTML и Markdown. Для печати всего обзора можно использовать печать HTML в PDF.']
 (HERE/'README.md').write_text('\n'.join(md)+'\n')
-(HERE/'sources.json').write_text(json.dumps({'snapshot_date':'2026-10-19','head':revision,'scope':'working tree, static review','sources':source_map},ensure_ascii=False,indent=2)+'\n')
+(HERE/'sources.json').write_text(json.dumps({'snapshot_date':'2026-10-31','head':revision,'scope':'working tree, static review','sources':source_map},ensure_ascii=False,indent=2)+'\n')
 (HERE/'atlas.json').write_text(json.dumps(sections,ensure_ascii=False,indent=2)+'\n')
 print(f'Built {len(sections)} diagrams, 6 offline HTML documents, Mermaid/DOT/SVG/PNG and source manifest ({len(source_map)} anchors).')

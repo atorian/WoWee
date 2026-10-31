@@ -13,7 +13,7 @@ subgraph cluster_gamebox {
 label="wowee_game · protocol state"; style="rounded"; color="#c4d1e2"; fontcolor="#38546f";
 gh [label="[C1/C2] GameHandler\nsession / queue / dispatch / facade",fillcolor="#fff1e9",color="#d6a68b"];
 domain [label="Доменные handlers\nchat / spell / inventory / quest / …"];
-old [label="[C1] 4 legacy handlers\nCombat / Movement / Entity / Warden",fillcolor="#fff1e9",color="#d6a68b"];
+old [label="[C1] XxxQueries\nGameHandler реализует и пересылает",fillcolor="#fff1e9",color="#d6a68b"];
 }
 subgraph cluster_renderbox {
 label="wowee_render · сцена и GPU"; style="rounded"; color="#c4d1e2"; fontcolor="#38546f";
@@ -40,8 +40,7 @@ presentation -> gh [];
 presentation -> renderer [];
 presentation -> pipeline [];
 gh -> domain [label="создаёт и делегирует"];
-gh -> old [label="создаёт"];
-old -> gh [label="GameHandler& owner_",style=dashed,constraint=false,color="#ae5b32",fontcolor="#8a4324"];
+old -> gh [label="реализует: пересылка владельцу",style=dashed,constraint=false,color="#ae5b32",fontcolor="#8a4324"];
 gh -> netlib [];
 gh -> protocol [];
 gh -> pipeline [];

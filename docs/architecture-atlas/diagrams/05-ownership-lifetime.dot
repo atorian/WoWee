@@ -10,7 +10,7 @@ window [label="Window → VkContext\ndevice / swapchain / fences"];
 renderer [label="Renderer\nmodel / texture caches + render layers"];
 assets [label="AssetManager\nshared immutable file / DBC cache"];
 gh [label="GameHandler\nconnection + domains"];
-entities [label="Handlers / EntityController\ncharacter state / entities"];
+entities [label="Handlers / WorldHandler\ncharacter state / entities"];
 front [label="PlayerView / EntitySpawner\nWorldLoader / UI / audio"];
 loop [label="ClientLoop\nworld transitions"];
 }
