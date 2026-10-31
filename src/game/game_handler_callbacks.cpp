@@ -612,6 +612,7 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     combatHandler_->beginCharacter();
     combatHandler_->invalidateTabCycle();
     entityController_->clearAll();
+    queryCacheHandler_->clear();
     accountDataHandler_->characterSelected(characterGuid);
     // The domains that keep what the server will send again end it on this.
     eventBus().publish(events::CharacterLoggingIn{characterGuid});
@@ -1157,20 +1158,43 @@ void GameHandler::addLocalChatMessage(const MessageChatData& msg) {
 }
 
 // ============================================================
-// Name Queries (delegated to EntityController)
+// Name Queries
 // ============================================================
 
-void GameHandler::queryPlayerName(uint64_t guid) {
-    entityController_->queryPlayerName(guid);
+void GameHandler::playerNameArrived(uint64_t guid, const std::string& name) {
+    entityController_->playerNamed(guid, name);
 }
 
-void GameHandler::queryCreatureInfo(uint32_t entry, uint64_t guid) {
-    entityController_->queryCreatureInfo(entry, guid);
+void GameHandler::creatureTemplateArrived(const CreatureQueryResponseData& data) {
+    entityController_->creatureNamed(data);
+    // A companion may have been waiting on exactly this. A companion's
+    // creature id is a template entry and the model frame needs a display
+    // id, so GetCompanionInfo answers zero until the query comes back - and
+    // the tab only re-reads when told. Without this the model appeared on
+    // the next login and not before.
+    //
+    // With the kind, because the event carries it and the tab re-reads the
+    // list it names: a mount's answer announced as a critter's left the
+    // mount tab holding the zero it started with.
+    const std::string kind = companionKindForCreature(data.entry);
+    if (!kind.empty() && hasAddonEventListener()) {
+        fireAddonEvent("COMPANION_UPDATE", {kind});
+    }
+    // An objective that had no name for what it is about now has one.
+    questHandler_->objectiveTargetNamed(data.entry, false);
+}
+
+void GameHandler::gameObjectTemplateArrived(const GameObjectQueryResponseData& data) {
+    entityController_->gameObjectNamed(data);
+    // And the same for an objective that names this one - a chest to open
+    // rather than a creature to kill.
+    questHandler_->objectiveTargetNamed(data.entry, true);
+    movementHandler_->transportTemplateArrived(data);
 }
 
 uint32_t GameHandler::getCreatureDisplayIdForEntry(uint32_t entry) {
     if (entry == 0) return 0;
-    const auto& cache = getCreatureInfoCache();
+    const auto& cache = queryCacheHandler_->getCreatureInfoCache();
     if (auto it = cache.find(entry); it != cache.end()) {
         // The first non-zero of the four. A template may carry several models
         // and the server picks between them per spawn; for a preview any of
@@ -1181,16 +1205,8 @@ uint32_t GameHandler::getCreatureDisplayIdForEntry(uint32_t entry) {
     }
     // Guid zero: this is not about any one spawn. queryCreatureInfo drops a
     // repeat while one is in flight, so calling every frame sends one query.
-    queryCreatureInfo(entry, 0);
+    queryCacheHandler_->queryCreatureInfo(entry, 0);
     return 0;
-}
-
-std::string GameHandler::getCachedPlayerName(uint64_t guid) const {
-    return entityController_->getCachedPlayerName(guid);
-}
-
-std::string GameHandler::getCachedCreatureName(uint32_t entry) const {
-    return entityController_->getCachedCreatureName(entry);
 }
 
 // ============================================================
@@ -1348,7 +1364,7 @@ bool GameHandler::isFishingHoleGameObject(uint64_t guid) const {
     if (guid == 0) return false;
     auto entity = entityController_->getEntityManager().getEntity(guid);
     if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return false;
-    const auto* info = getCachedGameObjectInfo(
+    const auto* info = queryCacheHandler_->getCachedGameObjectInfo(
         std::static_pointer_cast<GameObject>(entity)->getEntry());
     return info && info->type == kGoTypeFishingHole;
 }
@@ -1376,7 +1392,7 @@ bool GameHandler::isGatherGameObject(uint64_t guid) const {
     if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return false;
 
     auto go = std::static_pointer_cast<GameObject>(entity);
-    const GameObjectQueryResponseData* goInfo = getCachedGameObjectInfo(go->getEntry());
+    const GameObjectQueryResponseData* goInfo = queryCacheHandler_->getCachedGameObjectInfo(go->getEntry());
     return gatherSpellForGameObject(goInfo, go->getName()) != 0;
 }
 
@@ -1577,7 +1593,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
             auto go = std::static_pointer_cast<GameObject>(entity);
             goEntry = go->getEntry();
             goName = go->getName();
-            goInfo = getCachedGameObjectInfo(goEntry);
+            goInfo = queryCacheHandler_->getCachedGameObjectInfo(goEntry);
             if (goInfo) goType = goInfo->type;
             if (goType == kGoTypeFishingHole) {
                 // Nothing sent, and nothing scheduled: the school is fished, not
@@ -1633,7 +1649,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
     bool metadataPending = false;
     if (entity && entity->getType() == ObjectType::GAMEOBJECT) {
         auto go = std::static_pointer_cast<GameObject>(entity);
-        if (!goInfo) goInfo = getCachedGameObjectInfo(go->getEntry());
+        if (!goInfo) goInfo = queryCacheHandler_->getCachedGameObjectInfo(go->getEntry());
         metadataPending = (goInfo == nullptr);
         if (goInfo && goInfo->type == 19) {
             isMailbox = true;

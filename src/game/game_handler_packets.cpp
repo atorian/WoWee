@@ -433,7 +433,7 @@ void GameHandler::registerCoreOpcodes() {
         // Who is asking. StaticPopup_Show("CONFIRM_BINDER", arg1) puts the name
         // into "Do you want to make <name> your new home?" - without it the
         // question had a hole where the innkeeper should be.
-        fireAddonEvent("CONFIRM_BINDER", {entityController_->lookupName(binderGuid_)});
+        fireAddonEvent("CONFIRM_BINDER", {queryCacheHandler_->lookupName(binderGuid_)});
     };
     registerSkipHandler(Opcode::SMSG_SET_PHASE_SHIFT);
     dispatchTable_[Opcode::SMSG_TOGGLE_XP_GAIN] = [this](network::Packet& packet) {
@@ -759,7 +759,7 @@ void GameHandler::registerCoreOpcodes() {
             // M2 animation id 0, so the packet payload itself cannot identify it.
             uint64_t createdBy = static_cast<uint64_t>(go->getField(6))
                                | (static_cast<uint64_t>(go->getField(7)) << 32);
-            auto* info = getCachedGameObjectInfo(go->getEntry());
+            auto* info = queryCacheHandler_->getCachedGameObjectInfo(go->getEntry());
             ownedFishingBite = createdBy == playerGuid && (!info || info->type == 17);
             if (ownedFishingBite) {
                 hookedFishingBobberGuid_ = guid;
@@ -1009,7 +1009,7 @@ void GameHandler::registerRemainingOpcodes() {
             // Show enchant message if the player is involved
             if (enchTargetGuid == playerGuid || enchCasterGuid == playerGuid) {
                 const std::string& enchName = spellHandler_->getSpellName(enchSpellId);
-                std::string casterName = entityController_->lookupName(enchCasterGuid);
+                std::string casterName = queryCacheHandler_->lookupName(enchCasterGuid);
                 if (!enchName.empty()) {
                     std::string msg;
                     if (enchCasterGuid == playerGuid)
@@ -1138,7 +1138,7 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_INVALIDATE_PLAYER] = [this](network::Packet& packet) {
         if (packet.hasRemaining(8)) {
             uint64_t guid = packet.readUInt64();
-            entityController_->invalidatePlayerName(guid);
+            queryCacheHandler_->invalidatePlayerName(guid);
         }
     };
     // uint32 movieId - we don't play movies; acknowledge immediately.
@@ -1234,7 +1234,7 @@ void GameHandler::registerRemainingOpcodes() {
         // uint64 memberGuid - a player was added to your group via meeting stone
         if (packet.hasRemaining(8)) {
             uint64_t memberGuid = packet.readUInt64();
-            const auto& memberName = entityController_->lookupName(memberGuid);
+            const auto& memberName = queryCacheHandler_->lookupName(memberGuid);
             if (!memberName.empty()) {
                 chatHandler_->addSystemChatMessage("Meeting Stone: " + memberName +
                                      " has been added to your group.");
@@ -1820,7 +1820,7 @@ void GameHandler::registerRemainingOpcodes() {
             std::string mentorName;
             auto ent = entityController_->getEntityManager().getEntity(mentorGuid);
             if (auto* unit = dynamic_cast<Unit*>(ent.get())) mentorName = unit->getName();
-            if (mentorName.empty()) mentorName = entityController_->lookupName(mentorGuid);
+            if (mentorName.empty()) mentorName = queryCacheHandler_->lookupName(mentorGuid);
             chatHandler_->addSystemChatMessage(mentorName.empty()
                 ? "A player is offering to grant you a level."
                 : (mentorName + " is offering to grant you a level."));
@@ -2180,6 +2180,7 @@ void GameHandler::registerRemainingOpcodes() {
 // opcode by opcode, 182 here against 320 there, no overlap - so the order
 // between them carries no meaning and a reader need not look for one.
 void GameHandler::registerDomainOpcodes() {
+    queryCacheHandler_->registerOpcodes(dispatchTable_);
     chatHandler_->registerOpcodes(dispatchTable_);
     movementHandler_->registerOpcodes(dispatchTable_);
     combatHandler_->registerOpcodes(dispatchTable_);

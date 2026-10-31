@@ -690,7 +690,7 @@ void GameScreen::renderMinimapRares(const MinimapFrame& frame, const EntityList&
             auto unit = std::static_pointer_cast<game::Unit>(entity);
             if (!unit || unit->getHealth() == 0) continue;
 
-            const int rank = gameHandler.entityController().getCreatureRank(unit->getEntry());
+            const int rank = gameHandler.queryCache().getCreatureRank(unit->getEntry());
             if (rank != 2 && rank != 4) continue; // 2 = Rare Elite, 4 = Rare
 
             float sx = 0.0f, sy = 0.0f;
@@ -804,7 +804,7 @@ void GameScreen::renderMinimapObjectDots(const MinimapFrame& frame, const Entity
             if (!go) continue;
 
             // Only show if we have name data (avoids cluttering with unknown objects)
-            const auto* goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
+            const auto* goInfo = gameHandler.queryCache().getCachedGameObjectInfo(go->getEntry());
             if (!goInfo || !goInfo->isValid()) continue;
             // Skip transport objects (boats/zeppelins): type 15 = MO_TRANSPORT, 11 = TRANSPORT
             if (goInfo->type == 11 || goInfo->type == 15) continue;
@@ -849,7 +849,7 @@ void GameScreen::renderMinimapChests(const MinimapFrame& frame, const EntityList
         for (const auto& entity : minimapGameObjects) {
             auto chest = std::static_pointer_cast<game::GameObject>(entity);
             if (!chest) continue;
-            const auto* info = gameHandler.getCachedGameObjectInfo(chest->getEntry());
+            const auto* info = gameHandler.queryCache().getCachedGameObjectInfo(chest->getEntry());
             if (!info || !info->isValid() || info->type != 3) continue;
             if (gameHandler.isGatherGameObject(chest->getGuid())) continue;
 

@@ -286,7 +286,7 @@ void AudioCallbackHandler::setupCallbacks() {
 
         // Show chat message if in group
         if (gameHandler_.inGroup()) {
-            std::string name = gameHandler_.getCachedPlayerName(guid);
+            std::string name = gameHandler_.queryCache().lookupName(guid);
             if (name.empty()) name = "A party member";
             game::MessageChatData msg;
             msg.type = game::ChatType::SYSTEM;

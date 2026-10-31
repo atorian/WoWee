@@ -1228,7 +1228,7 @@ bool GameScreen::drawWorldObjectCursor(game::GameHandler& gameHandler,
     if (!entity || entity->getType() != game::ObjectType::GAMEOBJECT) return false;
 
     auto go = std::static_pointer_cast<game::GameObject>(entity);
-    const auto* info = gameHandler.getCachedGameObjectInfo(go->getEntry());
+    const auto* info = gameHandler.queryCache().getCachedGameObjectInfo(go->getEntry());
     if (usable) {
         VkDescriptorSet tex = cursorTexture(services_.assetManager, services_.window,
                                             objectCursorPath(info ? info->type : 0u));
@@ -2025,7 +2025,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
             auto target = gameHandler.combat().getTarget();
             if (target && target->getType() == game::ObjectType::GAMEOBJECT) {
                 auto go = std::static_pointer_cast<game::GameObject>(target);
-                auto* goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
+                auto* goInfo = gameHandler.queryCache().getCachedGameObjectInfo(go->getEntry());
                 if (!goInfo || goInfo->type != 7) {
                     LOG_DEBUG("[GO-DIAG] Right-click: re-interacting with targeted GO 0x",
                                 std::hex, target->getGuid(), std::dec);
@@ -2175,7 +2175,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     // Skip chairs: auto-sit must only happen when the chair is
                     // under the cursor, never as a side effect of right-click.
                     auto go = std::static_pointer_cast<game::GameObject>(target);
-                    auto* goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
+                    auto* goInfo = gameHandler.queryCache().getCachedGameObjectInfo(go->getEntry());
                     if (!goInfo || goInfo->type != 7) {
                         gameHandler.interactWithGameObject(target->getGuid());
                     }

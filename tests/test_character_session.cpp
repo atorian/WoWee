@@ -133,7 +133,7 @@ TEST_CASE("a relog's session is the new character's, and so are its saved variab
     h.enterWorld(alice);
     const auto first = wowee::core::characterIdentityOf(
         h.game().getPlayerGuid(), h.game().getCharacters(),
-        h.game().entityController().lookupName(h.game().getPlayerGuid()));
+        h.game().queryCache().lookupName(h.game().getPlayerGuid()));
     CHECK(first.guid == alice.guid);
     CHECK(first.name == "Alice");
 
@@ -153,7 +153,7 @@ TEST_CASE("a relog's session is the new character's, and so are its saved variab
 
     const auto second = wowee::core::characterIdentityOf(
         h.game().getPlayerGuid(), h.game().getCharacters(),
-        h.game().entityController().lookupName(h.game().getPlayerGuid()));
+        h.game().queryCache().lookupName(h.game().getPlayerGuid()));
     CHECK(second.guid == bob.guid);
     CHECK(second.name == "Bob");
 

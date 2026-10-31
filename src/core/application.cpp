@@ -565,7 +565,7 @@ bool Application::initialize() {
     auctionHouse_ = std::make_unique<auction::AuctionService>(*auctionGateway_, *auctionGateway_, eventBus_);
     gameServices_.auctionFeed = auctionHouse_.get();
     mailGateway_ = std::make_unique<game::MailGateway>(*gameHandler, gameHandler->inventory(), *gameHandler,
-                                                       *gameHandler);
+                                                       gameHandler->queryCache());
     mail_ = std::make_unique<mail::MailService>(*mailGateway_, *mailGateway_, eventBus_);
     gameServices_.mailFeed = mail_.get();
     gameServices_.mail = mail_.get();

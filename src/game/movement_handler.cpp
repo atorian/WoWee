@@ -27,6 +27,7 @@
 #include <limits>
 #include <zlib.h>
 #include <array>
+#include <set>
 #include <unordered_set>
 
 namespace wowee {
@@ -4686,6 +4687,45 @@ void MovementHandler::reconcileMount() {
                 mount_.displayId = serverMountDisplayId;
                 events_.publish(events::PlayerMountChanged{serverMountDisplayId});
             }
+        }
+    }
+}
+
+void MovementHandler::transportTemplateArrived(const GameObjectQueryResponseData& data) {
+    // MO_TRANSPORT (type 15): assign TaxiPathNode path if available.
+    //
+    // This is the only route a zeppelin or a continent ship ever gets -
+    // none of them has a TransportAnimation.dbc entry - so every way it
+    // can fail leaves a transport standing at its dock, and every one of
+    // them used to be silent or at debug level. Said once per entry.
+    const uint32_t mapId = queries_.currentMapId();
+    if (data.type == 15) {
+        static std::set<uint32_t> saidRoute;
+        const bool sayThis = saidRoute.insert(data.entry).second;
+        const uint32_t taxiPathId = data.hasData ? data.data[0] : 0u;
+        if (taxiPathId == 0) {
+            if (sayThis) {
+                LOG_WARNING("MO_TRANSPORT entry=", data.entry,
+                            " carries no taxiPathId (hasData=", data.hasData ? 1 : 0,
+                            ") - it has no route to fly and will stay docked");
+            }
+        } else if (!queries_.transports()->hasTaxiPathForMap(taxiPathId, mapId)) {
+            if (sayThis) {
+                LOG_WARNING("MO_TRANSPORT entry=", data.entry, " taxiPathId=", taxiPathId,
+                            " has no TaxiPathNode segment on map ", mapId,
+                            " (the path exists on some map: ",
+                            queries_.transports()->hasTaxiPath(taxiPathId) ? 1 : 0, ")");
+            }
+        } else if (queries_.transports()->assignTaxiPathToTransport(
+                       data.entry, taxiPathId, mapId)) {
+            if (sayThis) {
+                LOG_WARNING("MO_TRANSPORT entry=", data.entry, " assigned TaxiPathNode path ",
+                            taxiPathId, " on map ", mapId);
+            }
+        } else if (sayThis) {
+            LOG_WARNING("MO_TRANSPORT entry=", data.entry, " has TaxiPathNode path ",
+                        taxiPathId, " on map ", mapId,
+                        " but no transport registered under that entry took it");
         }
     }
 }

@@ -10,7 +10,7 @@ namespace wowee::game {
 class PacketSender;
 class InventoryHandler;
 class InventoryQueries;
-class IEntityAccess;
+class QueryCacheHandler;
 class ChatLog;
 class FrameXmlEvents;
 
@@ -19,7 +19,7 @@ class FrameXmlEvents;
 class MailGateway final : public mail::IMailGateway, public mail::IMailWorld {
 public:
     MailGateway(PacketSender& sender, InventoryHandler& inventory, InventoryQueries& world,
-                IEntityAccess& names)
+                const QueryCacheHandler& names)
         : sender_(sender), inventory_(inventory), world_(world), names_(names) {}
 
     // IMailGateway
@@ -52,7 +52,7 @@ private:
     PacketSender& sender_;
     InventoryHandler& inventory_;
     InventoryQueries& world_;
-    IEntityAccess& names_;
+    const QueryCacheHandler& names_;
 };
 
 /// What the player sees and hears of the mailbox: the MAIL_* events, the chat

@@ -237,7 +237,7 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     auctionGateway_ = std::make_unique<game::AuctionGateway>(*game_, game_->inventory(), *game_);
     auctionHouse_ = std::make_unique<auction::AuctionService>(*auctionGateway_, *auctionGateway_, events_);
     services_.auctionFeed = auctionHouse_.get();
-    mailGateway_ = std::make_unique<game::MailGateway>(*game_, game_->inventory(), *game_, *game_);
+    mailGateway_ = std::make_unique<game::MailGateway>(*game_, game_->inventory(), *game_, game_->queryCache());
     mail_ = std::make_unique<mail::MailService>(*mailGateway_, *mailGateway_, events_);
     services_.mailFeed = mail_.get();
     services_.mail = mail_.get();
@@ -509,6 +509,10 @@ std::vector<uint8_t> GameHarness::valuesBody(uint64_t guid, const Fields& fields
 void GameHarness::playerInView() {
     const uint64_t guid = player_.guid;
     game_->getEntityManager().addEntity(guid, std::make_shared<game::Player>(guid));
+}
+
+std::vector<uint8_t> GameHarness::nameResponseBody(uint64_t guid, const std::string& name) {
+    return Body().packedGuid(guid).u8(0 /* found */).cstr(name).cstr("").u8(2).u8(0).u8(7);
 }
 
 void GameHarness::playerFields(const std::map<uint16_t, uint32_t>& fields, bool create) {

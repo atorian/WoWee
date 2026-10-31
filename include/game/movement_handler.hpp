@@ -128,6 +128,11 @@ public:
     /// Once a frame, off a taxi: the mount is what the player's field says.
     void reconcileMount();
 
+    /// A game object template arrived. A transport's (MO_TRANSPORT) names
+    /// the TaxiPathNode route it flies, which is the only one a zeppelin or
+    /// a continent ship ever gets.
+    void transportTemplateArrived(const GameObjectQueryResponseData& data);
+
     // --- Public API (delegated from GameHandler) ---
 
     void sendMovement(Opcode opcode);
