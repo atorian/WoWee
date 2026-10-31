@@ -4,7 +4,7 @@
 
 #include "game_harness.hpp"
 #include "game/entity.hpp"
-#include "game/entity_controller.hpp"
+#include "game/world_handler.hpp"
 #include "game/game_events.hpp"
 #include "game/transport_manager.hpp"
 #include "game/game_handler.hpp"
@@ -65,7 +65,7 @@ void boatArrives(GameHarness& h) {
     boat.x = 100.0f; boat.y = 200.0f; boat.z = 0.0f;
     UpdateObjectData batch{};
     batch.blocks.push_back(boat);
-    h.game().entityController().applyRecordedObjects(batch);
+    h.game().world().applyRecordedObjects(batch);
 }
 
 /// The server moves the player: aboard `transport` at a server-space offset,
@@ -82,7 +82,7 @@ void playerMoves(GameHarness& h, uint64_t transport, float ox = 0, float oy = 0,
     self.transportX = ox; self.transportY = oy; self.transportZ = oz;
     UpdateObjectData batch{};
     batch.blocks.push_back(self);
-    h.game().entityController().applyRecordedObjects(batch);
+    h.game().world().applyRecordedObjects(batch);
 }
 
 void enterWorldAsEntity(GameHarness& h) {
@@ -215,7 +215,7 @@ TEST_CASE("the server's position wins when it puts the player far from where the
         self.x = canonicalY; self.y = canonicalX; self.z = z;
         UpdateObjectData batch{};
         batch.blocks.push_back(self);
-        h.game().entityController().applyRecordedObjects(batch);
+        h.game().world().applyRecordedObjects(batch);
     };
     const auto me = h.game().getMovementInfo();
 

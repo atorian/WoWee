@@ -4,7 +4,7 @@
 
 #include "game_harness.hpp"
 #include "game/entity.hpp"
-#include "game/entity_controller.hpp"
+#include "game/world_handler.hpp"
 #include "game/game_events.hpp"
 #include "game/update_field_table.hpp"
 
@@ -129,7 +129,7 @@ TEST_CASE("Tab steps through enemies nearest first, and takes in one that has ju
     block.fields[fieldIndex(UF::UNIT_FIELD_MAXHEALTH)] = 100;
     UpdateObjectData batch{};
     batch.blocks.push_back(block);
-    h.game().entityController().applyRecordedObjects(batch);
+    h.game().world().applyRecordedObjects(batch);
     auto arrived = std::static_pointer_cast<Unit>(h.game().getEntityManager().getEntity(0x8003));
     REQUIRE(arrived);
     arrived->setPosition(me.x + 3.0f, me.y, me.z, 0.0f);
@@ -290,7 +290,7 @@ TEST_CASE("the ghost flag makes the player a ghost, and clearing it brings them 
         block.fields[fieldIndex(UF::PLAYER_FLAGS)] = value;
         UpdateObjectData batch{};
         batch.blocks.push_back(block);
-        h.game().entityController().applyRecordedObjects(batch);
+        h.game().world().applyRecordedObjects(batch);
     };
     flags(0x10);   // PLAYER_FLAGS_GHOST
     CHECK(h.game().combat().isPlayerGhost());

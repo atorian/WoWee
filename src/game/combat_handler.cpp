@@ -1345,7 +1345,7 @@ bool CombatHandler::isSelectableUnit(uint64_t guid) const {
     // live corpse that the flag now reads what it should.
     // Empty, fully-looted corpses are already removed locally by the
     // lootableCleared -> despawnCreatureLocally path (see
-    // EntityController::onValuesUpdateUnit), so they don't return as click targets.
+    // WorldHandler::onValuesUpdateUnit), so they don't return as click targets.
     return true;
 }
 

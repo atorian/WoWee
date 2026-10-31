@@ -223,9 +223,9 @@ void GameHandler::registerCoreOpcodes() {
     registerHandler(Opcode::SMSG_PONG, &GameHandler::handlePong);
 
     // -----------------------------------------------------------------------
-    // World object updates + entity queries (delegated to EntityController)
+    // World object updates + entity queries (delegated to WorldHandler)
     // -----------------------------------------------------------------------
-    entityController_->registerOpcodes(dispatchTable_);
+    worldHandler_->registerOpcodes(dispatchTable_);
 
     // -----------------------------------------------------------------------
     // Item push / logout
@@ -745,13 +745,13 @@ void GameHandler::registerCoreOpcodes() {
     // (SMSG_CHANNEL_LIST → moved to ChatHandler)
     // (SMSG_GROUP_SET_LEADER → moved to SocialHandler)
 
-    // Gameobject / page text (entity queries moved to EntityController::registerOpcodes)
+    // Gameobject / page text (entity queries moved to WorldHandler::registerOpcodes)
     dispatchTable_[Opcode::SMSG_GAMEOBJECT_CUSTOM_ANIM] = [this](network::Packet& packet) {
         if (packet.getSize() < 12) return;
         uint64_t guid = packet.readUInt64();
         uint32_t animId = packet.readUInt32();
         bool ownedFishingBite = false;
-        auto goEnt = entityController_->getEntityManager().getEntity(guid);
+        auto goEnt = worldHandler_->getEntityManager().getEntity(guid);
         if (goEnt && goEnt->getType() == ObjectType::GAMEOBJECT) {
             auto go = std::static_pointer_cast<GameObject>(goEnt);
             // Only treat custom animation as a bite when this is our bobber.
@@ -1103,7 +1103,7 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_SET_REST_START] = [](network::Packet& packet) {
         // The rest-XP accumulation start time, not a statement about where the
         // player is standing: the server sends it on login wherever that is.
-        // Resting itself comes from PLAYER_FLAGS_RESTING, which entity_controller
+        // Resting itself comes from PLAYER_FLAGS_RESTING, which world_handler
         // watches, because that is the one that clears again on leaving an inn.
         packet.skipAll();
     };
@@ -1726,7 +1726,7 @@ void GameHandler::registerRemainingOpcodes() {
             items[s] = packet.readUInt32();
 
         // Resolve player name
-        auto ent = entityController_->getEntityManager().getEntity(guid);
+        auto ent = worldHandler_->getEntityManager().getEntity(guid);
         std::string playerName = "Target";
         if (ent) {
             auto pl = std::dynamic_pointer_cast<Player>(ent);
@@ -1818,7 +1818,7 @@ void GameHandler::registerRemainingOpcodes() {
         if (packet.hasRemaining(1)) {
             uint64_t mentorGuid = packet.readPackedGuid();
             std::string mentorName;
-            auto ent = entityController_->getEntityManager().getEntity(mentorGuid);
+            auto ent = worldHandler_->getEntityManager().getEntity(mentorGuid);
             if (auto* unit = dynamic_cast<Unit*>(ent.get())) mentorName = unit->getName();
             if (mentorName.empty()) mentorName = queryCacheHandler_->lookupName(mentorGuid);
             chatHandler_->addSystemChatMessage(mentorName.empty()
@@ -1922,7 +1922,7 @@ void GameHandler::registerRemainingOpcodes() {
         /*uint8_t classId  =*/ packet.readUInt8();
         // Apply display ID to the mirror image unit so it renders correctly
         if (mirrorGuid != 0 && displayId != 0) {
-            auto entity = entityController_->getEntityManager().getEntity(mirrorGuid);
+            auto entity = worldHandler_->getEntityManager().getEntity(mirrorGuid);
             if (entity) {
                 auto unit = std::dynamic_pointer_cast<game::Unit>(entity);
                 if (unit && unit->getDisplayId() == 0)
@@ -2405,7 +2405,7 @@ void GameHandler::enqueueIncomingPacketFront(network::Packet&& packet) {
     pendingIncomingPackets_.emplace_front(std::move(packet));
 }
 
-// enqueueUpdateObjectWork and processPendingUpdateObjectWork moved to EntityController
+// enqueueUpdateObjectWork and processPendingUpdateObjectWork moved to WorldHandler
 
 void GameHandler::processQueuedIncomingPackets() {
     const auto start = std::chrono::steady_clock::now();
@@ -2449,7 +2449,7 @@ void GameHandler::processQueuedIncomingPackets() {
         lagEpisode = {};
     }
 
-    if (pendingIncomingPackets_.empty() && !entityController_->hasPendingUpdateObjectWork()) {
+    if (pendingIncomingPackets_.empty() && !worldHandler_->hasPendingUpdateObjectWork()) {
         return;
     }
 
@@ -2468,9 +2468,9 @@ void GameHandler::processQueuedIncomingPackets() {
             break;
         }
 
-        if (entityController_->hasPendingUpdateObjectWork()) {
-            entityController_->processPendingUpdateObjectWork(start, budgetMs);
-            if (entityController_->hasPendingUpdateObjectWork()) {
+        if (worldHandler_->hasPendingUpdateObjectWork()) {
+            worldHandler_->processPendingUpdateObjectWork(start, budgetMs);
+            if (worldHandler_->hasPendingUpdateObjectWork()) {
                 break;
             }
             continue;
@@ -2501,7 +2501,7 @@ void GameHandler::processQueuedIncomingPackets() {
         ++processed;
     }
 
-    if (entityController_->hasPendingUpdateObjectWork()) {
+    if (worldHandler_->hasPendingUpdateObjectWork()) {
         return;
     }
 

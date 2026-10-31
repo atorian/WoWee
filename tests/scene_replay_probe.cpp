@@ -3,7 +3,7 @@
 #include "core/frame_observer.hpp"
 #include "core/coordinates.hpp"
 #include "game/game_handler.hpp"
-#include "game/entity_controller.hpp"
+#include "game/world_handler.hpp"
 #include "game/game_events.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
@@ -44,7 +44,7 @@ public:
                 if (i<2) block.fields[game::fieldIndex(game::UF::UNIT_FIELD_MOUNTDISPLAYID)]=2409;
                 source.blocks.push_back(std::move(block));
             }
-            game->entityController().applyRecordedObjects(source);
+            game->world().applyRecordedObjects(source);
             const pipeline::RequiredTable items(app_.getRenderer()->gameTables(),"ItemDisplayInfo.dbc","the replay's weapon");
             uint32_t weapon=0;
             for (uint32_t row=0;row<items->getRecordCount();++row) {
@@ -74,7 +74,7 @@ public:
         if (!removed_ && elapsed>6) {
             removed_=true;
             game::UpdateObjectData gone{}; gone.outOfRangeGuids={first_+7};
-            game->entityController().applyRecordedObjects(gone);
+            game->world().applyRecordedObjects(gone);
             std::puts("SCENE FIXTURE: one real player despawned");
         }
         if (!emoted_ && elapsed>7) {

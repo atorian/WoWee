@@ -29,7 +29,7 @@
 #include "game/movement_handler.hpp"
 #include "game/warden_session.hpp"
 #include "game/world_state.hpp"
-#include "game/entity_controller.hpp"
+#include "game/world_handler.hpp"
 #include "game/game_services.hpp"
 #include "game/world_login.hpp"
 #include "network/packet.hpp"
@@ -196,7 +196,7 @@ public:
     // MovementQueries (the rest it shares with the other handlers' queries)
     WorldState worldState() const override { return state; }
     Race characterRace() const override { return playerRace_; }
-    bool isTransport(uint64_t guid) const override { return entityController_->isTransportGuid(guid); }
+    bool isTransport(uint64_t guid) const override { return worldHandler_->isTransportGuid(guid); }
     TransportManager* transports() override { return transportManager_.get(); }
     uint32_t gryphonDisplayId() const override { return services_.gryphonDisplayId; }
     uint32_t wyvernDisplayId() const override { return services_.wyvernDisplayId; }
@@ -477,8 +477,8 @@ public:
     /// player walks out of range, which is the only thing these answer.
     uint64_t getBinderGuid() const { return binderGuid_; }
 
-    EntityManager& getEntityManager() { return entityController_->getEntityManager(); }
-    const EntityManager& getEntityManager() const { return entityController_->getEntityManager(); }
+    EntityManager& getEntityManager() { return worldHandler_->getEntityManager(); }
+    const EntityManager& getEntityManager() const { return worldHandler_->getEntityManager(); }
 
     /**
      * Send a chat message
@@ -1273,10 +1273,10 @@ public:
     const MovementHandler& movement() const { return *movementHandler_; }
     /// The objects in view as the server describes them: creatures, players,
     /// game objects, their names, kinds, appearance and transports.
-    EntityController& entityController() { return *entityController_; }
+    WorldHandler& world() { return *worldHandler_; }
     QueryCacheHandler& queryCache() { return *queryCacheHandler_; }
     const QueryCacheHandler& queryCache() const { return *queryCacheHandler_; }
-    const EntityController& entityController() const { return *entityController_; }
+    const WorldHandler& world() const { return *worldHandler_; }
     /// The rest of the player's dealings with the world and the server: inspect,
     /// played time, logout, summons, instances and their lockouts, the
     /// battlefield manager, minimap pings, GM tickets and reports.
@@ -1603,8 +1603,8 @@ private:
     // fallTime must be the elapsed ms since the FALLING flag was set; the server
     // uses it for fall-damage calculations and anti-cheat validation.
 
-    // Entity tracking (delegated to EntityController)
-    std::unique_ptr<EntityController> entityController_;
+    // Entity tracking (delegated to WorldHandler)
+    std::unique_ptr<WorldHandler> worldHandler_;
 
     // Chat (state lives in ChatHandler; callbacks remain here for cross-domain access)
     AddonEventCallback addonEventCallback_;

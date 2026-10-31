@@ -1006,7 +1006,7 @@ void MovementHandler::forceClearTaxiAndMovementState() {
     // Previously this method reset 10 death-related fields despite being named
     // "forceClearTaxiAndMovementState", which could cancel pending resurrections
     // or clear death state on taxi dismount. Death state is managed by
-    // entity_controller (markPlayerDead) and the resurrect packet handlers.
+    // world_handler (markPlayerDead) and the resurrect packet handlers.
 
     movementInfo.flags = 0;
     movementInfo.flags2 = 0;

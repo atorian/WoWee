@@ -275,7 +275,7 @@ looks, not the way the old code does.
 
 - Each domain handler — `ChatHandler`, `CombatHandler`, `InventoryHandler`,
   `MovementHandler`, `QuestHandler`, `SocialHandler`, `SpellHandler`,
-  `WardenHandler`, `EntityController`, `AccountDataHandler`,
+  `WardenHandler`, `WorldHandler`, `AccountDataHandler`,
   `ActionBarHandler`, `PetHandler`, `ReputationHandler`, `RealmTimeHandler`,
   `PlayerHandler`, `QueryCacheHandler` — owns the opcodes of its area. A new opcode goes into that handler's
   `registerOpcodes`, never

@@ -5,7 +5,7 @@
 #include "game_harness.hpp"
 
 #include "game/entity.hpp"
-#include "game/entity_controller.hpp"
+#include "game/world_handler.hpp"
 #include "game/game_events.hpp"
 #include "game/update_field_table.hpp"
 
@@ -351,7 +351,7 @@ TEST_CASE("before WotLK the player's auras are the aura fields, harmful ones mar
     block.fields[fieldIndex(UF::UNIT_FIELD_AURAFLAGS)] = 0x02u << 24;
     UpdateObjectData batch{};
     batch.blocks.push_back(block);
-    h.game().entityController().applyRecordedObjects(batch);
+    h.game().world().applyRecordedObjects(batch);
     h.pump();
 
     const auto& auras = h.game().spells().getPlayerAuras();

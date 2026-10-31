@@ -610,7 +610,7 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     lastInteractedGoGuid_ = 0;
     combatHandler_->beginCharacter();
     combatHandler_->invalidateTabCycle();
-    entityController_->clearAll();
+    worldHandler_->clearAll();
     queryCacheHandler_->clear();
     accountDataHandler_->characterSelected(characterGuid);
     // The domains that keep what the server will send again end it on this.
@@ -1124,7 +1124,7 @@ void GameHandler::sendMovement(Opcode opcode) {
 
 // Entity lifecycle methods (handleUpdateObject, processOutOfRangeObjectsUntil,
 // applyUpdateObjectBlock, finalizeUpdateObjectBatch, handleCompressedUpdateObject,
-// handleDestroyObject) moved to EntityController - see entity_controller.cpp
+// handleDestroyObject) moved to WorldHandler - see world_handler.cpp
 
 void GameHandler::autoJoinDefaultChannels() {
     chatHandler_->chatAutoJoin.general = chatAutoJoin.general;
@@ -1161,11 +1161,11 @@ void GameHandler::addLocalChatMessage(const MessageChatData& msg) {
 // ============================================================
 
 void GameHandler::playerNameArrived(uint64_t guid, const std::string& name) {
-    entityController_->playerNamed(guid, name);
+    worldHandler_->playerNamed(guid, name);
 }
 
 void GameHandler::creatureTemplateArrived(const CreatureQueryResponseData& data) {
-    entityController_->creatureNamed(data);
+    worldHandler_->creatureNamed(data);
     // A companion may have been waiting on exactly this. A companion's
     // creature id is a template entry and the model frame needs a display
     // id, so GetCompanionInfo answers zero until the query comes back - and
@@ -1184,7 +1184,7 @@ void GameHandler::creatureTemplateArrived(const CreatureQueryResponseData& data)
 }
 
 void GameHandler::gameObjectTemplateArrived(const GameObjectQueryResponseData& data) {
-    entityController_->gameObjectNamed(data);
+    worldHandler_->gameObjectNamed(data);
     inventoryHandler_->gameObjectTemplateArrived(data);
     // And the same for an objective that names this one - a chest to open
     // rather than a creature to kill.
@@ -1362,7 +1362,7 @@ void GameHandler::scheduleGameObjectLootOpen(uint64_t guid, float delaySeconds, 
 
 bool GameHandler::isFishingHoleGameObject(uint64_t guid) const {
     if (guid == 0) return false;
-    auto entity = entityController_->getEntityManager().getEntity(guid);
+    auto entity = worldHandler_->getEntityManager().getEntity(guid);
     if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return false;
     const auto* info = queryCacheHandler_->getCachedGameObjectInfo(
         std::static_pointer_cast<GameObject>(entity)->getEntry());
@@ -1388,7 +1388,7 @@ bool GameHandler::hasPendingGameObjectLootOpen(uint64_t guid) const {
 
 bool GameHandler::isGatherGameObject(uint64_t guid) const {
     if (guid == 0) return false;
-    auto entity = entityController_->getEntityManager().getEntity(guid);
+    auto entity = worldHandler_->getEntityManager().getEntity(guid);
     if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return false;
 
     auto go = std::static_pointer_cast<GameObject>(entity);
@@ -1399,7 +1399,7 @@ bool GameHandler::isGatherGameObject(uint64_t guid) const {
 void GameHandler::despawnCreatureLocally(uint64_t guid) {
     if (guid == 0) return;
 
-    auto& entityManager = entityController_->getEntityManager();
+    auto& entityManager = worldHandler_->getEntityManager();
     auto entity = entityManager.getEntity(guid);
     if (!entity || entity->getType() != ObjectType::UNIT) return;
 
@@ -1416,7 +1416,7 @@ void GameHandler::despawnCreatureLocally(uint64_t guid) {
 void GameHandler::despawnGameObjectLocally(uint64_t guid) {
     if (guid == 0) return;
 
-    auto& entityManager = entityController_->getEntityManager();
+    auto& entityManager = worldHandler_->getEntityManager();
     auto entity = entityManager.getEntity(guid);
     if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return;
 
@@ -1581,7 +1581,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
 
     // Ensure GO interaction isn't blocked by stale or active melee state.
     stopAutoAttack();
-    auto entity = entityController_->getEntityManager().getEntity(guid);
+    auto entity = worldHandler_->getEntityManager().getEntity(guid);
     uint32_t goEntry = 0;
     uint32_t goType = 0;
     std::string goName;
@@ -1828,7 +1828,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
 }
 
 Unit* GameHandler::getUnitByGuid(uint64_t guid) {
-    auto entity = entityController_->getEntityManager().getEntity(guid);
+    auto entity = worldHandler_->getEntityManager().getEntity(guid);
     // Use the type tag to skip RTTI - both UNIT and PLAYER object types derive from Unit.
     if (!entity || !entity->isUnit()) return nullptr;
     return static_cast<Unit*>(entity.get());
@@ -1885,7 +1885,7 @@ void GameHandler::tearDownWorldForTransfer(uint32_t mapId) {
     inventoryHandler_->leaveWorld();
     spellHandler_->clearUnitCaches();
     combatHandler_->clearCombatText();
-    entityController_->getEntityManager().clear();
+    worldHandler_->getEntityManager().clear();
     combatHandler_->clearHostileAttackers();
     worldStates_.clear();
     questHandler_->clearGossipPois();

@@ -6,7 +6,7 @@
 #include "core/logger.hpp"
 #include "core/player_view.hpp"
 #include "core/zone_tracker.hpp"
-#include "game/entity_controller.hpp"
+#include "game/world_handler.hpp"
 #include "game/game_handler.hpp"
 #include "game/game_events.hpp"
 #include "game/inventory_handler.hpp"
@@ -298,7 +298,7 @@ void SceneReplay::beforeGame(Application& app) {
         for (const auto& field : object.at("fields")) block.fields[field.at(0).get<uint16_t>()]=field.at(1);
         update.blocks.push_back(std::move(block));
     }
-    if (s.appliedSample != s.sample) app.gameHandler->entityController().applyRecordedObjects(update);
+    if (s.appliedSample != s.sample) app.gameHandler->world().applyRecordedObjects(update);
     game::UpdateObjectData objectMotion;
     for (const auto& pose : frame.at("poses")) {
         const uint64_t guid = pose.at(0);
@@ -322,7 +322,7 @@ void SceneReplay::beforeGame(Application& app) {
             }
         } else { throw std::runtime_error("scene pose refers to absent entity " + std::to_string(guid)); }
     }
-    if (!objectMotion.blocks.empty()) app.gameHandler->entityController().applyRecordedObjects(objectMotion);
+    if (!objectMotion.blocks.empty()) app.gameHandler->world().applyRecordedObjects(objectMotion);
     const auto applyGear = [&app,&s](const Json& value) {
         const uint64_t guid=value.at("guid");
         if (guid==app.gameHandler->getPlayerGuid() || !app.gameHandler->getEntityManager().hasEntity(guid)) {
@@ -408,7 +408,7 @@ void SceneReplay::toggleCapture(Application& app) {
             {"gear",Json::array()}, {"config",Json::object()},
             {"limitations",{"Existing transient spell particles and animation phase are not keyframed; interface and network load are not replayed. Compare scene counters and control images before accepting an A/B."}}};
         auto character=*app.gameHandler->getActiveCharacter();
-        if (const auto look=app.gameHandler->entityController().appearanceOf(character.guid)) {
+        if (const auto look=app.gameHandler->world().appearanceOf(character.guid)) {
             character.race=static_cast<game::Race>(look->race); character.gender=static_cast<game::Gender>(look->gender);
             character.appearanceBytes=look->appearanceBytes; character.facialFeatures=look->facialFeatures;
         }

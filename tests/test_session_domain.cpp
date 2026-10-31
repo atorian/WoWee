@@ -6,7 +6,7 @@
 #include "game/entity.hpp"
 #include "game/movement_handler.hpp"
 #include "game/movement_flags.hpp"
-#include "game/entity_controller.hpp"
+#include "game/world_handler.hpp"
 #include "game/update_field_table.hpp"
 #include "core/world_transition_queue.hpp"
 
@@ -327,7 +327,7 @@ TEST_CASE("a new map scope is shown every object already in view, once, without 
     });
     h.server().clearSent();
 
-    h.game().entityController().announceObjectsInView();
+    h.game().world().announceObjectsInView();
 
     std::sort(creatures.begin(), creatures.end());
     CHECK(creatures == std::vector<uint64_t>{creature->getGuid(), corpse->getGuid()});
@@ -404,7 +404,7 @@ TEST_CASE("an empty view announces nothing, and the local player is never presen
     unsigned spawns = 0;
     auto playerSub = h.events().subscribe<ev::PlayerSpawned>([&](const ev::PlayerSpawned&) { ++spawns; });
     auto creatureSub = h.events().subscribe<ev::CreatureSpawned>([&](const ev::CreatureSpawned&) { ++spawns; });
-    h.game().entityController().announceObjectsInView();
+    h.game().world().announceObjectsInView();
     CHECK(spawns == 0);
 }
 

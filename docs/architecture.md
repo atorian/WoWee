@@ -184,7 +184,7 @@ Wowee follows a modular architecture with clear separation of concerns:
 - Receives dependencies via `GameServices` struct
 
 **Domain Handlers** (SOLID decomposition from GameHandler):
-- `EntityController` - UPDATE_OBJECT parsing, entity spawn/despawn
+- `WorldHandler` - UPDATE_OBJECT parsing, entity spawn/despawn
 - `MovementHandler` - Movement packets (including SMSG_COMPRESSED_MOVES), speed, taxi, swimming, flying
 - `CombatHandler` - Damage, healing, death, auto-attack, threat
 - `SpellHandler` - Spell casting, cooldowns, auras, talents, pet spells

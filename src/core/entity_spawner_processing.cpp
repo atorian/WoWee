@@ -1067,7 +1067,7 @@ void EntitySpawner::finishWmoSpawn(const PreparedGameObjectWMO& result, uint32_t
     // render instance. Do the same here: unique/uncached transport WMOs (notably
     // the Kraken icebreaker) otherwise become visible but remain unregistered
     // and stationary forever.
-    if (gameHandler_ && gameHandler_->entityController().isTransportGuid(result.guid)) {
+    if (gameHandler_ && gameHandler_->world().isTransportGuid(result.guid)) {
         gameHandler_->notifyTransportSpawned(
             result.guid, result.entry, result.displayId,
             result.x, result.y, result.z, result.orientation);
@@ -1170,7 +1170,7 @@ void EntitySpawner::processGameObjectSpawnQueue() {
         std::string modelPath;
         if (assets_.gameObjectLookupsBuilt_) {
             // Check transport overrides first
-            if (gameHandler_ && gameHandler_->entityController().isTransportGuid(s.guid)) {
+            if (gameHandler_ && gameHandler_->world().isTransportGuid(s.guid)) {
                 modelPath = transportModelPath(s.entry, s.displayId);
             }
             if (modelPath.empty())
@@ -1416,7 +1416,7 @@ void EntitySpawner::processPendingTransportRegistrations() {
 
         // TransportAnimation.dbc is indexed by GameObject entry.
         uint32_t pathId = pending.entry;
-        const bool preferServerData = gameHandler_->entityController().hasServerTransportUpdate(pending.guid);
+        const bool preferServerData = gameHandler_->world().hasServerTransportUpdate(pending.guid);
 
         bool clientAnim = transportManager->isClientSideAnimation();
         LOG_DEBUG("Transport spawn callback: clientAnimation=", clientAnim,
@@ -2300,7 +2300,7 @@ void EntitySpawner::applyGameObjectState(uint64_t guid, uint8_t goState) {
     }
 
     // Transports are moved and animated by the transport system.
-    if (gameHandler_ && gameHandler_->entityController().isTransportGuid(guid)) {
+    if (gameHandler_ && gameHandler_->world().isTransportGuid(guid)) {
         it->second.goState = goState;
         return;
     }
@@ -2368,7 +2368,7 @@ void EntitySpawner::despawnGameObject(uint64_t guid) {
     auto it = spawns_->gameObjectInstances_.find(guid);
     if (it == spawns_->gameObjectInstances_.end()) return;
 
-    if (gameHandler_ && gameHandler_->entityController().isTransportGuid(guid)) {
+    if (gameHandler_ && gameHandler_->world().isTransportGuid(guid)) {
         if (auto* transportManager = gameHandler_->getTransportManager()) {
             if (auto* transport = transportManager->getTransport(guid)) {
                 const bool isDeeprunTram =

@@ -22,12 +22,17 @@ namespace game {
 
 class GameHandler;
 
-class EntityController {
+/// The objects in view, as SMSG_UPDATE_OBJECT, its compressed form and
+/// SMSG_DESTROY_OBJECT describe them: their lifetime, their fields, and how
+/// each is presented when it comes into view. The parts of a field update
+/// another area owns - the player's sheet, combat, the mount, the inventory -
+/// are handed to that owner as the fields are read, in their order.
+class WorldHandler {
 public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
-    explicit EntityController(GameHandler& owner);
+    explicit WorldHandler(GameHandler& owner);
 
     void registerOpcodes(DispatchTable& table);
 

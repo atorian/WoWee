@@ -1,4 +1,4 @@
-#include "game/entity_controller.hpp"
+#include "game/world_handler.hpp"
 #include "game/player_appearance.hpp"
 #include "title/services/titles.hpp"
 #include "pet/domain/records.hpp"
@@ -60,10 +60,10 @@ void applyBlockMovementSpeeds(const UpdateBlock& block, Entity& entity) {
 
 } // anonymous namespace
 
-EntityController::EntityController(GameHandler& owner)
+WorldHandler::WorldHandler(GameHandler& owner)
     : owner_(owner) { initTypeHandlers(); }
 
-void EntityController::registerOpcodes(DispatchTable& table) {
+void WorldHandler::registerOpcodes(DispatchTable& table) {
     // World object updates - accept during ENTERING_WORLD too so that entity
     // packets arriving before SMSG_LOGIN_VERIFY_WORLD are parsed and queued
     // rather than silently dropped (the budget system processes them later once
@@ -86,7 +86,7 @@ void EntityController::registerOpcodes(DispatchTable& table) {
 
 }
 
-void EntityController::clearAll() {
+void WorldHandler::clearAll() {
     pendingUpdateObjectWork_.clear();
     transportGuids_.clear();
     serverUpdatedTransportGuids_.clear();
@@ -97,10 +97,10 @@ void EntityController::clearAll() {
 // Update Object Pipeline
 // ============================================================
 
-void EntityController::enqueueUpdateObjectWork(UpdateObjectData&& data) {
+void WorldHandler::enqueueUpdateObjectWork(UpdateObjectData&& data) {
     pendingUpdateObjectWork_.push_back(PendingUpdateObjectWork{.data = std::move(data)});
 }
-void EntityController::processPendingUpdateObjectWork(const std::chrono::steady_clock::time_point& start,
+void WorldHandler::processPendingUpdateObjectWork(const std::chrono::steady_clock::time_point& start,
                                                  float budgetMs) {
     if (pendingUpdateObjectWork_.empty()) {
         return;
@@ -181,7 +181,7 @@ void EntityController::processPendingUpdateObjectWork(const std::chrono::steady_
                   "/", work.data.blocks.size(), ", owner_.getState()=", worldStateName(owner_.getState()), ")");
     }
 }
-void EntityController::handleUpdateObject(network::Packet& packet) {
+void WorldHandler::handleUpdateObject(network::Packet& packet) {
     UpdateObjectData data;
     if (!owner_.getPacketParsers()->parseUpdateObject(packet, data)) {
         static int updateObjErrors = 0;
@@ -194,7 +194,7 @@ void EntityController::handleUpdateObject(network::Packet& packet) {
     enqueueUpdateObjectWork(std::move(data));
 }
 
-size_t EntityController::processOutOfRangeObjectsUntil(const std::vector<uint64_t>& guids, size_t next,
+size_t WorldHandler::processOutOfRangeObjectsUntil(const std::vector<uint64_t>& guids, size_t next,
                                                        std::chrono::steady_clock::time_point deadline,
                                                        float costs[4]) {
     using clock = std::chrono::steady_clock;
@@ -277,13 +277,13 @@ size_t EntityController::processOutOfRangeObjectsUntil(const std::vector<uint64_
 // Extracted helper methods
 // ============================================================
 
-std::optional<PlayerAppearance> EntityController::appearanceOf(uint64_t guid) const {
+std::optional<PlayerAppearance> WorldHandler::appearanceOf(uint64_t guid) const {
     auto entity = entityManager.getEntity(guid);
     if (!entity || entity->getType() != ObjectType::PLAYER) return std::nullopt;
     return playerAppearance(entity->getFields());
 }
 
-void EntityController::applyUpdateObjectBlock(const UpdateBlock& block, bool& newItemCreated) {
+void WorldHandler::applyUpdateObjectBlock(const UpdateBlock& block, bool& newItemCreated) {
     switch (block.updateType) {
         case UpdateType::CREATE_OBJECT:
         case UpdateType::CREATE_OBJECT2:
@@ -305,7 +305,7 @@ void EntityController::applyUpdateObjectBlock(const UpdateBlock& block, bool& ne
 // ============================================================
 
 // Non-player transport child attachment - identical in CREATE/VALUES/MOVEMENT
-void EntityController::updateNonPlayerTransportAttachment(const UpdateBlock& block,
+void WorldHandler::updateNonPlayerTransportAttachment(const UpdateBlock& block,
                                                            const std::shared_ptr<Entity>& entity,
                                                            ObjectType entityType) {
     if (block.guid == owner_.getPlayerGuid()) return;
@@ -346,7 +346,7 @@ float bitsToFloat(uint32_t raw) {
 }  // namespace
 
 // Resolve cached field indices once per handler call.
-EntityController::UnitFieldIndices EntityController::UnitFieldIndices::resolve() {
+WorldHandler::UnitFieldIndices WorldHandler::UnitFieldIndices::resolve() {
     return UnitFieldIndices{
         .health = fieldIndex(UF::UNIT_FIELD_HEALTH),
         .maxHealth = fieldIndex(UF::UNIT_FIELD_MAXHEALTH),
@@ -379,7 +379,7 @@ EntityController::UnitFieldIndices EntityController::UnitFieldIndices::resolve()
 }
 
 // Create the appropriate Entity subclass from the block's object type.
-std::shared_ptr<Entity> EntityController::createEntityFromBlock(const UpdateBlock& block) {
+std::shared_ptr<Entity> WorldHandler::createEntityFromBlock(const UpdateBlock& block) {
     switch (block.objectType) {
         case ObjectType::PLAYER:
             return std::make_shared<Player>(block.guid);
@@ -397,7 +397,7 @@ std::shared_ptr<Entity> EntityController::createEntityFromBlock(const UpdateBloc
 
 //     Apply unit fields during CREATE - sets health/power/level/flags/displayId/etc.
 //     Returns true if the entity is initially dead (health=0 or DYNFLAG_DEAD).
-bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
+bool WorldHandler::applyUnitFieldsOnCreate(const UpdateBlock& block,
                                                  std::shared_ptr<Unit>& unit,
                                                  const UnitFieldIndices& ufi) {
     bool unitInitiallyDead = false;
@@ -525,7 +525,7 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
 
 // 3c: Apply unit fields during VALUES update - tracks health/power/display changes
 //     and fires events for transitions (death, resurrect, level up, etc.).
-EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdate(
+WorldHandler::UnitFieldUpdateResult WorldHandler::applyUnitFieldsOnUpdate(
         const UpdateBlock& block, const std::shared_ptr<Entity>& entity,
         std::shared_ptr<Unit>& unit, const UnitFieldIndices& ufi) {
     UnitFieldUpdateResult result;
@@ -773,7 +773,7 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
 //     Dispatch entity spawn callbacks for units/players.
 //     Consolidates player/creature spawn callback invocation from CREATE and VALUES handlers.
 //     isDead = unitInitiallyDead (CREATE) or computed isDeadNow && !npcDeathNotified (VALUES).
-void EntityController::dispatchEntitySpawn(uint64_t guid, ObjectType objectType,
+void WorldHandler::dispatchEntitySpawn(uint64_t guid, ObjectType objectType,
                                             const std::shared_ptr<Entity>& entity,
                                             const std::shared_ptr<Unit>& unit,
                                             bool isDead) {
@@ -787,7 +787,7 @@ void EntityController::dispatchEntitySpawn(uint64_t guid, ObjectType objectType,
     }
 }
 
-void EntityController::announceUnit(uint64_t guid, ObjectType objectType,
+void WorldHandler::announceUnit(uint64_t guid, ObjectType objectType,
                                      const std::shared_ptr<Entity>& entity,
                                      const std::shared_ptr<Unit>& unit,
                                      bool isDead) {
@@ -824,7 +824,7 @@ void EntityController::announceUnit(uint64_t guid, ObjectType objectType,
     if (isDead) owner_.eventBus().publish(events::UnitDied{guid});
 }
 
-void EntityController::announceObjectsInView() {
+void WorldHandler::announceObjectsInView() {
     size_t units = 0, players = 0, objects = 0, corpses = 0;
     for (const auto& [guid, entity] : entityManager.getEntities()) {
         if (!entity) continue;
@@ -864,7 +864,7 @@ void EntityController::announceObjectsInView() {
              " gameobjects=", objects, " corpses=", corpses);
 }
 
-void EntityController::applyRecordedObjects(const UpdateObjectData& data) {
+void WorldHandler::applyRecordedObjects(const UpdateObjectData& data) {
     float costs[4]{};
     processOutOfRangeObjectsUntil(data.outOfRangeGuids, 0,
         std::chrono::steady_clock::time_point::max(), costs);
@@ -874,7 +874,7 @@ void EntityController::applyRecordedObjects(const UpdateObjectData& data) {
 }
 
 // Track online item/container objects during CREATE.
-void EntityController::trackItemOnCreate(const UpdateBlock& block, bool& newItemCreated) {
+void WorldHandler::trackItemOnCreate(const UpdateBlock& block, bool& newItemCreated) {
     // The inventory reads what an item object's fields say; this rebuilds the
     // bags once for the whole packet.
     if (owner_.inventory().trackItemObject(block.guid, block.objectType == ObjectType::CONTAINER,
@@ -884,7 +884,7 @@ void EntityController::trackItemOnCreate(const UpdateBlock& block, bool& newItem
 }
 
 // Update item stack count / durability / enchants for existing items during VALUES.
-void EntityController::updateItemOnValuesUpdate(const UpdateBlock& block,
+void WorldHandler::updateItemOnValuesUpdate(const UpdateBlock& block,
                                                   const std::shared_ptr<Entity>& entity) {
     owner_.inventory().itemObjectChanged(
         block.guid, entity && entity->getType() == ObjectType::CONTAINER, block.fields, pendingEvents_);
@@ -894,37 +894,37 @@ void EntityController::updateItemOnValuesUpdate(const UpdateBlock& block,
 // Object-type handler struct definitions
 // ============================================================
 
-struct EntityController::UnitTypeHandler : EntityController::IObjectTypeHandler {
-    EntityController& ctl_;
-    explicit UnitTypeHandler(EntityController& c) : ctl_(c) {}
+struct WorldHandler::UnitTypeHandler : WorldHandler::IObjectTypeHandler {
+    WorldHandler& ctl_;
+    explicit UnitTypeHandler(WorldHandler& c) : ctl_(c) {}
     void onCreate(const UpdateBlock& block, std::shared_ptr<Entity>& entity, bool&) override { ctl_.onCreateUnit(block, entity); }
     void onValuesUpdate(const UpdateBlock& block, std::shared_ptr<Entity>& entity) override { ctl_.onValuesUpdateUnit(block, entity); }
 };
 
-struct EntityController::PlayerTypeHandler : EntityController::IObjectTypeHandler {
-    EntityController& ctl_;
-    explicit PlayerTypeHandler(EntityController& c) : ctl_(c) {}
+struct WorldHandler::PlayerTypeHandler : WorldHandler::IObjectTypeHandler {
+    WorldHandler& ctl_;
+    explicit PlayerTypeHandler(WorldHandler& c) : ctl_(c) {}
     void onCreate(const UpdateBlock& block, std::shared_ptr<Entity>& entity, bool&) override { ctl_.onCreatePlayer(block, entity); }
     void onValuesUpdate(const UpdateBlock& block, std::shared_ptr<Entity>& entity) override { ctl_.onValuesUpdatePlayer(block, entity); }
 };
 
-struct EntityController::GameObjectTypeHandler : EntityController::IObjectTypeHandler {
-    EntityController& ctl_;
-    explicit GameObjectTypeHandler(EntityController& c) : ctl_(c) {}
+struct WorldHandler::GameObjectTypeHandler : WorldHandler::IObjectTypeHandler {
+    WorldHandler& ctl_;
+    explicit GameObjectTypeHandler(WorldHandler& c) : ctl_(c) {}
     void onCreate(const UpdateBlock& block, std::shared_ptr<Entity>& entity, bool&) override { ctl_.onCreateGameObject(block, entity); }
     void onValuesUpdate(const UpdateBlock& block, std::shared_ptr<Entity>& entity) override { ctl_.onValuesUpdateGameObject(block, entity); }
 };
 
-struct EntityController::ItemTypeHandler : EntityController::IObjectTypeHandler {
-    EntityController& ctl_;
-    explicit ItemTypeHandler(EntityController& c) : ctl_(c) {}
+struct WorldHandler::ItemTypeHandler : WorldHandler::IObjectTypeHandler {
+    WorldHandler& ctl_;
+    explicit ItemTypeHandler(WorldHandler& c) : ctl_(c) {}
     void onCreate(const UpdateBlock& block, std::shared_ptr<Entity>& /*entity*/, bool& newItemCreated) override { ctl_.onCreateItem(block, newItemCreated); }
     void onValuesUpdate(const UpdateBlock& block, std::shared_ptr<Entity>& entity) override { ctl_.onValuesUpdateItem(block, entity); }
 };
 
-struct EntityController::CorpseTypeHandler : EntityController::IObjectTypeHandler {
-    EntityController& ctl_;
-    explicit CorpseTypeHandler(EntityController& c) : ctl_(c) {}
+struct WorldHandler::CorpseTypeHandler : WorldHandler::IObjectTypeHandler {
+    WorldHandler& ctl_;
+    explicit CorpseTypeHandler(WorldHandler& c) : ctl_(c) {}
     void onCreate(const UpdateBlock& block, std::shared_ptr<Entity>& entity, bool&) override { ctl_.onCreateCorpse(block, *entity); }
 };
 
@@ -932,7 +932,7 @@ struct EntityController::CorpseTypeHandler : EntityController::IObjectTypeHandle
 // Handler registry infrastructure
 // ============================================================
 
-void EntityController::initTypeHandlers() {
+void WorldHandler::initTypeHandlers() {
     typeHandlers_[static_cast<uint8_t>(ObjectType::UNIT)] = std::make_unique<UnitTypeHandler>(*this);
     typeHandlers_[static_cast<uint8_t>(ObjectType::PLAYER)] = std::make_unique<PlayerTypeHandler>(*this);
     typeHandlers_[static_cast<uint8_t>(ObjectType::GAMEOBJECT)] = std::make_unique<GameObjectTypeHandler>(*this);
@@ -941,7 +941,7 @@ void EntityController::initTypeHandlers() {
     typeHandlers_[static_cast<uint8_t>(ObjectType::CORPSE)] = std::make_unique<CorpseTypeHandler>(*this);
 }
 
-EntityController::IObjectTypeHandler* EntityController::getTypeHandler(ObjectType type) const {
+WorldHandler::IObjectTypeHandler* WorldHandler::getTypeHandler(ObjectType type) const {
     auto it = typeHandlers_.find(static_cast<uint8_t>(type));
     return it != typeHandlers_.end() ? it->second.get() : nullptr;
 }
@@ -950,7 +950,7 @@ EntityController::IObjectTypeHandler* EntityController::getTypeHandler(ObjectTyp
 // Deferred event bus flush
 // ============================================================
 
-void EntityController::flushPendingEvents() {
+void WorldHandler::flushPendingEvents() {
     for (const auto& [name, args] : pendingEvents_.events) {
         owner_.fireAddonEvent(name, args);
     }
@@ -961,7 +961,7 @@ void EntityController::flushPendingEvents() {
 // Type-specific CREATE handlers
 // ============================================================
 
-void EntityController::onCreateUnit(const UpdateBlock& block, std::shared_ptr<Entity>& entity) {
+void WorldHandler::onCreateUnit(const UpdateBlock& block, std::shared_ptr<Entity>& entity) {
     // Name query for creatures
     auto it = block.fields.find(fieldIndex(UF::OBJECT_FIELD_ENTRY));
     if (it != block.fields.end() && it->second != 0) {
@@ -996,7 +996,7 @@ void EntityController::onCreateUnit(const UpdateBlock& block, std::shared_ptr<En
     }
 }
 
-void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<Entity>& entity) {
+void WorldHandler::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<Entity>& entity) {
     static const bool kVerboseUpdateObject = core::envFlagEnabled("WOWEE_LOG_UPDATE_OBJECT_VERBOSE", false);
 
     // For the local player, capture the full initial field state
@@ -1086,7 +1086,7 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
     }
 }
 
-void EntityController::onCreateGameObject(const UpdateBlock& block, std::shared_ptr<Entity>& entity) {
+void WorldHandler::onCreateGameObject(const UpdateBlock& block, std::shared_ptr<Entity>& entity) {
     auto go = std::static_pointer_cast<GameObject>(entity);
     auto itDisp = block.fields.find(fieldIndex(UF::GAMEOBJECT_DISPLAYID));
     if (itDisp != block.fields.end()) {
@@ -1117,7 +1117,7 @@ void EntityController::onCreateGameObject(const UpdateBlock& block, std::shared_
     announceGameObject(block.guid, *go);
 }
 
-void EntityController::announceGameObject(uint64_t guid, const GameObject& go) {
+void WorldHandler::announceGameObject(uint64_t guid, const GameObject& go) {
     // What it is doing, which the create block carries as surely as an update
     // does: a door standing open when the player walks into the room says so
     // here and nowhere else. Only the update path read it, so every object came
@@ -1156,7 +1156,7 @@ void EntityController::announceGameObject(uint64_t guid, const GameObject& go) {
     }
 }
 
-void EntityController::onCreateItem(const UpdateBlock& block, bool& newItemCreated) {
+void WorldHandler::onCreateItem(const UpdateBlock& block, bool& newItemCreated) {
     trackItemOnCreate(block, newItemCreated);
 }
 
@@ -1186,7 +1186,7 @@ struct CorpseFields {
 };
 } // namespace
 
-void EntityController::onCreateCorpse(const UpdateBlock& block, const Entity& corpse) {
+void WorldHandler::onCreateCorpse(const UpdateBlock& block, const Entity& corpse) {
     const CorpseFields field{corpse};
     const bool own = field.ownedBy(owner_.getPlayerGuid());
 
@@ -1207,7 +1207,7 @@ void EntityController::onCreateCorpse(const UpdateBlock& block, const Entity& co
     announceCorpse(block.guid, corpse);
 }
 
-void EntityController::announceCorpse(uint64_t guid, const Entity& corpse) {
+void WorldHandler::announceCorpse(uint64_t guid, const Entity& corpse) {
     const CorpseFields field{corpse};
     const bool bones = field.bones();
     if (field.ownedBy(owner_.getPlayerGuid())) {
@@ -1276,7 +1276,7 @@ void EntityController::announceCorpse(uint64_t guid, const Entity& corpse) {
 // Type-specific VALUES UPDATE handlers
 // ============================================================
 
-void EntityController::handleDisplayIdChange(const UpdateBlock& block,
+void WorldHandler::handleDisplayIdChange(const UpdateBlock& block,
                                               const std::shared_ptr<Entity>& entity,
                                               const std::shared_ptr<Unit>& unit,
                                               const UnitFieldUpdateResult& result) {
@@ -1298,7 +1298,7 @@ void EntityController::handleDisplayIdChange(const UpdateBlock& block,
     }
 }
 
-void EntityController::onValuesUpdateUnit(const UpdateBlock& block, std::shared_ptr<Entity>& entity) {
+void WorldHandler::onValuesUpdateUnit(const UpdateBlock& block, std::shared_ptr<Entity>& entity) {
     auto unit = std::static_pointer_cast<Unit>(entity);
     UnitFieldIndices ufi = UnitFieldIndices::resolve();
     UnitFieldUpdateResult result = applyUnitFieldsOnUpdate(block, entity, unit, ufi);
@@ -1314,7 +1314,7 @@ void EntityController::onValuesUpdateUnit(const UpdateBlock& block, std::shared_
     }
 }
 
-void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::shared_ptr<Entity>& entity) {
+void WorldHandler::onValuesUpdatePlayer(const UpdateBlock& block, std::shared_ptr<Entity>& entity) {
     // Other player visible items
     if (block.guid != owner_.getPlayerGuid()) {
         owner_.inventory().updateOtherPlayerVisibleItems(block.guid, entity->getFields());
@@ -1364,11 +1364,11 @@ void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::share
     }
 }
 
-void EntityController::onValuesUpdateItem(const UpdateBlock& block, std::shared_ptr<Entity>& entity) {
+void WorldHandler::onValuesUpdateItem(const UpdateBlock& block, std::shared_ptr<Entity>& entity) {
     updateItemOnValuesUpdate(block, entity);
 }
 
-void EntityController::onValuesUpdateGameObject(const UpdateBlock& block, std::shared_ptr<Entity>& entity) {
+void WorldHandler::onValuesUpdateGameObject(const UpdateBlock& block, std::shared_ptr<Entity>& entity) {
     if (block.hasMovement) {
         if (transportGuids_.count(block.guid)) {
             serverUpdatedTransportGuids_.insert(block.guid);
@@ -1393,7 +1393,7 @@ void EntityController::onValuesUpdateGameObject(const UpdateBlock& block, std::s
     applyTransportRouteClock(block);
 }
 
-void EntityController::applyTransportRouteClock(const UpdateBlock& block) {
+void WorldHandler::applyTransportRouteClock(const UpdateBlock& block) {
     // A moving transport publishes where it is on its route: LEVEL is the route's
     // period in milliseconds, and the high int16 of DYNAMIC is how far through
     // that period it currently is, as a fraction of 65535.
@@ -1431,7 +1431,7 @@ void EntityController::applyTransportRouteClock(const UpdateBlock& block) {
 // Update type handlers
 // ============================================================
 
-void EntityController::handleCreateObject(const UpdateBlock& block, bool& newItemCreated) {
+void WorldHandler::handleCreateObject(const UpdateBlock& block, bool& newItemCreated) {
     if (block.guid == owner_.getPlayerGuid()) owner_.spells().companionFieldsArrived(block.fields);
     pendingEvents_.clear();
 
@@ -1475,7 +1475,7 @@ void EntityController::handleCreateObject(const UpdateBlock& block, bool& newIte
     flushPendingEvents();
 }
 
-void EntityController::handleValuesUpdate(const UpdateBlock& block) {
+void WorldHandler::handleValuesUpdate(const UpdateBlock& block) {
     if (block.guid == owner_.getPlayerGuid()) owner_.spells().companionFieldsArrived(block.fields);
     auto entity = entityManager.getEntity(block.guid);
     if (!entity) {
@@ -1513,7 +1513,7 @@ void EntityController::handleValuesUpdate(const UpdateBlock& block) {
     LOG_DEBUG("Updated entity fields: 0x", std::hex, block.guid, std::dec);
 }
 
-void EntityController::handleMovementUpdate(const UpdateBlock& block) {
+void WorldHandler::handleMovementUpdate(const UpdateBlock& block) {
             // Diagnostic: Log if we receive MOVEMENT blocks for transports
             if (transportGuids_.count(block.guid)) {
                 LOG_INFO("MOVEMENT update for transport 0x", std::hex, block.guid, std::dec,
@@ -1562,14 +1562,14 @@ void EntityController::handleMovementUpdate(const UpdateBlock& block) {
             }
 }
 
-void EntityController::finalizeUpdateObjectBatch(bool newItemCreated) {
+void WorldHandler::finalizeUpdateObjectBatch(bool newItemCreated) {
     owner_.combat().invalidateTabCycle();
     // Entity count logging disabled
 
     owner_.inventory().updateBatchFinished(newItemCreated, owner_.player().fields());
 }
 
-void EntityController::handleCompressedUpdateObject(network::Packet& packet) {
+void WorldHandler::handleCompressedUpdateObject(network::Packet& packet) {
     LOG_DEBUG("Handling SMSG_COMPRESSED_UPDATE_OBJECT, packet size: ", packet.getSize());
 
     // First 4 bytes = decompressed size
@@ -1606,7 +1606,7 @@ void EntityController::handleCompressedUpdateObject(network::Packet& packet) {
     network::Packet decompressedPacket(wireOpcode(Opcode::SMSG_UPDATE_OBJECT), decompressed);
     handleUpdateObject(decompressedPacket);
 }
-void EntityController::handleDestroyObject(network::Packet& packet) {
+void WorldHandler::handleDestroyObject(network::Packet& packet) {
     LOG_DEBUG("Handling SMSG_DESTROY_OBJECT");
 
     DestroyObjectData data;
@@ -1701,7 +1701,7 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
 // Name Queries
 // ============================================================
 
-void EntityController::playerNamed(uint64_t guid, const std::string& name) {
+void WorldHandler::playerNamed(uint64_t guid, const std::string& name) {
     auto entity = entityManager.getEntity(guid);
     if (entity && entity->getType() == ObjectType::PLAYER) {
         std::static_pointer_cast<Player>(entity)->setName(name);
@@ -1716,7 +1716,7 @@ void EntityController::playerNamed(uint64_t guid, const std::string& name) {
     }
 }
 
-void EntityController::creatureNamed(const CreatureQueryResponseData& data) {
+void WorldHandler::creatureNamed(const CreatureQueryResponseData& data) {
     for (auto& [guid, entity] : entityManager.getEntities()) {
         if (entity->getType() != ObjectType::UNIT) continue;
         auto unit = std::static_pointer_cast<Unit>(entity);
@@ -1737,7 +1737,7 @@ void EntityController::creatureNamed(const CreatureQueryResponseData& data) {
     }
 }
 
-void EntityController::gameObjectNamed(const GameObjectQueryResponseData& data) {
+void WorldHandler::gameObjectNamed(const GameObjectQueryResponseData& data) {
     for (auto& [guid, entity] : entityManager.getEntities()) {
         if (entity->getType() != ObjectType::GAMEOBJECT) continue;
         auto go = std::static_pointer_cast<GameObject>(entity);

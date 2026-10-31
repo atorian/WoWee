@@ -5237,7 +5237,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                     if (inspectModel && inspectModel->visible) {
                         const auto* result = gameHandler->social().getInspectResult();
                         const auto look = result && result->guid != 0
-                                              ? gameHandler->entityController().appearanceOf(result->guid)
+                                              ? gameHandler->world().appearanceOf(result->guid)
                                               : std::nullopt;
                         if (look) {
                             std::vector<game::EquipmentItem> worn;
@@ -5363,7 +5363,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                     // naked race model, with none of their skin, face or hair.
                     // The world already reads all three off their update
                     // fields, and now so does this.
-                    const auto look = gameHandler->entityController().appearanceOf(face.guid);
+                    const auto look = gameHandler->world().appearanceOf(face.guid);
                     if (look) {
                         // What they are visibly wearing, where it is known.
                         // Empty means the item queries have not come back, and

@@ -891,7 +891,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
         }
     }
     if (goIt != spawns_->gameObjectInstances_.end()) {
-        if (gameHandler_ && gameHandler_->entityController().isTransportGuid(guid)) {
+        if (gameHandler_ && gameHandler_->world().isTransportGuid(guid)) {
             if (auto* transportManager = gameHandler_->getTransportManager()) {
                 if (transportManager->getTransport(guid)) {
                     transportManager->rebindTransportInstance(
@@ -927,7 +927,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
 
     std::string modelPath;
 
-    if (gameHandler_ && gameHandler_->entityController().isTransportGuid(guid)) {
+    if (gameHandler_ && gameHandler_->world().isTransportGuid(guid)) {
         modelPath = transportModelPath(entry, displayId);
         if (!modelPath.empty()) {
             LOG_INFO("Transport entry/display ", entry, "/", displayId, " → ", modelPath);
@@ -1065,7 +1065,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
             // Transport GameObjects are not always named "transport" in their WMO path
             // (e.g. elevators/lifts). If the server marks it as a transport, always
             // notify so TransportManager can animate/carry passengers.
-            bool isTG = gameHandler_ && gameHandler_->entityController().isTransportGuid(guid);
+            bool isTG = gameHandler_ && gameHandler_->world().isTransportGuid(guid);
             LOG_DEBUG("WMO GO spawned: guid=0x", std::hex, guid, std::dec,
                        " entry=", entry, " displayId=", displayId,
                        " isTransport=", isTG,
@@ -1187,7 +1187,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
         }
 
         // Notify transport system for M2 transports (e.g. Deeprun Tram cars)
-        if (gameHandler_ && gameHandler_->entityController().isTransportGuid(guid)) {
+        if (gameHandler_ && gameHandler_->world().isTransportGuid(guid)) {
             LOG_DEBUG("M2 transport spawned: guid=0x", std::hex, guid, std::dec,
                        " entry=", entry, " displayId=", displayId,
                        " instanceId=", instanceId);

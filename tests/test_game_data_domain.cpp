@@ -7,7 +7,7 @@
 #include "test_support.hpp"
 
 #include "game/game_data.hpp"
-#include "game/entity_controller.hpp"
+#include "game/world_handler.hpp"
 #include "game/game_handler.hpp"
 #include "game/player_handler.hpp"
 #include "game/protocol_tables.hpp"
@@ -200,7 +200,7 @@ TEST_CASE("another player's race and looks are their own fields, never guessed f
                                              {fieldIndex(UF::UNIT_FIELD_FACTIONTEMPLATE), 0x00010101u}},
                                             h.player().x + 5.0f, h.player().y, h.player().z));
     h.pump();
-    CHECK_FALSE(h.game().entityController().appearanceOf(kOther).has_value());
+    CHECK_FALSE(h.game().world().appearanceOf(kOther).has_value());
 
     // Race 5 (undead), female; skin 2, face 3, hair 4, colour 1; beard 6.
     h.receive(Opcode::SMSG_UPDATE_OBJECT,
@@ -208,7 +208,7 @@ TEST_CASE("another player's race and looks are their own fields, never guessed f
                                                {fieldIndex(UF::PLAYER_BYTES), 0x01040302u},
                                                {fieldIndex(UF::PLAYER_BYTES_2), 0x00000006u}}));
     h.pump();
-    const auto looks = h.game().entityController().appearanceOf(kOther);
+    const auto looks = h.game().world().appearanceOf(kOther);
     REQUIRE(looks.has_value());
     CHECK(looks->race == 5);
     CHECK(looks->gender == 1);

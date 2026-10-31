@@ -42,7 +42,7 @@
 
 #include "core/env.hpp"
 #include "game/entity.hpp"
-#include "game/entity_controller.hpp"
+#include "game/world_handler.hpp"
 #include "game/protocol_tables.hpp"
 #include "game/update_field_table.hpp"
 #include "game/world_packet_data.hpp"
@@ -547,7 +547,7 @@ void GameHarness::playerFields(const std::map<uint16_t, uint32_t>& fields, bool 
     for (const auto& [k, v] : fields) block.fields[k] = v;
     game::UpdateObjectData batch{};
     batch.blocks.push_back(block);
-    game_->entityController().applyRecordedObjects(batch);
+    game_->world().applyRecordedObjects(batch);
     pump();
 }
 

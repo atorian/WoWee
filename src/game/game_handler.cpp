@@ -120,7 +120,7 @@ GameHandler::GameHandler(GameServices& services)
 
     // Initialize domain handlers
     queryCacheHandler_ = std::make_unique<QueryCacheHandler>(*this, *services_.events, *this);
-    entityController_ = std::make_unique<EntityController>(*this);
+    worldHandler_ = std::make_unique<WorldHandler>(*this);
     chatHandler_      = std::make_unique<ChatHandler>(*this, *this, *services_.events, *this,
                                                       *services_.cvars, *services_.emotes);
     movementHandler_  = std::make_unique<MovementHandler>(*this, *this, *services_.events, *chatHandler_,
@@ -302,7 +302,7 @@ void GameHandler::clearWorldState() {
     movementHandler_->clearTransportAttachments();
     pendingIncomingPackets_.clear();
     // Say every entity left view so the renderer releases M2/character model resources.
-    for (const auto& [guid, entity] : entityController_->getEntityManager().getEntities()) {
+    for (const auto& [guid, entity] : worldHandler_->getEntityManager().getEntities()) {
         if (guid == playerGuid) continue;
         if (entity->getType() == ObjectType::UNIT)
             eventBus().publish(events::CreatureDespawned{guid});
@@ -315,7 +315,7 @@ void GameHandler::clearWorldState() {
     spellHandler_->clearUnitCastStates();
     spellHandler_->clearUnitAurasCache();
     combatHandler_->clearCombatText();
-    entityController_->clearAll();
+    worldHandler_->clearAll();
     queryCacheHandler_->clear();
 }
 
@@ -352,7 +352,7 @@ ActionCooldown GameHandler::spellCooldown(uint32_t spellId) const {
 std::optional<uint32_t> GameHandler::playerFieldBytes() const {
     const uint16_t index = fieldIndex(UF::PLAYER_FIELD_BYTES);
     if (index == 0xFFFF) return std::nullopt;
-    const auto player = entityController_->getEntityManager().getEntity(playerGuid);
+    const auto player = worldHandler_->getEntityManager().getEntity(playerGuid);
     if (!player || !player->hasField(index)) return std::nullopt;
     return player->getField(index);
 }
@@ -428,7 +428,7 @@ bool GameHandler::npcDialogOpen() const {
 }
 
 bool GameHandler::nameUnitInView(uint64_t guid, const std::string& name) {
-    auto unit = std::dynamic_pointer_cast<Unit>(entityController_->getEntityManager().getEntity(guid));
+    auto unit = std::dynamic_pointer_cast<Unit>(worldHandler_->getEntityManager().getEntity(guid));
     if (!unit) return false;
     unit->setName(name);
     return true;
@@ -561,7 +561,7 @@ void GameHandler::updateNetworking() {
     // Detect server-side disconnect (socket closed during update)
     if (socket && !socket->isConnected() && state != WorldState::DISCONNECTED) {
         if (movementHandler_->hasPendingWorldTransfer() ||
-            (pendingIncomingPackets_.empty() && !entityController_->hasPendingUpdateObjectWork())) {
+            (pendingIncomingPackets_.empty() && !worldHandler_->hasPendingUpdateObjectWork())) {
             LOG_WARNING("Server closed connection in state: ", worldStateName(state));
             // The client releases the world after submitting the frame. Keep
             // entities and the closed connection alive until that command.
@@ -627,7 +627,7 @@ void GameHandler::updateEntityInterpolation(float deltaTime) {
 // creature then put it on the unconditional path and made it snap forward.
 // Entity interpolation is inexpensive; rendering retains its own distance
 // culling and remains the correct place to skip costly visual work.
-for (const auto& [guid, entity] : entityController_->getEntityManager().getEntities()) {
+for (const auto& [guid, entity] : worldHandler_->getEntityManager().getEntities()) {
     (void)guid;
     if (entity && entity->isUnit()) {
         entity->updateMovement(deltaTime, services_.movementCollision);
@@ -706,7 +706,7 @@ void GameHandler::updateTimers(float deltaTime) {
         nameResyncTimer += deltaTime;
         if (nameResyncTimer >= 5.0f) {
             nameResyncTimer = 0.0f;
-            for (const auto& [guid, entity] : entityController_->getEntityManager().getEntities()) {
+            for (const auto& [guid, entity] : worldHandler_->getEntityManager().getEntities()) {
                 if (!entity || entity->getType() != ObjectType::PLAYER) continue;
                 if (guid == playerGuid) continue;
                 auto player = std::static_pointer_cast<Player>(entity);
@@ -837,7 +837,7 @@ void GameHandler::updateGame(float deltaTime) {
 
     // Validate target still exists
     if (const uint64_t target = combatHandler_->getTargetGuid();
-        target != 0 && !entityController_->getEntityManager().hasEntity(target)) {
+        target != 0 && !worldHandler_->getEntityManager().hasEntity(target)) {
         combatHandler_->clearTarget();
     }
 
@@ -845,7 +845,7 @@ void GameHandler::updateGame(float deltaTime) {
     movementHandler_->updateFollow(deltaTime);
 
     // Entering and leaving combat is fired from the update block that carries
-    // UNIT_FLAG_IN_COMBAT, in EntityController - not from here.
+    // UNIT_FLAG_IN_COMBAT, in WorldHandler - not from here.
     //
     // Both places used to fire it, so every fight announced itself twice: the
     // combat text showed "Entering Combat" and then "Entering Combat" again,
@@ -950,7 +950,7 @@ void GameHandler::updateGame(float deltaTime) {
         combatHandler_->updateAutoAttack(deltaTime);
         auto closeIfTooFar = [&](bool windowOpen, uint64_t npcGuid, auto closeFn, const char* label) {
             if (!windowOpen || npcGuid == 0) return;
-            auto npc = entityController_->getEntityManager().getEntity(npcGuid);
+            auto npc = worldHandler_->getEntityManager().getEntity(npcGuid);
             if (!npc) return;
             float dx = movementInfo.x - npc->getX();
             float dy = movementInfo.y - npc->getY();
@@ -973,7 +973,7 @@ void GameHandler::updateGame(float deltaTime) {
             // server never heard the walk over.
             float sentDistance = -1.0f;
             glm::vec3 sent;
-            auto npc = entityController_->getEntityManager().getEntity(pendingNpcHello_.guid);
+            auto npc = worldHandler_->getEntityManager().getEntity(pendingNpcHello_.guid);
             if (npc && movementHandler_->lastSentPosition(sent)) {
                 sentDistance = glm::length(sent - glm::vec3(npc->getX(), npc->getY(), npc->getZ()));
             }

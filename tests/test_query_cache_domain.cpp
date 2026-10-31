@@ -5,7 +5,7 @@
 
 #include "game_harness.hpp"
 #include "game/entity.hpp"
-#include "game/entity_controller.hpp"
+#include "game/world_handler.hpp"
 #include "game/game_handler.hpp"
 #include "game/update_field_table.hpp"
 
