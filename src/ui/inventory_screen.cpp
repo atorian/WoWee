@@ -9,6 +9,7 @@
 #include "ui/ui_colors.hpp"
 #include "ui/keybinding_manager.hpp"
 #include "game/game_handler.hpp"
+#include "game/game_data.hpp"
 #include "core/application.hpp"
 #include "core/world_loader.hpp"
 #include "rendering/vk_context.hpp"
@@ -99,13 +100,6 @@ void InventoryScreen::renderItemTooltip(const game::ItemQueryResponseData& info,
                                         const game::Inventory* inventory,
                                         uint64_t itemGuid) {
     ui::renderItemTooltip(info, inventory, itemGuid, gameHandler_, assetManager_);
-}
-
-VkDescriptorSet InventoryScreen::getItemIcon(uint32_t displayInfoId) {
-    // The shared cache, so an item drawn here and on the action bar is
-    // uploaded once. See itemIconTexture.
-    return itemIconTexture(displayInfoId, assetManager_,
-                           core::Application::getInstance().getWindow());
 }
 
 // ============================================================

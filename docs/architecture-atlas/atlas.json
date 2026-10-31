@@ -49,6 +49,10 @@
             "World preload · до 4\nотдельные потоки → join"
           ],
           [
+            "release",
+            "background · 1\nосвобождение tiles / моделей"
+          ],
+          [
             "other",
             "Задачи по необходимости\nDNS/connect · Warden · patch/hash\nwatchdog · stats · update · recorder"
           ]
@@ -205,6 +209,12 @@
         "other",
         "запуск / poll",
         "borrow"
+      ],
+      [
+        "main",
+        "release",
+        "releaseInBackground",
+        "borrow"
       ]
     ],
     "issues": [
@@ -213,10 +223,10 @@
         "kind": "Факт → риск",
         "title": "Все обычные I/O-задачи делят два FIFO-воркера",
         "body": "JobGroup отправляет map/entity preparation в тот же ioWorkers, что чтение музыки и spell assets. Очередь ThreadPool не ограничена и не имеет приоритетов. Длинный backlog может задерживать появление близких объектов или запуск музыки.",
-        "action": "Измерять время ожидания в очереди, её длину и тип задачи; затем вводить приоритеты и backpressure по общему контракту.",
+        "action": "ThreadPool уже записывает по метке задачи время в очереди и выполнения, но frame profile включает это только для frameWorkers. Включить то же для ioWorkers, добавить длину очереди; затем вводить приоритеты и backpressure по общему контракту.",
         "refs": [
-          "include/core/thread_pool.hpp:59",
-          "include/core/thread_pool.hpp:73",
+          "include/core/thread_pool.hpp:61",
+          "include/core/thread_pool.hpp:85",
           "include/core/job_group.hpp:116",
           "src/audio/music_manager.cpp:136"
         ]
@@ -228,8 +238,8 @@
         "body": "Главный поток ждёт M2 animation в Present и окончания secondary command buffers в Render. Это необходимые барьеры: длительность кадра зависит от самого долгого незавершённого задания, даже если остальные воркеры свободны.",
         "action": "Профилировать очередь отдельно от выполнения и ожидания get; сохранять барьер перед чтением изменяемых spatial/animation данных.",
         "refs": [
-          "src/rendering/renderer.cpp:2394",
-          "src/rendering/renderer.cpp:3344"
+          "src/rendering/renderer.cpp:2703",
+          "src/rendering/renderer.cpp:3661"
         ]
       },
       {
@@ -239,9 +249,9 @@
         "body": "Frame pool, terrain pool, preload, normal maps и std::async задают параллелизм независимо. Их одновременная активность может вытеснять главный поток. Это риск oversubscription, а не доказанный замер фриза.",
         "action": "Снять профиль холодного входа в город: runnable threads, загрузка CPU и задержки main; учитывать все активные пулы.",
         "refs": [
-          "src/rendering/terrain_manager.cpp:104",
-          "include/core/thread_pool.hpp:82",
-          "src/core/world_loader.cpp:600",
+          "src/rendering/terrain_manager.cpp:107",
+          "include/core/thread_pool.hpp:116",
+          "src/core/world_loader.cpp:510",
           "src/rendering/character_renderer.cpp:71"
         ]
       }
@@ -266,6 +276,10 @@
       [
         "I/O workers",
         "2 потока; JobGroup даёт token и lifetime fence, а не собственный пул."
+      ],
+      [
+        "Background",
+        "1 поток для работы, которую не ждёт ни кадр, ни вызывающий: освобождение разобранных tiles и вытесненных моделей (releaseInBackground)."
       ],
       [
         "Normal maps",
@@ -508,10 +522,10 @@
         "body": "Фаза Streaming опрашивает WorldLoader и loading scene, но terrain.update → processReadyTiles выполняется в Renderer::update, вызванном из Present. Название фазы не отражает всю её стоимость; смотреть только метрику Streaming недостаточно.",
         "action": "При анализе фризов раскрывать Present на terrain finalization, unload, animation и wait; не переносить вызовы без проверки зависимостей.",
         "refs": [
-          "src/core/application.cpp:4071",
-          "src/core/application.cpp:4093",
-          "src/rendering/renderer.cpp:2277",
-          "src/rendering/terrain_manager.cpp:231"
+          "src/core/application.cpp:4660",
+          "src/core/application.cpp:4690",
+          "src/rendering/renderer.cpp:2582",
+          "src/rendering/terrain_manager.cpp:240"
         ]
       },
       {
@@ -534,10 +548,10 @@
         "body": "Сеть по умолчанию получает 4 мс в мире, 8 мс при входе и 12 мс при catch-up. Terrain finalize получает 2/8/16 мс, unload — ещё 8/16 мс. Это независимые лимиты; проверка между операциями не прерывает один долгий шаг. Это настройки времени, не измеренная длительность кадра.",
         "action": "Сопоставлять суммарные CPU-фазы с целевым временем кадра и отдельно отмечать overruns одной операции и ожидания GPU.",
         "refs": [
-          "src/game/game_handler_packets.cpp:87",
-          "src/game/game_handler_packets.cpp:101",
-          "src/rendering/terrain_manager.cpp:1529",
-          "src/rendering/terrain_manager.cpp:1591"
+          "src/game/game_handler_packets.cpp:110",
+          "src/game/game_handler_packets.cpp:124",
+          "src/rendering/terrain_manager.cpp:1634",
+          "src/rendering/terrain_manager.cpp:1732"
         ]
       }
     ],
@@ -628,7 +642,7 @@
           ],
           [
             "old",
-            "[C1] 4 legacy handlers\nCombat / Movement / Entity / Warden"
+            "[C1] XxxQueries\nGameHandler реализует и пересылает"
           ]
         ]
       },
@@ -749,15 +763,9 @@
         "flow"
       ],
       [
-        "gh",
-        "old",
-        "создаёт",
-        "flow"
-      ],
-      [
         "old",
         "gh",
-        "GameHandler& owner_",
+        "реализует: пересылка владельцу",
         "wait"
       ],
       [
@@ -843,20 +851,21 @@
       {
         "code": "C1",
         "kind": "Подтверждённый долг",
-        "title": "Четыре домена всё ещё зависят от всего GameHandler",
-        "body": "Статическая проверка: 4 handlers с GameHandler&, 1206 обращений через owner_, 110 xxxRef-accessors. Имена доменов уже выделены, но часть их зависимостей и владения состоянием остаётся неявной.",
-        "action": "Переносить state к владельцу и передавать узкие PacketSender / FrameXmlEvents / Query interfaces; не добавлять новые owner_. и Ref-пути.",
+        "title": "GameHandler остаётся узлом, через который домены спрашивают друг друга",
+        "body": "Статическая проверка: 0 handlers с GameHandler&, 0 обращений через owner_. Каждый handler строится из своих interfaces, но реализует их GameHandler: вопрос одного домена к другому проходит через его пересылку, а порядок вызовов в ней держит порядок событий FrameXML. Ещё 4 xxxRef-accessors открывают его состояние наружу.",
+        "action": "Переносить оставшееся состояние (movementInfo, characters, currentMapId, update field table) к владельцам; уведомления между контекстами вести через bus, а не через пересылку.",
         "refs": [
           "tools/domain_shape_check.py:54",
-          "src/game/game_handler.cpp:116",
-          "include/game/game_handler.hpp:143"
+          "src/game/game_handler.cpp:123",
+          "include/game/world_handler.hpp:37",
+          "include/game/game_handler.hpp:101"
         ]
       },
       {
         "code": "C2",
         "kind": "Долг → риск",
         "title": "Сохраняются каналы уведомления с одним слушателем",
-        "body": "В GameHandler осталось 50 set*Callback setters. Они требуют ручного wiring и допускают замену предыдущего слушателя. Само число не доказывает потерю события сейчас, но показывает объём неявного контракта.",
+        "body": "В GameHandler осталось 2 set*Callback setters. Они требуют ручного wiring и допускают замену предыдущего слушателя. Само число не доказывает потерю события сейчас, но показывает объём неявного контракта.",
         "action": "При изменении существующего уведомления переходить на типизированное событие и RAII Subscription; FrameXML оставить отдельным контрактом Lua.",
         "refs": [
           "tools/domain_shape_check.py:47",
@@ -871,7 +880,7 @@
         "body": "CMake исключает camera_controller, animation_controller, spell visuals и другие presentation-файлы из wowee_render. В game также остаётся 6 includes общих animation/movement constants из rendering/. Это усложняет определение владельца по каталогу.",
         "action": "Ориентироваться на CMake targets и guard checks; общие protocol/animation IDs постепенно переносить в нейтральные headers.",
         "refs": [
-          "CMakeLists.txt:1249",
+          "CMakeLists.txt:1319",
           "tools/render_dependency_check.py:58",
           "tools/game_dependency_check.py:46"
         ]
@@ -888,7 +897,7 @@
       ],
       [
         "Renderer",
-        "Получает scene/presentation state, не включает game/ui/audio/network client modules. 83 source-файла в текущей проверке; compile-time границы зависят от CMake."
+        "Получает scene/presentation state, не включает game/ui/audio/network client modules. 95 source-файлов в текущей проверке; compile-time границы зависят от CMake."
       ],
       [
         "Pipeline",
@@ -1138,8 +1147,8 @@
         "body": "При заполнении 8192 slots enqueueIncomingPacket удаляет самый старый пакет; enqueueIncomingPacketFront удаляет самый новый. Это общий протокольный поток, поэтому может пропасть не только промежуточное движение, но и изменение состояния. Socket queue при собственном overflow, напротив, закрывает соединение.",
         "action": "Нужна явная recovery/resync политика. До доказанной безопасной coalescing-семантики нельзя произвольно отбрасывать пакеты состояния. Сценарий overflow требует отдельного поведенческого теста.",
         "refs": [
-          "src/game/game_handler_packets.cpp:3054",
-          "src/game/game_handler_packets.cpp:3065",
+          "src/game/game_handler_packets.cpp:2388",
+          "src/game/game_handler_packets.cpp:2399",
           "src/network/world_socket.cpp:791"
         ]
       },
@@ -1150,8 +1159,8 @@
         "body": "readFileShared сначала проверяет cache, затем читает источник вне lock, затем вставляет результат. In-flight request table в этом пути нет: несколько воркеров на холодном файле могут одновременно прочитать его. Generation защищает актуальность cache, но не объединяет запросы.",
         "action": "Сначала измерить дубликаты cold reads и peak decoded bytes; если существенно — объединять одновременные запросы по нормализованному ключу и generation.",
         "refs": [
-          "src/pipeline/asset_manager.cpp:804",
-          "src/pipeline/asset_manager.cpp:813"
+          "src/pipeline/asset_manager.cpp:791",
+          "src/pipeline/asset_manager.cpp:800"
         ]
       },
       {
@@ -1161,9 +1170,9 @@
         "body": "Порог 3 проверяется перед началом terrain preparation; уже работающие workers могут положить дополнительные tiles. Разные tiles содержат разное количество decoded pixels и моделей. MemoryMonitor уже замедляет загрузку, но этот порог не является жёстким byte cap всего pipeline.",
         "action": "Наблюдать queued + preparing + ready + finalizing CPU bytes и staging bytes; оценивать backpressure по общему объёму, сохраняя прогресс хотя бы одного tile.",
         "refs": [
-          "include/rendering/terrain_manager.hpp:522",
-          "src/rendering/terrain_manager.cpp:1439",
-          "src/rendering/terrain_manager.cpp:1462"
+          "include/rendering/terrain_manager.hpp:525",
+          "src/rendering/terrain_manager.cpp:1541",
+          "src/rendering/terrain_manager.cpp:1567"
         ]
       }
     ],
@@ -1174,7 +1183,7 @@
       ],
       [
         "Домены",
-        "Packet parser + opcode handler изменяют state. EntityController владеет entities; отображение получает события и запрашивает state."
+        "Packet parser + opcode handler изменяют state. WorldHandler владеет объектами в зоне видимости, QueryCacheHandler — кэшами имён и шаблонов; отображение получает события и запрашивает state."
       ],
       [
         "Ресурсный handoff",
@@ -1232,7 +1241,7 @@
           ],
           [
             "entities",
-            "Handlers / EntityController\ncharacter state / entities"
+            "Handlers / WorldHandler\ncharacter state / entities"
           ],
           [
             "front",
@@ -1459,8 +1468,8 @@
         "refs": [
           "src/core/map_scope.cpp:37",
           "include/core/job_group.hpp:115",
-          "src/core/world_loader.cpp:93",
-          "include/core/thread_pool.hpp:73"
+          "src/core/world_loader.cpp:96",
+          "include/core/thread_pool.hpp:85"
         ]
       },
       {
@@ -1471,8 +1480,8 @@
         "action": "Новые подписки хранить RAII-членами; для каждого нового borrowed указателя указать lifetime. Проверять logout, same-map reconnect, superseded load и exit, сохраняя порядок stop/join → release.",
         "refs": [
           "include/core/window.hpp:85",
-          "include/rendering/renderer.hpp:620",
-          "src/core/application.cpp:2104",
+          "include/rendering/renderer.hpp:678",
+          "src/core/application.cpp:2623",
           "src/core/character_session.cpp:67"
         ]
       },

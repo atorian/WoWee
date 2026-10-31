@@ -14,19 +14,11 @@
 
 using wowee::rendering::cellMayCastShadow;
 using wowee::rendering::distanceSqToBox;
+using wowee::rendering::instanceInShadowFootprint;
 using wowee::rendering::Frustum;
 using wowee::rendering::M2CullGrid;
 
 namespace {
-
-// The shadow pass's per-instance test, as M2Renderer::renderShadow writes it.
-bool instanceCasts(const glm::mat4& lightSpace, const glm::vec3& position, float shadowRadius,
-                   float boundRadiusTimesScale) {
-    const glm::vec4 clip = lightSpace * glm::vec4(position, 1.0f);
-    const float margin = boundRadiusTimesScale / shadowRadius * 1.5f;
-    if (std::abs(clip.x) > 1.0f + margin || std::abs(clip.y) > 1.0f + margin) return false;
-    return clip.z >= -margin && clip.z <= 1.0f + margin;
-}
 
 // Files instance `index` as M2Renderer::fileInCullGrid does: its record from
 // the instance, then its column.
@@ -96,7 +88,7 @@ TEST_CASE("a column is kept whenever one of its instances would cast") {
             if (kept) continue;
             for (const uint32_t index : cell.members) {
                 const Inst& inst = all[index];
-                if (instanceCasts(light, inst.pos, shadowRadius, inst.r)) ++lost;
+                if (instanceInShadowFootprint(light, inst.pos, inst.r, shadowRadius)) ++lost;
             }
         }
         CHECK(lost == 0);

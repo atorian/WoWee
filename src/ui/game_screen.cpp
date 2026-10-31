@@ -231,6 +231,7 @@ void GameScreen::setAntiAliasingIndex(int index) {
 
 void GameScreen::setServices(const UIServices& services) {
     services_ = services;
+    spellbookScreen.setGameTables(services_.gameTables);
     // Settings are loaded by the constructor before services are injected.
     // Apply the saved display pacing as soon as the actual window is available.
     if (services_.window &&
@@ -943,7 +944,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                         circleColor = glm::vec3(0.5f, 0.5f, 0.5f); // gray (dead)
                     } else if (unit->isHostile() || gameHandler.combat().isAggressiveTowardPlayer(target->getGuid())) {
                         const ImVec4 c = ui::helpers::levelDifficultyColor(
-                            gameHandler.getPlayerLevel(), unit->getLevel());
+                            gameHandler.player().level(), unit->getLevel());
                         circleColor = glm::vec3(c.x, c.y, c.z);
                     } else {
                         circleColor = glm::vec3(0.3f, 1.0f, 0.3f); // green (friendly)
@@ -1228,7 +1229,7 @@ bool GameScreen::drawWorldObjectCursor(game::GameHandler& gameHandler,
     if (!entity || entity->getType() != game::ObjectType::GAMEOBJECT) return false;
 
     auto go = std::static_pointer_cast<game::GameObject>(entity);
-    const auto* info = gameHandler.getCachedGameObjectInfo(go->getEntry());
+    const auto* info = gameHandler.queryCache().getCachedGameObjectInfo(go->getEntry());
     if (usable) {
         VkDescriptorSet tex = cursorTexture(services_.assetManager, services_.window,
                                             objectCursorPath(info ? info->type : 0u));
@@ -2025,7 +2026,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
             auto target = gameHandler.combat().getTarget();
             if (target && target->getType() == game::ObjectType::GAMEOBJECT) {
                 auto go = std::static_pointer_cast<game::GameObject>(target);
-                auto* goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
+                auto* goInfo = gameHandler.queryCache().getCachedGameObjectInfo(go->getEntry());
                 if (!goInfo || goInfo->type != 7) {
                     LOG_DEBUG("[GO-DIAG] Right-click: re-interacting with targeted GO 0x",
                                 std::hex, target->getGuid(), std::dec);
@@ -2175,7 +2176,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     // Skip chairs: auto-sit must only happen when the chair is
                     // under the cursor, never as a side effect of right-click.
                     auto go = std::static_pointer_cast<game::GameObject>(target);
-                    auto* goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
+                    auto* goInfo = gameHandler.queryCache().getCachedGameObjectInfo(go->getEntry());
                     if (!goInfo || goInfo->type != 7) {
                         gameHandler.interactWithGameObject(target->getGuid());
                     }

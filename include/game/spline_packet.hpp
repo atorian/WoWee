@@ -156,7 +156,7 @@ enum class SplineFlagSet { PreWotlk, Wotlk };
                                           MonsterMoveData& data,
                                           bool& stopped);
 
-/// Parse a Classic/Turtle movement update spline block.
+/// Parse a Classic movement update spline block.
 /// Format: splineFlags, FINAL_POINT/TARGET/ANGLE, timePassed, duration, splineId,
 /// pointCount, uncompressed waypoints (12 bytes each), endPoint (no splineMode).
 [[nodiscard]] bool parseClassicMoveUpdateSpline(

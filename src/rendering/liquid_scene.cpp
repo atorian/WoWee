@@ -832,25 +832,5 @@ bool LiquidScene::isWmoLiquidAt(float x, float y) const {
     return false;
 }
 
-std::optional<float> LiquidScene::dominantWaterHeight(const glm::vec3& cameraPos) const {
-    float bestDist = std::numeric_limits<float>::max();
-    std::optional<float> best;
-    for (const auto& s : surfaces_) {
-        // Only water and ocean are mirrored; magma and slime are not.
-        if (s.basicType() >= 2) continue;
-        const glm::vec3 center = s.origin +
-            s.stepX * (static_cast<float>(s.width) * 0.5f) +
-            s.stepY * (static_cast<float>(s.height) * 0.5f);
-        const float dx = cameraPos.x - center.x;
-        const float dy = cameraPos.y - center.y;
-        const float dist = dx * dx + dy * dy;
-        if (dist < bestDist) {
-            bestDist = dist;
-            best = s.minHeight;
-        }
-    }
-    return best;
-}
-
 } // namespace rendering
 } // namespace wowee

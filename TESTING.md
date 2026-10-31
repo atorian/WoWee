@@ -128,7 +128,6 @@ tests/
   test_combat_fsm.cpp                     - Combat animation state machine
   test_activity_fsm.cpp                   - Activity state machine
   test_anim_capability.cpp                - Animation capability queries
-  test_indoor_shadows.cpp                 - Indoor shadow rendering
 
   # Rendering
   test_pass_ablation.cpp                  - Phase walk and arithmetic of the WOWEE_PASS_ABLATION report
@@ -139,7 +138,6 @@ tests/
   test_transport_path_repo.cpp            - TransportPathRepository (DBC loading, path inference)
 
   # World Map
-  test_world_map.cpp                      - World map integration tests
   test_world_map_coordinate_projection.cpp - UV projection, zone/continent spatial lookups
   test_world_map_exploration_state.cpp    - Server exploration mask, local tracking
   test_world_map_map_resolver.cpp         - Cross-map navigation (Outland, Northrend)
@@ -147,7 +145,6 @@ tests/
   test_world_map_zone_metadata.cpp        - Zone level ranges and faction labels
 
   # Chat
-  test_chat_markup_parser.cpp             - Item link and markup parsing
   test_gm_commands.cpp                    - GM command data table and dispatch
   test_macro_evaluator.cpp                - Macro conditional evaluation
 ```

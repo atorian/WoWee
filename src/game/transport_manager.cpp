@@ -819,12 +819,12 @@ void TransportManager::rebindTransportInstance(uint64_t guid, uint32_t instanceI
     }
 }
 
-bool TransportManager::loadTransportAnimationDBC(pipeline::AssetManager* assetMgr) {
-    return pathRepo_.loadTransportAnimationDBC(assetMgr);
+bool TransportManager::loadTransportAnimationDBC(const GameData& data) {
+    return pathRepo_.loadTransportAnimationDBC(data);
 }
 
-bool TransportManager::loadTaxiPathNodeDBC(pipeline::AssetManager* assetMgr) {
-    return pathRepo_.loadTaxiPathNodeDBC(assetMgr);
+bool TransportManager::loadTaxiPathNodeDBC(const GameData& data) {
+    return pathRepo_.loadTaxiPathNodeDBC(data);
 }
 
 bool TransportManager::hasTaxiPath(uint32_t taxiPathId) const {

@@ -10,7 +10,7 @@
 
 namespace wowee {
 
-namespace pipeline { class AssetManager; }
+namespace pipeline { class AssetManager; class GameTables; }
 
 namespace ui {
 
@@ -36,6 +36,9 @@ public:
     [[nodiscard]] bool isOpen() const { return open; }
     void toggle() { open = !open; }
     void setOpen(bool o) { open = o; }
+    /// The running expansion's tables the book reads Spell.dbc and the cast
+    /// times and ranges from. Nothing is read until they are handed over.
+    void setGameTables(const pipeline::GameTables* tables) { gameTables_ = tables; }
 
     // Spell name lookup - triggers DBC load if needed, used by action bar tooltips
 
@@ -91,6 +94,7 @@ private:
     std::string pendingChatSpellLink_;
 
     void loadSpellDBC(pipeline::AssetManager* assetManager);
+    const pipeline::GameTables* gameTables_ = nullptr;
     [[nodiscard]] const SpellInfo* getSpellInfo(uint32_t spellId) const;
 
     // Tooltip rendering helper (showUsageHints=false when called from action bar)

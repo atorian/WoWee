@@ -4,12 +4,13 @@
 
 #include "game_harness.hpp"
 #include "game/entity.hpp"
-#include "game/entity_controller.hpp"
+#include "game/world_handler.hpp"
 #include "game/game_events.hpp"
 #include "game/update_field_table.hpp"
 
 #include <glm/vec3.hpp>
 
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -128,7 +129,7 @@ TEST_CASE("Tab steps through enemies nearest first, and takes in one that has ju
     block.fields[fieldIndex(UF::UNIT_FIELD_MAXHEALTH)] = 100;
     UpdateObjectData batch{};
     batch.blocks.push_back(block);
-    h.game().entityController().applyRecordedObjects(batch);
+    h.game().world().applyRecordedObjects(batch);
     auto arrived = std::static_pointer_cast<Unit>(h.game().getEntityManager().getEntity(0x8003));
     REQUIRE(arrived);
     arrived->setPosition(me.x + 3.0f, me.y, me.z, 0.0f);
@@ -289,7 +290,7 @@ TEST_CASE("the ghost flag makes the player a ghost, and clearing it brings them 
         block.fields[fieldIndex(UF::PLAYER_FLAGS)] = value;
         UpdateObjectData batch{};
         batch.blocks.push_back(block);
-        h.game().entityController().applyRecordedObjects(batch);
+        h.game().world().applyRecordedObjects(batch);
     };
     flags(0x10);   // PLAYER_FLAGS_GHOST
     CHECK(h.game().combat().isPlayerGhost());
@@ -384,4 +385,120 @@ TEST_CASE("auto-attack reaches 8 yards bare-handed and 40 with a bow in the rang
     REQUIRE(h.game().inventory().items().setEquipSlot(EquipSlot::RANGED, bow));
     h.game().combat().startAutoAttack(0xA001);
     CHECK(h.countSent(Opcode::CMSG_ATTACKSWING) == 1);
+}
+
+namespace {
+/// A block for the player's own object, as an update or as the create a login
+/// brings.
+uint16_t uf(wowee::game::UF f) { return static_cast<uint16_t>(wowee::game::fieldIndex(f)); }
+}  // namespace
+
+TEST_CASE("the player's health reaching zero is a death, and coming back from it is life",
+          "[combat][death][harness]") {
+    using wowee::game::UF;
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    h.playerFields({{uf(UF::UNIT_FIELD_HEALTH), 100}, {uf(UF::UNIT_FIELD_MAXHEALTH), 100}});
+    h.clearRecords();
+
+    h.playerFields({{uf(UF::UNIT_FIELD_HEALTH), 0}});
+    CHECK(h.game().combat().isPlayerDead());
+    CHECK(h.addonEvents("PLAYER_DEAD").size() == 1);
+
+    h.playerFields({{uf(UF::UNIT_FIELD_HEALTH), 50}});
+    CHECK_FALSE(h.game().combat().isPlayerDead());
+    CHECK(h.addonEvents("PLAYER_ALIVE").size() == 1);
+}
+
+TEST_CASE("health coming back to a ghost is the spirit taking form, not life", "[combat][death][harness]") {
+    using wowee::game::UF;
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    h.playerFields({{uf(UF::UNIT_FIELD_HEALTH), 0}});
+    h.playerFields({{uf(UF::PLAYER_FLAGS), 0x10}});   // released: a ghost
+    REQUIRE(h.game().combat().isPlayerGhost());
+    h.clearRecords();
+
+    h.playerFields({{uf(UF::UNIT_FIELD_HEALTH), 1}});
+    CHECK(h.addonEvents("PLAYER_UNGHOST").size() == 1);
+    CHECK(h.addonEvents("PLAYER_ALIVE").empty());
+}
+
+TEST_CASE("the dead flag alone is a death, and clearing it is life", "[combat][death][harness]") {
+    using wowee::game::UF;
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    h.clearRecords();
+
+    h.playerFields({{uf(UF::UNIT_DYNAMIC_FLAGS), wowee::game::UNIT_DYNFLAG_DEAD}});
+    CHECK(h.game().combat().isPlayerDead());
+    CHECK(h.addonEvents("PLAYER_DEAD").size() == 1);
+
+    h.playerFields({{uf(UF::UNIT_DYNAMIC_FLAGS), 0}});
+    CHECK_FALSE(h.game().combat().isPlayerDead());
+    CHECK(h.addonEvents("PLAYER_ALIVE").size() == 1);
+}
+
+TEST_CASE("a player who logs in as a ghost is one, and the corpse is asked for", "[combat][death][harness]") {
+    using wowee::game::UF;
+    GameHarness h;
+    h.enterWorld();
+    std::vector<bool> ghostStates;
+    auto sub = h.events().subscribe<ev::GhostStateChanged>(
+        [&](const ev::GhostStateChanged& e) { ghostStates.push_back(e.isGhost); });
+    h.clearRecords();
+
+    h.playerFields({{uf(UF::UNIT_FIELD_HEALTH), 1}, {uf(UF::PLAYER_FLAGS), 0x10}}, /*create=*/true);
+
+    CHECK(h.game().combat().isPlayerGhost());
+    CHECK(h.game().combat().isPlayerDead());
+    CHECK(ghostStates == std::vector<bool>{true});
+    CHECK(h.countSent(Opcode::MSG_CORPSE_QUERY) == 1);
+}
+
+TEST_CASE("a player who logs in with no health is dead, and one whose block says nothing of it is not",
+          "[combat][death][harness]") {
+    using wowee::game::UF;
+    {
+        GameHarness h;
+        h.enterWorld();
+        h.playerFields({{uf(UF::UNIT_FIELD_HEALTH), 0}}, /*create=*/true);
+        CHECK(h.game().combat().isPlayerDead());
+    }
+    {
+        GameHarness h;
+        h.enterWorld();
+        h.playerFields({{uf(UF::UNIT_FIELD_MAXHEALTH), 100}}, /*create=*/true);
+        CHECK_FALSE(h.game().combat().isPlayerDead());
+    }
+}
+
+TEST_CASE("the combat flag starts and ends the fight the interface sees, and its end drops the attackers",
+          "[combat][harness]") {
+    using wowee::game::UF;
+    constexpr uint32_t kInCombat = 0x00080000;
+    constexpr uint64_t kWolf = 0xF130000001000001ull;
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    // A wolf swings at the player.
+    h.receive(Opcode::SMSG_ATTACKSTART, Body().u64(kWolf).u64(h.player().guid).bytes());
+    h.pump();
+    REQUIRE(h.game().combat().isHostileAttacker(kWolf));
+    h.clearRecords();
+
+    h.playerFields({{uf(UF::UNIT_FIELD_FLAGS), kInCombat}});
+    CHECK(h.addonEvents("PLAYER_REGEN_DISABLED").size() == 1);
+    CHECK(h.game().combat().isHostileAttacker(kWolf));
+
+    h.playerFields({{uf(UF::UNIT_FIELD_FLAGS), kInCombat | 0x1}});   // another flag: no news
+    CHECK(h.addonEvents("PLAYER_REGEN_DISABLED").size() == 1);
+    CHECK(h.addonEvents("PLAYER_REGEN_ENABLED").empty());
+
+    h.playerFields({{uf(UF::UNIT_FIELD_FLAGS), 0}});
+    CHECK(h.addonEvents("PLAYER_REGEN_ENABLED").size() == 1);
+    CHECK_FALSE(h.game().combat().isHostileAttacker(kWolf));
 }

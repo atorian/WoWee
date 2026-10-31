@@ -79,7 +79,7 @@ private:
         int port = 3724;
         std::string username;
         std::string passwordHash;  // SHA1 hex (UPPER(user):UPPER(pass))
-        std::string expansionId;   // "wotlk", "tbc", "classic", "turtle", ...
+        std::string expansionId;   // "wotlk", "tbc", "classic", ...
         std::string assetProfileId; // empty=match protocol, "legacy"=root manifest
         /// What to call it in the list, for the servers this client already
         /// knows about. Empty for one somebody typed in themselves, which has

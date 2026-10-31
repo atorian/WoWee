@@ -1,4 +1,5 @@
 #include "audio/npc_voice_manager.hpp"
+#include "pipeline/game_tables.hpp"
 #include "audio/audio_engine.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
@@ -14,8 +15,9 @@ NpcVoiceManager::~NpcVoiceManager() {
     shutdown();
 }
 
-bool NpcVoiceManager::initialize(pipeline::AssetManager* assets) {
+bool NpcVoiceManager::initialize(pipeline::AssetManager* assets, const pipeline::GameTables& tables) {
     assetManager_ = assets;
+    gameTables_ = &tables;
     if (!assetManager_) {
         LOG_WARNING("NPC voice manager: no asset manager");
         return false;
@@ -316,17 +318,14 @@ void NpcVoiceManager::loadVoiceSounds() {
 }
 
 void NpcVoiceManager::loadCreatureAggroSounds() {
-    if (!assetManager_) return;
+    if (!gameTables_) return;
 
-    auto displayDbc = assetManager_->loadDBC("CreatureDisplayInfo.dbc");
-    auto modelDbc = assetManager_->loadDBC("CreatureModelData.dbc");
-    auto soundDbc = assetManager_->loadDBC("CreatureSoundData.dbc");
-    if (!displayDbc || !displayDbc->isLoaded() ||
-        !modelDbc || !modelDbc->isLoaded() ||
-        !soundDbc || !soundDbc->isLoaded()) {
-        LOG_WARNING("NPC voice: creature aggro DBC data unavailable");
-        return;
-    }
+    // The columns read below: CreatureDisplayInfo's sound set (2),
+    // CreatureModelData's (13), CreatureSoundData's attack (1) and aggro (10).
+    constexpr std::string_view kNeededFor = "creatures' aggro and attack sounds";
+    const auto displayDbc = gameTables_->table("CreatureDisplayInfo.dbc", 3, kNeededFor);
+    const auto modelDbc = gameTables_->table("CreatureModelData.dbc", 14, kNeededFor);
+    const auto soundDbc = gameTables_->table("CreatureSoundData.dbc", 11, kNeededFor);
 
     // Fixed-skin creature models (including the Defias HumanThief model) keep
     // their sound set on CreatureModelData, while customizable displays can
@@ -368,11 +367,11 @@ void NpcVoiceManager::loadCreatureAggroSounds() {
 }
 
 bool NpcVoiceManager::playSoundEntry(uint32_t soundId, const glm::vec3& position) {
-    if (!assetManager_ || !AudioEngine::instance().isInitialized() || soundId == 0)
+    if (!assetManager_ || !gameTables_ || !AudioEngine::instance().isInitialized() || soundId == 0)
         return false;
 
-    auto dbc = assetManager_->loadDBC("SoundEntries.dbc");
-    if (!dbc || !dbc->isLoaded()) return false;
+    // File[0..9] at 3..12, DirectoryBase at 23.
+    const auto dbc = gameTables_->table("SoundEntries.dbc", 24, "creatures' voices");
     const int32_t rowIndex = dbc->findRecordById(soundId);
     if (rowIndex < 0) return false;
 

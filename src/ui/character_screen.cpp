@@ -405,8 +405,9 @@ void CharacterScreen::renderDetails(game::GameHandler& gameHandler,
             preview_ = std::make_shared<rendering::CharacterPreview>();
         }
         if (!previewInitialized_) {
-            if (auto* renderer = core::Application::getInstance().getRenderer()) renderer->drainFrames();
-            previewInitialized_ = preview_->initialize(assetManager_);
+            auto* renderer = core::Application::getInstance().getRenderer();
+            if (renderer) renderer->drainFrames();
+            previewInitialized_ = renderer && preview_->initialize(assetManager_, renderer->gameTables());
             if (!previewInitialized_) {
                 LOG_WARNING("CharacterScreen: failed to init CharacterPreview");
                 preview_.reset();

@@ -1,4 +1,5 @@
 #include "rendering/terrain_manager.hpp"
+#include "pipeline/game_tables.hpp"
 #include "collision/collision_world.hpp"
 
 #include <vector>
@@ -9,7 +10,7 @@
 #include "rendering/vk_context.hpp"
 #include "rendering/liquid_scene.hpp"
 #include "rendering/m2_renderer.hpp"
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/camera.hpp"
 #include "core/coordinates.hpp"
@@ -151,8 +152,10 @@ void TerrainManager::setWMORenderer(WMORenderer* renderer) {
     if (renderer) wmoNormalMapFormat_ = renderer->normalMapFormat();
 }
 
-bool TerrainManager::initialize(pipeline::AssetManager* assets, TerrainRenderer* renderer) {
+bool TerrainManager::initialize(pipeline::AssetManager* assets, TerrainRenderer* renderer,
+                                const pipeline::GameTables& tables) {
     assetManager = assets;
+    gameTables_ = &tables;
     terrainRenderer = renderer;
     if (renderer) terrainNormalMapFormat_ = renderer->normalMapFormat();
 
@@ -417,7 +420,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
             return nullptr;
         }
 
-        *terrainPtr = pipeline::ADTLoader::load(*adtData);
+        terrainPtr = pipeline::ADTLoader::load(*adtData);
         if (!terrainPtr->isLoaded()) {
             LOG_ERROR("Failed to parse ADT terrain: ", adtPath);
             return nullptr;
@@ -433,7 +436,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
                           std::to_string(coord.x) + "_" + std::to_string(coord.y) + "_obj0.adt";
     const auto objData = assetManager->readFileShared(objPath);
     if (objData) {
-        auto objTerrain = std::make_unique<pipeline::ADTTerrain>(pipeline::ADTLoader::load(*objData));
+        auto objTerrain = pipeline::ADTLoader::load(*objData);
         if (objTerrain->isLoaded()) {
             const uint32_t doodadNameBase = static_cast<uint32_t>(terrainPtr->doodadNames.size());
             const uint32_t wmoNameBase = static_cast<uint32_t>(terrainPtr->wmoNames.size());
@@ -858,18 +861,18 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
                             doodadLogCount++;
                         }
 
-                        auto emitterType = rendering::classifyAmbientEmitter(m2PathLower);
-                        if (emitterType != rendering::AmbientEmitterType::None) {
+                        auto emitterType = pipeline::classifyAmbientEmitter(m2PathLower);
+                        if (emitterType != pipeline::AmbientEmitterType::None) {
                             PendingTile::AmbientEmitter emitter;
                             emitter.position = worldPos;
                             // Map classifier enum to AmbientSoundManager type codes
                             switch (emitterType) {
-                                case rendering::AmbientEmitterType::FireplaceSmall: emitter.type = 0; break;
-                                case rendering::AmbientEmitterType::FireplaceLarge: emitter.type = 1; break;
-                                case rendering::AmbientEmitterType::Torch:          emitter.type = 2; break;
-                                case rendering::AmbientEmitterType::Fountain:       emitter.type = 3; break;
-                                case rendering::AmbientEmitterType::Waterfall:      emitter.type = 6; break;
-                                case rendering::AmbientEmitterType::Forge:          emitter.type = 1; break; // Forge → large fire
+                                case pipeline::AmbientEmitterType::FireplaceSmall: emitter.type = 0; break;
+                                case pipeline::AmbientEmitterType::FireplaceLarge: emitter.type = 1; break;
+                                case pipeline::AmbientEmitterType::Torch:          emitter.type = 2; break;
+                                case pipeline::AmbientEmitterType::Fountain:       emitter.type = 3; break;
+                                case pipeline::AmbientEmitterType::Waterfall:      emitter.type = 6; break;
+                                case pipeline::AmbientEmitterType::Forge:          emitter.type = 1; break; // Forge → large fire
                                 default: emitter.type = 0; break;
                             }
                             pending->ambientEmitters.push_back(emitter);
@@ -1978,15 +1981,12 @@ std::string TerrainManager::getADTPath(const TileCoord& coord) const {
 }
 
 void TerrainManager::ensureGroundEffectTablesLoaded() {
-    if (groundEffectsLoaded_ || !assetManager) return;
+    if (groundEffectsLoaded_ || !gameTables_) return;
     groundEffectsLoaded_ = true;
 
-    auto groundEffectTex = assetManager->loadDBC("GroundEffectTexture.dbc");
-    auto groundEffectDoodad = assetManager->loadDBC("GroundEffectDoodad.dbc");
-    if (!groundEffectTex || !groundEffectDoodad) {
-        LOG_WARNING("Ground clutter DBCs missing; skipping procedural ground effects");
-        return;
-    }
+    // ID, 4 doodad ids, 4 weights, density; ID, model name.
+    const auto groundEffectTex = gameTables_->table("GroundEffectTexture.dbc", 10, "ground clutter");
+    const auto groundEffectDoodad = gameTables_->table("GroundEffectDoodad.dbc", 2, "ground clutter");
 
     // GroundEffectTexture: id + 4 doodad IDs + 4 weights + density + sound
     for (uint32_t i = 0; i < groundEffectTex->getRecordCount(); ++i) {

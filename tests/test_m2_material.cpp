@@ -98,17 +98,6 @@ TEST_CASE("authored priorities sort stably without reordering the batches", "[m2
     CHECK(m2MaterialDrawOrder(std::vector<Batch>{}).empty());
 }
 
-TEST_CASE("transparency combos resolve reordered and invisible tracks", "[m2][material]") {
-    const std::vector<float> weights{0.0f, 0.25f, 0.75f};
-    const std::vector<uint16_t> lookup{2, 0, 1, UINT16_MAX};
-    CHECK(m2TextureWeightOpacity(weights, lookup, 0) == 0.75f);
-    CHECK(m2TextureWeightOpacity(weights, lookup, 1) == 0.0f);
-    CHECK(m2TextureWeightOpacity(weights, lookup, 2) == 0.25f);
-    CHECK(m2TextureWeightOpacity(weights, lookup, 3) == 1.0f);
-    CHECK(m2TextureWeightOpacity(weights, lookup, UINT16_MAX) == 1.0f);
-    CHECK(m2TextureWeightOpacity({}, lookup, 0) == 1.0f);
-}
-
 TEST_CASE("Dalaran fountains combine scrolling foam with a UV1 border mask", "[m2][material][asset]") {
     for (const auto name : {"dalaran_fountain_01", "dalaran_fountain_02"}) {
         const std::string path = std::string("Data/expansions/wotlk/world/expansion02/doodads/dalaran/") + name;
@@ -154,8 +143,10 @@ TEST_CASE("Dalaran fountains combine scrolling foam with a UV1 border mask", "[m
             for (const auto pair : {std::pair<size_t, float>{1, 16384.0f / 32767.0f},
                                    {2, 10813.0f / 32767.0f}, {16, 6553.0f / 32767.0f}}) {
                 const auto& batch = model.batches[pair.first];
-                CHECK(m2TextureWeightOpacity(model.textureWeights, model.textureWeightLookup,
-                    batch.transparencyIndex) == Catch::Approx(pair.second));
+                REQUIRE(batch.transparencyIndex < model.textureWeightLookup.size());
+                const uint16_t track = model.textureWeightLookup[batch.transparencyIndex];
+                REQUIRE(track < model.textureWeights.size());
+                CHECK(model.textureWeights[track] == Catch::Approx(pair.second));
             }
         }
     }

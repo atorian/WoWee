@@ -27,7 +27,7 @@ double-click - opens this window instead when it sits beside it.
    will find it.
 
 2. **Which game does your server run?** Vanilla, The Burning Crusade, Wrath,
-   Cataclysm, or Turtle. Preselected to whatever the folder turned out to be.
+   or Cataclysm. Preselected to whatever the folder turned out to be.
 
 3. **Do you want updated assets?** Optional, and each can be left off. The
    second installation an upgrade needs is asked for beside it:

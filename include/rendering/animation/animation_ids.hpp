@@ -557,7 +557,7 @@ const char* nameFromId(uint32_t id);
 
 /// Validate animation_ids.hpp constants against AnimationData.dbc.
 /// Logs warnings for IDs present in DBC but missing from constants, and vice versa.
-void validateAgainstDBC(const std::shared_ptr<wowee::pipeline::DBCFile>& dbc);
+void validateAgainstDBC(const wowee::pipeline::DBCFile& dbc);
 
 } // namespace anim
 } // namespace rendering

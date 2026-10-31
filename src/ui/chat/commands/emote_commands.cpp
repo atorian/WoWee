@@ -18,7 +18,7 @@ namespace wowee { namespace ui {
 class SitCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.setStandState(1);
+        ctx.gameHandler.player().requestStandState(1);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"sit"}; }
@@ -29,7 +29,7 @@ public:
 class StandCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.setStandState(0);
+        ctx.gameHandler.player().requestStandState(0);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"stand"}; }
@@ -40,7 +40,7 @@ public:
 class KneelCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.setStandState(8);
+        ctx.gameHandler.player().requestStandState(8);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"kneel"}; }

@@ -187,20 +187,6 @@ inline void renderBindingType(uint32_t bindType) {
     }
 }
 
-// ---- DBC item-set spell field keys ----
-inline constexpr const char* kItemSetItemKeys[10] = {
-    "Item0","Item1","Item2","Item3","Item4",
-    "Item5","Item6","Item7","Item8","Item9"
-};
-inline constexpr const char* kItemSetSpellKeys[10] = {
-    "Spell0","Spell1","Spell2","Spell3","Spell4",
-    "Spell5","Spell6","Spell7","Spell8","Spell9"
-};
-inline constexpr const char* kItemSetThresholdKeys[10] = {
-    "Threshold0","Threshold1","Threshold2","Threshold3","Threshold4",
-    "Threshold5","Threshold6","Threshold7","Threshold8","Threshold9"
-};
-
 // ---- Socket type display (gem sockets) ----
 struct SocketTypeDef { uint32_t mask; const char* label; ImVec4 col; };
 inline constexpr SocketTypeDef kSocketTypes[] = {

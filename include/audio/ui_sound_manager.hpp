@@ -9,6 +9,7 @@
 namespace wowee {
 namespace pipeline {
 class AssetManager;
+class GameTables;
 }
 
 namespace audio {
@@ -19,7 +20,7 @@ public:
     ~UiSoundManager() = default;
 
     // Initialization
-    bool initialize(pipeline::AssetManager* assets);
+    bool initialize(pipeline::AssetManager* assets, const pipeline::GameTables& tables);
     void shutdown();
 
     /// Play a sound by the name FrameXML asks for - PlaySound("igQuestFailed")
@@ -167,6 +168,7 @@ private:
     /// cost this has that the preloaded libraries do not.
     std::unordered_map<std::string, UISample> namedSamples_;
     pipeline::AssetManager* assets_ = nullptr;
+    const pipeline::GameTables* gameTables_ = nullptr;
     void playSound(const std::vector<UISample>& library);
 };
 

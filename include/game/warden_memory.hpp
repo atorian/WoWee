@@ -21,9 +21,8 @@ public:
 
     /** Search standard candidate dirs for WoW.exe and load it.
      *  @param build Client build number (e.g. 5875 for Classic 1.12.1) to select the right exe.
-     *  @param isTurtle If true, prefer the Turtle WoW custom exe (different code bytes).
      *  @param dataPath Active expansion asset directory; its misc/WoW.exe takes precedence. */
-    bool load(uint16_t build = 0, bool isTurtle = false, const std::string& dataPath = {});
+    bool load(uint16_t build = 0, const std::string& dataPath = {});
 
     /** Load PE image from a specific file path. */
     bool loadFromFile(const std::string& exePath);
@@ -48,7 +47,7 @@ public:
      */
     bool searchCodePattern(const uint8_t seed[4], const uint8_t expectedHash[20],
                            uint8_t patternLen, bool imageOnly,
-                           uint32_t hintOffset = 0, bool hintOnly = false) const;
+                           uint32_t hintOffset = 0) const;
 
     /** Abandon any code-pattern search in progress, and every later one.
      *  The session it answers has ended; a search returns "not found" and
@@ -72,11 +71,9 @@ private:
     bool parsePE(const std::vector<uint8_t>& fileData);
     void initKuserSharedData();
     void patchRuntimeGlobals();
-    void patchTurtleWowBinary();
     void verifyWardenScanEntries();
-    bool isTurtle_ = false;
     [[nodiscard]] std::string findWowExe(uint16_t build, const std::string& dataPath) const;
-    static uint32_t expectedImageSizeForBuild(uint16_t build, bool isTurtle);
+    static uint32_t expectedImageSizeForBuild(uint16_t build);
 
     // Cache for searchCodePattern results to avoid repeated 5-second brute-force searches.
     // Key: hex string of seed(4)+hash(20)+patLen(1)+imageOnly(1) = 26 bytes.

@@ -1,0 +1,274 @@
+// The game data an expansion uses, end to end: what its list in
+// expansion.json makes the game read, what stops the game, and what an
+// expansion without a table offers instead.
+#include <catch_amalgamated.hpp>
+
+#include "game_harness.hpp"
+#include "test_support.hpp"
+
+#include "game/game_data.hpp"
+#include "game/world_handler.hpp"
+#include "game/game_handler.hpp"
+#include "game/player_handler.hpp"
+#include "game/protocol_tables.hpp"
+#include "game/title_gateway.hpp"
+#include "game/update_field_table.hpp"
+
+#include <filesystem>
+#include <fstream>
+#include <regex>
+#include <sstream>
+#include <string>
+
+using Catch::Matchers::ContainsSubstring;
+using wowee::test::GameHarness;
+using wowee::test::GameStopped;
+
+TEST_CASE("a table the expansion uses that cannot be read stops the game, naming it and the expansion",
+          "[game_data][harness]") {
+    GameHarness h;
+    h.unreadableDbc("Languages.dbc");
+    h.enterWorld();
+
+    CHECK_THROWS_MATCHES(h.game().getLanguageName(7), GameStopped,
+                         Catch::Matchers::MessageMatches(ContainsSubstring("Languages.dbc could not be read") &&
+                                                     ContainsSubstring("Wrath of the Lich King")));
+}
+
+TEST_CASE("a table narrower than the columns read stops the game", "[game_data][harness]") {
+    GameHarness h;
+    h.dbc("Languages.dbc", 1, {{{0, 7}}});
+    h.enterWorld();
+
+    CHECK_THROWS_MATCHES(h.game().getLanguageName(7), GameStopped,
+                         Catch::Matchers::MessageMatches(ContainsSubstring("Languages.dbc has 1 fields, 2 are read")));
+}
+
+TEST_CASE("opening the expansion's data reads its whole list and stops at the first table that does not read",
+          "[game_data][harness]") {
+    GameHarness h;
+    h.gameData().checkAll();  // every table there, if empty
+
+    h.unreadableDbc("QuestSort.dbc");
+    CHECK_THROWS_MATCHES(h.gameData().checkAll(), GameStopped,
+                         Catch::Matchers::MessageMatches(ContainsSubstring("QuestSort.dbc could not be read")));
+}
+
+TEST_CASE("the expansion's own files are the ones its list names", "[game_data][harness]") {
+    GameHarness h;
+    CHECK_THAT(h.gameData().file("opcodes.json", "the test"), ContainsSubstring("expansions/wotlk/opcodes.json"));
+    CHECK_THROWS_MATCHES(h.gameData().file("movement_sequences.json", "the test"), GameStopped,
+                         Catch::Matchers::MessageMatches(ContainsSubstring("not on the expansion's list of files")));
+}
+
+TEST_CASE("a table the expansion does not use is never opened, and asking for it is a bug that stops the game",
+          "[game_data][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.useExpansion("tbc");
+
+    // Currencies are WotLK's: TBC has no tab to fill and no file to open.
+    CHECK(h.game().getCurrencyTypes().empty());
+    CHECK_FALSE(h.dbcWasRead("CurrencyTypes.dbc"));
+    CHECK_FALSE(h.gameData().has("CurrencyTypes.dbc"));
+
+    CHECK_THROWS_MATCHES(h.gameData().table("CurrencyTypes.dbc", 2, "the test"), GameStopped,
+                         Catch::Matchers::MessageMatches(ContainsSubstring("not on the expansion's list of tables") &&
+                                                     ContainsSubstring("Burning Crusade")));
+}
+
+TEST_CASE("Classic's character sheet has no numbers from game tables, and reads none",
+          "[game_data][harness]") {
+    using wowee::game::UF;
+    GameHarness h;
+    wowee::test::PlayerSpec mage;
+    mage.classId = 8;
+    h.enterWorld(mage);
+    h.useExpansion("classic");
+
+    CHECK(h.game().player().meleeCritFromAgility() == 0.0f);
+    CHECK(h.game().player().manaRegenFromSpirit() == 0.0f);
+    CHECK_FALSE(h.dbcWasRead("gtChanceToMeleeCrit.dbc"));
+    CHECK_FALSE(h.dbcWasRead("gtRegenMPPerSpt.dbc"));
+}
+
+TEST_CASE("the currency tab lists the CurrencyTypes.dbc rows that name an item", "[game_data][harness]") {
+    GameHarness h;
+    h.dbc("CurrencyTypes.dbc", 4, {{{0, 1}, {1, 29434}}, {{0, 2}, {1, 0}}, {{0, 3}, {1, 40752}}});
+    h.enterWorld();
+
+    const auto& currencies = h.game().getCurrencyTypes();
+    REQUIRE(currencies.size() == 2);
+    CHECK(currencies[0].itemId == 29434);
+    CHECK(currencies[1].itemId == 40752);
+}
+
+TEST_CASE("a vendor's honor, arena and token prices are ItemExtendedCost.dbc's", "[game_data][harness]") {
+    GameHarness h;
+    // ID, honor, arena, slot rule, five items at 4-8 and their counts at 9-13.
+    h.dbc("ItemExtendedCost.dbc", 16, {{{0, 2425}, {1, 0}, {2, 1250}, {4, 40752}, {9, 25}}});
+    h.enterWorld();
+
+    const auto* cost = h.game().getExtendedCost(2425);
+    REQUIRE(cost != nullptr);
+    CHECK(cost->arenaPoints == 1250);
+    CHECK(cost->itemId[0] == 40752);
+    CHECK(cost->itemCount[0] == 25);
+    CHECK(h.game().getExtendedCost(1) == nullptr);
+}
+
+TEST_CASE("the battleground list is BattlemasterList.dbc's battleground rows, not its arenas",
+          "[game_data][harness]") {
+    GameHarness h;
+    // ID, maps at 1-8 (0xFFFFFFFF unused), type at 9, name at 11, group size
+    // at 28, levels at 30 and 31.
+    const uint32_t none = 0xFFFFFFFFu;
+    h.dbc("BattlemasterList.dbc", 32, {
+        {{0, 2}, {1, 489}, {2, none}, {3, none}, {4, none}, {5, none}, {6, none}, {7, none}, {8, none},
+         {9, 3}, {11, "Warsong Gulch"}, {28, 10}, {30, 10}, {31, 80}},
+        {{0, 4}, {1, 559}, {2, none}, {3, none}, {4, none}, {5, none}, {6, none}, {7, none}, {8, none},
+         {9, 4}, {11, "Nagrand Arena"}, {28, 5}, {30, 10}, {31, 80}},
+    });
+    h.enterWorld();
+
+    const auto& battlegrounds = h.game().getBattlegroundTypes();
+    REQUIRE(battlegrounds.size() == 1);
+    CHECK(battlegrounds[0].name == "Warsong Gulch");
+    CHECK(h.game().isBattlegroundMap(489));
+    CHECK(h.game().isArenaMap(559));
+    CHECK_FALSE(h.game().isBattlegroundMap(559));
+}
+
+TEST_CASE("an instance's boss count is its DungeonEncounter.dbc rows", "[game_data][harness]") {
+    GameHarness h;
+    // ID, map, difficulty.
+    h.dbc("DungeonEncounter.dbc", 23, {{{0, 464}, {1, 33}, {2, 0}}, {{0, 465}, {1, 33}, {2, 0}},
+                                       {{0, 466}, {1, 33}, {2, 1}}});
+    h.enterWorld();
+
+    CHECK(h.game().getDungeonEncounterCount(33, 0) == 2);
+    CHECK(h.game().getDungeonEncounterCount(33, 1) == 1);
+    CHECK(h.game().getDungeonEncounterCount(36, 0) == 0);
+}
+
+TEST_CASE("a dungeon finder entry is named by LFGDungeons.dbc", "[game_data][harness]") {
+    GameHarness h;
+    h.dbc("LFGDungeons.dbc", 49, {{{0, 18}, {1, "Scarlet Monastery"}, {23, 189}, {31, 1}}});
+    h.enterWorld();
+
+    CHECK(h.game().getLfgDungeonName(18) == "Scarlet Monastery");
+    CHECK(h.game().getLfgDungeonName(19).empty());
+}
+
+TEST_CASE("a glyph is the spell GlyphProperties.dbc gives it", "[game_data][harness]") {
+    GameHarness h;
+    h.dbc("GlyphProperties.dbc", 4, {{{0, 161}, {1, 54825}}});
+    h.enterWorld();
+
+    h.game().ensureGlyphPropertiesLoaded();
+    CHECK(h.game().getGlyphSpellId(161) == 54825);
+}
+
+TEST_CASE("the titles are CharTitles.dbc's names by their bit", "[game_data][harness]") {
+    GameHarness h;
+    // ID, condition, the name at 2, its bit at 36.
+    h.dbc("CharTitles.dbc", 37, {{{0, 1}, {2, "Private %s"}, {36, 1}}});
+    h.enterWorld();
+
+    wowee::game::TitleData data(h.gameData());
+    const auto titles = data.titles();
+    REQUIRE(titles.size() == 1);
+    CHECK(titles[0].format == "Private %s");
+    CHECK(titles[0].bit == 1);
+}
+
+TEST_CASE("another player's race and looks are their own fields, never guessed from others",
+          "[game_data][harness]") {
+    using wowee::game::fieldIndex;
+    using wowee::game::Opcode;
+    using wowee::game::UF;
+    constexpr uint64_t kOther = 0x0000000000000777ull;
+    GameHarness h;
+    h.enterWorld();
+
+    // A player whose update has not carried its appearance yet, with a
+    // faction that reads, byte for byte, like a packed race, class and gender.
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(kOther, wowee::game::ObjectType::PLAYER,
+                                            {{fieldIndex(UF::UNIT_FIELD_HEALTH), 100},
+                                             {fieldIndex(UF::UNIT_FIELD_MAXHEALTH), 100},
+                                             {fieldIndex(UF::UNIT_FIELD_FACTIONTEMPLATE), 0x00010101u}},
+                                            h.player().x + 5.0f, h.player().y, h.player().z));
+    h.pump();
+    CHECK_FALSE(h.game().world().appearanceOf(kOther).has_value());
+
+    // Race 5 (undead), female; skin 2, face 3, hair 4, colour 1; beard 6.
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::valuesBody(kOther, {{fieldIndex(UF::UNIT_FIELD_BYTES_0), 0x01010805u},
+                                               {fieldIndex(UF::PLAYER_BYTES), 0x01040302u},
+                                               {fieldIndex(UF::PLAYER_BYTES_2), 0x00000006u}}));
+    h.pump();
+    const auto looks = h.game().world().appearanceOf(kOther);
+    REQUIRE(looks.has_value());
+    CHECK(looks->race == 5);
+    CHECK(looks->gender == 1);
+    CHECK(looks->appearanceBytes == 0x01040302u);
+    CHECK(looks->facialFeatures == 6);
+}
+
+namespace {
+/// WotLK's profile and files under a fresh directory, its update_fields.json
+/// without `dropped`: what an install with a broken field table holds.
+std::filesystem::path wotlkWithout(const char* scratch, const std::string& dropped) {
+    namespace fs = std::filesystem;
+    const fs::path root = wowee::test::scratchDir(scratch);
+    const fs::path from = fs::path(wowee::test::sourceRoot()) / "Data" / "expansions" / "wotlk";
+    const fs::path to = root / "expansions" / "wotlk";
+    fs::create_directories(to);
+    for (const char* file : {"expansion.json", "opcodes.json", "dbc_layouts.json"}) {
+        fs::copy_file(from / file, to / file);
+    }
+    std::ifstream in(from / "update_fields.json");
+    std::stringstream text;
+    text << in.rdbuf();
+    const std::string fields =
+        std::regex_replace(text.str(), std::regex("\\s*\"" + dropped + "\"\\s*:\\s*[0-9]+,?"), "");
+    REQUIRE(fields != text.str());
+    std::ofstream(to / "update_fields.json") << fields;
+    return root;
+}
+
+/// Load the protocol tables from `root` as the client does when it starts.
+void loadFrom(GameHarness& h, const std::filesystem::path& root) {
+    wowee::game::ExpansionRegistry expansions;
+    REQUIRE(expansions.initialize(root.string()) == 1);
+    REQUIRE(expansions.setActive("wotlk"));
+    const wowee::game::GameData data([](const std::string&) { return wowee::game::GameData::Table{}; },
+                                     expansions,
+                                     [](const std::string& line) { throw GameStopped(line); });
+    wowee::game::loadProtocolTables(h.game(), data);
+}
+}  // namespace
+
+TEST_CASE("an update field table without a field every expansion carries stops the game, naming it",
+          "[game_data][harness]") {
+    GameHarness h;
+    const auto root = wotlkWithout("wowee_update_fields_no_player_bytes", "PLAYER_BYTES");
+    CHECK_THROWS_MATCHES(loadFrom(h, root), GameStopped,
+                         Catch::Matchers::MessageMatches(ContainsSubstring("update_fields.json") &&
+                                                     ContainsSubstring("names no PLAYER_BYTES")));
+}
+
+TEST_CASE("a field only some expansions carry may be missing from the table", "[game_data][harness]") {
+    GameHarness h;
+    // Before WotLK there is no UNIT_FIELD_CRITTER; what reads it asks first.
+    const auto root = wotlkWithout("wowee_update_fields_no_critter", "UNIT_FIELD_CRITTER");
+    CHECK_NOTHROW(loadFrom(h, root));
+}
+
+TEST_CASE("Classic's and TBC's update field tables carry every field the client reads everywhere",
+          "[game_data][harness]") {
+    GameHarness h;
+    CHECK_NOTHROW(h.useExpansion("classic"));
+    CHECK_NOTHROW(h.useExpansion("tbc"));
+}

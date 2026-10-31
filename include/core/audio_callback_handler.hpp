@@ -11,7 +11,7 @@ namespace wowee {
 namespace rendering { class Renderer; }
 namespace game { class GameHandler; }
 namespace audio { class AudioCoordinator; class UiSoundManager; }
-namespace pipeline { class AssetManager; }
+namespace pipeline { class GameTables; }
 namespace ui { class UIManager; }
 
 namespace core {
@@ -21,7 +21,7 @@ class PlayerView;
 /// Handles audio-related callbacks: music, sound effects, level-up, achievement, LFG.
 class AudioCallbackHandler {
 public:
-    AudioCallbackHandler(pipeline::AssetManager& assetManager,
+    AudioCallbackHandler(const pipeline::GameTables& tables,
                          audio::AudioCoordinator* audioCoordinator,
                          rendering::Renderer* renderer,
                          PlayerView* playerView,
@@ -42,7 +42,7 @@ private:
     template <class Play>
     void playUi(Play&& play) const;
 
-    pipeline::AssetManager& assetManager_;
+    const pipeline::GameTables& tables_;
     audio::AudioCoordinator* audioCoordinator_;
     rendering::Renderer* renderer_;
     PlayerView* playerView_;

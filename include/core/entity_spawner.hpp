@@ -24,7 +24,7 @@ namespace wowee {
 
 // Forward declarations
 namespace rendering { class Renderer; class SceneCommands; }
-namespace pipeline { class AssetManager; struct M2Model; struct WMOModel; }
+namespace pipeline { class AssetManager; class GameTables; struct M2Model; struct WMOModel; }
 namespace audio { enum class VoiceType; }
 namespace game { class GameHandler; }
 
@@ -38,6 +38,7 @@ public:
     struct SpawnState;
     EntitySpawner(rendering::Renderer* renderer,
                   pipeline::AssetManager* assetManager,
+                  const pipeline::GameTables& tables,
                   game::GameHandler* gameHandler,
                   game::GameServices* gameServices,
                   PlayerView* playerView);
@@ -341,6 +342,8 @@ private:
     // Dependencies (non-owning)
     rendering::Renderer* renderer_;
     pipeline::AssetManager* assetManager_;
+    /// The expansion's tables the appearances are read from.
+    const pipeline::GameTables& tables_;
     game::GameHandler* gameHandler_;
     game::GameServices* gameServices_;
     /// The player's camera and animation: a transport transfer moves the one,

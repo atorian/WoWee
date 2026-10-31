@@ -3,7 +3,6 @@
 #
 #   make dev        configure (once) and build the client into build-dev
 #   make run-dev    build, then run the client with the game data it needs
-#   make submodules fetch the two submodules the client cannot build without
 #
 # The dev build is the "dev" preset of CMakePresets.json: RelWithDebInfo, no
 # link-time optimisation. The preset asks for Ninja; without Ninja the same
@@ -27,7 +26,7 @@ endif
 OPENSSL_ROOT := $(shell brew --prefix openssl@4 2>/dev/null)
 CMAKE_EXTRA  := $(if $(OPENSSL_ROOT),-DOPENSSL_ROOT_DIR=$(OPENSSL_ROOT))
 
-.PHONY: dev run-dev submodules
+.PHONY: dev run-dev
 
 $(BUILD_DIR)/CMakeCache.txt:
 	@if command -v ninja >/dev/null 2>&1; then \
@@ -45,6 +44,3 @@ run-dev: dev
 	@test -f "$(WOW_DATA_PATH)/expansions/wotlk/manifest.json" || \
 		{ echo "No extracted game data in $(WOW_DATA_PATH): set WOW_DATA_PATH or run the asset builder"; exit 1; }
 	cd $(BUILD_DIR)/bin && WOW_DATA_PATH="$(WOW_DATA_PATH)" ./wowee
-
-submodules:
-	git submodule update --init extern/imgui extern/vk-bootstrap

@@ -503,7 +503,7 @@ public:
     // button:   0-based slot index
     // type:     ActionBarSlot::Type (SPELL=0, ITEM=1, MACRO=2, EMPTY=0)
     // id:       spellId, itemId, or macroId (0 to clear)
-    // isClassic: true for Vanilla/Turtle format (5-byte payload),
+    // isClassic: true for Vanilla format (5-byte payload),
     //            false for TBC/WotLK (5-byte packed uint32)
     static network::Packet build(uint8_t button, uint8_t type, uint32_t id, bool isClassic);
 };
@@ -853,7 +853,7 @@ public:
      *   type 1 - full list: only the icons that are actually set, so the
      *            length varies; it is not a fixed 8 entries.
      *   type 0 - single set: WotLK leads with the GUID of the player who
-     *            placed the mark, classic/TBC/Turtle omit it. Told apart by
+     *            placed the mark, classic/TBC omit it. Told apart by
      *            remaining size so both wire layouts decode correctly.
      */
     static bool parse(network::Packet& packet, RaidTargetUpdateData& data);
@@ -1072,7 +1072,7 @@ public:
     // WotLK 3.3.5a format: PackedGUID + uint8 unk + float[3] + uint32 splineId + uint8 moveType + ...
     static bool parse(network::Packet& packet, MonsterMoveData& data);
     // Vanilla 1.12 format: PackedGUID + float[3] + uint32 timeInMs + uint8 moveType + ...
-    // Used for Classic/TBC/Turtle WoW servers (no splineId, timeInMs before moveType)
+    // Used for Classic/TBC WoW servers (no splineId, timeInMs before moveType)
     static bool parseVanilla(network::Packet& packet, MonsterMoveData& data);
 };
 

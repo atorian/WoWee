@@ -3,7 +3,7 @@
 #include "rendering/m2_renderer.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/m2_renderer_internal.h"
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 #include "rendering/texture_upload.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_buffer.hpp"
@@ -729,7 +729,6 @@ void M2Renderer::clear() {
     if (collision_) collision_->clearM2();
     scene_->instanceIndexById.clear();
     scene_->cullGrid_.clear();
-    scene_->boneSeedInstanceByModel_.clear();
     scene_->instanceDedupMap_.clear();
     scene_->animatedInstanceIndices_.clear();
     scene_->particleOnlyInstanceIndices_.clear();

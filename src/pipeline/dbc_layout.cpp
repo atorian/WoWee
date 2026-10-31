@@ -89,7 +89,10 @@ bool DBCLayout::loadFromJson(const std::string& path) {
     }
 
     std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return loadFromJsonText(json, path);
+}
 
+bool DBCLayout::loadFromJsonText(const std::string& json, const std::string& source) {
     layouts_.clear();
     size_t loaded = 0;
     size_t pos = 0;
@@ -156,7 +159,7 @@ bool DBCLayout::loadFromJson(const std::string& path) {
         pos = objEnd + 1;
     }
 
-    LOG_INFO("DBCLayout: loaded ", loaded, " layouts from ", path);
+    LOG_INFO("DBCLayout: loaded ", loaded, " layouts from ", source);
     return loaded > 0;
 }
 
@@ -260,7 +263,7 @@ SpellTimingFields detectSpellTimingFields(const DBCFile* dbc, const DBCFieldMap*
     if (!dbc || dbc->getRecordCount() == 0) return f;
 
     const uint32_t fieldCount = dbc->getFieldCount();
-    if (fieldCount < 216)      f = {.castingTimeIndex = 18, .recoveryTime = 19, .categoryRecoveryTime = 20};  // Vanilla 1.12 / Turtle
+    if (fieldCount < 216)      f = {.castingTimeIndex = 18, .recoveryTime = 19, .categoryRecoveryTime = 20};  // Vanilla 1.12
     else if (fieldCount < 234) f = {.castingTimeIndex = 22, .recoveryTime = 23, .categoryRecoveryTime = 24};  // TBC 2.4.3
 
     // A layout may name CastingTimeIndex, and TBC's and WotLK's are right. It is
@@ -284,7 +287,7 @@ uint32_t detectEnchantmentNameField(const DBCFile* dbc, const DBCFieldMap* sieL)
     uint32_t nameField;
     if (fieldCount >= 38)      nameField = 14;  // WotLK 3.3.5a
     else if (fieldCount >= 34) nameField = 13;  // TBC 2.4.3
-    else                       nameField = 10;  // Vanilla 1.12 / Turtle
+    else                       nameField = 10;  // Vanilla 1.12
 
     // A layout override wins, but only when it is in range - a stale index here
     // reads an integer column as a string offset and garbles every enchant name.
@@ -304,7 +307,7 @@ uint32_t detectEnchantmentItemVisualField(const DBCFile* dbc, const DBCFieldMap*
     uint32_t visualField;
     if (fieldCount >= 38)      visualField = 31;  // WotLK 3.3.5a
     else if (fieldCount >= 34) visualField = 30;  // TBC 2.4.3
-    else                       visualField = 19;  // Vanilla 1.12 / Turtle
+    else                       visualField = 19;  // Vanilla 1.12
 
     if (sieL) {
         uint32_t f = sieL->field("ItemVisual");
@@ -331,7 +334,7 @@ uint32_t detectEnchantmentGemItemField(const DBCFile* dbc, const DBCFieldMap* si
     uint32_t gemField;
     if (fieldCount >= 38)      gemField = 33;  // WotLK 3.3.5a
     else if (fieldCount >= 34) gemField = 32;  // TBC 2.4.3
-    else                       return 0;       // Vanilla 1.12 / Turtle: no gems
+    else                       return 0;       // Vanilla 1.12: no gems
 
     if (sieL) {
         uint32_t f = sieL->field("SrcItemID");

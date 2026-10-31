@@ -15,6 +15,7 @@ class Window;
 
 namespace wowee::pipeline {
 class AssetManager;
+class GameTables;
 }
 
 namespace wowee::ui {
@@ -56,6 +57,7 @@ VkDescriptorSet cachedIconTexture(
 /// and there is no reason for each to upload its own copy.
 VkDescriptorSet itemIconTexture(uint32_t displayInfoId,
                                 pipeline::AssetManager* assetManager,
+                                const pipeline::GameTables* tables,
                                 core::Window* window);
 
 }  // namespace wowee::ui

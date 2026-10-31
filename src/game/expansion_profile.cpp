@@ -6,7 +6,6 @@
 #include <sstream>
 #include <algorithm>
 #include <cstdlib>
-#include <limits>
 
 // Minimal JSON parsing (no external dependency) - expansion.json is tiny and flat.
 // We parse the subset we need: strings, integers, arrays of integers.
@@ -84,6 +83,20 @@ std::vector<uint32_t> jsonUintArray(const std::string& json, const std::string& 
         if (!t.empty()) {
             try { result.push_back(static_cast<uint32_t>(std::stoul(t))); } catch (...) {}
         }
+    }
+    return result;
+}
+
+std::vector<std::string> jsonStringArray(const std::string& json, const std::string& key) {
+    std::vector<std::string> result;
+    std::string arr = jsonValue(json, key);
+    if (arr.empty() || arr.front() != '[') return result;
+    arr = arr.substr(1, arr.size() - 2);
+    std::istringstream ss(arr);
+    std::string tok;
+    while (std::getline(ss, tok, ',')) {
+        std::string t = trim(tok);
+        if (!t.empty()) result.push_back(std::move(t));
     }
     return result;
 }
@@ -182,7 +195,7 @@ void ExpansionRegistry::activeChanged() {
     // alone would have left every auto-detected install - which is every
     // ordinary one - on the layout it was not playing.
     slots::setBankLayout(
-        slots::bankLayoutFor(activeId_ == "classic" || activeId_ == "turtle"));
+        slots::bankLayoutFor(activeId_ == "classic"));
 }
 
 bool ExpansionRegistry::setActive(const std::string& id) {
@@ -217,28 +230,6 @@ bool ExpansionRegistry::loadProfile(const std::string& jsonPath, const std::stri
     }
 
     p.build = static_cast<uint16_t>(jsonInt(json, "build"));
-    p.worldBuild = static_cast<uint16_t>(jsonInt(json, "worldBuild", p.build));
-    // Custom clients sometimes advance their authentication build without
-    // changing the underlying Vanilla world protocol. Permit a profile-scoped
-    // override so archived/private servers on an older Turtle revision remain
-    // usable without editing tracked expansion metadata.
-    const std::string buildEnv = jsonValue(json, "buildEnv");
-    if (!buildEnv.empty()) {
-        if (const char* raw = std::getenv(buildEnv.c_str()); raw && *raw) {
-            try {
-                const unsigned long overrideBuild = std::stoul(raw);
-                if (overrideBuild == 0 || overrideBuild > std::numeric_limits<uint16_t>::max()) {
-                    throw std::out_of_range("client build");
-                }
-                p.build = static_cast<uint16_t>(overrideBuild);
-                LOG_WARNING("ExpansionRegistry: overriding auth build via ", buildEnv,
-                            "=", p.build);
-            } catch (...) {
-                LOG_WARNING("ExpansionRegistry: ignoring invalid ", buildEnv,
-                            "='", raw, "'");
-            }
-        }
-    }
     p.protocolVersion = static_cast<uint8_t>(jsonInt(json, "protocolVersion"));
     // Optional client header fields (LOGON_CHALLENGE)
     {
@@ -282,6 +273,8 @@ bool ExpansionRegistry::loadProfile(const std::string& jsonPath, const std::stri
     }
     p.races = jsonUintArray(json, "races");
     p.classes = jsonUintArray(json, "classes");
+    p.files = jsonStringArray(json, "files");
+    p.tables = jsonStringArray(json, "tables");
 
     if (p.id.empty() || p.build == 0) {
         LOG_WARNING("ExpansionRegistry: skipping invalid profile at ", jsonPath);

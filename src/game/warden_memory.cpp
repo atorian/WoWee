@@ -325,7 +325,7 @@ void WardenMemory::patchRuntimeGlobals() {
     //    - "CWorld::enables" reads 0xC7B2A4, checks flag bits
     //    - "EndScene" reads 0xC0ED38, follows pointer chain to find EndScene address
     //
-    // We MUST patch these for ALL clients (including Turtle WoW) because the scripted
+    // We MUST patch these for ALL clients because the scripted
     // scans interpret the values as runtime state, not static code bytes. Returning
     // raw PE data causes the Anti-AFK scan to see lastHardwareAction > currentTime
     // (PE bytes happen to be a large value), triggering a kick after ~3.5 minutes.
@@ -398,8 +398,8 @@ void WardenMemory::patchRuntimeGlobals() {
     writeLE32(FAKE_VTABLE1, FAKE_VTABLE2);
     writeLE32(FAKE_VTABLE2 + 0xA8, FAKE_ENDSCENE);
 
-    // The EndScene device+sOfsDevice2 offset may differ from 0x38A8 in Turtle WoW.
-    // Also set API=1 (Direct3D) at multiple offsets so the API kind check passes.
+    // The EndScene device+sOfsDevice2 offset may differ from 0x38A8 in a modified
+    // client. Also set API=1 (Direct3D) at multiple offsets so the API kind check passes.
     // Fill the entire fake device area with the vtable pointer for robustness.
     for (uint32_t off = 0x3800; off <= 0x3A00; off += 4) {
         uint32_t addr = FAKE_DEVICE + off;
@@ -444,135 +444,6 @@ void WardenMemory::patchRuntimeGlobals() {
     }
 }
 
-void WardenMemory::patchTurtleWowBinary() {
-    // Apply TurtlePatcher byte patches to make our PE image match a real Turtle WoW client.
-    // These patches are applied at file offsets which equal RVAs for this PE.
-    // Source: TurtlePatcher/Main.cpp PatchBinary() + PatchVersion()
-
-    auto patchBytes = [&](uint32_t fileOffset, const std::vector<uint8_t>& bytes) {
-        if (fileOffset + bytes.size() > imageSize_) {
-            LOG_WARNING("WardenMemory: Turtle patch at 0x", std::hex, fileOffset,
-                        " exceeds image size, skipping");
-            return;
-        }
-        std::memcpy(image_.data() + fileOffset, bytes.data(), bytes.size());
-    };
-
-    auto patchString = [&](uint32_t fileOffset, const char* str) {
-        size_t len = std::strlen(str) + 1; // include null terminator
-        if (fileOffset + len > imageSize_) return;
-        std::memcpy(image_.data() + fileOffset, str, len);
-    };
-
-    // --- PatchBinary() patches ---
-
-    // Patches 1-4: Unknown purpose code patches in .text
-    patchBytes(0x2F113A, {0xEB, 0x19});
-    patchBytes(0x2F1158, {0x03});
-    patchBytes(0x2F11A7, {0x03});
-    patchBytes(0x2F11F0, {0xEB, 0xB2});
-
-    // PvP rank check removal (6x NOP)
-    patchBytes(0x2093B0, {0x90, 0x90, 0x90, 0x90, 0x90, 0x90});
-
-    // Dwarf mage hackfix removal
-    patchBytes(0x0706E5, {0xFE});
-    patchBytes(0x0706EB, {0xFE});
-    patchBytes(0x07075D, {0xFE});
-    patchBytes(0x070763, {0xFE});
-
-    // Emote sound race ID checks (High Elf support)
-    patchBytes(0x059289, {0x40});
-    patchBytes(0x057C81, {0x40});
-
-    // Nameplate distance (41 yards)
-    patchBytes(0x40C448, {0x00, 0x00, 0x24, 0x42});
-
-    // Large address aware flag in PE header
-    patchBytes(0x000126, {0x2F, 0x01});
-
-    // Sound channel patches
-    patchBytes(0x05728C, {0x38, 0x5D, 0x83, 0x00}); // software channels
-    patchBytes(0x057250, {0x38, 0x5D, 0x83, 0x00}); // hardware channels
-    patchBytes(0x0572C8, {0x6C, 0x5C, 0x83, 0x00}); // memory cache
-
-    // Sound in background (non-FoV build)
-    patchBytes(0x3A4869, {0x14});
-
-    // Hardcore chat patches
-    patchBytes(0x09B0B8, {0x5F});
-    patchBytes(0x09B193, {0xE9, 0xA8, 0xAE, 0x86});
-    patchBytes(0x09F7A5, {0x70, 0x53, 0x56, 0x33, 0xF6, 0xE9, 0x71, 0x68, 0x86, 0x00});
-    patchBytes(0x09F864, {0x94});
-    patchBytes(0x09F878, {0x0E});
-    patchBytes(0x09F887, {0x90});
-    patchBytes(0x11BAE1, {0x0C, 0x60, 0xD0});
-
-    // Hardcore chat code cave at 0x48E000 (85 bytes)
-    patchBytes(0x48E000, {
-        0x48, 0x41, 0x52, 0x44, 0x43, 0x4F, 0x52, 0x45, 0x00, 0x00, 0x00, 0x00, 0x43, 0x48, 0x41, 0x54,
-        0x5F, 0x4D, 0x53, 0x47, 0x5F, 0x48, 0x41, 0x52, 0x44, 0x43, 0x4F, 0x52, 0x45, 0x00, 0x00, 0x00,
-        0x57, 0x8B, 0xDA, 0x8B, 0xF9, 0xC7, 0x45, 0x94, 0x00, 0x60, 0xD0, 0x00, 0xC7, 0x45, 0x90, 0x5E,
-        0x00, 0x00, 0x00, 0xE9, 0x77, 0x97, 0x79, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x68, 0x08, 0x46, 0x84, 0x00, 0x83, 0x7D, 0xF0, 0x5E, 0x75, 0x05, 0xB9, 0x1F, 0x02, 0x00, 0x00,
-        0xE9, 0x43, 0x51, 0x79, 0xFF
-    });
-
-    // Blue child moon patch
-    patchBytes(0x3E5B83, {
-        0xC7, 0x05, 0xA4, 0x98, 0xCE, 0x00, 0xD4, 0xE2, 0xE7, 0xFF, 0xC2, 0x04, 0x00
-    });
-
-    // Blue child moon timer
-    patchBytes(0x2D2095, {0x00, 0x00, 0x80, 0x3F});
-
-    // SetUnit codecave jump
-    patchBytes(0x105E19, {0xE9, 0x02, 0x03, 0x80, 0x00});
-
-    // SetUnit main code cave at 0x48E060 (291 bytes)
-    patchBytes(0x48E060, {
-        0x55, 0x89, 0xE5, 0x83, 0xEC, 0x10, 0x85, 0xD2, 0x53, 0x56, 0x57, 0x89, 0xCF, 0x0F, 0x84, 0xA2,
-        0x00, 0x00, 0x00, 0x89, 0xD0, 0x85, 0xC0, 0x0F, 0x8C, 0x98, 0x00, 0x00, 0x00, 0x3B, 0x05, 0x94,
-        0xDE, 0xC0, 0x00, 0x0F, 0x8F, 0x8C, 0x00, 0x00, 0x00, 0x8B, 0x0D, 0x90, 0xDE, 0xC0, 0x00, 0x8B,
-        0x04, 0x81, 0x85, 0xC0, 0x89, 0x45, 0xF0, 0x74, 0x7C, 0x8B, 0x40, 0x04, 0x85, 0xC0, 0x7C, 0x75,
-        0x3B, 0x05, 0x6C, 0xDE, 0xC0, 0x00, 0x7F, 0x6D, 0x8B, 0x15, 0x68, 0xDE, 0xC0, 0x00, 0x8B, 0x1C,
-        0x82, 0x85, 0xDB, 0x74, 0x60, 0x8B, 0x43, 0x08, 0x6A, 0x00, 0x50, 0x89, 0xF9, 0xE8, 0xFE, 0x6E,
-        0xA6, 0xFF, 0x89, 0xC1, 0xE8, 0x87, 0x12, 0xA0, 0xFF, 0x89, 0xC6, 0x85, 0xF6, 0x74, 0x46, 0x8B,
-        0x55, 0xF0, 0x53, 0x89, 0xF1, 0xE8, 0xD6, 0x36, 0x77, 0xFF, 0x8B, 0x17, 0x56, 0x89, 0xF9, 0xFF,
-        0x92, 0x90, 0x00, 0x00, 0x00, 0x89, 0xF8, 0x99, 0x52, 0x50, 0x68, 0xA0, 0x62, 0x50, 0x00, 0x89,
-        0xF1, 0xE8, 0xBA, 0xBA, 0xA0, 0xFF, 0x6A, 0x01, 0x6A, 0x01, 0x68, 0x00, 0x00, 0x80, 0x3F, 0x6A,
-        0x00, 0x6A, 0xFF, 0x6A, 0x00, 0x6A, 0xFF, 0x89, 0xF1, 0xE8, 0x92, 0xC0, 0xA0, 0xFF, 0x89, 0xF1,
-        0xE8, 0x8B, 0xA2, 0xA0, 0xFF, 0x5F, 0x5E, 0x5B, 0x89, 0xEC, 0x5D, 0xC3, 0x90, 0x90, 0x90, 0x90,
-        0xBA, 0x02, 0x00, 0x00, 0x00, 0x89, 0xF1, 0xE8, 0xD4, 0xD2, 0x9E, 0xFF, 0x83, 0xF8, 0x03, 0x75,
-        0x43, 0xBA, 0x02, 0x00, 0x00, 0x00, 0x89, 0xF1, 0xE8, 0xE3, 0xD4, 0x9E, 0xFF, 0xE8, 0x6E, 0x41,
-        0x70, 0xFF, 0x56, 0x8B, 0xB7, 0xD4, 0x00, 0x00, 0x00, 0x31, 0xD2, 0x39, 0xD6, 0x89, 0x97, 0xE0,
-        0x03, 0x00, 0x00, 0x89, 0x97, 0xE4, 0x03, 0x00, 0x00, 0x89, 0x97, 0xF0, 0x03, 0x00, 0x00, 0x5E,
-        0x0F, 0x84, 0xD3, 0xFC, 0x7F, 0xFF, 0x89, 0xC2, 0x89, 0xF9, 0xE8, 0xF1, 0xFE, 0xFF, 0xFF, 0xE9,
-        0xC5, 0xFC, 0x7F, 0xFF, 0xBA, 0x02, 0x00, 0x00, 0x00, 0xE9, 0xA0, 0xFC, 0x7F, 0xFF, 0x90, 0x90,
-        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90
-    });
-
-    // --- PatchVersion() patches ---
-
-    // Net version: build 7199 (0x1C1F LE)
-    patchBytes(0x1B2122, {0x1F, 0x1C});
-
-    // Visual version string
-    patchString(0x437C04, "1.17.2");
-
-    // Visual build string
-    patchString(0x437BFC, "7199");
-
-    // Build date string
-    patchString(0x434798, "May 20 2024");
-
-    // Website filters
-    patchString(0x45CCD8, "*.turtle-wow.org");
-    patchString(0x45CC9C, "*.discord.gg");
-
-    LOG_WARNING("WardenMemory: Applied TurtlePatcher binary patches (build 7199)");
-}
-
 bool WardenMemory::readMemory(uint32_t va, uint8_t length, uint8_t* outBuf) const {
     if (length == 0) return true;
 
@@ -588,7 +459,7 @@ bool WardenMemory::readMemory(uint32_t va, uint8_t length, uint8_t* outBuf) cons
     // 1) Absolute VA (e.g. 0x00401337)
     // 2) RVA (e.g. 0x000139A9)
     // 3) Tiny module-relative offsets (e.g. 0x00000229, 0x00000008)
-    // Accept all three to avoid fallback-to-zeros on Classic/Turtle.
+    // Accept all three to avoid fallback-to-zeros on Classic.
     uint32_t offset = 0;
     if (va >= imageBase_) {
         // Absolute VA.
@@ -610,18 +481,15 @@ bool WardenMemory::readMemory(uint32_t va, uint8_t length, uint8_t* outBuf) cons
     return true;
 }
 
-uint32_t WardenMemory::expectedImageSizeForBuild(uint16_t build, bool isTurtle) {
+uint32_t WardenMemory::expectedImageSizeForBuild(uint16_t build) {
     switch (build) {
-        case 5875:
-            // Turtle WoW uses a custom WoW.exe with different code bytes.
-            // Their warden_scans DB expects bytes from this custom exe.
-            return isTurtle ? 0x00906000 : 0x009FD000;
+        case 5875: return 0x009FD000;
         default:   return 0;          // Unknown - accept any
     }
 }
 
 std::string WardenMemory::findWowExe(uint16_t build, const std::string& dataPath) const {
-    const char* candidateExes[] = { "WoW.exe", "TurtleWoW.exe", "Wow.exe", "wow.exe" };
+    const char* candidateExes[] = { "WoW.exe", "Wow.exe", "wow.exe" };
     const auto findInDirectory = [&](const std::filesystem::path& dir) -> std::string {
         for (const char* exe : candidateExes) {
             const auto path = dir / exe;
@@ -638,18 +506,12 @@ std::string WardenMemory::findWowExe(uint16_t build, const std::string& dataPath
     if (!dataPath.empty()) {
         if (auto path = findInDirectory(std::filesystem::path(dataPath) / "misc");
             !path.empty()) return path;
-        if (isTurtle_) {
-            if (auto path = findInDirectory(std::filesystem::path(dataPath) / "overlay/misc");
-                !path.empty()) return path;
-        }
     }
 
     std::vector<std::string> candidateDirs;
     if (const char* home = std::getenv("HOME")) {
         if (home && *home) {
             candidateDirs.push_back(std::string(home) + "/Downloads");
-            candidateDirs.push_back(std::string(home) + "/Downloads/twmoa_1180");
-            candidateDirs.push_back(std::string(home) + "/twmoa_1180");
         }
     }
     // Under the data folder being read as well as Data/ beside the client: an
@@ -657,9 +519,7 @@ std::string WardenMemory::findWowExe(uint16_t build, const std::string& dataPath
     // looking beside the client alone never found its executable.
     for (const std::string& root : core::extractionRoots()) {
         if (dataPath.empty()) {
-            candidateDirs.push_back(root + "/expansions/turtle/misc");
             candidateDirs.push_back(root + "/expansions/classic/misc");
-            candidateDirs.push_back(root + "/expansions/turtle/overlay/misc");
         }
         candidateDirs.push_back(root + "/misc");
     }
@@ -678,7 +538,7 @@ std::string WardenMemory::findWowExe(uint16_t build, const std::string& dataPath
     }
 
     // If we know the expected imageSize for this build, try to find a matching PE
-    uint32_t expectedSize = expectedImageSizeForBuild(build, isTurtle_);
+    uint32_t expectedSize = expectedImageSizeForBuild(build);
     if (expectedSize != 0 && allPaths.size() > 1) {
         for (const auto& path : allPaths) {
             std::ifstream f(path, std::ios::binary);
@@ -702,8 +562,8 @@ std::string WardenMemory::findWowExe(uint16_t build, const std::string& dataPath
         }
     }
 
-    // Fallback: prefer the largest PE file (modified clients like Turtle WoW are
-    // larger than vanilla, and Warden checks target the actual running client).
+    // Fallback: prefer the largest PE file (a modified client is larger than
+    // the stock one, and Warden checks target the actual running client).
     std::string bestPath;
     uintmax_t bestSize = 0;
     for (const auto& path : allPaths) {
@@ -717,8 +577,7 @@ std::string WardenMemory::findWowExe(uint16_t build, const std::string& dataPath
     return bestPath.empty() && !allPaths.empty() ? allPaths[0] : bestPath;
 }
 
-bool WardenMemory::load(uint16_t build, bool isTurtle, const std::string& dataPath) {
-    isTurtle_ = isTurtle;
+bool WardenMemory::load(uint16_t build, const std::string& dataPath) {
     std::string path = findWowExe(build, dataPath);
     if (path.empty()) {
         LOG_WARNING("WardenMemory: WoW.exe not found in any candidate directory");
@@ -749,14 +608,6 @@ bool WardenMemory::loadFromFile(const std::string& exePath) {
 
     initKuserSharedData();
     patchRuntimeGlobals();
-    if (isTurtle_ && imageSize_ != 0x00906000) {
-        // Only apply TurtlePatcher patches if we loaded the vanilla exe.
-        // The real Turtle WoW.exe (imageSize=0x906000) already has these bytes.
-        patchTurtleWowBinary();
-        LOG_WARNING("WardenMemory: Applied Turtle patches to vanilla PE (imageSize=0x", std::hex, imageSize_, std::dec, ")");
-    } else if (isTurtle_) {
-        LOG_WARNING("WardenMemory: Loaded native Turtle PE - skipping patches");
-    }
     loaded_ = true;
     LOG_INFO("WardenMemory: Loaded PE image (", fileData.size(), " bytes on disk, ",
              imageSize_, " bytes virtual)");
@@ -858,7 +709,6 @@ void WardenMemory::verifyWardenScanEntries() {
     };
 
     int mismatches = 0;
-    int patched = 0;
     for (const auto& e : entries) {
         std::string hexStr(e.expectedHex);
         std::vector<uint8_t> expected;
@@ -868,27 +718,12 @@ void WardenMemory::verifyWardenScanEntries() {
         std::vector<uint8_t> actual(e.length, 0);
         bool ok = readMemory(e.address, e.length, actual.data());
 
-        if (!ok || actual != expected) {
-            mismatches++;
-
-            // In Turtle mode, write the expected bytes into the PE image so
-            // MEM_CHECK responses return what the server expects.
-            if (isTurtle_ && e.address >= imageBase_) {
-                uint32_t offset = e.address - imageBase_;
-                if (offset + expected.size() <= imageSize_) {
-                    std::memcpy(image_.data() + offset, expected.data(), expected.size());
-                    patched++;
-                }
-            }
-        }
+        if (!ok || actual != expected) mismatches++;
     }
 
     if (mismatches == 0) {
         LOG_WARNING("WardenScan: All ", sizeof(entries)/sizeof(entries[0]),
                     " DB scan entries MATCH PE image");
-    } else if (patched > 0) {
-        LOG_WARNING("WardenScan: Patched ", patched, "/", mismatches,
-                    " mismatched scan entries into PE image");
     } else {
         LOG_WARNING("WardenScan: ", mismatches, " / ", sizeof(entries)/sizeof(entries[0]),
                     " DB scan entries MISMATCH");
@@ -897,7 +732,7 @@ void WardenMemory::verifyWardenScanEntries() {
 
 bool WardenMemory::searchCodePattern(const uint8_t seed[4], const uint8_t expectedHash[20],
                                      uint8_t patternLen, bool imageOnly,
-                                     uint32_t hintOffset, bool hintOnly) const {
+                                     uint32_t hintOffset) const {
     if (!loaded_ || patternLen == 0 || cancel_.load(std::memory_order_relaxed)) return false;
 
     // Build cache key from all inputs: seed(4) + hash(20) + patLen(1) + imageOnly(1)
@@ -948,9 +783,6 @@ bool WardenMemory::searchCodePattern(const uint8_t seed[4], const uint8_t expect
             }
         }
     }
-
-    // If hint-only mode, skip the expensive brute-force search.
-    if (hintOnly) return false;
 
     // --- Brute-force fallback: search all PE sections ---
     struct Range { size_t start; size_t end; };

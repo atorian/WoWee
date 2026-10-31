@@ -81,6 +81,7 @@ cscope.out
 extern/*
 !extern/.gitkeep
 !extern/catch2
+!extern/approval_tests
 !extern/imgui
 !extern/vk-bootstrap
 !extern/FidelityFX-SDK
@@ -126,7 +127,6 @@ Data/expansions/*/*
 !Data/expansions/*/opcodes.json
 !Data/expansions/*/update_fields.json
 !Data/expansions/*/dbc_layouts.json
-!Data/expansions/*/movement_sequences.json
 
 ingest/
 

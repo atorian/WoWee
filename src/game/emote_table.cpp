@@ -1,6 +1,6 @@
 #include "game/emote_table.hpp"
 #include "rendering/animation/animation_ids.hpp"
-#include "pipeline/asset_manager.hpp"
+#include "game/game_data.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "core/logger.hpp"
@@ -38,71 +38,6 @@ static bool isLoopingEmote(const std::string& command) {
     return kLooping.find(command) != kLooping.end();
 }
 
-static std::unordered_map<uint32_t, uint32_t> makeFallbackEmotesIdMap() {
-    // Emotes.dbc IDs used on classic-family MaNGOS/CMaNGOS servers.
-    return {
-        {1, anim::EMOTE_TALK},
-        {2, anim::EMOTE_BOW},
-        {3, anim::EMOTE_WAVE},
-        {4, anim::EMOTE_CHEER},
-        {5, anim::EMOTE_EXCLAMATION},
-        {6, anim::EMOTE_QUESTION},
-        {7, anim::EMOTE_EAT},
-        {10, anim::EMOTE_DANCE},
-        {11, anim::EMOTE_LAUGH},
-        {12, anim::EMOTE_SLEEP},
-        {13, anim::EMOTE_SIT_GROUND},
-        {14, anim::EMOTE_RUDE},
-        {15, anim::EMOTE_ROAR},
-        {16, anim::EMOTE_KNEEL},
-        {17, anim::EMOTE_KISS},
-        {18, anim::EMOTE_CRY},
-        {19, anim::EMOTE_CHICKEN},
-        {20, anim::EMOTE_BEG},
-        {21, anim::EMOTE_APPLAUD},
-        {22, anim::EMOTE_SHOUT},
-        {23, anim::EMOTE_FLEX},
-        {24, anim::EMOTE_SHY},
-        {25, anim::EMOTE_POINT},
-        {33, anim::COMBAT_WOUND},
-        {34, anim::COMBAT_CRITICAL},
-        {35, anim::ATTACK_UNARMED},
-        {36, anim::ATTACK_1H},
-        {37, anim::ATTACK_2H},
-        {38, anim::ATTACK_2H_LOOSE},
-        {50, anim::SPELL_PRECAST},
-        {51, anim::SPELL_CAST},
-        {53, anim::BATTLE_ROAR},
-        {60, anim::KICK},
-        {66, anim::EMOTE_SALUTE},
-        {68, anim::KNEEL_LOOP},
-        {69, anim::EMOTE_USE_STANDING},
-        {70, anim::EMOTE_WAVE},
-        {71, anim::EMOTE_CHEER},
-        {92, anim::EMOTE_EAT_NO_SHEATHE},
-        {94, anim::EMOTE_DANCE},
-        {113, anim::EMOTE_SALUTE},
-        {133, anim::EMOTE_USE_STANDING_NO_SHEATHE},
-        {153, anim::EMOTE_LAUGH},
-        {173, anim::EMOTE_WORK_NO_SHEATHE},
-        {193, anim::SPELL_PRECAST},
-        {213, anim::READY_RIFLE},
-        {214, anim::HOLD_RIFLE},
-        {233, anim::EMOTE_WORK_NO_SHEATHE},
-        {234, anim::EMOTE_WORK_NO_SHEATHE},
-        {253, anim::EMOTE_APPLAUD},
-        {273, anim::EMOTE_YES},
-        {274, anim::EMOTE_NO},
-        {275, anim::EMOTE_TRAIN},
-    };
-}
-
-// Emotes.dbc IDs with EmoteSpecProc != 0 (persistent STATE_ emotes) that appear
-// in the fallback map above. Used only when Emotes.dbc is unavailable.
-static std::unordered_set<uint32_t> makeFallbackStateEmoteIds() {
-    return {10, 12, 13, 26, 28, 64, 65, 68, 69, 173, 213, 214, 233, 234, 379, 383};
-}
-
 static std::string replacePlaceholders(const std::string& text, const std::string* targetName) {
     if (text.empty()) return text;
     std::string out;
@@ -124,25 +59,28 @@ void EmoteTable::ensureLoaded() const {
     if (loaded_) return;
     loaded_ = true;
 
-    auto* assetManager = assets_;
-    if (!assetManager) {
-        LOG_WARNING("Emotes: no AssetManager - using the built-in table");
-        loadFallbackEmotes();
-        return;
-    }
-
-    auto emotesTextDbc = assetManager->loadDBC("EmotesText.dbc");
-    auto emotesTextDataDbc = assetManager->loadDBC("EmotesTextData.dbc");
-    if (!emotesTextDbc || !emotesTextDataDbc || !emotesTextDbc->isLoaded() || !emotesTextDataDbc->isLoaded()) {
-        LOG_WARNING("Emotes: DBCs not available (EmotesText/EmotesTextData)");
-        loadFallbackEmotes();
-        return;
-    }
-
     const auto* activeLayout = pipeline::getActiveDBCLayout();
     const auto* etdL = activeLayout ? activeLayout->getLayout("EmotesTextData") : nullptr;
     const auto* emL  = activeLayout ? activeLayout->getLayout("Emotes") : nullptr;
     const auto* etL  = activeLayout ? activeLayout->getLayout("EmotesText") : nullptr;
+    // The widest column read of each, by the layout or the WotLK file's place.
+    const auto widest = [](const pipeline::DBCFieldMap* layout,
+                           std::initializer_list<std::pair<const char*, uint32_t>> columns) {
+        uint32_t out = 0;
+        for (const auto& [name, wotlk] : columns) {
+            const uint32_t column = layout ? layout->field(name) : wotlk;
+            if (column != 0xFFFFFFFF) out = std::max(out, column);
+        }
+        return out + 1;
+    };
+    constexpr const char* kNeed = "the emotes";
+    const auto emotesTextDbc = data_.table(
+        "EmotesText.dbc",
+        widest(etL, {{"ID", 0}, {"Command", 1}, {"EmoteRef", 2}, {"OthersTargetTextID", 3},
+                     {"SenderTargetTextID", 5}, {"OthersNoTargetTextID", 7}, {"SenderNoTargetTextID", 9}}),
+        kNeed);
+    const auto emotesTextDataDbc = data_.table("EmotesTextData.dbc",
+                                               widest(etdL, {{"ID", 0}, {"Text", 1}}), kNeed);
 
     std::unordered_map<uint32_t, std::string> textData;
     textData.reserve(emotesTextDataDbc->getRecordCount());
@@ -155,13 +93,15 @@ void EmoteTable::ensureLoaded() const {
     std::unordered_map<uint32_t, uint32_t> emoteIdToAnim;
     animByEmotesId_.clear();
     stateEmoteIds_.clear();
-    if (auto emotesDbc = assetManager->loadDBC("Emotes.dbc"); emotesDbc && emotesDbc->isLoaded()) {
-        emoteIdToAnim.reserve(emotesDbc->getRecordCount());
-        animByEmotesId_.reserve(emotesDbc->getRecordCount());
+    {
         // EmoteSpecProc: 0 = one-shot, 1 = stand-state change, 2 = looping state
         // anim. Column 4 in every expansion's Emotes.dbc.
         uint32_t specField = emL ? (*emL)["EmoteSpecProc"] : 4;
         if (specField == 0xFFFFFFFF) specField = 4;
+        const auto emotesDbc = data_.table(
+            "Emotes.dbc", std::max(widest(emL, {{"ID", 0}, {"AnimID", 2}}), specField + 1), kNeed);
+        emoteIdToAnim.reserve(emotesDbc->getRecordCount());
+        animByEmotesId_.reserve(emotesDbc->getRecordCount());
         for (uint32_t r = 0; r < emotesDbc->getRecordCount(); ++r) {
             uint32_t emoteId = emotesDbc->getUInt32(r, emL ? (*emL)["ID"] : 0);
             uint32_t animId = emotesDbc->getUInt32(r, emL ? (*emL)["AnimID"] : 2);
@@ -174,8 +114,6 @@ void EmoteTable::ensureLoaded() const {
             }
         }
         LOG_DEBUG("Emotes: loaded ", emoteIdToAnim.size(), " anim mappings from Emotes.dbc");
-    } else {
-        LOG_WARNING("Emotes: Emotes.dbc failed to load - all emotes will use fallback animations");
     }
 
     emoteTable_.clear();
@@ -245,50 +183,12 @@ void EmoteTable::ensureLoaded() const {
     }
 
     if (emoteTable_.empty()) {
-        LOG_DEBUG("Emotes: DBC loaded but no commands parsed, using fallback list");
-        loadFallbackEmotes();
+        LOG_WARNING("Emotes: EmotesText.dbc has ", emotesTextDbc->getRecordCount(),
+                    " rows and no command in any - no emote can be used");
     } else {
         LOG_DEBUG("Emotes: loaded ", emoteTable_.size(), " commands from DBC");
     }
-    if (animByEmotesId_.empty()) {
-        animByEmotesId_ = makeFallbackEmotesIdMap();
-        stateEmoteIds_ = makeFallbackStateEmoteIds();
-    }
 
-    buildDbcIdIndex();
-}
-
-void EmoteTable::loadFallbackEmotes() const {
-    if (!emoteTable_.empty()) return;
-    animByEmotesId_ = makeFallbackEmotesIdMap();
-    stateEmoteIds_ = makeFallbackStateEmoteIds();
-    emoteTable_ = {
-        {"wave",    {.animId = anim::EMOTE_WAVE,    .dbcId = 0, .loop = false, .textNoTarget = "You wave.", .textTarget = "You wave at %s.", .othersNoTarget = "%s waves.", .othersTarget = "%s waves at %s.", .command = "wave"}},
-        {"bow",     {.animId = anim::EMOTE_BOW,     .dbcId = 0, .loop = false, .textNoTarget = "You bow down graciously.", .textTarget = "You bow down before %s.", .othersNoTarget = "%s bows down graciously.", .othersTarget = "%s bows down before %s.", .command = "bow"}},
-        {"laugh",   {.animId = anim::EMOTE_LAUGH,   .dbcId = 0, .loop = false, .textNoTarget = "You laugh.", .textTarget = "You laugh at %s.", .othersNoTarget = "%s laughs.", .othersTarget = "%s laughs at %s.", .command = "laugh"}},
-        {"point",   {.animId = anim::EMOTE_POINT,   .dbcId = 0, .loop = false, .textNoTarget = "You point over yonder.", .textTarget = "You point at %s.", .othersNoTarget = "%s points over yonder.", .othersTarget = "%s points at %s.", .command = "point"}},
-        {"cheer",   {.animId = anim::EMOTE_CHEER,   .dbcId = 0, .loop = false, .textNoTarget = "You cheer!", .textTarget = "You cheer at %s.", .othersNoTarget = "%s cheers!", .othersTarget = "%s cheers at %s.", .command = "cheer"}},
-        {"dance",   {.animId = anim::EMOTE_DANCE,   .dbcId = 0, .loop = true,  .textNoTarget = "You burst into dance.", .textTarget = "You dance with %s.", .othersNoTarget = "%s bursts into dance.", .othersTarget = "%s dances with %s.", .command = "dance"}},
-        {"kneel",   {.animId = anim::EMOTE_KNEEL,   .dbcId = 0, .loop = false, .textNoTarget = "You kneel down.", .textTarget = "You kneel before %s.", .othersNoTarget = "%s kneels down.", .othersTarget = "%s kneels before %s.", .command = "kneel"}},
-        {"applaud", {.animId = anim::EMOTE_APPLAUD, .dbcId = 0, .loop = false, .textNoTarget = "You applaud. Bravo!", .textTarget = "You applaud at %s. Bravo!", .othersNoTarget = "%s applauds. Bravo!", .othersTarget = "%s applauds at %s. Bravo!", .command = "applaud"}},
-        {"shout",   {.animId = anim::EMOTE_SHOUT,   .dbcId = 0, .loop = false, .textNoTarget = "You shout.", .textTarget = "You shout at %s.", .othersNoTarget = "%s shouts.", .othersTarget = "%s shouts at %s.", .command = "shout"}},
-        {"chicken", {.animId = anim::EMOTE_CHICKEN, .dbcId = 0, .loop = false, .textNoTarget = "With arms flapping, you strut around. Cluck, Cluck, Chicken!",
-                     .textTarget = "With arms flapping, you strut around %s. Cluck, Cluck, Chicken!",
-                     .othersNoTarget = "%s struts around. Cluck, Cluck, Chicken!", .othersTarget = "%s struts around %s. Cluck, Cluck, Chicken!", .command = "chicken"}},
-        {"cry",     {.animId = anim::EMOTE_CRY,     .dbcId = 0, .loop = false, .textNoTarget = "You cry.", .textTarget = "You cry on %s's shoulder.", .othersNoTarget = "%s cries.", .othersTarget = "%s cries on %s's shoulder.", .command = "cry"}},
-        {"kiss",    {.animId = anim::EMOTE_KISS,    .dbcId = 0, .loop = false, .textNoTarget = "You blow a kiss into the wind.", .textTarget = "You blow a kiss to %s.", .othersNoTarget = "%s blows a kiss into the wind.", .othersTarget = "%s blows a kiss to %s.", .command = "kiss"}},
-        {"roar",    {.animId = anim::EMOTE_ROAR,    .dbcId = 0, .loop = false, .textNoTarget = "You roar with bestial vigor. So fierce!", .textTarget = "You roar with bestial vigor at %s. So fierce!", .othersNoTarget = "%s roars with bestial vigor. So fierce!", .othersTarget = "%s roars with bestial vigor at %s. So fierce!", .command = "roar"}},
-        {"salute",  {.animId = anim::EMOTE_SALUTE,  .dbcId = 0, .loop = false, .textNoTarget = "You salute.", .textTarget = "You salute %s with respect.", .othersNoTarget = "%s salutes.", .othersTarget = "%s salutes %s with respect.", .command = "salute"}},
-        {"rude",    {.animId = anim::EMOTE_RUDE,    .dbcId = 0, .loop = false, .textNoTarget = "You make a rude gesture.", .textTarget = "You make a rude gesture at %s.", .othersNoTarget = "%s makes a rude gesture.", .othersTarget = "%s makes a rude gesture at %s.", .command = "rude"}},
-        {"flex",    {.animId = anim::EMOTE_FLEX,    .dbcId = 0, .loop = false, .textNoTarget = "You flex your muscles. Oooooh so strong!", .textTarget = "You flex at %s. Oooooh so strong!", .othersNoTarget = "%s flexes. Oooooh so strong!", .othersTarget = "%s flexes at %s. Oooooh so strong!", .command = "flex"}},
-        {"shy",     {.animId = anim::EMOTE_SHY,     .dbcId = 0, .loop = false, .textNoTarget = "You smile shyly.", .textTarget = "You smile shyly at %s.", .othersNoTarget = "%s smiles shyly.", .othersTarget = "%s smiles shyly at %s.", .command = "shy"}},
-        {"beg",     {.animId = anim::EMOTE_BEG,     .dbcId = 0, .loop = false, .textNoTarget = "You beg everyone around you. How pathetic.", .textTarget = "You beg %s. How pathetic.", .othersNoTarget = "%s begs everyone around. How pathetic.", .othersTarget = "%s begs %s. How pathetic.", .command = "beg"}},
-        {"eat",     {.animId = anim::EMOTE_EAT,     .dbcId = 0, .loop = true,  .textNoTarget = "You begin to eat.", .textTarget = "You begin to eat in front of %s.", .othersNoTarget = "%s begins to eat.", .othersTarget = "%s begins to eat in front of %s.", .command = "eat"}},
-        {"talk",    {.animId = anim::EMOTE_TALK,    .dbcId = 0, .loop = false, .textNoTarget = "You talk.", .textTarget = "You talk to %s.", .othersNoTarget = "%s talks.", .othersTarget = "%s talks to %s.", .command = "talk"}},
-        {"work",    {.animId = anim::EMOTE_WORK,    .dbcId = 0, .loop = true,  .textNoTarget = "You begin to work.", .textTarget = "You begin to work near %s.", .othersNoTarget = "%s begins to work.", .othersTarget = "%s begins to work near %s.", .command = "work"}},
-        {"train",   {.animId = anim::EMOTE_TRAIN,   .dbcId = 0, .loop = true,  .textNoTarget = "You let off a train whistle. Choo Choo!", .textTarget = "You let off a train whistle at %s. Choo Choo!", .othersNoTarget = "%s lets off a train whistle. Choo Choo!", .othersTarget = "%s lets off a train whistle at %s. Choo Choo!", .command = "train"}},
-        {"dead",    {.animId = anim::EMOTE_DEAD,    .dbcId = 0, .loop = true,  .textNoTarget = "You play dead.", .textTarget = "You play dead in front of %s.", .othersNoTarget = "%s plays dead.", .othersTarget = "%s plays dead in front of %s.", .command = "dead"}},
-    };
     buildDbcIdIndex();
 }
 

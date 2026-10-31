@@ -20,13 +20,16 @@
 #include "game/group_defines.hpp"
 #include "game/handler_types.hpp"
 #include "game/combat_handler.hpp"
+#include "game/player_handler.hpp"
+#include "game/query_cache_handler.hpp"
 #include "game/spell_handler.hpp"
 #include "game/quest_handler.hpp"
 #include "game/reputation_handler.hpp"
 #include "game/social_handler.hpp"
 #include "game/movement_handler.hpp"
 #include "game/warden_session.hpp"
-#include "game/entity_controller.hpp"
+#include "game/world_state.hpp"
+#include "game/world_handler.hpp"
 #include "game/game_services.hpp"
 #include "game/world_login.hpp"
 #include "network/packet.hpp"
@@ -79,51 +82,6 @@ struct EzWowPatch;
  * Quest giver status values (WoW 3.3.5a)
  */
 /**
- * World connection state
- */
-enum class WorldState {
-    DISCONNECTED,           // Not connected
-    CONNECTING,             // TCP connection in progress
-    CONNECTED,              // Connected, waiting for challenge
-    CHALLENGE_RECEIVED,     // Received SMSG_AUTH_CHALLENGE
-    AUTH_SENT,              // Sent CMSG_AUTH_SESSION, encryption initialized
-    AUTHENTICATED,          // Received SMSG_AUTH_RESPONSE success
-    READY,                  // Ready for character/world operations
-    CHAR_LIST_REQUESTED,    // CMSG_CHAR_ENUM sent
-    CHAR_LIST_RECEIVED,     // SMSG_CHAR_ENUM received
-    ENTERING_WORLD,         // CMSG_PLAYER_LOGIN sent
-    IN_WORLD,               // In game world
-    FAILED                  // Connection or authentication failed
-};
-
-/// The state's own name, for a log line.
-///
-/// Four files kept an identical copy of this in their own anonymous namespace -
-/// the three GameHandler was split into and the entity controller - so adding a
-/// state meant remembering four switches, and a switch that was not updated
-/// answers "UNKNOWN" for the new one rather than failing to compile.
-///
-/// Beside the enum, so the two are read together. No default case, so adding a
-/// state to the list above is a warning here rather than a silent "UNKNOWN".
-inline const char* worldStateName(WorldState state) {
-    switch (state) {
-        case WorldState::DISCONNECTED:        return "DISCONNECTED";
-        case WorldState::CONNECTING:          return "CONNECTING";
-        case WorldState::CONNECTED:           return "CONNECTED";
-        case WorldState::CHALLENGE_RECEIVED:  return "CHALLENGE_RECEIVED";
-        case WorldState::AUTH_SENT:           return "AUTH_SENT";
-        case WorldState::AUTHENTICATED:       return "AUTHENTICATED";
-        case WorldState::READY:               return "READY";
-        case WorldState::CHAR_LIST_REQUESTED: return "CHAR_LIST_REQUESTED";
-        case WorldState::CHAR_LIST_RECEIVED:  return "CHAR_LIST_RECEIVED";
-        case WorldState::ENTERING_WORLD:      return "ENTERING_WORLD";
-        case WorldState::IN_WORLD:            return "IN_WORLD";
-        case WorldState::FAILED:              return "FAILED";
-    }
-    return "UNKNOWN";
-}
-
-/**
  * World connection callbacks
  */
 using WorldConnectSuccessCallback = std::function<void()>;
@@ -141,7 +99,8 @@ using WorldConnectFailureCallback = std::function<void(const std::string& reason
  * - Game packets
  */
 class GameHandler : public IConnectionState,
-                     public IEntityAccess,
+                     public QueryCacheQueries,
+                     public WorldQueries,
                      public PacketSender,
                      public FrameXmlEvents,
                      public ActionBarQueries,
@@ -153,7 +112,9 @@ class GameHandler : public IConnectionState,
                      public ReputationQueries,
                      public SocialQueries,
                      public WardenSession,
-                     public CombatQueries {
+                     public CombatQueries,
+                     public MovementQueries,
+                     public PlayerQueries {
 public:
     // Talent data structures (aliased from handler_types.hpp)
     using TalentEntry = game::TalentEntry;
@@ -233,6 +194,25 @@ public:
     // rest of the game (ActionBarQueries, InventoryQueries). See AGENTS.md,
     // "A new domain handler".
     bool connected() const override { return isConnected(); }
+    // MovementQueries (the rest it shares with the other handlers' queries)
+    WorldState worldState() const override { return state; }
+    Race characterRace() const override { return playerRace_; }
+    bool isTransport(uint64_t guid) const override { return worldHandler_->isTransportGuid(guid); }
+    TransportManager* transports() override { return transportManager_.get(); }
+    uint32_t gryphonDisplayId() const override { return services_.gryphonDisplayId; }
+    uint32_t wyvernDisplayId() const override { return services_.wyvernDisplayId; }
+    bool resurrectPending() const override { return combatHandler_->resurrectPending(); }
+    bool channeling() const override { return spellHandler_->isChanneling(); }
+    const std::vector<AuraSlot>& playerAuras() const override { return spellHandler_->getPlayerAuras(); }
+    void resetCastState() override { spellHandler_->resetCastState(); }
+    uint32_t lastGroundCastSpellId() const override { return spellHandler_->getLastGroundCastSpellId(); }
+    void forgetPlayerAura(uint32_t spellId) override { spellHandler_->forgetPlayerAura(spellId); }
+    void leftVehicle() override { vehicleId_ = 0; }
+    void arrivedOnMap(uint32_t mapId) override { currentMapId_ = mapId; }
+    void traceWorldPackets(std::chrono::seconds duration, const char* label) override;
+    void tearDownWorldForTransfer(uint32_t mapId) override;
+    void resurrectedInPlace() override;
+    void resetPingTimer() override { timeSinceLastPing = 0.0f; }
     // CombatQueries (the rest it shares with the other handlers' queries)
     bool inInstance() const override { return isInInstance(); }
     bool corpseHoldsLoot(uint64_t guid) const override;
@@ -262,10 +242,10 @@ public:
     uint64_t characterGuid() const override { return getPlayerGuid(); }
     uint64_t currentTargetGuid() const override { return combatHandler_->getTargetGuid(); }
     const EntityManager& entities() const override { return getEntityManager(); }
-    const FlatFieldMap& playerFields() const override { return lastPlayerFields_; }
+    const FlatFieldMap& playerFields() const override { return playerHandler_->fields(); }
     PacketParsers& packetParsers() override { return *packetParsers_; }
-    std::string playerName(uint64_t guid) const override { return entityController_->lookupName(guid); }
-    void requestPlayerName(uint64_t guid) override { queryPlayerName(guid); }
+    std::string playerName(uint64_t guid) const override { return queryCacheHandler_->lookupName(guid); }
+    void requestPlayerName(uint64_t guid) override { queryCacheHandler_->queryPlayerName(guid); }
     bool inGuild() const override;
     std::string spellName(uint32_t spellId) const override { return spellHandler_->getSpellName(spellId); }
     bool spellKnownToClient(uint32_t spellId) const override { return spellHandler_->isSpellKnownToClient(spellId); }
@@ -284,8 +264,8 @@ public:
     uint32_t currentCastSpellId() const override { return spellHandler_->getCurrentCastSpellId(); }
     bool restoring() const override { return spellHandler_->isRestoring(); }
     bool craftingWindowOpen() const override { return spellHandler_->isCraftingWindowOpen(); }
-    bool mounted() const override { return isMounted(); }
-    uint32_t mountAuraSpellId() const override { return getMountAuraSpellId(); }
+    bool mounted() const override { return movementHandler_->isMounted(); }
+    uint32_t mountAuraSpellId() const override { return movementHandler_->mountAuraSpellId(); }
     bool carriesAura(uint32_t spellId) const override { return playerCarriesAura(spellId); }
     void noteItemCastSpell(uint32_t spellId) override;
     void stopMovingForCast() override;
@@ -293,6 +273,8 @@ public:
     bool gameObjectLootOpened(uint64_t lootGuid) override;
     bool npcDialogOpen() const override;
     bool questWantsItem(uint32_t itemId) const override;
+    bool actionBarHoldsItem() const override;
+    void coinageFieldFoundAt(uint16_t index) override;
     // cancelCast, dismount, closeGossip and runInterfaceCommand are
     // InventoryQueries' too, declared with the rest of their kind below.
 
@@ -308,9 +290,9 @@ public:
     uint64_t petGuid() const override;
     pet::IPetFeed* petFeed() override;
     std::string unitIdFor(uint64_t guid) const override { return guidToUnitId(guid); }
-    uint32_t playerLevel() const override { return getPlayerLevel(); }
+    uint32_t playerLevel() const override { return playerHandler_->level(); }
     const GameObjectQueryResponseData* gameObjectInfo(uint32_t entry) const override {
-        return getCachedGameObjectInfo(entry);
+        return queryCacheHandler_->getCachedGameObjectInfo(entry);
     }
     bool friendlyFaction(uint32_t factionTemplateId) const override {
         return isFriendlyFaction(factionTemplateId);
@@ -323,8 +305,8 @@ public:
     bool autoFaceTarget() const override { return isAutoFaceTarget(); }
     bool autoSelfCast() const override { return isAutoSelfCast(); }
     bool flying() const override { return isPlayerFlying(); }
-    uint32_t mountDisplayId() const override { return currentMountDisplayId_; }
-    void noteMountAura(uint32_t spellId) override { mountAuraSpellId_ = spellId; }
+    uint32_t mountDisplayId() const override { return movementHandler_->mountDisplayId(); }
+    void noteMountAura(uint32_t spellId) override { movementHandler_->noteMountAura(spellId); }
     bool autoAttacking() const override { return combatHandler_->isAutoAttacking(); }
     bool inCombat() const override { return combatHandler_->isInCombat(); }
     const ItemQueryResponseData* itemInfo(uint32_t itemId) const override { return inventoryHandler_->getItemInfo(itemId); }
@@ -338,8 +320,6 @@ public:
     uint64_t lastInteractedGameObject() const override { return lastInteractedGoGuid_; }
     void clearPendingGameObjectInteraction() override { pendingGameObjectInteractGuid_ = 0; }
     void clearLastInteractedGameObject() override { lastInteractedGoGuid_ = 0; }
-    uint32_t activeCritterSpellId() const override { return getActiveCritterSpellId(); }
-    uint64_t activeCritterGuid() const override { return getActiveCritterGuid(); }
     std::optional<HomeBind> homeBind() const override;
     std::string achievementName(uint32_t achievementId) override;
     achievement::IAchievementsFeed* achievementsFeed() override;
@@ -350,9 +330,9 @@ public:
     // packetParsers, playerMovement and achievementName are above).
     const Character* activeCharacter() const override { return getActiveCharacter(); }
     uint32_t currentMapId() const override { return currentMapId_; }
-    uint8_t playerClassOf(uint64_t guid) const override { return entityController_->lookupPlayerClass(guid); }
-    uint8_t playerRaceOf(uint64_t guid) const override { return entityController_->lookupPlayerRace(guid); }
-    uint8_t playerGenderOf(uint64_t guid) const override { return entityController_->lookupPlayerGender(guid); }
+    uint8_t playerClassOf(uint64_t guid) const override { return queryCacheHandler_->lookupPlayerClass(guid); }
+    uint8_t playerRaceOf(uint64_t guid) const override { return queryCacheHandler_->lookupPlayerRace(guid); }
+    uint8_t playerGenderOf(uint64_t guid) const override { return queryCacheHandler_->lookupPlayerGender(guid); }
     const GroupListData& party() const override;
     const GuildRosterData& guildRoster() const override;
     std::optional<uint32_t> guildRankRights() const override;
@@ -361,10 +341,13 @@ public:
     // QuestQueries (the shared ones are above; closeVendor is declared with
     // the vendor's facade).
     bool inGroup() const override;
-    void setResting(bool resting) override;
-    std::string creatureName(uint32_t entry) const override { return getCachedCreatureName(entry); }
-    void requestCreatureInfo(uint32_t entry) override { queryCreatureInfo(entry, 0); }
-    void requestGameObjectInfo(uint32_t entry) override { entityController_->queryGameObjectInfo(entry, 0); }
+    void setResting(bool resting) override { playerHandler_->restStateArrived(resting); }
+    std::string creatureName(uint32_t entry) const override { return queryCacheHandler_->getCachedCreatureName(entry); }
+    void requestCreatureInfo(uint32_t entry) override { queryCacheHandler_->queryCreatureInfo(entry, 0); }
+    void requestGameObjectInfo(uint32_t entry) override { queryCacheHandler_->queryGameObjectInfo(entry, 0); }
+    void requestGameObjectInfo(uint32_t entry, uint64_t guid) override {
+        queryCacheHandler_->queryGameObjectInfo(entry, guid);
+    }
     void vendorCanRepair() override { inventoryHandler_->setVendorCanRepair(true); }
     void openedStableMaster(uint64_t npcGuid) override;
 
@@ -388,10 +371,138 @@ public:
     const std::array<uint32_t, 19>* inspectedItemEntries(uint64_t guid) const override {
         return inventoryHandler_->inspectedItemEntries(guid);
     }
-    bool showingHelm() const override { return helmVisible_; }
-    bool showingCloak() const override { return cloakVisible_; }
-    void setShowingHelm(bool shown) override { helmVisible_ = shown; }
-    void setShowingCloak(bool shown) override { cloakVisible_ = shown; }
+    bool showingHelm() const override { return playerHandler_->helmVisible(); }
+    bool showingCloak() const override { return playerHandler_->cloakVisible(); }
+    void setShowingHelm(bool shown) override { playerHandler_->showHelm(shown); }
+    void setShowingCloak(bool shown) override { playerHandler_->showCloak(shown); }
+
+    // PlayerQueries (markOnlineEquipmentDirty is the inventory's, below)
+    Character* listedCharacter() override;
+    void moneyFieldArrived(uint32_t copper, FrameXmlEvents& packetEvents) override;
+    void bankBagSlotsArrived(uint8_t slots) override;
+    void chosenTitleArrived(int32_t title) override;
+    void playerFlagsArrived(uint32_t flags, FrameXmlEvents& packetEvents) override;
+
+    // QueryCacheQueries (packetParsers and entities are above)
+    void playerNameArrived(uint64_t guid, const std::string& name) override;
+    void creatureTemplateArrived(const CreatureQueryResponseData& data) override;
+    void gameObjectTemplateArrived(const GameObjectQueryResponseData& data) override;
+
+    // WorldQueries. The session's, the caches' and some of the fight's
+    // answers are above, under the names other handlers ask them by; these
+    // hand the rest to their owners.
+    bool hostileFaction(uint32_t factionTemplateId) const override { return isHostileFaction(factionTemplateId); }
+    uint64_t movementTransportGuid() const override { return movementInfo.transportGuid; }
+    uint64_t playerTransportGuid() const override { return movementHandler_->getPlayerTransportGuid(); }
+    bool recentlyAboard(uint64_t guid) const override { return movementHandler_->recentlyAboard(guid); }
+    void clearPlayerTransport() override { movementHandler_->clearPlayerTransport(); }
+    void setTransportAttachment(uint64_t childGuid, ObjectType type, uint64_t transportGuid,
+                                const glm::vec3& localOffset, bool hasLocalOrientation,
+                                float localOrientation, bool offsetNeedsTransportResolution) override {
+        movementHandler_->setTransportAttachment(childGuid, type, transportGuid, localOffset,
+                                                 hasLocalOrientation, localOrientation,
+                                                 offsetNeedsTransportResolution);
+    }
+    void clearTransportAttachment(uint64_t childGuid) override { movementHandler_->clearTransportAttachment(childGuid); }
+    std::optional<glm::vec3> serverPlacedPlayer(const UpdateBlock& block, const glm::vec3& canonicalPos,
+                                                float canonicalOrientation, bool movementUpdate) override {
+        return movementHandler_->serverPlacedPlayer(block, canonicalPos, canonicalOrientation, movementUpdate);
+    }
+    void applyServerMovementSpeeds(float walk, float run, float runBack, float swim, float swimBack,
+                                   float flight, float flightBack, float turn, float pitch) override {
+        movementHandler_->applyServerMovementSpeeds(walk, run, runBack, swim, swimBack, flight,
+                                                    flightBack, turn, pitch);
+    }
+    void playerCreatedInFlight() override { movementHandler_->playerCreatedInFlight(); }
+    void playerMountFieldArrived(uint32_t displayId, const FlatFieldMap& blockFields,
+                                 FrameXmlEvents& packetEvents) override {
+        movementHandler_->playerMountFieldArrived(displayId, blockFields, packetEvents);
+    }
+    void playerFieldsCreated(const FlatFieldMap& fields) override { playerHandler_->fieldsCreated(fields); }
+    void playerFieldsUpdated(const FlatFieldMap& fields) override { playerHandler_->fieldsUpdated(fields); }
+    void playerFieldsArrived(const FlatFieldMap& fields, bool isCreate, FrameXmlEvents& packetEvents) override {
+        playerHandler_->playerFieldsArrived(fields, isCreate, packetEvents);
+    }
+    void shapeshiftFormArrived(uint8_t form, FrameXmlEvents& packetEvents) override {
+        playerHandler_->shapeshiftFormArrived(form, packetEvents);
+    }
+    void playerUnitFlagsArrived(uint32_t previous, uint32_t flags, FrameXmlEvents& packetEvents) override {
+        combatHandler_->playerUnitFlagsArrived(previous, flags, packetEvents);
+        playerHandler_->unitFlagsArrived(previous, flags);
+    }
+    void playerVisibilityFlagsArrived(uint8_t previous, uint8_t flags) override {
+        playerHandler_->visibilityFlagsArrived(previous, flags);
+    }
+    void playerDynamicFlagsArrived(uint32_t previous, uint32_t flags, FrameXmlEvents& packetEvents) override {
+        combatHandler_->playerDynamicFlagsArrived(previous, flags, packetEvents);
+    }
+    void playerObjectCreated(std::optional<uint32_t> health, uint32_t dynamicFlags,
+                             std::optional<uint32_t> playerFlags) override {
+        combatHandler_->playerCreated(health, dynamicFlags, playerFlags);
+    }
+    void unitHealthArrived(uint64_t guid, uint32_t previous, uint32_t health,
+                           FrameXmlEvents& packetEvents) override {
+        combatHandler_->unitHealthArrived(guid, previous, health, packetEvents);
+    }
+    void ownCorpseSeen(uint64_t guid, bool hasPosition, float serverX, float serverY, float serverZ) override {
+        combatHandler_->ownCorpseSeen(guid, hasPosition, serverX, serverY, serverZ);
+    }
+    void playerAuraFieldsArrived(const FlatFieldMap& fields, FrameXmlEvents& packetEvents) override {
+        spellHandler_->playerAuraFieldsArrived(fields, packetEvents);
+    }
+    void skillFieldsArrived(const FlatFieldMap& fields) override { spellHandler_->extractSkillFields(fields); }
+    void exploredZoneFieldsArrived(const FlatFieldMap& fields) override {
+        spellHandler_->extractExploredZoneFields(fields);
+    }
+    void companionFieldsArrived(const FlatFieldMap& blockFields) override {
+        spellHandler_->companionFieldsArrived(blockFields);
+    }
+    void questFieldsArrived(const FlatFieldMap& fields) override { questHandler_->applyQuestStateFromFields(fields); }
+    uint64_t autoAttackTargetGuid() const override { return combatHandler_->getAutoAttackTargetGuid(); }
+    void targetGone() override { combatHandler_->targetGone(); }
+    void invalidateTabCycle() override { combatHandler_->invalidateTabCycle(); }
+    void removeHostileAttacker(uint64_t guid) override { combatHandler_->removeHostileAttacker(guid); }
+    void removeCombatTextForGuid(uint64_t guid) override { combatHandler_->removeCombatTextForGuid(guid); }
+    void forgetUnitAuras(uint64_t guid) override { spellHandler_->removeUnitAuraCache(guid); }
+    void forgetUnitCast(uint64_t guid) override { spellHandler_->removeUnitCastState(guid); }
+    void forgetQuestGiver(uint64_t guid) override { questHandler_->forgetQuestGiver(guid); }
+    const std::unordered_map<uint64_t, std::string>& playerNameCache() const override {
+        return queryCacheHandler_->getPlayerNameCache();
+    }
+    void requestCreatureInfo(uint32_t entry, uint64_t guid) override {
+        queryCacheHandler_->queryCreatureInfo(entry, guid);
+    }
+    void playerLeftView(uint64_t guid) override { queryCacheHandler_->playerLeftView(guid); }
+    bool holdsItemObject(uint64_t guid) const override { return inventoryHandler_->holdsItemObject(guid); }
+    bool trackItemObject(uint64_t guid, bool isContainer, const FlatFieldMap& fields) override {
+        return inventoryHandler_->trackItemObject(guid, isContainer, fields);
+    }
+    void itemObjectChanged(uint64_t guid, bool isContainer, const FlatFieldMap& fields,
+                           FrameXmlEvents& packetEvents) override {
+        inventoryHandler_->itemObjectChanged(guid, isContainer, fields, packetEvents);
+    }
+    bool forgetItemObject(uint64_t guid) override { return inventoryHandler_->forgetItemObject(guid); }
+    void inventoryFieldsArrived(const FlatFieldMap& fields, bool isCreate, FrameXmlEvents& packetEvents) override {
+        inventoryHandler_->inventoryFieldsArrived(fields, isCreate, packetEvents);
+    }
+    void detectInventorySlotBases(const FlatFieldMap& fields) override {
+        inventoryHandler_->detectInventorySlotBases(fields);
+    }
+    void detectCoinageField(const FlatFieldMap& before, const FlatFieldMap& after) override {
+        inventoryHandler_->detectCoinageField(before, after);
+    }
+    uint32_t expectedMoneyDelta() const override { return inventoryHandler_->expectedMoneyDelta(); }
+    void maybeDetectVisibleItemLayout() override { inventoryHandler_->maybeDetectVisibleItemLayout(); }
+    void rebuildOnlineInventory() override { inventoryHandler_->rebuildOnlineInventory(); }
+    void updateBatchFinished(bool newItemCreated, const FlatFieldMap& playerFields) override {
+        inventoryHandler_->updateBatchFinished(newItemCreated, playerFields);
+    }
+    void updateOtherPlayerVisibleItems(uint64_t guid, const FlatFieldMap& fields) override {
+        inventoryHandler_->updateOtherPlayerVisibleItems(guid, fields);
+    }
+    void forgetPlayerEquipment(uint64_t guid) override { inventoryHandler_->forgetPlayerEquipment(guid); }
+    void emitAllOtherPlayerEquipment() override { inventoryHandler_->emitAllOtherPlayerEquipment(); }
+    bool loggingOut() const override;
 
     // ReputationQueries (refreshUnitHostility is declared with the rest of the
     // faction table below).
@@ -482,8 +593,8 @@ public:
     /// player walks out of range, which is the only thing these answer.
     uint64_t getBinderGuid() const { return binderGuid_; }
 
-    EntityManager& getEntityManager() override { return entityController_->getEntityManager(); }
-    const EntityManager& getEntityManager() const override { return entityController_->getEntityManager(); }
+    EntityManager& getEntityManager() { return worldHandler_->getEntityManager(); }
+    const EntityManager& getEntityManager() const { return worldHandler_->getEntityManager(); }
 
     /**
      * Send a chat message
@@ -603,95 +714,6 @@ public:
     const loot::ILoot* loot() const override;
     const guild_bank::IGuildBank* guildBank() const override;
 
-    // PvP currency (TBC/WotLK only)
-    uint32_t getHonorPoints() const { return playerHonorPoints_; }
-    uint32_t getArenaPoints() const { return playerArenaPoints_; }
-
-    // Server-authoritative armor (UNIT_FIELD_RESISTANCES[0])
-    int32_t getArmorRating() const { return playerArmorRating_; }
-
-    // Server-authoritative elemental resistances (UNIT_FIELD_RESISTANCES[1-6]).
-    // school: 1=Holy, 2=Fire, 3=Nature, 4=Frost, 5=Shadow, 6=Arcane. Returns 0 if not received.
-    int32_t getResistance(int school) const {
-        if (school < 1 || school > 6) return 0;
-        return playerResistances_[school - 1];
-    }
-
-    // Server-authoritative primary stats (UNIT_FIELD_STAT0-4: STR, AGI, STA, INT, SPI).
-    // Returns -1 if the server hasn't sent the value yet.
-    int32_t getPlayerStat(int idx) const {
-        if (idx < 0 || idx > 4) return -1;
-        return playerStats_[idx];
-    }
-
-    /// Melee critical-strike chance the player's Agility grants, as a percent,
-    /// the way the character sheet's stat flyout reads it: the class base plus
-    /// Agility times the per-class-per-level ratio, both from the combat game
-    /// tables. Zero until the tables and the player's stats are available.
-    float getMeleeCritFromAgility() const;
-    /// Spell critical-strike chance the player's Intellect grants, as a percent -
-    /// the spell-side twin of getMeleeCritFromAgility, read the same way from the
-    /// spell-crit game tables. Zero for a class with no spell crit (a warrior).
-    float getSpellCritFromIntellect() const;
-    /// The percent a combat rating grants - dodge, parry, haste, defense and the
-    /// rest of the rating-based stats the flyout shows. rating × (class scalar ÷
-    /// the level's coefficient), from gtCombatRatings and the class scalar table,
-    /// exactly as AzerothCore's GetRatingBonusValue reads it. Zero for an
-    /// out-of-range index or a rating the player has none of.
-    float getCombatRatingBonus(int cr) const;
-    /// Health and mana regenerated per second from Spirit, as the stat flyout
-    /// shows them. Health splits Spirit at 50 across two tables (gtOCTRegenHP,
-    /// gtRegenHPPerSpt) then doubles; mana is Spirit × gtRegenMPPerSpt - the
-    /// same as AzerothCore's OCTRegen*PerSpirit. Zero for a class with no mana.
-    float getHealthRegenFromSpirit() const;
-    float getManaRegenFromSpirit() const;
-
-    // Server-authoritative attack power (WotLK: UNIT_FIELD_ATTACK_POWER / RANGED).
-    // Returns -1 if not yet received.
-    int32_t getMeleeAttackPower()  const { return playerMeleeAP_; }
-    int32_t getRangedAttackPower() const { return playerRangedAP_; }
-
-    // Server-authoritative spell damage / healing bonus (WotLK: PLAYER_FIELD_MOD_*).
-    // getSpellPower returns the max damage bonus across magic schools 1-6 (Holy/Fire/Nature/Frost/Shadow/Arcane).
-    // Returns -1 if not yet received.
-    int32_t getSpellPower() const {
-        int32_t sp = -1;
-        for (int i = 1; i <= 6; ++i) {
-            if (playerSpellDmgBonus_[i] > sp) sp = playerSpellDmgBonus_[i];
-        }
-        return sp;
-    }
-    int32_t getHealingPower() const { return playerHealBonus_; }
-
-    // Server-authoritative combat chance percentages (WotLK: PLAYER_* float fields).
-    // Returns -1.0f if not yet received.
-    float getDodgePct()  const { return playerDodgePct_; }
-    float getParryPct()  const { return playerParryPct_; }
-    float getBlockPct()  const { return playerBlockPct_; }
-    /// Expertise in points, main hand and off hand. Zero until the server
-    /// says otherwise, which is also the right answer for a class that has
-    /// none - unlike the percentages above, where -1 has to mean "not told".
-    int32_t getExpertise() const { return playerExpertise_; }
-    int32_t getOffhandExpertise() const { return playerOffhandExpertise_; }
-    /// Mana regen per second, not-casting and while-casting - the server sends
-    /// both already computed. GetManaRegen returns them for the mana-regen stat.
-    float getManaRegen() const { return playerManaRegen_; }
-    float getManaRegenCasting() const { return playerManaRegenCasting_; }
-    float getCritPct()   const { return playerCritPct_; }
-    float getRangedCritPct() const { return playerRangedCritPct_; }
-    // Spell crit by school (0=Physical,1=Holy,2=Fire,3=Nature,4=Frost,5=Shadow,6=Arcane)
-    float getSpellCritPct(int school = 1) const {
-        if (school < 0 || school > 6) return -1.0f;
-        return playerSpellCritPct_[school];
-    }
-
-    // Server-authoritative combat ratings (WotLK: PLAYER_FIELD_COMBAT_RATING_1+idx).
-    // Returns -1 if not yet received. Indices match AzerothCore CombatRating enum.
-    int32_t getCombatRating(int cr) const {
-        if (cr < 0 || cr > 24) return -1;
-        return playerCombatRatings_[cr];
-    }
-
     // Inventory
     void markOnlineEquipmentDirty() override { inventoryHandler_->markOnlineEquipmentDirty(); }
 
@@ -714,13 +736,6 @@ public:
 
     // Stand state
     void setStandState(uint8_t state) override;  // 0=stand, 1=sit, 2=sit_chair, 3=sleep, 4=sit_low_chair, 5=sit_medium_chair, 6=sit_high_chair, 7=dead, 8=kneel, 9=submerged
-    uint8_t getStandState() const { return standState_; }
-    bool isSitting() const { return standState_ >= 1 && standState_ <= 6; }
-    bool isDead() const { return standState_ == 7; }
-
-    // Display toggles
-    bool isHelmVisible() const { return helmVisible_; }
-    bool isCloakVisible() const { return cloakVisible_; }
 
     /// Take the glyph out of a socket. Zero-based slot, as the server counts.
     void removeGlyphFromSocket(uint32_t slot);
@@ -734,9 +749,6 @@ public:
     bool isAfk() const;
     bool isDnd() const;
 
-    void queryPlayerName(uint64_t guid) override;
-
-    void queryCreatureInfo(uint32_t entry, uint64_t guid) override;
     /// A creature template entry turned into something that can be drawn, by
     /// asking the server if it has not already.
     ///
@@ -749,18 +761,6 @@ public:
     /// answers zero the first time and the query fills the cache for the next
     /// frame to find.
     uint32_t getCreatureDisplayIdForEntry(uint32_t entry);
-    const GameObjectQueryResponseData* getCachedGameObjectInfo(uint32_t entry) const override {
-        return entityController_->getCachedGameObjectInfo(entry);
-    }
-    std::string getCachedPlayerName(uint64_t guid) const override;
-    std::string getCachedCreatureName(uint32_t entry) const override;
-    // Read-only cache access forwarded from EntityController
-    const std::unordered_map<uint64_t, std::string>& getPlayerNameCache() const override {
-        return entityController_->getPlayerNameCache();
-    }
-    const std::unordered_map<uint32_t, CreatureQueryResponseData>& getCreatureInfoCache() const override {
-        return entityController_->getCreatureInfoCache();
-    }
     void startAutoAttack(uint64_t targetGuid) override;
     void stopAutoAttack() override;
     // Threat
@@ -799,7 +799,7 @@ public:
     ///
     /// The reliable way to ask "am I already riding the mount this button
     /// summons": the mount you are on put its own aura on you, and no other
-    /// mount's aura is there. mountAuraSpellId_ is a guess by comparison - it
+    /// mount's aura is there. Movement's mountAuraSpellId is a guess by comparison - it
     /// is whatever the client could work out at the moment the mount appeared,
     /// and when the player did not cast it themselves (a login already mounted,
     /// a taxi, a server-applied aura) the blind scan behind it can land on a
@@ -821,14 +821,6 @@ public:
     float faceCameraDirection() {
         return faceCameraProvider_ ? faceCameraProvider_() : getMovementInfo().orientation;
     }
-
-    // XP tracking
-    uint32_t getPlayerXp() const { return playerXp_; }
-    uint32_t getPlayerNextLevelXp() const { return playerNextLevelXp_; }
-    uint32_t getPlayerRestedXp() const { return playerRestedXp_; }
-    bool isPlayerResting() const { return isResting_; }
-    uint32_t getPlayerLevel() const { return serverPlayerLevel_; }
-    static uint32_t killXp(uint32_t playerLevel, uint32_t victimLevel);
 
     // Global Cooldown (GCD) - set when the server sends a spellId=0 cooldown entry
     bool isGCDActive() const { return spellHandler_->getGCDRemaining() > 0.0f; }
@@ -941,7 +933,7 @@ public:
     bool isGatherGameObject(uint64_t guid) const;
     void despawnGameObjectLocally(uint64_t guid) override;
     /// Remove a creature corpse client-side once it has been looted empty.
-    void despawnCreatureLocally(uint64_t guid);
+    void despawnCreatureLocally(uint64_t guid) override;
     /// Turn the player to face the target when an attack or a targeted spell
     /// starts. Off by default, as the original client has it: a target behind
     /// the player has to be faced first, and the server says so. A debugging
@@ -987,15 +979,6 @@ public:
     }
     uint32_t getWorldStateMapId() const { return worldStateMapId_; }
     uint32_t getWorldStateZoneId() const { return worldStateZoneId_; }
-    uint64_t getActiveCritterGuid() const { return activeCritterGuid_; }
-    uint32_t getActiveCritterSpellId() const { return activeCritterSpellId_; }
-    void setActiveCritter(uint64_t guid, uint32_t spellId) {
-        activeCritterGuid_ = guid;
-        activeCritterSpellId_ = spellId;
-    }
-    /// Send the active companion away. No-op when none is out or the expansion
-    /// has no opcode for it.
-    void dismissCritter() override;
 
     // Mirror timers (0=fatigue, 1=breath, 2=feigndeath)
     //
@@ -1072,7 +1055,6 @@ public:
         }
     }
 
-    uint8_t  getShapeshiftFormId() const { return shapeshiftFormId_; }
     /// Which extra action bar the current form or stance uses, or 0 for none.
     ///
     /// SpellShapeshiftForm.dbc carries it per form - cat 1, bear 3, moonkin 4,
@@ -1107,13 +1089,6 @@ public:
     static constexpr int NUM_TOTEM_SLOTS = kTotemSlots;
     /// Pull down a totem by the slot it stands in.
     void destroyTotem(int slot);
-
-    // Stat deltas from the last SMSG_LEVELUP_INFO (valid until next level-up)
-    struct LevelUpDeltas {
-        uint32_t hp   = 0;
-        uint32_t mana = 0;
-        uint32_t str = 0, agi = 0, sta = 0, intel = 0, spi = 0;
-    };
 
     // ---- Readable text (books / scrolls / notes) ----
     /// PageTextMaterial.dbc's name for a material id, empty for none. The
@@ -1242,7 +1217,6 @@ public:
     /// Interface phase only. Notifications produced by handlers wait for the next drain.
     void dispatchAddonEvents();
 
-    bool isMounted() const { return currentMountDisplayId_ != 0; }
     bool isHostileFactionPublic(uint32_t factionTemplateId) const { return isHostileFaction(factionTemplateId); }
     bool isPlayerRooted() const { return movementInfo.isPlayerRooted(); }
     bool isGravityDisabled() const { return movementInfo.isGravityDisabled(); }
@@ -1415,8 +1389,10 @@ public:
     const MovementHandler& movement() const { return *movementHandler_; }
     /// The objects in view as the server describes them: creatures, players,
     /// game objects, their names, kinds, appearance and transports.
-    EntityController& entityController() { return *entityController_; }
-    const EntityController& entityController() const { return *entityController_; }
+    WorldHandler& world() { return *worldHandler_; }
+    QueryCacheHandler& queryCache() { return *queryCacheHandler_; }
+    const QueryCacheHandler& queryCache() const { return *queryCacheHandler_; }
+    const WorldHandler& world() const { return *worldHandler_; }
     /// The rest of the player's dealings with the world and the server: inspect,
     /// played time, logout, summons, instances and their lockouts, the
     /// battlefield manager, minimap pings, GM tickets and reports.
@@ -1434,6 +1410,9 @@ public:
     /// The weather where the character stands, as the realm says it.
     WeatherHandler& weather() { return *weatherHandler_; }
     const WeatherHandler& weather() const { return *weatherHandler_; }
+    /// The character in the world: experience, level, rest, the sheet.
+    PlayerHandler& player() { return *playerHandler_; }
+    const PlayerHandler& player() const { return *playerHandler_; }
 
     // ── Mutable Accessors for Members with Existing Const Getters ────
     MovementInfo& movementInfoRef() { return movementInfo; }
@@ -1453,58 +1432,17 @@ public:
     /// quietly do nothing.
     bool previewPlayerAppearance(uint32_t appearanceBytes, uint8_t facialFeatures);
     auto& updateFieldTableRef() { return updateFieldTable_; }
-    auto& lastPlayerFieldsRef() { return lastPlayerFields_; }
-    auto& timeSinceLastPingRef() { return timeSinceLastPing; }
-    auto& activeCharacterGuidRef() { return activeCharacterGuid_; }
 
     // ── Character & Appearance ───────────────────────────────────────
-    auto& cloakVisibleRef() { return cloakVisible_; }
-    auto& helmVisibleRef() { return helmVisible_; }
-    auto& currentMountDisplayIdRef() { return currentMountDisplayId_; }
-    auto& mountAuraSpellIdRef() { return mountAuraSpellId_; }
-    /// Spell of the aura currently keeping the player mounted, 0 when on foot.
-    /// Pressing this one again is a dismount, not a second mount.
-    uint32_t getMountAuraSpellId() const { return mountAuraSpellId_; }
-    auto& shapeshiftFormIdRef() { return shapeshiftFormId_; }
-    auto& playerRaceRef() { return playerRace_; }
-    auto& serverPlayerLevelRef() { return serverPlayerLevel_; }
 
     // ── AFK / DND ────────────────────────────────────────────────────
 
     // ── Movement & Transport ─────────────────────────────────────────
-    auto& vehicleIdRef() { return vehicleId_; }
 
     // ── Combat & Player Stats ────────────────────────────────────────
-    auto& playerArenaPointsRef() { return playerArenaPoints_; }
-    auto& playerArmorRatingRef() { return playerArmorRating_; }
-    auto& playerBlockPctRef() { return playerBlockPct_; }
-    auto& playerExpertiseRef() { return playerExpertise_; }
-    auto& playerOffhandExpertiseRef() { return playerOffhandExpertise_; }
-    auto& playerManaRegenRef() { return playerManaRegen_; }
-    auto& playerManaRegenCastingRef() { return playerManaRegenCasting_; }
-    auto& playerCombatRatingsRef() { return playerCombatRatings_; }
-    auto& playerCritPctRef() { return playerCritPct_; }
-    auto& playerDodgePctRef() { return playerDodgePct_; }
-    auto& playerHealBonusRef() { return playerHealBonus_; }
-    auto& playerHonorPointsRef() { return playerHonorPoints_; }
-    auto& playerMeleeAPRef() { return playerMeleeAP_; }
-    auto& playerNextLevelXpRef() { return playerNextLevelXp_; }
-    auto& playerParryPctRef() { return playerParryPct_; }
-    auto& playerRangedAPRef() { return playerRangedAP_; }
-    auto& playerRangedCritPctRef() { return playerRangedCritPct_; }
-    auto* playerResistancesArr() { return playerResistances_; }
-    auto& playerRestedXpRef() { return playerRestedXp_; }
-    auto* playerSpellCritPctArr() { return playerSpellCritPct_; }
-    auto* playerSpellDmgBonusArr() { return playerSpellDmgBonus_; }
-    auto& playerStatsArr() { return playerStats_; }
-    auto& playerXpRef() { return playerXp_; }
-    auto& isRestingRef() { return isResting_; }
 
     // ── World, Map & Zones ───────────────────────────────────────────
     auto& currentMapIdRef() { return currentMapId_; }
-    auto& worldStateMapIdRef() { return worldStateMapId_; }
-    auto& worldStatesRef() { return worldStates_; }
-    auto& worldStateZoneIdRef() { return worldStateZoneId_; }
 
     // ── Home Bind ────────────────────────────────────────────────────
 
@@ -1537,7 +1475,7 @@ public:
     /// mattered: "Not ready", "Not enough rage" and "You can't do that right
     /// now" arrive once per rejected keypress.
     void raiseUiError(const std::string& message);
-    void sendPing();
+    void sendPing() override;
     std::string guidToUnitId(uint64_t guid) const;
     Unit* getUnitByGuid(uint64_t guid);
     void cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries,
@@ -1715,6 +1653,7 @@ private:
     GameServices& services_;
 
     // Domain handlers - each manages a specific concern extracted from GameHandler
+    std::unique_ptr<QueryCacheHandler> queryCacheHandler_;
     std::unique_ptr<ChatHandler>      chatHandler_;
     std::unique_ptr<MovementHandler>  movementHandler_;
     std::unique_ptr<CombatHandler>    combatHandler_;
@@ -1729,6 +1668,7 @@ private:
     std::unique_ptr<ReputationHandler> reputationHandler_;
     std::unique_ptr<RealmTimeHandler> realmTimeHandler_;
     std::unique_ptr<WeatherHandler> weatherHandler_;
+    std::unique_ptr<PlayerHandler> playerHandler_;
 
     // Opcode dispatch table - built once in registerOpcodeHandlers(), called by handlePacket()
     using PacketHandler = std::function<void(network::Packet&)>;
@@ -1779,8 +1719,8 @@ private:
     // fallTime must be the elapsed ms since the FALLING flag was set; the server
     // uses it for fall-damage calculations and anti-cheat validation.
 
-    // Entity tracking (delegated to EntityController)
-    std::unique_ptr<EntityController> entityController_;
+    // Entity tracking (delegated to WorldHandler)
+    std::unique_ptr<WorldHandler> worldHandler_;
 
     // Chat (state lives in ChatHandler; callbacks remain here for cross-domain access)
     AddonEventCallback addonEventCallback_;
@@ -1817,18 +1757,12 @@ private:
     // that spell dismisses rather than re-summons, which is how a companion is
     // put away: it has no aura to cancel from the buff bar, so this toggle is
     // the only way to send it back.
-    uint64_t activeCritterGuid_ = 0;
-    uint32_t activeCritterSpellId_ = 0;
     std::unordered_map<uint32_t, uint32_t> worldStates_;
 
     // ---- Display state ----
-    bool helmVisible_ = true;
-    bool cloakVisible_ = true;
-    uint8_t standState_ = 0;  // 0=stand, 1=sit, ..., 7=dead, 8=kneel (server-confirmed)
 
     // Items, coin, books and the equipment of players in view are the
     // inventory's (InventoryHandler); none of it is kept here.
-    FlatFieldMap lastPlayerFields_;
     /// The innkeeper that asked "make this your home?". SMSG_BINDER_CONFIRM
     /// names it and the answer has to go back to the same one.
     uint64_t binderGuid_ = 0;
@@ -1850,8 +1784,6 @@ private:
     // Mirror timers (0=fatigue, 1=breath, 2=feigndeath)
     MirrorTimer mirrorTimers_[3];
 
-    // Shapeshift form (from UNIT_FIELD_BYTES_1 byte 3)
-    uint8_t  shapeshiftFormId_ = 0;
 
 
 
@@ -1875,28 +1807,6 @@ private:
     // Tracks the last GO we sent CMSG_GAMEOBJ_USE to; used in handleSpellGo
     // to send CMSG_LOOT after a gather cast (mining/herbalism) completes.
     uint64_t lastInteractedGoGuid_ = 0;
-    uint32_t playerHonorPoints_ = 0;
-    uint32_t playerArenaPoints_ = 0;
-    int32_t playerArmorRating_ = 0;
-    int32_t playerResistances_[6] = {};  // [0]=Holy,[1]=Fire,[2]=Nature,[3]=Frost,[4]=Shadow,[5]=Arcane
-    // Server-authoritative primary stats: [0]=STR [1]=AGI [2]=STA [3]=INT [4]=SPI; -1 = not received yet
-    int32_t playerStats_[5] = {-1, -1, -1, -1, -1};
-    // WotLK secondary combat stats (-1 = not yet received)
-    int32_t playerMeleeAP_    = -1;
-    int32_t playerRangedAP_   = -1;
-    int32_t playerSpellDmgBonus_[7] = {-1,-1,-1,-1,-1,-1,-1}; // per school 0-6
-    int32_t playerHealBonus_  = -1;
-    float playerDodgePct_     = -1.0f;
-    float playerParryPct_     = -1.0f;
-    float playerBlockPct_     = -1.0f;
-    int32_t playerExpertise_        = 0;
-    int32_t playerOffhandExpertise_ = 0;
-    float playerManaRegen_          = 0.0f;  // per second, while not casting
-    float playerManaRegenCasting_   = 0.0f;  // per second, during the five-second rule
-    float playerCritPct_      = -1.0f;
-    float playerRangedCritPct_ = -1.0f;
-    float playerSpellCritPct_[7] = {-1.0f,-1.0f,-1.0f,-1.0f,-1.0f,-1.0f,-1.0f};
-    int32_t playerCombatRatings_[25] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
 
     void performGameObjectInteractionNow(uint64_t guid);
 
@@ -1919,25 +1829,6 @@ private:
 
     // Vehicle (WotLK): non-zero when player is seated in a vehicle
     uint32_t vehicleId_ = 0;
-
-    // Combat game tables for the stat flyout: per-class base crit, and the
-    // per-class-per-level Agility ratio (11 classes × 100 levels).
-    mutable std::vector<float> gtMeleeCritBase_;
-    mutable std::vector<float> gtMeleeCrit_;
-    mutable bool gtMeleeCritLoaded_ = false;
-    mutable std::vector<float> gtSpellCritBase_;
-    mutable std::vector<float> gtSpellCrit_;
-    mutable bool gtSpellCritLoaded_ = false;
-    mutable std::vector<float> gtCombatRatings_;       // 32 ratings × 100 levels
-    mutable std::vector<float> gtClassRatingScalar_;   // 11 classes × 32 ratings (ratio column)
-    mutable bool gtCombatRatingsLoaded_ = false;
-    mutable std::vector<float> gtOctRegenHp_, gtRegenHpPerSpt_, gtRegenMpPerSpt_;
-    mutable bool gtRegenLoaded_ = false;
-    // Shared: class base + stat × per-class-per-level ratio, ×100 for a percent.
-    float critPercentFromGameTable(std::vector<float>& baseCache,
-                                   std::vector<float>& ratioCache, bool& loaded,
-                                   const char* baseDbc, const char* ratioDbc,
-                                   int statIdx) const;
 
     /// Read once on the first ask, like the other DBC-backed caches here.
     mutable std::unordered_map<uint32_t, ExtendedCostEntry> extendedCostCache_;
@@ -2022,13 +1913,6 @@ private:
     /// Whether a ping has gone out to ask about the silence.
     bool worldSilenceProbed_ = false;
 
-    // ---- XP tracking ----
-    uint32_t playerXp_ = 0;
-    uint32_t playerNextLevelXp_ = 0;
-    uint32_t playerRestedXp_ = 0;
-    bool isResting_ = false;
-    uint32_t serverPlayerLevel_ = 1;
-
     // ---- Light override (SMSG_OVERRIDE_LIGHT) ----
 
     // ---- Player skills (the skills themselves are the spell book's) ----
@@ -2038,7 +1922,6 @@ private:
     FaceCameraProvider faceCameraProvider_;
     bool suppressMeleeSwingAnim_ = false;
     // lastMeleeSwingMs_ moved to CombatHandler
-    LevelUpDeltas lastLevelUpDeltas_;
     /// PageTextMaterial.dbc is seven rows and is read once on the first ask,
     /// like the other DBC-backed caches here.
     mutable std::unordered_map<uint32_t, std::string> pageTextMaterialNames_;
@@ -2046,8 +1929,6 @@ private:
     /// Languages.dbc, read once on the first ask like the caches beside it.
     mutable std::unordered_map<uint32_t, std::string> languageNames_;
     mutable bool languageNamesLoaded_ = false;
-    uint32_t currentMountDisplayId_ = 0;
-    uint32_t mountAuraSpellId_ = 0;       // Spell ID of the aura that caused mounting (for CMSG_CANCEL_AURA fallback)
     // Death Knight runes (class 6): slots 0-1=Blood, 2-3=Unholy, 4-5=Frost initially
     std::array<RuneSlot, 6> playerRunes_ = [] {
         std::array<RuneSlot, 6> r{};

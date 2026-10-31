@@ -23,6 +23,8 @@
 #include "game/expansion_profile.hpp"
 #include "game/game_handler.hpp"
 #include "game/game_services.hpp"
+#include "game/stat_tables.hpp"
+#include "game/game_data.hpp"
 #include "game/opcode_table.hpp"
 #include "achievement/services/ports.hpp"
 #include "title/services/ports.hpp"
@@ -35,9 +37,12 @@
 #include <deque>
 #include <filesystem>
 #include <functional>
+#include <array>
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -112,6 +117,12 @@ private:
     std::function<void(const network::Packet&)> callback_;
     std::deque<network::Packet> inbound_;
     std::vector<network::Packet> sent_;
+};
+
+/// The game stopped: what the client logs as LOG_FATAL before it aborts,
+/// thrown in a test instead.
+struct GameStopped : std::runtime_error {
+    using std::runtime_error::runtime_error;
 };
 
 /// One FrameXML event the game fired, with its arguments.
@@ -306,16 +317,63 @@ public:
     /// rest a plain item with no stats, spells or sockets.
     static std::vector<uint8_t> itemTemplateBody(uint32_t entry, const std::string& name,
                                                  uint32_t displayInfoId, uint32_t inventoryType);
+    /// SMSG_NAME_QUERY_RESPONSE as 3.3.5a writes it for a player who exists:
+    /// a Tauren (2) male shaman (7).
+    static std::vector<uint8_t> nameResponseBody(uint64_t guid, const std::string& name);
+    /// SMSG_GAMEOBJECT_QUERY_RESPONSE as 3.3.5a writes it: the type, a name,
+    /// and the type's 24 data words.
+    static std::vector<uint8_t> gameObjectTemplateBody(uint32_t entry, uint32_t type,
+                                                       const std::string& name,
+                                                       const std::array<uint32_t, 24>& data = {});
     /// SMSG_UPDATE_OBJECT with one VALUES block for an object.
     static std::vector<uint8_t> valuesBody(uint64_t guid, const Fields& fields);
     /// Put the player's own object in view - what the realm's fields for the
     /// character are applied to.
     void playerInView();
+    /// The realm's fields for the player's own object, as an update block -
+    /// `create` the one that puts it in the world - applied and pumped.
+    void playerFields(const std::map<uint16_t, uint32_t>& fields, bool create = false);
+    /// What the game reads for column `column` of the game table `dbc`, one
+    /// float per row. A table the test has not given has no rows, which the
+    /// sheet stops the game over.
+    void gameTable(const std::string& dbc, uint32_t column, std::vector<float> rows);
+    /// One cell of a table a test gives: a number, a float or a string.
+    struct DbcCell {
+        DbcCell(uint32_t v) : number(v) {}
+        DbcCell(int v) : number(static_cast<uint32_t>(v)) {}
+        DbcCell(float v);
+        DbcCell(const char* s) : text(s), isText(true) {}
+        uint32_t number = 0;
+        std::string text;
+        bool isText = false;
+    };
+    /// A row by column; the columns it does not name are zero.
+    using DbcRow = std::map<uint32_t, DbcCell>;
+    /// The table the game reads as `dbc`: `fields` columns wide, these rows in
+    /// order. A table the test has not given has no rows.
+    void dbc(const std::string& dbc, uint32_t fields, const std::vector<DbcRow>& rows);
+    /// `dbc` is there and cannot be read: what a broken install looks like.
+    void unreadableDbc(const std::string& dbc);
+    /// Whether the game opened `dbc` at all.
+    [[nodiscard]] bool dbcWasRead(const std::string& dbc) const { return dbcsRead_.count(dbc) != 0; }
+    /// The tables the game reads, as the client hands them to what it builds
+    /// outside the game (buildFactionHostilityMap).
+    [[nodiscard]] const game::GameData& gameData() const { return *gameData_; }
+    /// Read the world as expansion `id` does from here on: its update field
+    /// and opcode tables, and the rules that ask which expansion is active.
+    /// The login has already happened on WotLK's wire, so this is for what
+    /// is fed in decoded (applyRecordedObjects), not for packets.
+    void useExpansion(const std::string& id);
 
 private:
     core::EventBus events_;
     core::CVarStore cvars_;
+    std::map<std::string, game::GameData::Table> dbcs_;
+    game::GameData::Table noRows_;
+    std::set<std::string> dbcsRead_;
+    std::unique_ptr<game::GameData> gameData_;
     std::unique_ptr<game::EmoteTable> emotes_;
+    std::unique_ptr<game::StatTables> statTables_;
     game::ExpansionRegistry expansions_;
     game::GameServices services_;
     std::unique_ptr<game::ContactsGateway> contactsGateway_;

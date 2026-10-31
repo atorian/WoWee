@@ -360,8 +360,10 @@ TEST_CASE("logging in another character carries none of the last one's interface
     ClientHarness h;
     h.enterWorld(alice);
     // Alice ticks a dungeon in the finder and leaves something in her Lua state.
-    h.runInInterface("SetLFGDungeonEnabled(285, true); RELOG_MARK = 'alice'");
+    h.runInInterface("SetLFGDungeonEnabled(285, true); SetLFGHeaderCollapsed(261, true); "
+                     "RELOG_MARK = 'alice'");
     REQUIRE(h.interfaceAnswers("GetLFDChoiceEnabledState()[285] == true"));
+    REQUIRE(h.interfaceAnswers("GetLFDChoiceCollapseState()[261] == true"));
 
     h.game().social().requestLogout(false);
     h.server().receive(Opcode::SMSG_LOGOUT_COMPLETE);
@@ -373,10 +375,22 @@ TEST_CASE("logging in another character carries none of the last one's interface
     REQUIRE(h.session());
     CHECK(h.session()->identity().name == "Bob");
     CHECK(h.interfaceAnswers("next(GetLFDChoiceEnabledState()) == nil"));
+    CHECK(h.interfaceAnswers("next(GetLFDChoiceCollapseState()) == nil"));
     CHECK(h.interfaceAnswers("RELOG_MARK == nil"));
     const auto bobHeard = h.interfaceEventsOf("Bob");
     CHECK(std::count(bobHeard.begin(), bobHeard.end(), "PLAYER_ENTERING_WORLD") >= 1);
     CHECK(std::count(bobHeard.begin(), bobHeard.end(), "PLAYER_LEAVING_WORLD") == 0);
+}
+
+TEST_CASE("a reload keeps the character's dungeon finder choices and nothing else",
+          "[client][harness][charactersession]") {
+    ClientHarness h;
+    h.enterWorld();
+    h.runInInterface("SetLFGDungeon(285); RELOAD_MARK = 'before'; ReloadUI()");
+    // The reload is taken at the next frame, as /reload is.
+    h.frame();
+    CHECK(h.interfaceAnswers("RELOAD_MARK == nil"));
+    CHECK(h.interfaceAnswers("GetLFDChoiceEnabledState()[285] == true"));
 }
 
 // ---- A world connection lost and restored --------------------------------------
@@ -672,4 +686,20 @@ TEST_CASE("control and F10 open the weather panel and reach nothing in the inter
         "for key, command in pairs(HarnessBindingsBefore) do\n"
         "  if command ~= '' then SetBinding(key, command) else SetBinding(key) end\n"
         "end\n");
+}
+
+TEST_CASE("the map to enter is found in Map.dbc and nowhere else", "[client][harness][tables]") {
+    // The harness's Map.dbc has Eastern Kingdoms and Kalimdor. The client kept
+    // a list of map directories of its own to fall back on, so a map the
+    // table did not have - Northrend here - was entered by that list's name.
+    ClientHarness h;
+    CHECK(h.loader().mapNameFor(1) == "Kalimdor");
+    CHECK(h.loader().mapNameFor(571).empty());
+}
+
+TEST_CASE("a Map.dbc that cannot be read stops the game when a map is to be entered",
+          "[client][harness][tables]") {
+    ClientHarness h;
+    h.server().unreadableDbc("Map.dbc");
+    CHECK_THROWS_AS(h.loader().mapNameFor(0), wowee::test::GameStopped);
 }

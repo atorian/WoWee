@@ -2,6 +2,9 @@
 // the camera's view and the water's reflection, each from its own eye.
 // Requires Vulkan and WotLK data; exits 77 without a device.
 #include "pipeline/asset_manager.hpp"
+#include "pipeline/dbc_layout.hpp"
+#include "pipeline/dbc_loader.hpp"
+#include "pipeline/game_tables.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/render_surface.hpp"
@@ -15,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
 
@@ -32,6 +36,29 @@ public:
     int getHeight() const override { return 240; }
     int getDrawableWidth() const override { return 320; }
     int getDrawableHeight() const override { return 240; }
+};
+
+// The expansion's tables, read through the asset manager as the client reads
+// them; a table that cannot be read fails the test.
+class AssetTables final : public pipeline::GameTables {
+public:
+    explicit AssetTables(pipeline::AssetManager& assets) : assets_(assets) {}
+    [[nodiscard]] bool has(const std::string& dbc) const override {
+        const Table t = assets_.loadDBC(dbc);
+        return t && t->isLoaded();
+    }
+    [[nodiscard]] Table table(const std::string& dbc, uint32_t, std::string_view neededFor) const override {
+        Table t = assets_.loadDBC(dbc);
+        if (!t || !t->isLoaded()) stop(dbc, neededFor, "could not be read");
+        return t;
+    }
+    [[noreturn]] void stop(const std::string& what, std::string_view neededFor,
+                           const std::string& why) const override {
+        throw std::runtime_error(what + " " + why + " (" + std::string(neededFor) + ")");
+    }
+
+private:
+    pipeline::AssetManager& assets_;
 };
 
 // A wall four yards square facing -X, standing at `centre`.
@@ -108,26 +135,21 @@ void exercise(rendering::Renderer& renderer) {
     camera.setRotation(0.0f, -20.0f);
     const std::vector<rendering::LocalLight> lights;
 
-    const auto reflection = rendering::waterReflectionView(camera, 0.0f);
-    require(reflection.has_value(), "a camera above the water has a reflection");
-    {
-        const auto frame = wmo.extract(camera, camera.getPosition(), lights,
-                                       reflection->projection * reflection->view);
-        expect(walls(frame->view), {"ahead"}, "the view");
-        expect(walls(frame->reflection), {"ahead", "high"}, "the reflection");
-        require(frame->view.frustumCulled == 2, "the view counts the two walls it cannot see, not " +
-                                                std::to_string(frame->view.frustumCulled));
-    }
+    // A wide pool in front of the camera, where both walls ahead are mirrored.
+    rendering::ReflectedCamera eye;
+    eye.position = camera.getPosition();
+    eye.forward = camera.getForward();
+    eye.view = camera.getViewMatrix();
+    eye.projection = camera.getProjectionMatrix();
+    const rendering::WaterInView pool{glm::vec3(5, -60, -0.2f), glm::vec3(150, 60, 0.2f), 0.0f};
+    const auto mirror = rendering::waterReflectionView(eye, std::span(&pool, 1));
+    require(mirror.has_value(), "a camera above the pool has a reflection");
 
-    // Under the water there is no reflection to draw, and so nothing in its list.
-    camera.setPosition({0, 0, 0.2f});
-    require(!rendering::waterReflectionView(camera, 0.0f).has_value(),
-            "a camera at the water's surface has no reflection");
-    {
-        const auto frame = wmo.extract(camera, camera.getPosition(), lights, std::nullopt);
-        require(walls(frame->reflection).empty(), "no reflection, yet its list drew " +
-                                                      named(walls(frame->reflection)));
-    }
+    const auto frame = wmo.extract(camera, camera.getPosition(), lights, &*mirror);
+    expect(walls(frame->view), {"ahead"}, "the view");
+    expect(walls(frame->reflection), {"ahead", "high"}, "the reflection");
+    require(frame->view.frustumCulled == 2, "the view counts the two walls it cannot see, not " +
+                                            std::to_string(frame->view.frustumCulled));
     std::puts("PASS: the view and the reflection each draw the WMO groups their own eye can see");
 }
 }  // namespace
@@ -141,6 +163,7 @@ int main() {
         Surface surface;
         pipeline::AssetManager assets;
         rendering::Renderer renderer;
+        AssetTables tables(assets);
         try {
             require(surface.context.initialize(window), "Vulkan initialization failed");
             const char* root = std::getenv("WOW_DATA_PATH");
@@ -148,6 +171,12 @@ int main() {
             assets.setExpansionDataPath(data + "/expansions/wotlk");
             require(assets.initialize(data + "/expansions/wotlk"), "WotLK assets unavailable");
             assets.setBaseFallbackPath(data, "wotlk");
+            // The expansion's column layouts, as the client sets them before
+            // the renderer reads its tables through them.
+            static pipeline::DBCLayout layouts;
+            require(layouts.loadFromJson(data + "/expansions/wotlk/dbc_layouts.json"), "WotLK DBC layouts unavailable");
+            pipeline::setActiveDBCLayout(&layouts);
+            renderer.setGameTables(tables);
             require(renderer.initialize(&surface), "renderer initialization failed");
             require(renderer.initializeRenderers(&assets, "Northrend"), "world renderers initialization failed");
             renderer.getTerrainManager()->setStreamingEnabled(false);

@@ -129,7 +129,7 @@ void UIScreenCallbackHandler::setupCallbacks() {
         uint32_t clientBuild = 12340; // default WotLK
         if (expansionRegistry_) {
             auto* profile = expansionRegistry_->getActive();
-            if (profile) clientBuild = profile->worldBuild;
+            if (profile) clientBuild = profile->build;
         }
         // Prefer realm-reported build when available (e.g. vanilla servers
         // that report build 5875 in the realm list)

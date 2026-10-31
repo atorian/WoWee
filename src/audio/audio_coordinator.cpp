@@ -74,6 +74,7 @@ void AudioCoordinator::shutdown() {
 }
 
 void AudioCoordinator::loadWorldSounds(pipeline::AssetManager* assets,
+                                       const pipeline::GameTables& tables,
                                        const game::ZoneManager* zones) {
     if (worldSoundsLoaded_ || !assets || !musicManager_) return;
     worldSoundsLoaded_ = true;
@@ -83,10 +84,11 @@ void AudioCoordinator::loadWorldSounds(pipeline::AssetManager* assets,
     footstepManager_->initialize(assets);
     activitySoundManager_->initialize(assets);
     mountSoundManager_->initialize(assets);
-    npcVoiceManager_->initialize(assets);
+    npcVoiceManager_->initialize(assets, tables);
     playerVoiceManager_->initialize(assets);
 
     deferredAssets_ = assets;
+    deferredTables_ = &tables;
     if (core::envFlagEnabled("WOWEE_DEFER_WORLD_SYSTEMS", true)) {
         deferredGroup_ = 0;
         deferredCooldown_ = 0.25f;
@@ -121,7 +123,7 @@ bool AudioCoordinator::loadDeferredGroup(uint8_t group) {
     pipeline::AssetManager* assets = deferredAssets_;
     switch (group) {
         case 0: ambientSoundManager_->initialize(assets); return true;
-        case 1: uiSoundManager_->initialize(assets); return true;
+        case 1: uiSoundManager_->initialize(assets, *deferredTables_); return true;
         case 2: combatSoundManager_->initialize(assets); return true;
         case 3: spellSoundManager_->initialize(assets); return true;
         case 4: movementSoundManager_->initialize(assets); return true;

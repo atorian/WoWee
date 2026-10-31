@@ -7,9 +7,11 @@
 
 #include "game/entity.hpp"
 #include "game/game_events.hpp"
+#include "game/action_bar_handler.hpp"
 #include "game/inventory_handler.hpp"
 #include "game/update_field_table.hpp"
 
+#include <array>
 #include <memory>
 #include <optional>
 #include <string>
@@ -350,4 +352,285 @@ TEST_CASE("the player's own weapon shows a poison over its enchant, and the ench
     h.receive(Opcode::SMSG_UPDATE_OBJECT, values(kSword, {{kTemporaryEnchantField, 0}}));
     h.pump();
     CHECK(inventory.shownEnchantId(held) == kCrusader);
+}
+
+namespace {
+/// The FrameXML events a packet fired, by name, in the order they went out.
+std::vector<std::string> eventNames(GameHarness& h) {
+    std::vector<std::string> names;
+    for (const auto& e : h.addonEvents()) names.push_back(e.name);
+    return names;
+}
+
+void clothInBackpack(GameHarness& h) {
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, createItem(kCloth, 2589, 7));
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, values(h.player().guid, inBackpack(0, kCloth)));
+    h.pump();
+    h.clearRecords();
+}
+}  // namespace
+
+TEST_CASE("a stack that changes redraws each bag once, then the unit once", "[inventory][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    clothInBackpack(h);
+
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, values(kCloth, Fields{{fieldIndex(UF::ITEM_FIELD_STACK_COUNT), 3}}));
+    h.pump();
+
+    // The backpack, the four worn bags and the seven bank bags, each once.
+    std::vector<std::string> bags;
+    for (const auto& e : h.addonEvents("BAG_UPDATE")) bags.push_back(e.args.at(0));
+    CHECK(bags == std::vector<std::string>{"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"});
+    CHECK(h.addonEvents("UNIT_INVENTORY_CHANGED").size() == 1);
+    CHECK(eventNames(h).back() == "UNIT_INVENTORY_CHANGED");
+}
+
+TEST_CASE("an item on the action bar has its buttons recounted when the bags change", "[inventory][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    clothInBackpack(h);
+    h.game().actionBar().setSlot(5, wowee::game::ActionBarSlot::ITEM, 2589);
+    h.pump();
+    h.clearRecords();
+
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, values(kCloth, Fields{{fieldIndex(UF::ITEM_FIELD_STACK_COUNT), 2}}));
+    h.pump();
+
+    const auto recount = h.addonEvents("ACTIONBAR_SLOT_CHANGED");
+    REQUIRE(recount.size() == 1);
+    CHECK(recount[0].args.at(0) == "0");
+    CHECK(eventNames(h).back() == "ACTIONBAR_SLOT_CHANGED");
+}
+
+TEST_CASE("durability that changes is announced to the armour indicator and the repair buttons",
+          "[inventory][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    clothInBackpack(h);
+
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, values(kCloth, Fields{{fieldIndex(UF::ITEM_FIELD_DURABILITY), 20}}));
+    h.pump();
+    CHECK(h.addonEvents("UPDATE_INVENTORY_ALERTS").size() == 1);
+    CHECK(h.addonEvents("UPDATE_INVENTORY_DURABILITY").size() == 1);
+    h.clearRecords();
+
+    // A stack count moving is not a durability change.
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, values(kCloth, Fields{{fieldIndex(UF::ITEM_FIELD_STACK_COUNT), 5}}));
+    h.pump();
+    CHECK(h.addonEvents("UPDATE_INVENTORY_ALERTS").empty());
+    CHECK(h.addonEvents("UPDATE_INVENTORY_DURABILITY").empty());
+}
+
+TEST_CASE("the player's coin is what the money field says, and a change is announced once",
+          "[inventory][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    h.clearRecords();
+
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, values(h.player().guid, Fields{{fieldIndex(UF::PLAYER_FIELD_COINAGE), 12345}}));
+    h.pump();
+    CHECK(h.game().inventory().moneyCopper() == 12345);
+    CHECK(h.addonEvents("PLAYER_MONEY").size() == 1);
+    h.clearRecords();
+
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, values(h.player().guid, Fields{{fieldIndex(UF::PLAYER_FIELD_COINAGE), 12345}}));
+    h.pump();
+    CHECK(h.addonEvents("PLAYER_MONEY").empty());
+}
+
+TEST_CASE("a repair costs what DurabilityCosts.dbc and DurabilityQuality.dbc make of the wear",
+          "[inventory][harness][tables]") {
+    GameHarness h;
+    // Item level 60; the sword's column is weapon subclass 7, the file's 8th
+    // after the level.
+    h.dbc("DurabilityCosts.dbc", 30, {{{0, 59}, {8, 99}}, {{0, 60}, {8, 30}}});
+    // Uncommon quality (2) is row (2 + 1) * 2.
+    h.dbc("DurabilityQuality.dbc", 2, {{{0, 4}, {1, 0.9f}}, {{0, 6}, {1, 0.5f}}});
+    h.enterWorld();
+
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, createItem(kSword, 25, 1));
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              values(kSword, {{fieldIndex(UF::ITEM_FIELD_DURABILITY), 40},
+                              {fieldIndex(UF::ITEM_FIELD_MAXDURABILITY), 100}}));
+    h.receive(Opcode::SMSG_ITEM_QUERY_SINGLE_RESPONSE,
+              GameHarness::itemTemplateBody(25, "Test Sword", 1000, 13));
+    h.pump();
+
+    // Sixty points lost, at 30 copper each, halved for an uncommon item.
+    CHECK(h.game().inventory().estimateRepairAllCost() == 900);
+}
+
+TEST_CASE("a book's background is the material PageTextMaterial.dbc names", "[inventory][harness][tables]") {
+    GameHarness h;
+    h.dbc("PageTextMaterial.dbc", 2, {{{0, 1}, {1, "Parchment"}}, {{0, 2}, {1, "Stone"}}});
+    h.enterWorld();
+
+    CHECK(h.game().getPageTextMaterialName(2) == "Stone");
+    CHECK(h.game().getPageTextMaterialName(1) == "Parchment");
+    CHECK(h.game().getPageTextMaterialName(9).empty());
+}
+
+namespace {
+constexpr uint64_t kSign = 0xF110000400000001ull;
+constexpr uint32_t kSignEntry = 1234;
+constexpr uint32_t kPage = 55;
+constexpr uint32_t kStone = 2;   // PageTextMaterial: the tablet the page is drawn on
+
+void signInView(GameHarness& h) {
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(kSign, wowee::game::ObjectType::GAMEOBJECT,
+                                            {{static_cast<uint16_t>(fieldIndex(UF::OBJECT_FIELD_ENTRY)), kSignEntry},
+                                             {static_cast<uint16_t>(fieldIndex(UF::GAMEOBJECT_DISPLAYID)), 0xD15}}));
+    h.pump();
+}
+
+/// A type 9 (TEXT) object: the page in data[0], the material in data[2].
+std::vector<uint8_t> signTemplate() {
+    std::array<uint32_t, 24> data{};
+    data[0] = kPage;
+    data[2] = kStone;
+    return GameHarness::gameObjectTemplateBody(kSignEntry, 9, "Stormwind Notice", data);
+}
+
+/// The page CMSG_PAGE_TEXT_QUERY asked for, and of which object.
+std::pair<uint32_t, uint64_t> pageAsked(GameHarness& h) {
+    auto* query = h.lastSent(Opcode::CMSG_PAGE_TEXT_QUERY);
+    REQUIRE(query);
+    const uint32_t page = query->readUInt32();
+    return {page, query->readUInt64()};
+}
+}  // namespace
+
+TEST_CASE("a sign clicked before its template came is read when it comes", "[inventory][book][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    signInView(h);
+    h.clearRecords();
+
+    h.game().inventory().readGameObject(kSign);
+    CHECK_FALSE(h.lastSent(Opcode::CMSG_PAGE_TEXT_QUERY));
+
+    h.receive(Opcode::SMSG_GAMEOBJECT_QUERY_RESPONSE, signTemplate());
+    h.pump();
+    CHECK(pageAsked(h) == std::pair<uint32_t, uint64_t>{kPage, kSign});
+    CHECK(h.game().inventory().getBookTitle() == "Stormwind Notice");
+    CHECK(h.game().inventory().getBookMaterial() == kStone);
+}
+
+TEST_CASE("a sign the server offers is read, its page asked for at once", "[inventory][book][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    signInView(h);
+    h.receive(Opcode::SMSG_GAMEOBJECT_QUERY_RESPONSE, signTemplate());
+    h.pump();
+    h.clearRecords();
+
+    h.receive(Opcode::SMSG_GAMEOBJECT_PAGETEXT, Body().u64(kSign).bytes());
+    h.pump();
+    CHECK(pageAsked(h) == std::pair<uint32_t, uint64_t>{kPage, kSign});
+}
+
+// ---------------------------------------------------------------------------
+// Equipment sets.
+//
+// Every guid in this family is packed - a mask byte and then only the non-zero
+// bytes - and all of them were read and written as fixed eight-byte values. A
+// set guid of one is two bytes on the wire, so the incoming read ate the set id
+// and the front of the name, and with more than one set the loop lost its place
+// entirely. The outgoing save was worse: a fixed eight bytes where the server
+// calls readPackGUID leaves seven behind.
+//
+// There was also a field on the incoming side that the server does not send: an
+// ignore mask read as a uint32 between the icon name and the slots. An ignored
+// slot is written as an item guid of literal one, and that is the mask.
+//
+// The packets are built the way AzerothCore's Player::SendEquipmentSetList
+// writes them and read the way HandleEquipmentSetSave reads them.
+
+namespace {
+
+constexpr uint64_t kHelm = 0x40000000000001ull;
+constexpr uint64_t kMace = 0x40000000000002ull;
+
+/// One set: packed set guid, index, name, icon, then nineteen packed item
+/// guids, one meaning "leave this slot alone". Head, chest ignored, main hand.
+void appendSet(Body& body, uint64_t setGuid, uint32_t index, const std::string& name,
+               const std::string& icon) {
+    body.packedGuid(setGuid).u32(index).cstr(name).cstr(icon);
+    for (int slot = 0; slot < 19; ++slot) {
+        if (slot == 0) body.packedGuid(kHelm);
+        else if (slot == 4) body.packedGuid(1);
+        else if (slot == 15) body.packedGuid(kMace);
+        else body.packedGuid(0);
+    }
+}
+
+}  // namespace
+
+TEST_CASE("three equipment sets from the server are three sets in the manager",
+          "[inventory][equipment_sets][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.clearRecords();
+
+    Body list;
+    list.u32(3);
+    appendSet(list, 1, 0, "Tanking", "Interface\\Icons\\INV_Shield_06");
+    appendSet(list, 0x1234, 1, "Healing", "iconB");
+    appendSet(list, 0xFFFFFFFFFFull, 2, "Damage", "iconC");
+    h.receive(Opcode::SMSG_EQUIPMENT_SET_LIST, list);
+    h.pump();
+
+    const auto& inventory = h.game().inventory();
+    const auto& sets = inventory.getEquipmentSets();
+    REQUIRE(sets.size() == 3);
+    CHECK(sets[0].setGuid == 1);
+    CHECK(sets[0].setId == 0);
+    CHECK(sets[0].name == "Tanking");
+    CHECK(sets[0].iconName == "Interface\\Icons\\INV_Shield_06");
+    CHECK(sets[1].name == "Healing");
+    CHECK(sets[1].setGuid == 0x1234);
+    CHECK(sets[2].name == "Damage");
+    CHECK(sets[2].setGuid == 0xFFFFFFFFFFull);
+    CHECK(sets[2].setId == 2);
+
+    const auto* items = inventory.getEquipmentSetItems(2);
+    REQUIRE(items);
+    CHECK((*items)[0] == kHelm);
+    CHECK((*items)[15] == kMace);
+    // The chest is ignored, not "an item whose guid is one".
+    CHECK((*items)[4] == 0);
+    CHECK(inventory.getEquipmentSetIgnoreMask(2) == (1u << 4));
+
+    CHECK(h.addonEvents("EQUIPMENT_SETS_CHANGED").size() == 1);
+}
+
+TEST_CASE("a new equipment set is saved the way the server reads it",
+          "[inventory][equipment_sets][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.clearRecords();
+
+    h.game().inventory().saveEquipmentSet("Farming", "iconD");
+    auto* save = h.lastSent(Opcode::CMSG_EQUIPMENT_SET_SAVE);
+    REQUIRE(save);
+    // HandleEquipmentSetSave: readPackGUID, index, name, icon, nineteen packed
+    // item guids. A new set has no guid yet, which packs to one mask byte of
+    // zero; eight zero bytes would leave the server reading the index out of
+    // the padding.
+    const std::vector<uint8_t> expectedHead = {
+        0x00,                    // packed guid 0
+        0x00, 0x00, 0x00, 0x00,  // index 0: the first free one
+        'F', 'a', 'r', 'm', 'i', 'n', 'g', 0x00,
+        'i', 'c', 'o', 'n', 'D', 0x00,
+    };
+    const auto& body = save->getData();
+    REQUIRE(body.size() == expectedHead.size() + 19);  // nothing worn: 19 empty guids
+    CHECK(std::vector<uint8_t>(body.begin(), body.begin() + expectedHead.size()) == expectedHead);
+    for (size_t i = expectedHead.size(); i < body.size(); ++i) CHECK(body[i] == 0x00);
 }

@@ -107,7 +107,11 @@ def main():
         if path.suffix in (".cpp", ".mm"):
             for cls in set(re.findall(r"\b(\w+)::~?\w+\s*\(", text)):
                 defines.setdefault(cls, set()).add(path)
-    CLASS_DECL = re.compile(r"^\s*(?:class|struct)\s+(?:\w+\s+)?(\w+)\b[^;{]*\{", re.M)
+    # The optional word is an export macro (`class WOWEE_API Foo`). It must not
+    # take the name itself when `final` follows it: `class Application final`
+    # read as a class named "final", and every member Application's methods
+    # read outside application.cpp looked stored and never read.
+    CLASS_DECL = re.compile(r"^\s*(?:class|struct)\s+(?:\w+\s+(?!final\b))?(\w+)\b[^;{]*\{", re.M)
 
     def scope_for(header):
         stem = header.stem

@@ -5,25 +5,27 @@
 
 #include <vector>
 
-namespace wowee::pipeline { class AssetManager; }
-
 namespace wowee::game {
 
+class GameData;
 class PacketSender;
 class ChatLog;
 class FrameXmlEvents;
 class SocialQueries;
 
-/// CharTitles.dbc, read through the asset manager.
+/// CharTitles.dbc, read through the game's tables. Classic has no titles and
+/// answers none; an expansion that has them and cannot read them stops the
+/// game.
 class TitleData final : public title::ITitleData {
 public:
-    explicit TitleData(pipeline::AssetManager* assets) : assets_(assets) {}
+    explicit TitleData(const GameData& data) : data_(data) {}
 
-    [[nodiscard]] bool ready() const override;
+    /// Always: the table is there whenever it is asked for, or the game stops.
+    [[nodiscard]] bool ready() const override { return true; }
     std::vector<title::TitleRecord> titles() override;
 
 private:
-    pipeline::AssetManager* assets_;
+    const GameData& data_;
 };
 
 /// The titles' port: who the player is, and the request to wear a title over

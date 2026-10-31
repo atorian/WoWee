@@ -13,6 +13,7 @@
 // place on screen.
 #include "catch_amalgamated.hpp"
 #include "ui/link_hit.hpp"
+#include "ui/widget_tree.hpp"
 #include "ui/text_markup.hpp"
 
 using wowee::ui::LinkRect;
@@ -95,29 +96,26 @@ namespace {
 float runWidth(const std::string& s) { return static_cast<float>(s.size()); }
 
 /// What a click at a window pixel lands on, given a line drawn at (atX, atY).
-/// Mirrors drawMarkupText's advance: runs are laid left to right, each one
-/// starting where the last ended.
+/// The runs are placed left to right, each starting where the last ended, as
+/// the renderer advances; each link is filed in the tree the way
+/// widget_renderer files it, and the click is answered by the tree's own hit
+/// test.
 std::string linkUnderClick(const std::string& line, float atX, float atY,
                            float lineH, float clickX, float clickY,
                            float screenH, float scale) {
-    std::vector<wowee::ui::LinkRect> filed;
+    wowee::ui::WidgetTree tree;
     float x = atX;
     for (const WrapRun& run : parseMarkup(line)) {
         const float w = runWidth(run.text);
         if (!run.link.empty()) {
-            filed.push_back(wowee::ui::linkRectFromDraw(
+            tree.addLinkRect(wowee::ui::linkRectFromDraw(
                 1, run.link, run.text, x, atY, w, lineH, screenH, scale));
         }
         x += w;
     }
     mouseToTreeSpace(clickX, clickY, screenH, scale);
-    for (auto it = filed.rbegin(); it != filed.rend(); ++it) {
-        if (clickX >= it->x0 && clickX <= it->x1 &&
-            clickY >= it->y0 && clickY <= it->y1) {
-            return it->link;
-        }
-    }
-    return "";
+    const LinkRect* hit = tree.linkAt(clickX, clickY);
+    return hit ? hit->link : std::string();
 }
 
 }  // namespace

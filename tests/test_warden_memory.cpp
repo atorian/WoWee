@@ -65,7 +65,7 @@ TEST_CASE("Warden reads the selected WotLK extraction instead of a larger Classi
     f.exe(f.root / "expansions/classic/misc", 0x11, 1024);
     f.exe(f.root / "misc", 0x22, 2048);
     wowee::game::WardenMemory memory;
-    REQUIRE(memory.load(12340, false, active.string()));
+    REQUIRE(memory.load(12340, active.string()));
     uint8_t result = 0;
     REQUIRE(memory.readMemory(0x4002A7, 1, &result));
     CHECK(result == 0xE0);
@@ -79,7 +79,7 @@ TEST_CASE("An explicit Warden integrity directory wins over the active extractio
     f.exe(overrideDir, 0x33);
     wowee::core::setEnvVar("WOWEE_INTEGRITY_DIR", overrideDir.string().c_str());
     wowee::game::WardenMemory memory;
-    REQUIRE(memory.load(12340, false, active.string()));
+    REQUIRE(memory.load(12340, active.string()));
     uint8_t result = 0;
     REQUIRE(memory.readMemory(0x4002A7, 1, &result));
     CHECK(result == 0x33);

@@ -18,7 +18,6 @@ namespace wowee::rendering {
 /// at Chest, not ChestBloodFront.
 struct SpellKitColumn {
     const char* field;       ///< the column's name in dbc_layouts.json
-    uint32_t fallbackField;  ///< its index in 3.3.5a's SpellVisualKit.dbc
     uint32_t attachmentId;   ///< M2 attachment; kSpellKitWorldPlaced for World
 };
 
@@ -26,18 +25,18 @@ struct SpellKitColumn {
 inline constexpr uint32_t kSpellKitWorldPlaced = 0xFFFFFFFFu;
 
 inline constexpr SpellKitColumn kSpellKitColumns[] = {
-    {.field = "HeadEffect",        .fallbackField = 3,  .attachmentId = 20},  // Head
-    {.field = "ChestEffect",       .fallbackField = 4,  .attachmentId = 34},  // Chest
-    {.field = "BaseEffect",        .fallbackField = 5,  .attachmentId = 19},  // Base
-    {.field = "LeftHandEffect",    .fallbackField = 6,  .attachmentId = 21},  // SpellLeftHand
-    {.field = "RightHandEffect",   .fallbackField = 7,  .attachmentId = 22},  // SpellRightHand
-    {.field = "BreathEffect",      .fallbackField = 8,  .attachmentId = 17},  // Breath
-    {.field = "LeftWeaponEffect",  .fallbackField = 9,  .attachmentId = 2},   // HandLeft
-    {.field = "RightWeaponEffect", .fallbackField = 10, .attachmentId = 1},   // HandRight
-    {.field = "SpecialEffect0",    .fallbackField = 11, .attachmentId = 23},  // Special1
-    {.field = "SpecialEffect1",    .fallbackField = 12, .attachmentId = 24},  // Special2
-    {.field = "SpecialEffect2",    .fallbackField = 13, .attachmentId = 25},  // Special3
-    {.field = "WorldEffect",       .fallbackField = 14, .attachmentId = kSpellKitWorldPlaced},
+    {.field = "HeadEffect",        .attachmentId = 20},  // Head
+    {.field = "ChestEffect",       .attachmentId = 34},  // Chest
+    {.field = "BaseEffect",        .attachmentId = 19},  // Base
+    {.field = "LeftHandEffect",    .attachmentId = 21},  // SpellLeftHand
+    {.field = "RightHandEffect",   .attachmentId = 22},  // SpellRightHand
+    {.field = "BreathEffect",      .attachmentId = 17},  // Breath
+    {.field = "LeftWeaponEffect",  .attachmentId = 2},   // HandLeft
+    {.field = "RightWeaponEffect", .attachmentId = 1},   // HandRight
+    {.field = "SpecialEffect0",    .attachmentId = 23},  // Special1
+    {.field = "SpecialEffect1",    .attachmentId = 24},  // Special2
+    {.field = "SpecialEffect2",    .attachmentId = 25},  // Special3
+    {.field = "WorldEffect",       .attachmentId = kSpellKitWorldPlaced},
 };
 
 /// One model a kit plays: SpellVisualEffectName's file, scale and limits.

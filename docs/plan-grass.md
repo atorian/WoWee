@@ -336,9 +336,8 @@ world positions per tile and all of this goes.
 | Cull + compaction | `assets/shaders/grass_cull.comp.glsl` |
 | Draw | `assets/shaders/grass.vert.glsl`, `grass.frag.glsl` |
 | Renderer | `include/rendering/grass_renderer.hpp`, `src/rendering/grass_renderer.cpp` |
-| Layout test | `tests/test_grass_blade_layout.cpp` (ctest `grass_blade_layout`) |
 
-**Blade layout** — 32 bytes, std430, asserted at compile time and in the test:
+**Blade layout** — 32 bytes, std430, asserted at compile time:
 
 | offset | field | meaning |
 |---|---|---|

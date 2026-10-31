@@ -51,7 +51,7 @@ out-of-range field, so scoring on that picked whichever sorted first.
 
 The fit does not separate everything either, and the run prints every score so
 that is visible rather than implied: TBC and WotLK agree on the string fields
-checked here and both reach 100%, while Classic and Turtle fall behind. Where
+checked here and both reach 100%, while Classic falls behind. Where
 two tie, the violations reported are the same ones - the layouts differ in the
 columns this cannot score, not in the ones it can.
 """

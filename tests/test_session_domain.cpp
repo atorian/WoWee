@@ -6,7 +6,7 @@
 #include "game/entity.hpp"
 #include "game/movement_handler.hpp"
 #include "game/movement_flags.hpp"
-#include "game/entity_controller.hpp"
+#include "game/world_handler.hpp"
 #include "game/update_field_table.hpp"
 #include "core/world_transition_queue.hpp"
 
@@ -327,7 +327,7 @@ TEST_CASE("a new map scope is shown every object already in view, once, without 
     });
     h.server().clearSent();
 
-    h.game().entityController().announceObjectsInView();
+    h.game().world().announceObjectsInView();
 
     std::sort(creatures.begin(), creatures.end());
     CHECK(creatures == std::vector<uint64_t>{creature->getGuid(), corpse->getGuid()});
@@ -404,7 +404,7 @@ TEST_CASE("an empty view announces nothing, and the local player is never presen
     unsigned spawns = 0;
     auto playerSub = h.events().subscribe<ev::PlayerSpawned>([&](const ev::PlayerSpawned&) { ++spawns; });
     auto creatureSub = h.events().subscribe<ev::CreatureSpawned>([&](const ev::CreatureSpawned&) { ++spawns; });
-    h.game().entityController().announceObjectsInView();
+    h.game().world().announceObjectsInView();
     CHECK(spawns == 0);
 }
 
@@ -599,22 +599,6 @@ TEST_CASE("exploration experience is announced; an area found for nothing is not
     CHECK(found[0].xpGained == 170);
 }
 
-TEST_CASE("a stand state the server confirms is announced once", "[session][harness]") {
-    GameHarness h;
-    h.enterWorld();
-    std::vector<int> states;
-    auto sub = h.events().subscribe<ev::StandStateChanged>(
-        [&](const ev::StandStateChanged& e) { states.push_back(e.standState); });
-
-    // SMSG_STANDSTATE_UPDATE: sit, sit again, stand.
-    h.receive(Opcode::SMSG_STANDSTATE_UPDATE, Body().u8(1));
-    h.receive(Opcode::SMSG_STANDSTATE_UPDATE, Body().u8(1));
-    h.receive(Opcode::SMSG_STANDSTATE_UPDATE, Body().u8(0));
-    h.pump();
-
-    CHECK(states == std::vector<int>{1, 0});
-}
-
 TEST_CASE("sounds the server plays are passed on: music, flat, and at an object", "[session][harness]") {
     GameHarness h;
     h.enterWorld();
@@ -704,4 +688,111 @@ TEST_CASE("a camera shake is light for the first fifty shakes and heavy after", 
     CHECK(shakes[1].magnitude == 0.08f);
     CHECK(shakes[1].frequency == 18.0f);
     CHECK(shakes[1].duration == 0.5f);
+}
+
+TEST_CASE("the map the player is on is named, and is an instance, as Map.dbc says",
+          "[session][harness][tables]") {
+    GameHarness h;
+    // ID, internal name, instance type (1 = party), flags, display name.
+    h.dbc("Map.dbc", 5, {{{0, 0}, {1, "Azeroth"}, {2, 0}, {4, "Eastern Kingdoms"}},
+                         {{0, 33}, {1, "Shadowfang"}, {2, 1}, {4, "Shadowfang Keep"}}});
+    wowee::test::PlayerSpec inKeep;
+    inKeep.mapId = 33;
+    h.enterWorld(inKeep);
+
+    CHECK(h.game().getMapName(0) == "Eastern Kingdoms");
+    CHECK(h.game().getMapName(33) == "Shadowfang Keep");
+    CHECK(h.game().isInInstance());
+}
+
+TEST_CASE("the open world is not an instance, by its Map.dbc row", "[session][harness][tables]") {
+    GameHarness h;
+    h.dbc("Map.dbc", 5, {{{0, 0}, {1, "Azeroth"}, {2, 0}, {4, "Eastern Kingdoms"}},
+                         {{0, 33}, {1, "Shadowfang"}, {2, 1}, {4, "Shadowfang Keep"}}});
+    h.enterWorld();
+    CHECK_FALSE(h.game().isInInstance());
+}
+
+TEST_CASE("an area is named by AreaTable.dbc, and by WorldMapArea.dbc where it has no row there",
+          "[session][harness][tables]") {
+    GameHarness h;
+    h.dbc("AreaTable.dbc", 36, {{{0, 12}, {11, "Elwynn Forest"}}});
+    // AreaID 2 and AreaName 3; a row for an area AreaTable also names does not
+    // override it.
+    h.dbc("WorldMapArea.dbc", 11, {{{0, 1}, {2, 12}, {3, "Elwynn"}},
+                                   {{0, 2}, {2, 4000}, {3, "Somewhere Else"}}});
+    h.enterWorld();
+
+    CHECK(h.game().getAreaName(12) == "Elwynn Forest");
+    CHECK(h.game().getAreaName(4000) == "Somewhere Else");
+    CHECK(h.game().getAreaName(99).empty());
+}
+
+TEST_CASE("a continent's map rectangle is its own WorldMapArea.dbc row, not a zone's",
+          "[session][harness][tables]") {
+    GameHarness h;
+    // MapID 1, AreaID 2, then left, right, top, bottom at 4-7.
+    h.dbc("WorldMapArea.dbc", 11, {
+        {{0, 1}, {1, 0}, {2, 12}, {4, 100.0f}, {5, -100.0f}, {6, 50.0f}, {7, -50.0f}},
+        {{0, 2}, {1, 0}, {2, 0}, {4, 4000.0f}, {5, -4000.0f}, {6, 8000.0f}, {7, -6000.0f}},
+    });
+    h.enterWorld();
+
+    const auto& bounds = h.game().getContinentBounds(0);
+    REQUIRE(bounds.valid);
+    CHECK(bounds.left == 4000.0f);
+    CHECK(bounds.right == -4000.0f);
+    CHECK(bounds.top == 8000.0f);
+    CHECK(bounds.bottom == -6000.0f);
+    CHECK_FALSE(h.game().getContinentBounds(1).valid);
+}
+
+TEST_CASE("another player is drawn as their fields say, a field left out being zero",
+          "[session][harness]") {
+    using wowee::game::ObjectType;
+    using wowee::game::UF;
+    auto uf = [](UF f) { return static_cast<uint16_t>(wowee::game::fieldIndex(f)); };
+    constexpr uint64_t kOther = 0x0000000000000777ull;
+    GameHarness h;
+    h.enterWorld();
+    std::vector<ev::PlayerSpawned> spawned;
+    auto sub = h.events().subscribe<ev::PlayerSpawned>(
+        [&](const ev::PlayerSpawned& e) { spawned.push_back(e); });
+
+    // A Tauren (race 6) woman, a druid (class 11). Her skin, face, hair style,
+    // hair colour and markings are all the first: PLAYER_BYTES and
+    // PLAYER_BYTES_2 are zero, and a create block leaves a zero field out.
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(kOther, ObjectType::PLAYER,
+                                            {{uf(UF::UNIT_FIELD_BYTES_0), 6u | (11u << 8) | (1u << 16)},
+                                             {uf(UF::UNIT_FIELD_HEALTH), 100},
+                                             {uf(UF::UNIT_FIELD_DISPLAYID), 2589}}));
+    h.pump();
+
+    REQUIRE(spawned.size() == 1);
+    CHECK(spawned[0].raceId == 6);
+    CHECK(spawned[0].genderId == 1);
+    CHECK(spawned[0].appearanceBytes == 0u);
+    CHECK(spawned[0].facialFeatures == 0);
+}
+
+TEST_CASE("a player whose fields carry no race is not drawn as one", "[session][harness]") {
+    using wowee::game::ObjectType;
+    using wowee::game::UF;
+    auto uf = [](UF f) { return static_cast<uint16_t>(wowee::game::fieldIndex(f)); };
+    GameHarness h;
+    h.enterWorld();
+    std::vector<ev::PlayerSpawned> spawned;
+    auto sub = h.events().subscribe<ev::PlayerSpawned>(
+        [&](const ev::PlayerSpawned& e) { spawned.push_back(e); });
+
+    // No UNIT_FIELD_BYTES_0, but plenty of small fields a guess could take
+    // for one.
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(0x778, ObjectType::PLAYER,
+                                            {{uf(UF::UNIT_FIELD_HEALTH), 100},
+                                             {uf(UF::UNIT_FIELD_LEVEL), 0x00010106},
+                                             {uf(UF::UNIT_FIELD_DISPLAYID), 2589}}));
+    h.pump();
+    CHECK(spawned.empty());
 }

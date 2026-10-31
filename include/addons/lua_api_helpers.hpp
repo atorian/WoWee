@@ -36,14 +36,6 @@ namespace wowee::addons {
 /// the only reason the number means anything on the other side.
 int questLogRowForQuest(lua_State* L, game::GameHandler* gh, uint32_t questId);
 
-/// Put FrameXML's quest log in front of `questId`.
-///
-/// Asked for by a quest link in chat and by the objective tracker, neither of
-/// which has a log of its own to open any more. Without a row the log is
-/// opened on whatever it had selected: an approximation of the ask beats
-/// nothing happening.
-void openInterfaceQuestLog(game::GameHandler& gh, uint32_t questId);
-
 /// The pet and the stable as the composition root handed them to the addon
 /// layer, or no pet and no stable when there is no game.
 pet::IPet& petOf(lua_State* L);
@@ -536,7 +528,7 @@ inline uint8_t unitRaceOf(game::GameHandler* gh, const std::string& lowerUid) {
             entity->getField(game::fieldIndex(game::UF::UNIT_FIELD_BYTES_0));
         raceId = static_cast<uint8_t>(bytes0 & 0xFF);
     }
-    if (raceId == 0) raceId = gh->entityController().lookupPlayerRace(guid);
+    if (raceId == 0) raceId = gh->queryCache().lookupPlayerRace(guid);
     return raceId;
 }
 

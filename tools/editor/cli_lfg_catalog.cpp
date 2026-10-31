@@ -272,9 +272,9 @@ int handleValidate(int& i, int argc, char** argv) {
                 errors.push_back(ctx + ": difficulty " +
                     std::to_string(e.difficulty) + " not in 0..3");
             }
-            if (e.expansionRequired > wowee::pipeline::WoweeLFGDungeon::TurtleWoW) {
+            if (e.expansionRequired > wowee::pipeline::WoweeLFGDungeon::WotLK) {
                 errors.push_back(ctx + ": expansionRequired " +
-                    std::to_string(e.expansionRequired) + " not in 0..3");
+                    std::to_string(e.expansionRequired) + " not in 0..2");
             }
             if (e.minLevel > e.maxLevel) {
                 errors.push_back(ctx + ": minLevel " +

@@ -2,6 +2,8 @@
 // as the client, without a realm or a logged-in character.
 #include "core/window.hpp"
 #include "pipeline/asset_manager.hpp"
+#include "rendering/imgui_texture.hpp"
+#include "rendering/interface_frame.hpp"
 #include "rendering/vk_context.hpp"
 #include "ui/widget_renderer.hpp"
 #include "ui/widget_tree.hpp"
@@ -80,6 +82,12 @@ int main(int argc, char** argv) {
     const double openMs = std::chrono::duration<double, std::milli>(Clock::now() - open).count();
     ImGui::Render();
     const bool drewImages = ImGui::GetDrawData()->TotalVtxCount > 0;
+    // Drawn as the client draws its interface: the frame is extracted from
+    // ImGui first and recorded from that copy, through VkContext's lanes,
+    // never by ImGui's own Vulkan backend.
+    const auto interfaceFrame = wowee::rendering::extractImGuiFrame(*context);
+    wowee::rendering::InterfaceRecorder recorder;
+    const bool recorderReady = recorder.initialize(*context, context->getOverlayClearRenderPass());
     std::printf("DRAW vertices=%d visibleWidgets=%zu\n", ImGui::GetDrawData()->TotalVtxCount, tree.drawOrder().size());
     uint32_t imageIndex = 0;
     if (const auto command = context->beginFrame(imageIndex)) {
@@ -90,7 +98,9 @@ int main(int argc, char** argv) {
         pass.renderArea.extent = context->getSwapchainExtent();
         pass.clearValueCount = 1; pass.pClearValues = &clear;
         vkCmdBeginRenderPass(command, &pass, VK_SUBPASS_CONTENTS_INLINE);
-        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), command);
+        if (recorderReady && interfaceFrame) {
+            recorder.record(*context, command, pass.renderPass, context->getCurrentFrame(), *interfaceFrame);
+        }
         vkCmdEndRenderPass(command);
         context->endFrame(command, imageIndex);
     }
@@ -119,6 +129,7 @@ int main(int argc, char** argv) {
     std::printf("INTERFACE_GPU_MIB %.2f\n", static_cast<double>(bytes) / (1024.0 * 1024.0));
     renderer.resetResources();
     window.getVkContext()->waitIdle();
+    recorder.shutdown();
     shutdownUi();
-    return resident > 100 && loadedBeforeOpen && iconsReady && drewImages ? 0 : 1;
+    return resident > 100 && loadedBeforeOpen && iconsReady && drewImages && recorderReady ? 0 : 1;
 }

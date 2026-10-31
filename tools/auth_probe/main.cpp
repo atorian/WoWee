@@ -18,7 +18,7 @@ static void usage() {
         << "Usage:\n"
         << "  auth_probe <host> <port> <account> <major> <minor> <patch> <build> <proto> <locale> [platform] [os]\n"
         << "Example:\n"
-        << "  auth_probe logon.turtle-server-eu.kz 3724 test 1 12 1 5875 8 enGB x86 Win\n";
+        << "  auth_probe logon.example.org 3724 test 1 12 1 5875 8 enGB x86 Win\n";
 }
 
 int main(int argc, char** argv) {

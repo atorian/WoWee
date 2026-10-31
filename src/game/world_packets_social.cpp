@@ -393,7 +393,7 @@ network::Packet SetActiveMoverPacket::build(uint64_t guid) {
 
 network::Packet InspectPacket::build(uint64_t targetGuid) {
     network::Packet packet(wireOpcode(Opcode::CMSG_INSPECT));
-    if (isActiveExpansion("classic") || isActiveExpansion("tbc") || isActiveExpansion("turtle")) {
+    if (isActiveExpansion("classic") || isActiveExpansion("tbc")) {
         packet.writeUInt64(targetGuid);
     } else {
         packet.writePackedGuid(targetGuid);
@@ -446,7 +446,7 @@ network::Packet RequestPlayedTimePacket::build(bool sendToChat) {
 }
 
 bool PlayedTimeParser::parse(network::Packet& packet, PlayedTimeData& data) {
-    // Classic/Turtle may omit the trailing trigger-message byte and send only
+    // Classic may omit the trailing trigger-message byte and send only
     // totalTime(4) + levelTime(4). Later expansions append triggerMsg(1).
     if (!packet.hasRemaining(8)) {
         LOG_WARNING("SMSG_PLAYED_TIME: packet too small (", packet.getSize(), " bytes)");
@@ -617,7 +617,7 @@ network::Packet StandStateChangePacket::build(uint8_t state) {
 // ============================================================
 
 network::Packet SetActionButtonPacket::build(uint8_t button, uint8_t type, uint32_t id, bool isClassic) {
-    // Classic/Turtle (1.12): uint8 button + uint16 id + uint8 type + uint8 misc(0)
+    // Classic (1.12): uint8 button + uint16 id + uint8 type + uint8 misc(0)
     //   type encoding: 0=spell, 1=item, 64=macro
     // TBC/WotLK:       uint8 button + uint32 packed (type<<24 | id)
     //   type encoding: 0x00=spell, 0x80=item, 0x40=macro

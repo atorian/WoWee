@@ -42,11 +42,14 @@
 
 #include "core/env.hpp"
 #include "game/entity.hpp"
+#include "game/world_handler.hpp"
 #include "game/protocol_tables.hpp"
 #include "game/update_field_table.hpp"
 #include "game/world_packet_data.hpp"
+#include "pipeline/dbc_loader.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -161,9 +164,28 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
         fail("no wotlk profile under " + sourceRoot() + "Data/expansions");
     }
 
-    emotes_ = std::make_unique<game::EmoteTable>(nullptr);
+    // A table the test has not given reads as one with no rows, wider than
+    // any the game reads: a world whose data has nothing in it. The game asks
+    // for spell names, skill lines and area triggers on paths a test about
+    // something else walks, and finds none, as it would in an empty file.
+    auto noRows = std::make_shared<pipeline::DBCFile>();
+    if (!noRows->load(wdbcFile(512, {}, std::string(1, '\0')))) fail("an empty table does not load");
+    noRows_ = std::move(noRows);
+    gameData_ = std::make_unique<game::GameData>(
+        [this](const std::string& dbc) {
+            dbcsRead_.insert(dbc);
+            const auto it = dbcs_.find(dbc);
+            return it != dbcs_.end() ? it->second : noRows_;
+        },
+        expansions_,
+        // Where the client logs the line and aborts, a test sees it thrown.
+        [](const std::string& line) { throw GameStopped(line); });
+    services_.gameData = gameData_.get();
+    emotes_ = std::make_unique<game::EmoteTable>(*gameData_);
     services_.expansionRegistry = &expansions_;
     services_.emotes = emotes_.get();
+    statTables_ = std::make_unique<game::StatTables>(*gameData_);
+    services_.statTables = statTables_.get();
     services_.events = &events_;
     services_.cvars = &cvars_;
     services_.steadyNow = [this] { return now_; };
@@ -229,7 +251,7 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     auctionGateway_ = std::make_unique<game::AuctionGateway>(*game_, game_->inventory(), *game_);
     auctionHouse_ = std::make_unique<auction::AuctionService>(*auctionGateway_, *auctionGateway_, events_);
     services_.auctionFeed = auctionHouse_.get();
-    mailGateway_ = std::make_unique<game::MailGateway>(*game_, game_->inventory(), *game_, *game_);
+    mailGateway_ = std::make_unique<game::MailGateway>(*game_, game_->inventory(), *game_, game_->queryCache());
     mail_ = std::make_unique<mail::MailService>(*mailGateway_, *mailGateway_, events_);
     services_.mailFeed = mail_.get();
     services_.mail = mail_.get();
@@ -260,10 +282,15 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     pet_ = std::make_unique<pet::PetService>(*petGateway_, events_);
     services_.petFeed = pet_.get();
     services_.pet = pet_.get();
-    game::loadProtocolTables(*game_, *expansions_.getActive());
+    game::loadProtocolTables(*game_, *gameData_);
     game_->setAddonEventCallback([this](const std::string& name, const std::vector<std::string>& args) {
         addonEvents_.push_back({name, args});
     });
+}
+
+void GameHarness::useExpansion(const std::string& id) {
+    if (!expansions_.setActive(id)) fail("no expansion profile named " + id);
+    game::loadProtocolTables(*game_, *gameData_);
 }
 
 GameHarness::~GameHarness() = default;
@@ -496,6 +523,70 @@ std::vector<uint8_t> GameHarness::valuesBody(uint64_t guid, const Fields& fields
 void GameHarness::playerInView() {
     const uint64_t guid = player_.guid;
     game_->getEntityManager().addEntity(guid, std::make_shared<game::Player>(guid));
+}
+
+std::vector<uint8_t> GameHarness::gameObjectTemplateBody(uint32_t entry, uint32_t type,
+                                                         const std::string& name,
+                                                         const std::array<uint32_t, 24>& data) {
+    Body b;
+    // display id, the four names, then icon, cast bar caption and unk1.
+    b.u32(entry).u32(type).u32(0xD15).cstr(name).cstr("").cstr("").cstr("").cstr("").cstr("").cstr("");
+    for (uint32_t word : data) b.u32(word);
+    return b.bytes();
+}
+
+std::vector<uint8_t> GameHarness::nameResponseBody(uint64_t guid, const std::string& name) {
+    return Body().packedGuid(guid).u8(0 /* found */).cstr(name).cstr("").u8(2).u8(0).u8(7);
+}
+
+void GameHarness::playerFields(const std::map<uint16_t, uint32_t>& fields, bool create) {
+    game::UpdateBlock block{};
+    block.guid = player_.guid;
+    block.objectType = game::ObjectType::PLAYER;
+    block.updateType = create ? game::UpdateType::CREATE_OBJECT : game::UpdateType::VALUES;
+    for (const auto& [k, v] : fields) block.fields[k] = v;
+    game::UpdateObjectData batch{};
+    batch.blocks.push_back(block);
+    game_->world().applyRecordedObjects(batch);
+    pump();
+}
+
+void GameHarness::gameTable(const std::string& dbc, uint32_t column, std::vector<float> rows) {
+    std::vector<DbcRow> table;
+    table.reserve(rows.size());
+    for (float value : rows) table.push_back({{column, value}});
+    this->dbc(dbc, column + 1, table);
+}
+
+void GameHarness::unreadableDbc(const std::string& dbc) {
+    dbcs_[dbc] = nullptr;
+}
+
+GameHarness::DbcCell::DbcCell(float v) : number(std::bit_cast<uint32_t>(v)) {}
+
+void GameHarness::dbc(const std::string& dbc, uint32_t fields, const std::vector<DbcRow>& rows) {
+    // The string block opens with the empty string, as the client's files do,
+    // so offset 0 reads as "".
+    std::string strings(1, '\0');
+    std::vector<std::vector<uint32_t>> cells;
+    for (const DbcRow& row : rows) {
+        std::vector<uint32_t> out(fields, 0);
+        for (const auto& [column, cell] : row) {
+            if (column >= fields) fail(dbc + " given a column " + std::to_string(column) + " past its " +
+                                       std::to_string(fields) + " fields");
+            if (cell.isText) {
+                out[column] = static_cast<uint32_t>(strings.size());
+                strings += cell.text;
+                strings += '\0';
+            } else {
+                out[column] = cell.number;
+            }
+        }
+        cells.push_back(std::move(out));
+    }
+    auto table = std::make_shared<pipeline::DBCFile>();
+    if (!table->load(wdbcFile(fields, cells, strings))) fail(dbc + " given rows that do not load");
+    dbcs_[dbc] = std::move(table);
 }
 
 void GameHarness::enterWorld(const PlayerSpec& player) {

@@ -50,7 +50,6 @@ struct WoweeLFGDungeon {
         Classic = 0,
         TBC     = 1,
         WotLK   = 2,
-        TurtleWoW = 3,
     };
 
     // requiredRolesMask bits - combine to require multiple

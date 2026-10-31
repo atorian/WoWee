@@ -2,7 +2,7 @@
 
 ## Current Status
 
-Wowee is a native C++ World of Warcraft client focused on online multiplayer. It speaks the Vanilla 1.12 (including Turtle WoW 1.18), TBC 2.4.3 and WotLK 3.3.5a protocols.
+Wowee is a native C++ World of Warcraft client focused on online multiplayer. It speaks the Vanilla 1.12, TBC 2.4.3 and WotLK 3.3.5a protocols.
 
 Implemented today:
 
@@ -21,7 +21,7 @@ For a more honest snapshot of gaps and current direction, see `docs/status.md`.
 ### 1. Clone
 
 ```bash
-git clone --recurse-submodules https://github.com/Kelsidavis/WoWee.git
+git clone https://github.com/Kelsidavis/WoWee.git
 cd WoWee
 ```
 

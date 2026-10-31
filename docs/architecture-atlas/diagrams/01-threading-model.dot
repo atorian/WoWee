@@ -15,6 +15,7 @@ frame [label="[T2] frameWorkers · 2–16\nанимация / floor / culling / 
 terrain [label="Terrain workers · обычно 4–8\nloadQueue → ADT / WMO / M2"];
 normals [label="Character NormalMapBuilder · 2\n64 ожидающих · ближние первыми"];
 preload [label="World preload · до 4\nотдельные потоки → join"];
+release [label="background · 1\nосвобождение tiles / моделей"];
 other [label="Задачи по необходимости\nDNS/connect · Warden · patch/hash\nwatchdog · stats · update · recorder"];
 }
 subgraph cluster_returnmain {
@@ -48,6 +49,7 @@ preload -> assets [label="warm cache",style=dashed,constraint=false];
 main -> audio [label="управление звуками",style=dashed,constraint=false];
 main -> normals [label="submit"];
 main -> other [label="запуск / poll",style=dashed,constraint=false];
+main -> release [label="releaseInBackground",style=dashed,constraint=false];
 {rank=same; io; frame;}
 {rank=same; terrain; normals;}
 {rank=same; preload; other;}

@@ -10,12 +10,11 @@
     Path to the WoW client's Data directory containing .MPQ files.
 
 .PARAMETER Expansion
-    Expansion hint: classic, turtle, tbc, wotlk. Auto-detected if omitted.
+    Expansion hint: classic, tbc, wotlk. Auto-detected if omitted.
 
 .EXAMPLE
     .\extract_assets.ps1 "C:\Games\WoW-3.3.5a\Data"
     .\extract_assets.ps1 "C:\Games\WoW-1.12\Data" classic
-    .\extract_assets.ps1 "D:\TurtleWoW\Data" turtle
 #>
 
 param(

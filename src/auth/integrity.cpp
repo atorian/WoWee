@@ -112,12 +112,7 @@ bool computeIntegrityHashWin32WithExe(const std::array<uint8_t, 16>& checksumSal
     // Classic 1.12.x (build <=6005) ships fmod.dll, ijl15.dll, dbghelp.dll,
     // unicows.dll alongside WoW.exe.  TBC/WotLK clients do not; hashing
     // only the .exe is sufficient (servers rarely validate the CRC for those).
-    //
-    // Turtle WoW ships a custom loader DLL. Some Turtle auth servers appear to validate integrity against
-    // that distribution rather than a stock 1.12.1 client, so when using Turtle's executable we include
-    // Turtle-specific DLLs as well.
-    const bool isTurtleExe = (exeName == "TurtleWoW.exe");
-    const bool isClassicBuild = (clientBuild <= 6005 || isTurtleExe);
+    const bool isClassicBuild = clientBuild <= 6005;
     // 3.3.5a hashes two modules as they sit in memory (Wow.exe 0x6B9CF0); the
     // result matches TrinityCore's build_executable_hash for 12340 'Win'.
     const bool isWotlk12340 = (clientBuild == 12340);
@@ -140,10 +135,6 @@ bool computeIntegrityHashWin32WithExe(const std::array<uint8_t, 16>& checksumSal
         fileGroups.push_back({ { "ijl15.dll" } });
         fileGroups.push_back({ { "dbghelp.dll" } });
         fileGroups.push_back({ { "unicows.dll" } });
-    }
-    if (isTurtleExe) {
-        fileGroups.push_back({ { "twloader.dll" } });
-        fileGroups.push_back({ { "twdiscord.dll" } });
     }
 
     std::vector<uint8_t> allFiles;

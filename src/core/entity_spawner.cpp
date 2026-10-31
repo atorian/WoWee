@@ -1,6 +1,6 @@
 #include "core/entity_spawner.hpp"
 #include "core/thread_pool.hpp"
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 #include "core/appearance_composer.hpp"
 #include "pipeline/char_sections.hpp"
 #include "core/geoset_rules.hpp"
@@ -24,6 +24,7 @@
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "game/game_handler.hpp"
 #include "game/game_services.hpp"
 #include "game/transport_manager.hpp"
@@ -59,11 +60,13 @@ rendering::SceneCommands& EntitySpawner::scene() {
 
 EntitySpawner::EntitySpawner(rendering::Renderer* renderer,
                              pipeline::AssetManager* assetManager,
+                             const pipeline::GameTables& tables,
                              game::GameHandler* gameHandler,
                              game::GameServices* gameServices,
                              PlayerView* playerView)
     : renderer_(renderer)
     , assetManager_(assetManager)
+    , tables_(tables)
     , gameHandler_(gameHandler)
     , gameServices_(gameServices)
     , playerView_(playerView)
@@ -372,13 +375,13 @@ bool EntitySpawner::tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t inst
         return false;
     }
 
-    auto itemDisplayDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
-    if (!itemDisplayDbc) return false;
-    // Item.dbc is not distributed to clients in Vanilla 1.12; on those expansions
-    // item display IDs are resolved via the server-sent item cache instead.
-    auto itemDbc = assetManager_->loadDBCOptional("Item.dbc");
-    const auto* itemL = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("Item") : nullptr;
+    constexpr std::string_view kNeededFor = "the weapons a creature holds";
+    const pipeline::RequiredTable itemDisplayDbc(tables_, "ItemDisplayInfo.dbc", kNeededFor);
+    // Item.dbc, entry -> DisplayID (column 5), is WotLK's. The other expansions
+    // resolve item display ids through the server-sent item cache instead.
+    constexpr uint32_t kItemDisplayIdField = 5;
+    const pipeline::GameTables::Table itemDbc = tables_.has("Item.dbc")
+        ? tables_.table("Item.dbc", kItemDisplayIdField + 1, kNeededFor) : nullptr;
 
     auto resolveDisplayInfoId = [&](uint32_t rawId) -> uint32_t {
         if (rawId == 0) return 0;
@@ -388,16 +391,15 @@ bool EntitySpawner::tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t inst
         if (itemDbc) {
             int32_t itemRec = itemDbc->findRecordById(rawId); // treat as item entry
             if (itemRec >= 0) {
-                const uint32_t dispFieldPrimary = itemL ? (*itemL)["DisplayID"] : 5u;
-                uint32_t displayIdA = itemDbc->getUInt32(static_cast<uint32_t>(itemRec), dispFieldPrimary);
+                uint32_t displayIdA = itemDbc->getUInt32(static_cast<uint32_t>(itemRec), kItemDisplayIdField);
                 if (displayIdA != 0 && itemDisplayDbc->findRecordById(displayIdA) >= 0) {
                     return displayIdA;
                 }
             }
         }
-        // Fallback: Vanilla 1.12 does not distribute Item.dbc to clients.
-        // Items arrive via SMSG_ITEM_QUERY_SINGLE_RESPONSE and are cached in
-        // itemInfoCache_. Use the server-sent displayInfoId when available.
+        // Without Item.dbc, items arrive via SMSG_ITEM_QUERY_SINGLE_RESPONSE
+        // and are cached in itemInfoCache_. Use the server-sent displayInfoId
+        // when available.
         if (!itemDbc && gameHandler_) {
             if (const auto* info = gameHandler_->inventory().getItemInfo(rawId)) {
                 uint32_t displayIdB = info->displayInfoId;
@@ -415,7 +417,7 @@ bool EntitySpawner::tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t inst
         int32_t recIdx = itemDisplayDbc->findRecordById(resolvedDisplayId);
         if (recIdx < 0) return false;
 
-        const auto art = pipeline::readItemDisplayArt(*itemDisplayDbc,
+        const auto art = pipeline::readItemDisplayArt(itemDisplayDbc,
                                                       static_cast<uint32_t>(recIdx));
         if (art.modelFile.empty()) return false;
         const std::string& modelFile = art.modelFile;
@@ -457,7 +459,7 @@ bool EntitySpawner::tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t inst
         if (resolvedDisplayId == 0) return false;
         int32_t recIdx = itemDisplayDbc->findRecordById(resolvedDisplayId);
         if (recIdx < 0) return false;
-        const auto art = pipeline::readItemDisplayArt(*itemDisplayDbc,
+        const auto art = pipeline::readItemDisplayArt(itemDisplayDbc,
                                                       static_cast<uint32_t>(recIdx));
         if (art.modelFile.empty()) return false;
         const std::string& modelFile = art.modelFile;
@@ -520,11 +522,8 @@ bool EntitySpawner::retryCreatureVirtualWeapons(uint64_t guid, uint32_t instance
 
 void EntitySpawner::buildCharSectionsCache() {
     if (assets_.charSectionsCacheBuilt_ || !assetManager_ || !assetManager_->isInitialized()) return;
-    auto dbc = assetManager_->loadDBC("CharSections.dbc");
-    if (!dbc) return;
-    const auto* csL = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
-    auto csF = pipeline::detectCharSectionsFields(dbc.get(), csL);
+    const pipeline::RequiredTable dbc(tables_, "CharSections.dbc", "characters' skin, face and hair");
+    auto csF = pipeline::detectCharSectionsFields(dbc.get(), &dbc.layout());
     for (uint32_t r = 0; r < dbc->getRecordCount(); r++) {
         uint32_t race = dbc->getUInt32(r, csF.raceId);
         uint32_t sex = dbc->getUInt32(r, csF.sexId);
@@ -566,15 +565,15 @@ void EntitySpawner::buildCreatureDisplayLookups() {
     // Col 6: Skin1 (texture name)
     // Col 7: Skin2
     // Col 8: Skin3
-    if (auto cdi = assetManager_->loadDBC("CreatureDisplayInfo.dbc"); cdi && cdi->isLoaded()) {
-        const auto* cdiL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("CreatureDisplayInfo") : nullptr;
+    {
+        const pipeline::RequiredTable cdi(tables_, "CreatureDisplayInfo.dbc", "creature models");
         for (uint32_t i = 0; i < cdi->getRecordCount(); i++) {
             CreatureDisplayData data;
-            data.modelId = cdi->getUInt32(i, cdiL ? (*cdiL)["ModelID"] : 1);
-            data.extraDisplayId = cdi->getUInt32(i, cdiL ? (*cdiL)["ExtraDisplayId"] : 3);
-            data.skin1 = cdi->getString(i, cdiL ? (*cdiL)["Skin1"] : 6);
-            data.skin2 = cdi->getString(i, cdiL ? (*cdiL)["Skin2"] : 7);
-            data.skin3 = cdi->getString(i, cdiL ? (*cdiL)["Skin3"] : 8);
+            data.modelId = cdi->getUInt32(i, cdi.column("ModelID"));
+            data.extraDisplayId = cdi->getUInt32(i, cdi.column("ExtraDisplayId"));
+            data.skin1 = cdi->getString(i, cdi.column("Skin1"));
+            data.skin2 = cdi->getString(i, cdi.column("Skin2"));
+            data.skin3 = cdi->getString(i, cdi.column("Skin3"));
             // How big this display draws its model. One model serves many
             // displays at many sizes - the boar is 0.6 for a piglet and 1.5
             // for a giant across ten of them - and reading none of it drew
@@ -583,12 +582,9 @@ void EntitySpawner::buildCreatureDisplayLookups() {
             //
             // Zero occurs in the file (and in more rows on TBC and vanilla)
             // and means unset, not invisible.
-            const uint32_t scaleField = cdiL ? (*cdiL)["CreatureModelScale"] : 4;
-            if (scaleField != 0xFFFFFFFF && scaleField < cdi->getFieldCount()) {
-                const float displayScale = cdi->getFloat(i, scaleField);
-                if (displayScale > 0.0f) data.displayScale = displayScale;
-            }
-            assets_.displayDataMap_[cdi->getUInt32(i, cdiL ? (*cdiL)["ID"] : 0)] = data;
+            const float displayScale = cdi->getFloat(i, cdi.column("CreatureModelScale"));
+            if (displayScale > 0.0f) data.displayScale = displayScale;
+            assets_.displayDataMap_[cdi->getUInt32(i, cdi.column("ID"))] = data;
         }
         LOG_INFO("Loaded ", assets_.displayDataMap_.size(), " display→model mappings");
     }
@@ -605,9 +601,9 @@ void EntitySpawner::buildCreatureDisplayLookups() {
     // CreatureDisplayInfoExtra.dbc field layout depends on actual field count:
     //   19 fields: 10 equip slots (8-17), BakeName=18 (no Flags field)
     //   21 fields: 11 equip slots (8-18), Flags=19, BakeName=20
-    if (auto cdie = assetManager_->loadDBC("CreatureDisplayInfoExtra.dbc"); cdie && cdie->isLoaded()) {
-        const auto* cdieL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("CreatureDisplayInfoExtra") : nullptr;
-        const uint32_t cdieEquip0 = cdieL ? (*cdieL)["EquipDisplay0"] : 8;
+    {
+        const pipeline::RequiredTable cdie(tables_, "CreatureDisplayInfoExtra.dbc", "humanoid creatures' looks");
+        const uint32_t cdieEquip0 = cdie.column("EquipDisplay0");
         // Detect actual field count to determine equip slot count and BakeName position
         const uint32_t dbcFieldCount = cdie->getFieldCount();
         int numEquipSlots;
@@ -619,24 +615,24 @@ void EntitySpawner::buildCreatureDisplayLookups() {
         } else {
             // 21 fields: 11 equip slots (8-18), Flags=19, BakeName=20
             numEquipSlots = 11;
-            bakeField = cdieL ? (*cdieL)["BakeName"] : 20;
+            bakeField = cdie.column("BakeName");
         }
         uint32_t withBakeName = 0;
         for (uint32_t i = 0; i < cdie->getRecordCount(); i++) {
             HumanoidDisplayExtra extra;
-            extra.raceId = static_cast<uint8_t>(cdie->getUInt32(i, cdieL ? (*cdieL)["RaceID"] : 1));
-            extra.sexId = static_cast<uint8_t>(cdie->getUInt32(i, cdieL ? (*cdieL)["SexID"] : 2));
-            extra.skinId = static_cast<uint8_t>(cdie->getUInt32(i, cdieL ? (*cdieL)["SkinID"] : 3));
-            extra.faceId = static_cast<uint8_t>(cdie->getUInt32(i, cdieL ? (*cdieL)["FaceID"] : 4));
-            extra.hairStyleId = static_cast<uint8_t>(cdie->getUInt32(i, cdieL ? (*cdieL)["HairStyleID"] : 5));
-            extra.hairColorId = static_cast<uint8_t>(cdie->getUInt32(i, cdieL ? (*cdieL)["HairColorID"] : 6));
-            extra.facialHairId = static_cast<uint8_t>(cdie->getUInt32(i, cdieL ? (*cdieL)["FacialHairID"] : 7));
+            extra.raceId = static_cast<uint8_t>(cdie->getUInt32(i, cdie.column("RaceID")));
+            extra.sexId = static_cast<uint8_t>(cdie->getUInt32(i, cdie.column("SexID")));
+            extra.skinId = static_cast<uint8_t>(cdie->getUInt32(i, cdie.column("SkinID")));
+            extra.faceId = static_cast<uint8_t>(cdie->getUInt32(i, cdie.column("FaceID")));
+            extra.hairStyleId = static_cast<uint8_t>(cdie->getUInt32(i, cdie.column("HairStyleID")));
+            extra.hairColorId = static_cast<uint8_t>(cdie->getUInt32(i, cdie.column("HairColorID")));
+            extra.facialHairId = static_cast<uint8_t>(cdie->getUInt32(i, cdie.column("FacialHairID")));
             for (int eq = 0; eq < numEquipSlots; eq++) {
                 extra.equipDisplayId[eq] = cdie->getUInt32(i, cdieEquip0 + eq);
             }
             extra.bakeName = cdie->getString(i, bakeField);
             if (!extra.bakeName.empty()) withBakeName++;
-            assets_.humanoidExtraMap_[cdie->getUInt32(i, cdieL ? (*cdieL)["ID"] : 0)] = extra;
+            assets_.humanoidExtraMap_[cdie->getUInt32(i, cdie.column("ID"))] = extra;
         }
         LOG_DEBUG("Loaded ", assets_.humanoidExtraMap_.size(), " humanoid display extra entries (",
                  withBakeName, " with baked textures, ", numEquipSlots, " equip slots, ",
@@ -644,25 +640,22 @@ void EntitySpawner::buildCreatureDisplayLookups() {
     }
 
     // CreatureModelData.dbc: modelId (col 0) → modelPath (col 2, .mdx → .m2)
-    if (auto cmd = assetManager_->loadDBC("CreatureModelData.dbc"); cmd && cmd->isLoaded()) {
-        const auto* cmdL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("CreatureModelData") : nullptr;
+    {
+        const pipeline::RequiredTable cmd(tables_, "CreatureModelData.dbc", "creature models");
         for (uint32_t i = 0; i < cmd->getRecordCount(); i++) {
-            std::string path = cmd->getString(i, cmdL ? (*cmdL)["ModelPath"] : 2);
+            std::string path = cmd->getString(i, cmd.column("ModelPath"));
             if (path.empty()) continue;
             // The client's own rows all say .mdx, but a realm's rows can name
             // the .M2 itself. Cutting four characters off every path turned
             // PandarenSerpentMount.M2 into PandarenSerpentMoun.m2, and those
             // mounts were never found.
             path = pipeline::modelPathToM2(path);
-            const uint32_t modelId = cmd->getUInt32(i, cmdL ? (*cmdL)["ID"] : 0);
+            const uint32_t modelId = cmd->getUInt32(i, cmd.column("ID"));
             assets_.modelIdToPath_[modelId] = path;
             // The other half of a creature's size. Zero appears in the file
             // and means unset rather than invisible, so it keeps 1.0.
-            const uint32_t scaleField = cmdL ? (*cmdL)["ModelScale"] : 4;
-            if (scaleField != 0xFFFFFFFF && scaleField < cmd->getFieldCount()) {
-                const float modelScale = cmd->getFloat(i, scaleField);
-                if (modelScale > 0.0f) assets_.modelIdToScale_[modelId] = modelScale;
-            }
+            const float modelScale = cmd->getFloat(i, cmd.column("ModelScale"));
+            if (modelScale > 0.0f) assets_.modelIdToScale_[modelId] = modelScale;
         }
         LOG_INFO("Loaded ", assets_.modelIdToPath_.size(), " model→path mappings");
     }
@@ -771,13 +764,13 @@ void EntitySpawner::buildCreatureDisplayLookups() {
 
     // CharHairGeosets.dbc: maps (race, sex, hairStyleId) → skinSectionId for hair mesh
     // Col 0: ID, Col 1: RaceID, Col 2: SexID, Col 3: VariationID, Col 4: GeosetID, Col 5: Showscalp
-    if (auto chg = assetManager_->loadDBC("CharHairGeosets.dbc"); chg && chg->isLoaded()) {
-        const auto* chgL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("CharHairGeosets") : nullptr;
+    {
+        const pipeline::RequiredTable chg(tables_, "CharHairGeosets.dbc", "characters' hair");
         for (uint32_t i = 0; i < chg->getRecordCount(); i++) {
-            uint32_t raceId = chg->getUInt32(i, chgL ? (*chgL)["RaceID"] : 1);
-            uint32_t sexId = chg->getUInt32(i, chgL ? (*chgL)["SexID"] : 2);
-            uint32_t variation = chg->getUInt32(i, chgL ? (*chgL)["Variation"] : 3);
-            uint32_t geosetId = chg->getUInt32(i, chgL ? (*chgL)["GeosetID"] : 4);
+            uint32_t raceId = chg->getUInt32(i, chg.column("RaceID"));
+            uint32_t sexId = chg->getUInt32(i, chg.column("SexID"));
+            uint32_t variation = chg->getUInt32(i, chg.column("Variation"));
+            uint32_t geosetId = chg->getUInt32(i, chg.column("GeosetID"));
             // Showscalp/Bald means this style uses the default scalp instead
             // of the extra hair-cap mesh. Ignoring it makes the cap physically
             // poke through hair authored to expose the normal scalp.
@@ -793,13 +786,13 @@ void EntitySpawner::buildCreatureDisplayLookups() {
     // CharacterFacialHairStyles.dbc: maps (race, sex, facialHairId) → geoset IDs
     // No ID column: Col 0: RaceID, Col 1: SexID, Col 2: VariationID
     // Col 3: Geoset100, Col 4: Geoset300, Col 5: Geoset200
-    if (auto cfh = assetManager_->loadDBC("CharacterFacialHairStyles.dbc"); cfh && cfh->isLoaded()) {
-        const auto* cfhL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("CharacterFacialHairStyles") : nullptr;
-        const auto fhF = pipeline::detectFacialHairFields(cfh.get(), cfhL);
+    {
+        const pipeline::RequiredTable cfh(tables_, "CharacterFacialHairStyles.dbc", "characters' facial hair");
+        const auto fhF = pipeline::detectFacialHairFields(cfh.get(), &cfh.layout());
         for (uint32_t i = 0; i < cfh->getRecordCount(); i++) {
-            uint32_t raceId = cfh->getUInt32(i, cfhL ? (*cfhL)["RaceID"] : 0);
-            uint32_t sexId = cfh->getUInt32(i, cfhL ? (*cfhL)["SexID"] : 1);
-            uint32_t variation = cfh->getUInt32(i, cfhL ? (*cfhL)["Variation"] : 2);
+            uint32_t raceId = cfh->getUInt32(i, cfh.column("RaceID"));
+            uint32_t sexId = cfh->getUInt32(i, cfh.column("SexID"));
+            uint32_t variation = cfh->getUInt32(i, cfh.column("Variation"));
             const uint32_t key = appearanceKey(static_cast<uint8_t>(raceId),
                                               static_cast<uint8_t>(sexId),
                                               static_cast<uint8_t>(variation));
@@ -937,11 +930,11 @@ void EntitySpawner::buildGameObjectDisplayLookups() {
     // GameObjectDisplayInfo.dbc structure (3.3.5a):
     // Col 0: ID (displayId)
     // Col 1: ModelName
-    if (auto godi = assetManager_->loadDBC("GameObjectDisplayInfo.dbc"); godi && godi->isLoaded()) {
-        const auto* godiL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("GameObjectDisplayInfo") : nullptr;
+    {
+        const pipeline::RequiredTable godi(tables_, "GameObjectDisplayInfo.dbc", "game object models");
         for (uint32_t i = 0; i < godi->getRecordCount(); i++) {
-            uint32_t displayId = godi->getUInt32(i, godiL ? (*godiL)["ID"] : 0);
-            std::string modelName = godi->getString(i, godiL ? (*godiL)["ModelName"] : 1);
+            uint32_t displayId = godi->getUInt32(i, godi.column("ID"));
+            std::string modelName = godi->getString(i, godi.column("ModelName"));
             if (modelName.empty()) continue;
             // GameObjectDisplayInfo names .mdx and .mdl alike; this knew only
             // the first, so a .mdl gameobject had no model path at all.
@@ -949,8 +942,6 @@ void EntitySpawner::buildGameObjectDisplayLookups() {
             assets_.gameObjectDisplayIdToPath_[displayId] = modelName;
         }
         LOG_INFO("Loaded ", assets_.gameObjectDisplayIdToPath_.size(), " gameobject display mappings");
-    } else {
-        LOG_WARNING("GameObjectDisplayInfo.dbc failed to load - no GO display mappings available");
     }
 
     if (assets_.gameObjectDisplayIdToPath_.empty()) {
@@ -1377,16 +1368,15 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
                     selectedFacial200 = static_cast<uint16_t>(200 + itFacial->second.geoset200);
                     selectedFacial300 = static_cast<uint16_t>(300 + itFacial->second.geoset300);
                 }
-                auto itemDisplayDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
-                const auto* idiL = pipeline::getActiveDBCLayout()
-                    ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
+                const pipeline::RequiredTable itemDisplayDbc(tables_, "ItemDisplayInfo.dbc",
+                                                             "humanoid creatures' equipment");
 
                 uint32_t capeDisplayId = itExtra->second.equipDisplayId[10];
-                if (capeDisplayId != 0 && itemDisplayDbc) {
+                if (capeDisplayId != 0) {
                         int32_t recIdx = itemDisplayDbc->findRecordById(capeDisplayId);
                         if (recIdx >= 0) {
-                            const uint32_t leftTexField = idiL ? (*idiL)["LeftModelTexture"] : 3u;
-                            const uint32_t rightTexField = idiL ? (*idiL)["RightModelTexture"] : 4u;
+                            const uint32_t leftTexField = itemDisplayDbc.column("LeftModelTexture");
+                            const uint32_t rightTexField = itemDisplayDbc.column("RightModelTexture");
                             std::vector<std::string> capeNames;
                             auto addName = [&](const std::string& n) {
                                 if (!n.empty() &&
@@ -1421,10 +1411,10 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
                 }
 
                 // Read GeosetGroup1 from equipment to drive clothed mesh selection
-                if (itemDisplayDbc) {
-                    const uint32_t fGG1 = idiL ? (*idiL)["GeosetGroup1"] : 7;
-                    const uint32_t fGG2 = idiL ? (*idiL)["GeosetGroup2"] : 8;
-                    const uint32_t fGG3 = idiL ? (*idiL)["GeosetGroup3"] : 9;
+                {
+                    const uint32_t fGG1 = itemDisplayDbc.column("GeosetGroup1");
+                    const uint32_t fGG2 = itemDisplayDbc.column("GeosetGroup2");
+                    const uint32_t fGG3 = itemDisplayDbc.column("GeosetGroup3");
                     auto readGG = [&](uint32_t did) -> uint32_t {
                         if (did == 0) return 0;
                         int32_t idx = itemDisplayDbc->findRecordById(did);
@@ -1832,9 +1822,10 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
             // happen on a background thread. Only GPU texture upload runs on main thread
             // (in processAsyncNpcCompositeResults).
             auto* am = assetManager_;
+            const pipeline::GameTables* tables = &tables_;
             AsyncNpcCompositeLoad load;
             load.future = spawns_->jobs_.submit(
-                [am, extraCopy, skinSlots = std::move(skinSlots),
+                [am, tables, extraCopy, skinSlots = std::move(skinSlots),
                  hairSlots = std::move(hairSlots), modelId, displayId, isHdCharacterModel](const JobGroup::Token& jobToken) mutable -> PreparedNpcComposite {
                     PreparedNpcComposite result{};
                     result.token = jobToken;
@@ -1869,61 +1860,57 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
 
                     // --- CharSections fallback (skin/face/underwear) ---
                     if (!def.hasBakedSkin) {
-                        auto csDbc = am->loadDBC("CharSections.dbc");
-                        if (csDbc) {
-                            const auto* csL = pipeline::getActiveDBCLayout()
-                                ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
-                            auto csF = pipeline::detectCharSectionsFields(csDbc.get(), csL);
-                            uint32_t npcRace = static_cast<uint32_t>(extraCopy.raceId);
-                            uint32_t npcSex = static_cast<uint32_t>(extraCopy.sexId);
-                            uint32_t npcSkin = static_cast<uint32_t>(extraCopy.skinId);
-                            uint32_t npcFace = static_cast<uint32_t>(extraCopy.faceId);
-                            std::string npcFaceLower, npcFaceUpper;
-                            std::vector<std::string> npcUnderwear;
+                        const pipeline::RequiredTable csDbc(*tables, "CharSections.dbc",
+                                                            "humanoid creatures' skin and face");
+                        auto csF = pipeline::detectCharSectionsFields(csDbc.get(), &csDbc.layout());
+                        uint32_t npcRace = static_cast<uint32_t>(extraCopy.raceId);
+                        uint32_t npcSex = static_cast<uint32_t>(extraCopy.sexId);
+                        uint32_t npcSkin = static_cast<uint32_t>(extraCopy.skinId);
+                        uint32_t npcFace = static_cast<uint32_t>(extraCopy.faceId);
+                        std::string npcFaceLower, npcFaceUpper;
+                        std::vector<std::string> npcUnderwear;
 
-                            // The one reader, in pipeline/char_sections.hpp.
-                            //
-                            // This copy had no fallback for a face the
-                            // table does not carry, and no reading of the
-                            // skin row's second texture. Both come with the
-                            // conversion; the second is what an HD model
-                            // draws its ears and eyelashes from.
-                            pipeline::CharacterAppearance who;
-                            who.raceId = npcRace;
-                            who.sexId = npcSex;
-                            who.skinId = static_cast<uint8_t>(npcSkin);
-                            who.faceId = static_cast<uint8_t>(npcFace);
-                            who.hairStyleId = extraCopy.hairStyleId;
-                            who.hairColorId = extraCopy.hairColorId;
+                        // The one reader, in pipeline/char_sections.hpp.
+                        //
+                        // This copy had no fallback for a face the
+                        // table does not carry, and no reading of the
+                        // skin row's second texture. Both come with the
+                        // conversion; the second is what an HD model
+                        // draws its ears and eyelashes from.
+                        pipeline::CharacterAppearance who;
+                        who.raceId = npcRace;
+                        who.sexId = npcSex;
+                        who.skinId = static_cast<uint8_t>(npcSkin);
+                        who.faceId = static_cast<uint8_t>(npcFace);
+                        who.hairStyleId = extraCopy.hairStyleId;
+                        who.hairColorId = extraCopy.hairColorId;
 
-                            const auto sections = pipeline::resolveCharacterSections(
-                                csDbc.get(), csF, who,
-                                [](const std::string& path, void* ctx) {
-                                    return static_cast<pipeline::AssetManager*>(ctx)->fileExists(path);
-                                },
-                                am);
+                        const auto sections = pipeline::resolveCharacterSections(
+                            csDbc.get(), csF, who,
+                            [](const std::string& path, void* ctx) {
+                                return static_cast<pipeline::AssetManager*>(ctx)->fileExists(path);
+                            },
+                            am);
 
-                            def.basePath = sections.bodySkin;
-                            npcFaceLower = sections.faceLower;
-                            npcFaceUpper = sections.faceUpper;
-                            npcUnderwear = sections.underwear;
+                        def.basePath = sections.bodySkin;
+                        npcFaceLower = sections.faceLower;
+                        npcFaceUpper = sections.faceUpper;
+                        npcUnderwear = sections.underwear;
 
-                            if (!def.basePath.empty()) {
-                                allPaths.push_back(def.basePath);
-                                if (!npcFaceLower.empty()) { def.overlayPaths.push_back(npcFaceLower); allPaths.push_back(npcFaceLower); }
-                                if (!npcFaceUpper.empty()) { def.overlayPaths.push_back(npcFaceUpper); allPaths.push_back(npcFaceUpper); }
-                                for (const auto& uw : npcUnderwear) { def.overlayPaths.push_back(uw); allPaths.push_back(uw); }
-                            }
+                        if (!def.basePath.empty()) {
+                            allPaths.push_back(def.basePath);
+                            if (!npcFaceLower.empty()) { def.overlayPaths.push_back(npcFaceLower); allPaths.push_back(npcFaceLower); }
+                            if (!npcFaceUpper.empty()) { def.overlayPaths.push_back(npcFaceUpper); allPaths.push_back(npcFaceUpper); }
+                            for (const auto& uw : npcUnderwear) { def.overlayPaths.push_back(uw); allPaths.push_back(uw); }
                         }
                     }
 
                     // --- Equipment region layers (ItemDisplayInfo DBC) ---
-                    auto idiDbc = am->loadDBC("ItemDisplayInfo.dbc");
-                    if (idiDbc) {
-                        const auto* idiL = pipeline::getActiveDBCLayout()
-                            ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
+                    {
+                        const pipeline::RequiredTable idiDbc(*tables, "ItemDisplayInfo.dbc",
+                                                             "humanoid creatures' equipment textures");
                         uint32_t texRegionFields[8];
-                        pipeline::getItemDisplayInfoTextureFields(*idiDbc, idiL, texRegionFields);
+                        pipeline::getItemDisplayInfoTextureFields(idiDbc, texRegionFields);
                         const bool npcIsFemale = (extraCopy.sexId == 1);
                         const bool npcHasArmArmor = (extraCopy.equipDisplayId[7] != 0 || extraCopy.equipDisplayId[8] != 0);
 
@@ -1994,27 +1981,24 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
                     // The one reader again, rather than a sixth scan of the
                     // table written out by hand. Only the hair is wanted here.
                     {
-                        auto csDbc = am->loadDBC("CharSections.dbc");
-                        if (csDbc) {
-                            const auto* csL = pipeline::getActiveDBCLayout()
-                                ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
-                            const auto csF = pipeline::detectCharSectionsFields(csDbc.get(), csL);
-                            pipeline::CharacterAppearance who;
-                            who.raceId = extraCopy.raceId;
-                            who.sexId = extraCopy.sexId;
-                            who.skinId = extraCopy.skinId;
-                            who.faceId = extraCopy.faceId;
-                            who.hairStyleId = extraCopy.hairStyleId;
-                            who.hairColorId = extraCopy.hairColorId;
-                            def.hairTexturePath =
-                                pipeline::resolveCharacterSections(csDbc.get(), csF, who).hair;
+                        const pipeline::RequiredTable csDbc(*tables, "CharSections.dbc",
+                                                            "humanoid creatures' hair");
+                        const auto csF = pipeline::detectCharSectionsFields(csDbc.get(), &csDbc.layout());
+                        pipeline::CharacterAppearance who;
+                        who.raceId = extraCopy.raceId;
+                        who.sexId = extraCopy.sexId;
+                        who.skinId = extraCopy.skinId;
+                        who.faceId = extraCopy.faceId;
+                        who.hairStyleId = extraCopy.hairStyleId;
+                        who.hairColorId = extraCopy.hairColorId;
+                        def.hairTexturePath =
+                            pipeline::resolveCharacterSections(csDbc.get(), csF, who).hair;
 
-                            if (!def.hairTexturePath.empty()) {
-                                allPaths.push_back(def.hairTexturePath);
-                            } else if (def.hasBakedSkin && !def.hairTextureSlots.empty()) {
-                                def.useBakedForHair = true;
-                                // bakedSkinPath already in allPaths
-                            }
+                        if (!def.hairTexturePath.empty()) {
+                            allPaths.push_back(def.hairTexturePath);
+                        } else if (def.hasBakedSkin && !def.hairTextureSlots.empty()) {
+                            def.useBakedForHair = true;
+                            // bakedSkinPath already in allPaths
                         }
                     }
 

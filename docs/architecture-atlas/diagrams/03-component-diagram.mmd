@@ -8,7 +8,7 @@ flowchart TB
   subgraph sg_gamebox["wowee_game · protocol state"]
     gh["[C1/C2] GameHandler<br/>session / queue / dispatch / facade"]
     domain["Доменные handlers<br/>chat / spell / inventory / quest / …"]
-    old["[C1] 4 legacy handlers<br/>Combat / Movement / Entity / Warden"]
+    old["[C1] XxxQueries<br/>GameHandler реализует и пересылает"]
   end
   subgraph sg_renderbox["wowee_render · сцена и GPU"]
     renderer["Renderer / VkContext API<br/>terrain / M2 / WMO / characters<br/>RT / water / post / overlays"]
@@ -33,8 +33,7 @@ flowchart TB
   presentation --> renderer
   presentation --> pipeline
   gh -->|"создаёт и делегирует"| domain
-  gh -->|"создаёт"| old
-  old -.->|"GameHandler&amp; owner_"| gh
+  old -.->|"реализует: пересылка владельцу"| gh
   gh --> netlib
   gh --> protocol
   gh --> pipeline

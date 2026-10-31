@@ -40,6 +40,7 @@ class VkContext;
 class VkTexture;
 class Frustum;
 class RtScene;
+struct WaterReflectionView;
 
 /**
  * GPU-side terrain chunk data (Vulkan)
@@ -273,6 +274,9 @@ public:
     };
     struct DrawList {
         std::vector<ChunkDraw> view;
+        /// What the water's reflection can show (WaterReflectionView), when
+        /// it was asked for.
+        std::vector<ChunkDraw> reflection;
         std::vector<std::shared_ptr<const DepthTile>> depth;
         std::vector<BakeDraw> bake;
         std::vector<std::shared_ptr<TerrainBake::Atlas>> atlases;
@@ -280,8 +284,11 @@ public:
         int culled = 0, baked = 0, crossfade = 0;
         float furthestSq = 0;
     };
-    DrawList extract(const Camera& camera, const std::vector<LocalLight>& lights);
+    DrawList extract(const Camera& camera, const std::vector<LocalLight>& lights,
+                     const WaterReflectionView* mirror = nullptr);
     void recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const DrawList& list);
+    /// The chunks the water's reflection can show, through its mirrored set.
+    void recordReflection(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const DrawList& list);
     void recordDepth(VkCommandBuffer cmd, const glm::mat4& matrix, const glm::vec3& centre,
                      float radius, const DrawList& list);
 
@@ -349,6 +356,9 @@ public:
 
 private:
 
+    /// Records `draws`; the triangles it drew.
+    uint32_t recordChunks(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                          const std::vector<ChunkDraw>& draws, bool wireframe);
     GeometryDraw geometryOf(const TerrainChunkGPU& chunk) const;
     static void bindDraw(VkCommandBuffer cmd, const GeometryDraw& draw);
     TerrainChunkGPU uploadChunk(const pipeline::ChunkMesh& chunk);

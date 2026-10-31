@@ -173,7 +173,7 @@ public:
     /// The opcode table, update fields, packet parsers and DBC layouts a
     /// protocol profile brings with it. Loaded at startup and on every
     /// expansion change, which used to be two copies.
-    void loadExpansionTables(const game::ExpansionProfile& profile); // Reload DBC layouts, opcodes, etc. after expansion change
+    void loadExpansionTables(); // Reload DBC layouts, opcodes, etc. after expansion change
 
     // Singleton access
     static Application& getInstance() { return *instance; }
@@ -401,8 +401,12 @@ private:
     /// before everything that subscribes, so it is destroyed after them.
     core::EventBus eventBus_;
     game::GameServices gameServices_;
+    /// The tables the game reads; before the emote table and the game, which
+    /// read through it.
+    std::unique_ptr<game::GameData> gameData_;
     /// What the emotes are, for the game, the interface and the animation.
     std::unique_ptr<game::EmoteTable> emoteTable_;
+    std::unique_ptr<game::StatTables> statTables_;
 
     // What an agent connected over MCP holds down; ahead of everything that
     // reads it, so it is destroyed after them.

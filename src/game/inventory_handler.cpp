@@ -1,4 +1,5 @@
 #include "game/inventory_handler.hpp"
+#include "game/game_data.hpp"
 #include "auction/domain/records.hpp"
 #include "auction/services/auction_house.hpp"
 #include "game/auction_gateway.hpp"
@@ -104,9 +105,9 @@ static auction::IAuctionHouseFeed* auctionFeed(InventoryQueries& queries) {
 InventoryHandler::InventoryHandler(PacketSender& sender, FrameXmlEvents& frameXml,
                                    core::EventBus& events, ChatLog& chat,
                                    InventoryQueries& queries, const core::CVarStore& cvars,
-                                   pipeline::AssetManager* assets)
+                                   const GameData& data)
     : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat),
-      queries_(queries), assets_(assets),
+      queries_(queries), data_(data),
       subscriptions_(subscribeAuctionNotices(events, chat, frameXml, *this)) {
     for (auto& subscription : subscribeMailNotices(events, chat, frameXml, *this))
         subscriptions_.push_back(std::move(subscription));
@@ -343,6 +344,11 @@ uint64_t targetGuidForUseItem(const InventoryQueries& owner, const ItemQueryResp
 // ============================================================
 
 void InventoryHandler::registerOpcodes(DispatchTable& table) {
+    // The server offering a page of a game object.
+    table[Opcode::SMSG_GAMEOBJECT_PAGETEXT] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(8)) return;
+        readGameObject(packet.readUInt64());
+    };
     // ---- Item query response ----
     table[Opcode::SMSG_ITEM_QUERY_SINGLE_RESPONSE] = [this](network::Packet& packet) { handleItemQueryResponse(packet); };
     table[Opcode::SMSG_ITEM_QUERY_MULTIPLE_RESPONSE] = [this](network::Packet& packet) { handleItemQueryResponse(packet); };
@@ -4389,17 +4395,12 @@ uint32_t InventoryHandler::getTempEnchantRemainingMs(uint32_t slot) const {
 void InventoryHandler::loadRepairDbc() const {
     if (repairDbcLoaded_) return;
 
-    auto* am = assets_;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
     repairDbcLoaded_ = true;
 
     // DurabilityCosts.dbc: field 0 = itemLevel (key), fields 1-29 = cost multipliers
     // Columns 1-21 = weapon subclass (0-20), columns 22-29 = armor subclass (0-7)
-    auto costsDbc = am->loadDBC("DurabilityCosts.dbc");
-    if (costsDbc && costsDbc->isLoaded()) {
+    {
+        const auto costsDbc = data_.table("DurabilityCosts.dbc", 30, "what a repair costs");
         uint32_t count = costsDbc->getRecordCount();
         for (uint32_t i = 0; i < count; ++i) {
             uint32_t itemLevel = costsDbc->getUInt32(i, 0);
@@ -4411,8 +4412,8 @@ void InventoryHandler::loadRepairDbc() const {
     }
 
     // DurabilityQuality.dbc: field 0 = id (key), field 1 = quality_mod (float)
-    auto qualDbc = am->loadDBC("DurabilityQuality.dbc");
-    if (qualDbc && qualDbc->isLoaded()) {
+    {
+        const auto qualDbc = data_.table("DurabilityQuality.dbc", 2, "what a repair costs");
         uint32_t count = qualDbc->getRecordCount();
         for (uint32_t i = 0; i < count; ++i) {
             uint32_t id = qualDbc->getUInt32(i, 0);
@@ -4724,6 +4725,102 @@ void InventoryHandler::forgetPlayerEquipment(uint64_t guid) {
 // Money
 // ============================================================
 
+void InventoryHandler::itemObjectChanged(uint64_t guid, bool isContainer, const FlatFieldMap& fields,
+                                         FrameXmlEvents& packetEvents) {
+    const ItemObjectChange change = updateItemObject(guid, isContainer, fields);
+    if (change.inventory) {
+        // The rebuild redraws every bag and the character sheet itself
+        // (fireBagUpdates).
+        rebuildOnlineInventory();
+        // An item on the action bar shows how many are left, and nothing in
+        // FrameXML recomputes that from a bag change: ActionButton_UpdateCount
+        // runs only from ActionButton_Update, which BAG_UPDATE does not reach.
+        // So a stack of bandages went down and the bar kept the number it had
+        // when the button was last drawn - usually the count at login.
+        //
+        // Slot zero means every button, which is what the interface reads it
+        // as. Only sent when something on the bar is an item, so a bag change
+        // does not rebuild a hundred and twenty buttons for nothing.
+        if (queries_.actionBarHoldsItem()) packetEvents.fireFrameXmlEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
+    }
+    // Apart from the inventory change, so the durability events fire on a
+    // durability change and not on every stack count that moves.
+    if (change.durability) {
+        // The armour indicator is DurabilityFrame, which listens for
+        // UPDATE_INVENTORY_ALERTS; the merchant's repair buttons listen for
+        // UPDATE_INVENTORY_DURABILITY. Neither was fired anywhere but at world
+        // entry, so the indicator showed the durability the player logged in
+        // with -- a repair changed nothing on screen, and neither did damage.
+        packetEvents.fireFrameXmlEvent("UPDATE_INVENTORY_ALERTS", {});
+        packetEvents.fireFrameXmlEvent("UPDATE_INVENTORY_DURABILITY", {});
+    }
+}
+
+void InventoryHandler::inventoryFieldsArrived(const FlatFieldMap& fields, bool isCreate,
+                                              FrameXmlEvents& packetEvents) {
+    if (!applyInventoryFields(fields)) return;
+    rebuildOnlineInventory();
+    if (!isCreate) packetEvents.fireFrameXmlEvent("PLAYER_EQUIPMENT_CHANGED", {});
+}
+
+void InventoryHandler::updateBatchFinished(bool newItemCreated, const FlatFieldMap& playerFields) {
+    // Deferred rebuild: if new item objects were created in this packet, rebuild
+    // the bags so that slot GUIDs updated earlier in the same packet can resolve.
+    if (newItemCreated) rebuildOnlineInventory();
+
+    // Late inventory base detection once items are known
+    if (queries_.characterGuid() != 0 && !inventoryFieldBaseKnown() &&
+        !playerFields.empty() && !held_.onlineItems.empty()) {
+        detectInventorySlotBases(playerFields);
+        if (inventoryFieldBaseKnown() && applyInventoryFields(playerFields)) rebuildOnlineInventory();
+    }
+}
+
+void InventoryHandler::moneyFieldArrived(uint64_t copper, FrameXmlEvents& packetEvents) {
+    const bool moneyChanged = setMoneyFromFields(copper);
+    LOG_DEBUG("Money from update fields: ", copper, " copper");
+    if (moneyChanged) packetEvents.fireFrameXmlEvent("PLAYER_MONEY", {});
+}
+
+void InventoryHandler::detectCoinageField(const FlatFieldMap& before, const FlatFieldMap& after) {
+    const uint32_t expectedDelta = expectedMoneyDelta();
+    if (expectedDelta == 0) return;
+    if (before.empty() || after.empty()) return;
+
+    constexpr uint32_t kMaxPlausibleCoinage = 2147483647u;
+    std::vector<uint16_t> candidates;
+    candidates.reserve(8);
+
+    for (const auto& [idx, newVal] : after) {
+        auto itOld = before.find(idx);
+        if (itOld == before.end()) continue;
+        uint32_t oldVal = itOld->second;
+        if (newVal < oldVal) continue;
+        uint32_t delta = newVal - oldVal;
+        if (delta != expectedDelta) continue;
+        if (newVal > kMaxPlausibleCoinage) continue;
+        candidates.push_back(idx);
+    }
+
+    if (candidates.empty()) return;
+
+    uint16_t current = fieldIndex(UF::PLAYER_FIELD_COINAGE);
+    uint16_t chosen = candidates[0];
+    if (std::find(candidates.begin(), candidates.end(), current) != candidates.end()) {
+        chosen = current;
+    } else {
+        std::sort(candidates.begin(), candidates.end());
+        chosen = candidates[0];
+    }
+
+    if (chosen != current && current != 0xFFFF) {
+        queries_.coinageFieldFoundAt(chosen);
+        LOG_WARNING("Auto-detected PLAYER_FIELD_COINAGE index: ", chosen, " (was ", current, ")");
+    }
+
+    clearExpectedMoneyDelta();
+}
+
 bool InventoryHandler::setMoneyFromFields(uint64_t copper) {
     const uint64_t old = held_.moneyCopper;
     held_.moneyCopper = copper;
@@ -4740,6 +4837,74 @@ void InventoryHandler::applyServerMoney(uint64_t copper) {
 // ============================================================
 // Books
 // ============================================================
+
+void InventoryHandler::readGameObject(uint64_t guid) {
+    auto entity = queries_.entities().getEntity(guid);
+    if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return;
+
+    auto go = std::static_pointer_cast<GameObject>(entity);
+    uint32_t entry = go->getEntry();
+    if (entry == 0) return;
+
+    const GameObjectQueryResponseData* cached = queries_.gameObjectInfo(entry);
+    if (!cached) {
+        held_.pendingReads.insert(guid);
+        queries_.requestGameObjectInfo(entry, guid);
+        LOG_WARNING("Read object 0x", std::hex, guid, std::dec, " entry=", entry,
+                    ": no metadata yet, asked for it and will read when it lands");
+        return;
+    }
+
+    const GameObjectQueryResponseData& info = *cached;
+    uint32_t pageId = 0;
+    // AzerothCore layout:
+    // type 9 (TEXT): data[0]=pageID
+    // type 10 (GOOBER): data[7]=pageId
+    // The backing sits two words behind the page in both layouts, which is the
+    // whole of what tells a stone tablet from a parchment letter on screen.
+    uint32_t pageMaterial = 0;
+    if (info.type == 9)       { pageId = info.data[0]; pageMaterial = info.data[2]; }
+    else if (info.type == 10) { pageId = info.data[7]; pageMaterial = info.data[9]; }
+
+    // At warning, because this is the whole of why a sign says nothing: the
+    // type decides where the page id is, and an object that is not a 9 or a 10
+    // has none to find. The default log carries warnings only, so an INFO line
+    // here answers nobody.
+    LOG_WARNING("Read object '", info.name, "' entry=", entry, " type=", info.type,
+                " pageId=", pageId, " hasData=", info.hasData);
+
+    if (pageId != 0 && sender_.characterInWorld()) {
+        beginBook(info.name, pageMaterial);  // a fresh book for this interaction
+        sender_.send(PageTextQueryPacket::build(pageId, guid));
+        return;
+    }
+
+    if (!info.name.empty()) {
+        chat_.addSystemChatMessage(info.name);
+    }
+}
+
+void InventoryHandler::gameObjectTemplateArrived(const GameObjectQueryResponseData& data) {
+    // A sign somebody clicked while this was in flight: the click was
+    // kept rather than dropped, so it is answered now.
+    if (!held_.pendingReads.empty()) {
+        std::vector<uint64_t> ready;
+        for (uint64_t waiting : held_.pendingReads) {
+            auto entity = queries_.entities().getEntity(waiting);
+            if (!entity || entity->getType() != ObjectType::GAMEOBJECT) {
+                ready.push_back(waiting);   // gone; drop it
+                continue;
+            }
+            if (std::static_pointer_cast<GameObject>(entity)->getEntry() == data.entry) {
+                ready.push_back(waiting);
+            }
+        }
+        for (uint64_t guid : ready) {
+            held_.pendingReads.erase(guid);
+            if (queries_.entities().getEntity(guid)) readGameObject(guid);
+        }
+    }
+}
 
 void InventoryHandler::beginBook(std::string title, uint32_t material) {
     held_.bookPages.clear();

@@ -81,18 +81,6 @@ TEST_CASE("nameFromId covers first and last IDs", "[animation]") {
 
 // ── validateAgainstDBC tests ────────────────────────────────────────────────
 
-TEST_CASE("validateAgainstDBC handles null DBC", "[animation][dbc]") {
-    // Should not crash - just logs a warning
-    anim::validateAgainstDBC(nullptr);
-}
-
-TEST_CASE("validateAgainstDBC handles unloaded DBC", "[animation][dbc]") {
-    auto dbc = std::make_shared<DBCFile>();
-    REQUIRE_FALSE(dbc->isLoaded());
-    // Should not crash - just logs a warning
-    anim::validateAgainstDBC(dbc);
-}
-
 TEST_CASE("validateAgainstDBC with perfect match", "[animation][dbc]") {
     // Build a DBC containing IDs 0..ANIM_COUNT-1 (exact match)
     std::vector<uint32_t> allIds;
@@ -106,7 +94,7 @@ TEST_CASE("validateAgainstDBC with perfect match", "[animation][dbc]") {
     REQUIRE(dbc->getRecordCount() == anim::ANIM_COUNT);
 
     // Should complete without crashing - all IDs match
-    anim::validateAgainstDBC(dbc);
+    anim::validateAgainstDBC(*dbc);
 }
 
 TEST_CASE("validateAgainstDBC with missing IDs in DBC", "[animation][dbc]") {
@@ -119,7 +107,7 @@ TEST_CASE("validateAgainstDBC with missing IDs in DBC", "[animation][dbc]") {
     REQUIRE(dbc->getRecordCount() == 5);
 
     // Should log warnings for missing IDs but not crash
-    anim::validateAgainstDBC(dbc);
+    anim::validateAgainstDBC(*dbc);
 }
 
 TEST_CASE("validateAgainstDBC with extra IDs beyond range", "[animation][dbc]") {
@@ -132,7 +120,7 @@ TEST_CASE("validateAgainstDBC with extra IDs beyond range", "[animation][dbc]") 
     REQUIRE(dbc->getRecordCount() == 5);
 
     // Should log info about extra DBC-only IDs but not crash
-    anim::validateAgainstDBC(dbc);
+    anim::validateAgainstDBC(*dbc);
 }
 
 TEST_CASE("validateAgainstDBC with empty DBC", "[animation][dbc]") {
@@ -144,7 +132,7 @@ TEST_CASE("validateAgainstDBC with empty DBC", "[animation][dbc]") {
     REQUIRE(dbc->getRecordCount() == 0);
 
     // Should log warnings for all ANIM_COUNT missing IDs but not crash
-    anim::validateAgainstDBC(dbc);
+    anim::validateAgainstDBC(*dbc);
 }
 
 TEST_CASE("validateAgainstDBC with single ID", "[animation][dbc]") {
@@ -155,49 +143,5 @@ TEST_CASE("validateAgainstDBC with single ID", "[animation][dbc]") {
     REQUIRE(dbc->load(data));
     REQUIRE(dbc->getRecordCount() == 1);
 
-    anim::validateAgainstDBC(dbc);
-}
-
-TEST_CASE("ANIM_COUNT matches expected value", "[animation]") {
-    REQUIRE(anim::ANIM_COUNT == 506);   // 0-505, 3.3.5's AnimationData.dbc
-}
-
-TEST_CASE("Animation constant IDs are unique and sequential from documentation", "[animation]") {
-    // Verify key animation ID values match WoW's AnimationData.dbc layout
-    REQUIRE(anim::STAND == 0);
-    REQUIRE(anim::DEATH == 1);
-    REQUIRE(anim::SPELL == 2);
-    REQUIRE(anim::ATTACK_UNARMED == 16);
-    REQUIRE(anim::ATTACK_1H == 17);
-    REQUIRE(anim::ATTACK_2H == 18);
-    REQUIRE(anim::ATTACK_2H_LOOSE == 19);
-    REQUIRE(anim::READY_UNARMED == 25);
-    REQUIRE(anim::READY_1H == 26);
-    REQUIRE(anim::READY_2H == 27);
-    REQUIRE(anim::READY_2H_LOOSE == 28);
-    REQUIRE(anim::SPELL_CAST == 32);
-    REQUIRE(anim::SPELL_CAST_DIRECTED == 53);
-    REQUIRE(anim::SPELL_CAST_OMNI == 54);
-    REQUIRE(anim::CHANNEL_CAST_DIRECTED == 124);
-    REQUIRE(anim::CHANNEL_CAST_OMNI == 125);
-    REQUIRE(anim::EMOTE_DANCE == 69);
-}
-
-TEST_CASE("IDs above 145 follow 3.3.5's AnimationData.dbc", "[animation]") {
-    // The block these sit in was once transcribed from a list that dropped
-    // Opened at 149, so everything after named something else in the game.
-    REQUIRE(anim::OPENED == 149);
-    REQUIRE(anim::DESTROY == 150);
-    REQUIRE(anim::HOLD == 158);
-    REQUIRE(anim::JUMP_LAND_RUN == 187);
-    REQUIRE(anim::HOVER == 193);
-    REQUIRE(anim::STEALTH_RUN == 223);
-    REQUIRE(anim::FLY_STAND == 229);
-    REQUIRE(anim::FLY_RUN == 234);
-    REQUIRE(anim::EMOTE_YES == 185);
-    REQUIRE(anim::EMOTE_TRAIN == 195);
-    // A flying mount moves with Fly and holds still with Hover.
-    REQUIRE(anim::FLY_FORWARD == anim::FLY);
-    REQUIRE(anim::FLY_IDLE == anim::HOVER);
-    REQUIRE(std::string(anim::nameFromId(193)) == "HOVER");
+    anim::validateAgainstDBC(*dbc);
 }

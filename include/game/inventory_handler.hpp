@@ -25,8 +25,9 @@ namespace mail { class IMailboxFeed; }
 namespace guild_bank { class IGuildBankFeed; class IGuildBank; }
 namespace trade { class ITradeFeed; }
 namespace loot { class ILootFeed; class ILoot; }
-namespace pipeline { class AssetManager; }
 namespace game {
+
+class GameData;
 
 class PacketSender;
 class FrameXmlEvents;
@@ -156,10 +157,19 @@ public:
     /// A gossip or quest window is on screen.
     [[nodiscard]] virtual bool npcDialogOpen() const = 0;
     virtual void closeGossip() = 0;
+    /// A game object's template; null until the realm has said it.
+    [[nodiscard]] virtual const GameObjectQueryResponseData* gameObjectInfo(uint32_t entry) const = 0;
+    /// Ask for a game object's template, for the object `guid`.
+    virtual void requestGameObjectInfo(uint32_t entry, uint64_t guid) = 0;
     /// Whether a quest in the log asks for this item.
     [[nodiscard]] virtual bool questWantsItem(uint32_t itemId) const = 0;
     /// Run a line of the interface's own Lua.
     virtual void runInterfaceCommand(const std::string& lua) = 0;
+    /// Whether a button on the action bar holds an item, whose count a bag
+    /// change moves.
+    [[nodiscard]] virtual bool actionBarHoldsItem() const = 0;
+    /// The coinage field turned out to be at `index` on this realm.
+    virtual void coinageFieldFoundAt(uint16_t index) = 0;
 
     // ---- The contexts it feeds ----
     /// Where the auction house's packets and the client's clock go; null when
@@ -189,7 +199,7 @@ public:
     InventoryHandler(PacketSender& sender, FrameXmlEvents& frameXml,
                      core::EventBus& events, ChatLog& chat,
                      InventoryQueries& queries, const core::CVarStore& cvars,
-                     pipeline::AssetManager* assets);
+                     const GameData& data);
 
     /// Announce that the bags changed, one event per bag.
     ///
@@ -276,6 +286,20 @@ public:
     };
     /// A held item's fields changed (a VALUES block).
     ItemObjectChange updateItemObject(uint64_t guid, bool isContainer, const FlatFieldMap& fields);
+    /// A held item's fields changed, as the object updates report it: the
+    /// bags are rebuilt and redrawn, and the rest of what the change means -
+    /// an item count on the action bar, the durability indicator - goes out
+    /// on `packetEvents`, among the other events of the packet it came in.
+    void itemObjectChanged(uint64_t guid, bool isContainer, const FlatFieldMap& fields,
+                           FrameXmlEvents& packetEvents);
+    /// The player's fields arrived (`isCreate` for the create block): the item
+    /// slots they hold are read, and a change is redrawn - on an update with
+    /// PLAYER_EQUIPMENT_CHANGED on `packetEvents` as well.
+    void inventoryFieldsArrived(const FlatFieldMap& fields, bool isCreate, FrameXmlEvents& packetEvents);
+    /// A packet's blocks are all applied: the bags are rebuilt once for the
+    /// item objects it created, and the slot layout is worked out late, once
+    /// both the player's fields and the items are known.
+    void updateBatchFinished(bool newItemCreated, const FlatFieldMap& playerFields);
     /// An item object left the client's view - destroyed, traded, mailed.
     /// Returns whether it was one the player held.
     bool forgetItemObject(uint64_t guid);
@@ -314,6 +338,13 @@ public:
     /// changed, which the caller announces (PLAYER_MONEY) with the rest of
     /// the update it came in.
     bool setMoneyFromFields(uint64_t copper);
+    /// PLAYER_FIELD_COINAGE arrived: PLAYER_MONEY goes out on `packetEvents`
+    /// when the coin moved.
+    void moneyFieldArrived(uint64_t copper, FrameXmlEvents& packetEvents);
+    /// The player's fields before and after an update. While a coin change is
+    /// expected and the coinage field's index is not known, the field that
+    /// moved by exactly that much is it.
+    void detectCoinageField(const FlatFieldMap& before, const FlatFieldMap& after);
     /// A realm's own authoritative extended balance.
     void applyServerMoney(uint64_t copper);
     /// The coin the client is waiting to see added to a field, while the
@@ -367,6 +398,17 @@ public:
     /// A new book is opened - an item read, an object used - before its first
     /// page is asked for. SMSG_PAGE_TEXT_QUERY_RESPONSE fills it, here.
     void beginBook(std::string title, uint32_t material);
+    /// Read what is written on a game object: a sign, a plaque, a gravestone.
+    ///
+    /// Public because the click is where this starts. SMSG_GAMEOBJECT_PAGETEXT
+    /// is the server *offering* a page, which not every server sends and no
+    /// server sends for a plain sign - the real client reads the page id out of
+    /// the object's own data and asks for the text itself. Both ends arrive
+    /// here.
+    void readGameObject(uint64_t guid);
+    /// A game object template arrived: a sign clicked before it came is read
+    /// now.
+    void gameObjectTemplateArrived(const GameObjectQueryResponseData& data);
 
     // ---- Refunds -------------------------------------------------------------
 
@@ -692,7 +734,7 @@ private:
     InventoryQueries& queries_;
     /// The client's data, for the repair cost tables. Null in a test that
     /// has none, which leaves repairs unestimated.
-    pipeline::AssetManager* const assets_;
+    const GameData& data_;
     /// The auction house's, the mailbox's, the vault's, the trade's and the
     /// loot's chat lines and panel events, and the late names a letter waits
     /// on, for as long as this handler lives.
@@ -731,6 +773,14 @@ private:
         std::vector<BookPage> bookPages;
         std::string bookTitle;
         uint32_t bookMaterial = 0;
+        /// Objects clicked to be read before their template arrived.
+        ///
+        /// The page id lives in the query response, so a sign clicked in the
+        /// first moments after it spawns has nothing to read from yet. The
+        /// click is kept here and answered when the response lands, rather
+        /// than dropped - which is a sign that does nothing the first time it
+        /// is clicked and works the second.
+        std::unordered_set<uint64_t> pendingReads;
         std::unordered_map<uint64_t, ItemRefundInfo> itemRefundInfo;
         /// Items whose refund has been asked about, so it is asked once.
         std::set<uint64_t> itemRefundAsked;

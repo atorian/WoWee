@@ -32,7 +32,7 @@
 
 namespace wowee {
 
-namespace pipeline { class AssetManager; }
+namespace pipeline { class AssetManager; class GameTables; }
 namespace collision { class CollisionWorld; }
 namespace rendering { class TerrainRenderer; class Camera; class LiquidScene; class M2Renderer; class WMORenderer; struct WmoModelPrep; }
 
@@ -233,8 +233,10 @@ public:
      * Initialize terrain manager
      * @param assetManager Asset manager for loading files
      * @param terrainRenderer Terrain renderer for GPU upload
+     * @param tables The expansion's tables (ground clutter)
      */
-    bool initialize(pipeline::AssetManager* assetManager, TerrainRenderer* terrainRenderer);
+    bool initialize(pipeline::AssetManager* assetManager, TerrainRenderer* terrainRenderer,
+                    const pipeline::GameTables& tables);
 
     /**
      * Update terrain streaming based on camera position
@@ -428,6 +430,7 @@ private:
                                          std::unordered_set<uint32_t>& preparedModelIds);
 
     pipeline::AssetManager* assetManager = nullptr;
+    const pipeline::GameTables* gameTables_ = nullptr;
     TerrainRenderer* terrainRenderer = nullptr;
     LiquidScene* liquidScene = nullptr;
     M2Renderer* m2Renderer = nullptr;

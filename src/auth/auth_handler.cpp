@@ -305,7 +305,7 @@ void AuthHandler::handleLogonChallengeResponse(network::Packet& packet) {
                << ", auth protocol " << static_cast<int>(clientInfo.protocolVersion) << ")";
             fail(ss.str(), /*protocolRelated=*/true);
         } else if (response.result == AuthResult::BUSY && isLegacyVanillaAuth(clientInfo)) {
-            // Turtle/vmangos-derived realms can answer protocol 3 challenges
+            // vmangos-derived realms can answer protocol 3 challenges
             // with BUSY before sending the v8 security-flags byte. Let the UI
             // try the alternate vanilla auth protocol instead of stopping here.
             std::ostringstream ss;
@@ -391,11 +391,10 @@ void AuthHandler::sendLogonProof() {
         if (const char* env = std::getenv("WOWEE_INTEGRITY_DIR")) {
             if (env && *env) candidateDirs.emplace_back(env);
         }
-        // Expansion-isolated extraction layouts. Select narrowly so a Wrath or
-        // stock Classic executable can never be used for a Turtle integrity hash.
+        // Expansion-isolated extraction layouts, chosen by build so one
+        // expansion's executable is never hashed for another's.
         const char* expansion =
-            (clientInfo.majorVersion == 1 && clientInfo.minorVersion == 18) ? "turtle"
-            : (clientInfo.build <= 6005) ? "classic"
+            (clientInfo.build <= 6005) ? "classic"
             : (clientInfo.build <= 8606) ? "tbc"
             : "wotlk";
         // Under the data folder being read as well as Data/ beside the client.
@@ -408,15 +407,8 @@ void AuthHandler::sendLogonProof() {
         }
         // Legacy flat extraction layout.
         for (const auto& root : roots) candidateDirs.push_back(root + "/misc");
-        // Common turtle repack location used in this workspace
-        if (const char* home = std::getenv("HOME")) {
-            if (home && *home) {
-                candidateDirs.push_back(std::string(home) + "/Downloads/twmoa_1180");
-                candidateDirs.push_back(std::string(home) + "/twmoa_1180");
-            }
-        }
 
-        const char* candidateExes[] = { "WoW.exe", "TurtleWoW.exe", "Wow.exe", "wow.exe" };
+        const char* candidateExes[] = { "WoW.exe", "Wow.exe", "wow.exe" };
         bool ok = false;
         // The reason worth reporting: where the executable was first expected,
         // unless some candidate got further than that - an executable found

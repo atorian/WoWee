@@ -16,7 +16,7 @@ constexpr uint32_t COPPER_PER_SILVER = 100;
 
 // ---------------------------------------------------------------------------
 // Unit flags (UNIT_FIELD_FLAGS - index 59 in UnitFields for 3.3.5a;
-// 46 in Classic/TBC/Turtle. Bitmask values below are stable across expansions.)
+// 46 in Classic/TBC. Bitmask values below are stable across expansions.)
 // ---------------------------------------------------------------------------
 constexpr uint32_t UNIT_FLAG_TAXI_FLIGHT = 0x00000100;
 constexpr uint32_t UNIT_FLAG_IN_COMBAT   = 0x00080000;
@@ -37,7 +37,7 @@ constexpr uint8_t UNIT_VIS_FLAG_CREEP = 0x02;
 
 // ---------------------------------------------------------------------------
 // NPC flags (UNIT_NPC_FLAGS - index 82 in UnitFields for 3.3.5a;
-// 147 in Classic/Turtle. Bitmask values below are stable across expansions.)
+// 147 in Classic. Bitmask values below are stable across expansions.)
 // ---------------------------------------------------------------------------
 // The bits are a run: gossip, questgiver, two unused, three trainers, then the
 // five vendors, repair, the flight master and the two spirits. 0x04 is one of

@@ -7,9 +7,7 @@
 //
 // All 1306 WotLK numbers were compared against AzerothCore\'s Opcodes.h and
 // every one agreed, so the numbers themselves are not in doubt. What is worth
-// holding is that they stay that way, and that the structure around them - the
-// _extends inheritance the smaller tables use, and the absence of collisions -
-// keeps working.
+// holding is that they stay that way, and that no two names share a number.
 //
 // The values below are recorded from that comparison. They are the ones whose
 // being wrong would be felt first: the login handshake, the update block, and
@@ -29,38 +27,15 @@ namespace {
 
 
 
-/// One expansion\'s opcodes, with _extends resolved and _remove applied.
-std::map<std::string, int> opcodesOf(const std::string& expansion, int depth = 0) {
+/// One expansion\'s opcodes, by name.
+std::map<std::string, int> opcodesOf(const std::string& expansion) {
     std::map<std::string, int> out;
-    if (depth > 4) return out;  // the loader refuses cycles; so does this
     const std::string json =
         wowee::test::slurp("Data/expansions/" + expansion + "/opcodes.json");
-    if (json.empty()) return out;
-
-    std::smatch ext;
-    const std::regex extends(R"RX("_extends"\s*:\s*"\.\./(\w+)/opcodes\.json")RX");
-    if (std::regex_search(json, ext, extends)) {
-        out = opcodesOf(ext[1].str(), depth + 1);
-    }
-
     const std::regex pair(R"RX("((?:SMSG|CMSG|MSG)_\w+)"\s*:\s*"(0x[0-9A-Fa-f]+)")RX");
     for (std::sregex_iterator it(json.begin(), json.end(), pair), end;
          it != end; ++it) {
         out[(*it)[1].str()] = static_cast<int>(std::stoul((*it)[2].str(), nullptr, 16));
-    }
-
-    const size_t rm = json.find("\"_remove\"");
-    if (rm != std::string::npos) {
-        const size_t open = json.find('[', rm);
-        const size_t close = json.find(']', open);
-        if (open != std::string::npos && close != std::string::npos) {
-            const std::string body = json.substr(open, close - open);
-            const std::regex name(R"RX("((?:SMSG|CMSG|MSG)_\w+)")RX");
-            for (std::sregex_iterator it(body.begin(), body.end(), name), end;
-                 it != end; ++it) {
-                out.erase((*it)[1].str());
-            }
-        }
     }
     return out;
 }
@@ -70,7 +45,7 @@ std::map<std::string, int> opcodesOf(const std::string& expansion, int depth = 0
 TEST_CASE("no two opcodes in one table share a number", "[opcodes]") {
     // A collision makes one of the two unreachable, and which one depends on
     // lookup order rather than on anything anybody decided.
-    for (const char* expansion : {"classic", "tbc", "wotlk", "turtle"}) {
+    for (const char* expansion : {"classic", "tbc", "wotlk"}) {
         const auto table = opcodesOf(expansion);
         INFO(expansion << ": " << table.size() << " opcodes");
         REQUIRE(table.size() > 500);
@@ -118,21 +93,6 @@ TEST_CASE("the WotLK numbers are what the server uses", "[opcodes]") {
         REQUIRE(found != table.end());
         CHECK(found->second == number);
     }
-}
-
-TEST_CASE("a table that extends another gets its opcodes", "[opcodes]") {
-    // Turtle declares two keys and inherits the rest. Read without resolving
-    // _extends it would have two opcodes and nothing would work.
-    const auto turtle = opcodesOf("turtle");
-    const auto classic = opcodesOf("classic");
-    REQUIRE(classic.size() > 500);
-    CHECK(turtle.size() > 500);
-    CHECK(turtle.count("CMSG_PING") == 1);
-    CHECK(turtle.at("CMSG_PING") == classic.at("CMSG_PING"));
-
-    // And _remove takes one back out.
-    CHECK(classic.count("MSG_SET_DUNGEON_DIFFICULTY") == 1);
-    CHECK(turtle.count("MSG_SET_DUNGEON_DIFFICULTY") == 0);
 }
 
 TEST_CASE("the movement acknowledgements exist where they are sent",

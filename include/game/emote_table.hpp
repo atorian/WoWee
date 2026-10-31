@@ -8,14 +8,15 @@
 #include <vector>
 
 namespace wowee {
-namespace pipeline { class AssetManager; }
 namespace game {
+
+class GameData;
 
 /// What the emotes are: their chat commands, the text they print and the
 /// animation each plays, from EmotesText.dbc, EmotesTextData.dbc and
-/// Emotes.dbc (a built-in table when those cannot be read). Loaded on first
-/// use. Game data - the chat, the units' emote states and the interface all
-/// ask it; the client owns one and hands it over (GameServices::emotes).
+/// Emotes.dbc, which the game cannot go on without. Loaded on first use.
+/// Game data - the chat, the units' emote states and the interface all ask
+/// it; the client owns one and hands it over (GameServices::emotes).
 struct EmoteInfo {
     uint32_t animId = 0;
     uint32_t dbcId = 0;
@@ -29,8 +30,7 @@ struct EmoteInfo {
 
 class EmoteTable {
 public:
-    /// Without an asset manager only the built-in table is known.
-    explicit EmoteTable(pipeline::AssetManager* assets) : assets_(assets) {}
+    explicit EmoteTable(const GameData& data) : data_(data) {}
     EmoteTable(const EmoteTable&) = delete;
     EmoteTable& operator=(const EmoteTable&) = delete;
 
@@ -65,10 +65,9 @@ public:
 private:
     /// Reads the DBCs the first time anything is asked.
     void ensureLoaded() const;
-    void loadFallbackEmotes() const;
     void buildDbcIdIndex() const;
 
-    pipeline::AssetManager* assets_;
+    const GameData& data_;
     // Filled on first use, so a const question can be the one that loads them.
     mutable bool loaded_ = false;
     mutable std::unordered_map<std::string, EmoteInfo> emoteTable_;

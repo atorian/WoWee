@@ -51,6 +51,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "core/geoset_rules.hpp"
 #include "pipeline/item_textures.hpp"
 
@@ -100,21 +101,16 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
     auto* charRenderer = renderer->getCharacterRenderer();
     if (!charRenderer) return;
 
-    auto* assetManager = app.getAssetManager();
+    if (!services_.gameTables) return;
+    const pipeline::GameTables& tables = *services_.gameTables;
 
-    // Load ItemDisplayInfo.dbc for geosetGroup lookup
-    std::shared_ptr<pipeline::DBCFile> displayInfoDbc;
-    if (assetManager) {
-        displayInfoDbc = assetManager->loadDBC("ItemDisplayInfo.dbc");
-    }
-    const auto* idiL = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-    const uint32_t geosetGroup1Field = idiL ? (*idiL)["GeosetGroup1"] : 7;
-    const uint32_t geosetGroup2Field = idiL ? (*idiL)["GeosetGroup2"] : 8;
-    const uint32_t geosetGroup3Field = idiL ? (*idiL)["GeosetGroup3"] : 9;
+    const pipeline::RequiredTable displayInfoDbc(tables, "ItemDisplayInfo.dbc", "the player's equipment");
+    const uint32_t geosetGroup1Field = displayInfoDbc.column("GeosetGroup1");
+    const uint32_t geosetGroup2Field = displayInfoDbc.column("GeosetGroup2");
+    const uint32_t geosetGroup3Field = displayInfoDbc.column("GeosetGroup3");
 
     auto getGeosetGroup = [&](uint32_t displayInfoId, uint32_t fieldIdx) -> uint32_t {
-        if (!displayInfoDbc || displayInfoId == 0) return 0;
+        if (displayInfoId == 0) return 0;
         int32_t recIdx = displayInfoDbc->findRecordById(displayInfoId);
         if (recIdx < 0) return 0;
         return displayInfoDbc->getUInt32(static_cast<uint32_t>(recIdx), fieldIdx);
@@ -269,8 +265,8 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
     // and turning the helm off left the player bald under nothing.
     bool helmShown = true, cloakShown = true;
     if (auto* gh = app.getGameHandler()) {
-        helmShown = gh->isHelmVisible();
-        cloakShown = gh->isCloakVisible();
+        helmShown = gh->player().helmVisible();
+        cloakShown = gh->player().cloakVisible();
     }
 
     // Back/Cloak: inventoryType 16 → group 15
@@ -313,8 +309,7 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
         }
         // A circlet, tiara or crown sits over the hair rather than covering it,
         // and the data says which does what - see core::helmHidesHair.
-        if (auto* assets = app.getAssetManager();
-            assets && core::helmHidesHair(*assets, headDisplayId, genderId)) {
+        if (core::helmHidesHair(tables, headDisplayId, genderId)) {
             for (auto it = geosets.begin(); it != geosets.end();) {
                 if (*it != 0 && (*it / 100) == 0) it = geosets.erase(it);
                 else ++it;
@@ -387,7 +382,7 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
     if (!charRenderer) return;
 
     auto* assetManager = app.getAssetManager();
-    if (!assetManager) return;
+    if (!assetManager || !services_.gameTables) return;
 
     const auto& bodySkinPath = app.getBodySkinPath();
     const auto& underwearPaths = app.getUnderwearPaths();
@@ -398,12 +393,10 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
     // Component directory names indexed by region
 
     // Load ItemDisplayInfo.dbc
-    auto displayInfoDbc = assetManager->loadDBC("ItemDisplayInfo.dbc");
-    if (!displayInfoDbc) return;
-    const auto* idiL = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
+    const pipeline::RequiredTable displayInfoDbc(*services_.gameTables, "ItemDisplayInfo.dbc",
+                                                 "the player's equipment textures");
     uint32_t texRegionFields[8];
-    pipeline::getItemDisplayInfoTextureFields(*displayInfoDbc, idiL, texRegionFields);
+    pipeline::getItemDisplayInfoTextureFields(displayInfoDbc, texRegionFields);
 
     // Collect equipment texture regions from all equipped items
     std::vector<std::pair<int, std::string>> regionLayers;
@@ -478,9 +471,8 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
         if (cloakDisplayId > 0) {
             int32_t recIdx = displayInfoDbc->findRecordById(cloakDisplayId);
             if (recIdx >= 0) {
-                // DBC field 3 = modelTexture_1 (cape texture name)
-                const auto* dispL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-                std::string capeName = displayInfoDbc->getString(static_cast<uint32_t>(recIdx), dispL ? (*dispL)["LeftModelTexture"] : 3);
+                std::string capeName = displayInfoDbc->getString(static_cast<uint32_t>(recIdx),
+                                                                 displayInfoDbc.column("LeftModelTexture"));
                 if (!capeName.empty()) {
                     // This asked for one path only - ObjectComponents, no
                     // suffix - and a cape whose art is filed anywhere else
@@ -581,7 +573,7 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
                 const glm::vec3 rpos =
                     core::coords::canonicalToRender(glm::vec3(bp.wowX, bp.wowY, 0.0f));
                 dots.push_back({ .renderPos = rpos, .color = ui::bgGroupColor(bp.group),
-                                 .name = gameHandler.entityController().lookupName(bp.guid) });
+                                 .name = gameHandler.queryCache().lookupName(bp.guid) });
             }
         }
         wm->setPartyDots(std::move(dots));
@@ -767,7 +759,7 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
         for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
             if (!entity || entity->getType() != game::ObjectType::UNIT) continue;
             auto unit = std::static_pointer_cast<game::Unit>(entity);
-            const int rank = gameHandler.entityController().getCreatureRank(unit->getEntry());
+            const int rank = gameHandler.queryCache().getCreatureRank(unit->getEntry());
             if (rank != 2 && rank != 4) continue;      // 2 = Rare Elite, 4 = Rare
             if (unit->getHealth() == 0) continue;       // skip dead/looted rares
             rendering::WorldMapRareMark m;
@@ -967,7 +959,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         // An entry whose creature info has not arrived yet answers 0, which is
         // not 11, so an unknown unit keeps its plate rather than losing it.
         const bool isTotem =
-            !isPlayer && gameHandler.entityController().getCreatureType(unit->getEntry()) == 11;
+            !isPlayer && gameHandler.queryCache().getCreatureType(unit->getEntry()) == 11;
 
         // Pets and guardians, which the panels separate and which separate the
         // same way the game does: both are summons carrying a summoner, and
@@ -1107,7 +1099,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         }
         // Creature rank for border styling (Elite=gold double border, Boss=red, Rare=silver)
         int creatureRank = -1;
-        if (!isPlayer) creatureRank = gameHandler.entityController().getCreatureRank(unit->getEntry());
+        if (!isPlayer) creatureRank = gameHandler.queryCache().getCreatureRank(unit->getEntry());
 
         // Border: gold = currently selected, orange = targeting player, dark = default
         ImU32 borderColor = isTarget
@@ -1409,14 +1401,14 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                 snprintf(labelBuf, sizeof(labelBuf), "%s", shownName.c_str());
             else {
                 // Name query may be pending; request it now to ensure it gets resolved
-                gameHandler.queryPlayerName(unit->getGuid());
+                gameHandler.queryCache().queryPlayerName(unit->getGuid());
                 if (level > 0)
                     snprintf(labelBuf, sizeof(labelBuf), "Player (%u)", level);
                 else
                     snprintf(labelBuf, sizeof(labelBuf), "Player");
             }
         } else if (level > 0) {
-            uint32_t playerLevel = gameHandler.getPlayerLevel();
+            uint32_t playerLevel = gameHandler.player().level();
             // Show skull for units more than 10 levels above the player
             if (playerLevel > 0 && level > playerLevel + 10)
                 snprintf(labelBuf, sizeof(labelBuf), "?? %s", unitName.c_str());
@@ -1459,7 +1451,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
             }
         } else {
             // NPC subtitle (e.g. "<Reagent Vendor>", "<Innkeeper>")
-            std::string sub = gameHandler.entityController().getCachedCreatureSubName(unit->getEntry());
+            std::string sub = gameHandler.queryCache().getCachedCreatureSubName(unit->getEntry());
             if (!sub.empty()) subLabel = "<" + sub + ">";
         }
         if (!subLabel.empty()) nameY -= 10.0f;  // shift name up for sub-label line

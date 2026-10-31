@@ -15,6 +15,7 @@
 #include <glm/gtc/quaternion.hpp>
 
 namespace wowee::game {
+    class GameData;
     class TransportScene;
 }
 
@@ -293,10 +294,10 @@ public:
     void setDeckBounds(uint64_t guid, const glm::vec3& min, const glm::vec3& max);
 
     // Load transport paths from TransportAnimation.dbc
-    bool loadTransportAnimationDBC(pipeline::AssetManager* assetMgr);
+    bool loadTransportAnimationDBC(const GameData& data);
 
     // Load transport paths from TaxiPathNode.dbc (world-coordinate paths for MO_TRANSPORT)
-    bool loadTaxiPathNodeDBC(pipeline::AssetManager* assetMgr);
+    bool loadTaxiPathNodeDBC(const GameData& data);
 
     // Check if a TaxiPathNode path exists for a given taxiPathId (on any map)
     [[nodiscard]] bool hasTaxiPath(uint32_t taxiPathId) const;

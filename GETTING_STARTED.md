@@ -5,7 +5,7 @@ WoWee is a native C++ World of Warcraft client that connects to private servers.
 ## Prerequisites
 
 - **World of Warcraft Game Data** (Vanilla 1.12, TBC 2.4.3, or WotLK 3.3.5a)
-- **A Private Server** (AzerothCore, TrinityCore, Mangos, or Turtle WoW compatible)
+- **A Private Server** (AzerothCore, TrinityCore or Mangos compatible)
 - **System Requirements**: Linux, macOS, or Windows with a GPU and driver that support Vulkan 1.3 (MoltenVK on macOS), or Android 13+ on arm64
 
 ## Installation
@@ -49,7 +49,7 @@ The same builder is under **more options** → **add or rebuild assets...** on t
 .\extract_assets.ps1 "C:\Games\WoW-3.3.5a\Data" wotlk
 ```
 
-The scripts write to `Data/` in the checkout, one directory per expansion (`classic`, `turtle`, `tbc`, `wotlk`):
+The scripts write to `Data/` in the checkout, one directory per expansion (`classic`, `tbc`, `wotlk`):
 ```
 Data/
 └── expansions/
@@ -172,7 +172,7 @@ Game data is looked for in this order:
 
 ### Multi-Expansion Support
 WoWee supports:
-- **Vanilla 1.12** - Original game (and Turtle WoW 1.18)
+- **Vanilla 1.12** - Original game
 - **TBC 2.4.3** - Burning Crusade
 - **WotLK 3.3.5a** - Wrath of the Lich King
 
@@ -214,7 +214,6 @@ With more than one expansion's assets installed, an **Assets** row on the login 
 - **AzerothCore** - Full support, recommended for learning
 - **TrinityCore** - Full support, extensive customization
 - **Mangos** - Full support, solid foundation
-- **Turtle WoW** - Full support, 1.18 custom content
 
 ### Server Requirements
 - Must support Vanilla, TBC, or WotLK protocol

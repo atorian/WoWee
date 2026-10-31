@@ -283,7 +283,7 @@ World server uses different framing, implemented in `WorldSocket` (`include/netw
 
 ### Compression
 
-The auth protocol has no compressed packets. On the world side compression is per opcode and handled by the game code that reads the packet, not by the socket: `SMSG_COMPRESSED_UPDATE_OBJECT` in `src/game/entity_controller.cpp` and `SMSG_COMPRESSED_MOVES` in `src/game/movement_handler.cpp`.
+The auth protocol has no compressed packets. On the world side compression is per opcode and handled by the game code that reads the packet, not by the socket: `SMSG_COMPRESSED_UPDATE_OBJECT` in `src/game/world_handler.cpp` and `SMSG_COMPRESSED_MOVES` in `src/game/movement_handler.cpp`.
 
 ## Testing
 
@@ -413,4 +413,4 @@ The authentication system can now reliably communicate with WoW 3.3.5a servers!
 
 ---
 
-**Status:** ✅ Auth-protocol framing is complete and exercised against AzerothCore, TrinityCore, Mangos, and Turtle WoW. World-protocol framing (with header encryption) lives in `WorldSocket` and is only outlined here - see World Server Framing.
+**Status:** ✅ Auth-protocol framing is complete and exercised against AzerothCore, TrinityCore and Mangos. World-protocol framing (with header encryption) lives in `WorldSocket` and is only outlined here - see World Server Framing.

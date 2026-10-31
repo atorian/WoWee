@@ -23,6 +23,7 @@
 #include <random>
 #include <limits>
 #include <set>
+#include <tuple>
 
 namespace wowee {
 namespace rendering {
@@ -61,6 +62,35 @@ glm::vec3 particleWorldPosition(const M2Instance& inst, const M2ModelGPU& gpu, c
     const auto& em = gpu.particleEmitters[p.emitterIndex];
     if (!(em.flags & pipeline::kM2EmitterModelSpace)) return p.position;
     return glm::vec3(emitterToWorld(inst, em) * glm::vec4(p.position, 1.0f));
+}
+
+// Nearest first. Equally far ones by where they stand, then by model, so the
+// order is the same whatever order the instances were loaded in: blended
+// particles drawn in load order came out differently from one run of the
+// same scene to the next.
+template <typename Emitter>
+void sortNearestFirst(std::vector<Emitter>& emitters) {
+    std::sort(emitters.begin(), emitters.end(), [](const Emitter& a, const Emitter& b) {
+        if (a.distSq != b.distSq) return a.distSq < b.distSq;
+        const glm::vec3 p(a.inst->modelMatrix[3]);
+        const glm::vec3 q(b.inst->modelMatrix[3]);
+        if (p != q) return std::tie(p.x, p.y, p.z) < std::tie(q.x, q.y, q.z);
+        return a.inst->cachedModel->name < b.inst->cachedModel->name;
+    });
+}
+
+// The blocks of `items` starting at `starts` in reverse order, each block as
+// it was.
+template <typename T>
+void reverseBlocks(std::vector<T>& items, const std::vector<size_t>& starts, std::vector<T>& scratch) {
+    scratch.clear();
+    size_t end = items.size();
+    for (size_t b = starts.size(); b-- > 0;) {
+        scratch.insert(scratch.end(), items.begin() + static_cast<std::ptrdiff_t>(starts[b]),
+                       items.begin() + static_cast<std::ptrdiff_t>(end));
+        end = starts[b];
+    }
+    items.swap(scratch);
 }
 
 } // namespace
@@ -475,7 +505,7 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     recordM2Ribbons(cmd, perFrameSet);
 }
 
-size_t M2Renderer::gatherM2Ribbons(Frame& frame) {
+size_t M2Renderer::gatherM2Ribbons(Frame& frame, const glm::vec3& eye) {
     auto& ribbonDraws_ = frame.ribbonDraws_;
     ribbonDraws_.clear();
     // Diagnostic: WOWEE_M2_NO_RIBBONS=1 drops every M2 ribbon trail draw.
@@ -571,10 +601,26 @@ size_t M2Renderer::gatherM2Ribbons(Frame& frame) {
     // concerned (M2ModelGPU::hasEmitters). This walked every instance in the
     // world, asking each whether its model had ribbons - the walk the particle
     // pass dropped for costing 2 ms of a 16 ms frame.
+    //
+    // Nearest first, so a full buffer cuts the farthest trails short, and
+    // then drawn farthest first, over what is behind them.
+    emittersInView_.clear();
+    const auto addInView = [&](const M2Instance& inst) {
+        if (!inst.cachedModel) return;
+        const glm::vec3 toEye = glm::vec3(inst.modelMatrix[3]) - eye;
+        emittersInView_.push_back({.inst = &inst, .distSq = glm::dot(toEye, toEye)});
+    };
     for (size_t idx : scene_->particleInstanceIndices_) {
-        if (idx < scene_->instances.size()) addInstanceRibbons(scene_->instances[idx]);
+        if (idx < scene_->instances.size()) addInView(scene_->instances[idx]);
     }
-    for (const auto& [id, posed] : scene_->posedEmitters_) addInstanceRibbons(posed.inst);
+    for (const auto& [id, posed] : scene_->posedEmitters_) addInView(posed.inst);
+    sortNearestFirst(emittersInView_);
+    emitterBlocks_.clear();
+    for (const auto& e : emittersInView_) {
+        emitterBlocks_.push_back(draws.size());
+        addInstanceRibbons(*e.inst);
+    }
+    reverseBlocks(draws, emitterBlocks_, reorderedRibbons_);
 
     // Periodic diagnostic: spell ribbon draw count
     {
@@ -648,7 +694,7 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
     recordM2Particles(cmd, perFrameSet);
 }
 
-size_t M2Renderer::gatherM2Particles(Frame& frame) {
+size_t M2Renderer::gatherM2Particles(Frame& frame, const glm::vec3& eye) {
     auto& particleRuns_ = frame.particleRuns_;
     particleRuns_.clear();
     // Diagnostic: WOWEE_M2_NO_PARTICLES=1 drops every M2 particle draw, which
@@ -891,21 +937,39 @@ size_t M2Renderer::gatherM2Particles(Frame& frame) {
     // filled before a Shadowform priest's fire - created last, so listed last
     // - got any of it. The sphere is the model's and its particles' reach,
     // with room for a particle's own size.
+    //
+    // Nearest first, so a full buffer drops the farthest particles rather
+    // than whichever effect was created last; then drawn farthest first, as
+    // blending needs them.
     constexpr float kParticleSizeMargin = 2.0f;
+    emittersInView_.clear();
+    const auto addInView = [&](const M2Instance& inst) {
+        if (inst.particles.empty() || !inst.cachedModel) return;
+        const glm::vec3 toEye = glm::vec3(inst.modelMatrix[3]) - eye;
+        emittersInView_.push_back({.inst = &inst, .distSq = glm::dot(toEye, toEye)});
+    };
     for (size_t idx : scene_->particleInstanceIndices_) {
         if (idx >= scene_->instances.size()) continue;
         const M2Instance& inst = scene_->instances[idx];
         if (inst.particles.empty()) continue;
         const float radius = std::max(inst.cachedPaddedRadius, inst.particleReach) + kParticleSizeMargin;
         if (!viewFrustum.intersectsSphere(inst.cachedCullCenter, radius)) continue;
-        addInstanceParticles(inst);
+        addInView(inst);
     }
-    for (const auto& [id, posed] : scene_->posedEmitters_) addInstanceParticles(posed.inst);
+    for (const auto& [id, posed] : scene_->posedEmitters_) addInView(posed.inst);
+    sortNearestFirst(emittersInView_);
+    emitterBlocks_.clear();
+    for (const auto& e : emittersInView_) {
+        emitterBlocks_.push_back(particleRuns_.size());
+        runGroup = nullptr;
+        addInstanceParticles(*e.inst);
+    }
+    reverseBlocks(particleRuns_, emitterBlocks_, reorderedRuns_);
     if (droppedForSpace > 0) {
         static core::LogBudget overflowBudget(8, "M2 particle buffer overflows");
         if (overflowBudget.take()) {
             LOG_WARNING("M2 particle buffer full: ", droppedForSpace, " particles in view not drawn (",
-                        MAX_M2_PARTICLE_QUADS, " quads); the effects listed last lose them");
+                        MAX_M2_PARTICLE_QUADS, " quads); the farthest effects lose them");
         }
     }
 

@@ -114,13 +114,6 @@ public:
     std::string getStringInLocale(uint32_t row, uint32_t base, uint32_t locale) const;
 
     /**
-     * Get string by offset in string block
-     * @param offset Offset into string block
-     * @return String value
-     */
-    std::string getStringByOffset(uint32_t offset) const;
-
-    /**
      * Get string by offset as a view (no allocation; valid while this DBCFile lives)
      */
     std::string_view getStringViewByOffset(uint32_t offset) const;
@@ -188,37 +181,6 @@ private:
 
     bool loadJSON(const std::vector<uint8_t>& jsonData);
 };
-
-/**
- * Build the 8-element texture region field index array for ItemDisplayInfo.dbc.
- * Classic/Turtle 23-field DBCs have textures at 14-21;
- * TBC/WotLK 25-field DBCs have textures at 15-22.
- * Detects automatically from the loaded DBC's field count.
- */
-inline void getItemDisplayInfoTextureFields(const DBCFile& dbc,
-    const DBCFieldMap* layout,
-    uint32_t (&out)[8])
-{
-    // 25-field DBCs (TBC/WotLK) shift textures +1 vs 23-field (Classic/Turtle):
-    // vanilla has one InventoryIcon where the later files have two.
-    //
-    // The layouts say 15 and 14 respectively and have since 2026-08-13; before
-    // that all four said 14, and this correction was the only thing keeping
-    // WotLK's equipment textures on the right regions. It stays as a backstop
-    // rather than being deleted, and now corrects in both directions - a
-    // layout that has drifted the other way was left to read one column past
-    // the eight and take whatever follows them.
-    uint32_t base = (dbc.getFieldCount() >= 25) ? 15u : 14u;
-    if (layout) {
-        uint32_t idx = layout->field("TextureArmUpper");
-        if (idx != 0xFFFFFFFF) {
-            base = idx;
-            if (base == 14 && dbc.getFieldCount() >= 25) base = 15;
-            else if (base == 15 && dbc.getFieldCount() < 25) base = 14;
-        }
-    }
-    for (int i = 0; i < 8; i++) out[i] = base + static_cast<uint32_t>(i);
-}
 
 } // namespace pipeline
 } // namespace wowee

@@ -4,31 +4,21 @@
 #include "pipeline/liquid_types.hpp"
 
 #include "core/logger.hpp"
-#include "pipeline/dbc_layout.hpp"
 #include "pipeline/dbc_loader.hpp"
+#include "pipeline/required_table.hpp"
 
 namespace wowee {
 namespace pipeline {
 
-LiquidTypeTable LiquidTypeTable::fromDbc(const DBCFile& dbc, const DBCFieldMap* layout,
-                                         const std::string& source) {
+LiquidTypeTable LiquidTypeTable::fromDbc(const RequiredTable& liquidTypes) {
     LiquidTypeTable table;
-    if (!layout) {
-        LOG_WARNING("Liquid types: no column layout for LiquidType in ", source,
-                    " - only the four basic liquids are known, drawn without their textures");
-        return basicOnly();
-    }
-    const uint32_t idCol = layout->field("ID");
-    const uint32_t nameCol = layout->field("Name");
-    const uint32_t typeCol = layout->field("Type");
-    const uint32_t materialCol = layout->field("MaterialID");
-    const uint32_t textureCol = layout->field("Texture");
-    constexpr uint32_t kMissing = 0xFFFFFFFFu;
-    if (idCol == kMissing || typeCol == kMissing) {
-        LOG_WARNING("Liquid types: the LiquidType layout in ", source,
-                    " names no ID or Type column - only the four basic liquids are known");
-        return basicOnly();
-    }
+    const DBCFile& dbc = *liquidTypes;
+    const uint32_t idCol = liquidTypes.column("ID");
+    const uint32_t nameCol = liquidTypes.column("Name");
+    const uint32_t typeCol = liquidTypes.column("Type");
+    const uint32_t materialCol = liquidTypes.column("MaterialID");
+    const uint32_t textureCol = liquidTypes.column("Texture");
+    const std::string source = "LiquidType.dbc";
 
     for (uint32_t r = 0; r < dbc.getRecordCount(); ++r) {
         LiquidTypeInfo info;
@@ -41,9 +31,9 @@ LiquidTypeTable LiquidTypeTable::fromDbc(const DBCFile& dbc, const DBCFieldMap* 
             continue;
         }
         info.basic = static_cast<LiquidBasic>(type);
-        if (nameCol != kMissing) info.name = dbc.getString(r, nameCol);
-        if (materialCol != kMissing) info.materialId = dbc.getUInt32(r, materialCol);
-        if (textureCol != kMissing) info.texturePattern = dbc.getString(r, textureCol);
+        info.name = dbc.getString(r, nameCol);
+        info.materialId = dbc.getUInt32(r, materialCol);
+        info.texturePattern = dbc.getString(r, textureCol);
         table.add(std::move(info));
     }
     return table;

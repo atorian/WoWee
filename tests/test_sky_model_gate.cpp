@@ -14,14 +14,15 @@
 // where two skies crossfade.
 //
 // Each case is a place made up here - Light, LightParams and LightSkybox
-// files in a data root - that LightingManager reads as it reads the client's,
-// and walks into.
+// tables under the expansion's layouts - that LightingManager reads as it
+// reads the client's, and walks into.
 #include <catch_amalgamated.hpp>
 
 #include "pipeline/asset_manager.hpp"
 #include "rendering/light_coords.hpp"
 #include "rendering/lighting_manager.hpp"
 
+#include "lighting_tables.hpp"
 #include "test_support.hpp"
 
 #include <algorithm>
@@ -104,22 +105,20 @@ const std::vector<SkyRow> kSkies = {
     {FIRE_SKY_OVER, "ENVIRONMENTS\\Stars\\DeathKnightFireSkyBox.mdx", 2},
 };
 
-/// A LightingManager over a data root holding these volumes, with
+/// A LightingManager over tables holding these volumes, with
 /// LightParams row N naming LightSkybox row N.
 struct Place {
-    wowee::pipeline::AssetManager assets;
     LightingManager lighting;
 
-    Place(const char* name, const std::vector<Volume>& volumes) {
+    explicit Place(const std::vector<Volume>& volumes) {
         std::vector<std::pair<uint32_t, uint32_t>> params;
         for (const SkyRow& s : kSkies) params.emplace_back(s.id, s.id);
-        const auto root = wowee::test::makeDataRoot(name, {
-            {"dbfilesclient\\light.dbc", lightDbc(volumes)},
-            {"dbfilesclient\\lightparams.dbc", lightParamsDbc(params)},
-            {"dbfilesclient\\lightskybox.dbc", lightSkyboxDbc(kSkies)},
+        const wowee::test::LightingTables data({
+            {"Light.dbc", lightDbc(volumes)},
+            {"LightParams.dbc", lightParamsDbc(params)},
+            {"LightSkybox.dbc", lightSkyboxDbc(kSkies)},
         });
-        REQUIRE(assets.initialize(root.string()));
-        REQUIRE(lighting.initialize(&assets));
+        lighting.initialize(data.tables);
     }
 
     /// One frame at the centre of the volume at (dbcX, dbcY).
@@ -152,7 +151,7 @@ struct Place {
 }  // namespace
 
 TEST_CASE("A sky model fully up stands in for the client's own sky", "[sky]") {
-    Place place("wowee_sky_gate_opaque", {{1, 0, 1000.0f, 1000.0f, OPAQUE_SKY}});
+    Place place({{1, 0, 1000.0f, 1000.0f, OPAQUE_SKY}});
 
     // Just arrived: the model is fading in, and the client's sky is drawn
     // under it until it is all the way up.
@@ -170,7 +169,7 @@ TEST_CASE("A sky model fully up stands in for the client's own sky", "[sky]") {
 
 TEST_CASE("A sky model with LightSkybox flag 2 is drawn over the client's own sky",
           "[sky]") {
-    Place place("wowee_sky_gate_aurora", {{1, 0, 1000.0f, 1000.0f, AURORA}});
+    Place place({{1, 0, 1000.0f, 1000.0f, AURORA}});
     place.stand(0, 1000.0f, 1000.0f);
 
     // The aurora is all the way up, and the stars, sun, moons and clouds
@@ -199,7 +198,7 @@ TEST_CASE("Two skies crossfading at a border are both drawn over the client's ow
           "[sky]") {
     // Each opaque sky is half of what is overhead, and neither covers the
     // client's sky alone.
-    Place place("wowee_sky_gate_border", border(OPAQUE_SKY, OTHER_OPAQUE_SKY));
+    Place place(border(OPAQUE_SKY, OTHER_OPAQUE_SKY));
     place.stand(0, 1000.0f, 1000.0f);
 
     REQUIRE(place.weightOf(OPAQUE_SKY) > 0.4f);
@@ -210,7 +209,7 @@ TEST_CASE("Two skies crossfading at a border are both drawn over the client's ow
 TEST_CASE("Lights naming the same LightSkybox row add up to one sky", "[sky]") {
     // Two volumes across a border, both naming one sky: their halves add up to
     // the whole of what is overhead, and it stands in for the client's.
-    Place place("wowee_sky_gate_same_row", border(OPAQUE_SKY, OPAQUE_SKY));
+    Place place(border(OPAQUE_SKY, OPAQUE_SKY));
     place.stand(0, 1000.0f, 1000.0f);
 
     CHECK(place.lighting.getSkyboxLayers().size() == 1);
@@ -222,7 +221,7 @@ TEST_CASE("Two LightSkybox rows naming one model are two skies", "[sky]") {
     // DeathKnightFireSkyBox is row 39 without flag 2 and row 40 with it. At a
     // border between them each is half of what is overhead, and neither
     // covers the client's sky alone.
-    Place place("wowee_sky_gate_shared_model", border(FIRE_SKY, FIRE_SKY_OVER));
+    Place place(border(FIRE_SKY, FIRE_SKY_OVER));
     place.stand(0, 1000.0f, 1000.0f);
 
     CHECK(place.lighting.getSkyboxLayers().size() == 2);

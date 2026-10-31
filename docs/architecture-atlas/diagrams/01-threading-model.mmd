@@ -10,6 +10,7 @@ flowchart TB
     terrain["Terrain workers · обычно 4–8<br/>loadQueue → ADT / WMO / M2"]
     normals["Character NormalMapBuilder · 2<br/>64 ожидающих · ближние первыми"]
     preload["World preload · до 4<br/>отдельные потоки → join"]
+    release["background · 1<br/>освобождение tiles / моделей"]
     other["Задачи по необходимости<br/>DNS/connect · Warden · patch/hash<br/>watchdog · stats · update · recorder"]
   end
   subgraph sg_returnmain["Результаты → тот же главный поток"]
@@ -41,3 +42,4 @@ flowchart TB
   main -.->|"управление звуками"| audio
   main -->|"submit"| normals
   main -.->|"запуск / poll"| other
+  main -.->|"releaseInBackground"| release

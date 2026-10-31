@@ -8,6 +8,7 @@
 #include <chrono>
 #include <deque>
 #include <functional>
+#include <optional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -239,6 +240,30 @@ public:
     void queryAreaSpiritHealer(uint64_t guid);
     /// Join that resurrection. Nothing happens without it.
     void queueAreaSpiritHeal();
+
+    // What the object updates say of death, read here. The interface is told
+    // on `packetEvents`, among the other events of the packet they came in.
+    /// A unit's health changed (an update): a target that died is no longer
+    /// swung at nor counted among the attackers; the player's own reaching
+    /// zero is their death, and coming back from it life - or, for a ghost,
+    /// the spirit taking form.
+    void unitHealthArrived(uint64_t guid, uint32_t previous, uint32_t health,
+                           FrameXmlEvents& packetEvents);
+    /// UNIT_DYNFLAG_DEAD on the player: the server marks a death by health,
+    /// by this flag or by both, so either alone is one.
+    void playerDynamicFlagsArrived(uint32_t previous, uint32_t flags, FrameXmlEvents& packetEvents);
+    /// UNIT_FIELD_FLAGS on the player, in an update: UNIT_FLAG_IN_COMBAT is
+    /// the server's word on whether the player is in a fight.
+    void playerUnitFlagsArrived(uint32_t previous, uint32_t flags, FrameXmlEvents& packetEvents);
+    /// PLAYER_FLAGS, on a create as on an update: PLAYER_FLAGS_GHOST coming on
+    /// is the spirit released, going off a resurrection.
+    void playerFlagsArrived(uint32_t flags, FrameXmlEvents& packetEvents);
+    /// The player's create block, as a login brings it: dead by its health or
+    /// its dead flag, a ghost by its flags - and then the corpse is asked for,
+    /// so its marker is right after a reconnect. `health` and `playerFlags`
+    /// only when the block carries them.
+    void playerCreated(std::optional<uint32_t> health, uint32_t dynamicFlags,
+                       std::optional<uint32_t> playerFlags);
 
     // What the rest of the game saw of the player's death.
     /// The player's own create block said health 0 or the dead flag.

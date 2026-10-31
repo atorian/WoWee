@@ -18,6 +18,7 @@
 #include "rendering/light_coords.hpp"
 #include "rendering/lighting_manager.hpp"
 
+#include "lighting_tables.hpp"
 #include "test_support.hpp"
 
 #include <bit>
@@ -108,16 +109,14 @@ glm::vec3 worldOf(float dbcX, float dbcY) { return lightPositionToWorld(dbcX, db
 
 /// The sky's top colour a point at `pos` is lit with: one of the light's
 /// colours that goes to the screen as the file has it.
-glm::vec3 skyAt(const char* rootName, const glm::vec3& pos) {
-    wowee::pipeline::AssetManager assets;
+glm::vec3 skyAt(const glm::vec3& pos) {
     LightingManager lighting;
-    const auto root = wowee::test::makeDataRoot(rootName, {
-        {"dbfilesclient\\light.dbc", lightDbc()},
-        {"dbfilesclient\\lightparams.dbc", lightParamsDbc()},
-        {"dbfilesclient\\lightintband.dbc", lightIntBandDbc()},
+    const wowee::test::LightingTables data({
+        {"Light.dbc", lightDbc()},
+        {"LightParams.dbc", lightParamsDbc()},
+        {"LightIntBand.dbc", lightIntBandDbc()},
     });
-    REQUIRE(assets.initialize(root.string()));
-    REQUIRE(lighting.initialize(&assets));
+    lighting.initialize(data.tables);
     // Long enough for the light's smoothing to
     // settle on where the point is.
     for (int i = 0; i < 10; ++i) {
@@ -140,7 +139,7 @@ const glm::vec3 kZoneCentre = worldOf(ZONE_X, ZONE_Y);
 TEST_CASE("outside every volume a point is lit by its map's global light", "[lighting]") {
     // Five hundred yards past the zone's edge.
     const glm::vec3 pos = kZoneCentre + glm::vec3(700.0f, 0.0f, 0.0f);
-    requireColour(skyAt("light_blend_outside", pos), rgb(colourOf(GLOBAL_PARAMS)));
+    requireColour(skyAt(pos), rgb(colourOf(GLOBAL_PARAMS)));
 }
 
 TEST_CASE("across a volume's falloff its light gives way linearly to the global light",
@@ -148,7 +147,7 @@ TEST_CASE("across a volume's falloff its light gives way linearly to the global 
     // Halfway from the zone's inner radius to its outer one, on the side away
     // from the hamlet: half the zone, half the map's own light.
     const glm::vec3 pos = kZoneCentre - glm::vec3(0.0f, 150.0f, 0.0f);
-    requireColour(skyAt("light_blend_falloff", pos),
+    requireColour(skyAt(pos),
                   glm::mix(rgb(colourOf(GLOBAL_PARAMS)), rgb(colourOf(ZONE_PARAMS)), 0.5f));
 }
 
@@ -156,29 +155,27 @@ TEST_CASE("where two volumes hold a point whole, the one whose centre is nearer 
           "[lighting]") {
     // At the hamlet's centre, well inside the zone's inner radius too.
     const glm::vec3 pos = worldOf(ZONE_X + HAMLET_OFFSET * LIGHT_COORD_UNITS_PER_YARD, ZONE_Y);
-    requireColour(skyAt("light_blend_nested", pos), rgb(colourOf(HAMLET_PARAMS)));
+    requireColour(skyAt(pos), rgb(colourOf(HAMLET_PARAMS)));
 }
 
 TEST_CASE("a volume three yards across or less lights nothing", "[lighting]") {
     // At the speck's centre, inside the zone and away from the hamlet.
     const glm::vec3 pos = worldOf(ZONE_X + SPECK_OFFSET * LIGHT_COORD_UNITS_PER_YARD, ZONE_Y);
-    requireColour(skyAt("light_blend_speck", pos), rgb(colourOf(ZONE_PARAMS)));
+    requireColour(skyAt(pos), rgb(colourOf(ZONE_PARAMS)));
 }
 
 namespace {
 struct AtmosphereWorld {
-    wowee::pipeline::AssetManager assets;
+    wowee::test::LightingTables data{{
+        {"Light.dbc", lightDbc()},
+        {"LightParams.dbc", lightParamsDbc()},
+        {"LightIntBand.dbc", lightIntBandDbc()},
+    }};
     LightingManager lighting;
     explicit AtmosphereWorld(const std::string& profiles) {
-        const auto root = wowee::test::makeDataRoot("atmosphere_regions", {
-            {"dbfilesclient\\light.dbc", lightDbc()},
-            {"dbfilesclient\\lightparams.dbc", lightParamsDbc()},
-            {"dbfilesclient\\lightintband.dbc", lightIntBandDbc()},
-        });
-        const auto path = root / "atmosphere.json";
+        const auto path = wowee::test::scratchDir("atmosphere_regions") / "atmosphere.json";
         wowee::test::writeFile(path, std::vector<uint8_t>(profiles.begin(), profiles.end()));
-        REQUIRE(assets.initialize(root.string()));
-        REQUIRE(lighting.initialize(&assets, path.string()));
+        lighting.initialize(data.tables, path.string());
     }
     wowee::rendering::AtmosphereProfile at(glm::vec3 pos, float weather = 0, uint32_t zone = 0) {
         for (int i = 0; i < 16; ++i) lighting.update(.25f, pos, 0, zone, 12.f, weather);
@@ -239,7 +236,7 @@ TEST_CASE("unreadable atmosphere data falls back to the original atmosphere", "[
     CHECK(got.baseHeight == Catch::Approx(reference.baseHeight));
     CHECK(got.scaleHeight == Catch::Approx(reference.scaleHeight));
     CHECK(got.densityScale == Catch::Approx(reference.densityScale));
-    REQUIRE(broken.lighting.initialize(&broken.assets, "nonexistent-atmosphere-profiles.json"));
+    broken.lighting.initialize(broken.data.tables, "nonexistent-atmosphere-profiles.json");
     got = broken.at(kZoneCentre);
     CHECK(got.baseHeight == Catch::Approx(reference.baseHeight));
     CHECK(got.scaleHeight == Catch::Approx(reference.scaleHeight));

@@ -66,7 +66,7 @@ std::vector<uint32_t> getMaxOutGear(const char* expansion, uint8_t classId) {
     const std::unordered_map<uint8_t, std::vector<uint32_t>>* table = nullptr;
     if (expansion && std::strcmp(expansion, "wotlk") == 0)      table = &kWotlk;
     else if (expansion && std::strcmp(expansion, "tbc") == 0)   table = &kTbc;
-    else                                                        table = &kClassic; // classic/turtle
+    else                                                        table = &kClassic; // classic
 
     std::vector<uint32_t> out{kHearthstone};
     if (table) {

@@ -35,21 +35,21 @@ public:
 
     // ILootFeed
     void onContents(LootContents contents) override;
-    void onReleased() override { apply(window_.released()); }
+    void onReleased() override;
     void onSlotRemoved(uint8_t slot) override;
     void onMasterCandidates(std::vector<uint64_t> candidates) override;
     void onMoneyNotify(uint32_t amount) override;
     void onMoneyCleared() override;
     void onItemNotify(uint8_t slot) override;
     void onSlotChanged(uint8_t slot) override;
-    void onItemInfo(uint32_t itemId) override { apply(window_.itemInfoArrived(itemId)); }
+    void onItemInfo(uint32_t itemId) override;
     void onRollStarted(uint64_t objectGuid, uint32_t slot, uint32_t itemId,
                        uint32_t countdownMs, uint8_t voteMask) override;
     void onAllPassed(uint64_t objectGuid, uint32_t slot, uint32_t itemId) override;
     void onVote(uint64_t playerGuid, uint8_t rollNumber, uint8_t rollType) override;
     void onRollWon(uint64_t objectGuid, uint32_t slot, uint32_t itemId, int32_t randomPropertyId,
                    uint64_t winnerGuid, uint8_t rollNumber, uint8_t rollType) override;
-    void timePassed(float seconds) override { apply(window_.timePassed(seconds)); }
+    void timePassed(float seconds) override;
     void beginCharacter() override {
         window_.beginCharacter();
         rolls_.beginCharacter();

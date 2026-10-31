@@ -9,7 +9,7 @@
 #include "rendering/m2_glow_card.hpp"
 #include "rendering/m2_particle_emission.hpp"
 #include "core/thread_pool.hpp"
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 #include "rendering/hiz_system.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/cpu_stage_times.hpp"
@@ -36,6 +36,7 @@
 #include <unordered_set>
 #include <functional>
 #include <algorithm>
+#include <tuple>
 #include <cmath>
 #include <cstdlib>
 #include <random>
@@ -70,44 +71,23 @@ void M2Renderer::setAnimTime(M2Instance& instance, float timeMs) const {
 /// Both spawn paths need this: the one that takes a position and the one that
 /// takes a whole matrix, and each had its own copy.
 ///
-/// The bone seed is what keeps a new instance from being invisible for a
-/// frame. Bones are computed in update(), so an instance spawned mid-frame has
-/// none until the next one; copying them from a sibling of the same model
-/// draws it immediately. A seed entry pointing at an instance that has since
-/// gone is dropped rather than followed.
-void M2Renderer::seedInstanceAnimation(const M2ModelGPU& model, uint32_t modelId,
-                                       M2Instance& instance) {
-        if (!model.sequences.empty()) {
-            instance.currentSequenceIndex = 0;
-            instance.idleSequenceIndex = 0;
-            instance.animDuration = static_cast<float>(model.sequences[0].duration);
-            setAnimTime(instance, static_cast<float>(instance.random.below(std::max(1u, model.sequences[0].duration))));
-            instance.variationTimer = instance.random.uniform(rendering::M2_VARIATION_TIMER_MIN_MS, rendering::M2_VARIATION_TIMER_MAX_MS);
-        }
-
-    auto seedIt = scene_->boneSeedInstanceByModel_.find(modelId);
-    if (seedIt != scene_->boneSeedInstanceByModel_.end()) {
-        auto idxIt = scene_->instanceIndexById.find(seedIt->second);
-        if (idxIt != scene_->instanceIndexById.end() && idxIt->second < scene_->instances.size()) {
-            const auto& existing = scene_->instances[idxIt->second];
-            if (existing.modelId == modelId && !existing.boneMatrices.empty()) {
-                instance.boneMatrices = existing.boneMatrices;
-            } else {
-                scene_->boneSeedInstanceByModel_.erase(seedIt);  // stale entry
-            }
-        } else {
-            scene_->boneSeedInstanceByModel_.erase(seedIt);  // that instance is gone
-        }
+/// Bones are computed in update(), so an instance spawned mid-frame would have
+/// none until the next one and be invisible for a frame; they are computed
+/// here, at the instance's own time. They used to be copied from a sibling of
+/// the same model when there was one - whichever had loaded first - and an
+/// instance the bone loop does not step (out of view: a lamp seen only in the
+/// water) kept that sibling's pose, its light and its flame where the other
+/// one's were. Which sibling that was changed from one run to the next.
+void M2Renderer::startInstanceAnimation(const M2ModelGPU& model, M2Instance& instance) {
+    if (!model.sequences.empty()) {
+        instance.currentSequenceIndex = 0;
+        instance.idleSequenceIndex = 0;
+        instance.animDuration = static_cast<float>(model.sequences[0].duration);
+        setAnimTime(instance, static_cast<float>(instance.random.below(std::max(1u, model.sequences[0].duration))));
+        instance.variationTimer = instance.random.uniform(rendering::M2_VARIATION_TIMER_MIN_MS, rendering::M2_VARIATION_TIMER_MAX_MS);
     }
-
-    // No sibling to copy from, so pay for the bones now.
-    if (instance.boneMatrices.empty()) {
-        computeBoneMatrices(model, instance, animTimeOf(instance),
-                            globalSequenceTimeOf(instance), &cachedView_);
-    }
-    if (!instance.boneMatrices.empty()) {
-        scene_->boneSeedInstanceByModel_.emplace(modelId, instance.id);
-    }
+    computeBoneMatrices(model, instance, animTimeOf(instance), globalSequenceTimeOf(instance), &cachedView_);
+    instance.bonesPosedAtMs = animClockMs_;
 }
 
 // A model the bone loop does not step still plays its first sequence: its
@@ -161,7 +141,7 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
 
     M2Instance instance;
     instance.id = reservedId != 0 ? reservedId : nextInstanceId++;
-    instance.random = InstanceRandom(instance.id);
+    instance.random = InstanceRandom::at(position);
     instance.modelId = modelId;
     instance.position = position;
     if (mdlRef.isGroundDetail) {
@@ -195,7 +175,7 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     // Initialize animation: play first sequence (usually Stand/Idle)
     const auto& mdl = mdlRef;
     if (mdl.hasAnimation && !mdl.disableAnimation) {
-        seedInstanceAnimation(mdlRef, modelId, instance);
+        startInstanceAnimation(mdlRef, instance);
     } else {
         seedUnanimatedSequence(mdlRef, instance);
     }
@@ -262,7 +242,7 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
 
     M2Instance instance;
     instance.id = reservedId != 0 ? reservedId : nextInstanceId++;
-    instance.random = InstanceRandom(instance.id);
+    instance.random = InstanceRandom::at(position);
     instance.modelId = modelId;
     instance.position = position;  // Used for frustum culling
     instance.rotation = glm::vec3(0.0f);
@@ -293,7 +273,7 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
 
     // Initialize animation
     if (mdl2.hasAnimation && !mdl2.disableAnimation) {
-        seedInstanceAnimation(mdl2, modelId, instance);
+        startInstanceAnimation(mdl2, instance);
     } else {
         // A model with no skeleton can still have particle emitters, and their
         // rate and lifespan tracks are sampled at animTime. Starting every
@@ -582,14 +562,22 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
                                        instance.cachedIsTransportDoodad;
         if (distSq > kLOD3DistSq && !needsDistantBones) continue;
 
-        // Distance-based frame skipping: update distant bones less frequently
-        uint32_t boneInterval = 1;
+        // Distant bones are posed less often: again once the animation clock
+        // has moved on far enough. On the clock rather than every n-th call:
+        // a count of calls went on through frames in which no time passed, so
+        // which frames posed a torch depended on how many of those there had
+        // been - a scene waiting a different time for its files drew its
+        // torches and fish in a different pose.
+        double refreshMs = 0.0;
         if (!needsDistantBones) {
-            if (distSq > rendering::M2_BONE_SKIP_DIST_FAR * rendering::M2_BONE_SKIP_DIST_FAR) boneInterval = 4;
-            else if (distSq > rendering::M2_BONE_SKIP_DIST_MID * rendering::M2_BONE_SKIP_DIST_MID) boneInterval = 2;
+            if (distSq > rendering::M2_BONE_SKIP_DIST_FAR * rendering::M2_BONE_SKIP_DIST_FAR) {
+                refreshMs = rendering::M2_BONE_REFRESH_FAR_MS;
+            } else if (distSq > rendering::M2_BONE_SKIP_DIST_MID * rendering::M2_BONE_SKIP_DIST_MID) {
+                refreshMs = rendering::M2_BONE_REFRESH_MID_MS;
+            }
         }
-        instance.frameSkipCounter++;
-        if ((instance.frameSkipCounter % boneInterval) != 0) continue;
+        if (refreshMs > 0.0 && animClockMs_ - instance.bonesPosedAtMs < refreshMs) continue;
+        instance.bonesPosedAtMs = animClockMs_;
 
         scene_->boneWorkIndices_.push_back(idx);
     }
@@ -1639,9 +1627,27 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
     // turned out to be the largest single piece of CPU work in the frame.
     std::sort(sortedVisible_.begin(), sortedVisible_.end(),
               [](const VisibleEntry& a, const VisibleEntry& b) { return a.modelId < b.modelId; });
-    // Pass 2 is drawn back to front, one instance at a time.
+    // Pass 2 is drawn back to front, one instance at a time. Equally far ones
+    // by where they stand: the visible list follows the order the instances
+    // were loaded in, which differs from one run to the next.
     std::sort(transparentVisible_.begin(), transparentVisible_.end(),
-              [](const VisibleEntry& a, const VisibleEntry& b) { return a.distSq > b.distSq; });
+              [&](const VisibleEntry& a, const VisibleEntry& b) {
+                  if (a.distSq != b.distSq) return a.distSq > b.distSq;
+                  const glm::vec3& p = drawInstances_[a.draw].position;
+                  const glm::vec3& q = drawInstances_[b.draw].position;
+                  return std::tie(p.x, p.y, p.z) < std::tie(q.x, q.y, q.z);
+              });
+    // The glows far to near too: blended in load order, the same lamps summed
+    // to a different value from one run to the next.
+    const glm::vec3 eye = camera.getPosition();
+    std::sort(glowSprites_.begin(), glowSprites_.end(), [&](const GlowSprite& a, const GlowSprite& b) {
+        const float da = glm::dot(a.worldPos - eye, a.worldPos - eye);
+        const float db = glm::dot(b.worldPos - eye, b.worldPos - eye);
+        if (da != db) return da > db;
+        const glm::vec3& p = a.worldPos;
+        const glm::vec3& q = b.worldPos;
+        return std::tie(p.x, p.y, p.z) < std::tie(q.x, q.y, q.z);
+    });
 }
 void M2Renderer::collectCullOutput(uint32_t frame) {
     const auto* visibility = static_cast<const uint32_t*>(cullOutputMapped_[frame]);
@@ -1707,8 +1713,8 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
     // transparent draws). This bounds every pass before any command is recorded.
     for(const auto& draw:frame->drawInstances_)
         if(draw.model) frame->instanceEntries+=uint64_t(1)+draw.model->batches.size();
-    gatherM2Particles(*frame);
-    gatherM2Ribbons(*frame);
+    gatherM2Particles(*frame, camera.getPosition());
+    gatherM2Ribbons(*frame, camera.getPosition());
     if (shadowMatrix != glm::mat4(0.0f)) {
         gatherReusedShadowCandidates(shadowMatrix, shadowRadius);
         frame->solarDepth.reserve(shadowCandidates_.size());
@@ -2635,13 +2641,8 @@ void M2Renderer::cullShadowCasters(const glm::mat4& lightSpaceMatrix, float shad
     if (perspective) lightFrustum.extractFromMatrix(lightSpaceMatrix);
     auto insideFootprint = [&](const glm::vec3& position, float scale, const M2ModelGPU& model) {
         if (perspective) return lightFrustum.intersectsSphere(position, model.boundRadius * scale * 1.5f);
-        const glm::vec4 clip = lightSpaceMatrix * glm::vec4(position, 1.0f);
-        // Orthographic projection: w == 1, NDC directly comparable.
-        // Inflate by the model's bounding sphere converted to NDC
-        // (shadowRadius ≈ frustum half-extent; overshoot is harmless).
-        const float margin = (model.boundRadius * scale) / shadowRadius * 1.5f;
-        if (std::abs(clip.x) > 1.0f + margin || std::abs(clip.y) > 1.0f + margin) return false;
-        return clip.z >= -margin && clip.z <= 1.0f + margin;
+        return instanceInShadowFootprint(lightSpaceMatrix, position, model.boundRadius * scale,
+                                         shadowRadius);
     };
 
 

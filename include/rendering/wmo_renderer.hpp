@@ -47,6 +47,7 @@ namespace rendering {
 
 class Camera;
 class Frustum;
+struct WaterReflectionView;
 class M2Renderer;
 class RtScene;
 class VkContext;
@@ -267,12 +268,12 @@ public:
      */
     /** Pre-update mutable state (frame ID, material UBOs) on main thread before parallel render. */
     struct Frame;
-    /// `reflection` is the view-projection the water's reflection is drawn
-    /// with (waterReflectionView), none when no reflection is drawn; each
-    /// colour pass keeps only the groups its own eye can see.
+    /// `mirror`, when there is water to reflect in, fills the reflection's
+    /// draw list with what its mirror can show. Each colour pass keeps only
+    /// the groups its own eye can see.
     std::shared_ptr<const Frame> extract(const Camera& camera, const glm::vec3& viewer,
                                         const std::vector<LocalLight>& lights,
-                                        std::optional<glm::mat4> reflection = std::nullopt);
+                                        const WaterReflectionView* mirror = nullptr);
     void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
     void prepareRender();
     /// The passes that draw the buildings in colour. Each culls into a draw
@@ -485,6 +486,9 @@ private:
         uint32_t groupFlags = 0;
         bool allUntextured = false;  // True if ALL batches use fallback white texture (collision/placeholder group)
         bool isLOD = false;          // Distance-only group (skip when camera is close)
+        /// How far a banner hung in the group can swing past its box, in the
+        /// building's units; zero when it has none (clothSwayReach).
+        float swayReach = 0.0f;
 
         // Material batches (start index, count, material ID)
         struct Batch {
@@ -924,10 +928,11 @@ private:
 
 
     /// The instances the camera sees and their groups that are drawn.
-    /// `eye` is the view-projection the pass draws with - the camera's, or
-    /// the reflection's - and a group outside its volume is left out.
-    void cullView(const Camera& camera, const glm::vec3& portalViewerPos, const glm::mat4& eye,
-                  DrawList& list) const;
+    /// The camera's view into `list`, and, given a mirror, what the water's
+    /// reflection can show into `mirrorList`; a group outside the camera's
+    /// volume is left out of the view, not of the reflection.
+    void cullView(const Camera& camera, const glm::vec3& portalViewerPos, DrawList& list,
+                  const WaterReflectionView* mirror = nullptr, DrawList* mirrorList = nullptr) const;
     uint32_t recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const glm::vec3& camPos,
                     const DrawList& list, Layer layer) const;
     /// The instances, shown, and groups that reach a shadow map of this centre and reach.

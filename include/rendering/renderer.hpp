@@ -43,7 +43,7 @@
 
 namespace wowee {
 namespace rendering { class VkContext; }
-namespace pipeline { class AssetManager; }
+namespace pipeline { class AssetManager; class GameTables; }
 namespace collision { class CollisionWorld; }
 
 namespace rendering {
@@ -281,6 +281,13 @@ public:
     [[nodiscard]] bool isCapturingFrames() const { return frameSink_ != nullptr; }
     /// The assets the world was set up with (initializeRenderers); null before.
     pipeline::AssetManager* getAssetManager() const { return cachedAssetManager; }
+    /// The running expansion's tables, which the renderer's parts read their
+    /// art from (Light.dbc, SpellVisual.dbc, LiquidType.dbc, ...). Handed over
+    /// by whoever owns them before the world is set up.
+    void setGameTables(const pipeline::GameTables& tables) { gameTables_ = &tables; }
+    /// Stops the game when none were handed over: a part read a table before
+    /// the client wired them, which is a bug in the wiring.
+    [[nodiscard]] const pipeline::GameTables& gameTables() const;
 
     // Sub-system accessors (§4.2)
     LevelUpEffect* getLevelUpEffect() const { return levelUpEffect.get(); }
@@ -635,6 +642,7 @@ private:
 
     std::vector<pipeline::CustomZoneInfo> customZones_;
     pipeline::AssetManager* cachedAssetManager = nullptr;
+    const pipeline::GameTables* gameTables_ = nullptr;
 
     // Post-process pipeline - owns all FSR/FXAA/FSR2 state (extracted §4.3)
     std::unique_ptr<PostProcessPipeline> postProcessPipeline_;

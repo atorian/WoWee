@@ -1,6 +1,6 @@
 #include <catch_amalgamated.hpp>
 #include "game_harness.hpp"
-#include "game/entity_controller.hpp"
+#include "game/world_handler.hpp"
 #include "game/game_events.hpp"
 #include "core/coordinates.hpp"
 
@@ -25,7 +25,7 @@ TEST_CASE("recorded entities use the normal create, appearance update and despaw
     object.fields[game::fieldIndex(game::UF::UNIT_FIELD_MAXHEALTH)]=100;
     game::UpdateObjectData initial{};
     initial.blocks.push_back(object);
-    h.game().entityController().applyRecordedObjects(initial);
+    h.game().world().applyRecordedObjects(initial);
     auto entity=h.game().getEntityManager().getEntity(object.guid);
     REQUIRE(entity);
     const auto canonical=core::coords::serverToCanonical({5815,629,647});
@@ -39,7 +39,7 @@ TEST_CASE("recorded entities use the normal create, appearance update and despaw
     object.fields.clear();
     object.fields[game::fieldIndex(game::UF::UNIT_FIELD_DISPLAYID)]=5678;
     changed.blocks.push_back(object);
-    h.game().entityController().applyRecordedObjects(changed);
+    h.game().world().applyRecordedObjects(changed);
     REQUIRE(displays.back()==5678);
     entity->applySampledPosition(canonical.x+4,canonical.y+1,647,0.5f,true);
     REQUIRE(entity->isEntityMoving());
@@ -49,7 +49,7 @@ TEST_CASE("recorded entities use the normal create, appearance update and despaw
 
     game::UpdateObjectData gone{};
     gone.outOfRangeGuids.push_back(object.guid);
-    h.game().entityController().applyRecordedObjects(gone);
+    h.game().world().applyRecordedObjects(gone);
     REQUIRE_FALSE(h.game().getEntityManager().hasEntity(object.guid));
     REQUIRE(removed==std::vector<uint64_t>{object.guid});
 }

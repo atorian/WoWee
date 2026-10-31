@@ -208,7 +208,7 @@ bool MapWindow::open(SDL_Window* gameWindow, rendering::Renderer* renderer,
     // places. Its textures are made under this window's context.
     map_ = std::make_shared<rendering::world_map::WorldMapFacade>();
     withContext([&] {
-        if (!map_->initialize(ctx, assets)) {
+        if (!map_->initialize(ctx, assets, renderer->gameTables())) {
             LOG_WARNING("Map window: the map did not initialise");
         }
         map_->setPersistent(true);
@@ -434,7 +434,7 @@ void MapWindow::drawQuestPanel(float x, float width, float height, uint64_t now)
         return a->second.name < b->second.name;
     });
 
-    const int playerLevel = static_cast<int>(gh->getPlayerLevel());
+    const int playerLevel = static_cast<int>(gh->player().level());
     for (const auto* entry : order) {
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(0.85f, 0.75f, 0.55f, 1.0f), "%s", entry->second.name.c_str());

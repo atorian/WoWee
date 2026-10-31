@@ -16,11 +16,7 @@ namespace wowee::network { class WorldConnection; }
 namespace wowee::game {
 
 // Forward declarations
-class Entity;
-class EntityManager;
 enum class WorldState;
-struct CreatureQueryResponseData;
-struct GameObjectQueryResponseData;
 
 // ---------------------------------------------------------------------------
 // IConnectionState - server connection and authentication state
@@ -34,25 +30,6 @@ public:
     [[nodiscard]] virtual WorldState getState() const = 0;
     virtual network::WorldConnection* getSocket() = 0;
     [[nodiscard]] virtual const std::vector<uint8_t>& getSessionKey() const = 0;
-};
-
-// ---------------------------------------------------------------------------
-// IEntityAccess - entity queries and name/info caching
-// ---------------------------------------------------------------------------
-class IEntityAccess {
-public:
-    virtual ~IEntityAccess() = default;
-
-    virtual EntityManager& getEntityManager() = 0;
-    [[nodiscard]] virtual const EntityManager& getEntityManager() const = 0;
-
-    virtual void queryPlayerName(uint64_t guid) = 0;
-    virtual void queryCreatureInfo(uint32_t entry, uint64_t guid) = 0;
-    [[nodiscard]] virtual std::string getCachedPlayerName(uint64_t guid) const = 0;
-    [[nodiscard]] virtual std::string getCachedCreatureName(uint32_t entry) const = 0;
-    [[nodiscard]] virtual const std::unordered_map<uint64_t, std::string>& getPlayerNameCache() const = 0;
-    [[nodiscard]] virtual const std::unordered_map<uint32_t, CreatureQueryResponseData>& getCreatureInfoCache() const = 0;
-    [[nodiscard]] virtual const GameObjectQueryResponseData* getCachedGameObjectInfo(uint32_t entry) const = 0;
 };
 
 } // namespace wowee::game

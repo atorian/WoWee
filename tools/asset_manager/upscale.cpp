@@ -7,7 +7,7 @@
 #include <map>
 
 #include "pipeline/blp_loader.hpp"
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 #include "texture_ops.hpp"
 
 namespace wowee::assets {
@@ -104,7 +104,7 @@ UpscalePlan planUpscale(const std::string& expansionDir, int sharedLimit) {
         uint32_t vertices = 0;
         if (!modelBounds(blob, lo, hi, vertices)) continue;
 
-        const auto classification = wowee::rendering::classifyM2Model(
+        const auto classification = wowee::pipeline::classifyM2Model(
             it->path().filename().string(),
             glm::vec3(lo[0], lo[1], lo[2]), glm::vec3(hi[0], hi[1], hi[2]),
             vertices, 0);

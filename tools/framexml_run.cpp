@@ -65,6 +65,7 @@
 #include "ui/widget_renderer.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "pipeline/spell_icon_paths.hpp"
 #include "ui/interface_fonts.hpp"
 #include "ui/link_hit.hpp"
@@ -77,6 +78,11 @@
 
 #include <array>
 #include "game/emote_table.hpp"
+#include "game/stat_tables.hpp"
+#include "game/game_data.hpp"
+#include "game/flat_field_map.hpp"
+#include "game/update_field_table.hpp"
+#include "game/protocol_tables.hpp"
 #include "game/game_services.hpp"
 #include "game/character.hpp"
 #include "game/spell_handler.hpp"
@@ -89,6 +95,7 @@
 #include <cstdlib>
 #include "core/env.hpp"
 #include <string>
+#include <map>
 #include <set>
 #include <vector>
 
@@ -157,7 +164,6 @@ int main(int argc, char** argv) {
     // channels were written to it and saved from the chat panel's, so they read
     // back as whatever they had always been.
     gameScreen.setServices(wowee::ui::UIServices{});
-    wowee::ui::SettingsPanel& settingsPanel = gameScreen.getSettingsPanel();
     // No seeding of the defaults. The panel's fields already hold them - the
     // schema's default and the member's initialiser are checked against each
     // other in settings_apply_on_load - and setting them here went through
@@ -527,8 +533,13 @@ int main(int argc, char** argv) {
             static wowee::core::EventBus events;
             static wowee::game::GameServices svc;
             svc.events = &events;
-            static wowee::game::EmoteTable emotes(haveAssets ? &assets : nullptr);
+            static wowee::game::GameData gameData(
+                wowee::game::GameData::fromAssets(haveAssets ? &assets : nullptr), assetExpansions);
+            svc.gameData = &gameData;
+            static wowee::game::EmoteTable emotes(gameData);
             svc.emotes = &emotes;
+            static wowee::game::StatTables statTables(gameData);
+            svc.statTables = &statTables;
             // The two more GameHandler refuses to be built without. A store
             // in memory, so a run writes no CVar file, and a connection
             // factory that is never called: nothing here logs in.
@@ -557,44 +568,53 @@ int main(int argc, char** argv) {
             gh.charactersRef().clear();
             gh.charactersRef().push_back(ch);
             gh.setActiveCharacterGuid(kGuid);
-            gh.playerRaceRef() = wowee::game::Race::HUMAN;
             // Base stats, so the character-sheet stat conversions (crit from
-            // agility, etc.) have something to read. str, agi, sta, int, spirit.
-            gh.playerStatsArr()[0] = 150;
-            gh.playerStatsArr()[1] = 200;  // agility
-            gh.playerStatsArr()[2] = 300;
-            gh.playerStatsArr()[3] = 50;
-            gh.playerStatsArr()[4] = 60;
-            gh.serverPlayerLevelRef() = 80;  // the level the game-table lookups use
-            gh.playerCombatRatingsRef()[1] = 148;  // CR_DEFENSE_SKILL, for UnitDefense
-            gh.playerCombatRatingsRef()[2] = 100;  // CR_DODGE, for GetCombatRatingBonus
-            gh.playerCombatRatingsRef()[24] = 100; // CR_ARMOR_PENETRATION, for GetArmorPenetration
-            gh.playerManaRegenRef() = 172.5f;        // per second, not casting, for GetManaRegen
-            gh.playerManaRegenCastingRef() = 50.0f;  // per second, while casting
+            // agility, etc.) have something to read, given as the realm gives
+            // them: the player's fields at create, in the expansion's layout.
+            if (assetExpansions.getActive()) {
+                wowee::game::loadProtocolTables(gh, gameData);
+                using wowee::game::UF;
+                const auto at = [](UF f) { return wowee::game::fieldIndex(f); };
+                const auto bitsOf = [](float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; };
+                const uint16_t ratings = at(UF::PLAYER_FIELD_COMBAT_RATING_1);
+                const std::map<uint16_t, uint32_t> fields = {
+                    {at(UF::UNIT_FIELD_STAT0), 150},
+                    {at(UF::UNIT_FIELD_STAT1), 200},  // agility
+                    {at(UF::UNIT_FIELD_STAT2), 300},
+                    {at(UF::UNIT_FIELD_STAT3), 50},
+                    {at(UF::UNIT_FIELD_STAT4), 60},
+                    {at(UF::UNIT_FIELD_LEVEL), 80},  // the level the game-table lookups use
+                    {static_cast<uint16_t>(ratings + 1), 148},   // CR_DEFENSE_SKILL, for UnitDefense
+                    {static_cast<uint16_t>(ratings + 2), 100},   // CR_DODGE, for GetCombatRatingBonus
+                    {static_cast<uint16_t>(ratings + 24), 100},  // CR_ARMOR_PENETRATION, for GetArmorPenetration
+                    // per second, not casting and while casting, for GetManaRegen
+                    {at(UF::UNIT_FIELD_POWER_REGEN_FLAT_MODIFIER), bitsOf(172.5f)},
+                    {at(UF::UNIT_FIELD_POWER_REGEN_INTERRUPTED_FLAT_MODIFIER), bitsOf(50.0f)},
+                };
+                wowee::game::FlatFieldMap flat;
+                for (const auto& [key, value] : fields) flat.insert_or_assign(key, value);
+                gh.player().playerFieldsArrived(flat, /*isCreate=*/true, gh);
+            } else {
+                std::fprintf(stderr, "--player: no expansion profile in %s, so the character has no stats\n",
+                             assetPath.c_str());
+            }
             // A few spells, so the spellbook is not empty. getSpellBookTabs
             // rebuilds itself from the known set whenever the count changes,
             // so adding them is all that is needed - and without them
             // PickupSpell resolves slot 1 to nothing and every drag out of the
             // book is a no-op that looks like a broken drag.
-            if (auto* sh = gh.getSpellHandler()) {
-                for (uint32_t id : {6603u, 8690u, 133u, 168u, 116u}) sh->addKnownSpell(id);
-            }
+            for (uint32_t id : {6603u, 8690u, 133u, 168u, 116u}) gh.spells().addKnownSpell(id);
             // Use the dataset's actual icons: a question mark for every spell
             // would hide macro and spellbook icon regressions.
             std::unordered_map<uint32_t, std::string> iconPaths, spellPaths;
-            wowee::pipeline::loadSpellIconPaths(haveAssets ? &assets : nullptr, iconPaths);
             if (haveAssets) {
-                auto dbc = assets.loadDBC("Spell.dbc");
-                const auto* layouts = wowee::pipeline::getActiveDBCLayout();
-                const auto* layout = layouts ? layouts->getLayout("Spell") : nullptr;
-                if (dbc && dbc->isLoaded() && layout) {
-                    for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
-                        auto icon = iconPaths.find(dbc->getUInt32(row, (*layout)["IconID"]));
-                        if (icon != iconPaths.end())
-                            spellPaths.emplace(dbc->getUInt32(row, (*layout)["ID"]), icon->second);
-                    }
-                } else {
-                    LOG_WARNING("FrameXML fixture: Spell.dbc/layout unavailable; spell icons unavailable");
+                wowee::pipeline::loadSpellIconPaths(gameData, iconPaths);
+                const wowee::pipeline::RequiredTable dbc(gameData, "Spell.dbc", "the fixture's spell icons");
+                const uint32_t iconField = dbc.column("IconID");
+                const uint32_t idField = dbc.column("ID");
+                for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
+                    auto icon = iconPaths.find(dbc->getUInt32(row, iconField));
+                    if (icon != iconPaths.end()) spellPaths.emplace(dbc->getUInt32(row, idField), icon->second);
                 }
             }
             gh.setSpellIconPathResolver([paths = std::move(spellPaths)](uint32_t id) {
@@ -605,8 +625,8 @@ int main(int argc, char** argv) {
             // query, so the quest-log detail has something real to lay out.
             // Without it GetQuestLogQuestText answers empty and "the
             // description is blank" cannot be told from "there was no quest".
-            if (auto* qh = gh.getQuestHandler()) {
-                auto& log = qh->questLogRef();
+            {
+                auto& log = gh.quests().questLogRef();
                 if (log.empty()) {
                     wowee::game::QuestHandler::QuestLogEntry q{};
                     q.questId = 375;
@@ -626,7 +646,7 @@ int main(int argc, char** argv) {
                     q.rewardTitleId = 6;  // CharTitles.dbc id 6 = "Knight %s"
                     q.factionRewards[0] = {69, 5, 0};  // faction 69, value idx 5 -> 250 rep
                     log.push_back(q);
-                    gh.setSelectedQuestLogIndex(1);
+                    gh.quests().setSelectedQuestLogIndex(1);
                 }
             }
             if (auto* engine = mgr.getLuaEngine()) engine->setGameHandler(&gh);

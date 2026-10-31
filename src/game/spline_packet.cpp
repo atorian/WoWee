@@ -211,7 +211,7 @@ bool parseMonsterMoveSplineBodyVanilla(
     return true;
 }
 
-// ── Classic/Turtle movement update spline block ─────────────────
+// ── Classic movement update spline block ─────────────────
 
 bool parseClassicMoveUpdateSpline(
     network::Packet& packet,

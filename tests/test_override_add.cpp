@@ -8,134 +8,73 @@
 // dropped in as an override rendered white, its own new textures unreachable
 // while it was not.
 //
-// AssetManager cannot be built here - it wants an extracted tree and a 32 MB
-// manifest - so this pins the resolution order itself, in the shape
-// resolveFile implements it.
+// Each case builds a small data tree - a manifest, the extracted files it
+// names, and an override directory - and reads through a real AssetManager,
+// as the renderer does.
 #include <catch_amalgamated.hpp>
 
-#include <algorithm>
-#include <chrono>
-#include <filesystem>
-#include <fstream>
 #include <string>
+#include <vector>
 
-#include "pipeline/asset_manifest.hpp"
+#include "pipeline/asset_manager.hpp"
+#include "test_support.hpp"
 
-using namespace wowee::pipeline;
+using wowee::pipeline::AssetManager;
 
 namespace {
 
-namespace fs = std::filesystem;
-
-struct TempTree {
-    fs::path root;
-    TempTree() {
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        root = fs::temp_directory_path() /
-               ("wowee_override_test_" + std::to_string(stamp));
-        fs::remove_all(root);
-        fs::create_directories(root);
-    }
-    ~TempTree() { fs::remove_all(root); }
-
-    void write(const std::string& rel, const std::string& contents) const {
-        fs::path p = root / rel;
-        fs::create_directories(p.parent_path());
-        std::ofstream(p, std::ios::binary) << contents;
-    }
-};
-
-/// resolveFile's order, as src/pipeline/asset_manager.cpp implements it:
-/// the override's manifest-resolved path, then the override taken as a path,
-/// then the manifest, then the loose file.
-std::string resolveLikeAssetManager(const fs::path& dataPath,
-                                    const AssetManifest& manifest,
-                                    const std::string& normalizedPath) {
-    const std::string overridePath = (dataPath / "override").string();
-
-    if (const auto* entry = manifest.lookup(normalizedPath)) {
-        if (!entry->filesystemPath.empty()) {
-            std::string candidate = overridePath + "/" + entry->filesystemPath;
-            if (fs::exists(candidate)) return candidate;
-        }
-    }
-    std::string byPath = normalizedPath;
-    std::replace(byPath.begin(), byPath.end(), '\\', '/');
-    if (fs::exists(overridePath + "/" + byPath)) return overridePath + "/" + byPath;
-
-    std::string primary = manifest.resolveFilesystemPath(normalizedPath);
-    if (!primary.empty()) return primary;
-
-    std::string loose = normalizedPath;
-    std::replace(loose.begin(), loose.end(), '\\', '/');
-    loose = (dataPath / loose).string();
-    if (fs::exists(loose)) return loose;
-    return {};
+std::vector<uint8_t> bytes(const std::string& text) {
+    return std::vector<uint8_t>(text.begin(), text.end());
 }
 
-/// A two-entry manifest over the temp tree.
-AssetManifest manifestOver(const TempTree& tree) {
-    tree.write("manifest.json", R"({
-      "version": 1,
-      "basePath": ".",
-      "fileCount": 1,
-      "entries": {
-        "world\\trees\\old.blp": {"p": "world/trees/old.blp", "s": 3, "h": "00000000"}
-      }
-    })");
-    AssetManifest manifest;
-    REQUIRE(manifest.load((tree.root / "manifest.json").string()));
-    return manifest;
-}
-
-/// Whether `resolved` lies in the tree's override directory. Compared as
-/// paths rather than by searching the string: the resolver joins its pieces
-/// with '/', and the root it starts from has the platform's separator.
-bool inOverride(const TempTree& tree, const std::string& resolved) {
-    const fs::path rel = fs::path(resolved).lexically_normal()
-                             .lexically_relative((tree.root / "override").lexically_normal());
-    return !rel.empty() && *rel.begin() != "..";
+std::string text(const std::vector<uint8_t>& data) {
+    return std::string(data.begin(), data.end());
 }
 
 }  // namespace
 
 TEST_CASE("an override replaces a file the manifest knows") {
-    TempTree tree;
-    AssetManifest manifest = manifestOver(tree);
-    tree.write("world/trees/old.blp", "base");
-    tree.write("override/world/trees/old.blp", "pack");
+    // The manifest files the asset under a path of its own, as an extraction
+    // does, and the pack replaces it under that same path.
+    const auto root = wowee::test::scratchDir("wowee_override_replace");
+    wowee::test::writeFile(root / "manifest.json",
+                           bytes(R"({"version":1,"basePath":".","entries":{)"
+                                 R"("world\\trees\\old.blp":{"p":"extracted/old_tree.blp","s":4,"h":"00000000"}}})"));
+    wowee::test::writeFile(root / "extracted/old_tree.blp", bytes("base"));
+    wowee::test::writeFile(root / "override/extracted/old_tree.blp", bytes("pack"));
+    AssetManager assets;
+    REQUIRE(assets.initialize(root.string()));
 
-    const std::string resolved =
-        resolveLikeAssetManager(tree.root, manifest, "world\\trees\\old.blp");
-    REQUIRE_FALSE(resolved.empty());
-    CHECK(inOverride(tree, resolved));
+    CHECK(text(assets.readFile("world\\trees\\old.blp")) == "pack");
 }
 
 TEST_CASE("an override adds a file the manifest has never heard of") {
-    TempTree tree;
-    AssetManifest manifest = manifestOver(tree);
     // No manifest entry, no file in the tree - only the pack has it.
-    tree.write("override/world/trees/leaves_set.blp", "pack");
+    const auto root = wowee::test::makeDataRoot("wowee_override_add",
+                                                {{"world\\trees\\old.blp", bytes("base")}});
+    wowee::test::writeFile(root / "override/world/trees/leaves_set.blp", bytes("pack"));
+    AssetManager assets;
+    REQUIRE(assets.initialize(root.string()));
 
-    const std::string resolved =
-        resolveLikeAssetManager(tree.root, manifest, "world\\trees\\leaves_set.blp");
-    REQUIRE_FALSE(resolved.empty());
-    CHECK(inOverride(tree, resolved));
+    CHECK(text(assets.readFile("world\\trees\\leaves_set.blp")) == "pack");
 }
 
 TEST_CASE("without the override, the manifest still answers") {
-    TempTree tree;
-    AssetManifest manifest = manifestOver(tree);
-    tree.write("world/trees/old.blp", "base");
+    const auto root = wowee::test::makeDataRoot("wowee_override_none",
+                                                {{"world\\trees\\old.blp", bytes("base")}});
+    AssetManager assets;
+    REQUIRE(assets.initialize(root.string()));
 
-    const std::string resolved =
-        resolveLikeAssetManager(tree.root, manifest, "world\\trees\\old.blp");
-    REQUIRE_FALSE(resolved.empty());
-    CHECK_FALSE(inOverride(tree, resolved));
+    CHECK(text(assets.readFile("world\\trees\\old.blp")) == "base");
 }
 
 TEST_CASE("a path nothing has resolves to nothing") {
-    TempTree tree;
-    AssetManifest manifest = manifestOver(tree);
-    CHECK(resolveLikeAssetManager(tree.root, manifest, "world\\trees\\absent.blp").empty());
+    const auto root = wowee::test::makeDataRoot("wowee_override_absent",
+                                                {{"world\\trees\\old.blp", bytes("base")}});
+    wowee::test::writeFile(root / "override/world/trees/other.blp", bytes("pack"));
+    AssetManager assets;
+    REQUIRE(assets.initialize(root.string()));
+
+    CHECK_FALSE(assets.fileExists("world\\trees\\absent.blp"));
+    CHECK(assets.readFileOptional("world\\trees\\absent.blp").empty());
 }

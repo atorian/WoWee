@@ -424,24 +424,8 @@ std::string Extractor::detectExpansion(const std::string& mpqDir) {
         return "wotlk";
     if (hasFileCaseInsensitive(mpqDir, "expansion.mpq"))
         return "tbc";
-    // Turtle WoW uses vanilla-era base MPQs, so detect its executable and its
-    // custom high-numbered/letter patch archives before falling back to Classic.
     if (hasFileCaseInsensitive(mpqDir, "dbc.mpq") ||
         hasFileCaseInsensitive(mpqDir, "terrain.mpq")) {
-        const fs::path clientRoot = fs::path(mpqDir).parent_path();
-        if (hasFileCaseInsensitive(clientRoot, "TurtleWoW.exe")) return "turtle";
-        for (int patch = 8; patch <= 9; ++patch) {
-            if (hasFileCaseInsensitive(mpqDir,
-                                       "patch-" + std::to_string(patch) + ".mpq")) {
-                return "turtle";
-            }
-        }
-        for (char c = 'a'; c <= 'z'; ++c) {
-            if (hasFileCaseInsensitive(mpqDir,
-                                       std::string("patch-") + c + ".mpq")) {
-                return "turtle";
-            }
-        }
         return "classic";
     }
     return "";
@@ -575,7 +559,7 @@ static std::vector<std::string> discoverArchives(const std::string& mpqDirIn,
     std::vector<std::string> baseSequence;
     std::vector<std::string> localeSequence;
 
-    if (expansion == "classic" || expansion == "turtle") {
+    if (expansion == "classic") {
         baseSequence = {
             "base.mpq", "backup.mpq", "dbc.mpq", "fonts.mpq",
             "interface.mpq", "misc.mpq", "model.mpq", "sound.mpq",
@@ -1248,7 +1232,7 @@ bool Extractor::run(const Options& opts) {
 
     // Cache WoW.exe for Warden MEM_CHECK responses
     {
-        const char* exeNames[] = { "WoW.exe", "TurtleWoW.exe", "Wow.exe" };
+        const char* exeNames[] = { "WoW.exe", "Wow.exe" };
         std::vector<std::string> searchDirs = {
             fs::path(opts.mpqDir).parent_path().string(),  // WoW.exe is typically next to Data/
             opts.mpqDir                                      // Some layouts put it inside Data/
@@ -1268,11 +1252,10 @@ bool Extractor::run(const Options& opts) {
                     std::cout << "Cached " << name << " -> " << dst.string() << "\n";
 
                     // Legacy auth integrity hashes include companion DLLs. Keep
-                    // them with the executable so Classic and Turtle servers can
-                    // validate the exact distribution that was extracted.
+                    // them with the executable so Classic servers can validate
+                    // the exact distribution that was extracted.
                     for (const char* companion : {
-                            "fmod.dll", "ijl15.dll", "dbghelp.dll", "unicows.dll",
-                            "twloader.dll", "twdiscord.dll"}) {
+                            "fmod.dll", "ijl15.dll", "dbghelp.dll", "unicows.dll"}) {
                         const auto companionSrc = fs::path(dir) / companion;
                         if (!fs::exists(companionSrc)) continue;
                         const auto companionDst = dstDir / companion;

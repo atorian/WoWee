@@ -30,7 +30,7 @@ static int lua_UnitName(lua_State* L) {
             lua_pushstring(L, pm->name.c_str());
         } else if (gh && guid != 0) {
             // Try player name cache
-            const std::string& cached = gh->entityController().lookupName(guid);
+            const std::string& cached = gh->queryCache().lookupName(guid);
             if (!cached.empty()) {
                 lua_pushstring(L, cached.c_str());
             } else {
@@ -234,7 +234,7 @@ static int lua_UnitClass(lua_State* L) {
             }
             // Fallback: check name query class/race cache
             if (classId == 0 && guid != 0) {
-                classId = gh->entityController().lookupPlayerClass(guid);
+                classId = gh->queryCache().lookupPlayerClass(guid);
             }
         }
         // Nothing at all when the class is not known, because that is what WoW
@@ -736,7 +736,7 @@ static int lua_UnitCreatureFamily(lua_State* L) {
     if (!entity || entity->getType() == game::ObjectType::PLAYER) { return luaReturnNil(L); }
     auto unit = std::dynamic_pointer_cast<game::Unit>(entity);
     if (!unit) { return luaReturnNil(L); }
-    uint32_t family = gh->entityController().getCreatureFamily(unit->getEntry());
+    uint32_t family = gh->queryCache().getCreatureFamily(unit->getEntry());
     if (family == 0) { return luaReturnNil(L); }
     static constexpr const char* kFamilies[] = {
         "", "Wolf", "Cat", "Spider", "Bear", "Boar", "Crocolisk", "Carrion Bird",
@@ -803,7 +803,7 @@ static int lua_UnitStat(lua_State* L) {
     if (who == "pet") {
         if (statIdx >= 0 && statIdx < 5) val = petOf(L).getPetStats()[static_cast<size_t>(statIdx)];
     } else if (who == "player") {
-        val = gh->getPlayerStat(statIdx);
+        val = gh->player().stat(statIdx);
     }
     if (val < 0) val = 0;
     // We only have the effective value from the server; report base=effective, no buffs
@@ -817,7 +817,7 @@ static int lua_UnitStat(lua_State* L) {
 // GetDodgeChance() → percent
 static int lua_GetDodgeChance(lua_State* L) {
     auto* gh = getGameHandler(L);
-    float v = gh ? gh->getDodgePct() : 0.0f;
+    float v = gh ? gh->player().dodgePct() : 0.0f;
     lua_pushnumber(L, v >= 0 ? v : 0.0);
     return 1;
 }
@@ -825,7 +825,7 @@ static int lua_GetDodgeChance(lua_State* L) {
 // GetParryChance() → percent
 static int lua_GetParryChance(lua_State* L) {
     auto* gh = getGameHandler(L);
-    float v = gh ? gh->getParryPct() : 0.0f;
+    float v = gh ? gh->player().parryPct() : 0.0f;
     lua_pushnumber(L, v >= 0 ? v : 0.0);
     return 1;
 }
@@ -833,7 +833,7 @@ static int lua_GetParryChance(lua_State* L) {
 // GetBlockChance() → percent
 static int lua_GetBlockChance(lua_State* L) {
     auto* gh = getGameHandler(L);
-    float v = gh ? gh->getBlockPct() : 0.0f;
+    float v = gh ? gh->player().blockPct() : 0.0f;
     lua_pushnumber(L, v >= 0 ? v : 0.0);
     return 1;
 }
@@ -841,7 +841,7 @@ static int lua_GetBlockChance(lua_State* L) {
 // GetCritChance() → percent (melee crit)
 static int lua_GetCritChance(lua_State* L) {
     auto* gh = getGameHandler(L);
-    float v = gh ? gh->getCritPct() : 0.0f;
+    float v = gh ? gh->player().critPct() : 0.0f;
     lua_pushnumber(L, v >= 0 ? v : 0.0);
     return 1;
 }
@@ -849,7 +849,7 @@ static int lua_GetCritChance(lua_State* L) {
 // GetRangedCritChance() → percent
 static int lua_GetRangedCritChance(lua_State* L) {
     auto* gh = getGameHandler(L);
-    float v = gh ? gh->getRangedCritPct() : 0.0f;
+    float v = gh ? gh->player().rangedCritPct() : 0.0f;
     lua_pushnumber(L, v >= 0 ? v : 0.0);
     return 1;
 }
@@ -858,7 +858,7 @@ static int lua_GetRangedCritChance(lua_State* L) {
 static int lua_GetSpellCritChance(lua_State* L) {
     auto* gh = getGameHandler(L);
     int school = static_cast<int>(luaL_checknumber(L, 1));
-    float v = gh ? gh->getSpellCritPct(school) : 0.0f;
+    float v = gh ? gh->player().spellCritPct(school) : 0.0f;
     lua_pushnumber(L, v >= 0 ? v : 0.0);
     return 1;
 }
@@ -871,7 +871,7 @@ static int lua_GetSpellCritChance(lua_State* L) {
 static int lua_GetCombatRating(lua_State* L) {
     auto* gh = getGameHandler(L);
     int cr = static_cast<int>(luaL_checknumber(L, 1)) - 1;
-    int32_t v = gh ? gh->getCombatRating(cr) : 0;
+    int32_t v = gh ? gh->player().combatRating(cr) : 0;
     lua_pushnumber(L, v >= 0 ? v : 0);
     return 1;
 }
@@ -880,7 +880,7 @@ static int lua_GetCombatRating(lua_State* L) {
 static int lua_GetSpellBonusDamage(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnZero(L); }
-    int32_t sp = gh->getSpellPower();
+    int32_t sp = gh->player().spellPower();
     lua_pushnumber(L, sp >= 0 ? sp : 0);
     return 1;
 }
@@ -889,7 +889,7 @@ static int lua_GetSpellBonusDamage(lua_State* L) {
 static int lua_GetSpellBonusHealing(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnZero(L); }
-    int32_t v = gh->getHealingPower();
+    int32_t v = gh->player().healingPower();
     lua_pushnumber(L, v >= 0 ? v : 0);
     return 1;
 }
@@ -897,7 +897,7 @@ static int lua_GetSpellBonusHealing(lua_State* L) {
 // GetMeleeHaste / GetAttackPowerForStat stubs for addon compat
 static int lua_GetAttackPower(lua_State* L) {
     auto* gh = getGameHandler(L);
-    int32_t ap = gh ? gh->getMeleeAttackPower() : 0;
+    int32_t ap = gh ? gh->player().meleeAttackPower() : 0;
     if (ap < 0) ap = 0;
     lua_pushnumber(L, ap);  // base
     lua_pushnumber(L, 0);   // posBuff
@@ -907,7 +907,7 @@ static int lua_GetAttackPower(lua_State* L) {
 
 static int lua_GetRangedAttackPower(lua_State* L) {
     auto* gh = getGameHandler(L);
-    int32_t ap = gh ? gh->getRangedAttackPower() : 0;
+    int32_t ap = gh ? gh->player().rangedAttackPower() : 0;
     if (ap < 0) ap = 0;
     lua_pushnumber(L, ap);
     lua_pushnumber(L, 0);
@@ -1185,7 +1185,7 @@ static int lua_InCombatLockdown(lua_State* L) {
 
 static int lua_IsMounted(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->isMounted());
+    lua_pushboolean(L, gh && gh->movement().isMounted());
     return 1;
 }
 
@@ -1203,7 +1203,7 @@ static int lua_IsSwimming(lua_State* L) {
 
 static int lua_IsResting(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->isPlayerResting());
+    lua_pushboolean(L, gh && gh->player().isResting());
     return 1;
 }
 
@@ -1258,7 +1258,7 @@ static int lua_UnitXP(lua_State* L) {
     if (!gh) { return luaReturnZero(L); }
     std::string u(uid);
     toLowerInPlace(u);
-    if (u == "player") lua_pushnumber(L, gh->getPlayerXp());
+    if (u == "player") lua_pushnumber(L, gh->player().xp());
     else lua_pushnumber(L, 0);
     return 1;
 }
@@ -1270,7 +1270,7 @@ static int lua_UnitXPMax(lua_State* L) {
     std::string u(uid);
     toLowerInPlace(u);
     if (u == "player") {
-        uint32_t nlxp = gh->getPlayerNextLevelXp();
+        uint32_t nlxp = gh->player().nextLevelXp();
         lua_pushnumber(L, nlxp > 0 ? nlxp : 1);
     } else {
         lua_pushnumber(L, 1);
@@ -1282,7 +1282,7 @@ static int lua_UnitXPMax(lua_State* L) {
 static int lua_GetXPExhaustion(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnNil(L); }
-    uint32_t rested = gh->getPlayerRestedXp();
+    uint32_t rested = gh->player().restedXp();
     if (rested > 0) lua_pushnumber(L, rested);
     else lua_pushnil(L);
     return 1;
@@ -1398,7 +1398,7 @@ static int lua_UnitAttackPower(lua_State* L) {
         lua_pushnumber(L, 0);
         return 3;
     }
-    const int32_t ap = gh ? gh->getMeleeAttackPower() : -1;
+    const int32_t ap = gh ? gh->player().meleeAttackPower() : -1;
     lua_pushnumber(L, ap > 0 ? ap : 0);
     lua_pushnumber(L, 0);
     lua_pushnumber(L, 0);
@@ -1406,7 +1406,7 @@ static int lua_UnitAttackPower(lua_State* L) {
 }
 static int lua_UnitRangedAttackPower(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const int32_t ap = gh ? gh->getRangedAttackPower() : -1;
+    const int32_t ap = gh ? gh->player().rangedAttackPower() : -1;
     lua_pushnumber(L, ap > 0 ? ap : 0);
     lua_pushnumber(L, 0);
     lua_pushnumber(L, 0);
@@ -1422,9 +1422,9 @@ static int lua_UnitRangedAttackPower(lua_State* L) {
 /// the defence rating that pushes it to the crit-immunity threshold.
 static int lua_UnitDefense(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const int level = gh ? static_cast<int>(gh->getPlayerLevel()) : 1;
+    const int level = gh ? static_cast<int>(gh->player().level()) : 1;
     constexpr int kCrDefenseSkill = 1;  // 0-based CombatRating enum
-    const int modifier = gh ? static_cast<int>(gh->getCombatRatingBonus(kCrDefenseSkill)) : 0;
+    const int modifier = gh ? static_cast<int>(gh->player().combatRatingBonus(kCrDefenseSkill)) : 0;
     lua_pushnumber(L, level * 5);
     lua_pushnumber(L, modifier);
     return 2;
@@ -1492,7 +1492,7 @@ static int lua_UnitDamage(lua_State* L) {
         lua_pushnumber(L, 1.0);  // damage percent
         return 7;
     }
-    const int32_t ap = gh ? gh->getMeleeAttackPower() : -1;
+    const int32_t ap = gh ? gh->player().meleeAttackPower() : -1;
     double baseMin = 1.0, baseMax = 2.0;   // bare hands
     double speed = 2.0;
     double offMin = 0.0, offMax = 0.0;
@@ -1524,7 +1524,7 @@ static int lua_UnitDamage(lua_State* L) {
 /// UnitRangedDamage(unit) → speed, min, max, positive, negative, percent.
 static int lua_UnitRangedDamage(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const int32_t ap = gh ? gh->getRangedAttackPower() : -1;
+    const int32_t ap = gh ? gh->player().rangedAttackPower() : -1;
     const double swing = (ap > 0) ? (ap / 14.0) * 2.8 : 0.0;
     lua_pushnumber(L, 2.8);
     lua_pushnumber(L, swing);
@@ -1538,7 +1538,7 @@ static int lua_UnitRangedDamage(lua_State* L) {
 /// UnitRangedAttack(unit) → skill, modifier. As with defense, five per level.
 static int lua_UnitRangedAttack(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const int level = gh ? static_cast<int>(gh->getPlayerLevel()) : 1;
+    const int level = gh ? static_cast<int>(gh->player().level()) : 1;
     lua_pushnumber(L, level * 5);
     lua_pushnumber(L, 0);
     return 2;
@@ -1548,7 +1548,7 @@ static int lua_UnitRangedAttack(lua_State* L) {
 /// modifier.
 static int lua_UnitAttackBothHands(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const int level = gh ? static_cast<int>(gh->getPlayerLevel()) : 1;
+    const int level = gh ? static_cast<int>(gh->player().level()) : 1;
     lua_pushnumber(L, level * 5);
     lua_pushnumber(L, 0);
     lua_pushnumber(L, level * 5);
@@ -1563,8 +1563,8 @@ static int lua_UnitAttackBothHands(lua_State* L) {
 /// intellect formula - it was a flat zero, so every caster's mana regen read 0.
 static int lua_GetManaRegen(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushnumber(L, gh ? gh->getManaRegen() : 0.0);
-    lua_pushnumber(L, gh ? gh->getManaRegenCasting() : 0.0);
+    lua_pushnumber(L, gh ? gh->player().manaRegen() : 0.0);
+    lua_pushnumber(L, gh ? gh->player().manaRegenCasting() : 0.0);
     return 2;
 }
 
@@ -1584,7 +1584,7 @@ static int lua_ZeroPercent(lua_State* L) {
 // flyout read "0.00% from Agility" for every character.
 static int lua_GetCritChanceFromAgility(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushnumber(L, gh ? gh->getMeleeCritFromAgility() : 0.0);
+    lua_pushnumber(L, gh ? gh->player().meleeCritFromAgility() : 0.0);
     return 1;
 }
 
@@ -1592,7 +1592,7 @@ static int lua_GetCritChanceFromAgility(lua_State* L) {
 // gives, from the spell-crit game tables. Was a flat zero.
 static int lua_GetSpellCritChanceFromIntellect(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushnumber(L, gh ? gh->getSpellCritFromIntellect() : 0.0);
+    lua_pushnumber(L, gh ? gh->player().spellCritFromIntellect() : 0.0);
     return 1;
 }
 
@@ -1603,7 +1603,7 @@ static int lua_GetCombatRatingBonus(lua_State* L) {
     auto* gh = getGameHandler(L);
     // Same 1-based CR_* → 0-based table convention as GetCombatRating above.
     const int cr = static_cast<int>(luaL_optnumber(L, 1, 0)) - 1;
-    lua_pushnumber(L, gh ? gh->getCombatRatingBonus(cr) : 0.0);
+    lua_pushnumber(L, gh ? gh->player().combatRatingBonus(cr) : 0.0);
     return 1;
 }
 
@@ -1616,7 +1616,7 @@ static int lua_GetCombatRatingBonus(lua_State* L) {
 static int lua_GetArmorPenetration(lua_State* L) {
     auto* gh = getGameHandler(L);
     constexpr int kCrArmorPenetration = 24;  // 0-based CombatRating enum
-    lua_pushnumber(L, gh ? gh->getCombatRatingBonus(kCrArmorPenetration) : 0.0);
+    lua_pushnumber(L, gh ? gh->player().combatRatingBonus(kCrArmorPenetration) : 0.0);
     return 1;
 }
 
@@ -1627,14 +1627,14 @@ static int lua_GetUnitHealthRegenRateFromSpirit(lua_State* L) {
     auto* gh = getGameHandler(L);
     std::string unit(luaL_optstring(L, 1, "player"));
     toLowerInPlace(unit);
-    lua_pushnumber(L, (gh && unit == "player") ? gh->getHealthRegenFromSpirit() : 0.0);
+    lua_pushnumber(L, (gh && unit == "player") ? gh->player().healthRegenFromSpirit() : 0.0);
     return 1;
 }
 static int lua_GetUnitManaRegenRateFromSpirit(lua_State* L) {
     auto* gh = getGameHandler(L);
     std::string unit(luaL_optstring(L, 1, "player"));
     toLowerInPlace(unit);
-    lua_pushnumber(L, (gh && unit == "player") ? gh->getManaRegenFromSpirit() : 0.0);
+    lua_pushnumber(L, (gh && unit == "player") ? gh->player().manaRegenFromSpirit() : 0.0);
     return 1;
 }
 
@@ -1851,7 +1851,7 @@ static int lua_GetMaxCombatRatingBonus(lua_State* L) {
 /// indicator it feeds.
 static int lua_GetRestState(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const bool rested = gh && gh->getPlayerRestedXp() > 0;
+    const bool rested = gh && gh->player().restedXp() > 0;
     lua_pushnumber(L, rested ? 1 : 2);
     lua_pushstring(L, rested ? "Rested" : "Normal");
     lua_pushnumber(L, rested ? 1.5 : 1.0);
@@ -2168,7 +2168,7 @@ static int lua_UnitCreatureType(lua_State* L) {
     }
     auto unit = std::dynamic_pointer_cast<game::Unit>(entity);
     if (!unit) { lua_pushstring(L, "Unknown"); return 1; }
-    uint32_t ct = gh->entityController().getCreatureType(unit->getEntry());
+    uint32_t ct = gh->queryCache().getCreatureType(unit->getEntry());
     static constexpr const char* kTypes[] = {
         "Unknown", "Beast", "Dragonkin", "Demon", "Elemental",
         "Giant", "Undead", "Humanoid", "Critter", "Mechanical",
@@ -2196,7 +2196,7 @@ static int lua_GetPlayerInfoByGUID(lua_State* L) {
     if (guid == 0) { for (int i = 0; i < 7; i++) lua_pushnil(L); return 7; }
 
     // Look up entity name
-    std::string name = gh->entityController().lookupName(guid);
+    std::string name = gh->queryCache().lookupName(guid);
     if (name.empty() && guid == gh->getPlayerGuid()) {
         const auto& chars = gh->getCharacters();
         for (const auto& c : chars)
@@ -2239,7 +2239,7 @@ static int lua_UnitClassification(lua_State* L) {
     }
     auto unit = std::dynamic_pointer_cast<game::Unit>(entity);
     if (!unit) { lua_pushstring(L, "normal"); return 1; }
-    int rank = gh->entityController().getCreatureRank(unit->getEntry());
+    int rank = gh->queryCache().getCreatureRank(unit->getEntry());
     switch (rank) {
         case 1:  lua_pushstring(L, "elite"); break;
         case 2:  lua_pushstring(L, "rareelite"); break;
@@ -2470,7 +2470,7 @@ void registerUnitLuaAPI(lua_State* L) {
             int32_t armor = 0;
             if (gh) {
                 armor = (who == "pet") ? petOf(L).getPetResistances()[0]
-                      : (who == "player") ? gh->getArmorRating() : 0;
+                      : (who == "player") ? gh->player().armor() : 0;
             }
             if (armor < 0) armor = 0;
             lua_pushnumber(L, armor); // base
@@ -2492,7 +2492,7 @@ void registerUnitLuaAPI(lua_State* L) {
                     val = petOf(L).getPetResistances()[static_cast<size_t>(school)];
                 } else if (who == "player") {
                     // Physical is armor, and it is index zero of the same block.
-                    val = (school == 0) ? gh->getArmorRating() : gh->getResistance(school);
+                    val = (school == 0) ? gh->player().armor() : gh->player().resistance(school);
                 }
             }
             if (val < 0) val = 0;
@@ -2522,7 +2522,7 @@ void registerUnitLuaAPI(lua_State* L) {
             int index = static_cast<int>(luaL_checknumber(L, 1));
             if (!gh || index < 1) { return luaReturnNil(L); }
             uint8_t classId = gh->getPlayerClass();
-            uint8_t currentForm = gh->getShapeshiftFormId();
+            uint8_t currentForm = gh->player().shapeshiftForm();
 
             // The one table CastShapeshiftForm and GetNumShapeshiftForms
             // also read, filtered the same way. The bar walks
@@ -3296,8 +3296,8 @@ void registerUnitLuaAPI(lua_State* L) {
                 // and nothing here was reading the fields.
                 {"GetExpertise", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getExpertise() : 0);
-            lua_pushnumber(L, gh ? gh->getOffhandExpertise() : 0);
+            lua_pushnumber(L, gh ? gh->player().expertise() : 0);
+            lua_pushnumber(L, gh ? gh->player().offhandExpertise() : 0);
             return 2;
         }},
                 // Two, for the same reason and under the same guard, four
@@ -3311,8 +3311,8 @@ void registerUnitLuaAPI(lua_State* L) {
                 // whatever it is given with two decimal places and a % sign.
                 {"GetExpertisePercent", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, (gh ? gh->getExpertise() : 0) * 0.25);
-            lua_pushnumber(L, (gh ? gh->getOffhandExpertise() : 0) * 0.25);
+            lua_pushnumber(L, (gh ? gh->player().expertise() : 0) * 0.25);
+            lua_pushnumber(L, (gh ? gh->player().offhandExpertise() : 0) * 0.25);
             return 2;
         }},
                 {"GetArmorPenetration",     lua_GetArmorPenetration},

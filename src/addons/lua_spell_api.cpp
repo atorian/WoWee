@@ -1316,7 +1316,7 @@ void registerSpellLuaAPI(lua_State* L) {
                 {"CancelShapeshiftForm", [](lua_State* L) -> int {
             // Cancel current form - cast spell 0 or cancel aura
             auto* gh = getGameHandler(L);
-            if (gh && gh->getShapeshiftFormId() != 0) {
+            if (gh && gh->player().shapeshiftForm() != 0) {
                 // Cancelling a form is done by re-casting the same form spell
                 // For simplicity, just note that the server will handle it
             }
@@ -1329,7 +1329,7 @@ void registerSpellLuaAPI(lua_State* L) {
                 // framexml_lua_override_check exists to catch exactly that.
                 {"GetShapeshiftForm", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getShapeshiftFormId() : 0);
+            lua_pushnumber(L, gh ? gh->player().shapeshiftForm() : 0);
             return 1;
         }},
                 {"GetNumShapeshiftForms", [](lua_State* L) -> int {

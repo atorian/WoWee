@@ -35,9 +35,6 @@ const std::vector<Base>& bases() {
         Base{"classic", "Vanilla", "1.12",
              "The old world before either expansion touched it.",
              "classic", 5},
-        Base{"turtle", "Turtle WoW", "1.18.1",
-             "A vanilla client with custom zones and models of its own.",
-             "turtle", 6},
     };
     return all;
 }

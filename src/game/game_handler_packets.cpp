@@ -223,9 +223,9 @@ void GameHandler::registerCoreOpcodes() {
     registerHandler(Opcode::SMSG_PONG, &GameHandler::handlePong);
 
     // -----------------------------------------------------------------------
-    // World object updates + entity queries (delegated to EntityController)
+    // World object updates + entity queries (delegated to WorldHandler)
     // -----------------------------------------------------------------------
-    entityController_->registerOpcodes(dispatchTable_);
+    worldHandler_->registerOpcodes(dispatchTable_);
 
     // -----------------------------------------------------------------------
     // Item push / logout
@@ -433,7 +433,7 @@ void GameHandler::registerCoreOpcodes() {
         // Who is asking. StaticPopup_Show("CONFIRM_BINDER", arg1) puts the name
         // into "Do you want to make <name> your new home?" - without it the
         // question had a hole where the innkeeper should be.
-        fireAddonEvent("CONFIRM_BINDER", {entityController_->lookupName(binderGuid_)});
+        fireAddonEvent("CONFIRM_BINDER", {queryCacheHandler_->lookupName(binderGuid_)});
     };
     registerSkipHandler(Opcode::SMSG_SET_PHASE_SHIFT);
     dispatchTable_[Opcode::SMSG_TOGGLE_XP_GAIN] = [this](network::Packet& packet) {
@@ -563,119 +563,7 @@ void GameHandler::registerCoreOpcodes() {
 
     // (SMSG_BREAK_TARGET, SMSG_CLEAR_TARGET → CombatHandler)
 
-    // Mount/dismount
-    dispatchTable_[Opcode::SMSG_DISMOUNT] = [this](network::Packet& packet) {
-        // TBC/WotLK identify the dismounting unit with a packed GUID. Applying
-        // every nearby unit's dismount to the local player made an enemy
-        // dismounting to attack knock us off our own mount. Classic variants
-        // may send the legacy empty packet, which is implicitly local.
-        uint64_t dismountGuid = playerGuid;
-        if (packet.hasRemaining(1)) {
-            dismountGuid = packet.readPackedGuid();
-            if (dismountGuid == 0) {
-                LOG_WARNING("Ignoring SMSG_DISMOUNT with an invalid packed GUID");
-                return;
-            }
-        }
-        if (dismountGuid != playerGuid) {
-            LOG_DEBUG("Remote SMSG_DISMOUNT: guid=0x", std::hex,
-                      dismountGuid, std::dec);
-            eventBus().publish(events::OtherPlayerMounted{dismountGuid, 0});
-            return;
-        }
-
-        // Live-confirmed: CMaNGOS sends this partway through a taxi flight (its
-        // own server-side flight-completion estimate firing early, well before
-        // the client-simulated path actually finishes) - obeying it unconditionally
-        // cancelled the taxi mount animation while updateClientTaxi() kept flying
-        // the real path for several more seconds, seen as "walking in the air".
-        // But other cores (e.g. AzerothCore) finalize taxi flights server-side -
-        // dismounting/stopping the player is the *authoritative* completion
-        // signal there, not a premature estimate - so a blanket "ignore while
-        // flying" guard could let the client fly past a real landing if local
-        // spline timing ever drifts from the server's. Distinguish the two using
-        // the server's own UNIT_FLAG_TAXI_FLIGHT: still set means this is the
-        // premature-estimate quirk (ignore, let updateClientTaxi() finish
-        // naturally); already cleared means the server considers the flight
-        // genuinely over (honor it now instead of waiting on our own spline).
-        const bool onTaxiFlight = movementHandler_->isOnTaxiFlight();
-        bool serverStillTaxiing = false;
-        if (onTaxiFlight) {
-            auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
-            auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity);
-            if (playerUnit) {
-                serverStillTaxiing = (playerUnit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0;
-            }
-        }
-        const bool nearDestination = onTaxiFlight && movementHandler_->isNearTaxiDestination();
-        LOG_INFO("SMSG_DISMOUNT received: onTaxiFlight=", onTaxiFlight,
-                 " serverStillTaxiing=", serverStillTaxiing,
-                 " nearDestination=", nearDestination);
-        if (onTaxiFlight && (serverStillTaxiing || !nearDestination)) {
-            movementHandler_->deferServerTaxiCompletion();
-            LOG_WARNING("Deferring premature SMSG_DISMOUNT until taxi landing zone");
-            return;
-        }
-        if (onTaxiFlight && movementHandler_) {
-            // Authoritative server completion ahead of our own spline - stop the
-            // client flight now rather than snapping to a final waypoint that may
-            // not match where the server actually stopped us.
-            movementHandler_->finishClientTaxiFlight(/*snapToFinalWaypoint=*/false);
-            return;
-        }
-
-        // UNIT_FIELD_MOUNTDISPLAYID is the authoritative persistent mount
-        // state.  Some realms emit an isolated SMSG_DISMOUNT while processing
-        // damage (notably periodic poison) without actually removing the mount
-        // aura or clearing the update field.  Treating that transient packet as
-        // state made the local model dismount even though the player remained
-        // mounted server-side.  A real dismount also clears the update field;
-        // let that values update drive the visual when the two signals disagree.
-        if (isActiveExpansion("wotlk")) {
-            const uint16_t mountField = fieldIndex(UF::UNIT_FIELD_MOUNTDISPLAYID);
-            auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
-            const uint32_t serverMountDisplay =
-                (playerEntity && mountField != 0xFFFF && playerEntity->hasField(mountField))
-                    ? playerEntity->getField(mountField)
-                    : 0;
-            // ...unless the player asked to dismount, in which case a still-set
-            // field is exactly the staleness this packet is arriving to correct.
-            // Discarding it there threw away the one authoritative confirmation
-            // the dismount had.
-            const bool awaitingOurOwnDismount =
-                movementHandler_->isDismountPending();
-            if (serverMountDisplay != 0 && !awaitingOurOwnDismount) {
-                LOG_WARNING("Ignoring transient SMSG_DISMOUNT while authoritative mount field is ",
-                            serverMountDisplay,
-                            " casting=", spellHandler_->isCasting(),
-                            " channeling=", spellHandler_->isChanneling(),
-                            " spell=", spellHandler_->getCurrentCastSpellId());
-                return;
-            }
-            movementHandler_->clearDismountPending();
-        }
-        currentMountDisplayId_ = 0;
-        eventBus().publish(events::PlayerMountChanged{0});
-    };
-    dispatchTable_[Opcode::SMSG_MOUNTRESULT] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(4)) return;
-        uint32_t result = packet.readUInt32();
-        if (result != 4) {
-            const char* msgs[] = { "Cannot mount here.", "Invalid mount spell.",
-                                   "Too far away to mount.", "Already mounted." };
-            std::string mountErr = result < 4 ? msgs[result] : "Cannot mount.";
-            addUIError(mountErr);
-            chatHandler_->addSystemChatMessage(mountErr);
-        }
-    };
-    dispatchTable_[Opcode::SMSG_DISMOUNTRESULT] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(4)) return;
-        uint32_t result = packet.readUInt32();
-        if (result != 0) {
-            addUIError("Cannot dismount here.");
-            raiseUiError("Cannot dismount here.");
-        }
-    };
+    // (SMSG_DISMOUNT, SMSG_MOUNTRESULT, SMSG_DISMOUNTRESULT → MovementHandler)
 
     // Camera shake
     dispatchTable_[Opcode::SMSG_CAMERA_SHAKE] = [this](network::Packet& packet) {
@@ -846,20 +734,6 @@ void GameHandler::registerCoreOpcodes() {
     };
 
     // Taxi
-    dispatchTable_[Opcode::SMSG_STANDSTATE_UPDATE] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(1)) {
-            const uint8_t newStandState = packet.readUInt8();
-            if (newStandState == standState_) {
-                return;
-            }
-            standState_ = newStandState;
-            // 0=stand, 1=sit, 2-6=sit variants, 7=dead, 8=kneel. Logged because a
-            // wrong state here is indistinguishable, in-game, from a wrong animation.
-            // At warning level: the file log filters info out by default.
-            LOG_WARNING("SMSG_STANDSTATE_UPDATE: standState=", static_cast<int>(standState_));
-            eventBus().publish(events::StandStateChanged{standState_});
-        }
-    };
     dispatchTable_[Opcode::SMSG_NEW_TAXI_PATH] = [this](network::Packet& /*packet*/) {
         chatHandler_->addSystemChatMessage("New flight path discovered!");
     };
@@ -871,13 +745,13 @@ void GameHandler::registerCoreOpcodes() {
     // (SMSG_CHANNEL_LIST → moved to ChatHandler)
     // (SMSG_GROUP_SET_LEADER → moved to SocialHandler)
 
-    // Gameobject / page text (entity queries moved to EntityController::registerOpcodes)
+    // Gameobject / page text (entity queries moved to WorldHandler::registerOpcodes)
     dispatchTable_[Opcode::SMSG_GAMEOBJECT_CUSTOM_ANIM] = [this](network::Packet& packet) {
         if (packet.getSize() < 12) return;
         uint64_t guid = packet.readUInt64();
         uint32_t animId = packet.readUInt32();
         bool ownedFishingBite = false;
-        auto goEnt = entityController_->getEntityManager().getEntity(guid);
+        auto goEnt = worldHandler_->getEntityManager().getEntity(guid);
         if (goEnt && goEnt->getType() == ObjectType::GAMEOBJECT) {
             auto go = std::static_pointer_cast<GameObject>(goEnt);
             // Only treat custom animation as a bite when this is our bobber.
@@ -885,7 +759,7 @@ void GameHandler::registerCoreOpcodes() {
             // M2 animation id 0, so the packet payload itself cannot identify it.
             uint64_t createdBy = static_cast<uint64_t>(go->getField(6))
                                | (static_cast<uint64_t>(go->getField(7)) << 32);
-            auto* info = getCachedGameObjectInfo(go->getEntry());
+            auto* info = queryCacheHandler_->getCachedGameObjectInfo(go->getEntry());
             ownedFishingBite = createdBy == playerGuid && (!info || info->type == 17);
             if (ownedFishingBite) {
                 hookedFishingBobberGuid_ = guid;
@@ -1009,7 +883,7 @@ void GameHandler::registerCoreOpcodes() {
                 worldStateZoneId_ = newZoneId;
             }
         }
-        // TBC added areaId in 2.1.0; WotLK kept it. Classic/Turtle use the shorter format.
+        // TBC added areaId in 2.1.0; WotLK kept it. Classic use the shorter format.
         size_t remaining = packet.getRemainingSize();
         bool hasAreaId = isActiveExpansion("tbc") || isActiveExpansion("wotlk");
         if (hasAreaId && remaining >= 6) {
@@ -1044,68 +918,6 @@ void GameHandler::registerCoreOpcodes() {
     };
 
     // SMSG_ACTION_BUTTONS - moved to ActionBarHandler::registerOpcodes
-
-    // ---- SMSG_LEVELUP_INFO / SMSG_LEVELUP_INFO_ALT (shared body) ----
-    for (auto op : {Opcode::SMSG_LEVELUP_INFO, Opcode::SMSG_LEVELUP_INFO_ALT}) {
-        dispatchTable_[op] = [this](network::Packet& packet) {
-            // Server-authoritative level-up event.
-            // WotLK layout: uint32 newLevel + uint32 hpDelta + uint32 manaDelta + 5x uint32 statDeltas
-            if (packet.hasRemaining(4)) {
-                uint32_t newLevel = packet.readUInt32();
-                if (newLevel > 0) {
-                    // Parse stat deltas (WotLK layout has 7 more uint32s)
-                    lastLevelUpDeltas_ = {};
-                    if (packet.hasRemaining(28)) {
-                        lastLevelUpDeltas_.hp    = packet.readUInt32();
-                        lastLevelUpDeltas_.mana  = packet.readUInt32();
-                        lastLevelUpDeltas_.str   = packet.readUInt32();
-                        lastLevelUpDeltas_.agi   = packet.readUInt32();
-                        lastLevelUpDeltas_.sta   = packet.readUInt32();
-                        lastLevelUpDeltas_.intel = packet.readUInt32();
-                        lastLevelUpDeltas_.spi   = packet.readUInt32();
-                    }
-                    uint32_t oldLevel = serverPlayerLevel_;
-                    serverPlayerLevel_ = std::max(serverPlayerLevel_, newLevel);
-                    // Update the character-list entry so the selection screen
-                    // shows the correct level if the player logs out and back.
-                    for (auto& ch : characters) {
-                        if (ch.guid == playerGuid) {
-                            ch.level = serverPlayerLevel_;
-                            break;  // was 'return' - must NOT exit here or level-up notification is skipped
-                        }
-                    }
-                    if (newLevel > oldLevel) {
-                        // The sound, the ding banner, the glow and the client's
-                        // own chat line all answer this. FrameXML's chat writes
-                        // its line from PLAYER_LEVEL_UP below instead.
-                        eventBus().publish(events::PlayerLevelUp{oldLevel, newLevel});
-                        // All nine, in the order the interface reads them:
-                        // level, health, power, talent points, then the five
-                        // stats. The chat frame tests the third against zero
-                        // to decide whether to mention mana, so sending only
-                        // the level was an error on every level gained - and
-                        // every one of these was already parsed above.
-                        //
-                        // Talent points are zero: the packet carries no such
-                        // delta, and zero is what stops the interface claiming
-                        // a point was gained.
-                        fireAddonEvent("PLAYER_LEVEL_UP", {
-                            std::to_string(newLevel),
-                            std::to_string(lastLevelUpDeltas_.hp),
-                            std::to_string(lastLevelUpDeltas_.mana),
-                            "0",
-                            std::to_string(lastLevelUpDeltas_.str),
-                            std::to_string(lastLevelUpDeltas_.agi),
-                            std::to_string(lastLevelUpDeltas_.sta),
-                            std::to_string(lastLevelUpDeltas_.intel),
-                            std::to_string(lastLevelUpDeltas_.spi),
-                        });
-                    }
-                }
-            }
-            packet.skipAll();
-        };
-    }
 
     // (MSG_RAID_TARGET_UPDATE and SMSG_REAL_GROUP_UPDATE → SocialHandler, which feeds the group)
 
@@ -1197,7 +1009,7 @@ void GameHandler::registerRemainingOpcodes() {
             // Show enchant message if the player is involved
             if (enchTargetGuid == playerGuid || enchCasterGuid == playerGuid) {
                 const std::string& enchName = spellHandler_->getSpellName(enchSpellId);
-                std::string casterName = entityController_->lookupName(enchCasterGuid);
+                std::string casterName = queryCacheHandler_->lookupName(enchCasterGuid);
                 if (!enchName.empty()) {
                     std::string msg;
                     if (enchCasterGuid == playerGuid)
@@ -1291,7 +1103,7 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_SET_REST_START] = [](network::Packet& packet) {
         // The rest-XP accumulation start time, not a statement about where the
         // player is standing: the server sends it on login wherever that is.
-        // Resting itself comes from PLAYER_FLAGS_RESTING, which entity_controller
+        // Resting itself comes from PLAYER_FLAGS_RESTING, which world_handler
         // watches, because that is the one that clears again on leaving an inn.
         packet.skipAll();
     };
@@ -1326,7 +1138,7 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_INVALIDATE_PLAYER] = [this](network::Packet& packet) {
         if (packet.hasRemaining(8)) {
             uint64_t guid = packet.readUInt64();
-            entityController_->invalidatePlayerName(guid);
+            queryCacheHandler_->invalidatePlayerName(guid);
         }
     };
     // uint32 movieId - we don't play movies; acknowledge immediately.
@@ -1422,7 +1234,7 @@ void GameHandler::registerRemainingOpcodes() {
         // uint64 memberGuid - a player was added to your group via meeting stone
         if (packet.hasRemaining(8)) {
             uint64_t memberGuid = packet.readUInt64();
-            const auto& memberName = entityController_->lookupName(memberGuid);
+            const auto& memberName = queryCacheHandler_->lookupName(memberGuid);
             if (!memberName.empty()) {
                 chatHandler_->addSystemChatMessage("Meeting Stone: " + memberName +
                                      " has been added to your group.");
@@ -1914,7 +1726,7 @@ void GameHandler::registerRemainingOpcodes() {
             items[s] = packet.readUInt32();
 
         // Resolve player name
-        auto ent = entityController_->getEntityManager().getEntity(guid);
+        auto ent = worldHandler_->getEntityManager().getEntity(guid);
         std::string playerName = "Target";
         if (ent) {
             auto pl = std::dynamic_pointer_cast<Player>(ent);
@@ -2006,9 +1818,9 @@ void GameHandler::registerRemainingOpcodes() {
         if (packet.hasRemaining(1)) {
             uint64_t mentorGuid = packet.readPackedGuid();
             std::string mentorName;
-            auto ent = entityController_->getEntityManager().getEntity(mentorGuid);
+            auto ent = worldHandler_->getEntityManager().getEntity(mentorGuid);
             if (auto* unit = dynamic_cast<Unit*>(ent.get())) mentorName = unit->getName();
-            if (mentorName.empty()) mentorName = entityController_->lookupName(mentorGuid);
+            if (mentorName.empty()) mentorName = queryCacheHandler_->lookupName(mentorGuid);
             chatHandler_->addSystemChatMessage(mentorName.empty()
                 ? "A player is offering to grant you a level."
                 : (mentorName + " is offering to grant you a level."));
@@ -2110,7 +1922,7 @@ void GameHandler::registerRemainingOpcodes() {
         /*uint8_t classId  =*/ packet.readUInt8();
         // Apply display ID to the mirror image unit so it renders correctly
         if (mirrorGuid != 0 && displayId != 0) {
-            auto entity = entityController_->getEntityManager().getEntity(mirrorGuid);
+            auto entity = worldHandler_->getEntityManager().getEntity(mirrorGuid);
             if (entity) {
                 auto unit = std::dynamic_pointer_cast<game::Unit>(entity);
                 if (unit && unit->getDisplayId() == 0)
@@ -2368,6 +2180,7 @@ void GameHandler::registerRemainingOpcodes() {
 // opcode by opcode, 182 here against 320 there, no overlap - so the order
 // between them carries no meaning and a reader need not look for one.
 void GameHandler::registerDomainOpcodes() {
+    queryCacheHandler_->registerOpcodes(dispatchTable_);
     chatHandler_->registerOpcodes(dispatchTable_);
     movementHandler_->registerOpcodes(dispatchTable_);
     combatHandler_->registerOpcodes(dispatchTable_);
@@ -2382,6 +2195,7 @@ void GameHandler::registerDomainOpcodes() {
     reputationHandler_->registerOpcodes(dispatchTable_);
     realmTimeHandler_->registerOpcodes(dispatchTable_);
     weatherHandler_->registerOpcodes(dispatchTable_);
+    playerHandler_->registerOpcodes(dispatchTable_);
 }
 
 void GameHandler::registerOpcodeHandlers() {
@@ -2591,7 +2405,7 @@ void GameHandler::enqueueIncomingPacketFront(network::Packet&& packet) {
     pendingIncomingPackets_.emplace_front(std::move(packet));
 }
 
-// enqueueUpdateObjectWork and processPendingUpdateObjectWork moved to EntityController
+// enqueueUpdateObjectWork and processPendingUpdateObjectWork moved to WorldHandler
 
 void GameHandler::processQueuedIncomingPackets() {
     const auto start = std::chrono::steady_clock::now();
@@ -2635,7 +2449,7 @@ void GameHandler::processQueuedIncomingPackets() {
         lagEpisode = {};
     }
 
-    if (pendingIncomingPackets_.empty() && !entityController_->hasPendingUpdateObjectWork()) {
+    if (pendingIncomingPackets_.empty() && !worldHandler_->hasPendingUpdateObjectWork()) {
         return;
     }
 
@@ -2654,9 +2468,9 @@ void GameHandler::processQueuedIncomingPackets() {
             break;
         }
 
-        if (entityController_->hasPendingUpdateObjectWork()) {
-            entityController_->processPendingUpdateObjectWork(start, budgetMs);
-            if (entityController_->hasPendingUpdateObjectWork()) {
+        if (worldHandler_->hasPendingUpdateObjectWork()) {
+            worldHandler_->processPendingUpdateObjectWork(start, budgetMs);
+            if (worldHandler_->hasPendingUpdateObjectWork()) {
                 break;
             }
             continue;
@@ -2687,7 +2501,7 @@ void GameHandler::processQueuedIncomingPackets() {
         ++processed;
     }
 
-    if (entityController_->hasPendingUpdateObjectWork()) {
+    if (worldHandler_->hasPendingUpdateObjectWork()) {
         return;
     }
 

@@ -73,6 +73,27 @@
   failure its own result, log it once, and stop retrying.
 - Log a failure once per id/path, not once per frame.
 
+## Game data: what an expansion uses is required
+
+User decision (2026-10-30, widened 2026-10-31). It holds in every layer that
+reads game data - `game`, `core`, `ui`, `rendering`, `audio`, `pipeline`.
+
+- Each expansion declares the game data it uses: every DBC table and every
+  file of its own in `Data/expansions/<expansion>/` (`dbc_layouts.json`,
+  `opcodes.json`, `update_fields.json`). The client reads nothing outside
+  that list.
+- Data on the running expansion's list that is missing, cannot be read, or
+  is narrower than the columns read stops the game: `LOG_FATAL` naming the
+  file, the expansion and what needed it, then `std::abort()`. No default
+  value, built-in copy, zero, guess or "not loaded" branch in its place.
+- The list is checked when the expansion's data is opened, so a broken
+  install stops at start, not when a player first opens the window that
+  reads the table.
+- A table the running expansion does not have is not on its list and is
+  never opened: no load, no warning. What needs it is a feature that
+  expansion does not have, and the code that offers it asks the expansion
+  whether it has the feature - never whether a file happened to load.
+
 ## Tests test behaviour
 
 A test says what the code does in a situation: given this input or this state,
@@ -104,6 +125,13 @@ whatever the code looks like inside.
   context's library; fakes implement its ports and the real `core::EventBus`
   delivers its events. What a packet does end to end is still tested through
   `GameHarness`.
+- **What runs on the GPU is tested on the GPU.** User decision (2026-10-31):
+  a shader's behaviour is not tested by compiling it, or a copy of the
+  pipeline around it, for the CPU - that tests a replica, and misses what the
+  GPU does differently (dispatch order, barriers, formats, precision). It is
+  an acceptance test: a scene drawn by `scene_render` and the picture checked
+  (`tools/scene_render/check_*.py`). Those are slow and run apart from the
+  unit tests.
 
 ## Layers
 
@@ -177,6 +205,9 @@ A renderer edit rebuilds only the renderer and this; a shader edit only its
 built shaders and the rest of `assets/` into `build-dev/bin`, where it loads
 them from - build it before every run. Use it before reaching for the client,
 and keep it building: nothing in `wowee_render` may need the game to link.
+
+User decision (2026-10-31): at most two `scene_render` runs at once. Six in
+parallel overloaded the Mac. To compare runs, render two, then two more.
 
 ### Testing the game without the client
 
@@ -254,9 +285,9 @@ looks, not the way the old code does.
 
 - Each domain handler — `ChatHandler`, `CombatHandler`, `InventoryHandler`,
   `MovementHandler`, `QuestHandler`, `SocialHandler`, `SpellHandler`,
-  `WardenHandler`, `EntityController`, `AccountDataHandler`,
-  `ActionBarHandler`, `PetHandler`, `ReputationHandler`, `RealmTimeHandler`
-  — owns the opcodes of its area. A new opcode goes into that handler's
+  `WardenHandler`, `WorldHandler`, `AccountDataHandler`,
+  `ActionBarHandler`, `PetHandler`, `ReputationHandler`, `RealmTimeHandler`,
+  `PlayerHandler`, `QueryCacheHandler` — owns the opcodes of its area. A new opcode goes into that handler's
   `registerOpcodes`, never
   into `GameHandler::registerCoreOpcodes`/`registerRemainingOpcodes`. Domain
   handlers register last and overwrite the table, so a second registration in
@@ -314,11 +345,12 @@ looks, not the way the old code does.
 
 ### A handler is built from what it uses
 
-A handler is built from interfaces, never from `GameHandler&`. The older
-handlers take `GameHandler& owner` and reach through `owner_.` for anything -
-the socket, another handler's state, the facade; do not copy them.
-`AccountDataHandler`, `ActionBarHandler`, `InventoryHandler`, `PetHandler`
-and `SpellHandler` are the pattern:
+A handler is built from interfaces, never from `GameHandler&`. Since
+2026-10-31 none is: the last, `WorldHandler`, takes `WorldQueries`. Do not
+bring one back by reaching through a `GameHandler& owner_` for the socket,
+another handler's state or the facade. `AccountDataHandler`,
+`ActionBarHandler`, `InventoryHandler`, `PetHandler` and `SpellHandler` are
+the pattern:
 
 ```cpp
 AccountDataHandler(PacketSender& sender, FrameXmlEvents& frameXml,
@@ -328,7 +360,7 @@ ActionBarHandler(PacketSender& sender, FrameXmlEvents& frameXml,
 InventoryHandler(PacketSender& sender, FrameXmlEvents& frameXml,
                  core::EventBus& events, ChatLog& chat,
                  InventoryQueries& queries, const core::CVarStore& cvars,
-                 pipeline::AssetManager* assets);
+                 const GameData& data);
 ```
 
 State a domain keeps for the character goes in one struct it assigns whole
@@ -348,6 +380,7 @@ What there is to take:
 | a refusal on the error line ("That bag is full.") | `raiseUiError(bus, frameXml, text)` | `game/ui_errors.hpp` |
 | say what happened, hear another domain | `core::EventBus&` | `core/event_bus.hpp`, `game/game_events.hpp` |
 | a value from `GameServices` | that field alone (`std::string cacheRoot`, `const EmoteTable&`), not the struct | `game/game_services.hpp` |
+| read a client table (`Spell.dbc`, `TaxiNodes.dbc`, ...) | `const GameData&`: `table(dbc, fields, neededFor)` returns it or stops the game; a `GameHarness` test gives rows with `dbc(...)` | `game/game_data.hpp` |
 | ask something of another part of the game | a small interface of your own, in your header (`ActionBarQueries`) | |
 
 `GameHandler` implements these and hands itself over as each one; the handler
@@ -355,7 +388,7 @@ never sees the class.
 
 - A handler does not take `GameHandler&`. `tools/domain_shape_check.py`
   counts the handlers that do and the reaches through `owner_.` in
-  `src/game`; `sweep_guard` holds both and they only go down.
+  `src/game`; `sweep_guard` holds both at zero.
 - Built in `GameHandler`'s constructor, registered in `registerDomainOpcodes`,
   reached from outside through an accessor returning a reference
   (`accountData()`, `actionBar()`).

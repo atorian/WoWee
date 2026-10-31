@@ -303,7 +303,7 @@ For each realm:
 
 `RealmListResponseParser::parse(packet, response, legacyVanillaLayout)` reads
 whichever the caller asks for. The login screen asks for the vanilla layout
-when the active expansion is `classic` or `turtle`, or its protocol version is
+when the active expansion is `classic`, or its protocol version is
 3 or lower (`ClientInfo::legacyVanillaRealmList`), since vmangos-derived 1.12
 realms speak auth protocol 8 while still sending the vanilla entries. If a
 modern-layout parse comes out with an empty realm name, the entry is re-read as

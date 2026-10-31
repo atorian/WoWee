@@ -5,25 +5,26 @@
 
 #include <vector>
 
-namespace wowee::pipeline { class AssetManager; }
-
 namespace wowee::game {
 
+class GameData;
 class PacketSender;
 class ChatLog;
 class FrameXmlEvents;
 class ReputationQueries;
 
-/// Faction.dbc, read through the asset manager.
+/// Faction.dbc, read through the game's tables: one that cannot be read
+/// stops the game.
 class FactionData final : public reputation::IFactionData {
 public:
-    explicit FactionData(pipeline::AssetManager* assets) : assets_(assets) {}
+    explicit FactionData(const GameData& data) : data_(data) {}
 
-    [[nodiscard]] bool ready() const override;
+    /// Always: the table is there whenever it is asked for, or the game stops.
+    [[nodiscard]] bool ready() const override { return true; }
     std::vector<reputation::FactionRecord> factions() override;
 
 private:
-    pipeline::AssetManager* assets_;
+    const GameData& data_;
 };
 
 /// Reputation's port: the player's race and class, and the requests over the

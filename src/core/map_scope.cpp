@@ -1,7 +1,7 @@
 #include "core/map_scope.hpp"
 #include "core/logger.hpp"
 #include "core/player_view.hpp"
-#include "game/entity_controller.hpp"
+#include "game/world_handler.hpp"
 #include "game/game_handler.hpp"
 #include "game/transport_manager.hpp"
 #include "rendering/animation_controller.hpp"
@@ -22,7 +22,7 @@ MapScope::MapScope(const Services& services, uint32_t mapId)
     // time, and a create that arrived before this scope existed - in the same
     // frame as the login, or kept across a far teleport - had no scene to go
     // to. The entities are the authority; present them once, here.
-    services_.game.entityController().announceObjectsInView();
+    services_.game.world().announceObjectsInView();
 }
 
 MapScope::MapScope(const Services& services, WorldLoader& loader, WorldLoader::Entry entry)

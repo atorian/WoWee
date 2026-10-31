@@ -43,7 +43,8 @@ const wowee::game::QuestHandler::QuestLogEntry& logEntry(GameHarness& h, uint32_
 /// writes it on 3.3.5a: sixty-five numeric fields, then the strings - title,
 /// objectives, details, area description, completion text.
 std::vector<uint8_t> questQuery(uint32_t questId, const std::vector<std::string>& strings,
-                                uint32_t collectItem = 0, uint32_t collectCount = 0) {
+                                uint32_t collectItem = 0, uint32_t collectCount = 0,
+                                int32_t killTarget = 0, uint32_t killCount = 0) {
     Body b;
     b.u32(questId).u32(2).u32(50).u32(45).u32(38);   // id, method, level, min level, zone
     b.u32(0).u32(0);                                  // type, suggested players
@@ -58,10 +59,12 @@ std::vector<uint8_t> questQuery(uint32_t questId, const std::vector<std::string>
     b.zeros(5 * 3 * 4);                               // five reputations: ids, values, overrides
     b.u32(0).u32(0).u32(0).u32(0);                    // point of interest
     for (const auto& s : strings) b.cstr(s);
-    if (collectItem != 0) {
+    if (collectItem != 0 || killTarget != 0) {
         // The objectives: four {creature or object, count, dropped item,
-        // count} records, then six {required item, count}.
-        b.zeros(4 * 4 * 4);
+        // count} records - an object's id negative - then six {required
+        // item, count}.
+        b.u32(static_cast<uint32_t>(killTarget)).u32(killCount).u32(0).u32(0);
+        b.zeros(3 * 4 * 4);
         b.u32(collectItem).u32(collectCount);
         b.zeros(5 * 2 * 4);
     }
@@ -248,4 +251,71 @@ TEST_CASE("the next character is offered none of the last one's quests", "[quest
     CHECK_FALSE(h.game().quests().hasPendingSharedQuest());
     CHECK_FALSE(h.game().quests().isQuestDetailsOpen());
     CHECK_FALSE(h.game().quests().isQuestTracked(11));
+}
+
+TEST_CASE("an objective's target named at last has the quest log redrawn, and only then",
+          "[quest][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.receive(Opcode::SMSG_QUESTGIVER_QUEST_DETAILS, offer(kMarshal, 11, "Riverpaw Gnoll Bounty"));
+    h.pump();
+    h.game().quests().acceptQuest();
+    // Kill ten of creature 117.
+    h.receive(Opcode::SMSG_QUEST_QUERY_RESPONSE,
+              questQuery(11, {"Riverpaw Gnoll Bounty", "Kill 10 Riverpaw Gnolls.", "", "", ""}, 0, 0, 117, 10));
+    h.pump();
+    h.clearRecords();
+
+    // A creature no objective is about: nothing to redraw.
+    h.receive(Opcode::SMSG_CREATURE_QUERY_RESPONSE,
+              Body().u32(299).cstr("Young Wolf").cstr("").cstr("").cstr("").cstr("").cstr("").zeros(16).bytes());
+    h.pump();
+    CHECK(h.addonEvents("QUEST_LOG_UPDATE").empty());
+
+    // The objective's own creature: the log and the tracker look again.
+    h.receive(Opcode::SMSG_CREATURE_QUERY_RESPONSE,
+              Body().u32(117).cstr("Riverpaw Gnoll").cstr("").cstr("").cstr("").cstr("").cstr("").zeros(16).bytes());
+    h.pump();
+    CHECK(h.addonEvents("QUEST_LOG_UPDATE").size() == 1);
+}
+
+TEST_CASE("the quest log's category headings are QuestSort.dbc's names", "[quest][harness][tables]") {
+    GameHarness h;
+    h.dbc("QuestSort.dbc", 18, {{{0, 61}, {1, "Warlock"}}, {{0, 141}, {1, "Seasonal"}}});
+    h.enterWorld();
+
+    CHECK(h.game().quests().getQuestSortName(141) == "Seasonal");
+    CHECK(h.game().quests().getQuestSortName(61) == "Warlock");
+    CHECK(h.game().quests().getQuestSortName(7).empty());
+}
+
+TEST_CASE("a quest's reward experience is its level's QuestXP.dbc column for its difficulty",
+          "[quest][harness][tables]") {
+    GameHarness h;
+    // Level, then ten difficulty columns; column 0 is zero at every level.
+    h.dbc("QuestXP.dbc", 11, {{{0, 10}, {1, 0}, {2, 45}, {3, 90}, {6, 450}},
+                              {{0, 11}, {1, 0}, {2, 50}, {3, 100}, {6, 500}}});
+    h.enterWorld();
+
+    CHECK(h.game().quests().getQuestRewardXP(10, 5) == 450);
+    CHECK(h.game().quests().getQuestRewardXP(11, 2) == 100);
+    // No difficulty, as every quest before WotLK names none: no experience,
+    // without the file.
+    CHECK(h.game().quests().getQuestRewardXP(10, 0) == 0);
+}
+
+TEST_CASE("a quest's reputation is QuestFactionReward.dbc's, a gain from row 1 and a loss from row 2",
+          "[quest][harness][tables]") {
+    GameHarness h;
+    h.dbc("QuestFactionReward.dbc", 11, {
+        {{0, 1}, {1, 0}, {2, 10}, {3, 25}, {4, 75}, {5, 150}, {6, 250}},
+        {{0, 2}, {1, 0}, {2, -10}, {3, -25}, {4, -75}, {5, -150}, {6, -250}},
+    });
+    h.enterWorld();
+
+    // In hundredths, as GetQuestLogRewardFactionInfo answers.
+    CHECK(h.game().quests().getQuestRewardReputation(5, 0) == 25000);
+    CHECK(h.game().quests().getQuestRewardReputation(-3, 0) == -7500);
+    // The override is in hundredths already and wins.
+    CHECK(h.game().quests().getQuestRewardReputation(5, 1234) == 1234);
 }

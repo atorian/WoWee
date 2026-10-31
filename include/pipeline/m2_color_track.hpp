@@ -37,16 +37,6 @@ inline constexpr uint32_t m2ColorTrackKeysOffset(bool wotlk) {
     return wotlk ? 12u : 20u;
 }
 
-/// Size of one M2Color record: two tracks back to back.
-inline constexpr uint32_t m2ColorRecordSize(bool wotlk) {
-    return wotlk ? 40u : 56u;
-}
-
-/// Byte offset of the alpha track within an M2Color record.
-inline constexpr uint32_t m2ColorAlphaTrackOffset(bool wotlk) {
-    return wotlk ? 20u : 28u;
-}
-
 /// Find the first colour key of the track at `trackOffset`.
 ///
 /// `readU32` reads a little-endian uint32 at a byte offset. Returns false and

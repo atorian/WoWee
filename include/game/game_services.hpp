@@ -7,7 +7,7 @@
 
 namespace wowee {
 namespace pipeline { class AssetManager; }
-namespace game { class ExpansionRegistry; class EmoteTable; class MovementCollision; }
+namespace game { class ExpansionRegistry; class EmoteTable; class GameData; class MovementCollision; class StatTables; }
 namespace core { class EventBus; class CVarStore; }
 namespace contacts { class IContactsServerFeed; }
 namespace who { class IWhoFeed; }
@@ -44,6 +44,10 @@ struct GameServices {
     ExpansionRegistry* expansionRegistry = nullptr;
     /// What the emotes are. Required, like `events`.
     const EmoteTable* emotes = nullptr;
+    /// The combat game tables the character sheet reads. Required.
+    const StatTables* statTables = nullptr;
+    /// The client's tables the game reads its rules and names from. Required.
+    const GameData* gameData = nullptr;
     /// Where the game announces what happened. Required: GameHandler
     /// refuses to be built without one.
     core::EventBus* events = nullptr;

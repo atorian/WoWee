@@ -3,11 +3,12 @@
 #include "core/frame_observer.hpp"
 #include "core/coordinates.hpp"
 #include "game/game_handler.hpp"
-#include "game/entity_controller.hpp"
+#include "game/world_handler.hpp"
 #include "game/game_events.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/item_textures.hpp"
+#include "pipeline/required_table.hpp"
 #include "rendering/renderer.hpp"
 #include <chrono>
 #include <cstdio>
@@ -43,11 +44,11 @@ public:
                 if (i<2) block.fields[game::fieldIndex(game::UF::UNIT_FIELD_MOUNTDISPLAYID)]=2409;
                 source.blocks.push_back(std::move(block));
             }
-            game->entityController().applyRecordedObjects(source);
-            const auto items=app_.getAssetManager()->loadDBC("ItemDisplayInfo.dbc");
+            game->world().applyRecordedObjects(source);
+            const pipeline::RequiredTable items(app_.getRenderer()->gameTables(),"ItemDisplayInfo.dbc","the replay's weapon");
             uint32_t weapon=0;
-            if (items) for (uint32_t row=0;row<items->getRecordCount();++row) {
-                const auto art=pipeline::readItemDisplayArt(*items,row);
+            for (uint32_t row=0;row<items->getRecordCount();++row) {
+                const auto art=pipeline::readItemDisplayArt(items,row);
                 if (!art.modelFile.empty() && app_.getAssetManager()->fileExists("Item\\ObjectComponents\\Weapon\\"+art.modelFile)) {
                     weapon=items->getUInt32(row,0); break;
                 }
@@ -73,7 +74,7 @@ public:
         if (!removed_ && elapsed>6) {
             removed_=true;
             game::UpdateObjectData gone{}; gone.outOfRangeGuids={first_+7};
-            game->entityController().applyRecordedObjects(gone);
+            game->world().applyRecordedObjects(gone);
             std::puts("SCENE FIXTURE: one real player despawned");
         }
         if (!emoted_ && elapsed>7) {

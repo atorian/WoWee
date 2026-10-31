@@ -8,7 +8,7 @@ This guide covers common issues and solutions for WoWee.
 - **Cause**: Incorrect server address, expired realm list, or version mismatch
 - **Solution**:
   1. Verify the server chosen in the login card's **Server** list is the one you mean. For a server that is not listed, choose **Somewhere else...** and enter the address and port under **more options**
-  2. Ensure the expansion under **more options** matches the server (Vanilla/TBC/WotLK/Turtle), and that your extracted data is for that expansion
+  2. Ensure the expansion under **more options** matches the server (Vanilla/TBC/WotLK), and that your extracted data is for that expansion
   3. Check that the emulator server is running and reachable
 
 ### "Realm List Connection Failed"
@@ -136,38 +136,6 @@ This guide covers common issues and solutions for WoWee.
   3. Check if bags are full: Open bag windows, consolidate items
   4. Reload character if item is still missing
 
-### Interface Options Empty or Dead (Turtle WoW)
-
-The Video, Interface and Audio option panels open but list nothing, and the log
-carries `OptionsFrame.lua:424: attempt to index field 'text' (a nil value)`
-followed by `VideoOptionsFrame`, `AudioOptionsFrame` and several
-`OptionsFrame*ScrollFrame*` names reported as missing APIs.
-
-- **Cause**: A packaging fault in the Turtle client, not in this one. Turtle
-  back-ports `Interface\FrameXML\OptionsFrameTemplates.xml` — the file that
-  declares `OptionsListButtonTemplate` — into `patch-4.mpq`, but no
-  `FrameXML.toc` in the client lists it, so it never loads. Turtle's own
-  `OptionsFrame.xml` inherits that template eighteen times, so the category
-  buttons are built without the `text` and `bar` regions the template would
-  have given them, and the first read of `button.text` raises. The raise aborts
-  the rest of that file's frame build, which is where the other missing names
-  come from - one cause, not several.
-- **Solution**:
-  1. Add `OptionsFrameTemplates.xml` to `Interface\FrameXML\FrameXML.toc`
-     ahead of `OptionsFrame.xml`, in whichever patch archive supplies the toc
-  2. Or report it upstream to Turtle - the real 1.12 client resolves a template
-     when the frame is built, exactly as this one does, so it has the same
-     nothing to inherit and the same failure
-  3. Nothing else in the options framework needs changing; the template is
-     present on disk and correct
-
-See [#132](https://github.com/Kelsidavis/WoWee/issues/132).
-
-## Performance Optimization
-
-The quality preset on the Graphics page sets these values. Upscaling is a
-separate page and no preset changes it.
-
 ### For Low-End GPUs
 ```
 Graphics Preset: LOW
@@ -218,7 +186,6 @@ Include relevant log entries when reporting issues. The first lines name the bui
 - **AzerothCore**: Full support
 - **TrinityCore**: Full support
 - **Mangos**: Full support
-- **Turtle WoW**: Full support (1.18)
 
 ### Report Issues
 If you encounter a bug:

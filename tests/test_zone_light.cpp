@@ -20,6 +20,7 @@
 #include "rendering/lighting_manager.hpp"
 #include "rendering/sky_params_from_lighting.hpp"
 
+#include "lighting_tables.hpp"
 #include "test_support.hpp"
 
 #include <bit>
@@ -101,17 +102,15 @@ std::vector<uint8_t> lightIntBandDbc() {
 
 /// What a player standing in the volume under `zoneId` at `hour`, in weather
 /// of `weatherIntensity`, is lit by.
-LightingParams lightIn(const char* rootName, uint32_t zoneId, float hour,
+LightingParams lightIn(uint32_t zoneId, float hour,
                        float weatherIntensity = 0.0f) {
-    wowee::pipeline::AssetManager assets;
     LightingManager lighting;
-    const auto root = wowee::test::makeDataRoot(rootName, {
-        {"dbfilesclient\\light.dbc", lightDbc()},
-        {"dbfilesclient\\lightparams.dbc", lightParamsDbc()},
-        {"dbfilesclient\\lightintband.dbc", lightIntBandDbc()},
+    const wowee::test::LightingTables data({
+        {"Light.dbc", lightDbc()},
+        {"LightParams.dbc", lightParamsDbc()},
+        {"LightIntBand.dbc", lightIntBandDbc()},
     });
-    REQUIRE(assets.initialize(root.string()));
-    REQUIRE(lighting.initialize(&assets));
+    lighting.initialize(data.tables);
 
     // Long enough for the light's smoothing to settle where the player stands.
     const glm::vec3 pos = wowee::rendering::lightPositionToWorld(DBC_X, DBC_Y, 0.0f);
@@ -144,16 +143,16 @@ void requireSameLight(const LightingParams& a, const LightingParams& b) {
 TEST_CASE("Tirisfal, Silverpine and Duskwood at noon are lit by their light volume", "[light]") {
     // Elwynn's zone id under the same volume is the reference: nothing there
     // but the volume's own curves.
-    const LightingParams reference = lightIn("wowee_zone_light_elwynn", 12, 12.0f);
+    const LightingParams reference = lightIn(12, 12.0f);
 
     SECTION("Tirisfal Glades") {
-        requireSameLight(lightIn("wowee_zone_light_tirisfal", 85, 12.0f), reference);
+        requireSameLight(lightIn(85, 12.0f), reference);
     }
     SECTION("Silverpine Forest") {
-        requireSameLight(lightIn("wowee_zone_light_silverpine", 130, 12.0f), reference);
+        requireSameLight(lightIn(130, 12.0f), reference);
     }
     SECTION("Duskwood") {
-        requireSameLight(lightIn("wowee_zone_light_duskwood", 10, 12.0f), reference);
+        requireSameLight(lightIn(10, 12.0f), reference);
     }
 }
 
@@ -161,7 +160,7 @@ TEST_CASE("The sky is handed the zone's sun colour, not the light it casts", "[l
     // The disc and the glow around it were drawn from the cast light mixed
     // with fixed warm colours, so Tirisfal's green sun came out warm white.
     // WoW.exe tints both its disc and its glare with channel 9.
-    const LightingParams lit = lightIn("wowee_zone_light_sun", 85, 12.0f);
+    const LightingParams lit = lightIn(85, 12.0f);
     const wowee::rendering::SkyParams sky =
         wowee::rendering::skyParamsFromLighting(12.0f, 12.0f, 0.0f, &lit, false);
 
@@ -185,22 +184,22 @@ TEST_CASE("Weather blends the light toward the storm row, all the way at a quart
     const glm::vec3 clearSky = rgb(noonColour(2));
     const glm::vec3 stormSky = rgb(stormNoonColour(2));
 
-    CHECK(matches(lightIn("wowee_zone_light_clear", 12, 12.0f, 0.0f).skyTopColor, clearSky));
-    CHECK(matches(lightIn("wowee_zone_light_drizzle", 12, 12.0f, 0.0625f).skyTopColor,
+    CHECK(matches(lightIn(12, 12.0f, 0.0f).skyTopColor, clearSky));
+    CHECK(matches(lightIn(12, 12.0f, 0.0625f).skyTopColor,
                   glm::mix(clearSky, stormSky, 0.25f)));
-    CHECK(matches(lightIn("wowee_zone_light_quarter", 12, 12.0f, 0.25f).skyTopColor, stormSky));
-    CHECK(matches(lightIn("wowee_zone_light_heavy", 12, 12.0f, 0.8f).skyTopColor, stormSky));
+    CHECK(matches(lightIn(12, 12.0f, 0.25f).skyTopColor, stormSky));
+    CHECK(matches(lightIn(12, 12.0f, 0.8f).skyTopColor, stormSky));
 }
 
 TEST_CASE("distance fog retains its authored colour instead of the middle sky", "[light][fog]") {
-    const LightingParams lit = lightIn("wowee_authored_fog", 4395, 12.0f);
+    const LightingParams lit = lightIn(4395, 12.0f);
     const glm::vec3 expected = rgb(noonColour(7));
     CHECK(glm::length(lit.fogColor - expected) < 2e-3f);
 }
 
 TEST_CASE("the sky receives the authored smog and fog in clear and storm light", "[light][fog]") {
     for (float weather : {0.0f, 0.125f, 0.25f}) {
-        const LightingParams lit = lightIn("wowee_sky_fog_channels", 4395, 12.0f, weather);
+        const LightingParams lit = lightIn(4395, 12.0f, weather);
         const auto sky = wowee::rendering::skyParamsFromLighting(12, 12, weather, &lit, false);
         const float stormWeight = std::min(1.0f, 4.0f * weather);
         const auto expected = [&](uint32_t channel) {
@@ -212,15 +211,13 @@ TEST_CASE("the sky receives the authored smog and fog in clear and storm light",
 }
 
 TEST_CASE("Fog thickness does not enter temporal zone-profile smoothing", "[light][fog-response]") {
-    wowee::pipeline::AssetManager assets;
     LightingManager lighting;
-    const auto root = wowee::test::makeDataRoot("wowee_fog_slider_profile", {
-        {"dbfilesclient\\light.dbc", lightDbc()},
-        {"dbfilesclient\\lightparams.dbc", lightParamsDbc()},
-        {"dbfilesclient\\lightintband.dbc", lightIntBandDbc()},
+    const wowee::test::LightingTables data({
+        {"Light.dbc", lightDbc()},
+        {"LightParams.dbc", lightParamsDbc()},
+        {"LightIntBand.dbc", lightIntBandDbc()},
     });
-    REQUIRE(assets.initialize(root.string()));
-    REQUIRE(lighting.initialize(&assets));
+    lighting.initialize(data.tables);
     const glm::vec3 pos = wowee::rendering::lightPositionToWorld(DBC_X, DBC_Y, 0.0f);
     for (int i = 0; i < 120; ++i)
         lighting.update(0.25f, pos, 0, 12, 12.0f, 0.0f);

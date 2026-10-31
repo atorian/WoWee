@@ -1,5 +1,6 @@
 #pragma once
 
+#include "game/flat_field_map.hpp"
 #include "game/world_packet_data.hpp"
 #include "core/coordinates.hpp"
 #include "game/opcodes.hpp"
@@ -17,13 +18,79 @@
 
 namespace wowee {
 namespace core { class EventBus; }
-namespace pipeline { class AssetManager; }
 namespace game {
 
+class GameData;
+
 class ChatLog;
+class EntityManager;
 class FrameXmlEvents;
-class GameHandler;
+class PacketParsers;
 class PacketSender;
+class TransportManager;
+struct AuraSlot;
+enum class Race : uint8_t;
+enum class WorldState;
+
+/// What movement, taxis and transports ask of the rest of the game, and the
+/// few things they make happen there. GameHandler implements it; several of
+/// its answers it already gives other handlers under the same names.
+class MovementQueries {
+public:
+    virtual ~MovementQueries() = default;
+
+    // ---- The session and the world in view ----
+    [[nodiscard]] virtual WorldState worldState() const = 0;
+    [[nodiscard]] virtual uint64_t characterGuid() const = 0;
+    /// The race of the character logged in, for the taxi mount's faction;
+    /// Human before one is.
+    [[nodiscard]] virtual Race characterRace() const = 0;
+    [[nodiscard]] virtual uint32_t currentMapId() const = 0;
+    [[nodiscard]] virtual const EntityManager& entities() const = 0;
+    /// A game object that came into view as a transport.
+    [[nodiscard]] virtual bool isTransport(uint64_t guid) const = 0;
+    /// The transports' own motion. Never null in a running game.
+    [[nodiscard]] virtual TransportManager* transports() = 0;
+    [[nodiscard]] virtual PacketParsers& packetParsers() = 0;
+    /// The taxi mounts' display ids, once the spawner has read them.
+    [[nodiscard]] virtual uint32_t gryphonDisplayId() const = 0;
+    [[nodiscard]] virtual uint32_t wyvernDisplayId() const = 0;
+
+    // ---- The target and the cast ----
+    [[nodiscard]] virtual uint64_t currentTargetGuid() const = 0;
+    /// An accepted resurrection the server has yet to carry out.
+    [[nodiscard]] virtual bool resurrectPending() const = 0;
+    [[nodiscard]] virtual bool casting() const = 0;
+    [[nodiscard]] virtual bool channeling() const = 0;
+    /// Eating or drinking.
+    [[nodiscard]] virtual bool restoring() const = 0;
+    [[nodiscard]] virtual const std::vector<AuraSlot>& playerAuras() const = 0;
+    [[nodiscard]] virtual uint32_t currentCastSpellId() const = 0;
+    /// The spell the player last cast from the ground, not from a mount.
+    [[nodiscard]] virtual uint32_t lastGroundCastSpellId() const = 0;
+    /// The mount's aura is gone with the mount: take it off the buff bar.
+    virtual void forgetPlayerAura(uint32_t spellId) = 0;
+    virtual void cancelCast() = 0;
+    virtual void resetCastState() = 0;
+
+    // ---- The vehicle ----
+    virtual void leftVehicle() = 0;
+
+    // ---- Arriving somewhere ----
+    /// SMSG_NEW_WORLD moved the player to `mapId`.
+    virtual void arrivedOnMap(uint32_t mapId) = 0;
+    /// Keep the world connection's packets for a while, under `label`.
+    virtual void traceWorldPackets(std::chrono::seconds duration, const char* label) = 0;
+    /// What a new map leaves behind: the units in view and their casts and
+    /// auras, the fight, the world states, the gossip markers, the cast.
+    virtual void tearDownWorldForTransfer(uint32_t mapId) = 0;
+    /// SMSG_NEW_WORLD on the same map, answering an accepted resurrection:
+    /// the death, the fight and the cast end.
+    virtual void resurrectedInPlace() = 0;
+    virtual void resetPingTimer() = 0;
+    virtual void sendPing() = 0;
+    virtual void closeGossip() = 0;
+};
 
 class MovementHandler {
 public:
@@ -36,10 +103,36 @@ public:
 
     /// @param assets Null in a client without game data: no taxi path or
     ///        area trigger table is read.
-    MovementHandler(GameHandler& owner, PacketSender& sender, FrameXmlEvents& frameXml,
-                    core::EventBus& events, ChatLog& chat, pipeline::AssetManager* assets);
+    MovementHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
+                    ChatLog& chat, const GameData& data, MovementQueries& queries,
+                    MovementInfo& movementInfo);
 
     void registerOpcodes(DispatchTable& table);
+
+    /// A character is entering the world: not on the last one's mount.
+    void beginCharacter() { mount_ = Mount{}; }
+
+    // --- The player's mount ---
+    [[nodiscard]] bool isMounted() const { return mount_.displayId != 0; }
+    /// UNIT_FIELD_MOUNTDISPLAYID as the client holds it, 0 on foot.
+    [[nodiscard]] uint32_t mountDisplayId() const { return mount_.displayId; }
+    /// The aura the mount came with, as far as it could be told: what
+    /// cancelling the mount cancels.
+    [[nodiscard]] uint32_t mountAuraSpellId() const { return mount_.auraSpellId; }
+    /// The spell cast was a mount's.
+    void noteMountAura(uint32_t spellId) { mount_.auraSpellId = spellId; }
+    /// UNIT_FIELD_MOUNTDISPLAYID on the player, at create or in an update.
+    void playerMountFieldArrived(uint32_t displayId, const FlatFieldMap& blockFields,
+                                 FrameXmlEvents& packetEvents);
+    /// Entering the world, or a far teleport: on foot.
+    void enteredWorld();
+    /// Once a frame, off a taxi: the mount is what the player's field says.
+    void reconcileMount();
+
+    /// A game object template arrived. A transport's (MO_TRANSPORT) names
+    /// the TaxiPathNode route it flies, which is the only one a zeppelin or
+    /// a continent ship ever gets.
+    void transportTemplateArrived(const GameObjectQueryResponseData& data);
 
     // --- Public API (delegated from GameHandler) ---
 
@@ -96,6 +189,15 @@ public:
         bool hasLocalOrientation = false;
         bool offsetNeedsTransportResolution = false;
     };
+    /// The server's own word on where the player is: a MOVEMENT block
+    /// (`movementUpdate`), which also turns the player and catches a client
+    /// that has drifted far from it, or the movement part of the player's
+    /// create block. Says whether the player rides a transport. Returns the
+    /// player's world position when they ride one this client has placed,
+    /// for the player's entity.
+    std::optional<glm::vec3> serverPlacedPlayer(const UpdateBlock& block, const glm::vec3& canonicalPos,
+                                                float canonicalOrientation, bool movementUpdate);
+
     // --- The player's transport ---
     [[nodiscard]] bool isOnTransport() const { return playerTransportGuid_ != 0; }
     [[nodiscard]] uint64_t getPlayerTransportGuid() const { return playerTransportGuid_; }
@@ -256,6 +358,10 @@ public:
     [[nodiscard]] bool isNearTaxiDestination(float maxDistance = 24.0f) const;
     uint32_t nextMovementTimestampMs();
     void sanitizeMovementForTaxi();
+    /// The player's create block has them on a taxi flight the client did not
+    /// start - entering the world mid-flight. Shown as one: no walking flags,
+    /// on the mount.
+    void playerCreatedInFlight();
 
     // Heartbeat / movement timing (for GameHandler::update())
     float& timeSinceLastMoveHeartbeatRef() { return timeSinceLastMoveHeartbeat_; }
@@ -290,6 +396,19 @@ public:
     void handleForceMoveFlagChange(network::Packet& packet, const char* name, Opcode ackOpcode, uint32_t flag, bool set);
     void handleMoveSetCollisionHeight(network::Packet& packet);
     void applyTaxiMountForCurrentNode();
+
+private:
+    //     Track player-on-transport state from movement blocks: the CREATE and
+    //     MOVEMENT paths share it. With updateMovementInfoPos (MOVEMENT) the
+    //     player's position is taken from the block when they are not on a
+    //     placed transport; without it (CREATE) only a placed transport's
+    //     composed position is.
+    std::optional<glm::vec3> applyPlayerTransportState(const UpdateBlock& block, const glm::vec3& canonicalPos,
+                                                       bool updateMovementInfoPos);
+    void resyncPlayerIfFarFromServer(const glm::vec3& serverCanonicalPos);
+    void handleDismount(network::Packet& packet);
+    void handleMountResult(network::Packet& packet);
+    void handleDismountResult(network::Packet& packet);
 
 private:
     // --- Packet handlers ---
@@ -330,12 +449,12 @@ private:
     void beginTaxiFlightMotion();
     bool restoreWorldTransferFallbackIfNearOrigin(const char* context);
 
-    GameHandler& owner_;
     PacketSender& sender_;
     FrameXmlEvents& frameXml_;
     core::EventBus& events_;
     ChatLog& chat_;
-    pipeline::AssetManager* const assets_;
+    const GameData& data_;
+    MovementQueries& queries_;
 
     // --- Movement state ---
     // Reference to GameHandler's movementInfo to avoid desync
@@ -451,6 +570,12 @@ private:
     // taxi path's own waypoint trace doesn't necessarily terminate exactly on
     // the node's registered coordinate the way GM teleports/.gps do.
     uint32_t taxiDestNodeId_ = 0;
+    /// The player's own mount, assigned whole by beginCharacter.
+    struct Mount {
+        uint32_t displayId = 0;
+        uint32_t auraSpellId = 0;  // what CMSG_CANCEL_AURA cancels where there is no CMSG_CANCEL_MOUNT_AURA
+    };
+    Mount mount_;
     bool taxiMountActive_ = false;
     bool taxiActivatePending_ = false;
     float taxiActivateTimer_ = 0.0f;

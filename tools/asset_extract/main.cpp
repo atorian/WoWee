@@ -55,7 +55,7 @@ static void printUsage(const char* prog) {
               << "  --output <path>     Output directory for extracted assets\n"
               << "\n"
               << "Options:\n"
-              << "  --expansion <id>    Expansion: classic, turtle, tbc, wotlk, cata (default: auto-detect)\n"
+              << "  --expansion <id>    Expansion: classic, tbc, wotlk, cata (default: auto-detect)\n"
               << "  --expansion-subdir Write into <output>/expansions/<id> so multiple clients\n"
               << "                      cannot overwrite one another\n"
               << "  --locale <id>       Locale: enUS, deDE, frFR, etc. (default: auto-detect)\n"
@@ -383,10 +383,10 @@ int main(int argc, char** argv) {
     // docs/plan-cataclysm.md is the measure of what that would take. Extract a
     // 4.3.4 client to borrow its art - as an override over another expansion's
     // tree - rather than to play it.
-    if (expansion != "classic" && expansion != "turtle" &&
+    if (expansion != "classic" &&
         expansion != "tbc" && expansion != "wotlk" && expansion != "cata") {
         std::cerr << "Error: Unsupported expansion '" << expansion
-                  << "'. Expected classic, turtle, tbc, wotlk, or cata.\n";
+                  << "'. Expected classic, tbc, wotlk, or cata.\n";
         return 1;
     }
     if (expansion == "cata") {

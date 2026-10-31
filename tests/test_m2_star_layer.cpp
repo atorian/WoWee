@@ -1,10 +1,10 @@
 #include <catch_amalgamated.hpp>
 
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 
 #include <string>
 
-using wowee::rendering::classifyBatchTexture;
+using wowee::pipeline::classifyBatchTexture;
 
 namespace {
 bool isStarLayer(const std::string& path) {

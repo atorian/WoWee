@@ -6,7 +6,9 @@
 #include "game_harness.hpp"
 
 #include "game/entity.hpp"
+#include "game/faction_hostility.hpp"
 #include "game/game_handler.hpp"
+#include "game/reputation_gateway.hpp"
 #include "game/update_field_table.hpp"
 #include "game/world_packet_data.hpp"
 #include "reputation/domain/records.hpp"
@@ -239,4 +241,48 @@ TEST_CASE("the next character has none of the last one's reputation", "[reputati
     CHECK(h.reputation().getReputationRows().empty());
     CHECK(h.reputation().getWatchedFactionId() == 0);
     CHECK(h.reputation().getCollapsedFactions().empty());
+}
+
+TEST_CASE("who is hostile and who friendly to a human is what FactionTemplate.dbc's groups say",
+          "[reputation][harness][tables]") {
+    GameHarness h;
+    // ID, faction, flags, faction group, friend group, enemy group. The groups
+    // are bits: 1 player, 2 Alliance, 4 Horde, 8 monster.
+    h.dbc("FactionTemplate.dbc", 14, {
+        {{0, 1}, {1, 1}, {3, 3}, {4, 2}, {5, 4}},     // a human player
+        {{0, 11}, {1, 72}, {3, 2}, {4, 2}, {5, 4}},   // a Stormwind guard
+        {{0, 85}, {1, 29}, {3, 4}, {4, 4}, {5, 2}},   // an Orgrimmar grunt
+        {{0, 14}, {1, 20}, {3, 8}},                   // a monster
+        {{0, 31}, {1, 31}},                           // wildlife
+    });
+    h.enterWorld();
+
+    wowee::game::buildFactionHostilityMap(h.gameData(), h.game(), 1 /* human */);
+
+    CHECK(h.game().isHostileFaction(85));
+    CHECK(h.game().isHostileFaction(14));
+    CHECK_FALSE(h.game().isHostileFaction(11));
+    CHECK(h.game().isFriendlyFaction(11));
+    CHECK_FALSE(h.game().isHostileFaction(31));
+    CHECK_FALSE(h.game().isFriendlyFaction(31));
+}
+
+TEST_CASE("the reputation panel's factions are Faction.dbc's rows, named and grouped",
+          "[reputation][harness][tables]") {
+    GameHarness h;
+    // ID, standing index, the race masks and bases, parent at 18, name at 23.
+    h.dbc("Faction.dbc", 57, {
+        {{0, 469}, {1, 0xFFFFFFFFu}, {23, "Alliance"}},
+        {{0, 72}, {1, 7}, {18, 469}, {23, "Stormwind"}},
+    });
+    h.enterWorld();
+
+    wowee::game::FactionData data(h.gameData());
+    const auto factions = data.factions();
+    const auto stormwind = std::find_if(factions.begin(), factions.end(),
+                                        [](const auto& f) { return f.id == 72; });
+    REQUIRE(stormwind != factions.end());
+    CHECK(stormwind->name == "Stormwind");
+    CHECK(stormwind->parentId == 469);
+    CHECK(stormwind->reputationIndex == 7);
 }

@@ -81,6 +81,35 @@ TEST_CASE("the login list is what the panel reads, and it is told the list arriv
     CHECK(h.addonEvents("RECEIVED_ACHIEVEMENT_LIST").size() == 1);
 }
 
+TEST_CASE("criteria of every counter width in the login list are all kept", "[achievement][harness]") {
+    // The failure a fixed eight-byte counter read produced was never one wrong
+    // number: the loop lost its place and read the rest of the packet as
+    // records. Three records of different packed widths, then the sentinel.
+    GameHarness h;
+    h.enterWorld();
+
+    Body b;
+    b.u32(kSentinel);  // no achievements
+    b.u32(100);
+    criteriaTail(b, 3, h.player().guid, 0, 0);
+    b.u32(200);
+    criteriaTail(b, 0x1234, h.player().guid, 0, 0);
+    b.u32(300);
+    criteriaTail(b, 0xFFFFFFFFFFull, h.player().guid, 0, 0);
+    b.u32(kSentinel);
+    h.receive(Opcode::SMSG_ALL_ACHIEVEMENT_DATA, b.bytes());
+    h.pump();
+
+    const auto& progress = h.achievements().getCriteriaProgress();
+    REQUIRE(progress.size() == 3);
+    REQUIRE(progress.count(100) == 1);
+    REQUIRE(progress.count(200) == 1);
+    REQUIRE(progress.count(300) == 1);
+    CHECK(progress.at(100) == 3);
+    CHECK(progress.at(200) == 0x1234);
+    CHECK(progress.at(300) == 0xFFFFFFFFFFull);
+}
+
 TEST_CASE("an achievement the player earns is kept and announced, another's is not", "[achievement][harness]") {
     GameHarness h;
     achievementFiles(h);

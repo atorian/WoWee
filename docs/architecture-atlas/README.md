@@ -1,12 +1,12 @@
 # WoWee — архитектурный атлас
 
-Снимок: 2026-10-19, HEAD `9f10869` + рабочее дерево. Все выводы основаны на статическом чтении кода; runtime-профиль не снимался.
+Снимок: 2026-10-31, HEAD `1637f77c` + рабочее дерево. Все выводы основаны на статическом чтении кода; runtime-профиль не снимался.
 
 [Открыть общий обзор](index.html). Пять отдельных HTML-артефактов работают без сети. В каждом диаграмма находится рядом с проблемами и ссылками на код. SVG/PNG предназначены для просмотра и экспорта, Mermaid/DOT — для редактирования.
 
 Обозначения: **Факт** — проверено в коде; **Риск** — возможное следствие, требующее воспроизведения/замера; **Долг** — текущая архитектурная связанность. Это описание реализации, не проект исправлений. Номера строк относятся к снимку; хеши исходников сохранены в `sources.json`.
 
-Существовавшие локальные изменения server_extension и warden не изменялись. Результаты проверок относятся к прочитанному рабочему дереву. `docs/threading.md` использовался только как ориентир: его описания detached normal-map tasks и самостоятельных loading frames расходятся с текущей реализацией.
+Результаты проверок относятся к прочитанному рабочему дереву. `docs/threading.md` использовался только как ориентир: его описания detached normal-map tasks и самостоятельных loading frames расходятся с текущей реализацией.
 
 ## Артефакты
 
@@ -33,6 +33,7 @@ flowchart TB
     terrain["Terrain workers · обычно 4–8<br/>loadQueue → ADT / WMO / M2"]
     normals["Character NormalMapBuilder · 2<br/>64 ожидающих · ближние первыми"]
     preload["World preload · до 4<br/>отдельные потоки → join"]
+    release["background · 1<br/>освобождение tiles / моделей"]
     other["Задачи по необходимости<br/>DNS/connect · Warden · patch/hash<br/>watchdog · stats · update · recorder"]
   end
   subgraph sg_returnmain["Результаты → тот же главный поток"]
@@ -64,6 +65,7 @@ flowchart TB
   main -.->|"управление звуками"| audio
   main -->|"submit"| normals
   main -.->|"запуск / poll"| other
+  main -.->|"releaseInBackground"| release
 ```
 
 Сплошные стрелки — передача работы или данных. Пунктир — ожидание или общие ресурсы. GPU — отдельная исполнительная область, не C++-поток.
@@ -74,12 +76,12 @@ flowchart TB
 
 JobGroup отправляет map/entity preparation в тот же ioWorkers, что чтение музыки и spell assets. Очередь ThreadPool не ограничена и не имеет приоритетов. Длинный backlog может задерживать появление близких объектов или запуск музыки.
 
-Следующий шаг: Измерять время ожидания в очереди, её длину и тип задачи; затем вводить приоритеты и backpressure по общему контракту.
+Следующий шаг: ThreadPool уже записывает по метке задачи время в очереди и выполнения, но frame profile включает это только для frameWorkers. Включить то же для ioWorkers, добавить длину очереди; затем вводить приоритеты и backpressure по общему контракту.
 
-- [include/core/thread_pool.hpp:59](/mnt/d/games/WoWee/include/core/thread_pool.hpp:59)
-- [include/core/thread_pool.hpp:73](/mnt/d/games/WoWee/include/core/thread_pool.hpp:73)
-- [include/core/job_group.hpp:116](/mnt/d/games/WoWee/include/core/job_group.hpp:116)
-- [src/audio/music_manager.cpp:136](/mnt/d/games/WoWee/src/audio/music_manager.cpp:136)
+- [include/core/thread_pool.hpp:61](../../include/core/thread_pool.hpp#L61)
+- [include/core/thread_pool.hpp:85](../../include/core/thread_pool.hpp#L85)
+- [include/core/job_group.hpp:116](../../include/core/job_group.hpp#L116)
+- [src/audio/music_manager.cpp:136](../../src/audio/music_manager.cpp#L136)
 
 **T2 · Факт → риск · Параллельная работа остаётся на критическом пути кадра**
 
@@ -87,8 +89,8 @@ JobGroup отправляет map/entity preparation в тот же ioWorkers, �
 
 Следующий шаг: Профилировать очередь отдельно от выполнения и ожидания get; сохранять барьер перед чтением изменяемых spatial/animation данных.
 
-- [src/rendering/renderer.cpp:2394](/mnt/d/games/WoWee/src/rendering/renderer.cpp:2394)
-- [src/rendering/renderer.cpp:3344](/mnt/d/games/WoWee/src/rendering/renderer.cpp:3344)
+- [src/rendering/renderer.cpp:2703](../../src/rendering/renderer.cpp#L2703)
+- [src/rendering/renderer.cpp:3661](../../src/rendering/renderer.cpp#L3661)
 
 **T3 · Риск · Нет единого лимита фоновой загрузки CPU**
 
@@ -96,10 +98,10 @@ Frame pool, terrain pool, preload, normal maps и std::async задают пар
 
 Следующий шаг: Снять профиль холодного входа в город: runnable threads, загрузка CPU и задержки main; учитывать все активные пулы.
 
-- [src/rendering/terrain_manager.cpp:104](/mnt/d/games/WoWee/src/rendering/terrain_manager.cpp:104)
-- [include/core/thread_pool.hpp:82](/mnt/d/games/WoWee/include/core/thread_pool.hpp:82)
-- [src/core/world_loader.cpp:600](/mnt/d/games/WoWee/src/core/world_loader.cpp:600)
-- [src/rendering/character_renderer.cpp:71](/mnt/d/games/WoWee/src/rendering/character_renderer.cpp:71)
+- [src/rendering/terrain_manager.cpp:107](../../src/rendering/terrain_manager.cpp#L107)
+- [include/core/thread_pool.hpp:116](../../include/core/thread_pool.hpp#L116)
+- [src/core/world_loader.cpp:510](../../src/core/world_loader.cpp#L510)
+- [src/rendering/character_renderer.cpp:71](../../src/rendering/character_renderer.cpp#L71)
 
 
 ### Обязанности и границы
@@ -111,6 +113,7 @@ Frame pool, terrain pool, preload, normal maps и std::async задают пар
 | Terrain | queueMutex + queueCV; readyQueue ограничивает старт новой подготовки при глубине ≥3, есть MemoryMonitor throttling. Уже выполняемые задачи могут добавить результаты. |
 | Frame workers | 2–16 потоков, по умолчанию hardware_concurrency−1 с clamp; общий пул для анимации, коллизий, visibility и записи secondary commands. |
 | I/O workers | 2 потока; JobGroup даёт token и lifetime fence, а не собственный пул. |
+| Background | 1 поток для работы, которую не ждёт ни кадр, ни вызывающий: освобождение разобранных tiles и вытесненных моделей (releaseInBackground). |
 | Normal maps | У CharacterRenderer собственный NormalMapBuilder: 2 потока, очередь 64, приоритет расстояния, completed results → main. |
 | World preload | До 4 потоков на прогрев файлов; отдельная отмена и join, не общий ioWorkers. |
 | Прочие роли | DNS/connect detached с shared job; Warden/patch/hash/background decode — task-scoped; watchdog и ProcessStats — отдельные потоки; recorder и встроенный asset panel — условные. Число потоков библиотек/драйвера отдельно не инвентаризировалось. |
@@ -173,10 +176,10 @@ flowchart TB
 
 Следующий шаг: При анализе фризов раскрывать Present на terrain finalization, unload, animation и wait; не переносить вызовы без проверки зависимостей.
 
-- [src/core/application.cpp:4071](/mnt/d/games/WoWee/src/core/application.cpp:4071)
-- [src/core/application.cpp:4093](/mnt/d/games/WoWee/src/core/application.cpp:4093)
-- [src/rendering/renderer.cpp:2277](/mnt/d/games/WoWee/src/rendering/renderer.cpp:2277)
-- [src/rendering/terrain_manager.cpp:231](/mnt/d/games/WoWee/src/rendering/terrain_manager.cpp:231)
+- [src/core/application.cpp:4660](../../src/core/application.cpp#L4660)
+- [src/core/application.cpp:4690](../../src/core/application.cpp#L4690)
+- [src/rendering/renderer.cpp:2582](../../src/rendering/renderer.cpp#L2582)
+- [src/rendering/terrain_manager.cpp:240](../../src/rendering/terrain_manager.cpp#L240)
 
 **F2 · Факт → риск · Events — не единственное место выполнения подписчиков**
 
@@ -184,10 +187,10 @@ publish вызывает подписчиков сразу, например и�
 
 Следующий шаг: Указывать канал и фазу у нового события; синхронные подписчики переходов должны только записывать запрос. Стоимость publish относится к фазе отправителя.
 
-- [include/core/event_bus.hpp:85](/mnt/d/games/WoWee/include/core/event_bus.hpp:85)
-- [include/core/event_bus.hpp:100](/mnt/d/games/WoWee/include/core/event_bus.hpp:100)
-- [src/core/client_loop.cpp:341](/mnt/d/games/WoWee/src/core/client_loop.cpp:341)
-- [docs/principles/client-frame-phases.md:34](/mnt/d/games/WoWee/docs/principles/client-frame-phases.md:34)
+- [include/core/event_bus.hpp:85](../../include/core/event_bus.hpp#L85)
+- [include/core/event_bus.hpp:100](../../include/core/event_bus.hpp#L100)
+- [src/core/client_loop.cpp:341](../../src/core/client_loop.cpp#L341)
+- [docs/principles/client-frame-phases.md:34](../../docs/principles/client-frame-phases.md#L34)
 
 **F3 · Факт → риск · Локальные бюджеты не дают общего потолка кадра**
 
@@ -195,10 +198,10 @@ publish вызывает подписчиков сразу, например и�
 
 Следующий шаг: Сопоставлять суммарные CPU-фазы с целевым временем кадра и отдельно отмечать overruns одной операции и ожидания GPU.
 
-- [src/game/game_handler_packets.cpp:87](/mnt/d/games/WoWee/src/game/game_handler_packets.cpp:87)
-- [src/game/game_handler_packets.cpp:101](/mnt/d/games/WoWee/src/game/game_handler_packets.cpp:101)
-- [src/rendering/terrain_manager.cpp:1529](/mnt/d/games/WoWee/src/rendering/terrain_manager.cpp:1529)
-- [src/rendering/terrain_manager.cpp:1591](/mnt/d/games/WoWee/src/rendering/terrain_manager.cpp:1591)
+- [src/game/game_handler_packets.cpp:110](../../src/game/game_handler_packets.cpp#L110)
+- [src/game/game_handler_packets.cpp:124](../../src/game/game_handler_packets.cpp#L124)
+- [src/rendering/terrain_manager.cpp:1634](../../src/rendering/terrain_manager.cpp#L1634)
+- [src/rendering/terrain_manager.cpp:1732](../../src/rendering/terrain_manager.cpp#L1732)
 
 
 ### Обязанности и границы
@@ -233,7 +236,7 @@ flowchart TB
   subgraph sg_gamebox["wowee_game · protocol state"]
     gh["[C1/C2] GameHandler<br/>session / queue / dispatch / facade"]
     domain["Доменные handlers<br/>chat / spell / inventory / quest / …"]
-    old["[C1] 4 legacy handlers<br/>Combat / Movement / Entity / Warden"]
+    old["[C1] XxxQueries<br/>GameHandler реализует и пересылает"]
   end
   subgraph sg_renderbox["wowee_render · сцена и GPU"]
     renderer["Renderer / VkContext API<br/>terrain / M2 / WMO / characters<br/>RT / water / post / overlays"]
@@ -258,8 +261,7 @@ flowchart TB
   presentation --> renderer
   presentation --> pipeline
   gh -->|"создаёт и делегирует"| domain
-  gh -->|"создаёт"| old
-  old -.->|"GameHandler&amp; owner_"| gh
+  old -.->|"реализует: пересылка владельцу"| gh
   gh --> netlib
   gh --> protocol
   gh --> pipeline
@@ -279,25 +281,26 @@ flowchart TB
 
 ### Что подсвечивает
 
-**C1 · Подтверждённый долг · Четыре домена всё ещё зависят от всего GameHandler**
+**C1 · Подтверждённый долг · GameHandler остаётся узлом, через который домены спрашивают друг друга**
 
-Статическая проверка: 4 handlers с GameHandler&, 1206 обращений через owner_, 110 xxxRef-accessors. Имена доменов уже выделены, но часть их зависимостей и владения состоянием остаётся неявной.
+Статическая проверка: 0 handlers с GameHandler&, 0 обращений через owner_. Каждый handler строится из своих interfaces, но реализует их GameHandler: вопрос одного домена к другому проходит через его пересылку, а порядок вызовов в ней держит порядок событий FrameXML. Ещё 4 xxxRef-accessors открывают его состояние наружу.
 
-Следующий шаг: Переносить state к владельцу и передавать узкие PacketSender / FrameXmlEvents / Query interfaces; не добавлять новые owner_. и Ref-пути.
+Следующий шаг: Переносить оставшееся состояние (movementInfo, characters, currentMapId, update field table) к владельцам; уведомления между контекстами вести через bus, а не через пересылку.
 
-- [tools/domain_shape_check.py:54](/mnt/d/games/WoWee/tools/domain_shape_check.py:54)
-- [src/game/game_handler.cpp:116](/mnt/d/games/WoWee/src/game/game_handler.cpp:116)
-- [include/game/game_handler.hpp:143](/mnt/d/games/WoWee/include/game/game_handler.hpp:143)
+- [tools/domain_shape_check.py:54](../../tools/domain_shape_check.py#L54)
+- [src/game/game_handler.cpp:123](../../src/game/game_handler.cpp#L123)
+- [include/game/world_handler.hpp:37](../../include/game/world_handler.hpp#L37)
+- [include/game/game_handler.hpp:101](../../include/game/game_handler.hpp#L101)
 
 **C2 · Долг → риск · Сохраняются каналы уведомления с одним слушателем**
 
-В GameHandler осталось 50 set*Callback setters. Они требуют ручного wiring и допускают замену предыдущего слушателя. Само число не доказывает потерю события сейчас, но показывает объём неявного контракта.
+В GameHandler осталось 2 set*Callback setters. Они требуют ручного wiring и допускают замену предыдущего слушателя. Само число не доказывает потерю события сейчас, но показывает объём неявного контракта.
 
 Следующий шаг: При изменении существующего уведомления переходить на типизированное событие и RAII Subscription; FrameXML оставить отдельным контрактом Lua.
 
-- [tools/domain_shape_check.py:47](/mnt/d/games/WoWee/tools/domain_shape_check.py:47)
-- [src/core/client_loop.cpp:38](/mnt/d/games/WoWee/src/core/client_loop.cpp:38)
-- [include/core/event_bus.hpp:38](/mnt/d/games/WoWee/include/core/event_bus.hpp:38)
+- [tools/domain_shape_check.py:47](../../tools/domain_shape_check.py#L47)
+- [src/core/client_loop.cpp:38](../../src/core/client_loop.cpp#L38)
+- [include/core/event_bus.hpp:38](../../include/core/event_bus.hpp#L38)
 
 **C3 · Подтверждённый долг · Граница подсистемы не совпадает с путём файла**
 
@@ -305,9 +308,9 @@ CMake исключает camera_controller, animation_controller, spell visuals 
 
 Следующий шаг: Ориентироваться на CMake targets и guard checks; общие protocol/animation IDs постепенно переносить в нейтральные headers.
 
-- [CMakeLists.txt:1249](/mnt/d/games/WoWee/CMakeLists.txt:1249)
-- [tools/render_dependency_check.py:58](/mnt/d/games/WoWee/tools/render_dependency_check.py:58)
-- [tools/game_dependency_check.py:46](/mnt/d/games/WoWee/tools/game_dependency_check.py:46)
+- [CMakeLists.txt:1319](../../CMakeLists.txt#L1319)
+- [tools/render_dependency_check.py:58](../../tools/render_dependency_check.py#L58)
+- [tools/game_dependency_check.py:46](../../tools/game_dependency_check.py#L46)
 
 
 ### Обязанности и границы
@@ -316,7 +319,7 @@ CMake исключает camera_controller, animation_controller, spell visuals 
 |---|---|
 | Client | Application владеет и связывает game, render, assets, UI и audio; ClientLoop управляет кадром и transitions. UI, addons, audio показаны как подсистемы, а не отдельные wowee_* targets. |
 | Game | Domain handlers владеют своими opcode/state; GameHandler сохраняет session/dispatch и legacy facade. Команды идут владельцу, queries — через interfaces, notifications — в bus. |
-| Renderer | Получает scene/presentation state, не включает game/ui/audio/network client modules. 83 source-файла в текущей проверке; compile-time границы зависят от CMake. |
+| Renderer | Получает scene/presentation state, не включает game/ui/audio/network client modules. 95 source-файлов в текущей проверке; compile-time границы зависят от CMake. |
 | Pipeline | Загрузка файлов, архивные слои, кеши и парсеры. Зависит от base, не от game/render клиента. |
 | Network / protocol | Сеть использует protocol; game использует net и protocol. Сетевые transport-данные не вызывают GPU напрямую. |
 | Headless validation | GameHarness ведёт real GameHandler без client; scene_render связывает wowee_render без game. ClientHarness ведёт тот же ClientLoop с front-end stand-ins. |
@@ -382,9 +385,9 @@ flowchart TB
 
 Следующий шаг: Нужна явная recovery/resync политика. До доказанной безопасной coalescing-семантики нельзя произвольно отбрасывать пакеты состояния. Сценарий overflow требует отдельного поведенческого теста.
 
-- [src/game/game_handler_packets.cpp:3054](/mnt/d/games/WoWee/src/game/game_handler_packets.cpp:3054)
-- [src/game/game_handler_packets.cpp:3065](/mnt/d/games/WoWee/src/game/game_handler_packets.cpp:3065)
-- [src/network/world_socket.cpp:791](/mnt/d/games/WoWee/src/network/world_socket.cpp:791)
+- [src/game/game_handler_packets.cpp:2388](../../src/game/game_handler_packets.cpp#L2388)
+- [src/game/game_handler_packets.cpp:2399](../../src/game/game_handler_packets.cpp#L2399)
+- [src/network/world_socket.cpp:791](../../src/network/world_socket.cpp#L791)
 
 **D2 · Факт → риск · Параллельные cache miss одного файла могут дублировать I/O**
 
@@ -392,8 +395,8 @@ readFileShared сначала проверяет cache, затем читает 
 
 Следующий шаг: Сначала измерить дубликаты cold reads и peak decoded bytes; если существенно — объединять одновременные запросы по нормализованному ключу и generation.
 
-- [src/pipeline/asset_manager.cpp:804](/mnt/d/games/WoWee/src/pipeline/asset_manager.cpp:804)
-- [src/pipeline/asset_manager.cpp:813](/mnt/d/games/WoWee/src/pipeline/asset_manager.cpp:813)
+- [src/pipeline/asset_manager.cpp:791](../../src/pipeline/asset_manager.cpp#L791)
+- [src/pipeline/asset_manager.cpp:800](../../src/pipeline/asset_manager.cpp#L800)
 
 **D3 · Риск · Порог readyQueue измеряет tiles, а не память всех результатов**
 
@@ -401,9 +404,9 @@ readFileShared сначала проверяет cache, затем читает 
 
 Следующий шаг: Наблюдать queued + preparing + ready + finalizing CPU bytes и staging bytes; оценивать backpressure по общему объёму, сохраняя прогресс хотя бы одного tile.
 
-- [include/rendering/terrain_manager.hpp:522](/mnt/d/games/WoWee/include/rendering/terrain_manager.hpp:522)
-- [src/rendering/terrain_manager.cpp:1439](/mnt/d/games/WoWee/src/rendering/terrain_manager.cpp:1439)
-- [src/rendering/terrain_manager.cpp:1462](/mnt/d/games/WoWee/src/rendering/terrain_manager.cpp:1462)
+- [include/rendering/terrain_manager.hpp:525](../../include/rendering/terrain_manager.hpp#L525)
+- [src/rendering/terrain_manager.cpp:1541](../../src/rendering/terrain_manager.cpp#L1541)
+- [src/rendering/terrain_manager.cpp:1567](../../src/rendering/terrain_manager.cpp#L1567)
 
 
 ### Обязанности и границы
@@ -411,7 +414,7 @@ readFileShared сначала проверяет cache, затем читает 
 | Область | Поведение |
 |---|---|
 | Сетевой handoff | Фоновая очередь socket → main → очередь game. Первая защищена mutex; вторая — main-thread-only и бюджетирована по времени. |
-| Домены | Packet parser + opcode handler изменяют state. EntityController владеет entities; отображение получает события и запрашивает state. |
+| Домены | Packet parser + opcode handler изменяют state. WorldHandler владеет объектами в зоне видимости, QueryCacheHandler — кэшами имён и шаблонов; отображение получает события и запрашивает state. |
 | Ресурсный handoff | Workers готовят CPU-результаты. Main опрашивает future/ready queue и проверяет token карты и запроса перед использованием. |
 | Актуальность | JobGroup::replace(channel, GUID) отменяет предыдущий запрос; map cancellation отсекает результаты старой карты, даже если GUID переиспользован. |
 | GPU handoff | Upload batch записывает copies и submit с fence. Fence опрашивается в последующих кадрах. Наличие готовых CPU bytes не равнозначно завершённому upload. |
@@ -432,7 +435,7 @@ flowchart TB
     renderer["Renderer<br/>model / texture caches + render layers"]
     assets["AssetManager<br/>shared immutable file / DBC cache"]
     gh["GameHandler<br/>connection + domains"]
-    entities["Handlers / EntityController<br/>character state / entities"]
+    entities["Handlers / WorldHandler<br/>character state / entities"]
     front["PlayerView / EntitySpawner<br/>WorldLoader / UI / audio"]
     loop["ClientLoop<br/>world transitions"]
   end
@@ -488,10 +491,10 @@ MapScope отменяет jobs, уничтожает load session, остана�
 
 Следующий шаг: Измерять Transitions и возраст отменённых jobs; при требовании ограниченной задержки нужен scheduler с удалением queued cancelled work или эквивалентный контракт fence.
 
-- [src/core/map_scope.cpp:37](/mnt/d/games/WoWee/src/core/map_scope.cpp:37)
-- [include/core/job_group.hpp:115](/mnt/d/games/WoWee/include/core/job_group.hpp:115)
-- [src/core/world_loader.cpp:93](/mnt/d/games/WoWee/src/core/world_loader.cpp:93)
-- [include/core/thread_pool.hpp:73](/mnt/d/games/WoWee/include/core/thread_pool.hpp:73)
+- [src/core/map_scope.cpp:37](../../src/core/map_scope.cpp#L37)
+- [include/core/job_group.hpp:115](../../include/core/job_group.hpp#L115)
+- [src/core/world_loader.cpp:96](../../src/core/world_loader.cpp#L96)
+- [include/core/thread_pool.hpp:85](../../include/core/thread_pool.hpp#L85)
 
 **O2 · Долг → риск · Безопасность borrowed ссылок зависит от ручного teardown order**
 
@@ -499,10 +502,10 @@ Renderer заимствует VkContext у Window; spawner — SpawnState кар
 
 Следующий шаг: Новые подписки хранить RAII-членами; для каждого нового borrowed указателя указать lifetime. Проверять logout, same-map reconnect, superseded load и exit, сохраняя порядок stop/join → release.
 
-- [include/core/window.hpp:85](/mnt/d/games/WoWee/include/core/window.hpp:85)
-- [include/rendering/renderer.hpp:620](/mnt/d/games/WoWee/include/rendering/renderer.hpp:620)
-- [src/core/application.cpp:2104](/mnt/d/games/WoWee/src/core/application.cpp:2104)
-- [src/core/character_session.cpp:67](/mnt/d/games/WoWee/src/core/character_session.cpp:67)
+- [include/core/window.hpp:85](../../include/core/window.hpp#L85)
+- [include/rendering/renderer.hpp:678](../../include/rendering/renderer.hpp#L678)
+- [src/core/application.cpp:2623](../../src/core/application.cpp#L2623)
+- [src/core/character_session.cpp:67](../../src/core/character_session.cpp#L67)
 
 **O3 · Факт → риск · AsyncConnect.cancel оставляет DNS/connect работать до возврата**
 
@@ -510,8 +513,8 @@ Detached worker удерживает shared Job, а cancel ставит abandone
 
 Следующий шаг: Если нужна строгая отмена и ограничение повторов — ограничивать число connect jobs и использовать отменяемый transport/resolver. Не заменять shared Job захватом сырого owner.
 
-- [include/network/async_connect.hpp:41](/mnt/d/games/WoWee/include/network/async_connect.hpp:41)
-- [include/network/async_connect.hpp:84](/mnt/d/games/WoWee/include/network/async_connect.hpp:84)
+- [include/network/async_connect.hpp:41](../../include/network/async_connect.hpp#L41)
+- [include/network/async_connect.hpp:84](../../include/network/async_connect.hpp#L84)
 
 
 ### Обязанности и границы

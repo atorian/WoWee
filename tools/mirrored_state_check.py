@@ -37,7 +37,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 HEADERS = ["game_handler", "chat_handler", "combat_handler", "inventory_handler",
            "movement_handler", "quest_handler", "social_handler", "spell_handler",
-           "warden_handler", "entity_controller"]
+           "warden_handler", "world_handler"]
 
 # A data member: indented, a type, a name ending in `_`, an optional
 # initialiser, a semicolon. Statements and declarations of functions do not

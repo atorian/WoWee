@@ -349,7 +349,8 @@ int handleInfoAdt(int& i, int argc, char** argv) {
     }
     std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)),
                                 std::istreambuf_iterator<char>());
-    auto terrain = wowee::pipeline::ADTLoader::load(bytes);
+    const auto terrainTile = wowee::pipeline::ADTLoader::load(bytes);
+    const auto& terrain = *terrainTile;
     if (!terrain.isLoaded()) {
         std::fprintf(stderr, "info-adt: failed to parse %s\n", path.c_str());
         return 1;

@@ -747,7 +747,7 @@ bool MonsterMoveParser::parseVanilla(network::Packet& packet, MonsterMoveData& d
     data.y = packet.readFloat();
     data.z = packet.readFloat();
 
-    // Turtle WoW movement payload uses a spline-style layout after XYZ:
+    // Vanilla movement payload uses a spline-style layout after XYZ:
     //   uint32 splineIdOrTick
     //   uint8  moveType
     //   [if moveType 2/3/4] facing payload
@@ -790,7 +790,7 @@ bool MonsterMoveParser::parseVanilla(network::Packet& packet, MonsterMoveData& d
         }
     }
 
-    LOG_DEBUG("MonsterMove(turtle): guid=0x", std::hex, data.guid, std::dec,
+    LOG_DEBUG("MonsterMove(vanilla): guid=0x", std::hex, data.guid, std::dec,
               " type=", static_cast<int>(data.moveType), " dur=", data.duration, "ms",
               " dest=(", data.destX, ",", data.destY, ",", data.destZ, ")");
 

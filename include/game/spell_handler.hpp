@@ -20,8 +20,9 @@
 namespace wowee {
 namespace achievement { class IAchievementsFeed; }
 namespace core { class CVarStore; }
-namespace pipeline { class AssetManager; }
 namespace game {
+
+class GameData;
 
 class PacketSender;
 class FrameXmlEvents;
@@ -267,9 +268,6 @@ public:
     virtual void lootTarget(uint64_t guid) = 0;
 
     // ---- Companions and the hearth ----
-    [[nodiscard]] virtual uint32_t activeCritterSpellId() const = 0;
-    [[nodiscard]] virtual uint64_t activeCritterGuid() const = 0;
-    virtual void dismissCritter() = 0;
     /// A mount or critter may have come out or gone away.
     virtual void announceCompanionChange() = 0;
     [[nodiscard]] virtual std::optional<HomeBind> homeBind() const = 0;
@@ -293,7 +291,7 @@ public:
 
     SpellHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
                  ChatLog& chat, SpellQueries& queries, const core::CVarStore& cvars,
-                 pipeline::AssetManager* assets);
+                 const GameData& data);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -429,7 +427,13 @@ public:
     // Player aura mutation (formerly accessed via friend)
     void resetPlayerAuras(size_t capacity) { playerAuras_.clear(); playerAuras_.resize(capacity); }
     AuraSlot& getPlayerAuraSlotRef(size_t slot) { return playerAuras_[slot]; }
-    std::vector<AuraSlot>& getPlayerAurasMut() { return playerAuras_; }
+    /// Take this spell's aura off the player's buff bar, where the server's
+    /// own word on it will not come.
+    void forgetPlayerAura(uint32_t spellId);
+    /// The player's UNIT_FIELD_CRITTER, at create or in an update: which
+    /// non-combat companion is out. It is attributed to the spell last cast
+    /// from the ground, so casting that spell again puts it away.
+    void companionFieldsArrived(const FlatFieldMap& blockFields);
 
     // Talents
     [[nodiscard]] uint8_t getActiveTalentSpec() const { return activeTalentSpec_; }
@@ -610,6 +614,12 @@ public:
     // Skill DBC
     void loadSkillLineDbc() const;
     void extractSkillFields(const FlatFieldMap& fields);
+    /// Before WotLK the player's auras are fields, not packets: UNIT_FIELD_AURAS
+    /// holds a spell per slot and UNIT_FIELD_AURAFLAGS a flag byte per slot.
+    /// `fields` are all the player's fields; when they carry any aura slot the
+    /// list is rebuilt from them, and the interface told on `packetEvents`,
+    /// among the other events of the packet they came in.
+    void playerAuraFieldsArrived(const FlatFieldMap& fields, FrameXmlEvents& packetEvents);
     void extractExploredZoneFields(const FlatFieldMap& fields);
 
     // Update per-frame timers (call from GameHandler::update)
@@ -718,7 +728,7 @@ private:
     const core::CVarStore& cvars_;
     /// The client's data, for the DBC tables. Null in a test that has none,
     /// which leaves every spell unknown to the client.
-    pipeline::AssetManager* const assets_;
+    const GameData& data_;
 
     // --- What the client's data says (read once, kept until an expansion switch) ---
     mutable std::unordered_map<uint32_t, SpellNameEntry> spellNameCache_;
@@ -737,6 +747,8 @@ private:
     /// The character's skills, talent modifiers, explored map and totems, as
     /// the realm has described them. Assigned whole by resetAllState, so a
     /// field added here cannot keep the last character's value.
+    void dismissCompanion();
+
     struct CharacterSpellState {
         std::unordered_map<uint32_t, PlayerSkill> skills;
         SpellModMap flatMods;
@@ -744,6 +756,9 @@ private:
         std::vector<uint32_t> exploredZones = std::vector<uint32_t>(kExploredZoneMaskCount, 0u);
         bool hasExploredZones = false;
         std::array<TotemSlot, kTotemSlots> totems{};
+        /// The non-combat companion out, and the spell that called it.
+        uint64_t companionGuid = 0;
+        uint32_t companionSpellId = 0;
     };
     CharacterSpellState character_;
 

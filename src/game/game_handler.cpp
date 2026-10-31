@@ -1,4 +1,5 @@
 #include "game/game_handler.hpp"
+#include "game/game_data.hpp"
 #include "title/services/titles.hpp"
 #include "reputation/domain/records.hpp"
 #include "reputation/services/reputation.hpp"
@@ -92,6 +93,12 @@ GameHandler::GameHandler(GameServices& services)
     if (!services_.emotes) {
         throw std::invalid_argument("GameHandler needs GameServices::emotes");
     }
+    if (!services_.statTables) {
+        throw std::invalid_argument("GameHandler needs GameServices::statTables");
+    }
+    if (!services_.gameData) {
+        throw std::invalid_argument("GameHandler needs GameServices::gameData");
+    }
     if (!services_.cvars) {
         throw std::invalid_argument("GameHandler needs GameServices::cvars");
     }
@@ -112,25 +119,26 @@ GameHandler::GameHandler(GameServices& services)
     // Initialize Warden module manager
 
     // Initialize domain handlers
-    entityController_ = std::make_unique<EntityController>(*this);
+    queryCacheHandler_ = std::make_unique<QueryCacheHandler>(*this, *services_.events, *this);
+    worldHandler_ = std::make_unique<WorldHandler>(*this, *this, *services_.events, *this, *services_.emotes);
     chatHandler_      = std::make_unique<ChatHandler>(*this, *this, *services_.events, *this,
                                                       *services_.cvars, *services_.emotes);
-    movementHandler_  = std::make_unique<MovementHandler>(*this, *this, *this, *services_.events, *chatHandler_,
-                                                          services_.assetManager);
+    movementHandler_  = std::make_unique<MovementHandler>(*this, *this, *services_.events, *chatHandler_,
+                                                          *services_.gameData, *this, movementInfo);
     combatHandler_    = std::make_unique<CombatHandler>(*this, *this, *services_.events, *chatHandler_,
                                                         *services_.cvars, *this);
     socialHandler_    = std::make_unique<SocialHandler>(*this, *this, *services_.events, *chatHandler_,
                                                         *this, *services_.cvars);
     questHandler_     = std::make_unique<QuestHandler>(*this, *this, *services_.events, *chatHandler_,
-                                                       *this, services_.assetManager);
+                                                       *this, *services_.gameData);
     // Built from what they use rather than from this class (AGENTS.md, "A new
     // domain handler").
     spellHandler_ = std::make_unique<SpellHandler>(
         *this, *this, *services_.events, *chatHandler_, *this, *services_.cvars,
-        services_.assetManager);
+        *services_.gameData);
     inventoryHandler_ = std::make_unique<InventoryHandler>(
         *this, *this, *services_.events, *chatHandler_, *this, *services_.cvars,
-        services_.assetManager);
+        *services_.gameData);
     accountDataHandler_ = std::make_unique<AccountDataHandler>(
         *this, *this, *services_.events, services_.accountDataDir);
     actionBarHandler_ = std::make_unique<ActionBarHandler>(*this, *this, *services_.events, *this);
@@ -143,6 +151,8 @@ GameHandler::GameHandler(GameServices& services)
     weatherHandler_ = std::make_unique<WeatherHandler>(
         *services_.events, *this, *chatHandler_,
         [] { return isClassicLikeExpansion() ? WeatherNumbering::Classic : WeatherNumbering::WeatherState; });
+    playerHandler_ = std::make_unique<PlayerHandler>(*this, *this, *services_.events, *chatHandler_, *this,
+                                                    *services_.statTables);
 
     // The character's own settings, read once its spells have arrived - the
     // first thing the realm sends of a character entering the world.
@@ -292,7 +302,7 @@ void GameHandler::clearWorldState() {
     movementHandler_->clearTransportAttachments();
     pendingIncomingPackets_.clear();
     // Say every entity left view so the renderer releases M2/character model resources.
-    for (const auto& [guid, entity] : entityController_->getEntityManager().getEntities()) {
+    for (const auto& [guid, entity] : worldHandler_->getEntityManager().getEntities()) {
         if (guid == playerGuid) continue;
         if (entity->getType() == ObjectType::UNIT)
             eventBus().publish(events::CreatureDespawned{guid});
@@ -305,7 +315,8 @@ void GameHandler::clearWorldState() {
     spellHandler_->clearUnitCastStates();
     spellHandler_->clearUnitAurasCache();
     combatHandler_->clearCombatText();
-    entityController_->clearAll();
+    worldHandler_->clearAll();
+    queryCacheHandler_->clear();
 }
 
 void GameHandler::resetDbcCaches() {
@@ -341,7 +352,7 @@ ActionCooldown GameHandler::spellCooldown(uint32_t spellId) const {
 std::optional<uint32_t> GameHandler::playerFieldBytes() const {
     const uint16_t index = fieldIndex(UF::PLAYER_FIELD_BYTES);
     if (index == 0xFFFF) return std::nullopt;
-    const auto player = entityController_->getEntityManager().getEntity(playerGuid);
+    const auto player = worldHandler_->getEntityManager().getEntity(playerGuid);
     if (!player || !player->hasField(index)) return std::nullopt;
     return player->getField(index);
 }
@@ -417,7 +428,7 @@ bool GameHandler::npcDialogOpen() const {
 }
 
 bool GameHandler::nameUnitInView(uint64_t guid, const std::string& name) {
-    auto unit = std::dynamic_pointer_cast<Unit>(entityController_->getEntityManager().getEntity(guid));
+    auto unit = std::dynamic_pointer_cast<Unit>(worldHandler_->getEntityManager().getEntity(guid));
     if (!unit) return false;
     unit->setName(name);
     return true;
@@ -507,7 +518,7 @@ void GameHandler::updateNetworking() {
         inventoryHandler_->swapContainerItems(op.srcBag, op.srcSlot, op.dstBag, op.dstSlot, false);
     }
 
-    // Reset per-tick monster-move budget tracking (Classic/Turtle flood protection).
+    // Reset per-tick monster-move budget tracking (Classic flood protection).
     movementHandler_->monsterMovePacketsThisTickRef() = 0;
     movementHandler_->monsterMovePacketsDroppedThisTickRef() = 0;
 
@@ -550,7 +561,7 @@ void GameHandler::updateNetworking() {
     // Detect server-side disconnect (socket closed during update)
     if (socket && !socket->isConnected() && state != WorldState::DISCONNECTED) {
         if (movementHandler_->hasPendingWorldTransfer() ||
-            (pendingIncomingPackets_.empty() && !entityController_->hasPendingUpdateObjectWork())) {
+            (pendingIncomingPackets_.empty() && !worldHandler_->hasPendingUpdateObjectWork())) {
             LOG_WARNING("Server closed connection in state: ", worldStateName(state));
             // The client releases the world after submitting the frame. Keep
             // entities and the closed connection alive until that command.
@@ -605,22 +616,7 @@ void GameHandler::updateTaxiAndMountState(float deltaTime) {
 
     movementHandler_->updatePlayerTransportHold(deltaTime);
 
-    // Keep non-taxi mount state server-authoritative.
-    // Some server paths don't emit explicit mount field updates in lockstep
-    // with local visual state changes, so reconcile continuously.
-    if (!movementHandler_->isOnTaxiFlight()) {
-        auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
-        auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity);
-        if (playerUnit) {
-            uint32_t serverMountDisplayId = playerUnit->getMountDisplayId();
-            if (serverMountDisplayId != currentMountDisplayId_) {
-                LOG_INFO("Mount reconcile: server=", serverMountDisplayId,
-                         " local=", currentMountDisplayId_);
-                currentMountDisplayId_ = serverMountDisplayId;
-                eventBus().publish(events::PlayerMountChanged{serverMountDisplayId});
-            }
-        }
-    }
+    movementHandler_->reconcileMount();
 }
 
 void GameHandler::updateEntityInterpolation(float deltaTime) {
@@ -631,7 +627,7 @@ void GameHandler::updateEntityInterpolation(float deltaTime) {
 // creature then put it on the unconditional path and made it snap forward.
 // Entity interpolation is inexpensive; rendering retains its own distance
 // culling and remains the correct place to skip costly visual work.
-for (const auto& [guid, entity] : entityController_->getEntityManager().getEntities()) {
+for (const auto& [guid, entity] : worldHandler_->getEntityManager().getEntities()) {
     (void)guid;
     if (entity && entity->isUnit()) {
         entity->updateMovement(deltaTime, services_.movementCollision);
@@ -710,13 +706,13 @@ void GameHandler::updateTimers(float deltaTime) {
         nameResyncTimer += deltaTime;
         if (nameResyncTimer >= 5.0f) {
             nameResyncTimer = 0.0f;
-            for (const auto& [guid, entity] : entityController_->getEntityManager().getEntities()) {
+            for (const auto& [guid, entity] : worldHandler_->getEntityManager().getEntities()) {
                 if (!entity || entity->getType() != ObjectType::PLAYER) continue;
                 if (guid == playerGuid) continue;
                 auto player = std::static_pointer_cast<Player>(entity);
                 if (!player->getName().empty()) continue;
                 // Player entity exists with empty name and no pending query - resend.
-                entityController_->queryPlayerName(guid);
+                queryCacheHandler_->queryPlayerName(guid);
             }
         }
     }
@@ -841,7 +837,7 @@ void GameHandler::updateGame(float deltaTime) {
 
     // Validate target still exists
     if (const uint64_t target = combatHandler_->getTargetGuid();
-        target != 0 && !entityController_->getEntityManager().hasEntity(target)) {
+        target != 0 && !worldHandler_->getEntityManager().hasEntity(target)) {
         combatHandler_->clearTarget();
     }
 
@@ -849,7 +845,7 @@ void GameHandler::updateGame(float deltaTime) {
     movementHandler_->updateFollow(deltaTime);
 
     // Entering and leaving combat is fired from the update block that carries
-    // UNIT_FLAG_IN_COMBAT, in EntityController - not from here.
+    // UNIT_FLAG_IN_COMBAT, in WorldHandler - not from here.
     //
     // Both places used to fire it, so every fight announced itself twice: the
     // combat text showed "Entering Combat" and then "Entering Combat" again,
@@ -954,7 +950,7 @@ void GameHandler::updateGame(float deltaTime) {
         combatHandler_->updateAutoAttack(deltaTime);
         auto closeIfTooFar = [&](bool windowOpen, uint64_t npcGuid, auto closeFn, const char* label) {
             if (!windowOpen || npcGuid == 0) return;
-            auto npc = entityController_->getEntityManager().getEntity(npcGuid);
+            auto npc = worldHandler_->getEntityManager().getEntity(npcGuid);
             if (!npc) return;
             float dx = movementInfo.x - npc->getX();
             float dy = movementInfo.y - npc->getY();
@@ -977,7 +973,7 @@ void GameHandler::updateGame(float deltaTime) {
             // server never heard the walk over.
             float sentDistance = -1.0f;
             glm::vec3 sent;
-            auto npc = entityController_->getEntityManager().getEntity(pendingNpcHello_.guid);
+            auto npc = worldHandler_->getEntityManager().getEntity(pendingNpcHello_.guid);
             if (npc && movementHandler_->lastSentPosition(sent)) {
                 sentDistance = glm::length(sent - glm::vec3(npc->getX(), npc->getY(), npc->getZ()));
             }
@@ -1015,14 +1011,6 @@ void GameHandler::updateGame(float deltaTime) {
 // ============================================================
 // Single-player local combat
 // ============================================================
-
-// ============================================================
-// XP tracking
-// ============================================================
-
-uint32_t GameHandler::killXp(uint32_t playerLevel, uint32_t victimLevel) {
-    return CombatHandler::killXp(playerLevel, victimLevel);
-}
 
 void GameHandler::raiseUiError(const std::string& message) {
     // On screen and nowhere else, which is where the real client puts these.
@@ -1320,127 +1308,14 @@ uint32_t GameHandler::getBankBagSlotPrice(int slotIndex) const {
 // Group loot roll (SMSG_LOOT_ROLL / SMSG_LOOT_ROLL_WON / CMSG_LOOT_ROLL)
 // ---------------------------------------------------------------------------
 
-float GameHandler::critPercentFromGameTable(std::vector<float>& baseCache,
-                                            std::vector<float>& ratioCache, bool& loaded,
-                                            const char* baseDbc, const char* ratioDbc,
-                                            int statIdx) const {
-    const uint8_t pclass = getPlayerClass();
-    uint32_t level = getPlayerLevel();
-    if (pclass == 0 || pclass > 11 || level == 0) return 0.0f;
-    constexpr uint32_t kGtMaxLevel = 100;
-    if (level > kGtMaxLevel) level = kGtMaxLevel;
-    if (!loaded) {
-        loaded = true;
-        auto* am = services_.assetManager;
-        if (am && am->isInitialized()) {
-            // Single-column float game tables; getFloat reads that one column.
-            if (auto base = am->loadDBC(baseDbc); base && base->isLoaded())
-                for (uint32_t i = 0; i < base->getRecordCount(); ++i)
-                    baseCache.push_back(base->getFloat(i, 0));
-            if (auto ratio = am->loadDBC(ratioDbc); ratio && ratio->isLoaded())
-                for (uint32_t i = 0; i < ratio->getRecordCount(); ++i)
-                    ratioCache.push_back(ratio->getFloat(i, 0));
-        }
-    }
-    const size_t baseIdx  = static_cast<size_t>(pclass - 1);
-    const size_t ratioIdx = static_cast<size_t>(pclass - 1) * kGtMaxLevel + (level - 1);
-    if (baseIdx >= baseCache.size() || ratioIdx >= ratioCache.size()) return 0.0f;
-    const float stat = static_cast<float>(std::max(0, getPlayerStat(statIdx)));
-    return (baseCache[baseIdx] + stat * ratioCache[ratioIdx]) * 100.0f;  // the sheet reads a percent
-}
-
-float GameHandler::getMeleeCritFromAgility() const {
-    return critPercentFromGameTable(gtMeleeCritBase_, gtMeleeCrit_, gtMeleeCritLoaded_,
-                                    "gtChanceToMeleeCritBase.dbc", "gtChanceToMeleeCrit.dbc",
-                                    1 /* STAT_AGILITY */);
-}
-
-float GameHandler::getSpellCritFromIntellect() const {
-    return critPercentFromGameTable(gtSpellCritBase_, gtSpellCrit_, gtSpellCritLoaded_,
-                                    "gtChanceToSpellCritBase.dbc", "gtChanceToSpellCrit.dbc",
-                                    3 /* STAT_INTELLECT */);
-}
-
-namespace {
-// A single-column float game table into a flat vector.
-void loadFloatColumn(pipeline::AssetManager* am, const char* dbc, std::vector<float>& out) {
-    if (auto t = am->loadDBC(dbc); t && t->isLoaded())
-        for (uint32_t i = 0; i < t->getRecordCount(); ++i) out.push_back(t->getFloat(i, 0));
-}
-}  // namespace
-
-float GameHandler::getHealthRegenFromSpirit() const {
-    const uint8_t pclass = getPlayerClass();
-    uint32_t level = getPlayerLevel();
-    if (pclass == 0 || pclass > 11 || level == 0) return 0.0f;
-    constexpr uint32_t kGtMaxLevel = 100;
-    if (level > kGtMaxLevel) level = kGtMaxLevel;
-    if (!gtRegenLoaded_) {
-        gtRegenLoaded_ = true;
-        if (auto* am = services_.assetManager; am && am->isInitialized()) {
-            loadFloatColumn(am, "gtOCTRegenHP.dbc", gtOctRegenHp_);
-            loadFloatColumn(am, "gtRegenHPPerSpt.dbc", gtRegenHpPerSpt_);
-            loadFloatColumn(am, "gtRegenMPPerSpt.dbc", gtRegenMpPerSpt_);
-        }
-    }
-    const size_t idx = static_cast<size_t>(pclass - 1) * kGtMaxLevel + (level - 1);
-    if (idx >= gtOctRegenHp_.size() || idx >= gtRegenHpPerSpt_.size()) return 0.0f;
-    const float spirit = static_cast<float>(std::max(0, getPlayerStat(4 /* SPIRIT */)));
-    const float baseSpirit = std::min(spirit, 50.0f);
-    const float moreSpirit = spirit - baseSpirit;
-    return (baseSpirit * gtOctRegenHp_[idx] + moreSpirit * gtRegenHpPerSpt_[idx]) * 2.0f;
-}
-
-float GameHandler::getManaRegenFromSpirit() const {
-    const uint8_t pclass = getPlayerClass();
-    uint32_t level = getPlayerLevel();
-    if (pclass == 0 || pclass > 11 || level == 0) return 0.0f;
-    constexpr uint32_t kGtMaxLevel = 100;
-    if (level > kGtMaxLevel) level = kGtMaxLevel;
-    if (!gtRegenLoaded_) { getHealthRegenFromSpirit(); }  // shares the same lazy load
-    const size_t idx = static_cast<size_t>(pclass - 1) * kGtMaxLevel + (level - 1);
-    if (idx >= gtRegenMpPerSpt_.size()) return 0.0f;
-    const float spirit = static_cast<float>(std::max(0, getPlayerStat(4 /* SPIRIT */)));
-    return spirit * gtRegenMpPerSpt_[idx];
-}
-
-float GameHandler::getCombatRatingBonus(int cr) const {
-    const uint8_t pclass = getPlayerClass();
-    uint32_t level = getPlayerLevel();
-    constexpr uint32_t kGtMaxLevel = 100, kGtMaxRating = 32;
-    if (pclass == 0 || pclass > 11 || level == 0 || cr < 0 ||
-        cr >= static_cast<int>(kGtMaxRating)) return 0.0f;
-    if (level > kGtMaxLevel) level = kGtMaxLevel;
-    if (!gtCombatRatingsLoaded_) {
-        gtCombatRatingsLoaded_ = true;
-        auto* am = services_.assetManager;
-        if (am && am->isInitialized()) {
-            if (auto t = am->loadDBC("gtCombatRatings.dbc"); t && t->isLoaded())
-                for (uint32_t i = 0; i < t->getRecordCount(); ++i)
-                    gtCombatRatings_.push_back(t->getFloat(i, 0));
-            // The scalar table is id + ratio; the ratio is the second column.
-            if (auto s = am->loadDBC("gtOCTClassCombatRatingScalar.dbc"); s && s->isLoaded())
-                for (uint32_t i = 0; i < s->getRecordCount(); ++i)
-                    gtClassRatingScalar_.push_back(s->getFloat(i, 1));
-        }
-    }
-    const size_t coefIdx   = static_cast<size_t>(cr) * kGtMaxLevel + (level - 1);
-    const size_t scalarIdx = static_cast<size_t>(pclass - 1) * kGtMaxRating + cr;
-    if (coefIdx >= gtCombatRatings_.size() || scalarIdx >= gtClassRatingScalar_.size()) return 0.0f;
-    const float coef = gtCombatRatings_[coefIdx];
-    if (coef == 0.0f) return 0.0f;
-    const float ratingValue = static_cast<float>(std::max(0, getCombatRating(cr)));
-    return ratingValue * (gtClassRatingScalar_[scalarIdx] / coef);
-}
-
 const GameHandler::BattlemasterEntry* GameHandler::getBattlemasterInfo(uint32_t bgTypeId) {
     if (!battlemasterListLoaded_) {
-        auto* am = services_.assetManager;
-        // Checked before the latch, as with the other DBC caches here.
-        if (!am || !am->isInitialized()) return nullptr;
         battlemasterListLoaded_ = true;
-        auto dbc = am->loadDBC("BattlemasterList.dbc");
-        if (dbc && dbc->isLoaded() && dbc->getFieldCount() > 31) {
+        // Read at the WotLK file's columns, verified against it; an expansion
+        // that does not list the table has no battleground list to offer.
+        if (services_.gameData->has("BattlemasterList.dbc")) {
+            const auto dbc = services_.gameData->table("BattlemasterList.dbc", 32,
+                                                       "the battleground list");
             for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
                 const uint32_t id = dbc->getUInt32(i, 0);
                 if (id == 0) continue;
@@ -1513,14 +1388,11 @@ const std::vector<GameHandler::BattlemasterEntry>& GameHandler::getBattlegroundT
 // item, so the row itself needs nothing else.
 const std::vector<GameHandler::CurrencyType>& GameHandler::getCurrencyTypes() {
     if (currencyTypesLoaded_) return currencyTypes_;
-    auto* am = services_.assetManager;
-    // Checked before the latch: an early ask would otherwise leave the tab
-    // permanently empty for the session.
-    if (!am || !am->isInitialized()) return currencyTypes_;
     currencyTypesLoaded_ = true;
+    // Currencies came with WotLK: before it there is no tab to fill.
+    if (!services_.gameData->has("CurrencyTypes.dbc")) return currencyTypes_;
 
-    auto dbc = am->loadDBC("CurrencyTypes.dbc");
-    if (!dbc || !dbc->isLoaded() || dbc->getFieldCount() < 2) return currencyTypes_;
+    const auto dbc = services_.gameData->table("CurrencyTypes.dbc", 2, "the currency tab");
     for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
         CurrencyType c;
         c.id     = dbc->getUInt32(i, 0);
@@ -1534,14 +1406,11 @@ const std::vector<GameHandler::CurrencyType>& GameHandler::getCurrencyTypes() {
 
 void GameHandler::ensureGlyphPropertiesLoaded() {
     if (glyphPropertiesLoaded_) return;
-    auto* am = services_.assetManager;
-    // Checked before the latch: one call made before the asset manager is up
-    // would disable this for the session.
-    if (!am || !am->isInitialized()) return;
     glyphPropertiesLoaded_ = true;
+    // Glyphs came with WotLK.
+    if (!services_.gameData->has("GlyphProperties.dbc")) return;
 
-    auto dbc = am->loadDBC("GlyphProperties.dbc");
-    if (!dbc || !dbc->isLoaded() || dbc->getFieldCount() < 2) return;
+    const auto dbc = services_.gameData->table("GlyphProperties.dbc", 2, "the glyphs' spells");
     for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
         const uint32_t id = dbc->getUInt32(i, 0);
         const uint32_t spellId = dbc->getUInt32(i, 1);
@@ -1590,18 +1459,12 @@ void GameHandler::refreshUnitHostility() {
 
 void GameHandler::loadAreaNameCache() const {
     if (areaNameCacheLoaded_) return;
-
-    auto* am = services_.assetManager;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
     areaNameCacheLoaded_ = true;
 
     // AreaTable.dbc has the canonical zone/area names keyed by AreaID.
     // Field 0 = ID, field 11 = AreaName (enUS locale).
-    auto areaDbc = am->loadDBC("AreaTable.dbc");
-    if (areaDbc && areaDbc->isLoaded() && areaDbc->getFieldCount() > 11) {
+    {
+        const auto areaDbc = services_.gameData->table("AreaTable.dbc", 12, "the names of zones and areas");
         for (uint32_t i = 0; i < areaDbc->getRecordCount(); ++i) {
             uint32_t areaId = areaDbc->getUInt32(i, 0);
             if (areaId == 0) continue;
@@ -1620,22 +1483,21 @@ void GameHandler::loadAreaNameCache() const {
     }
 
     // WorldMapArea.dbc supplements with map-UI area names (different ID space).
-    auto dbc = am->loadDBC("WorldMapArea.dbc");
-    if (dbc && dbc->isLoaded()) {
+    {
         const auto* layout = pipeline::getActiveDBCLayout()
             ? pipeline::getActiveDBCLayout()->getLayout("WorldMapArea") : nullptr;
         const uint32_t areaIdField   = layout ? (*layout)["AreaID"]   : 2;
         const uint32_t areaNameField = layout ? (*layout)["AreaName"] : 3;
-
-        if (dbc->getFieldCount() > areaNameField) {
-            for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-                uint32_t areaId = dbc->getUInt32(i, areaIdField);
-                if (areaId == 0) continue;
-                std::string name = dbc->getString(i, areaNameField);
-                // Don't overwrite AreaTable names - those are authoritative
-                if (!name.empty() && !areaNameCache_.count(areaId)) {
-                    areaNameCache_[areaId] = std::move(name);
-                }
+        const auto dbc = services_.gameData->table("WorldMapArea.dbc",
+                                                   std::max(areaIdField, areaNameField) + 1,
+                                                   "the names of zones and areas");
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            uint32_t areaId = dbc->getUInt32(i, areaIdField);
+            if (areaId == 0) continue;
+            std::string name = dbc->getString(i, areaNameField);
+            // Don't overwrite AreaTable names - those are authoritative
+            if (!name.empty() && !areaNameCache_.count(areaId)) {
+                areaNameCache_[areaId] = std::move(name);
             }
         }
     }
@@ -1652,16 +1514,10 @@ std::string GameHandler::getAreaName(uint32_t areaId) const {
 
 void GameHandler::loadMapNameCache() const {
     if (mapNameCacheLoaded_) return;
-
-    auto* am = services_.assetManager;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
     mapNameCacheLoaded_ = true;
 
-    auto dbc = am->loadDBC("Map.dbc");
-    if (!dbc || !dbc->isLoaded()) return;
+    const auto dbc = services_.gameData->table("Map.dbc", 5,
+                                               "the names of maps and whether one is an instance");
 
     // Map.dbc layout: 0=ID, 1=InternalName, 2=InstanceType, 3=Flags,
     // 4=MapName_enUS (display name), fields 5+ = other locales
@@ -1728,14 +1584,11 @@ bool GameHandler::getInstanceLockPrompt(float& secondsLeft, bool& previouslySave
 
 uint32_t GameHandler::getDungeonEncounterCount(uint32_t mapId, uint32_t difficulty) const {
     if (!dungeonEncounterCacheLoaded_) {
-        auto* am = services_.assetManager;
-        // Not an attempt: the assets are not there to read yet, and a caller
-        // can reach this before they are.
-        if (!am || !am->isInitialized()) return 0;
         dungeonEncounterCacheLoaded_ = true;
-
-        auto dbc = am->loadDBC("DungeonEncounter.dbc");
-        if (dbc && dbc->isLoaded()) {
+        // Encounters are counted from WotLK on; before it there are none.
+        if (services_.gameData->has("DungeonEncounter.dbc")) {
+            const auto dbc = services_.gameData->table("DungeonEncounter.dbc", 3,
+                                                       "how many bosses an instance has");
             // ID, MapID, Difficulty, OrderIndex, Bit, Name[17], SpellIconID.
             // Verified against record 0: id 464, map 33 (Shadowfang Keep),
             // difficulty 0, order 0, bit 0.
@@ -1765,16 +1618,9 @@ uint32_t GameHandler::getDungeonEncounterCount(uint32_t mapId, uint32_t difficul
 
 void GameHandler::loadLfgDungeonDbc() const {
     if (lfgDungeonNameCacheLoaded_) return;
-
-    auto* am = services_.assetManager;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
     lfgDungeonNameCacheLoaded_ = true;
-
-    auto dbc = am->loadDBC("LFGDungeons.dbc");
-    if (!dbc || !dbc->isLoaded()) return;
+    // The dungeon finder is WotLK's.
+    if (!services_.gameData->has("LFGDungeons.dbc")) return;
 
     const auto* layout = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("LFGDungeons") : nullptr;
@@ -1798,11 +1644,8 @@ void GameHandler::loadLfgDungeonDbc() const {
     // Coren Direbrew and the Crown Chemical Co. - and nothing else. The file
     // has no holiday flag of its own; the group is the flag.
     constexpr uint32_t kHolidayGroup = 11;
-    const bool wideEnough = dbc->getFieldCount() > kGroupId;
-    if (!wideEnough) {
-        LOG_WARNING("LFGDungeons.dbc has only ", dbc->getFieldCount(),
-                    " fields - the dungeon finder will list names only");
-    }
+    const auto dbc = services_.gameData->table(
+        "LFGDungeons.dbc", std::max({idField, nameField, kGroupId}) + 1, "the dungeon finder");
 
     for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
         uint32_t id = dbc->getUInt32(i, idField);
@@ -1810,7 +1653,6 @@ void GameHandler::loadLfgDungeonDbc() const {
         std::string name = dbc->getString(i, nameField);
         if (name.empty()) continue;
         lfgDungeonNameCache_[id] = name;
-        if (!wideEnough) continue;
 
         LfgDungeon d;
         d.id          = id;
@@ -1870,15 +1712,34 @@ void GameHandler::rebuildCompanions() const {
     mountSpells_.clear();
     critterSpells_.clear();
 
-    auto* am = services_.assetManager;
-    if (!am || !am->isInitialized()) return;
-    auto dbc = am->loadDBC("Spell.dbc");
-    if (!dbc || !dbc->isLoaded()) return;
-
     const auto* layout = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("Spell") : nullptr;
-    if (!layout) return;
-    const uint32_t idField = (*layout)["ID"];
+    // Every column read below by the layout's name, or the WotLK file's
+    // position where no layout is loaded (a test). A column an older layout
+    // does not name - the second and third effects, EffectMiscValueB - reads
+    // as zero, as it always has.
+    constexpr uint32_t kNone = 0xFFFFFFFFu;
+    const auto field = [layout](const std::string& name, uint32_t wotlk) {
+        return layout ? layout->field(name) : wotlk;
+    };
+    const uint32_t idField = field("ID", 0);
+    uint32_t widest = idField;
+    std::array<uint32_t, 3> effect{}, aura{}, misc{}, miscB{};
+    for (uint32_t i = 0; i < 3; ++i) {
+        const std::string idx = std::to_string(i);
+        effect[i] = field("Effect" + idx, 71 + i);
+        aura[i]   = field("EffectApplyAuraName" + idx, 95 + i);
+        misc[i]   = field("EffectMiscValue" + idx, 110 + i);
+        miscB[i]  = field("EffectMiscValueB" + idx, 113 + i);
+        for (uint32_t column : {effect[i], aura[i], misc[i], miscB[i]}) {
+            if (column != kNone) widest = std::max(widest, column);
+        }
+    }
+    const auto dbc = services_.gameData->table("Spell.dbc", widest + 1,
+                                               "telling the player's mounts from their pets");
+    const auto at = [&dbc](uint32_t row, uint32_t column) {
+        return column == kNone ? 0u : dbc->getUInt32(row, column);
+    };
 
     // Built once per rebuild rather than searched per spell: the file is fifty
     // thousand rows and the spellbook is a few hundred.
@@ -1903,9 +1764,8 @@ void GameHandler::rebuildCompanions() const {
         if (c.name.empty()) continue;
 
         bool mount = false, critter = false;
-        for (int i = 0; i < 3 && !mount && !critter; ++i) {
-            const std::string idx = std::to_string(i);
-            if (dbc->getUInt32(row, (*layout)["EffectApplyAuraName" + idx]) == kAuraMounted) {
+        for (uint32_t i = 0; i < 3 && !mount && !critter; ++i) {
+            if (at(row, aura[i]) == kAuraMounted) {
                 mount = true;
                 // SPELL_AURA_MOUNTED's misc value is a creature *entry*, the
                 // same number space a summon's is. AuraEffect::HandleAuraMounted
@@ -1914,10 +1774,9 @@ void GameHandler::rebuildCompanions() const {
                 // template - it is not handed to Player::Mount as a display id,
                 // which is what the comment here used to say. Stored as the
                 // entry and resolved by the reader, exactly like a critter's.
-                c.creatureId = dbc->getUInt32(row, (*layout)["EffectMiscValue" + idx]);
-            } else if (dbc->getUInt32(row, (*layout)["Effect" + idx]) == kEffectSummon &&
-                       dbc->getUInt32(row, (*layout)["EffectMiscValueB" + idx]) ==
-                           kCritterSummonProperties) {
+                c.creatureId = at(row, misc[i]);
+            } else if (at(row, effect[i]) == kEffectSummon &&
+                       at(row, miscB[i]) == kCritterSummonProperties) {
                 critter = true;
                 // A summon's misc value is a creature *entry*, not a display
                 // id, and the model frame takes a display id. Left as the entry
@@ -1931,7 +1790,7 @@ void GameHandler::rebuildCompanions() const {
                 // query answer and nothing sent the query, so the field meant a
                 // display id or an entry depending on what had been near the
                 // player. One number space, decided in one place.
-                c.creatureId = dbc->getUInt32(row, (*layout)["EffectMiscValue" + idx]);
+                c.creatureId = at(row, misc[i]);
             }
         }
         if (!mount && !critter) continue;
@@ -1947,31 +1806,29 @@ void GameHandler::rebuildCompanions() const {
 }
 
 uint32_t GameHandler::getBonusActionBarOffset() const {
-    const uint8_t form = shapeshiftFormId_;
+    const uint8_t form = playerHandler_->shapeshiftForm();
     if (form == 0) return 0;
 
-    // Cached per form: the file does not change, and this is asked on every
-    // action button update.
-    static std::unordered_map<uint8_t, uint32_t> barOfForm;
-    if (auto it = barOfForm.find(form); it != barOfForm.end()) return it->second;
-
-    uint32_t bar = 0;
-    auto* am = services_.assetManager;
-    if (am && am->isInitialized()) {
-        if (auto dbc = am->loadDBC("SpellShapeshiftForm.dbc"); dbc && dbc->isLoaded()) {
-            const auto* layout = pipeline::getActiveDBCLayout()
-                ? pipeline::getActiveDBCLayout()->getLayout("SpellShapeshiftForm") : nullptr;
-            const uint32_t idField  = layout ? (*layout)["ID"] : 0;
-            const uint32_t barField = layout ? (*layout)["BonusActionBar"] : 1;
-            for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
-                if (dbc->getUInt32(row, idField) != form) continue;
-                bar = dbc->getUInt32(row, barField);
-                break;
-            }
-        }
+    // Asked by GetBonusBarOffset when the bars change, not every frame, and
+    // the asset manager keeps the file: the thirty rows are walked each time.
+    const auto* layout = pipeline::getActiveDBCLayout()
+        ? pipeline::getActiveDBCLayout()->getLayout("SpellShapeshiftForm") : nullptr;
+    const uint32_t idField  = layout ? (*layout)["ID"] : 0;
+    const uint32_t barField = layout ? (*layout)["BonusActionBar"] : 1;
+    const auto dbc = services_.gameData->table("SpellShapeshiftForm.dbc",
+                                               std::max(idField, barField) + 1,
+                                               "the action bar a form swaps in");
+    for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
+        if (dbc->getUInt32(row, idField) == form) return dbc->getUInt32(row, barField);
     }
-    barOfForm[form] = bar;
-    return bar;
+    // A form the file has no row for keeps the ordinary bar, as the original
+    // client's lookup does; said once per form, since a missing row is news.
+    static std::unordered_set<uint8_t> said;
+    if (said.insert(form).second) {
+        LOG_WARNING("SpellShapeshiftForm.dbc has no row for form ", static_cast<int>(form),
+                    "; the action bar stays the ordinary one");
+    }
+    return 0;
 }
 
 void GameHandler::announceCompanionChange() {
@@ -2057,18 +1914,14 @@ const std::string& GameHandler::getLanguageName(uint32_t languageId) const {
     // to print a language header at all.
     if (languageId == 0) return kUniversal;
     if (!languageNamesLoaded_) {
-        auto* am = services().assetManager;
-        if (am && am->isInitialized()) {
-            languageNamesLoaded_ = true;
-            if (auto dbc = am->loadDBC("Languages.dbc"); dbc && dbc->isLoaded()) {
-                for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-                    const uint32_t id = dbc->getUInt32(i, 0);
-                    std::string name = dbc->getString(i, 1);
-                    if (id != 0 && !name.empty()) languageNames_[id] = std::move(name);
-                }
-                LOG_INFO("Languages.dbc: loaded ", languageNames_.size(), " languages");
-            }
+        languageNamesLoaded_ = true;
+        const auto dbc = services_.gameData->table("Languages.dbc", 2, "the chat's language names");
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            const uint32_t id = dbc->getUInt32(i, 0);
+            std::string name = dbc->getString(i, 1);
+            if (id != 0 && !name.empty()) languageNames_[id] = std::move(name);
         }
+        LOG_INFO("Languages.dbc: loaded ", languageNames_.size(), " languages");
     }
     auto it = languageNames_.find(languageId);
     return it != languageNames_.end() ? it->second : kNone;
@@ -2077,24 +1930,18 @@ const std::string& GameHandler::getLanguageName(uint32_t languageId) const {
 const std::string& GameHandler::getPageTextMaterialName(uint32_t materialId) const {
     static const std::string kNone;
     if (!pageTextMaterialsLoaded_) {
-        auto* am = services().assetManager;
-        // Not an attempt while the assets are down: marking it loaded here
-        // would disable the file for the session, the way the faction and
-        // skill caches beside it were once caught doing.
-        if (am && am->isInitialized()) {
-            pageTextMaterialsLoaded_ = true;
-            if (auto dbc = am->loadDBC("PageTextMaterial.dbc"); dbc && dbc->isLoaded()) {
-                for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-                    const uint32_t id = dbc->getUInt32(i, 0);
-                    std::string name = dbc->getString(i, 1);
-                    if (id != 0 && !name.empty()) {
-                        pageTextMaterialNames_[id] = std::move(name);
-                    }
-                }
-                LOG_INFO("PageTextMaterial.dbc: loaded ",
-                         pageTextMaterialNames_.size(), " page materials");
+        pageTextMaterialsLoaded_ = true;
+        const auto dbc = services_.gameData->table("PageTextMaterial.dbc", 2,
+                                                   "the background of a book or letter");
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            const uint32_t id = dbc->getUInt32(i, 0);
+            std::string name = dbc->getString(i, 1);
+            if (id != 0 && !name.empty()) {
+                pageTextMaterialNames_[id] = std::move(name);
             }
         }
+        LOG_INFO("PageTextMaterial.dbc: loaded ",
+                 pageTextMaterialNames_.size(), " page materials");
     }
     auto it = pageTextMaterialNames_.find(materialId);
     return it != pageTextMaterialNames_.end() ? it->second : kNone;
@@ -2106,28 +1953,32 @@ GameHandler::getContinentBounds(uint32_t mapId) const {
     if (cached != continentBoundsCache_.end()) return cached->second;
 
     ContinentBounds bounds;
-    auto* am = services_.assetManager;
-    if (am && am->isInitialized()) {
-        if (auto dbc = am->loadDBC("WorldMapArea.dbc"); dbc && dbc->isLoaded()) {
-            const auto* layout = pipeline::getActiveDBCLayout()
-                ? pipeline::getActiveDBCLayout()->getLayout("WorldMapArea") : nullptr;
-            const auto field = [&](const char* name, uint32_t fallback) {
-                return layout ? (*layout)[name] : fallback;
-            };
-            for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-                if (dbc->getUInt32(i, field("MapID", 1)) != mapId) continue;
-                // The continent's own row, not one of its zones.
-                if (dbc->getUInt32(i, field("AreaID", 2)) != 0) continue;
-                bounds.left   = dbc->getFloat(i, field("LocLeft", 4));
-                bounds.right  = dbc->getFloat(i, field("LocRight", 5));
-                bounds.top    = dbc->getFloat(i, field("LocTop", 6));
-                bounds.bottom = dbc->getFloat(i, field("LocBottom", 7));
-                // A degenerate rectangle projects everything to one point, so
-                // it is no more usable than a missing row.
-                bounds.valid = std::abs(bounds.left - bounds.right) > 0.001f &&
-                               std::abs(bounds.top - bounds.bottom) > 0.001f;
-                break;
-            }
+    {
+        const auto* layout = pipeline::getActiveDBCLayout()
+            ? pipeline::getActiveDBCLayout()->getLayout("WorldMapArea") : nullptr;
+        const auto field = [&](const char* name, uint32_t fallback) {
+            return layout ? (*layout)[name] : fallback;
+        };
+        const uint32_t mapField = field("MapID", 1), areaField = field("AreaID", 2);
+        const uint32_t leftField = field("LocLeft", 4), rightField = field("LocRight", 5);
+        const uint32_t topField = field("LocTop", 6), bottomField = field("LocBottom", 7);
+        const auto dbc = services_.gameData->table(
+            "WorldMapArea.dbc",
+            std::max({mapField, areaField, leftField, rightField, topField, bottomField}) + 1,
+            "a continent's map rectangle");
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            if (dbc->getUInt32(i, mapField) != mapId) continue;
+            // The continent's own row, not one of its zones.
+            if (dbc->getUInt32(i, areaField) != 0) continue;
+            bounds.left   = dbc->getFloat(i, leftField);
+            bounds.right  = dbc->getFloat(i, rightField);
+            bounds.top    = dbc->getFloat(i, topField);
+            bounds.bottom = dbc->getFloat(i, bottomField);
+            // A degenerate rectangle projects everything to one point, so
+            // it is no more usable than a missing row.
+            bounds.valid = std::abs(bounds.left - bounds.right) > 0.001f &&
+                           std::abs(bounds.top - bounds.bottom) > 0.001f;
+            break;
         }
     }
     if (!bounds.valid) {
@@ -2142,38 +1993,31 @@ const GameHandler::ExtendedCostEntry*
 GameHandler::getExtendedCost(uint32_t extendedCostId) const {
     if (!extendedCostCacheLoaded_) {
         extendedCostCacheLoaded_ = true;
-        auto* am = services_.assetManager;
-        if (am && am->isInitialized()) {
-            if (auto dbc = am->loadDBC("ItemExtendedCost.dbc"); dbc && dbc->isLoaded()) {
-                // WotLK layout: 0=ID, 1=honorPoints, 2=arenaPoints,
-                // 3=arenaSlotRestrictions, 4-8=itemId[5], 9-13=itemCount[5],
-                // 14=reqRating, 15=purchaseGroup
-                for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-                    const uint32_t id = dbc->getUInt32(i, 0);
-                    if (id == 0) continue;
-                    ExtendedCostEntry e;
-                    e.honorPoints = dbc->getUInt32(i, 1);
-                    e.arenaPoints = dbc->getUInt32(i, 2);
-                    for (int j = 0; j < 5; ++j) {
-                        e.itemId[j]    = dbc->getUInt32(i, 4 + j);
-                        e.itemCount[j] = dbc->getUInt32(i, 9 + j);
-                    }
-                    extendedCostCache_[id] = e;
+        // Prices in honor, arena points and tokens came with TBC.
+        if (services_.gameData->has("ItemExtendedCost.dbc")) {
+            const auto dbc = services_.gameData->table("ItemExtendedCost.dbc", 14,
+                                                       "a vendor's prices in honor, arena points and tokens");
+            // WotLK layout: 0=ID, 1=honorPoints, 2=arenaPoints,
+            // 3=arenaSlotRestrictions, 4-8=itemId[5], 9-13=itemCount[5],
+            // 14=reqRating, 15=purchaseGroup
+            for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+                const uint32_t id = dbc->getUInt32(i, 0);
+                if (id == 0) continue;
+                ExtendedCostEntry e;
+                e.honorPoints = dbc->getUInt32(i, 1);
+                e.arenaPoints = dbc->getUInt32(i, 2);
+                for (int j = 0; j < 5; ++j) {
+                    e.itemId[j]    = dbc->getUInt32(i, 4 + j);
+                    e.itemCount[j] = dbc->getUInt32(i, 9 + j);
                 }
-                LOG_INFO("ItemExtendedCost.dbc: loaded ", extendedCostCache_.size(),
-                         " entries");
+                extendedCostCache_[id] = e;
             }
+            LOG_INFO("ItemExtendedCost.dbc: loaded ", extendedCostCache_.size(),
+                     " entries");
         }
     }
     auto it = extendedCostCache_.find(extendedCostId);
     return it == extendedCostCache_.end() ? nullptr : &it->second;
-}
-
-void GameHandler::setResting(bool resting) {
-    if (resting == isResting_) return;
-    isResting_ = resting;
-    chatHandler_->addSystemChatMessage(resting ? "You are now resting." : "You are no longer resting.");
-    if (hasAddonEventListener()) fireAddonEvent("PLAYER_UPDATE_RESTING", {});
 }
 
 // ---- MovementHandler delegating getters ----

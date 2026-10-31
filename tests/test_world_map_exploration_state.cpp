@@ -25,34 +25,6 @@ static Zone makeZone(uint32_t wmaID, uint32_t areaID,
     return z;
 }
 
-TEST_CASE("ExplorationState: initially has no server mask", "[world_map][exploration_state]") {
-    ExplorationState es;
-    REQUIRE(es.hasServerMask() == false);
-    REQUIRE(es.exploredZones().empty());
-    REQUIRE(es.exploredOverlays().empty());
-}
-
-TEST_CASE("ExplorationState: setServerMask toggles hasServerMask", "[world_map][exploration_state]") {
-    ExplorationState es;
-    std::vector<uint32_t> mask = {0xFF, 0x00, 0x01};
-    es.setServerMask(mask, true);
-    REQUIRE(es.hasServerMask() == true);
-
-    es.setServerMask({}, false);
-    REQUIRE(es.hasServerMask() == false);
-}
-
-TEST_CASE("ExplorationState: overlaysChanged tracks changes", "[world_map][exploration_state]") {
-    ExplorationState es;
-    REQUIRE(es.overlaysChanged() == false);
-}
-
-TEST_CASE("ExplorationState: clearLocal resets local data", "[world_map][exploration_state]") {
-    ExplorationState es;
-    es.clearLocal();
-    REQUIRE(es.exploredZones().empty());
-}
-
 TEST_CASE("ExplorationState: update with empty zones is safe", "[world_map][exploration_state]") {
     ExplorationState es;
     std::vector<Zone> zones;

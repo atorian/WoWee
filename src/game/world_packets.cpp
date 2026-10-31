@@ -504,7 +504,7 @@ network::Packet CharCreatePacket::build(const CharCreateData& data) {
     packet.writeUInt8(data.hairColor);
     packet.writeUInt8(data.facialHair);
     packet.writeUInt8(0);  // outfitId, always 0
-    // Turtle WoW / 1.12.1 clients send 4 extra zero bytes after outfitId.
+    // 1.12.1 clients send 4 extra zero bytes after outfitId.
     // Servers may validate packet length and silently drop undersized packets.
     packet.writeUInt32(0);
 
@@ -1075,7 +1075,7 @@ void MovementPacket::writeMovementPayload(network::Packet& packet, const Movemen
     // are four floats - and this was written sine first, after the order of
     // the fields in MovementInfo, so other clients saw our jumps go off at
     // right angles. Their own packets settle it: the first of the two follows
-    // cos(orientation), as cata_movement's layout has it too.
+    // cos(orientation), as the 4.3.4 core's movement layout has it too.
     if (info.hasFlag(MovementFlags::FALLING)) {
         packet.writeFloat(info.jumpVelocity);
         packet.writeFloat(info.jumpCosAngle);

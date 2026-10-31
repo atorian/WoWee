@@ -4,7 +4,7 @@
 #include "rendering/world_map/data_repository.hpp"
 #include "rendering/world_map/map_resolver.hpp"
 #include "pipeline/asset_manager.hpp"
-#include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "core/logger.hpp"
 #include "core/application.hpp"
 #include "game/expansion_profile.hpp"
@@ -41,19 +41,18 @@ void DataRepository::clear() {
 // --------------------------------------------------------
 
 void DataRepository::loadZones(const std::string& mapName,
-                                pipeline::AssetManager& assetManager) {
+                                pipeline::AssetManager& assetManager,
+                                const pipeline::GameTables& tables) {
     if (!zones_.empty()) return;
 
-    const auto* activeLayout = pipeline::getActiveDBCLayout();
-    const auto* mapL = activeLayout ? activeLayout->getLayout("Map") : nullptr;
-
     int mapID = -1;
-    auto mapDbc = assetManager.loadDBC("Map.dbc");
-    if (mapDbc && mapDbc->isLoaded()) {
+    {
+        const pipeline::RequiredTable mapDbc(tables, "Map.dbc", "the world map");
+        const uint32_t dirCol = mapDbc.column("InternalName");
+        const uint32_t idCol = mapDbc.column("ID");
         for (uint32_t i = 0; i < mapDbc->getRecordCount(); i++) {
-            std::string dir = mapDbc->getString(i, mapL ? (*mapL)["InternalName"] : 1);
-            if (dir == mapName) {
-                mapID = static_cast<int>(mapDbc->getUInt32(i, mapL ? (*mapL)["ID"] : 0));
+            if (mapDbc->getString(i, dirCol) == mapName) {
+                mapID = static_cast<int>(mapDbc->getUInt32(i, idCol));
                 LOG_INFO("DataRepository: Map.dbc '", mapName, "' -> mapID=", mapID);
                 break;
             }
@@ -76,10 +75,12 @@ void DataRepository::loadZones(const std::string& mapName,
 
     // Physical-map regions that the UI presents on another continent. In
     // particular, Azuremyst/Bloodmyst use map 530 terrain but are projected
-    // onto Kalimdor (map 1) with a +10133.333/+17600 coordinate offset.
-    auto transformsDbc = assetManager.loadDBC("WorldMapTransforms.dbc");
-    if (transformsDbc && transformsDbc->isLoaded() &&
-        transformsDbc->getFieldCount() >= 9) {
+    // onto Kalimdor (map 1) with a +10133.333/+17600 coordinate offset. An
+    // expansion with one physical map per continent has no such table.
+    // ID, source map, its rectangle, target map, offset.
+    if (tables.has("WorldMapTransforms.dbc")) {
+        const auto transformsDbc =
+            tables.table("WorldMapTransforms.dbc", 9, "zones the world map shows on another continent");
         for (uint32_t i = 0; i < transformsDbc->getRecordCount(); ++i) {
             MapTransform tr;
             tr.sourceMapId = transformsDbc->getUInt32(i, 1);
@@ -94,47 +95,48 @@ void DataRepository::loadZones(const std::string& mapName,
         }
     }
 
-    // Use expansion-aware DBC layout when available; fall back to WotLK stock field
-    // indices (ID=0, ParentAreaNum=2, ExploreFlag=3) when layout metadata is missing.
-    const auto* atL = activeLayout ? activeLayout->getLayout("AreaTable") : nullptr;
     std::unordered_map<uint32_t, uint32_t> exploreFlagByAreaId;
     std::unordered_map<uint32_t, std::vector<uint32_t>> childBitsByParent;
-    auto areaDbc = assetManager.loadDBC("AreaTable.dbc");
-    // Bug fix: old code used > 3 which covers core fields (ID=0, ParentAreaNum=2,
-    // ExploreFlag=3).  The > 11 threshold broke exploration for DBC variants with
-    // 4-11 fields.  Load core exploration data with > 3; area name only when > 11.
-    if (areaDbc && areaDbc->isLoaded() && areaDbc->getFieldCount() > 3) {
-        const uint32_t fieldCount = areaDbc->getFieldCount();
-        const uint32_t parentField = atL ? (*atL)["ParentAreaNum"] : 2;
+    {
+        // The area's name is column 11 (AreaName_lang) in every shape.
+        constexpr uint32_t kAreaNameField = 11;
+        const pipeline::RequiredTable areaDbc(tables, "AreaTable.dbc", "the world map's explored areas",
+                                              kAreaNameField + 1);
+        const uint32_t idField = areaDbc.column("ID");
+        const uint32_t mapField = areaDbc.column("MapID");
+        const uint32_t parentField = areaDbc.column("ParentAreaNum");
+        const uint32_t exploreField = areaDbc.column("ExploreFlag");
         for (uint32_t i = 0; i < areaDbc->getRecordCount(); i++) {
-            const uint32_t areaId = areaDbc->getUInt32(i, atL ? (*atL)["ID"] : 0);
-            const uint32_t exploreFlag = areaDbc->getUInt32(i, atL ? (*atL)["ExploreFlag"] : 3);
+            const uint32_t areaId = areaDbc->getUInt32(i, idField);
+            const uint32_t exploreFlag = areaDbc->getUInt32(i, exploreField);
             const uint32_t parentArea = areaDbc->getUInt32(i, parentField);
             if (areaId != 0) exploreFlagByAreaId[areaId] = exploreFlag;
-            if (areaId != 0)
-                mapIdByAreaId_[areaId] = areaDbc->getUInt32(i, atL ? (*atL)["MapID"] : 1);
+            if (areaId != 0) mapIdByAreaId_[areaId] = areaDbc->getUInt32(i, mapField);
             if (parentArea != 0) childBitsByParent[parentArea].push_back(exploreFlag);
-            // Cache area display name (field 11 = AreaName_lang enUS)
-            if (areaId != 0 && fieldCount > 11) {
-                std::string areaDispName = areaDbc->getString(i, 11);
+            if (areaId != 0) {
+                std::string areaDispName = areaDbc->getString(i, kAreaNameField);
                 if (!areaDispName.empty())
                     areaNameByAreaId_[areaId] = std::move(areaDispName);
             }
         }
     }
 
-    auto wmaDbc = assetManager.loadDBC("WorldMapArea.dbc");
-    if (!wmaDbc || !wmaDbc->isLoaded()) {
-        LOG_WARNING("DataRepository: WorldMapArea.dbc not found");
-        return;
-    }
-
-    const auto* wmaL = activeLayout ? activeLayout->getLayout("WorldMapArea") : nullptr;
+    const pipeline::RequiredTable wmaDbc(tables, "WorldMapArea.dbc", "the world map's zones");
+    const uint32_t wmaIdField = wmaDbc.column("ID");
+    const uint32_t wmaMapField = wmaDbc.column("MapID");
+    const uint32_t wmaDisplayMapField = wmaDbc.column("DisplayMapID");
+    const uint32_t wmaAreaField = wmaDbc.column("AreaID");
+    const uint32_t wmaNameField = wmaDbc.column("AreaName");
+    const uint32_t wmaLeftField = wmaDbc.column("LocLeft");
+    const uint32_t wmaRightField = wmaDbc.column("LocRight");
+    const uint32_t wmaTopField = wmaDbc.column("LocTop");
+    const uint32_t wmaBottomField = wmaDbc.column("LocBottom");
+    const uint32_t wmaParentField = wmaDbc.column("ParentWorldMapID");
 
     int continentIdx = -1;
     for (uint32_t i = 0; i < wmaDbc->getRecordCount(); i++) {
-        uint32_t recMapID = wmaDbc->getUInt32(i, wmaL ? (*wmaL)["MapID"] : 1);
-        uint32_t displayMapID = wmaDbc->getUInt32(i, wmaL ? (*wmaL)["DisplayMapID"] : 8);
+        uint32_t recMapID = wmaDbc->getUInt32(i, wmaMapField);
+        uint32_t displayMapID = wmaDbc->getUInt32(i, wmaDisplayMapField);
         // WorldMapArea can place a zone on one physical map while displaying it
         // under another continent. Azuremyst/Bloodmyst physically live on map
         // 530, but DisplayMapID=1 makes them children of Kalimdor. Include those
@@ -143,16 +145,16 @@ void DataRepository::loadZones(const std::string& mapName,
             static_cast<int>(displayMapID) != mapID) continue;
 
         Zone zone;
-        zone.wmaID   = wmaDbc->getUInt32(i, wmaL ? (*wmaL)["ID"] : 0);
+        zone.wmaID   = wmaDbc->getUInt32(i, wmaIdField);
         zone.mapID   = recMapID;
-        zone.areaID  = wmaDbc->getUInt32(i, wmaL ? (*wmaL)["AreaID"] : 2);
-        zone.areaName = wmaDbc->getString(i, wmaL ? (*wmaL)["AreaName"] : 3);
-        zone.bounds.locLeft   = wmaDbc->getFloat(i, wmaL ? (*wmaL)["LocLeft"] : 4);
-        zone.bounds.locRight  = wmaDbc->getFloat(i, wmaL ? (*wmaL)["LocRight"] : 5);
-        zone.bounds.locTop    = wmaDbc->getFloat(i, wmaL ? (*wmaL)["LocTop"] : 6);
-        zone.bounds.locBottom = wmaDbc->getFloat(i, wmaL ? (*wmaL)["LocBottom"] : 7);
+        zone.areaID  = wmaDbc->getUInt32(i, wmaAreaField);
+        zone.areaName = wmaDbc->getString(i, wmaNameField);
+        zone.bounds.locLeft   = wmaDbc->getFloat(i, wmaLeftField);
+        zone.bounds.locRight  = wmaDbc->getFloat(i, wmaRightField);
+        zone.bounds.locTop    = wmaDbc->getFloat(i, wmaTopField);
+        zone.bounds.locBottom = wmaDbc->getFloat(i, wmaBottomField);
         zone.displayMapID = displayMapID;
-        zone.parentWorldMapID = wmaDbc->getUInt32(i, wmaL ? (*wmaL)["ParentWorldMapID"] : 10);
+        zone.parentWorldMapID = wmaDbc->getUInt32(i, wmaParentField);
         if (recMapID != static_cast<uint32_t>(mapID) && displayMapID == static_cast<uint32_t>(mapID)) {
             const float centerX = (zone.bounds.locLeft + zone.bounds.locRight) * 0.5f;
             const float centerY = (zone.bounds.locTop + zone.bounds.locBottom) * 0.5f;
@@ -240,8 +242,8 @@ void DataRepository::loadZones(const std::string& mapName,
         wmaIdToZoneIdx[zones_[i].wmaID] = i;
 
     // Parse WorldMapOverlay.dbc → attach overlay entries to their zones
-    auto wmoDbc = assetManager.loadDBC("WorldMapOverlay.dbc");
-    if (wmoDbc && wmoDbc->isLoaded()) {
+    {
+        const auto wmoDbc = tables.table("WorldMapOverlay.dbc", 17, "the world map's explored overlays");
         // WotLK field layout:
         // 0:ID, 1:WorldMapAreaID, 2-5:AreaTableID[4],
         // 6:MapPointX, 7:MapPointY, 8:TextureName(str),
@@ -299,7 +301,7 @@ void DataRepository::loadZones(const std::string& mapName,
     }
 
     // Load area POI data (towns, dungeons, etc.)
-    loadPOIs(assetManager);
+    loadPOIs(tables);
 
     // Build areaID → zone index lookup for ZMP resolution
     for (int i = 0; i < static_cast<int>(zones_.size()); i++) {
@@ -465,21 +467,14 @@ int DataRepository::zoneIndexForAreaId(uint32_t areaId) const {
     return -1;
 }
 
-void DataRepository::loadPOIs(pipeline::AssetManager& assetManager) {
+void DataRepository::loadPOIs(const pipeline::GameTables& tables) {
     if (poisLoaded_) return;
     poisLoaded_ = true;
 
-    auto poiDbc = assetManager.loadDBC("AreaPOI.dbc");
-    if (!poiDbc || !poiDbc->isLoaded()) {
-        LOG_INFO("DataRepository: AreaPOI.dbc not found, skipping POI markers");
-        return;
-    }
-
-    const uint32_t fieldCount = poiDbc->getFieldCount();
-    if (fieldCount < 17) {
-        LOG_WARNING("DataRepository: AreaPOI.dbc has too few fields (", fieldCount, ")");
-        return;
-    }
+    // The columns below are WotLK's; an expansion that does not list the
+    // table shows no markers.
+    if (!tables.has("AreaPOI.dbc")) return;
+    const auto poiDbc = tables.table("AreaPOI.dbc", 17, "the world map's points of interest");
 
     // AreaPOI.dbc field layout (WotLK 3.3.5a):
     // 0:ID, 1:Importance, 2-10:Icon[9], 11:FactionID,

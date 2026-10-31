@@ -1,96 +1,93 @@
+// Where the flight map draws a node: TaxiNodePosition, as FrameXML asks it.
+//
+// The flight map places a node by the chain the world map places the player
+// by - server position, canonical, render, UV against the continent rectangle -
+// and then counts up from the bottom, because taxiframe.lua anchors its markers
+// to BOTTOMLEFT where the world map anchors to TOPLEFT. Getting any step wrong
+// does not fail: it draws every marker somewhere plausible and wrong.
+//
+// It has been wrong twice. Feeding TaxiNodes.dbc positions straight into
+// canonicalToRender transposed every node, and answering the world map's
+// top-down fraction mirrored the map vertically - Rut'theran was drawn over
+// Tanaris.
+//
+// The expected fractions follow from WorldMapArea.dbc's own convention: X runs
+// north and Y runs west, LocLeft/LocRight bound Y (west, east) and
+// LocTop/LocBottom bound X (north, south). So a node's fraction across is
+// (LocLeft - Y) / (LocLeft - LocRight) and its fraction up from the bottom is
+// (X - LocBottom) / (LocTop - LocBottom).
 #include <catch_amalgamated.hpp>
 
-#include "core/coordinates.hpp"
-#include "rendering/world_map/coordinate_projection.hpp"
+#include "client_harness.hpp"
+#include "game_harness.hpp"
 
-using namespace wowee;
-using rendering::world_map::ZoneBounds;
-using rendering::world_map::renderPosToMapUV;
+#include "game/opcode_table.hpp"
 
-// The flight map places a node by the same chain the world map places the
-// player: server position → canonical → render → UV against the continent
-// rectangle. Every step of that is somewhere else's code; what is pinned here
-// is the *order*, because getting it wrong does not fail, it draws every marker
-// somewhere plausible and wrong.
-//
-// It has been wrong before. Feeding TaxiNodes.dbc positions straight into
-// canonicalToRender - skipping the server-to-canonical swap because the numbers
-// look like coordinates already - transposed every node on the flight map.
+#include <string>
+
+using wowee::game::Opcode;
+using wowee::test::Body;
+using wowee::test::ClientHarness;
 
 namespace {
 
-/// What taxiNodeMapPos does, in the order it does it.
-glm::vec2 nodeToMapUV(float serverX, float serverY, float serverZ,
-                      const ZoneBounds& continent) {
-    const glm::vec3 canonical =
-        core::coords::serverToCanonical(glm::vec3(serverX, serverY, serverZ));
-    const glm::vec3 render = core::coords::canonicalToRender(canonical);
-    return renderPosToMapUV(render, continent, /*isContinent=*/true);
-}
-
-/// Shaped like a real continent row: the bounds descend left→right and
-/// top→bottom, which is how WorldMapArea.dbc stores them.
-ZoneBounds continent() {
-    ZoneBounds b;
-    b.locLeft = 16000.0f;  b.locRight  = -16000.0f;
-    b.locTop  = 10000.0f;  b.locBottom = -10000.0f;
+/// SMSG_SHOWTAXINODES: window, the flight master, the nearest node, then the
+/// twelve words of the known-node mask (node n is bit n - 1).
+Body showTaxiNodes(uint32_t nearest, uint32_t mask0) {
+    Body b;
+    b.u32(1).u64(0xF130000000003003ull).u32(nearest).u32(mask0);
+    for (int i = 1; i < 12; ++i) b.u32(0);
     return b;
 }
 
-} // namespace
+/// A character in the world on map 0, whose flight master knows two nodes.
+///
+/// Kalimdor-shaped continent rectangle: 32000 yards west to east, 20000 south
+/// to north, centred on the origin.
+struct FlightMap {
+    ClientHarness h;
 
-TEST_CASE("The middle of the continent is the middle of the map", "[taxi][map]") {
-    const glm::vec2 uv = nodeToMapUV(0.0f, 0.0f, 0.0f, continent());
-    REQUIRE(uv.x == Catch::Approx(0.5f));
-    REQUIRE(uv.y == Catch::Approx(0.5f));
+    FlightMap() {
+        auto& server = h.server();
+        // ID, map, X (north), Y (west), Z, name.
+        server.dbc("TaxiNodes.dbc", 24,
+                   {{{0, 2}, {1, 0}, {2, 5000.0f}, {3, 8000.0f}, {4, 0.0f}, {5, "Northwest"}},
+                    {{0, 4}, {1, 0}, {2, -9000.0f}, {3, -12000.0f}, {4, 0.0f}, {5, "Southeast"}}});
+        server.dbc("TaxiPath.dbc", 4, {});
+        // ID, map, area (0: the continent's own row), name, then LocLeft,
+        // LocRight, LocTop, LocBottom.
+        server.dbc("WorldMapArea.dbc", 11,
+                   {{{0, 13}, {1, 0}, {2, 0}, {3, "Kalimdor"},
+                     {4, 16000.0f}, {5, -16000.0f}, {6, 10000.0f}, {7, -10000.0f}}});
+        h.enterWorld();
+        server.receive(Opcode::SMSG_SHOWTAXINODES, showTaxiNodes(2, 0b1010));
+        server.pump();
+    }
+
+    /// Whether TaxiNodePosition(index) answers (x, y), to four places.
+    bool nodeAt(int index, double x, double y) {
+        return h.interfaceAnswers(
+            "(function() local x, y = TaxiNodePosition(" + std::to_string(index) + ") "
+            "return x ~= nil and math.abs(x - " + std::to_string(x) + ") < 1e-4 "
+            "and math.abs(y - " + std::to_string(y) + ") < 1e-4 end)()");
+    }
+};
+
+}  // namespace
+
+TEST_CASE("a node in the northwest is drawn left of centre and above it", "[taxi][map][interface]") {
+    FlightMap map;
+    // Across: (16000 - 8000) / 32000. Up: (5000 + 10000) / 20000.
+    CHECK(map.nodeAt(1, 0.25, 0.75));
 }
 
-TEST_CASE("Each corner of the rectangle lands in a corner of the map",
-          "[taxi][map]") {
-    const ZoneBounds c = continent();
-    // Server order: x is the west axis, y is the north axis. The rectangle's
-    // "left" bounds the axis renderPosToMapUV pairs with u, and "top" the one
-    // it pairs with v - a pairing verified against real WorldMapArea values and
-    // deliberately not "corrected" here.
-    const glm::vec2 topLeft     = nodeToMapUV(c.locTop,    c.locLeft,  0.0f, c);
-    const glm::vec2 bottomRight = nodeToMapUV(c.locBottom, c.locRight, 0.0f, c);
-
-    REQUIRE(topLeft.x == Catch::Approx(0.0f));
-    REQUIRE(topLeft.y == Catch::Approx(0.0f));
-    REQUIRE(bottomRight.x == Catch::Approx(1.0f));
-    REQUIRE(bottomRight.y == Catch::Approx(1.0f));
+TEST_CASE("a node in the southeast is drawn right of centre and below it", "[taxi][map][interface]") {
+    FlightMap map;
+    // Across: (16000 + 12000) / 32000. Up: (-9000 + 10000) / 20000.
+    CHECK(map.nodeAt(2, 0.875, 0.05));
 }
 
-TEST_CASE("The two axes are not interchangeable", "[taxi][map]") {
-    // The regression this file exists for. Swapping the pair moves a marker,
-    // and if it did not, the order would not matter and nothing would have
-    // broken the first time.
-    const ZoneBounds c = continent();
-    const glm::vec2 a = nodeToMapUV(4000.0f, 8000.0f, 0.0f, c);
-    const glm::vec2 b = nodeToMapUV(8000.0f, 4000.0f, 0.0f, c);
-    REQUIRE(a.x != Catch::Approx(b.x));
-    REQUIRE(a.y != Catch::Approx(b.y));
-}
-
-TEST_CASE("Skipping the server-to-canonical swap moves the marker",
-          "[taxi][map]") {
-    // Stated as a test rather than a comment: this is the mistake that was
-    // actually made, and it is silent - both paths return a perfectly good UV.
-    const ZoneBounds c = continent();
-    const float sx = 4000.0f, sy = -6000.0f;
-
-    const glm::vec2 correct = nodeToMapUV(sx, sy, 0.0f, c);
-    const glm::vec2 skipped = renderPosToMapUV(
-        core::coords::canonicalToRender(glm::vec3(sx, sy, 0.0f)), c, true);
-
-    REQUIRE(correct.x != Catch::Approx(skipped.x));
-}
-
-TEST_CASE("A node outside the continent still projects, off the map",
-          "[taxi][map]") {
-    // Not clamped: a node belonging to another continent should land outside
-    // [0,1] so it reads as wrong, rather than being pinned to an edge where it
-    // would look like a real place.
-    const glm::vec2 uv = nodeToMapUV(0.0f, 32000.0f, 0.0f, continent());
-    REQUIRE(uv.x < 0.0f);
+TEST_CASE("a node past the last one has no position", "[taxi][map][interface]") {
+    FlightMap map;
+    CHECK(map.h.interfaceAnswers("TaxiNodePosition(3) == nil"));
 }

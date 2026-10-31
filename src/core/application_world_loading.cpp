@@ -1,4 +1,5 @@
 #include "core/application.hpp"
+#include "game/game_data.hpp"
 #include "core/appearance_composer.hpp"
 #include "core/window.hpp"
 #include "collision/collision_world.hpp"
@@ -144,7 +145,7 @@ void Application::mapEntryBegun(const WorldLoader::Entry& entry) {
 void Application::mapRenderersReady(const WorldLoader::Entry& entry, const std::string& mapName) {
     onWorldRenderersReady();
     setActiveMapName(mapName);
-    if (audioCoordinator_) audioCoordinator_->loadWorldSounds(assetManager.get(), zoneTracker_ ? zoneTracker_->getZoneManager() : nullptr);
+    if (audioCoordinator_) audioCoordinator_->loadWorldSounds(assetManager.get(), *gameData_, zoneTracker_ ? zoneTracker_->getZoneManager() : nullptr);
     const glm::vec3 spawnRender = coords::canonicalToRender(coords::serverToCanonical(glm::vec3(entry.x, entry.y, entry.z)));
     // Build faction hostility map for this character's race
     if (gameHandler) {

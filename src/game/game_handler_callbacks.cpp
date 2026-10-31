@@ -1,4 +1,5 @@
 #include "game/game_handler.hpp"
+#include "game/game_data.hpp"
 #include "achievement/services/achievements.hpp"
 #include "title/services/titles.hpp"
 #include "reputation/services/reputation.hpp"
@@ -129,14 +130,12 @@ struct LockOpenPlan {
 // Decide how to open a game object from its Lock.dbc row. Only a known player
 // OPEN_LOCK spell yields CastSpell; every other case (including key-item locks)
 // is UseDirect, with keyItemId set so the caller can move the key into a bag.
-LockOpenPlan planGameObjectOpen(pipeline::AssetManager* assets,
+LockOpenPlan planGameObjectOpen(const GameData& data,
                                 const GameObjectQueryResponseData* info,
                                 const std::unordered_set<uint32_t>& knownSpells) {
     LockOpenPlan plan;
-    if (!assets || !info || !info->hasData || info->data[0] == 0) return plan;
+    if (!info || !info->hasData || info->data[0] == 0) return plan;
 
-    auto lockDbc = assets->loadDBC("Lock.dbc");
-    auto spellDbc = assets->loadDBC("Spell.dbc");
     // Which columns hold the spell's effects and their misc values, from the
     // layout. They were 71 and 110, the WotLK positions, behind a demand that
     // Spell.dbc have 234 fields - which is the WotLK file and nothing else, so
@@ -146,15 +145,16 @@ LockOpenPlan planGameObjectOpen(pipeline::AssetManager* assets,
     // not; the misc values are at 106 there rather than 110.
     const auto* spellL = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("Spell") : nullptr;
-    const uint32_t effect0Field = spellL ? spellL->field("Effect0") : 0xFFFFFFFF;
-    const uint32_t misc0Field   = spellL ? spellL->field("EffectMiscValue0") : 0xFFFFFFFF;
-    if (!lockDbc || !spellDbc || !lockDbc->isLoaded() || !spellDbc->isLoaded() ||
-        lockDbc->getFieldCount() < 33 ||
-        effect0Field == 0xFFFFFFFF || misc0Field == 0xFFFFFFFF ||
-        effect0Field + 3 > spellDbc->getFieldCount() ||
-        misc0Field + 3 > spellDbc->getFieldCount()) {
-        return plan; // Can't inspect the lock - let the server adjudicate a USE.
+    // The WotLK file's positions where no layout is loaded (a test).
+    const uint32_t effect0Field = spellL ? spellL->field("Effect0") : 71;
+    const uint32_t misc0Field   = spellL ? spellL->field("EffectMiscValue0") : 110;
+    if (effect0Field == 0xFFFFFFFF || misc0Field == 0xFFFFFFFF) {
+        data.stop("Spell.dbc", "how a locked object is opened",
+                  "has no Effect0 or EffectMiscValue0 in its layout");
     }
+    const auto lockDbc = data.table("Lock.dbc", 33, "how a locked object is opened");
+    const auto spellDbc = data.table("Spell.dbc", std::max(effect0Field, misc0Field) + 3,
+                                     "how a locked object is opened");
 
     const uint32_t lockId = info->data[0];
     for (uint32_t row = 0; row < lockDbc->getRecordCount(); ++row) {
@@ -380,8 +380,7 @@ void GameHandler::handleCharEnum(network::Packet& packet) {
     LOG_INFO("Handling SMSG_CHAR_ENUM");
 
     CharEnumResponse response;
-    // IMPORTANT: Do not infer packet formats from numeric build alone.
-    // Turtle WoW uses a "high" build but classic-era world packet formats.
+    // The expansion's parsers decide the format, never the numeric build.
     bool parsed = packetParsers_->parseCharEnum(packet, response);
     if (!parsed) {
         fail("Failed to parse SMSG_CHAR_ENUM");
@@ -595,31 +594,13 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     // Reset per-character state so previous character data doesn't bleed through
     inventoryHandler_->beginCharacter();
     if (services_.achievementsFeed) services_.achievementsFeed->beginCharacter();
-    lastPlayerFields_.clear();
-    playerArmorRating_ = 0;
-    std::fill(std::begin(playerResistances_), std::end(playerResistances_), 0);
-    std::fill(std::begin(playerStats_), std::end(playerStats_), -1);
-    playerMeleeAP_ = -1;
-    playerRangedAP_ = -1;
-    std::fill(std::begin(playerSpellDmgBonus_), std::end(playerSpellDmgBonus_), -1);
-    playerHealBonus_ = -1;
-    playerDodgePct_ = -1.0f;
-    playerParryPct_ = -1.0f;
-    playerBlockPct_ = -1.0f;
-    playerExpertise_ = 0;
-    playerOffhandExpertise_ = 0;
-    playerCritPct_  = -1.0f;
-    playerRangedCritPct_ = -1.0f;
-    std::fill(std::begin(playerSpellCritPct_), std::end(playerSpellCritPct_), -1.0f);
-    std::fill(std::begin(playerCombatRatings_), std::end(playerCombatRatings_), -1);
+    playerHandler_->beginCharacter();
+    movementHandler_->beginCharacter();
     spellHandler_->resetAllState();
     eventBus().publish(events::PlayerIntoxicationChanged{0.0f});
     actionBarHandler_->clear();
     petHandler_->beginCharacter();
     weatherHandler_->beginCharacter();
-    playerXp_ = 0;
-    playerNextLevelXp_ = 0;
-    serverPlayerLevel_ = 1;
     // The quest log begins again with CharacterLoggingIn, below.
     pendingLoginQuestResync_ = false;
     pendingLoginQuestResyncTimeout_ = 0.0f;
@@ -629,7 +610,8 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     lastInteractedGoGuid_ = 0;
     combatHandler_->beginCharacter();
     combatHandler_->invalidateTabCycle();
-    entityController_->clearAll();
+    worldHandler_->clearAll();
+    queryCacheHandler_->clear();
     accountDataHandler_->characterSelected(characterGuid);
     // The domains that keep what the server will send again end it on this.
     eventBus().publish(events::CharacterLoggingIn{characterGuid});
@@ -740,9 +722,8 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     movementInfo.jumpCosAngle = 0.0f;
     movementInfo.jumpXYSpeed = 0.0f;
     combatHandler_->worldEntered();
-    currentMountDisplayId_ = 0;
     vehicleId_ = 0;
-    eventBus().publish(events::PlayerMountChanged{0});
+    movementHandler_->enteredWorld();
 
     // Clear boss encounter unit slots and raid marks on world transfer
     socialHandler_->resetTransferState();
@@ -1143,7 +1124,7 @@ void GameHandler::sendMovement(Opcode opcode) {
 
 // Entity lifecycle methods (handleUpdateObject, processOutOfRangeObjectsUntil,
 // applyUpdateObjectBlock, finalizeUpdateObjectBatch, handleCompressedUpdateObject,
-// handleDestroyObject) moved to EntityController - see entity_controller.cpp
+// handleDestroyObject) moved to WorldHandler - see world_handler.cpp
 
 void GameHandler::autoJoinDefaultChannels() {
     chatHandler_->chatAutoJoin.general = chatAutoJoin.general;
@@ -1165,7 +1146,7 @@ void GameHandler::faceCanonicalYaw(float canonicalYaw) {
 }
 
 void GameHandler::setStandState(uint8_t standState) {
-    socialHandler_->setStandState(standState);
+    playerHandler_->requestStandState(standState);
 }
 
 bool GameHandler::isAfk() const { return chatHandler_->isAfk(); }
@@ -1176,20 +1157,44 @@ void GameHandler::addLocalChatMessage(const MessageChatData& msg) {
 }
 
 // ============================================================
-// Name Queries (delegated to EntityController)
+// Name Queries
 // ============================================================
 
-void GameHandler::queryPlayerName(uint64_t guid) {
-    entityController_->queryPlayerName(guid);
+void GameHandler::playerNameArrived(uint64_t guid, const std::string& name) {
+    worldHandler_->playerNamed(guid, name);
 }
 
-void GameHandler::queryCreatureInfo(uint32_t entry, uint64_t guid) {
-    entityController_->queryCreatureInfo(entry, guid);
+void GameHandler::creatureTemplateArrived(const CreatureQueryResponseData& data) {
+    worldHandler_->creatureNamed(data);
+    // A companion may have been waiting on exactly this. A companion's
+    // creature id is a template entry and the model frame needs a display
+    // id, so GetCompanionInfo answers zero until the query comes back - and
+    // the tab only re-reads when told. Without this the model appeared on
+    // the next login and not before.
+    //
+    // With the kind, because the event carries it and the tab re-reads the
+    // list it names: a mount's answer announced as a critter's left the
+    // mount tab holding the zero it started with.
+    const std::string kind = companionKindForCreature(data.entry);
+    if (!kind.empty() && hasAddonEventListener()) {
+        fireAddonEvent("COMPANION_UPDATE", {kind});
+    }
+    // An objective that had no name for what it is about now has one.
+    questHandler_->objectiveTargetNamed(data.entry, false);
+}
+
+void GameHandler::gameObjectTemplateArrived(const GameObjectQueryResponseData& data) {
+    worldHandler_->gameObjectNamed(data);
+    inventoryHandler_->gameObjectTemplateArrived(data);
+    // And the same for an objective that names this one - a chest to open
+    // rather than a creature to kill.
+    questHandler_->objectiveTargetNamed(data.entry, true);
+    movementHandler_->transportTemplateArrived(data);
 }
 
 uint32_t GameHandler::getCreatureDisplayIdForEntry(uint32_t entry) {
     if (entry == 0) return 0;
-    const auto& cache = getCreatureInfoCache();
+    const auto& cache = queryCacheHandler_->getCreatureInfoCache();
     if (auto it = cache.find(entry); it != cache.end()) {
         // The first non-zero of the four. A template may carry several models
         // and the server picks between them per spawn; for a preview any of
@@ -1200,16 +1205,8 @@ uint32_t GameHandler::getCreatureDisplayIdForEntry(uint32_t entry) {
     }
     // Guid zero: this is not about any one spawn. queryCreatureInfo drops a
     // repeat while one is in flight, so calling every frame sends one query.
-    queryCreatureInfo(entry, 0);
+    queryCacheHandler_->queryCreatureInfo(entry, 0);
     return 0;
-}
-
-std::string GameHandler::getCachedPlayerName(uint64_t guid) const {
-    return entityController_->getCachedPlayerName(guid);
-}
-
-std::string GameHandler::getCachedCreatureName(uint32_t entry) const {
-    return entityController_->getCachedCreatureName(entry);
 }
 
 // ============================================================
@@ -1307,18 +1304,6 @@ void GameHandler::cancelCast() {
     spellHandler_->cancelCast();
 }
 
-void GameHandler::dismissCritter() {
-    if (activeCritterGuid_ == 0 || !getSocket() || getState() != WorldState::IN_WORLD) return;
-    const uint16_t wire = wireOpcode(Opcode::CMSG_DISMISS_CRITTER);
-    if (wire == 0xFFFF) return;   // expansion has no such opcode
-    auto pkt = DismissCritterPacket::build(activeCritterGuid_);
-    getSocket()->send(pkt);
-    LOG_INFO("Dismissing companion: guid=0x", std::hex, activeCritterGuid_, std::dec,
-             " summonedBy=", activeCritterSpellId_);
-    // The server confirms by clearing the critter field; leave the local state
-    // alone so a refused dismiss does not leave the client thinking it worked.
-}
-
 // CMSG_UNLEARN_SKILL carries the skill line and nothing else.
 // HandleUnlearnSkillOpcode drops anything that is not a primary profession, so
 // a mistaken call costs nothing, but the confirmation dialog in front of it is
@@ -1377,9 +1362,9 @@ void GameHandler::scheduleGameObjectLootOpen(uint64_t guid, float delaySeconds, 
 
 bool GameHandler::isFishingHoleGameObject(uint64_t guid) const {
     if (guid == 0) return false;
-    auto entity = entityController_->getEntityManager().getEntity(guid);
+    auto entity = worldHandler_->getEntityManager().getEntity(guid);
     if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return false;
-    const auto* info = getCachedGameObjectInfo(
+    const auto* info = queryCacheHandler_->getCachedGameObjectInfo(
         std::static_pointer_cast<GameObject>(entity)->getEntry());
     return info && info->type == kGoTypeFishingHole;
 }
@@ -1403,18 +1388,18 @@ bool GameHandler::hasPendingGameObjectLootOpen(uint64_t guid) const {
 
 bool GameHandler::isGatherGameObject(uint64_t guid) const {
     if (guid == 0) return false;
-    auto entity = entityController_->getEntityManager().getEntity(guid);
+    auto entity = worldHandler_->getEntityManager().getEntity(guid);
     if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return false;
 
     auto go = std::static_pointer_cast<GameObject>(entity);
-    const GameObjectQueryResponseData* goInfo = getCachedGameObjectInfo(go->getEntry());
+    const GameObjectQueryResponseData* goInfo = queryCacheHandler_->getCachedGameObjectInfo(go->getEntry());
     return gatherSpellForGameObject(goInfo, go->getName()) != 0;
 }
 
 void GameHandler::despawnCreatureLocally(uint64_t guid) {
     if (guid == 0) return;
 
-    auto& entityManager = entityController_->getEntityManager();
+    auto& entityManager = worldHandler_->getEntityManager();
     auto entity = entityManager.getEntity(guid);
     if (!entity || entity->getType() != ObjectType::UNIT) return;
 
@@ -1431,7 +1416,7 @@ void GameHandler::despawnCreatureLocally(uint64_t guid) {
 void GameHandler::despawnGameObjectLocally(uint64_t guid) {
     if (guid == 0) return;
 
-    auto& entityManager = entityController_->getEntityManager();
+    auto& entityManager = worldHandler_->getEntityManager();
     auto entity = entityManager.getEntity(guid);
     if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return;
 
@@ -1535,7 +1520,7 @@ void GameHandler::interactWithGameObject(uint64_t guid) {
     // then, and they fell out of the sky. The same rule casting follows: with
     // Auto Dismount in Flight off - the default - it is refused, and the
     // player stays up.
-    if (isMounted() && !movementHandler_->isTaxiMountActive() && isPlayerFlying() &&
+    if (movementHandler_->isMounted() && !movementHandler_->isTaxiMountActive() && isPlayerFlying() &&
         cvars().get("autoDismountFlying", "0") == "0") {
         addUIError("You can't do that while flying.");
         return;
@@ -1553,7 +1538,7 @@ void GameHandler::interactWithGameObject(uint64_t guid) {
     //
     // Not on a taxi: the flight's mount is not the player's to dismiss, and
     // there is nothing to interact with mid-flight anyway.
-    if (isMounted() && !movementHandler_->isTaxiMountActive()) {
+    if (movementHandler_->isMounted() && !movementHandler_->isTaxiMountActive()) {
         constexpr float kGameObjectReach = 12.0f;
         bool inReach = true;
         if (auto entity = getEntityManager().getEntity(guid)) {
@@ -1596,7 +1581,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
 
     // Ensure GO interaction isn't blocked by stale or active melee state.
     stopAutoAttack();
-    auto entity = entityController_->getEntityManager().getEntity(guid);
+    auto entity = worldHandler_->getEntityManager().getEntity(guid);
     uint32_t goEntry = 0;
     uint32_t goType = 0;
     std::string goName;
@@ -1608,7 +1593,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
             auto go = std::static_pointer_cast<GameObject>(entity);
             goEntry = go->getEntry();
             goName = go->getName();
-            goInfo = getCachedGameObjectInfo(goEntry);
+            goInfo = queryCacheHandler_->getCachedGameObjectInfo(goEntry);
             if (goInfo) goType = goInfo->type;
             if (goType == kGoTypeFishingHole) {
                 // Nothing sent, and nothing scheduled: the school is fished, not
@@ -1664,7 +1649,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
     bool metadataPending = false;
     if (entity && entity->getType() == ObjectType::GAMEOBJECT) {
         auto go = std::static_pointer_cast<GameObject>(entity);
-        if (!goInfo) goInfo = getCachedGameObjectInfo(go->getEntry());
+        if (!goInfo) goInfo = queryCacheHandler_->getCachedGameObjectInfo(go->getEntry());
         metadataPending = (goInfo == nullptr);
         if (goInfo && goInfo->type == 19) {
             isMailbox = true;
@@ -1719,7 +1704,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
         // lock. A plain CMSG_GAMEOBJ_USE only opens unlocked / server-gated quest
         // containers (e.g. the Legend of Stalvan Sealed Crate).
         const LockOpenPlan plan = planGameObjectOpen(
-            services_.assetManager, goInfo, spellHandler_->getKnownSpells());
+            *services_.gameData, goInfo, spellHandler_->getKnownSpells());
         if (plan.method == LockOpenMethod::CastSpell) {
             auto castPacket = getPacketParsers()->buildCastGameObjectSpell(
                 plan.spellId, guid, 0);
@@ -1825,7 +1810,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
         // for a type 9 the server has nothing to offer, the page id being in
         // the object's own data where the real client reads it from. Stormwind
         // is full of signs that answered a click with silence.
-        entityController_->showGameObjectPageText(guid);
+        inventoryHandler_->readGameObject(guid);
     }
 
     // CMSG_GAMEOBJ_REPORT_USE triggers GO AI scripts (SmartAI, ScriptAI) which
@@ -1843,7 +1828,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
 }
 
 Unit* GameHandler::getUnitByGuid(uint64_t guid) {
-    auto entity = entityController_->getEntityManager().getEntity(guid);
+    auto entity = worldHandler_->getEntityManager().getEntity(guid);
     // Use the type tag to skip RTTI - both UNIT and PLAYER object types derive from Unit.
     if (!entity || !entity->isUnit()) return nullptr;
     return static_cast<Unit*>(entity.get());
@@ -1889,6 +1874,69 @@ bool GameHandler::previewPlayerAppearance(uint32_t appearanceBytes, uint8_t faci
         return true;
     }
     return false;
+}
+
+void GameHandler::traceWorldPackets(std::chrono::seconds duration, const char* label) {
+    if (socket) socket->tracePacketsFor(duration, label);
+}
+
+void GameHandler::tearDownWorldForTransfer(uint32_t mapId) {
+    combatHandler_->arrivedInNewWorld();
+    inventoryHandler_->leaveWorld();
+    spellHandler_->clearUnitCaches();
+    combatHandler_->clearCombatText();
+    worldHandler_->getEntityManager().clear();
+    combatHandler_->clearHostileAttackers();
+    worldStates_.clear();
+    questHandler_->clearGossipPois();
+    worldStateMapId_ = mapId;
+    worldStateZoneId_ = 0;
+    stopAutoAttack();
+    spellHandler_->resetCastState();
+}
+
+void GameHandler::resurrectedInPlace() {
+    combatHandler_->resurrectedInPlace();
+    combatHandler_->clearHostileAttackers();
+    stopAutoAttack();
+    combatHandler_->invalidateTabCycle();
+    spellHandler_->resetCastState();
+}
+
+bool GameHandler::loggingOut() const { return socialHandler_->isLoggingOut(); }
+
+Character* GameHandler::listedCharacter() {
+    for (auto& ch : characters) {
+        if (ch.guid == playerGuid) return &ch;
+    }
+    return nullptr;
+}
+
+void GameHandler::moneyFieldArrived(uint32_t copper, FrameXmlEvents& packetEvents) {
+    inventoryHandler_->moneyFieldArrived(copper, packetEvents);
+}
+
+void GameHandler::bankBagSlotsArrived(uint8_t slots) {
+    inventoryHandler_->setPurchasedBankBagSlots(slots);
+}
+
+void GameHandler::chosenTitleArrived(int32_t title) {
+    if (auto* feed = services_.titlesFeed) feed->onChosen(title);
+}
+
+void GameHandler::playerFlagsArrived(uint32_t flags, FrameXmlEvents& packetEvents) {
+    combatHandler_->playerFlagsArrived(flags, packetEvents);
+}
+
+bool GameHandler::actionBarHoldsItem() const {
+    for (const auto& action : actionBarHandler_->slots()) {
+        if (action.type == ActionBarSlot::ITEM && action.id != 0) return true;
+    }
+    return false;
+}
+
+void GameHandler::coinageFieldFoundAt(uint16_t index) {
+    updateFieldTable_.setIndex(UF::PLAYER_FIELD_COINAGE, index);
 }
 
 bool GameHandler::corpseHoldsLoot(uint64_t guid) const {
