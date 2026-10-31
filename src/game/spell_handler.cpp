@@ -1,4 +1,5 @@
 #include "game/spell_handler.hpp"
+#include "game/game_data.hpp"
 #include "achievement/services/achievements.hpp"
 #include "game/achievement_data.hpp"
 #include "core/event_bus.hpp"
@@ -191,8 +192,7 @@ uint32_t SpellHandler::gatherRequiredSkillRank(uint64_t goGuid) const {
     const auto* info = queries_.gameObjectInfo(go->getEntry());
     if (!info || !info->hasData || info->data[0] == 0) return 0;
 
-    auto lockDbc = assets_ ? assets_->loadDBC("Lock.dbc") : nullptr;
-    if (!lockDbc || !lockDbc->isLoaded() || lockDbc->getFieldCount() < 33) return 0;
+    const auto lockDbc = data_.table("Lock.dbc", 33, "the skill a gathering node asks for");
 
     const uint32_t lockId = info->data[0];
     for (uint32_t row = 0; row < lockDbc->getRecordCount(); ++row) {
@@ -330,9 +330,9 @@ std::string SpellHandler::formatSpellNameList(const std::vector<uint32_t>& spell
 
 SpellHandler::SpellHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
                            ChatLog& chat, SpellQueries& queries, const core::CVarStore& cvars,
-                           pipeline::AssetManager* assets)
+                           const GameData& data)
     : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat), queries_(queries),
-      cvars_(cvars), assets_(assets) {
+      cvars_(cvars), data_(data) {
     // A spell bought from a trainer is in the book from the moment the
     // purchase succeeds; SMSG_LEARNED_SPELL can come after the trainer
     // window has redrawn from SPELLS_CHANGED.
@@ -1213,17 +1213,9 @@ uint32_t SpellHandler::getKnownSlotFromHighestRankSlot(uint32_t slot) {
 
 void SpellHandler::loadTalentDbc() {
     if (talentDbcLoaded_) return;
-
-    auto* am = assets_;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
     talentDbcLoaded_ = true;
 
-    // Load Talent.dbc
-    auto talentDbc = am->loadDBC("Talent.dbc");
-    if (talentDbc && talentDbc->isLoaded()) {
+    {
         const auto* talL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("Talent") : nullptr;
         const uint32_t tID = talL ? (*talL)["ID"] : 0;
         const uint32_t tTabID = talL ? (*talL)["TabID"] : 1;
@@ -1232,6 +1224,9 @@ void SpellHandler::loadTalentDbc() {
         const uint32_t tRank0 = talL ? (*talL)["RankSpell0"] : 4;
         const uint32_t tPrereq0 = talL ? (*talL)["PrereqTalent0"] : 9;
         const uint32_t tPrereqR0 = talL ? (*talL)["PrereqRank0"] : 12;
+        const auto talentDbc = data_.table(
+            "Talent.dbc", std::max({tID, tTabID, tRow, tCol, tRank0 + 4, tPrereq0 + 2, tPrereqR0 + 2}) + 1,
+            "the talent trees");
 
         uint32_t count = talentDbc->getRecordCount();
         for (uint32_t i = 0; i < count; ++i) {
@@ -1262,13 +1257,9 @@ void SpellHandler::loadTalentDbc() {
             talentCache_[entry.talentId] = entry;
         }
         LOG_INFO("Loaded ", talentCache_.size(), " talents from Talent.dbc");
-    } else {
-        LOG_WARNING("Could not load Talent.dbc");
     }
 
-    // Load TalentTab.dbc
-    auto tabDbc = am->loadDBC("TalentTab.dbc");
-    if (tabDbc && tabDbc->isLoaded()) {
+    {
         const auto* ttL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("TalentTab") : nullptr;
         // Cache field indices before the loop
         const uint32_t ttIdField    = ttL ? (*ttL)["ID"]             : 0;
@@ -1276,6 +1267,10 @@ void SpellHandler::loadTalentDbc() {
         const uint32_t ttClassField = ttL ? (*ttL)["ClassMask"]      : 20;
         const uint32_t ttOrderField = ttL ? (*ttL)["OrderIndex"]     : 22;
         const uint32_t ttBgField    = ttL ? (*ttL)["BackgroundFile"] : 23;
+        const auto tabDbc = data_.table(
+            "TalentTab.dbc",
+            std::max({ttIdField, ttNameField, ttClassField, ttOrderField, ttBgField}) + 1,
+            "the talent trees");
 
         uint32_t count = tabDbc->getRecordCount();
         for (uint32_t i = 0; i < count; ++i) {
@@ -1295,8 +1290,6 @@ void SpellHandler::loadTalentDbc() {
             }
         }
         LOG_INFO("Loaded ", talentTabCache_.size(), " talent tabs from TalentTab.dbc");
-    } else {
-        LOG_WARNING("Could not load TalentTab.dbc");
     }
 
     syncPreWotlkTalentsFromKnownSpells();
@@ -2455,26 +2448,16 @@ static const std::string SPELL_EMPTY_STRING;
 
 void SpellHandler::loadSpellNameCache() const {
     if (spellNameCacheLoaded_) return;
-
-    auto* am = assets_;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
     spellNameCacheLoaded_ = true;
 
-    auto dbc = am->loadDBC("Spell.dbc");
-    if (!dbc || !dbc->isLoaded()) {
-        LOG_WARNING("Trainer: Could not load Spell.dbc for spell names");
-        return;
-    }
-
-    if (dbc->getFieldCount() < 148) {
-        LOG_WARNING("Trainer: Spell.dbc has too few fields (", dbc->getFieldCount(), ")");
-        return;
-    }
-
     const auto* spellL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("Spell") : nullptr;
+    // The columns every spell is read for; the rest below are each taken only
+    // where the layout names them and the file has them.
+    const uint32_t idField   = spellL ? (*spellL)["ID"]   : 0;
+    const uint32_t nameField = spellL ? (*spellL)["Name"] : 136;
+    const uint32_t rankField = spellL ? (*spellL)["Rank"] : 153;
+    const auto dbc = data_.table("Spell.dbc", std::max({idField, nameField, rankField}) + 1,
+                                 "the names, ranks and costs of spells");
 
     uint32_t schoolMaskField = 0, schoolEnumField = 0;
     bool hasSchoolMask = false, hasSchoolEnum = false;
@@ -2529,10 +2512,6 @@ void SpellHandler::loadSpellNameCache() const {
         if (f != 0xFFFFFFFF && f < dbc->getFieldCount()) targetsField = f;
     }
 
-    // Cache field indices before the loop to avoid repeated layout lookups
-    const uint32_t idField   = spellL ? (*spellL)["ID"]   : 0;
-    const uint32_t nameField = spellL ? (*spellL)["Name"] : 136;
-    const uint32_t rankField = spellL ? (*spellL)["Rank"] : 153;
     const uint32_t fieldCount = dbc->getFieldCount();
 
     // Which row of SpellDescriptionVariables.dbc a spell's $<name> tokens are
@@ -2547,23 +2526,20 @@ void SpellHandler::loadSpellNameCache() const {
     }
     if (descVarField == 0xFFFFFFFF && fieldCount == 234) descVarField = 232;
 
-    // The declarations themselves, read once. Thirty rows in 3.3.5.
-    if (spellDescriptionVariables_.empty()) {
-        if (auto varDbc = am->loadDBC("SpellDescriptionVariables.dbc");
-            varDbc && varDbc->isLoaded() && varDbc->getFieldCount() >= 2) {
-            for (uint32_t i = 0; i < varDbc->getRecordCount(); ++i) {
-                const uint32_t vid = varDbc->getUInt32(i, 0);
-                std::string text = varDbc->getString(i, 1);
-                if (vid != 0 && !text.empty()) {
-                    spellDescriptionVariables_[vid] = std::move(text);
-                }
+    // The declarations themselves, read once. Thirty rows in 3.3.5. Only a
+    // Spell.dbc with the column refers to them, so only then are they needed.
+    if (descVarField != 0xFFFFFFFF && spellDescriptionVariables_.empty()) {
+        const auto varDbc = data_.table("SpellDescriptionVariables.dbc", 2,
+                                        "the named values ($<name>) in spell descriptions");
+        for (uint32_t i = 0; i < varDbc->getRecordCount(); ++i) {
+            const uint32_t vid = varDbc->getUInt32(i, 0);
+            std::string text = varDbc->getString(i, 1);
+            if (vid != 0 && !text.empty()) {
+                spellDescriptionVariables_[vid] = std::move(text);
             }
-            LOG_INFO("Loaded ", spellDescriptionVariables_.size(),
-                     " spell description variable set(s)");
-        } else {
-            LOG_WARNING("SpellDescriptionVariables.dbc did not load; spell descriptions show "
-                        "their named values ($<name>) blank");
         }
+        LOG_INFO("Loaded ", spellDescriptionVariables_.size(),
+                 " spell description variable set(s)");
     }
     // What a recipe makes and what it consumes, from the layout rather than
     // from three WotLK column numbers written out here.
@@ -2744,8 +2720,8 @@ void SpellHandler::loadSpellNameCache() const {
             spellNameCache_[id] = std::move(entry);
         }
     }
-    auto durDbc = am->loadDBC("SpellDuration.dbc");
-    if (durDbc && durDbc->isLoaded()) {
+    {
+        const auto durDbc = data_.table("SpellDuration.dbc", 2, "how long a spell's effect lasts");
         std::unordered_map<uint32_t, float> durMap;
         for (uint32_t di = 0; di < durDbc->getRecordCount(); ++di) {
             uint32_t durId = durDbc->getUInt32(di, 0);
@@ -2766,14 +2742,13 @@ void SpellHandler::loadSpellNameCache() const {
     // rather than mistaking a raw index for a distance in yards.
     const auto* rangeL = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("SpellRange") : nullptr;
-    auto rangeDbc = am->loadDBC("SpellRange.dbc");
+    // MaxRange is column 4 in the WotLK file, read where no layout is loaded.
+    const uint32_t maxRangeField = rangeL ? rangeL->field("MaxRange") : 4;
     std::unordered_map<uint32_t, float> rangeMap;
-    if (rangeDbc && rangeDbc->isLoaded() && rangeL) {
-        const uint32_t maxRangeField = rangeL->field("MaxRange");
-        if (maxRangeField != 0xFFFFFFFF && maxRangeField < rangeDbc->getFieldCount()) {
-            for (uint32_t ri = 0; ri < rangeDbc->getRecordCount(); ++ri) {
-                rangeMap[rangeDbc->getUInt32(ri, 0)] = rangeDbc->getFloat(ri, maxRangeField);
-            }
+    if (maxRangeField != 0xFFFFFFFF) {
+        const auto rangeDbc = data_.table("SpellRange.dbc", maxRangeField + 1, "how far a spell reaches");
+        for (uint32_t ri = 0; ri < rangeDbc->getRecordCount(); ++ri) {
+            rangeMap[rangeDbc->getUInt32(ri, 0)] = rangeDbc->getFloat(ri, maxRangeField);
         }
     }
     for (auto& [sid, entry] : spellNameCache_) {
@@ -2786,19 +2761,15 @@ void SpellHandler::loadSpellNameCache() const {
 
 void SpellHandler::loadSkillLineAbilityDbc() const {
     if (skillLineAbilityLoaded_) return;
-
-    auto* am = assets_;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
     skillLineAbilityLoaded_ = true;
 
-    auto slaDbc = am->loadDBC("SkillLineAbility.dbc");
-    if (slaDbc && slaDbc->isLoaded()) {
+    {
         const auto* slaL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("SkillLineAbility") : nullptr;
         const uint32_t slaSkillField = slaL ? (*slaL)["SkillLineID"] : 1;
         const uint32_t slaSpellField = slaL ? (*slaL)["SpellID"]     : 2;
+        const auto slaDbc = data_.table("SkillLineAbility.dbc",
+                                        std::max(slaSkillField, slaSpellField) + 1,
+                                        "which profession a spell belongs to");
         const uint32_t slaFieldCount = slaDbc->getFieldCount();
         const bool hasDiffFields = (slaFieldCount > 11);
         for (uint32_t i = 0; i < slaDbc->getRecordCount(); i++) {
@@ -2829,21 +2800,17 @@ const std::string& SpellHandler::getSpellFocusName(uint32_t focusId) {
     static const std::string kEmpty;
     if (!spellFocusDbcLoaded_) {
         spellFocusDbcLoaded_ = true;
-        auto* am = assets_;
-        if (am && am->isInitialized()) {
-            auto dbc = am->loadDBC("SpellFocusObject.dbc");
-            // Layout is stable across expansions: ID(0) + Name locstring
-            // whose English text sits at field 1.
-            if (dbc && dbc->isLoaded() && dbc->getFieldCount() >= 2) {
-                for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-                    uint32_t id = dbc->getUInt32(i, 0);
-                    std::string name = dbc->getString(i, 1);
-                    if (id != 0 && !name.empty())
-                        spellFocusNames_[id] = std::move(name);
-                }
-                LOG_INFO("Loaded ", spellFocusNames_.size(), " spell focus object names");
-            }
+        // Layout is stable across expansions: ID(0) + Name locstring
+        // whose English text sits at field 1.
+        const auto dbc = data_.table("SpellFocusObject.dbc", 2,
+                                     "the object a spell must be cast near");
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            uint32_t id = dbc->getUInt32(i, 0);
+            std::string name = dbc->getString(i, 1);
+            if (id != 0 && !name.empty())
+                spellFocusNames_[id] = std::move(name);
         }
+        LOG_INFO("Loaded ", spellFocusNames_.size(), " spell focus object names");
     }
     auto it = spellFocusNames_.find(focusId);
     return it != spellFocusNames_.end() ? it->second : kEmpty;
@@ -2853,22 +2820,18 @@ const std::string& SpellHandler::getTotemCategoryName(uint32_t categoryId) {
     static const std::string kEmpty;
     if (!totemCategoryDbcLoaded_) {
         totemCategoryDbcLoaded_ = true;
-        auto* am = assets_;
-        if (am && am->isInitialized()) {
-            // TBC/WotLK only - absent in Vanilla, where totem failures carry
-            // item ids instead of category ids.
-            auto dbc = am->loadDBC("TotemCategory.dbc");
-            // ID(0) + Name locstring whose English text sits at field 1.
-            if (dbc && dbc->isLoaded() && dbc->getFieldCount() >= 2) {
-                for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-                    uint32_t id = dbc->getUInt32(i, 0);
-                    std::string name = dbc->getString(i, 1);
-                    if (id != 0 && !name.empty())
-                        totemCategoryNames_[id] = std::move(name);
-                }
-                LOG_INFO("Loaded ", totemCategoryNames_.size(), " totem category names");
-            }
+        // TBC/WotLK only - absent in Vanilla, where totem failures carry item
+        // ids instead of category ids, so it is asked for only where it is.
+        // ID(0) + Name locstring whose English text sits at field 1.
+        const auto dbc = data_.table("TotemCategory.dbc", 2,
+                                     "the tool a spell's failure names");
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            uint32_t id = dbc->getUInt32(i, 0);
+            std::string name = dbc->getString(i, 1);
+            if (id != 0 && !name.empty())
+                totemCategoryNames_[id] = std::move(name);
         }
+        LOG_INFO("Loaded ", totemCategoryNames_.size(), " totem category names");
     }
     auto it = totemCategoryNames_.find(categoryId);
     return it != totemCategoryNames_.end() ? it->second : kEmpty;
@@ -3012,10 +2975,7 @@ const std::string& SpellHandler::getSpellDescription(uint32_t spellId) const {
 
 std::string SpellHandler::getEnchantName(uint32_t enchantId) const {
     if (enchantId == 0) return {};
-    auto* am = assets_;
-    if (!am || !am->isInitialized()) return {};
-    auto dbc = am->loadDBC("SpellItemEnchantment.dbc");
-    if (!dbc || !dbc->isLoaded()) return {};
+    const auto dbc = data_.table("SpellItemEnchantment.dbc", 1, "the name of an enchantment");
     const auto* sieL = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("SpellItemEnchantment") : nullptr;
     const uint32_t nameField = pipeline::detectEnchantmentNameField(dbc.get(), sieL);
@@ -3029,10 +2989,7 @@ std::string SpellHandler::getEnchantName(uint32_t enchantId) const {
 
 uint32_t SpellHandler::getEnchantGemItem(uint32_t enchantId) const {
     if (enchantId == 0) return 0;
-    auto* am = assets_;
-    if (!am || !am->isInitialized()) return 0;
-    auto dbc = am->loadDBC("SpellItemEnchantment.dbc");
-    if (!dbc || !dbc->isLoaded()) return 0;
+    const auto dbc = data_.table("SpellItemEnchantment.dbc", 1, "the gem in a socket");
     const auto* sieL = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("SpellItemEnchantment") : nullptr;
     const uint32_t gemField = pipeline::detectEnchantmentGemItemField(dbc.get(), sieL);
@@ -3303,23 +3260,14 @@ const TotemSlot& SpellHandler::totemSlot(int slot) const {
 void SpellHandler::loadSkillLineDbc() const {
     if (skillLineDbcLoaded_) return;
 
-    auto* am = assets_;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
     skillLineDbcLoaded_ = true;
-
-    auto dbc = am->loadDBC("SkillLine.dbc");
-    if (!dbc || !dbc->isLoaded()) {
-        LOG_WARNING("GameHandler: Could not load SkillLine.dbc");
-        return;
-    }
 
     const auto* slL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("SkillLine") : nullptr;
     const uint32_t slIdField   = slL ? (*slL)["ID"]       : 0;
     const uint32_t slCatField  = slL ? (*slL)["Category"] : 1;
     const uint32_t slNameField = slL ? (*slL)["Name"]     : 3;
+    const auto dbc = data_.table("SkillLine.dbc", std::max({slIdField, slCatField, slNameField}) + 1,
+                                 "the skills tab");
     // The icon column moved between expansions with the locale block in front
     // of it: 37 where there is a description and an alternate verb, 21 in the
     // vanilla-era file that has neither. Both were read off the files rather
@@ -3358,11 +3306,7 @@ void SpellHandler::loadSkillLineDbc() const {
     // itself gives, which is the order the original tab draws them in:
     // Attributes, Class Skills, Professions, Secondary Skills, Weapon Skills,
     // Armor Proficiencies, Languages, Not Displayed.
-    auto catDbc = am->loadDBC("SkillLineCategory.dbc");
-    if (!catDbc || !catDbc->isLoaded()) {
-        LOG_WARNING("GameHandler: Could not load SkillLineCategory.dbc");
-        return;
-    }
+    const auto catDbc = data_.table("SkillLineCategory.dbc", 2, "the skills tab's headings");
     // Nineteen fields: the id, seventeen locale columns, and the sort index
     // last. Taken from the end rather than by number so a shorter localised
     // build still finds it.

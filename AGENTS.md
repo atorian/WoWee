@@ -332,7 +332,7 @@ ActionBarHandler(PacketSender& sender, FrameXmlEvents& frameXml,
 InventoryHandler(PacketSender& sender, FrameXmlEvents& frameXml,
                  core::EventBus& events, ChatLog& chat,
                  InventoryQueries& queries, const core::CVarStore& cvars,
-                 pipeline::AssetManager* assets);
+                 const GameData& data);
 ```
 
 State a domain keeps for the character goes in one struct it assigns whole
@@ -352,6 +352,7 @@ What there is to take:
 | a refusal on the error line ("That bag is full.") | `raiseUiError(bus, frameXml, text)` | `game/ui_errors.hpp` |
 | say what happened, hear another domain | `core::EventBus&` | `core/event_bus.hpp`, `game/game_events.hpp` |
 | a value from `GameServices` | that field alone (`std::string cacheRoot`, `const EmoteTable&`), not the struct | `game/game_services.hpp` |
+| read a client table (`Spell.dbc`, `TaxiNodes.dbc`, ...) | `const GameData&`: `table(dbc, fields, neededFor)` returns it or stops the game; a `GameHarness` test gives rows with `dbc(...)` | `game/game_data.hpp` |
 | ask something of another part of the game | a small interface of your own, in your header (`ActionBarQueries`) | |
 
 `GameHandler` implements these and hands itself over as each one; the handler

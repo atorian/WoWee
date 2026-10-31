@@ -7,9 +7,9 @@
 #include <string>
 #include <vector>
 
-namespace wowee::pipeline { class AssetManager; }
-
 namespace wowee::game {
+
+class GameData;
 
 /// The combat game tables (gt*.dbc) the character sheet's derived numbers are
 /// read from: crit from Agility and Intellect, regen from Spirit, and what a
@@ -42,9 +42,8 @@ public:
     using ReadColumn = std::function<std::vector<float>(const std::string& dbc, uint32_t column)>;
 
     explicit StatTables(ReadColumn read);
-    /// Read from the client's data. The asset manager is asked at the first
-    /// read, when it has long been initialized.
-    static ReadColumn fromAssets(pipeline::AssetManager* assets);
+    /// Read from the game's tables, which outlive this.
+    static ReadColumn fromData(const GameData& data);
 
     /// A table's row for a class (1-11).
     [[nodiscard]] float perClass(Table table, uint8_t classId) const;

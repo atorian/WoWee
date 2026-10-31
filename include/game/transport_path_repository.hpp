@@ -16,6 +16,8 @@ namespace wowee::pipeline {
 
 namespace wowee::game {
 
+class GameData;
+
 /// Whether a displayId belongs to a vehicle that travels a route - a ship, a
 /// zeppelin, an icebreaker, a gunship - as opposed to an elevator or a lift.
 ///
@@ -127,8 +129,8 @@ public:
     TransportPathRepository() = default;
 
     // ── DBC loading ─────────────────────────────────────────
-    bool loadTransportAnimationDBC(pipeline::AssetManager* assetMgr);
-    bool loadTaxiPathNodeDBC(pipeline::AssetManager* assetMgr);
+    bool loadTransportAnimationDBC(const GameData& data);
+    bool loadTaxiPathNodeDBC(const GameData& data);
 
     // ── Path construction ───────────────────────────────────
     void loadPathFromNodes(uint32_t pathId, const std::vector<glm::vec3>& waypoints,

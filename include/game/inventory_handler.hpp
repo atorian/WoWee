@@ -25,8 +25,9 @@ namespace mail { class IMailboxFeed; }
 namespace guild_bank { class IGuildBankFeed; class IGuildBank; }
 namespace trade { class ITradeFeed; }
 namespace loot { class ILootFeed; class ILoot; }
-namespace pipeline { class AssetManager; }
 namespace game {
+
+class GameData;
 
 class PacketSender;
 class FrameXmlEvents;
@@ -194,7 +195,7 @@ public:
     InventoryHandler(PacketSender& sender, FrameXmlEvents& frameXml,
                      core::EventBus& events, ChatLog& chat,
                      InventoryQueries& queries, const core::CVarStore& cvars,
-                     pipeline::AssetManager* assets);
+                     const GameData& data);
 
     /// Announce that the bags changed, one event per bag.
     ///
@@ -718,7 +719,7 @@ private:
     InventoryQueries& queries_;
     /// The client's data, for the repair cost tables. Null in a test that
     /// has none, which leaves repairs unestimated.
-    pipeline::AssetManager* const assets_;
+    const GameData& data_;
     /// The auction house's, the mailbox's, the vault's, the trade's and the
     /// loot's chat lines and panel events, and the late names a letter waits
     /// on, for as long as this handler lives.

@@ -705,3 +705,60 @@ TEST_CASE("a camera shake is light for the first fifty shakes and heavy after", 
     CHECK(shakes[1].frequency == 18.0f);
     CHECK(shakes[1].duration == 0.5f);
 }
+
+TEST_CASE("the map the player is on is named, and is an instance, as Map.dbc says",
+          "[session][harness][tables]") {
+    GameHarness h;
+    // ID, internal name, instance type (1 = party), flags, display name.
+    h.dbc("Map.dbc", 5, {{{0, 0}, {1, "Azeroth"}, {2, 0}, {4, "Eastern Kingdoms"}},
+                         {{0, 33}, {1, "Shadowfang"}, {2, 1}, {4, "Shadowfang Keep"}}});
+    wowee::test::PlayerSpec inKeep;
+    inKeep.mapId = 33;
+    h.enterWorld(inKeep);
+
+    CHECK(h.game().getMapName(0) == "Eastern Kingdoms");
+    CHECK(h.game().getMapName(33) == "Shadowfang Keep");
+    CHECK(h.game().isInInstance());
+}
+
+TEST_CASE("the open world is not an instance, by its Map.dbc row", "[session][harness][tables]") {
+    GameHarness h;
+    h.dbc("Map.dbc", 5, {{{0, 0}, {1, "Azeroth"}, {2, 0}, {4, "Eastern Kingdoms"}},
+                         {{0, 33}, {1, "Shadowfang"}, {2, 1}, {4, "Shadowfang Keep"}}});
+    h.enterWorld();
+    CHECK_FALSE(h.game().isInInstance());
+}
+
+TEST_CASE("an area is named by AreaTable.dbc, and by WorldMapArea.dbc where it has no row there",
+          "[session][harness][tables]") {
+    GameHarness h;
+    h.dbc("AreaTable.dbc", 36, {{{0, 12}, {11, "Elwynn Forest"}}});
+    // AreaID 2 and AreaName 3; a row for an area AreaTable also names does not
+    // override it.
+    h.dbc("WorldMapArea.dbc", 11, {{{0, 1}, {2, 12}, {3, "Elwynn"}},
+                                   {{0, 2}, {2, 4000}, {3, "Somewhere Else"}}});
+    h.enterWorld();
+
+    CHECK(h.game().getAreaName(12) == "Elwynn Forest");
+    CHECK(h.game().getAreaName(4000) == "Somewhere Else");
+    CHECK(h.game().getAreaName(99).empty());
+}
+
+TEST_CASE("a continent's map rectangle is its own WorldMapArea.dbc row, not a zone's",
+          "[session][harness][tables]") {
+    GameHarness h;
+    // MapID 1, AreaID 2, then left, right, top, bottom at 4-7.
+    h.dbc("WorldMapArea.dbc", 11, {
+        {{0, 1}, {1, 0}, {2, 12}, {4, 100.0f}, {5, -100.0f}, {6, 50.0f}, {7, -50.0f}},
+        {{0, 2}, {1, 0}, {2, 0}, {4, 4000.0f}, {5, -4000.0f}, {6, 8000.0f}, {7, -6000.0f}},
+    });
+    h.enterWorld();
+
+    const auto& bounds = h.game().getContinentBounds(0);
+    REQUIRE(bounds.valid);
+    CHECK(bounds.left == 4000.0f);
+    CHECK(bounds.right == -4000.0f);
+    CHECK(bounds.top == 8000.0f);
+    CHECK(bounds.bottom == -6000.0f);
+    CHECK_FALSE(h.game().getContinentBounds(1).valid);
+}

@@ -809,6 +809,7 @@ set(WOWEE_SOURCES
     src/game/weather_handler.cpp
     src/game/player_handler.cpp
     src/game/stat_tables.cpp
+    src/game/game_data.cpp
     src/game/ui_errors.cpp
     src/game/quest_handler.cpp
     src/game/reputation_handler.cpp

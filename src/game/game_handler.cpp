@@ -1,4 +1,5 @@
 #include "game/game_handler.hpp"
+#include "game/game_data.hpp"
 #include "title/services/titles.hpp"
 #include "reputation/domain/records.hpp"
 #include "reputation/services/reputation.hpp"
@@ -95,6 +96,9 @@ GameHandler::GameHandler(GameServices& services)
     if (!services_.statTables) {
         throw std::invalid_argument("GameHandler needs GameServices::statTables");
     }
+    if (!services_.gameData) {
+        throw std::invalid_argument("GameHandler needs GameServices::gameData");
+    }
     if (!services_.cvars) {
         throw std::invalid_argument("GameHandler needs GameServices::cvars");
     }
@@ -119,21 +123,21 @@ GameHandler::GameHandler(GameServices& services)
     chatHandler_      = std::make_unique<ChatHandler>(*this, *this, *services_.events, *this,
                                                       *services_.cvars, *services_.emotes);
     movementHandler_  = std::make_unique<MovementHandler>(*this, *this, *services_.events, *chatHandler_,
-                                                          services_.assetManager, *this, movementInfo);
+                                                          *services_.gameData, *this, movementInfo);
     combatHandler_    = std::make_unique<CombatHandler>(*this, *this, *services_.events, *chatHandler_,
                                                         *services_.cvars, *this);
     socialHandler_    = std::make_unique<SocialHandler>(*this, *this, *services_.events, *chatHandler_,
                                                         *this, *services_.cvars);
     questHandler_     = std::make_unique<QuestHandler>(*this, *this, *services_.events, *chatHandler_,
-                                                       *this, services_.assetManager);
+                                                       *this, *services_.gameData);
     // Built from what they use rather than from this class (AGENTS.md, "A new
     // domain handler").
     spellHandler_ = std::make_unique<SpellHandler>(
         *this, *this, *services_.events, *chatHandler_, *this, *services_.cvars,
-        services_.assetManager);
+        *services_.gameData);
     inventoryHandler_ = std::make_unique<InventoryHandler>(
         *this, *this, *services_.events, *chatHandler_, *this, *services_.cvars,
-        services_.assetManager);
+        *services_.gameData);
     accountDataHandler_ = std::make_unique<AccountDataHandler>(
         *this, *this, *services_.events, services_.accountDataDir);
     actionBarHandler_ = std::make_unique<ActionBarHandler>(*this, *this, *services_.events, *this);
@@ -1474,18 +1478,12 @@ void GameHandler::refreshUnitHostility() {
 
 void GameHandler::loadAreaNameCache() const {
     if (areaNameCacheLoaded_) return;
-
-    auto* am = services_.assetManager;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
     areaNameCacheLoaded_ = true;
 
     // AreaTable.dbc has the canonical zone/area names keyed by AreaID.
     // Field 0 = ID, field 11 = AreaName (enUS locale).
-    auto areaDbc = am->loadDBC("AreaTable.dbc");
-    if (areaDbc && areaDbc->isLoaded() && areaDbc->getFieldCount() > 11) {
+    {
+        const auto areaDbc = services_.gameData->table("AreaTable.dbc", 12, "the names of zones and areas");
         for (uint32_t i = 0; i < areaDbc->getRecordCount(); ++i) {
             uint32_t areaId = areaDbc->getUInt32(i, 0);
             if (areaId == 0) continue;
@@ -1504,22 +1502,21 @@ void GameHandler::loadAreaNameCache() const {
     }
 
     // WorldMapArea.dbc supplements with map-UI area names (different ID space).
-    auto dbc = am->loadDBC("WorldMapArea.dbc");
-    if (dbc && dbc->isLoaded()) {
+    {
         const auto* layout = pipeline::getActiveDBCLayout()
             ? pipeline::getActiveDBCLayout()->getLayout("WorldMapArea") : nullptr;
         const uint32_t areaIdField   = layout ? (*layout)["AreaID"]   : 2;
         const uint32_t areaNameField = layout ? (*layout)["AreaName"] : 3;
-
-        if (dbc->getFieldCount() > areaNameField) {
-            for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-                uint32_t areaId = dbc->getUInt32(i, areaIdField);
-                if (areaId == 0) continue;
-                std::string name = dbc->getString(i, areaNameField);
-                // Don't overwrite AreaTable names - those are authoritative
-                if (!name.empty() && !areaNameCache_.count(areaId)) {
-                    areaNameCache_[areaId] = std::move(name);
-                }
+        const auto dbc = services_.gameData->table("WorldMapArea.dbc",
+                                                   std::max(areaIdField, areaNameField) + 1,
+                                                   "the names of zones and areas");
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            uint32_t areaId = dbc->getUInt32(i, areaIdField);
+            if (areaId == 0) continue;
+            std::string name = dbc->getString(i, areaNameField);
+            // Don't overwrite AreaTable names - those are authoritative
+            if (!name.empty() && !areaNameCache_.count(areaId)) {
+                areaNameCache_[areaId] = std::move(name);
             }
         }
     }
@@ -1536,16 +1533,10 @@ std::string GameHandler::getAreaName(uint32_t areaId) const {
 
 void GameHandler::loadMapNameCache() const {
     if (mapNameCacheLoaded_) return;
-
-    auto* am = services_.assetManager;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
     mapNameCacheLoaded_ = true;
 
-    auto dbc = am->loadDBC("Map.dbc");
-    if (!dbc || !dbc->isLoaded()) return;
+    const auto dbc = services_.gameData->table("Map.dbc", 5,
+                                               "the names of maps and whether one is an instance");
 
     // Map.dbc layout: 0=ID, 1=InternalName, 2=InstanceType, 3=Flags,
     // 4=MapName_enUS (display name), fields 5+ = other locales
@@ -1754,15 +1745,34 @@ void GameHandler::rebuildCompanions() const {
     mountSpells_.clear();
     critterSpells_.clear();
 
-    auto* am = services_.assetManager;
-    if (!am || !am->isInitialized()) return;
-    auto dbc = am->loadDBC("Spell.dbc");
-    if (!dbc || !dbc->isLoaded()) return;
-
     const auto* layout = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("Spell") : nullptr;
-    if (!layout) return;
-    const uint32_t idField = (*layout)["ID"];
+    // Every column read below by the layout's name, or the WotLK file's
+    // position where no layout is loaded (a test). A column an older layout
+    // does not name - the second and third effects, EffectMiscValueB - reads
+    // as zero, as it always has.
+    constexpr uint32_t kNone = 0xFFFFFFFFu;
+    const auto field = [layout](const std::string& name, uint32_t wotlk) {
+        return layout ? layout->field(name) : wotlk;
+    };
+    const uint32_t idField = field("ID", 0);
+    uint32_t widest = idField;
+    std::array<uint32_t, 3> effect{}, aura{}, misc{}, miscB{};
+    for (uint32_t i = 0; i < 3; ++i) {
+        const std::string idx = std::to_string(i);
+        effect[i] = field("Effect" + idx, 71 + i);
+        aura[i]   = field("EffectApplyAuraName" + idx, 95 + i);
+        misc[i]   = field("EffectMiscValue" + idx, 110 + i);
+        miscB[i]  = field("EffectMiscValueB" + idx, 113 + i);
+        for (uint32_t column : {effect[i], aura[i], misc[i], miscB[i]}) {
+            if (column != kNone) widest = std::max(widest, column);
+        }
+    }
+    const auto dbc = services_.gameData->table("Spell.dbc", widest + 1,
+                                               "telling the player's mounts from their pets");
+    const auto at = [&dbc](uint32_t row, uint32_t column) {
+        return column == kNone ? 0u : dbc->getUInt32(row, column);
+    };
 
     // Built once per rebuild rather than searched per spell: the file is fifty
     // thousand rows and the spellbook is a few hundred.
@@ -1787,9 +1797,8 @@ void GameHandler::rebuildCompanions() const {
         if (c.name.empty()) continue;
 
         bool mount = false, critter = false;
-        for (int i = 0; i < 3 && !mount && !critter; ++i) {
-            const std::string idx = std::to_string(i);
-            if (dbc->getUInt32(row, (*layout)["EffectApplyAuraName" + idx]) == kAuraMounted) {
+        for (uint32_t i = 0; i < 3 && !mount && !critter; ++i) {
+            if (at(row, aura[i]) == kAuraMounted) {
                 mount = true;
                 // SPELL_AURA_MOUNTED's misc value is a creature *entry*, the
                 // same number space a summon's is. AuraEffect::HandleAuraMounted
@@ -1798,10 +1807,9 @@ void GameHandler::rebuildCompanions() const {
                 // template - it is not handed to Player::Mount as a display id,
                 // which is what the comment here used to say. Stored as the
                 // entry and resolved by the reader, exactly like a critter's.
-                c.creatureId = dbc->getUInt32(row, (*layout)["EffectMiscValue" + idx]);
-            } else if (dbc->getUInt32(row, (*layout)["Effect" + idx]) == kEffectSummon &&
-                       dbc->getUInt32(row, (*layout)["EffectMiscValueB" + idx]) ==
-                           kCritterSummonProperties) {
+                c.creatureId = at(row, misc[i]);
+            } else if (at(row, effect[i]) == kEffectSummon &&
+                       at(row, miscB[i]) == kCritterSummonProperties) {
                 critter = true;
                 // A summon's misc value is a creature *entry*, not a display
                 // id, and the model frame takes a display id. Left as the entry
@@ -1815,7 +1823,7 @@ void GameHandler::rebuildCompanions() const {
                 // query answer and nothing sent the query, so the field meant a
                 // display id or an entry depending on what had been near the
                 // player. One number space, decided in one place.
-                c.creatureId = dbc->getUInt32(row, (*layout)["EffectMiscValue" + idx]);
+                c.creatureId = at(row, misc[i]);
             }
         }
         if (!mount && !critter) continue;
@@ -1834,28 +1842,26 @@ uint32_t GameHandler::getBonusActionBarOffset() const {
     const uint8_t form = playerHandler_->shapeshiftForm();
     if (form == 0) return 0;
 
-    // Cached per form: the file does not change, and this is asked on every
-    // action button update.
-    static std::unordered_map<uint8_t, uint32_t> barOfForm;
-    if (auto it = barOfForm.find(form); it != barOfForm.end()) return it->second;
-
-    uint32_t bar = 0;
-    auto* am = services_.assetManager;
-    if (am && am->isInitialized()) {
-        if (auto dbc = am->loadDBC("SpellShapeshiftForm.dbc"); dbc && dbc->isLoaded()) {
-            const auto* layout = pipeline::getActiveDBCLayout()
-                ? pipeline::getActiveDBCLayout()->getLayout("SpellShapeshiftForm") : nullptr;
-            const uint32_t idField  = layout ? (*layout)["ID"] : 0;
-            const uint32_t barField = layout ? (*layout)["BonusActionBar"] : 1;
-            for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
-                if (dbc->getUInt32(row, idField) != form) continue;
-                bar = dbc->getUInt32(row, barField);
-                break;
-            }
-        }
+    // Asked by GetBonusBarOffset when the bars change, not every frame, and
+    // the asset manager keeps the file: the thirty rows are walked each time.
+    const auto* layout = pipeline::getActiveDBCLayout()
+        ? pipeline::getActiveDBCLayout()->getLayout("SpellShapeshiftForm") : nullptr;
+    const uint32_t idField  = layout ? (*layout)["ID"] : 0;
+    const uint32_t barField = layout ? (*layout)["BonusActionBar"] : 1;
+    const auto dbc = services_.gameData->table("SpellShapeshiftForm.dbc",
+                                               std::max(idField, barField) + 1,
+                                               "the action bar a form swaps in");
+    for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
+        if (dbc->getUInt32(row, idField) == form) return dbc->getUInt32(row, barField);
     }
-    barOfForm[form] = bar;
-    return bar;
+    // A form the file has no row for keeps the ordinary bar, as the original
+    // client's lookup does; said once per form, since a missing row is news.
+    static std::unordered_set<uint8_t> said;
+    if (said.insert(form).second) {
+        LOG_WARNING("SpellShapeshiftForm.dbc has no row for form ", static_cast<int>(form),
+                    "; the action bar stays the ordinary one");
+    }
+    return 0;
 }
 
 void GameHandler::announceCompanionChange() {
@@ -1941,18 +1947,14 @@ const std::string& GameHandler::getLanguageName(uint32_t languageId) const {
     // to print a language header at all.
     if (languageId == 0) return kUniversal;
     if (!languageNamesLoaded_) {
-        auto* am = services().assetManager;
-        if (am && am->isInitialized()) {
-            languageNamesLoaded_ = true;
-            if (auto dbc = am->loadDBC("Languages.dbc"); dbc && dbc->isLoaded()) {
-                for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-                    const uint32_t id = dbc->getUInt32(i, 0);
-                    std::string name = dbc->getString(i, 1);
-                    if (id != 0 && !name.empty()) languageNames_[id] = std::move(name);
-                }
-                LOG_INFO("Languages.dbc: loaded ", languageNames_.size(), " languages");
-            }
+        languageNamesLoaded_ = true;
+        const auto dbc = services_.gameData->table("Languages.dbc", 2, "the chat's language names");
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            const uint32_t id = dbc->getUInt32(i, 0);
+            std::string name = dbc->getString(i, 1);
+            if (id != 0 && !name.empty()) languageNames_[id] = std::move(name);
         }
+        LOG_INFO("Languages.dbc: loaded ", languageNames_.size(), " languages");
     }
     auto it = languageNames_.find(languageId);
     return it != languageNames_.end() ? it->second : kNone;
@@ -1961,24 +1963,18 @@ const std::string& GameHandler::getLanguageName(uint32_t languageId) const {
 const std::string& GameHandler::getPageTextMaterialName(uint32_t materialId) const {
     static const std::string kNone;
     if (!pageTextMaterialsLoaded_) {
-        auto* am = services().assetManager;
-        // Not an attempt while the assets are down: marking it loaded here
-        // would disable the file for the session, the way the faction and
-        // skill caches beside it were once caught doing.
-        if (am && am->isInitialized()) {
-            pageTextMaterialsLoaded_ = true;
-            if (auto dbc = am->loadDBC("PageTextMaterial.dbc"); dbc && dbc->isLoaded()) {
-                for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-                    const uint32_t id = dbc->getUInt32(i, 0);
-                    std::string name = dbc->getString(i, 1);
-                    if (id != 0 && !name.empty()) {
-                        pageTextMaterialNames_[id] = std::move(name);
-                    }
-                }
-                LOG_INFO("PageTextMaterial.dbc: loaded ",
-                         pageTextMaterialNames_.size(), " page materials");
+        pageTextMaterialsLoaded_ = true;
+        const auto dbc = services_.gameData->table("PageTextMaterial.dbc", 2,
+                                                   "the background of a book or letter");
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            const uint32_t id = dbc->getUInt32(i, 0);
+            std::string name = dbc->getString(i, 1);
+            if (id != 0 && !name.empty()) {
+                pageTextMaterialNames_[id] = std::move(name);
             }
         }
+        LOG_INFO("PageTextMaterial.dbc: loaded ",
+                 pageTextMaterialNames_.size(), " page materials");
     }
     auto it = pageTextMaterialNames_.find(materialId);
     return it != pageTextMaterialNames_.end() ? it->second : kNone;
@@ -1990,28 +1986,32 @@ GameHandler::getContinentBounds(uint32_t mapId) const {
     if (cached != continentBoundsCache_.end()) return cached->second;
 
     ContinentBounds bounds;
-    auto* am = services_.assetManager;
-    if (am && am->isInitialized()) {
-        if (auto dbc = am->loadDBC("WorldMapArea.dbc"); dbc && dbc->isLoaded()) {
-            const auto* layout = pipeline::getActiveDBCLayout()
-                ? pipeline::getActiveDBCLayout()->getLayout("WorldMapArea") : nullptr;
-            const auto field = [&](const char* name, uint32_t fallback) {
-                return layout ? (*layout)[name] : fallback;
-            };
-            for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-                if (dbc->getUInt32(i, field("MapID", 1)) != mapId) continue;
-                // The continent's own row, not one of its zones.
-                if (dbc->getUInt32(i, field("AreaID", 2)) != 0) continue;
-                bounds.left   = dbc->getFloat(i, field("LocLeft", 4));
-                bounds.right  = dbc->getFloat(i, field("LocRight", 5));
-                bounds.top    = dbc->getFloat(i, field("LocTop", 6));
-                bounds.bottom = dbc->getFloat(i, field("LocBottom", 7));
-                // A degenerate rectangle projects everything to one point, so
-                // it is no more usable than a missing row.
-                bounds.valid = std::abs(bounds.left - bounds.right) > 0.001f &&
-                               std::abs(bounds.top - bounds.bottom) > 0.001f;
-                break;
-            }
+    {
+        const auto* layout = pipeline::getActiveDBCLayout()
+            ? pipeline::getActiveDBCLayout()->getLayout("WorldMapArea") : nullptr;
+        const auto field = [&](const char* name, uint32_t fallback) {
+            return layout ? (*layout)[name] : fallback;
+        };
+        const uint32_t mapField = field("MapID", 1), areaField = field("AreaID", 2);
+        const uint32_t leftField = field("LocLeft", 4), rightField = field("LocRight", 5);
+        const uint32_t topField = field("LocTop", 6), bottomField = field("LocBottom", 7);
+        const auto dbc = services_.gameData->table(
+            "WorldMapArea.dbc",
+            std::max({mapField, areaField, leftField, rightField, topField, bottomField}) + 1,
+            "a continent's map rectangle");
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            if (dbc->getUInt32(i, mapField) != mapId) continue;
+            // The continent's own row, not one of its zones.
+            if (dbc->getUInt32(i, areaField) != 0) continue;
+            bounds.left   = dbc->getFloat(i, leftField);
+            bounds.right  = dbc->getFloat(i, rightField);
+            bounds.top    = dbc->getFloat(i, topField);
+            bounds.bottom = dbc->getFloat(i, bottomField);
+            // A degenerate rectangle projects everything to one point, so
+            // it is no more usable than a missing row.
+            bounds.valid = std::abs(bounds.left - bounds.right) > 0.001f &&
+                           std::abs(bounds.top - bounds.bottom) > 0.001f;
+            break;
         }
     }
     if (!bounds.valid) {

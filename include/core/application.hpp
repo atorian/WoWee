@@ -401,6 +401,9 @@ private:
     /// before everything that subscribes, so it is destroyed after them.
     core::EventBus eventBus_;
     game::GameServices gameServices_;
+    /// The tables the game reads; before the emote table and the game, which
+    /// read through it.
+    std::unique_ptr<game::GameData> gameData_;
     /// What the emotes are, for the game, the interface and the animation.
     std::unique_ptr<game::EmoteTable> emoteTable_;
     std::unique_ptr<game::StatTables> statTables_;

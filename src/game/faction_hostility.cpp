@@ -1,20 +1,17 @@
 #include "game/faction_hostility.hpp"
 #include "reputation/domain/records.hpp"
 #include "game/game_handler.hpp"
-#include "pipeline/asset_manager.hpp"
+#include "game/game_data.hpp"
+#include "pipeline/dbc_loader.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "core/logger.hpp"
+#include <algorithm>
 #include <unordered_map>
 
 namespace wowee {
 namespace game {
 
-void buildFactionHostilityMap(pipeline::AssetManager& assetManager, GameHandler& gameHandler, uint8_t playerRace) {
-    if (!assetManager.isInitialized()) return;
-
-    auto ftDbc = assetManager.loadDBC("FactionTemplate.dbc");
-    auto fDbc = assetManager.loadDBC("Faction.dbc");
-    if (!ftDbc || !ftDbc->isLoaded()) return;
+void buildFactionHostilityMap(const GameData& data, GameHandler& gameHandler, uint8_t playerRace) {
 
     // Race enum -> race mask bit: race 1=0x1, 2=0x2, 3=0x4, 4=0x8, 5=0x10, 6=0x20, 7=0x40, 8=0x80, 10=0x200, 11=0x400
     uint32_t playerRaceMask = 0;
@@ -59,12 +56,16 @@ void buildFactionHostilityMap(pipeline::AssetManager& assetManager, GameHandler&
     const auto* ftL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("FactionTemplate") : nullptr;
     struct RepFaction { uint32_t repListId = 0; bool atWar = false; };
     std::unordered_map<uint32_t, RepFaction> repFactions;
-    if (fDbc && fDbc->isLoaded()) {
+    {
         const uint32_t facID = facL ? (*facL)["ID"] : 0;
         const uint32_t facRepList = facL ? (*facL)["ReputationListID"] : 1;
         const uint32_t facRaceMask0 = facL ? (*facL)["ReputationRaceMask0"] : 2;
         const uint32_t facBase0 = facL ? (*facL)["ReputationBase0"] : 10;
         const uint32_t facFlags0 = facL ? (*facL)["ReputationFlags0"] : 14;
+        uint32_t facWidest = std::max({facID, facRaceMask0 + 3, facBase0 + 3});
+        if (facRepList != 0xFFFFFFFF) facWidest = std::max(facWidest, facRepList);
+        if (facFlags0 != 0xFFFFFFFF) facWidest = std::max(facWidest, facFlags0 + 3);
+        const auto fDbc = data.table("Faction.dbc", facWidest + 1, "which units are hostile to the player");
         constexpr int32_t kHostileRankTop = -3001;  // Hostile runs -6000 to -3001
         uint32_t atWarCount = 0;
         for (uint32_t i = 0; i < fDbc->getRecordCount(); i++) {
@@ -98,6 +99,9 @@ void buildFactionHostilityMap(pipeline::AssetManager& assetManager, GameHandler&
     const uint32_t ftFriend = ftL ? (*ftL)["FriendGroup"] : 4;
     const uint32_t ftEnemy = ftL ? (*ftL)["EnemyGroup"] : 5;
     const uint32_t ftEnemy0 = ftL ? (*ftL)["Enemy0"] : 6;
+    const auto ftDbc = data.table("FactionTemplate.dbc",
+                                  std::max({ftID, ftFaction, ftFG, ftFriend, ftEnemy, ftEnemy0 + 3}) + 1,
+                                  "which units are hostile to the player");
     uint32_t playerFriendGroup = 0;
     uint32_t playerEnemyGroup = 0;
     uint32_t playerFactionId = 0;

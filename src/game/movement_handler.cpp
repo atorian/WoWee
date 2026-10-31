@@ -1,4 +1,5 @@
 #include "game/movement_handler.hpp"
+#include "game/game_data.hpp"
 #include "game/world_state.hpp"
 #include "game/chat_log.hpp"
 #include "game/frame_xml_events.hpp"
@@ -88,9 +89,9 @@ uint32_t findKnownReturnAreaTrigger(uint32_t triggerId) {
 } // namespace
 
 MovementHandler::MovementHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
-                                 ChatLog& chat, pipeline::AssetManager* assets, MovementQueries& queries,
+                                 ChatLog& chat, const GameData& data, MovementQueries& queries,
                                  MovementInfo& movementInfo)
-    : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat), assets_(assets),
+    : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat), data_(data),
       queries_(queries), movementInfo(movementInfo) {}
 
 void MovementHandler::applyServerMovementSpeeds(float walk, float run, float runBack,
@@ -2319,16 +2320,9 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
 
 void MovementHandler::loadTaxiDbc() {
     if (taxiDbcLoaded_) return;
-
-    auto* am = assets_;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
     taxiDbcLoaded_ = true;
 
-    auto nodesDbc = am->loadDBC("TaxiNodes.dbc");
-    if (nodesDbc && nodesDbc->isLoaded()) {
+    {
         const auto* tnL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("TaxiNodes") : nullptr;
         // Cache field indices before the loop
         const uint32_t tnIdField   = tnL ? (*tnL)["ID"]    : 0;
@@ -2344,6 +2338,9 @@ void MovementHandler::loadTaxiDbc() {
         // second pair to fall back to; a node without a mount has none.
         const uint32_t mountAllianceField = tnL ? (*tnL)["MountDisplayIdAlliance"] : 22;
         const uint32_t mountHordeField    = tnL ? (*tnL)["MountDisplayIdHorde"]    : 23;
+        const auto nodesDbc = data_.table(
+            "TaxiNodes.dbc", std::max({tnIdField, tnMapField, tnXField, tnYField, tnZField, tnNameField}) + 1,
+            "the flight map");
         uint32_t fieldCount = nodesDbc->getFieldCount();
         for (uint32_t i = 0; i < nodesDbc->getRecordCount(); i++) {
             TaxiNode node;
@@ -2370,17 +2367,17 @@ void MovementHandler::loadTaxiDbc() {
             }
         }
         LOG_INFO("Loaded ", taxiNodes_.size(), " taxi nodes from TaxiNodes.dbc");
-    } else {
-        LOG_WARNING("Could not load TaxiNodes.dbc");
     }
 
-    auto pathDbc = am->loadDBC("TaxiPath.dbc");
-    if (pathDbc && pathDbc->isLoaded()) {
+    {
         const auto* tpL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("TaxiPath") : nullptr;
         const uint32_t tpIdField   = tpL ? (*tpL)["ID"]       : 0;
         const uint32_t tpFromField = tpL ? (*tpL)["FromNode"] : 1;
         const uint32_t tpToField   = tpL ? (*tpL)["ToNode"]   : 2;
         const uint32_t tpCostField = tpL ? (*tpL)["Cost"]     : 3;
+        const auto pathDbc = data_.table(
+            "TaxiPath.dbc", std::max({tpIdField, tpFromField, tpToField, tpCostField}) + 1,
+            "the flight map's routes and their prices");
         for (uint32_t i = 0; i < pathDbc->getRecordCount(); i++) {
             TaxiPathEdge edge;
             edge.pathId = pathDbc->getUInt32(i, tpIdField);
@@ -2390,12 +2387,9 @@ void MovementHandler::loadTaxiDbc() {
             taxiPathEdges_.push_back(edge);
         }
         LOG_INFO("Loaded ", taxiPathEdges_.size(), " taxi path edges from TaxiPath.dbc");
-    } else {
-        LOG_WARNING("Could not load TaxiPath.dbc");
     }
 
-    auto pathNodeDbc = am->loadDBC("TaxiPathNode.dbc");
-    if (pathNodeDbc && pathNodeDbc->isLoaded()) {
+    {
         const auto* tpnL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("TaxiPathNode") : nullptr;
         const uint32_t tpnIdField    = tpnL ? (*tpnL)["ID"]        : 0;
         const uint32_t tpnPathField  = tpnL ? (*tpnL)["PathID"]    : 1;
@@ -2404,6 +2398,10 @@ void MovementHandler::loadTaxiDbc() {
         const uint32_t tpnXField     = tpnL ? (*tpnL)["X"]         : 4;
         const uint32_t tpnYField     = tpnL ? (*tpnL)["Y"]         : 5;
         const uint32_t tpnZField     = tpnL ? (*tpnL)["Z"]         : 6;
+        const auto pathNodeDbc = data_.table(
+            "TaxiPathNode.dbc",
+            std::max({tpnIdField, tpnPathField, tpnIndexField, tpnMapField, tpnXField, tpnYField, tpnZField}) + 1,
+            "the way a flight takes");
         for (uint32_t i = 0; i < pathNodeDbc->getRecordCount(); i++) {
             TaxiPathNode node;
             node.id = pathNodeDbc->getUInt32(i, tpnIdField);
@@ -2422,8 +2420,6 @@ void MovementHandler::loadTaxiDbc() {
                 });
         }
         LOG_INFO("Loaded ", pathNodeDbc->getRecordCount(), " taxi path waypoints from TaxiPathNode.dbc");
-    } else {
-        LOG_WARNING("Could not load TaxiPathNode.dbc");
     }
 }
 
@@ -3259,21 +3255,9 @@ void MovementHandler::forgetAreaTriggerTable() {
 void MovementHandler::loadAreaTriggerDbc() {
     if (areaTriggerDbcLoaded_) return;
 
-    auto* am = assets_;
-    // Don't latch "loaded" until the asset manager is actually ready - the
-    // first checkAreaTriggers() tick can land well before asset manager
-    // init finishes (observed in headless mode), and latching here first
-    // would permanently strand areaTriggersRef() empty with no retry and
-    // no warning, silently disabling every area trigger for the process's
-    // lifetime.
-    if (!am || !am->isInitialized()) return;
     areaTriggerDbcLoaded_ = true;
 
-    auto dbc = am->loadDBC("AreaTrigger.dbc");
-    if (!dbc || !dbc->isLoaded()) {
-        LOG_WARNING("Failed to load AreaTrigger.dbc");
-        return;
-    }
+    const auto dbc = data_.table("AreaTrigger.dbc", 10, "the area triggers the player walks into");
 
     areaTriggers_.reserve(dbc->getRecordCount());
     for (uint32_t i = 0; i < dbc->getRecordCount(); i++) {

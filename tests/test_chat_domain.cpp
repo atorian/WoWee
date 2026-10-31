@@ -252,3 +252,43 @@ TEST_CASE("the server's echo of the player's own line is not a second line", "[c
     CHECK(h.game().chat().getChatHistory().size() == afterOwn);
     CHECK(h.addonEvents("CHAT_MSG_SAY").size() == saysAfterOwn);
 }
+
+TEST_CASE("a line in a language reaches the interface under the name Languages.dbc gives it",
+          "[chat][harness][tables]") {
+    GameHarness h;
+    h.dbc("Languages.dbc", 2, {{{0, 1}, {1, "Orcish"}}, {{0, 7}, {1, "Common"}}});
+    h.enterWorld();
+    h.receive(Opcode::SMSG_NAME_QUERY_RESPONSE, nameResponse(kJaina, "Jaina"));
+    h.pump();
+
+    h.receive(Opcode::SMSG_MESSAGECHAT,
+              playerLine(ChatType::WHISPER, kJaina, h.player().guid, "well met", 7 /* Common */));
+    h.pump();
+
+    // The chat frame prints "[arg3] " ahead of a line in any language but the
+    // player's own, and compares that argument with GetDefaultLanguage's word.
+    const auto whispers = h.addonEvents("CHAT_MSG_WHISPER");
+    REQUIRE(whispers.size() == 1);
+    CHECK(whispers[0].args.at(2) == "Common");
+}
+
+TEST_CASE("another player's emote is narrated with the words EmotesText.dbc points to",
+          "[chat][harness][tables]") {
+    GameHarness h;
+    // /dance: EmotesText row 34 points at Emotes row 10 for the animation and
+    // at EmotesTextData 300 for what onlookers read when it has no target.
+    h.dbc("EmotesText.dbc", 18, {{{0, 34}, {1, "DANCE"}, {2, 10}, {7, 300}}});
+    h.dbc("EmotesTextData.dbc", 2, {{{0, 300}, {1, "%s bursts into dance."}}});
+    h.dbc("Emotes.dbc", 5, {{{0, 10}, {2, 69}, {4, 2}}});
+    h.enterWorld();
+    h.receive(Opcode::SMSG_NAME_QUERY_RESPONSE, nameResponse(kThrall, "Thrall"));
+    h.pump();
+
+    h.receive(Opcode::SMSG_TEXT_EMOTE, Body().u64(kThrall).u32(34).u32(0).u32(0));
+    h.pump();
+
+    const auto& history = h.game().chat().getChatHistory();
+    REQUIRE_FALSE(history.empty());
+    CHECK(history.back().type == ChatType::TEXT_EMOTE);
+    CHECK(history.back().message == "Thrall bursts into dance.");
+}

@@ -15,8 +15,8 @@ ZoneTracker::ZoneTracker() : zoneManager_(std::make_unique<game::ZoneManager>())
 
 ZoneTracker::~ZoneTracker() = default;
 
-void ZoneTracker::loadZoneTable(pipeline::AssetManager* assets) {
-    if (assets) zoneManager_->enrichFromDBC(assets);
+void ZoneTracker::loadZoneTable(const game::GameData& data, pipeline::AssetManager& assets) {
+    zoneManager_->enrichFromDBC(data, assets);
 }
 
 uint32_t ZoneTracker::resolveAreaZoneId(uint32_t areaId) const {

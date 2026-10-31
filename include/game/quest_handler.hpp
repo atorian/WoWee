@@ -16,8 +16,9 @@
 #include <vector>
 
 namespace wowee {
-namespace pipeline { class AssetManager; }
 namespace game {
+
+class GameData;
 
 class PacketSender;
 class FrameXmlEvents;
@@ -67,7 +68,7 @@ public:
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
     QuestHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
-                 ChatLog& chat, QuestQueries& queries, pipeline::AssetManager* assets);
+                 ChatLog& chat, QuestQueries& queries, const GameData& data);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -343,7 +344,7 @@ private:
     QuestQueries& queries_;
     /// The client's data, for the quest DBC tables. Null in a test that has
     /// none.
-    pipeline::AssetManager* const assets_;
+    const GameData& data_;
 
     /// The character's quests and the quest windows open on them. Assigned
     /// whole when a character logs in (events::CharacterLoggingIn): the

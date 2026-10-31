@@ -12,24 +12,16 @@
 #include "game/reputation_handler.hpp"
 #include "game/world_packet_data.hpp"
 #include "network/packet.hpp"
-#include "pipeline/asset_manager.hpp"
+#include "game/game_data.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "reputation/domain/events.hpp"
 
 namespace wowee::game {
 
-bool FactionData::ready() const {
-    return assets_ && assets_->isInitialized();
-}
 
 std::vector<reputation::FactionRecord> FactionData::factions() {
     std::vector<reputation::FactionRecord> out;
-    auto dbc = assets_->loadDBC("Faction.dbc");
-    if (!dbc || !dbc->isLoaded()) {
-        LOG_WARNING("Faction.dbc: missing - reputation shows no faction names, no groups and no "
-                    "standings from login");
-        return out;
-    }
+    const auto dbc = data_.table("Faction.dbc", 1, "the reputation panel's factions");
 
     // Faction.dbc WotLK 3.3.5a field layout:
     //   0: ID

@@ -1,4 +1,5 @@
 #include "game/game_handler.hpp"
+#include "game/game_data.hpp"
 #include "achievement/services/achievements.hpp"
 #include "title/services/titles.hpp"
 #include "reputation/services/reputation.hpp"
@@ -129,14 +130,12 @@ struct LockOpenPlan {
 // Decide how to open a game object from its Lock.dbc row. Only a known player
 // OPEN_LOCK spell yields CastSpell; every other case (including key-item locks)
 // is UseDirect, with keyItemId set so the caller can move the key into a bag.
-LockOpenPlan planGameObjectOpen(pipeline::AssetManager* assets,
+LockOpenPlan planGameObjectOpen(const GameData& data,
                                 const GameObjectQueryResponseData* info,
                                 const std::unordered_set<uint32_t>& knownSpells) {
     LockOpenPlan plan;
-    if (!assets || !info || !info->hasData || info->data[0] == 0) return plan;
+    if (!info || !info->hasData || info->data[0] == 0) return plan;
 
-    auto lockDbc = assets->loadDBC("Lock.dbc");
-    auto spellDbc = assets->loadDBC("Spell.dbc");
     // Which columns hold the spell's effects and their misc values, from the
     // layout. They were 71 and 110, the WotLK positions, behind a demand that
     // Spell.dbc have 234 fields - which is the WotLK file and nothing else, so
@@ -146,15 +145,16 @@ LockOpenPlan planGameObjectOpen(pipeline::AssetManager* assets,
     // not; the misc values are at 106 there rather than 110.
     const auto* spellL = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("Spell") : nullptr;
-    const uint32_t effect0Field = spellL ? spellL->field("Effect0") : 0xFFFFFFFF;
-    const uint32_t misc0Field   = spellL ? spellL->field("EffectMiscValue0") : 0xFFFFFFFF;
-    if (!lockDbc || !spellDbc || !lockDbc->isLoaded() || !spellDbc->isLoaded() ||
-        lockDbc->getFieldCount() < 33 ||
-        effect0Field == 0xFFFFFFFF || misc0Field == 0xFFFFFFFF ||
-        effect0Field + 3 > spellDbc->getFieldCount() ||
-        misc0Field + 3 > spellDbc->getFieldCount()) {
-        return plan; // Can't inspect the lock - let the server adjudicate a USE.
+    // The WotLK file's positions where no layout is loaded (a test).
+    const uint32_t effect0Field = spellL ? spellL->field("Effect0") : 71;
+    const uint32_t misc0Field   = spellL ? spellL->field("EffectMiscValue0") : 110;
+    if (effect0Field == 0xFFFFFFFF || misc0Field == 0xFFFFFFFF) {
+        GameData::stop("Spell.dbc", "how a locked object is opened",
+                       "has no Effect0 or EffectMiscValue0 in its layout");
     }
+    const auto lockDbc = data.table("Lock.dbc", 33, "how a locked object is opened");
+    const auto spellDbc = data.table("Spell.dbc", std::max(effect0Field, misc0Field) + 3,
+                                     "how a locked object is opened");
 
     const uint32_t lockId = info->data[0];
     for (uint32_t row = 0; row < lockDbc->getRecordCount(); ++row) {
@@ -1700,7 +1700,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
         // lock. A plain CMSG_GAMEOBJ_USE only opens unlocked / server-gated quest
         // containers (e.g. the Legend of Stalvan Sealed Crate).
         const LockOpenPlan plan = planGameObjectOpen(
-            services_.assetManager, goInfo, spellHandler_->getKnownSpells());
+            *services_.gameData, goInfo, spellHandler_->getKnownSpells());
         if (plan.method == LockOpenMethod::CastSpell) {
             auto castPacket = getPacketParsers()->buildCastGameObjectSpell(
                 plan.spellId, guid, 0);

@@ -46,8 +46,10 @@
 #include "game/protocol_tables.hpp"
 #include "game/update_field_table.hpp"
 #include "game/world_packet_data.hpp"
+#include "pipeline/dbc_loader.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -162,7 +164,19 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
         fail("no wotlk profile under " + sourceRoot() + "Data/expansions");
     }
 
-    emotes_ = std::make_unique<game::EmoteTable>(nullptr);
+    // A table the test has not given reads as one with no rows, wider than
+    // any the game reads: a world whose data has nothing in it. The game asks
+    // for spell names, skill lines and area triggers on paths a test about
+    // something else walks, and finds none, as it would in an empty file.
+    auto noRows = std::make_shared<pipeline::DBCFile>();
+    if (!noRows->load(wdbcFile(512, {}, std::string(1, '\0')))) fail("an empty table does not load");
+    noRows_ = std::move(noRows);
+    gameData_ = std::make_unique<game::GameData>([this](const std::string& dbc) {
+        const auto it = dbcs_.find(dbc);
+        return it != dbcs_.end() ? it->second : noRows_;
+    });
+    services_.gameData = gameData_.get();
+    emotes_ = std::make_unique<game::EmoteTable>(*gameData_);
     services_.expansionRegistry = &expansions_;
     services_.emotes = emotes_.get();
     statTables_ = std::make_unique<game::StatTables>([this](const std::string& dbc, uint32_t column) {
@@ -525,6 +539,33 @@ void GameHarness::playerFields(const std::map<uint16_t, uint32_t>& fields, bool 
 
 void GameHarness::gameTable(const std::string& dbc, uint32_t column, std::vector<float> rows) {
     gameTables_[{dbc, column}] = std::move(rows);
+}
+
+GameHarness::DbcCell::DbcCell(float v) : number(std::bit_cast<uint32_t>(v)) {}
+
+void GameHarness::dbc(const std::string& dbc, uint32_t fields, const std::vector<DbcRow>& rows) {
+    // The string block opens with the empty string, as the client's files do,
+    // so offset 0 reads as "".
+    std::string strings(1, '\0');
+    std::vector<std::vector<uint32_t>> cells;
+    for (const DbcRow& row : rows) {
+        std::vector<uint32_t> out(fields, 0);
+        for (const auto& [column, cell] : row) {
+            if (column >= fields) fail(dbc + " given a column " + std::to_string(column) + " past its " +
+                                       std::to_string(fields) + " fields");
+            if (cell.isText) {
+                out[column] = static_cast<uint32_t>(strings.size());
+                strings += cell.text;
+                strings += '\0';
+            } else {
+                out[column] = cell.number;
+            }
+        }
+        cells.push_back(std::move(out));
+    }
+    auto table = std::make_shared<pipeline::DBCFile>();
+    if (!table->load(wdbcFile(fields, cells, strings))) fail(dbc + " given rows that do not load");
+    dbcs_[dbc] = std::move(table);
 }
 
 void GameHarness::enterWorld(const PlayerSpec& player) {

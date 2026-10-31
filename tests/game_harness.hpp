@@ -24,6 +24,7 @@
 #include "game/game_handler.hpp"
 #include "game/game_services.hpp"
 #include "game/stat_tables.hpp"
+#include "game/game_data.hpp"
 #include "game/opcode_table.hpp"
 #include "achievement/services/ports.hpp"
 #include "title/services/ports.hpp"
@@ -318,6 +319,24 @@ public:
     /// What the game reads for column `column` of the game table `dbc`. A
     /// table the test has not given fails the test when it is read.
     void gameTable(const std::string& dbc, uint32_t column, std::vector<float> rows);
+    /// One cell of a table a test gives: a number, a float or a string.
+    struct DbcCell {
+        DbcCell(uint32_t v) : number(v) {}
+        DbcCell(int v) : number(static_cast<uint32_t>(v)) {}
+        DbcCell(float v);
+        DbcCell(const char* s) : text(s), isText(true) {}
+        uint32_t number = 0;
+        std::string text;
+        bool isText = false;
+    };
+    /// A row by column; the columns it does not name are zero.
+    using DbcRow = std::map<uint32_t, DbcCell>;
+    /// The table the game reads as `dbc`: `fields` columns wide, these rows in
+    /// order. A table the test has not given has no rows.
+    void dbc(const std::string& dbc, uint32_t fields, const std::vector<DbcRow>& rows);
+    /// The tables the game reads, as the client hands them to what it builds
+    /// outside the game (buildFactionHostilityMap).
+    [[nodiscard]] const game::GameData& gameData() const { return *gameData_; }
     /// Read the world as expansion `id` does from here on: its update field
     /// and opcode tables, and the rules that ask which expansion is active.
     /// The login has already happened on WotLK's wire, so this is for what
@@ -327,6 +346,9 @@ public:
 private:
     core::EventBus events_;
     core::CVarStore cvars_;
+    std::map<std::string, game::GameData::Table> dbcs_;
+    game::GameData::Table noRows_;
+    std::unique_ptr<game::GameData> gameData_;
     std::unique_ptr<game::EmoteTable> emotes_;
     std::map<std::pair<std::string, uint32_t>, std::vector<float>> gameTables_;
     std::unique_ptr<game::StatTables> statTables_;

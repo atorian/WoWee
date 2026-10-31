@@ -17,8 +17,9 @@
 
 namespace wowee {
 namespace core { class EventBus; }
-namespace pipeline { class AssetManager; }
 namespace game {
+
+class GameData;
 
 class ChatLog;
 class EntityManager;
@@ -104,7 +105,7 @@ public:
     /// @param assets Null in a client without game data: no taxi path or
     ///        area trigger table is read.
     MovementHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
-                    ChatLog& chat, pipeline::AssetManager* assets, MovementQueries& queries,
+                    ChatLog& chat, const GameData& data, MovementQueries& queries,
                     MovementInfo& movementInfo);
 
     void registerOpcodes(DispatchTable& table);
@@ -421,7 +422,7 @@ private:
     FrameXmlEvents& frameXml_;
     core::EventBus& events_;
     ChatLog& chat_;
-    pipeline::AssetManager* const assets_;
+    const GameData& data_;
     MovementQueries& queries_;
 
     // --- Movement state ---

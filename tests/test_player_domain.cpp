@@ -388,3 +388,20 @@ TEST_CASE("the player's fields are what the create block held, with each update 
     h.playerFields({{uf(UF::UNIT_FIELD_LEVEL), 12}}, /*create=*/true);
     CHECK(h.game().player().fields().find(uf(UF::PLAYER_XP)) == h.game().player().fields().end());
 }
+
+TEST_CASE("a form's bonus action bar is the one SpellShapeshiftForm.dbc gives it",
+          "[player][harness][tables]") {
+    GameHarness h;
+    // Bear form (5) swaps in bar 8, cat form (1) bar 7; travel form (3) none.
+    h.dbc("SpellShapeshiftForm.dbc", 35, {{{0, 1}, {1, 7}}, {{0, 3}, {1, 0}}, {{0, 5}, {1, 8}}});
+    h.enterWorld();
+    h.playerInView();
+
+    CHECK(h.game().getBonusActionBarOffset() == 0);
+    h.playerFields({{uf(UF::UNIT_FIELD_BYTES_1), 5u << 24}});
+    CHECK(h.game().getBonusActionBarOffset() == 8);
+    h.playerFields({{uf(UF::UNIT_FIELD_BYTES_1), 1u << 24}});
+    CHECK(h.game().getBonusActionBarOffset() == 7);
+    h.playerFields({{uf(UF::UNIT_FIELD_BYTES_1), 3u << 24}});
+    CHECK(h.game().getBonusActionBarOffset() == 0);
+}

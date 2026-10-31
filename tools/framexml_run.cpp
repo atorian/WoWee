@@ -78,6 +78,7 @@
 #include <array>
 #include "game/emote_table.hpp"
 #include "game/stat_tables.hpp"
+#include "game/game_data.hpp"
 #include "game/flat_field_map.hpp"
 #include "game/update_field_table.hpp"
 #include "game/protocol_tables.hpp"
@@ -531,10 +532,12 @@ int main(int argc, char** argv) {
             static wowee::core::EventBus events;
             static wowee::game::GameServices svc;
             svc.events = &events;
-            static wowee::game::EmoteTable emotes(haveAssets ? &assets : nullptr);
+            static wowee::game::GameData gameData(
+                wowee::game::GameData::fromAssets(haveAssets ? &assets : nullptr));
+            svc.gameData = &gameData;
+            static wowee::game::EmoteTable emotes(gameData);
             svc.emotes = &emotes;
-            static wowee::game::StatTables statTables(
-                wowee::game::StatTables::fromAssets(haveAssets ? &assets : nullptr));
+            static wowee::game::StatTables statTables(wowee::game::StatTables::fromData(gameData));
             svc.statTables = &statTables;
             // The two more GameHandler refuses to be built without. A store
             // in memory, so a run writes no CVar file, and a connection

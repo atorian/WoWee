@@ -1,4 +1,5 @@
 #include "game/inventory_handler.hpp"
+#include "game/game_data.hpp"
 #include "auction/domain/records.hpp"
 #include "auction/services/auction_house.hpp"
 #include "game/auction_gateway.hpp"
@@ -104,9 +105,9 @@ static auction::IAuctionHouseFeed* auctionFeed(InventoryQueries& queries) {
 InventoryHandler::InventoryHandler(PacketSender& sender, FrameXmlEvents& frameXml,
                                    core::EventBus& events, ChatLog& chat,
                                    InventoryQueries& queries, const core::CVarStore& cvars,
-                                   pipeline::AssetManager* assets)
+                                   const GameData& data)
     : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat),
-      queries_(queries), assets_(assets),
+      queries_(queries), data_(data),
       subscriptions_(subscribeAuctionNotices(events, chat, frameXml, *this)) {
     for (auto& subscription : subscribeMailNotices(events, chat, frameXml, *this))
         subscriptions_.push_back(std::move(subscription));
@@ -4389,17 +4390,12 @@ uint32_t InventoryHandler::getTempEnchantRemainingMs(uint32_t slot) const {
 void InventoryHandler::loadRepairDbc() const {
     if (repairDbcLoaded_) return;
 
-    auto* am = assets_;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
     repairDbcLoaded_ = true;
 
     // DurabilityCosts.dbc: field 0 = itemLevel (key), fields 1-29 = cost multipliers
     // Columns 1-21 = weapon subclass (0-20), columns 22-29 = armor subclass (0-7)
-    auto costsDbc = am->loadDBC("DurabilityCosts.dbc");
-    if (costsDbc && costsDbc->isLoaded()) {
+    {
+        const auto costsDbc = data_.table("DurabilityCosts.dbc", 30, "what a repair costs");
         uint32_t count = costsDbc->getRecordCount();
         for (uint32_t i = 0; i < count; ++i) {
             uint32_t itemLevel = costsDbc->getUInt32(i, 0);
@@ -4411,8 +4407,8 @@ void InventoryHandler::loadRepairDbc() const {
     }
 
     // DurabilityQuality.dbc: field 0 = id (key), field 1 = quality_mod (float)
-    auto qualDbc = am->loadDBC("DurabilityQuality.dbc");
-    if (qualDbc && qualDbc->isLoaded()) {
+    {
+        const auto qualDbc = data_.table("DurabilityQuality.dbc", 2, "what a repair costs");
         uint32_t count = qualDbc->getRecordCount();
         for (uint32_t i = 0; i < count; ++i) {
             uint32_t id = qualDbc->getUInt32(i, 0);

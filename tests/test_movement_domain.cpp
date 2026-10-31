@@ -6,6 +6,7 @@
 #include "game/entity.hpp"
 #include "game/entity_controller.hpp"
 #include "game/game_events.hpp"
+#include "game/transport_manager.hpp"
 
 #include <glm/vec3.hpp>
 
@@ -225,4 +226,88 @@ TEST_CASE("the server's position wins when it puts the player far from where the
     CHECK(corrected[0].x == me.x + 200.0f);
     CHECK(corrected[0].y == me.y);
     CHECK(h.game().getMovementInfo().x == me.x + 200.0f);
+}
+
+namespace {
+
+/// SMSG_SHOWTAXINODES: window, the flight master, the nearest node, then the
+/// twelve words of the known-node mask (node n is bit n - 1).
+std::vector<uint8_t> showTaxiNodes(uint32_t nearest, uint32_t mask0) {
+    wowee::test::Body b;
+    b.u32(1).u64(0xF130000000003003ull).u32(nearest).u32(mask0);
+    for (int i = 1; i < 12; ++i) b.u32(0);
+    return b.bytes();
+}
+
+}  // namespace
+
+TEST_CASE("the flight map's nodes, routes and prices are TaxiNodes.dbc's and TaxiPath.dbc's",
+          "[movement][harness][tables]") {
+    using wowee::game::Opcode;
+    GameHarness h;
+    // ID, map, x, y, z, name; the mounts at 22 and 23.
+    h.dbc("TaxiNodes.dbc", 24, {{{0, 2}, {1, 0}, {5, "Stormwind"}},
+                                {{0, 4}, {1, 0}, {5, "Sentinel Hill"}}});
+    // ID, from, to, cost.
+    h.dbc("TaxiPath.dbc", 4, {{{0, 1}, {1, 2}, {2, 4}, {3, 50}}});
+    h.enterWorld();
+
+    h.receive(Opcode::SMSG_SHOWTAXINODES, showTaxiNodes(2, 0b0010));  // knows Stormwind
+    h.pump();
+    const auto& nodes = h.game().movement().getTaxiNodes();
+    REQUIRE(nodes.count(4) == 1);
+    CHECK(nodes.at(4).name == "Sentinel Hill");
+    CHECK_FALSE(h.game().movement().hasTaxiRouteTo(4));  // not discovered yet
+
+    h.receive(Opcode::SMSG_SHOWTAXINODES, showTaxiNodes(2, 0b1010));  // and Sentinel Hill
+    h.pump();
+    CHECK(h.game().movement().getTaxiCostTo(4) == 50);
+    const auto& history = h.game().chat().getChatHistory();
+    REQUIRE_FALSE(history.empty());
+    CHECK(history.back().message == "Discovered flight path: Sentinel Hill");
+}
+
+TEST_CASE("walking into an AreaTrigger.dbc sphere tells the server which trigger",
+          "[movement][harness][tables]") {
+    using wowee::game::Opcode;
+    GameHarness h;
+    // ID, map, then the centre in the server's axes (x, y), z, and a radius.
+    h.dbc("AreaTrigger.dbc", 10, {{{0, 45}, {1, 0}, {2, 2000.0f}, {3, 1000.0f}, {4, 50.0f},
+                                   {5, 5.0f}}});
+    h.enterWorld();
+    h.advance(12.0f);  // past the hold every arrival puts on triggers
+    REQUIRE(h.countSent(Opcode::CMSG_AREATRIGGER) == 0);
+
+    h.game().movement().setPosition(1000.0f, 2000.0f, 50.0f);
+    h.advance(1.0f);
+
+    auto* sent = h.lastSent(Opcode::CMSG_AREATRIGGER);
+    REQUIRE(sent != nullptr);
+    CHECK(sent->readUInt32() == 45);
+}
+
+TEST_CASE("a ship sails the path TransportAnimation.dbc gives its entry, and a boat its TaxiPathNode.dbc path",
+          "[movement][transport][harness][tables]") {
+    GameHarness h;
+    // ID, transport entry, time, x, y, z.
+    h.dbc("TransportAnimation.dbc", 7, {
+        {{0, 1}, {1, 20808}, {2, 0}, {3, 0.0f}, {4, 0.0f}, {5, 0.0f}},
+        {{0, 2}, {1, 20808}, {2, 10000}, {3, 100.0f}, {4, 0.0f}, {5, 0.0f}},
+        {{0, 3}, {1, 20808}, {2, 20000}, {3, 100.0f}, {4, 100.0f}, {5, 0.0f}},
+    });
+    // ID, path, index, map, x, y, z, flags, delay.
+    h.dbc("TaxiPathNode.dbc", 9, {
+        {{0, 1}, {1, 99}, {2, 0}, {3, 0}, {4, 0.0f}, {5, 0.0f}, {6, 0.0f}},
+        {{0, 2}, {1, 99}, {2, 1}, {3, 0}, {4, 500.0f}, {5, 0.0f}, {6, 0.0f}},
+    });
+    h.enterWorld();
+    auto& transports = *h.game().getTransportManager();
+
+    transports.loadTransportAnimationDBC(h.gameData());
+    transports.loadTaxiPathNodeDBC(h.gameData());
+
+    CHECK(transports.hasPathForEntry(20808));
+    CHECK_FALSE(transports.hasPathForEntry(20809));
+    CHECK(transports.hasTaxiPath(99));
+    CHECK_FALSE(transports.hasTaxiPath(98));
 }

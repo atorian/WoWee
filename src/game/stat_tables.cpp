@@ -1,10 +1,8 @@
 #include "game/stat_tables.hpp"
 
-#include "core/logger.hpp"
-#include "pipeline/asset_manager.hpp"
+#include "game/game_data.hpp"
 #include "pipeline/dbc_loader.hpp"
 
-#include <cstdlib>
 #include <utility>
 
 namespace wowee::game {
@@ -31,25 +29,16 @@ constexpr TableSource kSources[] = {
 };
 static_assert(std::size(kSources) == static_cast<size_t>(StatTables::Table::Count));
 
-[[noreturn]] void stop(const std::string& why) {
-    LOG_FATAL("Character sheet: ", why, "; the game cannot go on without it");
-    std::abort();
-}
+constexpr const char* kNeed = "the character sheet";
 
 }  // namespace
 
 StatTables::StatTables(ReadColumn read) : read_(std::move(read)) {}
 
-StatTables::ReadColumn StatTables::fromAssets(pipeline::AssetManager* assets) {
-    return [assets](const std::string& dbc, uint32_t column) {
-        if (!assets || !assets->isInitialized()) stop(dbc + " asked for with no game data loaded");
-        auto table = assets->loadDBC(dbc);
-        if (!table || !table->isLoaded()) stop(dbc + " could not be read");
-        if (table->getRecordCount() == 0 || table->getFieldCount() <= column) {
-            stop(dbc + " has " + std::to_string(table->getRecordCount()) + " rows of " +
-                 std::to_string(table->getFieldCount()) + " fields, no column " +
-                 std::to_string(column));
-        }
+StatTables::ReadColumn StatTables::fromData(const GameData& data) {
+    return [&data](const std::string& dbc, uint32_t column) {
+        const auto table = data.table(dbc, column + 1, kNeed);
+        if (table->getRecordCount() == 0) GameData::stop(dbc, kNeed, "has no rows");
         std::vector<float> rows;
         rows.reserve(table->getRecordCount());
         for (uint32_t i = 0; i < table->getRecordCount(); ++i) rows.push_back(table->getFloat(i, column));
@@ -62,8 +51,8 @@ float StatTables::row(Table table, size_t index) const {
     if (!tables_[t]) tables_[t] = read_(kSources[t].dbc, kSources[t].column);
     const auto& rows = *tables_[t];
     if (index >= rows.size()) {
-        stop(std::string(kSources[t].dbc) + " has " + std::to_string(rows.size()) +
-             " rows; row " + std::to_string(index) + " was asked for");
+        GameData::stop(kSources[t].dbc, kNeed, "has " + std::to_string(rows.size()) +
+                       " rows; row " + std::to_string(index) + " was asked for");
     }
     return rows[index];
 }

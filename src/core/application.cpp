@@ -53,6 +53,7 @@
 #include "game/protocol_tables.hpp"
 #include "game/emote_table.hpp"
 #include "game/stat_tables.hpp"
+#include "game/game_data.hpp"
 #include "audio/ambient_sound_manager.hpp"
 #include "core/zone_tracker.hpp"
 #include "core/frame_pacer.hpp"
@@ -506,13 +507,15 @@ bool Application::initialize() {
     assetManager = std::make_unique<pipeline::AssetManager>();
 
     // Populate game services - all subsystems now available
-    emoteTable_ = std::make_unique<game::EmoteTable>(assetManager.get());
+    gameData_ = std::make_unique<game::GameData>(game::GameData::fromAssets(assetManager.get()));
+    emoteTable_ = std::make_unique<game::EmoteTable>(*gameData_);
     if (auto* animation = playerView_->getAnimationController()) {
         animation->setEmoteTable(emoteTable_.get());
     }
     gameServices_.emotes = emoteTable_.get();
-    statTables_ = std::make_unique<game::StatTables>(game::StatTables::fromAssets(assetManager.get()));
+    statTables_ = std::make_unique<game::StatTables>(game::StatTables::fromData(*gameData_));
     gameServices_.statTables = statTables_.get();
+    gameServices_.gameData = gameData_.get();
     gameServices_.assetManager = assetManager.get();
     gameServices_.expansionRegistry = expansionRegistry_.get();
     gameServices_.events = &eventBus_;
@@ -591,7 +594,7 @@ bool Application::initialize() {
     titles_ = std::make_unique<title::TitleService>(*titleData_, *titleGateway_, eventBus_);
     gameServices_.titlesFeed = titles_.get();
     gameServices_.titles = titles_.get();
-    factionData_ = std::make_unique<game::FactionData>(assetManager.get());
+    factionData_ = std::make_unique<game::FactionData>(*gameData_);
     reputationGateway_ = std::make_unique<game::ReputationGateway>(*gameHandler, *gameHandler);
     reputation_ = std::make_unique<reputation::ReputationService>(*factionData_, *reputationGateway_, eventBus_);
     gameServices_.reputationFeed = reputation_.get();
@@ -695,7 +698,7 @@ bool Application::initialize() {
     LOG_INFO("Attempting to load WoW assets from: ", assetPath);
     if (assetManager->initialize(assetPath)) {
         LOG_INFO("Asset manager initialized successfully");
-        zoneTracker_->loadZoneTable(assetManager.get());
+        zoneTracker_->loadZoneTable(*gameData_, *assetManager);
 
         // Fonts, now the archives are open and still before any frame is
         // drawn - the only moment the glyph atlas can take another face
@@ -998,8 +1001,8 @@ bool Application::initialize() {
 
         // Load transport paths from TransportAnimation.dbc and TaxiPathNode.dbc
         if (gameHandler && gameHandler->getTransportManager()) {
-            gameHandler->getTransportManager()->loadTransportAnimationDBC(assetManager.get());
-            gameHandler->getTransportManager()->loadTaxiPathNodeDBC(assetManager.get());
+            gameHandler->getTransportManager()->loadTransportAnimationDBC(*gameData_);
+            gameHandler->getTransportManager()->loadTaxiPathNodeDBC(*gameData_);
         }
 
         // The addon system: what is on disk, for the whole run. Each character
@@ -6296,8 +6299,8 @@ void Application::refreshPlayerCharacterModel() {
 }
 
 void Application::buildFactionHostilityMap(uint8_t playerRace) {
-    if (!assetManager || !gameHandler) return;
-    game::buildFactionHostilityMap(*assetManager, *gameHandler, playerRace);
+    if (!gameHandler) return;
+    game::buildFactionHostilityMap(*gameData_, *gameHandler, playerRace);
 }
 
 // Render bounds/position queries - delegates to EntitySpawner
@@ -6807,8 +6810,8 @@ void Application::applyRealmPatchLayer(std::shared_ptr<const pipeline::ArchiveLa
         // Additive: a realm's transports join the client's, and the client's
         // are found again as they were.
         if (auto* transports = gameHandler->getTransportManager()) {
-            transports->loadTransportAnimationDBC(assetManager.get());
-            transports->loadTaxiPathNodeDBC(assetManager.get());
+            transports->loadTransportAnimationDBC(*gameData_);
+            transports->loadTaxiPathNodeDBC(*gameData_);
         }
     }
     if (entitySpawner_) entitySpawner_->rebuildLookups();

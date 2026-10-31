@@ -6,7 +6,7 @@
 
 namespace wowee {
 namespace pipeline { class AssetManager; }
-namespace game { class GameHandler; class ZoneManager; }
+namespace game { class GameData; class GameHandler; class ZoneManager; }
 namespace audio { class AudioCoordinator; }
 namespace rendering { class TerrainManager; }
 namespace collision { class CollisionWorld; }
@@ -27,7 +27,7 @@ public:
     ~ZoneTracker();
 
     /// The zone table, music included, from the client's DBCs.
-    void loadZoneTable(pipeline::AssetManager* assets);
+    void loadZoneTable(const game::GameData& data, pipeline::AssetManager& assets);
 
     /// Resolve the zone for this frame: from the area of the ground under the
     /// player, as `world` has it, and failing that from the streamed tile, the

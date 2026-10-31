@@ -278,3 +278,44 @@ TEST_CASE("an objective's target named at last has the quest log redrawn, and on
     h.pump();
     CHECK(h.addonEvents("QUEST_LOG_UPDATE").size() == 1);
 }
+
+TEST_CASE("the quest log's category headings are QuestSort.dbc's names", "[quest][harness][tables]") {
+    GameHarness h;
+    h.dbc("QuestSort.dbc", 18, {{{0, 61}, {1, "Warlock"}}, {{0, 141}, {1, "Seasonal"}}});
+    h.enterWorld();
+
+    CHECK(h.game().quests().getQuestSortName(141) == "Seasonal");
+    CHECK(h.game().quests().getQuestSortName(61) == "Warlock");
+    CHECK(h.game().quests().getQuestSortName(7).empty());
+}
+
+TEST_CASE("a quest's reward experience is its level's QuestXP.dbc column for its difficulty",
+          "[quest][harness][tables]") {
+    GameHarness h;
+    // Level, then ten difficulty columns; column 0 is zero at every level.
+    h.dbc("QuestXP.dbc", 11, {{{0, 10}, {1, 0}, {2, 45}, {3, 90}, {6, 450}},
+                              {{0, 11}, {1, 0}, {2, 50}, {3, 100}, {6, 500}}});
+    h.enterWorld();
+
+    CHECK(h.game().quests().getQuestRewardXP(10, 5) == 450);
+    CHECK(h.game().quests().getQuestRewardXP(11, 2) == 100);
+    // No difficulty, as every quest before WotLK names none: no experience,
+    // without the file.
+    CHECK(h.game().quests().getQuestRewardXP(10, 0) == 0);
+}
+
+TEST_CASE("a quest's reputation is QuestFactionReward.dbc's, a gain from row 1 and a loss from row 2",
+          "[quest][harness][tables]") {
+    GameHarness h;
+    h.dbc("QuestFactionReward.dbc", 11, {
+        {{0, 1}, {1, 0}, {2, 10}, {3, 25}, {4, 75}, {5, 150}, {6, 250}},
+        {{0, 2}, {1, 0}, {2, -10}, {3, -25}, {4, -75}, {5, -150}, {6, -250}},
+    });
+    h.enterWorld();
+
+    // In hundredths, as GetQuestLogRewardFactionInfo answers.
+    CHECK(h.game().quests().getQuestRewardReputation(5, 0) == 25000);
+    CHECK(h.game().quests().getQuestRewardReputation(-3, 0) == -7500);
+    // The override is in hundredths already and wins.
+    CHECK(h.game().quests().getQuestRewardReputation(5, 1234) == 1234);
+}

@@ -441,3 +441,35 @@ TEST_CASE("the player's coin is what the money field says, and a change is annou
     h.pump();
     CHECK(h.addonEvents("PLAYER_MONEY").empty());
 }
+
+TEST_CASE("a repair costs what DurabilityCosts.dbc and DurabilityQuality.dbc make of the wear",
+          "[inventory][harness][tables]") {
+    GameHarness h;
+    // Item level 60; the sword's column is weapon subclass 7, the file's 8th
+    // after the level.
+    h.dbc("DurabilityCosts.dbc", 30, {{{0, 59}, {8, 99}}, {{0, 60}, {8, 30}}});
+    // Uncommon quality (2) is row (2 + 1) * 2.
+    h.dbc("DurabilityQuality.dbc", 2, {{{0, 4}, {1, 0.9f}}, {{0, 6}, {1, 0.5f}}});
+    h.enterWorld();
+
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, createItem(kSword, 25, 1));
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              values(kSword, {{fieldIndex(UF::ITEM_FIELD_DURABILITY), 40},
+                              {fieldIndex(UF::ITEM_FIELD_MAXDURABILITY), 100}}));
+    h.receive(Opcode::SMSG_ITEM_QUERY_SINGLE_RESPONSE,
+              GameHarness::itemTemplateBody(25, "Test Sword", 1000, 13));
+    h.pump();
+
+    // Sixty points lost, at 30 copper each, halved for an uncommon item.
+    CHECK(h.game().inventory().estimateRepairAllCost() == 900);
+}
+
+TEST_CASE("a book's background is the material PageTextMaterial.dbc names", "[inventory][harness][tables]") {
+    GameHarness h;
+    h.dbc("PageTextMaterial.dbc", 2, {{{0, 1}, {1, "Parchment"}}, {{0, 2}, {1, "Stone"}}});
+    h.enterWorld();
+
+    CHECK(h.game().getPageTextMaterialName(2) == "Stone");
+    CHECK(h.game().getPageTextMaterialName(1) == "Parchment");
+    CHECK(h.game().getPageTextMaterialName(9).empty());
+}

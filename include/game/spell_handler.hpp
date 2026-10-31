@@ -20,8 +20,9 @@
 namespace wowee {
 namespace achievement { class IAchievementsFeed; }
 namespace core { class CVarStore; }
-namespace pipeline { class AssetManager; }
 namespace game {
+
+class GameData;
 
 class PacketSender;
 class FrameXmlEvents;
@@ -293,7 +294,7 @@ public:
 
     SpellHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
                  ChatLog& chat, SpellQueries& queries, const core::CVarStore& cvars,
-                 pipeline::AssetManager* assets);
+                 const GameData& data);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -724,7 +725,7 @@ private:
     const core::CVarStore& cvars_;
     /// The client's data, for the DBC tables. Null in a test that has none,
     /// which leaves every spell unknown to the client.
-    pipeline::AssetManager* const assets_;
+    const GameData& data_;
 
     // --- What the client's data says (read once, kept until an expansion switch) ---
     mutable std::unordered_map<uint32_t, SpellNameEntry> spellNameCache_;
