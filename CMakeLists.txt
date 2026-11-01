@@ -709,6 +709,7 @@ set(WOWEE_SOURCES
     src/core/resource_monitor.cpp
     src/core/benchmark_run.cpp
     src/core/scene_replay.cpp
+    src/core/scene_capture_files.cpp
     src/core/screen_recorder.cpp
     src/core/entity_spawner.cpp
     src/core/entity_spawner_player.cpp

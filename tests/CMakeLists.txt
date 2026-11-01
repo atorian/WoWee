@@ -206,6 +206,13 @@ wowee_add_test(test_benchmark_run
             ${CMAKE_SOURCE_DIR}/src/core/frame_budget.cpp)
 target_link_libraries(test_benchmark_run PRIVATE wowee_client)
 
+# What a scene replay accepts of the files its capture was taken against: the
+# same files across a daylight-saving change, the same data root however it is
+# spelled, and nothing rewritten. No client.
+wowee_add_test(test_scene_capture_files
+    SOURCES test_scene_capture_files.cpp
+            ${CMAKE_SOURCE_DIR}/src/core/scene_capture_files.cpp)
+
 # The pipeline cache kept between runs: checked against the device, written
 # whole or not at all.
 wowee_add_test(test_pipeline_cache_file
