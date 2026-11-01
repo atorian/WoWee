@@ -133,7 +133,8 @@ void InventoryHandler::beginCharacter() {
     held_ = Held{};
     itemInfoCache_.clear();
     pendingItemQueries_.clear();
-    pendingItemQueryTimer_ = 0.0f;
+    failedItemQueries_.clear();
+    unansweredItemsReported_.clear();
     // The buyback list persists across vendor windows within a session but is
     // the last character's, not this one's.
     clearBuybackState();
@@ -149,16 +150,21 @@ void InventoryHandler::leaveWorld() {
 }
 
 void InventoryHandler::update(float deltaTime) {
-    // Periodically forget pending item queries so they can be asked again.
+    // Forget a query that has waited too long, so the next need asks again.
     // Without this, a lost or malformed response leaves the entry stuck for
-    // good and the item nameless.
-    pendingItemQueryTimer_ += deltaTime;
-    if (pendingItemQueryTimer_ >= 5.0f) {
-        pendingItemQueryTimer_ = 0.0f;
-        if (!pendingItemQueries_.empty()) {
-            LOG_DEBUG("Clearing ", pendingItemQueries_.size(), " stale pending item queries");
-            pendingItemQueries_.clear();
+    // good and the item nameless. Each query has its own age: a sweep of all
+    // of them every few seconds also dropped one sent just before it.
+    for (auto it = pendingItemQueries_.begin(); it != pendingItemQueries_.end();) {
+        it->second += deltaTime;
+        if (it->second < kItemQueryTimeoutSeconds) {
+            ++it;
+            continue;
         }
+        if (unansweredItemsReported_.insert(it->first).second) {
+            LOG_WARNING("Item ", it->first, ": no answer to its query in ", kItemQueryTimeoutSeconds,
+                        " s; it shows as \"Item #", it->first, "\" until asked again");
+        }
+        it = pendingItemQueries_.erase(it);
     }
 
     if (auto* feed = auctionFeed(queries_)) feed->onTimePassed(deltaTime);
@@ -2928,10 +2934,13 @@ void InventoryHandler::handleEquipmentSetList(network::Packet& packet) {
 // ============================================================
 
 void InventoryHandler::queryItemInfo(uint32_t entry, uint64_t guid) {
-    if (itemInfoCache_.count(entry) || pendingItemQueries_.count(entry)) return;
+    if (itemInfoCache_.count(entry) || pendingItemQueries_.count(entry) ||
+        failedItemQueries_.count(entry)) {
+        return;
+    }
     if (!sender_.characterInWorld()) return;
 
-    pendingItemQueries_.insert(entry);
+    pendingItemQueries_[entry] = 0.0f;
     // Some cores reject CMSG_ITEM_QUERY_SINGLE when the GUID is 0.
     // If we don't have the item object's GUID (e.g. visible equipment decoding),
     // fall back to the player's GUID to keep the request non-zero.
@@ -2954,12 +2963,23 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
             // mask it off so we can still clear the pending query by entry ID.
             uint32_t rawEntry = packet.readUInt32() & ~0x80000000u;
             pendingItemQueries_.erase(rawEntry);
+            if (failedItemQueries_.insert(rawEntry).second) {
+                LOG_WARNING("SMSG_ITEM_QUERY_SINGLE_RESPONSE for item ", rawEntry, " could not be read (",
+                            packet.getSize(), " bytes); it shows as \"Item #", rawEntry,
+                            "\" and is not asked for again");
+            }
+        } else {
+            LOG_WARNING("SMSG_ITEM_QUERY_SINGLE_RESPONSE too short to name its item (",
+                        packet.getSize(), " bytes); the answer is dropped");
         }
-        LOG_WARNING("handleItemQueryResponse: parse failed, size=", packet.getSize());
         return;
     }
 
     pendingItemQueries_.erase(data.entry);
+    if (!data.valid && failedItemQueries_.insert(data.entry).second) {
+        LOG_WARNING("Item ", data.entry, ": the realm has no such item; it shows as \"Item #",
+                    data.entry, "\" and is not asked for again");
+    }
     LOG_DEBUG("handleItemQueryResponse: RECV entry=", data.entry, " name='", data.name,
               "' displayInfoId=", data.displayInfoId,
               " class=", data.itemClass, " subClass=", data.subClass,

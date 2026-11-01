@@ -40,7 +40,12 @@ reputation::IReputationFeed* ReputationHandler::feed() {
 }
 
 void ReputationHandler::handleInitializeFactions(network::Packet& packet) {
-    if (!packet.hasRemaining(4)) return;
+    if (!packet.hasRemaining(4)) {
+        LOG_WARNING("SMSG_INITIALIZE_FACTIONS too short: ", packet.getSize(),
+                    " bytes; the reputation stays as it was");
+        packet.skipAll();
+        return;
+    }
     const uint32_t count = packet.readUInt32();
     const size_t needed = static_cast<size_t>(count) * 5;
     if (!packet.hasRemaining(needed)) {
@@ -67,21 +72,30 @@ void ReputationHandler::handleSetFactionStanding(network::Packet& packet) {
     //   WotLK:   RAF bonus (float), showVisual (uint8), count
     // Treating WotLK's first float byte as showVisual shifted the entire packet,
     // producing bogus counts, faction names, standings, and chat messages.
-    if (isActiveExpansion("wotlk")) {
-        if (!packet.hasRemaining(9)) return;
-        /*float rafBonus =*/ packet.readFloat();
-        /*uint8_t showVisual =*/ packet.readUInt8();
-    } else if (isActiveExpansion("tbc")) {
-        if (!packet.hasRemaining(8)) return;
-        /*float rafBonus =*/ packet.readFloat();
-    } else if (!packet.hasRemaining(4)) {
+    const size_t header = isActiveExpansion("wotlk") ? 9 : isActiveExpansion("tbc") ? 8 : 4;
+    if (!packet.hasRemaining(header)) {
+        LOG_WARNING("SMSG_SET_FACTION_STANDING too short: ", packet.getSize(), " bytes, ", header,
+                    " needed for its header; no standing changes");
+        packet.skipAll();
         return;
     }
+    if (header >= 8) /*float rafBonus =*/ packet.readFloat();
+    if (header == 9) /*uint8_t showVisual =*/ packet.readUInt8();
 
-    uint32_t count = packet.readUInt32();
-    count = std::min(count, 128u);
+    const uint32_t count = packet.readUInt32();
+    if (count > 128u) {
+        LOG_WARNING("SMSG_SET_FACTION_STANDING: ", count, " standings, more than the 128 a "
+                    "character can have; the first 128 are read");
+    }
+    const uint32_t read = std::min(count, 128u);
     auto* reputation = feed();
-    for (uint32_t i = 0; i < count && packet.hasRemaining(8); ++i) {
+    for (uint32_t i = 0; i < read; ++i) {
+        if (!packet.hasRemaining(8)) {
+            LOG_WARNING("SMSG_SET_FACTION_STANDING truncated: ", i, " of ", count,
+                        " standings in the packet; the rest do not change");
+            packet.skipAll();
+            break;
+        }
         // The packet carries Faction.dbc ReputationListID, not the faction ID,
         // and what has been earned rather than the whole standing.
         const uint32_t repListId = packet.readUInt32();
@@ -91,14 +105,24 @@ void ReputationHandler::handleSetFactionStanding(network::Packet& packet) {
 }
 
 void ReputationHandler::handleSetFactionAtWar(network::Packet& packet) {
-    if (!packet.hasRemaining(5)) { packet.skipAll(); return; }
+    if (!packet.hasRemaining(5)) {
+        LOG_WARNING("SMSG_SET_FACTION_ATWAR too short: ", packet.getSize(),
+                    " bytes; the at-war flag does not change");
+        packet.skipAll();
+        return;
+    }
     const uint32_t repListId = packet.readUInt32();
     const uint8_t setAtWar = packet.readUInt8();
     if (auto* reputation = feed()) reputation->onAtWar(repListId, setAtWar != 0);
 }
 
 void ReputationHandler::handleSetFactionVisible(network::Packet& packet) {
-    if (!packet.hasRemaining(5)) { packet.skipAll(); return; }
+    if (!packet.hasRemaining(5)) {
+        LOG_WARNING("SMSG_SET_FACTION_VISIBLE too short: ", packet.getSize(),
+                    " bytes; the faction is not added to the list");
+        packet.skipAll();
+        return;
+    }
     const uint32_t repListId = packet.readUInt32();
     const uint8_t visible = packet.readUInt8();
     // A faction met for the first time joins the list the panel draws.

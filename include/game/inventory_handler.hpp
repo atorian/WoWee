@@ -323,7 +323,10 @@ public:
     }
     /// Ask for an item's template unless it is known or already asked for.
     void ensureItemInfo(uint32_t entry) {
-        if (entry == 0 || itemInfoCache_.count(entry) || pendingItemQueries_.count(entry)) return;
+        if (entry == 0 || itemInfoCache_.count(entry) || pendingItemQueries_.count(entry) ||
+            failedItemQueries_.count(entry)) {
+            return;
+        }
         queryItemInfo(entry, 0);
     }
 
@@ -799,8 +802,16 @@ private:
 
     /// Item templates the realm has described, and the queries out for more.
     std::unordered_map<uint32_t, ItemQueryResponseData> itemInfoCache_;
-    std::unordered_set<uint32_t> pendingItemQueries_;
-    float pendingItemQueryTimer_ = 0.0f;
+    /// The queries out, by entry, with how long each has waited. One with no
+    /// answer after kItemQueryTimeoutSeconds is forgotten, so the next need
+    /// asks again.
+    std::unordered_map<uint32_t, float> pendingItemQueries_;
+    static constexpr float kItemQueryTimeoutSeconds = 5.0f;
+    /// Entries whose answer was "no such item" or could not be read: a
+    /// failure, said once and not asked again.
+    std::unordered_set<uint32_t> failedItemQueries_;
+    /// Entries whose query went unanswered at least once, said once each.
+    std::unordered_set<uint32_t> unansweredItemsReported_;
 
     /// The visible-item layout (base field and stride) of this realm's update
     /// fields, detected from the player's own equipped items and then used to

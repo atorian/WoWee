@@ -634,3 +634,44 @@ TEST_CASE("a new equipment set is saved the way the server reads it",
     CHECK(std::vector<uint8_t>(body.begin(), body.begin() + expectedHead.size()) == expectedHead);
     for (size_t i = expectedHead.size(); i < body.size(); ++i) CHECK(body[i] == 0x00);
 }
+
+TEST_CASE("an item query waits its own time for an answer, not a shared sweep's",
+          "[inventory][item_query][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.clearRecords();
+    auto& inventory = h.game().inventory();
+
+    inventory.ensureItemInfo(100);
+    h.advance(4.0f);
+    inventory.ensureItemInfo(200);
+    REQUIRE(h.countSent(Opcode::CMSG_ITEM_QUERY_SINGLE) == 2);
+
+    // The first has waited 5.5 s and is given up; the second only 1.5 s.
+    h.advance(1.5f);
+    inventory.ensureItemInfo(200);
+    CHECK(h.countSent(Opcode::CMSG_ITEM_QUERY_SINGLE) == 2);
+    inventory.ensureItemInfo(100);
+    CHECK(h.countSent(Opcode::CMSG_ITEM_QUERY_SINGLE) == 3);
+}
+
+TEST_CASE("an item the realm says does not exist is not asked for again",
+          "[inventory][item_query][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.clearRecords();
+    auto& inventory = h.game().inventory();
+
+    inventory.ensureItemInfo(300);
+    REQUIRE(h.countSent(Opcode::CMSG_ITEM_QUERY_SINGLE) == 1);
+    // ItemQuerySingle for an entry with no template: the entry with its top
+    // bit set, and nothing else.
+    h.receive(Opcode::SMSG_ITEM_QUERY_SINGLE_RESPONSE, Body().u32(300u | 0x80000000u));
+    h.pump();
+
+    inventory.ensureItemInfo(300);
+    h.advance(6.0f);
+    inventory.ensureItemInfo(300);
+    CHECK(h.countSent(Opcode::CMSG_ITEM_QUERY_SINGLE) == 1);
+    CHECK(inventory.getItemInfo(300) == nullptr);
+}
