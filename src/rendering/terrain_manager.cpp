@@ -154,8 +154,44 @@ bool TerrainManager::initialize(pipeline::AssetManager* assets, TerrainRenderer*
     return true;
 }
 
+void TerrainManager::loadMovementCollisionModels() {
+    if (!collision_ || !assetManager) return;
+    auto& movement = collision_->movement();
+    for (auto& path : movement.takeWantedModels()) {
+        collisionModelLoads_.push_back(standaloneJobs_.submit(mapToken_,
+            [assets = assetManager, path = std::move(path)](const core::JobGroup::Token&) {
+                CollisionModelLoad load;
+                load.path = path;
+                const auto bytes = assets->readFileShared(path);
+                if (!bytes) {
+                    load.error = "the file is not in the data";
+                    return load;
+                }
+                if (bytes->size() < 4 || std::memcmp(bytes->data(), "MD20", 4) != 0) {
+                    load.error = "the file is not an M2 model";
+                    return load;
+                }
+                const auto model = pipeline::M2Loader::load(*bytes);
+                load.shape = collision::M2Shape::build(path, model.collisionVertices, model.collisionIndices,
+                                                       model.collisionNormals);
+                load.boundsMin = model.boundMin;
+                load.boundsMax = model.boundMax;
+                return load;
+            }));
+    }
+    std::erase_if(collisionModelLoads_, [&movement](auto& future) {
+        if (!future.current()) return true;
+        if (future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+        auto load = future.get();
+        if (!load.error.empty()) movement.modelUnavailable(load.path, load.error);
+        else movement.addM2Model(load.path, load.shape, load.boundsMin, load.boundsMax);
+        return true;
+    });
+}
+
 void TerrainManager::update(const Camera& camera, float deltaTime) {
     ZoneScopedN("TerrainManager::update");
+    loadMovementCollisionModels();
     if (!streamingEnabled || !assetManager || !terrainRenderer) {
         return;
     }
@@ -561,7 +597,10 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
         if (!m2Model.isValid()) {
             skippedInvalid++;
             LOG_DEBUG("M2 model invalid (no verts/indices): ", m2Path);
-            pending->unavailableModels.emplace_back(m2Path, "it has no geometry the renderer loads");
+            pending->collisionOnlyModels.push_back({m2Path,
+                collision::M2Shape::build(m2Path, m2Model.collisionVertices, m2Model.collisionIndices,
+                                          m2Model.collisionNormals),
+                m2Model.boundMin, m2Model.boundMax});
             return false;
         }
 
@@ -798,7 +837,10 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
                                 pipeline::M2Loader::loadSkin(*skinData, m2Model);
                             }
                             if (!m2Model.isValid()) {
-                                pending->unavailableModels.emplace_back(m2Path, "it has no geometry the renderer loads");
+                                pending->collisionOnlyModels.push_back({m2Path,
+                                    collision::M2Shape::build(m2Path, m2Model.collisionVertices,
+                                                              m2Model.collisionIndices, m2Model.collisionNormals),
+                                    m2Model.boundMin, m2Model.boundMax});
                                 continue;
                             }
                             wmoPreparedModelIds.insert(doodadModelId);
@@ -1442,6 +1484,9 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
         if (collision_) {
             for (const auto& [model, reason] : pending->unavailableModels) {
                 collision_->movement().modelUnavailable(model, reason);
+            }
+            for (const auto& model : pending->collisionOnlyModels) {
+                collision_->movement().addM2Model(model.path, model.shape, model.boundsMin, model.boundsMax);
             }
             if (pending->heights) collision_->addTerrainTile(pending->heights);
         }

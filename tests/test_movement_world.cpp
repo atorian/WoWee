@@ -171,3 +171,13 @@ TEST_CASE("a building's group doodads of its placement's set are solid with it",
     CHECK(facetsAtHeight(facets, 3.0f) == 1);
     CHECK(facetsAtHeight(facets, 4.0f) == 0);
 }
+
+TEST_CASE("a doodad model no renderer has loaded is asked for once", "[collision][movement_world]") {
+    collision::CollisionWorld world;
+    world.movement().beginMap(0, terrainAt({32}));
+    world.addTerrainTile(tileWithDoodad("World\\Tree.mdx", 7));
+    CHECK(world.movement().takeWantedModels() == std::vector<std::string>{"world\\tree.m2"});
+    CHECK(world.movement().takeWantedModels().empty());
+    world.addTerrainTile(tileWithDoodad("World\\Tree.mdx", 7, 33));
+    CHECK(world.movement().takeWantedModels().empty());
+}

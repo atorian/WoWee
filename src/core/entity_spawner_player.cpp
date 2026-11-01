@@ -980,6 +980,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
             auto wmoData = assetManager_->readFile(modelPath);
             if (!wmoData.empty()) {
                 pipeline::WMOModel wmoModel = pipeline::WMOLoader::load(wmoData);
+                wmoModel.sourcePath = modelPath;
                 LOG_DEBUG("Gameobject WMO root loaded: ", modelPath, " nGroups=", wmoModel.nGroups);
                 int loadedGroups = 0;
                 if (wmoModel.nGroups > 0) {

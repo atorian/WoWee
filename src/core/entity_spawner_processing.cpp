@@ -1217,6 +1217,7 @@ void EntitySpawner::processGameObjectSpawnQueue() {
 
                     auto wmo = std::make_shared<pipeline::WMOModel>(
                         pipeline::WMOLoader::load(*wmoData));
+                    wmo->sourcePath = capturePath;
 
                     // Load groups
                     if (wmo->nGroups > 0) {

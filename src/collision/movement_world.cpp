@@ -11,6 +11,7 @@
 #include <array>
 #include <cctype>
 #include <limits>
+#include <utility>
 
 namespace wowee::collision {
 
@@ -209,6 +210,9 @@ void MovementWorld::prepareDoodad(DoodadEntry& doodad) {
     if (found == m2Models_.end()) {
         placement.model = nullptr;
         placement.flags &= ~kPrepared;
+        if (!unavailable_.contains(doodad.model) && asked_.insert(doodad.model).second) {
+            wanted_.push_back(doodad.model);
+        }
         return;
     }
     placement.model = &found->second->facets;
@@ -364,6 +368,12 @@ void MovementWorld::addWmoModel(std::shared_ptr<const WmoShape> shape) {
     dirty_ = true;
 }
 
+std::vector<std::string> MovementWorld::takeWantedModels() {
+    // Buildings name their doodads once their model has arrived.
+    if (dirty_) rebuild();
+    return std::exchange(wanted_, {});
+}
+
 void MovementWorld::modelUnavailable(const std::string& path, const std::string& reason) {
     const std::string key = movementModelKey(path);
     if (!unavailable_.emplace(key, reason).second) return;
@@ -424,6 +434,57 @@ void MovementWorld::rebuild() {
     source_ = std::make_unique<WorldMovementFacets>(*view_, mapId_, dungeon_, *materials_, *materials_,
                                                     nullptr, FacetNormalization::X87, queryTag_);
     dirty_ = false;
+}
+
+std::string MovementWorld::waitingFor(const glm::vec3& at, float radius) const {
+    std::string what;
+    const auto add = [&what](const std::string& item) {
+        if (!what.empty()) what += "; ";
+        what += item;
+    };
+    const auto [lowX, lowY] = core::coords::worldToTile(at.x + radius, at.y + radius);
+    const auto [highX, highY] = core::coords::worldToTile(at.x - radius, at.y - radius);
+    for (int tileY = std::min(lowY, highY); tileY <= std::max(lowY, highY); ++tileY) {
+        for (int tileX = std::min(lowX, highX); tileX <= std::max(lowX, highX); ++tileX) {
+            const int key = tileKey(tileX, tileY);
+            const auto tile = tiles_.find(key);
+            if (tile == tiles_.end()) {
+                if (tilesWithTerrain_[static_cast<size_t>(key)]) {
+                    add("tile [" + std::to_string(tileX) + "," + std::to_string(tileY) + "] is not loaded");
+                }
+                continue;
+            }
+            for (const uint64_t doodadKey : tile->second->doodadKeys) {
+                if (doodadKey == 0) continue;
+                const auto& doodad = *doodads_.at(doodadKey);
+                if (!doodad.placement.model && !unavailable_.contains(doodad.model)) {
+                    add("tile [" + std::to_string(tileX) + "," + std::to_string(tileY) + "] doodad model " +
+                        doodad.model + " has not arrived");
+                    break;
+                }
+            }
+        }
+    }
+    const glm::vec3 low = at - glm::vec3(radius), high = at + glm::vec3(radius);
+    for (const auto* building : buildingOrder_) {
+        if (building->ready) continue;
+        if (building->bounds && (high.x < building->bounds->low.x || high.y < building->bounds->low.y ||
+                                 high.z < building->bounds->low.z || low.x > building->bounds->high.x ||
+                                 low.y > building->bounds->high.y || low.z > building->bounds->high.z)) {
+            continue;
+        }
+        if (!wmoModels_.contains(building->model)) {
+            add("building " + building->model + " has not arrived");
+            continue;
+        }
+        for (const auto& doodad : building->groupDoodadStorage) {
+            if (!doodad->placement.model) {
+                add("building " + building->model + " doodad model " + doodad->model + " has not arrived");
+                break;
+            }
+        }
+    }
+    return what.empty() ? "nothing named - a request outside the loaded map" : what;
 }
 
 MovementGeometryStatus MovementWorld::query(const MovementFacetRequest& request, uint32_t flags,

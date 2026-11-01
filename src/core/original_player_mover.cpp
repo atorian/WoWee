@@ -414,7 +414,8 @@ rendering::CharacterMotion OriginalPlayerMover::move(const rendering::CharacterI
     case collision::MovementGeometryStatus::NotReady:
         if (!s.waitingForMap) {
             s.waitingForMap = true;
-            LOG_WARNING("Original movement: the map around the player is still loading - the player waits for it");
+            LOG_WARNING("Original movement: the map around the player is still loading (",
+                        s.world->waitingFor(s.movement.position, 8.0f), ") - the player waits for it");
         }
         break;
     case collision::MovementGeometryStatus::Ready:

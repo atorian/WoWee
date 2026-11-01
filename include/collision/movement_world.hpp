@@ -76,9 +76,16 @@ public:
     void addWmoModel(std::shared_ptr<const WmoShape> shape);
     /// A model that will not arrive: logged once, with why.
     void modelUnavailable(const std::string& path, const std::string& reason);
+    /// Doodad models a placement names that have not arrived, each once:
+    /// for whoever can load their collision when no renderer does.
+    [[nodiscard]] std::vector<std::string> takeWantedModels();
 
     MovementGeometryStatus query(const MovementFacetRequest& request, uint32_t flags,
                                  std::vector<MovementFacet>& output) override;
+
+    /// What keeps the map within `radius` of `at` from being ready, for the
+    /// log: a tile not streamed, a doodad model or a building not arrived.
+    [[nodiscard]] std::string waitingFor(const glm::vec3& at, float radius) const;
 
 private:
     struct DoodadEntry;
@@ -113,6 +120,8 @@ private:
     std::unordered_map<std::string, std::unique_ptr<M2Model>> m2Models_;
     std::unordered_map<std::string, std::shared_ptr<const WmoShape>> wmoModels_;
     std::unordered_map<std::string, std::string> unavailable_;
+    std::unordered_set<std::string> asked_;
+    std::vector<std::string> wanted_;
 
     std::unique_ptr<LiquidMaterials> materials_;
     std::unique_ptr<WorldFacetView> view_;

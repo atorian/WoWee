@@ -779,6 +779,7 @@ bool Application::initialize() {
                 !std::getenv("WOWEE_FOUNTAIN_PROBE")) return false;
             const std::string cityPath = "World/WMO/Northrend/Dalaran/ND_Dalaran.wmo";
             auto city = pipeline::WMOLoader::load(assetManager->readFile(cityPath));
+            city.sourcePath = cityPath;
             for (uint32_t group = 0; group < city.nGroups; ++group) {
                 const auto candidates = pipeline::wmoGroupCandidates(cityPath, group);
                 if (!pipeline::WMOLoader::loadGroup(assetManager->readFile(candidates.front()), city, group))
@@ -826,6 +827,7 @@ bool Application::initialize() {
             std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
             if (lower.size() > 4 && lower.compare(lower.size() - 4, 4, ".wmo") == 0) {
                 auto wmo = pipeline::WMOLoader::load(assetManager->readFile(path));
+                wmo.sourcePath = path;
                 for (uint32_t group = 0; group < wmo.nGroups; ++group) {
                     const auto candidates = pipeline::wmoGroupCandidates(path, group);
                     if (!pipeline::WMOLoader::loadGroup(assetManager->readFile(candidates.front()), wmo, group)) {
@@ -6557,6 +6559,7 @@ void Application::setupTestTransport() {
 
     // Load WMO model
     pipeline::WMOModel wmoModel = pipeline::WMOLoader::load(wmoData);
+    wmoModel.sourcePath = transportWmoPath;
     LOG_INFO("Transport WMO root loaded: ", transportWmoPath, " nGroups=", wmoModel.nGroups);
 
     // Load WMO groups
