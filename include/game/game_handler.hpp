@@ -534,6 +534,12 @@ public:
      * @param characterGuid GUID of character to log in with
      */
     void selectCharacter(uint64_t characterGuid);
+    /// Enters the world with `character` and no realm, the way a login does:
+    /// the character begins as selectCharacter begins it, and the world entry
+    /// SMSG_LOGIN_VERIFY_WORLD makes runs from where the character stands
+    /// (its position in server coordinates). For scene replay and the offline
+    /// benchmarks; refused while connected to a world server.
+    void enterWorldOffline(const Character& character);
     void setActiveCharacterGuid(uint64_t guid) { activeCharacterGuid_ = guid; }
     uint64_t getActiveCharacterGuid() const { return activeCharacterGuid_; }
     const Character* getActiveCharacter() const;
@@ -1516,6 +1522,10 @@ private:
      * Handle SMSG_LOGIN_VERIFY_WORLD from server
      */
     void handleLoginVerifyWorld(network::Packet& packet);
+    /// What selectCharacter does to begin a character, short of logging in.
+    void beginCharacterSession(uint64_t characterGuid);
+    /// What SMSG_LOGIN_VERIFY_WORLD does once read: the world entry itself.
+    void enterWorld(const LoginVerifyWorldData& data);
 
     /**
      * Handle SMSG_CLIENTCACHE_VERSION from server

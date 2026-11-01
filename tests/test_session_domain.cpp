@@ -346,6 +346,63 @@ TEST_CASE("login publishes the server destination for deferred world entry", "[s
     CHECK(entered.front().isInitialEntry);
 }
 
+TEST_CASE("offline world entry enters the world as a login does", "[session][harness]") {
+    // Scene replay and the benchmarks enter without a realm. What they measure
+    // is only the game's if the entry is the game's: a session begun, the
+    // player where SMSG_LOGIN_VERIFY_WORLD would put it, the data a session
+    // plays with read now rather than on the frame of the first spell.
+    GameHarness h;
+    std::vector<ev::WorldEntered> entered;
+    auto subscription = h.events().subscribe<ev::WorldEntered>([&](const auto& event) {
+        entered.push_back(event);
+    });
+    wowee::game::Character character{};
+    character.guid = 0x4242;
+    character.name = "Offline";
+    character.mapId = 571;
+    character.x = 5804.0f;  // server coordinates, as a character list gives them
+    character.y = 624.0f;
+    character.z = 647.5f;
+    REQUIRE_FALSE(h.dbcWasRead("Spell.dbc"));
+
+    h.game().enterWorldOffline(character);
+
+    CHECK(h.game().getState() == wowee::game::WorldState::IN_WORLD);
+    CHECK(h.game().getPlayerGuid() == character.guid);
+    CHECK(h.game().getActiveCharacterGuid() == character.guid);
+    CHECK(h.game().getCurrentMapId() == character.mapId);
+    const auto canonical = wowee::core::coords::serverToCanonical({character.x, character.y, character.z});
+    CHECK(h.game().getMovementInfo().x == canonical.x);
+    CHECK(h.game().getMovementInfo().y == canonical.y);
+    CHECK(h.game().getMovementInfo().z == canonical.z);
+    REQUIRE(entered.size() == 1);
+    CHECK(entered.front().mapId == character.mapId);
+    CHECK(entered.front().x == character.x);
+    CHECK(entered.front().y == character.y);
+    CHECK(entered.front().z == character.z);
+    CHECK(entered.front().isInitialEntry);
+    CHECK(h.dbcWasRead("Spell.dbc"));
+    CHECK(h.sentOpcodes().empty());
+}
+
+TEST_CASE("offline world entry is refused while a realm's world is connected", "[session][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    std::vector<ev::WorldEntered> entered;
+    auto subscription = h.events().subscribe<ev::WorldEntered>([&](const auto& event) {
+        entered.push_back(event);
+    });
+    wowee::game::Character character{};
+    character.guid = 0x4242;
+    character.mapId = 571;
+
+    h.game().enterWorldOffline(character);
+
+    CHECK(entered.empty());
+    CHECK(h.game().getPlayerGuid() == h.player().guid);
+    CHECK(h.game().getCurrentMapId() == h.player().mapId);
+}
+
 TEST_CASE("transfer pending announces its map without destroying the current world",
           "[session][harness]") {
     GameHarness h;

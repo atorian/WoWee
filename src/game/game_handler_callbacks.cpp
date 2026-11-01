@@ -567,6 +567,37 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
         return;
     }
 
+    beginCharacterSession(characterGuid);
+
+    // Build CMSG_PLAYER_LOGIN packet
+    auto packet = PlayerLoginPacket::build(characterGuid);
+
+    // Send packet
+    socket->send(packet);
+
+    setState(WorldState::ENTERING_WORLD);
+    LOG_INFO("CMSG_PLAYER_LOGIN sent, entering world...");
+}
+
+void GameHandler::enterWorldOffline(const Character& character) {
+    if (isConnected()) {
+        LOG_WARNING("Offline world entry refused: connected to a world server; the realm's "
+                    "login enters the world instead");
+        return;
+    }
+    if (std::none_of(characters.begin(), characters.end(),
+                     [&](const Character& c) { return c.guid == character.guid; })) {
+        characters.push_back(character);
+    }
+    beginCharacterSession(character.guid);
+    setState(WorldState::ENTERING_WORLD);
+    LOG_INFO("Entering the world offline as 0x", std::hex, character.guid, std::dec,
+             " on map ", character.mapId);
+    enterWorld(LoginVerifyWorldData{.mapId = character.mapId, .x = character.x, .y = character.y,
+                                    .z = character.z, .orientation = 0.0f});
+}
+
+void GameHandler::beginCharacterSession(uint64_t characterGuid) {
     // Make the selected character authoritative in GameHandler.
     // This avoids relying on UI/Application ordering for appearance-dependent logic.
     activeCharacterGuid_ = characterGuid;
@@ -612,20 +643,10 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     eventBus().publish(events::PlayerIntoxicationChanged{0.0f});
     worldHandler_->clearAll();
     queryCacheHandler_->clear();
-
-    // Build CMSG_PLAYER_LOGIN packet
-    auto packet = PlayerLoginPacket::build(characterGuid);
-
-    // Send packet
-    socket->send(packet);
-
-    setState(WorldState::ENTERING_WORLD);
-    LOG_INFO("CMSG_PLAYER_LOGIN sent, entering world...");
 }
 
 void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     LOG_INFO("Handling SMSG_LOGIN_VERIFY_WORLD");
-    const bool initialWorldEntry = (state == WorldState::ENTERING_WORLD);
 
     LoginVerifyWorldData data;
     if (!LoginVerifyWorldParser::parse(packet, data)) {
@@ -637,7 +658,11 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
         fail("Invalid world entry data");
         return;
     }
+    enterWorld(data);
+}
 
+void GameHandler::enterWorld(const LoginVerifyWorldData& data) {
+    const bool initialWorldEntry = (state == WorldState::ENTERING_WORLD);
     glm::vec3 canonical = core::coords::serverToCanonical(glm::vec3(data.x, data.y, data.z));
     const bool alreadyInWorld = (state == WorldState::IN_WORLD);
     const bool sameMap = alreadyInWorld && (currentMapId_ == data.mapId);

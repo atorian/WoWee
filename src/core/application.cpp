@@ -2069,18 +2069,15 @@ void Application::startBenchmarkFromEnvironment() {
 }
 
 void Application::beginOfflineWorldEntry(const game::Character& character) {
-    gameHandler->currentMapIdRef() = character.mapId;
-    gameHandler->charactersRef().push_back(character);
-    gameHandler->setActiveCharacterGuid(character.guid);
-    gameHandler->setPlayerGuid(character.guid);
-    auto& movement = gameHandler->movementInfoRef();
-    movement.x = character.x; movement.y = character.y; movement.z = character.z;
     // Addon login events require live UNIT update fields. An offline entry
     // exercises world assets and appearance queues without those packets:
     // its character's interface hears events and OnUpdate from the start
     // and loads nothing.
     loop_->setSessionInterface(CharacterSession::Interface::EventsOnly);
-    worldLoader_->setPendingEntry(character.mapId, character.x, character.y, character.z);
+    // The game enters the world as a login does - the character begun, the
+    // data a session plays with prepared - and announces WorldEntered, which
+    // starts the world loading here as it does for a realm's login.
+    gameHandler->enterWorldOffline(character);
 }
 
 void Application::placeBenchmarkCamera() {
