@@ -3,6 +3,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "game_harness.hpp"
+#include "core/coordinates.hpp"
 #include "game/entity.hpp"
 #include "game/world_handler.hpp"
 #include "game/game_events.hpp"
@@ -19,6 +20,32 @@ using wowee::game::Opcode;
 using wowee::test::Body;
 using wowee::test::GameHarness;
 namespace ev = wowee::game::events;
+
+namespace {
+
+uint16_t uf(wowee::game::UF field) { return wowee::game::fieldIndex(field); }
+
+/// The realm puts a creature in view at a canonical position: SMSG_UPDATE_OBJECT
+/// creating a unit, alive, of faction template 14 - Monster, hostile to all.
+void creatureAt(GameHarness& h, uint64_t guid, const glm::vec3& canonical) {
+    const glm::vec3 server = wowee::core::coords::canonicalToServer(canonical);
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(guid, wowee::game::ObjectType::UNIT,
+                                            {{uf(wowee::game::UF::UNIT_FIELD_DISPLAYID), 1234},
+                                             {uf(wowee::game::UF::UNIT_FIELD_HEALTH), 100},
+                                             {uf(wowee::game::UF::UNIT_FIELD_MAXHEALTH), 100},
+                                             {uf(wowee::game::UF::UNIT_FIELD_FACTIONTEMPLATE), 14}},
+                                            server.x, server.y, server.z));
+    h.pump();
+}
+
+/// A hostile creature this many yards east of the player.
+void hostileAt(GameHarness& h, uint64_t guid, float yardsAway) {
+    const auto& me = h.game().getMovementInfo();
+    creatureAt(h, guid, glm::vec3(me.x + yardsAway, me.y, me.z));
+}
+
+}  // namespace
 
 TEST_CASE("honor credited for a kill is announced with the victim and their rank", "[combat][harness]") {
     GameHarness h;
@@ -39,9 +66,7 @@ TEST_CASE("honor credited for a kill is announced with the victim and their rank
 TEST_CASE("an NPC turning hostile is announced where it stands; another reaction is not", "[combat][harness]") {
     GameHarness h;
     h.enterWorld();
-    auto wolf = std::make_shared<wowee::game::Unit>(0x5001);
-    wolf->setPosition(1.0f, 2.0f, 3.0f, 0.0f);
-    h.game().getEntityManager().addEntity(wolf->getGuid(), wolf);
+    creatureAt(h, 0x5001, glm::vec3(1.0f, 2.0f, 3.0f));
     std::vector<ev::NpcAggroed> aggro;
     auto sub = h.events().subscribe<ev::NpcAggroed>([&](const ev::NpcAggroed& e) { aggro.push_back(e); });
 
@@ -52,20 +77,17 @@ TEST_CASE("an NPC turning hostile is announced where it stands; another reaction
 
     REQUIRE(aggro.size() == 1);
     CHECK(aggro[0].guid == 0x5001);
-    CHECK(aggro[0].x == 1.0f);
-    CHECK(aggro[0].y == 2.0f);
-    CHECK(aggro[0].z == 3.0f);
+    CHECK(aggro[0].x == Catch::Approx(1.0f));
+    CHECK(aggro[0].y == Catch::Approx(2.0f));
+    CHECK(aggro[0].z == Catch::Approx(3.0f));
 }
 
 TEST_CASE("a swing at a target just out of reach says so once", "[combat][harness]") {
     GameHarness h;
     h.enterWorld();
-    const auto& me = h.game().getMovementInfo();
     // Inside the 8 yards auto-attack starts at, outside the 5.75 a sword
     // reaches.
-    auto boar = std::make_shared<wowee::game::Unit>(0x6001);
-    boar->setPosition(me.x + 6.5f, me.y, me.z, 0.0f);
-    h.game().getEntityManager().addEntity(boar->getGuid(), boar);
+    hostileAt(h, 0x6001, 6.5f);
     std::vector<std::string> raised;
     auto sub = h.events().subscribe<ev::UiErrorRaised>([&](const ev::UiErrorRaised& e) { raised.push_back(e.message); });
 
@@ -93,26 +115,14 @@ TEST_CASE("combo points are the ones the server last stated", "[combat][harness]
     CHECK(h.game().combat().comboPoints() == 0);
 }
 
-namespace {
-std::shared_ptr<wowee::game::Unit> hostileAt(GameHarness& h, uint64_t guid, float yardsAway) {
-    const auto& me = h.game().getMovementInfo();
-    auto unit = std::make_shared<wowee::game::Unit>(guid);
-    unit->setPosition(me.x + yardsAway, me.y, me.z, 0.0f);
-    unit->setMaxHealth(100);
-    unit->setHealth(100);
-    unit->setHostile(true);
-    return unit;
-}
-}  // namespace
-
 TEST_CASE("Tab steps through enemies nearest first, and takes in one that has just come into view",
           "[combat][harness]") {
     using namespace wowee::game;
     GameHarness h;
     h.enterWorld();
     const auto& me = h.game().getMovementInfo();
-    for (const auto& unit : {hostileAt(h, 0x8001, 5.0f), hostileAt(h, 0x8002, 10.0f)})
-        h.game().getEntityManager().addEntity(unit->getGuid(), unit);
+    hostileAt(h, 0x8001, 5.0f);
+    hostileAt(h, 0x8002, 10.0f);
 
     h.game().combat().tabTarget(me.x, me.y, me.z);
     CHECK(h.game().combat().getTargetGuid() == 0x8001);
@@ -120,20 +130,7 @@ TEST_CASE("Tab steps through enemies nearest first, and takes in one that has ju
     CHECK(h.game().combat().getTargetGuid() == 0x8002);
 
     // A third, nearer than both, arrives in an update from the server.
-    UpdateBlock block{};
-    block.guid = 0x8003;
-    block.objectType = ObjectType::UNIT;
-    block.updateType = UpdateType::CREATE_OBJECT;
-    block.fields[fieldIndex(UF::UNIT_FIELD_DISPLAYID)] = 1234;
-    block.fields[fieldIndex(UF::UNIT_FIELD_HEALTH)] = 100;
-    block.fields[fieldIndex(UF::UNIT_FIELD_MAXHEALTH)] = 100;
-    UpdateObjectData batch{};
-    batch.blocks.push_back(block);
-    h.game().world().applyRecordedObjects(batch);
-    auto arrived = std::static_pointer_cast<Unit>(h.game().getEntityManager().getEntity(0x8003));
-    REQUIRE(arrived);
-    arrived->setPosition(me.x + 3.0f, me.y, me.z, 0.0f);
-    arrived->setHostile(true);
+    hostileAt(h, 0x8003, 3.0f);
 
     // From the farthest the list now goes round to the newcomer, nearest of all.
     h.game().combat().tabTarget(me.x, me.y, me.z);
@@ -277,8 +274,7 @@ TEST_CASE("the ghost flag makes the player a ghost, and clearing it brings them 
     using namespace wowee::game;
     GameHarness h;
     h.enterWorld();
-    auto self = std::make_shared<Player>(h.player().guid);
-    h.game().getEntityManager().addEntity(self->getGuid(), self);
+    h.playerInView();
     h.receive(Opcode::SMSG_FORCED_DEATH_UPDATE, Body());
     h.pump();
 
@@ -347,8 +343,8 @@ TEST_CASE("the server breaking off or clearing the target drops it, and only tha
           "[combat][harness]") {
     GameHarness h;
     h.enterWorld();
-    for (const auto& unit : {hostileAt(h, 0x9001, 5.0f), hostileAt(h, 0x9002, 6.0f)})
-        h.game().getEntityManager().addEntity(unit->getGuid(), unit);
+    hostileAt(h, 0x9001, 5.0f);
+    hostileAt(h, 0x9002, 6.0f);
     h.game().combat().setTarget(0x9001);
     REQUIRE(h.game().combat().getTargetGuid() == 0x9001);
 
@@ -372,7 +368,7 @@ TEST_CASE("auto-attack reaches 8 yards bare-handed and 40 with a bow in the rang
     using namespace wowee::game;
     GameHarness h;
     h.enterWorld();
-    h.game().getEntityManager().addEntity(0xA001, hostileAt(h, 0xA001, 20.0f));
+    hostileAt(h, 0xA001, 20.0f);
 
     h.game().combat().startAutoAttack(0xA001);
     h.pump();
@@ -386,12 +382,6 @@ TEST_CASE("auto-attack reaches 8 yards bare-handed and 40 with a bow in the rang
     h.game().combat().startAutoAttack(0xA001);
     CHECK(h.countSent(Opcode::CMSG_ATTACKSWING) == 1);
 }
-
-namespace {
-/// A block for the player's own object, as an update or as the create a login
-/// brings.
-uint16_t uf(wowee::game::UF f) { return static_cast<uint16_t>(wowee::game::fieldIndex(f)); }
-}  // namespace
 
 TEST_CASE("the player's health reaching zero is a death, and coming back from it is life",
           "[combat][death][harness]") {

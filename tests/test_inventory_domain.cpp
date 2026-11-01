@@ -5,6 +5,7 @@
 
 #include "game_harness.hpp"
 
+#include "core/coordinates.hpp"
 #include "game/entity.hpp"
 #include "game/game_events.hpp"
 #include "game/action_bar_handler.hpp"
@@ -221,9 +222,13 @@ TEST_CASE("a vendor's window opening is the vendor's greeting, from where the ve
     // A step from the player: a vendor out of reach closes its own window.
     const auto& at = h.game().getMovementInfo();
     const float vx = at.x + 2.0f, vy = at.y + 1.0f, vz = at.z;
-    auto vendor = std::make_shared<wowee::game::Unit>(kVendor);
-    vendor->setPosition(vx, vy, vz, 0.0f);
-    h.game().getEntityManager().addEntity(kVendor, vendor);
+    const glm::vec3 server = wowee::core::coords::canonicalToServer(glm::vec3(vx, vy, vz));
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(kVendor, wowee::game::ObjectType::UNIT,
+                                            {{fieldIndex(UF::OBJECT_FIELD_ENTRY), 54},
+                                             {fieldIndex(UF::UNIT_FIELD_HEALTH), 100}},
+                                            server.x, server.y, server.z));
+    h.pump();
     std::vector<ev::VendorOpened> opened;
     auto sub = h.events().subscribe<ev::VendorOpened>(
         [&](const ev::VendorOpened& e) { opened.push_back(e); });

@@ -521,8 +521,11 @@ std::vector<uint8_t> GameHarness::valuesBody(uint64_t guid, const Fields& fields
 }
 
 void GameHarness::playerInView() {
-    const uint64_t guid = player_.guid;
-    game_->getEntityManager().addEntity(guid, std::make_shared<game::Player>(guid));
+    // The realm's create block for the character's own object, every field
+    // zero and so left out: what a test then fills with playerFields.
+    receive(game::Opcode::SMSG_UPDATE_OBJECT,
+            createObjectBody(player_.guid, game::ObjectType::PLAYER, {}, player_.x, player_.y, player_.z));
+    pump();
 }
 
 std::vector<uint8_t> GameHarness::gameObjectTemplateBody(uint32_t entry, uint32_t type,
@@ -632,7 +635,7 @@ void GameHarness::answerPlayerLogin(const PlayerSpec& player) {
 
 std::vector<uint8_t> GameHarness::createObjectBody(uint64_t guid, game::ObjectType type,
                                                    std::vector<std::pair<uint16_t, uint32_t>> fields,
-                                                   float x, float y, float z) {
+                                                   float x, float y, float z, float orientation) {
     for (const auto& [index, value] : fields) {
         (void)value;
         if (index == 0xFFFF) fail("an update field the active table does not have");
@@ -652,7 +655,7 @@ std::vector<uint8_t> GameHarness::createObjectBody(uint64_t guid, game::ObjectTy
         b.u8(0x20).u8(0x00);                             // update flags: living
         b.u32(0).u8(0).u8(0);                            // movement flags, flags2
         b.u32(0);                                        // time
-        b.f32(x).f32(y).f32(z).f32(0.0f);                // position, facing
+        b.f32(x).f32(y).f32(z).f32(orientation);         // position, facing
         b.u32(0);                                        // fall time
         for (float speed : {2.5f, 7.0f, 4.5f, 4.72f, 2.5f, 7.0f, 4.5f, 3.14159f, 3.14159f})
             b.f32(speed);                                // walk .. pitch rate

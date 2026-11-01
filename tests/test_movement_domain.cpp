@@ -3,6 +3,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "game_harness.hpp"
+#include "core/coordinates.hpp"
 #include "game/entity.hpp"
 #include "game/world_handler.hpp"
 #include "game/game_events.hpp"
@@ -19,15 +20,34 @@
 using wowee::test::GameHarness;
 namespace ev = wowee::game::events;
 
+namespace {
+
+uint16_t uf(wowee::game::UF field) { return wowee::game::fieldIndex(field); }
+
+/// The realm puts a creature in view: SMSG_UPDATE_OBJECT creating a unit, alive.
+void creatureInView(GameHarness& h, uint64_t guid) {
+    h.receive(wowee::game::Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(guid, wowee::game::ObjectType::UNIT,
+                                            {{uf(wowee::game::UF::OBJECT_FIELD_ENTRY), 299},
+                                             {uf(wowee::game::UF::UNIT_FIELD_HEALTH), 100}}));
+    h.pump();
+}
+
+}  // namespace
+
 TEST_CASE("following stops on the next frame once the followed player leaves view", "[movement][harness]") {
     using namespace wowee::game;
     GameHarness h;
     h.enterWorld();
     const auto& me = h.game().getMovementInfo();
-    auto friendPlayer = std::make_shared<Player>(0xB001);
-    friendPlayer->setName("Anna");
-    friendPlayer->setPosition(me.x + 3.0f, me.y, me.z, 0.0f);
-    h.game().getEntityManager().addEntity(friendPlayer->getGuid(), friendPlayer);
+    // Anna, three yards east, and her name as the server answers the query
+    // her arrival asks.
+    const glm::vec3 at = wowee::core::coords::canonicalToServer(glm::vec3(me.x + 3.0f, me.y, me.z));
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(0xB001, ObjectType::PLAYER, {{uf(UF::UNIT_FIELD_HEALTH), 100}},
+                                            at.x, at.y, at.z));
+    h.receive(Opcode::SMSG_NAME_QUERY_RESPONSE, GameHarness::nameResponseBody(0xB001, "Anna"));
+    h.pump();
     std::vector<bool> following;
     auto sub = h.events().subscribe<ev::AutoFollowChanged>(
         [&](const ev::AutoFollowChanged& e) { following.push_back(e.renderPos != nullptr); });
@@ -39,7 +59,8 @@ TEST_CASE("following stops on the next frame once the followed player leaves vie
     REQUIRE(h.addonEvents("AUTOFOLLOW_BEGIN").size() == 1);
     CHECK(h.addonEvents("AUTOFOLLOW_BEGIN")[0].args.at(0) == "Anna");
 
-    h.game().getEntityManager().removeEntity(0xB001);
+    h.receive(Opcode::SMSG_DESTROY_OBJECT, wowee::test::Body().u64(0xB001).u8(0));
+    h.pump();
     h.pump();
     CHECK(following == std::vector<bool>{true, false});
     CHECK(h.addonEvents("AUTOFOLLOW_END").size() == 1);
@@ -87,8 +108,7 @@ void playerMoves(GameHarness& h, uint64_t transport, float ox = 0, float oy = 0,
 
 void enterWorldAsEntity(GameHarness& h) {
     h.enterWorld();
-    auto self = std::make_shared<wowee::game::Player>(h.player().guid);
-    h.game().getEntityManager().addEntity(self->getGuid(), self);
+    h.playerInView();
 }
 }  // namespace
 
@@ -213,8 +233,7 @@ TEST_CASE("arriving on a new map ends what the old one left: offers, world state
     h.enterWorld();
     const uint32_t oldMap = h.game().getCurrentMapId();
     const uint32_t newMap = oldMap + 1;
-    auto creature = std::make_shared<wowee::game::Unit>(0xC001);
-    h.game().getEntityManager().addEntity(creature->getGuid(), creature);
+    creatureInView(h, 0xC001);
     // A resurrection offered, and a battleground score showing.
     h.receive(Opcode::SMSG_RESURRECT_REQUEST, Body().u64(0x777).u32(5).cstr("Anna").u8(0).u8(0));
     h.receive(Opcode::SMSG_UPDATE_WORLD_STATE, Body().u32(1581).u32(42));
@@ -241,8 +260,7 @@ TEST_CASE("a resurrection on the same map brings the player back where they are,
     GameHarness h;
     h.enterWorld();
     const uint32_t here = h.game().getCurrentMapId();
-    auto creature = std::make_shared<wowee::game::Unit>(0xC002);
-    h.game().getEntityManager().addEntity(creature->getGuid(), creature);
+    creatureInView(h, 0xC002);
     h.receive(Opcode::SMSG_FORCED_DEATH_UPDATE, Body());
     h.receive(Opcode::SMSG_SPIRIT_HEALER_CONFIRM, Body().u64(0xF130000000001234ull));
     h.pump();

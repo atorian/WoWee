@@ -52,7 +52,7 @@ TEST_CASE("the extra action bars the realm keeps shown are the ones the characte
     GameHarness h;
     h.enterWorld();
     const uint64_t guid = h.player().guid;
-    h.game().getEntityManager().addEntity(guid, std::make_shared<wowee::game::Player>(guid));
+    h.playerInView();
     auto& bars = h.game().actionBar();
 
     // Before the realm has said: not known, rather than "none shown".

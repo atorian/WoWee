@@ -8,7 +8,6 @@
 
 #include <catch_amalgamated.hpp>
 #include "game_harness.hpp"
-#include "core/packed_time.hpp"
 #include "game/realm_time_handler.hpp"
 
 #include <chrono>
@@ -17,7 +16,6 @@
 using Catch::Approx;
 using wowee::game::Opcode;
 using wowee::game::RealmClock;
-using wowee::core::WowDate;
 using wowee::test::Body;
 using wowee::test::GameHarness;
 
@@ -32,19 +30,15 @@ std::vector<uint8_t> queryTimeResponse(uint32_t unixTime) {
     return Body().u32(unixTime).u32(3600);
 }
 
-/// SMSG_LOGIN_SETTIMESPEED: a packed date and the speed, 1/60 being real time.
-std::vector<uint8_t> loginSetTimeSpeed(const WowDate& date) {
-    return Body().u32(wowee::core::packWowPackedTime(date)).f32(1.0f / 60.0f);
-}
+/// Thursday 2025-10-09 08:53 and 20:00 as the server packs a date: minute in
+/// bits 0-5, hour 6-10, weekday 11-13 (Sunday 0), day-1 14-19, month-1 20-23,
+/// years since 2000 from 24.
+constexpr uint32_t kOct9At0853 = 0x19922235u;
+constexpr uint32_t kOct9At2000 = 0x19922500u;
 
-WowDate date(int year, int month, int day, int hour, int minute) {
-    WowDate d;
-    d.yearSince2000 = year - 2000;
-    d.month = month;
-    d.day = day;
-    d.hour = hour;
-    d.minute = minute;
-    return d;
+/// SMSG_LOGIN_SETTIMESPEED: a packed date and the speed, 1/60 being real time.
+std::vector<uint8_t> loginSetTimeSpeed(uint32_t packedDate) {
+    return Body().u32(packedDate).f32(1.0f / 60.0f);
 }
 
 /// What the realm clock reads now.
@@ -87,7 +81,7 @@ TEST_CASE("The login packet's date sets the realm clock to the minute until the 
     h.enterWorld();
 
     // 2025-10-09 08:53, realm-local - read as though it were UTC.
-    h.receive(Opcode::SMSG_LOGIN_SETTIMESPEED, loginSetTimeSpeed(date(2025, 10, 9, 8, 53)));
+    h.receive(Opcode::SMSG_LOGIN_SETTIMESPEED, loginSetTimeSpeed(kOct9At0853));
     h.pump();
     CHECK(realmSeconds(h) == Approx(1759999980.0).margin(0.05));
     CHECK(h.game().realmTime().realmClockSource() == RealmClock::Source::PackedDate);
@@ -106,7 +100,7 @@ TEST_CASE("The login packet's date sets the realm clock to the minute until the 
     // And a packed date after that says nothing the clock does not know
     // better: the game-time packets move the hour and leave the clock alone.
     h.receive(Opcode::SMSG_GAMETIME_SET,
-              Body().u32(wowee::core::packWowPackedTime(date(2025, 10, 9, 20, 0))));
+              Body().u32(kOct9At2000));
     h.pump();
     CHECK(realmSeconds(h) == Approx(kUnixTime + 7200.0).margin(0.05));
     CHECK(h.game().realmTime().gameHours() == Approx(20.0f).margin(0.01f));
