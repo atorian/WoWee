@@ -261,6 +261,21 @@ void Logger::log(LogLevel level, const std::string& message) {
 
     std::lock_guard<std::mutex> lock(mutex);
     ensureFile();
+    logLocked(level, message, nowSteady);
+}
+
+void Logger::logLines(LogLevel level, const std::vector<std::string>& lines) {
+    if (!shouldLog(level) || lines.empty()) {
+        return;
+    }
+    const auto nowSteady = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(mutex);
+    ensureFile();
+    for (const std::string& line : lines) logLocked(level, line, nowSteady);
+}
+
+void Logger::logLocked(LogLevel level, const std::string& message,
+                       std::chrono::steady_clock::time_point nowSteady) {
     if (dedupeEnabled_ && !lastMessage_.empty() &&
         level == lastLevel_ && message == lastMessage_) {
         auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(nowSteady - lastMessageTime_).count();

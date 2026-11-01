@@ -319,6 +319,12 @@ wowee_add_test(test_data_paths
 wowee_add_test(test_log_privacy
     SOURCES test_log_privacy.cpp)
 
+# ── test_logger_lines ───────────────────────────────────────
+# A block of lines written by one thread (the frame profile's report, written
+# off the game thread) is not broken up by another thread's lines.
+wowee_add_test(test_logger_lines
+    SOURCES test_logger_lines.cpp ${TEST_COMMON_SOURCES})
+
 # ── test_asset_profiles ─────────────────────────────────────
 # The asset sets on offer. Pinned because the upgrades used to be written per
 # base and so were only ever offered on Wrath, and because the plan's ordering

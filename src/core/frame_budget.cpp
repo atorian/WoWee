@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <sstream>
+#include <utility>
 
 namespace wowee::core {
 
@@ -160,6 +161,12 @@ void FrameBudget::reset() {
     gpuPasses_.clear();
     gpuFrameMs_.clear();
     gpuFrames_ = 0;
+}
+
+FrameBudget FrameBudget::takeWindow() {
+    FrameBudget taken;
+    std::swap(*this, taken);
+    return taken;
 }
 
 } // namespace wowee::core

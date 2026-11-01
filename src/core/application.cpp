@@ -319,6 +319,56 @@ std::optional<float> movingEntityFloor(rendering::Renderer* renderer, const coll
     return best;
 }
 
+/// One window of the frame profile, as the frame that ended it hands it over:
+/// the samples themselves, moved and not yet looked at, and the few numbers
+/// the report prints beside them, read while they were true. Everything the
+/// report says is worked out from this alone, on ThreadPool::background(),
+/// so it touches nothing the game thread goes on changing.
+struct StageReport {
+    FrameBudget window;
+    double windowMs = 0.0;
+    LogLevel level = LogLevel::INFO;
+    /// VkContext::gpuTimingCaveat(), a string with static storage, or null
+    /// when there is nothing to say about the GPU's timings.
+    const char* gpuCaveat = nullptr;
+    struct Scene {
+        std::optional<std::pair<uint32_t, uint32_t>> m2;  // instances, models
+        std::optional<std::pair<uint32_t, uint32_t>> wmo; // instances, models
+        std::optional<size_t> characters;
+        std::optional<int> terrainTiles;
+    };
+    /// In the world only.
+    std::optional<Scene> scene;
+
+    [[nodiscard]] std::vector<std::string> lines() const {
+        // The frame time's spread and the frames that missed 120, 60 and 30
+        // fps; each stage, costliest first, with its parts under it; and the
+        // GPU's passes averaged over every frame read back in the window. The
+        // CPU stages say where the frame waits, the GPU's where the GPU spent it.
+        std::vector<std::string> out = window.report(
+            "frame budget over " + std::to_string(static_cast<int>(windowMs / 1000.0)) + "s",
+            windowMs);
+        // ...and whether the GPU's part of that is worth believing.
+        if (gpuCaveat != nullptr && *gpuCaveat != '\0' && window.gpuFrames() > 0) {
+            out.push_back(std::string("    ") + gpuCaveat);
+        }
+        // How much world there is to draw. The same city cost twice as much on
+        // one visit as another, and without these the report could not say
+        // whether the scene was larger or the work per object had grown.
+        if (scene) {
+            std::ostringstream line;
+            line << "  scene:";
+            if (scene->m2)
+                line << " M2 " << scene->m2->first << " instances / " << scene->m2->second << " models,";
+            if (scene->wmo) line << " WMO " << scene->wmo->first << " / " << scene->wmo->second << ",";
+            if (scene->characters) line << " characters " << *scene->characters << ",";
+            if (scene->terrainTiles) line << " terrain tiles " << *scene->terrainTiles;
+            out.push_back(line.str());
+        }
+        return out;
+    }
+};
+
 } // namespace
 
 Application* Application::instance = nullptr;
@@ -1986,9 +2036,11 @@ void Application::frameFinished() {
     }
     noteWorkerTimes();
     {
-        // The report is a hundred and more lines once every ten seconds, and
-        // it lands in some frame's time. Said when it is long enough to be
-        // mistaken for a stall of the game's own.
+        // What the report costs the game thread: handing the window over.
+        // The hundred and more lines are worked out and written on the
+        // background thread (reportStageTimes), so this is about nothing;
+        // said when it is long enough to be mistaken for a stall of the
+        // game's own.
         const auto reportStart = std::chrono::steady_clock::now();
         reportStageTimes();
         const float reportMs = std::chrono::duration<float, std::milli>(
@@ -2598,6 +2650,10 @@ void Application::shutdown() {
     sceneReplay_.reset();
     // Close visibly before saved variables or worker lifetime fences can delay cleanup.
     if (window && window->getSDLWindow()) SDL_HideWindow(window->getSDLWindow());
+    // The last window's frame profile, if it is still being written: it owns
+    // everything it reads, so this is only for the log's order - the report
+    // lands before what the shutdown says, not after the client has closed.
+    if (stageReport_.valid()) stageReport_.wait();
     widgetRenderer_.resetResources();
     // What watched the frames goes first, then the interface hears the
     // character leave while the world still stands; the session itself ends
@@ -5864,36 +5920,46 @@ void Application::reportStageTimes() {
     // each stage, costliest first, with its parts under it; and the GPU's
     // passes averaged over every frame read back in the window. The CPU
     // stages say where the frame waits, the GPU's where the GPU spent it.
-    const auto lines = frameBudget_.report(
-        "frame budget over " + std::to_string(static_cast<int>(windowMs / 1000.0)) + "s", windowMs);
-    for (const auto& line : lines) {
-        if (frameProfileEnabled_) LOG_WARNING(line); else LOG_INFO(line);
+    // A hundred lines and more, sorted, ranked and formatted: on the game
+    // thread that was 25-50 ms of the frame that ended the window in steady
+    // play and up to a second under load. The frame hands the window over
+    // whole and goes on collecting into a new one; the report is worked out
+    // and written on the background thread (StageReport).
+    StageReport report;
+    report.window = frameBudget_.takeWindow();
+    report.windowMs = windowMs;
+    report.level = frameProfileEnabled_ ? LogLevel::WARNING : LogLevel::INFO;
+    if (const auto* vk = renderer ? renderer->getVkContext() : nullptr) {
+        report.gpuCaveat = vk->gpuTimingCaveat();
     }
-    // ...and whether the GPU's part of that is worth believing.
-    if (const auto* vk = renderer ? renderer->getVkContext() : nullptr;
-        vk && frameBudget_.gpuFrames() > 0 && *vk->gpuTimingCaveat() != '\0') {
-        if (frameProfileEnabled_) LOG_WARNING("    ", vk->gpuTimingCaveat());
-        else LOG_INFO("    ", vk->gpuTimingCaveat());
-    }
-
-    // How much world there is to draw. The same city cost twice as much on
-    // one visit as another, and without these the report could not say
-    // whether the scene was larger or the work per object had grown.
     if (renderer && getState() == AppState::IN_GAME) {
-        std::ostringstream scene;
-        scene << "  scene:";
+        StageReport::Scene& scene = report.scene.emplace();
         if (auto* m2 = renderer->getM2Renderer())
-            scene << " M2 " << m2->getInstanceCount() << " instances / " << m2->getModelCount() << " models,";
+            scene.m2.emplace(m2->getInstanceCount(), m2->getModelCount());
         if (auto* wmo = renderer->getWMORenderer())
-            scene << " WMO " << wmo->getInstanceCount() << " / " << wmo->getModelCount() << ",";
-        if (auto* chars = renderer->getCharacterRenderer())
-            scene << " characters " << chars->getInstanceCount() << ",";
-        if (auto* terrain = renderer->getTerrainManager())
-            scene << " terrain tiles " << terrain->getLoadedTileCount();
-        if (frameProfileEnabled_) LOG_WARNING(scene.str()); else LOG_INFO(scene.str());
+            scene.wmo.emplace(wmo->getInstanceCount(), wmo->getModelCount());
+        if (auto* chars = renderer->getCharacterRenderer()) scene.characters = chars->getInstanceCount();
+        if (auto* terrain = renderer->getTerrainManager()) scene.terrainTiles = terrain->getLoadedTileCount();
     }
 
-    frameBudget_.reset();
+    // The background thread runs one task at a time, in order, so a report
+    // still being written when the next window ends is followed by it, never
+    // interleaved with it. Said, because the next one is late by as much.
+    if (stageReport_.valid() &&
+        stageReport_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+        LOG_WARNING("Frame profile: the report of the window before is still being written; "
+                    "this window's report is queued behind it");
+    }
+    stageReport_ = ThreadPool::background().submit(
+        "frame profile report", [report = std::move(report)]() {
+            // Nothing escapes the task: no one reads its future for a result.
+            try {
+                Logger::getInstance().logLines(report.level, report.lines());
+            } catch (const std::exception& e) {
+                LOG_ERROR("Frame profile: the report of a ", report.windowMs,
+                          " ms window could not be written: ", e.what());
+            }
+        });
     stageStatsSince_ = now;
 }
 

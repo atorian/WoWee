@@ -64,6 +64,11 @@ public:
 
     /// Start a new stretch.
     void reset();
+    /// The stretch so far, handed over whole, and a new one started here,
+    /// empty. What was collected is moved, not copied, sorted or summed: the
+    /// frame that ends a window pays nothing for its report, which is built
+    /// from what this returns by whichever thread now owns it.
+    [[nodiscard]] FrameBudget takeWindow();
 
 private:
     struct Series {

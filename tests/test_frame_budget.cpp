@@ -134,3 +134,35 @@ TEST_CASE("a new stretch starts from nothing", "[frame budget]") {
     REQUIRE(lines.size() == 1);
     CHECK(contains(lines.front(), "over 33.3ms: 0"));
 }
+
+TEST_CASE("a window handed over reports what it held, and collection goes on in a new one",
+          "[frame budget]") {
+    // The periodic report is built off the game thread: the frame that ends a
+    // window takes it whole and keeps collecting while another thread sorts
+    // and formats what it took.
+    FrameBudget budget;
+    for (int i = 0; i < 30; ++i) {
+        budget.noteStage("beginFrame", 2.0f + static_cast<float>(i % 7));
+        budget.noteStage("beginFrame/acquire", 0.5f);
+        budget.noteGpuFrame({{"shadows", 1.0 + (i % 3)}, {"world total", 5.0}});
+        budget.frameFinished(10.0f + static_cast<float>(i % 11));
+    }
+    const auto expected = budget.report("frame budget over 10s", 10000.0);
+    REQUIRE_FALSE(expected.empty());
+
+    FrameBudget window = budget.takeWindow();
+
+    // The budget starts a new window with nothing in it...
+    CHECK(budget.frames() == 0);
+    CHECK(budget.report("frame budget over 10s", 10000.0).empty());
+    // ...and what it collects next is the new window's, not the one taken.
+    budget.noteStage("beginFrame", 99.0f);
+    budget.noteGpuFrame({{"shadows", 50.0}});
+    budget.frameFinished(99.0f);
+    const auto next = budget.report("window", 1000.0);
+    REQUIRE(next.size() > 1);
+    CHECK(contains(next.front(), "window: 1 frames"));
+
+    // The taken window says exactly what the budget would have said for it.
+    CHECK(window.report("frame budget over 10s", 10000.0) == expected);
+}

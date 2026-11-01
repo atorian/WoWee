@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 #include <iostream>
 #include <sstream>
 #include <mutex>
@@ -37,6 +38,10 @@ public:
     static Logger& getInstance();
 
     void log(LogLevel level, const std::string& message);
+    /// Several lines as one block: each is written as log() writes a line,
+    /// and no other thread's line lands between them. For a report written
+    /// off the thread whose lines would otherwise break it up.
+    void logLines(LogLevel level, const std::vector<std::string>& lines);
     void setLogLevel(LogLevel level);
     [[nodiscard]] bool shouldLog(LogLevel level) const;
 
@@ -114,6 +119,9 @@ private:
     std::chrono::steady_clock::time_point lastMessageTime_{};
     uint64_t suppressedCount_ = 0;
     void emitLineLocked(LogLevel level, const std::string& message);
+    /// log()'s work once the lock is held: the repeat check, then the line.
+    void logLocked(LogLevel level, const std::string& message,
+                   std::chrono::steady_clock::time_point nowSteady);
 public:
     /// Put whatever is buffered on disk if it has been there long enough.
     ///

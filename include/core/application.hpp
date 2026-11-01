@@ -342,6 +342,10 @@ private:
     /// The window the periodic report covers.
     FrameBudget frameBudget_;
     std::chrono::steady_clock::time_point stageStatsSince_{};
+    /// The report of the last window to end, worked out and written on
+    /// ThreadPool::background() from a window of its own. Waited for at
+    /// shutdown, so it is in the log before the client says it has closed.
+    std::future<void> stageReport_;
     /// The end of the last frame: the frame time is measured end to end.
     std::optional<std::chrono::steady_clock::time_point> lastFrameEnd_;
     /// The GPU timings read so far, so each frame's are taken once.
