@@ -120,6 +120,43 @@ replacement in ordinary gameplay or silently mix the two movement models.
 Deliverable: production path uses the verified behaviour; reference regressions
 remain runnable; unsupported cases remain visible in the completion report.
 
+State (2026-11-01): the original mover runs in the client behind the
+`originalMovement` setting (CVar, off by default; `/run SetCVar("originalMovement", 1)`
+switches it while playing). Both movement models stay: the camera's physics
+move the player whenever the setting is off or the original mover cannot take
+the player, and every change of hands is logged with its reason.
+
+- `collision::MovementWorld` collects from the map data as CMap::GetFacets
+  does - tiles with their MCRF lists, MDDF/MODF placements shared by uniqueId,
+  each building's MOGI groups and their MODR doodads of the placement's set -
+  fed by TerrainManager and the M2/WMO renderers. A model that cannot load
+  fails its areas; a doodad model not yet loaded keeps its area NotReady.
+- `core::OriginalPlayerMover` queues the controls, runs
+  `executeUninterpolatedMovement`, reports through the ported reporting
+  (`processLocalMovementEvent12340`, heartbeats from the scheduler), and takes
+  forced movement into the queue, acknowledging it when applied
+  (`game::ClientMover`).
+- The camera only follows the player it moves (`rendering::CharacterMover`).
+
+Not verified against the original, each named where it is made:
+- SetCollisionBox's arguments: CreatureModelData's box of the player's
+  display, scale = object scale x display scale, reference = display scale.
+  The mount's box is not used.
+- Steering by the view: facing and pitch set and re-anchored at the player,
+  then MSG_MOVE_SET_FACING / SET_PITCH through ProcessLocalMoveEvent.
+- Walk mode: WALKING toggled and MSG_MOVE_SET_WALK_MODE / SET_RUN_MODE sent.
+- Collision state messages: FALL_LAND, START_SWIM and STOP_SWIM sent for the
+  state changes the request reports, in place of the unported handler.
+- MovementWorld: the order buildings are listed in, the flight-bounds corner,
+  every MOGI group as a linked group, and placement matrices composed as the
+  renderer composes them (solved against MODF's own boxes).
+- Game objects and other dynamic entities are not in the collected world.
+
+Not supported, so the camera keeps the player: transports, taxis, splines,
+vehicles; expansions other than WotLK. Server teleports restart the mover at
+the new position. The removal of the camera's competing heuristics waits for
+the verification above.
+
 ## 7. Validate against the optimization branch
 
 User requirement (2026-10-23): after collision compatibility and production
@@ -168,6 +205,7 @@ checks and explicitly contain no FPS measurement.
 - [ ] Equivalent full movement trajectories and state transitions.
 - [ ] Equivalent server-visible movement.
 - [ ] Verified production integration and removal of competing heuristics.
+  Unverified integration behind `originalMovement` is in place; see step 6.
 - [ ] Combined optimization-branch validation with no reproducible performance regression.
 
 Geometry progress: WMO MOBN/MOBR are now retained through loading and model
