@@ -151,7 +151,7 @@ GameHandler::GameHandler(GameServices& services)
     weatherHandler_ = std::make_unique<WeatherHandler>(
         *services_.events, *this, *chatHandler_,
         [] { return isClassicLikeExpansion() ? WeatherNumbering::Classic : WeatherNumbering::WeatherState; });
-    playerHandler_ = std::make_unique<PlayerHandler>(*this, *this, *services_.events, *this,
+    playerHandler_ = std::make_unique<PlayerHandler>(*this, *this, *services_.events, *chatHandler_, *this,
                                                     *services_.statTables);
 
     // The character's own settings, read once its spells have arrived - the
@@ -384,8 +384,7 @@ uint32_t GameHandler::itemEntryByGuid(uint64_t itemGuid) const {
 }
 
 std::optional<HomeBind> GameHandler::homeBind() const {
-    if (!hasHomeBind_) return std::nullopt;
-    return HomeBind{homeBindMapId_, homeBindPos_};
+    return playerHandler_->homeBind();
 }
 
 void GameHandler::noteItemCastSpell(uint32_t spellId) {
@@ -938,7 +937,7 @@ void GameHandler::updateGame(float deltaTime) {
         // Update combat text (Phase 2)
         combatHandler_->updateCombatText(deltaTime);
         socialHandler_->ageMinimapPings(deltaTime);
-        tickMirrorTimers(deltaTime);
+        playerHandler_->tickMirrorTimers(deltaTime);
 
         // Tick logout countdown
         socialHandler_->updateLogoutCountdown(deltaTime);

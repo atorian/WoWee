@@ -377,6 +377,7 @@ public:
     void bankBagSlotsArrived(uint8_t slots) override;
     void chosenTitleArrived(int32_t title) override;
     void playerFlagsArrived(uint32_t flags, FrameXmlEvents& packetEvents) override;
+    std::string unitName(uint64_t guid) const override { return queryCacheHandler_->lookupName(guid); }
 
     // QueryCacheQueries (packetParsers and entities are above)
     void playerNameArrived(uint64_t guid, const std::string& name) override;
@@ -544,12 +545,13 @@ public:
     const MovementInfo& getMovementInfo() const { return movementInfo; }
     uint32_t getCurrentMapId() const { return currentMapId_; }
     bool getHomeBind(uint32_t& mapId, glm::vec3& pos) const {
-        if (!hasHomeBind_) return false;
-        mapId = homeBindMapId_;
-        pos = homeBindPos_;
+        const auto home = playerHandler_->homeBind();
+        if (!home) return false;
+        mapId = home->mapId;
+        pos = home->position;
         return true;
     }
-    uint32_t getHomeBindZoneId() const { return homeBindZoneId_; }
+    uint32_t getHomeBindZoneId() const { return playerHandler_->homeBindZoneId(); }
 
     /**
      * Send a movement packet
@@ -586,7 +588,7 @@ public:
     /// The innkeeper whose bind confirmation is open, and the trainer whose
     /// talent-wipe confirmation is. Both dialogs close themselves when the
     /// player walks out of range, which is the only thing these answer.
-    uint64_t getBinderGuid() const { return binderGuid_; }
+    uint64_t getBinderGuid() const { return playerHandler_->binderGuid(); }
 
     EntityManager& getEntityManager() { return worldHandler_->getEntityManager(); }
     const EntityManager& getEntityManager() const { return worldHandler_->getEntityManager(); }
@@ -599,8 +601,6 @@ public:
      */
     /// Tell the server whether to pass on every loot roll for us.
     void sendOptOutOfLoot(bool optOut);
-    /// Announce a rune's type and readiness to the interface.
-    void fireRuneUpdate(uint32_t index);
     /// The members of a chat channel, as of the last list requested for it.
     const std::vector<ChannelMember>& getChannelRoster(const std::string& channel) const;
 
@@ -774,10 +774,10 @@ public:
     // Player proficiency bitmasks (from SMSG_SET_PROFICIENCY)
     // itemClass 2 = Weapon (subClassMask bits: 0=Axe1H,1=Axe2H,2=Bow,3=Gun,4=Mace1H,5=Mace2H,6=Polearm,7=Sword1H,8=Sword2H,10=Staff,13=Fist,14=Misc,15=Dagger,16=Thrown,17=Crossbow,18=Wand,19=Fishing)
     // itemClass 4 = Armor (subClassMask bits: 1=Cloth,2=Leather,3=Mail,4=Plate,6=Shield)
-    uint32_t getWeaponProficiency() const { return weaponProficiency_; }
-    uint32_t getArmorProficiency()  const { return armorProficiency_; }
-    bool canUseWeaponSubclass(uint32_t subClass) const { return (weaponProficiency_ >> subClass) & 1u; }
-    bool canUseArmorSubclass(uint32_t subClass)  const { return (armorProficiency_  >> subClass) & 1u; }
+    uint32_t getWeaponProficiency() const { return playerHandler_->weaponProficiency(); }
+    uint32_t getArmorProficiency()  const { return playerHandler_->armorProficiency(); }
+    bool canUseWeaponSubclass(uint32_t subClass) const { return (getWeaponProficiency() >> subClass) & 1u; }
+    bool canUseArmorSubclass(uint32_t subClass)  const { return (getArmorProficiency() >> subClass) & 1u; }
 
     // Minimap pings from party members
     using MinimapPing = game::MinimapPing;
@@ -892,8 +892,8 @@ public:
     void setPlayerGuid(uint64_t guid) { playerGuid = guid; }
 
     // Barber shop
-    bool isBarberShopOpen() const { return barberShopOpen_; }
-    void closeBarberShop() { barberShopOpen_ = false; fireAddonEvent("BARBER_SHOP_CLOSE", {}); }
+    bool isBarberShopOpen() const { return playerHandler_->barberShopOpen(); }
+    void closeBarberShop() { playerHandler_->closeBarberShop(); }
 
     /// The bind-or-leave prompt raised on entering an instance in progress.
     /// False when nothing is pending, in which case the out-params are
@@ -985,70 +985,10 @@ public:
     // have to agree - they are one table here for that reason. Four copies of
     // this list had accumulated across three files and the fourth said
     // "FATIGUE", which is not one of the four keys mirrortimer.lua defines.
-    static constexpr const char* kMirrorTimerNames[3] =
-        {"EXHAUSTION", "BREATH", "FEIGNDEATH"};
-    static constexpr const char* kMirrorTimerLabels[3] =
-        {"Exhaustion", "Breath", "Feign Death"};
-
-    struct MirrorTimer {
-        int32_t value    = 0;
-        int32_t maxValue = 0;
-        int32_t scale    = 0;     // +1 = counting up, -1 = counting down
-        bool    paused   = false;
-        bool    active   = false;
-        float   pendingMs = 0.0f; // sub-millisecond carry for the local countdown
-    };
-    const MirrorTimer& getMirrorTimer(int type) const {
-        static MirrorTimer empty;
-        return (type >= 0 && type < 3) ? mirrorTimers_[type] : empty;
-    }
-    /**
-     * Count the mirror timers (breath, fatigue, feign death) down locally.
-     *
-     * The server sends SMSG_START_MIRROR_TIMER once with the remaining time and a
-     * scale, then only speaks again when something changes - so without this the
-     * breath bar just sits at whatever value it was handed and never moves.
-     * scale is ms of timer per ms of real time: -1 while drowning, +1 while the
-     * bar refills at the surface.
-     */
-    void tickMirrorTimers(float dt) {
-        if (dt <= 0.0f) return;
-        const float elapsedMs = dt * 1000.0f;
-        for (size_t ti = 0; ti < 3; ++ti) {
-            auto& t = mirrorTimers_[ti];
-            if (!t.active || t.paused || t.scale == 0 || t.maxValue <= 0) continue;
-            // Carry the sub-millisecond remainder: truncating each frame would lose
-            // most of a 144fps frame's 6.94ms and run the timer visibly slow.
-            t.pendingMs += elapsedMs;
-            const int32_t wholeMs = static_cast<int32_t>(t.pendingMs);
-            if (wholeMs == 0) continue;
-            t.pendingMs -= static_cast<float>(wholeMs);
-            t.value = std::clamp(t.value + t.scale * wholeMs, 0, t.maxValue);
-            // Refilled, so it is over. The server does not say so at this
-            // point: on surfacing it sends one update with a positive scale
-            // and then nothing until its own counter reaches full, which is
-            // several seconds later. Without this the bar climbs to full and
-            // sits there at a hundred percent in the meantime, which is what
-            // "the breath meter will not go away" looks like.
-            //
-            // Only when refilling. A drowning bar reaching zero is not over -
-            // that is when the damage starts, and the server keeps it up.
-            if (t.scale > 0 && t.value >= t.maxValue) {
-                t.active = false;
-                t.pendingMs = 0.0f;
-                // And say so. Clearing the flag only put away the bar this
-                // client draws, and the player frame is handed over - which
-                // means MirrorTimer1..3 are not suppressed and the bar actually
-                // on screen is FrameXML's. It hides on MIRROR_TIMER_STOP and
-                // nothing else, so without this it sat there full for good.
-                //
-                // Named rather than numbered, as the packet handler does:
-                // MirrorTimer_Hide matches on the timer's name.
-                fireAddonEvent("MIRROR_TIMER_STOP",
-                               {ti < 3 ? kMirrorTimerNames[ti] : "BREATH"});
-            }
-        }
-    }
+    static constexpr const auto& kMirrorTimerNames = game::kMirrorTimerNames;
+    static constexpr const auto& kMirrorTimerLabels = game::kMirrorTimerLabels;
+    using MirrorTimer = game::MirrorTimer;
+    const MirrorTimer& getMirrorTimer(int type) const { return playerHandler_->mirrorTimer(type); }
 
     /// Which extra action bar the current form or stance uses, or 0 for none.
     ///
@@ -1059,13 +999,9 @@ public:
     uint32_t getBonusActionBarOffset() const;
 
     // Death Knight rune state (6 runes: 0-1=Blood, 2-3=Unholy, 4-5=Frost; may become Death=3)
-    enum class RuneType : uint8_t { Blood = 0, Unholy = 1, Frost = 2, Death = 3 };
-    struct RuneSlot {
-        RuneType type = RuneType::Blood;
-        bool     ready = true;          // Server-confirmed ready state
-        float    readyFraction = 1.0f;  // 0.0=depleted → 1.0=full (from server sync)
-    };
-    const std::array<RuneSlot, 6>& getPlayerRunes() const { return playerRunes_; }
+    using RuneType = game::RuneType;
+    using RuneSlot = game::RuneSlot;
+    const std::array<RuneSlot, 6>& getPlayerRunes() const { return playerHandler_->runes(); }
 
     // Talent-driven spell modifiers (SMSG_SET_FLAT_SPELL_MODIFIER /
     // SMSG_SET_PCT_SPELL_MODIFIER), kept by the spell book.
@@ -1740,10 +1676,6 @@ private:
     // Player GUID and map
     uint64_t playerGuid = 0;
     uint32_t currentMapId_ = 0;
-    bool hasHomeBind_ = false;
-    uint32_t homeBindMapId_ = 0;
-    uint32_t homeBindZoneId_ = 0;
-    glm::vec3 homeBindPos_{0.0f};
 
     // ---- World state and faction initialization snapshots ----
     uint32_t worldStateMapId_ = 0;
@@ -1758,14 +1690,9 @@ private:
 
     // Items, coin, books and the equipment of players in view are the
     // inventory's (InventoryHandler); none of it is kept here.
-    /// The innkeeper that asked "make this your home?". SMSG_BINDER_CONFIRM
-    /// names it and the answer has to go back to the same one.
-    uint64_t binderGuid_ = 0;
 
     // Transport tracking
     std::unique_ptr<TransportManager> transportManager_;  // Transport movement manager
-    uint32_t weaponProficiency_ = 0;  // bitmask from SMSG_SET_PROFICIENCY itemClass=2
-    uint32_t armorProficiency_  = 0;  // bitmask from SMSG_SET_PROFICIENCY itemClass=4
     uint64_t pendingGameObjectInteractGuid_ = 0;
     // Owned fishing bobber whose bite animation has fired. Keeping this explicit
     // lets the UI target/reel it even while GAMEOBJECT_QUERY metadata is pending.
@@ -1776,18 +1703,8 @@ private:
     // (which re-casts the next queued item) before giving up
     float craftCastGoGraceSec_ = 0.0f;
 
-    // Mirror timers (0=fatigue, 1=breath, 2=feigndeath)
-    MirrorTimer mirrorTimers_[3];
-
-
-
-
-
     uint64_t activeCharacterGuid_ = 0;
     Race playerRace_ = Race::HUMAN;
-
-    // Barber shop
-    bool barberShopOpen_ = false;
 
     // ---- Loot ----
     bool autoFaceTarget_ = false;
@@ -1908,14 +1825,6 @@ private:
     /// Languages.dbc, read once on the first ask like the caches beside it.
     mutable std::unordered_map<uint32_t, std::string> languageNames_;
     mutable bool languageNamesLoaded_ = false;
-    // Death Knight runes (class 6): slots 0-1=Blood, 2-3=Unholy, 4-5=Frost initially
-    std::array<RuneSlot, 6> playerRunes_ = [] {
-        std::array<RuneSlot, 6> r{};
-        r[0].type = r[1].type = RuneType::Blood;
-        r[2].type = r[3].type = RuneType::Unholy;
-        r[4].type = r[5].type = RuneType::Frost;
-        return r;
-    }();
     // ---- Talent wipe confirm dialog ----
     // (talent wipe confirm state lives in SpellHandler)
     // ---- Pet talent respec confirm dialog ----

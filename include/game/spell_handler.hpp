@@ -5,6 +5,7 @@
 #include "game/opcode_table.hpp"
 #include "game/spell_defines.hpp"
 #include "game/handler_types.hpp"
+#include "game/home_bind.hpp"
 #include "network/packet.hpp"
 #include <glm/glm.hpp>
 #include <array>
@@ -179,12 +180,6 @@ inline constexpr int kTotemSlots = 4;
 
 /// PLAYER_EXPLORED_ZONES_1 and the words after it: one bit per explored area.
 inline constexpr size_t kExploredZoneMaskCount = 128;
-
-/// Where the hearthstone goes.
-struct HomeBind {
-    uint32_t mapId = 0;
-    glm::vec3 position{0.0f};  ///< canonical
-};
 
 /// What the spell book asks of the rest of the game, and the few things a
 /// cast has the rest of the game do.

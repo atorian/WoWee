@@ -1269,11 +1269,7 @@ const std::vector<GameHandler::ThreatEntry>* GameHandler::getTargetThreatList() 
 }
 
 void GameHandler::confirmBinder() {
-    if (!isInWorld() || !socket || binderGuid_ == 0) return;
-    auto pkt = BinderActivatePacket::build(binderGuid_);
-    socket->send(pkt);
-    LOG_INFO("Sent CMSG_BINDER_ACTIVATE (confirmed) for npc=0x",
-             std::hex, binderGuid_, std::dec);
+    playerHandler_->confirmBinder();
 }
 
 void GameHandler::dismount() {
