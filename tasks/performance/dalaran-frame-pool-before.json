@@ -1,6 +1,6 @@
 {
   "trace": "D:\\games\\WoWee\\build-dev\\scratch\\scene-replay\\run-20261021-202417-037\\thread-1.perf.json",
-  "scene": "D:\\games\\WoWee\\.claude\\worktrees\\hungry-wilson-e5280c\\build-dev\\scratch\\scene-replay\\dalaran-live-20261021-082422.json",
+  "scene": "D:\\games\\WoWee\\build-dev\\scratch\\gpu-scene-pipeline\\dalaran-live-current-data-20261022.json",
   "renderThread": "1",
   "frames": 760,
   "countersMatchCapture": false,

@@ -2,7 +2,7 @@
 
 Последний завершённый офлайн-прогон живой записи: 760 кадров, 30,013 с игрового времени, 279 событий. Dev, render thread=1, Vulkan validation выключена, прогрев 8 с. Все распределения и счётчики сохранены в `dalaran-baseline.json`.
 
-Запись: `D:\games\WoWee\.claude\worktrees\hungry-wilson-e5280c\build-dev\scratch\scene-replay\dalaran-live-20261021-082422.json`.
+Запись: `D:\games\WoWee\build-dev\scratch\gpu-scene-pipeline\dalaran-live-current-data-20261022.json`. Замер снят с исходной записи `dalaran-live-20261021-082422.json` (worktree `hungry-wilson-e5280c`, удалена вместе с ним 2026-11-01). Копия содержит те же события, кадры и настройки; в ней обновлена только подпись манифеста под текущие данные (`gpu-scene-pipeline\dalaran-current-data-provenance.json`), поэтому новые прогоны идут на других данных, чем этот замер.
 Исходный отчёт: `D:\games\WoWee\.claude\worktrees\hungry-wilson-e5280c\build-dev\scratch\scene-replay\run-20261021-082718-620\thread-1.perf.json`.
 
 | Метрика, мс | Среднее | p95 | p99 |
