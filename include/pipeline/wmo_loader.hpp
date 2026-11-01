@@ -7,6 +7,7 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include "pipeline/wmo_flags.hpp"
+#include "pipeline/wmo_bsp.hpp"
 
 namespace wowee {
 namespace pipeline {
@@ -147,6 +148,7 @@ struct WMOBatch {
 
 // WMO Group (individual room/section)
 struct WMOGroup {
+    WmoGroupLoadState loadState = WmoGroupLoadState::NotLoaded;
     uint32_t flags;
     glm::vec3 boundingBoxMin;
     glm::vec3 boundingBoxMax;
@@ -171,8 +173,8 @@ struct WMOGroup {
     std::vector<WMOPortal> portals;
     std::vector<glm::vec3> portalVertices;
 
-    // BSP tree (for collision - optional)
-    std::vector<uint8_t> bspNodes;
+    // Authored collision tree, shared with the collision world.
+    std::shared_ptr<const WmoBspData> collisionBsp;
 
     // MODR: the MODD entries standing in this group
     std::vector<uint16_t> doodadRefs;

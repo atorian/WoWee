@@ -39,6 +39,8 @@ struct Row {
     const char* name;
     uint32_t type;
     const char* texture;
+    uint32_t material = 1;
+    uint32_t flags = 0;
 };
 
 /// A LiquidType.dbc of these rows, in the WotLK columns the layout names.
@@ -55,8 +57,9 @@ std::vector<uint8_t> liquidTypeDbc(const std::vector<Row>& rows) {
         std::vector<uint32_t> rec(kFields, 0);
         rec[0] = r.id;
         rec[1] = intern(r.name);
+        rec[2] = r.flags;
         rec[3] = r.type;
-        rec[14] = 1;
+        rec[14] = r.material;
         rec[kTextureCol] = r.texture ? intern(r.texture) : 0;
         records.insert(records.end(), rec.begin(), rec.end());
     }
@@ -71,21 +74,44 @@ std::vector<uint8_t> liquidTypeDbc(const std::vector<Row>& rows) {
     return out;
 }
 
+/// A LiquidMaterial.dbc of (id, LVF) rows.
+std::vector<uint8_t> liquidMaterialDbc(const std::vector<std::pair<uint32_t, uint32_t>>& rows) {
+    std::vector<uint32_t> records;
+    for (const auto& [id, lvf] : rows) records.insert(records.end(), {id, lvf, 0u});
+    std::vector<uint8_t> out(20);
+    std::memcpy(out.data(), "WDBC", 4);
+    const uint32_t header[4] = {static_cast<uint32_t>(rows.size()), 3, 12, 1};
+    std::memcpy(out.data() + 4, header, sizeof(header));
+    const auto* bytes = reinterpret_cast<const uint8_t*>(records.data());
+    out.insert(out.end(), bytes, bytes + records.size() * 4);
+    out.push_back(0);
+    return out;
+}
+
 /// The WotLK columns, as Data/expansions/wotlk/dbc_layouts.json names them.
 constexpr const char* kWotlkLayout =
-    R"({"LiquidType": {"ID": 0, "MaterialID": 14, "Name": 1, "Texture": 15, "Type": 3}})";
+    R"({"LiquidType": {"Flags": 2, "ID": 0, "MaterialID": 14, "Name": 1, "Texture": 15, "Type": 3},)"
+    R"( "LiquidMaterial": {"Flags": 2, "ID": 0, "LVF": 1}})";
 
-/// LiquidType.dbc on the expansion's list, holding these rows.
-wowee::test::GivenTables liquidTables(const std::vector<Row>& rows) {
+const std::vector<std::pair<uint32_t, uint32_t>> kStockMaterials = {{1, 0}, {2, 1}, {3, 0}};
+
+/// LiquidType.dbc and LiquidMaterial.dbc on the expansion's list.
+wowee::test::GivenTables liquidTables(const std::vector<Row>& rows,
+                                      const std::vector<std::pair<uint32_t, uint32_t>>& materials = kStockMaterials) {
     wowee::test::GivenTables tables;
     tables.giveFile("LiquidType.dbc", liquidTypeDbc(rows));
+    tables.giveFile("LiquidMaterial.dbc", liquidMaterialDbc(materials));
     return tables;
+}
+
+LiquidTypeTable readTables(const wowee::test::GivenTables& tables) {
+    return LiquidTypeTable::fromDbc(wowee::pipeline::RequiredTable(tables, "LiquidType.dbc", "the test"),
+                                    wowee::pipeline::RequiredTable(tables, "LiquidMaterial.dbc", "the test"));
 }
 
 LiquidTypeTable tableOf(const std::vector<Row>& rows) {
     const wowee::test::GivenLayouts layouts(kWotlkLayout);
-    const auto tables = liquidTables(rows);
-    return LiquidTypeTable::fromDbc(wowee::pipeline::RequiredTable(tables, "LiquidType.dbc", "the test"));
+    return readTables(liquidTables(rows));
 }
 
 const std::vector<Row> kStockRows = {
@@ -160,8 +186,24 @@ TEST_CASE("a layout without the type column stops the game rather than guess the
     // liquid drew untextured and liquid 21 drew as water, with a warning.
     const wowee::test::GivenLayouts layouts(R"({"LiquidType": {"ID": 0, "Name": 1}})");
     const auto tables = liquidTables(kStockRows);
-    CHECK_THROWS_AS(LiquidTypeTable::fromDbc(wowee::pipeline::RequiredTable(tables, "LiquidType.dbc", "the test")),
-                    wowee::test::TablesStopped);
+    CHECK_THROWS_AS(readTables(tables), wowee::test::TablesStopped);
+}
+
+TEST_CASE("a liquid carries its flags and its material's vertex format", "[liquid]") {
+    // A legacy MCLQ layer has no vertex format of its own: collision lays its
+    // heights out by the material's, and fishing asks the flags.
+    const LiquidTypeTable table = tableOf({{1, "Water", 0, nullptr, 1, 15},
+                                           {3, "Magma", 2, nullptr, 2, 120},
+                                           {9, "Odd", 0, nullptr, 7, 0}});
+    REQUIRE(table.find(1));
+    CHECK(table.find(1)->flags == 15);
+    CHECK(table.find(1)->vertexFormat == 0);
+    REQUIRE(table.find(3));
+    CHECK(table.find(3)->flags == 120);
+    CHECK(table.find(3)->vertexFormat == 1);
+    REQUIRE(table.find(9));
+    CHECK_FALSE(table.find(9)->materialKnown);
+    CHECK(table.find(1)->materialKnown);
 }
 
 TEST_CASE("a building's liquid is what its group header says, by the client's rule", "[liquid]") {

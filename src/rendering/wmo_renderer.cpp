@@ -3,7 +3,8 @@
 #include "pipeline/heap_bytes.hpp"
 #include "rendering/face_culling.hpp"
 #include "rendering/pom_quality.hpp"
-#include "rendering/placement_transform.hpp"
+#include "pipeline/placement_transform.hpp"
+#include "collision/movement_world.hpp"
 #include "rendering/wmo_vertex.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/wmo_renderer.hpp"
@@ -688,9 +689,14 @@ WMORenderer::ModelLoadResult WMORenderer::loadPreparedIncremental(WmoModelPrep& 
         shape->boundingBoxMax = modelData.boundingBoxMax;
         shape->isLowPlatform = modelData.isLowPlatform;
         shape->ambientColor = modelData.wmoAmbientColor;
+        shape->originalGroups = prep.collisionGroups;
+        shape->path = prep.collisionDoodads.path;
+        shape->doodads = prep.collisionDoodads.doodads;
+        shape->doodadSets = prep.collisionDoodads.doodadSets;
         shape->groups.reserve(modelData.groups.size());
         for (const auto& group : modelData.groups) shape->groups.push_back(group.shape);
         modelData.shape = std::move(shape);
+        if (collision_) collision_->movement().addWmoModel(modelData.shape);
     }
     loadedModels[id] = std::move(modelData);
     scene_->loadingModels_.erase(id);
@@ -2188,7 +2194,7 @@ void WMORenderer::WMOInstance::updateModelMatrix() {
     // carries: composing it in both places is how they came to disagree, and
     // how a building on flat ground could look right while a bridge across a
     // ravine did not.
-    modelMatrix = placementModelMatrix(position, rotation, scale);
+    modelMatrix = pipeline::placementModelMatrix(position, rotation, scale);
 
     // Cache inverse for collision detection
     invModelMatrix = glm::inverse(modelMatrix);

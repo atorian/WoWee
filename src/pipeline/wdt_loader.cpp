@@ -1,4 +1,5 @@
 #include "pipeline/wdt_loader.hpp"
+#include <algorithm>
 #include "core/logger.hpp"
 #include <cstring>
 
@@ -30,6 +31,7 @@ constexpr uint32_t MVER = 0x4D564552; // "MVER"
 constexpr uint32_t MPHD = 0x4D504844; // "MPHD"
 constexpr uint32_t MWMO = 0x4D574D4F; // "MWMO"
 constexpr uint32_t MODF = 0x4D4F4446; // "MODF"
+constexpr uint32_t MAIN = 0x4D41494E; // "MAIN"
 
 } // anonymous namespace
 
@@ -63,6 +65,15 @@ WDTInfo parseWDT(const std::vector<uint8_t>& data) {
             if (chunkSize >= 4) {
                 info.mphdFlags = readU32(chunkData, 0);
                 LOG_DEBUG("WDT MPHD flags: 0x", std::hex, info.mphdFlags, std::dec);
+            }
+        } else if (magic == MAIN) {
+            // 64x64 entries of {flags, async id}, row by row.
+            const size_t entries = std::min<size_t>(chunkSize / 8, 64 * 64);
+            if (entries < 64 * 64) {
+                LOG_WARNING("WDT MAIN holds ", entries, " of 4096 tiles - the rest are taken to have no terrain");
+            }
+            for (size_t index = 0; index < entries; ++index) {
+                if (readU32(chunkData, index * 8) & 1u) info.tilesWithTerrain.set(index);
             }
         } else if (magic == MWMO) {
             // Null-terminated WMO path string(s)

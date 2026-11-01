@@ -44,7 +44,7 @@
 namespace wowee {
 namespace rendering { class VkContext; }
 namespace pipeline { class AssetManager; class GameTables; }
-namespace collision { class CollisionWorld; }
+namespace collision { class CollisionWorld; class MovementWorld; }
 
 namespace rendering {
 
@@ -227,6 +227,10 @@ public:
     /// slides along. The renderers place what they draw in it; everyone else
     /// asks it.
     [[nodiscard]] const collision::CollisionWorld& collision() const { return *collision_; }
+    /// The map as the original client's movement collects it: the map loader
+    /// begins and ends its maps, the original mover asks it for facets - which
+    /// marks what it visits, so it is not const. Fed by the renderers.
+    [[nodiscard]] collision::MovementWorld& movementWorld();
     /// Makes the changes asked of scene() now: at the start of the frame's
     /// Present, and first thing in update().
     void applySceneCommands();

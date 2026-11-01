@@ -93,9 +93,9 @@ uint32_t findKnownReturnAreaTrigger(uint32_t triggerId) {
 
 MovementHandler::MovementHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
                                  ChatLog& chat, const GameData& data, MovementQueries& queries,
-                                 MovementInfo& movementInfo)
+                                 MovementInfo& movementInfo, ClientMover* clientMover)
     : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat), data_(data),
-      queries_(queries), movementInfo(movementInfo) {}
+      queries_(queries), clientMover_(clientMover), movementInfo(movementInfo) {}
 
 void MovementHandler::applyServerMovementSpeeds(float walk, float run, float runBack,
                                                  float swim, float swimBack, float flight,
@@ -472,6 +472,13 @@ void MovementHandler::handleClientControlUpdate(network::Packet& packet) {
 // Movement Timestamp
 // ============================================================
 
+namespace {
+constexpr uint32_t kMoveMask = static_cast<uint32_t>(MovementFlags::FORWARD) |
+                               static_cast<uint32_t>(MovementFlags::BACKWARD) |
+                               static_cast<uint32_t>(MovementFlags::STRAFE_LEFT) |
+                               static_cast<uint32_t>(MovementFlags::STRAFE_RIGHT);
+}
+
 uint32_t MovementHandler::nextMovementTimestampMs() {
     auto now = std::chrono::steady_clock::now();
     uint64_t elapsed = static_cast<uint64_t>(
@@ -560,7 +567,7 @@ void MovementHandler::stopInputMovement() {
     for (const auto& axis : axes) if (movementInfo.flags & axis.flags) sendMovement(axis.stop);
 }
 
-void MovementHandler::sendMovement(Opcode opcode) {  // NOLINT(readability-function-size)
+bool MovementHandler::movementHeld(Opcode opcode) {
     if (queries_.worldState() != WorldState::IN_WORLD) {
         // Not in a world to send to - between connections while the client
         // reconnects, the character walking on here. Once per stretch, like
@@ -571,7 +578,7 @@ void MovementHandler::sendMovement(Opcode opcode) {  // NOLINT(readability-funct
             LOG_WARNING("Movement: not sent while ", kNoWorld, " (world state ",
                         static_cast<int>(queries_.worldState()), ")");
         }
-        return;
+        return true;
     }
 
     // Block manual movement while taxi is active/mounted, but always allow
@@ -601,7 +608,86 @@ void MovementHandler::sendMovement(Opcode opcode) {  // NOLINT(readability-funct
             LOG_WARNING("Movement: not sent while ", heldReason,
                         " - the server keeps the last position it was told");
         }
-        return;
+        return true;
+    }
+    return false;
+}
+
+void MovementHandler::cancelCastOnMove(Opcode opcode) {
+    // Cancel any timed non-channel cast, plus food/water restoration, the moment
+    // the player starts moving. Other channels retain their normal behavior.
+    if (queries_.casting() && (!queries_.channeling() || queries_.restoring())) {
+        const bool isPositionalMove =
+            opcode == Opcode::MSG_MOVE_START_FORWARD  ||
+            opcode == Opcode::MSG_MOVE_START_BACKWARD ||
+            opcode == Opcode::MSG_MOVE_START_STRAFE_LEFT  ||
+            opcode == Opcode::MSG_MOVE_START_STRAFE_RIGHT ||
+            opcode == Opcode::MSG_MOVE_JUMP;
+        if (isPositionalMove) {
+            queries_.cancelCast();
+        }
+    }
+}
+
+void MovementHandler::fireMovingEvents(bool wasMoving) {
+    // Fire PLAYER_STARTED/STOPPED_MOVING on movement state transitions
+    const bool isMoving = (movementInfo.flags & kMoveMask) != 0;
+    if (isMoving && !wasMoving && frameXml_.frameXmlListening())
+        frameXml_.fireFrameXmlEvent("PLAYER_STARTED_MOVING", {});
+    else if (!isMoving && wasMoving && frameXml_.frameXmlListening())
+        frameXml_.fireFrameXmlEvent("PLAYER_STOPPED_MOVING", {});
+}
+
+void MovementHandler::noteMovementSent(Opcode opcode) {
+    lastSentPos_ = glm::vec3(movementInfo.x, movementInfo.y, movementInfo.z);
+    hasSentMovement_ = true;
+    if (movementHeldReason_) {
+        LOG_WARNING("Movement: sending again (was held while ", movementHeldReason_, ")");
+        movementHeldReason_ = nullptr;
+    }
+
+    if (opcode == Opcode::MSG_MOVE_HEARTBEAT) {
+        lastHeartbeatSendTimeMs_ = movementInfo.time;
+        lastHeartbeatX_ = movementInfo.x;
+        lastHeartbeatY_ = movementInfo.y;
+        lastHeartbeatZ_ = movementInfo.z;
+        lastHeartbeatFlags_ = movementInfo.flags;
+        lastHeartbeatTransportGuid_ = movementInfo.transportGuid;
+    } else {
+        lastNonHeartbeatMoveSendTimeMs_ = movementInfo.time;
+    }
+}
+
+uint32_t MovementHandler::movementClockMs() const {
+    const auto elapsed = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - movementClockStart_).count()) + 1ULL;
+    return std::max(static_cast<uint32_t>(std::min<uint64_t>(elapsed, std::numeric_limits<uint32_t>::max())),
+                    lastMovementTimestampMs_);
+}
+
+void MovementHandler::sendReportedMovement(Opcode opcode, const MovementInfo& status, network::Packet packet) {
+    if (movementHeld(opcode)) return;
+    const bool wasMoving = (movementInfo.flags & kMoveMask) != 0;
+    cancelCastOnMove(opcode);
+    movementInfo = status;
+    const glm::vec3 canonical = core::coords::serverToCanonical(glm::vec3(status.x, status.y, status.z));
+    movementInfo.x = canonical.x;
+    movementInfo.y = canonical.y;
+    movementInfo.z = canonical.z;
+    movementInfo.orientation = core::coords::serverToCanonicalYaw(status.orientation);
+    lastMovementTimestampMs_ = std::max(lastMovementTimestampMs_, status.time);
+    isFalling_ = movementInfo.hasFlag(MovementFlags::FALLING);
+    fallStartMs_ = isFalling_ ? status.time - status.fallTime : 0;
+    fireMovingEvents(wasMoving);
+    sender_.send(packet);
+    noteMovementSent(opcode);
+}
+
+void MovementHandler::sendMovement(Opcode opcode) {
+    if (movementHeld(opcode)) return;
+    if (clientMoverReports() && mixedMovementSaid_.insert(opcode).second) {
+        LOG_WARNING("Movement: the game sent opcode 0x", std::hex, wireOpcode(opcode), std::dec,
+                    " itself while the client's mover moves the player - the server is told both");
     }
 
     // Always send a strictly increasing non-zero client movement clock value.
@@ -622,25 +708,8 @@ void MovementHandler::sendMovement(Opcode opcode) {  // NOLINT(readability-funct
     }
 
     // Track movement state transition for PLAYER_STARTED/STOPPED_MOVING events
-    const uint32_t kMoveMask = static_cast<uint32_t>(MovementFlags::FORWARD) |
-                               static_cast<uint32_t>(MovementFlags::BACKWARD) |
-                               static_cast<uint32_t>(MovementFlags::STRAFE_LEFT) |
-                               static_cast<uint32_t>(MovementFlags::STRAFE_RIGHT);
     const bool wasMoving = (movementInfo.flags & kMoveMask) != 0;
-
-    // Cancel any timed non-channel cast, plus food/water restoration, the moment
-    // the player starts moving. Other channels retain their normal behavior.
-    if (queries_.casting() && (!queries_.channeling() || queries_.restoring())) {
-        const bool isPositionalMove =
-            opcode == Opcode::MSG_MOVE_START_FORWARD  ||
-            opcode == Opcode::MSG_MOVE_START_BACKWARD ||
-            opcode == Opcode::MSG_MOVE_START_STRAFE_LEFT  ||
-            opcode == Opcode::MSG_MOVE_START_STRAFE_RIGHT ||
-            opcode == Opcode::MSG_MOVE_JUMP;
-        if (isPositionalMove) {
-            queries_.cancelCast();
-        }
-    }
+    cancelCastOnMove(opcode);
 
     // Update movement flags based on opcode
     switch (opcode) {
@@ -776,14 +845,7 @@ void MovementHandler::sendMovement(Opcode opcode) {  // NOLINT(readability-funct
             break;
     }
 
-    // Fire PLAYER_STARTED/STOPPED_MOVING on movement state transitions
-    {
-        const bool isMoving = (movementInfo.flags & kMoveMask) != 0;
-        if (isMoving && !wasMoving && frameXml_.frameXmlListening())
-            frameXml_.fireFrameXmlEvent("PLAYER_STARTED_MOVING", {});
-        else if (!isMoving && wasMoving && frameXml_.frameXmlListening())
-            frameXml_.fireFrameXmlEvent("PLAYER_STOPPED_MOVING", {});
-    }
+    fireMovingEvents(wasMoving);
 
     if (opcode == Opcode::MSG_MOVE_SET_FACING) {
         lastFacingSendTimeMs_ = movementInfo.time;
@@ -948,23 +1010,7 @@ void MovementHandler::sendMovement(Opcode opcode) {  // NOLINT(readability-funct
     // Build and send movement packet (expansion-specific format)
     auto packet = queries_.packetParsers().buildMovementPacket(opcode, wireInfo, queries_.characterGuid());
     sender_.send(packet);
-    lastSentPos_ = glm::vec3(movementInfo.x, movementInfo.y, movementInfo.z);
-    hasSentMovement_ = true;
-    if (movementHeldReason_) {
-        LOG_WARNING("Movement: sending again (was held while ", movementHeldReason_, ")");
-        movementHeldReason_ = nullptr;
-    }
-
-    if (opcode == Opcode::MSG_MOVE_HEARTBEAT) {
-        lastHeartbeatSendTimeMs_ = movementInfo.time;
-        lastHeartbeatX_ = movementInfo.x;
-        lastHeartbeatY_ = movementInfo.y;
-        lastHeartbeatZ_ = movementInfo.z;
-        lastHeartbeatFlags_ = movementInfo.flags;
-        lastHeartbeatTransportGuid_ = movementInfo.transportGuid;
-    } else {
-        lastNonHeartbeatMoveSendTimeMs_ = movementInfo.time;
-    }
+    noteMovementSent(opcode);
 }
 
 // ============================================================
@@ -1117,17 +1163,8 @@ void MovementHandler::dismount() {
 // root, flag, collision-height, knockback) require the same ACK structure:
 // GUID + counter + movement payload with server-space coordinates. Centralised
 // here so transport coordinate conversion can't diverge between handlers.
-network::Packet MovementHandler::buildForceAck(Opcode ackOpcode, uint32_t counter) {
-    network::Packet ack(wireOpcode(ackOpcode));
-    const bool legacyGuid =
-        isActiveExpansion("classic") || isActiveExpansion("tbc");
-    if (legacyGuid) {
-        ack.writeUInt64(queries_.characterGuid());
-    } else {
-        ack.writePackedGuid(queries_.characterGuid());
-    }
-    ack.writeUInt32(counter);
-
+network::Packet MovementHandler::buildForceAck(Opcode ackOpcode, uint32_t counter, float value) {
+    const auto playerGuid = queries_.characterGuid();
     MovementInfo wire = movementInfo;
     wire.time = nextMovementTimestampMs();
     if (wire.hasFlag(MovementFlags::ONTRANSPORT)) {
@@ -1145,8 +1182,24 @@ network::Packet MovementHandler::buildForceAck(Opcode ackOpcode, uint32_t counte
         wire.transportY = serverTransport.y;
         wire.transportZ = serverTransport.z;
     }
+    if (isActiveExpansion("wotlk")) {
+        return MovementPacket::buildForceAck(ackOpcode, wire, playerGuid, counter, value);
+    }
+    network::Packet ack(wireOpcode(ackOpcode));
+    const bool legacyGuid = isActiveExpansion("classic") || isActiveExpansion("tbc");
+    if (legacyGuid) {
+        ack.writeUInt64(playerGuid);
+    } else {
+        ack.writePackedGuid(playerGuid);
+    }
+    ack.writeUInt32(counter);
+
     queries_.packetParsers().writeMovementPayload(ack, wire);
     return ack;
+}
+
+bool MovementHandler::forcedMovementTaken(const ForcedMovement& command) {
+    return clientMover_ && clientMover_->takeForcedMovement(command);
 }
 
 void MovementHandler::handleForceSpeedChange(network::Packet& packet, const char* name,
@@ -1186,9 +1239,10 @@ void MovementHandler::handleForceSpeedChange(network::Packet& packet, const char
         return;
     }
 
-    if (sender_.connected()) {
-        auto ack = buildForceAck(ackOpcode, counter);
-        ack.writeFloat(newSpeed);
+    if (!forcedMovementTaken({.acknowledgement = ackOpcode, .counter = counter, .value = newSpeed}) &&
+        sender_.connected()) {
+        auto ack = buildForceAck(ackOpcode, counter, newSpeed);
+        if (!isActiveExpansion("wotlk")) ack.writeFloat(newSpeed);
         sender_.send(ack);
     }
 
@@ -1220,8 +1274,9 @@ void MovementHandler::handleForceMoveRootState(network::Packet& packet, bool roo
         movementInfo.flags &= ~static_cast<uint32_t>(MovementFlags::ROOT);
     }
 
-    if (!sender_.connected()) return;
     Opcode ackOp = rooted ? Opcode::CMSG_FORCE_MOVE_ROOT_ACK : Opcode::CMSG_FORCE_MOVE_UNROOT_ACK;
+    if (forcedMovementTaken({.acknowledgement = ackOp, .counter = counter, .enabled = rooted})) return;
+    if (!sender_.connected()) return;
     if (wireOpcode(ackOp) == 0xFFFF) return;
     sender_.send(buildForceAck(ackOp, counter));
 }
@@ -1247,9 +1302,13 @@ void MovementHandler::handleForceMoveFlagChange(network::Packet& packet, const c
         }
     }
 
+    if (forcedMovementTaken({.acknowledgement = ackOpcode, .counter = counter,
+                             .value = set ? 1.0f : 0.0f, .enabled = set})) {
+        return;
+    }
     if (!sender_.connected()) return;
     if (wireOpcode(ackOpcode) == 0xFFFF) return;
-    sender_.send(buildForceAck(ackOpcode, counter));
+    sender_.send(buildForceAck(ackOpcode, counter, set ? 1.0f : 0.0f));
 }
 
 void MovementHandler::handleMoveSetCollisionHeight(network::Packet& packet) {
@@ -1264,13 +1323,17 @@ void MovementHandler::handleMoveSetCollisionHeight(network::Packet& packet) {
              " counter=", counter, " height=", height);
 
     if (guid != queries_.characterGuid()) return;
+    if (forcedMovementTaken({.acknowledgement = Opcode::CMSG_MOVE_SET_COLLISION_HGT_ACK,
+                             .counter = counter, .value = height})) {
+        return;
+    }
     if (!sender_.connected()) return;
 
     if (wireOpcode(Opcode::CMSG_MOVE_SET_COLLISION_HGT_ACK) == 0xFFFF) return;
     // buildForceAck now handles transport coordinate conversion, fixing the
     // previous omission that caused desync when riding boats/zeppelins.
-    auto ack = buildForceAck(Opcode::CMSG_MOVE_SET_COLLISION_HGT_ACK, counter);
-    ack.writeFloat(height);
+    auto ack = buildForceAck(Opcode::CMSG_MOVE_SET_COLLISION_HGT_ACK, counter, height);
+    if (!isActiveExpansion("wotlk")) ack.writeFloat(height);
     sender_.send(ack);
 }
 
@@ -1294,6 +1357,10 @@ void MovementHandler::handleMoveKnockBack(network::Packet& packet) {
 
     events_.publish(events::PlayerKnockedBack{vcos, vsin, hspeed, vspeed});
 
+    if (forcedMovementTaken({.acknowledgement = Opcode::CMSG_MOVE_KNOCK_BACK_ACK, .counter = counter,
+                             .launch = ForcedMovement::Launch{vcos, vsin, hspeed, vspeed}})) {
+        return;
+    }
     if (!sender_.connected()) return;
     if (wireOpcode(Opcode::CMSG_MOVE_KNOCK_BACK_ACK) == 0xFFFF) return;
     sender_.send(buildForceAck(Opcode::CMSG_MOVE_KNOCK_BACK_ACK, counter));

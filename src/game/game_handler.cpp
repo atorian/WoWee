@@ -124,7 +124,8 @@ GameHandler::GameHandler(GameServices& services)
     chatHandler_      = std::make_unique<ChatHandler>(*this, *this, *services_.events, *this,
                                                       *services_.cvars, *services_.emotes);
     movementHandler_  = std::make_unique<MovementHandler>(*this, *this, *services_.events, *chatHandler_,
-                                                          *services_.gameData, *this, movementInfo);
+                                                          *services_.gameData, *this, movementInfo,
+                                                          services_.clientMover);
     combatHandler_    = std::make_unique<CombatHandler>(*this, *this, *services_.events, *chatHandler_,
                                                         *services_.cvars, *this);
     socialHandler_    = std::make_unique<SocialHandler>(*this, *this, *services_.events, *chatHandler_,
@@ -803,7 +804,9 @@ void GameHandler::updateGame(float deltaTime) {
                                       : (classicLikeStationaryCombatSync ? game::HEARTBEAT_INTERVAL_STATIONARY_COMBAT
                                                                          : (classicLikeCombatSync ? game::HEARTBEAT_INTERVAL_MOVING_COMBAT
                                                                                                   : movementHandler_->getMoveHeartbeatInterval()));
-        if (movementHandler_->timeSinceLastMoveHeartbeatRef() >= heartbeatInterval) {
+        // The client's own mover sends its heartbeats on the original's schedule.
+        if (!movementHandler_->clientMoverReports() &&
+            movementHandler_->timeSinceLastMoveHeartbeatRef() >= heartbeatInterval) {
             sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
             movementHandler_->timeSinceLastMoveHeartbeatRef() = 0.0f;
         }

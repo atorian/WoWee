@@ -10,7 +10,7 @@
 namespace wowee::collision {
 
 /// What a doodad (an M2) is solid with: its authored collision mesh, in model
-/// space, binned into a grid of floor and wall triangles.
+/// space, binned into a grid of triangles.
 ///
 /// Built once per model and shared by every placement of it - and by the
 /// renderer, which drew the model and used to keep this inside its GPU model.
@@ -26,6 +26,7 @@ struct M2Shape {
     std::string name;
     std::vector<glm::vec3> vertices;
     std::vector<uint16_t> indices;
+    std::vector<glm::vec3> faceNormals; // Preserved authored collision planes, before placement
     uint32_t triCount = 0;
     /// The box around the vertices.
     glm::vec3 boundMin{0.0f};
@@ -38,19 +39,21 @@ struct M2Shape {
     glm::vec2 gridOrigin{0.0f};
     int gridCellsX = 0;
     int gridCellsY = 0;
-    /// Per cell, the triangles flat enough to stand on (|n.z| >= 0.35, about
-    /// 70 degrees) and those steep enough to walk into (|n.z| < 0.65). The two
-    /// overlap on purpose: a steep ramp is both.
-    std::vector<std::vector<uint32_t>> cellFloorTris;
+    /// All valid triangles. A placement can rotate any model-space facet
+    /// into a world-space floor; its role cannot be fixed when loading it.
+    std::vector<std::vector<uint32_t>> cellTris;
+    /// Model-space walls used by the legacy wall response. The original
+    /// contact solver consumes unclassified facets instead.
     std::vector<std::vector<uint32_t>> cellWallTris;
 
     /// The shape of a mesh, or nothing for one with no triangle in it.
     [[nodiscard]] static std::shared_ptr<const M2Shape> build(std::string name,
                                                              std::vector<glm::vec3> vertices,
-                                                             std::vector<uint16_t> indices);
+                                                             std::vector<uint16_t> indices,
+                                                             std::vector<glm::vec3> faceNormals = {});
 
-    /// The floor or wall triangles a model-space XY box reaches, each once.
-    void floorTrisInRange(float minX, float minY, float maxX, float maxY,
+    /// The triangles a model-space XY box reaches, each once in mesh order.
+    void trisInRange(float minX, float minY, float maxX, float maxY,
                           std::vector<uint32_t>& out) const;
     void wallTrisInRange(float minX, float minY, float maxX, float maxY,
                          std::vector<uint32_t>& out) const;

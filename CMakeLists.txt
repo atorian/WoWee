@@ -690,11 +690,35 @@ set(WOWEE_SOURCES
     # Collision
     src/collision/collision_world.cpp
     src/collision/m2_shape.cpp
+    src/collision/movement_contact.cpp
+    src/collision/movement_surface.cpp
+    src/collision/movement_facet.cpp
+    src/collision/m2_facets.cpp
     src/collision/terrain_heights.cpp
+    src/collision/terrain_chunk_facets.cpp
+    src/collision/map_facets.cpp
+    src/collision/liquid_facets.cpp
+    src/collision/terrain_facets.cpp
     src/collision/wmo_shape.cpp
+    src/collision/wmo_model_facets.cpp
+    src/collision/wmo_world_facets.cpp
+    src/collision/doodad_facets.cpp
+    src/collision/entity_facets.cpp
+    src/collision/world_facets.cpp
+    src/collision/movement_dimensions.cpp
+    src/collision/movement_plot.cpp
+    src/collision/movement_frame.cpp
+    src/collision/movement_commands.cpp
+    src/collision/movement_execution.cpp
+    src/collision/wmo_bsp_query.cpp
+    src/collision/movement_world.cpp
+    src/collision/model_collision_cache.cpp
 
     # Core
     src/core/application.cpp
+    src/core/movement_status.cpp
+    src/core/movement_reporting.cpp
+    src/core/original_player_mover.cpp
     src/core/interface_resources.cpp
     src/core/application_world_loading.cpp
     src/core/client_main.cpp
@@ -886,6 +910,7 @@ set(WOWEE_SOURCES
     src/pipeline/m2_loader.cpp
     src/pipeline/m2_model_classifier.cpp
     src/pipeline/wmo_loader.cpp
+    src/pipeline/wmo_bsp.cpp
     src/pipeline/liquid_types.cpp
     src/pipeline/liquid_types_dbc.cpp
     src/pipeline/adt_loader.cpp
@@ -2005,6 +2030,13 @@ target_precompile_headers(wowee_pipeline PRIVATE
 )
 
 add_library(wowee_collision STATIC ${WOWEE_COLLISION_SOURCES})
+# The recovered x87 calculation has explicit precision boundaries. Fused
+# multiply-add or fast-math reassociation changes which contact is first.
+if(MSVC)
+    set_source_files_properties(src/collision/movement_contact.cpp src/collision/movement_surface.cpp src/collision/movement_facet.cpp src/collision/terrain_facets.cpp src/collision/liquid_facets.cpp src/collision/map_facets.cpp src/collision/terrain_chunk_facets.cpp src/collision/terrain_heights.cpp src/collision/m2_facets.cpp src/collision/wmo_model_facets.cpp src/collision/wmo_world_facets.cpp src/collision/doodad_facets.cpp src/collision/movement_dimensions.cpp src/collision/movement_plot.cpp src/collision/movement_frame.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
+else()
+    set_source_files_properties(src/collision/movement_contact.cpp src/collision/movement_surface.cpp src/collision/movement_facet.cpp src/collision/terrain_facets.cpp src/collision/liquid_facets.cpp src/collision/map_facets.cpp src/collision/terrain_chunk_facets.cpp src/collision/terrain_heights.cpp src/collision/m2_facets.cpp src/collision/wmo_model_facets.cpp src/collision/wmo_world_facets.cpp src/collision/doodad_facets.cpp src/collision/movement_dimensions.cpp src/collision/movement_plot.cpp src/collision/movement_frame.cpp PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
+endif()
 target_link_libraries(wowee_collision PUBLIC wowee_pipeline wowee_base)
 target_precompile_headers(wowee_collision PRIVATE
     ${WOWEE_PCH_STD}

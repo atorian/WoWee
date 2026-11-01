@@ -1,5 +1,6 @@
 #include "collision/collision_world.hpp"
 
+#include "collision/movement_world.hpp"
 #include "collision/wmo_group_containment.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
@@ -62,7 +63,8 @@ bool withinBounds(const glm::vec3& boundsMin, const glm::vec3& boundsMax,
 
 }  // namespace
 
-CollisionWorld::CollisionWorld() = default;
+CollisionWorld::CollisionWorld()
+    : models_(std::make_unique<ModelCollisionCache>()), movement_(std::make_unique<MovementWorld>(*models_)) {}
 CollisionWorld::~CollisionWorld() = default;
 
 // ---- Doodads ---------------------------------------------------------------
@@ -227,14 +229,19 @@ void CollisionWorld::gatherWmo(const glm::vec3& queryMin, const glm::vec3& query
 void CollisionWorld::addTerrainTile(std::shared_ptr<const TerrainTileHeights> tile) {
     if (!tile) return;
     const uint64_t key = tileKey(tile->tileX, tile->tileY);
+    movement_->addTile(tile);
     terrain_[key] = std::move(tile);
 }
 
 void CollisionWorld::removeTerrainTile(int tileX, int tileY) {
+    movement_->removeTile(tileX, tileY);
     terrain_.erase(tileKey(tileX, tileY));
 }
 
-void CollisionWorld::clearTerrain() { terrain_.clear(); }
+void CollisionWorld::clearTerrain() {
+    for (const auto& [key, tile] : terrain_) movement_->removeTile(tile->tileX, tile->tileY);
+    terrain_.clear();
+}
 
 void CollisionWorld::clear() {
     clearM2();
@@ -378,7 +385,9 @@ std::optional<float> CollisionWorld::wmoFloor(const Reach& reach, float x, float
         const float zMarginUp = shape.isLowPlatform ? 20.0f : 4.0f;
 
         // Broad phase in world space, before any matrix work.
-        if (bestFloor && p.boundsMax.z <= (*bestFloor + 0.05f)) continue;
+        // Highest-floor pruning cannot serve a nearest-to-feet query. Nor
+        // may a tolerance discard a distinct, slightly higher surface.
+        if (!byReference && bestFloor && p.boundsMax.z <= *bestFloor) continue;
         const bool insideXY = x >= p.boundsMin.x && x <= p.boundsMax.x &&
                               y >= p.boundsMin.y && y <= p.boundsMax.y;
         if (!withinBounds(p.boundsMin, p.boundsMax, x, y, z, zMarginDown, zMarginUp)) {
@@ -937,7 +946,7 @@ std::optional<float> CollisionWorld::m2Floor(const Reach& reach, float x, float 
         if (localRayLength <= 1e-5f) continue;
         const glm::vec3 localRayDir = localRayVector / localRayLength;
 
-        shape.floorTrisInRange(std::min(localRayOrigin.x, localRayEnd.x) - 1.0f,
+        shape.trisInRange(std::min(localRayOrigin.x, localRayEnd.x) - 1.0f,
                                std::min(localRayOrigin.y, localRayEnd.y) - 1.0f,
                                std::max(localRayOrigin.x, localRayEnd.x) + 1.0f,
                                std::max(localRayOrigin.y, localRayEnd.y) + 1.0f, tl_triScratch);
@@ -998,7 +1007,7 @@ std::optional<float> CollisionWorld::m2InstanceFloor(uint32_t instanceId, const 
     if (localRayLength <= 1e-5f) return std::nullopt;
     const glm::vec3 localRayDir = localRayVector / localRayLength;
 
-    shape.floorTrisInRange(std::min(localRayOrigin.x, localRayEnd.x) - 1.0f,
+    shape.trisInRange(std::min(localRayOrigin.x, localRayEnd.x) - 1.0f,
                            std::min(localRayOrigin.y, localRayEnd.y) - 1.0f,
                            std::max(localRayOrigin.x, localRayEnd.x) + 1.0f,
                            std::max(localRayOrigin.y, localRayEnd.y) + 1.0f, tl_triScratch);
@@ -1176,7 +1185,7 @@ glm::vec3 CollisionWorld::sweepMover(const Reach& reach, const glm::vec3& from, 
                                      bool insideWmo, bool includeDoodads) const {
     const glm::vec3 delta = to - from;
     const float distSq = glm::dot(delta, delta);
-    if (distSq <= 1e-4f) return to;  // standing still: not worth a query
+    if (distSq == 0.0f) return to;
 
     const float dist = std::sqrt(distSq);
     // Tighter steps indoors, where the geometry is closer together.
@@ -1312,7 +1321,7 @@ uint64_t CollisionWorld::bytes() const {
         total += sizeof(p) + p.groupBounds.capacity() * sizeof(p.groupBounds[0]);
         if (counted.insert(p.shape.get()).second) total += p.shape->bytes();
     }
-    total += terrain_.size() * sizeof(TerrainTileHeights);
+    for (const auto& [key,tile] : terrain_) total += sizeof(TerrainTileHeights)+tile->heapBytes();
     for (const auto* grid : {&m2Grid_, &wmoGrid_}) {
         for (const auto& [cell, ids] : *grid) total += sizeof(cell) + ids.capacity() * sizeof(uint32_t);
     }

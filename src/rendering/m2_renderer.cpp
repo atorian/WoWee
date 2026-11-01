@@ -1,6 +1,7 @@
 #include <atomic>
 #include "rendering/face_culling.hpp"
-#include "rendering/placement_transform.hpp"
+#include "pipeline/placement_transform.hpp"
+#include "collision/model_collision_cache.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/texture_upload.hpp"
 #include <stdexcept>
@@ -67,7 +68,7 @@ void M2Instance::updateModelMatrix() {
     // Doodads and buildings compose this identically, in placement_transform.hpp
     // - the header records what it took to establish the order, and a test
     // pins it. Composing it here as well is how the two came to disagree.
-    modelMatrix = placementModelMatrix(position, rotation, scale);
+    modelMatrix = pipeline::placementModelMatrix(position, rotation, scale);
     invModelMatrix = glm::inverse(modelMatrix);
 }
 
@@ -1738,13 +1739,13 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
         }
     }
 
-    // Build collision mesh + spatial grid from M2 bounding geometry
-    gpuModel.collision = collision::M2Shape::build(model.name, model.collisionVertices,
-                                                   model.collisionIndices);
+    // The model's collision, from the one place every model's is built.
+    if (collision_) gpuModel.collision = collision_->models().offer(model.name, model)->shape;
     if (gpuModel.collision) {
         core::Logger::getInstance().debug("  M2 collision mesh: ", gpuModel.collision->triCount,
             " tris, grid ", gpuModel.collision->gridCellsX, "x", gpuModel.collision->gridCellsY);
     }
+
 
     // Identify idle variation sequences (animation ID 0 = Stand)
     for (int i = 0; i < static_cast<int>(model.sequences.size()); i++) {

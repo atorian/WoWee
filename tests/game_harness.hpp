@@ -151,6 +151,9 @@ public:
     /// With the account data kept in this folder, as it is - for a test of
     /// what one session leaves behind for the next.
     explicit GameHarness(const std::filesystem::path& accountDataDir);
+    /// With the client's own mover of the player, as the client hands it to
+    /// the game (GameServices::clientMover).
+    explicit GameHarness(game::ClientMover& clientMover);
     ~GameHarness();
     GameHarness(const GameHarness&) = delete;
     GameHarness& operator=(const GameHarness&) = delete;
@@ -368,6 +371,8 @@ public:
     void useExpansion(const std::string& id);
 
 private:
+    GameHarness(const std::filesystem::path& accountDataDir, game::ClientMover* clientMover);
+
     core::EventBus events_;
     core::CVarStore cvars_;
     std::map<std::string, game::GameData::Table> dbcs_;

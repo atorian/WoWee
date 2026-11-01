@@ -3,6 +3,7 @@
 #include "collision/geometry.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/camera_boom.hpp"
+#include "rendering/character_mover.hpp"
 #include "rendering/movement_limits.hpp"
 #include "rendering/movement_command.hpp"
 #include "core/input.hpp"
@@ -56,6 +57,9 @@ public:
     /// maps, when there is nothing to stand on.
     void setCollisionWorld(const collision::CollisionWorld* world) { collision_ = world; }
     void setLiquidScene(const LiquidScene* scene) { liquidScene = scene; }
+    /// Moves the followed character in place of this controller's own physics
+    /// whenever it says it does; see CharacterMover. None: this one always.
+    void setCharacterMover(CharacterMover* mover) { characterMover_ = mover; }
     /// How far round the player the collision queries look: the radius kept
     /// round the character followed, or the free camera. Everything else that
     /// is only asked about near the player - the game's movers - asks with it.
@@ -347,6 +351,7 @@ public:
 private:
     Camera* camera;
     const collision::CollisionWorld* collision_ = nullptr;
+    CharacterMover* characterMover_ = nullptr;
     collision::Reach reach_ = collision::Reach::everywhere();
     /// One frame's input and physics setup, handed to whichever camera mode is
     /// running.
@@ -376,6 +381,8 @@ private:
         bool spaceHeld = false;       ///< held, not pressed: rising in water and in flight
         bool xDown = false;
         bool uiWantsKeyboard = false;
+        bool cameraDrivesFacing = false;  ///< the view steers the character
+        bool walking = false;
     };
 
     /// The camera that orbits a character and moves it: collision, grounding,
@@ -384,6 +391,10 @@ private:
 
     /// The camera that flies itself, used when nothing is being followed.
     void updateFreeFlyCamera(float deltaTime, FrameInput& f);
+
+    /// The camera that follows a character the CharacterMover moves: it hands
+    /// the mover the frame's intent and orbits where the character went.
+    void updateMovedCharacter(float deltaTime, FrameInput& f);
 
     /// Where the followed character wants to be this frame: the movement
     /// intent and the swept wall collision. The floor is not consulted yet.

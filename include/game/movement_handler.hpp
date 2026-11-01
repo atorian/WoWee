@@ -1,5 +1,7 @@
 #pragma once
 
+#include "game/client_mover.hpp"
+
 #include "game/flat_field_map.hpp"
 #include "game/world_packet_data.hpp"
 #include "core/coordinates.hpp"
@@ -99,9 +101,12 @@ public:
 
     /// @param assets Null in a client without game data: no taxi path or
     ///        area trigger table is read.
+    /// @param clientMover The client's own mover of the player, when it has
+    ///        one: it may take forced movement and send the heartbeats; null:
+    ///        this does both.
     MovementHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
                     ChatLog& chat, const GameData& data, MovementQueries& queries,
-                    MovementInfo& movementInfo);
+                    MovementInfo& movementInfo, ClientMover* clientMover);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -140,6 +145,17 @@ public:
     // --- Public API (delegated from GameHandler) ---
 
     void sendMovement(Opcode opcode);
+    /// A movement message the client's own mover built, bytes and all - the
+    /// original client's, for build 12340. `status` is what it says of the
+    /// player, in the server's axes. Kept as the player's movement, with what
+    /// the game does on it - the moving events, the cast a step cancels - and
+    /// sent unless the server holds the player's movement, as sendMovement is.
+    void sendReportedMovement(Opcode opcode, const MovementInfo& status, network::Packet packet);
+    /// The clock movement messages are stamped with, read without advancing it.
+    [[nodiscard]] uint32_t movementClockMs() const;
+    /// Whether the client's own mover sends the player's movement: the game
+    /// then sends no heartbeat of its own.
+    [[nodiscard]] bool clientMoverReports() const { return clientMover_ && clientMover_->reportsMovement(); }
     /// Stop client-directed motion before suspending control (e.g. a map load).
     void stopInputMovement();
     void setPosition(float x, float y, float z);
@@ -360,6 +376,14 @@ public:
     // its final waypoint. Only treat those signals as authoritative near arrival.
     [[nodiscard]] bool isNearTaxiDestination(float maxDistance = 24.0f) const;
     uint32_t nextMovementTimestampMs();
+    /// Not sent: no world to send to, or the server holds the player's
+    /// movement. Said once per stretch.
+    bool movementHeld(Opcode opcode);
+    void cancelCastOnMove(Opcode opcode);
+    void fireMovingEvents(bool wasMoving);
+    void noteMovementSent(Opcode opcode);
+    /// Offered to the client's mover; true when it took it.
+    bool forcedMovementTaken(const ForcedMovement& command);
     void sanitizeMovementForTaxi();
     /// The player's create block has them on a taxi flight the client did not
     /// start - entering the world mid-flight. Shown as one: no walking flags,
@@ -422,7 +446,7 @@ private:
     /// Set one of another unit's movement speeds.
     void applyUnitSpeed(uint64_t guid, float MovementSpeeds::* speed, float value);
     void handleForceRunSpeedChange(network::Packet& packet);
-    network::Packet buildForceAck(Opcode ackOpcode, uint32_t counter);
+    network::Packet buildForceAck(Opcode ackOpcode, uint32_t counter, float value = 0);
     /// A forced speed change. Ours is applied and acknowledged; another
     /// unit's goes into its speeds as unitSpeed (null: not one it keeps).
     void handleForceSpeedChange(network::Packet& packet, const char* name, Opcode ackOpcode,
@@ -458,6 +482,10 @@ private:
     ChatLog& chat_;
     const GameData& data_;
     MovementQueries& queries_;
+    ClientMover* clientMover_ = nullptr;
+    /// Opcodes the game sent itself while the client's mover moved the
+    /// player, said once each.
+    std::unordered_set<Opcode> mixedMovementSaid_;
 
     // --- Movement state ---
     // Reference to GameHandler's movementInfo to avoid desync

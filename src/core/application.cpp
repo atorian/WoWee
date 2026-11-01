@@ -1,4 +1,5 @@
 #include "core/application.hpp"
+#include "core/original_player_mover.hpp"
 #include "core/appearance_composer.hpp"
 #include "core/input.hpp"
 #include "core/window.hpp"
@@ -578,9 +579,13 @@ bool Application::initialize() {  // NOLINT(readability-function-size)
     movementCollision_ = std::make_unique<WorldMovementCollision>(
         renderer->collision(), [this] { return playerReach(getCameraController()); });
     gameServices_.movementCollision = movementCollision_.get();
+    originalMover_ = std::make_unique<OriginalPlayerMover>(cvars_);
+    gameServices_.clientMover = originalMover_.get();
 
     // Create game handler with explicit service dependencies
     gameHandler = std::make_unique<game::GameHandler>(gameServices_);
+    originalMover_->connect(renderer->movementWorld(), *gameHandler, *gameData_);
+    if (auto* camera = getCameraController()) camera->setCharacterMover(originalMover_.get());
     // The contact lists: the service owns them, the gateway reaches the
     // server and the name cache through the game, and the game feeds them.
     contactsGateway_ = std::make_unique<game::ContactsGateway>(*gameHandler, *gameHandler);
@@ -828,6 +833,7 @@ bool Application::initialize() {  // NOLINT(readability-function-size)
                 !std::getenv("WOWEE_FOUNTAIN_PROBE")) return false;
             const std::string cityPath = "World/WMO/Northrend/Dalaran/ND_Dalaran.wmo";
             auto city = pipeline::WMOLoader::load(assetManager->readFile(cityPath));
+            city.sourcePath = cityPath;
             for (uint32_t group = 0; group < city.nGroups; ++group) {
                 const auto candidates = pipeline::wmoGroupCandidates(cityPath, group);
                 if (!pipeline::WMOLoader::loadGroup(assetManager->readFile(candidates.front()), city, group))
@@ -875,6 +881,7 @@ bool Application::initialize() {  // NOLINT(readability-function-size)
             std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
             if (lower.size() > 4 && lower.compare(lower.size() - 4, 4, ".wmo") == 0) {
                 auto wmo = pipeline::WMOLoader::load(assetManager->readFile(path));
+                wmo.sourcePath = path;
                 for (uint32_t group = 0; group < wmo.nGroups; ++group) {
                     const auto candidates = pipeline::wmoGroupCandidates(path, group);
                     if (!pipeline::WMOLoader::loadGroup(assetManager->readFile(candidates.front()), wmo, group)) {
@@ -3680,7 +3687,8 @@ void Application::applyServerMovementState(float deltaTime) {  // NOLINT(readabi
             static_cast<uint32_t>(game::MovementFlags::TURN_LEFT) |
             static_cast<uint32_t>(game::MovementFlags::TURN_RIGHT);
         bool keyboardTurning = (mi.flags & kTurnFlags) != 0;
-        if (!keyboardTurning && sync.facingSendCooldown <= 0.0f) {
+        // The original client's mover reports its own facing.
+        if (!keyboardTurning && sync.facingSendCooldown <= 0.0f && !originalMover_->reportsMovement()) {
             float yawDiff = core::coords::normalizeAngleRad(canonicalYaw - sync.lastSentCanonicalYaw);
             if (std::abs(yawDiff) > glm::radians(3.0f)) {
                 gameHandler->sendMovement(game::Opcode::MSG_MOVE_SET_FACING);
@@ -6617,6 +6625,7 @@ void Application::setupTestTransport() {
 
     // Load WMO model
     pipeline::WMOModel wmoModel = pipeline::WMOLoader::load(wmoData);
+    wmoModel.sourcePath = transportWmoPath;
     LOG_INFO("Transport WMO root loaded: ", transportWmoPath, " nGroups=", wmoModel.nGroups);
 
     // Load WMO groups

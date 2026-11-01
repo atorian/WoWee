@@ -1,6 +1,8 @@
 #include "rendering/terrain_manager.hpp"
+#include "pipeline/placement_transform.hpp"
 #include "pipeline/game_tables.hpp"
 #include "collision/collision_world.hpp"
+#include "collision/movement_world.hpp"
 
 #include <vector>
 
@@ -58,41 +60,6 @@ namespace wowee {
 namespace rendering {
 
 namespace {
-/// The euler triple a placement's three degrees become, in render axes.
-///
-/// MDDF and MODF store the rotation identically and this was written out twice,
-/// once for each; it is one function. Both are composed Z, Y, X, in
-/// placement_transform.hpp.
-glm::vec3 placementEuler(const float rotation[3]) {
-    // Solved against Blizzard's own numbers rather than judged by eye. MODF
-    // records, beside every building placement, the world-space bounding box
-    // its tools computed for it - so a candidate convention can be scored by
-    // whether it reproduces that box. Over the 1469 placements in 3.3.5's ADTs
-    // carrying more than three degrees of pitch or roll, this triple composed
-    // Z, Y, X reproduces every one of them to zero error, and the next best
-    // candidate is out by a median of 4.3 yards.
-    //
-    // The note that stood here said the mapping was not where the error was,
-    // and that a heightmap the bridges were judged against was the thing left
-    // to suspect. It was the mapping. What hid it is that the signs and the
-    // order are wrong together and right together: composed Z, Y, X these
-    // components are positive, composed X, Y, Z the first two had to be
-    // negated to keep flat ground looking right. Turning one dial at a time -
-    // six orders, then the sign of each component - never reaches a pair that
-    // only works as a pair, and every single-dial result looks worse than what
-    // it replaced.
-    //
-    // That is also why a factor of four once looked like the closest thing to
-    // an answer: with the order wrong, no constant can be right, and fitting
-    // one to a single bridge produces a number that is wrong differently for
-    // every other roll.
-    constexpr float kDeg = core::coords::PI / 180.0f;
-    return glm::vec3(rotation[2] * kDeg,
-                     rotation[0] * kDeg,
-                     (rotation[1] + 180.0f) * kDeg);
-}
-
-
 // Alpha map format constants live with the loader now - see
 // pipeline/adt_alpha.hpp - because two copies of the decoder had grown and the
 // grass terrain adapter would have made a third.
@@ -671,7 +638,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
         p.modelId = modelId;
         p.uniqueId = placement.uniqueId;
         p.position = glPos;
-        p.rotation = placementEuler(placement.rotation);
+        p.rotation = pipeline::placementEuler(placement.rotation);
         p.scale = placement.scale * kInv1024;
         pending->m2Placements.push_back(p);
     }
@@ -724,7 +691,12 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
 
             if (!wobLoaded) {
                 const auto wmoData = assetManager->readFileShared(wmoPath);
-                if (!wmoData) continue;
+                if (!wmoData) {
+                    LOG_WARNING("Building ", wmoPath, " is not in the data - tile [", x, ",", y,
+                                "] is drawn without it");
+                    pending->unavailableBuildings.emplace_back(wmoPath, "the file is not in the data");
+                    continue;
+                }
 
                 wmoModel = pipeline::WMOLoader::load(*wmoData);
                 if (wmoModel.nGroups > 0) {
@@ -740,13 +712,17 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
                 }
             }
 
+            if (wmoModel.groups.empty()) {
+                LOG_WARNING("Building ", wmoPath, " has no groups - tile [", x, ",", y, "] is drawn without it");
+                pending->unavailableBuildings.emplace_back(wmoPath, "it has no groups");
+            }
             if (!wmoModel.groups.empty()) {
                 wmoModel.sourcePath = wmoPath;
                 glm::vec3 pos = core::coords::adtToWorld(placement.position[0],
                                                        placement.position[1],
                                                        placement.position[2]);
 
-                glm::vec3 rot = placementEuler(placement.rotation);
+                glm::vec3 rot = pipeline::placementEuler(placement.rotation);
 
                 // Pre-load WMO doodads (M2 models inside WMO)
                 if (!workerRunning.load() || !mapToken_.current()) return nullptr;
@@ -839,12 +815,8 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
 
                         // Build doodad's local transform (WoW coordinates)
                         // WMO doodads use quaternion rotation
-                        glm::quat fixedRotation(doodad.rotation.w, doodad.rotation.x, doodad.rotation.y, doodad.rotation.z);
-
-                        glm::mat4 doodadLocal(1.0f);
-                        doodadLocal = glm::translate(doodadLocal, doodad.position);
-                        doodadLocal *= glm::mat4_cast(fixedRotation);
-                        doodadLocal = glm::scale(doodadLocal, glm::vec3(doodad.scale));
+                        const glm::mat4 doodadLocal =
+                            pipeline::wmoDoodadMatrix(doodad.position, doodad.rotation, doodad.scale);
 
                         // Full world transform = WMO world transform * doodad local transform
                         glm::mat4 worldMatrix = wmoMatrix * doodadLocal;
@@ -1455,7 +1427,12 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {  // NOLINT(readab
         }
 
         // Commit tile to loadedTiles, and its ground to the world's.
-        if (collision_ && pending->heights) collision_->addTerrainTile(pending->heights);
+        if (collision_) {
+            for (const auto& [building, reason] : pending->unavailableBuildings) {
+                collision_->movement().buildingUnavailable(building, reason);
+            }
+            if (pending->heights) collision_->addTerrainTile(pending->heights);
+        }
         auto tile = std::make_unique<TerrainTile>();
         tile->coord = coord;
         tile->detail = pending->detail;

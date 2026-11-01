@@ -44,6 +44,12 @@ struct LiquidTypeInfo {
     LiquidBasic basic = LiquidBasic::Water;
     /// LiquidMaterial.dbc: which shader the original client draws it with.
     uint32_t materialId = 0;
+    /// LiquidType's flags; 4 marks a liquid that can be fished in.
+    uint32_t flags = 0;
+    /// LiquidMaterial's LVF for materialId: how a legacy MCLQ layer, which
+    /// carries no vertex format of its own, lays out its heights.
+    uint16_t vertexFormat = 0;
+    bool materialKnown = true;
     /// The animated surface texture, a printf pattern over the frame number
     /// starting at 1 ("XTextures\\ocean\\ocean_h.%d.blp"); empty when the row
     /// has none.
@@ -56,7 +62,7 @@ public:
     /// Rows of the table, read through the expansion's column layout, which
     /// must name every column read. A row with a type outside the four basic
     /// kinds is reported and left out.
-    static LiquidTypeTable fromDbc(const RequiredTable& liquidTypes);
+    static LiquidTypeTable fromDbc(const RequiredTable& liquidTypes, const RequiredTable& liquidMaterials);
     /// The four basic rows alone, without textures, for an expansion that
     /// does not use LiquidType.dbc.
     static LiquidTypeTable basicOnly();

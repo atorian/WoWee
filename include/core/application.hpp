@@ -80,6 +80,7 @@ namespace audio { enum class VoiceType; class AudioCoordinator; }
 namespace addons { class AddonManager; class AddonCatalog; class LuaErrorReport; }
 
 namespace core {
+class OriginalPlayerMover;
 
 class Window;
 class EntitySpawner;
@@ -479,6 +480,9 @@ private:
     std::unique_ptr<reputation::ReputationService> reputation_;
     std::unique_ptr<game::PetGateway> petGateway_;
     std::unique_ptr<pet::PetService> pet_;
+    /// The player moved by the original client's rules when the setting asks
+    /// for it. Before the game, which asks it, so it outlives the game.
+    std::unique_ptr<OriginalPlayerMover> originalMover_;
     std::unique_ptr<game::GameHandler> gameHandler;
     /// The renderer's side of the transports - see game::TransportScene.
     std::unique_ptr<RendererTransportScene> transportScene_;

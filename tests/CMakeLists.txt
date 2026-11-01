@@ -3021,6 +3021,123 @@ wowee_add_test(test_collision_world
     SOURCES test_collision_world.cpp)
 target_link_libraries(test_collision_world PRIVATE wowee_collision)
 
+# ── test_movement_world ──────────────────────────────────────
+# The map as the original client's movement collects it, fed the way the
+# client feeds it: tiles through CollisionWorld, models as the renderers build
+# them. Not ready, failed, or the facets of what the map data places.
+wowee_add_test(test_movement_world
+    SOURCES test_movement_world.cpp)
+target_link_libraries(test_movement_world PRIVATE wowee_collision)
+
+# ── Original 3.3.5a (build 12340) movement and collision ─────
+# Differential tests against the original client's own machine code. A probe
+# runs our implementation on the inputs a fixture recorded and prints what it
+# produced; the check script compares that with what the original routines
+# produced for the same inputs. tools/original_*_reference.py regenerates a
+# fixture from the verified executable; running the comparison needs only
+# Python. See docs/original-collision-reference.md for what each one covers.
+#
+# A probe links the library that holds what it exercises and nothing is
+# compiled for it again. The probes of the client-side status and reporting
+# adapters (src/core) link the client objects, as test_shared_rules does.
+function(wowee_add_original_probe target)
+    cmake_parse_arguments(ARG "" "" "LIBS" ${ARGN})
+    add_executable(${target} ${target}.cpp)
+    target_include_directories(${target} PRIVATE ${TEST_INCLUDE_DIRS})
+    target_include_directories(${target} SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+    target_link_libraries(${target} PRIVATE ${ARG_LIBS})
+    wowee_test_link_glm(${target})
+    register_test_target(${target})
+endfunction()
+
+# original_collision_<name>: tools/check_original_<SCRIPT>.py compares PROBE's
+# output with tests/fixtures/original_<FIXTURE>_12340.json.
+function(wowee_add_original_check name)
+    cmake_parse_arguments(ARG "" "SCRIPT;FIXTURE;PROBE" "ARGS" ${ARGN})
+    if(NOT Python3_Interpreter_FOUND)
+        return()
+    endif()
+    add_test(NAME original_collision_${name}
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_${ARG_SCRIPT}.py ${ARG_ARGS}
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_${ARG_FIXTURE}_12340.json
+            --probe $<TARGET_FILE:${ARG_PROBE}>)
+endfunction()
+
+set(_wotlk_opcodes --opcodes ${CMAKE_SOURCE_DIR}/Data/expansions/wotlk/opcodes.json)
+
+# Collision inputs: authored geometry and how the original collects facets.
+wowee_add_test(test_wmo_bsp SOURCES test_wmo_bsp.cpp)
+target_link_libraries(test_wmo_bsp PRIVATE wowee_collision)
+wowee_add_test(test_m2_collision SOURCES test_m2_collision.cpp)
+target_link_libraries(test_m2_collision PRIVATE wowee_collision)
+wowee_add_test(test_adt_collision SOURCES test_adt_collision.cpp ${TEST_COMMON_SOURCES})
+target_link_libraries(test_adt_collision PRIVATE wowee_pipeline)
+
+foreach(_probe wmo_bsp_probe movement_facet_probe terrain_facet_probe terrain_chunk_probe
+               m2_facet_probe doodad_facet_probe entity_facet_probe wmo_model_probe
+               wmo_world_probe wmo_liquid_probe map_facet_probe world_facet_probe
+               movement_contact_probe movement_plot_probe movement_commands_probe)
+    wowee_add_original_probe(${_probe} LIBS wowee_collision)
+endforeach()
+foreach(_probe movement_surface_probe movement_status_probe movement_ack_probe movement_reporting_probe)
+    wowee_add_original_probe(${_probe} LIBS wowee_client)
+endforeach()
+
+wowee_add_original_check(wmo_bsp            SCRIPT wmo            FIXTURE wmo_bsp          PROBE wmo_bsp_probe)
+wowee_add_original_check(facets             SCRIPT facets         FIXTURE facets           PROBE movement_facet_probe)
+wowee_add_original_check(terrain            SCRIPT terrain        FIXTURE terrain          PROBE terrain_facet_probe)
+wowee_add_original_check(flight_bounds      SCRIPT terrain        FIXTURE flight_bounds    PROBE terrain_facet_probe ARGS --flight)
+wowee_add_original_check(impassable         SCRIPT terrain        FIXTURE impassable       PROBE terrain_facet_probe ARGS --impassable)
+wowee_add_original_check(liquid             SCRIPT terrain        FIXTURE liquid           PROBE terrain_facet_probe ARGS --liquid)
+wowee_add_original_check(liquid_vertices    SCRIPT liquid_vertices FIXTURE liquid_vertices PROBE terrain_facet_probe)
+wowee_add_original_check(chunk              SCRIPT chunk          FIXTURE chunk            PROBE terrain_chunk_probe)
+wowee_add_original_check(m2                 SCRIPT m2             FIXTURE m2               PROBE m2_facet_probe)
+wowee_add_original_check(doodads            SCRIPT doodads        FIXTURE doodads          PROBE doodad_facet_probe)
+wowee_add_original_check(entities           SCRIPT entities       FIXTURE entities         PROBE entity_facet_probe)
+wowee_add_original_check(wmo_model          SCRIPT wmo_model      FIXTURE wmo_model        PROBE wmo_model_probe)
+wowee_add_original_check(wmo_world          SCRIPT wmo_world      FIXTURE wmo_world        PROBE wmo_world_probe)
+wowee_add_original_check(wmo_liquid         SCRIPT wmo_liquid     FIXTURE wmo_liquid       PROBE wmo_liquid_probe)
+wowee_add_original_check(streaming          SCRIPT streaming      FIXTURE streaming        PROBE map_facet_probe)
+wowee_add_original_check(map                SCRIPT map            FIXTURE map              PROBE map_facet_probe)
+wowee_add_original_check(world_collection   SCRIPT world          FIXTURE world            PROBE world_facet_probe)
+
+# Contact, surface traversal and the movement phases.
+wowee_add_original_check(contact            SCRIPT collision      FIXTURE collision        PROBE movement_contact_probe)
+wowee_add_original_check(surface            SCRIPT surface        FIXTURE surface          PROBE movement_surface_probe)
+wowee_add_original_check(fall               SCRIPT fall           FIXTURE fall             PROBE movement_surface_probe)
+wowee_add_original_check(fall_edges         SCRIPT fall           FIXTURE fall_edges       PROBE movement_surface_probe)
+wowee_add_original_check(swim               SCRIPT swim           FIXTURE swim             PROBE movement_surface_probe)
+wowee_add_original_check(hover              SCRIPT hover          FIXTURE hover            PROBE movement_surface_probe)
+wowee_add_original_check(ground             SCRIPT ground         FIXTURE ground           PROBE movement_surface_probe)
+wowee_add_original_check(dimensions         SCRIPT dimensions     FIXTURE dimensions       PROBE movement_surface_probe)
+wowee_add_original_check(movement_request   SCRIPT movement_request FIXTURE movement_request PROBE movement_surface_probe)
+wowee_add_original_check(movement_query     SCRIPT movement_query FIXTURE movement_query   PROBE movement_surface_probe)
+wowee_add_original_check(world_apply        SCRIPT world_movement FIXTURE apply            PROBE movement_surface_probe)
+wowee_add_original_check(world_movement     SCRIPT world_movement FIXTURE world_movement   PROBE movement_surface_probe)
+wowee_add_original_check(plot               SCRIPT movement_plot  FIXTURE plot             PROBE movement_plot_probe)
+
+# The movement event queue and its execution schedule.
+wowee_add_original_check(commands           SCRIPT movement_commands FIXTURE commands      PROBE movement_commands_probe)
+wowee_add_original_check(execution          SCRIPT movement_execution FIXTURE execution    PROBE movement_surface_probe)
+wowee_add_original_check(input              SCRIPT movement_input FIXTURE input            PROBE movement_surface_probe)
+wowee_add_original_check(input_queue        SCRIPT movement_input_queue FIXTURE input_queue PROBE movement_surface_probe)
+wowee_add_original_check(input_execution    SCRIPT movement_input_execution FIXTURE input_execution PROBE movement_surface_probe)
+wowee_add_original_check(state_changes      SCRIPT movement_state FIXTURE state            PROBE movement_surface_probe)
+wowee_add_original_check(rate_queue         SCRIPT movement_rate_queue FIXTURE rate_queue  PROBE movement_surface_probe)
+wowee_add_original_check(rate_execution     SCRIPT movement_rate_queue FIXTURE rate_execution PROBE movement_surface_probe ARGS --execute)
+wowee_add_original_check(launch             SCRIPT movement_launch FIXTURE launch          PROBE movement_surface_probe)
+wowee_add_original_check(launch_queue       SCRIPT movement_launch FIXTURE launch_queue    PROBE movement_surface_probe ARGS --queue)
+wowee_add_original_check(launch_execution   SCRIPT movement_launch FIXTURE launch_execution PROBE movement_surface_probe ARGS --execute)
+wowee_add_original_check(mode_queue         SCRIPT movement_mode_queue FIXTURE mode_queue  PROBE movement_surface_probe)
+wowee_add_original_check(mode_execution     SCRIPT movement_mode_queue FIXTURE mode_execution PROBE movement_surface_probe ARGS --execute)
+
+# What the server is sent: status bytes, acknowledgements and reporting.
+wowee_add_original_check(wire_status        SCRIPT movement_status FIXTURE status          PROBE movement_status_probe)
+wowee_add_original_check(force_ack          SCRIPT movement_ack   FIXTURE ack              PROBE movement_ack_probe ARGS ${_wotlk_opcodes})
+wowee_add_original_check(reporting          SCRIPT movement_reporting FIXTURE reporting    PROBE movement_reporting_probe ARGS ${_wotlk_opcodes})
+wowee_add_original_check(local_event        SCRIPT movement_local_event FIXTURE local_event PROBE movement_reporting_probe ARGS ${_wotlk_opcodes})
+wowee_add_original_check(delivery           SCRIPT movement_delivery FIXTURE delivery      PROBE movement_surface_probe ARGS ${_wotlk_opcodes})
+
 # ── test_race_gender_suffix ──────────────────────────────────
 # The two-letter race code per-race models are suffixed with. Written out twice
 # - the helmet resolver and the shoulder attachment - and a wrong suffix reads
@@ -3478,6 +3595,11 @@ wowee_add_suite_test(test_client_end_to_end test_addon_event_queue)
 # from the game, and the saved variables keyed by it. The LFG bindings are the
 # ones that link without the whole interface; the rest share their accessor.
 wowee_add_suite_test(test_client_end_to_end test_character_session)
+
+# The player moved by the original client's rules when the originalMovement
+# setting asks for it: the real game, the map as the original collects it, and
+# what the server is sent. The mover is the client's, so it runs here.
+wowee_add_suite_test(test_client_end_to_end test_original_player_mover)
 
 # ── wowee_loading_test_client ────────────────────────────────
 option(WOWEE_BUILD_RENDER_CLIENT_PROBE "Build native interface/render lifecycle GPU probe" OFF)

@@ -4,8 +4,17 @@ Requirement chosen by the user on 2026-10-22: graphics may change; gameplay
 behaviour must match the original client. See
 [the governing principle](principles/original-gameplay-behaviour.md).
 
-Status: audit complete; behavioural equivalence not established; runtime
-replacement not implemented. This plan supersedes the audit's generic solver
+Status: contact/surface phases, supplied-state world collection, unattached
+frame application and the input/height/rate/knockback/server-mode queue have
+original-executable comparisons. Offline reporting now executes original local
+notification, delayed angular messages, admission, byte serialization and
+heartbeat timing. Combined frame comparisons include actual outgoing packets.
+Full behavioural equivalence is not established and the player solver is not
+replaced. Production world lifecycle, remaining input commands, real unit/input
+callbacks and collision-state notifications, interpolation and transport/spline
+movement remain open. The unresolved raw-input case is retained explicitly.
+See `docs/original-collision-reference.md` for comparison boundaries.
+This plan supersedes the audit's generic solver
 redesign as the acceptance target. A common collision API remains useful, but
 its behaviour must be derived from the original implementation.
 
@@ -111,14 +120,465 @@ replacement in ordinary gameplay or silently mix the two movement models.
 Deliverable: production path uses the verified behaviour; reference regressions
 remain runnable; unsupported cases remain visible in the completion report.
 
+State (2026-11-01): the original mover runs in the client behind the
+`originalMovement` setting (CVar, off by default; `/run SetCVar("originalMovement", 1)`
+switches it while playing). Both movement models stay: the camera's physics
+move the player whenever the setting is off or the original mover cannot take
+the player, and every change of hands is logged with its reason.
+
+- `collision::MovementWorld` collects from the map data as CMap::GetFacets
+  does - tiles with their MCRF lists, MDDF/MODF placements shared by uniqueId,
+  each building's MOGI groups and their MODR doodads of the placement's set -
+  fed tiles by TerrainManager and buildings by the WMO renderer. Doodad
+  models come from `collision::ModelCollisionCache`, the one place an M2's
+  collision is read and built: the renderer offers what it parses, and the
+  cache reads any model nobody offered. A model that cannot load fails its
+  areas; a doodad model not yet built keeps its area NotReady.
+- `core::OriginalPlayerMover` queues the controls, runs
+  `executeUninterpolatedMovement`, reports through the ported reporting
+  (`processLocalMovementEvent12340`, heartbeats from the scheduler), and takes
+  forced movement into the queue, acknowledging it when applied
+  (`game::ClientMover`).
+- The camera only follows the player it moves (`rendering::CharacterMover`).
+
+Not verified against the original, each named where it is made:
+- SetCollisionBox's arguments: CreatureModelData's box of the player's
+  display, scale = object scale x display scale, reference = display scale.
+  The mount's box is not used.
+- Steering by the view: facing and pitch set and re-anchored at the player,
+  then MSG_MOVE_SET_FACING / SET_PITCH through ProcessLocalMoveEvent.
+- Walk mode: WALKING toggled and MSG_MOVE_SET_WALK_MODE / SET_RUN_MODE sent.
+- Collision state messages: FALL_LAND, START_SWIM and STOP_SWIM sent for the
+  state changes the request reports, in place of the unported handler.
+- MovementWorld: the order buildings are listed in, the flight-bounds corner,
+  every MOGI group as a linked group, and placement matrices composed as the
+  renderer composes them (solved against MODF's own boxes).
+- Game objects and other dynamic entities are not in the collected world.
+
+Not supported, so the camera keeps the player: transports, taxis, splines,
+vehicles; expansions other than WotLK. Server teleports restart the mover at
+the new position. The removal of the camera's competing heuristics waits for
+the verification above.
+
+## 7. Validate against the optimization branch
+
+User requirement (2026-10-23): after collision compatibility and production
+integration are finished, verify the changes together with the optimization
+branch, without worsening performance. This is a completion requirement.
+
+Target: `codex/gpu-scene-pipeline`, from the chat “Найти узкие места
+производительности” (`01a15f73-45c0-72b3-88f4-70e1dc72ccfc`). Its observed
+HEAD is `319e4be`; resolve and pin its then-current HEAD again at final testing.
+Do not treat today's revision as the final baseline if that work advances.
+
+- Build two isolated, otherwise identical versions on D: the pinned optimization
+  baseline and that same revision with the completed collision changes. Preserve
+  the optimization session's working files and use identical build settings,
+  graphics options, assets, scene population and movement routes.
+- Re-run collision/reference, protocol and renderer compatibility checks on the
+  combined code. A clean merge or two separately passing branches is insufficient.
+- Compare repeated runs of populated exterior/interior scenes, stairs, corners,
+  jumps/falls and movement across streaming boundaries. Include cold loading and
+  warmed runs; use offline controlled scenes before any ordinary gameplay run.
+- Measure total CPU/GPU frame time, median/p95/p99 frame time, collision/query CPU
+  cost, allocation/peak-memory behavior and loading stalls. FPS alone can hide a
+  collision CPU regression behind GPU work. Keep validation instrumentation out of
+  the performance comparison and preserve the user's active profile.
+- Record exact commits, build/configuration, hardware, scenarios and raw timings.
+  Check variation across repeats; investigate and fix reproducible regressions
+  without weakening original movement behavior. Do not report “no regression”
+  from unchanged average FPS, reduced visual quality or unmeasured scenarios.
+
+Current state: planned; combined integration and performance measurements have
+not run. The optimization chat's latest shadow-quality checks are correctness
+checks and explicitly contain no FPS measurement.
+
 ## Progress
 
 - [x] Audit current implementation and inspect selected original functions.
 - [x] Reproduce current collision defects through the public CollisionWorld API.
 - [x] Record the user's original-behaviour requirement and acceptance criteria.
-- [ ] Executable original-reference comparisons.
+- [x] Executable original-reference comparisons for DistanceToMove on supplied facets.
+- [x] Three legacy query regressions reproduced before fixes and corrected.
 - [ ] Equivalent collision geometry and mover parameters.
-- [ ] Equivalent contact/surface solver.
+- [x] Supplied-geometry contact/surface phases against the original executable.
+  DistanceToMove matches 1306 calls; TraceSurface, stepping and its speculative
+  fall checks match 1069 calls, including consecutive-frame stair trajectories.
+  This does not certify world facet collection or the other movement phases.
 - [ ] Equivalent full movement trajectories and state transitions.
 - [ ] Equivalent server-visible movement.
 - [ ] Verified production integration and removal of competing heuristics.
+  Unverified integration behind `originalMovement` is in place; see step 6.
+- [ ] Combined optimization-branch validation with no reproducible performance regression.
+
+Geometry progress: WMO MOBN/MOBR are now retained through loading and model
+preparation. Independent original-code comparisons cover BSP traversal/masks,
+model facet transforms and terrain chunk queries including holes. SSE references
+execute host RSQRTSS because the emulator's default approximation is incorrect.
+World placement ordering, M2 facets, liquids, impassable boundaries and streaming
+still need to be connected and compared before changing player simulation.
+
+Falling progress: original Fall/FallDown matches 2993 calls, including jump/landing
+sequences, ceiling resets and deferred movement actions. This remains a supplied-
+geometry phase; full frame dispatch, transports and packet delivery are pending.
+
+Swimming/flight progress: resident-facet Swim matches 2848 original calls,
+including water-boundary jump restrictions, solid-contact liquid suppression
+and consecutive frames. Transport detach, active splines and the frame
+dispatcher remain outside this phase. Eleven native collision tests pass.
+
+Hover/ground progress: 2256 HoverMove calls and 1065 GroundNormal queries
+match original machine code on Linux, native MinGW and ASan/UBSan. The frame
+dispatcher, world-facet acquisition and protocol integration are still pending.
+
+M2 progress: fixed the three-float authored-normal loader stride and retained
+normals through collision shape creation. Original GetCollisionFacets agrees
+in 1512 cases on Linux, native Windows and ASan/UBSan. This closes model-local
+facet generation, not whole-world collection order or movement integration.
+
+World-query progress: impassable boundaries agree in 1017 cases; terrain
+liquid facet selection agrees in 1014 x87/SSE cases; mover query extents and
+participation flags agree in 2500 cases. These APIs still need the world
+collector, repeated-query path and production dispatcher, not only phase probes.
+
+Request-dispatch progress: 3413 cases compare the unattached CollideRequestMove
+path, repeated geometry queries, liquid inversion, phase changes and event
+boundary calls. Query preparation/refresh has 3700 cases. Missing geometry in
+FallDown now follows the original skipped-time branch. Real world gathering,
+unit event delivery, active splines, transports and production integration are
+still required; this milestone does not close the overall checklist.
+
+ADT/flight progress: MCRF placement ordinals and MHDR-controlled MFBO bounds
+are retained, with explicit failure for corrupt references. Flight-bound facets
+match 1608 original calls; the native collision/ADT selection passes 22/22.
+Remaining loader gaps include original liquid vertex material formats, raw MCLQ
+participation and world links. The production movement path remains unchanged.
+
+
+Authored liquid/world progress: retained raw MCLQ/MH2O layers separately from
+visual height fallbacks, including legacy tile flags, material vertex formats,
+rectangle masks and original layer order. MCNK identity now comes from its
+header coordinates rather than file order. Immutable terrain snapshots carry
+MCRF references, MDDF/MODF placements, flight bounds and raw liquid inputs.
+Original liquid vertex readers/CreateVertXY agree in 1800 cases. Original
+GetFacets dispatch agrees in 2130 cases, and the loaded terrain/liquid portion
+of GetChunkFacets agrees in 650 cases. The dispatcher is abstract until all
+world object sources are supplied; it is not a production movement replacement.
+
+WMO liquid progress: GenLiquidVerts/GetLiquidFacets agree in 908 cases on Linux,
+native MinGW and ASan/UBSan; host-SSE comparisons also pass. Tests cover exact
+cell seams, tile participation, transformed planes and the 8192-vertex cull
+limit. The WMO cell multiplier is one float above the terrain multiplier; using
+the terrain value failed 10 seam cases before correction. Liquid-only groups
+now survive loading and shape preparation. Every source group is retained in
+file order, with authored bounds, BSP, MODR references and liquid vertices,
+independently of renderable batches. Truncated MLIQ no longer fabricates wet
+cells; both loader regressions failed against the old loader before passing.
+
+Unavailable terrain progress: the absent/asynchronous-area branch of
+GetChunkFacets, including its AddAaBoxFacets barriers, agrees in 1254 cases on
+Linux, native Windows and ASan/UBSan. WDT presence, local-control participation,
+near-body rejection, original cell coordinates, touching bounds and facet
+order are covered. A resident area's missing chunk remains a separate failure.
+This does not validate WMO/doodad availability or the streaming owner's wiring.
+
+Validation for this increment: 29/29 native collision/ADT tests pass; changed
+WMO model preparation and renderer objects compile. The invalid MH2O rectangle
+regression first produced an ASan heap-buffer-overflow, then passed after
+rejecting the rectangle before visual mask construction. All seven ADT
+collision tests pass (174 assertions), as do WMO loader/shape regressions.
+No game account or server was used. Production movement is still the old path.
+Remaining work includes MOGI/world placement selection and order, linked doodads
+and dynamic objects, mover dimensions, transports/splines, unit event delivery
+and packet comparisons. The overall acceptance checklist remains open.
+
+WMO model assembly progress: `appendWmoModelFacets` matches 682 executions of
+GetTris/GetLiquidFacets, including MOGI selection independent of MOGP, authored
+group order, the separate solid/liquid passes, 31 usable batches and strict
+face/index pool limits. Liquid rectangles reserve all clipped indices before
+filtering dry cells. Preparation now retains MOGI bounds beside every source
+group; missing MOGI is reported rather than replaced by visual mesh bounds.
+
+World WMO progress: `appendWorldWmoFacets` matches 1693 original GetMapObjFacets
+executions. Coverage includes rotated/scaled/translated placements, x87 center
+rounding and per-axis AABB stores, root/group bounds, disabled placements,
+destructible proxy rejection, partial output before failure, local-control
+barriers and their different whole-building/group readiness rules. Linked
+M2/entity calls in this particular oracle are supplied services: call order,
+arguments and facet counts are compared, but their bodies are not executed
+there. Separate collectors below execute those bodies independently.
+
+Linked M2 progress: `appendDoodadFacets` matches 1248 GetDoodadDefFacets
+executions with real M2 facet generation and original box barriers. This covers
+query-tag deduplication across lists, marking misses, GUID-dependent masks,
+disabled/missing models and transformed shared-model bounds while preparation
+is pending. No per-model exemptions or visual bounds substitutions were added.
+
+Dynamic entity progress: `appendEntityFacets` matches 1095
+QueryDestructibleFacets executions with a supplied collision-data callback and
+real M2 facet generation. The first link without static flag 2 ends the list;
+hidden/visited entries skip instead. Callback failure still marks the query
+tag, while callback absence does not. Parameters, callback order and returned
+facet ownership are compared. The real game's collision-data provider still
+needs to be wired and validated.
+
+The four new independent fixture sets contain 4718 cases. Linux comparisons
+and ASan/UBSan pass; WMO model/world comparisons also pass with host RSQRTSS.
+This closes additional collection rules, not the world owner's lifecycle,
+original placement/link construction, combined collector integration, mover
+sizes, active splines/transports or network reporting. Production player
+movement remains on the old path until those contracts are verified.
+
+Validation for the object-collection increment: 33/33 native collision/ADT tests
+pass, WMO model/world host-SSE results also match on native Windows, affected
+renderer objects compile, and all available sweep_guard checks remain within
+their ceilings. No live client or player account was used.
+
+Combined supplied-world collection now matches 1072 original GetFacets calls,
+executing WMO, terrain, linked M2 and entity-list collection together. Shared
+objects occur in multiple lists, with successive query tags, missing areas and
+partial groups. The only substituted geometry service is the dynamic entity's
+collision-data callback. The real streaming/link lifecycle remains separate.
+
+Mover dimension rules now match 1884 original executions of SetCollisionBox /
+SetCollisionHeight followed by real query-envelope generation or refresh. The
+model scale, reference scale, forced height and controlled-player override rules
+are retained. Server height events still need ownership, queue timing and ACK
+integration; this is not yet a live fix for the ignored-height packet handler.
+
+Falling-edge precision: 3705 new original-code cases cover thin tilted platforms,
+nearby walls, large coordinates, jump-peak boundaries and the falling-far flag.
+Before correction, 43 edge trajectories and 75 falling-far boundary cases failed.
+Original x87 intermediate/store boundaries are now retained in edge selection,
+plane intersection, steep support evaluation and fall threshold comparisons.
+All 3705 Linux comparisons pass. This replaces rounding errors, not the original
+movement rules. Production movement and outgoing-packet parity remain open.
+
+Combined movement/world progress: 1072 cases execute CollideRequestMove and real
+GetFacets together in the original binary, comparing resulting movement state,
+query order/extents, readiness and movement-event boundary calls. These pass on
+Linux and native Windows. Synthetic authored geometry and link state are supplied;
+unit event/network delivery is observed rather than executed. The old world-query
+reference still matches all 1072 cases after sharing its setup with this oracle.
+
+Validation: 37/37 native collision/ADT tests pass. The expanded 3705-case falling
+regression also passes ASan/UBSan. Dimensions and standalone combined-world
+comparisons passed their respective sanitizer probes. No live account was used.
+
+Projection/frame progress: original PlotUnitMovement (0x987b50) and its complete
+mode table agree in 4096 cases, including turning, pitching, spiral motion,
+ascent/descent, optional output pointers and 32-bit time boundaries. A separate
+host FSINCOS oracle also matches all cases; projection passes ASan/UBSan.
+
+ApplyMovement (0x6eac40) now joins projection, local/remote anchor timing,
+RequestMove and the real world collector. All 1444 cases match, including
+remote delay ramps, counter wrap and world-edge admission. A premature target
+store in the initial port caused 552 divergences; preserving the original x87
+anchor-plus-move-minus-position sequence resolves them. Thirty-frame sequences
+include landing and subsequent movement. This entry explicitly
+excludes interpolation, attached transports, splines and queued input delivery.
+The frame oracle supplies thread globals and an empty game-object registry;
+unit SkipTime/event delivery is observed at its boundary. It does not validate
+heartbeat packet scheduling or the complete ExecuteMovement loop.
+
+The earlier combined movement/world oracle also passes ASan/UBSan, and the full
+sweep remains within its ceilings. The 1444-frame/4096-projection increment
+passes the 39-test native collision/ADT selection. The overall acceptance
+checklist remains open, and ordinary gameplay still uses the previous path.
+
+Final frame validation: all 1444 cases, including the six thirty-frame sequences,
+pass native Windows and ASan/UBSan. All 39 native collision/ADT tests pass and
+sweep_guard remains within every ceiling (unavailable optional checks skip).
+
+
+### 2026-10-23 — Height queue and execution schedule
+
+Verified height command ordering and application-before-notification through
+36,864 original UpdatePlayerMovement calls in 768 scenarios. Verified the
+ExecuteMovement schedule joined to the frame solver and supplied-state world
+collector in 1444 cases, including six thirty-frame sequences. This includes
+250ms frame limits, rollover, timed height changes, heartbeat deadlines,
+unavailable geometry and passenger deferral. Linux ASan/UBSan and native
+Windows pass; the full native collision/ADT selection is now 41/41.
+
+Scope remains explicit: heartbeat preparation is a successful supplied service,
+not verified wire bytes. Unit events, height notification delivery and mover
+retirement are observed boundaries; their remaining side effects are not
+silently treated as implemented. No change is enabled in player control.
+Next work is the remaining original input/state commands, their synchronous
+unit/protocol effects and integration with production world ownership.
+
+
+### 2026-10-23 — Shared input state transitions
+
+Added the original shared start/stop operations for forward/backward motion,
+strafe, turn, pitch and ascent/descent, plus Jump(1), reusing the verified
+anchor, direction and speed calculations. All 5120 original-code comparisons
+pass: random states plus explicit ordinary, falling/pending, swimming, flying,
+rooted, gravity-disabled and pitch/no-jump/no-strafe cases. Float32 outputs
+and return values are compared; void start-turn/pitch operations have an
+explicit true adapter result. Native Windows and ASan/UBSan pass. The native
+collision/ADT selection passes 42/42, with the expanded input matrix rerun
+separately. The collision dependency check remains clean.
+
+These shared operations are not queue admission: the original event dispatcher
+also suppresses some inputs for transport/root/pending-root, updates heartbeat
+clocks and calls the unit/input services. Wiring and independently validating
+those synchronous effects remains the next step.
+
+
+### 2026-10-23 — Basic input queue and complete offline execution
+
+The common queue now admits the 16 basic input operations alongside collision
+height changes, preserves stable timed ordering, enforces the original
+transport/root/pending-root gates and resets extrapolation delay even for
+ignored input. Angular-stop notifications and the fallback heartbeat reset
+are delivered synchronously at their original boundaries.
+
+All 5120 queue scenarios match original AddPlayerMoveEvent/UpdatePlayerMovement.
+All 1564 combined input/height/scheduler/world scenarios match, including ten
+thirty-frame trajectories and mixed commands with equal timestamps. ASan/UBSan
+and native Windows pass; the full native collision/ADT selection is 44/44.
+The 36,864 height-only update calls still pass with the generalized queue.
+
+Unit notification delivery in these fixtures reports no send; original dispatch
+executes its own fallback heartbeat reset. Heartbeat packet preparation itself
+is still supplied as a successful service. Actual outgoing packet contents and
+unit side effects are the next verification boundary. The complete original
+movement-status writer can now execute against a supplied CDataStore buffer;
+a scratch probe has produced its real bytes for a falling mover.
+
+
+### 2026-10-23 — Original movement status serialization
+
+Executed the original complete movement-status writer into CDataStore storage.
+Added an offline core adapter from the verified collision state to MovementInfo
+and 1024 original byte fixtures. The test failed in 512 cases before changing
+the existing codec: ALWAYS_ALLOW_PITCHING did not cause pitch emission, and
+SPLINE_ELEVATION was neither written nor retained by the reader. Both are fixed
+in the ordinary WotLK codec; the new movement solver remains offline.
+
+All 1024 outgoing payloads and read/rewrite checks against original bytes now
+pass on Linux, native Windows and ASan/UBSan. Existing movement payload and
+pre-WotLK packet tests pass. Full sweep passes. The preceding collision/ADT
+selection remains 44/44; this increment adds the independent wire-status test.
+Packet envelopes, ACK metadata and complete synchronous unit effects still need
+comparison and integration, alongside remaining movement/world lifecycle work.
+
+
+### 2026-10-23 — Complete ordinary forced ACK envelopes
+
+Executed original PrepareMovementPacket (0x71ef80), including active-mover
+admission and the real CDataStore writers, for 1280 cases across 20 ACK types.
+All output bytes match on native Windows and ASan/UBSan. A GameHarness test
+first failed on all ten enable/disable flag commands: the WotLK handler omitted
+the float value for hover, feather fall, water walk, can fly and swim/fly
+transition. A shared WotLK ACK builder now owns conditional values for those
+commands, nine speed/rate changes and collision height. Gravity, root/unroot
+and knockback carry no value. Other expansion paths retain their prior layout.
+
+Native ACK domain, original wire status, original ACK, movement payload and
+pre-WotLK tests pass (5/5). This verifies construction and command routing,
+not the remaining movement-state effects, timing, active transport/spline
+handling or unit event side effects. Those remain work before solver rollout.
+
+
+### 2026-10-23 — Shared state changes and timed rates
+
+4784 comparisons cover all nine speed/rate changes and shared gravity, feather
+fall, post-feather-fall, water walk, hover, root and unroot operations without
+an active spline. This includes rate equality/epsilon boundaries and airborne
+pending root. Shared mode functions do not yet implement their queue's unit
+effects: feather-fall's post-step, for example, must occur after its ACK.
+
+Added typed rate changes to the common input/height queue. State changes happen
+before notification even when the rate compares equal. All 2304 mixed queue
+cases match original enqueues/dispatch, including wrapping clocks, equal-time
+ordering, future commands, root/transport flags and passenger deferral.
+1444 complete scheduler/world comparisons pass, including 180 consecutive
+trajectory frames. Each rate notification also compares the state visible to
+the unit at that moment. Unit notification returns false (no send); heartbeat
+preparation remains a supplied successful boundary.
+
+Native collision/ADT selection: 49/49. All three new matrices pass ASan/UBSan.
+Full sweep passes after consolidating the ACK builder's repeated player-GUID
+lookup (domain ownership reach count 1205, below ceiling 1206). No new physics
+is enabled in ordinary gameplay. Remaining queued mode/knockback transitions,
+unit side effects, lifecycle and integration remain required work.
+
+
+### 2026-10-23 — Unattached knockback and swim/flight exit
+
+Added original StopSwim, StopFlying and Launch without an attached transport
+or active spline. Shared-state coverage is now 5328 calls; 2560 standalone
+Launch cases also match. Launch retains the supplied direction, exits swim
+or flight, defers root and sets pending stop in the original order.
+
+Timed knockback initially diverged in 1093 mixed queue cases: UpdatePlayerMovement
+rejects knockback while ONTRANSPORT, although direct Launch still has defined
+state behavior. The gate was added at dispatch, preserving delay reset and
+skipping ACK/interpolation work exactly there. All 2304 queue cases now match.
+1424 complete scheduler/world scenarios match, including 160 consecutive frames
+with repeated launches. State visible at each ACK boundary is compared.
+Native collision/ADT selection is 52/52; all new matrices pass ASan/UBSan.
+Transport-frame conversion, attached movement and real unit/protocol effects
+remain outside these offline comparisons.
+
+
+### 2026-10-23 — Timed server modes and gravity collision phase
+
+The common queue now handles gravity, feather fall, water walk, hover, root,
+can-fly and swim/fly transition, preserving ACK order and observed unit/input
+boundaries. Shared state now compares 5872 original calls. Mode dispatch matches
+2304 mixed queues; complete server-command execution matches 1444 scenes/frames,
+including 180 consecutive trajectory frames. Native collision/ADT: 54/54.
+The mode queue and execution matrices also pass ASan/UBSan; full sweep passes.
+
+Full execution first exposed 93 mismatches: collision phase and vertical
+projection ignored gravity disabled through movement flag 0x400 or flags2 bit 4.
+Using the original CanCollideWhileFlying condition resolves all 93.
+
+An additional arbitrary local-input/server-mode sequence remains unresolved:
+original_mode_input_boundary_12340.json preserves root + swimming + descending +
+disabled gravity on an inactive mover. With unit/input handlers stubbed, original
+ApplyMovement repeatedly requests seven milliseconds without consuming time;
+the diagnostic reaches its ten-million-instruction budget. This is not evidence
+of a complete original-client hang. The diagnostic intentionally fails and is
+not part of the passing matrix. Real input admission and unit effects must be
+resolved; no invented escape or gameplay rollout was added. Retire observations
+are lifecycle requests, not proof of successful removal from the mover list.
+
+
+### 2026-10-23 — Actual movement reporting and landing input notification
+
+Added offline original SendMovementUpdate and ProcessLocalMoveEvent composition.
+2560 reporting cases compare admission, exact packet bytes, unit reporting flags,
+property samples and heartbeat timing. ACKs and not-active-mover reports bypass
+ordinary active-mover admission; only an active mover advances its deadline, after
+connection submission. Another 2560 local-event cases compare synchronous unit
+callback order, pending turn/pitch messages, the strict >100 ms flush boundary,
+angle-change suppression and wrapping clocks. Unit callbacks are observed and do
+not yet perform real input or presentation effects.
+
+The full original queue/collision/reporting comparison now uses the unit's actual
+inline mover and actual packet preparation, replacing the earlier successful-send
+stub. It compares 2828 frames, including 300 consecutive trajectory frames with
+reporting state carried forward. Wire bodies are compared exactly, independently
+of the numeric tolerance used for geometry observations.
+
+Those trajectories first exposed four missing MoveStopped notifications during
+landing. Pending-stop handling now calls its observer synchronously, after the
+forward stop and anchor update but before the remaining pending actions. The
+execution owner preserves the original active-mover and queued-forward/backward
+admission rule; the gravity command uses the same queue query. No new motion or
+escape rule was added.
+
+The actual collision-state event handler and real input callbacks are still
+unimplemented boundaries. The synthetic root/swim/descend/gravity case remains
+unresolved. Transport/spline/lifecycle and production integration are still
+required; these additions do not enable the new solver for ordinary gameplay.
+
+Validation after the landing fix: native collision/ADT suite 57/57; ACK/domain/
+layout/reporting selection 8/8; all 2828 delivered frames match with ASan/UBSan.
+Standalone reporting and local-event matrices also pass ASan/UBSan. Full sweep
+passes; final collision-dependency and duplicate-tool checks both report zero.
