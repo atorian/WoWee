@@ -1744,6 +1744,7 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
     laps.lap("ribbons");
     if (shadowMatrix != glm::mat4(0.0f)) {
         gatherReusedShadowCandidates(shadowMatrix, shadowRadius);
+        laps.lap("sun shadow candidates");
         frame->solarDepth.reserve(shadowCandidates_.size());
         for (uint32_t index : shadowCandidates_) {
             const auto& inst = scene_->instances[index];
