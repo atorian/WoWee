@@ -425,7 +425,7 @@ private:
      */
     void workerLoop();
 
-    void ensureGroundEffectTablesLoaded();
+    void loadGroundEffectTables();
     void generateGroundClutterPlacements(std::shared_ptr<PendingTile>& pending,
                                          std::unordered_set<uint32_t>& preparedModelIds);
 
@@ -591,7 +591,8 @@ private:
         std::array<uint32_t, 4> weights{{0, 0, 0, 0}};
         uint32_t density = 0;
     };
-    bool groundEffectsLoaded_ = false;
+    // Filled by initialize() before the workers start, read-only after: every
+    // worker reads them while it prepares a tile.
     std::unordered_map<uint32_t, GroundEffectEntry> groundEffectById_; // effectId -> config
     std::unordered_map<uint32_t, std::string> groundDoodadModelById_;  // doodadId -> model path
     float groundClutterDensityScale_ = 1.0f;

@@ -327,7 +327,7 @@ ImGui::EndChild();
 if (ImGui::Button("Restore Audio Defaults", ImVec2(-1, 0))) {
     restoreSchemaDefaults("Sound");
     restoreSchemaDefaults("Sound Effects");
-    applyAudioVolumes(services_.audioCoordinator);
+    applyAudioSettings(services_.audioCoordinator);
     saveCallback();
 }
 
@@ -855,11 +855,9 @@ constexpr const char* kGraphicsApplyKeys[] = {
     // applies them at startup; the cvar store used to do it.
     "groundclutterdistance", "particledensity", "weatherdetail",
     "environmentdetail", "texturefiltering",
-    // The sound switches off the game's own panel. The stored cvars are
-    // replayed at startup and reach them that way too, but a setting whose
-    // only route in is the cvar behind it is one rename away from silence.
-    "soundinbackground", "enablemusic", "loopmusic", "enableambience",
-    "errorspeech", "enablesoundeffects",
+    // Not the sound switches: the audio managers do not exist yet when the
+    // file is read, and the game screen applies every audio setting together
+    // once they do - see applyAudioSettings.
 };
 
 /// Whether a quality preset has an opinion about this setting.
@@ -1113,7 +1111,6 @@ constexpr FieldBinding kFieldBindings[] = {
     {.key = "mountvolume",     .asInt  = &SettingsPanel::pendingMountVolume},
     {.key = "activityvolume",  .asInt  = &SettingsPanel::pendingActivityVolume},
     {.key = "npcvoicevolume",  .asInt  = &SettingsPanel::pendingNpcVoiceVolume},
-    {.key = "characterspeech", .asBool = &SettingsPanel::pendingCharacterSpeech},
     {.key = "woweemusic",      .asBool = &SettingsPanel::pendingUseOriginalSoundtrack},
 
     // --- Gameplay ---
@@ -1165,18 +1162,20 @@ const FieldBinding* findFieldBinding(const std::string& key) {
 }
 
 /// Whether changing this setting means the audio coordinator has to work the
-/// volumes out again.
+/// sound out again.
 ///
-/// Every one of them does, including the two that are not volumes: character
-/// speech switches the player voice manager on and off inside the same call,
-/// and the effects slider scales seven of the others.
-bool isVolumeKey(const std::string& key) {
+/// Every volume and every switch over them does: the switches multiply the
+/// volumes, and the effects slider scales seven of the others, so the
+/// coordinator works them all out together. Sound in background is not here -
+/// it is read when the window loses the focus.
+bool isAudioKey(const std::string& key) {
     return key == "mastervolume" || key == "mutesound" ||
            key == "effectsvolume" || key == "musicvolume" || key == "ambientvolume" ||
            key == "bellvolume" || key == "uivolume" || key == "combatvolume" ||
            key == "spellvolume" || key == "movementvolume" || key == "footstepvolume" ||
            key == "mountvolume" || key == "activityvolume" || key == "npcvoicevolume" ||
-           key == "characterspeech";
+           key == "enablemusic" || key == "loopmusic" || key == "enableambience" ||
+           key == "enablesoundeffects" || key == "errorspeech";
 }
 
 }  // namespace
@@ -1198,19 +1197,6 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
     auto* chars = renderer ? renderer->getCharacterRenderer() : nullptr;
     auto* terrain = renderer ? renderer->getTerrainRenderer() : nullptr;
 
-    // The switches the game's own Sound panel used to own. Writing the setting
-    // has already written the cvar behind it - see noteClientSettingChanged -
-    // and this is what re-reads them. applySoundCVars is where the knowledge
-    // of what each one silences lives, so it stays the only copy.
-    if (key == "soundinbackground" || key == "enablemusic" || key == "loopmusic" ||
-        key == "enableambience" || key == "errorspeech" || key == "enablesoundeffects") {
-        if (services_.characterAddons()) {
-            if (auto* engine = services_.characterAddons()->getLuaEngine()) {
-                if (auto* L = engine->getState()) addons::applySoundCVarSideEffects(L);
-            }
-        }
-        return;
-    }
     if (key == "viewdistance") {
         if (renderer) renderer->setViewDistance(pendingViewDistance);
     } else if (key == "shadows") {
@@ -1465,10 +1451,10 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
             services_.gameHandler->runInterfaceCommand(
                 wowee::addons::kChatBoxVisibilityLua);
         }
-    } else if (isVolumeKey(key)) {
+    } else if (isAudioKey(key)) {
         // Every volume goes through one call, because each of them is a balance
         // against the others and the coordinator works them all out together.
-        applyAudioVolumes(services_.audioCoordinator);
+        applyAudioSettings(services_.audioCoordinator);
     }
 
     // And say so, for the settings whose effect is not this client's to apply.
@@ -1577,19 +1563,31 @@ bool SettingsPanel::setSettingValue(const std::string& key, const std::string& v
     return true;
 }
 
-void SettingsPanel::applyAudioVolumes(audio::AudioCoordinator* ac) {
+void SettingsPanel::applyAudioSettings(audio::AudioCoordinator* ac) {
     if (!ac) return;
+    // Each switch multiplies its channels here, beside the sliders, rather than
+    // being laid over them afterwards. Laid over them, a switch was undone by
+    // whatever applied the sliders next - any slider, the minimap's mute
+    // button, the apply at startup - so music turned off came back the moment
+    // the master volume moved, and stayed on across a restart.
+    //
     // Every effect volume is its own balance; this is the one slider over them,
     // which is what Blizzard's Sound Effects control drives.
-    const float fx = static_cast<float>(pendingEffectsVolume) / 100.0f;
+    const float fx = pendingEnableSoundEffects
+                         ? static_cast<float>(pendingEffectsVolume) / 100.0f : 0.0f;
+    const float ambience = pendingEnableAmbience ? 1.0f : 0.0f;
     float masterScale = soundMuted_ ? 0.0f : static_cast<float>(pendingMasterVolume) / 100.0f;
     audio::AudioEngine::instance().setMasterVolume(masterScale);
     if (auto* music = ac->getMusicManager())
-        music->setVolume(pendingMusicVolume);
+        music->setVolume(pendingEnableMusic ? pendingMusicVolume : 0);
+    // Not a volume, but the music's own setting, and the apply at startup is
+    // this call: loaded with the rest, it reached the music only once a
+    // SetCVar happened to carry it.
+    ac->setZoneMusicLooping(pendingLoopMusic);
     if (auto* ambient = ac->getAmbientSoundManager())
     {
-        ambient->setVolumeScale(pendingAmbientVolume / 100.0f);
-        ambient->setBellVolumeScale(pendingBellVolume / 100.0f);
+        ambient->setVolumeScale(ambience * pendingAmbientVolume / 100.0f);
+        ambient->setBellVolumeScale(ambience * pendingBellVolume / 100.0f);
     }
     if (auto* ui = ac->getUiSoundManager())
         ui->setVolumeScale(fx * pendingUiVolume / 100.0f);
@@ -1604,11 +1602,12 @@ void SettingsPanel::applyAudioVolumes(audio::AudioCoordinator* ac) {
     if (auto* npcVoice = ac->getNpcVoiceManager())
         npcVoice->setVolumeScale(fx * pendingNpcVoiceVolume / 100.0f);
     if (auto* playerVoice = ac->getPlayerVoiceManager()) {
-        playerVoice->setEnabled(pendingCharacterSpeech);
+        // The refusals are all this manager speaks, so Spoken refusals is its
+        // switch. A "Character speech" row drove the same flag as well, and
+        // the two overwrote each other in turn.
+        playerVoice->setEnabled(pendingErrorSpeech);
         // And its volume, which has no slider of its own but is an effect
-        // channel like the eight above. The interface's Sound Effects switch
-        // zeroes this scale along with theirs; restoring only `enabled` left
-        // the character silent for good once that switch had been off.
+        // channel like the eight above.
         playerVoice->setVolumeScale(fx);
     }
     if (auto* mount = ac->getMountSoundManager())

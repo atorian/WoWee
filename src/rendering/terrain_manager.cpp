@@ -169,6 +169,11 @@ bool TerrainManager::initialize(pipeline::AssetManager* assets, TerrainRenderer*
         return false;
     }
 
+    // Before the workers: each reads these tables while it prepares a tile.
+    // Loaded by whichever worker came first, the others read the maps while
+    // it was still filling them, and the client crashed entering the world.
+    loadGroundEffectTables();
+
     // Start background worker pool (dynamic: scales with available cores)
     // Keep defaults moderate; env override can increase if streaming is bottlenecked.
     workerRunning.store(true);
@@ -680,10 +685,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
     }
 
     // Procedural ground clutter from terrain layer effectId -> GroundEffectTexture/Doodad DBCs.
-    if (!landmarks) {
-        ensureGroundEffectTablesLoaded();
-        generateGroundClutterPlacements(pending, preparedModelIds);
-    }
+    if (!landmarks) generateGroundClutterPlacements(pending, preparedModelIds);
 
     if (!workerRunning.load() || !mapToken_.current()) return nullptr;
 
@@ -1980,10 +1982,7 @@ std::string TerrainManager::getADTPath(const TileCoord& coord) const {
            std::to_string(coord.x) + "_" + std::to_string(coord.y) + ".adt";
 }
 
-void TerrainManager::ensureGroundEffectTablesLoaded() {
-    if (groundEffectsLoaded_ || !gameTables_) return;
-    groundEffectsLoaded_ = true;
-
+void TerrainManager::loadGroundEffectTables() {
     // ID, 4 doodad ids, 4 weights, density; ID, model name.
     const auto groundEffectTex = gameTables_->table("GroundEffectTexture.dbc", 10, "ground clutter");
     const auto groundEffectDoodad = gameTables_->table("GroundEffectDoodad.dbc", 2, "ground clutter");

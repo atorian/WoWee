@@ -1068,9 +1068,6 @@ bool Application::initialize() {
             LOG_INFO("Exit Game with no session to leave - closing");
             if (window) window->setShouldClose(true);
         };
-        luaSvc.setZoneMusicLooping = [this](bool loop) {
-            if (audioCoordinator_) audioCoordinator_->setZoneMusicLooping(loop);
-        };
         luaSvc.setGroundDetailDistance = [this](float yards) {
             if (!renderer) return;
             if (auto* m2 = renderer->getM2Renderer()) m2->setGroundDetailDistance(yards);
@@ -1118,39 +1115,6 @@ bool Application::initialize() {
             }
         }
 
-        // FrameXML's Sound options, driving this client's own audio settings.
-        // Its sliders are 0..1 and these are percentages, so the conversion
-        // happens here rather than in the binding.
-        luaSvc.getAudioSetting = [uim = uiManager.get()](const std::string& key) -> float {
-            if (!uim) return 0.0f;
-            auto& sp = uim->getGameScreen().getSettingsPanel();
-            if (key == "master")  return static_cast<float>(sp.pendingMasterVolume) / 100.0f;
-            if (key == "music")   return static_cast<float>(sp.pendingMusicVolume) / 100.0f;
-            if (key == "ambient") return static_cast<float>(sp.pendingAmbientVolume) / 100.0f;
-            if (key == "enableall") return sp.soundMuted_ ? 0.0f : 1.0f;
-            return 0.0f;
-        };
-        luaSvc.setAudioSetting = [uim = uiManager.get(), this](const std::string& key, float v) {
-            if (!uim) return;
-            auto& gs = uim->getGameScreen();
-            auto& sp = gs.getSettingsPanel();
-            const int pct = static_cast<int>(std::lround(v * 100.0f));
-            if (key == "master") {
-                sp.pendingMasterVolume = pct;
-                // Raising it means sound is wanted, the same as the slider in
-                // the client's own panel does.
-                if (pct > 0) sp.soundMuted_ = false;
-            } else if (key == "music")   { sp.pendingMusicVolume = pct;
-            } else if (key == "ambient") { sp.pendingAmbientVolume = pct;
-            } else if (key == "enableall") { sp.soundMuted_ = (v <= 0.0f);
-            } else { return; }
-            sp.applyAudioVolumes(audioCoordinator_.get());
-            gs.saveSettings();
-        };
-        luaSvc.reapplyAudioVolumes = [uim = uiManager.get(), this]() {
-            if (!uim) return;
-            uim->getGameScreen().getSettingsPanel().applyAudioVolumes(audioCoordinator_.get());
-        };
         luaSvc.macroIconPath = [this](const game::Macro& macro) {
             return ui::macroIconPath(macro, *gameHandler, pet::orNoPet(pet_.get()), renderer.get());
         };

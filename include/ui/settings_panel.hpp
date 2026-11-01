@@ -100,7 +100,6 @@ public:
     int pendingNpcVoiceVolume = 100;
     int pendingMountVolume = 70;
     int pendingActivityVolume = 100;
-    bool pendingCharacterSpeech = true;
 
     // ---- Pending camera / controls ----
     float pendingMouseSensitivity = 0.2f;
@@ -264,7 +263,6 @@ public:
 
     // ---- Mute state: mute bypasses master volume without touching slider values ----
     bool soundMuted_ = false;
-    float preMuteVolume_ = 1.0f;  // AudioEngine master volume before muting
 
     // ---- Config toggles (read by GameScreen rendering, edited by Interface tab) ----
     float nameplateScale_ = 1.0f; // Scale multiplier for nameplate bar dimensions
@@ -283,8 +281,9 @@ public:
     /// Render the settings window (call from GameScreen::render)
     void renderSettingsWindow(ChatPanel& chatPanel, const std::function<void()>& saveCallback);
 
-    /// Apply audio volume levels to all audio coordinator sound managers
-    void applyAudioVolumes(audio::AudioCoordinator* ac);
+    /// Apply every audio setting - the volumes, the mute, the switches that
+    /// silence a channel and music looping - to the coordinator's managers.
+    void applyAudioSettings(audio::AudioCoordinator* ac);
 
     /// Read or write a setting by the key the schema names it with.
     ///

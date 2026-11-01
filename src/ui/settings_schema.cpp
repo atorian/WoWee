@@ -754,8 +754,10 @@ constexpr SettingDesc kSchema[] = {
 
     {"npcvoicevolume", "NPC voices", SettingKind::Int, 0, 100, 5, "Sound", "Voices",
      "Greetings, farewells and quest speech from the people you talk to.", "", 100},
-    {"characterspeech", "Character speech", SettingKind::Bool, 0, 0, 0, "Sound", "",
-     "Your own character's grunts, greetings and emotes.", "", 1},
+    // There was a Character speech row here, promising the character's grunts,
+    // greetings and emotes. This client plays none of those; the switch drove
+    // the refusal voice, the same flag as the row below, and the two undid
+    // each other.
     {"errorspeech", "Spoken refusals", SettingKind::Bool, 0, 0, 0, "Sound", "",
      "Your character saying why an action was refused - \"I can't do that\n"
      "yet\", \"Not enough rage\".", "", 1},

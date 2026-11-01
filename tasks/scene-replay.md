@@ -138,3 +138,9 @@ In this approximate reproduction, extraction averaged 17.87 ms (p95 20.44): M2
 7.05 ms, RT source synchronization 4.81 ms, RT region updates 1.65 ms, terrain
 3.03 ms. These identify work to investigate, not an optimization gain. The normal
 client was restored with the complete active profile after the offline run.
+
+The original capture was lost with its worktree on 2026-11-01. The saved
+baselines now name
+`build-dev/scratch/gpu-scene-pipeline/dalaran-live-current-data-20261022.json`:
+the same events, samples and settings with only the manifest signature updated
+for the current data (`dalaran-current-data-provenance.json` beside it).
