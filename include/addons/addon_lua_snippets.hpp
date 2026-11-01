@@ -706,8 +706,8 @@ elsewhereText:SetJustifyV("TOP")
 --
 -- Music and ambience were on this list and should not have been: they are rows
 -- in the schema, drawn on our own Sound panel. The game's controls for them
--- reach the same values through getAudioSetting, which is what stops the two
--- disagreeing - not their being left out of here.
+-- reach the same values through the CVars bound to those rows, which is what
+-- stops the two disagreeing - not their being left out of here.
 WOWEE_SETTINGS_ELSEWHERE = {
     -- "gamma (brightness)" because it is one control with two names: the
     -- game's panel calls it gamma, this client's own window calls it

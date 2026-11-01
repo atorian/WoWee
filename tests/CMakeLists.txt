@@ -3477,6 +3477,15 @@ wowee_add_test(test_rain_audio
     SOURCES test_rain_audio.cpp)
 target_link_libraries(test_rain_audio PRIVATE wowee_client wowee_pipeline wowee_base ${CMAKE_DL_LIBS} Threads::Threads)
 
+# ── test_audio_settings ──────────────────────────────────────
+# The sound settings through setSettingValue: a volume set in the client is
+# what the next start replays from the CVar store, and a switch keeps its
+# channels quiet whatever applies the volumes after it (that half needs a
+# playback device and is opt-in).
+wowee_add_test(test_audio_settings
+    SOURCES test_audio_settings.cpp ${TEST_COMMON_SOURCES})
+target_link_libraries(test_audio_settings PRIVATE wowee_client)
+
 # ── The libraries' sources from their libraries, never a copy ─
 # Keep this last, after every test is declared. A test that names a source one
 # of these libraries builds has that source taken out of its own list and links

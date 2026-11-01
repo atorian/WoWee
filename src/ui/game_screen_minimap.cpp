@@ -204,10 +204,10 @@ void GameScreen::renderMinimapButtons(game::GameHandler& gameHandler, float cent
     auto* minimap = renderer ? renderer->getMinimap() : nullptr;
     if (!minimap) return;
     // The same work the settings panel does when a volume changes. It used to be
-    // a second copy of applyAudioVolumes with every manager listed again, which
+    // a second copy of applyAudioSettings with every manager listed again, which
     // was two places to remember when a manager was added.
     auto applyMuteState = [this]() {
-        settingsPanel_.applyAudioVolumes(services_.audioCoordinator);
+        settingsPanel_.applyAudioSettings(services_.audioCoordinator);
     };
     // Speaker mute button at the minimap top-right corner
     ImGui::SetNextWindowPos(ImVec2(centerX + mapRadius - 26.0f, centerY - mapRadius + 4.0f), ImGuiCond_Always);
@@ -221,9 +221,6 @@ void GameScreen::renderMinimapButtons(game::GameHandler& gameHandler, float cent
         ImVec2 size(20.0f, 20.0f);
         if (ImGui::InvisibleButton("##MinimapMuteButton", size)) {
             settingsPanel_.soundMuted_ = !settingsPanel_.soundMuted_;
-            if (settingsPanel_.soundMuted_) {
-                settingsPanel_.preMuteVolume_ = audio::AudioEngine::instance().getMasterVolume();
-            }
             applyMuteState();
             saveSettings();
         }
@@ -1807,7 +1804,6 @@ void GameScreen::saveSettings() {
     out << "npc_voice_volume=" << settingsPanel_.pendingNpcVoiceVolume << "\n";
     out << "mount_volume=" << settingsPanel_.pendingMountVolume << "\n";
     out << "activity_volume=" << settingsPanel_.pendingActivityVolume << "\n";
-    out << "character_speech=" << (settingsPanel_.pendingCharacterSpeech ? 1 : 0) << "\n";
 
     // Gameplay / display pacing
     out << "fullscreen=" << (settingsPanel_.pendingFullscreen ? 1 : 0) << "\n";
@@ -2019,10 +2015,6 @@ void GameScreen::loadSettings() {
             // Audio
             else if (key == "sound_muted") {
                 settingsPanel_.soundMuted_ = (std::stoi(val) != 0);
-                if (settingsPanel_.soundMuted_) {
-                    // Apply mute on load; settingsPanel_.preMuteVolume_ will be set when AudioEngine is available
-                    audio::AudioEngine::instance().setMasterVolume(0.0f);
-                }
             }
             else if (key == "sound_in_background") settingsPanel_.pendingSoundInBackground = (val != "0");
             else if (key == "enable_music") settingsPanel_.pendingEnableMusic = (val != "0");
@@ -2044,7 +2036,6 @@ void GameScreen::loadSettings() {
             else if (key == "npc_voice_volume") settingsPanel_.pendingNpcVoiceVolume = std::clamp(std::stoi(val), 0, 100);
             else if (key == "mount_volume") settingsPanel_.pendingMountVolume = std::clamp(std::stoi(val), 0, 100);
             else if (key == "activity_volume") settingsPanel_.pendingActivityVolume = std::clamp(std::stoi(val), 0, 100);
-            else if (key == "character_speech") settingsPanel_.pendingCharacterSpeech = (std::stoi(val) != 0);
             // Gameplay / display pacing
             else if (key == "fullscreen") {
                 settingsPanel_.pendingFullscreen = (std::stoi(val) != 0);

@@ -24,13 +24,6 @@ void registerSystemLuaAPI(lua_State* L);
 /// exist. See applyCVarSideEffects.
 void applyStoredCVarSideEffects(lua_State* L);
 
-/// Re-apply the sound switches from the cvar store.
-///
-/// The settings panel owns those switches now, and writing a setting writes
-/// the cvar behind it - but nothing was re-reading them, so the switch moved
-/// and the sound did not change until something else called SetCVar.
-void applySoundCVarSideEffects(lua_State* L);
-
 /// The client's CVar store, which every CVar binding here reads and writes.
 /// Handed over once, as the client starts and before anything reads a CVar.
 void useCVarStore(core::CVarStore& store);
