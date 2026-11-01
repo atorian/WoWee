@@ -223,6 +223,32 @@ packet in, the state it builds, what the interface is told, and the command
 that reads that state back out. That is where a copy of the state that one
 side writes and the other reads shows up; a parser test cannot see it.
 
+### Which executable a test is built into
+
+User decision (2026-11-01). A test that links a large library goes into the
+suite for that library, not into an executable of its own. With its debug
+info, such an executable weighs as much as the library: every copy is
+relinked and rewritten on each change to it (forty GameHarness tests used
+to write over 15 GB for one edit in `wowee_game`).
+
+- Through `GameHarness` (`wowee_game`): `test_game_end_to_end`.
+- Through `ClientHarness`, or anything else that links the client's archive
+  (`wowee_client`): `test_client_end_to_end`.
+- Register it with `wowee_add_suite_test(<suite> test_<name>)` in
+  `tests/CMakeLists.txt`. The ctest entry keeps the file's name without
+  `test_` and runs the suite in a process of its own on that file's cases
+  alone (`--filenames-as-tags "[#test_<name>]"`), so entries stay
+  independent and run in parallel as before.
+- A test that links only its own sources, a context library or a small
+  layer library (`wowee_protocol`, `wowee_pipeline`, `wowee_render`) stays
+  its own executable through `wowee_add_test`: it is small and links in a
+  fraction of a second.
+- The files of a suite share one link. Keep a file's helpers in an anonymous
+  namespace or `static`, or two files' helpers of the same name collide.
+- When another group of tests comes to share a library this large, give it a
+  suite of its own (`wowee_add_test_suite`) rather than an executable per
+  test.
+
 ## Game layer architecture (`src/game`, `include/game`, `<context>/`)
 
 `GameHandler` is being taken apart. Each area of the game becomes a bounded
