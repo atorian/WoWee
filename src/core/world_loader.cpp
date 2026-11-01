@@ -18,6 +18,8 @@
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/wmo_group_path.hpp"
 #include "pipeline/wdt_loader.hpp"
+#include "pipeline/placement_transform.hpp"
+#include "collision/movement_world.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/game_tables.hpp"
 
@@ -294,6 +296,20 @@ bool WorldLoader::initializeScene() {
             ok = renderer_->loadTestTerrain(assetManager_, "World\\Maps\\" + name + "\\" + name + "_" + std::to_string(x) + "_" + std::to_string(y) + ".adt");
         }
         if (!ok) { fail("Cannot initialize geometry for " + name); return false; }
+        // The original client's movement collects from the map data: begun
+        // before the first tile or building arrives.
+        auto& movement = renderer_->movementWorld();
+        if (isInstance()) {
+            const auto& prepared = *load_->prepared;
+            movement.beginBuildingMap(load_->entry.mapId, prepared.wdt.rootWMOPath,
+                                      pipeline::placementModelMatrix(prepared.position, prepared.rotation, 1.0f),
+                                      prepared.wdt.doodadSet);
+        } else if (load_->prepared && load_->prepared->wdt.tilesWithTerrain.any()) {
+            movement.beginMap(load_->entry.mapId, load_->prepared->wdt.tilesWithTerrain);
+        } else {
+            LOG_WARNING("Map ", name, " has no WDT tile list - movement collision takes every tile to have terrain");
+            movement.beginMap(load_->entry.mapId, std::bitset<64 * 64>().set());
+        }
         if (auto* terrain = renderer_->getTerrainManager()) {
             terrain->setStreamingEnabled(!isInstance());
             if (!isInstance()) {
@@ -384,6 +400,7 @@ const WorldLoadStatus& WorldLoader::update(float /*deltaTime*/) {
                     const auto& d = prepared.doodads[load.doodad++];
                     if (!m2->loadModel(*d.model, d.modelId)) {
                         LOG_WARNING("Instance doodad upload failed: ", d.model->name, "; doodad omitted");
+                        renderer_->movementWorld().modelUnavailable(d.model->name, "the renderer did not load it");
                         continue;
                     }
                     auto& models = renderer_->scene().models();

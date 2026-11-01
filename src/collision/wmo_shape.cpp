@@ -2,6 +2,8 @@
 
 #include "collision/geometry.hpp"
 #include "collision/liquid_facets.hpp"
+#include "collision/movement_world.hpp"
+#include "pipeline/placement_transform.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "collision/spatial_grid.hpp"
 #include "core/logger.hpp"
@@ -291,7 +293,29 @@ uint64_t WmoShape::bytes() const {
         if (group && seen.insert(group.get()).second) total+=group->bytes();
     for (const auto& group:originalGroups)
         if (group.shape && seen.insert(group.shape.get()).second) total+=group.shape->bytes();
+    total+=path.capacity()+doodads.capacity()*sizeof(WmoDoodadDef)+doodadSets.capacity()*sizeof(WmoDoodadSetRange);
+    for (const auto& doodad:doodads) total+=doodad.model.capacity();
     return total;
+}
+
+void WmoShape::describeDoodads(const pipeline::WMOModel& model) {
+    path=movementModelKey(model.sourcePath);
+    doodads.clear();
+    doodads.reserve(model.doodads.size());
+    for (size_t index=0;index<model.doodads.size();++index) {
+        const auto& doodad=model.doodads[index];
+        WmoDoodadDef def;
+        const auto name=model.doodadNames.find(doodad.nameIndex);
+        if (name==model.doodadNames.end() || name->second.empty()) {
+            LOG_WARNING("WMO '",model.sourcePath,"' doodad ",index," names no model - it is not solid");
+        } else {
+            def.model=movementModelKey(name->second);
+        }
+        def.transform=pipeline::wmoDoodadMatrix(doodad.position,doodad.rotation,doodad.scale);
+        doodads.push_back(std::move(def));
+    }
+    doodadSets.clear();
+    for (const auto& set:model.doodadSets) doodadSets.push_back({set.startIndex,set.count});
 }
 
 }  // namespace wowee::collision

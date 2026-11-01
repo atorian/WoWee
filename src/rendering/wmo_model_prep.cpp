@@ -167,6 +167,7 @@ std::shared_ptr<WmoModelPrep> WMORenderer::prepareModel(const pipeline::WMOModel
     prep->boundingBoxMin = model.boundingBoxMin;
     prep->boundingBoxMax = model.boundingBoxMax;
     prep->ambientColor = model.ambientColor;
+    prep->collisionDoodads.describeDoodads(model);
     prep->minimap = WmoMinimapModel::from(model);
     {
         glm::vec3 ext = model.boundingBoxMax - model.boundingBoxMin;

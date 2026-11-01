@@ -1,5 +1,6 @@
 #include "collision/collision_world.hpp"
 
+#include "collision/movement_world.hpp"
 #include "collision/wmo_group_containment.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
@@ -62,7 +63,7 @@ bool withinBounds(const glm::vec3& boundsMin, const glm::vec3& boundsMax,
 
 }  // namespace
 
-CollisionWorld::CollisionWorld() = default;
+CollisionWorld::CollisionWorld() : movement_(std::make_unique<MovementWorld>()) {}
 CollisionWorld::~CollisionWorld() = default;
 
 // ---- Doodads ---------------------------------------------------------------
@@ -227,14 +228,19 @@ void CollisionWorld::gatherWmo(const glm::vec3& queryMin, const glm::vec3& query
 void CollisionWorld::addTerrainTile(std::shared_ptr<const TerrainTileHeights> tile) {
     if (!tile) return;
     const uint64_t key = tileKey(tile->tileX, tile->tileY);
+    movement_->addTile(tile);
     terrain_[key] = std::move(tile);
 }
 
 void CollisionWorld::removeTerrainTile(int tileX, int tileY) {
+    movement_->removeTile(tileX, tileY);
     terrain_.erase(tileKey(tileX, tileY));
 }
 
-void CollisionWorld::clearTerrain() { terrain_.clear(); }
+void CollisionWorld::clearTerrain() {
+    for (const auto& [key, tile] : terrain_) movement_->removeTile(tile->tileX, tile->tileY);
+    terrain_.clear();
+}
 
 void CollisionWorld::clear() {
     clearM2();

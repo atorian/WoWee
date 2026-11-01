@@ -1,4 +1,5 @@
 #include "rendering/renderer.hpp"
+#include "collision/movement_world.hpp"
 #include "rendering/frame_scene.hpp"
 #include "collision/collision_world.hpp"
 #include "rendering/offscreen_composite.hpp"
@@ -110,6 +111,8 @@ Renderer::Renderer()
     : collision_(std::make_unique<collision::CollisionWorld>()),
       scene_(std::make_unique<SceneCommands>(*this)) {}
 Renderer::~Renderer() = default;
+
+collision::MovementWorld& Renderer::movementWorld() { return collision_->movement(); }
 
 void Renderer::applySceneCommands() {
     scene_->apply();
@@ -4353,12 +4356,15 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         // expansions do not use it and know the four basic liquids alone.
         if (gameTables().has("LiquidType.dbc")) {
             liquidTypes_ = pipeline::LiquidTypeTable::fromDbc(
-                pipeline::RequiredTable(gameTables(), "LiquidType.dbc", "the kinds of liquid in the map data"));
+                pipeline::RequiredTable(gameTables(), "LiquidType.dbc", "the kinds of liquid in the map data"),
+                pipeline::RequiredTable(gameTables(), "LiquidMaterial.dbc",
+                                        "how a liquid's heights are laid out, which collision reads"));
             LOG_INFO("Liquid types: ", liquidTypes_.size(), " from LiquidType.dbc");
         } else {
             liquidTypes_ = pipeline::LiquidTypeTable::basicOnly();
         }
         liquidScene_.setLiquidTypes(&liquidTypes_);
+        collision_->movement().setLiquidTypes(&liquidTypes_);
     }
 
     // What lies under the water, drawn by the shadow pass's casters: before

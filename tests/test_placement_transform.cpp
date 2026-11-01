@@ -25,9 +25,10 @@
 #include <glm/glm.hpp>
 
 #include "core/coordinates.hpp"
-#include "rendering/placement_transform.hpp"
+#include "pipeline/placement_transform.hpp"
 
-using wowee::rendering::placementModelMatrix;
+using wowee::pipeline::adtPlacementMatrix;
+using wowee::pipeline::placementModelMatrix;
 
 namespace {
 
@@ -71,12 +72,9 @@ const Placement kPlacements[] = {
 /// the placement's into the renderer's. Both are signed permutations, so a box
 /// stays a box and the stored bounds can be compared corner for corner.
 void transformedBounds(const Placement& p, glm::vec3& outMin, glm::vec3& outMax) {
-    constexpr float kDeg = wowee::core::coords::PI / 180.0f;
-    const glm::mat4 m = placementModelMatrix(
-        wowee::core::coords::adtToWorld(p.position.x, p.position.y, p.position.z),
-        glm::vec3(p.rotation.z * kDeg, p.rotation.x * kDeg,
-                  (p.rotation.y + 180.0f) * kDeg),
-        1.0f);
+    const float position[3] = {p.position.x, p.position.y, p.position.z};
+    const float rotation[3] = {p.rotation.x, p.rotation.y, p.rotation.z};
+    const glm::mat4 m = adtPlacementMatrix(position, rotation, 1.0f);
 
     outMin = glm::vec3(std::numeric_limits<float>::max());
     outMax = glm::vec3(std::numeric_limits<float>::lowest());

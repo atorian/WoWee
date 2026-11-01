@@ -25,6 +25,10 @@ struct TerrainTileHeights {
     std::optional<std::array<int16_t,18>> flightBounds;
     std::vector<pipeline::ADTTerrain::DoodadPlacement> doodadPlacements;
     std::vector<pipeline::ADTTerrain::WMOPlacement> wmoPlacements;
+    /// MMDX and MWMO, as movementModelKey keys them: what a placement's nameId
+    /// names.
+    std::vector<std::string> doodadModels;
+    std::vector<std::string> wmoModels;
 
     struct Chunk {
         float position[3] = {};

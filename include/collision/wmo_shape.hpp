@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 
 #include <cstdint>
 #include <memory>
@@ -129,6 +130,18 @@ private:
 };
 
 struct WmoGroupBounds { glm::vec3 low, high; };
+
+/// A doodad of a building (MODD): the model it names, as movementModelKey
+/// keys it, and its matrix in the building's model space.
+struct WmoDoodadDef {
+    std::string model;
+    glm::mat4 transform{1.0f};
+};
+/// A doodad set (MODS): the MODD range a placement's set picks.
+struct WmoDoodadSetRange {
+    uint32_t start = 0;
+    uint32_t count = 0;
+};
 struct WmoModelGroup {
     // MOGI bounds are distinct from the group's MOGP and visual mesh bounds.
     std::optional<WmoGroupBounds> bounds;
@@ -147,6 +160,12 @@ struct WmoShape {
     // Every authored group in file order, including groups with no render
     // batches. Shares shapes with groups above wherever they are rendered.
     std::vector<WmoModelGroup> originalGroups;
+    /// The file the building was read from, as movementModelKey keys it: what
+    /// a MODF names it by.
+    std::string path;
+    /// MODD in file order - empty where a name is missing - and MODS.
+    std::vector<WmoDoodadDef> doodads;
+    std::vector<WmoDoodadSetRange> doodadSets;
     glm::vec3 boundingBoxMin{0.0f};
     glm::vec3 boundingBoxMax{0.0f};
     /// A flat model (a dock, a platform) whose floor is searched for further
@@ -156,6 +175,10 @@ struct WmoShape {
     glm::vec3 ambientColor{0.5f};
 
     [[nodiscard]] uint64_t bytes() const;
+
+    /// A model's path, doodads and doodad sets, as the building's movement
+    /// collision places them.
+    void describeDoodads(const pipeline::WMOModel& model);
 };
 
 }  // namespace wowee::collision

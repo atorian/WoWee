@@ -228,7 +228,13 @@
     "ID": 0,
     "Path": 1
   },
+  "LiquidMaterial": {
+    "Flags": 2,
+    "ID": 0,
+    "LVF": 1
+  },
   "LiquidType": {
+    "Flags": 2,
     "ID": 0,
     "MaterialID": 14,
     "Name": 1,

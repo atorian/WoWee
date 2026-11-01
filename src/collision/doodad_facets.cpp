@@ -4,6 +4,18 @@
 #include <iterator>
 
 namespace wowee::collision {
+void transformMovementBox(const glm::mat4& transform,const glm::vec3& boxLow,const glm::vec3& boxHigh,
+    glm::vec3& low,glm::vec3& high) {
+    // CWorldMath::TransformAABox starts at translation and stores each axis
+    // contribution separately, before testing the query.
+    low=high=glm::vec3(transform[3]);
+    for (int axis=0;axis<3;++axis) for (int input=0;input<3;++input) {
+        const double a=double(transform[input][axis])*boxLow[input];
+        const double b=double(transform[input][axis])*boxHigh[input];
+        low[axis]=float(double(low[axis])+(a<b?a:b));
+        high[axis]=float(double(high[axis])+(a<b?b:a));
+    }
+}
 void appendDoodadFacets(std::span<DoodadFacetPlacement* const> links,
     const MovementFacetRequest& request,uint32_t flags,uint32_t queryTag,
     std::vector<MovementFacet>& output) {
@@ -15,15 +27,7 @@ void appendDoodadFacets(std::span<DoodadFacetPlacement* const> links,
         glm::vec3 low=p.boundsMin,high=p.boundsMax;
         if (!(p.flags&0x80)) {
             p.staticFlags|=0x10000;
-            // CWorldMath::TransformAABox starts at translation and stores
-            // each axis contribution separately, before testing the query.
-            low=high=glm::vec3(p.transform[3]);
-            for (int axis=0;axis<3;++axis) for (int input=0;input<3;++input) {
-                const double a=double(p.transform[input][axis])*p.model->boundsMin[input];
-                const double b=double(p.transform[input][axis])*p.model->boundsMax[input];
-                low[axis]=float(double(low[axis])+(a<b?a:b));
-                high[axis]=float(double(high[axis])+(a<b?b:a));
-            }
+            transformMovementBox(p.transform,p.model->boundsMin,p.model->boundsMax,low,high);
         }
         if (!(request.queryMax.x<low.x || request.queryMax.y<low.y || request.queryMax.z<low.z ||
               request.queryMin.x>high.x || request.queryMin.y>high.y || request.queryMin.z>high.z)) {

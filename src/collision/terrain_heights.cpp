@@ -1,4 +1,5 @@
 #include "collision/terrain_heights.hpp"
+#include "collision/movement_world.hpp"
 #include "pipeline/heap_bytes.hpp"
 #include <algorithm>
 
@@ -13,6 +14,8 @@ std::shared_ptr<const TerrainTileHeights> TerrainTileHeights::build(
     heights->flightBounds = terrain.flightBounds;
     heights->doodadPlacements = terrain.doodadPlacements;
     heights->wmoPlacements = terrain.wmoPlacements;
+    for (const auto& name : terrain.doodadNames) heights->doodadModels.push_back(movementModelKey(name));
+    for (const auto& name : terrain.wmoNames) heights->wmoModels.push_back(movementModelKey(name));
     for (int cy = 0; cy < 16; ++cy) {
         for (int cx = 0; cx < 16; ++cx) {
             const pipeline::MapChunk& source = terrain.getChunk(cx, cy);
@@ -46,6 +49,8 @@ std::shared_ptr<const TerrainTileHeights> TerrainTileHeights::build(
 uint64_t TerrainTileHeights::heapBytes() const {
     using pipeline::vectorBytes;
     uint64_t total=vectorBytes(doodadPlacements)+vectorBytes(wmoPlacements);
+    for (const auto& name:doodadModels) total+=sizeof(name)+name.capacity();
+    for (const auto& name:wmoModels) total+=sizeof(name)+name.capacity();
     for (const auto& chunk : chunks) {
         total+=vectorBytes(chunk.doodadReferences)+vectorBytes(chunk.wmoReferences);
         total+=vectorBytes(chunk.liquids,[](const pipeline::ADTTerrain::CollisionLiquidLayer& liquid) {

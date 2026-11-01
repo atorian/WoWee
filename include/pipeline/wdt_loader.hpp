@@ -1,5 +1,6 @@
 #pragma once
 
+#include <bitset>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -12,6 +13,10 @@ struct WDTInfo {
     [[nodiscard]] bool isWMOOnly() const { return mphdFlags & 0x01; }  // WDTF_GLOBAL_WMO
 
     std::string rootWMOPath;       // from MWMO chunk (null-terminated string)
+
+    /// MAIN: which of the 64x64 tiles have an ADT (flag bit 1), at
+    /// [tileY * 64 + tileX] - the tile x being MAIN's column.
+    std::bitset<64 * 64> tilesWithTerrain;
 
     // MODF placement (only valid for WMO-only maps):
     float position[3] = {};        // ADT placement space coords

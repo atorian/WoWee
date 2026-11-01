@@ -51,6 +51,9 @@ struct WmoModelPrep {
 
     std::vector<Group> groups;
     std::vector<collision::WmoModelGroup> collisionGroups;
+    /// The building's path, doodads and doodad sets, as the original
+    /// client's movement places them (WmoShape::describeDoodads).
+    collision::WmoShape collisionDoodads;
 
     std::vector<WMORenderer::PortalData> portals;
     std::vector<glm::vec3> portalVertices;

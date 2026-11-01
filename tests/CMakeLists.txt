@@ -2950,6 +2950,14 @@ wowee_add_test(test_collision_world
     SOURCES test_collision_world.cpp)
 target_link_libraries(test_collision_world PRIVATE wowee_collision)
 
+# ── test_movement_world ──────────────────────────────────────
+# The map as the original client's movement collects it, fed the way the
+# client feeds it: tiles through CollisionWorld, models as the renderers build
+# them. Not ready, failed, or the facets of what the map data places.
+wowee_add_test(test_movement_world
+    SOURCES test_movement_world.cpp)
+target_link_libraries(test_movement_world PRIVATE wowee_collision)
+
 # ── Original 3.3.5a (build 12340) movement and collision ─────
 # Differential tests against the original client's own machine code. A probe
 # runs our implementation on the inputs a fixture recorded and prints what it

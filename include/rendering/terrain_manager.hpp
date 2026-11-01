@@ -92,6 +92,10 @@ struct PendingTile {
     /// Its ground for the collision world, handed over at the commit.
     std::shared_ptr<const collision::TerrainTileHeights> heights;
 
+    /// Models this tile names that will not arrive, and why: told to the
+    /// movement world when the tile is committed, on the main thread.
+    std::vector<std::pair<std::string, std::string>> unavailableModels;
+
     // Pre-loaded M2 data
     struct M2Ready {
         uint32_t modelId;

@@ -69,6 +69,7 @@
     "LightIntBand.dbc",
     "LightParams.dbc",
     "LightSkybox.dbc",
+    "LiquidMaterial.dbc",
     "LiquidType.dbc",
     "Lock.dbc",
     "Map.dbc",

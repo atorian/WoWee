@@ -19,7 +19,7 @@
 /// median of 4.3 yards and as much as 120.
 ///
 /// The answer is Z, then Y, then X, over an euler triple of
-/// (rot[2], rot[0], rot[1] + 180) - see placementEuler in terrain_manager.cpp.
+/// (rot[2], rot[0], rot[1] + 180) - see placementEuler below.
 /// Both halves matter and neither works alone, which is why trying the six
 /// orders and the sign of each component separately never landed on it: the
 /// order that is right needs the signs that were wrong, and the other way
@@ -30,10 +30,29 @@
 /// and checks the bounds this reproduces against the ones on disk, so the next
 /// change to the order answers to the data rather than to a screenshot.
 
+#include "core/coordinates.hpp"
+
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 
-namespace wowee::rendering {
+namespace wowee::pipeline {
+
+/// An MDDF or MODF rotation, in degrees as the file keeps it, as the euler
+/// triple placementModelMatrix composes.
+///
+/// Solved against Blizzard's own numbers rather than judged by eye: over the
+/// 1469 placements in 3.3.5's ADTs carrying more than three degrees of pitch
+/// or roll, this triple composed Z, Y, X reproduces every stored MODF box to
+/// zero error, and the next best candidate is out by a median of 4.3 yards.
+/// The signs and the order are wrong together and right together, which is
+/// why turning one dial at a time never reached it.
+inline glm::vec3 placementEuler(const float rotation[3]) {
+    constexpr float kDeg = core::coords::PI / 180.0f;
+    return glm::vec3(rotation[2] * kDeg,
+                     rotation[0] * kDeg,
+                     (rotation[1] + 180.0f) * kDeg);
+}
 
 /// Translate, then rotate Z, Y, X, then scale uniformly.
 ///
@@ -51,4 +70,21 @@ inline glm::mat4 placementModelMatrix(const glm::vec3& position,
     return m;
 }
 
-}  // namespace wowee::rendering
+/// Where an MDDF or MODF record puts its model: the file's position, rotation
+/// in degrees and scale (1.0 for a building) to the model matrix, in render
+/// axes - which are also the original client's world axes.
+inline glm::mat4 adtPlacementMatrix(const float position[3], const float rotation[3], float scale) {
+    return placementModelMatrix(core::coords::adtToWorld(position[0], position[1], position[2]),
+                                placementEuler(rotation), scale);
+}
+
+/// A MODD doodad's matrix in its building's model space: translate, rotate by
+/// the record's quaternion (stored x, y, z, w), scale.
+inline glm::mat4 wmoDoodadMatrix(const glm::vec3& position, const glm::quat& stored, float scale) {
+    const glm::quat rotation(stored.w, stored.x, stored.y, stored.z);
+    glm::mat4 m = glm::translate(glm::mat4(1.0f), position);
+    m *= glm::mat4_cast(rotation);
+    return glm::scale(m, glm::vec3(scale));
+}
+
+}  // namespace wowee::pipeline

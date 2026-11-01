@@ -1,6 +1,7 @@
 #include <atomic>
 #include "rendering/face_culling.hpp"
-#include "rendering/placement_transform.hpp"
+#include "pipeline/placement_transform.hpp"
+#include "collision/movement_world.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/texture_upload.hpp"
 #include <stdexcept>
@@ -67,7 +68,7 @@ void M2Instance::updateModelMatrix() {
     // Doodads and buildings compose this identically, in placement_transform.hpp
     // - the header records what it took to establish the order, and a test
     // pins it. Composing it here as well is how the two came to disagree.
-    modelMatrix = placementModelMatrix(position, rotation, scale);
+    modelMatrix = pipeline::placementModelMatrix(position, rotation, scale);
     invModelMatrix = glm::inverse(modelMatrix);
 }
 
@@ -1743,6 +1744,11 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     if (gpuModel.collision) {
         core::Logger::getInstance().debug("  M2 collision mesh: ", gpuModel.collision->triCount,
             " tris, grid ", gpuModel.collision->gridCellsX, "x", gpuModel.collision->gridCellsY);
+    }
+    // The original client's movement collects a doodad by its model's box and
+    // authored collision, whether or not this renderer draws it.
+    if (collision_) {
+        collision_->movement().addM2Model(model.name, gpuModel.collision, model.boundMin, model.boundMax);
     }
 
     // Identify idle variation sequences (animation ID 0 = Stand)
