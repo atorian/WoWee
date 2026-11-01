@@ -73,9 +73,6 @@ public:
     virtual void cancelCast() = 0;
     virtual void resetCastState() = 0;
 
-    // ---- The vehicle ----
-    virtual void leftVehicle() = 0;
-
     // ---- Arriving somewhere ----
     /// SMSG_NEW_WORLD moved the player to `mapId`.
     virtual void arrivedOnMap(uint32_t mapId) = 0;
@@ -108,8 +105,15 @@ public:
 
     void registerOpcodes(DispatchTable& table);
 
-    /// A character is entering the world: not on the last one's mount.
+    /// A character is entering the world: not on the last one's mount or in
+    /// its vehicle.
     void beginCharacter() { mount_ = Mount{}; }
+
+    // --- The vehicle (SMSG_PLAYER_VEHICLE_DATA) ---
+    [[nodiscard]] bool isInVehicle() const { return mount_.vehicleId != 0; }
+    [[nodiscard]] uint32_t vehicleId() const { return mount_.vehicleId; }
+    /// Ask to leave the vehicle: CMSG_REQUEST_VEHICLE_EXIT.
+    void requestVehicleExit();
 
     // --- The player's mount ---
     [[nodiscard]] bool isMounted() const { return mount_.displayId != 0; }
@@ -569,12 +573,17 @@ private:
     // taxi path's own waypoint trace doesn't necessarily terminate exactly on
     // the node's registered coordinate the way GM teleports/.gps do.
     uint32_t taxiDestNodeId_ = 0;
-    /// The player's own mount, assigned whole by beginCharacter.
+    /// What the player rides - its own mount, or a vehicle's seat. Assigned
+    /// whole by beginCharacter; the vehicle also ends at every world entry.
     struct Mount {
         uint32_t displayId = 0;
         uint32_t auraSpellId = 0;  // what CMSG_CANCEL_AURA cancels where there is no CMSG_CANCEL_MOUNT_AURA
+        uint32_t vehicleId = 0;
     };
     Mount mount_;
+    /// The vehicle is left, by the server's word or ours; announced when it
+    /// was one.
+    void vehicleChanged(uint32_t vehicleId);
     bool taxiMountActive_ = false;
     bool taxiActivatePending_ = false;
     float taxiActivateTimer_ = 0.0f;

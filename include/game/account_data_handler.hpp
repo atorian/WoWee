@@ -57,7 +57,7 @@ public:
     void accountAuthenticated();
     /// A character is being logged in: read its slots from disk. The server
     /// says when its copies changed once the login is under way.
-    void characterSelected(uint64_t characterGuid);
+    void beginCharacter(uint64_t characterGuid);
     /// The character is in the world, so the server can store its slots:
     /// send the ones that changed before it could.
     void worldEntered();

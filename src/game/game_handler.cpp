@@ -459,66 +459,10 @@ ActionCooldown GameHandler::itemCooldown(uint32_t itemId) const {
     return {};
 }
 
-void GameHandler::sortBags() {
-    if (!sortSwapQueue_.empty()) return;   // one sort at a time
-    auto& inv = inventoryHandler_->items();
-    // Pour partial stacks together first, so the sort places one stack of
-    // twenty rather than two of ten. Merging both plans and applies, so the
-    // swaps below are computed from the merged layout.
-    auto merges = inv.mergePartialStacks();
-    auto swaps = inv.computeSortSwaps();
-    // The local layout changes now so the bags read as sorted immediately; the
-    // server is told the same thing over the following ticks.
-    inv.sortBags();
-    // And say so. The layout above is the one the player asked for and it is
-    // already in the model, but every bag on screen reads through
-    // GetContainerItemInfo and redraws on BAG_UPDATE - so without this the
-    // sorted bags sat behind the unsorted picture until something unrelated
-    // forced a rebuild, which is most of what "sorting does nothing" looked
-    // like. The moves queued below no longer fire it, having stopped touching
-    // the model at all.
-    inventoryHandler_->fireBagUpdates();
-    for (auto& m : merges) sortSwapQueue_.push_back(m);
-    for (auto& s : swaps)  sortSwapQueue_.push_back(s);
-}
-
-void GameHandler::sortBank(int mainSlotCount) {
-    if (!sortSwapQueue_.empty()) return;   // one sort at a time
-    auto& inv = inventoryHandler_->items();
-    auto merges = inv.mergeBankPartialStacks(mainSlotCount);
-    auto swaps = inv.computeBankSortSwaps(mainSlotCount);
-    inv.sortBank(mainSlotCount);
-    inventoryHandler_->fireBagUpdates();
-    for (auto& m : merges) sortSwapQueue_.push_back(m);
-    for (auto& s : swaps)  sortSwapQueue_.push_back(s);
-}
-
-void GameHandler::sortBankBag(int bagIndex) {
-    if (!sortSwapQueue_.empty()) return;   // one sort at a time
-    auto& inv = inventoryHandler_->items();
-    auto swaps = inv.computeBankBagSortSwaps(bagIndex);
-    inv.sortBankBag(bagIndex);
-    inventoryHandler_->fireBagUpdates();
-    for (auto& s : swaps) sortSwapQueue_.push_back(s);
-}
-
-void GameHandler::queuePacedChat(std::vector<std::string> lines) {
-    for (std::string& line : lines) pacedChatQueue_.push_back(std::move(line));
-}
-
 void GameHandler::updateNetworking() {
     // One queued sort move per tick. A sort is dozens of swaps and the server
     // drops a burst of them, so they go out at the rate anything else does.
-    if (!sortSwapQueue_.empty()) {
-        const auto op = sortSwapQueue_.front();
-        sortSwapQueue_.pop_front();
-        // Sent, not applied. The sort put the finished layout into the model
-        // before queuing any of this; moving each pair again on the way out
-        // permuted that layout a second time - and a merge, which the server
-        // answers by combining two stacks, would have been applied here as a
-        // swap of the two slots. See swapContainerItems.
-        inventoryHandler_->swapContainerItems(op.srcBag, op.srcSlot, op.dstBag, op.dstSlot, false);
-    }
+    inventoryHandler_->sendNextSortMove();
 
     // Reset per-tick monster-move budget tracking (Classic flood protection).
     movementHandler_->monsterMovePacketsThisTickRef() = 0;
@@ -526,11 +470,7 @@ void GameHandler::updateNetworking() {
 
     // One queued chat line per tick, for the same reason and at the same rate
     // as the sort moves above.
-    if (!pacedChatQueue_.empty()) {
-        const std::string line = std::move(pacedChatQueue_.front());
-        pacedChatQueue_.pop_front();
-        chatHandler_->sendChatMessage(ChatType::SAY, line, "");
-    }
+    chatHandler_->sendNextPacedLine();
 
     // Anything still waiting on a name query that never came back. After the
     // socket below would be a tick later than it needs to be; before it means
@@ -643,31 +583,12 @@ void GameHandler::updateTimers(float deltaTime) {
     // and the equipment inspects - each with the state it counts down.
     inventoryHandler_->update(deltaTime);
 
-    // The quest giver marks' requery and unconfirmed accepts.
+    // The quest giver marks' requery, unconfirmed accepts and the login's
+    // rebuild of the log.
     questHandler_->update(deltaTime);
 
     // The corpse-proximity crossing, for FrameXML's reclaim prompt.
     combatHandler_->announceCorpseRange();
-
-    // autoAttackRangeWarnCooldown_ decrement moved into CombatHandler::updateAutoAttack()
-
-    if (pendingLoginQuestResync_) {
-        pendingLoginQuestResyncTimeout_ -= deltaTime;
-        if (questHandler_->resyncQuestLogFromServerSlots(true)) {
-            pendingLoginQuestResync_ = false;
-            pendingLoginQuestResyncTimeout_ = 0.0f;
-            // trackedQuestIds_ was restored from the character config earlier
-            // at login, before addons were guaranteed loaded, so that restore
-            // may never have reached WatchFrame. This is the first point after
-            // world entry where both the quest log and the tracked-quest set
-            // are known settled, so force the one redraw the tracker needs.
-            fireAddonEvent("QUEST_LOG_UPDATE", {});
-        } else if (pendingLoginQuestResyncTimeout_ <= 0.0f) {
-            pendingLoginQuestResync_ = false;
-            pendingLoginQuestResyncTimeout_ = 0.0f;
-            LOG_WARNING("Quest login resync timed out waiting for player quest slot fields");
-        }
-    }
 
     for (auto it = pendingGameObjectLootOpens_.begin(); it != pendingGameObjectLootOpens_.end();) {
         it->timer -= deltaTime;

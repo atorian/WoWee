@@ -591,27 +591,27 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     // Store player GUID
     playerGuid = characterGuid;
 
-    // Reset per-character state so previous character data doesn't bleed through
-    inventoryHandler_->beginCharacter();
-    if (services_.achievementsFeed) services_.achievementsFeed->beginCharacter();
+    // Each domain begins the character - one call each, assigning what it
+    // keeps of a character whole - so nothing of the last one carries over.
+    accountDataHandler_->beginCharacter(characterGuid);
     playerHandler_->beginCharacter();
     movementHandler_->beginCharacter();
+    combatHandler_->beginCharacter();
     spellHandler_->beginCharacter();
-    eventBus().publish(events::PlayerIntoxicationChanged{0.0f});
-    actionBarHandler_->clear();
+    actionBarHandler_->beginCharacter();
+    inventoryHandler_->beginCharacter();
     petHandler_->beginCharacter();
+    chatHandler_->beginCharacter();
+    questHandler_->beginCharacter();
+    socialHandler_->beginCharacter();
+    reputationHandler_->beginCharacter();
     weatherHandler_->beginCharacter();
-    // The quest log begins again with CharacterLoggingIn, below.
-    pendingLoginQuestResync_ = false;
-    pendingLoginQuestResyncTimeout_ = 0.0f;
+    if (services_.achievementsFeed) services_.achievementsFeed->beginCharacter();
     pendingGameObjectInteractGuid_ = 0;
     lastInteractedGoGuid_ = 0;
-    combatHandler_->beginCharacter();
+    eventBus().publish(events::PlayerIntoxicationChanged{0.0f});
     worldHandler_->clearAll();
     queryCacheHandler_->clear();
-    accountDataHandler_->characterSelected(characterGuid);
-    // The domains that keep what the server will send again end it on this.
-    eventBus().publish(events::CharacterLoggingIn{characterGuid});
 
     // Build CMSG_PLAYER_LOGIN packet
     auto packet = PlayerLoginPacket::build(characterGuid);
@@ -719,7 +719,6 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     movementInfo.jumpCosAngle = 0.0f;
     movementInfo.jumpXYSpeed = 0.0f;
     combatHandler_->worldEntered();
-    vehicleId_ = 0;
     movementHandler_->enteredWorld();
 
     // Clear boss encounter unit slots and raid marks on world transfer
@@ -770,11 +769,7 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
             LOG_INFO("Auto-queried guild info (guildId=", activeChar->guildId, ")");
         }
 
-        // The quest log, its pending queries and the completed quests began
-        // empty with the login (CharacterLoggingIn); the server fills them.
-        pendingLoginQuestResync_ = true;
-        pendingLoginQuestResyncTimeout_ = 10.0f;
-        LOG_INFO("Queued quest log resync for login (from server quest slots)");
+        questHandler_->loginWorldEntered();
 
         // Request completed quest IDs when the expansion supports it. Classic-like
         // opcode tables do not define this packet, and sending 0xFFFF during world
@@ -936,11 +931,7 @@ void GameHandler::sendPing() {
 }
 
 void GameHandler::sendRequestVehicleExit() {
-    if (state != WorldState::IN_WORLD || vehicleId_ == 0) return;
-    // CMSG_REQUEST_VEHICLE_EXIT has no payload - opcode only
-    network::Packet pkt(wireOpcode(Opcode::CMSG_REQUEST_VEHICLE_EXIT));
-    socket->send(pkt);
-    vehicleId_ = 0;  // Optimistically clear; server will confirm via SMSG_PLAYER_VEHICLE_DATA(0)
+    movementHandler_->requestVehicleExit();
 }
 
 // --- Inventory state delegation (canonical state lives in InventoryHandler) ---

@@ -210,6 +210,22 @@ public:
 
     void registerOpcodes(DispatchTable& table);
 
+    // ---- Sorting ----
+    /// Sort the bags: pour partial stacks together, plan the swaps against
+    /// the merged layout, show the result at once and tell the server one
+    /// move per tick - it refuses a burst of CMSG_SWAP_ITEM, and a sort is
+    /// dozens. One sort at a time, whichever container it is over.
+    void sortBags();
+    /// The bank, main slots and bank bags together, the same way.
+    void sortBank(int mainSlotCount);
+    /// One bank bag, leaving the rest of the bank alone. No stack merging:
+    /// that would move items out of the bag being sorted.
+    void sortBankBag(int bagIndex);
+    /// Whether a sort is still sending.
+    [[nodiscard]] bool isSortingItems() const { return !held_.sortMoves.empty(); }
+    /// Send the next queued sort move, if there is one. Once per tick.
+    void sendNextSortMove();
+
     // ---- Lifetime ------------------------------------------------------------
 
     /// A character is being logged in: what the last one held - its bags, its
@@ -796,6 +812,8 @@ private:
             int bagButtonId = 0;
         };
         std::vector<PendingItemPushNotif> pendingItemPushNotifs;
+        /// Sort moves still to send, one per tick. See sortBags.
+        std::deque<Inventory::SwapOp> sortMoves;
     };
     Held held_;
 

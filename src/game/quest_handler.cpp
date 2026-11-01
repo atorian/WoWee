@@ -129,7 +129,34 @@ void QuestHandler::requeryNearbyQuestGiverStatus() {
     questGiverRequeryCooldown_ = kQuestGiverRequeryIntervalSec;
 }
 
+void QuestHandler::loginWorldEntered() {
+    // The log, its pending queries and the completed quests began empty with
+    // the login (beginCharacter); the server fills them.
+    journal_.loginResyncPending = true;
+    journal_.loginResyncTimeout = 10.0f;
+    LOG_INFO("Queued quest log resync for login (from server quest slots)");
+}
+
 void QuestHandler::update(float deltaTime) {
+    if (journal_.loginResyncPending) {
+        journal_.loginResyncTimeout -= deltaTime;
+        if (resyncQuestLogFromServerSlots(true)) {
+            journal_.loginResyncPending = false;
+            journal_.loginResyncTimeout = 0.0f;
+            // The tracked quests were restored from the character config
+            // earlier at login, before addons were guaranteed loaded, so that
+            // restore may never have reached WatchFrame. This is the first
+            // point after world entry where both the log and the tracked set
+            // are settled, so force the one redraw the tracker needs.
+            frameXml_.fireFrameXmlEvent("QUEST_LOG_UPDATE", {});
+        } else if (journal_.loginResyncTimeout <= 0.0f) {
+            journal_.loginResyncPending = false;
+            journal_.loginResyncTimeout = 0.0f;
+            LOG_WARNING("Quest login resync timed out waiting for player quest slot fields; "
+                        "the quest log is what the quest packets said");
+        }
+    }
+
     if (questGiverRequeryCooldown_ > 0.0f) {
         questGiverRequeryCooldown_ -= deltaTime;
         if (questGiverRequeryCooldown_ <= 0.0f) {
@@ -577,10 +604,6 @@ QuestHandler::QuestHandler(PacketSender& sender, FrameXmlEvents& frameXml, core:
                            ChatLog& chat, QuestQueries& queries, const GameData& data)
     : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat), queries_(queries),
       data_(data) {
-    // The character's quests begin with their login; the server sends the
-    // log, and the tracked set comes back with their settings.
-    subscriptions_.push_back(events_.subscribe<events::CharacterLoggingIn>(
-        [this](const events::CharacterLoggingIn&) { journal_ = {}; }));
     // "Collect N of item" advances from the bags: 3.3.5a never sends those
     // counts, so what the inventory says it carries is the only source.
     subscriptions_.push_back(events_.subscribe<events::CarriedItemsCounted>(

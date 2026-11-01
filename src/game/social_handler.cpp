@@ -470,26 +470,26 @@ SocialHandler::SocialHandler(PacketSender& sender, FrameXmlEvents& frameXml, cor
         subscriptions_.push_back(std::move(subscription));
     for (auto& subscription : subscribeTitleNotices(events_, chat_, frameXml_))
         subscriptions_.push_back(std::move(subscription));
-    // The character's social state is the server's to say at every login:
-    // SMSG_GROUP_LIST comes with it for a character in a party, the guild
-    // and the queues with theirs. Kept, the last session's party stood for
-    // the next character (and for this one back from a lost connection after
-    // the group had gone on without it), its guild made a guildless one look
-    // guilded, and a duel or an invite put to it waited for the next one.
-    subscriptions_.push_back(events.subscribe<events::CharacterLoggingIn>(
-        [this](const events::CharacterLoggingIn&) {
-            static_cast<SocialCharacterState&>(*this) = SocialCharacterState{};
-            if (auto* feed = contactsFeed(queries_)) feed->beginCharacter();
-            if (auto* feed = whoFeed(queries_)) feed->beginCharacter();
-            if (auto* feed = duelFeed(queries_)) feed->beginCharacter();
-            if (auto* feed = petitionFeed(queries_)) feed->beginCharacter();
-            if (auto* feed = arenaFeed(queries_)) feed->beginCharacter();
-            if (auto* feed = battlegroundFeed(queries_)) feed->beginCharacter();
-            if (auto* feed = lfgFeed(queries_)) feed->beginCharacter();
-            if (auto* feed = calendarFeed(queries_)) feed->beginCharacter();
-            if (auto* feed = groupFeed(queries_)) feed->beginCharacter();
-            if (auto* feed = guildFeed(queries_)) feed->beginCharacter();
-        }));
+}
+
+// The character's social state is the server's to say at every login:
+// SMSG_GROUP_LIST comes with it for a character in a party, the guild and the
+// queues with theirs. Kept, the last session's party stood for the next
+// character (and for this one back from a lost connection after the group had
+// gone on without it), its guild made a guildless one look guilded, and a
+// duel or an invite put to it waited for the next one.
+void SocialHandler::beginCharacter() {
+    static_cast<SocialCharacterState&>(*this) = SocialCharacterState{};
+    if (auto* feed = contactsFeed(queries_)) feed->beginCharacter();
+    if (auto* feed = whoFeed(queries_)) feed->beginCharacter();
+    if (auto* feed = duelFeed(queries_)) feed->beginCharacter();
+    if (auto* feed = petitionFeed(queries_)) feed->beginCharacter();
+    if (auto* feed = arenaFeed(queries_)) feed->beginCharacter();
+    if (auto* feed = battlegroundFeed(queries_)) feed->beginCharacter();
+    if (auto* feed = lfgFeed(queries_)) feed->beginCharacter();
+    if (auto* feed = calendarFeed(queries_)) feed->beginCharacter();
+    if (auto* feed = groupFeed(queries_)) feed->beginCharacter();
+    if (auto* feed = guildFeed(queries_)) feed->beginCharacter();
 }
 
 // ============================================================

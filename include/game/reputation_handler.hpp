@@ -41,6 +41,8 @@ public:
                       ReputationQueries& queries);
 
     void registerOpcodes(DispatchTable& table);
+    /// A character is being logged in: none of the last one's standings.
+    void beginCharacter();
 
 private:
     void handleInitializeFactions(network::Packet& packet);

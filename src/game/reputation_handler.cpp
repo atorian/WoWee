@@ -15,13 +15,15 @@ namespace wowee::game {
 
 ReputationHandler::ReputationHandler(FrameXmlEvents& frameXml, core::EventBus& events,
                                      ChatLog& chat, ReputationQueries& queries)
-    : queries_(queries), subscriptions_(subscribeReputationNotices(events, chat, frameXml, queries)) {
-    // The next character's standings arrive with its login, and until they do
-    // the last one's at-war flags and watched faction are not this one's.
-    subscriptions_.push_back(events.subscribe<events::CharacterLoggingIn>(
-        [this](const events::CharacterLoggingIn&) {
-            if (auto* reputation = feed()) reputation->beginCharacter();
-        }));
+    : queries_(queries) {
+    for (auto& subscription : subscribeReputationNotices(events, chat, frameXml, queries))
+        subscriptions_.push_back(std::move(subscription));
+}
+
+// The next character's standings arrive with its login, and until they do the
+// last one's at-war flags and watched faction are not this one's.
+void ReputationHandler::beginCharacter() {
+    if (auto* reputation = feed()) reputation->beginCharacter();
 }
 
 void ReputationHandler::registerOpcodes(DispatchTable& table) {

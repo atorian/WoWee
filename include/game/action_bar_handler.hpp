@@ -65,7 +65,16 @@ public:
 /// own, asked for when it is drawn, and a spell unlearned or replaced by its
 /// next rank (events::SpellsUnlearned, SpellSuperseded) changes the buttons
 /// that held it.
-class ActionBarHandler {
+/// The character's bar: what is on each button and the extra bars as this
+/// client last set them. Assigned whole by ActionBarHandler::beginCharacter;
+/// the server sends the bar with the login.
+struct ActionBarCharacterState {
+    ActionBar bar_{};
+    /// The extra bars as this client last set them for this character.
+    std::optional<uint8_t> extraBarsSetHere_;
+};
+
+class ActionBarHandler : private ActionBarCharacterState {
 public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
@@ -96,7 +105,7 @@ public:
     /// here until the next login rather than waiting for the realm's echo.
     void setExtraBarsShown(uint8_t mask);
     /// A character is being logged in; its bar arrives from the server.
-    void clear();
+    void beginCharacter() { static_cast<ActionBarCharacterState&>(*this) = ActionBarCharacterState{}; }
 
 private:
     void handleActionButtons(network::Packet& packet);
@@ -109,9 +118,6 @@ private:
     PacketSender& sender_;
     FrameXmlEvents& frameXml_;
     ActionBarQueries& queries_;
-    ActionBar bar_{};
-    /// The extra bars as this client last set them for this character.
-    std::optional<uint8_t> extraBarsSetHere_;
     /// That the realm's extra bars could not be read has been said.
     mutable bool extraBarsUnknownSaid_ = false;
     /// Action types already reported as not drawn, so each is said once.

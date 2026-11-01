@@ -82,6 +82,8 @@ public:
                 ChatQueries& queries, const core::CVarStore& cvars, const EmoteTable& emotes);
 
     void registerOpcodes(DispatchTable& table);
+    /// A character is being logged in: its conversation begins.
+    void beginCharacter() { conversation_ = {}; }
 
     // --- Public API (delegated from GameHandler) ---
     void sendChatMessage(ChatType type, const std::string& message, const std::string& target = "");
@@ -154,7 +156,16 @@ public:
     /// Release anything whose wait has run out, named or not. A line nobody
     /// answers for is still a line the player should see.
     void expireChatAwaitingName();
+
+    /// Say these one per tick rather than all at once: the server's flood
+    /// protection drops a burst, which for a sequence of dot-commands means
+    /// most of it silently does not happen.
+    void queuePacedChat(std::vector<std::string> lines);
+    /// Say the next paced line, if there is one. Once per tick.
+    void sendNextPacedLine();
     void handleMotd(network::Packet& packet);
+    /// The answers to the GM ticket requests above, and the queue's state.
+    void registerGmTicketOpcodes(DispatchTable& table);
 
     // --- State accessors ---
     [[nodiscard]] const std::deque<MessageChatData>& getChatHistory() const { return conversation_.history; }
@@ -225,11 +236,13 @@ private:
 
     /// The character's conversation: what was said to them, where they are
     /// listening, whether they are away and who /r answers. Assigned whole
-    /// when a character logs in (events::CharacterLoggingIn), so none of it
+    /// by beginCharacter, so none of it
     /// reaches the next character - the server joins a character to its own
     /// channels and nobody has whispered them yet.
     struct Conversation {
         std::deque<MessageChatData> history;
+        /// Lines still to say, one per tick. See queuePacedChat.
+        std::deque<std::string> pacedLines;
         /// What has just been said, for the spam filter. Short on purpose:
         /// this is looking for a line pasted again a moment later, not keeping
         /// a record of the conversation. See repeatsRecentLine.

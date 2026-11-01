@@ -208,7 +208,6 @@ public:
     void resetCastState() override { spellHandler_->resetCastState(); }
     uint32_t lastGroundCastSpellId() const override { return spellHandler_->getLastGroundCastSpellId(); }
     void forgetPlayerAura(uint32_t spellId) override { spellHandler_->forgetPlayerAura(spellId); }
-    void leftVehicle() override { vehicleId_ = 0; }
     void arrivedOnMap(uint32_t mapId) override { currentMapId_ = mapId; }
     void traceWorldPackets(std::chrono::seconds duration, const char* label) override;
     void tearDownWorldForTransfer(uint32_t mapId) override;
@@ -1177,8 +1176,8 @@ public:
     using TaxiPathNode = MovementHandler::TaxiPathNode;
 
     // Vehicle (WotLK)
-    bool isInVehicle() const { return vehicleId_ != 0; }
-    uint32_t getVehicleId() const { return vehicleId_; }
+    bool isInVehicle() const { return movementHandler_->isInVehicle(); }
+    uint32_t getVehicleId() const { return movementHandler_->vehicleId(); }
     void sendRequestVehicleExit();
 
     // Vendor
@@ -1201,29 +1200,14 @@ public:
     /// things ask for it now: this client's own bag screen and the interface's
     /// SortBags(). One queue, drained a swap per tick - the server refuses a
     /// burst of them, and a sort is dozens.
-    void sortBags();
-    /// Send these one per tick rather than all at once.
-    ///
-    /// The server's flood protection drops a burst, which for a sequence of
-    /// dot-commands means most of it silently does not happen. Same reason
-    /// sortBags has a queue, and the same drain beside it.
-    void queuePacedChat(std::vector<std::string> lines);
+    void sortBags() { inventoryHandler_->sortBags(); }
+    /// Send these one per tick rather than all at once. See ChatHandler.
+    void queuePacedChat(std::vector<std::string> lines) { chatHandler_->queuePacedChat(std::move(lines)); }
 
     /// Whether a sort is still sending. The button reads it to disable itself.
-    /// One item sort at a time, whichever container it is over.
-    ///
-    /// Bags and the bank both move items with CMSG_SWAP_ITEM and the server
-    /// takes them one at a time, so they share a queue rather than racing two.
-    bool isSortingItems() const { return !sortSwapQueue_.empty(); }
-    /// The bank, main slots and bank bags together. Mirrors sortBags: merge
-    /// partial stacks, plan the swaps against the merged layout, show the
-    /// result at once locally, and let the queue tell the server over the
-    /// following ticks.
-    void sortBank(int mainSlotCount);
-    /// One bank bag, leaving the rest of the bank alone. No stack merging:
-    /// pouring partials together across the bank is what Sort All is for, and
-    /// doing it here would move items out of the bag being sorted.
-    void sortBankBag(int bagIndex);
+    bool isSortingItems() const { return inventoryHandler_->isSortingItems(); }
+    void sortBank(int mainSlotCount) { inventoryHandler_->sortBank(mainSlotCount); }
+    void sortBankBag(int bagIndex) { inventoryHandler_->sortBankBag(bagIndex); }
 
     // ---- Item socketing ----
     // Flat accessors rather than the session struct: InventoryHandler is only
@@ -1734,17 +1718,12 @@ private:
     // written by setSelectedQuestLogIndex, read by nobody, while the getter went
     // to the QuestHandler - and has been removed.
     std::unordered_set<uint32_t> blobQuestIds_;
-    bool pendingLoginQuestResync_ = false;
-    float pendingLoginQuestResyncTimeout_ = 0.0f;
 
 
     // Faction hostility lookup (populated from FactionTemplate.dbc)
     std::unordered_map<uint32_t, bool> factionHostileMap_;
     std::unordered_map<uint32_t, bool> factionFriendlyMap_;
     std::unordered_map<uint32_t, uint32_t> factionTemplateRepList_;
-
-    // Vehicle (WotLK): non-zero when player is seated in a vehicle
-    uint32_t vehicleId_ = 0;
 
     /// Read once on the first ask, like the other DBC-backed caches here.
     mutable std::unordered_map<uint32_t, ExtendedCostEntry> extendedCostCache_;
@@ -1757,12 +1736,6 @@ private:
     bool battlemasterListLoaded_ = false;
     bool glyphPropertiesLoaded_ = false;
     std::unordered_map<uint32_t, uint32_t> glyphSpellCache_;
-
-    /// Sort moves still to send, one per tick. See sortBags.
-    std::deque<Inventory::SwapOp> sortSwapQueue_;
-
-    /// Chat lines still to send, one per tick. See queuePacedChat.
-    std::deque<std::string> pacedChatQueue_;
 
     // Area name cache (lazy-loaded from WorldMapArea.dbc; maps AreaTable ID → display name)
     mutable std::unordered_map<uint32_t, std::string> areaNameCache_;
@@ -1841,11 +1814,6 @@ private:
     // ---- UI error frame callback ----
 
     // ---- Quest completion callback ----
-
-    // ---- GM Ticket state (SMSG_GMTICKET_GETTICKET / SMSG_GMTICKET_SYSTEMSTATUS) ----
-    std::string gmTicketText_;               ///< Text of the open ticket (from SMSG_GMTICKET_GETTICKET)
-    float       gmTicketWaitHours_ = 0.0f;  ///< Server-estimated wait time in hours
-    bool        gmSupportAvailable_ = true; ///< GM support system online (SMSG_GMTICKET_SYSTEMSTATUS)
 
     /// The conversation last asked for, until the server answers it.
     ///

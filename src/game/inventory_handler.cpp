@@ -137,6 +137,57 @@ void InventoryHandler::raiseUiError(const std::string& message) {
     game::raiseUiError(events_, frameXml_, message);
 }
 
+void InventoryHandler::sortBags() {
+    if (!held_.sortMoves.empty()) return;   // one sort at a time
+    auto& inv = held_.items;
+    // Pour partial stacks together first, so the sort places one stack of
+    // twenty rather than two of ten. Merging both plans and applies, so the
+    // swaps below are computed from the merged layout.
+    auto merges = inv.mergePartialStacks();
+    auto swaps = inv.computeSortSwaps();
+    // The local layout changes now so the bags read as sorted immediately; the
+    // server is told the same thing over the following ticks.
+    inv.sortBags();
+    // And say so: every bag on screen reads through GetContainerItemInfo and
+    // redraws on BAG_UPDATE, and the moves queued below do not touch the
+    // model, so without this the sorted bags sat behind the unsorted picture.
+    fireBagUpdates();
+    for (auto& m : merges) held_.sortMoves.push_back(m);
+    for (auto& s : swaps)  held_.sortMoves.push_back(s);
+}
+
+void InventoryHandler::sortBank(int mainSlotCount) {
+    if (!held_.sortMoves.empty()) return;   // one sort at a time
+    auto& inv = held_.items;
+    auto merges = inv.mergeBankPartialStacks(mainSlotCount);
+    auto swaps = inv.computeBankSortSwaps(mainSlotCount);
+    inv.sortBank(mainSlotCount);
+    fireBagUpdates();
+    for (auto& m : merges) held_.sortMoves.push_back(m);
+    for (auto& s : swaps)  held_.sortMoves.push_back(s);
+}
+
+void InventoryHandler::sortBankBag(int bagIndex) {
+    if (!held_.sortMoves.empty()) return;   // one sort at a time
+    auto& inv = held_.items;
+    auto swaps = inv.computeBankBagSortSwaps(bagIndex);
+    inv.sortBankBag(bagIndex);
+    fireBagUpdates();
+    for (auto& s : swaps) held_.sortMoves.push_back(s);
+}
+
+void InventoryHandler::sendNextSortMove() {
+    if (held_.sortMoves.empty()) return;
+    const auto op = held_.sortMoves.front();
+    held_.sortMoves.pop_front();
+    // Sent, not applied. The sort put the finished layout into the model
+    // before queuing any of this; moving each pair again on the way out
+    // permuted that layout a second time - and a merge, which the server
+    // answers by combining two stacks, would have been applied here as a
+    // swap of the two slots. See swapContainerItems.
+    swapContainerItems(op.srcBag, op.srcSlot, op.dstBag, op.dstSlot, false);
+}
+
 void InventoryHandler::beginCharacter() {
     held_ = Held{};
     itemInfoCache_.clear();

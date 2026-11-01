@@ -892,31 +892,6 @@ void GameHandler::registerRemainingOpcodes() {
     // The actual items come via update packets; we just log this.
     // PackedGuid (player guid) + uint32 vehicleId
     // vehicleId == 0 means the player left the vehicle
-    dispatchTable_[Opcode::SMSG_PLAYER_VEHICLE_DATA] = [this](network::Packet& packet) {
-        // PackedGuid (player guid) + uint32 vehicleId
-        // vehicleId == 0 means the player left the vehicle
-        if (packet.hasRemaining(1)) {
-            (void)packet.readPackedGuid(); // player guid (unused)
-        }
-        uint32_t newVehicleId = 0;
-        if (packet.hasRemaining(4)) {
-            newVehicleId = packet.readUInt32();
-        }
-        bool wasInVehicle = vehicleId_ != 0;
-        bool nowInVehicle = newVehicleId != 0;
-        vehicleId_ = newVehicleId;
-        if (wasInVehicle != nowInVehicle) {
-            eventBus().publish(events::VehicleStateChanged{nowInVehicle, newVehicleId});
-            // Announced as well as stored. The state was kept and handed to
-            // this client's own bar, and the interface heard nothing - so the
-            // leave-vehicle button, which redraws on VEHICLE_UPDATE, never
-            // learned there was a vehicle to leave.
-            fireAddonEvent("VEHICLE_UPDATE", {});
-            fireAddonEvent(nowInVehicle ? "UNIT_ENTERED_VEHICLE"
-                                        : "UNIT_EXITED_VEHICLE", {"player"});
-            fireAddonEvent("UPDATE_BONUS_ACTIONBAR", {});
-        }
-    };
     // SMSG_GUILD_DECLINE - moved to SocialHandler::registerOpcodes
     // (SMSG_TALENTS_INVOLUNTARILY_RESET → SpellHandler)
     dispatchTable_[Opcode::SMSG_UPDATE_AURA_DURATION] = [this](network::Packet& packet) {
@@ -1082,139 +1057,7 @@ void GameHandler::registerRemainingOpcodes() {
         LOG_DEBUG("SMSG_MEETINGSTONE_LEAVE");
         packet.skipAll();
     };
-    // All three of these carry a uint32 from the same enum, and all three read
-    // a single byte of it. Little-endian kept the comparison working for the
-    // delete, whose value is nine, and broke the other two outright: creating a
-    // ticket answers 2 and updating one answers 4, and both were compared
-    // against 1 - so a ticket that went through reported that it had not.
-    constexpr uint32_t kTicketAlreadyExists = 1, kTicketCreated = 2,
-                       kTicketUpdated = 4, kTicketDeleted = 9;
-    dispatchTable_[Opcode::SMSG_GMTICKET_CREATE] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(4)) {
-            const uint32_t res = packet.readUInt32();
-            chatHandler_->addSystemChatMessage(
-                res == kTicketCreated       ? "GM ticket submitted."
-              : res == kTicketAlreadyExists ? "You already have a GM ticket open."
-                                            : "Failed to submit GM ticket.");
-        }
-    };
-    dispatchTable_[Opcode::SMSG_GMTICKET_UPDATETEXT] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(4)) {
-            const uint32_t res = packet.readUInt32();
-            chatHandler_->addSystemChatMessage(res == kTicketUpdated ? "GM ticket updated."
-                                                       : "Failed to update GM ticket.");
-        }
-    };
-    dispatchTable_[Opcode::SMSG_GMTICKET_DELETETICKET] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(4)) {
-            const uint32_t res = packet.readUInt32();
-            if (res == kTicketDeleted) gmTicketText_.clear();
-            chatHandler_->addSystemChatMessage(res == kTicketDeleted ? "GM ticket deleted."
-                                                       : "No ticket to delete.");
-        }
-    };
-    // WotLK 3.3.5a format:
-    //   uint8  status  - 6=has open ticket, 3=closed, anything else none
-    // If status == 6 (GMTICKET_STATUS_HASTEXT):
-    //   cstring ticketText
-    //   uint32  ticketAge       (seconds old)
-    //   uint32  daysUntilOld    (days remaining before escalation)
-    //   float   waitTimeHours   (estimated GM wait time)
-    dispatchTable_[Opcode::SMSG_GMTICKET_GETTICKET] = [this](network::Packet& packet) {
-        // WotLK 3.3.5a format:
-        //   uint8  status  - 6=has open ticket, 3=closed, anything else none
-        // If status == 6 (GMTICKET_STATUS_HASTEXT):
-        //   cstring ticketText
-        //   uint32  ticketAge       (seconds old)
-        //   uint32  daysUntilOld    (days remaining before escalation)
-        //   float   waitTimeHours   (estimated GM wait time)
-        if (!packet.hasRemaining(1)) { packet.skipAll(); return; }
-        uint8_t gmStatus = packet.readUInt8();
-        // Status 6 = GMTICKET_STATUS_HASTEXT - open ticket with text
-        if (gmStatus == 6 && packet.hasRemaining(1)) {
-            gmTicketText_    = packet.readString();
-            uint32_t ageSec  = (packet.hasRemaining(4)) ? packet.readUInt32() : 0;
-            /*uint32_t daysLeft =*/ (packet.hasRemaining(4)) ? packet.readUInt32() : 0;
-            gmTicketWaitHours_ = (packet.hasRemaining(4))
-                ? packet.readFloat() : 0.0f;
-            char buf[256];
-            if (ageSec < 60) {
-                std::snprintf(buf, sizeof(buf),
-                    "You have an open GM ticket (submitted %us ago). Estimated wait: %.1f hours.",
-                    ageSec, gmTicketWaitHours_);
-            } else {
-                uint32_t ageMin = ageSec / 60;
-                std::snprintf(buf, sizeof(buf),
-                    "You have an open GM ticket (submitted %um ago). Estimated wait: %.1f hours.",
-                    ageMin, gmTicketWaitHours_);
-            }
-            chatHandler_->addSystemChatMessage(buf);
-            LOG_INFO("SMSG_GMTICKET_GETTICKET: open ticket age=", ageSec,
-                     "s wait=", gmTicketWaitHours_, "h");
-
-            // The interface measures all of this in days and works the wait out
-            // itself, as (oldestTicketTime - ticketAge). This packet gives the
-            // wait directly, so the oldest time is the age plus it - which
-            // arrives at the same number the server meant.
-            //
-            // updateTime says how stale the estimate is; anything over an hour
-            // is treated as no estimate at all, and this one was computed from
-            // the packet that just arrived.
-            const double ageDays = static_cast<double>(ageSec) / 86400.0;
-            auto days = [](double v) {
-                char out[32];
-                std::snprintf(out, sizeof(out), "%.6f", v);
-                return std::string(out);
-            };
-            fireAddonEvent("UPDATE_TICKET", {
-                "1",                                            // category: has one
-                gmTicketText_,
-                days(ageDays),
-                days(ageDays + gmTicketWaitHours_ / 24.0),
-                "0",                                            // just measured
-                "0",                                            // not assigned
-                "0",                                            // not opened by a GM
-            });
-        } else if (gmStatus == 3) {
-            gmTicketText_.clear();
-            chatHandler_->addSystemChatMessage("Your GM ticket has been closed.");
-            LOG_INFO("SMSG_GMTICKET_GETTICKET: ticket closed");
-            // No arguments at all is how the interface is told there is no
-            // ticket: it reads the first one and stops if it is absent.
-            fireAddonEvent("UPDATE_TICKET", {});
-        } else {
-            // Everything else is "no ticket", including 10.
-            //
-            // 10 was read as "suspended" and announced in chat, and this is
-            // asked on every login - so an account that had never filed a
-            // ticket was told at each one that the one it did not have had
-            // been suspended. 0x0A is GMTICKET_STATUS_DEFAULT, the answer a
-            // server gives when the player has no ticket at all, which is why
-            // it arrived every time and why nothing else ever followed it.
-            gmTicketText_.clear();
-            LOG_DEBUG("SMSG_GMTICKET_GETTICKET: no open ticket (status=", static_cast<int>(gmStatus), ")");
-            fireAddonEvent("UPDATE_TICKET", {});
-        }
-        packet.skipAll();
-    };
-    // uint32 status: 1 = GM support available, 0 = offline/unavailable
-    dispatchTable_[Opcode::SMSG_GMTICKET_SYSTEMSTATUS] = [this](network::Packet& packet) {
-        // uint32 status: 1 = GM support available, 0 = offline/unavailable
-        if (packet.hasRemaining(4)) {
-            uint32_t sysStatus = packet.readUInt32();
-            gmSupportAvailable_ = (sysStatus != 0);
-            chatHandler_->addSystemChatMessage(gmSupportAvailable_
-                ? "GM support is currently available."
-                : "GM support is currently unavailable.");
-            LOG_INFO("SMSG_GMTICKET_SYSTEMSTATUS: available=", gmSupportAvailable_);
-            // The help frame disables its "open a ticket" button on anything
-            // but GMTICKET_QUEUE_STATUS_ENABLED, which is the number 1 - and
-            // gets it from here. Parsed and stored and never said, so a closed
-            // queue looked open until the ticket was refused.
-            fireAddonEvent("UPDATE_GM_STATUS", {gmSupportAvailable_ ? "1" : "0"});
-        }
-        packet.skipAll();
-    };
+    // (The GM ticket answers → ChatHandler, with the requests)
     // (The runes → PlayerHandler)
 
     // uint8 result: 0=success, 1=failed, 2=disabled
@@ -1605,17 +1448,6 @@ void GameHandler::registerRemainingOpcodes() {
                  " achievements=", achievements.size());
         if (auto* feed = achievementsFeedOf(services_))
             feed->onInspected(inspectedGuid, std::move(achievements));
-    };
-    dispatchTable_[Opcode::SMSG_ON_CANCEL_EXPECTED_RIDE_VEHICLE_AURA] = [this](network::Packet& packet) {
-        const bool wasRiding = vehicleId_ != 0;
-        vehicleId_ = 0;  // Vehicle ride cancelled; clear UI
-        eventBus().publish(events::VehicleStateChanged{false, 0});
-        if (wasRiding) {
-            fireAddonEvent("VEHICLE_UPDATE", {});
-            fireAddonEvent("UNIT_EXITED_VEHICLE", {"player"});
-            fireAddonEvent("UPDATE_BONUS_ACTIONBAR", {});
-        }
-        packet.skipAll();
     };
     // uint32 type (0=normal, 1=heavy, 2=tired/restricted) + uint32 minutes played
     dispatchTable_[Opcode::SMSG_PLAY_TIME_WARNING] = [this](network::Packet& packet) {

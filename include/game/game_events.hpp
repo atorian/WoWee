@@ -62,14 +62,6 @@ struct Disconnected {
     uint64_t characterGuid = 0;
 };
 
-/// A character is being logged in: CMSG_PLAYER_LOGIN is going out. What the
-/// server keeps of a character - its party among it - comes afresh with the
-/// login, so nothing a domain holds from the last session (another
-/// character's, or this one's before a lost connection) stands for it.
-struct CharacterLoggingIn {
-    uint64_t characterGuid = 0;
-};
-
 /// The answer to a character creation: SMSG_CHAR_CREATE, or the client's own
 /// refusal when it cannot ask (not connected, the list not in yet).
 struct CharacterCreateAnswered {
