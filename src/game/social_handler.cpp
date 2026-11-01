@@ -507,7 +507,7 @@ void SocialHandler::ageMinimapPings(float deltaTime) {
                         minimapPings_.end());
 }
 
-void SocialHandler::registerOpcodes(DispatchTable& table) {
+void SocialHandler::registerOpcodes(DispatchTable& table) {  // NOLINT(readability-function-size)
     registerBattlefieldOpcodes(table);
 
     // ---- Player info queries / social ----

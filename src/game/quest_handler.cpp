@@ -620,7 +620,7 @@ QuestHandler::QuestHandler(PacketSender& sender, FrameXmlEvents& frameXml, core:
 // Opcode registrations
 // ---------------------------------------------------------------------------
 
-void QuestHandler::registerOpcodes(DispatchTable& table) {
+void QuestHandler::registerOpcodes(DispatchTable& table) {  // NOLINT(readability-function-size)
 
     // ---- SMSG_GOSSIP_MESSAGE ----
     table[Opcode::SMSG_GOSSIP_MESSAGE] = [this](network::Packet& packet) { handleGossipMessage(packet); };

@@ -5835,7 +5835,7 @@ void LuaEngine::setLuaServices(const LuaServices& services) {
 }
 
 
-void LuaEngine::registerCoreAPI() {
+void LuaEngine::registerCoreAPI() {  // NOLINT(readability-function-size)
     // Override print() to go to chat
     lua_pushcfunction(L_, lua_wow_print);
     lua_setglobal(L_, "print");
@@ -10696,7 +10696,7 @@ void LuaEngine::releaseMouseHover() {
     haveCursor_ = false;
 }
 
-void LuaEngine::dispatchMouse(float x, float y, float screenH, MouseButtons buttons) {
+void LuaEngine::dispatchMouse(float x, float y, float screenH, MouseButtons buttons) {  // NOLINT(readability-function-size)
     if (!L_) return;
     // The cursor arrives in window pixels measured from the top, and the tree
     // is in interface units measured from the bottom. ui::mouseToTreeSpace is

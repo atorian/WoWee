@@ -3,7 +3,8 @@
 #
 # Usage:
 #   ./test.sh                    # run both lint and tests (default)
-#   ./test.sh --lint             # run clang-tidy only
+#   ./test.sh --lint             # run clang-tidy on what changed from origin/master
+#   ./test.sh --lint-all         # run clang-tidy on every source file
 #   ./test.sh --test             # run ctest unit tests only
 #   ./test.sh --lint --test      # explicit: run both
 #   ./test.sh --asan             # run ctest under ASAN/UBSan (requires build_asan/)
@@ -11,13 +12,20 @@
 #   ./test.sh --gpu              # run the tests that draw on the GPU, two at a time
 #   FIX=1 ./test.sh --lint       # apply clang-tidy fix suggestions (use with care)
 #
-# Exit code is non-zero if any lint diagnostic or test failure is reported.
+# Exit code is non-zero if a test fails or clang-tidy reports one of the checks
+# .clang-tidy lists under WarningsAsErrors; its other checks are advice.
+#
+# --lint compares the working tree with LINT_BASE (default: where HEAD left
+# origin/master) and checks each changed source file, and for each changed
+# header one source file that includes it.
 #
 # Build directories:
 #   build/       - Release build used for normal ctest  (cmake -DCMAKE_BUILD_TYPE=Release)
+#                  and the compile commands lint reads (LINT_BUILD_DIR overrides)
 #   build_asan/  - Debug+ASAN build used with --asan    (cmake -DCMAKE_BUILD_TYPE=Debug
 #                                                              -DWOWEE_ENABLE_ASAN=ON
 #                                                              -DWOWEE_BUILD_TESTS=ON)
+# End of usage.
 
 set -euo pipefail
 
@@ -28,6 +36,7 @@ cd "$SCRIPT_DIR"
 # Argument parsing
 # ---------------------------------------------------------------------------
 RUN_LINT=0
+LINT_ALL=0
 RUN_TEST=0
 RUN_ASAN=0
 RUN_GPU=0
@@ -35,16 +44,17 @@ RUN_GPU=0
 for arg in "$@"; do
     case "$arg" in
         --lint) RUN_LINT=1 ;;
+        --lint-all) RUN_LINT=1; LINT_ALL=1 ;;
         --test) RUN_TEST=1 ;;
         --asan) RUN_ASAN=1; RUN_TEST=1 ;;
         --gpu) RUN_GPU=1; RUN_TEST=1 ;;
         --help|-h)
-            sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            sed -n '2,/^# End of usage\./p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: $0 [--lint] [--test] [--asan] [--gpu]"
+            echo "Usage: $0 [--lint] [--lint-all] [--test] [--asan] [--gpu]"
             exit 1
             ;;
     esac
@@ -150,7 +160,8 @@ for candidate in run-clang-tidy run-clang-tidy-18 run-clang-tidy-17 run-clang-ti
 done
 
 # Build database check
-COMPILE_COMMANDS="$SCRIPT_DIR/build/compile_commands.json"
+LINT_BUILD_DIR="${LINT_BUILD_DIR:-$SCRIPT_DIR/build}"
+COMPILE_COMMANDS="$LINT_BUILD_DIR/compile_commands.json"
 if [[ ! -f "$COMPILE_COMMANDS" ]]; then
     echo "compile_commands.json not found at $COMPILE_COMMANDS"
     echo "Run cmake first:  cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
@@ -165,7 +176,7 @@ fi
 #
 # So lint against a copy of the database with the PCH arguments removed. The
 # headers are still included normally -- the PCH is only a parse cache.
-TIDY_DB_DIR="$SCRIPT_DIR/build/.tidy"
+TIDY_DB_DIR="$LINT_BUILD_DIR/.tidy"
 mkdir -p "$TIDY_DB_DIR"
 python3 - "$COMPILE_COMMANDS" "$TIDY_DB_DIR/compile_commands.json" <<'PYEOF'
 import json, re, sys
@@ -190,6 +201,16 @@ json.dump(db, open(dst, 'w'))
 PYEOF
 COMPILE_COMMANDS="$TIDY_DB_DIR/compile_commands.json"
 
+# The sources the build compiles, relative to the tree: a file outside the
+# build (an optional SDK's probe, say) has no flags to parse it with.
+python3 - "$COMPILE_COMMANDS" "$SCRIPT_DIR" > "$TIDY_DB_DIR/built_files.txt" <<'PYEOF'
+import json, os, sys
+db, root = sys.argv[1], os.path.realpath(sys.argv[2])
+for entry in json.load(open(db)):
+    path = os.path.realpath(os.path.join(entry.get('directory', ''), entry['file']))
+    print(os.path.relpath(path, root).replace(os.sep, '/'))
+PYEOF
+
 # ---------------------------------------------------------------------------
 # Source files to check (first-party only)
 # ---------------------------------------------------------------------------
@@ -197,16 +218,47 @@ COMPILE_COMMANDS="$TIDY_DB_DIR/compile_commands.json"
 # ships bash 3.2 as /bin/bash. The shebang finds a newer bash when one is
 # installed, so this only bites on a machine without one - where it aborts
 # under set -e with "mapfile: command not found" and no lint runs at all.
+#
+# A header is not a translation unit, so a changed one is checked through a
+# source file that includes it: what clang-tidy reports in a header it reports
+# from any file that reads it.
+list_lint_files() {
+    if [[ $LINT_ALL -eq 1 ]]; then
+        find "$SCRIPT_DIR/src" -type f \( -name '*.cpp' -o -name '*.cxx' -o -name '*.cc' \)
+        return
+    fi
+    local base changed f rel
+    base="${LINT_BASE:-$(git merge-base HEAD origin/master)}"
+    changed="$( { git diff --name-only --diff-filter=ACMR "$base" -- src include
+                  git ls-files --others --exclude-standard -- src include; } | sort -u)"
+    for f in $changed; do
+        case "$f" in
+            src/*.cpp|src/*.cxx|src/*.cc)
+                echo "$SCRIPT_DIR/$f" ;;
+            include/*.hpp|include/*.h|src/*.hpp|src/*.h)
+                rel="${f#*/}"
+                grep -rlF --include='*.cpp' "\"$rel\"" "$SCRIPT_DIR/src" | head -1 || true ;;
+        esac
+    done
+}
+
 SOURCE_FILES=()
 while IFS= read -r src_file; do
+    [[ -n "$src_file" ]] || continue
+    if ! grep -qxF "${src_file#"$SCRIPT_DIR"/}" "$TIDY_DB_DIR/built_files.txt"; then
+        echo "Not linted, not in the build: ${src_file#"$SCRIPT_DIR"/}"
+        continue
+    fi
     SOURCE_FILES+=("$src_file")
-done < <(
-    find "$SCRIPT_DIR/src" -type f \( -name '*.cpp' -o -name '*.cxx' -o -name '*.cc' \) | sort
-)
+done < <(list_lint_files | sort -u)
 
 if [[ ${#SOURCE_FILES[@]} -eq 0 ]]; then
-    echo "No source files found in src/"
-    exit 1
+    if [[ $LINT_ALL -eq 1 ]]; then
+        echo "No source files found in src/"
+        exit 1
+    fi
+    echo "No source files changed from ${LINT_BASE:-origin/master}; nothing to lint."
+    exit $OVERALL_FAILED
 fi
 
 echo "Linting ${#SOURCE_FILES[@]} source files..."
@@ -257,7 +309,13 @@ fi
 
 LINT_FAILED=0
 
-if [[ -n "$RUN_CLANG_TIDY" ]]; then
+if [[ $LINT_ALL -eq 0 ]]; then
+    # The changed files only: a few, so one clang-tidy per file, all at once.
+    NPROC=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
+    printf '%s\n' "${SOURCE_FILES[@]}" | xargs -P "$NPROC" -I{} \
+        "$CLANG_TIDY" -p "$TIDY_DB_DIR" $FIX_FLAG "${EXTRA_TIDY_ARGS[@]}" {} \
+        || LINT_FAILED=1
+elif [[ -n "$RUN_CLANG_TIDY" ]]; then
     echo "Running via $RUN_CLANG_TIDY (parallel)..."
     # run-clang-tidy takes a source-file regex; match our src/ tree
     SRC_REGEX="$(echo "$SCRIPT_DIR/src" | sed 's|/|\\/|g')"

@@ -2398,7 +2398,7 @@ static int lua_UnitIsConnected(lua_State* L) {
 
 // HasAction(slot) → boolean (1-indexed slot)
 
-void registerUnitLuaAPI(lua_State* L) {
+void registerUnitLuaAPI(lua_State* L) {  // NOLINT(readability-function-size)
     static const struct { const char* name; lua_CFunction func; } api[] = {
                 {"UnitName",      lua_UnitName},
                 {"UnitFullName",  lua_UnitName},

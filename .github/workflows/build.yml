@@ -142,6 +142,29 @@ jobs:
     - name: Build editor
       run: cmake --build build --target wowee_editor --parallel ${{ matrix.build_jobs }}
 
+    # clang-tidy on what this push or pull request changed, failing on the
+    # checks .clang-tidy gates. The whole tree takes most of an hour on this
+    # runner; the changed files take a minute. One platform is enough: the
+    # gated checks read the source, not the target.
+    - name: Lint changed files
+      if: matrix.arch == 'x86-64'
+      env:
+        BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      run: |
+        set -euo pipefail
+        sudo apt-get install -y clang-tidy
+        # The checkout is one commit deep: fetch the base to compare with. A
+        # push with no usable base (a new branch, a forced push) compares
+        # with its parent instead.
+        if [[ -n "$BASE" && "$BASE" != 0000000000000000000000000000000000000000 ]] \
+            && git fetch --depth=1 origin "$BASE"; then
+          export LINT_BASE="$BASE"
+        else
+          git fetch --deepen=1 origin "$GITHUB_SHA"
+          export LINT_BASE="$GITHUB_SHA~1"
+        fi
+        ./test.sh --lint
+
     - name: Run tests
       run: cd build && ctest --output-on-failure --parallel "$(nproc)"
 

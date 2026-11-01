@@ -2738,7 +2738,7 @@ void CharacterRenderer::cullCharacters(const Camera& camera, Part part,
     }
 }
 
-void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, Part part,
+void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, Part part,  // NOLINT(readability-function-size)
                                          const std::vector<DrawCharacter>& list) {
     const PipelineSet& pipes =
         part == Part::Faded && fadedPass_ != VK_NULL_HANDLE ? fadedPassPipes_ : scenePipes_;

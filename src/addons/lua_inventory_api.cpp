@@ -3399,7 +3399,7 @@ static int lua_GetItemLink(lua_State* L) {
 
 // GetSpellLink(spellIdOrName) → "|cFFxxxxxx|Hspell:ID|h[Name]|h|r"
 
-void registerInventoryLuaAPI(lua_State* L) {
+void registerInventoryLuaAPI(lua_State* L) {  // NOLINT(readability-function-size)
     static const struct { const char* name; lua_CFunction func; } api[] = {
                 {"GetMoney",      lua_GetMoney},
                 // The money cursor. A drag of money is routed entirely by the

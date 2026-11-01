@@ -408,7 +408,7 @@ uint64_t targetGuidForUseItem(const InventoryQueries& owner, const ItemQueryResp
 // Opcode Registration
 // ============================================================
 
-void InventoryHandler::registerOpcodes(DispatchTable& table) {
+void InventoryHandler::registerOpcodes(DispatchTable& table) {  // NOLINT(readability-function-size)
     // The server offering a page of a game object.
     table[Opcode::SMSG_GAMEOBJECT_PAGETEXT] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(8)) return;

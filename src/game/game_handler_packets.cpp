@@ -147,7 +147,7 @@ constexpr size_t kMaxQueuedInboundPackets = 8192;
 // session handshake, XP and exploration, corpses and combat state, guilds and
 // loot and vendors, teleports and taxis and battlegrounds, world states, action
 // buttons, levelling.
-void GameHandler::registerCoreOpcodes() {
+void GameHandler::registerCoreOpcodes() {  // NOLINT(readability-function-size)
     // -----------------------------------------------------------------------
     // Auth / session / pre-world handshake
     // -----------------------------------------------------------------------
@@ -799,7 +799,7 @@ void GameHandler::registerCoreOpcodes() {
 // Named for what it is rather than given a theme it does not have: it arrived
 // as five batches of whatever was left over, and the honest description of that
 // is 'the rest'.
-void GameHandler::registerRemainingOpcodes() {
+void GameHandler::registerRemainingOpcodes() {  // NOLINT(readability-function-size)
     // -----------------------------------------------------------------------
     // Batch 8-12: Remaining opcodes (inspects, quests, auctions, spells,
     //             calendars, battlefields, voice, misc consume-only)

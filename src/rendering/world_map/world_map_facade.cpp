@@ -909,7 +909,7 @@ bool WorldMapFacade::isTaxiMapOpen() const {
 
 // ── ImGui Overlay ────────────────────────────────────────────
 
-void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
+void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,  // NOLINT(readability-function-size)
                                                 int screenWidth, int screenHeight,
                                                 float playerYawDeg,
                                                 bool rightClickConsumed) {

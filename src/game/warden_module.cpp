@@ -525,7 +525,7 @@ bool WardenModule::decompressZlib(const std::vector<uint8_t>& compressed,
     return true;
 }
 
-bool WardenModule::parseExecutableFormat(const std::vector<uint8_t>& exeData) {
+bool WardenModule::parseExecutableFormat(const std::vector<uint8_t>& exeData) {  // NOLINT(readability-function-size)
     // Every store below lands in the MAP_JIT mapping; see JitWriteWindow.
     JitWriteWindow jitWrite;
     if (exeData.size() < 4) {

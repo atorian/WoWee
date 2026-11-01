@@ -115,7 +115,7 @@ void Renderer::applySceneCommands() {
     scene_->apply();
 }
 
-bool Renderer::createPerFrameResources() {
+bool Renderer::createPerFrameResources() {  // NOLINT(readability-function-size)
     VkDevice device = vkCtx->getDevice();
 
     // --- Create per-frame shadow depth images (one per in-flight frame) ---
@@ -3394,7 +3394,7 @@ void Renderer::renderSkyBackground(float timeOfDay,
     }
 }
 
-void Renderer::renderWorld() {
+void Renderer::renderWorld() {  // NOLINT(readability-function-size)
     ZoneScopedN("Renderer::renderWorld");
 
     // Guard against null command buffer (e.g. after VK_ERROR_DEVICE_LOST)

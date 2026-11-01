@@ -1357,7 +1357,7 @@ int setPetAutocastByName(lua_State* L, bool on) {
 
 }  // namespace
 
-void registerSocialLuaAPI(lua_State* L) {
+void registerSocialLuaAPI(lua_State* L) {  // NOLINT(readability-function-size)
     static const struct { const char* name; lua_CFunction func; } api[] = {
                 {"BNGetNumFriends",     lua_BNGetNumFriends},
                 {"BNConnected",              lua_BNFalse},

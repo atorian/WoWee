@@ -533,7 +533,7 @@ std::string assetLine(const pipeline::AssetInventory& inventory,
 
 }  // namespace
 
-void AuthScreen::renderCard(auth::AuthHandler& authHandler, float screenW, float screenH) {
+void AuthScreen::renderCard(auth::AuthHandler& authHandler, float screenW, float screenH) {  // NOLINT(readability-function-size)
     const PaperTheme& theme = ui_.theme();
     const auto px = [this](float units) { return ui_.px(units); };
 

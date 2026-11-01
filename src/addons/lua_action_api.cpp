@@ -2311,7 +2311,7 @@ static int lua_ClearOverrideBindings(lua_State* L) { (void)L; return 0; }
 
 // Frame methods: SetPoint, SetSize, SetWidth, SetHeight, GetWidth, GetHeight, GetCenter, SetAlpha, GetAlpha
 
-void registerActionLuaAPI(lua_State* L) {
+void registerActionLuaAPI(lua_State* L) {  // NOLINT(readability-function-size)
     static const struct { const char* name; lua_CFunction func; } api[] = {
                 {"HasAction",           lua_HasAction},
                 // A macro's name, which only a macro has; ActionButton_Update

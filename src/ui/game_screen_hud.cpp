@@ -755,19 +755,20 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
     // Opt-in via the Interface setting; when off, feed an empty list so markers clear.
     {
         std::vector<rendering::WorldMapRareMark> rares;
-        if (settingsPanel_.showRareTracker_)
-        for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
-            if (!entity || entity->getType() != game::ObjectType::UNIT) continue;
-            auto unit = std::static_pointer_cast<game::Unit>(entity);
-            const int rank = gameHandler.queryCache().getCreatureRank(unit->getEntry());
-            if (rank != 2 && rank != 4) continue;      // 2 = Rare Elite, 4 = Rare
-            if (unit->getHealth() == 0) continue;       // skip dead/looted rares
-            rendering::WorldMapRareMark m;
-            m.renderPos = core::coords::canonicalToRender(
-                glm::vec3(unit->getX(), unit->getY(), unit->getZ()));
-            m.name = unit->getName();
-            m.rank = rank;
-            rares.push_back(std::move(m));
+        if (settingsPanel_.showRareTracker_) {
+            for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
+                if (!entity || entity->getType() != game::ObjectType::UNIT) continue;
+                auto unit = std::static_pointer_cast<game::Unit>(entity);
+                const int rank = gameHandler.queryCache().getCreatureRank(unit->getEntry());
+                if (rank != 2 && rank != 4) continue;      // 2 = Rare Elite, 4 = Rare
+                if (unit->getHealth() == 0) continue;       // skip dead/looted rares
+                rendering::WorldMapRareMark m;
+                m.renderPos = core::coords::canonicalToRender(
+                    glm::vec3(unit->getX(), unit->getY(), unit->getZ()));
+                m.name = unit->getName();
+                m.rank = rank;
+                rares.push_back(std::move(m));
+            }
         }
         wm->setRares(std::move(rares));
     }
@@ -861,7 +862,7 @@ VkDescriptorSet GameScreen::getSpellIcon(uint32_t spellId, pipeline::AssetManage
 // Nameplates - world-space health bars projected to screen
 // ============================================================
 
-void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
+void GameScreen::renderNameplates(game::GameHandler& gameHandler) {  // NOLINT(readability-function-size)
     if (gameHandler.getState() != game::WorldState::IN_WORLD) return;
 
     // Reset mouseover each frame; we'll set it below when the cursor is over a nameplate

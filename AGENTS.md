@@ -57,6 +57,11 @@
   (compare column culling against the whole-world walk; slow).
 - Another session may be working in the same tree. Check `git status` and
   stage only your own hunks when committing.
+- Before committing C++, run clang-tidy on what changed:
+  `LINT_BUILD_DIR=build-dev ./test.sh --lint` (`--lint-all` for the whole
+  tree, which takes minutes). It fails on the checks `.clang-tidy` lists under
+  `WarningsAsErrors`, and CI runs it on every push and pull request. A rule a
+  standard tool can check goes there, not into a new sweep in `tools/`.
 
 ## Errors are logged, never swallowed
 

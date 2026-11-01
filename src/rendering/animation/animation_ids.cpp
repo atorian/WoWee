@@ -12,7 +12,7 @@ namespace wowee {
 namespace rendering {
 namespace anim {
 
-const char* nameFromId(uint32_t id) {
+const char* nameFromId(uint32_t id) {  // NOLINT(readability-function-size)
     static const char* const names[ANIM_COUNT] = {
         /*   0 */ "STAND",
         /*   1 */ "DEATH",

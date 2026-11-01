@@ -339,7 +339,7 @@ Application::~Application() {
     instance = nullptr;
 }
 
-bool Application::initialize() {
+bool Application::initialize() {  // NOLINT(readability-function-size)
     ScopedPhase initializing(currentPhase_, Phase::Transitions);
     LOG_INFO("Initializing Wowee Native Client");
 
@@ -3028,7 +3028,7 @@ void Application::showDisconnectNotice(const std::string& notice) {
 // water walking, and which of them the current mount, taxi or transport
 // overrides. The camera owns the movement, so this is where the server's word
 // about it lands.
-void Application::applyServerMovementState(float deltaTime) {
+void Application::applyServerMovementState(float deltaTime) {  // NOLINT(readability-function-size)
     if (renderer && gameHandler && getCameraController()) {
         getCameraController()->setRunSpeedOverride(gameHandler->movement().getServerRunSpeed());
         getCameraController()->setWalkSpeedOverride(gameHandler->movement().getServerWalkSpeed());
@@ -3650,7 +3650,7 @@ void Application::applyServerMovementState(float deltaTime) {
 // ring sliding off an NPC that never moved. Player instances need the same for
 // a different reason: without it they never leave the run animation when they
 // stop.
-void Application::syncRenderInstancesToEntities(float deltaTime) {
+void Application::syncRenderInstancesToEntities(float deltaTime) {  // NOLINT(readability-function-size)
     auto creatureSyncStart = std::chrono::steady_clock::now();
     if (renderer && gameHandler && renderer->getCharacterRenderer()) {
         auto* charRenderer = renderer->getCharacterRenderer();
@@ -4806,7 +4806,7 @@ void Application::updateScreens(float deltaTime) {
     }
 }
 
-void Application::drawInterface(float deltaTime, const FramePlan& plan) {
+void Application::drawInterface(float deltaTime, const FramePlan& plan) {  // NOLINT(readability-function-size)
     const FrameView view = plan.view;
     if (view == FrameView::CharacterCreation && uiManager)
         uiManager->getCharacterCreateScreen().update(deltaTime);

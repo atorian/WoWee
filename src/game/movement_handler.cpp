@@ -560,7 +560,7 @@ void MovementHandler::stopInputMovement() {
     for (const auto& axis : axes) if (movementInfo.flags & axis.flags) sendMovement(axis.stop);
 }
 
-void MovementHandler::sendMovement(Opcode opcode) {
+void MovementHandler::sendMovement(Opcode opcode) {  // NOLINT(readability-function-size)
     if (queries_.worldState() != WorldState::IN_WORLD) {
         // Not in a world to send to - between connections while the client
         // reconnects, the character walking on here. Once per stretch, like

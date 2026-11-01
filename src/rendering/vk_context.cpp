@@ -707,7 +707,7 @@ bool VkContext::useDynamicRendering() const {
     return dynamicRenderingSupported_ && !disabled;
 }
 
-bool VkContext::createLogicalDevice() {
+bool VkContext::createLogicalDevice() {  // NOLINT(readability-function-size)
     // Every enable_extension_if_present has to happen before this line.
     // vkb::DeviceBuilder takes the physical device by value, so a call made
     // after it is constructed changes vkbPhysicalDevice_ and not the copy the

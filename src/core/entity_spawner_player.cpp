@@ -243,7 +243,7 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     spawns_->onlinePlayerAppearance_[guid] = std::move(st);
 }
 
-void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment& equipment) {
+void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment& equipment) {  // NOLINT(readability-function-size)
     if (!renderer_ || !renderer_->getCharacterRenderer() || !assetManager_ || !assetManager_->isInitialized()) return;
     const auto& displayInfoIds = equipment.displayInfoIds;
     const auto& inventoryTypes = equipment.inventoryTypes;

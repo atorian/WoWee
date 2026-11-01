@@ -2874,7 +2874,7 @@ static int lua_GetQuestSpellLink(lua_State* L) {
     return luaReturnNil(L);
 }
 
-void registerQuestLuaAPI(lua_State* L) {
+void registerQuestLuaAPI(lua_State* L) {  // NOLINT(readability-function-size)
     static const struct { const char* name; lua_CFunction func; } api[] = {
                 {"GetNumQuestLogEntries",   lua_GetNumQuestLogEntries},
                 // GetQuestLogIndexByID(questId) → the row the quest log shows

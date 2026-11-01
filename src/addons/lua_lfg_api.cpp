@@ -223,7 +223,7 @@ void pushInfoRow(lua_State* L, const char* name, int typeId, int minLevel,
 
 }  // namespace
 
-void registerLfgLuaAPI(lua_State* L) {
+void registerLfgLuaAPI(lua_State* L) {  // NOLINT(readability-function-size)
     static const std::pair<const char*, lua_CFunction> api[] = {
 
     // ---- The catalogue ----

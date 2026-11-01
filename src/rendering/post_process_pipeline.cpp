@@ -872,7 +872,7 @@ float PostProcessPipeline::halton(uint32_t index, uint32_t base) {
     return r;
 }
 
-bool PostProcessPipeline::initFSR2Resources() {
+bool PostProcessPipeline::initFSR2Resources() {  // NOLINT(readability-function-size)
     if (!vkCtx_) return false;
     ++sceneTargetGeneration_;
 

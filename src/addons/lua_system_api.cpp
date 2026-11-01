@@ -639,7 +639,7 @@ static void flagTutorial(int id) {
 /// opened. Nothing looked broken: the button worked, it just always agreed
 /// with wherever the controls already were.
 
-static void pushCvarDefault(lua_State* L, const std::string& n) {
+static void pushCvarDefault(lua_State* L, const std::string& n) {  // NOLINT(readability-function-size)
     // Return sensible defaults for commonly queried CVars
     // The sound ones read back as on and at full, which is what this client
     // starts as. Volume up/down step from whatever is read here, so answering
@@ -5034,7 +5034,7 @@ static std::vector<uint32_t>& taxiRouteShown(lua_State* L) {
     return interfaceState(L).taxiRouteShown;
 }
 
-void registerSystemLuaAPI(lua_State* L) {
+void registerSystemLuaAPI(lua_State* L) {  // NOLINT(readability-function-size)
     // The client loaded the CVar store when it was built, long before this:
     // the first GetCVar of the run happens while a panel is being built and
     // has to see what the player last set.

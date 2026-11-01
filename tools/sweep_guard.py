@@ -164,20 +164,10 @@ CHECKS = [
     # Both halves still write to the chat window. The handler adds a line and
     # fires the event; chatframe.lua's own branch formats the same fact from
     # the event and adds it too, and the player reads it twice.
-    # glm arrives with an imported target, and Linux has a system copy that
-    # hides a missing link entirely. Every one of these built green here and
-    # failed on macOS, one per CI run, because the build stops at the first.
     # Clang calls these -Wunused-private-field and only some versions do: the
     # Windows CI image reported two that clang 18 on Linux does not, so a local
     # build is not a gate for this class. The ceiling is where the count stands
     # today, not an endorsement of it; it exists so the number can only fall.
-    # Only fails where the macro is actually passed, so a Windows-only build
-    # error for something greppable on any host.
-    # Three Windows failures in a row were a POSIX-only function called
-    # directly in one place among several that had all remembered the #ifdef.
-    ("posix_only_check.py",
-     r"^(\d+) called directly instead", 0,
-     "POSIX-only calls that break the Windows build"),
     # The renderer library is what draws a scene without the client
     # (tools/scene_render); one include of the game or the sound and it is
     # the client again, with nothing but a distant link to say so.
@@ -288,9 +278,6 @@ CHECKS = [
     ("function_static_check.py",
      r"^(\d+) of them in the interface", 85,
      "mutable function-local statics in the interface"),
-    ("redefined_macro_check.py",
-     r"^(\d+) redefined without an #ifndef", 0,
-     "macros the build defines, redefined unguarded"),
     ("unused_member_check.py",
      r"^(\d+) members stored and never read", 0,
      "class members stored and never read"),
@@ -299,9 +286,6 @@ CHECKS = [
     ("unused_member_check.py",
      r"^(\d+) private and never referenced", 0,
      "private members nothing mentions, which fail the Windows build"),
-    ("test_glm_link_check.py",
-     r"^(\d+) reach glm without it", 0,
-     "test targets that build on Linux and fail on macOS"),
     ("chat_line_twice_check.py",
      r"^(\d+) of them written a second time", 0,
      "chat lines the interface already writes"),
@@ -343,9 +327,6 @@ CHECKS = [
     ("framexml_short_returns.py",
      r"^(\d+) binding\(s\) may return short", 0,
      "bindings answering fewer values than the interface unpacks"),
-    ("misleading_indent_check.py",
-     r"^(\d+) statement\(s\) dressed as though", 0,
-     "statements dressed as though a braceless if guarded them"),
     # Seventeen, each read on 2026-08-05 and listed in the tool's docstring.
     # Three are XML namespace boilerplate rather than attributes at all, and
     # the rest divide into "no mechanism here" (texture tiling needs a REPEAT
@@ -1147,14 +1128,6 @@ CHECKS = [
     # collapsing a four-line filter into a call brings previously separated
     # code within one twelve-line window, and the count goes up while the
     # duplication goes down. It did exactly that on the WMO queries.
-    # Measured in code lines, so dense commenting is not penalised and removing
-    # a comment cannot improve the number. The duplication sweeps above are at
-    # zero, leaving function length as the remaining structural measure. The
-    # largest entries are registration tables whose entries are inline lambdas.
-    # The ceiling comes down as functions are split and must not go up.
-    ("long_function_check.py",
-     r"^(\d+) function\(s\) over \d+ code lines", 30,
-     "functions too long to hold in one's head"),
     ("duplicate_block_check.py",
      r"^(\d+) file pair\(s\) sharing code", 0,
      "unjudged pairs of files sharing a block of code"),
@@ -2139,9 +2112,9 @@ def main():
     # A sweep pinned at zero whose whole output is the digit zero cannot be
     # told apart from one whose matcher has stopped recognising its subject:
     # both print "0 ...", and this reads both as a pass. That is not
-    # hypothetical - posix_only_check could not see std::localtime for as long
-    # as it existed, and dead_symbol_check counted a name in a comment as a
-    # call. Neither showed up here.
+    # hypothetical - a POSIX-only sweep could not see std::localtime for as
+    # long as it existed, and dead_symbol_check counted a name in a comment as
+    # a call. Neither showed up here.
     #
     # The rule is only that a positive number appears somewhere in the output.
     # It costs nothing - these runs are already cached above - and it makes a

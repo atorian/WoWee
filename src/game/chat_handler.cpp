@@ -577,7 +577,7 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
     deliverChatMessage(std::move(data), /*alreadyWaited=*/false);
 }
 
-void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
+void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {  // NOLINT(readability-function-size)
     // Resolve sender name from entity/cache if not already set by parser
     if (data.senderName.empty() && data.senderGuid != 0) {
         // The name cache, then whoever is in view by that guid.

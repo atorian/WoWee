@@ -920,7 +920,7 @@ struct Emitter {
     /// ownerName is the name of the frame containing this one. A frame's own
     /// anchors say $parent meaning the frame they hang off, not themselves, so
     /// they need a different name from the one its regions use.
-    void emitFrameBody(const XmlNode& node, const std::string& var,
+    void emitFrameBody(const XmlNode& node, const std::string& var,  // NOLINT(readability-function-size)
                        const std::string& name, const std::string& parentVar,
                        const std::string& ownerName = std::string(),
                        bool fireOnLoad = true,

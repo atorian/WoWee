@@ -631,7 +631,7 @@ void AddonManager::giveCoinAmountsClearance() {
     }
 }
 
-bool AddonManager::loadFrameXml(const std::string& frameXmlDir) {
+bool AddonManager::loadFrameXml(const std::string& frameXmlDir) {  // NOLINT(readability-function-size)
     std::error_code ec;
     std::filesystem::path dir(frameXmlDir);
     if (!std::filesystem::is_directory(dir, ec)) {

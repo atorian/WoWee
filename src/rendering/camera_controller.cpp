@@ -309,7 +309,7 @@ void CameraController::setFlyingActive(bool active) {
     if (!active) flightAirborne_ = false;
 }
 
-glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInput& f,
+glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInput& f,  // NOLINT(readability-function-size)
                                                   glm::vec3& prevTargetPos) {
     // Move the follow target (character position) instead of the camera
     prevTargetPos = *followTarget;
@@ -878,7 +878,7 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
 // character has barely moved. The three centre samples come back with the
 // chosen floor because the recovery probes above need to know which surfaces
 // existed at all, not just which one won.
-CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::vec3& targetPos,
+CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::vec3& targetPos,  // NOLINT(readability-function-size)
                                                                      float stepUpBudget) {
     std::optional<float> groundH;
     std::optional<float> centerTerrainH;
@@ -1342,7 +1342,7 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
     return {.floor = groundH, .terrain = centerTerrainH, .wmo = centerWmoH, .m2 = centerM2H};
 }
 
-void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
+void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,  // NOLINT(readability-function-size)
                                                glm::vec3& targetPos,
                                                const glm::vec3& prevTargetPos) {
     // Seated: the server placed the character, and this pass would place them
@@ -2572,7 +2572,7 @@ void CameraController::releaseMovement(MovementSource source) {
     }
 }
 
-void CameraController::update(float deltaTime) {
+void CameraController::update(float deltaTime) {  // NOLINT(readability-function-size)
     // The presses since the last frame, taken whether or not this frame moves
     // anyone: a jump pressed during a flight path is not a jump on landing.
     const bool jumpPressed = std::exchange(jumpPressed_, false);

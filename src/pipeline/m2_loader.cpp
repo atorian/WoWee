@@ -844,7 +844,7 @@ void parseFBlock(const std::vector<uint8_t>& data, uint32_t offset,
 
 } // anonymous namespace
 
-M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
+M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {  // NOLINT(readability-function-size)
     M2Model model;
 
     // Read header with version-aware field parsing.

@@ -339,7 +339,7 @@ void openBagsForTrading(game::GameHandler& gameHandler) {
 
 }  // namespace
 
-void GameScreen::render(game::GameHandler& gameHandler) {
+void GameScreen::render(game::GameHandler& gameHandler) {  // NOLINT(readability-function-size)
     rendering::CpuStageLaps laps(services_.interfaceStages, "uiManager->render");
     // Apply before any Begin() calls so a scale change cannot alter style
     // metrics halfway through an ImGui frame.
@@ -1338,7 +1338,7 @@ void GameScreen::renderEntityList(game::GameHandler& gameHandler) {
     ImGui::End();
 }
 
-void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
+void GameScreen::processTargetInput(game::GameHandler& gameHandler) {  // NOLINT(readability-function-size)
     auto& io = ImGui::GetIO();
     auto& input = core::Input::getInstance();
 

@@ -295,7 +295,7 @@ void EntitySpawner::processAsyncNpcCompositeResults(bool unlimited) {
     }
 }
 
-void EntitySpawner::processCreatureSpawnQueue(bool unlimited, rendering::CpuStageTimes* stages) {
+void EntitySpawner::processCreatureSpawnQueue(bool unlimited, rendering::CpuStageTimes* stages) {  // NOLINT(readability-function-size)
     auto startTime = std::chrono::steady_clock::now();
     // Budget: max 2ms per frame for creature spawning to prevent stutter.
     // In unlimited mode (load screen), process everything without budget cap.

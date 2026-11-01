@@ -1383,7 +1383,7 @@ int widgetDumpLevel() {
 
 }  // namespace
 
-void WidgetRenderer::reportWidgetDiagnostics(WidgetTree& tree,
+void WidgetRenderer::reportWidgetDiagnostics(WidgetTree& tree,  // NOLINT(readability-function-size)
                                              const std::vector<const Widget*>& order,
                                              float s, float screenW, float screenH) {
     // What is actually on screen, named, once, when asked for.
@@ -1954,7 +1954,7 @@ void WidgetRenderer::reportWidgetDiagnostics(WidgetTree& tree,
     }
 }
 
-void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
+void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {  // NOLINT(readability-function-size)
     // Cleared here rather than in layout(), which is the half that runs before
     // the frame's clicks are resolved. Emptying the list there and refilling it
     // here would leave nothing to click against in between, and a chat link

@@ -480,7 +480,7 @@ void SpellHandler::registerOpcodes(DispatchTable& table) {
 // Public API
 // ============================================================
 
-void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
+void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {  // NOLINT(readability-function-size)
     LOG_DEBUG("castSpell: spellId=", spellId, " target=0x", std::hex, targetGuid, std::dec);
     if (!sender_.worldCommandAllowed("a cast")) return;
 

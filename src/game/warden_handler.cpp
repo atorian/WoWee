@@ -443,7 +443,7 @@ bool WardenHandler::loadWardenCRFile(const std::string& moduleHashHex) {
 // handleWardenData - main Warden packet dispatcher
 // ---------------------------------------------------------------------------
 
-void WardenHandler::handleWardenData(network::Packet& packet) {
+void WardenHandler::handleWardenData(network::Packet& packet) {  // NOLINT(readability-function-size)
     if (extensionPreparationPending_) {
         if (extensionWaitingPackets_.size() >= 128 || extensionWaitingBytes_ + packet.getSize() > 512 * 1024) {
             extensionPreparationError_ = "Too much Warden data while preparing the server extension";

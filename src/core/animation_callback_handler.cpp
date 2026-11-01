@@ -121,7 +121,7 @@ bool AnimationCallbackHandler::updateCharge(float deltaTime) {
     return true; // charge is active
 }
 
-void AnimationCallbackHandler::setupCallbacks() {
+void AnimationCallbackHandler::setupCallbacks() {  // NOLINT(readability-function-size)
     // Sprint aura callback - use SPRINT(143) animation when sprint-type buff is active
     // The player's swing: an auto attack, a melee ability, or a ranged auto
     // attack (Auto Shot, Shoot, Throw), which brings the ranged weapon out.

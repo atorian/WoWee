@@ -327,7 +327,7 @@ static bool skyBatchAllowed(bool skyMode, std::size_t index) {
     return maxBatch < 0 || static_cast<int>(index) < maxBatch;
 }
 
-void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4& projection) {
+void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4& projection) {  // NOLINT(readability-function-size)
     const glm::vec3 cameraPos = glm::vec3(glm::inverse(view)[3]);
     const glm::mat4 viewProjection = projection * view;
     cachedView_ = view;

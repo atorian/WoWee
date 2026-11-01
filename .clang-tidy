@@ -95,6 +95,19 @@
 # was a real one: a chat window colour read back from saved variables with
 # neither the return value nor isfinite checked, two lines from the code
 # that checks both and says why.
+#
+# The checks under WarningsAsErrors are a gate: ./test.sh --lint fails on
+# them, and CI runs it on what each push and pull request changed. The rest
+# are advice. Each gated check replaced a sweep in tools/ that read the
+# source text for the same fault.
+#
+#   readability-misleading-indentation
+#       a statement indented as though a braceless if guarded it. GCC has
+#       -Wmisleading-indentation, but drops it partway through a large
+#       translation unit; clang does not.
+#   readability-function-size (LineThreshold 400)
+#       a function too long to change safely. The ones already over it carry
+#       NOLINT(readability-function-size); shortening one removes its NOLINT.
 
 ---
 Checks: >
@@ -113,8 +126,10 @@ Checks: >
   modernize-use-designated-initializers, 
   readability-container-size-empty, 
   readability-delete-null-pointer, 
-  readability-else-after-return, 
-  readability-misplaced-array-index, 
+  readability-else-after-return,
+  readability-function-size,
+  readability-misleading-indentation,
+  readability-misplaced-array-index,
   readability-non-const-parameter, 
   readability-redundant-control-flow, 
   readability-redundant-declaration, 
@@ -143,16 +158,29 @@ Checks: >
   -bugprone-throwing-static-initialization,
   -performance-inefficient-string-concatenation
 
-WarningsAsErrors: ''
+WarningsAsErrors: >
+  readability-function-size,
+  readability-misleading-indentation
 
-# Suppress the noise from GCC-only LTO flags in compile_commands.json.
+# Suppress the noise from GCC-only flags in compile_commands.json.
 # clang doesn't support -fno-fat-lto-objects; this silences the harmless warning.
+# Nor GCC's -Werror=maybe-uninitialized and the like, which clang reports as
+# unknown warning options, as errors; nor GCC's precompiled header beside the
+# header the build includes, which clang ignores and reads the header instead.
+# The language standard is the build's own (-std=gnu++20): a -std=c++20 here
+# replaced it, and strict C++ on MinGW declares no M_PI.
 ExtraArgs:
-  - -std=c++20
   - -Wno-ignored-optimization-argument
+  - -Wno-unknown-warning-option
+  - -Wno-ignored-gch
 
 HeaderFilterRegex: '^.*/include/.*\.hpp$'
 
 CheckOptions:
 - key: modernize-use-default-member-init.UseAssignment
   value: true
+# Lines only: the statement, branch and nesting counts are off (-1).
+- key: readability-function-size.LineThreshold
+  value: 400
+- key: readability-function-size.StatementThreshold
+  value: -1

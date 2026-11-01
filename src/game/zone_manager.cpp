@@ -35,7 +35,7 @@ std::string ZoneManager::resolveOriginalMusicFile(const char* filename) {
     return filePrefix(resolveOriginalMusic(filename));
 }
 
-void ZoneManager::initialize() {
+void ZoneManager::initialize() {  // NOLINT(readability-function-size)
     // Resolve original music paths at startup
     auto om = [](const char* name) -> std::string {
         std::string path = resolveOriginalMusic(name);

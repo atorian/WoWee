@@ -322,7 +322,7 @@ bool TerrainManager::enqueueTile(int x, int y) {
     return true;
 }
 
-std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetail detail) {
+std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetail detail) {  // NOLINT(readability-function-size)
     const bool landmarks = detail == TileDetail::Landmarks;
     TileCoord coord = {.x = x, .y = y};
     LOG_DEBUG("Preparing tile [", x, ",", y, "] (CPU work)");
@@ -1002,7 +1002,7 @@ void TerrainManager::logMissingAdtOnce(const std::string& adtPath) {
     }
 }
 
-bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
+bool TerrainManager::advanceFinalization(FinalizingTile& ft) {  // NOLINT(readability-function-size)
     auto& pending = ft.pending;
     int x = pending->coord.x;
     int y = pending->coord.y;

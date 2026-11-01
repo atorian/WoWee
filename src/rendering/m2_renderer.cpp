@@ -496,7 +496,7 @@ void M2Renderer::setAfterWaterPass(VkRenderPass pass, VkSampleCountFlagBits samp
     }
 }
 
-bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout,
+bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout,  // NOLINT(readability-function-size)
                             pipeline::AssetManager* assets) {
     if (initialized_) { assetManager = assets; return true; }
     vkCtx_ = ctx;
@@ -1414,7 +1414,7 @@ void M2Renderer::censusInstance(const M2Instance& instance) {
                 " top=", instance.position.z + gpu.boundMax.z * instance.scale);
 }
 
-bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
+bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  // NOLINT(readability-function-size)
     if (models.find(modelId) != models.end()) {
         // Already loaded
         return true;

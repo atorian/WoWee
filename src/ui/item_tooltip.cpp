@@ -203,7 +203,7 @@ const std::unordered_map<uint32_t, ItemSetData>& setsOrNone(const pipeline::Game
 
 }  // namespace
 
-void renderItemTooltip(const game::ItemDef& item, const game::Inventory* inventory,
+void renderItemTooltip(const game::ItemDef& item, const game::Inventory* inventory,  // NOLINT(readability-function-size)
                        uint64_t itemGuid, game::GameHandler* gameHandler,
                        pipeline::AssetManager* assetManager) {
     const pipeline::GameTables* tables = gameTablesOf(gameHandler);
