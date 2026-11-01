@@ -5303,6 +5303,10 @@ void Renderer::recordRtLighting(VkImage sceneDepth, VkExtent2D sceneExtent, bool
     in.skyColor = glm::vec3(currentFrameData.ambientColor);
     in.sunUp = in.sunDir.z > -0.05f;
     in.distance = frameInputs_.rtDistance;
+    // Closes what ran since the world's last mark - the end of the scene pass,
+    // its multisample resolve - so that the scene update's mark, from which
+    // RtScene sizes its build share, times the update alone.
+    vkCtx->gpuMark(currentCmd, "scene pass end");
     GpuPass pass(*vkCtx, currentCmd, "rt_lighting");
     CpuStage stage(vkCtx->cpuStages(), stageGroup, "rt lighting");
     rtLighting_->record(currentCmd, sceneDepth, sceneExtent, depthIsMsaa, in);
