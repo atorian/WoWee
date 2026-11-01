@@ -52,8 +52,9 @@ Makefile
 *.app
 /wowee
 
-# Claude Code internal state
-.claude/
+# Claude Code internal state (project skills in .claude/skills are tracked)
+.claude/worktrees/
+.claude/settings.local.json
 
 # IDE files
 .vscode/
