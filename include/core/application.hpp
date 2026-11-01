@@ -569,6 +569,17 @@ private:
     // Empty means assets follow the active protocol profile. "legacy" selects
     // the root WOW_DATA_PATH manifest; otherwise this is an expansion id.
     std::string assetExpansionOverrideId_;
+    /// What the game data was last opened as: the expansion, the asset source
+    /// and the locale its tables are read in. Asking for the same again - the
+    /// login screen does at every launch - is not a reason to read them again.
+    struct OpenedGameData {
+        std::string expansionId;
+        std::string assetPath;
+        std::string locale;
+        uint32_t build = 0;
+        bool operator==(const OpenedGameData&) const = default;
+    };
+    std::optional<OpenedGameData> openedGameData_;
     std::unique_ptr<pipeline::DBCLayout> dbcLayout_;
     std::unique_ptr<EntitySpawner> entitySpawner_;
     std::unique_ptr<AppearanceComposer> appearanceComposer_;

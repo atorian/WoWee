@@ -328,13 +328,9 @@ void GameHandler::resetDbcCaches() {
     // only there.
     spellHandler_->resetSpellDbcCaches();
     movementHandler_->resetTaxiDbcCache();
-    // Clear the AssetManager DBC file cache so that expansion-specific DBCs
-    // (CharSections, ItemDisplayInfo, etc.) are reloaded from the new expansion's
-    // MPQ files instead of returning stale data from a previous session/expansion.
-    auto* am = services_.assetManager;
-    if (am) {
-        am->clearDBCCache();
-    }
+    // The tables themselves are the client's: it lets go of them when the data
+    // changes and reads the new ones before calling this, so what is rebuilt
+    // here comes from those. Clearing them again here threw that read away.
     LOG_INFO("GameHandler: DBC caches cleared for expansion switch");
 }
 

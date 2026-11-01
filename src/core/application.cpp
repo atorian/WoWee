@@ -702,6 +702,10 @@ bool Application::initialize() {
         // Everything the expansion uses, read now: a broken install stops
         // here rather than when a window first asks for a table.
         gameData_->checkAll();
+        if (const auto* profile = expansionRegistry_ ? expansionRegistry_->getActive() : nullptr) {
+            openedGameData_ = OpenedGameData{profile->id, assetManager->getDataPath(), profile->locale,
+                                             profile->build};
+        }
         zoneTracker_->loadZoneTable(*gameData_, *assetManager);
 
         // Fonts, now the archives are open and still before any frame is
@@ -2920,6 +2924,33 @@ void Application::reloadExpansionData() {
     auto* profile = expansionRegistry_->getActive();
     if (!profile) return;
 
+    // Where this expansion's assets are read from: its own extracted data, or
+    // the base WOW_DATA_PATH for "legacy" or when it has none.
+    const char* dataPathEnv = std::getenv("WOW_DATA_PATH");
+    const std::string baseDataPath = dataPathEnv ? dataPathEnv : "./Data";
+    const game::ExpansionProfile* assetProfile = profile;
+    if (!assetExpansionOverrideId_.empty() &&
+        assetExpansionOverrideId_ != "legacy") {
+        if (const auto* selected = expansionRegistry_->getProfile(assetExpansionOverrideId_)) {
+            assetProfile = selected;
+        }
+    }
+    const bool useLegacyAssets = assetExpansionOverrideId_ == "legacy";
+    const std::string desiredAssetPath =
+        !useLegacyAssets && std::filesystem::exists(assetProfile->dataPath + "/manifest.json")
+            ? assetProfile->dataPath
+            : baseDataPath;
+
+    // The same expansion from the same source in the same locale is the data
+    // already open: every table of it was read when it was opened, and reading
+    // them all again changes nothing but the time the login screen takes.
+    if (assetManager && assetManager->isInitialized() && !profile->dataPath.empty() &&
+        openedGameData_ == OpenedGameData{profile->id, desiredAssetPath, profile->locale, profile->build}) {
+        LOG_INFO("Expansion data for ", profile->name, " from ", desiredAssetPath,
+                 " is open already; nothing to reload");
+        return;
+    }
+
     LOG_INFO("Reloading expansion data for: ", profile->name);
 
     widgetRenderer_.resetResources();
@@ -2927,21 +2958,6 @@ void Application::reloadExpansionData() {
 
     // Update expansion data path for CSV DBC lookups and clear DBC cache
     if (assetManager && !profile->dataPath.empty()) {
-        const char* dataPathEnv = std::getenv("WOW_DATA_PATH");
-        const std::string baseDataPath = dataPathEnv ? dataPathEnv : "./Data";
-        const game::ExpansionProfile* assetProfile = profile;
-        if (!assetExpansionOverrideId_.empty() &&
-            assetExpansionOverrideId_ != "legacy") {
-            if (const auto* selected = expansionRegistry_->getProfile(assetExpansionOverrideId_)) {
-                assetProfile = selected;
-            }
-        }
-        const std::string assetManifest = assetProfile->dataPath + "/manifest.json";
-        const bool useLegacyAssets = assetExpansionOverrideId_ == "legacy";
-        const std::string desiredAssetPath = !useLegacyAssets &&
-                                                  std::filesystem::exists(assetManifest)
-            ? assetProfile->dataPath
-            : baseDataPath;
         if (desiredAssetPath != assetManager->getDataPath() &&
             assetManager->switchDataPath(desiredAssetPath) &&
             desiredAssetPath != baseDataPath) {
@@ -2951,8 +2967,12 @@ void Application::reloadExpansionData() {
                  useLegacyAssets ? std::string("legacy") : assetProfile->id, "'");
         assetManager->setExpansionDataPath(profile->dataPath);
         assetManager->setDBCLocale(profile->locale, profile->build);
+        // The one clear for this change: what checkAll reads next stays
+        // cached for everything built from it below and after.
         assetManager->clearDBCCache();
         gameData_->checkAll();
+        openedGameData_ = OpenedGameData{profile->id, assetManager->getDataPath(), profile->locale,
+                                         profile->build};
     }
 
     widgetRenderer_.initialize(assetManager.get(), window ? window->getVkContext() : nullptr);
@@ -2960,7 +2980,8 @@ void Application::reloadExpansionData() {
     // Reset map name cache so it reloads from new expansion's Map.dbc
     if (worldLoader_) worldLoader_->resetMapNameCache();
 
-    // Reset game handler DBC caches so they reload from new expansion data
+    // What the game built from the old tables, built again from the new ones
+    // (read from the cache checkAll has just filled).
     if (gameHandler) {
         gameHandler->resetDbcCaches();
     }
@@ -6661,7 +6682,12 @@ void Application::updateRealmPatchMount() {
 
     // Connected somewhere else: these archives are not that realm's. Taken down
     // as soon as the world allows, before anything is read for the new realm.
-    if (!mountedRealmPatches_.realm.empty() && realm != mountedRealmPatches_.realm && !worldInUse) {
+    // Connected nowhere is not somewhere else: back at the login screen the
+    // next realm decides, and a reconnect to this one keeps them rather than
+    // dropping and remounting every table; an offline scene replay plays on
+    // the archives it captured.
+    if (!mountedRealmPatches_.realm.empty() && !realm.empty() && realm != mountedRealmPatches_.realm &&
+        !worldInUse) {
         LOG_INFO("Realm patches of ", mountedRealmPatches_.realm, " unmounted: now connected to ",
                  realm.empty() ? std::string("no realm") : realm);
         applyRealmPatchLayer(nullptr, {});
@@ -6755,9 +6781,15 @@ void Application::applyRealmPatchLayer(std::shared_ptr<const pipeline::ArchiveLa
                  mountedRealmPatches_.archives.size(), " archives above the extracted data");
     }
 
+    // The archives changed the tables, and setArchiveLayer let go of every one
+    // read before. Each is read again now, once, with the realm's records
+    // merged in (or without them) - here, rather than by whatever first asks
+    // for it during play - and a realm archive that breaks one stops the game
+    // here, as a broken install stops it at start.
+    gameData_->checkAll();
+
     // Everything built from the tables the archives change, rebuilt the way
-    // an expansion switch rebuilds it: the readers load again, lazily, from
-    // the tables with the realm's records merged in (or without them).
+    // an expansion switch rebuilds it, from the tables just read.
     if (worldLoader_) worldLoader_->resetMapNameCache();
     if (gameHandler) {
         gameHandler->resetDbcCaches();
