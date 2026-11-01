@@ -151,7 +151,7 @@ GameHandler::GameHandler(GameServices& services)
     weatherHandler_ = std::make_unique<WeatherHandler>(
         *services_.events, *this, *chatHandler_,
         [] { return isClassicLikeExpansion() ? WeatherNumbering::Classic : WeatherNumbering::WeatherState; });
-    playerHandler_ = std::make_unique<PlayerHandler>(*this, *this, *services_.events, *chatHandler_, *this,
+    playerHandler_ = std::make_unique<PlayerHandler>(*this, *this, *services_.events, *this,
                                                     *services_.statTables);
 
     // The character's own settings, read once its spells have arrived - the
@@ -161,6 +161,9 @@ GameHandler::GameHandler(GameServices& services)
     // The tracked quests are kept with the character's settings.
     subscriptions_.push_back(eventBus().subscribe<events::QuestTrackingChanged>(
         [this](const events::QuestTrackingChanged&) { saveCharacterConfig(); }));
+    // Opening a game object waits on the cast that opens it.
+    subscriptions_.push_back(eventBus().subscribe<events::PlayerCastEnded>(
+        [this](const events::PlayerCastEnded& e) { gameObjectCastEnded(e); }));
 
     // The action bar starts empty. What is on it is the server's to say -
     // SMSG_ACTION_BUTTONS at every login, which for a new character carries

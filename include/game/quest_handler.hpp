@@ -41,8 +41,6 @@ public:
     [[nodiscard]] virtual const FlatFieldMap& playerFields() const = 0;
     [[nodiscard]] virtual uint32_t currentMapId() const = 0;
     [[nodiscard]] virtual bool inGroup() const = 0;
-    /// SMSG_SET_REST_START, which shares an opcode with a quest one.
-    virtual void setResting(bool resting) = 0;
 
     // ---- Names and templates ----
     [[nodiscard]] virtual PacketParsers& packetParsers() = 0;
@@ -52,14 +50,6 @@ public:
     virtual void requestGameObjectInfo(uint32_t entry) = 0;
     [[nodiscard]] virtual const ItemQueryResponseData* itemInfo(uint32_t itemId) const = 0;
     virtual void requestItemInfo(uint32_t itemId) = 0;
-
-    // ---- What a gossip option opens ----
-    /// A gossip or quest list opened over the vendor window, which closes.
-    virtual void closeVendor() = 0;
-    /// The armorer's option: the vendor that follows can repair.
-    virtual void vendorCanRepair() = 0;
-    /// The stable master's option: the stable that follows is theirs.
-    virtual void openedStableMaster(uint64_t npcGuid) = 0;
 };
 
 class QuestHandler {

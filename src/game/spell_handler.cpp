@@ -936,8 +936,7 @@ void SpellHandler::cancelCast() {
         auto packet = CancelCastPacket::build(currentCastSpellId_);
         sender_.send(packet);
     }
-    queries_.clearPendingGameObjectInteraction();
-    queries_.clearLastInteractedGameObject();
+    events_.publish(events::PlayerCastEnded{currentCastSpellId_, events::PlayerCastEnded::Outcome::Cancelled});
     casting_ = false;
     castIsChannel_ = false;
     currentCastSpellId_ = 0;
@@ -1545,8 +1544,7 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
     castIsChannel_ = false;
     currentCastSpellId_ = 0;
     castTimeRemaining_ = 0.0f;
-    queries_.clearLastInteractedGameObject();
-    queries_.clearPendingGameObjectInteraction();
+    events_.publish(events::PlayerCastEnded{data.spellId, events::PlayerCastEnded::Outcome::Failed});
     craftQueueSpellId_ = 0;
     craftQueueRemaining_ = 0;
     queuedSpellId_ = 0;
@@ -1785,16 +1783,11 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
         castTimeRemaining_ = 0.0f;
         castTimeTotal_ = 0.0f;
 
-        // Gather node looting: re-send CMSG_LOOT now that the cast completed.
-        if (wasInTimedCast && queries_.lastInteractedGameObject() != 0) {
-            LOG_DEBUG("[GO-DIAG] Sending CMSG_LOOT for GO 0x", std::hex,
-                        queries_.lastInteractedGameObject(), std::dec);
-            queries_.lootTarget(queries_.lastInteractedGameObject());
-        }
-        // Clear the GO interaction guard so future cancelCast() calls work
-        // normally. Without this, pendingGameObjectInteractGuid_ stays stale
-        // and suppresses CMSG_CANCEL_CAST for ALL subsequent spell casts.
-        queries_.clearPendingGameObjectInteraction();
+        // What waited on the cast goes on: a gather node or a chest opened by
+        // a timed cast is looted now, and the game object interaction ends -
+        // left standing, it suppressed CMSG_CANCEL_CAST for every later cast.
+        events_.publish(events::PlayerCastEnded{data.spellId, events::PlayerCastEnded::Outcome::WentOff,
+                                                wasInTimedCast});
 
         if (!rangedWeaponAttack && !restorationLoop) {
             announceCastAnimation(queries_.characterGuid(), false, false, SpellCastType::OMNI);
@@ -2360,13 +2353,12 @@ void SpellHandler::stopCasting() {
         sender_.send(packet);
     }
 
+    events_.publish(events::PlayerCastEnded{currentCastSpellId_, events::PlayerCastEnded::Outcome::Cancelled});
     casting_ = false;
     castIsChannel_ = false;
     currentCastSpellId_ = 0;
     castTimeRemaining_ = 0.0f;
     castTimeTotal_ = 0.0f;
-    queries_.clearPendingGameObjectInteraction();
-    queries_.clearLastInteractedGameObject();
     craftQueueSpellId_ = 0;
     craftQueueRemaining_ = 0;
     queuedSpellId_ = 0;
@@ -2376,6 +2368,7 @@ void SpellHandler::stopCasting() {
 }
 
 void SpellHandler::resetCastState() {
+    const uint32_t droppedSpellId = currentCastSpellId_;
     restorationActive_ = false;
     restorationSpellId_ = 0;
     restorationTimeRemaining_ = 0.0f;
@@ -2389,13 +2382,11 @@ void SpellHandler::resetCastState() {
     craftQueueRemaining_ = 0;
     queuedSpellId_ = 0;
     queuedSpellTarget_ = 0;
-    queries_.clearPendingGameObjectInteraction();
-    // lastInteractedGoGuid_ is intentionally NOT cleared here - it must survive
-    // until the server delivers SMSG_LOOT_RESPONSE after the cast completes.
-    // InventoryHandler::handleLootResponse() clears it once loot has opened
-    // (src/game/inventory_handler.cpp). Previously it was cleared here, which
-    // meant the client-side cast-timer fallback destroyed the guid before
-    // SMSG_SPELL_GO arrived, preventing loot from opening on quest chests.
+    // Reset, not Cancelled: the game object the cast was opening stays the
+    // one to loot until SMSG_LOOT_RESPONSE, because the client's own cast
+    // timer runs out before SMSG_SPELL_GO arrives and a reset there must not
+    // keep loot from opening on a quest chest.
+    events_.publish(events::PlayerCastEnded{droppedSpellId, events::PlayerCastEnded::Outcome::Reset});
 }
 
 void SpellHandler::resetAllState() {
@@ -3517,8 +3508,7 @@ void SpellHandler::handleCastResult(network::Packet& packet) {
             const uint64_t gatherGoGuid = queries_.lastInteractedGameObject();
             const bool gatherCast = gatherGoGuid != 0 && isGatherSpellId(castResultSpellId);
             casting_ = false; castIsChannel_ = false; currentCastSpellId_ = 0; castTimeRemaining_ = 0.0f;
-            queries_.clearLastInteractedGameObject();
-            queries_.clearPendingGameObjectInteraction();
+            events_.publish(events::PlayerCastEnded{castResultSpellId, events::PlayerCastEnded::Outcome::Failed});
             craftQueueSpellId_ = 0; craftQueueRemaining_ = 0;
             queuedSpellId_ = 0; queuedSpellTarget_ = 0;
             int playerPowerType = -1;
@@ -3805,10 +3795,10 @@ void SpellHandler::handleSpellFailure(network::Packet& packet) {
         }
     }
     if (failGuid == queries_.characterGuid() || failGuid == 0) {
-        // Player's own cast failed - clear gather-node loot target so the
-        // next timed cast doesn't try to loot a stale interrupted gather node.
+        // Player's own cast failed: the game object it was opening is not
+        // looted when the next timed cast goes off.
+        events_.publish(events::PlayerCastEnded{currentCastSpellId_, events::PlayerCastEnded::Outcome::Failed});
         casting_ = false; castIsChannel_ = false; currentCastSpellId_ = 0;
-        queries_.clearLastInteractedGameObject();
         craftQueueSpellId_ = 0;
         craftQueueRemaining_ = 0;
         queuedSpellId_ = 0;

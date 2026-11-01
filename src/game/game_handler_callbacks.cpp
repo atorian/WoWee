@@ -1036,10 +1036,6 @@ uint64_t GameHandler::petGuid() const {
     return pet::orNoPet(services_.pet).getPetGuid();
 }
 
-void GameHandler::openedStableMaster(uint64_t npcGuid) {
-    pet::orNoPet(services_.pet).setStableMaster(npcGuid);
-}
-
 reputation::IReputationFeed* GameHandler::reputationFeed() {
     return services_.reputationFeed;
 }
@@ -1561,6 +1557,31 @@ void GameHandler::interactWithGameObject(uint64_t guid) {
     // 3. isGameObjectInteractionCasting() returns true during GO casts.
     pendingGameObjectInteractGuid_ = guid;
     performGameObjectInteractionNow(guid);
+}
+
+void GameHandler::gameObjectCastEnded(const events::PlayerCastEnded& ended) {
+    using Outcome = events::PlayerCastEnded::Outcome;
+    switch (ended.outcome) {
+    case Outcome::WentOff:
+        // A gather node or a chest opened by a timed cast: CMSG_LOOT again
+        // now that the cast is done.
+        if (ended.timed && lastInteractedGoGuid_ != 0) {
+            LOG_DEBUG("[GO-DIAG] Sending CMSG_LOOT for GO 0x", std::hex, lastInteractedGoGuid_, std::dec);
+            lootTarget(lastInteractedGoGuid_);
+        }
+        pendingGameObjectInteractGuid_ = 0;
+        break;
+    case Outcome::Failed:
+    case Outcome::Cancelled:
+        pendingGameObjectInteractGuid_ = 0;
+        lastInteractedGoGuid_ = 0;
+        break;
+    case Outcome::Reset:
+        // The object stays the one to loot until SMSG_LOOT_RESPONSE: the
+        // client's cast timer resets before SMSG_SPELL_GO arrives.
+        pendingGameObjectInteractGuid_ = 0;
+        break;
+    }
 }
 
 void GameHandler::performGameObjectInteractionNow(uint64_t guid) {

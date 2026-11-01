@@ -1100,13 +1100,6 @@ void GameHandler::registerRemainingOpcodes() {
         if (hasAddonEventListener()) fireAddonEvent("TALENTS_INVOLUNTARILY_RESET", {});
         packet.skipAll();
     };
-    dispatchTable_[Opcode::SMSG_SET_REST_START] = [](network::Packet& packet) {
-        // The rest-XP accumulation start time, not a statement about where the
-        // player is standing: the server sends it on login wherever that is.
-        // Resting itself comes from PLAYER_FLAGS_RESTING, which world_handler
-        // watches, because that is the one that clears again on leaving an inn.
-        packet.skipAll();
-    };
     dispatchTable_[Opcode::SMSG_UPDATE_AURA_DURATION] = [this](network::Packet& packet) {
         if (packet.hasRemaining(5)) {
             uint8_t slot       = packet.readUInt8();

@@ -5,6 +5,7 @@
 #include "game/chat_log.hpp"
 #include "game/game_utils.hpp"
 #include "game/frame_xml_events.hpp"
+#include "game/game_events.hpp"
 #include "game/packet_sender.hpp"
 #include "game/pet_gateway.hpp"
 #include "game/spell_defines.hpp"
@@ -21,7 +22,13 @@ namespace wowee::game {
 PetHandler::PetHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
                        ChatLog& chat, PetQueries& queries)
     : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat), queries_(queries),
-      subscriptions_(subscribePetNotices(events, chat, frameXml, queries)) {}
+      subscriptions_(subscribePetNotices(events, chat, frameXml, queries)) {
+    // The stable opened next is this stable master's.
+    subscriptions_.push_back(events.subscribe<events::StableOptionChosen>(
+        [this](const events::StableOptionChosen& e) {
+            if (auto* pet = feed()) pet->onStableMasterChosen(e.npcGuid);
+        }));
+}
 
 void PetHandler::raiseUiError(const std::string& message) {
     game::raiseUiError(events_, frameXml_, message);

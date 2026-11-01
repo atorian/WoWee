@@ -89,7 +89,6 @@ public:
     virtual void resurrectedInPlace() = 0;
     virtual void resetPingTimer() = 0;
     virtual void sendPing() = 0;
-    virtual void closeGossip() = 0;
 };
 
 class MovementHandler {

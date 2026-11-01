@@ -264,22 +264,6 @@ TEST_CASE("a level gained is announced with what it brought; an old one again is
     CHECK(h.addonEvents("PLAYER_LEVEL_UP").empty());
 }
 
-TEST_CASE("entering an inn says the player is resting, once", "[player][harness]") {
-    GameHarness h;
-    h.useExpansion("wotlk");
-    h.enterWorld();
-    // WotLK's SMSG_SET_REST_START, on the opcode older realms use to drop a quest.
-    h.receive(Opcode::SMSG_QUEST_FORCE_REMOVE, Body().u32(1).bytes());
-    h.receive(Opcode::SMSG_QUEST_FORCE_REMOVE, Body().u32(1).bytes());
-    h.pump();
-    CHECK(h.game().player().isResting());
-    CHECK(h.addonEvents("PLAYER_UPDATE_RESTING").size() == 1);
-    const auto& history = h.game().chat().getChatHistory();
-    CHECK(std::count_if(history.begin(), history.end(), [](const auto& line) {
-              return line.message == "You are now resting.";
-          }) == 1);
-}
-
 namespace {
 // A per-class table where only the warrior's row is the one asked for: any
 // other row read gives a number far from what the test expects.

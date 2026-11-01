@@ -123,6 +123,14 @@ InventoryHandler::InventoryHandler(PacketSender& sender, FrameXmlEvents& frameXm
         [this](const events::PlayerNameKnown& e) {
             if (auto* feed = mailFeed(queries_)) feed->onPlayerNameResolved(e.guid, e.name);
         }));
+    // A gossip page or quest list takes the vendor window's place.
+    subscriptions_.push_back(events.subscribe<events::GossipWindowOpened>(
+        [this](const events::GossipWindowOpened&) { closeVendor(); }));
+    // The armorer's goods come with repairs.
+    subscriptions_.push_back(events.subscribe<events::VendorOptionChosen>(
+        [this](const events::VendorOptionChosen& e) {
+            if (e.repairs) setVendorCanRepair(true);
+        }));
 }
 
 void InventoryHandler::raiseUiError(const std::string& message) {
@@ -1000,7 +1008,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         AuctionHelloData data;
         if (!AuctionHelloParser::parse(packet, data)) return;
         if (auto* feed = auctionFeed(queries_)) feed->onHello(data.auctioneerGuid);
-        queries_.closeGossip();
+        events_.publish(events::NpcWindowOpened{data.auctioneerGuid});
     };
     // The plain list result fills whichever list was asked for last; the
     // owner and bidder results say which they are.
@@ -2376,7 +2384,7 @@ void InventoryHandler::handleListInventory(network::Packet& packet) {
         }
     }
     vendorWindowOpen_ = true;
-    queries_.closeGossip();
+    events_.publish(events::NpcWindowOpened{currentVendorItems_.vendorGuid});
     if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("MERCHANT_SHOW", {});
 
     // Auto-sell grey items
@@ -2483,7 +2491,7 @@ void InventoryHandler::handleTrainerList(network::Packet& packet) {
     const bool isClassic = isClassicLikeExpansion();
     if (!TrainerListParser::parse(packet, currentTrainerList_, isClassic)) return;
     trainerWindowOpen_ = true;
-    queries_.closeGossip();
+    events_.publish(events::NpcWindowOpened{currentTrainerList_.trainerGuid});
     if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("TRAINER_SHOW", {});
 
     // At WARNING, and broken down by the three states the panel filters on,

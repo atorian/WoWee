@@ -68,6 +68,7 @@ namespace wowee::game {
     class AccountDataHandler;
     class RealmTimeHandler;
     class WeatherHandler;
+    namespace events { struct PlayerCastEnded; }
 }
 
 namespace wowee {
@@ -275,8 +276,8 @@ public:
     bool questWantsItem(uint32_t itemId) const override;
     bool actionBarHoldsItem() const override;
     void coinageFieldFoundAt(uint16_t index) override;
-    // cancelCast, dismount, closeGossip and runInterfaceCommand are
-    // InventoryQueries' too, declared with the rest of their kind below.
+    // cancelCast, dismount and runInterfaceCommand are InventoryQueries'
+    // too, declared with the rest of their kind below.
 
     // PetQueries (spellName is InventoryQueries' too)
     bool nameUnitInView(uint64_t guid, const std::string& name) override;
@@ -284,7 +285,7 @@ public:
     // SpellQueries. The ones InventoryQueries shares (characterGuid,
     // entities, packetParsers, mounted, ...) are above; the ones this class
     // already had under the same name (sendMovement, setStandState,
-    // startAutoAttack, lootTarget, addCombatText, ...) are marked override
+    // startAutoAttack, addCombatText, ...) are marked override
     // where they are declared.
     uint64_t focusTargetGuid() const override { return combatHandler_->getFocusGuid(); }
     uint64_t petGuid() const override;
@@ -318,8 +319,6 @@ public:
     bool awaitingItemTarget() const override { return inventoryHandler_->isAwaitingItemTarget(); }
     uint64_t pendingGameObjectInteraction() const override { return pendingGameObjectInteractGuid_; }
     uint64_t lastInteractedGameObject() const override { return lastInteractedGoGuid_; }
-    void clearPendingGameObjectInteraction() override { pendingGameObjectInteractGuid_ = 0; }
-    void clearLastInteractedGameObject() override { lastInteractedGoGuid_ = 0; }
     std::optional<HomeBind> homeBind() const override;
     std::string achievementName(uint32_t achievementId) override;
     achievement::IAchievementsFeed* achievementsFeed() override;
@@ -338,18 +337,14 @@ public:
     std::optional<uint32_t> guildRankRights() const override;
     std::string languageName(uint32_t languageId) const override { return getLanguageName(languageId); }
 
-    // QuestQueries (the shared ones are above; closeVendor is declared with
-    // the vendor's facade).
+    // QuestQueries (the shared ones are above).
     bool inGroup() const override;
-    void setResting(bool resting) override { playerHandler_->restStateArrived(resting); }
     std::string creatureName(uint32_t entry) const override { return queryCacheHandler_->getCachedCreatureName(entry); }
     void requestCreatureInfo(uint32_t entry) override { queryCacheHandler_->queryCreatureInfo(entry, 0); }
     void requestGameObjectInfo(uint32_t entry) override { queryCacheHandler_->queryGameObjectInfo(entry, 0); }
     void requestGameObjectInfo(uint32_t entry, uint64_t guid) override {
         queryCacheHandler_->queryGameObjectInfo(entry, guid);
     }
-    void vendorCanRepair() override { inventoryHandler_->setVendorCanRepair(true); }
-    void openedStableMaster(uint64_t npcGuid) override;
 
     // SocialQueries (the ones shared with the other handlers are above).
     bool battlegroundMap(uint32_t mapId) override { return isBattlegroundMap(mapId); }
@@ -920,7 +915,7 @@ public:
     // ---- Loot ----
     /// Asked by the spell handler once a gather or an opening finishes, and by
     /// the deferred open of a used game object.
-    void lootTarget(uint64_t guid) override;
+    void lootTarget(uint64_t guid);
     void scheduleGameObjectLootOpen(uint64_t guid, float delaySeconds = 0.35f, uint8_t attempts = 1);
 
     /// True once the object is known to be a fishing school. A click on one
@@ -955,7 +950,7 @@ public:
     void interactWithNpc(uint64_t guid);
     void interactWithGameObject(uint64_t guid);
     uint64_t getHookedFishingBobberGuid() const { return hookedFishingBobberGuid_; }
-    void closeGossip() override;
+    void closeGossip();
 
     // Quest log
     using QuestLogEntry = QuestHandler::QuestLogEntry;
@@ -1249,7 +1244,7 @@ public:
     void sendRequestVehicleExit();
 
     // Vendor
-    void closeVendor() override;
+    void closeVendor();
 
     // Item-targeted item use: sharpening stones, weightstones and weapon oils enchant
     // another item, so using one arms a targeting cursor instead of casting immediately.
@@ -1809,6 +1804,8 @@ private:
     uint64_t lastInteractedGoGuid_ = 0;
 
     void performGameObjectInteractionNow(uint64_t guid);
+    /// The player's cast ended: what the game object interaction waited on.
+    void gameObjectCastEnded(const events::PlayerCastEnded& ended);
 
     // Quest turn-in
     // (pending quest accept timeout state lives in QuestHandler)

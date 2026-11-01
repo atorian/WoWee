@@ -260,7 +260,9 @@ TEST_CASE("stabling with no pet out is refused on the error line, and nothing is
     GameHarness h;
     h.enterWorld();
     constexpr uint64_t kStableMaster = 0xF130000000000201ull;
-    h.pet().setStableMaster(kStableMaster);
+    // The stable master's list: no pets in it, two slots bought.
+    h.receive(Opcode::MSG_LIST_STABLED_PETS, Body().u64(kStableMaster).u8(0).u8(2));
+    h.pump();
     h.clearRecords();
 
     h.pet().stablePet(1);

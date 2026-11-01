@@ -1,7 +1,6 @@
 #include "game/player_handler.hpp"
 
 #include "game/character.hpp"
-#include "game/chat_log.hpp"
 #include "game/flat_field_map.hpp"
 #include "game/frame_xml_events.hpp"
 #include "game/game_events.hpp"
@@ -73,9 +72,8 @@ struct PlayerFieldIndices {
 }  // namespace
 
 PlayerHandler::PlayerHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
-                             ChatLog& chat, PlayerQueries& queries, const StatTables& tables)
-    : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat), queries_(queries),
-      tables_(tables) {}
+                             PlayerQueries& queries, const StatTables& tables)
+    : sender_(sender), frameXml_(frameXml), events_(events), queries_(queries), tables_(tables) {}
 
 void PlayerHandler::registerOpcodes(DispatchTable& table) {
     for (auto op : {Opcode::SMSG_LEVELUP_INFO, Opcode::SMSG_LEVELUP_INFO_ALT}) {
@@ -250,13 +248,6 @@ float PlayerHandler::combatRatingBonus(int cr) const {
         ? tables_.classRatingScalar(cls, static_cast<uint32_t>(cr))
         : 1.0f;
     return ratingValue * (scalar / coef);
-}
-
-void PlayerHandler::restStateArrived(bool resting) {
-    if (resting == sheet_.resting) return;
-    sheet_.resting = resting;
-    chat_.addSystemChatMessage(resting ? "You are now resting." : "You are no longer resting.");
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("PLAYER_UPDATE_RESTING", {});
 }
 
 void PlayerHandler::shapeshiftFormArrived(uint8_t form, FrameXmlEvents& packetEvents) {

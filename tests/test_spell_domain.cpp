@@ -560,6 +560,39 @@ TEST_CASE("a locked chest is opened with the known spell Lock.dbc and Spell.dbc 
     CHECK(h.countSent(Opcode::CMSG_GAMEOBJ_USE) == 0);
 }
 
+namespace {
+/// SMSG_SPELL_GO as 3.3.5a writes it: the caster twice, packed; a cast count,
+/// the spell, the flags, a timestamp; one hit target, no misses, no targets.
+std::vector<uint8_t> spellGo(uint64_t caster, uint32_t spellId, uint64_t hit) {
+    return Body().packedGuid(caster).packedGuid(caster).u8(1).u32(spellId).u32(0).u32(0)
+        .u8(1).u64(hit).u8(0).u32(0).bytes();
+}
+}  // namespace
+
+TEST_CASE("a chest opened by a timed cast is looted the moment the cast goes off",
+          "[spell][harness][tables]") {
+    constexpr uint32_t kPickLock = 1804;
+    constexpr uint64_t kStrongbox = 0xF110000000004006ull;
+    GameHarness h;
+    h.dbc("Lock.dbc", 33, {{{0, 57}, {1, 2}, {9, 1}, {17, 75}}});
+    h.dbc("Spell.dbc", 234, {{{0, kPickLock}, {136, "Pick Lock"}, {71, 33}, {110, 1}}});
+    h.enterWorld();
+    h.receive(Opcode::SMSG_INITIAL_SPELLS, initialSpells({kPickLock}));
+    h.pump();
+    objectBesidePlayer(h, kStrongbox, 2844, 3 /* chest */, "Battered Strongbox", 57);
+    h.game().interactWithGameObject(kStrongbox);
+    h.receive(Opcode::SMSG_SPELL_START, spellStart(h.player().guid, kPickLock, 5000));
+    h.pump();
+    REQUIRE(h.countSent(Opcode::CMSG_LOOT) == 0);
+
+    h.receive(Opcode::SMSG_SPELL_GO, spellGo(h.player().guid, kPickLock, kStrongbox));
+    h.pump();
+
+    auto* loot = h.lastSent(Opcode::CMSG_LOOT);
+    REQUIRE(loot != nullptr);
+    CHECK(loot->readUInt64() == kStrongbox);
+}
+
 TEST_CASE("a node refused for want of skill names the rank its Lock.dbc row asks for",
           "[spell][harness][tables]") {
     constexpr uint32_t kMining = 2575;

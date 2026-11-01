@@ -262,10 +262,7 @@ public:
     // ---- The game object being opened or gathered ----
     [[nodiscard]] virtual uint64_t pendingGameObjectInteraction() const = 0;
     [[nodiscard]] virtual uint64_t lastInteractedGameObject() const = 0;
-    virtual void clearPendingGameObjectInteraction() = 0;
-    virtual void clearLastInteractedGameObject() = 0;
     virtual void despawnGameObjectLocally(uint64_t guid) = 0;
-    virtual void lootTarget(uint64_t guid) = 0;
 
     // ---- Companions and the hearth ----
     /// A mount or critter may have come out or gone away.

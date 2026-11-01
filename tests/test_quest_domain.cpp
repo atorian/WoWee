@@ -167,6 +167,29 @@ TEST_CASE("an abandoned quest leaves the log and the watch list", "[quest][harne
     CHECK_FALSE(h.game().quests().isQuestTracked(11));
 }
 
+TEST_CASE("a quest the realm takes away leaves the log, on WotLK as on the older realms",
+          "[quest][harness]") {
+    GameHarness h;
+    h.enterWorld();  // WotLK's wire
+    h.receive(Opcode::SMSG_QUESTGIVER_QUEST_DETAILS, offer(kMarshal, 11, "Riverpaw Gnoll Bounty"));
+    h.pump();
+    h.game().quests().acceptQuest();
+    REQUIRE(inLog(h, 11));
+    h.clearRecords();
+
+    // AzerothCore's 3.3.5a table: 0x21E, "uint32 questid".
+    h.receive(Opcode::SMSG_QUEST_FORCE_REMOVE, Body().u32(11));
+    h.pump();
+
+    CHECK_FALSE(inLog(h, 11));
+    const auto removed = h.addonEvents("QUEST_REMOVED");
+    REQUIRE(removed.size() == 1);
+    CHECK(removed[0].args == std::vector<std::string>{"11"});
+    // Not a word about resting: that is PLAYER_FLAGS_RESTING's to say.
+    CHECK_FALSE(h.game().player().isResting());
+    CHECK(h.addonEvents("PLAYER_UPDATE_RESTING").empty());
+}
+
 TEST_CASE("a full quest log refuses a quest before asking the server", "[quest][harness]") {
     GameHarness h;
     h.enterWorld();

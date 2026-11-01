@@ -13,7 +13,6 @@ namespace wowee::network { class Packet; }
 
 namespace wowee::game {
 
-class ChatLog;
 class FrameXmlEvents;
 class PacketSender;
 struct Character;
@@ -54,7 +53,7 @@ public:
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
     PlayerHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
-                  ChatLog& chat, PlayerQueries& queries, const StatTables& tables);
+                  PlayerQueries& queries, const StatTables& tables);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -76,8 +75,6 @@ public:
     void playerFieldsArrived(const FlatFieldMap& fields, bool isCreate, FrameXmlEvents& packetEvents);
     /// The form, the top byte of UNIT_FIELD_BYTES_1, in an update.
     void shapeshiftFormArrived(uint8_t form, FrameXmlEvents& packetEvents);
-    /// WotLK's SMSG_SET_REST_START: in or out of an inn or a city.
-    void restStateArrived(bool resting);
     /// UNIT_FIELD_FLAGS on the player, in an update: UNIT_FLAG_STUNNED.
     void unitFlagsArrived(uint32_t previous, uint32_t flags);
     /// The visibility byte of UNIT_FIELD_BYTES_1 on the player, in an update:
@@ -238,7 +235,6 @@ private:
     PacketSender& sender_;
     FrameXmlEvents& frameXml_;
     core::EventBus& events_;
-    ChatLog& chat_;
     PlayerQueries& queries_;
     const StatTables& tables_;
     Sheet sheet_;

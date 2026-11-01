@@ -587,6 +587,10 @@ QuestHandler::QuestHandler(PacketSender& sender, FrameXmlEvents& frameXml, core:
         [this](const events::CarriedItemsCounted& e) {
             reconcileItemObjectivesFromInventory(e.counts);
         }));
+    // An NPC's goods, trainer list, auction house or flight map takes the
+    // gossip page's place.
+    subscriptions_.push_back(events_.subscribe<events::NpcWindowOpened>(
+        [this](const events::NpcWindowOpened&) { closeGossip(); }));
 }
 
 // ---------------------------------------------------------------------------
@@ -1058,21 +1062,17 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
     };
 
     // ---- SMSG_QUEST_FORCE_REMOVE ----
+    // uint32 questId in every expansion: AzerothCore's 3.3.5a table names
+    // 0x21E SMSG_QUEST_FORCE_REMOVE "uint32 questid", as the older ones do.
+    // It was read on WotLK as a rest-start packet, which no 3.3.5a server
+    // sends; resting is PLAYER_FLAGS_RESTING, which PlayerHandler reads.
     table[Opcode::SMSG_QUEST_FORCE_REMOVE] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(4)) {
-            LOG_WARNING("SMSG_QUEST_FORCE_REMOVE/SET_REST_START too short");
+            LOG_WARNING("SMSG_QUEST_FORCE_REMOVE too short: ", packet.getSize(),
+                        " bytes; the quest stays in the log");
             return;
         }
-        uint32_t value = packet.readUInt32();
-
-        // WotLK uses this opcode as SMSG_SET_REST_START
-        if (!isClassicLikeExpansion() && !isActiveExpansion("tbc")) {
-            queries_.setResting(value != 0);
-            return;
-        }
-
-        // Classic/TBC: treat as QUEST_FORCE_REMOVE (uint32 questId)
-        uint32_t questId = value;
+        const uint32_t questId = packet.readUInt32();
         clearPendingQuestAccept(questId);
         journal_.pendingQuestQueryIds.erase(questId);
         if (questId == 0) {
@@ -1418,7 +1418,7 @@ void QuestHandler::selectGossipOption(uint32_t optionId, const std::string& code
                                 (textLower.find("goods") != std::string::npos || textLower.find("wares") != std::string::npos)));
         const bool isArmorer = (text == "GOSSIP_OPTION_ARMORER" || textLower.find("repair") != std::string::npos);
         if (isVendor || isArmorer) {
-            if (isArmorer) queries_.vendorCanRepair();
+            events_.publish(events::VendorOptionChosen{journal_.currentGossip.npcGuid, isArmorer});
             auto pkt = ListInventoryPacket::build(journal_.currentGossip.npcGuid);
             sender_.send(pkt);
             LOG_DEBUG("Sent CMSG_LIST_INVENTORY (gossip) to npc=0x", std::hex, journal_.currentGossip.npcGuid, std::dec);
@@ -1434,7 +1434,7 @@ void QuestHandler::selectGossipOption(uint32_t optionId, const std::string& code
         if (text == "GOSSIP_OPTION_STABLE" ||
             textLower.find("stable") != std::string::npos ||
             textLower.find("my pet") != std::string::npos) {
-            queries_.openedStableMaster(journal_.currentGossip.npcGuid);
+            events_.publish(events::StableOptionChosen{journal_.currentGossip.npcGuid});
             auto listPkt = ListStabledPetsPacket::build(journal_.currentGossip.npcGuid);
             sender_.send(listPkt);
             LOG_INFO("Sent MSG_LIST_STABLED_PETS (gossip) to npc=0x",
@@ -2244,7 +2244,7 @@ void QuestHandler::handleGossipMessage(network::Packet& packet) {
     }
 
     if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("GOSSIP_SHOW", {});
-    queries_.closeVendor(); // Close vendor if gossip opens
+    events_.publish(events::GossipWindowOpened{journal_.currentGossip.npcGuid});
 
     // Classify gossip quests and update quest log + overhead NPC markers.
     classifyGossipQuests(true);
@@ -2313,7 +2313,7 @@ void QuestHandler::handleQuestgiverQuestList(network::Packet& packet) {
     // be worse: each frame shows itself on its own event, so sending both shows
     // two.
     if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("QUEST_GREETING", {});
-    queries_.closeVendor();
+    events_.publish(events::GossipWindowOpened{journal_.currentGossip.npcGuid});
 
     classifyGossipQuests(false);
 

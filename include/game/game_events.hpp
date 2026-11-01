@@ -462,6 +462,21 @@ struct PlayerCastStopped {
     bool failed = false;
 };
 
+/// The player's own cast is over, however it ended - for what waits on it:
+/// opening a game object waits on the cast that opens it.
+struct PlayerCastEnded {
+    enum class Outcome {
+        WentOff,    ///< SMSG_SPELL_GO
+        Failed,     ///< refused or interrupted by the server
+        Cancelled,  ///< the player stopped it
+        Reset,      ///< the cast state was dropped without an answer
+    };
+    uint32_t spellId = 0;
+    Outcome outcome = Outcome::Failed;
+    /// For WentOff: the cast had a cast bar, rather than going off at once.
+    bool timed = false;
+};
+
 /// The server asked for a spell visual on a unit (SMSG_PLAY_SPELL_VISUAL,
 /// SMSG_PLAY_SPELL_IMPACT).
 struct SpellVisualRequested {
@@ -545,6 +560,33 @@ struct GossipOpenedOnNpc {
 struct GossipClosedOnNpc {
     uint64_t npcGuid = 0;
     float x = 0, y = 0, z = 0;
+};
+
+/// The server opened an NPC's gossip page or quest list
+/// (SMSG_GOSSIP_MESSAGE, SMSG_QUESTGIVER_QUEST_LIST), in view or not. It
+/// takes the place of any vendor window.
+struct GossipWindowOpened {
+    uint64_t npcGuid = 0;
+};
+
+/// The server opened one of an NPC's service windows - its goods, a
+/// trainer's list, the auction house, the flight map. It takes the gossip
+/// page's place.
+struct NpcWindowOpened {
+    uint64_t npcGuid = 0;
+};
+
+/// The player chose a gossip option that opens the NPC's goods; `repairs`
+/// when it is the armorer's, whose vendor window can repair.
+struct VendorOptionChosen {
+    uint64_t npcGuid = 0;
+    bool repairs = false;
+};
+
+/// The player chose the stable master's gossip option: the stable that
+/// opens next is this NPC's.
+struct StableOptionChosen {
+    uint64_t npcGuid = 0;
 };
 
 /// The server asks the dungeon finder be opened (SMSG_OPEN_LFG_DUNGEON_FINDER).

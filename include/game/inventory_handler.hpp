@@ -156,7 +156,6 @@ public:
     // ---- The NPC dialog and the quest log ----
     /// A gossip or quest window is on screen.
     [[nodiscard]] virtual bool npcDialogOpen() const = 0;
-    virtual void closeGossip() = 0;
     /// A game object's template; null until the realm has said it.
     [[nodiscard]] virtual const GameObjectQueryResponseData* gameObjectInfo(uint32_t entry) const = 0;
     /// Ask for a game object's template, for the object `guid`.
