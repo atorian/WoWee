@@ -741,8 +741,8 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     // Compute shader tests each instance bounding sphere against 6 frustum planes + distance.
     // Output: uint visibility[] read back by CPU to skip culled instances in sortedVisible_ build.
     {
-        static_assert(sizeof(CullInstanceGPU) == 32, "CullInstanceGPU must be 32 bytes (std430)");
-        static_assert(sizeof(CullUniformsGPU) == 128, "CullUniformsGPU must be 128 bytes (std140)");
+        static_assert(sizeof(CullRowGPU) == 32, "CullRowGPU must be 32 bytes (std430)");
+        static_assert(sizeof(CullUniformsGPU) == 144, "CullUniformsGPU must be 144 bytes (std140)");
 
         // Descriptor set layout: binding 0 = UBO (frustum+camera), 1 = SSBO (input), 2 = SSBO (output)
         VkDescriptorSetLayoutBinding bindings[3] = {};
@@ -795,9 +795,9 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         poolCi.pPoolSizes = poolSizes;
         vkCreateDescriptorPool(device, &poolCi, nullptr, &cullDescPool_);
 
+        // The table, the staging rows and the kept lists are made and grown
+        // with the scene (ensureCullCapacity), which writes their bindings.
         const VkDeviceSize uniformSize = sizeof(CullUniformsGPU);
-        const VkDeviceSize inputSize   = MAX_CULL_INSTANCES * sizeof(CullInstanceGPU);
-        const VkDeviceSize outputSize  = MAX_CULL_INSTANCES * sizeof(uint32_t);
 
         for (int i = 0; i < 2; i++) {
             // Uniform buffer (frustum planes + camera)
@@ -813,34 +813,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
                                 &cullUniformBuffer_[i], &cullUniformAlloc_[i], &ai);
                 cullUniformMapped_[i] = ai.pMappedData;
             }
-            // Input SSBO (per-instance cull data)
-            {
-                VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-                bci.size = inputSize;
-                bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-                VmaAllocationCreateInfo aci{};
-                aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-                aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-                VmaAllocationInfo ai{};
-                gpuCreateBuffer(ctx->getAllocator(), &bci, &aci,
-                                &cullInputBuffer_[i], &cullInputAlloc_[i], &ai);
-                cullInputMapped_[i] = ai.pMappedData;
-            }
-            // Output SSBO (visibility flags - GPU writes, CPU reads)
-            {
-                VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-                bci.size = outputSize;
-                bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-                VmaAllocationCreateInfo aci{};
-                aci.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
-                aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-                VmaAllocationInfo ai{};
-                gpuCreateBuffer(ctx->getAllocator(), &bci, &aci,
-                                &cullOutputBuffer_[i], &cullOutputAlloc_[i], &ai);
-                cullOutputMapped_[i] = ai.pMappedData;
-            }
 
-            // Allocate and write descriptor set
             VkDescriptorSetAllocateInfo setAi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
             setAi.descriptorPool = cullDescPool_;
             setAi.descriptorSetCount = 1;
@@ -848,32 +821,13 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
             vkAllocateDescriptorSets(device, &setAi, &cullSet_[i]);
 
             VkDescriptorBufferInfo uboInfo{.buffer = cullUniformBuffer_[i], .offset = 0, .range = uniformSize};
-            VkDescriptorBufferInfo inputInfo{.buffer = cullInputBuffer_[i], .offset = 0, .range = inputSize};
-            VkDescriptorBufferInfo outputInfo{.buffer = cullOutputBuffer_[i], .offset = 0, .range = outputSize};
-
-            VkWriteDescriptorSet writes[3] = {};
-            writes[0] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            writes[0].dstSet = cullSet_[i];
-            writes[0].dstBinding = 0;
-            writes[0].descriptorCount = 1;
-            writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            writes[0].pBufferInfo = &uboInfo;
-
-            writes[1] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            writes[1].dstSet = cullSet_[i];
-            writes[1].dstBinding = 1;
-            writes[1].descriptorCount = 1;
-            writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[1].pBufferInfo = &inputInfo;
-
-            writes[2] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            writes[2].dstSet = cullSet_[i];
-            writes[2].dstBinding = 2;
-            writes[2].descriptorCount = 1;
-            writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[2].pBufferInfo = &outputInfo;
-
-            vkUpdateDescriptorSets(device, 3, writes, 0, nullptr);
+            VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            write.dstSet = cullSet_[i];
+            write.dstBinding = 0;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            write.pBufferInfo = &uboInfo;
+            vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
         }
     }
 
@@ -982,14 +936,6 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     return true;
 }
 
-void M2Renderer::invalidateCullOutput(uint32_t frameIndex) {
-    // On non-HOST_COHERENT memory, VMA-mapped GPU→CPU buffers need explicit
-    // invalidation so the CPU cache sees the latest GPU writes.
-    if (frameIndex < 2 && cullOutputAlloc_[frameIndex]) {
-        vmaInvalidateAllocation(vkCtx_->getAllocator(), cullOutputAlloc_[frameIndex], 0, VK_WHOLE_SIZE);
-    }
-}
-
 void M2Renderer::shutdown() {
     LOG_INFO("Shutting down M2 renderer...");
     recording_ = std::make_shared<Frame>();
@@ -1001,6 +947,7 @@ void M2Renderer::shutdown() {
 
     scene_->rtChanges.clear(rtScene_);
     scene_->slots.clear();
+    scene_->indexOfSlot.clear();
     // Delete model GPU resources
     for (auto& [id, modelResource] : models) {
         destroyModelGPU(id, modelResource);
@@ -1077,11 +1024,19 @@ void M2Renderer::shutdown() {
     destroy(device, cullPipelineLayout_);
     for (int i = 0; i < 2; i++) {
         destroy(alloc, cullUniformBuffer_[i], cullUniformAlloc_[i]);
-        destroy(alloc, cullInputBuffer_[i], cullInputAlloc_[i]);
-        destroy(alloc, cullOutputBuffer_[i], cullOutputAlloc_[i]);
-        cullUniformMapped_[i] = cullInputMapped_[i] = cullOutputMapped_[i] = nullptr;
+        destroy(alloc, cullStaging_[i].buffer, cullStaging_[i].alloc);
+        destroy(alloc, cullVisible_[i].buffer, cullVisible_[i].alloc);
+        cullStaging_[i] = cullVisible_[i] = CullBuffer{};
+        cullUniformMapped_[i] = nullptr;
         cullSet_[i] = VK_NULL_HANDLE;
+        cullSetTableVersion_[i] = 0;
+        slotCullDispatch_[i] = CullDispatch{};
     }
+    destroy(alloc, cullTable_.buffer, cullTable_.alloc);
+    cullTable_ = CullBuffer{};
+    pendingCullDispatch_ = CullDispatch{};
+    // The table is gone: whatever scene comes next is mirrored from scratch.
+    cullTableScene_ = 0;
     destroy(device, cullDescPool_);
     destroy(device, cullSetLayout_);
 

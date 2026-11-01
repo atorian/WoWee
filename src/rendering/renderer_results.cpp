@@ -91,7 +91,7 @@ void Renderer::publishFrameResults() {
         result.statistics.m2Moved = by(Why::Moved);
         result.statistics.m2ShownOrHidden = by(Why::ShownOrHidden);
         result.statistics.m2Finished = by(Why::Finished);
-        result.culling = m2Renderer->takeCullAnswers();
+        result.culling = m2Renderer->takeCullVerdicts();
     }
     if (wmoRenderer) {
         result.statistics.wmoDraws = wmoRenderer->getDrawCallCount();
@@ -140,7 +140,7 @@ std::vector<FrameResults> Renderer::takeFrameResults() {
         accept(result.skyView, publishedSkyView_);
         accept(result.sun, publishedSun_);
         accept(result.moon, publishedMoon_);
-        if (m2Renderer && !result.culling.empty()) m2Renderer->acceptCullAnswers(result.culling);
+        if (m2Renderer && !result.culling.empty()) m2Renderer->acceptCullVerdicts(result.culling);
         for (const auto generation : result.captureDrops)
             if (frameSink_ && generation == captureGeneration_) frameSink_->frameDropped();
         for (auto& image : result.images) {

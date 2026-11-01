@@ -14,12 +14,12 @@ struct FrameStage {
     float milliseconds = 0;
 };
 
-struct CullAnswer {
-    uint32_t id = 0;
-    /// Its place in the renderer's instance list when it was culled.
-    uint32_t index = 0;
-    bool visible = false;
-    uint64_t sceneIdentity = 0, gpuFrame = 0;
+/// What the GPU cull kept in one extracted frame: the slots of the instances
+/// it kept, each with the id the slot held then (slot, id, slot, id, ...).
+struct CullVerdict {
+    uint64_t sceneIdentity = 0;
+    uint32_t serial = 0;
+    std::vector<uint32_t> kept;
 };
 
 struct VisibilityAnswer {
@@ -72,7 +72,7 @@ struct FrameResults {
     std::vector<std::pair<std::string, double>> gpu;
     VisibilityAnswer exposure, skyView, sun, moon;
     RenderStatistics statistics;
-    std::vector<CullAnswer> culling;
+    std::vector<CullVerdict> culling;
     std::vector<CapturedImage> images;
     std::vector<uint64_t> captureDrops;
     std::vector<std::pair<std::string, bool>> screenshots;

@@ -584,6 +584,8 @@ void M2Renderer::dropFromIndexSets(size_t index) {
 }
 
 void M2Renderer::moveInIndexSets(size_t from, size_t to) {
+    const uint32_t slot = scene_->slots.slotOf(scene_->instances[to].id);
+    if (slot < scene_->indexOfSlot.size()) scene_->indexOfSlot[slot] = static_cast<uint32_t>(to);
     scene_->animatedInstanceIndices_.move(from, to);
     scene_->particleOnlyInstanceIndices_.move(from, to);
     scene_->particleInstanceIndices_.move(from, to);
@@ -715,6 +717,7 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
 void M2Renderer::clear() {
     scene_->rtChanges.clear(rtScene_);
     scene_->slots.clear();
+    scene_->indexOfSlot.clear();
     scene_->identity = nextSceneIdentity_.fetch_add(1, std::memory_order_relaxed);
     ++instanceLayoutRevision_;
     if (vkCtx_) {
@@ -753,6 +756,7 @@ void M2Renderer::clear() {
 void M2Renderer::clearInstances() {
     scene_->rtChanges.clear(rtScene_);
     scene_->slots.clear();
+    scene_->indexOfSlot.clear();
     ++instanceLayoutRevision_;
     for (auto& inst : scene_->instances) destroyInstanceBones(inst);
     *scene_ = InstanceState{};

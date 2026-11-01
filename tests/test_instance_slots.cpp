@@ -67,14 +67,32 @@ TEST_CASE("a catch-up reads each changed instance once, and nothing in a scene t
     CHECK(caughtUp(slots).empty());
 }
 
-TEST_CASE("an instance removed after it changed is not read", "[instance slots]") {
+TEST_CASE("a removed instance is read once more, as a free slot, so a copy can clear its row",
+          "[instance slots]") {
     InstanceSlots slots;
     for (uint32_t id = 1; id <= 4; ++id) slots.add(id, 1);
     (void)caughtUp(slots);
+    const uint32_t gone = slots.slotOf(2);
     slots.changed(1);
     slots.changed(2);
-    slots.changed(3);
     slots.remove(2);
+    slots.remove(4);  // removed while unchanged: read as free all the same
+    const auto visited = caughtUp(slots);
+    REQUIRE(visited.size() == 3);
+    CHECK(visited[0].second == 1);
+    CHECK(std::count_if(visited.begin(), visited.end(),
+                        [](const auto& v) { return v.second == InstanceSlots::invalid; }) == 2);
+    CHECK(std::any_of(visited.begin(), visited.end(), [&](const auto& v) { return v.first == gone; }));
+    CHECK(caughtUp(slots).empty());
+}
+
+TEST_CASE("a copy that falls behind reads every instance again", "[instance slots]") {
+    InstanceSlots slots;
+    for (uint32_t id = 1; id <= 3; ++id) slots.add(id, 1);
+    (void)caughtUp(slots);
+    slots.remove(2);
+    (void)caughtUp(slots);
+    slots.markAllChanged(InstanceSlots::Mirror::RayTracing);
     const auto visited = caughtUp(slots);
     REQUIRE(visited.size() == 2);
     CHECK(visited[0].second == 1);
@@ -88,6 +106,7 @@ TEST_CASE("a model's change wakes its instances and no others", "[instance slots
     slots.add(3, 10);
     (void)caughtUp(slots);
     slots.remove(1);  // its model's list keeps the rest
+    (void)caughtUp(slots);
     slots.modelChanged(10);
     const auto visited = caughtUp(slots);
     REQUIRE(visited.size() == 1);

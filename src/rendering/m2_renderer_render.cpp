@@ -201,7 +201,11 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     fileInIndexSets(idx);
     if (scene_->instances[idx].cachedIsBoat) scene_->pendingAfloatIds_.push_back(scene_->instances[idx].id);
     scene_->instanceIndexById[placed.id] = idx;
-    scene_->slots.add(placed.id, placed.modelId);
+    {
+        const uint32_t slot = scene_->slots.add(placed.id, placed.modelId);
+        if (scene_->indexOfSlot.size() <= slot) scene_->indexOfSlot.resize(slot + 1);
+        scene_->indexOfSlot[slot] = static_cast<uint32_t>(idx);
+    }
     scene_->cullGrid_.add();
     fileInCullGrid(idx, InstanceChange::Placed);
     placeInCollision(placed);
@@ -304,7 +308,11 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     fileInIndexSets(idx);
     if (scene_->instances[idx].cachedIsBoat) scene_->pendingAfloatIds_.push_back(scene_->instances[idx].id);
     scene_->instanceIndexById[placed.id] = idx;
-    scene_->slots.add(placed.id, placed.modelId);
+    {
+        const uint32_t slot = scene_->slots.add(placed.id, placed.modelId);
+        if (scene_->indexOfSlot.size() <= slot) scene_->indexOfSlot.resize(slot + 1);
+        scene_->indexOfSlot[slot] = static_cast<uint32_t>(idx);
+    }
     scene_->cullGrid_.add();
     fileInCullGrid(idx, InstanceChange::Placed);
     placeInCollision(placed);
@@ -863,95 +871,247 @@ void M2Renderer::extractCull(const Camera& camera, Frame& frame) {
     // must cover that ceiling: twice the adaptive clutter range can be much
     // shorter than a large landmark's own range once a dense scene settles.
     const float maxPossibleDistSq = cappedViewDistance() * cappedViewDistance();
-
-    // --- Upload frustum planes + camera (UBO, binding 0) ---
-    const glm::mat4 vp = camera.getProjectionMatrix() * camera.getViewMatrix();
-    Frustum frustum;
-    frustum.extractFromMatrix(vp);
-    const glm::vec3 camPos = camera.getPosition();
-
-    // Only the instances in columns this camera may see go to the GPU. This
-    // took the first MAX_CULL_INSTANCES of the array whatever they were - in a
-    // city with ninety thousand resident that was a quarter of them, picked by
-    // load order, with the rest left to a CPU test in render().
-    gatherViewCandidates(camPos, frustum, maxPossibleDistSq, cullCandidates_);
-    const uint32_t numInstances =
-        std::min(static_cast<uint32_t>(cullCandidates_.size()), MAX_CULL_INSTANCES);
+    (void)camera;
 
     frame.maxPossibleDistSq = maxPossibleDistSq;
-    frame.cullIds.reserve(numInstances);
-    frame.cullIndices.reserve(numInstances);
-    frame.cullInput.reserve(numInstances);
-    using G = M2CullGrid;
-    for (uint32_t i = 0; i < numInstances; ++i) {
-        const uint32_t index = cullCandidates_[i];
-        const G::Record& r = scene_->cullGrid_.record(index);
-        const bool gameObject = (r.flags & G::kGameObject) != 0;
-        float distanceSq = rendering::m2InstanceMaxDistSq(maxRenderDistanceSq,
-            r.maxDistSqFactor, gameObject,
-            rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE, cappedViewDistance(),
-            (r.flags & G::kGroundDetail) != 0, groundDetailMaxDistance_);
-        if (r.flags & G::kAnimatedSkyBird)
-            distanceSq = std::min(distanceSq, rendering::M2_SKY_BIRD_MAX_RENDER_DISTANCE * rendering::M2_SKY_BIRD_MAX_RENDER_DISTANCE);
-        frame.cullIds.push_back(r.id);
-        frame.cullIndices.push_back(index);
-        frame.cullInput.push_back({glm::vec4(r.cullCenter, r.paddedRadius), distanceSq,
-                                   ((r.flags & G::kValid) ? 1u : 0u) | ((r.flags & G::kInvisibleTrap) ? 4u : 0u),
-                                   {0.0f, 0.0f}});
+    frame.cullBaseMaxDistSq = maxRenderDistanceSq;
+    frame.cullViewDistance = cappedViewDistance();
+    frame.cullGroundDetailMaxDistance = groundDetailMaxDistance_;
+    const uint32_t serial = ++cullSerial_;
+    frame.cullSerial = serial;
+
+    // The table mirrors one scene. Another in its place - cleared, swapped -
+    // and the table is cleared and filled from it whole.
+    InstanceSlots& slots = scene_->slots;
+    if (cullTableScene_ != scene_->identity) {
+        cullTableScene_ = scene_->identity;
+        cullResetSerial_ = serial;
+        cullPendingSlots_.clear();
+        std::fill(cullPendingSerial_.begin(), cullPendingSerial_.end(), 0u);
+        std::fill(slotChangeSerial_.begin(), slotChangeSerial_.end(), 0u);
+        changedSinceVerdict_.clear();
+        verdictVisible_.clear();
+        haveVerdict_ = false;
+        slots.markAllChanged(InstanceSlots::Mirror::GpuCull);
     }
+    const uint32_t slotCount = slots.slotCount();
+    if (cullPendingSerial_.size() < slotCount) cullPendingSerial_.resize(slotCount, 0u);
+    if (slotChangeSerial_.size() < slotCount) slotChangeSerial_.resize(slotCount, 0u);
+    slots.catchUp(InstanceSlots::Mirror::GpuCull, [&](uint32_t slot, uint32_t) {
+        if (cullPendingSerial_[slot] == 0) cullPendingSlots_.push_back(slot);
+        cullPendingSerial_[slot] = serial;
+        slotChangeSerial_[slot] = serial;
+        changedSinceVerdict_.push_back(slot);
+    });
+
+    // What a submitted frame carried is on the GPU; the rest rides again, as
+    // it stands now.
+    const uint32_t applied = cullAppliedSerial_.load(std::memory_order_acquire);
+    std::erase_if(cullPendingSlots_, [&](uint32_t slot) {
+        if (cullPendingSerial_[slot] > applied) return false;
+        cullPendingSerial_[slot] = 0;
+        return true;
+    });
+    frame.cullReset = cullResetSerial_ > applied;
+    frame.cullUpdateSlots.reserve(cullPendingSlots_.size());
+    frame.cullUpdateRows.reserve(cullPendingSlots_.size());
+    for (const uint32_t slot : cullPendingSlots_) {
+        frame.cullUpdateSlots.push_back(slot);
+        frame.cullUpdateRows.push_back(slots.idAt(slot) == InstanceSlots::invalid
+                                           ? CullRowGPU{}
+                                           : cullRowOf(scene_->indexOfSlot[slot]));
+    }
+    frame.cullSlotCount = slotCount;
+}
+
+M2Renderer::CullRowGPU M2Renderer::cullRowOf(size_t index) const {
+    const M2CullGrid::Record& r = scene_->cullGrid_.record(static_cast<uint32_t>(index));
+    return {.sphere = glm::vec4(r.cullCenter, r.paddedRadius), .maxDistSqFactor = r.maxDistSqFactor,
+            .flags = r.flags, .id = r.id};
+}
+
+bool M2Renderer::ensureCullCapacity(VkCommandBuffer cmd, uint32_t frameIndex, uint32_t slots, uint32_t updates) {
+    const auto grown = [](uint32_t capacity, uint32_t need) {
+        return std::max({need, capacity * 2u, 1024u});
+    };
+    const auto make = [&](CullBuffer& into, uint32_t capacity, VkDeviceSize bytes, VkBufferUsageFlags usage,
+                          VmaMemoryUsage memory, const char* what) {
+        VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bci.size = bytes;
+        bci.usage = usage;
+        VmaAllocationCreateInfo aci{};
+        aci.usage = memory;
+        if (memory != VMA_MEMORY_USAGE_GPU_ONLY) aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        VmaAllocationInfo info{};
+        CullBuffer next;
+        if (gpuCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &next.buffer, &next.alloc, &info) != VK_SUCCESS) {
+            static core::LogBudget budget(4, "M2 cull buffers");
+            if (budget.take())
+                LOG_ERROR("M2 cull: no memory for the ", what, " of ", capacity,
+                          " slots; this frame's models are culled on the CPU");
+            return false;
+        }
+        next.mapped = info.pMappedData;
+        next.capacity = capacity;
+        DeferredResources retire(*vkCtx_);
+        if (into.buffer) retire.buffer(into.buffer, into.alloc);
+        into = next;
+        return true;
+    };
+    constexpr VkDeviceSize kRow = sizeof(CullRowGPU);
+
+    if (slots > cullTable_.capacity) {
+        CullBuffer old = cullTable_;
+        const uint32_t capacity = grown(old.capacity, slots);
+        CullBuffer next;
+        if (!make(next, capacity, VkDeviceSize(capacity) * kRow,
+                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                  VMA_MEMORY_USAGE_GPU_ONLY, "cull table")) {
+            return false;
+        }
+        // The rows so far come across on the GPU, after every earlier frame's
+        // copies into the old table; the new rows start free.
+        const VkDeviceSize kept = VkDeviceSize(old.capacity) * kRow;
+        if (old.buffer) {
+            VkMemoryBarrier2 before{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+            before.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            before.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            before.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            before.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+            VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            dep.memoryBarrierCount = 1;
+            dep.pMemoryBarriers = &before;
+            cmdPipelineBarrier2(cmd, dep);
+            const VkBufferCopy region{.srcOffset = 0, .dstOffset = 0, .size = kept};
+            vkCmdCopyBuffer(cmd, old.buffer, next.buffer, 1, &region);
+        }
+        vkCmdFillBuffer(cmd, next.buffer, kept, VkDeviceSize(capacity) * kRow - kept, 0);
+        DeferredResources retire(*vkCtx_);
+        if (old.buffer) retire.buffer(old.buffer, old.alloc);
+        cullTable_ = next;
+        ++cullTableVersion_;
+    }
+    bool visibleReplaced = false;
+    if (slots > cullVisible_[frameIndex].capacity) {
+        const uint32_t capacity = grown(cullVisible_[frameIndex].capacity, slots);
+        if (!make(cullVisible_[frameIndex], capacity, sizeof(uint32_t) * (1 + 2 * VkDeviceSize(capacity)),
+                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                  VMA_MEMORY_USAGE_GPU_TO_CPU, "kept list")) {
+            return false;
+        }
+        visibleReplaced = true;
+    }
+    if (updates > cullStaging_[frameIndex].capacity) {
+        const uint32_t capacity = grown(cullStaging_[frameIndex].capacity, updates);
+        if (!make(cullStaging_[frameIndex], capacity, VkDeviceSize(capacity) * kRow,
+                  VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, "table changes")) {
+            return false;
+        }
+    }
+    // This slot's set is written after its fence, and only when what it
+    // names was replaced.
+    if (visibleReplaced || cullSetTableVersion_[frameIndex] != cullTableVersion_) {
+        const VkDescriptorBufferInfo table{.buffer = cullTable_.buffer, .offset = 0,
+                                           .range = VkDeviceSize(cullTable_.capacity) * kRow};
+        const VkDescriptorBufferInfo kept{
+            .buffer = cullVisible_[frameIndex].buffer, .offset = 0,
+            .range = sizeof(uint32_t) * (1 + 2 * VkDeviceSize(cullVisible_[frameIndex].capacity))};
+        VkWriteDescriptorSet writes[2] = {};
+        for (int w = 0; w < 2; ++w) {
+            writes[w] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            writes[w].dstSet = cullSet_[frameIndex];
+            writes[w].dstBinding = static_cast<uint32_t>(w + 1);
+            writes[w].descriptorCount = 1;
+            writes[w].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        }
+        writes[0].pBufferInfo = &table;
+        writes[1].pBufferInfo = &kept;
+        vkUpdateDescriptorSets(vkCtx_->getDevice(), 2, writes, 0, nullptr);
+        cullSetTableVersion_[frameIndex] = cullTableVersion_;
+    }
+    return true;
+}
+
+void M2Renderer::frameSubmitted() {
+    if (!pendingCullDispatch_.valid) return;
+    slotCullDispatch_[pendingCullDispatch_.frameIndex] = pendingCullDispatch_;
+    cullAppliedSerial_.store(pendingCullDispatch_.serial, std::memory_order_release);
+    pendingCullDispatch_ = CullDispatch{};
 }
 
 void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera) {
-    if (!cullPipeline_ || recording_->cullInput.empty()) return;
-    const uint32_t numInstances = static_cast<uint32_t>(recording_->cullInput.size());
-    const float maxPossibleDistSq = recording_->maxPossibleDistSq;
-    const glm::mat4 vp = camera.getViewProjectionMatrix();
-    Frustum frustum;
-    frustum.extractFromMatrix(vp);
-    const glm::vec3 camPos = camera.getPosition();
-    if (cullUniformMapped_[frameIndex]) {
-        auto* ubo = static_cast<CullUniformsGPU*>(cullUniformMapped_[frameIndex]);
-        for (int i = 0; i < 6; i++) {
-            const auto& p = frustum.getPlane(static_cast<Frustum::Side>(i));
-            ubo->frustumPlanes[i] = glm::vec4(p.normal, p.distance);
-        }
-        ubo->cameraPos = glm::vec4(camPos, maxPossibleDistSq);
-        ubo->instanceCount = numInstances;
-    }
-
+    if (!cullPipeline_) return;
+    // What this slot's last submitted cull kept, now its fence has passed.
     collectCullOutput(frameIndex);
-    submittedCullIds_[frameIndex] = recording_->cullIds;
-    submittedCullIndices_[frameIndex] = recording_->cullIndices;
-    submittedCullScenes_[frameIndex] = recording_->sceneIdentity;
-    submittedCullFrames_[frameIndex] = vkCtx_->frameNumber();
+    const Frame& frame = *recording_;
+    if (frame.cullSlotCount == 0 || !cullUniformMapped_[frameIndex]) return;
+    const auto updates = static_cast<uint32_t>(frame.cullUpdateSlots.size());
+    if (!ensureCullCapacity(cmd, frameIndex, frame.cullSlotCount, updates)) return;
 
-    // --- Upload per-instance cull data (SSBO, binding 1) ---
-    // The per-instance radius math used to be recomputed here every frame; it's
-    // now precomputed once by recomputeCachedCullFactors() since it depends only
-    // on static instance state (scale, bound radius, animation/ground flags).
-    if (cullInputMapped_[frameIndex] && numInstances)
-        std::memcpy(cullInputMapped_[frameIndex], recording_->cullInput.data(), numInstances * sizeof(CullInstanceGPU));
+    const auto barrier = [&](VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
+                             VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess) {
+        VkMemoryBarrier2 b{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        b.srcStageMask = srcStage;
+        b.srcAccessMask = srcAccess;
+        b.dstStageMask = dstStage;
+        b.dstAccessMask = dstAccess;
+        VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dep.memoryBarrierCount = 1;
+        dep.pMemoryBarriers = &b;
+        cmdPipelineBarrier2(cmd, dep);
+    };
+    // The table's changes go in after every earlier frame's copies and tests.
+    barrier(VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    if (frame.cullReset) {
+        vkCmdFillBuffer(cmd, cullTable_.buffer, 0, VK_WHOLE_SIZE, 0);
+        barrier(VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    }
+    if (updates > 0) {
+        auto* staged = static_cast<CullRowGPU*>(cullStaging_[frameIndex].mapped);
+        std::memcpy(staged, frame.cullUpdateRows.data(), updates * sizeof(CullRowGPU));
+        cullCopyRegions_.resize(updates);
+        for (uint32_t k = 0; k < updates; ++k) {
+            cullCopyRegions_[k] = VkBufferCopy{.srcOffset = k * sizeof(CullRowGPU),
+                                               .dstOffset = frame.cullUpdateSlots[k] * sizeof(CullRowGPU),
+                                               .size = sizeof(CullRowGPU)};
+        }
+        vkCmdCopyBuffer(cmd, cullStaging_[frameIndex].buffer, cullTable_.buffer, updates,
+                        cullCopyRegions_.data());
+    }
+    vkCmdFillBuffer(cmd, cullVisible_[frameIndex].buffer, 0, sizeof(uint32_t), 0);
+    barrier(VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT);
 
+    Frustum frustum;
+    frustum.extractFromMatrix(camera.getViewProjectionMatrix());
+    auto* ubo = static_cast<CullUniformsGPU*>(cullUniformMapped_[frameIndex]);
+    for (int i = 0; i < 6; i++) {
+        const auto& p = frustum.getPlane(static_cast<Frustum::Side>(i));
+        ubo->frustumPlanes[i] = glm::vec4(p.normal, p.distance);
+    }
+    ubo->cameraPos = glm::vec4(camera.getPosition(), frame.maxPossibleDistSq);
+    ubo->slotCount = frame.cullSlotCount;
+    ubo->baseMaxDistSq = frame.cullBaseMaxDistSq;
+    ubo->viewDistance = frame.cullViewDistance;
+    ubo->groundDetailMaxDistance = frame.cullGroundDetailMaxDistance;
+    ubo->gameObjectMinDistance = rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE;
+    ubo->skyBirdMaxDistance = rendering::M2_SKY_BIRD_MAX_RENDER_DISTANCE;
 
-    // --- Dispatch compute shader ---
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cullPipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                             cullPipelineLayout_, 0, 1, &cullSet_[frameIndex], 0, nullptr);
+    vkCmdDispatch(cmd, (frame.cullSlotCount + 63) / 64, 1, 1);
+    pendingCullDispatch_ = CullDispatch{.valid = true, .frameIndex = frameIndex,
+                                        .serial = frame.cullSerial, .sceneIdentity = frame.sceneIdentity};
 
-    const uint32_t groupCount = (numInstances + 63) / 64;
-    vkCmdDispatch(cmd, groupCount, 1, 1);
-
-    // Make writes available to the host after this frame's fence signals. The
-    // CPU invalidates and reads them when this frame slot is reused.
-    VkMemoryBarrier2 barrier{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-    barrier.srcStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-    barrier.dstStageMask = VK_PIPELINE_STAGE_HOST_BIT;
-    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-    VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    dep.memoryBarrierCount = 1;
-    dep.pMemoryBarriers = &barrier;
-    cmdPipelineBarrier2(cmd, dep);
+    // The kept list is the host's after this frame's fence: collectCullOutput
+    // invalidates and reads it when this frame slot comes round again.
+    barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
 }
 
 namespace {
@@ -1279,8 +1439,6 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
     glowSprites_.clear();
     drawInstances_.clear();
 
-    const bool gpuCullAvailable = cullPipeline_ != VK_NULL_HANDLE;
-    const uint32_t verdictSerial = cullVerdictSerial_;
 
     const float maxRenderDistanceSq = smoothedRenderDist_ * smoothedRenderDist_;
 
@@ -1339,9 +1497,11 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
         }
     }
 
-    // The instances in columns this camera may see; every one the test below
-    // would keep is among them. This walked the whole resident world - ninety
-    // thousand instances in Dalaran - for the few thousand it drew.
+    // What the GPU's last verdict kept and what changed since it; before the
+    // first verdict, the columns in view. This walked the whole resident
+    // world - ninety thousand instances in Dalaran - for the few thousand it
+    // drew, and then the columns in view - some twenty thousand.
+    if (!forceNoCull_) gatherCullCandidates(camPos, frustum, maxPossibleDistSq);
     const auto& candidates = forceNoCull_ ? viewCandidates_ : cullCandidates_;
     if (forceNoCull_) {
         viewCandidates_.resize(scene_->instances.size());
@@ -1371,7 +1531,8 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
         using G = M2CullGrid;
         const G& grid = scene_->cullGrid_;
         for (uint32_t k = begin; k < end; ++k) {
-            const uint32_t i = list[k];
+            const bool trusted = (list[k] & kTrustedCandidate) != 0;
+            const uint32_t i = list[k] & ~kTrustedCandidate;
             // The tests read the instance's cull record; the instance itself
             // only once it is kept.
             const G::Record& r = grid.record(i);
@@ -1396,11 +1557,8 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
                 glm::vec3 toCam = r.position - camPos;
                 distSq = glm::dot(toCam, toCam);
                 effectiveMaxDistSq = instanceMaxDistSq;
-            } else if (gpuCullAvailable && r.verdictSerial == verdictSerial) {
-                // Per-instance verdict scattered above - indexing visibility[]
-                // directly here would read the slot of whichever instance held
-                // this array position when the dispatch was recorded.
-                if (!r.lastVisible) continue;
+            } else if (trusted) {
+                // The GPU kept it, and it has not changed since.
                 glm::vec3 toCam = r.position - camPos;
                 distSq = glm::dot(toCam, toCam);
                 effectiveMaxDistSq = instanceMaxDistSq;
@@ -1608,37 +1766,112 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
     });
 }
 void M2Renderer::collectCullOutput(uint32_t frame) {
-    const auto* visibility = static_cast<const uint32_t*>(cullOutputMapped_[frame]);
-    if (!visibility) return;
+    CullDispatch& done = slotCullDispatch_[frame];
+    if (!done.valid) return;
+    done.valid = false;
+    const CullBuffer& list = cullVisible_[frame];
+    if (!list.mapped) return;
+    vmaInvalidateAllocation(vkCtx_->getAllocator(), list.alloc, 0, VK_WHOLE_SIZE);
+    const auto* data = static_cast<const uint32_t*>(list.mapped);
+    const uint32_t count = std::min(data[0], list.capacity);
+    CullVerdict verdict{.sceneIdentity = done.sceneIdentity, .serial = done.serial};
+    verdict.kept.assign(data + 1, data + 1 + 2 * size_t(count));
     std::lock_guard<std::mutex> lock(cullResultMutex_);
-    for (size_t k = 0; k < submittedCullIds_[frame].size(); ++k)
-        collectedCull_.push_back({.id = submittedCullIds_[frame][k], .index = submittedCullIndices_[frame][k],
-                                  .visible = visibility[k] != 0, .sceneIdentity = submittedCullScenes_[frame],
-                                  .gpuFrame = submittedCullFrames_[frame]});
+    collectedCull_.push_back(std::move(verdict));
 }
 
-std::vector<CullAnswer> M2Renderer::takeCullAnswers() {
+std::vector<CullVerdict> M2Renderer::takeCullVerdicts() {
     std::lock_guard lock(cullResultMutex_);
-    std::vector<CullAnswer> result;
+    std::vector<CullVerdict> result;
     result.swap(collectedCull_);
     return result;
 }
 
-void M2Renderer::acceptCullAnswers(const std::vector<CullAnswer>& answers) {
-    ++cullVerdictSerial_;
+void M2Renderer::acceptCullVerdicts(const std::vector<CullVerdict>& verdicts) {
+    const CullVerdict* newest = nullptr;
+    for (const auto& verdict : verdicts) {
+        if (verdict.sceneIdentity != scene_->identity) continue;
+        if (!newest || verdict.serial > newest->serial) newest = &verdict;
+    }
+    if (!newest) return;
+    if (haveVerdict_ && verdictScene_ == scene_->identity && newest->serial <= verdictSerial_) return;
+    const InstanceSlots& slots = scene_->slots;
+    const uint32_t slotCount = slots.slotCount();
+    if (slotMark_.size() < slotCount) slotMark_.resize(slotCount, 0u);
+    if (slotChangeSerial_.size() < slotCount) slotChangeSerial_.resize(slotCount, 0u);
+    if (++markStamp_ == 0) {
+        std::fill(slotMark_.begin(), slotMark_.end(), 0u);
+        markStamp_ = 1;
+    }
+    const uint32_t stamp = markStamp_;
+    const uint32_t serial = newest->serial;
     auto& grid = scene_->cullGrid_;
-    for (const auto& result : answers) {
-        if (result.sceneIdentity != scene_->identity) continue;
-        // Where it was when it was culled; a removal since may have moved it.
-        uint32_t index = result.index;
-        if (index >= grid.size() || grid.record(index).id != result.id) {
-            const auto found = scene_->instanceIndexById.find(result.id);
-            if (found == scene_->instanceIndexById.end()) continue;
-            index = static_cast<uint32_t>(found->second);
-        }
-        auto& record = grid.record(index);
-        record.verdictSerial = cullVerdictSerial_;
-        record.lastVisible = result.visible ? 1 : 0;
+    // A slot the verdict covers: its instance unchanged since that frame.
+    const auto covered = [&](uint32_t slot) {
+        return slot < slotCount && slots.idAt(slot) != InstanceSlots::invalid && slotChangeSerial_[slot] <= serial;
+    };
+    const auto setVisible = [&](uint32_t slot, uint8_t visible) {
+        const uint32_t index = scene_->indexOfSlot[slot];
+        if (index < grid.size()) grid.record(index).lastVisible = visible;
+    };
+
+    std::vector<uint32_t> kept;
+    kept.reserve(newest->kept.size() / 2);
+    for (size_t k = 0; k + 1 < newest->kept.size(); k += 2) {
+        const uint32_t slot = newest->kept[k];
+        if (!covered(slot) || slots.idAt(slot) != newest->kept[k + 1]) continue;
+        slotMark_[slot] = stamp;
+        kept.push_back(slot);
+        setVisible(slot, 1);
+    }
+    // Kept no longer: what the last verdict kept, and what changed since it
+    // and is covered now, unless this one kept it too.
+    for (const uint32_t slot : verdictVisible_) {
+        if (covered(slot) && slotMark_[slot] != stamp) setVisible(slot, 0);
+    }
+    std::erase_if(changedSinceVerdict_, [&](uint32_t slot) {
+        if (slot < slotCount && slotChangeSerial_[slot] > serial) return false;
+        if (covered(slot) && slotMark_[slot] != stamp) setVisible(slot, 0);
+        return true;
+    });
+    // The same order whatever order the GPU appended them in.
+    std::sort(kept.begin(), kept.end());
+    verdictVisible_ = std::move(kept);
+    verdictSerial_ = serial;
+    verdictScene_ = scene_->identity;
+    haveVerdict_ = true;
+}
+
+void M2Renderer::gatherCullCandidates(const glm::vec3& camPos, const Frustum& frustum, float maxPossibleDistSq) {
+    auto& out = cullCandidates_;
+    out.clear();
+    if (!haveVerdict_ || verdictScene_ != scene_->identity) {
+        // No verdict for this scene yet: the columns in view, tested here.
+        gatherViewCandidates(camPos, frustum, maxPossibleDistSq, out);
+        return;
+    }
+    const InstanceSlots& slots = scene_->slots;
+    const uint32_t slotCount = slots.slotCount();
+    if (slotMark_.size() < slotCount) slotMark_.resize(slotCount, 0u);
+    if (++markStamp_ == 0) {
+        std::fill(slotMark_.begin(), slotMark_.end(), 0u);
+        markStamp_ = 1;
+    }
+    const uint32_t stamp = markStamp_;
+    out.reserve(verdictVisible_.size() + changedSinceVerdict_.size());
+    // What the GPU kept, unchanged since: trusted.
+    for (const uint32_t slot : verdictVisible_) {
+        if (slots.idAt(slot) == InstanceSlots::invalid || slotChangeSerial_[slot] > verdictSerial_) continue;
+        slotMark_[slot] = stamp;
+        out.push_back(scene_->indexOfSlot[slot] | kTrustedCandidate);
+    }
+    // What changed after the frame it culled - placed, moved, shown - is
+    // tested here, as an instance with no verdict always was.
+    for (const uint32_t slot : changedSinceVerdict_) {
+        if (slot >= slotCount || slotMark_[slot] == stamp) continue;
+        if (slots.idAt(slot) == InstanceSlots::invalid) continue;
+        slotMark_[slot] = stamp;
+        out.push_back(scene_->indexOfSlot[slot]);
     }
 }
 
@@ -1646,7 +1879,8 @@ void M2Renderer::Frame::clear() noexcept {
     drawInstances_.clear(); sortedVisible_.clear(); transparentVisible_.clear();
     glowSprites_.clear(); ribbonDraws_.clear(); particleRuns_.clear();
     ribbonVertices.clear(); particleVertices.clear(); bones.clear();
-    cullInput.clear(); cullIds.clear(); cullIndices.clear(); depth.clear(); solarDepth.clear(); strikeDepth.clear(); shadowModels.clear();
+    cullUpdateSlots.clear(); cullUpdateRows.clear(); cullReset = false; cullSlotCount = cullSerial = 0;
+    depth.clear(); solarDepth.clear(); strikeDepth.clear(); shadowModels.clear();
     instanceEntries = 0;
     skinnedDraws = 0;
     changesBy = {};
@@ -1658,7 +1892,7 @@ M2Renderer::FrameCounts M2Renderer::recordedCounts() const {
     // lets it go), and has nothing to count.
     if (!recording_) return {};
     const Frame& frame = *recording_;
-    return {.cullCandidates = static_cast<uint32_t>(frame.cullInput.size()),
+    return {.cullCandidates = frame.cullSlotCount,
             .drawn = static_cast<uint32_t>(frame.drawInstances_.size()),
             .skinned = frame.skinnedDraws,
             .boneMatrices = static_cast<uint32_t>(frame.bones.size()),

@@ -24,8 +24,9 @@ class InstanceSlots {
 public:
     static constexpr uint32_t invalid = ~0u;
     /// The copies kept of a scene. Each catches up at its own time: the ray
-    /// tracer's when the renderer syncs it.
-    enum class Mirror : uint8_t { RayTracing, Count };
+    /// tracer's when the renderer syncs it, the GPU cull's table with each
+    /// frame extracted.
+    enum class Mirror : uint8_t { RayTracing, GpuCull, Count };
 
     /// A new instance: the slot it takes, changed for every mirror.
     uint32_t add(uint32_t id, uint32_t model) {
@@ -38,7 +39,12 @@ public:
             slots_.emplace_back();
         }
         auto& group = slotsByModel_[model];
-        slots_[slot] = Slot{.id = id, .model = model, .inModel = static_cast<uint32_t>(group.size())};
+        // A reused slot may still wait in a queue, read as freed; it is read
+        // as this instance instead, once.
+        Slot& s = slots_[slot];
+        s.id = id;
+        s.model = model;
+        s.inModel = static_cast<uint32_t>(group.size());
         group.push_back(slot);
         slotById_[id] = slot;
         markChanged(slot);
@@ -59,33 +65,40 @@ public:
         for (const uint32_t slot : it->second) markChanged(slot);
     }
 
-    /// Gone. Its slot is free for the next instance added; a mirror lets go
-    /// of what it kept for the slot before this. The slot it had, or
-    /// `invalid` for an id this does not know.
+    /// Gone. Its slot is free for the next instance added, and every mirror
+    /// reads it once more, as free (id `invalid`), to clear what it kept for
+    /// it - unless another instance has taken it by then. The slot it had,
+    /// or `invalid` for an id this does not know.
     uint32_t remove(uint32_t id) {
         const auto it = slotById_.find(id);
         if (it == slotById_.end()) return invalid;
         const uint32_t slot = it->second;
         slotById_.erase(it);
         Slot& s = slots_[slot];
-        for (size_t m = 0; m < queues_.size(); ++m) {
-            if (s.queuedAt[m] == invalid) continue;
-            auto& queue = queues_[m];
-            const uint32_t moved = queue.back();
-            queue[s.queuedAt[m]] = moved;
-            slots_[moved].queuedAt[m] = s.queuedAt[m];
-            queue.pop_back();
-            s.queuedAt[m] = invalid;
-        }
         auto group = slotsByModel_.find(s.model);
         const uint32_t moved = group->second.back();
         group->second[s.inModel] = moved;
         slots_[moved].inModel = s.inModel;
         group->second.pop_back();
         if (group->second.empty()) slotsByModel_.erase(group);
-        s = Slot{};
+        s.id = invalid;
+        s.model = 0;
+        s.inModel = 0;
+        markChanged(slot);
         free_.push_back(slot);
         return slot;
+    }
+
+    /// Every instance changed, for a mirror that lost its copy - a new
+    /// buffer, another scene in its place.
+    void markAllChanged(Mirror mirror) {
+        const auto m = static_cast<size_t>(mirror);
+        for (uint32_t slot = 0; slot < slots_.size(); ++slot) {
+            Slot& s = slots_[slot];
+            if (s.id == invalid || s.queuedAt[m] != invalid) continue;
+            s.queuedAt[m] = static_cast<uint32_t>(queues_[m].size());
+            queues_[m].push_back(slot);
+        }
     }
 
     /// No instances, no slots, nothing to catch up on.
@@ -122,7 +135,8 @@ public:
     }
 
     /// The slots changed since the mirror last caught up, each once, as
-    /// visit(slot, id); after this there are none.
+    /// visit(slot, id) - id `invalid` for a slot freed since; after this
+    /// there are none.
     template<class Visit>
     void catchUp(Mirror mirror, Visit&& visit) {
         const auto m = static_cast<size_t>(mirror);

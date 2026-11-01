@@ -589,6 +589,9 @@ public:
     void prepareRender(uint32_t frameIndex, const Camera& camera);
     /** Dispatch GPU frustum culling compute shader on primary cmd before render pass. */
     void dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera);
+    /// The frame recorded since the last call went to the GPU: the cull
+    /// table changes it carried are in, and its kept list will be.
+    void frameSubmitted();
     /// The opaque pass, and the blended one too unless it is drawn after the
     /// water (see renderAfterWater).
     /// A replacement is recorded where a suppressed star sheet would draw,
@@ -630,10 +633,6 @@ public:
     /// Changes accumulate while lighting is off; removals retire immediately.
     void syncRtScene();
     void setForceNoCull(bool v) { forceNoCull_ = v; }
-
-    /** Ensure GPU→CPU cull output is visible to the host after a fence wait.
-     *  Call after the early compute submission finishes (endSingleTimeCommands). */
-    void invalidateCullOutput(uint32_t frameIndex);
 
     /**
      * Initialize shadow pipeline (Phase 7)
@@ -802,8 +801,10 @@ public:
     // Stats
     [[nodiscard]] bool isInitialized() const { return initialized_; }
     [[nodiscard]] uint32_t getModelCount() const { return static_cast<uint32_t>(models.size()); }
-    std::vector<CullAnswer> takeCullAnswers();
-    void acceptCullAnswers(const std::vector<CullAnswer>& answers);
+    /// The GPU cull's kept lists read back since the last call (render side).
+    std::vector<CullVerdict> takeCullVerdicts();
+    /// The newest of them for this scene becomes what the view trusts.
+    void acceptCullVerdicts(const std::vector<CullVerdict>& verdicts);
     /// CPU memory the models keep after upload - bones and their animation
     /// tracks, emitters, collision - and the instances with what each holds.
     [[nodiscard]] uint64_t modelDataBytes() const;
@@ -1107,46 +1108,73 @@ private:
     VkDescriptorSet instanceSet_[2] = {};
     uint32_t instanceDataCount_ = 0; // reset each frame in render()
 
-    // GPU Frustum Culling via Compute Shader
-    // Compute shader tests each M2 instance against frustum planes + distance, writes visibility[].
-    // CPU reads back visibility to build sortedVisible_ without per-instance frustum/distance tests.
-    struct CullInstanceGPU {        // matches CullInstance in m2_cull.comp.glsl (32 bytes, std430)
-        glm::vec4 sphere;           // xyz = world position, w = padded radius
-        float effectiveMaxDistSq;   // adaptive distance cull threshold
-        uint32_t flags;             // bit 0 = valid, bit 2 = invisibleTrap
-        float _pad[2] = {};
+    // GPU culling (m2_cull.comp). The scene's instances live on the GPU in a
+    // cull table, a row per slot (InstanceSlots), changed only where an
+    // instance changed. Each frame the compute shader tests every slot and
+    // lists the kept ones, which the CPU reads back a frame or two later.
+    struct CullRowGPU {             // CullRow in m2_cull.comp.glsl (std430)
+        glm::vec4 sphere{0.0f};     // xyz = cull centre, w = padded radius
+        float maxDistSqFactor = 0;  // M2CullGrid::Record::maxDistSqFactor
+        uint32_t flags = 0;         // M2CullGrid flags; 0 for a free slot
+        uint32_t id = 0;
+        uint32_t _pad = 0;
     };
-    struct CullUniformsGPU {        // matches CullUniforms in m2_cull.comp.glsl (std140)
+    struct CullUniformsGPU {        // CullUniforms in m2_cull.comp.glsl (std140)
         glm::vec4 frustumPlanes[6]; // xyz = normal, w = distance
         glm::vec4 cameraPos;        // xyz = camera position, w = maxPossibleDistSq
-        uint32_t instanceCount;
-        uint32_t _pad[3] = {};
+        uint32_t slotCount;
+        float baseMaxDistSq;
+        float viewDistance;
+        float groundDetailMaxDistance;
+        float gameObjectMinDistance;
+        float skyBirdMaxDistance;
+        uint32_t _pad[2] = {};
     };
-    static constexpr uint32_t MAX_CULL_INSTANCES = 24576;
+    /// A device buffer the cull owns, with what it holds room for.
+    struct CullBuffer {
+        ::VkBuffer buffer = VK_NULL_HANDLE;
+        VmaAllocation alloc = VK_NULL_HANDLE;
+        void* mapped = nullptr;
+        uint32_t capacity = 0;
+    };
     VkPipeline cullPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout cullPipelineLayout_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout cullSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool cullDescPool_ = VK_NULL_HANDLE;
     VkDescriptorSet cullSet_[2] = {};               // double-buffered
-    ::VkBuffer cullUniformBuffer_[2] = {};           // frustum planes + camera (UBO)
+    ::VkBuffer cullUniformBuffer_[2] = {};           // frustum planes, camera, ranges (UBO)
     VmaAllocation cullUniformAlloc_[2] = {};
     void* cullUniformMapped_[2] = {};
-    ::VkBuffer cullInputBuffer_[2] = {};             // per-instance bounding sphere + flags (SSBO)
-    VmaAllocation cullInputAlloc_[2] = {};
-    void* cullInputMapped_[2] = {};
-    ::VkBuffer cullOutputBuffer_[2] = {};            // uint visibility[] (SSBO, host-readable)
-    VmaAllocation cullOutputAlloc_[2] = {};
-    void* cullOutputMapped_[2] = {};
+    /// The table, device-local, shared by both frame slots: written only by
+    /// copies recorded into the frames, in queue order.
+    CullBuffer cullTable_;
+    /// Bumped when the table is replaced, so each slot's set is rewritten.
+    uint32_t cullTableVersion_ = 0;
+    uint32_t cullSetTableVersion_[2] = {};
+    /// Per frame slot: the rows being copied in, and the kept list read back.
+    CullBuffer cullStaging_[2];
+    CullBuffer cullVisible_[2];
+    /// The table, the staging and the list at least this large, grown in
+    /// `cmd` (the table's rows copied across on the GPU).
+    /// False, logged, when there was no memory for one: no cull this frame.
+    bool ensureCullCapacity(VkCommandBuffer cmd, uint32_t frameIndex, uint32_t slots, uint32_t updates);
+    /// The recorded cull not yet known to be submitted, and per frame slot
+    /// the one its list was last written by: the extracted frame it culled
+    /// and the scene that frame held.
+    struct CullDispatch {
+        bool valid = false;
+        uint32_t frameIndex = 0, serial = 0;
+        uint64_t sceneIdentity = 0;
+    };
+    CullDispatch pendingCullDispatch_;
+    CullDispatch slotCullDispatch_[2];
+    std::vector<VkBufferCopy> cullCopyRegions_;  ///< scratch, render thread
 
     const std::vector<LocalLight>* frameLights_ = nullptr;
 
     RtScene* rtScene_ = nullptr;
     void registerRtModel(M2ModelGPU& gpuModel, const pipeline::M2Model& model);
     void releaseRtModel(uint32_t modelId, M2ModelGPU& gpuModel);
-
-    // The recording side retains submitted instance IDs and scene identities.
-    // After a slot's fence, collectCullOutput publishes completed verdicts;
-    // extraction applies them by identity, never by a volatile array index.
 
     // Dynamic ribbon vertex buffer (CPU-written triangle strip)
     // 9 floats each, for every trail in view. One riding phoenix lays 660
@@ -1301,7 +1329,41 @@ private:
     void gatherShadowCandidates(const glm::mat4& lightSpace, float shadowRadius,
                                 std::vector<uint32_t>& out) const;
     std::vector<uint32_t> viewCandidates_;    // reused by render()
-    std::vector<uint32_t> cullCandidates_;    // reused by dispatchCullCompute()
+    /// The view's candidates this frame, by instance index: those the GPU's
+    /// last verdict kept, marked kTrustedCandidate, and those to test here.
+    std::vector<uint32_t> cullCandidates_;
+    static constexpr uint32_t kTrustedCandidate = 1u << 31;
+    /// cullCandidates_ for this frame: the verdict's kept instances and the
+    /// ones changed since it; without a verdict for this scene, the columns
+    /// in view, to be tested here.
+    void gatherCullCandidates(const glm::vec3& camPos, const Frustum& frustum, float maxPossibleDistSq);
+    /// The cull table row of instance `index`.
+    [[nodiscard]] CullRowGPU cullRowOf(size_t index) const;
+
+    // The cull table as the game thread keeps it in step (extractCull). A
+    // changed slot rides in every extracted frame, as it stands then, until
+    // a frame that carried it is known to have reached the GPU; carrying it
+    // twice writes the same row twice.
+    uint32_t cullSerial_ = 0;                    ///< frames extracted
+    /// The newest extracted frame whose table changes are on the GPU:
+    /// written by the render thread (frameSubmitted), read here.
+    std::atomic<uint32_t> cullAppliedSerial_{0};
+    uint64_t cullTableScene_ = 0;                ///< the scene the table mirrors
+    uint32_t cullResetSerial_ = 0;               ///< the frame that cleared it
+    std::vector<uint32_t> cullPendingSlots_;
+    std::vector<uint32_t> cullPendingSerial_;    ///< by slot: last change, 0 if none pending
+
+    // The verdict the view trusts (acceptCullVerdicts): the slots the GPU
+    // kept in an extracted frame, and every slot changed since that frame,
+    // which no verdict has covered yet.
+    bool haveVerdict_ = false;
+    uint64_t verdictScene_ = 0;
+    uint32_t verdictSerial_ = 0;
+    std::vector<uint32_t> verdictVisible_;
+    std::vector<uint32_t> slotChangeSerial_;     ///< by slot: the frame it last changed in
+    std::vector<uint32_t> changedSinceVerdict_;  ///< slots, may repeat
+    std::vector<uint32_t> slotMark_;             ///< by slot: scratch stamp
+    uint32_t markStamp_ = 0;
     std::vector<uint32_t> shadowCandidates_;  // reused by renderShadow()
     /// The sun map's candidates: the instances that can cast at all (valid,
     /// not a trap), within kShadowCullSlack of the map shadowCullMatrix_
@@ -1322,7 +1384,6 @@ private:
     uint64_t instanceLayoutRevision_ = 0;
     /// shadowCandidates_ for the sun's map, from shadowCullIds_ or a new cull.
     void gatherReusedShadowCandidates(const glm::mat4& lightSpace, float shadowRadius);
-    uint32_t cullVerdictSerial_ = 0;
     // Instance to copy bone matrices from when spawning another of the same
     // model. Finding one by scanning every instance is O(n) per spawn, which
     // became 18ms for a single createInstance once a zone held tens of
@@ -1662,6 +1723,8 @@ private:
         /// Each instance's slot in the copies kept of this scene, and what
         /// changed since each caught up.
         InstanceSlots slots;
+        /// By slot: where its instance stands in `instances`.
+        std::vector<uint32_t> indexOfSlot;
         RtInstanceChanges rtChanges;
         std::unordered_map<uint32_t, PosedEmitters> posedEmitters_;
         std::unordered_map<DedupKey, uint32_t, DedupHash> instanceDedupMap_;
@@ -1697,11 +1760,16 @@ public:
         std::vector<float> ribbonVertices;
         std::vector<M2ParticleQuad> particleVertices;
         std::vector<glm::mat4> bones;
-        std::vector<CullInstanceGPU> cullInput;
-        std::vector<uint32_t> cullIds;
-        /// Where each was in the instance list, as a hint: checked against
-        /// its id when the verdict comes back.
-        std::vector<uint32_t> cullIndices;
+        /// The cull table's changes this frame carries, as they stand: the
+        /// rows of the slots changed and not yet known to be on the GPU, the
+        /// table cleared first when it starts mirroring this scene.
+        std::vector<uint32_t> cullUpdateSlots;
+        std::vector<CullRowGPU> cullUpdateRows;
+        bool cullReset = false;
+        /// Slots the cull tests, this extracted frame's number, and the
+        /// ranges its test reads.
+        uint32_t cullSlotCount = 0, cullSerial = 0;
+        float cullBaseMaxDistSq = 0, cullViewDistance = 0, cullGroundDetailMaxDistance = 0;
         std::vector<ShadowDraw> depth, solarDepth, strikeDepth;
         /// The models the three caster lists point into, kept alive with the
         /// frame: one reference for each run of a model's casters rather than
@@ -1724,11 +1792,7 @@ private:
     std::array<uint32_t, static_cast<size_t>(InstanceChange::Count)> refiledBy_{};
     std::shared_ptr<const Frame> recording_ = std::make_shared<Frame>();
     std::mutex cullResultMutex_;
-    std::vector<CullAnswer> collectedCull_;
-    std::vector<uint32_t> submittedCullIds_[2];
-    std::vector<uint32_t> submittedCullIndices_[2];
-    uint64_t submittedCullScenes_[2]{};
-    uint64_t submittedCullFrames_[2]{};
+    std::vector<CullVerdict> collectedCull_;
 
 };
 

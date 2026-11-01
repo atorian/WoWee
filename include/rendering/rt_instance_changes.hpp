@@ -52,6 +52,8 @@ public:
         if (bindings_.size() < slots.slotCount()) bindings_.resize(slots.slotCount());
         slots.catchUp(InstanceSlots::Mirror::RayTracing, [&](uint32_t slot, uint32_t id) {
             auto& binding = bindings_[slot];
+            // Freed: its RT instance went with release() when it was removed.
+            if (id == InstanceSlots::invalid) return;
             const State state = read(id);
             if (state.mesh != binding.mesh) retire(binding, &sink);
             if (state.mesh == invalid) return;

@@ -61,12 +61,9 @@ public:
         /// How far beyond its position the shadow pass lets it cast: its
         /// bound radius at its scale, times 1.5.
         float shadowRadius = 0.0f;
-        /// The render() call whose GPU verdict lastVisible is; a verdict from
-        /// another call is not this frame's.
-        uint32_t verdictSerial = 0;
         uint16_t flags = 0;
-        /// The last GPU verdict that covered it. Visible until one says not,
-        /// so a new instance is drawn at once.
+        /// The last GPU verdict that covered it (M2Renderer::acceptCullVerdicts).
+        /// Visible until one says not, so a new instance is drawn at once.
         uint8_t lastVisible = 1;
     };
     enum Flag : uint16_t {
@@ -210,7 +207,7 @@ private:
     std::vector<uint32_t> cellOf_;
     std::vector<uint32_t> slotOf_;
 };
-static_assert(sizeof(M2CullGrid::Record) == 48, "two to three records to a 128-byte cache line");
+static_assert(sizeof(M2CullGrid::Record) == 44, "two to three records to a 128-byte cache line");
 
 /// The shadow pass's per-instance test against an orthographic light-space
 /// matrix: whether a caster at `position` with this bounding radius (already

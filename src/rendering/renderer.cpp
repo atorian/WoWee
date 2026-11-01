@@ -1982,7 +1982,6 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
         CpuStage stage(stages, "beginFrame", "M2 cull");
         GpuPass pass(*vkCtx, currentCmd, "M2 cull");
         uint32_t frame = vkCtx->getCurrentFrame();
-        m2Renderer->invalidateCullOutput(frame);
         m2Renderer->dispatchCullCompute(currentCmd, frame, *frameCamera());
     }
 
@@ -2216,6 +2215,7 @@ void Renderer::endFrame() {
     // Submit and present
     vkCtx->endFrame(currentCmd, currentImageIndex);
     currentCmd = VK_NULL_HANDLE;
+    if (m2Renderer) m2Renderer->frameSubmitted();
     vkCtx->cpuStages().add("Render", "endFrame", std::chrono::duration<float, std::milli>(
         std::chrono::steady_clock::now() - recordingStart).count());
     publishFrameResults();
