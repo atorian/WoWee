@@ -596,7 +596,7 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     if (services_.achievementsFeed) services_.achievementsFeed->beginCharacter();
     playerHandler_->beginCharacter();
     movementHandler_->beginCharacter();
-    spellHandler_->resetAllState();
+    spellHandler_->beginCharacter();
     eventBus().publish(events::PlayerIntoxicationChanged{0.0f});
     actionBarHandler_->clear();
     petHandler_->beginCharacter();
@@ -604,12 +604,9 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     // The quest log begins again with CharacterLoggingIn, below.
     pendingLoginQuestResync_ = false;
     pendingLoginQuestResyncTimeout_ = 0.0f;
-    combatHandler_->resetAllCombatState();
-    // resetCastState() already called inside resetAllState() above
     pendingGameObjectInteractGuid_ = 0;
     lastInteractedGoGuid_ = 0;
     combatHandler_->beginCharacter();
-    combatHandler_->invalidateTabCycle();
     worldHandler_->clearAll();
     queryCacheHandler_->clear();
     accountDataHandler_->characterSelected(characterGuid);
@@ -759,9 +756,6 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     }
 
     if (initialWorldEntry) {
-        // Reset talent initialization so the first SMSG_TALENTS_INFO after login
-        // correctly sets the active spec (static locals don't reset across logins).
-        spellHandler_->resetTalentState();
 
         // Auto-join default chat channels only on first world entry.
         autoJoinDefaultChannels();

@@ -73,10 +73,120 @@ public:
     virtual bool consumeSuppressMeleeSwingAnim() = 0;
 };
 
-class CombatHandler {
+/// One victim on a unit's threat list, as SMSG_THREAT_UPDATE carries it.
+struct ThreatEntry {
+    uint64_t victimGuid = 0;
+    uint32_t threat     = 0;
+};
+
+/// Everything the fight keeps of the character in the world - its targets,
+/// its swings, who is attacking it, its death, combo points, threat, the
+/// combat text and log, the faction reactions the server forced. Assigned
+/// whole by CombatHandler::beginCharacter, so a field added here cannot keep
+/// the last character's value.
+struct CombatCharacterState {
+    // Last tab-target press (steady-clock ms); a pause restarts the cycle
+    // from the nearest enemy instead of resuming a stale rotation.
+    uint64_t lastTabTargetMs_ = 0;
+
+    // One remembered target of each kind, for targetLastEnemy/Friend. Written
+    // by setTarget as the old target is let go, so they are the target before
+    // this one rather than this one.
+    uint64_t lastEnemyTargetGuid_ = 0;
+    uint64_t lastFriendTargetGuid_ = 0;
+    uint64_t targetGuid_ = 0;
+    uint64_t focusGuid_ = 0;
+    /// What targetLastTarget flips back to.
+    uint64_t lastTargetGuid_ = 0;
+    uint64_t mouseoverGuid_ = 0;
+
+    // --- Combat state ---
+    bool autoAttacking_ = false;
+    bool autoAttackRequested_ = false;
+    bool autoAttackRetryPending_ = false;
+    uint64_t autoAttackTarget_ = 0;
+    bool autoAttackOutOfRange_ = false;
+    float autoAttackOutOfRangeTime_ = 0.0f;
+    float autoAttackRangeWarnCooldown_ = 0.0f;
+    float autoAttackResendTimer_ = 0.0f;
+    std::unordered_set<uint64_t> hostileAttackers_;
+
+    /// The player's death.
+    struct PlayerDeath {
+        bool dead = false;
+        /// Released: PLAYER_FLAGS_GHOST.
+        bool ghost = false;
+        bool repopPending = false;
+        uint64_t lastRepopRequestMs = 0;
+        uint64_t pendingSpiritHealerGuid = 0;
+        // The corpse, in server coordinates (x west, y north).
+        bool corpsePositionValid = false;
+        uint32_t corpseMapId = 0;
+        float corpseX = 0.0f, corpseY = 0.0f, corpseZ = 0.0f;
+        uint64_t corpseGuid = 0;
+        /// Absolute time (ms since epoch) when the PvP reclaim delay ends;
+        /// 0 when none applies.
+        uint64_t corpseReclaimAvailableMs = 0;
+        /// The last corpse proximity announced. canReclaimCorpse() is a
+        /// predicate; CORPSE_IN_RANGE and CORPSE_OUT_OF_RANGE are its edges,
+        /// and FrameXML raises its reclaim prompt from them.
+        bool corpseInRangeAnnounced = false;
+        /// Where the server says the spirit healer is - the graveyard a
+        /// release sends the player to (SMSG_DEATH_RELEASE_LOC). Withdrawn by
+        /// map id -1, which is how a resurrect clears the marker.
+        bool deathReleaseValid = false;
+        uint32_t deathReleaseMapId = 0;
+        glm::vec3 deathReleaseCanonical{0.0f};
+        // Offers to bring the player back.
+        bool resurrectPending = false;
+        bool resurrectRequestPending = false;
+        /// true = SMSG_SPIRIT_HEALER_CONFIRM, false = SMSG_RESURRECT_REQUEST.
+        bool resurrectIsSpiritHealer = false;
+        uint64_t resurrectCasterGuid = 0;
+        std::string resurrectCasterName;
+        bool resurrectHasSickness = false;
+        bool resurrectHasTimer = true;
+        /// SMSG_PRE_RESURRECT: Reincarnation, Twisting Nether.
+        bool selfResAvailable = false;
+        uint64_t areaSpiritHealerGuid = 0;
+        float areaSpiritHealerSeconds = 0.0f;
+    };
+    PlayerDeath death_;
+
+    uint8_t comboPoints_ = 0;
+    /// The hostile units Tab steps through, nearest first, and where it is.
+    std::vector<uint64_t> tabCycleList_;
+    int tabCycleIndex_ = -1;
+    bool tabCycleStale_ = true;
+    std::vector<CombatTextEntry> combatText_;
+    std::deque<CombatLogEntry> combatLog_;
+
+    struct RecentSpellstealLogEntry {
+        uint64_t casterGuid = 0;
+        uint64_t victimGuid = 0;
+        uint32_t spellId = 0;
+        std::chrono::steady_clock::time_point timestamp{};
+    };
+    std::deque<RecentSpellstealLogEntry> recentSpellstealLogs_;
+
+    uint64_t lastMeleeSwingMs_ = 0;
+
+    // unitGuid → sorted threat list (descending by threat value)
+    std::unordered_map<uint64_t, std::vector<ThreatEntry>> threatLists_;
+    /// Which mobs the player is currently top of the threat list for, so the
+    /// aggro warning sounds on becoming that rather than on every update that
+    /// says they still are. See the threat update handler.
+    std::unordered_set<uint64_t> playerTopThreatOn_;
+
+    // Forced faction reactions
+    std::unordered_map<uint32_t, uint8_t> forcedReactions_;
+};
+
+class CombatHandler : private CombatCharacterState {
 public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
+    using ThreatEntry = game::ThreatEntry;
 
     CombatHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
                   ChatLog& chat, const core::CVarStore& cvars, CombatQueries& queries);
@@ -113,10 +223,6 @@ public:
     void clearCombatLog() { combatLog_.clear(); }
 
     // Threat
-    struct ThreatEntry {
-        uint64_t victimGuid = 0;
-        uint32_t threat     = 0;
-    };
     [[nodiscard]] const std::vector<ThreatEntry>* getThreatList(uint64_t unitGuid) const {
         auto it = threatLists_.find(unitGuid);
         return (it != threatLists_.end()) ? &it->second : nullptr;
@@ -297,35 +403,15 @@ public:
     static uint32_t killXp(uint32_t playerLevel, uint32_t victimLevel);
     void handleXpGain(network::Packet& packet);
 
-    // State management (for resets, entity cleanup)
-    void resetAllCombatState();
-    /// A character is being logged in: nothing of the last one's death or
-    /// targets stands.
-    void beginCharacter() {
-        death_ = {};
-        targetGuid_ = 0;
-        focusGuid_ = 0;
-        lastTargetGuid_ = 0;
-    }
+    /// A character is being logged in: nothing of the last one's fight,
+    /// targets or death stands.
+    void beginCharacter() { static_cast<CombatCharacterState&>(*this) = CombatCharacterState{}; }
     void removeHostileAttacker(uint64_t guid);
     void clearCombatText();
     void removeCombatTextForGuid(uint64_t guid);
 
 private:
-    // Last tab-target press (steady-clock ms); a pause restarts the cycle
-    // from the nearest enemy instead of resuming a stale rotation.
-    uint64_t lastTabTargetMs_ = 0;
-
-    // One remembered target of each kind, for targetLastEnemy/Friend. Written
-    // by setTarget as the old target is let go, so they are the target before
-    // this one rather than this one.
-    uint64_t lastEnemyTargetGuid_ = 0;
-    uint64_t lastFriendTargetGuid_ = 0;
-    uint64_t targetGuid_ = 0;
-    uint64_t focusGuid_ = 0;
-    /// What targetLastTarget flips back to.
-    uint64_t lastTargetGuid_ = 0;
-    uint64_t mouseoverGuid_ = 0;
+    // The state is CombatCharacterState's.
 
     /// The walk both cycles do: everything alive within range that `wanted`
     /// accepts, nearest first, then step to the next one past the current
@@ -367,92 +453,13 @@ private:
     /// The unit a guid names, or null.
     [[nodiscard]] Unit* unitByGuid(uint64_t guid) const;
 
-    // --- Combat state ---
-    bool autoAttacking_ = false;
-    bool autoAttackRequested_ = false;
-    bool autoAttackRetryPending_ = false;
-    uint64_t autoAttackTarget_ = 0;
-    bool autoAttackOutOfRange_ = false;
-    float autoAttackOutOfRangeTime_ = 0.0f;
-    float autoAttackRangeWarnCooldown_ = 0.0f;
-    float autoAttackResendTimer_ = 0.0f;
-    std::unordered_set<uint64_t> hostileAttackers_;
-
-    /// The player's death, assigned whole when a character is logged in.
-    struct PlayerDeath {
-        bool dead = false;
-        /// Released: PLAYER_FLAGS_GHOST.
-        bool ghost = false;
-        bool repopPending = false;
-        uint64_t lastRepopRequestMs = 0;
-        uint64_t pendingSpiritHealerGuid = 0;
-        // The corpse, in server coordinates (x west, y north).
-        bool corpsePositionValid = false;
-        uint32_t corpseMapId = 0;
-        float corpseX = 0.0f, corpseY = 0.0f, corpseZ = 0.0f;
-        uint64_t corpseGuid = 0;
-        /// Absolute time (ms since epoch) when the PvP reclaim delay ends;
-        /// 0 when none applies.
-        uint64_t corpseReclaimAvailableMs = 0;
-        /// The last corpse proximity announced. canReclaimCorpse() is a
-        /// predicate; CORPSE_IN_RANGE and CORPSE_OUT_OF_RANGE are its edges,
-        /// and FrameXML raises its reclaim prompt from them.
-        bool corpseInRangeAnnounced = false;
-        /// Where the server says the spirit healer is - the graveyard a
-        /// release sends the player to (SMSG_DEATH_RELEASE_LOC). Withdrawn by
-        /// map id -1, which is how a resurrect clears the marker.
-        bool deathReleaseValid = false;
-        uint32_t deathReleaseMapId = 0;
-        glm::vec3 deathReleaseCanonical{0.0f};
-        // Offers to bring the player back.
-        bool resurrectPending = false;
-        bool resurrectRequestPending = false;
-        /// true = SMSG_SPIRIT_HEALER_CONFIRM, false = SMSG_RESURRECT_REQUEST.
-        bool resurrectIsSpiritHealer = false;
-        uint64_t resurrectCasterGuid = 0;
-        std::string resurrectCasterName;
-        bool resurrectHasSickness = false;
-        bool resurrectHasTimer = true;
-        /// SMSG_PRE_RESURRECT: Reincarnation, Twisting Nether.
-        bool selfResAvailable = false;
-        uint64_t areaSpiritHealerGuid = 0;
-        float areaSpiritHealerSeconds = 0.0f;
-    };
-    PlayerDeath death_;
-
-    uint8_t comboPoints_ = 0;
-    /// The hostile units Tab steps through, nearest first, and where it is.
-    std::vector<uint64_t> tabCycleList_;
-    int tabCycleIndex_ = -1;
-    bool tabCycleStale_ = true;
-    std::vector<CombatTextEntry> combatText_;
     static constexpr size_t MAX_COMBAT_LOG = 500;
-    std::deque<CombatLogEntry> combatLog_;
-
-    struct RecentSpellstealLogEntry {
-        uint64_t casterGuid = 0;
-        uint64_t victimGuid = 0;
-        uint32_t spellId = 0;
-        std::chrono::steady_clock::time_point timestamp{};
-    };
     static constexpr size_t MAX_RECENT_SPELLSTEAL_LOGS = 32;
-    std::deque<RecentSpellstealLogEntry> recentSpellstealLogs_;
 
-    uint64_t lastMeleeSwingMs_ = 0;
-
-    // unitGuid → sorted threat list (descending by threat value)
-    std::unordered_map<uint64_t, std::vector<ThreatEntry>> threatLists_;
-    /// Which mobs the player is currently top of the threat list for, so the
-    /// aggro warning sounds on becoming that rather than on every update that
-    /// says they still are. See the threat update handler.
-    std::unordered_set<uint64_t> playerTopThreatOn_;
     /// Whether an aggro warning applies at all where the player is - the same
     /// question IsThreatWarningEnabled answers for the indicator, asked from
     /// C++ so the sound and the picture agree about when they are wanted.
     [[nodiscard]] bool threatWarningWanted() const;
-
-    // Forced faction reactions
-    std::unordered_map<uint32_t, uint8_t> forcedReactions_;
 };
 
 } // namespace game

@@ -276,7 +276,107 @@ public:
     virtual void addLocalChatMessage(const MessageChatData& message) = 0;
 };
 
-class SpellHandler {
+/// Glyph slots per talent spec.
+inline constexpr uint8_t kMaxGlyphSlots = 6;
+
+/// One tab of the spell book.
+struct SpellBookTab {
+    std::string name;
+    std::string texture; // icon path
+    std::vector<uint32_t> spellIds; // all visible learned ranks in this tab
+    // One-based slots in the full book, for the compact highest-rank view.
+    std::vector<uint32_t> highestRankSlots;
+};
+
+/// Everything the spell book keeps of the character in the world: what the
+/// realm has said of it (skills, talent modifiers, the explored map, totems,
+/// the companion out, the spells known, their cooldowns, its auras and its
+/// talents and glyphs), its cast, its queues and the windows a cast opens,
+/// and the skill headings the player closed. Assigned whole by
+/// SpellHandler::beginCharacter, so a field added here cannot keep the last
+/// character's value.
+struct SpellCharacterState {
+    std::unordered_map<uint32_t, PlayerSkill> skills_;
+    SpellModMap flatMods_;
+    SpellModMap pctMods_;
+    std::vector<uint32_t> exploredZones_ = std::vector<uint32_t>(kExploredZoneMaskCount, 0u);
+    bool hasExploredZones_ = false;
+    std::array<TotemSlot, kTotemSlots> totems_{};
+    /// The non-combat companion out, and the spell that called it.
+    uint64_t companionGuid_ = 0;
+    uint32_t companionSpellId_ = 0;
+
+    std::unordered_set<uint32_t> knownSpells_;
+    std::unordered_map<uint32_t, float> spellCooldowns_;    // spellId -> remaining seconds
+    // spellId -> the length the cooldown had when it began. Kept beside the
+    // remaining time rather than derived from it because GetSpellCooldown is
+    // asked for (start, duration), and answering (now, remaining) redraws the
+    // swirl as a fresh full sweep every time the interface asks - which it does
+    // on every ACTIONBAR_UPDATE_COOLDOWN, so a long cooldown appears to restart
+    // whenever anything else is cast.
+    std::unordered_map<uint32_t, float> spellCooldownTotals_;
+
+    // The cast
+    uint8_t castCount_ = 0;
+    bool casting_ = false;
+    bool castIsChannel_ = false;
+    uint32_t currentCastSpellId_ = 0;
+    float castTimeRemaining_ = 0.0f;
+    float castTimeTotal_ = 0.0f;
+    bool restorationActive_ = false;
+    uint32_t restorationSpellId_ = 0;
+    bool restorationIsFood_ = false;
+    float restorationTimeRemaining_ = 0.0f;
+    float restorationTimeTotal_ = 0.0f;
+
+    // Repeat-craft queue
+    uint32_t craftQueueSpellId_ = 0;
+    int craftQueueRemaining_ = 0;
+
+    // Crafting window
+    bool craftingWindowOpen_ = false;
+    uint32_t craftingSkillLine_ = 0;
+
+    // Spell queue (400ms window)
+    uint32_t lastGroundCastSpellId_ = 0;
+    /// When auto-attack was last toggled, for the Ability Toggle guard: a
+    /// second press inside a short window is an accident rather than a
+    /// decision. See the SPELL_ID_ATTACK branch in castSpell.
+    std::chrono::steady_clock::time_point autoAttackToggledAt_{};
+    uint32_t queuedSpellId_ = 0;
+    uint64_t queuedSpellTarget_ = 0;
+
+    // Talents (dual-spec support)
+    uint8_t activeTalentSpec_ = 0;
+    uint8_t unspentTalentPoints_[2] = {0, 0};
+    std::unordered_map<uint32_t, uint8_t> learnedTalents_[2];
+    std::array<std::array<uint16_t, kMaxGlyphSlots>, 2> learnedGlyphs_{};
+    bool talentsInitialized_ = false;
+
+    // Auras
+    std::vector<AuraSlot> playerAuras_;
+    std::vector<AuraSlot> targetAuras_;
+
+    // Global Cooldown
+    float gcdTotal_ = 0.0f;
+    std::chrono::steady_clock::time_point gcdStartedAt_{};
+
+    // Spell book tabs, built from the spells known
+    std::vector<SpellBookTab> spellBookTabs_;
+    size_t lastSpellCount_ = 0;
+    bool spellBookTabsDirty_ = true;
+
+    // Talent wipe confirm dialog
+    bool talentWipePending_ = false;
+    uint64_t talentWipeNpcGuid_ = 0;
+    uint32_t talentWipeCost_ = 0;
+
+    /// Skill panel headings the player has closed. Client-side, saved with
+    /// the rest of the character config.
+    std::unordered_set<uint32_t> collapsedSkillCategories_;
+};
+
+class SpellHandler : private SpellCharacterState {
 public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
@@ -292,13 +392,7 @@ public:
     using TalentTabEntry = game::TalentTabEntry;
 
     // --- Spell book tabs ---
-    struct SpellBookTab {
-        std::string name;
-        std::string texture; // icon path
-        std::vector<uint32_t> spellIds; // all visible learned ranks in this tab
-        // One-based slots in the full book, for the compact highest-rank view.
-        std::vector<uint32_t> highestRankSlots;
-    };
+    using SpellBookTab = game::SpellBookTab;
 
     // Unit cast state (aliased from handler_types.hpp)
     using UnitCastState = game::UnitCastState;
@@ -437,7 +531,7 @@ public:
         return spec < 2 ? learnedTalents_[spec] : empty;
     }
 
-    static constexpr uint8_t MAX_GLYPH_SLOTS = 6;
+    static constexpr uint8_t MAX_GLYPH_SLOTS = kMaxGlyphSlots;
     [[nodiscard]] const std::array<uint16_t, MAX_GLYPH_SLOTS>& getGlyphs() const { return learnedGlyphs_[activeTalentSpec_]; }
     [[nodiscard]] const std::array<uint16_t, MAX_GLYPH_SLOTS>& getGlyphs(uint8_t spec) const {
         static std::array<uint16_t, MAX_GLYPH_SLOTS> empty{};
@@ -556,7 +650,7 @@ public:
 
     // ---- Skills ----
     [[nodiscard]] const std::unordered_map<uint32_t, PlayerSkill>& playerSkills() const {
-        return character_.skills;
+        return skills_;
     }
     /// SkillLine.dbc's category for a skill: 7 class, 9 secondary, 11 profession...
     [[nodiscard]] uint32_t skillCategory(uint32_t skillLineId) const;
@@ -576,17 +670,17 @@ public:
     [[nodiscard]] std::vector<CraftRecipe> craftingRecipes() const;
 
     // ---- Talent modifiers ----
-    [[nodiscard]] const SpellModMap& spellFlatMods() const { return character_.flatMods; }
-    [[nodiscard]] const SpellModMap& spellPctMods() const { return character_.pctMods; }
+    [[nodiscard]] const SpellModMap& spellFlatMods() const { return flatMods_; }
+    [[nodiscard]] const SpellModMap& spellPctMods() const { return pctMods_; }
     /// The sum of every flat (or percent) modifier for an op, across groups.
     [[nodiscard]] int32_t spellFlatMod(SpellModOp op) const;
     [[nodiscard]] int32_t spellPctMod(SpellModOp op) const;
 
     // ---- Explored zones ----
     [[nodiscard]] const std::vector<uint32_t>& exploredZoneMasks() const {
-        return character_.exploredZones;
+        return exploredZones_;
     }
-    [[nodiscard]] bool hasExploredZoneMasks() const { return character_.hasExploredZones; }
+    [[nodiscard]] bool hasExploredZoneMasks() const { return hasExploredZones_; }
 
     // ---- Totems ----
     [[nodiscard]] const TotemSlot& totemSlot(int slot) const;
@@ -594,10 +688,22 @@ public:
     // Cast state
     void stopCasting();
     void resetCastState();
-    void resetTalentState();
-    // Full per-character reset (spells, cooldowns, auras, cast state, talents).
-    // Called from GameHandler::selectCharacter so spell state doesn't bleed between characters.
-    void resetAllState();
+    /// A character is being logged in: nothing of the last one's spells,
+    /// cooldowns, auras, cast, talents or skill headings stands.
+    void beginCharacter() { static_cast<SpellCharacterState&>(*this) = SpellCharacterState{}; }
+
+    // ---- Skill panel headings ----
+    [[nodiscard]] bool isSkillCategoryCollapsed(uint32_t categoryId) const {
+        return collapsedSkillCategories_.count(categoryId) > 0;
+    }
+    void setSkillCategoryCollapsed(uint32_t categoryId, bool collapsed);
+    [[nodiscard]] const std::unordered_set<uint32_t>& collapsedSkillCategories() const {
+        return collapsedSkillCategories_;
+    }
+    /// The closed headings as the character's settings saved them.
+    void restoreCollapsedSkillCategories(std::unordered_set<uint32_t> categoryIds) {
+        collapsedSkillCategories_ = std::move(categoryIds);
+    }
     void clearUnitCaches();
 
     // Aura duration
@@ -693,6 +799,7 @@ private:
     void handleRemovedSpell(network::Packet& packet);
     void handleUnlearnSpells(network::Packet& packet);
     void handleTalentsInfo(network::Packet& packet);
+    void handleTalentsInvoluntarilyReset(network::Packet& packet);
     void handleAchievementEarned(network::Packet& packet);
 
     // Wording for a refused cast, from the packet's codes and what the
@@ -736,53 +843,9 @@ private:
     mutable bool skillLineDbcLoaded_ = false;
     mutable bool skillLineAbilityLoaded_ = false;
 
-    /// The character's skills, talent modifiers, explored map and totems, as
-    /// the realm has described them. Assigned whole by resetAllState, so a
-    /// field added here cannot keep the last character's value.
     void dismissCompanion();
 
-    struct CharacterSpellState {
-        std::unordered_map<uint32_t, PlayerSkill> skills;
-        SpellModMap flatMods;
-        SpellModMap pctMods;
-        std::vector<uint32_t> exploredZones = std::vector<uint32_t>(kExploredZoneMaskCount, 0u);
-        bool hasExploredZones = false;
-        std::array<TotemSlot, kTotemSlots> totems{};
-        /// The non-combat companion out, and the spell that called it.
-        uint64_t companionGuid = 0;
-        uint32_t companionSpellId = 0;
-    };
-    CharacterSpellState character_;
-
-    // --- Spell state ---
-    std::unordered_set<uint32_t> knownSpells_;
-    std::unordered_map<uint32_t, float> spellCooldowns_;    // spellId -> remaining seconds
-    // spellId -> the length the cooldown had when it began. Kept beside the
-    // remaining time rather than derived from it because GetSpellCooldown is
-    // asked for (start, duration), and answering (now, remaining) redraws the
-    // swirl as a fresh full sweep every time the interface asks - which it does
-    // on every ACTIONBAR_UPDATE_COOLDOWN, so a long cooldown appears to restart
-    // whenever anything else is cast.
-    std::unordered_map<uint32_t, float> spellCooldownTotals_;
-    uint8_t castCount_ = 0;
-    bool casting_ = false;
-    bool castIsChannel_ = false;
-    uint32_t currentCastSpellId_ = 0;
-    float castTimeRemaining_ = 0.0f;
-    float castTimeTotal_ = 0.0f;
-    bool restorationActive_ = false;
-    uint32_t restorationSpellId_ = 0;
-    bool restorationIsFood_ = false;
-    float restorationTimeRemaining_ = 0.0f;
-    float restorationTimeTotal_ = 0.0f;
-
-    // Repeat-craft queue
-    uint32_t craftQueueSpellId_ = 0;
-    int craftQueueRemaining_ = 0;
-
-    // Crafting window
-    bool craftingWindowOpen_ = false;
-    uint32_t craftingSkillLine_ = 0;
+    // The character's state is SpellCharacterState's.
 
     // SpellFocusObject.dbc names, loaded lazily
     std::unordered_map<uint32_t, std::string> spellFocusNames_;
@@ -792,47 +855,17 @@ private:
     std::unordered_map<uint32_t, std::string> totemCategoryNames_;
     bool totemCategoryDbcLoaded_ = false;
 
-    // Spell queue (400ms window)
-    uint32_t lastGroundCastSpellId_ = 0;
-    /// When auto-attack was last toggled, for the Ability Toggle guard: a
-    /// second press inside a short window is an accident rather than a
-    /// decision. See the SPELL_ID_ATTACK branch in castSpell.
-    std::chrono::steady_clock::time_point autoAttackToggledAt_{};
-    uint32_t queuedSpellId_ = 0;
-    uint64_t queuedSpellTarget_ = 0;
-
-    // Per-unit cast state
+    // The units in view: their casts and auras, for the map they are on.
     std::unordered_map<uint64_t, UnitCastState> unitCastStates_;
+    std::unordered_map<uint64_t, std::vector<AuraSlot>> unitAurasCache_;
 
-    // Talents (dual-spec support)
-    uint8_t activeTalentSpec_ = 0;
-    uint8_t unspentTalentPoints_[2] = {0, 0};
-    std::unordered_map<uint32_t, uint8_t> learnedTalents_[2];
-    std::array<std::array<uint16_t, MAX_GLYPH_SLOTS>, 2> learnedGlyphs_{};
+    // Talent.dbc
     std::unordered_map<uint32_t, TalentEntry> talentCache_;
     std::unordered_map<uint32_t, TalentTabEntry> talentTabCache_;
     bool talentDbcLoaded_ = false;
-    bool talentsInitialized_ = false;
 
-    // Auras
-    std::vector<AuraSlot> playerAuras_;
-    std::vector<AuraSlot> targetAuras_;
-    std::unordered_map<uint64_t, std::vector<AuraSlot>> unitAurasCache_;
-
-    // Global Cooldown
-    float gcdTotal_ = 0.0f;
-    std::chrono::steady_clock::time_point gcdStartedAt_{};
-
-    // Spell book tabs
-    std::vector<SpellBookTab> spellBookTabs_;
-    size_t lastSpellCount_ = 0;
-    bool spellBookTabsDirty_ = true;
+    /// Spell book icons that could not be resolved, said once each.
     std::unordered_set<uint32_t> warnedSpellBookIcons_;
-
-    // Talent wipe confirm dialog
-    bool talentWipePending_ = false;
-    uint64_t talentWipeNpcGuid_ = 0;
-    uint32_t talentWipeCost_ = 0;
 
     /// Last, so it goes first: its handlers write the spell book.
     std::vector<core::EventBus::Subscription> subscriptions_;

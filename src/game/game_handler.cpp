@@ -1074,12 +1074,6 @@ void GameHandler::fail(const std::string& reason) {
 // Player Skills
 // ============================================================
 
-void GameHandler::setSkillCategoryCollapsed(uint32_t categoryId, bool collapsed) {
-    if (categoryId == 0) return;
-    if (collapsed) collapsedSkillCategories_.insert(categoryId);
-    else           collapsedSkillCategories_.erase(categoryId);
-}
-
 std::string GameHandler::getCharacterConfigDir() {
     return core::getConfigRoot() + "/characters";
 }
@@ -1137,9 +1131,9 @@ void GameHandler::saveCharacterConfig() {
         }
         out << "collapsed_factions=" << ids << "\n";
     }
-    if (!collapsedSkillCategories_.empty()) {
+    if (const auto& collapsedSkills = spellHandler_->collapsedSkillCategories(); !collapsedSkills.empty()) {
         std::string ids;
-        for (uint32_t cid : collapsedSkillCategories_) {
+        for (uint32_t cid : collapsedSkills) {
             if (!ids.empty()) ids += ',';
             ids += std::to_string(cid);
         }
@@ -1165,6 +1159,7 @@ void GameHandler::loadCharacterConfig() {
     // The quest log's; handed to it once the file is read.
     std::unordered_set<uint32_t> trackedQuests;
     std::unordered_set<uint32_t> collapsedFactions;
+    std::unordered_set<uint32_t> collapsedSkillCategories;
 
     std::string line;
     while (std::getline(in, line)) {
@@ -1215,7 +1210,7 @@ void GameHandler::loadCharacterConfig() {
             auto& destination =
                   key == "tracked_quests"    ? trackedQuests
                 : key == "collapsed_factions" ? collapsedFactions
-                                              : collapsedSkillCategories_;
+                                              : collapsedSkillCategories;
             destination.clear();
             size_t tqPos = 0;
             while (tqPos <= val.size()) {
@@ -1236,6 +1231,7 @@ void GameHandler::loadCharacterConfig() {
 
     questHandler_->restoreTrackedQuests(std::move(trackedQuests));
     reputation::orNoReputation(services_.reputation).restoreCollapsedFactions(std::move(collapsedFactions));
+    spellHandler_->restoreCollapsedSkillCategories(std::move(collapsedSkillCategories));
 
     // Validate guid matches current character
     if (savedGuid != 0 && savedGuid != playerGuid) {

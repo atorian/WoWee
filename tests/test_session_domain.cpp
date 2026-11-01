@@ -18,6 +18,78 @@ using wowee::test::Body;
 using wowee::test::GameHarness;
 namespace ev = wowee::game::events;
 
+// What the server tells one character, and what the player sets for it, is
+// that character's: the next one logged in on the same connection starts
+// with none of it, whether or not the server sends it again.
+TEST_CASE("the next character logged in keeps nothing of the last one's", "[session][harness][relog]") {
+    using wowee::test::PlayerSpec;
+    PlayerSpec alice;
+    alice.guid = 0x81;
+    alice.name = "Alice";
+    alice.classId = 6;  // a death knight, for the runes
+    PlayerSpec bob;
+    bob.guid = 0x82;
+    bob.name = "Bob";
+    constexpr uint64_t kInnkeeper = 0xF130000000000301ull;
+    constexpr uint64_t kTrainer = 0xF130000000000302ull;
+    constexpr uint64_t kBoar = 0xF130000000000303ull;
+
+    GameHarness h;
+    h.enterWorld(alice);
+    // Home in Goldshire, and an innkeeper asking to move it.
+    h.receive(Opcode::SMSG_BINDPOINTUPDATE, Body().f32(-9459.0f).f32(42.0f).f32(57.0f).u32(0).u32(12));
+    h.receive(Opcode::SMSG_BINDER_CONFIRM, Body().u64(kInnkeeper));
+    // Weapons and armour the character can use.
+    h.receive(Opcode::SMSG_SET_PROFICIENCY, Body().u8(2).u32(0x5));
+    h.receive(Opcode::SMSG_SET_PROFICIENCY, Body().u8(4).u32(0x3));
+    // Holding its breath under water.
+    h.receive(Opcode::SMSG_START_MIRROR_TIMER, Body().u32(1).u32(90000).u32(180000).u32(static_cast<uint32_t>(-1)).u8(0).u32(0));
+    // A blood rune turned to death.
+    h.receive(Opcode::SMSG_CONVERT_RUNE, Body().u8(0).u8(3));
+    // In the barber's chair, and in a vehicle.
+    h.receive(Opcode::SMSG_ENABLE_BARBER_SHOP);
+    h.receive(Opcode::SMSG_PLAYER_VEHICLE_DATA, Body().packedGuid(alice.guid).u32(244));
+    // Three combo points on a boar, a faction forced hostile, and a talent
+    // reset offered.
+    h.receive(Opcode::SMSG_UPDATE_COMBO_POINTS, Body().packedGuid(kBoar).u8(3));
+    h.receive(Opcode::SMSG_SET_FORCED_REACTIONS, Body().u32(1).u32(72).u32(0));
+    h.receive(Opcode::MSG_TALENT_WIPE_CONFIRM, Body().u64(kTrainer).u32(10000));
+    h.pump();
+    // A heading the player closed in the skills panel.
+    h.game().setSkillCategoryCollapsed(9, true);
+
+    uint32_t homeMap = 0;
+    glm::vec3 homePos{};
+    REQUIRE(h.game().getHomeBind(homeMap, homePos));
+    REQUIRE(h.game().getBinderGuid() == kInnkeeper);
+    REQUIRE(h.game().getWeaponProficiency() == 0x5);
+    REQUIRE(h.game().getMirrorTimer(1).active);
+    REQUIRE(h.game().getPlayerRunes()[0].type == wowee::game::GameHandler::RuneType::Death);
+    REQUIRE(h.game().isBarberShopOpen());
+    REQUIRE(h.game().isInVehicle());
+    REQUIRE(h.game().combat().comboPoints() == 3);
+    REQUIRE_FALSE(h.game().combat().getForcedReactions().empty());
+    REQUIRE(h.game().spells().showTalentWipeConfirmDialog());
+    REQUIRE(h.game().isSkillCategoryCollapsed(9));
+
+    h.relogAs(bob);
+
+    CHECK_FALSE(h.game().getHomeBind(homeMap, homePos));
+    CHECK_FALSE(h.game().homeBind().has_value());
+    CHECK(h.game().getHomeBindZoneId() == 0);
+    CHECK(h.game().getBinderGuid() == 0);
+    CHECK(h.game().getWeaponProficiency() == 0);
+    CHECK(h.game().getArmorProficiency() == 0);
+    CHECK_FALSE(h.game().getMirrorTimer(1).active);
+    CHECK(h.game().getPlayerRunes()[0].type == wowee::game::GameHandler::RuneType::Blood);
+    CHECK_FALSE(h.game().isBarberShopOpen());
+    CHECK_FALSE(h.game().isInVehicle());
+    CHECK(h.game().combat().comboPoints() == 0);
+    CHECK(h.game().combat().getForcedReactions().empty());
+    CHECK_FALSE(h.game().spells().showTalentWipeConfirmDialog());
+    CHECK_FALSE(h.game().isSkillCategoryCollapsed(9));
+}
+
 TEST_CASE("suspending client movement sends stop packets before controls are frozen", "[session][harness][loading]") {
     GameHarness h;
     h.enterWorld();

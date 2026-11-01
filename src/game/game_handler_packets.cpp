@@ -918,17 +918,7 @@ void GameHandler::registerRemainingOpcodes() {
         }
     };
     // SMSG_GUILD_DECLINE - moved to SocialHandler::registerOpcodes
-    // Clear cached talent data so the talent screen reflects the reset.
-    dispatchTable_[Opcode::SMSG_TALENTS_INVOLUNTARILY_RESET] = [this](network::Packet& packet) {
-        // Clear cached talent data so the talent screen reflects the reset.
-        spellHandler_->resetTalentState();
-        addUIError("Your talents have been reset by the server.");
-        chatHandler_->addSystemChatMessage("Your talents have been reset by the server.");
-        // The talent frame rebuilds from this; the cached state was cleared
-        // above and nothing told it to redraw, so it kept the old trees.
-        if (hasAddonEventListener()) fireAddonEvent("TALENTS_INVOLUNTARILY_RESET", {});
-        packet.skipAll();
-    };
+    // (SMSG_TALENTS_INVOLUNTARILY_RESET → SpellHandler)
     dispatchTable_[Opcode::SMSG_UPDATE_AURA_DURATION] = [this](network::Packet& packet) {
         if (packet.hasRemaining(5)) {
             uint8_t slot       = packet.readUInt8();

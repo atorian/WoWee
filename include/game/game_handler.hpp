@@ -822,9 +822,11 @@ public:
 
     // Player skills
     bool isSkillCategoryCollapsed(uint32_t categoryId) const {
-        return collapsedSkillCategories_.count(categoryId) > 0;
+        return spellHandler_->isSkillCategoryCollapsed(categoryId);
     }
-    void setSkillCategoryCollapsed(uint32_t categoryId, bool collapsed);
+    void setSkillCategoryCollapsed(uint32_t categoryId, bool collapsed) {
+        spellHandler_->setSkillCategoryCollapsed(categoryId, collapsed);
+    }
 
     void unstuck();
     void unstuckGy();
@@ -1811,10 +1813,6 @@ private:
 
     // ---- Light override (SMSG_OVERRIDE_LIGHT) ----
 
-    // ---- Player skills (the skills themselves are the spell book's) ----
-    /// Headings the player has closed. Client-side, like the reputation ones,
-    /// and saved with the rest of the character config for the same reason.
-    std::unordered_set<uint32_t> collapsedSkillCategories_;
     FaceCameraProvider faceCameraProvider_;
     bool suppressMeleeSwingAnim_ = false;
     // lastMeleeSwingMs_ moved to CombatHandler

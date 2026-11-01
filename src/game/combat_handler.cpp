@@ -1069,20 +1069,6 @@ void CombatHandler::updateAutoAttack(float deltaTime) {
 // State management
 // ============================================================
 
-void CombatHandler::resetAllCombatState() {
-    hostileAttackers_.clear();
-    combatText_.clear();
-    autoAttacking_ = false;
-    autoAttackRequested_ = false;
-    autoAttackRetryPending_ = false;
-    autoAttackTarget_ = 0;
-    autoAttackOutOfRange_ = false;
-    autoAttackOutOfRangeTime_ = 0.0f;
-    autoAttackRangeWarnCooldown_ = 0.0f;
-    autoAttackResendTimer_ = 0.0f;
-    lastMeleeSwingMs_ = 0;
-}
-
 void CombatHandler::removeHostileAttacker(uint64_t guid) {
     hostileAttackers_.erase(guid);
 }
