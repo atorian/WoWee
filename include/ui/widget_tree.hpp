@@ -25,6 +25,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace wowee {
@@ -35,6 +36,7 @@ namespace ui {
 struct AnchorPoint {
     float fx = 0.0f;
     float fy = 0.0f;
+    bool operator==(const AnchorPoint&) const = default;
 };
 
 /// Resolve a WoW point name. Unknown names resolve to CENTER, which is what an
@@ -71,6 +73,7 @@ struct Anchor {
     std::string relativePoint = "CENTER";
     float x = 0.0f;
     float y = 0.0f;
+    bool operator==(const Anchor&) const = default;
 };
 
 /// Whether a region's anchors pin *opposite edges* on one axis, which is the
@@ -101,25 +104,6 @@ struct Widget {
     float height = 0.0f;
     bool shown = true;
     float alpha = 1.0f;
-    /// Whether this frame takes the mouse. False by default, as in WoW, where a
-    /// plain Frame is transparent to clicks until EnableMouse is called; Buttons
-    /// switch it on for themselves.
-    bool mouseEnabled = false;
-    /// Whether the frame may be dragged around the screen, and which mouse
-    /// buttons begin a drag on it. WoW keeps these separate: a bag window is
-    /// movable and registers the left button for drag, while an item button
-    /// registers for drag without being movable - dragging it picks the item up
-    /// instead of moving the button.
-    bool movable = false;
-    /// Whether StartSizing will pick this frame up. A frame declares it in XML
-    /// or is told by SetResizable; the chat window turns it off while docked.
-    bool resizable = false;
-    /// The bounds a resize is held inside, from SetMinResize/SetMaxResize.
-    /// Zero means unbounded in that direction.
-    float minResizeW = 0.0f;
-    float minResizeH = 0.0f;
-    float maxResizeW = 0.0f;
-    float maxResizeH = 0.0f;
     /// Whether dragging is stopped at the screen edge. FrameXML declares it on
     /// 33 frames and addons set it on nearly every window they let the player
     /// move; without it a window dragged past the edge is gone for good, since
@@ -130,47 +114,12 @@ struct Widget {
     // holds it clear. Only read when clampedToScreen is set.
     float clampInsetL = 0.0f, clampInsetR = 0.0f;
     float clampInsetT = 0.0f, clampInsetB = 0.0f;
-    /// Whether clicking this frame brings it to the front of its strata. WoW
-    /// calls it toplevel, and it is what stops one window staying buried under
-    /// another once two overlap. FrameXML declares it on 102 frames.
-    bool topLevel = false;
-    /// Whether the frame receives OnKeyDown and OnKeyUp, and whether it lets
-    /// the key through afterwards. WoW consumes by default and passes on only
-    /// when asked, which is why a dialog swallows the movement keys while it
-    /// is up and nothing else does.
-    bool keyboardEnabled = false;
-    bool propagateKeys = false;
-    /// The frame's own scale, and the product of it with every scale above it.
-    ///
-    /// A frame's width, height and anchor offsets are in its own units, and
-    /// WoW multiplies them by the effective scale to place it. Addons lean on
-    /// this to fit a panel where it would not otherwise go. When nothing sets a
-    /// scale every effScale is 1 and the arithmetic in layoutWidget is a
-    /// no-op, so a tree that never scales lays out exactly as it did before.
-    /// How far in from each edge the frame actually answers the mouse.
-    ///
-    /// Positive shrinks, negative expands - WoW's sense. PaperDollFrame is the
-    /// case that matters: it covers the whole character sheet and takes the
-    /// mouse, and declares 30 off its right and 45 off its bottom so the
-    /// transparent parts do not swallow clicks meant for what is behind them.
-    float hitInsetLeft = 0.0f, hitInsetRight = 0.0f;
-    float hitInsetTop = 0.0f, hitInsetBottom = 0.0f;
 
     /// Where a running Translation animation has moved the frame to, in
     /// interface units. Kept apart from the anchors so an animation that is
     /// stopped or interrupted leaves no trace in them - nudging the anchors
     /// instead would make every played animation permanent.
     float animOffsetX = 0.0f, animOffsetY = 0.0f;
-
-    /// The rect this frame last reported through OnSizeChanged. Kept on the
-    /// widget rather than in a map beside it: a hash lookup each was paying
-    /// for a comparison that two floats here answer directly.
-    float lastReportedW = -1.0f, lastReportedH = -1.0f;
-    /// Whether this widget is already waiting in the tree's list of size or
-    /// visibility changes, so a widget moved several times in a frame is
-    /// reported on once. See WidgetTree::takeSizeChanges.
-    bool sizeChangeQueued = false;
-    bool visibilityChangeQueued = false;
     /// In WidgetTree::placedTooltips.
     bool tooltipListed = false;
 
@@ -178,33 +127,15 @@ struct Widget {
     /// means never, which is older than any generation.
     uint64_t resolvedGen = 0;
 
-    /// How far a button's label shifts while the button is held. Declared as
-    /// <PushedTextOffset> on 11 templates; it is the small movement that makes
-    /// a button feel pressed rather than merely recoloured.
-    float pushedTextOffsetX = 0.0f, pushedTextOffsetY = 0.0f;
-
-    /// A button's label colour while the cursor is over it and while it is
-    /// disabled, from <HighlightFont> and <DisabledFont>. Unset means draw it
-    /// the usual way, so a template that names neither is unaffected.
-    bool  hasHighlightColor = false, hasDisabledColor = false;
-    float highlightColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-    float disabledColor[4]  = {0.5f, 0.5f, 0.5f, 1.0f};
-
+    /// The frame's own scale, and the product of it with every scale above it.
+    ///
+    /// A frame's width, height and anchor offsets are in its own units, and
+    /// WoW multiplies them by the effective scale to place it. Addons lean on
+    /// this to fit a panel where it would not otherwise go. When nothing sets a
+    /// scale every effScale is 1 and the arithmetic in layoutWidget is a
+    /// no-op, so a tree that never scales lays out exactly as it did before.
     float scale = 1.0f;
     float effScale = 1.0f;
-    bool dragLeft = false;
-    bool dragRight = false;
-    /// Whether a drag put this frame where it is. The single anchor a move
-    /// leaves behind has to give way the next time the interface positions the
-    /// frame itself: a bag is re-anchored every time it opens, with a bare
-    /// SetPoint and no ClearAllPoints, and a leftover anchor on a different
-    /// point turns that into two constraints on one axis - which sizes the
-    /// frame from them and opens a bag with no width.
-    bool userMoved = false;
-    /// The facing a model frame was told to show, in radians. FrameXML rotates
-    /// a paperdoll by keeping its own running total and calling SetRotation
-    /// with it, so this is absolute rather than a delta.
-    float modelFacing = 0.0f;
     /// A label whose size came from measuring its own text, and the text that
     /// was measured. Without the second, a label sized once keeps that size
     /// forever - the character sheet's level line stayed the width of the
@@ -240,6 +171,66 @@ struct Widget {
     DrawLayer layer = DrawLayer::Artwork;
     int subLevel = 0;
 
+    // Everything above, from `anchors` on, and everything from here to the
+    // texture path is what a layout pass reads of every visible widget each
+    // frame - what it is placed from, what it is sized from and where it was
+    // placed. Kept together on purpose: a widget is 1.5 KB, and with these
+    // spread across it a pass touched sixteen cache lines of each of 1,360
+    // widgets a frame and spent its time waiting on memory.
+
+    /// Whether this region is one of its owner's state textures, and which.
+    ButtonArt buttonArt = ButtonArt::None;
+    /// A tooltip holds lines the same way, but draws them from the top and
+    /// sizes itself to fit them - which is the part a chat frame does not do,
+    /// because a tooltip has no size of its own until it has something to say.
+    bool  isTooltip = false;
+    bool  isScrollFrame = false;
+    uint32_t scrollChild = 0;
+    float scrollX = 0.0f, scrollY = 0.0f;
+    /// A slider shares the bar's range and value but is dragged rather than
+    /// filled, and draws a thumb at the value instead of a fill to it.
+    bool  isSlider = false;
+    bool  barVertical = false;
+    /// The slider's grip, as a region rather than a file. A <ThumbTexture>
+    /// declares a size and no anchors at all, because in WoW the slider is what
+    /// puts it where the value says - so the layout moves it along the track
+    /// (the same thing already done for the colour picker's thumbs). Left at 0
+    /// for a slider that never declared one.
+    uint32_t thumbRegion = 0;
+    float barMin = 0.0f, barMax = 1.0f, barValue = 0.0f;
+
+    // Filled in by layout(). Screen rect in WoW coordinates: origin bottom-left.
+    float left = 0.0f, bottom = 0.0f, rectW = 0.0f, rectH = 0.0f;
+    /// Shown, with every ancestor shown. This is what WoW's IsVisible answers
+    /// and what decides whether an OnUpdate runs.
+    ///
+    /// Distinct from `visible` below, which is this AND has somewhere to be
+    /// drawn. A frame with no anchors is not drawn - that is WoW's rule and
+    /// the reason a stray unanchored panel does not land in the middle of the
+    /// screen - but it is still running. Eight of FrameXML's driver frames are
+    /// exactly that: created by CreateFrame, never positioned, existing only
+    /// to carry an OnUpdate. frameFadeManager drives every fade in the
+    /// interface, frameFlashManager every flash, AnimUpdateFrame the whole
+    /// animation system.
+    bool  visibleChain = false;
+    bool  visible = false;      ///< visibleChain, and anchored somewhere
+    FrameStrata effStrata = FrameStrata::Medium;
+    int   effLevel = 0;
+    /// The nearest scroll frame above this one, or zero. Everything under a
+    /// scroll frame is drawn clipped to it, which is what makes a window onto
+    /// a taller child a window rather than a spill.
+    uint32_t clipTo = 0;
+
+    // FontString regions.
+    float fontHeight = 12.0f;
+    /// Break inside a word when a single word is wider than the box. Thirty-six
+    /// labels ask for it, all of them prose in a narrow column.
+    bool  nonSpaceWrap = false;
+    std::string text;
+    /// The typeface a font object named, as it wrote it. Empty means
+    /// whatever the renderer is already using.
+    std::string fontFace;
+
     // Texture regions.
     std::string texturePath;
     float texCoord[4] = {0.0f, 1.0f, 0.0f, 1.0f};   ///< left, right, top, bottom
@@ -266,6 +257,82 @@ struct Widget {
     /// renderer draws one as a disc - see the live-texture branch.
     bool isUnitPortrait = false;
 
+    // What the layout does not read, from here on.
+
+    /// Whether this frame takes the mouse. False by default, as in WoW, where a
+    /// plain Frame is transparent to clicks until EnableMouse is called; Buttons
+    /// switch it on for themselves.
+    bool mouseEnabled = false;
+    /// Whether the frame may be dragged around the screen, and which mouse
+    /// buttons begin a drag on it. WoW keeps these separate: a bag window is
+    /// movable and registers the left button for drag, while an item button
+    /// registers for drag without being movable - dragging it picks the item up
+    /// instead of moving the button.
+    bool movable = false;
+    /// Whether StartSizing will pick this frame up. A frame declares it in XML
+    /// or is told by SetResizable; the chat window turns it off while docked.
+    bool resizable = false;
+    /// The bounds a resize is held inside, from SetMinResize/SetMaxResize.
+    /// Zero means unbounded in that direction.
+    float minResizeW = 0.0f;
+    float minResizeH = 0.0f;
+    float maxResizeW = 0.0f;
+    float maxResizeH = 0.0f;
+    /// Whether clicking this frame brings it to the front of its strata. WoW
+    /// calls it toplevel, and it is what stops one window staying buried under
+    /// another once two overlap. FrameXML declares it on 102 frames.
+    bool topLevel = false;
+    /// Whether the frame receives OnKeyDown and OnKeyUp, and whether it lets
+    /// the key through afterwards. WoW consumes by default and passes on only
+    /// when asked, which is why a dialog swallows the movement keys while it
+    /// is up and nothing else does.
+    bool keyboardEnabled = false;
+    bool propagateKeys = false;
+    /// How far in from each edge the frame actually answers the mouse.
+    ///
+    /// Positive shrinks, negative expands - WoW's sense. PaperDollFrame is the
+    /// case that matters: it covers the whole character sheet and takes the
+    /// mouse, and declares 30 off its right and 45 off its bottom so the
+    /// transparent parts do not swallow clicks meant for what is behind them.
+    float hitInsetLeft = 0.0f, hitInsetRight = 0.0f;
+    float hitInsetTop = 0.0f, hitInsetBottom = 0.0f;
+
+    /// The rect this frame last reported through OnSizeChanged. Kept on the
+    /// widget rather than in a map beside it: a hash lookup each was paying
+    /// for a comparison that two floats here answer directly.
+    float lastReportedW = -1.0f, lastReportedH = -1.0f;
+    /// Whether this widget is already waiting in the tree's list of size or
+    /// visibility changes, so a widget moved several times in a frame is
+    /// reported on once. See WidgetTree::takeSizeChanges.
+    bool sizeChangeQueued = false;
+    bool visibilityChangeQueued = false;
+
+    /// How far a button's label shifts while the button is held. Declared as
+    /// <PushedTextOffset> on 11 templates; it is the small movement that makes
+    /// a button feel pressed rather than merely recoloured.
+    float pushedTextOffsetX = 0.0f, pushedTextOffsetY = 0.0f;
+
+    /// A button's label colour while the cursor is over it and while it is
+    /// disabled, from <HighlightFont> and <DisabledFont>. Unset means draw it
+    /// the usual way, so a template that names neither is unaffected.
+    bool  hasHighlightColor = false, hasDisabledColor = false;
+    float highlightColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float disabledColor[4]  = {0.5f, 0.5f, 0.5f, 1.0f};
+
+    bool dragLeft = false;
+    bool dragRight = false;
+    /// Whether a drag put this frame where it is. The single anchor a move
+    /// leaves behind has to give way the next time the interface positions the
+    /// frame itself: a bag is re-anchored every time it opens, with a bare
+    /// SetPoint and no ClearAllPoints, and a leftover anchor on a different
+    /// point turns that into two constraints on one axis - which sizes the
+    /// frame from them and opens a bag with no width.
+    bool userMoved = false;
+    /// The facing a model frame was told to show, in radians. FrameXML rotates
+    /// a paperdoll by keeping its own running total and calling SetRotation
+    /// with it, so this is absolute rather than a delta.
+    float modelFacing = 0.0f;
+
     // Backdrop, the bordered panel look most of the original interface is
     // built from. The edge file is a strip of eight square tiles - verified
     // against the art: UI-Tooltip-Border is 128x16 and UI-DialogBox-Border
@@ -281,9 +348,6 @@ struct Widget {
 
     // StatusBar. Health, mana, cast bars and experience are all this one type.
     bool  isStatusBar = false;
-    /// A slider shares the bar's range and value but is dragged rather than
-    /// filled, and draws a thumb at the value instead of a fill to it.
-    bool  isSlider = false;
     /// A cooldown darkens what it covers and wipes clear as the time runs out.
     /// Start is on the same clock GetTime answers with; zero duration means
     /// nothing is running.
@@ -305,8 +369,6 @@ struct Widget {
     /// greyed control explains *why* it is greyed: five templates here declare
     /// it, MainMenuBarMicroButton and LootRollButtonTemplate among them.
     bool  motionScriptsWhileDisabled = false;
-    /// Whether this region is one of its owner's state textures, and which.
-    ButtonArt buttonArt = ButtonArt::None;
     /// Whether a check button is checked, which decides between its checked
     /// art and none.
     bool  checked = false;
@@ -319,9 +381,6 @@ struct Widget {
     /// stays lit once it has been clicked.
     bool  highlightLocked = false;
 
-    bool  isScrollFrame = false;
-    uint32_t scrollChild = 0;
-    float scrollX = 0.0f, scrollY = 0.0f;
     /// The range last reported to the interface. A scroll bar sizes and
     /// enables itself from OnScrollRangeChanged, so the change has to be
     /// noticed and announced rather than merely being true.
@@ -382,9 +441,6 @@ struct Widget {
     /// here did, so every one of them drew a single line straight out of its
     /// own frame.
     bool  wordWrap = true;
-    /// Break inside a word when a single word is wider than the box. Thirty-six
-    /// labels ask for it, all of them prose in a narrow column.
-    bool  nonSpaceWrap = false;
     /// Lines the last wrap produced, so the height a wrapped label reports
     /// matches what is drawn. FrameXML sizes panels from GetStringHeight.
     ///
@@ -406,13 +462,6 @@ struct Widget {
     bool  cooldownDrawEdge = false;
     float sliderStep = 0.0f;
     std::string thumbTexture;
-    /// The slider's grip, as a region rather than a file. A <ThumbTexture>
-    /// declares a size and no anchors at all, because in WoW the slider is what
-    /// puts it where the value says - so the layout moves it along the track
-    /// (the same thing already done for the colour picker's thumbs). Left at 0
-    /// for a slider that never declared one.
-    uint32_t thumbRegion = 0;
-    float barMin = 0.0f, barMax = 1.0f, barValue = 0.0f;
     std::string barTexture;
     float barColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     /// Which layer the bar's fill draws in. In the real client the fill is a
@@ -420,7 +469,6 @@ struct Widget {
     /// here it is drawn by the bar itself, so the bar carries the layer and
     /// sorts by it. ARTWORK is WoW's default for a bar that does not say.
     DrawLayer barLayer = DrawLayer::Artwork;
-    bool  barVertical = false;
 
     /// Fraction filled, clamped. A zero or inverted range reads as empty rather
     /// than dividing by nothing.
@@ -485,10 +533,6 @@ struct Widget {
     /// How far back through the history the frame has been scrolled, in lines.
     int   messageScroll = 0;
 
-    /// A tooltip holds lines the same way, but draws them from the top and
-    /// sizes itself to fit them - which is the part a chat frame does not do,
-    /// because a tooltip has no size of its own until it has something to say.
-    bool  isTooltip = false;
     /// The frame this tooltip was last given by SetOwner. A tooltip is hidden
     /// when its owner stops being visible - see hideOrphanedTooltips.
     uint32_t tooltipOwnerId = 0;
@@ -541,9 +585,6 @@ struct Widget {
     /// the micro button's tooltip put its framerate over its latency.
     float tooltipWrapWidth = 0.0f;
 
-    // FontString regions.
-    std::string text;
-    float fontHeight = 12.0f;
     /// Items a model frame has been asked to try on, as ItemDisplayInfo id
     /// and inventory type. The dressing room's contents belong to the frame
     /// rather than to the application: a second one would have its own, and
@@ -592,9 +633,6 @@ struct Widget {
     /// means the path above is used instead.
     uint64_t externalTexture = 0;
 
-    /// The typeface a font object named, as it wrote it. Empty means
-    /// whatever the renderer is already using.
-    std::string fontFace;
     /// A dark copy of the text, offset. Distinct from the outline, which
     /// surrounds the glyphs on all sides; a shadow falls on one.
     bool  hasShadow = false;
@@ -628,21 +666,6 @@ struct Widget {
     bool pingRequested = false;
     float pingX = 0.0f, pingY = 0.0f;
 
-    // Filled in by layout(). Screen rect in WoW coordinates: origin bottom-left.
-    float left = 0.0f, bottom = 0.0f, rectW = 0.0f, rectH = 0.0f;
-    /// Shown, with every ancestor shown. This is what WoW's IsVisible answers
-    /// and what decides whether an OnUpdate runs.
-    ///
-    /// Distinct from `visible` below, which is this AND has somewhere to be
-    /// drawn. A frame with no anchors is not drawn - that is WoW's rule and
-    /// the reason a stray unanchored panel does not land in the middle of the
-    /// screen - but it is still running. Eight of FrameXML's driver frames are
-    /// exactly that: created by CreateFrame, never positioned, existing only
-    /// to carry an OnUpdate. frameFadeManager drives every fade in the
-    /// interface, frameFlashManager every flash, AnimUpdateFrame the whole
-    /// animation system.
-    bool  visibleChain = false;
-    bool  visible = false;      ///< visibleChain, and anchored somewhere
     /// Whether the interface has been told this is on screen. Visibility is
     /// not a property a frame sets - it is shown, and every ancestor shown too
     /// - so becoming visible has to be noticed rather than announced at the
@@ -665,12 +688,6 @@ struct Widget {
     /// forcing a suppressed window hidden cannot be mistaken for the interface
     /// asking for a rebuild.
     uint8_t shownToggles = 0;
-    /// The nearest scroll frame above this one, or zero. Everything under a
-    /// scroll frame is drawn clipped to it, which is what makes a window onto
-    /// a taller child a window rather than a spill.
-    uint32_t clipTo = 0;
-    FrameStrata effStrata = FrameStrata::Medium;
-    int   effLevel = 0;
 };
 
 /// A link drawn on screen this frame, and where it landed.
@@ -1058,6 +1075,111 @@ private:
     /// Resolve a widget after whatever its rect is measured from.
     void resolveChain(uint32_t id, float screenW, float screenH, int& depth);
 
+    /// A rect as the solve reads and writes it.
+    struct PlacedRect {
+        float left = 0.0f, bottom = 0.0f, w = 0.0f, h = 0.0f;
+        bool operator==(const PlacedRect&) const = default;
+    };
+    /// One anchor as the solve uses it: the two points already resolved and
+    /// the rect it hangs from already read.
+    struct AnchorInput {
+        AnchorPoint point;
+        AnchorPoint relativePoint;
+        float x = 0.0f, y = 0.0f;
+        PlacedRect relativeTo;
+        bool operator==(const AnchorInput&) const = default;
+    };
+    /// Everything a widget's placement is worked out from, apart from its
+    /// anchors (AnchorInput, beside it). The solve is a function of this and
+    /// nothing else - it is handed this rather than the widget - so a widget
+    /// whose inputs are what they were last time, and whose results nobody
+    /// has written over since, would be placed exactly where it already is.
+    struct LayoutInputs {
+        WidgetKind kind = WidgetKind::Frame;
+        bool isRoot = false;
+        bool shown = false;
+        bool hasParent = false;
+        uint32_t parentId = 0;
+        PlacedRect parentRect;
+        bool parentVisibleChain = false;
+        bool parentVisible = false;
+        uint32_t parentClipTo = 0;
+        FrameStrata parentStrata = FrameStrata::Medium;
+        int parentLevel = 0;
+        float parentScale = 1.0f;
+        bool scrollChild = false;
+        float scrollX = 0.0f, scrollY = 0.0f;
+        bool thumb = false;
+        float barFraction = 0.0f;
+        bool barVertical = false;
+        bool strataExplicit = false;
+        FrameStrata strata = FrameStrata::Medium;
+        bool levelExplicit = false;
+        int level = 0;
+        float scale = 1.0f;
+        float width = 0.0f, height = 0.0f;
+        bool isTooltip = false;
+        bool buttonArt = false;
+        float animOffsetX = 0.0f, animOffsetY = 0.0f;
+        bool clamped = false;
+        float clampInsetL = 0.0f, clampInsetR = 0.0f, clampInsetT = 0.0f, clampInsetB = 0.0f;
+        PlacedRect screenRect;
+        float screenW = 0.0f, screenH = 0.0f;
+        bool operator==(const LayoutInputs&) const = default;
+    };
+    /// What the solve writes to the widget.
+    struct LayoutOutputs {
+        PlacedRect rect;
+        bool visibleChain = false;
+        bool visible = false;
+        uint32_t clipTo = 0;
+        FrameStrata effStrata = FrameStrata::Medium;
+        int effLevel = 0;
+        float effScale = 1.0f;
+        bool operator==(const LayoutOutputs&) const = default;
+    };
+    /// The last placement of one widget: what it was worked out from and what
+    /// it came to. The outputs are kept as well as the inputs because other
+    /// code writes them too - SetWidth leaves a provisional rect, hiding an
+    /// ancestor clears the visibility flags - and a placement that has been
+    /// written over has to be worked out again even though nothing it is
+    /// worked out from has changed.
+    struct LayoutMemo {
+        bool valid = false;
+        /// Everything under this hidden widget has been marked hidden, and
+        /// stays so until the widget is shown: nothing but the walk puts a
+        /// widget on screen, and a frame moved under a hidden one is marked
+        /// as it moves (setParent).
+        bool subtreeHidden = false;
+        LayoutInputs inputs;
+        /// The anchors as the widget holds them, and the rect each one hung
+        /// from. Compared as they stand rather than as AnchorInput: resolving
+        /// two point names per anchor per frame, only to find them the same,
+        /// was most of what checking a widget cost.
+        std::vector<Anchor> anchors;
+        std::vector<PlacedRect> anchorTargets;
+        LayoutOutputs outputs;
+    };
+    /// Read everything but the anchors of `w` into `in`.
+    void gatherLayoutInputs(const Widget& w, float screenW, float screenH,
+                            LayoutInputs& in) const;
+    /// The rect anchor `a` of `w` hangs from: the widget it names, the parent
+    /// when it names none, the screen when what it names is gone.
+    [[nodiscard]] PlacedRect anchorTarget(const Widget& w, const Anchor& a,
+                                          float screenW, float screenH) const;
+    /// Whether the anchors of `w` and what they hang from are what `memo` holds.
+    [[nodiscard]] bool anchorsAsPlaced(const Widget& w, const LayoutMemo& memo,
+                                       float screenW, float screenH) const;
+    static LayoutOutputs currentOutputs(const Widget& w);
+    /// Where a widget goes, from what it is placed from and nothing else.
+    static LayoutOutputs solveLayout(const LayoutInputs& in,
+                                     const std::vector<AnchorInput>& anchors);
+    /// Indexed by widget id, like widgets_.
+    std::vector<LayoutMemo> layoutMemos_;
+    /// Reused for each widget's anchors as they are read, so reading them is
+    /// not an allocation per widget per frame.
+    std::vector<AnchorInput> anchorScratch_;
+
     /// Bumped whenever anything moves. A widget resolved in this generation
     /// needs no further work; one from an older generation is stale.
     uint64_t layoutGeneration_ = 1;
@@ -1068,26 +1190,41 @@ private:
     std::vector<uint32_t> visibilityChanges_;
     void noteSizeChange(Widget& w);
     void noteVisibilityChange(Widget& w);
-    // What the last full pass cost and whether it needed to run. Read by the
+    // What the last full pass cost and how much of it was work. Read by the
     // frame profile; see WidgetTree::layout.
     double lastWalkMs_ = 0.0;
     double lastDrawOrderMs_ = 0.0;
-    uint64_t generationAtLastPass_ = 0;
-    uint64_t cleanPasses_ = 0;
     uint64_t totalPasses_ = 0;
+    uint64_t sortedPasses_ = 0;
+    uint64_t widgetsVisited_ = 0;
+    uint64_t widgetsPlaced_ = 0;
     uint32_t visibleThisPass_ = 0;
     uint32_t lastVisibleCount_ = 0;
+    uint32_t placedThisPass_ = 0;
+    uint32_t lastPlacedCount_ = 0;
 
 public:
-    /// The anchor walk and the draw-order collection of the last full pass,
-    /// and how many passes since the last reset had nothing to do.
+    /// The anchor walk and the draw-order collection of the last full pass.
     [[nodiscard]] double lastWalkMs() const { return lastWalkMs_; }
     [[nodiscard]] double lastDrawOrderMs() const { return lastDrawOrderMs_; }
-    [[nodiscard]] uint64_t cleanPasses() const { return cleanPasses_; }
+    /// Since the last resetPassCounts: full passes, how many of them had to
+    /// sort the draw order again, how many widgets they walked, and how many
+    /// of those had to be placed anew rather than left where they were.
     [[nodiscard]] uint64_t totalPasses() const { return totalPasses_; }
+    [[nodiscard]] uint64_t sortedPasses() const { return sortedPasses_; }
+    [[nodiscard]] uint64_t widgetsVisited() const { return widgetsVisited_; }
+    [[nodiscard]] uint64_t widgetsPlaced() const { return widgetsPlaced_; }
     /// How many widgets the last full pass placed that were actually visible.
     [[nodiscard]] uint32_t lastVisibleCount() const { return lastVisibleCount_; }
-    void resetPassCounts() { cleanPasses_ = 0; totalPasses_ = 0; }
+    /// How many widgets the last full pass had to place anew - zero when
+    /// nothing it is laid out from has changed.
+    [[nodiscard]] uint32_t lastPlacedCount() const { return lastPlacedCount_; }
+    void resetPassCounts() {
+        totalPasses_ = 0;
+        sortedPasses_ = 0;
+        widgetsVisited_ = 0;
+        widgetsPlaced_ = 0;
+    }
 
 private:
 
@@ -1099,6 +1236,37 @@ private:
     /// after it would run another one.
     bool  layingOut_ = false;
     void collectDrawOrder();
+    /// The widgets the current full pass has left visible, in the order it
+    /// walked them. Nothing else can be drawn, so the draw order is chosen
+    /// from these rather than from every widget in the tree.
+    std::vector<uint32_t> visibleIds_;
+    /// One drawable widget and everything its place in the draw order is
+    /// decided by. Two passes with the same keys in the same walk order draw
+    /// in the same order, and the second does not sort again.
+    struct DrawKey {
+        int strata = 0;
+        int level = 0;
+        int layer = 0;
+        int subLevel = 0;
+        uint32_t creationOrder = 0;
+        uint32_t id = 0;
+        bool operator==(const DrawKey&) const = default;
+    };
+    std::vector<DrawKey> drawKeys_;
+    std::vector<DrawKey> lastDrawKeys_;
+
+    /// Each name's widget for findByName: the last one created under it.
+    /// Names are given only by create() and taken back only by reset(), so
+    /// those two keep this; a lookup is then one hash rather than a walk of
+    /// every widget, which the client made several times a frame for frames
+    /// that do not exist until their addon loads (AuctionDressUpModel).
+    struct NameHash {
+        using is_transparent = void;
+        std::size_t operator()(std::string_view s) const noexcept {
+            return std::hash<std::string_view>{}(s);
+        }
+    };
+    std::unordered_map<std::string, uint32_t, NameHash, std::equal_to<>> idsByName_;
 
 public:
     /// The screen the tree will lay out against, before it has laid out once.

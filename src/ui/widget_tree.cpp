@@ -5,16 +5,35 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
-#include <ranges>
 
 namespace wowee {
 namespace ui {
 
 namespace {
 
-bool contains(const std::string& s, const char* sub) {
-    return s.find(sub) != std::string::npos;
-}
+/// A point name upper-cased into a buffer on the stack.
+///
+/// Point names are resolved for every anchor each time a layout pass looks at
+/// a widget. An upper-cased std::string of each was an allocation per anchor
+/// per frame, and comparing case-insensitively in place called toupper dozens
+/// of times per name. Every real name fits: the longest is BOTTOMRIGHT.
+class UpperName {
+public:
+    explicit UpperName(std::string_view s) {
+        len_ = std::min(s.size(), sizeof(buf_));
+        for (std::size_t i = 0; i < len_; ++i) {
+            const char c = s[i];
+            buf_[i] = (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c;
+        }
+    }
+    [[nodiscard]] bool has(std::string_view sub) const {
+        return std::string_view(buf_, len_).find(sub) != std::string_view::npos;
+    }
+
+private:
+    char buf_[32] = {};
+    std::size_t len_ = 0;
+};
 
 std::string upper(std::string s) {
     for (char& c : s) c = static_cast<char>(::toupper(static_cast<unsigned char>(c)));
@@ -27,17 +46,26 @@ int layerRank(DrawLayer l) { return static_cast<int>(l); }
 } // namespace
 
 AnchorPoint resolveAnchorPoint(const std::string& rawName) {
-    const std::string name = upper(rawName);
     AnchorPoint p;
+    // Nothing a frame is anchored by is longer than the buffer; anything that
+    // is gets read whole the slow way rather than cut short.
+    if (rawName.size() > 32) {
+        const std::string name = upper(rawName);
+        const auto has = [&](const char* sub) { return name.find(sub) != std::string::npos; };
+        p.fy = has("TOP") ? 1.0f : (has("BOTTOM") ? 0.0f : 0.5f);
+        p.fx = has("LEFT") ? 0.0f : (has("RIGHT") ? 1.0f : 0.5f);
+        return p;
+    }
+    const UpperName name(rawName);
     // Vertical: TOP is 1, BOTTOM is 0, neither is centred. Tested before the
     // horizontal half because the names combine (TOPLEFT is both).
-    if (contains(name, "TOP"))         p.fy = 1.0f;
-    else if (contains(name, "BOTTOM")) p.fy = 0.0f;
-    else                               p.fy = 0.5f;
+    if (name.has("TOP"))         p.fy = 1.0f;
+    else if (name.has("BOTTOM")) p.fy = 0.0f;
+    else                         p.fy = 0.5f;
 
-    if (contains(name, "LEFT"))        p.fx = 0.0f;
-    else if (contains(name, "RIGHT"))  p.fx = 1.0f;
-    else                               p.fx = 0.5f;
+    if (name.has("LEFT"))        p.fx = 0.0f;
+    else if (name.has("RIGHT"))  p.fx = 1.0f;
+    else                         p.fx = 0.5f;
     return p;
 }
 
@@ -98,7 +126,11 @@ WidgetTree::WidgetTree() {
 
 void WidgetTree::reset() {
     widgets_.clear();
+    layoutMemos_.clear();
     drawOrder_.clear();
+    visibleIds_.clear();
+    drawKeys_.clear();
+    lastDrawKeys_.clear();
     linkRects_.clear();
     scrollFrames_.clear();
     ownedTooltips_.clear();
@@ -107,6 +139,7 @@ void WidgetTree::reset() {
     sizeChanges_.clear();
     visibilityChanges_.clear();
     placedTooltips_.clear();
+    idsByName_.clear();
     // Every one of these names a widget by id, and the ids are about to mean
     // something else. A drag or a focus held across the reset would be held on
     // whatever frame the new load happens to give that number to.
@@ -139,6 +172,7 @@ uint32_t WidgetTree::create(WidgetKind kind, uint32_t parent, const std::string&
     w.id = id;
     w.kind = kind;
     w.name = name;
+    if (!name.empty()) idsByName_[name] = id;
     w.creationOrder = nextOrder_++;
     // Regions belong to the frame that made them; a widget with no parent
     // hangs off the screen, which is the root and sits above UIParent.
@@ -314,27 +348,20 @@ const std::vector<uint32_t>& WidgetTree::portraitsFor(const std::string& unit) c
     return (it == portraitsByUnit_.end()) ? kNone : it->second;
 }
 
-// Kept as a scan on purpose.
+// Indexed, though the load is slower for it.
 //
-// A perf profile put this at 6.51% of the headless interface load, the largest
-// first-party function in it, and indexing name -> ids dropped it to 0.06%.
-// Against the clock that was a loss: ten interleaved runs per build measured
-// the FrameXML load at 514ms scanning and 528ms indexed, stdev 4.1 and 2.4.
-//
-// The lookups got faster and the index cost more to build than they saved: a
-// hash insert with a string key for every widget created, which the profile
-// never showed as a hotspot because it spread across the creation path.
-//
-// Worth revisiting only with a measurement of lookups at runtime rather than
-// during load, where the tree is full and each scan is longest.
+// Ten interleaved runs measured the FrameXML load at 514ms with a scan and
+// 528ms with the index: a hash insert for every widget created costs more
+// than the lookups during the load save. At runtime it is the other way round
+// and by far more. The tree is full then, and the paperdoll and the interface
+// models looked their frames up by name every frame - 1.0ms of each frame went
+// to scanning 28,000 widgets, against 0.07ms through the index.
 Widget* WidgetTree::findByName(std::string_view name) {
     if (name.empty()) return nullptr;
-    // Backwards, so the last frame to take the name is the one found - the
-    // same rule as the global it was published under.
-    for (auto& widget : std::views::reverse(widgets_)) {
-        if (widget.id != 0 && widget.name == name) return &widget;
-    }
-    return nullptr;
+    // The last frame to take the name is the one found - the same rule as the
+    // global it was published under. create() files each name as it gives it.
+    const auto it = idsByName_.find(name);
+    return it != idsByName_.end() ? get(it->second) : nullptr;
 }
 
 const Widget* WidgetTree::findByName(std::string_view name) const {
@@ -461,14 +488,13 @@ namespace {
 /// The world map names the case exactly - SetClampRectInsets(0, 0, 0, -60)
 /// with "don't overlap the xp/rep bars" beside it, so a negative bottom keeps
 /// the frame sixty above the bottom edge rather than letting it reach.
-void clampInside(const Widget& screen, float rectW, float rectH,
-                 float& left, float& bottom,
-                 float insetL = 0.0f, float insetR = 0.0f,
-                 float insetT = 0.0f, float insetB = 0.0f) {
-    const float loX = screen.left - insetL;
-    const float hiX = screen.left + screen.rectW - rectW + insetR;
-    const float loY = screen.bottom - insetB;
-    const float hiY = screen.bottom + screen.rectH - rectH + insetT;
+void clampInside(float screenLeft, float screenBottom, float screenW, float screenH,
+                 float rectW, float rectH, float& left, float& bottom,
+                 float insetL, float insetR, float insetT, float insetB) {
+    const float loX = screenLeft - insetL;
+    const float hiX = screenLeft + screenW - rectW + insetR;
+    const float loY = screenBottom - insetB;
+    const float hiY = screenBottom + screenH - rectH + insetT;
     if (hiX >= loX) left   = std::clamp(left,   loX, hiX);
     if (hiY >= loY) bottom = std::clamp(bottom, loY, hiY);
 }
@@ -545,7 +571,8 @@ void WidgetTree::nudge(uint32_t id, float dx, float dy) {
             // the rect: the clamped position is what the anchors have to add
             // up to, not something that can be written to left/bottom here.
             float left = w->left + dx, bottom = w->bottom + dy;
-            clampInside(*screen, w->rectW, w->rectH, left, bottom,
+            clampInside(screen->left, screen->bottom, screen->rectW, screen->rectH,
+                        w->rectW, w->rectH, left, bottom,
                         w->clampInsetL, w->clampInsetR, w->clampInsetT, w->clampInsetB);
             dx = left - w->left;
             dy = bottom - w->bottom;
@@ -801,6 +828,8 @@ void WidgetTree::layout(float pixelW, float pixelH) {
 
     const auto solveStart = std::chrono::steady_clock::now();
     visibleThisPass_ = 0;
+    placedThisPass_ = 0;
+    visibleIds_.clear();
 
     // The screen and UIParent are sized here rather than by the solve, so
     // their changes are noted here too.
@@ -813,6 +842,7 @@ void WidgetTree::layout(float pixelW, float pixelH) {
         w.rectH = screenH;
         w.visibleChain = visible;
         w.visible = visible;
+        if (visible) visibleIds_.push_back(w.id);
     };
     Widget& rootW = widgets_[rootId_];
     fillScreen(rootW, rootW.shown);
@@ -844,19 +874,11 @@ void WidgetTree::layout(float pixelW, float pixelH) {
     lastDrawOrderMs_ = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - drawOrderStart).count();
 
-    // Whether this pass had to happen at all.
-    //
-    // The generation counter is bumped by everything that moves a widget, and
-    // the on-demand resolve already skips a widget whose generation matches.
-    // The full pass does not look: it walks all 28018 of them every frame,
-    // for 3.6ms, whether or not anything changed. Skipping a clean frame is
-    // only worth building if clean frames exist, so count them before
-    // believing they do.
     lastVisibleCount_ = visibleThisPass_;
     visibleThisPass_ = 0;
-    if (layoutGeneration_ == generationAtLastPass_) ++cleanPasses_;
+    lastPlacedCount_ = placedThisPass_;
+    widgetsPlaced_ += placedThisPass_;
     ++totalPasses_;
-    generationAtLastPass_ = layoutGeneration_;
 }
 
 bool WidgetTree::runs(uint32_t id) const {
@@ -907,10 +929,20 @@ void WidgetTree::layoutWidget(uint32_t id, float screenW, float screenH) {
     // and every ancestor shown - so placing them is arithmetic for something
     // that is neither drawn nor measured against. Of the 28018 widgets this
     // pass walked, 666 were visible; the other 97% were the 3.4ms.
-    if (const Widget* self = get(id); self && !self->visibleChain) {
-        markSubtreeHidden(id);
+    //
+    // Marked once, when it is hidden, rather than on every pass: 480 hidden
+    // frames had their 2,600 children read every frame to set flags that
+    // were already set.
+    const Widget* self = get(id);
+    if (!self) return;
+    if (!self->visibleChain) {
+        if (LayoutMemo& memo = layoutMemos_[id]; !memo.subtreeHidden) {
+            markSubtreeHidden(id);
+            memo.subtreeHidden = true;
+        }
         return;
     }
+    layoutMemos_[id].subtreeHidden = false;
 
     // Resolving a child can create widgets, which reallocates widgets_ and
     // invalidates both `w` and the vector it points at. This copied the
@@ -938,11 +970,161 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
     // Its size from what it holds, now that it is being placed.
     if (contentSizer_) contentSizer_(*w);
     w->resolvedGen = layoutGeneration_;
-    // What the interface may be owed word of, compared at the end.
-    const bool wasVisible = w->visible;
-    const float wasW = w->rectW;
-    const float wasH = w->rectH;
-    const Widget* parent = get(w->parent);
+    if (layingOut_) ++widgetsVisited_;
+
+    // Placed anew only when something it is placed from has changed, or
+    // something has written over where it was placed.
+    //
+    // The pass used to solve every visible widget every frame, about 950 of
+    // them, and could not have skipped a frame on the generation counter:
+    // 0 of 440 passes in ten seconds of play found it unchanged, because a
+    // write that changes nothing still bumps it, and a Show or a SetText
+    // that does change something never did. Comparing what the solve reads
+    // needs neither half to be right - it is the solve's own input, so
+    // nothing can change a placement without changing it.
+    LayoutInputs in;
+    gatherLayoutInputs(*w, screenW, screenH, in);
+    if (layoutMemos_.size() < widgets_.size()) layoutMemos_.resize(widgets_.size());
+    LayoutMemo& memo = layoutMemos_[id];
+    const LayoutOutputs was = currentOutputs(*w);
+    if (!memo.valid || !(memo.inputs == in) || !(memo.outputs == was) ||
+        !anchorsAsPlaced(*w, memo, screenW, screenH)) {
+        anchorScratch_.clear();
+        memo.anchorTargets.clear();
+        for (const Anchor& a : w->anchors) {
+            AnchorInput ai;
+            ai.point = resolveAnchorPoint(a.point);
+            ai.relativePoint = resolveAnchorPoint(a.relativePoint);
+            ai.x = a.x;
+            ai.y = a.y;
+            ai.relativeTo = anchorTarget(*w, a, screenW, screenH);
+            anchorScratch_.push_back(ai);
+            memo.anchorTargets.push_back(ai.relativeTo);
+        }
+        const LayoutOutputs out = solveLayout(in, anchorScratch_);
+        w->left = out.rect.left;
+        w->bottom = out.rect.bottom;
+        w->rectW = out.rect.w;
+        w->rectH = out.rect.h;
+        w->visibleChain = out.visibleChain;
+        w->visible = out.visible;
+        w->clipTo = out.clipTo;
+        w->effStrata = out.effStrata;
+        w->effLevel = out.effLevel;
+        w->effScale = out.effScale;
+        // What the interface is owed word of.
+        if (out.rect.w != was.rect.w || out.rect.h != was.rect.h) noteSizeChange(*w);
+        if (out.visible != was.visible) noteVisibilityChange(*w);
+        memo.valid = true;
+        memo.inputs = in;
+        memo.anchors = w->anchors;
+        memo.outputs = out;
+        if (layingOut_) ++placedThisPass_;
+    }
+
+    // How much of the tree the walk placed that nobody can see. The whole
+    // pass is 3.4ms over 28018 widgets every frame, and a hidden frame's rect
+    // is already re-derived on demand by resolveWidget when something asks
+    // for it - so if most of these are hidden, not walking them is the fix.
+    if (w->visibleChain) ++visibleThisPass_;
+    if (layingOut_ && w->visible) visibleIds_.push_back(id);
+    if (w->isTooltip && w->visible && !w->tooltipListed) {
+        w->tooltipListed = true;
+        placedTooltips_.push_back(id);
+    }
+}
+
+WidgetTree::LayoutOutputs WidgetTree::currentOutputs(const Widget& w) {
+    LayoutOutputs out;
+    out.rect = {.left = w.left, .bottom = w.bottom, .w = w.rectW, .h = w.rectH};
+    out.visibleChain = w.visibleChain;
+    out.visible = w.visible;
+    out.clipTo = w.clipTo;
+    out.effStrata = w.effStrata;
+    out.effLevel = w.effLevel;
+    out.effScale = w.effScale;
+    return out;
+}
+
+WidgetTree::PlacedRect WidgetTree::anchorTarget(const Widget& w, const Anchor& a,
+                                                float screenW, float screenH) const {
+    const Widget* rel = (a.relativeTo != 0) ? get(a.relativeTo) : get(w.parent);
+    return rel ? PlacedRect{.left = rel->left, .bottom = rel->bottom,
+                            .w = rel->rectW, .h = rel->rectH}
+               : PlacedRect{.left = 0.0f, .bottom = 0.0f, .w = screenW, .h = screenH};
+}
+
+bool WidgetTree::anchorsAsPlaced(const Widget& w, const LayoutMemo& memo,
+                                 float screenW, float screenH) const {
+    if (w.anchors.size() != memo.anchors.size()) return false;
+    for (std::size_t i = 0; i < w.anchors.size(); ++i) {
+        if (!(w.anchors[i] == memo.anchors[i])) return false;
+        if (!(anchorTarget(w, w.anchors[i], screenW, screenH) == memo.anchorTargets[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void WidgetTree::gatherLayoutInputs(const Widget& w, float screenW, float screenH,
+                                    LayoutInputs& in) const {
+    in = LayoutInputs{};
+    const Widget* parent = get(w.parent);
+    in.kind = w.kind;
+    in.isRoot = w.id == rootId_;
+    in.shown = w.shown;
+    if (parent) {
+        in.hasParent = true;
+        in.parentId = parent->id;
+        in.parentRect = {.left = parent->left, .bottom = parent->bottom,
+                         .w = parent->rectW, .h = parent->rectH};
+        in.parentVisibleChain = parent->visibleChain;
+        in.parentVisible = parent->visible;
+        in.parentClipTo = parent->clipTo;
+        in.parentStrata = parent->effStrata;
+        in.parentLevel = parent->effLevel;
+        in.parentScale = parent->effScale;
+        in.scrollChild = parent->isScrollFrame && parent->scrollChild == w.id;
+        if (in.scrollChild) {
+            in.scrollX = parent->scrollX;
+            in.scrollY = parent->scrollY;
+        }
+        in.thumb = parent->isSlider && parent->thumbRegion == w.id &&
+                   parent->rectW > 0.0f && parent->rectH > 0.0f;
+        if (in.thumb) {
+            in.barFraction = parent->barFraction();
+            in.barVertical = parent->barVertical;
+        }
+    }
+    in.strataExplicit = w.strataExplicit;
+    in.strata = w.strata;
+    in.levelExplicit = w.levelExplicit;
+    in.level = w.level;
+    in.scale = w.scale;
+    in.width = w.width;
+    in.height = w.height;
+    in.isTooltip = w.isTooltip;
+    in.buttonArt = w.buttonArt != ButtonArt::None;
+    in.animOffsetX = w.animOffsetX;
+    in.animOffsetY = w.animOffsetY;
+    in.clamped = w.clampedToScreen && !in.isRoot;
+    if (in.clamped) {
+        in.clampInsetL = w.clampInsetL;
+        in.clampInsetR = w.clampInsetR;
+        in.clampInsetT = w.clampInsetT;
+        in.clampInsetB = w.clampInsetB;
+        if (const Widget* screen = get(rootId_)) {
+            in.screenRect = {.left = screen->left, .bottom = screen->bottom,
+                             .w = screen->rectW, .h = screen->rectH};
+        }
+    }
+    in.screenW = screenW;
+    in.screenH = screenH;
+}
+
+WidgetTree::LayoutOutputs WidgetTree::solveLayout(const LayoutInputs& in,
+                                                  const std::vector<AnchorInput>& anchors) {
+    LayoutOutputs out;
 
     // A frame with no anchor points is not displayed. That is WoW's rule, and
     // without it every frame FrameXML declares without anchors - a money
@@ -962,26 +1144,19 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
     // dialog read as blank while every frame in it measured correct. It draws
     // where it is placed like any other frame, so it must not be hidden for
     // lacking anchors it was never meant to have.
-    const bool isScrollChild = parent && parent->isScrollFrame &&
-                               parent->scrollChild == id;
-    const bool unanchoredFrame = (w->kind == WidgetKind::Frame) &&
-                                 w->anchors.empty() && id != rootId_ &&
-                                 !isScrollChild;
+    const bool unanchoredFrame = (in.kind == WidgetKind::Frame) &&
+                                 anchors.empty() && !in.isRoot &&
+                                 !in.scrollChild;
     // Two questions, and they are not the same one. Running is shown with
     // every ancestor shown; drawing additionally needs somewhere to be drawn.
     // Inherited from the parent's chain rather than its `visible`, or a child
     // of an unanchored driver frame would stop running too.
-    w->visibleChain = w->shown && (!parent || parent->visibleChain);
-    // How much of the tree the walk placed that nobody can see. The whole
-    // pass is 3.4ms over 28018 widgets every frame, and a hidden frame's rect
-    // is already re-derived on demand by resolveWidget when something asks
-    // for it - so if most of these are hidden, not walking them is the fix.
-    if (w->visibleChain) ++visibleThisPass_;
+    out.visibleChain = in.shown && (!in.hasParent || in.parentVisibleChain);
     // Drawing inherits from the parent's *drawing*, not from the chain: an
     // anchored child of an unanchored frame has nowhere to be either, because
     // the thing it is anchored to has no position. Deriving this from the
     // chain instead put those children back on screen.
-    w->visible = w->shown && (!parent || parent->visible) && !unanchoredFrame;
+    out.visible = in.shown && (!in.hasParent || in.parentVisible) && !unanchoredFrame;
     // Clipping is inherited: anything under a scroll frame is bounded by it,
     // however deep, because a scroll child holds frames of its own.
     //
@@ -995,14 +1170,12 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
     // Found by sweeping for content clipped away sideways - vertical is
     // ordinary, since a scroll child is meant to be taller than its window,
     // but nothing scrolls back into view from beside it.
-    const bool clippedByParent = parent && parent->isScrollFrame &&
-                                 w->id == parent->scrollChild;
-    w->clipTo = parent ? (clippedByParent ? parent->id : parent->clipTo) : 0;
+    out.clipTo = in.hasParent ? (in.scrollChild ? in.parentId : in.parentClipTo) : 0;
     // Strata and level are inherited unless the widget set its own. A child
     // frame sits one level above its parent so it draws over it, which is what
     // makes a button's own regions land on top of the frame holding it.
-    w->effStrata = w->strataExplicit ? w->strata : (parent ? parent->effStrata : FrameStrata::Medium);
-    w->effLevel  = w->levelExplicit  ? w->level  : (parent ? parent->effLevel + 1 : 0);
+    out.effStrata = in.strataExplicit ? in.strata : (in.hasParent ? in.parentStrata : FrameStrata::Medium);
+    out.effLevel  = in.levelExplicit  ? in.level  : (in.hasParent ? in.parentLevel + 1 : 0);
     // ...and never below the parent, whatever the two lines above worked out.
     //
     // The level a child inherits is read off the parent, so a parent raised
@@ -1016,12 +1189,12 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
     //
     // Ties are settled by creation order, so a backdrop declared before the
     // buttons still sits behind them once all three are on the same level.
-    if (parent && w->effLevel < parent->effLevel) {
-        w->effLevel = parent->effLevel + 1;
+    if (in.hasParent && out.effLevel < in.parentLevel) {
+        out.effLevel = in.parentLevel + 1;
     }
     // Multiplied down the chain, so scaling a window scales everything in it.
-    w->effScale  = (parent ? parent->effScale : 1.0f) * w->scale;
-    const float es = w->effScale;
+    out.effScale  = (in.hasParent ? in.parentScale : 1.0f) * in.scale;
+    const float es = out.effScale;
 
     // Solve each axis from the anchors. An anchor says "this fraction of my rect
     // sits at that point", which is one linear constraint; two constraints with
@@ -1030,23 +1203,15 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
     // SetSize.
     struct Constraint { float f; float target; };
     std::vector<Constraint> cx, cy;
-    cx.reserve(w->anchors.size());
-    cy.reserve(w->anchors.size());
+    cx.reserve(anchors.size());
+    cy.reserve(anchors.size());
 
-    for (const Anchor& a : w->anchors) {
-        const Widget* rel = (a.relativeTo != 0) ? get(a.relativeTo) : parent;
-        float relLeft, relBottom, relW, relH;
-        if (rel) {
-            relLeft = rel->left; relBottom = rel->bottom; relW = rel->rectW; relH = rel->rectH;
-        } else {
-            relLeft = 0.0f; relBottom = 0.0f; relW = screenW; relH = screenH;
-        }
-        const AnchorPoint rp = resolveAnchorPoint(a.relativePoint);
-        const AnchorPoint mp = resolveAnchorPoint(a.point);
+    for (const AnchorInput& a : anchors) {
+        const PlacedRect& rel = a.relativeTo;
         // The offset is in this frame's units; the anchor it hangs from is
         // already resolved, so only the offset is scaled.
-        cx.push_back({.f = mp.fx, .target = relLeft   + rp.fx * relW + a.x * es});
-        cy.push_back({.f = mp.fy, .target = relBottom + rp.fy * relH + a.y * es});
+        cx.push_back({.f = a.point.fx, .target = rel.left   + a.relativePoint.fx * rel.w + a.x * es});
+        cy.push_back({.f = a.point.fy, .target = rel.bottom + a.relativePoint.fy * rel.h + a.y * es});
     }
 
     auto solveAxis = [](const std::vector<Constraint>& cs, float explicitSize,
@@ -1131,10 +1296,11 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
         }
     };
 
-    const float pLeft   = parent ? parent->left   : 0.0f;
-    const float pBottom = parent ? parent->bottom : 0.0f;
-    const float pW      = parent ? parent->rectW  : screenW;
-    const float pH      = parent ? parent->rectH  : screenH;
+    const float pLeft   = in.hasParent ? in.parentRect.left   : 0.0f;
+    const float pBottom = in.hasParent ? in.parentRect.bottom : 0.0f;
+    const float pW      = in.hasParent ? in.parentRect.w      : in.screenW;
+    const float pH      = in.hasParent ? in.parentRect.h      : in.screenH;
+    PlacedRect& r = out.rect;
 
     // A region that says nothing about where it is or how big fills its
     // parent. That is WoW's default for a Texture or FontString declared in a
@@ -1143,15 +1309,12 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
     // the ring around the minimap, and both are written this way. Centring
     // them at no size instead meant they were laid out to nothing, never
     // reached the draw order, and so were never even uploaded.
-    if (w->kind != WidgetKind::Frame && w->anchors.empty() &&
-        w->width <= 0.0f && w->height <= 0.0f && parent && !w->isTooltip) {
-        w->left   = parent->left;
-        w->bottom = parent->bottom;
-        w->rectW  = parent->rectW;
-        w->rectH  = parent->rectH;
+    if (in.kind != WidgetKind::Frame && anchors.empty() &&
+        in.width <= 0.0f && in.height <= 0.0f && in.hasParent && !in.isTooltip) {
+        r = in.parentRect;
     } else {
-        solveAxis(cx, w->width * es,  pLeft,   pW, w->left,   w->rectW);
-        solveAxis(cy, w->height * es, pBottom, pH, w->bottom, w->rectH);
+        solveAxis(cx, in.width * es,  pLeft,   pW, r.left,   r.w);
+        solveAxis(cy, in.height * es, pBottom, pH, r.bottom, r.h);
         // A button's art fills the button on any axis its anchors left open.
         //
         // The rule above covers art that says nothing at all about where it
@@ -1168,22 +1331,22 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
         // Only for button art, and only for an axis that came out empty, so a
         // highlight that does declare its own size - TabButtonTemplate's says
         // 5 by 32 - keeps it.
-        if (w->buttonArt != ButtonArt::None && parent) {
-            if (w->rectW <= 0.0f) { w->left   = pLeft;   w->rectW = pW; }
-            if (w->rectH <= 0.0f) { w->bottom = pBottom; w->rectH = pH; }
+        if (in.buttonArt && in.hasParent) {
+            if (r.w <= 0.0f) { r.left   = pLeft;   r.w = pW; }
+            if (r.h <= 0.0f) { r.bottom = pBottom; r.h = pH; }
         }
     }
     // After the solve, so it displaces the result rather than becoming another
     // constraint on it.
-    w->left   += w->animOffsetX;
-    w->bottom += w->animOffsetY;
+    r.left   += in.animOffsetX;
+    r.bottom += in.animOffsetY;
 
     // The scroll offset, applied to the child a scroll frame holds. Scrolling
     // down means seeing content further down a taller child, which is the
     // child moving up - and up is a larger bottom in these coordinates.
-    if (parent && parent->isScrollFrame && parent->scrollChild == id) {
-        w->left   -= parent->scrollX;
-        w->bottom += parent->scrollY;
+    if (in.scrollChild) {
+        r.left   -= in.scrollX;
+        r.bottom += in.scrollY;
     }
 
     // A slider's grip goes where its value says. <ThumbTexture> declares a size
@@ -1197,17 +1360,17 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
     // content and so the top of the track. That matches how a drag reads the
     // cursor back into a value, and the two must agree or the grip walks the
     // opposite way from the hand holding it.
-    if (parent && parent->isSlider && parent->thumbRegion == id &&
-        parent->rectW > 0.0f && parent->rectH > 0.0f) {
-        const float f = parent->barFraction();
-        if (parent->barVertical) {
-            const float span = parent->rectH - w->rectH;
-            w->bottom = parent->bottom + (span > 0.0f ? span * (1.0f - f) : 0.0f);
-            w->left   = parent->left + (parent->rectW - w->rectW) * 0.5f;
+    if (in.thumb) {
+        const PlacedRect& bar = in.parentRect;
+        const float f = in.barFraction;
+        if (in.barVertical) {
+            const float span = bar.h - r.h;
+            r.bottom = bar.bottom + (span > 0.0f ? span * (1.0f - f) : 0.0f);
+            r.left   = bar.left + (bar.w - r.w) * 0.5f;
         } else {
-            const float span = parent->rectW - w->rectW;
-            w->left   = parent->left + (span > 0.0f ? span * f : 0.0f);
-            w->bottom = parent->bottom + (parent->rectH - w->rectH) * 0.5f;
+            const float span = bar.w - r.w;
+            r.left   = bar.left + (span > 0.0f ? span * f : 0.0f);
+            r.bottom = bar.bottom + (bar.h - r.h) * 0.5f;
         }
     }
 
@@ -1223,20 +1386,13 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
     //
     // Before the children, so they follow the clamped position rather than the
     // one it was moved out of.
-    if (w->clampedToScreen && id != rootId_ &&
-        w->rectW > 0.0f && w->rectH > 0.0f) {
-        if (const Widget* screen = get(rootId_)) {
-            clampInside(*screen, w->rectW, w->rectH, w->left, w->bottom,
-                        w->clampInsetL, w->clampInsetR, w->clampInsetT, w->clampInsetB);
-        }
+    if (in.clamped && r.w > 0.0f && r.h > 0.0f) {
+        const PlacedRect& screen = in.screenRect;
+        clampInside(screen.left, screen.bottom, screen.w, screen.h, r.w, r.h,
+                    r.left, r.bottom,
+                    in.clampInsetL, in.clampInsetR, in.clampInsetT, in.clampInsetB);
     }
-
-    if (w->rectW != wasW || w->rectH != wasH) noteSizeChange(*w);
-    if (w->visible != wasVisible) noteVisibilityChange(*w);
-    if (w->isTooltip && w->visible && !w->tooltipListed) {
-        w->tooltipListed = true;
-        placedTooltips_.push_back(id);
-    }
+    return out;
 }
 
 uint32_t WidgetTree::hitTest(float x, float y) const {
@@ -1346,9 +1502,13 @@ bool WidgetTree::buttonArtVisible(const Widget& w) const {
 }
 
 void WidgetTree::collectDrawOrder() {
-    drawOrder_.clear();
-    for (const Widget& w : widgets_) {
-        if (w.id == 0) continue;
+    // From the widgets the pass left visible rather than from all of them:
+    // nothing else is drawn, and reading all 28,000 to find the 950 was most
+    // of this function. Only the layout sets `visible`, and it lists each one
+    // it sets.
+    drawKeys_.clear();
+    for (const uint32_t id : visibleIds_) {
+        const Widget& w = widgets_[id];
         if (!w.visible) continue;
         if (w.alpha <= 0.001f) continue;
         // Frames are containers, except when they carry a backdrop or are a
@@ -1394,7 +1554,7 @@ void WidgetTree::collectDrawOrder() {
         if (w.kind == WidgetKind::FontString && w.text.empty()) continue;
         // A button shows one of its state textures, not all of them.
         if (!buttonArtVisible(w)) continue;
-        drawOrder_.push_back(&w);
+        drawKeys_.push_back({.id = id});
     }
 
     // A status bar draws its own fill, where the real client makes the fill a
@@ -1430,20 +1590,33 @@ void WidgetTree::collectDrawOrder() {
         if (w->isEditBox) return layerRank(DrawLayer::Artwork);
         return layerRank((w->isStatusBar && !w->barTexture.empty()) ? w->barLayer : w->layer);
     };
-    std::sort(drawOrder_.begin(), drawOrder_.end(),
-              [&](const Widget* a, const Widget* b) {
-                  const int sa = strataRank(a->effStrata), sb = strataRank(b->effStrata);
-                  if (sa != sb) return sa < sb;
-                  const int va = sortLevel(a), vb = sortLevel(b);
-                  if (va != vb) return va < vb;
-                  const int la = sortLayer(a), lb = sortLayer(b);
-                  if (la != lb) return la < lb;
-                  if (a->subLevel != b->subLevel) return a->subLevel < b->subLevel;
+    for (DrawKey& k : drawKeys_) {
+        const Widget& w = widgets_[k.id];
+        k.strata = strataRank(w.effStrata);
+        k.level = sortLevel(&w);
+        k.layer = sortLayer(&w);
+        k.subLevel = w.subLevel;
+        k.creationOrder = w.creationOrder;
+    }
+    // The same widgets, met in the same order and keyed the same way, sort
+    // into the order they sorted into last time - which is what most frames
+    // are, so most frames keep the order they have.
+    if (drawKeys_ == lastDrawKeys_) return;
+    lastDrawKeys_ = drawKeys_;
+    ++sortedPasses_;
+    std::sort(drawKeys_.begin(), drawKeys_.end(),
+              [](const DrawKey& a, const DrawKey& b) {
+                  if (a.strata != b.strata) return a.strata < b.strata;
+                  if (a.level != b.level) return a.level < b.level;
+                  if (a.layer != b.layer) return a.layer < b.layer;
+                  if (a.subLevel != b.subLevel) return a.subLevel < b.subLevel;
                   // Ties resolve by creation order, so a region added later sits
                   // on top of one added earlier - the same rule the real client
                   // uses within a layer.
-                  return a->creationOrder < b->creationOrder;
+                  return a.creationOrder < b.creationOrder;
               });
+    drawOrder_.clear();
+    for (const DrawKey& k : drawKeys_) drawOrder_.push_back(&widgets_[k.id]);
 }
 
 void hsvToRgb(const float hsv[3], float rgb[3]) {

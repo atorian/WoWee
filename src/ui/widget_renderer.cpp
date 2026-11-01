@@ -177,6 +177,10 @@ void WidgetRenderer::sizeTextureWidget(Widget* w) {
     // tall tab, overhanging it by eight. The two rules answer the same
     // question, so only one of them may run.
     if (w->buttonArt != ButtonArt::None) return;
+    // A size on both axes already: nothing below could change it, and this
+    // runs for every visible texture every frame, so the anchors are not
+    // resolved to find that out.
+    if (w->width > 0.0f && w->height > 0.0f) return;
     // Anything it already knows about itself wins. Two opposing anchors
     // are a statement about size just as much as <Size> is, so a piece
     // stretched between two others must not be pulled back to its file's
@@ -196,27 +200,6 @@ void WidgetRenderer::sizeTextureWidget(Widget* w) {
 /// One label, sized from its own text. See sizeContent.
 void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font) {
     if (w->text.empty()) return;
-    // Anchors that span an axis give the size on that axis, and the string
-    // does not get a say about it. Asked per axis, the way the texture
-    // sizing above asks it - anchorsSpanAxis exists for exactly this and
-    // this loop was counting instead.
-    //
-    // Counting is wrong whenever two anchors pin the same axis, or pin one
-    // axis twice and the other not at all. Every options category button
-    // is that: OptionsList_DisplayButton does
-    // `button.text:SetPoint("LEFT", 8, 2)` on a ButtonText that already
-    // carries one, so the label had two anchors, neither of which says how
-    // tall it is - and the measure that would have said was skipped. The
-    // label kept height 0 and drew nothing.
-    //
-    // That emptied the category list of every options frame at once:
-    // Video, Interface and Audio all list their categories with this
-    // button. The entries were there and the buttons were there; the names
-    // were invisible, so nothing could be read or clicked, and no setting
-    // added to the schema could be reached however correctly it registered.
-    const bool spansX = anchorsSpanAxis(w->anchors, true);
-    const bool spansY = anchorsSpanAxis(w->anchors, false);
-    if (spansX && spansY) return;
 
     // A width with no height is a paragraph, not a request to be measured.
     //
@@ -242,7 +225,6 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font) {
     // of its right edge. The money frame is where it shows: the number is
     // anchored to end exactly where the coin icon begins, so the overspill
     // lands on top of the coin.
-    //
     const float size = interfaceFontSize(w->fontHeight);
 
     // Already the right size for this text, measured the way it would be
@@ -257,6 +239,10 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font) {
     // box it was given, the backpack's coin amounts among them: that rect
     // is anchored to end exactly where the coin picture begins, so the
     // overspill lands on the coin.
+    //
+    // Asked before the anchors are resolved below: this runs for every
+    // visible label every frame, nearly all of them unchanged, and resolving
+    // their point names only to return here was most of what it cost.
     const bool sameMeasurement = w->measuredText == w->text &&
                                  w->measuredSize == size &&
                                  w->measuredFace == w->fontFace;
@@ -266,6 +252,28 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font) {
         if (w->autoSized && sameMeasurement) return;
         if (!w->autoSized && w->width > 0.0f && w->height > 0.0f) return;
     }
+
+    // Anchors that span an axis give the size on that axis, and the string
+    // does not get a say about it. Asked per axis, the way the texture
+    // sizing above asks it - anchorsSpanAxis exists for exactly this and
+    // this loop was counting instead.
+    //
+    // Counting is wrong whenever two anchors pin the same axis, or pin one
+    // axis twice and the other not at all. Every options category button
+    // is that: OptionsList_DisplayButton does
+    // `button.text:SetPoint("LEFT", 8, 2)` on a ButtonText that already
+    // carries one, so the label had two anchors, neither of which says how
+    // tall it is - and the measure that would have said was skipped. The
+    // label kept height 0 and drew nothing.
+    //
+    // That emptied the category list of every options frame at once:
+    // Video, Interface and Audio all list their categories with this
+    // button. The entries were there and the buttons were there; the names
+    // were invisible, so nothing could be read or clicked, and no setting
+    // added to the schema could be reached however correctly it registered.
+    const bool spansX = anchorsSpanAxis(w->anchors, true);
+    const bool spansY = anchorsSpanAxis(w->anchors, false);
+    if (spansX && spansY) return;
 
     // Same face too - the widget's own, then the interface default -
     // rather than whichever face this measure happened to be handed. Looked
@@ -1116,30 +1124,10 @@ void WidgetRenderer::layout(WidgetTree& tree, float screenW, float screenH) {
     const double now = core::appTimeSeconds();
     if (firstSeen == 0.0) firstSeen = now;
 
-    // Resolved once and kept, because findByName is a linear scan over every
-    // widget with a string compare on each. Sixty-two names against several
-    // thousand FrameXML widgets is a few hundred thousand comparisons a frame,
-    // every frame, for a list that barely changes - the cost arrived with the
-    // list, which grew from fifteen names to sixty-two in one sitting.
-    //
-    // The id is verified against the name before use, so a slot reused by a
-    // different frame re-resolves rather than hiding the wrong one. Names that
-    // do not resolve are retried on a timer, not per frame: several belong to
-    // load-on-demand addons and only appear once something asks for them.
-    static std::vector<uint32_t> resolved(kSuppressed.size(), 0);
-    static double lastRetry = 0.0;
-    const bool retryMisses = (now - lastRetry) > 1.0;
-    if (retryMisses) lastRetry = now;
-
-    for (size_t i = 0; i < kSuppressed.size(); ++i) {
-        const std::string& name = kSuppressed[i];
-        Widget* w = (resolved[i] != 0) ? tree.get(resolved[i]) : nullptr;
-        if (w && w->name != name) w = nullptr;   // that slot is someone else now
-        if (!w && (resolved[i] != 0 || retryMisses)) {
-            w = tree.findByName(name);
-            resolved[i] = w ? w->id : 0;
-        }
-        if (w) w->shown = false;
+    // Looked up every frame: findByName is one hash lookup, and a frame from a
+    // load-on-demand addon is hidden on the frame it first exists.
+    for (const std::string& name : kSuppressed) {
+        if (Widget* w = tree.findByName(name)) w->shown = false;
     }
     // Suppression is a drawing decision and nothing more. A frame hidden here
     // keeps every event it registered, and the frame dispatch does not filter
@@ -1228,9 +1216,10 @@ void WidgetRenderer::layout(WidgetTree& tree, float screenW, float screenH) {
                         "ms/frame, over ", tree.size(), " widgets");
             LOG_WARNING("    of that solve: anchor walk ", tree.lastWalkMs(),
                         "ms, draw order ", tree.lastDrawOrderMs(),
-                        "ms (last frame); ", tree.cleanPasses(), " of ",
-                        tree.totalPasses(),
-                        " passes had nothing to lay out; ", tree.lastVisibleCount(),
+                        "ms (last frame); ", tree.widgetsPlaced(), " of ",
+                        tree.widgetsVisited(), " widgets walked had to be placed anew, ",
+                        tree.sortedPasses(), " of ", tree.totalPasses(),
+                        " passes sorted the draw order; ", tree.lastVisibleCount(),
                         " of ", tree.size(), " widgets were visible");
             tree.resetPassCounts();
             times = PassTimes{};

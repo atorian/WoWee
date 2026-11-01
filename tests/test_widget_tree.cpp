@@ -2,6 +2,7 @@
 
 #include "ui/widget_tree.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <string>
 
@@ -2740,6 +2741,30 @@ TEST_CASE("Reset leaves nothing but the screen and UIParent", "[widget][reset]")
     CHECK(tree.get(tree.root())->children.size() == 1);
 }
 
+// The client and FrameXML reach frames by name, and a name taken twice is the
+// later frame's: the global it was published under was assigned last.
+TEST_CASE("A name finds the last frame created under it", "[widget][name]") {
+    WidgetTree tree;
+    const uint32_t first = tree.create(WidgetKind::Frame, tree.uiParentId(), "ShoppingTooltip1");
+    const uint32_t child = tree.create(WidgetKind::Frame, first, "ShoppingTooltip1TextLeft1");
+    const uint32_t second = tree.create(WidgetKind::Frame, tree.uiParentId(), "ShoppingTooltip1");
+
+    REQUIRE(tree.findByName("ShoppingTooltip1") != nullptr);
+    CHECK(tree.findByName("ShoppingTooltip1")->id == second);
+    REQUIRE(tree.findByName("ShoppingTooltip1TextLeft1") != nullptr);
+    CHECK(tree.findByName("ShoppingTooltip1TextLeft1")->id == child);
+    // A frame of an addon that has not loaded is not there, however often
+    // it is asked for.
+    CHECK(tree.findByName("AuctionDressUpModel") == nullptr);
+    CHECK(tree.findByName("AuctionDressUpModel") == nullptr);
+    CHECK(tree.findByName("") == nullptr);
+
+    // Created later, it is found.
+    const uint32_t late = tree.create(WidgetKind::Frame, tree.uiParentId(), "AuctionDressUpModel");
+    REQUIRE(tree.findByName("AuctionDressUpModel") != nullptr);
+    CHECK(tree.findByName("AuctionDressUpModel")->id == late);
+}
+
 TEST_CASE("A second load after a reset draws one interface, not two", "[widget][reset]") {
     WidgetTree tree;
     auto buildInterface = [&] {
@@ -3014,6 +3039,250 @@ TEST_CASE("a hidden subtree is not drawn and not run") {
         CHECK(tree.get(id)->visibleChain);
         CHECK(tree.get(id)->rectW > 0.0f);
     }
+}
+
+// A layout pass places a widget anew only when something it is placed from has
+// changed, and the interface writes most of those things straight into the
+// widget - Show sets `shown`, SetScale `scale`, SetVerticalScroll `scrollY` -
+// without telling the tree. These change each such input the way its binding
+// does, lay out once, and read where things ended up.
+namespace {
+struct PlacedTree {
+    WidgetTree tree;
+    uint32_t panel = 0;
+    uint32_t label = 0;     // a font string sized from its text
+    uint32_t follower = 0;  // hangs off the label's right edge
+
+    PlacedTree() {
+        // Ten units a character, so a change of text is a change of width.
+        tree.setContentSizer([](Widget& w) {
+            if (w.kind == WidgetKind::FontString)
+                w.width = 10.0f * static_cast<float>(w.text.size());
+        });
+        panel = tree.create(WidgetKind::Frame, tree.uiParentId(), "Panel");
+        tree.setWidth(panel, 400.0f);
+        tree.setHeight(panel, 200.0f);
+        Anchor p;
+        p.point = "BOTTOMLEFT";
+        p.relativePoint = "BOTTOMLEFT";
+        p.x = 100.0f;
+        p.y = 100.0f;
+        tree.addPoint(panel, p);
+
+        label = tree.create(WidgetKind::FontString, panel, "PanelLabel");
+        tree.get(label)->text = "abc";
+        tree.setHeight(label, 12.0f);
+        Anchor l;
+        l.point = "LEFT";
+        l.relativePoint = "LEFT";
+        tree.addPoint(label, l);
+
+        follower = tree.create(WidgetKind::Frame, panel, "PanelFollower");
+        tree.setWidth(follower, 20.0f);
+        tree.setHeight(follower, 20.0f);
+        Anchor f;
+        f.point = "LEFT";
+        f.relativeTo = label;
+        f.relativePoint = "RIGHT";
+        tree.addPoint(follower, f);
+
+        tree.layout(kScreenW, kScreenH);
+    }
+    const Widget& at(uint32_t id) { return *tree.get(id); }
+};
+}  // namespace
+
+TEST_CASE("A layout with nothing changed places nothing anew", "[widget][layout]") {
+    PlacedTree t;
+    REQUIRE(t.tree.lastPlacedCount() > 0);
+
+    t.tree.layout(kScreenW, kScreenH);
+    CHECK(t.tree.lastPlacedCount() == 0);
+    // Still where they were, and still drawn.
+    CHECK(t.at(t.follower).left == Catch::Approx(130.0f));
+    CHECK(t.at(t.follower).visible);
+    CHECK(t.tree.drawOrder().size() == 1);   // the label; frames draw nothing
+}
+
+TEST_CASE("Changed text moves what hangs off the label", "[widget][layout]") {
+    PlacedTree t;
+    REQUIRE(t.at(t.follower).left == Catch::Approx(130.0f));
+
+    t.tree.get(t.label)->text = "abcdef";     // what FontString:SetText writes
+    t.tree.layout(kScreenW, kScreenH);
+    CHECK(t.at(t.label).rectW == Catch::Approx(60.0f));
+    // The label is placed before the follower, so the follower reads the new
+    // edge in the same pass.
+    CHECK(t.at(t.follower).left == Catch::Approx(160.0f));
+}
+
+TEST_CASE("A frame moved takes its children with it at the next layout",
+          "[widget][layout]") {
+    PlacedTree t;
+    Anchor p;
+    p.point = "BOTTOMLEFT";
+    p.relativePoint = "BOTTOMLEFT";
+    p.x = 300.0f;
+    p.y = 100.0f;
+    t.tree.addPoint(t.panel, p);
+    t.tree.layout(kScreenW, kScreenH);
+    CHECK(t.at(t.label).left == Catch::Approx(300.0f));
+    CHECK(t.at(t.follower).left == Catch::Approx(330.0f));
+}
+
+TEST_CASE("Hide and Show written into the widget are laid out", "[widget][layout]") {
+    PlacedTree t;
+    t.tree.get(t.panel)->shown = false;       // what Region:Hide writes
+    t.tree.layout(kScreenW, kScreenH);
+    CHECK_FALSE(t.at(t.label).visible);
+    CHECK_FALSE(t.at(t.follower).visibleChain);
+    CHECK(t.tree.drawOrder().empty());
+
+    // Resized while hidden: the children come back at the new size.
+    t.tree.setWidth(t.panel, 600.0f);
+    t.tree.get(t.panel)->shown = true;
+    t.tree.layout(kScreenW, kScreenH);
+    CHECK(t.at(t.label).visible);
+    CHECK(t.at(t.panel).rectW == Catch::Approx(600.0f));
+    CHECK(t.tree.drawOrder().size() == 1);
+}
+
+TEST_CASE("A scale written into the widget scales what is under it",
+          "[widget][layout]") {
+    PlacedTree t;
+    t.tree.get(t.panel)->scale = 2.0f;        // what SetScale writes
+    t.tree.layout(kScreenW, kScreenH);
+    CHECK(t.at(t.panel).rectW == Catch::Approx(800.0f));
+    CHECK(t.at(t.label).effScale == Catch::Approx(2.0f));
+    CHECK(t.at(t.label).rectW == Catch::Approx(60.0f));
+}
+
+TEST_CASE("A scroll offset written into the frame moves its scroll child",
+          "[widget][layout]") {
+    PlacedTree t;
+    t.tree.markScrollFrame(t.panel);
+    t.tree.get(t.panel)->scrollChild = t.follower;
+    t.tree.layout(kScreenW, kScreenH);
+    const float bottom = t.at(t.follower).bottom;
+
+    t.tree.get(t.panel)->scrollY = 25.0f;     // what SetVerticalScroll writes
+    t.tree.layout(kScreenW, kScreenH);
+    CHECK(t.at(t.follower).bottom == Catch::Approx(bottom + 25.0f));
+}
+
+TEST_CASE("A slider's value written into it moves its thumb", "[widget][layout]") {
+    PlacedTree t;
+    Widget* bar = t.tree.get(t.panel);
+    bar->isSlider = true;
+    bar->barMin = 0.0f;
+    bar->barMax = 1.0f;
+    bar->barValue = 0.0f;
+    bar->thumbRegion = t.follower;
+    t.tree.layout(kScreenW, kScreenH);
+    REQUIRE(t.at(t.follower).left == Catch::Approx(100.0f));
+
+    t.tree.get(t.panel)->barValue = 1.0f;     // what SetValue writes
+    t.tree.layout(kScreenW, kScreenH);
+    CHECK(t.at(t.follower).left == Catch::Approx(100.0f + 400.0f - 20.0f));
+}
+
+TEST_CASE("An animation offset written into the frame moves it", "[widget][layout]") {
+    PlacedTree t;
+    t.tree.get(t.panel)->animOffsetY = 40.0f; // what a Translation writes
+    t.tree.layout(kScreenW, kScreenH);
+    CHECK(t.at(t.panel).bottom == Catch::Approx(140.0f));
+    CHECK(t.at(t.label).bottom == Catch::Approx(140.0f + 100.0f - 6.0f));
+}
+
+TEST_CASE("Turning the clamp on pulls a frame back on screen", "[widget][layout]") {
+    PlacedTree t;
+    Anchor p;
+    p.point = "BOTTOMLEFT";
+    p.relativePoint = "BOTTOMLEFT";
+    p.x = 900.0f;
+    p.y = 100.0f;
+    t.tree.addPoint(t.panel, p);
+    t.tree.layout(kScreenW, kScreenH);
+    REQUIRE(t.at(t.panel).left == Catch::Approx(900.0f));
+
+    t.tree.get(t.panel)->clampedToScreen = true;   // SetClampedToScreen
+    t.tree.layout(kScreenW, kScreenH);
+    CHECK(t.at(t.panel).left == Catch::Approx(kScreenW - 400.0f));
+}
+
+TEST_CASE("A rect written over between layouts is placed again", "[widget][layout]") {
+    // SetWidth leaves the width it was given as a provisional rect, and a
+    // frame sized by two opposing anchors does not take its size from it.
+    // Nothing the frame is placed from changes when the width written is the
+    // one it already had - the rect it was placed at still has to come back.
+    WidgetTree tree;
+    const uint32_t f = tree.create(WidgetKind::Frame, tree.uiParentId(), "Spanned");
+    tree.setAllPoints(f, tree.uiParentId());
+    tree.layout(kScreenW, kScreenH);
+    REQUIRE(tree.get(f)->rectW == Catch::Approx(kScreenW));
+
+    tree.setWidth(f, tree.get(f)->width);
+    REQUIRE(tree.get(f)->rectW != Catch::Approx(kScreenW));
+    tree.layout(kScreenW, kScreenH);
+    CHECK(tree.get(f)->rectW == Catch::Approx(kScreenW));
+}
+
+TEST_CASE("The draw order follows what changed without anything moving",
+          "[widget][layout][draw]") {
+    PlacedTree t;
+    // Two textures over each other in the panel, the second made later and so
+    // drawn on top.
+    const uint32_t under = t.tree.create(WidgetKind::Texture, t.panel, "Under");
+    const uint32_t over = t.tree.create(WidgetKind::Texture, t.panel, "Over");
+    for (uint32_t id : {under, over}) {
+        t.tree.setAllPoints(id, t.panel);
+        t.tree.get(id)->texturePath = "Interface\\Buttons\\WHITE8X8";
+    }
+    t.tree.layout(kScreenW, kScreenH);
+    const auto pos = [&](uint32_t id) {
+        const auto& order = t.tree.drawOrder();
+        return std::find(order.begin(), order.end(), t.tree.get(id)) - order.begin();
+    };
+    REQUIRE(pos(under) < pos(over));
+
+    // A layer is not where anything is, only what goes on top.
+    t.tree.get(under)->layer = DrawLayer::Overlay;   // SetDrawLayer
+    t.tree.layout(kScreenW, kScreenH);
+    CHECK(t.tree.lastPlacedCount() == 0);
+    CHECK(pos(over) < pos(under));
+
+    // And a texture that loses its file stops being drawn.
+    t.tree.get(over)->texturePath.clear();
+    t.tree.layout(kScreenW, kScreenH);
+    CHECK(pos(over) == static_cast<std::ptrdiff_t>(t.tree.drawOrder().size()));
+}
+
+TEST_CASE("A tooltip hidden with its owner's panel takes its art with it",
+          "[widget][layout][draw]") {
+    // The layout marks a hidden frame's subtree once, when the frame is
+    // hidden, rather than on every pass. A tooltip is the one frame hidden by
+    // something other than the layout - the orphaned-tooltip sweep clears its
+    // flags directly - and its art has to go with it all the same.
+    WidgetTree tree;
+    const uint32_t panel = tree.create(WidgetKind::Frame, tree.uiParentId(), "LootPanel");
+    tree.setAllPoints(panel, tree.uiParentId());
+    const uint32_t tip = tree.create(WidgetKind::Frame, tree.root(), "LootTip");
+    tree.setAllPoints(tip, panel);
+    const uint32_t art = tree.create(WidgetKind::Texture, tip, "LootTipArt");
+    tree.setAllPoints(art, tip);
+    tree.get(art)->texturePath = "Interface\\Tooltips\\UI-Tooltip-Background";
+    tree.setTooltipOwner(tip, panel);
+    tree.layout(kScreenW, kScreenH);
+    REQUIRE(tree.get(art)->visible);
+
+    tree.get(panel)->shown = false;
+    tree.layout(kScreenW, kScreenH);
+    tree.hideOrphanedTooltips();
+    REQUIRE_FALSE(tree.get(tip)->shown);
+    tree.layout(kScreenW, kScreenH);
+    CHECK_FALSE(tree.get(art)->visible);
+    CHECK(std::find(tree.drawOrder().begin(), tree.drawOrder().end(), tree.get(art)) ==
+          tree.drawOrder().end());
 }
 
 TEST_CASE("a hidden frame still answers for its own rect") {
