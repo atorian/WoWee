@@ -112,6 +112,67 @@ TEST_CASE("the player rides the transport the server names, and steps off when i
     CHECK(h.game().getMovementInfo().transportGuid == 0);
 }
 
+// Transport guids are reused across maps - an Undercity elevator's becomes a
+// Deeprun tram's - so the ride ends with the world it was in. The game knows
+// when it leaves one; the client's scene ending is not what decides it.
+TEST_CASE("the player's ride ends when the server puts the player in another world",
+          "[movement][transport][harness]") {
+    using wowee::game::Opcode;
+    GameHarness h;
+    enterWorldAsEntity(h);
+    boatArrives(h);
+    playerMoves(h, kBoat, 1.0f, 2.0f, 3.0f);
+    REQUIRE(h.game().movement().isOnTransport());
+
+    wowee::test::PlayerSpec elsewhere = h.player();
+    elsewhere.mapId = 1;  // Kalimdor
+    elsewhere.x = 1629.0f;
+    elsewhere.y = -4373.0f;
+    elsewhere.z = 31.0f;
+    h.receive(Opcode::SMSG_LOGIN_VERIFY_WORLD, GameHarness::loginVerifyWorldBody(elsewhere));
+    h.pump();
+
+    CHECK_FALSE(h.game().movement().isOnTransport());
+    CHECK(h.game().getMovementInfo().transportGuid == 0);
+}
+
+TEST_CASE("the player's ride ends when the server puts the player elsewhere on the same map",
+          "[movement][transport][harness]") {
+    using wowee::game::Opcode;
+    GameHarness h;
+    enterWorldAsEntity(h);
+    boatArrives(h);
+    playerMoves(h, kBoat, 1.0f, 2.0f, 3.0f);
+    REQUIRE(h.game().movement().isOnTransport());
+
+    // A teleport across the continent: the boat is still in view until the
+    // server says it is not, and the player is not on it.
+    wowee::test::PlayerSpec across = h.player();
+    across.x += 2000.0f;
+    across.y += 1500.0f;
+    h.receive(Opcode::SMSG_LOGIN_VERIFY_WORLD, GameHarness::loginVerifyWorldBody(across));
+    h.pump();
+
+    CHECK_FALSE(h.game().movement().isOnTransport());
+    CHECK(h.game().getMovementInfo().transportGuid == 0);
+}
+
+TEST_CASE("the player's ride ends with the character's session", "[movement][transport][harness][relog]") {
+    GameHarness h;
+    enterWorldAsEntity(h);
+    boatArrives(h);
+    playerMoves(h, kBoat, 1.0f, 2.0f, 3.0f);
+    REQUIRE(h.game().movement().isOnTransport());
+
+    wowee::test::PlayerSpec next;
+    next.guid = 0x91;
+    next.name = "Next";
+    h.relogAs(next);
+
+    CHECK_FALSE(h.game().movement().isOnTransport());
+    CHECK(h.game().getMovementInfo().transportGuid == 0);
+}
+
 TEST_CASE("a transport the client has not seen yet does not carry the player", "[movement][transport][harness]") {
     GameHarness h;
     enterWorldAsEntity(h);
