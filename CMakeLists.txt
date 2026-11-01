@@ -1153,7 +1153,6 @@ set(WOWEE_SOURCES
     src/rendering/character_emitters.cpp
     src/rendering/map_render_session.cpp
     src/rendering/render_graph.cpp
-    src/rendering/hiz_system.cpp
     src/rendering/volumetric_fog.cpp
     src/rendering/sun_shafts.cpp
     src/rendering/bloom.cpp

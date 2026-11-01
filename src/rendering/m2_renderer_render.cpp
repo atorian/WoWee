@@ -10,7 +10,6 @@
 #include "rendering/m2_particle_emission.hpp"
 #include "core/thread_pool.hpp"
 #include "pipeline/m2_model_classifier.hpp"
-#include "rendering/hiz_system.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/cpu_stage_times.hpp"
 #include "rendering/vk_buffer.hpp"
@@ -897,8 +896,8 @@ void M2Renderer::extractCull(const Camera& camera, Frame& frame) {
         frame.cullIds.push_back(r.id);
         frame.cullIndices.push_back(index);
         frame.cullInput.push_back({glm::vec4(r.cullCenter, r.paddedRadius), distanceSq,
-                                   ((r.flags & G::kValid) ? 1u : 0u) | ((r.flags & G::kInvisibleTrap) ? 4u : 0u) |
-                                   (r.culledFrames < 2 && !gameObject ? 8u : 0u), {0.0f, 0.0f}});
+                                   ((r.flags & G::kValid) ? 1u : 0u) | ((r.flags & G::kInvisibleTrap) ? 4u : 0u),
+                                   {0.0f, 0.0f}});
     }
 }
 
@@ -918,52 +917,6 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
         }
         ubo->cameraPos = glm::vec4(camPos, maxPossibleDistSq);
         ubo->instanceCount = numInstances;
-
-        // HiZ occlusion culling fields
-        const bool hizReady = hizSystem_ && hizSystem_->isReady();
-
-        // Auto-disable HiZ when the camera has moved/rotated significantly.
-        // Large VP changes make the depth pyramid unreliable because the
-        // reprojected screen positions diverge from the actual pyramid data.
-        bool hizSafe = hizReady;
-        if (hizReady) {
-            // Compare current VP against previous VP - Frobenius-style max diff.
-            float maxDiff = 0.0f;
-            const float* curM  = &vp[0][0];
-            const float* prevM = &prevVP_[0][0];
-            for (int k = 0; k < 16; ++k)
-                maxDiff = std::max(maxDiff, std::abs(curM[k] - prevM[k]));
-            // Threshold: typical tracking-camera motion (following a walking
-            // character) produces diffs of 0.05–0.25.  A fast rotation or
-            // zoom easily exceeds 0.5.  The previous threshold (0.15) caused
-            // the HiZ pass to toggle on/off every other frame during normal
-            // gameplay, which produced global M2 doodad flicker.
-            if (maxDiff > rendering::HIZ_VP_DIFF_THRESHOLD) hizSafe = false;
-        }
-
-        ubo->hizEnabled = hizSafe ? 1u : 0u;
-        ubo->hizMipLevels = hizReady ? hizSystem_->getMipLevels() : 0u;
-        ubo->_pad2 = 0;
-        if (hizReady) {
-            ubo->hizParams = glm::vec4(
-                static_cast<float>(hizSystem_->getPyramidWidth()),
-                static_cast<float>(hizSystem_->getPyramidHeight()),
-                camera.getNearPlane(),
-                0.0f
-            );
-            ubo->viewProj = vp;
-            // Use previous frame's VP for HiZ reprojection - the HiZ pyramid
-            // was built from the previous frame's depth, so we must project
-            // into the same screen space to sample the correct depths.
-            ubo->prevViewProj = prevVP_;
-        } else {
-            ubo->hizParams = glm::vec4(0.0f);
-            ubo->viewProj = glm::mat4(1.0f);
-            ubo->prevViewProj = glm::mat4(1.0f);
-        }
-
-        // Save current VP for next frame's temporal reprojection
-        prevVP_ = vp;
     }
 
     collectCullOutput(frameIndex);
@@ -981,22 +934,9 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
 
 
     // --- Dispatch compute shader ---
-    const bool useHiZ = (cullHiZPipeline_ != VK_NULL_HANDLE)
-                     && hizSystem_ && hizSystem_->isReady();
-    if (useHiZ) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cullHiZPipeline_);
-        // Set 0: cull UBO + input/output SSBOs
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                cullHiZPipelineLayout_, 0, 1, &cullSet_[frameIndex], 0, nullptr);
-        // Set 1: HiZ pyramid sampler
-        VkDescriptorSet hizSet = hizSystem_->getDescriptorSet(frameIndex);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                cullHiZPipelineLayout_, 1, 1, &hizSet, 0, nullptr);
-    } else {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cullPipeline_);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                cullPipelineLayout_, 0, 1, &cullSet_[frameIndex], 0, nullptr);
-    }
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cullPipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            cullPipelineLayout_, 0, 1, &cullSet_[frameIndex], 0, nullptr);
 
     const uint32_t groupCount = (numInstances + 63) / 64;
     vkCmdDispatch(cmd, groupCount, 1, 1);
@@ -1699,7 +1639,6 @@ void M2Renderer::acceptCullAnswers(const std::vector<CullAnswer>& answers) {
         auto& record = grid.record(index);
         record.verdictSerial = cullVerdictSerial_;
         record.lastVisible = result.visible ? 1 : 0;
-        record.culledFrames = static_cast<uint8_t>(result.visible ? 0 : std::min(record.culledFrames + 1u, 3u));
     }
 }
 

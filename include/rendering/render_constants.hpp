@@ -60,13 +60,6 @@ constexpr float M2_IDLE_VARIATION_TIMER_MAX_MS = 6000.0f;
 constexpr float M2_DEFAULT_PARTICLE_ANIM_MS    = 3333.0f;
 
 // ---------------------------------------------------------------------------
-// HiZ occlusion culling
-// ---------------------------------------------------------------------------
-// VP matrix diff threshold - below this HiZ is considered safe.
-// Typical tracking camera (following a walking character) produces 0.05–0.25.
-constexpr float HIZ_VP_DIFF_THRESHOLD = 0.5f;
-
-// ---------------------------------------------------------------------------
 // Character rendering
 // ---------------------------------------------------------------------------
 // Default frustum-cull radius when model bounds are unavailable (world units).

@@ -48,7 +48,6 @@
 #include "pipeline/grass_population.hpp"
 #include "pipeline/grass_terrain.hpp"
 #include "rendering/grass_renderer.hpp"
-#include "rendering/hiz_system.hpp"
 #include "rendering/volumetric_fog.hpp"
 #include "rendering/sky_background.hpp"
 #include "rendering/sun_shafts.hpp"
@@ -1318,10 +1317,6 @@ void Renderer::shutdown() {
     }
 
     LOG_DEBUG("Renderer::shutdown - m2Renderer...");
-    if (hizSystem_) {
-        hizSystem_->shutdown();
-        hizSystem_.reset();
-    }
     if (m2Renderer) {
         m2Renderer->shutdown();
         m2Renderer.reset();
@@ -1466,17 +1461,6 @@ void Renderer::applyMsaaChange() {
         // After syncSwimEffectsTargetPass above, which is what decides the pass
         // this is built against.
         minimap->recreatePipelines();
-    }
-
-    // Resize HiZ pyramid (depth format/MSAA may have changed)
-    if (hizSystem_) {
-        auto ext = vkCtx->getSwapchainExtent();
-        if (!hizSystem_->resize(ext.width, ext.height)) {
-            LOG_WARNING("HiZ resize failed after MSAA change");
-            if (m2Renderer) m2Renderer->setHiZSystem(nullptr);
-            hizSystem_->shutdown();
-            hizSystem_.reset();
-        }
     }
 
     // Selection circle + overlay + FSR use lazy init, just destroy them
@@ -1884,16 +1868,6 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
         }
         // Recreate post-process resources for new swapchain dimensions
         if (postProcessPipeline_) postProcessPipeline_->handleSwapchainResize();
-        // Resize HiZ depth pyramid for new swapchain dimensions
-        if (hizSystem_) {
-            auto ext = vkCtx->getSwapchainExtent();
-            if (!hizSystem_->resize(ext.width, ext.height)) {
-                LOG_WARNING("HiZ resize failed - disabling occlusion culling");
-                if (m2Renderer) m2Renderer->setHiZSystem(nullptr);
-                hizSystem_->shutdown();
-                hizSystem_.reset();
-            }
-        }
     }
 
     // Retire replaced images; each consumer set is rewritten after its fence.
@@ -4466,10 +4440,6 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         }
     }
 
-    // HiZ occlusion culling disabled - the pyramid build + blocking fence was
-    // the main frame-rate bottleneck.  GPU frustum culling alone provides good
-    // draw-call reduction without the per-frame GPU stall.  HiZ can be re-
-    // enabled once the pyramid build is moved to an async compute queue.
     if (!wmoRenderer) {
         wmoRenderer = std::make_unique<WMORenderer>();
         if (!wmoRenderer->initialize(vkCtx, perFrameSetLayout, assetManager))

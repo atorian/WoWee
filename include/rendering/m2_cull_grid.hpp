@@ -68,9 +68,6 @@ public:
         /// The last GPU verdict that covered it. Visible until one says not,
         /// so a new instance is drawn at once.
         uint8_t lastVisible = 1;
-        /// Frames in a row the GPU culled it, capped at 3, for the HiZ test's
-        /// hysteresis. A new one counts as not recently seen.
-        uint8_t culledFrames = 2;
     };
     enum Flag : uint16_t {
         kValid = 1 << 0,          ///< its model is valid

@@ -259,12 +259,9 @@ void M2Renderer::setInstancesHidden(const std::vector<uint32_t>& instanceIds, bo
             inst.animStartMs += away;
             inst.globalSequenceStartMs += away;
             fileInCullGrid(idxIt->second, InstanceChange::ShownOrHidden);
-            // Back as if newly placed: no cull verdict to trust, and its bone
-            // slots were handed to others while it was away, so the bones are
-            // uploaded again wherever it lands.
+            // Back as if newly placed: no cull verdict to trust.
             auto& record = scene_->cullGrid_.record(static_cast<uint32_t>(idxIt->second));
             record.lastVisible = 1;
-            record.culledFrames = 2;
             fileInIndexSets(idxIt->second);
         }
     }

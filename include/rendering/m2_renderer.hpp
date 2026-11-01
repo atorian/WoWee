@@ -60,7 +60,6 @@ class Camera;
 class Frustum;
 class VkContext;
 class VkTexture;
-class HiZSystem;
 class RtScene;
 
 // Ceiling on the bone matrices computed and uploaded for one M2 instance.
@@ -621,9 +620,6 @@ public:
     /// Owned by the Renderer, filled before anything draws.
     /// Time captured with the view, for effects made while preparing its draws.
 
-    /** Set the HiZ system for occlusion culling (Phase 6.3). nullptr disables HiZ. */
-    void setHiZSystem(HiZSystem* hiz) { hizSystem_ = hiz; }
-
     /// Where loaded models register their geometry for the ray traced
     /// lighting. Static doodads only - animated models would cast their
     /// bind pose. Not given to the sky's renderer.
@@ -1117,29 +1113,22 @@ private:
     struct CullInstanceGPU {        // matches CullInstance in m2_cull.comp.glsl (32 bytes, std430)
         glm::vec4 sphere;           // xyz = world position, w = padded radius
         float effectiveMaxDistSq;   // adaptive distance cull threshold
-        uint32_t flags;             // bit 0 = valid, bit 1 unused, bit 2 = invisibleTrap, bit 3 = previously visible
+        uint32_t flags;             // bit 0 = valid, bit 2 = invisibleTrap
         float _pad[2] = {};
     };
-    struct CullUniformsGPU {        // matches CullUniforms in m2_cull_hiz.comp.glsl (std140)
-        glm::vec4 frustumPlanes[6]; // xyz = normal, w = distance         (96 bytes)
-        glm::vec4 cameraPos;        // xyz = camera position, w = maxPossibleDistSq (16 bytes)
-        uint32_t instanceCount;     //                                    (4 bytes)
-        uint32_t hizEnabled;        // 1 = HiZ occlusion active           (4 bytes)
-        uint32_t hizMipLevels;      // mip levels in HiZ pyramid          (4 bytes)
-        uint32_t _pad2 = {};        //                                    (4 bytes)
-        glm::vec4 hizParams;        // x=pyramidW, y=pyramidH, z=nearPlane, w=unused (16 bytes)
-        glm::mat4 viewProj;         // current frame view-projection                 (64 bytes)
-        glm::mat4 prevViewProj;     // previous frame VP for HiZ reprojection        (64 bytes)
-    };                              // Total: 272 bytes
+    struct CullUniformsGPU {        // matches CullUniforms in m2_cull.comp.glsl (std140)
+        glm::vec4 frustumPlanes[6]; // xyz = normal, w = distance
+        glm::vec4 cameraPos;        // xyz = camera position, w = maxPossibleDistSq
+        uint32_t instanceCount;
+        uint32_t _pad[3] = {};
+    };
     static constexpr uint32_t MAX_CULL_INSTANCES = 24576;
-    VkPipeline cullPipeline_ = VK_NULL_HANDLE;           // frustum-only (fallback)
-    VkPipeline cullHiZPipeline_ = VK_NULL_HANDLE;        // frustum + HiZ occlusion
-    VkPipelineLayout cullPipelineLayout_ = VK_NULL_HANDLE;  // frustum-only layout (set 0)
-    VkPipelineLayout cullHiZPipelineLayout_ = VK_NULL_HANDLE; // HiZ layout (set 0 + set 1)
+    VkPipeline cullPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout cullPipelineLayout_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout cullSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool cullDescPool_ = VK_NULL_HANDLE;
     VkDescriptorSet cullSet_[2] = {};               // double-buffered
-    ::VkBuffer cullUniformBuffer_[2] = {};           // frustum planes + camera + HiZ params (UBO)
+    ::VkBuffer cullUniformBuffer_[2] = {};           // frustum planes + camera (UBO)
     VmaAllocation cullUniformAlloc_[2] = {};
     void* cullUniformMapped_[2] = {};
     ::VkBuffer cullInputBuffer_[2] = {};             // per-instance bounding sphere + flags (SSBO)
@@ -1149,18 +1138,11 @@ private:
     VmaAllocation cullOutputAlloc_[2] = {};
     void* cullOutputMapped_[2] = {};
 
-    // HiZ occlusion culling (Phase 6.3) - optional, driven by Renderer
-    HiZSystem* hizSystem_ = nullptr;
     const std::vector<LocalLight>* frameLights_ = nullptr;
 
     RtScene* rtScene_ = nullptr;
     void registerRtModel(M2ModelGPU& gpuModel, const pipeline::M2Model& model);
     void releaseRtModel(uint32_t modelId, M2ModelGPU& gpuModel);
-
-    // Previous frame's view-projection for temporal reprojection in HiZ culling.
-    // Stored each frame so the cull shader can project into the same screen space
-    // as the depth buffer the HiZ pyramid was built from.
-    glm::mat4 prevVP_{1.0f};
 
     // The recording side retains submitted instance IDs and scene identities.
     // After a slot's fence, collectCullOutput publishes completed verdicts;
