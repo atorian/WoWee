@@ -871,6 +871,8 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     FrameTimer timer(timing, std::min(10, frames / 3));
     const char* workerMode = std::getenv("WOWEE_RENDER_THREAD");
     core::FrameWorker recordingWorker(workerMode && std::string_view(workerMode) != "0");
+    // What the last recorded frame held, as the client's frame profile reads it.
+    rendering::RenderStatistics keptStatistics;
     auto drawFrame = [&]() {
         const auto start = std::chrono::steady_clock::now();
         (void)renderer.takeFrameResults();
@@ -989,6 +991,7 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
             timer.call("endFrame", [&] { renderer.endFrame(); });
         });
         recordingWorker.drain();
+        for (const auto& result : renderer.takeFrameResults()) keptStatistics = result.statistics;
         timer.frameDone(frame, std::chrono::duration<float, std::milli>(
                                    std::chrono::steady_clock::now() - start).count(),
                         *renderer.getVkContext());
@@ -1026,6 +1029,11 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     }
     std::printf("scene_render: world M2 draw calls: %u in the kept frame\n",
                 renderer.getM2Renderer()->getDrawCallCount());
+    std::printf("scene_render: world M2 in the kept frame: %u cull candidates, %u drawn, %u skinned, "
+                "%u bone matrices, %u sun shadow candidates, %u particle quads, %u instances changed\n",
+                keptStatistics.m2CullCandidates, keptStatistics.m2Drawn, keptStatistics.m2Skinned,
+                keptStatistics.m2BoneMatrices, keptStatistics.m2SunCasters,
+                keptStatistics.m2ParticleQuads, keptStatistics.m2InstanceChanges);
     std::printf("scene_render: WMO shadow draw calls: %u in the kept frame\n",
                 renderer.getWMORenderer()->getShadowDrawCallCount());
     if (const auto* rt = renderer.getRtScene()) {

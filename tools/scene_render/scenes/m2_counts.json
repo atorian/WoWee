@@ -1,0 +1,21 @@
+// What the frame profile counts of the world's M2s: a lamppost and the
+// lighthouse beam, both skinned, drawn every frame, and a crate placed hidden
+// and shown in the kept frame - the one instance that changes in it.
+{
+  "map": "Northrend", "mapId": 571, "zoneId": 4395, "hour": 12.0,
+  "origin": [5818, 405, 650],
+  "streamWorld": false,
+  "models": [
+    { "path": "World\\Azeroth\\Elwynn\\PassiveDoodads\\LampPost\\LampPost.m2" },
+    { "path": "World\\Generic\\Human\\Passive Doodads\\Stormwind\\Stormwind_LighthouseBeam_01.m2",
+      "offset": [0, 8, 0] },
+    { "path": "World\\Generic\\PassiveDoodads\\Crate01\\Crate01.m2", "offset": [0, -3, 0],
+      "hidden": true, "shownAtFrame": 11 }
+  ],
+  "camera": { "offset": [-14, 4, 4], "lookAt": [0, 4, 3] },
+  "size": [320, 240],
+  "frames": 12,
+  "rayTracedLighting": 0, "volumetricFog": 0, "shadowQuality": 1, "msaa": 1, "bloom": 0,
+  "clouds": false, "sunShafts": false,
+  "wind": { "direction": 0, "speed": 0 }
+}

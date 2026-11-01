@@ -48,6 +48,11 @@ public:
     /// The GPU's timings of one frame, in the order the passes ran, as
     /// (label, milliseconds since the previous mark).
     void noteGpuFrame(const std::vector<std::pair<const char*, double>>& passes);
+    /// How many of something one frame had - instances drawn, casters kept.
+    /// Reported as its median and largest over the stretch, apart from the
+    /// times: a stage that grew could not say whether there was more to do
+    /// or each thing took longer.
+    void noteCount(std::string_view name, uint64_t value);
     /// A frame ended, this long after the one before.
     void frameFinished(float frameMilliseconds);
 
@@ -84,6 +89,8 @@ private:
     std::vector<std::pair<std::string, Series>> gpuPasses_;
     std::vector<float> gpuFrameMs_;
     uint32_t gpuFrames_ = 0;
+    /// In the order they were first noted.
+    std::vector<std::pair<std::string, std::vector<uint64_t>>> counts_;
 };
 
 } // namespace core

@@ -121,10 +121,31 @@ TEST_CASE("the GPU's passes are averaged over every frame read back", "[frame bu
     CHECK(shadows < world);
 }
 
+TEST_CASE("how many of a thing each frame had is reported as its median and largest",
+          "[frame budget]") {
+    FrameBudget budget;
+    // Nine frames drawing about a thousand models, one drawing five thousand.
+    for (uint64_t drawn : {1000u, 1010u, 990u, 1005u, 5000u, 1000u, 995u, 1002u, 998u, 1001u}) {
+        budget.noteCount("M2 drawn", drawn);
+        budget.noteCount("M2 changed", 0);
+        budget.frameFinished(16.0f);
+    }
+    const auto lines = budget.report("window", 160.0);
+    const int head = lineWith(lines, "per frame, median / largest");
+    const int drawn = lineWith(lines, "M2 drawn:");
+    const int changed = lineWith(lines, "M2 changed:");
+    REQUIRE(head >= 0);
+    REQUIRE(drawn > head);
+    REQUIRE(changed > drawn);  // in the order first noted
+    CHECK(contains(lines[drawn], "M2 drawn: 1000 / 5000"));
+    CHECK(contains(lines[changed], "M2 changed: 0 / 0"));
+}
+
 TEST_CASE("a new stretch starts from nothing", "[frame budget]") {
     FrameBudget budget;
     budget.noteStage("beginFrame", 5.0f);
     budget.noteGpuFrame({{"shadows", 2.0}});
+    budget.noteCount("M2 drawn", 7);
     budget.frameFinished(60.0f);
     budget.reset();
     CHECK(budget.report("window", 1000.0).empty());

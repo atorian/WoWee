@@ -73,9 +73,18 @@ void Renderer::publishFrameResults() {
         result.statistics.terrainDrawn = terrainRenderer->getRenderedChunkCount();
         result.statistics.terrainCulled = terrainRenderer->getCulledChunkCount();
         result.statistics.terrainTriangles = terrainRenderer->getRenderedTriangleCount();
+        result.statistics.terrainChunks = static_cast<uint32_t>(terrainRenderer->getChunkCount());
     }
     if (m2Renderer) {
         result.statistics.m2Draws = m2Renderer->getDrawCallCount();
+        const auto counts = m2Renderer->recordedCounts();
+        result.statistics.m2CullCandidates = counts.cullCandidates;
+        result.statistics.m2Drawn = counts.drawn;
+        result.statistics.m2Skinned = counts.skinned;
+        result.statistics.m2BoneMatrices = counts.boneMatrices;
+        result.statistics.m2SunCasters = counts.sunCasters;
+        result.statistics.m2ParticleQuads = counts.particleQuads;
+        result.statistics.m2InstanceChanges = counts.instanceChanges;
         result.culling = m2Renderer->takeCullAnswers();
     }
     if (wmoRenderer) {

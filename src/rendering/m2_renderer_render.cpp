@@ -1279,6 +1279,7 @@ void M2Renderer::joinVisibleChunks(Frame& frame) {
                                 std::span<const glm::mat4>(chunk.bones).subspan(first, skinnedDraw.boneCount));
             skinnedDraw.megaBoneOffset = boneBase + first;
             bonesPlaced = first + skinnedDraw.boneCount;
+            ++frame.skinnedDraws;
         }
         bones.insert(bones.end(), chunk.bones.begin(), chunk.bones.begin() + bonesPlaced);
         frame.drawInstances_.insert(frame.drawInstances_.end(), std::make_move_iterator(chunk.draws.begin()),
@@ -1707,7 +1708,22 @@ void M2Renderer::Frame::clear() noexcept {
     ribbonVertices.clear(); particleVertices.clear(); bones.clear();
     cullInput.clear(); cullIds.clear(); cullIndices.clear(); depth.clear(); solarDepth.clear(); strikeDepth.clear(); shadowModels.clear();
     instanceEntries = 0;
+    skinnedDraws = instanceChanges = 0;
     solarMatrix = overheadMatrix = strikeMatrix = glm::mat4(0.0f);
+}
+
+M2Renderer::FrameCounts M2Renderer::recordedCounts() const {
+    // Between recordings the renderer holds no frame (Renderer::endFrame
+    // lets it go), and has nothing to count.
+    if (!recording_) return {};
+    const Frame& frame = *recording_;
+    return {.cullCandidates = static_cast<uint32_t>(frame.cullInput.size()),
+            .drawn = static_cast<uint32_t>(frame.drawInstances_.size()),
+            .skinned = frame.skinnedDraws,
+            .boneMatrices = static_cast<uint32_t>(frame.bones.size()),
+            .sunCasters = static_cast<uint32_t>(frame.solarDepth.size()),
+            .particleQuads = static_cast<uint32_t>(frame.particleVertices.size()),
+            .instanceChanges = frame.instanceChanges};
 }
 
 std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camera, std::string_view stageGroup,
@@ -1719,6 +1735,7 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
     // was. Each is timed apart.
     CpuStageLaps laps(vkCtx_ ? &vkCtx_->gameCpuStages() : nullptr, stageGroup);
     auto frame = framePool_.acquire();
+    frame->instanceChanges = std::exchange(instancesRefiled_, 0u);
     frame->time = time;
     frame->cameraPosition = camera.getPosition();
     frame->skyHour = skyTimeOfDayHours_;

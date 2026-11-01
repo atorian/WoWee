@@ -37,6 +37,7 @@ void M2Renderer::placeInCollision(const M2Instance& instance) {
 }
 
 void M2Renderer::fileInCullGrid(size_t index) {
+    ++instancesRefiled_;
     const M2Instance& instance = scene_->instances[index];
     auto& record = scene_->cullGrid_.record(static_cast<uint32_t>(index));
     record.position = instance.position;

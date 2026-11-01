@@ -75,6 +75,16 @@ void FrameBudget::noteGpuFrame(const std::vector<std::pair<const char*, double>>
     ++gpuFrames_;
 }
 
+void FrameBudget::noteCount(std::string_view name, uint64_t value) {
+    auto it = std::find_if(counts_.begin(), counts_.end(),
+                           [&](const auto& count) { return count.first == name; });
+    if (it == counts_.end()) {
+        counts_.emplace_back(std::string(name), std::vector<uint64_t>{});
+        it = counts_.end() - 1;
+    }
+    it->second.push_back(value);
+}
+
 void FrameBudget::frameFinished(float frameMilliseconds) {
     frameMs_.push_back(frameMilliseconds);
 }
@@ -152,6 +162,17 @@ std::vector<std::string> FrameBudget::report(std::string_view title, double wind
             out.push_back(line.str());
         }
     }
+
+    if (!counts_.empty()) {
+        out.emplace_back("  per frame, median / largest:");
+        for (const auto& [name, values] : counts_) {
+            std::vector<uint64_t> sorted = values;
+            std::sort(sorted.begin(), sorted.end());
+            std::ostringstream line;
+            line << "    " << name << ": " << sorted[(sorted.size() - 1) / 2] << " / " << sorted.back();
+            out.push_back(line.str());
+        }
+    }
     return out;
 }
 
@@ -161,6 +182,7 @@ void FrameBudget::reset() {
     gpuPasses_.clear();
     gpuFrameMs_.clear();
     gpuFrames_ = 0;
+    counts_.clear();
 }
 
 FrameBudget FrameBudget::takeWindow() {

@@ -815,6 +815,12 @@ public:
     [[nodiscard]] uint32_t getInstanceCount() const { return static_cast<uint32_t>(scene_->instances.size()); }
     [[nodiscard]] uint32_t getTotalTriangleCount() const;
     [[nodiscard]] uint32_t getDrawCallCount() const { return lastDrawCallCount; }
+    /// How much the frame being recorded holds; see RenderStatistics.
+    struct FrameCounts {
+        uint32_t cullCandidates = 0, drawn = 0, skinned = 0, boneMatrices = 0;
+        uint32_t sunCasters = 0, particleQuads = 0, instanceChanges = 0;
+    };
+    [[nodiscard]] FrameCounts recordedCounts() const;
 
     /**
      * Append the 2D footprints of placed props touching the given window,
@@ -1717,9 +1723,14 @@ public:
         glm::vec3 cameraPosition{0};
         float skyHour = 12;
         bool suppressStars = false, skipDetail = false;
+        /// Draws whose bones were placed, and instances changed since the
+        /// frame before (fileInCullGrid calls).
+        uint32_t skinnedDraws = 0, instanceChanges = 0;
     };
 private:
     FramePool<Frame> framePool_;
+    /// Instances refiled since the last extract, for the next frame's count.
+    uint32_t instancesRefiled_ = 0;
     std::shared_ptr<const Frame> recording_ = std::make_shared<Frame>();
     std::mutex cullResultMutex_;
     std::vector<CullAnswer> collectedCull_;

@@ -64,6 +64,7 @@ namespace game { class ContactsGateway; class WhoGateway; class DuelGateway; cla
 namespace rendering {
 class Renderer;
 struct FrameInputs;
+struct RenderStatistics;
 class PerformanceHUD;
 class CameraController;
 class AnimationController;
@@ -325,6 +326,9 @@ private:
     /// samples for the window and prints the breakdown periodically.
     void noteStageTime(const char* stage, float milliseconds) override;
     void noteStage(std::string_view stage, float milliseconds);
+    /// How much a recorded frame held - M2s drawn, casters, chunks walked -
+    /// into the frame profile beside its times.
+    void noteSceneCounts(const rendering::RenderStatistics& statistics);
     /// The renderer's own parts of the frame (CpuStageTimes), under the
     /// renderer call each belongs to.
     void noteRendererStages();

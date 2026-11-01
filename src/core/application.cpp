@@ -1997,6 +1997,7 @@ float Application::beginFrame() {
             } else noteStage("render thread/" + part.group + "/" + part.name, part.milliseconds);
         }
         if (recordingMs > 0.0f) noteStage("render thread", recordingMs);
+        noteSceneCounts(result.statistics);
         if (result.gpuTimingSerial && result.gpuTimingSerial != gpuTimingsSeen_) {
             gpuTimingsSeen_ = result.gpuTimingSerial;
             std::vector<std::pair<const char*, double>> passes;
@@ -5841,6 +5842,21 @@ void Application::noteStage(std::string_view stage, float milliseconds) {
     if (sceneReplay_) sceneReplay_->stage(stage, milliseconds);
     frameBudget_.noteStage(stage, milliseconds);
     if (benchmark_ && benchmark_->recording()) benchmark_->budget().noteStage(stage, milliseconds);
+}
+
+void Application::noteSceneCounts(const rendering::RenderStatistics& s) {
+    // How much each frame had to walk and draw, beside what it cost.
+    const std::pair<std::string_view, uint64_t> counts[] = {
+        {"M2 cull candidates", s.m2CullCandidates}, {"M2 drawn", s.m2Drawn},
+        {"M2 skinned drawn", s.m2Skinned},          {"M2 bone matrices", s.m2BoneMatrices},
+        {"M2 sun shadow candidates", s.m2SunCasters}, {"M2 particle quads", s.m2ParticleQuads},
+        {"M2 instances changed", s.m2InstanceChanges}, {"terrain chunks walked", s.terrainChunks},
+        {"terrain chunks drawn", s.terrainDrawn},
+    };
+    for (const auto& [name, value] : counts) {
+        frameBudget_.noteCount(name, value);
+        if (benchmark_ && benchmark_->recording()) benchmark_->budget().noteCount(name, value);
+    }
 }
 
 void Application::noteWorkerTimes() {

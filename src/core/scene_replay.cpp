@@ -112,6 +112,9 @@ Json statistics(const rendering::RenderStatistics& s) {
         {"wmoShadows",s.wmoShadows}, {"wmoDistanceCulled",s.wmoDistanceCulled},
         {"wmoPortalCulled",s.wmoPortalCulled}, {"wmoFrustumCulled",s.wmoFrustumCulled}, {"rtInstances",s.rtInstances}, {"rtMeshes",s.rtMeshes},
         {"rtTriangles",s.rtTriangles}, {"rtGpuBytes",s.rtGpuBytes}, {"rtSourceBytes",s.rtSourceBytes},
+        {"terrainChunks",s.terrainChunks}, {"m2CullCandidates",s.m2CullCandidates}, {"m2Drawn",s.m2Drawn},
+        {"m2Skinned",s.m2Skinned}, {"m2BoneMatrices",s.m2BoneMatrices}, {"m2SunCasters",s.m2SunCasters},
+        {"m2ParticleQuads",s.m2ParticleQuads}, {"m2InstanceChanges",s.m2InstanceChanges},
         {"width",s.width}, {"height",s.height}};
 }
 }

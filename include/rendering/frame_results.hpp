@@ -39,6 +39,14 @@ struct CapturedImage {
 struct RenderStatistics {
     double renderMs = 0, terrainMs = 0, wmoMs = 0, m2Ms = 0;
     uint32_t terrainDrawn = 0, terrainCulled = 0, m2Draws = 0, wmoDraws = 0, wmoShadows = 0;
+    /// The terrain chunks the extraction walked to find the drawn ones.
+    uint32_t terrainChunks = 0;
+    /// The world's M2s in the frame recorded: candidates sent to the GPU
+    /// cull, instances drawn and the skinned among them, bone matrices
+    /// uploaded, sun shadow candidates kept, particle quads, and instances
+    /// changed (placed, moved, hidden, ended) since the frame before.
+    uint32_t m2CullCandidates = 0, m2Drawn = 0, m2Skinned = 0, m2BoneMatrices = 0;
+    uint32_t m2SunCasters = 0, m2ParticleQuads = 0, m2InstanceChanges = 0;
     uint64_t terrainTriangles = 0;
     uint32_t rtMeshes = 0, rtInstances = 0;
     uint64_t rtTriangles = 0, rtGpuBytes = 0, rtSourceBytes = 0;
