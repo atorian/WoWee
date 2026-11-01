@@ -1448,7 +1448,8 @@ private:
     struct ShadowDraw {
         uint32_t modelId = 0;
         glm::mat4 modelMatrix{1.0f};
-        std::shared_ptr<const M2ModelGPU> model;
+        /// Held for the frame by its shadowModels, once per model.
+        const M2ModelGPU* model = nullptr;
         glm::vec3 position{0.0f};
         float scale = 1.0f;
     };
@@ -1706,6 +1707,10 @@ public:
         /// its id when the verdict comes back.
         std::vector<uint32_t> cullIndices;
         std::vector<ShadowDraw> depth, solarDepth, strikeDepth;
+        /// The models the three caster lists point into, kept alive with the
+        /// frame: one reference for each run of a model's casters rather than
+        /// one per caster.
+        std::vector<std::shared_ptr<const M2ModelGPU>> shadowModels;
         glm::mat4 solarMatrix{0.0f}, overheadMatrix{0.0f}, strikeMatrix{0.0f};
         float maxPossibleDistSq = 0, time = 0;
         uint64_t sceneIdentity = 0;

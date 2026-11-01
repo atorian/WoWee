@@ -1705,7 +1705,7 @@ void M2Renderer::Frame::clear() noexcept {
     drawInstances_.clear(); sortedVisible_.clear(); transparentVisible_.clear();
     glowSprites_.clear(); ribbonDraws_.clear(); particleRuns_.clear();
     ribbonVertices.clear(); particleVertices.clear(); bones.clear();
-    cullInput.clear(); cullIds.clear(); cullIndices.clear(); depth.clear(); solarDepth.clear(); strikeDepth.clear();
+    cullInput.clear(); cullIds.clear(); cullIndices.clear(); depth.clear(); solarDepth.clear(); strikeDepth.clear(); shadowModels.clear();
     instanceEntries = 0;
     solarMatrix = overheadMatrix = strikeMatrix = glm::mat4(0.0f);
 }
@@ -1742,36 +1742,46 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
     laps.lap("particles");
     gatherM2Ribbons(*frame, camera.getPosition());
     laps.lap("ribbons");
+    // The candidates that cast, as the shadow passes take them. Whether one
+    // casts at all is on its cull record, which the cull just read; the
+    // instance is read only for what is kept. Its model is held by the frame
+    // once for each run of its casters - a shared_ptr per caster was an
+    // atomic increment here and a decrement on the render thread for each of
+    // some ten thousand casters a frame in Dalaran.
+    const auto takeCasters = [&](std::vector<ShadowDraw>& into) {
+        using G = M2CullGrid;
+        constexpr uint16_t kNeeds = G::kValid | G::kHasModel;
+        constexpr uint16_t kRefuses = G::kHidden | G::kFinishing | G::kInvisibleTrap;
+        into.reserve(shadowCandidates_.size());
+        uint32_t heldModelId = 0;
+        const M2ModelGPU* heldModel = nullptr;
+        for (uint32_t index : shadowCandidates_) {
+            const uint16_t flags = scene_->cullGrid_.record(index).flags;
+            if ((flags & kNeeds) != kNeeds || (flags & kRefuses)) continue;
+            const auto& inst = scene_->instances[index];
+            if (!heldModel || inst.modelId != heldModelId) {
+                frame->shadowModels.push_back(models.at(inst.modelId));
+                heldModelId = inst.modelId;
+                heldModel = frame->shadowModels.back().get();
+            }
+            into.push_back({inst.modelId, inst.modelMatrix, heldModel, inst.position, inst.scale});
+        }
+    };
     if (shadowMatrix != glm::mat4(0.0f)) {
         gatherReusedShadowCandidates(shadowMatrix, shadowRadius);
         laps.lap("sun shadow candidates");
-        frame->solarDepth.reserve(shadowCandidates_.size());
-        for (uint32_t index : shadowCandidates_) {
-            const auto& inst = scene_->instances[index];
-            if (inst.hidden || inst.finishing || !inst.cachedModel || !inst.cachedIsValid || inst.cachedIsInvisibleTrap) continue;
-            frame->solarDepth.push_back({inst.modelId, inst.modelMatrix, models.at(inst.modelId), inst.position, inst.scale});
-        }
+        takeCasters(frame->solarDepth);
     }
     laps.lap("sun shadow casters");
     if (overheadMatrix) {
         frame->overheadMatrix = *overheadMatrix;
         gatherShadowCandidates(*overheadMatrix, overheadRadius, shadowCandidates_);
-        frame->depth.reserve(shadowCandidates_.size());
-        for (uint32_t index : shadowCandidates_) {
-            const auto& inst = scene_->instances[index];
-            if (inst.hidden || inst.finishing || !inst.cachedModel || !inst.cachedIsValid || inst.cachedIsInvisibleTrap) continue;
-            frame->depth.push_back({inst.modelId, inst.modelMatrix, models.at(inst.modelId), inst.position, inst.scale});
-        }
+        takeCasters(frame->depth);
     }
     if (strikeMatrix) {
         frame->strikeMatrix = *strikeMatrix;
         gatherShadowCandidates(*strikeMatrix, strikeRadius, shadowCandidates_);
-        frame->strikeDepth.reserve(shadowCandidates_.size());
-        for (uint32_t index : shadowCandidates_) {
-            const auto& inst = scene_->instances[index];
-            if (inst.hidden || inst.finishing || !inst.cachedModel || !inst.cachedIsValid || inst.cachedIsInvisibleTrap) continue;
-            frame->strikeDepth.push_back({inst.modelId, inst.modelMatrix, models.at(inst.modelId), inst.position, inst.scale});
-        }
+        takeCasters(frame->strikeDepth);
     }
     laps.lap("overhead and lightning casters");
     frameLights_ = nullptr;
@@ -2723,7 +2733,7 @@ void M2Renderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& light
             std::size_t groupEnd = g;
             while (groupEnd < casters.size() && casters[groupEnd].modelId == modelId) ++groupEnd;
 
-            const M2ModelGPU* groupModel = shadowDraws_[casters[g].draw].model.get();
+            const M2ModelGPU* groupModel = shadowDraws_[casters[g].draw].model;
             if (!groupModel) { g = groupEnd; continue; }
             const M2ModelGPU& model = *groupModel;
 
