@@ -435,13 +435,6 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                 settingsPanel_.terrainSettingsApplied_ = true;
             }
             }
-            // Restore mute state: save actual master volume first, then apply mute
-            if (settingsPanel_.soundMuted_) {
-                float actual = audio::AudioEngine::instance().getMasterVolume();
-                settingsPanel_.preMuteVolume_ = (actual > 0.0f) ? actual
-                    : static_cast<float>(settingsPanel_.pendingMasterVolume) / 100.0f;
-                audio::AudioEngine::instance().setMasterVolume(0.0f);
-            }
         }
     }
 
@@ -471,11 +464,12 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         }
     }
 
-    // Apply saved volume settings once when audio managers first become available
+    // Apply the saved audio settings once, when the audio managers first exist.
+    // The mute is one of them, so this is also what keeps a muted client quiet.
     if (!settingsPanel_.volumeSettingsApplied_) {
         auto* ac = services_.audioCoordinator;
         if (ac && ac->getUiSoundManager()) {
-            settingsPanel_.applyAudioVolumes(ac);
+            settingsPanel_.applyAudioSettings(ac);
             settingsPanel_.volumeSettingsApplied_ = true;
         }
     }

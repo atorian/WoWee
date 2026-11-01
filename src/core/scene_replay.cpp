@@ -5,6 +5,7 @@
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "core/player_view.hpp"
+#include "core/scene_capture_files.hpp"
 #include "core/zone_tracker.hpp"
 #include "game/world_handler.hpp"
 #include "game/game_handler.hpp"
@@ -86,14 +87,6 @@ void writeJson(const std::filesystem::path& path, const Json& value) {
     // Refuse replacement: a capture or A/B report must not silently erase evidence.
     if (std::filesystem::exists(path)) throw std::runtime_error("output already exists: " + path.string());
     std::filesystem::rename(temporary, path);
-}
-Json signature(const std::filesystem::path& path) {
-    return {{"path", path.string()}, {"bytes", std::filesystem::file_size(path)},
-        {"modified", std::filesystem::last_write_time(path).time_since_epoch().count()}};
-}
-void verifySignature(const Json& expected) {
-    const auto path = expected.at("path").get<std::string>();
-    if (signature(path) != expected) throw std::runtime_error("capture asset changed: " + path);
 }
 Json characterJson(const game::Character& c) {
     Json gear = Json::array();
@@ -197,15 +190,20 @@ void SceneReplay::initialize(Application& app) {
                         throw std::runtime_error("non-finite recorded position");
                 }
             }
-            verifySignature(s.replay.at("manifest"));
-            if (app.assetManager->getDataPath() != s.replay.at("dataPath").get<std::string>())
-                throw std::runtime_error("replay data root differs; use the captured dataPath");
+            verifyCapturedDataPath(app.assetManager->getDataPath(), s.replay.at("dataPath").get<std::string>());
+            verifyCapturedFile(s.replay.at("manifest"));
             Application::RealmPatchSet patches;
             patches.realm = s.replay.at("realm");
             for (const auto& archive : s.replay.at("archives")) {
-                verifySignature(archive);
+                verifyCapturedFile(archive);
                 patches.archives.emplace_back(archive.at("path").get<std::string>());
             }
+            // Written by tools/resign_scene_capture.py; a capture never re-signed has none.
+            for (const auto& resign : s.replay.value("resigned", Json::array()))
+                LOG_WARNING("Scene recording re-signed ", resign.at("at").get<std::string>(), " (",
+                    resign.at("provenance").get<std::string>(), "): ", resign.at("converted").get<size_t>(),
+                    " signatures moved to UTC write times; content accepted as replaced: ",
+                    resign.at("replaced").empty() ? std::string("none") : resign.at("replaced").dump());
             if (!patches.archives.empty()) {
 #ifdef WOWEE_HAVE_STORMLIB
                 std::string error;
@@ -403,7 +401,7 @@ void SceneReplay::toggleCapture(Application& app) {
         s.capture={{"version",1},{"complete",false},{"frames",Json::array()},
             {"expansion",app.expansionRegistry_->getActiveId()},
             {"dataRoot",std::filesystem::absolute(environment("WOW_DATA_PATH").empty() ? "Data" : environment("WOW_DATA_PATH")).lexically_normal().string()},
-            {"dataPath",app.assetManager->getDataPath()}, {"manifest",signature(std::filesystem::path(app.assetManager->getDataPath())/"manifest.json")},
+            {"dataPath",app.assetManager->getDataPath()}, {"manifest",signCapturedFile(std::filesystem::path(app.assetManager->getDataPath())/"manifest.json")},
             {"realm",app.mountedRealmPatches_.realm},{"archives",Json::array()}, {"fields",Json::array()},
             {"gear",Json::array()}, {"config",Json::object()},
             {"limitations",{"Existing transient spell particles and animation phase are not keyframed; interface and network load are not replayed. Compare scene counters and control images before accepting an A/B."}}};
@@ -421,7 +419,7 @@ void SceneReplay::toggleCapture(Application& app) {
         const auto p=coords::canonicalToServer(coords::renderToCanonical(app.renderer->getCharacterPosition()));
         character.mapId=app.gameHandler->getCurrentMapId(); character.x=p.x; character.y=p.y; character.z=p.z;
         s.capture["character"]=characterJson(character);
-        for (const auto& path : app.mountedRealmPatches_.archives) s.capture["archives"].push_back(signature(path));
+        for (const auto& path : app.mountedRealmPatches_.archives) s.capture["archives"].push_back(signCapturedFile(path));
         for (uint16_t id=0; id<static_cast<uint16_t>(game::UF::COUNT); ++id) {
             const auto field=static_cast<game::UF>(id);
             if (app.gameHandler->updateFieldTableRef().hasField(field))

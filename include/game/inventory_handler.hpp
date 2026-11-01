@@ -156,7 +156,6 @@ public:
     // ---- The NPC dialog and the quest log ----
     /// A gossip or quest window is on screen.
     [[nodiscard]] virtual bool npcDialogOpen() const = 0;
-    virtual void closeGossip() = 0;
     /// A game object's template; null until the realm has said it.
     [[nodiscard]] virtual const GameObjectQueryResponseData* gameObjectInfo(uint32_t entry) const = 0;
     /// Ask for a game object's template, for the object `guid`.
@@ -210,6 +209,22 @@ public:
     void fireBagUpdates();
 
     void registerOpcodes(DispatchTable& table);
+
+    // ---- Sorting ----
+    /// Sort the bags: pour partial stacks together, plan the swaps against
+    /// the merged layout, show the result at once and tell the server one
+    /// move per tick - it refuses a burst of CMSG_SWAP_ITEM, and a sort is
+    /// dozens. One sort at a time, whichever container it is over.
+    void sortBags();
+    /// The bank, main slots and bank bags together, the same way.
+    void sortBank(int mainSlotCount);
+    /// One bank bag, leaving the rest of the bank alone. No stack merging:
+    /// that would move items out of the bag being sorted.
+    void sortBankBag(int bagIndex);
+    /// Whether a sort is still sending.
+    [[nodiscard]] bool isSortingItems() const { return !held_.sortMoves.empty(); }
+    /// Send the next queued sort move, if there is one. Once per tick.
+    void sendNextSortMove();
 
     // ---- Lifetime ------------------------------------------------------------
 
@@ -323,7 +338,10 @@ public:
     }
     /// Ask for an item's template unless it is known or already asked for.
     void ensureItemInfo(uint32_t entry) {
-        if (entry == 0 || itemInfoCache_.count(entry) || pendingItemQueries_.count(entry)) return;
+        if (entry == 0 || itemInfoCache_.count(entry) || pendingItemQueries_.count(entry) ||
+            failedItemQueries_.count(entry)) {
+            return;
+        }
         queryItemInfo(entry, 0);
     }
 
@@ -794,13 +812,23 @@ private:
             int bagButtonId = 0;
         };
         std::vector<PendingItemPushNotif> pendingItemPushNotifs;
+        /// Sort moves still to send, one per tick. See sortBags.
+        std::deque<Inventory::SwapOp> sortMoves;
     };
     Held held_;
 
     /// Item templates the realm has described, and the queries out for more.
     std::unordered_map<uint32_t, ItemQueryResponseData> itemInfoCache_;
-    std::unordered_set<uint32_t> pendingItemQueries_;
-    float pendingItemQueryTimer_ = 0.0f;
+    /// The queries out, by entry, with how long each has waited. One with no
+    /// answer after kItemQueryTimeoutSeconds is forgotten, so the next need
+    /// asks again.
+    std::unordered_map<uint32_t, float> pendingItemQueries_;
+    static constexpr float kItemQueryTimeoutSeconds = 5.0f;
+    /// Entries whose answer was "no such item" or could not be read: a
+    /// failure, said once and not asked again.
+    std::unordered_set<uint32_t> failedItemQueries_;
+    /// Entries whose query went unanswered at least once, said once each.
+    std::unordered_set<uint32_t> unansweredItemsReported_;
 
     /// The visible-item layout (base field and stride) of this realm's update
     /// fields, detected from the player's own equipped items and then used to

@@ -129,9 +129,6 @@ struct LuaServices {
     /// How far the ground cover is drawn - the game's Ground Clutter Radius.
     std::function<void(float)> setGroundDetailDistance;
 
-    /// Loop Music - whether a zone track runs on or stops at its end.
-    std::function<void(bool)> setZoneMusicLooping;
-
     /// Close the program. The last resort behind Exit Game: the tidy path asks
     /// the server to log the character out first, and this is what answers
     /// when there is no server, no character, and no handler to ask.
@@ -160,14 +157,6 @@ struct LuaServices {
     /// it between frames instead.
     std::function<void()> requestReloadUI;
 
-    /// Read and write this client's audio settings by name, so FrameXML's own
-    /// Sound options drive the same values the settings window does rather than
-    /// writing to a CVar store nothing reads.
-    ///
-    /// Volumes are 0..1, which is what Blizzard's sliders use; the client keeps
-    /// them as percentages and converts at this boundary. Known keys: master,
-    /// music, ambient. "enableall" is the mute, inverted - the panel's checkbox
-    /// asks whether sound is on.
     /// Read and write a client setting by name, as a string.
     ///
     /// FrameXML's options panels are bound to CVar names and their values live
@@ -179,17 +168,6 @@ struct LuaServices {
     /// Strings both ways because that is what a CVar is. A bool is "0" or "1".
     std::function<std::string(const std::string&)> getClientSetting;
     std::function<void(const std::string&, const std::string&)> setClientSetting;
-
-    std::function<float(const std::string&)> getAudioSetting;
-    std::function<void(const std::string&, float)> setAudioSetting;
-
-    /// Push the client's own volume sliders at the audio system again.
-    ///
-    /// The interface's three enable switches multiply on top of what those
-    /// sliders set, and they are applied by zeroing a channel. Zeroing has no
-    /// inverse, so turning one back on needs the sliders re-applied underneath
-    /// it before the switches are composed over them again.
-    std::function<void()> reapplyAudioVolumes;
 
     /// Open this client's settings window, on a named tab when one is given.
     ///

@@ -8,8 +8,10 @@
 #include "game/opcodes.hpp"
 #include "game/packet_sender.hpp"
 #include "game/protocol_constants.hpp"
+#include "game/ui_errors.hpp"
 #include "game/world_packets.hpp"
 #include "game/update_field_table.hpp"
+#include "core/coordinates.hpp"
 #include "core/event_bus.hpp"
 #include "core/logger.hpp"
 #include "network/packet.hpp"
@@ -84,6 +86,315 @@ void PlayerHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_STANDSTATE_UPDATE] = [this](network::Packet& packet) {
         handleStandStateUpdate(packet);
     };
+    table[Opcode::SMSG_PLAYERBOUND] = [this](network::Packet& p) { handlePlayerBound(p); };
+    table[Opcode::SMSG_BINDPOINTUPDATE] = [this](network::Packet& p) { handleBindPointUpdate(p); };
+    // The innkeeper asking whether to make this the player's home. FrameXML's
+    // gossip window follows the real flow: the server asks, the CONFIRM_BINDER
+    // popup accepts, and confirmBinder answers.
+    table[Opcode::SMSG_BINDER_CONFIRM] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(8)) {
+            LOG_WARNING("SMSG_BINDER_CONFIRM too short: ", packet.getSize(),
+                        " bytes; no \"make this your home?\" is asked");
+            packet.skipAll();
+            return;
+        }
+        sheet_.binderGuid = packet.readUInt64();
+        // Who is asking: StaticPopup_Show("CONFIRM_BINDER", arg1) puts the name
+        // into "Do you want to make <name> your new home?".
+        frameXml_.fireFrameXmlEvent("CONFIRM_BINDER", {queries_.unitName(sheet_.binderGuid)});
+    };
+    table[Opcode::SMSG_SET_PROFICIENCY] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(5)) {
+            LOG_WARNING("SMSG_SET_PROFICIENCY too short: ", packet.getSize(),
+                        " bytes; what the character can use is not known");
+            packet.skipAll();
+            return;
+        }
+        const uint8_t itemClass = packet.readUInt8();
+        const uint32_t mask = packet.readUInt32();
+        if (itemClass == 2) sheet_.weaponProficiency = mask;
+        else if (itemClass == 4) sheet_.armorProficiency = mask;
+    };
+    table[Opcode::SMSG_START_MIRROR_TIMER] = [this](network::Packet& p) { handleStartMirrorTimer(p); };
+    table[Opcode::SMSG_STOP_MIRROR_TIMER] = [this](network::Packet& p) { handleStopMirrorTimer(p); };
+    table[Opcode::SMSG_PAUSE_MIRROR_TIMER] = [this](network::Packet& p) { handlePauseMirrorTimer(p); };
+    table[Opcode::SMSG_CONVERT_RUNE] = [this](network::Packet& p) { handleConvertRune(p); };
+    table[Opcode::SMSG_RESYNC_RUNES] = [this](network::Packet& p) { handleResyncRunes(p); };
+    table[Opcode::SMSG_ADD_RUNE_POWER] = [this](network::Packet& p) { handleAddRunePower(p); };
+    table[Opcode::SMSG_ENABLE_BARBER_SHOP] = [this](network::Packet& /*packet*/) {
+        LOG_INFO("SMSG_ENABLE_BARBER_SHOP: barber shop available");
+        sheet_.barberShopOpen = true;
+        frameXml_.fireFrameXmlEvent("BARBER_SHOP_OPEN", {});
+    };
+    table[Opcode::SMSG_BARBER_SHOP_RESULT] = [this](network::Packet& p) { handleBarberShopResult(p); };
+}
+
+// ---- Home ----
+
+std::optional<HomeBind> PlayerHandler::homeBind() const {
+    if (!sheet_.hasHomeBind) return std::nullopt;
+    return HomeBind{sheet_.homeBindMapId, sheet_.homeBindPos};
+}
+
+void PlayerHandler::announceHome(const char* lead, uint32_t zoneId) {
+    std::string message = lead;
+    const std::string zoneName = queries_.areaName(zoneId);
+    if (!zoneName.empty()) message += " to " + zoneName;
+    message += '.';
+    chat_.addSystemChatMessage(message);
+}
+
+void PlayerHandler::handlePlayerBound(network::Packet& packet) {
+    if (!packet.hasRemaining(16)) {
+        LOG_WARNING("SMSG_PLAYERBOUND too short: ", packet.getSize(), " bytes; the new home is not announced");
+        packet.skipAll();
+        return;
+    }
+    /*uint64_t binderGuid =*/ packet.readUInt64();
+    const uint32_t mapId = packet.readUInt32();
+    const uint32_t zoneId = packet.readUInt32();
+    const bool changed = !sheet_.hasHomeBind || sheet_.homeBindMapId != mapId ||
+                         sheet_.homeBindZoneId != zoneId;
+    sheet_.homeBindMapId = mapId;
+    sheet_.homeBindZoneId = zoneId;
+    if (changed) announceHome("Your home location has been set", zoneId);
+}
+
+void PlayerHandler::handleBindPointUpdate(network::Packet& packet) {
+    BindPointUpdateData data;
+    if (!BindPointUpdateParser::parse(packet, data)) {
+        LOG_WARNING("SMSG_BINDPOINTUPDATE too short: ", packet.getSize(),
+                    " bytes; the hearthstone keeps the home it had");
+        return;
+    }
+    const glm::vec3 canonical = core::coords::serverToCanonical(glm::vec3(data.x, data.y, data.z));
+    const bool wasSet = sheet_.hasHomeBind;
+    const bool changed = !sheet_.hasHomeBind || sheet_.homeBindMapId != data.mapId ||
+                         sheet_.homeBindZoneId != data.zoneId ||
+                         glm::length(sheet_.homeBindPos - canonical) > 0.5f;
+    sheet_.hasHomeBind = true;
+    sheet_.homeBindMapId = data.mapId;
+    sheet_.homeBindZoneId = data.zoneId;
+    sheet_.homeBindPos = canonical;
+    events_.publish(events::BindPointChanged{data.mapId, canonical.x, canonical.y, canonical.z});
+    if (wasSet && changed) announceHome("Your home has been set", data.zoneId);
+}
+
+void PlayerHandler::confirmBinder() {
+    if (!sender_.characterInWorld() || sheet_.binderGuid == 0) return;
+    sender_.send(BinderActivatePacket::build(sheet_.binderGuid));
+    LOG_INFO("Sent CMSG_BINDER_ACTIVATE (confirmed) for npc=0x", std::hex, sheet_.binderGuid, std::dec);
+}
+
+// ---- Mirror timers ----
+
+const MirrorTimer& PlayerHandler::mirrorTimer(int type) const {
+    static const MirrorTimer kNone;
+    return (type >= 0 && type < 3) ? sheet_.mirrorTimers[static_cast<size_t>(type)] : kNone;
+}
+
+void PlayerHandler::handleStartMirrorTimer(network::Packet& packet) {
+    // type(4) + value(4) + maxValue(4) + scale(4) + paused(1) + spellId(4).
+    // The last two were being read the other way round: harmless while the
+    // spell id is 0, but a non-zero one would land its high byte in paused and
+    // freeze the bar.
+    if (!packet.hasRemaining(21)) {
+        LOG_WARNING("SMSG_START_MIRROR_TIMER too short: ", packet.getSize(), " bytes; no timer bar is shown");
+        packet.skipAll();
+        return;
+    }
+    const uint32_t type = packet.readUInt32();
+    const int32_t value = static_cast<int32_t>(packet.readUInt32());
+    const int32_t maxV = static_cast<int32_t>(packet.readUInt32());
+    const int32_t scale = static_cast<int32_t>(packet.readUInt32());
+    const uint8_t paused = packet.readUInt8();
+    /*uint32_t spellId =*/ packet.readUInt32();
+    if (type >= 3) {
+        LOG_WARNING("SMSG_START_MIRROR_TIMER: timer type ", type, " is none of the three; no bar is shown");
+        return;
+    }
+    auto& t = sheet_.mirrorTimers[type];
+    t.value = value;
+    t.maxValue = maxV;
+    t.scale = scale;
+    t.paused = (paused != 0);
+    t.active = true;
+    t.pendingMs = 0.0f;  // server re-sync; drop the local carry
+    // Said once per timer, because nothing on this side decides any of it. The
+    // length of a breath is the server's: three minutes plus whatever
+    // SPELL_AURA_MOD_WATER_BREATHING adds, which for a Forsaken is 300% more
+    // and so twelve. A maxValue of 180000 on an undead character means the
+    // racial is not being applied there, and no change here can put it right.
+    static bool saidTimer[3] = {false, false, false};
+    if (!saidTimer[type]) {
+        saidTimer[type] = true;
+        LOG_INFO("Mirror timer ", kMirrorTimerNames[type], " from the server: value=", value,
+                 "ms of max=", maxV, "ms scale=", scale, " paused=", (paused != 0 ? 1 : 0));
+    }
+    // MirrorTimer_Show(timer, value, maxvalue, scale, paused, label): named,
+    // with a label, as the interface matches and draws it.
+    frameXml_.fireFrameXmlEvent("MIRROR_TIMER_START",
+                                {kMirrorTimerNames[type], std::to_string(value), std::to_string(maxV),
+                                 std::to_string(scale), paused ? "1" : "0", kMirrorTimerLabels[type]});
+}
+
+void PlayerHandler::handleStopMirrorTimer(network::Packet& packet) {
+    if (!packet.hasRemaining(4)) {
+        LOG_WARNING("SMSG_STOP_MIRROR_TIMER too short: ", packet.getSize(), " bytes; the timer bar stays");
+        packet.skipAll();
+        return;
+    }
+    const uint32_t type = packet.readUInt32();
+    if (type >= 3) return;
+    sheet_.mirrorTimers[type].active = false;
+    sheet_.mirrorTimers[type].value = 0;
+    // MirrorTimer_Hide matches on the timer's name, so a number hides nothing.
+    frameXml_.fireFrameXmlEvent("MIRROR_TIMER_STOP", {kMirrorTimerNames[type]});
+}
+
+void PlayerHandler::handlePauseMirrorTimer(network::Packet& packet) {
+    if (!packet.hasRemaining(5)) {
+        LOG_WARNING("SMSG_PAUSE_MIRROR_TIMER too short: ", packet.getSize(), " bytes; the timer runs on");
+        packet.skipAll();
+        return;
+    }
+    const uint32_t type = packet.readUInt32();
+    const uint8_t paused = packet.readUInt8();
+    if (type >= 3) return;
+    sheet_.mirrorTimers[type].paused = (paused != 0);
+    frameXml_.fireFrameXmlEvent("MIRROR_TIMER_PAUSE", {paused ? "1" : "0"});
+}
+
+void PlayerHandler::tickMirrorTimers(float dt) {
+    if (dt <= 0.0f) return;
+    const float elapsedMs = dt * 1000.0f;
+    for (size_t ti = 0; ti < sheet_.mirrorTimers.size(); ++ti) {
+        auto& t = sheet_.mirrorTimers[ti];
+        if (!t.active || t.paused || t.scale == 0 || t.maxValue <= 0) continue;
+        // Carry the sub-millisecond remainder: truncating each frame would lose
+        // most of a 144fps frame's 6.94ms and run the timer visibly slow.
+        t.pendingMs += elapsedMs;
+        const int32_t wholeMs = static_cast<int32_t>(t.pendingMs);
+        if (wholeMs == 0) continue;
+        t.pendingMs -= static_cast<float>(wholeMs);
+        t.value = std::clamp(t.value + t.scale * wholeMs, 0, t.maxValue);
+        // Refilled, so it is over. The server does not say so at this point:
+        // on surfacing it sends one update with a positive scale and then
+        // nothing until its own counter reaches full, several seconds later.
+        // Only when refilling: a drowning bar reaching zero is when the damage
+        // starts, and the server keeps it up. FrameXML's bar hides on
+        // MIRROR_TIMER_STOP and nothing else, so it is told.
+        if (t.scale > 0 && t.value >= t.maxValue) {
+            t.active = false;
+            t.pendingMs = 0.0f;
+            frameXml_.fireFrameXmlEvent("MIRROR_TIMER_STOP", {kMirrorTimerNames[ti]});
+        }
+    }
+}
+
+// ---- Runes ----
+
+// The rune bar draws itself from these two events and from nothing else.
+// "usable" is sent as a present argument or no argument at all rather than as
+// one and zero, because zero is true in Lua.
+void PlayerHandler::announceRune(uint32_t index) {
+    if (index >= sheet_.runes.size()) return;
+    const std::string oneBased = std::to_string(index + 1);
+    frameXml_.fireFrameXmlEvent("RUNE_TYPE_UPDATE", {oneBased});
+    if (sheet_.runes[index].ready) {
+        frameXml_.fireFrameXmlEvent("RUNE_POWER_UPDATE", {oneBased, "1"});
+    } else {
+        frameXml_.fireFrameXmlEvent("RUNE_POWER_UPDATE", {oneBased});
+    }
+}
+
+void PlayerHandler::handleConvertRune(network::Packet& packet) {
+    // uint8 runeIndex + uint8 newRuneType (0=Blood,1=Unholy,2=Frost,3=Death)
+    if (!packet.hasRemaining(2)) {
+        LOG_WARNING("SMSG_CONVERT_RUNE too short: ", packet.getSize(), " bytes; the rune keeps its type");
+        packet.skipAll();
+        return;
+    }
+    const uint8_t idx = packet.readUInt8();
+    const uint8_t type = packet.readUInt8();
+    if (idx >= sheet_.runes.size()) {
+        LOG_WARNING("SMSG_CONVERT_RUNE: rune ", static_cast<int>(idx), " of six; nothing converted");
+        return;
+    }
+    sheet_.runes[idx].type = static_cast<RuneType>(type & 0x3);
+    // The rune bar redraws a rune on this event and on nothing else.
+    frameXml_.fireFrameXmlEvent("RUNE_TYPE_UPDATE", {std::to_string(idx + 1)});
+}
+
+// uint32 count, then per rune: uint8 type, uint8 elapsed - Player::ResyncRunes.
+// The server sends 255 - cooldown * 51, so 255 is a rune ready and 0 one just
+// spent.
+void PlayerHandler::handleResyncRunes(network::Packet& packet) {
+    if (!packet.hasRemaining(4)) {
+        LOG_WARNING("SMSG_RESYNC_RUNES too short: ", packet.getSize(), " bytes; the runes are not resynced");
+        packet.skipAll();
+        return;
+    }
+    const uint32_t count = packet.readUInt32();
+    for (uint32_t i = 0; i < count && i < sheet_.runes.size(); ++i) {
+        if (!packet.hasRemaining(2)) {
+            LOG_WARNING("SMSG_RESYNC_RUNES truncated at rune ", i, " of ", count, "; the rest keep their state");
+            break;
+        }
+        const uint8_t type = packet.readUInt8();
+        const uint8_t elapsed = packet.readUInt8();
+        auto& rune = sheet_.runes[i];
+        rune.type = static_cast<RuneType>(type & 0x3);
+        rune.readyFraction = elapsed / 255.0f;
+        rune.ready = (elapsed >= 255);
+        announceRune(i);
+    }
+    packet.skipAll();
+}
+
+void PlayerHandler::handleAddRunePower(network::Packet& packet) {
+    // uint32 runeMask (bit i=1 → rune i just became ready)
+    if (!packet.hasRemaining(4)) {
+        LOG_WARNING("SMSG_ADD_RUNE_POWER too short: ", packet.getSize(), " bytes; no rune is made ready");
+        packet.skipAll();
+        return;
+    }
+    const uint32_t runeMask = packet.readUInt32();
+    for (uint32_t i = 0; i < sheet_.runes.size(); ++i) {
+        if ((runeMask & (1u << i)) == 0) continue;
+        sheet_.runes[i].ready = true;
+        sheet_.runes[i].readyFraction = 1.0f;
+        announceRune(i);
+    }
+}
+
+// ---- The barber's chair ----
+
+void PlayerHandler::closeBarberShop() {
+    sheet_.barberShopOpen = false;
+    frameXml_.fireFrameXmlEvent("BARBER_SHOP_CLOSE", {});
+}
+
+void PlayerHandler::handleBarberShopResult(network::Packet& packet) {
+    // uint32 result: 0=success, 1/3=not enough money, 2=not seated at barber
+    if (!packet.hasRemaining(4)) {
+        LOG_WARNING("SMSG_BARBER_SHOP_RESULT too short: ", packet.getSize(),
+                    " bytes; the player is not told how the haircut went");
+        packet.skipAll();
+        return;
+    }
+    const uint32_t result = packet.readUInt32();
+    LOG_DEBUG("SMSG_BARBER_SHOP_RESULT: result=", result);
+    if (result == 0) {
+        chat_.addSystemChatMessage("Hairstyle changed.");
+        closeBarberShop();
+        return;
+    }
+    const char* msg = (result == 1 || result == 3) ? "Not enough money for new hairstyle."
+                    : (result == 2) ? "You are not at a barber shop."
+                    : "Barber shop unavailable.";
+    raiseUiError(events_, frameXml_, msg);
+    chat_.addSystemChatMessage(msg);
 }
 
 void PlayerHandler::handleStandStateUpdate(network::Packet& packet) {
@@ -250,13 +561,6 @@ float PlayerHandler::combatRatingBonus(int cr) const {
         ? tables_.classRatingScalar(cls, static_cast<uint32_t>(cr))
         : 1.0f;
     return ratingValue * (scalar / coef);
-}
-
-void PlayerHandler::restStateArrived(bool resting) {
-    if (resting == sheet_.resting) return;
-    sheet_.resting = resting;
-    chat_.addSystemChatMessage(resting ? "You are now resting." : "You are no longer resting.");
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("PLAYER_UPDATE_RESTING", {});
 }
 
 void PlayerHandler::shapeshiftFormArrived(uint8_t form, FrameXmlEvents& packetEvents) {

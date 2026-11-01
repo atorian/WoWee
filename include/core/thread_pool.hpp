@@ -11,6 +11,7 @@
 #include <queue>
 #include <thread>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace wowee {
@@ -94,6 +95,16 @@ public:
 
     [[nodiscard]] size_t threadCount() const { return workers_.size(); }
 
+    /// Returns once every task submitted before the call, and every task those
+    /// submitted, has run. For a caller that keeps its own clock and must see
+    /// the work one of its frames handed out as done by the next - the test
+    /// harness, whose frames are not the machine's time. Never from a task of
+    /// this pool, which would wait for itself.
+    void waitIdle() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        idle_.wait(lock, [this]() { return tasks_.empty() && running_ == 0; });
+    }
+
     /// What one task cost: how long it sat in the queue before a worker took
     /// it, and how long it ran.
     struct TaskTiming {
@@ -130,15 +141,21 @@ private:
     };
 
     void workerLoop() {
+        bool ran = false;
         for (;;) {
             Queued task;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
+                // The last task counted as finished under the lock this takes
+                // anyway, so waitIdle costs a task nothing more.
+                if (std::exchange(ran, false) && --running_ == 0 && tasks_.empty()) idle_.notify_all();
                 cv_.wait(lock, [this]() { return stop_ || !tasks_.empty(); });
                 if (stop_ && tasks_.empty()) return;
                 task = std::move(tasks_.front());
                 tasks_.pop();
+                ++running_;
             }
+            ran = true;
             if (!timing_.load(std::memory_order_relaxed)) {
                 task.fn();
                 continue;
@@ -155,7 +172,9 @@ private:
 
     std::mutex mutex_;
     std::condition_variable cv_;
+    std::condition_variable idle_;
     std::queue<Queued> tasks_;
+    size_t running_ = 0;
     std::vector<std::thread> workers_;
     bool stop_ = false;
     std::atomic<bool> timing_{false};

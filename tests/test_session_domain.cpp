@@ -1,6 +1,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "game_harness.hpp"
+#include "core/coordinates.hpp"
 #include "game/game_events.hpp"
 #include "group/services/group.hpp"
 #include "game/entity.hpp"
@@ -17,6 +18,95 @@ using wowee::game::Opcode;
 using wowee::test::Body;
 using wowee::test::GameHarness;
 namespace ev = wowee::game::events;
+
+namespace {
+
+uint16_t uf(wowee::game::UF field) { return wowee::game::fieldIndex(field); }
+
+/// The realm puts a creature in view: SMSG_UPDATE_OBJECT creating a unit of
+/// some creature entry, alive.
+void creatureInView(GameHarness& h, uint64_t guid) {
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(guid, wowee::game::ObjectType::UNIT,
+                                            {{uf(wowee::game::UF::OBJECT_FIELD_ENTRY), 299},
+                                             {uf(wowee::game::UF::UNIT_FIELD_HEALTH), 100},
+                                             {uf(wowee::game::UF::UNIT_FIELD_MAXHEALTH), 100}}));
+    h.pump();
+}
+
+}  // namespace
+
+// What the server tells one character, and what the player sets for it, is
+// that character's: the next one logged in on the same connection starts
+// with none of it, whether or not the server sends it again.
+TEST_CASE("the next character logged in keeps nothing of the last one's", "[session][harness][relog]") {
+    using wowee::test::PlayerSpec;
+    PlayerSpec alice;
+    alice.guid = 0x81;
+    alice.name = "Alice";
+    alice.classId = 6;  // a death knight, for the runes
+    PlayerSpec bob;
+    bob.guid = 0x82;
+    bob.name = "Bob";
+    constexpr uint64_t kInnkeeper = 0xF130000000000301ull;
+    constexpr uint64_t kTrainer = 0xF130000000000302ull;
+    constexpr uint64_t kBoar = 0xF130000000000303ull;
+
+    GameHarness h;
+    h.enterWorld(alice);
+    // Home in Goldshire, and an innkeeper asking to move it.
+    h.receive(Opcode::SMSG_BINDPOINTUPDATE, Body().f32(-9459.0f).f32(42.0f).f32(57.0f).u32(0).u32(12));
+    h.receive(Opcode::SMSG_BINDER_CONFIRM, Body().u64(kInnkeeper));
+    // Weapons and armour the character can use.
+    h.receive(Opcode::SMSG_SET_PROFICIENCY, Body().u8(2).u32(0x5));
+    h.receive(Opcode::SMSG_SET_PROFICIENCY, Body().u8(4).u32(0x3));
+    // Holding its breath under water.
+    h.receive(Opcode::SMSG_START_MIRROR_TIMER, Body().u32(1).u32(90000).u32(180000).u32(static_cast<uint32_t>(-1)).u8(0).u32(0));
+    // A blood rune turned to death.
+    h.receive(Opcode::SMSG_CONVERT_RUNE, Body().u8(0).u8(3));
+    // In the barber's chair, and in a vehicle.
+    h.receive(Opcode::SMSG_ENABLE_BARBER_SHOP);
+    h.receive(Opcode::SMSG_PLAYER_VEHICLE_DATA, Body().packedGuid(alice.guid).u32(244));
+    // Three combo points on a boar, a faction forced hostile, and a talent
+    // reset offered.
+    h.receive(Opcode::SMSG_UPDATE_COMBO_POINTS, Body().packedGuid(kBoar).u8(3));
+    h.receive(Opcode::SMSG_SET_FORCED_REACTIONS, Body().u32(1).u32(72).u32(0));
+    h.receive(Opcode::MSG_TALENT_WIPE_CONFIRM, Body().u64(kTrainer).u32(10000));
+    h.pump();
+    // A heading the player closed in the skills panel.
+    h.game().setSkillCategoryCollapsed(9, true);
+
+    uint32_t homeMap = 0;
+    glm::vec3 homePos{};
+    REQUIRE(h.game().getHomeBind(homeMap, homePos));
+    REQUIRE(h.game().getBinderGuid() == kInnkeeper);
+    REQUIRE(h.game().getWeaponProficiency() == 0x5);
+    REQUIRE(h.game().getMirrorTimer(1).active);
+    REQUIRE(h.game().getPlayerRunes()[0].type == wowee::game::GameHandler::RuneType::Death);
+    REQUIRE(h.game().isBarberShopOpen());
+    REQUIRE(h.game().isInVehicle());
+    REQUIRE(h.game().combat().comboPoints() == 3);
+    REQUIRE_FALSE(h.game().combat().getForcedReactions().empty());
+    REQUIRE(h.game().spells().showTalentWipeConfirmDialog());
+    REQUIRE(h.game().isSkillCategoryCollapsed(9));
+
+    h.relogAs(bob);
+
+    CHECK_FALSE(h.game().getHomeBind(homeMap, homePos));
+    CHECK_FALSE(h.game().homeBind().has_value());
+    CHECK(h.game().getHomeBindZoneId() == 0);
+    CHECK(h.game().getBinderGuid() == 0);
+    CHECK(h.game().getWeaponProficiency() == 0);
+    CHECK(h.game().getArmorProficiency() == 0);
+    CHECK_FALSE(h.game().getMirrorTimer(1).active);
+    CHECK(h.game().getPlayerRunes()[0].type == wowee::game::GameHandler::RuneType::Blood);
+    CHECK_FALSE(h.game().isBarberShopOpen());
+    CHECK_FALSE(h.game().isInVehicle());
+    CHECK(h.game().combat().comboPoints() == 0);
+    CHECK(h.game().combat().getForcedReactions().empty());
+    CHECK_FALSE(h.game().spells().showTalentWipeConfirmDialog());
+    CHECK_FALSE(h.game().isSkillCategoryCollapsed(9));
+}
 
 TEST_CASE("suspending client movement sends stop packets before controls are frozen", "[session][harness][loading]") {
     GameHarness h;
@@ -67,15 +157,14 @@ TEST_CASE("logout completion announces the destination and preserves the session
     GameHarness h;
     h.enterWorld();
     const bool exiting = GENERATE(false, true);
-    constexpr uint64_t creatureGuid = 0x1234;
-    auto creature = std::make_shared<wowee::game::Unit>(creatureGuid);
-    h.game().getEntityManager().addEntity(creatureGuid, creature);
+    constexpr uint64_t creatureGuid = 0xF130000000001234ull;
+    creatureInView(h, creatureGuid);
     std::vector<ev::LogoutCompleted> completed;
     auto subscription = h.events().subscribe<ev::LogoutCompleted>([&](const auto& event) {
         completed.push_back(event);
         CHECK(h.game().getPlayerGuid() == h.player().guid);
         CHECK(h.game().isInWorld());
-        CHECK(h.game().getEntityManager().getEntity(creatureGuid) == creature);
+        CHECK(h.game().getEntityManager().hasEntity(creatureGuid));
     });
 
     h.game().social().requestLogout(exiting);
@@ -87,7 +176,7 @@ TEST_CASE("logout completion announces the destination and preserves the session
     CHECK(h.game().getPlayerGuid() == h.player().guid);
     CHECK(h.game().isConnected());
     CHECK(h.game().isInWorld());
-    CHECK(h.game().getEntityManager().getEntity(creatureGuid) == creature);
+    CHECK(h.game().getEntityManager().hasEntity(creatureGuid));
 
     // The client's command happens after pump, and only then releases state.
     h.game().returnToCharacterSelect();
@@ -101,8 +190,8 @@ TEST_CASE("a closed connection announces disconnect once and leaves state for cl
           "[session][harness]") {
     GameHarness h;
     h.enterWorld();
-    auto creature = std::make_shared<wowee::game::Unit>(0x1234);
-    h.game().getEntityManager().addEntity(creature->getGuid(), creature);
+    constexpr uint64_t creatureGuid = 0xF130000000001234ull;
+    creatureInView(h, creatureGuid);
     std::vector<ev::Disconnected> disconnected;
     auto subscription = h.events().subscribe<ev::Disconnected>([&](const auto& event) {
         disconnected.push_back(event);
@@ -116,9 +205,9 @@ TEST_CASE("a closed connection announces disconnect once and leaves state for cl
     CHECK(disconnected.front().characterGuid == h.player().guid);
     CHECK(h.game().getState() == wowee::game::WorldState::DISCONNECTED);
     CHECK(h.game().getPlayerGuid() == h.player().guid);
-    CHECK(h.game().getEntityManager().getEntity(creature->getGuid()) == creature);
+    CHECK(h.game().getEntityManager().hasEntity(creatureGuid));
     h.game().disconnect();
-    CHECK_FALSE(h.game().getEntityManager().hasEntity(creature->getGuid()));
+    CHECK_FALSE(h.game().getEntityManager().hasEntity(creatureGuid));
     CHECK_FALSE(h.game().isConnected());
 }
 
@@ -127,11 +216,11 @@ TEST_CASE("NEW_WORLD waits for the client boundary and holds subsequent packets"
     GameHarness h;
     h.enterWorld();
     wowee::core::WorldTransitionQueue transitions(h.events());
-    auto creature = std::make_shared<wowee::game::Unit>(0x1234);
-    h.game().getEntityManager().addEntity(creature->getGuid(), creature);
+    constexpr uint64_t creatureGuid = 0xF130000000001234ull;
+    creatureInView(h, creatureGuid);
     auto despawns = std::make_shared<unsigned>(0);
     auto despawnSub = h.events().subscribe<ev::CreatureDespawned>(
-        [despawns, creatureGuid = creature->getGuid()](const ev::CreatureDespawned& e) {
+        [despawns](const ev::CreatureDespawned& e) {
             CHECK(e.guid == creatureGuid);
             ++*despawns;
         });
@@ -140,7 +229,7 @@ TEST_CASE("NEW_WORLD waits for the client boundary and holds subsequent packets"
     h.game().update(1.0f / 60.0f);
 
     CHECK(h.game().getCurrentMapId() == h.player().mapId);
-    CHECK(h.game().getEntityManager().getEntity(creature->getGuid()) == creature);
+    CHECK(h.game().getEntityManager().hasEntity(creatureGuid));
     CHECK(*despawns == 0);
     CHECK(h.countSent(Opcode::MSG_MOVE_WORLDPORT_ACK) == 0);
     CHECK(h.countSent(Opcode::CMSG_TIME_SYNC_RESP) == 0);
@@ -152,7 +241,7 @@ TEST_CASE("NEW_WORLD waits for the client boundary and holds subsequent packets"
     h.game().movement().applyPendingWorldTransfer();
 
     CHECK(h.game().getCurrentMapId() == 1);
-    CHECK_FALSE(h.game().getEntityManager().hasEntity(creature->getGuid()));
+    CHECK_FALSE(h.game().getEntityManager().hasEntity(creatureGuid));
     CHECK(*despawns == 1);
     CHECK(h.countSent(Opcode::MSG_MOVE_WORLDPORT_ACK) == 1);
     request = transitions.takeNext();
@@ -257,6 +346,63 @@ TEST_CASE("login publishes the server destination for deferred world entry", "[s
     CHECK(entered.front().isInitialEntry);
 }
 
+TEST_CASE("offline world entry enters the world as a login does", "[session][harness]") {
+    // Scene replay and the benchmarks enter without a realm. What they measure
+    // is only the game's if the entry is the game's: a session begun, the
+    // player where SMSG_LOGIN_VERIFY_WORLD would put it, the data a session
+    // plays with read now rather than on the frame of the first spell.
+    GameHarness h;
+    std::vector<ev::WorldEntered> entered;
+    auto subscription = h.events().subscribe<ev::WorldEntered>([&](const auto& event) {
+        entered.push_back(event);
+    });
+    wowee::game::Character character{};
+    character.guid = 0x4242;
+    character.name = "Offline";
+    character.mapId = 571;
+    character.x = 5804.0f;  // server coordinates, as a character list gives them
+    character.y = 624.0f;
+    character.z = 647.5f;
+    REQUIRE_FALSE(h.dbcWasRead("Spell.dbc"));
+
+    h.game().enterWorldOffline(character);
+
+    CHECK(h.game().getState() == wowee::game::WorldState::IN_WORLD);
+    CHECK(h.game().getPlayerGuid() == character.guid);
+    CHECK(h.game().getActiveCharacterGuid() == character.guid);
+    CHECK(h.game().getCurrentMapId() == character.mapId);
+    const auto canonical = wowee::core::coords::serverToCanonical({character.x, character.y, character.z});
+    CHECK(h.game().getMovementInfo().x == canonical.x);
+    CHECK(h.game().getMovementInfo().y == canonical.y);
+    CHECK(h.game().getMovementInfo().z == canonical.z);
+    REQUIRE(entered.size() == 1);
+    CHECK(entered.front().mapId == character.mapId);
+    CHECK(entered.front().x == character.x);
+    CHECK(entered.front().y == character.y);
+    CHECK(entered.front().z == character.z);
+    CHECK(entered.front().isInitialEntry);
+    CHECK(h.dbcWasRead("Spell.dbc"));
+    CHECK(h.sentOpcodes().empty());
+}
+
+TEST_CASE("offline world entry is refused while a realm's world is connected", "[session][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    std::vector<ev::WorldEntered> entered;
+    auto subscription = h.events().subscribe<ev::WorldEntered>([&](const auto& event) {
+        entered.push_back(event);
+    });
+    wowee::game::Character character{};
+    character.guid = 0x4242;
+    character.mapId = 571;
+
+    h.game().enterWorldOffline(character);
+
+    CHECK(entered.empty());
+    CHECK(h.game().getPlayerGuid() == h.player().guid);
+    CHECK(h.game().getCurrentMapId() == h.player().mapId);
+}
+
 TEST_CASE("transfer pending announces its map without destroying the current world",
           "[session][harness]") {
     GameHarness h;
@@ -279,27 +425,41 @@ TEST_CASE("a new map scope is shown every object already in view, once, without 
     GameHarness h;
     h.enterWorld();
 
-    auto creature = std::make_shared<Unit>(0x1001);
-    creature->setDisplayId(4321);
-    creature->setMaxHealth(100);
-    creature->setHealth(100);
-    creature->setNpcFlags(0x02);  // a quest giver: its status is not asked again
-    creature->setPosition(10.0f, 20.0f, 30.0f, 1.5f);
-    auto corpse = std::make_shared<Unit>(0x1002);
-    corpse->setDisplayId(4322);
-    corpse->setMaxHealth(100);
-    corpse->setHealth(0);
-    auto invisible = std::make_shared<Unit>(0x1003);  // no display: never drawn
-    auto rider = std::make_shared<Player>(0x1004);
-    rider->setDisplayId(49);
-    rider->setMountDisplayId(14337);
-    auto door = std::make_shared<GameObject>(0x1005);
-    door->setEntry(77);
-    door->setDisplayId(411);
-    door->setField(fieldIndex(UF::GAMEOBJECT_BYTES_1), 0);  // open
-    for (const auto& entity : std::initializer_list<std::shared_ptr<Entity>>{
-             creature, corpse, invisible, rider, door})
-        h.game().getEntityManager().addEntity(entity->getGuid(), entity);
+    // What the realm has put in view before the scope existed, in its own
+    // create blocks. A field the server leaves at zero is not in the block.
+    constexpr uint64_t kCreature = 0x1001, kCorpse = 0x1002, kInvisible = 0x1003,
+                       kRider = 0x1004, kDoor = 0x1005;
+    const glm::vec3 at = wowee::core::coords::canonicalToServer(glm::vec3(10.0f, 20.0f, 30.0f));
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(kCreature, ObjectType::UNIT,
+                                            {{uf(UF::UNIT_FIELD_DISPLAYID), 4321},
+                                             {uf(UF::UNIT_FIELD_HEALTH), 100},
+                                             {uf(UF::UNIT_FIELD_MAXHEALTH), 100},
+                                             // a quest giver: its status is not asked again
+                                             {uf(UF::UNIT_NPC_FLAGS), 0x02}},
+                                            at.x, at.y, at.z,
+                                            wowee::core::coords::canonicalToServerYaw(1.5f)));
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(kCorpse, ObjectType::UNIT,
+                                            {{uf(UF::UNIT_FIELD_DISPLAYID), 4322},
+                                             {uf(UF::UNIT_FIELD_MAXHEALTH), 100}}));
+    // No display: never drawn.
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(kInvisible, ObjectType::UNIT,
+                                            {{uf(UF::UNIT_FIELD_HEALTH), 100}}));
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(kRider, ObjectType::PLAYER,
+                                            {{uf(UF::UNIT_FIELD_DISPLAYID), 49},
+                                             {uf(UF::UNIT_FIELD_HEALTH), 100},
+                                             {uf(UF::UNIT_FIELD_MOUNTDISPLAYID), 14337}}));
+    // Open: GAMEOBJECT_BYTES_1 is the state (0, open), the type (0, a door),
+    // the art kit and the animation progress (255), low byte first.
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(kDoor, ObjectType::GAMEOBJECT,
+                                            {{uf(UF::OBJECT_FIELD_ENTRY), 77},
+                                             {uf(UF::GAMEOBJECT_DISPLAYID), 411},
+                                             {uf(UF::GAMEOBJECT_BYTES_1), 0xFF000000u}}));
+    h.pump();
 
     std::vector<uint64_t> creatures, deaths;
     std::vector<std::pair<uint64_t, uint32_t>> mounts;
@@ -307,12 +467,12 @@ TEST_CASE("a new map scope is shown every object already in view, once, without 
     std::vector<uint64_t> objects;
     auto creatureSub = h.events().subscribe<ev::CreatureSpawned>([&](const ev::CreatureSpawned& e) {
         creatures.push_back(e.guid);
-        if (e.guid == creature->getGuid()) {
+        if (e.guid == kCreature) {
             CHECK(e.displayId == 4321);
-            CHECK(e.x == 10.0f);
-            CHECK(e.y == 20.0f);
-            CHECK(e.z == 30.0f);
-            CHECK(e.orientation == 1.5f);
+            CHECK(e.x == Catch::Approx(10.0f));
+            CHECK(e.y == Catch::Approx(20.0f));
+            CHECK(e.z == Catch::Approx(30.0f));
+            CHECK(e.orientation == Catch::Approx(1.5f));
         }
     });
     auto deathSub = h.events().subscribe<ev::UnitDied>([&](const ev::UnitDied& e) { deaths.push_back(e.guid); });
@@ -330,11 +490,11 @@ TEST_CASE("a new map scope is shown every object already in view, once, without 
     h.game().world().announceObjectsInView();
 
     std::sort(creatures.begin(), creatures.end());
-    CHECK(creatures == std::vector<uint64_t>{creature->getGuid(), corpse->getGuid()});
-    CHECK(deaths == std::vector<uint64_t>{corpse->getGuid()});
-    CHECK(mounts == std::vector<std::pair<uint64_t, uint32_t>>{{rider->getGuid(), 14337}});
-    CHECK(doorStates == std::vector<std::pair<uint64_t, uint8_t>>{{door->getGuid(), 0}});
-    CHECK(objects == std::vector<uint64_t>{door->getGuid()});
+    CHECK(creatures == std::vector<uint64_t>{kCreature, kCorpse});
+    CHECK(deaths == std::vector<uint64_t>{kCorpse});
+    CHECK(mounts == std::vector<std::pair<uint64_t, uint32_t>>{{kRider, 14337}});
+    CHECK(doorStates == std::vector<std::pair<uint64_t, uint8_t>>{{kDoor, 0}});
+    CHECK(objects == std::vector<uint64_t>{kDoor});
     CHECK(h.sentOpcodes().empty());
 }
 
@@ -342,11 +502,12 @@ TEST_CASE("an object the server destroys leaves view as what it is", "[session][
     using namespace wowee::game;
     GameHarness h;
     h.enterWorld();
-    auto creature = std::make_shared<Unit>(0x2001);
-    auto player = std::make_shared<Player>(0x2002);
-    auto chest = std::make_shared<GameObject>(0x2003);
-    for (const auto& entity : std::initializer_list<std::shared_ptr<Entity>>{creature, player, chest})
-        h.game().getEntityManager().addEntity(entity->getGuid(), entity);
+    creatureInView(h, 0x2001);
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(0x2002, ObjectType::PLAYER, {{uf(UF::UNIT_FIELD_HEALTH), 100}}));
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(0x2003, ObjectType::GAMEOBJECT, {{uf(UF::OBJECT_FIELD_ENTRY), 2843}}));
+    h.pump();
 
     std::vector<std::pair<char, uint64_t>> left;
     auto creatureSub = h.events().subscribe<ev::CreatureDespawned>(
@@ -371,13 +532,16 @@ TEST_CASE("a game object's custom animation is played; the player's own bobber p
     using namespace wowee::game;
     GameHarness h;
     h.enterWorld();
-    auto chest = std::make_shared<GameObject>(0x3001);
-    auto bobber = std::make_shared<GameObject>(0x3002);
-    // OBJECT_FIELD_CREATED_BY, as two words: the player cast it.
-    bobber->setField(6, static_cast<uint32_t>(h.player().guid & 0xFFFFFFFFu));
-    bobber->setField(7, static_cast<uint32_t>(h.player().guid >> 32));
-    h.game().getEntityManager().addEntity(chest->getGuid(), chest);
-    h.game().getEntityManager().addEntity(bobber->getGuid(), bobber);
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(0x3001, ObjectType::GAMEOBJECT, {{uf(UF::OBJECT_FIELD_ENTRY), 2843}}));
+    // OBJECT_FIELD_CREATED_BY (fields 6 and 7 of a game object), low word
+    // first: the player cast it.
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(0x3002, ObjectType::GAMEOBJECT,
+                                            {{uf(UF::OBJECT_FIELD_ENTRY), 35591},
+                                             {6, static_cast<uint32_t>(h.player().guid & 0xFFFFFFFFu)},
+                                             {7, static_cast<uint32_t>(h.player().guid >> 32)}}));
+    h.pump();
 
     std::vector<std::pair<uint64_t, uint32_t>> played;
     auto sub = h.events().subscribe<ev::GameObjectCustomAnimPlayed>(
@@ -398,9 +562,10 @@ TEST_CASE("an empty view announces nothing, and the local player is never presen
     using namespace wowee::game;
     GameHarness h;
     h.enterWorld();
-    auto self = std::make_shared<Player>(h.player().guid);
-    self->setDisplayId(49);
-    h.game().getEntityManager().addEntity(self->getGuid(), self);
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(h.player().guid, ObjectType::PLAYER,
+                                            {{uf(UF::UNIT_FIELD_DISPLAYID), 49}, {uf(UF::UNIT_FIELD_HEALTH), 100}}));
+    h.pump();
     unsigned spawns = 0;
     auto playerSub = h.events().subscribe<ev::PlayerSpawned>([&](const ev::PlayerSpawned&) { ++spawns; });
     auto creatureSub = h.events().subscribe<ev::CreatureSpawned>([&](const ev::CreatureSpawned&) { ++spawns; });

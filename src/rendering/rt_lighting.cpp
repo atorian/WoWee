@@ -46,7 +46,8 @@ enum Binding : uint32_t {
     kFilterOut = 15,
     kFilterOutGi = 16,
     kReflectionStore = 17,
-    kBindingCount = 18,
+    kSeedStore = 18,
+    kBindingCount = 19,
 };
 
 constexpr VkFormat kFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -147,7 +148,7 @@ void RtLighting::shutdown() {
     destroyImage(dev, alloc, neutral_);
     if (depthView_) vkDestroyImageView(dev, depthView_, nullptr);
     depthView_ = VK_NULL_HANDLE;
-    for (VkPipeline* p : {&prepare_, &prepareMs_, &trace_, &temporal_, &filter_}) {
+    for (VkPipeline* p : {&prepare_, &prepareMs_, &trace_, &temporal_, &filter_, &seed_}) {
         if (*p) vkDestroyPipeline(dev, *p, nullptr);
         *p = VK_NULL_HANDLE;
     }
@@ -176,7 +177,7 @@ bool RtLighting::createPipelines() {
     }
     b[kUbo].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     for (uint32_t i : {kGbufStore, kRawStore, kRawGiStore, kHistStore, kHistGiStore, kFilterOut,
-                       kFilterOutGi, kReflectionStore}) {
+                       kFilterOutGi, kReflectionStore, kSeedStore}) {
         b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     }
     VkDescriptorSetLayoutCreateInfo li{};
@@ -189,7 +190,7 @@ bool RtLighting::createPipelines() {
     VkDescriptorPoolSize sizes[3] = {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kSets},
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kSets * 10},
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kSets * 8},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kSets * 9},
     };
     VkDescriptorPoolCreateInfo pi{};
     pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -242,7 +243,8 @@ bool RtLighting::createPipelines() {
                    make(hw ? "assets/shaders/rt_trace_hw.comp.spv"
                            : "assets/shaders/rt_trace.comp.spv", trace_) &&
                    make("assets/shaders/rt_temporal.comp.spv", temporal_) &&
-                   make("assets/shaders/rt_filter.comp.spv", filter_);
+                   make("assets/shaders/rt_filter.comp.spv", filter_) &&
+                   make("assets/shaders/rt_seed.comp.spv", seed_);
     if (!pipelinesOk_) LOG_ERROR("RtLighting: pipelines unavailable, ray traced lighting stays off");
     return pipelinesOk_;
 }
@@ -262,7 +264,8 @@ bool RtLighting::createImages(VkExtent2D e) {
         // Half-float distance rounds mountain positions into metre-scale bands.
         // Keep ray origins/history geometry precise; radiance can stay float16.
         ok = ok && make(s.gbuf, VK_FORMAT_R32G32B32A32_SFLOAT) &&
-             make(s.hist) && make(s.histGi) && make(s.out) && make(s.outGi) && make(s.reflection);
+             make(s.hist) && make(s.histGi) && make(s.out) && make(s.outGi) && make(s.reflection) &&
+             make(s.seed);
         s.wroteImages = false;
     }
     if (!ok) return false;
@@ -304,7 +307,8 @@ bool RtLighting::createImages(VkExtent2D e) {
         for (const auto& slot : slots_) {
             init(slot.hist, true);
             init(slot.out, true);
-            for (const Target* t : {&slot.gbuf, &slot.histGi, &slot.outGi, &slot.reflection}) init(*t);
+            for (const Target* t : {&slot.gbuf, &slot.histGi, &slot.outGi, &slot.reflection, &slot.seed})
+                init(*t);
         }
     });
     traceExtent_ = e;
@@ -315,7 +319,8 @@ void RtLighting::destroyImages() {
     DeferredResources retired(*ctx_);
     for (Target* t : {&raw_, &rawGi_, &tmp_, &tmpGi_}) retired.image(t->img);
     for (auto& s : slots_) {
-        for (Target* t : {&s.gbuf, &s.hist, &s.histGi, &s.out, &s.outGi, &s.reflection}) retired.image(t->img);
+        for (Target* t : {&s.gbuf, &s.hist, &s.histGi, &s.out, &s.outGi, &s.reflection, &s.seed})
+            retired.image(t->img);
         s.wroteImages = false;
         s.boundDepth = VK_NULL_HANDLE;
     }
@@ -368,6 +373,11 @@ VkImageView RtLighting::reflectionViewForSlot(uint32_t slot) const {
 VkImageView RtLighting::geometryViewForSlot(uint32_t slot) const {
     const Slot& other = slots_[(slot + 1) % MAX_FRAMES_IN_FLIGHT];
     return other.gbuf.img.imageView ? other.gbuf.img.imageView : neutral_.imageView;
+}
+
+VkImageView RtLighting::seedViewForSlot(uint32_t slot) const {
+    const Slot& other = slots_[(slot + 1) % MAX_FRAMES_IN_FLIGHT];
+    return other.seed.img.imageView ? other.seed.img.imageView : neutral_.imageView;
 }
 
 VkImageView RtLighting::giViewForSlot(uint32_t slot) const {
@@ -424,6 +434,7 @@ void RtLighting::writeSlotSets(uint32_t slotIndex) {
         img[kRawStore] = storage(raw_);
         img[kRawGiStore] = storage(rawGi_);
         img[kReflectionStore] = storage(s.reflection);
+        img[kSeedStore] = storage(s.seed);
         img[kGbufPrev] = sampled(prev.gbuf);
         img[kRaw] = sampled(raw_);
         img[kRawGi] = sampled(rawGi_);
@@ -543,6 +554,11 @@ void RtLighting::record(VkCommandBuffer cmd, VkImage sceneDepth, VkExtent2D scen
         vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), push);
         vkCmdDispatch(cmd, gx, gy, 1);
     }
+
+    // Where the other surfaces are, for receivers the trace did not see
+    // (rt_seed.comp). Reads only this frame's G-buffer.
+    bind(seed_, 0);
+    vkCmdDispatch(cmd, gx, gy, 1);
 
     // For the next frame's surfaces.
     memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,

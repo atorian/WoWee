@@ -129,9 +129,13 @@ size_t ExpansionRegistry::initialize(const std::string& dataRoot) {
 
     for (auto& entry : std::filesystem::directory_iterator(expansionsDir, ec)) {
         if (!entry.is_directory()) continue;
-        std::string jsonPath = entry.path().string() + "/expansion.json";
+        // Forward slashes throughout: every path built from this one appends
+        // with "/", and on Windows the native form put a backslash before the
+        // expansion's directory and a slash after it.
+        const std::string dirPath = entry.path().generic_string();
+        std::string jsonPath = dirPath + "/expansion.json";
         if (std::filesystem::exists(jsonPath, ec)) {
-            loadProfile(jsonPath, entry.path().string());
+            loadProfile(jsonPath, dirPath);
         }
     }
 

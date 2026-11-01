@@ -369,7 +369,7 @@ void CharacterPreview::createFBO() {
         sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         sizes[0].descriptorCount = MAX_FRAMES;
         sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        sizes[1].descriptorCount = MAX_FRAMES * 10;
+        sizes[1].descriptorCount = MAX_FRAMES * 11;
         sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         sizes[2].descriptorCount = MAX_FRAMES;
 
@@ -434,7 +434,7 @@ void CharacterPreview::createFBO() {
         fogImg.imageView = appRenderer->getNeutralFogVolumeView();
         fogImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-        // Bindings 3 and 4 are the world's ray traced lighting; the neutral
+        // Bindings 3, 4, 6, 7 and 12 are the world's ray traced lighting; the neutral
         // image, with the block's switch left at zero.
         VkDescriptorImageInfo rtImg{};
         rtImg.imageView = appRenderer->getNeutralRtLightingView();
@@ -447,7 +447,7 @@ void CharacterPreview::createFBO() {
         lightBuf.offset = 0;
         lightBuf.range = VK_WHOLE_SIZE;
 
-        VkWriteDescriptorSet writes[12]{};
+        VkWriteDescriptorSet writes[13]{};
         writes[9].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[9].dstSet = previewPerFrameSet_[i];
         writes[9].dstBinding = 9;
@@ -485,7 +485,9 @@ void CharacterPreview::createFBO() {
         writes[10].dstBinding = 10;
         writes[11] = writes[5];
         writes[11].dstBinding = 11;
-        vkUpdateDescriptorSets(device, 12, writes, 0, nullptr);
+        writes[12] = writes[3];
+        writes[12].dstBinding = 12;
+        vkUpdateDescriptorSets(device, 13, writes, 0, nullptr);
     }
 
     // 5. Register the color attachment as an ImGui texture
@@ -1157,7 +1159,7 @@ bool CharacterPreview::loadCreature(
         break;
     }
 
-    if (!charRenderer_->loadModel(model, PREVIEW_MODEL_ID)) {
+    if (!charRenderer_->loadModel(std::move(model), PREVIEW_MODEL_ID)) {
         LOG_WARNING("CharacterPreview: failed to upload creature model");
         return false;
     }

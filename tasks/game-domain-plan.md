@@ -7,6 +7,88 @@ through the event bus - and, at the end, no `GameHandler`: a connection, a
 character session and a map scope, the same three lifetimes the client side
 already has (`core::CharacterSession`, `core::MapScope`).
 
+## Status (2026-11-01), branch `claude/game-layer-deviations-7def83`
+
+The review of master 83f9c1c against AGENTS.md, redone against master
+838c6e35. Master had meanwhile given achievements, reputation, titles, the
+pet and the rest their contexts, built every handler from interfaces and
+moved the player's sheet to PlayerHandler, which settled findings 1, 4 and 5
+and most of the DBC part of 7 (a missing table now stops the game). This
+branch does the rest:
+
+| Commit | Finding |
+|---|---|
+| `88504166` | 9: GameHandler's unused copy of the Warden state is gone |
+| `6b1290c9` | an expansion's data path is in forward slashes on Windows (`game_data_domain` failed on master) |
+| `d0c972e4` | 7: short reputation, pet and item packets are logged; each item query waits its own 5 s; an item the realm does not have is a failure, said once and not asked again |
+| `1880c1a3` | 2: the commands in query interfaces become events (`GossipWindowOpened`, `VendorOptionChosen`, `StableOptionChosen`, `NpcWindowOpened`, `PlayerCastEnded`); `setResting` is gone with the second writer of the rest state - WotLK's 0x21E is SMSG_QUEST_FORCE_REMOVE |
+| `d4d48159` | 3: home, binder, proficiencies, mirror timers, runes and barber chair move to PlayerHandler with their opcodes |
+| `aae4e999` | 3: CombatHandler and SpellHandler keep the character in one struct each, assigned whole; the relog test |
+| `5ac56792` | 3: every domain's `beginCharacter` once from `selectCharacter`; `CharacterLoggingIn` gone; the login quest resync, the vehicle, the sort queue, the paced chat and the GM ticket answers move to their owners |
+| `5c616953` | 6: the client's map scope no longer ends the player's ride - the game does |
+| `6d9ef72d` | 8: domain tests put units and objects in view by packets; realm time by fixed bytes |
+
+Counters (`tools/domain_shape_check.py`): handlers built from `GameHandler&`
+0, reaches through `owner_.` 0, `xxxRef()` accessors 4 (0 calls through
+`owner_`), `set*Callback` setters 2 - as master had them; this branch adds
+none. The `unused_member_check` ceiling (0) holds.
+
+Bugs found on the way, each with a test that failed first:
+
+- After a relog the next character had the last one's home (the hearthstone
+  went there until the server sent another), the innkeeper's offer, its
+  weapon and armour proficiencies, a running breath bar, a death knight's
+  converted runes, the barber's chair, combo points, forced faction
+  reactions, a talent reset offer and the skill headings closed in the
+  panel. One test, A then B, failed on 13 of 14 and passes.
+- On WotLK an SMSG_QUEST_FORCE_REMOVE set the player resting and printed
+  "You are now resting." instead of removing the quest.
+- Item queries were all dropped by one sweep every five seconds, so a query
+  sent just before it was asked again at once; an item the realm does not
+  have was asked for on every need.
+
+Per-character state now begins in one place: `GameHandler::selectCharacter`
+calls `beginCharacter` once on each of AccountData, Player, Movement,
+Combat, Spell, ActionBar, Inventory, Pet, Chat, Quest, Social, Reputation,
+Weather and the achievements context, and each assigns one struct whole
+(`Sheet`, `Mount`, `CombatCharacterState`, `SpellCharacterState`,
+`ActionBarCharacterState`, `Held`, `Conversation`, `Journal`,
+`SocialCharacterState`).
+
+### Left, and why
+
+- **Commands still in query interfaces.** 101 `void` methods remain across
+  the `*Queries` interfaces, 44 of them `WorldQueries`: the update-field
+  decoder handing each owner its fields (`skillFieldsArrived`,
+  `inventoryFieldsArrived`, ...) and requests on another domain's behalf
+  (`stopAutoAttack`, `cancelCast`, `dismount`). The ones the review named
+  are gone. The field hand-offs want to be per-owner feeds the decoder is
+  given, the rest events; that is its own piece of work.
+- **The game object interaction** (`pendingGameObjectInteractGuid_`,
+  `lastInteractedGoGuid_`, `hookedFishingBobberGuid_`, the pending loot
+  opens) and its ~500 lines of logic (`interactWithGameObject`,
+  `performGameObjectInteractionNow`, the loot-open retries, the bobber
+  opcodes) are still GameHandler's. They reach movement, spells, the bags,
+  mail and the guild bank; a `GameObjectHandler` needs those as feeds and
+  events, not another query interface of commands.
+- **Two of MapScope's three calls stay**: `TransportManager::clearTransports`
+  and `InventoryHandler::resetEquipmentDirtyTracking`. Both are the client's
+  scene state kept in the game - the transports are registered with their
+  render instance ids, the equipment tracking records what was composited
+  onto the player model - and they end with the scene, which a far teleport
+  on the same map replaces without the game leaving anything. A reset hung
+  on a game event would come too early: the packet that announces a world
+  is handled before the interface draws and before the old scene ends, so
+  the old model would be dressed and the new one left bare. The fix is in
+  the client: the instance binding and the composition tracking become its
+  own, and the game keeps the logical transports.
+- **`blobQuestIds_`** (the quests the world map shades) is interface view
+  state written by a Lua binding; it belongs in the client's
+  `InterfaceState`, not in the game.
+- **MovementHandler's other per-character state** (the known flight paths,
+  server speeds) and AccountData's per-character slots sharing arrays with
+  the account's are not yet one struct each.
+
 ## Status (2026-10-16), branch `claude/game-domain-scopes-8ce265`
 
 The first five commits are on master (9574660 includes them); after it, on
@@ -88,11 +170,10 @@ animation, melee swing, sprint, hearthstone preload, charge, chat bubble,
 emote animation, quest progress, NPC greeting and farewell, reputation
 change, open dungeon finder) are gone from GameHandler.
 
-Per-character state is reset by the one login path: each converted domain
-assigns its struct whole on `events::CharacterLoggingIn` (Chat's
-`Conversation`, Quest's `Journal`) - Inventory, Pet and Spell still do it from
-`selectCharacter` (`beginCharacter`, `resetAllState`) and should move to the
-event too.
+Per-character state was reset on `events::CharacterLoggingIn` in some
+domains and from `selectCharacter` in others; since 2026-11-01 it is one
+`beginCharacter` per domain, called from `selectCharacter`, as AGENTS.md
+says (see the status above), and the event is gone.
 
 The `*Queries` interfaces are grouped by the owner of each answer (the fight,
 the mount, the items, the game object being opened...). They are what is left

@@ -122,11 +122,6 @@ void ActionBarHandler::setExtraBarsShown(uint8_t mask) {
     sender_.send(packet);
 }
 
-void ActionBarHandler::clear() {
-    bar_ = {};
-    extraBarsSetHere_.reset();
-}
-
 void ActionBarHandler::handleActionButtons(network::Packet& packet) {
     // Slot encoding differs by expansion:
     //   Classic: uint16 actionId + uint8 type + uint8 misc

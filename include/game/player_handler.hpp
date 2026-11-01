@@ -1,11 +1,17 @@
 #pragma once
 
 #include "game/flat_field_map.hpp"
+#include "game/home_bind.hpp"
 #include "game/opcode_table.hpp"
 #include "game/stat_tables.hpp"
 
+#include <glm/glm.hpp>
+
+#include <array>
 #include <cstdint>
 #include <functional>
+#include <optional>
+#include <string>
 #include <unordered_map>
 
 namespace wowee::core { class EventBus; }
@@ -17,6 +23,32 @@ class ChatLog;
 class FrameXmlEvents;
 class PacketSender;
 struct Character;
+
+/// The three timers the server runs on the player - exhaustion, breath and
+/// feign death, in the wire's order.
+///
+/// The names are what MirrorTimer_Show and MirrorTimer_Hide match on, and the
+/// labels what they draw beside the bar: mirrortimer.lua's four keys, of which
+/// the server uses three.
+inline constexpr const char* kMirrorTimerNames[3] = {"EXHAUSTION", "BREATH", "FEIGNDEATH"};
+inline constexpr const char* kMirrorTimerLabels[3] = {"Exhaustion", "Breath", "Feign Death"};
+
+struct MirrorTimer {
+    int32_t value    = 0;
+    int32_t maxValue = 0;
+    int32_t scale    = 0;      ///< +1 counting up, -1 counting down
+    bool    paused   = false;
+    bool    active   = false;
+    float   pendingMs = 0.0f;  ///< sub-millisecond carry for the local countdown
+};
+
+/// A death knight's rune: 0-1 Blood, 2-3 Unholy, 4-5 Frost until converted.
+enum class RuneType : uint8_t { Blood = 0, Unholy = 1, Frost = 2, Death = 3 };
+struct RuneSlot {
+    RuneType type = RuneType::Blood;
+    bool     ready = true;          ///< as the server last confirmed
+    float    readyFraction = 1.0f;  ///< 0 just spent, 1 ready
+};
 
 /// What PlayerHandler asks of the rest of the game: the character list's
 /// entry for the one in the world, and the parts of the player's fields whose
@@ -41,13 +73,20 @@ public:
     virtual void markOnlineEquipmentDirty() = 0;
     /// The logout countdown is running.
     [[nodiscard]] virtual bool loggingOut() const = 0;
+    /// AreaTable.dbc's name for a zone, empty when there is none.
+    [[nodiscard]] virtual std::string areaName(uint32_t areaId) const = 0;
+    /// The name a unit or player in the name cache goes by.
+    [[nodiscard]] virtual std::string unitName(uint64_t guid) const = 0;
 };
 
 /// The character in the world as the server describes it: experience, level,
 /// rest, PvP currency, the character sheet's numbers, the helm and cloak
 /// switches, the shapeshift form, and how the character stands: sitting,
-/// stunned, stealthed. The server is authoritative for all of
-/// it; this keeps what it last said and tells the interface what moved.
+/// stunned, stealthed. Its home and the innkeeper offering a new one, the
+/// weapons and armour it can use, its breath and the other mirror timers, a
+/// death knight's runes and the barber's chair. The server is authoritative
+/// for all of it; this keeps what it last said and tells the interface what
+/// moved.
 class PlayerHandler {
 public:
     using PacketHandler = std::function<void(network::Packet&)>;
@@ -76,8 +115,6 @@ public:
     void playerFieldsArrived(const FlatFieldMap& fields, bool isCreate, FrameXmlEvents& packetEvents);
     /// The form, the top byte of UNIT_FIELD_BYTES_1, in an update.
     void shapeshiftFormArrived(uint8_t form, FrameXmlEvents& packetEvents);
-    /// WotLK's SMSG_SET_REST_START: in or out of an inn or a city.
-    void restStateArrived(bool resting);
     /// UNIT_FIELD_FLAGS on the player, in an update: UNIT_FLAG_STUNNED.
     void unitFlagsArrived(uint32_t previous, uint32_t flags);
     /// The visibility byte of UNIT_FIELD_BYTES_1 on the player, in an update:
@@ -190,6 +227,34 @@ public:
     /// something, 7 dead, 8 kneel.
     [[nodiscard]] uint8_t standState() const { return sheet_.standState; }
 
+    // ---- Home ----
+    /// Where the hearthstone goes, once SMSG_BINDPOINTUPDATE has said.
+    [[nodiscard]] std::optional<HomeBind> homeBind() const;
+    [[nodiscard]] uint32_t homeBindZoneId() const { return sheet_.homeBindZoneId; }
+    /// The innkeeper whose "make this your home?" is open, or 0.
+    [[nodiscard]] uint64_t binderGuid() const { return sheet_.binderGuid; }
+    /// Accept that innkeeper's offer: CMSG_BINDER_ACTIVATE.
+    void confirmBinder();
+
+    // ---- Proficiencies (SMSG_SET_PROFICIENCY): one bit per item subclass ----
+    [[nodiscard]] uint32_t weaponProficiency() const { return sheet_.weaponProficiency; }
+    [[nodiscard]] uint32_t armorProficiency() const { return sheet_.armorProficiency; }
+
+    // ---- Mirror timers ----
+    [[nodiscard]] const MirrorTimer& mirrorTimer(int type) const;
+    /// Count the running timers on locally. The server sends a timer once with
+    /// its value and scale and then speaks only when something changes, so
+    /// without this a breath bar stands still.
+    void tickMirrorTimers(float dt);
+
+    // ---- Runes ----
+    [[nodiscard]] const std::array<RuneSlot, 6>& runes() const { return sheet_.runes; }
+
+    // ---- The barber's chair ----
+    [[nodiscard]] bool barberShopOpen() const { return sheet_.barberShopOpen; }
+    /// The player got up from the chair.
+    void closeBarberShop();
+
 private:
     /// Everything this keeps of the character, assigned whole by
     /// beginCharacter.
@@ -225,10 +290,38 @@ private:
         uint8_t shapeshiftForm = 0;
         uint8_t standState = 0;
         FlatFieldMap fields;
+        bool hasHomeBind = false;
+        uint32_t homeBindMapId = 0;
+        uint32_t homeBindZoneId = 0;
+        glm::vec3 homeBindPos{0.0f};  // canonical
+        uint64_t binderGuid = 0;
+        uint32_t weaponProficiency = 0;
+        uint32_t armorProficiency = 0;
+        std::array<MirrorTimer, 3> mirrorTimers{};
+        std::array<RuneSlot, 6> runes = [] {
+            std::array<RuneSlot, 6> r{};
+            r[2].type = r[3].type = RuneType::Unholy;
+            r[4].type = r[5].type = RuneType::Frost;
+            return r;
+        }();
+        bool barberShopOpen = false;
     };
 
     void handleLevelUp(network::Packet& packet);
     void handleStandStateUpdate(network::Packet& packet);
+    void handlePlayerBound(network::Packet& packet);
+    void handleBindPointUpdate(network::Packet& packet);
+    void handleStartMirrorTimer(network::Packet& packet);
+    void handleStopMirrorTimer(network::Packet& packet);
+    void handlePauseMirrorTimer(network::Packet& packet);
+    void handleConvertRune(network::Packet& packet);
+    void handleResyncRunes(network::Packet& packet);
+    void handleAddRunePower(network::Packet& packet);
+    void handleBarberShopResult(network::Packet& packet);
+    /// Announce a rune's type and readiness to the interface.
+    void announceRune(uint32_t index);
+    /// "Your home has been set to <zone>."
+    void announceHome(const char* lead, uint32_t zoneId);
     /// The level a per-level game table is read at: the player's, the last
     /// row past it.
     [[nodiscard]] uint32_t tableLevel() const;

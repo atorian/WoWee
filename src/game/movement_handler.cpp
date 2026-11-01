@@ -120,6 +120,23 @@ void MovementHandler::applyServerMovementSpeeds(float walk, float run, float run
 }
 
 void MovementHandler::registerOpcodes(DispatchTable& table) {
+    table[Opcode::SMSG_PLAYER_VEHICLE_DATA] = [this](network::Packet& packet) {
+        // PackedGuid (player guid) + uint32 vehicleId; 0 is the vehicle left.
+        if (!packet.hasRemaining(1)) {
+            LOG_WARNING("SMSG_PLAYER_VEHICLE_DATA is empty; the vehicle state does not change");
+            return;
+        }
+        (void)packet.readPackedGuid();
+        if (!packet.hasRemaining(4)) {
+            LOG_WARNING("SMSG_PLAYER_VEHICLE_DATA too short: no vehicle id after the guid; "
+                        "the vehicle is taken as left");
+        }
+        vehicleChanged(packet.hasRemaining(4) ? packet.readUInt32() : 0);
+    };
+    table[Opcode::SMSG_ON_CANCEL_EXPECTED_RIDE_VEHICLE_AURA] = [this](network::Packet& packet) {
+        vehicleChanged(0);
+        packet.skipAll();
+    };
     table[Opcode::SMSG_DISMOUNT] = [this](network::Packet& packet) { handleDismount(packet); };
     table[Opcode::SMSG_MOUNTRESULT] = [this](network::Packet& packet) { handleMountResult(packet); };
     table[Opcode::SMSG_DISMOUNTRESULT] = [this](network::Packet& packet) { handleDismountResult(packet); };
@@ -1047,7 +1064,7 @@ void MovementHandler::forceClearTaxiAndMovementState() {
     if (clearingTaxiMount) {
         mount_.displayId = 0;
     }
-    queries_.leftVehicle();
+    mount_.vehicleId = 0;
     // Death/resurrect state is intentionally NOT cleared here.
     // Previously this method reset 10 death-related fields despite being named
     // "forceClearTaxiAndMovementState", which could cancel pending resurrections
@@ -2475,7 +2492,7 @@ void MovementHandler::handleShowTaxiNodes(network::Packet& packet) {
     currentTaxiData_ = data;
     taxiNpcGuid_ = data.npcGuid;
     taxiWindowOpen_ = true;
-    queries_.closeGossip();
+    events_.publish(events::NpcWindowOpened{data.npcGuid});
     buildTaxiCostMap();
     auto it = taxiNodes_.find(data.nearestNode);
     if (it != taxiNodes_.end()) {
@@ -2778,7 +2795,7 @@ void MovementHandler::finishClientTaxiFlight(bool snapToFinalWaypoint) {
     // Some WotLK servers expose the taxi mount through vehicle data.
     // Clear that cached ID at landing so the dismount control does not
     // remain visible after the flight has completed.
-    queries_.leftVehicle();
+    mount_.vehicleId = 0;
     taxiClientPath_.clear();
     taxiDestNodeId_ = 0;
     taxiServerCompletionPending_ = false;
@@ -4666,7 +4683,27 @@ void MovementHandler::handleDismountResult(network::Packet& packet) {
 
 void MovementHandler::enteredWorld() {
     mount_.displayId = 0;
+    mount_.vehicleId = 0;
     events_.publish(events::PlayerMountChanged{0});
+}
+
+void MovementHandler::vehicleChanged(uint32_t vehicleId) {
+    const bool wasInVehicle = mount_.vehicleId != 0;
+    const bool nowInVehicle = vehicleId != 0;
+    mount_.vehicleId = vehicleId;
+    if (wasInVehicle == nowInVehicle) return;
+    events_.publish(events::VehicleStateChanged{nowInVehicle, vehicleId});
+    // The leave-vehicle button redraws on VEHICLE_UPDATE.
+    frameXml_.fireFrameXmlEvent("VEHICLE_UPDATE", {});
+    frameXml_.fireFrameXmlEvent(nowInVehicle ? "UNIT_ENTERED_VEHICLE" : "UNIT_EXITED_VEHICLE", {"player"});
+    frameXml_.fireFrameXmlEvent("UPDATE_BONUS_ACTIONBAR", {});
+}
+
+void MovementHandler::requestVehicleExit() {
+    if (!sender_.characterInWorld() || mount_.vehicleId == 0) return;
+    // CMSG_REQUEST_VEHICLE_EXIT has no payload - opcode only
+    sender_.send(network::Packet(wireOpcode(Opcode::CMSG_REQUEST_VEHICLE_EXIT)));
+    mount_.vehicleId = 0;  // Optimistically clear; the server confirms with SMSG_PLAYER_VEHICLE_DATA(0)
 }
 
 void MovementHandler::reconcileMount() {

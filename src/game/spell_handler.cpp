@@ -411,6 +411,9 @@ void SpellHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_REMOVED_SPELL] = [this](network::Packet& packet) { handleRemovedSpell(packet); };
     table[Opcode::SMSG_SEND_UNLEARN_SPELLS] = [this](network::Packet& packet) { handleUnlearnSpells(packet); };
     table[Opcode::SMSG_TALENTS_INFO] = [this](network::Packet& packet) { handleTalentsInfo(packet); };
+    table[Opcode::SMSG_TALENTS_INVOLUNTARILY_RESET] = [this](network::Packet& packet) {
+        handleTalentsInvoluntarilyReset(packet);
+    };
     // Server asks the player to confirm a talent reset (guid + gold cost).
     // Must be handled here: this handler owns the pending-wipe state that the
     // confirm dialog reads.
@@ -561,8 +564,8 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     // no aura, so there is nothing in the buff bar to right-click and this is
     // the only way to send one back - without it the button could only ever
     // summon, which is why pressing it again just produced the same critter.
-    if (spellId != 0 && spellId == character_.companionSpellId &&
-        character_.companionGuid != 0) {
+    if (spellId != 0 && spellId == companionSpellId_ &&
+        companionGuid_ != 0) {
         dismissCompanion();
         return;
     }
@@ -936,8 +939,7 @@ void SpellHandler::cancelCast() {
         auto packet = CancelCastPacket::build(currentCastSpellId_);
         sender_.send(packet);
     }
-    queries_.clearPendingGameObjectInteraction();
-    queries_.clearLastInteractedGameObject();
+    events_.publish(events::PlayerCastEnded{currentCastSpellId_, events::PlayerCastEnded::Outcome::Cancelled});
     casting_ = false;
     castIsChannel_ = false;
     currentCastSpellId_ = 0;
@@ -1545,8 +1547,7 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
     castIsChannel_ = false;
     currentCastSpellId_ = 0;
     castTimeRemaining_ = 0.0f;
-    queries_.clearLastInteractedGameObject();
-    queries_.clearPendingGameObjectInteraction();
+    events_.publish(events::PlayerCastEnded{data.spellId, events::PlayerCastEnded::Outcome::Failed});
     craftQueueSpellId_ = 0;
     craftQueueRemaining_ = 0;
     queuedSpellId_ = 0;
@@ -1785,16 +1786,11 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
         castTimeRemaining_ = 0.0f;
         castTimeTotal_ = 0.0f;
 
-        // Gather node looting: re-send CMSG_LOOT now that the cast completed.
-        if (wasInTimedCast && queries_.lastInteractedGameObject() != 0) {
-            LOG_DEBUG("[GO-DIAG] Sending CMSG_LOOT for GO 0x", std::hex,
-                        queries_.lastInteractedGameObject(), std::dec);
-            queries_.lootTarget(queries_.lastInteractedGameObject());
-        }
-        // Clear the GO interaction guard so future cancelCast() calls work
-        // normally. Without this, pendingGameObjectInteractGuid_ stays stale
-        // and suppresses CMSG_CANCEL_CAST for ALL subsequent spell casts.
-        queries_.clearPendingGameObjectInteraction();
+        // What waited on the cast goes on: a gather node or a chest opened by
+        // a timed cast is looted now, and the game object interaction ends -
+        // left standing, it suppressed CMSG_CANCEL_CAST for every later cast.
+        events_.publish(events::PlayerCastEnded{data.spellId, events::PlayerCastEnded::Outcome::WentOff,
+                                                wasInTimedCast});
 
         if (!rangedWeaponAttack && !restorationLoop) {
             announceCastAnimation(queries_.characterGuid(), false, false, SpellCastType::OMNI);
@@ -2360,13 +2356,12 @@ void SpellHandler::stopCasting() {
         sender_.send(packet);
     }
 
+    events_.publish(events::PlayerCastEnded{currentCastSpellId_, events::PlayerCastEnded::Outcome::Cancelled});
     casting_ = false;
     castIsChannel_ = false;
     currentCastSpellId_ = 0;
     castTimeRemaining_ = 0.0f;
     castTimeTotal_ = 0.0f;
-    queries_.clearPendingGameObjectInteraction();
-    queries_.clearLastInteractedGameObject();
     craftQueueSpellId_ = 0;
     craftQueueRemaining_ = 0;
     queuedSpellId_ = 0;
@@ -2376,6 +2371,7 @@ void SpellHandler::stopCasting() {
 }
 
 void SpellHandler::resetCastState() {
+    const uint32_t droppedSpellId = currentCastSpellId_;
     restorationActive_ = false;
     restorationSpellId_ = 0;
     restorationTimeRemaining_ = 0.0f;
@@ -2389,30 +2385,23 @@ void SpellHandler::resetCastState() {
     craftQueueRemaining_ = 0;
     queuedSpellId_ = 0;
     queuedSpellTarget_ = 0;
-    queries_.clearPendingGameObjectInteraction();
-    // lastInteractedGoGuid_ is intentionally NOT cleared here - it must survive
-    // until the server delivers SMSG_LOOT_RESPONSE after the cast completes.
-    // InventoryHandler::handleLootResponse() clears it once loot has opened
-    // (src/game/inventory_handler.cpp). Previously it was cleared here, which
-    // meant the client-side cast-timer fallback destroyed the guid before
-    // SMSG_SPELL_GO arrived, preventing loot from opening on quest chests.
+    // Reset, not Cancelled: the game object the cast was opening stays the
+    // one to loot until SMSG_LOOT_RESPONSE, because the client's own cast
+    // timer runs out before SMSG_SPELL_GO arrives and a reset there must not
+    // keep loot from opening on a quest chest.
+    events_.publish(events::PlayerCastEnded{droppedSpellId, events::PlayerCastEnded::Outcome::Reset});
 }
 
-void SpellHandler::resetAllState() {
-    character_ = {};
-    knownSpells_.clear();
-    spellBookTabsDirty_ = true;
-    spellCooldowns_.clear();
-    spellCooldownTotals_.clear();
-    playerAuras_.clear();
-    targetAuras_.clear();
-    unitAurasCache_.clear();
-    unitCastStates_.clear();
-    resetCastState();
-    resetTalentState();
+void SpellHandler::setSkillCategoryCollapsed(uint32_t categoryId, bool collapsed) {
+    if (categoryId == 0) return;
+    if (collapsed) collapsedSkillCategories_.insert(categoryId);
+    else           collapsedSkillCategories_.erase(categoryId);
 }
 
-void SpellHandler::resetTalentState() {
+void SpellHandler::handleTalentsInvoluntarilyReset(network::Packet& packet) {
+    // The talents and glyphs as they were are gone; the server sends the new
+    // ones. talentsInitialized_ goes too, so the next SMSG_TALENTS_INFO sets
+    // the active spec.
     talentsInitialized_ = false;
     learnedTalents_[0].clear();
     learnedTalents_[1].clear();
@@ -2421,6 +2410,12 @@ void SpellHandler::resetTalentState() {
     unspentTalentPoints_[0] = 0;
     unspentTalentPoints_[1] = 0;
     activeTalentSpec_ = 0;
+    raiseUiError("Your talents have been reset by the server.");
+    chat_.addSystemChatMessage("Your talents have been reset by the server.");
+    // The talent frame rebuilds from this; nothing else tells it the trees
+    // it drew are gone.
+    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("TALENTS_INVOLUNTARILY_RESET", {});
+    packet.skipAll();
 }
 
 void SpellHandler::clearUnitCaches() {
@@ -3194,8 +3189,8 @@ int SpellHandler::recipeDifficulty(uint32_t spellId) const {
     if (!recipe) return 0;
     // No thresholds means the recipe never greys out.
     if (recipe->trivialSkillHigh == 0 && recipe->trivialSkillLow == 0) return 0;
-    const auto skill = character_.skills.find(skillLineOfSpell(spellId));
-    if (skill == character_.skills.end()) return 0;
+    const auto skill = skills_.find(skillLineOfSpell(spellId));
+    if (skill == skills_.end()) return 0;
     const uint32_t value = skill->second.effectiveValue();
     if (value >= recipe->trivialSkillHigh) return 3;
     if (value >= recipe->trivialSkillLow) return 2;
@@ -3238,21 +3233,21 @@ std::vector<CraftRecipe> SpellHandler::craftingRecipes() const {
 
 int32_t SpellHandler::spellFlatMod(SpellModOp op) const {
     int32_t total = 0;
-    for (const auto& [key, value] : character_.flatMods)
+    for (const auto& [key, value] : flatMods_)
         if (key.op == op) total += value;
     return total;
 }
 
 int32_t SpellHandler::spellPctMod(SpellModOp op) const {
     int32_t total = 0;
-    for (const auto& [key, value] : character_.pctMods)
+    for (const auto& [key, value] : pctMods_)
         if (key.op == op) total += value;
     return total;
 }
 
 const TotemSlot& SpellHandler::totemSlot(int slot) const {
     static const TotemSlot kEmptyTotem;
-    return (slot >= 0 && slot < kTotemSlots) ? character_.totems[slot] : kEmptyTotem;
+    return (slot >= 0 && slot < kTotemSlots) ? totems_[slot] : kEmptyTotem;
 }
 
 // ============================================================
@@ -3437,8 +3432,8 @@ void SpellHandler::extractSkillFields(const FlatFieldMap& fields) {
 
     for (const auto& [skillId, skill] : newSkills) {
         if (skill.value == 0) continue;
-        auto oldIt = character_.skills.find(skillId);
-        if (oldIt != character_.skills.end() && skill.value > oldIt->second.value) {
+        auto oldIt = skills_.find(skillId);
+        if (oldIt != skills_.end() && skill.value > oldIt->second.value) {
             auto catIt = skillLineCategories_.find(skillId);
             if (catIt != skillLineCategories_.end()) {
                 uint32_t category = catIt->second;
@@ -3453,17 +3448,17 @@ void SpellHandler::extractSkillFields(const FlatFieldMap& fields) {
         }
     }
 
-    bool skillsChanged = (newSkills.size() != character_.skills.size());
+    bool skillsChanged = (newSkills.size() != skills_.size());
     if (!skillsChanged) {
         for (const auto& [id, sk] : newSkills) {
-            auto it = character_.skills.find(id);
-            if (it == character_.skills.end() || it->second.value != sk.value) {
+            auto it = skills_.find(id);
+            if (it == skills_.end() || it->second.value != sk.value) {
                 skillsChanged = true;
                 break;
             }
         }
     }
-    character_.skills = std::move(newSkills);
+    skills_ = std::move(newSkills);
     if (skillsChanged)
         frameXml_.fireFrameXmlEvent("SKILL_LINES_CHANGED", {});
 }
@@ -3472,8 +3467,8 @@ void SpellHandler::extractExploredZoneFields(const FlatFieldMap& fields) {
     const size_t zoneCount = std::min<size_t>(queries_.packetParsers().exploredZonesCount(),
                                               kExploredZoneMaskCount);
 
-    if (character_.exploredZones.size() != kExploredZoneMaskCount) {
-        character_.exploredZones.assign(kExploredZoneMaskCount, 0u);
+    if (exploredZones_.size() != kExploredZoneMaskCount) {
+        exploredZones_.assign(kExploredZoneMaskCount, 0u);
     }
 
     bool foundAny = false;
@@ -3481,15 +3476,15 @@ void SpellHandler::extractExploredZoneFields(const FlatFieldMap& fields) {
         const uint16_t fieldIdx = static_cast<uint16_t>(fieldIndex(UF::PLAYER_EXPLORED_ZONES_START) + i);
         auto it = fields.find(fieldIdx);
         if (it == fields.end()) continue;
-        character_.exploredZones[i] = it->second;
+        exploredZones_[i] = it->second;
         foundAny = true;
     }
     for (size_t i = zoneCount; i < kExploredZoneMaskCount; i++) {
-        character_.exploredZones[i] = 0u;
+        exploredZones_[i] = 0u;
     }
 
     if (foundAny) {
-        character_.hasExploredZones = true;
+        hasExploredZones_ = true;
     }
 }
 
@@ -3517,8 +3512,7 @@ void SpellHandler::handleCastResult(network::Packet& packet) {
             const uint64_t gatherGoGuid = queries_.lastInteractedGameObject();
             const bool gatherCast = gatherGoGuid != 0 && isGatherSpellId(castResultSpellId);
             casting_ = false; castIsChannel_ = false; currentCastSpellId_ = 0; castTimeRemaining_ = 0.0f;
-            queries_.clearLastInteractedGameObject();
-            queries_.clearPendingGameObjectInteraction();
+            events_.publish(events::PlayerCastEnded{castResultSpellId, events::PlayerCastEnded::Outcome::Failed});
             craftQueueSpellId_ = 0; craftQueueRemaining_ = 0;
             queuedSpellId_ = 0; queuedSpellTarget_ = 0;
             int playerPowerType = -1;
@@ -3611,7 +3605,7 @@ void SpellHandler::handlePlaySpellVisual(network::Packet& packet) {
 }
 
 void SpellHandler::handleSpellModifier(network::Packet& packet, bool isFlat) {
-    auto& modMap = isFlat ? character_.flatMods : character_.pctMods;
+    auto& modMap = isFlat ? flatMods_ : pctMods_;
     while (packet.hasRemaining(6)) {
         uint8_t groupIndex = packet.readUInt8();
         uint8_t modOpRaw   = packet.readUInt8();
@@ -3805,10 +3799,10 @@ void SpellHandler::handleSpellFailure(network::Packet& packet) {
         }
     }
     if (failGuid == queries_.characterGuid() || failGuid == 0) {
-        // Player's own cast failed - clear gather-node loot target so the
-        // next timed cast doesn't try to loot a stale interrupted gather node.
+        // Player's own cast failed: the game object it was opening is not
+        // looted when the next timed cast goes off.
+        events_.publish(events::PlayerCastEnded{currentCastSpellId_, events::PlayerCastEnded::Outcome::Failed});
         casting_ = false; castIsChannel_ = false; currentCastSpellId_ = 0;
-        queries_.clearLastInteractedGameObject();
         craftQueueSpellId_ = 0;
         craftQueueRemaining_ = 0;
         queuedSpellId_ = 0;
@@ -3912,9 +3906,9 @@ void SpellHandler::handleTotemCreated(network::Packet& packet) {
     LOG_DEBUG("SMSG_TOTEM_CREATED: slot=", static_cast<int>(slot),
               " spellId=", spellId, " duration=", duration, "ms");
     if (slot < kTotemSlots) {
-        character_.totems[slot].spellId    = spellId;
-        character_.totems[slot].durationMs = duration;
-        character_.totems[slot].placedAt   = std::chrono::steady_clock::now();
+        totems_[slot].spellId    = spellId;
+        totems_[slot].durationMs = duration;
+        totems_[slot].placedAt   = std::chrono::steady_clock::now();
         // The totem bar draws each slot from its start and duration, and
         // refreshes on this alone - without it a totem is placed and the bar
         // goes on showing whatever was there before.
@@ -4739,26 +4733,26 @@ void SpellHandler::companionFieldsArrived(const FlatFieldMap& blockFields) {
     if (loIt == blockFields.end() && hiIt == blockFields.end()) return;
 
     const uint32_t lo = (loIt != blockFields.end()) ? loIt->second
-                                                     : static_cast<uint32_t>(character_.companionGuid);
+                                                     : static_cast<uint32_t>(companionGuid_);
     const uint32_t hi = (hiIt != blockFields.end())
                             ? hiIt->second
-                            : static_cast<uint32_t>(character_.companionGuid >> 32);
+                            : static_cast<uint32_t>(companionGuid_ >> 32);
     const uint64_t critterGuid = (static_cast<uint64_t>(hi) << 32) | lo;
-    if (critterGuid == character_.companionGuid) return;
+    if (critterGuid == companionGuid_) return;
 
     if (critterGuid == 0) {
         LOG_INFO("Companion dismissed: was guid=0x", std::hex,
-                 character_.companionGuid, std::dec);
-        character_.companionGuid = 0;
-        character_.companionSpellId = 0;
+                 companionGuid_, std::dec);
+        companionGuid_ = 0;
+        companionSpellId_ = 0;
         return;
     }
     // Attribute it to the spell just cast from the ground, the same way the
     // mount aura is identified - a blind guess at "some spell" would make the
     // toggle fire on the wrong button.
     const uint32_t summonedBy = lastGroundCastSpellId_;
-    character_.companionGuid = critterGuid;
-    character_.companionSpellId = summonedBy;
+    companionGuid_ = critterGuid;
+    companionSpellId_ = summonedBy;
     LOG_INFO("Companion summoned: guid=0x", std::hex, critterGuid, std::dec,
              " by spell=", summonedBy);
 }
@@ -4766,9 +4760,9 @@ void SpellHandler::companionFieldsArrived(const FlatFieldMap& blockFields) {
 void SpellHandler::dismissCompanion() {
     if (!sender_.characterInWorld()) return;
     if (wireOpcode(Opcode::CMSG_DISMISS_CRITTER) == 0xFFFF) return;   // expansion has no such opcode
-    sender_.send(DismissCritterPacket::build(character_.companionGuid));
-    LOG_INFO("Dismissing companion: guid=0x", std::hex, character_.companionGuid, std::dec,
-             " summonedBy=", character_.companionSpellId);
+    sender_.send(DismissCritterPacket::build(companionGuid_));
+    LOG_INFO("Dismissing companion: guid=0x", std::hex, companionGuid_, std::dec,
+             " summonedBy=", companionSpellId_);
     // The server confirms by clearing the critter field; leave the local state
     // alone so a refused dismiss does not leave the client thinking it worked.
 }

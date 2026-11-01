@@ -178,7 +178,7 @@ TEST_CASE("A stable master's list is asked for, and refreshed after a change whi
     std::vector<uint8_t> results;
     auto sub = bus.subscribe<StableResult>([&](const StableResult& e) { results.push_back(e.result); });
     service.buyStableSlot();                // no stable master yet: nothing to ask
-    service.setStableMaster(77);
+    service.onStableMasterChosen(77);
     service.requestStabledPetList();
     service.onStableResult(0x01);           // window not open yet: no refresh
     service.onStableList(77, 2, {});
@@ -195,7 +195,7 @@ TEST_CASE("A pet is stabled only when one is out, and the player is told when no
     PetService service{gateway, bus};
     int refused = 0;
     auto sub = bus.subscribe<NoPetToStable>([&](const auto&) { ++refused; });
-    service.setStableMaster(77);
+    service.onStableMasterChosen(77);
     service.stablePet(2);
     CHECK(refused == 1);
     service.onPetSpells(wolf({}));

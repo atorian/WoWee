@@ -303,10 +303,12 @@ public:
     static std::vector<uint8_t> loginVerifyWorldBody(const PlayerSpec& player);
     /// SMSG_UPDATE_OBJECT with one block creating an object of `type` with
     /// these update fields (by index in the active table): a unit or a player
-    /// alive at the position, anything else with no movement block.
+    /// alive at the position and facing (server coordinates), anything else
+    /// with no movement block.
     static std::vector<uint8_t> createObjectBody(uint64_t guid, game::ObjectType type,
                                                  std::vector<std::pair<uint16_t, uint32_t>> fields,
-                                                 float x = 0.0f, float y = 0.0f, float z = 0.0f);
+                                                 float x = 0.0f, float y = 0.0f, float z = 0.0f,
+                                                 float orientation = 0.0f);
 
     /// Update fields by index, as an SMSG_UPDATE_OBJECT block carries them.
     using Fields = std::map<uint16_t, uint32_t>;

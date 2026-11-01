@@ -68,6 +68,7 @@ namespace wowee::game {
     class AccountDataHandler;
     class RealmTimeHandler;
     class WeatherHandler;
+    namespace events { struct PlayerCastEnded; }
 }
 
 namespace wowee {
@@ -207,7 +208,6 @@ public:
     void resetCastState() override { spellHandler_->resetCastState(); }
     uint32_t lastGroundCastSpellId() const override { return spellHandler_->getLastGroundCastSpellId(); }
     void forgetPlayerAura(uint32_t spellId) override { spellHandler_->forgetPlayerAura(spellId); }
-    void leftVehicle() override { vehicleId_ = 0; }
     void arrivedOnMap(uint32_t mapId) override { currentMapId_ = mapId; }
     void traceWorldPackets(std::chrono::seconds duration, const char* label) override;
     void tearDownWorldForTransfer(uint32_t mapId) override;
@@ -275,8 +275,8 @@ public:
     bool questWantsItem(uint32_t itemId) const override;
     bool actionBarHoldsItem() const override;
     void coinageFieldFoundAt(uint16_t index) override;
-    // cancelCast, dismount, closeGossip and runInterfaceCommand are
-    // InventoryQueries' too, declared with the rest of their kind below.
+    // cancelCast, dismount and runInterfaceCommand are InventoryQueries'
+    // too, declared with the rest of their kind below.
 
     // PetQueries (spellName is InventoryQueries' too)
     bool nameUnitInView(uint64_t guid, const std::string& name) override;
@@ -284,7 +284,7 @@ public:
     // SpellQueries. The ones InventoryQueries shares (characterGuid,
     // entities, packetParsers, mounted, ...) are above; the ones this class
     // already had under the same name (sendMovement, setStandState,
-    // startAutoAttack, lootTarget, addCombatText, ...) are marked override
+    // startAutoAttack, addCombatText, ...) are marked override
     // where they are declared.
     uint64_t focusTargetGuid() const override { return combatHandler_->getFocusGuid(); }
     uint64_t petGuid() const override;
@@ -318,8 +318,6 @@ public:
     bool awaitingItemTarget() const override { return inventoryHandler_->isAwaitingItemTarget(); }
     uint64_t pendingGameObjectInteraction() const override { return pendingGameObjectInteractGuid_; }
     uint64_t lastInteractedGameObject() const override { return lastInteractedGoGuid_; }
-    void clearPendingGameObjectInteraction() override { pendingGameObjectInteractGuid_ = 0; }
-    void clearLastInteractedGameObject() override { lastInteractedGoGuid_ = 0; }
     std::optional<HomeBind> homeBind() const override;
     std::string achievementName(uint32_t achievementId) override;
     achievement::IAchievementsFeed* achievementsFeed() override;
@@ -338,18 +336,14 @@ public:
     std::optional<uint32_t> guildRankRights() const override;
     std::string languageName(uint32_t languageId) const override { return getLanguageName(languageId); }
 
-    // QuestQueries (the shared ones are above; closeVendor is declared with
-    // the vendor's facade).
+    // QuestQueries (the shared ones are above).
     bool inGroup() const override;
-    void setResting(bool resting) override { playerHandler_->restStateArrived(resting); }
     std::string creatureName(uint32_t entry) const override { return queryCacheHandler_->getCachedCreatureName(entry); }
     void requestCreatureInfo(uint32_t entry) override { queryCacheHandler_->queryCreatureInfo(entry, 0); }
     void requestGameObjectInfo(uint32_t entry) override { queryCacheHandler_->queryGameObjectInfo(entry, 0); }
     void requestGameObjectInfo(uint32_t entry, uint64_t guid) override {
         queryCacheHandler_->queryGameObjectInfo(entry, guid);
     }
-    void vendorCanRepair() override { inventoryHandler_->setVendorCanRepair(true); }
-    void openedStableMaster(uint64_t npcGuid) override;
 
     // SocialQueries (the ones shared with the other handlers are above).
     bool battlegroundMap(uint32_t mapId) override { return isBattlegroundMap(mapId); }
@@ -382,6 +376,7 @@ public:
     void bankBagSlotsArrived(uint8_t slots) override;
     void chosenTitleArrived(int32_t title) override;
     void playerFlagsArrived(uint32_t flags, FrameXmlEvents& packetEvents) override;
+    std::string unitName(uint64_t guid) const override { return queryCacheHandler_->lookupName(guid); }
 
     // QueryCacheQueries (packetParsers and entities are above)
     void playerNameArrived(uint64_t guid, const std::string& name) override;
@@ -539,6 +534,12 @@ public:
      * @param characterGuid GUID of character to log in with
      */
     void selectCharacter(uint64_t characterGuid);
+    /// Enters the world with `character` and no realm, the way a login does:
+    /// the character begins as selectCharacter begins it, and the world entry
+    /// SMSG_LOGIN_VERIFY_WORLD makes runs from where the character stands
+    /// (its position in server coordinates). For scene replay and the offline
+    /// benchmarks; refused while connected to a world server.
+    void enterWorldOffline(const Character& character);
     void setActiveCharacterGuid(uint64_t guid) { activeCharacterGuid_ = guid; }
     uint64_t getActiveCharacterGuid() const { return activeCharacterGuid_; }
     const Character* getActiveCharacter() const;
@@ -549,12 +550,13 @@ public:
     const MovementInfo& getMovementInfo() const { return movementInfo; }
     uint32_t getCurrentMapId() const { return currentMapId_; }
     bool getHomeBind(uint32_t& mapId, glm::vec3& pos) const {
-        if (!hasHomeBind_) return false;
-        mapId = homeBindMapId_;
-        pos = homeBindPos_;
+        const auto home = playerHandler_->homeBind();
+        if (!home) return false;
+        mapId = home->mapId;
+        pos = home->position;
         return true;
     }
-    uint32_t getHomeBindZoneId() const { return homeBindZoneId_; }
+    uint32_t getHomeBindZoneId() const { return playerHandler_->homeBindZoneId(); }
 
     /**
      * Send a movement packet
@@ -591,7 +593,7 @@ public:
     /// The innkeeper whose bind confirmation is open, and the trainer whose
     /// talent-wipe confirmation is. Both dialogs close themselves when the
     /// player walks out of range, which is the only thing these answer.
-    uint64_t getBinderGuid() const { return binderGuid_; }
+    uint64_t getBinderGuid() const { return playerHandler_->binderGuid(); }
 
     EntityManager& getEntityManager() { return worldHandler_->getEntityManager(); }
     const EntityManager& getEntityManager() const { return worldHandler_->getEntityManager(); }
@@ -604,8 +606,6 @@ public:
      */
     /// Tell the server whether to pass on every loot roll for us.
     void sendOptOutOfLoot(bool optOut);
-    /// Announce a rune's type and readiness to the interface.
-    void fireRuneUpdate(uint32_t index);
     /// The members of a chat channel, as of the last list requested for it.
     const std::vector<ChannelMember>& getChannelRoster(const std::string& channel) const;
 
@@ -779,10 +779,10 @@ public:
     // Player proficiency bitmasks (from SMSG_SET_PROFICIENCY)
     // itemClass 2 = Weapon (subClassMask bits: 0=Axe1H,1=Axe2H,2=Bow,3=Gun,4=Mace1H,5=Mace2H,6=Polearm,7=Sword1H,8=Sword2H,10=Staff,13=Fist,14=Misc,15=Dagger,16=Thrown,17=Crossbow,18=Wand,19=Fishing)
     // itemClass 4 = Armor (subClassMask bits: 1=Cloth,2=Leather,3=Mail,4=Plate,6=Shield)
-    uint32_t getWeaponProficiency() const { return weaponProficiency_; }
-    uint32_t getArmorProficiency()  const { return armorProficiency_; }
-    bool canUseWeaponSubclass(uint32_t subClass) const { return (weaponProficiency_ >> subClass) & 1u; }
-    bool canUseArmorSubclass(uint32_t subClass)  const { return (armorProficiency_  >> subClass) & 1u; }
+    uint32_t getWeaponProficiency() const { return playerHandler_->weaponProficiency(); }
+    uint32_t getArmorProficiency()  const { return playerHandler_->armorProficiency(); }
+    bool canUseWeaponSubclass(uint32_t subClass) const { return (getWeaponProficiency() >> subClass) & 1u; }
+    bool canUseArmorSubclass(uint32_t subClass)  const { return (getArmorProficiency() >> subClass) & 1u; }
 
     // Minimap pings from party members
     using MinimapPing = game::MinimapPing;
@@ -827,9 +827,11 @@ public:
 
     // Player skills
     bool isSkillCategoryCollapsed(uint32_t categoryId) const {
-        return collapsedSkillCategories_.count(categoryId) > 0;
+        return spellHandler_->isSkillCategoryCollapsed(categoryId);
     }
-    void setSkillCategoryCollapsed(uint32_t categoryId, bool collapsed);
+    void setSkillCategoryCollapsed(uint32_t categoryId, bool collapsed) {
+        spellHandler_->setSkillCategoryCollapsed(categoryId, collapsed);
+    }
 
     void unstuck();
     void unstuckGy();
@@ -897,8 +899,8 @@ public:
     void setPlayerGuid(uint64_t guid) { playerGuid = guid; }
 
     // Barber shop
-    bool isBarberShopOpen() const { return barberShopOpen_; }
-    void closeBarberShop() { barberShopOpen_ = false; fireAddonEvent("BARBER_SHOP_CLOSE", {}); }
+    bool isBarberShopOpen() const { return playerHandler_->barberShopOpen(); }
+    void closeBarberShop() { playerHandler_->closeBarberShop(); }
 
     /// The bind-or-leave prompt raised on entering an instance in progress.
     /// False when nothing is pending, in which case the out-params are
@@ -920,7 +922,7 @@ public:
     // ---- Loot ----
     /// Asked by the spell handler once a gather or an opening finishes, and by
     /// the deferred open of a used game object.
-    void lootTarget(uint64_t guid) override;
+    void lootTarget(uint64_t guid);
     void scheduleGameObjectLootOpen(uint64_t guid, float delaySeconds = 0.35f, uint8_t attempts = 1);
 
     /// True once the object is known to be a fishing school. A click on one
@@ -955,7 +957,7 @@ public:
     void interactWithNpc(uint64_t guid);
     void interactWithGameObject(uint64_t guid);
     uint64_t getHookedFishingBobberGuid() const { return hookedFishingBobberGuid_; }
-    void closeGossip() override;
+    void closeGossip();
 
     // Quest log
     using QuestLogEntry = QuestHandler::QuestLogEntry;
@@ -990,70 +992,10 @@ public:
     // have to agree - they are one table here for that reason. Four copies of
     // this list had accumulated across three files and the fourth said
     // "FATIGUE", which is not one of the four keys mirrortimer.lua defines.
-    static constexpr const char* kMirrorTimerNames[3] =
-        {"EXHAUSTION", "BREATH", "FEIGNDEATH"};
-    static constexpr const char* kMirrorTimerLabels[3] =
-        {"Exhaustion", "Breath", "Feign Death"};
-
-    struct MirrorTimer {
-        int32_t value    = 0;
-        int32_t maxValue = 0;
-        int32_t scale    = 0;     // +1 = counting up, -1 = counting down
-        bool    paused   = false;
-        bool    active   = false;
-        float   pendingMs = 0.0f; // sub-millisecond carry for the local countdown
-    };
-    const MirrorTimer& getMirrorTimer(int type) const {
-        static MirrorTimer empty;
-        return (type >= 0 && type < 3) ? mirrorTimers_[type] : empty;
-    }
-    /**
-     * Count the mirror timers (breath, fatigue, feign death) down locally.
-     *
-     * The server sends SMSG_START_MIRROR_TIMER once with the remaining time and a
-     * scale, then only speaks again when something changes - so without this the
-     * breath bar just sits at whatever value it was handed and never moves.
-     * scale is ms of timer per ms of real time: -1 while drowning, +1 while the
-     * bar refills at the surface.
-     */
-    void tickMirrorTimers(float dt) {
-        if (dt <= 0.0f) return;
-        const float elapsedMs = dt * 1000.0f;
-        for (size_t ti = 0; ti < 3; ++ti) {
-            auto& t = mirrorTimers_[ti];
-            if (!t.active || t.paused || t.scale == 0 || t.maxValue <= 0) continue;
-            // Carry the sub-millisecond remainder: truncating each frame would lose
-            // most of a 144fps frame's 6.94ms and run the timer visibly slow.
-            t.pendingMs += elapsedMs;
-            const int32_t wholeMs = static_cast<int32_t>(t.pendingMs);
-            if (wholeMs == 0) continue;
-            t.pendingMs -= static_cast<float>(wholeMs);
-            t.value = std::clamp(t.value + t.scale * wholeMs, 0, t.maxValue);
-            // Refilled, so it is over. The server does not say so at this
-            // point: on surfacing it sends one update with a positive scale
-            // and then nothing until its own counter reaches full, which is
-            // several seconds later. Without this the bar climbs to full and
-            // sits there at a hundred percent in the meantime, which is what
-            // "the breath meter will not go away" looks like.
-            //
-            // Only when refilling. A drowning bar reaching zero is not over -
-            // that is when the damage starts, and the server keeps it up.
-            if (t.scale > 0 && t.value >= t.maxValue) {
-                t.active = false;
-                t.pendingMs = 0.0f;
-                // And say so. Clearing the flag only put away the bar this
-                // client draws, and the player frame is handed over - which
-                // means MirrorTimer1..3 are not suppressed and the bar actually
-                // on screen is FrameXML's. It hides on MIRROR_TIMER_STOP and
-                // nothing else, so without this it sat there full for good.
-                //
-                // Named rather than numbered, as the packet handler does:
-                // MirrorTimer_Hide matches on the timer's name.
-                fireAddonEvent("MIRROR_TIMER_STOP",
-                               {ti < 3 ? kMirrorTimerNames[ti] : "BREATH"});
-            }
-        }
-    }
+    static constexpr const auto& kMirrorTimerNames = game::kMirrorTimerNames;
+    static constexpr const auto& kMirrorTimerLabels = game::kMirrorTimerLabels;
+    using MirrorTimer = game::MirrorTimer;
+    const MirrorTimer& getMirrorTimer(int type) const { return playerHandler_->mirrorTimer(type); }
 
     /// Which extra action bar the current form or stance uses, or 0 for none.
     ///
@@ -1064,13 +1006,9 @@ public:
     uint32_t getBonusActionBarOffset() const;
 
     // Death Knight rune state (6 runes: 0-1=Blood, 2-3=Unholy, 4-5=Frost; may become Death=3)
-    enum class RuneType : uint8_t { Blood = 0, Unholy = 1, Frost = 2, Death = 3 };
-    struct RuneSlot {
-        RuneType type = RuneType::Blood;
-        bool     ready = true;          // Server-confirmed ready state
-        float    readyFraction = 1.0f;  // 0.0=depleted → 1.0=full (from server sync)
-    };
-    const std::array<RuneSlot, 6>& getPlayerRunes() const { return playerRunes_; }
+    using RuneType = game::RuneType;
+    using RuneSlot = game::RuneSlot;
+    const std::array<RuneSlot, 6>& getPlayerRunes() const { return playerHandler_->runes(); }
 
     // Talent-driven spell modifiers (SMSG_SET_FLAT_SPELL_MODIFIER /
     // SMSG_SET_PCT_SPELL_MODIFIER), kept by the spell book.
@@ -1244,12 +1182,12 @@ public:
     using TaxiPathNode = MovementHandler::TaxiPathNode;
 
     // Vehicle (WotLK)
-    bool isInVehicle() const { return vehicleId_ != 0; }
-    uint32_t getVehicleId() const { return vehicleId_; }
+    bool isInVehicle() const { return movementHandler_->isInVehicle(); }
+    uint32_t getVehicleId() const { return movementHandler_->vehicleId(); }
     void sendRequestVehicleExit();
 
     // Vendor
-    void closeVendor() override;
+    void closeVendor();
 
     // Item-targeted item use: sharpening stones, weightstones and weapon oils enchant
     // another item, so using one arms a targeting cursor instead of casting immediately.
@@ -1268,29 +1206,14 @@ public:
     /// things ask for it now: this client's own bag screen and the interface's
     /// SortBags(). One queue, drained a swap per tick - the server refuses a
     /// burst of them, and a sort is dozens.
-    void sortBags();
-    /// Send these one per tick rather than all at once.
-    ///
-    /// The server's flood protection drops a burst, which for a sequence of
-    /// dot-commands means most of it silently does not happen. Same reason
-    /// sortBags has a queue, and the same drain beside it.
-    void queuePacedChat(std::vector<std::string> lines);
+    void sortBags() { inventoryHandler_->sortBags(); }
+    /// Send these one per tick rather than all at once. See ChatHandler.
+    void queuePacedChat(std::vector<std::string> lines) { chatHandler_->queuePacedChat(std::move(lines)); }
 
     /// Whether a sort is still sending. The button reads it to disable itself.
-    /// One item sort at a time, whichever container it is over.
-    ///
-    /// Bags and the bank both move items with CMSG_SWAP_ITEM and the server
-    /// takes them one at a time, so they share a queue rather than racing two.
-    bool isSortingItems() const { return !sortSwapQueue_.empty(); }
-    /// The bank, main slots and bank bags together. Mirrors sortBags: merge
-    /// partial stacks, plan the swaps against the merged layout, show the
-    /// result at once locally, and let the queue tell the server over the
-    /// following ticks.
-    void sortBank(int mainSlotCount);
-    /// One bank bag, leaving the rest of the bank alone. No stack merging:
-    /// pouring partials together across the bank is what Sort All is for, and
-    /// doing it here would move items out of the bag being sorted.
-    void sortBankBag(int bagIndex);
+    bool isSortingItems() const { return inventoryHandler_->isSortingItems(); }
+    void sortBank(int mainSlotCount) { inventoryHandler_->sortBank(mainSlotCount); }
+    void sortBankBag(int bagIndex) { inventoryHandler_->sortBankBag(bagIndex); }
 
     // ---- Item socketing ----
     // Flat accessors rather than the session struct: InventoryHandler is only
@@ -1599,6 +1522,10 @@ private:
      * Handle SMSG_LOGIN_VERIFY_WORLD from server
      */
     void handleLoginVerifyWorld(network::Packet& packet);
+    /// What selectCharacter does to begin a character, short of logging in.
+    void beginCharacterSession(uint64_t characterGuid);
+    /// What SMSG_LOGIN_VERIFY_WORLD does once read: the world entry itself.
+    void enterWorld(const LoginVerifyWorldData& data);
 
     /**
      * Handle SMSG_CLIENTCACHE_VERSION from server
@@ -1745,10 +1672,6 @@ private:
     // Player GUID and map
     uint64_t playerGuid = 0;
     uint32_t currentMapId_ = 0;
-    bool hasHomeBind_ = false;
-    uint32_t homeBindMapId_ = 0;
-    uint32_t homeBindZoneId_ = 0;
-    glm::vec3 homeBindPos_{0.0f};
 
     // ---- World state and faction initialization snapshots ----
     uint32_t worldStateMapId_ = 0;
@@ -1763,14 +1686,9 @@ private:
 
     // Items, coin, books and the equipment of players in view are the
     // inventory's (InventoryHandler); none of it is kept here.
-    /// The innkeeper that asked "make this your home?". SMSG_BINDER_CONFIRM
-    /// names it and the answer has to go back to the same one.
-    uint64_t binderGuid_ = 0;
 
     // Transport tracking
     std::unique_ptr<TransportManager> transportManager_;  // Transport movement manager
-    uint32_t weaponProficiency_ = 0;  // bitmask from SMSG_SET_PROFICIENCY itemClass=2
-    uint32_t armorProficiency_  = 0;  // bitmask from SMSG_SET_PROFICIENCY itemClass=4
     uint64_t pendingGameObjectInteractGuid_ = 0;
     // Owned fishing bobber whose bite animation has fired. Keeping this explicit
     // lets the UI target/reel it even while GAMEOBJECT_QUERY metadata is pending.
@@ -1781,18 +1699,8 @@ private:
     // (which re-casts the next queued item) before giving up
     float craftCastGoGraceSec_ = 0.0f;
 
-    // Mirror timers (0=fatigue, 1=breath, 2=feigndeath)
-    MirrorTimer mirrorTimers_[3];
-
-
-
-
-
     uint64_t activeCharacterGuid_ = 0;
     Race playerRace_ = Race::HUMAN;
-
-    // Barber shop
-    bool barberShopOpen_ = false;
 
     // ---- Loot ----
     bool autoFaceTarget_ = false;
@@ -1809,6 +1717,8 @@ private:
     uint64_t lastInteractedGoGuid_ = 0;
 
     void performGameObjectInteractionNow(uint64_t guid);
+    /// The player's cast ended: what the game object interaction waited on.
+    void gameObjectCastEnded(const events::PlayerCastEnded& ended);
 
     // Quest turn-in
     // (pending quest accept timeout state lives in QuestHandler)
@@ -1818,17 +1728,12 @@ private:
     // written by setSelectedQuestLogIndex, read by nobody, while the getter went
     // to the QuestHandler - and has been removed.
     std::unordered_set<uint32_t> blobQuestIds_;
-    bool pendingLoginQuestResync_ = false;
-    float pendingLoginQuestResyncTimeout_ = 0.0f;
 
 
     // Faction hostility lookup (populated from FactionTemplate.dbc)
     std::unordered_map<uint32_t, bool> factionHostileMap_;
     std::unordered_map<uint32_t, bool> factionFriendlyMap_;
     std::unordered_map<uint32_t, uint32_t> factionTemplateRepList_;
-
-    // Vehicle (WotLK): non-zero when player is seated in a vehicle
-    uint32_t vehicleId_ = 0;
 
     /// Read once on the first ask, like the other DBC-backed caches here.
     mutable std::unordered_map<uint32_t, ExtendedCostEntry> extendedCostCache_;
@@ -1841,12 +1746,6 @@ private:
     bool battlemasterListLoaded_ = false;
     bool glyphPropertiesLoaded_ = false;
     std::unordered_map<uint32_t, uint32_t> glyphSpellCache_;
-
-    /// Sort moves still to send, one per tick. See sortBags.
-    std::deque<Inventory::SwapOp> sortSwapQueue_;
-
-    /// Chat lines still to send, one per tick. See queuePacedChat.
-    std::deque<std::string> pacedChatQueue_;
 
     // Area name cache (lazy-loaded from WorldMapArea.dbc; maps AreaTable ID → display name)
     mutable std::unordered_map<uint32_t, std::string> areaNameCache_;
@@ -1889,24 +1788,6 @@ private:
     float pendingDeleteTimer_ = 0.0f;
     bool pendingDeleteFallbackEnum_ = false;
 
-    // Warden module download state
-    enum class WardenState {
-        WAIT_MODULE_USE,     // Waiting for first SMSG (MODULE_USE)
-        WAIT_MODULE_CACHE,   // Sent MODULE_MISSING, receiving module chunks
-        WAIT_HASH_REQUEST,   // Module received, waiting for HASH_REQUEST
-        WAIT_CHECKS,         // Hash sent, waiting for check requests
-    };
-
-    // Pre-computed challenge/response entries from .cr file
-    struct WardenCREntry {
-        uint8_t seed[16];
-        uint8_t reply[20];
-        uint8_t clientKey[16];  // Encrypt key (client→server)
-        uint8_t serverKey[16]; // Decrypt key (server→client)
-    };
-    // Module-specific check type opcodes [9]: MEM, PAGE_A, PAGE_B, MPQ, LUA, DRIVER, TIMING, PROC, MODULE
-    uint8_t wardenCheckOpcodes_[9] = {};
-
     // ---- Silence on the world connection (watchWorldSilence) ----
     /// Seconds of listening, in the world, since the last packet arrived.
     float worldSilenceSeconds_ = 0.0f;
@@ -1915,10 +1796,6 @@ private:
 
     // ---- Light override (SMSG_OVERRIDE_LIGHT) ----
 
-    // ---- Player skills (the skills themselves are the spell book's) ----
-    /// Headings the player has closed. Client-side, like the reputation ones,
-    /// and saved with the rest of the character config for the same reason.
-    std::unordered_set<uint32_t> collapsedSkillCategories_;
     FaceCameraProvider faceCameraProvider_;
     bool suppressMeleeSwingAnim_ = false;
     // lastMeleeSwingMs_ moved to CombatHandler
@@ -1929,14 +1806,6 @@ private:
     /// Languages.dbc, read once on the first ask like the caches beside it.
     mutable std::unordered_map<uint32_t, std::string> languageNames_;
     mutable bool languageNamesLoaded_ = false;
-    // Death Knight runes (class 6): slots 0-1=Blood, 2-3=Unholy, 4-5=Frost initially
-    std::array<RuneSlot, 6> playerRunes_ = [] {
-        std::array<RuneSlot, 6> r{};
-        r[0].type = r[1].type = RuneType::Blood;
-        r[2].type = r[3].type = RuneType::Unholy;
-        r[4].type = r[5].type = RuneType::Frost;
-        return r;
-    }();
     // ---- Talent wipe confirm dialog ----
     // (talent wipe confirm state lives in SpellHandler)
     // ---- Pet talent respec confirm dialog ----
@@ -1955,11 +1824,6 @@ private:
     // ---- UI error frame callback ----
 
     // ---- Quest completion callback ----
-
-    // ---- GM Ticket state (SMSG_GMTICKET_GETTICKET / SMSG_GMTICKET_SYSTEMSTATUS) ----
-    std::string gmTicketText_;               ///< Text of the open ticket (from SMSG_GMTICKET_GETTICKET)
-    float       gmTicketWaitHours_ = 0.0f;  ///< Server-estimated wait time in hours
-    bool        gmSupportAvailable_ = true; ///< GM support system online (SMSG_GMTICKET_SYSTEMSTATUS)
 
     /// The conversation last asked for, until the server answers it.
     ///

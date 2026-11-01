@@ -131,7 +131,21 @@ void ReputationService::onStanding(uint32_t reputationIndex, int32_t earned) {
 }
 
 void ReputationService::onAtWar(uint32_t reputationIndex, bool atWar) {
+    if (!player_.at(reputationIndex)) {
+        LOG_WARNING("SMSG_SET_FACTION_ATWAR: no standing at repListId=", reputationIndex,
+                    "; the at-war flag is not kept");
+        return;
+    }
     publish(player_.setAtWar(reputationIndex, atWar));
+}
+
+void ReputationService::onVisible(uint32_t reputationIndex, bool visible) {
+    if (!player_.at(reputationIndex)) {
+        LOG_WARNING("SMSG_SET_FACTION_VISIBLE: no standing at repListId=", reputationIndex,
+                    "; the faction does not join the reputation list");
+        return;
+    }
+    player_.setVisible(reputationIndex, visible);
 }
 
 void ReputationService::publish(const std::vector<ReputationChange>& changes) {

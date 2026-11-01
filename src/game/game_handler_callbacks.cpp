@@ -567,6 +567,37 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
         return;
     }
 
+    beginCharacterSession(characterGuid);
+
+    // Build CMSG_PLAYER_LOGIN packet
+    auto packet = PlayerLoginPacket::build(characterGuid);
+
+    // Send packet
+    socket->send(packet);
+
+    setState(WorldState::ENTERING_WORLD);
+    LOG_INFO("CMSG_PLAYER_LOGIN sent, entering world...");
+}
+
+void GameHandler::enterWorldOffline(const Character& character) {
+    if (isConnected()) {
+        LOG_WARNING("Offline world entry refused: connected to a world server; the realm's "
+                    "login enters the world instead");
+        return;
+    }
+    if (std::none_of(characters.begin(), characters.end(),
+                     [&](const Character& c) { return c.guid == character.guid; })) {
+        characters.push_back(character);
+    }
+    beginCharacterSession(character.guid);
+    setState(WorldState::ENTERING_WORLD);
+    LOG_INFO("Entering the world offline as 0x", std::hex, character.guid, std::dec,
+             " on map ", character.mapId);
+    enterWorld(LoginVerifyWorldData{.mapId = character.mapId, .x = character.x, .y = character.y,
+                                    .z = character.z, .orientation = 0.0f});
+}
+
+void GameHandler::beginCharacterSession(uint64_t characterGuid) {
     // Make the selected character authoritative in GameHandler.
     // This avoids relying on UI/Application ordering for appearance-dependent logic.
     activeCharacterGuid_ = characterGuid;
@@ -591,44 +622,31 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     // Store player GUID
     playerGuid = characterGuid;
 
-    // Reset per-character state so previous character data doesn't bleed through
-    inventoryHandler_->beginCharacter();
-    if (services_.achievementsFeed) services_.achievementsFeed->beginCharacter();
+    // Each domain begins the character - one call each, assigning what it
+    // keeps of a character whole - so nothing of the last one carries over.
+    accountDataHandler_->beginCharacter(characterGuid);
     playerHandler_->beginCharacter();
     movementHandler_->beginCharacter();
-    spellHandler_->resetAllState();
-    eventBus().publish(events::PlayerIntoxicationChanged{0.0f});
-    actionBarHandler_->clear();
+    combatHandler_->beginCharacter();
+    spellHandler_->beginCharacter();
+    actionBarHandler_->beginCharacter();
+    inventoryHandler_->beginCharacter();
     petHandler_->beginCharacter();
+    chatHandler_->beginCharacter();
+    questHandler_->beginCharacter();
+    socialHandler_->beginCharacter();
+    reputationHandler_->beginCharacter();
     weatherHandler_->beginCharacter();
-    // The quest log begins again with CharacterLoggingIn, below.
-    pendingLoginQuestResync_ = false;
-    pendingLoginQuestResyncTimeout_ = 0.0f;
-    combatHandler_->resetAllCombatState();
-    // resetCastState() already called inside resetAllState() above
+    if (services_.achievementsFeed) services_.achievementsFeed->beginCharacter();
     pendingGameObjectInteractGuid_ = 0;
     lastInteractedGoGuid_ = 0;
-    combatHandler_->beginCharacter();
-    combatHandler_->invalidateTabCycle();
+    eventBus().publish(events::PlayerIntoxicationChanged{0.0f});
     worldHandler_->clearAll();
     queryCacheHandler_->clear();
-    accountDataHandler_->characterSelected(characterGuid);
-    // The domains that keep what the server will send again end it on this.
-    eventBus().publish(events::CharacterLoggingIn{characterGuid});
-
-    // Build CMSG_PLAYER_LOGIN packet
-    auto packet = PlayerLoginPacket::build(characterGuid);
-
-    // Send packet
-    socket->send(packet);
-
-    setState(WorldState::ENTERING_WORLD);
-    LOG_INFO("CMSG_PLAYER_LOGIN sent, entering world...");
 }
 
 void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     LOG_INFO("Handling SMSG_LOGIN_VERIFY_WORLD");
-    const bool initialWorldEntry = (state == WorldState::ENTERING_WORLD);
 
     LoginVerifyWorldData data;
     if (!LoginVerifyWorldParser::parse(packet, data)) {
@@ -640,7 +658,11 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
         fail("Invalid world entry data");
         return;
     }
+    enterWorld(data);
+}
 
+void GameHandler::enterWorld(const LoginVerifyWorldData& data) {
+    const bool initialWorldEntry = (state == WorldState::ENTERING_WORLD);
     glm::vec3 canonical = core::coords::serverToCanonical(glm::vec3(data.x, data.y, data.z));
     const bool alreadyInWorld = (state == WorldState::IN_WORLD);
     const bool sameMap = alreadyInWorld && (currentMapId_ == data.mapId);
@@ -722,7 +744,6 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     movementInfo.jumpCosAngle = 0.0f;
     movementInfo.jumpXYSpeed = 0.0f;
     combatHandler_->worldEntered();
-    vehicleId_ = 0;
     movementHandler_->enteredWorld();
 
     // Clear boss encounter unit slots and raid marks on world transfer
@@ -759,9 +780,6 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     }
 
     if (initialWorldEntry) {
-        // Reset talent initialization so the first SMSG_TALENTS_INFO after login
-        // correctly sets the active spec (static locals don't reset across logins).
-        spellHandler_->resetTalentState();
 
         // Auto-join default chat channels only on first world entry.
         autoJoinDefaultChannels();
@@ -776,11 +794,7 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
             LOG_INFO("Auto-queried guild info (guildId=", activeChar->guildId, ")");
         }
 
-        // The quest log, its pending queries and the completed quests began
-        // empty with the login (CharacterLoggingIn); the server fills them.
-        pendingLoginQuestResync_ = true;
-        pendingLoginQuestResyncTimeout_ = 10.0f;
-        LOG_INFO("Queued quest log resync for login (from server quest slots)");
+        questHandler_->loginWorldEntered();
 
         // Request completed quest IDs when the expansion supports it. Classic-like
         // opcode tables do not define this packet, and sending 0xFFFF during world
@@ -942,11 +956,7 @@ void GameHandler::sendPing() {
 }
 
 void GameHandler::sendRequestVehicleExit() {
-    if (state != WorldState::IN_WORLD || vehicleId_ == 0) return;
-    // CMSG_REQUEST_VEHICLE_EXIT has no payload - opcode only
-    network::Packet pkt(wireOpcode(Opcode::CMSG_REQUEST_VEHICLE_EXIT));
-    socket->send(pkt);
-    vehicleId_ = 0;  // Optimistically clear; server will confirm via SMSG_PLAYER_VEHICLE_DATA(0)
+    movementHandler_->requestVehicleExit();
 }
 
 // --- Inventory state delegation (canonical state lives in InventoryHandler) ---
@@ -1034,10 +1044,6 @@ pet::IPetFeed* GameHandler::petFeed() {
 
 uint64_t GameHandler::petGuid() const {
     return pet::orNoPet(services_.pet).getPetGuid();
-}
-
-void GameHandler::openedStableMaster(uint64_t npcGuid) {
-    pet::orNoPet(services_.pet).setStableMaster(npcGuid);
 }
 
 reputation::IReputationFeed* GameHandler::reputationFeed() {
@@ -1273,11 +1279,7 @@ const std::vector<GameHandler::ThreatEntry>* GameHandler::getTargetThreatList() 
 }
 
 void GameHandler::confirmBinder() {
-    if (!isInWorld() || !socket || binderGuid_ == 0) return;
-    auto pkt = BinderActivatePacket::build(binderGuid_);
-    socket->send(pkt);
-    LOG_INFO("Sent CMSG_BINDER_ACTIVATE (confirmed) for npc=0x",
-             std::hex, binderGuid_, std::dec);
+    playerHandler_->confirmBinder();
 }
 
 void GameHandler::dismount() {
@@ -1561,6 +1563,31 @@ void GameHandler::interactWithGameObject(uint64_t guid) {
     // 3. isGameObjectInteractionCasting() returns true during GO casts.
     pendingGameObjectInteractGuid_ = guid;
     performGameObjectInteractionNow(guid);
+}
+
+void GameHandler::gameObjectCastEnded(const events::PlayerCastEnded& ended) {
+    using Outcome = events::PlayerCastEnded::Outcome;
+    switch (ended.outcome) {
+    case Outcome::WentOff:
+        // A gather node or a chest opened by a timed cast: CMSG_LOOT again
+        // now that the cast is done.
+        if (ended.timed && lastInteractedGoGuid_ != 0) {
+            LOG_DEBUG("[GO-DIAG] Sending CMSG_LOOT for GO 0x", std::hex, lastInteractedGoGuid_, std::dec);
+            lootTarget(lastInteractedGoGuid_);
+        }
+        pendingGameObjectInteractGuid_ = 0;
+        break;
+    case Outcome::Failed:
+    case Outcome::Cancelled:
+        pendingGameObjectInteractGuid_ = 0;
+        lastInteractedGoGuid_ = 0;
+        break;
+    case Outcome::Reset:
+        // The object stays the one to loot until SMSG_LOOT_RESPONSE: the
+        // client's cast timer resets before SMSG_SPELL_GO arrives.
+        pendingGameObjectInteractGuid_ = 0;
+        break;
+    }
 }
 
 void GameHandler::performGameObjectInteractionNow(uint64_t guid) {

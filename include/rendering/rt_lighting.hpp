@@ -25,9 +25,11 @@ class RtScene;
  * reprojection, and smooth with an edge-aware filter. The surface shaders
  * read the result in the *next* frame, reprojecting their own position into
  * the frame the result was traced in (rt_lighting.glsli). Where that misses -
- * a surface just revealed, or one that moved - they fall back to the shadow
- * map and the flat ambient, so the one frame of latency only ever shows as
- * the old lighting, never as a hole.
+ * a surface just revealed, or one that moved - they take the texel of the
+ * nearest other surface behind or in front, found once per trace texel
+ * (rt_seed.comp), and failing that fall back to the shadow map and the flat
+ * ambient, so the one frame of latency only ever shows as the old lighting,
+ * never as a hole.
  *
  * Only what RtScene holds casts: terrain, buildings and doodads. Characters
  * receive traced light and shadow but cast only into the shadow map.
@@ -80,6 +82,9 @@ public:
     [[nodiscard]] VkImageView giViewForSlot(uint32_t slot) const;
     [[nodiscard]] VkImageView reflectionViewForSlot(uint32_t slot) const;
     [[nodiscard]] VkImageView geometryViewForSlot(uint32_t slot) const;
+    /// Binding 12: per trace texel, where the nearest other surface behind
+    /// and in front of it is (rt_seed.comp), for receivers the trace missed.
+    [[nodiscard]] VkImageView seedViewForSlot(uint32_t slot) const;
     [[nodiscard]] VkImage reflectionImageWrittenBy(uint32_t slot) const { return slots_[slot].reflection.img.image; }
     [[nodiscard]] VkImageView neutralView() const { return neutral_.imageView; }
     /// The images slot `slot` writes, in GENERAL layout, at the trace size.
@@ -123,7 +128,7 @@ private:
         AllocatedImage img{};
     };
     struct Slot {
-        Target gbuf, hist, histGi, out, outGi, reflection;
+        Target gbuf, hist, histGi, out, outGi, reflection, seed;
         AllocatedBuffer ubo{};
         VkDescriptorSet sets[3] = {};  // one per filter pass; set 0 also runs the rest
         VkImage boundDepth = VK_NULL_HANDLE;
@@ -158,6 +163,7 @@ private:
     VkPipeline trace_ = VK_NULL_HANDLE;
     VkPipeline temporal_ = VK_NULL_HANDLE;
     VkPipeline filter_ = VK_NULL_HANDLE;
+    VkPipeline seed_ = VK_NULL_HANDLE;
 
     VkImage depthImage_ = VK_NULL_HANDLE;
     VkImageView depthView_ = VK_NULL_HANDLE;

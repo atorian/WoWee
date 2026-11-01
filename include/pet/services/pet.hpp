@@ -60,9 +60,6 @@ public:
     virtual void closeStableWindow() = 0;
     [[nodiscard]] virtual uint8_t getStableSlots() const = 0;
     [[nodiscard]] virtual const std::vector<StabledPet>& getStabledPets() const = 0;
-    /// The player is talking to a stable master; the window opens when the
-    /// list it asks for arrives.
-    virtual void setStableMaster(uint64_t npcGuid) = 0;
     virtual void requestStabledPetList() = 0;
     virtual void stablePet(uint8_t slot) = 0;
     virtual void unstablePet(uint32_t petNumber) = 0;
@@ -100,6 +97,9 @@ public:
     virtual void onStableList(uint64_t masterGuid, uint8_t slots, std::vector<StabledPet> pets) = 0;
     /// SMSG_STABLE_RESULT.
     virtual void onStableResult(uint8_t result) = 0;
+    /// The player chose a stable master's gossip option; the window opens
+    /// when the list asked of them arrives.
+    virtual void onStableMasterChosen(uint64_t npcGuid) = 0;
     /// A character is logging in: the last one's pet and stable are not this
     /// one's.
     virtual void beginCharacter() = 0;

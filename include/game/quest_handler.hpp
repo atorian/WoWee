@@ -41,8 +41,6 @@ public:
     [[nodiscard]] virtual const FlatFieldMap& playerFields() const = 0;
     [[nodiscard]] virtual uint32_t currentMapId() const = 0;
     [[nodiscard]] virtual bool inGroup() const = 0;
-    /// SMSG_SET_REST_START, which shares an opcode with a quest one.
-    virtual void setResting(bool resting) = 0;
 
     // ---- Names and templates ----
     [[nodiscard]] virtual PacketParsers& packetParsers() = 0;
@@ -52,14 +50,6 @@ public:
     virtual void requestGameObjectInfo(uint32_t entry) = 0;
     [[nodiscard]] virtual const ItemQueryResponseData* itemInfo(uint32_t itemId) const = 0;
     virtual void requestItemInfo(uint32_t itemId) = 0;
-
-    // ---- What a gossip option opens ----
-    /// A gossip or quest list opened over the vendor window, which closes.
-    virtual void closeVendor() = 0;
-    /// The armorer's option: the vendor that follows can repair.
-    virtual void vendorCanRepair() = 0;
-    /// The stable master's option: the stable that follows is theirs.
-    virtual void openedStableMaster(uint64_t npcGuid) = 0;
 };
 
 class QuestHandler {
@@ -71,6 +61,9 @@ public:
                  ChatLog& chat, QuestQueries& queries, const GameData& data);
 
     void registerOpcodes(DispatchTable& table);
+    /// A character is being logged in: its journal begins, and the server
+    /// sends its log.
+    void beginCharacter() { journal_ = {}; }
 
     // --- Public API (delegated from GameHandler) ---
 
@@ -301,8 +294,12 @@ public:
     void announceQuestLogChanged(uint32_t questId);
 
     /// The frame's quest bookkeeping: the quest-giver status requery
-    /// cooldown, and accepts the server has not confirmed in time.
+    /// cooldown, accepts the server has not confirmed in time, and the log
+    /// rebuilt after the login.
     void update(float deltaTime);
+    /// The character entered the world for the first time since its login:
+    /// the log is rebuilt from the quest slot fields once they are there.
+    void loginWorldEntered();
 
 private:
     // Request fresh quest-giver status for nearby NPCs so the !/? markers update
@@ -347,7 +344,7 @@ private:
     const GameData& data_;
 
     /// The character's quests and the quest windows open on them. Assigned
-    /// whole when a character logs in (events::CharacterLoggingIn): the
+    /// whole by beginCharacter: the
     /// server sends the next character's log, and nothing of the last one's -
     /// a share offered to them, a giver's page, the quests they tracked -
     /// is the next one's.
@@ -394,6 +391,11 @@ private:
         std::string sharedQuestTitle;
         std::string sharedQuestSharerName;
         uint64_t    sharedQuestSharerGuid = 0;
+
+        // The log rebuilt from the quest slot fields after the first world
+        // entry, once they have arrived; given up on after the timeout.
+        bool  loginResyncPending = false;
+        float loginResyncTimeout = 0.0f;
     };
     Journal journal_;
 

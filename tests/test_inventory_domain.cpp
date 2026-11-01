@@ -5,11 +5,13 @@
 
 #include "game_harness.hpp"
 
+#include "core/coordinates.hpp"
 #include "game/entity.hpp"
 #include "game/game_events.hpp"
 #include "game/action_bar_handler.hpp"
 #include "game/inventory_handler.hpp"
 #include "game/update_field_table.hpp"
+#include "pet/services/pet.hpp"
 
 #include <array>
 #include <memory>
@@ -220,9 +222,13 @@ TEST_CASE("a vendor's window opening is the vendor's greeting, from where the ve
     // A step from the player: a vendor out of reach closes its own window.
     const auto& at = h.game().getMovementInfo();
     const float vx = at.x + 2.0f, vy = at.y + 1.0f, vz = at.z;
-    auto vendor = std::make_shared<wowee::game::Unit>(kVendor);
-    vendor->setPosition(vx, vy, vz, 0.0f);
-    h.game().getEntityManager().addEntity(kVendor, vendor);
+    const glm::vec3 server = wowee::core::coords::canonicalToServer(glm::vec3(vx, vy, vz));
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(kVendor, wowee::game::ObjectType::UNIT,
+                                            {{fieldIndex(UF::OBJECT_FIELD_ENTRY), 54},
+                                             {fieldIndex(UF::UNIT_FIELD_HEALTH), 100}},
+                                            server.x, server.y, server.z));
+    h.pump();
     std::vector<ev::VendorOpened> opened;
     auto sub = h.events().subscribe<ev::VendorOpened>(
         [&](const ev::VendorOpened& e) { opened.push_back(e); });
@@ -633,4 +639,121 @@ TEST_CASE("a new equipment set is saved the way the server reads it",
     REQUIRE(body.size() == expectedHead.size() + 19);  // nothing worn: 19 empty guids
     CHECK(std::vector<uint8_t>(body.begin(), body.begin() + expectedHead.size()) == expectedHead);
     for (size_t i = expectedHead.size(); i < body.size(); ++i) CHECK(body[i] == 0x00);
+}
+
+namespace {
+
+constexpr uint64_t kSmith = 0xF130000000000091ull;
+
+/// SMSG_GOSSIP_MESSAGE, 3.3.5a: the NPC, the menu, the greeting's text id,
+/// the options - each id, icon, coded flag, box money, text and box text -
+/// and no quests.
+std::vector<uint8_t> gossipPage(uint64_t npc, const std::vector<std::pair<uint32_t, std::string>>& options) {
+    Body b;
+    b.u64(npc).u32(1).u32(0).u32(static_cast<uint32_t>(options.size()));
+    for (const auto& [id, text] : options) b.u32(id).u8(1).u8(0).u32(0).cstr(text).cstr("");
+    b.u32(0);
+    return b.bytes();
+}
+
+}  // namespace
+
+TEST_CASE("a gossip page and a vendor's window take each other's place",
+          "[inventory][vendor][gossip][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    auto& inventory = h.game().inventory();
+
+    h.receive(Opcode::SMSG_LIST_INVENTORY, Body().u64(kSmith).u8(0));
+    h.pump();
+    REQUIRE(inventory.isVendorWindowOpen());
+    h.clearRecords();
+
+    h.receive(Opcode::SMSG_GOSSIP_MESSAGE, gossipPage(kSmith, {}));
+    h.pump();
+    CHECK_FALSE(inventory.isVendorWindowOpen());
+    CHECK(h.addonEvents("MERCHANT_CLOSED").size() == 1);
+    REQUIRE(h.game().quests().isGossipWindowOpen());
+    h.clearRecords();
+
+    h.receive(Opcode::SMSG_LIST_INVENTORY, Body().u64(kSmith).u8(0));
+    h.pump();
+    CHECK(inventory.isVendorWindowOpen());
+    CHECK_FALSE(h.game().quests().isGossipWindowOpen());
+    CHECK(h.addonEvents("GOSSIP_CLOSED").size() == 1);
+}
+
+TEST_CASE("the armorer's gossip option opens goods that can be repaired at",
+          "[inventory][vendor][gossip][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.receive(Opcode::SMSG_GOSSIP_MESSAGE, gossipPage(kSmith, {{3, "GOSSIP_OPTION_ARMORER"}}));
+    h.pump();
+
+    h.game().quests().selectGossipOption(3, "");
+    auto* list = h.lastSent(Opcode::CMSG_LIST_INVENTORY);
+    REQUIRE(list != nullptr);
+    CHECK(list->readUInt64() == kSmith);
+    h.receive(Opcode::SMSG_LIST_INVENTORY, Body().u64(kSmith).u8(0));
+    h.pump();
+
+    CHECK(h.game().inventory().getVendorItems().canRepair);
+}
+
+TEST_CASE("the stable master's gossip option makes the stable theirs before its list comes",
+          "[pet][stable][gossip][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    constexpr uint64_t kStableMaster = 0xF130000000000202ull;
+    h.receive(Opcode::SMSG_GOSSIP_MESSAGE, gossipPage(kStableMaster, {{1, "GOSSIP_OPTION_STABLE"}}));
+    h.pump();
+
+    h.game().quests().selectGossipOption(1, "");
+    REQUIRE(h.lastSent(Opcode::MSG_LIST_STABLED_PETS) != nullptr);
+    // Buying a slot goes to the stable master being talked to.
+    h.pet().buyStableSlot();
+    auto* buy = h.lastSent(Opcode::CMSG_BUY_STABLE_SLOT);
+    REQUIRE(buy != nullptr);
+    CHECK(buy->readUInt64() == kStableMaster);
+}
+
+TEST_CASE("an item query waits its own time for an answer, not a shared sweep's",
+          "[inventory][item_query][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.clearRecords();
+    auto& inventory = h.game().inventory();
+
+    inventory.ensureItemInfo(100);
+    h.advance(4.0f);
+    inventory.ensureItemInfo(200);
+    REQUIRE(h.countSent(Opcode::CMSG_ITEM_QUERY_SINGLE) == 2);
+
+    // The first has waited 5.5 s and is given up; the second only 1.5 s.
+    h.advance(1.5f);
+    inventory.ensureItemInfo(200);
+    CHECK(h.countSent(Opcode::CMSG_ITEM_QUERY_SINGLE) == 2);
+    inventory.ensureItemInfo(100);
+    CHECK(h.countSent(Opcode::CMSG_ITEM_QUERY_SINGLE) == 3);
+}
+
+TEST_CASE("an item the realm says does not exist is not asked for again",
+          "[inventory][item_query][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.clearRecords();
+    auto& inventory = h.game().inventory();
+
+    inventory.ensureItemInfo(300);
+    REQUIRE(h.countSent(Opcode::CMSG_ITEM_QUERY_SINGLE) == 1);
+    // ItemQuerySingle for an entry with no template: the entry with its top
+    // bit set, and nothing else.
+    h.receive(Opcode::SMSG_ITEM_QUERY_SINGLE_RESPONSE, Body().u32(300u | 0x80000000u));
+    h.pump();
+
+    inventory.ensureItemInfo(300);
+    h.advance(6.0f);
+    inventory.ensureItemInfo(300);
+    CHECK(h.countSent(Opcode::CMSG_ITEM_QUERY_SINGLE) == 1);
+    CHECK(inventory.getItemInfo(300) == nullptr);
 }

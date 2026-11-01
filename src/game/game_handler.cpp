@@ -162,6 +162,9 @@ GameHandler::GameHandler(GameServices& services)
     // The tracked quests are kept with the character's settings.
     subscriptions_.push_back(eventBus().subscribe<events::QuestTrackingChanged>(
         [this](const events::QuestTrackingChanged&) { saveCharacterConfig(); }));
+    // Opening a game object waits on the cast that opens it.
+    subscriptions_.push_back(eventBus().subscribe<events::PlayerCastEnded>(
+        [this](const events::PlayerCastEnded& e) { gameObjectCastEnded(e); }));
 
     // The action bar starts empty. What is on it is the server's to say -
     // SMSG_ACTION_BUTTONS at every login, which for a new character carries
@@ -382,8 +385,7 @@ uint32_t GameHandler::itemEntryByGuid(uint64_t itemGuid) const {
 }
 
 std::optional<HomeBind> GameHandler::homeBind() const {
-    if (!hasHomeBind_) return std::nullopt;
-    return HomeBind{homeBindMapId_, homeBindPos_};
+    return playerHandler_->homeBind();
 }
 
 void GameHandler::noteItemCastSpell(uint32_t spellId) {
@@ -458,66 +460,10 @@ ActionCooldown GameHandler::itemCooldown(uint32_t itemId) const {
     return {};
 }
 
-void GameHandler::sortBags() {
-    if (!sortSwapQueue_.empty()) return;   // one sort at a time
-    auto& inv = inventoryHandler_->items();
-    // Pour partial stacks together first, so the sort places one stack of
-    // twenty rather than two of ten. Merging both plans and applies, so the
-    // swaps below are computed from the merged layout.
-    auto merges = inv.mergePartialStacks();
-    auto swaps = inv.computeSortSwaps();
-    // The local layout changes now so the bags read as sorted immediately; the
-    // server is told the same thing over the following ticks.
-    inv.sortBags();
-    // And say so. The layout above is the one the player asked for and it is
-    // already in the model, but every bag on screen reads through
-    // GetContainerItemInfo and redraws on BAG_UPDATE - so without this the
-    // sorted bags sat behind the unsorted picture until something unrelated
-    // forced a rebuild, which is most of what "sorting does nothing" looked
-    // like. The moves queued below no longer fire it, having stopped touching
-    // the model at all.
-    inventoryHandler_->fireBagUpdates();
-    for (auto& m : merges) sortSwapQueue_.push_back(m);
-    for (auto& s : swaps)  sortSwapQueue_.push_back(s);
-}
-
-void GameHandler::sortBank(int mainSlotCount) {
-    if (!sortSwapQueue_.empty()) return;   // one sort at a time
-    auto& inv = inventoryHandler_->items();
-    auto merges = inv.mergeBankPartialStacks(mainSlotCount);
-    auto swaps = inv.computeBankSortSwaps(mainSlotCount);
-    inv.sortBank(mainSlotCount);
-    inventoryHandler_->fireBagUpdates();
-    for (auto& m : merges) sortSwapQueue_.push_back(m);
-    for (auto& s : swaps)  sortSwapQueue_.push_back(s);
-}
-
-void GameHandler::sortBankBag(int bagIndex) {
-    if (!sortSwapQueue_.empty()) return;   // one sort at a time
-    auto& inv = inventoryHandler_->items();
-    auto swaps = inv.computeBankBagSortSwaps(bagIndex);
-    inv.sortBankBag(bagIndex);
-    inventoryHandler_->fireBagUpdates();
-    for (auto& s : swaps) sortSwapQueue_.push_back(s);
-}
-
-void GameHandler::queuePacedChat(std::vector<std::string> lines) {
-    for (std::string& line : lines) pacedChatQueue_.push_back(std::move(line));
-}
-
 void GameHandler::updateNetworking() {
     // One queued sort move per tick. A sort is dozens of swaps and the server
     // drops a burst of them, so they go out at the rate anything else does.
-    if (!sortSwapQueue_.empty()) {
-        const auto op = sortSwapQueue_.front();
-        sortSwapQueue_.pop_front();
-        // Sent, not applied. The sort put the finished layout into the model
-        // before queuing any of this; moving each pair again on the way out
-        // permuted that layout a second time - and a merge, which the server
-        // answers by combining two stacks, would have been applied here as a
-        // swap of the two slots. See swapContainerItems.
-        inventoryHandler_->swapContainerItems(op.srcBag, op.srcSlot, op.dstBag, op.dstSlot, false);
-    }
+    inventoryHandler_->sendNextSortMove();
 
     // Reset per-tick monster-move budget tracking (Classic flood protection).
     movementHandler_->monsterMovePacketsThisTickRef() = 0;
@@ -525,11 +471,7 @@ void GameHandler::updateNetworking() {
 
     // One queued chat line per tick, for the same reason and at the same rate
     // as the sort moves above.
-    if (!pacedChatQueue_.empty()) {
-        const std::string line = std::move(pacedChatQueue_.front());
-        pacedChatQueue_.pop_front();
-        chatHandler_->sendChatMessage(ChatType::SAY, line, "");
-    }
+    chatHandler_->sendNextPacedLine();
 
     // Anything still waiting on a name query that never came back. After the
     // socket below would be a tick later than it needs to be; before it means
@@ -642,31 +584,12 @@ void GameHandler::updateTimers(float deltaTime) {
     // and the equipment inspects - each with the state it counts down.
     inventoryHandler_->update(deltaTime);
 
-    // The quest giver marks' requery and unconfirmed accepts.
+    // The quest giver marks' requery, unconfirmed accepts and the login's
+    // rebuild of the log.
     questHandler_->update(deltaTime);
 
     // The corpse-proximity crossing, for FrameXML's reclaim prompt.
     combatHandler_->announceCorpseRange();
-
-    // autoAttackRangeWarnCooldown_ decrement moved into CombatHandler::updateAutoAttack()
-
-    if (pendingLoginQuestResync_) {
-        pendingLoginQuestResyncTimeout_ -= deltaTime;
-        if (questHandler_->resyncQuestLogFromServerSlots(true)) {
-            pendingLoginQuestResync_ = false;
-            pendingLoginQuestResyncTimeout_ = 0.0f;
-            // trackedQuestIds_ was restored from the character config earlier
-            // at login, before addons were guaranteed loaded, so that restore
-            // may never have reached WatchFrame. This is the first point after
-            // world entry where both the quest log and the tracked-quest set
-            // are known settled, so force the one redraw the tracker needs.
-            fireAddonEvent("QUEST_LOG_UPDATE", {});
-        } else if (pendingLoginQuestResyncTimeout_ <= 0.0f) {
-            pendingLoginQuestResync_ = false;
-            pendingLoginQuestResyncTimeout_ = 0.0f;
-            LOG_WARNING("Quest login resync timed out waiting for player quest slot fields");
-        }
-    }
 
     for (auto it = pendingGameObjectLootOpens_.begin(); it != pendingGameObjectLootOpens_.end();) {
         it->timer -= deltaTime;
@@ -938,7 +861,7 @@ void GameHandler::updateGame(float deltaTime) {
         // Update combat text (Phase 2)
         combatHandler_->updateCombatText(deltaTime);
         socialHandler_->ageMinimapPings(deltaTime);
-        tickMirrorTimers(deltaTime);
+        playerHandler_->tickMirrorTimers(deltaTime);
 
         // Tick logout countdown
         socialHandler_->updateLogoutCountdown(deltaTime);
@@ -1075,12 +998,6 @@ void GameHandler::fail(const std::string& reason) {
 // Player Skills
 // ============================================================
 
-void GameHandler::setSkillCategoryCollapsed(uint32_t categoryId, bool collapsed) {
-    if (categoryId == 0) return;
-    if (collapsed) collapsedSkillCategories_.insert(categoryId);
-    else           collapsedSkillCategories_.erase(categoryId);
-}
-
 std::string GameHandler::getCharacterConfigDir() {
     return core::getConfigRoot() + "/characters";
 }
@@ -1138,9 +1055,9 @@ void GameHandler::saveCharacterConfig() {
         }
         out << "collapsed_factions=" << ids << "\n";
     }
-    if (!collapsedSkillCategories_.empty()) {
+    if (const auto& collapsedSkills = spellHandler_->collapsedSkillCategories(); !collapsedSkills.empty()) {
         std::string ids;
-        for (uint32_t cid : collapsedSkillCategories_) {
+        for (uint32_t cid : collapsedSkills) {
             if (!ids.empty()) ids += ',';
             ids += std::to_string(cid);
         }
@@ -1166,6 +1083,7 @@ void GameHandler::loadCharacterConfig() {
     // The quest log's; handed to it once the file is read.
     std::unordered_set<uint32_t> trackedQuests;
     std::unordered_set<uint32_t> collapsedFactions;
+    std::unordered_set<uint32_t> collapsedSkillCategories;
 
     std::string line;
     while (std::getline(in, line)) {
@@ -1216,7 +1134,7 @@ void GameHandler::loadCharacterConfig() {
             auto& destination =
                   key == "tracked_quests"    ? trackedQuests
                 : key == "collapsed_factions" ? collapsedFactions
-                                              : collapsedSkillCategories_;
+                                              : collapsedSkillCategories;
             destination.clear();
             size_t tqPos = 0;
             while (tqPos <= val.size()) {
@@ -1237,6 +1155,7 @@ void GameHandler::loadCharacterConfig() {
 
     questHandler_->restoreTrackedQuests(std::move(trackedQuests));
     reputation::orNoReputation(services_.reputation).restoreCollapsedFactions(std::move(collapsedFactions));
+    spellHandler_->restoreCollapsedSkillCategories(std::move(collapsedSkillCategories));
 
     // Validate guid matches current character
     if (savedGuid != 0 && savedGuid != playerGuid) {

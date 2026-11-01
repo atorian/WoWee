@@ -143,24 +143,6 @@ constexpr size_t kMaxQueuedInboundPackets = 8192;
 
 } // end anonymous namespace
 
-// The rune bar draws itself from these two events and from nothing else. All
-// three rune packets stored their state and announced none of it, so a death
-// knight's runes were drawn once at login and then stood still.
-//
-// "usable" is sent as a present argument or no argument at all rather than as
-// one and zero, because zero is true in Lua: an argument saying the rune is on
-// cooldown would read as one saying it is ready.
-void GameHandler::fireRuneUpdate(uint32_t index) {
-    if (index >= playerRunes_.size()) return;
-    const std::string oneBased = std::to_string(index + 1);
-    fireAddonEvent("RUNE_TYPE_UPDATE", {oneBased});
-    if (playerRunes_[index].ready) {
-        fireAddonEvent("RUNE_POWER_UPDATE", {oneBased, "1"});
-    } else {
-        fireAddonEvent("RUNE_POWER_UPDATE", {oneBased});
-    }
-}
-
 // The opcodes this handler answers itself, grouped by what they are about: the
 // session handshake, XP and exploration, corpses and combat state, guilds and
 // loot and vendors, teleports and taxis and battlegrounds, world states, action
@@ -284,74 +266,7 @@ void GameHandler::registerCoreOpcodes() {
             LOG_DEBUG("SMSG_WORLD_STATE_UI_TIMER_UPDATE: serverTime=", serverTime);
         }
     };
-    dispatchTable_[Opcode::SMSG_START_MIRROR_TIMER] = [this](network::Packet& packet) {
-        // type(4) + value(4) + maxValue(4) + scale(4) + paused(1) + spellId(4).
-        // The last two were being read the other way round: harmless while the
-        // spell id is 0, but a non-zero one would land its high byte in paused and
-        // freeze the bar.
-        if (!packet.hasRemaining(21)) return;
-        uint32_t type  = packet.readUInt32();
-        int32_t  value = static_cast<int32_t>(packet.readUInt32());
-        int32_t  maxV  = static_cast<int32_t>(packet.readUInt32());
-        int32_t  scale = static_cast<int32_t>(packet.readUInt32());
-        uint8_t  paused = packet.readUInt8();
-        /*uint32_t spellId =*/ packet.readUInt32();
-        if (type < 3) {
-            mirrorTimers_[type].value     = value;
-            mirrorTimers_[type].maxValue  = maxV;
-            mirrorTimers_[type].scale     = scale;
-            mirrorTimers_[type].paused    = (paused != 0);
-            mirrorTimers_[type].active    = true;
-            mirrorTimers_[type].pendingMs = 0.0f;  // server re-sync; drop the local carry
-            // The interface names its timers rather than numbering them, and
-            // wants a label to draw beside the bar: MirrorTimer_Show(timer,
-            // value, maxvalue, scale, paused, label). Sending the type as a
-            // number and omitting the label left it matching no timer and
-            // dividing a nil.
-            // The names WoW passes, not the wire's own ordering words - see
-            // kMirrorTimerNames, which every path that names a timer shares.
-            const char* timerName = (type < 3) ? kMirrorTimerNames[type] : "BREATH";
-            const char* timerLabel = (type < 3) ? kMirrorTimerLabels[type] : "Breath";
-            // Said once per timer, because nothing on this side decides any of
-            // it. The length of a breath is the server's: three minutes plus
-            // whatever SPELL_AURA_MOD_WATER_BREATHING adds, which for a
-            // Forsaken is 300% more and so twelve. A maxValue of 180000 on an
-            // undead character means the racial is not being applied there,
-            // and no change here can put it right.
-            static bool saidTimer[3] = {false, false, false};
-            if (!saidTimer[type]) {
-                saidTimer[type] = true;
-                LOG_INFO("Mirror timer ", timerName, " from the server: value=", value,
-                            "ms of max=", maxV, "ms scale=", scale,
-                            " paused=", (paused != 0 ? 1 : 0));
-            }
-            fireAddonEvent("MIRROR_TIMER_START", {
-                    timerName, std::to_string(value),
-                    std::to_string(maxV), std::to_string(scale),
-                    paused ? "1" : "0", timerLabel});
-        }
-    };
-    dispatchTable_[Opcode::SMSG_STOP_MIRROR_TIMER] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(4)) return;
-        uint32_t type = packet.readUInt32();
-        if (type < 3) {
-            mirrorTimers_[type].active = false;
-            mirrorTimers_[type].value  = 0;
-            // Named, like the start above: MirrorTimer_Hide matches on the
-            // timer's name, so a number hides nothing.
-            fireAddonEvent("MIRROR_TIMER_STOP",
-                           {type < 3 ? kMirrorTimerNames[type] : "BREATH"});
-        }
-    };
-    dispatchTable_[Opcode::SMSG_PAUSE_MIRROR_TIMER] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(5)) return;
-        uint32_t type   = packet.readUInt32();
-        uint8_t  paused = packet.readUInt8();
-        if (type < 3) {
-            mirrorTimers_[type].paused = (paused != 0);
-            fireAddonEvent("MIRROR_TIMER_PAUSE", {paused ? "1" : "0"});
-        }
-    };
+    // (The mirror timers → PlayerHandler)
 
     // -----------------------------------------------------------------------
     // Cast result / spell proc
@@ -408,33 +323,7 @@ void GameHandler::registerCoreOpcodes() {
     // -----------------------------------------------------------------------
     // Bind / heartstone / phase / barber / corpse
     // -----------------------------------------------------------------------
-    dispatchTable_[Opcode::SMSG_PLAYERBOUND] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(16)) return;
-        /*uint64_t binderGuid =*/ packet.readUInt64();
-        uint32_t mapId  = packet.readUInt32();
-        uint32_t zoneId = packet.readUInt32();
-        bool changed = !hasHomeBind_ || homeBindMapId_ != mapId || homeBindZoneId_ != zoneId;
-        homeBindMapId_  = mapId;
-        homeBindZoneId_ = zoneId;
-        if (!changed) return;
-        std::string pbMsg = "Your home location has been set";
-        std::string zoneName = getAreaName(zoneId);
-        if (!zoneName.empty()) pbMsg += " to " + zoneName;
-        pbMsg += '.';
-        chatHandler_->addSystemChatMessage(pbMsg);
-    };
-    // The innkeeper asking whether to make this the player's home. It was
-    // skipped because this client's own gossip window never waited for it - it
-    // matches the option's English text and sends the activate itself. FrameXML
-    // draws the gossip window now and follows the real flow: the server asks,
-    // a popup accepts, and the reply goes back.
-    dispatchTable_[Opcode::SMSG_BINDER_CONFIRM] = [this](network::Packet& packet) {
-        binderGuid_ = packet.hasRemaining(8) ? packet.readUInt64() : 0;
-        // Who is asking. StaticPopup_Show("CONFIRM_BINDER", arg1) puts the name
-        // into "Do you want to make <name> your new home?" - without it the
-        // question had a hole where the innkeeper should be.
-        fireAddonEvent("CONFIRM_BINDER", {queryCacheHandler_->lookupName(binderGuid_)});
-    };
+    // (The home, the binder and the barber's chair → PlayerHandler)
     registerSkipHandler(Opcode::SMSG_SET_PHASE_SHIFT);
     dispatchTable_[Opcode::SMSG_TOGGLE_XP_GAIN] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(1)) return;
@@ -521,11 +410,6 @@ void GameHandler::registerCoreOpcodes() {
         eventBus().publish(events::GameObjectStateChanged{guid, 0});
     };
     // SMSG_DEFENSE_MESSAGE - moved to ChatHandler::registerOpcodes
-    dispatchTable_[Opcode::SMSG_ENABLE_BARBER_SHOP] = [this](network::Packet& /*packet*/) {
-        LOG_INFO("SMSG_ENABLE_BARBER_SHOP: barber shop available");
-        barberShopOpen_ = true;
-        fireAddonEvent("BARBER_SHOP_OPEN", {});
-    };
 
     // ---- Batch 3: gametime, combat clearing, mount, loot notify,
     //                movement/speed/flags, attack, spells, group ----
@@ -585,33 +469,6 @@ void GameHandler::registerCoreOpcodes() {
     // Loot/gossip/vendor delegates
     // (SMSG_SUMMON_REQUEST, SMSG_SUMMON_CANCEL → SocialHandler)
 
-    // Bind point
-    dispatchTable_[Opcode::SMSG_BINDPOINTUPDATE] = [this](network::Packet& packet) {
-        BindPointUpdateData data;
-        if (BindPointUpdateParser::parse(packet, data)) {
-            glm::vec3 canonical = core::coords::serverToCanonical(
-                glm::vec3(data.x, data.y, data.z));
-            bool wasSet = hasHomeBind_;
-            bool changed =
-                !hasHomeBind_ ||
-                homeBindMapId_ != data.mapId ||
-                homeBindZoneId_ != data.zoneId ||
-                glm::length(homeBindPos_ - canonical) > 0.5f;
-            hasHomeBind_ = true;
-            homeBindMapId_ = data.mapId;
-            homeBindZoneId_ = data.zoneId;
-            homeBindPos_ = canonical;
-            eventBus().publish(events::BindPointChanged{data.mapId, canonical.x, canonical.y, canonical.z});
-            if (wasSet && changed) {
-                std::string bindMsg = "Your home has been set";
-                std::string zoneName = getAreaName(data.zoneId);
-                if (!zoneName.empty()) bindMsg += " to " + zoneName;
-                bindMsg += '.';
-                chatHandler_->addSystemChatMessage(bindMsg);
-            }
-        }
-    };
-
     // (The player's death, resurrection and spirit healers → CombatHandler)
 
     // Time sync
@@ -662,15 +519,6 @@ void GameHandler::registerCoreOpcodes() {
     };
 
     // (SMSG_SET_FLAT_SPELL_MODIFIER, SMSG_SET_PCT_SPELL_MODIFIER, SMSG_SPELL_DELAYED → moved to SpellHandler)
-
-    // Proficiency
-    dispatchTable_[Opcode::SMSG_SET_PROFICIENCY] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(5)) return;
-        uint8_t  itemClass = packet.readUInt8();
-        uint32_t mask      = packet.readUInt32();
-        if (itemClass == 2) weaponProficiency_ = mask;
-        else if (itemClass == 4) armorProficiency_ = mask;
-    };
 
     // Play sound
     dispatchTable_[Opcode::SMSG_PLAY_SOUND] = [this](network::Packet& packet) {
@@ -942,25 +790,6 @@ void GameHandler::registerCoreOpcodes() {
         }
     };
 
-    // ---- SMSG_BARBER_SHOP_RESULT ----
-    dispatchTable_[Opcode::SMSG_BARBER_SHOP_RESULT] = [this](network::Packet& packet) {
-        // uint32 result: 0=success, 1/3=not enough money, 2=not seated at barber
-        if (packet.hasRemaining(4)) {
-            uint32_t result = packet.readUInt32();
-            if (result == 0) {
-                chatHandler_->addSystemChatMessage("Hairstyle changed.");
-                barberShopOpen_ = false;
-                fireAddonEvent("BARBER_SHOP_CLOSE", {});
-            } else {
-                const char* msg = (result == 1 || result == 3) ? "Not enough money for new hairstyle."
-                                : (result == 2) ? "You are not at a barber shop."
-                                : "Barber shop unavailable.";
-                addUIError(msg);
-                chatHandler_->addSystemChatMessage(msg);
-            }
-            LOG_DEBUG("SMSG_BARBER_SHOP_RESULT: result=", result);
-        }
-    };
 
 }
 
@@ -1063,50 +892,8 @@ void GameHandler::registerRemainingOpcodes() {
     // The actual items come via update packets; we just log this.
     // PackedGuid (player guid) + uint32 vehicleId
     // vehicleId == 0 means the player left the vehicle
-    dispatchTable_[Opcode::SMSG_PLAYER_VEHICLE_DATA] = [this](network::Packet& packet) {
-        // PackedGuid (player guid) + uint32 vehicleId
-        // vehicleId == 0 means the player left the vehicle
-        if (packet.hasRemaining(1)) {
-            (void)packet.readPackedGuid(); // player guid (unused)
-        }
-        uint32_t newVehicleId = 0;
-        if (packet.hasRemaining(4)) {
-            newVehicleId = packet.readUInt32();
-        }
-        bool wasInVehicle = vehicleId_ != 0;
-        bool nowInVehicle = newVehicleId != 0;
-        vehicleId_ = newVehicleId;
-        if (wasInVehicle != nowInVehicle) {
-            eventBus().publish(events::VehicleStateChanged{nowInVehicle, newVehicleId});
-            // Announced as well as stored. The state was kept and handed to
-            // this client's own bar, and the interface heard nothing - so the
-            // leave-vehicle button, which redraws on VEHICLE_UPDATE, never
-            // learned there was a vehicle to leave.
-            fireAddonEvent("VEHICLE_UPDATE", {});
-            fireAddonEvent(nowInVehicle ? "UNIT_ENTERED_VEHICLE"
-                                        : "UNIT_EXITED_VEHICLE", {"player"});
-            fireAddonEvent("UPDATE_BONUS_ACTIONBAR", {});
-        }
-    };
     // SMSG_GUILD_DECLINE - moved to SocialHandler::registerOpcodes
-    // Clear cached talent data so the talent screen reflects the reset.
-    dispatchTable_[Opcode::SMSG_TALENTS_INVOLUNTARILY_RESET] = [this](network::Packet& packet) {
-        // Clear cached talent data so the talent screen reflects the reset.
-        spellHandler_->resetTalentState();
-        addUIError("Your talents have been reset by the server.");
-        chatHandler_->addSystemChatMessage("Your talents have been reset by the server.");
-        // The talent frame rebuilds from this; the cached state was cleared
-        // above and nothing told it to redraw, so it kept the old trees.
-        if (hasAddonEventListener()) fireAddonEvent("TALENTS_INVOLUNTARILY_RESET", {});
-        packet.skipAll();
-    };
-    dispatchTable_[Opcode::SMSG_SET_REST_START] = [](network::Packet& packet) {
-        // The rest-XP accumulation start time, not a statement about where the
-        // player is standing: the server sends it on login wherever that is.
-        // Resting itself comes from PLAYER_FLAGS_RESTING, which world_handler
-        // watches, because that is the one that clears again on leaving an inn.
-        packet.skipAll();
-    };
+    // (SMSG_TALENTS_INVOLUNTARILY_RESET → SpellHandler)
     dispatchTable_[Opcode::SMSG_UPDATE_AURA_DURATION] = [this](network::Packet& packet) {
         if (packet.hasRemaining(5)) {
             uint8_t slot       = packet.readUInt8();
@@ -1270,203 +1057,8 @@ void GameHandler::registerRemainingOpcodes() {
         LOG_DEBUG("SMSG_MEETINGSTONE_LEAVE");
         packet.skipAll();
     };
-    // All three of these carry a uint32 from the same enum, and all three read
-    // a single byte of it. Little-endian kept the comparison working for the
-    // delete, whose value is nine, and broke the other two outright: creating a
-    // ticket answers 2 and updating one answers 4, and both were compared
-    // against 1 - so a ticket that went through reported that it had not.
-    constexpr uint32_t kTicketAlreadyExists = 1, kTicketCreated = 2,
-                       kTicketUpdated = 4, kTicketDeleted = 9;
-    dispatchTable_[Opcode::SMSG_GMTICKET_CREATE] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(4)) {
-            const uint32_t res = packet.readUInt32();
-            chatHandler_->addSystemChatMessage(
-                res == kTicketCreated       ? "GM ticket submitted."
-              : res == kTicketAlreadyExists ? "You already have a GM ticket open."
-                                            : "Failed to submit GM ticket.");
-        }
-    };
-    dispatchTable_[Opcode::SMSG_GMTICKET_UPDATETEXT] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(4)) {
-            const uint32_t res = packet.readUInt32();
-            chatHandler_->addSystemChatMessage(res == kTicketUpdated ? "GM ticket updated."
-                                                       : "Failed to update GM ticket.");
-        }
-    };
-    dispatchTable_[Opcode::SMSG_GMTICKET_DELETETICKET] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(4)) {
-            const uint32_t res = packet.readUInt32();
-            if (res == kTicketDeleted) gmTicketText_.clear();
-            chatHandler_->addSystemChatMessage(res == kTicketDeleted ? "GM ticket deleted."
-                                                       : "No ticket to delete.");
-        }
-    };
-    // WotLK 3.3.5a format:
-    //   uint8  status  - 6=has open ticket, 3=closed, anything else none
-    // If status == 6 (GMTICKET_STATUS_HASTEXT):
-    //   cstring ticketText
-    //   uint32  ticketAge       (seconds old)
-    //   uint32  daysUntilOld    (days remaining before escalation)
-    //   float   waitTimeHours   (estimated GM wait time)
-    dispatchTable_[Opcode::SMSG_GMTICKET_GETTICKET] = [this](network::Packet& packet) {
-        // WotLK 3.3.5a format:
-        //   uint8  status  - 6=has open ticket, 3=closed, anything else none
-        // If status == 6 (GMTICKET_STATUS_HASTEXT):
-        //   cstring ticketText
-        //   uint32  ticketAge       (seconds old)
-        //   uint32  daysUntilOld    (days remaining before escalation)
-        //   float   waitTimeHours   (estimated GM wait time)
-        if (!packet.hasRemaining(1)) { packet.skipAll(); return; }
-        uint8_t gmStatus = packet.readUInt8();
-        // Status 6 = GMTICKET_STATUS_HASTEXT - open ticket with text
-        if (gmStatus == 6 && packet.hasRemaining(1)) {
-            gmTicketText_    = packet.readString();
-            uint32_t ageSec  = (packet.hasRemaining(4)) ? packet.readUInt32() : 0;
-            /*uint32_t daysLeft =*/ (packet.hasRemaining(4)) ? packet.readUInt32() : 0;
-            gmTicketWaitHours_ = (packet.hasRemaining(4))
-                ? packet.readFloat() : 0.0f;
-            char buf[256];
-            if (ageSec < 60) {
-                std::snprintf(buf, sizeof(buf),
-                    "You have an open GM ticket (submitted %us ago). Estimated wait: %.1f hours.",
-                    ageSec, gmTicketWaitHours_);
-            } else {
-                uint32_t ageMin = ageSec / 60;
-                std::snprintf(buf, sizeof(buf),
-                    "You have an open GM ticket (submitted %um ago). Estimated wait: %.1f hours.",
-                    ageMin, gmTicketWaitHours_);
-            }
-            chatHandler_->addSystemChatMessage(buf);
-            LOG_INFO("SMSG_GMTICKET_GETTICKET: open ticket age=", ageSec,
-                     "s wait=", gmTicketWaitHours_, "h");
-
-            // The interface measures all of this in days and works the wait out
-            // itself, as (oldestTicketTime - ticketAge). This packet gives the
-            // wait directly, so the oldest time is the age plus it - which
-            // arrives at the same number the server meant.
-            //
-            // updateTime says how stale the estimate is; anything over an hour
-            // is treated as no estimate at all, and this one was computed from
-            // the packet that just arrived.
-            const double ageDays = static_cast<double>(ageSec) / 86400.0;
-            auto days = [](double v) {
-                char out[32];
-                std::snprintf(out, sizeof(out), "%.6f", v);
-                return std::string(out);
-            };
-            fireAddonEvent("UPDATE_TICKET", {
-                "1",                                            // category: has one
-                gmTicketText_,
-                days(ageDays),
-                days(ageDays + gmTicketWaitHours_ / 24.0),
-                "0",                                            // just measured
-                "0",                                            // not assigned
-                "0",                                            // not opened by a GM
-            });
-        } else if (gmStatus == 3) {
-            gmTicketText_.clear();
-            chatHandler_->addSystemChatMessage("Your GM ticket has been closed.");
-            LOG_INFO("SMSG_GMTICKET_GETTICKET: ticket closed");
-            // No arguments at all is how the interface is told there is no
-            // ticket: it reads the first one and stops if it is absent.
-            fireAddonEvent("UPDATE_TICKET", {});
-        } else {
-            // Everything else is "no ticket", including 10.
-            //
-            // 10 was read as "suspended" and announced in chat, and this is
-            // asked on every login - so an account that had never filed a
-            // ticket was told at each one that the one it did not have had
-            // been suspended. 0x0A is GMTICKET_STATUS_DEFAULT, the answer a
-            // server gives when the player has no ticket at all, which is why
-            // it arrived every time and why nothing else ever followed it.
-            gmTicketText_.clear();
-            LOG_DEBUG("SMSG_GMTICKET_GETTICKET: no open ticket (status=", static_cast<int>(gmStatus), ")");
-            fireAddonEvent("UPDATE_TICKET", {});
-        }
-        packet.skipAll();
-    };
-    // uint32 status: 1 = GM support available, 0 = offline/unavailable
-    dispatchTable_[Opcode::SMSG_GMTICKET_SYSTEMSTATUS] = [this](network::Packet& packet) {
-        // uint32 status: 1 = GM support available, 0 = offline/unavailable
-        if (packet.hasRemaining(4)) {
-            uint32_t sysStatus = packet.readUInt32();
-            gmSupportAvailable_ = (sysStatus != 0);
-            chatHandler_->addSystemChatMessage(gmSupportAvailable_
-                ? "GM support is currently available."
-                : "GM support is currently unavailable.");
-            LOG_INFO("SMSG_GMTICKET_SYSTEMSTATUS: available=", gmSupportAvailable_);
-            // The help frame disables its "open a ticket" button on anything
-            // but GMTICKET_QUEUE_STATUS_ENABLED, which is the number 1 - and
-            // gets it from here. Parsed and stored and never said, so a closed
-            // queue looked open until the ticket was refused.
-            fireAddonEvent("UPDATE_GM_STATUS", {gmSupportAvailable_ ? "1" : "0"});
-        }
-        packet.skipAll();
-    };
-    // uint8 runeIndex + uint8 newRuneType (0=Blood,1=Unholy,2=Frost,3=Death)
-    dispatchTable_[Opcode::SMSG_CONVERT_RUNE] = [this](network::Packet& packet) {
-        // uint8 runeIndex + uint8 newRuneType (0=Blood,1=Unholy,2=Frost,3=Death)
-        if (!packet.hasRemaining(2)) {
-            packet.skipAll();
-            return;
-        }
-        uint8_t idx  = packet.readUInt8();
-        uint8_t type = packet.readUInt8();
-        if (idx < 6) {
-            playerRunes_[idx].type = static_cast<RuneType>(type & 0x3);
-            // Stored and never announced: the rune bar redraws a rune on this
-            // event and on nothing else, so a rune converted to Death kept the
-            // colour it was drawn with at login.
-            fireAddonEvent("RUNE_TYPE_UPDATE", {std::to_string(idx + 1)});
-        }
-    };
-    // uint32 count, then per rune: uint8 type, uint8 elapsed.
-    //
-    // This read a one-byte "ready mask" and six cooldowns, which is neither the
-    // shape nor the meaning. Player::ResyncRunes writes a count first, so the
-    // mask was the low byte of that count and every cooldown after it was
-    // half a type and half an elapsed value.
-    //
-    // The polarity was inverted as well. The server sends
-    // 255 - cooldown * 51, so 255 means the cooldown has fully elapsed and the
-    // rune is ready, and 0 means it was just spent - the opposite of what
-    // `1 - cd/255` computed.
-    //
-    // The type is in here too and was never read, so a rune converted to Death
-    // kept whatever it was at login.
-    dispatchTable_[Opcode::SMSG_RESYNC_RUNES] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(4)) {
-            packet.skipAll();
-            return;
-        }
-        const uint32_t count = packet.readUInt32();
-        for (uint32_t i = 0; i < count && i < playerRunes_.size(); ++i) {
-            if (!packet.hasRemaining(2)) break;
-            const uint8_t type    = packet.readUInt8();
-            const uint8_t elapsed = packet.readUInt8();
-            playerRunes_[i].type = static_cast<RuneType>(type & 0x3);
-            playerRunes_[i].readyFraction = elapsed / 255.0f;
-            playerRunes_[i].ready = (elapsed >= 255);
-            fireRuneUpdate(i);
-        }
-        packet.skipAll();
-    };
-    // uint32 runeMask (bit i=1 → rune i just became ready)
-    dispatchTable_[Opcode::SMSG_ADD_RUNE_POWER] = [this](network::Packet& packet) {
-        // uint32 runeMask (bit i=1 → rune i just became ready)
-        if (!packet.hasRemaining(4)) {
-            packet.skipAll();
-            return;
-        }
-        uint32_t runeMask = packet.readUInt32();
-        for (int i = 0; i < 6; i++) {
-            if (runeMask & (1u << i)) {
-                playerRunes_[i].ready = true;
-                playerRunes_[i].readyFraction = 1.0f;
-                fireRuneUpdate(static_cast<uint32_t>(i));
-            }
-        }
-    };
+    // (The GM ticket answers → ChatHandler, with the requests)
+    // (The runes → PlayerHandler)
 
     // uint8 result: 0=success, 1=failed, 2=disabled
     dispatchTable_[Opcode::SMSG_COMPLAIN_RESULT] = [this](network::Packet& packet) {
@@ -1856,17 +1448,6 @@ void GameHandler::registerRemainingOpcodes() {
                  " achievements=", achievements.size());
         if (auto* feed = achievementsFeedOf(services_))
             feed->onInspected(inspectedGuid, std::move(achievements));
-    };
-    dispatchTable_[Opcode::SMSG_ON_CANCEL_EXPECTED_RIDE_VEHICLE_AURA] = [this](network::Packet& packet) {
-        const bool wasRiding = vehicleId_ != 0;
-        vehicleId_ = 0;  // Vehicle ride cancelled; clear UI
-        eventBus().publish(events::VehicleStateChanged{false, 0});
-        if (wasRiding) {
-            fireAddonEvent("VEHICLE_UPDATE", {});
-            fireAddonEvent("UNIT_EXITED_VEHICLE", {"player"});
-            fireAddonEvent("UPDATE_BONUS_ACTIONBAR", {});
-        }
-        packet.skipAll();
     };
     // uint32 type (0=normal, 1=heavy, 2=tired/restricted) + uint32 minutes played
     dispatchTable_[Opcode::SMSG_PLAY_TIME_WARNING] = [this](network::Packet& packet) {

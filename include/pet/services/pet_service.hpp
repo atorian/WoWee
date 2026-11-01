@@ -44,7 +44,6 @@ public:
     void closeStableWindow() override { publish(stable_.close()); }
     [[nodiscard]] uint8_t getStableSlots() const override { return stable_.slots(); }
     [[nodiscard]] const std::vector<StabledPet>& getStabledPets() const override { return stable_.pets(); }
-    void setStableMaster(uint64_t npcGuid) override { stable_.chooseMaster(npcGuid); }
     void requestStabledPetList() override;
     void stablePet(uint8_t slot) override;
     void unstablePet(uint32_t petNumber) override;
@@ -63,6 +62,7 @@ public:
         publish(stable_.listed(masterGuid, slots, std::move(pets)));
     }
     void onStableResult(uint8_t result) override;
+    void onStableMasterChosen(uint64_t npcGuid) override { stable_.chooseMaster(npcGuid); }
     void beginCharacter() override;
 
 private:

@@ -14,13 +14,16 @@
 
 #include "core/coordinates.hpp"
 #include "core/map_scope.hpp"
+#include "core/thread_pool.hpp"
 #include "core/world_reconnect.hpp"
 #include "game/movement_flags.hpp"
 #include "game/opcodes.hpp"
 #include "rendering/camera_controller.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 
 using wowee::core::AppState;
@@ -79,6 +82,21 @@ TEST_CASE("the client's real path into the world ends in the world with the inte
     const auto heard = h.interfaceEventsOf("Harness");
     CHECK(std::count(heard.begin(), heard.end(), "PLAYER_ENTERING_WORLD") >= 1);
     CHECK(std::count(heard.begin(), heard.end(), "PLAYER_LEAVING_WORLD") == 0);
+}
+
+TEST_CASE("the world is entered however long the map's preparation waits for a worker",
+          "[client][harness][loading]") {
+    // The preparation runs on the I/O workers in real time, the frames on the
+    // harness's own clock. A machine busy with other processes - ctest running
+    // the suite's files at once - kept it waiting past every frame the entry
+    // was given, and the world was never entered.
+    auto& workers = wowee::core::ThreadPool::ioWorkers();
+    for (size_t i = 0; i < workers.threadCount(); ++i) {
+        (void)workers.submit([] { std::this_thread::sleep_for(std::chrono::seconds(1)); });
+    }
+    ClientHarness h;
+    h.enterWorld();
+    CHECK(h.state() == AppState::IN_GAME);
 }
 
 TEST_CASE("closing the window while the world loads ends the loop before anything else runs",

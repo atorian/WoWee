@@ -120,7 +120,7 @@ void AccountDataHandler::accountAuthenticated() {
     }
 }
 
-void AccountDataHandler::characterSelected(uint64_t characterGuid) {
+void AccountDataHandler::beginCharacter(uint64_t characterGuid) {
     characterGuid_ = characterGuid;
     legacyMacros_ = {};
     for (int i = 0; i < kAccountDataTypeCount; ++i) {

@@ -37,10 +37,6 @@ ChatHandler::ChatHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::E
     : sender_(sender), frameXml_(frameXml), events_(events), queries_(queries), cvars_(cvars),
       emotes_(emotes) {
     initializeChatLog();
-    // A character's conversation begins with their login. What the last one
-    // had - their whisperers, their channels, being away - is not theirs.
-    subscriptions_.push_back(events_.subscribe<events::CharacterLoggingIn>(
-        [this](const events::CharacterLoggingIn&) { conversation_ = {}; }));
     subscriptions_.push_back(events_.subscribe<events::PlayerNameKnown>(
         [this](const events::PlayerNameKnown& e) {
             // The lines held back for this name go out with it, and the ones
@@ -209,7 +205,123 @@ void ChatHandler::logChatMessage(const MessageChatData& msg, const char* source)
     chatLogStream_.flush();
 }
 
+void ChatHandler::registerGmTicketOpcodes(DispatchTable& table) {
+    // All three of these carry a uint32 from the same enum: creating a ticket
+    // answers 2, updating one 4, deleting one 9.
+    constexpr uint32_t kTicketAlreadyExists = 1, kTicketCreated = 2,
+                       kTicketUpdated = 4, kTicketDeleted = 9;
+    table[Opcode::SMSG_GMTICKET_CREATE] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(4)) {
+            LOG_WARNING("SMSG_GMTICKET_CREATE too short: ", packet.getSize(),
+                        " bytes; the player is not told whether the ticket went in");
+            return;
+        }
+        const uint32_t res = packet.readUInt32();
+        addSystemChatMessage(res == kTicketCreated       ? "GM ticket submitted."
+                           : res == kTicketAlreadyExists ? "You already have a GM ticket open."
+                                                         : "Failed to submit GM ticket.");
+    };
+    table[Opcode::SMSG_GMTICKET_UPDATETEXT] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(4)) {
+            LOG_WARNING("SMSG_GMTICKET_UPDATETEXT too short: ", packet.getSize(),
+                        " bytes; the player is not told whether the ticket changed");
+            return;
+        }
+        const uint32_t res = packet.readUInt32();
+        addSystemChatMessage(res == kTicketUpdated ? "GM ticket updated." : "Failed to update GM ticket.");
+    };
+    table[Opcode::SMSG_GMTICKET_DELETETICKET] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(4)) {
+            LOG_WARNING("SMSG_GMTICKET_DELETETICKET too short: ", packet.getSize(),
+                        " bytes; the player is not told whether the ticket went");
+            return;
+        }
+        const uint32_t res = packet.readUInt32();
+        addSystemChatMessage(res == kTicketDeleted ? "GM ticket deleted." : "No ticket to delete.");
+    };
+    // WotLK 3.3.5a: uint8 status - 6 an open ticket, 3 closed, anything else
+    // none; with 6, the ticket's text, its age in seconds, the days before it
+    // escalates and the estimated wait in hours.
+    table[Opcode::SMSG_GMTICKET_GETTICKET] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(1)) {
+            LOG_WARNING("SMSG_GMTICKET_GETTICKET is empty; the help frame is not told of any ticket");
+            packet.skipAll();
+            return;
+        }
+        const uint8_t gmStatus = packet.readUInt8();
+        if (gmStatus == 6 && packet.hasRemaining(1)) {
+            const std::string ticketText = packet.readString();
+            const uint32_t ageSec = packet.hasRemaining(4) ? packet.readUInt32() : 0;
+            /*uint32_t daysLeft =*/ (packet.hasRemaining(4)) ? packet.readUInt32() : 0;
+            const float waitHours = packet.hasRemaining(4) ? packet.readFloat() : 0.0f;
+            char buf[256];
+            if (ageSec < 60) {
+                std::snprintf(buf, sizeof(buf),
+                    "You have an open GM ticket (submitted %us ago). Estimated wait: %.1f hours.",
+                    ageSec, waitHours);
+            } else {
+                std::snprintf(buf, sizeof(buf),
+                    "You have an open GM ticket (submitted %um ago). Estimated wait: %.1f hours.",
+                    ageSec / 60, waitHours);
+            }
+            addSystemChatMessage(buf);
+            LOG_INFO("SMSG_GMTICKET_GETTICKET: open ticket age=", ageSec, "s wait=", waitHours, "h");
+
+            // The interface measures all of this in days and works the wait out
+            // itself, as (oldestTicketTime - ticketAge). This packet gives the
+            // wait directly, so the oldest time is the age plus it. updateTime
+            // says how stale the estimate is; this one was just measured.
+            const double ageDays = static_cast<double>(ageSec) / 86400.0;
+            auto days = [](double v) {
+                char out[32];
+                std::snprintf(out, sizeof(out), "%.6f", v);
+                return std::string(out);
+            };
+            frameXml_.fireFrameXmlEvent("UPDATE_TICKET", {
+                "1",                                            // category: has one
+                ticketText,
+                days(ageDays),
+                days(ageDays + waitHours / 24.0),
+                "0",                                            // just measured
+                "0",                                            // not assigned
+                "0",                                            // not opened by a GM
+            });
+        } else if (gmStatus == 3) {
+            addSystemChatMessage("Your GM ticket has been closed.");
+            LOG_INFO("SMSG_GMTICKET_GETTICKET: ticket closed");
+            // No arguments at all is how the interface is told there is no
+            // ticket: it reads the first one and stops if it is absent.
+            frameXml_.fireFrameXmlEvent("UPDATE_TICKET", {});
+        } else {
+            // Everything else is "no ticket", including 10: 0x0A is
+            // GMTICKET_STATUS_DEFAULT, what a server answers on every login
+            // for a player who has none.
+            LOG_DEBUG("SMSG_GMTICKET_GETTICKET: no open ticket (status=", static_cast<int>(gmStatus), ")");
+            frameXml_.fireFrameXmlEvent("UPDATE_TICKET", {});
+        }
+        packet.skipAll();
+    };
+    // uint32 status: 1 = GM support available, 0 = offline/unavailable
+    table[Opcode::SMSG_GMTICKET_SYSTEMSTATUS] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(4)) {
+            LOG_WARNING("SMSG_GMTICKET_SYSTEMSTATUS too short: ", packet.getSize(),
+                        " bytes; the help frame keeps the queue state it had");
+            packet.skipAll();
+            return;
+        }
+        const bool available = packet.readUInt32() != 0;
+        addSystemChatMessage(available ? "GM support is currently available."
+                                       : "GM support is currently unavailable.");
+        LOG_INFO("SMSG_GMTICKET_SYSTEMSTATUS: available=", available);
+        // The help frame disables its "open a ticket" button on anything but
+        // GMTICKET_QUEUE_STATUS_ENABLED, which is the number 1.
+        frameXml_.fireFrameXmlEvent("UPDATE_GM_STATUS", {available ? "1" : "0"});
+        packet.skipAll();
+    };
+}
+
 void ChatHandler::registerOpcodes(DispatchTable& table) {
+    registerGmTicketOpcodes(table);
     table[Opcode::SMSG_MOTD] = [this](network::Packet& packet) { handleMotd(packet); };
     table[Opcode::SMSG_MESSAGECHAT] = [this](network::Packet& packet) {
         if (sender_.characterInWorld()) handleMessageChat(packet);
@@ -976,6 +1088,17 @@ void ChatHandler::flushChatAwaitingName(uint64_t guid) {
     // Delivered outside the walk: each one runs the whole chat path, which can
     // hold another line of its own.
     for (auto& data : ready) deliverChatMessage(std::move(data), /*alreadyWaited=*/true);
+}
+
+void ChatHandler::queuePacedChat(std::vector<std::string> lines) {
+    for (std::string& line : lines) conversation_.pacedLines.push_back(std::move(line));
+}
+
+void ChatHandler::sendNextPacedLine() {
+    if (conversation_.pacedLines.empty()) return;
+    const std::string line = std::move(conversation_.pacedLines.front());
+    conversation_.pacedLines.pop_front();
+    sendChatMessage(ChatType::SAY, line, "");
 }
 
 void ChatHandler::expireChatAwaitingName() {

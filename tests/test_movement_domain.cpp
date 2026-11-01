@@ -3,6 +3,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "game_harness.hpp"
+#include "core/coordinates.hpp"
 #include "game/entity.hpp"
 #include "game/world_handler.hpp"
 #include "game/game_events.hpp"
@@ -20,15 +21,34 @@
 using wowee::test::GameHarness;
 namespace ev = wowee::game::events;
 
+namespace {
+
+uint16_t uf(wowee::game::UF field) { return wowee::game::fieldIndex(field); }
+
+/// The realm puts a creature in view: SMSG_UPDATE_OBJECT creating a unit, alive.
+void creatureInView(GameHarness& h, uint64_t guid) {
+    h.receive(wowee::game::Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(guid, wowee::game::ObjectType::UNIT,
+                                            {{uf(wowee::game::UF::OBJECT_FIELD_ENTRY), 299},
+                                             {uf(wowee::game::UF::UNIT_FIELD_HEALTH), 100}}));
+    h.pump();
+}
+
+}  // namespace
+
 TEST_CASE("following stops on the next frame once the followed player leaves view", "[movement][harness]") {
     using namespace wowee::game;
     GameHarness h;
     h.enterWorld();
     const auto& me = h.game().getMovementInfo();
-    auto friendPlayer = std::make_shared<Player>(0xB001);
-    friendPlayer->setName("Anna");
-    friendPlayer->setPosition(me.x + 3.0f, me.y, me.z, 0.0f);
-    h.game().getEntityManager().addEntity(friendPlayer->getGuid(), friendPlayer);
+    // Anna, three yards east, and her name as the server answers the query
+    // her arrival asks.
+    const glm::vec3 at = wowee::core::coords::canonicalToServer(glm::vec3(me.x + 3.0f, me.y, me.z));
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(0xB001, ObjectType::PLAYER, {{uf(UF::UNIT_FIELD_HEALTH), 100}},
+                                            at.x, at.y, at.z));
+    h.receive(Opcode::SMSG_NAME_QUERY_RESPONSE, GameHarness::nameResponseBody(0xB001, "Anna"));
+    h.pump();
     std::vector<bool> following;
     auto sub = h.events().subscribe<ev::AutoFollowChanged>(
         [&](const ev::AutoFollowChanged& e) { following.push_back(e.renderPos != nullptr); });
@@ -40,7 +60,8 @@ TEST_CASE("following stops on the next frame once the followed player leaves vie
     REQUIRE(h.addonEvents("AUTOFOLLOW_BEGIN").size() == 1);
     CHECK(h.addonEvents("AUTOFOLLOW_BEGIN")[0].args.at(0) == "Anna");
 
-    h.game().getEntityManager().removeEntity(0xB001);
+    h.receive(Opcode::SMSG_DESTROY_OBJECT, wowee::test::Body().u64(0xB001).u8(0));
+    h.pump();
     h.pump();
     CHECK(following == std::vector<bool>{true, false});
     CHECK(h.addonEvents("AUTOFOLLOW_END").size() == 1);
@@ -88,8 +109,7 @@ void playerMoves(GameHarness& h, uint64_t transport, float ox = 0, float oy = 0,
 
 void enterWorldAsEntity(GameHarness& h) {
     h.enterWorld();
-    auto self = std::make_shared<wowee::game::Player>(h.player().guid);
-    h.game().getEntityManager().addEntity(self->getGuid(), self);
+    h.playerInView();
 }
 }  // namespace
 
@@ -110,6 +130,67 @@ TEST_CASE("the player rides the transport the server names, and steps off when i
     playerMoves(h, 0);
     CHECK_FALSE(h.game().movement().isOnTransport());
     CHECK(h.game().movement().getPlayerTransportOffset() == glm::vec3(0.0f));
+    CHECK(h.game().getMovementInfo().transportGuid == 0);
+}
+
+// Transport guids are reused across maps - an Undercity elevator's becomes a
+// Deeprun tram's - so the ride ends with the world it was in. The game knows
+// when it leaves one; the client's scene ending is not what decides it.
+TEST_CASE("the player's ride ends when the server puts the player in another world",
+          "[movement][transport][harness]") {
+    using wowee::game::Opcode;
+    GameHarness h;
+    enterWorldAsEntity(h);
+    boatArrives(h);
+    playerMoves(h, kBoat, 1.0f, 2.0f, 3.0f);
+    REQUIRE(h.game().movement().isOnTransport());
+
+    wowee::test::PlayerSpec elsewhere = h.player();
+    elsewhere.mapId = 1;  // Kalimdor
+    elsewhere.x = 1629.0f;
+    elsewhere.y = -4373.0f;
+    elsewhere.z = 31.0f;
+    h.receive(Opcode::SMSG_LOGIN_VERIFY_WORLD, GameHarness::loginVerifyWorldBody(elsewhere));
+    h.pump();
+
+    CHECK_FALSE(h.game().movement().isOnTransport());
+    CHECK(h.game().getMovementInfo().transportGuid == 0);
+}
+
+TEST_CASE("the player's ride ends when the server puts the player elsewhere on the same map",
+          "[movement][transport][harness]") {
+    using wowee::game::Opcode;
+    GameHarness h;
+    enterWorldAsEntity(h);
+    boatArrives(h);
+    playerMoves(h, kBoat, 1.0f, 2.0f, 3.0f);
+    REQUIRE(h.game().movement().isOnTransport());
+
+    // A teleport across the continent: the boat is still in view until the
+    // server says it is not, and the player is not on it.
+    wowee::test::PlayerSpec across = h.player();
+    across.x += 2000.0f;
+    across.y += 1500.0f;
+    h.receive(Opcode::SMSG_LOGIN_VERIFY_WORLD, GameHarness::loginVerifyWorldBody(across));
+    h.pump();
+
+    CHECK_FALSE(h.game().movement().isOnTransport());
+    CHECK(h.game().getMovementInfo().transportGuid == 0);
+}
+
+TEST_CASE("the player's ride ends with the character's session", "[movement][transport][harness][relog]") {
+    GameHarness h;
+    enterWorldAsEntity(h);
+    boatArrives(h);
+    playerMoves(h, kBoat, 1.0f, 2.0f, 3.0f);
+    REQUIRE(h.game().movement().isOnTransport());
+
+    wowee::test::PlayerSpec next;
+    next.guid = 0x91;
+    next.name = "Next";
+    h.relogAs(next);
+
+    CHECK_FALSE(h.game().movement().isOnTransport());
     CHECK(h.game().getMovementInfo().transportGuid == 0);
 }
 
@@ -153,8 +234,7 @@ TEST_CASE("arriving on a new map ends what the old one left: offers, world state
     h.enterWorld();
     const uint32_t oldMap = h.game().getCurrentMapId();
     const uint32_t newMap = oldMap + 1;
-    auto creature = std::make_shared<wowee::game::Unit>(0xC001);
-    h.game().getEntityManager().addEntity(creature->getGuid(), creature);
+    creatureInView(h, 0xC001);
     // A resurrection offered, and a battleground score showing.
     h.receive(Opcode::SMSG_RESURRECT_REQUEST, Body().u64(0x777).u32(5).cstr("Anna").u8(0).u8(0));
     h.receive(Opcode::SMSG_UPDATE_WORLD_STATE, Body().u32(1581).u32(42));
@@ -181,8 +261,7 @@ TEST_CASE("a resurrection on the same map brings the player back where they are,
     GameHarness h;
     h.enterWorld();
     const uint32_t here = h.game().getCurrentMapId();
-    auto creature = std::make_shared<wowee::game::Unit>(0xC002);
-    h.game().getEntityManager().addEntity(creature->getGuid(), creature);
+    creatureInView(h, 0xC002);
     h.receive(Opcode::SMSG_FORCED_DEATH_UPDATE, Body());
     h.receive(Opcode::SMSG_SPIRIT_HEALER_CONFIRM, Body().u64(0xF130000000001234ull));
     h.pump();

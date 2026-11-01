@@ -5,6 +5,7 @@
 #include "game/chat_log.hpp"
 #include "game/game_utils.hpp"
 #include "game/frame_xml_events.hpp"
+#include "game/game_events.hpp"
 #include "game/packet_sender.hpp"
 #include "game/pet_gateway.hpp"
 #include "game/spell_defines.hpp"
@@ -21,7 +22,13 @@ namespace wowee::game {
 PetHandler::PetHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
                        ChatLog& chat, PetQueries& queries)
     : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat), queries_(queries),
-      subscriptions_(subscribePetNotices(events, chat, frameXml, queries)) {}
+      subscriptions_(subscribePetNotices(events, chat, frameXml, queries)) {
+    // The stable opened next is this stable master's.
+    subscriptions_.push_back(events.subscribe<events::StableOptionChosen>(
+        [this](const events::StableOptionChosen& e) {
+            if (auto* pet = feed()) pet->onStableMasterChosen(e.npcGuid);
+        }));
+}
 
 void PetHandler::raiseUiError(const std::string& message) {
     game::raiseUiError(events_, frameXml_, message);
@@ -41,7 +48,10 @@ void PetHandler::registerOpcodes(DispatchTable& table) {
         if (sender_.characterInWorld()) handleListStabledPets(p);
     };
     table[Opcode::SMSG_STABLE_RESULT] = [this](network::Packet& p) {
-        if (!p.hasRemaining(1)) return;
+        if (!p.hasRemaining(1)) {
+            LOG_WARNING("SMSG_STABLE_RESULT is empty; the stable is not told how its request went");
+            return;
+        }
         const uint8_t result = p.readUInt8();
         if (auto* pet = feed()) pet->onStableResult(result);
     };
@@ -62,6 +72,9 @@ void PetHandler::registerOpcodes(DispatchTable& table) {
             const uint32_t spellId = p.readUInt32();
             LOG_DEBUG("SMSG_PET_LEARNED_SPELL: spellId=", spellId);
             if (auto* pet = feed()) pet->onSpellLearned(spellId);
+        } else {
+            LOG_WARNING("SMSG_PET_LEARNED_SPELL too short: ", p.getSize(),
+                        " bytes; the pet's spell list does not gain it");
         }
         p.skipAll();
     };
@@ -70,6 +83,9 @@ void PetHandler::registerOpcodes(DispatchTable& table) {
             const uint32_t spellId = p.readUInt32();
             LOG_DEBUG("SMSG_PET_UNLEARNED_SPELL: spellId=", spellId);
             if (auto* pet = feed()) pet->onSpellUnlearned(spellId);
+        } else {
+            LOG_WARNING("SMSG_PET_UNLEARNED_SPELL too short: ", p.getSize(),
+                        " bytes; the pet's spell list keeps it");
         }
         p.skipAll();
     };
@@ -92,6 +108,9 @@ void PetHandler::registerOpcodes(DispatchTable& table) {
             packet.readUInt64();   // the pet's guid; the cost is what is asked for
             const uint32_t cost = packet.readUInt32();
             if (auto* pet = feed()) pet->onUnlearnOffered(cost);
+        } else {
+            LOG_WARNING("SMSG_PET_UNLEARN_CONFIRM too short: ", packet.getSize(),
+                        " bytes; no untrain offer is shown");
         }
         packet.skipAll();
     };
@@ -198,7 +217,12 @@ void PetHandler::handlePetNameQueryResponse(network::Packet& packet) {
     // the timestamp the name was set. A pet it could not find answers a zero
     // byte where the name would be, which is the empty string and means "keep
     // what you have" rather than "the pet has no name".
-    if (!packet.hasRemaining(4)) { packet.skipAll(); return; }
+    if (!packet.hasRemaining(4)) {
+        LOG_WARNING("SMSG_PET_NAME_QUERY_RESPONSE too short: ", packet.getSize(),
+                    " bytes; the pet keeps its template's name");
+        packet.skipAll();
+        return;
+    }
     const uint32_t key = packet.readUInt32();
     const std::string name = packet.readString();
     packet.skipAll();
@@ -234,13 +258,15 @@ void PetHandler::handleTameFailure(network::Packet& packet) {
         "Wrong faction", "Level too low", "Creature not tameable",
         "Can't control", "Can't command"
     };
-    if (packet.hasRemaining(1)) {
-        uint8_t reason = packet.readUInt8();
-        const char* msg = (reason < 8) ? reasons[reason] : "Unknown reason";
-        std::string s = std::string("Failed to tame: ") + msg;
-        raiseUiError(s);
-        chat_.addSystemChatMessage(s);
+    if (!packet.hasRemaining(1)) {
+        LOG_WARNING("SMSG_PET_TAME_FAILURE is empty; the player is not told why the taming failed");
+        return;
     }
+    uint8_t reason = packet.readUInt8();
+    const char* msg = (reason < 8) ? reasons[reason] : "Unknown reason";
+    std::string s = std::string("Failed to tame: ") + msg;
+    raiseUiError(s);
+    chat_.addSystemChatMessage(s);
 }
 
 void PetHandler::handleActionFeedback(network::Packet& packet) {
@@ -251,7 +277,10 @@ void PetHandler::handleActionFeedback(network::Packet& packet) {
         "Your pet cannot find a path to the target.",
         "Your pet cannot attack an immune target.",
     };
-    if (!packet.hasRemaining(1)) return;
+    if (!packet.hasRemaining(1)) {
+        LOG_WARNING("SMSG_PET_ACTION_FEEDBACK is empty; the pet's refusal is not shown");
+        return;
+    }
     uint8_t msg = packet.readUInt8();
     if (msg > 0 && msg < 7 && kPetFeedback[msg]) chat_.addSystemChatMessage(kPetFeedback[msg]);
     packet.skipAll();
@@ -262,7 +291,10 @@ void PetHandler::handleCastFailed(network::Packet& packet) {
     // Classic/TBC: spellId(4) + reason(1) (no castCount)
     const bool hasCount = isActiveExpansion("wotlk");
     const size_t minSize = hasCount ? 6u : 5u;
-    if (packet.hasRemaining(minSize)) {
+    if (!packet.hasRemaining(minSize)) {
+        LOG_WARNING("SMSG_PET_CAST_FAILED too short: ", packet.getSize(), " bytes, ", minSize,
+                    " needed; the failed pet spell is not reported");
+    } else {
         if (hasCount) /*uint8_t castCount =*/ packet.readUInt8();
         uint32_t spellId   = packet.readUInt32();
         uint8_t  reason    = (packet.hasRemaining(1)) ? packet.readUInt8() : 0;
@@ -292,6 +324,9 @@ void PetHandler::handleMode(network::Packet& packet) {
         m.react   = static_cast<uint8_t>((mode >> 8) & 0xFF);
         LOG_DEBUG("SMSG_PET_MODE: command=", static_cast<int>(m.command), " react=", static_cast<int>(m.react));
         if (auto* pet = feed()) pet->onMode(modeGuid, m);
+    } else {
+        LOG_WARNING("SMSG_PET_MODE too short: ", packet.getSize(),
+                    " bytes; the pet bar keeps the stance it showed");
     }
     packet.skipAll();
 }
@@ -314,7 +349,11 @@ void PetHandler::handleListStabledPets(network::Packet& packet) {
     pets.reserve(petCount);
     for (uint8_t i = 0; i < petCount; ++i) {
         // petNumber(4) + entry(4) + level(4) = 12 bytes before the name string
-        if (!packet.hasRemaining(12)) break;
+        if (!packet.hasRemaining(12)) {
+            LOG_WARNING("MSG_LIST_STABLED_PETS truncated: ", static_cast<int>(i), " of ",
+                        static_cast<int>(petCount), " pets read; the rest are not listed");
+            break;
+        }
         pet::StabledPet pet;
         pet.petNumber = packet.readUInt32();
         pet.entry     = packet.readUInt32();
@@ -324,7 +363,11 @@ void PetHandler::handleListStabledPets(network::Packet& packet) {
         // uint32 PetNumber, uint32 CreatureId, uint32 Level, the name, then
         // `uint8(1)` for the pet that is out and `uint8(2)` for one in a stable
         // slot. There is no display id on the wire.
-        if (!packet.hasRemaining(1)) break;
+        if (!packet.hasRemaining(1)) {
+            LOG_WARNING("MSG_LIST_STABLED_PETS truncated after pet ", pet.petNumber, " ('", pet.name,
+                        "'); it and the rest are not listed");
+            break;
+        }
         pet.isActive  = (packet.readUInt8() == 1);
         pets.push_back(std::move(pet));
     }

@@ -123,7 +123,7 @@ public:
 /// What the social side of the game keeps for one character: its party and
 /// guild, the invitations and challenges put to it, its queues and its saved
 /// instances. SocialHandler is this and assigns it whole
-/// when a character logs in (events::CharacterLoggingIn): the server sends
+/// in beginCharacter: the server sends
 /// the next character's own, and a duel or an invite put to the last one is
 /// not the next one's to answer.
 struct SocialCharacterState {
@@ -165,6 +165,10 @@ public:
                   ChatLog& chat, SocialQueries& queries, const core::CVarStore& cvars);
 
     void registerOpcodes(DispatchTable& table);
+    /// A character is being logged in: its party, guild, queues, the offers
+    /// put to it and its saved instances begin, here and in each social
+    /// context.
+    void beginCharacter();
 
     // ---- Structs (aliased from handler_types.hpp) ----
 
@@ -364,8 +368,7 @@ private:
     std::array<uint64_t, kMaxEncounterSlots> encounterUnitGuids_ = {};
     InstanceLockPrompt instanceLock_;
 
-    /// What this handler hears of the session: the character's state begins
-    /// anew at each login (events::CharacterLoggingIn). Last, so it goes first.
+    /// What this handler hears of the other domains. Last, so it goes first.
     std::vector<core::EventBus::Subscription> subscriptions_;
 };
 

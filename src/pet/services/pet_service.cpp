@@ -37,7 +37,6 @@ public:
     void closeStableWindow() override {}
     uint8_t getStableSlots() const override { return 0; }
     const std::vector<StabledPet>& getStabledPets() const override { return stabled_; }
-    void setStableMaster(uint64_t) override {}
     void requestStabledPetList() override {}
     void stablePet(uint8_t) override {}
     void unstablePet(uint32_t) override {}

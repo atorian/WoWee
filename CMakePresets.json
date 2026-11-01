@@ -55,8 +55,19 @@
       "hidden": true,
       "output": { "outputOnFailure": true }
     },
+    {
+      "name": "gpu",
+      "hidden": true,
+      "inherits": "base",
+      "description": "The tests that draw on the GPU, kept out of a plain ctest: ctest's gpu configuration, two at a time.",
+      "configuration": "gpu",
+      "filter": { "include": { "label": "gpu" } },
+      "execution": { "jobs": 2 }
+    },
     { "name": "dev", "inherits": "base", "configurePreset": "dev" },
+    { "name": "dev-gpu", "inherits": "gpu", "configurePreset": "dev" },
     { "name": "asan", "inherits": "base", "configurePreset": "asan" },
-    { "name": "release", "inherits": "base", "configurePreset": "release" }
+    { "name": "release", "inherits": "base", "configurePreset": "release" },
+    { "name": "release-gpu", "inherits": "gpu", "configurePreset": "release" }
   ]
 }

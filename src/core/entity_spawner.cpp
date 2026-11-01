@@ -13,6 +13,7 @@
 #include "rendering/scene_commands.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/vk_context.hpp"
+#include "rendering/cpu_stage_times.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
@@ -82,8 +83,9 @@ void EntitySpawner::initialize() {
     buildGameObjectDisplayLookups();
 }
 
-void EntitySpawner::update() {
+void EntitySpawner::update(rendering::CpuStageTimes* stages) {
     if (!spawns_) return;
+    rendering::CpuStageLaps laps(stages, "spawn/equipment queues");
     // Submit appearance, equipment and attachment copies together before the
     // next draw. The default upload queue is the graphics queue, so rendering
     // observes the recorded barriers without a CPU fence wait per texture.
@@ -107,18 +109,27 @@ void EntitySpawner::update() {
             spawns_->preparedAttachmentTextures_[path] = std::move(texture);
         it = spawns_->asyncAttachmentLoads_.erase(it);
     }
+    laps.lap("attachments");
     processPlayerSpawnQueue();
-    processCreatureSpawnQueue();
+    laps.lap("players");
+    processCreatureSpawnQueue(false, stages);
+    laps.lap("creatures");
     processAsyncNpcCompositeResults();
+    laps.lap("NPC composites");
     processDeferredEquipmentQueue();
+    laps.lap("equipment");
     processGameObjectSpawnQueue();
+    laps.lap("game objects");
     processPendingTransportRegistrations();
     processPendingTransportDoodads();
+    laps.lap("transports");
     processPendingMount();
     processPendingRemotePlayerMounts();
     reconcileRemotePlayerForms();
     processPendingRemotePlayerForms();
+    laps.lap("mounts and forms");
     syncCreatureStealthVisuals();
+    laps.lap("stealth");
 }
 
 void EntitySpawner::syncCreatureStealthVisuals() {
@@ -2226,11 +2237,19 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
     // Apply skin textures from CreatureDisplayInfo.dbc (only once per displayId model).
     // Track separately from model cache because async loading may upload the model
     // before textures are applied.
+    // Each step's time is added to creatureSpawnSteps_ for the frame profile.
+    auto stepStart = std::chrono::steady_clock::now();
+    auto endStep = [&stepStart](float& total) {
+        const auto now = std::chrono::steady_clock::now();
+        total += std::chrono::duration<float, std::milli>(now - stepStart).count();
+        stepStart = now;
+    };
     auto itDisplayData = assets_.displayDataMap_.find(displayId);
     bool needsTextures = (assets_.displayIdTexturesApplied_.find(displayId) == assets_.displayIdTexturesApplied_.end());
     if (needsTextures && itDisplayData != assets_.displayDataMap_.end()) {
         applyCreatureDisplayTextures(displayId, modelId, itDisplayData->second);
     }
+    endStep(creatureSpawnSteps_.textures);
 
     // Use the entity's latest server-authoritative position rather than the stale spawn
     // position. Movement packets (SMSG_MONSTER_MOVE) can arrive while a creature is still
@@ -2259,6 +2278,7 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
     // Create instance (apply server-provided scale from OBJECT_FIELD_SCALE_X)
     uint32_t instanceId = scene().characters().createInstance(modelId, renderPos,
         glm::vec3(0.0f, 0.0f, renderYaw), scale);
+    endStep(creatureSpawnSteps_.instance);
 
     if (instanceId == 0) {
         LOG_WARNING("Failed to create creature instance for guid 0x", std::hex, guid, std::dec);
@@ -2269,6 +2289,7 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
     // NPC, cached model or not, so two NPCs sharing a model still get their own
     // colouring.
     applyHumanoidInstanceOverrides(instanceId, modelId, displayId);
+    endStep(creatureSpawnSteps_.overrides);
     // A humanoid NPC geoset mask used to be built here, behind
     // `static constexpr bool kEnableNpcSafeGeosetMask = false`. Same story as
     // the block below: disabled, unreachable, and edited tonight as though it
@@ -2291,14 +2312,17 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
     // at once - a cape and no cape, a robe skirt over trousers. Pick one per
     // clothing group and leave every other batch of the model alone.
     normalizeHumanoidClothingGeosets(instanceId, modelId, displayId);
+    endStep(creatureSpawnSteps_.geosets);
 
     // Try attaching NPC held weapons; if update fields are not ready yet,
     // IN_GAME retry loop will attempt again shortly.
     bool weaponsAttachedNow = tryAttachCreatureVirtualWeapons(guid, instanceId);
+    endStep(creatureSpawnSteps_.weapons);
 
     // Start the creature in the pose the server says it is already in: dead,
     // mid-emote, or newly arrived.
     playCreatureSpawnPose(guid, instanceId);
+    endStep(creatureSpawnSteps_.pose);
 
     // Track instance
     spawns_->creatureInstances_[guid] = instanceId;

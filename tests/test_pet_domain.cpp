@@ -25,6 +25,16 @@ constexpr uint64_t kWolf = 0xF140000000000101ull;
 constexpr uint32_t kBite = 17253;
 constexpr uint32_t kGrowl = 2649;
 
+/// The realm puts the wolf in view: SMSG_UPDATE_OBJECT creating a unit of its
+/// creature entry, a timber wolf.
+void wolfInView(GameHarness& h) {
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(kWolf, wowee::game::ObjectType::UNIT,
+                                            {{wowee::game::fieldIndex(wowee::game::UF::OBJECT_FIELD_ENTRY), 69},
+                                             {wowee::game::fieldIndex(wowee::game::UF::UNIT_FIELD_HEALTH), 50}}));
+    h.pump();
+}
+
 /// SMSG_PET_SPELLS as AzerothCore's Player::PetSpellInitialize writes it on
 /// 3.3.5a: the pet, its family, duration, react and command, flags, the ten
 /// bar slots, and the spells with their state in the top byte.
@@ -73,10 +83,11 @@ TEST_CASE("a summoned pet's bar and spells are what the interface reads", "[pet]
     CHECK(query->readUInt64() == kWolf);
 
     // The answer names the pet in view.
-    auto wolf = std::make_shared<wowee::game::Unit>(kWolf);
-    h.game().getEntityManager().addEntity(kWolf, wolf);
+    wolfInView(h);
     h.receive(Opcode::SMSG_PET_NAME_QUERY_RESPONSE, Body().u32(key).cstr("Fang").u32(0));
     h.pump();
+    auto wolf = std::dynamic_pointer_cast<wowee::game::Unit>(h.game().getEntityManager().getEntity(kWolf));
+    REQUIRE(wolf);
     CHECK(wolf->getName() == "Fang");
     REQUIRE(h.addonEvents("UNIT_NAME_UPDATE").size() == 1);
     CHECK(h.addonEvents("UNIT_NAME_UPDATE")[0].args == std::vector<std::string>{"pet"});
@@ -124,7 +135,7 @@ TEST_CASE("the pet's own fields are the pet's stats, not the player's", "[pet][h
     h.enterWorld();
     h.receive(Opcode::SMSG_PET_SPELLS, petSpells(kWolf, 1, 1, {}));
     h.pump();
-    h.game().getEntityManager().addEntity(kWolf, std::make_shared<wowee::game::Unit>(kWolf));
+    wolfInView(h);
 
     GameHarness::Fields fields;
     fields[wowee::game::fieldIndex(wowee::game::UF::UNIT_FIELD_STAT0)] = 77;
@@ -218,7 +229,7 @@ TEST_CASE("the pet's experience bar is told when the experience moves, and only 
     h.enterWorld();
     h.receive(Opcode::SMSG_PET_SPELLS, petSpells(kWolf, 1, 1, {}));
     h.pump();
-    h.game().getEntityManager().addEntity(kWolf, std::make_shared<wowee::game::Unit>(kWolf));
+    wolfInView(h);
     h.clearRecords();
 
     GameHarness::Fields xp{{wowee::game::fieldIndex(wowee::game::UF::UNIT_FIELD_PETEXPERIENCE), 500}};
@@ -260,7 +271,9 @@ TEST_CASE("stabling with no pet out is refused on the error line, and nothing is
     GameHarness h;
     h.enterWorld();
     constexpr uint64_t kStableMaster = 0xF130000000000201ull;
-    h.pet().setStableMaster(kStableMaster);
+    // The stable master's list: no pets in it, two slots bought.
+    h.receive(Opcode::MSG_LIST_STABLED_PETS, Body().u64(kStableMaster).u8(0).u8(2));
+    h.pump();
     h.clearRecords();
 
     h.pet().stablePet(1);

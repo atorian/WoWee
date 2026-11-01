@@ -1707,6 +1707,9 @@ void CharacterRenderer::setModelTexture(uint32_t modelId, uint32_t textureSlot, 
         return;
     }
 
+    // A snapshot the render thread records from may hold this model: change a
+    // copy, and leave it the one it has. The copy shares the parsed model
+    // (M2ModelGPU::data), so what a caller holds of that stays good.
     if (it->second.use_count() > 1) {
         it->second = std::make_shared<M2ModelGPU>(*it->second);
         for (auto& [id, inst] : scene_->instances) if (inst.modelId == modelId) inst.cachedModel = it->second.get();
@@ -1721,13 +1724,17 @@ void CharacterRenderer::setModelTexture(uint32_t modelId, uint32_t textureSlot, 
     core::Logger::getInstance().debug("Replaced model ", modelId, " texture slot ", textureSlot, " with composited texture");
 }
 bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
+    return loadModel(pipeline::M2Model(model), id);
+}
+
+bool CharacterRenderer::loadModel(pipeline::M2Model&& parsed, uint32_t id) {
     // A mesh, emitters, or both. A model of emitters alone - nearly every
     // enchant glow, and some creatures - has no batches to draw here and is
     // still an instance with a skeleton: CharacterEmitters poses its emitters
     // on that skeleton in M2Renderer. Refusing it for want of a mesh dropped
     // every weapon enchant on the floor.
-    if (!model.hasContent()) {
-        LOG_ERROR("CharacterRenderer: model '", model.name.empty() ? "<unnamed>" : model.name,
+    if (!parsed.hasContent()) {
+        LOG_ERROR("CharacterRenderer: model '", parsed.name.empty() ? "<unnamed>" : parsed.name,
                   "' (id ", id, ") has no mesh and no emitters; not loaded");
         return false;
     }
@@ -1739,8 +1746,12 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
         models.erase(existingIt);
     }
 
+    // Built here and frozen when the model is published below.
+    auto data = std::make_shared<pipeline::M2Model>(std::move(parsed));
+    const pipeline::M2Model& model = *data;
+    const size_t vertexCount = model.vertices.size();
     M2ModelGPU gpuModel;
-    gpuModel.data = model;
+    gpuModel.data = data;
     if (!model.vertices.empty()) {
         gpuModel.visualBoundMin = glm::vec3(std::numeric_limits<float>::max());
         gpuModel.visualBoundMax = glm::vec3(-std::numeric_limits<float>::max());
@@ -1823,16 +1834,16 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
     // here again: what the rest of the client asked of them - how many there
     // are, how high the model stands - is kept beside them (getModelShape).
     // Six hundred character models kept them all for the life of the session.
-    std::vector<pipeline::M2Vertex>().swap(gpuModel.data.vertices);
-    std::vector<uint16_t>().swap(gpuModel.data.indices);
+    std::vector<pipeline::M2Vertex>().swap(data->vertices);
+    std::vector<uint16_t>().swap(data->indices);
 
     // Precompute batch render order (priorityPlane, materialLayer). The result
     // depends only on the model, so caching it here removes the per-frame
     // per-instance allocate + sort from render().
-    gpuModel.sortedBatchIndices.resize(gpuModel.data.batches.size());
+    gpuModel.sortedBatchIndices.resize(gpuModel.data->batches.size());
     std::iota(gpuModel.sortedBatchIndices.begin(), gpuModel.sortedBatchIndices.end(), 0);
     std::stable_sort(gpuModel.sortedBatchIndices.begin(), gpuModel.sortedBatchIndices.end(),
-        [&batches = gpuModel.data.batches](size_t a, size_t b) {
+        [&batches = gpuModel.data->batches](size_t a, size_t b) {
             const auto& ba = batches[a];
             const auto& bb = batches[b];
             if (ba.priorityPlane != bb.priorityPlane)
@@ -1843,7 +1854,7 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
 
     models[id] = std::make_shared<M2ModelGPU>(std::move(gpuModel));
 
-    core::Logger::getInstance().debug("Loaded M2 model ", id, " (", model.vertices.size(),
+    core::Logger::getInstance().debug("Loaded M2 model ", id, " (", vertexCount,
                        " verts, ", model.bones.size(), " bones, ", model.sequences.size(),
                        " anims, ", model.textures.size(), " textures)");
 
@@ -1851,7 +1862,7 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
 }
 
 void CharacterRenderer::setupModelBuffers(M2ModelGPU& gpuModel) {
-    auto& model = gpuModel.data;
+    const pipeline::M2Model& model = *gpuModel.data;
 
     if (model.vertices.empty() || model.indices.empty()) return;
 
@@ -1964,7 +1975,7 @@ void CharacterRenderer::setupModelBuffers(M2ModelGPU& gpuModel) {
 }
 
 void CharacterRenderer::calculateBindPose(M2ModelGPU& gpuModel) {
-    auto& bones = gpuModel.data.bones;
+    auto& bones = gpuModel.data->bones;
     size_t numBones = bones.size();
     gpuModel.bindPose.resize(numBones);
 
@@ -2004,7 +2015,7 @@ uint32_t CharacterRenderer::createInstance(uint32_t modelId, const glm::vec3& po
 
     // Initialize bone matrices to identity
     auto& gpuRef = (*modelIt->second);
-    instance.boneMatrices.resize(std::max(static_cast<size_t>(1), gpuRef.data.bones.size()), glm::mat4(1.0f));
+    instance.boneMatrices.resize(std::max(static_cast<size_t>(1), gpuRef.data->bones.size()), glm::mat4(1.0f));
     instance.cachedModel = &gpuRef;
 
     uint32_t id = instance.id;
@@ -2021,7 +2032,7 @@ void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId,
     }
 
     auto& instance = it->second;
-    auto& model = models[instance.modelId]->data;
+    const auto& model = *models[instance.modelId]->data;
     instance.oneShotReturnAnim = loop ? 0 : oneShotReturnAnim;
 
     // Find animation sequence index by ID
@@ -2067,12 +2078,12 @@ void CharacterRenderer::advanceAnimation(uint32_t instanceId, CharacterInstance&
     // Advance global sequence timer (accumulates independently of animation wrapping)
     inst.globalSequenceTime += deltaTime * 1000.0f;
 
-    if (!inst.cachedModel || inst.cachedModel->data.sequences.empty()) return;
+    if (!inst.cachedModel || inst.cachedModel->data->sequences.empty()) return;
     if (inst.currentSequenceIndex < 0) {
         inst.currentSequenceIndex = 0;
-        inst.currentAnimationId = inst.cachedModel->data.sequences[0].id;
+        inst.currentAnimationId = inst.cachedModel->data->sequences[0].id;
     }
-    const auto& seq = inst.cachedModel->data.sequences[inst.currentSequenceIndex];
+    const auto& seq = inst.cachedModel->data->sequences[inst.currentSequenceIndex];
     inst.animationTime += deltaTime * 1000.0f * inst.animationSpeed;
     if (seq.duration > 0 && inst.animationTime >= static_cast<float>(seq.duration)) {
         if (inst.animationLoop) {
@@ -2261,7 +2272,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos, cons
                 constexpr float kMaxPush = 0.35f;
 
                 const glm::mat4 weaponInv = glm::inverse(weaponMat);
-                const auto& wm = weapIt->second.cachedModel->data;
+                const auto& wm = *weapIt->second.cachedModel->data;
 
                 glm::vec3 joints[3];
                 int jointCount = 0;
@@ -2334,7 +2345,7 @@ void CharacterRenderer::setArmAnimations(uint32_t instanceId, uint32_t leftArmAn
     auto it = scene_->instances.find(instanceId);
     if (it == scene_->instances.end()) return;
     auto& instance = it->second;
-    const auto& model = models[instance.modelId]->data;
+    const auto& model = *models[instance.modelId]->data;
     const auto& sequences = model.sequences;
     const uint32_t anims[2] = {leftArmAnim, rightArmAnim};
     for (int arm = 0; arm < 2; arm++) {
@@ -2362,7 +2373,7 @@ void CharacterRenderer::setArmAnimations(uint32_t instanceId, uint32_t leftArmAn
 
 void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
     if (!instance.cachedModel) return;
-    auto& model = instance.cachedModel->data;
+    const auto& model = *instance.cachedModel->data;
 
     if (model.bones.empty()) {
         return;
@@ -2675,7 +2686,7 @@ void CharacterRenderer::cullCharacters(const Camera& camera, Part part,
             float cullRadius = kDefaultCharacterCullRadius;
             auto mIt = models.find(instance.modelId);
             if (mIt != models.end()) {
-                float modelR = mIt->second->data.boundRadius;
+                float modelR = mIt->second->data->boundRadius;
                 if (modelR > 0.01f)
                     cullRadius = std::max(kDefaultCharacterCullRadius, modelR * std::max(0.001f, instance.scale));
             }
@@ -2873,11 +2884,11 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
         // A model with no batches draws nothing, as in the client: an
         // invisible stalker's skin is exactly that. It used to be drawn
         // whole with its first texture.
-        if (!gpuModel.data.batches.empty()) {
+        if (!gpuModel.data->batches.empty()) {
             bool applyGeosetFilter = !dress.activeGeosets.empty();
             if (applyGeosetFilter) {
                 bool hasRenderableGeoset = false;
-                for (const auto& batch : gpuModel.data.batches) {
+                for (const auto& batch : gpuModel.data->batches) {
                     if (dress.activeGeosets.find(batch.submeshId) != dress.activeGeosets.end()) {
                         hasRenderableGeoset = true;
                         break;
@@ -2896,15 +2907,15 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
 
 
             auto batchUsesTextureType = [](const M2ModelGPU& gm, const pipeline::M2Batch& b, uint32_t wantedType) {
-                if (b.textureIndex == 0xFFFF || gm.data.textureLookup.empty()) return false;
+                if (b.textureIndex == 0xFFFF || gm.data->textureLookup.empty()) return false;
 
                 uint32_t comboCount = b.textureCount ? static_cast<uint32_t>(b.textureCount) : 1u;
                 comboCount = std::min<uint32_t>(comboCount, 8u);
                 for (uint32_t i = 0; i < comboCount; ++i) {
                     uint32_t lookupPos = static_cast<uint32_t>(b.textureIndex) + i;
-                    if (lookupPos >= gm.data.textureLookup.size()) break;
-                    uint16_t texSlot = gm.data.textureLookup[lookupPos];
-                    if (texSlot < gm.data.textures.size() && gm.data.textures[texSlot].type == wantedType)
+                    if (lookupPos >= gm.data->textureLookup.size()) break;
+                    uint16_t texSlot = gm.data->textureLookup[lookupPos];
+                    if (texSlot < gm.data->textures.size() && gm.data->textures[texSlot].type == wantedType)
                         return true;
                 }
                 return false;
@@ -2917,8 +2928,8 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
             // alpha-key/blend after.  This ensures capes and body parts write
             // depth before hair overlay, preventing hair→cape z-fight.
             auto getBatchBlendMode = [&](const pipeline::M2Batch& b) -> uint16_t {
-                if (b.materialIndex < gpuModel.data.materials.size())
-                    return gpuModel.data.materials[b.materialIndex].blendMode;
+                if (b.materialIndex < gpuModel.data->materials.size())
+                    return gpuModel.data->materials[b.materialIndex].blendMode;
                 return 0;
             };
 
@@ -2936,7 +2947,7 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
             for (int stage = fadeDepthStage ? 0 : 1; stage < 2; ++stage) {
             for (int pass = 0; pass < 2; pass++) {
             for (size_t bi : sortedBatchIndices) {
-                const auto& batch = gpuModel.data.batches[bi];
+                const auto& batch = gpuModel.data->batches[bi];
                 uint16_t bm = getBatchBlendMode(batch);
                 if (pass == 0 && bm != 0) continue;  // pass 0: opaque only
                 if (pass == 1 && bm == 0) continue;   // pass 1: non-opaque only
@@ -2974,10 +2985,10 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
                 if (batch.submeshId == 0 && worldCharacter && headBatchCanaryCount_ < 24) {
                     ++headBatchCanaryCount_;
                     uint32_t chosenType = 0;
-                    if (batch.textureIndex != 0xFFFF && !gpuModel.data.textureLookup.empty()) {
-                        uint16_t sl = gpuModel.data.textureLookup[batch.textureIndex];
-                        if (sl < gpuModel.data.textures.size())
-                            chosenType = gpuModel.data.textures[sl].type;
+                    if (batch.textureIndex != 0xFFFF && !gpuModel.data->textureLookup.empty()) {
+                        uint16_t sl = gpuModel.data->textureLookup[batch.textureIndex];
+                        if (sl < gpuModel.data->textures.size())
+                            chosenType = gpuModel.data->textures[sl].type;
                     }
                     const VkTexture* rt = resolveBatchTexture(dress, gpuModel, batch).texture->get();
                     // At debug: this canary was for heads resolving to the
@@ -3007,11 +3018,11 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
                 // Opaque batches can't express alpha in the shader, so cull
                 // batches whose track evaluates to ~0 for the current sequence.
                 const float batchColorAlpha = glm::clamp(
-                    evalBatchColorAlpha(gpuModel.data, batch,
+                    evalBatchColorAlpha(*gpuModel.data, batch,
                                         instance.sequenceIndex,
                                         instance.animationTime,
                                         instance.globalSequenceTime) *
-                    evalBatchTextureWeight(gpuModel.data, batch,
+                    evalBatchTextureWeight(*gpuModel.data, batch,
                                            instance.sequenceIndex,
                                            instance.animationTime,
                                            instance.globalSequenceTime),
@@ -3036,11 +3047,11 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
                 // Respect M2 material blend mode for creature/character submeshes.
                 uint16_t blendMode = 0;
                 uint16_t materialFlags = 0;
-                if (batch.materialIndex < gpuModel.data.materials.size()) {
-                    blendMode = gpuModel.data.materials[batch.materialIndex].blendMode;
-                    materialFlags = gpuModel.data.materials[batch.materialIndex].flags;
+                if (batch.materialIndex < gpuModel.data->materials.size()) {
+                    blendMode = gpuModel.data->materials[batch.materialIndex].blendMode;
+                    materialFlags = gpuModel.data->materials[batch.materialIndex].flags;
                 }
-                const M2BatchShading shading = characterBatchShading(gpuModel.data, batch, blendMode);
+                const M2BatchShading shading = characterBatchShading(*gpuModel.data, batch, blendMode);
                 // Shader 0x8000: the client builds no effect for it and draws nothing.
                 if (!shading.drawn) continue;
 
@@ -3061,10 +3072,10 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
                                         group == 8 || group == 9 || group == 13);
                     if (isSkinGroup) {
                         uint32_t texType = 0;
-                        if (batch.textureIndex < gpuModel.data.textureLookup.size()) {
-                            uint16_t lk = gpuModel.data.textureLookup[batch.textureIndex];
-                            if (lk < gpuModel.data.textures.size()) {
-                                texType = gpuModel.data.textures[lk].type;
+                        if (batch.textureIndex < gpuModel.data->textureLookup.size()) {
+                            uint16_t lk = gpuModel.data->textureLookup[batch.textureIndex];
+                            if (lk < gpuModel.data->textures.size()) {
+                                texType = gpuModel.data->textures[lk].type;
                             }
                         }
                         // Do NOT apply skin composite to hair (type 6) batches
@@ -3076,10 +3087,10 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
                                     candidate = &itO->second;
                                 }
                                 if (*candidate != whiteTexture_ && *candidate) {
-                                    if (ti < gpuModel.data.textures.size() &&
-                                        (gpuModel.data.textures[ti].type == 1 || gpuModel.data.textures[ti].type == 11)) {
+                                    if (ti < gpuModel.data->textures.size() &&
+                                        (gpuModel.data->textures[ti].type == 1 || gpuModel.data->textures[ti].type == 11)) {
                                         texRef = candidate;
-                                        wrapFlags = static_cast<uint8_t>(gpuModel.data.textures[ti].flags & 0x3);
+                                        wrapFlags = static_cast<uint8_t>(gpuModel.data->textures[ti].flags & 0x3);
                                         break;
                                     }
                                 }
@@ -3136,8 +3147,8 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
                 matData.stateTint = glm::vec4(instance.stateTint, 1.0f);
                 // The colour half of the batch's M2Color, beside the alpha
                 // half above. The generic M2 path tints with the same value.
-                if (batch.colorIndex < gpuModel.data.colorRGB.size())
-                    matData.batchColor = glm::vec4(gpuModel.data.colorRGB[batch.colorIndex], 1.0f);
+                if (batch.colorIndex < gpuModel.data->colorRGB.size())
+                    matData.batchColor = glm::vec4(gpuModel.data->colorRGB[batch.colorIndex], 1.0f);
                 matData.alphaTest = blendNeedsCutout ? 1 : 0;
                 matData.ignoreTextureAlpha = (blendMode == 0 && !hairMaterial) ? 1 : 0;
                 matData.unlit = unlit ? 1 : 0;
@@ -3154,11 +3165,11 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
                 const auto stageUVTransform = [&](uint32_t stage) {
                     const size_t animLookup = batch.textureAnimIndex == 0xFFFF
                         ? size_t{0xFFFF} : size_t{batch.textureAnimIndex} + stage;
-                    const auto* tt = m2TextureTransformAt(gpuModel.data.textureTransformLookup,
-                                                          gpuModel.data.textureTransforms, animLookup);
+                    const auto* tt = m2TextureTransformAt(gpuModel.data->textureTransformLookup,
+                                                          gpuModel.data->textureTransforms, animLookup);
                     return tt ? m2SampleUVTransform(*tt, instance.sequenceIndex,
                                                     instance.animationTime, instance.globalSequenceTime,
-                                                    gpuModel.data.globalSequenceDurations)
+                                                    gpuModel.data->globalSequenceDurations)
                               : M2UVTransform{};
                 };
                 matData.uvTransform = stageUVTransform(0);
@@ -3176,7 +3187,7 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
                         // Drawn with the second stage white: the first alone.
                         static std::unordered_set<uint64_t> loggedMissingSecond;
                         if (loggedMissingSecond.insert((uint64_t{instance.modelId} << 16) | bi).second) {
-                            LOG_WARNING("Character model '", gpuModel.data.name, "' batch ", bi,
+                            LOG_WARNING("Character model '", gpuModel.data->name, "' batch ", bi,
                                         ": its second texture (lookup ", size_t{batch.textureIndex} + 1,
                                         ") is not loaded; drawn with the first stage alone");
                         }
@@ -3248,10 +3259,10 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
                 static int sceneDiagLines = 0;
                 if (instance.isSceneModel && sceneDiagEnabled() && sceneDiagLines++ < 40) {
                     std::string texName = "<white>";
-                    if (batch.textureIndex < gpuModel.data.textureLookup.size()) {
-                        uint16_t lk = gpuModel.data.textureLookup[batch.textureIndex];
-                        if (lk < gpuModel.data.textures.size())
-                            texName = gpuModel.data.textures[lk].filename;
+                    if (batch.textureIndex < gpuModel.data->textureLookup.size()) {
+                        uint16_t lk = gpuModel.data->textureLookup[batch.textureIndex];
+                        if (lk < gpuModel.data->textures.size())
+                            texName = gpuModel.data->textures[lk].filename;
                     }
                     // Warning level: the diagnostic is opt-in already, and the file log
                     // filters info out by default.
@@ -3486,13 +3497,13 @@ void CharacterRenderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4
 
         const CharacterDress& dress = *inst.dress;
         bool applyGeosetFilter = !dress.activeGeosets.empty();
-        for (const auto& batch : gpuModel.data.batches) {
+        for (const auto& batch : gpuModel.data->batches) {
             uint16_t blendMode = 0;
-            if (batch.materialIndex < gpuModel.data.materials.size()) {
-                blendMode = gpuModel.data.materials[batch.materialIndex].blendMode;
+            if (batch.materialIndex < gpuModel.data->materials.size()) {
+                blendMode = gpuModel.data->materials[batch.materialIndex].blendMode;
             }
             if (blendMode >= 2) continue; // skip transparent
-            if (!characterBatchShading(gpuModel.data, batch, blendMode).drawn) continue;  // shader 0x8000
+            if (!characterBatchShading(*gpuModel.data, batch, blendMode).drawn) continue;  // shader 0x8000
             if (applyGeosetFilter &&
                 dress.activeGeosets.find(batch.submeshId) == dress.activeGeosets.end()) continue;
             if (!applyGeosetFilter) {
@@ -3586,8 +3597,8 @@ void CharacterRenderer::gatherLocalLights(const Camera& camera, std::vector<Loca
     for (const auto& [id, inst] : scene_->instances) {
         if (!isShown(inst)) continue;
         const auto mit = models.find(inst.modelId);
-        if (mit == models.end() || mit->second->data.lights.empty()) continue;
-        const pipeline::M2Model& model = mit->second->data;
+        if (mit == models.end() || mit->second->data->lights.empty()) continue;
+        const pipeline::M2Model& model = *mit->second->data;
         const glm::mat4 modelMatrix = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix
                                                                   : getModelMatrix(inst);
         const glm::vec3 origin(modelMatrix[3]);
@@ -3632,13 +3643,13 @@ CharacterRenderer::BatchTexture CharacterRenderer::resolveBatchTexture(
     // other stage; the stages are combined now (m2BatchShading).
     if (b.textureIndex == 0xFFFF) return {.texture = &whiteTexture_};
     const uint32_t lookupPos = static_cast<uint32_t>(b.textureIndex) + stage;
-    if (lookupPos >= gm.data.textureLookup.size()) return {.texture = &whiteTexture_};
-    const uint16_t texSlot = gm.data.textureLookup[lookupPos];
+    if (lookupPos >= gm.data->textureLookup.size()) return {.texture = &whiteTexture_};
+    const uint16_t texSlot = gm.data->textureLookup[lookupPos];
     if (texSlot >= gm.textureIds.size()) return {.texture = &whiteTexture_};
 
     const TextureRef* texPtr = &gm.textureIds[texSlot];
-    const uint8_t wrapFlags = texSlot < gm.data.textures.size()
-        ? static_cast<uint8_t>(gm.data.textures[texSlot].flags & 0x3)
+    const uint8_t wrapFlags = texSlot < gm.data->textures.size()
+        ? static_cast<uint8_t>(gm.data->textures[texSlot].flags & 0x3)
         : BatchTexture::kRepeatBoth;
     // The instance's own texture for this slot, whatever the batch's geoset.
     //
@@ -3732,7 +3743,7 @@ void CharacterRenderer::setInstanceTorsoYaw(uint32_t instanceId, float deltaYawR
 const pipeline::M2Model* CharacterRenderer::getModelData(uint32_t modelId) const {
     auto it = models.find(modelId);
     if (it == models.end()) return nullptr;
-    return &it->second->data;
+    return it->second->data.get();
 }
 
 std::optional<CharacterRenderer::ModelShape> CharacterRenderer::getModelShape(uint32_t modelId) const {
@@ -3758,7 +3769,7 @@ void CharacterRenderer::forEachEmitterSource(
         EmitterSource source;
         source.instanceId = id;
         source.modelSerial = model->loadSerial;
-        source.model = &model->data;
+        source.model = model->data.get();
         source.modelMatrix = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix
                                                          : getModelMatrix(inst);
         source.scale = inst.scale;
@@ -3944,7 +3955,7 @@ bool CharacterRenderer::getAnimationState(uint32_t instanceId, uint32_t& animati
         return false;
     }
 
-    const auto& sequences = modelIt->second->data.sequences;
+    const auto& sequences = modelIt->second->data->sequences;
     if (instance.currentSequenceIndex < 0 || instance.currentSequenceIndex >= static_cast<int>(sequences.size())) {
         return false;
     }
@@ -3967,7 +3978,7 @@ const std::vector<uint32_t>* CharacterRenderer::getFootstepEventTimes(uint32_t i
         return nullptr;
     }
 
-    const auto& eventTimes = modelIt->second->data.footstepEventTimes;
+    const auto& eventTimes = modelIt->second->data->footstepEventTimes;
     if (instance.currentSequenceIndex < 0 ||
         instance.currentSequenceIndex >= static_cast<int>(eventTimes.size()) ||
         eventTimes[instance.currentSequenceIndex].empty()) {
@@ -3990,7 +4001,7 @@ bool CharacterRenderer::modelHasAnimation(uint32_t modelId, uint32_t animationId
         return false;
     }
 
-    const auto& sequences = modelIt->second->data.sequences;
+    const auto& sequences = modelIt->second->data->sequences;
     for (const auto& seq : sequences) {
         if (seq.id == animationId) {
             return true;
@@ -4011,7 +4022,7 @@ bool CharacterRenderer::getAnimationSequences(uint32_t instanceId, std::vector<p
         return false;
     }
 
-    out = modelIt->second->data.sequences;
+    out = modelIt->second->data->sequences;
     return !out.empty();
 }
 
@@ -4024,7 +4035,7 @@ bool CharacterRenderer::getInstanceModelName(uint32_t instanceId, std::string& m
     if (modelIt == models.end()) {
         return false;
     }
-    modelName = modelIt->second->data.name;
+    modelName = modelIt->second->data->name;
     return !modelName.empty();
 }
 
@@ -4032,7 +4043,7 @@ bool CharacterRenderer::findAttachmentBone(uint32_t modelId, uint32_t attachment
                                           uint16_t& outBoneIndex, glm::vec3& outOffset) const {
     auto modelIt = models.find(modelId);
     if (modelIt == models.end()) return false;
-    const auto& model = modelIt->second->data;
+    const auto& model = *modelIt->second->data;
 
     outBoneIndex = 0;
     outOffset = glm::vec3(0.0f);
@@ -4132,7 +4143,7 @@ bool CharacterRenderer::prepareWeaponModel(const pipeline::M2Model& weaponModel,
             bool appliedReplaceableSlot = false;
             auto modelIt = models.find(weaponModelId);
             if (modelIt != models.end()) {
-                const auto& textures = modelIt->second->data.textures;
+                const auto& textures = modelIt->second->data->textures;
                 for (uint32_t slot = 0; slot < textures.size(); ++slot) {
                     const uint32_t type = textures[slot].type;
                     if (type == 2 || type == 3 || type == 4) {
@@ -4207,7 +4218,7 @@ bool CharacterRenderer::getInstanceBounds(uint32_t instanceId, glm::vec3& outCen
     if (mIt == models.end()) return false;
 
     const auto& inst = it->second;
-    const auto& model = mIt->second->data;
+    const auto& model = *mIt->second->data;
 
     glm::vec3 boundsMin = mIt->second->visualBoundMin;
     glm::vec3 boundsMax = mIt->second->visualBoundMax;
@@ -4239,7 +4250,7 @@ bool CharacterRenderer::getInstanceKeyBonePivotZ(uint32_t instanceId, int32_t ke
     auto mIt = models.find(it->second.modelId);
     if (mIt == models.end()) return false;
 
-    for (const auto& bone : mIt->second->data.bones) {
+    for (const auto& bone : mIt->second->data->bones) {
         if (bone.keyBoneId != keyBoneId) continue;
         outZ = bone.pivot.z * std::max(0.001f, it->second.scale);
         return true;
@@ -4257,7 +4268,7 @@ bool CharacterRenderer::getInstanceHeight(uint32_t instanceId, float& outHeight)
     // M2 header's own box describes collision on a good many models and can
     // come out shorter than the thing it encloses, so it is the fallback.
     float top = mIt->second->visualBoundMax.z;
-    if (top <= 0.001f) top = mIt->second->data.boundMax.z;
+    if (top <= 0.001f) top = mIt->second->data->boundMax.z;
     if (top <= 0.001f) return false;
 
     outHeight = top * std::max(0.001f, it->second.scale);
@@ -4271,7 +4282,7 @@ bool CharacterRenderer::getInstanceFootZ(uint32_t instanceId, float& outFootZ) c
     if (mIt == models.end()) return false;
 
     const auto& inst = it->second;
-    const auto& model = mIt->second->data;
+    const auto& model = *mIt->second->data;
     float scale = std::max(0.001f, inst.scale);
     outFootZ = inst.position.z + model.boundMin.z * scale;
     return true;
@@ -4362,7 +4373,7 @@ bool CharacterRenderer::moveWeapon(uint32_t charInstanceId, uint32_t fromAttachm
 CharacterRenderer::ModelMemory CharacterRenderer::modelMemory() const {
     ModelMemory out;
     for (const auto& [id, gpu] : models) {
-        const auto& d = gpu->data;
+        const auto& d = *gpu->data;
         out.totalBytes += sizeof(M2ModelGPU) + pipeline::heapBytes(d);
         out.geometryBytes += pipeline::vectorBytes(d.vertices) + pipeline::vectorBytes(d.indices);
         for (const auto& bone : d.bones) out.boneTrackBytes += pipeline::heapBytes(bone);
@@ -4496,7 +4507,7 @@ void CharacterRenderer::dumpAnimations(uint32_t instanceId) const {
         core::Logger::getInstance().info("dumpAnimations: model not found for instance ", instanceId);
         return;
     }
-    const auto& model = modelIt->second->data;
+    const auto& model = *modelIt->second->data;
 
     core::Logger::getInstance().info("=== Animation dump for ", model.name, " ===");
     core::Logger::getInstance().info("Total animations: ", model.sequences.size());

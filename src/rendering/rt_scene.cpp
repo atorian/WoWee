@@ -714,11 +714,27 @@ void RtScene::buildPendingBlas(VkCommandBuffer cmd, const std::vector<MeshId>& i
     VkDevice dev = ctx_->getDevice();
     VmaAllocator alloc = ctx_->getAllocator();
     const VkDeviceAddress poolAddress = bufferAddress(triPool_.buffer.buffer);
+    const VkDeviceSize align = scratchAlignment_;
 
-    for (MeshId id : ids) {
-        Mesh& m = meshes_[id];
+    // Every mesh of the frame's share in one build command. Built one command
+    // each, a mesh cost about a quarter of a millisecond of GPU time however
+    // few its triangles - the driver runs each command on its own - and a
+    // share of 500 small doodads took 130 ms. In one command the driver
+    // builds them side by side; each has its own slice of one scratch buffer.
+    std::vector<VkAccelerationStructureGeometryKHR> geoms(ids.size());
+    std::vector<VkAccelerationStructureBuildGeometryInfoKHR> builds;
+    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
+    std::vector<VkDeviceSize> scratchOffsets;
+    std::vector<MeshId> built;
+    builds.reserve(ids.size());
+    ranges.reserve(ids.size());
+    scratchOffsets.reserve(ids.size());
+    VkDeviceSize scratchSize = 0;
 
-        VkAccelerationStructureGeometryKHR geom{};
+    for (size_t i = 0; i < ids.size(); ++i) {
+        Mesh& m = meshes_[ids[i]];
+
+        VkAccelerationStructureGeometryKHR& geom = geoms[i];
         geom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
         geom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
         // Translucent meshes go through the candidate loop in the shader, which
@@ -749,40 +765,51 @@ void RtScene::buildPendingBlas(VkCommandBuffer cmd, const std::vector<MeshId>& i
                                     VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
                                         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                     VMA_MEMORY_USAGE_GPU_ONLY);
-        AllocatedBuffer scratch = createBuffer(alloc, sizes.buildScratchSize + scratchAlignment_,
-                                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                                   VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                               VMA_MEMORY_USAGE_GPU_ONLY);
-        if (!m.blasBuffer.buffer || !scratch.buffer) {
-            destroyBuffer(alloc, scratch);
-            continue;
-        }
-
         VkAccelerationStructureCreateInfoKHR ci{};
         ci.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
         ci.buffer = m.blasBuffer.buffer;
         ci.size = sizes.accelerationStructureSize;
         ci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-        if (pfnCreateAs_(dev, &ci, nullptr, &m.blas) != VK_SUCCESS) {
-            destroyBuffer(alloc, scratch);
+        if (!m.blasBuffer.buffer || pfnCreateAs_(dev, &ci, nullptr, &m.blas) != VK_SUCCESS) {
+            m.blas = VK_NULL_HANDLE;
+            LOG_WARNING("RtScene: could not create the acceleration structure of a mesh of ",
+                        m.triCount, " triangles (", sizes.accelerationStructureSize,
+                        " bytes); it casts no ray traced shadow or occlusion");
             continue;
         }
 
-        const VkDeviceAddress scratchAddr = bufferAddress(scratch.buffer);
         build.dstAccelerationStructure = m.blas;
-        build.scratchData.deviceAddress =
-            (scratchAddr + scratchAlignment_ - 1) & ~(scratchAlignment_ - 1);
-        VkAccelerationStructureBuildRangeInfoKHR range{};
-        range.primitiveCount = m.triCount;
-        const VkAccelerationStructureBuildRangeInfoKHR* ranges = &range;
-        pfnCmdBuildAs_(cmd, 1, &build, &ranges);
-        ctx_->deferAfterAllFrameFences([alloc, scratch]() mutable { destroyBuffer(alloc, scratch); });
+        builds.push_back(build);
+        built.push_back(ids[i]);
+        ranges.push_back({m.triCount, 0, 0, 0});
+        scratchOffsets.push_back(scratchSize);
+        scratchSize += (sizes.buildScratchSize + align - 1) & ~(align - 1);
 
         VkAccelerationStructureDeviceAddressInfoKHR ai{};
         ai.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
         ai.accelerationStructure = m.blas;
         m.blasAddress = pfnGetAsAddress_(dev, &ai);
     }
+    if (builds.empty()) return;
+
+    AllocatedBuffer scratch = createBuffer(alloc, scratchSize + align,
+                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                               VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                           VMA_MEMORY_USAGE_GPU_ONLY);
+    if (!scratch.buffer) {
+        LOG_WARNING("RtScene: could not allocate ", scratchSize, " bytes of scratch to build ",
+                    builds.size(), " meshes; they cast no ray traced shadow or occlusion");
+        for (MeshId id : built) destroyMeshGpu(meshes_[id]);
+        return;
+    }
+    const VkDeviceAddress scratchBase = (bufferAddress(scratch.buffer) + align - 1) & ~(align - 1);
+    std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> rangePointers(builds.size());
+    for (size_t i = 0; i < builds.size(); ++i) {
+        builds[i].scratchData.deviceAddress = scratchBase + scratchOffsets[i];
+        rangePointers[i] = &ranges[i];
+    }
+    pfnCmdBuildAs_(cmd, static_cast<uint32_t>(builds.size()), builds.data(), rangePointers.data());
+    ctx_->deferAfterAllFrameFences([alloc, scratch]() mutable { destroyBuffer(alloc, scratch); });
 
     // BLAS builds must finish before the TLAS build that references them.
     VkMemoryBarrier2 mb{};

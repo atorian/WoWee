@@ -144,6 +144,40 @@ function(wowee_add_packet_test target)
     register_test_target(${target})
 endfunction()
 
+# Tests that link the same large library share one executable.
+#
+# A test through GameHarness carries all of wowee_game, and one through
+# ClientHarness all of the client: 270 MB and 1.2 GB with their debug info.
+# As an executable each, a change in wowee_game relinked some forty copies of
+# it and one in the client seven, writing over 15 GB to run one file's tests
+# again. A suite links it once.
+#
+# Each file stays its own ctest entry under the name it always had, running
+# the suite in a process of its own on that file's cases alone: Catch2 tags
+# every case with its file ("[#test_chat_domain]") under --filenames-as-tags.
+# A name that matches no case fails the entry (Catch2 exits 2 when no test
+# ran).
+#
+#   wowee_add_test_suite(test_game_end_to_end)
+#   wowee_add_suite_test(test_game_end_to_end test_chat_domain)
+function(wowee_add_test_suite target)
+    add_executable(${target})
+    target_include_directories(${target} PRIVATE ${TEST_INCLUDE_DIRS})
+    target_include_directories(${target} SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+    target_link_libraries(${target} PRIVATE catch2_main)
+    wowee_test_link_glm(${target})
+    register_test_target(${target})
+endfunction()
+
+function(wowee_add_suite_test suite test)
+    target_sources(${suite} PRIVATE ${test}.cpp)
+    string(REGEX REPLACE "^test_" "" _name ${test})
+    add_test(NAME ${_name} COMMAND ${suite} --filenames-as-tags "[#${test}]")
+    # Catch2 exits 4 when every test case in the run skipped - the data it
+    # reads is not on this machine. That is a skip, not a failure.
+    set_tests_properties(${_name} PROPERTIES SKIP_RETURN_CODE 4)
+endfunction()
+
 
 
 # The event bus: delivery, subscription lifetime, posting across threads.
@@ -171,6 +205,13 @@ wowee_add_test(test_benchmark_run
     SOURCES test_benchmark_run.cpp
             ${CMAKE_SOURCE_DIR}/src/core/frame_budget.cpp)
 target_link_libraries(test_benchmark_run PRIVATE wowee_client)
+
+# What a scene replay accepts of the files its capture was taken against: the
+# same files across a daylight-saving change, the same data root however it is
+# spelled, and nothing rewritten. No client.
+wowee_add_test(test_scene_capture_files
+    SOURCES test_scene_capture_files.cpp
+            ${CMAKE_SOURCE_DIR}/src/core/scene_capture_files.cpp)
 
 # The pipeline cache kept between runs: checked against the device, written
 # whole or not at all.
@@ -1565,7 +1606,7 @@ if(WOWEE_BUILD_RT_RENDERER_CHANGES_TEST AND NOT ANDROID)
     target_link_libraries(rt_renderer_changes_test PRIVATE wowee_render)
     wowee_test_link_glm(rt_renderer_changes_test)
     wowee_apply_client_flags(rt_renderer_changes_test)
-    add_test(NAME rt_renderer_changes COMMAND rt_renderer_changes_test
+    wowee_add_gpu_test(rt_renderer_changes COMMAND rt_renderer_changes_test
              WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
     set_tests_properties(rt_renderer_changes PROPERTIES SKIP_RETURN_CODE 77)
     register_test_target(rt_renderer_changes_test)
@@ -1577,7 +1618,7 @@ if(WOWEE_BUILD_WMO_VIEW_CULL_TEST AND NOT ANDROID)
     target_link_libraries(wmo_view_cull_test PRIVATE wowee_render)
     wowee_test_link_glm(wmo_view_cull_test)
     wowee_apply_client_flags(wmo_view_cull_test)
-    add_test(NAME wmo_view_cull COMMAND wmo_view_cull_test
+    wowee_add_gpu_test(wmo_view_cull COMMAND wmo_view_cull_test
              WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
     set_tests_properties(wmo_view_cull PROPERTIES SKIP_RETURN_CODE 77)
     register_test_target(wmo_view_cull_test)
@@ -2500,6 +2541,27 @@ target_include_directories(test_catalog_subprocess SYSTEM PRIVATE
 target_link_libraries(test_catalog_subprocess PRIVATE catch2_main)
 add_test(NAME catalog_subprocess COMMAND test_catalog_subprocess)
 register_test_target(test_catalog_subprocess)
+
+# ── test_scratch_dir ─────────────────────────────────────────
+# A test's scratch directory while other test processes ask for the same
+# name: ctest runs a suite's files at once. The child is scratch_child, which
+# asks for one and says where it got it.
+add_executable(test_scratch_child scratch_child.cpp)
+add_executable(test_scratch_dir
+    test_scratch_dir.cpp
+    ${CMAKE_SOURCE_DIR}/tools/editor/cli_subprocess.cpp
+    ${TEST_COMMON_SOURCES})
+add_dependencies(test_scratch_dir test_scratch_child)
+target_compile_definitions(test_scratch_dir PRIVATE
+    SCRATCH_CHILD_PATH="$<TARGET_FILE:test_scratch_child>")
+target_include_directories(test_scratch_dir PRIVATE
+    ${TEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/tools/editor
+)
+target_include_directories(test_scratch_dir SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_scratch_dir PRIVATE catch2_main)
+add_test(NAME scratch_dir COMMAND test_scratch_dir)
+register_test_target(test_scratch_dir)
 
 # ── test_cli_paths ───────────────────────────────────────────
 # Finding the files of one format under a directory. Eleven commands walked
@@ -3449,9 +3511,10 @@ target_compile_definitions(wowee_game_harness PUBLIC WOWEE_SOURCE_DIR="${CMAKE_S
 target_link_libraries(wowee_game_harness PUBLIC wowee_game catch2_main)
 wowee_test_link_glm(wowee_game_harness)
 
+wowee_add_test_suite(test_game_end_to_end)
+target_link_libraries(test_game_end_to_end PRIVATE wowee_game_harness)
 foreach(_domain game_data chat spell inventory quest session combat movement player query_cache account_data action_bar pet reputation realm_time weather contacts who duel petition arena battleground lfg calendar group guild auction mail guild_bank trade loot achievement title)
-    wowee_add_test(test_${_domain}_domain SOURCES test_${_domain}_domain.cpp)
-    target_link_libraries(test_${_domain}_domain PRIVATE wowee_game_harness)
+    wowee_add_suite_test(test_game_end_to_end test_${_domain}_domain)
 endforeach()
 
 # ── test_original_player_mover ───────────────────────────────
@@ -3463,29 +3526,10 @@ target_link_libraries(test_original_player_mover PRIVATE wowee_game_harness wowe
 target_compile_definitions(test_original_player_mover PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 # The loading screen keeps its former terrain/warmup readiness criteria.
-wowee_add_test(test_recorded_entities SOURCES test_recorded_entities.cpp)
-target_link_libraries(test_recorded_entities PRIVATE wowee_game_harness)
+wowee_add_suite_test(test_game_end_to_end test_recorded_entities)
 
 wowee_add_test(test_world_load_progress SOURCES test_world_load_progress.cpp)
 wowee_add_test(test_job_group SOURCES test_job_group.cpp)
-
-wowee_add_test(test_addon_event_queue SOURCES test_addon_event_queue.cpp)
-target_link_libraries(test_addon_event_queue PRIVATE wowee_client)
-target_include_directories(test_addon_event_queue SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/extern/lua-5.1.5/src)
-target_link_libraries(test_addon_event_queue PRIVATE wowee_game_harness lua51)
-target_compile_definitions(test_addon_event_queue PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-
-# ── test_character_session ───────────────────────────────────
-# What one character in the world leaves for the next: the real LFG bindings
-# (whose ticks and folds used to be function statics) run in one character's
-# Lua state and then in the next one's, the identity a relog's session takes
-# from the game, and the saved variables keyed by it. The LFG bindings are the
-# ones that link without the whole interface; the rest share their accessor.
-wowee_add_test(test_character_session SOURCES test_character_session.cpp)
-target_link_libraries(test_character_session PRIVATE wowee_client)
-target_include_directories(test_character_session SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/extern/lua-5.1.5/src)
-target_link_libraries(test_character_session PRIVATE wowee_game_harness lua51)
-target_compile_definitions(test_character_session PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 # ── The client, end to end ───────────────────────────────────
 option(WOWEE_BUILD_ENTITY_ASSET_RELOAD_TEST "Build the native GPU entity cache reload regression" OFF)
@@ -3494,7 +3538,7 @@ if(WOWEE_BUILD_ENTITY_ASSET_RELOAD_TEST AND NOT ANDROID)
     target_link_libraries(entity_asset_reload_test PRIVATE wowee_client)
     wowee_test_link_glm(entity_asset_reload_test)
     wowee_apply_client_flags(entity_asset_reload_test)
-    add_test(NAME entity_asset_reload COMMAND entity_asset_reload_test
+    wowee_add_gpu_test(entity_asset_reload COMMAND entity_asset_reload_test
              WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
     set_tests_properties(entity_asset_reload PROPERTIES SKIP_RETURN_CODE 77)
     register_test_target(entity_asset_reload_test)
@@ -3513,35 +3557,43 @@ target_include_directories(wowee_client_harness PUBLIC ${CMAKE_CURRENT_SOURCE_DI
 target_compile_definitions(wowee_client_harness PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(wowee_client_harness PUBLIC wowee_game_harness wowee_client)
 
-wowee_add_test(test_client_transitions SOURCES test_client_transitions.cpp)
-target_link_libraries(test_client_transitions PRIVATE wowee_client_harness)
+# Everything that links the client's archive: the ClientHarness tests, and the
+# two that drive the client's Lua bindings over GameHarness.
+wowee_add_test_suite(test_client_end_to_end)
+target_link_libraries(test_client_end_to_end PRIVATE wowee_client_harness lua51)
+target_include_directories(test_client_end_to_end SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/extern/lua-5.1.5/src)
+target_compile_definitions(test_client_end_to_end PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 # The client's objects are built for a link-time-optimised link in Release.
 if(_ipo_supported AND WOWEE_ENABLE_LTO)
-    set_property(TARGET test_client_transitions PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET test_client_end_to_end PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
+
+wowee_add_suite_test(test_client_end_to_end test_client_transitions)
 
 # What the interface's frames are told after layout - OnShow, OnHide,
 # OnSizeChanged - through the character's own interface.
-wowee_add_test(test_interface_frame_scripts SOURCES test_interface_frame_scripts.cpp)
-target_link_libraries(test_interface_frame_scripts PRIVATE wowee_client_harness)
-if(_ipo_supported AND WOWEE_ENABLE_LTO)
-    set_property(TARGET test_interface_frame_scripts PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-endif()
+wowee_add_suite_test(test_client_end_to_end test_interface_frame_scripts)
 
 # The Minimap frame's two zooms, outdoor and indoor, through the interface.
-wowee_add_test(test_minimap_zoom SOURCES test_minimap_zoom.cpp)
-target_link_libraries(test_minimap_zoom PRIVATE wowee_client_harness)
+wowee_add_suite_test(test_client_end_to_end test_minimap_zoom)
 
 # TaxiNodePosition, as the flight map asks it: TaxiNodes.dbc and the
 # continent's WorldMapArea.dbc row in, a fraction of the map out. Silent when
 # wrong - every marker still lands somewhere, just not where it belongs.
-wowee_add_test(test_taxi_map_projection SOURCES test_taxi_map_projection.cpp)
-target_link_libraries(test_taxi_map_projection PRIVATE wowee_client_harness)
+wowee_add_suite_test(test_client_end_to_end test_taxi_map_projection)
 
 # Widgets as the interface's Lua sees them: what a chat frame keeps of the
 # lines AddMessage hands it, and the type a widget answers.
-wowee_add_test(test_interface_widgets SOURCES test_interface_widgets.cpp)
-target_link_libraries(test_interface_widgets PRIVATE wowee_client_harness)
+wowee_add_suite_test(test_client_end_to_end test_interface_widgets)
+
+wowee_add_suite_test(test_client_end_to_end test_addon_event_queue)
+
+# What one character in the world leaves for the next: the real LFG bindings
+# (whose ticks and folds used to be function statics) run in one character's
+# Lua state and then in the next one's, the identity a relog's session takes
+# from the game, and the saved variables keyed by it. The LFG bindings are the
+# ones that link without the whole interface; the rest share their accessor.
+wowee_add_suite_test(test_client_end_to_end test_character_session)
 
 # ── wowee_loading_test_client ────────────────────────────────
 option(WOWEE_BUILD_RENDER_CLIENT_PROBE "Build native interface/render lifecycle GPU probe" OFF)
@@ -3601,6 +3653,15 @@ target_link_libraries(test_lightning_storm PRIVATE wowee_render)
 wowee_add_test(test_rain_audio
     SOURCES test_rain_audio.cpp)
 target_link_libraries(test_rain_audio PRIVATE wowee_client wowee_pipeline wowee_base ${CMAKE_DL_LIBS} Threads::Threads)
+
+# ── test_audio_settings ──────────────────────────────────────
+# The sound settings through setSettingValue: a volume set in the client is
+# what the next start replays from the CVar store, and a switch keeps its
+# channels quiet whatever applies the volumes after it (that half needs a
+# playback device and is opt-in).
+wowee_add_test(test_audio_settings
+    SOURCES test_audio_settings.cpp ${TEST_COMMON_SOURCES})
+target_link_libraries(test_audio_settings PRIVATE wowee_client)
 
 # ── The libraries' sources from their libraries, never a copy ─
 # Keep this last, after every test is declared. A test that names a source one
@@ -3670,21 +3731,17 @@ target_link_libraries(test_wmo_minimap PRIVATE wowee_pipeline wowee_render)
 # game data.
 # Built as wowee_add_test builds a test, but entered into ctest once per
 # scene, so the scenes draw side by side under -j rather than one after
-# another in a single entry - two at a time, no more (AGENTS.md): each scene
-# takes one of two locks in turn, and a lock's scenes draw one after another.
+# another in a single entry - as GPU tests, two at a time.
 add_executable(test_scene_references test_scene_references.cpp)
 target_include_directories(test_scene_references PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_scene_references SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_scene_references PRIVATE catch2_main)
 wowee_test_link_glm(test_scene_references)
 register_test_target(test_scene_references)
-set(_scene_lane 0)
 foreach(_scene IN ITEMS "water wake" "shadows" "sphere map" "ray traced lighting" "sea bed" "ocean")
     string(REPLACE " " "_" _scene_name "${_scene}")
-    add_test(NAME scene_reference_${_scene_name} COMMAND test_scene_references "${_scene}")
-    set_tests_properties(scene_reference_${_scene_name} PROPERTIES SKIP_RETURN_CODE 4
-        RESOURCE_LOCK scene_render_${_scene_lane})
-    math(EXPR _scene_lane "1 - ${_scene_lane}")
+    wowee_add_gpu_test(scene_reference_${_scene_name} COMMAND test_scene_references "${_scene}")
+    set_tests_properties(scene_reference_${_scene_name} PROPERTIES SKIP_RETURN_CODE 4)
     if(WOWEE_GAME_DATA_DIR)
         set_tests_properties(scene_reference_${_scene_name} PROPERTIES
             ENVIRONMENT "WOW_DATA_PATH=${WOWEE_GAME_DATA_DIR}")

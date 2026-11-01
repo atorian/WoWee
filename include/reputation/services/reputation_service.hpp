@@ -36,7 +36,7 @@ public:
     void onInitialize(std::vector<FactionStanding> earned) override;
     void onStanding(uint32_t reputationIndex, int32_t earned) override;
     void onAtWar(uint32_t reputationIndex, bool atWar) override;
-    void onVisible(uint32_t reputationIndex, bool visible) override { player_.setVisible(reputationIndex, visible); }
+    void onVisible(uint32_t reputationIndex, bool visible) override;
     void beginCharacter() override { player_.beginCharacter(); }
 
 private:

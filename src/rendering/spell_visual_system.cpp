@@ -295,7 +295,7 @@ void SpellVisualSystem::playPhysicalProjectile(const std::string& modelPath,
             auto skin = cachedAssetManager_->readFile(skinPath);
             if (!skin.empty()) pipeline::M2Loader::loadSkin(skin, model);
         }
-        if (model.vertices.empty() || !characterRenderer->loadModel(model, modelId)) return;
+        if (model.vertices.empty() || !characterRenderer->loadModel(std::move(model), modelId)) return;
         if (!texturePath.empty()) {
             if (TextureRef texture = characterRenderer->loadTexture(texturePath))
                 characterRenderer->setModelTexture(modelId, 0, texture);

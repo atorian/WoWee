@@ -630,101 +630,6 @@ static void flagTutorial(int id) {
     cvars().set(kTutorialCVar, std::move(all));
 }
 
-/// A sound CVar's value, or the stock client's default for it.
-///
-/// The defaults matter as much as the store does. Sound_MasterVolumeUp reads
-/// the CVar, runs it through tonumber and adds a step - with nothing stored and
-/// no default it reads nil, the `if (volume)` guard below it fails, and the
-/// volume keys do nothing at all rather than anything visible.
-static float soundCVar(const char* key, float fallback) {
-    if (const std::string* stored = cvars().find(key)) {
-        try {
-            return std::stof(*stored);
-        } catch (const std::exception&) {
-            return fallback;
-        }
-    }
-    return fallback;
-}
-
-/// Push the sound CVars at the audio system, which is what makes them settings
-/// rather than a record of what was clicked.
-///
-/// Every channel is recomputed from the store rather than from the one CVar
-/// that changed, so enable and volume compose and the order they arrive in does
-/// not matter - Sound_ToggleSound writes EnableSFX and EnableAmbience one after
-/// the other, and the interface's options panel writes a volume and an enable
-/// together on apply.
-///
-/// This client splits sound finer than the interface does: it has separate
-/// volumes for combat, spells, movement, footsteps and the rest, where FrameXML
-/// has one "sound effects". Turning SFX off and on again therefore levels those
-/// channels rather than restoring them. That is the retail behaviour - there is
-/// no finer control there to restore - and the client's own settings panel
-/// re-applies its sliders whenever it is used, so neither owner is stuck with
-/// the other's answer.
-static void applySoundCVars(lua_State* L) {
-    auto* svc = getLuaServices(L);
-    auto* ac = svc ? svc->audioCoordinator : nullptr;
-    if (!ac) return;
-
-    // The sliders first, then the switches on top. Each switch is applied by
-    // zeroing a channel and zeroing has no inverse, so without this the "on"
-    // case wrote nothing at all: turning sound effects off and on again left
-    // all nine effect channels silent until the client's own settings window
-    // was touched. Recomputing from the store is what the note above says this
-    // does, and now does.
-    if (svc->reapplyAudioVolumes) svc->reapplyAudioVolumes();
-
-    // Master, music and ambience are the client's own settings now, reached
-    // through SetCVar above - this function must not write them too, or the two
-    // fight and the last writer wins.
-    //
-    // What is left here are the three enable switches, which the client's panel
-    // has no equivalent for. They multiply whatever the settings applied.
-    const bool musicOn = soundCVar("sound_enablemusic", 1.0f) != 0.0f;
-    if (!musicOn) {
-        if (auto* music = ac->getMusicManager()) music->setVolume(0);
-    }
-
-    const bool ambOn = soundCVar("sound_enableambience", 1.0f) != 0.0f;
-    if (!ambOn) {
-        if (auto* ambient = ac->getAmbientSoundManager()) {
-            ambient->setVolumeScale(0.0f);
-            ambient->setBellVolumeScale(0.0f);
-        }
-    }
-
-    // The character's own voice lines for a refused action - "I can't do that
-    // yet", "Not enough rage". PlayerVoiceManager has carried an enabled_ flag
-    // all along and playError honours it; nothing ever set it, so the switch in
-    // the Sound panel was a checkbox that moved and changed nothing.
-    //
-    // Not folded into the sfx switch below: this is the one people actually
-    // reach for, and turning it off should leave every other effect alone.
-    if (auto* voice = ac->getPlayerVoiceManager()) {
-        voice->setEnabled(soundCVar("sound_enableerrorspeech", 1.0f) != 0.0f);
-    }
-
-    // The volume itself is a client setting now, reached through SetCVar, and
-    // applied by applyAudioVolumes as one scale over the seven effect volumes
-    // this client keeps separately. Only the switch is left here, and it zeroes
-    // them on top of whatever that applied.
-    const bool sfxOn = soundCVar("sound_enablesfx", 1.0f) != 0.0f;
-    if (!sfxOn) {
-        if (auto* m = ac->getUiSoundManager())        m->setVolumeScale(0.0f);
-        if (auto* m = ac->getCombatSoundManager())    m->setVolumeScale(0.0f);
-        if (auto* m = ac->getSpellSoundManager())     m->setVolumeScale(0.0f);
-        if (auto* m = ac->getMovementSoundManager())  m->setVolumeScale(0.0f);
-        if (auto* m = ac->getFootstepManager())       m->setVolumeScale(0.0f);
-        if (auto* m = ac->getActivitySoundManager())  m->setVolumeScale(0.0f);
-        if (auto* m = ac->getMountSoundManager())     m->setVolumeScale(0.0f);
-        if (auto* m = ac->getNpcVoiceManager())       m->setVolumeScale(0.0f);
-        if (auto* m = ac->getPlayerVoiceManager())    m->setVolumeScale(0.0f);
-    }
-}
-
-
 /// The value a CVar has when nobody has set it.
 ///
 /// Split out so GetCVarDefault can answer it. That was aliased straight to
@@ -1214,15 +1119,21 @@ constexpr ClientCVarBinding kClientCVars[] = {
     // Six levels on their slider and five here: theirs ends on 16x twice,
     // every card stopping there, so the top two both land on this one's 4.
     {"texturefilteringmode", "texturefiltering"},
-    // Their slider is 0 to 1 and this setting is a percentage.
+    // Their sliders are 0 to 1 and these settings are percentages.
+    //
+    // Master, music and ambience were bridged by hand, apart from this table,
+    // and nothing wrote the setting back into the CVar. The store kept the
+    // last value the interface had set, every start replayed it over the
+    // settings file, and a music volume moved in this client's own window was
+    // back at that value at the next login.
     {"sound_sfxvolume",      "effectsvolume", 100.0},
+    {"sound_mastervolume",   "mastervolume",  100.0},
+    {"sound_musicvolume",    "musicvolume",   100.0},
+    {"sound_ambiencevolume", "ambientvolume", 100.0},
     // The switches off the game's own Sound panel, now rows in the schema.
-    // Bound rather than converted because applySoundCVars reads the store:
-    // the setting writes the cvar, the panel asks for a re-apply, and the
-    // one piece of code that knows what each switch silences stays where it
-    // is. Not master, mute or the effects volume - those three are bridged
-    // through getAudioSetting already, and a second route would have the two
-    // fight over the same value.
+    // The mute is not here: Sound_EnableAllSound is the mute row the other
+    // way round, which a scale cannot say, so GetCVar and SetCVar carry it by
+    // hand as they do gxWindow.
     {"sound_enablesoundwhengameisinbg", "soundinbackground"},
     {"sound_enablemusic",    "enablemusic"},
     {"sound_zonemusicnodelay", "loopmusic"},
@@ -1314,28 +1225,13 @@ static int lua_GetCVar(lua_State* L) {
             lua_pushstring(L, svc->getFullscreen() ? "0" : "1");
             return 1;
         }
-    } else if (n == "sound_mastervolume" || n == "sound_musicvolume" ||
-               n == "sound_ambiencevolume" || n == "sound_enableallsound") {
-        // FrameXML's Sound options are bound to these, and the client owns the
-        // values. Answering from the CVar store would report whatever the panel
-        // last wrote and drift from what is actually playing - the same fault
-        // the nameplate and minimap entries above exist for.
-        if (auto* svc = getLuaServices(L); svc && svc->getAudioSetting) {
-            const bool isSwitch = (n == "sound_enableallsound");
-            const char* key = n == "sound_mastervolume"   ? "master"
-                            : n == "sound_musicvolume"    ? "music"
-                            : n == "sound_ambiencevolume" ? "ambient"
-                                                          : "enableall";
-            const float v = svc->getAudioSetting(key);
-            // A switch answers "1" or "0" and nothing else. The options panels
-            // compare the string exactly - `if ( value == "1" )` - so a float
-            // formatted as "1.000000" reads as off, and the box unticks itself
-            // the moment the panel is opened again.
-            if (isSwitch) {
-                lua_pushstring(L, v != 0.0f ? "1" : "0");
-            } else {
-                lua_pushstring(L, ui::settingNumberText(v).c_str());
-            }
+    } else if (n == "sound_enableallsound") {
+        // The client's mute row the other way round: 1 is sound on. Answered
+        // from the row, because the minimap's button turns it without SetCVar.
+        // "1" or "0" and nothing else - the options panels compare the string
+        // exactly, `if ( value == "1" )`.
+        if (auto* svc = getLuaServices(L); svc && svc->getClientSetting) {
+            lua_pushstring(L, svc->getClientSetting("mutesound") == "1" ? "0" : "1");
             return 1;
         }
     } else if (n == "chatstyle") {
@@ -1581,14 +1477,6 @@ static void applyCVarSideEffects(lua_State* L, const std::string& key,
             svc->setClientSetting("mousespeed", value);
         }
     }
-    // Loop Music. The checkbox says Loop Music and the CVar behind it says
-    // ZoneMusicNoDelay, which is the same thing said from the other side: a
-    // track that runs on leaves no silence between it and the next.
-    if (key == "sound_zonemusicnodelay") {
-        if (auto* svc = getLuaServices(L); svc && svc->setZoneMusicLooping) {
-            svc->setZoneMusicLooping(value != "0");
-        }
-    }
     // Ground Clutter Radius, in yards and used as it stands.
     if (key == "groundeffectdist") {
         if (auto* svc = getLuaServices(L); svc && svc->setGroundDetailDistance) {
@@ -1658,28 +1546,18 @@ static void applyCVarSideEffects(lua_State* L, const std::string& key,
             g_applyingCVarToSetting = false;
         }
     }
-    // The four the client owns go to its settings, which then apply and save.
-    // Both systems used to write the same AudioEngine - the CVar store from
-    // here and the settings panel from its own sliders - and whichever ran last
-    // won. A client left muted by its own setting came back silent however the
-    // interface's Sound panel was set, because the next thing to touch the
-    // settings slammed the master volume back to zero.
-    if (key == "sound_mastervolume" || key == "sound_musicvolume" ||
-        key == "sound_ambiencevolume" || key == "sound_enableallsound") {
-        if (auto* svc = getLuaServices(L); svc && svc->setAudioSetting) {
-            const char* which = key == "sound_mastervolume"   ? "master"
-                              : key == "sound_musicvolume"    ? "music"
-                              : key == "sound_ambiencevolume" ? "ambient"
-                                                              : "enableall";
-            svc->setAudioSetting(which, static_cast<float>(std::atof(value.c_str())));
-            return;
+    // The mute row the other way round, as GetCVar answers it. Not replayed:
+    // the minimap's button turns the row without SetCVar, so the store holds
+    // whatever the interface last wrote, and replaying that unmuted a client
+    // muted by its own button - or muted one that had been unmuted.
+    if (key == "sound_enableallsound" && !g_replayingStoredCVars) {
+        if (auto* svc = getLuaServices(L); svc && svc->setClientSetting) {
+            svc->setClientSetting("mutesound", value == "0" ? "1" : "0");
         }
-        applySoundCVars(L);
     }
-    else if (key.rfind("sound_", 0) == 0) applySoundCVars(L);
     // The one other CVar this client acts on. "0" is the only false value a
     // CVar carries - and it arrives as a string, which in Lua would be true.
-    else if (key == "autoselfcast") {
+    if (key == "autoselfcast") {
         if (auto* gh = getGameHandler(L)) gh->setAutoSelfCast(value != "0");
     }
     // A modified click, kept in the store so it survives a restart. The Lua
@@ -1725,8 +1603,6 @@ void noteClientSettingChanged(const std::string& settingKey, const std::string& 
         return;
     }
 }
-
-void applySoundCVarSideEffects(lua_State* L) { applySoundCVars(L); }
 
 void applyStoredCVarSideEffects(lua_State* L) {
     g_replayingStoredCVars = true;

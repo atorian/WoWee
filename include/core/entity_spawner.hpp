@@ -23,7 +23,7 @@
 namespace wowee {
 
 // Forward declarations
-namespace rendering { class Renderer; class SceneCommands; }
+namespace rendering { class Renderer; class SceneCommands; class CpuStageTimes; }
 namespace pipeline { class AssetManager; class GameTables; struct M2Model; struct WMOModel; }
 namespace audio { enum class VoiceType; }
 namespace game { class GameHandler; }
@@ -49,7 +49,9 @@ public:
 
     // Lifecycle
     void initialize();   // Build DBC lookups
-    void update();       // Process all spawn/despawn queues (called from Application::update)
+    // Process all spawn/despawn queues (called from Application::update). Each
+    // queue's time goes to `stages` as its own part, when given.
+    void update(rendering::CpuStageTimes* stages = nullptr);
 
     // Queue-based spawn API (called from GameHandler callbacks)
     void queueCreatureSpawn(uint64_t guid, uint32_t displayId,
@@ -505,7 +507,16 @@ private:
     /// when I zone again". A window that expires now buys another one, up to
     /// this many, so a spawn that keeps failing is delayed rather than lost.
     static constexpr int MAX_CREATURE_SPAWN_RETRY_WINDOWS = 6;
-    void processCreatureSpawnQueue(bool unlimited = false);
+    /// Its model uploads and each step of the creatures it spawns go to
+    /// `stages`, when given, as one part each for the call.
+    void processCreatureSpawnQueue(bool unlimited = false, rendering::CpuStageTimes* stages = nullptr);
+    /// What spawnOnlineCreature's steps cost, summed over the creatures one
+    /// processCreatureSpawnQueue call spawns.
+    struct CreatureSpawnStepTimes {
+        float textures = 0.0f, instance = 0.0f, overrides = 0.0f,
+              geosets = 0.0f, weapons = 0.0f, pose = 0.0f;
+    };
+    CreatureSpawnStepTimes creatureSpawnSteps_;
 
     // --- NPC composite loads ---
     struct DeferredNpcComposite {

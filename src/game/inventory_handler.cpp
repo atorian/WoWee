@@ -123,17 +123,77 @@ InventoryHandler::InventoryHandler(PacketSender& sender, FrameXmlEvents& frameXm
         [this](const events::PlayerNameKnown& e) {
             if (auto* feed = mailFeed(queries_)) feed->onPlayerNameResolved(e.guid, e.name);
         }));
+    // A gossip page or quest list takes the vendor window's place.
+    subscriptions_.push_back(events.subscribe<events::GossipWindowOpened>(
+        [this](const events::GossipWindowOpened&) { closeVendor(); }));
+    // The armorer's goods come with repairs.
+    subscriptions_.push_back(events.subscribe<events::VendorOptionChosen>(
+        [this](const events::VendorOptionChosen& e) {
+            if (e.repairs) setVendorCanRepair(true);
+        }));
 }
 
 void InventoryHandler::raiseUiError(const std::string& message) {
     game::raiseUiError(events_, frameXml_, message);
 }
 
+void InventoryHandler::sortBags() {
+    if (!held_.sortMoves.empty()) return;   // one sort at a time
+    auto& inv = held_.items;
+    // Pour partial stacks together first, so the sort places one stack of
+    // twenty rather than two of ten. Merging both plans and applies, so the
+    // swaps below are computed from the merged layout.
+    auto merges = inv.mergePartialStacks();
+    auto swaps = inv.computeSortSwaps();
+    // The local layout changes now so the bags read as sorted immediately; the
+    // server is told the same thing over the following ticks.
+    inv.sortBags();
+    // And say so: every bag on screen reads through GetContainerItemInfo and
+    // redraws on BAG_UPDATE, and the moves queued below do not touch the
+    // model, so without this the sorted bags sat behind the unsorted picture.
+    fireBagUpdates();
+    for (auto& m : merges) held_.sortMoves.push_back(m);
+    for (auto& s : swaps)  held_.sortMoves.push_back(s);
+}
+
+void InventoryHandler::sortBank(int mainSlotCount) {
+    if (!held_.sortMoves.empty()) return;   // one sort at a time
+    auto& inv = held_.items;
+    auto merges = inv.mergeBankPartialStacks(mainSlotCount);
+    auto swaps = inv.computeBankSortSwaps(mainSlotCount);
+    inv.sortBank(mainSlotCount);
+    fireBagUpdates();
+    for (auto& m : merges) held_.sortMoves.push_back(m);
+    for (auto& s : swaps)  held_.sortMoves.push_back(s);
+}
+
+void InventoryHandler::sortBankBag(int bagIndex) {
+    if (!held_.sortMoves.empty()) return;   // one sort at a time
+    auto& inv = held_.items;
+    auto swaps = inv.computeBankBagSortSwaps(bagIndex);
+    inv.sortBankBag(bagIndex);
+    fireBagUpdates();
+    for (auto& s : swaps) held_.sortMoves.push_back(s);
+}
+
+void InventoryHandler::sendNextSortMove() {
+    if (held_.sortMoves.empty()) return;
+    const auto op = held_.sortMoves.front();
+    held_.sortMoves.pop_front();
+    // Sent, not applied. The sort put the finished layout into the model
+    // before queuing any of this; moving each pair again on the way out
+    // permuted that layout a second time - and a merge, which the server
+    // answers by combining two stacks, would have been applied here as a
+    // swap of the two slots. See swapContainerItems.
+    swapContainerItems(op.srcBag, op.srcSlot, op.dstBag, op.dstSlot, false);
+}
+
 void InventoryHandler::beginCharacter() {
     held_ = Held{};
     itemInfoCache_.clear();
     pendingItemQueries_.clear();
-    pendingItemQueryTimer_ = 0.0f;
+    failedItemQueries_.clear();
+    unansweredItemsReported_.clear();
     // The buyback list persists across vendor windows within a session but is
     // the last character's, not this one's.
     clearBuybackState();
@@ -149,16 +209,21 @@ void InventoryHandler::leaveWorld() {
 }
 
 void InventoryHandler::update(float deltaTime) {
-    // Periodically forget pending item queries so they can be asked again.
+    // Forget a query that has waited too long, so the next need asks again.
     // Without this, a lost or malformed response leaves the entry stuck for
-    // good and the item nameless.
-    pendingItemQueryTimer_ += deltaTime;
-    if (pendingItemQueryTimer_ >= 5.0f) {
-        pendingItemQueryTimer_ = 0.0f;
-        if (!pendingItemQueries_.empty()) {
-            LOG_DEBUG("Clearing ", pendingItemQueries_.size(), " stale pending item queries");
-            pendingItemQueries_.clear();
+    // good and the item nameless. Each query has its own age: a sweep of all
+    // of them every few seconds also dropped one sent just before it.
+    for (auto it = pendingItemQueries_.begin(); it != pendingItemQueries_.end();) {
+        it->second += deltaTime;
+        if (it->second < kItemQueryTimeoutSeconds) {
+            ++it;
+            continue;
         }
+        if (unansweredItemsReported_.insert(it->first).second) {
+            LOG_WARNING("Item ", it->first, ": no answer to its query in ", kItemQueryTimeoutSeconds,
+                        " s; it shows as \"Item #", it->first, "\" until asked again");
+        }
+        it = pendingItemQueries_.erase(it);
     }
 
     if (auto* feed = auctionFeed(queries_)) feed->onTimePassed(deltaTime);
@@ -994,7 +1059,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         AuctionHelloData data;
         if (!AuctionHelloParser::parse(packet, data)) return;
         if (auto* feed = auctionFeed(queries_)) feed->onHello(data.auctioneerGuid);
-        queries_.closeGossip();
+        events_.publish(events::NpcWindowOpened{data.auctioneerGuid});
     };
     // The plain list result fills whichever list was asked for last; the
     // owner and bidder results say which they are.
@@ -2370,7 +2435,7 @@ void InventoryHandler::handleListInventory(network::Packet& packet) {
         }
     }
     vendorWindowOpen_ = true;
-    queries_.closeGossip();
+    events_.publish(events::NpcWindowOpened{currentVendorItems_.vendorGuid});
     if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("MERCHANT_SHOW", {});
 
     // Auto-sell grey items
@@ -2477,7 +2542,7 @@ void InventoryHandler::handleTrainerList(network::Packet& packet) {
     const bool isClassic = isClassicLikeExpansion();
     if (!TrainerListParser::parse(packet, currentTrainerList_, isClassic)) return;
     trainerWindowOpen_ = true;
-    queries_.closeGossip();
+    events_.publish(events::NpcWindowOpened{currentTrainerList_.trainerGuid});
     if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("TRAINER_SHOW", {});
 
     // At WARNING, and broken down by the three states the panel filters on,
@@ -2928,10 +2993,13 @@ void InventoryHandler::handleEquipmentSetList(network::Packet& packet) {
 // ============================================================
 
 void InventoryHandler::queryItemInfo(uint32_t entry, uint64_t guid) {
-    if (itemInfoCache_.count(entry) || pendingItemQueries_.count(entry)) return;
+    if (itemInfoCache_.count(entry) || pendingItemQueries_.count(entry) ||
+        failedItemQueries_.count(entry)) {
+        return;
+    }
     if (!sender_.characterInWorld()) return;
 
-    pendingItemQueries_.insert(entry);
+    pendingItemQueries_[entry] = 0.0f;
     // Some cores reject CMSG_ITEM_QUERY_SINGLE when the GUID is 0.
     // If we don't have the item object's GUID (e.g. visible equipment decoding),
     // fall back to the player's GUID to keep the request non-zero.
@@ -2954,12 +3022,23 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
             // mask it off so we can still clear the pending query by entry ID.
             uint32_t rawEntry = packet.readUInt32() & ~0x80000000u;
             pendingItemQueries_.erase(rawEntry);
+            if (failedItemQueries_.insert(rawEntry).second) {
+                LOG_WARNING("SMSG_ITEM_QUERY_SINGLE_RESPONSE for item ", rawEntry, " could not be read (",
+                            packet.getSize(), " bytes); it shows as \"Item #", rawEntry,
+                            "\" and is not asked for again");
+            }
+        } else {
+            LOG_WARNING("SMSG_ITEM_QUERY_SINGLE_RESPONSE too short to name its item (",
+                        packet.getSize(), " bytes); the answer is dropped");
         }
-        LOG_WARNING("handleItemQueryResponse: parse failed, size=", packet.getSize());
         return;
     }
 
     pendingItemQueries_.erase(data.entry);
+    if (!data.valid && failedItemQueries_.insert(data.entry).second) {
+        LOG_WARNING("Item ", data.entry, ": the realm has no such item; it shows as \"Item #",
+                    data.entry, "\" and is not asked for again");
+    }
     LOG_DEBUG("handleItemQueryResponse: RECV entry=", data.entry, " name='", data.name,
               "' displayInfoId=", data.displayInfoId,
               " class=", data.itemClass, " subClass=", data.subClass,
