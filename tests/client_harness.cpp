@@ -9,6 +9,7 @@
 #include "core/env.hpp"
 #include "core/frame_phase.hpp"
 #include "core/map_scope.hpp"
+#include "core/thread_pool.hpp"
 #include "game/entity.hpp"
 #include "game/opcodes.hpp"
 #include "game/update_field_table.hpp"
@@ -61,12 +62,20 @@ constexpr const char* kRecordedEvents[] = {
 /// A window that is a flag: closed when the player asks or the client does.
 /// Each frame is a sixtieth of a second, and the world loader's clock moves
 /// with it.
+///
+/// What the last frame handed the I/O workers - the map's preparation, a
+/// model read - is done before the next frame begins. The frames are the
+/// harness's clock, not the machine's: a machine busy with other processes
+/// makes a test slower and changes nothing it sees. Run as fast as they
+/// could, the frames a world entry is given went by before a worker was free
+/// to prepare the map, and the world was never entered.
 class ClientHarness::Window final : public core::ClientWindow {
 public:
     explicit Window(ClientHarness& h) : h_(h) {}
     [[nodiscard]] bool shouldClose() const override { return h_.windowClosed_; }
     void requestClose() override { h_.windowClosed_ = true; }
     float beginFrame() override {
+        core::ThreadPool::ioWorkers().waitIdle();
         h_.now_ += kFrameDuration;
         return kFrameSeconds;
     }

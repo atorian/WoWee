@@ -15,6 +15,8 @@
 /// every test target sets it, so the fallback is an empty root and the caller
 /// gets whatever a relative path means - which is what each copy already did.
 
+#include "scratch_dir.hpp"
+
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -67,19 +69,6 @@ inline uint32_t readU32(const std::vector<uint8_t>& bytes, size_t offset) {
            (static_cast<uint32_t>(bytes[offset + 1]) << 8) |
            (static_cast<uint32_t>(bytes[offset + 2]) << 16) |
            (static_cast<uint32_t>(bytes[offset + 3]) << 24);
-}
-
-/// An empty directory of that name under the temp directory, made fresh: what
-/// a previous run left there is removed first.
-///
-/// The temp directory is TMP/TEMP/TMPDIR, which a build on a full system drive
-/// points somewhere with room; nothing here names a drive.
-inline std::filesystem::path scratchDir(const char* name) {
-    const std::filesystem::path dir = std::filesystem::temp_directory_path() / name;
-    std::error_code ec;
-    std::filesystem::remove_all(dir, ec);
-    std::filesystem::create_directories(dir, ec);
-    return dir;
 }
 
 /// `data` written to `path`, its directories made first.

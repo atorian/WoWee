@@ -139,10 +139,12 @@ session first, as `Application::shutdown` does.
 - Pre-TBC login servers answer a successful reconnect proof with two bytes,
   not four; the socket frames four for success, so on those servers the
   renewal times out (20 s) and the attempt fails. WotLK and TBC are fine.
-- `ClientHarness` waits on world loads by frame count while the loader's map
-  preparation runs on real worker threads, so a heavily loaded machine can
-  time a world entry out (seen once while another test process was hung). Not
-  new; worth a frame-clocked loader stand-in.
+- Fixed 2026-11-01: `ClientHarness` gave a world entry 1800 frames on its
+  own clock while the map's preparation waited for a real I/O worker, so under
+  `ctest -j` the frames went by first. Each harness frame now waits for the
+  I/O workers to finish what the last one handed them
+  (`ThreadPool::waitIdle`). The harnesses also shared fixed scratch
+  directories across processes; each process now has its own.
 - One run of `test_client_transitions` hung at process exit after every case
   passed, in the same contended period; 40 later runs did not. The static
   thread pools are joined at exit; not investigated further.

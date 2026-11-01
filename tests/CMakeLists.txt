@@ -2542,6 +2542,27 @@ target_link_libraries(test_catalog_subprocess PRIVATE catch2_main)
 add_test(NAME catalog_subprocess COMMAND test_catalog_subprocess)
 register_test_target(test_catalog_subprocess)
 
+# ── test_scratch_dir ─────────────────────────────────────────
+# A test's scratch directory while other test processes ask for the same
+# name: ctest runs a suite's files at once. The child is scratch_child, which
+# asks for one and says where it got it.
+add_executable(test_scratch_child scratch_child.cpp)
+add_executable(test_scratch_dir
+    test_scratch_dir.cpp
+    ${CMAKE_SOURCE_DIR}/tools/editor/cli_subprocess.cpp
+    ${TEST_COMMON_SOURCES})
+add_dependencies(test_scratch_dir test_scratch_child)
+target_compile_definitions(test_scratch_dir PRIVATE
+    SCRATCH_CHILD_PATH="$<TARGET_FILE:test_scratch_child>")
+target_include_directories(test_scratch_dir PRIVATE
+    ${TEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/tools/editor
+)
+target_include_directories(test_scratch_dir SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_scratch_dir PRIVATE catch2_main)
+add_test(NAME scratch_dir COMMAND test_scratch_dir)
+register_test_target(test_scratch_dir)
+
 # ── test_cli_paths ───────────────────────────────────────────
 # Finding the files of one format under a directory. Eleven commands walked
 # the tree themselves for .wom alone. The oracle is a tree the test writes.
