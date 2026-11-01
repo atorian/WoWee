@@ -1159,7 +1159,7 @@ bool CharacterPreview::loadCreature(
         break;
     }
 
-    if (!charRenderer_->loadModel(model, PREVIEW_MODEL_ID)) {
+    if (!charRenderer_->loadModel(std::move(model), PREVIEW_MODEL_ID)) {
         LOG_WARNING("CharacterPreview: failed to upload creature model");
         return false;
     }

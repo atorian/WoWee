@@ -328,6 +328,8 @@ private:
     /// The renderer's own parts of the frame (CpuStageTimes), under the
     /// renderer call each belongs to.
     void noteRendererStages();
+    /// Each part in `parts` as "group/name", then empties it for the next frame.
+    void noteStageParts(rendering::CpuStageTimes& parts);
     /// The frame workers' task timings, by kind, into the frame profile.
     void noteWorkerTimes();
     void reportStageTimes();
@@ -495,6 +497,9 @@ private:
     /// the client's panels and the widget draw - read into the frame profile
     /// under their stage after drawInterface.
     rendering::CpuStageTimes interfaceStages_;
+    /// What each of the entity spawner's queues cost this frame, read into the
+    /// frame profile under "spawn/equipment queues" after that stage.
+    rendering::CpuStageTimes spawnStages_;
     /// The live head-and-shoulders view the interface's portrait draws.
     ui::UnitPortrait unitPortrait_;
     /// Where the portrait's widget was found last time. Ids are stable, so

@@ -1724,13 +1724,17 @@ void CharacterRenderer::setModelTexture(uint32_t modelId, uint32_t textureSlot, 
     core::Logger::getInstance().debug("Replaced model ", modelId, " texture slot ", textureSlot, " with composited texture");
 }
 bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
+    return loadModel(pipeline::M2Model(model), id);
+}
+
+bool CharacterRenderer::loadModel(pipeline::M2Model&& parsed, uint32_t id) {
     // A mesh, emitters, or both. A model of emitters alone - nearly every
     // enchant glow, and some creatures - has no batches to draw here and is
     // still an instance with a skeleton: CharacterEmitters poses its emitters
     // on that skeleton in M2Renderer. Refusing it for want of a mesh dropped
     // every weapon enchant on the floor.
-    if (!model.hasContent()) {
-        LOG_ERROR("CharacterRenderer: model '", model.name.empty() ? "<unnamed>" : model.name,
+    if (!parsed.hasContent()) {
+        LOG_ERROR("CharacterRenderer: model '", parsed.name.empty() ? "<unnamed>" : parsed.name,
                   "' (id ", id, ") has no mesh and no emitters; not loaded");
         return false;
     }
@@ -1743,7 +1747,9 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
     }
 
     // Built here and frozen when the model is published below.
-    auto data = std::make_shared<pipeline::M2Model>(model);
+    auto data = std::make_shared<pipeline::M2Model>(std::move(parsed));
+    const pipeline::M2Model& model = *data;
+    const size_t vertexCount = model.vertices.size();
     M2ModelGPU gpuModel;
     gpuModel.data = data;
     if (!model.vertices.empty()) {
@@ -1848,7 +1854,7 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
 
     models[id] = std::make_shared<M2ModelGPU>(std::move(gpuModel));
 
-    core::Logger::getInstance().debug("Loaded M2 model ", id, " (", model.vertices.size(),
+    core::Logger::getInstance().debug("Loaded M2 model ", id, " (", vertexCount,
                        " verts, ", model.bones.size(), " bones, ", model.sequences.size(),
                        " anims, ", model.textures.size(), " textures)");
 

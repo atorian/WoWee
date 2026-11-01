@@ -15,6 +15,7 @@
 #include "rendering/camera_controller.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/vk_context.hpp"
+#include "rendering/cpu_stage_times.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
@@ -147,10 +148,11 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
         modelUploads++;
 
         // Upload model to GPU (must happen on main thread)
-        // Use pre-decoded BLP cache to skip main-thread texture decode
+        // Use pre-decoded BLP cache to skip main-thread texture decode.
+        // The worker's parse is handed over, not copied: nothing reads it after.
         auto uploadStart = std::chrono::steady_clock::now();
         charRenderer->setPredecodedBLPCache(&result.predecodedTextures, true);
-        if (!charRenderer->loadModel(*result.model, result.modelId)) {
+        if (!charRenderer->loadModel(std::move(*result.model), result.modelId)) {
             charRenderer->setPredecodedBLPCache(nullptr);
             assets_.nonRenderableCreatureDisplayIds_.insert(result.displayId);
             spawns_->creaturePermanentFailureGuids_.insert(result.guid);
@@ -293,14 +295,33 @@ void EntitySpawner::processAsyncNpcCompositeResults(bool unlimited) {
     }
 }
 
-void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
+void EntitySpawner::processCreatureSpawnQueue(bool unlimited, rendering::CpuStageTimes* stages) {
     auto startTime = std::chrono::steady_clock::now();
     // Budget: max 2ms per frame for creature spawning to prevent stutter.
     // In unlimited mode (load screen), process everything without budget cap.
     static constexpr float kSpawnBudgetMs = 2.0f;
+    static constexpr std::string_view kStageGroup = "spawn/equipment queues/creatures";
 
     // First, finalize any async model loads that completed on background threads.
     processAsyncCreatureResults(unlimited);
+    if (stages) {
+        stages->add(kStageGroup, "model uploads", std::chrono::duration<float, std::milli>(
+                                                      std::chrono::steady_clock::now() - startTime).count());
+    }
+    creatureSpawnSteps_ = {};
+    struct ReportSteps {
+        rendering::CpuStageTimes* stages;
+        const CreatureSpawnStepTimes& steps;
+        ~ReportSteps() {
+            if (!stages) return;
+            stages->add(kStageGroup, "display textures", steps.textures);
+            stages->add(kStageGroup, "create instance", steps.instance);
+            stages->add(kStageGroup, "humanoid overrides", steps.overrides);
+            stages->add(kStageGroup, "clothing geosets", steps.geosets);
+            stages->add(kStageGroup, "weapons", steps.weapons);
+            stages->add(kStageGroup, "spawn pose", steps.pose);
+        }
+    } reportSteps{stages, creatureSpawnSteps_};
     {
         auto now = std::chrono::steady_clock::now();
         float asyncMs = std::chrono::duration<float, std::milli>(now - startTime).count();

@@ -4180,11 +4180,14 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     inGameStep = "spawn/equipment queues";
     updateCheckpoint = "in_game: spawn/equipment queues";
     runInGameStage("spawn/equipment queues", [&] {
-        if (entitySpawner_) entitySpawner_->update();
+        if (entitySpawner_) entitySpawner_->update(&spawnStages_);
         if (auto* cr = renderer ? renderer->getCharacterRenderer() : nullptr) {
+            rendering::CpuStage stage(spawnStages_, "spawn/equipment queues", "character normal maps");
             cr->processPendingNormalMaps(4);
         }
     });
+    // The parts of the stage above, each under its own name.
+    noteStageParts(spawnStages_);
     inGameStep = "gameobject/transport queues";
     updateCheckpoint = "in_game: gameobject/transport queues";
     runInGameStage("gameobject/transport queues", [&] {
@@ -5658,13 +5661,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
     }
 
     // The parts of the two stages above, each under its own.
-    for (const auto& part : interfaceStages_.entries()) {
-        stageKey_.assign(part.group);
-        stageKey_ += '/';
-        stageKey_ += part.name;
-        noteStage(stageKey_, part.milliseconds);
-    }
-    interfaceStages_.clear();
+    noteStageParts(interfaceStages_);
 }
 
 void Application::beatWatchdog() {
@@ -5814,14 +5811,17 @@ void Application::noteWorkerTimes() {
 
 void Application::noteRendererStages() {
     if (!renderer || !renderer->getVkContext()) return;
-    auto& parts = renderer->getVkContext()->gameCpuStages();
+    // Taken: a frame the renderer skips does not count these again.
+    noteStageParts(renderer->getVkContext()->gameCpuStages());
+}
+
+void Application::noteStageParts(rendering::CpuStageTimes& parts) {
     for (const auto& part : parts.entries()) {
         stageKey_.assign(part.group);
         stageKey_ += '/';
         stageKey_ += part.name;
         noteStage(stageKey_, part.milliseconds);
     }
-    // Taken: a frame the renderer skips does not count these again.
     parts.clear();
 }
 

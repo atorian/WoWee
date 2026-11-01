@@ -93,6 +93,12 @@ public:
 
     void setAssetManager(pipeline::AssetManager* am) { assetManager = am; }
 
+    /// Takes the parsed model over: its bones, sequences and animation keys
+    /// become the renderer's without being copied. A character model is
+    /// hundreds of thousands of small vectors, and copying one on the main
+    /// thread cost 25-35 ms a load in Dalaran - the frame's worst spikes.
+    bool loadModel(pipeline::M2Model&& model, uint32_t id);
+    /// For a caller that keeps using its model: loads a copy of it.
     bool loadModel(const pipeline::M2Model& model, uint32_t id);
 
     /// `reservedId`, when not 0, is the id SceneCommands handed out for this
