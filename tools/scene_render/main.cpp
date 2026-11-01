@@ -46,7 +46,9 @@
 //         "hidden": false,                 // placed out of the world, as a
 //                                          //   transport is while its route is
 //                                          //   on the other map,
-//         "shownAtFrame": 10 }             //   and back in it from this frame
+//         "shownAtFrame": 10,              //   and back in it from this frame
+//         "heldInPlace": false }           // set to where it stands every
+//                                          //   frame, as a transport at its dock
 //     ],
 //     "characters": [                     // drawn as the client draws units,
 //       { "path": "Creature\\Seal\\Seal.m2", //   and what follows units follows
@@ -340,6 +342,9 @@ struct Placement {
     uint32_t instanceId = 0;
     uint32_t modelId = 0;
     int shownAtFrame = -1;  ///< -1: left as placed
+    /// Set again to this transform every frame, as the client sets a
+    /// transport waiting at its dock; none for a model left as placed.
+    std::optional<glm::mat4> heldAt;
 };
 
 /// A WMO's own doodads, placed as children of one of its instances the way
@@ -440,6 +445,15 @@ bool placeModel(const json& entry, const glm::vec3& origin, pipeline::AssetManag
                 hi = glm::max(hi, v.position);
             }
         }
+    }
+    if (entry.value("heldInPlace", false)) {
+        // As the client builds a transport's transform: where it stands,
+        // turned about the vertical.
+        placement.heldAt = glm::scale(glm::rotate(glm::translate(glm::mat4(1.0f), position), rotation.z,
+                                                  glm::vec3(0.0f, 0.0f, 1.0f)),
+                                      glm::vec3(scale));
+        if (placement.wmo) renderer.getWMORenderer()->setInstanceTransform(placement.instanceId, *placement.heldAt);
+        else renderer.getM2Renderer()->setInstanceTransform(placement.instanceId, *placement.heldAt);
     }
     lo = position + lo * scale;
     hi = position + hi * scale;
@@ -876,6 +890,11 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     auto drawFrame = [&]() {
         const auto start = std::chrono::steady_clock::now();
         (void)renderer.takeFrameResults();
+        for (const auto& placement : placements) {
+            if (!placement.heldAt) continue;
+            if (placement.wmo) renderer.getWMORenderer()->setInstanceTransform(placement.instanceId, *placement.heldAt);
+            else renderer.getM2Renderer()->setInstanceTransform(placement.instanceId, *placement.heldAt);
+        }
         for (const auto& placement : placements) {
             if (placement.shownAtFrame != frame) continue;
             if (placement.wmo) {

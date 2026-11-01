@@ -201,6 +201,8 @@ void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& posit
     auto idxIt = scene_->instanceIndexById.find(instanceId);
     if (idxIt == scene_->instanceIndexById.end()) return;
     auto& inst = scene_->instances[idxIt->second];
+    // Where it already stands: nothing changes (see setInstanceTransform).
+    if (inst.position == position) return;
 
     inst.position = position;
     inst.updateModelMatrix();
@@ -464,6 +466,10 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
         for (int r = 0; r < 4; r++)
             if (!std::isfinite(transform[c][r])) return;
     auto& inst = scene_->instances[idxIt->second];
+    // Where it already stands. A transport waiting at its dock is set again
+    // every frame and carries its doodads with it; a spell effect on a unit
+    // that stands still is set every frame too. Neither moves anything.
+    if (inst.modelMatrix == transform) return;
     const glm::vec3 oldPosition = inst.position;
 
     // Update model matrix directly

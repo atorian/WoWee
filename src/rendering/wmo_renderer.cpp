@@ -873,6 +873,11 @@ void WMORenderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tra
     auto idxIt = scene_->instanceIndexById.find(instanceId);
     if (idxIt == scene_->instanceIndexById.end()) return;
     auto& inst = scene_->instances[idxIt->second];
+    // Where it already stands. The client sets a transport waiting at its dock
+    // every frame; carried on to its doodads, that was some 770 M2s refiled,
+    // re-read by the ray tracer and offered to the shadow cull again each
+    // frame in Dalaran, for nothing that moved.
+    if (inst.modelMatrix == transform) return;
 
     // Decompose transform to position/rotation/scale
     inst.position = glm::vec3(transform[3]);

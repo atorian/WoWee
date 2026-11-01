@@ -2470,6 +2470,11 @@ if(WOWEE_BUILD_TESTS)
                          "WMO shadow draw calls: [1-9][0-9]* in")
     # What the frame profile counts of the M2s a frame holds: three drawn,
     # the two skinned among them, and the one shown in that frame changed.
+    # A transport set to where it already stands every frame, as the client
+    # sets one waiting at its dock, changes nothing: neither its doodads nor
+    # a model on the quay held the same way.
+    wowee_add_scene_test(scene_transport_docked_changes_nothing transport_docked.json
+                         "world M2 in the kept frame: [0-9]+ cull candidates, [1-9][0-9]* drawn, [0-9]+ skinned, [0-9]+ bone matrices, [0-9]+ sun shadow candidates, [0-9]+ particle quads, 0 instances changed")
     wowee_add_scene_test(scene_m2_counts m2_counts.json
                          "world M2 in the kept frame: 3 cull candidates, 3 drawn, 2 skinned, [0-9]+ bone matrices, 3 sun shadow candidates, 0 particle quads, 1 instances changed")
     if(Python3_FOUND)
