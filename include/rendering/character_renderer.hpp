@@ -394,7 +394,12 @@ private:
         uint32_t indexCount = 0;
         uint32_t vertexCount = 0;
 
-        pipeline::M2Model data;  // Original model data
+        // The model as parsed, less the vertices and indices once they are
+        // on the GPU. Never changed after loadModel, and shared by every copy
+        // setModelTexture makes: a reference into it - getModelData(), a
+        // loop over its texture slots - stays good when the model's textures
+        // change while a snapshot holds the previous copy.
+        std::shared_ptr<const pipeline::M2Model> data;
         std::vector<glm::mat4> bindPose;  // Inverse bind pose matrices
 
         // Tight bind-pose bounds from rendered vertices. M2 header
