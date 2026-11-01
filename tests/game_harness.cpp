@@ -156,9 +156,16 @@ private:
 
 GameHarness::GameHarness() : GameHarness(scratchDir("wowee_harness_account_data")) {}
 
-GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
+GameHarness::GameHarness(game::ClientMover& clientMover)
+    : GameHarness(scratchDir("wowee_harness_account_data"), &clientMover) {}
+
+GameHarness::GameHarness(const std::filesystem::path& accountDataDir)
+    : GameHarness(accountDataDir, nullptr) {}
+
+GameHarness::GameHarness(const std::filesystem::path& accountDataDir, game::ClientMover* clientMover) {
     useEmptyExtensionsDir();
     services_.accountDataDir = accountDataDir.string();
+    services_.clientMover = clientMover;
 
     if (expansions_.initialize(sourceRoot() + "Data") == 0 || !expansions_.setActive("wotlk")) {
         fail("no wotlk profile under " + sourceRoot() + "Data/expansions");

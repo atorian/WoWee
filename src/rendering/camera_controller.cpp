@@ -2368,6 +2368,38 @@ void CameraController::updateThirdPersonCamera(float deltaTime, FrameInput& f) {
     updateOrbitCamera(deltaTime, f, targetPos);
 }
 
+void CameraController::updateMovedCharacter(float deltaTime, FrameInput& f) {
+    CharacterIntent intent;
+    intent.forward = f.nowForward;
+    intent.backward = f.nowBackward;
+    intent.strafeLeft = f.nowStrafeLeft;
+    intent.strafeRight = f.nowStrafeRight;
+    intent.turnLeft = f.nowTurnLeft;
+    intent.turnRight = f.nowTurnRight;
+    intent.jump = f.nowJump;
+    intent.ascend = f.spaceHeld;
+    intent.descend = f.xDown;
+    intent.walk = f.walking;
+    if (f.cameraDrivesFacing) {
+        intent.steeredFacingDeg = yaw;
+        intent.steeredPitchRad = glm::radians(pitch);
+    }
+    const CharacterMotion motion = characterMover_->move(intent);
+    *followTarget = motion.position;
+    facingYaw = motion.facingDeg;
+    // Turned by the keys, the view turns with the character.
+    if ((f.nowTurnLeft || f.nowTurnRight) && !f.cameraDrivesFacing) {
+        yaw = facingYaw;
+        camera->setRotation(yaw, pitch);
+    }
+    grounded = motion.grounded;
+    swimming = motion.swimming;
+    verticalVelocity = motion.verticalVelocity;
+    if (flyingActive_) flightAirborne_ = motion.flying;
+    reach_ = collision::Reach::around(*followTarget, COLLISION_FOCUS_RADIUS_THIRD_PERSON);
+    updateOrbitCamera(deltaTime, f, *followTarget);
+}
+
 // The camera that flies itself, used when nothing is being followed.
 void CameraController::updateFreeFlyCamera(float /*deltaTime*/, FrameInput& f) {
     // Free-fly camera mode (original behavior)
@@ -3021,9 +3053,16 @@ void CameraController::update(float deltaTime) {
     f.spaceHeld = spaceHeld;
     f.xDown = xDown;
     f.uiWantsKeyboard = uiWantsKeyboard;
+    f.cameraDrivesFacing = cameraDrivesFacing && !externalFollow_;
+    f.walking = walking;
 
-    // Two cameras: one orbits a character and moves it, one flies itself.
-    if (thirdPerson && followTarget) {
+    // Two cameras: one orbits a character and moves it, one flies itself -
+    // and a character something else moves, which the camera only follows.
+    const bool moverDrives = thirdPerson && followTarget && characterMover_ &&
+                             characterMover_->movesCharacter(*followTarget, facingYaw);
+    if (moverDrives) {
+        updateMovedCharacter(deltaTime, f);
+    } else if (thirdPerson && followTarget) {
         updateThirdPersonCamera(deltaTime, f);
     } else {
         updateFreeFlyCamera(deltaTime, f);
@@ -3034,7 +3073,8 @@ void CameraController::update(float deltaTime) {
     movement = f.movement;
 
     // --- Edge-detection: send movement opcodes on state transitions ---
-    if (movementCallback) {
+    // A mover that moves the character also tells the server what it did.
+    if (movementCallback && !moverDrives) {
         // Forward/backward
         if (nowForward && !wasMovingForward) {
             movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_START_FORWARD));
@@ -3099,7 +3139,7 @@ void CameraController::update(float deltaTime) {
     }
 
     // Swimming state transitions
-    if (movementCallback) {
+    if (movementCallback && !moverDrives) {
         if (swimming && !wasSwimming) {
             movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_START_SWIM));
         } else if (!swimming && wasSwimming) {
@@ -3108,7 +3148,7 @@ void CameraController::update(float deltaTime) {
     }
 
     // Flight ascend/descend transitions (Space = ascend, X = descend while mounted+flying)
-    if (movementCallback && !externalFollow_) {
+    if (movementCallback && !externalFollow_ && !moverDrives) {
         const bool airborne = isFlightAirborne();
         const bool nowAscending = airborne && spaceHeld;
         const bool nowDescending = airborne && xDown && mounted_;

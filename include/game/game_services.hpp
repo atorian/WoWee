@@ -7,7 +7,7 @@
 
 namespace wowee {
 namespace pipeline { class AssetManager; }
-namespace game { class ExpansionRegistry; class EmoteTable; class GameData; class MovementCollision; class StatTables; }
+namespace game { class ExpansionRegistry; class EmoteTable; class ClientMover; class GameData; class MovementCollision; class StatTables; }
 namespace core { class EventBus; class CVarStore; }
 namespace contacts { class IContactsServerFeed; }
 namespace who { class IWhoFeed; }
@@ -61,6 +61,9 @@ struct GameServices {
     std::function<std::unique_ptr<network::WorldConnection>()> makeConnection;
     // The walls units moving themselves run into between their reports.
     const MovementCollision* movementCollision = nullptr;
+    /// The client's own mover of the player (see ClientMover); null:
+    /// MovementHandler applies forced movement and sends heartbeats itself.
+    ClientMover* clientMover = nullptr;
     /// Where the account data - key bindings, macros, settings - is kept on
     /// disk, one folder per account and server. Empty keeps none, which
     /// AccountDataHandler says once.

@@ -717,6 +717,7 @@ set(WOWEE_SOURCES
     src/core/application.cpp
     src/core/movement_status.cpp
     src/core/movement_reporting.cpp
+    src/core/original_player_mover.cpp
     src/core/interface_resources.cpp
     src/core/application_world_loading.cpp
     src/core/client_main.cpp

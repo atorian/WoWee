@@ -80,6 +80,8 @@
     "SkinID": 3
   },
   "CreatureModelData": {
+    "CollisionHeight": 15,
+    "CollisionWidth": 14,
     "FootprintTextureID": 6,
     "FootprintTextureLength": 7,
     "FootprintTextureWidth": 8,
