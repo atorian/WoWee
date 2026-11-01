@@ -58,7 +58,9 @@ public:
     }
 
 private:
-    std::array<Entry, 64> entries_{};
+    // The game thread's frame alone adds some seventy: extraction and its M2
+    // steps, the renderer's update, the spawn queues.
+    std::array<Entry, 128> entries_{};
     std::atomic<size_t> count_{0};
     std::atomic<bool> overflowReported_{false};
 };

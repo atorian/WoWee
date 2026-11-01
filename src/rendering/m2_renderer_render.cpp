@@ -744,85 +744,51 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
 // drawn by the particle or ribbon systems.
 static const bool kM2NoSkinning = envFlagEnabled("WOWEE_M2_NO_SKINNING");
 
-void M2Renderer::extractBones(Frame& frame) {
-    if (!initialized_ || scene_->instances.empty()) return;
-    reapFinishedInstances();
+namespace {
 
-    // --- Mega bone SSBO: assign ranges and upload all animated instance bones ---
-    // Offset 0 is reserved as the identity/no-bones sentinel; animated instances
-    // are packed after it at their own bone count, so a 300-bone creature gets
-    // all 300 matrices instead of being truncated into a fixed stride and
-    // reading into its neighbour's range.
-    uint32_t nextOffset = 1;
-    frame.bones.emplace_back(1.0f);
-    for (size_t idx : scene_->animatedInstanceIndices_) {
-        if (idx >= scene_->instances.size()) continue;
-        auto& instance = scene_->instances[idx];
+/// Says, once per model, when one of a skinned draw's bones has left the
+/// model behind.
+void reportStrayBone(const M2ModelGPU& m, std::span<const glm::mat4> bones) {
+    // The vertex shader skins by these matrices, so one that translates far
+    // outside the model's own bounds drags every vertex weighted to it out
+    // with it. What that looks like on screen is not a bone problem: it is
+    // a long flat triangle with the skin smeared across it, which reads as
+    // a missing texture or a stray card. The Elemental Slave's white sheets
+    // were reported three times as missing textures, and the texture paths,
+    // the display skins, the particle emitters and the ribbons were all
+    // measured and found correct before the geometry was suspected.
+    //
+    // Judged against the other bones, not against the model's origin, and
+    // against the model's own bounding radius so a large creature is not
+    // accused for being large. Measuring from the origin flags every
+    // flying critter: a bird's flight path is authored into its root bone,
+    // so the whole skeleton is sixteen yards out and nothing is stretched.
+    // What a stretch looks like is one bone leaving the set behind.
+    //
+    // Examined once per model, not once per frame: this walks every
+    // bone, and there are models with three hundred of them drawn
+    // dozens at a time.
+    static std::unordered_set<const M2ModelGPU*> checked;
+    if (bones.empty() || checked.size() >= 64) return;
+    const float radius = 0.5f * glm::length(m.boundMax - m.boundMin);
+    if (radius <= 0.01f || !checked.insert(&m).second) return;
+    glm::vec3 centre(0.0f);
+    for (const auto& bone : bones) centre += glm::vec3(bone[3]);
+    centre /= static_cast<float>(bones.size());
 
-        if (instance.boneMatrices.empty()) {
-            instance.megaBoneOffset = 0;  // Use identity slot
-            continue;
-        }
-
-        // A bone that has left the model behind.
-        //
-        // The vertex shader skins by these matrices, so one that translates far
-        // outside the model's own bounds drags every vertex weighted to it out
-        // with it. What that looks like on screen is not a bone problem: it is
-        // a long flat triangle with the skin smeared across it, which reads as
-        // a missing texture or a stray card. The Elemental Slave's white sheets
-        // were reported three times as missing textures, and the texture paths,
-        // the display skins, the particle emitters and the ribbons were all
-        // measured and found correct before the geometry was suspected.
-        //
-        // Judged against the other bones, not against the model's origin, and
-        // against the model's own bounding radius so a large creature is not
-        // accused for being large. Measuring from the origin flags every
-        // flying critter: a bird's flight path is authored into its root bone,
-        // so the whole skeleton is sixteen yards out and nothing is stretched.
-        // What a stretch looks like is one bone leaving the set behind.
-        if (instance.cachedModel != nullptr) {
-            const M2ModelGPU& m = *instance.cachedModel;
-            const glm::vec3 extent = m.boundMax - m.boundMin;
-            const float radius = 0.5f * glm::length(extent);
-            // Examined once per model, not once per frame: this walks every
-            // bone, and there are models with three hundred of them drawn
-            // dozens at a time.
-            static std::unordered_set<uint32_t> boneRangeChecked;
-            if (radius > 0.01f && boneRangeChecked.size() < 64 &&
-                boneRangeChecked.insert(instance.modelId).second) {
-                glm::vec3 centre(0.0f);
-                for (const auto& bone : instance.boneMatrices) centre += glm::vec3(bone[3]);
-                centre /= static_cast<float>(instance.boneMatrices.size());
-
-                const float limit = radius * 4.0f;
-                for (size_t bi = 0; bi < instance.boneMatrices.size(); ++bi) {
-                    const glm::vec3 t(instance.boneMatrices[bi][3]);
-                    const float stray = glm::length(t - centre);
-                    if (stray <= limit) continue;
-                    LOG_WARNING("M2 '", m.name, "' bone ", bi, " of ",
-                                instance.boneMatrices.size(), " sits ", stray,
-                                " from where the rest of its skeleton is, in a model whose"
-                                " bounding radius is ", radius,
-                                " - anything weighted to it is drawn stretched");
-                    break;
-                }
-            }
-        }
-
-        const uint32_t boneCount = static_cast<uint32_t>(instance.boneMatrices.size());
-        if (boneCount > MEGA_BONE_MATRIX_CAPACITY - nextOffset) {
-            instance.megaBoneOffset = 0;  // Overflow - use identity
-            continue;
-        }
-
-        instance.megaBoneOffset = nextOffset;
-
-        frame.bones.insert(frame.bones.end(), instance.boneMatrices.begin(), instance.boneMatrices.end());
-
-        nextOffset += boneCount;
+    const float limit = radius * 4.0f;
+    for (size_t bi = 0; bi < bones.size(); ++bi) {
+        const float stray = glm::length(glm::vec3(bones[bi][3]) - centre);
+        if (stray <= limit) continue;
+        LOG_WARNING("M2 '", m.name, "' bone ", bi, " of ", bones.size(), " sits ", stray,
+                    " from where the rest of its skeleton is, in a model whose"
+                    " bounding radius is ", radius,
+                    " - anything weighted to it is drawn stretched");
+        break;
     }
 }
+
+}  // namespace
 
 bool M2Renderer::prepareInstanceStorage(uint32_t slot,uint64_t entries) {
     if(entries<=instanceCapacity_[slot]) return true;
@@ -1268,6 +1234,72 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
 }
 
 
+void M2Renderer::joinVisibleChunks(Frame& frame) {
+    auto& chunks = visibilityChunks_;
+    const auto reserveGrowing = [](auto& values, size_t count) {
+        if (count > values.capacity())
+            values.reserve(std::max(count, values.capacity() + values.capacity() / 2));
+    };
+    size_t drawCount = 0, opaqueCount = 0, transparentCount = 0, glowCount = 0;
+    for (const auto& chunk : chunks) {
+        drawCount += chunk.draws.size(); opaqueCount += chunk.opaque.size();
+        transparentCount += chunk.transparent.size(); glowCount += chunk.glows.size();
+    }
+    reserveGrowing(frame.drawInstances_, drawCount);
+    reserveGrowing(frame.sortedVisible_, opaqueCount);
+    reserveGrowing(frame.transparentVisible_, transparentCount);
+    reserveGrowing(frame.glowSprites_, glowCount);
+
+    // Slot 0 is the identity, the bones of a draw that has none; the kept
+    // skinned draws are packed after it at their own bone count, so a
+    // 300-bone creature gets all 300 matrices instead of being truncated into
+    // a fixed stride and reading into its neighbour's range.
+    auto& bones = frame.bones;
+    bones.emplace_back(1.0f);
+    size_t unplacedSkinned = 0;
+    for (auto& chunk : chunks) {
+        // Each chunk numbered its draws from zero; they follow the ones
+        // before it here.
+        const uint32_t base = static_cast<uint32_t>(frame.drawInstances_.size());
+        // And its bones from zero, after the ones before it. The chunk's
+        // ranges are in order, so what fits is a run from its start.
+        const uint32_t boneBase = static_cast<uint32_t>(bones.size());
+        const uint32_t room = MEGA_BONE_MATRIX_CAPACITY - boneBase;
+        uint32_t bonesPlaced = 0;
+        for (const uint32_t d : chunk.skinned) {
+            DrawInstance& skinnedDraw = chunk.draws[d];
+            const uint32_t first = skinnedDraw.megaBoneOffset;
+            if (skinnedDraw.boneCount > room - std::min(first, room)) {
+                skinnedDraw.megaBoneOffset = 0;
+                ++unplacedSkinned;
+                continue;
+            }
+            if (skinnedDraw.model)
+                reportStrayBone(*skinnedDraw.model,
+                                std::span<const glm::mat4>(chunk.bones).subspan(first, skinnedDraw.boneCount));
+            skinnedDraw.megaBoneOffset = boneBase + first;
+            bonesPlaced = first + skinnedDraw.boneCount;
+        }
+        bones.insert(bones.end(), chunk.bones.begin(), chunk.bones.begin() + bonesPlaced);
+        frame.drawInstances_.insert(frame.drawInstances_.end(), std::make_move_iterator(chunk.draws.begin()),
+                                    std::make_move_iterator(chunk.draws.end()));
+        for (VisibleEntry& e : chunk.opaque) e.draw += base;
+        for (VisibleEntry& e : chunk.transparent) e.draw += base;
+        frame.sortedVisible_.insert(frame.sortedVisible_.end(), chunk.opaque.begin(), chunk.opaque.end());
+        frame.transparentVisible_.insert(frame.transparentVisible_.end(), chunk.transparent.begin(),
+                                         chunk.transparent.end());
+        frame.glowSprites_.insert(frame.glowSprites_.end(), chunk.glows.begin(), chunk.glows.end());
+        chunk.clear();
+    }
+    if (unplacedSkinned > 0) {
+        static core::LogBudget bonesFullBudget(8, "M2 bone buffer overflows");
+        if (bonesFullBudget.take()) {
+            LOG_WARNING("M2 bone buffer full at ", MEGA_BONE_MATRIX_CAPACITY, " matrices: ",
+                        unplacedSkinned, " skinned models in view not drawn this frame");
+        }
+    }
+}
+
 void M2Renderer::cullView(const Camera& camera, Frame& frame) {
     auto& drawInstances_ = frame.drawInstances_;
     auto& sortedVisible_ = frame.sortedVisible_;
@@ -1285,20 +1317,18 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
     static int diagCounter = 0;
     if (++diagCounter == 600) { // ~10s at 60fps
         diagCounter = 0;
-        uint32_t totalValid = 0, totalAnimated = 0, totalBonesReady = 0, totalMegaBoneOk = 0;
+        uint32_t totalValid = 0, totalAnimated = 0, totalBonesReady = 0;
         for (const auto& inst : scene_->instances) {
             if (inst.cachedIsValid) totalValid++;
             if (inst.cachedHasAnimation && !inst.cachedDisableAnimation) {
                 totalAnimated++;
                 if (!inst.boneMatrices.empty()) totalBonesReady++;
-                if (inst.megaBoneOffset != 0) totalMegaBoneOk++;
             }
         }
         LOG_INFO("M2 diag: total=", scene_->instances.size(),
                  " valid=", totalValid,
                  " animated=", totalAnimated,
                  " bonesReady=", totalBonesReady,
-                 " megaBoneOk=", totalMegaBoneOk,
                  " visible=", sortedVisible_.size(),
                  " draws=", lastDrawCallCount);
     }
@@ -1363,7 +1393,7 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
                 " broadRange=",std::sqrt(maxPossibleDistSq)," ownRange=",std::sqrt(effective),
                 " radius=",inst.cachedPaddedRadius," frustum=",inFrustum,
                 " animated=",inst.cachedModel->hasAnimation," disableAnim=",inst.cachedModel->disableAnimation,
-                " bones=",inst.boneMatrices.size()," boneOffset=",inst.megaBoneOffset);
+                " bones=",inst.boneMatrices.size());
         }
     }
 
@@ -1457,6 +1487,17 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
                                                instance.cachedModel->hasTransparentBatches);
             // What the passes will draw of it, so they need not come back here.
             const uint32_t draw = static_cast<uint32_t>(out.draws.size());
+            // Its bones go to the GPU because it is drawn. They were copied for
+            // every animated instance in the world before anything was culled -
+            // mostly ground clutter nobody could see, 1.2 ms of a Dalaran frame.
+            const bool skinned = instance.cachedHasAnimation && !instance.cachedDisableAnimation &&
+                                 !instance.boneMatrices.empty();
+            const uint32_t firstBone = static_cast<uint32_t>(out.bones.size());
+            if (skinned) {
+                out.bones.insert(out.bones.end(), instance.boneMatrices.begin(),
+                                 instance.boneMatrices.end());
+                out.skinned.push_back(draw);
+            }
             out.draws.push_back(DrawInstance{
                 .modelMatrix = instance.modelMatrix,
                 .model = models.at(instance.modelId),
@@ -1471,7 +1512,7 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
                 .animTime = animTimeOf(instance),
                 .globalSequenceTime = globalSequenceTimeOf(instance),
                 .sequenceIndex = instance.currentSequenceIndex,
-                .megaBoneOffset = instance.megaBoneOffset,
+                .megaBoneOffset = skinned ? firstBone : 0,
                 .boneCount = static_cast<uint32_t>(instance.boneMatrices.size()),
                 .afloat = instance.afloat > 0,
             });
@@ -1481,8 +1522,7 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
                 if (instance.cachedModel && instance.cachedModel->hasGlowSprites) {
                     const M2ModelGPU& model = *instance.cachedModel;
                     const bool needsAnimation = model.hasAnimation && !model.disableAnimation;
-                    const bool posed = !needsAnimation ||
-                        (!instance.boneMatrices.empty() && instance.megaBoneOffset != 0);
+                    const bool posed = !needsAnimation || !instance.boneMatrices.empty();
                     if (posed) {
                         appendGlowSprites(instance, model, m2LodFor(model, distSq),
                                           camPos,
@@ -1510,31 +1550,7 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
     const uint32_t lastChunk = chunkCount - 1;
     classifyRange(lastChunk, lastChunk * chunkSize, totalInstances);
     for (uint32_t chunk = 0; chunk + 1 < chunkCount; ++chunk) visibilityFutures[chunk].get();
-
-    size_t drawCount = 0, opaqueCount = 0, transparentCount = 0, glowCount = 0;
-    for (const auto& chunk : chunks) {
-        drawCount += chunk.draws.size(); opaqueCount += chunk.opaque.size();
-        transparentCount += chunk.transparent.size(); glowCount += chunk.glows.size();
-    }
-    reserveGrowing(drawInstances_, drawCount);
-    reserveGrowing(sortedVisible_, opaqueCount);
-    reserveGrowing(transparentVisible_, transparentCount);
-    reserveGrowing(glowSprites_, glowCount);
-
-    for (auto& chunk : chunks) {
-        // Each chunk numbered its draws from zero; they follow the ones
-        // before it here.
-        const uint32_t base = static_cast<uint32_t>(drawInstances_.size());
-        drawInstances_.insert(drawInstances_.end(), std::make_move_iterator(chunk.draws.begin()),
-                              std::make_move_iterator(chunk.draws.end()));
-        for (VisibleEntry& e : chunk.opaque) e.draw += base;
-        for (VisibleEntry& e : chunk.transparent) e.draw += base;
-        sortedVisible_.insert(sortedVisible_.end(), chunk.opaque.begin(), chunk.opaque.end());
-        transparentVisible_.insert(transparentVisible_.end(), chunk.transparent.begin(),
-                                   chunk.transparent.end());
-        glowSprites_.insert(glowSprites_.end(), chunk.glows.begin(), chunk.glows.end());
-        chunk.clear();
-    }
+    joinVisibleChunks(frame);
 
     // WOWEE_M2_CULL_CHECK=1: classify the whole world as well, the way this
     // did before the columns, and say when the two disagree. Only a GPU verdict
@@ -1569,7 +1585,7 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
             if(inserted || at->second!=present) {
                 at->second=present;
                 LOG_WARNING("M2 SELECTION '",inst.cachedModel->name,"' selected=",present,
-                    " candidates=",candidates.size()," bones=",inst.boneMatrices.size()," boneOffset=",inst.megaBoneOffset);
+                    " candidates=",candidates.size()," bones=",inst.boneMatrices.size());
             }
         }
     }
@@ -1694,9 +1710,14 @@ void M2Renderer::Frame::clear() noexcept {
     solarMatrix = overheadMatrix = strikeMatrix = glm::mat4(0.0f);
 }
 
-std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camera, const std::vector<LocalLight>& lights, float time, const glm::mat4& shadowMatrix, float shadowRadius,
+std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camera, std::string_view stageGroup,
+        const std::vector<LocalLight>& lights, float time, const glm::mat4& shadowMatrix, float shadowRadius,
         const glm::mat4* overheadMatrix, float overheadRadius,
         const glm::mat4* strikeMatrix, float strikeRadius) {
+    // The world's extraction was one number in the frame profile - 5.4 ms of
+    // a 21.5 ms frame in Dalaran - that could not say which of these steps it
+    // was. Each is timed apart.
+    CpuStageLaps laps(vkCtx_ ? &vkCtx_->gameCpuStages() : nullptr, stageGroup);
     auto frame = framePool_.acquire();
     frame->time = time;
     frame->cameraPosition = camera.getPosition();
@@ -1706,15 +1727,21 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
     frame->sceneIdentity = scene_->identity;
     frame->solarMatrix = shadowMatrix;
     frameLights_ = &lights;
-    extractBones(*frame);
+    laps.lap("frame");
+    if (initialized_) reapFinishedInstances();
+    laps.lap("finished instances");
     extractCull(camera, *frame);
+    laps.lap("view candidates");
     cullView(camera, *frame);
+    laps.lap("visibility");
     // One base record and at most one override per batch (opaque UVs or
     // transparent draws). This bounds every pass before any command is recorded.
     for(const auto& draw:frame->drawInstances_)
         if(draw.model) frame->instanceEntries+=uint64_t(1)+draw.model->batches.size();
     gatherM2Particles(*frame, camera.getPosition());
+    laps.lap("particles");
     gatherM2Ribbons(*frame, camera.getPosition());
+    laps.lap("ribbons");
     if (shadowMatrix != glm::mat4(0.0f)) {
         gatherReusedShadowCandidates(shadowMatrix, shadowRadius);
         frame->solarDepth.reserve(shadowCandidates_.size());
@@ -1724,6 +1751,7 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
             frame->solarDepth.push_back({inst.modelId, inst.modelMatrix, models.at(inst.modelId), inst.position, inst.scale});
         }
     }
+    laps.lap("sun shadow casters");
     if (overheadMatrix) {
         frame->overheadMatrix = *overheadMatrix;
         gatherShadowCandidates(*overheadMatrix, overheadRadius, shadowCandidates_);
@@ -1744,6 +1772,7 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
             frame->strikeDepth.push_back({inst.modelId, inst.modelMatrix, models.at(inst.modelId), inst.position, inst.scale});
         }
     }
+    laps.lap("overhead and lightning casters");
     frameLights_ = nullptr;
     return frame;
 }

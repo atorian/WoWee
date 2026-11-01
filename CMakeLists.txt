@@ -2495,6 +2495,11 @@ if(WOWEE_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_face_culling.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/face-culling)
         set_tests_properties(scene_face_culling PROPERTIES SKIP_RETURN_CODE 77)
+        # A skinned doodad is drawn in its own pose beside another one in its.
+        wowee_add_gpu_test(scene_m2_skinning
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_m2_skinning.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/m2-skinning)
+        set_tests_properties(scene_m2_skinning PROPERTIES SKIP_RETURN_CODE 77)
         foreach(object m2 wmo character terrain water)
             wowee_add_gpu_test(scene_frame_scene_${object}
                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py

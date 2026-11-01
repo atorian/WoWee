@@ -34,6 +34,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -442,9 +443,6 @@ struct M2Instance {
     void* boneMapped[2] = {};
     VkDescriptorSet boneSet[2] = {};
 
-    // Mega bone SSBO offset - base bone index for this instance (set per-frame in prepareRender)
-    uint32_t megaBoneOffset = 0;
-
     void updateModelMatrix();
 };
 
@@ -582,7 +580,10 @@ public:
      */
     /** Pre-allocate GPU resources (bone SSBOs, descriptors) on main thread before parallel render. */
     struct Frame;
-    std::shared_ptr<const Frame> extract(const Camera& camera, const std::vector<LocalLight>& lights, float time, const glm::mat4& shadowMatrix, float shadowRadius,
+    /// Each step is timed in the game thread's frame profile under
+    /// `stageGroup` ("extract/M2"), so the stage the caller times has its parts.
+    std::shared_ptr<const Frame> extract(const Camera& camera, std::string_view stageGroup,
+                                         const std::vector<LocalLight>& lights, float time, const glm::mat4& shadowMatrix, float shadowRadius,
                                          const glm::mat4* overheadMatrix = nullptr, float overheadRadius = 1.0f,
                                          const glm::mat4* strikeMatrix = nullptr, float strikeRadius = 1.0f);
     void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
@@ -1352,6 +1353,8 @@ private:
         float animTime = 0.0f;
         float globalSequenceTime = 0.0f;
         int sequenceIndex = 0;
+        /// Where its bones start in the frame's bone buffer; 0, the identity
+        /// slot, for a model that is not skinned or whose bones did not fit.
         uint32_t megaBoneOffset = 0;
         /// How many bones it has posed; none yet for an animated model is
         /// an instance whose bones are still to come, and is not drawn.
@@ -1377,8 +1380,14 @@ private:
         std::vector<VisibleEntry> opaque, transparent;
         std::vector<DrawInstance> draws;
         std::vector<GlowSprite> glows;
+        /// The bones of the skinned draws kept, in draw order, and which draws
+        /// those are; each one's megaBoneOffset counts from the chunk's first
+        /// bone until the chunks are joined.
+        std::vector<glm::mat4> bones;
+        std::vector<uint32_t> skinned;
         void clear() noexcept {
             opaque.clear(); transparent.clear(); draws.clear(); glows.clear();
+            bones.clear(); skinned.clear();
         }
     };
     // Producer-only scratch; workers write disjoint chunks and finish before
@@ -1387,10 +1396,14 @@ private:
 
     /// The view's half of render(): folds the GPU's cull verdicts into the
     /// instances, keeps what the camera sees, copies it into drawInstances_,
-    /// sorts the two lists and makes the glow sprites. Reads the scene and
-    /// writes only the verdicts into it.
+    /// sorts the two lists and makes the glow sprites, and puts the bones of
+    /// the skinned ones it keeps - and no others - into the frame's bone
+    /// buffer. Reads the scene and writes only the verdicts into it.
     void cullView(const Camera& camera, Frame& frame);
-    void extractBones(Frame& frame);
+    /// cullView's last step: the chunks it classified on the workers joined
+    /// into the frame's lists in order, each skinned draw's bones placed in
+    /// the frame's bone buffer.
+    void joinVisibleChunks(Frame& frame);
     void extractCull(const Camera& camera, Frame& frame);
     void collectCullOutput(uint32_t frame);
     /// The opaque pass, from the lists cullView made; reads no instance.

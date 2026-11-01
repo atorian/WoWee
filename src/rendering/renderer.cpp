@@ -1667,7 +1667,7 @@ FrameInputs Renderer::extractFrameInputs() {
             in.camera.getPosition().z + ShelterMap::kAbove, ShelterMap::kHalfExtent,
             ShelterMap::kRange, ShelterMap::kTexels);
         const glm::mat4 shelterMatrix = shelterFrame.viewProjection();
-        scene->models = m2Renderer->extract(in.camera, in.localLights, in.time, in.shadowMatrix,
+        scene->models = m2Renderer->extract(in.camera, "extract/M2", in.localLights, in.time, in.shadowMatrix,
             in.shadowDistance * 1.35f, in.weather.any() ? &shelterMatrix : nullptr,
             ShelterMap::kHalfExtent * 1.415f,
             scene->lightning.lightColor.b > 0.0f ? &scene->lightning.lightMatrix : nullptr, 550.0f);
@@ -1689,7 +1689,8 @@ FrameInputs Renderer::extractFrameInputs() {
     extraction.lap("minimap");
     if (skyboxModelRenderer_) {
         skyboxModelRenderer_->setSuppressBakedStars(in.sharpStars);
-        scene->skyModels = skyboxModelRenderer_->extract(in.camera, in.localLights, in.time, glm::mat4(0.0f), 1.0f);
+        scene->skyModels = skyboxModelRenderer_->extract(in.camera, "extract/sky models", in.localLights, in.time,
+                                                         glm::mat4(0.0f), 1.0f);
     }
     extraction.lap("sky models");
     if (grassRenderer_) scene->grass = grassRenderer_->extract();
