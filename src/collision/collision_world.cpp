@@ -63,7 +63,8 @@ bool withinBounds(const glm::vec3& boundsMin, const glm::vec3& boundsMax,
 
 }  // namespace
 
-CollisionWorld::CollisionWorld() : movement_(std::make_unique<MovementWorld>()) {}
+CollisionWorld::CollisionWorld()
+    : models_(std::make_unique<ModelCollisionCache>()), movement_(std::make_unique<MovementWorld>(*models_)) {}
 CollisionWorld::~CollisionWorld() = default;
 
 // ---- Doodads ---------------------------------------------------------------

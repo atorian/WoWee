@@ -3,6 +3,7 @@
 // original collects it, and what the server is sent.
 #include <catch_amalgamated.hpp>
 
+#include "collision/collision_world.hpp"
 #include "collision/movement_world.hpp"
 #include "collision/terrain_heights.hpp"
 #include "core/cvar_store.hpp"
@@ -54,7 +55,8 @@ struct World {
     wowee::core::CVarStore settings;
     wowee::core::OriginalPlayerMover mover{settings};
     GameHarness h{mover};
-    wowee::collision::MovementWorld map;
+    wowee::collision::CollisionWorld collision;
+    wowee::collision::MovementWorld& map = collision.movement();
     wowee::test::PlayerSpec spec;
 
     explicit World(bool on) {

@@ -14,6 +14,29 @@
   symptom. When the proper fix is a real feature, lay out the plan and its
   costs first, then build it fully.
 
+## One producer for each thing
+
+Every piece of derived data - a model's collision, a parsed table, a texture,
+a placement's matrix - has one producer: one place that loads it, one that
+builds it, one cache that holds it. Everyone who needs it asks that producer.
+
+- When a new consumer needs something an existing pipeline makes, it asks
+  that pipeline. If the pipeline does not deliver what it needs - not all of
+  it, not soon enough, not without the renderer's say - change the pipeline or
+  move it to an owner that serves both. Never add a second loader, a side
+  channel that fills the gaps the first leaves, or a copy of its build step.
+- What a lower layer needs is not left to a higher layer's choices. Collision
+  and game state do not depend on what the renderer decided to draw, load or
+  skip; the renderer asks the lower layer's producer like anyone else.
+- Before writing code that reads a file, parses a format or builds a shape,
+  search for who already does it. Two call sites of the same build function
+  for the same input are a duplicate pipeline, whatever names they have.
+- Example (2026-11-01): the original mover's world needed doodad collision the
+  renderer had not loaded, and got a second M2 loader beside the renderer's,
+  with the collision build in four places. The fix was one collision model
+  cache in `collision/` that loads and builds every model's collision, which
+  the renderer and the movement world both ask.
+
 ## Original gameplay behaviour
 
 - User decision (2026-10-22): graphics may change; gameplay behaviour must

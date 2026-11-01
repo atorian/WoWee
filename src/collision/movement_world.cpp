@@ -92,6 +92,11 @@ private:
 struct MovementWorld::DoodadEntry {
     DoodadFacetPlacement placement;
     std::string model;
+    /// The cache's answer for the model: its collision once built, or why it
+    /// cannot be had.
+    std::shared_ptr<const M2Collision> collision;
+    DoodadFacetModel facets;
+    std::string unavailable;
     int refs = 0;
 };
 
@@ -122,8 +127,9 @@ struct MovementWorld::Tile {
     std::array<WorldFacetLinks, 256> chunkLinks{};
 };
 
-MovementWorld::MovementWorld()
-    : materials_(std::make_unique<LiquidMaterials>()), view_(std::make_unique<WorldFacetView>()) {}
+MovementWorld::MovementWorld(ModelCollisionCache& models)
+    : models_(models), materials_(std::make_unique<LiquidMaterials>()),
+      view_(std::make_unique<WorldFacetView>()) {}
 
 MovementWorld::~MovementWorld() = default;
 
@@ -206,16 +212,18 @@ void MovementWorld::releaseBuilding(uint64_t key) {
 
 void MovementWorld::prepareDoodad(DoodadEntry& doodad) {
     auto& placement = doodad.placement;
-    const auto found = m2Models_.find(doodad.model);
-    if (found == m2Models_.end()) {
+    if (doodad.collision) return;
+    auto found = models_.find(doodad.model);
+    doodad.unavailable = std::move(found.unavailable);
+    if (!found.collision) {
         placement.model = nullptr;
         placement.flags &= ~kPrepared;
-        if (!unavailable_.contains(doodad.model) && asked_.insert(doodad.model).second) {
-            wanted_.push_back(doodad.model);
-        }
         return;
     }
-    placement.model = &found->second->facets;
+    doodad.collision = std::move(found.collision);
+    doodad.facets = DoodadFacetModel{doodad.collision->boundsMin, doodad.collision->boundsMax,
+                                     doodad.collision->shape.get()};
+    placement.model = &doodad.facets;
     placement.flags |= kPrepared;
     transformMovementBox(placement.transform, placement.model->boundsMin, placement.model->boundsMax,
                          placement.boundsMin, placement.boundsMax);
@@ -223,7 +231,7 @@ void MovementWorld::prepareDoodad(DoodadEntry& doodad) {
 
 bool MovementWorld::prepareBuilding(BuildingEntry& building) {
     building.ready = false;
-    building.failed = unavailable_.contains(building.model);
+    building.failed = unavailableBuildings_.contains(building.model);
     if (building.failed) return false;
     const auto found = wmoModels_.find(building.model);
     if (found == wmoModels_.end()) return false;
@@ -243,7 +251,7 @@ bool MovementWorld::prepareBuilding(BuildingEntry& building) {
         for (size_t index = 0; index < shape.originalGroups.size(); ++index) {
             const auto& group = shape.originalGroups[index];
             if (!group.bounds) {
-                modelUnavailable(building.model, "group " + std::to_string(index) + " has no MOGI bounds");
+                buildingUnavailable(building.model, "group " + std::to_string(index) + " has no MOGI bounds");
                 building.failed = true;
                 return false;
             }
@@ -269,11 +277,11 @@ bool MovementWorld::prepareBuilding(BuildingEntry& building) {
         }
     }
     for (auto& doodad : building.groupDoodadStorage) {
-        if (unavailable_.contains(doodad->model)) {
+        prepareDoodad(*doodad);
+        if (!doodad->unavailable.empty()) {
             building.failed = true;
             return false;
         }
-        prepareDoodad(*doodad);
         if (!doodad->placement.model) return false;
     }
     building.ready = true;
@@ -344,19 +352,6 @@ void MovementWorld::removeTile(int tileX, int tileY) {
     dirty_ = true;
 }
 
-void MovementWorld::addM2Model(const std::string& path, std::shared_ptr<const M2Shape> shape,
-                               const glm::vec3& boundsMin, const glm::vec3& boundsMax) {
-    const std::string key = movementModelKey(path);
-    auto model = std::make_unique<M2Model>();
-    model->shape = std::move(shape);
-    model->facets = DoodadFacetModel{boundsMin, boundsMax, model->shape.get()};
-    m2Models_[key] = std::move(model);
-    for (auto& [doodadKey, doodad] : doodads_) {
-        if (doodad->model == key) prepareDoodad(*doodad);
-    }
-    dirty_ = true;
-}
-
 void MovementWorld::addWmoModel(std::shared_ptr<const WmoShape> shape) {
     if (!shape) return;
     if (shape->path.empty()) {
@@ -368,16 +363,10 @@ void MovementWorld::addWmoModel(std::shared_ptr<const WmoShape> shape) {
     dirty_ = true;
 }
 
-std::vector<std::string> MovementWorld::takeWantedModels() {
-    // Buildings name their doodads once their model has arrived.
-    if (dirty_) rebuild();
-    return std::exchange(wanted_, {});
-}
-
-void MovementWorld::modelUnavailable(const std::string& path, const std::string& reason) {
+void MovementWorld::buildingUnavailable(const std::string& path, const std::string& reason) {
     const std::string key = movementModelKey(path);
-    if (!unavailable_.emplace(key, reason).second) return;
-    LOG_ERROR("Movement collision: model ", key, " is unavailable (", reason,
+    if (!unavailableBuildings_.emplace(key, reason).second) return;
+    LOG_ERROR("Movement collision: building ", key, " is unavailable (", reason,
               ") - an area that places it cannot be collided with");
     dirty_ = true;
 }
@@ -385,6 +374,8 @@ void MovementWorld::modelUnavailable(const std::string& path, const std::string&
 void MovementWorld::rebuild() {
     if (source_) queryTag_ = source_->queryTag();
     source_.reset();
+    modelsSeen_ = models_.revision();
+    for (auto& [key, doodad] : doodads_) prepareDoodad(*doodad);
     for (auto* building : buildingOrder_) prepareBuilding(*building);
 
     for (auto& area : view_->areas) area = WorldFacetArea{};
@@ -401,7 +392,7 @@ void MovementWorld::rebuild() {
         for (const uint64_t doodadKey : tile->doodadKeys) {
             if (state == MovementGeometryStatus::Failed || doodadKey == 0) continue;
             const auto& doodad = *doodads_.at(doodadKey);
-            if (unavailable_.contains(doodad.model)) state = MovementGeometryStatus::Failed;
+            if (!doodad.unavailable.empty()) state = MovementGeometryStatus::Failed;
             else if (!doodad.placement.model) state = MovementGeometryStatus::NotReady;
         }
         for (const uint64_t buildingKey : tile->buildingKeys) {
@@ -457,7 +448,7 @@ std::string MovementWorld::waitingFor(const glm::vec3& at, float radius) const {
             for (const uint64_t doodadKey : tile->second->doodadKeys) {
                 if (doodadKey == 0) continue;
                 const auto& doodad = *doodads_.at(doodadKey);
-                if (!doodad.placement.model && !unavailable_.contains(doodad.model)) {
+                if (!doodad.placement.model && doodad.unavailable.empty()) {
                     add("tile [" + std::to_string(tileX) + "," + std::to_string(tileY) + "] doodad model " +
                         doodad.model + " has not arrived");
                     break;
@@ -493,7 +484,7 @@ MovementGeometryStatus MovementWorld::query(const MovementFacetRequest& request,
         output.clear();
         return MovementGeometryStatus::NotReady;
     }
-    if (dirty_) rebuild();
+    if (dirty_ || models_.revision() != modelsSeen_) rebuild();
     return source_->query(request, flags, output);
 }
 

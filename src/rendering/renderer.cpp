@@ -1,4 +1,5 @@
 #include "rendering/renderer.hpp"
+#include "collision/model_collision_cache.hpp"
 #include "collision/movement_world.hpp"
 #include "rendering/frame_scene.hpp"
 #include "collision/collision_world.hpp"
@@ -4573,6 +4574,20 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         }
 
         cachedAssetManager = assetManager;
+    }
+    // Models nobody has parsed are read for their collision from the same data.
+    if (assetManager) {
+        struct AssetFiles final : collision::ModelFileSource {
+            const pipeline::AssetManager& assets;
+            explicit AssetFiles(const pipeline::AssetManager& a) : assets(a) {}
+            std::shared_ptr<const std::vector<uint8_t>> read(const std::string& path) const override {
+                return assets.readFileShared(path);
+            }
+            void runInBackground(std::function<void()> job) const override {
+                (void)core::ThreadPool::ioWorkers().submit("model collision", std::move(job));
+            }
+        };
+        collision_->models().setSource(std::make_shared<AssetFiles>(*assetManager));
     }
 
     return true;

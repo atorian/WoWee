@@ -129,8 +129,11 @@ the player, and every change of hands is logged with its reason.
 - `collision::MovementWorld` collects from the map data as CMap::GetFacets
   does - tiles with their MCRF lists, MDDF/MODF placements shared by uniqueId,
   each building's MOGI groups and their MODR doodads of the placement's set -
-  fed by TerrainManager and the M2/WMO renderers. A model that cannot load
-  fails its areas; a doodad model not yet loaded keeps its area NotReady.
+  fed tiles by TerrainManager and buildings by the WMO renderer. Doodad
+  models come from `collision::ModelCollisionCache`, the one place an M2's
+  collision is read and built: the renderer offers what it parses, and the
+  cache reads any model nobody offered. A model that cannot load fails its
+  areas; a doodad model not yet built keeps its area NotReady.
 - `core::OriginalPlayerMover` queues the controls, runs
   `executeUninterpolatedMovement`, reports through the ported reporting
   (`processLocalMovementEvent12340`, heartbeats from the scheduler), and takes

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "collision/model_collision_cache.hpp"
 #include "collision/terrain_heights.hpp"
 #include "collision/world_facets.hpp"
 
@@ -27,9 +28,10 @@ namespace wowee::collision {
 /// are the renderer's.
 ///
 /// A placement is shared by every tile that names it, by its uniqueId, as the
-/// original's map object and doodad definitions are. Models arrive as the
-/// renderers build their collision shapes:
-/// - an area is NotReady until every doodad model its tile names has arrived
+/// original's map object and doodad definitions are. Doodad models come from
+/// the ModelCollisionCache, which reads any nobody has offered; buildings
+/// arrive as the WMO renderer builds their collision:
+/// - an area is NotReady until every doodad model its tile names is built
 ///   (the original knows a doodad's model box before it collects it);
 /// - a building whose model has not arrived, or whose group doodads have not,
 ///   is a placement with no groups ready, which the collector answers the way
@@ -45,7 +47,8 @@ namespace wowee::collision {
 /// measured from, and that a building's linked groups are all its MOGI groups.
 class MovementWorld final : public MovementFacetSource {
 public:
-    MovementWorld();
+    /// Doodad models' collision from `models`, which outlives this.
+    explicit MovementWorld(ModelCollisionCache& models);
     ~MovementWorld() override;
     MovementWorld(const MovementWorld&) = delete;
     MovementWorld& operator=(const MovementWorld&) = delete;
@@ -67,18 +70,10 @@ public:
     /// needs its material fails, and says so once.
     void setLiquidTypes(const pipeline::LiquidTypeTable* table);
 
-    /// A doodad model's collision, as the renderer built it: its authored
-    /// collision mesh (none for a model with no collision triangles) and the
-    /// header's bounding box.
-    void addM2Model(const std::string& path, std::shared_ptr<const M2Shape> shape,
-                    const glm::vec3& boundsMin, const glm::vec3& boundsMax);
     /// A building's collision; its path, doodads and doodad sets are set.
     void addWmoModel(std::shared_ptr<const WmoShape> shape);
-    /// A model that will not arrive: logged once, with why.
-    void modelUnavailable(const std::string& path, const std::string& reason);
-    /// Doodad models a placement names that have not arrived, each once:
-    /// for whoever can load their collision when no renderer does.
-    [[nodiscard]] std::vector<std::string> takeWantedModels();
+    /// A building that will not arrive: logged once, with why.
+    void buildingUnavailable(const std::string& path, const std::string& reason);
 
     MovementGeometryStatus query(const MovementFacetRequest& request, uint32_t flags,
                                  std::vector<MovementFacet>& output) override;
@@ -113,15 +108,10 @@ private:
     std::vector<BuildingEntry*> buildingOrder_;
     uint64_t nextBuildingSerial_ = 1;
 
-    struct M2Model {
-        std::shared_ptr<const M2Shape> shape;
-        DoodadFacetModel facets;
-    };
-    std::unordered_map<std::string, std::unique_ptr<M2Model>> m2Models_;
+    ModelCollisionCache& models_;
+    uint64_t modelsSeen_ = 0;
     std::unordered_map<std::string, std::shared_ptr<const WmoShape>> wmoModels_;
-    std::unordered_map<std::string, std::string> unavailable_;
-    std::unordered_set<std::string> asked_;
-    std::vector<std::string> wanted_;
+    std::unordered_map<std::string, std::string> unavailableBuildings_;
 
     std::unique_ptr<LiquidMaterials> materials_;
     std::unique_ptr<WorldFacetView> view_;

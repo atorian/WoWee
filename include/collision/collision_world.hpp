@@ -19,6 +19,7 @@
 
 namespace wowee::collision {
 
+class ModelCollisionCache;
 class MovementWorld;
 
 /// The solid world of the map being shown: the ground of its loaded tiles, and
@@ -87,6 +88,9 @@ public:
     /// tiles as this, and the models the renderers build. See MovementWorld.
     [[nodiscard]] MovementWorld& movement() { return *movement_; }
     [[nodiscard]] const MovementWorld& movement() const { return *movement_; }
+    /// Every M2 model's collision, read and built in one place: the renderer
+    /// offers what it parses, the movement world asks for what it names.
+    [[nodiscard]] ModelCollisionCache& models() { return *models_; }
 
     void addTerrainTile(std::shared_ptr<const TerrainTileHeights> tile);
     void removeTerrainTile(int tileX, int tileY);
@@ -286,6 +290,7 @@ private:
     uint64_t wmoRevision_ = 1;
     /// Tile key (x << 32 | y, as unsigned) to its ground.
     std::unordered_map<uint64_t, std::shared_ptr<const TerrainTileHeights>> terrain_;
+    std::unique_ptr<ModelCollisionCache> models_;
     std::unique_ptr<MovementWorld> movement_;
 
     mutable std::atomic<double> wmoQueryMs_{0.0};

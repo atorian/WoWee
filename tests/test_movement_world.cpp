@@ -1,17 +1,23 @@
 // The map as the original client's movement collects it, fed the way the
-// client feeds it: terrain tiles through CollisionWorld, models as the
-// renderers build them. What a mover is answered - not ready, failed, or the
+// client feeds it: terrain tiles through CollisionWorld, buildings as the WMO
+// renderer builds them, doodad models from the one collision model cache -
+// offered by whoever parsed them, or read by the cache itself. What a mover is answered - not ready, failed, or the
 // facets - for doodads and buildings the map data places.
 #include <catch_amalgamated.hpp>
 
 #include "collision/collision_world.hpp"
+#include "collision/model_collision_cache.hpp"
 #include "collision/movement_world.hpp"
 #include "collision/terrain_heights.hpp"
 #include "core/coordinates.hpp"
 #include "pipeline/adt_loader.hpp"
+#include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_loader.hpp"
 
 #include <glm/glm.hpp>
+
+#include <cstring>
+#include <map>
 
 using namespace wowee;
 using collision::MovementGeometryStatus;
@@ -48,11 +54,47 @@ std::shared_ptr<const collision::TerrainTileHeights> tileWithDoodad(
     return collision::TerrainTileHeights::build(*terrain, tileX, 32);
 }
 
-/// A model with one collision triangle 1 yard up.
-std::shared_ptr<const collision::M2Shape> raisedTriangle() {
-    return collision::M2Shape::build("triangle", {{-2, -2, 1}, {2, -2, 1}, {0, 2, 1}}, {0, 1, 2},
-                                     {{0, 0, 1}});
+/// A parsed model with one collision triangle 1 yard up.
+pipeline::M2Model raisedTriangle() {
+    pipeline::M2Model model{};
+    model.collisionVertices = {{-2, -2, 1}, {2, -2, 1}, {0, 2, 1}};
+    model.collisionIndices = {0, 1, 2};
+    model.collisionNormals = {{0, 0, 1}};
+    model.boundMin = {-2, -2, 0};
+    model.boundMax = {2, 2, 2};
+    return model;
 }
+
+/// The same triangle as an M2 file: MD20, version 264, the collision
+/// indices, vertices and normals in the header's collision arrays.
+std::vector<uint8_t> raisedTriangleFile() {
+    std::vector<uint8_t> bytes(352 + 12, 0);
+    auto put32 = [&](size_t at, uint32_t value) { std::memcpy(bytes.data() + at, &value, 4); };
+    std::memcpy(bytes.data(), "MD20", 4);
+    put32(4, 264);
+    put32(0xd8, 3); put32(0xdc, 340);
+    put32(0xe0, 3); put32(0xe4, 304);
+    put32(0xe8, 1); put32(0xec, 352);
+    const float positions[] = {-2, -2, 1, 2, -2, 1, 0, 2, 1};
+    const uint16_t indices[] = {0, 1, 2};
+    const float normal[] = {0, 0, 1};
+    std::memcpy(bytes.data() + 304, positions, sizeof(positions));
+    std::memcpy(bytes.data() + 340, indices, sizeof(indices));
+    std::memcpy(bytes.data() + 352, normal, sizeof(normal));
+    return bytes;
+}
+
+/// The data, as the cache reads files nobody offered: these files and no
+/// others, read at once rather than on a worker.
+struct Files final : collision::ModelFileSource {
+    std::map<std::string, std::vector<uint8_t>> files;
+    std::shared_ptr<const std::vector<uint8_t>> read(const std::string& path) const override {
+        const auto found = files.find(path);
+        if (found == files.end()) return nullptr;
+        return std::make_shared<const std::vector<uint8_t>>(found->second);
+    }
+    void runInBackground(std::function<void()> job) const override { job(); }
+};
 
 collision::MovementFacetRequest aroundDoodad() {
     collision::MovementFacetRequest request{};
@@ -90,7 +132,7 @@ TEST_CASE("a tile's doodad is solid once its model arrives, and the area waits f
 
     CHECK(world.movement().query(aroundDoodad(), kStaticDoodads, facets) == MovementGeometryStatus::NotReady);
 
-    world.movement().addM2Model("world/tree.m2", raisedTriangle(), {-2, -2, 0}, {2, 2, 2});
+    (void)world.models().offer("world/tree.m2", raisedTriangle());
     REQUIRE(world.movement().query(aroundDoodad(), kStaticDoodads, facets) == MovementGeometryStatus::Ready);
     CHECK(facetsAtHeight(facets, 1.0f) == 1);
 }
@@ -98,8 +140,8 @@ TEST_CASE("a tile's doodad is solid once its model arrives, and the area waits f
 TEST_CASE("a doodad whose model cannot be loaded fails its area", "[collision][movement_world]") {
     collision::CollisionWorld world;
     world.movement().beginMap(0, terrainAt({32}));
+    world.models().setSource(std::make_shared<Files>());
     world.addTerrainTile(tileWithDoodad("World\\Missing.m2", 7));
-    world.movement().modelUnavailable("World\\Missing.m2", "file not found");
     std::vector<collision::MovementFacet> facets;
     CHECK(world.movement().query(aroundDoodad(), kStaticDoodads, facets) == MovementGeometryStatus::Failed);
 }
@@ -108,7 +150,7 @@ TEST_CASE("a doodad two tiles place is one placement, kept while either tile is 
           "[collision][movement_world]") {
     collision::CollisionWorld world;
     world.movement().beginMap(0, terrainAt({32, 33}));
-    world.movement().addM2Model("world/tree.m2", raisedTriangle(), {-2, -2, 0}, {2, 2, 2});
+    (void)world.models().offer("world/tree.m2", raisedTriangle());
     world.addTerrainTile(tileWithDoodad("World\\Tree.mdx", 7, 32));
     world.addTerrainTile(tileWithDoodad("World\\Tree.mdx", 7, 33));
     world.removeTerrainTile(33, 32);
@@ -163,7 +205,7 @@ TEST_CASE("a building's group doodads of its placement's set are solid with it",
     shape->describeDoodads(input);
     world.movement().addWmoModel(shape);
     for (const char* model : {"world/floor.m2", "world/lamp.m2", "world/other.m2"}) {
-        world.movement().addM2Model(model, raisedTriangle(), {-2, -2, 0}, {2, 2, 2});
+        (void)world.models().offer(model, raisedTriangle());
     }
 
     REQUIRE(world.movement().query(request, kStaticDoodads, facets) == MovementGeometryStatus::Ready);
@@ -172,12 +214,23 @@ TEST_CASE("a building's group doodads of its placement's set are solid with it",
     CHECK(facetsAtHeight(facets, 4.0f) == 0);
 }
 
-TEST_CASE("a doodad model no renderer has loaded is asked for once", "[collision][movement_world]") {
+TEST_CASE("a doodad model nobody has parsed is read by the cache and is solid",
+          "[collision][movement_world]") {
     collision::CollisionWorld world;
+    auto files = std::make_shared<Files>();
+    files->files["world\\tree.m2"] = raisedTriangleFile();
+    world.models().setSource(files);
     world.movement().beginMap(0, terrainAt({32}));
     world.addTerrainTile(tileWithDoodad("World\\Tree.mdx", 7));
-    CHECK(world.movement().takeWantedModels() == std::vector<std::string>{"world\\tree.m2"});
-    CHECK(world.movement().takeWantedModels().empty());
-    world.addTerrainTile(tileWithDoodad("World\\Tree.mdx", 7, 33));
-    CHECK(world.movement().takeWantedModels().empty());
+    std::vector<collision::MovementFacet> facets;
+    REQUIRE(world.movement().query(aroundDoodad(), kStaticDoodads, facets) == MovementGeometryStatus::Ready);
+    CHECK(facetsAtHeight(facets, 1.0f) == 1);
+}
+
+TEST_CASE("a model's collision is built once, whoever offers it", "[collision][movement_world]") {
+    collision::ModelCollisionCache models;
+    const auto first = models.offer("World\\Tree.mdx", raisedTriangle());
+    const auto second = models.offer("world/tree.m2", raisedTriangle());
+    CHECK(first == second);
+    CHECK(models.find("WORLD\\TREE.M2").collision == first);
 }

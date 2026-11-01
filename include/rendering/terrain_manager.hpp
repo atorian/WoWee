@@ -33,7 +33,7 @@
 namespace wowee {
 
 namespace pipeline { class AssetManager; class GameTables; }
-namespace collision { class CollisionWorld; struct M2Shape; }
+namespace collision { class CollisionWorld; }
 namespace rendering { class TerrainRenderer; class Camera; class LiquidScene; class M2Renderer; class WMORenderer; struct WmoModelPrep; }
 
 namespace rendering {
@@ -92,18 +92,9 @@ struct PendingTile {
     /// Its ground for the collision world, handed over at the commit.
     std::shared_ptr<const collision::TerrainTileHeights> heights;
 
-    /// Models this tile names that will not arrive, and why: told to the
+    /// Buildings this tile names that will not arrive, and why: told to the
     /// movement world when the tile is committed, on the main thread.
-    std::vector<std::pair<std::string, std::string>> unavailableModels;
-    /// Models with nothing this renderer draws - a smoke or pollen emitter -
-    /// whose collision the movement world still takes: its box and authored
-    /// collision mesh, if any. Told when the tile is committed.
-    struct CollisionOnlyModel {
-        std::string path;
-        std::shared_ptr<const collision::M2Shape> shape;
-        glm::vec3 boundsMin{0.0f}, boundsMax{0.0f};
-    };
-    std::vector<CollisionOnlyModel> collisionOnlyModels;
+    std::vector<std::pair<std::string, std::string>> unavailableBuildings;
 
     // Pre-loaded M2 data
     struct M2Ready {
@@ -562,17 +553,6 @@ private:
     std::unordered_set<uint32_t> uploadedM2Ids_;
     std::mutex uploadedM2IdsMutex_;
 
-    /// The movement world collects doodads whatever this renderer drew: the
-    /// collision of every model it names that has not arrived is read here,
-    /// on the IO workers, and handed to it on the main thread.
-    void loadMovementCollisionModels();
-    struct CollisionModelLoad {
-        std::string path;
-        std::shared_ptr<const collision::M2Shape> shape;
-        glm::vec3 boundsMin{0.0f}, boundsMax{0.0f};
-        std::string error;
-    };
-    std::vector<core::JobGroup::Future<CollisionModelLoad>> collisionModelLoads_;
 
     // Cross-tile dedup for WMO doodad preparation on background workers
     // (prevents re-parsing thousands of doodads when same WMO spans multiple tiles)

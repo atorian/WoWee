@@ -154,44 +154,8 @@ bool TerrainManager::initialize(pipeline::AssetManager* assets, TerrainRenderer*
     return true;
 }
 
-void TerrainManager::loadMovementCollisionModels() {
-    if (!collision_ || !assetManager) return;
-    auto& movement = collision_->movement();
-    for (auto& path : movement.takeWantedModels()) {
-        collisionModelLoads_.push_back(standaloneJobs_.submit(mapToken_,
-            [assets = assetManager, path = std::move(path)](const core::JobGroup::Token&) {
-                CollisionModelLoad load;
-                load.path = path;
-                const auto bytes = assets->readFileShared(path);
-                if (!bytes) {
-                    load.error = "the file is not in the data";
-                    return load;
-                }
-                if (bytes->size() < 4 || std::memcmp(bytes->data(), "MD20", 4) != 0) {
-                    load.error = "the file is not an M2 model";
-                    return load;
-                }
-                const auto model = pipeline::M2Loader::load(*bytes);
-                load.shape = collision::M2Shape::build(path, model.collisionVertices, model.collisionIndices,
-                                                       model.collisionNormals);
-                load.boundsMin = model.boundMin;
-                load.boundsMax = model.boundMax;
-                return load;
-            }));
-    }
-    std::erase_if(collisionModelLoads_, [&movement](auto& future) {
-        if (!future.current()) return true;
-        if (future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
-        auto load = future.get();
-        if (!load.error.empty()) movement.modelUnavailable(load.path, load.error);
-        else movement.addM2Model(load.path, load.shape, load.boundsMin, load.boundsMax);
-        return true;
-    });
-}
-
 void TerrainManager::update(const Camera& camera, float deltaTime) {
     ZoneScopedN("TerrainManager::update");
-    loadMovementCollisionModels();
     if (!streamingEnabled || !assetManager || !terrainRenderer) {
         return;
     }
@@ -578,7 +542,6 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
         const auto m2Data = assetManager->readFileShared(m2Path);
         if (!m2Data) {
             skippedFileNotFound++;
-            pending->unavailableModels.emplace_back(m2Path, "the file is not in the data");
             return false;
         }
 
@@ -597,10 +560,6 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
         if (!m2Model.isValid()) {
             skippedInvalid++;
             LOG_DEBUG("M2 model invalid (no verts/indices): ", m2Path);
-            pending->collisionOnlyModels.push_back({m2Path,
-                collision::M2Shape::build(m2Path, m2Model.collisionVertices, m2Model.collisionIndices,
-                                          m2Model.collisionNormals),
-                m2Model.boundMin, m2Model.boundMax});
             return false;
         }
 
@@ -733,7 +692,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
                 if (!wmoData) {
                     LOG_WARNING("Building ", wmoPath, " is not in the data - tile [", x, ",", y,
                                 "] is drawn without it");
-                    pending->unavailableModels.emplace_back(wmoPath, "the file is not in the data");
+                    pending->unavailableBuildings.emplace_back(wmoPath, "the file is not in the data");
                     continue;
                 }
 
@@ -753,7 +712,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
 
             if (wmoModel.groups.empty()) {
                 LOG_WARNING("Building ", wmoPath, " has no groups - tile [", x, ",", y, "] is drawn without it");
-                pending->unavailableModels.emplace_back(wmoPath, "it has no groups");
+                pending->unavailableBuildings.emplace_back(wmoPath, "it has no groups");
             }
             if (!wmoModel.groups.empty()) {
                 wmoModel.sourcePath = wmoPath;
@@ -824,10 +783,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
                         pipeline::M2Model m2Model;
                         if (!modelAlreadyUploaded && !modelAlreadyPreparedInWmo) {
                             const auto m2Data = assetManager->readFileShared(m2Path);
-                            if (!m2Data) {
-                                pending->unavailableModels.emplace_back(m2Path, "the file is not in the data");
-                                continue;
-                            }
+                            if (!m2Data) continue;
 
                             m2Model = pipeline::M2Loader::load(*m2Data);
                             m2Model.name = m2Path;
@@ -836,13 +792,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
                             if (skinData && m2Model.version >= 264) {
                                 pipeline::M2Loader::loadSkin(*skinData, m2Model);
                             }
-                            if (!m2Model.isValid()) {
-                                pending->collisionOnlyModels.push_back({m2Path,
-                                    collision::M2Shape::build(m2Path, m2Model.collisionVertices,
-                                                              m2Model.collisionIndices, m2Model.collisionNormals),
-                                    m2Model.boundMin, m2Model.boundMax});
-                                continue;
-                            }
+                            if (!m2Model.isValid()) continue;
                             wmoPreparedModelIds.insert(doodadModelId);
 
                             // Pre-decode doodad M2 textures on background thread
@@ -1157,9 +1107,6 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 const bool modelLoaded = m2Renderer->loadModel(m2Ready.model, m2Ready.modelId);
                 finalizePartMs_[kPartM2ModelLoad] += std::chrono::duration<float, std::milli>(
                     std::chrono::steady_clock::now() - modelStart).count();
-                if (!modelLoaded && collision_) {
-                    collision_->movement().modelUnavailable(m2Ready.model.name, "the renderer did not load it");
-                }
                 if (modelLoaded) {
                     ft.uploadedM2ModelIds.insert(m2Ready.modelId);
                     // Track uploaded model IDs so background threads can skip re-reading
@@ -1399,9 +1346,6 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 finalizePartMs_[kPartM2ModelLoad] +=
                     std::chrono::duration<float, std::milli>(instanceStart - modelStart).count();
                 if (!modelLoaded) {
-                    if (collision_) {
-                        collision_->movement().modelUnavailable(doodad.model.name, "the renderer did not load it");
-                    }
                     ft.wmoDoodadIndex++;
                     uploaded++;
                     continue;
@@ -1482,11 +1426,8 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
 
         // Commit tile to loadedTiles, and its ground to the world's.
         if (collision_) {
-            for (const auto& [model, reason] : pending->unavailableModels) {
-                collision_->movement().modelUnavailable(model, reason);
-            }
-            for (const auto& model : pending->collisionOnlyModels) {
-                collision_->movement().addM2Model(model.path, model.shape, model.boundsMin, model.boundsMax);
+            for (const auto& [building, reason] : pending->unavailableBuildings) {
+                collision_->movement().buildingUnavailable(building, reason);
             }
             if (pending->heights) collision_->addTerrainTile(pending->heights);
         }

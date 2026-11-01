@@ -712,6 +712,7 @@ set(WOWEE_SOURCES
     src/collision/movement_execution.cpp
     src/collision/wmo_bsp_query.cpp
     src/collision/movement_world.cpp
+    src/collision/model_collision_cache.cpp
 
     # Core
     src/core/application.cpp

@@ -400,7 +400,6 @@ const WorldLoadStatus& WorldLoader::update(float /*deltaTime*/) {
                     const auto& d = prepared.doodads[load.doodad++];
                     if (!m2->loadModel(*d.model, d.modelId)) {
                         LOG_WARNING("Instance doodad upload failed: ", d.model->name, "; doodad omitted");
-                        renderer_->movementWorld().modelUnavailable(d.model->name, "the renderer did not load it");
                         continue;
                     }
                     auto& models = renderer_->scene().models();
