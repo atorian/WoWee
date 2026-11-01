@@ -5850,7 +5850,9 @@ void Application::noteSceneCounts(const rendering::RenderStatistics& s) {
         {"M2 cull candidates", s.m2CullCandidates}, {"M2 drawn", s.m2Drawn},
         {"M2 skinned drawn", s.m2Skinned},          {"M2 bone matrices", s.m2BoneMatrices},
         {"M2 sun shadow candidates", s.m2SunCasters}, {"M2 particle quads", s.m2ParticleQuads},
-        {"M2 instances changed", s.m2InstanceChanges}, {"terrain chunks walked", s.terrainChunks},
+        {"M2 instances changed", s.m2InstanceChanges}, {"M2 instances placed", s.m2Placed},
+        {"M2 instances moved", s.m2Moved}, {"M2 instances shown or hidden", s.m2ShownOrHidden},
+        {"M2 instances finished", s.m2Finished}, {"terrain chunks walked", s.terrainChunks},
         {"terrain chunks drawn", s.terrainDrawn},
     };
     for (const auto& [name, value] : counts) {

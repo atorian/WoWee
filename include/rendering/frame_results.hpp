@@ -47,6 +47,9 @@ struct RenderStatistics {
     /// changed (placed, moved, hidden, ended) since the frame before.
     uint32_t m2CullCandidates = 0, m2Drawn = 0, m2Skinned = 0, m2BoneMatrices = 0;
     uint32_t m2SunCasters = 0, m2ParticleQuads = 0, m2InstanceChanges = 0;
+    /// m2InstanceChanges by why; the rest were reclassified or got a new
+    /// copy of their model.
+    uint32_t m2Placed = 0, m2Moved = 0, m2ShownOrHidden = 0, m2Finished = 0;
     uint64_t terrainTriangles = 0;
     uint32_t rtMeshes = 0, rtInstances = 0;
     uint64_t rtTriangles = 0, rtGpuBytes = 0, rtSourceBytes = 0;

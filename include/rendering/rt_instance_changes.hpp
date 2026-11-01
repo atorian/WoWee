@@ -1,16 +1,18 @@
 #pragma once
 
+#include "rendering/instance_slots.hpp"
+
 #include <glm/glm.hpp>
 #include <cassert>
 #include <cstdint>
-#include <unordered_map>
 #include <vector>
 
 namespace wowee::rendering {
 
-/// Producer-owned bindings from stable scene ids to RT ids. Only mutations
-/// queue work; matrices remain in the scene, never in a second mirror here.
-/// Model membership makes unload/reload invalidate only its own placements.
+/// The ray tracer's copy of a scene's instances, kept as the scene's
+/// InstanceSlots mirror RayTracing: for each slot, the RT instance placed for
+/// it and the mesh it was placed with. Only the slots changed since the last
+/// flush are read; matrices remain in the scene, never in a second copy here.
 /// Move this with its owning instance scene, including temporary scenes.
 class RtInstanceChanges {
 public:
@@ -20,94 +22,52 @@ public:
         glm::mat4 transform{1};
     };
 
-    void add(uint32_t id, uint32_t model) {
-        auto& group = models_[model];
-        const auto [it, inserted] = instances_.emplace(id, Binding{model, static_cast<uint32_t>(group.size())});
-        assert(inserted);
-        if (!inserted) return;
-        group.push_back(id);
-        changed(id);
-    }
-
-    void changed(uint32_t id) {
-        const auto it = instances_.find(id);
-        if (it == instances_.end() || it->second.queueSlot != invalid) return;
-        it->second.queueSlot = static_cast<uint32_t>(pending_.size());
-        pending_.push_back(id);
-    }
-
-    void modelReady(uint32_t model) {
-        const auto it = models_.find(model);
-        if (it != models_.end()) for (uint32_t id : it->second) changed(id);
-    }
-
+    /// Lets go of the RT instance placed for a slot. An instance being
+    /// removed does this before its slot is freed for another.
     template<class Sink>
-    void remove(uint32_t id, Sink* sink) {
-        const auto it = instances_.find(id);
-        if (it == instances_.end()) return;
-        auto& binding = it->second;
-        retire(binding, sink);
-        if (binding.queueSlot != invalid) {
-            const uint32_t moved = pending_.back();
-            pending_[binding.queueSlot] = moved;
-            instances_.at(moved).queueSlot = binding.queueSlot;
-            pending_.pop_back();
-        }
-        auto group = models_.find(binding.model);
-        const uint32_t moved = group->second.back();
-        group->second[binding.slot] = moved;
-        instances_.at(moved).slot = binding.slot;
-        group->second.pop_back();
-        if (group->second.empty()) models_.erase(group);
-        instances_.erase(it);
-        // No tombstones accumulate while RT is disabled and streaming continues.
+    void release(uint32_t slot, Sink* sink) {
+        if (slot < bindings_.size()) retire(bindings_[slot], sink);
     }
 
+    /// The model's mesh is going: its placements leave RT before it does,
+    /// and are read again once something says the model is back.
     template<class Sink>
-    void modelRemoved(uint32_t model, Sink* sink) {
-        const auto it = models_.find(model);
-        if (it == models_.end()) return;
-        for (uint32_t id : it->second) {
-            retire(instances_.at(id), sink);
-            changed(id);
-        }
+    void releaseModel(InstanceSlots& slots, uint32_t model, Sink* sink) {
+        slots.forEachOfModel(model, [&](uint32_t slot) { release(slot, sink); });
+        slots.modelChanged(model);
     }
 
     template<class Sink>
     void clear(Sink* sink) {
-        for (auto& [id, binding] : instances_) retire(binding, sink);
-        instances_.clear();
-        models_.clear();
-        pending_.clear();
+        for (auto& binding : bindings_) retire(binding, sink);
+        bindings_.clear();
+        // No tombstones accumulate while RT is disabled and streaming continues.
     }
 
     /// Called after all producer mutations, before RtScene::extractChanges.
     /// Failures are reported once and retried only after another mutation.
     /// The RT sink retains its own ordered deltas until the consumer acks them.
     template<class Sink, class Read, class Failure>
-    void flush(Sink& sink, Read&& read, Failure&& failure) {
-        for (uint32_t id : pending_) {
-            auto& binding = instances_.at(id);
-            binding.queueSlot = invalid;
+    void flush(InstanceSlots& slots, Sink& sink, Read&& read, Failure&& failure) {
+        if (bindings_.size() < slots.slotCount()) bindings_.resize(slots.slotCount());
+        slots.catchUp(InstanceSlots::Mirror::RayTracing, [&](uint32_t slot, uint32_t id) {
+            auto& binding = bindings_[slot];
             const State state = read(id);
             if (state.mesh != binding.mesh) retire(binding, &sink);
-            if (state.mesh == invalid) continue;
+            if (state.mesh == invalid) return;
             if (binding.rt == invalid) {
                 binding.rt = sink.addInstance(state.mesh, state.transform);
-                if (binding.rt == invalid) { failure(id, state.mesh); continue; }
+                if (binding.rt == invalid) { failure(id, state.mesh); return; }
                 binding.mesh = state.mesh;
             } else {
                 sink.setInstanceTransform(binding.rt, state.transform);
             }
-        }
-        pending_.clear();
+        });
     }
 
 private:
     struct Binding {
-        uint32_t model, slot;
         uint32_t rt = invalid, mesh = invalid;
-        uint32_t queueSlot = invalid;
     };
     template<class Sink>
     static void retire(Binding& binding, Sink* sink) {
@@ -117,9 +77,7 @@ private:
         }
         binding.rt = binding.mesh = invalid;
     }
-    std::unordered_map<uint32_t, Binding> instances_;
-    std::unordered_map<uint32_t, std::vector<uint32_t>> models_;
-    std::vector<uint32_t> pending_;
+    std::vector<Binding> bindings_;
 };
 
 } // namespace wowee::rendering

@@ -85,6 +85,12 @@ void Renderer::publishFrameResults() {
         result.statistics.m2SunCasters = counts.sunCasters;
         result.statistics.m2ParticleQuads = counts.particleQuads;
         result.statistics.m2InstanceChanges = counts.instanceChanges;
+        using Why = M2Renderer::InstanceChange;
+        const auto by = [&](Why why) { return counts.changesBy[static_cast<size_t>(why)]; };
+        result.statistics.m2Placed = by(Why::Placed);
+        result.statistics.m2Moved = by(Why::Moved);
+        result.statistics.m2ShownOrHidden = by(Why::ShownOrHidden);
+        result.statistics.m2Finished = by(Why::Finished);
         result.culling = m2Renderer->takeCullAnswers();
     }
     if (wmoRenderer) {

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <utility>
 
+using wowee::rendering::InstanceSlots;
 using wowee::rendering::RtInstanceChanges;
 namespace {
 struct Sink {
@@ -20,19 +21,24 @@ struct Sink {
     void removeInstance(uint32_t id) { ++removes; REQUIRE(drawn.erase(id) == 1); }
 };
 struct Scene {
+    InstanceSlots slots;
     RtInstanceChanges changes;
     Sink sink;
     size_t reads = 0, failures = 0;
     std::unordered_map<uint32_t, RtInstanceChanges::State> instances;
     void add(uint32_t id, uint32_t model, uint32_t mesh) {
         instances[id] = {mesh, glm::mat4(1)};
-        changes.add(id, model);
+        slots.add(id, model);
     }
     void flush() {
-        changes.flush(sink, [&](uint32_t id) { ++reads; return instances.at(id); },
+        changes.flush(slots, sink, [&](uint32_t id) { ++reads; return instances.at(id); },
                       [&](uint32_t, uint32_t) { ++failures; });
     }
-    void remove(uint32_t id) { changes.remove(id, &sink); instances.erase(id); }
+    void remove(uint32_t id) {
+        changes.release(slots.slotOf(id), &sink);
+        slots.remove(id);
+        instances.erase(id);
+    }
 };
 }
 
@@ -53,7 +59,7 @@ TEST_CASE("several mutations publish only the final transform of the changed pla
     scene.reads = 0;
     for (float x : {1.f, 2.f, 9.f}) {
         scene.instances.at(2).transform = glm::translate(glm::mat4(1), glm::vec3(x, 3, 4));
-        scene.changes.changed(2);
+        scene.slots.changed(2);
     }
     scene.flush();
     CHECK(scene.reads == 1);
@@ -66,10 +72,10 @@ TEST_CASE("several mutations publish only the final transform of the changed pla
 TEST_CASE("hidden or faded placements leave RT and can return without moving", "[rt-changes]") {
     Scene scene; scene.add(1, 10, 42); scene.flush();
     scene.instances.at(1).mesh = RtInstanceChanges::invalid;
-    scene.changes.changed(1); scene.flush();
+    scene.slots.changed(1); scene.flush();
     CHECK(scene.sink.drawn.empty());
     scene.instances.at(1).mesh = 42;
-    scene.changes.changed(1); scene.flush();
+    scene.slots.changed(1); scene.flush();
     CHECK(scene.sink.drawn.size() == 1);
     CHECK(scene.sink.adds == 2);
 }
@@ -77,13 +83,13 @@ TEST_CASE("hidden or faded placements leave RT and can return without moving", "
 TEST_CASE("model replacement retires placements before the mesh and wakes only its users", "[rt-changes]") {
     Scene scene;
     scene.add(1, 10, 42); scene.add(2, 10, 42); scene.add(3, 11, 99); scene.flush();
-    scene.changes.modelRemoved(10, &scene.sink);
+    scene.changes.releaseModel(scene.slots, 10, &scene.sink);
     REQUIRE(scene.sink.drawn.size() == 1);
     CHECK(scene.sink.drawn.begin()->second.mesh == 99);
     scene.instances.at(1).mesh = scene.instances.at(2).mesh = RtInstanceChanges::invalid;
     scene.flush(); // model is absent for a frame
     scene.instances.at(1).mesh = scene.instances.at(2).mesh = 77;
-    scene.changes.modelReady(10);
+    scene.slots.modelChanged(10);
     scene.reads = 0; scene.flush();
     CHECK(scene.reads == 2);
     CHECK(scene.sink.drawn.size() == 3);
@@ -91,7 +97,7 @@ TEST_CASE("model replacement retires placements before the mesh and wakes only i
 
 TEST_CASE("removal while dirty and reused ids do not address a retired placement", "[rt-changes]") {
     Scene scene; scene.add(1, 10, 42); scene.add(2, 10, 42); scene.flush();
-    scene.changes.changed(1); scene.remove(1);
+    scene.slots.changed(1); scene.remove(1);
     scene.add(1, 11, 99); scene.remove(2); scene.flush();
     REQUIRE(scene.sink.drawn.size() == 1);
     CHECK(scene.sink.drawn.begin()->second.mesh == 99);
@@ -105,11 +111,11 @@ TEST_CASE("removal while dirty and reused ids do not address a retired placement
 TEST_CASE("unavailable meshes wait for publication and failures do not retry every frame", "[rt-changes]") {
     Scene scene; scene.add(1, 10, RtInstanceChanges::invalid); scene.flush();
     CHECK(scene.sink.adds == 0);
-    scene.instances.at(1).mesh = 42; scene.changes.modelReady(10);
+    scene.instances.at(1).mesh = 42; scene.slots.modelChanged(10);
     scene.sink.fail = true; scene.flush();
     CHECK(scene.failures == 1);
     for (int frame = 0; frame < 10; ++frame) scene.flush();
     CHECK(scene.failures == 1);
-    scene.sink.fail = false; scene.changes.modelReady(10); scene.flush();
+    scene.sink.fail = false; scene.slots.modelChanged(10); scene.flush();
     CHECK(scene.sink.drawn.size() == 1);
 }

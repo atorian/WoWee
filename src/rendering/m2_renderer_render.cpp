@@ -47,6 +47,7 @@
 #include <thread>
 
 #include <set>
+#include <numeric>
 #include <utility>
 
 namespace wowee {
@@ -201,9 +202,9 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     fileInIndexSets(idx);
     if (scene_->instances[idx].cachedIsBoat) scene_->pendingAfloatIds_.push_back(scene_->instances[idx].id);
     scene_->instanceIndexById[placed.id] = idx;
-    scene_->rtChanges.add(placed.id, placed.modelId);
+    scene_->slots.add(placed.id, placed.modelId);
     scene_->cullGrid_.add();
-    fileInCullGrid(idx);
+    fileInCullGrid(idx, InstanceChange::Placed);
     placeInCollision(placed);
 
     return placed.id;
@@ -304,9 +305,9 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     fileInIndexSets(idx);
     if (scene_->instances[idx].cachedIsBoat) scene_->pendingAfloatIds_.push_back(scene_->instances[idx].id);
     scene_->instanceIndexById[placed.id] = idx;
-    scene_->rtChanges.add(placed.id, placed.modelId);
+    scene_->slots.add(placed.id, placed.modelId);
     scene_->cullGrid_.add();
-    fileInCullGrid(idx);
+    fileInCullGrid(idx, InstanceChange::Placed);
     placeInCollision(placed);
 
     return placed.id;
@@ -1708,7 +1709,8 @@ void M2Renderer::Frame::clear() noexcept {
     ribbonVertices.clear(); particleVertices.clear(); bones.clear();
     cullInput.clear(); cullIds.clear(); cullIndices.clear(); depth.clear(); solarDepth.clear(); strikeDepth.clear(); shadowModels.clear();
     instanceEntries = 0;
-    skinnedDraws = instanceChanges = 0;
+    skinnedDraws = 0;
+    changesBy = {};
     solarMatrix = overheadMatrix = strikeMatrix = glm::mat4(0.0f);
 }
 
@@ -1723,7 +1725,8 @@ M2Renderer::FrameCounts M2Renderer::recordedCounts() const {
             .boneMatrices = static_cast<uint32_t>(frame.bones.size()),
             .sunCasters = static_cast<uint32_t>(frame.solarDepth.size()),
             .particleQuads = static_cast<uint32_t>(frame.particleVertices.size()),
-            .instanceChanges = frame.instanceChanges};
+            .instanceChanges = std::accumulate(frame.changesBy.begin(), frame.changesBy.end(), 0u),
+            .changesBy = frame.changesBy};
 }
 
 std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camera, std::string_view stageGroup,
@@ -1735,7 +1738,7 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
     // was. Each is timed apart.
     CpuStageLaps laps(vkCtx_ ? &vkCtx_->gameCpuStages() : nullptr, stageGroup);
     auto frame = framePool_.acquire();
-    frame->instanceChanges = std::exchange(instancesRefiled_, 0u);
+    frame->changesBy = std::exchange(refiledBy_, {});
     frame->time = time;
     frame->cameraPosition = camera.getPosition();
     frame->skyHour = skyTimeOfDayHours_;

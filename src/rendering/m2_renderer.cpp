@@ -1047,6 +1047,7 @@ void M2Renderer::shutdown() {
     VmaAllocator alloc = vkCtx_->getAllocator();
 
     scene_->rtChanges.clear(rtScene_);
+    scene_->slots.clear();
     // Delete model GPU resources
     for (auto& [id, modelResource] : models) {
         destroyModelGPU(id, modelResource);
@@ -1307,7 +1308,7 @@ bool M2Renderer::makeModelWritable(uint32_t modelId) {
         if (inst.modelId != modelId) continue;
         inst.cachedModel = current.get();
         inst.recomputeCachedCullFactors();
-        fileInCullGrid(i);
+        fileInCullGrid(i, InstanceChange::Other);
     }
     return true;
 }
@@ -2372,7 +2373,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
     // for every model that loaded: 26-53 ms each time something new came into
     // view in Dalaran.
     models[modelId] = std::make_shared<M2ModelGPU>(std::move(gpuModel));
-    scene_->rtChanges.modelReady(modelId);
+    scene_->slots.modelChanged(modelId);
 
     LOG_DEBUG("Loaded M2 model: ", model.name, " (", models[modelId]->vertexCount, " vertices, ",
               models[modelId]->indexCount / 3, " triangles, ", models[modelId]->batches.size(), " batches)");
@@ -2433,14 +2434,14 @@ void M2Renderer::registerRtModel(M2ModelGPU& gpuModel, const pipeline::M2Model& 
 
 void M2Renderer::releaseRtModel(uint32_t modelId, M2ModelGPU& gpuModel) {
     if (!rtScene_ || gpuModel.rtMesh == RtScene::kInvalid) return;
-    scene_->rtChanges.modelRemoved(modelId, rtScene_);
+    scene_->rtChanges.releaseModel(scene_->slots, modelId, rtScene_);
     rtScene_->removeMesh(gpuModel.rtMesh);
     gpuModel.rtMesh = RtScene::kInvalid;
 }
 
 void M2Renderer::syncRtScene() {
     if (!rtScene_) return;
-    scene_->rtChanges.flush(*rtScene_, [&](uint32_t id) {
+    scene_->rtChanges.flush(scene_->slots, *rtScene_, [&](uint32_t id) {
         const auto& inst = scene_->instances[scene_->instanceIndexById.at(id)];
         const auto model = models.find(inst.modelId);
         const uint32_t mesh = model != models.end() && inst.fade >= 1.0f && !inst.hidden

@@ -942,6 +942,8 @@ private:
     struct InstanceState {
         std::unordered_map<uint32_t, ModelData> loadingModels_;
         std::vector<WMOInstance> instances;
+        /// Each instance's slot in the copies kept of this scene.
+        InstanceSlots slots;
         RtInstanceChanges rtChanges;
         std::unordered_map<uint32_t, size_t> instanceIndexById;
     };

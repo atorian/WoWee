@@ -815,10 +815,14 @@ public:
     [[nodiscard]] uint32_t getInstanceCount() const { return static_cast<uint32_t>(scene_->instances.size()); }
     [[nodiscard]] uint32_t getTotalTriangleCount() const;
     [[nodiscard]] uint32_t getDrawCallCount() const { return lastDrawCallCount; }
+    /// Why an instance was filed again, as the frame profile counts it.
+    enum class InstanceChange : uint8_t { Placed, Moved, ShownOrHidden, Finished, Other, Count };
     /// How much the frame being recorded holds; see RenderStatistics.
     struct FrameCounts {
         uint32_t cullCandidates = 0, drawn = 0, skinned = 0, boneMatrices = 0;
         uint32_t sunCasters = 0, particleQuads = 0, instanceChanges = 0;
+        /// instanceChanges by why, in InstanceChange order.
+        std::array<uint32_t, static_cast<size_t>(InstanceChange::Count)> changesBy{};
     };
     [[nodiscard]] FrameCounts recordedCounts() const;
 
@@ -1301,8 +1305,9 @@ private:
     /// whole regions before looking at any instance in them. See M2CullGrid.
     /// Writes instance `index`'s cull record from the instance and files it
     /// in its column (M2CullGrid::Record): wherever its position, cull data,
-    /// model, hidden or finished state, or game-object flag change.
-    void fileInCullGrid(size_t index);
+    /// model, hidden or finished state, or game-object flag change. Every
+    /// copy kept of the scene (InstanceSlots) reads the instance again.
+    void fileInCullGrid(size_t index, InstanceChange why);
     /// Indices of the instances in the columns this camera may see within
     /// maxPossibleDistSq. Every instance the per-instance view test would keep
     /// is among them.
@@ -1672,6 +1677,9 @@ private:
         uint64_t identity = nextSceneIdentity_.fetch_add(1, std::memory_order_relaxed);
         /// Chunked so that growing it moves no instance (chunked_vector.hpp).
         ChunkedVector<M2Instance> instances;
+        /// Each instance's slot in the copies kept of this scene, and what
+        /// changed since each caught up.
+        InstanceSlots slots;
         RtInstanceChanges rtChanges;
         std::unordered_map<uint32_t, PosedEmitters> posedEmitters_;
         std::unordered_map<DedupKey, uint32_t, DedupHash> instanceDedupMap_;
@@ -1724,13 +1732,14 @@ public:
         float skyHour = 12;
         bool suppressStars = false, skipDetail = false;
         /// Draws whose bones were placed, and instances changed since the
-        /// frame before (fileInCullGrid calls).
-        uint32_t skinnedDraws = 0, instanceChanges = 0;
+        /// frame before (fileInCullGrid calls), by why.
+        uint32_t skinnedDraws = 0;
+        std::array<uint32_t, static_cast<size_t>(InstanceChange::Count)> changesBy{};
     };
 private:
     FramePool<Frame> framePool_;
-    /// Instances refiled since the last extract, for the next frame's count.
-    uint32_t instancesRefiled_ = 0;
+    /// Instances refiled since the last extract, by why, for the next frame.
+    std::array<uint32_t, static_cast<size_t>(InstanceChange::Count)> refiledBy_{};
     std::shared_ptr<const Frame> recording_ = std::make_shared<Frame>();
     std::mutex cullResultMutex_;
     std::vector<CullAnswer> collectedCull_;

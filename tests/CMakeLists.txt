@@ -1606,6 +1606,9 @@ wowee_add_test(test_frustum
 target_link_libraries(test_frustum PRIVATE wowee_render)
 
 wowee_add_test(test_rt_instance_changes SOURCES test_rt_instance_changes.cpp)
+# The slots the copies of a scene address its instances by, and the changes
+# each copy catches up on.
+wowee_add_test(test_instance_slots SOURCES test_instance_slots.cpp)
 option(WOWEE_BUILD_RT_RENDERER_CHANGES_TEST "Build native renderer RT mutation regression" OFF)
 if(WOWEE_BUILD_RT_RENDERER_CHANGES_TEST AND NOT ANDROID)
     add_executable(rt_renderer_changes_test rt_renderer_changes_main.cpp)

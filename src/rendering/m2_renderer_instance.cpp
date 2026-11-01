@@ -36,9 +36,10 @@ void M2Renderer::placeInCollision(const M2Instance& instance) {
     if (instance.hidden) collision_->setM2Hidden(instance.id, true);
 }
 
-void M2Renderer::fileInCullGrid(size_t index) {
-    ++instancesRefiled_;
+void M2Renderer::fileInCullGrid(size_t index, InstanceChange why) {
+    ++refiledBy_[static_cast<size_t>(why)];
     const M2Instance& instance = scene_->instances[index];
+    scene_->slots.changed(instance.id);
     auto& record = scene_->cullGrid_.record(static_cast<uint32_t>(index));
     record.position = instance.position;
     record.cullCenter = instance.cachedCullCenter;
@@ -211,8 +212,7 @@ void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& posit
         transformAABB(inst.modelMatrix, localMin, localMax, inst.worldBoundsMin, inst.worldBoundsMax);
         inst.recomputeCachedCullFactors();
     }
-    fileInCullGrid(idxIt->second);
-    scene_->rtChanges.changed(instanceId);
+    fileInCullGrid(idxIt->second, InstanceChange::Moved);
     if (collision_) collision_->moveM2(instanceId, inst.modelMatrix, inst.scale);
 }
 
@@ -221,7 +221,8 @@ void M2Renderer::setInstanceFade(uint32_t instanceId, float alpha) {
     if (idxIt == scene_->instanceIndexById.end()) return;
     auto& inst = scene_->instances[idxIt->second];
     const float next = std::clamp(alpha, 0.0f, 1.0f);
-    if ((inst.fade >= 1.0f) != (next >= 1.0f)) scene_->rtChanges.changed(instanceId);
+    // A faded instance leaves the ray tracer's copy, which reads it again.
+    if ((inst.fade >= 1.0f) != (next >= 1.0f)) scene_->slots.changed(instanceId);
     inst.fade = next;
 }
 
@@ -240,13 +241,12 @@ void M2Renderer::setInstancesHidden(const std::vector<uint32_t>& instanceIds, bo
         auto& inst = scene_->instances[idxIt->second];
         if (inst.hidden == hidden) continue;
         inst.hidden = hidden;
-        scene_->rtChanges.changed(id);
         if (collision_) collision_->setM2Hidden(id, hidden);
         if (hidden) {
             // Its clocks stop while it is away and resume where they were.
             inst.hiddenAtMs = animClockMs_;
             dropFromIndexSets(idxIt->second);
-            fileInCullGrid(idxIt->second);
+            fileInCullGrid(idxIt->second, InstanceChange::ShownOrHidden);
             // What it had emitted goes with it rather than hanging where it
             // was, or reappearing there, stale, when it comes back.
             inst.particles.clear();
@@ -256,7 +256,7 @@ void M2Renderer::setInstancesHidden(const std::vector<uint32_t>& instanceIds, bo
             const double away = animClockMs_ - inst.hiddenAtMs;
             inst.animStartMs += away;
             inst.globalSequenceStartMs += away;
-            fileInCullGrid(idxIt->second);
+            fileInCullGrid(idxIt->second, InstanceChange::ShownOrHidden);
             // Back as if newly placed: no cull verdict to trust, and its bone
             // slots were handed to others while it was away, so the bones are
             // uploaded again wherever it lands.
@@ -507,8 +507,7 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
         transformAABB(inst.modelMatrix, localMin, localMax, inst.worldBoundsMin, inst.worldBoundsMax);
         inst.recomputeCachedCullFactors();
     }
-    fileInCullGrid(idxIt->second);
-    scene_->rtChanges.changed(instanceId);
+    fileInCullGrid(idxIt->second, InstanceChange::Moved);
     if (collision_) collision_->moveM2(instanceId, inst.modelMatrix, inst.scale);
 }
 
@@ -521,7 +520,8 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
 
     auto& inst = scene_->instances[idx];
 
-    scene_->rtChanges.remove(instanceId, rtScene_);
+    scene_->rtChanges.release(scene_->slots.slotOf(instanceId), rtScene_);
+    scene_->slots.remove(instanceId);
     if (collision_) collision_->removeM2(instanceId);
 
     // Remove from dedup map
@@ -591,7 +591,7 @@ void M2Renderer::setInstanceIsGameObject(uint32_t instanceId, bool isGameObject)
     auto idxIt = scene_->instanceIndexById.find(instanceId);
     if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) return;
     scene_->instances[idxIt->second].isGameObject = isGameObject;
-    fileInCullGrid(idxIt->second);
+    fileInCullGrid(idxIt->second, InstanceChange::Other);
 }
 
 void M2Renderer::setSkipCollision(uint32_t instanceId, bool skip) {
@@ -614,7 +614,7 @@ void M2Renderer::finishInstance(uint32_t instanceId) {
     auto& inst = scene_->instances[idxIt->second];
     if (inst.finishing) return;
     inst.finishing = true;
-    fileInCullGrid(idxIt->second);
+    fileInCullGrid(idxIt->second, InstanceChange::Finished);
     // Its particles have at most their longest life left to run.
     float longestLife = 0.0f;
     if (inst.cachedModel) {
@@ -672,7 +672,8 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
         if (!toRemove.insert(id).second) continue;
         auto& inst = scene_->instances[idxIt->second];
         holes.push_back(idxIt->second);
-        scene_->rtChanges.remove(id, rtScene_);
+        scene_->rtChanges.release(scene_->slots.slotOf(id), rtScene_);
+        scene_->slots.remove(id);
         if (collision_) collision_->removeM2(id);
 
         if (!inst.cachedIsGroundDetail) {
@@ -710,6 +711,7 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
 
 void M2Renderer::clear() {
     scene_->rtChanges.clear(rtScene_);
+    scene_->slots.clear();
     scene_->identity = nextSceneIdentity_.fetch_add(1, std::memory_order_relaxed);
     ++instanceLayoutRevision_;
     if (vkCtx_) {
@@ -747,6 +749,7 @@ void M2Renderer::clear() {
 
 void M2Renderer::clearInstances() {
     scene_->rtChanges.clear(rtScene_);
+    scene_->slots.clear();
     ++instanceLayoutRevision_;
     for (auto& inst : scene_->instances) destroyInstanceBones(inst);
     *scene_ = InstanceState{};
