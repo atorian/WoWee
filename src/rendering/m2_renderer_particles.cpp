@@ -717,6 +717,17 @@ size_t M2Renderer::gatherM2Particles(Frame& frame, const glm::vec3& eye) {
 
     size_t totalParticles = 0;
     size_t droppedForSpace = 0;
+    // One emitter of the instance being gathered; `group` null until its
+    // first particle.
+    struct EmitterState {
+        ParticleGroup* group = nullptr;
+        uint32_t totalTiles = 1;
+        bool randomCell = false;
+        bool lit = false;
+        glm::mat4 toWorld{1.0f};
+        float boneScale = 1.0f;
+    };
+    std::vector<EmitterState> emitterStates;
     Frustum viewFrustum;
     viewFrustum.extractFromMatrix(cachedViewProjection_);
 
@@ -736,18 +747,14 @@ size_t M2Renderer::gatherM2Particles(Frame& frame, const glm::vec3& eye) {
         drawnPerEmitter_.assign(gpu.particleEmitters.size(), 0u);
 
 
-        // Cache the last emitter's per-emitter state so adjacent particles
-        // sharing an emitter (the common case - particles from one source
-        // cluster together) skip the texture/key/map-lookup work entirely.
-        int lastEmitterIdx = -1;
-        VkTexture* cachedTex = nullptr;
-        uint16_t cachedTilesX = 1, cachedTilesY = 1;
-        uint32_t cachedTotalTiles = 1;
-        uint16_t cachedBlendType = 0;
-        const pipeline::M2ParticleEmitter* cachedEm = nullptr;
-        ParticleGroup* cachedGroup = nullptr;
-        bool cachedRandomCell = false;
-        bool cachedLit = false;
+        // What a particle takes from its emitter, worked out at the emitter's
+        // first particle in this instance and kept for the rest. It was kept
+        // for the last emitter only, on the belief that one emitter's
+        // particles lie together - they do not: each emitter appends its
+        // spawns in turn and a dead particle's slot takes the last one - so
+        // the group lookup and the emitter's matrix into the world were
+        // redone at nearly every particle.
+        emitterStates.assign(gpu.particleEmitters.size(), EmitterState{});
         // A lit particle takes its model's lights (render spec, lit particles).
         const LocalLightSet instLights = frameLights_ && !frameLights_->empty()
             ? pickLocalLights(*frameLights_, glm::vec3(inst.modelMatrix[3]), 0.0f)
@@ -764,40 +771,40 @@ size_t M2Renderer::gatherM2Particles(Frame& frame, const glm::vec3& eye) {
         for (const auto& p : inst.particles) {
             if (p.emitterIndex < 0 || p.emitterIndex >= static_cast<int>(gpu.particleEmitters.size())) continue;
 
-            if (p.emitterIndex != lastEmitterIdx) {
-                lastEmitterIdx = p.emitterIndex;
-                cachedEm = &gpu.particleEmitters[p.emitterIndex];
-
-                cachedTex = whiteTexture_.get();
+            EmitterState& state = emitterStates[p.emitterIndex];
+            if (!state.group) {
+                const auto& emitter = gpu.particleEmitters[p.emitterIndex];
+                VkTexture* texture = whiteTexture_.get();
                 if (p.emitterIndex < static_cast<int>(gpu.particleTextures.size())) {
-                    cachedTex = gpu.particleTextures[p.emitterIndex];
+                    texture = gpu.particleTextures[p.emitterIndex];
                 }
-                cachedTilesX = std::max<uint16_t>(cachedEm->textureCols, 1);
-                cachedTilesY = std::max<uint16_t>(cachedEm->textureRows, 1);
-                cachedTotalTiles = static_cast<uint32_t>(cachedTilesX) *
-                                   static_cast<uint32_t>(cachedTilesY);
-                cachedBlendType = cachedEm->blendingType;
-                const bool fogged = !(cachedEm->flags & pipeline::kM2EmitterUnfogged);
-                ParticleGroupKey key{.texture = cachedTex, .blendType = static_cast<uint8_t>(cachedBlendType), .tilesX = cachedTilesX, .tilesY = cachedTilesY, .fogged = fogged};
-                cachedGroup = &groups[key];
-                cachedGroup->texture = cachedTex;
-                cachedGroup->blendType = cachedBlendType;
-                cachedGroup->fogged = fogged;
-                cachedGroup->tilesX = cachedTilesX;
-                cachedGroup->tilesY = cachedTilesY;
-                if (cachedGroup->preAllocSet == VK_NULL_HANDLE &&
+                const uint16_t tilesX = std::max<uint16_t>(emitter.textureCols, 1);
+                const uint16_t tilesY = std::max<uint16_t>(emitter.textureRows, 1);
+                state.totalTiles = static_cast<uint32_t>(tilesX) * static_cast<uint32_t>(tilesY);
+                const uint16_t blendType = emitter.blendingType;
+                const bool fogged = !(emitter.flags & pipeline::kM2EmitterUnfogged);
+                ParticleGroupKey key{.texture = texture, .blendType = static_cast<uint8_t>(blendType), .tilesX = tilesX, .tilesY = tilesY, .fogged = fogged};
+                state.group = &groups[key];
+                state.group->texture = texture;
+                state.group->blendType = blendType;
+                state.group->fogged = fogged;
+                state.group->tilesX = tilesX;
+                state.group->tilesY = tilesY;
+                if (state.group->preAllocSet == VK_NULL_HANDLE &&
                     p.emitterIndex < static_cast<int>(gpu.particleTexSets.size())) {
-                    cachedGroup->preAllocSet = gpu.particleTexSets[p.emitterIndex];
+                    state.group->preAllocSet = gpu.particleTexSets[p.emitterIndex];
                 }
 
-                cachedRandomCell = cachedTotalTiles > 1 &&
-                                   (cachedEm->flags & pipeline::kM2EmitterRandomCell);
+                state.randomCell = state.totalTiles > 1 &&
+                                   (emitter.flags & pipeline::kM2EmitterRandomCell);
                 // Lit unless flag 0x1, and never Mod or Mod2x (0xa45374).
-                cachedLit = !(cachedEm->flags & pipeline::kM2EmitterUnlit) &&
-                            !m2BlendIsModulate(cachedEm->blendingType);
+                state.lit = !(emitter.flags & pipeline::kM2EmitterUnlit) &&
+                            !m2BlendIsModulate(emitter.blendingType);
+                state.toWorld = emitterToWorld(inst, emitter);
+                state.boneScale = glm::length(glm::vec3(state.toWorld[0]));
             }
 
-            const auto& em = *cachedEm;
+            const auto& em = gpu.particleEmitters[p.emitterIndex];
             if (!em.drawsHead && !em.drawsTail) continue;
             const float lifeRatio = p.life / std::max(p.maxLife, 0.001f);
 
@@ -818,11 +825,11 @@ size_t M2Renderer::gatherM2Particles(Frame& frame, const glm::vec3& eye) {
             // particle's own variation and the twinkle, and the bone's world
             // scale with flag 0x20. A doodad's particles were capped at 1.5,
             // and spell effects' and flame fixtures' floored at 0.15.
-            const glm::mat4 toWorld = emitterToWorld(inst, em);
+            const glm::mat4& toWorld = state.toWorld;
             glm::vec2 halfSize = interpFBlockVec2(em.particleScale, lifeRatio) * p.sizeFactor *
                 (em.twinkleScaleMin + twinkle * (em.twinkleScaleMax - em.twinkleScaleMin));
             if (em.flags & pipeline::kM2EmitterBoneScale) {
-                halfSize *= glm::length(glm::vec3(toWorld[0]));
+                halfSize *= state.boneScale;
             }
             const float spin = p.spinSign * m2ParticleSpin(em.baseSpin, em.baseSpinVary, em.spin,
                                                            em.spinVary, p.spinRandBase,
@@ -874,11 +881,10 @@ size_t M2Renderer::gatherM2Particles(Frame& frame, const glm::vec3& eye) {
                 continue;
             }
             // A run per stretch of particles sharing a group. The group only
-            // changes when the emitter does, and particles from one emitter
-            // are adjacent, so this closes a run about once per emitter.
-            if (cachedGroup != runGroup) {
-                runGroup = cachedGroup;
-                particleRuns_.push_back({.group = *cachedGroup, .first = vbWritten, .count = 0});
+            // changes when the emitter does.
+            if (state.group != runGroup) {
+                runGroup = state.group;
+                particleRuns_.push_back({.group = *state.group, .first = vbWritten, .count = 0});
             }
             highestParticleZ = std::max(highestParticleZ, position.z);
             widestParticle = std::max(widestParticle, std::max(halfSize.x, halfSize.y));
@@ -888,9 +894,9 @@ size_t M2Renderer::gatherM2Particles(Frame& frame, const glm::vec3& eye) {
             // tail's always from its own track. Every particle of a tiled
             // emitter used to step through the whole atlas on the model's
             // clock, whatever its age.
-            const float headCell = cachedRandomCell ? p.tileIndex
-                : interpFBlockCell(em.headCellTrack, lifeRatio, cachedTotalTiles);
-            const float tailCell = interpFBlockCell(em.tailCellTrack, lifeRatio, cachedTotalTiles);
+            const float headCell = state.randomCell ? p.tileIndex
+                : interpFBlockCell(em.headCellTrack, lifeRatio, state.totalTiles);
+            const float tailCell = interpFBlockCell(em.tailCellTrack, lifeRatio, state.totalTiles);
             for (int q = 0; q < quads; ++q) {
                 // With both, the first quad is the head and the second the tail.
                 const bool isHead = quads == 2 ? q == 0 : em.drawsHead;
@@ -902,7 +908,7 @@ size_t M2Renderer::gatherM2Particles(Frame& frame, const glm::vec3& eye) {
                 quad.color = glm::vec4(color, alpha);
                 quad.halfSize = halfSize;
                 quad.cell = isHead ? headCell : tailCell;
-                quad.lit = cachedLit ? 1u : 0u;
+                quad.lit = state.lit ? 1u : 0u;
                 quad.light = inst.interiorLight;
                 quad.localLights = instLights;
                 vertices.push_back(quad);
@@ -977,8 +983,13 @@ size_t M2Renderer::gatherM2Particles(Frame& frame, const glm::vec3& eye) {
     {
         static uint32_t spellParticleDiagFrame_ = 0;
         if (++spellParticleDiagFrame_ % 300 == 1) {
+            // Over the instances that emit, not the whole world: in Dalaran
+            // that walk of 103k instances was a 0.7-1.5 ms spike in the frame
+            // that ran it.
             size_t spellPtc = 0;
-            for (const auto& inst : scene_->instances) {
+            for (size_t idx : scene_->particleInstanceIndices_) {
+                if (idx >= scene_->instances.size()) continue;
+                const M2Instance& inst = scene_->instances[idx];
                 if (inst.cachedModel && inst.cachedModel->isSpellEffect)
                     spellPtc += inst.particles.size();
             }
