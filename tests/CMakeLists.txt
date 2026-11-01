@@ -3517,14 +3517,6 @@ foreach(_domain game_data chat spell inventory quest session combat movement pla
     wowee_add_suite_test(test_game_end_to_end test_${_domain}_domain)
 endforeach()
 
-# ── test_original_player_mover ───────────────────────────────
-# The player moved by the original client's rules when the originalMovement
-# setting asks for it: the real game, the map as the original collects it, and
-# what the server is sent. The mover is the client's, so the client's objects.
-wowee_add_test(test_original_player_mover SOURCES test_original_player_mover.cpp)
-target_link_libraries(test_original_player_mover PRIVATE wowee_game_harness wowee_client)
-target_compile_definitions(test_original_player_mover PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-
 # The loading screen keeps its former terrain/warmup readiness criteria.
 wowee_add_suite_test(test_game_end_to_end test_recorded_entities)
 
@@ -3594,6 +3586,11 @@ wowee_add_suite_test(test_client_end_to_end test_addon_event_queue)
 # from the game, and the saved variables keyed by it. The LFG bindings are the
 # ones that link without the whole interface; the rest share their accessor.
 wowee_add_suite_test(test_client_end_to_end test_character_session)
+
+# The player moved by the original client's rules when the originalMovement
+# setting asks for it: the real game, the map as the original collects it, and
+# what the server is sent. The mover is the client's, so it runs here.
+wowee_add_suite_test(test_client_end_to_end test_original_player_mover)
 
 # ── wowee_loading_test_client ────────────────────────────────
 option(WOWEE_BUILD_RENDER_CLIENT_PROBE "Build native interface/render lifecycle GPU probe" OFF)
