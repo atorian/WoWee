@@ -2263,6 +2263,30 @@ function(wowee_link_stormlib target)
     target_link_libraries(${target} PRIVATE wowee_stormlib)
 endfunction()
 
+# ── Tests that draw on the GPU ───────────────────────────────
+# A test that needs a Vulkan device - a scene drawn by scene_render, a native
+# renderer regression - is an acceptance test (AGENTS.md), slow beside the
+# unit tests and heavy on the machine. It is entered into ctest's "gpu"
+# configuration only, so a plain `ctest` neither runs nor lists it:
+#
+#   ctest                         the unit tests
+#   ctest -C gpu -L gpu           the GPU tests alone (ctest --preset dev-gpu)
+#
+# Two at a time, no more, under any -j (AGENTS.md): each takes one of two
+# locks in turn, and a lock's tests run one after another.
+#
+#   wowee_add_gpu_test(scene_bloom COMMAND scene_render ... [WORKING_DIRECTORY dir])
+function(wowee_add_gpu_test name)
+    add_test(NAME ${name} ${ARGN} CONFIGURATIONS gpu)
+    get_property(_lane GLOBAL PROPERTY WOWEE_GPU_TEST_LANE)
+    if(NOT _lane)
+        set(_lane 0)
+    endif()
+    set_tests_properties(${name} PROPERTIES LABELS gpu RESOURCE_LOCK gpu_lane_${_lane})
+    math(EXPR _lane "1 - ${_lane}")
+    set_property(GLOBAL PROPERTY WOWEE_GPU_TEST_LANE ${_lane})
+endfunction()
+
 # ── Unit tests (Catch2) ──────────────────────────────────────
 if(WOWEE_BUILD_TESTS)
     enable_testing()
@@ -2422,7 +2446,7 @@ set(WOWEE_GAME_DATA_DIR "${_wowee_default_data}" CACHE PATH
 if(WOWEE_BUILD_TESTS)
     file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/scratch)
     function(wowee_add_scene_test name scene pass_regex)
-        add_test(NAME ${name}
+        wowee_add_gpu_test(${name}
                  COMMAND scene_render ${CMAKE_SOURCE_DIR}/tools/scene_render/scenes/${scene}
                          ${CMAKE_BINARY_DIR}/scratch/${name}.png
                  WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
@@ -2444,60 +2468,60 @@ if(WOWEE_BUILD_TESTS)
     wowee_add_scene_test(scene_transport_shown_again_casts transport_shown_again.json
                          "WMO shadow draw calls: [1-9][0-9]* in")
     if(Python3_FOUND)
-        add_test(NAME scene_bloom
+        wowee_add_gpu_test(scene_bloom
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_bloom.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/bloom/behaviour)
         set_tests_properties(scene_bloom PROPERTIES SKIP_RETURN_CODE 77)
-        add_test(NAME scene_interface_frame
+        wowee_add_gpu_test(scene_interface_frame
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_interface_frame.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/interface-frame)
         set_tests_properties(scene_interface_frame PROPERTIES SKIP_RETURN_CODE 77)
-        add_test(NAME scene_sharp_stars
+        wowee_add_gpu_test(scene_sharp_stars
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_sharp_stars.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/sharp-stars/scene)
         set_tests_properties(scene_sharp_stars PROPERTIES SKIP_RETURN_CODE 77)
-        add_test(NAME scene_sharp_stars_fxaa
+        wowee_add_gpu_test(scene_sharp_stars_fxaa
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_sharp_stars.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/sharp-stars/fxaa --fxaa --msaa 2)
         set_tests_properties(scene_sharp_stars_fxaa PROPERTIES SKIP_RETURN_CODE 77)
-        add_test(NAME scene_rt_radius
+        wowee_add_gpu_test(scene_rt_radius
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_rt_radius.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/rt-radius/scene)
         set_tests_properties(scene_rt_radius PROPERTIES SKIP_RETURN_CODE 77)
         # A one-sided material shows its front faces only, a two-sided one both,
         # in the view and in the water's reflection.
-        add_test(NAME scene_face_culling
+        wowee_add_gpu_test(scene_face_culling
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_face_culling.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/face-culling)
         set_tests_properties(scene_face_culling PROPERTIES SKIP_RETURN_CODE 77)
         foreach(object m2 wmo character terrain water)
-            add_test(NAME scene_frame_scene_${object}
+            wowee_add_gpu_test(scene_frame_scene_${object}
                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py
                         $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/frame-scene-${object}
                         --scene-mutations --object ${object})
             set_tests_properties(scene_frame_scene_${object} PROPERTIES SKIP_RETURN_CODE 77)
         endforeach()
-        add_test(NAME scene_frame_scene_water_msaa
+        wowee_add_gpu_test(scene_frame_scene_water_msaa
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/frame-scene-water-msaa
                     --scene-mutations --object water --msaa 2 --fxaa)
         set_tests_properties(scene_frame_scene_water_msaa PROPERTIES SKIP_RETURN_CODE 77)
         foreach(mode 1 2 3)
-            add_test(NAME scene_frame_inputs_rt${mode}
+            wowee_add_gpu_test(scene_frame_inputs_rt${mode}
                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py
                         $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/frame-inputs-rt${mode}
                         --mode ${mode})
             set_tests_properties(scene_frame_inputs_rt${mode} PROPERTIES SKIP_RETURN_CODE 77)
         endforeach()
-        add_test(NAME scene_frame_inputs_fsr2
+        wowee_add_gpu_test(scene_frame_inputs_fsr2
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/frame-inputs-fsr2 --fsr2)
         set_tests_properties(scene_frame_inputs_fsr2 PROPERTIES SKIP_RETURN_CODE 77)
-        add_test(NAME scene_frame_inputs_msaa_fxaa
+        wowee_add_gpu_test(scene_frame_inputs_msaa_fxaa
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/frame-inputs-msaa-fxaa --msaa 2 --fxaa)
         set_tests_properties(scene_frame_inputs_msaa_fxaa PROPERTIES SKIP_RETURN_CODE 77)
-        add_test(NAME scene_frame_inputs_rain
+        wowee_add_gpu_test(scene_frame_inputs_rain
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/frame-inputs-rain --weather rain)
         set_tests_properties(scene_frame_inputs_rain PROPERTIES SKIP_RETURN_CODE 77)

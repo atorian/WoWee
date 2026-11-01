@@ -1599,7 +1599,7 @@ if(WOWEE_BUILD_RT_RENDERER_CHANGES_TEST AND NOT ANDROID)
     target_link_libraries(rt_renderer_changes_test PRIVATE wowee_render)
     wowee_test_link_glm(rt_renderer_changes_test)
     wowee_apply_client_flags(rt_renderer_changes_test)
-    add_test(NAME rt_renderer_changes COMMAND rt_renderer_changes_test
+    wowee_add_gpu_test(rt_renderer_changes COMMAND rt_renderer_changes_test
              WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
     set_tests_properties(rt_renderer_changes PROPERTIES SKIP_RETURN_CODE 77)
     register_test_target(rt_renderer_changes_test)
@@ -1611,7 +1611,7 @@ if(WOWEE_BUILD_WMO_VIEW_CULL_TEST AND NOT ANDROID)
     target_link_libraries(wmo_view_cull_test PRIVATE wowee_render)
     wowee_test_link_glm(wmo_view_cull_test)
     wowee_apply_client_flags(wmo_view_cull_test)
-    add_test(NAME wmo_view_cull COMMAND wmo_view_cull_test
+    wowee_add_gpu_test(wmo_view_cull COMMAND wmo_view_cull_test
              WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
     set_tests_properties(wmo_view_cull PROPERTIES SKIP_RETURN_CODE 77)
     register_test_target(wmo_view_cull_test)
@@ -3385,7 +3385,7 @@ if(WOWEE_BUILD_ENTITY_ASSET_RELOAD_TEST AND NOT ANDROID)
     target_link_libraries(entity_asset_reload_test PRIVATE wowee_client)
     wowee_test_link_glm(entity_asset_reload_test)
     wowee_apply_client_flags(entity_asset_reload_test)
-    add_test(NAME entity_asset_reload COMMAND entity_asset_reload_test
+    wowee_add_gpu_test(entity_asset_reload COMMAND entity_asset_reload_test
              WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
     set_tests_properties(entity_asset_reload PROPERTIES SKIP_RETURN_CODE 77)
     register_test_target(entity_asset_reload_test)
@@ -3578,21 +3578,17 @@ target_link_libraries(test_wmo_minimap PRIVATE wowee_pipeline wowee_render)
 # game data.
 # Built as wowee_add_test builds a test, but entered into ctest once per
 # scene, so the scenes draw side by side under -j rather than one after
-# another in a single entry - two at a time, no more (AGENTS.md): each scene
-# takes one of two locks in turn, and a lock's scenes draw one after another.
+# another in a single entry - as GPU tests, two at a time.
 add_executable(test_scene_references test_scene_references.cpp)
 target_include_directories(test_scene_references PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_scene_references SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_scene_references PRIVATE catch2_main)
 wowee_test_link_glm(test_scene_references)
 register_test_target(test_scene_references)
-set(_scene_lane 0)
 foreach(_scene IN ITEMS "water wake" "shadows" "sphere map" "ray traced lighting" "sea bed" "ocean")
     string(REPLACE " " "_" _scene_name "${_scene}")
-    add_test(NAME scene_reference_${_scene_name} COMMAND test_scene_references "${_scene}")
-    set_tests_properties(scene_reference_${_scene_name} PROPERTIES SKIP_RETURN_CODE 4
-        RESOURCE_LOCK scene_render_${_scene_lane})
-    math(EXPR _scene_lane "1 - ${_scene_lane}")
+    wowee_add_gpu_test(scene_reference_${_scene_name} COMMAND test_scene_references "${_scene}")
+    set_tests_properties(scene_reference_${_scene_name} PROPERTIES SKIP_RETURN_CODE 4)
     if(WOWEE_GAME_DATA_DIR)
         set_tests_properties(scene_reference_${_scene_name} PROPERTIES
             ENVIRONMENT "WOW_DATA_PATH=${WOWEE_GAME_DATA_DIR}")

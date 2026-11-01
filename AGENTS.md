@@ -132,6 +132,11 @@ whatever the code looks like inside.
   an acceptance test: a scene drawn by `scene_render` and the picture checked
   (`tools/scene_render/check_*.py`). Those are slow and run apart from the
   unit tests.
+- **A test that needs a GPU is registered with `wowee_add_gpu_test`**, never
+  `add_test` (user decision, 2026-11-01). It goes into ctest's `gpu`
+  configuration, so a plain `ctest` neither lists nor runs it, and takes one
+  of two locks, so no more than two run at once under any `-j`. Run them
+  with `ctest -C gpu -L gpu` (`ctest --preset dev-gpu`, `./test.sh --gpu`).
 
 ## Layers
 
@@ -207,7 +212,8 @@ them from - build it before every run. Use it before reaching for the client,
 and keep it building: nothing in `wowee_render` may need the game to link.
 
 User decision (2026-10-31): at most two `scene_render` runs at once. Six in
-parallel overloaded the Mac. To compare runs, render two, then two more.
+parallel overloaded the Mac. To compare runs, render two, then two more. The
+GPU tests in ctest hold to it on their own (`wowee_add_gpu_test`).
 
 ### Testing the game without the client
 

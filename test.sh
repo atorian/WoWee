@@ -8,6 +8,7 @@
 #   ./test.sh --lint --test      # explicit: run both
 #   ./test.sh --asan             # run ctest under ASAN/UBSan (requires build_asan/)
 #   ./test.sh --test --asan      # same as above
+#   ./test.sh --gpu              # run the tests that draw on the GPU, two at a time
 #   FIX=1 ./test.sh --lint       # apply clang-tidy fix suggestions (use with care)
 #
 # Exit code is non-zero if any lint diagnostic or test failure is reported.
@@ -29,19 +30,21 @@ cd "$SCRIPT_DIR"
 RUN_LINT=0
 RUN_TEST=0
 RUN_ASAN=0
+RUN_GPU=0
 
 for arg in "$@"; do
     case "$arg" in
         --lint) RUN_LINT=1 ;;
         --test) RUN_TEST=1 ;;
         --asan) RUN_ASAN=1; RUN_TEST=1 ;;
+        --gpu) RUN_GPU=1; RUN_TEST=1 ;;
         --help|-h)
-            sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: $0 [--lint] [--test] [--asan]"
+            echo "Usage: $0 [--lint] [--test] [--asan] [--gpu]"
             exit 1
             ;;
     esac
@@ -85,18 +88,28 @@ if [[ $RUN_TEST -eq 1 ]]; then
         exit 1
     fi
 
+    if [[ $RUN_GPU -eq 1 ]]; then
+        # ctest's gpu configuration holds them, out of a plain run; two at a
+        # time, as their locks allow no more.
+        TEST_KIND="GPU tests"
+        CTEST_ARGS=(-C gpu -L gpu --parallel 2)
+    else
+        # In parallel: 9 s serially, 4 s on 11 cores.
+        NPROC=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
+        TEST_KIND="unit tests"
+        CTEST_ARGS=(--parallel "$NPROC")
+    fi
+
     echo "──────────────────────────────────────────────"
-    echo " Running unit tests [$TEST_LABEL]"
+    echo " Running $TEST_KIND [$TEST_LABEL]"
     echo "──────────────────────────────────────────────"
-    # In parallel: 9 s serially, 4 s on 11 cores.
-    NPROC=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
-    if ! (cd "$BUILD_TEST_DIR" && ctest --output-on-failure --parallel "$NPROC"); then
+    if ! (cd "$BUILD_TEST_DIR" && ctest --output-on-failure "${CTEST_ARGS[@]}"); then
         OVERALL_FAILED=1
         echo ""
-        echo "One or more unit tests FAILED."
+        echo "One or more $TEST_KIND FAILED."
     else
         echo ""
-        echo "All unit tests passed."
+        echo "All $TEST_KIND passed."
     fi
 fi
 
