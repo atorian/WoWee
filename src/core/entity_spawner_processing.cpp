@@ -5,7 +5,7 @@
 #include "core/enchant_visual.hpp"
 
 #include <set>
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 #include "game/transport_path_repository.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
@@ -26,6 +26,7 @@
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "pipeline/char_sections.hpp"
 #include "pipeline/m2_asset_loader.hpp"
 #include "pipeline/item_textures.hpp"
@@ -402,7 +403,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
 
             AsyncCreatureLoad load;
             load.future = spawns_->jobs_.submit(s.token, 
-                [am, m2Path, modelId, s, displayCopy, extraCopy](const JobGroup::Token& jobToken) -> PreparedCreatureModel {
+                [am, tables = &tables_, m2Path, modelId, s, displayCopy, extraCopy](const JobGroup::Token& jobToken) -> PreparedCreatureModel {
                     PreparedCreatureModel result{};
                     result.token = jobToken;
                     result.guid = s.guid; result.displayId = s.displayId;
@@ -458,11 +459,10 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                                 // never collected the skin row's second texture,
                                 // so the head detail sheet was always decoded on
                                 // the main thread at spawn time.
-                                auto csDbc = am->loadDBC("CharSections.dbc");
-                                if (csDbc) {
-                                    const auto* csL = pipeline::getActiveDBCLayout()
-                                        ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
-                                    const auto csF = pipeline::detectCharSectionsFields(csDbc.get(), csL);
+                                {
+                                    const pipeline::RequiredTable csDbc(*tables, "CharSections.dbc",
+                                                                        "humanoid creatures' skin and face");
+                                    const auto csF = pipeline::detectCharSectionsFields(csDbc.get(), &csDbc.layout());
                                     pipeline::CharacterAppearance who;
                                     who.raceId = he.raceId;
                                     who.sexId = he.sexId;
@@ -490,10 +490,9 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                                     for (const auto& uw : sections.underwear) displaySkinPaths.push_back(uw);
                                 }
                                 // Equipment region textures
-                                auto idiDbc = am->loadDBC("ItemDisplayInfo.dbc");
-                                if (idiDbc) {
-                                    const auto* idiL = pipeline::getActiveDBCLayout()
-                                        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
+                                {
+                                    const pipeline::RequiredTable idiDbc(*tables, "ItemDisplayInfo.dbc",
+                                                                         "humanoid creatures' equipment textures");
                                     // Through the shared resolver, which reconciles
                                     // the layout against the file's own field count.
                                     // Written out here instead, this path read the
@@ -504,7 +503,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                                     // the other reader of the same eight columns
                                     // went through the resolver and was right.
                                     uint32_t trf[8];
-                                    pipeline::getItemDisplayInfoTextureFields(*idiDbc, idiL, trf);
+                                    pipeline::getItemDisplayInfoTextureFields(idiDbc, trf);
                                     const bool isFem = (he.sexId == 1);
                                     for (uint32_t did : he.equipDisplayId) {
                                         if (did == 0) continue;
@@ -742,7 +741,7 @@ void EntitySpawner::processPlayerSpawnQueue() {
         auto cached = assets_.preparedPlayerModels_.find(key);
         auto model = cached != assets_.preparedPlayerModels_.end() ? cached->second : nullptr;
         spawns_->asyncPlayerLoads_.push_back(spawns_->jobs_.submit(request.token, 
-            [assets, request, model = std::move(model)](const JobGroup::Token& jobToken) mutable {
+            [assets, tables = &tables_, request, model = std::move(model)](const JobGroup::Token& jobToken) mutable {
                 PreparedPlayerSpawn ready{};
                 ready.request = request;
                 if (!jobToken.current()) return ready;
@@ -762,16 +761,16 @@ void EntitySpawner::processPlayerSpawnQueue() {
                 }
                 ready.model = model;
                 ready.bodySkinPath = defaultBodySkinPath(request.raceId, request.genderId);
-                if (auto dbc = assets->loadDBC("CharSections.dbc")) {
-                    const auto* layout = pipeline::getActiveDBCLayout()
-                        ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
+                {
+                    const pipeline::RequiredTable dbc(*tables, "CharSections.dbc",
+                                                      "other players' skin, face and hair");
                     const auto look = unpackAppearanceBytes(request.appearanceBytes);
                     pipeline::CharacterAppearance who;
                     who.raceId = request.raceId; who.sexId = request.genderId;
                     who.skinId = look.skinId; who.faceId = look.faceId;
                     who.hairStyleId = look.hairStyleId; who.hairColorId = look.hairColorId;
                     auto sections = pipeline::resolveCharacterSections(dbc.get(),
-                        pipeline::detectCharSectionsFields(dbc.get(), layout), who,
+                        pipeline::detectCharSectionsFields(dbc.get(), &dbc.layout()), who,
                         [](const std::string& path, void* ctx) {
                             return static_cast<pipeline::AssetManager*>(ctx)->fileExists(path);
                         }, assets);
@@ -855,7 +854,7 @@ void EntitySpawner::processDeferredEquipmentQueue() {
     const auto token = spawns_->jobs_.request(JobGroup::Channel::Equipment, guid);
     auto* assets = assetManager_;
     AsyncEquipmentLoad load;
-    load.future = spawns_->jobs_.submit(token, [assets, guid, equipment, snapshot](const JobGroup::Token& jobToken) {
+    load.future = spawns_->jobs_.submit(token, [assets, tables = &tables_, guid, equipment, snapshot](const JobGroup::Token& jobToken) {
         PreparedEquipmentUpdate ready;
         ready.guid = guid; ready.instanceId = snapshot.instanceId; ready.token = jobToken;
         if (!jobToken.current()) return ready;
@@ -883,14 +882,13 @@ void EntitySpawner::processDeferredEquipmentQueue() {
             ready.models[key] = std::move(model);
         };
         if (displayInfoIds[0]) {
-            const auto helm = resolveHelmVisual(*assets, displayInfoIds[0], snapshot.raceId, snapshot.genderId);
+            const auto helm = resolveHelmVisual(*assets, *tables, displayInfoIds[0], snapshot.raceId, snapshot.genderId);
             prepareModel(helm.racialModelPath); prepareModel(helm.baseModelPath);
             paths.push_back(helm.texturePath);
         }
-        if (auto dbc = assets->loadDBC("ItemDisplayInfo.dbc")) {
-            const auto* layout = pipeline::getActiveDBCLayout()
-                ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-            uint32_t fields[8]; pipeline::getItemDisplayInfoTextureFields(*dbc, layout, fields);
+        {
+            const pipeline::RequiredTable dbc(*tables, "ItemDisplayInfo.dbc", "other players' equipment");
+            uint32_t fields[8]; pipeline::getItemDisplayInfoTextureFields(dbc, fields);
             for (int slot = 0; slot < 19; ++slot) {
                 const auto row = dbc->findRecordById(displayInfoIds[slot]);
                 if (row < 0 || displayInfoIds[slot] == 0) continue;
@@ -902,13 +900,13 @@ void EntitySpawner::processDeferredEquipmentQueue() {
                 }
                 if (slot == 2) {
                     for (int side = 0; side < 2; ++side) {
-                        auto name = dbc->getString(row, layout ? (*layout)[side ? "RightModel" : "LeftModel"] : 1u + side);
+                        auto name = dbc->getString(row, dbc.column(side ? "RightModel" : "LeftModel"));
                         if (auto dot = name.rfind('.'); dot != std::string::npos) name.resize(dot);
                         if (name.empty()) continue;
                         const auto base = "Item\\ObjectComponents\\Shoulder\\" + name;
                         const auto suffix = raceGenderSuffix(snapshot.raceId, snapshot.genderId);
                         prepareModel(base + suffix + ".m2"); prepareModel(base + ".m2");
-                        const auto tex = dbc->getString(row, layout ? (*layout)[side ? "RightModelTexture" : "LeftModelTexture"] : 3u + side);
+                        const auto tex = dbc->getString(row, dbc.column(side ? "RightModelTexture" : "LeftModelTexture"));
                         if (!tex.empty()) {
                             paths.push_back("Item\\ObjectComponents\\Shoulder\\" + tex + suffix + ".blp");
                             paths.push_back("Item\\ObjectComponents\\Shoulder\\" + tex + ".blp");
@@ -916,15 +914,14 @@ void EntitySpawner::processDeferredEquipmentQueue() {
                     }
                 }
                 if (slot == 14) {
-                    for (const auto field : {layout ? (*layout)["LeftModelTexture"] : 3u,
-                                             layout ? (*layout)["RightModelTexture"] : 4u}) {
+                    for (const auto field : {dbc.column("LeftModelTexture"), dbc.column("RightModelTexture")}) {
                         const auto name = dbc->getString(row, field);
                         const auto candidates = pipeline::capeTextureCandidates(name, snapshot.genderId == 1);
                         paths.insert(paths.end(), candidates.begin(), candidates.end());
                     }
                 }
                 if (slot == 15 || slot == 16) {
-                    const auto art = pipeline::readItemDisplayArt(*dbc, row);
+                    const auto art = pipeline::readItemDisplayArt(dbc, row);
                     if (!art.modelFile.empty()) {
                         prepareModel("Item\\ObjectComponents\\Weapon\\" + art.modelFile);
                         prepareModel("Item\\ObjectComponents\\Shield\\" + art.modelFile);
@@ -935,7 +932,7 @@ void EntitySpawner::processDeferredEquipmentQueue() {
                     }
                     // The enchant's glow, read here with the weapon so that
                     // attaching it on the main thread reads nothing.
-                    for (const auto& path : resolveEnchantVisualModels(*assets, ready.equipment.enchantIds[slot]))
+                    for (const auto& path : resolveEnchantVisualModels(*tables, ready.equipment.enchantIds[slot]))
                         prepareModel(path);
                 }
             }
@@ -1070,7 +1067,7 @@ void EntitySpawner::finishWmoSpawn(const PreparedGameObjectWMO& result, uint32_t
     // render instance. Do the same here: unique/uncached transport WMOs (notably
     // the Kraken icebreaker) otherwise become visible but remain unregistered
     // and stationary forever.
-    if (gameHandler_ && gameHandler_->isTransportGuid(result.guid)) {
+    if (gameHandler_ && gameHandler_->world().isTransportGuid(result.guid)) {
         gameHandler_->notifyTransportSpawned(
             result.guid, result.entry, result.displayId,
             result.x, result.y, result.z, result.orientation);
@@ -1173,7 +1170,7 @@ void EntitySpawner::processGameObjectSpawnQueue() {
         std::string modelPath;
         if (assets_.gameObjectLookupsBuilt_) {
             // Check transport overrides first
-            if (gameHandler_ && gameHandler_->isTransportGuid(s.guid)) {
+            if (gameHandler_ && gameHandler_->world().isTransportGuid(s.guid)) {
                 modelPath = transportModelPath(s.entry, s.displayId);
             }
             if (modelPath.empty())
@@ -1419,7 +1416,7 @@ void EntitySpawner::processPendingTransportRegistrations() {
 
         // TransportAnimation.dbc is indexed by GameObject entry.
         uint32_t pathId = pending.entry;
-        const bool preferServerData = gameHandler_->hasServerTransportUpdate(pending.guid);
+        const bool preferServerData = gameHandler_->world().hasServerTransportUpdate(pending.guid);
 
         bool clientAnim = transportManager->isClientSideAnimation();
         LOG_DEBUG("Transport spawn callback: clientAnimation=", clientAnim,
@@ -1514,7 +1511,7 @@ void EntitySpawner::processPendingTransportRegistrations() {
         // never applied and the boat fell back to an unrelated route. If the template
         // isn't cached yet, the GO-query response hook assigns it when it arrives.
         {
-            auto goData = gameHandler_->getCachedGameObjectInfo(pending.entry);
+            auto goData = gameHandler_->queryCache().getCachedGameObjectInfo(pending.entry);
             if (goData && goData->type == 15 && goData->hasData && goData->data[0] != 0) {
                 uint32_t taxiPathId = goData->data[0];
                 const uint32_t mapId = gameHandler_->getCurrentMapId();
@@ -1556,7 +1553,7 @@ void EntitySpawner::processPendingTransportRegistrations() {
             }
 
             glm::vec3 restoredWorldPosition(0.0f);
-            if (gameHandler_->completePlayerTransportWorldTransfer(
+            if (gameHandler_->movement().completePlayerTransportWorldTransfer(
                     pending.guid, restoredWorldPosition)) {
                 const glm::vec3 renderPosition =
                     core::coords::canonicalToRender(restoredWorldPosition);
@@ -1582,7 +1579,21 @@ void EntitySpawner::processPendingTransportRegistrations() {
 }
 
 void EntitySpawner::processPendingTransportDoodads() {
-    if (spawns_->pendingTransportDoodadBatches_.empty()) return;
+    if (spawns_->pendingTransportDoodadBatches_.empty()) {
+        // Nothing left to place, so the models read for the last batches go.
+        // A load still running is left to finish and is picked up if another
+        // batch asks for it; the map's JobGroup joins it on a map change.
+        spawns_->preparedTransportDoodads_.clear();
+        for (auto lit = spawns_->asyncTransportDoodadLoads_.begin();
+             lit != spawns_->asyncTransportDoodadLoads_.end();) {
+            if (lit->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                lit = spawns_->asyncTransportDoodadLoads_.erase(lit);
+            } else {
+                ++lit;
+            }
+        }
+        return;
+    }
     if (!renderer_ || !assetManager_) return;
 
     auto* wmoRenderer = renderer_->getWMORenderer();
@@ -1620,51 +1631,41 @@ void EntitySpawner::processPendingTransportDoodads() {
         }
 
         const size_t maxIndex = std::min(it->doodadBudget, doodadTemplates->size());
+        // Start the reads for every model this batch still needs, so they run
+        // on the I/O workers while the earlier doodads are placed.
+        for (size_t i = it->nextIndex; i < maxIndex; ++i) {
+            requestTransportDoodadModel((*doodadTemplates)[i].m2Path);
+        }
         while (it->nextIndex < maxIndex && budgetLeft > 0) {
-            // Per-doodad time budget (each does synchronous file I/O + parse + GPU upload)
+            // Per-doodad time budget (a model not yet on the GPU is uploaded here)
             float innerMs = std::chrono::duration<float, std::milli>(
                 std::chrono::steady_clock::now() - startTime).count();
             if (innerMs >= kDoodadBudgetMs) { budgetLeft = 0; break; }
 
             const auto& doodadTemplate = (*doodadTemplates)[it->nextIndex];
-            it->nextIndex++;
-            budgetLeft--;
-
-            // Every failure below used to be a silent continue, so a transport
-            // that lost a doodad lost it without a trace - the ship rendered,
-            // minus its sails or its paddlewheel, and nothing said why. A v264
-            // model carries no indices of its own, so a .skin that does not
-            // resolve leaves isValid() false and drops the piece; that is the
-            // one worth naming loudly.
             uint32_t doodadModelId = static_cast<uint32_t>(std::hash<std::string>{}(doodadTemplate.m2Path));
-            auto m2Data = assetManager_->readFile(doodadTemplate.m2Path);
-            if (m2Data.empty()) {
-                LOG_WARNING("Transport doodad missing: ", doodadTemplate.m2Path);
-                continue;
-            }
+            if (!m2Renderer->hasModel(doodadModelId)) {
+                const PreparedTransportDoodad* prepared = readyTransportDoodadModel(doodadTemplate.m2Path);
+                // Still being read: the doodads are placed in order, so this
+                // batch waits for it and tries again next frame.
+                if (!prepared) break;
 
-            pipeline::M2Model m2Model = pipeline::M2Loader::load(m2Data);
-            if (m2Model.name.empty()) m2Model.name = doodadTemplate.m2Path;
-            std::string skinPath = pipeline::skinPathForM2(doodadTemplate.m2Path);
-            std::vector<uint8_t> skinData = assetManager_->readFile(skinPath);
-            if (!skinData.empty() && m2Model.version >= 264) {
-                pipeline::M2Loader::loadSkin(skinData, m2Model);
-            } else if (skinData.empty() && m2Model.version >= 264) {
-                LOG_WARNING("Transport doodad ", doodadTemplate.m2Path, " is version ",
-                            m2Model.version, " and its skin '", skinPath,
-                            "' did not resolve - it has no indices and will be skipped");
-            }
-            if (!m2Model.isValid()) {
-                LOG_WARNING("Transport doodad unusable: ", doodadTemplate.m2Path,
-                            " version=", m2Model.version,
-                            " verts=", m2Model.vertices.size(),
-                            " indices=", m2Model.indices.size());
-                continue;
-            }
-
-            if (!m2Renderer->loadModel(m2Model, doodadModelId)) {
-                LOG_WARNING("Transport doodad failed to upload: ", doodadTemplate.m2Path);
-                continue;
+                it->nextIndex++;
+                budgetLeft--;
+                // Every failure below used to be a silent continue, so a
+                // transport that lost a doodad lost it without a trace - the
+                // ship rendered, minus its sails or its paddlewheel, and
+                // nothing said why. The worker says why; each doodad that
+                // asked repeats it.
+                for (const std::string& warning : prepared->warnings) LOG_WARNING(warning);
+                if (!prepared->model) continue;
+                if (!m2Renderer->loadModel(*prepared->model, doodadModelId)) {
+                    LOG_WARNING("Transport doodad failed to upload: ", doodadTemplate.m2Path);
+                    continue;
+                }
+            } else {
+                it->nextIndex++;
+                budgetLeft--;
             }
             // Created at the origin and moved into place by the parent WMO's
             // transform, so its position here is a placeholder. An instance
@@ -1725,6 +1726,74 @@ void EntitySpawner::processPendingTransportDoodads() {
 
     // Finalize the upload batch - submit all GPU copies in one shot (async, no wait).
     if (vkCtx) vkCtx->endUploadBatch();
+}
+
+void EntitySpawner::requestTransportDoodadModel(const std::string& m2Path) {
+    auto* m2Renderer = renderer_ ? renderer_->getM2Renderer() : nullptr;
+    if (!m2Renderer || !assetManager_) return;
+    if (m2Renderer->hasModel(static_cast<uint32_t>(std::hash<std::string>{}(m2Path)))) return;
+    if (spawns_->preparedTransportDoodads_.count(m2Path) != 0) return;
+    if (spawns_->asyncTransportDoodadLoads_.count(m2Path) != 0) return;
+
+    auto* am = assetManager_;
+    spawns_->asyncTransportDoodadLoads_.emplace(m2Path, spawns_->jobs_.submit(
+        [am, m2Path](const JobGroup::Token& jobToken) {
+            PreparedTransportDoodad result;
+            result.token = jobToken;
+            if (!jobToken.current()) return result;
+            auto m2Data = am->readFile(m2Path);
+            if (m2Data.empty()) {
+                result.warnings.push_back("Transport doodad missing: " + m2Path);
+                return result;
+            }
+
+            auto m2Model = std::make_shared<pipeline::M2Model>(pipeline::M2Loader::load(m2Data));
+            if (m2Model->name.empty()) m2Model->name = m2Path;
+            // A v264 model carries no indices of its own, so a .skin that does
+            // not resolve leaves isValid() false and drops the piece; that is
+            // the one worth naming loudly.
+            std::string skinPath = pipeline::skinPathForM2(m2Path);
+            std::vector<uint8_t> skinData = am->readFile(skinPath);
+            if (!skinData.empty() && m2Model->version >= 264) {
+                pipeline::M2Loader::loadSkin(skinData, *m2Model);
+            } else if (skinData.empty() && m2Model->version >= 264) {
+                result.warnings.push_back(
+                    "Transport doodad " + m2Path + " is version " + std::to_string(m2Model->version) +
+                    " and its skin '" + skinPath + "' did not resolve - it has no indices and will be skipped");
+            }
+            if (!m2Model->isValid()) {
+                result.warnings.push_back(
+                    "Transport doodad unusable: " + m2Path +
+                    " version=" + std::to_string(m2Model->version) +
+                    " verts=" + std::to_string(m2Model->vertices.size()) +
+                    " indices=" + std::to_string(m2Model->indices.size()));
+                return result;
+            }
+            result.model = std::move(m2Model);
+            return result;
+        }));
+}
+
+const EntitySpawner::PreparedTransportDoodad* EntitySpawner::readyTransportDoodadModel(const std::string& m2Path) {
+    if (auto pit = spawns_->preparedTransportDoodads_.find(m2Path);
+        pit != spawns_->preparedTransportDoodads_.end()) {
+        return &pit->second;
+    }
+    auto lit = spawns_->asyncTransportDoodadLoads_.find(m2Path);
+    if (lit == spawns_->asyncTransportDoodadLoads_.end()) {
+        // Never asked for, or dropped while the batch was idle: ask now.
+        requestTransportDoodadModel(m2Path);
+        return nullptr;
+    }
+    if (lit->second.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return nullptr;
+    PreparedTransportDoodad prepared = lit->second.get();
+    spawns_->asyncTransportDoodadLoads_.erase(lit);
+    // Cancelled: the map it was read for is being left. Ask again.
+    if (!spawns_->jobs_.accepts(prepared.token)) {
+        requestTransportDoodadModel(m2Path);
+        return nullptr;
+    }
+    return &spawns_->preparedTransportDoodads_.emplace(m2Path, std::move(prepared)).first->second;
 }
 
 void EntitySpawner::processPendingMount() {
@@ -1805,7 +1874,7 @@ void EntitySpawner::processPendingMount() {
     if (auto* ac = playerView_ ? playerView_->getAnimationController() : nullptr) ac->setMounted(instanceId, mountDisplayId, heightOffset, m2Path);
 
     // For taxi mounts, start with flying animation; for ground mounts, start with stand
-    bool isTaxi = gameHandler_ && gameHandler_->isOnTaxiFlight();
+    bool isTaxi = gameHandler_ && gameHandler_->movement().isOnTaxiFlight();
     uint32_t startAnim = rendering::anim::STAND;
     if (isTaxi) {
         // Try WotLK fly anims first, then Vanilla-friendly fallbacks
@@ -2208,7 +2277,7 @@ void EntitySpawner::applyGameObjectState(uint64_t guid, uint8_t goState) {
                 const auto go = std::static_pointer_cast<game::GameObject>(entity);
                 goEntry = go->getEntry();
                 goDisplayId = go->getDisplayId();
-                if (const auto* info = gameHandler_->getCachedGameObjectInfo(goEntry)) {
+                if (const auto* info = gameHandler_->queryCache().getCachedGameObjectInfo(goEntry)) {
                     goType = info->type;
                 }
             }
@@ -2231,7 +2300,7 @@ void EntitySpawner::applyGameObjectState(uint64_t guid, uint8_t goState) {
     }
 
     // Transports are moved and animated by the transport system.
-    if (gameHandler_ && gameHandler_->isTransportGuid(guid)) {
+    if (gameHandler_ && gameHandler_->world().isTransportGuid(guid)) {
         it->second.goState = goState;
         return;
     }
@@ -2299,7 +2368,7 @@ void EntitySpawner::despawnGameObject(uint64_t guid) {
     auto it = spawns_->gameObjectInstances_.find(guid);
     if (it == spawns_->gameObjectInstances_.end()) return;
 
-    if (gameHandler_ && gameHandler_->isTransportGuid(guid)) {
+    if (gameHandler_ && gameHandler_->world().isTransportGuid(guid)) {
         if (auto* transportManager = gameHandler_->getTransportManager()) {
             if (auto* transport = transportManager->getTransport(guid)) {
                 const bool isDeeprunTram =

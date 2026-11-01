@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "game/packet_parsers.hpp"
+#include "guild/domain/records.hpp"
 #include "game/world_packets.hpp"
 
 

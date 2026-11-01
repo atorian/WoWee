@@ -7,8 +7,10 @@
 // writers put down, and flags come back as this client's MovementFlags
 // whatever the wire bits were.
 //
-// This is a regression net rather than an outside oracle: each reader is
-// checked against its own expansion's writer.
+// WotLK's payload is laid out here byte for byte as the 3.3.5a server writes
+// it. TBC's and Classic's are still checked against their own expansion's
+// writer, which catches a reader that drifted from it but not an error the
+// two share.
 #include <catch_amalgamated.hpp>
 
 #include "game/packet_parsers.hpp"
@@ -64,34 +66,75 @@ void checkJump(const MovementInfo& read, const MovementInfo& written) {
 }  // namespace
 
 TEST_CASE("WotLK movement payload keeps the jump", "[movement][packet]") {
+    // As 3.3.5a's MovementInfo goes on the wire: flags, flags2, time, the
+    // position and facing, the fall time, then - FALLING set - the vertical
+    // speed, the direction (cosine first) and the horizontal speed.
+    Packet packet(0);
+    packet.writeUInt32(bit(MovementFlags::FORWARD) | bit(MovementFlags::FALLING));
+    packet.writeUInt16(0);
+    packet.writeUInt32(123456);
+    packet.writeFloat(1.5f);
+    packet.writeFloat(-2.25f);
+    packet.writeFloat(30.0f);
+    packet.writeFloat(0.75f);
+    packet.writeUInt32(210);
+    packet.writeFloat(-7.955547f);
+    packet.writeFloat(0.8f);
+    packet.writeFloat(0.6f);
+    packet.writeFloat(7.0f);
+
     WotlkPacketParsers parsers;
-    const MovementInfo written = jumpingForward();
-    checkJump(readBack(parsers, written), written);
+    Packet incoming(0, packet.getData());
+    MovementInfo read;
+    REQUIRE(parsers.readMovementPayload(incoming, read));
+    CHECK(incoming.getRemainingSize() == 0);
+    CHECK(read.flags == (bit(MovementFlags::FORWARD) | bit(MovementFlags::FALLING)));
+    CHECK(read.time == 123456);
+    CHECK(read.x == 1.5f);
+    CHECK(read.y == -2.25f);
+    CHECK(read.z == 30.0f);
+    CHECK(read.orientation == 0.75f);
+    CHECK(read.fallTime == 210);
+    CHECK(read.jumpVelocity == -7.955547f);
+    CHECK(read.jumpCosAngle == 0.8f);
+    CHECK(read.jumpSinAngle == 0.6f);
+    CHECK(read.jumpXYSpeed == 7.0f);
 }
 
 TEST_CASE("WotLK movement payload keeps pitch and transport", "[movement][packet]") {
-    WotlkPacketParsers parsers;
-    MovementInfo written;
-    written.flags = bit(MovementFlags::SWIMMING) | bit(MovementFlags::FORWARD) |
-                    bit(MovementFlags::ONTRANSPORT);
-    written.flags2 = 0x0400;  // interpolated movement: a second transport time
-    written.pitch = -0.4f;
-    written.transportGuid = 0x1F10000000000042ull;
-    written.transportX = 3.0f;
-    written.transportO = 1.0f;
-    written.transportTime = 77;
-    written.transportSeat = 2;
-    written.transportTime2 = 88;
+    // ONTRANSPORT adds the transport block after the facing: packed guid, its
+    // offset and facing, its time, the seat, and - interpolated movement in
+    // flags2 (0x0400) - a second time. SWIMMING then adds the pitch before
+    // the fall time.
+    Packet packet(0);
+    packet.writeUInt32(bit(MovementFlags::SWIMMING) | bit(MovementFlags::FORWARD) |
+                       bit(MovementFlags::ONTRANSPORT));
+    packet.writeUInt16(0x0400);
+    packet.writeUInt32(1000);
+    for (int i = 0; i < 4; ++i) packet.writeFloat(0.0f);  // x, y, z, facing
+    packet.writePackedGuid(0x1F10000000000042ull);
+    packet.writeFloat(3.0f);   // transport x
+    packet.writeFloat(0.0f);
+    packet.writeFloat(0.0f);
+    packet.writeFloat(1.0f);   // transport facing
+    packet.writeUInt32(77);
+    packet.writeUInt8(2);      // seat
+    packet.writeUInt32(88);    // second transport time
+    packet.writeFloat(-0.4f);  // pitch
+    packet.writeUInt32(0);     // fall time
 
-    const MovementInfo read = readBack(parsers, written);
-    CHECK(read.flags == written.flags);
-    CHECK(read.pitch == written.pitch);
-    CHECK(read.transportGuid == written.transportGuid);
-    CHECK(read.transportX == written.transportX);
-    CHECK(read.transportO == written.transportO);
-    CHECK(read.transportTime == written.transportTime);
-    CHECK(read.transportSeat == written.transportSeat);
-    CHECK(read.transportTime2 == written.transportTime2);
+    WotlkPacketParsers parsers;
+    Packet incoming(0, packet.getData());
+    MovementInfo read;
+    REQUIRE(parsers.readMovementPayload(incoming, read));
+    CHECK(incoming.getRemainingSize() == 0);
+    CHECK(read.pitch == -0.4f);
+    CHECK(read.transportGuid == 0x1F10000000000042ull);
+    CHECK(read.transportX == 3.0f);
+    CHECK(read.transportO == 1.0f);
+    CHECK(read.transportTime == 77);
+    CHECK(read.transportSeat == 2);
+    CHECK(read.transportTime2 == 88);
 }
 
 TEST_CASE("A jump's direction is cosine first on the wire", "[movement][packet]") {

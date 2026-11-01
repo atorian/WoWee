@@ -1,4 +1,7 @@
 #include "core/application.hpp"
+#include "game/game_data.hpp"
+#include "core/appearance_composer.hpp"
+#include "core/window.hpp"
 #include "collision/collision_world.hpp"
 #include "core/map_scope.hpp"
 #include "core/frame_phase.hpp"
@@ -142,7 +145,7 @@ void Application::mapEntryBegun(const WorldLoader::Entry& entry) {
 void Application::mapRenderersReady(const WorldLoader::Entry& entry, const std::string& mapName) {
     onWorldRenderersReady();
     setActiveMapName(mapName);
-    if (audioCoordinator_) audioCoordinator_->loadWorldSounds(assetManager.get(), zoneTracker_ ? zoneTracker_->getZoneManager() : nullptr);
+    if (audioCoordinator_) audioCoordinator_->loadWorldSounds(assetManager.get(), *gameData_, zoneTracker_ ? zoneTracker_->getZoneManager() : nullptr);
     const glm::vec3 spawnRender = coords::canonicalToRender(coords::serverToCanonical(glm::vec3(entry.x, entry.y, entry.z)));
     // Build faction hostility map for this character's race
     if (gameHandler) {
@@ -182,7 +185,7 @@ void Application::placeOnInstanceFloor(const WorldLoader::Entry& entry) {
             renderer->getCharacterPosition() = position;
             if (gameHandler) {
                 const auto canonical = coords::renderToCanonical(position);
-                gameHandler->setPosition(canonical.x, canonical.y, canonical.z);
+                gameHandler->movement().setPosition(canonical.x, canonical.y, canonical.z);
             }
         } else LOG_WARNING("Instance spawn floor unavailable on map ", entry.mapId,
                            "; retaining server spawn height until warmup");

@@ -15,6 +15,7 @@
 #include "game/spell_defines.hpp"
 #include "game/group_defines.hpp"
 #include "game/flat_field_map.hpp"
+#include "auction/domain/sort_key.hpp"
 #include <array>
 #include <vector>
 #include <cstdint>
@@ -45,9 +46,11 @@ std::string normalizeWowTextTokens(std::string text, const std::string& playerNa
  * Contains server seed/salt for authentication hash
  */
 struct AuthChallengeData {
-    uint32_t unknown1;      // Always seems to be 0x00000001
-    uint32_t serverSeed;    // Random seed from server
-    // Note: 3.3.5a has additional data after this
+    // WotLK only: the DoS proof-of-work the client must solve before
+    // CMSG_AUTH_SESSION (see AuthSessionPacket::solveDosChallenge).
+    uint32_t dosDifficulty = 0;
+    uint32_t serverSeed = 0;
+    std::array<uint8_t, 32> dosSeeds{};
 
     [[nodiscard]] bool isValid() const { return true; }
 };
@@ -655,107 +658,23 @@ struct PetitionShowlistData {
     [[nodiscard]] bool isValid() const { return npcGuid != 0; }
 };
 
-// Guild event type constants
-namespace GuildEvent {
-    constexpr uint8_t PROMOTION      = 0;
-    constexpr uint8_t DEMOTION       = 1;
-    constexpr uint8_t MOTD           = 2;
-    constexpr uint8_t JOINED         = 3;
-    constexpr uint8_t LEFT           = 4;
-    constexpr uint8_t REMOVED        = 5;
-    constexpr uint8_t LEADER_IS      = 6;
-    constexpr uint8_t LEADER_CHANGED = 7;
-    constexpr uint8_t DISBANDED      = 8;
-    constexpr uint8_t TABARD_CHANGED = 9;
-    constexpr uint8_t RANK_UPDATED   = 10;
-    constexpr uint8_t RANK_DELETED   = 11;
-    constexpr uint8_t SIGNED_ON      = 12;
-    constexpr uint8_t SIGNED_OFF     = 13;
-    // The bank half of the event list. These are broadcast to the whole guild
-    // every time anyone touches the bank, so they are frequent and none of
-    // them is a chat line - they carry the numbers the bank panel reads.
-    constexpr uint8_t BANK_BAG_SLOTS_CHANGED = 14;
-    constexpr uint8_t BANK_TAB_PURCHASED     = 15;
-    constexpr uint8_t BANK_TAB_UPDATED       = 16;
-    constexpr uint8_t BANK_MONEY_SET         = 17;
-    constexpr uint8_t BANK_TAB_AND_MONEY     = 18;
-    constexpr uint8_t BANK_TEXT_CHANGED      = 19;
-}
+} // namespace game
+namespace guild {
+struct Identity;
+struct Summary;
+struct RosterMember;
+struct Rank;
+struct Roster;
+} // namespace guild
+namespace game {
 
-/// The bank balance out of a BANK_MONEY_SET event, which carries it as text.
-///
-/// A 3.3.5 server writes it as sixteen zero-padded hex digits, so
-/// "000000000051451B" is 532g 61s 7c. Read as hex when the string says hex -
-/// its length, or a digit above nine - and as decimal otherwise, so a server
-/// that sends the plain number is not multiplied by sixteen.
-inline uint64_t guildEventMoney(const std::string& text) {
-    if (text.empty()) return 0;
-    const bool hex = text.size() == 16 ||
-                     text.find_first_of("abcdefABCDEFxX") != std::string::npos;
-    char* end = nullptr;
-    const unsigned long long value = std::strtoull(text.c_str(), &end, hex ? 16 : 10);
-    if (end == text.c_str()) return 0;
-    return static_cast<uint64_t>(value);
-}
-
-/** SMSG_GUILD_QUERY_RESPONSE data */
-struct GuildQueryResponseData {
-    uint32_t guildId = 0;
-    std::string guildName;
-    std::string rankNames[10];
-    uint32_t emblemStyle = 0;
-    uint32_t emblemColor = 0;
-    uint32_t borderStyle = 0;
-    uint32_t borderColor = 0;
-    uint32_t backgroundColor = 0;
-    uint32_t rankCount = 0;
-
-    [[nodiscard]] bool isValid() const { return guildId != 0 && !guildName.empty(); }
-};
-
-/** SMSG_GUILD_INFO data */
-struct GuildInfoData {
-    std::string guildName;
-    uint32_t numMembers = 0;
-    uint32_t numAccounts = 0;
-
-    [[nodiscard]] bool isValid() const { return !guildName.empty(); }
-};
-
-/** Guild roster member entry */
-struct GuildRosterMember {
-    uint64_t guid = 0;
-    bool online = false;
-    std::string name;
-    uint32_t rankIndex = 0;
-    uint8_t level = 0;
-    uint8_t classId = 0;
-    uint8_t gender = 0;
-    uint32_t zoneId = 0;
-    float lastOnline = 0.0f;
-    std::string publicNote;
-    std::string officerNote;
-};
-
-/** Guild rank info */
-struct GuildRankInfo {
-    uint32_t rights = 0;
-    uint32_t goldLimit = 0;
-    // Per guild bank tab, for this rank. The roster has always carried both -
-    // they were read to stay aligned with the packet and then thrown away.
-    std::array<uint32_t, 6> bankTabRights{};
-    std::array<uint32_t, 6> bankTabSlotsPerDay{};
-};
-
-/** SMSG_GUILD_ROSTER data */
-struct GuildRosterData {
-    std::string motd;
-    std::string guildInfo;
-    std::vector<GuildRankInfo> ranks;
-    std::vector<GuildRosterMember> members;
-
-    [[nodiscard]] bool isEmpty() const { return members.empty(); }
-};
+// The guild's records are its domain's (guild/domain/records.hpp); these are
+// their protocol names.
+using GuildQueryResponseData = guild::Identity;
+using GuildInfoData = guild::Summary;
+using GuildRosterMember = guild::RosterMember;
+using GuildRankInfo = guild::Rank;
+using GuildRosterData = guild::Roster;
 
 /// The two facts that separate SMSG_GUILD_ROSTER's three shapes.
 ///
@@ -1231,43 +1150,17 @@ struct GroupDeclineData {
 // Loot System
 // ============================================================
 
-/** Loot item entry */
-struct LootItem {
-    uint8_t slotIndex = 0;
-    uint32_t itemId = 0;
-    uint32_t count = 0;
-    uint32_t displayInfoId = 0;
-    uint32_t randomSuffix = 0;
-    uint32_t randomPropertyId = 0;
-    uint8_t lootSlotType = 0;
-    bool isQuestItem = false;
-    bool looted = false;
-};
+} // namespace game
+namespace loot {
+struct LootItem;
+struct LootContents;
+} // namespace loot
+namespace game {
 
-/** SMSG_LOOT_RESPONSE data */
-struct LootResponseData {
-    uint64_t lootGuid = 0;
-    uint8_t lootType = 0;
-    uint32_t gold = 0;           // In copper
-    bool goldLooted = false;     // Taken; the coin keeps its slot
-    std::vector<LootItem> items;
-
-    /// Whether display slot one is the coin, taken or not.
-    [[nodiscard]] bool hasCoinSlot() const { return gold > 0; }
-    [[nodiscard]] bool goldLeft() const { return gold > 0 && !goldLooted; }
-
-    [[nodiscard]] bool nothingLeft() const {
-        if (goldLeft()) return false;
-        for (const auto& item : items)
-            if (!item.looted) return false;
-        return true;
-    }
-
-    [[nodiscard]] bool isValid() const { return true; }
-    [[nodiscard]] uint32_t getGold() const { return gold / 10000; }
-    [[nodiscard]] uint32_t getSilver() const { return (gold / 100) % 100; }
-    [[nodiscard]] uint32_t getCopper() const { return gold % 100; }
-};
+// The loot records are the loot domain's (loot/domain/records.hpp); these are
+// their protocol names. Their definitions are included where used.
+using LootItem = loot::LootItem;
+using LootResponseData = loot::LootContents;
 
 // ============================================================
 // NPC Gossip
@@ -1476,23 +1369,13 @@ struct TrainerListData {
     [[nodiscard]] bool isValid() const { return true; }
 };
 
-/** One queue slot's worth of SMSG_BATTLEFIELD_STATUS. */
-struct BattlefieldStatusData {
-    uint32_t queueSlot = 0;
-    uint8_t  arenaType = 0;
-    uint32_t bgTypeId = 0;
-    uint8_t  minLevel = 0;
-    uint8_t  maxLevel = 0;
-    uint32_t instanceId = 0;
-    bool     isRated = false;
-    /// 0 none, 1 queued, 2 invited, 3 in progress, 4 waiting to leave.
-    uint32_t statusId = 0;
-    // Whichever of these the status carries; the rest stay zero.
-    uint32_t avgWaitMs = 0;        ///< status 1
-    uint32_t timeInQueueMs = 0;    ///< status 1
-    uint32_t mapId = 0;            ///< status 2 and 3
-    uint32_t inviteTimeoutMs = 0;  ///< status 2 - how long the invitation lasts
-};
+} // namespace game
+namespace battleground { struct BattlefieldStatus; }
+namespace game {
+
+/// One queue slot's worth of SMSG_BATTLEFIELD_STATUS, which is the battleground
+/// domain's record (battleground/domain/records.hpp).
+using BattlefieldStatusData = battleground::BattlefieldStatus;
 
 // ============================================================
 // Taxi / Flight Paths
@@ -1524,113 +1407,61 @@ struct ActivateTaxiReplyData {
 // Mail System
 // ============================================================
 
-struct MailAttachment {
-    uint8_t slot = 0;
-    uint32_t itemGuidLow = 0;
-    uint32_t itemId = 0;
-    uint32_t enchantId = 0;
-    uint32_t randomPropertyId = 0;
-    uint32_t randomSuffix = 0;
-    uint32_t stackCount = 1;
-    uint32_t chargesOrDurability = 0;
-    uint32_t maxDurability = 0;
-};
-
-struct MailMessage {
-    uint32_t messageId = 0;
-    uint8_t messageType = 0;    // 0=normal, 2=auction, 3=creature, 4=gameobject
-    uint64_t senderGuid = 0;
-    uint32_t senderEntry = 0;   // For non-player mail
-    std::string senderName;
-    std::string subject;
-    std::string body;
-    uint32_t stationeryId = 0;
-    uint64_t money = 0;
-    uint64_t cod = 0;           // Cash on delivery
-    uint32_t flags = 0;
-    float expirationTime = 0.0f;
-    uint32_t mailTemplateId = 0;
-    bool read = false;
-    std::vector<MailAttachment> attachments;
-};
-
-struct AuctionMailSubject {
-    uint32_t itemEntry = 0;
-    uint32_t response = 0;
-    uint32_t lotId = 0;
-    uint32_t itemCount = 0;
-};
-
-// Decoded auction-house mail body ("invoice"). The wire body is a colon-
-// separated string the retail client never prints verbatim.
-struct AuctionMailInvoice {
-    uint32_t ownerGuidLow = 0;  // seller/buyer low GUID (hex field)
-    uint32_t bid = 0;           // copper
-    uint32_t buyout = 0;        // copper
-    uint32_t deposit = 0;       // copper (successful-sale mail only)
-    uint32_t consignment = 0;   // copper - auction house cut (successful sale)
-};
-
+} // namespace game
+namespace mail {
+struct MailAttachment;
+struct MailMessage;
+struct AuctionMailSubject;
+struct AuctionMailInvoice;
 bool parseAuctionMailSubject(const std::string& subject, AuctionMailSubject& result);
-std::string formatAuctionMailSubject(const AuctionMailSubject& subject,
-                                     const std::string& itemName);
+std::string formatAuctionMailSubject(const AuctionMailSubject& subject, const std::string& itemName);
 bool parseAuctionMailBody(const std::string& body, AuctionMailInvoice& result);
+} // namespace mail
+namespace game {
+
+// The mail records are the mail domain's (mail/domain/records.hpp); these are
+// their protocol names. Their definitions are included where used.
+using MailAttachment = mail::MailAttachment;
+using MailMessage = mail::MailMessage;
+using AuctionMailSubject = mail::AuctionMailSubject;
+using AuctionMailInvoice = mail::AuctionMailInvoice;
+using mail::parseAuctionMailSubject;
+using mail::formatAuctionMailSubject;
+using mail::parseAuctionMailBody;
 
 // ============================================================
 // Guild Bank System
 // ============================================================
 
-struct GuildBankItemSlot {
-    uint8_t slotId = 0;
-    uint32_t itemEntry = 0;
-    uint32_t stackCount = 1;
-    uint32_t enchantId = 0;
-    uint32_t randomPropertyId = 0;
-};
+} // namespace game
+namespace guild_bank {
+struct GuildBankItemSlot;
+struct GuildBankTab;
+struct GuildBankData;
+} // namespace guild_bank
+namespace game {
 
-struct GuildBankTab {
-    std::string tabName;
-    std::string tabIcon;
-    std::vector<GuildBankItemSlot> items;
-};
-
-struct GuildBankData {
-    uint64_t money = 0;
-    uint8_t tabId = 0;
-    int32_t withdrawAmount = -1;  // -1 = unlimited
-    std::vector<GuildBankTab> tabs;  // Only populated on fullUpdate
-    std::vector<GuildBankItemSlot> tabItems;  // Current tab items
-    /// Whether the list just parsed carried the tab names, which is what the
-    /// panel's GUILDBANK_UPDATE_TABS means. A slots-only update leaves `tabs`
-    /// as it found them, so their contents cannot answer this.
-    bool tabsIncluded = false;
-};
+// The guild bank's records are its domain's (guild_bank/domain/records.hpp);
+// these are their protocol names. Their definitions are included where used.
+using GuildBankItemSlot = guild_bank::GuildBankItemSlot;
+using GuildBankTab = guild_bank::GuildBankTab;
+using GuildBankData = guild_bank::GuildBankData;
 
 // ============================================================
 // Auction House System
 // ============================================================
 
-struct AuctionEntry {
-    uint32_t auctionId = 0;
-    uint32_t itemEntry = 0;
-    uint32_t stackCount = 1;
-    uint32_t enchantId = 0;
-    uint32_t randomPropertyId = 0;
-    uint32_t suffixFactor = 0;
-    uint64_t ownerGuid = 0;
-    uint32_t startBid = 0;
-    uint32_t minBidIncrement = 0;
-    uint32_t buyoutPrice = 0;
-    uint32_t timeLeftMs = 0;
-    uint64_t bidderGuid = 0;
-    uint32_t currentBid = 0;
-};
+} // namespace game
+namespace auction {
+struct Entry;
+struct ListResult;
+} // namespace auction
+namespace game {
 
-struct AuctionListResult {
-    std::vector<AuctionEntry> auctions;
-    uint32_t totalCount = 0;
-    uint32_t searchDelay = 0;
-};
+// The auction records are the auction domain's (auction/domain/records.hpp);
+// these are their protocol names. Their definitions are included where used.
+using AuctionEntry = auction::Entry;
+using AuctionListResult = auction::ListResult;
 
 struct AuctionCommandResult {
     uint32_t auctionId = 0;
@@ -1644,21 +1475,7 @@ struct AuctionHelloData {
     uint8_t enabled = 1;
 };
 
-/** One column of an auction search's ordering, as the wire carries it.
- *
- * `column` is AzerothCore's AuctionSortOrder - MINLEVEL 0, RARITY 1, BUYOUT 2,
- * TIMELEFT 3, ITEM 5, MINBIDBUY 6, OWNER 7, BID 8, STACK 9.
- *
- * `descending` goes across as sent. The server's comparator is not uniformly
- * ordered - it answers -1 for the *higher* required level and -1 for the
- * *lower* quality - and the original interface's per-column reverse flags were
- * written against those inversions. Normalising the flag here would undo that
- * pairing and sort half the columns backwards.
- */
-struct AuctionSortKey {
-    uint8_t column = 0;
-    bool descending = false;
-};
+using AuctionSortKey = auction::SortKey;
 
 } // namespace game
 } // namespace wowee

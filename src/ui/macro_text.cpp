@@ -54,10 +54,9 @@ std::string macroShowtooltipArg(const std::string& macroText) {
     LineReader reader(macroText);
     std::string line;
     while (reader.next(line)) {
-        if (line.rfind("#showtooltip", 0) != 0 && line.rfind("#show", 0) != 0) {
-            continue;
-        }
-        const size_t space = line.find(' ');
+        const size_t space = line.find_first_of(" \t");
+        const auto directive = line.substr(0, space);
+        if (directive != "#showtooltip" && directive != "#show") continue;
         if (space != std::string::npos) {
             std::string arg = line.substr(space + 1);
             const size_t first = arg.find_first_not_of(" \t");

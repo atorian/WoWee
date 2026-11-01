@@ -8,7 +8,7 @@
 #include "core/logger.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
-#include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 
 namespace wowee {
 namespace pipeline {
@@ -48,20 +48,18 @@ std::string resolveItemRegionTexture(AssetManager& assets, int region,
     return {};
 }
 
-ItemDisplayArt readItemDisplayArt(const DBCFile& itemDisplayInfo, uint32_t recordIndex) {
-    const auto* layout = getActiveDBCLayout()
-        ? getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-    const uint32_t modelLeft   = layout ? (*layout)["LeftModel"]         : 1u;
-    const uint32_t modelRight  = layout ? (*layout)["RightModel"]        : 2u;
-    const uint32_t texLeft     = layout ? (*layout)["LeftModelTexture"]  : 3u;
-    const uint32_t texRight    = layout ? (*layout)["RightModelTexture"] : 4u;
+ItemDisplayArt readItemDisplayArt(const RequiredTable& itemDisplayInfo, uint32_t recordIndex) {
+    const uint32_t modelLeft   = itemDisplayInfo.column("LeftModel");
+    const uint32_t modelRight  = itemDisplayInfo.column("RightModel");
+    const uint32_t texLeft     = itemDisplayInfo.column("LeftModelTexture");
+    const uint32_t texRight    = itemDisplayInfo.column("RightModelTexture");
 
     ItemDisplayArt art;
-    art.modelFile   = itemDisplayInfo.getString(recordIndex, modelLeft);
-    art.textureName = itemDisplayInfo.getString(recordIndex, texLeft);
+    art.modelFile   = itemDisplayInfo->getString(recordIndex, modelLeft);
+    art.textureName = itemDisplayInfo->getString(recordIndex, texLeft);
     if (art.modelFile.empty()) {
-        art.modelFile   = itemDisplayInfo.getString(recordIndex, modelRight);
-        art.textureName = itemDisplayInfo.getString(recordIndex, texRight);
+        art.modelFile   = itemDisplayInfo->getString(recordIndex, modelRight);
+        art.textureName = itemDisplayInfo->getString(recordIndex, texRight);
     }
     if (art.modelFile.empty()) return art;
 
@@ -74,6 +72,13 @@ ItemDisplayArt readItemDisplayArt(const DBCFile& itemDisplayInfo, uint32_t recor
     return art;
 }
 
+void getItemDisplayInfoTextureFields(const RequiredTable& itemDisplayInfo, uint32_t (&out)[8]) {
+    const uint32_t width = itemDisplayInfo->getFieldCount();
+    uint32_t base = itemDisplayInfo.column("TextureArmUpper", 8);
+    if (base == 14 && width >= 25) base = 15;
+    else if (base == 15 && width < 25) base = 14;
+    for (int i = 0; i < 8; i++) out[i] = base + static_cast<uint32_t>(i);
+}
 
 }  // namespace pipeline
 }  // namespace wowee

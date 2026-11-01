@@ -1,0 +1,41 @@
+// The open sea under a steady wind at sunset: its waves come out of the
+// wind's spectrum through the ocean's FFT, longest running with the wind,
+// and the sun's path glitters on their slopes.
+{
+  "map": "Azeroth",
+  "mapId": 0,
+  "zoneId": 33,
+  "hour": 20.3,
+  "server": [
+    -14600,
+    1400,
+    2
+  ],
+  "terrain": false,
+  "waterPlane": true,
+  "waterTiles": 64,
+  "camera": {
+    "offset": [
+      -12,
+      -12,
+      1
+    ],
+    "yaw": 45,
+    "pitch": -2
+  },
+  "size": [
+    1024,
+    576
+  ],
+  "frames": 90,
+  "bloom": 0.8,
+  "sunShafts": false,
+  "volumetricFog": 0,
+  "fogStrength": 0.4,
+  "msaa": 1,
+  "streamWorld": false,
+  "wind": {
+    "direction": 45.0,
+    "speed": 6.0
+  }
+}

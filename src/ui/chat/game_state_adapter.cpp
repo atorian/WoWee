@@ -15,18 +15,18 @@ GameStateAdapter::GameStateAdapter(game::GameHandler& gameHandler,
 
 // --- GUIDs ---
 uint64_t GameStateAdapter::getPlayerGuid() const { return gameHandler_.getPlayerGuid(); }
-uint64_t GameStateAdapter::getTargetGuid() const { return gameHandler_.getTargetGuid(); }
-uint64_t GameStateAdapter::getFocusGuid() const  { return gameHandler_.getFocusGuid(); }
-uint64_t GameStateAdapter::getPetGuid() const    { return gameHandler_.getPetGuid(); }
-uint64_t GameStateAdapter::getMouseoverGuid() const { return gameHandler_.getMouseoverGuid(); }
+uint64_t GameStateAdapter::getTargetGuid() const { return gameHandler_.combat().getTargetGuid(); }
+uint64_t GameStateAdapter::getFocusGuid() const  { return gameHandler_.combat().getFocusGuid(); }
+uint64_t GameStateAdapter::getPetGuid() const    { return gameHandler_.petGuid(); }
+uint64_t GameStateAdapter::getMouseoverGuid() const { return gameHandler_.combat().getMouseoverGuid(); }
 
 // --- Player state ---
-bool GameStateAdapter::isInCombat() const  { return gameHandler_.isInCombat(); }
-bool GameStateAdapter::isMounted() const   { return gameHandler_.isMounted(); }
+bool GameStateAdapter::isInCombat() const  { return gameHandler_.combat().isInCombat(); }
+bool GameStateAdapter::isMounted() const   { return gameHandler_.movement().isMounted(); }
 bool GameStateAdapter::isSwimming() const  { return gameHandler_.isSwimming(); }
 bool GameStateAdapter::isFlying() const    { return gameHandler_.isPlayerFlying(); }
-bool GameStateAdapter::isCasting() const   { return gameHandler_.isCasting(); }
-bool GameStateAdapter::isChanneling() const { return gameHandler_.isChanneling(); }
+bool GameStateAdapter::isCasting() const   { return gameHandler_.spells().isCasting(); }
+bool GameStateAdapter::isChanneling() const { return gameHandler_.spells().isChanneling(); }
 
 bool GameStateAdapter::isStealthed() const {
     auto pe = gameHandler_.getEntityManager().getEntity(gameHandler_.getPlayerGuid());
@@ -35,12 +35,12 @@ bool GameStateAdapter::isStealthed() const {
     return pu && pu->hasCreepVisibility();
 }
 
-bool GameStateAdapter::hasPet() const   { return gameHandler_.hasPet(); }
-bool GameStateAdapter::isInGroup() const { return gameHandler_.isInGroup(); }
+bool GameStateAdapter::hasPet() const   { return gameHandler_.petGuid() != 0; }
+bool GameStateAdapter::isInGroup() const { return gameHandler_.inGroup(); }
 
 bool GameStateAdapter::isInRaid() const {
-    return gameHandler_.isInGroup() &&
-           game::groupIsRaid(gameHandler_.getPartyData().groupType);
+    return gameHandler_.inGroup() &&
+           game::groupIsRaid(gameHandler_.party().groupType);
 }
 
 bool GameStateAdapter::isIndoors() const {
@@ -48,13 +48,13 @@ bool GameStateAdapter::isIndoors() const {
 }
 
 // --- Numeric ---
-uint8_t GameStateAdapter::getActiveTalentSpec() const { return gameHandler_.getActiveTalentSpec(); }
+uint8_t GameStateAdapter::getActiveTalentSpec() const { return gameHandler_.spells().getActiveTalentSpec(); }
 uint32_t GameStateAdapter::getVehicleId() const { return gameHandler_.getVehicleId(); }
-uint32_t GameStateAdapter::getCurrentCastSpellId() const { return gameHandler_.getCurrentCastSpellId(); }
+uint32_t GameStateAdapter::getCurrentCastSpellId() const { return gameHandler_.spells().getCurrentCastSpellId(); }
 
 // --- Spell/aura ---
 std::string GameStateAdapter::getSpellName(uint32_t spellId) const {
-    return gameHandler_.getSpellName(spellId);
+    return gameHandler_.spells().getSpellName(spellId);
 }
 
 bool GameStateAdapter::hasAuraByName(uint64_t targetGuid, const std::string& spellName,
@@ -64,9 +64,9 @@ bool GameStateAdapter::hasAuraByName(uint64_t targetGuid, const std::string& spe
     uint64_t playerGuid = gameHandler_.getPlayerGuid();
     if (targetGuid != static_cast<uint64_t>(-1) && targetGuid != 0 &&
         targetGuid != playerGuid) {
-        auras = &gameHandler_.getTargetAuras();
+        auras = &gameHandler_.spells().getTargetAuras();
     } else {
-        auras = &gameHandler_.getPlayerAuras();
+        auras = &gameHandler_.spells().getPlayerAuras();
     }
 
     std::string nameLow = spellName;
@@ -76,7 +76,7 @@ bool GameStateAdapter::hasAuraByName(uint64_t targetGuid, const std::string& spe
         if (a.isEmpty() || a.spellId == 0) continue;
         bool isDebuff = (a.flags & 0x80) != 0;
         if (wantDebuff ? !isDebuff : isDebuff) continue;
-        std::string sn = gameHandler_.getSpellName(a.spellId);
+        std::string sn = gameHandler_.spells().getSpellName(a.spellId);
         for (char& ch : sn) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
         if (sn == nameLow) return true;
     }
@@ -84,7 +84,7 @@ bool GameStateAdapter::hasAuraByName(uint64_t targetGuid, const std::string& spe
 }
 
 bool GameStateAdapter::hasFormAura() const {
-    for (const auto& a : gameHandler_.getPlayerAuras()) {
+    for (const auto& a : gameHandler_.spells().getPlayerAuras()) {
         if (!a.isEmpty() && a.maxDurationMs == -1) return true;
     }
     return false;

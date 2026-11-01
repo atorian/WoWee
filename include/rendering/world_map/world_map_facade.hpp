@@ -17,7 +17,7 @@ namespace wowee {
 namespace rendering {
 class VkContext;
 }
-namespace pipeline { class AssetManager; }
+namespace pipeline { class AssetManager; class GameTables; }
 namespace rendering {
 namespace world_map {
 
@@ -31,7 +31,7 @@ public:
 
     Request extractComposite() override;
 
-    bool initialize(VkContext* ctx, pipeline::AssetManager* am);
+    bool initialize(VkContext* ctx, pipeline::AssetManager* am, const pipeline::GameTables& tables);
     void shutdown();
 
     /// ImGui overlay - call INSIDE the main render pass (during ImGui frame).

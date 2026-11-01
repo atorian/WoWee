@@ -1,8 +1,16 @@
+#include "auction/services/auction_house.hpp"
+#include "trade/services/trade.hpp"
+#include "loot/services/loot.hpp"
+#include "mail/services/mail.hpp"
+#include "guild_bank/services/guild_bank.hpp"
 #include "ui/graphics_choices.hpp"
 #include "rendering/cpu_stage_times.hpp"
 #include "core/zone_tracker.hpp"
 #include "ui/game_screen.hpp"
+#include "game/game_events.hpp"
 #include "ui/gamepad_controls.hpp"
+#include "ui/agent_controls.hpp"
+#include "game/chat_handler.hpp"
 #include "core/gamepad.hpp"
 
 #include <set>
@@ -17,6 +25,7 @@
 #include "ui/ui_texture_load.hpp"
 #include "rendering/vk_context.hpp"
 #include "core/application.hpp"
+#include "core/window.hpp"
 #include "core/appearance_composer.hpp"
 #include "addons/addon_manager.hpp"
 #include "ui/link_hit.hpp"
@@ -222,6 +231,7 @@ void GameScreen::setAntiAliasingIndex(int index) {
 
 void GameScreen::setServices(const UIServices& services) {
     services_ = services;
+    spellbookScreen.setGameTables(services_.gameTables);
     // Settings are loaded by the constructor before services are injected.
     // Apply the saved display pacing as soon as the actual window is available.
     if (services_.window &&
@@ -339,12 +349,12 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     chatPanel_.setupCallbacks(gameHandler);
     toastManager_.setupCallbacks(gameHandler);
 
-    // Set up appearance-changed callback to refresh inventory preview (barber shop, etc.)
-    if (!appearanceCallbackSet_) {
-        gameHandler.setAppearanceChangedCallback([this]() {
-            inventoryScreenCharGuid_ = 0;  // force preview re-sync on next frame
-        });
-        appearanceCallbackSet_ = true;
+    // A changed appearance (barber shop, etc.) refreshes the inventory preview.
+    if (!appearanceChangedSub_) {
+        appearanceChangedSub_ = gameHandler.eventBus().subscribe<game::events::PlayerAppearanceChanged>(
+            [this](const game::events::PlayerAppearanceChanged&) {
+                inventoryScreenCharGuid_ = 0;  // force preview re-sync on next frame
+            });
     }
 
     // The error line: UIErrorsFrame draws the text from UI_ERROR_MESSAGE, and
@@ -601,7 +611,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     }
 
     // Apply auto-loot / auto-sell settings to GameHandler every frame (cheap bool sync)
-    gameHandler.setAutoLoot(settingsPanel_.pendingAutoLoot);
+    loot::orNoLoot(services_.loot).setAutoLoot(settingsPanel_.pendingAutoLoot);
     gameHandler.setAutoFaceTarget(settingsPanel_.pendingAutoFaceTarget);
     // Pushed rather than applied once: a /reload makes a new engine.
     if (services_.characterAddons()) {
@@ -609,8 +619,8 @@ void GameScreen::render(game::GameHandler& gameHandler) {
             engine->setWheelSensitivity(settingsPanel_.pendingScrollSpeed);
         }
     }
-    gameHandler.setAutoSellGrey(settingsPanel_.pendingAutoSellGrey);
-    gameHandler.setAutoRepair(settingsPanel_.pendingAutoRepair);
+    gameHandler.inventory().setAutoSellGrey(settingsPanel_.pendingAutoSellGrey);
+    gameHandler.inventory().setAutoRepair(settingsPanel_.pendingAutoRepair);
 
     // Sync chat auto-join settings to GameHandler
     gameHandler.chatAutoJoin.general = chatPanel_.chatAutoJoinGeneral;
@@ -667,6 +677,18 @@ void GameScreen::render(game::GameHandler& gameHandler) {
             case ChatPanel::SlashCommands::Recording::Stop:   stopRecording();   break;
             case ChatPanel::SlashCommands::Recording::None:   break;
         }
+        if (cmds.agentControl != ChatPanel::SlashCommands::AgentControl::None && services_.agentControls) {
+            using AgentControl = ChatPanel::SlashCommands::AgentControl;
+            auto& agent = *services_.agentControls;
+            const bool give = cmds.agentControl == AgentControl::On ||
+                              (cmds.agentControl == AgentControl::Toggle && !agent.hasControl());
+            if (give) agent.grant(); else agent.release();
+            LOG_WARNING("Agent control ", give ? "handed to the agent" : "taken back", " by /ai");
+            gameHandler.chat().addSystemChatMessage(give
+                ? "The agent has control. Any key, click or Ctrl+Shift+H takes it back."
+                : "You have control.");
+        }
+        if (services_.agentControls) services_.agentControls->drawIndicator();
     }
     reportRecordingFailure();
     reportScreenshotResults();
@@ -699,7 +721,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     // way the minimap measures MinimapCluster, but nothing reads it yet.
     combatUI_.renderDPSMeter(gameHandler, settingsPanel_, -1.0f);
     toastManager_.renderEarlyToasts(ImGui::GetIO().DeltaTime, gameHandler);
-    dialogManager_.renderDialogs(gameHandler);
+    dialogManager_.renderDialogs();
     // FriendsFrame is what "social" suppresses, and its tabs are the friends
     // list, the who list and the guild roster. Only the friends list was gated
     // on this side, so handing social over left two of this client's three
@@ -727,7 +749,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         renderMinimapMarkers(gameHandler);
     }
     laps.lap("minimap markers");
-    dialogManager_.renderLateDialogs(gameHandler);
+    dialogManager_.renderLateDialogs();
     chatPanel_.renderBubbles(gameHandler);
     laps.lap("chat bubbles");
     // Not gated on GameMenu ownership. FrameXML's own options frames are shells
@@ -773,7 +795,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     inventoryScreen.setGameHandler(&gameHandler);
 
     // Auto-open bags once when vendor window first opens
-    if (gameHandler.isVendorWindowOpen()) {
+    if (gameHandler.inventory().isVendorWindowOpen()) {
         if (!windowManager_.vendorBagsOpened_) {
             windowManager_.vendorBagsOpened_ = true;
             openBagsForTrading(gameHandler);
@@ -784,7 +806,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
 
     // Auto-open bags once when the guild bank first opens, so items can be
     // right-clicked to deposit into the vault.
-    if (gameHandler.isGuildBankOpen()) {
+    if (guild_bank::orNoGuildBank(services_.guildBank).isGuildBankOpen()) {
         if (!windowManager_.guildBankBagsOpened_) {
             windowManager_.guildBankBagsOpened_ = true;
             openBagsForTrading(gameHandler);
@@ -805,14 +827,14 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         }
     }
 
-    if (inventoryScreen.consumeEquipmentDirty() || gameHandler.consumeOnlineEquipmentDirty()) {
-        updateCharacterGeosets(gameHandler.getInventory());
-        updateCharacterTextures(gameHandler.getInventory());
+    if (inventoryScreen.consumeEquipmentDirty() || gameHandler.inventory().consumeOnlineEquipmentDirty()) {
+        updateCharacterGeosets(gameHandler.inventory().items());
+        updateCharacterTextures(gameHandler.inventory().items());
         if (appearanceComposer_) appearanceComposer_->loadEquippedWeapons();
         // Update the weapon type for animation selection
         if (services_.animationController) {
-            const auto& mh = gameHandler.getInventory().getEquipSlot(game::EquipSlot::MAIN_HAND);
-            const auto& oh = gameHandler.getInventory().getEquipSlot(game::EquipSlot::OFF_HAND);
+            const auto& mh = gameHandler.inventory().items().getEquipSlot(game::EquipSlot::MAIN_HAND);
+            const auto& oh = gameHandler.inventory().items().getEquipSlot(game::EquipSlot::OFF_HAND);
             if (mh.empty()) {
                 if (auto* ac = services_.animationController) ac->setEquippedWeaponType(0, false);
             } else {
@@ -828,7 +850,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                 if (auto* ac = services_.animationController) ac->setEquippedWeaponType(mh.item.inventoryType, is2HLoose, isFist, isDagger, hasOffHand, hasShield, offHandIsFist, offHandIsDagger);
             }
             // Detect ranged weapon type from RANGED slot
-            const auto& rangedSlot = gameHandler.getInventory().getEquipSlot(game::EquipSlot::RANGED);
+            const auto& rangedSlot = gameHandler.inventory().items().getEquipSlot(game::EquipSlot::RANGED);
             if (rangedSlot.empty()) {
                 if (auto* ac = services_.animationController) ac->setEquippedRangedType(rendering::RangedWeaponType::NONE);
             } else if (rangedSlot.item.inventoryType == game::InvType::RANGED_BOW) {
@@ -860,13 +882,13 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     // Update renderer face-target position and selection circle
     auto* renderer = services_.renderer;
     if (renderer) {
-        if (auto* ac = services_.animationController) ac->setInCombat(gameHandler.isInCombat() &&
-                              !gameHandler.isPlayerDead() &&
-                              !gameHandler.isPlayerGhost());
+        if (auto* ac = services_.animationController) ac->setInCombat(gameHandler.combat().isInCombat() &&
+                              !gameHandler.combat().isPlayerDead() &&
+                              !gameHandler.combat().isPlayerGhost());
         if (renderer->getCharacterRenderer()) {
             uint32_t charInstId = renderer->getCharacterInstanceId();
             if (charInstId != 0) {
-                const bool isGhost = gameHandler.isPlayerGhost();
+                const bool isGhost = gameHandler.combat().isPlayerGhost();
                 if (!ghostOpacityStateKnown_ ||
                     ghostOpacityLastState_ != isGhost ||
                     ghostOpacityLastInstanceId_ != charInstId) {
@@ -878,8 +900,8 @@ void GameScreen::render(game::GameHandler& gameHandler) {
             }
         }
         static glm::vec3 targetGLPos;
-        if (gameHandler.hasTarget()) {
-            auto target = gameHandler.getTarget();
+        if (gameHandler.combat().hasTarget()) {
+            auto target = gameHandler.combat().getTarget();
             if (target) {
                 // Prefer the renderer's actual instance position so the selection
                 // circle tracks the rendered model (not a parallel entity-space
@@ -920,9 +942,9 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                     auto unit = std::static_pointer_cast<game::Unit>(target);
                     if (unit->getHealth() == 0 && unit->getMaxHealth() > 0) {
                         circleColor = glm::vec3(0.5f, 0.5f, 0.5f); // gray (dead)
-                    } else if (unit->isHostile() || gameHandler.isAggressiveTowardPlayer(target->getGuid())) {
+                    } else if (unit->isHostile() || gameHandler.combat().isAggressiveTowardPlayer(target->getGuid())) {
                         const ImVec4 c = ui::helpers::levelDifficultyColor(
-                            gameHandler.getPlayerLevel(), unit->getLevel());
+                            gameHandler.player().level(), unit->getLevel());
                         circleColor = glm::vec3(c.x, c.y, c.z);
                     } else {
                         circleColor = glm::vec3(0.3f, 1.0f, 0.3f); // green (friendly)
@@ -952,7 +974,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
 
     // Screen edge damage flash - red vignette that fires on HP decrease
     {
-        const bool deadOrGhost = gameHandler.isPlayerDead() || gameHandler.isPlayerGhost();
+        const bool deadOrGhost = gameHandler.combat().isPlayerDead() || gameHandler.combat().isPlayerGhost();
         auto playerEntity = gameHandler.getEntityManager().getEntity(gameHandler.getPlayerGuid());
         uint32_t currentHp = 0;
         if (playerEntity && (playerEntity->getType() == game::ObjectType::PLAYER ||
@@ -987,7 +1009,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     // Persistent low-health vignette - pulsing red edges when HP < 20%
     {
         auto playerEntity = gameHandler.getEntityManager().getEntity(gameHandler.getPlayerGuid());
-        const bool deadOrGhost = gameHandler.isPlayerDead() || gameHandler.isPlayerGhost();
+        const bool deadOrGhost = gameHandler.combat().isPlayerDead() || gameHandler.combat().isPlayerGhost();
         float hpPct = 1.0f;
         if (!deadOrGhost && playerEntity &&
             (playerEntity->getType() == game::ObjectType::PLAYER ||
@@ -1045,13 +1067,13 @@ void GameScreen::render(game::GameHandler& gameHandler) {
 /// player who walked away - rather than being offered into the next one.
 void GameScreen::offerPendingTradeItem(game::GameHandler& gameHandler) {
     if (!pendingTradeItem_.active) return;
-    if (!gameHandler.isTradeOpen()) {
+    if (!trade::orNoTrade(services_.trade).isTradeOpen()) {
         // Only while the request could still be answered. Leaving the world
         // ends that, and so does putting the item somewhere else.
         if (!gameHandler.isInWorld()) pendingTradeItem_ = PendingTradeItem{};
         return;
     }
-    gameHandler.setTradeItem(0, pendingTradeItem_.bag, pendingTradeItem_.slot);
+    trade::orNoTrade(services_.trade).setTradeItem(0, pendingTradeItem_.bag, pendingTradeItem_.slot);
     pendingTradeItem_ = PendingTradeItem{};
 }
 
@@ -1117,22 +1139,7 @@ void GameScreen::renderPlayerInfo(game::GameHandler& gameHandler) {
 /// the same.
 VkDescriptorSet cursorTexture(pipeline::AssetManager* assets, core::Window* window,
                               const char* path) {
-    static std::unordered_map<std::string, VkDescriptorSet> loaded;
-    auto it = loaded.find(path);
-    if (it != loaded.end() && it->second != VK_NULL_HANDLE) return it->second;
-
-    ui::UiTextureLoad why = ui::UiTextureLoad::Ok;
-    VkDescriptorSet tex = ui::uploadUiTextureFromBlp(assets, path, window, &why);
-    if (tex) {
-        loaded[path] = tex;
-        return tex;
-    }
-    static std::set<std::string> said;
-    if (said.insert(path).second) {
-        LOG_WARNING("Cursor art ", path, " did not load (", static_cast<int>(why),
-                    ") - the pointer stays the plain hand there");
-    }
-    return VK_NULL_HANDLE;
+    return ui::uploadUiTextureFromBlp(assets, path, window);
 }
 
 /// Draw one in place of the pointer. The tip sits at the mouse position, the
@@ -1187,26 +1194,8 @@ bool GameScreen::drawVendorCursor(game::GameHandler& gameHandler,
     auto unit = std::static_pointer_cast<game::Unit>(entity);
     if ((unit->getNpcFlags() & game::NPC_FLAG_ANY_VENDOR) == 0) return false;
 
-    // Only a successful upload is cached, so a transient descriptor-pool
-    // failure is retried rather than leaving the cursor plain for good.
-    static VkDescriptorSet cursorTex = VK_NULL_HANDLE;
-    if (!cursorTex) {
-        ui::UiTextureLoad why = ui::UiTextureLoad::Ok;
-        cursorTex = ui::uploadUiTextureFromBlp(
-            services_.assetManager, "Interface\\Cursor\\Buy.blp", services_.window, &why);
-        // Said once. A cursor that will not load and a unit that is not a
-        // vendor both end as the plain hand, and from the chair they are the
-        // same thing - so the one that is a fault has to name itself.
-        if (!cursorTex) {
-            static bool said = false;
-            if (!said) {
-                said = true;
-                LOG_WARNING("Vendor cursor: Interface\\Cursor\\Buy.blp did not load (",
-                            static_cast<int>(why),
-                            ") - the pointer stays the plain hand over merchants");
-            }
-        }
-    }
+    const auto cursorTex = ui::uploadUiTextureFromBlp(
+        services_.assetManager, "Interface\\Cursor\\Buy.blp", services_.window);
     if (!cursorTex) return false;
 
     // Drawn in place of the pointer rather than beside it, which is what a
@@ -1240,7 +1229,7 @@ bool GameScreen::drawWorldObjectCursor(game::GameHandler& gameHandler,
     if (!entity || entity->getType() != game::ObjectType::GAMEOBJECT) return false;
 
     auto go = std::static_pointer_cast<game::GameObject>(entity);
-    const auto* info = gameHandler.getCachedGameObjectInfo(go->getEntry());
+    const auto* info = gameHandler.queryCache().getCachedGameObjectInfo(go->getEntry());
     if (usable) {
         VkDescriptorSet tex = cursorTexture(services_.assetManager, services_.window,
                                             objectCursorPath(info ? info->type : 0u));
@@ -1466,7 +1455,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
             !interfaceConsumedKey(ImGuiKey_Tab) &&
             input.isKeyJustPressed(SDL_SCANCODE_TAB)) {
             const auto& movement = gameHandler.getMovementInfo();
-            gameHandler.tabTarget(movement.x, movement.y, movement.z);
+            gameHandler.combat().tabTarget(movement.x, movement.y, movement.z);
         }
 
         // Escape (TOGGLE_SETTINGS) must not fire while chat input is active -
@@ -1531,20 +1520,20 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
             // an item still stuck to the pointer.
             st.holdingItem           = inventoryScreen.isHoldingItem() ||
                                        !frameXmlCursorItem().empty();
-            st.casting               = gameHandler.isCasting();
-            st.lootOpen              = gameHandler.isLootWindowOpen();
-            st.gossipOpen            = gameHandler.isGossipWindowOpen();
-            st.vendorOpen            = gameHandler.isVendorWindowOpen();
+            st.casting               = gameHandler.spells().isCasting();
+            st.lootOpen              = loot::orNoLoot(services_.loot).isLootWindowOpen();
+            st.gossipOpen            = gameHandler.quests().isGossipWindowOpen();
+            st.vendorOpen            = gameHandler.inventory().isVendorWindowOpen();
             st.barberShopOpen        = gameHandler.isBarberShopOpen();
-            st.bankOpen              = gameHandler.isBankOpen();
-            st.guildBankOpen         = gameHandler.isGuildBankOpen();
-            st.trainerOpen           = gameHandler.isTrainerWindowOpen();
-            st.mailboxOpen           = gameHandler.isMailboxOpen();
-            st.auctionHouseOpen      = gameHandler.isAuctionHouseOpen();
-            st.questDetailsOpen      = gameHandler.isQuestDetailsOpen();
-            st.questOfferRewardOpen  = gameHandler.isQuestOfferRewardOpen();
-            st.questRequestItemsOpen = gameHandler.isQuestRequestItemsOpen();
-            st.tradeOpen             = gameHandler.isTradeOpen();
+            st.bankOpen              = gameHandler.inventory().isBankOpen();
+            st.guildBankOpen         = guild_bank::orNoGuildBank(services_.guildBank).isGuildBankOpen();
+            st.trainerOpen           = gameHandler.inventory().isTrainerWindowOpen();
+            st.mailboxOpen           = mail::orNoMailbox(services_.mail).isMailboxOpen();
+            st.auctionHouseOpen      = auction::orNoAuctionHouse(services_.auctionHouse).isAuctionHouseOpen();
+            st.questDetailsOpen      = gameHandler.quests().isQuestDetailsOpen();
+            st.questOfferRewardOpen  = gameHandler.quests().isQuestOfferRewardOpen();
+            st.questRequestItemsOpen = gameHandler.quests().isQuestRequestItemsOpen();
+            st.tradeOpen             = trade::orNoTrade(services_.trade).isTradeOpen();
 
             const EscapeAction action = resolveEscape(st);
             // At warning, like the three in the pump it pairs with.
@@ -1565,25 +1554,25 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     settingsPanel_.showSettingsWindow = false;
                     break;
                 case EscapeAction::CancelCast:             gameHandler.cancelCast(); break;
-                case EscapeAction::CloseLoot:              gameHandler.closeLoot(); break;
+                case EscapeAction::CloseLoot:              loot::orNoLoot(services_.loot).closeLoot(); break;
                 case EscapeAction::CloseGossip:            gameHandler.closeGossip(); break;
                 case EscapeAction::ReturnHeldItem:
                     if (inventoryScreen.isHoldingItem())
-                        inventoryScreen.returnHeldItem(gameHandler.getInventory());
+                        inventoryScreen.returnHeldItem(gameHandler.inventory().items());
                     else
                         frameXmlPutCursorDown();
                     break;
                 case EscapeAction::CloseVendor:            gameHandler.closeVendor(); break;
                 case EscapeAction::CloseBarberShop:        gameHandler.closeBarberShop(); break;
-                case EscapeAction::CloseBank:              gameHandler.closeBank(); break;
-                case EscapeAction::CloseGuildBank:         gameHandler.closeGuildBank(); break;
-                case EscapeAction::CloseTrainer:           gameHandler.closeTrainer(); break;
-                case EscapeAction::CloseMailbox:           gameHandler.closeMailbox(); break;
-                case EscapeAction::CloseAuctionHouse:      gameHandler.closeAuctionHouse(); break;
-                case EscapeAction::DeclineQuest:           gameHandler.declineQuest(); break;
-                case EscapeAction::CloseQuestOfferReward:  gameHandler.closeQuestOfferReward(); break;
-                case EscapeAction::CloseQuestRequestItems: gameHandler.closeQuestRequestItems(); break;
-                case EscapeAction::CancelTrade:            gameHandler.cancelTrade(); break;
+                case EscapeAction::CloseBank:              gameHandler.inventory().closeBank(); break;
+                case EscapeAction::CloseGuildBank:         guild_bank::orNoGuildBank(services_.guildBank).closeGuildBank(); break;
+                case EscapeAction::CloseTrainer:           gameHandler.inventory().closeTrainer(); break;
+                case EscapeAction::CloseMailbox:           mail::orNoMailbox(services_.mail).closeMailbox(); break;
+                case EscapeAction::CloseAuctionHouse:      auction::orNoAuctionHouse(services_.auctionHouse).closeAuctionHouse(); break;
+                case EscapeAction::DeclineQuest:           gameHandler.quests().declineQuest(); break;
+                case EscapeAction::CloseQuestOfferReward:  gameHandler.quests().closeQuestOfferReward(); break;
+                case EscapeAction::CloseQuestRequestItems: gameHandler.quests().closeQuestRequestItems(); break;
+                case EscapeAction::CancelTrade:            trade::orNoTrade(services_.trade).cancelTrade(); break;
                 case EscapeAction::None: break;
                 case EscapeAction::AskTheInterface: {
                     // Asked only here, because asking closes things. Everything
@@ -1691,7 +1680,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 // reported three times: IsKeyPressed does not consume, so both
                 // sites saw the same press and toggled in the same frame -
                 // open, then shut, and nothing on screen.
-                if (gameHandler.isConnected()) gameHandler.requestPlayedTime();
+                if (gameHandler.isConnected()) gameHandler.social().requestPlayedTime();
             }
 
             if (KeybindingManager::getInstance().isActionPressed(KeybindingManager::Action::TOGGLE_INVENTORY)) {
@@ -1930,7 +1919,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                                 : frameXmlCursorWireSlot(srcBag, srcSlot);
                         if (haveSource) {
                             pendingTradeItem_ = PendingTradeItem{.active = true, .bag = srcBag, .slot = srcSlot};
-                            gameHandler.initiateTrade(closestGuid);
+                            trade::orNoTrade(services_.trade).initiateTrade(closestGuid);
                             // Whichever cursor was carrying it.
                             if (inventoryScreen.isHoldingItem())
                                 inventoryScreen.releaseHeldItem();
@@ -1944,8 +1933,8 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 // An item waiting for a unit takes this click instead of it
                 // selecting anyone: "right-click the treat, then click the dog"
                 // is the whole of what the cursor is asking for.
-                if (closestGuid != 0 && gameHandler.isAwaitingUnitTarget()) {
-                    gameHandler.completeItemUseOnUnit(closestGuid);
+                if (closestGuid != 0 && gameHandler.inventory().isAwaitingUnitTarget()) {
+                    gameHandler.inventory().completeItemUseOnUnit(closestGuid);
                 } else if (closestGuid != 0) {
                     // A game object is used, not targeted.
                     //
@@ -1961,7 +1950,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     if (picked && picked->getType() == game::ObjectType::GAMEOBJECT) {
                         gameHandler.interactWithGameObject(closestGuid);
                     } else {
-                        gameHandler.setTarget(closestGuid);
+                        gameHandler.combat().setTarget(closestGuid);
                     }
                 } else if (addons::storedCVarValue("deselectOnClick", "1") != "0") {
                     // Clicked empty space - deselect current target, unless the
@@ -1974,7 +1963,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     // target went anyway. The default is the clearing this
                     // client already did, so nobody's targeting changes by the
                     // switch beginning to work.
-                    gameHandler.clearTarget();
+                    gameHandler.combat().clearTarget();
                 }
             }
         }
@@ -2033,15 +2022,15 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
         // instead of re-picking under cursor (which can hit nearby decorative GOs).
         // Exclude chair-type GOs (type 7): otherwise any right-click (including the
         // start of a camera rotate) auto-sits the player whenever a chair is targeted.
-        if (gameHandler.hasTarget()) {
-            auto target = gameHandler.getTarget();
+        if (gameHandler.combat().hasTarget()) {
+            auto target = gameHandler.combat().getTarget();
             if (target && target->getType() == game::ObjectType::GAMEOBJECT) {
                 auto go = std::static_pointer_cast<game::GameObject>(target);
-                auto* goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
+                auto* goInfo = gameHandler.queryCache().getCachedGameObjectInfo(go->getEntry());
                 if (!goInfo || goInfo->type != 7) {
                     LOG_DEBUG("[GO-DIAG] Right-click: re-interacting with targeted GO 0x",
                                 std::hex, target->getGuid(), std::dec);
-                    gameHandler.setTarget(target->getGuid());
+                    gameHandler.combat().setTarget(target->getGuid());
                     gameHandler.interactWithGameObject(target->getGuid());
                     return;
                 }
@@ -2058,7 +2047,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 // hostile units so quest pickups (e.g. "Bundle of Wood") are reliable.
                 std::unordered_set<uint32_t> questObjectiveGoEntries;
                 {
-                    const auto& ql = gameHandler.getQuestLog();
+                    const auto& ql = gameHandler.quests().getQuestLog();
                     questObjectiveGoEntries.reserve(32);
                     for (const auto& q : ql) {
                         if (q.complete) continue;
@@ -2132,22 +2121,22 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     if (closestType == game::ObjectType::GAMEOBJECT) {
                         LOG_DEBUG("[GO-DIAG] Right-click: raypick hit GO 0x",
                                     std::hex, closestGuid, std::dec);
-                        gameHandler.setTarget(closestGuid);
+                        gameHandler.combat().setTarget(closestGuid);
                         gameHandler.interactWithGameObject(closestGuid);
                         return;
                     }
-                    gameHandler.setTarget(closestGuid);
+                    gameHandler.combat().setTarget(closestGuid);
                 }
             }
         }
-        if (gameHandler.hasTarget()) {
-            auto target = gameHandler.getTarget();
+        if (gameHandler.combat().hasTarget()) {
+            auto target = gameHandler.combat().getTarget();
             if (target) {
                 if (target->getType() == game::ObjectType::UNIT) {
                     // Check if unit is dead (health == 0) → loot, otherwise interact/attack
                     auto unit = std::static_pointer_cast<game::Unit>(target);
                     if (unit->getHealth() == 0 && unit->getMaxHealth() > 0) {
-                        gameHandler.lootTarget(target->getGuid());
+                        loot::orNoLoot(services_.loot).lootTarget(target->getGuid());
                     } else {
                         // Interact with service NPCs; otherwise treat non-interactable living units
                         // as attackable fallback (covers bad faction-template classification).
@@ -2163,7 +2152,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                             return (name.find("spirit healer") != std::string::npos) ||
                                    (name.find("spirit guide") != std::string::npos);
                         };
-                        bool allowSpiritInteract = (gameHandler.isPlayerDead() || gameHandler.isPlayerGhost()) && isSpiritNpc();
+                        bool allowSpiritInteract = (gameHandler.combat().isPlayerDead() || gameHandler.combat().isPlayerGhost()) && isSpiritNpc();
                         bool canInteractNpc = unit->isInteractable() || allowSpiritInteract;
                         bool shouldAttackByFallback = !canInteractNpc;
                         if (!unit->isHostile() && canInteractNpc) {
@@ -2187,7 +2176,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     // Skip chairs: auto-sit must only happen when the chair is
                     // under the cursor, never as a side effect of right-click.
                     auto go = std::static_pointer_cast<game::GameObject>(target);
-                    auto* goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
+                    auto* goInfo = gameHandler.queryCache().getCachedGameObjectInfo(go->getEntry());
                     if (!goInfo || goInfo->type != 7) {
                         gameHandler.interactWithGameObject(target->getGuid());
                     }

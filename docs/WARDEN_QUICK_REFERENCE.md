@@ -35,7 +35,6 @@ key as `wardenRsaModulus` in the expansion profile.
 | AzerothCore (local) | Works |
 | ChromieCraft | Works |
 | Warmane | Should work |
-| Turtle WoW-derived | Needs a `.cr` file for the module; without one `HASH_REQUEST` goes unanswered |
 
 ---
 

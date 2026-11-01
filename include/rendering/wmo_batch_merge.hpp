@@ -16,10 +16,9 @@
 ///
 /// Material flags are here only through what they change. F_UNLIT and
 /// F_WINDOW are in `lighting`, with the batch's run and its group's flags
-/// (wmo_lighting.hpp); F_SIDN is `sidnColor`, the glow it brings. F_UNFOGGED
-/// and F_UNCULLED change nothing yet - every WMO pipeline draws both faces and
-/// fogs every batch - so keying on them would only split batches that draw the
-/// same.
+/// (wmo_lighting.hpp); F_SIDN is `sidnColor`, the glow it brings; F_UNCULLED
+/// is `twoSided`. F_UNFOGGED changes nothing yet - every batch is fogged - so
+/// keying on it would only split batches that draw the same.
 
 #include <cstddef>
 #include <cstdint>
@@ -40,6 +39,9 @@ struct WmoBatchState {
     /// that names the same file, UINT32_MAX for none (the white fallback).
     uint32_t texture = UINT32_MAX;
     uint32_t blendMode = 0;         ///< MOMT blend mode: 1 alpha-tests, 2+ blends
+    /// F_UNCULLED (0x04): both faces shown. Without it the client culls the
+    /// back faces, and so does the renderer (FaceCulling).
+    bool twoSided = false;
     /// The light the batch is drawn with. A group's transition and interior
     /// batches on one texture are lit apart, so they draw apart.
     WmoBatchLighting lighting;

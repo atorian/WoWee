@@ -2,6 +2,7 @@
 //                /threat, /combatlog, /helm, /cloak, /follow, /stopfollow,
 //                /assist, /pvp, /unstuck*, /transport
 // Moved from ChatPanel::sendChatMessage() if/else chain (Phase 3).
+#include "battleground/services/battlegrounds.hpp"
 #include "ui/chat/i_chat_command.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "core/zone_tracker.hpp"
@@ -65,7 +66,7 @@ public:
 class TimeCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.queryServerTime(true);  // typed by the player, so say it
+        ctx.gameHandler.social().queryServerTime(true);  // typed by the player, so say it
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"time"}; }
@@ -118,7 +119,7 @@ public:
 class PlayedCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.requestPlayedTime();
+        ctx.gameHandler.social().requestPlayedTime();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"played"}; }
@@ -160,6 +161,29 @@ public:
     }
 };
 
+// --- /ai ---
+// Hand the character to the agent connected over MCP, or take it back. Any
+// key, click or wheel of the player's own takes it back as well, as does Ctrl+Shift+H.
+class AiCommand : public IChatCommand {
+public:
+    ChatCommandResult execute(ChatCommandContext& ctx) override {
+        std::string arg = ctx.args;
+        for (char& c : arg) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        while (!arg.empty() && arg.back() == ' ') arg.pop_back();
+        while (!arg.empty() && arg.front() == ' ') arg.erase(arg.begin());
+        using AgentControl = ChatPanel::SlashCommands::AgentControl;
+        auto& cmds = ctx.panel.getSlashCmds();
+        if (arg == "on") cmds.agentControl = AgentControl::On;
+        else if (arg == "off") cmds.agentControl = AgentControl::Off;
+        else cmds.agentControl = AgentControl::Toggle;
+        return {};
+    }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"ai"}; }
+    [[nodiscard]] std::string helpText() const override {
+        return "Hand the character to the connected agent: /ai [on|off]";
+    }
+};
+
 // --- /ticket, /gmticket, /gm ---
 class TicketCommand : public IChatCommand {
 public:
@@ -175,7 +199,7 @@ public:
 class ScoreCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.requestPvpLog();
+        if (auto* battlegrounds = ctx.services.battlegrounds) battlegrounds->requestPvpLog();
         ctx.panel.getSlashCmds().showBgScore = true;
         return {};
     }
@@ -209,7 +233,7 @@ public:
 class HelmCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.toggleHelm();
+        ctx.gameHandler.social().toggleHelm();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"helm", "helmet", "showhelm"}; }
@@ -220,7 +244,7 @@ public:
 class CloakCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.toggleCloak();
+        ctx.gameHandler.social().toggleCloak();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"cloak", "showcloak"}; }
@@ -231,7 +255,7 @@ public:
 class FollowCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.followTarget();
+        ctx.gameHandler.movement().followTarget();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"follow", "f"}; }
@@ -242,7 +266,7 @@ public:
 class StopFollowCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.cancelFollow();
+        ctx.gameHandler.movement().cancelFollow();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"stopfollow"}; }
@@ -255,10 +279,10 @@ public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         auto assistEntityTarget = [&](uint64_t srcGuid) {
             auto srcEnt = ctx.gameHandler.getEntityManager().getEntity(srcGuid);
-            if (!srcEnt) { ctx.gameHandler.assistTarget(); return; }
+            if (!srcEnt) { ctx.gameHandler.combat().assistTarget(); return; }
             const uint64_t atkGuid = game::unitTargetGuid(*srcEnt);
             if (atkGuid != 0) {
-                ctx.gameHandler.setTarget(atkGuid);
+                ctx.gameHandler.combat().setTarget(atkGuid);
             } else {
                 std::string sn = game::entityDisplayName(srcEnt);
                 game::MessageChatData msg;
@@ -309,10 +333,10 @@ public:
                     ctx.gameHandler.addLocalChatMessage(msg);
                 }
             } else {
-                ctx.gameHandler.assistTarget();
+                ctx.gameHandler.combat().assistTarget();
             }
         } else {
-            ctx.gameHandler.assistTarget();
+            ctx.gameHandler.combat().assistTarget();
         }
         return {};
     }
@@ -324,7 +348,7 @@ public:
 class PvpCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.togglePvp();
+        ctx.gameHandler.combat().togglePvp();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"pvp"}; }
@@ -378,7 +402,7 @@ public:
             if (tm) {
                 uint64_t testTransportGuid = 0x1000000000000001ULL;
                 glm::vec3 deckCenter(0.0f, 0.0f, 5.0f);
-                ctx.gameHandler.setPlayerOnTransport(testTransportGuid, deckCenter);
+                ctx.gameHandler.movement().setPlayerOnTransport(testTransportGuid, deckCenter);
                 game::MessageChatData msg;
                 msg.type = game::ChatType::SYSTEM;
                 msg.language = game::ChatLanguage::UNIVERSAL;
@@ -393,8 +417,8 @@ public:
             }
             return {};
         } if (sub == "leave") {
-            if (ctx.gameHandler.isOnTransport()) {
-                ctx.gameHandler.clearPlayerTransport();
+            if (ctx.gameHandler.movement().isOnTransport()) {
+                ctx.gameHandler.movement().clearPlayerTransport();
                 game::MessageChatData msg;
                 msg.type = game::ChatType::SYSTEM;
                 msg.language = game::ChatLanguage::UNIVERSAL;
@@ -424,6 +448,7 @@ void registerMiscCommands(ChatCommandRegistry& reg) {
     reg.registerCommand(std::make_unique<PlayedCommand>());
     reg.registerCommand(std::make_unique<ScreenshotCommand>());
     reg.registerCommand(std::make_unique<RecordCommand>());
+    reg.registerCommand(std::make_unique<AiCommand>());
     reg.registerCommand(std::make_unique<TicketCommand>());
     reg.registerCommand(std::make_unique<ScoreCommand>());
     reg.registerCommand(std::make_unique<ThreatCommand>());

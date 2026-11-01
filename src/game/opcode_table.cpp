@@ -58,91 +58,23 @@ static std::optional<uint16_t> resolveLogicalOpcodeIndex(std::string_view name) 
     return std::nullopt;
 }
 
-static std::optional<std::string> parseStringField(const std::string& json, const char* fieldName) {
-    const std::string needle = std::string("\"") + fieldName + "\"";
-    size_t keyPos = json.find(needle);
-    if (keyPos == std::string::npos) return std::nullopt;
-
-    size_t colon = json.find(':', keyPos + needle.size());
-    if (colon == std::string::npos) return std::nullopt;
-
-    size_t valueStart = json.find('"', colon + 1);
-    if (valueStart == std::string::npos) return std::nullopt;
-    size_t valueEnd = json.find('"', valueStart + 1);
-    if (valueEnd == std::string::npos) return std::nullopt;
-    return json.substr(valueStart + 1, valueEnd - valueStart - 1);
-}
-
-static std::vector<std::string> parseStringArrayField(const std::string& json, const char* fieldName) {
-    std::vector<std::string> values;
-    const std::string needle = std::string("\"") + fieldName + "\"";
-    size_t keyPos = json.find(needle);
-    if (keyPos == std::string::npos) return values;
-
-    size_t colon = json.find(':', keyPos + needle.size());
-    if (colon == std::string::npos) return values;
-
-    size_t arrayStart = json.find('[', colon + 1);
-    if (arrayStart == std::string::npos) return values;
-    size_t arrayEnd = json.find(']', arrayStart + 1);
-    if (arrayEnd == std::string::npos) return values;
-
-    size_t pos = arrayStart + 1;
-    while (pos < arrayEnd) {
-        size_t valueStart = json.find('"', pos);
-        if (valueStart == std::string::npos || valueStart >= arrayEnd) break;
-        size_t valueEnd = json.find('"', valueStart + 1);
-        if (valueEnd == std::string::npos || valueEnd > arrayEnd) break;
-        values.push_back(json.substr(valueStart + 1, valueEnd - valueStart - 1));
-        pos = valueEnd + 1;
-    }
-    return values;
-}
-
-static bool loadOpcodeJsonRecursive(const std::filesystem::path& path,
-                                    std::unordered_map<uint16_t, uint16_t>& logicalToWire,
-                                    std::unordered_map<uint16_t, uint16_t>& wireToLogical,
-                                    std::unordered_set<std::string>& loadingStack) {
-    const std::filesystem::path canonicalPath = std::filesystem::weakly_canonical(path);
-    const std::string canonicalKey = canonicalPath.string();
-    if (!loadingStack.insert(canonicalKey).second) {
-        LOG_WARNING("OpcodeTable: inheritance cycle at ", canonicalKey);
-        return false;
-    }
-
-    std::ifstream f(canonicalPath);
+/// One opcodes.json: every "NAME": "0x123" pair whose name is a logical
+/// opcode. A later pair for the same name or the same wire value replaces
+/// the earlier one, so the table stays one-to-one.
+static bool loadOpcodeJson(const std::filesystem::path& path,
+                           std::unordered_map<uint16_t, uint16_t>& logicalToWire,
+                           std::unordered_map<uint16_t, uint16_t>& wireToLogical) {
+    std::ifstream f(path);
     if (!f.is_open()) {
-        LOG_WARNING("OpcodeTable: cannot open ", canonicalPath.string());
-        loadingStack.erase(canonicalKey);
+        LOG_WARNING("OpcodeTable: cannot open ", path.string());
         return false;
     }
 
     std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    bool ok = true;
-
-    if (auto extends = parseStringField(json, "_extends")) {
-        ok = loadOpcodeJsonRecursive(canonicalPath.parent_path() / *extends,
-                                     logicalToWire, wireToLogical, loadingStack) && ok;
-    }
-
-    for (const std::string& removeName : parseStringArrayField(json, "_remove")) {
-        auto logical = resolveLogicalOpcodeIndex(removeName);
-        if (!logical) continue;
-        auto it = logicalToWire.find(*logical);
-        if (it != logicalToWire.end()) {
-            const uint16_t oldWire = it->second;
-            logicalToWire.erase(it);
-            auto wireIt = wireToLogical.find(oldWire);
-            if (wireIt != wireToLogical.end() && wireIt->second == *logical) {
-                wireToLogical.erase(wireIt);
-            }
-        }
-    }
 
     forEachJsonKeyValue(json, [&](const std::string& key, const std::string& valStr) {
         uint32_t parsed = 0;
-        // A value that is not wholly a number is skipped rather than stored:
-        // the "_extends" and "_remove" entries handled above land here too.
+        // A value that is not wholly a number is skipped rather than stored.
         if (!parseTableNumber(valStr, parsed)) return;
         const uint16_t wire = static_cast<uint16_t>(parsed);
 
@@ -165,10 +97,9 @@ static bool loadOpcodeJsonRecursive(const std::filesystem::path& path,
             wireToLogical[wire] = *logical;
         }
     });
-
-    loadingStack.erase(canonicalKey);
-    return ok;
+    return true;
 }
+
 const char* OpcodeTable::logicalToName(LogicalOpcode op) {
     uint16_t val = static_cast<uint16_t>(op);
     for (auto entry : kOpcodeNames) {
@@ -178,15 +109,12 @@ const char* OpcodeTable::logicalToName(LogicalOpcode op) {
 }
 
 bool OpcodeTable::loadFromJson(const std::string& path) {
-    // Resolved JSON inheritance is the single source of truth for opcode mappings.
-    // Load into a scratch map (the recursive loader supports add/remove via
-    // _extends/_remove), then bake it into the flat vector for fast toWire().
-    // Load into temporaries so a failed reload doesn't wipe the working table.
+    // Load into a scratch map, then bake it into the flat vector for fast
+    // toWire(). Into temporaries, so a failed reload doesn't wipe the working
+    // table.
     std::unordered_map<uint16_t, uint16_t> scratch;
     std::unordered_map<uint16_t, uint16_t> newWireToLogical;
-    std::unordered_set<std::string> loadingStack;
-    if (!loadOpcodeJsonRecursive(std::filesystem::path(path),
-                                 scratch, newWireToLogical, loadingStack) ||
+    if (!loadOpcodeJson(std::filesystem::path(path), scratch, newWireToLogical) ||
         scratch.empty()) {
         LOG_WARNING("OpcodeTable: no opcodes loaded from ", path);
         return false;

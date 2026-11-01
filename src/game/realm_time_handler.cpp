@@ -3,7 +3,7 @@
 #include "core/logger.hpp"
 #include "game/game_events.hpp"
 #include "game/opcodes.hpp"
-#include "game/packed_time.hpp"
+#include "core/packed_time.hpp"
 #include "network/packet.hpp"
 
 namespace wowee::game {
@@ -40,7 +40,7 @@ void RealmTimeHandler::handleLoginSetTimeSpeed(network::Packet& packet) {
         return;
     }
 
-    const WowDate now = unpackWowPackedTime(packet.readUInt32());
+    const core::WowDate now = core::unpackWowPackedTime(packet.readUInt32());
     const float timeScale = packet.readFloat();
 
     gameClock_.set(static_cast<float>(now.hour) + static_cast<float>(now.minute) / 60.0f,
@@ -53,7 +53,7 @@ void RealmTimeHandler::handleLoginSetTimeSpeed(network::Packet& packet) {
 
 void RealmTimeHandler::handleGameTime(network::Packet& packet) {
     if (packet.hasRemaining(4)) {
-        const WowDate t = unpackWowPackedTime(packet.readUInt32());
+        const core::WowDate t = core::unpackWowPackedTime(packet.readUInt32());
         gameClock_.setHours(static_cast<float>(t.hour) + static_cast<float>(t.minute) / 60.0f,
                             now_());
         takePackedDate(t, "SMSG_GAMETIME_SET/UPDATE");
@@ -69,7 +69,7 @@ void RealmTimeHandler::handleGameTime(network::Packet& packet) {
 
 void RealmTimeHandler::handleGameSpeed(network::Packet& packet) {
     if (packet.hasRemaining(8)) {
-        const WowDate t = unpackWowPackedTime(packet.readUInt32());
+        const core::WowDate t = core::unpackWowPackedTime(packet.readUInt32());
         const float timeSpeed = packet.readFloat();
         gameClock_.set(static_cast<float>(t.hour) + static_cast<float>(t.minute) / 60.0f,
                        timeSpeed, now_());
@@ -89,7 +89,7 @@ void RealmTimeHandler::handleServerTime(network::Packet& packet) {
     packet.skipAll();
 }
 
-void RealmTimeHandler::takePackedDate(const WowDate& date, const char* from) {
+void RealmTimeHandler::takePackedDate(const core::WowDate& date, const char* from) {
     if (realmClock_.source() == RealmClock::Source::UnixTime) return;  // knows better already
     if (realmClock_.setPackedDate(date, now_())) {
         LOG_INFO("Realm clock: ", date.fullYear(), "-", date.month, "-", date.day, " ", date.hour,

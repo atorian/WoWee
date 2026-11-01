@@ -1,5 +1,6 @@
 #include "game/item_text.hpp"
 #include "game/quest_handler.hpp"
+#include "game/game_data.hpp"
 #include "game/quest_query_layout.hpp"
 #include "game/chat_log.hpp"
 #include "game/frame_xml_events.hpp"
@@ -21,6 +22,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <limits>
 #include <set>
@@ -561,7 +563,7 @@ static QuestQueryObjectives extractQuestQueryObjectives(const std::vector<uint8_
         return tryParseQuestObjectivesAt(data, base + 63u * 4u, 5, true);  // WotLK
     if (questLogStride == 4)
         return tryParseQuestObjectivesAt(data, base + 41u * 4u, 4, false); // TBC
-    return tryParseQuestObjectivesAt(data, base + 37u * 4u, 4, false);     // Classic/Turtle
+    return tryParseQuestObjectivesAt(data, base + 37u * 4u, 4, false);     // Classic
 }
 
 // Quest log reward extraction lives in QuestQueryRewardsParser
@@ -572,9 +574,9 @@ static QuestQueryObjectives extractQuestQueryObjectives(const std::vector<uint8_
 // ---------------------------------------------------------------------------
 
 QuestHandler::QuestHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
-                           ChatLog& chat, QuestQueries& queries, pipeline::AssetManager* assets)
+                           ChatLog& chat, QuestQueries& queries, const GameData& data)
     : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat), queries_(queries),
-      assets_(assets) {
+      data_(data) {
     // The character's quests begin with their login; the server sends the
     // log, and the tracked set comes back with their settings.
     subscriptions_.push_back(events_.subscribe<events::CharacterLoggingIn>(
@@ -1752,6 +1754,9 @@ void QuestHandler::abandonQuest(uint32_t questId) {
         std::remove_if(journal_.gossipPois.begin(), journal_.gossipPois.end(),
             [questId](const GossipPoi& p) { return p.data == questId; }),
         journal_.gossipPois.end());
+
+    // A quest no longer held is no longer watched.
+    setQuestTracked(questId, false);
 }
 
 void QuestHandler::shareQuestWithParty(uint32_t questId) {
@@ -1787,11 +1792,6 @@ void QuestHandler::acceptSharedQuest() {
     chat_.addSystemChatMessage("Accepted: " + journal_.sharedQuestTitle);
 }
 
-void QuestHandler::declineSharedQuest() {
-    journal_.pendingSharedQuest = false;
-    // No response packet needed - just dismiss the UI
-}
-
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -1804,20 +1804,15 @@ const std::string& QuestHandler::getQuestSortName(uint32_t sortId) {
     static const std::string kEmpty;
     if (!questSortDbcLoaded_) {
         questSortDbcLoaded_ = true;
-        auto* am = assets_;
-        if (am && am->isInitialized()) {
-            auto dbc = am->loadDBC("QuestSort.dbc");
-            // ID(0) + Name locstring whose English text sits at field 1
-            if (dbc && dbc->isLoaded() && dbc->getFieldCount() >= 2) {
-                for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-                    uint32_t id = dbc->getUInt32(i, 0);
-                    std::string name = dbc->getString(i, 1);
-                    if (id != 0 && !name.empty())
-                        questSortNames_[id] = std::move(name);
-                }
-                LOG_INFO("Loaded ", questSortNames_.size(), " quest sort names");
-            }
+        // ID(0) + Name locstring whose English text sits at field 1
+        const auto dbc = data_.table("QuestSort.dbc", 2, "the quest log's category headings");
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            uint32_t id = dbc->getUInt32(i, 0);
+            std::string name = dbc->getString(i, 1);
+            if (id != 0 && !name.empty())
+                questSortNames_[id] = std::move(name);
         }
+        LOG_INFO("Loaded ", questSortNames_.size(), " quest sort names");
     }
     auto it = questSortNames_.find(sortId);
     return it != questSortNames_.end() ? it->second : kEmpty;
@@ -1826,28 +1821,28 @@ const std::string& QuestHandler::getQuestSortName(uint32_t sortId) {
 uint32_t QuestHandler::getQuestRewardXP(int32_t level, uint32_t xpDifficulty) {
     // xpDifficulty is AzerothCore's RewardXPDifficulty, indexing the ten Exp
     // columns directly (Exp[d] = column d = row[d] here). Index 0's column is
-    // zero at every level, and an unparsed layout leaves the index at 0 too, so
-    // both correctly answer no reward XP. Valid difficulty indices are 0..9.
-    if (level <= 0 || xpDifficulty > 9) return 0;
+    // zero at every level, and a quest that names no difficulty - every quest
+    // before WotLK, whose packets carry none and whose clients have no
+    // QuestXP.dbc - leaves the index at 0, so both answer no reward XP without
+    // the file. Valid difficulty indices are 0..9.
+    if (level <= 0 || xpDifficulty == 0 || xpDifficulty > 9) return 0;
     if (!questXpDbcLoaded_) {
         questXpDbcLoaded_ = true;
-        auto* am = assets_;
-        if (am && am->isInitialized()) {
-            auto dbc = am->loadDBC("QuestXP.dbc");
-            // Field 0 is the level; fields 1..10 are the ten difficulty columns.
-            if (dbc && dbc->isLoaded() && dbc->getFieldCount() >= 11) {
-                for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-                    const int32_t lvl = static_cast<int32_t>(dbc->getUInt32(i, 0));
-                    std::array<uint32_t, 10> row{};
-                    for (uint32_t c = 0; c < 10; ++c) row[c] = dbc->getUInt32(i, c + 1);
-                    questXpByLevel_[lvl] = row;
-                }
-                LOG_INFO("Loaded ", questXpByLevel_.size(), " quest XP levels");
-            }
+        // Field 0 is the level; fields 1..10 are the ten difficulty columns.
+        const auto dbc = data_.table("QuestXP.dbc", 11, "the experience a quest rewards");
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            const int32_t lvl = static_cast<int32_t>(dbc->getUInt32(i, 0));
+            std::array<uint32_t, 10> row{};
+            for (uint32_t c = 0; c < 10; ++c) row[c] = dbc->getUInt32(i, c + 1);
+            questXpByLevel_[lvl] = row;
         }
+        LOG_INFO("Loaded ", questXpByLevel_.size(), " quest XP levels");
     }
     auto it = questXpByLevel_.find(level);
-    if (it == questXpByLevel_.end()) return 0;
+    if (it == questXpByLevel_.end()) {
+        data_.stop("QuestXP.dbc", "the experience a quest rewards",
+                   "has no row for level " + std::to_string(level));
+    }
     // The same column AzerothCore's Quest::XPValue reads: Exp[xpDifficulty].
     return it->second[xpDifficulty];
 }
@@ -1860,28 +1855,29 @@ int32_t QuestHandler::getQuestRewardReputation(int32_t valueId, int32_t override
     // index, a whole reputation scaled up to hundredths. Matches the display
     // value in Player::RewardReputation.
     if (override != 0) return override;
+    // Only WotLK's quest packets carry a value index, and only its client has
+    // the file, so it is read only when one was given.
     if (valueId == 0) return 0;
     if (!questFactionRewDbcLoaded_) {
         questFactionRewDbcLoaded_ = true;
-        auto* am = assets_;
-        if (am && am->isInitialized()) {
-            auto dbc = am->loadDBC("QuestFactionReward.dbc");
-            if (dbc && dbc->isLoaded() && dbc->getFieldCount() >= 11) {
-                for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-                    const int32_t id = static_cast<int32_t>(dbc->getUInt32(i, 0));
-                    std::array<int32_t, 10> row{};
-                    for (uint32_t c = 0; c < 10; ++c)
-                        row[c] = static_cast<int32_t>(dbc->getUInt32(i, c + 1));
-                    questFactionRew_[id] = row;
-                }
-            }
+        const auto dbc = data_.table("QuestFactionReward.dbc", 11,
+                                     "the reputation a quest rewards");
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            const int32_t id = static_cast<int32_t>(dbc->getUInt32(i, 0));
+            std::array<int32_t, 10> row{};
+            for (uint32_t c = 0; c < 10; ++c)
+                row[c] = static_cast<int32_t>(dbc->getUInt32(i, c + 1));
+            questFactionRew_[id] = row;
         }
     }
     const int32_t rowId = (valueId < 0) ? 2 : 1;
     const uint32_t field = static_cast<uint32_t>(std::abs(valueId));
     if (field > 9) return 0;
     auto it = questFactionRew_.find(rowId);
-    if (it == questFactionRew_.end()) return 0;
+    if (it == questFactionRew_.end()) {
+        data_.stop("QuestFactionReward.dbc", "the reputation a quest rewards",
+                   "has no row " + std::to_string(rowId));
+    }
     return it->second[field] * 100;
 }
 
@@ -2065,6 +2061,25 @@ bool QuestHandler::resyncQuestLogFromServerSlots(bool forceQueryMetadata) {
              " localBefore=", localBefore, " removed=", removed, " added=", added,
              " markedComplete=", marked);
     return true;
+}
+
+// The log and the tracker draw an objective as "<name> slain: 3/8", and the
+// name is whatever the creature or game object query answers. Both are drawn
+// long before the answer arrives, and neither looks again on its own - so an
+// objective built while the query was out kept the bare word "Creature" until
+// something else happened to that quest. This is what tells them to look.
+void QuestHandler::objectiveTargetNamed(uint32_t entry, bool isGameObject) {
+    if (!frameXml_.frameXmlListening()) return;
+    for (const auto& quest : journal_.questLog) {
+        for (const auto& obj : quest.killObjectives) {
+            if (obj.npcOrGoId == 0 || obj.required == 0) continue;
+            if ((obj.npcOrGoId < 0) != isGameObject) continue;
+            if (static_cast<uint32_t>(std::abs(obj.npcOrGoId)) == entry) {
+                frameXml_.fireFrameXmlEvent("QUEST_LOG_UPDATE", {});
+                return;
+            }
+        }
+    }
 }
 
 void QuestHandler::applyQuestStateFromFields(const FlatFieldMap& fields) {

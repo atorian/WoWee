@@ -9,7 +9,7 @@
 #include <glm/glm.hpp>
 
 namespace wowee {
-namespace pipeline { class DBCFile; class AssetManager; }
+namespace pipeline { class DBCFile; class GameTables; }
 
 namespace rendering {
 
@@ -237,7 +237,7 @@ public:
     /**
      * Initialize lighting system and load DBCs
      */
-    bool initialize(pipeline::AssetManager* assetManager,
+    void initialize(const pipeline::GameTables& tables,
                     const std::string& atmospherePath = "assets/atmosphere_profiles.json");
 
     /**
@@ -353,19 +353,19 @@ private:
     /**
      * Load Light.dbc
      */
-    bool loadLightDbc(pipeline::AssetManager* assetManager);
+    void loadLightDbc(const pipeline::GameTables& tables);
 
     /**
      * Load LightParams.dbc for zone→light mapping
      */
-    bool loadLightParamsDbc(pipeline::AssetManager* assetManager);
+    void loadLightParamsDbc(const pipeline::GameTables& tables);
 
-    bool loadLightSkyboxDbc(pipeline::AssetManager* assetManager);
+    void loadLightSkyboxDbc(const pipeline::GameTables& tables);
 
     /**
      * Load LightIntBand.dbc and LightFloatBand.dbc for time curves
      */
-    bool loadLightBandDbcs(pipeline::AssetManager* assetManager);
+    void loadLightBandDbcs(const pipeline::GameTables& tables);
 
     /**
      * A light and its share of what a point is lit by.

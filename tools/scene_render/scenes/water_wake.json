@@ -1,0 +1,100 @@
+{
+  "map": "Azeroth",
+  "mapId": 0,
+  "zoneId": 33,
+  "hour": 20.3,
+  "server": [
+    -14600,
+    1400,
+    2
+  ],
+  "terrain": false,
+  "streamWorld": false,
+  "waterPlane": true,
+  "waterTiles": 64,
+  "characters": [
+    {
+      "path": "Creature\\SeaTurtle\\SeaTurtle.m2",
+      "offset": [
+        -12,
+        -4,
+        -1.4
+      ],
+      "rotation": [
+        0,
+        0,
+        90
+      ],
+      "velocity": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "path": "Creature\\SeaTurtle\\SeaTurtle.m2",
+      "offset": [
+        0,
+        -10,
+        -1.4
+      ],
+      "rotation": [
+        0,
+        0,
+        90
+      ],
+      "velocity": [
+        0,
+        2,
+        0
+      ]
+    },
+    {
+      "path": "Creature\\SeaTurtle\\SeaTurtle.m2",
+      "offset": [
+        12,
+        -20,
+        -1.4
+      ],
+      "rotation": [
+        0,
+        0,
+        90
+      ],
+      "velocity": [
+        0,
+        5,
+        0
+      ]
+    }
+  ],
+  "camera": {
+    "offset": [
+      0,
+      -34,
+      7
+    ],
+    "lookAt": [
+      0,
+      0,
+      -1
+    ]
+  },
+  "fov": 60.0,
+  "size": [
+    1024,
+    576
+  ],
+  "frames": 120,
+  "clouds": false,
+  "sharpStars": false,
+  "bloom": 0,
+  "sunShafts": false,
+  "volumetricFog": 0,
+  "fogStrength": 0,
+  "msaa": 1,
+  "wind": {
+    "direction": 90.0,
+    "speed": 0.0
+  }
+}

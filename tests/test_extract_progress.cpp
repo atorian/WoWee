@@ -59,6 +59,86 @@ bool packArchive(const fs::path& from, const fs::path& archivePath) {
 
 }  // namespace
 
+#ifdef _WIN32
+namespace {
+struct ExtractFiles {
+    fs::path root;
+    ~ExtractFiles() {
+        std::error_code ec;
+        for (const auto& item : fs::recursive_directory_iterator(root, ec)) {
+            if (item.is_regular_file(ec))
+                fs::permissions(item.path(), fs::perms::owner_write, fs::perm_options::add, ec);
+        }
+        fs::remove_all(root, ec);
+    }
+};
+
+std::string contents(const fs::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+}
+
+TEST_CASE("extraction reads archives from a read-only installation", "[extract][readonly]") {
+    ExtractFiles files{wowee::test::scratchDir("wowee_extract_readonly_archive")};
+    fs::create_directories(files.root / "src/World");
+    std::ofstream(files.root / "src/World/probe.wdt") << "original world data";
+    const auto archive = files.root / "game/Data/lichking.MPQ";
+    REQUIRE(packArchive(files.root / "src", archive));
+    const auto before = contents(archive);
+    fs::permissions(archive, fs::perms::owner_read, fs::perm_options::replace);
+    wowee::tools::Extractor::Options opts;
+    opts.mpqDir = archive.parent_path().string();
+    opts.outputDir = (files.root / "out").string();
+    opts.expansion = "wotlk";
+    REQUIRE(wowee::tools::Extractor::run(opts));
+    CHECK(contents(files.root / "out/world/probe.wdt") == "original world data");
+    CHECK(contents(archive) == before);
+}
+
+TEST_CASE("reimport replaces read-only cached client files", "[extract][readonly]") {
+    ExtractFiles files{wowee::test::scratchDir("wowee_extract_readonly_cache")};
+    fs::create_directories(files.root / "src/World");
+    std::ofstream(files.root / "src/World/probe.wdt") << "world data";
+    REQUIRE(packArchive(files.root / "src", files.root / "game/Data/lichking.MPQ"));
+    for (const char* name : {"WoW.exe", "ijl15.dll"}) {
+        std::ofstream(files.root / "game" / name) << "old client bytes";
+        fs::permissions(files.root / "game" / name, fs::perms::owner_read,
+                        fs::perm_options::replace);
+    }
+    wowee::tools::Extractor::Options opts;
+    opts.mpqDir = (files.root / "game/Data").string();
+    opts.outputDir = (files.root / "out").string();
+    opts.expansion = "wotlk";
+    REQUIRE(wowee::tools::Extractor::run(opts));
+    for (const char* name : {"WoW.exe", "ijl15.dll"}) {
+        const auto source = files.root / "game" / name;
+        fs::permissions(source, fs::perms::owner_write, fs::perm_options::add);
+        std::ofstream(source) << "updated client bytes";
+        fs::permissions(source, fs::perms::owner_read, fs::perm_options::replace);
+        fs::permissions(files.root / "out/misc" / name, fs::perms::owner_read,
+                        fs::perm_options::replace);
+    }
+    REQUIRE(wowee::tools::Extractor::run(opts));
+    CHECK(contents(files.root / "out/misc/WoW.exe") == "updated client bytes");
+    CHECK(contents(files.root / "out/misc/ijl15.dll") == "updated client bytes");
+}
+
+TEST_CASE("extraction refuses an unreadable base archive instead of reporting partial success", "[extract][readonly]") {
+    ExtractFiles files{wowee::test::scratchDir("wowee_extract_broken_base")};
+    fs::create_directories(files.root / "src/World");
+    std::ofstream(files.root / "src/World/probe.wdt") << "patch contents";
+    REQUIRE(packArchive(files.root / "src", files.root / "game/Data/patch.MPQ"));
+    std::ofstream(files.root / "game/Data/common.MPQ") << "broken archive";
+    wowee::tools::Extractor::Options opts;
+    opts.mpqDir = (files.root / "game/Data").string();
+    opts.outputDir = (files.root / "out").string();
+    opts.expansion = "wotlk";
+    CHECK_FALSE(wowee::tools::Extractor::run(opts));
+    CHECK_FALSE(fs::exists(files.root / "out/manifest.json"));
+}
+#endif
+
 TEST_CASE("extraction reports progress as it goes", "[extract][progress]") {
 #ifdef __linux__
     // Debian and Ubuntu package StormLib 9.22 built against a libtomcrypt

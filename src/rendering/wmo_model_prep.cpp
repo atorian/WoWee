@@ -4,6 +4,7 @@
 #include "wmo_model_prep.hpp"
 
 #include "core/logger.hpp"
+#include "rendering/wmo_minimap.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "rendering/wmo_lighting.hpp"
@@ -166,6 +167,7 @@ std::shared_ptr<WmoModelPrep> WMORenderer::prepareModel(const pipeline::WMOModel
     prep->boundingBoxMin = model.boundingBoxMin;
     prep->boundingBoxMax = model.boundingBoxMax;
     prep->ambientColor = model.ambientColor;
+    prep->minimap = WmoMinimapModel::from(model);
     {
         glm::vec3 ext = model.boundingBoxMax - model.boundingBoxMin;
         float horiz = std::max(ext.x, ext.y);
@@ -370,6 +372,7 @@ std::shared_ptr<WmoModelPrep> WMORenderer::prepareModel(const pipeline::WMOModel
             }
 
             batchStates.push_back({ .texture = texture, .blendMode = blendMode,
+                                    .twoSided = (matFlags & 0x04) != 0,
                                     .lighting = wmoBatchLighting(model.flags, resources.groupFlags,
                                                                  batch.kind, matFlags),
                                     .sidnColor = sidnColor, .isLava = isLava,

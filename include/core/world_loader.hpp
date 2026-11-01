@@ -21,7 +21,7 @@
 namespace wowee {
 
 namespace rendering { class Renderer; class LoadingScreen; }
-namespace pipeline { class AssetManager; class DBCLayout; }
+namespace pipeline { class AssetManager; class DBCLayout; class GameTables; }
 
 namespace core {
 
@@ -41,6 +41,7 @@ public:
     /// `lastWorldFile` is where the last map entered is kept for the next
     /// start's preload; `clock` times the stages.
     WorldLoader(const Phase& phase, rendering::Renderer* renderer, pipeline::AssetManager* assetManager,
+                const pipeline::GameTables& tables,
                 std::filesystem::path lastWorldFile = defaultLastWorldFile(),
                 Clock clock = &std::chrono::steady_clock::now);
     ~WorldLoader();
@@ -77,7 +78,6 @@ public:
     bool isInstance() const;
 
     // Map name utilities
-    static const char* mapIdToName(uint32_t mapId);
     static const char* mapDisplayName(uint32_t mapId);
 
     // Background preloading - warms AssetManager file cache
@@ -100,11 +100,9 @@ public:
     [[nodiscard]] uint32_t getLoadedMapId() const;
     [[nodiscard]] bool hasPendingEntry() const { return pendingWorldEntry_.has_value(); }
 
-    // Get cached map name by ID (returns empty string if not found)
-    [[nodiscard]] std::string getMapNameById(uint32_t mapId) const {
-        auto it = mapNameById_.find(mapId);
-        return (it != mapNameById_.end()) ? it->second : std::string{};
-    }
+    /// The map's directory under World\Maps, from Map.dbc; empty for an id
+    /// the table does not have.
+    [[nodiscard]] std::string mapNameFor(uint32_t mapId);
 
     // ClientLoop takes the last pending destination at its transition boundary.
     void setPendingEntry(uint32_t mapId, float x, float y, float z) {
@@ -121,13 +119,13 @@ private:
     const Phase& phase_;
     rendering::Renderer* renderer_;
     pipeline::AssetManager* assetManager_;
+    const pipeline::GameTables& tables_;
     std::filesystem::path lastWorldFile_;
     bool reportedLastWorldFailure_ = false;
     Clock clock_;
     Load* load_ = nullptr;  // Borrowed from MapScope's Session.
     [[nodiscard]] float secondsSince(std::chrono::steady_clock::time_point start) const;
     void fail(const std::string& reason);
-    std::string resolveMapName(uint32_t mapId);
     /// `normalMaps`: how this device keeps building normal maps, which the
     /// worker encodes them as.
     static std::shared_ptr<PreparedMap> prepareMap(pipeline::AssetManager& assets,

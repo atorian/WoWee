@@ -1,3 +1,9 @@
+#include "group/services/group.hpp"
+#include "mail/services/mail.hpp"
+#include "contacts/services/contacts.hpp"
+#include "battleground/services/battlegrounds.hpp"
+#include "lfg/services/lfg.hpp"
+#include "calendar/services/calendar.hpp"
 #include "rendering/view_distance.hpp"
 #include "game/group_defines.hpp"
 #include "game/weather_handler.hpp"
@@ -13,6 +19,7 @@
 #include "ui/minimap_projection.hpp"
 #include "rendering/vk_context.hpp"
 #include "core/application.hpp"
+#include "core/window.hpp"
 #include "core/appearance_composer.hpp"
 #include "addons/addon_manager.hpp"
 #include "core/coordinates.hpp"
@@ -113,9 +120,9 @@ void GameScreen::refreshQuestObjectiveCache(game::GameHandler& gameHandler) {
         signature ^= value;
         signature *= 1099511628211ull;
     };
-    const auto& tracked = gameHandler.getTrackedQuestIds();
+    const auto& tracked = gameHandler.quests().trackedQuests();
     mix(tracked.size());
-    for (const auto& quest : gameHandler.getQuestLog()) {
+    for (const auto& quest : gameHandler.quests().getQuestLog()) {
         if (quest.complete || quest.questId == 0 ||
             !tracked.count(quest.questId)) continue;
         mix(quest.questId);
@@ -134,7 +141,7 @@ void GameScreen::refreshQuestObjectiveCache(game::GameHandler& gameHandler) {
     minimapQuestCacheSignature_ = signature;
     minimapQuestCreatureEntries_.clear();
     minimapQuestGameObjectEntries_.clear();
-    for (const auto& quest : gameHandler.getQuestLog()) {
+    for (const auto& quest : gameHandler.quests().getQuestLog()) {
         if (quest.complete || quest.questId == 0 ||
             !tracked.count(quest.questId)) continue;
         for (const auto& objective : quest.killObjectives) {
@@ -246,7 +253,8 @@ void GameScreen::renderMinimapButtons(game::GameHandler& gameHandler, float cent
 
     // Friends button at top-left of minimap
     {
-        const auto& contacts = gameHandler.getContacts();
+        static const std::vector<contacts::Contact> kNoContacts;
+        const auto& contacts = services_.contacts ? services_.contacts->contacts() : kNoContacts;
         int onlineCount = 0;
         for (const auto& c : contacts)
             if (c.isFriend() && c.isOnline()) ++onlineCount;
@@ -373,7 +381,7 @@ void GameScreen::renderMinimapIndicators(game::GameHandler& gameHandler, float c
                                        ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoInputs;
 
     // "New Mail" indicator
-    if (gameHandler.hasNewMail()) {
+    if (mail::orNoMailbox(services_.mail).hasNewMail()) {
         ImGui::SetNextWindowPos(ImVec2(indicatorX, nextIndicatorY), ImGuiCond_Always);
         ImGui::SetNextWindowSize(ImVec2(indicatorW, kIndicatorH), ImGuiCond_Always);
         if (ImGui::Begin("##NewMailIndicator", nullptr, indicatorFlags)) {
@@ -386,7 +394,7 @@ void GameScreen::renderMinimapIndicators(game::GameHandler& gameHandler, float c
 
     // Unspent talent points indicator
     {
-        uint8_t unspent = gameHandler.getUnspentTalentPoints();
+        uint8_t unspent = gameHandler.spells().getUnspentTalentPoints();
         if (unspent > 0) {
             ImGui::SetNextWindowPos(ImVec2(indicatorX, nextIndicatorY), ImGuiCond_Always);
             ImGui::SetNextWindowSize(ImVec2(indicatorW, kIndicatorH), ImGuiCond_Always);
@@ -403,7 +411,9 @@ void GameScreen::renderMinimapIndicators(game::GameHandler& gameHandler, float c
     }
 
     // BG queue status indicator (when in queue but not yet invited)
-    for (const auto& slot : gameHandler.getBgQueues()) {
+    static const std::array<battleground::BgQueueSlot, 3> kNoQueues{};
+    const auto& queues = services_.battlegrounds ? services_.battlegrounds->getBgQueues() : kNoQueues;
+    for (const auto& slot : queues) {
         if (slot.statusId != 1) continue;  // STATUS_WAIT_QUEUE only
 
         std::string bgName;
@@ -441,9 +451,9 @@ void GameScreen::renderMinimapIndicators(game::GameHandler& gameHandler, float c
     }
 
     // LFG queue indicator - shown when Dungeon Finder queue is active (Queued or RoleCheck)
-    {
-        using LfgState = game::GameHandler::LfgState;
-        LfgState lfgSt = gameHandler.getLfgState();
+    if (auto* finder = services_.lfg) {
+        using LfgState = lfg::LfgState;
+        LfgState lfgSt = finder->getLfgState();
         if (lfgSt == LfgState::Queued || lfgSt == LfgState::RoleCheck) {
             ImGui::SetNextWindowPos(ImVec2(indicatorX, nextIndicatorY), ImGuiCond_Always);
             ImGui::SetNextWindowSize(ImVec2(indicatorW, kIndicatorH), ImGuiCond_Always);
@@ -452,7 +462,7 @@ void GameScreen::renderMinimapIndicators(game::GameHandler& gameHandler, float c
                     float pulse = 0.6f + 0.4f * std::sin(static_cast<float>(ImGui::GetTime()) * 3.0f);
                     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, pulse), "LFG: Role Check...");
                 } else {
-                    const uint32_t queued = gameHandler.getLfgQueuedSeconds();
+                    const uint32_t queued = finder->getLfgQueuedSeconds();
                     const int qMin = static_cast<int>(queued / 60);
                     const int qSec = static_cast<int>(queued % 60);
                     float pulse = 0.6f + 0.4f * std::sin(static_cast<float>(ImGui::GetTime()) * 1.2f);
@@ -470,7 +480,7 @@ void GameScreen::renderMinimapIndicators(game::GameHandler& gameHandler, float c
         auto* expReg = services_.expansionRegistry;
         bool isWotLK = expReg && expReg->getActive() && expReg->getActive()->id == "wotlk";
         if (isWotLK) {
-            uint32_t calPending = gameHandler.getCalendarPendingInvites();
+            const uint32_t calPending = services_.calendar ? services_.calendar->getCalendarPendingInvites() : 0;
             if (calPending > 0) {
                 ImGui::SetNextWindowPos(ImVec2(indicatorX, nextIndicatorY), ImGuiCond_Always);
                 ImGui::SetNextWindowSize(ImVec2(indicatorW, kIndicatorH), ImGuiCond_Always);
@@ -488,11 +498,11 @@ void GameScreen::renderMinimapIndicators(game::GameHandler& gameHandler, float c
     }
 
     // Taxi flight indicator - shown while on a flight path
-    if (gameHandler.isOnTaxiFlight()) {
+    if (gameHandler.movement().isOnTaxiFlight()) {
         ImGui::SetNextWindowPos(ImVec2(indicatorX, nextIndicatorY), ImGuiCond_Always);
         ImGui::SetNextWindowSize(ImVec2(indicatorW, kIndicatorH), ImGuiCond_Always);
         if (ImGui::Begin("##TaxiIndicator", nullptr, indicatorFlags)) {
-            const std::string& dest = gameHandler.getTaxiDestName();
+            const std::string& dest = gameHandler.movement().getTaxiDestName();
             float pulse = 0.7f + 0.3f * std::sin(static_cast<float>(ImGui::GetTime()) * 1.0f);
             if (dest.empty()) {
                 ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, pulse), "\xe2\x9c\x88 In Flight");
@@ -550,7 +560,7 @@ void GameScreen::renderMinimapIndicators(game::GameHandler& gameHandler, float c
 
     // Low durability warning - shown when any equipped item has < 20% durability
     if (gameHandler.getState() == game::WorldState::IN_WORLD) {
-        const auto& inv = gameHandler.getInventory();
+        const auto& inv = gameHandler.inventory().items();
         float lowestDurPct = 1.0f;
         for (int i = 0; i < game::Inventory::NUM_EQUIP_SLOTS; ++i) {
             const auto& slot = inv.getEquipSlot(static_cast<game::EquipSlot>(i));
@@ -680,7 +690,7 @@ void GameScreen::renderMinimapRares(const MinimapFrame& frame, const EntityList&
             auto unit = std::static_pointer_cast<game::Unit>(entity);
             if (!unit || unit->getHealth() == 0) continue;
 
-            const int rank = gameHandler.getCreatureRank(unit->getEntry());
+            const int rank = gameHandler.queryCache().getCreatureRank(unit->getEntry());
             if (rank != 2 && rank != 4) continue; // 2 = Rare Elite, 4 = Rare
 
             float sx = 0.0f, sy = 0.0f;
@@ -718,7 +728,7 @@ void GameScreen::renderMinimapPlayerDots(const MinimapFrame& frame, const Entity
     // Party members are already drawn as squares above; other players get a small circle.
     if (settingsPanel_.minimapNpcDots_) {
         const uint64_t selfGuid = gameHandler.getPlayerGuid();
-        const auto& partyData = gameHandler.getPartyData();
+        const auto& partyData = group::orNoGroup(services_.group).getPartyData();
         for (const auto& entity : minimapPlayers) {
             const uint64_t guid = entity->getGuid();
             if (entity->getGuid() == selfGuid) continue;  // skip self (already drawn as arrow)
@@ -794,7 +804,7 @@ void GameScreen::renderMinimapObjectDots(const MinimapFrame& frame, const Entity
             if (!go) continue;
 
             // Only show if we have name data (avoids cluttering with unknown objects)
-            const auto* goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
+            const auto* goInfo = gameHandler.queryCache().getCachedGameObjectInfo(go->getEntry());
             if (!goInfo || !goInfo->isValid()) continue;
             // Skip transport objects (boats/zeppelins): type 15 = MO_TRANSPORT, 11 = TRANSPORT
             if (goInfo->type == 11 || goInfo->type == 15) continue;
@@ -839,7 +849,7 @@ void GameScreen::renderMinimapChests(const MinimapFrame& frame, const EntityList
         for (const auto& entity : minimapGameObjects) {
             auto chest = std::static_pointer_cast<game::GameObject>(entity);
             if (!chest) continue;
-            const auto* info = gameHandler.getCachedGameObjectInfo(chest->getEntry());
+            const auto* info = gameHandler.queryCache().getCachedGameObjectInfo(chest->getEntry());
             if (!info || !info->isValid() || info->type != 3) continue;
             if (gameHandler.isGatherGameObject(chest->getGuid())) continue;
 
@@ -945,8 +955,8 @@ void GameScreen::renderMinimapQuestKills(const MinimapFrame& frame, const Entity
         // Tracked, not every quest in the log: this highlights live NPCs in
         // the world, and a player with twenty quests wants the ones they are
         // watching lit up rather than all of them.
-        const auto& trackedIds = gameHandler.getTrackedQuestIds();
-        for (const auto& quest : gameHandler.getQuestLog()) {
+        const auto& trackedIds = gameHandler.quests().trackedQuests();
+        for (const auto& quest : gameHandler.quests().getQuestLog()) {
             if (quest.complete) continue;
             if (!trackedIds.count(quest.questId)) continue;
             for (const auto& obj : quest.killObjectives) {
@@ -1005,9 +1015,9 @@ void GameScreen::renderMinimapQuestKills(const MinimapFrame& frame, const Entity
 // The points a gossip window has pointed at - quest and service targets.
 void GameScreen::renderMinimapGossipPois(const MinimapFrame& frame, game::GameHandler& gameHandler) {
     // Gossip POI markers (quest / NPC navigation targets)
-    for (const auto& poi : gameHandler.getGossipPois()) {
+    for (const auto& poi : gameHandler.quests().getGossipPois()) {
         // A gossip target always, a quest's points while it is tracked.
-        if (poi.questObjectiveIndex != -2 && !gameHandler.isQuestTracked(poi.data)) {
+        if (poi.questObjectiveIndex != -2 && !gameHandler.quests().isQuestTracked(poi.data)) {
             continue;
         }
         // Convert WoW canonical coords to render coords for minimap projection
@@ -1038,7 +1048,7 @@ void GameScreen::renderMinimapGossipPois(const MinimapFrame& frame, game::GameHa
 // What a party member pinged, for as long as the ping lasts.
 void GameScreen::renderMinimapPings(const MinimapFrame& frame, game::GameHandler& gameHandler) {
     // Minimap pings from party members
-    for (const auto& ping : gameHandler.getMinimapPings()) {
+    for (const auto& ping : gameHandler.social().minimapPings()) {
         float sx = 0.0f, sy = 0.0f;
         if (!frame.projectCanonical(ping.wowX, ping.wowY, sx, sy)) continue;
 
@@ -1064,7 +1074,7 @@ void GameScreen::renderMinimapPings(const MinimapFrame& frame, game::GameHandler
 void GameScreen::renderMinimapPartyDots(const MinimapFrame& frame, game::GameHandler& gameHandler) {
     // Party member dots on minimap
     {
-        const auto& partyData = gameHandler.getPartyData();
+        const auto& partyData = group::orNoGroup(services_.group).getPartyData();
         const uint64_t leaderGuid = partyData.leaderGuid;
         for (const auto& member : partyData.members) {
             if (!member.isOnline || !member.hasPartyStats) continue;
@@ -1099,8 +1109,8 @@ void GameScreen::renderMinimapPartyDots(const MinimapFrame& frame, game::GameHan
 
             // Raid mark: the marker artwork drawn small above the dot
             {
-                uint8_t pmk = gameHandler.getEntityRaidMark(member.guid);
-                if (pmk < game::GameHandler::kRaidMarkCount) {
+                uint8_t pmk = group::orNoGroup(services_.group).getEntityRaidMark(member.guid);
+                if (pmk < group::kRaidMarkCount) {
                     if (VkDescriptorSet markTex = ui::getRaidTargetIcon(pmk, services_.assetManager)) {
                         constexpr float kMarkSize = 10.0f;
                         frame.drawList->AddImage((ImTextureID)(uintptr_t)markTex,
@@ -1111,7 +1121,7 @@ void GameScreen::renderMinimapPartyDots(const MinimapFrame& frame, game::GameHan
             }
 
             if (!member.name.empty() && cursorNearBlip(sx, sy)) {
-                uint8_t pmk2 = gameHandler.getEntityRaidMark(member.guid);
+                uint8_t pmk2 = group::orNoGroup(services_.group).getEntityRaidMark(member.guid);
                 if (const char* markName = game::raidMarkName(pmk2)) {
                     ImGui::SetTooltip("%s {%s}", member.name.c_str(), markName);
                 } else {
@@ -1127,7 +1137,9 @@ void GameScreen::renderMinimapPartyDots(const MinimapFrame& frame, game::GameHan
 void GameScreen::renderMinimapBattlegroundPositions(const MinimapFrame& frame, game::GameHandler& gameHandler) {
     // BG flag carrier / important player positions (MSG_BATTLEGROUND_PLAYER_POSITIONS)
     {
-        const auto& bgPositions = gameHandler.getBgPlayerPositions();
+        static const std::vector<battleground::BgPlayerPosition> kNoPositions;
+        const auto& bgPositions =
+            services_.battlegrounds ? services_.battlegrounds->getBgPlayerPositions() : kNoPositions;
         if (!bgPositions.empty()) {
             for (const auto& bp : bgPositions) {
                 // Packet coords: wowX=canonical X (north), wowY=canonical Y (west)
@@ -1175,9 +1187,9 @@ void GameScreen::renderMinimapBattlegroundPositions(const MinimapFrame& frame, g
 // one keeps the render position rather than only the projected point.
 void GameScreen::renderMinimapCorpseMarker(const MinimapFrame& frame, game::GameHandler& gameHandler) {
     // Corpse direction indicator - shown when player is a ghost
-    if (gameHandler.isPlayerGhost()) {
+    if (gameHandler.combat().isPlayerGhost()) {
         float corpseCanX = 0.0f, corpseCanY = 0.0f;
-        if (gameHandler.getCorpseCanonicalPos(corpseCanX, corpseCanY)) {
+        if (gameHandler.combat().getCorpseCanonicalPos(corpseCanX, corpseCanY)) {
             // The render position is kept: unlike the loops above, a corpse off
             // the edge is not skipped - it gets a direction arrow at the rim,
             // and that needs the direction.
@@ -1198,7 +1210,7 @@ void GameScreen::renderMinimapCorpseMarker(const MinimapFrame& frame, game::Game
                                   IM_COL32(180, 180, 220, 255), 1.5f);
                 // Tooltip on hover
                 if (cursorNearBlip(csx, csy)) {
-                    float dist = gameHandler.getCorpseDistance();
+                    float dist = gameHandler.combat().getCorpseDistance();
                     if (dist >= 0.0f)
                         ImGui::SetTooltip("Your corpse (%.0f yd)", dist);
                     else
@@ -1234,7 +1246,7 @@ void GameScreen::renderMinimapCorpseMarker(const MinimapFrame& frame, game::Game
                     frame.drawList->AddTriangle(tip, left, right, IM_COL32(0, 0, 0, 180), 1.0f);
                     // Tooltip on hover
                     if (cursorNearBlip(ax, ay, kArrowHoverRadius)) {
-                        float dist = gameHandler.getCorpseDistance();
+                        float dist = gameHandler.combat().getCorpseDistance();
                         if (dist >= 0.0f)
                             ImGui::SetTooltip("Your corpse (%.0f yd)", dist);
                         else
@@ -1335,7 +1347,7 @@ void GameScreen::handleMinimapInput(const MinimapFrame& frame, game::GameHandler
             const glm::vec2 d = minimapOffsetToRenderDelta(mdx, mdy, frame.view);
             glm::vec3 clickRender = frame.playerRender + glm::vec3(d.x, d.y, 0.0f);
             glm::vec3 clickCanon = core::coords::renderToCanonical(clickRender);
-            gameHandler.sendMinimapPing(clickCanon.x, clickCanon.y);
+            gameHandler.social().sendMinimapPing(clickCanon.x, clickCanon.y);
         }
     }
 
@@ -1488,7 +1500,7 @@ void GameScreen::renderMinimapReadouts(const MinimapFrame& frame, game::GameHand
 
     // Instance difficulty indicator - just below zone name, inside minimap top edge
     if (gameHandler.isInInstance()) {
-        uint32_t diff = gameHandler.getInstanceDifficulty();
+        uint32_t diff = gameHandler.social().getInstanceDifficulty();
         const char* named = game::instanceDifficultyName(diff);
         const char* label = named ? named : "Unknown";
 
@@ -1501,8 +1513,8 @@ void GameScreen::renderMinimapReadouts(const MinimapFrame& frame, game::GameHand
         float pad = 2.0f;
 
         // Color-code: heroic=orange, normal=light gray
-        ImU32 bgCol = gameHandler.isInstanceHeroic() ? IM_COL32(120, 60, 0, 180) : IM_COL32(0, 0, 0, 160);
-        ImU32 textCol = gameHandler.isInstanceHeroic() ? IM_COL32(255, 180, 50, 255) : IM_COL32(200, 200, 200, 220);
+        ImU32 bgCol = gameHandler.social().isInstanceHeroic() ? IM_COL32(120, 60, 0, 180) : IM_COL32(0, 0, 0, 160);
+        ImU32 textCol = gameHandler.social().isInstanceHeroic() ? IM_COL32(255, 180, 50, 255) : IM_COL32(200, 200, 200, 220);
 
         drawList->AddRectFilled(
             ImVec2(tx - pad, ty - pad),
@@ -1583,7 +1595,7 @@ void GameScreen::renderMinimapReadouts(const MinimapFrame& frame, game::GameHand
 }
 
 void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
-    const auto& statuses = gameHandler.getNpcQuestStatuses();
+    const auto& statuses = gameHandler.quests().getNpcQuestStatuses();
     auto* renderer = services_.renderer;
     auto* camera = renderer ? renderer->getCamera() : nullptr;
     auto* minimap = renderer ? renderer->getMinimap() : nullptr;

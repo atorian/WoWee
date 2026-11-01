@@ -17,10 +17,13 @@
 #include "game/spell_classification.hpp"
 #include "game/update_field_table.hpp"
 #include "game/inventory_slots.hpp"
-#include "game/reputation_standing.hpp"
+#include "pet/services/pet.hpp"
 #include "core/logger.hpp"
 #include "core/app_clock.hpp"
 #include "ui/widget_tree.hpp"
+
+namespace wowee::reputation { class IReputation; struct ReputationEntry; struct ReputationRow; }
+struct lua_State;
 
 namespace wowee::addons {
 
@@ -33,13 +36,9 @@ namespace wowee::addons {
 /// the only reason the number means anything on the other side.
 int questLogRowForQuest(lua_State* L, game::GameHandler* gh, uint32_t questId);
 
-/// Put FrameXML's quest log in front of `questId`.
-///
-/// Asked for by a quest link in chat and by the objective tracker, neither of
-/// which has a log of its own to open any more. Without a row the log is
-/// opened on whatever it had selected: an approximation of the ask beats
-/// nothing happening.
-void openInterfaceQuestLog(game::GameHandler& gh, uint32_t questId);
+/// The pet and the stable as the composition root handed them to the addon
+/// layer, or no pet and no stable when there is no game.
+pet::IPet& petOf(lua_State* L);
 
 }  // namespace wowee::addons
 
@@ -314,7 +313,7 @@ inline LuaServices* getLuaServices(lua_State* L) {
 inline uint64_t getEntityTargetGuid(game::GameHandler* gh, uint64_t guid) {
     if (guid == 0) return 0;
     // If asking for the player's target, use direct accessor
-    if (guid == gh->getPlayerGuid()) return gh->getTargetGuid();
+    if (guid == gh->getPlayerGuid()) return gh->combat().getTargetGuid();
     auto entity = gh->getEntityManager().getEntity(guid);
     if (!entity) return 0;
     const auto& fields = entity->getFields();
@@ -330,10 +329,10 @@ inline uint64_t getEntityTargetGuid(game::GameHandler* gh, uint64_t guid) {
 // Resolve WoW unit IDs to GUID
 inline uint64_t resolveUnitGuid(game::GameHandler* gh, const std::string& uid) {
     if (uid == "player")      return gh->getPlayerGuid();
-    if (uid == "target")      return gh->getTargetGuid();
-    if (uid == "focus")       return gh->getFocusGuid();
-    if (uid == "mouseover")   return gh->getMouseoverGuid();
-    if (uid == "pet")         return gh->getPetGuid();
+    if (uid == "target")      return gh->combat().getTargetGuid();
+    if (uid == "focus")       return gh->combat().getFocusGuid();
+    if (uid == "mouseover")   return gh->combat().getMouseoverGuid();
+    if (uid == "pet")         return gh->petGuid();
     // The NPC whose window is open, which is how FrameXML titles three of
     // them: GossipFrameNpcNameText and BankFrameTitleText both read
     // UnitName("npc"), and QuestFrameNpcNameText reads UnitName("questnpc").
@@ -345,25 +344,25 @@ inline uint64_t resolveUnitGuid(game::GameHandler* gh, const std::string& uid) {
     // giver it came from, the gossip its own npc, and a vendor or a banker
     // theirs. The target is the last resort, and is usually the same NPC.
     if (uid == "npc" || uid == "questnpc") {
-        if (uid == "questnpc" && gh->getQuestDetails().npcGuid != 0)
-            return gh->getQuestDetails().npcGuid;
-        if (gh->getCurrentGossip().npcGuid != 0) return gh->getCurrentGossip().npcGuid;
-        if (gh->getQuestDetails().npcGuid != 0)  return gh->getQuestDetails().npcGuid;
-        if (gh->getVendorGuid() != 0)            return gh->getVendorGuid();
-        if (gh->getBankerGuid() != 0)            return gh->getBankerGuid();
-        return gh->getTargetGuid();
+        if (uid == "questnpc" && gh->quests().getQuestDetails().npcGuid != 0)
+            return gh->quests().getQuestDetails().npcGuid;
+        if (gh->quests().getCurrentGossip().npcGuid != 0) return gh->quests().getCurrentGossip().npcGuid;
+        if (gh->quests().getQuestDetails().npcGuid != 0)  return gh->quests().getQuestDetails().npcGuid;
+        if (gh->inventory().getVendorGuid() != 0) return gh->inventory().getVendorGuid();
+        if (gh->inventory().getBankerGuid() != 0) return gh->inventory().getBankerGuid();
+        return gh->combat().getTargetGuid();
     }
     // Compound unit IDs: targettarget, focustarget, pettarget, mouseovertarget
-    if (uid == "targettarget")    return getEntityTargetGuid(gh, gh->getTargetGuid());
-    if (uid == "focustarget")     return getEntityTargetGuid(gh, gh->getFocusGuid());
-    if (uid == "pettarget")       return getEntityTargetGuid(gh, gh->getPetGuid());
-    if (uid == "mouseovertarget") return getEntityTargetGuid(gh, gh->getMouseoverGuid());
+    if (uid == "targettarget")    return getEntityTargetGuid(gh, gh->combat().getTargetGuid());
+    if (uid == "focustarget")     return getEntityTargetGuid(gh, gh->combat().getFocusGuid());
+    if (uid == "pettarget")       return getEntityTargetGuid(gh, gh->petGuid());
+    if (uid == "mouseovertarget") return getEntityTargetGuid(gh, gh->combat().getMouseoverGuid());
     // party1-party4, raid1-raid40
     if (uid.rfind("party", 0) == 0 && uid.size() > 5) {
         int idx = 0;
         try { idx = std::stoi(uid.substr(5)); } catch (...) { return 0; }
         if (idx < 1 || idx > 4) return 0;
-        const auto& pd = gh->getPartyData();
+        const auto& pd = gh->party();
         // party members exclude self; index 1-based
         int found = 0;
         for (const auto& m : pd.members) {
@@ -379,13 +378,13 @@ inline uint64_t resolveUnitGuid(game::GameHandler* gh, const std::string& uid) {
         int idx = 0;
         try { idx = std::stoi(uid.substr(4)); } catch (...) { return 0; }
         if (idx < 1 || idx > static_cast<int>(game::GameHandler::kMaxEncounterSlots)) return 0;
-        return gh->getEncounterUnitGuid(static_cast<uint32_t>(idx - 1));
+        return gh->social().getEncounterUnitGuid(static_cast<uint32_t>(idx - 1));
     }
     if (uid.rfind("raid", 0) == 0 && uid.size() > 4 && uid[4] != 'p') {
         int idx = 0;
         try { idx = std::stoi(uid.substr(4)); } catch (...) { return 0; }
         if (idx < 1 || idx > 40) return 0;
-        const auto& pd = gh->getPartyData();
+        const auto& pd = gh->party();
         if (idx <= static_cast<int>(pd.members.size()))
             return pd.members[idx - 1].guid;
         return 0;
@@ -443,12 +442,12 @@ struct QuestSpecialItem {
 inline QuestSpecialItem questSpecialItemAt(game::GameHandler* gh, int questIndex) {
     QuestSpecialItem found;
     if (!gh || questIndex < 1) return found;
-    const auto& ql = gh->getQuestLog();
+    const auto& ql = gh->quests().getQuestLog();
     if (questIndex > static_cast<int>(ql.size())) return found;
     const uint32_t itemId = ql[questIndex - 1].sourceItemId;
     if (itemId == 0) return found;
 
-    const auto& inv = gh->getInventory();
+    const auto& inv = gh->inventory().items();
     for (int i = 0; i < inv.getBackpackSize(); ++i) {
         const auto& slot = inv.getBackpackSlot(i);
         if (!slot.empty() && slot.item.itemId == itemId) {
@@ -477,70 +476,17 @@ inline QuestSpecialItem questSpecialItemAt(game::GameHandler* gh, int questIndex
 /// The tree flags default to "a plain faction row with a standing", which is
 /// what GetFactionInfoByID answers: it is asked about one faction by id and
 /// has no row, so it has no place in the tree to report.
-inline int pushFactionInfo(lua_State* L, game::GameHandler* gh,
-                           const game::GameHandler::ReputationEntry& f,
-                           bool isHeader = false, bool isCollapsed = false,
-                           bool hasRep = true, bool isChild = false) {
-    const int32_t value = gh->getFactionStanding(f.factionId);
-    const auto& band = game::reputationStandingFor(value);
-    const bool atWar = (f.flags & game::GameHandler::FACTION_FLAG_AT_WAR) != 0;
-    const bool peaceForced =
-        (f.flags & game::GameHandler::FACTION_FLAG_PEACE_FORCED) != 0;
-
-    lua_pushstring(L, f.name.c_str());                          // 1: name
-    lua_pushstring(L, "");                                      // 2: description
-    lua_pushnumber(L, band.id);                                 // 3: standingId
-    lua_pushnumber(L, band.floor);                              // 4: barMin
-    // The bar's top is one past the last value still at this standing, so a
-    // faction sitting at the ceiling reads as full rather than as over.
-    lua_pushnumber(L, band.ceiling + 1);                        // 5: barMax
-    lua_pushnumber(L, value);                                   // 6: barValue
-    lua_pushboolean(L, atWar ? 1 : 0);                          // 7: atWarWith
-    lua_pushboolean(L, peaceForced ? 0 : 1);                    // 8: canToggleAtWar
-    // Whether this row is a heading, and whether it is drawn indented. Both
-    // come from Faction.dbc's parent chain, and both used to be false because
-    // the rule looked for was the wrong one: a header was taken to be a parent
-    // with no reputation of its own, and no faction in the file is that -
-    // Alliance is ReputationListID 11, Horde is 12, Classic is 96. But isHeader
-    // and hasRep are separate answers precisely so that a heading can carry a
-    // standing too, which is what Alliance is. The rule is simply "something
-    // visible descends from it", and it yields the groups the original panel
-    // draws: Classic, The Burning Crusade and Wrath of the Lich King at the
-    // top, with Alliance, Horde, Steamwheedle Cartel and the rest inside them.
-    lua_pushboolean(L, isHeader ? 1 : 0);                       // 9: isHeader
-    lua_pushboolean(L, isCollapsed ? 1 : 0);                    // 10: isCollapsed
-    lua_pushboolean(L, hasRep ? 1 : 0);                         // 11: hasRep
-    lua_pushboolean(L, f.factionId == gh->getWatchedFactionId() ? 1 : 0);  // 12: isWatched
-    lua_pushboolean(L, isChild ? 1 : 0);                        // 13: isChild
-    return 13;
-}
+int pushFactionInfo(lua_State* L, const reputation::ReputationEntry& f,
+                    bool isHeader = false, bool isCollapsed = false,
+                    bool hasRep = true, bool isChild = false);
 
 /// Open or close the group at a drawn-row index. Shared because the two verbs
 /// differ only in the boolean, and because the index has to be resolved the
 /// same way both times - against the rows, which is what FrameXML counted.
-inline int factionHeaderSetCollapsed(lua_State* L, bool collapsed) {
-    auto* gh = getGameHandler(L);
-    const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh || index < 1) return 0;
-    const auto& rows = gh->getReputationRows();
-    if (index > static_cast<int>(rows.size())) return 0;
-    const auto& row = rows[static_cast<size_t>(index) - 1];
-    if (row.isHeader) gh->setFactionCollapsed(row.factionId, collapsed);
-    return 0;
-}
+int factionHeaderSetCollapsed(lua_State* L, bool collapsed);
 
 /// The same thirteen for a drawn row, which knows its place in the tree.
-inline int pushFactionRow(lua_State* L, game::GameHandler* gh,
-                          const game::GameHandler::ReputationRow& row) {
-    game::GameHandler::ReputationEntry e;
-    e.factionId = row.factionId;
-    e.reputationIndex = row.reputationIndex;
-    e.name = row.name;
-    e.flags = row.flags;
-    return pushFactionInfo(L, gh, e, row.isHeader,
-                           row.isHeader && gh->isFactionCollapsed(row.factionId),
-                           row.hasRep, row.isChild);
-}
+int pushFactionRow(lua_State* L, const reputation::ReputationRow& row);
 
 /// The item behind a row of the currency list, or zero for no such row.
 ///
@@ -582,7 +528,7 @@ inline uint8_t unitRaceOf(game::GameHandler* gh, const std::string& lowerUid) {
             entity->getField(game::fieldIndex(game::UF::UNIT_FIELD_BYTES_0));
         raceId = static_cast<uint8_t>(bytes0 & 0xFF);
     }
-    if (raceId == 0) raceId = gh->lookupPlayerRace(guid);
+    if (raceId == 0) raceId = gh->queryCache().lookupPlayerRace(guid);
     return raceId;
 }
 
@@ -600,8 +546,8 @@ inline uint8_t unitRaceOf(game::GameHandler* gh, const std::string& lowerUid) {
 // than doing nothing.
 inline bool completedItemTarget(lua_State* L, uint64_t targetGuid) {
     auto* gh = getGameHandler(L);
-    if (!gh || !gh->isAwaitingItemTarget()) return false;
-    if (targetGuid != 0) gh->completeItemUseOnItem(targetGuid);
+    if (!gh || !gh->inventory().isAwaitingItemTarget()) return false;
+    if (targetGuid != 0) gh->inventory().completeItemUseOnItem(targetGuid);
     return true;
 }
 
@@ -627,9 +573,9 @@ inline bool& repairCursorUp(lua_State* L) {
 /// otherwise try to repair against a vendor that is no longer there.
 inline bool repairedHeldItem(lua_State* L, game::GameHandler* gh, uint64_t itemGuid) {
     if (!gh || !repairCursorUp(L) || !itemGuid) return false;
-    const uint64_t vendor = gh->getVendorGuid();
-    if (!vendor || !gh->isVendorWindowOpen()) return false;
-    gh->repairItem(vendor, itemGuid);
+    const uint64_t vendor = gh->inventory().getVendorGuid();
+    if (!vendor || !gh->inventory().isVendorWindowOpen()) return false;
+    gh->inventory().repairItem(vendor, itemGuid);
     return true;
 }
 
@@ -742,7 +688,7 @@ inline uint8_t containerWireSlot(int bag, int slot) {
 inline uint32_t spellIdForBookSlot(game::GameHandler* gh, int slot) {
     if (!gh || slot < 1) return 0;
     int idx = slot;
-    for (const auto& tab : gh->getSpellBookTabs()) {
+    for (const auto& tab : gh->spells().getSpellBookTabs()) {
         if (idx <= static_cast<int>(tab.spellIds.size())) return tab.spellIds[idx - 1];
         idx -= static_cast<int>(tab.spellIds.size());
     }
@@ -773,7 +719,7 @@ inline uint32_t spellIdForCall(lua_State* L, game::GameHandler* gh) {
         // one, which is worse than none.
         const char* book = lua_tostring(L, 2);
         if (book && std::string(book) == "pet") {
-            const auto& pet = gh->getPetSpells();
+            const auto& pet = petOf(L).getPetSpells();
             if (slot < 1 || slot > static_cast<int>(pet.size())) return 0;
             return pet[static_cast<size_t>(slot - 1)];
         }
@@ -784,8 +730,8 @@ inline uint32_t spellIdForCall(lua_State* L, game::GameHandler* gh) {
     if (!name || !*name) return 0;
     std::string nameLow(name);
     toLowerInPlace(nameLow);
-    for (uint32_t sid : gh->getKnownSpells()) {
-        std::string sn = gh->getSpellName(sid);
+    for (uint32_t sid : gh->spells().getKnownSpells()) {
+        std::string sn = gh->spells().getSpellName(sid);
         toLowerInPlace(sn);
         if (sn == nameLow) return sid;
     }
@@ -794,12 +740,12 @@ inline uint32_t spellIdForCall(lua_State* L, game::GameHandler* gh) {
 
 inline uint64_t containerSlotGuid(game::GameHandler* gh, int bag, int slot) {
     if (!gh || slot < 1) return 0;
-    if (bag == 0) return gh->getBackpackItemGuid(slot - 1);
-    if (bag >= 1 && bag <= 4) return gh->getBagItemGuid(bag - 1, slot - 1);
+    if (bag == 0) return gh->inventory().getBackpackItemGuid(slot - 1);
+    if (bag >= 1 && bag <= 4) return gh->inventory().getBagItemGuid(bag - 1, slot - 1);
     // The keyring and the bank bags keep their guid on the slot rather than in
     // a side table, so these read it from the inventory directly.
     if (bag == kKeyringContainer || bag == kBankContainer || isBankBagContainer(bag)) {
-        const auto* s = containerItemSlot(gh->getInventory(), bag, slot);
+        const auto* s = containerItemSlot(gh->inventory().items(), bag, slot);
         return s ? s->item.guid : 0;
     }
     return 0;
@@ -819,14 +765,14 @@ inline uint64_t containerSlotGuid(game::GameHandler* gh, int bag, int slot) {
 inline bool itemUseCooldown(game::GameHandler* gh, uint32_t itemId,
                             double& start, double& duration) {
     if (!gh || itemId == 0) return false;
-    const auto* info = gh->getItemInfo(itemId);
+    const auto* info = gh->inventory().getItemInfo(itemId);
     if (!info || !info->valid) return false;
     for (const auto& sp : info->spells) {
         if (sp.spellId == 0 || (sp.spellTrigger != 0 && sp.spellTrigger != 5)) continue;
-        const auto& cds = gh->getSpellCooldowns();
+        const auto& cds = gh->spells().getSpellCooldowns();
         auto it = cds.find(sp.spellId);
         if (it == cds.end() || it->second <= 0.0f) continue;
-        double total = gh->getSpellCooldownTotal(sp.spellId);
+        double total = gh->spells().getSpellCooldownTotal(sp.spellId);
         if (total < it->second) total = it->second;
         start = luaGetTimeNow() - (total - it->second);
         duration = total;
@@ -838,7 +784,7 @@ inline bool itemUseCooldown(game::GameHandler* gh, uint32_t itemId,
 // Find GroupMember data for a GUID (for party members out of entity range)
 inline const game::GroupMember* findPartyMember(game::GameHandler* gh, uint64_t guid) {
     if (!gh || guid == 0) return nullptr;
-    for (const auto& m : gh->getPartyData().members) {
+    for (const auto& m : gh->party().members) {
         if (m.guid == guid && m.hasPartyStats) return &m;
     }
     return nullptr;
@@ -950,12 +896,70 @@ inline void invalidateTradeSkillRows(lua_State* L) {
     ++interfaceState(L).tradeSkill.rowsGeneration;
 }
 
-/// The team id at an arena team index, or zero when the index is off the end.
+/// The arena teams as the composition root handed them to the addon layer;
+/// null without a game.
+arena::IArenaTeams* arenaTeamsOf(lua_State* L);
+
+/// The battlegrounds as the composition root handed them to the addon layer;
+/// null without a game.
+battleground::IBattlegrounds* battlegroundsOf(lua_State* L);
+
+/// The dungeon finder as the composition root handed it to the addon layer,
+/// or one that is never queued and sends nothing when there is no game - so a
+/// binding reads it without testing for it.
+lfg::ILfg& lfgOf(lua_State* L);
+
+/// The calendar as the composition root handed it to the addon layer, or an
+/// empty one that sends nothing when there is no game.
+calendar::ICalendar& calendarOf(lua_State* L);
+
+/// The player's group as the composition root handed it to the addon layer,
+/// or one the player is never in that sends nothing when there is no game.
+group::IGroup& groupOf(lua_State* L);
+
+/// The player's guild as the composition root handed it to the addon layer,
+/// or one the player is never in that sends nothing when there is no game.
+guild::IGuild& guildOf(lua_State* L);
+
+/// The auction house as the composition root handed it to the addon layer,
+/// or one that is never open and sends nothing when there is no game.
+auction::IAuctionHouse& auctionOf(lua_State* L);
+
+/// The mailbox as the composition root handed it to the addon layer, or one
+/// that is never open and sends nothing when there is no game.
+mail::IMailbox& mailOf(lua_State* L);
+
+/// The guild vault as the composition root handed it to the addon layer, or
+/// one that is never open and sends nothing when there is no game.
+guild_bank::IGuildBank& guildBankOf(lua_State* L);
+
+/// The trade as the composition root handed it to the addon layer, or one that
+/// is never open and sends nothing when there is no game.
+trade::ITrade& tradeOf(lua_State* L);
+
+/// The loot window and the rolls as the composition root handed them to the
+/// addon layer, or ones never open that send nothing when there is no game.
+loot::ILoot& lootOf(lua_State* L);
+
+/// The achievements as the composition root handed them to the addon layer, or
+/// ones with nothing earned and nothing known when there is no game.
+achievement::IAchievements& achievementsOf(lua_State* L);
+
+/// The titles as the composition root handed them to the addon layer, or none
+/// known and none worn when there is no game.
+title::ITitles& titlesOf(lua_State* L);
+
+/// The reputation as the composition root handed it to the addon layer, or no
+/// standings and no names when there is no game.
+reputation::IReputation& reputationOf(lua_State* L);
+
+/// The team id at an arena team index, or zero when the index is off the end
+/// or there are no arena teams.
 ///
 /// One-based, as the interface counts: ArenaTeamRoster(1) is the first team.
 /// Two files had this, under two names, each with its own off-by-one to get
 /// right - and an index convention is the kind of thing that goes wrong once
 /// and is then copied.
-uint32_t arenaTeamIdAtIndex(game::GameHandler* gh, int index);
+uint32_t arenaTeamIdAtIndex(lua_State* L, int index);
 
 } // namespace wowee::addons

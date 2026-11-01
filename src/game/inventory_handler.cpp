@@ -1,4 +1,19 @@
 #include "game/inventory_handler.hpp"
+#include "game/game_data.hpp"
+#include "auction/domain/records.hpp"
+#include "auction/services/auction_house.hpp"
+#include "game/auction_gateway.hpp"
+#include "game/mail_gateway.hpp"
+#include "game/guild_bank_gateway.hpp"
+#include "game/trade_gateway.hpp"
+#include "game/loot_gateway.hpp"
+#include "loot/domain/records.hpp"
+#include "loot/services/loot.hpp"
+#include "trade/services/trade.hpp"
+#include "guild_bank/domain/records.hpp"
+#include "guild_bank/services/guild_bank.hpp"
+#include "mail/domain/records.hpp"
+#include "mail/services/mail.hpp"
 #include "game/spell_classification.hpp"
 #include "game/item_text.hpp"
 #include "game/inventory_slots.hpp"
@@ -37,12 +52,78 @@ namespace game {
 // formatCopperAmount was forward-declared here, across translation units,
 // to reach a file-scope copy in game_handler.cpp. It is in item_text.hpp now.
 
+// The mailbox the protocol feeds. A client built without it drops the mail
+// packets, and says so once.
+static mail::IMailboxFeed* mailFeed(InventoryQueries& queries) {
+    auto* feed = queries.mailFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("Mail is not wired into this client; mail packets are dropped");
+    return feed;
+}
+
+// The guild vault the protocol feeds. A client built without it drops the
+// vault's packets, and says so once.
+static guild_bank::IGuildBankFeed* guildBankFeed(InventoryQueries& queries) {
+    auto* feed = queries.guildBankFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("The guild bank is not wired into this client; guild bank packets are dropped");
+    return feed;
+}
+
+// The trade the protocol feeds. A client built without it drops the trade
+// packets, and says so once.
+static trade::ITradeFeed* tradeFeed(InventoryQueries& queries) {
+    auto* feed = queries.tradeFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("Trading is not wired into this client; trade packets are dropped");
+    return feed;
+}
+
+// The loot the protocol feeds. A client built without it drops the loot
+// packets, and says so once.
+static loot::ILootFeed* lootFeed(InventoryQueries& queries) {
+    auto* feed = queries.lootFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("Looting is not wired into this client; loot packets are dropped");
+    return feed;
+}
+
+// The auction house the protocol feeds. A client built without it drops the
+// auction packets, and says so once.
+static auction::IAuctionHouseFeed* auctionFeed(InventoryQueries& queries) {
+    auto* feed = queries.auctionFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("The auction house is not wired into this client; auction packets are dropped");
+    return feed;
+}
+
 InventoryHandler::InventoryHandler(PacketSender& sender, FrameXmlEvents& frameXml,
                                    core::EventBus& events, ChatLog& chat,
                                    InventoryQueries& queries, const core::CVarStore& cvars,
-                                   pipeline::AssetManager* assets)
+                                   const GameData& data)
     : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat),
-      queries_(queries), cvars_(cvars), assets_(assets) {}
+      queries_(queries), data_(data),
+      subscriptions_(subscribeAuctionNotices(events, chat, frameXml, *this)) {
+    for (auto& subscription : subscribeMailNotices(events, chat, frameXml, *this))
+        subscriptions_.push_back(std::move(subscription));
+    for (auto& subscription : subscribeGuildBankNotices(events, chat, frameXml))
+        subscriptions_.push_back(std::move(subscription));
+    for (auto& subscription : subscribeTradeNotices(events, chat, frameXml, *this))
+        subscriptions_.push_back(std::move(subscription));
+    for (auto& subscription : subscribeLootNotices(events, chat, frameXml, *this, queries, cvars))
+        subscriptions_.push_back(std::move(subscription));
+    // A letter from a player carries a guid; its sender is named once the
+    // name arrives.
+    subscriptions_.push_back(events.subscribe<events::PlayerNameKnown>(
+        [this](const events::PlayerNameKnown& e) {
+            if (auto* feed = mailFeed(queries_)) feed->onPlayerNameResolved(e.guid, e.name);
+        }));
+}
 
 void InventoryHandler::raiseUiError(const std::string& message) {
     game::raiseUiError(events_, frameXml_, message);
@@ -56,6 +137,11 @@ void InventoryHandler::beginCharacter() {
     // The buyback list persists across vendor windows within a session but is
     // the last character's, not this one's.
     clearBuybackState();
+    if (auto* feed = auctionFeed(queries_)) feed->beginCharacter();
+    if (auto* feed = mailFeed(queries_)) feed->beginCharacter();
+    if (auto* feed = guildBankFeed(queries_)) feed->beginCharacter();
+    if (auto* feed = tradeFeed(queries_)) feed->beginCharacter();
+    if (auto* feed = lootFeed(queries_)) feed->beginCharacter();
 }
 
 void InventoryHandler::leaveWorld() {
@@ -75,22 +161,15 @@ void InventoryHandler::update(float deltaTime) {
         }
     }
 
-    tickAuctionSearchDelay(deltaTime);
+    if (auto* feed = auctionFeed(queries_)) feed->onTimePassed(deltaTime);
 
     if (held_.pendingMoneyDeltaTimer > 0.0f) {
         held_.pendingMoneyDeltaTimer -= deltaTime;
         if (held_.pendingMoneyDeltaTimer <= 0.0f) clearExpectedMoneyDelta();
     }
 
-    tickLootMoneyFallback(deltaTime);
+    if (auto* feed = lootFeed(queries_)) feed->timePassed(deltaTime);
     sendPendingAutoInspect(deltaTime);
-}
-
-void InventoryHandler::tickAuctionSearchDelay(float deltaTime) {
-    if (auctionSearchDelayTimer_ > 0.0f) {
-        auctionSearchDelayTimer_ -= deltaTime;
-        if (auctionSearchDelayTimer_ < 0.0f) auctionSearchDelayTimer_ = 0.0f;
-    }
 }
 
 void InventoryHandler::sendPendingAutoInspect(float deltaTime) {
@@ -264,46 +343,12 @@ uint64_t targetGuidForUseItem(const InventoryQueries& owner, const ItemQueryResp
 // Opcode Registration
 // ============================================================
 
-/// Says what was looted, once per loot.
-///
-/// Both paths that learn about looted money end here - the server's notify and
-/// the fallback timer for servers that do not send one - so the line and the
-/// coin cannot differ between them.
-void InventoryHandler::announceLootMoney(uint64_t lootGuid, uint32_t amount) {
-    if (amount == 0) return;
-    auto it = localLootState_.find(lootGuid);
-    if (it != localLootState_.end()) {
-        if (it->second.moneyTaken) return;
-        it->second.moneyTaken = true;
-    }
-    chat_.addSystemChatMessage("Looted: " + formatCopperAmount(amount));
-    events_.publish(events::LootMoneyReceived{lootGuid, amount});
-    if (lootGuid != 0) recentLootMoneyAnnounceCooldowns_[lootGuid] = 1.5f;
-}
-
-void InventoryHandler::tickLootMoneyFallback(float deltaTime) {
-    // The cooldown that keeps one corpse's coin from being announced twice.
-    // GameHandler counted down a copy of its own that nothing set, so this one
-    // never ran out: a loot guid announced once stayed silent for the session.
-    for (auto it = recentLootMoneyAnnounceCooldowns_.begin(); it != recentLootMoneyAnnounceCooldowns_.end();) {
-        it->second -= deltaTime;
-        if (it->second <= 0.0f) {
-            it = recentLootMoneyAnnounceCooldowns_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-
-    if (pendingLootMoneyNotifyTimer_ <= 0.0f) return;
-    pendingLootMoneyNotifyTimer_ -= deltaTime;
-    if (pendingLootMoneyNotifyTimer_ > 0.0f) return;
-    pendingLootMoneyNotifyTimer_ = 0.0f;
-    announceLootMoney(pendingLootMoneyGuid_, pendingLootMoneyAmount_);
-    pendingLootMoneyGuid_ = 0;
-    pendingLootMoneyAmount_ = 0;
-}
-
 void InventoryHandler::registerOpcodes(DispatchTable& table) {
+    // The server offering a page of a game object.
+    table[Opcode::SMSG_GAMEOBJECT_PAGETEXT] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(8)) return;
+        readGameObject(packet.readUInt64());
+    };
     // ---- Item query response ----
     table[Opcode::SMSG_ITEM_QUERY_SINGLE_RESPONSE] = [this](network::Packet& packet) { handleItemQueryResponse(packet); };
     table[Opcode::SMSG_ITEM_QUERY_MULTIPLE_RESPONSE] = [this](network::Packet& packet) { handleItemQueryResponse(packet); };
@@ -328,58 +373,78 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_PAGE_TEXT_QUERY_RESPONSE] = [this](network::Packet& packet) { handlePageTextQueryResponse(packet); };
 
     // ---- Loot ----
-    table[Opcode::SMSG_LOOT_RESPONSE] = [this](network::Packet& packet) { handleLootResponse(packet); };
-    table[Opcode::SMSG_LOOT_RELEASE_RESPONSE] = [this](network::Packet& packet) { handleLootReleaseResponse(packet); };
-    table[Opcode::SMSG_LOOT_REMOVED] = [this](network::Packet& packet) { handleLootRemoved(packet); };
-    table[Opcode::SMSG_LOOT_ROLL] = [this](network::Packet& packet) { handleLootRoll(packet); };
-    table[Opcode::SMSG_LOOT_ROLL_WON] = [this](network::Packet& packet) { handleLootRollWon(packet); };
+    table[Opcode::SMSG_LOOT_RESPONSE] = [this](network::Packet& packet) {
+        // Read into its own record: a response that does not parse leaves the
+        // window as it was.
+        LootResponseData contents;
+        if (!LootResponseParser::parse(packet, contents, isActiveExpansion("wotlk"))) return;
+        LOG_INFO("SMSG_LOOT_RESPONSE: guid=0x", std::hex, contents.lootGuid, std::dec,
+                 " items=", contents.items.size(), " gold=", contents.gold);
+        if (auto* feed = lootFeed(queries_)) feed->onContents(std::move(contents));
+    };
+    table[Opcode::SMSG_LOOT_RELEASE_RESPONSE] = [this](network::Packet& /*packet*/) {
+        if (auto* feed = lootFeed(queries_)) feed->onReleased();
+    };
+    table[Opcode::SMSG_LOOT_REMOVED] = [this](network::Packet& packet) {
+        const uint8_t slotIndex = packet.readUInt8();
+        if (auto* feed = lootFeed(queries_)) feed->onSlotRemoved(slotIndex);
+    };
+    table[Opcode::SMSG_LOOT_ROLL] = [this](network::Packet& packet) {
+        // objectGuid(8) + lootSlot(4) + playerGuid(8) + itemId(4) + itemRandSuffix(4) +
+        // itemRandProp(4) + rollNumber(1) + rollType(1) + autoPass(1)
+        if (!packet.hasRemaining(35)) return;
+        /*uint64_t objectGuid =*/ packet.readUInt64();
+        /*uint32_t lootSlot   =*/ packet.readUInt32();
+        const uint64_t playerGuid = packet.readUInt64();
+        /*uint32_t itemId     =*/ packet.readUInt32();
+        /*uint32_t randSuffix =*/ packet.readUInt32();
+        (void)packet.readUInt32(); // random property
+        const uint8_t rollNumber = packet.readUInt8();
+        const uint8_t rollType   = packet.readUInt8();
+        /*uint8_t autoPass   =*/ packet.readUInt8();
+        if (auto* feed = lootFeed(queries_)) feed->onVote(playerGuid, rollNumber, rollType);
+    };
+    table[Opcode::SMSG_LOOT_ROLL_WON] = [this](network::Packet& packet) {
+        // objectGuid(8) + lootSlot(4) + itemId(4) + itemSuffix(4) + itemProp(4) + playerGuid(8) + rollNumber(1) + rollType(1)
+        if (!packet.hasRemaining(34)) return;
+        const uint64_t wonGuid = packet.readUInt64();
+        const uint32_t wonSlot = packet.readUInt32();
+        const uint32_t itemId  = packet.readUInt32();
+        /*uint32_t randSuffix =*/ packet.readUInt32();
+        const int32_t wonRandProp = static_cast<int32_t>(packet.readUInt32());
+        const uint64_t winnerGuid = packet.readUInt64();
+        const uint8_t rollNumber  = packet.readUInt8();
+        const uint8_t rollType    = packet.readUInt8();
+        if (auto* feed = lootFeed(queries_))
+            feed->onRollWon(wonGuid, wonSlot, itemId, wonRandProp, winnerGuid, rollNumber, rollType);
+    };
     table[Opcode::SMSG_LOOT_MASTER_LIST] = [this](network::Packet& packet) {
-        masterLootCandidates_.clear();
-        if (!packet.hasRemaining(1)) return;
-        uint8_t mlCount = packet.readUInt8();
-        masterLootCandidates_.reserve(mlCount);
+        if (!packet.hasRemaining(1)) {
+            LOG_WARNING("SMSG_LOOT_MASTER_LIST: no count; the master loot menu keeps its last list");
+            return;
+        }
+        const uint8_t mlCount = packet.readUInt8();
+        std::vector<uint64_t> candidates;
+        candidates.reserve(mlCount);
         for (uint8_t i = 0; i < mlCount; ++i) {
             if (!packet.hasRemaining(8)) break;
-            masterLootCandidates_.push_back(packet.readUInt64());
+            candidates.push_back(packet.readUInt64());
         }
-        // The candidate list arrives because the master looter picked an item,
-        // and the menu that assigns it is built from exactly this. Parsed and
-        // stored already; nothing was told it had come, so the menu never
-        // opened. Both events: one opens it, one fills it, and they are the
-        // same frame rather than two.
-        if (frameXml_.frameXmlListening()) {
-            frameXml_.fireFrameXmlEvent("OPEN_MASTER_LOOT_LIST", {});
-            frameXml_.fireFrameXmlEvent("UPDATE_MASTER_LOOT_LIST", {});
-        }
+        if (auto* feed = lootFeed(queries_)) feed->onMasterCandidates(std::move(candidates));
     };
 
-    // ---- Loot money / misc consume ----
+    // ---- Loot money ----
     table[Opcode::SMSG_LOOT_MONEY_NOTIFY] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(4)) return;
-        uint32_t amount = packet.readUInt32();
+        const uint32_t amount = packet.readUInt32();
         if (packet.hasRemaining(1))
             /*uint8_t soleLooter =*/ packet.readUInt8();
-        held_.moneyCopper += amount;
-        held_.pendingMoneyDelta = amount;
-        held_.pendingMoneyDeltaTimer = 2.0f;
-        uint64_t notifyGuid = pendingLootMoneyGuid_ != 0 ? pendingLootMoneyGuid_ : currentLoot_.lootGuid;
-        pendingLootMoneyGuid_ = 0;
-        pendingLootMoneyAmount_ = 0;
-        pendingLootMoneyNotifyTimer_ = 0.0f;
-        announceLootMoney(notifyGuid, amount);
-        if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("PLAYER_MONEY", {});
-        // Both packets report the same thing and a server may send either, so
-        // the coin goes on whichever arrives first.
-        //
-        // Only for an amount that is this corpse's whole purse, though: in a
-        // group this notify carries one player's share and reaches everyone,
-        // including someone standing over a different corpse of their own.
-        // SMSG_LOOT_CLEAR_MONEY is the one that names the loot itself, and it
-        // is what clears the coin in that case.
-        if (amount == currentLoot_.gold) clearLootMoney();
+        if (auto* feed = lootFeed(queries_)) feed->onMoneyNotify(amount);
     };
+    // Both this and the notify report the coin taken, and a server may send
+    // either: the coin goes on whichever arrives first.
     table[Opcode::SMSG_LOOT_CLEAR_MONEY] = [this](network::Packet& /*packet*/) {
-        clearLootMoney();
+        if (auto* feed = lootFeed(queries_)) feed->onMoneyCleared();
     };
 
     // ---- Read item (books) (moved from GameHandler) ----
@@ -399,58 +464,25 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         // randSuffix(4) + randProp(4) + itemCount(4) + countdown(4) + voteMask(1)
         //
         // itemCount - "items in stack" - was missing, so the countdown was read
-        // from it and the vote mask from the countdown's first byte. The
-        // countdown drives the bar that times the roll out and the mask decides
-        // which of need, greed and disenchant are even offered.
-        //
-        // Chosen by the length rather than by the expansion: WotLK is verified
-        // against Group::SendLootStartRoll, and rather than guess whether a
-        // pre-WotLK realm sends the field, take it when the packet is long
-        // enough to hold it.
+        // from it and the vote mask from the countdown's first byte. Chosen by
+        // the length rather than by the expansion: WotLK is verified against
+        // Group::SendLootStartRoll, and rather than guess whether a pre-WotLK
+        // realm sends the field, take it when the packet is long enough to
+        // hold it.
         const bool hasMapId = isActiveExpansion("wotlk");
         const size_t baseSz = hasMapId ? 33 : 29;
         if (packet.getRemainingSize() < baseSz) return;
         const bool hasItemCount = packet.getRemainingSize() >= baseSz + 4;
-        uint64_t objectGuid = packet.readUInt64();
+        const uint64_t objectGuid = packet.readUInt64();
         if (hasMapId) packet.readUInt32(); // mapId
-        uint32_t lootSlot = packet.readUInt32();
-        uint32_t itemId   = packet.readUInt32();
+        const uint32_t lootSlot = packet.readUInt32();
+        const uint32_t itemId   = packet.readUInt32();
         /*uint32_t randSuffix =*/ packet.readUInt32();
         (void)packet.readUInt32(); // random property
         if (hasItemCount) (void)packet.readUInt32(); // items in stack
-        uint32_t countdown = packet.readUInt32();
-        uint8_t  voteMask  = packet.readUInt8();
-
-        // Resolve item name from cache
-        ensureItemInfo(itemId);
-        auto* info = getItemInfo(itemId);
-        std::string itemName = (info && !info->name.empty()) ? info->name : ("Item #" + std::to_string(itemId));
-        uint8_t quality = info ? static_cast<uint8_t>(info->quality) : 1;
-
-        // Its own entry, kept alongside whatever else is being rolled for.
-        // A boss puts four of these up at once and there was one slot to hold
-        // them, so the last to arrive answered for all of them.
-        LootRollEntry& roll = beginLootRoll(objectGuid, lootSlot);
-        roll.itemId = itemId;
-        roll.itemName = itemName;
-        roll.itemQuality = quality;
-        roll.rollCountdownMs = countdown;
-        roll.voteMask = voteMask;
-        roll.rollStartedAt = std::chrono::steady_clock::now();
-        std::string link = buildItemLink(itemId, quality, itemName);
-        chat_.addSystemChatMessage("Loot roll started for " + link + ".");
-        // The roll id the interface will ask every later question by. Its own
-        // number: the slot plus one was unique only while one roll was open,
-        // and two corpses both rolling their first item shared it.
-        if (frameXml_.frameXmlListening()) {
-            // ...and the time to roll in, which the packet carried all along
-            // and this read past. GroupLootFrame_OpenNewFrame takes it as the
-            // second argument and sizes the countdown bar from it; without one
-            // the bar had no length and the window could not time out.
-            frameXml_.fireFrameXmlEvent("START_LOOT_ROLL",
-                                           {std::to_string(roll.rollId),
-                                            std::to_string(countdown)});
-        }
+        const uint32_t countdown = packet.readUInt32();
+        const uint8_t  voteMask  = packet.readUInt8();
+        if (auto* feed = lootFeed(queries_)) feed->onRollStarted(objectGuid, lootSlot, itemId, countdown, voteMask);
     };
 
     table[Opcode::SMSG_LOOT_ALL_PASSED] = [this](network::Packet& packet) {
@@ -458,16 +490,10 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         if (!packet.hasRemaining(24)) return;
         const uint64_t passedGuid = packet.readUInt64();
         const uint32_t passedSlot = packet.readUInt32();
-        uint32_t itemId     = packet.readUInt32();
+        const uint32_t itemId     = packet.readUInt32();
         /*uint32_t randSuffix =*/ packet.readUInt32();
         (void)packet.readUInt32(); // random property
-        ensureItemInfo(itemId);
-        auto* allPassInfo = getItemInfo(itemId);
-        std::string allPassName = (allPassInfo && !allPassInfo->name.empty())
-            ? allPassInfo->name : ("Item #" + std::to_string(itemId));
-        uint32_t allPassQuality = allPassInfo ? allPassInfo->quality : 1u;
-        chat_.addSystemChatMessage("Everyone passed on " + buildItemLink(itemId, allPassQuality, allPassName) + ".");
-        endLootRoll(passedGuid, passedSlot);
+        if (auto* feed = lootFeed(queries_)) feed->onAllPassed(passedGuid, passedSlot, itemId);
     };
 
     table[Opcode::SMSG_LOOT_ITEM_NOTIFY] = [this](network::Packet& packet) {
@@ -481,46 +507,14 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
             if (!packet.hasRemaining(4)) return;
             lootSlot = packet.readUInt32();
         }
-        // Try to resolve item name
-        uint32_t itemId = 0;
-        for (const auto& lootItem : currentLoot_.items) {
-            if (lootItem.slotIndex == static_cast<uint8_t>(lootSlot)) {
-                itemId = lootItem.itemId;
-                break;
-            }
-        }
-        if (itemId != 0) {
-            auto* notifInfo = getItemInfo(itemId);
-            std::string itemName = (notifInfo && !notifInfo->name.empty())
-                ? notifInfo->name : ("Item #" + std::to_string(itemId));
-            uint32_t notifyQuality = notifInfo ? notifInfo->quality : 1u;
-            std::string itemLink2 = buildItemLink(itemId, notifyQuality, itemName);
-            // Show Loot Spam, which the panel offers and nothing read - so the
-            // line went to chat for every item however it was set, which is
-            // what the setting is named after. Default on: it is what this
-            // client has always printed, and a player who does not want it
-            // has now got the switch that says so.
-            if (cvars_.get("showLootSpam", "1") != "0") {
-                chat_.addSystemChatMessage("You receive loot: " + itemLink2 + ".");
-            }
-        }
+        if (auto* feed = lootFeed(queries_)) feed->onItemNotify(static_cast<uint8_t>(lootSlot));
     };
 
     table[Opcode::SMSG_LOOT_SLOT_CHANGED] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(1)) {
-            uint8_t slotIdx = packet.readUInt8();
-            LOG_DEBUG("SMSG_LOOT_SLOT_CHANGED: slot=", (int)slotIdx);
-            // The loot frame redraws the one row from this. It carries the
-            // slot, and the slot is what the event carries - the interface
-            // reads arg1 to know which button to refresh, so a bare fire would
-            // make it redraw the wrong one.
-            //
-            // Slots are zero-based on the wire and one-based in the interface.
-            if (frameXml_.frameXmlListening()) {
-                frameXml_.fireFrameXmlEvent("LOOT_SLOT_CHANGED",
-                                               {std::to_string(slotIdx + 1)});
-            }
-        }
+        if (!packet.hasRemaining(1)) return;
+        const uint8_t slotIdx = packet.readUInt8();
+        LOG_DEBUG("SMSG_LOOT_SLOT_CHANGED: slot=", (int)slotIdx);
+        if (auto* feed = lootFeed(queries_)) feed->onSlotChanged(slotIdx);
     };
 
     // ---- Item push result ----
@@ -772,7 +766,8 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                     default: break;
                 }
         std::string msg = errMsg ? errMsg : "Inventory error (" + std::to_string(error) + ").";
-        if (error == 50 && currentLoot_.lootGuid != 0) {
+        const auto* loot = queries_.loot();
+        if (error == 50 && loot && loot->getCurrentLoot().lootGuid != 0) {
             msg = "Cannot loot item: Inventory is full.";
         }
         // The error line sounds itself (UiErrorRaised); this played the same
@@ -938,37 +933,87 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_TRAINER_LIST] = [this](network::Packet& packet) { handleTrainerList(packet); };
 
     // ---- Mail ----
-    table[Opcode::SMSG_SHOW_MAILBOX] = [this](network::Packet& packet) { handleShowMailbox(packet); };
-    table[Opcode::SMSG_MAIL_LIST_RESULT] = [this](network::Packet& packet) { handleMailListResult(packet); };
-    table[Opcode::SMSG_SEND_MAIL_RESULT] = [this](network::Packet& packet) { handleSendMailResult(packet); };
-    table[Opcode::SMSG_RECEIVED_MAIL] = [this](network::Packet& packet) { handleReceivedMail(packet); };
-    table[Opcode::MSG_QUERY_NEXT_MAIL_TIME] = [this](network::Packet& packet) { handleQueryNextMailTime(packet); };
+    table[Opcode::SMSG_SHOW_MAILBOX] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(8)) return;
+        const uint64_t mailboxGuid = packet.readUInt64();
+        if (auto* feed = mailFeed(queries_)) feed->onMailboxShown(mailboxGuid);
+    };
+    table[Opcode::SMSG_MAIL_LIST_RESULT] = [this](network::Packet& packet) {
+        std::vector<MailMessage> inbox;
+        if (!queries_.packetParsers().parseMailList(packet, inbox)) return;
+        if (auto* feed = mailFeed(queries_)) feed->onInbox(std::move(inbox));
+    };
+    table[Opcode::SMSG_SEND_MAIL_RESULT] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(12)) return;
+        const uint32_t mailId = packet.readUInt32();
+        const uint32_t action = packet.readUInt32();
+        const uint32_t error  = packet.readUInt32();
+        if (auto* feed = mailFeed(queries_)) feed->onSendResult(mailId, action, error);
+    };
+    table[Opcode::SMSG_RECEIVED_MAIL] = [this](network::Packet& /*packet*/) {
+        if (auto* feed = mailFeed(queries_)) feed->onNewMail(true);
+    };
+    table[Opcode::MSG_QUERY_NEXT_MAIL_TIME] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(8)) return;
+        // readFloat() copies the bytes, so nothing reinterprets the packet's
+        // own storage as a float.
+        const float nextTime = packet.readFloat();
+        const uint32_t count = packet.readUInt32();
+        packet.skipAll();
+        if (auto* feed = mailFeed(queries_)) feed->onNewMail(nextTime >= 0.0f && count > 0);
+    };
 
     // ---- Bank ----
     table[Opcode::SMSG_SHOW_BANK] = [this](network::Packet& packet) { handleShowBank(packet); };
     table[Opcode::SMSG_BUY_BANK_SLOT_RESULT] = [this](network::Packet& packet) { handleBuyBankSlotResult(packet); };
 
     // ---- Guild Bank ----
-    table[Opcode::SMSG_GUILD_BANK_LIST] = [this](network::Packet& packet) { handleGuildBankList(packet); };
+    table[Opcode::SMSG_GUILD_BANK_LIST] = [this](network::Packet& packet) {
+        auto* feed = guildBankFeed(queries_);
+        if (!feed) return;
+        // A slots-only list leaves the tab names as they were, so it is read
+        // over what the vault already holds.
+        GuildBankData data;
+        if (const auto* bank = queries_.guildBank()) data = bank->getGuildBankData();
+        if (!GuildBankListParser::parse(packet, data)) {
+            LOG_WARNING("SMSG_GUILD_BANK_LIST: could not be read; the vault stays as it was");
+            return;
+        }
+        feed->onBankList(std::move(data));
+    };
     // The reply shares its opcode with the request: a tab id and its text.
     table[Opcode::MSG_QUERY_GUILD_BANK_TEXT] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(1)) return;
         const uint8_t tabId = packet.readUInt8();
         std::string text = packet.readString();
-        if (tabId < guildBankTabText_.size()) guildBankTabText_[tabId] = std::move(text);
-        // The panel asked for this text and was never told it arrived, so the
-        // info box kept whatever it was drawn with. Its handler reads the tab
-        // back with GetGuildBankText, counting tabs from one.
-        if (frameXml_.frameXmlListening())
-            frameXml_.fireFrameXmlEvent("GUILDBANK_UPDATE_TEXT", {std::to_string(tabId + 1)});
+        if (auto* feed = guildBankFeed(queries_)) feed->onTabText(tabId, std::move(text));
     };
 
     // ---- Auction House ----
-    table[Opcode::MSG_AUCTION_HELLO] = [this](network::Packet& packet) { handleAuctionHello(packet); };
-    table[Opcode::SMSG_AUCTION_LIST_RESULT] = [this](network::Packet& packet) { handleAuctionListResult(packet); };
-    table[Opcode::SMSG_AUCTION_OWNER_LIST_RESULT] = [this](network::Packet& packet) { handleAuctionOwnerListResult(packet); };
-    table[Opcode::SMSG_AUCTION_BIDDER_LIST_RESULT] = [this](network::Packet& packet) { handleAuctionBidderListResult(packet); };
-    table[Opcode::SMSG_AUCTION_COMMAND_RESULT] = [this](network::Packet& packet) { handleAuctionCommandResult(packet); };
+    table[Opcode::MSG_AUCTION_HELLO] = [this](network::Packet& packet) {
+        AuctionHelloData data;
+        if (!AuctionHelloParser::parse(packet, data)) return;
+        if (auto* feed = auctionFeed(queries_)) feed->onHello(data.auctioneerGuid);
+        queries_.closeGossip();
+    };
+    // The plain list result fills whichever list was asked for last; the
+    // owner and bidder results say which they are.
+    table[Opcode::SMSG_AUCTION_LIST_RESULT] = [this](network::Packet& packet) {
+        handleAuctionListResult(packet, std::nullopt);
+    };
+    table[Opcode::SMSG_AUCTION_OWNER_LIST_RESULT] = [this](network::Packet& packet) {
+        handleAuctionListResult(packet, auction::AuctionList::Owned);
+    };
+    table[Opcode::SMSG_AUCTION_BIDDER_LIST_RESULT] = [this](network::Packet& packet) {
+        handleAuctionListResult(packet, auction::AuctionList::Bids);
+    };
+    table[Opcode::SMSG_AUCTION_COMMAND_RESULT] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(12)) return;
+        /*uint32_t auctionId =*/ packet.readUInt32();
+        const uint32_t action = packet.readUInt32();
+        const uint32_t error = packet.readUInt32();
+        if (auto* feed = auctionFeed(queries_)) feed->onCommandResult(action, error);
+    };
 
     table[Opcode::SMSG_AUCTION_OWNER_NOTIFICATION] = [this](network::Packet& packet) {
         // SendAuctionOwnerNotification writes:
@@ -1124,8 +1169,26 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_ITEM_TEXT_QUERY_RESPONSE] = [this](network::Packet& packet) { handleItemTextQueryResponse(packet); };
 
     // ---- Trade ----
-    table[Opcode::SMSG_TRADE_STATUS] = [this](network::Packet& packet) { handleTradeStatus(packet); };
-    table[Opcode::SMSG_TRADE_STATUS_EXTENDED] = [this](network::Packet& packet) { handleTradeStatusExtended(packet); };
+    table[Opcode::SMSG_TRADE_STATUS] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(4)) return;
+        const uint32_t status = packet.readUInt32();
+        LOG_WARNING("SMSG_TRADE_STATUS: status=", status, " size=", packet.getSize());
+        const auto code = tradeStatusCode(status);
+        if (!code) {
+            LOG_DEBUG("Unhandled SMSG_TRADE_STATUS: ", status);
+            return;
+        }
+        // A request names who is asking.
+        uint64_t peer = 0;
+        if (*code == trade::StatusCode::BeginTrade && packet.hasRemaining(8)) peer = packet.readUInt64();
+        if (auto* feed = tradeFeed(queries_)) feed->onStatus(*code, peer);
+    };
+    table[Opcode::SMSG_TRADE_STATUS_EXTENDED] = [this](network::Packet& packet) {
+        auto offer = readTradeOffer(packet);
+        if (!offer) return;
+        if (auto* feed = tradeFeed(queries_))
+            feed->onOffer(offer->ownSide, offer->gold, std::move(offer->slots));
+    };
 
     // ---- Trainer buy ----
     table[Opcode::SMSG_TRAINER_BUY_SUCCEEDED] = [this](network::Packet& p) { handleTrainerBuySucceeded(p); };
@@ -1136,56 +1199,12 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
 // Loot
 // ============================================================
 
-void InventoryHandler::lootTarget(uint64_t targetGuid) {
-    if (!sender_.worldCommandAllowed("loot")) return;
-    currentLoot_.items.clear();
-    LOG_INFO("Looting target 0x", std::hex, targetGuid, std::dec);
-    auto packet = LootPacket::build(targetGuid);
-    sender_.send(packet);
-}
-
-void InventoryHandler::lootItem(uint8_t slotIndex, bool confirmed) {
-    if (!sender_.worldCommandAllowed("loot")) return;
-
-    if (!confirmed) {
-        // Bind-on-pickup, and the warning neither interface gave. The slot the
-        // event carries is the one on screen, not the server's: uiparent.lua
-        // answers it with GetLootSlotInfo, which counts the coin as a slot of
-        // its own and the items after it.
-        const auto& loot = currentLoot_;
-        int display = loot.hasCoinSlot() ? 1 : 0;
-        for (const auto& item : loot.items) {
-            ++display;
-            if (item.slotIndex != slotIndex) continue;
-            const auto* info = getItemInfo(item.itemId);
-            if (info && info->valid && info->bindType == 1) {
-                pendingLootActive_ = true;
-                pendingLootSlot_ = slotIndex;
-                if (frameXml_.frameXmlListening())
-                    frameXml_.fireFrameXmlEvent("LOOT_BIND_CONFIRM",
-                                                   {std::to_string(display)});
-                return;
-            }
-            break;
-        }
-    }
-
-    pendingLootActive_ = false;
-    auto packet = AutostoreLootItemPacket::build(slotIndex);
-    sender_.send(packet);
-}
-
-void InventoryHandler::confirmPendingLoot() {
-    if (!pendingLootActive_) return;
-    const uint8_t slot = pendingLootSlot_;
-    pendingLootActive_ = false;
-    lootItem(slot, true);
-}
-
-void InventoryHandler::lootMoney() {
-    if (!sender_.characterInWorld()) return;
-    auto packet = LootMoneyPacket::build();
-    sender_.send(packet);
+// The purse moves now, and the change is expected: the field update that
+// follows is the same money, not more of it.
+void InventoryHandler::creditLootedMoney(uint32_t copper) {
+    held_.moneyCopper += copper;
+    held_.pendingMoneyDelta = copper;
+    held_.pendingMoneyDeltaTimer = 2.0f;
 }
 
 void InventoryHandler::cancelTempEnchantment(uint8_t handIndex) {
@@ -1198,319 +1217,9 @@ void InventoryHandler::cancelTempEnchantment(uint8_t handIndex) {
     sender_.send(packet);
 }
 
-void InventoryHandler::clearLootMoney() {
-    if (!currentLoot_.goldLeft()) return;
-    // Marked rather than zeroed: the coin is display slot one, and dropping it
-    // would move every item button onto the item after its own.
-    currentLoot_.goldLooted = true;
-    auto it = localLootState_.find(currentLoot_.lootGuid);
-    if (it != localLootState_.end()) it->second.data.goldLooted = true;
-    // Display slot one, which is where the coin sits whenever there is one.
-    if (lootWindowOpen_ && frameXml_.frameXmlListening()) {
-        frameXml_.fireFrameXmlEvent("LOOT_SLOT_CLEARED", {"1"});
-    }
-    // A corpse that held only money is empty now.
-    if (lootWindowOpen_ && currentLoot_.nothingLeft()) closeLoot();
-}
-
-void InventoryHandler::closeLoot() {
-    if (!lootWindowOpen_) return;
-    const uint64_t lootGuid = currentLoot_.lootGuid;
-    if (sender_.characterInWorld()) {
-        auto packet = LootReleasePacket::build(lootGuid);
-        sender_.send(packet);
-    }
-    lootWindowOpen_ = false;
-    events_.publish(events::LootWindowChanged{.open = false});
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("LOOT_CLOSED", {});
-    // Do NOT locally despawn a gather node on loot-close. Node lifetime is
-    // server-authoritative: a mineral vein / herb can still hold charges for another
-    // gatherer, and the server sends SMSG_DESTROY_OBJECT when it is truly depleted.
-    // Predicting the despawn here removed the node after a single loot, so it couldn't
-    // be shared or re-mined (it looked like one player "mined it all").
-    currentLoot_ = LootResponseData{};
-}
-
-void InventoryHandler::lootMasterGive(uint8_t lootSlot, uint64_t targetGuid) {
-    if (!sender_.characterInWorld()) return;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_LOOT_MASTER_GIVE));
-    pkt.writeUInt64(currentLoot_.lootGuid);
-    pkt.writeUInt8(lootSlot);
-    pkt.writeUInt64(targetGuid);
-    sender_.send(pkt);
-}
-
-void InventoryHandler::handleLootResponse(network::Packet& packet) {
-    const bool wotlkLoot = isActiveExpansion("wotlk");
-    if (!LootResponseParser::parse(packet, currentLoot_, wotlkLoot)) return;
-    const bool hasLoot = !currentLoot_.items.empty() || currentLoot_.gold > 0;
-    LOG_INFO("SMSG_LOOT_RESPONSE: guid=0x", std::hex, currentLoot_.lootGuid, std::dec,
-             " items=", currentLoot_.items.size(), " gold=", currentLoot_.gold);
-    if (!hasLoot && queries_.gameObjectLootPending(currentLoot_.lootGuid)) {
-        LOG_DEBUG("Ignoring empty SMSG_LOOT_RESPONSE during pending gather/open");
-        return;
-    }
-    lootWindowOpen_ = true;
-    events_.publish(events::LootWindowChanged{.open = true});
-    if (frameXml_.frameXmlListening()) {
-        // Carries whether this loot is being taken automatically. The loot
-        // frame reads it on the path where it could not show itself, and
-        // closes with CloseLoot(autoLoot == 0) - so an absent argument
-        // compares false and tells the server the window opened when it did
-        // not.
-        frameXml_.fireFrameXmlEvent("LOOT_OPENED", {autoLoot_ ? "1" : "0"});
-        frameXml_.fireFrameXmlEvent("LOOT_READY", {});
-    }
-    const bool isLastInteractedGoLoot = queries_.gameObjectLootOpened(currentLoot_.lootGuid);
-    auto& localLoot = localLootState_[currentLoot_.lootGuid];
-    localLoot.data = currentLoot_;
-
-    for (const auto& item : currentLoot_.items) {
-        queryItemInfo(item.itemId, 0);
-    }
-
-    if (currentLoot_.gold > 0) {
-        if (sender_.characterInWorld()) {
-            bool suppressFallback = false;
-            auto cooldownIt = recentLootMoneyAnnounceCooldowns_.find(currentLoot_.lootGuid);
-            if (cooldownIt != recentLootMoneyAnnounceCooldowns_.end() && cooldownIt->second > 0.0f) {
-                suppressFallback = true;
-            }
-            pendingLootMoneyGuid_ = suppressFallback ? 0 : currentLoot_.lootGuid;
-            pendingLootMoneyAmount_ = suppressFallback ? 0 : currentLoot_.gold;
-            pendingLootMoneyNotifyTimer_ = suppressFallback ? 0.0f : 0.4f;
-            auto pkt = LootMoneyPacket::build();
-            sender_.send(pkt);
-            // The coin stays in the window until the server says it is taken.
-            //
-            // Clearing it here emptied the slot the interface had just been
-            // told about: the loot frame builds its buttons on LOOT_OPENED,
-            // which fires above, and the coin is display slot one with the
-            // items after it. Dropping the coin out from under that renumbered
-            // every item - GetLootSlotInfo(2) answered the *second* item, or
-            // nothing at all - so the window went on showing a coin that had
-            // been taken and an item button that did nothing when clicked.
-        }
-    }
-
-    // Game-object quest containers are single-action pickups in normal play.
-    // Autostore their returned items even when general creature auto-loot is off;
-    // otherwise right-click opens server loot but never grants the objective item.
-    const bool autoStoreGameObjectLoot = isLastInteractedGoLoot;
-    if ((autoLoot_ || autoStoreGameObjectLoot) &&
-        sender_.characterInWorld() &&
-        !localLoot.itemAutoLootSent) {
-        for (const auto& item : currentLoot_.items) {
-            LOG_INFO("Autostoring loot slot=", static_cast<int>(item.slotIndex),
-                     " item=", item.itemId, " count=", item.count,
-                     " fromGuid=0x", std::hex, currentLoot_.lootGuid, std::dec,
-                     " gameObject=", autoStoreGameObjectLoot);
-            auto pkt = AutostoreLootItemPacket::build(item.slotIndex);
-            sender_.send(pkt);
-        }
-        localLoot.itemAutoLootSent = true;
-    }
-
-    // A corpse that held only money is already empty, so close it here rather
-    // than waiting for a slot to clear that will never clear. Only when there
-    // are no items: an item loot's slots have not been confirmed cleared yet,
-    // and releasing before the server stores them would drop them - that case
-    // closes from handleLootRemoved once the last slot is gone.
-    if (lootWindowOpen_ && currentLoot_.items.empty() && currentLoot_.gold == 0) {
-        closeLoot();
-    }
-}
-
-void InventoryHandler::handleLootReleaseResponse(network::Packet& packet) {
-    (void)packet;
-    const uint64_t lootGuid = currentLoot_.lootGuid;
-    localLootState_.erase(lootGuid);
-    lootWindowOpen_ = false;
-    events_.publish(events::LootWindowChanged{.open = false});
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("LOOT_CLOSED", {});
-    // Node lifetime is server-authoritative - see closeLoot(). The server despawns a
-    // depleted gather node via SMSG_DESTROY_OBJECT; don't predict it here or a node the
-    // server keeps (still holding charges for another gatherer) disappears locally.
-    currentLoot_ = LootResponseData{};
-}
-
-void InventoryHandler::handleLootRemoved(network::Packet& packet) {
-    uint8_t slotIndex = packet.readUInt8();
-    for (auto it = currentLoot_.items.begin(); it != currentLoot_.items.end(); ++it) {
-        if (it->slotIndex == slotIndex) {
-            // SMSG_ITEM_PUSH_RESULT is the authoritative inventory receipt and
-            // emits the single "Received item" notification. Slot removal only
-            // updates the open loot window; announcing here duplicated chat and
-            // the loot sound for the same item.
-            it->looted = true;
-            if (frameXml_.frameXmlListening())
-                frameXml_.fireFrameXmlEvent("LOOT_SLOT_CLEARED", {std::to_string(slotIndex + 1)});
-            break;
-        }
-    }
-    // An emptied corpse closes itself.
-    //
-    // The interface's loot window opens on LOOT_OPENED and closes on
-    // LOOT_CLOSED and nothing else - LOOT_SLOT_CLEARED only hides the one
-    // button. Autoloot sends an autostore for every slot at once, the server
-    // clears them one by one, and when the last one goes there is nothing left
-    // to loot but no close was ever sent: the window sat open and empty, which
-    // is what "autoloot doesn't close the bag" is. Money is grabbed and zeroed
-    // in the same breath at open, so items empty with no gold left is a corpse
-    // with nothing on it. Retail closes it here too, for a manual last-item
-    // loot as much as an automatic one.
-    if (lootWindowOpen_ && currentLoot_.nothingLeft()) {
-        closeLoot();
-    }
-}
-
-// ============================================================
-// Loot Roll
-// ============================================================
-
-/// A new roll, with the id the interface will know it by.
-///
-/// Any roll already open on the same item of the same corpse is replaced: the
-/// server restates a roll when its countdown is reset, and two windows for one
-/// item is worse than none.
-LootRollEntry& InventoryHandler::beginLootRoll(uint64_t objectGuid, uint32_t slot) {
-    for (auto& roll : lootRolls_) {
-        if (roll.objectGuid == objectGuid && roll.slot == slot) {
-            const int keptId = roll.rollId;
-            roll = LootRollEntry{};
-            roll.rollId = keptId;
-            roll.objectGuid = objectGuid;
-            roll.slot = slot;
-            return roll;
-        }
-    }
-    LootRollEntry roll;
-    roll.rollId = nextLootRollId_++;
-    roll.objectGuid = objectGuid;
-    roll.slot = slot;
-    lootRolls_.push_back(roll);
-    return lootRolls_.back();
-}
-
-/// The roll on one item of one corpse, which is how every later packet names
-/// it - the roll id is this client's own and the server has never seen it.
-LootRollEntry* InventoryHandler::findLootRoll(uint64_t objectGuid, uint32_t slot) {
-    for (auto& roll : lootRolls_) {
-        if (roll.objectGuid == objectGuid && roll.slot == slot) return &roll;
-    }
-    return nullptr;
-}
-
-/// Close one roll and take its window down with it.
-void InventoryHandler::endLootRoll(uint64_t objectGuid, uint32_t slot) {
-    for (auto it = lootRolls_.begin(); it != lootRolls_.end(); ++it) {
-        if (it->objectGuid != objectGuid || it->slot != slot) continue;
-        const int rollId = it->rollId;
-        lootRolls_.erase(it);
-        // Named, so the window that closes is the one this roll opened. It was
-        // the slot plus one here as well, which closed a different roll's
-        // window whenever two were up.
-        if (frameXml_.frameXmlListening()) {
-            frameXml_.fireFrameXmlEvent("CANCEL_LOOT_ROLL",
-                                           {std::to_string(rollId)});
-        }
-        return;
-    }
-}
-
-void InventoryHandler::sendLootRoll(uint64_t objectGuid, uint32_t slot, uint8_t rollType) {
-    if (!sender_.characterInWorld()) return;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_LOOT_ROLL));
-    pkt.writeUInt64(objectGuid);
-    pkt.writeUInt32(slot);
-    pkt.writeUInt8(rollType);
-    sender_.send(pkt);
-    // Once we've sent any choice (pass/need/greed/disenchant), close the dialog
-    // - this roll's, and only this roll's.
-    endLootRoll(objectGuid, slot);
-}
-
-void InventoryHandler::handleLootRoll(network::Packet& packet) {
-    // objectGuid(8) + lootSlot(4) + playerGuid(8) + itemId(4) + itemRandSuffix(4) +
-    // itemRandProp(4) + rollNumber(1) + rollType(1) + autoPass(1)
-    if (!packet.hasRemaining(35)) return;
-    uint64_t objectGuid = packet.readUInt64();
-    uint32_t lootSlot   = packet.readUInt32();
-    uint64_t playerGuid = packet.readUInt64();
-    /*uint32_t itemId     =*/ packet.readUInt32();
-    /*uint32_t randSuffix =*/ packet.readUInt32();
-    (void)packet.readUInt32(); // random property
-    uint8_t rollNumber  = packet.readUInt8();
-    uint8_t rollType    = packet.readUInt8();
-    /*uint8_t autoPass   =*/ packet.readUInt8();
-
-    // Resolve player name
-    std::string playerName = queries_.playerName(playerGuid);
-    if (playerName.empty()) playerName = "Player";
-
-    if (LootRollEntry* roll = findLootRoll(objectGuid, lootSlot)) {
-        LootRollEntry::PlayerRollResult result;
-        result.playerName = playerName;
-        result.rollNum = rollNumber;
-        result.rollType = rollType;
-        roll->playerRolls.push_back(result);
-    }
-
-    // RollVote enum: 0=Pass, 1=Need, 2=Greed, 3=Disenchant.
-    const char* typeStr = "passed on";
-    if (rollType == 1) typeStr = "rolled Need";
-    else if (rollType == 2) typeStr = "rolled Greed";
-    else if (rollType == 3) typeStr = "rolled Disenchant";
-    if (rollType >= 1 && rollType <= 3) {
-        chat_.addSystemChatMessage(playerName + " " + typeStr + " - " + std::to_string(rollNumber));
-    } else {
-        chat_.addSystemChatMessage(playerName + " passed.");
-    }
-}
-
-void InventoryHandler::handleLootRollWon(network::Packet& packet) {
-    // objectGuid(8) + lootSlot(4) + itemId(4) + itemSuffix(4) + itemProp(4) + playerGuid(8) + rollNumber(1) + rollType(1)
-    if (!packet.hasRemaining(34)) return;
-    const uint64_t wonGuid = packet.readUInt64();
-    const uint32_t wonSlot = packet.readUInt32();
-    uint32_t itemId     = packet.readUInt32();
-    /*uint32_t randSuffix =*/ packet.readUInt32();
-    int32_t wonRandProp = static_cast<int32_t>(packet.readUInt32());
-    uint64_t winnerGuid = packet.readUInt64();
-    uint8_t rollNumber  = packet.readUInt8();
-    uint8_t rollType    = packet.readUInt8();
-
-    std::string winnerName = queries_.playerName(winnerGuid);
-    if (winnerName.empty()) winnerName = "Player";
-
-    ensureItemInfo(itemId);
-    auto* info = getItemInfo(itemId);
-    std::string itemName = (info && !info->name.empty()) ? info->name : ("Item #" + std::to_string(itemId));
-    if (wonRandProp != 0) {
-        std::string suffix = queries_.randomPropertyName(wonRandProp);
-        if (!suffix.empty()) itemName += " " + suffix;
-    }
-    uint32_t wonQuality = info ? info->quality : 1u;
-    std::string link = buildItemLink(itemId, wonQuality, itemName);
-
-    // RollVote enum: 1=Need, 2=Greed, 3=Disenchant (0=Pass cannot win).
-    const char* typeStr = "Need";
-    if (rollType == 2) typeStr = "Greed";
-    else if (rollType == 3) typeStr = "Disenchant";
-
-    chat_.addSystemChatMessage(winnerName + " won " + link + " (" + typeStr + " - " + std::to_string(rollNumber) + ")");
-    endLootRoll(wonGuid, wonSlot);
-}
-
 // ============================================================
 // Vendor
 // ============================================================
-
-void InventoryHandler::openVendor(uint64_t npcGuid) {
-    if (!sender_.characterInWorld()) return;
-    auto packet = ListInventoryPacket::build(npcGuid);
-    sender_.send(packet);
-}
 
 void InventoryHandler::closeVendor() {
     bool wasOpen = vendorWindowOpen_;
@@ -1809,13 +1518,6 @@ void InventoryHandler::repairAll(uint64_t vendorGuid, bool useGuildBank) {
     }
 }
 
-bool InventoryHandler::equipWouldBindFromBackpack(int backpackIndex) const {
-    const auto& inv = held_.items;
-    if (backpackIndex < 0 || backpackIndex >= inv.getBackpackSize()) return false;
-    const auto& slot = inv.getBackpackSlot(backpackIndex);
-    return !slot.empty() && slot.item.wouldBindOnEquip();
-}
-
 bool InventoryHandler::equipWouldBindFromBag(int bagIndex, int slotIndex) const {
     const auto& inv = held_.items;
     if (bagIndex < 0 || bagIndex >= Inventory::NUM_BAG_SLOTS) return false;
@@ -2043,10 +1745,6 @@ bool InventoryHandler::isAwaitingUnitTarget() const {
     return true;
 }
 
-uint32_t InventoryHandler::getPendingUnitTargetSourceItemId() const {
-    return isAwaitingUnitTarget() ? pendingUnitTarget_->itemId : 0;
-}
-
 void InventoryHandler::cancelUnitTargeting() {
     pendingUnitTarget_.reset();
 }
@@ -2072,10 +1770,6 @@ bool InventoryHandler::isAwaitingItemTarget() const {
         return false;
     }
     return true;
-}
-
-uint32_t InventoryHandler::getPendingItemTargetSourceItemId() const {
-    return pendingItemTarget_ ? pendingItemTarget_->itemId : 0;
 }
 
 void InventoryHandler::cancelItemTargeting() {
@@ -2420,29 +2114,6 @@ void InventoryHandler::splitItemTo(uint8_t srcBag, uint8_t srcSlot,
              ") count=", (int)count, " -> dst(bag=", (int)dstBag,
              " slot=", (int)dstSlot, ")");
     sender_.send(SplitItemPacket::build(srcBag, srcSlot, dstBag, dstSlot, count));
-}
-
-void InventoryHandler::splitItem(uint8_t srcBag, uint8_t srcSlot, uint8_t count) {
-    // No destination given: the first free slot, which is what this client's
-    // own bag window means by a split. The interface means something else and
-    // says where it wants it - see splitItemTo.
-    const int freeBp = held_.items.findFreeBackpackSlot();
-    if (freeBp >= 0) {
-        splitItemTo(srcBag, srcSlot, 0xFF,
-                    static_cast<uint8_t>(Inventory::NUM_EQUIP_SLOTS + freeBp), count);
-        return;
-    }
-    for (int b = 0; b < held_.items.NUM_BAG_SLOTS; b++) {
-        const int bagSize = held_.items.getBagSize(b);
-        for (int s = 0; s < bagSize; s++) {
-            if (!held_.items.getBagSlot(b, s).empty()) continue;
-            splitItemTo(srcBag, srcSlot,
-                        static_cast<uint8_t>(Inventory::FIRST_BAG_EQUIP_SLOT + b),
-                        static_cast<uint8_t>(s), count);
-            return;
-        }
-    }
-    raiseUiError("Cannot split: no free inventory slots.");
 }
 
 void InventoryHandler::fireBagUpdates() {
@@ -2971,454 +2642,6 @@ void InventoryHandler::acceptSockets() {
 }
 
 // ============================================================
-// Mail
-// ============================================================
-
-void InventoryHandler::openMailbox(uint64_t guid) {
-    mailboxGuid_ = guid;
-    mailboxOpen_ = true;
-    // Through the setter, which is the only thing that says so. Assigning the
-    // member cleared the flag and told nobody: this client's own minimap asks
-    // hasNewMail() again on every frame it draws, so it went out by itself,
-    // and an interface that is told once kept the envelope up for the rest of
-    // the session.
-    setHasNewMail(false);
-    selectedMailIndex_ = -1;
-    showMailCompose_ = false;
-    clearMailAttachments();
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("MAIL_SHOW", {});
-    selectDefaultStationery();
-    refreshMailList();
-}
-
-void InventoryHandler::selectDefaultStationery() {
-    // The paper a letter is written on, chosen the way it arrives already in
-    // the frame.
-    //
-    // SendMailFrame_CanSend counts three things before it enables the Send
-    // button, and one is that a stationery has been chosen. Nothing chooses one
-    // when the frame opens: SendMailFrame_Reset is the only thing in the whole
-    // interface that does, and it runs after a letter has been sent
-    // successfully. So the first letter of a session could never be sent - the
-    // button was disabled before it was ever pressed, which is exactly what the
-    // input log shows and what "mail not being sent" turned out to be.
-    queries_.runInterfaceCommand(
-        "if StationeryPopupFrame and not StationeryPopupFrame.selectedIndex then "
-        "StationeryPopupButton_OnClick(nil, 1) end");
-}
-
-void InventoryHandler::closeMailbox() {
-    mailboxOpen_ = false;
-    mailboxGuid_ = 0;
-    showMailCompose_ = false;
-    clearMailAttachments();
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("MAIL_CLOSED", {});
-}
-
-void InventoryHandler::refreshMailList() {
-    if (!mailboxOpen_ || mailboxGuid_ == 0) return;
-    if (!sender_.characterInWorld()) return;
-    auto packet = GetMailListPacket::build(mailboxGuid_);
-    sender_.send(packet);
-}
-
-const char* InventoryHandler::mailResultText(uint32_t error) {
-    // MailResponseResult, as the server sends it.
-    switch (error) {
-        case 1:  return "Those items cannot go in your bags.";
-        case 2:  return "You cannot send mail to yourself.";
-        case 3:  return "You do not have enough money.";
-        case 4:  return "No player by that name.";
-        case 5:  return "You cannot send mail to the other faction.";
-        case 6:  return "The server refused the letter.";
-        case 14: return "Trial accounts cannot send mail.";
-        case 15: return "That player's mailbox is full.";
-        case 16: return "A wrapped item cannot be sent cash on delivery.";
-        case 17: return "Your mail and chat are suspended.";
-        case 18: return "Too many items attached.";
-        case 19: return "One of the attached items cannot be mailed.";
-        case 21: return "One of the attached items has expired.";
-        default: return nullptr;
-    }
-}
-
-void InventoryHandler::refuseSend(const std::string& reason, const char* logLine) {
-    // The compose frame disables its Send button the moment it is pressed and
-    // re-enables it only when it hears how the send went. A refusal on this
-    // side used to return without a word, so the button stayed disabled - one
-    // silent refusal and no letter could be sent for the rest of the session,
-    // whatever was wrong the first time.
-    LOG_WARNING("sendMail: ", logLine);
-    chat_.addSystemChatMessage(reason);
-    if (frameXml_.frameXmlListening()) {
-        // Zero is "internal error" in the server's own table, which is the
-        // honest answer for a refusal that never reached it.
-        frameXml_.fireFrameXmlEvent("MAIL_FAILED", {"0"});
-    }
-}
-
-void InventoryHandler::sendMail(const std::string& recipient, const std::string& subject,
-                                const std::string& body, uint64_t money, uint64_t cod) {
-    if (!sender_.characterInWorld()) {
-        refuseSend("Cannot send mail right now.", "not in world");
-        return;
-    }
-    if (!sender_.connected()) {
-        refuseSend("Cannot send mail: not connected.", "no socket");
-        return;
-    }
-    if (mailboxGuid_ == 0) {
-        refuseSend("You are not at a mailbox.", "mailboxGuid_ is 0 (mailbox closed?)");
-        return;
-    }
-    if (recipient.empty()) {
-        refuseSend("Enter a recipient.", "no recipient");
-        return;
-    }
-    // Collect attached item GUIDs
-    std::vector<uint64_t> itemGuids;
-    for (const auto& att : mailAttachments_) {
-        if (att.occupied()) {
-            itemGuids.push_back(att.itemGuid);
-        }
-    }
-    const int sendable = maxSendableMailAttachments();
-    if (static_cast<int>(itemGuids.size()) > sendable) {
-        // Should be unreachable now that attaching is capped, but dropping
-        // attachments without saying so is how this went unnoticed.
-        LOG_ERROR("sendMail: ", itemGuids.size(), " attachments but this expansion's "
-                  "packet carries ", sendable, " - refusing to send and lose the rest");
-        refuseSend("This realm's mail carries one item per letter.", "too many attachments");
-        return;
-    }
-    auto packet = queries_.packetParsers().buildSendMail(mailboxGuid_, recipient, subject, body, money, cod, itemGuids);
-    LOG_INFO("sendMail: to='", recipient, "' subject='", subject, "' money=", money,
-             " attachments=", itemGuids.size(), " mailboxGuid=", mailboxGuid_);
-    sender_.send(packet);
-    clearMailAttachments();
-}
-
-int InventoryHandler::maxSendableMailAttachments() {
-    // Vanilla's packet has one uint64 item GUID where TBC and later have a
-    // count followed by an array.
-    return isClassicLikeExpansion() ? 1 : MAIL_MAX_ATTACHMENTS;
-}
-
-/// Warn when an attached item still has a refund window, which posting it ends.
-///
-/// Only tellable since the refund info is asked for and kept: this used to be
-/// recorded as correctly-unfired on the grounds that the window was a timer
-/// this client did not have. It has one now.
-///
-/// The interface answers with RespondMailLockSendItem(slot, keep).
-void InventoryHandler::noteMailAttachRefundable(int attachIndex) {
-    if (attachIndex < 0 || attachIndex >= maxSendableMailAttachments()) return;
-    const auto& att = mailAttachments_[static_cast<size_t>(attachIndex)];
-    if (!att.occupied()) return;
-    const auto* refund = getItemRefundInfo(att.itemGuid);
-    if (!refund) {
-        // Not asked yet. Ask, so the next attachment of the same item knows -
-        // and say nothing now rather than guess, which is what an item with no
-        // window looks like too.
-        requestItemRefundInfo(att.itemGuid);
-        return;
-    }
-    constexpr uint32_t kRefundWindow = 2 * 60 * 60;
-    if (refund->playedSincePurchase >= kRefundWindow) return;   // window is over
-    if (!frameXml_.frameXmlListening()) return;
-    const auto* info = getItemInfo(att.item.itemId);
-    frameXml_.fireFrameXmlEvent(
-        "MAIL_LOCK_SEND_ITEMS",
-        {std::to_string(attachIndex + 1),
-         info ? game::buildItemLink(att.item.itemId, info->quality, info->name)
-              : att.item.name});
-}
-
-bool InventoryHandler::attachItemFromBackpack(int backpackIndex) {
-    if (backpackIndex < 0 || backpackIndex >= held_.items.getBackpackSize()) return false;
-    const auto& slot = held_.items.getBackpackSlot(backpackIndex);
-    if (slot.empty()) return false;
-    uint64_t itemGuid = held_.backpackSlotGuids[backpackIndex];
-    if (itemGuid == 0) return false;
-    for (int i = 0; i < maxSendableMailAttachments(); ++i) {
-        if (!mailAttachments_[i].occupied()) {
-            mailAttachments_[i].itemGuid = itemGuid;
-            mailAttachments_[i].item = slot.item;
-            mailAttachments_[i].srcBag = 0xFF;
-            mailAttachments_[i].srcSlot = static_cast<uint8_t>(Inventory::NUM_EQUIP_SLOTS + backpackIndex);
-            noteMailAttachRefundable(i);
-            notifyMailComposeChanged();
-            return true;
-        }
-    }
-    return false;
-}
-
-bool InventoryHandler::attachItemFromBag(int bagIndex, int slotIndex) {
-    if (bagIndex < 0 || bagIndex >= held_.items.NUM_BAG_SLOTS) return false;
-    if (slotIndex < 0 || slotIndex >= held_.items.getBagSize(bagIndex)) return false;
-    const auto& slot = held_.items.getBagSlot(bagIndex, slotIndex);
-    if (slot.empty()) return false;
-    uint64_t bagGuid = held_.equipSlotGuids[Inventory::FIRST_BAG_EQUIP_SLOT + bagIndex];
-    if (bagGuid == 0) return false;
-    auto it = held_.containerContents.find(bagGuid);
-    if (it == held_.containerContents.end()) return false;
-    if (slotIndex >= static_cast<int>(it->second.numSlots)) return false;
-    uint64_t itemGuid = it->second.slotGuids[slotIndex];
-    if (itemGuid == 0) return false;
-    for (int i = 0; i < maxSendableMailAttachments(); ++i) {
-        if (!mailAttachments_[i].occupied()) {
-            mailAttachments_[i].itemGuid = itemGuid;
-            mailAttachments_[i].item = slot.item;
-            mailAttachments_[i].srcBag = static_cast<uint8_t>(Inventory::FIRST_BAG_EQUIP_SLOT + bagIndex);
-            mailAttachments_[i].srcSlot = static_cast<uint8_t>(slotIndex);
-            noteMailAttachRefundable(i);
-            notifyMailComposeChanged();
-            return true;
-        }
-    }
-    return false;
-}
-
-bool InventoryHandler::detachMailAttachment(int attachIndex) {
-    if (attachIndex < 0 || attachIndex >= MAIL_MAX_ATTACHMENTS) return false;
-    mailAttachments_[attachIndex] = MailAttachSlot{};
-    notifyMailComposeChanged();
-    return true;
-}
-
-void InventoryHandler::clearMailAttachments() {
-    for (auto& a : mailAttachments_) a = MailAttachSlot{};
-    notifyMailComposeChanged();
-}
-
-void InventoryHandler::notifyMailComposeChanged() {
-    // The send frame recomputes its slots, its postage and its Send button from
-    // this and from nothing else - there is no poll behind it.
-    if (frameXml_.frameXmlListening()) {
-        frameXml_.fireFrameXmlEvent("MAIL_SEND_INFO_UPDATE", {});
-    }
-}
-
-int InventoryHandler::getMailAttachmentCount() const {
-    int count = 0;
-    for (const auto& a : mailAttachments_)
-        if (a.occupied()) ++count;
-    return count;
-}
-
-void InventoryHandler::mailTakeMoney(uint32_t mailId) {
-    if (!sender_.characterInWorld() || mailboxGuid_ == 0) return;
-    auto packet = MailTakeMoneyPacket::build(mailboxGuid_, mailId);
-    sender_.send(packet);
-}
-
-void InventoryHandler::mailTakeItem(uint32_t mailId, uint32_t itemGuidLow) {
-    if (!sender_.characterInWorld() || mailboxGuid_ == 0) return;
-    auto packet = MailTakeItemPacket::build(mailboxGuid_, mailId, itemGuidLow);
-    sender_.send(packet);
-}
-
-void InventoryHandler::mailReturnToSender(uint32_t mailId) {
-    if (!sender_.characterInWorld() || mailboxGuid_ == 0) return;
-    auto packet = MailReturnToSenderPacket::build(mailboxGuid_, mailId);
-    sender_.send(packet);
-    // Same as deleting: the letter being read is this one, and the view over it
-    // hides when told which mail closed.
-    if (frameXml_.frameXmlListening()) {
-        frameXml_.fireFrameXmlEvent("CLOSE_INBOX_ITEM", {std::to_string(mailId)});
-    }
-}
-
-void InventoryHandler::mailDelete(uint32_t mailId) {
-    if (!sender_.characterInWorld() || mailboxGuid_ == 0) return;
-    auto packet = MailDeletePacket::build(mailboxGuid_, mailId, 0);
-    sender_.send(packet);
-    // The letter being read is this one, so the view over it has to go: the
-    // interface hides it when told which mail closed, and was never told.
-    if (frameXml_.frameXmlListening()) {
-        frameXml_.fireFrameXmlEvent("CLOSE_INBOX_ITEM", {std::to_string(mailId)});
-    }
-}
-
-void InventoryHandler::mailMarkAsRead(uint32_t mailId) {
-    if (!sender_.characterInWorld() || mailboxGuid_ == 0) return;
-    auto packet = MailMarkAsReadPacket::build(mailboxGuid_, mailId);
-    sender_.send(packet);
-
-    // And locally, because the server does not send the list again for this.
-    // Without it the letter stays bold and HasNewMail keeps answering true
-    // until something else refreshes the inbox - which, for a player who reads
-    // their mail and walks away, is never.
-    //
-    // The flag is set *before* the event, and that order is load-bearing:
-    // MailFrame answers MAIL_INBOX_UPDATE with OpenMail_Update, which asks
-    // GetInboxText, which is what marks a letter read. Setting the flag first
-    // makes the second pass find it already read and stop. Firing first would
-    // recur until the stack ran out.
-    bool marked = false;
-    for (auto& mail : mailInbox_) {
-        if (mail.messageId != mailId || mail.read) continue;
-        mail.read = true;
-        marked = true;
-        if (frameXml_.frameXmlListening())
-            frameXml_.fireFrameXmlEvent("MAIL_INBOX_UPDATE", {});
-        break;
-    }
-
-    // And the envelope on the minimap, which is a different event and was
-    // never fired. MAIL_INBOX_UPDATE redraws the list of letters;
-    // MiniMapMailFrame does not listen to it and answers UPDATE_PENDING_MAIL
-    // alone. So the last unread letter could be read with the list in front of
-    // the player and the notification stayed up - nothing had said the thing
-    // it was reporting had stopped being true.
-    if (marked) {
-        bool anyUnread = false;
-        for (const auto& mail : mailInbox_) {
-            if (!mail.read) { anyUnread = true; break; }
-        }
-        if (anyUnread != hasNewMail_) setHasNewMail(anyUnread);
-    }
-}
-
-void InventoryHandler::handleShowMailbox(network::Packet& packet) {
-    if (!packet.hasRemaining(8)) return;
-    mailboxGuid_ = packet.readUInt64();
-    mailboxOpen_ = true;
-    selectedMailIndex_ = -1;
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("MAIL_SHOW", {});
-    selectDefaultStationery();
-    refreshMailList();
-}
-
-void InventoryHandler::handleMailListResult(network::Packet& packet) {
-    if (!queries_.packetParsers().parseMailList(packet, mailInbox_)) return;
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("MAIL_INBOX_UPDATE", {});
-    for (const auto& mail : mailInbox_) {
-        // Player mail carries a GUID, not a name. Ask for it once here; the UI
-        // reads the name through GameHandler::getMailSenderName, so it appears
-        // as soon as the query comes back.
-        if (mail.messageType == 0 && mail.senderGuid != 0 &&
-            queries_.playerName(mail.senderGuid).empty()) {
-            queries_.requestPlayerName(mail.senderGuid);
-        }
-        if (mail.messageType == 2) {
-            AuctionMailSubject auction;
-            if (parseAuctionMailSubject(mail.subject, auction)) {
-                ensureItemInfo(auction.itemEntry);
-            }
-        }
-        for (const auto& att : mail.attachments) {
-            if (att.itemId != 0) ensureItemInfo(att.itemId);
-        }
-    }
-}
-
-void InventoryHandler::handleSendMailResult(network::Packet& packet) {
-    if (!packet.hasRemaining(12)) return;
-    uint32_t mailId = packet.readUInt32();
-    uint32_t action = packet.readUInt32();
-    uint32_t error  = packet.readUInt32();
-    // WotLK MailResponseType values from SharedDefines.h.
-    constexpr uint32_t MAIL_SEND = 0;
-    constexpr uint32_t MAIL_MONEY_TAKEN = 1;
-    constexpr uint32_t MAIL_ITEM_TAKEN = 2;
-    constexpr uint32_t MAIL_RETURNED_TO_SENDER = 3;
-    constexpr uint32_t MAIL_DELETED = 4;
-    constexpr uint32_t MAIL_MADE_PERMANENT = 5;
-
-    auto mailIt = std::find_if(mailInbox_.begin(), mailInbox_.end(),
-        [mailId](const MailMessage& mail) { return mail.messageId == mailId; });
-
-    if (action == MAIL_SEND) {
-        if (error == 0) {
-            chat_.addSystemChatMessage("Mail sent.");
-            clearMailAttachments();
-            // The frame stays where it is - WoW resets its fields and leaves it
-            // open. This used to close this client's own compose window here,
-            // and that flag now means "the interface's send tab is showing",
-            // which is what decides whether clicking an item in a bag attaches
-            // it. Clearing it made the first letter of a session the last one
-            // that could have anything attached to it.
-            // The send frame waits on these before it will clear its fields and
-            // re-enable the Send button. Without them a mail went out and the
-            // frame sat there as though it had not.
-            if (frameXml_.frameXmlListening()) {
-                frameXml_.fireFrameXmlEvent("MAIL_SEND_SUCCESS", {});
-                frameXml_.fireFrameXmlEvent("MAIL_SUCCESS", {});
-            }
-        } else {
-            const char* why = mailResultText(error);
-            chat_.addSystemChatMessage(
-                why ? std::string("Mail not sent: ") + why
-                    : "Failed to send mail (error " + std::to_string(error) + ").");
-            // Carries the error so the frame can say which refusal it was.
-            if (frameXml_.frameXmlListening()) {
-                frameXml_.fireFrameXmlEvent("MAIL_FAILED", {std::to_string(error)});
-            }
-        }
-    } else if (action == MAIL_ITEM_TAKEN) {
-        if (error == 0) {
-            chat_.addSystemChatMessage("Item taken from mail.");
-            if (frameXml_.frameXmlListening()) fireBagUpdates();
-        } else {
-            chat_.addSystemChatMessage("Failed to take item (error " + std::to_string(error) + ").");
-        }
-    } else if (action == MAIL_MONEY_TAKEN) {
-        if (error == 0) {
-            if (mailIt != mailInbox_.end()) mailIt->money = 0;
-            chat_.addSystemChatMessage("Money taken from mail.");
-            if (frameXml_.frameXmlListening()) {
-                frameXml_.fireFrameXmlEvent("PLAYER_MONEY", {});
-                frameXml_.fireFrameXmlEvent("MAIL_INBOX_UPDATE", {});
-            }
-        } else {
-            chat_.addSystemChatMessage("Failed to take money (error " + std::to_string(error) + ").");
-        }
-    } else if (action == MAIL_DELETED || action == MAIL_RETURNED_TO_SENDER) {
-        if (error == 0) {
-            chat_.addSystemChatMessage(action == MAIL_DELETED ? "Mail deleted." : "Mail returned.");
-            if (mailIt != mailInbox_.end()) {
-                const int erasedIndex = static_cast<int>(std::distance(mailInbox_.begin(), mailIt));
-                mailInbox_.erase(mailIt);
-                if (selectedMailIndex_ == erasedIndex) selectedMailIndex_ = -1;
-                else if (selectedMailIndex_ > erasedIndex) --selectedMailIndex_;
-            }
-            if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("MAIL_INBOX_UPDATE", {});
-        }
-    } else if (action == MAIL_MADE_PERMANENT && error == 0) {
-        chat_.addSystemChatMessage("Mail text copied.");
-    }
-    refreshMailList();
-}
-
-void InventoryHandler::handleReceivedMail(network::Packet& packet) {
-    (void)packet;
-    setHasNewMail(true);
-}
-
-void InventoryHandler::handleQueryNextMailTime(network::Packet& packet) {
-    if (!packet.hasRemaining(8)) return;
-    // readFloat() uses memcpy internally, avoiding the strict aliasing violation
-    // that the previous reinterpret_cast<float*> on raw packet bytes had.
-    float nextTime = packet.readFloat();
-    uint32_t count = packet.readUInt32();
-    setHasNewMail(nextTime >= 0.0f && count > 0);
-    packet.skipAll();
-}
-
-void InventoryHandler::setHasNewMail(bool value) {
-    // Announce a chat line + sound only on the rising edge (no unread -> unread), so the
-    // periodic next-mail-time poll doesn't repeat the notification while mail sits unread.
-    if (value && !hasNewMail_) {
-        chat_.addSystemChatMessage("You have new mail.");
-        events_.publish(events::MailArrived{});
-    }
-    hasNewMail_ = value;
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("UPDATE_PENDING_MAIL", {});
-}
-
-// ============================================================
 // Bank
 // ============================================================
 
@@ -3501,418 +2724,19 @@ void InventoryHandler::handleBuyBankSlotResult(network::Packet& packet) {
     }
 }
 
-// ============================================================
-// Guild Bank
-// ============================================================
-
-void InventoryHandler::openGuildBank(uint64_t guid) {
-    // A vault belongs to a guild, and a player in none has nothing to open. The
-    // server answers CMSG_GUILD_BANKER_ACTIVATE from a guildless player with an
-    // error and sends no bank list, so the window this raised at the moment the
-    // object was clicked had nothing behind it and never would: tabs to click,
-    // no contents, and no way to tell that from a vault that had not loaded yet.
-    if (!queries_.inGuild()) {
-        raiseUiError("You are not in a guild.");
-        return;
-    }
-    guildBankerGuid_ = guid;
-    guildBankActiveTab_ = 0;
-    // The window opens when the vault answers, not when it is asked.
-    //
-    // Raising it here meant any refusal - a guild the client thought the player
-    // was in and the server did not, a banker out of range, a permission the
-    // rank does not carry - left an empty vault on screen with nothing coming.
-    // handleGuildBankList shows it the moment a tab list arrives, which is the
-    // server agreeing that this player may look.
-    // CMSG_GUILD_BANKER_ACTIVATE registers this session with the guild banker so
-    // the server sends the tab list + contents (SMSG_GUILD_BANK_LIST). Without it
-    // the follow-up query-tab is rejected and no bank list ever arrives, so the
-    // window opened empty (or not at all).
-    if (sender_.characterInWorld() && guid != 0) {
-        auto activate = GuildBankerActivatePacket::build(guid);
-        sender_.send(activate);
-    }
-    queryGuildBankTab(0);
-}
-
-void InventoryHandler::closeGuildBank() {
-    guildBankOpen_ = false;
-    guildBankerGuid_ = 0;
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("GUILDBANKFRAME_CLOSED", {});
-}
-
-void InventoryHandler::queryGuildBankTab(uint8_t tabId) {
-    if (!sender_.characterInWorld() || guildBankerGuid_ == 0) return;
-    // Asking for the full tab, not a slot refresh. The byte reaches
-    // SendBankList as "with content" on the cores that read it, so a false here
-    // asked the server for a tab and told it not to send what is in it. This
-    // client keeps no cached tab to refresh, so there is nothing a partial
-    // update could be for.
-    auto packet = GuildBankQueryTabPacket::build(guildBankerGuid_, tabId, true);
-    sender_.send(packet);
-}
-
-void InventoryHandler::buyGuildBankTab() {
-    if (!sender_.characterInWorld() || guildBankerGuid_ == 0) return;
-    uint8_t nextTab = static_cast<uint8_t>(guildBankData_.tabs.size());
-    auto packet = GuildBankBuyTabPacket::build(guildBankerGuid_, nextTab);
-    sender_.send(packet);
-}
-
-void InventoryHandler::depositGuildBankMoney(uint32_t amount) {
-    if (!sender_.characterInWorld() || guildBankerGuid_ == 0) return;
-    auto packet = GuildBankDepositMoneyPacket::build(guildBankerGuid_, amount);
-    sender_.send(packet);
-}
-
-void InventoryHandler::withdrawGuildBankMoney(uint32_t amount) {
-    if (!sender_.characterInWorld() || guildBankerGuid_ == 0) return;
-    auto packet = GuildBankWithdrawMoneyPacket::build(guildBankerGuid_, amount);
-    sender_.send(packet);
-}
-
-void InventoryHandler::guildBankWithdrawItem(uint8_t tabId, uint8_t bankSlot, uint8_t destBag,
-                                             uint8_t destSlot, uint32_t splitCount) {
-    if (!sender_.characterInWorld() || guildBankerGuid_ == 0) return;
-    auto packet = GuildBankSwapItemsPacket::buildBankToInventory(guildBankerGuid_, tabId, bankSlot,
-                                                                 destBag, destSlot, splitCount);
-    sender_.send(packet);
-}
-
-void InventoryHandler::queryGuildBankText(uint8_t tabId) {
-    if (!sender_.characterInWorld()) return;
-    network::Packet p(wireOpcode(Opcode::MSG_QUERY_GUILD_BANK_TEXT));
-    p.writeUInt8(tabId);
-    sender_.send(p);
-}
-
-const std::string& InventoryHandler::getGuildBankTabText(uint8_t tabId) const {
-    static const std::string kNone;
-    return tabId < guildBankTabText_.size() ? guildBankTabText_[tabId] : kNone;
-}
-
-void InventoryHandler::setGuildBankTabInfo(uint8_t tabId, const std::string& name,
-                                           const std::string& icon) {
-    if (!sender_.characterInWorld()) return;
-    if (guildBankerGuid_ == 0) return;
-    // Both or neither: the server tests them before it does anything, so a
-    // half-filled request is a packet that changes nothing and says nothing.
-    if (name.empty() || icon.empty()) return;
-    network::Packet p(wireOpcode(Opcode::CMSG_GUILD_BANK_UPDATE_TAB));
-    p.writeUInt64(guildBankerGuid_);
-    p.writeUInt8(tabId);
-    p.writeString(name);
-    p.writeString(icon);
-    sender_.send(p);
-}
-
-void InventoryHandler::guildBankDepositItem(uint8_t tabId, uint8_t bankSlot, uint8_t srcBag, uint8_t srcSlot) {
-    if (!sender_.characterInWorld() || guildBankerGuid_ == 0) return;
-    auto packet = GuildBankSwapItemsPacket::buildInventoryToBank(guildBankerGuid_, tabId, bankSlot, srcBag, srcSlot);
-    sender_.send(packet);
-}
-
-void InventoryHandler::guildBankDepositFromInventory(uint8_t srcBag, uint8_t srcSlot) {
-    if (!sender_.characterInWorld() ||
-        guildBankerGuid_ == 0 || !guildBankOpen_) return;
-    // CMSG_GUILD_BANK_SWAP_ITEMS has no server-side auto-store for the deposit
-    // direction (that path forces bank→character), so the client picks the
-    // target slot - the first empty one in the tab the player is viewing, which
-    // is what the retail client does on a right-click deposit.
-    constexpr int kTabSlots = 98; // GUILD_BANK_MAX_SLOTS
-    std::array<bool, kTabSlots> occupied{};
-    for (const auto& slot : guildBankData_.tabItems) {
-        if (slot.itemEntry != 0 && slot.slotId < kTabSlots)
-            occupied[slot.slotId] = true;
-    }
-    int freeSlot = -1;
-    for (int s = 0; s < kTabSlots; ++s) {
-        if (!occupied[s]) { freeSlot = s; break; }
-    }
-    if (freeSlot < 0) {
-        chat_.addSystemChatMessage("This guild bank tab is full.");
-        return;
-    }
-    guildBankDepositItem(guildBankActiveTab_, static_cast<uint8_t>(freeSlot), srcBag, srcSlot);
-}
-
-void InventoryHandler::setGuildBankMoney(uint64_t money) {
-    if (guildBankData_.money == money) return;
-    guildBankData_.money = money;
-    if (frameXml_.frameXmlListening())
-        frameXml_.fireFrameXmlEvent("GUILDBANK_UPDATE_MONEY", {});
-}
-
-void InventoryHandler::handleGuildBankList(network::Packet& packet) {
-    if (!GuildBankListParser::parse(packet, guildBankData_)) return;
-    // Receiving the bank list means the banker accepted us - make sure the
-    // window is shown even if the open path didn't (e.g. a server-initiated
-    // refresh, or the banker guid arrived only with the list).
-    if (guildBankerGuid_ != 0 && !guildBankOpen_) {
-        guildBankOpen_ = true;
-        if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("GUILDBANKFRAME_OPENED", {});
-    }
-    // Each list is tagged with the tab it describes. Track it so the UI
-    // highlights the right tab and item withdraw/deposit target the tab the
-    // player is actually viewing (clicking a tab only sends a query - it never
-    // updated the active tab, so operations defaulted to tab 0).
-    guildBankActiveTab_ = guildBankData_.tabId;
-    if (frameXml_.frameXmlListening()) {
-        // The three the panel listens for and this fired none of.
-        //
-        // GUILDBANK_UPDATE_TABS is the one that runs
-        // GuildBankFrame_SelectAvailableTab, which is what picks a tab the
-        // player may look in and draws it - without it the frame kept whatever
-        // tab it had and never chose one. Only when a tab list actually
-        // arrived: the event means the set of tabs changed, and a slot refresh
-        // does not change it.
-        if (guildBankData_.tabsIncluded && !guildBankData_.tabs.empty()) {
-            frameXml_.fireFrameXmlEvent("GUILDBANK_UPDATE_TABS", {});
-        }
-        frameXml_.fireFrameXmlEvent("GUILDBANKBAGSLOTS_CHANGED", {});
-        // The money line and the withdraw allowance, which are read from
-        // GetGuildBankMoney and GetGuildBankWithdrawMoney and were never asked
-        // for again after the frame first drew.
-        frameXml_.fireFrameXmlEvent("GUILDBANK_UPDATE_MONEY", {});
-        frameXml_.fireFrameXmlEvent("GUILDBANK_UPDATE_WITHDRAWMONEY", {});
-    }
-    for (const auto& tab : guildBankData_.tabs) {
-        for (const auto& item : tab.items) {
-            if (item.itemEntry != 0) ensureItemInfo(item.itemEntry);
-        }
-    }
-}
-
-// ============================================================
-// Auction House
-// ============================================================
-
-void InventoryHandler::openAuctionHouse(uint64_t guid) {
-    auctioneerGuid_ = guid;
-    auctionOpen_ = true;
-    auctionActiveTab_ = 0;
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("AUCTION_HOUSE_SHOW", {});
-}
-
-void InventoryHandler::closeAuctionHouse() {
-    auctionOpen_ = false;
-    auctioneerGuid_ = 0;
-    if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("AUCTION_HOUSE_CLOSED", {});
-}
-
-void InventoryHandler::auctionSearch(const std::string& name, uint8_t levelMin, uint8_t levelMax,
-                                      uint32_t quality, uint32_t itemClass, uint32_t itemSubClass,
-                                      uint32_t invTypeMask, uint8_t usableOnly, uint32_t offset,
-                                      const std::vector<AuctionSortKey>& sort) {
-    if (!sender_.characterInWorld() || auctioneerGuid_ == 0) return;
-    lastAuctionSearch_ = {.name = name, .levelMin = levelMin, .levelMax = levelMax, .quality = quality, .itemClass = itemClass, .itemSubClass = itemSubClass,
-                          .invTypeMask = invTypeMask, .usableOnly = usableOnly, .offset = offset, .sort = sort};
-    hasAuctionSearch_ = true;
-    pendingAuctionTarget_ = AuctionResultTarget::BROWSE;
-    auto packet = AuctionListItemsPacket::build(auctioneerGuid_, offset, name,
-                                                  levelMin, levelMax, invTypeMask,
-                                                  itemClass, itemSubClass, quality, usableOnly, 0,
-                                                  sort);
-    sender_.send(packet);
-    // Blocks the Search button until the answer comes back. The result carries
-    // the server's own wait and replaces this with it, so five seconds is only
-    // what applies while a reply is outstanding - and on Classic and TBC, whose
-    // list result ends before that field.
-    auctionSearchDelayTimer_ = 5.0f;
-}
-
-void InventoryHandler::auctionSellItem(int backpackIndex, uint32_t bid,
-                                        uint32_t buyout, uint32_t duration) {
-    if (!sender_.characterInWorld() || auctioneerGuid_ == 0) return;
-    if (backpackIndex < 0 || backpackIndex >= held_.items.getBackpackSize()) return;
-    const auto& slot = held_.items.getBackpackSlot(backpackIndex);
-    if (slot.empty()) return;
-
-    uint64_t itemGuid = held_.backpackSlotGuids[backpackIndex];
-    if (itemGuid == 0) {
-        itemGuid = resolveOnlineItemGuid(slot.item.itemId);
-    }
-    if (itemGuid == 0) {
-        LOG_ERROR("auctionSellItem: could not resolve GUID for backpack slot ", backpackIndex);
-        return;
-    }
-
-    uint32_t stackCount = slot.item.stackCount;
-    auto packet = AuctionSellItemPacket::build(auctioneerGuid_, itemGuid, stackCount, bid, buyout, duration,
-                                                isPreWotlk());
-    sender_.send(packet);
-}
-
-void InventoryHandler::auctionSellItemByGuid(uint64_t itemGuid, uint32_t stackCount, uint32_t bid,
-                                             uint32_t buyout, uint32_t duration) {
-    if (!sender_.characterInWorld() || auctioneerGuid_ == 0) return;
-    if (itemGuid == 0) {
-        LOG_ERROR("auctionSellItemByGuid: refusing to post with a null item GUID");
-        return;
-    }
-    if (stackCount == 0) stackCount = 1;
-    auto packet = AuctionSellItemPacket::build(auctioneerGuid_, itemGuid, stackCount, bid, buyout, duration,
-                                                isPreWotlk());
-    sender_.send(packet);
-}
-
-void InventoryHandler::auctionPlaceBid(uint32_t auctionId, uint32_t amount) {
-    if (!sender_.characterInWorld() || auctioneerGuid_ == 0) return;
-    auto packet = AuctionPlaceBidPacket::build(auctioneerGuid_, auctionId, amount);
-    sender_.send(packet);
-}
-
-void InventoryHandler::auctionBuyout(uint32_t auctionId, uint32_t buyoutPrice) {
-    if (!sender_.characterInWorld() || auctioneerGuid_ == 0) return;
-    auto packet = AuctionPlaceBidPacket::build(auctioneerGuid_, auctionId, buyoutPrice);
-    sender_.send(packet);
-}
-
-void InventoryHandler::auctionCancelItem(uint32_t auctionId) {
-    if (!sender_.characterInWorld() || auctioneerGuid_ == 0) return;
-    auto packet = AuctionRemoveItemPacket::build(auctioneerGuid_, auctionId);
-    sender_.send(packet);
-}
-
-void InventoryHandler::auctionListOwnerItems(uint32_t offset) {
-    if (!sender_.characterInWorld() || auctioneerGuid_ == 0) return;
-    pendingAuctionTarget_ = AuctionResultTarget::OWNER;
-    auto packet = AuctionListOwnerItemsPacket::build(auctioneerGuid_, offset);
-    sender_.send(packet);
-}
-
-void InventoryHandler::auctionListBidderItems(uint32_t offset) {
-    if (!sender_.characterInWorld() || auctioneerGuid_ == 0) return;
-    pendingAuctionTarget_ = AuctionResultTarget::BIDDER;
-    auto packet = AuctionListBidderItemsPacket::build(auctioneerGuid_, offset);
-    sender_.send(packet);
-}
-
-void InventoryHandler::handleAuctionHello(network::Packet& packet) {
-    // Through the parser and the opener rather than reading and setting inline.
-    // Both existed and neither had a caller: this read the same two fields a
-    // second time and set the same state a second time, so the packet's layout
-    // was written down twice and openAuctionHouse was dead code that looked
-    // live. The parser also reads the trailing enabled byte, which is in the
-    // WotLK packet and not the vanilla one - this did not, and would have
-    // needed the same expansion difference written a second time to.
-    AuctionHelloData data;
-    if (!AuctionHelloParser::parse(packet, data)) return;
-    openAuctionHouse(data.auctioneerGuid);
-    queries_.closeGossip();
-}
-
-void InventoryHandler::handleAuctionListResult(network::Packet& packet) {
+void InventoryHandler::handleAuctionListResult(network::Packet& packet,
+                                               std::optional<auction::AuctionList> list) {
     AuctionListResult result;
     // Vanilla sends a single enchantId; TBC inspects 6 enchant slots per item,
     // WotLK 7 (PRISMATIC_ENCHANTMENT_SLOT joined the inspected range in 3.x).
     const int enchantSlots = isClassicLikeExpansion() ? 1 : (isPreWotlk() ? 6 : 7);
     if (!AuctionListResultParser::parse(packet, result, enchantSlots)) return;
-
-    // How long before another search may be sent - the server's own figure,
-    // which every list result carries and which was parsed and then dropped.
-    // AzerothCore's AUCTION_SEARCH_DELAY is 300, in milliseconds; the guess it
-    // replaces was five whole seconds, so the Search button sat dead for about
-    // seventeen times longer than the server ever asked for, and paging
-    // through results crawled.
-    //
-    // A zero means the field was not sent at all rather than "no wait" -
-    // Classic and TBC end the packet before it - so the old guess stays as the
-    // floor for those, where an unthrottled client is what the server would
-    // have to defend itself against.
-    if (result.searchDelay > 0) {
-        auctionSearchDelayTimer_ = static_cast<float>(result.searchDelay) / 1000.0f;
-    }
-
-    if (pendingAuctionTarget_ == AuctionResultTarget::OWNER) {
-        auctionOwnerResults_ = std::move(result);
-        if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("AUCTION_OWNED_LIST_UPDATE", {});
-    } else if (pendingAuctionTarget_ == AuctionResultTarget::BIDDER) {
-        auctionBidderResults_ = std::move(result);
-        if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("AUCTION_BIDDER_LIST_UPDATE", {});
-    } else {
-        auctionBrowseResults_ = std::move(result);
-        if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("AUCTION_ITEM_LIST_UPDATE", {});
-    }
-
-    // Ensure item info for all entries
-    auto ensureEntries = [this](const AuctionListResult& r) {
-        for (const auto& e : r.auctions) {
-            ensureItemInfo(e.itemEntry);
-            if (e.ownerGuid != 0) queries_.requestPlayerName(e.ownerGuid);
-        }
-    };
-    if (pendingAuctionTarget_ == AuctionResultTarget::OWNER) ensureEntries(auctionOwnerResults_);
-    else if (pendingAuctionTarget_ == AuctionResultTarget::BIDDER) ensureEntries(auctionBidderResults_);
-    else ensureEntries(auctionBrowseResults_);
-}
-
-void InventoryHandler::handleAuctionOwnerListResult(network::Packet& packet) {
-    pendingAuctionTarget_ = AuctionResultTarget::OWNER;
-    handleAuctionListResult(packet);
-}
-
-void InventoryHandler::handleAuctionBidderListResult(network::Packet& packet) {
-    pendingAuctionTarget_ = AuctionResultTarget::BIDDER;
-    handleAuctionListResult(packet);
-}
-
-void InventoryHandler::handleAuctionCommandResult(network::Packet& packet) {
-    if (!packet.hasRemaining(12)) return;
-    uint32_t auctionId = packet.readUInt32();
-    uint32_t action = packet.readUInt32();
-    uint32_t error  = packet.readUInt32();
-    (void)auctionId;
-
-    const char* actionNames[] = {"sell", "cancel", "bid/buyout"};
-    const char* actionStr = (action < 3) ? actionNames[action] : "unknown";
-
-    if (error == 0) {
-        std::string msg = std::string("Auction ") + actionStr + " successful.";
-        chat_.addSystemChatMessage(msg);
-        if (frameXml_.frameXmlListening()) {
-            frameXml_.fireFrameXmlEvent("PLAYER_MONEY", {});
-            fireBagUpdates();
-        }
-        // Re-query after successful buy/bid so the list reflects the change.
-        // Previously gated on name.length()>0 which skipped browse-all (empty name).
-        if (action == 2 && hasAuctionSearch_) {
-            auctionSearch(lastAuctionSearch_.name, lastAuctionSearch_.levelMin, lastAuctionSearch_.levelMax,
-                         lastAuctionSearch_.quality, lastAuctionSearch_.itemClass, lastAuctionSearch_.itemSubClass,
-                         lastAuctionSearch_.invTypeMask, lastAuctionSearch_.usableOnly,
-                         lastAuctionSearch_.offset, lastAuctionSearch_.sort);
-        }
-    } else {
-        const char* errMsg = "Unknown error.";
-        switch (error) {
-            case 1: errMsg = "Not enough money."; break;
-            case 2: errMsg = "Item not found."; break;
-            case 5: errMsg = "Bid too low."; break;
-            case 6: errMsg = "Bid increment too low."; break;
-            case 7: errMsg = "You cannot bid on your own auction."; break;
-            case 8: errMsg = "Database error."; break;
-            default: break;
-        }
-        raiseUiError(std::string("Auction ") + actionStr + " failed: " + errMsg);
-        chat_.addSystemChatMessage(std::string("Auction ") + actionStr + " failed: " + errMsg);
-    }
+    if (auto* feed = auctionFeed(queries_)) feed->onList(std::move(result), list);
 }
 
 // ============================================================
 // Item Text
 // ============================================================
-
-void InventoryHandler::queryItemText(uint64_t itemGuid) {
-    if (!sender_.characterInWorld()) return;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_ITEM_TEXT_QUERY));
-    pkt.writeUInt64(itemGuid);
-    sender_.send(pkt);
-    // The read has started. The frame answers this by clearing the page and
-    // picking the material's text colour, before any words have arrived -
-    // which is why it is a separate event from ITEM_TEXT_READY and not a
-    // duplicate of it.
-    frameXml_.fireFrameXmlEvent("ITEM_TEXT_BEGIN", {});
-}
 
 void InventoryHandler::closeItemText() {
     if (!itemTextOpen_) return;
@@ -3937,345 +2761,8 @@ void InventoryHandler::handleItemTextQueryResponse(network::Packet& packet) {
 }
 
 // ============================================================
-// Trade
-// ============================================================
-
-void InventoryHandler::acceptTradeRequest() {
-    if (tradeStatus_ != TradeStatus::PendingIncoming) return;
-    if (!sender_.characterInWorld()) return;
-    auto packet = BeginTradePacket::build();
-    sender_.send(packet);
-}
-
-void InventoryHandler::declineTradeRequest() {
-    if (tradeStatus_ != TradeStatus::PendingIncoming) return;
-    if (!sender_.characterInWorld()) return;
-    auto packet = CancelTradePacket::build();
-    sender_.send(packet);
-    resetTradeState();
-}
-
-/// TRADE_ACCEPT_UPDATE(playerState, targetState) - 1 for accepted, 0 for not.
-///
-/// TradeFrame_SetAcceptState reads both: the first decides whether the player's
-/// half is highlighted and whether the trade button is enabled, the second does
-/// the same for the target's. Fired with neither, both read nil, the highlights
-/// stayed off and the trade button stayed enabled after accepting.
-void InventoryHandler::fireTradeAcceptUpdate() {
-    if (!frameXml_.frameXmlListening()) return;
-    frameXml_.fireFrameXmlEvent("TRADE_ACCEPT_UPDATE",
-                                   {tradeSelfAccepted_ ? "1" : "0",
-                                    tradePartnerAccepted_ ? "1" : "0"});
-}
-
-void InventoryHandler::acceptTrade() {
-    // Open *or* Accepted. The status becomes Accepted the moment the partner
-    // presses accept, and requiring Open meant that whoever pressed second
-    // could not press at all - the trade sat with one acceptance in it and no
-    // way to add the other.
-    if (!isTradeOpen()) return;
-    if (!sender_.characterInWorld()) return;
-    auto packet = AcceptTradePacket::build();
-    sender_.send(packet);
-    tradeSelfAccepted_ = true;
-    fireTradeAcceptUpdate();
-}
-
-void InventoryHandler::unacceptTrade() {
-    // Only where there is one of *ours* to take back. The status says the
-    // trade has an acceptance in it, and TradeStatus::Accepted is set when the
-    // partner accepts - gating on that let the player withdraw an acceptance
-    // they had never made, and stopped them withdrawing one they had.
-    if (!tradeSelfAccepted_) return;
-    if (!sender_.characterInWorld()) return;
-    auto packet = UnacceptTradePacket::build();
-    sender_.send(packet);
-    tradeSelfAccepted_ = false;
-    fireTradeAcceptUpdate();
-}
-
-void InventoryHandler::cancelTrade() {
-    if (tradeStatus_ == TradeStatus::None) return;
-    if (sender_.characterInWorld()) {
-        auto packet = CancelTradePacket::build();
-        sender_.send(packet);
-    }
-    resetTradeState();
-}
-
-void InventoryHandler::setTradeItem(uint8_t tradeSlot, uint8_t srcBag, uint8_t srcSlot) {
-    if (tradeStatus_ != TradeStatus::Open) return;
-    if (!sender_.characterInWorld()) return;
-    auto packet = SetTradeItemPacket::build(tradeSlot, srcBag, srcSlot);
-    sender_.send(packet);
-}
-
-void InventoryHandler::clearTradeItem(uint8_t tradeSlot) {
-    if (tradeStatus_ != TradeStatus::Open) return;
-    if (!sender_.characterInWorld()) return;
-    auto packet = ClearTradeItemPacket::build(tradeSlot);
-    sender_.send(packet);
-}
-
-void InventoryHandler::setTradeGold(uint64_t amount) {
-    if (tradeStatus_ != TradeStatus::Open) return;
-    if (!sender_.characterInWorld()) return;
-    auto packet = SetTradeGoldPacket::build(static_cast<uint32_t>(amount));
-    sender_.send(packet);
-}
-
-void InventoryHandler::resetTradeState() {
-    tradeStatus_ = TradeStatus::None;
-    tradePeerGuid_ = 0;
-    tradePeerName_.clear();
-    myTradeSlots_ = {};
-    peerTradeSlots_ = {};
-    myTradeGold_ = 0;
-    peerTradeGold_ = 0;
-    tradeSelfAccepted_ = false;
-    tradePartnerAccepted_ = false;
-}
-
-void InventoryHandler::handleTradeStatus(network::Packet& packet) {
-    if (!packet.hasRemaining(4)) return;
-    uint32_t status = packet.readUInt32();
-    LOG_WARNING("SMSG_TRADE_STATUS: status=", status, " size=", packet.getSize());
-    switch (status) {
-        // The codes are AzerothCore's TradeStatus enum, checked against
-        // SharedDefines.h rather than against the names that used to be here.
-        // Two of those names were on the wrong cases and they were the two that
-        // matter: 7 is BACK_TO_TRADE, the trade returning to editing because
-        // somebody took their acceptance back, and 8 is TRADE_COMPLETE. Read
-        // the other way round, every finished trade left the window open with
-        // stale bags and no money update, and a partner un-accepting closed the
-        // window announcing "Trade complete".
-        case 0:   // BUSY
-        case 5:   // BUSY_2
-            resetTradeState();
-            chat_.addSystemChatMessage("Trade failed: player is busy.");
-            break;
-        case 1: { // BEGIN_TRADE - someone is asking
-            if (packet.hasRemaining(8))
-                tradePeerGuid_ = packet.readUInt64();
-            tradeStatus_ = TradeStatus::PendingIncoming;
-            // Resolve name
-            if (std::string name = queries_.playerName(tradePeerGuid_); !name.empty()) {
-                tradePeerName_ = std::move(name);
-            }
-            else tradePeerName_ = "Unknown";
-            // Block Trades, which the panel offers and nothing read: every
-            // request opened a window whatever it said. Refused before the
-            // window rather than after, and said in chat, because a request
-            // silently swallowed reads as the other player being ignored.
-            if (cvars_.get("blockTrades", "0") != "0") {
-                chat_.addSystemChatMessage(
-                    "Declined a trade from " + tradePeerName_ + " (trades are blocked).");
-                declineTradeRequest();
-                break;
-            }
-            chat_.addSystemChatMessage(tradePeerName_ + " wants to trade with you.");
-            if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("TRADE_REQUEST", {tradePeerName_});
-            break;
-        }
-        case 2:   // OPEN_WINDOW
-            tradeStatus_ = TradeStatus::Open;
-            tradeSelfAccepted_ = false;
-            tradePartnerAccepted_ = false;
-            chat_.addSystemChatMessage("Trade opened.");
-            if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("TRADE_SHOW", {});
-            break;
-        case 3:   // TRADE_CANCELED
-            resetTradeState();
-            chat_.addSystemChatMessage("Trade cancelled.");
-            if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("TRADE_CLOSED", {});
-            break;
-        case 4:   // TRADE_ACCEPT - the other side pressed accept
-            tradeStatus_ = TradeStatus::Accepted;
-            tradePartnerAccepted_ = true;
-            chat_.addSystemChatMessage("Trade partner accepted.");
-            fireTradeAcceptUpdate();
-            break;
-        case 6:   // NO_TARGET
-            resetTradeState();
-            raiseUiError("You have no target.");
-            break;
-        case 7:   // BACK_TO_TRADE - an acceptance was taken back
-            tradeStatus_ = TradeStatus::Open;
-            tradeSelfAccepted_ = false;
-            tradePartnerAccepted_ = false;
-            fireTradeAcceptUpdate();
-            break;
-        case 8:   // TRADE_COMPLETE
-            // Not reset immediately - SMSG_TRADE_STATUS_EXTENDED may arrive in
-            // the same batch and needs the trade state to read the final items
-            // and gold from.
-            tradeStatus_ = TradeStatus::None;
-            tradeSelfAccepted_ = false;
-            tradePartnerAccepted_ = false;
-            chat_.addSystemChatMessage("Trade complete.");
-            if (frameXml_.frameXmlListening()) {
-                frameXml_.fireFrameXmlEvent("TRADE_CLOSED", {});
-                fireBagUpdates();
-                frameXml_.fireFrameXmlEvent("PLAYER_MONEY", {});
-            }
-            break;
-        case 9:   // TRADE_REJECTED
-            resetTradeState();
-            chat_.addSystemChatMessage("Trade declined.");
-            if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("TRADE_CLOSED", {});
-            break;
-        case 10:  // TARGET_TO_FAR
-            resetTradeState();
-            chat_.addSystemChatMessage("Trade failed: target is too far away.");
-            break;
-        case 11:  // WRONG_FACTION
-            resetTradeState();
-            raiseUiError("You cannot trade with the enemy.");
-            break;
-        case 12:  // CLOSE_WINDOW
-            resetTradeState();
-            if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("TRADE_CLOSED", {});
-            break;
-        case 14:  // IGNORE_YOU
-            resetTradeState();
-            raiseUiError("That player is ignoring you.");
-            break;
-        case 15:  // YOU_STUNNED
-            raiseUiError("You are stunned.");
-            break;
-        case 16:  // TARGET_STUNNED
-            raiseUiError("That player is stunned.");
-            break;
-        case 17:  // YOU_DEAD
-            raiseUiError("You are dead.");
-            break;
-        case 18:  // TARGET_DEAD
-            raiseUiError("That player is dead.");
-            break;
-        case 19:  // YOU_LOGOUT
-        case 20:  // TARGET_LOGOUT
-            resetTradeState();
-            chat_.addSystemChatMessage("Trade failed: logging out.");
-            break;
-        case 23:  // NOT_ON_TAPLIST
-            raiseUiError("You do not have permission to loot that item.");
-            break;
-        default:
-            LOG_DEBUG("Unhandled SMSG_TRADE_STATUS: ", status);
-            break;
-    }
-}
-
-void InventoryHandler::handleTradeStatusExtended(network::Packet& packet) {
-    // SendUpdateTrade writes:
-    //
-    //   uint8  traderData     1 = the other player's offer, 0 = your own
-    //   uint32 tradeId
-    //   uint32 slotCount      seven, twice
-    //   uint32 slotCount
-    //   uint32 gold           the *header* carries it, not the tail
-    //   uint32 spell          cast on the lowest slot's item
-    //   per slot (seven of them):
-    //     uint8  slotIndex
-    //     uint32 entry, displayId, stackCount, wrapped
-    //     uint64 giftCreator
-    //     uint32 permEnchant, gem1, gem2, gem3
-    //     uint64 creator
-    //     uint32 charges, suffixFactor
-    //     int32  randomPropertyId
-    //     uint32 lockId, maxDurability, durability
-    //
-    // An empty slot writes eighteen zeroed uint32s, which is the same
-    // seventy-two bytes, so the stride never changes.
-    //
-    // What was here read a four-byte "whichPlayer" and a four-byte count and
-    // then walked slots of sixty-five bytes from offset eight. Every one of
-    // those is wrong: the discriminator is one byte, the item block starts at
-    // twenty-one, and a slot is seventy-three.
-    //
-    // It went unnoticed because the arithmetic came out right. The note above
-    // it read "8 + 8x65 + 4 = 532 (matches observed packet size)", and 532 is
-    // the true size - 21 + 7x73. A total that agrees says nothing about where
-    // the fields are, and every item in the trade window was read from the
-    // wrong offset with the wrong stride.
-    constexpr size_t kHeaderBytes = 1 + 4 * 5;
-    constexpr size_t kSlotBytes = 1 + 4 * 4 + 8 + 4 * 4 + 8 + 4 * 6;
-    if (!packet.hasRemaining(kHeaderBytes)) { packet.skipAll(); return; }
-
-    const uint8_t traderData = packet.readUInt8();
-    /*uint32_t tradeId    =*/ packet.readUInt32();
-    const uint32_t slotCount = packet.readUInt32();
-    /*uint32_t slotCount2 =*/ packet.readUInt32();
-    const uint32_t gold = packet.readUInt32();
-    /*uint32_t spell     =*/ packet.readUInt32();
-
-    // Zero is this player's own offer, which is the side myTradeSlots_ holds.
-    const bool ownSide = (traderData == 0);
-    auto& slots = ownSide ? myTradeSlots_ : peerTradeSlots_;
-
-    uint32_t count = slotCount;
-    if (count > TRADE_SLOT_COUNT) count = TRADE_SLOT_COUNT;
-    LOG_DEBUG("SMSG_TRADE_STATUS_EXTENDED: ", ownSide ? "own" : "trader",
-              " slots=", count, " gold=", gold);
-
-    for (uint32_t i = 0; i < count; ++i) {
-        if (!packet.hasRemaining(kSlotBytes)) { packet.skipAll(); break; }
-        const uint8_t slotNum = packet.readUInt8();
-        const uint32_t itemId    = packet.readUInt32();
-        const uint32_t displayId = packet.readUInt32();
-        const uint32_t stackCnt  = packet.readUInt32();
-        /*uint32_t wrapped     =*/ packet.readUInt32();
-        /*uint64_t giftCreator =*/ packet.readUInt64();
-        /*uint32_t permEnchant =*/ packet.readUInt32();
-        for (int g = 0; g < 3; ++g) packet.readUInt32();   // socket enchants
-        /*uint64_t creator     =*/ packet.readUInt64();
-        /*uint32_t charges     =*/ packet.readUInt32();
-        /*uint32_t suffixFactor=*/ packet.readUInt32();
-        /*int32_t randomProp   =*/ packet.readUInt32();
-        /*uint32_t lockId      =*/ packet.readUInt32();
-        /*uint32_t maxDur      =*/ packet.readUInt32();
-        /*uint32_t durability  =*/ packet.readUInt32();
-
-        if (slotNum < TRADE_SLOT_COUNT) {
-            slots[slotNum].itemId = itemId;
-            slots[slotNum].displayId = displayId;
-            slots[slotNum].stackCount = stackCnt;
-        }
-        if (itemId != 0) ensureItemInfo(itemId);
-    }
-    packet.skipAll();
-
-    uint64_t& side = ownSide ? myTradeGold_ : peerTradeGold_;
-    const bool goldChanged = (side != gold);
-    side = gold;
-
-    if (frameXml_.frameXmlListening()) {
-        frameXml_.fireFrameXmlEvent("TRADE_UPDATE", {});
-        // The trade window's own refresh redraws the item slots and nothing
-        // else; the two money frames listen for this and only this. Without it
-        // the gold on the table stays at whatever it read when the window
-        // opened, however much either side puts down.
-        //
-        // One event per side, because they are two different frames. A money
-        // frame carries a moneyType and answers only its own name:
-        // TARGET_TRADE listens for TRADE_MONEY_CHANGED, PLAYER_TRADE for
-        // PLAYER_TRADE_MONEY. Announcing the peer's event for both refreshed
-        // their side when our own gold moved and never refreshed ours - so the
-        // amount *this* player had put down never appeared.
-        if (goldChanged) {
-            frameXml_.fireFrameXmlEvent(
-                ownSide ? "PLAYER_TRADE_MONEY" : "TRADE_MONEY_CHANGED", {});
-        }
-    }
-}
-
-// ============================================================
 // Equipment Sets
 // ============================================================
-
-bool InventoryHandler::supportsEquipmentSets() const {
-    return isActiveExpansion("wotlk");
-}
 
 void InventoryHandler::useEquipmentSet(uint32_t setId) {
     if (!sender_.characterInWorld()) return;
@@ -4507,15 +2994,7 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
         // after it has drawn - "Item #4606" against an empty square, kept for
         // as long as the corpse is open. LOOT_SLOT_CHANGED is the event the
         // loot frame redraws one button on.
-        if (lootWindowOpen_ && frameXml_.frameXmlListening()) {
-            const int coinSlots = currentLoot_.hasCoinSlot() ? 1 : 0;
-            for (size_t i = 0; i < currentLoot_.items.size(); ++i) {
-                if (currentLoot_.items[i].itemId != data.entry) continue;
-                frameXml_.fireFrameXmlEvent(
-                    "LOOT_SLOT_CHANGED",
-                    {std::to_string(coinSlots + static_cast<int>(i) + 1)});
-            }
-        }
+        if (auto* feed = lootFeed(queries_)) feed->onItemInfo(data.entry);
 
         // An objective that had no name for what it asks for now has one.
         //
@@ -4546,20 +3025,9 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
             }
         }
 
-        // Auction mail subjects contain an item entry rather than display text.
-        // Refresh FrameXML mail rows once that item's name becomes available.
-        bool resolvedAuctionSubject = false;
-        for (const auto& mail : mailInbox_) {
-            AuctionMailSubject auction;
-            if (mail.messageType == 2 && parseAuctionMailSubject(mail.subject, auction) &&
-                auction.itemEntry == data.entry) {
-                resolvedAuctionSubject = true;
-                break;
-            }
-        }
-        if (resolvedAuctionSubject && frameXml_.frameXmlListening()) {
-            frameXml_.fireFrameXmlEvent("MAIL_INBOX_UPDATE", {});
-        }
+        // Auction mail subjects contain an item entry rather than display text,
+        // so a letter's row is redrawn once that item's name becomes available.
+        if (auto* feed = mailFeed(queries_)) feed->onItemInfo(data.entry);
 
         // The auction list, for the same reason as the quest rewards above.
         //
@@ -4571,23 +3039,7 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
         // keeps it. Only while the house is open, and only for a row that is
         // actually waiting on this entry: the query runs hundreds of times
         // over a login and the rest of them are nothing to do with auctions.
-        if (auctionOpen_ && frameXml_.frameXmlListening()) {
-            auto listWants = [&data](const AuctionListResult& r) {
-                for (const auto& e : r.auctions) {
-                    if (e.itemEntry == data.entry) return true;
-                }
-                return false;
-            };
-            if (listWants(auctionBrowseResults_)) {
-                frameXml_.fireFrameXmlEvent("AUCTION_ITEM_LIST_UPDATE", {});
-            }
-            if (listWants(auctionOwnerResults_)) {
-                frameXml_.fireFrameXmlEvent("AUCTION_OWNED_LIST_UPDATE", {});
-            }
-            if (listWants(auctionBidderResults_)) {
-                frameXml_.fireFrameXmlEvent("AUCTION_BIDDER_LIST_UPDATE", {});
-            }
-        }
+        if (auto* feed = auctionFeed(queries_)) feed->onItemInfo(data.entry);
 
         // The vendor list, which arrives the same way: SMSG_LIST_INVENTORY
         // gives an item id and a price per row and nothing a player can read.
@@ -5923,23 +4375,6 @@ void InventoryHandler::handleTrainerBuyFailed(network::Packet& packet) {
 // Methods moved from GameHandler
 // ============================================================
 
-void InventoryHandler::initiateTrade(uint64_t targetGuid) {
-    if (!sender_.worldCommandAllowed("trade")) {
-        LOG_WARNING("Cannot initiate trade: not in world or not connected");
-        return;
-    }
-
-    if (targetGuid == 0) {
-        raiseUiError("You must target a player to trade with.");
-        return;
-    }
-
-    auto packet = InitiateTradePacket::build(targetGuid);
-    sender_.send(packet);
-    chat_.addSystemChatMessage("Requesting trade with target.");
-    LOG_INFO("Initiated trade with target: 0x", std::hex, targetGuid, std::dec);
-}
-
 uint32_t InventoryHandler::getTempEnchantRemainingMs(uint32_t slot) const {
     uint64_t nowMs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -5953,23 +4388,6 @@ uint32_t InventoryHandler::getTempEnchantRemainingMs(uint32_t slot) const {
     return 0u;
 }
 
-void InventoryHandler::addMoneyCopper(uint32_t amount) {
-    if (amount == 0) return;
-    held_.moneyCopper += amount;
-    const auto coins = game::splitCopper(amount);
-    const uint32_t gold = coins.gold;
-    const uint32_t silver = coins.silver;
-    const uint32_t copper = coins.copper;
-    std::string msg = "You receive ";
-    msg += std::to_string(gold) + "g ";
-    msg += std::to_string(silver) + "s ";
-    msg += std::to_string(copper) + "c.";
-    // As money, not as a system line. Both were added because the typed one
-    // raised in the interface's handler and never appeared - see
-    // ChatHandler::addLocalChatLine.
-    chat_.addLocalChatLine(ChatType::MONEY, msg);
-}
-
 // ============================================================
 // Repair cost estimation from DBC data
 // ============================================================
@@ -5977,17 +4395,12 @@ void InventoryHandler::addMoneyCopper(uint32_t amount) {
 void InventoryHandler::loadRepairDbc() const {
     if (repairDbcLoaded_) return;
 
-    auto* am = assets_;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
     repairDbcLoaded_ = true;
 
     // DurabilityCosts.dbc: field 0 = itemLevel (key), fields 1-29 = cost multipliers
     // Columns 1-21 = weapon subclass (0-20), columns 22-29 = armor subclass (0-7)
-    auto costsDbc = am->loadDBC("DurabilityCosts.dbc");
-    if (costsDbc && costsDbc->isLoaded()) {
+    {
+        const auto costsDbc = data_.table("DurabilityCosts.dbc", 30, "what a repair costs");
         uint32_t count = costsDbc->getRecordCount();
         for (uint32_t i = 0; i < count; ++i) {
             uint32_t itemLevel = costsDbc->getUInt32(i, 0);
@@ -5999,8 +4412,8 @@ void InventoryHandler::loadRepairDbc() const {
     }
 
     // DurabilityQuality.dbc: field 0 = id (key), field 1 = quality_mod (float)
-    auto qualDbc = am->loadDBC("DurabilityQuality.dbc");
-    if (qualDbc && qualDbc->isLoaded()) {
+    {
+        const auto qualDbc = data_.table("DurabilityQuality.dbc", 2, "what a repair costs");
         uint32_t count = qualDbc->getRecordCount();
         for (uint32_t i = 0; i < count; ++i) {
             uint32_t id = qualDbc->getUInt32(i, 0);
@@ -6312,6 +4725,102 @@ void InventoryHandler::forgetPlayerEquipment(uint64_t guid) {
 // Money
 // ============================================================
 
+void InventoryHandler::itemObjectChanged(uint64_t guid, bool isContainer, const FlatFieldMap& fields,
+                                         FrameXmlEvents& packetEvents) {
+    const ItemObjectChange change = updateItemObject(guid, isContainer, fields);
+    if (change.inventory) {
+        // The rebuild redraws every bag and the character sheet itself
+        // (fireBagUpdates).
+        rebuildOnlineInventory();
+        // An item on the action bar shows how many are left, and nothing in
+        // FrameXML recomputes that from a bag change: ActionButton_UpdateCount
+        // runs only from ActionButton_Update, which BAG_UPDATE does not reach.
+        // So a stack of bandages went down and the bar kept the number it had
+        // when the button was last drawn - usually the count at login.
+        //
+        // Slot zero means every button, which is what the interface reads it
+        // as. Only sent when something on the bar is an item, so a bag change
+        // does not rebuild a hundred and twenty buttons for nothing.
+        if (queries_.actionBarHoldsItem()) packetEvents.fireFrameXmlEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
+    }
+    // Apart from the inventory change, so the durability events fire on a
+    // durability change and not on every stack count that moves.
+    if (change.durability) {
+        // The armour indicator is DurabilityFrame, which listens for
+        // UPDATE_INVENTORY_ALERTS; the merchant's repair buttons listen for
+        // UPDATE_INVENTORY_DURABILITY. Neither was fired anywhere but at world
+        // entry, so the indicator showed the durability the player logged in
+        // with -- a repair changed nothing on screen, and neither did damage.
+        packetEvents.fireFrameXmlEvent("UPDATE_INVENTORY_ALERTS", {});
+        packetEvents.fireFrameXmlEvent("UPDATE_INVENTORY_DURABILITY", {});
+    }
+}
+
+void InventoryHandler::inventoryFieldsArrived(const FlatFieldMap& fields, bool isCreate,
+                                              FrameXmlEvents& packetEvents) {
+    if (!applyInventoryFields(fields)) return;
+    rebuildOnlineInventory();
+    if (!isCreate) packetEvents.fireFrameXmlEvent("PLAYER_EQUIPMENT_CHANGED", {});
+}
+
+void InventoryHandler::updateBatchFinished(bool newItemCreated, const FlatFieldMap& playerFields) {
+    // Deferred rebuild: if new item objects were created in this packet, rebuild
+    // the bags so that slot GUIDs updated earlier in the same packet can resolve.
+    if (newItemCreated) rebuildOnlineInventory();
+
+    // Late inventory base detection once items are known
+    if (queries_.characterGuid() != 0 && !inventoryFieldBaseKnown() &&
+        !playerFields.empty() && !held_.onlineItems.empty()) {
+        detectInventorySlotBases(playerFields);
+        if (inventoryFieldBaseKnown() && applyInventoryFields(playerFields)) rebuildOnlineInventory();
+    }
+}
+
+void InventoryHandler::moneyFieldArrived(uint64_t copper, FrameXmlEvents& packetEvents) {
+    const bool moneyChanged = setMoneyFromFields(copper);
+    LOG_DEBUG("Money from update fields: ", copper, " copper");
+    if (moneyChanged) packetEvents.fireFrameXmlEvent("PLAYER_MONEY", {});
+}
+
+void InventoryHandler::detectCoinageField(const FlatFieldMap& before, const FlatFieldMap& after) {
+    const uint32_t expectedDelta = expectedMoneyDelta();
+    if (expectedDelta == 0) return;
+    if (before.empty() || after.empty()) return;
+
+    constexpr uint32_t kMaxPlausibleCoinage = 2147483647u;
+    std::vector<uint16_t> candidates;
+    candidates.reserve(8);
+
+    for (const auto& [idx, newVal] : after) {
+        auto itOld = before.find(idx);
+        if (itOld == before.end()) continue;
+        uint32_t oldVal = itOld->second;
+        if (newVal < oldVal) continue;
+        uint32_t delta = newVal - oldVal;
+        if (delta != expectedDelta) continue;
+        if (newVal > kMaxPlausibleCoinage) continue;
+        candidates.push_back(idx);
+    }
+
+    if (candidates.empty()) return;
+
+    uint16_t current = fieldIndex(UF::PLAYER_FIELD_COINAGE);
+    uint16_t chosen = candidates[0];
+    if (std::find(candidates.begin(), candidates.end(), current) != candidates.end()) {
+        chosen = current;
+    } else {
+        std::sort(candidates.begin(), candidates.end());
+        chosen = candidates[0];
+    }
+
+    if (chosen != current && current != 0xFFFF) {
+        queries_.coinageFieldFoundAt(chosen);
+        LOG_WARNING("Auto-detected PLAYER_FIELD_COINAGE index: ", chosen, " (was ", current, ")");
+    }
+
+    clearExpectedMoneyDelta();
+}
+
 bool InventoryHandler::setMoneyFromFields(uint64_t copper) {
     const uint64_t old = held_.moneyCopper;
     held_.moneyCopper = copper;
@@ -6328,6 +4837,74 @@ void InventoryHandler::applyServerMoney(uint64_t copper) {
 // ============================================================
 // Books
 // ============================================================
+
+void InventoryHandler::readGameObject(uint64_t guid) {
+    auto entity = queries_.entities().getEntity(guid);
+    if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return;
+
+    auto go = std::static_pointer_cast<GameObject>(entity);
+    uint32_t entry = go->getEntry();
+    if (entry == 0) return;
+
+    const GameObjectQueryResponseData* cached = queries_.gameObjectInfo(entry);
+    if (!cached) {
+        held_.pendingReads.insert(guid);
+        queries_.requestGameObjectInfo(entry, guid);
+        LOG_WARNING("Read object 0x", std::hex, guid, std::dec, " entry=", entry,
+                    ": no metadata yet, asked for it and will read when it lands");
+        return;
+    }
+
+    const GameObjectQueryResponseData& info = *cached;
+    uint32_t pageId = 0;
+    // AzerothCore layout:
+    // type 9 (TEXT): data[0]=pageID
+    // type 10 (GOOBER): data[7]=pageId
+    // The backing sits two words behind the page in both layouts, which is the
+    // whole of what tells a stone tablet from a parchment letter on screen.
+    uint32_t pageMaterial = 0;
+    if (info.type == 9)       { pageId = info.data[0]; pageMaterial = info.data[2]; }
+    else if (info.type == 10) { pageId = info.data[7]; pageMaterial = info.data[9]; }
+
+    // At warning, because this is the whole of why a sign says nothing: the
+    // type decides where the page id is, and an object that is not a 9 or a 10
+    // has none to find. The default log carries warnings only, so an INFO line
+    // here answers nobody.
+    LOG_WARNING("Read object '", info.name, "' entry=", entry, " type=", info.type,
+                " pageId=", pageId, " hasData=", info.hasData);
+
+    if (pageId != 0 && sender_.characterInWorld()) {
+        beginBook(info.name, pageMaterial);  // a fresh book for this interaction
+        sender_.send(PageTextQueryPacket::build(pageId, guid));
+        return;
+    }
+
+    if (!info.name.empty()) {
+        chat_.addSystemChatMessage(info.name);
+    }
+}
+
+void InventoryHandler::gameObjectTemplateArrived(const GameObjectQueryResponseData& data) {
+    // A sign somebody clicked while this was in flight: the click was
+    // kept rather than dropped, so it is answered now.
+    if (!held_.pendingReads.empty()) {
+        std::vector<uint64_t> ready;
+        for (uint64_t waiting : held_.pendingReads) {
+            auto entity = queries_.entities().getEntity(waiting);
+            if (!entity || entity->getType() != ObjectType::GAMEOBJECT) {
+                ready.push_back(waiting);   // gone; drop it
+                continue;
+            }
+            if (std::static_pointer_cast<GameObject>(entity)->getEntry() == data.entry) {
+                ready.push_back(waiting);
+            }
+        }
+        for (uint64_t guid : ready) {
+            held_.pendingReads.erase(guid);
+            if (queries_.entities().getEntity(guid)) readGameObject(guid);
+        }
+    }
+}
 
 void InventoryHandler::beginBook(std::string title, uint32_t material) {
     held_.bookPages.clear();

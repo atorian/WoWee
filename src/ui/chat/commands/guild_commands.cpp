@@ -4,6 +4,7 @@
 #include "ui/chat/i_chat_command.hpp"
 #include "ui/chat_panel.hpp"
 #include "game/game_handler.hpp"
+#include "guild/services/guild.hpp"
 
 namespace wowee { namespace ui {
 
@@ -11,7 +12,7 @@ namespace wowee { namespace ui {
 class GuildInfoCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.requestGuildInfo();
+        guild::orNoGuild(ctx.services.guild).requestGuildInfo();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"ginfo", "guildinfo"}; }
@@ -22,7 +23,7 @@ public:
 class GuildRosterCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.requestGuildRoster();
+        guild::orNoGuild(ctx.services.guild).requestGuildRoster();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"groster", "guildroster"}; }
@@ -34,7 +35,7 @@ class GuildMotdCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (!ctx.args.empty()) {
-            ctx.gameHandler.setGuildMotd(ctx.args);
+            guild::orNoGuild(ctx.services.guild).setGuildMotd(ctx.args);
             return {};
         }
         game::MessageChatData msg;
@@ -53,7 +54,7 @@ class GuildPromoteCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (!ctx.args.empty()) {
-            ctx.gameHandler.promoteGuildMember(ctx.args);
+            guild::orNoGuild(ctx.services.guild).promoteGuildMember(ctx.args);
             return {};
         }
         game::MessageChatData msg;
@@ -72,7 +73,7 @@ class GuildDemoteCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (!ctx.args.empty()) {
-            ctx.gameHandler.demoteGuildMember(ctx.args);
+            guild::orNoGuild(ctx.services.guild).demoteGuildMember(ctx.args);
             return {};
         }
         game::MessageChatData msg;
@@ -90,7 +91,7 @@ public:
 class GuildQuitCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.leaveGuild();
+        guild::orNoGuild(ctx.services.guild).leaveGuild();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"gquit", "guildquit", "leaveguild"}; }
@@ -102,7 +103,7 @@ class GuildInviteCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (!ctx.args.empty()) {
-            ctx.gameHandler.inviteToGuild(ctx.args);
+            guild::orNoGuild(ctx.services.guild).inviteToGuild(ctx.args);
             return {};
         }
         game::MessageChatData msg;
@@ -121,7 +122,7 @@ class GuildKickCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (!ctx.args.empty()) {
-            ctx.gameHandler.kickGuildMember(ctx.args);
+            guild::orNoGuild(ctx.services.guild).kickGuildMember(ctx.args);
             return {};
         }
         game::MessageChatData msg;
@@ -140,7 +141,7 @@ class GuildCreateCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (!ctx.args.empty()) {
-            ctx.gameHandler.createGuild(ctx.args);
+            guild::orNoGuild(ctx.services.guild).createGuild(ctx.args);
             return {};
         }
         game::MessageChatData msg;
@@ -158,7 +159,7 @@ public:
 class GuildDisbandCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.disbandGuild();
+        guild::orNoGuild(ctx.services.guild).disbandGuild();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"gdisband", "guilddisband"}; }
@@ -170,7 +171,7 @@ class GuildLeaderCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (!ctx.args.empty()) {
-            ctx.gameHandler.setGuildLeader(ctx.args);
+            guild::orNoGuild(ctx.services.guild).setGuildLeader(ctx.args);
             return {};
         }
         game::MessageChatData msg;

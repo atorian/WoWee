@@ -3,7 +3,6 @@
 #include "game/addon_event_queue.hpp"
 
 #include "game/quest_giver_status.hpp"
-#include "game/calendar_data.hpp"
 #include "game/craft_recipe.hpp"
 #include "game/game_interfaces.hpp"
 #include "game/action_bar_handler.hpp"
@@ -21,12 +20,16 @@
 #include "game/group_defines.hpp"
 #include "game/handler_types.hpp"
 #include "game/combat_handler.hpp"
+#include "game/player_handler.hpp"
+#include "game/query_cache_handler.hpp"
 #include "game/spell_handler.hpp"
 #include "game/quest_handler.hpp"
 #include "game/reputation_handler.hpp"
 #include "game/social_handler.hpp"
 #include "game/movement_handler.hpp"
-#include "game/entity_controller.hpp"
+#include "game/warden_session.hpp"
+#include "game/world_state.hpp"
+#include "game/world_handler.hpp"
 #include "game/game_services.hpp"
 #include "game/world_login.hpp"
 #include "network/packet.hpp"
@@ -79,51 +82,6 @@ struct EzWowPatch;
  * Quest giver status values (WoW 3.3.5a)
  */
 /**
- * World connection state
- */
-enum class WorldState {
-    DISCONNECTED,           // Not connected
-    CONNECTING,             // TCP connection in progress
-    CONNECTED,              // Connected, waiting for challenge
-    CHALLENGE_RECEIVED,     // Received SMSG_AUTH_CHALLENGE
-    AUTH_SENT,              // Sent CMSG_AUTH_SESSION, encryption initialized
-    AUTHENTICATED,          // Received SMSG_AUTH_RESPONSE success
-    READY,                  // Ready for character/world operations
-    CHAR_LIST_REQUESTED,    // CMSG_CHAR_ENUM sent
-    CHAR_LIST_RECEIVED,     // SMSG_CHAR_ENUM received
-    ENTERING_WORLD,         // CMSG_PLAYER_LOGIN sent
-    IN_WORLD,               // In game world
-    FAILED                  // Connection or authentication failed
-};
-
-/// The state's own name, for a log line.
-///
-/// Four files kept an identical copy of this in their own anonymous namespace -
-/// the three GameHandler was split into and the entity controller - so adding a
-/// state meant remembering four switches, and a switch that was not updated
-/// answers "UNKNOWN" for the new one rather than failing to compile.
-///
-/// Beside the enum, so the two are read together. No default case, so adding a
-/// state to the list above is a warning here rather than a silent "UNKNOWN".
-inline const char* worldStateName(WorldState state) {
-    switch (state) {
-        case WorldState::DISCONNECTED:        return "DISCONNECTED";
-        case WorldState::CONNECTING:          return "CONNECTING";
-        case WorldState::CONNECTED:           return "CONNECTED";
-        case WorldState::CHALLENGE_RECEIVED:  return "CHALLENGE_RECEIVED";
-        case WorldState::AUTH_SENT:           return "AUTH_SENT";
-        case WorldState::AUTHENTICATED:       return "AUTHENTICATED";
-        case WorldState::READY:               return "READY";
-        case WorldState::CHAR_LIST_REQUESTED: return "CHAR_LIST_REQUESTED";
-        case WorldState::CHAR_LIST_RECEIVED:  return "CHAR_LIST_RECEIVED";
-        case WorldState::ENTERING_WORLD:      return "ENTERING_WORLD";
-        case WorldState::IN_WORLD:            return "IN_WORLD";
-        case WorldState::FAILED:              return "FAILED";
-    }
-    return "UNKNOWN";
-}
-
-/**
  * World connection callbacks
  */
 using WorldConnectSuccessCallback = std::function<void()>;
@@ -141,10 +99,8 @@ using WorldConnectFailureCallback = std::function<void(const std::string& reason
  * - Game packets
  */
 class GameHandler : public IConnectionState,
-                     public ITargetingState,
-                     public IEntityAccess,
-                     public ISocialState,
-                     public IPvpState,
+                     public QueryCacheQueries,
+                     public WorldQueries,
                      public PacketSender,
                      public FrameXmlEvents,
                      public ActionBarQueries,
@@ -154,7 +110,11 @@ class GameHandler : public IConnectionState,
                      public ChatQueries,
                      public QuestQueries,
                      public ReputationQueries,
-                     public SocialQueries {
+                     public SocialQueries,
+                     public WardenSession,
+                     public CombatQueries,
+                     public MovementQueries,
+                     public PlayerQueries {
 public:
     // Talent data structures (aliased from handler_types.hpp)
     using TalentEntry = game::TalentEntry;
@@ -234,6 +194,36 @@ public:
     // rest of the game (ActionBarQueries, InventoryQueries). See AGENTS.md,
     // "A new domain handler".
     bool connected() const override { return isConnected(); }
+    // MovementQueries (the rest it shares with the other handlers' queries)
+    WorldState worldState() const override { return state; }
+    Race characterRace() const override { return playerRace_; }
+    bool isTransport(uint64_t guid) const override { return worldHandler_->isTransportGuid(guid); }
+    TransportManager* transports() override { return transportManager_.get(); }
+    uint32_t gryphonDisplayId() const override { return services_.gryphonDisplayId; }
+    uint32_t wyvernDisplayId() const override { return services_.wyvernDisplayId; }
+    bool resurrectPending() const override { return combatHandler_->resurrectPending(); }
+    bool channeling() const override { return spellHandler_->isChanneling(); }
+    const std::vector<AuraSlot>& playerAuras() const override { return spellHandler_->getPlayerAuras(); }
+    void resetCastState() override { spellHandler_->resetCastState(); }
+    uint32_t lastGroundCastSpellId() const override { return spellHandler_->getLastGroundCastSpellId(); }
+    void forgetPlayerAura(uint32_t spellId) override { spellHandler_->forgetPlayerAura(spellId); }
+    void leftVehicle() override { vehicleId_ = 0; }
+    void arrivedOnMap(uint32_t mapId) override { currentMapId_ = mapId; }
+    void traceWorldPackets(std::chrono::seconds duration, const char* label) override;
+    void tearDownWorldForTransfer(uint32_t mapId) override;
+    void resurrectedInPlace() override;
+    void resetPingTimer() override { timeSinceLastPing = 0.0f; }
+    // CombatQueries (the rest it shares with the other handlers' queries)
+    bool inInstance() const override { return isInInstance(); }
+    bool corpseHoldsLoot(uint64_t guid) const override;
+    uint8_t rangedWeaponInventoryType() const override;
+    bool taxiMountActive() const override { return movementHandler_->isTaxiMountActive(); }
+    void forgetTargetAuras() override { spellHandler_->clearTargetAuras(); }
+    // WardenSession
+    uint32_t clientBuild() const override { return build; }
+    const std::vector<uint8_t>& loginSessionKey() const override { return sessionKey; }
+    void serverMoneyReported(uint64_t copper) override;
+    void knownTitlesReported(const KnownTitleUpdate& update) override;
     bool characterInWorld() const override { return isInWorld(); }
     /// Refused with "No connection to the server." while worldConnectionLost().
     bool worldCommandAllowed(const char* command) override;
@@ -245,37 +235,37 @@ public:
     bool frameXmlListening() const override { return hasAddonEventListener(); }
     ActionCooldown spellCooldown(uint32_t spellId) const override;
     ActionCooldown itemCooldown(uint32_t itemId) const override;
-    void requestItemInfo(uint32_t itemId) override { queryItemInfo(itemId, 0); }
+    void requestItemInfo(uint32_t itemId) override { inventoryHandler_->queryItemInfo(itemId, 0); }
     std::optional<uint32_t> playerFieldBytes() const override;
 
     // InventoryQueries
     uint64_t characterGuid() const override { return getPlayerGuid(); }
-    uint64_t currentTargetGuid() const override { return getTargetGuid(); }
+    uint64_t currentTargetGuid() const override { return combatHandler_->getTargetGuid(); }
     const EntityManager& entities() const override { return getEntityManager(); }
-    const FlatFieldMap& playerFields() const override { return lastPlayerFields_; }
+    const FlatFieldMap& playerFields() const override { return playerHandler_->fields(); }
     PacketParsers& packetParsers() override { return *packetParsers_; }
-    std::string playerName(uint64_t guid) const override { return lookupName(guid); }
-    void requestPlayerName(uint64_t guid) override { queryPlayerName(guid); }
-    bool inGuild() const override { return isInGuild(); }
-    std::string spellName(uint32_t spellId) const override { return getSpellName(spellId); }
-    bool spellKnownToClient(uint32_t spellId) const override { return isSpellKnownToClient(spellId); }
-    uint32_t spellImplicitTargetA(uint32_t spellId) const override { return getSpellImplicitTargetA(spellId); }
-    uint32_t spellTargetFlags(uint32_t spellId) const override { return getSpellTargetFlags(spellId); }
+    std::string playerName(uint64_t guid) const override { return queryCacheHandler_->lookupName(guid); }
+    void requestPlayerName(uint64_t guid) override { queryCacheHandler_->queryPlayerName(guid); }
+    bool inGuild() const override;
+    std::string spellName(uint32_t spellId) const override { return spellHandler_->getSpellName(spellId); }
+    bool spellKnownToClient(uint32_t spellId) const override { return spellHandler_->isSpellKnownToClient(spellId); }
+    uint32_t spellImplicitTargetA(uint32_t spellId) const override { return spellHandler_->getSpellImplicitTargetA(spellId); }
+    uint32_t spellTargetFlags(uint32_t spellId) const override { return spellHandler_->getSpellTargetFlags(spellId); }
     std::array<uint32_t, 3> spellEffects(uint32_t spellId) const override;
     uint32_t classSkillLineOf(uint32_t spellId) override;
-    std::string skillLineName(uint32_t skillLineId) const override { return getSkillLineName(skillLineId); }
+    std::string skillLineName(uint32_t skillLineId) const override { return spellHandler_->getSkillLineName(skillLineId); }
     std::string itemIconPath(uint32_t displayInfoId) const override { return getItemIconPath(displayInfoId); }
     std::string randomPropertyName(int32_t id) const override { return getRandomPropertyName(id); }
     std::vector<RandomStatBonus> randomStatBonuses(int32_t id, uint32_t suffixFactor) const override {
         return getRandomStatBonuses(id, suffixFactor);
     }
-    std::string enchantName(uint32_t enchantId) const override { return getEnchantName(enchantId); }
-    bool casting() const override { return isCasting(); }
-    uint32_t currentCastSpellId() const override { return getCurrentCastSpellId(); }
-    bool restoring() const override { return isRestoring(); }
-    bool craftingWindowOpen() const override { return isCraftingWindowOpen(); }
-    bool mounted() const override { return isMounted(); }
-    uint32_t mountAuraSpellId() const override { return getMountAuraSpellId(); }
+    std::string enchantName(uint32_t enchantId) const override { return spellHandler_->getEnchantName(enchantId); }
+    bool casting() const override { return spellHandler_->isCasting(); }
+    uint32_t currentCastSpellId() const override { return spellHandler_->getCurrentCastSpellId(); }
+    bool restoring() const override { return spellHandler_->isRestoring(); }
+    bool craftingWindowOpen() const override { return spellHandler_->isCraftingWindowOpen(); }
+    bool mounted() const override { return movementHandler_->isMounted(); }
+    uint32_t mountAuraSpellId() const override { return movementHandler_->mountAuraSpellId(); }
     bool carriesAura(uint32_t spellId) const override { return playerCarriesAura(spellId); }
     void noteItemCastSpell(uint32_t spellId) override;
     void stopMovingForCast() override;
@@ -283,6 +273,8 @@ public:
     bool gameObjectLootOpened(uint64_t lootGuid) override;
     bool npcDialogOpen() const override;
     bool questWantsItem(uint32_t itemId) const override;
+    bool actionBarHoldsItem() const override;
+    void coinageFieldFoundAt(uint16_t index) override;
     // cancelCast, dismount, closeGossip and runInterfaceCommand are
     // InventoryQueries' too, declared with the rest of their kind below.
 
@@ -294,17 +286,18 @@ public:
     // already had under the same name (sendMovement, setStandState,
     // startAutoAttack, lootTarget, addCombatText, ...) are marked override
     // where they are declared.
-    uint64_t focusTargetGuid() const override { return focusGuid; }
-    uint64_t petGuid() const override { return getPetGuid(); }
+    uint64_t focusTargetGuid() const override { return combatHandler_->getFocusGuid(); }
+    uint64_t petGuid() const override;
+    pet::IPetFeed* petFeed() override;
     std::string unitIdFor(uint64_t guid) const override { return guidToUnitId(guid); }
-    uint32_t playerLevel() const override { return getPlayerLevel(); }
+    uint32_t playerLevel() const override { return playerHandler_->level(); }
     const GameObjectQueryResponseData* gameObjectInfo(uint32_t entry) const override {
-        return getCachedGameObjectInfo(entry);
+        return queryCacheHandler_->getCachedGameObjectInfo(entry);
     }
     bool friendlyFaction(uint32_t factionTemplateId) const override {
         return isFriendlyFaction(factionTemplateId);
     }
-    bool aggressiveTowardPlayer(uint64_t guid) const override { return isAggressiveTowardPlayer(guid); }
+    bool aggressiveTowardPlayer(uint64_t guid) const override { return combatHandler_->isAggressiveTowardPlayer(guid); }
     const MovementInfo& playerMovement() const override { return movementInfo; }
     void setFacing(float canonicalYaw) override;
     void faceTowards(float canonicalYaw) override { faceCanonicalYaw(canonicalYaw); }
@@ -312,26 +305,24 @@ public:
     bool autoFaceTarget() const override { return isAutoFaceTarget(); }
     bool autoSelfCast() const override { return isAutoSelfCast(); }
     bool flying() const override { return isPlayerFlying(); }
-    uint32_t mountDisplayId() const override { return currentMountDisplayId_; }
-    void noteMountAura(uint32_t spellId) override { mountAuraSpellId_ = spellId; }
-    bool autoAttacking() const override { return isAutoAttacking(); }
-    bool inCombat() const override { return isInCombat(); }
-    const ItemQueryResponseData* itemInfo(uint32_t itemId) const override { return getItemInfo(itemId); }
+    uint32_t mountDisplayId() const override { return movementHandler_->mountDisplayId(); }
+    void noteMountAura(uint32_t spellId) override { movementHandler_->noteMountAura(spellId); }
+    bool autoAttacking() const override { return combatHandler_->isAutoAttacking(); }
+    bool inCombat() const override { return combatHandler_->isInCombat(); }
+    const ItemQueryResponseData* itemInfo(uint32_t itemId) const override { return inventoryHandler_->getItemInfo(itemId); }
     const std::unordered_map<uint32_t, ItemQueryResponseData>& itemTemplates() const override {
-        return getItemInfoCache();
+        return inventoryHandler_->getItemInfoCache();
     }
     uint32_t itemEntryByGuid(uint64_t itemGuid) const override;
-    uint32_t itemCountInBags(uint32_t itemId) const override { return countItemInBags(itemId); }
-    bool awaitingItemTarget() const override { return isAwaitingItemTarget(); }
+    uint32_t itemCountInBags(uint32_t itemId) const override { return inventoryHandler_->items().countItem(itemId); }
+    bool awaitingItemTarget() const override { return inventoryHandler_->isAwaitingItemTarget(); }
     uint64_t pendingGameObjectInteraction() const override { return pendingGameObjectInteractGuid_; }
     uint64_t lastInteractedGameObject() const override { return lastInteractedGoGuid_; }
     void clearPendingGameObjectInteraction() override { pendingGameObjectInteractGuid_ = 0; }
     void clearLastInteractedGameObject() override { lastInteractedGoGuid_ = 0; }
-    uint32_t activeCritterSpellId() const override { return getActiveCritterSpellId(); }
-    uint64_t activeCritterGuid() const override { return getActiveCritterGuid(); }
     std::optional<HomeBind> homeBind() const override;
     std::string achievementName(uint32_t achievementId) override;
-    void recordAchievementEarned(uint32_t achievementId, uint32_t packedDate) override;
+    achievement::IAchievementsFeed* achievementsFeed() override;
     SpellDataInfo spellData(uint32_t spellId) const override { return getSpellData(spellId); }
     std::string iconPath(uint32_t iconId) const override { return getIconPath(iconId); }
 
@@ -339,30 +330,33 @@ public:
     // packetParsers, playerMovement and achievementName are above).
     const Character* activeCharacter() const override { return getActiveCharacter(); }
     uint32_t currentMapId() const override { return currentMapId_; }
-    uint8_t playerClassOf(uint64_t guid) const override { return lookupPlayerClass(guid); }
-    uint8_t playerRaceOf(uint64_t guid) const override { return lookupPlayerRace(guid); }
-    uint8_t playerGenderOf(uint64_t guid) const override { return lookupPlayerGender(guid); }
-    const GroupListData& party() const override { return getPartyData(); }
-    const GuildRosterData& guildRoster() const override { return getGuildRoster(); }
+    uint8_t playerClassOf(uint64_t guid) const override { return queryCacheHandler_->lookupPlayerClass(guid); }
+    uint8_t playerRaceOf(uint64_t guid) const override { return queryCacheHandler_->lookupPlayerRace(guid); }
+    uint8_t playerGenderOf(uint64_t guid) const override { return queryCacheHandler_->lookupPlayerGender(guid); }
+    const GroupListData& party() const override;
+    const GuildRosterData& guildRoster() const override;
     std::optional<uint32_t> guildRankRights() const override;
     std::string languageName(uint32_t languageId) const override { return getLanguageName(languageId); }
 
     // QuestQueries (the shared ones are above; closeVendor is declared with
     // the vendor's facade).
-    bool inGroup() const override { return isInGroup(); }
-    void setResting(bool resting) override;
-    std::string creatureName(uint32_t entry) const override { return getCachedCreatureName(entry); }
-    void requestCreatureInfo(uint32_t entry) override { queryCreatureInfo(entry, 0); }
-    void requestGameObjectInfo(uint32_t entry) override { queryGameObjectInfo(entry, 0); }
-    void vendorCanRepair() override { setVendorCanRepair(true); }
-    void openedStableMaster(uint64_t npcGuid) override { petHandler_->setStableMaster(npcGuid); }
+    bool inGroup() const override;
+    void setResting(bool resting) override { playerHandler_->restStateArrived(resting); }
+    std::string creatureName(uint32_t entry) const override { return queryCacheHandler_->getCachedCreatureName(entry); }
+    void requestCreatureInfo(uint32_t entry) override { queryCacheHandler_->queryCreatureInfo(entry, 0); }
+    void requestGameObjectInfo(uint32_t entry) override { queryCacheHandler_->queryGameObjectInfo(entry, 0); }
+    void requestGameObjectInfo(uint32_t entry, uint64_t guid) override {
+        queryCacheHandler_->queryGameObjectInfo(entry, guid);
+    }
+    void vendorCanRepair() override { inventoryHandler_->setVendorCanRepair(true); }
+    void openedStableMaster(uint64_t npcGuid) override;
 
     // SocialQueries (the ones shared with the other handlers are above).
     bool battlegroundMap(uint32_t mapId) override { return isBattlegroundMap(mapId); }
     std::string mapName(uint32_t mapId) const override { return getMapName(mapId); }
     std::string areaName(uint32_t areaId) const override { return getAreaName(areaId); }
     std::string lfgDungeonName(uint32_t dungeonId) const override { return getLfgDungeonName(dungeonId); }
-    uint8_t spellDispelType(uint32_t spellId) const override { return getSpellDispelType(spellId); }
+    uint8_t spellDispelType(uint32_t spellId) const override { return spellHandler_->getSpellDispelType(spellId); }
     const std::unordered_map<uint32_t, TalentTabEntry>& talentTabs() override {
         spellHandler_->loadTalentDbc();
         return spellHandler_->getAllTalentTabs();
@@ -377,20 +371,144 @@ public:
     const std::array<uint32_t, 19>* inspectedItemEntries(uint64_t guid) const override {
         return inventoryHandler_->inspectedItemEntries(guid);
     }
-    bool showingHelm() const override { return helmVisible_; }
-    bool showingCloak() const override { return cloakVisible_; }
-    void setShowingHelm(bool shown) override { helmVisible_ = shown; }
-    void setShowingCloak(bool shown) override { cloakVisible_ = shown; }
+    bool showingHelm() const override { return playerHandler_->helmVisible(); }
+    bool showingCloak() const override { return playerHandler_->cloakVisible(); }
+    void setShowingHelm(bool shown) override { playerHandler_->showHelm(shown); }
+    void setShowingCloak(bool shown) override { playerHandler_->showCloak(shown); }
 
-    // ReputationQueries (factionBaseReputation and refreshUnitHostility are
-    // declared with the rest of the faction table below).
-    uint32_t factionIdByRepListId(uint32_t repListId) const override {
-        return getFactionIdByRepListId(repListId);
+    // PlayerQueries (markOnlineEquipmentDirty is the inventory's, below)
+    Character* listedCharacter() override;
+    void moneyFieldArrived(uint32_t copper, FrameXmlEvents& packetEvents) override;
+    void bankBagSlotsArrived(uint8_t slots) override;
+    void chosenTitleArrived(int32_t title) override;
+    void playerFlagsArrived(uint32_t flags, FrameXmlEvents& packetEvents) override;
+
+    // QueryCacheQueries (packetParsers and entities are above)
+    void playerNameArrived(uint64_t guid, const std::string& name) override;
+    void creatureTemplateArrived(const CreatureQueryResponseData& data) override;
+    void gameObjectTemplateArrived(const GameObjectQueryResponseData& data) override;
+
+    // WorldQueries. The session's, the caches' and some of the fight's
+    // answers are above, under the names other handlers ask them by; these
+    // hand the rest to their owners.
+    bool hostileFaction(uint32_t factionTemplateId) const override { return isHostileFaction(factionTemplateId); }
+    uint64_t movementTransportGuid() const override { return movementInfo.transportGuid; }
+    uint64_t playerTransportGuid() const override { return movementHandler_->getPlayerTransportGuid(); }
+    bool recentlyAboard(uint64_t guid) const override { return movementHandler_->recentlyAboard(guid); }
+    void clearPlayerTransport() override { movementHandler_->clearPlayerTransport(); }
+    void setTransportAttachment(uint64_t childGuid, ObjectType type, uint64_t transportGuid,
+                                const glm::vec3& localOffset, bool hasLocalOrientation,
+                                float localOrientation, bool offsetNeedsTransportResolution) override {
+        movementHandler_->setTransportAttachment(childGuid, type, transportGuid, localOffset,
+                                                 hasLocalOrientation, localOrientation,
+                                                 offsetNeedsTransportResolution);
     }
-    std::string factionName(uint32_t factionId) const override {
-        loadFactionNameCache();
-        return getFactionName(factionId);
+    void clearTransportAttachment(uint64_t childGuid) override { movementHandler_->clearTransportAttachment(childGuid); }
+    std::optional<glm::vec3> serverPlacedPlayer(const UpdateBlock& block, const glm::vec3& canonicalPos,
+                                                float canonicalOrientation, bool movementUpdate) override {
+        return movementHandler_->serverPlacedPlayer(block, canonicalPos, canonicalOrientation, movementUpdate);
     }
+    void applyServerMovementSpeeds(float walk, float run, float runBack, float swim, float swimBack,
+                                   float flight, float flightBack, float turn, float pitch) override {
+        movementHandler_->applyServerMovementSpeeds(walk, run, runBack, swim, swimBack, flight,
+                                                    flightBack, turn, pitch);
+    }
+    void playerCreatedInFlight() override { movementHandler_->playerCreatedInFlight(); }
+    void playerMountFieldArrived(uint32_t displayId, const FlatFieldMap& blockFields,
+                                 FrameXmlEvents& packetEvents) override {
+        movementHandler_->playerMountFieldArrived(displayId, blockFields, packetEvents);
+    }
+    void playerFieldsCreated(const FlatFieldMap& fields) override { playerHandler_->fieldsCreated(fields); }
+    void playerFieldsUpdated(const FlatFieldMap& fields) override { playerHandler_->fieldsUpdated(fields); }
+    void playerFieldsArrived(const FlatFieldMap& fields, bool isCreate, FrameXmlEvents& packetEvents) override {
+        playerHandler_->playerFieldsArrived(fields, isCreate, packetEvents);
+    }
+    void shapeshiftFormArrived(uint8_t form, FrameXmlEvents& packetEvents) override {
+        playerHandler_->shapeshiftFormArrived(form, packetEvents);
+    }
+    void playerUnitFlagsArrived(uint32_t previous, uint32_t flags, FrameXmlEvents& packetEvents) override {
+        combatHandler_->playerUnitFlagsArrived(previous, flags, packetEvents);
+        playerHandler_->unitFlagsArrived(previous, flags);
+    }
+    void playerVisibilityFlagsArrived(uint8_t previous, uint8_t flags) override {
+        playerHandler_->visibilityFlagsArrived(previous, flags);
+    }
+    void playerDynamicFlagsArrived(uint32_t previous, uint32_t flags, FrameXmlEvents& packetEvents) override {
+        combatHandler_->playerDynamicFlagsArrived(previous, flags, packetEvents);
+    }
+    void playerObjectCreated(std::optional<uint32_t> health, uint32_t dynamicFlags,
+                             std::optional<uint32_t> playerFlags) override {
+        combatHandler_->playerCreated(health, dynamicFlags, playerFlags);
+    }
+    void unitHealthArrived(uint64_t guid, uint32_t previous, uint32_t health,
+                           FrameXmlEvents& packetEvents) override {
+        combatHandler_->unitHealthArrived(guid, previous, health, packetEvents);
+    }
+    void ownCorpseSeen(uint64_t guid, bool hasPosition, float serverX, float serverY, float serverZ) override {
+        combatHandler_->ownCorpseSeen(guid, hasPosition, serverX, serverY, serverZ);
+    }
+    void playerAuraFieldsArrived(const FlatFieldMap& fields, FrameXmlEvents& packetEvents) override {
+        spellHandler_->playerAuraFieldsArrived(fields, packetEvents);
+    }
+    void skillFieldsArrived(const FlatFieldMap& fields) override { spellHandler_->extractSkillFields(fields); }
+    void exploredZoneFieldsArrived(const FlatFieldMap& fields) override {
+        spellHandler_->extractExploredZoneFields(fields);
+    }
+    void companionFieldsArrived(const FlatFieldMap& blockFields) override {
+        spellHandler_->companionFieldsArrived(blockFields);
+    }
+    void questFieldsArrived(const FlatFieldMap& fields) override { questHandler_->applyQuestStateFromFields(fields); }
+    uint64_t autoAttackTargetGuid() const override { return combatHandler_->getAutoAttackTargetGuid(); }
+    void targetGone() override { combatHandler_->targetGone(); }
+    void invalidateTabCycle() override { combatHandler_->invalidateTabCycle(); }
+    void removeHostileAttacker(uint64_t guid) override { combatHandler_->removeHostileAttacker(guid); }
+    void removeCombatTextForGuid(uint64_t guid) override { combatHandler_->removeCombatTextForGuid(guid); }
+    void forgetUnitAuras(uint64_t guid) override { spellHandler_->removeUnitAuraCache(guid); }
+    void forgetUnitCast(uint64_t guid) override { spellHandler_->removeUnitCastState(guid); }
+    void forgetQuestGiver(uint64_t guid) override { questHandler_->forgetQuestGiver(guid); }
+    const std::unordered_map<uint64_t, std::string>& playerNameCache() const override {
+        return queryCacheHandler_->getPlayerNameCache();
+    }
+    void requestCreatureInfo(uint32_t entry, uint64_t guid) override {
+        queryCacheHandler_->queryCreatureInfo(entry, guid);
+    }
+    void playerLeftView(uint64_t guid) override { queryCacheHandler_->playerLeftView(guid); }
+    bool holdsItemObject(uint64_t guid) const override { return inventoryHandler_->holdsItemObject(guid); }
+    bool trackItemObject(uint64_t guid, bool isContainer, const FlatFieldMap& fields) override {
+        return inventoryHandler_->trackItemObject(guid, isContainer, fields);
+    }
+    void itemObjectChanged(uint64_t guid, bool isContainer, const FlatFieldMap& fields,
+                           FrameXmlEvents& packetEvents) override {
+        inventoryHandler_->itemObjectChanged(guid, isContainer, fields, packetEvents);
+    }
+    bool forgetItemObject(uint64_t guid) override { return inventoryHandler_->forgetItemObject(guid); }
+    void inventoryFieldsArrived(const FlatFieldMap& fields, bool isCreate, FrameXmlEvents& packetEvents) override {
+        inventoryHandler_->inventoryFieldsArrived(fields, isCreate, packetEvents);
+    }
+    void detectInventorySlotBases(const FlatFieldMap& fields) override {
+        inventoryHandler_->detectInventorySlotBases(fields);
+    }
+    void detectCoinageField(const FlatFieldMap& before, const FlatFieldMap& after) override {
+        inventoryHandler_->detectCoinageField(before, after);
+    }
+    uint32_t expectedMoneyDelta() const override { return inventoryHandler_->expectedMoneyDelta(); }
+    void maybeDetectVisibleItemLayout() override { inventoryHandler_->maybeDetectVisibleItemLayout(); }
+    void rebuildOnlineInventory() override { inventoryHandler_->rebuildOnlineInventory(); }
+    void updateBatchFinished(bool newItemCreated, const FlatFieldMap& playerFields) override {
+        inventoryHandler_->updateBatchFinished(newItemCreated, playerFields);
+    }
+    void updateOtherPlayerVisibleItems(uint64_t guid, const FlatFieldMap& fields) override {
+        inventoryHandler_->updateOtherPlayerVisibleItems(guid, fields);
+    }
+    void forgetPlayerEquipment(uint64_t guid) override { inventoryHandler_->forgetPlayerEquipment(guid); }
+    void emitAllOtherPlayerEquipment() override { inventoryHandler_->emitAllOtherPlayerEquipment(); }
+    bool loggingOut() const override;
+
+    // ReputationQueries (refreshUnitHostility is declared with the rest of the
+    // faction table below).
+    reputation::IReputationFeed* reputationFeed() override;
+    uint8_t playerRace() const override { return getPlayerRace(); }
+    uint8_t playerClass() const override { return getPlayerClass(); }
 
     /**
      * Get current connection state
@@ -415,21 +533,6 @@ public:
     void createCharacter(const CharCreateData& data);
     void deleteCharacter(uint64_t characterGuid);
 
-    using CharCreateCallback = std::function<void(bool success, const std::string& message)>;
-    void setCharCreateCallback(CharCreateCallback cb) { charCreateCallback_ = std::move(cb); }
-
-    using CharDeleteCallback = std::function<void(bool success, const std::string& message)>;
-    void setCharDeleteCallback(CharDeleteCallback cb) { charDeleteCallback_ = std::move(cb); }
-
-    // A realm extension announced the patch archives this client should hold.
-    using ServerPatchManifestCallback = std::function<void(const std::vector<EzWowPatch>&)>;
-    void setServerPatchManifestCallback(ServerPatchManifestCallback cb) { serverPatchManifestCallback_ = std::move(cb); }
-    void notifyServerPatchManifest(const std::vector<EzWowPatch>& patches) {
-        if (serverPatchManifestCallback_) serverPatchManifestCallback_(patches);
-    }
-
-    using CharLoginFailCallback = std::function<void(const std::string& reason)>;
-    void setCharLoginFailCallback(CharLoginFailCallback cb) { charLoginFailCallback_ = std::move(cb); }
 
     /**
      * Select and log in with a character
@@ -465,13 +568,11 @@ public:
      * @param y Y coordinate
      * @param z Z coordinate
      */
-    void setPosition(float x, float y, float z);
 
     /**
      * Update player orientation
      * @param orientation Facing direction in radians
      */
-    void setOrientation(float orientation);
 
     /**
      * Get entity manager (for accessing entities in view)
@@ -491,25 +592,9 @@ public:
     /// talent-wipe confirmation is. Both dialogs close themselves when the
     /// player walks out of range, which is the only thing these answer.
     uint64_t getBinderGuid() const { return binderGuid_; }
-    uint64_t getTalentWipeNpcGuid() const;
 
-    /// What another player is visibly wearing, by ItemDisplayInfo id and
-    /// inventory type, indexed by equipment slot. False when nothing is known
-    /// yet - which is not the same as wearing nothing.
-    bool getOtherPlayerEquipment(uint64_t guid,
-                                 std::array<uint32_t, 19>& displayIds,
-                                 std::array<uint8_t, 19>& invTypes) const;
-
-    /// How a player in the world looks: race, gender, the packed appearance
-    /// bytes and the facial-feature byte. False for anything that is not a
-    /// player, or a player whose fields have not arrived.
-    bool getPlayerAppearance(uint64_t guid, uint8_t& race, uint8_t& gender,
-                             uint32_t& appearanceBytes, uint8_t& facial) const {
-        return entityController_->getPlayerAppearance(guid, race, gender,
-                                                      appearanceBytes, facial);
-    }
-    EntityManager& getEntityManager() override { return entityController_->getEntityManager(); }
-    const EntityManager& getEntityManager() const override { return entityController_->getEntityManager(); }
+    EntityManager& getEntityManager() { return worldHandler_->getEntityManager(); }
+    const EntityManager& getEntityManager() const { return worldHandler_->getEntityManager(); }
 
     /**
      * Send a chat message
@@ -517,36 +602,12 @@ public:
      * @param message Message text
      * @param target Target name (for whispers, empty otherwise)
      */
-    void sendChatMessage(ChatType type, const std::string& message, const std::string& target = "");
-    void sendAddonMessage(ChatType type, const std::string& message, const std::string& target = "");
-    void sendTextEmote(uint32_t textEmoteId, uint64_t targetGuid = 0);
-    void joinChannel(const std::string& channelName, const std::string& password = "");
-    void leaveChannel(const std::string& channelName);
-    void requestChannelList(const std::string& channelName);
-    /// One guild bank tab's log; tab six is the money log.
-    void requestGuildBankLog(uint8_t tab);
-    const std::vector<GuildBankLogEntry>& getGuildBankLog(uint8_t tab) const;
     /// Tell the server whether to pass on every loot roll for us.
     void sendOptOutOfLoot(bool optOut);
-    /// Ask an area spirit healer when the next mass resurrection is.
-    void queryAreaSpiritHealer(uint64_t guid);
-    /// Join that resurrection. Nothing happens without it.
-    void queueAreaSpiritHeal();
-    bool resurrectHasSickness() const { return resurrectHasSickness_; }
-    bool resurrectHasTimer() const { return resurrectHasTimer_; }
-    /// Seconds until the next one, and the healer it belongs to.
-    float getAreaSpiritHealerTime() const { return areaSpiritHealerSeconds_; }
     /// Announce a rune's type and readiness to the interface.
     void fireRuneUpdate(uint32_t index);
-    const std::vector<std::string>& getJoinedChannels() const;
-    /// Whether the player owns this chat channel. See ChatHandler.
-    bool ownsChatChannel(const std::string& name) const;
-    /// Who sent the chat line with this id, or zero. See ChatHandler.
-    uint64_t chatLineSender(uint32_t lineId) const;
     /// The members of a chat channel, as of the last list requested for it.
     const std::vector<ChannelMember>& getChannelRoster(const std::string& channel) const;
-    std::string getChannelByIndex(int index) const;
-    int getChannelIndex(const std::string& channelName) const;
 
     // Chat auto-join settings (aliased from handler_types.hpp)
     using ChatAutoJoin = game::ChatAutoJoin;
@@ -629,222 +690,39 @@ public:
      * @param maxMessages Maximum number of messages to return (0 = all)
      * @return Vector of chat messages
      */
-    const std::deque<MessageChatData>& getChatHistory() const;
-    void clearChatHistory();
 
     /**
      * Add a locally-generated chat message (e.g., emote feedback)
      */
     void addLocalChatMessage(const MessageChatData& msg) override;
-
-    // Money (copper)
-    uint64_t getMoneyCopper() const { return inventoryHandler_->moneyCopper(); }
-    void applyServerMoney(uint64_t copper) { inventoryHandler_->applyServerMoney(copper); }
-
-    // PvP currency (TBC/WotLK only)
-    uint32_t getHonorPoints() const { return playerHonorPoints_; }
-    uint32_t getArenaPoints() const { return playerArenaPoints_; }
-
-    // Server-authoritative armor (UNIT_FIELD_RESISTANCES[0])
-    int32_t getArmorRating() const { return playerArmorRating_; }
-
-    // Server-authoritative elemental resistances (UNIT_FIELD_RESISTANCES[1-6]).
-    // school: 1=Holy, 2=Fire, 3=Nature, 4=Frost, 5=Shadow, 6=Arcane. Returns 0 if not received.
-    int32_t getResistance(int school) const {
-        if (school < 1 || school > 6) return 0;
-        return playerResistances_[school - 1];
-    }
-
-    // Server-authoritative primary stats (UNIT_FIELD_STAT0-4: STR, AGI, STA, INT, SPI).
-    // Returns -1 if the server hasn't sent the value yet.
-    int32_t getPlayerStat(int idx) const {
-        if (idx < 0 || idx > 4) return -1;
-        return playerStats_[idx];
-    }
-
-    /// Melee critical-strike chance the player's Agility grants, as a percent,
-    /// the way the character sheet's stat flyout reads it: the class base plus
-    /// Agility times the per-class-per-level ratio, both from the combat game
-    /// tables. Zero until the tables and the player's stats are available.
-    float getMeleeCritFromAgility() const;
-    /// Spell critical-strike chance the player's Intellect grants, as a percent -
-    /// the spell-side twin of getMeleeCritFromAgility, read the same way from the
-    /// spell-crit game tables. Zero for a class with no spell crit (a warrior).
-    float getSpellCritFromIntellect() const;
-    /// The percent a combat rating grants - dodge, parry, haste, defense and the
-    /// rest of the rating-based stats the flyout shows. rating × (class scalar ÷
-    /// the level's coefficient), from gtCombatRatings and the class scalar table,
-    /// exactly as AzerothCore's GetRatingBonusValue reads it. Zero for an
-    /// out-of-range index or a rating the player has none of.
-    float getCombatRatingBonus(int cr) const;
-    /// Health and mana regenerated per second from Spirit, as the stat flyout
-    /// shows them. Health splits Spirit at 50 across two tables (gtOCTRegenHP,
-    /// gtRegenHPPerSpt) then doubles; mana is Spirit × gtRegenMPPerSpt - the
-    /// same as AzerothCore's OCTRegen*PerSpirit. Zero for a class with no mana.
-    float getHealthRegenFromSpirit() const;
-    float getManaRegenFromSpirit() const;
-
-    // Server-authoritative attack power (WotLK: UNIT_FIELD_ATTACK_POWER / RANGED).
-    // Returns -1 if not yet received.
-    int32_t getMeleeAttackPower()  const { return playerMeleeAP_; }
-    int32_t getRangedAttackPower() const { return playerRangedAP_; }
-
-    // Server-authoritative spell damage / healing bonus (WotLK: PLAYER_FIELD_MOD_*).
-    // getSpellPower returns the max damage bonus across magic schools 1-6 (Holy/Fire/Nature/Frost/Shadow/Arcane).
-    // Returns -1 if not yet received.
-    int32_t getSpellPower() const {
-        int32_t sp = -1;
-        for (int i = 1; i <= 6; ++i) {
-            if (playerSpellDmgBonus_[i] > sp) sp = playerSpellDmgBonus_[i];
-        }
-        return sp;
-    }
-    int32_t getHealingPower() const { return playerHealBonus_; }
-
-    // Server-authoritative combat chance percentages (WotLK: PLAYER_* float fields).
-    // Returns -1.0f if not yet received.
-    float getDodgePct()  const { return playerDodgePct_; }
-    float getParryPct()  const { return playerParryPct_; }
-    float getBlockPct()  const { return playerBlockPct_; }
-    /// Expertise in points, main hand and off hand. Zero until the server
-    /// says otherwise, which is also the right answer for a class that has
-    /// none - unlike the percentages above, where -1 has to mean "not told".
-    int32_t getExpertise() const { return playerExpertise_; }
-    int32_t getOffhandExpertise() const { return playerOffhandExpertise_; }
-    /// Mana regen per second, not-casting and while-casting - the server sends
-    /// both already computed. GetManaRegen returns them for the mana-regen stat.
-    float getManaRegen() const { return playerManaRegen_; }
-    float getManaRegenCasting() const { return playerManaRegenCasting_; }
-    float getCritPct()   const { return playerCritPct_; }
-    float getRangedCritPct() const { return playerRangedCritPct_; }
-    // Spell crit by school (0=Physical,1=Holy,2=Fire,3=Nature,4=Frost,5=Shadow,6=Arcane)
-    float getSpellCritPct(int school = 1) const {
-        if (school < 0 || school > 6) return -1.0f;
-        return playerSpellCritPct_[school];
-    }
-
-    // Server-authoritative combat ratings (WotLK: PLAYER_FIELD_COMBAT_RATING_1+idx).
-    // Returns -1 if not yet received. Indices match AzerothCore CombatRating enum.
-    int32_t getCombatRating(int cr) const {
-        if (cr < 0 || cr > 24) return -1;
-        return playerCombatRatings_[cr];
-    }
+    contacts::IContactsServerFeed* contactsFeed() override;
+    who::IWhoFeed* whoFeed() override;
+    duel::IDuelsFeed* duelFeed() override;
+    petition::IPetitionsFeed* petitionFeed() override;
+    arena::IArenaTeamsFeed* arenaFeed() override;
+    battleground::IBattlegroundsFeed* battlegroundFeed() override;
+    lfg::ILfgFeed* lfgFeed() override;
+    calendar::ICalendarFeed* calendarFeed() override;
+    group::IGroupServerFeed* groupFeed() override;
+    const group::IGroup* group() const override;
+    guild::IGuildServerFeed* guildFeed() override;
+    auction::IAuctionHouseFeed* auctionFeed() override;
+    mail::IMailboxFeed* mailFeed() override;
+    guild_bank::IGuildBankFeed* guildBankFeed() override;
+    trade::ITradeFeed* tradeFeed() override;
+    loot::ILootFeed* lootFeed() override;
+    const loot::ILoot* loot() const override;
+    const guild_bank::IGuildBank* guildBank() const override;
 
     // Inventory
-    // Inventory - InventoryHandler's; these forward for the old callers.
-    Inventory& getInventory() { return inventoryHandler_->items(); }
-    const Inventory& getInventory() const { return inventoryHandler_->items(); }
-    bool consumeOnlineEquipmentDirty() { return inventoryHandler_->consumeOnlineEquipmentDirty(); }
-    void markOnlineEquipmentDirty() { inventoryHandler_->markOnlineEquipmentDirty(); }
-    void resetEquipmentDirtyTracking() { inventoryHandler_->resetEquipmentDirtyTracking(); }
-    void unequipToBackpack(EquipSlot equipSlot);
-
-    // Targeting
-    void setTarget(uint64_t guid) override;
-    void clearTarget() override;
-    uint64_t getTargetGuid() const override { return targetGuid; }
-    std::shared_ptr<Entity> getTarget() const override;
-    bool hasTarget() const override { return targetGuid != 0; }
-    void tabTarget(float playerX, float playerY, float playerZ);
-
-    // Focus targeting
-    void setFocus(uint64_t guid) override;
-    void clearFocus() override;
-    uint64_t getFocusGuid() const override { return focusGuid; }
-    std::shared_ptr<Entity> getFocus() const;
-    bool hasFocus() const override { return focusGuid != 0; }
-
-    // Mouseover targeting - set each frame by the nameplate renderer
-    void setMouseoverGuid(uint64_t guid) override;
-    uint64_t getMouseoverGuid() const override { return mouseoverGuid_; }
-
-    // Advanced targeting
-    void targetLastTarget();
-    void targetEnemy(bool reverse = false);
-    void targetFriend(bool reverse = false);
-    void targetNearestEnemyPlayer(bool reverse = false);
-    void targetNearestFriendPlayer(bool reverse = false);
-    void targetNearestPartyMember(bool reverse = false);
-    void targetNearestRaidMember(bool reverse = false);
-    void targetLastEnemy();
-    void targetLastFriend();
-
-    // Inspection
-    void inspectTarget();
-    /// Inspect any player by guid, which is what FrameXML's unit menus name.
-    void inspectUnit(uint64_t guid);
-    /// See SocialHandler: the honour tab asks for these separately.
-    void requestInspectHonorData(uint64_t guid);
+    void markOnlineEquipmentDirty() override { inventoryHandler_->markOnlineEquipmentDirty(); }
 
     using InspectArenaTeam = game::InspectArenaTeam;
-    using InspectResult = game::InspectResult;
-    const InspectResult* getInspectResult() const;
 
-    // Server info commands
-    void queryServerTime(bool announce = false);
-    /// Seconds until the daily quest reset, or 0 if the server has not said.
-    uint32_t getSecondsUntilDailyReset() const;
-    void requestPlayedTime();
-    void queryWho(const std::string& playerName = "");
-    uint32_t getTotalTimePlayed() const;
-    uint32_t getLevelTimePlayed() const;
-
-    using WhoEntry = game::WhoEntry;
-    const std::vector<WhoEntry>& getWhoResults() const;
-    uint32_t getWhoOnlineCount() const;
-    /// Whether the interface is showing the who panel, and so whether a /who
-    /// answer belongs there rather than in the chat.
-    void setWhoToUI(bool toUI);
     std::string getWhoAreaName(uint32_t zoneId) const { return getAreaName(zoneId); }
-
-    // Social commands
-    void addFriend(const std::string& playerName, const std::string& note = "") override;
-    void removeFriend(const std::string& playerName) override;
-    void setFriendNote(const std::string& playerName, const std::string& note);
-    void addIgnore(const std::string& playerName) override;
-    void removeIgnore(const std::string& playerName) override;
-    const std::unordered_map<std::string, uint64_t>& getIgnoreCache() const override {
-        return socialHandler_->ignoreCache();
-    }
-
-    // Random roll
-    void randomRoll(uint32_t minRoll = 1, uint32_t maxRoll = 100);
-
-    // Battleground queue slot (aliased from handler_types.hpp)
-    using BgQueueSlot = game::BgQueueSlot;
-
-    // Available BG list (aliased from handler_types.hpp)
-    using AvailableBgInfo = game::AvailableBgInfo;
-
-    // Battleground
-    bool hasPendingBgInvite() const override;
-    void acceptBattlefield(uint32_t queueSlot = 0xFFFFFFFF) override;
-    void declineBattlefield(uint32_t queueSlot = 0xFFFFFFFF) override;
-    void leaveBattlefield();
-    void requestBattlefieldList(uint32_t bgTypeId);
-    void reportPvpAfk(uint64_t playerGuid);
-    void joinBattlefield(uint64_t battlemasterGuid, uint32_t bgTypeId,
-                         uint32_t instanceId, bool asGroup);
-    const std::array<BgQueueSlot, 3>& getBgQueues() const override;
-    const std::vector<AvailableBgInfo>& getAvailableBgs() const override;
-
-    // BG scoreboard (aliased from handler_types.hpp)
-    using BgPlayerScore = game::BgPlayerScore;
-    using ArenaTeamScore = game::ArenaTeamScore;
-    using BgScoreboardData = game::BgScoreboardData;
-    void requestPvpLog();
-    const BgScoreboardData* getBgScoreboard() const override;
-
-    // BG flag carrier positions (aliased from handler_types.hpp)
-    using BgPlayerPosition = game::BgPlayerPosition;
-    const std::vector<BgPlayerPosition>& getBgPlayerPositions() const;
 
     // Network latency (milliseconds, updated each PONG response)
     uint32_t getLatencyMs() const { return lastLatency; }
-
-    // Logout commands. exitAfterLogout: /quit and /exit leave the game; /logout and
-    // /camp drop back to character select.
-    void requestLogout(bool exitAfterLogout = false);
 
     /// Turn the character to face a canonical yaw, and tell the server.
     ///
@@ -855,268 +733,22 @@ public:
     /// before anything with a cast time completes. Turning the character makes
     /// the two agree, and keeps them agreeing.
     void faceCanonicalYaw(float canonicalYaw);
-    void cancelLogout();
-
-    // Instance difficulty
-    void sendSetDifficulty(uint32_t difficulty, bool raid = false);
-    bool  isLoggingOut() const;
-    float getLogoutCountdown() const;
 
     // Stand state
     void setStandState(uint8_t state) override;  // 0=stand, 1=sit, 2=sit_chair, 3=sleep, 4=sit_low_chair, 5=sit_medium_chair, 6=sit_high_chair, 7=dead, 8=kneel, 9=submerged
-    uint8_t getStandState() const { return standState_; }
-    bool isSitting() const { return standState_ >= 1 && standState_ <= 6; }
-    bool isDead() const { return standState_ == 7; }
 
-    // Display toggles
-    void toggleHelm();
-    void toggleCloak();
-    bool isHelmVisible() const { return helmVisible_; }
-    bool isCloakVisible() const { return cloakVisible_; }
-
-    // Follow/Assist
-    void followTarget();
-    void cancelFollow();   // Stop following current target
-    void assistTarget();
-
-    // PvP
-    void togglePvp();
-
-    // Minimap ping (Ctrl+click on minimap; wowX/wowY in canonical WoW coords)
-    void sendMinimapPing(float wowX, float wowY);
-
-    // Guild commands
-    void requestGuildInfo();
-    void requestGuildRoster();
-    void setGuildInfoText(const std::string& text);
-    void takeInboxTextItem(uint32_t mailId);
-    void setGuildMotd(const std::string& motd);
-    void promoteGuildMember(const std::string& playerName);
-    void demoteGuildMember(const std::string& playerName);
-    void leaveGuild();
-    void inviteToGuild(const std::string& playerName);
-    void kickGuildMember(const std::string& playerName);
-    void disbandGuild();
-    void setGuildLeader(const std::string& name);
-    void setGuildPublicNote(const std::string& name, const std::string& note);
-    void setGuildOfficerNote(const std::string& name, const std::string& note);
-    void acceptGuildInvite();
-    void declineGuildInvite();
-
-    // GM Ticket
-    void submitGmTicket(const std::string& text);
-    void updateGmTicket(const std::string& text);
-    void deleteGmTicket();
-    void requestGmTicket();          ///< Send CMSG_GMTICKET_GETTICKET to query open ticket
-    void requestGmSystemStatus();    ///< Send CMSG_GMTICKET_SYSTEMSTATUS to query the queue
-    void requestGuildEventLog();
-    const std::vector<GuildEventLogEntry>& getGuildEventLog() const;
-
-    uint32_t getBfMgrBattleId() const { return socialHandler_->bfMgrBattleId(); }
-    void acceptBfMgrInvite();
-    void declineBfMgrInvite();
-    void respondBfMgrQueueInvite(uint32_t battleId, bool accept);
-    void requestBfMgrExit(uint32_t battleId);
-
-    // WotLK Calendar
-    uint32_t getCalendarPendingInvites() const { return calendarPendingInvites_; }
-    void requestCalendar(); ///< Send CMSG_CALENDAR_GET_CALENDAR to the server
-    /// The calendar the server last sent, empty until it has answered one.
-    const CalendarData& getCalendarData() const { return calendarData_; }
-    /// The event the server last sent in full, empty until one is opened.
-    const CalendarEventDetail& getCalendarEventDetail() const {
-        return calendarEventDetail_;
-    }
-    /// Invite someone to an event, or to one not yet created.
-    void inviteToCalendarEvent(uint64_t eventId, uint64_t inviteId,
-                               const std::string& name, bool isPreInvite,
-                               bool isGuildEvent);
-    /// Set another invitee's status or moderator rank.
-    void setCalendarInviteStatus(uint64_t inviteeGuid, uint64_t eventId,
-                                 uint64_t inviteId, uint8_t status);
-    void setCalendarInviteModerator(uint64_t inviteeGuid, uint64_t eventId,
-                                    uint64_t inviteId, uint8_t rank);
-    /// Edit an existing event, and delete one.
-    void updateCalendarEvent(uint64_t eventId, uint64_t inviteId,
-                             const CalendarEventDraft& draft);
-    void removeCalendarEvent(uint64_t eventId, uint64_t inviteId);
-    /// Invite the guild by level and rank filter.
-    void massInviteGuildToCalendarEvent(uint32_t minLevel, uint32_t maxLevel,
-                                        uint32_t minRank);
-    /// Ask the server for one event's detail: CMSG_CALENDAR_GET_EVENT.
-    void requestCalendarEvent(uint64_t eventId);
-    /// Send a staged event to the server.
-    void createCalendarEvent(const CalendarEventDraft& draft);
-    /// Answer an invitation. Status is a CalendarInviteStatus.
-    void respondToCalendarInvite(uint64_t eventId, uint64_t inviteId,
-                                 uint32_t status);
-    void queryGuildInfo(uint32_t guildId);
-    void createGuild(const std::string& guildName);
-    void addGuildRank(const std::string& rankName);
-    void delGuildRank();
-    void deleteGuildRank();
-    void requestPetitionShowlist(uint64_t npcGuid);
-    void buyPetition(uint64_t npcGuid, const std::string& guildName,
-                     uint32_t clientIndex = 1);
-
-    // Guild state accessors
-    bool isInGuild() const override;
-    const std::string& getGuildName() const override;
-    const GuildRosterData& getGuildRoster() const override;
-
-    /// Where the player sits in the guild, as an index into the roster's rank
-    /// list. Rank zero is the guild master, which is what IsGuildLeader asks.
-    /// Returns 0xFFFFFFFF when the roster has not arrived or the player is not
-    /// in it - distinct from rank zero, which is the opposite answer.
-    ///
-    /// Shared because the chat handler was already doing this walk to decide
-    /// whether to show officer chat, and a second copy is how two answers to
-    /// one question start to disagree.
-    uint32_t getPlayerGuildRankIndex() const;
-    bool hasGuildRoster() const override;
-    const std::vector<std::string>& getGuildRankNames() const;
-    uint32_t getPlayerGuildRankRights() const;
-    /// Which rank the guild control panel is editing. Client-side only - the
-    /// panel picks it from a dropdown and asks for its rights with a call that
-    /// takes no argument, so the choice has to be remembered here.
-    int  getSelectedGuildRank() const { return selectedGuildRank_; }
-    void setSelectedGuildRank(int index);
-
-    /// What the guild rank editor has staged but not yet sent.
-    ///
-    /// The panel edits by parts - a checkbox stages one right, the gold box
-    /// stages the allowance, each bank tab stages three more - and only then
-    /// commits with one packet carrying all of it. Seeded from the rank's
-    /// current values when a rank is selected, so anything the panel does not
-    /// touch is sent back exactly as it arrived rather than as a zero.
-    struct PendingGuildRank {
-        uint32_t rights = 0;
-        uint32_t goldLimit = 0;
-        std::array<uint32_t, 6> tabRights{};
-        std::array<uint32_t, 6> tabSlots{};
-    };
-    PendingGuildRank& pendingGuildRankRef() { return pendingGuildRank_; }
-    void saveGuildRank(const std::string& rankName);
-    bool hasPendingGuildInvite() const;
-    const std::string& getPendingGuildInviterName() const;
-    const std::string& getPendingGuildInviteGuildName() const;
-    const GuildInfoData& getGuildInfoData() const;
-    const GuildQueryResponseData& getGuildQueryData() const;
-    bool hasGuildInfoData() const;
-    bool hasPetitionShowlist() const;
-    void closePetitionVendor();
-    void acceptArenaTeamInvite();
-    void declineArenaTeamInvite();
-    void arenaTeamInvite(uint32_t teamId, const std::string& name);
-    void arenaTeamLeave(uint32_t teamId);
-    void arenaTeamRemove(uint32_t teamId, const std::string& name);
-    void arenaTeamSetLeader(uint32_t teamId, const std::string& name);
-    void disbandArenaTeam(uint32_t teamId);
-    void reportMailSpam(uint64_t senderGuid, uint32_t mailId);
     /// Take the glyph out of a socket. Zero-based slot, as the server counts.
     void removeGlyphFromSocket(uint32_t slot);
-    /// Rename a charter the player is carrying. The petition is an item, so it
-    /// is named by its item guid.
-    void renamePetition(uint64_t petitionGuid, const std::string& newName);
     /// Tell the server the GM's reply has been read and closed. Empty packet;
     /// the server answers by deciding whether to offer a survey.
     void resolveGMResponse();
-    /// Clears the petition list the social handler is holding.
-    ///
-    /// This set a flag of its own, which nothing read: hasPetitionShowlist
-    /// beside it forwards to SocialHandler. The social panel reads through
-    /// that forward and cleared this one two lines later, so the petition
-    /// dialog could not be dismissed.
-    void clearPetitionDialog();
-    uint32_t getPetitionCost() const;
-    uint64_t getPetitionNpcGuid() const;
-    /// name, icon and cost of the nth charter a petition vendor is offering.
-    /// False when the vendor offered no such charter.
-    bool getPetitionCharter(int index, uint32_t& itemId, uint32_t& displayId,
-                            uint32_t& cost) const;
-
-    // Petition signatures (guild charter signing flow)
-    using PetitionSignature = game::PetitionSignature;
-    using PetitionInfo = game::PetitionInfo;
-    const PetitionInfo& getPetitionInfo() const;
-    bool hasPetitionSignaturesUI() const;
-    void clearPetitionSignaturesUI();
-    void signPetition(uint64_t petitionGuid);
-    void turnInPetition(uint64_t petitionGuid);
-    void offerPetition(uint64_t petitionGuid, uint64_t targetGuid);
-
-    // Guild name lookup for other players' nameplates
-    // Returns the guild name for a given guildId, or empty if unknown.
-    // Automatically queries the server for unknown guild IDs.
-    const std::string& lookupGuildName(uint32_t guildId);
     // Returns the guildId for a player entity (from PLAYER_GUILDID update field).
     uint32_t getEntityGuildId(uint64_t guid) const;
 
-    using ReadyCheckResult = game::ReadyCheckResult;
-    void initiateReadyCheck();
-    void respondToReadyCheck(bool ready);
-    bool hasPendingReadyCheck() const;
-    /// Clears the ready check the social handler is holding.
-    ///
-    /// This wrote a flag of its own, which nothing read: the reader
-    /// beside it forwards to SocialHandler and always did. Dismissing a
-    /// ready check therefore cleared nothing the client asks about, and
-    /// hasPendingReadyCheck went on answering true.
-    void dismissReadyCheck();
-    const std::string& getReadyCheckInitiator() const;
-    const std::vector<ReadyCheckResult>& getReadyCheckResults() const;
-
-    // Duel
-    void forfeitDuel();
-
     // AFK/DND status
-    void toggleAfk(const std::string& message = "");
-    void toggleDnd(const std::string& message = "");
-    void replyToLastWhisper(const std::string& message);
-    std::string getLastWhisperSender() const;
     bool isAfk() const;
     bool isDnd() const;
 
-    // Party/Raid management
-    /// The info text on a guild bank tab. Tab is zero-based, as stored.
-    void setGuildBankTabText(uint8_t tab, const std::string& text);
-
-    /// Channel moderation: invite, kick, ban, unban, mute, unmute and the
-    /// moderator pair, which are one packet shape with eight opcodes.
-    void channelModeration(Opcode op, const std::string& channelName,
-                           const std::string& targetName,
-                           bool allowEmptyTarget = false);
-
-    /// Hand party leadership to another member.
-    void promoteToLeader(uint64_t guid);
-    void uninvitePlayer(const std::string& playerName);
-    void setLootMethod(uint8_t method, uint64_t masterGuid, uint8_t threshold);
-    void setPartyAssignment(uint8_t assignment, uint64_t guid, bool apply);
-    void setRaidSubgroup(const std::string& playerName, uint8_t group);
-    void swapRaidSubgroup(const std::string& firstName, const std::string& secondName);
-    void leaveParty();
-    void setMainTank(uint64_t targetGuid);
-    void setMainAssist(uint64_t targetGuid);
-    void clearMainTank();
-    void clearMainAssist();
-    void requestRaidInfo();
-    /// Hold a raid lockout past its reset, or let it go. Raid binds only.
-    void setSavedInstanceExtend(uint32_t mapId, uint32_t difficulty, bool extend);
-
-    // Combat and Trade
-    void proposeDuel(uint64_t targetGuid);
-    void initiateTrade(uint64_t targetGuid);
-    void reportPlayer(uint64_t targetGuid, const std::string& reason);
-    void stopCasting();
-    void resetCastState();       // force-clear all cast/craft/queue state without sending packets
-    void clearUnitCaches();      // clear per-unit cast states and aura caches
-
-    void queryPlayerName(uint64_t guid) override;
-
-    /// Who a piece of mail is from, resolved from its GUID or entry depending on
-    /// the mail type. Resolved on demand so a late name query still shows.
-    std::string getMailSenderName(const MailMessage& mail) const;
-    void queryCreatureInfo(uint32_t entry, uint64_t guid) override;
     /// A creature template entry turned into something that can be drawn, by
     /// asking the server if it has not already.
     ///
@@ -1129,115 +761,14 @@ public:
     /// answers zero the first time and the query fills the cache for the next
     /// frame to find.
     uint32_t getCreatureDisplayIdForEntry(uint32_t entry);
-    void queryGameObjectInfo(uint32_t entry, uint64_t guid);
-    const GameObjectQueryResponseData* getCachedGameObjectInfo(uint32_t entry) const override {
-        return entityController_->getCachedGameObjectInfo(entry);
-    }
-    std::string getCachedPlayerName(uint64_t guid) const override;
-    std::string getCachedCreatureName(uint32_t entry) const override;
-    // Read-only cache access forwarded from EntityController
-    const std::unordered_map<uint64_t, std::string>& getPlayerNameCache() const override {
-        return entityController_->getPlayerNameCache();
-    }
-    const std::unordered_map<uint32_t, CreatureQueryResponseData>& getCreatureInfoCache() const override {
-        return entityController_->getCreatureInfoCache();
-    }
-    // Returns the creature subname/title (e.g. "<Warchief of the Horde>"), empty if not cached
-    std::string getCachedCreatureSubName(uint32_t entry) const {
-        return entityController_->getCachedCreatureSubName(entry);
-    }
-    // Returns the creature rank (0=Normal,1=Elite,2=RareElite,3=Boss,4=Rare)
-    // or -1 if not cached yet
-    int getCreatureRank(uint32_t entry) const {
-        return entityController_->getCreatureRank(entry);
-    }
-    // Returns creature type (1=Beast,2=Dragonkin,...,7=Humanoid,...) or 0 if not cached
-    uint32_t getCreatureType(uint32_t entry) const {
-        return entityController_->getCreatureType(entry);
-    }
-    // Returns creature family (e.g. pet family for beasts) or 0
-    uint32_t getCreatureFamily(uint32_t entry) const {
-        return entityController_->getCreatureFamily(entry);
-    }
-
     void startAutoAttack(uint64_t targetGuid) override;
     void stopAutoAttack() override;
-    bool isAutoAttacking() const;
-    bool hasAutoAttackIntent() const;
-    bool isInCombat() const;
-    bool isInCombatWith(uint64_t guid) const;
-    uint64_t getAutoAttackTargetGuid() const;
-    bool isAggressiveTowardPlayer(uint64_t guid) const;
-    // Timestamp (ms since epoch) of the most recent player melee auto-attack.
-    // Zero if no swing has occurred this session.
-    uint64_t getLastMeleeSwingMs() const;
-    const std::vector<CombatTextEntry>& getCombatText() const;
-    void clearCombatText();
-    void updateCombatText(float deltaTime);
-    void clearHostileAttackers();
-
-    // Combat log (persistent rolling history, max MAX_COMBAT_LOG entries)
-    const std::deque<CombatLogEntry>& getCombatLog() const;
-    void clearCombatLog();
-
-    // Area trigger messages (SMSG_AREA_TRIGGER_MESSAGE) - drained by UI each frame
-    bool hasAreaTriggerMsg() const { return chatHandler_->hasAreaTriggerMessage(); }
-    std::string popAreaTriggerMsg() { return chatHandler_->takeAreaTriggerMessage(); }
-
     // Threat
     using ThreatEntry = CombatHandler::ThreatEntry;
-    const std::vector<ThreatEntry>* getThreatList(uint64_t unitGuid) const;
     const std::vector<ThreatEntry>* getTargetThreatList() const;
 
-    void castSpell(uint32_t spellId, uint64_t targetGuid = 0);
     void cancelCast() override;
-    void cancelAura(uint32_t spellId);
 
-    // ---- The pet - PetHandler's; these forward for the old callers ----
-    void dismissPet() { petHandler_->dismiss(); }
-    void renamePet(const std::string& newName) { petHandler_->rename(newName); }
-    bool hasPet() const { return petHandler_->hasPet(); }
-    /// The same flag without taking it. The unit menu asks whether a rename is
-    /// offered every time it is built.
-    bool isPetRenameable() const { return petHandler_->renameable(); }
-    uint64_t getPetGuid() const { return petHandler_->guid(); }
-    static constexpr int PET_ACTION_BAR_SLOTS = PetHandler::kActionBarSlots;
-    uint32_t getPetActionSlot(int idx) const { return petHandler_->actionSlot(idx); }
-    uint8_t getPetCommand() const { return petHandler_->command(); }   // 0=stay,1=follow,2=attack,3=dismiss
-    uint8_t getPetReact()   const { return petHandler_->react(); }     // 0=passive,1=defensive,2=aggressive
-    const std::array<int32_t, 5>& getPetStats() const { return petHandler_->stats(); }
-    const std::array<int32_t, 7>& getPetResistances() const { return petHandler_->resistances(); }
-    int32_t getPetAttackPower() const { return petHandler_->attackPower(); }
-    float getPetMinDamage() const { return petHandler_->minDamage(); }
-    float getPetMaxDamage() const { return petHandler_->maxDamage(); }
-    uint32_t getPetExperience() const { return petHandler_->experience(); }
-    uint32_t getPetNextLevelExp() const { return petHandler_->nextLevelExperience(); }
-    const std::vector<uint32_t>& getPetSpells() const { return petHandler_->spells(); }
-    bool isPetSpellAutocast(uint32_t spellId) const { return petHandler_->isAutocast(spellId); }
-    void sendPetAction(uint32_t action, uint64_t targetGuid = 0) {
-        petHandler_->sendAction(action, targetGuid);
-    }
-    void togglePetSpellAutocast(uint32_t spellId) { petHandler_->toggleAutocast(spellId); }
-    const std::unordered_set<uint32_t>& getKnownSpells() const {
-        static const std::unordered_set<uint32_t> empty;
-        return spellHandler_->getKnownSpells();
-    }
-
-    // Spell book tabs - groups known spells by class skill line for Lua API
-    using SpellBookTab = SpellHandler::SpellBookTab;
-    const std::vector<SpellBookTab>& getSpellBookTabs();
-
-    // ---- Pet Stable - PetHandler's ----
-    using StabledPet = game::StabledPet;
-    bool isStableWindowOpen() const { return petHandler_->isStableWindowOpen(); }
-    void closeStableWindow() { petHandler_->closeStableWindow(); }
-    uint8_t  getStableSlots() const { return petHandler_->stableSlots(); }
-    const std::vector<StabledPet>& getStabledPets() const { return petHandler_->stabledPets(); }
-    void requestStabledPetList() { petHandler_->requestStabledPetList(); }
-    void stablePet(uint8_t slot) { petHandler_->stablePet(slot); }
-    void unstablePet(uint32_t petNumber) { petHandler_->unstablePet(petNumber); }
-    void buyStableSlot() { petHandler_->buyStableSlot(); }
-    void abandonPet() { petHandler_->abandon(); }
     /// Forget a primary profession. The server refuses anything that is not
     /// one, so the skill panel's unlearn button is the only sensible caller.
     void unlearnSkill(uint32_t skillId);
@@ -1255,93 +786,9 @@ public:
 
     // Minimap pings from party members
     using MinimapPing = game::MinimapPing;
-    const std::vector<MinimapPing>& getMinimapPings() const { return socialHandler_->minimapPings(); }
-    void tickMinimapPings(float dt) { socialHandler_->ageMinimapPings(dt); }
-
-    bool isCasting() const { return spellHandler_->isCasting(); }
-    bool isChanneling() const { return spellHandler_->isChanneling(); }
-    bool isRestoring() const { return spellHandler_->isRestoring(); }
-    bool isGameObjectInteractionCasting() const {
-        return spellHandler_->isGameObjectInteractionCasting();
-    }
-    uint32_t getCurrentCastSpellId() const { return spellHandler_->getCurrentCastSpellId(); }
-    float getCastProgress() const { return spellHandler_->getCastProgress(); }
-    float getCastTimeRemaining() const { return spellHandler_->getCastTimeRemaining(); }
-    float getCastTimeTotal() const { return spellHandler_->getCastTimeTotal(); }
-
-    // Repeat-craft queue
-    void startCraftQueue(uint32_t spellId, int count);
-    void cancelCraftQueue();
-    int getCraftQueueRemaining() const;
-    uint32_t getCraftQueueSpellId() const;
-
-    // Crafting window (opened client-side by casting a profession spell)
-    bool isCraftingWindowOpen() const { return spellHandler_->isCraftingWindowOpen(); }
-    uint32_t getCraftingSkillLine() const { return spellHandler_->getCraftingSkillLine(); }
-    void closeCraftingWindow() { spellHandler_->closeCraftingWindow(); }
-
-    // 400ms spell-queue window: next spell to cast when current finishes
-    uint32_t getQueuedSpellId() const;
-    void cancelQueuedSpell() { spellHandler_->cancelQueuedSpell(); }
-
-    // Unit cast state (aliased from handler_types.hpp)
-    using UnitCastState = game::UnitCastState;
-    // Returns cast state for any unit by GUID (delegates to SpellHandler)
-    const UnitCastState* getUnitCastState(uint64_t guid) const {
-        return spellHandler_->getUnitCastState(guid);
-    }
-    // Convenience helpers for the current target
-    bool isTargetCasting() const { return spellHandler_->isTargetCasting(); }
-    uint32_t getTargetCastSpellId() const { return spellHandler_->getTargetCastSpellId(); }
-    float getTargetCastProgress() const { return spellHandler_->getTargetCastProgress(); }
-    float getTargetCastTimeRemaining() const { return spellHandler_->getTargetCastTimeRemaining(); }
-    bool isTargetCastInterruptible() const { return spellHandler_->isTargetCastInterruptible(); }
-
-    // Talents - delegate to SpellHandler as canonical authority
-    uint8_t getActiveTalentSpec() const { return spellHandler_->getActiveTalentSpec(); }
-    uint8_t getUnspentTalentPoints() const { return spellHandler_->getUnspentTalentPoints(); }
-    uint8_t getUnspentTalentPoints(uint8_t spec) const { return spellHandler_->getUnspentTalentPoints(spec); }
-    const std::unordered_map<uint32_t, uint8_t>& getLearnedTalents() const {
-        return spellHandler_->getLearnedTalents();
-    }
-    const std::unordered_map<uint32_t, uint8_t>& getLearnedTalents(uint8_t spec) const {
-        return spellHandler_->getLearnedTalents(spec);
-    }
 
     // Glyphs (WotLK): up to 6 glyph slots per spec (3 major + 3 minor)
     static constexpr uint8_t MAX_GLYPH_SLOTS = 6;
-    const std::array<uint16_t, MAX_GLYPH_SLOTS>& getGlyphs() const {
-        return spellHandler_->getGlyphs();
-    }
-    const std::array<uint16_t, MAX_GLYPH_SLOTS>& getGlyphs(uint8_t spec) const {
-        return spellHandler_->getGlyphs(spec);
-    }
-    uint8_t getTalentRank(uint32_t talentId) const {
-        return spellHandler_->getTalentRank(talentId);
-    }
-    void learnTalent(uint32_t talentId, uint32_t requestedRank);
-    void switchTalentSpec(uint8_t newSpec);
-
-    // Talent DBC access
-    const TalentEntry* getTalentEntry(uint32_t talentId) const {
-        return spellHandler_->getTalentEntry(talentId);
-    }
-    const TalentTabEntry* getTalentTabEntry(uint32_t tabId) const {
-        return spellHandler_->getTalentTabEntry(tabId);
-    }
-    const std::unordered_map<uint32_t, TalentEntry>& getAllTalents() const;
-    const std::unordered_map<uint32_t, TalentTabEntry>& getAllTalentTabs() const;
-    void loadTalentDbc();
-
-    // Action bar - ActionBarHandler's. A facade for the callers that have
-    // not moved; new code asks actionBar().
-    static constexpr int SLOTS_PER_BAR    = kActionBarSlotsPerBar;
-    static constexpr int ACTION_BARS      = kActionBars;
-    static constexpr int ACTION_BAR_SLOTS = kActionBarSlots;
-    const ActionBar& getActionBar() const { return actionBarHandler_->slots(); }
-    void setActionBarSlot(int slot, ActionBarSlot::Type type, uint32_t id) {
-        actionBarHandler_->setSlot(slot, type, id);
-    }
 
     void saveCharacterConfig();
     void loadCharacterConfig();
@@ -1352,62 +799,18 @@ public:
     ///
     /// The reliable way to ask "am I already riding the mount this button
     /// summons": the mount you are on put its own aura on you, and no other
-    /// mount's aura is there. mountAuraSpellId_ is a guess by comparison - it
+    /// mount's aura is there. Movement's mountAuraSpellId is a guess by comparison - it
     /// is whatever the client could work out at the moment the mount appeared,
     /// and when the player did not cast it themselves (a login already mounted,
     /// a taxi, a server-applied aura) the blind scan behind it can land on a
     /// racial or a tracking buff instead.
     [[nodiscard]] bool playerCarriesAura(uint32_t spellId) const {
         if (spellId == 0) return false;
-        for (const auto& aura : getPlayerAuras()) {
+        for (const auto& aura : spellHandler_->getPlayerAuras()) {
             if (!aura.isEmpty() && aura.spellId == spellId) return true;
         }
         return false;
     }
-
-    const std::vector<AuraSlot>& getPlayerAuras() const {
-        return spellHandler_->getPlayerAuras();
-    }
-    const std::vector<AuraSlot>& getTargetAuras() const {
-        return spellHandler_->getTargetAuras();
-    }
-    // Per-unit aura cache (populated for party members and any unit we receive updates for)
-    const std::vector<AuraSlot>* getUnitAuras(uint64_t guid) const {
-        return spellHandler_->getUnitAuras(guid);
-    }
-
-    // Completed quests (populated from SMSG_QUERY_QUESTS_COMPLETED_RESPONSE)
-    bool isQuestCompleted(uint32_t questId) const { return questHandler_->isQuestCompleted(questId); }
-    const std::unordered_set<uint32_t>& getCompletedQuests() const {
-        return questHandler_->completedQuests();
-    }
-
-    // NPC death callback (for animations)
-    using NpcDeathCallback = std::function<void(uint64_t guid)>;
-    void setNpcDeathCallback(NpcDeathCallback cb) { npcDeathCallback_ = std::move(cb); }
-
-
-    using NpcAggroCallback = std::function<void(uint64_t guid, const glm::vec3& position)>;
-    void setNpcAggroCallback(NpcAggroCallback cb) { npcAggroCallback_ = std::move(cb); }
-
-    // NPC respawn callback (health 0 → >0, resets animation to idle)
-    using NpcRespawnCallback = std::function<void(uint64_t guid)>;
-    void setNpcRespawnCallback(NpcRespawnCallback cb) { npcRespawnCallback_ = std::move(cb); }
-
-    // Stand state animation callback - fired when SMSG_STANDSTATE_UPDATE confirms a new state
-    // standState: 0=stand, 1-6=sit variants, 7=dead, 8=kneel
-    using StandStateCallback = std::function<void(uint8_t standState)>;
-    void setStandStateCallback(StandStateCallback cb) { standStateCallback_ = std::move(cb); }
-
-    // Appearance changed callback - fired when PLAYER_BYTES or facial features update (barber shop, etc.)
-    using AppearanceChangedCallback = std::function<void()>;
-    void setAppearanceChangedCallback(AppearanceChangedCallback cb) { appearanceChangedCallback_ = std::move(cb); }
-
-    // Player model rebuild callback - fired alongside the appearance change so the
-    // in-world 3D character can be respawned with the new hair/facial hair without
-    // requiring a game restart.
-    using PlayerModelRebuildCallback = std::function<void()>;
-    void setPlayerModelRebuildCallback(PlayerModelRebuildCallback cb) { playerModelRebuildCallback_ = std::move(cb); }
 
     // Snap the character to face the camera's current look direction and return the
     // resulting canonical orientation. Used by fishing so the bobber lands in front of
@@ -1419,166 +822,18 @@ public:
         return faceCameraProvider_ ? faceCameraProvider_() : getMovementInfo().orientation;
     }
 
-    // Unit animation hint: signal jump (animId=38) for other players/NPCs
-    using UnitAnimHintCallback = std::function<void(uint64_t guid, uint32_t animId)>;
-    void setUnitAnimHintCallback(UnitAnimHintCallback cb) { unitAnimHintCallback_ = std::move(cb); }
-
-    // Unit move-flags callback: fired on every MSG_MOVE_* for other players with the raw flags field.
-    // Drives Walk(4) vs Run(5) selection and swim state initialization from heartbeat packets.
-    /// A unit's movement flags changed.
-    ///
-    /// `mask` says which flags this update actually speaks about, because most
-    /// of the opcodes that reach here speak about one. A full movement block
-    /// is authoritative and passes ~0u; SMSG_SPLINE_MOVE_START_SWIM knows only
-    /// about swimming and passes SWIMMING, so it cannot take the flying
-    /// animation off a creature that is doing both.
-    using UnitMoveFlagsCallback =
-        std::function<void(uint64_t guid, uint32_t moveFlags, uint32_t mask)>;
-    void setUnitMoveFlagsCallback(UnitMoveFlagsCallback cb) { unitMoveFlagsCallback_ = std::move(cb); }
-
-    // NPC swing callback (plays attack animation on NPC)
-    using NpcSwingCallback = std::function<void(uint64_t guid)>;
-    void setNpcSwingCallback(NpcSwingCallback cb) { npcSwingCallback_ = std::move(cb); }
-
-    // Hit reaction callback - triggers victim animation (dodge, block, wound, crit wound)
-    enum class HitReaction : uint8_t { WOUND, CRIT_WOUND, DODGE, PARRY, BLOCK, SHIELD_BLOCK };
-    using HitReactionCallback = std::function<void(uint64_t victimGuid, HitReaction reaction)>;
-    void setHitReactionCallback(HitReactionCallback cb) { hitReactionCallback_ = std::move(cb); }
-
-    // Stun state callback - fires when UNIT_FLAG_STUNNED changes on the local player
-    using StunStateCallback = std::function<void(bool stunned)>;
-    void setStunStateCallback(StunStateCallback cb) { stunStateCallback_ = std::move(cb); }
-
-    // Stealth state callback - fires when UNIT_FLAG_SNEAKING changes on the local player
-    using StealthStateCallback = std::function<void(bool stealthed)>;
-    void setStealthStateCallback(StealthStateCallback cb) { stealthStateCallback_ = std::move(cb); }
-
-    // Player health changed callback - fires when local player HP changes
-    using PlayerHealthCallback = std::function<void(uint32_t health, uint32_t maxHealth)>;
-    void setPlayerHealthCallback(PlayerHealthCallback cb) { playerHealthCallback_ = std::move(cb); }
-
-
-    // XP tracking
-    uint32_t getPlayerXp() const { return playerXp_; }
-    uint32_t getPlayerNextLevelXp() const { return playerNextLevelXp_; }
-    uint32_t getPlayerRestedXp() const { return playerRestedXp_; }
-    bool isPlayerResting() const { return isResting_; }
-    uint32_t getPlayerLevel() const { return serverPlayerLevel_; }
-    const std::vector<uint32_t>& getPlayerExploredZoneMasks() const {
-        return spellHandler_->exploredZoneMasks();
-    }
-    bool hasPlayerExploredZoneMasks() const { return spellHandler_->hasExploredZoneMasks(); }
-    static uint32_t killXp(uint32_t playerLevel, uint32_t victimLevel);
-
-    // Server game time now, in HOURS since midnight (0.0-24.0), or -1 before
-    // the server has sent it.
-    //
-    // The unit is stated because four things disagreed about it: the wire
-    // format is a packed bitfield, the sky divided by 86400 as though it were
-    // seconds, GetGameTime split it as hours, and SMSG_SERVERTIME wrote a unix
-    // timestamp into the same field.
-    //
-    // RealmTimeHandler's; a facade for the callers that have not moved.
-    float getGameTime() const;
-
     // Global Cooldown (GCD) - set when the server sends a spellId=0 cooldown entry
-    float getGCDRemaining() const;
-    float getGCDTotal() const;
-    bool isGCDActive() const { return getGCDRemaining() > 0.0f; }
+    bool isGCDActive() const { return spellHandler_->getGCDRemaining() > 0.0f; }
 
     // Player skills
-    const std::unordered_map<uint32_t, PlayerSkill>& getPlayerSkills() const {
-        return spellHandler_->playerSkills();
-    }
-    const std::string& getSkillName(uint32_t skillId) const;
-    /// The heading a skill is filed under, and that heading's name and place.
-    /// Zero and empty for a skill the file does not categorise.
-    const std::string& getSkillCategoryName(uint32_t categoryId) const;
-    uint32_t getSkillCategorySortIndex(uint32_t categoryId) const;
     bool isSkillCategoryCollapsed(uint32_t categoryId) const {
         return collapsedSkillCategories_.count(categoryId) > 0;
     }
     void setSkillCategoryCollapsed(uint32_t categoryId, bool collapsed);
-    uint32_t getSkillCategory(uint32_t skillId) const;
-    bool isProfessionSpell(uint32_t spellId) const;
 
-    // Knockback callback: called when server sends SMSG_MOVE_KNOCK_BACK for the player.
-    // Parameters: vcos, vsin (2D direction vector in server/wire coord space - the
-    //   server→canonical→render swaps cancel, so the consumer can use them directly
-    //   in render space, see CameraController::applyKnockBack),
-    //   hspeed, vspeed (raw from packet; vspeed is negative when the server intends
-    //   an upward launch - negate before applying as initial Y velocity).
-    using KnockBackCallback = std::function<void(float vcos, float vsin, float hspeed, float vspeed)>;
-    void setKnockBackCallback(KnockBackCallback cb) { knockBackCallback_ = std::move(cb); }
-
-    // Camera shake callback: called when server sends SMSG_CAMERA_SHAKE.
-    // Parameters: magnitude (world units), frequency (Hz), duration (seconds).
-    using CameraShakeCallback = std::function<void(float magnitude, float frequency, float duration)>;
-    void setCameraShakeCallback(CameraShakeCallback cb) { cameraShakeCallback_ = std::move(cb); }
-
-    // Auto-follow callback: pass render-space position pointer to start, nullptr to cancel.
-    using AutoFollowCallback = std::function<void(const glm::vec3* renderPos)>;
-    void setAutoFollowCallback(AutoFollowCallback cb) { autoFollowCallback_ = std::move(cb); }
-
-    // Unstuck callback (resets player Z to floor height)
-    using UnstuckCallback = std::function<void()>;
-    void setUnstuckCallback(UnstuckCallback cb) { unstuckCallback_ = std::move(cb); }
     void unstuck();
-    void setUnstuckGyCallback(UnstuckCallback cb) { unstuckGyCallback_ = std::move(cb); }
     void unstuckGy();
-    void setUnstuckHearthCallback(UnstuckCallback cb) { unstuckHearthCallback_ = std::move(cb); }
     void unstuckHearth();
-    using BindPointCallback = std::function<void(uint32_t mapId, float x, float y, float z)>;
-    void setBindPointCallback(BindPointCallback cb) { bindPointCallback_ = std::move(cb); }
-
-    // Creature spawn callback (online mode - triggered when creature enters view)
-    // Parameters: guid, displayId, x, y, z (canonical), orientation, scale (OBJECT_FIELD_SCALE_X)
-    using CreatureSpawnCallback = std::function<void(uint64_t guid, uint32_t displayId, float x, float y, float z, float orientation, float scale)>;
-    void setCreatureSpawnCallback(CreatureSpawnCallback cb) { creatureSpawnCallback_ = std::move(cb); }
-
-    // Creature despawn callback (online mode - triggered when creature leaves view)
-    using CreatureDespawnCallback = std::function<void(uint64_t guid)>;
-    void setCreatureDespawnCallback(CreatureDespawnCallback cb) { creatureDespawnCallback_ = std::move(cb); }
-
-    // Player spawn callback (online mode - triggered when a player enters view).
-    // Players need appearance data so the renderer can build the right body/hair textures.
-    using PlayerSpawnCallback = std::function<void(uint64_t guid,
-                                                   uint32_t displayId,
-                                                   uint8_t raceId,
-                                                   uint8_t genderId,
-                                                   uint32_t appearanceBytes,
-                                                   uint8_t facialFeatures,
-                                                   float x, float y, float z, float orientation)>;
-    void setPlayerSpawnCallback(PlayerSpawnCallback cb) { playerSpawnCallback_ = std::move(cb); }
-
-    using PlayerDespawnCallback = std::function<void(uint64_t guid)>;
-    void setPlayerDespawnCallback(PlayerDespawnCallback cb) { playerDespawnCallback_ = std::move(cb); }
-
-    // GameObject spawn callback (online mode - triggered when gameobject enters view)
-    // Parameters: guid, entry, displayId, x, y, z (canonical), orientation, scale (OBJECT_FIELD_SCALE_X)
-    using GameObjectSpawnCallback = std::function<void(uint64_t guid, uint32_t entry, uint32_t displayId, float x, float y, float z, float orientation, float scale)>;
-    void setGameObjectSpawnCallback(GameObjectSpawnCallback cb) { gameObjectSpawnCallback_ = std::move(cb); }
-
-    // GameObject move callback (online mode - triggered when gameobject position updates)
-    // Parameters: guid, x, y, z (canonical), orientation
-    using GameObjectMoveCallback = std::function<void(uint64_t guid, float x, float y, float z, float orientation)>;
-    void setGameObjectMoveCallback(GameObjectMoveCallback cb) { gameObjectMoveCallback_ = std::move(cb); }
-
-    // GameObject despawn callback (online mode - triggered when gameobject leaves view)
-    using GameObjectDespawnCallback = std::function<void(uint64_t guid)>;
-    void setGameObjectDespawnCallback(GameObjectDespawnCallback cb) { gameObjectDespawnCallback_ = std::move(cb); }
-
-    using GameObjectCustomAnimCallback = std::function<void(uint64_t guid, uint32_t animId)>;
-    void setGameObjectCustomAnimCallback(GameObjectCustomAnimCallback cb) { gameObjectCustomAnimCallback_ = std::move(cb); }
-
-    // GameObject state change callback (triggered when GAMEOBJECT_BYTES_1 updates - state byte changes)
-    // goState: 0=READY(closed), 1=OPEN, 2=DESTROYED
-    using GameObjectStateCallback = std::function<void(uint64_t guid, uint8_t goState)>;
-    void setGameObjectStateCallback(GameObjectStateCallback cb) { gameObjectStateCallback_ = std::move(cb); }
-
-    // Vehicle state callback - fired when player enters/exits a vehicle
-    using VehicleStateCallback = std::function<void(bool entered, uint32_t vehicleId)>;
-    void setVehicleStateCallback(VehicleStateCallback cb) { vehicleStateCallback_ = std::move(cb); }
 
     // Faction hostility map (populated from FactionTemplate.dbc by Application)
     void setFactionHostileMap(std::unordered_map<uint32_t, bool> map) { factionHostileMap_ = std::move(map); }
@@ -1612,118 +867,13 @@ public:
     /// the server refuses the conversation on exactly this number.
     [[nodiscard]] int unitReactionToPlayer(const Unit& unit) const;
 
-    // Creature move callback (online mode - triggered by SMSG_MONSTER_MOVE)
-    // Parameters: guid, x, y, z (canonical), duration_ms (0 = instant)
-    using CreatureMoveCallback = std::function<void(uint64_t guid, float x, float y, float z, uint32_t durationMs)>;
-    void setCreatureMoveCallback(CreatureMoveCallback cb) { creatureMoveCallback_ = std::move(cb); }
-
-    // Transport move callback (online mode - triggered when transport position updates)
-    // Parameters: guid, x, y, z (canonical), orientation
-    using TransportMoveCallback = std::function<void(uint64_t guid, float x, float y, float z, float orientation)>;
-    void setTransportMoveCallback(TransportMoveCallback cb) { transportMoveCallback_ = std::move(cb); }
-
-    // Transport spawn callback (online mode - triggered when transport GameObject is first detected)
-    // Parameters: guid, entry, displayId, x, y, z (canonical), orientation
-    using TransportSpawnCallback = std::function<void(uint64_t guid, uint32_t entry, uint32_t displayId, float x, float y, float z, float orientation)>;
-    void setTransportSpawnCallback(TransportSpawnCallback cb) { transportSpawnCallback_ = std::move(cb); }
-
     // Notify that a transport has been spawned (called after WMO instance creation)
-    void notifyTransportSpawned(uint64_t guid, uint32_t entry, uint32_t displayId, float x, float y, float z, float orientation) {
-        if (transportSpawnCallback_) {
-            transportSpawnCallback_(guid, entry, displayId, x, y, z, orientation);
-        }
-    }
+    void notifyTransportSpawned(uint64_t guid, uint32_t entry, uint32_t displayId, float x, float y, float z, float orientation);
 
-    // Transport state for player-on-transport
-    bool isOnTransport() const { return playerTransportGuid_ != 0; }
-    uint64_t getPlayerTransportGuid() const { return playerTransportGuid_; }
-    glm::vec3 getPlayerTransportOffset() const { return playerTransportOffset_; }
-
-    // Check if a GUID is a known transport
-    bool isTransportGuid(uint64_t guid) const { return entityController_->isTransportGuid(guid); }
-    bool hasServerTransportUpdate(uint64_t guid) const { return entityController_->hasServerTransportUpdate(guid); }
-    glm::vec3 getComposedWorldPosition();  // Compose transport transform * local offset
     TransportManager* getTransportManager() { return transportManager_.get(); }
-    // Client-side transport board/disembark check by proximity to the live deck.
-    // Covers M2 trams/lifts and client-animated TaxiPathNode WMO ships.
-    void updateM2TransportBoarding(const glm::vec3& playerCanonical);
-    void setPlayerOnTransport(uint64_t transportGuid, const glm::vec3& localOffset) {
-        // Validate transport is registered before attaching player
-        // (defer if transport not yet registered to prevent desyncs)
-        if (transportGuid != 0 && !isTransportGuid(transportGuid)) {
-            // Said, rather than dropped in silence.
-            //
-            // This is the one decision between the server saying the player
-            // has boarded and the client agreeing, and taking it means the
-            // player stands still while the transport leaves without them -
-            // with nothing logged, nothing raised, and no retry. If the
-            // zeppelin sails off and the player does not, this line is the
-            // first place to look.
-            static uint64_t saidFor = 0;
-            if (saidFor != transportGuid) {
-                saidFor = transportGuid;
-                LOG_WARNING("Transport attach refused: guid=0x", std::hex,
-                            transportGuid, std::dec,
-                            " is not a registered transport yet - the player "
-                            "will not move with it");
-            }
-            return;  // Transport not yet registered; skip attachment
-        }
-        playerTransportGuid_ = transportGuid;
-        playerTransportOffset_ = localOffset;
-        playerTransportStickyGuid_ = transportGuid;
-        playerTransportStickyTimer_ = 8.0f;
-        movementInfo.transportGuid = transportGuid;
-    }
-    void setPlayerTransportOffset(const glm::vec3& offset) {
-        playerTransportOffset_ = offset;
-    }
-    void clearPlayerTransport() {
-        if (playerTransportGuid_ != 0) {
-            playerTransportStickyGuid_ = playerTransportGuid_;
-            playerTransportStickyTimer_ = std::max(playerTransportStickyTimer_, 1.5f);
-        }
-        playerTransportGuid_ = 0;
-        playerTransportOffset_ = glm::vec3(0.0f);
-        movementInfo.transportGuid = 0;
-    }
-    // Preserve an authoritative on-deck offset while a continent transfer tears
-    // down the origin map's transport and constructs its destination instance.
-    void beginPlayerTransportWorldTransfer(uint32_t destinationMapId,
-                                           const glm::vec3& localOffset);
-    bool hasPendingPlayerTransportWorldTransfer() const {
-        return pendingPlayerTransportTransfer_;
-    }
-    bool completePlayerTransportWorldTransfer(uint64_t transportGuid,
-                                              glm::vec3& worldPosition);
-
-    // Cooldowns
-    float getSpellCooldown(uint32_t spellId) const;
-    float getSpellCooldownTotal(uint32_t spellId) const;
-    const std::unordered_map<uint32_t, float>& getSpellCooldowns() const {
-        static const std::unordered_map<uint32_t, float> empty;
-        return spellHandler_->getSpellCooldowns();
-    }
 
     // Player GUID
     uint64_t getPlayerGuid() const { return playerGuid; }
-
-    // Look up class/race for a player GUID from name query cache. Returns 0 if unknown.
-    uint8_t lookupPlayerClass(uint64_t guid) const {
-        return entityController_->lookupPlayerClass(guid);
-    }
-    uint8_t lookupPlayerRace(uint64_t guid) const {
-        return entityController_->lookupPlayerRace(guid);
-    }
-    uint8_t lookupPlayerGender(uint64_t guid) const {
-        return entityController_->lookupPlayerGender(guid);
-    }
-
-    // Look up a display name for any guid: checks playerNameCache then entity manager.
-    // Returns empty string if unknown. Used by chat display to resolve names at render time.
-    const std::string& lookupName(uint64_t guid) const {
-        return entityController_->lookupName(guid);
-    }
 
     uint8_t getPlayerClass() const {
         const Character* ch = getActiveCharacter();
@@ -1746,250 +896,31 @@ public:
     }
     void setPlayerGuid(uint64_t guid) { playerGuid = guid; }
 
-    // Player death state
-    bool isPlayerDead() const { return playerDead_; }
-    bool isPlayerGhost() const { return releasedSpirit_; }
-    /// The graveyard a release would send the player to, in canonical space.
-    /// False when the server has not named one, or has withdrawn it.
-    bool getDeathReleaseLocation(uint32_t& mapId, glm::vec3& canonical) const {
-        if (!deathReleaseValid_) return false;
-        mapId = deathReleaseMapId_;
-        canonical = deathReleaseCanonical_;
-        return true;
-    }
-    /** True when SMSG_PRE_RESURRECT arrived - Reincarnation/Twisting Nether available. */
-    bool canSelfRes() const { return selfResAvailable_; }
-    /** Send CMSG_SELF_RES to use Reincarnation / Twisting Nether. */
-    void useSelfRes();
-    bool showTalentWipeConfirmDialog() const;
-    uint32_t getTalentWipeCost() const;
-    void confirmTalentWipe();
-    void cancelTalentWipe();
-    // Pet talent respec confirm
-    bool showPetUnlearnDialog() const { return petHandler_->showUnlearnDialog(); }
-    uint32_t getPetUnlearnCost() const { return petHandler_->unlearnCost(); }
-    void confirmPetUnlearn() { petHandler_->confirmUnlearn(); }
-    void cancelPetUnlearn() { petHandler_->cancelUnlearn(); }
-
     // Barber shop
     bool isBarberShopOpen() const { return barberShopOpen_; }
     void closeBarberShop() { barberShopOpen_ = false; fireAddonEvent("BARBER_SHOP_CLOSE", {}); }
-    void sendAlterAppearance(uint32_t hairStyleEntry, uint32_t hairColor,
-                             uint32_t facialHairEntry, uint32_t skinColorEntry);
-
-    // Instance difficulty (0=5N, 1=5H, 2=25N, 3=25H for WotLK)
-    uint32_t getInstanceDifficulty() const;
 
     /// The bind-or-leave prompt raised on entering an instance in progress.
     /// False when nothing is pending, in which case the out-params are
     /// untouched.
     bool getInstanceLockPrompt(float& secondsLeft, bool& previouslySaved,
                                uint32_t& completedMask) const;
-    void respondInstanceLock(bool accept);
-    bool isInstanceHeroic() const;
     bool isInInstance() const;
-
-    /** True when ghost is within 40 yards of corpse position (same map). */
-    bool canReclaimCorpse() const;
-    /** Seconds remaining on the PvP corpse-reclaim delay, or 0 if the reclaim is available now. */
-    float getCorpseReclaimDelaySec() const;
-    /** Distance (yards) from ghost to corpse, or -1 if no corpse data. */
-    float getCorpseDistance() const {
-        if (!corpsePositionValid_ || currentMapId_ != corpseMapId_) return -1.0f;
-        // movementInfo is canonical (x=north=server_y, y=west=server_x);
-        // corpse coords are raw server (x=west, y=north) - swap to compare.
-        float dx = movementInfo.x - corpseY_;
-        float dy = movementInfo.y - corpseX_;
-        float dz = movementInfo.z - corpseZ_;
-        return std::sqrt(dx*dx + dy*dy + dz*dz);
-    }
-    /** Corpse position in canonical WoW coords (X=north, Y=west).
-     *  Returns false if no corpse data or on a different map. */
-    bool getCorpseCanonicalPos(float& outX, float& outY) const {
-        if (!corpsePositionValid_ || currentMapId_ != corpseMapId_) return false;
-        outX = corpseY_;  // server Y = canonical X (north)
-        outY = corpseX_;  // server X = canonical Y (west)
-        return true;
-    }
-    /** Send CMSG_RECLAIM_CORPSE; noop if not a ghost or not near corpse. */
-    void reclaimCorpse();
-    void releaseSpirit();
-    void acceptResurrect();
-    void declineResurrect();
-
-    // ---- Group ----
-    void inviteToGroup(const std::string& playerName);
-    void acceptGroupInvite();
-    void declineGroupInvite();
-    void leaveGroup();
-    void convertToRaid();
-    void sendSetLootMethod(uint32_t method, uint32_t threshold, uint64_t masterLooterGuid);
-    bool isInGroup() const;
-    const GroupListData& getPartyData() const;
-    const std::vector<ContactEntry>& getContacts() const override { return socialHandler_->contacts(); }
-    bool hasPendingGroupInvite() const;
-    const std::string& getPendingInviterName() const;
-
-    // ---- Item text (books / readable items) ----
-    bool isItemTextOpen() const;
-    const std::string& getItemText() const;
-    void closeItemText();
-    void queryItemText(uint64_t itemGuid);
-
-    // ---- Shared Quest ----
-    bool hasPendingSharedQuest() const;
-    uint32_t getSharedQuestId() const;
-    const std::string& getSharedQuestTitle() const;
-    const std::string& getSharedQuestSharerName() const;
-    void acceptSharedQuest();
-    void declineSharedQuest();
-
-    const std::string& getSummonerName() const { return socialHandler_->summonerName(); }
-    float getSummonTimeoutSec() const { return socialHandler_->summonTimeoutSec(); }
-    void acceptSummon();
-    void declineSummon();
-
-    // ---- Trade (InventoryHandler's; types in handler_types.hpp) ----
-    using TradeStatus = game::TradeStatus;
-    using TradeSlot = game::TradeSlot;
-    static constexpr int TRADE_SLOT_COUNT     = kTradeSlotCount;
-    static constexpr int TRADE_SLOT_NONTRADED = kTradeSlotNonTraded;
-
-    TradeStatus getTradeStatus() const;
-    bool hasPendingTradeRequest() const;
-    bool isTradeOpen() const;
-    const std::string& getTradePeerName() const;
-
-    // My trade slots (what I'm offering)
-    const std::array<TradeSlot, TRADE_SLOT_COUNT>& getMyTradeSlots() const;
-    const std::array<TradeSlot, TRADE_SLOT_COUNT>& getPeerTradeSlots() const;
-    uint64_t getMyTradeGold() const;
-    uint64_t getPeerTradeGold() const;
-
-    void acceptTradeRequest();   // respond to incoming SMSG_TRADE_STATUS(1) with CMSG_BEGIN_TRADE
-    /// Take back an acceptance, leaving the trade open.
-    void unacceptTrade();
-    void declineTradeRequest();  // respond with CMSG_CANCEL_TRADE
-    void acceptTrade();          // lock in offer: CMSG_ACCEPT_TRADE
-    void cancelTrade();          // CMSG_CANCEL_TRADE
-    void setTradeItem(uint8_t tradeSlot, uint8_t bag, uint8_t bagSlot);
-    void clearTradeItem(uint8_t tradeSlot);
-    void setTradeGold(uint64_t copper);
-
-    // ---- Duel ----
-    bool hasPendingDuelRequest() const;
-    const std::string& getDuelChallengerName() const;
-    void acceptDuel();
-    // forfeitDuel() already declared at line ~399
-    // Returns remaining duel countdown seconds, or 0 if no active countdown
-    float getDuelCountdownRemaining() const;
-
-    // Instance lockouts (aliased from handler_types.hpp)
-    using InstanceLockout = game::InstanceLockout;
-    const std::vector<InstanceLockout>& getInstanceLockouts() const;
 
     // Boss encounter unit tracking (SMSG_UPDATE_INSTANCE_ENCOUNTER_UNIT)
     static constexpr uint32_t kMaxEncounterSlots = 5;
-    // Returns boss unit guid for the given encounter slot (0 if none).
-    // The slots live on SocialHandler, which is what the packet writes to; the
-    // array that used to sit here was never written and answered zero for
-    // every slot, so the boss frames drawn from it were always empty.
-    uint64_t getEncounterUnitGuid(uint32_t slot) const;
 
-    // Raid target markers (MSG_RAID_TARGET_UPDATE)
-    // Icon indices 0-7: Star, Circle, Diamond, Triangle, Moon, Square, Cross, Skull
-    static constexpr uint32_t kRaidMarkCount = game::kRaidMarkCount;
-    // Both read SocialHandler's marks - the state MSG_RAID_TARGET_UPDATE writes.
-    // Returns the GUID marked with the given icon (0 = no mark)
-    uint64_t getRaidMarkGuid(uint32_t icon) const;
-    // Returns the raid mark icon for a given guid (0xFF = no mark)
-    uint8_t getEntityRaidMark(uint64_t guid) const;
-    // Set or clear a raid mark on a guid (icon 0-7, or 0xFF to clear)
-    void setRaidMark(uint64_t guid, uint8_t icon);
-
-    // ---- LFG / Dungeon Finder ----
-    // LFG state (aliased from handler_types.hpp)
-    using LfgState = game::LfgState;
-
-    // roles bitmask: 0x02=tank, 0x04=healer, 0x08=dps; pass LFGDungeonEntry ID
-    void lfgJoin(const std::vector<uint32_t>& dungeonIds, uint8_t roles);
-    void lfgLeave();
-    /// Ask the server to re-send which dungeons are locked and what they pay.
-    /// The ready popup asks for both as it opens.
-    void requestLfgPlayerLockInfo();
-    void requestLfgPartyLockInfo();
-    void lfgSetRoles(uint8_t roles);
-    void lfgAcceptProposal(uint32_t proposalId, bool accept);
-    void lfgSetBootVote(bool vote);
-    void lfgTeleport(bool toLfgDungeon = true);
-    LfgState getLfgState() const;
-    /// What the last finished dungeon-finder run paid out.
-    const LfgCompletionReward& getLfgCompletionReward() const;
-    bool isLfgQueued() const;
-    bool isLfgInDungeon() const;
-    uint32_t getLfgDungeonId() const;
-    std::string getCurrentLfgDungeonName() const;
     std::string getMapName(uint32_t mapId) const;
 
     /// How many boss encounters a map has, for the "%d of %d bosses" line.
     /// Counted from DungeonEncounter.dbc, which is the only place the total
     /// lives - the server sends which are done and never how many there are.
     uint32_t getDungeonEncounterCount(uint32_t mapId, uint32_t difficulty) const;
-    uint32_t getLfgProposalId() const;
-    uint8_t  getLfgOfferedRoles() const;
-    const std::vector<LfgProposalMember>& getLfgProposalMembers() const;
-    const std::unordered_map<uint32_t, uint32_t>& getLfgLocks() const;
-    const std::vector<LfgReward>& getLfgRewards() const;
-    int32_t  getLfgAvgWaitSec() const;
-    int32_t  getLfgMyWaitSec() const;
-    uint32_t getLfgQueuedSeconds() const;
-    int32_t  getLfgWaitTank() const;
-    int32_t  getLfgWaitHealer() const;
-    int32_t  getLfgWaitDps() const;
-    uint8_t  getLfgNeedTank() const;
-    uint8_t  getLfgNeedHealer() const;
-    uint8_t  getLfgNeedDps() const;
-    uint32_t getLfgBootVotes() const;
-    uint32_t getLfgBootTotal() const;
-    uint32_t getLfgBootTimeLeft() const;
-    uint32_t getLfgBootNeeded() const;
-    const std::string& getLfgBootTargetName() const;
-    const std::string& getLfgBootReason() const;
-    using LfgRoleCheckDungeon = game::LfgRoleCheckDungeon;
-    const std::vector<LfgRoleCheckDungeon>& getLfgRoleCheckDungeons() const;
-    uint8_t getLfgRoleCheckMembers() const;
-    bool isLfgBootInProgress() const;
-    bool hasLfgBootVoted() const;
-    bool getLfgBootMyVote() const;
-
-    // Arena team stats (aliased from handler_types.hpp)
-    using ArenaTeamStats = game::ArenaTeamStats;
-    const std::vector<ArenaTeamStats>& getArenaTeamStats() const override;
-    void requestArenaTeamRoster(uint32_t teamId);
-
-    // Arena team roster (aliased from handler_types.hpp)
-    using ArenaTeamMember = game::ArenaTeamMember;
-    using ArenaTeamRoster = game::ArenaTeamRoster;
-    // Returns roster for the given teamId, or nullptr if not yet received
-    /// Reorder every stored arena roster by one of the details frame's
-    /// columns: "name", "class", "played", "won", "rating", "seasonplayed" or
-    /// "seasonwon". Clicking the same column again reverses it.
-    ///
-    /// Every roster rather than one, because the interface asks for a sort
-    /// without saying which team - it sorts what it is showing, and it only
-    /// ever shows one at a time.
-    void sortArenaTeamRosters(const std::string& key);
-
-    const ArenaTeamRoster* getArenaTeamRoster(uint32_t teamId) const;
 
     // ---- Loot ----
+    /// Asked by the spell handler once a gather or an opening finishes, and by
+    /// the deferred open of a used game object.
     void lootTarget(uint64_t guid) override;
-    void lootItem(uint8_t slotIndex, bool confirmed = false);
-    void confirmPendingLoot();
-    void confirmBindOnUse();
-    void lootMoney();
-    void cancelTempEnchantment(uint8_t handIndex);
-    void closeLoot();
     void scheduleGameObjectLootOpen(uint64_t guid, float delaySeconds = 0.35f, uint8_t attempts = 1);
 
     /// True once the object is known to be a fishing school. A click on one
@@ -2002,22 +933,13 @@ public:
     bool isGatherGameObject(uint64_t guid) const;
     void despawnGameObjectLocally(uint64_t guid) override;
     /// Remove a creature corpse client-side once it has been looted empty.
-    void despawnCreatureLocally(uint64_t guid);
-    void activateSpiritHealer(uint64_t npcGuid);
-    bool isLootWindowOpen() const;
-    const LootResponseData& getCurrentLoot() const;
-    void setAutoLoot(bool enabled);
-    bool isAutoLoot() const;
+    void despawnCreatureLocally(uint64_t guid) override;
     /// Turn the player to face the target when an attack or a targeted spell
     /// starts. Off by default, as the original client has it: a target behind
     /// the player has to be faced first, and the server says so. A debugging
     /// aid, set from the Combat page.
     void setAutoFaceTarget(bool enabled) { autoFaceTarget_ = enabled; }
     [[nodiscard]] bool isAutoFaceTarget() const { return autoFaceTarget_; }
-    void setAutoSellGrey(bool enabled);
-    bool isAutoSellGrey() const;
-    void setAutoRepair(bool enabled);
-    bool isAutoRepair() const;
 
     /// Whether a friendly spell cast with nothing friendly selected falls back
     /// to the caster. On by default, as the real client is, and turned off
@@ -2026,94 +948,17 @@ public:
     void setAutoSelfCast(bool enabled) { autoSelfCast_ = enabled; }
     bool isAutoSelfCast() const { return autoSelfCast_; }
 
-    // Master loot candidates (from SMSG_LOOT_MASTER_LIST)
-    const std::vector<uint64_t>& getMasterLootCandidates() const;
-    bool hasMasterLootCandidates() const;
-    void lootMasterGive(uint8_t lootSlot, uint64_t targetGuid);
-
-    // Group loot roll (aliased from handler_types.hpp)
-    using LootRollEntry = game::LootRollEntry;
-    /// One open loot roll by the id the interface knows it by, or null when
-    /// that roll has closed.
-    const LootRollEntry* getLootRoll(int rollId) const;
-    void sendLootRoll(uint64_t objectGuid, uint32_t slot, uint8_t rollType);
-    // rollType: 0=need, 1=greed, 2=disenchant, 96=pass
-
     // Equipment Sets (aliased from handler_types.hpp)
     using EquipmentSetInfo = game::EquipmentSetInfo;
-    const std::vector<EquipmentSetInfo>& getEquipmentSets() const;
-    /// The items a saved set holds, by slot, as the item guids the server sent.
-    const std::array<uint64_t, 19>* getEquipmentSetItems(uint32_t setId) const;
-    uint32_t getEquipmentSetIgnoreMask(uint32_t setId) const;
-    /// The item an online guid refers to, or zero when it is not known here.
-    uint32_t getItemIdByGuid(uint64_t guid) const { return inventoryHandler_->getItemEntryByGuid(guid); }
-    bool supportsEquipmentSets() const;
-    void useEquipmentSet(uint32_t setId);
-    void saveEquipmentSet(const std::string& name, const std::string& iconName = "INV_Misc_QuestionMark",
-                          uint64_t existingGuid = 0, uint32_t setIndex = 0xFFFFFFFF);
-    void deleteEquipmentSet(uint64_t setGuid);
 
     // NPC Gossip
     void interactWithNpc(uint64_t guid);
     void interactWithGameObject(uint64_t guid);
     uint64_t getHookedFishingBobberGuid() const { return hookedFishingBobberGuid_; }
-    void selectGossipOption(uint32_t optionId, const std::string& code = "");
-    void selectGossipQuest(uint32_t questId);
-    void acceptQuest();
-    void declineQuest(bool announce = true);
     void closeGossip() override;
-    // Quest-starting items: right-click triggers quest offer dialog via questgiver protocol
-    void offerQuestFromItem(uint64_t itemGuid, uint32_t questId);
-    uint64_t getBagItemGuid(int bagIndex, int slotIndex) const;
-    bool isGossipWindowOpen() const;
-    const GossipMessageData& getCurrentGossip() const;
-    const std::string& getNpcText(uint32_t textId) const;
-    /// What a quest giver says over its list of quests, when the window came
-    /// from SMSG_QUESTGIVER_QUEST_LIST rather than from gossip.
-    const std::string& getQuestGreeting() const;
-    bool isQuestDetailsOpen();
-    /// Whether the reward item names asked for when the details arrived have
-    /// had time to come back. Only this client's own quest window asks - see
-    /// QuestHandler::questDetailsItemInfoReady.
-    bool questDetailsItemInfoReady() const;
-    const QuestDetailsData& getQuestDetails() const;
-
-    // Gossip POI (aliased from handler_types.hpp)
-    using GossipPoi = game::GossipPoi;
-    const std::vector<GossipPoi>& getGossipPois() const;
-
-    // Quest turn-in
-    bool isQuestRequestItemsOpen() const;
-    const QuestRequestItemsData& getQuestRequestItems() const;
-    void completeQuest();       // Send CMSG_QUESTGIVER_COMPLETE_QUEST
-    void closeQuestRequestItems(bool announce = true);
-
-    bool isQuestOfferRewardOpen() const;
-    const QuestOfferRewardData& getQuestOfferReward() const;
-    void chooseQuestReward(uint32_t rewardIndex);  // Send CMSG_QUESTGIVER_CHOOSE_REWARD
-    void closeQuestOfferReward(bool announce = true);
 
     // Quest log
     using QuestLogEntry = QuestHandler::QuestLogEntry;
-    const std::vector<QuestLogEntry>& getQuestLog() const;
-    // Seconds left on each timed quest, paired with its quest id.
-    std::vector<std::pair<uint32_t, uint32_t>> getQuestTimers() const;
-    // QuestSort.dbc name for negative ZoneOrSort values (class/profession/seasonal)
-    const std::string& getQuestSortName(uint32_t sortId) const;
-    int getSelectedQuestLogIndex() const;
-    // Writes through to the QuestHandler, which is where getSelectedQuestLogIndex
-    // reads it from. The two used to touch different variables - the setter this
-    // GameHandler's own copy, the getter the decomposed QuestHandler's - so
-    // SelectQuestLogEntry set a selection the quest log never saw: the index
-    // read back 0, GetQuestLogQuestText answered nil for both description and
-    // objectives, and every quest's detail pane drew blank.
-    void setSelectedQuestLogIndex(int idx);
-    void abandonQuest(uint32_t questId);
-    void shareQuestWithParty(uint32_t questId);  // CMSG_PUSHQUESTTOPARTY
-    bool requestQuestQuery(uint32_t questId, bool force = false);
-    bool isQuestTracked(uint32_t questId) const { return questHandler_->isQuestTracked(questId); }
-    void setQuestTracked(uint32_t questId, bool tracked) { questHandler_->setQuestTracked(questId, tracked); }
-    const std::unordered_set<uint32_t>& getTrackedQuestIds() const;
     /// The quests whose objective areas the world map shades.
     ///
     /// Set by WorldMapBlobFrame:DrawQuestBlob, which FrameXML calls with false
@@ -2134,15 +979,6 @@ public:
     }
     uint32_t getWorldStateMapId() const { return worldStateMapId_; }
     uint32_t getWorldStateZoneId() const { return worldStateZoneId_; }
-    uint64_t getActiveCritterGuid() const { return activeCritterGuid_; }
-    uint32_t getActiveCritterSpellId() const { return activeCritterSpellId_; }
-    void setActiveCritter(uint64_t guid, uint32_t spellId) {
-        activeCritterGuid_ = guid;
-        activeCritterSpellId_ = spellId;
-    }
-    /// Send the active companion away. No-op when none is out or the expansion
-    /// has no opcode for it.
-    void dismissCritter() override;
 
     // Mirror timers (0=fatigue, 1=breath, 2=feigndeath)
     //
@@ -2219,9 +1055,6 @@ public:
         }
     }
 
-    // Combo points
-    uint8_t  getComboPoints() const { return comboPoints_; }
-    uint8_t  getShapeshiftFormId() const { return shapeshiftFormId_; }
     /// Which extra action bar the current form or stance uses, or 0 for none.
     ///
     /// SpellShapeshiftForm.dbc carries it per form - cat 1, bear 3, moonkin 4,
@@ -2242,8 +1075,6 @@ public:
     // Talent-driven spell modifiers (SMSG_SET_FLAT_SPELL_MODIFIER /
     // SMSG_SET_PCT_SPELL_MODIFIER), kept by the spell book.
     using SpellModOp = game::SpellModOp;
-    int32_t getSpellFlatMod(SpellModOp op) const { return spellHandler_->spellFlatMod(op); }
-    int32_t getSpellPctMod(SpellModOp op) const { return spellHandler_->spellPctMod(op); }
 
     // Convenience: apply flat+pct modifier to a base value.
     // result = (base + flatMod) * (1.0 + pctMod/100.0), clamped to >= 0.
@@ -2253,138 +1084,13 @@ public:
         return static_cast<int32_t>(v < 0 ? 0 : v);
     }
 
-    using FactionStandingInit = game::FactionStanding;
-    // Faction flag bitmask constants (from Faction.dbc ReputationFlags / SMSG_INITIALIZE_FACTIONS)
-    static constexpr uint8_t FACTION_FLAG_VISIBLE          = kFactionFlagVisible;
-    static constexpr uint8_t FACTION_FLAG_AT_WAR           = kFactionFlagAtWar;
-    static constexpr uint8_t FACTION_FLAG_HIDDEN           = kFactionFlagHidden;
-    static constexpr uint8_t FACTION_FLAG_INVISIBLE_FORCED = kFactionFlagInvisibleForced;
-    static constexpr uint8_t FACTION_FLAG_PEACE_FORCED     = kFactionFlagPeaceForced;
-    static constexpr uint8_t FACTION_FLAG_INACTIVE         = kFactionFlagInactive;
-
-    /// A faction the player has a standing with, as the reputation panel lists
-    /// it.
-    ///
-    /// The server sends standings by *reputation index* - a dense numbering
-    /// that is not the faction id - and only Faction.dbc knows which faction
-    /// each index belongs to. Resolved here rather than in a window, because
-    /// the original interface asks the same question through GetFactionInfo.
-    struct ReputationEntry {
-        uint32_t factionId = 0;
-        uint32_t reputationIndex = 0;
-        std::string name;
-        uint8_t flags = 0;
-    };
-    /// Visible factions in the server's own order. Empty until the standings
-    /// arrive, and built once after they do.
-    const std::vector<ReputationEntry>& getReputationList() const;
-    /// The player's current standing with a faction, which moves after the
-    /// list is built and so is not stored in it.
-    int32_t getFactionStanding(uint32_t factionId) const;
-
-    /// One line of the reputation panel as it is drawn: the flat list above
-    /// grouped under the headers Faction.dbc's parent chain describes.
-    ///
-    /// The server sends standings and nothing else - no categories, no order
-    /// beyond its own list. Both the headers and the nesting come from
-    /// ParentFactionID, and a header is simply a faction that some visible
-    /// faction descends from. A header may have a standing of its own (Alliance
-    /// does), which is why hasRep is a separate answer from isHeader.
-    struct ReputationRow {
-        uint32_t factionId = 0;
-        /// The server's repListId, and 0 for a header the player has no
-        /// standing with - such a row is drawn but cannot be acted on.
-        uint32_t reputationIndex = 0;
-        std::string name;
-        uint8_t flags = 0;
-        bool isHeader = false;    ///< something below it descends from this
-        bool isChild = false;     ///< drawn indented, under a header
-        bool hasRep = false;      ///< the player has a standing to show
-    };
-    /// The rows currently on screen: headers, plus the children of every header
-    /// that is not collapsed. This is what GetNumFactions counts and what
-    /// GetFactionInfo indexes, so every binding taking a "faction index" must
-    /// resolve it through here rather than through the flat list.
-    const std::vector<ReputationRow>& getReputationRows() const;
-    bool isFactionCollapsed(uint32_t factionId) const {
-        return collapsedFactionIds_.count(factionId) > 0;
-    }
-    void setFactionCollapsed(uint32_t factionId, bool collapsed);
-    /// The faction this one is grouped under, or 0 for a top-level one.
-    uint32_t getFactionParentId(uint32_t factionId) const;
-
-    const std::unordered_map<uint32_t, int32_t>& getFactionStandings() const {
-        return reputationHandler_->standings();
-    }
-
-    // Returns true if the player has "at war" toggled for the faction at repListId
-    bool isFactionAtWar(uint32_t repListId) const {
-        return reputationHandler_->hasFlag(repListId, kFactionFlagAtWar);
-    }
-    // Returns true if war cannot be declared on this faction (peace forced by the server)
-    bool isFactionPeaceForced(uint32_t repListId) const {
-        return reputationHandler_->hasFlag(repListId, kFactionFlagPeaceForced);
-    }
-    // Returns the faction ID for a given repListId (0 if unknown)
-    uint32_t getFactionIdByRepListId(uint32_t repListId) const;
-    /// Where this character's standing with a faction starts, by race and
-    /// class, from Faction.dbc.
-    ///
-    /// The part of every standing the server leaves out. SMSG_INITIALIZE_FACTIONS
-    /// and SMSG_SET_FACTION_STANDING carry what has been earned, and the client
-    /// adds this - the server's own total is the two together. Read as the
-    /// whole, every faction with a starting value came out wrong: an Alliance
-    /// character starts at -1200 with the Kurenai, so 900 earned showed as
-    /// Neutral while the server held them at Unfriendly and Telaar would not
-    /// speak to them.
-    int32_t factionBaseReputation(uint32_t factionId) const override;
-    // Returns the repListId for a given faction ID (0xFFFFFFFF if not found)
-    uint32_t getRepListIdByFactionId(uint32_t factionId) const;
     // Shaman totems (4 slots: 0=Earth, 1=Fire, 2=Water, 3=Air), kept by the
     // spell book.
-    using TotemSlot = game::TotemSlot;
     static constexpr int NUM_TOTEM_SLOTS = kTotemSlots;
     /// Pull down a totem by the slot it stands in.
     void destroyTotem(int slot);
 
-    const TotemSlot& getTotemSlot(int slot) const { return spellHandler_->totemSlot(slot); }
-
-    const std::string& getFactionNamePublic(uint32_t factionId) const;
-    uint32_t getWatchedFactionId() const { return reputationHandler_->watchedFaction(); }
-    void setWatchedFactionId(uint32_t factionId);
-    // Declare war / make peace with a faction (CMSG_SET_FACTION_ATWAR). No-op on
-    // peace-forced factions. Updates the local flag optimistically.
-    void setFactionAtWar(uint32_t repListId, bool atWar);
-    // Move a faction to / from the inactive list (CMSG_SET_FACTION_INACTIVE).
-    void setFactionInactive(uint32_t repListId, bool inactive);
-    bool isServerMovementAllowed() const;
-
-    // Quest giver status (! and ? markers)
-    QuestGiverStatus getQuestGiverStatus(uint64_t guid) const;
-    const std::unordered_map<uint64_t, QuestGiverStatus>& getNpcQuestStatuses() const;
-
-
-
-    // Stat deltas from the last SMSG_LEVELUP_INFO (valid until next level-up)
-    struct LevelUpDeltas {
-        uint32_t hp   = 0;
-        uint32_t mana = 0;
-        uint32_t str = 0, agi = 0, sta = 0, intel = 0, spi = 0;
-    };
-
-    // Temporary weapon enchant timers (from SMSG_ITEM_ENCHANT_TIME_UPDATE), the
-    // inventory's. Returns remaining ms for a given slot, or 0 if absent/expired.
-    using TempEnchantTimer = game::TempEnchantTimer;
-    uint32_t getTempEnchantRemainingMs(uint32_t slot) const;
-
-    // ---- Readable text (books / scrolls / notes) - the inventory's ----
-    using BookPage = game::BookPage;
-    const std::vector<BookPage>& getBookPages() const { return inventoryHandler_->getBookPages(); }
-    void clearBook() { inventoryHandler_->clearBook(); }
-    /// What is being read, for the heading over the page.
-    const std::string& getBookTitle() const { return inventoryHandler_->getBookTitle(); }
-    /// The backing the open book's pages are drawn on.
-    uint32_t getBookMaterial() const { return inventoryHandler_->getBookMaterial(); }
+    // ---- Readable text (books / scrolls / notes) ----
     /// PageTextMaterial.dbc's name for a material id, empty for none. The
     /// interface wants the word, not the number - it picks a texture and a
     /// text colour by it.
@@ -2398,39 +1104,7 @@ public:
     /// "[<it>] " when they differ, so a number there is printed verbatim.
     const std::string& getLanguageName(uint32_t languageId) const;
 
-    const std::unordered_set<uint32_t>& getEarnedAchievements() const { return earnedAchievements_; }
 
-    // Title system - earned title bits and the currently displayed title
-    const std::unordered_set<uint32_t>& getKnownTitleBits() const { return knownTitleBits_; }
-    void applyKnownTitleUpdate(uint8_t operation, const std::vector<uint16_t>& bits);
-    int32_t getChosenTitleBit() const { return chosenTitleBit_; }
-    /// Returns the formatted title string for a given bit (replaces %s with player name), or empty.
-    std::string getFormattedTitle(uint32_t bit) const;
-    /// A title by its CharTitles.dbc id (what a quest reward carries), formatted
-    /// with the player's name where the "%s" sits - "%s the Explorer". Empty
-    /// when the id is unknown.
-    std::string getFormattedTitleById(uint32_t id) const;
-
-    /// One player's title, decorated with that player's own name.
-    ///
-    /// getFormattedTitle above answers for the local player, because the row
-    /// it reads is a sentence with the reader's name in it. Anyone else needs
-    /// their own name in that hole, which is all this adds.
-    std::string getFormattedTitleFor(uint32_t bit, const std::string& name) const;
-    /// Send CMSG_SET_TITLE to activate a title (bit >= 0) or clear it (bit = -1).
-    void sendSetTitle(int32_t bit);
-
-    // Area discovery callback - fires when SMSG_EXPLORATION_EXPERIENCE is received
-    using AreaDiscoveryCallback = std::function<void(const std::string& areaName, uint32_t xpGained)>;
-    void setAreaDiscoveryCallback(AreaDiscoveryCallback cb) { areaDiscoveryCallback_ = std::move(cb); }
-
-    const std::unordered_map<uint32_t, uint64_t>& getCriteriaProgress() const { return criteriaProgress_; }
-    /// Returns the WoW PackedTime earn date for an achievement, or 0 if unknown.
-    uint32_t getAchievementDate(uint32_t id) const {
-        auto it = achievementDates_.find(id);
-        return (it != achievementDates_.end()) ? it->second : 0u;
-    }
-    /// Returns the name of an achievement by ID, or empty string if unknown.
     /// What a vendor wants besides coin: honor, arena points, or up to five
     /// items of a given count. ItemExtendedCost.dbc, keyed by the id a vendor
     /// item carries.
@@ -2460,48 +1134,6 @@ public:
         bool valid = false;
     };
     const ContinentBounds& getContinentBounds(uint32_t mapId) const;
-
-    const std::string& getAchievementName(uint32_t id) const {
-        auto it = achievementNameCache_.find(id);
-        if (it != achievementNameCache_.end()) return it->second;
-        static const std::string kEmpty;
-        return kEmpty;
-    }
-    void ensureAchievementNamesLoaded() { loadAchievementNameCache(); }
-
-    struct AchievementCategoryInfo {
-        std::string name;
-        int32_t     parentId = -1;  // -1 is a top-level category, as WoW reports it
-        uint32_t    uiOrder  = 0;   // where it sits among its siblings
-        bool        isStatistic = false;  // lives in the Statistics tree
-    };
-    struct AchievementCriterion {
-        uint32_t    id = 0;
-        std::string description;
-        uint32_t    type = 0;
-        uint32_t    assetId = 0;
-        uint32_t    quantity = 0;
-        /// Seconds the player has, once the criteria's timer starts. Zero for
-        /// all but fifty-nine of the seven and a half thousand criteria - the
-        /// ones whose own description names the limit, "Win Warsong Gulch in
-        /// under 7 minutes" against 420 and "Kill Maexxna within 20 minutes"
-        /// against 1200. That agreement is how field 29 was identified; it is
-        /// not in dbc_layouts.json.
-        uint32_t    timeLimit = 0;
-        /// Achievement_Criteria.dbc field 26. Bit one is
-        /// ACHIEVEMENT_CRITERIA_PROGRESS_BAR, which is what makes the panel
-        /// draw a bar instead of a tick - "Complete 2000 quests" carries it,
-        /// "Axes" at four hundred does not, which is how WoW draws those two.
-        uint32_t    flags = 0;
-    };
-
-    /// Where a criteria lives, by its own id. SMSG_CRITERIA_UPDATE names a
-    /// criteria and nothing else, and everything about it - which achievement
-    /// it belongs to, whether it is timed - is in the DBC under that id.
-    struct AchievementCriterionIndex {
-        uint32_t achievementId = 0;
-        uint32_t timeLimit = 0;
-    };
 
     // ---- Battlegrounds (BattlemasterList.dbc) ----
     // Thirteen rows: ID=0, MapID=1, Name=11, MaxGroupSize=28, MinLevel=30,
@@ -2534,13 +1166,6 @@ public:
 
     /// Whether a map id belongs to a battleground, from the same table.
     bool isBattlegroundMap(uint32_t mapId);
-    /// Ask the battleground for everyone's position; throttled, and a no-op
-    /// outside one. See SocialHandler::requestBattlefieldPositions.
-    void requestBattlefieldPositions();
-    /// Ask for the friend, ignore and mute lists again. See SocialHandler.
-    void requestContactList();
-    /// Give or take raid assistant, by guid.
-    void setGroupAssistant(uint64_t guid, bool apply);
     /// Whether a map id belongs to an arena. Same table, the other instance
     /// type - the rows are loaded either way and only the battleground ones
     /// are kept in the queue list.
@@ -2555,11 +1180,6 @@ public:
     };
     const std::vector<CurrencyType>& getCurrencyTypes();
 
-    // ---- Achievement categories and criteria (Achievement_Category.dbc,
-    // Achievement_Criteria.dbc). The panel is a tree of categories, so it needs
-    // all of this before it can draw a single row.
-    void ensureAchievementCategoriesLoaded();
-
     /// The spell a glyph is, by GlyphProperties.dbc id.
     ///
     /// The server sends glyph *properties* ids in the update fields, and every
@@ -2572,121 +1192,6 @@ public:
         auto it = glyphSpellCache_.find(glyphPropertiesId);
         return it != glyphSpellCache_.end() ? it->second : 0u;
     }
-    void ensureAchievementCriteriaLoaded();
-    /// Category ids in the order the panel shows them. The two tabs are
-    /// disjoint sets, not one list filtered at the call site: GetCategoryList
-    /// and GetStatisticsCategoryList are separate accessors in WoW because a
-    /// statistic is not a thing that can be earned, and showing the Statistics
-    /// tree under Achievements offers rows nothing can complete.
-    const std::vector<uint32_t>& getAchievementCategoryOrder() const { return achievementCategoryOrder_; }
-    const std::vector<uint32_t>& getStatisticCategoryOrder() const { return statisticCategoryOrder_; }
-    const AchievementCategoryInfo* getAchievementCategoryInfo(uint32_t categoryId) const {
-        auto it = achievementCategoryInfo_.find(categoryId);
-        return it != achievementCategoryInfo_.end() ? &it->second : nullptr;
-    }
-    const std::vector<uint32_t>& getCategoryAchievements(uint32_t categoryId) const {
-        auto it = categoryAchievements_.find(categoryId);
-        static const std::vector<uint32_t> kEmpty;
-        return it != categoryAchievements_.end() ? it->second : kEmpty;
-    }
-    uint32_t getAchievementCategory(uint32_t achievementId) const {
-        auto it = achievementCategoryCache_.find(achievementId);
-        return it != achievementCategoryCache_.end() ? it->second : 0u;
-    }
-
-    /// The achievement this one supersedes, or zero - Achievement.dbc's
-    /// Supercedes column, which chains "Level 20" behind "Level 10" and
-    /// "Expert Cook" behind "Journeyman Cook". The achievement panel walks it
-    /// backwards to build a completed chain and forwards to find the step in
-    /// progress, so both directions are kept.
-    uint32_t getAchievementSupercedes(uint32_t achievementId) const {
-        auto it = achievementSupercedes_.find(achievementId);
-        return it != achievementSupercedes_.end() ? it->second : 0u;
-    }
-    uint32_t getAchievementSupercededBy(uint32_t achievementId) const {
-        auto it = achievementSupercededBy_.find(achievementId);
-        return it != achievementSupercededBy_.end() ? it->second : 0u;
-    }
-    const std::unordered_map<uint32_t, std::vector<AchievementCriterion>>& getAchievementCriteriaMap() const {
-        return achievementCriteria_;
-    }
-    /// The achievement a criteria belongs to and its time limit, or nulls if
-    /// the DBC has no such criteria.
-    AchievementCriterionIndex getAchievementCriterionIndex(uint32_t criteriaId) const {
-        auto it = achievementCriterionById_.find(criteriaId);
-        return it != achievementCriterionById_.end() ? it->second : AchievementCriterionIndex{};
-    }
-
-    const std::vector<AchievementCriterion>& getAchievementCriteria(uint32_t achievementId) const {
-        auto it = achievementCriteria_.find(achievementId);
-        static const std::vector<AchievementCriterion> kEmpty;
-        return it != achievementCriteria_.end() ? it->second : kEmpty;
-    }
-    /// Points from every achievement the player has earned.
-    uint32_t getTotalAchievementPoints() const {
-        uint32_t total = 0;
-        for (uint32_t id : earnedAchievements_) total += getAchievementPoints(id);
-        return total;
-    }
-    const std::unordered_set<uint32_t>& getTrackedAchievements() const { return trackedAchievements_; }
-    void setAchievementTracked(uint32_t id, bool tracked) {
-        if (tracked) trackedAchievements_.insert(id); else trackedAchievements_.erase(id);
-    }
-    /// Returns the description of an achievement by ID, or empty string if unknown.
-    const std::string& getAchievementDescription(uint32_t id) const {
-        auto it = achievementDescCache_.find(id);
-        if (it != achievementDescCache_.end()) return it->second;
-        static const std::string kEmpty;
-        return kEmpty;
-    }
-    /// Returns the point value of an achievement by ID, or 0 if unknown.
-    uint32_t getAchievementPoints(uint32_t id) const {
-        auto it = achievementPointsCache_.find(id);
-        return (it != achievementPointsCache_.end()) ? it->second : 0u;
-    }
-    /// Returns the SpellIcon.dbc ID for an achievement's icon, or 0 if unknown.
-    /// Achievement.dbc's Flags column. FrameXML reads bit 0x80 to decide
-    /// whether a row draws as a progress bar instead of a list of criteria -
-    /// the Loremaster and zone-quest achievements, twenty-two of them.
-    uint32_t getAchievementFlags(uint32_t id) const {
-        auto it = achievementFlagsCache_.find(id);
-        return (it != achievementFlagsCache_.end()) ? it->second : 0u;
-    }
-    uint32_t getAchievementIconId(uint32_t id) const {
-        auto it = achievementIconCache_.find(id);
-        return (it != achievementIconCache_.end()) ? it->second : 0u;
-    }
-    /// What an inspected player has earned, from SMSG_RESPOND_INSPECT_ACHIEVEMENTS:
-    /// achievement id to the packed date it was earned. Null when nothing has
-    /// come back for that guid.
-    ///
-    /// The date is kept because the comparison tab prints it beside each row -
-    /// it was being read off the wire to stay in step and then dropped, which
-    /// is the same thing as not reading it.
-    const std::unordered_map<uint32_t, uint32_t>* getInspectedPlayerAchievements(uint64_t guid) const {
-        auto it = inspectedPlayerAchievements_.find(guid);
-        return (it != inspectedPlayerAchievements_.end()) ? &it->second : nullptr;
-    }
-
-    /// Who the achievement comparison tab is looking at, or zero.
-    uint64_t getAchievementComparisonGuid() const { return achievementComparisonGuid_; }
-    void setAchievementComparisonGuid(uint64_t guid) { achievementComparisonGuid_ = guid; }
-
-    // Server-triggered music callback - fires when SMSG_PLAY_MUSIC is received.
-    // The soundId corresponds to a SoundEntries.dbc record. The receiver is
-    // responsible for looking up the file path and forwarding to MusicManager.
-    using PlayMusicCallback = std::function<void(uint32_t soundId)>;
-    void setPlayMusicCallback(PlayMusicCallback cb) { playMusicCallback_ = std::move(cb); }
-
-    // Server-triggered 2-D sound effect callback - fires when SMSG_PLAY_SOUND is received.
-    // The soundId corresponds to a SoundEntries.dbc record.
-    using PlaySoundCallback = std::function<void(uint32_t soundId)>;
-    void setPlaySoundCallback(PlaySoundCallback cb) { playSoundCallback_ = std::move(cb); }
-
-    // Server-triggered 3-D positional sound callback - fires for SMSG_PLAY_OBJECT_SOUND and
-    // SMSG_PLAY_SPELL_IMPACT. Includes sourceGuid so the receiver can look up world position.
-    using PlayPositionalSoundCallback = std::function<void(uint32_t soundId, uint64_t sourceGuid)>;
-    void setPlayPositionalSoundCallback(PlayPositionalSoundCallback cb) { playPositionalSoundCallback_ = std::move(cb); }
 
     /// A line for the error frame (spell can't be cast, etc.): UI_ERROR_MESSAGE
     /// for the interface, which draws it, and UiErrorRaised for the client,
@@ -2712,59 +1217,7 @@ public:
     /// Interface phase only. Notifications produced by handlers wait for the next drain.
     void dispatchAddonEvents();
 
-
-    // PvP honor credit callback (honorable kill or BG reward)
-    using PvpHonorCallback = std::function<void(uint32_t honorAmount, uint64_t victimGuid, uint32_t victimRank)>;
-    void setPvpHonorCallback(PvpHonorCallback cb) { pvpHonorCallback_ = std::move(cb); }
-
-    // Mount state
-    using MountCallback = std::function<void(uint32_t mountDisplayId)>;  // 0 = dismount
-    void setMountCallback(MountCallback cb) { mountCallback_ = std::move(cb); }
-
-    // Mount display changes for visible players other than the local character.
-    using OtherPlayerMountCallback = std::function<void(uint64_t guid, uint32_t mountDisplayId)>;
-    void setOtherPlayerMountCallback(OtherPlayerMountCallback cb) { otherPlayerMountCallback_ = std::move(cb); }
-
-    // Taxi terrain precaching callback
-    using TaxiPrecacheCallback = std::function<void(const std::vector<glm::vec3>&)>;
-    void setTaxiPrecacheCallback(TaxiPrecacheCallback cb) { taxiPrecacheCallback_ = std::move(cb); }
-
-    // Taxi orientation callback (for mount rotation: yaw, pitch, roll in radians)
-    using TaxiOrientationCallback = std::function<void(float yaw, float pitch, float roll)>;
-    void setTaxiOrientationCallback(TaxiOrientationCallback cb) { taxiOrientationCallback_ = std::move(cb); }
-
-    // Taxi landing position correction callback (canonical x, y, z). Application's
-    // per-frame render-position sync only pulls from game state while onTaxi (see
-    // its "Sync character render position" block) - once finishClientTaxiFlight()
-    // clears onTaxiFlight_/taxiMountActive_, that sync stops, so a position
-    // correction applied only to movementInfo/the entity (e.g. snapping to the
-    // known-correct TaxiNodes.dbc position instead of a short-landed spline) never
-    // reaches the renderer, which then stays authoritative at its last (wrong)
-    // value. Live-confirmed: the landing clamp reads renderer->getCharacterPosition()
-    // directly and kept computing from the pre-correction position even after
-    // finishClientTaxiFlight() had already fixed movementInfo/the entity. This
-    // callback lets MovementHandler push the corrected position straight to the
-    // renderer at the same moment, without MovementHandler needing direct access
-    // to rendering types.
-    using PlayerPositionCorrectionCallback = std::function<void(float x, float y, float z)>;
-    void setPlayerPositionCorrectionCallback(PlayerPositionCorrectionCallback cb) { playerPositionCorrectionCallback_ = std::move(cb); }
-
-    // Callback for when taxi flight is about to start (after mounting delay, before movement begins)
-    using TaxiFlightStartCallback = std::function<void()>;
-    void setTaxiFlightStartCallback(TaxiFlightStartCallback cb) { taxiFlightStartCallback_ = std::move(cb); }
-
-
-    bool isMounted() const { return currentMountDisplayId_ != 0; }
-    bool isHostileAttacker(uint64_t guid) const;
     bool isHostileFactionPublic(uint32_t factionTemplateId) const { return isHostileFaction(factionTemplateId); }
-    float getServerRunSpeed() const;
-    float getServerWalkSpeed() const;
-    float getServerSwimSpeed() const;
-    float getServerSwimBackSpeed() const;
-    float getServerFlightSpeed() const;
-    float getServerFlightBackSpeed() const;
-    float getServerRunBackSpeed() const;
-    float getServerTurnRate() const;
     bool isPlayerRooted() const { return movementInfo.isPlayerRooted(); }
     bool isGravityDisabled() const { return movementInfo.isGravityDisabled(); }
     bool isFeatherFalling() const { return movementInfo.isFeatherFalling(); }
@@ -2782,36 +1235,13 @@ public:
     // Positive = nose up, negative = nose down.
     void setMovementPitch(float radians) { movementInfo.pitch = radians; }
     void dismount() override;
-    /// In the air on a flying mount or not - see MovementHandler::setFlightAirborne.
-    void setFlightAirborne(bool airborne);
 
     /// Accept the innkeeper's offer to make this the player's home. The prompt
     /// arrives as SMSG_BINDER_CONFIRM and this is the reply.
     void confirmBinder();
 
     // Taxi / Flight Paths
-    bool isTaxiWindowOpen() const;
-    void closeTaxi();
-    void activateTaxi(uint32_t destNodeId);
-    bool isOnTaxiFlight() const;
-    bool isTaxiMountActive() const;
-    bool isTaxiActivationPending() const;
-    void forceClearTaxiAndMovementState();
-    const std::string& getTaxiDestName() const;
-    const ShowTaxiNodesData& getTaxiData() const;
-    uint32_t getTaxiCurrentNode() const;
-
-    using TaxiNode = MovementHandler::TaxiNode;
-    using TaxiPathEdge = MovementHandler::TaxiPathEdge;
     using TaxiPathNode = MovementHandler::TaxiPathNode;
-    const std::unordered_map<uint32_t, TaxiNode>& getTaxiNodes() const;
-    bool isKnownTaxiNode(uint32_t nodeId) const;
-    uint32_t getTaxiCostTo(uint32_t destNodeId) const;
-    bool hasTaxiRouteTo(uint32_t destNodeId) const;
-    std::vector<uint32_t> getTaxiRouteTo(uint32_t destNodeId) const;
-    bool taxiNpcHasRoutes(uint64_t guid) const {
-        return movementHandler_->taxiNpcHasRoutes(guid);
-    }
 
     // Vehicle (WotLK)
     bool isInVehicle() const { return vehicleId_ != 0; }
@@ -2819,77 +1249,18 @@ public:
     void sendRequestVehicleExit();
 
     // Vendor
-    void openVendor(uint64_t npcGuid);
     void closeVendor() override;
-    void buyItem(uint64_t vendorGuid, uint32_t itemId, uint32_t slot, uint32_t count);
-    void sellItem(uint64_t vendorGuid, uint64_t itemGuid, uint32_t count);
-    void sellItemBySlot(int backpackIndex);
-    void sellItemInBag(int bagIndex, int slotIndex);
-    struct BuybackItem {
-        uint64_t itemGuid = 0;
-        ItemDef item;
-        uint32_t count = 1;
-        uint32_t wireSlot = 0;
-    };
-    void buyBackItem(uint32_t buybackSlot);
-    void repairItem(uint64_t vendorGuid, uint64_t itemGuid);
-    void repairAll(uint64_t vendorGuid, bool useGuildBank = false);
-    uint32_t estimateRepairAllCost() const;
-    const std::deque<BuybackItem>& getBuybackItems() const;
-    /// Equip a held item into a named equipment slot. See InventoryHandler.
-    void equipItemToSlot(uint64_t itemGuid, uint8_t equipSlot);
-    void autoEquipItemBySlot(int backpackIndex, bool confirmed = false);
-    void autoEquipItemInBag(int bagIndex, int slotIndex, bool confirmed = false);
-    /// Would equipping this bind it? Asked by both interfaces before they put
-    /// their own prompt up.
-    bool equipWouldBindFromBackpack(int backpackIndex) const;
-    bool equipWouldBindFromBag(int bagIndex, int slotIndex) const;
-    void equipPendingItem();
-    void cancelPendingEquip();
-    void useItemBySlot(int backpackIndex, bool confirmed = false,
-                       uint64_t unitTarget = 0);
-    void useKeyringItem(int index, bool confirmed = false);
-    void useItemInBag(int bagIndex, int slotIndex, bool confirmed = false,
-                      uint64_t unitTarget = 0);
 
     // Item-targeted item use: sharpening stones, weightstones and weapon oils enchant
     // another item, so using one arms a targeting cursor instead of casting immediately.
-    bool isAwaitingItemTarget() const;
-    /// True while a used item is waiting for the player to click a unit.
-    bool isAwaitingUnitTarget() const;
-    uint32_t getPendingUnitTargetSourceItemId() const;
-    void cancelUnitTargeting();
-    void completeItemUseOnUnit(uint64_t targetUnitGuid);
     /// Arm the item-picking cursor for a spell that must be cast at an item.
     void beginSpellItemTargeting(uint32_t spellId, const std::string& spellName) override;
-    uint32_t getPendingItemTargetSourceItemId() const;
-    void cancelItemTargeting();
-    void completeItemUseOnItem(uint64_t targetItemGuid, bool confirmed = false);
-    void replaceEnchant();
 
     /// Seconds until the server teleports the player out of an instance they
     /// are not valid for, or 0 when no such timer is running. The server sends
     /// the whole countdown once and then says nothing until it stops, so the
     /// remainder is worked out from when it arrived.
     int getInstanceBootTimeRemaining() const;
-
-    // CMSG_OPEN_ITEM - for locked containers (lockboxes); server checks keyring automatically
-    void openItemBySlot(int backpackIndex);
-    void openItemInBag(int bagIndex, int slotIndex);
-    void readItemBySlot(int backpackIndex);
-    void readItemInBag(int bagIndex, int slotIndex);
-    void destroyItem(uint8_t bag, uint8_t slot, uint8_t count = 1);
-    void splitItem(uint8_t srcBag, uint8_t srcSlot, uint8_t count);
-    void splitItemTo(uint8_t srcBag, uint8_t srcSlot,
-                     uint8_t dstBag, uint8_t dstSlot, uint8_t count);
-    void swapContainerItems(uint8_t srcBag, uint8_t srcSlot, uint8_t dstBag,
-                            uint8_t dstSlot, bool applyLocally = true);
-    /// Tell every frame that draws from a bag to read it again.
-    ///
-    /// For a change made straight to the model rather than arriving from the
-    /// server: nothing on screen holds bag contents of its own, so a layout
-    /// that changes without this is correct and invisible.
-    void notifyBagsChanged();
 
     /// Merge partial stacks, then order every bag slot, and send the moves.
     ///
@@ -2920,155 +1291,19 @@ public:
     /// pouring partials together across the bank is what Sort All is for, and
     /// doing it here would move items out of the bag being sorted.
     void sortBankBag(int bagIndex);
-    void swapBagSlots(int srcBagIndex, int dstBagIndex);
-    void useItemById(uint32_t itemId, uint64_t unitTarget = 0);
-    /// Put a glyph from a bag slot into a socket, counted from zero.
-    void placeGlyphFromBag(uint8_t wireBag, uint8_t wireSlot, uint32_t socketIndex);
-    uint32_t getItemIdForSpell(uint32_t spellId) const;
-    bool isVendorWindowOpen() const;
-    const ListInventoryData& getVendorItems() const;
-    void setVendorCanRepair(bool v);
 
-    // Mail
     // ---- Item socketing ----
     // Flat accessors rather than the session struct: InventoryHandler is only
     // forward-declared here, and a nested type cannot cross that.
-    bool isSocketingOpen() const;
-    uint64_t getSocketItemGuid() const;
-    uint32_t getSocketItemId() const;
     uint32_t getSocketPendingGemItemId(int index) const;
-    void openSocketing(uint64_t itemGuid);
-    void closeSocketing();
-    bool setSocketGem(int index, uint64_t gemGuid, uint32_t gemItemId);
-    void acceptSockets();
-
-    bool isMailboxOpen() const;
-    const std::vector<MailMessage>& getMailInbox() const;
-    std::string getMailDisplaySubject(const MailMessage& mail);
-    int getSelectedMailIndex() const;
-    void setSelectedMailIndex(int idx);
-    bool isMailComposeOpen() const;
-    void openMailCompose();
-    void closeMailCompose();
-    /// Whether the compose frame is showing, without clearing the draft.
-    void setMailComposeShowing(bool showing);
-    bool hasNewMail() const;
-    void openMailbox(uint64_t guid);
-    void closeMailbox();
-    void sendMail(const std::string& recipient, const std::string& subject,
-                  const std::string& body, uint64_t money, uint64_t cod = 0);
-
-    // Mail attachments (max 12 per WotLK)
-    static constexpr int MAIL_MAX_ATTACHMENTS = 12;
-    struct MailAttachSlot {
-        uint64_t itemGuid = 0;
-        game::ItemDef item;
-        uint8_t srcBag = 0xFF;   // source container for return
-        uint8_t srcSlot = 0;
-        [[nodiscard]] bool occupied() const { return itemGuid != 0; }
-    };
-    bool attachItemFromBackpack(int backpackIndex);
-    bool attachItemFromBag(int bagIndex, int slotIndex);
-    bool detachMailAttachment(int attachIndex);
-    void clearMailAttachments();
-    const std::array<MailAttachSlot, 12>& getMailAttachments() const;
-    int getMailAttachmentCount() const;
-    /// Attachments this realm's mail packet can actually carry - one on Vanilla,
-    /// twelve from TBC on. The compose window used to offer twelve regardless
-    /// and quietly send the first.
-    void mailTakeMoney(uint32_t mailId);
-    void mailTakeItem(uint32_t mailId, uint32_t itemGuidLow);
-    void mailDelete(uint32_t mailId);
-    /// Send a letter back where it came from, with whatever is still attached.
-    void mailReturnToSender(uint32_t mailId);
-    void mailMarkAsRead(uint32_t mailId);
-    void refreshMailList();
 
     // Bank
-    void openBank(uint64_t guid);
-    void closeBank();
-    void buyBankSlot();
     // Copper cost of the bank bag slot at the given 0-based index (BankBagSlotPrices.dbc).
     uint32_t getBankBagSlotPrice(int slotIndex) const;
-    void depositItem(uint8_t srcBag, uint8_t srcSlot);
-    void withdrawItem(uint8_t srcBag, uint8_t srcSlot);
-    bool isBankOpen() const;
-    uint64_t getBankerGuid() const;
-    int getEffectiveBankSlots() const;
-    int getEffectiveBankBagSlots() const;
-
-    // Guild Bank
-    void openGuildBank(uint64_t guid);
-    void closeGuildBank();
-    void queryGuildBankTab(uint8_t tabId);
-    void buyGuildBankTab();
-    void depositGuildBankMoney(uint32_t amount);
-    void withdrawGuildBankMoney(uint32_t amount);
-    void guildBankWithdrawItem(uint8_t tabId, uint8_t bankSlot, uint8_t destBag,
-                               uint8_t destSlot, uint32_t splitCount = 0);
-    void guildBankDepositItem(uint8_t tabId, uint8_t bankSlot, uint8_t srcBag, uint8_t srcSlot);
-    /// Rename a guild bank tab and pick its icon.
-    void setGuildBankTabInfo(uint8_t tabId, const std::string& name, const std::string& icon);
-    /// Ask for a tab's info text, and read back what arrived.
-    void queryGuildBankText(uint8_t tabId);
-    const std::string& getGuildBankTabText(uint8_t tabId) const;
-    void guildBankDepositFromInventory(uint8_t srcBag, uint8_t srcSlot);
-    bool isGuildBankOpen() const;
-    const GuildBankData& getGuildBankData() const;
-    /// The bank's balance as SMSG_GUILD_EVENT reports it, for guild members
-    /// who are not the one standing at the banker.
-    void setGuildBankMoney(uint64_t money);
-    uint8_t getGuildBankActiveTab() const;
-    void setGuildBankActiveTab(uint8_t tab);
-
-    // Auction House
-    void openAuctionHouse(uint64_t guid);
-    void closeAuctionHouse();
-    void auctionSearch(const std::string& name, uint8_t levelMin, uint8_t levelMax,
-                       uint32_t quality, uint32_t itemClass, uint32_t itemSubClass,
-                       uint32_t invTypeMask, uint8_t usableOnly, uint32_t offset = 0,
-                       const std::vector<AuctionSortKey>& sort = {});
-    void auctionSellItem(int backpackIndex, uint32_t bid,
-                         uint32_t buyout, uint32_t duration);
-    void auctionSellItemByGuid(uint64_t itemGuid, uint32_t stackCount, uint32_t bid,
-                               uint32_t buyout, uint32_t duration);
-    void auctionPlaceBid(uint32_t auctionId, uint32_t amount);
-    void auctionBuyout(uint32_t auctionId, uint32_t buyoutPrice);
-    void auctionCancelItem(uint32_t auctionId);
-    void auctionListOwnerItems(uint32_t offset = 0);
-    void auctionListBidderItems(uint32_t offset = 0);
-    bool isAuctionHouseOpen() const;
-    uint64_t getAuctioneerGuid() const;
-    const AuctionListResult& getAuctionBrowseResults() const;
-    const AuctionListResult& getAuctionOwnerResults() const;
-    const AuctionListResult& getAuctionBidderResults() const;
-    // The panel's column sort reorders the lists in place, through
-    // inventory().auctionBrowseResultsRef() and its two siblings.
-    int getAuctionActiveTab() const;
-    void setAuctionActiveTab(int tab);
-    float getAuctionSearchDelay() const;
 
     /// One row of a profession's recipe list (game/craft_recipe.hpp).
     using CraftRecipe = game::CraftRecipe;
-    /// The known recipes of the profession whose window is open.
-    ///
-    /// Shared with the interface rather than rebuilt there: the difficulty
-    /// bands and the reagent arithmetic are fiddly enough that two copies
-    /// would drift, and a recipe that is orange in one window and yellow in
-    /// the other is a bug nobody can explain.
-    std::vector<CraftRecipe> getCraftingRecipes() const;
-    /// How many of an item the backpack and equipped bags hold together.
-    uint32_t countItemInBags(uint32_t itemId) const;
 
-    // Trainer
-    bool isTrainerWindowOpen() const;
-    const TrainerListData& getTrainerSpells() const;
-    void trainSpell(uint32_t spellId);
-    void closeTrainer();
-    const std::string& getSpellName(uint32_t spellId) const;
-    const std::string& getSpellRank(uint32_t spellId) const;
-    /// Returns the tooltip/description text from Spell.dbc (empty if unknown or has no text).
-    const std::string& getSpellDescription(uint32_t spellId) const;
     /// Substitute WoW description tokens in `raw` using live spell data: $s/$o/$m/$M base
     /// points and $d durations (incl. cross-spell $<spellId> references), plus $l/$g
     /// plural/gender forms. Unresolvable tokens ($h proc chance, $t period) are stripped
@@ -3084,77 +1319,9 @@ public:
                      : nullptr;
     }
     std::string formatSpellDescription(uint32_t selfSpellId, const std::string& raw) const;
-    // SpellFocusObject.dbc name ("Anvil", "Cooking Fire", ...) for
-    // requires-spell-focus cast failures; empty if unknown.
-    const std::string& getSpellFocusName(uint32_t focusId) const;
-    // TotemCategory.dbc name ("Blacksmith Hammer", "Mining Pick", ...) for
-    // totem-category cast failures; empty if unknown.
-    const std::string& getTotemCategoryName(uint32_t categoryId) const;
-    const int32_t* getSpellEffectBasePoints(uint32_t spellId) const;
-    float getSpellDuration(uint32_t spellId) const;
-    std::string getEnchantName(uint32_t enchantId) const;
-    /// The gem item an enchantment came out of; 0 when it is not a gem.
-    uint32_t getEnchantGemItem(uint32_t enchantId) const;
-    // Refunds and held items - the inventory's; these forward for the old callers.
-    using ItemRefundInfo = game::ItemRefundInfo;
-    void requestItemRefundInfo(uint64_t itemGuid) { inventoryHandler_->requestItemRefundInfo(itemGuid); }
-    void refundItem(uint64_t itemGuid) { inventoryHandler_->refundItem(itemGuid); }
-    const ItemRefundInfo* getItemRefundInfo(uint64_t itemGuid) const {
-        return inventoryHandler_->getItemRefundInfo(itemGuid);
-    }
-    bool isItemSoulbound(uint64_t guid) const { return inventoryHandler_->isItemSoulbound(guid); }
-    uint32_t getItemEntryByGuid(uint64_t guid) const { return inventoryHandler_->getItemEntryByGuid(guid); }
-    /// The skill's own name, by SkillLine.dbc id.
-    const std::string& getSkillLineName(uint32_t skillLineId) const;
-    /// Returns the DispelType for a spell (0=none,1=magic,2=curse,3=disease,4=poison,5+=other)
-    uint8_t getSpellDispelType(uint32_t spellId) const;
-    /// Returns true if the spell can be interrupted by abilities like Kick/Counterspell.
-    /// False for spells with SPELL_ATTR_EX_NOT_INTERRUPTIBLE (attrEx bit 4 = 0x10).
-    bool isSpellInterruptible(uint32_t spellId) const;
-    /// True for a spell that is never cast - a talent's passive effect, a
-    /// permanent aura. The spell book draws these without a cast border and
-    /// refuses to put them on the action bar.
-    bool isSpellPassive(uint32_t spellId) const;
-    /// Returns the school bitmask for the spell from Spell.dbc
-    /// (0x01=Physical, 0x02=Holy, 0x04=Fire, 0x08=Nature, 0x10=Frost, 0x20=Shadow, 0x40=Arcane).
-    /// Returns 0 if unknown.
-    uint32_t getSpellSchoolMask(uint32_t spellId) const;
-    uint32_t getSpellVisualId(uint32_t spellId) const;
-    /// Returns the Spell.dbc Targets bitmask (SpellCastTargetFlags) for the spell.
-    /// 0x10 = TARGET_FLAG_ITEM, meaning the spell must be cast onto another item.
-    uint32_t getSpellTargetFlags(uint32_t spellId) const;
-    /// Spell.dbc's EffectImplicitTargetA - what the spell aims at.
-    ///
-    /// Not the same question as getSpellTargetFlags: that column is zero for
-    /// most spells, bandages included, so it cannot say whether one needs a
-    /// target. This one carries it.
-    uint32_t getSpellImplicitTargetA(uint32_t spellId) const;
-    bool isSpellKnownToClient(uint32_t spellId) const;
-    // Spell.dbc TargetAuraState (aura state the target must be in; 0 = no requirement).
-    uint32_t getSpellTargetAuraState(uint32_t spellId) const;
 
-    struct TrainerTab {
-        std::string name;
-        std::vector<const TrainerSpell*> spells;
-    };
-    const std::vector<TrainerTab>& getTrainerTabs() const;
-    // Item templates and held items - the inventory's; forwarded for the old callers.
-    const ItemQueryResponseData* getItemInfo(uint32_t itemId) const {
-        return inventoryHandler_->getItemInfo(itemId);
-    }
-    const std::unordered_map<uint32_t, ItemQueryResponseData>& getItemInfoCache() const {
-        return inventoryHandler_->getItemInfoCache();
-    }
+    // Item templates - the inventory's.
     void ensureItemInfo(uint32_t entry) override { inventoryHandler_->ensureItemInfo(entry); }
-    uint64_t getBackpackItemGuid(int index) const { return inventoryHandler_->getBackpackItemGuid(index); }
-    uint64_t getEquipSlotGuid(int slot) const { return inventoryHandler_->getEquipSlotGuid(slot); }
-    std::pair<uint32_t, uint32_t> getItemEnchantIds(uint64_t guid) const {
-        return inventoryHandler_->getItemEnchantIds(guid);
-    }
-    std::array<uint32_t, 3> getItemSocketEnchantIds(uint64_t guid) const {
-        return inventoryHandler_->getItemSocketEnchantIds(guid);
-    }
-    uint64_t getVendorGuid() const;
 
     /**
      * Set callbacks
@@ -3184,7 +1351,6 @@ public:
     void updateTimers(float deltaTime);
     void updateEntityInterpolation(float deltaTime);
     void updateTaxiAndMountState(float deltaTime);
-    void updateAutoAttack(float deltaTime);
 
     /**
      * Reset DBC-backed caches so they reload from new expansion data.
@@ -3199,32 +1365,39 @@ public:
     // ── Handler & Subsystem Accessors (unique_ptr → raw pointer) ─────
     network::WorldConnection* getSocket() override { return socket.get(); }
     const network::WorldConnection* getSocket() const { return socket.get(); }
-    ChatHandler* getChatHandler() { return chatHandler_.get(); }
-    CombatHandler* getCombatHandler() { return combatHandler_.get(); }
-    MovementHandler* getMovementHandler() { return movementHandler_.get(); }
-    SpellHandler* getSpellHandler() { return spellHandler_.get(); }
-    QuestHandler* getQuestHandler() { return questHandler_.get(); }
-    EntityController* getEntityController() { return entityController_.get(); }
     /// What the character holds - bags, equipment, coin, books - and the
     /// windows that move it: loot, vendors, mail, the bank, the auction house.
     InventoryHandler& inventory() { return *inventoryHandler_; }
     const InventoryHandler& inventory() const { return *inventoryHandler_; }
-    /// The character's standing with each faction.
-    ReputationHandler& reputation() { return *reputationHandler_; }
-    const ReputationHandler& reputation() const { return *reputationHandler_; }
     /// The character's quests, the quest givers' windows and their marks.
     QuestHandler& quests() { return *questHandler_; }
     const QuestHandler& quests() const { return *questHandler_; }
     /// The character's conversation: the chat log, channels, whispers, AFK.
     ChatHandler& chat() { return *chatHandler_; }
     const ChatHandler& chat() const { return *chatHandler_; }
-    /// The player's pet and the stable.
-    PetHandler& pet() { return *petHandler_; }
-    const PetHandler& pet() const { return *petHandler_; }
     /// The spell book: spells, casts, auras, talents, skills, and what
     /// Spell.dbc and the skill tables say about them.
     SpellHandler& spells() { return *spellHandler_; }
     const SpellHandler& spells() const { return *spellHandler_; }
+    /// Combat: auto-attack, who is attacking whom, threat, targeting,
+    /// combat text, death and the spirit healer.
+    CombatHandler& combat() { return *combatHandler_; }
+    const CombatHandler& combat() const { return *combatHandler_; }
+    /// Where the player is and how they move: position, speeds, transports,
+    /// following, area triggers and taxi flights.
+    MovementHandler& movement() { return *movementHandler_; }
+    const MovementHandler& movement() const { return *movementHandler_; }
+    /// The objects in view as the server describes them: creatures, players,
+    /// game objects, their names, kinds, appearance and transports.
+    WorldHandler& world() { return *worldHandler_; }
+    QueryCacheHandler& queryCache() { return *queryCacheHandler_; }
+    const QueryCacheHandler& queryCache() const { return *queryCacheHandler_; }
+    const WorldHandler& world() const { return *worldHandler_; }
+    /// The rest of the player's dealings with the world and the server: inspect,
+    /// played time, logout, summons, instances and their lockouts, the
+    /// battlefield manager, minimap pings, GM tickets and reports.
+    SocialHandler& social() { return *socialHandler_; }
+    const SocialHandler& social() const { return *socialHandler_; }
     /// Key bindings, macros and settings the server keeps for the account.
     AccountDataHandler& accountData() { return *accountDataHandler_; }
     const AccountDataHandler& accountData() const { return *accountDataHandler_; }
@@ -3237,12 +1410,11 @@ public:
     /// The weather where the character stands, as the realm says it.
     WeatherHandler& weather() { return *weatherHandler_; }
     const WeatherHandler& weather() const { return *weatherHandler_; }
+    /// The character in the world: experience, level, rest, the sheet.
+    PlayerHandler& player() { return *playerHandler_; }
+    const PlayerHandler& player() const { return *playerHandler_; }
 
     // ── Mutable Accessors for Members with Existing Const Getters ────
-    void setTargetGuidRaw(uint64_t g) { targetGuid = g; }
-    uint64_t& lastTargetGuidRef() { return lastTargetGuid; }
-    uint64_t& focusGuidRef() { return focusGuid; }
-    uint64_t& mouseoverGuidRef() { return mouseoverGuid_; }
     MovementInfo& movementInfoRef() { return movementInfo; }
 
     // ── Core / Session ───────────────────────────────────────────────
@@ -3258,185 +1430,38 @@ public:
     /// cannot look different.
     /// False when there is no record to write to, which is the one way this can
     /// quietly do nothing.
-    bool previewPlayerAppearance(uint32_t appearanceBytes, uint8_t facialFeatures) {
-        // Keyed the way the reader is keyed. The model is rebuilt from
-        // getActiveCharacter(), which finds the record by activeCharacterGuid_,
-        // so writing to any other record is a change nothing draws.
-        const uint64_t guid = activeCharacterGuid_ != 0 ? activeCharacterGuid_ : playerGuid;
-        for (auto& ch : characters) {
-            if (ch.guid != guid) continue;
-            ch.appearanceBytes = appearanceBytes;
-            ch.facialFeatures = facialFeatures;
-            if (playerModelRebuildCallback_) playerModelRebuildCallback_();
-            return true;
-        }
-        return false;
-    }
+    bool previewPlayerAppearance(uint32_t appearanceBytes, uint8_t facialFeatures);
     auto& updateFieldTableRef() { return updateFieldTable_; }
-    auto& lastPlayerFieldsRef() { return lastPlayerFields_; }
-    auto& timeSinceLastPingRef() { return timeSinceLastPing; }
-    auto& activeCharacterGuidRef() { return activeCharacterGuid_; }
 
     // ── Character & Appearance ───────────────────────────────────────
-    auto& chosenTitleBitRef() { return chosenTitleBit_; }
-    auto& cloakVisibleRef() { return cloakVisible_; }
-    auto& helmVisibleRef() { return helmVisible_; }
-    auto& currentMountDisplayIdRef() { return currentMountDisplayId_; }
-    auto& mountAuraSpellIdRef() { return mountAuraSpellId_; }
-    /// Spell of the aura currently keeping the player mounted, 0 when on foot.
-    /// Pressing this one again is a dismount, not a second mount.
-    uint32_t getMountAuraSpellId() const { return mountAuraSpellId_; }
-    auto& shapeshiftFormIdRef() { return shapeshiftFormId_; }
-    auto& playerRaceRef() { return playerRace_; }
-    auto& serverPlayerLevelRef() { return serverPlayerLevel_; }
 
     // ── AFK / DND ────────────────────────────────────────────────────
 
     // ── Movement & Transport ─────────────────────────────────────────
-    auto& followRenderPosRef() { return followRenderPos_; }
-    auto& followTargetGuidRef() { return followTargetGuid_; }
-    auto& vehicleIdRef() { return vehicleId_; }
-    auto& playerTransportGuidRef() { return playerTransportGuid_; }
-    auto& playerTransportOffsetRef() { return playerTransportOffset_; }
-    auto& playerTransportStickyGuidRef() { return playerTransportStickyGuid_; }
-    auto& playerTransportStickyTimerRef() { return playerTransportStickyTimer_; }
-    auto& transportAttachmentsRef() { return transportAttachments_; }
 
     // ── Combat & Player Stats ────────────────────────────────────────
-    auto& comboPointsRef() { return comboPoints_; }
-    auto& comboTargetRef() { return comboTarget_; }
-    auto& playerArenaPointsRef() { return playerArenaPoints_; }
-    auto& playerArmorRatingRef() { return playerArmorRating_; }
-    auto& playerBlockPctRef() { return playerBlockPct_; }
-    auto& playerExpertiseRef() { return playerExpertise_; }
-    auto& playerOffhandExpertiseRef() { return playerOffhandExpertise_; }
-    auto& playerManaRegenRef() { return playerManaRegen_; }
-    auto& playerManaRegenCastingRef() { return playerManaRegenCasting_; }
-    auto& playerCombatRatingsRef() { return playerCombatRatings_; }
-    auto& playerCritPctRef() { return playerCritPct_; }
-    auto& playerDodgePctRef() { return playerDodgePct_; }
-    auto& playerHealBonusRef() { return playerHealBonus_; }
-    auto& playerHonorPointsRef() { return playerHonorPoints_; }
-    auto& playerMeleeAPRef() { return playerMeleeAP_; }
-    auto& playerNextLevelXpRef() { return playerNextLevelXp_; }
-    auto& playerParryPctRef() { return playerParryPct_; }
-    auto& playerRangedAPRef() { return playerRangedAP_; }
-    auto& playerRangedCritPctRef() { return playerRangedCritPct_; }
-    auto* playerResistancesArr() { return playerResistances_; }
-    auto& playerRestedXpRef() { return playerRestedXp_; }
-    auto* playerSpellCritPctArr() { return playerSpellCritPct_; }
-    auto* playerSpellDmgBonusArr() { return playerSpellDmgBonus_; }
-    auto& playerStatsArr() { return playerStats_; }
-    auto& playerXpRef() { return playerXp_; }
-    auto& isRestingRef() { return isResting_; }
-
-    // ── Skills ───────────────────────────────────────────────────────
-    const std::string& getSkillDescription(uint32_t skillId) const {
-        return spellHandler_->skillLineDescription(skillId);
-    }
-
-    // ── Quests & Achievements ────────────────────────────────────────
-    auto& achievementNameCacheRef() { return achievementNameCache_; }
 
     // ── World, Map & Zones ───────────────────────────────────────────
     auto& currentMapIdRef() { return currentMapId_; }
-    auto& worldStateMapIdRef() { return worldStateMapId_; }
-    auto& worldStatesRef() { return worldStates_; }
-    auto& worldStateZoneIdRef() { return worldStateZoneId_; }
-    /// Drops the points of interest the quest handler is holding.
-    ///
-    /// This handed out a reference to a list of its own. getGossipPois
-    /// forwards to QuestHandler, so clearing through the reference left
-    /// the markers the map draws exactly where they were.
-    void clearGossipPois();
 
-    // ── Corpse & Home Bind ───────────────────────────────────────────
-    auto& corpseGuidRef() { return corpseGuid_; }
-    auto& corpseMapIdRef() { return corpseMapId_; }
-    auto& corpsePositionValidRef() { return corpsePositionValid_; }
-    auto& corpseReclaimAvailableMsRef() { return corpseReclaimAvailableMs_; }
-    auto& corpseXRef() { return corpseX_; }
-    auto& corpseYRef() { return corpseY_; }
-    auto& corpseZRef() { return corpseZ_; }
-
-    // ── Area Triggers ────────────────────────────────────────────────
-    auto& activeAreaTriggersRef() { return activeAreaTriggers_; }
-    auto& areaTriggerCheckTimerRef() { return areaTriggerCheckTimer_; }
-    auto& areaTriggerDbcLoadedRef() { return areaTriggerDbcLoaded_; }
-    auto& areaTriggersRef() { return areaTriggers_; }
-    auto& areaTriggerSuppressFirstRef() { return areaTriggerSuppressFirst_; }
-    auto& areaTriggerCooldownRef() { return areaTriggerCooldown_; }
-
-    // ── Death & Resurrection ─────────────────────────────────────────
-    auto& playerDeadRef() { return playerDead_; }
-    auto& releasedSpiritRef() { return releasedSpirit_; }
-    auto& repopPendingRef() { return repopPending_; }
-    auto& lastRepopRequestMsRef() { return lastRepopRequestMs_; }
-    auto& pendingSpiritHealerGuidRef() { return pendingSpiritHealerGuid_; }
-    auto& resurrectCasterGuidRef() { return resurrectCasterGuid_; }
-    auto& resurrectIsSpiritHealerRef() { return resurrectIsSpiritHealer_; }
-    auto& resurrectPendingRef() { return resurrectPending_; }
-    auto& resurrectRequestPendingRef() { return resurrectRequestPending_; }
-    auto& selfResAvailableRef() { return selfResAvailable_; }
-
+    // ── Home Bind ────────────────────────────────────────────────────
 
     // ── Trainer, GM & Misc ───────────────────────────────────────────
 
-    // ── Tab Cycling ──────────────────────────────────────────────────
-    auto& tabCycleIndexRef() { return tabCycleIndex; }
-    auto& tabCycleListRef() { return tabCycleList; }
-    auto& tabCycleStaleRef() { return tabCycleStale; }
-
     // ── UI & Event Callbacks ─────────────────────────────────────────
     bool hasAddonEventListener() const { return static_cast<bool>(addonEventCallback_); }
-    auto& appearanceChangedCallbackRef() { return appearanceChangedCallback_; }
-    auto& playerModelRebuildCallbackRef() { return playerModelRebuildCallback_; }
-    auto& autoFollowCallbackRef() { return autoFollowCallback_; }
-    auto& creatureDespawnCallbackRef() { return creatureDespawnCallback_; }
-    auto& creatureMoveCallbackRef() { return creatureMoveCallback_; }
-    auto& creatureSpawnCallbackRef() { return creatureSpawnCallback_; }
-    auto& gameObjectDespawnCallbackRef() { return gameObjectDespawnCallback_; }
-    auto& gameObjectMoveCallbackRef() { return gameObjectMoveCallback_; }
-    auto& gameObjectSpawnCallbackRef() { return gameObjectSpawnCallback_; }
-    auto& gameObjectStateCallbackRef() { return gameObjectStateCallback_; }
-    auto& hitReactionCallbackRef() { return hitReactionCallback_; }
-    auto& knockBackCallbackRef() { return knockBackCallback_; }
     void suppressNextMeleeSwingAnim() override { suppressMeleeSwingAnim_ = true; }
-    bool consumeSuppressMeleeSwingAnim() {
+    bool consumeSuppressMeleeSwingAnim() override {
         bool v = suppressMeleeSwingAnim_;
         suppressMeleeSwingAnim_ = false;
         return v;
     }
-    auto& mountCallbackRef() { return mountCallback_; }
-    auto& npcAggroCallbackRef() { return npcAggroCallback_; }
-    auto& npcDeathCallbackRef() { return npcDeathCallback_; }
-    auto& npcRespawnCallbackRef() { return npcRespawnCallback_; }
-    auto& npcSwingCallbackRef() { return npcSwingCallback_; }
-    auto& otherPlayerMountCallbackRef() { return otherPlayerMountCallback_; }
-    auto& playerDespawnCallbackRef() { return playerDespawnCallback_; }
-    auto& playerHealthCallbackRef() { return playerHealthCallback_; }
-    auto& playerSpawnCallbackRef() { return playerSpawnCallback_; }
-    auto& pvpHonorCallbackRef() { return pvpHonorCallback_; }
-    auto& stealthStateCallbackRef() { return stealthStateCallback_; }
-    auto& stunStateCallbackRef() { return stunStateCallback_; }
-    auto& taxiFlightStartCallbackRef() { return taxiFlightStartCallback_; }
-    auto& taxiOrientationCallbackRef() { return taxiOrientationCallback_; }
-    auto& playerPositionCorrectionCallbackRef() { return playerPositionCorrectionCallback_; }
-    auto& taxiPrecacheCallbackRef() { return taxiPrecacheCallback_; }
-    auto& transportMoveCallbackRef() { return transportMoveCallback_; }
-    auto& unitAnimHintCallbackRef() { return unitAnimHintCallback_; }
-    auto& unitMoveFlagsCallbackRef() { return unitMoveFlagsCallback_; }
 
     // ── Methods moved from private (domain handler use) ──────────────
     void addCombatText(CombatTextEntry::Type type, int32_t amount, uint32_t spellId,
                        bool isPlayerSource, uint8_t powerType = 0,
                        uint64_t srcGuid = 0, uint64_t dstGuid = 0) override;
     bool shouldLogSpellstealAura(uint64_t casterGuid, uint64_t victimGuid, uint32_t spellId) override;
-    void addSystemChatMessage(const std::string& message);
-    /// A chat line of a given kind - money looted, experience gained, a
-    /// reputation change. These are chat messages and must be added as such:
-    /// see ChatHandler::addLocalChatLine.
-    void addLocalChatLine(game::ChatType type, const std::string& message);
 
     /// An error the player should see: "Target is too far away", "You have no
     /// target", and their kind.
@@ -3450,33 +1475,11 @@ public:
     /// mattered: "Not ready", "Not enough rage" and "You can't do that right
     /// now" arrive once per rejected keypress.
     void raiseUiError(const std::string& message);
-    void sendPing();
-    void setTransportAttachment(uint64_t childGuid, ObjectType type,
-                                uint64_t transportGuid, const glm::vec3& localOffset,
-                                bool hasLocalOrientation, float localOrientation,
-                                bool offsetNeedsTransportResolution = false);
-    void clearTransportAttachment(uint64_t childGuid);
+    void sendPing() override;
     std::string guidToUnitId(uint64_t guid) const;
     Unit* getUnitByGuid(uint64_t guid);
-    uint64_t resolveOnlineItemGuid(uint32_t itemId) const;
-    void rebuildOnlineInventory();
-    void maybeDetectVisibleItemLayout();
-    void updateOtherPlayerVisibleItems(uint64_t guid, const FlatFieldMap& fields);
     void cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries,
                                        const std::array<uint16_t, 19>& enchantIds) override;
-    void detectInventorySlotBases(const FlatFieldMap& fields);
-    bool applyInventoryFields(const FlatFieldMap& fields);
-    void extractContainerFields(uint64_t containerGuid, const FlatFieldMap& fields);
-    void extractSkillFields(const FlatFieldMap& fields);
-    void extractExploredZoneFields(const FlatFieldMap& fields);
-    void applyQuestStateFromFields(const FlatFieldMap& fields);
-    void sanitizeMovementForTaxi();
-    void loadSpellNameCache() const;
-    void loadFactionNameCache() const;
-    void loadAchievementNameCache();
-    void loadSkillLineDbc() const;
-    void loadSkillLineAbilityDbc();
-    std::string getFactionName(uint32_t factionId) const;
     std::string getLfgDungeonName(uint32_t dungeonId) const;
     /// The mounts and critters the player knows, as the pet tab lists them.
     ///
@@ -3503,25 +1506,7 @@ public:
         loadLfgDungeonDbc();
         return lfgDungeons_;
     }
-    void queryItemInfo(uint32_t entry, uint64_t guid);
 
-    // --- Inner types exposed for former friend classes ---
-    struct TransportAttachment {
-        ObjectType type = ObjectType::OBJECT;
-        uint64_t transportGuid = 0;
-        glm::vec3 localOffset{0.0f};
-        float localOrientation = 0.0f;
-        bool hasLocalOrientation = false;
-        bool offsetNeedsTransportResolution = false;
-    };
-    struct AreaTriggerEntry {
-        uint32_t id = 0;
-        uint32_t mapId = 0;
-        float x = 0, y = 0, z = 0;
-        float radius = 0;
-        float boxLength = 0, boxWidth = 0, boxHeight = 0;
-        float boxYaw = 0;
-    };
     std::string getAreaName(uint32_t areaId) const;
 
     /// What GetZonePVPInfo answers for a zone: one of "sanctuary", "arena",
@@ -3549,7 +1534,6 @@ public:
             default:         return {};
         }
     }
-    using OnlineItemInfo = game::OnlineItemInfo;
     bool isHostileFaction(uint32_t factionTemplateId) const {
         if (const int atWar = factionAtWarLive(factionTemplateId); atWar >= 0) return atWar == 1;
         auto it = factionHostileMap_.find(factionTemplateId);
@@ -3559,12 +1543,7 @@ public:
     /// says the player is at war with it, 0 when not, and -1 when it is not
     /// such a template or the standings have not arrived - the maps above,
     /// built from the starting standings, answer until then.
-    int factionAtWarLive(uint32_t factionTemplateId) const {
-        auto it = factionTemplateRepList_.find(factionTemplateId);
-        if (it == factionTemplateRepList_.end() ||
-            it->second >= reputationHandler_->factions().size()) return -1;
-        return isFactionAtWar(it->second) ? 1 : 0;
-    }
+    int factionAtWarLive(uint32_t factionTemplateId) const;
 
 private:
     // Dead: autoTargetAttacker moved to CombatHandler
@@ -3631,16 +1610,6 @@ private:
      */
     void handleTutorialFlags(network::Packet& packet);
 
-    /**
-     * Handle SMSG_WARDEN_DATA gate packet from server.
-     * We do not implement anti-cheat exchange for third-party realms.
-     */
-
-    /**
-     * Handle SMSG_MOTD from server
-     */
-    void handleMotd(network::Packet& packet);
-
     /** Handle SMSG_NOTIFICATION (vanilla/classic server notification string) */
     void handleNotification(network::Packet& packet);
 
@@ -3649,45 +1618,21 @@ private:
      */
     void handlePong(network::Packet& packet);
 
-    void emitOtherPlayerEquipment(uint64_t guid);
-    void emitAllOtherPlayerEquipment();
-
     // handleAttackStart, handleAttackStop, handleAttackerStateUpdate,
     // handleSpellDamageLog, handleSpellHealLog removed
 
-    // ---- Equipment set handler ----
-    void handleUpdateAuraDuration(uint8_t slot, uint32_t durationMs);
     // handleSetForcedReactions - dispatched via CombatHandler
 
 
     // ---- Character creation handler ----
     void handleCharCreateResponse(network::Packet& packet);
 
-    // ---- XP handler ----
-    void handleXpGain(network::Packet& packet);
-
-    void clearPendingQuestAccept(uint32_t questId);
-    void triggerQuestAcceptResync(uint32_t questId, uint64_t npcGuid, const char* reason);
-    bool hasQuestInLog(uint32_t questId) const;
-    int findQuestLogSlotIndexFromServer(uint32_t questId) const;
-    void addQuestToLocalLogIfMissing(uint32_t questId, const std::string& title, const std::string& objectives);
-    bool resyncQuestLogFromServerSlots(bool forceQueryMetadata);
-    void addMoneyCopper(uint32_t amount);
-
-    // ---- Area trigger detection ----
-    void loadAreaTriggerDbc();
-    void checkAreaTriggers();
-
     // ---- Instance lockout handler ----
-    void resetTradeState();
-    void handleDuelRequested(network::Packet& packet);
-    void handleDuelComplete(network::Packet& packet);
-    void handleDuelWinner(network::Packet& packet);
 
     /**
      * Send CMSG_AUTH_SESSION to server
      */
-    void sendAuthSession();
+    void sendAuthSession(const AuthChallengeData& challenge);
 
     /**
      * Generate random client seed
@@ -3703,12 +1648,12 @@ private:
      * Fail connection with reason
      */
     void fail(const std::string& reason);
-    void updateAttachedTransportChildren(float deltaTime);
 
     // Explicit service dependencies (owned by Application)
     GameServices& services_;
 
     // Domain handlers - each manages a specific concern extracted from GameHandler
+    std::unique_ptr<QueryCacheHandler> queryCacheHandler_;
     std::unique_ptr<ChatHandler>      chatHandler_;
     std::unique_ptr<MovementHandler>  movementHandler_;
     std::unique_ptr<CombatHandler>    combatHandler_;
@@ -3723,6 +1668,7 @@ private:
     std::unique_ptr<ReputationHandler> reputationHandler_;
     std::unique_ptr<RealmTimeHandler> realmTimeHandler_;
     std::unique_ptr<WeatherHandler> weatherHandler_;
+    std::unique_ptr<PlayerHandler> playerHandler_;
 
     // Opcode dispatch table - built once in registerOpcodeHandlers(), called by handlePacket()
     using PacketHandler = std::function<void(network::Packet&)>;
@@ -3761,7 +1707,6 @@ private:
     /// The refusals said since the connection was lost, one log line each.
     std::set<std::string> refusalsLogged_;
     uint32_t clientSeed = 0;             // Random seed generated by client
-    uint32_t serverSeed = 0;             // Seed from SMSG_AUTH_CHALLENGE
 
     // Characters
     std::vector<Character> characters;       // Character list from SMSG_CHAR_ENUM
@@ -3774,8 +1719,8 @@ private:
     // fallTime must be the elapsed ms since the FALLING flag was set; the server
     // uses it for fall-damage calculations and anti-cheat validation.
 
-    // Entity tracking (delegated to EntityController)
-    std::unique_ptr<EntityController> entityController_;
+    // Entity tracking (delegated to WorldHandler)
+    std::unique_ptr<WorldHandler> worldHandler_;
 
     // Chat (state lives in ChatHandler; callbacks remain here for cross-domain access)
     AddonEventCallback addonEventCallback_;
@@ -3787,15 +1732,6 @@ private:
     SpellDataResolver spellDataResolver_;
     RandomPropertyNameResolver randomPropertyNameResolver_;
     RandomStatResolver randomStatResolver_;
-
-    // Targeting
-    uint64_t targetGuid = 0;
-    uint64_t focusGuid = 0;              // Focus target
-    uint64_t lastTargetGuid = 0;         // Previous target
-    uint64_t mouseoverGuid_ = 0;         // Set each frame by nameplate renderer
-    std::vector<uint64_t> tabCycleList;
-    int tabCycleIndex = -1;
-    bool tabCycleStale = true;
 
     // Heartbeat
     uint32_t pingSequence = 0;               // Ping sequence number (increments)
@@ -3821,66 +1757,17 @@ private:
     // that spell dismisses rather than re-summons, which is how a companion is
     // put away: it has no aura to cancel from the buff bar, so this toggle is
     // the only way to send it back.
-    uint64_t activeCritterGuid_ = 0;
-    uint32_t activeCritterSpellId_ = 0;
     std::unordered_map<uint32_t, uint32_t> worldStates_;
 
     // ---- Display state ----
-    bool helmVisible_ = true;
-    bool cloakVisible_ = true;
-    uint8_t standState_ = 0;  // 0=stand, 1=sit, ..., 7=dead, 8=kneel (server-confirmed)
-
-    // ---- Follow state ----
-    uint64_t followTargetGuid_ = 0;
-    glm::vec3 followRenderPos_{0.0f};  // Render-space position of followed entity (updated each frame)
-
 
     // Items, coin, books and the equipment of players in view are the
     // inventory's (InventoryHandler); none of it is kept here.
-    FlatFieldMap lastPlayerFields_;
     /// The innkeeper that asked "make this your home?". SMSG_BINDER_CONFIRM
     /// names it and the answer has to go back to the same one.
     uint64_t binderGuid_ = 0;
 
-
-    KnockBackCallback knockBackCallback_;
-    CameraShakeCallback cameraShakeCallback_;
-    AutoFollowCallback autoFollowCallback_;
-    UnstuckCallback unstuckCallback_;
-    UnstuckCallback unstuckGyCallback_;
-    UnstuckCallback unstuckHearthCallback_;
-    BindPointCallback bindPointCallback_;
-    CreatureSpawnCallback creatureSpawnCallback_;
-    CreatureDespawnCallback creatureDespawnCallback_;
-    PlayerSpawnCallback playerSpawnCallback_;
-    PlayerDespawnCallback playerDespawnCallback_;
-    CreatureMoveCallback creatureMoveCallback_;
-    TransportMoveCallback transportMoveCallback_;
-    TransportSpawnCallback transportSpawnCallback_;
-    GameObjectSpawnCallback gameObjectSpawnCallback_;
-    GameObjectMoveCallback gameObjectMoveCallback_;
-    GameObjectDespawnCallback gameObjectDespawnCallback_;
-    GameObjectCustomAnimCallback gameObjectCustomAnimCallback_;
-    GameObjectStateCallback gameObjectStateCallback_;
-    VehicleStateCallback vehicleStateCallback_;
-
     // Transport tracking
-    std::unordered_map<uint64_t, TransportAttachment> transportAttachments_;
-    // Transport GUID tracking moved to EntityController
-    uint64_t playerTransportGuid_ = 0;             // Transport the player is riding (0 = none)
-    glm::vec3 playerTransportOffset_ = glm::vec3(0.0f); // Player offset on transport
-    uint64_t playerTransportStickyGuid_ = 0;       // Last transport player was on (temporary retention)
-    float playerTransportStickyTimer_ = 0.0f;      // Seconds to keep sticky transport alive after transient clears
-    // Consecutive frames a ship rider has had no deck beneath them. Walking off
-    // onto the pier leaves the rider well inside the ship's boarding footprint,
-    // so losing the deck is what actually distinguishes "ashore" from "aboard".
-    // Counted rather than tested instantly so a jump is not a disembark.
-    int shipNoDeckSupportFrames_ = 0;
-    bool pendingPlayerTransportTransfer_ = false;
-    uint64_t pendingPlayerTransportGuid_ = 0;
-    uint32_t pendingPlayerTransportEntry_ = 0;
-    uint32_t pendingPlayerTransportMapId_ = 0xFFFFFFFFu;
-    glm::vec3 pendingPlayerTransportOffset_ = glm::vec3(0.0f);
     std::unique_ptr<TransportManager> transportManager_;  // Transport movement manager
     uint32_t weaponProficiency_ = 0;  // bitmask from SMSG_SET_PROFICIENCY itemClass=2
     uint32_t armorProficiency_  = 0;  // bitmask from SMSG_SET_PROFICIENCY itemClass=4
@@ -3890,44 +1777,16 @@ private:
     uint64_t hookedFishingBobberGuid_ = 0;
 
 
-    // ---- Area trigger detection ----
-    bool areaTriggerDbcLoaded_ = false;
-    std::vector<AreaTriggerEntry> areaTriggers_;
-    std::unordered_set<uint32_t> activeAreaTriggers_;  // triggers player is currently inside
-    float areaTriggerCheckTimer_ = 0.0f;
-    bool areaTriggerSuppressFirst_ = false;  // suppress first check after map transfer
-    float areaTriggerCooldown_ = 0.0f;       // seconds remaining - suppress ALL triggers
-
     // Craft queue: seconds the expired cast bar has waited for SMSG_SPELL_GO
     // (which re-casts the next queued item) before giving up
     float craftCastGoGraceSec_ = 0.0f;
 
-    // The pet and the stable are PetHandler's.
-
     // Mirror timers (0=fatigue, 1=breath, 2=feigndeath)
     MirrorTimer mirrorTimers_[3];
 
-    // Shapeshift form (from UNIT_FIELD_BYTES_1 byte 3)
-    uint8_t  shapeshiftFormId_ = 0;
-    // Combo points (rogues/druids)
-    uint8_t  comboPoints_ = 0;
-    uint64_t comboTarget_ = 0;
 
 
-    // Faction standings (factionId → absolute standing value)
-    // Faction name cache (factionId → name), populated lazily from Faction.dbc
-    mutable std::unordered_map<uint32_t, std::string> factionNameCache_;
-    // repListId → factionId mapping (populated with factionNameCache)
-    mutable std::unordered_map<uint32_t, uint32_t> factionRepListToId_;
-    // factionId → repListId reverse mapping
-    mutable std::unordered_map<uint32_t, uint32_t> factionIdToRepList_;
-    // factionId → Faction.dbc's four race masks, four class masks and four
-    // starting values, in that order. See factionBaseReputation.
-    mutable std::unordered_map<uint32_t, std::array<int32_t, 12>> factionRepBase_;
-    mutable bool factionNameCacheLoaded_ = false;
 
-
-    // ---- Guild state ----
 
     uint64_t activeCharacterGuid_ = 0;
     Race playerRace_ = Race::HUMAN;
@@ -3948,28 +1807,6 @@ private:
     // Tracks the last GO we sent CMSG_GAMEOBJ_USE to; used in handleSpellGo
     // to send CMSG_LOOT after a gather cast (mining/herbalism) completes.
     uint64_t lastInteractedGoGuid_ = 0;
-    uint32_t playerHonorPoints_ = 0;
-    uint32_t playerArenaPoints_ = 0;
-    int32_t playerArmorRating_ = 0;
-    int32_t playerResistances_[6] = {};  // [0]=Holy,[1]=Fire,[2]=Nature,[3]=Frost,[4]=Shadow,[5]=Arcane
-    // Server-authoritative primary stats: [0]=STR [1]=AGI [2]=STA [3]=INT [4]=SPI; -1 = not received yet
-    int32_t playerStats_[5] = {-1, -1, -1, -1, -1};
-    // WotLK secondary combat stats (-1 = not yet received)
-    int32_t playerMeleeAP_    = -1;
-    int32_t playerRangedAP_   = -1;
-    int32_t playerSpellDmgBonus_[7] = {-1,-1,-1,-1,-1,-1,-1}; // per school 0-6
-    int32_t playerHealBonus_  = -1;
-    float playerDodgePct_     = -1.0f;
-    float playerParryPct_     = -1.0f;
-    float playerBlockPct_     = -1.0f;
-    int32_t playerExpertise_        = 0;
-    int32_t playerOffhandExpertise_ = 0;
-    float playerManaRegen_          = 0.0f;  // per second, while not casting
-    float playerManaRegenCasting_   = 0.0f;  // per second, during the five-second rule
-    float playerCritPct_      = -1.0f;
-    float playerRangedCritPct_ = -1.0f;
-    float playerSpellCritPct_[7] = {-1.0f,-1.0f,-1.0f,-1.0f,-1.0f,-1.0f,-1.0f};
-    int32_t playerCombatRatings_[25] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
 
     void performGameObjectInteractionNow(uint64_t guid);
 
@@ -3993,117 +1830,17 @@ private:
     // Vehicle (WotLK): non-zero when player is seated in a vehicle
     uint32_t vehicleId_ = 0;
 
-    uint32_t nextMovementTimestampMs();
-    void updateClientTaxi(float deltaTime);
-
-    // Auction House
-    // Last search params for re-query (pagination, auto-refresh after bid/buyout)
-    struct AuctionSearchParams {
-        std::string name;
-        uint8_t levelMin = 0, levelMax = 0;
-        uint32_t quality = 0xFFFFFFFF;
-        uint32_t itemClass = 0xFFFFFFFF;
-        uint32_t itemSubClass = 0xFFFFFFFF;
-        uint32_t invTypeMask = 0;
-        uint8_t usableOnly = 0;
-        uint32_t offset = 0;
-    };
-    // Routing: which result vector to populate from next SMSG_AUCTION_LIST_RESULT
-    enum class AuctionResultTarget { BROWSE, OWNER, BIDDER };
-
-    // Title cache: maps titleBit → title string (lazy-loaded from CharTitles.dbc)
-    // The strings use "%s" as a player-name placeholder (e.g. "Commander %s", "%s the Explorer").
-    mutable std::unordered_map<uint32_t, std::string> titleNameCache_;
-    mutable std::unordered_map<uint32_t, std::string> titleFormatById_;  // CharTitles id -> format
-    mutable bool titleNameCacheLoaded_ = false;
-    // Combat game tables for the stat flyout: per-class base crit, and the
-    // per-class-per-level Agility ratio (11 classes × 100 levels).
-    mutable std::vector<float> gtMeleeCritBase_;
-    mutable std::vector<float> gtMeleeCrit_;
-    mutable bool gtMeleeCritLoaded_ = false;
-    mutable std::vector<float> gtSpellCritBase_;
-    mutable std::vector<float> gtSpellCrit_;
-    mutable bool gtSpellCritLoaded_ = false;
-    mutable std::vector<float> gtCombatRatings_;       // 32 ratings × 100 levels
-    mutable std::vector<float> gtClassRatingScalar_;   // 11 classes × 32 ratings (ratio column)
-    mutable bool gtCombatRatingsLoaded_ = false;
-    mutable std::vector<float> gtOctRegenHp_, gtRegenHpPerSpt_, gtRegenMpPerSpt_;
-    mutable bool gtRegenLoaded_ = false;
-    // Shared: class base + stat × per-class-per-level ratio, ×100 for a percent.
-    float critPercentFromGameTable(std::vector<float>& baseCache,
-                                   std::vector<float>& ratioCache, bool& loaded,
-                                   const char* baseDbc, const char* ratioDbc,
-                                   int statIdx) const;
-    // Substitutes the player's name into a title's "%s" slot; shared by the
-    // by-bit (worn) and by-id (quest reward) title lookups.
-    std::string formatTitleString(const std::string& fmt) const;
-    std::string formatTitleStringFor(const std::string& fmt, const std::string& name) const;
-    void loadTitleNameCache() const;
-    // Set of title bit-indices known to the player (from SMSG_TITLE_EARNED).
-    std::unordered_set<uint32_t> knownTitleBits_;
-    // Currently selected title bit, or -1 for no title. Updated from PLAYER_CHOSEN_TITLE.
-    int32_t chosenTitleBit_ = -1;
-
-    // Achievement caches (lazy-loaded from Achievement.dbc on first earned event)
-    std::unordered_map<uint32_t, std::string> achievementNameCache_;
     /// Read once on the first ask, like the other DBC-backed caches here.
     mutable std::unordered_map<uint32_t, ExtendedCostEntry> extendedCostCache_;
     mutable bool extendedCostCacheLoaded_ = false;
     mutable std::unordered_map<uint32_t, ContinentBounds> continentBoundsCache_;
-    mutable std::vector<ReputationEntry> reputationList_;
-    mutable bool reputationListBuilt_ = false;
-    /// factionId → the faction it is grouped under, from Faction.dbc field 18.
-    /// Filled by loadFactionNameCache alongside the names and the repList map.
-    mutable std::unordered_map<uint32_t, uint32_t> factionParent_;
-    /// The drawn rows, rebuilt whenever the collapse set changes rather than
-    /// on every ask - the reputation panel calls GetFactionInfo once per row
-    /// per redraw.
-    mutable std::vector<ReputationRow> reputationRows_;
-    mutable bool reputationRowsDirty_ = true;
-    /// Headers the player has closed. Client-side only: the server has no
-    /// opinion about it, so it is saved with the rest of the character config.
-    std::unordered_set<uint32_t> collapsedFactionIds_;
-    std::unordered_map<uint32_t, std::string> achievementDescCache_;
-    std::unordered_map<uint32_t, uint32_t>    achievementPointsCache_;
-    std::unordered_map<uint32_t, uint32_t>    achievementIconCache_;  // achievementId → SpellIcon.dbc ID
-    std::unordered_map<uint32_t, uint32_t>    achievementFlagsCache_; // achievementId → Achievement.dbc Flags
-    int selectedGuildRank_ = 1;
-    PendingGuildRank pendingGuildRank_;
     std::vector<CurrencyType> currencyTypes_;
     bool currencyTypesLoaded_ = false;
     std::unordered_map<uint32_t, BattlemasterEntry> battlemasterList_;
     std::vector<BattlemasterEntry> battlegroundTypes_;  // arenas filtered out, id-ordered
     bool battlemasterListLoaded_ = false;
-    std::unordered_map<uint32_t, uint32_t>    achievementCategoryCache_;  // achievementId → Achievement_Category.dbc ID
-    // Achievement ids per category, in the DBC's own order - the panel lists a
-    // category by index, so the order has to be stable across calls.
-    std::unordered_map<uint32_t, std::vector<uint32_t>> categoryAchievements_;
-    std::unordered_map<uint32_t, AchievementCategoryInfo> achievementCategoryInfo_;
-    std::vector<uint32_t> achievementCategoryOrder_;
-    std::vector<uint32_t> statisticCategoryOrder_;
-    std::unordered_map<uint32_t, uint32_t> achievementSupercedes_;
-    std::unordered_map<uint32_t, uint32_t> achievementSupercededBy_;
-    bool achievementCategoriesLoaded_ = false;
     bool glyphPropertiesLoaded_ = false;
     std::unordered_map<uint32_t, uint32_t> glyphSpellCache_;
-    std::unordered_map<uint32_t, std::vector<AchievementCriterion>> achievementCriteria_;
-    std::unordered_map<uint32_t, AchievementCriterionIndex> achievementCriterionById_;
-    bool achievementCriteriaLoaded_ = false;
-    // Client-side, like the quest tracker's set - nothing is sent for it.
-    std::unordered_set<uint32_t> trackedAchievements_;
-    bool achievementNameCacheLoaded_ = false;
-    // Set of achievement IDs earned by the player (populated from SMSG_ALL_ACHIEVEMENT_DATA)
-    std::unordered_set<uint32_t> earnedAchievements_;
-    // Earn dates: achievementId → WoW PackedTime (from SMSG_ACHIEVEMENT_EARNED / SMSG_ALL_ACHIEVEMENT_DATA)
-    std::unordered_map<uint32_t, uint32_t> achievementDates_;
-    // Criteria progress: criteriaId → current value (from SMSG_CRITERIA_UPDATE)
-    std::unordered_map<uint32_t, uint64_t> criteriaProgress_;
-    void handleAllAchievementData(network::Packet& packet);
-
-    // Per-player achievement data from SMSG_RESPOND_INSPECT_ACHIEVEMENTS
-    // Key: inspected player's GUID; value: set of earned achievement IDs
-    std::unordered_map<uint64_t, std::unordered_map<uint32_t, uint32_t>> inspectedPlayerAchievements_;
-    uint64_t achievementComparisonGuid_ = 0;
 
     /// Sort moves still to send, one per tick. See sortBags.
     std::deque<Inventory::SwapOp> sortSwapQueue_;
@@ -4147,10 +1884,6 @@ private:
     // Callbacks
     WorldConnectSuccessCallback onSuccess;
     WorldConnectFailureCallback onFailure;
-    CharCreateCallback charCreateCallback_;
-    CharDeleteCallback charDeleteCallback_;
-    ServerPatchManifestCallback serverPatchManifestCallback_;
-    CharLoginFailCallback charLoginFailCallback_;
     bool pendingCharDeleteResponse_ = false;
     uint64_t pendingDeleteGuid_ = 0;
     float pendingDeleteTimer_ = 0.0f;
@@ -4180,40 +1913,15 @@ private:
     /// Whether a ping has gone out to ask about the silence.
     bool worldSilenceProbed_ = false;
 
-    // ---- XP tracking ----
-    uint32_t playerXp_ = 0;
-    uint32_t playerNextLevelXp_ = 0;
-    uint32_t playerRestedXp_ = 0;
-    bool isResting_ = false;
-    uint32_t serverPlayerLevel_ = 1;
-
     // ---- Light override (SMSG_OVERRIDE_LIGHT) ----
 
     // ---- Player skills (the skills themselves are the spell book's) ----
     /// Headings the player has closed. Client-side, like the reputation ones,
     /// and saved with the rest of the character config for the same reason.
     std::unordered_set<uint32_t> collapsedSkillCategories_;
-    // Apply packed kill counts from player update fields to a quest entry that has
-    // already had its killObjectives populated from SMSG_QUEST_QUERY_RESPONSE.
-    void applyPackedKillCountsFromFields(QuestLogEntry& quest);
-
-    NpcDeathCallback npcDeathCallback_;
-    NpcAggroCallback npcAggroCallback_;
-    NpcRespawnCallback npcRespawnCallback_;
-    StandStateCallback standStateCallback_;
-    AppearanceChangedCallback appearanceChangedCallback_;
-    PlayerModelRebuildCallback playerModelRebuildCallback_;
     FaceCameraProvider faceCameraProvider_;
     bool suppressMeleeSwingAnim_ = false;
     // lastMeleeSwingMs_ moved to CombatHandler
-    UnitAnimHintCallback unitAnimHintCallback_;
-    UnitMoveFlagsCallback unitMoveFlagsCallback_;
-    NpcSwingCallback npcSwingCallback_;
-    HitReactionCallback hitReactionCallback_;
-    StunStateCallback stunStateCallback_;
-    StealthStateCallback stealthStateCallback_;
-    PlayerHealthCallback playerHealthCallback_;
-    LevelUpDeltas lastLevelUpDeltas_;
     /// PageTextMaterial.dbc is seven rows and is read once on the first ask,
     /// like the other DBC-backed caches here.
     mutable std::unordered_map<uint32_t, std::string> pageTextMaterialNames_;
@@ -4221,39 +1929,6 @@ private:
     /// Languages.dbc, read once on the first ask like the caches beside it.
     mutable std::unordered_map<uint32_t, std::string> languageNames_;
     mutable bool languageNamesLoaded_ = false;
-    OtherPlayerMountCallback otherPlayerMountCallback_;
-    AreaDiscoveryCallback areaDiscoveryCallback_;
-    MountCallback mountCallback_;
-    TaxiPrecacheCallback taxiPrecacheCallback_;
-    TaxiOrientationCallback taxiOrientationCallback_;
-    PlayerPositionCorrectionCallback playerPositionCorrectionCallback_;
-    TaxiFlightStartCallback taxiFlightStartCallback_;
-    uint32_t currentMountDisplayId_ = 0;
-    uint32_t mountAuraSpellId_ = 0;       // Spell ID of the aura that caused mounting (for CMSG_CANCEL_AURA fallback)
-    bool playerDead_ = false;
-    bool releasedSpirit_ = false;
-    uint32_t corpseMapId_ = 0;
-    bool corpsePositionValid_ = false;
-    float corpseX_ = 0.0f, corpseY_ = 0.0f, corpseZ_ = 0.0f;
-    uint64_t corpseGuid_ = 0;
-    // Absolute time (ms since epoch) when PvP corpse-reclaim delay expires.
-    // 0 means no active delay (reclaim allowed immediately upon proximity).
-    uint64_t corpseReclaimAvailableMs_ = 0;
-    // Last announced corpse proximity. canReclaimCorpse() is a predicate this
-    // client's own button polled every frame, so the crossing was never an
-    // event; CORPSE_IN_RANGE and CORPSE_OUT_OF_RANGE are edges, and FrameXML
-    // raises its reclaim prompt from them.
-    bool corpseInRangeAnnounced_ = false;
-    // Where the server says the spirit healer is - the graveyard a release
-    // would send the player to. SMSG_DEATH_RELEASE_LOC carries it and it used
-    // to be read and logged and nothing else, so this client knew exactly where
-    // to point a ghost and never pointed anywhere.
-    //
-    // The server withdraws it by sending map id -1, which is how a resurrect
-    // clears the marker.
-    bool deathReleaseValid_ = false;
-    uint32_t deathReleaseMapId_ = 0;
-    glm::vec3 deathReleaseCanonical_{0.0f};
     // Death Knight runes (class 6): slots 0-1=Blood, 2-3=Unholy, 4-5=Frost initially
     std::array<RuneSlot, 6> playerRunes_ = [] {
         std::array<RuneSlot, 6> r{};
@@ -4262,19 +1937,10 @@ private:
         r[4].type = r[5].type = RuneType::Frost;
         return r;
     }();
-    uint64_t pendingSpiritHealerGuid_ = 0;
-    bool resurrectPending_ = false;
-    bool resurrectRequestPending_ = false;
-    bool selfResAvailable_ = false;  // SMSG_PRE_RESURRECT received - Reincarnation/Twisting Nether
     // ---- Talent wipe confirm dialog ----
     // (talent wipe confirm state lives in SpellHandler)
     // ---- Pet talent respec confirm dialog ----
     // (pet unlearn confirm state lives in SpellHandler)
-    bool resurrectIsSpiritHealer_ = false;  // true = SMSG_SPIRIT_HEALER_CONFIRM, false = SMSG_RESURRECT_REQUEST
-    uint64_t resurrectCasterGuid_ = 0;
-    std::string resurrectCasterName_;
-    bool repopPending_ = false;
-    uint64_t lastRepopRequestMs_ = 0;
 
     // ---- Equipment sets (SMSG_EQUIPMENT_SET_LIST) ----
     struct EquipmentSet {
@@ -4286,20 +1952,7 @@ private:
         std::array<uint64_t, 19> itemGuids{};
     };
 
-    // ---- Server-triggered audio ----
-    PlayMusicCallback playMusicCallback_;
-    PlaySoundCallback playSoundCallback_;
-    PlayPositionalSoundCallback playPositionalSoundCallback_;
-
     // ---- UI error frame callback ----
-
-    // ---- Reputation change callback ----
-
-    // ---- PvP honor credit callback ----
-    PvpHonorCallback pvpHonorCallback_;
-
-    // ---- Item loot callback ----
-
 
     // ---- Quest completion callback ----
 
@@ -4308,12 +1961,6 @@ private:
     float       gmTicketWaitHours_ = 0.0f;  ///< Server-estimated wait time in hours
     bool        gmSupportAvailable_ = true; ///< GM support system online (SMSG_GMTICKET_SYSTEMSTATUS)
 
-    /// What the resurrect offer said about itself: whether accepting brings
-    /// resurrection sickness, and whether a reclaim delay applies. Both decide
-    /// which of the three dialogs the interface raises.
-    bool        resurrectHasSickness_ = false;
-    bool        resurrectHasTimer_ = true;
-    uint64_t    areaSpiritHealerGuid_ = 0;
     /// The conversation last asked for, until the server answers it.
     ///
     /// A server that refuses one says nothing - out of reach, a creature that
@@ -4333,14 +1980,6 @@ private:
     /// through. Called from the dispatch for every packet that opens an NPC's
     /// window.
     void noteNpcAnswered() { pendingNpcHello_.guid = 0; }
-    float       areaSpiritHealerSeconds_ = 0.0f;
-
-    // ---- WotLK Calendar: pending invite counter ----
-    uint32_t    calendarPendingInvites_ = 0; ///< Unacknowledged calendar invites (SMSG_CALENDAR_SEND_NUM_PENDING)
-    /// The whole calendar, as of the server's last answer to a request for it.
-    CalendarData calendarData_;
-    /// One event in full, as of the last one opened.
-    CalendarEventDetail calendarEventDetail_;
 
     /// What this hears from its own domains. Last, so it ends before anything
     /// a handler uses goes.

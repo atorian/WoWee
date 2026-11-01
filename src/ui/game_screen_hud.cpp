@@ -1,10 +1,16 @@
+#include "group/services/group.hpp"
+#include "title/services/titles.hpp"
+#include "trade/services/trade.hpp"
+#include "guild/services/guild.hpp"
+#include "contacts/services/contacts.hpp"
+#include "duel/services/duels.hpp"
+#include "battleground/services/battlegrounds.hpp"
 #include "ui/game_screen.hpp"
 #include "core/screen_recording.hpp"
 #include "ui/sight_cache.hpp"
 #include "rendering/cpu_stage_times.hpp"
 #include "addons/lua_api_registrations.hpp"
 #include "ui/ui_texture_load.hpp"
-#include "ui/ui_upload_budget.hpp"
 #include "core/helm_visual.hpp"
 #include "ui/ui_raid_icons.hpp"
 #include "ui/ui_colors.hpp"
@@ -12,6 +18,7 @@
 #include "ui/nameplate_stacking.hpp"
 #include "rendering/vk_context.hpp"
 #include "core/application.hpp"
+#include "core/window.hpp"
 #include "core/appearance_composer.hpp"
 #include "ui/map_window.hpp"
 #include "addons/addon_manager.hpp"
@@ -44,6 +51,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "core/geoset_rules.hpp"
 #include "pipeline/item_textures.hpp"
 
@@ -93,21 +101,16 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
     auto* charRenderer = renderer->getCharacterRenderer();
     if (!charRenderer) return;
 
-    auto* assetManager = app.getAssetManager();
+    if (!services_.gameTables) return;
+    const pipeline::GameTables& tables = *services_.gameTables;
 
-    // Load ItemDisplayInfo.dbc for geosetGroup lookup
-    std::shared_ptr<pipeline::DBCFile> displayInfoDbc;
-    if (assetManager) {
-        displayInfoDbc = assetManager->loadDBC("ItemDisplayInfo.dbc");
-    }
-    const auto* idiL = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-    const uint32_t geosetGroup1Field = idiL ? (*idiL)["GeosetGroup1"] : 7;
-    const uint32_t geosetGroup2Field = idiL ? (*idiL)["GeosetGroup2"] : 8;
-    const uint32_t geosetGroup3Field = idiL ? (*idiL)["GeosetGroup3"] : 9;
+    const pipeline::RequiredTable displayInfoDbc(tables, "ItemDisplayInfo.dbc", "the player's equipment");
+    const uint32_t geosetGroup1Field = displayInfoDbc.column("GeosetGroup1");
+    const uint32_t geosetGroup2Field = displayInfoDbc.column("GeosetGroup2");
+    const uint32_t geosetGroup3Field = displayInfoDbc.column("GeosetGroup3");
 
     auto getGeosetGroup = [&](uint32_t displayInfoId, uint32_t fieldIdx) -> uint32_t {
-        if (!displayInfoDbc || displayInfoId == 0) return 0;
+        if (displayInfoId == 0) return 0;
         int32_t recIdx = displayInfoDbc->findRecordById(displayInfoId);
         if (recIdx < 0) return 0;
         return displayInfoDbc->getUInt32(static_cast<uint32_t>(recIdx), fieldIdx);
@@ -262,8 +265,8 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
     // and turning the helm off left the player bald under nothing.
     bool helmShown = true, cloakShown = true;
     if (auto* gh = app.getGameHandler()) {
-        helmShown = gh->isHelmVisible();
-        cloakShown = gh->isCloakVisible();
+        helmShown = gh->player().helmVisible();
+        cloakShown = gh->player().cloakVisible();
     }
 
     // Back/Cloak: inventoryType 16 → group 15
@@ -306,8 +309,7 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
         }
         // A circlet, tiara or crown sits over the hair rather than covering it,
         // and the data says which does what - see core::helmHidesHair.
-        if (auto* assets = app.getAssetManager();
-            assets && core::helmHidesHair(*assets, headDisplayId, genderId)) {
+        if (core::helmHidesHair(tables, headDisplayId, genderId)) {
             for (auto it = geosets.begin(); it != geosets.end();) {
                 if (*it != 0 && (*it / 100) == 0) it = geosets.erase(it);
                 else ++it;
@@ -380,7 +382,7 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
     if (!charRenderer) return;
 
     auto* assetManager = app.getAssetManager();
-    if (!assetManager) return;
+    if (!assetManager || !services_.gameTables) return;
 
     const auto& bodySkinPath = app.getBodySkinPath();
     const auto& underwearPaths = app.getUnderwearPaths();
@@ -391,12 +393,10 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
     // Component directory names indexed by region
 
     // Load ItemDisplayInfo.dbc
-    auto displayInfoDbc = assetManager->loadDBC("ItemDisplayInfo.dbc");
-    if (!displayInfoDbc) return;
-    const auto* idiL = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
+    const pipeline::RequiredTable displayInfoDbc(*services_.gameTables, "ItemDisplayInfo.dbc",
+                                                 "the player's equipment textures");
     uint32_t texRegionFields[8];
-    pipeline::getItemDisplayInfoTextureFields(*displayInfoDbc, idiL, texRegionFields);
+    pipeline::getItemDisplayInfoTextureFields(displayInfoDbc, texRegionFields);
 
     // Collect equipment texture regions from all equipped items
     std::vector<std::pair<int, std::string>> regionLayers;
@@ -471,9 +471,8 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
         if (cloakDisplayId > 0) {
             int32_t recIdx = displayInfoDbc->findRecordById(cloakDisplayId);
             if (recIdx >= 0) {
-                // DBC field 3 = modelTexture_1 (cape texture name)
-                const auto* dispL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-                std::string capeName = displayInfoDbc->getString(static_cast<uint32_t>(recIdx), dispL ? (*dispL)["LeftModelTexture"] : 3);
+                std::string capeName = displayInfoDbc->getString(static_cast<uint32_t>(recIdx),
+                                                                 displayInfoDbc.column("LeftModelTexture"));
                 if (!capeName.empty()) {
                     // This asked for one path only - ObjectComponents, no
                     // suffix - and a cape whose art is filed anywhere else
@@ -526,8 +525,8 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
         wm->setMapName(minimap->getMapName());
     }
     wm->setServerExplorationMask(
-        gameHandler.getPlayerExploredZoneMasks(),
-        gameHandler.hasPlayerExploredZoneMasks());
+        gameHandler.spells().exploredZoneMasks(),
+        gameHandler.spells().hasExploredZoneMasks());
     // Which zone the player is actually in, rather than which WorldMapArea box
     // they happen to sit deepest inside. The boxes are axis-aligned rectangles
     // around irregular zones and overlap their neighbours heavily, so opening
@@ -537,8 +536,8 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
     // Party member dots on world map
     {
         std::vector<rendering::WorldMapPartyDot> dots;
-        if (gameHandler.isInGroup()) {
-            const auto& partyData = gameHandler.getPartyData();
+        if (group::orNoGroup(services_.group).isInGroup()) {
+            const auto& partyData = group::orNoGroup(services_.group).getPartyData();
             for (const auto& member : partyData.members) {
                 if (!member.isOnline || !member.hasPartyStats) continue;
                 if (member.posX == 0 && member.posY == 0) continue;
@@ -568,13 +567,13 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
         //
         // The same two group colours the minimap uses, so a flag carrier is
         // the same colour on both.
-        {
-            for (const auto& bp : gameHandler.getBgPlayerPositions()) {
+        if (auto* battlegrounds = services_.battlegrounds) {
+            for (const auto& bp : battlegrounds->getBgPlayerPositions()) {
                 // Packet coords are canonical: wowX north, wowY west.
                 const glm::vec3 rpos =
                     core::coords::canonicalToRender(glm::vec3(bp.wowX, bp.wowY, 0.0f));
                 dots.push_back({ .renderPos = rpos, .color = ui::bgGroupColor(bp.group),
-                                 .name = gameHandler.lookupName(bp.guid) });
+                                 .name = gameHandler.queryCache().lookupName(bp.guid) });
             }
         }
         wm->setPartyDots(std::move(dots));
@@ -583,12 +582,12 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
     // Taxi node markers on world map
     {
         std::vector<rendering::WorldMapTaxiNode> taxiNodes;
-        const auto& nodes = gameHandler.getTaxiNodes();
-        uint32_t currentTaxiNode = gameHandler.getTaxiCurrentNode();
+        const auto& nodes = gameHandler.movement().getTaxiNodes();
+        uint32_t currentTaxiNode = gameHandler.movement().getTaxiCurrentNode();
         const bool playerAlliance = gameHandler.isPlayerAlliance();
         taxiNodes.reserve(nodes.size());
         for (const auto& [id, node] : nodes) {
-            const bool known = gameHandler.isKnownTaxiNode(id);
+            const bool known = gameHandler.movement().isKnownTaxiNode(id);
             // Undiscovered nodes are shown so the player can see where flight
             // paths exist, but only ones their faction can actually use. A node's
             // faction is inferred from which taxi mount TaxiNodes.dbc lists:
@@ -615,9 +614,9 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
             wtn.wowZ  = canonical.z;
             wtn.name  = node.name;
             wtn.known = known;
-            wtn.costCopper = gameHandler.getTaxiCostTo(id);
+            wtn.costCopper = gameHandler.movement().getTaxiCostTo(id);
             wtn.current    = (id == currentTaxiNode);
-            wtn.reachable  = gameHandler.hasTaxiRouteTo(id);
+            wtn.reachable  = gameHandler.movement().hasTaxiRouteTo(id);
             taxiNodes.push_back(std::move(wtn));
         }
         wm->setTaxiNodes(std::move(taxiNodes));
@@ -626,7 +625,7 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
     // Quest objective and quest-giver markers on the world map.
     {
         std::vector<rendering::WorldMap::QuestPoi> qpois;
-        const auto& questStatuses = gameHandler.getNpcQuestStatuses();
+        const auto& questStatuses = gameHandler.quests().getNpcQuestStatuses();
         // Add authoritative NPC statuses first. Some servers also emit a
         // generic POI at the NPC's position; that duplicate is filtered below
         // so it cannot leave a teal objective circle on a quest giver.
@@ -658,11 +657,11 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
         // for that quest, and abandoning one never comes with an answer - so
         // without this an abandoned quest's objectives stay on the map.
         std::unordered_set<uint32_t> questsInLog;
-        for (const auto& quest : gameHandler.getQuestLog()) {
+        for (const auto& quest : gameHandler.quests().getQuestLog()) {
             if (quest.questId != 0) questsInLog.insert(quest.questId);
         }
         size_t objectivePois = 0;
-        for (const auto& poi : gameHandler.getGossipPois()) {
+        for (const auto& poi : gameHandler.quests().getGossipPois()) {
             // Keep ordinary gossip navigation POIs, and quest points for a
             // quest in the log.
             //
@@ -704,7 +703,7 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
                 // not an objective area. Completed quests use a yellow ?,
                 // while in-progress endpoints use a gray ?.
                 qp.kind = rendering::WorldMap::QuestPoi::Kind::INCOMPLETE;
-                for (const auto& quest : gameHandler.getQuestLog()) {
+                for (const auto& quest : gameHandler.quests().getQuestLog()) {
                     if (quest.questId != poi.data) continue;
                     if (quest.complete) {
                         qp.kind = rendering::WorldMap::QuestPoi::Kind::REWARD;
@@ -731,8 +730,8 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
     // Corpse marker: show skull X on world map when ghost with unclaimed corpse
     {
         float corpseCanX = 0.0f, corpseCanY = 0.0f;
-        bool ghostWithCorpse = gameHandler.isPlayerGhost() &&
-                               gameHandler.getCorpseCanonicalPos(corpseCanX, corpseCanY);
+        bool ghostWithCorpse = gameHandler.combat().isPlayerGhost() &&
+                               gameHandler.combat().getCorpseCanonicalPos(corpseCanX, corpseCanY);
         glm::vec3 corpseRender = ghostWithCorpse
             ? core::coords::canonicalToRender(glm::vec3(corpseCanX, corpseCanY, 0.0f))
             : glm::vec3{};
@@ -743,8 +742,8 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
         // place to walk back from.
         uint32_t healerMap = 0;
         glm::vec3 healerCanonical(0.0f);
-        const bool haveHealer = gameHandler.isPlayerDead() &&
-                                gameHandler.getDeathReleaseLocation(healerMap, healerCanonical) &&
+        const bool haveHealer = gameHandler.combat().isPlayerDead() &&
+                                gameHandler.combat().getDeathReleaseLocation(healerMap, healerCanonical) &&
                                 healerMap == gameHandler.getCurrentMapId();
         wm->setGraveyardPos(haveHealer,
                             haveHealer ? core::coords::canonicalToRender(healerCanonical)
@@ -760,7 +759,7 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
         for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
             if (!entity || entity->getType() != game::ObjectType::UNIT) continue;
             auto unit = std::static_pointer_cast<game::Unit>(entity);
-            const int rank = gameHandler.getCreatureRank(unit->getEntry());
+            const int rank = gameHandler.queryCache().getCreatureRank(unit->getEntry());
             if (rank != 2 && rank != 4) continue;      // 2 = Rare Elite, 4 = Rare
             if (unit->getHealth() == 0) continue;       // skip dead/looted rares
             rendering::WorldMapRareMark m;
@@ -801,14 +800,14 @@ void GameScreen::renderWorldMap(game::GameHandler& gameHandler) {
     // list a few lines up already stands aside for that element; this mode did
     // not, so talking to a flight master put both on screen at once - TaxiFrame
     // over this client's own map, each with its own set of pins.
-    const bool taxiWanted = gameHandler.isTaxiWindowOpen() &&
+    const bool taxiWanted = gameHandler.movement().isTaxiWindowOpen() &&
                             !frameXmlOwns(UiElement::Taxi);
     if (taxiWanted && !wm->isTaxiMapOpen()) {
         auto* gh = &gameHandler;
         wm->openTaxiMap(
-            [gh](uint32_t dest) { return gh->getTaxiRouteTo(dest); },
-            [gh](uint32_t dest) { gh->activateTaxi(dest); },
-            [gh]() { gh->closeTaxi(); });
+            [gh](uint32_t dest) { return gh->movement().getTaxiRouteTo(dest); },
+            [gh](uint32_t dest) { gh->movement().activateTaxi(dest); },
+            [gh]() { gh->movement().closeTaxi(); });
     } else if (!taxiWanted && wm->isTaxiMapOpen()) {
         wm->closeTaxiMap();
     }
@@ -845,82 +844,9 @@ void GameScreen::renderWorldMap(game::GameHandler& gameHandler) {
 // ============================================================
 
 VkDescriptorSet GameScreen::getSpellIcon(uint32_t spellId, pipeline::AssetManager* am) {
-    if (spellId == 0 || !am) return VK_NULL_HANDLE;
-
-    // Check cache first
-    auto cit = spellIconCache_.find(spellId);
-    if (cit != spellIconCache_.end()) return cit->second;
-
-    // Lazy-load SpellIcon.dbc and Spell.dbc icon IDs
-    if (!spellIconDbLoaded_) {
-        spellIconDbLoaded_ = true;
-
-        // Load SpellIcon.dbc: field 0 = ID, field 1 = icon path
-        pipeline::loadSpellIconPaths(am, spellIconPaths_);
-
-        // Load Spell.dbc: SpellIconID field
-        auto spellDbc = am->loadDBC("Spell.dbc");
-        const auto* spellL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("Spell") : nullptr;
-        if (spellDbc && spellDbc->isLoaded()) {
-            uint32_t fieldCount = spellDbc->getFieldCount();
-            // Helper to load icons for a given field layout
-            auto tryLoadIcons = [&](uint32_t idField, uint32_t iconField) {
-                spellIconIds_.clear();
-                if (iconField >= fieldCount) return;
-                for (uint32_t i = 0; i < spellDbc->getRecordCount(); i++) {
-                    uint32_t id = spellDbc->getUInt32(i, idField);
-                    uint32_t iconId = spellDbc->getUInt32(i, iconField);
-                    if (id > 0 && iconId > 0) {
-                        spellIconIds_[id] = iconId;
-                    }
-                }
-            };
-
-            // Use the active expansion layout when its fields are present in
-            // the loaded DBC. TBC/WotLK/Classic place IconID in different
-            // columns, so reading the WotLK default for every client leaves
-            // action bars and spell UI without icons.
-            uint32_t iconField = 133; // WotLK default
-            uint32_t idField = 0;
-            if (spellL) {
-                try {
-                    uint32_t layoutId = (*spellL)["ID"];
-                    uint32_t layoutIcon = (*spellL)["IconID"];
-                    if (layoutId < fieldCount && layoutIcon < fieldCount) {
-                        iconField = layoutIcon;
-                        idField = layoutId;
-                    }
-                } catch (...) {}
-            }
-            tryLoadIcons(idField, iconField);
-        }
-    }
-
-    // Rate-limit GPU uploads per frame to prevent stalls when many icons are uncached
-    // (e.g., first login, after loading screen, or many new auras appearing at once).
-    if (!claimUiTextureUpload()) return VK_NULL_HANDLE;  // defer - do NOT cache null here
-
-    // Look up spellId -> SpellIconID -> icon path
-    auto iit = spellIconIds_.find(spellId);
-    if (iit == spellIconIds_.end()) {
-        spellIconCache_[spellId] = VK_NULL_HANDLE;
-        return VK_NULL_HANDLE;
-    }
-
-    auto pit = spellIconPaths_.find(iit->second);
-    if (pit == spellIconPaths_.end()) {
-        spellIconCache_[spellId] = VK_NULL_HANDLE;
-        return VK_NULL_HANDLE;
-    }
-
-    // Path from DBC has no extension - append .blp
-    std::string iconPath = pit->second + ".blp";
-    // Cached either way, failures included: the HUD asks for this every frame
-    // an aura is up, so a missing icon must not be retried each time.
-    VkDescriptorSet ds =
-        uploadUiTextureFromBlp(am, iconPath, services_.window);
-    spellIconCache_[spellId] = ds;
-    return ds;
+    if (!spellId || !am || !services_.gameHandler) return VK_NULL_HANDLE;
+    const auto path = services_.gameHandler->getSpellIconPath(spellId);
+    return path.empty() ? VK_NULL_HANDLE : uploadUiTextureFromBlp(am, path, services_.window);
 }
 
 // ============================================================
@@ -939,7 +865,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
     if (gameHandler.getState() != game::WorldState::IN_WORLD) return;
 
     // Reset mouseover each frame; we'll set it below when the cursor is over a nameplate
-    gameHandler.setMouseoverGuid(0);
+    gameHandler.combat().setMouseoverGuid(0);
 
     auto* appRenderer = services_.renderer;
     if (!appRenderer) return;
@@ -955,7 +881,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
     const glm::mat4 viewProj = camera->getProjectionMatrix() * camera->getViewMatrix();
     const glm::vec3 camPos   = camera->getPosition();
     const uint64_t  playerGuid = gameHandler.getPlayerGuid();
-    const uint64_t  targetGuid = gameHandler.getTargetGuid();
+    const uint64_t  targetGuid = gameHandler.combat().getTargetGuid();
 
     refreshQuestObjectiveCache(gameHandler);
     const auto& questKillEntries = minimapQuestCreatureEntries_;
@@ -1033,7 +959,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         // An entry whose creature info has not arrived yet answers 0, which is
         // not 11, so an unknown unit keeps its plate rather than losing it.
         const bool isTotem =
-            !isPlayer && gameHandler.getCreatureType(unit->getEntry()) == 11;
+            !isPlayer && gameHandler.queryCache().getCreatureType(unit->getEntry()) == 11;
 
         // Pets and guardians, which the panels separate and which separate the
         // same way the game does: both are summons carrying a summoner, and
@@ -1173,7 +1099,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         }
         // Creature rank for border styling (Elite=gold double border, Boss=red, Rare=silver)
         int creatureRank = -1;
-        if (!isPlayer) creatureRank = gameHandler.getCreatureRank(unit->getEntry());
+        if (!isPlayer) creatureRank = gameHandler.queryCache().getCreatureRank(unit->getEntry());
 
         // Border: gold = currently selected, orange = targeting player, dark = default
         ImU32 borderColor = isTarget
@@ -1251,13 +1177,13 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
             const bool castBarAllowed =
                 isTarget || !isHostile ||
                 addons::storedCVarValue("showVKeyCastBar", "1") != "0";
-            const auto* cs = castBarAllowed ? gameHandler.getUnitCastState(guid) : nullptr;
+            const auto* cs = castBarAllowed ? gameHandler.spells().getUnitCastState(guid) : nullptr;
             if (cs && cs->casting && cs->timeTotal > 0.0f) {
                 float castPct = std::clamp((cs->timeTotal - cs->timeRemaining) / cs->timeTotal, 0.0f, 1.0f);
                 const float cbH = 6.0f * settingsPanel_.nameplateScale_;
 
                 // Spell icon + name above the cast bar
-                const std::string& spellName = gameHandler.getSpellName(cs->spellId);
+                const std::string& spellName = gameHandler.spells().getSpellName(cs->spellId);
                 {
                     auto* castAm = services_.assetManager;
                     VkDescriptorSet castIcon = (cs->spellId && castAm)
@@ -1321,14 +1247,14 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         // player-applied auras on the current hostile target.
         // Colors: Magic=blue, Curse=purple, Disease=yellow, Poison=green, Other=grey
         if (isTarget && unit->isHostile() && !isCorpse) {
-            const auto& auras = gameHandler.getTargetAuras();
+            const auto& auras = gameHandler.spells().getTargetAuras();
             const uint64_t pguid = gameHandler.getPlayerGuid();
             const float dotSize = 6.0f * settingsPanel_.nameplateScale_;
             const float dotGap  = 2.0f;
             float dotX = barX;
             for (const auto& aura : auras) {
                 if (aura.isEmpty() || aura.casterGuid != pguid) continue;
-                uint8_t dispelType = gameHandler.getSpellDispelType(aura.spellId);
+                uint8_t dispelType = gameHandler.spells().getSpellDispelType(aura.spellId);
                 ImU32 dotCol;
                 switch (dispelType) {
                     case 1:  dotCol = IM_COL32( 64, 128, 255, A(210)); break; // Magic   - blue
@@ -1400,7 +1326,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                     ImVec2 mouse = ImGui::GetMousePos();
                     if (mouse.x >= dotX && mouse.x < dotX + dotSize &&
                         mouse.y >= nameplateBottom && mouse.y < nameplateBottom + dotSize) {
-                        const std::string& dotSpellName = gameHandler.getSpellName(aura.spellId);
+                        const std::string& dotSpellName = gameHandler.spells().getSpellName(aura.spellId);
                         if (!dotSpellName.empty()) {
                             if (remainMs > 0) {
                                 int secs = remainMs / 1000;
@@ -1462,7 +1388,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
             const auto& fields = entityPtr->getFields();
             auto tit = fields.find(game::fieldIndex(game::UF::PLAYER_CHOSEN_TITLE));
             if (tit != fields.end() && tit->second != 0) {
-                titledName = gameHandler.getFormattedTitleFor(tit->second, unitName);
+                titledName = title::orNoTitles(services_.titles).getFormattedTitleFor(tit->second, unitName);
             }
         }
         const std::string& shownName = titledName.empty() ? unitName : titledName;
@@ -1475,14 +1401,14 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                 snprintf(labelBuf, sizeof(labelBuf), "%s", shownName.c_str());
             else {
                 // Name query may be pending; request it now to ensure it gets resolved
-                gameHandler.queryPlayerName(unit->getGuid());
+                gameHandler.queryCache().queryPlayerName(unit->getGuid());
                 if (level > 0)
                     snprintf(labelBuf, sizeof(labelBuf), "Player (%u)", level);
                 else
                     snprintf(labelBuf, sizeof(labelBuf), "Player");
             }
         } else if (level > 0) {
-            uint32_t playerLevel = gameHandler.getPlayerLevel();
+            uint32_t playerLevel = gameHandler.player().level();
             // Show skull for units more than 10 levels above the player
             if (playerLevel > 0 && level > playerLevel + 10)
                 snprintf(labelBuf, sizeof(labelBuf), "?? %s", unitName.c_str());
@@ -1520,12 +1446,12 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                 addons::storedCVarValue("unitNamePlayerGuild", "1") != "0"
                     ? gameHandler.getEntityGuildId(guid) : 0;
             if (guildId != 0) {
-                const std::string& gn = gameHandler.lookupGuildName(guildId);
+                const std::string& gn = guild::orNoGuild(services_.guild).lookupGuildName(guildId);
                 if (!gn.empty()) subLabel = "<" + gn + ">";
             }
         } else {
             // NPC subtitle (e.g. "<Reagent Vendor>", "<Innkeeper>")
-            std::string sub = gameHandler.getCachedCreatureSubName(unit->getEntry());
+            std::string sub = gameHandler.queryCache().getCachedCreatureSubName(unit->getEntry());
             if (!sub.empty()) subLabel = "<" + sub + ">";
         }
         if (!subLabel.empty()) nameY -= 10.0f;  // shift name up for sub-label line
@@ -1562,8 +1488,8 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         }
 
         // Group leader crown to the right of the name on player nameplates
-        if (isPlayer && gameHandler.isInGroup() &&
-            gameHandler.getPartyData().leaderGuid == guid) {
+        if (isPlayer && group::orNoGroup(services_.group).isInGroup() &&
+            group::orNoGroup(services_.group).getPartyData().leaderGuid == guid) {
             float crownX = nameX + textSize.x + 3.0f;
             const char* crownSym = "\xe2\x99\x9b";  // ♛
             drawList->AddText(ImVec2(crownX + 1.0f, nameY + 1.0f), IM_COL32(0, 0, 0, A(160)), crownSym);
@@ -1575,8 +1501,8 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         // the name, but the ImGui font carries no skull/moon/cross code points,
         // so every mark drew as a '?' box.
         {
-            uint8_t raidMark = gameHandler.getEntityRaidMark(guid);
-            if (raidMark < game::GameHandler::kRaidMarkCount) {
+            uint8_t raidMark = group::orNoGroup(services_.group).getEntityRaidMark(guid);
+            if (raidMark < group::kRaidMarkCount) {
                 VkDescriptorSet markTex = ui::getRaidTargetIcon(raidMark, services_.assetManager);
                 if (markTex) {
                     // Sits above the name, and above the target chevron when this
@@ -1605,7 +1531,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
             // Quest giver indicator: "!" for available quests, "?" for completable/incomplete
             if (!isPlayer) {
                 const auto mark = game::questGiverMarker(
-                    gameHandler.getQuestGiverStatus(guid));
+                    gameHandler.quests().getQuestGiverStatus(guid));
                 const char* qSym = mark.symbol;
                 const ImU32 qCol = mark.dim ? IM_COL32(160, 160, 160, A(220))
                                             : IM_COL32(255, 210, 0, A(255));
@@ -1629,7 +1555,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
             float nx1 = hitRight;
             if (mouse.x >= nx0 && mouse.x <= nx1 && mouse.y >= ny0 && mouse.y <= ny1) {
                 // Track mouseover for [target=mouseover] macro conditionals
-                gameHandler.setMouseoverGuid(guid);
+                gameHandler.combat().setMouseoverGuid(guid);
                 // Hover tooltip: name, level/class, guild
                 ImGui::BeginTooltip();
                 ImGui::TextUnformatted(unitName.c_str());
@@ -1642,7 +1568,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                 if (!subLabel.empty()) ImGui::TextColored(ImVec4(0.7f,0.7f,0.7f,1.0f), "%s", subLabel.c_str());
                 ImGui::EndTooltip();
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                    gameHandler.setTarget(guid);
+                    gameHandler.combat().setTarget(guid);
                 } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
                     nameplateCtxGuid_ = guid;
                     nameplateCtxPos_  = mouse;
@@ -1710,9 +1636,9 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                     ImGui::Separator();
                 }
                 if (ImGui::MenuItem("Target"))
-                    gameHandler.setTarget(nameplateCtxGuid_);
+                    gameHandler.combat().setTarget(nameplateCtxGuid_);
                 if (ImGui::MenuItem("Set Focus"))
-                    gameHandler.setFocus(nameplateCtxGuid_);
+                    gameHandler.combat().setFocus(nameplateCtxGuid_);
                 bool isPlayer = entityPtr && entityPtr->getType() == game::ObjectType::PLAYER;
                 if (isPlayer && !ctxName.empty()) {
                     ImGui::Separator();
@@ -1720,21 +1646,21 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                         chatPanel_.setWhisperTarget(ctxName);
                     }
                     if (ImGui::MenuItem("Invite to Group"))
-                        gameHandler.inviteToGroup(ctxName);
+                        group::orNoGroup(services_.group).inviteToGroup(ctxName);
                     if (ImGui::MenuItem("Trade"))
-                        gameHandler.initiateTrade(nameplateCtxGuid_);
+                        trade::orNoTrade(services_.trade).initiateTrade(nameplateCtxGuid_);
                     if (ImGui::MenuItem("Duel"))
-                        gameHandler.proposeDuel(nameplateCtxGuid_);
+                        if (auto* duels = services_.duels) duels->proposeDuel(nameplateCtxGuid_);
                     if (ImGui::MenuItem("Inspect")) {
-                        gameHandler.setTarget(nameplateCtxGuid_);
-                        gameHandler.inspectTarget();
+                        gameHandler.combat().setTarget(nameplateCtxGuid_);
+                        gameHandler.social().inspectTarget();
                         openInspectWindow(gameHandler);
                     }
                     ImGui::Separator();
-                    if (ImGui::MenuItem("Add Friend"))
-                        gameHandler.addFriend(ctxName);
-                    if (ImGui::MenuItem("Ignore"))
-                        gameHandler.addIgnore(ctxName);
+                    if (ImGui::MenuItem("Add Friend") && services_.contacts)
+                        services_.contacts->addFriend(ctxName);
+                    if (ImGui::MenuItem("Ignore") && services_.contacts)
+                        services_.contacts->addIgnore(ctxName);
                 }
                 ImGui::EndPopup();
             } else {
@@ -1815,10 +1741,10 @@ void GameScreen::startRecording() {
     std::string error;
     if (recording->start(path, error)) {
         recordingPath_ = path;
-        services_.gameHandler->addSystemChatMessage(
+        services_.gameHandler->chat().addSystemChatMessage(
             "Recording to " + path + ". Type /record again to stop.");
     } else {
-        services_.gameHandler->addSystemChatMessage("Could not start recording: " + error + ".");
+        services_.gameHandler->chat().addSystemChatMessage("Could not start recording: " + error + ".");
     }
 }
 
@@ -1834,7 +1760,7 @@ void GameScreen::stopRecording() {
     if (stats.framesDropped > 0) {
         message += ", " + std::to_string(stats.framesDropped) + " frames dropped";
     }
-    services_.gameHandler->addSystemChatMessage(message + ").");
+    services_.gameHandler->chat().addSystemChatMessage(message + ").");
 }
 
 void GameScreen::toggleRecording() {
@@ -1852,7 +1778,7 @@ void GameScreen::reportRecordingFailure() {
     if (!recording || !services_.gameHandler) return;
     const std::string failure = recording->takeFailure();
     if (failure.empty()) return;
-    services_.gameHandler->addSystemChatMessage(
+    services_.gameHandler->chat().addSystemChatMessage(
         "Recording stopped: " + failure + ". What was recorded is saved in " + recordingPath_ + ".");
 }
 
@@ -1874,7 +1800,7 @@ void GameScreen::takeScreenshot() {
 void GameScreen::reportScreenshotResults() {
     if (!services_.renderer || !services_.gameHandler) return;
     for (const auto& [path, saved] : services_.renderer->takeScreenshotResults())
-        services_.gameHandler->addSystemChatMessage(
+        services_.gameHandler->chat().addSystemChatMessage(
             std::string(saved ? "Screenshot saved: " : "Screenshot failed: ") + path);
 }
 

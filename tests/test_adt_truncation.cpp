@@ -173,7 +173,8 @@ TEST_CASE("standard MCNK alpha payload stops at its declared subchunk size", "[a
     appendChunk(payload, 0x4D435345, {5, 6, 7, 8});
     std::vector<uint8_t> data;
     appendChunk(data, kMCNK, payload);
-    const auto terrain = ADTLoader::load(data);
+    const auto terrainTile = ADTLoader::load(data);
+    const auto& terrain = *terrainTile;
     REQUIRE(terrain.chunks[0].alphaMap == std::vector<uint8_t>{1, 2, 3, 4});
 }
 
@@ -185,6 +186,7 @@ TEST_CASE("canonical MCAL pixels may themselves spell the subchunk magic", "[adt
     appendChunk(payload, kMCAL, pixels);
     std::vector<uint8_t> data;
     appendChunk(data, kMCNK, payload);
-    const auto terrain = ADTLoader::load(data);
+    const auto terrainTile = ADTLoader::load(data);
+    const auto& terrain = *terrainTile;
     REQUIRE(terrain.chunks[0].alphaMap == pixels);
 }

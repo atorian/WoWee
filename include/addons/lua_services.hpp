@@ -13,6 +13,26 @@
 namespace wowee::core  { class Window; }
 namespace wowee::audio { class AudioCoordinator; }
 namespace wowee::game  { class ExpansionRegistry; }
+namespace wowee::game  { struct Macro; }
+namespace wowee::contacts { class IContacts; }
+namespace wowee::who { class IWho; }
+namespace wowee::duel { class IDuels; }
+namespace wowee::petition { class IPetitions; }
+namespace wowee::arena { class IArenaTeams; }
+namespace wowee::battleground { class IBattlegrounds; }
+namespace wowee::lfg { class ILfg; }
+namespace wowee::calendar { class ICalendar; }
+namespace wowee::group { class IGroup; }
+namespace wowee::guild { class IGuild; }
+namespace wowee::auction { class IAuctionHouse; }
+namespace wowee::mail { class IMailbox; }
+namespace wowee::guild_bank { class IGuildBank; }
+namespace wowee::trade { class ITrade; }
+namespace wowee::loot { class ILoot; }
+namespace wowee::achievement { class IAchievements; }
+namespace wowee::title { class ITitles; }
+namespace wowee::reputation { class IReputation; }
+namespace wowee::pet { class IPet; }
 
 namespace wowee::addons {
 
@@ -27,10 +47,61 @@ struct LuaServices {
     core::Window*            window            = nullptr;
     audio::AudioCoordinator* audioCoordinator  = nullptr;
     game::ExpansionRegistry* expansionRegistry = nullptr;
+    /// The friend, ignore and mute lists, and the requests that change them.
+    contacts::IContacts*     contacts          = nullptr;
+    /// /who: the last answer, where answers go, and the query.
+    who::IWho*               who               = nullptr;
+    /// The duel the player is asked to or in, and the answers to it.
+    duel::IDuels*            duels             = nullptr;
+    /// Guild and arena charters: the registrar's offer and the one on screen.
+    petition::IPetitions*    petitions         = nullptr;
+    /// The player's arena teams, their rosters and the team commands.
+    arena::IArenaTeams*      arenaTeams        = nullptr;
+    /// The battleground queues, listings, scoreboard and map positions.
+    battleground::IBattlegrounds* battlegrounds    = nullptr;
+    /// The dungeon finder: the queue, the proposal, the role check and the
+    /// vote to kick, and the requests that move them.
+    lfg::ILfg*               lfg               = nullptr;
+    /// The calendar the server sent, the event open, and the requests that
+    /// change them.
+    calendar::ICalendar*     calendar          = nullptr;
+    /// The player's party or raid, its invite, ready check and markers, and
+    /// the requests that change them.
+    group::IGroup*           group             = nullptr;
+    /// The player's guild and the requests that change it, and other
+    /// guilds' names for nameplates and tooltips.
+    guild::IGuild*           guild             = nullptr;
+    /// The auction house the player is standing at, its lists and the
+    /// requests that go to the auctioneer.
+    auction::IAuctionHouse*  auctionHouse      = nullptr;
+    /// The mailbox the player is at, its inbox, the letter being written and
+    /// the requests that go to it.
+    mail::IMailbox*          mail              = nullptr;
+    /// The guild vault the player is at, its tabs, texts and logs, and the
+    /// requests that go to the banker.
+    guild_bank::IGuildBank*  guildBank         = nullptr;
+    /// A trade with another player, what each side has put down, and the
+    /// requests that change it.
+    trade::ITrade*           trade             = nullptr;
+    /// The loot window, the group's rolls and the master loot menu, and the
+    /// requests that take from them.
+    loot::ILoot*             loot              = nullptr;
+    /// What the player has earned and is tracking, what an inspected player
+    /// has earned, and what the game's files say about each achievement.
+    achievement::IAchievements* achievements      = nullptr;
+    /// The titles the player knows and wears, and their names.
+    title::ITitles*          titles            = nullptr;
+    /// The standings, the reputation panel's rows and the requests that change
+    /// them.
+    reputation::IReputation* reputation        = nullptr;
+    /// The player's pet, its bar and spells, and the stable.
+    pet::IPet*               pet               = nullptr;
 
     /// Run a macro body, as RunMacroText() does - one command per line,
     /// through the same path the action bar uses for a macro button.
     std::function<void(const std::string&)> runMacroText;
+    /// Shared presentation resolver, with the client's current world context.
+    std::function<std::string(const game::Macro&)> macroIconPath;
 
     /// Hold or let go of a movement command, as MoveForwardStart and
     /// MoveForwardStop do - which is how bindings.xml walks the character on

@@ -1,0 +1,42 @@
+// Models whose shine is a sphere environment map (texture coordinate set -1,
+// GL_SPHERE_MAP): Murloc's great pearl and a mage-hunter crystal set, at
+// noon. What the map reflects follows the camera, not the model.
+{
+  "map": "Azeroth",
+  "mapId": 0,
+  "zoneId": 12,
+  "hour": 12.0,
+  "server": [
+    -9440.0,
+    70.0,
+    56.5
+  ],
+  "models": [
+    {
+      "path": "World\\Generic\\Murloc\\Passive Doodads\\Pearl\\GreatPearl_01.m2",
+      "offset": [
+        0,
+        -4,
+        1
+      ],
+      "scale": 8.0
+    },
+    {
+      "path": "World\\Generic\\MageHunter\\Passive Doodads\\Crystals\\MH_CrystalSet_01.m2",
+      "offset": [
+        0,
+        6,
+        0
+      ]
+    }
+  ],
+  "size": [
+    768,
+    512
+  ],
+  "frames": 20,
+  "clouds": false,
+  "bloom": 0,
+  "sunShafts": false,
+  "volumetricFog": 0
+}

@@ -1,4 +1,5 @@
 #include "ui/character_screen.hpp"
+#include "guild/services/guild.hpp"
 #include "game/equipment_hash.hpp"
 #include "ui/ui_colors.hpp"
 #include "rendering/character_preview.hpp"
@@ -404,8 +405,9 @@ void CharacterScreen::renderDetails(game::GameHandler& gameHandler,
             preview_ = std::make_shared<rendering::CharacterPreview>();
         }
         if (!previewInitialized_) {
-            if (auto* renderer = core::Application::getInstance().getRenderer()) renderer->drainFrames();
-            previewInitialized_ = preview_->initialize(assetManager_);
+            auto* renderer = core::Application::getInstance().getRenderer();
+            if (renderer) renderer->drainFrames();
+            previewInitialized_ = renderer && preview_->initialize(assetManager_, renderer->gameTables());
             if (!previewInitialized_) {
                 LOG_WARNING("CharacterScreen: failed to init CharacterPreview");
                 preview_.reset();
@@ -513,7 +515,7 @@ void CharacterScreen::renderDetails(game::GameHandler& gameHandler,
     }
 
     if (character.hasGuild()) {
-        const std::string& guildName = gameHandler.lookupGuildName(character.guildId);
+        const std::string& guildName = guild::orNoGuild(services_.guild).lookupGuildName(character.guildId);
         const std::string line = guildName.empty() ? std::string("Guild: resolving...")
                                                    : "<" + guildName + ">";
         ui_.text(col.at(), line.c_str(), smallSize, theme.inkSoft);

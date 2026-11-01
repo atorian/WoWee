@@ -1,4 +1,46 @@
 #include "core/application.hpp"
+#include "core/appearance_composer.hpp"
+#include "core/input.hpp"
+#include "core/window.hpp"
+#include "contacts/services/contacts_service.hpp"
+#include "game/contacts_gateway.hpp"
+#include "game/who_gateway.hpp"
+#include "who/services/who_service.hpp"
+#include "game/duel_gateway.hpp"
+#include "duel/services/duel_service.hpp"
+#include "game/petition_gateway.hpp"
+#include "petition/services/petition_service.hpp"
+#include "game/arena_gateway.hpp"
+#include "arena/services/arena_service.hpp"
+#include "game/battleground_gateway.hpp"
+#include "battleground/services/battleground_service.hpp"
+#include "game/lfg_gateway.hpp"
+#include "lfg/services/lfg_service.hpp"
+#include "game/calendar_gateway.hpp"
+#include "calendar/services/calendar_service.hpp"
+#include "game/group_gateway.hpp"
+#include "group/services/group_service.hpp"
+#include "game/guild_gateway.hpp"
+#include "guild/services/guild_service.hpp"
+#include "game/auction_gateway.hpp"
+#include "auction/services/auction_service.hpp"
+#include "game/mail_gateway.hpp"
+#include "mail/services/mail_service.hpp"
+#include "game/guild_bank_gateway.hpp"
+#include "guild_bank/services/guild_bank_service.hpp"
+#include "game/trade_gateway.hpp"
+#include "trade/services/trade_service.hpp"
+#include "game/loot_gateway.hpp"
+#include "loot/services/loot_service.hpp"
+#include "game/achievement_data.hpp"
+#include "achievement/services/achievement_service.hpp"
+#include "game/title_gateway.hpp"
+#include "title/services/title_service.hpp"
+#include "game/reputation_gateway.hpp"
+#include "reputation/services/reputation_service.hpp"
+#include "game/pet_gateway.hpp"
+#include "pet/services/pet_service.hpp"
+#include "ui/macro_icon.hpp"
 #include <imgui_impl_vulkan.h>
 #include "rendering/imgui_texture.hpp"
 #include "core/screen_recording.hpp"
@@ -10,6 +52,8 @@
 #include "network/world_socket.hpp"
 #include "game/protocol_tables.hpp"
 #include "game/emote_table.hpp"
+#include "game/stat_tables.hpp"
+#include "game/game_data.hpp"
 #include "audio/ambient_sound_manager.hpp"
 #include "core/zone_tracker.hpp"
 #include "core/frame_pacer.hpp"
@@ -39,6 +83,7 @@
 #ifdef WOWEE_HAVE_STORMLIB
 #include "pipeline/mpq_archive_layer.hpp"
 #endif
+#include "game/game_events.hpp"
 #include "game/server_protocol.hpp"
 #include "game/spell_classification.hpp"
 #include "rendering/animation/animation_ids.hpp"
@@ -93,6 +138,7 @@
 #include "audio/audio_engine.hpp"
 #include "rendering/lightning.hpp"
 #include "addons/lua_api_registrations.hpp"
+#include "addons/minimap_zoom.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "addons/addon_manager.hpp"
 #include "addons/lua_api_helpers.hpp"
@@ -107,6 +153,8 @@
 #include "ui/map_window.hpp"
 #include "ui/touch_controls.hpp"
 #include "ui/gamepad_controls.hpp"
+#include "ui/agent_controls.hpp"
+#include "core/agent_bridge.hpp"
 #include "core/gamepad.hpp"
 #include "addons/lua_api_registrations.hpp"
 #include "core/data_paths.hpp"
@@ -124,6 +172,7 @@
 #include "pipeline/asset_inventory.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "pipeline/spell_icon_paths.hpp"
 
 #include <SDL3/SDL.h>
@@ -277,6 +326,13 @@ Application* Application::instance = nullptr;
 Application::Application() {
     instance = this;
 }
+
+const std::string& Application::getBodySkinPath() const { return appearanceComposer_ ? appearanceComposer_->getBodySkinPath() : emptyString_; }
+const std::vector<std::string>& Application::getUnderwearPaths() const { return appearanceComposer_ ? appearanceComposer_->getUnderwearPaths() : emptyStringVec_; }
+uint32_t Application::getSkinTextureSlotIndex() const { return appearanceComposer_ ? appearanceComposer_->getSkinTextureSlotIndex() : 0; }
+uint32_t Application::getCloakTextureSlotIndex() const { return appearanceComposer_ ? appearanceComposer_->getCloakTextureSlotIndex() : 0; }
+uint32_t Application::getGryphonDisplayId() const { return entitySpawner_ ? entitySpawner_->getGryphonDisplayId() : 0; }
+uint32_t Application::getWyvernDisplayId() const { return entitySpawner_ ? entitySpawner_->getWyvernDisplayId() : 0; }
 
 Application::~Application() {
     shutdown();
@@ -452,11 +508,17 @@ bool Application::initialize() {
     assetManager = std::make_unique<pipeline::AssetManager>();
 
     // Populate game services - all subsystems now available
-    emoteTable_ = std::make_unique<game::EmoteTable>(assetManager.get());
+    gameData_ = std::make_unique<game::GameData>(game::GameData::fromAssets(assetManager.get()),
+                                                 *expansionRegistry_);
+    emoteTable_ = std::make_unique<game::EmoteTable>(*gameData_);
     if (auto* animation = playerView_->getAnimationController()) {
         animation->setEmoteTable(emoteTable_.get());
     }
     gameServices_.emotes = emoteTable_.get();
+    statTables_ = std::make_unique<game::StatTables>(*gameData_);
+    gameServices_.statTables = statTables_.get();
+    gameServices_.gameData = gameData_.get();
+    if (renderer) renderer->setGameTables(*gameData_);
     gameServices_.assetManager = assetManager.get();
     gameServices_.expansionRegistry = expansionRegistry_.get();
     gameServices_.events = &eventBus_;
@@ -469,6 +531,81 @@ bool Application::initialize() {
 
     // Create game handler with explicit service dependencies
     gameHandler = std::make_unique<game::GameHandler>(gameServices_);
+    // The contact lists: the service owns them, the gateway reaches the
+    // server and the name cache through the game, and the game feeds them.
+    contactsGateway_ = std::make_unique<game::ContactsGateway>(*gameHandler, *gameHandler);
+    contacts_ = std::make_unique<contacts::ContactsService>(*contactsGateway_, *contactsGateway_, eventBus_);
+    gameServices_.contactsFeed = contacts_.get();
+    whoGateway_ = std::make_unique<game::WhoGateway>(*gameHandler);
+    who_ = std::make_unique<who::WhoService>(*whoGateway_, eventBus_);
+    gameServices_.whoFeed = who_.get();
+    duelGateway_ = std::make_unique<game::DuelGateway>(*gameHandler, *gameHandler);
+    duels_ = std::make_unique<duel::DuelService>(*duelGateway_, *duelGateway_, eventBus_);
+    gameServices_.duelFeed = duels_.get();
+    petitionGateway_ = std::make_unique<game::PetitionGateway>(*gameHandler);
+    petitions_ = std::make_unique<petition::PetitionService>(*petitionGateway_, eventBus_);
+    gameServices_.petitionFeed = petitions_.get();
+    arenaGateway_ = std::make_unique<game::ArenaGateway>(*gameHandler);
+    arenaTeams_ = std::make_unique<arena::ArenaService>(*arenaGateway_, eventBus_);
+    gameServices_.arenaFeed = arenaTeams_.get();
+    battlegroundGateway_ = std::make_unique<game::BattlegroundGateway>(*gameHandler, *gameHandler);
+    battlegrounds_ = std::make_unique<battleground::BattlegroundService>(*battlegroundGateway_, *battlegroundGateway_,
+                                                                         eventBus_);
+    gameServices_.battlegroundFeed = battlegrounds_.get();
+    lfgGateway_ = std::make_unique<game::LfgGateway>(*gameHandler, *gameHandler);
+    lfg_ = std::make_unique<lfg::LfgService>(*lfgGateway_, *lfgGateway_, eventBus_);
+    gameServices_.lfgFeed = lfg_.get();
+    calendarGateway_ = std::make_unique<game::CalendarGateway>(*gameHandler);
+    calendar_ = std::make_unique<calendar::CalendarService>(*calendarGateway_, eventBus_);
+    gameServices_.calendarFeed = calendar_.get();
+    groupGateway_ = std::make_unique<game::GroupGateway>(*gameHandler, *gameHandler);
+    group_ = std::make_unique<group::GroupService>(*groupGateway_, eventBus_);
+    gameServices_.groupFeed = group_.get();
+    gameServices_.group = group_.get();
+    guildGateway_ = std::make_unique<game::GuildGateway>(*gameHandler, *gameHandler);
+    guildNames_ = std::make_unique<game::GuildNameFile>();
+    guild_ = std::make_unique<guild::GuildService>(*guildGateway_, *guildGateway_, *guildNames_, eventBus_);
+    gameServices_.guildFeed = guild_.get();
+    gameServices_.guild = guild_.get();
+    auctionGateway_ = std::make_unique<game::AuctionGateway>(*gameHandler, gameHandler->inventory(), *gameHandler);
+    auctionHouse_ = std::make_unique<auction::AuctionService>(*auctionGateway_, *auctionGateway_, eventBus_);
+    gameServices_.auctionFeed = auctionHouse_.get();
+    mailGateway_ = std::make_unique<game::MailGateway>(*gameHandler, gameHandler->inventory(), *gameHandler,
+                                                       gameHandler->queryCache());
+    mail_ = std::make_unique<mail::MailService>(*mailGateway_, *mailGateway_, eventBus_);
+    gameServices_.mailFeed = mail_.get();
+    gameServices_.mail = mail_.get();
+    guildBankGateway_ = std::make_unique<game::GuildBankGateway>(*gameHandler, gameHandler->inventory(), *gameHandler);
+    guildBank_ = std::make_unique<guild_bank::GuildBankService>(*guildBankGateway_, *guildBankGateway_, eventBus_);
+    gameServices_.guildBankFeed = guildBank_.get();
+    gameServices_.guildBank = guildBank_.get();
+    tradeGateway_ = std::make_unique<game::TradeGateway>(*gameHandler, gameHandler->inventory(), *gameHandler,
+                                                         cvars_);
+    trade_ = std::make_unique<trade::TradeService>(*tradeGateway_, *tradeGateway_, eventBus_);
+    gameServices_.tradeFeed = trade_.get();
+    gameServices_.trade = trade_.get();
+    lootGateway_ = std::make_unique<game::LootGateway>(*gameHandler, gameHandler->inventory(), *gameHandler);
+    loot_ = std::make_unique<loot::LootService>(*lootGateway_, *lootGateway_, eventBus_);
+    gameServices_.lootFeed = loot_.get();
+    gameServices_.loot = loot_.get();
+    achievementData_ = std::make_unique<game::AchievementData>(*gameData_);
+    achievements_ = std::make_unique<achievement::AchievementService>(*achievementData_, eventBus_);
+    gameServices_.achievementsFeed = achievements_.get();
+    gameServices_.achievements = achievements_.get();
+    titleData_ = std::make_unique<game::TitleData>(*gameData_);
+    titleGateway_ = std::make_unique<game::TitleGateway>(*gameHandler, *gameHandler);
+    titles_ = std::make_unique<title::TitleService>(*titleData_, *titleGateway_, eventBus_);
+    gameServices_.titlesFeed = titles_.get();
+    gameServices_.titles = titles_.get();
+    factionData_ = std::make_unique<game::FactionData>(*gameData_);
+    reputationGateway_ = std::make_unique<game::ReputationGateway>(*gameHandler, *gameHandler);
+    reputation_ = std::make_unique<reputation::ReputationService>(*factionData_, *reputationGateway_, eventBus_);
+    gameServices_.reputationFeed = reputation_.get();
+    gameServices_.reputation = reputation_.get();
+    petGateway_ = std::make_unique<game::PetGateway>(*gameHandler);
+    pet_ = std::make_unique<pet::PetService>(*petGateway_, eventBus_);
+    gameServices_.petFeed = pet_.get();
+    gameServices_.pet = pet_.get();
     transportScene_ = std::make_unique<RendererTransportScene>(*renderer);
     gameHandler->getTransportManager()->setScene(transportScene_.get());
 
@@ -532,9 +669,7 @@ bool Application::initialize() {
 
     // Load the tables this expansion's protocol is described by.
     if (gameHandler && expansionRegistry_) {
-        if (auto* profile = expansionRegistry_->getActive()) {
-            loadExpansionTables(*profile);
-        }
+        if (expansionRegistry_->getActive()) loadExpansionTables();
     }
 
     // Try expansion-specific asset path first, fall back to base Data/
@@ -544,6 +679,7 @@ bool Application::initialize() {
         if (profile && !profile->dataPath.empty()) {
             // Enable expansion-specific CSV DBC lookup (Data/expansions/<id>/db/*.csv).
             assetManager->setExpansionDataPath(profile->dataPath);
+            assetManager->setDBCLocale(profile->locale, profile->build);
 
             std::string expansionManifest = profile->dataPath + "/manifest.json";
             if (std::filesystem::exists(expansionManifest)) {
@@ -563,7 +699,10 @@ bool Application::initialize() {
     LOG_INFO("Attempting to load WoW assets from: ", assetPath);
     if (assetManager->initialize(assetPath)) {
         LOG_INFO("Asset manager initialized successfully");
-        zoneTracker_->loadZoneTable(assetManager.get());
+        // Everything the expansion uses, read now: a broken install stops
+        // here rather than when a window first asks for a table.
+        gameData_->checkAll();
+        zoneTracker_->loadZoneTable(*gameData_, *assetManager);
 
         // Fonts, now the archives are open and still before any frame is
         // drawn - the only moment the glyph atlas can take another face
@@ -580,15 +719,16 @@ bool Application::initialize() {
         // --expansion-subdir keeps its fonts under expansions/<id>/, and one
         // made without keeps them in the base Data. Both exist in the wild.
         if (uiManager) {
+            if (!assetManager->getLocaleDataPath().empty())
+                uiManager->loadInterfaceFont(assetManager->getLocaleDataPath(), assetManager.get());
             uiManager->loadInterfaceFont(assetPath, assetManager.get());
             uiManager->loadInterfaceFont(dataPath, assetManager.get());
         }
 
         // Renderer creation precedes AssetManager creation, so DBC-driven
         // lighting must be initialized here rather than in Renderer::initialize.
-        if (renderer && renderer->getLightingManager() &&
-            !renderer->getLightingManager()->initialize(assetManager.get())) {
-            LOG_WARNING("Lighting manager initialization failed; using fallback lighting");
+        if (renderer && renderer->getLightingManager()) {
+            renderer->getLightingManager()->initialize(*gameData_);
         }
 
         // Offline GPU regression: load the real Dalaran sky without connecting
@@ -726,13 +866,14 @@ bool Application::initialize() {
                     if (const char* weapon = std::getenv("WOWEE_PROBE_WEAPON"); weapon && *weapon) {
                         constexpr uint32_t kRightHand = 1;
                         const auto displayId = static_cast<uint32_t>(std::stoul(weapon));
-                        auto items = assetManager->loadDBC("ItemDisplayInfo.dbc");
-                        const int32_t row = items ? items->findRecordById(displayId) : -1;
+                        const pipeline::RequiredTable items(*gameData_, "ItemDisplayInfo.dbc",
+                                                            "the model probe's weapon");
+                        const int32_t row = items->findRecordById(displayId);
                         if (row < 0) {
                             LOG_ERROR("Model probe: weapon display ", displayId, " is not in ItemDisplayInfo");
                             return false;
                         }
-                        const auto art = pipeline::readItemDisplayArt(*items, static_cast<uint32_t>(row));
+                        const auto art = pipeline::readItemDisplayArt(items, static_cast<uint32_t>(row));
                         const std::string weaponPath = "Item\\ObjectComponents\\Weapon\\" + art.modelFile;
                         pipeline::M2Model weaponModel;
                         if (art.modelFile.empty() ||
@@ -753,7 +894,7 @@ bool Application::initialize() {
                             enchant = static_cast<uint32_t>(std::stoul(e));
                         uint32_t nextEffectModel = 0xFFFF0310;
                         attachEnchantVisuals(
-                            renderer->scene().characters(), *assetManager, instance, kRightHand, enchant,
+                            renderer->scene().characters(), *gameData_, instance, kRightHand, enchant,
                             [&](const std::string& p, pipeline::M2Model& m) {
                                 return pipeline::loadM2WithSkin(*assetManager, p, m);
                             },
@@ -800,12 +941,12 @@ bool Application::initialize() {
 
         // Eagerly load creature display DBC lookups so first spawn doesn't stall
         entitySpawner_ = std::make_unique<EntitySpawner>(
-            renderer.get(), assetManager.get(), gameHandler.get(), &gameServices_,
+            renderer.get(), assetManager.get(), *gameData_, gameHandler.get(), &gameServices_,
             playerView_.get());
         entitySpawner_->initialize();
 
         appearanceComposer_ = std::make_unique<AppearanceComposer>(
-            renderer.get(), playerView_.get(), assetManager.get(), gameHandler.get(),
+            renderer.get(), playerView_.get(), assetManager.get(), *gameData_, gameHandler.get(),
             entitySpawner_.get());
 
         // Wire AppearanceComposer to UI components (Phase A singleton breaking)
@@ -817,8 +958,24 @@ bool Application::initialize() {
             uiServices.window = window.get();
             uiServices.renderer = renderer.get();
             uiServices.assetManager = assetManager.get();
+            uiServices.gameTables = gameData_.get();
             uiServices.gameHandler = gameHandler.get();
             uiServices.expansionRegistry = expansionRegistry_.get();
+            uiServices.contacts = contacts_.get();
+            uiServices.who = who_.get();
+            uiServices.duels = duels_.get();
+            uiServices.battlegrounds = battlegrounds_.get();
+            uiServices.lfg = lfg_.get();
+            uiServices.calendar = calendar_.get();
+            uiServices.group = group_.get();
+            uiServices.guild = guild_.get();
+            uiServices.auctionHouse = auctionHouse_.get();
+            uiServices.mail = mail_.get();
+            uiServices.guildBank = guildBank_.get();
+            uiServices.trade = trade_.get();
+            uiServices.loot = loot_.get();
+            uiServices.titles = titles_.get();
+            uiServices.pet = pet_.get();
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();  // May be nullptr here, re-wire later
             uiServices.interfaceStages = &interfaceStages_;
@@ -834,7 +991,10 @@ bool Application::initialize() {
             uiServices.entitySpawner = entitySpawner_.get();
             uiServices.appearanceComposer = appearanceComposer_.get();
             uiServices.worldLoader = worldLoader_.get();
+            agentControls_ = std::make_unique<ui::AgentControls>();
+            uiServices.agentControls = agentControls_.get();
             uiManager->setServices(uiServices);
+            startAgentBridge();
         }
 
         // Ensure the main in-world CharacterRenderer can load textures immediately.
@@ -846,8 +1006,8 @@ bool Application::initialize() {
 
         // Load transport paths from TransportAnimation.dbc and TaxiPathNode.dbc
         if (gameHandler && gameHandler->getTransportManager()) {
-            gameHandler->getTransportManager()->loadTransportAnimationDBC(assetManager.get());
-            gameHandler->getTransportManager()->loadTaxiPathNodeDBC(assetManager.get());
+            gameHandler->getTransportManager()->loadTransportAnimationDBC(*gameData_);
+            gameHandler->getTransportManager()->loadTaxiPathNodeDBC(*gameData_);
         }
 
         // The addon system: what is on disk, for the whole run. Each character
@@ -870,6 +1030,25 @@ bool Application::initialize() {
         luaSvc.window            = window.get();
         luaSvc.audioCoordinator  = audioCoordinator_.get();
         luaSvc.expansionRegistry = expansionRegistry_.get();
+        luaSvc.contacts          = contacts_.get();
+        luaSvc.who               = who_.get();
+        luaSvc.duels             = duels_.get();
+        luaSvc.petitions         = petitions_.get();
+        luaSvc.arenaTeams        = arenaTeams_.get();
+        luaSvc.battlegrounds     = battlegrounds_.get();
+        luaSvc.lfg               = lfg_.get();
+        luaSvc.calendar          = calendar_.get();
+        luaSvc.group             = group_.get();
+        luaSvc.guild             = guild_.get();
+        luaSvc.auctionHouse      = auctionHouse_.get();
+        luaSvc.mail              = mail_.get();
+        luaSvc.guildBank         = guildBank_.get();
+        luaSvc.trade             = trade_.get();
+        luaSvc.loot              = loot_.get();
+        luaSvc.achievements      = achievements_.get();
+        luaSvc.titles            = titles_.get();
+        luaSvc.reputation        = reputation_.get();
+        luaSvc.pet               = pet_.get();
         // Acted on between frames - the reload destroys the state that asked.
         luaSvc.requestReloadUI = [this]() {
             if (auto* character = session()) character->requestInterfaceReload();
@@ -971,6 +1150,9 @@ bool Application::initialize() {
         luaSvc.reapplyAudioVolumes = [uim = uiManager.get(), this]() {
             if (!uim) return;
             uim->getGameScreen().getSettingsPanel().applyAudioVolumes(audioCoordinator_.get());
+        };
+        luaSvc.macroIconPath = [this](const game::Macro& macro) {
+            return ui::macroIconPath(macro, *gameHandler, pet::orNoPet(pet_.get()), renderer.get());
         };
         luaSvc.runMacroText = [uim = uiManager.get(), gh = gameHandler.get()](const std::string& body) {
             if (uim && gh) uim->getGameScreen().getChatPanel().executeMacroText(*gh, body);
@@ -1201,6 +1383,14 @@ bool Application::initialize() {
                     }
                 }
             }
+            if (!assetManager->getLocaleDataPath().empty()) {
+                std::error_code ec;
+                const auto& localizedRoot = assetManager->getLocaleDataPath();
+                if (std::filesystem::is_directory(localizedRoot + "/interface/framexml", ec))
+                    interfaceRoot = localizedRoot;
+                else LOG_WARNING("Locale interface missing under ", localizedRoot,
+                                 "; base FrameXML retained");
+            }
             std::string addonsDir = interfaceRoot + "/interface/AddOns";
             addonCatalog_->setFrameXmlDir(interfaceRoot + "/interface/FrameXML");
             addonCatalog_->scan(addonsDir);
@@ -1238,35 +1428,22 @@ bool Application::initialize() {
                 // asked for one would have found the table empty and answered
                 // nothing, which is the sort of thing that only shows up when
                 // the tabs happen to be built first.
+                const game::GameData* data = gameData_.get();
                 auto ensureLoaded = std::make_shared<std::function<void()>>(
-                    [spellIconPaths, spellIconIds, loaded, am]() {
+                    [spellIconPaths, spellIconIds, loaded, am, data]() {
                     if (!am || !am->isInitialized() || *loaded) return;
-                    // Initialised, not merely present: loadDBC answers nullptr
-                    // before the assets are up, and latching on that left both
-                    // tables empty for the rest of the session.
+                    // Initialised, not merely present: before the assets are
+                    // up there is nothing to read yet, and latching on that
+                    // left both tables empty for the rest of the session.
                     *loaded = true;
-                    pipeline::loadSpellIconPaths(am, *spellIconPaths);
-                    auto spellDbc = am->loadDBC("Spell.dbc");
-                    const auto* spellL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("Spell") : nullptr;
-                    if (spellDbc && spellDbc->isLoaded()) {
-                        uint32_t fieldCount = spellDbc->getFieldCount();
-                        uint32_t iconField = 133; // WotLK default
-                        uint32_t idField = 0;
-                        if (spellL) {
-                            try {
-                                uint32_t layoutId = (*spellL)["ID"];
-                                uint32_t layoutIcon = (*spellL)["IconID"];
-                                if (layoutId < fieldCount && layoutIcon < fieldCount) {
-                                    iconField = layoutIcon;
-                                    idField = layoutId;
-                                }
-                            } catch (...) {}
-                        }
-                        for (uint32_t i = 0; i < spellDbc->getRecordCount(); i++) {
-                            uint32_t id = spellDbc->getUInt32(i, idField);
-                            uint32_t iconId = spellDbc->getUInt32(i, iconField);
-                            if (id > 0 && iconId > 0) (*spellIconIds)[id] = iconId;
-                        }
+                    pipeline::loadSpellIconPaths(*data, *spellIconPaths);
+                    const pipeline::RequiredTable spellDbc(*data, "Spell.dbc", "spell icons");
+                    const uint32_t idField = spellDbc.column("ID");
+                    const uint32_t iconField = spellDbc.column("IconID");
+                    for (uint32_t i = 0; i < spellDbc->getRecordCount(); i++) {
+                        uint32_t id = spellDbc->getUInt32(i, idField);
+                        uint32_t iconId = spellDbc->getUInt32(i, iconField);
+                        if (id > 0 && iconId > 0) (*spellIconIds)[id] = iconId;
                     }
                 });
 
@@ -1296,24 +1473,23 @@ bool Application::initialize() {
                 auto iconNames = std::make_shared<std::unordered_map<uint32_t, std::string>>();
                 auto loaded    = std::make_shared<bool>(false);
                 auto* am = assetManager.get();
-                gameHandler->setItemIconPathResolver([iconNames, loaded, am](uint32_t displayInfoId) -> std::string {
+                const game::GameData* data = gameData_.get();
+                gameHandler->setItemIconPathResolver([iconNames, loaded, am, data](uint32_t displayInfoId) -> std::string {
                     if (!am || displayInfoId == 0) return {};
                     if (!*loaded && am->isInitialized()) {
-                        // Initialised, not merely present: loadDBC answers
-                        // nullptr before the assets are up, and latching on
+                        // Initialised, not merely present: before the assets
+                        // are up there is nothing to read yet, and latching on
                         // that left this table empty for the session.
                         *loaded = true;
-                        auto dbc = am->loadDBC("ItemDisplayInfo.dbc");
-                        const auto* dispL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-                        if (dbc && dbc->isLoaded()) {
-                            uint32_t iconField = dispL ? (*dispL)["InventoryIcon"] : 5;
-                            for (uint32_t i = 0; i < dbc->getRecordCount(); i++) {
-                                uint32_t id = dbc->getUInt32(i, 0); // field 0 = ID
-                                std::string name = dbc->getString(i, iconField);
-                                if (id > 0 && !name.empty()) (*iconNames)[id] = name;
-                            }
-                            LOG_INFO("Loaded ", iconNames->size(), " item icon names from ItemDisplayInfo.dbc");
+                        const pipeline::RequiredTable dbc(*data, "ItemDisplayInfo.dbc", "item icons");
+                        const uint32_t idField = dbc.column("ID");
+                        const uint32_t iconField = dbc.column("InventoryIcon");
+                        for (uint32_t i = 0; i < dbc->getRecordCount(); i++) {
+                            uint32_t id = dbc->getUInt32(i, idField);
+                            std::string name = dbc->getString(i, iconField);
+                            if (id > 0 && !name.empty()) (*iconNames)[id] = name;
                         }
+                        LOG_INFO("Loaded ", iconNames->size(), " item icon names from ItemDisplayInfo.dbc");
                     }
                     auto it = iconNames->find(displayInfoId);
                     if (it == iconNames->end()) return {};
@@ -1330,64 +1506,53 @@ bool Application::initialize() {
                 auto spellCostMap = std::make_shared<std::unordered_map<uint32_t, SpellCostEntry>>();
                 auto loaded = std::make_shared<bool>(false);
                 auto* am = assetManager.get();
-                gameHandler->setSpellDataResolver([castTimeMap, rangeMap, spellCastIdx, spellRangeIdx, spellCostMap, loaded, am](uint32_t spellId) -> game::GameHandler::SpellDataInfo {
+                const game::GameData* data = gameData_.get();
+                gameHandler->setSpellDataResolver([castTimeMap, rangeMap, spellCastIdx, spellRangeIdx, spellCostMap, loaded, am, data](uint32_t spellId) -> game::GameHandler::SpellDataInfo {
                     if (!am) return {};
                     if (!*loaded && am->isInitialized()) {
-                        // Initialised, not merely present: loadDBC answers
-                        // nullptr before the assets are up, and latching on
+                        // Initialised, not merely present: before the assets
+                        // are up there is nothing to read yet, and latching on
                         // that left this table empty for the session.
                         *loaded = true;
-                        // Load SpellCastTimes.dbc
-                        auto ctDbc = am->loadDBC("SpellCastTimes.dbc");
-                        if (ctDbc && ctDbc->isLoaded()) {
-                            for (uint32_t i = 0; i < ctDbc->getRecordCount(); ++i) {
-                                uint32_t id = ctDbc->getUInt32(i, 0);
-                                int32_t base = static_cast<int32_t>(ctDbc->getUInt32(i, 1));
-                                if (id > 0 && base > 0) (*castTimeMap)[id] = static_cast<uint32_t>(base);
-                            }
+                        constexpr std::string_view kNeededFor = "spells' cast times, ranges and costs";
+                        // SpellCastTimes.dbc: ID, base cast time in ms.
+                        const auto ctDbc = data->table("SpellCastTimes.dbc", 2, kNeededFor);
+                        for (uint32_t i = 0; i < ctDbc->getRecordCount(); ++i) {
+                            uint32_t id = ctDbc->getUInt32(i, 0);
+                            int32_t base = static_cast<int32_t>(ctDbc->getUInt32(i, 1));
+                            if (id > 0 && base > 0) (*castTimeMap)[id] = static_cast<uint32_t>(base);
                         }
-                        // Load SpellRange.dbc
-                        const auto* srL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("SpellRange") : nullptr;
-                        uint32_t minRField = srL ? (*srL)["MinRange"] : 1;
-                        uint32_t maxRField = srL ? (*srL)["MaxRange"] : 4;
-                        auto rDbc = am->loadDBC("SpellRange.dbc");
-                        if (rDbc && rDbc->isLoaded()) {
-                            for (uint32_t i = 0; i < rDbc->getRecordCount(); ++i) {
-                                uint32_t id = rDbc->getUInt32(i, 0);
-                                float minR = rDbc->getFloat(i, minRField);
-                                float maxR = rDbc->getFloat(i, maxRField);
-                                if (id > 0) (*rangeMap)[id] = {minR, maxR};
-                            }
+                        // SpellRange.dbc: ID, then the ranges where the layout puts them.
+                        const pipeline::RequiredTable rDbc(*data, "SpellRange.dbc", kNeededFor);
+                        const uint32_t minRField = rDbc.column("MinRange");
+                        const uint32_t maxRField = rDbc.column("MaxRange");
+                        for (uint32_t i = 0; i < rDbc->getRecordCount(); ++i) {
+                            uint32_t id = rDbc->getUInt32(i, 0);
+                            float minR = rDbc->getFloat(i, minRField);
+                            float maxR = rDbc->getFloat(i, maxRField);
+                            if (id > 0) (*rangeMap)[id] = {minR, maxR};
                         }
-                        // Load Spell.dbc: extract castTimeIndex and rangeIndex per spell
-                        auto sDbc = am->loadDBC("Spell.dbc");
-                        const auto* spL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("Spell") : nullptr;
-                        if (sDbc && sDbc->isLoaded()) {
-                            uint32_t idF = spL ? (*spL)["ID"] : 0;
-                            // From the file's shape - Classic and Turtle named
-                            // this 15, which is RequiresSpellFocus and zero for
-                            // every spell.
-                            uint32_t ctF = pipeline::detectSpellTimingFields(sDbc.get(), spL)
-                                               .castingTimeIndex;
-                            uint32_t rF  = spL ? (*spL)["RangeIndex"] : 132;
-                            uint32_t ptF = UINT32_MAX, mcF = UINT32_MAX;
-                            if (spL) {
-                                try { ptF = (*spL)["PowerType"]; } catch (...) {}
-                                try { mcF = (*spL)["ManaCost"]; } catch (...) {}
-                            }
-                            uint32_t fc = sDbc->getFieldCount();
-                            for (uint32_t i = 0; i < sDbc->getRecordCount(); ++i) {
-                                uint32_t id = sDbc->getUInt32(i, idF);
-                                if (id == 0) continue;
-                                uint32_t ct = sDbc->getUInt32(i, ctF);
-                                uint32_t ri = sDbc->getUInt32(i, rF);
-                                if (ct > 0) (*spellCastIdx)[id] = ct;
-                                if (ri > 0) (*spellRangeIdx)[id] = ri;
-                                // Extract power cost
-                                uint32_t mc = (mcF < fc) ? sDbc->getUInt32(i, mcF) : 0;
-                                uint8_t  pt = (ptF < fc) ? static_cast<uint8_t>(sDbc->getUInt32(i, ptF)) : 0;
-                                if (mc > 0) (*spellCostMap)[id] = {.manaCost = mc, .powerType = pt};
-                            }
+                        // Spell.dbc: each spell's cast time and range index, and its cost.
+                        const pipeline::RequiredTable sDbc(*data, "Spell.dbc", kNeededFor);
+                        const uint32_t idF = sDbc.column("ID");
+                        // From the file's shape - Classic named this
+                        // 15, which is RequiresSpellFocus and zero for
+                        // every spell.
+                        const uint32_t ctF = pipeline::detectSpellTimingFields(sDbc.get(), &sDbc.layout())
+                                                 .castingTimeIndex;
+                        const uint32_t rF = sDbc.column("RangeIndex");
+                        const uint32_t ptF = sDbc.column("PowerType");
+                        const uint32_t mcF = sDbc.column("ManaCost");
+                        for (uint32_t i = 0; i < sDbc->getRecordCount(); ++i) {
+                            uint32_t id = sDbc->getUInt32(i, idF);
+                            if (id == 0) continue;
+                            uint32_t ct = sDbc->getUInt32(i, ctF);
+                            uint32_t ri = sDbc->getUInt32(i, rF);
+                            if (ct > 0) (*spellCastIdx)[id] = ct;
+                            if (ri > 0) (*spellRangeIdx)[id] = ri;
+                            uint32_t mc = sDbc->getUInt32(i, mcF);
+                            uint8_t pt = static_cast<uint8_t>(sDbc->getUInt32(i, ptF));
+                            if (mc > 0) (*spellCostMap)[id] = {.manaCost = mc, .powerType = pt};
                         }
                         LOG_INFO("SpellDataResolver: loaded ", spellCastIdx->size(), " cast indices, ",
                                  spellRangeIdx->size(), " range indices");
@@ -1419,26 +1584,31 @@ bool Application::initialize() {
                 auto propNames   = std::make_shared<std::unordered_map<int32_t, std::string>>();
                 auto propLoaded  = std::make_shared<bool>(false);
                 auto* amPtr = assetManager.get();
-                gameHandler->setRandomPropertyNameResolver([propNames, propLoaded, amPtr](int32_t id) -> std::string {
+                const game::GameData* data = gameData_.get();
+                gameHandler->setRandomPropertyNameResolver([propNames, propLoaded, amPtr, data](int32_t id) -> std::string {
                     if (!amPtr || id == 0) return {};
-                    // Initialised, not merely present: loadDBC answers nullptr
-                    // before the assets are up, and latching on that left the
-                    // suffix names empty for the rest of the session.
+                    // Initialised, not merely present: before the assets are up
+                    // there is nothing to read yet, and latching on that left
+                    // the suffix names empty for the rest of the session.
                     if (!*propLoaded && amPtr->isInitialized()) {
                         *propLoaded = true;
                         // Both DBCs carry the display name ("of the Bear" / "of Strength") as
-                        // the first string column, field 1, across classic/tbc/wotlk/turtle.
+                        // the first string column, field 1, across classic/tbc/wotlk.
                         constexpr uint32_t kNameField = 1;
+                        constexpr std::string_view kNeededFor = "the names of items' random bonuses";
                         // ItemRandomProperties.dbc: ID=0, Name=1 (positive IDs)
-                        if (auto dbc = amPtr->loadDBC("ItemRandomProperties.dbc"); dbc && dbc->isLoaded()) {
+                        {
+                            const auto dbc = data->table("ItemRandomProperties.dbc", kNameField + 1, kNeededFor);
                             for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
                                 int32_t rid = static_cast<int32_t>(dbc->getUInt32(r, 0));
                                 std::string name = dbc->getString(r, kNameField);
                                 if (!name.empty() && rid > 0) (*propNames)[rid] = name;
                             }
                         }
-                        // ItemRandomSuffix.dbc: ID=0, Name=1 - keyed as negative IDs
-                        if (auto dbc = amPtr->loadDBC("ItemRandomSuffix.dbc"); dbc && dbc->isLoaded()) {
+                        // ItemRandomSuffix.dbc: ID=0, Name=1 - keyed as negative IDs.
+                        // TBC's; Classic has random properties alone.
+                        if (data->has("ItemRandomSuffix.dbc")) {
+                            const auto dbc = data->table("ItemRandomSuffix.dbc", kNameField + 1, kNeededFor);
                             for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
                                 int32_t rid = static_cast<int32_t>(dbc->getUInt32(r, 0));
                                 std::string name = dbc->getString(r, kNameField);
@@ -1461,27 +1631,28 @@ bool Application::initialize() {
                 auto enchMap   = std::make_shared<std::unordered_map<uint32_t, std::vector<EnchEffect>>>();
                 auto loaded    = std::make_shared<bool>(false);
                 auto* amPtr = assetManager.get();
+                const game::GameData* data = gameData_.get();
                 gameHandler->setRandomStatResolver(
-                    [suffixMap, propMap, enchMap, loaded, amPtr](int32_t id, uint32_t suffixFactor)
+                    [suffixMap, propMap, enchMap, loaded, amPtr, data](int32_t id, uint32_t suffixFactor)
                         -> std::vector<game::GameHandler::RandomStatBonus> {
                     std::vector<game::GameHandler::RandomStatBonus> out;
                     if (!amPtr || id == 0) return out;
                     if (!*loaded && amPtr->isInitialized()) {
-                        // Initialised, not merely present: loadDBC answers
-                        // nullptr before the assets are up, and latching on
+                        // Initialised, not merely present: before the assets
+                        // are up there is nothing to read yet, and latching on
                         // that left this table empty for the session.
                         *loaded = true;
+                        constexpr std::string_view kNeededFor = "the stats of items' random bonuses";
                         // SpellItemEnchantment: enchId -> up to 3 (type, statArg, minAmount).
                         // Arg (stat type) is the 3 fields before Name; the effect-type array
                         // precedes the amount block(s) - 2 blocks (Min+Max) on TBC/WotLK, 1 on Vanilla.
-                        if (auto dbc = amPtr->loadDBC("SpellItemEnchantment.dbc"); dbc && dbc->isLoaded()) {
-                            const auto* sieL = pipeline::getActiveDBCLayout()
-                                ? pipeline::getActiveDBCLayout()->getLayout("SpellItemEnchantment") : nullptr;
+                        {
+                            const pipeline::RequiredTable dbc(*data, "SpellItemEnchantment.dbc", kNeededFor);
                             const uint32_t fc = dbc->getFieldCount();
-                            const uint32_t nameF = pipeline::detectEnchantmentNameField(dbc.get(), sieL);
+                            const uint32_t nameF = pipeline::detectEnchantmentNameField(dbc.get(), &dbc.layout());
                             if (nameF >= 12 && nameF < fc) {
                                 const uint32_t argBase = nameF - 3;
-                                const bool singleAmount = fc < 34;  // Vanilla/Turtle: no separate Max array
+                                const bool singleAmount = fc < 34;  // Vanilla: no separate Max array
                                 const uint32_t effBase = argBase - (singleAmount ? 6u : 9u);
                                 const uint32_t minBase = effBase + 3u;
                                 for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
@@ -1500,36 +1671,40 @@ bool Application::initialize() {
                             }
                         }
                         // ItemRandomSuffix: enchant array at field 19, AllocationPct follows; N=(fc-19)/2.
-                        if (auto dbc = amPtr->loadDBC("ItemRandomSuffix.dbc"); dbc && dbc->isLoaded()) {
+                        // TBC's; Classic has random properties alone.
+                        if (data->has("ItemRandomSuffix.dbc")) {
+                            const auto dbc = data->table("ItemRandomSuffix.dbc", 22, kNeededFor);
                             const uint32_t fc = dbc->getFieldCount();
-                            if (fc > 21 && (fc - 19u) % 2u == 0u) {
-                                const uint32_t n = (fc - 19u) / 2u;
-                                for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
-                                    int32_t sid = static_cast<int32_t>(dbc->getUInt32(r, 0));
-                                    if (sid <= 0) continue;
-                                    std::vector<std::pair<uint32_t,uint32_t>> ens;
-                                    for (uint32_t k = 0; k < n; ++k) {
-                                        uint32_t ench = dbc->getUInt32(r, 19u + k);
-                                        uint32_t pct  = dbc->getUInt32(r, 19u + n + k);
-                                        if (ench != 0) ens.emplace_back(ench, pct);
-                                    }
-                                    if (!ens.empty()) (*suffixMap)[sid] = std::move(ens);
+                            if ((fc - 19u) % 2u != 0u) {
+                                data->stop("ItemRandomSuffix.dbc", kNeededFor,
+                                           "is " + std::to_string(fc) +
+                                               " columns wide, which is not an enchant list and its shares");
+                            }
+                            const uint32_t n = (fc - 19u) / 2u;
+                            for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+                                int32_t sid = static_cast<int32_t>(dbc->getUInt32(r, 0));
+                                if (sid <= 0) continue;
+                                std::vector<std::pair<uint32_t,uint32_t>> ens;
+                                for (uint32_t k = 0; k < n; ++k) {
+                                    uint32_t ench = dbc->getUInt32(r, 19u + k);
+                                    uint32_t pct  = dbc->getUInt32(r, 19u + n + k);
+                                    if (ench != 0) ens.emplace_back(ench, pct);
                                 }
+                                if (!ens.empty()) (*suffixMap)[sid] = std::move(ens);
                             }
                         }
                         // ItemRandomProperties: up to 5 enchant ids at fields 2..6 (fixed amount).
-                        if (auto dbc = amPtr->loadDBC("ItemRandomProperties.dbc"); dbc && dbc->isLoaded()) {
-                            if (dbc->getFieldCount() > 6) {
-                                for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
-                                    int32_t pid = static_cast<int32_t>(dbc->getUInt32(r, 0));
-                                    if (pid <= 0) continue;
-                                    std::vector<uint32_t> ens;
-                                    for (uint32_t k = 2; k <= 6; ++k) {
-                                        uint32_t ench = dbc->getUInt32(r, k);
-                                        if (ench != 0) ens.push_back(ench);
-                                    }
-                                    if (!ens.empty()) (*propMap)[pid] = std::move(ens);
+                        {
+                            const auto dbc = data->table("ItemRandomProperties.dbc", 7, kNeededFor);
+                            for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+                                int32_t pid = static_cast<int32_t>(dbc->getUInt32(r, 0));
+                                if (pid <= 0) continue;
+                                std::vector<uint32_t> ens;
+                                for (uint32_t k = 2; k <= 6; ++k) {
+                                    uint32_t ench = dbc->getUInt32(r, k);
+                                    if (ench != 0) ens.push_back(ench);
                                 }
+                                if (!ens.empty()) (*propMap)[pid] = std::move(ens);
                             }
                         }
                     }
@@ -1563,7 +1738,7 @@ bool Application::initialize() {
 
         // Initialize world loader (handles terrain streaming, world preload, map transitions)
         worldLoader_ = std::make_unique<WorldLoader>(
-            currentPhase_, renderer.get(), assetManager.get());
+            currentPhase_, renderer.get(), assetManager.get(), *gameData_);
 
         // Re-wire UIServices now that all services (addonCatalog_, worldLoader_) are available
         if (uiManager) {
@@ -1571,8 +1746,24 @@ bool Application::initialize() {
             uiServices.window = window.get();
             uiServices.renderer = renderer.get();
             uiServices.assetManager = assetManager.get();
+            uiServices.gameTables = gameData_.get();
             uiServices.gameHandler = gameHandler.get();
             uiServices.expansionRegistry = expansionRegistry_.get();
+            uiServices.contacts = contacts_.get();
+            uiServices.who = who_.get();
+            uiServices.duels = duels_.get();
+            uiServices.battlegrounds = battlegrounds_.get();
+            uiServices.lfg = lfg_.get();
+            uiServices.calendar = calendar_.get();
+            uiServices.group = group_.get();
+            uiServices.guild = guild_.get();
+            uiServices.auctionHouse = auctionHouse_.get();
+            uiServices.mail = mail_.get();
+            uiServices.guildBank = guildBank_.get();
+            uiServices.trade = trade_.get();
+            uiServices.loot = loot_.get();
+            uiServices.titles = titles_.get();
+            uiServices.pet = pet_.get();
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();
             uiServices.interfaceStages = &interfaceStages_;
@@ -1588,6 +1779,7 @@ bool Application::initialize() {
             uiServices.entitySpawner = entitySpawner_.get();
             uiServices.appearanceComposer = appearanceComposer_.get();
             uiServices.worldLoader = worldLoader_.get();
+            uiServices.agentControls = agentControls_.get();
             uiManager->setServices(uiServices);
         }
 
@@ -1603,6 +1795,10 @@ bool Application::initialize() {
     } else {
         LOG_WARNING("Failed to initialize asset manager - asset loading will be unavailable");
         LOG_WARNING("Set WOW_DATA_PATH environment variable to your WoW Data directory");
+        // Data that is there and does not open is a broken install, and stops
+        // the game naming the first table; with none at all the asset
+        // builder opens instead.
+        if (assetInventory_.anyUsable()) gameData_->checkAll();
     }
 
     // If the archives never opened, the fonts were not tried at all. Loose
@@ -2095,6 +2291,42 @@ void Application::pump(float deltaTime, const FramePlan& plan, InterfaceInput& f
 
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
+        // Ctrl+Shift+G hands control to an agent, Ctrl+Shift+H takes it
+        // back; two combos rather than one toggle, so a press always does
+        // what it says whatever state the player believes it is in. Ahead
+        // of everything else, so the press is neither the player's input
+        // that would end control again nor a key the interface sees. G and
+        // H because movement reads its keys from the keyboard state, past
+        // this queue: on A the character turned while the combo was held.
+        if (agentControls_ && event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
+            (event.key.key == SDLK_G || event.key.key == SDLK_H) &&
+            (event.key.mod & SDL_KMOD_CTRL) && (event.key.mod & SDL_KMOD_SHIFT)) {
+            const bool give = event.key.key == SDLK_G;
+            if (give) agentControls_->grant();
+            else agentControls_->release();
+            LOG_WARNING("Agent control ", give ? "given by Ctrl+Shift+G" : "taken back by Ctrl+Shift+H");
+            continue;
+        }
+        // A key, a click or the wheel of the player's own takes control
+        // back from an agent at once - while the game has the focus. Not
+        // the mouse moving: the player talks to the agent in another
+        // window, and the pointer crossing this one on the way there is
+        // not taking the wheel; nor is the Cmd of the Cmd+Tab.
+        if (agentControls_ && agentControls_->hasControl() && SDL_GetKeyboardFocus() != nullptr) {
+            const bool modifierOnly = event.type == SDL_EVENT_KEY_DOWN &&
+                event.key.scancode >= SDL_SCANCODE_LCTRL && event.key.scancode <= SDL_SCANCODE_RGUI;
+            const bool playerInput =
+                (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat && !modifierOnly) ||
+                event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_WHEEL;
+            if (playerInput) {
+                agentControls_->onPlayerInput();
+                LOG_WARNING("Agent control taken back by player input (SDL event 0x", std::hex,
+                            static_cast<unsigned>(event.type), std::dec,
+                            event.type == SDL_EVENT_KEY_DOWN ? ", key " : "",
+                            event.type == SDL_EVENT_KEY_DOWN ? SDL_GetScancodeName(event.key.scancode) : "",
+                            ")");
+            }
+        }
         // Sound in Background. Off in the real client and off here: losing
         // focus silences the client rather than playing on behind whatever
         // the player switched to. Read at the moment focus changes, so
@@ -2221,6 +2453,23 @@ void Application::pump(float deltaTime, const FramePlan& plan, InterfaceInput& f
     } else {
         ui::gamepadControls().setCameraController(nullptr);
         ui::gamepadControls().update(deltaTime);
+    }
+    // The agent after the pad, for the same reason the pad precedes the
+    // keyboard: its keys must be down before Input::update reads them.
+    if (agentBridge_) agentBridge_->pump(deltaTime);
+    if (agentControls_) {
+        auto* cam = getCameraController();
+        const auto frame = agentControls_->update(deltaTime, cam);
+        if (frame.setKeys) {
+            using Move = ui::AgentControls::Move;
+            auto& input = Input::getInstance();
+            input.setVirtualKey(SDL_SCANCODE_W, frame.held[static_cast<size_t>(Move::Forward)]);
+            input.setVirtualKey(SDL_SCANCODE_S, frame.held[static_cast<size_t>(Move::Backward)]);
+            input.setVirtualKey(SDL_SCANCODE_Q, frame.held[static_cast<size_t>(Move::StrafeLeft)]);
+            input.setVirtualKey(SDL_SCANCODE_E, frame.held[static_cast<size_t>(Move::StrafeRight)]);
+            input.setVirtualKey(SDL_SCANCODE_SPACE, frame.jump);
+        }
+        if (cam) cam->setSteering(ui::gamepadControls().isSteering() || agentControls_->isSteering());
     }
 
     // Update input
@@ -2384,6 +2633,7 @@ void Application::shutdown() {
     sceneReplay_.reset();
     // Close visibly before saved variables or worker lifetime fences can delay cleanup.
     if (window && window->getSDLWindow()) SDL_HideWindow(window->getSDLWindow());
+    widgetRenderer_.resetResources();
     // What watched the frames goes first, then the interface hears the
     // character leave while the world still stands; the session itself ends
     // below, with its map.
@@ -2521,6 +2771,76 @@ void Application::shutdown() {
 
     LOG_DEBUG("Resetting gameHandler...");
     gameHandler.reset();
+    gameServices_.contactsFeed = nullptr;
+    gameServices_.whoFeed = nullptr;
+    gameServices_.duelFeed = nullptr;
+    gameServices_.petitionFeed = nullptr;
+    gameServices_.arenaFeed = nullptr;
+    gameServices_.battlegroundFeed = nullptr;
+    gameServices_.lfgFeed = nullptr;
+    gameServices_.calendarFeed = nullptr;
+    gameServices_.groupFeed = nullptr;
+    gameServices_.group = nullptr;
+    gameServices_.guildFeed = nullptr;
+    gameServices_.guild = nullptr;
+    gameServices_.auctionFeed = nullptr;
+    gameServices_.mailFeed = nullptr;
+    gameServices_.mail = nullptr;
+    gameServices_.guildBankFeed = nullptr;
+    gameServices_.guildBank = nullptr;
+    gameServices_.tradeFeed = nullptr;
+    gameServices_.trade = nullptr;
+    gameServices_.lootFeed = nullptr;
+    gameServices_.loot = nullptr;
+    gameServices_.achievementsFeed = nullptr;
+    gameServices_.achievements = nullptr;
+    gameServices_.titlesFeed = nullptr;
+    gameServices_.titles = nullptr;
+    gameServices_.reputationFeed = nullptr;
+    gameServices_.reputation = nullptr;
+    gameServices_.petFeed = nullptr;
+    gameServices_.pet = nullptr;
+    contacts_.reset();
+    contactsGateway_.reset();
+    who_.reset();
+    whoGateway_.reset();
+    duels_.reset();
+    duelGateway_.reset();
+    petitions_.reset();
+    petitionGateway_.reset();
+    arenaTeams_.reset();
+    arenaGateway_.reset();
+    battlegrounds_.reset();
+    battlegroundGateway_.reset();
+    lfg_.reset();
+    lfgGateway_.reset();
+    calendar_.reset();
+    calendarGateway_.reset();
+    pet_.reset();
+    petGateway_.reset();
+    reputation_.reset();
+    reputationGateway_.reset();
+    factionData_.reset();
+    titles_.reset();
+    titleGateway_.reset();
+    titleData_.reset();
+    achievements_.reset();
+    achievementData_.reset();
+    loot_.reset();
+    lootGateway_.reset();
+    trade_.reset();
+    tradeGateway_.reset();
+    guildBank_.reset();
+    guildBankGateway_.reset();
+    mail_.reset();
+    mailGateway_.reset();
+    auctionHouse_.reset();
+    auctionGateway_.reset();
+    guild_.reset();
+    guildNames_.reset();
+    guildGateway_.reset();
+    group_.reset();
+    groupGateway_.reset();
 
     // GameHandler teardown can still publish events consumed by audio.
     if (audioCoordinator_) {
@@ -2588,29 +2908,6 @@ void Application::enteredWorld() {
                 if (appearanceComposer_) appearanceComposer_->showRangedWeapon(false);
             });
         }
-        gameHandler->setKnockBackCallback([this](float vcos, float vsin, float hspeed, float vspeed) {
-            if (getCameraController()) {
-                getCameraController()->applyKnockBack(vcos, vsin, hspeed, vspeed);
-            }
-        });
-        gameHandler->setCameraShakeCallback([this](float magnitude, float frequency, float duration) {
-            if (getCameraController()) {
-                getCameraController()->triggerShake(magnitude, frequency, duration);
-            }
-        });
-        gameHandler->setAutoFollowCallback([this](const glm::vec3* renderPos) {
-            if (getCameraController()) {
-                if (renderPos) {
-                    getCameraController()->setAutoFollow(renderPos);
-                } else {
-                    getCameraController()->cancelAutoFollow();
-                }
-            }
-        });
-        // Barber shop and other live appearance changes rebuild the model.
-        gameHandler->setPlayerModelRebuildCallback([this]() {
-            refreshPlayerCharacterModel();
-        });
     }
     // Load quest marker models
     loadQuestMarkerModels();
@@ -2641,18 +2938,17 @@ bool Application::setAssetExpansionOverride(const std::string& id) {
 /// on exactly one of the two paths, and which one depends on which copy was
 /// edited.
 ///
-/// Each table is set active as it loads, because a failed load leaves the
-/// previous expansion's table in place rather than none at all, and a wrong
-/// table reads better than a null one.
-void Application::loadExpansionTables(const game::ExpansionProfile& profile) {
+/// Each is one of the running expansion's own files, from its list in
+/// expansion.json; one that is not there or does not load stops the game.
+void Application::loadExpansionTables() {
     if (!gameHandler) return;
 
-    game::loadProtocolTables(*gameHandler, profile);
+    game::loadProtocolTables(*gameHandler, *gameData_);
 
     if (dbcLayout_) {
-        const std::string dbcLayoutsPath = profile.dataPath + "/dbc_layouts.json";
+        const std::string dbcLayoutsPath = gameData_->file("dbc_layouts.json", "the DBC column layouts");
         if (!dbcLayout_->loadFromJson(dbcLayoutsPath)) {
-            LOG_ERROR("Failed to load DBC layouts from ", dbcLayoutsPath);
+            gameData_->stop(dbcLayoutsPath, "the DBC column layouts", "could not be read");
         }
         pipeline::setActiveDBCLayout(dbcLayout_.get());
     }
@@ -2665,7 +2961,8 @@ void Application::reloadExpansionData() {
 
     LOG_INFO("Reloading expansion data for: ", profile->name);
 
-    loadExpansionTables(*profile);
+    widgetRenderer_.resetResources();
+    loadExpansionTables();
 
     // Update expansion data path for CSV DBC lookups and clear DBC cache
     if (assetManager && !profile->dataPath.empty()) {
@@ -2692,9 +2989,13 @@ void Application::reloadExpansionData() {
         LOG_INFO("Protocol profile '", profile->id, "' using asset source '",
                  useLegacyAssets ? std::string("legacy") : assetProfile->id, "'");
         assetManager->setExpansionDataPath(profile->dataPath);
+        assetManager->setDBCLocale(profile->locale, profile->build);
         assetManager->clearDBCCache();
+        gameData_->checkAll();
     }
 
+    widgetRenderer_.initialize(assetManager.get(), window ? window->getVkContext() : nullptr);
+    iconPrefetchCharacter_ = 0;
     // Reset map name cache so it reloads from new expansion's Map.dbc
     if (worldLoader_) worldLoader_->resetMapNameCache();
 
@@ -2747,14 +3048,14 @@ void Application::showDisconnectNotice(const std::string& notice) {
 // about it lands.
 void Application::applyServerMovementState(float deltaTime) {
     if (renderer && gameHandler && getCameraController()) {
-        getCameraController()->setRunSpeedOverride(gameHandler->getServerRunSpeed());
-        getCameraController()->setWalkSpeedOverride(gameHandler->getServerWalkSpeed());
-        getCameraController()->setSwimSpeedOverride(gameHandler->getServerSwimSpeed());
-        getCameraController()->setSwimBackSpeedOverride(gameHandler->getServerSwimBackSpeed());
-        getCameraController()->setFlightSpeedOverride(gameHandler->getServerFlightSpeed());
-        getCameraController()->setFlightBackSpeedOverride(gameHandler->getServerFlightBackSpeed());
-        getCameraController()->setRunBackSpeedOverride(gameHandler->getServerRunBackSpeed());
-        getCameraController()->setTurnRateOverride(gameHandler->getServerTurnRate());
+        getCameraController()->setRunSpeedOverride(gameHandler->movement().getServerRunSpeed());
+        getCameraController()->setWalkSpeedOverride(gameHandler->movement().getServerWalkSpeed());
+        getCameraController()->setSwimSpeedOverride(gameHandler->movement().getServerSwimSpeed());
+        getCameraController()->setSwimBackSpeedOverride(gameHandler->movement().getServerSwimBackSpeed());
+        getCameraController()->setFlightSpeedOverride(gameHandler->movement().getServerFlightSpeed());
+        getCameraController()->setFlightBackSpeedOverride(gameHandler->movement().getServerFlightBackSpeed());
+        getCameraController()->setRunBackSpeedOverride(gameHandler->movement().getServerRunBackSpeed());
+        getCameraController()->setTurnRateOverride(gameHandler->movement().getServerTurnRate());
         getCameraController()->setMovementRooted(gameHandler->isPlayerRooted());
         getCameraController()->setGravityDisabled(gameHandler->isGravityDisabled());
         getCameraController()->setFeatherFallActive(gameHandler->isFeatherFalling());
@@ -2765,7 +3066,7 @@ void Application::applyServerMovementState(float deltaTime) {
         getCameraController()->setFlyingActive(gameHandler->canFly());
         // And whether the player is up in it, which the camera worked out
         // last frame: take-off and landing are decided where the floor is.
-        gameHandler->setFlightAirborne(getCameraController()->isFlightAirborne());
+        gameHandler->movement().setFlightAirborne(getCameraController()->isFlightAirborne());
         getCameraController()->setHoverActive(gameHandler->isHovering());
 
         // Sync camera forward pitch to movement packets during flight / swimming.
@@ -2779,8 +3080,8 @@ void Application::applyServerMovementState(float deltaTime) {
             const float pitchRad = getCameraController()->getFlightPitchRad();
             gameHandler->setMovementPitch(pitchRad);
             // Tilt the mount/character model to match flight direction
-            // (taxi flight uses setTaxiOrientationCallback for this instead)
-            if (gameHandler->isMounted()) {
+            // (taxi flight uses TaxiOrientationChanged for this instead)
+            if (gameHandler->movement().isMounted()) {
                 if (auto* ac = getAnimationController()) ac->setMountPitchRoll(pitchRad, 0.0f);
             }
         } else if (gameHandler->isSwimming()) {
@@ -2792,16 +3093,16 @@ void Application::applyServerMovementState(float deltaTime) {
                     gameHandler->setMovementPitch(std::asin(std::clamp(fwd.z / len, -1.0f, 1.0f)));
                 }
             }
-        } else if (gameHandler->isMounted()) {
+        } else if (gameHandler->movement().isMounted()) {
             // Reset mount pitch when not flying
             if (auto* ac = getAnimationController()) ac->setMountPitchRoll(0.0f, 0.0f);
         }
     }
 
     bool onTaxi = gameHandler &&
-                  (gameHandler->isOnTaxiFlight() ||
-                   gameHandler->isTaxiMountActive() ||
-                   gameHandler->isTaxiActivationPending());
+                  (gameHandler->movement().isOnTaxiFlight() ||
+                   gameHandler->movement().isTaxiMountActive() ||
+                   gameHandler->movement().isTaxiActivationPending());
     // Deliberately narrower than onTaxi: only true once the flight is
     // actually happening (mounted/flying), not merely pending a reply.
     // A rejected CMSG_ACTIVATETAXI sets isTaxiActivationPending() true
@@ -2815,15 +3116,15 @@ void Application::applyServerMovementState(float deltaTime) {
     // level below, with a "Cannot take that flight path" chat message
     // and zero actual movement in between.
     bool actuallyFlying = gameHandler &&
-                          (gameHandler->isOnTaxiFlight() ||
-                           gameHandler->isTaxiMountActive());
-    bool onTransportNow = gameHandler && gameHandler->isOnTransport();
+                          (gameHandler->movement().isOnTaxiFlight() ||
+                           gameHandler->movement().isTaxiMountActive());
+    bool onTransportNow = gameHandler && gameHandler->movement().isOnTransport();
     // Clear stale client-side transport state when the tracked transport no longer exists.
     if (onTransportNow && gameHandler->getTransportManager()) {
         auto* currentTracked = gameHandler->getTransportManager()->getTransport(
-            gameHandler->getPlayerTransportGuid());
+            gameHandler->movement().getPlayerTransportGuid());
         if (!currentTracked) {
-            gameHandler->clearPlayerTransport();
+            gameHandler->movement().clearPlayerTransport();
             onTransportNow = false;
         }
     }
@@ -2832,7 +3133,7 @@ void Application::applyServerMovementState(float deltaTime) {
     // Only WMO transports (ships) use full external-driven mode.
     bool isM2Transport = false;
     if (onTransportNow && gameHandler->getTransportManager()) {
-        auto* tr = gameHandler->getTransportManager()->getTransport(gameHandler->getPlayerTransportGuid());
+        auto* tr = gameHandler->getTransportManager()->getTransport(gameHandler->movement().getPlayerTransportGuid());
         isM2Transport = (tr && tr->isM2);
     }
     bool onWMOTransport = onTransportNow && !isM2Transport;
@@ -2859,10 +3160,10 @@ void Application::applyServerMovementState(float deltaTime) {
     // hasn't loaded yet - prevents gravity from pulling player through void.
     bool hearthFreeze = worldEntryCallbacks_ && worldEntryCallbacks_->isHearthTeleportPending();
     const bool transportTransferFreeze = gameHandler &&
-        gameHandler->hasPendingPlayerTransportWorldTransfer();
+        gameHandler->movement().hasPendingPlayerTransportWorldTransfer();
     bool landingClampActive = !onTaxi && worldEntryCallbacks_ && worldEntryCallbacks_->getTaxiLandingClampTimer() > 0.0f &&
                               worldEntryCallbacks_->getWorldEntryMovementGraceTimer() <= 0.0f &&
-                              !gameHandler->isMounted();
+                              !gameHandler->movement().isMounted();
     getCameraController()->setExternalFollow(
         externallyDrivenMotion || landingClampActive || hearthFreeze ||
         transportTransferFreeze || ride.deckFloorPending);
@@ -2967,7 +3268,7 @@ void Application::applyServerMovementState(float deltaTime) {
                     p.z = targetZ;
                     renderer->getCharacterPosition() = p;
                     glm::vec3 canonical = core::coords::renderToCanonical(p);
-                    gameHandler->setPosition(canonical.x, canonical.y, canonical.z);
+                    gameHandler->movement().setPosition(canonical.x, canonical.y, canonical.z);
                     gameHandler->sendMovement(game::Opcode::MSG_MOVE_HEARTBEAT);
                 }
                 float clampTimer = worldEntryCallbacks_ ? worldEntryCallbacks_->getTaxiLandingClampTimer() : 0.0f;
@@ -3023,7 +3324,7 @@ void Application::applyServerMovementState(float deltaTime) {
     bool onTransport = onWMOTransport;
 
     static bool wasOnTransport = false;
-    bool onTransportNowDbg = gameHandler->isOnTransport();
+    bool onTransportNowDbg = gameHandler->movement().isOnTransport();
     if (onTransportNowDbg != wasOnTransport) {
         // At warning, not debug. Whether the player is attached to a transport
         // decides which movement branch runs, and "the zeppelin leaves without
@@ -3031,7 +3332,7 @@ void Application::applyServerMovementState(float deltaTime) {
         // and nothing anywhere says whether the attachment was ever made.
         LOG_WARNING("Transport state changed: onTransport=", onTransportNowDbg,
                  " isM2=", isM2Transport,
-                 " guid=0x", std::hex, gameHandler->getPlayerTransportGuid(), std::dec);
+                 " guid=0x", std::hex, gameHandler->movement().getPlayerTransportGuid(), std::dec);
         wasOnTransport = onTransportNowDbg;
     }
 
@@ -3067,10 +3368,10 @@ void Application::applyServerMovementState(float deltaTime) {
         // boarding-time offset forever, freezing the player in a
         // running pose at the point where they stepped aboard.
         auto* tm = gameHandler->getTransportManager();
-        auto* tr = tm ? tm->getTransport(gameHandler->getPlayerTransportGuid()) : nullptr;
+        auto* tr = tm ? tm->getTransport(gameHandler->movement().getPlayerTransportGuid()) : nullptr;
         if (tr) {
-            const uint64_t transportGuid = gameHandler->getPlayerTransportGuid();
-            glm::vec3 localOffset = gameHandler->getPlayerTransportOffset();
+            const uint64_t transportGuid = gameHandler->movement().getPlayerTransportGuid();
+            glm::vec3 localOffset = gameHandler->movement().getPlayerTransportOffset();
             const glm::vec3 tentativeRender = renderer->getCharacterPosition();
             const glm::vec3 expectedRender(
                 tr->transform * glm::vec4(localOffset, 1.0f));
@@ -3149,23 +3450,23 @@ void Application::applyServerMovementState(float deltaTime) {
 
             localOffset = glm::vec3(
                 tr->invTransform * glm::vec4(intendedRender, 1.0f));
-            gameHandler->setPlayerTransportOffset(localOffset);
+            gameHandler->movement().setPlayerTransportOffset(localOffset);
         }
 
-        glm::vec3 canonical = gameHandler->getComposedWorldPosition();
+        glm::vec3 canonical = gameHandler->movement().getComposedWorldPosition();
         glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
         renderer->getCharacterPosition() = renderPos;
         ride.wmoLockedRender = renderPos;
         ride.hasWmoLock = true;
-        ride.wmoTransportGuid = gameHandler->getPlayerTransportGuid();
-        gameHandler->setPosition(canonical.x, canonical.y, canonical.z);
+        ride.wmoTransportGuid = gameHandler->movement().getPlayerTransportGuid();
+        gameHandler->movement().setPosition(canonical.x, canonical.y, canonical.z);
         if (getCameraController()) {
             glm::vec3* followTarget = getCameraController()->getFollowTargetMutable();
             if (followTarget) {
                 *followTarget = renderPos;
             }
         }
-        gameHandler->updateM2TransportBoarding(canonical);
+        gameHandler->movement().updateM2TransportBoarding(canonical);
     } else if (animationCallbacks_ && animationCallbacks_->isCharging()) {
         // Warrior Charge: interpolation delegated to AnimationCallbackHandler
         animationCallbacks_->updateCharge(deltaTime);
@@ -3179,7 +3480,7 @@ void Application::applyServerMovementState(float deltaTime) {
         // This avoids visible jitter from mixed render/canonical delta application.
         if (isM2Transport && gameHandler->getTransportManager()) {
             auto* tr = gameHandler->getTransportManager()->getTransport(
-                gameHandler->getPlayerTransportGuid());
+                gameHandler->movement().getPlayerTransportGuid());
             if (tr) {
                 // Ride along at a fixed offset from the transport's current position
                 // (set once at boarding - see GameHandler::updateM2TransportBoarding),
@@ -3197,7 +3498,7 @@ void Application::applyServerMovementState(float deltaTime) {
                 // traveled underneath.
                 const bool isDeeprunTram =
                     game::TransportManager::isDeeprunTramTransport(*tr);
-                glm::vec3 localOffset = gameHandler->getPlayerTransportOffset();
+                glm::vec3 localOffset = gameHandler->movement().getPlayerTransportOffset();
                 glm::vec3 tentativeCanonical = core::coords::renderToCanonical(renderPos);
                 if (ride.hasM2Lock) {
                     glm::vec3 walkDelta = tentativeCanonical - ride.m2LockedCanonical;
@@ -3265,7 +3566,7 @@ void Application::applyServerMovementState(float deltaTime) {
                     // player is jumping, which makes lifts appear to not move vertically.
                     localOffset.z = tentativeCanonical.z - tr->position.z;
                 }
-                gameHandler->setPlayerTransportOffset(localOffset);
+                gameHandler->movement().setPlayerTransportOffset(localOffset);
 
                 glm::vec3 lockedCanonical = tr->position + localOffset;
                 renderPos = core::coords::canonicalToRender(lockedCanonical);
@@ -3317,7 +3618,7 @@ void Application::applyServerMovementState(float deltaTime) {
         }
 
         glm::vec3 canonical = core::coords::renderToCanonical(renderPos);
-        gameHandler->setPosition(canonical.x, canonical.y, canonical.z);
+        gameHandler->movement().setPosition(canonical.x, canonical.y, canonical.z);
 
         // Sync orientation: camera yaw (degrees) → WoW orientation (radians)
         float yawDeg = renderer->getCharacterYaw();
@@ -3326,7 +3627,7 @@ void Application::applyServerMovementState(float deltaTime) {
         // canonical<->server mapping (serverYaw = PI/2 - canonicalYaw), the
         // equivalent canonical yaw is radians(180 - yawDeg).
         float canonicalYaw = core::coords::characterYawDegToCanonical(yawDeg);
-        gameHandler->setOrientation(canonicalYaw);
+        gameHandler->movement().setOrientation(canonicalYaw);
 
         // Send MSG_MOVE_SET_FACING when the player changes facing direction
         // (e.g. via mouse-look). Without this, the server predicts movement in
@@ -3354,7 +3655,7 @@ void Application::applyServerMovementState(float deltaTime) {
         // GameHandler::updateM2TransportBoarding).
         if (gameHandler->getTransportManager()) {
             glm::vec3 playerCanonical = core::coords::renderToCanonical(renderPos);
-            gameHandler->updateM2TransportBoarding(playerCanonical);
+            gameHandler->movement().updateM2TransportBoarding(playerCanonical);
         }
     }
     }
@@ -3401,9 +3702,9 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
         auto& _creatureWasSwimming = entitySpawner_->getCreatureWasSwimming();
         auto& _creatureWasFlying = entitySpawner_->getCreatureWasFlying();
         auto& _creatureWasWalking = entitySpawner_->getCreatureWasWalking();
-        const uint64_t currentTargetGuid = gameHandler->hasTarget()
-            ? gameHandler->getTargetGuid() : 0;
-        const uint64_t autoAttackGuid = gameHandler->getAutoAttackTargetGuid();
+        const uint64_t currentTargetGuid = gameHandler->combat().hasTarget()
+            ? gameHandler->combat().getTargetGuid() : 0;
+        const uint64_t autoAttackGuid = gameHandler->combat().getAutoAttackTargetGuid();
         for (const auto& [guid, instanceId] : _creatureInstances) {
             auto entity = gameHandler->getEntityManager().getEntity(guid);
             if (!entity || entity->getType() != game::ObjectType::UNIT) continue;
@@ -3419,7 +3720,7 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
             // avoid false-culling entities that moved while getX/Y/Z was stale.
             // Position sync still uses getX/Y/Z to preserve smooth interpolation for
             // nearby entities; distant entities (> 150u) have planarDist≈0 anyway
-            // so the renderer remains driven correctly by creatureMoveCallback_.
+            // so the renderer remains driven correctly by CreatureMoved.
             glm::vec3 latestCanonical(entity->getLatestX(), entity->getLatestY(), entity->getLatestZ());
             float canonDistSq = 0.0f;
             if (havePlayerPos) {
@@ -3482,7 +3783,7 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                 constexpr float kMoveThreshSq = 0.03f * 0.03f;
                 const bool posChanging = planarDistSq > kMoveThreshSq || dz > 0.08f;
                 const bool transportAttached =
-                    gameHandler->transportAttachmentsRef().count(guid) != 0;
+                    gameHandler->movement().hasTransportAttachment(guid);
                 // A stationary deck passenger changes world position every
                 // frame because the parent ship moves. That parent motion is
                 // not creature locomotion and must not trigger Run. Real
@@ -3588,9 +3889,9 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
         auto& _pCreatureWalkingState = entitySpawner_->getCreatureWalkingState();
         auto& _pCreatureFlyingState = entitySpawner_->getCreatureFlyingState();
         auto& _pCreatureRenderPosCache = entitySpawner_->getCreatureRenderPosCache();
-        const uint64_t playerTargetGuid = gameHandler->hasTarget()
-            ? gameHandler->getTargetGuid() : 0;
-        const uint64_t playerAutoAttackGuid = gameHandler->getAutoAttackTargetGuid();
+        const uint64_t playerTargetGuid = gameHandler->combat().hasTarget()
+            ? gameHandler->combat().getTargetGuid() : 0;
+        const uint64_t playerAutoAttackGuid = gameHandler->combat().getAutoAttackTargetGuid();
         for (const auto& [guid, instanceId] : _playerInstances) {
             auto entity = gameHandler->getEntityManager().getEntity(guid);
             if (!entity || entity->getType() != game::ObjectType::PLAYER) continue;
@@ -3720,7 +4021,7 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                 return (moveFlags & static_cast<uint32_t>(f)) != 0;
             };
             const bool transportAttached =
-                gameHandler->transportAttachmentsRef().count(guid) != 0;
+                gameHandler->movement().hasTransportAttachment(guid);
             const bool travelling = reported
                 ? reported->isTravelling()
                 : entity->isEntityMoving() || (posChanging && !transportAttached);
@@ -3843,13 +4144,13 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     inGameStep = "auto-unsheathe";
     updateCheckpoint = "in_game: auto-unsheathe";
     if (gameHandler) {
-        const bool autoAttacking = gameHandler->isAutoAttacking();
+        const bool autoAttacking = gameHandler->combat().isAutoAttacking();
         // Keep the attachment state consistent with the ongoing attack, not
         // just the initial false -> true transition. Z can be pressed after
         // combat has already started, and pre-WotLK servers briefly send
         // ATTACKSTOP while the client retains attack intent for a retry.
-        const bool attackWeaponNeeded = autoAttacking || gameHandler->hasAutoAttackIntent();
-        const auto& inventory = gameHandler->getInventory();
+        const bool attackWeaponNeeded = autoAttacking || gameHandler->combat().hasAutoAttackIntent();
+        const auto& inventory = gameHandler->inventory().items();
         const auto& mainHand = inventory.getEquipSlot(game::EquipSlot::MAIN_HAND);
         const auto& offHand = inventory.getEquipSlot(game::EquipSlot::OFF_HAND);
         const auto& ranged = inventory.getEquipSlot(game::EquipSlot::RANGED);
@@ -3981,7 +4282,7 @@ void Application::onWorldRenderersReady() {
     }
     if (!worldMap_ && assetManager) {
         auto map = std::make_shared<rendering::WorldMap>();
-        if (map->initialize(renderer->getVkContext(), assetManager.get())) {
+        if (map->initialize(renderer->getVkContext(), assetManager.get(), *gameData_)) {
             worldMap_ = std::move(map);
             renderer->registerComposite(worldMap_);
         } else {
@@ -4007,7 +4308,7 @@ void Application::presentWorldToRenderer(float deltaTime) {
     environment.areaId = zoneTracker_->areaId();
     if (gameHandler) {
         environment.mapId = gameHandler->getCurrentMapId();
-        environment.gameTime = gameHandler->getGameTime();
+        environment.gameTime = gameHandler->realmTime().gameHours();
         if (const auto realm = gameHandler->realmTime().realmSeconds()) {
             environment.realmSeconds = *realm;
         }
@@ -4015,7 +4316,7 @@ void Application::presentWorldToRenderer(float deltaTime) {
         environment.weatherKind = weather.kind;
         environment.weatherIntensity = weather.intensity;
         environment.weatherAbrupt = weather.abrupt;
-        environment.ghost = gameHandler->isPlayerGhost();
+        environment.ghost = gameHandler->combat().isPlayerGhost();
     }
     renderer->setWorldEnvironment(environment);
 
@@ -4209,11 +4510,11 @@ void Application::prepareFrame() {
             }
             std::array<uint32_t, 19> equipment{};
             std::array<uint8_t, 19> types{};
-            if (auto dbc = assetManager->loadDBC("ItemDisplayInfo.dbc")) {
-                const auto* layout = pipeline::getActiveDBCLayout()
-                    ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
+            {
+                const pipeline::RequiredTable dbc(*gameData_, "ItemDisplayInfo.dbc",
+                                                  "the entity stream probe's equipment");
                 uint32_t fields[8];
-                pipeline::getItemDisplayInfoTextureFields(*dbc, layout, fields);
+                pipeline::getItemDisplayInfoTextureFields(dbc, fields);
                 for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
                     const std::string torso = dbc->getString(row, fields[3]);
                     if (!torso.empty() && !pipeline::resolveItemRegionTexture(
@@ -4224,7 +4525,7 @@ void Application::prepareFrame() {
                     }
                 }
                 for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
-                    const auto art = pipeline::readItemDisplayArt(*dbc, row);
+                    const auto art = pipeline::readItemDisplayArt(dbc, row);
                     if (!art.modelFile.empty() && assetManager->fileExists(
                             "Item\\ObjectComponents\\Weapon\\" + art.modelFile)) {
                         equipment[15] = dbc->getUInt32(row, 0);
@@ -4243,7 +4544,9 @@ void Application::prepareFrame() {
             if (const char* enchant = std::getenv("WOWEE_PROBE_ENCHANT"); enchant && *enchant)
                 fixtureEnchants[15] = static_cast<uint32_t>(std::stoul(enchant));
             if (expanded) {
-                if (auto dbc = assetManager->loadDBC("CreatureDisplayInfo.dbc")) {
+                {
+                    const auto dbc = gameData_->table("CreatureDisplayInfo.dbc", 1,
+                                                      "the entity stream probe's mount");
                     for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
                         const auto id = dbc->getUInt32(row, 0);
                         const auto path = entitySpawner_->getModelPathForDisplayId(id);
@@ -4523,6 +4826,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
     if (view == FrameView::CharacterCreation && uiManager)
         uiManager->getCharacterCreateScreen().update(deltaTime);
     if (!renderer) return;
+    prepareInterfaceResources(deltaTime);
     // Keep existing profiling keys while building UI before graphics recording.
     auto runInterfaceStage = [this](const char* stageName, auto&& fn) {
         auto stageStart = std::chrono::steady_clock::now();
@@ -4631,26 +4935,32 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                         mm = widgets.findByName("Minimap");
                         minimapWidgetId_ = mm ? mm->id : 0;
                     }
+                    if (mm) {
+                        // SetZoom and GetZoom reach the indoor zoom while the
+                        // map draws a building's own tiles, and the map is
+                        // drawn at the levels the interface keeps.
+                        addons::setMinimapIndoors(*engine, *mm, map->isShowingBuilding());
+                        static_assert(rendering::kMinimapOutdoorRadius.size() == addons::kMinimapZoomLevels &&
+                                      rendering::kWmoMinimapRadius.size() == addons::kMinimapZoomLevels);
+                        const int outdoor = addons::minimapZoomLevel(false);
+                        const int indoor = addons::minimapZoomLevel(true);
+                        // On a change only: this client's own zoom buttons in
+                        // the settings window step the map as well.
+                        static int appliedOutdoor = -1, appliedIndoor = -1;
+                        if (outdoor != appliedOutdoor) {
+                            appliedOutdoor = outdoor;
+                            map->setViewRadius(rendering::kMinimapOutdoorRadius[outdoor]);
+                        }
+                        if (indoor != appliedIndoor) {
+                            appliedIndoor = indoor;
+                            map->setIndoorZoom(indoor);
+                        }
+                    }
                     if (mm && mm->visible && mm->rectW > 0.0f && mm->rectH > 0.0f) {
                         const float sc = widgets.uiScale();
                         map->setScreenRect(mm->left * sc,
                                            io.DisplaySize.y - (mm->bottom + mm->rectH) * sc,
                                            mm->rectW * sc, mm->rectH * sc);
-
-                        // The zoom buttons move a number on the frame, and the
-                        // map has to be told: Minimap:SetZoom is the interface
-                        // saying what it wants, not the map changing. Five
-                        // levels as WoW has them, zero furthest out.
-                        static int appliedZoom = -1;
-                        if (mm->zoomLevel != appliedZoom) {
-                            appliedZoom = mm->zoomLevel;
-                            static const float kRadius[5] = {
-                                800.0f, 620.0f, 460.0f, 320.0f, 200.0f
-                            };
-                            const int lvl = (mm->zoomLevel < 0) ? 0
-                                          : (mm->zoomLevel > 4 ? 4 : mm->zoomLevel);
-                            map->setViewRadius(kRadius[lvl]);
-                        }
 
                         // Minimap:PingLocation, which is all Minimap_OnClick
                         // does. The offsets are minimap-local interface units
@@ -4679,7 +4989,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                                 mm->pingX, -mm->pingY, view);
                             const glm::vec3 canon = core::coords::renderToCanonical(
                                 playerRender + glm::vec3(d.x, d.y, 0.0f));
-                            if (gameHandler) gameHandler->sendMinimapPing(canon.x, canon.y);
+                            if (gameHandler) gameHandler->social().sendMinimapPing(canon.x, canon.y);
                         }
                     } else {
                         map->clearScreenRect();
@@ -4788,7 +5098,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                             {
                                 std::array<uint32_t, 19> displayIds{};
                                 std::array<uint8_t, 19> invTypes{};
-                                if (gameHandler->getOtherPlayerEquipment(
+                                if (gameHandler->inventory().resolveOtherPlayerEquipment(
                                         self->guid, displayIds, invTypes)) {
                                     for (size_t slot = 0; slot < displayIds.size(); ++slot) {
                                         if (displayIds[slot] == 0) continue;
@@ -4887,7 +5197,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                     if (petModel && petModel->visible) {
                         std::string modelPath;
                         uint32_t petDisplayId = 0;
-                        if (const uint64_t petGuid = gameHandler->getPetGuid()) {
+                        if (const uint64_t petGuid = pet::orNoPet(pet_.get()).getPetGuid()) {
                             if (game::Unit* u = gameHandler->getUnitByGuid(petGuid)) {
                                 petDisplayId = u->getDisplayId();
                                 if (petDisplayId != 0 && entitySpawner_) {
@@ -4925,16 +5235,15 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                     }
                     bool shown = false;
                     if (inspectModel && inspectModel->visible) {
-                        const auto* result = gameHandler->getInspectResult();
-                        uint8_t race = 0, gender = 0, facial = 0;
-                        uint32_t appearance = 0;
-                        if (result && result->guid != 0 &&
-                            gameHandler->getPlayerAppearance(result->guid, race, gender,
-                                                             appearance, facial)) {
+                        const auto* result = gameHandler->social().getInspectResult();
+                        const auto look = result && result->guid != 0
+                                              ? gameHandler->world().appearanceOf(result->guid)
+                                              : std::nullopt;
+                        if (look) {
                             std::vector<game::EquipmentItem> worn;
                             std::array<uint32_t, 19> displayIds{};
                             std::array<uint8_t, 19> invTypes{};
-                            if (gameHandler->getOtherPlayerEquipment(result->guid, displayIds,
+                            if (gameHandler->inventory().resolveOtherPlayerEquipment(result->guid, displayIds,
                                                                      invTypes)) {
                                 for (size_t slot = 0; slot < displayIds.size(); ++slot) {
                                     if (displayIds[slot] == 0) continue;
@@ -4946,7 +5255,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                             sizeFor(inspectModel_, inspectModel);
                             inspectModel_.setFraming(ui::UnitPortrait::Framing::FullBody);
                             shown = inspectModel_.updatePlayer(
-                                race, gender, appearance, facial, worn,
+                                look->race, look->gender, look->appearanceBytes, look->facialFeatures, worn,
                                 assetManager.get(), renderer.get(), io.DeltaTime);
                         }
                     }
@@ -5008,7 +5317,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                 std::array<uint64_t, 4> partyGuids{};
                 {
                     int found = 0;
-                    for (const auto& m : gameHandler->getPartyData().members) {
+                    for (const auto& m : group::orNoGroup(group_.get()).getPartyData().members) {
                         if (m.guid == gameHandler->getPlayerGuid()) continue;
                         if (found >= 4) break;
                         partyGuids[static_cast<size_t>(found++)] = m.guid;
@@ -5024,9 +5333,9 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                     // the second only in questframe and means nothing different
                     // by it.
                     {"npc", &npcPortrait_, npcGuid, "questnpc"},
-                    {"target", &targetPortrait_,   gameHandler->getTargetGuid()},
-                    {"pet",    &petPortrait_,      gameHandler->getPetGuid()},
-                    {"focus",  &focusPortrait_,    gameHandler->getFocusGuid()},
+                    {"target", &targetPortrait_,   gameHandler->combat().getTargetGuid()},
+                    {"pet",    &petPortrait_,      pet::orNoPet(pet_.get()).getPetGuid()},
+                    {"focus",  &focusPortrait_,    gameHandler->combat().getFocusGuid()},
                     {"party1", &partyPortraits_[0], partyGuids[0]},
                     {"party2", &partyPortraits_[1], partyGuids[1]},
                     {"party3", &partyPortraits_[2], partyGuids[2]},
@@ -5054,11 +5363,8 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                     // naked race model, with none of their skin, face or hair.
                     // The world already reads all three off their update
                     // fields, and now so does this.
-                    uint8_t race = 0, gender = 0, facial = 0;
-                    uint32_t appearance = 0;
-                    if (face.guid != 0 &&
-                        gameHandler->getPlayerAppearance(face.guid, race, gender,
-                                                         appearance, facial)) {
+                    const auto look = gameHandler->world().appearanceOf(face.guid);
+                    if (look) {
                         // What they are visibly wearing, where it is known.
                         // Empty means the item queries have not come back, and
                         // the portrait leaves the model dressed as it was
@@ -5068,7 +5374,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                         std::vector<game::EquipmentItem> worn;
                         std::array<uint32_t, 19> displayIds{};
                         std::array<uint8_t, 19> invTypes{};
-                        if (gameHandler->getOtherPlayerEquipment(face.guid, displayIds,
+                        if (gameHandler->inventory().resolveOtherPlayerEquipment(face.guid, displayIds,
                                                                  invTypes)) {
                             for (size_t slot = 0; slot < displayIds.size(); ++slot) {
                                 if (displayIds[slot] == 0) continue;
@@ -5082,7 +5388,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                         // last unit's face, and a frame that has just changed
                         // unit would go on showing it.
                         built = face.portrait->updatePlayer(
-                            race, gender, appearance, facial, worn,
+                            look->race, look->gender, look->appearanceBytes, look->facialFeatures, worn,
                             assetManager.get(), renderer.get(), io.DeltaTime);
                     } else {
                         uint32_t displayId = 0;
@@ -5318,7 +5624,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
                     !engine->mouseOverFrameXml()) {
                     const uint32_t carried = session()->interfaceState().cursor.itemId();
                     if (carried != 0 && gameHandler) {
-                        const auto* info = gameHandler->getItemInfo(carried);
+                        const auto* info = gameHandler->inventory().getItemInfo(carried);
                         const std::string name = info ? info->name : std::string();
                         const uint32_t quality = info ? info->quality : 0u;
                         gameHandler->fireAddonEvent(
@@ -5645,9 +5951,36 @@ void Application::setupUICallbacks() {
     uiScreenCallbacks_->setupCallbacks();
 
     // ── Realm patch archives (EZWoW: list over world, files over login) ──
-    gameHandler->setServerPatchManifestCallback([this](const std::vector<game::EzWowPatch>& patches) {
-        startRealmPatchSync(patches);
-    });
+    subscriptions_.push_back(eventBus_.subscribe<game::events::ServerPatchManifestReceived>(
+        [this](const game::events::ServerPatchManifestReceived& e) { startRealmPatchSync(e.patches); }));
+
+    // ── The camera and the player's model. Subscribed here, once: what
+    // enteredWorld sets up is set up again on every entry into the world.
+    subscriptions_.push_back(eventBus_.subscribe<game::events::PlayerKnockedBack>(
+        [this](const game::events::PlayerKnockedBack& e) {
+            if (getCameraController()) {
+                getCameraController()->applyKnockBack(e.vcos, e.vsin, e.hspeed, e.vspeed);
+            }
+        }));
+    subscriptions_.push_back(eventBus_.subscribe<game::events::CameraShakeRequested>(
+        [this](const game::events::CameraShakeRequested& e) {
+            if (getCameraController()) {
+                getCameraController()->triggerShake(e.magnitude, e.frequency, e.duration);
+            }
+        }));
+    subscriptions_.push_back(eventBus_.subscribe<game::events::AutoFollowChanged>(
+        [this](const game::events::AutoFollowChanged& e) {
+            if (getCameraController()) {
+                if (e.renderPos) {
+                    getCameraController()->setAutoFollow(e.renderPos);
+                } else {
+                    getCameraController()->cancelAutoFollow();
+                }
+            }
+        }));
+    // Barber shop and other live appearance changes rebuild the model.
+    subscriptions_.push_back(eventBus_.subscribe<game::events::PlayerModelRebuildRequested>(
+        [this](const game::events::PlayerModelRebuildRequested&) { refreshPlayerCharacterModel(); }));
     authHandler->setOnXferData([this](const uint8_t* data, size_t size) {
         if (realmPatchSync_) realmPatchSync_->onData(data, size);
     });
@@ -5655,12 +5988,12 @@ void Application::setupUICallbacks() {
     // ── World entry, unstuck, hearthstone, bind point ──
     worldEntryCallbacks_ = std::make_unique<WorldEntryCallbackHandler>(
         renderer.get(), *playerView_, *gameHandler, worldLoader_.get(), entitySpawner_.get(),
-        assetManager.get(), currentPhase_);
+        assetManager.get(), *gameData_, currentPhase_);
     worldEntryCallbacks_->setupCallbacks();
 
     // ── Entity spawn/despawn (creatures, players, game objects) ──
     entitySpawnCallbacks_ = std::make_unique<EntitySpawnCallbackHandler>(
-        *entitySpawner_, renderer.get(), *gameHandler,
+        *entitySpawner_, renderer.get(), gameHandler->eventBus(),
         [this](uint64_t guid) {
             uint64_t localGuid = gameHandler ? gameHandler->getPlayerGuid() : 0;
             uint64_t activeGuid = gameHandler ? gameHandler->getActiveCharacterGuid() : 0;
@@ -5688,7 +6021,7 @@ void Application::setupUICallbacks() {
 
     // ── Audio: music, sound effects, level-up, achievement, LFG ──
     audioCallbacks_ = std::make_unique<AudioCallbackHandler>(
-        *assetManager, audioCoordinator_.get(), renderer.get(), playerView_.get(),
+        *gameData_, audioCoordinator_.get(), renderer.get(), playerView_.get(),
         uiManager.get(), *gameHandler);
     audioCallbacks_->setupCallbacks();
 
@@ -5955,12 +6288,12 @@ void Application::refreshPlayerCharacterModel() {
     // Force equipment geosets/textures to be re-composited onto the fresh model
     // next frame - the respawn only builds the base body, and equipment isn't
     // "dirty" (nothing was equipped), so without this the model loses its armor.
-    if (gameHandler) gameHandler->resetEquipmentDirtyTracking();
+    if (gameHandler) gameHandler->inventory().resetEquipmentDirtyTracking();
 }
 
 void Application::buildFactionHostilityMap(uint8_t playerRace) {
-    if (!assetManager || !gameHandler) return;
-    game::buildFactionHostilityMap(*assetManager, *gameHandler, playerRace);
+    if (!gameHandler) return;
+    game::buildFactionHostilityMap(*gameData_, *gameHandler, playerRace);
 }
 
 // Render bounds/position queries - delegates to EntitySpawner
@@ -6069,7 +6402,7 @@ void Application::updateQuestMarkers() {
         return;
     }
 
-    const auto& questStatuses = gameHandler->getNpcQuestStatuses();
+    const auto& questStatuses = gameHandler->quests().getNpcQuestStatuses();
 
     // Clear all markers (we'll re-add active ones)
     questMarkerRenderer->clear();
@@ -6451,8 +6784,11 @@ void Application::updateRealmPatchMount() {
 void Application::applyRealmPatchLayer(std::shared_ptr<const pipeline::ArchiveLayer> layer,
                                        RealmPatchSet set) {
     const bool mounting = layer != nullptr;
+    widgetRenderer_.resetResources();
     assetManager->setArchiveLayer(std::move(layer));
     mountedRealmPatches_ = std::move(set);
+    widgetRenderer_.initialize(assetManager.get(), window ? window->getVkContext() : nullptr);
+    iconPrefetchCharacter_ = 0;
     if (mounting) {
         LOG_WARNING("Realm patches mounted for ", mountedRealmPatches_.realm, ": ",
                  mountedRealmPatches_.archives.size(), " archives above the extracted data");
@@ -6467,8 +6803,8 @@ void Application::applyRealmPatchLayer(std::shared_ptr<const pipeline::ArchiveLa
         // Additive: a realm's transports join the client's, and the client's
         // are found again as they were.
         if (auto* transports = gameHandler->getTransportManager()) {
-            transports->loadTransportAnimationDBC(assetManager.get());
-            transports->loadTaxiPathNodeDBC(assetManager.get());
+            transports->loadTransportAnimationDBC(*gameData_);
+            transports->loadTaxiPathNodeDBC(*gameData_);
         }
     }
     if (entitySpawner_) entitySpawner_->rebuildLookups();
@@ -6528,5 +6864,23 @@ void Application::updateConnectionAndPatches(float deltaTime, const FramePlan& p
         else uiManager->getCharacterScreen().setStatus("", false);
     }
 }
+void Application::startAgentBridge() {
+    const char* value = std::getenv("WOWEE_MCP_PORT");
+    if (!value || !*value) return;
+    const int port = std::atoi(value);
+    if (port <= 0 || port > 65535) {
+        LOG_WARNING("WOWEE_MCP_PORT: not a port: ", value);
+        return;
+    }
+    agentBridge_ = std::make_unique<AgentBridge>(
+        AgentBridge::Dependencies{renderer.get(), gameHandler.get(), agentControls_.get(),
+                                  getCameraController(), audioCoordinator_.get()});
+    std::string error;
+    if (!agentBridge_->start(static_cast<uint16_t>(port), error)) {
+        LOG_WARNING("MCP endpoint not started: ", error);
+        agentBridge_.reset();
+    }
+}
+
 } // namespace core
 } // namespace wowee

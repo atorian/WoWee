@@ -1,10 +1,24 @@
 #include "game/game_handler.hpp"
+#include "game/game_data.hpp"
+#include "achievement/services/achievements.hpp"
+#include "title/services/titles.hpp"
+#include "reputation/services/reputation.hpp"
+#include "pet/services/pet.hpp"
+#include "group/services/group.hpp"
+#include "game/guild_gateway.hpp"
+#include "guild/domain/records.hpp"
+#include "guild/services/guild.hpp"
+#include "mail/services/mail.hpp"
+#include "guild_bank/services/guild_bank.hpp"
+#include "trade/services/trade.hpp"
+#include "loot/services/loot.hpp"
 #include "core/event_bus.hpp"
 #include "game/game_events.hpp"
+#include "game/server_protocol.hpp"
 #include "game/reputation_standing.hpp"
 #include "game/spell_description_eval.hpp"
 #include "game/gather_spells.hpp"
-#include "game/packed_time.hpp"
+#include "core/packed_time.hpp"
 #include "game/inventory_slots.hpp"
 #include "game/ui_errors.hpp"
 #include "game/game_utils.hpp"
@@ -116,14 +130,12 @@ struct LockOpenPlan {
 // Decide how to open a game object from its Lock.dbc row. Only a known player
 // OPEN_LOCK spell yields CastSpell; every other case (including key-item locks)
 // is UseDirect, with keyItemId set so the caller can move the key into a bag.
-LockOpenPlan planGameObjectOpen(pipeline::AssetManager* assets,
+LockOpenPlan planGameObjectOpen(const GameData& data,
                                 const GameObjectQueryResponseData* info,
                                 const std::unordered_set<uint32_t>& knownSpells) {
     LockOpenPlan plan;
-    if (!assets || !info || !info->hasData || info->data[0] == 0) return plan;
+    if (!info || !info->hasData || info->data[0] == 0) return plan;
 
-    auto lockDbc = assets->loadDBC("Lock.dbc");
-    auto spellDbc = assets->loadDBC("Spell.dbc");
     // Which columns hold the spell's effects and their misc values, from the
     // layout. They were 71 and 110, the WotLK positions, behind a demand that
     // Spell.dbc have 234 fields - which is the WotLK file and nothing else, so
@@ -133,15 +145,16 @@ LockOpenPlan planGameObjectOpen(pipeline::AssetManager* assets,
     // not; the misc values are at 106 there rather than 110.
     const auto* spellL = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("Spell") : nullptr;
-    const uint32_t effect0Field = spellL ? spellL->field("Effect0") : 0xFFFFFFFF;
-    const uint32_t misc0Field   = spellL ? spellL->field("EffectMiscValue0") : 0xFFFFFFFF;
-    if (!lockDbc || !spellDbc || !lockDbc->isLoaded() || !spellDbc->isLoaded() ||
-        lockDbc->getFieldCount() < 33 ||
-        effect0Field == 0xFFFFFFFF || misc0Field == 0xFFFFFFFF ||
-        effect0Field + 3 > spellDbc->getFieldCount() ||
-        misc0Field + 3 > spellDbc->getFieldCount()) {
-        return plan; // Can't inspect the lock - let the server adjudicate a USE.
+    // The WotLK file's positions where no layout is loaded (a test).
+    const uint32_t effect0Field = spellL ? spellL->field("Effect0") : 71;
+    const uint32_t misc0Field   = spellL ? spellL->field("EffectMiscValue0") : 110;
+    if (effect0Field == 0xFFFFFFFF || misc0Field == 0xFFFFFFFF) {
+        data.stop("Spell.dbc", "how a locked object is opened",
+                  "has no Effect0 or EffectMiscValue0 in its layout");
     }
+    const auto lockDbc = data.table("Lock.dbc", 33, "how a locked object is opened");
+    const auto spellDbc = data.table("Spell.dbc", std::max(effect0Field, misc0Field) + 3,
+                                     "how a locked object is opened");
 
     const uint32_t lockId = info->data[0];
     for (uint32_t row = 0; row < lockDbc->getRecordCount(); ++row) {
@@ -236,18 +249,24 @@ void GameHandler::handleAuthChallenge(network::Packet& packet) {
         return;
     }
 
-    // Store server seed
-    serverSeed = challenge.serverSeed;
-    LOG_DEBUG("Server seed: 0x", std::hex, serverSeed, std::dec);
+    LOG_DEBUG("Server seed: 0x", std::hex, challenge.serverSeed, std::dec);
 
     setState(WorldState::CHALLENGE_RECEIVED);
 
     // Send authentication session
-    sendAuthSession();
+    sendAuthSession(challenge);
 }
 
-void GameHandler::sendAuthSession() {
+void GameHandler::sendAuthSession(const AuthChallengeData& challenge) {
     LOG_INFO("Sending CMSG_AUTH_SESSION");
+
+    const auto dosResponse = AuthSessionPacket::solveDosChallenge(
+        accountName, challenge.dosSeeds, challenge.dosDifficulty);
+    if (!dosResponse) {
+        fail("SMSG_AUTH_CHALLENGE asks for an unsolvable DoS difficulty (" +
+             std::to_string(challenge.dosDifficulty) + ")");
+        return;
+    }
 
     // Build authentication packet
     auto packet = AuthSessionPacket::build(
@@ -255,8 +274,9 @@ void GameHandler::sendAuthSession() {
         accountName,
         clientSeed,
         sessionKey,
-        serverSeed,
-        realmId_
+        challenge.serverSeed,
+        realmId_,
+        *dosResponse
     );
 
     LOG_DEBUG("CMSG_AUTH_SESSION packet size: ", packet.getSize(), " bytes");
@@ -291,10 +311,16 @@ void GameHandler::handleAuthResponse(network::Packet& packet) {
     }
 
     if (!response.isSuccess()) {
+        // The code and the whole payload: a code this client has no name for
+        // is otherwise reported only as "unknown", which says nothing about
+        // what the server refused.
+        const auto& payload = packet.getData();
         char code[8];
         std::snprintf(code, sizeof(code), "0x%02X", static_cast<unsigned>(response.result));
         std::string reason = std::string("Authentication failed: ") +
-                           getAuthResultString(response.result) + " (code " + code + ")";
+                           getAuthResultString(response.result) +
+                           " (code " + code + ", payload " +
+                           core::toHexString(payload.data(), payload.size(), true) + ")";
         fail(reason);
         return;
     }
@@ -354,8 +380,7 @@ void GameHandler::handleCharEnum(network::Packet& packet) {
     LOG_INFO("Handling SMSG_CHAR_ENUM");
 
     CharEnumResponse response;
-    // IMPORTANT: Do not infer packet formats from numeric build alone.
-    // Turtle WoW uses a "high" build but classic-era world packet formats.
+    // The expansion's parsers decide the format, never the numeric build.
     bool parsed = packetParsers_->parseCharEnum(packet, response);
     if (!parsed) {
         fail("Failed to parse SMSG_CHAR_ENUM");
@@ -373,10 +398,11 @@ void GameHandler::handleCharEnum(network::Packet& packet) {
         if (std::find(queriedGuildIds.begin(), queriedGuildIds.end(), character.guildId) != queriedGuildIds.end())
             continue;
         queriedGuildIds.push_back(character.guildId);
-        queryGuildInfo(character.guildId);
+        // Asks the server only for a name it does not already know.
+        guild::orNoGuild(services_.guild).lookupGuildName(character.guildId);
     }
     if (!queriedGuildIds.empty()) {
-        LOG_INFO("Queued guild name queries for ", queriedGuildIds.size(), " guild(s) from character list");
+        LOG_INFO("Looked up the names of ", queriedGuildIds.size(), " guild(s) from the character list");
     }
 
     LOG_INFO("========================================");
@@ -406,9 +432,7 @@ void GameHandler::createCharacter(const CharCreateData& data) {
     // Online mode: send packet to server
     if (!socket) {
         LOG_WARNING("Cannot create character: not connected");
-        if (charCreateCallback_) {
-            charCreateCallback_(false, "Not connected to server");
-        }
+        eventBus().publish(events::CharacterCreateAnswered{false, "Not connected to server"});
         return;
     }
 
@@ -416,9 +440,7 @@ void GameHandler::createCharacter(const CharCreateData& data) {
         std::string msg = "Character list not ready yet. Wait for SMSG_CHAR_ENUM.";
         LOG_WARNING("Blocking CMSG_CHAR_CREATE in state=", worldStateName(state),
                     " (awaiting CHAR_LIST_RECEIVED)");
-        if (charCreateCallback_) {
-            charCreateCallback_(false, msg);
-        }
+        eventBus().publish(events::CharacterCreateAnswered{false, msg});
         return;
     }
 
@@ -437,9 +459,7 @@ void GameHandler::handleCharCreateResponse(network::Packet& packet) {
     if (data.result == CharCreateResult::SUCCESS || data.result == CharCreateResult::IN_PROGRESS) {
         LOG_INFO("Character created successfully (code=", static_cast<int>(data.result), ")");
         requestCharacterList();
-        if (charCreateCallback_) {
-            charCreateCallback_(true, "Character created!");
-        }
+        eventBus().publish(events::CharacterCreateAnswered{true, "Character created!"});
     } else {
         std::string msg;
         switch (data.result) {
@@ -483,15 +503,13 @@ void GameHandler::handleCharCreateResponse(network::Packet& packet) {
             default: msg = "Unknown error (code " + std::to_string(static_cast<int>(data.result)) + ")"; break;
         }
         LOG_WARNING("Character creation failed: ", msg, " (code=", static_cast<int>(data.result), ")");
-        if (charCreateCallback_) {
-            charCreateCallback_(false, msg);
-        }
+        eventBus().publish(events::CharacterCreateAnswered{false, msg});
     }
 }
 
 void GameHandler::deleteCharacter(uint64_t characterGuid) {
     if (!socket) {
-        if (charDeleteCallback_) charDeleteCallback_(false, "Delete failed: not connected to server.");
+        eventBus().publish(events::CharacterDeleteAnswered{false, "Delete failed: not connected to server."});
         return;
     }
 
@@ -540,9 +558,7 @@ void GameHandler::handleCharLoginFailed(network::Packet& packet) {
     // Allow the player to re-select a character
     setState(WorldState::CHAR_LIST_RECEIVED);
 
-    if (charLoginFailCallback_) {
-        charLoginFailCallback_(msg);
-    }
+    eventBus().publish(events::CharacterLoginFailed{msg});
 }
 
 void GameHandler::selectCharacter(uint64_t characterGuid) {
@@ -577,31 +593,14 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
 
     // Reset per-character state so previous character data doesn't bleed through
     inventoryHandler_->beginCharacter();
-    lastPlayerFields_.clear();
-    playerArmorRating_ = 0;
-    std::fill(std::begin(playerResistances_), std::end(playerResistances_), 0);
-    std::fill(std::begin(playerStats_), std::end(playerStats_), -1);
-    playerMeleeAP_ = -1;
-    playerRangedAP_ = -1;
-    std::fill(std::begin(playerSpellDmgBonus_), std::end(playerSpellDmgBonus_), -1);
-    playerHealBonus_ = -1;
-    playerDodgePct_ = -1.0f;
-    playerParryPct_ = -1.0f;
-    playerBlockPct_ = -1.0f;
-    playerExpertise_ = 0;
-    playerOffhandExpertise_ = 0;
-    playerCritPct_  = -1.0f;
-    playerRangedCritPct_ = -1.0f;
-    std::fill(std::begin(playerSpellCritPct_), std::end(playerSpellCritPct_), -1.0f);
-    std::fill(std::begin(playerCombatRatings_), std::end(playerCombatRatings_), -1);
+    if (services_.achievementsFeed) services_.achievementsFeed->beginCharacter();
+    playerHandler_->beginCharacter();
+    movementHandler_->beginCharacter();
     spellHandler_->resetAllState();
     eventBus().publish(events::PlayerIntoxicationChanged{0.0f});
     actionBarHandler_->clear();
     petHandler_->beginCharacter();
     weatherHandler_->beginCharacter();
-    playerXp_ = 0;
-    playerNextLevelXp_ = 0;
-    serverPlayerLevel_ = 1;
     // The quest log begins again with CharacterLoggingIn, below.
     pendingLoginQuestResync_ = false;
     pendingLoginQuestResyncTimeout_ = 0.0f;
@@ -609,16 +608,10 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     // resetCastState() already called inside resetAllState() above
     pendingGameObjectInteractGuid_ = 0;
     lastInteractedGoGuid_ = 0;
-    playerDead_ = false;
-    releasedSpirit_ = false;
-    corpseGuid_ = 0;
-    corpsePositionValid_ = false;
-    corpseReclaimAvailableMs_ = 0;
-    targetGuid = 0;
-    focusGuid = 0;
-    lastTargetGuid = 0;
-    tabCycleStale = true;
-    entityController_->clearAll();
+    combatHandler_->beginCharacter();
+    combatHandler_->invalidateTabCycle();
+    worldHandler_->clearAll();
+    queryCacheHandler_->clear();
     accountDataHandler_->characterSelected(characterGuid);
     // The domains that keep what the server will send again end it on this.
     eventBus().publish(events::CharacterLoggingIn{characterGuid});
@@ -666,7 +659,7 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     // is where they logged in. Any of these arriving mid-flight is a duplicate
     // whatever the distance says: the server moves a passenger along the
     // spline, not by sending them into the world again.
-    const bool flying = isOnTaxiFlight();
+    const bool flying = movementHandler_->isOnTaxiFlight();
     if (!initialWorldEntry && sameMap &&
         (flying || distSqCurrent <= (5.0f * 5.0f))) {
         LOG_INFO("Ignoring duplicate SMSG_LOGIN_VERIFY_WORLD while already in world: mapId=",
@@ -720,7 +713,7 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     movementInfo.flags = 0;
     movementInfo.flags2 = 0;
     movementHandler_->resetMovementClock();
-    movementInfo.time = nextMovementTimestampMs();
+    movementInfo.time = movementHandler_->nextMovementTimestampMs();
     movementHandler_->setFalling(false);
     movementHandler_->setFallStartMs(0);
     movementInfo.fallTime = 0;
@@ -728,14 +721,9 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     movementInfo.jumpSinAngle = 0.0f;
     movementInfo.jumpCosAngle = 0.0f;
     movementInfo.jumpXYSpeed = 0.0f;
-    resurrectPending_ = false;
-    resurrectRequestPending_ = false;
-    selfResAvailable_ = false;
-    currentMountDisplayId_ = 0;
+    combatHandler_->worldEntered();
     vehicleId_ = 0;
-    if (mountCallback_) {
-        mountCallback_(0);
-    }
+    movementHandler_->enteredWorld();
 
     // Clear boss encounter unit slots and raid marks on world transfer
     socialHandler_->resetTransferState();
@@ -743,11 +731,7 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     // Suppress area triggers on initial login - prevents exit portals from
     // immediately firing when spawning inside a dungeon/instance. Deeprun Tram
     // (map 369) needs a shorter window because exits are close to the spawn.
-    const bool deeprunTram = data.mapId == 369;
-    activeAreaTriggers_.clear();
-    areaTriggerCheckTimer_ = deeprunTram ? -1.0f : -5.0f;
-    areaTriggerSuppressFirst_ = true;
-    areaTriggerCooldown_ = deeprunTram ? 1.5f : 10.0f;
+    movementHandler_->holdAreaTriggersOnArrival(data.mapId);
 
     eventBus().publish(events::WorldEntered{data.mapId, data.x, data.y, data.z, initialWorldEntry});
 
@@ -775,9 +759,6 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     }
 
     if (initialWorldEntry) {
-        // Clear inspect caches on world entry to avoid showing stale data.
-        inspectedPlayerAchievements_.clear();
-
         // Reset talent initialization so the first SMSG_TALENTS_INFO after login
         // correctly sets the active spec (static locals don't reset across logins).
         spellHandler_->resetTalentState();
@@ -832,7 +813,7 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
         // Asked once, read all session: the reply carries how long until the
         // daily quests reset, which is the only place that figure comes from.
         // Silently - the announcement belongs to /time.
-        queryServerTime(false);
+        socialHandler_->queryServerTime(false);
     }
 
     // Fire PLAYER_ENTERING_WORLD - THE most important event for addon initialization.
@@ -895,7 +876,7 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
         // pulls them to the graveyard. Same reason every UNIT_ value above is
         // re-sent here: a frame built after the fact has missed the event that
         // would have filled it in.
-        if (isPlayerDead()) {
+        if (combatHandler_->isPlayerDead()) {
             fireAddonEvent("PLAYER_DEAD", {});
         }
         // The durability warnings hide themselves when nothing is damaged, and
@@ -932,16 +913,12 @@ void GameHandler::handleTutorialFlags(network::Packet& packet) {
              flags[4], ", ", flags[5], ", ", flags[6], ", ", flags[7], "]");
 }
 
-void GameHandler::handleMotd(network::Packet& packet) {
-    chatHandler_->handleMotd(packet);
-}
-
 void GameHandler::handleNotification(network::Packet& packet) {
     // SMSG_NOTIFICATION: single null-terminated string
     std::string message = packet.readString();
     if (!message.empty()) {
         LOG_INFO("Server notification: ", message);
-        addSystemChatMessage(message);
+        chatHandler_->addSystemChatMessage(message);
     }
 }
 
@@ -972,277 +949,140 @@ void GameHandler::sendRequestVehicleExit() {
     vehicleId_ = 0;  // Optimistically clear; server will confirm via SMSG_PLAYER_VEHICLE_DATA(0)
 }
 
-const std::vector<GameHandler::EquipmentSetInfo>& GameHandler::getEquipmentSets() const {
-    return inventoryHandler_->getEquipmentSets();
-}
-
-const std::array<uint64_t, 19>* GameHandler::getEquipmentSetItems(uint32_t setId) const {
-    return inventoryHandler_->getEquipmentSetItems(setId);
-}
-
-uint32_t GameHandler::getEquipmentSetIgnoreMask(uint32_t setId) const {
-    return inventoryHandler_->getEquipmentSetIgnoreMask(setId);
-}
-
-// Trade: InventoryHandler owns it.
-GameHandler::TradeStatus GameHandler::getTradeStatus() const {
-    return inventoryHandler_->getTradeStatus();
-}
-bool GameHandler::hasPendingTradeRequest() const {
-    return inventoryHandler_->hasPendingTradeRequest();
-}
-bool GameHandler::isTradeOpen() const {
-    return inventoryHandler_->isTradeOpen();
-}
-const std::string& GameHandler::getTradePeerName() const {
-    return inventoryHandler_->getTradePeerName();
-}
-const std::array<GameHandler::TradeSlot, GameHandler::TRADE_SLOT_COUNT>& GameHandler::getMyTradeSlots() const {
-    return inventoryHandler_->getMyTradeSlots();
-}
-const std::array<GameHandler::TradeSlot, GameHandler::TRADE_SLOT_COUNT>& GameHandler::getPeerTradeSlots() const {
-    return inventoryHandler_->getPeerTradeSlots();
-}
-uint64_t GameHandler::getMyTradeGold() const {
-    return inventoryHandler_->getMyTradeGold();
-}
-uint64_t GameHandler::getPeerTradeGold() const {
-    return inventoryHandler_->getPeerTradeGold();
-}
-
-bool GameHandler::supportsEquipmentSets() const {
-    return inventoryHandler_->supportsEquipmentSets();
-}
-
-void GameHandler::useEquipmentSet(uint32_t setId) {
-    inventoryHandler_->useEquipmentSet(setId);
-}
-
-void GameHandler::saveEquipmentSet(const std::string& name, const std::string& iconName,
-                                    uint64_t existingGuid, uint32_t setIndex) {
-    inventoryHandler_->saveEquipmentSet(name, iconName, existingGuid, setIndex);
-}
-
-void GameHandler::deleteEquipmentSet(uint64_t setGuid) {
-    inventoryHandler_->deleteEquipmentSet(setGuid);
-}
-
 // --- Inventory state delegation (canonical state lives in InventoryHandler) ---
 
-// Item text
-bool GameHandler::isItemTextOpen() const {
-    return inventoryHandler_->isItemTextOpen();
-}
-const std::string& GameHandler::getItemText() const {
-    return inventoryHandler_->getItemText();
-}
-void GameHandler::closeItemText() {
-    inventoryHandler_->closeItemText();
-}
-
-// Loot
-bool GameHandler::isLootWindowOpen() const {
-    return inventoryHandler_->isLootWindowOpen();
-}
-const LootResponseData& GameHandler::getCurrentLoot() const {
-    return inventoryHandler_->getCurrentLoot();
-}
-void GameHandler::setAutoLoot(bool enabled) {
-    inventoryHandler_->setAutoLoot(enabled);
-}
-bool GameHandler::isAutoLoot() const {
-    return inventoryHandler_->isAutoLoot();
-}
-void GameHandler::setAutoSellGrey(bool enabled) {
-    inventoryHandler_->setAutoSellGrey(enabled);
-}
-bool GameHandler::isAutoSellGrey() const {
-    return inventoryHandler_->isAutoSellGrey();
-}
-void GameHandler::setAutoRepair(bool enabled) {
-    inventoryHandler_->setAutoRepair(enabled);
-}
-bool GameHandler::isAutoRepair() const {
-    return inventoryHandler_->isAutoRepair();
-}
-const std::vector<uint64_t>& GameHandler::getMasterLootCandidates() const {
-    return inventoryHandler_->getMasterLootCandidates();
-}
-bool GameHandler::hasMasterLootCandidates() const {
-    return inventoryHandler_->hasMasterLootCandidates();
-}
-const LootRollEntry* GameHandler::getLootRoll(int rollId) const {
-    return inventoryHandler_->getLootRoll(rollId);
-}
-
-// Vendor
-bool GameHandler::isVendorWindowOpen() const {
-    return inventoryHandler_->isVendorWindowOpen();
-}
-const ListInventoryData& GameHandler::getVendorItems() const {
-    return inventoryHandler_->getVendorItems();
-}
-void GameHandler::setVendorCanRepair(bool v) {
-    inventoryHandler_->setVendorCanRepair(v);
-}
-const std::deque<GameHandler::BuybackItem>& GameHandler::getBuybackItems() const {
-    // Layout-identical structs (InventoryHandler::BuybackItem == GameHandler::BuybackItem)
-    return reinterpret_cast<const std::deque<BuybackItem>&>(inventoryHandler_->getBuybackItems());
-}
-uint64_t GameHandler::getVendorGuid() const {
-    return inventoryHandler_->getVendorGuid();
-}
-
-// Mail
-bool GameHandler::isSocketingOpen() const {
-    return inventoryHandler_->getSocketSession().open;
-}
-
-uint64_t GameHandler::getSocketItemGuid() const {
-    return inventoryHandler_->getSocketSession().itemGuid;
-}
-
-uint32_t GameHandler::getSocketItemId() const {
-    return inventoryHandler_->getSocketSession().itemId;
-}
 uint32_t GameHandler::getSocketPendingGemItemId(int index) const {
     if (index < 0 || index > 2) return 0;
     return inventoryHandler_->getSocketSession().newGemItemId[index];
 }
 
-void GameHandler::openSocketing(uint64_t itemGuid) {
-    inventoryHandler_->openSocketing(itemGuid);
+contacts::IContactsServerFeed* GameHandler::contactsFeed() {
+    return services_.contactsFeed;
 }
 
-void GameHandler::closeSocketing() {
-    inventoryHandler_->closeSocketing();
+who::IWhoFeed* GameHandler::whoFeed() {
+    return services_.whoFeed;
 }
 
-bool GameHandler::setSocketGem(int index, uint64_t gemGuid, uint32_t gemItemId) {
-    return inventoryHandler_->setSocketGem(index, gemGuid, gemItemId);
+duel::IDuelsFeed* GameHandler::duelFeed() {
+    return services_.duelFeed;
 }
 
-void GameHandler::acceptSockets() {
-    inventoryHandler_->acceptSockets();
+petition::IPetitionsFeed* GameHandler::petitionFeed() {
+    return services_.petitionFeed;
 }
 
-bool GameHandler::isMailboxOpen() const {
-    return inventoryHandler_->isMailboxOpen();
-}
-const std::vector<MailMessage>& GameHandler::getMailInbox() const {
-    return inventoryHandler_->getMailInbox();
-}
-std::string GameHandler::getMailDisplaySubject(const MailMessage& mail) {
-    if (mail.messageType != 2) return mail.subject;
-
-    AuctionMailSubject auction;
-    if (!parseAuctionMailSubject(mail.subject, auction)) return mail.subject;
-
-    ensureItemInfo(auction.itemEntry);
-    const auto* info = getItemInfo(auction.itemEntry);
-    const std::string itemName = info && !info->name.empty()
-        ? info->name
-        : "Item #" + std::to_string(auction.itemEntry);
-    return formatAuctionMailSubject(auction, itemName);
-}
-int GameHandler::getSelectedMailIndex() const {
-    return inventoryHandler_->getSelectedMailIndex();
-}
-void GameHandler::setSelectedMailIndex(int idx) {
-    inventoryHandler_->setSelectedMailIndex(idx);
-}
-bool GameHandler::isMailComposeOpen() const {
-    return inventoryHandler_->isMailComposeOpen();
-}
-void GameHandler::openMailCompose() {
-    inventoryHandler_->openMailCompose();
-}
-void GameHandler::closeMailCompose() {
-    inventoryHandler_->closeMailCompose();
-}
-void GameHandler::setMailComposeShowing(bool showing) {
-    inventoryHandler_->setMailComposeShowing(showing);
-}
-bool GameHandler::hasNewMail() const {
-    return inventoryHandler_->hasNewMail();
-}
-const std::array<GameHandler::MailAttachSlot, 12>& GameHandler::getMailAttachments() const {
-    // Layout-identical structs (InventoryHandler::MailAttachSlot == GameHandler::MailAttachSlot)
-    return reinterpret_cast<const std::array<MailAttachSlot, 12>&>(inventoryHandler_->getMailAttachments());
+arena::IArenaTeamsFeed* GameHandler::arenaFeed() {
+    return services_.arenaFeed;
 }
 
-
-// Bank
-bool GameHandler::isBankOpen() const {
-    return inventoryHandler_->isBankOpen();
-}
-uint64_t GameHandler::getBankerGuid() const {
-    return inventoryHandler_->getBankerGuid();
-}
-int GameHandler::getEffectiveBankSlots() const {
-    return inventoryHandler_->getEffectiveBankSlots();
-}
-int GameHandler::getEffectiveBankBagSlots() const {
-    return inventoryHandler_->getEffectiveBankBagSlots();
+battleground::IBattlegroundsFeed* GameHandler::battlegroundFeed() {
+    return services_.battlegroundFeed;
 }
 
-// Guild Bank
-bool GameHandler::isGuildBankOpen() const {
-    return inventoryHandler_->isGuildBankOpen();
-}
-const GuildBankData& GameHandler::getGuildBankData() const {
-    return inventoryHandler_->getGuildBankData();
-}
-void GameHandler::setGuildBankMoney(uint64_t money) {
-    inventoryHandler_->setGuildBankMoney(money);
-}
-uint8_t GameHandler::getGuildBankActiveTab() const {
-    return inventoryHandler_->getGuildBankActiveTab();
-}
-void GameHandler::setGuildBankActiveTab(uint8_t tab) {
-    inventoryHandler_->setGuildBankActiveTab(tab);
+lfg::ILfgFeed* GameHandler::lfgFeed() {
+    return services_.lfgFeed;
 }
 
-// Auction House
-bool GameHandler::isAuctionHouseOpen() const {
-    return inventoryHandler_->isAuctionHouseOpen();
-}
-uint64_t GameHandler::getAuctioneerGuid() const {
-    return inventoryHandler_->getAuctioneerGuid();
-}
-const AuctionListResult& GameHandler::getAuctionBrowseResults() const {
-    return inventoryHandler_->getAuctionBrowseResults();
-}
-const AuctionListResult& GameHandler::getAuctionOwnerResults() const {
-    return inventoryHandler_->getAuctionOwnerResults();
-}
-const AuctionListResult& GameHandler::getAuctionBidderResults() const {
-    return inventoryHandler_->getAuctionBidderResults();
-}
-int GameHandler::getAuctionActiveTab() const {
-    return inventoryHandler_->getAuctionActiveTab();
-}
-void GameHandler::setAuctionActiveTab(int tab) {
-    inventoryHandler_->setAuctionActiveTab(tab);
-}
-float GameHandler::getAuctionSearchDelay() const {
-    return inventoryHandler_->getAuctionSearchDelay();
+calendar::ICalendarFeed* GameHandler::calendarFeed() {
+    return services_.calendarFeed;
 }
 
-// Trainer
-bool GameHandler::isTrainerWindowOpen() const {
-    return inventoryHandler_->isTrainerWindowOpen();
-}
-const TrainerListData& GameHandler::getTrainerSpells() const {
-    return inventoryHandler_->getTrainerSpells();
-}
-const std::vector<GameHandler::TrainerTab>& GameHandler::getTrainerTabs() const {
-    // Layout-identical structs (InventoryHandler::TrainerTab == GameHandler::TrainerTab)
-    return reinterpret_cast<const std::vector<TrainerTab>&>(inventoryHandler_->getTrainerTabs());
+group::IGroupServerFeed* GameHandler::groupFeed() {
+    return services_.groupFeed;
 }
 
-void GameHandler::sendMinimapPing(float wowX, float wowY) {
-    socialHandler_->sendMinimapPing(wowX, wowY);
+const group::IGroup* GameHandler::group() const {
+    return services_.group;
+}
+
+guild::IGuildServerFeed* GameHandler::guildFeed() {
+    return services_.guildFeed;
+}
+
+auction::IAuctionHouseFeed* GameHandler::auctionFeed() {
+    return services_.auctionFeed;
+}
+
+mail::IMailboxFeed* GameHandler::mailFeed() {
+    return services_.mailFeed;
+}
+
+guild_bank::IGuildBankFeed* GameHandler::guildBankFeed() {
+    return services_.guildBankFeed;
+}
+
+const guild_bank::IGuildBank* GameHandler::guildBank() const {
+    return services_.guildBank;
+}
+
+trade::ITradeFeed* GameHandler::tradeFeed() {
+    return services_.tradeFeed;
+}
+
+loot::ILootFeed* GameHandler::lootFeed() {
+    return services_.lootFeed;
+}
+
+const loot::ILoot* GameHandler::loot() const {
+    return services_.loot;
+}
+
+pet::IPetFeed* GameHandler::petFeed() {
+    return services_.petFeed;
+}
+
+uint64_t GameHandler::petGuid() const {
+    return pet::orNoPet(services_.pet).getPetGuid();
+}
+
+void GameHandler::openedStableMaster(uint64_t npcGuid) {
+    pet::orNoPet(services_.pet).setStableMaster(npcGuid);
+}
+
+reputation::IReputationFeed* GameHandler::reputationFeed() {
+    return services_.reputationFeed;
+}
+
+achievement::IAchievementsFeed* GameHandler::achievementsFeed() {
+    return services_.achievementsFeed;
+}
+
+// The name the chat line and the earned notice print, empty when it is not
+// known. Asking is what reads Achievement.dbc.
+std::string GameHandler::achievementName(uint32_t achievementId) {
+    auto& achievements = achievement::orNoAchievements(services_.achievements);
+    achievements.ensureAchievementNamesLoaded();
+    return achievements.getAchievementName(achievementId);
+}
+
+// The player's guild for the handlers that read it - the chat handler's
+// officer channel and member names, the guild bank's door - answered as a
+// guild the player is not in when the client has none.
+bool GameHandler::inGuild() const {
+    return guild::orNoGuild(services_.guild).isInGuild();
+}
+
+const GuildRosterData& GameHandler::guildRoster() const {
+    return guild::orNoGuild(services_.guild).getGuildRoster();
+}
+
+std::optional<uint32_t> GameHandler::guildRankRights() const {
+    const auto& guild = guild::orNoGuild(services_.guild);
+    const uint32_t rank = guild.getPlayerGuildRankIndex();
+    if (rank == 0xFFFFFFFFu || rank >= guild.getGuildRoster().ranks.size()) return std::nullopt;
+    return guild.getPlayerGuildRankRights();
+}
+
+// The group's roster, for the handlers that ask who is in it - empty when
+// there is no group, or none wired in.
+const GroupListData& GameHandler::party() const {
+    static const GroupListData kNoGroup;
+    return services_.group ? services_.group->getPartyData() : kNoGroup;
+}
+
+bool GameHandler::inGroup() const {
+    return services_.group && services_.group->isInGroup();
 }
 
 void GameHandler::handlePong(network::Packet& packet) {
@@ -1278,65 +1118,13 @@ void GameHandler::handlePong(network::Packet& packet) {
               " latencyMs=", lastLatency);
 }
 
-bool GameHandler::isServerMovementAllowed() const {
-    return movementHandler_->isServerMovementAllowed();
-}
-
-uint32_t GameHandler::nextMovementTimestampMs() {
-    return movementHandler_->nextMovementTimestampMs();
-}
-
 void GameHandler::sendMovement(Opcode opcode) {
     movementHandler_->sendMovement(opcode);
 }
 
-void GameHandler::sanitizeMovementForTaxi() {
-    movementHandler_->sanitizeMovementForTaxi();
-}
-
-void GameHandler::forceClearTaxiAndMovementState() {
-    movementHandler_->forceClearTaxiAndMovementState();
-}
-
-void GameHandler::setPosition(float x, float y, float z) {
-    movementHandler_->setPosition(x, y, z);
-}
-
-void GameHandler::setOrientation(float orientation) {
-    movementHandler_->setOrientation(orientation);
-}
-
 // Entity lifecycle methods (handleUpdateObject, processOutOfRangeObjectsUntil,
 // applyUpdateObjectBlock, finalizeUpdateObjectBatch, handleCompressedUpdateObject,
-// handleDestroyObject) moved to EntityController - see entity_controller.cpp
-
-void GameHandler::sendChatMessage(ChatType type, const std::string& message, const std::string& target) {
-    chatHandler_->sendChatMessage(type, message, target);
-}
-
-void GameHandler::sendAddonMessage(ChatType type, const std::string& message, const std::string& target) {
-    chatHandler_->sendAddonMessage(type, message, target);
-}
-
-void GameHandler::sendTextEmote(uint32_t textEmoteId, uint64_t targetGuid) {
-    chatHandler_->sendTextEmote(textEmoteId, targetGuid);
-}
-
-void GameHandler::joinChannel(const std::string& channelName, const std::string& password) {
-    chatHandler_->joinChannel(channelName, password);
-}
-
-void GameHandler::leaveChannel(const std::string& channelName) {
-    chatHandler_->leaveChannel(channelName);
-}
-
-std::string GameHandler::getChannelByIndex(int index) const {
-    return chatHandler_->getChannelByIndex(index);
-}
-
-int GameHandler::getChannelIndex(const std::string& channelName) const {
-    return chatHandler_->getChannelIndex(channelName);
-}
+// handleDestroyObject) moved to WorldHandler - see world_handler.cpp
 
 void GameHandler::autoJoinDefaultChannels() {
     chatHandler_->chatAutoJoin.general = chatAutoJoin.general;
@@ -1345,128 +1133,6 @@ void GameHandler::autoJoinDefaultChannels() {
     chatHandler_->chatAutoJoin.lfg = chatAutoJoin.lfg;
     chatHandler_->chatAutoJoin.local = chatAutoJoin.local;
     chatHandler_->autoJoinDefaultChannels();
-}
-
-void GameHandler::setTarget(uint64_t guid) {
-    combatHandler_->setTarget(guid);
-}
-
-void GameHandler::clearTarget() {
-    combatHandler_->clearTarget();
-}
-
-std::shared_ptr<Entity> GameHandler::getTarget() const {
-    return combatHandler_->getTarget();
-}
-
-void GameHandler::setFocus(uint64_t guid) {
-    combatHandler_->setFocus(guid);
-}
-
-void GameHandler::clearFocus() {
-    combatHandler_->clearFocus();
-}
-
-void GameHandler::setMouseoverGuid(uint64_t guid) {
-    combatHandler_->setMouseoverGuid(guid);
-}
-
-std::shared_ptr<Entity> GameHandler::getFocus() const {
-    return combatHandler_->getFocus();
-}
-
-void GameHandler::targetLastTarget() {
-    combatHandler_->targetLastTarget();
-}
-
-void GameHandler::targetEnemy(bool reverse) {
-    combatHandler_->targetEnemy(reverse);
-}
-
-void GameHandler::targetFriend(bool reverse) {
-    combatHandler_->targetFriend(reverse);
-}
-void GameHandler::targetNearestEnemyPlayer(bool reverse) {
-    combatHandler_->targetNearestEnemyPlayer(reverse);
-}
-void GameHandler::targetNearestFriendPlayer(bool reverse) {
-    combatHandler_->targetNearestFriendPlayer(reverse);
-}
-void GameHandler::targetNearestPartyMember(bool reverse) {
-    combatHandler_->targetNearestPartyMember(reverse);
-}
-void GameHandler::targetNearestRaidMember(bool reverse) {
-    combatHandler_->targetNearestRaidMember(reverse);
-}
-void GameHandler::targetLastEnemy() {
-    combatHandler_->targetLastEnemy();
-}
-void GameHandler::targetLastFriend() {
-    combatHandler_->targetLastFriend();
-}
-
-void GameHandler::inspectTarget() {
-    socialHandler_->inspectTarget();
-}
-
-void GameHandler::inspectUnit(uint64_t guid) {
-    socialHandler_->inspectUnit(guid);
-}
-
-void GameHandler::requestInspectHonorData(uint64_t guid) {
-    socialHandler_->requestInspectHonorData(guid);
-}
-
-const GameHandler::InspectResult* GameHandler::getInspectResult() const {
-    return socialHandler_->getInspectResult();
-}
-
-void GameHandler::queryServerTime(bool announce) {
-    socialHandler_->queryServerTime(announce);
-}
-
-uint64_t GameHandler::getTalentWipeNpcGuid() const {
-    return spellHandler_->getTalentWipeNpcGuid();
-}
-
-uint32_t GameHandler::getSecondsUntilDailyReset() const {
-    return socialHandler_->getSecondsUntilDailyReset();
-}
-
-float GameHandler::getGameTime() const {
-    return realmTimeHandler_->gameHours();
-}
-
-void GameHandler::requestPlayedTime() {
-    socialHandler_->requestPlayedTime();
-}
-
-void GameHandler::queryWho(const std::string& playerName) {
-    socialHandler_->queryWho(playerName);
-}
-
-void GameHandler::addFriend(const std::string& playerName, const std::string& note) {
-    socialHandler_->addFriend(playerName, note);
-}
-
-void GameHandler::removeFriend(const std::string& playerName) {
-    socialHandler_->removeFriend(playerName);
-}
-
-void GameHandler::setFriendNote(const std::string& playerName, const std::string& note) {
-    socialHandler_->setFriendNote(playerName, note);
-}
-
-void GameHandler::randomRoll(uint32_t minRoll, uint32_t maxRoll) {
-    socialHandler_->randomRoll(minRoll, maxRoll);
-}
-
-void GameHandler::addIgnore(const std::string& playerName) {
-    socialHandler_->addIgnore(playerName);
-}
-
-void GameHandler::removeIgnore(const std::string& playerName) {
-    socialHandler_->removeIgnore(playerName);
 }
 
 void GameHandler::faceCanonicalYaw(float canonicalYaw) {
@@ -1479,309 +1145,56 @@ void GameHandler::faceCanonicalYaw(float canonicalYaw) {
     sendMovement(Opcode::MSG_MOVE_SET_FACING);
 }
 
-void GameHandler::requestLogout(bool exitAfterLogout) {
-    socialHandler_->requestLogout(exitAfterLogout);
-}
-
-void GameHandler::cancelLogout() {
-    socialHandler_->cancelLogout();
-}
-
-void GameHandler::sendSetDifficulty(uint32_t difficulty, bool raid) {
-    socialHandler_->sendSetDifficulty(difficulty, raid);
-}
-
 void GameHandler::setStandState(uint8_t standState) {
-    socialHandler_->setStandState(standState);
-}
-
-void GameHandler::toggleHelm() {
-    socialHandler_->toggleHelm();
-}
-
-void GameHandler::toggleCloak() {
-    socialHandler_->toggleCloak();
-}
-
-void GameHandler::followTarget() {
-    movementHandler_->followTarget();
-}
-
-void GameHandler::cancelFollow() {
-    movementHandler_->cancelFollow();
-}
-
-void GameHandler::assistTarget() {
-    combatHandler_->assistTarget();
-}
-
-void GameHandler::togglePvp() {
-    combatHandler_->togglePvp();
-}
-
-void GameHandler::requestGuildInfo() {
-    socialHandler_->requestGuildInfo();
-}
-
-void GameHandler::requestGuildRoster() {
-    socialHandler_->requestGuildRoster();
-}
-
-void GameHandler::setGuildMotd(const std::string& motd) {
-    socialHandler_->setGuildMotd(motd);
-}
-
-void GameHandler::promoteGuildMember(const std::string& playerName) {
-    socialHandler_->promoteGuildMember(playerName);
-}
-
-void GameHandler::demoteGuildMember(const std::string& playerName) {
-    socialHandler_->demoteGuildMember(playerName);
-}
-
-void GameHandler::leaveGuild() {
-    socialHandler_->leaveGuild();
-}
-
-void GameHandler::inviteToGuild(const std::string& playerName) {
-    socialHandler_->inviteToGuild(playerName);
-}
-
-void GameHandler::initiateReadyCheck() {
-    socialHandler_->initiateReadyCheck();
-}
-
-void GameHandler::respondToReadyCheck(bool ready) {
-    socialHandler_->respondToReadyCheck(ready);
-}
-
-void GameHandler::acceptDuel() {
-    socialHandler_->acceptDuel();
-}
-
-void GameHandler::forfeitDuel() {
-    socialHandler_->forfeitDuel();
-}
-
-void GameHandler::toggleAfk(const std::string& message) {
-    chatHandler_->toggleAfk(message);
-}
-
-void GameHandler::toggleDnd(const std::string& message) {
-    chatHandler_->toggleDnd(message);
-}
-
-void GameHandler::replyToLastWhisper(const std::string& message) {
-    chatHandler_->replyToLastWhisper(message);
-}
-
-std::string GameHandler::getLastWhisperSender() const {
-    return chatHandler_->getLastWhisperSender();
+    playerHandler_->requestStandState(standState);
 }
 
 bool GameHandler::isAfk() const { return chatHandler_->isAfk(); }
 bool GameHandler::isDnd() const { return chatHandler_->isDnd(); }
 
-void GameHandler::setGuildBankTabText(uint8_t tab, const std::string& text) {
-    socialHandler_->setGuildBankTabText(tab, text);
-}
-
-void GameHandler::channelModeration(Opcode op, const std::string& channelName,
-                                    const std::string& targetName,
-                                    bool allowEmptyTarget) {
-    socialHandler_->channelModeration(op, channelName, targetName,
-                                                         allowEmptyTarget);
-}
-
-void GameHandler::promoteToLeader(uint64_t guid) {
-    socialHandler_->promoteToLeader(guid);
-}
-
-void GameHandler::uninvitePlayer(const std::string& playerName) {
-    socialHandler_->uninvitePlayer(playerName);
-}
-
-void GameHandler::leaveParty() {
-    socialHandler_->leaveParty();
-}
-
-void GameHandler::setMainTank(uint64_t targetGuid) {
-    socialHandler_->setMainTank(targetGuid);
-}
-
-void GameHandler::setMainAssist(uint64_t targetGuid) {
-    socialHandler_->setMainAssist(targetGuid);
-}
-
-void GameHandler::clearMainTank() {
-    socialHandler_->clearMainTank();
-}
-
-void GameHandler::clearMainAssist() {
-    socialHandler_->clearMainAssist();
-}
-
-void GameHandler::setRaidMark(uint64_t guid, uint8_t icon) {
-    socialHandler_->setRaidMark(guid, icon);
-}
-
-// The marks live in SocialHandler - MSG_RAID_TARGET_UPDATE writes them there.
-// GameHandler kept a second, identical array that nothing ever wrote, so every
-// caller of these (target frame, nameplates, minimap, social panel) read an
-// array of zeros and no marker icon was ever drawn.
-uint64_t GameHandler::getRaidMarkGuid(uint32_t icon) const {
-    return socialHandler_->getRaidMarkGuid(icon);
-}
-
-uint8_t GameHandler::getEntityRaidMark(uint64_t guid) const {
-    return socialHandler_->getEntityRaidMark(guid);
-}
-
-void GameHandler::requestRaidInfo() {
-    socialHandler_->requestRaidInfo();
-}
-
-void GameHandler::setSavedInstanceExtend(uint32_t mapId, uint32_t difficulty, bool extend) {
-    socialHandler_->setSavedInstanceExtend(mapId, difficulty, extend);
-}
-
-void GameHandler::proposeDuel(uint64_t targetGuid) {
-    socialHandler_->proposeDuel(targetGuid);
-}
-
-void GameHandler::initiateTrade(uint64_t targetGuid) {
-    inventoryHandler_->initiateTrade(targetGuid);
-}
-
-void GameHandler::reportPlayer(uint64_t targetGuid, const std::string& reason) {
-    socialHandler_->reportPlayer(targetGuid, reason);
-}
-
-void GameHandler::stopCasting() {
-    spellHandler_->stopCasting();
-}
-
-void GameHandler::resetCastState() {
-    spellHandler_->resetCastState();
-}
-
-void GameHandler::clearUnitCaches() {
-    spellHandler_->clearUnitCaches();
-}
-
-void GameHandler::releaseSpirit() {
-    combatHandler_->releaseSpirit();
-}
-
-bool GameHandler::canReclaimCorpse() const {
-    return combatHandler_->canReclaimCorpse();
-}
-
-float GameHandler::getCorpseReclaimDelaySec() const {
-    return combatHandler_->getCorpseReclaimDelaySec();
-}
-
-void GameHandler::reclaimCorpse() {
-    combatHandler_->reclaimCorpse();
-}
-
-void GameHandler::useSelfRes() {
-    combatHandler_->useSelfRes();
-}
-
-void GameHandler::activateSpiritHealer(uint64_t npcGuid) {
-    combatHandler_->activateSpiritHealer(npcGuid);
-}
-
-void GameHandler::acceptResurrect() {
-    combatHandler_->acceptResurrect();
-}
-
-void GameHandler::declineResurrect() {
-    combatHandler_->declineResurrect();
-}
-
-void GameHandler::tabTarget(float playerX, float playerY, float playerZ) {
-    combatHandler_->tabTarget(playerX, playerY, playerZ);
-}
-
 void GameHandler::addLocalChatMessage(const MessageChatData& msg) {
     chatHandler_->addLocalChatMessage(msg);
 }
 
-const std::deque<MessageChatData>& GameHandler::getChatHistory() const {
-    return chatHandler_->getChatHistory();
-}
-
-void GameHandler::clearChatHistory() {
-    chatHandler_->clearChatHistory();
-}
-
-bool GameHandler::ownsChatChannel(const std::string& name) const {
-    return chatHandler_->ownsChannel(name);
-}
-
-uint64_t GameHandler::chatLineSender(uint32_t lineId) const {
-    return chatHandler_->chatLineSender(lineId);
-}
-
-const std::vector<std::string>& GameHandler::getJoinedChannels() const {
-    return chatHandler_->getJoinedChannels();
-}
-
 // ============================================================
-// Name Queries (delegated to EntityController)
+// Name Queries
 // ============================================================
 
-// Who a piece of mail is from. The wire gives a player GUID for player mail and
-// an entry for everything else, and nothing resolved either - the inbox showed
-// an empty From line for every message.
-//
-// Resolved on demand rather than stored, so a name that arrives after the inbox
-// was parsed shows up on the next frame instead of staying blank.
-std::string GameHandler::getMailSenderName(const MailMessage& mail) const {
-    switch (mail.messageType) {
-        case 0: {  // from another player
-            // The name-query response backfills senderName, and Reply uses that
-            // field, so prefer it and fall back to the cache for the window
-            // between the inbox arriving and the query returning.
-            if (!mail.senderName.empty()) return mail.senderName;
-            if (mail.senderGuid == 0) break;
-            const std::string& name = lookupName(mail.senderGuid);
-            if (!name.empty()) return name;
-            return "Unknown";
-        }
-        case 2:    // the auction house, which has no creature behind it
-            return "Auction House";
-        case 3: {  // a creature
-            std::string name = getCachedCreatureName(mail.senderEntry);
-            if (!name.empty()) return name;
-            break;
-        }
-        case 4: {  // a game object
-            if (const auto* info = getCachedGameObjectInfo(mail.senderEntry);
-                info && !info->name.empty()) {
-                return info->name;
-            }
-            break;
-        }
-        default:
-            break;
+void GameHandler::playerNameArrived(uint64_t guid, const std::string& name) {
+    worldHandler_->playerNamed(guid, name);
+}
+
+void GameHandler::creatureTemplateArrived(const CreatureQueryResponseData& data) {
+    worldHandler_->creatureNamed(data);
+    // A companion may have been waiting on exactly this. A companion's
+    // creature id is a template entry and the model frame needs a display
+    // id, so GetCompanionInfo answers zero until the query comes back - and
+    // the tab only re-reads when told. Without this the model appeared on
+    // the next login and not before.
+    //
+    // With the kind, because the event carries it and the tab re-reads the
+    // list it names: a mount's answer announced as a critter's left the
+    // mount tab holding the zero it started with.
+    const std::string kind = companionKindForCreature(data.entry);
+    if (!kind.empty() && hasAddonEventListener()) {
+        fireAddonEvent("COMPANION_UPDATE", {kind});
     }
-    return "Unknown";
+    // An objective that had no name for what it is about now has one.
+    questHandler_->objectiveTargetNamed(data.entry, false);
 }
 
-void GameHandler::queryPlayerName(uint64_t guid) {
-    entityController_->queryPlayerName(guid);
-}
-
-void GameHandler::queryCreatureInfo(uint32_t entry, uint64_t guid) {
-    entityController_->queryCreatureInfo(entry, guid);
+void GameHandler::gameObjectTemplateArrived(const GameObjectQueryResponseData& data) {
+    worldHandler_->gameObjectNamed(data);
+    inventoryHandler_->gameObjectTemplateArrived(data);
+    // And the same for an objective that names this one - a chest to open
+    // rather than a creature to kill.
+    questHandler_->objectiveTargetNamed(data.entry, true);
+    movementHandler_->transportTemplateArrived(data);
 }
 
 uint32_t GameHandler::getCreatureDisplayIdForEntry(uint32_t entry) {
     if (entry == 0) return 0;
-    const auto& cache = getCreatureInfoCache();
+    const auto& cache = queryCacheHandler_->getCreatureInfoCache();
     if (auto it = cache.find(entry); it != cache.end()) {
         // The first non-zero of the four. A template may carry several models
         // and the server picks between them per spawn; for a preview any of
@@ -1792,45 +1205,17 @@ uint32_t GameHandler::getCreatureDisplayIdForEntry(uint32_t entry) {
     }
     // Guid zero: this is not about any one spawn. queryCreatureInfo drops a
     // repeat while one is in flight, so calling every frame sends one query.
-    queryCreatureInfo(entry, 0);
+    queryCacheHandler_->queryCreatureInfo(entry, 0);
     return 0;
-}
-
-void GameHandler::queryGameObjectInfo(uint32_t entry, uint64_t guid) {
-    entityController_->queryGameObjectInfo(entry, guid);
-}
-
-std::string GameHandler::getCachedPlayerName(uint64_t guid) const {
-    return entityController_->getCachedPlayerName(guid);
-}
-
-std::string GameHandler::getCachedCreatureName(uint32_t entry) const {
-    return entityController_->getCachedCreatureName(entry);
 }
 
 // ============================================================
 // Item Query (forwarded to InventoryHandler)
 // ============================================================
 
-void GameHandler::queryItemInfo(uint32_t entry, uint64_t guid) {
-    inventoryHandler_->queryItemInfo(entry, guid);
-}
-
-uint64_t GameHandler::resolveOnlineItemGuid(uint32_t itemId) const {
-    return inventoryHandler_->resolveOnlineItemGuid(itemId);
-}
-
-void GameHandler::detectInventorySlotBases(const FlatFieldMap& fields) {
-    inventoryHandler_->detectInventorySlotBases(fields);
-}
-
-bool GameHandler::applyInventoryFields(const FlatFieldMap& fields) {
-    return inventoryHandler_->applyInventoryFields(fields);
-}
-
 uint64_t GameHandler::getInteractNpcGuid() const {
-    if (const uint64_t peer = inventoryHandler_->getTradePeerGuid()) return peer;
-    if (const uint64_t vendor = getVendorGuid()) return vendor;
+    if (const uint64_t peer = trade::orNoTrade(services_.trade).getTradePeerGuid()) return peer;
+    if (const uint64_t vendor = inventoryHandler_->getVendorGuid()) return vendor;
     // The trainer, which the list above this function has always named and
     // this function never asked.
     //
@@ -1842,8 +1227,8 @@ uint64_t GameHandler::getInteractNpcGuid() const {
     //
     // Above the gossip for the same reason the vendor is: a trainer is a window
     // opened from a gossip and covering it.
-    if (isTrainerWindowOpen()) {
-        if (const uint64_t trainer = getTrainerSpells().trainerGuid) return trainer;
+    if (inventoryHandler_->isTrainerWindowOpen()) {
+        if (const uint64_t trainer = inventoryHandler_->getTrainerSpells().trainerGuid) return trainer;
     }
     // From the movement handler, which owns both. GameHandler kept members of
     // the same two names that the decomposition left behind unwritten, so this
@@ -1856,39 +1241,9 @@ uint64_t GameHandler::getInteractNpcGuid() const {
     return 0;
 }
 
-bool GameHandler::getOtherPlayerEquipment(uint64_t guid,
-                                          std::array<uint32_t, 19>& displayIds,
-                                          std::array<uint8_t, 19>& invTypes) const {
-    return inventoryHandler_->resolveOtherPlayerEquipment(guid, displayIds, invTypes);
-}
-
-void GameHandler::extractContainerFields(uint64_t containerGuid, const FlatFieldMap& fields) {
-    inventoryHandler_->extractContainerFields(containerGuid, fields);
-}
-
-void GameHandler::rebuildOnlineInventory() {
-    inventoryHandler_->rebuildOnlineInventory();
-}
-
-void GameHandler::maybeDetectVisibleItemLayout() {
-    inventoryHandler_->maybeDetectVisibleItemLayout();
-}
-
-void GameHandler::updateOtherPlayerVisibleItems(uint64_t guid, const FlatFieldMap& fields) {
-    inventoryHandler_->updateOtherPlayerVisibleItems(guid, fields);
-}
-
 void GameHandler::cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries,
                                                 const std::array<uint16_t, 19>& enchantIds) {
     inventoryHandler_->cacheInspectedPlayerEquipment(guid, itemEntries, enchantIds);
-}
-
-void GameHandler::emitOtherPlayerEquipment(uint64_t guid) {
-    inventoryHandler_->emitOtherPlayerEquipment(guid);
-}
-
-void GameHandler::emitAllOtherPlayerEquipment() {
-    inventoryHandler_->emitAllOtherPlayerEquipment();
 }
 
 // ============================================================
@@ -1912,70 +1267,9 @@ bool GameHandler::shouldLogSpellstealAura(uint64_t casterGuid, uint64_t victimGu
     return combatHandler_->shouldLogSpellstealAura(casterGuid, victimGuid, spellId);
 }
 
-void GameHandler::updateCombatText(float deltaTime) {
-    combatHandler_->updateCombatText(deltaTime);
-}
-
-bool GameHandler::isAutoAttacking() const {
-    return combatHandler_->isAutoAttacking();
-}
-
-bool GameHandler::hasAutoAttackIntent() const {
-    return combatHandler_->hasAutoAttackIntent();
-}
-
-bool GameHandler::isInCombat() const {
-    return combatHandler_->isInCombat();
-}
-
-bool GameHandler::isInCombatWith(uint64_t guid) const {
-    return combatHandler_->isInCombatWith(guid);
-}
-
-uint64_t GameHandler::getAutoAttackTargetGuid() const {
-    return combatHandler_->getAutoAttackTargetGuid();
-}
-
-bool GameHandler::isAggressiveTowardPlayer(uint64_t guid) const {
-    return combatHandler_->isAggressiveTowardPlayer(guid);
-}
-
-uint64_t GameHandler::getLastMeleeSwingMs() const {
-    return combatHandler_->getLastMeleeSwingMs();
-}
-
-const std::vector<CombatTextEntry>& GameHandler::getCombatText() const {
-    static const std::vector<CombatTextEntry> empty;
-    return combatHandler_->getCombatText();
-}
-
-const std::deque<CombatLogEntry>& GameHandler::getCombatLog() const {
-    static const std::deque<CombatLogEntry> empty;
-    return combatHandler_->getCombatLog();
-}
-
-void GameHandler::clearCombatLog() {
-    combatHandler_->clearCombatLog();
-}
-
-void GameHandler::clearCombatText() {
-    combatHandler_->clearCombatText();
-}
-
-void GameHandler::clearHostileAttackers() {
-    combatHandler_->clearHostileAttackers();
-}
-
-const std::vector<GameHandler::ThreatEntry>* GameHandler::getThreatList(uint64_t unitGuid) const {
-    return combatHandler_->getThreatList(unitGuid);
-}
-
 const std::vector<GameHandler::ThreatEntry>* GameHandler::getTargetThreatList() const {
-    return targetGuid ? getThreatList(targetGuid) : nullptr;
-}
-
-bool GameHandler::isHostileAttacker(uint64_t guid) const {
-    return combatHandler_->isHostileAttacker(guid);
+    const uint64_t target = combatHandler_->getTargetGuid();
+    return target ? combatHandler_->getThreatList(target) : nullptr;
 }
 
 void GameHandler::confirmBinder() {
@@ -1986,10 +1280,6 @@ void GameHandler::confirmBinder() {
              std::hex, binderGuid_, std::dec);
 }
 
-void GameHandler::setFlightAirborne(bool airborne) {
-    movementHandler_->setFlightAirborne(airborne);
-}
-
 void GameHandler::dismount() {
     movementHandler_->dismount();
 }
@@ -1997,90 +1287,6 @@ void GameHandler::dismount() {
 // ============================================================
 // Arena / Battleground Handlers
 // ============================================================
-
-void GameHandler::declineBattlefield(uint32_t queueSlot) {
-    socialHandler_->declineBattlefield(queueSlot);
-}
-
-bool GameHandler::hasPendingBgInvite() const {
-    return socialHandler_->hasPendingBgInvite();
-}
-
-// Seeds the staging copy from the rank as it stands, so a field the panel never
-// touches goes back to the server unchanged instead of as a zero.
-void GameHandler::setSelectedGuildRank(int index) {
-    selectedGuildRank_ = index;
-    pendingGuildRank_ = PendingGuildRank{};
-    const auto& roster = getGuildRoster();
-    if (index < 1 || index > static_cast<int>(roster.ranks.size())) return;
-    const auto& r = roster.ranks[static_cast<size_t>(index) - 1];
-    pendingGuildRank_.rights    = r.rights;
-    pendingGuildRank_.goldLimit = r.goldLimit;
-    pendingGuildRank_.tabRights = r.bankTabRights;
-    pendingGuildRank_.tabSlots  = r.bankTabSlotsPerDay;
-}
-
-void GameHandler::saveGuildRank(const std::string& rankName) {
-    if (selectedGuildRank_ < 1) return;
-    const auto& p = pendingGuildRank_;
-    // Ranks are zero-based on the wire and one-based in the panel.
-    socialHandler_->saveGuildRank(static_cast<uint32_t>(selectedGuildRank_ - 1),
-                                  p.rights, rankName, p.goldLimit,
-                                  p.tabRights.data(), p.tabSlots.data());
-}
-
-void GameHandler::setGuildInfoText(const std::string& text) {
-    socialHandler_->setGuildInfoText(text);
-}
-
-void GameHandler::takeInboxTextItem(uint32_t mailId) {
-    socialHandler_->takeInboxTextItem(mailId);
-}
-
-uint32_t GameHandler::getPlayerGuildRankRights() const {
-    return socialHandler_->getPlayerGuildRankRights();
-}
-
-void GameHandler::delGuildRank() {
-    socialHandler_->delGuildRank();
-}
-
-void GameHandler::setLootMethod(uint8_t method, uint64_t masterGuid, uint8_t threshold) {
-    socialHandler_->setLootMethod(method, masterGuid, threshold);
-}
-
-void GameHandler::setPartyAssignment(uint8_t assignment, uint64_t guid, bool apply) {
-    socialHandler_->setPartyAssignment(assignment, guid, apply);
-}
-
-void GameHandler::setRaidSubgroup(const std::string& playerName, uint8_t group) {
-    socialHandler_->setRaidSubgroup(playerName, group);
-}
-
-void GameHandler::swapRaidSubgroup(const std::string& a, const std::string& b) {
-    socialHandler_->swapRaidSubgroup(a, b);
-}
-
-void GameHandler::joinBattlefield(uint64_t battlemasterGuid, uint32_t bgTypeId,
-                                  uint32_t instanceId, bool asGroup) {
-    socialHandler_->joinBattlefield(battlemasterGuid, bgTypeId, instanceId, asGroup);
-}
-
-void GameHandler::leaveBattlefield() {
-    socialHandler_->leaveBattlefield();
-}
-
-void GameHandler::requestBattlefieldList(uint32_t bgTypeId) {
-    socialHandler_->requestBattlefieldList(bgTypeId);
-}
-
-void GameHandler::reportPvpAfk(uint64_t playerGuid) {
-    socialHandler_->reportPvpAfk(playerGuid);
-}
-
-void GameHandler::acceptBattlefield(uint32_t queueSlot) {
-    socialHandler_->acceptBattlefield(queueSlot);
-}
 
 // ---------------------------------------------------------------------------
 // LFG / Dungeon Finder handlers (WotLK 3.3.5a)
@@ -2090,98 +1296,12 @@ void GameHandler::acceptBattlefield(uint32_t queueSlot) {
 // LFG outgoing packets
 // ---------------------------------------------------------------------------
 
-void GameHandler::lfgJoin(const std::vector<uint32_t>& dungeonIds, uint8_t roles) {
-    socialHandler_->lfgJoin(dungeonIds, roles);
-}
-
-void GameHandler::lfgLeave() {
-    socialHandler_->lfgLeave();
-}
-
-void GameHandler::requestLfgPlayerLockInfo() {
-    if (state != WorldState::IN_WORLD || !socket) return;
-    // Payload-free requests. The dungeon finder's ready popup asks for both in
-    // its OnShow, so the rewards it is about to draw are the current ones.
-    network::Packet pkt(wireOpcode(Opcode::CMSG_LFD_PLAYER_LOCK_INFO_REQUEST));
-    socket->send(pkt);
-}
-
-void GameHandler::requestLfgPartyLockInfo() {
-    if (state != WorldState::IN_WORLD || !socket) return;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_LFD_PARTY_LOCK_INFO_REQUEST));
-    socket->send(pkt);
-}
-
-void GameHandler::lfgSetRoles(uint8_t roles) {
-    socialHandler_->lfgSetRoles(roles);
-}
-
-void GameHandler::lfgAcceptProposal(uint32_t proposalId, bool accept) {
-    socialHandler_->lfgAcceptProposal(proposalId, accept);
-}
-
-void GameHandler::lfgTeleport(bool toLfgDungeon) {
-    socialHandler_->lfgTeleport(toLfgDungeon);
-}
-
-void GameHandler::lfgSetBootVote(bool vote) {
-    socialHandler_->lfgSetBootVote(vote);
-}
-
-void GameHandler::loadAreaTriggerDbc() {
-    movementHandler_->loadAreaTriggerDbc();
-}
-
-void GameHandler::checkAreaTriggers() {
-    movementHandler_->checkAreaTriggers();
-}
-
-void GameHandler::requestArenaTeamRoster(uint32_t teamId) {
-    socialHandler_->requestArenaTeamRoster(teamId);
-}
-
-void GameHandler::requestPvpLog() {
-    socialHandler_->requestPvpLog();
-}
-
 // ============================================================
 // Spells
 // ============================================================
 
-void GameHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
-    spellHandler_->castSpell(spellId, targetGuid);
-}
-
 void GameHandler::cancelCast() {
     spellHandler_->cancelCast();
-}
-
-void GameHandler::startCraftQueue(uint32_t spellId, int count) {
-    spellHandler_->startCraftQueue(spellId, count);
-}
-
-void GameHandler::cancelCraftQueue() {
-    spellHandler_->cancelCraftQueue();
-}
-
-void GameHandler::cancelAura(uint32_t spellId) {
-    spellHandler_->cancelAura(spellId);
-}
-
-uint32_t GameHandler::getTempEnchantRemainingMs(uint32_t slot) const {
-    return inventoryHandler_->getTempEnchantRemainingMs(slot);
-}
-
-void GameHandler::dismissCritter() {
-    if (activeCritterGuid_ == 0 || !getSocket() || getState() != WorldState::IN_WORLD) return;
-    const uint16_t wire = wireOpcode(Opcode::CMSG_DISMISS_CRITTER);
-    if (wire == 0xFFFF) return;   // expansion has no such opcode
-    auto pkt = DismissCritterPacket::build(activeCritterGuid_);
-    getSocket()->send(pkt);
-    LOG_INFO("Dismissing companion: guid=0x", std::hex, activeCritterGuid_, std::dec,
-             " summonedBy=", activeCritterSpellId_);
-    // The server confirms by clearing the critter field; leave the local state
-    // alone so a refused dismiss does not leave the client thinking it worked.
 }
 
 // CMSG_UNLEARN_SKILL carries the skill line and nothing else.
@@ -2205,120 +1325,9 @@ void GameHandler::resetInstances() {
     LOG_INFO("Sent CMSG_RESET_INSTANCES");
 }
 
-
-void GameHandler::setGroupAssistant(uint64_t guid, bool apply) {
-    socialHandler_->setGroupAssistant(guid, apply);
-}
-
-void GameHandler::requestBattlefieldPositions() {
-    socialHandler_->requestBattlefieldPositions();
-}
-
-void GameHandler::requestContactList() {
-    socialHandler_->requestContactList();
-}
-
-uint32_t GameHandler::getPlayerGuildRankIndex() const {
-    return socialHandler_->getPlayerGuildRankIndex();
-}
-
-float GameHandler::getSpellCooldown(uint32_t spellId) const {
-    return spellHandler_->getSpellCooldown(spellId);
-}
-
-float GameHandler::getSpellCooldownTotal(uint32_t spellId) const {
-    return spellHandler_->getSpellCooldownTotal(spellId);
-}
-
-// ============================================================
-// Talents
-// ============================================================
-
-void GameHandler::learnTalent(uint32_t talentId, uint32_t requestedRank) {
-    spellHandler_->learnTalent(talentId, requestedRank);
-}
-
-void GameHandler::switchTalentSpec(uint8_t newSpec) {
-    spellHandler_->switchTalentSpec(newSpec);
-}
-
-void GameHandler::confirmTalentWipe() {
-    spellHandler_->confirmTalentWipe();
-}
-
-void GameHandler::sendAlterAppearance(uint32_t hairStyleEntry, uint32_t hairColor,
-                                      uint32_t facialHairEntry, uint32_t skinColorEntry) {
-    socialHandler_->sendAlterAppearance(hairStyleEntry, hairColor,
-                                        facialHairEntry, skinColorEntry);
-}
-
 // ============================================================
 // Group/Party
 // ============================================================
-
-void GameHandler::inviteToGroup(const std::string& playerName) {
-    socialHandler_->inviteToGroup(playerName);
-}
-
-void GameHandler::acceptGroupInvite() {
-    socialHandler_->acceptGroupInvite();
-}
-
-void GameHandler::declineGroupInvite() {
-    socialHandler_->declineGroupInvite();
-}
-
-void GameHandler::leaveGroup() {
-    socialHandler_->leaveGroup();
-}
-
-void GameHandler::convertToRaid() {
-    socialHandler_->convertToRaid();
-}
-
-void GameHandler::sendSetLootMethod(uint32_t method, uint32_t threshold, uint64_t masterLooterGuid) {
-    socialHandler_->sendSetLootMethod(method, threshold, masterLooterGuid);
-}
-
-// ============================================================
-// Guild Handlers
-// ============================================================
-
-void GameHandler::kickGuildMember(const std::string& playerName) {
-    socialHandler_->kickGuildMember(playerName);
-}
-
-void GameHandler::disbandGuild() {
-    socialHandler_->disbandGuild();
-}
-
-void GameHandler::setGuildLeader(const std::string& name) {
-    socialHandler_->setGuildLeader(name);
-}
-
-void GameHandler::setGuildPublicNote(const std::string& name, const std::string& note) {
-    socialHandler_->setGuildPublicNote(name, note);
-}
-
-void GameHandler::setGuildOfficerNote(const std::string& name, const std::string& note) {
-    socialHandler_->setGuildOfficerNote(name, note);
-}
-
-void GameHandler::acceptGuildInvite() {
-    socialHandler_->acceptGuildInvite();
-}
-
-void GameHandler::declineGuildInvite() {
-    socialHandler_->declineGuildInvite();
-}
-
-void GameHandler::submitGmTicket(const std::string& text) {
-    chatHandler_->submitGmTicket(text);
-}
-
-void GameHandler::updateGmTicket(const std::string& text) {
-    chatHandler_->updateGmTicket(text);
-}
 
 void GameHandler::destroyTotem(int slot) {
     // CMSG_TOTEM_DESTROYED carries the slot and nothing else on these
@@ -2329,71 +1338,8 @@ void GameHandler::destroyTotem(int slot) {
     getSocket()->send(pkt);
 }
 
-void GameHandler::deleteGmTicket() {
-    socialHandler_->deleteGmTicket();
-}
-
-void GameHandler::requestGmTicket() {
-    socialHandler_->requestGmTicket();
-}
-
-void GameHandler::requestGmSystemStatus() {
-    socialHandler_->requestGmSystemStatus();
-}
-
-void GameHandler::requestGuildEventLog() {
-    socialHandler_->requestGuildEventLog();
-}
-
-const std::vector<GuildEventLogEntry>& GameHandler::getGuildEventLog() const {
-    static const std::vector<GuildEventLogEntry> empty;
-    return socialHandler_->getGuildEventLog();
-}
-
-void GameHandler::queryGuildInfo(uint32_t guildId) {
-    socialHandler_->queryGuildInfo(guildId);
-}
-
-const std::string& GameHandler::lookupGuildName(uint32_t guildId) {
-    static const std::string kEmpty;
-    return socialHandler_->lookupGuildName(guildId);
-}
-
 uint32_t GameHandler::getEntityGuildId(uint64_t guid) const {
-    return socialHandler_->getEntityGuildId(guid);
-}
-
-void GameHandler::createGuild(const std::string& guildName) {
-    socialHandler_->createGuild(guildName);
-}
-
-void GameHandler::addGuildRank(const std::string& rankName) {
-    socialHandler_->addGuildRank(rankName);
-}
-
-void GameHandler::deleteGuildRank() {
-    socialHandler_->deleteGuildRank();
-}
-
-void GameHandler::requestPetitionShowlist(uint64_t npcGuid) {
-    socialHandler_->requestPetitionShowlist(npcGuid);
-}
-
-void GameHandler::buyPetition(uint64_t npcGuid, const std::string& guildName,
-                              uint32_t clientIndex) {
-    socialHandler_->buyPetition(npcGuid, guildName, clientIndex);
-}
-
-void GameHandler::signPetition(uint64_t petitionGuid) {
-    socialHandler_->signPetition(petitionGuid);
-}
-
-void GameHandler::turnInPetition(uint64_t petitionGuid) {
-    socialHandler_->turnInPetition(petitionGuid);
-}
-
-void GameHandler::offerPetition(uint64_t petitionGuid, uint64_t targetGuid) {
-    socialHandler_->offerPetition(petitionGuid, targetGuid);
+    return playerGuildId(*this, guid);
 }
 
 // ============================================================
@@ -2401,31 +1347,7 @@ void GameHandler::offerPetition(uint64_t petitionGuid, uint64_t targetGuid) {
 // ============================================================
 
 void GameHandler::lootTarget(uint64_t guid) {
-    inventoryHandler_->lootTarget(guid);
-}
-
-void GameHandler::lootItem(uint8_t slotIndex, bool confirmed) {
-    inventoryHandler_->lootItem(slotIndex, confirmed);
-}
-
-void GameHandler::confirmPendingLoot() {
-    inventoryHandler_->confirmPendingLoot();
-}
-
-void GameHandler::confirmBindOnUse() {
-    inventoryHandler_->confirmBindOnUse();
-}
-
-void GameHandler::lootMoney() {
-    inventoryHandler_->lootMoney();
-}
-
-void GameHandler::cancelTempEnchantment(uint8_t handIndex) {
-    inventoryHandler_->cancelTempEnchantment(handIndex);
-}
-
-void GameHandler::closeLoot() {
-    inventoryHandler_->closeLoot();
+    loot::orNoLoot(services_.loot).lootTarget(guid);
 }
 
 void GameHandler::scheduleGameObjectLootOpen(uint64_t guid, float delaySeconds, uint8_t attempts) {
@@ -2440,9 +1362,9 @@ void GameHandler::scheduleGameObjectLootOpen(uint64_t guid, float delaySeconds, 
 
 bool GameHandler::isFishingHoleGameObject(uint64_t guid) const {
     if (guid == 0) return false;
-    auto entity = entityController_->getEntityManager().getEntity(guid);
+    auto entity = worldHandler_->getEntityManager().getEntity(guid);
     if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return false;
-    const auto* info = getCachedGameObjectInfo(
+    const auto* info = queryCacheHandler_->getCachedGameObjectInfo(
         std::static_pointer_cast<GameObject>(entity)->getEntry());
     return info && info->type == kGoTypeFishingHole;
 }
@@ -2466,27 +1388,27 @@ bool GameHandler::hasPendingGameObjectLootOpen(uint64_t guid) const {
 
 bool GameHandler::isGatherGameObject(uint64_t guid) const {
     if (guid == 0) return false;
-    auto entity = entityController_->getEntityManager().getEntity(guid);
+    auto entity = worldHandler_->getEntityManager().getEntity(guid);
     if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return false;
 
     auto go = std::static_pointer_cast<GameObject>(entity);
-    const GameObjectQueryResponseData* goInfo = getCachedGameObjectInfo(go->getEntry());
+    const GameObjectQueryResponseData* goInfo = queryCacheHandler_->getCachedGameObjectInfo(go->getEntry());
     return gatherSpellForGameObject(goInfo, go->getName()) != 0;
 }
 
 void GameHandler::despawnCreatureLocally(uint64_t guid) {
     if (guid == 0) return;
 
-    auto& entityManager = entityController_->getEntityManager();
+    auto& entityManager = worldHandler_->getEntityManager();
     auto entity = entityManager.getEntity(guid);
     if (!entity || entity->getType() != ObjectType::UNIT) return;
 
-    if (creatureDespawnCallback_) creatureDespawnCallback_(guid);
+    eventBus().publish(events::CreatureDespawned{guid});
     entityManager.removeEntity(guid);
 
     if (guid == combatHandler_->getAutoAttackTargetGuid()) stopAutoAttack();
-    if (getTargetGuid() == guid) setTargetGuidRaw(0);
-    tabCycleStale = true;
+    if (combatHandler_->getTargetGuid() == guid) combatHandler_->targetGone();
+    combatHandler_->invalidateTabCycle();
 
     LOG_INFO("Locally despawned looted corpse: 0x", std::hex, guid, std::dec);
 }
@@ -2494,24 +1416,20 @@ void GameHandler::despawnCreatureLocally(uint64_t guid) {
 void GameHandler::despawnGameObjectLocally(uint64_t guid) {
     if (guid == 0) return;
 
-    auto& entityManager = entityController_->getEntityManager();
+    auto& entityManager = worldHandler_->getEntityManager();
     auto entity = entityManager.getEntity(guid);
     if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return;
 
-    if (gameObjectDespawnCallback_) gameObjectDespawnCallback_(guid);
+    eventBus().publish(events::GameObjectDespawned{guid});
     entityManager.removeEntity(guid);
 
     clearPendingGameObjectLootOpen(guid);
     if (lastInteractedGoGuid_ == guid) lastInteractedGoGuid_ = 0;
     if (pendingGameObjectInteractGuid_ == guid) pendingGameObjectInteractGuid_ = 0;
-    if (getTargetGuid() == guid) setTargetGuidRaw(0);
-    tabCycleStale = true;
+    if (combatHandler_->getTargetGuid() == guid) combatHandler_->targetGone();
+    combatHandler_->invalidateTabCycle();
 
     LOG_INFO("Locally despawned game object: 0x", std::hex, guid, std::dec);
-}
-
-void GameHandler::lootMasterGive(uint8_t lootSlot, uint64_t targetGuid) {
-    inventoryHandler_->lootMasterGive(lootSlot, targetGuid);
 }
 
 void GameHandler::interactWithNpc(uint64_t guid) {
@@ -2522,12 +1440,12 @@ void GameHandler::interactWithNpc(uint64_t guid) {
     // resurrection, and the client has to ask. Nothing here ever asked, so the
     // reply never came, the countdown never appeared, and the queue that
     // actually resurrects anyone was never joined.
-    if (isPlayerDead() || isPlayerGhost()) {
+    if (combatHandler_->isPlayerDead() || combatHandler_->isPlayerGhost()) {
         auto entity = getEntityManager().getEntity(guid);
         if (auto* unit = dynamic_cast<Unit*>(entity.get())) {
             constexpr uint32_t kSpiritFlags = NPC_FLAG_SPIRIT_GUIDE | NPC_FLAG_SPIRIT_HEALER;
             if (unit->getNpcFlags() & kSpiritFlags) {
-                queryAreaSpiritHealer(guid);
+                combatHandler_->queryAreaSpiritHealer(guid);
             }
         }
     }
@@ -2584,26 +1502,6 @@ void GameHandler::interactWithNpc(uint64_t guid) {
               pendingNpcHello_.distance, " yards");
 }
 
-void GameHandler::queryAreaSpiritHealer(uint64_t guid) {
-    if (!isInWorld() || !socket) return;
-    areaSpiritHealerGuid_ = guid;
-    network::Packet packet(wireOpcode(Opcode::CMSG_AREA_SPIRIT_HEALER_QUERY));
-    packet.writeUInt64(guid);
-    socket->send(packet);
-    LOG_INFO("CMSG_AREA_SPIRIT_HEALER_QUERY: 0x", std::hex, guid, std::dec);
-}
-
-void GameHandler::queueAreaSpiritHeal() {
-    // Joining the queue is what resurrects; the query only asks when the next
-    // one is. AzerothCore has no way to be told to leave it again, which is
-    // why CancelAreaSpiritHeal answers with nothing.
-    if (!isInWorld() || !socket || !areaSpiritHealerGuid_) return;
-    network::Packet packet(wireOpcode(Opcode::CMSG_AREA_SPIRIT_HEALER_QUEUE));
-    packet.writeUInt64(areaSpiritHealerGuid_);
-    socket->send(packet);
-    LOG_INFO("CMSG_AREA_SPIRIT_HEALER_QUEUE: 0x", std::hex, areaSpiritHealerGuid_, std::dec);
-}
-
 void GameHandler::interactWithGameObject(uint64_t guid) {
     LOG_DEBUG("[GO-DIAG] interactWithGameObject called: guid=0x", std::hex, guid, std::dec);
     if (guid == 0) { LOG_DEBUG("[GO-DIAG] BLOCKED: guid==0"); return; }
@@ -2622,7 +1520,7 @@ void GameHandler::interactWithGameObject(uint64_t guid) {
     // then, and they fell out of the sky. The same rule casting follows: with
     // Auto Dismount in Flight off - the default - it is refused, and the
     // player stays up.
-    if (isMounted() && !isTaxiMountActive() && isPlayerFlying() &&
+    if (movementHandler_->isMounted() && !movementHandler_->isTaxiMountActive() && isPlayerFlying() &&
         cvars().get("autoDismountFlying", "0") == "0") {
         addUIError("You can't do that while flying.");
         return;
@@ -2640,7 +1538,7 @@ void GameHandler::interactWithGameObject(uint64_t guid) {
     //
     // Not on a taxi: the flight's mount is not the player's to dismiss, and
     // there is nothing to interact with mid-flight anyway.
-    if (isMounted() && !isTaxiMountActive()) {
+    if (movementHandler_->isMounted() && !movementHandler_->isTaxiMountActive()) {
         constexpr float kGameObjectReach = 12.0f;
         bool inReach = true;
         if (auto entity = getEntityManager().getEntity(guid)) {
@@ -2683,7 +1581,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
 
     // Ensure GO interaction isn't blocked by stale or active melee state.
     stopAutoAttack();
-    auto entity = entityController_->getEntityManager().getEntity(guid);
+    auto entity = worldHandler_->getEntityManager().getEntity(guid);
     uint32_t goEntry = 0;
     uint32_t goType = 0;
     std::string goName;
@@ -2695,7 +1593,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
             auto go = std::static_pointer_cast<GameObject>(entity);
             goEntry = go->getEntry();
             goName = go->getName();
-            goInfo = getCachedGameObjectInfo(goEntry);
+            goInfo = queryCacheHandler_->getCachedGameObjectInfo(goEntry);
             if (goInfo) goType = goInfo->type;
             if (goType == kGoTypeFishingHole) {
                 // Nothing sent, and nothing scheduled: the school is fished, not
@@ -2708,7 +1606,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
             if (goType == 5 && !goName.empty()) {
                 std::string lower = lowerCopy(goName);
                 if (lower.rfind("doodad_", 0) != 0) {
-                    addSystemChatMessage(goName);
+                    chatHandler_->addSystemChatMessage(goName);
                 }
             }
         }
@@ -2751,7 +1649,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
     bool metadataPending = false;
     if (entity && entity->getType() == ObjectType::GAMEOBJECT) {
         auto go = std::static_pointer_cast<GameObject>(entity);
-        if (!goInfo) goInfo = getCachedGameObjectInfo(go->getEntry());
+        if (!goInfo) goInfo = queryCacheHandler_->getCachedGameObjectInfo(go->getEntry());
         metadataPending = (goInfo == nullptr);
         if (goInfo && goInfo->type == 19) {
             isMailbox = true;
@@ -2783,7 +1681,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
     if (gatherBaseSpellId != 0) {
         const uint32_t gatherSpellId = knownGatherRank(spellHandler_.get(), gatherBaseSpellId);
         if (gatherSpellId == 0) {
-            addSystemChatMessage(gatherBaseSpellId == kMiningBaseSpellId ? "Requires Mining."
+            chatHandler_->addSystemChatMessage(gatherBaseSpellId == kMiningBaseSpellId ? "Requires Mining."
                                                     : "Requires Herbalism.");
             LOG_INFO("GO gather skipped: no known rank for base spell=", gatherBaseSpellId,
                      " guid=0x", std::hex, guid, std::dec, " name='", goName, "'");
@@ -2806,7 +1704,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
         // lock. A plain CMSG_GAMEOBJ_USE only opens unlocked / server-gated quest
         // containers (e.g. the Legend of Stalvan Sealed Crate).
         const LockOpenPlan plan = planGameObjectOpen(
-            services_.assetManager, goInfo, spellHandler_->getKnownSpells());
+            *services_.gameData, goInfo, spellHandler_->getKnownSpells());
         if (plan.method == LockOpenMethod::CastSpell) {
             auto castPacket = getPacketParsers()->buildCastGameObjectSpell(
                 plan.spellId, guid, 0);
@@ -2824,7 +1722,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
         // USE does not open a locked type-3 chest, and casting the item's spell via
         // CMSG_CAST_SPELL is rejected (the player doesn't "know" it).
         if (plan.keyItemId != 0) {
-            const ItemQueryResponseData* keyInfo = getItemInfo(plan.keyItemId);
+            const ItemQueryResponseData* keyInfo = inventoryHandler_->getItemInfo(plan.keyItemId);
             uint32_t keyUseSpell = 0;
             if (keyInfo) {
                 for (const auto& sp : keyInfo->spells)
@@ -2836,7 +1734,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
 
             // Locate the key: wire (bag, slot) + item GUID. Keyring wire slots
             // start at 86; backpack at 23 in bag 0xFF; equipped bags are 19..22.
-            const Inventory& inv = getInventory();
+            const Inventory& inv = inventoryHandler_->items();
             uint8_t keyBag = 0xFF, keySlot = 0; uint64_t keyGuid = 0; bool keyFound = false;
             for (int i = 0; i < inv.getBackpackSize() && !keyFound; ++i)
                 if (inv.getBackpackSlot(i).item.itemId == plan.keyItemId) {
@@ -2899,11 +1797,11 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
         // click on quest containers from being lost while their query is pending.
         scheduleGameObjectLootOpen(guid, 0.35f, 8);
     } else if (isMailbox) {
-        openMailbox(guid);
+        mail::orNoMailbox(services_.mail).openMailbox(guid);
     } else if (isGuildBank) {
         // Guild vault: CMSG_GAMEOBJ_USE above is a no-op on the server; the bank
         // opens via CMSG_GUILD_BANKER_ACTIVATE, which openGuildBank() sends.
-        openGuildBank(guid);
+        guild_bank::orNoGuildBank(services_.guildBank).openGuildBank(guid);
     } else if (isReadable) {
         // A sign, a plaque, a gravestone: the client reads it.
         //
@@ -2912,7 +1810,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
         // for a type 9 the server has nothing to offer, the page id being in
         // the object's own data where the real client reads it from. Stormwind
         // is full of signs that answered a click with silence.
-        entityController_->showGameObjectPageText(guid);
+        inventoryHandler_->readGameObject(guid);
     }
 
     // CMSG_GAMEOBJ_REPORT_USE triggers GO AI scripts (SmartAI, ScriptAI) which
@@ -2929,24 +1827,8 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
     }
 }
 
-void GameHandler::selectGossipOption(uint32_t optionId, const std::string& code) {
-    questHandler_->selectGossipOption(optionId, code);
-}
-
-void GameHandler::selectGossipQuest(uint32_t questId) {
-    questHandler_->selectGossipQuest(questId);
-}
-
-bool GameHandler::requestQuestQuery(uint32_t questId, bool force) {
-    return questHandler_->requestQuestQuery(questId, force);
-}
-
-bool GameHandler::hasQuestInLog(uint32_t questId) const {
-    return questHandler_->hasQuestInLog(questId);
-}
-
 Unit* GameHandler::getUnitByGuid(uint64_t guid) {
-    auto entity = entityController_->getEntityManager().getEntity(guid);
+    auto entity = worldHandler_->getEntityManager().getEntity(guid);
     // Use the type tag to skip RTTI - both UNIT and PLAYER object types derive from Unit.
     if (!entity || !entity->isUnit()) return nullptr;
     return static_cast<Unit*>(entity.get());
@@ -2954,239 +1836,22 @@ Unit* GameHandler::getUnitByGuid(uint64_t guid) {
 
 std::string GameHandler::guidToUnitId(uint64_t guid) const {
     if (guid == playerGuid)      return "player";
-    if (guid == targetGuid)      return "target";
-    if (guid == focusGuid)       return "focus";
-    if (guid == petHandler_->guid()) return "pet";
+    if (guid == combatHandler_->getTargetGuid()) return "target";
+    if (guid == combatHandler_->getFocusGuid())  return "focus";
+    if (guid == petGuid()) return "pet";
     return {};
-}
-int GameHandler::findQuestLogSlotIndexFromServer(uint32_t questId) const {
-    return questHandler_->findQuestLogSlotIndexFromServer(questId);
-}
-
-void GameHandler::addQuestToLocalLogIfMissing(uint32_t questId, const std::string& title, const std::string& objectives) {
-    questHandler_->addQuestToLocalLogIfMissing(questId, title, objectives);
-}
-
-bool GameHandler::resyncQuestLogFromServerSlots(bool forceQueryMetadata) {
-    return questHandler_->resyncQuestLogFromServerSlots(forceQueryMetadata);
-}
-
-// Apply quest completion state from player update fields to already-tracked local quests.
-// Called from VALUES update handler so quests that complete mid-session (or that were
-// complete on login) get quest.complete=true without waiting for SMSG_QUESTUPDATE_COMPLETE.
-void GameHandler::applyQuestStateFromFields(const FlatFieldMap& fields) {
-    questHandler_->applyQuestStateFromFields(fields);
-}
-
-// Extract expansion-specific kill/objective counters from quest-log update fields
-// and populate quest.killCounts using the structured objectives obtained from a prior
-// SMSG_QUEST_QUERY_RESPONSE. Silently does nothing if objectives are absent.
-void GameHandler::applyPackedKillCountsFromFields(QuestLogEntry& quest) {
-    questHandler_->applyPackedKillCountsFromFields(quest);
-}
-
-void GameHandler::clearPendingQuestAccept(uint32_t questId) {
-    questHandler_->clearPendingQuestAccept(questId);
-}
-
-void GameHandler::triggerQuestAcceptResync(uint32_t questId, uint64_t npcGuid, const char* reason) {
-    questHandler_->triggerQuestAcceptResync(questId, npcGuid, reason);
-}
-
-void GameHandler::acceptQuest() {
-    questHandler_->acceptQuest();
-}
-
-void GameHandler::declineQuest(bool announce) {
-    questHandler_->declineQuest(announce);
-}
-
-void GameHandler::abandonQuest(uint32_t questId) {
-    questHandler_->abandonQuest(questId);
-    setQuestTracked(questId, false);
-}
-
-void GameHandler::shareQuestWithParty(uint32_t questId) {
-    questHandler_->shareQuestWithParty(questId);
-}
-
-void GameHandler::completeQuest() {
-    questHandler_->completeQuest();
-}
-
-void GameHandler::closeQuestRequestItems(bool announce) {
-    questHandler_->closeQuestRequestItems(announce);
-}
-
-void GameHandler::chooseQuestReward(uint32_t rewardIndex) {
-    questHandler_->chooseQuestReward(rewardIndex);
-}
-
-void GameHandler::closeQuestOfferReward(bool announce) {
-    questHandler_->closeQuestOfferReward(announce);
 }
 
 void GameHandler::closeGossip() {
     questHandler_->closeGossip();
 }
 
-void GameHandler::offerQuestFromItem(uint64_t itemGuid, uint32_t questId) {
-    questHandler_->offerQuestFromItem(itemGuid, questId);
-}
-
-uint64_t GameHandler::getBagItemGuid(int bagIndex, int slotIndex) const {
-    return inventoryHandler_->getBagItemGuid(bagIndex, slotIndex);
-}
-
-void GameHandler::openVendor(uint64_t npcGuid) {
-    inventoryHandler_->openVendor(npcGuid);
-}
-
 void GameHandler::closeVendor() {
     inventoryHandler_->closeVendor();
 }
 
-void GameHandler::buyItem(uint64_t vendorGuid, uint32_t itemId, uint32_t slot, uint32_t count) {
-    inventoryHandler_->buyItem(vendorGuid, itemId, slot, count);
-}
-
-void GameHandler::buyBackItem(uint32_t buybackSlot) {
-    inventoryHandler_->buyBackItem(buybackSlot);
-}
-
-void GameHandler::repairItem(uint64_t vendorGuid, uint64_t itemGuid) {
-    inventoryHandler_->repairItem(vendorGuid, itemGuid);
-}
-
-void GameHandler::repairAll(uint64_t vendorGuid, bool useGuildBank) {
-    inventoryHandler_->repairAll(vendorGuid, useGuildBank);
-}
-
-uint32_t GameHandler::estimateRepairAllCost() const {
-    return inventoryHandler_->estimateRepairAllCost();
-}
-
-void GameHandler::sellItem(uint64_t vendorGuid, uint64_t itemGuid, uint32_t count) {
-    inventoryHandler_->sellItem(vendorGuid, itemGuid, count);
-}
-
-void GameHandler::sellItemBySlot(int backpackIndex) {
-    inventoryHandler_->sellItemBySlot(backpackIndex);
-}
-
-void GameHandler::equipItemToSlot(uint64_t itemGuid, uint8_t equipSlot) {
-    inventoryHandler_->equipItemToSlot(itemGuid, equipSlot);
-}
-
-void GameHandler::autoEquipItemBySlot(int backpackIndex, bool confirmed) {
-    inventoryHandler_->autoEquipItemBySlot(backpackIndex, confirmed);
-}
-
-bool GameHandler::equipWouldBindFromBackpack(int backpackIndex) const {
-    return inventoryHandler_->equipWouldBindFromBackpack(backpackIndex);
-}
-
-bool GameHandler::equipWouldBindFromBag(int bagIndex, int slotIndex) const {
-    return inventoryHandler_->equipWouldBindFromBag(bagIndex, slotIndex);
-}
-
-void GameHandler::equipPendingItem() {
-    inventoryHandler_->equipPendingItem();
-}
-
-void GameHandler::cancelPendingEquip() {
-    inventoryHandler_->cancelPendingEquip();
-}
-
-void GameHandler::autoEquipItemInBag(int bagIndex, int slotIndex, bool confirmed) {
-    inventoryHandler_->autoEquipItemInBag(bagIndex, slotIndex, confirmed);
-}
-
-void GameHandler::sellItemInBag(int bagIndex, int slotIndex) {
-    inventoryHandler_->sellItemInBag(bagIndex, slotIndex);
-}
-
-void GameHandler::unequipToBackpack(EquipSlot equipSlot) {
-    inventoryHandler_->unequipToBackpack(equipSlot);
-}
-
-void GameHandler::swapContainerItems(uint8_t srcBag, uint8_t srcSlot, uint8_t dstBag,
-                                     uint8_t dstSlot, bool applyLocally) {
-    inventoryHandler_->swapContainerItems(srcBag, srcSlot, dstBag, dstSlot, applyLocally);
-}
-
-void GameHandler::notifyBagsChanged() {
-    inventoryHandler_->fireBagUpdates();
-}
-
-void GameHandler::swapBagSlots(int srcBagIndex, int dstBagIndex) {
-    inventoryHandler_->swapBagSlots(srcBagIndex, dstBagIndex);
-}
-
-void GameHandler::destroyItem(uint8_t bag, uint8_t slot, uint8_t count) {
-    inventoryHandler_->destroyItem(bag, slot, count);
-}
-
-void GameHandler::splitItem(uint8_t srcBag, uint8_t srcSlot, uint8_t count) {
-    inventoryHandler_->splitItem(srcBag, srcSlot, count);
-}
-void GameHandler::splitItemTo(uint8_t srcBag, uint8_t srcSlot,
-                              uint8_t dstBag, uint8_t dstSlot, uint8_t count) {
-    inventoryHandler_->splitItemTo(srcBag, srcSlot, dstBag, dstSlot, count);
-}
-
-void GameHandler::useItemBySlot(int backpackIndex, bool confirmed, uint64_t unitTarget) {
-    inventoryHandler_->useItemBySlot(backpackIndex, confirmed, unitTarget);
-}
-
-void GameHandler::useKeyringItem(int index, bool confirmed) {
-    inventoryHandler_->useKeyringItem(index, confirmed);
-}
-
-void GameHandler::placeGlyphFromBag(uint8_t wireBag, uint8_t wireSlot, uint32_t socketIndex) {
-    inventoryHandler_->placeGlyphFromBag(wireBag, wireSlot, socketIndex);
-}
-
-void GameHandler::useItemInBag(int bagIndex, int slotIndex, bool confirmed,
-                               uint64_t unitTarget) {
-    inventoryHandler_->useItemInBag(bagIndex, slotIndex, confirmed,
-                                                           unitTarget);
-}
-
-bool GameHandler::isAwaitingItemTarget() const {
-    return inventoryHandler_->isAwaitingItemTarget();
-}
-
-bool GameHandler::isAwaitingUnitTarget() const {
-    return inventoryHandler_->isAwaitingUnitTarget();
-}
-
-uint32_t GameHandler::getPendingUnitTargetSourceItemId() const {
-    return inventoryHandler_->getPendingUnitTargetSourceItemId();
-}
-
-void GameHandler::cancelUnitTargeting() {
-    inventoryHandler_->cancelUnitTargeting();
-}
-
-void GameHandler::completeItemUseOnUnit(uint64_t targetUnitGuid) {
-    inventoryHandler_->completeItemUseOnUnit(targetUnitGuid);
-}
-
 void GameHandler::beginSpellItemTargeting(uint32_t spellId, const std::string& spellName) {
     inventoryHandler_->beginSpellItemTargeting(spellId, spellName);
-}
-
-uint32_t GameHandler::getPendingItemTargetSourceItemId() const {
-    return inventoryHandler_->getPendingItemTargetSourceItemId();
-}
-
-void GameHandler::cancelItemTargeting() {
-    inventoryHandler_->cancelItemTargeting();
-}
-
-void GameHandler::completeItemUseOnItem(uint64_t targetItemGuid, bool confirmed) {
-    inventoryHandler_->completeItemUseOnItem(targetItemGuid, confirmed);
 }
 
 int GameHandler::getInstanceBootTimeRemaining() const {
@@ -3196,76 +1861,128 @@ int GameHandler::getInstanceBootTimeRemaining() const {
     return secs > 0 ? static_cast<int>(secs) : 0;
 }
 
-void GameHandler::replaceEnchant() {
-    inventoryHandler_->replaceEnchant();
+bool GameHandler::previewPlayerAppearance(uint32_t appearanceBytes, uint8_t facialFeatures) {
+    // Keyed the way the reader is keyed. The model is rebuilt from
+    // getActiveCharacter(), which finds the record by activeCharacterGuid_,
+    // so writing to any other record is a change nothing draws.
+    const uint64_t guid = activeCharacterGuid_ != 0 ? activeCharacterGuid_ : playerGuid;
+    for (auto& ch : characters) {
+        if (ch.guid != guid) continue;
+        ch.appearanceBytes = appearanceBytes;
+        ch.facialFeatures = facialFeatures;
+        eventBus().publish(events::PlayerModelRebuildRequested{});
+        return true;
+    }
+    return false;
 }
 
-void GameHandler::openItemBySlot(int backpackIndex) {
-    inventoryHandler_->openItemBySlot(backpackIndex);
+void GameHandler::traceWorldPackets(std::chrono::seconds duration, const char* label) {
+    if (socket) socket->tracePacketsFor(duration, label);
 }
 
-void GameHandler::openItemInBag(int bagIndex, int slotIndex) {
-    inventoryHandler_->openItemInBag(bagIndex, slotIndex);
+void GameHandler::tearDownWorldForTransfer(uint32_t mapId) {
+    combatHandler_->arrivedInNewWorld();
+    inventoryHandler_->leaveWorld();
+    spellHandler_->clearUnitCaches();
+    combatHandler_->clearCombatText();
+    worldHandler_->getEntityManager().clear();
+    combatHandler_->clearHostileAttackers();
+    worldStates_.clear();
+    questHandler_->clearGossipPois();
+    worldStateMapId_ = mapId;
+    worldStateZoneId_ = 0;
+    stopAutoAttack();
+    spellHandler_->resetCastState();
 }
 
-void GameHandler::readItemBySlot(int backpackIndex) {
-    inventoryHandler_->readItemBySlot(backpackIndex);
+void GameHandler::resurrectedInPlace() {
+    combatHandler_->resurrectedInPlace();
+    combatHandler_->clearHostileAttackers();
+    stopAutoAttack();
+    combatHandler_->invalidateTabCycle();
+    spellHandler_->resetCastState();
 }
 
-void GameHandler::readItemInBag(int bagIndex, int slotIndex) {
-    inventoryHandler_->readItemInBag(bagIndex, slotIndex);
+bool GameHandler::loggingOut() const { return socialHandler_->isLoggingOut(); }
+
+Character* GameHandler::listedCharacter() {
+    for (auto& ch : characters) {
+        if (ch.guid == playerGuid) return &ch;
+    }
+    return nullptr;
 }
 
-void GameHandler::useItemById(uint32_t itemId, uint64_t unitTarget) {
-    inventoryHandler_->useItemById(itemId, unitTarget);
+void GameHandler::moneyFieldArrived(uint32_t copper, FrameXmlEvents& packetEvents) {
+    inventoryHandler_->moneyFieldArrived(copper, packetEvents);
 }
 
-uint32_t GameHandler::getItemIdForSpell(uint32_t spellId) const {
-    return inventoryHandler_->itemIdForSpell(spellId);
+void GameHandler::bankBagSlotsArrived(uint8_t slots) {
+    inventoryHandler_->setPurchasedBankBagSlots(slots);
+}
+
+void GameHandler::chosenTitleArrived(int32_t title) {
+    if (auto* feed = services_.titlesFeed) feed->onChosen(title);
+}
+
+void GameHandler::playerFlagsArrived(uint32_t flags, FrameXmlEvents& packetEvents) {
+    combatHandler_->playerFlagsArrived(flags, packetEvents);
+}
+
+bool GameHandler::actionBarHoldsItem() const {
+    for (const auto& action : actionBarHandler_->slots()) {
+        if (action.type == ActionBarSlot::ITEM && action.id != 0) return true;
+    }
+    return false;
+}
+
+void GameHandler::coinageFieldFoundAt(uint16_t index) {
+    updateFieldTable_.setIndex(UF::PLAYER_FIELD_COINAGE, index);
+}
+
+bool GameHandler::corpseHoldsLoot(uint64_t guid) const {
+    return loot::orNoLoot(services_.loot).corpseHeldItems(guid);
+}
+
+uint8_t GameHandler::rangedWeaponInventoryType() const {
+    const auto& ranged = inventoryHandler_->items().getEquipSlot(EquipSlot::RANGED);
+    return ranged.empty() ? 0 : ranged.item.inventoryType;
+}
+
+void GameHandler::serverMoneyReported(uint64_t copper) {
+    inventoryHandler_->applyServerMoney(copper);
+}
+
+void GameHandler::knownTitlesReported(const KnownTitleUpdate& update) {
+    if (auto* feed = services_.titlesFeed) feed->onKnownTitles(update.operation, update.bits);
+}
+
+void GameHandler::notifyTransportSpawned(uint64_t guid, uint32_t entry, uint32_t displayId,
+                                         float x, float y, float z, float orientation) {
+    eventBus().publish(events::TransportSpawned{guid, entry, displayId, x, y, z, orientation});
 }
 
 void GameHandler::unstuck() {
-    if (unstuckCallback_) {
-        unstuckCallback_();
-        addSystemChatMessage("Unstuck: snapped upward. Use /unstuckgy for full teleport.");
-    }
+    eventBus().publish(events::UnstuckRequested{});
+    chatHandler_->addSystemChatMessage("Unstuck: snapped upward. Use /unstuckgy for full teleport.");
 }
 
 void GameHandler::unstuckGy() {
-    if (unstuckGyCallback_) {
-        unstuckGyCallback_();
-        addSystemChatMessage("Unstuck: teleported to safe location.");
-    }
+    eventBus().publish(events::UnstuckToGraveyardRequested{});
+    chatHandler_->addSystemChatMessage("Unstuck: teleported to safe location.");
 }
 
 void GameHandler::unstuckHearth() {
-    if (unstuckHearthCallback_) {
-        unstuckHearthCallback_();
-        addSystemChatMessage("Unstuck: teleported to hearthstone location.");
-    } else {
-        addSystemChatMessage("No hearthstone bind point set.");
-    }
-}
-
-// ============================================================
-// Trainer
-// ============================================================
-
-void GameHandler::trainSpell(uint32_t spellId) {
-    inventoryHandler_->trainSpell(spellId);
-}
-
-void GameHandler::closeTrainer() {
-    inventoryHandler_->closeTrainer();
+    eventBus().publish(events::UnstuckToHearthRequested{});
+    chatHandler_->addSystemChatMessage("Unstuck: teleported to hearthstone location.");
 }
 
 void GameHandler::preloadDBCCaches() const {
     LOG_INFO("Pre-loading DBC caches during world entry...");
     auto t0 = std::chrono::steady_clock::now();
 
-    loadSpellNameCache();   // Spell.dbc - largest, ~170ms cold
-    loadTitleNameCache();   // CharTitles.dbc
-    loadFactionNameCache(); // Faction.dbc
+    spellHandler_->loadSpellNameCache();   // Spell.dbc - largest, ~170ms cold
+    title::orNoTitles(services_.titles).loadTitles();   // CharTitles.dbc
+    reputation::orNoReputation(services_.reputation).loadFactions();   // Faction.dbc
     loadAreaNameCache();    // WorldMapArea.dbc
     loadMapNameCache();     // Map.dbc
     loadLfgDungeonDbc();    // LFGDungeons.dbc
@@ -3273,62 +1990,6 @@ void GameHandler::preloadDBCCaches() const {
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
     LOG_INFO("DBC cache pre-load complete in ", elapsed, " ms");
-}
-
-void GameHandler::loadSpellNameCache() const {
-    spellHandler_->loadSpellNameCache();
-}
-
-void GameHandler::loadSkillLineAbilityDbc() {
-    spellHandler_->loadSkillLineAbilityDbc();
-}
-
-const std::vector<GameHandler::SpellBookTab>& GameHandler::getSpellBookTabs() {
-    static const std::vector<SpellBookTab> kEmpty;
-    return spellHandler_->getSpellBookTabs();
-}
-
-
-void GameHandler::loadTalentDbc() {
-    spellHandler_->loadTalentDbc();
-}
-
-static const std::string EMPTY_STRING;
-
-const int32_t* GameHandler::getSpellEffectBasePoints(uint32_t spellId) const {
-    return spellHandler_->getSpellEffectBasePoints(spellId);
-}
-
-float GameHandler::getSpellDuration(uint32_t spellId) const {
-    return spellHandler_->getSpellDuration(spellId);
-}
-
-const std::string& GameHandler::getSpellName(uint32_t spellId) const {
-    return spellHandler_->getSpellName(spellId);
-}
-
-uint32_t GameHandler::getSpellTargetFlags(uint32_t spellId) const {
-    return spellHandler_->getSpellTargetFlags(spellId);
-}
-
-uint32_t GameHandler::getSpellImplicitTargetA(uint32_t spellId) const {
-    return spellHandler_->getSpellImplicitTargetA(spellId);
-}
-
-bool GameHandler::isSpellKnownToClient(uint32_t spellId) const {
-    return spellHandler_->isSpellKnownToClient(spellId);
-}
-
-uint32_t GameHandler::getSpellTargetAuraState(uint32_t spellId) const {
-    return spellHandler_->getSpellTargetAuraState(spellId);
-}
-
-const std::string& GameHandler::getSpellRank(uint32_t spellId) const {
-    return spellHandler_->getSpellRank(spellId);
-}
-
-const std::string& GameHandler::getSpellDescription(uint32_t spellId) const {
-    return spellHandler_->getSpellDescription(spellId);
 }
 
 namespace {
@@ -3359,12 +2020,12 @@ SpellDescriptionContext GameHandler::descriptionContext(
     SpellDescriptionContext ctx;
     ctx.declarations = declarations;
     ctx.magnitude = [this, spellId](int index, double& out) {
-        const int32_t* bp = getSpellEffectBasePoints(spellId);
+        const int32_t* bp = spellHandler_->getSpellEffectBasePoints(spellId);
         if (!bp || index < 0 || index > 2) return false;
         out = std::abs(static_cast<double>(bp[index]) + 1.0);
         return true;
     };
-    ctx.knowsSpell = [this](uint32_t id) { return isSpellKnownToClient(id); };
+    ctx.knowsSpell = [this](uint32_t id) { return spellHandler_->isSpellKnownToClient(id); };
     return ctx;
 }
 
@@ -3379,7 +2040,7 @@ std::string GameHandler::formatSpellDescription(uint32_t selfSpellId,
 
     // Resolve a base-point magnitude ($s/$o/$m/$M) for a spell + effect index.
     auto basePoints = [&](uint32_t sid, int idx) -> long {
-        const int32_t* bp = getSpellEffectBasePoints(sid);
+        const int32_t* bp = spellHandler_->getSpellEffectBasePoints(sid);
         if (!bp || idx < 0 || idx > 2) return LONG_MIN;
         return std::labs(static_cast<long>(bp[idx]) + 1);  // stored as value-1
     };
@@ -3512,7 +2173,7 @@ std::string GameHandler::formatSpellDescription(uint32_t selfSpellId,
                 break;
             }
             case 'd': {
-                std::string dur = formatSpellDurationSec(getSpellDuration(target));
+                std::string dur = formatSpellDurationSec(spellHandler_->getSpellDuration(target));
                 if (!dur.empty()) { out += dur; resolved = true; }
                 break;
             }
@@ -3563,46 +2224,6 @@ std::string GameHandler::formatSpellDescription(uint32_t selfSpellId,
         prevSpace = isSpace;
     }
     return cleaned;
-}
-
-const std::string& GameHandler::getSpellFocusName(uint32_t focusId) const {
-    return spellHandler_->getSpellFocusName(focusId);
-}
-
-const std::string& GameHandler::getTotemCategoryName(uint32_t categoryId) const {
-    return spellHandler_->getTotemCategoryName(categoryId);
-}
-
-std::string GameHandler::getEnchantName(uint32_t enchantId) const {
-    return spellHandler_->getEnchantName(enchantId);
-}
-
-uint32_t GameHandler::getEnchantGemItem(uint32_t enchantId) const {
-    return spellHandler_->getEnchantGemItem(enchantId);
-}
-
-uint8_t GameHandler::getSpellDispelType(uint32_t spellId) const {
-    return spellHandler_->getSpellDispelType(spellId);
-}
-
-bool GameHandler::isSpellInterruptible(uint32_t spellId) const {
-    return spellHandler_->isSpellInterruptible(spellId);
-}
-
-bool GameHandler::isSpellPassive(uint32_t spellId) const {
-    return spellHandler_->isSpellPassive(spellId);
-}
-
-uint32_t GameHandler::getSpellSchoolMask(uint32_t spellId) const {
-    return spellHandler_->getSpellSchoolMask(spellId);
-}
-
-uint32_t GameHandler::getSpellVisualId(uint32_t spellId) const {
-    return spellHandler_->getSpellVisualId(spellId);
-}
-
-const std::string& GameHandler::getSkillLineName(uint32_t skillLineId) const {
-    return spellHandler_->getSkillLineName(skillLineId);
 }
 
 

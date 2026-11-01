@@ -16,6 +16,8 @@ struct FrameStage {
 
 struct CullAnswer {
     uint32_t id = 0;
+    /// Its place in the renderer's instance list when it was culled.
+    uint32_t index = 0;
     bool visible = false;
     uint64_t sceneIdentity = 0, gpuFrame = 0;
 };
@@ -41,7 +43,7 @@ struct RenderStatistics {
     uint32_t rtMeshes = 0, rtInstances = 0;
     uint64_t rtTriangles = 0, rtGpuBytes = 0, rtSourceBytes = 0;
     uint32_t width = 0, height = 0;
-    uint32_t wmoDistanceCulled = 0, wmoPortalCulled = 0;
+    uint32_t wmoDistanceCulled = 0, wmoPortalCulled = 0, wmoFrustumCulled = 0;
     uint32_t waterDrawn = 0;
     std::string sunDisc = "pending", moonDisc = "pending";
     bool framegenActive = false, framegenReady = false;

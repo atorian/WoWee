@@ -191,21 +191,26 @@ ClientHarness::ClientHarness()
     imgui_ = ImGui::CreateContext();
     ImGui::GetIO().DisplaySize = ImVec2(1280.0f, 720.0f);
 
+    // The maps the tests enter, by the directories the client loads them from.
+    game_.dbc("Map.dbc", 5, {{{0, 0}, {1, "Azeroth"}, {4, "Eastern Kingdoms"}},
+                             {{0, 1}, {1, "Kalimdor"}, {4, "Kalimdor"}}});
+
     playerView_ = std::make_unique<core::PlayerView>(viewCamera_, nullptr, nullptr, nullptr,
                                                      game_.events());
-    spawner_ = std::make_unique<core::EntitySpawner>(nullptr, nullptr, &game(), nullptr,
-                                                     playerView_.get());
+    spawner_ = std::make_unique<core::EntitySpawner>(nullptr, nullptr, game_.gameData(), &game(),
+                                                     nullptr, playerView_.get());
     spawnCallbacks_ = std::make_unique<core::EntitySpawnCallbackHandler>(
-        *spawner_, nullptr, game(), [this](uint64_t guid) {
+        *spawner_, nullptr, game().eventBus(), [this](uint64_t guid) {
             return guid != 0 &&
                    (guid == game().getPlayerGuid() || guid == game().getActiveCharacterGuid());
         });
     spawnCallbacks_->setupCallbacks();
-    loader_ = std::make_unique<core::WorldLoader>(phase_, nullptr, nullptr,
+    loader_ = std::make_unique<core::WorldLoader>(phase_, nullptr, nullptr, game_.gameData(),
                                                   scratch_ / "last_world.cfg",
                                                   [this] { return now_; });
     worldEntry_ = std::make_unique<core::WorldEntryCallbackHandler>(
-        nullptr, *playerView_, game(), loader_.get(), spawner_.get(), nullptr, phase_);
+        nullptr, *playerView_, game(), loader_.get(), spawner_.get(), nullptr, game_.gameData(),
+        phase_);
     catalog_ = std::make_unique<addons::AddonCatalog>();
     catalog_->setFrameXmlDir((scratch_ / "FrameXML").string());
     catalog_->scan((scratch_ / "AddOns").string());
@@ -217,6 +222,30 @@ ClientHarness::ClientHarness()
 
     addons::LuaServices luaServices;
     luaServices.executionPhase = [this] { return phase_; };
+    luaServices.contacts = &game_.contacts();
+    luaServices.who = &game_.who();
+    luaServices.duels = &game_.duels();
+    luaServices.petitions = &game_.petitions();
+    luaServices.arenaTeams = &game_.arenaTeams();
+    luaServices.battlegrounds = &game_.battlegrounds();
+    luaServices.lfg = &game_.lfg();
+    luaServices.calendar = &game_.calendar();
+    luaServices.group = &game_.group();
+    luaServices.guild = &game_.guild();
+    luaServices.auctionHouse = &game_.auctionHouse();
+    luaServices.mail = &game_.mail();
+    luaServices.guildBank = &game_.guildBank();
+    luaServices.trade = &game_.trade();
+    luaServices.loot = &game_.loot();
+    luaServices.achievements = &game_.achievements();
+    luaServices.titles = &game_.titles();
+    luaServices.reputation = &game_.reputation();
+    luaServices.pet = &game_.pet();
+    // As Application wires it: acted on between frames, because the reload
+    // destroys the Lua state that asked.
+    luaServices.requestReloadUI = [this]() {
+        if (auto* character = session()) character->requestInterfaceReload();
+    };
     playerView_->bindMovementControls(luaServices);
 
     core::ClientLoop::Services services{
@@ -438,6 +467,13 @@ bool ClientHarness::interfaceAnswers(const std::string& expression) {
     if (!addons) fail("no interface to ask");
     core::ScopedPhase interfacePhase(phase_, core::Phase::Interface);
     return addons->interfaceCommandBoolean(expression);
+}
+
+void ClientHarness::withInterface(const std::function<void(addons::LuaEngine&)>& body) {
+    auto* addons = loop_->characterAddons();
+    if (!addons) fail("no interface to tell");
+    core::ScopedPhase interfacePhase(phase_, core::Phase::Interface);
+    body(*addons->getLuaEngine());
 }
 
 void ClientHarness::layOutInterface() {

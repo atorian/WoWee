@@ -1,8 +1,8 @@
 #include <catch_amalgamated.hpp>
 
-#include "game/pet_action.hpp"
+#include "pet/domain/actions.hpp"
 
-using namespace wowee::game::pet;
+using namespace wowee::pet;
 
 // The bug these cover: dismiss packed action 0 under the command type, which is
 // COMMAND_STAY, so the pet planted itself instead of leaving. The ids overlap

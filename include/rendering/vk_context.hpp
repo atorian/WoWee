@@ -64,17 +64,6 @@ public:
     /// zero. Only safe between frames, which is where the rebuild happens.
     void resetFrameSyncState();
 
-    /// Which incarnation of the UI textures is current. Anything holding a
-    /// descriptor set from uploadImGuiTexture caches this alongside it and
-    /// drops the cache when it moves, because those sets are this context's to
-    /// free and are not valid across the free.
-    ///
-    /// Counted against the destruction rather than against an ImGui backend
-    /// restart, which is what it used to key on: the restart was removed, its
-    /// only caller went with it, and the check downstream quietly became dead
-    /// code that never fired.
-    [[nodiscard]] uint32_t uiTextureGeneration() const { return uiTextureGeneration_; }
-
     VkContext();
     ~VkContext();
 
@@ -144,13 +133,13 @@ public:
     /// Opens the batch command buffer on first record, so a batch that
     /// nothing writes to never allocates one.
     void ensureBatchCmd();
-    void endUploadBatch();       // Async: submits but does NOT wait for fence
+    // Optional completion: 0 pending, 1 complete, -1 failed. Nested batches
+    // carry it to the outer submit; only a signalled fence publishes success.
+    using UploadCompletion = std::shared_ptr<std::atomic<int>>;
+    void endUploadBatch(UploadCompletion completion = {});
     void endUploadBatchSync();   // Sync: submits and waits (for load screens)
     /// Whether the calling thread has a batch open.
     [[nodiscard]] bool isInUploadBatch() const;
-    /// Hands a plainly-allocated staging buffer to the calling thread's batch,
-    /// which frees it once its copies have actually run.
-    void deferRawStagingCleanup(VkBuffer buffer, VkDeviceMemory memory);
     void deferStagingCleanup(AllocatedBuffer staging);
     void pollUploadBatches();    // Check completed async uploads, free staging buffers
     /// No batch in flight on any thread, and none open on this one.
@@ -421,6 +410,14 @@ public:
     [[nodiscard]] bool useDynamicRendering() const;
     [[nodiscard]] PFN_vkCmdPipelineBarrier2KHR cmdPipelineBarrier2Fn() const { return cmdPipelineBarrier2_; }
 
+    /// Whether the world's models show only the faces their materials show:
+    /// back faces culled per batch with the cull mode set on the command
+    /// buffer (core in 1.3; see FaceCulling). WOWEE_FACE_CULLING=0 keeps every
+    /// face, to compare against, and so does a driver whose entry points do
+    /// not resolve - which is said once, at startup.
+    [[nodiscard]] bool faceCulling() const { return cmdSetCullMode_ != nullptr && faceCullingEnabled_; }
+    void cmdSetCullMode(VkCommandBuffer cmd, VkCullModeFlags mode) const { cmdSetCullMode_(cmd, mode); }
+
     /// Whether a texture can be uploaded without a staging buffer.
     [[nodiscard]] bool isHostImageCopySupported() const { return hostImageCopySupported_; }
     /// Whether a single-level texture of `format` should go up by host image
@@ -448,12 +445,6 @@ public:
     // Global sampler cache accessor (set during VkContext::initialize, cleared on shutdown).
     // Used by VkTexture and other code that only has a VkDevice handle.
     static VkContext* globalInstance() { return sInstance_; }
-
-    // UI texture upload: creates a Vulkan texture from RGBA data and returns
-    // a VkDescriptorSet suitable for use as ImTextureID.
-    // The caller does NOT need to free the result - resources are tracked and
-    // cleaned up when the VkContext is destroyed.
-    VkDescriptorSet uploadImGuiTexture(const uint8_t* rgba, int width, int height);
 
 private:
     bool createInstance(SDL_Window* window);
@@ -547,7 +538,7 @@ private:
     PFN_vkCmdEndDebugUtilsLabelEXT cmdEndLabel_ = nullptr;
     /// Tracy's GPU context and its open zones; null outside a Tracy build.
     struct TracyGpu;
-    TracyGpu* tracyGpu_ = nullptr;
+    [[maybe_unused]] TracyGpu* tracyGpu_ = nullptr; // unread outside a Tracy build
     void createTracyGpuContext();
     void destroyTracyGpuContext();
     CpuStageTimes cpuStages_;
@@ -604,6 +595,8 @@ private:
     bool dynamicRenderingSupported_ = false;
     /// Whether it came from core 1.3 rather than the extension. Decides which
     PFN_vkCmdPipelineBarrier2KHR cmdPipelineBarrier2_ = nullptr;
+    PFN_vkCmdSetCullMode cmdSetCullMode_ = nullptr;
+    bool faceCullingEnabled_ = true;
 
     /// VK_EXT_host_image_copy. When present, pixels go from host memory into
     /// the image directly - no staging buffer, no transfer submission, no
@@ -655,22 +648,15 @@ private:
     VkSemaphore nextAcquireSemaphore_ = VK_NULL_HANDLE;  // free semaphore for next acquire
     VkSemaphore currentAcquireSemaphore_ = VK_NULL_HANDLE; // the one used for the current frame
 
-    /// Staging allocated with plain Vulkan calls rather than the allocator.
-    /// A batch only records the copy, so anything it reads from has to outlive
-    /// the recording and be freed once the submit has completed.
-    struct RawStaging { VkBuffer buffer; VkDeviceMemory memory; };
-
     // Async upload: in-flight batches awaiting GPU completion
     struct InFlightBatch {
         VkFence fence = VK_NULL_HANDLE;
         VkCommandBuffer cmd = VK_NULL_HANDLE;
         std::vector<AllocatedBuffer> stagingBuffers;
-        /// Plainly-allocated staging, which has to outlive the submit just as
-        /// the allocator's does.
-        std::vector<RawStaging> rawStaging;
         /// Submitted to the second queue (WOWEE_VK_ASYNC_UPLOAD_QUEUE=1), where
         /// nothing orders it against the frame but a wait.
         bool onTransferQueue = false;
+        std::vector<UploadCompletion> completions;
     };
 
     /// What one thread needs to put work on the GPU: its own command pool, the
@@ -693,7 +679,7 @@ private:
         bool inUploadBatch = false;
         VkCommandBuffer batchCmd = VK_NULL_HANDLE;
         std::vector<AllocatedBuffer> batchStaging;
-        std::vector<RawStaging> batchRawStaging;
+        std::vector<UploadCompletion> batchCompletions;
         /// Guards the two lists below: a batch may be retired by whichever
         /// thread polls first, but its command buffer goes back to the pool
         /// only on the owner, which is the one thread that uses the pool.
@@ -708,7 +694,6 @@ private:
     /// Retires the lane's batches that have completed (or, with `wait`, all of
     /// them once they have). Any thread.
     void retireBatches(SubmitLane& lane, bool wait);
-    void freeRawStaging(SubmitLane& lane);
     /// Every lane made so far; the lock guards the list, not the lanes.
     mutable std::mutex lanesMutex_;
     mutable std::vector<std::unique_ptr<SubmitLane>> lanes_;
@@ -783,40 +768,10 @@ private:
     void destroyOverlayRenderPass();
     VkDescriptorPool imguiDescriptorPool = VK_NULL_HANDLE;
 
-    // Shared sampler for UI textures (created on first uploadImGuiTexture call)
-    VkSampler uiTextureSampler_ = VK_NULL_HANDLE;
-    /// Bumped whenever the UI textures and the pool their descriptor sets came
-    /// from are destroyed.
-    ///
-    /// Any cache of those sets is dangling from that moment, and drawing with
-    /// one is a fault the GPU reports by resetting. Callers that keep sets
-    /// compare this against what they last saw and throw their cache away.
-    uint32_t uiTextureGeneration_ = 0;
     /// How many asynchronous upload batches have been submitted and retired.
     /// Only used to name the first fence and to say how many are outstanding.
     std::atomic<uint64_t> batchesSubmitted_{0};
     std::atomic<uint64_t> batchesRetired_{0};
-
-    /// A descriptor pool and layout this context owns, for UI textures.
-    ///
-    /// ImGui_ImplVulkan_AddTexture allocates from ImGui's pool, which is
-    /// destroyed whenever the backend restarts - and the backend restarts on
-    /// every anti-aliasing change, because that is how its render pass is
-    /// rebound. Ten different caches around the interface hold sets from that
-    /// pool and none of them hear about it. Allocating from a pool owned here
-    /// makes the sets outlive the restart; the layout matches the one ImGui
-    /// allocates with, so its pipeline binds them just the same.
-    VkDescriptorPool uiTexturePool_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout uiTextureLayout_ = VK_NULL_HANDLE;
-    bool ensureUiTextureDescriptorPool();
-
-    // Tracked UI textures for cleanup
-    struct UiTexture {
-        VkImage image;
-        VkDeviceMemory memory;
-        VkImageView view;
-    };
-    std::vector<UiTexture> uiTextures_;
 
     // Sampler cache - deduplicates VkSamplers by configuration hash.
     std::mutex samplerCacheMutex_;

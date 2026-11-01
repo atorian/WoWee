@@ -157,7 +157,7 @@ public:
 class ClearCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.clearChatHistory();
+        ctx.gameHandler.chat().clearChatHistory();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"clear"}; }
@@ -203,7 +203,7 @@ public:
             msg.language = game::ChatLanguage::UNIVERSAL;
             msg.message = std::string("Setting difficulty to: ") + kDiffNames[diff];
             ctx.gameHandler.addLocalChatMessage(msg);
-            ctx.gameHandler.sendSetDifficulty(diff);
+            ctx.gameHandler.social().sendSetDifficulty(diff);
         }
         return {};
     }

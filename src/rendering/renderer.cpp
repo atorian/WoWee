@@ -63,8 +63,7 @@
 #include "pipeline/m2_loader.hpp"
 #include <algorithm>
 #include "pipeline/asset_manager.hpp"
-#include "pipeline/dbc_loader.hpp"
-#include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/adt_loader.hpp"
 #include "pipeline/terrain_mesh.hpp"
@@ -89,7 +88,6 @@
 #include <chrono>
 #include <filesystem>
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 #include <cstdlib>
 #include <optional>
@@ -1577,7 +1575,6 @@ FrameInputs Renderer::extractFrameInputs() {
     in.cameraWaterDepth = cameraWaterDepth();
     if (camera) {
         const auto eye = camera->getPosition();
-        in.reflectionWaterHeight = liquidScene_.dominantWaterHeight(eye);
         in.waterHeight = liquidScene_.nearestHeightAt(eye.x, eye.y, eye.z, 400.0f);
         in.waterIsWmo = liquidScene_.isWmoLiquidAt(eye.x, eye.y);
         if (const auto type = liquidScene_.typeAt(eye.x, eye.y))
@@ -1626,14 +1623,8 @@ FrameInputs Renderer::extractFrameInputs() {
     scene->sequence = ++extractedSceneSequence_;
     if (vkCtx) scene->resources = vkCtx->holdSnapshotResources();
     extraction.lap("motion and resource lease");
-    if (terrainRenderer) {
-        terrainRenderer->setViewDistance(in.distantTerrainReady ? std::min(in.viewDistance,kDistantTerrainEnd) : in.viewDistance);
-        terrainRenderer->setLodViewportHeight(sceneRenderExtent().height);
-        scene->terrain = terrainRenderer->extract(in.camera, in.localLights);
-    }
-    if(distantTerrain_ && terrainRenderer && in.terrainEnabled)
-        scene->distantTerrain=distantTerrain_->extract(in.camera,in.viewDistance,terrainRenderer->detailedCoverage());
-    extraction.lap("terrain");
+    // The water first: the terrain and the buildings cull what its
+    // reflection can show along with their own view.
     if (waterRenderer) {
         scene->water = waterRenderer->extract(in.camera);
         if (in.hasLighting) {
@@ -1645,9 +1636,18 @@ FrameInputs Renderer::extractFrameInputs() {
         }
     }
     extraction.lap("water");
+    const WaterReflectionView* mirror = scene->water.reflection ? &*scene->water.reflection : nullptr;
+    if (terrainRenderer) {
+        terrainRenderer->setViewDistance(in.distantTerrainReady ? std::min(in.viewDistance,kDistantTerrainEnd) : in.viewDistance);
+        terrainRenderer->setLodViewportHeight(sceneRenderExtent().height);
+        scene->terrain = terrainRenderer->extract(in.camera, in.localLights, mirror);
+    }
+    if(distantTerrain_ && terrainRenderer && in.terrainEnabled)
+        scene->distantTerrain=distantTerrain_->extract(in.camera,in.viewDistance,terrainRenderer->detailedCoverage());
+    extraction.lap("terrain");
     if (wmoRenderer) {
         wmoRenderer->setViewDistance(in.viewDistance);
-        scene->buildings = wmoRenderer->extract(in.camera, in.characterPosition, in.localLights, scene->water.inView);
+        scene->buildings = wmoRenderer->extract(in.camera, in.characterPosition, in.localLights, mirror);
     }
     extraction.lap("WMO");
     if (characterRenderer) scene->characters = characterRenderer->extract(in.camera, in.localLights);
@@ -1666,8 +1666,16 @@ FrameInputs Renderer::extractFrameInputs() {
     extraction.lap("M2");
     if (minimap && in.minimapEnabled) {
         const auto centre = in.viewer.thirdPerson ? in.characterPosition : in.camera.getPosition();
+        std::optional<WmoMinimapPlacement> building;
+        if (wmoRenderer) {
+            if (const auto instance = collision_->wmoInstanceAt(collision::Reach::everywhere(),
+                                                                centre.x, centre.y, centre.z)) {
+                building = wmoRenderer->minimapPlacement(*instance);
+            }
+        }
         scene->minimap = minimap->extract(in.camera, centre, in.windowWidth, in.windowHeight,
-                                          glm::radians(in.characterYaw), true);
+                                          glm::radians(in.characterYaw), true,
+                                          building ? &*building : nullptr);
     }
     extraction.lap("minimap");
     if (skyboxModelRenderer_) {
@@ -1903,6 +1911,8 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
         if (skySystem && skySystem->getBodies()) {
             skySystem->getBodies()->beginFrameQueries(currentCmd, vkCtx->getCurrentFrame());
         }
+        // So are the water's, which say what of it reached the screen.
+        if (waterRenderer) waterRenderer->beginFrameQueries(currentCmd, vkCtx->getCurrentFrame());
         writeRtLightingBindings(vkCtx->getCurrentFrame());
         writeFogVolumeBindings(vkCtx->getCurrentFrame());
 
@@ -3495,7 +3505,8 @@ void Renderer::renderWorld() {
                 auto t0 = std::chrono::steady_clock::now();
                 VkCommandBuffer cmd = beginSecondary(SEC_WMO);
                 setSecondaryViewportScissor(cmd);
-                wmoRenderer->render(cmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition);
+                wmoRenderer->render(cmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
+                                    WMORenderer::Pass::View, WMORenderer::Layer::Opaque);
                 vkEndCommandBuffer(cmd);
                 return std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
@@ -3564,6 +3575,12 @@ void Renderer::renderWorld() {
                 skySystem->record(cmd, perFrameSet, *frameCamera(), skyParams, frameInputs_.scene->sky,
                                   drawSkyModels ? skyboxModelRenderer_.get() : nullptr);
                 logSunDiagnostic(skyParams);
+            }
+            // The buildings' blended batches, over the sky that shows through
+            // them; their opaque batches went ahead of it in SEC_WMO.
+            if (wmoRenderer && frameCamera() && !skipWMO) {
+                wmoRenderer->render(cmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
+                                    WMORenderer::Pass::View, WMORenderer::Layer::Blended);
             }
             vkEndCommandBuffer(cmd);
         }
@@ -3713,23 +3730,29 @@ void Renderer::renderWorld() {
         VkCommandBuffer validCmds[NUM_SECONDARIES];
         const char* validLabels[NUM_SECONDARIES];
         uint32_t numCmds = 0;
-        // Terrain first, then the sky. Every sky layer sits on the far plane
-        // and depth-tests against what is already there, so drawing it after
-        // the ground skips the clouds' noise on every pixel a hill covers,
-        // which outdoors is most of them. Only the terrain goes ahead of it:
-        // it is the one pass that is opaque throughout. Buildings carry
-        // blended windows and doodads carry leaves and particles, and blended
-        // pixels leave no depth behind, so a sky drawn after them would paint
-        // over whichever of them stood against it.
+        // The buildings' opaque batches first, then the terrain, then the
+        // sky, then the buildings' blended batches. Walls and floors go ahead
+        // of the ground so that the ground under and behind a city fails the
+        // depth test before it is shaded: Dalaran hangs over Crystalsong, and
+        // drawn first the forest floor was shaded under the whole city and
+        // then covered. Every sky layer sits on the far
+        // plane and depth-tests against what is already there, so drawing it
+        // after the ground and the walls skips the clouds' noise and the sky
+        // dome on every pixel they cover: in a city that is most of the
+        // screen, and it was about 5 ms a frame in Dalaran. Blended pixels
+        // leave no depth behind, so a sky drawn after them would paint over
+        // whichever of them stood against it: the buildings' windows are
+        // drawn after it (SEC_SKY ends with them), and doodads, with their
+        // leaves and particles, still come after the sky as a whole.
         const auto queue = [&](VkCommandBuffer buffer, const char* label) {
             validLabels[numCmds] = label;
             validCmds[numCmds++] = buffer;
         };
+        if (wmoRenderer && frameCamera() && !skipWMO)
+            queue(secondaryCmds_[SEC_WMO][frameIdx], "wmo");
         if (drawTerrain || drawGrass)
             queue(secondaryCmds_[SEC_TERRAIN][frameIdx], "terrain");
         queue(secondaryCmds_[SEC_SKY][frameIdx], "sky");
-        if (wmoRenderer && frameCamera() && !skipWMO)
-            queue(secondaryCmds_[SEC_WMO][frameIdx], "wmo");
         queue(secondaryCmds_[SEC_SELECTION][frameIdx], "selection");
         queue(secondaryCmds_[SEC_CHARS][frameIdx], "characters");
         if (m2Renderer && frameCamera() && !skipM2)
@@ -3759,6 +3782,21 @@ void Renderer::renderWorld() {
     } else {
         // ── Fallback: single-threaded inline recording (original path) ──
 
+        // The buildings' opaque batches, the terrain, the sky, then the
+        // buildings' blended batches, for the reasons given on the parallel
+        // path.
+        if (wmoRenderer && frameCamera() && !skipWMO) {
+            wmoRenderer->prepareRender();
+            auto wmoStart = std::chrono::steady_clock::now();
+            {
+                GpuPass pass(*vkCtx, currentCmd, "wmo");
+                wmoRenderer->render(currentCmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
+                                    WMORenderer::Pass::View, WMORenderer::Layer::Opaque);
+            }
+            lastWMORenderMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - wmoStart).count();
+        }
+
         if (terrainRenderer && frameCamera() && frameInputs_.terrainEnabled && !skipTerrain) {
             auto terrainStart = std::chrono::steady_clock::now();
             {
@@ -3777,7 +3815,6 @@ void Renderer::renderWorld() {
             grassRenderer_->record(currentCmd, vkCtx->getCurrentFrame(), perFrameSet, frameInputs_.scene->grass);
         }
 
-        // Sky after the ground, for the reason given on the parallel path.
         if (skySystem && frameCamera() && !skipSky) {
             GpuPass pass(*vkCtx, currentCmd, "sky");
             rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
@@ -3794,14 +3831,8 @@ void Renderer::renderWorld() {
         }
 
         if (wmoRenderer && frameCamera() && !skipWMO) {
-            wmoRenderer->prepareRender();
-            auto wmoStart = std::chrono::steady_clock::now();
-            {
-                GpuPass pass(*vkCtx, currentCmd, "wmo");
-                wmoRenderer->render(currentCmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition);
-            }
-            lastWMORenderMs = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - wmoStart).count();
+            wmoRenderer->render(currentCmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
+                                WMORenderer::Pass::View, WMORenderer::Layer::Blended);
         }
 
         if (overlaySystem_) {
@@ -4263,6 +4294,14 @@ void Renderer::setActiveMapName(const std::string& name) {
     if (minimap) minimap->setMapName(name);
 }
 
+const pipeline::GameTables& Renderer::gameTables() const {
+    if (!gameTables_) {
+        LOG_FATAL("Renderer: a table was read before the client handed over the expansion's tables");
+        std::abort();
+    }
+    return *gameTables_;
+}
+
 bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const std::string& mapName) {
     drainFrames();
     if (!assetManager) {
@@ -4310,15 +4349,13 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
     // by it. Before any tile or building is loaded.
     if (!liquidTypesLoaded_) {
         liquidTypesLoaded_ = true;
-        const auto dbc = assetManager->loadDBC("LiquidType.dbc");
-        const pipeline::DBCLayout* layouts = pipeline::getActiveDBCLayout();
-        if (dbc && dbc->isLoaded()) {
+        // Only WotLK's layout names the table's columns; the other
+        // expansions do not use it and know the four basic liquids alone.
+        if (gameTables().has("LiquidType.dbc")) {
             liquidTypes_ = pipeline::LiquidTypeTable::fromDbc(
-                *dbc, layouts ? layouts->getLayout("LiquidType") : nullptr, "LiquidType.dbc");
+                pipeline::RequiredTable(gameTables(), "LiquidType.dbc", "the kinds of liquid in the map data"));
             LOG_INFO("Liquid types: ", liquidTypes_.size(), " from LiquidType.dbc");
         } else {
-            LOG_WARNING("Liquid types: LiquidType.dbc did not load - only the four basic "
-                        "liquids are known, drawn without their textures");
             liquidTypes_ = pipeline::LiquidTypeTable::basicOnly();
         }
         liquidScene_.setLiquidTypes(&liquidTypes_);
@@ -4456,7 +4493,7 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         standaloneTerrain_ = std::make_unique<TerrainManager>();
         terrainManager = standaloneTerrain_.get();
         if (mapJobToken_.current()) terrainManager->setJobToken(mapJobToken_);
-        if (!terrainManager->initialize(assetManager, terrainRenderer.get())) {
+        if (!terrainManager->initialize(assetManager, terrainRenderer.get(), gameTables())) {
             LOG_ERROR("Failed to initialize terrain manager");
             standaloneTerrain_.reset();
             terrainManager = nullptr;
@@ -4492,8 +4529,21 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         // Wire asset manager to minimap for tile texture loading
         if (minimap) {
             minimap->setAssetManager(assetManager);
+            minimap->setGameTables(gameTables());
         }
     }
+
+    // The water's own pass, now that there is water to draw in it and the
+    // minimap, spray and blended doodads that follow it there exist.
+    //
+    // It was only ever set up when MSAA or the swapchain changed, and the
+    // sample count is applied at start-up, before the first world entry
+    // creates the water renderer. So the water stayed in the multisampled
+    // scene pass until the first resize - harmless while it was a plain draw,
+    // but its tessellation splits the pass under MoltenVK, and the samples the
+    // world had drawn into the memoryless MSAA colour were gone: a black world
+    // with the minimap over it, on the Mac, until the window was resized.
+    if (waterRenderer && !waterRenderer->hasWater1xPass()) setupWater1xPass();
 
     // Set map name on sub-renderers
     setActiveMapName(mapName);
@@ -4956,21 +5006,17 @@ void Renderer::renderReflectionPass() {
 
     // Reflection pass uses 1x MSAA. Scene pipelines must be render-pass-compatible,
     // which requires matching sample counts. Only render scene into reflection when MSAA is off.
-    bool canRenderScene = (vkCtx->getMsaaSamples() == VK_SAMPLE_COUNT_1_BIT);
+    const bool canRenderScene = waterRenderer->reflectionDrawsScene();
 
-    // Find dominant water height near camera
+    // The water in view that fills most of the picture, and the part of the
+    // mirror it shows (WaterRenderer::extract). Without one, no water reads
+    // the image this frame.
+    const auto& mirror = frameInputs_.scene->water.reflection;
+    if (!mirror) return;
     const glm::vec3 camPos = frameCamera()->getPosition();
-    auto waterH = frameInputs_.reflectionWaterHeight;
-    if (!waterH) return;
-
-    float waterHeight = *waterH;
-
-    // Skip reflection if camera is underwater (Z is up)
-    if (camPos.z < waterHeight + 0.5f) return;
-
-    // Compute reflected view and oblique projection
-    glm::mat4 reflView = mirroredView(frameCamera()->getPosition(), frameCamera()->getForward(), waterHeight);
-    glm::mat4 reflProj = obliqueReflectionProjection(frameCamera()->getProjectionMatrix(), reflView, waterHeight);
+    const float waterHeight = mirror->height;
+    const glm::mat4& reflView = mirror->view;
+    const glm::mat4& reflProj = mirror->projection;
 
     // Update water renderer's reflection UBO with the reflected viewProj
     waterRenderer->updateReflectionUBO(reflProj * reflView);
@@ -4990,7 +5036,7 @@ void Renderer::renderReflectionPass() {
     std::memcpy(reflPerFrameUBOMapped[frame], &reflData, sizeof(GPUPerFrameData));
 
     // Begin reflection render pass (clears to black; scene rendered if pipeline-compatible)
-    if (!waterRenderer->beginReflectionPass(currentCmd)) return;
+    if (!waterRenderer->beginReflectionPass(currentCmd, mirror->area)) return;
 
     if (canRenderScene) {
         // What stands above the water: the ground and the buildings. Not the
@@ -4998,10 +5044,11 @@ void Renderer::renderReflectionPass() {
         // reflected ray, from the sky the camera sees (skyAlong in
         // water.frag). The sky drawn here was a procedural one with no sky
         // model and no weather, and where the reflection held it, it stood
-        // in for the real one as a grey wash over the sea.
+        // in for the real one as a grey wash over the sea. Each draws what
+        // the mirror can show, culled with the camera's view.
         if (terrainRenderer && frameInputs_.terrainEnabled) {
             if(distantTerrain_)distantTerrain_->record(currentCmd,reflDescSet,frameInputs_.scene->distantTerrain);
-            terrainRenderer->recordView(currentCmd, reflDescSet, frameInputs_.scene->terrain);
+            terrainRenderer->recordReflection(currentCmd, reflDescSet, frameInputs_.scene->terrain);
         }
         if (wmoRenderer) {
             wmoRenderer->render(currentCmd, reflDescSet, *frameCamera(), nullptr, WMORenderer::Pass::Reflection);

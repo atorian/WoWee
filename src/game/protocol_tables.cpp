@@ -1,6 +1,7 @@
 #include "game/protocol_tables.hpp"
 
 #include "game/expansion_profile.hpp"
+#include "game/game_data.hpp"
 #include "game/game_handler.hpp"
 #include "game/opcode_table.hpp"
 #include "game/packet_parsers.hpp"
@@ -12,16 +13,22 @@
 
 namespace wowee::game {
 
-void loadProtocolTables(GameHandler& game, const ExpansionProfile& profile) {
-    const std::string opcodesPath = profile.dataPath + "/opcodes.json";
+void loadProtocolTables(GameHandler& game, const GameData& data) {
+    const ExpansionProfile& profile = data.expansion();
+    const std::string opcodesPath = data.file("opcodes.json", "the world server's opcodes");
     if (!game.getOpcodeTable().loadFromJson(opcodesPath)) {
-        LOG_ERROR("Failed to load opcodes from ", opcodesPath);
+        data.stop(opcodesPath, "the world server's opcodes", "holds no opcode the client knows");
     }
     setActiveOpcodeTable(&game.getOpcodeTable());
 
-    const std::string updateFieldsPath = profile.dataPath + "/update_fields.json";
+    const std::string updateFieldsPath = data.file("update_fields.json", "the objects' update fields");
     if (!game.getUpdateFieldTable().loadFromJson(updateFieldsPath)) {
-        LOG_ERROR("Failed to load update fields from ", updateFieldsPath);
+        data.stop(updateFieldsPath, "the objects' update fields", "could not be read");
+    }
+    if (const auto missing = game.getUpdateFieldTable().missingRequiredFields(); !missing.empty()) {
+        std::string names;
+        for (const auto& name : missing) names += (names.empty() ? "" : ", ") + name;
+        data.stop(updateFieldsPath, "the objects' update fields", "names no " + names);
     }
     setActiveUpdateFieldTable(&game.getUpdateFieldTable());
 

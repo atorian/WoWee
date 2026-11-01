@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <map>
+#include <mutex>
 #include <optional>
 
 namespace wowee {
@@ -17,9 +18,15 @@ namespace rendering {
 ///
 /// Knows nothing of the GPU: a range given back must no longer be read by any
 /// frame in flight, which is for the owner to wait out before calling free().
+/// Allocation/queries may run on the producer while a render-thread fence
+/// returns ranges. Each operation synchronizes its free-list and counters.
 class RangeAllocator {
 public:
     explicit RangeAllocator(uint32_t capacity = 0);
+    RangeAllocator(RangeAllocator&& other);
+    RangeAllocator& operator=(RangeAllocator&& other);
+    RangeAllocator(const RangeAllocator&) = delete;
+    RangeAllocator& operator=(const RangeAllocator&) = delete;
 
     /// The first element of `count` contiguous ones, or nothing when no free
     /// range is that long. A count of zero is never allocated.
@@ -27,14 +34,15 @@ public:
     /// Give back a range allocate() returned.
     void free(uint32_t offset, uint32_t count);
 
-    [[nodiscard]] uint32_t capacity() const { return capacity_; }
-    [[nodiscard]] uint32_t used() const { return used_; }
+    [[nodiscard]] uint32_t capacity() const;
+    [[nodiscard]] uint32_t used() const;
     /// The longest range allocate() could return now.
     [[nodiscard]] uint32_t largestFree() const;
     /// How many pieces the free space is in; one when nothing is allocated.
-    [[nodiscard]] size_t freeRangeCount() const { return free_.size(); }
+    [[nodiscard]] size_t freeRangeCount() const;
 
 private:
+    mutable std::mutex mutex_;
     uint32_t capacity_ = 0;
     uint32_t used_ = 0;
     std::map<uint32_t, uint32_t> free_;  // offset -> length

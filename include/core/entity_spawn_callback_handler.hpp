@@ -10,7 +10,6 @@
 namespace wowee {
 
 namespace rendering { class Renderer; }
-namespace game { class GameHandler; }
 namespace core { class EntitySpawner; }
 
 namespace core {
@@ -23,7 +22,7 @@ public:
     /// @param isLocalPlayerGuid Returns true if the given GUID is the local player (to skip self-spawn)
     EntitySpawnCallbackHandler(EntitySpawner& entitySpawner,
                                rendering::Renderer* renderer,
-                               game::GameHandler& gameHandler,
+                               EventBus& events,
                                std::function<bool(uint64_t)> isLocalPlayerGuid);
 
     void setupCallbacks();
@@ -31,7 +30,7 @@ public:
 private:
     EntitySpawner& entitySpawner_;
     rendering::Renderer* renderer_;
-    game::GameHandler& gameHandler_;
+    EventBus& events_;
     std::function<bool(uint64_t)> isLocalPlayerGuid_;
     std::vector<EventBus::Subscription> subscriptions_;
 };

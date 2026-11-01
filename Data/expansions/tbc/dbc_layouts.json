@@ -67,6 +67,9 @@
     "SkinID": 3
   },
   "CreatureModelData": {
+    "FootprintTextureID": 6,
+    "FootprintTextureLength": 7,
+    "FootprintTextureWidth": 8,
     "ID": 0,
     "ModelPath": 2,
     "ModelScale": 4
@@ -200,7 +203,12 @@
     "Value0": 18
   },
   "LightParams": {
-    "LightParamsID": 0
+    "LightParamsID": 0,
+    "LightSkyboxID": 2
+  },
+  "LightSkybox": {
+    "ID": 0,
+    "Path": 1
   },
   "Map": {
     "ID": 0,

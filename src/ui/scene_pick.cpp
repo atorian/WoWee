@@ -64,7 +64,7 @@ ScenePick pickScene(game::GameHandler& gameHandler,
         const game::GameObjectQueryResponseData* goInfo = nullptr;
         if (type == game::ObjectType::GAMEOBJECT) {
             auto go = std::static_pointer_cast<game::GameObject>(entity);
-            goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
+            goInfo = gameHandler.queryCache().getCachedGameObjectInfo(go->getEntry());
             if (params.skipChairs && goInfo && goInfo->type == kGoTypeChair) continue;
         }
 
@@ -147,7 +147,7 @@ ScenePick pickScene(game::GameHandler& gameHandler,
                     // A corpse still answers isHostile(), and a hostile is picked
                     // ahead of everything - hence the liveness check above it.
                     const bool hostile = unit->isHostile() ||
-                                         gameHandler.isAggressiveTowardPlayer(guid);
+                                         gameHandler.combat().isAggressiveTowardPlayer(guid);
                     if (hostile && hitT < pick.hostileUnitT) {
                         pick.hostileUnitT = hitT;
                         pick.hostileUnitGuid = guid;

@@ -1,7 +1,6 @@
 #pragma once
 #include "rendering/rt_distance.hpp"
 
-#include "ui/buff_bar_layout.hpp"
 #include "ui/graphics_defaults.hpp"
 #include "ui/ui_services.hpp"
 #include <vulkan/vulkan.h>
@@ -132,19 +131,17 @@ public:
     /// itself is in pixels and does not: on a 2160-line screen it comes up at
     /// the size it would have on a 768-line one.
     ///
-    /// The buff bar's rule, which is the one that keeps the HUD's proportions:
-    /// the height over the reference height, held between the same bounds. The
-    /// bags used steps of their own - 1.1 above 1300 lines, 1.2 above 2000 -
+    /// The rule the client's own buff bar used, which is the one that keeps the
+    /// HUD's proportions: the height over 1080 lines, held between 0.75 and 2.
+    /// The bags used steps of their own - 1.1 above 1300 lines, 1.2 above 2000 -
     /// and the two disagreed by more the further from 1080 the screen was. On a
     /// 2160-line screen the buff bar came up at 2.0 and everything beside it at
     /// 1.2, which is two neighbouring parts of one HUD at different sizes.
-    ///
-    /// The constants come from BuffBarMetrics rather than being written again,
-    /// so there is one rule here and not a third curve.
     static float recommendedPixelScale(float displayHeight) {
-        return std::clamp(displayHeight / BuffBarMetrics::kReferenceHeight,
-                          BuffBarMetrics::kMinAutoScale,
-                          BuffBarMetrics::kMaxAutoScale);
+        constexpr float kReferenceHeight = 1080.0f;
+        constexpr float kMinScale = 0.75f;
+        constexpr float kMaxScale = 2.0f;
+        return std::clamp(displayHeight / kReferenceHeight, kMinScale, kMaxScale);
     }
 
     /// The same, held to what one setting's own row will accept.

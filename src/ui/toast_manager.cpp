@@ -1,9 +1,11 @@
 #include "game/reputation_standing.hpp"
+#include "reputation/domain/events.hpp"
 #include "core/zone_tracker.hpp"
 #include "ui/toast_manager.hpp"
 #include "game/game_events.hpp"
 #include "game/game_handler.hpp"
 #include "core/application.hpp"
+#include "core/window.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/animation_controller.hpp"
 #include "audio/audio_coordinator.hpp"
@@ -25,14 +27,14 @@ void ToastManager::setupCallbacks(game::GameHandler& gameHandler) {
     // (which also triggers the 3D level-up effect).  Application routes to
     // triggerDing() / triggerAchievementToast() via the public API.
 
-    // Area discovery toast callback
-    if (!areaDiscoveryCallbackSet_) {
-        gameHandler.setAreaDiscoveryCallback([this](const std::string& areaName, uint32_t xpGained) {
-            discoveryToastName_ = areaName.empty() ? "New Area" : areaName;
-            discoveryToastXP_   = xpGained;
-            discoveryToastTimer_ = DISCOVERY_TOAST_DURATION;
-        });
-        areaDiscoveryCallbackSet_ = true;
+    // Area discovery toast
+    if (!areaDiscoveredSub_) {
+        areaDiscoveredSub_ = gameHandler.eventBus().subscribe<game::events::AreaDiscovered>(
+            [this](const game::events::AreaDiscovered& e) {
+                discoveryToastName_ = e.areaName.empty() ? "New Area" : e.areaName;
+                discoveryToastXP_   = e.xpGained;
+                discoveryToastTimer_ = DISCOVERY_TOAST_DURATION;
+            });
     }
 
     // Quest objective progress toast callback
@@ -73,15 +75,15 @@ void ToastManager::setupCallbacks(game::GameHandler& gameHandler) {
         });
     }
 
-    // PvP honor credit toast callback
-    if (!pvpHonorCallbackSet_) {
-        gameHandler.setPvpHonorCallback([this](uint32_t honor, uint64_t /*victimGuid*/, uint32_t rank) {
-            if (honor == 0) return;
-            pvpHonorToasts_.push_back({.honor = honor, .victimRank = rank, .age = 0.0f});
-            if (pvpHonorToasts_.size() > 4)
-                pvpHonorToasts_.erase(pvpHonorToasts_.begin());
-        });
-        pvpHonorCallbackSet_ = true;
+    // PvP honor credit toast
+    if (!honorGainedSub_) {
+        honorGainedSub_ = gameHandler.eventBus().subscribe<game::events::HonorGained>(
+            [this](const game::events::HonorGained& e) {
+                if (e.honor == 0) return;
+                pvpHonorToasts_.push_back({.honor = e.honor, .victimRank = e.victimRank, .age = 0.0f});
+                if (pvpHonorToasts_.size() > 4)
+                    pvpHonorToasts_.erase(pvpHonorToasts_.begin());
+            });
     }
 
     // Item loot toasts
@@ -114,8 +116,8 @@ void ToastManager::setupCallbacks(game::GameHandler& gameHandler) {
 
     // Reputation change toast callback
     if (!repChangeSub_) {
-        repChangeSub_ = gameHandler.eventBus().subscribe<game::events::ReputationChanged>(
-            [this](const game::events::ReputationChanged& e) {
+        repChangeSub_ = gameHandler.eventBus().subscribe<reputation::StandingChanged>(
+            [this](const reputation::StandingChanged& e) {
             const std::string& name = e.factionName;
             const int32_t delta = e.delta;
             const int32_t standing = e.standing;
@@ -388,9 +390,9 @@ void ToastManager::renderZoneToasts(float deltaTime) {
 // ─── Area Trigger Message Toasts ─────────────────────────────────────────────
 void ToastManager::renderAreaTriggerToasts(float deltaTime, game::GameHandler& gameHandler) {
     // Drain any pending messages from GameHandler
-    while (gameHandler.hasAreaTriggerMsg()) {
+    while (gameHandler.chat().hasAreaTriggerMessage()) {
         AreaTriggerToast t;
-        t.text = gameHandler.popAreaTriggerMsg();
+        t.text = gameHandler.chat().takeAreaTriggerMessage();
         t.age  = 0.0f;
         areaTriggerToasts_.push_back(std::move(t));
         if (areaTriggerToasts_.size() > 4)
@@ -892,7 +894,7 @@ void ToastManager::renderPlayerLevelUpToasts(game::GameHandler& gameHandler) {
         t.age += dt;
         // Lazy name resolution - fill in once the name cache has it
         if (t.playerName.empty() && t.guid != 0) {
-            t.playerName = gameHandler.lookupName(t.guid);
+            t.playerName = gameHandler.queryCache().lookupName(t.guid);
         }
     }
     playerLevelUpToasts_.erase(

@@ -25,6 +25,7 @@
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "pipeline/item_textures.hpp"
 #include "pipeline/m2_asset_loader.hpp"
 #include "game/game_handler.hpp"
@@ -280,9 +281,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
                 " head=", displayInfoIds[0], " chest=", displayInfoIds[4],
                 " legs=", displayInfoIds[6], " mainhand=", displayInfoIds[15]);
 
-    auto displayInfoDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
-    if (!displayInfoDbc) return;
-    const auto* idiL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
+    const pipeline::RequiredTable displayInfoDbc(tables_, "ItemDisplayInfo.dbc", "other players' equipment");
 
     auto getGeosetGroup = [&](uint32_t displayInfoId, uint32_t fieldIdx) -> uint32_t {
         if (displayInfoId == 0) return 0;
@@ -329,9 +328,9 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
         selectedHairScalp,
         itFacial != assets_.facialHairGeosetMap_.end() ? &itFacial->second : nullptr, st.raceId);
 
-    const uint32_t geosetGroup1Field = idiL ? (*idiL)["GeosetGroup1"] : 7;
-    const uint32_t geosetGroup2Field = idiL ? (*idiL)["GeosetGroup2"] : 8;
-    const uint32_t geosetGroup3Field = idiL ? (*idiL)["GeosetGroup3"] : 9;
+    const uint32_t geosetGroup1Field = displayInfoDbc.column("GeosetGroup1");
+    const uint32_t geosetGroup2Field = displayInfoDbc.column("GeosetGroup2");
+    const uint32_t geosetGroup3Field = displayInfoDbc.column("GeosetGroup3");
 
     std::unordered_set<uint16_t> modelGeosets;
     if (const auto* modelData = charRenderer->getModelData(st.modelId)) {
@@ -486,7 +485,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
     // Hide hair under helmets: replace style-specific scalp with bald scalp
     // HEAD slot is index 0 in the 19-element equipment array
     if (displayInfoIds[0] != 0 && hairStyleId > 0 &&
-        core::helmHidesHair(*assetManager_, displayInfoIds[0], st.genderId)) {
+        core::helmHidesHair(tables_, displayInfoIds[0], st.genderId)) {
         geosets.erase(selectedHairScalp);                              // Remove style scalp
         geosets.insert(1);    // Bald scalp cap (group 0)
     }
@@ -501,7 +500,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
         scene().characters().detachWeapon(st.instanceId, kAttachHelm);
 
         const core::HelmVisual helm = core::resolveHelmVisual(
-            *assetManager_, displayInfoIds[0], st.raceId, st.genderId);
+            *assetManager_, tables_, displayInfoIds[0], st.raceId, st.genderId);
         if (helm.valid()) {
             pipeline::M2Model helmModel;
             std::string helmPath;
@@ -535,7 +534,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
     scene().characters().detachWeapon(st.instanceId, kAttachShoulderLeft);
     if (displayInfoIds[2] != 0) {
         const ShoulderVisual shoulders =
-            resolveShoulderVisual(*assetManager_, displayInfoIds[2], st.raceId, st.genderId);
+            resolveShoulderVisual(*assetManager_, tables_, displayInfoIds[2], st.raceId, st.genderId);
         auto attachSide = [&](const HelmVisual& side, uint32_t attachmentId) {
             if (!side.valid()) return;
             pipeline::M2Model model;
@@ -559,13 +558,12 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
         if (capeDid != 0) {
             int32_t capeRecIdx = displayInfoDbc->findRecordById(capeDid);
             if (capeRecIdx >= 0) {
-                const uint32_t leftTexField = idiL ? (*idiL)["LeftModelTexture"] : 3u;
-                // RightModelTexture is the field right after LeftModelTexture.
+                const uint32_t leftTexField = displayInfoDbc.column("LeftModelTexture");
                 // Some cloaks (e.g. Jaina's Radiance) carry their texture only in
                 // the right field; the character-preview screen checks both, so
                 // match it here - otherwise the world model shows the cape mesh
                 // untextured even though the paperdoll preview looks correct.
-                const uint32_t rightTexField = leftTexField + 1;
+                const uint32_t rightTexField = displayInfoDbc.column("RightModelTexture");
                 std::string leftName = displayInfoDbc->getString(
                     static_cast<uint32_t>(capeRecIdx), leftTexField);
                 std::string rightName = displayInfoDbc->getString(
@@ -660,7 +658,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
             continue;
         }
 
-        const auto art = pipeline::readItemDisplayArt(*displayInfoDbc,
+        const auto art = pipeline::readItemDisplayArt(displayInfoDbc,
                                                       static_cast<uint32_t>(recIdx));
         if (art.modelFile.empty()) continue;  // an item with no model of its own
         const std::string& modelFile = art.modelFile;
@@ -701,7 +699,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
         st.weapons[hand] = {.attached = true, .inventoryType = inventoryType};
         // The enchant it shows, the way the player's own weapons get theirs.
         attachEnchantVisuals(
-            scene().characters(), *assetManager_, st.instanceId, point, equipment.enchantIds[slotIndex],
+            scene().characters(), tables_, st.instanceId, point, equipment.enchantIds[slotIndex],
             [this](const std::string& path, pipeline::M2Model& model) { return loadWeaponM2(path, model); },
             [this] { return nextWeaponModelId_++; });
     }
@@ -893,7 +891,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
         }
     }
     if (goIt != spawns_->gameObjectInstances_.end()) {
-        if (gameHandler_ && gameHandler_->isTransportGuid(guid)) {
+        if (gameHandler_ && gameHandler_->world().isTransportGuid(guid)) {
             if (auto* transportManager = gameHandler_->getTransportManager()) {
                 if (transportManager->getTransport(guid)) {
                     transportManager->rebindTransportInstance(
@@ -929,7 +927,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
 
     std::string modelPath;
 
-    if (gameHandler_ && gameHandler_->isTransportGuid(guid)) {
+    if (gameHandler_ && gameHandler_->world().isTransportGuid(guid)) {
         modelPath = transportModelPath(entry, displayId);
         if (!modelPath.empty()) {
             LOG_INFO("Transport entry/display ", entry, "/", displayId, " → ", modelPath);
@@ -1067,7 +1065,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
             // Transport GameObjects are not always named "transport" in their WMO path
             // (e.g. elevators/lifts). If the server marks it as a transport, always
             // notify so TransportManager can animate/carry passengers.
-            bool isTG = gameHandler_ && gameHandler_->isTransportGuid(guid);
+            bool isTG = gameHandler_ && gameHandler_->world().isTransportGuid(guid);
             LOG_DEBUG("WMO GO spawned: guid=0x", std::hex, guid, std::dec,
                        " entry=", entry, " displayId=", displayId,
                        " isTransport=", isTG,
@@ -1189,7 +1187,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
         }
 
         // Notify transport system for M2 transports (e.g. Deeprun Tram cars)
-        if (gameHandler_ && gameHandler_->isTransportGuid(guid)) {
+        if (gameHandler_ && gameHandler_->world().isTransportGuid(guid)) {
             LOG_DEBUG("M2 transport spawned: guid=0x", std::hex, guid, std::dec,
                        " entry=", entry, " displayId=", displayId,
                        " instanceId=", instanceId);

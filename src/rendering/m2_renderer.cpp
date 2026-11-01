@@ -1,4 +1,5 @@
 #include <atomic>
+#include "rendering/face_culling.hpp"
 #include "rendering/placement_transform.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/texture_upload.hpp"
@@ -13,7 +14,7 @@
 #include "rendering/m2_blend_mode.hpp"
 #include "pipeline/model_bounds.hpp"
 #include "rendering/render_constants.hpp"
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/bone_slots.hpp"
 #include "rendering/vk_buffer.hpp"
@@ -130,7 +131,8 @@ void M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
         const M2ModelGPU* model = inst.cachedModel;
         if (!model || model->lights.empty() || !inst.cachedIsValid) continue;
         const glm::vec3 toCam = inst.position - cameraPos;
-        if (!inst.lastCullVisible && glm::dot(toCam, toCam) > kNearDoodadSq) continue;
+        const bool culled = !scene_->cullGrid_.record(static_cast<uint32_t>(index)).lastVisible;
+        if (culled && glm::dot(toCam, toCam) > kNearDoodadSq) continue;
 
         for (const auto& light : model->lights) {
             if (light.type != 1) {
@@ -144,8 +146,8 @@ void M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
                 continue;
             }
             const int seq = inst.currentSequenceIndex;
-            const float t = inst.animTime;
-            const float gt = inst.globalSequenceTime;
+            const float t = animTimeOf(inst);
+            const float gt = globalSequenceTimeOf(inst);
             const auto& gsd = model->globalSequenceDurations;
             // Visibility is a switch: the Dalaran lamp's is 0 until it opens.
             if (m2_track::sampleFloat(light.visibility, seq, t, gt, gsd, 1.0f) < 0.5f) continue;
@@ -240,7 +242,7 @@ bool M2Renderer::buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout) {
         return builder
             .setLayout(pipelineLayout_)
             .setRenderPass(mainPass)
-            .setDynamicStates(viewportAndScissorDynamic())
+            .setDynamicStates(faceCullingDynamicStates(*vkCtx_))
             .setFlags(flags)
             .setBasePipeline(basePipeline)
             .build(device, vkCtx_->getPipelineCache());
@@ -317,7 +319,7 @@ bool M2Renderer::buildBlendedPipelines(VkRenderPass pass, VkSampleCountFlagBits 
             .setMultisample(samples)
             .setLayout(pipelineLayout_)
             .setRenderPass(pass)
-            .setDynamicStates(viewportAndScissorDynamic())
+            .setDynamicStates(faceCullingDynamicStates(*vkCtx_))
             .setFlags(flags)
             .setBasePipeline(base)
             .build(device, vkCtx_->getPipelineCache());
@@ -1156,6 +1158,8 @@ void M2Renderer::shutdown() {
 void M2Renderer::destroyModelGPU(uint32_t modelId, std::shared_ptr<M2ModelGPU> retired) {
     if (!vkCtx_) return;
     releaseRtModel(modelId, *retired);
+    // The shared emitter texture sets it used; the last use frees one.
+    releaseEmitterTexSets(*retired);
     // Detach ownership immediately; command buffers retain these handles until
     // every frame slot has fenced. Capture values, never this or model refs.
     VkContext* ctx = vkCtx_;
@@ -1167,12 +1171,6 @@ void M2Renderer::destroyModelGPU(uint32_t modelId, std::shared_ptr<M2ModelGPU> r
         for (auto& batch : retired->batches) {
             if (batch.materialSet) ctx->freeDescriptorSets(pool, 1, &batch.materialSet);
             if (slots) slots->free(batch.materialSlot);
-        }
-        for (auto set : retired->particleTexSets) {
-            if (set) ctx->freeDescriptorSets(pool, 1, &set);
-        }
-        for (auto set : retired->ribbonTexSets) {
-            if (set) ctx->freeDescriptorSets(pool, 1, &set);
         }
     });
 }
@@ -1304,10 +1302,12 @@ bool M2Renderer::makeModelWritable(uint32_t modelId) {
     }
     retireMaterials(current);
     current = std::move(next);
-    for (auto& inst : scene_->instances) if (inst.modelId == modelId) {
+    for (size_t i = 0; i < scene_->instances.size(); ++i) {
+        auto& inst = scene_->instances[i];
+        if (inst.modelId != modelId) continue;
         inst.cachedModel = current.get();
         inst.recomputeCachedCullFactors();
-        fileInCullGrid(inst);
+        fileInCullGrid(i);
     }
     return true;
 }
@@ -1370,8 +1370,6 @@ void M2Renderer::writeBatchMaterial(const M2ModelGPU& model,
     mat.blendMode = batch.blendMode;
     mat.combiner = static_cast<int32_t>(batch.combiner);
     mat.hasSecondTexture = batch.secondTexture && batch.secondTexture->isValid() ? 1 : 0;
-    mat.cullBackFaces = !skyMode_ &&
-        batch.blendMode >= 2 && (batch.materialFlags & 0x04) == 0 ? 1 : 0;
     mat.specularIntensity = 0.5f;
     mat.emissiveBoost = batch.preserveGlowMesh ? 2.4f : 1.0f;
     std::memcpy(batch.materialSlot.mapped, &mat, sizeof(mat));
@@ -1507,7 +1505,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     }
 
     // Classify model from name and geometry - pure function, no GPU dependencies.
-    auto cls = classifyM2Model(model.name, tightMin, tightMax,
+    auto cls = pipeline::classifyM2Model(model.name, tightMin, tightMax,
                                 model.vertices.size(),
                                 model.particleEmitters.size());
     const bool isInvisibleTrap   = cls.isInvisibleTrap;
@@ -2010,7 +2008,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                 }
             }
             bgpu.texture = tex;
-            const auto tcls = classifyBatchTexture(batchTexKeyLower);
+            const auto tcls = pipeline::classifyBatchTexture(batchTexKeyLower);
             bgpu.starLayer = tcls.starPointLayer;
             const bool modelLanternFamily = gpuModel.isLanternLike;
             const bool torchGlowCard = gpuModel.isTorch &&

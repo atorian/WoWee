@@ -15,7 +15,7 @@
 
 WoWee supports **Vanilla 1.12**, **TBC 2.4.3**, and **WotLK 3.3.5a** through
 expansion-specific profiles and packet parsers. It has been tested with
-AzerothCore/ChromieCraft, TrinityCore, MaNGOS, and Turtle WoW 1.18.
+AzerothCore/ChromieCraft, TrinityCore and MaNGOS.
 
 [Watch the latest demonstration](https://youtu.be/1Ax1jeNV_GU) ·
 [Download the latest release](https://github.com/Kelsidavis/WoWee/releases/latest) ·
@@ -171,7 +171,7 @@ For Windows/MSYS2, Visual Studio, and platform-specific notes, see the
 ### 2. Clone and build
 
 ```bash
-git clone --recurse-submodules https://github.com/Kelsidavis/WoWee.git
+git clone https://github.com/Kelsidavis/WoWee.git
 cd WoWee
 
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -206,14 +206,13 @@ From a terminal, the scripts extract into `Data/` in the checkout:
 .\extract_assets.ps1 "C:\Games\WoW-3.3.5a\Data" wotlk
 ```
 
-Valid targets are `classic`, `turtle`, `tbc`, and `wotlk`. Each target is kept
+Valid targets are `classic`, `tbc`, and `wotlk`. Each target is kept
 separately, so multiple expansions can coexist:
 
 ```text
 Data/
 └── expansions/
     ├── classic/manifest.json
-    ├── turtle/manifest.json
     ├── tbc/manifest.json
     └── wotlk/manifest.json
 ```
@@ -260,13 +259,6 @@ override only the host; the advertised port is preserved:
 
 ```bash
 export WOWEE_REALM_HOST_OVERRIDE=192.168.1.50
-```
-
-Turtle WoW defaults to authentication build 7272. Older compatible servers can
-use:
-
-```bash
-export WOWEE_TURTLE_AUTH_BUILD=7234
 ```
 
 ## Android

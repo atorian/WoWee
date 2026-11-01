@@ -47,15 +47,15 @@ uint32_t resolveSpellByName(game::GameHandler& gh, const std::string& spellArg, 
 
     uint32_t bestId = 0;
     int bestRank = -1;
-    for (uint32_t sid : gh.getKnownSpells()) {
-        const std::string& sName = gh.getSpellName(sid);
+    for (uint32_t sid : gh.spells().getKnownSpells()) {
+        const std::string& sName = gh.spells().getSpellName(sid);
         if (sName.empty()) continue;
         std::string sLow = sName;
         for (char& c : sLow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (sLow != spellNameLower) continue;
 
         int sRank = 0;
-        const std::string& rk = gh.getSpellRank(sid);
+        const std::string& rk = gh.spells().getSpellRank(sid);
         if (!rk.empty()) {
             std::string rLow = rk;
             for (char& c : rLow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -110,8 +110,8 @@ public:
         if (numId) {
             uint64_t targetGuid = (castTargetOverride != static_cast<uint64_t>(-1))
                 ? castTargetOverride
-                : (ctx.gameHandler.hasTarget() ? ctx.gameHandler.getTargetGuid() : 0);
-            ctx.gameHandler.castSpell(numId, targetGuid);
+                : (ctx.gameHandler.combat().hasTarget() ? ctx.gameHandler.combat().getTargetGuid() : 0);
+            ctx.gameHandler.spells().castSpell(numId, targetGuid);
             return {};
         }
 
@@ -120,8 +120,8 @@ public:
         if (bestSpellId) {
             uint64_t targetGuid = (castTargetOverride != static_cast<uint64_t>(-1))
                 ? castTargetOverride
-                : (ctx.gameHandler.hasTarget() ? ctx.gameHandler.getTargetGuid() : 0);
-            ctx.gameHandler.castSpell(bestSpellId, targetGuid);
+                : (ctx.gameHandler.combat().hasTarget() ? ctx.gameHandler.combat().getTargetGuid() : 0);
+            ctx.gameHandler.spells().castSpell(bestSpellId, targetGuid);
         } else {
             // Build error message
             std::string spellName = spellArg;
@@ -229,9 +229,9 @@ public:
                     try { rSec = std::stof(plow); } catch (...) {}
                     if (rSec > 0.0f && nowSec - seqState.lastPressSec > rSec) shouldReset = true;
                 } else if (plow == "target") {
-                    if (ctx.gameHandler.getTargetGuid() != seqState.lastTargetGuid) shouldReset = true;
+                    if (ctx.gameHandler.combat().getTargetGuid() != seqState.lastTargetGuid) shouldReset = true;
                 } else if (plow == "combat") {
-                    if (ctx.gameHandler.isInCombat() != seqState.lastInCombat) shouldReset = true;
+                    if (ctx.gameHandler.combat().isInCombat() != seqState.lastInCombat) shouldReset = true;
                 }
                 if (slash == std::string::npos) break;
                 rpos = slash + 1;
@@ -242,8 +242,8 @@ public:
         const std::string& seqSpell = seqSpells[seqState.index];
         seqState.index = (seqState.index + 1) % seqSpells.size();
         seqState.lastPressSec   = nowSec;
-        seqState.lastTargetGuid = ctx.gameHandler.getTargetGuid();
-        seqState.lastInCombat   = ctx.gameHandler.isInCombat();
+        seqState.lastTargetGuid = ctx.gameHandler.combat().getTargetGuid();
+        seqState.lastInCombat   = ctx.gameHandler.combat().isInCombat();
 
         // Cast the selected spell
         std::string ssLow = seqSpell;
@@ -251,14 +251,14 @@ public:
         if (!ssLow.empty() && ssLow.front() == '!') ssLow.erase(ssLow.begin());
 
         uint64_t seqTargetGuid = (seqTgtOver != static_cast<uint64_t>(-1) && seqTgtOver != 0)
-            ? seqTgtOver : (ctx.gameHandler.hasTarget() ? ctx.gameHandler.getTargetGuid() : 0);
+            ? seqTgtOver : (ctx.gameHandler.combat().hasTarget() ? ctx.gameHandler.combat().getTargetGuid() : 0);
 
         uint32_t numId = parseNumericSpellId(ssLow);
         if (numId) {
-            ctx.gameHandler.castSpell(numId, seqTargetGuid);
+            ctx.gameHandler.spells().castSpell(numId, seqTargetGuid);
         } else {
             uint32_t best = resolveSpellByName(ctx.gameHandler, ssLow);
-            if (best) ctx.gameHandler.castSpell(best, seqTargetGuid);
+            if (best) ctx.gameHandler.spells().castSpell(best, seqTargetGuid);
         }
         return {};
     }
@@ -290,10 +290,10 @@ public:
             iss >> bagNum >> slotNum;
             if (!iss.fail() && slotNum >= 1) {
                 if (bagNum == 0) {
-                    ctx.gameHandler.useItemBySlot(slotNum - 1, true);
+                    ctx.gameHandler.inventory().useItemBySlot(slotNum - 1, true);
                     return {};
                 } if (bagNum >= 1 && bagNum <= game::Inventory::NUM_BAG_SLOTS) {
-                    ctx.gameHandler.useItemInBag(bagNum - 1, slotNum - 1, true);
+                    ctx.gameHandler.inventory().useItemInBag(bagNum - 1, slotNum - 1, true);
                     return {};
                 }
             }
@@ -304,9 +304,9 @@ public:
             uint32_t numId = parseNumericSpellId(useArg);  // Reuse: strips '#', checks all digits
             if (numId && numId >= 1 && numId <= static_cast<uint32_t>(game::EquipSlot::BAG4) + 1) {
                 auto eslot = static_cast<game::EquipSlot>(numId - 1);
-                const auto& esl = ctx.gameHandler.getInventory().getEquipSlot(eslot);
+                const auto& esl = ctx.gameHandler.inventory().items().getEquipSlot(eslot);
                 if (!esl.empty())
-                    ctx.gameHandler.useItemById(esl.item.itemId);
+                    ctx.gameHandler.inventory().useItemById(esl.item.itemId);
                 return {};
             }
         }
@@ -316,17 +316,17 @@ public:
         for (char& c : useArgLower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
         bool found = false;
-        const auto& inv = ctx.gameHandler.getInventory();
+        const auto& inv = ctx.gameHandler.inventory().items();
         // Search backpack
         for (int s = 0; s < inv.getBackpackSize() && !found; ++s) {
             const auto& slot = inv.getBackpackSlot(s);
             if (slot.empty()) continue;
-            const auto* info = ctx.gameHandler.getItemInfo(slot.item.itemId);
+            const auto* info = ctx.gameHandler.inventory().getItemInfo(slot.item.itemId);
             if (!info) continue;
             std::string nameLow = info->name;
             for (char& c : nameLow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             if (nameLow == useArgLower) {
-                ctx.gameHandler.useItemBySlot(s, true);
+                ctx.gameHandler.inventory().useItemBySlot(s, true);
                 found = true;
             }
         }
@@ -335,12 +335,12 @@ public:
             for (int s = 0; s < inv.getBagSize(b) && !found; ++s) {
                 const auto& slot = inv.getBagSlot(b, s);
                 if (slot.empty()) continue;
-                const auto* info = ctx.gameHandler.getItemInfo(slot.item.itemId);
+                const auto* info = ctx.gameHandler.inventory().getItemInfo(slot.item.itemId);
                 if (!info) continue;
                 std::string nameLow = info->name;
                 for (char& c : nameLow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                 if (nameLow == useArgLower) {
-                    ctx.gameHandler.useItemInBag(b, s, true);
+                    ctx.gameHandler.inventory().useItemInBag(b, s, true);
                     found = true;
                 }
             }
@@ -370,16 +370,16 @@ public:
         for (char& c : equipArgLower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
         bool found = false;
-        const auto& inv = ctx.gameHandler.getInventory();
+        const auto& inv = ctx.gameHandler.inventory().items();
         for (int s = 0; s < inv.getBackpackSize() && !found; ++s) {
             const auto& slot = inv.getBackpackSlot(s);
             if (slot.empty()) continue;
-            const auto* info = ctx.gameHandler.getItemInfo(slot.item.itemId);
+            const auto* info = ctx.gameHandler.inventory().getItemInfo(slot.item.itemId);
             if (!info) continue;
             std::string nameLow = info->name;
             for (char& c : nameLow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             if (nameLow == equipArgLower) {
-                ctx.gameHandler.autoEquipItemBySlot(s);
+                ctx.gameHandler.inventory().autoEquipItemBySlot(s);
                 found = true;
             }
         }
@@ -387,12 +387,12 @@ public:
             for (int s = 0; s < inv.getBagSize(b) && !found; ++s) {
                 const auto& slot = inv.getBagSlot(b, s);
                 if (slot.empty()) continue;
-                const auto* info = ctx.gameHandler.getItemInfo(slot.item.itemId);
+                const auto* info = ctx.gameHandler.inventory().getItemInfo(slot.item.itemId);
                 if (!info) continue;
                 std::string nameLow = info->name;
                 for (char& c : nameLow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                 if (nameLow == equipArgLower) {
-                    ctx.gameHandler.autoEquipItemInBag(b, s);
+                    ctx.gameHandler.inventory().autoEquipItemInBag(b, s);
                     found = true;
                 }
             }
@@ -414,7 +414,7 @@ public:
 class EquipSetCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        const auto& sets = ctx.gameHandler.getEquipmentSets();
+        const auto& sets = ctx.gameHandler.inventory().getEquipmentSets();
         auto sysSay = [&](const std::string& msg) {
             game::MessageChatData m;
             m.type = game::ChatType::SYSTEM;
@@ -446,7 +446,7 @@ public:
             }
         }
         if (found) {
-            ctx.gameHandler.useEquipmentSet(found->setId);
+            ctx.gameHandler.inventory().useEquipmentSet(found->setId);
         } else {
             sysSay("[System] No equipment set matching '" + setName + "'.");
         }
@@ -472,7 +472,7 @@ public:
         }
         if (condPass) {
             uint64_t atkTarget = (saOverride != static_cast<uint64_t>(-1) && saOverride != 0)
-                ? saOverride : (ctx.gameHandler.hasTarget() ? ctx.gameHandler.getTargetGuid() : 0);
+                ? saOverride : (ctx.gameHandler.combat().hasTarget() ? ctx.gameHandler.combat().getTargetGuid() : 0);
             if (atkTarget != 0) {
                 ctx.gameHandler.startAutoAttack(atkTarget);
             } else {
@@ -504,7 +504,7 @@ public:
 class StopCastingCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.stopCasting();
+        ctx.gameHandler.spells().stopCasting();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"stopcasting"}; }
@@ -515,7 +515,7 @@ public:
 class CancelQueuedSpellCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.cancelQueuedSpell();
+        ctx.gameHandler.spells().cancelQueuedSpell();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"cancelqueuedspell", "stopspellqueue"}; }

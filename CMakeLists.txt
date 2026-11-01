@@ -30,14 +30,26 @@ option(WOWEE_ENABLE_ASAN "Enable AddressSanitizer + UBSan (applied to all build 
 option(WOWEE_ENABLE_TRACY "Enable Tracy profiler instrumentation" OFF)
 option(WOWEE_ENABLE_LTO "Link-time optimisation for the client in Release builds" ON)
 
-# ccache, when it is installed. A fresh worktree or a CI runner otherwise
-# compiles all of the client from nothing.
+# ccache, when it is installed. It serves a build directory again what that
+# directory compiled before: a rebuild after switching branches and back, a
+# clean rebuild, a CI runner whose cache is restored to the same path. It does
+# not serve one worktree what another compiled, and must not.
 #
 # The client compiles every file against a precompiled header, and ccache
 # refuses to cache those unless told the PCH's defines and timestamps may be
 # ignored - without the sloppiness below almost nothing would hit. Clang also
 # stamps the PCH with its build time, which -fno-pch-timestamp turns off
 # (see WOWEE_COMPILER_CACHE where the PCH is declared).
+#
+# base_dir is switched off for these calls, whatever the user's ccache.conf
+# says. It rewrites paths so that two directories compile to the same key,
+# but what they compile is not the same: a clang PCH, and the generated
+# cmake_pch.hxx it is built from, hold the absolute paths of the headers in
+# it. With base_dir covering two worktrees, a PCH built in one was served to
+# the other, which then included logger.hpp from its own tree a second time
+# and stopped on "redefinition of 'LogLevel'". Debug information keeps the
+# directory it was compiled in as well, so an object from another worktree
+# would point the debugger at that worktree's sources.
 #
 # Not on MSVC: Debug there uses /ZI, which ccache cannot cache.
 option(WOWEE_USE_CCACHE "Use ccache as the compiler launcher when found" ON)
@@ -49,6 +61,7 @@ if(WOWEE_USE_CCACHE AND NOT MSVC AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
         set(_wowee_ccache_launcher
             ${CMAKE_COMMAND} -E env
             CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime
+            CCACHE_BASEDIR=
             ${WOWEE_CCACHE_PROGRAM})
         set(CMAKE_C_COMPILER_LAUNCHER ${_wowee_ccache_launcher})
         set(CMAKE_CXX_COMPILER_LAUNCHER ${_wowee_ccache_launcher})
@@ -641,40 +654,36 @@ endfunction()
 find_library(STORMLIB_LIBRARY NAMES StormLib stormlib storm)
 find_path(STORMLIB_INCLUDE_DIR StormLib.h PATH_SUFFIXES StormLib)
 
-# Include ImGui as a static library (Vulkan backend)
+# Dear ImGui and vk-bootstrap (Vulkan device/instance setup). Copies of the
+# files the build uses, not submodules: see extern/VERSIONS.md.
+#
+# ImGui's core and its SDL input backend are one library; each renderer
+# backend is a library on top of it. The client draws through Vulkan (imgui),
+# the asset manager window through SDL's renderer (imgui_sdlrenderer, below).
 set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extern/imgui)
-if(EXISTS ${IMGUI_DIR})
-    add_library(imgui STATIC
-        ${IMGUI_DIR}/imgui.cpp
-        ${IMGUI_DIR}/imgui_draw.cpp
-        ${IMGUI_DIR}/imgui_tables.cpp
-        ${IMGUI_DIR}/imgui_widgets.cpp
-        ${IMGUI_DIR}/imgui_demo.cpp
-        ${IMGUI_DIR}/backends/imgui_impl_sdl3.cpp
-        ${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
-    )
-    # SYSTEM: vendored, so -Werror on wowee does not police it.
-    target_include_directories(imgui SYSTEM PUBLIC
-        ${IMGUI_DIR}
-        ${IMGUI_DIR}/backends
-    )
-    target_link_libraries(imgui PUBLIC SDL3::SDL3 Vulkan::Vulkan ${CMAKE_DL_LIBS})
-else()
-    message(WARNING "ImGui not found in extern/imgui. Clone it with:")
-    message(WARNING "  git clone https://github.com/ocornut/imgui.git extern/imgui")
-endif()
+add_library(imgui_core STATIC
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/imgui_demo.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_sdl3.cpp
+)
+# SYSTEM: vendored, so -Werror on wowee does not police it.
+target_include_directories(imgui_core SYSTEM PUBLIC
+    ${IMGUI_DIR}
+    ${IMGUI_DIR}/backends
+)
+target_link_libraries(imgui_core PUBLIC SDL3::SDL3 ${CMAKE_DL_LIBS})
+add_library(imgui STATIC ${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp)
+target_link_libraries(imgui PUBLIC imgui_core Vulkan::Vulkan)
 
-# vk-bootstrap (Vulkan device/instance setup)
 set(VK_BOOTSTRAP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extern/vk-bootstrap)
-if(EXISTS ${VK_BOOTSTRAP_DIR})
-    add_library(vk-bootstrap STATIC
-        ${VK_BOOTSTRAP_DIR}/src/VkBootstrap.cpp
-    )
-    target_include_directories(vk-bootstrap SYSTEM PUBLIC ${VK_BOOTSTRAP_DIR}/src)
-    target_link_libraries(vk-bootstrap PUBLIC Vulkan::Vulkan)
-else()
-    message(FATAL_ERROR "vk-bootstrap not found in extern/vk-bootstrap")
-endif()
+add_library(vk-bootstrap STATIC
+    ${VK_BOOTSTRAP_DIR}/src/VkBootstrap.cpp
+)
+target_include_directories(vk-bootstrap SYSTEM PUBLIC ${VK_BOOTSTRAP_DIR}/src)
+target_link_libraries(vk-bootstrap PUBLIC Vulkan::Vulkan)
 
 # Source files
 set(WOWEE_SOURCES
@@ -706,6 +715,8 @@ set(WOWEE_SOURCES
     # Core
     src/core/application.cpp
     src/core/movement_status.cpp
+    src/core/movement_reporting.cpp
+    src/core/interface_resources.cpp
     src/core/application_world_loading.cpp
     src/core/client_main.cpp
     src/core/client_loop.cpp
@@ -770,6 +781,13 @@ set(WOWEE_SOURCES
     src/auth/auth_packets.cpp
     src/auth/pin_auth.cpp
     src/auth/integrity.cpp
+    src/auth/client_timezone.cpp
+    src/mcp/mcp_server.cpp
+    src/mcp/http_transport.cpp
+    src/mcp/main_thread_queue.cpp
+    src/core/agent_bridge.cpp
+    src/ui/agent_controls.cpp
+    src/ui/agent_controls_apply.cpp
     src/auth/srp.cpp
     src/auth/big_num.cpp
     src/auth/crypto.cpp
@@ -793,6 +811,25 @@ set(WOWEE_SOURCES
     src/game/spell_description_eval.cpp
     src/game/inventory_handler.cpp
     src/game/social_handler.cpp
+    src/game/contacts_gateway.cpp
+    src/game/who_gateway.cpp
+    src/game/duel_gateway.cpp
+    src/game/petition_gateway.cpp
+    src/game/arena_gateway.cpp
+    src/game/battleground_gateway.cpp
+    src/game/lfg_gateway.cpp
+    src/game/calendar_gateway.cpp
+    src/game/group_gateway.cpp
+    src/game/guild_gateway.cpp
+    src/game/auction_gateway.cpp
+    src/game/mail_gateway.cpp
+    src/game/guild_bank_gateway.cpp
+    src/game/trade_gateway.cpp
+    src/game/loot_gateway.cpp
+    src/game/achievement_data.cpp
+    src/game/title_gateway.cpp
+    src/game/reputation_gateway.cpp
+    src/game/pet_gateway.cpp
     src/game/account_data.cpp
     src/game/account_data_handler.cpp
     src/game/action_bar_handler.cpp
@@ -800,14 +837,18 @@ set(WOWEE_SOURCES
     src/game/realm_clock.cpp
     src/game/realm_time_handler.cpp
     src/game/weather_handler.cpp
+    src/game/player_appearance.cpp
+    src/game/player_handler.cpp
+    src/game/query_cache_handler.cpp
+    src/game/stat_tables.cpp
+    src/game/game_data.cpp
     src/game/ui_errors.cpp
     src/game/quest_handler.cpp
     src/game/reputation_handler.cpp
     src/game/quest_objectives.cpp
-    src/game/entity_controller.cpp
+    src/game/world_handler.cpp
     src/game/warden_handler.cpp
     src/game/warden_crypto.cpp
-    src/game/cata_movement.cpp
     src/game/warden_module.cpp
     src/game/warden_emulator.cpp
     src/game/warden_memory.cpp
@@ -858,10 +899,12 @@ set(WOWEE_SOURCES
     src/pipeline/dbc_loader.cpp
     src/pipeline/asset_manager.cpp
     src/pipeline/stb_image_impl.cpp
+    src/pipeline/stb_image_write_impl.cpp
     src/pipeline/asset_inventory.cpp
     src/pipeline/asset_manifest.cpp
     src/pipeline/loose_file_reader.cpp
     src/pipeline/m2_loader.cpp
+    src/pipeline/m2_model_classifier.cpp
     src/pipeline/wmo_loader.cpp
     src/pipeline/wmo_bsp.cpp
     src/pipeline/liquid_types.cpp
@@ -1020,10 +1063,12 @@ set(WOWEE_SOURCES
     src/pipeline/item_textures.cpp
     src/pipeline/m2_asset_loader.cpp
     src/pipeline/dbc_layout.cpp
+    src/pipeline/required_table.cpp
     src/pipeline/spell_icon_paths.cpp
 
     src/pipeline/terrain_mesh.cpp
     src/pipeline/distant_terrain.cpp
+    src/pipeline/minimap_tile_index.cpp
 
     # Rendering (Vulkan infrastructure)
     src/rendering/pass_ablation.cpp
@@ -1057,10 +1102,12 @@ set(WOWEE_SOURCES
     src/rendering/material.cpp
     src/rendering/terrain_renderer.cpp
     src/rendering/terrain_bake.cpp
+    src/rendering/terrain_tile_maps.cpp
     src/rendering/range_allocator.cpp
     src/rendering/shadow_params.cpp
     src/rendering/terrain_manager.cpp
     src/rendering/frustum.cpp
+    src/rendering/face_culling.cpp
     src/rendering/rt_bvh.cpp
     src/rendering/rt_scene.cpp
     src/rendering/rt_lighting.cpp
@@ -1101,7 +1148,6 @@ set(WOWEE_SOURCES
     src/rendering/m2_renderer_posed_emitters.cpp
     src/rendering/character_emitters.cpp
     src/rendering/map_render_session.cpp
-    src/rendering/m2_model_classifier.cpp
     src/rendering/render_graph.cpp
     src/rendering/hiz_system.cpp
     src/rendering/volumetric_fog.cpp
@@ -1123,6 +1169,7 @@ set(WOWEE_SOURCES
     src/rendering/quest_marker_renderer.cpp
     src/rendering/footprint_renderer.cpp
     src/rendering/minimap.cpp
+    src/rendering/wmo_minimap.cpp
     src/rendering/aux_swapchain.cpp
     src/rendering/world_map/coordinate_projection.cpp
     src/rendering/world_map/map_resolver.cpp
@@ -1168,7 +1215,6 @@ set(WOWEE_SOURCES
     # UI
     src/ui/ui_manager.cpp
     src/ui/map_window.cpp
-    src/ui/ui_upload_budget.cpp
     src/ui/widget_tree.cpp
     src/ui/xml_parser.cpp
     src/ui/framexml_emitter.cpp
@@ -1178,6 +1224,9 @@ set(WOWEE_SOURCES
     src/ui/text_edit.cpp
     src/ui/paper_ui.cpp
     src/ui/widget_renderer.cpp
+    src/ui/widget_resources.cpp
+    src/ui/ui_texture_cache.cpp
+    src/ui/interface_art.cpp
     src/ui/ui_raid_icons.cpp
     src/ui/ui_texture_load.cpp
     src/ui/auth_screen.cpp
@@ -1193,15 +1242,13 @@ set(WOWEE_SOURCES
     src/ui/game_screen_minimap.cpp
     src/ui/chat_panel.cpp
     src/ui/macro_text.cpp
+    src/ui/macro_icon.cpp
     src/ui/chat/chat_settings.cpp
     src/ui/chat/chat_utils.cpp
     src/ui/chat/chat_bubble_manager.cpp
-    src/ui/chat/chat_markup_parser.cpp
     src/ui/plural_escape.cpp
-    src/ui/chat/chat_markup_renderer.cpp
     src/core/open_url.cpp
     src/core/click_drag.cpp
-    src/ui/chat/item_tooltip_renderer.cpp
     src/ui/chat/chat_command_registry.cpp
     src/ui/chat/macro_evaluator.cpp
     src/ui/chat/macro_eval_convenience.cpp
@@ -1230,6 +1277,7 @@ set(WOWEE_SOURCES
     src/ui/bis_gear_data.cpp
     src/ui/inventory_screen.cpp
     src/ui/item_tooltip.cpp
+    src/ui/item_tables.cpp
     src/ui/spellbook_screen.cpp
     src/ui/keybinding_manager.cpp
 
@@ -1246,6 +1294,7 @@ set(WOWEE_SOURCES
     src/addons/lua_socket_api.cpp
     src/addons/lua_social_api.cpp
     src/addons/lua_system_api.cpp
+    src/addons/minimap_zoom.cpp
     src/addons/lua_action_api.cpp
     src/addons/lua_movement_api.cpp
     src/addons/toc_parser.cpp
@@ -1735,15 +1784,8 @@ if(WIN32)
     target_link_libraries(wowee_client_objects PRIVATE ws2_32 winmm)
 endif()
 
-# Link ImGui if available
-if(TARGET imgui)
-    target_link_libraries(wowee_client_objects PUBLIC imgui)
-endif()
-
-# Link vk-bootstrap
-if(TARGET vk-bootstrap)
-    target_link_libraries(wowee_client_objects PRIVATE vk-bootstrap)
-endif()
+target_link_libraries(wowee_client_objects PUBLIC imgui)
+target_link_libraries(wowee_client_objects PRIVATE vk-bootstrap)
 
 if(TARGET wowee_fsr2_amd_vk)
     target_link_libraries(wowee_client_objects PRIVATE wowee_fsr2_amd_vk)
@@ -1816,6 +1858,164 @@ if(WOWEE_ENABLE_TRACY)
     endif()
 endif()
 
+# wowee_contacts: the friend, ignore and mute lists - their domain model and
+# the service the protocol, the interface and the addon layer reach them
+# through. On wowee_base only, so its tests link nothing of the client.
+set(WOWEE_CONTACTS_SOURCES
+    src/contacts/domain/contact_list.cpp
+    src/contacts/services/contacts_service.cpp
+)
+add_library(wowee_contacts STATIC ${WOWEE_CONTACTS_SOURCES})
+target_link_libraries(wowee_contacts PUBLIC wowee_base)
+# wowee_who: /who - its last answer, where answers go, and the query.
+set(WOWEE_WHO_SOURCES
+    src/who/domain/who_list.cpp
+    src/who/services/who_service.cpp
+)
+add_library(wowee_who STATIC ${WOWEE_WHO_SOURCES})
+target_link_libraries(wowee_who PUBLIC wowee_base)
+# wowee_duel: a duel the player is asked to or in, its countdown and answers.
+set(WOWEE_DUEL_SOURCES
+    src/duel/domain/duel.cpp
+    src/duel/services/duel_service.cpp
+)
+add_library(wowee_duel STATIC ${WOWEE_DUEL_SOURCES})
+target_link_libraries(wowee_duel PUBLIC wowee_base)
+# wowee_petition: guild and arena charters - the registrar's offer and the
+# signatures on the charter shown.
+set(WOWEE_PETITION_SOURCES
+    src/petition/domain/petitions.cpp
+    src/petition/services/petition_service.cpp
+)
+add_library(wowee_petition STATIC ${WOWEE_PETITION_SOURCES})
+target_link_libraries(wowee_petition PUBLIC wowee_base)
+# wowee_arena: the player's arena teams - their standings and rosters.
+set(WOWEE_ARENA_SOURCES
+    src/arena/domain/arena_teams.cpp
+    src/arena/services/arena_service.cpp
+)
+add_library(wowee_arena STATIC ${WOWEE_ARENA_SOURCES})
+target_link_libraries(wowee_arena PUBLIC wowee_base)
+# wowee_battleground: the battleground queues, what battlemasters list, the
+# scoreboard and everyone's position on the map.
+set(WOWEE_BATTLEGROUND_SOURCES
+    src/battleground/domain/battlegrounds.cpp
+    src/battleground/services/battleground_service.cpp
+)
+add_library(wowee_battleground STATIC ${WOWEE_BATTLEGROUND_SOURCES})
+target_link_libraries(wowee_battleground PUBLIC wowee_base)
+# wowee_lfg: the dungeon finder - the queue, the proposal, the role check,
+# the vote to kick, and what it pays and forbids.
+set(WOWEE_LFG_SOURCES
+    src/lfg/domain/dungeon_finder.cpp
+    src/lfg/services/lfg_service.cpp
+)
+add_library(wowee_lfg STATIC ${WOWEE_LFG_SOURCES})
+target_link_libraries(wowee_lfg PUBLIC wowee_base)
+# wowee_calendar: the calendar the server sends, the event open, and the
+# placement of a day's rows.
+set(WOWEE_CALENDAR_SOURCES
+    src/calendar/domain/calendar.cpp
+    src/calendar/domain/day_entries.cpp
+    src/calendar/services/calendar_service.cpp
+)
+add_library(wowee_calendar STATIC ${WOWEE_CALENDAR_SOURCES})
+target_link_libraries(wowee_calendar PUBLIC wowee_base)
+# wowee_group: the player's party or raid - its roster and members' stats,
+# the pending invite, the ready check and the raid target markers.
+set(WOWEE_GROUP_SOURCES
+    src/group/domain/group.cpp
+    src/group/services/group_service.cpp
+)
+add_library(wowee_group STATIC ${WOWEE_GROUP_SOURCES})
+target_link_libraries(wowee_group PUBLIC wowee_base)
+# wowee_guild: the player's guild - membership, the roster, the invite, what
+# its members did and the rank editor - and other guilds' names.
+set(WOWEE_GUILD_SOURCES
+    src/guild/domain/guild.cpp
+    src/guild/domain/guild_names.cpp
+    src/guild/services/guild_service.cpp
+)
+add_library(wowee_guild STATIC ${WOWEE_GUILD_SOURCES})
+target_link_libraries(wowee_guild PUBLIC wowee_base)
+# wowee_auction: the auction house the player is standing at - its three
+# lists, the last search and the wait before the next.
+set(WOWEE_AUCTION_SOURCES
+    src/auction/domain/auction_house.cpp
+    src/auction/services/auction_service.cpp
+)
+add_library(wowee_auction STATIC ${WOWEE_AUCTION_SOURCES})
+target_link_libraries(wowee_auction PUBLIC wowee_base)
+# wowee_mail: the mailbox the player is at - the inbox, the letter being
+# written and its enclosures, and whether unread mail is waiting.
+set(WOWEE_MAIL_SOURCES
+    src/mail/domain/auction_mail.cpp
+    src/mail/domain/mailbox.cpp
+    src/mail/services/mail_service.cpp
+)
+add_library(wowee_mail STATIC ${WOWEE_MAIL_SOURCES})
+target_link_libraries(wowee_mail PUBLIC wowee_base)
+# wowee_guild_bank: the guild vault the player is at - the tab being viewed
+# and its contents, the tab texts, the money and the logs.
+set(WOWEE_GUILD_BANK_SOURCES
+    src/guild_bank/domain/guild_bank.cpp
+    src/guild_bank/services/guild_bank_service.cpp
+)
+add_library(wowee_guild_bank STATIC ${WOWEE_GUILD_BANK_SOURCES})
+target_link_libraries(wowee_guild_bank PUBLIC wowee_base)
+# wowee_trade: a trade with another player - who, how far it has got, what
+# each side has put down and which side has accepted.
+set(WOWEE_TRADE_SOURCES
+    src/trade/domain/trade.cpp
+    src/trade/services/trade_service.cpp
+)
+add_library(wowee_trade STATIC ${WOWEE_TRADE_SOURCES})
+target_link_libraries(wowee_trade PUBLIC wowee_base)
+# wowee_loot: the open loot window and what is remembered per source, and the
+# group's rolls.
+set(WOWEE_LOOT_SOURCES
+    src/loot/domain/loot_rolls.cpp
+    src/loot/domain/loot_window.cpp
+    src/loot/services/loot_service.cpp
+)
+add_library(wowee_loot STATIC ${WOWEE_LOOT_SOURCES})
+target_link_libraries(wowee_loot PUBLIC wowee_base)
+# wowee_achievement: the player's achievements, what an inspected player has
+# earned, and what the game's files say about each achievement.
+set(WOWEE_ACHIEVEMENT_SOURCES
+    src/achievement/domain/achievements.cpp
+    src/achievement/domain/catalog.cpp
+    src/achievement/services/achievement_service.cpp
+)
+add_library(wowee_achievement STATIC ${WOWEE_ACHIEVEMENT_SOURCES})
+target_link_libraries(wowee_achievement PUBLIC wowee_base)
+# wowee_title: the titles the player knows and wears, and CharTitles.dbc's
+# names for them.
+set(WOWEE_TITLE_SOURCES
+    src/title/domain/catalog.cpp
+    src/title/domain/titles.cpp
+    src/title/services/title_service.cpp
+)
+add_library(wowee_title STATIC ${WOWEE_TITLE_SOURCES})
+target_link_libraries(wowee_title PUBLIC wowee_base)
+# wowee_reputation: the character's standings and the reputation panel's rows,
+# and what Faction.dbc says about each faction.
+set(WOWEE_REPUTATION_SOURCES
+    src/reputation/domain/factions.cpp
+    src/reputation/domain/standings.cpp
+    src/reputation/services/reputation_service.cpp
+)
+add_library(wowee_reputation STATIC ${WOWEE_REPUTATION_SOURCES})
+target_link_libraries(wowee_reputation PUBLIC wowee_base)
+# wowee_pet: the player's pet - its bar, stance, spells and fields - and the
+# stable.
+set(WOWEE_PET_SOURCES
+    src/pet/domain/pet.cpp
+    src/pet/services/pet_service.cpp
+)
+add_library(wowee_pet STATIC ${WOWEE_PET_SOURCES})
+target_link_libraries(wowee_pet PUBLIC wowee_base)
+
 add_library(wowee_pipeline STATIC ${WOWEE_PIPELINE_SOURCES})
 target_link_libraries(wowee_pipeline PUBLIC wowee_base)
 target_include_directories(wowee_pipeline SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/extern)
@@ -1882,7 +2082,7 @@ target_precompile_headers(wowee_net PRIVATE
 )
 
 add_library(wowee_game STATIC ${WOWEE_GAME_SOURCES})
-target_link_libraries(wowee_game PUBLIC wowee_net wowee_protocol wowee_pipeline wowee_base)
+target_link_libraries(wowee_game PUBLIC wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_group wowee_guild wowee_auction wowee_mail wowee_guild_bank wowee_trade wowee_loot wowee_achievement wowee_title wowee_reputation wowee_pet wowee_net wowee_protocol wowee_pipeline wowee_base)
 target_precompile_headers(wowee_game PRIVATE
     ${WOWEE_PCH_STD}
     <glm/glm.hpp>
@@ -1897,8 +2097,8 @@ if(HAVE_UNICORN)
 endif()
 
 if(ANDROID)
-    set_target_properties(wowee_base wowee_pipeline wowee_collision wowee_render wowee_protocol wowee_net wowee_game
-                          PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    set_target_properties(wowee_base wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_group wowee_guild wowee_auction wowee_mail wowee_guild_bank wowee_trade wowee_loot wowee_achievement wowee_title wowee_reputation wowee_pet wowee_pipeline wowee_collision wowee_render wowee_protocol
+                          wowee_net wowee_game PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
 target_link_libraries(wowee_client_objects PUBLIC wowee_game wowee_render wowee_collision wowee_pipeline wowee_net wowee_protocol wowee_base)
@@ -2035,7 +2235,7 @@ function(wowee_apply_client_flags target)
     endif()
 endfunction()
 
-foreach(_client_target wowee wowee_client_objects wowee_base wowee_pipeline wowee_collision wowee_render wowee_protocol wowee_net wowee_game)
+foreach(_client_target wowee wowee_client_objects wowee_base wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_group wowee_guild wowee_auction wowee_mail wowee_guild_bank wowee_trade wowee_loot wowee_achievement wowee_title wowee_reputation wowee_pet wowee_pipeline wowee_collision wowee_render wowee_protocol wowee_net wowee_game)
     wowee_apply_client_flags(${_client_target})
 endforeach()
 if(WOWEE_ENABLE_ASAN)
@@ -2210,6 +2410,8 @@ if(WOWEE_BUILD_FRAMEXML_RUN)
         ${WOWEE_PLATFORM_SOURCES}
     )
     target_link_libraries(framexml_run PRIVATE wowee_client_objects)
+    add_executable(interface_prefetch_check tools/interface_prefetch_check.cpp ${WOWEE_PLATFORM_SOURCES})
+    target_link_libraries(interface_prefetch_check PRIVATE wowee_client_objects)
     # The objects are built for a link-time-optimised link in Release.
     if(_ipo_supported AND WOWEE_ENABLE_LTO)
         set_property(TARGET framexml_run PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
@@ -2231,8 +2433,21 @@ target_precompile_headers(scene_render REUSE_FROM wowee_render)
 wowee_apply_client_flags(scene_render)
 
 # Scenes drawn as tests: what the world's M2 renderer drew in the kept frame,
-# as scene_render reports it. They need a Vulkan device and the game data in
-# bin/Data, and are skipped without either.
+# as scene_render reports it. They need a Vulkan device and the game data, and
+# are skipped without either.
+#
+# The game data is bin/Data unless WOWEE_GAME_DATA_DIR names it. On macOS the
+# asset extractor writes to the per-user folder the client's application
+# bundle reads (core/data_paths.hpp), while bin/Data is the tree's own Data/
+# with the expansion profiles alone; when that folder exists it is the default.
+set(_wowee_mac_data "$ENV{HOME}/Library/Application Support/Wowee/Data")
+if(APPLE AND EXISTS "${_wowee_mac_data}/expansions")
+    set(_wowee_default_data "${_wowee_mac_data}")
+else()
+    set(_wowee_default_data "")
+endif()
+set(WOWEE_GAME_DATA_DIR "${_wowee_default_data}" CACHE PATH
+    "Extracted game data the scene tests draw from; empty for bin/Data")
 if(WOWEE_BUILD_TESTS)
     file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/scratch)
     function(wowee_add_scene_test name scene pass_regex)
@@ -2278,6 +2493,12 @@ if(WOWEE_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_rt_radius.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/rt-radius/scene)
         set_tests_properties(scene_rt_radius PROPERTIES SKIP_RETURN_CODE 77)
+        # A one-sided material shows its front faces only, a two-sided one both,
+        # in the view and in the water's reflection.
+        add_test(NAME scene_face_culling
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_face_culling.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/face-culling)
+        set_tests_properties(scene_face_culling PROPERTIES SKIP_RETURN_CODE 77)
         foreach(object m2 wmo character terrain water)
             add_test(NAME scene_frame_scene_${object}
                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py
@@ -2309,6 +2530,16 @@ if(WOWEE_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/frame-inputs-rain --weather rain)
         set_tests_properties(scene_frame_inputs_rain PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
+    # Every scene test draws from the same game data, the checks' as well:
+    # they hand their environment to scene_render whole.
+    if(WOWEE_GAME_DATA_DIR)
+        get_property(_wowee_tests DIRECTORY PROPERTY TESTS)
+        foreach(_test IN LISTS _wowee_tests)
+            if(_test MATCHES "^scene_")
+                set_tests_properties(${_test} PROPERTIES ENVIRONMENT "WOW_DATA_PATH=${WOWEE_GAME_DATA_DIR}")
+            endif()
+        endforeach()
     endif()
 endif()
 
@@ -2369,26 +2600,92 @@ if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
     endif()
 endif()
 
+# ---- The asset tools: what the extractor, the asset manager and the client share ----
+#
+# Each of the three programs that build assets used to compile these sources
+# itself - the client, the asset manager window and asset_extract - and the
+# tests compiled them a fourth and fifth time. They are split by what they
+# need, so a program or a test takes only that:
+#
+#   wowee_asset_tools  the output formats, the profiles, packs, the probe of an
+#                      install, the model import and the upscale: no StormLib,
+#                      no ImGui, so their tests build everywhere
+#   wowee_asset_build  reading the game's archives: the extractor and the job
+#                      that drives it; needs StormLib
+#   wowee_asset_panel  the panel the asset manager window and the client both
+#                      draw, and its folder chooser. Compiled against ImGui's
+#                      headers only: the window links SDL's ImGui backend, the
+#                      client its Vulkan one, and each brings its own ImGui.
+add_library(wowee_asset_tools STATIC
+    tools/asset_extract/path_mapper.cpp
+    tools/asset_extract/manifest_writer.cpp
+    tools/asset_extract/open_format_emitter.cpp
+    tools/asset_manager/casc.cpp
+    tools/asset_manager/install_probe.cpp
+    tools/asset_manager/model_import.cpp
+    tools/asset_manager/pack.cpp
+    tools/asset_manager/profiles.cpp
+    tools/asset_manager/texture_ops.cpp
+    tools/asset_manager/upscale.cpp
+)
+target_include_directories(wowee_asset_tools PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/asset_extract
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/asset_manager
+)
+target_include_directories(wowee_asset_tools SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/extern)
+target_link_libraries(wowee_asset_tools PUBLIC wowee_pipeline PRIVATE ZLIB::ZLIB)
+wowee_apply_client_flags(wowee_asset_tools)
+
+if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
+    add_library(wowee_asset_build STATIC
+        tools/asset_extract/extractor.cpp
+        tools/asset_manager/install_scan.cpp
+        tools/asset_manager/job.cpp
+        tools/asset_manager/model_source.cpp
+    )
+    target_include_directories(wowee_asset_build PRIVATE ${STORMLIB_INCLUDE_DIR})
+    target_include_directories(wowee_asset_build SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/extern)
+    target_link_libraries(wowee_asset_build PUBLIC wowee_asset_tools)
+    wowee_link_stormlib(wowee_asset_build)
+    wowee_apply_client_flags(wowee_asset_build)
+
+    add_library(wowee_asset_panel STATIC
+        tools/asset_manager/panel.cpp
+        tools/asset_manager/folder_picker.cpp
+    )
+    target_include_directories(wowee_asset_panel SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/extern
+        ${IMGUI_DIR}
+    )
+    target_link_libraries(wowee_asset_panel PUBLIC wowee_asset_build)
+    # The folder chooser is the operating system's own where there is one. On
+    # Linux and the BSDs there is no such call - the usual answer is to run
+    # zenity or kdialog, which is a program that may not be installed and a
+    # button that silently does nothing when it is not - so those get the
+    # browser drawn in the window instead.
+    if(APPLE)
+        target_sources(wowee_asset_panel PRIVATE tools/asset_manager/folder_picker_mac.mm)
+        set_source_files_properties(tools/asset_manager/folder_picker_mac.mm
+            PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+        target_link_libraries(wowee_asset_panel PUBLIC
+            "-framework AppKit" "-framework UniformTypeIdentifiers")
+    elseif(WIN32)
+        target_sources(wowee_asset_panel PRIVATE tools/asset_manager/folder_picker_win.cpp)
+        target_link_libraries(wowee_asset_panel PUBLIC ole32 shell32)
+    else()
+        target_sources(wowee_asset_panel PRIVATE tools/asset_manager/folder_picker_none.cpp)
+    endif()
+    wowee_apply_client_flags(wowee_asset_panel)
+endif()
+
 # ---- Tool: asset_extract (MPQ → loose files) ----
 if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
     add_executable(asset_extract
         ${WOWEE_PLATFORM_SOURCES}
         tools/asset_extract/main.cpp
-        tools/asset_extract/extractor.cpp
-        tools/asset_extract/path_mapper.cpp
-        tools/asset_extract/manifest_writer.cpp
-        tools/asset_extract/open_format_emitter.cpp
     )
-    target_link_libraries(asset_extract PRIVATE wowee_pipeline)
-    target_include_directories(asset_extract PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/tools/asset_extract
-        ${STORMLIB_INCLUDE_DIR}
-    )
-    target_include_directories(asset_extract SYSTEM PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/extern
-    )
-    wowee_link_stormlib(asset_extract)
+    target_link_libraries(asset_extract PRIVATE wowee_asset_build)
+    target_include_directories(asset_extract SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/extern)
     if(WIN32)
         # ShellExecuteW, for handing a double-click over to the asset manager
         # window instead of printing a usage message at a console that closes.
@@ -2413,19 +2710,9 @@ endif()
 #
 # SDL's own renderer rather than Vulkan or GL: this draws a form and a log, and
 # the backend that needs no API choice is the one that builds everywhere.
-if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR AND SDL3_FOUND AND EXISTS ${IMGUI_DIR}/imgui.cpp)
-    add_library(imgui_sdlrenderer STATIC
-        ${IMGUI_DIR}/imgui.cpp
-        ${IMGUI_DIR}/imgui_draw.cpp
-        ${IMGUI_DIR}/imgui_tables.cpp
-        ${IMGUI_DIR}/imgui_widgets.cpp
-        ${IMGUI_DIR}/backends/imgui_impl_sdl3.cpp
-        ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer3.cpp
-    )
-    target_include_directories(imgui_sdlrenderer SYSTEM PUBLIC
-        ${IMGUI_DIR} ${IMGUI_DIR}/backends
-    )
-    target_link_libraries(imgui_sdlrenderer PUBLIC SDL3::SDL3)
+if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR AND SDL3_FOUND)
+    add_library(imgui_sdlrenderer STATIC ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer3.cpp)
+    target_link_libraries(imgui_sdlrenderer PUBLIC imgui_core)
 
     # WIN32: a windowed program rather than a console one, so double-clicking
     # it in Explorer opens the window and nothing else. Without it Windows
@@ -2438,62 +2725,18 @@ if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR AND SDL3_FOUND AND EXISTS ${IMGUI_D
         # on the Start menu entry the installer makes for it. Empty off Windows.
         ${WOWEE_PLATFORM_SOURCES}
         tools/asset_manager/main.cpp
-        tools/asset_manager/panel.cpp
-        tools/asset_manager/profiles.cpp
-        tools/asset_manager/install_scan.cpp
-        tools/asset_manager/install_probe.cpp
-        tools/asset_manager/job.cpp
-        tools/asset_manager/casc.cpp
-        tools/asset_manager/texture_ops.cpp
-        tools/asset_manager/upscale.cpp
-        tools/asset_manager/pack.cpp
-        tools/asset_manager/model_import.cpp
-        tools/asset_manager/model_source.cpp
-        tools/asset_manager/folder_picker.cpp
-        src/rendering/m2_model_classifier.cpp
-        tools/asset_extract/extractor.cpp
-        tools/asset_extract/path_mapper.cpp
-        tools/asset_extract/manifest_writer.cpp
-        tools/asset_extract/open_format_emitter.cpp
     )
-    target_link_libraries(wowee_assets PRIVATE wowee_pipeline)
-    # The folder chooser is the operating system's own where there is one. On
-    # Linux and the BSDs there is no such call - the usual answer is to run
-    # zenity or kdialog, which is a program that may not be installed and a
-    # button that silently does nothing when it is not - so those get the
-    # browser drawn in the window instead.
-    if(APPLE)
-        target_sources(wowee_assets PRIVATE tools/asset_manager/folder_picker_mac.mm)
-        set_source_files_properties(tools/asset_manager/folder_picker_mac.mm
-            PROPERTIES COMPILE_FLAGS "-fobjc-arc")
-        target_link_libraries(wowee_assets PRIVATE
-            "-framework AppKit" "-framework UniformTypeIdentifiers")
-    elseif(WIN32)
-        target_sources(wowee_assets PRIVATE tools/asset_manager/folder_picker_win.cpp)
-        target_link_libraries(wowee_assets PRIVATE ole32 shell32)
-        # No SDL main library to link: SDL3's WinMain shim is header-only, in
-        # SDL_main.h, where SDL2 kept it in SDL2main.
-    else()
-        target_sources(wowee_assets PRIVATE tools/asset_manager/folder_picker_none.cpp)
-    endif()
-
-    target_include_directories(wowee_assets PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/tools/asset_extract
-        ${STORMLIB_INCLUDE_DIR}
-    )
-    target_include_directories(wowee_assets SYSTEM PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/extern
-    )
-    target_link_libraries(wowee_assets PRIVATE imgui_sdlrenderer Threads::Threads ZLIB::ZLIB)
-    wowee_link_stormlib(wowee_assets)
+    # No SDL main library to link on Windows: SDL3's WinMain shim is
+    # header-only, in SDL_main.h, where SDL2 kept it in SDL2main.
+    target_link_libraries(wowee_assets PRIVATE wowee_asset_panel imgui_sdlrenderer Threads::Threads)
+    target_include_directories(wowee_assets SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/extern)
     set_target_properties(wowee_assets PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     )
     install(TARGETS wowee_assets RUNTIME DESTINATION bin)
     message(STATUS "  wowee_assets window: ENABLED")
 else()
-    message(STATUS "  wowee_assets window: DISABLED (needs StormLib, SDL3 and extern/imgui)")
+    message(STATUS "  wowee_assets window: DISABLED (needs StormLib and SDL3)")
 endif()
 
 # ---- The same panel, inside the client ----
@@ -2508,55 +2751,15 @@ endif()
 # Gated on what the window is gated on. Without StormLib there is nothing to
 # extract with, and a client built without it should still be a client - the
 # screen is compiled out and the old behaviour stands.
-if(TARGET wowee_client_objects AND STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR AND EXISTS ${IMGUI_DIR}/imgui.cpp)
-    target_sources(wowee_client_objects PRIVATE
-        tools/asset_manager/panel.cpp
-        tools/asset_manager/profiles.cpp
-        tools/asset_manager/install_scan.cpp
-        tools/asset_manager/install_probe.cpp
-        tools/asset_manager/job.cpp
-        tools/asset_manager/casc.cpp
-        tools/asset_manager/texture_ops.cpp
-        tools/asset_manager/upscale.cpp
-        tools/asset_manager/pack.cpp
-        tools/asset_manager/model_import.cpp
-        tools/asset_manager/model_source.cpp
-        tools/asset_manager/folder_picker.cpp
-        tools/asset_extract/extractor.cpp
-        tools/asset_extract/path_mapper.cpp
-        tools/asset_extract/manifest_writer.cpp
-        tools/asset_extract/open_format_emitter.cpp
-    )
-    # The same per-platform choice the window makes, for the same reasons.
-    if(APPLE)
-        target_sources(wowee_client_objects PRIVATE tools/asset_manager/folder_picker_mac.mm)
-        # SKIP_PRECOMPILE_HEADERS: the client's objcxx PCH is built without
-        # ARC and this file needs it on, which the compiler refuses to mix.
-        set_source_files_properties(tools/asset_manager/folder_picker_mac.mm
-            PROPERTIES COMPILE_FLAGS "-fobjc-arc" SKIP_PRECOMPILE_HEADERS ON)
-        target_link_libraries(wowee_client_objects PRIVATE
-            "-framework AppKit" "-framework UniformTypeIdentifiers")
-    elseif(WIN32)
-        target_sources(wowee_client_objects PRIVATE tools/asset_manager/folder_picker_win.cpp)
-        target_link_libraries(wowee_client_objects PRIVATE ole32 shell32)
-    else()
-        target_sources(wowee_client_objects PRIVATE tools/asset_manager/folder_picker_none.cpp)
-    endif()
-    target_include_directories(wowee_client_objects PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/tools/asset_manager
-        ${CMAKE_CURRENT_SOURCE_DIR}/tools/asset_extract
-        ${STORMLIB_INCLUDE_DIR}
-    )
+if(TARGET wowee_client_objects AND TARGET wowee_asset_panel)
+    target_link_libraries(wowee_client_objects PRIVATE wowee_asset_panel)
     # Public, because ui_manager.hpp has a member only when it is set: whatever
     # includes the client's headers has to agree with the objects.
     target_compile_definitions(wowee_client_objects PUBLIC WOWEE_HAVE_ASSET_PANEL)
-    # renderer.cpp already compiles stb_image_write for its screenshots, and
-    # open_format_emitter.cpp compiles it for every other binary it is in.
-    target_compile_definitions(wowee_client_objects PRIVATE WOWEE_STB_IMAGE_WRITE_PROVIDED)
     wowee_link_stormlib(wowee_client_objects)
     message(STATUS "  asset panel in the client: ENABLED")
 else()
-    message(STATUS "  asset panel in the client: DISABLED (needs StormLib and extern/imgui)")
+    message(STATUS "  asset panel in the client: DISABLED (needs StormLib)")
 endif()
 
 # ---- Realm patch archives, read in place ----
@@ -2613,10 +2816,8 @@ add_executable(auth_probe
     tools/auth_probe/main.cpp
     src/auth/auth_packets.cpp
     src/auth/auth_opcodes.cpp
-    src/network/socket.cpp
-    src/network/tcp_socket.cpp
 )
-target_link_libraries(auth_probe PRIVATE wowee_protocol wowee_base)
+target_link_libraries(auth_probe PRIVATE wowee_net wowee_protocol wowee_base)
 target_include_directories(auth_probe PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
@@ -2635,10 +2836,8 @@ add_executable(auth_login_probe
     src/auth/integrity.cpp
     src/auth/big_num.cpp
     src/auth/srp.cpp
-    src/network/socket.cpp
-    src/network/tcp_socket.cpp
 )
-target_link_libraries(auth_login_probe PRIVATE wowee_protocol wowee_base)
+target_link_libraries(auth_login_probe PRIVATE wowee_net wowee_protocol wowee_base)
 target_include_directories(auth_login_probe PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
@@ -2931,54 +3130,12 @@ add_executable(wowee_editor
     # Pipeline (asset loading)
     src/ui/settings_schema.cpp
 
-    # Rendering core
-    src/rendering/vk_context.cpp
-    src/rendering/pipeline_cache_file.cpp
-    src/rendering/gpu_memory.cpp
-    src/rendering/gpu_allocations.cpp
-    src/rendering/uniform_slot_pool.cpp
-    src/rendering/uniform_slot_pool_device.cpp
-    src/rendering/frame_targets.cpp
-    src/rendering/texture_cache.cpp
-    src/rendering/texture_upload.cpp
-    src/rendering/normal_map_builder.cpp
-    src/rendering/normal_map_encoding.cpp
-    src/rendering/vk_utils.cpp
-    src/rendering/polygon_triangulate.cpp
-    src/rendering/vk_shader.cpp
-    src/rendering/sky_background.cpp
-    src/rendering/vk_texture.cpp
-    src/rendering/vk_buffer.cpp
-    src/rendering/vk_pipeline.cpp
-    src/rendering/camera.cpp
-    src/rendering/terrain_renderer.cpp
-    src/rendering/terrain_bake.cpp
-    src/rendering/range_allocator.cpp
-    src/rendering/shadow_params.cpp
-    src/rendering/m2_renderer.cpp
-    src/rendering/m2_renderer_instance.cpp
-    src/rendering/m2_renderer_posed_emitters.cpp
-    src/rendering/m2_renderer_particles.cpp
-    src/rendering/m2_renderer_render.cpp
-    src/rendering/m2_model_classifier.cpp
-    src/rendering/wmo_renderer.cpp
-    src/rendering/wmo_model_prep.cpp
-    src/rendering/imgui_texture.cpp
-    src/rendering/interface_frame.cpp
-    src/rendering/bone_slots.cpp
-    src/rendering/normal_map.cpp
-    src/rendering/frustum.cpp
-    src/rendering/rt_bvh.cpp
-    src/rendering/rt_scene.cpp
-    src/rendering/rt_lighting.cpp
-    src/rendering/volumetric_fog.cpp
-
     # Core
     src/core/window.cpp
 
     ${WOWEE_MACOS_SOURCES}
 )
-target_link_libraries(wowee_editor PRIVATE wowee_pipeline)
+target_link_libraries(wowee_editor PRIVATE wowee_render wowee_pipeline)
 target_include_directories(wowee_editor PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src

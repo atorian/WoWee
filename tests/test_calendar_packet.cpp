@@ -13,6 +13,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "game/calendar_data.hpp"
+#include "calendar/domain/records.hpp"
 #include "network/packet.hpp"
 
 #include <ctime>
@@ -20,6 +21,7 @@
 
 
 using namespace wowee::game;
+using namespace wowee::calendar;
 using wowee::network::Packet;
 
 namespace {
@@ -34,13 +36,16 @@ void writeHoliday(Packet& p, uint32_t id, const std::string& texture,
     p.writeUInt32(1);    // looping
     p.writeUInt32(7);    // priority
     p.writeUInt32(3);    // calendarFilterType
-    for (int i = 0; i < CalendarHoliday::kNumDates; ++i) {
+    // The server's MAX_HOLIDAY_DATES, MAX_HOLIDAY_DURATIONS and
+    // MAX_HOLIDAY_FLAGS, written as numbers: taken from the reader they would
+    // agree with it whatever it got wrong.
+    for (int i = 0; i < 26; ++i) {
         p.writeUInt32(i == 0 ? firstDate : 0);
     }
-    for (int i = 0; i < CalendarHoliday::kNumDurations; ++i) {
+    for (int i = 0; i < 10; ++i) {
         p.writeUInt32(i == 0 ? 24u : 0u);
     }
-    for (int i = 0; i < CalendarHoliday::kNumFlags; ++i) {
+    for (int i = 0; i < 10; ++i) {
         p.writeUInt32(i == 0 ? 0x10u : 0u);
     }
     p.writeString(texture);
@@ -166,7 +171,7 @@ TEST_CASE("The event time unpacks as a date", "[calendar]") {
 
     // Same helper the achievement and guild parsers use, so the calendar
     // cannot drift into a fifth reading of the same field.
-    const WowDate expected = unpackWowPackedTime(0x09E1C000u);
+    const wowee::core::WowDate expected = wowee::core::unpackWowPackedTime(0x09E1C000u);
     CHECK(cal.events[0].eventTime.fullYear() == expected.fullYear());
     CHECK(cal.events[0].eventTime.month == expected.month);
     CHECK(cal.events[0].eventTime.day == expected.day);

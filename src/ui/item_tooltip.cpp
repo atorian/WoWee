@@ -13,8 +13,8 @@
 #include "game/reputation_standing.hpp"
 #include "core/application.hpp"
 #include "pipeline/asset_manager.hpp"
-#include "pipeline/dbc_loader.hpp"
-#include "pipeline/dbc_layout.hpp"
+#include "game/game_data.hpp"
+#include "ui/item_tables.hpp"
 #include "core/logger.hpp"
 #include <imgui.h>
 #include <algorithm>
@@ -52,8 +52,10 @@ bool canUseItemType(const game::GameHandler& gameHandler,
 }
 
 /// The item's icon, through the shared cache.
-VkDescriptorSet itemIcon(uint32_t displayInfoId, pipeline::AssetManager* assetManager) {
+VkDescriptorSet itemIcon(uint32_t displayInfoId, pipeline::AssetManager* assetManager,
+                         game::GameHandler* gameHandler) {
     return itemIconTexture(displayInfoId, assetManager,
+                           gameHandler ? gameHandler->services().gameData : nullptr,
                            core::Application::getInstance().getWindow());
 }
 
@@ -128,7 +130,7 @@ void renderEquippedEnhancements(
         const std::unordered_map<uint32_t, std::string>& enchantNames) {
     if (!gameHandler || !equipped) return;
 
-    const uint64_t guid = gameHandler->getEquipSlotGuid(
+    const uint64_t guid = gameHandler->inventory().getEquipSlotGuid(
         static_cast<int>(equipped.equipSlot));
     if (guid == 0) return;
 
@@ -141,11 +143,11 @@ void renderEquippedEnhancements(
             ImGui::TextColored(color, "%s: Enchantment %u", label, enchantId);
     };
 
-    const auto [permanent, temporary] = gameHandler->getItemEnchantIds(guid);
+    const auto [permanent, temporary] = gameHandler->inventory().getItemEnchantIds(guid);
     renderEnchant("Enchanted", permanent, ui::colors::kCyan);
     renderEnchant("Temporary", temporary, ImVec4(0.8f, 1.0f, 0.4f, 1.0f));
 
-    const auto sockets = gameHandler->getItemSocketEnchantIds(guid);
+    const auto sockets = gameHandler->inventory().getItemSocketEnchantIds(guid);
     for (uint32_t socketEnchant : sockets)
         renderEnchant("Gem", socketEnchant, ui::colors::kSocketGreen);
 }
@@ -183,34 +185,29 @@ const char* comparisonStatLabel(uint32_t statType) {
     }
 }
 
-}  // namespace
-
-const std::unordered_map<uint32_t, std::string>& enchantmentNames(pipeline::AssetManager* assetManager) {
-    static std::unordered_map<uint32_t, std::string> s_cache;
-    static bool s_loaded = false;
-    if (!s_loaded && assetManager && assetManager->isInitialized()) {
-        s_loaded = true;
-        auto dbc = assetManager->loadDBC("SpellItemEnchantment.dbc");
-        if (dbc && dbc->isLoaded()) {
-            const auto* lay = pipeline::getActiveDBCLayout()
-                ? pipeline::getActiveDBCLayout()->getLayout("SpellItemEnchantment") : nullptr;
-            uint32_t nf = pipeline::detectEnchantmentNameField(dbc.get(), lay);
-            uint32_t fc = dbc->getFieldCount();
-            for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
-                uint32_t eid = dbc->getUInt32(r, 0);
-                if (eid == 0 || nf >= fc) continue;
-                std::string en = dbc->getString(r, nf);
-                if (!en.empty()) s_cache[eid] = std::move(en);
-            }
-        }
-    }
-    return s_cache;
+/// The tables the tooltip reads, which come with the game; none without one.
+const pipeline::GameTables* gameTablesOf(game::GameHandler* gameHandler) {
+    return gameHandler ? gameHandler->services().gameData : nullptr;
 }
+
+using Names = std::unordered_map<uint32_t, std::string>;
+const Names& namesOrNone(const pipeline::GameTables* tables, const Names& (*read)(const pipeline::GameTables&)) {
+    static const Names kNone;
+    return tables ? read(*tables) : kNone;
+}
+
+const std::unordered_map<uint32_t, ItemSetData>& setsOrNone(const pipeline::GameTables* tables) {
+    static const std::unordered_map<uint32_t, ItemSetData> kNone;
+    return tables ? setsOrNone(tables) : kNone;
+}
+
+}  // namespace
 
 void renderItemTooltip(const game::ItemDef& item, const game::Inventory* inventory,
                        uint64_t itemGuid, game::GameHandler* gameHandler,
                        pipeline::AssetManager* assetManager) {
-    const auto& s_enchLookupB = enchantmentNames(assetManager);
+    const pipeline::GameTables* tables = gameTablesOf(gameHandler);
+    const auto& s_enchLookupB = namesOrNone(tables, enchantmentNames);
 
     ImGui::BeginTooltip();
 
@@ -229,7 +226,7 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
 
     // Heroic / Unique / Unique-Equipped indicators
     if (gameHandler) {
-        const auto* qi = gameHandler->getItemInfo(item.itemId);
+        const auto* qi = gameHandler->inventory().getItemInfo(item.itemId);
         if (qi && qi->valid) {
             constexpr uint32_t kFlagHeroic         = 0x8;
             constexpr uint32_t kFlagUniqueEquipped = 0x1000000;
@@ -271,7 +268,7 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
     // Slot type
     if (item.inventoryType > 0) {
         const char* slotName = ui::getInventorySlotName(item.inventoryType);
-        const auto* qi = gameHandler ? gameHandler->getItemInfo(item.itemId) : nullptr;
+        const auto* qi = gameHandler ? gameHandler->inventory().getItemInfo(item.itemId) : nullptr;
         // Containers (bags, quivers, ammo pouches, specialty bags) show their capacity as
         // "N Slot Bag", matching the WoW bag tooltip. containerSlots comes from the item
         // template query; itemClass 1 = Container, 11 = Quiver/ammo.
@@ -314,7 +311,7 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
 
     // Elemental resistances from item query cache (fire resist gear, nature resist gear, etc.)
     if (gameHandler) {
-        const auto* qi = gameHandler->getItemInfo(item.itemId);
+        const auto* qi = gameHandler->inventory().getItemInfo(item.itemId);
         if (qi && qi->valid) {
             const int32_t resValsI[6] = { qi->holyRes, qi->fireRes, qi->natureRes,
                                           qi->frostRes, qi->shadowRes, qi->arcaneRes };
@@ -352,7 +349,7 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
     }
 
     if (item.requiredLevel > 1) {
-        uint32_t playerLvl = gameHandler ? gameHandler->getPlayerLevel() : 0;
+        uint32_t playerLvl = gameHandler ? gameHandler->player().level() : 0;
         bool meetsReq = (playerLvl >= item.requiredLevel);
         ImVec4 reqColor = meetsReq ? ImVec4(1.0f, 1.0f, 1.0f, 0.75f) : ui::colors::kPaleRed;
         ImGui::TextColored(reqColor, "Requires Level %u", item.requiredLevel);
@@ -365,15 +362,15 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
     }
     // Item spell effects (Use/Equip/Chance on Hit)
     if (gameHandler) {
-        auto* info = gameHandler->getItemInfo(item.itemId);
+        auto* info = gameHandler->inventory().getItemInfo(item.itemId);
         if (info) {
             for (const auto& sp : info->spells) {
                 if (sp.spellId == 0) continue;
                 const char* trigger = game::itemSpellTriggerText(sp.spellTrigger);
                 if (!trigger) continue;
-                const std::string& spDesc = gameHandler->getSpellDescription(sp.spellId);
+                const std::string& spDesc = gameHandler->spells().getSpellDescription(sp.spellId);
                 std::string spText = spDesc.empty()
-                    ? gameHandler->getSpellName(sp.spellId)
+                    ? gameHandler->spells().getSpellName(sp.spellId)
                     : gameHandler->formatSpellDescription(sp.spellId, spDesc);
                 if (!spText.empty()) {
                     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 320.0f);
@@ -390,29 +387,12 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
 
     // Skill / reputation requirements from item query cache
     if (gameHandler) {
-        const auto* qInfo = gameHandler->getItemInfo(item.itemId);
+        const auto* qInfo = gameHandler->inventory().getItemInfo(item.itemId);
         if (qInfo && qInfo->valid) {
             if (qInfo->requiredSkill != 0 && qInfo->requiredSkillRank > 0) {
-                static std::unordered_map<uint32_t, std::string> s_skillNamesB;
-                static bool s_skillNamesLoadedB = false;
-                if (!s_skillNamesLoadedB && assetManager && assetManager->isInitialized()) {
-                    s_skillNamesLoadedB = true;
-                    auto dbc = assetManager->loadDBC("SkillLine.dbc");
-                    if (dbc && dbc->isLoaded()) {
-                        const auto* layout = pipeline::getActiveDBCLayout()
-                            ? pipeline::getActiveDBCLayout()->getLayout("SkillLine") : nullptr;
-                        uint32_t idF   = layout ? (*layout)["ID"]   : 0;
-                        uint32_t nameF = layout ? (*layout)["Name"] : 2;
-                        for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
-                            uint32_t sid = dbc->getUInt32(r, idF);
-                            if (!sid) continue;
-                            std::string sname = dbc->getString(r, nameF);
-                            if (!sname.empty()) s_skillNamesB[sid] = std::move(sname);
-                        }
-                    }
-                }
+                const auto& s_skillNamesB = namesOrNone(tables, skillLineNames);
                 uint32_t playerSkillVal = 0;
-                const auto& skills = gameHandler->getPlayerSkills();
+                const auto& skills = gameHandler->spells().playerSkills();
                 auto skPit = skills.find(qInfo->requiredSkill);
                 if (skPit != skills.end()) playerSkillVal = skPit->second.effectiveValue();
                 bool meetsSkill = (playerSkillVal == 0 || playerSkillVal >= qInfo->requiredSkillRank);
@@ -424,24 +404,7 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
                     ImGui::TextColored(skColor, "Requires Skill %u (%u)", qInfo->requiredSkill, qInfo->requiredSkillRank);
             }
             if (qInfo->requiredReputationFaction != 0 && qInfo->requiredReputationRank > 0) {
-                static std::unordered_map<uint32_t, std::string> s_factionNamesB;
-                static bool s_factionNamesLoadedB = false;
-                if (!s_factionNamesLoadedB && assetManager && assetManager->isInitialized()) {
-                    s_factionNamesLoadedB = true;
-                    auto dbc = assetManager->loadDBC("Faction.dbc");
-                    if (dbc && dbc->isLoaded()) {
-                        const auto* layout = pipeline::getActiveDBCLayout()
-                            ? pipeline::getActiveDBCLayout()->getLayout("Faction") : nullptr;
-                        uint32_t idF   = layout ? (*layout)["ID"]   : 0;
-                        uint32_t nameF = layout ? (*layout)["Name"] : 20;
-                        for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
-                            uint32_t fid = dbc->getUInt32(r, idF);
-                            if (!fid) continue;
-                            std::string fname = dbc->getString(r, nameF);
-                            if (!fname.empty()) s_factionNamesB[fid] = std::move(fname);
-                        }
-                    }
-                }
+                const auto& s_factionNamesB = namesOrNone(tables, factionNames);
                 const char* rankName = game::reputationRankName(qInfo->requiredReputationRank);
                 auto fIt = s_factionNamesB.find(qInfo->requiredReputationFaction);
                 ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 0.75f), "Requires %s with %s",
@@ -457,14 +420,14 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
 
     // Gem socket slots and item set - look up from query cache
     if (gameHandler) {
-        const auto* qi2 = gameHandler->getItemInfo(item.itemId);
+        const auto* qi2 = gameHandler->inventory().getItemInfo(item.itemId);
         if (qi2 && qi2->valid) {
             // Gem sockets
             {
                 // Get socket gem enchant IDs for this item (filled from item update fields)
                 std::array<uint32_t, 3> sockGems{};
                 if (itemGuid != 0 && gameHandler)
-                    sockGems = gameHandler->getItemSocketEnchantIds(itemGuid);
+                    sockGems = gameHandler->inventory().getItemSocketEnchantIds(itemGuid);
 
                 bool hasSocket = false;
                 for (int i = 0; i < 3; ++i) {
@@ -495,49 +458,11 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
             }
             // Item set membership
             if (qi2->itemSetId != 0) {
-                struct SetEntryD {
-                    std::string name;
-                    std::array<uint32_t, 10> itemIds{};
-                    std::array<uint32_t, 10> spellIds{};
-                    std::array<uint32_t, 10> thresholds{};
-                };
-                static std::unordered_map<uint32_t, SetEntryD> s_setDataD;
-                static bool s_setDataLoadedD = false;
-                if (!s_setDataLoadedD && assetManager && assetManager->isInitialized()) {
-                    s_setDataLoadedD = true;
-                    auto dbc = assetManager->loadDBC("ItemSet.dbc");
-                    if (dbc && dbc->isLoaded()) {
-                        const auto* layout = pipeline::getActiveDBCLayout()
-                            ? pipeline::getActiveDBCLayout()->getLayout("ItemSet") : nullptr;
-                        auto lf = [&](const char* k, uint32_t def) -> uint32_t {
-                            return layout ? (*layout)[k] : def;
-                        };
-                        uint32_t idF = lf("ID", 0), nameF = lf("Name", 1);
-                        const auto& itemKeys = ui::kItemSetItemKeys;
-                        const auto& spellKeys = ui::kItemSetSpellKeys;
-                        const auto& thrKeys = ui::kItemSetThresholdKeys;
-                        uint32_t itemFB[10], spellFB[10], thrFB[10];
-                        for (int i = 0; i < 10; ++i) {
-                            itemFB[i] = 18+i; spellFB[i] = 28+i; thrFB[i] = 38+i;
-                        }
-                        for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
-                            uint32_t id = dbc->getUInt32(r, idF);
-                            if (!id) continue;
-                            SetEntryD e;
-                            e.name = dbc->getString(r, nameF);
-                            for (int i = 0; i < 10; ++i) {
-                                e.itemIds[i]    = dbc->getUInt32(r, layout ? (*layout)[itemKeys[i]]  : itemFB[i]);
-                                e.spellIds[i]   = dbc->getUInt32(r, layout ? (*layout)[spellKeys[i]] : spellFB[i]);
-                                e.thresholds[i] = dbc->getUInt32(r, layout ? (*layout)[thrKeys[i]]   : thrFB[i]);
-                            }
-                            s_setDataD[id] = std::move(e);
-                        }
-                    }
-                }
+                const auto& s_setDataD = setsOrNone(tables);
                 auto setIt = s_setDataD.find(qi2->itemSetId);
                 ImGui::Spacing();
                 if (setIt != s_setDataD.end()) {
-                    const SetEntryD& se = setIt->second;
+                    const ItemSetData& se = setIt->second;
                     int equipped = 0, total = 0;
                     for (int i = 0; i < 10; ++i) {
                         if (se.itemIds[i] == 0) continue;
@@ -557,7 +482,7 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
                     }
                     for (int i = 0; i < 10; ++i) {
                         if (se.spellIds[i] == 0 || se.thresholds[i] == 0) continue;
-                        const std::string& bname = gameHandler->getSpellName(se.spellIds[i]);
+                        const std::string& bname = gameHandler->spells().getSpellName(se.spellIds[i]);
                         bool active = (equipped >= static_cast<int>(se.thresholds[i]));
                         ImVec4 col = active ? ui::colors::kActiveGreen
                                            : ui::colors::kInactiveGray;
@@ -575,7 +500,7 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
 
     // Weapon/armor enchant display for equipped items (reads from item update fields)
     if (itemGuid != 0 && gameHandler) {
-        auto [permId, tempId] = gameHandler->getItemEnchantIds(itemGuid);
+        auto [permId, tempId] = gameHandler->inventory().getItemEnchantIds(itemGuid);
         if (permId != 0) {
             auto it2 = s_enchLookupB.find(permId);
             const char* ename = (it2 != s_enchLookupB.end()) ? it2->second.c_str() : nullptr;
@@ -609,7 +534,7 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
             const game::ItemSlot* eq = equipped.slot;
             ImGui::Separator();
             ImGui::TextDisabled("Equipped:");
-            VkDescriptorSet eqIcon = itemIcon(eq->item.displayInfoId, assetManager);
+            VkDescriptorSet eqIcon = itemIcon(eq->item.displayInfoId, assetManager, gameHandler);
             if (eqIcon) {
                 ImGui::Image((ImTextureID)(uintptr_t)eqIcon, ImVec2(18.0f, 18.0f));
                 ImGui::SameLine();
@@ -719,7 +644,8 @@ void renderItemTooltip(const game::ItemDef& item, const game::Inventory* invento
 void renderItemTooltip(const game::ItemQueryResponseData& info, const game::Inventory* inventory,
                        uint64_t itemGuid, game::GameHandler* gameHandler,
                        pipeline::AssetManager* assetManager) {
-    const auto& s_enchLookup = enchantmentNames(assetManager);
+    const pipeline::GameTables* tables = gameTablesOf(gameHandler);
+    const auto& s_enchLookup = namesOrNone(tables, enchantmentNames);
 
     ImGui::BeginTooltip();
 
@@ -814,7 +740,7 @@ void renderItemTooltip(const game::ItemQueryResponseData& info, const game::Inve
     }
 
     if (info.requiredLevel > 1) {
-        uint32_t playerLvl = gameHandler ? gameHandler->getPlayerLevel() : 0;
+        uint32_t playerLvl = gameHandler ? gameHandler->player().level() : 0;
         bool meetsReq = (playerLvl >= info.requiredLevel);
         ImVec4 reqColor = meetsReq ? ImVec4(1.0f, 1.0f, 1.0f, 0.75f) : ui::colors::kPaleRed;
         ImGui::TextColored(reqColor, "Requires Level %u", info.requiredLevel);
@@ -823,27 +749,10 @@ void renderItemTooltip(const game::ItemQueryResponseData& info, const game::Inve
     // Required skill (e.g. "Requires Engineering (300)")
     if (info.requiredSkill != 0 && info.requiredSkillRank > 0) {
         // Lazy-load SkillLine.dbc names
-        static std::unordered_map<uint32_t, std::string> s_skillNames;
-        static bool s_skillNamesLoaded = false;
-        if (!s_skillNamesLoaded && assetManager && assetManager->isInitialized()) {
-            s_skillNamesLoaded = true;
-            auto dbc = assetManager->loadDBC("SkillLine.dbc");
-            if (dbc && dbc->isLoaded()) {
-                const auto* layout = pipeline::getActiveDBCLayout()
-                    ? pipeline::getActiveDBCLayout()->getLayout("SkillLine") : nullptr;
-                uint32_t idF   = layout ? (*layout)["ID"]   : 0;
-                uint32_t nameF = layout ? (*layout)["Name"] : 2;
-                for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
-                    uint32_t sid = dbc->getUInt32(r, idF);
-                    if (!sid) continue;
-                    std::string sname = dbc->getString(r, nameF);
-                    if (!sname.empty()) s_skillNames[sid] = std::move(sname);
-                }
-            }
-        }
+        const auto& s_skillNames = namesOrNone(tables, skillLineNames);
         uint32_t playerSkillVal = 0;
         if (gameHandler) {
-            const auto& skills = gameHandler->getPlayerSkills();
+            const auto& skills = gameHandler->spells().playerSkills();
             auto skPit = skills.find(info.requiredSkill);
             if (skPit != skills.end()) playerSkillVal = skPit->second.effectiveValue();
         }
@@ -858,24 +767,7 @@ void renderItemTooltip(const game::ItemQueryResponseData& info, const game::Inve
 
     // Required reputation (e.g. "Requires Exalted with Argent Dawn")
     if (info.requiredReputationFaction != 0 && info.requiredReputationRank > 0) {
-        static std::unordered_map<uint32_t, std::string> s_factionNames;
-        static bool s_factionNamesLoaded = false;
-        if (!s_factionNamesLoaded && assetManager && assetManager->isInitialized()) {
-            s_factionNamesLoaded = true;
-            auto dbc = assetManager->loadDBC("Faction.dbc");
-            if (dbc && dbc->isLoaded()) {
-                const auto* layout = pipeline::getActiveDBCLayout()
-                    ? pipeline::getActiveDBCLayout()->getLayout("Faction") : nullptr;
-                uint32_t idF   = layout ? (*layout)["ID"]   : 0;
-                uint32_t nameF = layout ? (*layout)["Name"] : 20;
-                for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
-                    uint32_t fid = dbc->getUInt32(r, idF);
-                    if (!fid) continue;
-                    std::string fname = dbc->getString(r, nameF);
-                    if (!fname.empty()) s_factionNames[fid] = std::move(fname);
-                }
-            }
-        }
+        const auto& s_factionNames = namesOrNone(tables, factionNames);
         const char* rankName = game::reputationRankName(info.requiredReputationRank);
         auto fIt = s_factionNames.find(info.requiredReputationFaction);
         ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 0.75f), "Requires %s with %s",
@@ -896,9 +788,9 @@ void renderItemTooltip(const game::ItemQueryResponseData& info, const game::Inve
         if (gameHandler) {
             // Prefer the spell's tooltip text (the actual effect description).
             // Fall back to the spell name if the description is empty.
-            const std::string& spDesc = gameHandler->getSpellDescription(sp.spellId);
+            const std::string& spDesc = gameHandler->spells().getSpellDescription(sp.spellId);
             std::string spName = spDesc.empty()
-                ? gameHandler->getSpellName(sp.spellId)
+                ? gameHandler->spells().getSpellName(sp.spellId)
                 : gameHandler->formatSpellDescription(sp.spellId, spDesc);
             if (!spName.empty()) {
                 ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 320.0f);
@@ -915,7 +807,7 @@ void renderItemTooltip(const game::ItemQueryResponseData& info, const game::Inve
         // Get socket gem enchant IDs for this item (filled from item update fields)
         std::array<uint32_t, 3> sockGems{};
         if (itemGuid != 0 && gameHandler)
-            sockGems = gameHandler->getItemSocketEnchantIds(itemGuid);
+            sockGems = gameHandler->inventory().getItemSocketEnchantIds(itemGuid);
 
         bool hasSocket = false;
         for (int i = 0; i < 3; ++i) {
@@ -947,7 +839,7 @@ void renderItemTooltip(const game::ItemQueryResponseData& info, const game::Inve
 
     // Weapon/armor enchant display for equipped items
     if (itemGuid != 0 && gameHandler) {
-        auto [permId, tempId] = gameHandler->getItemEnchantIds(itemGuid);
+        auto [permId, tempId] = gameHandler->inventory().getItemEnchantIds(itemGuid);
         if (permId != 0) {
             auto it2 = s_enchLookup.find(permId);
             const char* ename = (it2 != s_enchLookup.end()) ? it2->second.c_str() : nullptr;
@@ -963,52 +855,12 @@ void renderItemTooltip(const game::ItemQueryResponseData& info, const game::Inve
     // Item set membership
     if (info.itemSetId != 0) {
         // Lazy-load full ItemSet.dbc data (name + item IDs + bonus spells/thresholds)
-        struct SetEntry {
-            std::string name;
-            std::array<uint32_t, 10> itemIds{};
-            std::array<uint32_t, 10> spellIds{};
-            std::array<uint32_t, 10> thresholds{};
-        };
-        static std::unordered_map<uint32_t, SetEntry> s_setData;
-        static bool s_setDataLoaded = false;
-        if (!s_setDataLoaded && assetManager && assetManager->isInitialized()) {
-            s_setDataLoaded = true;
-            auto dbc = assetManager->loadDBC("ItemSet.dbc");
-            if (dbc && dbc->isLoaded()) {
-                const auto* layout = pipeline::getActiveDBCLayout()
-                    ? pipeline::getActiveDBCLayout()->getLayout("ItemSet") : nullptr;
-                auto lf = [&](const char* k, uint32_t def) -> uint32_t {
-                    return layout ? (*layout)[k] : def;
-                };
-                uint32_t idF = lf("ID", 0), nameF = lf("Name", 1);
-                const auto& itemKeys = ui::kItemSetItemKeys;
-                const auto& spellKeys = ui::kItemSetSpellKeys;
-                const auto& thrKeys = ui::kItemSetThresholdKeys;
-                uint32_t itemFallback[10], spellFallback[10], thrFallback[10];
-                for (int i = 0; i < 10; ++i) {
-                    itemFallback[i]  = 18 + i;
-                    spellFallback[i] = 28 + i;
-                    thrFallback[i]   = 38 + i;
-                }
-                for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
-                    uint32_t id = dbc->getUInt32(r, idF);
-                    if (!id) continue;
-                    SetEntry e;
-                    e.name = dbc->getString(r, nameF);
-                    for (int i = 0; i < 10; ++i) {
-                        e.itemIds[i]    = dbc->getUInt32(r, layout ? (*layout)[itemKeys[i]]  : itemFallback[i]);
-                        e.spellIds[i]   = dbc->getUInt32(r, layout ? (*layout)[spellKeys[i]] : spellFallback[i]);
-                        e.thresholds[i] = dbc->getUInt32(r, layout ? (*layout)[thrKeys[i]]   : thrFallback[i]);
-                    }
-                    s_setData[id] = std::move(e);
-                }
-            }
-        }
+        const auto& s_setData = setsOrNone(tables);
 
         auto setIt = s_setData.find(info.itemSetId);
         ImGui::Spacing();
         if (setIt != s_setData.end()) {
-            const SetEntry& se = setIt->second;
+            const ItemSetData& se = setIt->second;
             // Count equipped pieces
             int equipped = 0, total = 0;
             for (int i = 0; i < 10; ++i) {
@@ -1032,7 +884,7 @@ void renderItemTooltip(const game::ItemQueryResponseData& info, const game::Inve
             if (gameHandler) {
                 for (int i = 0; i < 10; ++i) {
                     if (se.spellIds[i] == 0 || se.thresholds[i] == 0) continue;
-                    const std::string& bname = gameHandler->getSpellName(se.spellIds[i]);
+                    const std::string& bname = gameHandler->spells().getSpellName(se.spellIds[i]);
                     bool active = (equipped >= static_cast<int>(se.thresholds[i]));
                     ImVec4 col = active ? ui::colors::kActiveGreen
                                        : ui::colors::kInactiveGray;
@@ -1066,7 +918,7 @@ void renderItemTooltip(const game::ItemQueryResponseData& info, const game::Inve
             const game::ItemSlot* eq = equipped.slot;
             ImGui::Separator();
             ImGui::TextDisabled("Equipped:");
-            VkDescriptorSet eqIcon = itemIcon(eq->item.displayInfoId, assetManager);
+            VkDescriptorSet eqIcon = itemIcon(eq->item.displayInfoId, assetManager, gameHandler);
             if (eqIcon) { ImGui::Image((ImTextureID)(uintptr_t)eqIcon, ImVec2(18.0f, 18.0f)); ImGui::SameLine(); }
             ImGui::TextColored(ui::getQualityColor(eq->item.quality), "%s", eq->item.name.c_str());
             renderEquippedEnhancements(gameHandler, equipped, s_enchLookup);

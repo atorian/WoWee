@@ -421,7 +421,7 @@ void ClientLoop::beginCharacterSession() {
     // The name keys the per-character saved variables; see characterIdentityOf.
     session_ = std::make_unique<CharacterSession>(
         characterSessionServices(),
-        characterIdentityOf(guid, services_.game.getCharacters(), services_.game.lookupName(guid)),
+        characterIdentityOf(guid, services_.game.getCharacters(), services_.game.queryCache().lookupName(guid)),
         services_.sessionInterface);
 }
 
@@ -466,8 +466,8 @@ void ClientLoop::processWorldTransitions() {
             return;
         }
         if (std::holds_alternative<game::events::WorldTransferStarted>(*request)) {
-            if (services_.game.getMovementHandler()->hasPendingWorldTransfer())
-                services_.game.getMovementHandler()->applyPendingWorldTransfer();
+            if (services_.game.movement().hasPendingWorldTransfer())
+                services_.game.movement().applyPendingWorldTransfer();
         } else if (auto* entry = std::get_if<game::events::WorldEntered>(&*request)) {
             if (reconnect_) {
                 reenterWorld(*entry);
@@ -549,8 +549,8 @@ void ClientLoop::beginWorldLoading(WorldLoader::Entry entry) {
     session_->enterMap(mapScopeServices(), *services_.loader, entry);
 
     auto& game = services_.game;
-    game.cancelFollow();
-    game.getMovementHandler()->stopInputMovement();
+    game.movement().cancelFollow();
+    game.movement().stopInputMovement();
     if (auto* camera = services_.playerView.getCameraController()) {
         const auto spawn = coords::canonicalToRender(coords::serverToCanonical(glm::vec3(x, y, z)));
         const auto yaw = coords::canonicalToCharacterYawDeg(game.getMovementInfo().orientation);

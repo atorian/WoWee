@@ -273,13 +273,13 @@ int layoutColumn(const std::string& expansion, const std::string& field) {
 
 TEST_CASE("the spell effect columns are the best match across expansions",
           "[dbc-layout]") {
-    // WotLK's file is the shipped one; the other two ship as overlays. Classic
-    // has no Spell.dbc of its own here and its layout is Turtle's, which is
-    // checked - so a wrong column there shows up as this failing.
+    // WotLK's file is the shipped one; the others are each expansion's own
+    // extraction, read where one has been made - so a wrong column there
+    // shows up as this failing.
     const std::vector<std::pair<std::string, std::string>> files = {
-        {"wotlk",  "Data/db/spell.dbc"},
-        {"tbc",    "Data/expansions/tbc/overlay/db/Spell.dbc"},
-        {"turtle", "Data/expansions/turtle/overlay/db/Spell.dbc"},
+        {"wotlk",   "Data/db/spell.dbc"},
+        {"tbc",     "Data/expansions/tbc/overlay/db/Spell.dbc"},
+        {"classic", "Data/expansions/classic/db/Spell.dbc"},
     };
 
     std::vector<std::pair<std::string, Wdbc>> opened;
@@ -293,8 +293,8 @@ TEST_CASE("the spell effect columns are the best match across expansions",
     }
 
     // Not "how often do they agree" - a private server's Spell.dbc is edited,
-    // and Turtle's is edited enough that the right column agrees on four
-    // spells in five rather than on all of them. What separates right from
+    // enough that the right column can agree on four spells in five rather
+    // than on all of them. What separates right from
     // wrong is that the right column agrees far more than any other column
     // does: 77% against 11% for the one beside it. So the test is that the
     // declared column wins its neighbourhood, which needs no threshold tuned

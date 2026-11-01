@@ -79,17 +79,9 @@ AUR as `stormlib-git` if you need the asset tools.
 
 ### Clone Repository
 
-Always clone with submodules:
-
 ```bash
-git clone --recurse-submodules https://github.com/Kelsidavis/WoWee.git
+git clone https://github.com/Kelsidavis/WoWee.git
 cd WoWee
-```
-
-If you already cloned without submodules:
-
-```bash
-git submodule update --init --recursive
 ```
 
 ### Build
@@ -118,7 +110,7 @@ same extractor:
   ./extract_assets.sh /path/to/WoW/Data wotlk
   ```
 
-  Supports `classic`, `turtle`, `tbc`, `wotlk` targets (auto-detected if omitted).
+  Supports `classic`, `tbc`, `wotlk` targets (auto-detected if omitted).
 
 The builder and `wowee_assets` write to the per-user data directory by
 default, `$XDG_DATA_HOME/wowee/Data` (or `~/.local/share/wowee/Data`). The
@@ -149,7 +141,7 @@ brew install stormlib # asset tools (see Asset Extraction below)
 ### Clone & Build
 
 ```bash
-git clone --recurse-submodules https://github.com/Kelsidavis/WoWee.git
+git clone https://github.com/Kelsidavis/WoWee.git
 cd WoWee
 
 BREW=$(brew --prefix)
@@ -195,7 +187,7 @@ It automatically detects Homebrew and passes the correct paths to CMake.
 ./extract_assets.sh /path/to/WoW/Data wotlk
 ```
 
-Supports `classic`, `turtle`, `tbc`, `wotlk` targets (auto-detected if omitted).
+Supports `classic`, `tbc`, `wotlk` targets (auto-detected if omitted).
 
 The builder and `wowee_assets` write to
 `~/Library/Application Support/Wowee/Data` by default; the script writes to
@@ -268,7 +260,7 @@ cmake --install /tmp/StormLib/build
 ### Clone & Build
 
 ```bash
-git clone --recurse-submodules https://github.com/Kelsidavis/WoWee.git
+git clone https://github.com/Kelsidavis/WoWee.git
 cd WoWee
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel $(nproc)
@@ -295,7 +287,7 @@ vcpkg install "sdl3[vulkan]" glm openssl zlib ffmpeg stormlib --triplet x64-wind
 ### Clone
 
 ```powershell
-git clone --recurse-submodules https://github.com/Kelsidavis/WoWee.git
+git clone https://github.com/Kelsidavis/WoWee.git
 cd WoWee
 ```
 
@@ -352,11 +344,6 @@ Pass these to the configure step as `-D<option>=ON|OFF`.
 ## ⚠️ Notes
 
 - Case matters on Linux (`WoWee` not `wowee`).
-- Always use `--recurse-submodules` when cloning.
-- If you encounter missing headers for ImGui, run:
-  ```bash
-  git submodule update --init --recursive
-  ```
 - The client's own upscaling (FSR 1 and the FSR 3 temporal upscaler) is
   in-tree and needs no external SDK.
 - The AMD FidelityFX backends are off by default and are compiled only with

@@ -11,11 +11,11 @@
 //     (tm_year - 100) << 24 | tm_mon << 20 | (tm_mday - 1) << 14
 //                           | tm_wday << 11 | tm_hour << 6 | tm_min
 #include <catch_amalgamated.hpp>
-#include "game/packed_time.hpp"
+#include "core/packed_time.hpp"
 
-using wowee::game::unpackWowPackedTime;
-using wowee::game::packWowPackedTime;
-using wowee::game::WowDate;
+using wowee::core::unpackWowPackedTime;
+using wowee::core::packWowPackedTime;
+using wowee::core::WowDate;
 
 // Pack exactly as the server does, so a test failure means the reader is
 // wrong rather than that two hand-written constants disagree.

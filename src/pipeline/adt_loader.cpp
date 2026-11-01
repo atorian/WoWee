@@ -1,4 +1,6 @@
 #include "pipeline/adt_loader.hpp"
+
+#include <memory>
 #include "pipeline/liquid_types.hpp"
 #include "pipeline/heap_bytes.hpp"
 
@@ -32,9 +34,12 @@ float HeightMap::getHeight(int x, int y) const {
 }
 
 // ADTLoader implementation
-ADTTerrain ADTLoader::load(const std::vector<uint8_t>& adtData) {
+std::unique_ptr<ADTTerrain> ADTLoader::load(const std::vector<uint8_t>& adtData) {
     ZoneScopedN("ADTLoader::load");
-    ADTTerrain terrain;
+    // On the heap from the start: a tile is some 300 KB, and it is loaded on
+    // the terrain workers, whose stacks on macOS are 512 KB. Returned by
+    // value it sat on a worker's stack twice over and overflowed it.
+    auto terrain = std::make_unique<ADTTerrain>();
 
     if (adtData.empty()) {
         LOG_ERROR("Empty ADT data");
@@ -58,58 +63,58 @@ ADTTerrain ADTLoader::load(const std::vector<uint8_t>& adtData) {
 
         // Parse based on chunk type
         if (header.magic == MVER) {
-            parseMVER(chunkData, terrain);
+            parseMVER(chunkData, *terrain);
         }
         else if (header.magic == 0x4D484452) { // MHDR
             if (chunkData.size() < 64) {
                 LOG_ERROR("ADT MHDR truncated: collision metadata unavailable");
-                terrain.collisionDataValid = false;
-            } else terrain.headerFlags = readUInt32(chunkData, 0);
+                terrain->collisionDataValid = false;
+            } else terrain->headerFlags = readUInt32(chunkData, 0);
         }
         else if (header.magic == 0x4D46424F) { // MFBO
             if (chunkData.size() < 36) {
                 LOG_ERROR("ADT MFBO truncated: flight collision bounds unavailable");
-                terrain.collisionDataValid = false;
+                terrain->collisionDataValid = false;
             } else {
                 std::array<int16_t,18> bounds;
                 std::memcpy(bounds.data(), chunkData.data(), 36);
-                terrain.flightBounds = bounds;
+                terrain->flightBounds = bounds;
             }
         }
         else if (header.magic == MTEX) {
-            parseMTEX(chunkData, terrain);
+            parseMTEX(chunkData, *terrain);
         }
         else if (header.magic == MMDX) {
-            parseMMDX(chunkData, terrain);
+            parseMMDX(chunkData, *terrain);
         }
         else if (header.magic == MWMO) {
-            parseMWMO(chunkData, terrain);
+            parseMWMO(chunkData, *terrain);
         }
         else if (header.magic == MDDF) {
-            parseMDDF(chunkData, terrain);
+            parseMDDF(chunkData, *terrain);
         }
         else if (header.magic == MODF) {
-            parseMODF(chunkData, terrain);
+            parseMODF(chunkData, *terrain);
         }
         else if (header.magic == MH2O) {
             LOG_DEBUG("Found MH2O chunk (", chunkSize, " bytes)");
-            parseMH2O(chunkData, terrain);
+            parseMH2O(chunkData, *terrain);
         }
         else if (header.magic == MCNK) {
-            parseMCNK(chunkData, chunkIndex++, terrain);
+            parseMCNK(chunkData, chunkIndex++, *terrain);
         }
 
         // Move to next chunk
         offset += 8 + chunkSize;
     }
 
-    if (!(terrain.headerFlags & 1)) terrain.flightBounds.reset();
-    else if (!terrain.flightBounds) {
+    if (!(terrain->headerFlags & 1)) terrain->flightBounds.reset();
+    else if (!terrain->flightBounds) {
         LOG_ERROR("ADT MHDR requires missing MFBO: flight collision bounds unavailable");
-        terrain.collisionDataValid = false;
+        terrain->collisionDataValid = false;
     }
-    validateCollisionReferences(terrain);
-    terrain.loaded = true;
+    validateCollisionReferences(*terrain);
+    terrain->loaded = true;
 
     return terrain;
 }

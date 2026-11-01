@@ -27,8 +27,7 @@ namespace pipeline {
 //   WCHF.entry.raceId          → WCHC.race.raceId
 //   WCHF.entry.requiresExpansion bit positions match the
 //                                expansion enum used by WLFG
-//                                (Classic=0, TBC=1, WotLK=2,
-//                                Turtle=3).
+//                                (Classic=0, TBC=1, WotLK=2).
 //
 // Binary layout (little-endian):
 //   magic[4]            = "WCHF"
@@ -67,7 +66,6 @@ struct WoweeCharFeature {
         Classic   = 0,
         TBC       = 1,    // unlocks Blood Elf + Draenei options
         WotLK     = 2,    // unlocks Death Knight starting features
-        TurtleWoW = 3,    // custom-server additions
     };
 
     struct Entry {

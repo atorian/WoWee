@@ -103,6 +103,7 @@ static int findWorldViewContinentIdx(const std::vector<Zone>& zones,
 struct WorldMapFacade::Impl {
     VkContext* vkCtx = nullptr;
     pipeline::AssetManager* assetManager = nullptr;
+    const pipeline::GameTables* gameTables = nullptr;
     bool initialized = false;
     bool open = false;
     // Where the map image was drawn last frame, in the ImGui context's own
@@ -203,7 +204,7 @@ void WorldMapFacade::Impl::switchToMap(const std::string& newMapName) {
     compositor.invalidateComposite();
 
     mapName = newMapName;
-    data.loadZones(mapName, *assetManager);
+    data.loadZones(mapName, *assetManager, *gameTables);
     zoneMetadata.initialize();
     viewState.setCosmicEnabled(data.cosmicEnabled());
 
@@ -241,7 +242,7 @@ void WorldMapFacade::Impl::switchToWorldView() {
         data.clear();
         compositor.invalidateComposite();
         mapName = "Azeroth";
-        data.loadZones(mapName, *assetManager);
+        data.loadZones(mapName, *assetManager, *gameTables);
         zoneMetadata.initialize();
         viewState.setCosmicEnabled(data.cosmicEnabled());
     }
@@ -348,9 +349,11 @@ WorldMapFacade::~WorldMapFacade() {
     shutdown();
 }
 
-bool WorldMapFacade::initialize(VkContext* ctx, pipeline::AssetManager* am) {
+bool WorldMapFacade::initialize(VkContext* ctx, pipeline::AssetManager* am,
+                                const pipeline::GameTables& tables) {
     impl_->vkCtx = ctx;
     impl_->assetManager = am;
+    impl_->gameTables = &tables;
     if (!impl_->compositor.initialize(ctx, am)) return false;
     if (impl_->zoneHighlightLayer)
         impl_->zoneHighlightLayer->initialize(ctx, am);
@@ -424,7 +427,7 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
         d.open = true;
         d.recenterOnPlayer = false;
         if (d.data.zones().empty()) {
-            d.data.loadZones(d.mapName, *d.assetManager);
+            d.data.loadZones(d.mapName, *d.assetManager, *d.gameTables);
             d.zoneMetadata.initialize();
             d.viewState.setCosmicEnabled(d.data.cosmicEnabled());
             displayPlayerRenderPos = displayedPlayerPosition();
@@ -459,7 +462,7 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
                     d.compositor.detachZoneTextures();
                     d.data.clear();
                     d.compositor.invalidateComposite();
-                    d.data.loadZones(d.mapName, *d.assetManager);
+                    d.data.loadZones(d.mapName, *d.assetManager, *d.gameTables);
                     d.zoneMetadata.initialize();
                     d.viewState.setCosmicEnabled(d.data.cosmicEnabled());
                     d.viewState.setContinentIdx(-1);
@@ -483,7 +486,7 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
                 d.compositor.detachZoneTextures();
                 d.data.clear();
                 d.compositor.invalidateComposite();
-                d.data.loadZones(d.mapName, *d.assetManager);
+                d.data.loadZones(d.mapName, *d.assetManager, *d.gameTables);
                 d.zoneMetadata.initialize();
                 d.viewState.setCosmicEnabled(d.data.cosmicEnabled());
                 d.viewState.setContinentIdx(-1);

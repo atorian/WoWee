@@ -1,15 +1,55 @@
 #include "game_harness.hpp"
+#include "contacts/services/contacts_service.hpp"
+#include "game/contacts_gateway.hpp"
+#include "game/who_gateway.hpp"
+#include "who/services/who_service.hpp"
+#include "game/duel_gateway.hpp"
+#include "duel/services/duel_service.hpp"
+#include "game/petition_gateway.hpp"
+#include "petition/services/petition_service.hpp"
+#include "game/arena_gateway.hpp"
+#include "arena/services/arena_service.hpp"
+#include "game/battleground_gateway.hpp"
+#include "battleground/services/battleground_service.hpp"
+#include "game/lfg_gateway.hpp"
+#include "lfg/services/lfg_service.hpp"
+#include "game/calendar_gateway.hpp"
+#include "calendar/services/calendar_service.hpp"
+#include "game/group_gateway.hpp"
+#include "group/services/group_service.hpp"
+#include "game/guild_gateway.hpp"
+#include "guild/services/guild_service.hpp"
+#include "game/auction_gateway.hpp"
+#include "auction/services/auction_service.hpp"
+#include "game/mail_gateway.hpp"
+#include "mail/services/mail_service.hpp"
+#include "game/guild_bank_gateway.hpp"
+#include "guild_bank/services/guild_bank_service.hpp"
+#include "game/trade_gateway.hpp"
+#include "trade/services/trade_service.hpp"
+#include "game/loot_gateway.hpp"
+#include "loot/services/loot_service.hpp"
+#include "achievement/services/achievement_service.hpp"
+#include "game/title_gateway.hpp"
+#include "title/services/title_service.hpp"
+#include "game/reputation_gateway.hpp"
+#include "reputation/services/reputation_service.hpp"
+#include "game/pet_gateway.hpp"
+#include "pet/services/pet_service.hpp"
 
 #include <catch_amalgamated.hpp>  // test_support.hpp's REQUIRE
 #include "test_support.hpp"
 
 #include "core/env.hpp"
 #include "game/entity.hpp"
+#include "game/world_handler.hpp"
 #include "game/protocol_tables.hpp"
 #include "game/update_field_table.hpp"
 #include "game/world_packet_data.hpp"
+#include "pipeline/dbc_loader.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -101,6 +141,17 @@ void useEmptyExtensionsDir() {
     throw std::runtime_error("GameHarness: " + what);
 }
 
+/// Guild names for one test: the client keeps them in the user's own file,
+/// which a test must neither read nor write.
+class MemoryGuildNames final : public guild::IGuildNameStore {
+public:
+    std::unordered_map<uint32_t, std::string> load() const override { return names_; }
+    void save(const std::unordered_map<uint32_t, std::string>& names) override { names_ = names; }
+
+private:
+    std::unordered_map<uint32_t, std::string> names_;
+};
+
 } // namespace
 
 GameHarness::GameHarness() : GameHarness(scratchDir("wowee_harness_account_data")) {}
@@ -113,9 +164,28 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
         fail("no wotlk profile under " + sourceRoot() + "Data/expansions");
     }
 
-    emotes_ = std::make_unique<game::EmoteTable>(nullptr);
+    // A table the test has not given reads as one with no rows, wider than
+    // any the game reads: a world whose data has nothing in it. The game asks
+    // for spell names, skill lines and area triggers on paths a test about
+    // something else walks, and finds none, as it would in an empty file.
+    auto noRows = std::make_shared<pipeline::DBCFile>();
+    if (!noRows->load(wdbcFile(512, {}, std::string(1, '\0')))) fail("an empty table does not load");
+    noRows_ = std::move(noRows);
+    gameData_ = std::make_unique<game::GameData>(
+        [this](const std::string& dbc) {
+            dbcsRead_.insert(dbc);
+            const auto it = dbcs_.find(dbc);
+            return it != dbcs_.end() ? it->second : noRows_;
+        },
+        expansions_,
+        // Where the client logs the line and aborts, a test sees it thrown.
+        [](const std::string& line) { throw GameStopped(line); });
+    services_.gameData = gameData_.get();
+    emotes_ = std::make_unique<game::EmoteTable>(*gameData_);
     services_.expansionRegistry = &expansions_;
     services_.emotes = emotes_.get();
+    statTables_ = std::make_unique<game::StatTables>(*gameData_);
+    services_.statTables = statTables_.get();
     services_.events = &events_;
     services_.cvars = &cvars_;
     services_.steadyNow = [this] { return now_; };
@@ -144,13 +214,106 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     cvars_.load();
 
     game_ = std::make_unique<game::GameHandler>(services_);
-    game::loadProtocolTables(*game_, *expansions_.getActive());
+    contactsGateway_ = std::make_unique<game::ContactsGateway>(*game_, *game_);
+    contacts_ = std::make_unique<contacts::ContactsService>(*contactsGateway_, *contactsGateway_, events_);
+    services_.contactsFeed = contacts_.get();
+    whoGateway_ = std::make_unique<game::WhoGateway>(*game_);
+    who_ = std::make_unique<who::WhoService>(*whoGateway_, events_);
+    services_.whoFeed = who_.get();
+    duelGateway_ = std::make_unique<game::DuelGateway>(*game_, *game_);
+    duels_ = std::make_unique<duel::DuelService>(*duelGateway_, *duelGateway_, events_);
+    services_.duelFeed = duels_.get();
+    petitionGateway_ = std::make_unique<game::PetitionGateway>(*game_);
+    petitions_ = std::make_unique<petition::PetitionService>(*petitionGateway_, events_);
+    services_.petitionFeed = petitions_.get();
+    arenaGateway_ = std::make_unique<game::ArenaGateway>(*game_);
+    arenaTeams_ = std::make_unique<arena::ArenaService>(*arenaGateway_, events_);
+    services_.arenaFeed = arenaTeams_.get();
+    battlegroundGateway_ = std::make_unique<game::BattlegroundGateway>(*game_, *game_);
+    battlegrounds_ = std::make_unique<battleground::BattlegroundService>(*battlegroundGateway_, *battlegroundGateway_,
+                                                                         events_);
+    services_.battlegroundFeed = battlegrounds_.get();
+    lfgGateway_ = std::make_unique<game::LfgGateway>(*game_, *game_);
+    lfg_ = std::make_unique<lfg::LfgService>(*lfgGateway_, *lfgGateway_, events_);
+    services_.lfgFeed = lfg_.get();
+    calendarGateway_ = std::make_unique<game::CalendarGateway>(*game_);
+    calendar_ = std::make_unique<calendar::CalendarService>(*calendarGateway_, events_);
+    services_.calendarFeed = calendar_.get();
+    groupGateway_ = std::make_unique<game::GroupGateway>(*game_, *game_);
+    group_ = std::make_unique<group::GroupService>(*groupGateway_, events_);
+    services_.groupFeed = group_.get();
+    services_.group = group_.get();
+    guildGateway_ = std::make_unique<game::GuildGateway>(*game_, *game_);
+    guildNames_ = std::make_unique<MemoryGuildNames>();
+    guild_ = std::make_unique<guild::GuildService>(*guildGateway_, *guildGateway_, *guildNames_, events_);
+    services_.guildFeed = guild_.get();
+    services_.guild = guild_.get();
+    auctionGateway_ = std::make_unique<game::AuctionGateway>(*game_, game_->inventory(), *game_);
+    auctionHouse_ = std::make_unique<auction::AuctionService>(*auctionGateway_, *auctionGateway_, events_);
+    services_.auctionFeed = auctionHouse_.get();
+    mailGateway_ = std::make_unique<game::MailGateway>(*game_, game_->inventory(), *game_, game_->queryCache());
+    mail_ = std::make_unique<mail::MailService>(*mailGateway_, *mailGateway_, events_);
+    services_.mailFeed = mail_.get();
+    services_.mail = mail_.get();
+    guildBankGateway_ = std::make_unique<game::GuildBankGateway>(*game_, game_->inventory(), *game_);
+    guildBank_ = std::make_unique<guild_bank::GuildBankService>(*guildBankGateway_, *guildBankGateway_, events_);
+    services_.guildBankFeed = guildBank_.get();
+    services_.guildBank = guildBank_.get();
+    tradeGateway_ = std::make_unique<game::TradeGateway>(*game_, game_->inventory(), *game_, cvars_);
+    trade_ = std::make_unique<trade::TradeService>(*tradeGateway_, *tradeGateway_, events_);
+    services_.tradeFeed = trade_.get();
+    services_.trade = trade_.get();
+    lootGateway_ = std::make_unique<game::LootGateway>(*game_, game_->inventory(), *game_);
+    loot_ = std::make_unique<loot::LootService>(*lootGateway_, *lootGateway_, events_);
+    services_.lootFeed = loot_.get();
+    services_.loot = loot_.get();
+    achievements_ = std::make_unique<achievement::AchievementService>(achievementFiles_, events_);
+    services_.achievementsFeed = achievements_.get();
+    services_.achievements = achievements_.get();
+    titleGateway_ = std::make_unique<game::TitleGateway>(*game_, *game_);
+    titles_ = std::make_unique<title::TitleService>(titleFiles_, *titleGateway_, events_);
+    services_.titlesFeed = titles_.get();
+    services_.titles = titles_.get();
+    reputationGateway_ = std::make_unique<game::ReputationGateway>(*game_, *game_);
+    reputation_ = std::make_unique<reputation::ReputationService>(factionFiles_, *reputationGateway_, events_);
+    services_.reputationFeed = reputation_.get();
+    services_.reputation = reputation_.get();
+    petGateway_ = std::make_unique<game::PetGateway>(*game_);
+    pet_ = std::make_unique<pet::PetService>(*petGateway_, events_);
+    services_.petFeed = pet_.get();
+    services_.pet = pet_.get();
+    game::loadProtocolTables(*game_, *gameData_);
     game_->setAddonEventCallback([this](const std::string& name, const std::vector<std::string>& args) {
         addonEvents_.push_back({name, args});
     });
 }
 
+void GameHarness::useExpansion(const std::string& id) {
+    if (!expansions_.setActive(id)) fail("no expansion profile named " + id);
+    game::loadProtocolTables(*game_, *gameData_);
+}
+
 GameHarness::~GameHarness() = default;
+
+contacts::IContacts& GameHarness::contacts() { return *contacts_; }
+who::IWho& GameHarness::who() { return *who_; }
+duel::IDuels& GameHarness::duels() { return *duels_; }
+petition::IPetitions& GameHarness::petitions() { return *petitions_; }
+arena::IArenaTeams& GameHarness::arenaTeams() { return *arenaTeams_; }
+battleground::IBattlegrounds& GameHarness::battlegrounds() { return *battlegrounds_; }
+lfg::ILfg& GameHarness::lfg() { return *lfg_; }
+calendar::ICalendar& GameHarness::calendar() { return *calendar_; }
+group::IGroup& GameHarness::group() { return *group_; }
+guild::IGuild& GameHarness::guild() { return *guild_; }
+auction::IAuctionHouse& GameHarness::auctionHouse() { return *auctionHouse_; }
+mail::IMailbox& GameHarness::mail() { return *mail_; }
+guild_bank::IGuildBank& GameHarness::guildBank() { return *guildBank_; }
+trade::ITrade& GameHarness::trade() { return *trade_; }
+loot::ILoot& GameHarness::loot() { return *loot_; }
+achievement::IAchievements& GameHarness::achievements() { return *achievements_; }
+title::ITitles& GameHarness::titles() { return *titles_; }
+reputation::IReputation& GameHarness::reputation() { return *reputation_; }
+pet::IPet& GameHarness::pet() { return *pet_; }
 
 FakeWorldConnection& GameHarness::server() {
     if (!connection_) fail("no connection yet: connect (or enterWorld) first");
@@ -227,6 +390,16 @@ std::vector<AddonEvent> GameHarness::addonEvents(const std::string& name) const 
     return out;
 }
 
+size_t GameHarness::firedAt(const std::string& name, const std::string& firstArg) const {
+    for (size_t i = 0; i < addonEvents_.size(); ++i) {
+        const auto& e = addonEvents_[i];
+        if (e.name != name) continue;
+        if (!firstArg.empty() && (e.args.empty() || e.args[0] != firstArg)) continue;
+        return i;
+    }
+    return addonEvents_.size();
+}
+
 void GameHarness::clearRecords() {
     addonEvents_.clear();
     if (connection_) connection_->clearSent();
@@ -250,7 +423,7 @@ std::vector<uint8_t> GameHarness::charEnumBody(const std::vector<PlayerSpec>& ch
         b.u32(0).u8(0);                // skin, face, hair style and colour; facial hair
         b.u8(p.level);
         b.u32(12 /* Elwynn */).u32(p.mapId).f32(p.x).f32(p.y).f32(p.z);
-        b.u32(0);                      // guild
+        b.u32(p.guildId);
         b.u32(0);                      // character flags
         b.u32(0).u8(0);                // customization flags, first login
         b.u32(0).u32(0).u32(0);        // pet: display, level, family
@@ -352,6 +525,70 @@ void GameHarness::playerInView() {
     game_->getEntityManager().addEntity(guid, std::make_shared<game::Player>(guid));
 }
 
+std::vector<uint8_t> GameHarness::gameObjectTemplateBody(uint32_t entry, uint32_t type,
+                                                         const std::string& name,
+                                                         const std::array<uint32_t, 24>& data) {
+    Body b;
+    // display id, the four names, then icon, cast bar caption and unk1.
+    b.u32(entry).u32(type).u32(0xD15).cstr(name).cstr("").cstr("").cstr("").cstr("").cstr("").cstr("");
+    for (uint32_t word : data) b.u32(word);
+    return b.bytes();
+}
+
+std::vector<uint8_t> GameHarness::nameResponseBody(uint64_t guid, const std::string& name) {
+    return Body().packedGuid(guid).u8(0 /* found */).cstr(name).cstr("").u8(2).u8(0).u8(7);
+}
+
+void GameHarness::playerFields(const std::map<uint16_t, uint32_t>& fields, bool create) {
+    game::UpdateBlock block{};
+    block.guid = player_.guid;
+    block.objectType = game::ObjectType::PLAYER;
+    block.updateType = create ? game::UpdateType::CREATE_OBJECT : game::UpdateType::VALUES;
+    for (const auto& [k, v] : fields) block.fields[k] = v;
+    game::UpdateObjectData batch{};
+    batch.blocks.push_back(block);
+    game_->world().applyRecordedObjects(batch);
+    pump();
+}
+
+void GameHarness::gameTable(const std::string& dbc, uint32_t column, std::vector<float> rows) {
+    std::vector<DbcRow> table;
+    table.reserve(rows.size());
+    for (float value : rows) table.push_back({{column, value}});
+    this->dbc(dbc, column + 1, table);
+}
+
+void GameHarness::unreadableDbc(const std::string& dbc) {
+    dbcs_[dbc] = nullptr;
+}
+
+GameHarness::DbcCell::DbcCell(float v) : number(std::bit_cast<uint32_t>(v)) {}
+
+void GameHarness::dbc(const std::string& dbc, uint32_t fields, const std::vector<DbcRow>& rows) {
+    // The string block opens with the empty string, as the client's files do,
+    // so offset 0 reads as "".
+    std::string strings(1, '\0');
+    std::vector<std::vector<uint32_t>> cells;
+    for (const DbcRow& row : rows) {
+        std::vector<uint32_t> out(fields, 0);
+        for (const auto& [column, cell] : row) {
+            if (column >= fields) fail(dbc + " given a column " + std::to_string(column) + " past its " +
+                                       std::to_string(fields) + " fields");
+            if (cell.isText) {
+                out[column] = static_cast<uint32_t>(strings.size());
+                strings += cell.text;
+                strings += '\0';
+            } else {
+                out[column] = cell.number;
+            }
+        }
+        cells.push_back(std::move(out));
+    }
+    auto table = std::make_shared<pipeline::DBCFile>();
+    if (!table->load(wdbcFile(fields, cells, strings))) fail(dbc + " given rows that do not load");
+    dbcs_[dbc] = std::move(table);
+}
+
 void GameHarness::enterWorld(const PlayerSpec& player) {
     player_ = player;
     const std::vector<uint8_t> sessionKey(40, 0x5A);
@@ -436,7 +673,7 @@ void GameHarness::relogAs(const PlayerSpec& next) {
     const PlayerSpec previous = player_;
     player_ = next;
 
-    game_->requestLogout(false);
+    game_->social().requestLogout(false);
     receive(Opcode::SMSG_LOGOUT_COMPLETE);
     pump();
     game_->returnToCharacterSelect();

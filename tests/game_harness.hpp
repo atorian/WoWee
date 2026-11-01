@@ -23,7 +23,12 @@
 #include "game/expansion_profile.hpp"
 #include "game/game_handler.hpp"
 #include "game/game_services.hpp"
+#include "game/stat_tables.hpp"
+#include "game/game_data.hpp"
 #include "game/opcode_table.hpp"
+#include "achievement/services/ports.hpp"
+#include "title/services/ports.hpp"
+#include "reputation/services/ports.hpp"
 #include "network/packet.hpp"
 #include "network/world_connection.hpp"
 
@@ -32,12 +37,36 @@
 #include <deque>
 #include <filesystem>
 #include <functional>
+#include <array>
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+namespace wowee::contacts { class IContacts; class ContactsService; }
+namespace wowee::who { class IWho; class WhoService; }
+namespace wowee::duel { class IDuels; class DuelService; }
+namespace wowee::petition { class IPetitions; class PetitionService; }
+namespace wowee::arena { class IArenaTeams; class ArenaService; }
+namespace wowee::battleground { class IBattlegrounds; class BattlegroundService; }
+namespace wowee::lfg { class ILfg; class LfgService; }
+namespace wowee::calendar { class ICalendar; class CalendarService; }
+namespace wowee::group { class IGroup; class GroupService; }
+namespace wowee::guild { class IGuild; class GuildService; class IGuildNameStore; }
+namespace wowee::auction { class IAuctionHouse; class AuctionService; }
+namespace wowee::mail { class IMailbox; class MailService; }
+namespace wowee::guild_bank { class IGuildBank; class GuildBankService; }
+namespace wowee::trade { class ITrade; class TradeService; }
+namespace wowee::loot { class ILoot; class LootService; }
+namespace wowee::achievement { class IAchievements; class AchievementService; }
+namespace wowee::title { class ITitles; class TitleService; }
+namespace wowee::reputation { class IReputation; class ReputationService; }
+namespace wowee::pet { class IPet; class PetService; }
+namespace wowee::game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; class AuctionGateway; class MailGateway; class GuildBankGateway; class TradeGateway; class LootGateway; class TitleGateway; class ReputationGateway; class PetGateway; }
 
 namespace wowee::test {
 
@@ -90,6 +119,12 @@ private:
     std::vector<network::Packet> sent_;
 };
 
+/// The game stopped: what the client logs as LOG_FATAL before it aborts,
+/// thrown in a test instead.
+struct GameStopped : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 /// One FrameXML event the game fired, with its arguments.
 struct AddonEvent {
     std::string name;
@@ -105,6 +140,7 @@ struct PlayerSpec {
     uint8_t level = 10;
     uint32_t mapId = 0;  // Eastern Kingdoms
     float x = -8949.95f, y = -132.49f, z = 83.53f;  // Northshire, server coordinates
+    uint32_t guildId = 0;  // none
 };
 
 class GameHarness {
@@ -121,6 +157,78 @@ public:
 
     game::GameHandler& game() { return *game_; }
     core::EventBus& events() { return events_; }
+    /// The friend, ignore and mute lists, wired to the game as the client
+    /// wires them.
+    contacts::IContacts& contacts();
+    /// /who, wired as the client wires it.
+    who::IWho& who();
+    /// Duels, wired as the client wires them.
+    duel::IDuels& duels();
+    /// Guild and arena charters, wired as the client wires them.
+    petition::IPetitions& petitions();
+    /// The player's arena teams, wired as the client wires them.
+    arena::IArenaTeams& arenaTeams();
+    /// The battlegrounds, wired as the client wires them.
+    battleground::IBattlegrounds& battlegrounds();
+    /// The dungeon finder, wired as the client wires it.
+    lfg::ILfg& lfg();
+    /// The calendar, wired as the client wires it.
+    calendar::ICalendar& calendar();
+    /// The group, wired as the client wires it.
+    group::IGroup& group();
+    /// The guild, wired as the client wires it, with its names kept in
+    /// memory rather than in the user's file.
+    guild::IGuild& guild();
+    /// The auction house, wired as the client wires it.
+    auction::IAuctionHouse& auctionHouse();
+    /// The mailbox, wired as the client wires it.
+    mail::IMailbox& mail();
+    /// The guild vault, wired as the client wires it.
+    guild_bank::IGuildBank& guildBank();
+    /// The trade, wired as the client wires it.
+    trade::ITrade& trade();
+    /// The loot window and the rolls, wired as the client wires them.
+    loot::ILoot& loot();
+    /// The achievements, wired as the client wires them, over achievementFiles.
+    achievement::IAchievements& achievements();
+    /// What the game's achievement files hold. Empty until a test writes to it,
+    /// and read once, on the first ask for each part, as the client reads the
+    /// files.
+    struct AchievementFiles final : achievement::IAchievementData {
+        achievement::AchievementTable table;
+        std::vector<achievement::CategoryRecord> categoryRows;
+        std::vector<achievement::CriterionRecord> criterionRows;
+
+        [[nodiscard]] bool ready() const override { return true; }
+        achievement::AchievementTable achievements() override { return table; }
+        std::vector<achievement::CategoryRecord> categories() override { return categoryRows; }
+        std::vector<achievement::CriterionRecord> criteria() override { return criterionRows; }
+    };
+    AchievementFiles& achievementFiles() { return achievementFiles_; }
+    /// The titles, wired as the client wires them, over titleFiles.
+    title::ITitles& titles();
+    /// What CharTitles.dbc holds. Empty until a test writes to it, and read on
+    /// the first ask, as the client reads the file.
+    struct TitleFiles final : title::ITitleData {
+        std::vector<title::TitleRecord> rows;
+
+        [[nodiscard]] bool ready() const override { return true; }
+        std::vector<title::TitleRecord> titles() override { return rows; }
+    };
+    TitleFiles& titleFiles() { return titleFiles_; }
+    /// The reputation, wired as the client wires it, over factionFiles.
+    reputation::IReputation& reputation();
+    /// What Faction.dbc holds. Empty until a test writes to it, and read on
+    /// the first ask, as the client reads the file.
+    struct FactionFiles final : reputation::IFactionData {
+        std::vector<reputation::FactionRecord> rows;
+
+        [[nodiscard]] bool ready() const override { return true; }
+        std::vector<reputation::FactionRecord> factions() override { return rows; }
+    };
+    FactionFiles& factionFiles() { return factionFiles_; }
+    /// The pet and the stable, wired as the client wires them.
+    pet::IPet& pet();
     core::CVarStore& cvars() { return cvars_; }
 
     /// The server's side of the connection: the one the game made last. Valid
@@ -161,6 +269,9 @@ public:
     /// Every FrameXML event fired, in order, and those with one name.
     [[nodiscard]] const std::vector<AddonEvent>& addonEvents() const { return addonEvents_; }
     [[nodiscard]] std::vector<AddonEvent> addonEvents(const std::string& name) const;
+    /// Where in that order the first event with this name (and first
+    /// argument, when one is given) was fired; the list's size when none was.
+    [[nodiscard]] size_t firedAt(const std::string& name, const std::string& firstArg = {}) const;
 
     /// Forget what was sent and fired so far, to look at one step on its own.
     void clearRecords();
@@ -206,18 +317,106 @@ public:
     /// rest a plain item with no stats, spells or sockets.
     static std::vector<uint8_t> itemTemplateBody(uint32_t entry, const std::string& name,
                                                  uint32_t displayInfoId, uint32_t inventoryType);
+    /// SMSG_NAME_QUERY_RESPONSE as 3.3.5a writes it for a player who exists:
+    /// a Tauren (2) male shaman (7).
+    static std::vector<uint8_t> nameResponseBody(uint64_t guid, const std::string& name);
+    /// SMSG_GAMEOBJECT_QUERY_RESPONSE as 3.3.5a writes it: the type, a name,
+    /// and the type's 24 data words.
+    static std::vector<uint8_t> gameObjectTemplateBody(uint32_t entry, uint32_t type,
+                                                       const std::string& name,
+                                                       const std::array<uint32_t, 24>& data = {});
     /// SMSG_UPDATE_OBJECT with one VALUES block for an object.
     static std::vector<uint8_t> valuesBody(uint64_t guid, const Fields& fields);
     /// Put the player's own object in view - what the realm's fields for the
     /// character are applied to.
     void playerInView();
+    /// The realm's fields for the player's own object, as an update block -
+    /// `create` the one that puts it in the world - applied and pumped.
+    void playerFields(const std::map<uint16_t, uint32_t>& fields, bool create = false);
+    /// What the game reads for column `column` of the game table `dbc`, one
+    /// float per row. A table the test has not given has no rows, which the
+    /// sheet stops the game over.
+    void gameTable(const std::string& dbc, uint32_t column, std::vector<float> rows);
+    /// One cell of a table a test gives: a number, a float or a string.
+    struct DbcCell {
+        DbcCell(uint32_t v) : number(v) {}
+        DbcCell(int v) : number(static_cast<uint32_t>(v)) {}
+        DbcCell(float v);
+        DbcCell(const char* s) : text(s), isText(true) {}
+        uint32_t number = 0;
+        std::string text;
+        bool isText = false;
+    };
+    /// A row by column; the columns it does not name are zero.
+    using DbcRow = std::map<uint32_t, DbcCell>;
+    /// The table the game reads as `dbc`: `fields` columns wide, these rows in
+    /// order. A table the test has not given has no rows.
+    void dbc(const std::string& dbc, uint32_t fields, const std::vector<DbcRow>& rows);
+    /// `dbc` is there and cannot be read: what a broken install looks like.
+    void unreadableDbc(const std::string& dbc);
+    /// Whether the game opened `dbc` at all.
+    [[nodiscard]] bool dbcWasRead(const std::string& dbc) const { return dbcsRead_.count(dbc) != 0; }
+    /// The tables the game reads, as the client hands them to what it builds
+    /// outside the game (buildFactionHostilityMap).
+    [[nodiscard]] const game::GameData& gameData() const { return *gameData_; }
+    /// Read the world as expansion `id` does from here on: its update field
+    /// and opcode tables, and the rules that ask which expansion is active.
+    /// The login has already happened on WotLK's wire, so this is for what
+    /// is fed in decoded (applyRecordedObjects), not for packets.
+    void useExpansion(const std::string& id);
 
 private:
     core::EventBus events_;
     core::CVarStore cvars_;
+    std::map<std::string, game::GameData::Table> dbcs_;
+    game::GameData::Table noRows_;
+    std::set<std::string> dbcsRead_;
+    std::unique_ptr<game::GameData> gameData_;
     std::unique_ptr<game::EmoteTable> emotes_;
+    std::unique_ptr<game::StatTables> statTables_;
     game::ExpansionRegistry expansions_;
     game::GameServices services_;
+    std::unique_ptr<game::ContactsGateway> contactsGateway_;
+    std::unique_ptr<contacts::ContactsService> contacts_;
+    std::unique_ptr<game::WhoGateway> whoGateway_;
+    std::unique_ptr<who::WhoService> who_;
+    std::unique_ptr<game::DuelGateway> duelGateway_;
+    std::unique_ptr<duel::DuelService> duels_;
+    std::unique_ptr<game::PetitionGateway> petitionGateway_;
+    std::unique_ptr<petition::PetitionService> petitions_;
+    std::unique_ptr<game::ArenaGateway> arenaGateway_;
+    std::unique_ptr<arena::ArenaService> arenaTeams_;
+    std::unique_ptr<game::BattlegroundGateway> battlegroundGateway_;
+    std::unique_ptr<battleground::BattlegroundService> battlegrounds_;
+    std::unique_ptr<game::LfgGateway> lfgGateway_;
+    std::unique_ptr<lfg::LfgService> lfg_;
+    std::unique_ptr<game::CalendarGateway> calendarGateway_;
+    std::unique_ptr<calendar::CalendarService> calendar_;
+    std::unique_ptr<game::GroupGateway> groupGateway_;
+    std::unique_ptr<group::GroupService> group_;
+    std::unique_ptr<game::GuildGateway> guildGateway_;
+    std::unique_ptr<guild::IGuildNameStore> guildNames_;
+    std::unique_ptr<guild::GuildService> guild_;
+    std::unique_ptr<game::AuctionGateway> auctionGateway_;
+    std::unique_ptr<auction::AuctionService> auctionHouse_;
+    std::unique_ptr<game::MailGateway> mailGateway_;
+    std::unique_ptr<mail::MailService> mail_;
+    std::unique_ptr<game::GuildBankGateway> guildBankGateway_;
+    std::unique_ptr<guild_bank::GuildBankService> guildBank_;
+    std::unique_ptr<game::TradeGateway> tradeGateway_;
+    std::unique_ptr<trade::TradeService> trade_;
+    std::unique_ptr<game::LootGateway> lootGateway_;
+    std::unique_ptr<loot::LootService> loot_;
+    AchievementFiles achievementFiles_;
+    std::unique_ptr<achievement::AchievementService> achievements_;
+    TitleFiles titleFiles_;
+    std::unique_ptr<game::TitleGateway> titleGateway_;
+    std::unique_ptr<title::TitleService> titles_;
+    FactionFiles factionFiles_;
+    std::unique_ptr<game::ReputationGateway> reputationGateway_;
+    std::unique_ptr<reputation::ReputationService> reputation_;
+    std::unique_ptr<game::PetGateway> petGateway_;
+    std::unique_ptr<pet::PetService> pet_;
     std::unique_ptr<game::GameHandler> game_;
     FakeWorldConnection* connection_ = nullptr;  // owned by the game once made
     bool pingsAnswered_ = true;

@@ -1,0 +1,980 @@
+{
+  "purpose": "WMO GPU cause isolation; diagnostic ablations, not production optimizations",
+  "scene": {
+    "map": "Northrend",
+    "mapId": 571,
+    "zoneId": 2817,
+    "hour": 9.408292770385742,
+    "origin": [
+      5824.882487012499,
+      666.949869825,
+      641.9556274414062
+    ],
+    "playerPosition": [
+      5946.4130859375,
+      623.02783203125,
+      655.4375
+    ],
+    "streamWorld": false,
+    "models": [
+      {
+        "path": "WORLD\\WMO\\NORTHREND\\DALARAN\\ND_DALARAN.WMO",
+        "rotation": [
+          0,
+          0,
+          -39
+        ]
+      }
+    ],
+    "camera": {
+      "position": [
+        5946.4130859375,
+        623.02783203125,
+        655.4375
+      ],
+      "yaw": 166.30895876598606,
+      "pitch": -18.600008189205408
+    },
+    "fov": 70.0,
+    "viewDistance": 2500,
+    "size": [
+      2560,
+      1369
+    ],
+    "frames": 240,
+    "msaa": 1,
+    "fxaa": true,
+    "bloom": 0,
+    "volumetricFog": 3,
+    "volumetricDensity": 1,
+    "shadowQuality": 2,
+    "rayTracedLighting": 3,
+    "rtDistance": 300,
+    "fogStrength": 0.85
+  },
+  "gpu": "AMD Radeon RX 7700 XT",
+  "driver": "2.0.395",
+  "vulkan": "1.4.349",
+  "vsync": "FIFO; compare GPU timestamps, not FPS",
+  "validation": false,
+  "executableSha256": "95f3b1ffd16cb6ea52b9db3323293b9be7bb2157729938f3e017521e09cdf0da",
+  "counts": {
+    "groups": 91,
+    "offscreenGroups": 10,
+    "draws": 1619,
+    "offscreenDraws": 116,
+    "triangles": 419562,
+    "offscreenTriangles": 17394,
+    "materialBatches": 1578,
+    "rtMeshes": 1,
+    "rtInstances": 1
+  },
+  "runs": {
+    "baseline": {
+      "gpu": {
+        "M2 cull": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "grass cull": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "minimap_composite": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "offscreen_composites": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "terrain_bake": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "shadows": {
+          "meanMs": 0.19,
+          "p95Ms": 0.29,
+          "maxMs": 0.77
+        },
+        "contact shadows": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "volumetric fog": {
+          "meanMs": 0.29,
+          "p95Ms": 0.41,
+          "maxMs": 0.68
+        },
+        "reflection_pass": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "sky capture": {
+          "meanMs": 0.05,
+          "p95Ms": 0.07,
+          "maxMs": 0.25
+        },
+        "scene pass begin": {
+          "meanMs": 0.02,
+          "p95Ms": 0.03,
+          "maxMs": 0.44
+        },
+        "terrain": {
+          "meanMs": 0.01,
+          "p95Ms": 0.01,
+          "maxMs": 0.14
+        },
+        "sky": {
+          "meanMs": 0.63,
+          "p95Ms": 0.76,
+          "maxMs": 1.05
+        },
+        "wmo": {
+          "meanMs": 7.62,
+          "p95Ms": 11.74,
+          "maxMs": 12.34
+        },
+        "selection": {
+          "meanMs": 0.0,
+          "p95Ms": 0.01,
+          "maxMs": 0.01
+        },
+        "characters": {
+          "meanMs": 0.0,
+          "p95Ms": 0.01,
+          "maxMs": 0.01
+        },
+        "m2": {
+          "meanMs": 0.0,
+          "p95Ms": 0.01,
+          "maxMs": 0.01
+        },
+        "water/effects": {
+          "meanMs": 0.0,
+          "p95Ms": 0.01,
+          "maxMs": 0.05
+        },
+        "world total": {
+          "meanMs": 0.0,
+          "p95Ms": 0.01,
+          "maxMs": 0.04
+        },
+        "rt_scene": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.04
+        },
+        "rt_lighting": {
+          "meanMs": 2.42,
+          "p95Ms": 2.78,
+          "maxMs": 4.3
+        },
+        "post-process": {
+          "meanMs": 0.17,
+          "p95Ms": 0.21,
+          "maxMs": 0.24
+        },
+        "bloom filter": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "interface": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        }
+      },
+      "measuredFrames": 230,
+      "competingSamples": 0,
+      "pngSha256": "5c43796f7a5dd3b60461222422e4f50a05db54e0f5d3de73165da2f92c3ebd96",
+      "shaderSha256": "2653d671800ddbfe65dac9fdb8ddee6e822df938a3d2526dc502d917076330a7"
+    },
+    "frustum": {
+      "gpu": {
+        "M2 cull": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "grass cull": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "minimap_composite": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "offscreen_composites": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "terrain_bake": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "shadows": {
+          "meanMs": 0.2,
+          "p95Ms": 0.26,
+          "maxMs": 0.92
+        },
+        "contact shadows": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "volumetric fog": {
+          "meanMs": 0.31,
+          "p95Ms": 0.46,
+          "maxMs": 0.86
+        },
+        "reflection_pass": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "sky capture": {
+          "meanMs": 0.06,
+          "p95Ms": 0.08,
+          "maxMs": 0.34
+        },
+        "scene pass begin": {
+          "meanMs": 0.02,
+          "p95Ms": 0.03,
+          "maxMs": 0.06
+        },
+        "terrain": {
+          "meanMs": 0.01,
+          "p95Ms": 0.01,
+          "maxMs": 0.17
+        },
+        "sky": {
+          "meanMs": 0.64,
+          "p95Ms": 0.81,
+          "maxMs": 1.0
+        },
+        "wmo": {
+          "meanMs": 7.29,
+          "p95Ms": 8.16,
+          "maxMs": 12.73
+        },
+        "selection": {
+          "meanMs": 0.0,
+          "p95Ms": 0.01,
+          "maxMs": 0.05
+        },
+        "characters": {
+          "meanMs": 0.0,
+          "p95Ms": 0.01,
+          "maxMs": 0.01
+        },
+        "m2": {
+          "meanMs": 0.0,
+          "p95Ms": 0.01,
+          "maxMs": 0.01
+        },
+        "water/effects": {
+          "meanMs": 0.0,
+          "p95Ms": 0.01,
+          "maxMs": 0.15
+        },
+        "world total": {
+          "meanMs": 0.0,
+          "p95Ms": 0.01,
+          "maxMs": 0.04
+        },
+        "rt_scene": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.08
+        },
+        "rt_lighting": {
+          "meanMs": 2.45,
+          "p95Ms": 2.91,
+          "maxMs": 3.07
+        },
+        "post-process": {
+          "meanMs": 0.17,
+          "p95Ms": 0.22,
+          "maxMs": 0.26
+        },
+        "bloom filter": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "interface": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        }
+      },
+      "measuredFrames": 230,
+      "competingSamples": 0,
+      "pngSha256": "5c43796f7a5dd3b60461222422e4f50a05db54e0f5d3de73165da2f92c3ebd96",
+      "shaderSha256": "2653d671800ddbfe65dac9fdb8ddee6e822df938a3d2526dc502d917076330a7"
+    },
+    "no-rt-lookup": {
+      "gpu": {
+        "M2 cull": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "grass cull": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "minimap_composite": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "offscreen_composites": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "terrain_bake": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "shadows": {
+          "meanMs": 0.21,
+          "p95Ms": 0.26,
+          "maxMs": 0.69
+        },
+        "contact shadows": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.05
+        },
+        "volumetric fog": {
+          "meanMs": 0.29,
+          "p95Ms": 0.42,
+          "maxMs": 0.51
+        },
+        "reflection_pass": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "sky capture": {
+          "meanMs": 0.08,
+          "p95Ms": 0.14,
+          "maxMs": 0.72
+        },
+        "scene pass begin": {
+          "meanMs": 0.03,
+          "p95Ms": 0.06,
+          "maxMs": 0.18
+        },
+        "terrain": {
+          "meanMs": 0.01,
+          "p95Ms": 0.01,
+          "maxMs": 0.13
+        },
+        "sky": {
+          "meanMs": 0.81,
+          "p95Ms": 0.99,
+          "maxMs": 1.31
+        },
+        "wmo": {
+          "meanMs": 2.57,
+          "p95Ms": 3.01,
+          "maxMs": 5.6
+        },
+        "selection": {
+          "meanMs": 0.0,
+          "p95Ms": 0.01,
+          "maxMs": 0.26
+        },
+        "characters": {
+          "meanMs": 0.0,
+          "p95Ms": 0.01,
+          "maxMs": 0.4
+        },
+        "m2": {
+          "meanMs": 0.0,
+          "p95Ms": 0.01,
+          "maxMs": 0.03
+        },
+        "water/effects": {
+          "meanMs": 0.01,
+          "p95Ms": 0.01,
+          "maxMs": 0.61
+        },
+        "world total": {
+          "meanMs": 0.0,
+          "p95Ms": 0.01,
+          "maxMs": 0.11
+        },
+        "rt_scene": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.04
+        },
+        "rt_lighting": {
+          "meanMs": 2.88,
+          "p95Ms": 3.15,
+          "maxMs": 3.55
+        },
+        "post-process": {
+          "meanMs": 0.2,
+          "p95Ms": 0.24,
+          "maxMs": 0.51
+        },
+        "bloom filter": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "interface": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        }
+      },
+      "measuredFrames": 230,
+      "competingSamples": 0,
+      "pngSha256": "7b7781256f3f204a2bdf649a9ade81691ea7af1125e9bb243b80276f500d841e",
+      "shaderSha256": "3d10f9ff590a5a1dab7dc98afea32626e13d313bea37a3c619fd95fbe7f5cd30"
+    },
+    "no-pom": {
+      "gpu": {
+        "M2 cull": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "grass cull": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "minimap_composite": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "offscreen_composites": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "terrain_bake": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "shadows": {
+          "meanMs": 0.2,
+          "p95Ms": 0.26,
+          "maxMs": 0.6
+        },
+        "contact shadows": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "volumetric fog": {
+          "meanMs": 0.31,
+          "p95Ms": 0.49,
+          "maxMs": 0.67
+        },
+        "reflection_pass": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "sky capture": {
+          "meanMs": 0.06,
+          "p95Ms": 0.09,
+          "maxMs": 0.3
+        },
+        "scene pass begin": {
+          "meanMs": 0.03,
+          "p95Ms": 0.04,
+          "maxMs": 0.24
+        },
+        "terrain": {
+          "meanMs": 0.01,
+          "p95Ms": 0.01,
+          "maxMs": 0.09
+        },
+        "sky": {
+          "meanMs": 0.66,
+          "p95Ms": 0.81,
+          "maxMs": 1.13
+        },
+        "wmo": {
+          "meanMs": 7.04,
+          "p95Ms": 8.1,
+          "maxMs": 13.32
+        },
+        "selection": {
+          "meanMs": 0.0,
+          "p95Ms": 0.01,
+          "maxMs": 0.01
+        },
+        "characters": {
+          "meanMs": 0.0,
+          "p95Ms": 0.01,
+          "maxMs": 0.01
+        },
+        "m2": {
+          "meanMs": 0.0,
+          "p95Ms": 0.01,
+          "maxMs": 0.04
+        },
+        "water/effects": {
+          "meanMs": 0.0,
+          "p95Ms": 0.01,
+          "maxMs": 0.05
+        },
+        "world total": {
+          "meanMs": 0.0,
+          "p95Ms": 0.01,
+          "maxMs": 0.01
+        },
+        "rt_scene": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.04
+        },
+        "rt_lighting": {
+          "meanMs": 2.54,
+          "p95Ms": 3.01,
+          "maxMs": 7.72
+        },
+        "post-process": {
+          "meanMs": 0.17,
+          "p95Ms": 0.24,
+          "maxMs": 0.41
+        },
+        "bloom filter": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "interface": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        }
+      },
+      "measuredFrames": 230,
+      "competingSamples": 0,
+      "pngSha256": "d7472c47fcc62cc60d8ff1e8f1a44aa16e15b0081337f75c6427727e77352d70",
+      "shaderSha256": "a5bdbfb4689fbe98ded199fe73f32a81dc50bfd56132f08969ab0a22a033179d"
+    },
+    "no-recovery": {
+      "gpu": {
+        "M2 cull": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "grass cull": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "minimap_composite": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "offscreen_composites": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "terrain_bake": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "shadows": {
+          "meanMs": 0.2,
+          "p95Ms": 0.26,
+          "maxMs": 0.45
+        },
+        "contact shadows": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "volumetric fog": {
+          "meanMs": 0.3,
+          "p95Ms": 0.41,
+          "maxMs": 0.51
+        },
+        "reflection_pass": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "sky capture": {
+          "meanMs": 0.07,
+          "p95Ms": 0.19,
+          "maxMs": 0.3
+        },
+        "scene pass begin": {
+          "meanMs": 0.03,
+          "p95Ms": 0.03,
+          "maxMs": 0.19
+        },
+        "terrain": {
+          "meanMs": 0.01,
+          "p95Ms": 0.01,
+          "maxMs": 0.14
+        },
+        "sky": {
+          "meanMs": 0.8,
+          "p95Ms": 0.98,
+          "maxMs": 1.13
+        },
+        "wmo": {
+          "meanMs": 4.28,
+          "p95Ms": 4.65,
+          "maxMs": 5.01
+        },
+        "selection": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.01
+        },
+        "characters": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.01
+        },
+        "m2": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.01
+        },
+        "water/effects": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.01
+        },
+        "world total": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.01
+        },
+        "rt_scene": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "rt_lighting": {
+          "meanMs": 2.85,
+          "p95Ms": 3.3,
+          "maxMs": 3.41
+        },
+        "post-process": {
+          "meanMs": 0.19,
+          "p95Ms": 0.22,
+          "maxMs": 0.28
+        },
+        "bloom filter": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "interface": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        }
+      },
+      "measuredFrames": 230,
+      "competingSamples": 0,
+      "pngSha256": "7d88250ad08620675a9a1843d47707b965c82f715236d72632965f8b29d59bf5",
+      "shaderSha256": "6cea4c41649838ae258b70904f958c94566a63bbb24f2a473bcf7a2a141bef1f"
+    },
+    "early-depth": {
+      "gpu": {
+        "M2 cull": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "grass cull": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "minimap_composite": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "offscreen_composites": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "terrain_bake": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "shadows": {
+          "meanMs": 0.21,
+          "p95Ms": 0.26,
+          "maxMs": 0.45
+        },
+        "contact shadows": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "volumetric fog": {
+          "meanMs": 0.32,
+          "p95Ms": 0.49,
+          "maxMs": 0.65
+        },
+        "reflection_pass": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "sky capture": {
+          "meanMs": 0.07,
+          "p95Ms": 0.19,
+          "maxMs": 0.3
+        },
+        "scene pass begin": {
+          "meanMs": 0.03,
+          "p95Ms": 0.15,
+          "maxMs": 0.26
+        },
+        "terrain": {
+          "meanMs": 0.01,
+          "p95Ms": 0.01,
+          "maxMs": 0.16
+        },
+        "sky": {
+          "meanMs": 0.82,
+          "p95Ms": 1.0,
+          "maxMs": 1.06
+        },
+        "wmo": {
+          "meanMs": 6.46,
+          "p95Ms": 7.02,
+          "maxMs": 11.4
+        },
+        "selection": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.01
+        },
+        "characters": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.01
+        },
+        "m2": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.01
+        },
+        "water/effects": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.01
+        },
+        "world total": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.01
+        },
+        "rt_scene": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "rt_lighting": {
+          "meanMs": 2.8,
+          "p95Ms": 3.09,
+          "maxMs": 3.36
+        },
+        "post-process": {
+          "meanMs": 0.18,
+          "p95Ms": 0.21,
+          "maxMs": 0.26
+        },
+        "bloom filter": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "interface": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        }
+      },
+      "measuredFrames": 230,
+      "competingSamples": 0,
+      "pngSha256": "23ecd280020e2931eff58fe24b6479f5e8bc7b180d2f8b81328f6195a1e7e2d5",
+      "shaderSha256": "b2f609a68a6d01ef639b12e3922602a0ef5bdd12ba2c8cca87f33e9637b89da8"
+    },
+    "flat": {
+      "gpu": {
+        "M2 cull": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "grass cull": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "minimap_composite": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "offscreen_composites": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "terrain_bake": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "shadows": {
+          "meanMs": 0.2,
+          "p95Ms": 0.2,
+          "maxMs": 0.26
+        },
+        "contact shadows": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "volumetric fog": {
+          "meanMs": 0.28,
+          "p95Ms": 0.32,
+          "maxMs": 0.4
+        },
+        "reflection_pass": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "sky capture": {
+          "meanMs": 0.07,
+          "p95Ms": 0.1,
+          "maxMs": 0.14
+        },
+        "scene pass begin": {
+          "meanMs": 0.02,
+          "p95Ms": 0.02,
+          "maxMs": 0.09
+        },
+        "terrain": {
+          "meanMs": 0.01,
+          "p95Ms": 0.01,
+          "maxMs": 0.08
+        },
+        "sky": {
+          "meanMs": 0.8,
+          "p95Ms": 0.98,
+          "maxMs": 1.32
+        },
+        "wmo": {
+          "meanMs": 0.5,
+          "p95Ms": 0.64,
+          "maxMs": 0.95
+        },
+        "selection": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.05
+        },
+        "characters": {
+          "meanMs": 0.01,
+          "p95Ms": 0.01,
+          "maxMs": 0.05
+        },
+        "m2": {
+          "meanMs": 0.02,
+          "p95Ms": 0.05,
+          "maxMs": 0.06
+        },
+        "water/effects": {
+          "meanMs": 0.02,
+          "p95Ms": 0.05,
+          "maxMs": 0.06
+        },
+        "world total": {
+          "meanMs": 0.01,
+          "p95Ms": 0.01,
+          "maxMs": 0.05
+        },
+        "rt_scene": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "rt_lighting": {
+          "meanMs": 2.9,
+          "p95Ms": 3.21,
+          "maxMs": 8.75
+        },
+        "post-process": {
+          "meanMs": 0.21,
+          "p95Ms": 0.23,
+          "maxMs": 0.36
+        },
+        "bloom filter": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        },
+        "interface": {
+          "meanMs": 0.0,
+          "p95Ms": 0.0,
+          "maxMs": 0.0
+        }
+      },
+      "measuredFrames": 230,
+      "competingSamples": 0,
+      "pngSha256": "2c2d07817b6c9cca3910db3774e63340fc40c0a48bc2812455f954d6fc841163",
+      "shaderSha256": "3359f937449f53af474579a48981517f543b33d27861072125fbc5304063fca1"
+    }
+  },
+  "excluded": [
+    "excluded-competing-no-recovery: simultaneous scene_render from aerial-march checkout"
+  ],
+  "limitations": [
+    "Static single WMO fixture with first captured Dalaran camera, no terrain, players, doodads or streaming",
+    "POM medium/32 samples and shadow quality 2 are scene-render defaults, not the captured client profile",
+    "Ablations alter rendered lighting/coverage; time deltas are diagnostic, not promised production FPS gains",
+    "One run per mode, 230 measured frames; no statistical confidence interval or locked GPU clock",
+    "Per-pass GPU distributions retained to hundredths of a millisecond as emitted by FrameTimer"
+  ]
+}

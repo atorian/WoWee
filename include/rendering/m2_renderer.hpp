@@ -19,7 +19,7 @@
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/grass_clearing.hpp"
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 #include "rendering/m2_blend_mode.hpp"
 #include "rendering/m2_uv_transform.hpp"
 #include "rendering/frames_in_flight.hpp"
@@ -72,6 +72,14 @@ inline constexpr uint32_t kMaxBonesPerInstance = 512;
 /**
  * GPU representation of an M2 model
  */
+/// What an emitter's texture set (set 1) holds: the image, and the wrap mode
+/// of the model's texture slot it came from, which picks the sampler.
+struct M2EmitterTexKey {
+    const VkTexture* texture = nullptr;
+    uint8_t wrap = 0;
+    bool operator==(const M2EmitterTexKey&) const = default;
+};
+
 struct M2ModelGPU {
     struct BatchGPU {
         VkTexture* texture = nullptr;  // from cache, NOT owned
@@ -163,7 +171,7 @@ struct M2ModelGPU {
     bool isGroundFire = false;      // Ground fire whose halo follows its lowest flame emitter
     bool isTorch = false;           // Wall-mounted or standing torch
     bool isForge = false;           // Smithy forge (contained fire, lights its surroundings)
-    AmbientEmitterType ambientEmitterType = AmbientEmitterType::None;
+    pipeline::AmbientEmitterType ambientEmitterType = pipeline::AmbientEmitterType::None;
 
     /// What the model is solid with, shared with the collision world; none
     /// for a model without a collision mesh, an invisible trap or a spell
@@ -201,13 +209,16 @@ struct M2ModelGPU {
     // Particle emitter data (kept from M2Model)
     std::vector<pipeline::M2ParticleEmitter> particleEmitters;
     std::vector<VkTexture*> particleTextures;    // Resolved Vulkan textures per emitter
-    std::vector<VkDescriptorSet> particleTexSets; // Pre-allocated descriptor sets per emitter (stable, avoids per-frame alloc)
+    std::vector<VkDescriptorSet> particleTexSets; // Each emitter's set, shared with every emitter of that texture and wrap
 
     // Ribbon emitter data (kept from M2Model)
     std::vector<pipeline::M2RibbonEmitter> ribbonEmitters;
     std::vector<VkTexture*> ribbonTextures;       // Resolved texture per ribbon emitter
     std::vector<uint16_t> ribbonBlendModes;       // Blend mode of each ribbon emitter's material
     std::vector<VkDescriptorSet> ribbonTexSets;   // Descriptor sets per ribbon emitter
+    /// One entry per emitter set above that came from the renderer's shared
+    /// sets, each a use given back when the model is destroyed.
+    std::vector<M2EmitterTexKey> emitterTexKeys;
 
     /// Particles or ribbons: either needs the per-frame emitter update and
     /// an animation clock. Asking for particles alone left a model whose only
@@ -299,8 +310,14 @@ struct M2Instance {
     glm::vec3 worldBoundsMax;
 
     // Animation state
-    float animTime = 0.0f;       // Current animation time (ms)
-    float globalSequenceTime = 0.0f; // Independent clock for global animation tracks
+    /// The renderer's animation clock reading at which the current sequence and
+    /// the global sequences were at zero; M2Renderer::animTimeOf works out the
+    /// time from them. Doubles, so hours of play keep a smooth scroll.
+    double animStartMs = 0.0;
+    double globalSequenceStartMs = 0.0;
+    /// The clock reading when it was hidden: its clocks stop while it is out
+    /// of the world and resume where they were.
+    double hiddenAtMs = 0.0;
     float animSpeed = 1.0f;      // Animation playback speed
     int currentSequenceIndex = 0;// Index into sequences array
     float animDuration = 0.0f;   // Duration of current animation (ms)
@@ -406,21 +423,7 @@ struct M2Instance {
     float cachedPaddedRadius = 0.0f;              // sphere radius used by the cull compute
     const M2ModelGPU* cachedModel = nullptr;  // Avoid per-frame hash lookups
 
-    // Result of the most recent GPU cull dispatch that actually covered this
-    // instance, matched back by instance ID (never by array index - see
-    // cullSubmittedIds_).  Defaults to visible so an instance created after the
-    // in-flight dispatch draws immediately instead of waiting ~2 frames for its
-    // first cull result.
-    uint8_t lastCullVisible = 1;
-    // Consecutive frames this instance has been culled (capped at 3), used for
-    // the HiZ `previouslyVisible` hysteresis.  Defaults to 2 ("not recently
-    // visible") so a freshly spawned instance skips the HiZ test rather than
-    // being judged against depth data that never contained it.
-    uint8_t hizPrevCulledFrames = 2;
-    // Which render() call last scattered a GPU verdict onto this instance.
-    // Only a verdict from the call reading it counts: the dispatch covers the
-    // instances the camera's columns held then, not a fixed prefix of the array.
-    uint32_t cullVerdictSerial = 0;
+    // The GPU cull's verdict on it is the cull's own: M2CullGrid::Record.
     // Server game object (mailbox, chest, node, door): exempt from the adaptive
     // ambient-doodad distance, which collapses to ~200 units in a city and hid
     // interactable objects long before the server stopped sending them.
@@ -429,8 +432,9 @@ struct M2Instance {
 
     void recomputeCachedCullFactors();
 
-    // Frame-skip optimization (update distant animations less frequently)
-    uint8_t frameSkipCounter = 0;
+    /// The animation clock when its bones were last posed: a distant one is
+    /// posed again only once the clock has moved on far enough.
+    double bonesPosedAtMs = 0.0;
 
     // Per-instance bone SSBO (double-buffered) - legacy; see mega bone SSBO in M2Renderer
     ::VkBuffer boneBuffer[2] = {};
@@ -451,7 +455,6 @@ struct M2MaterialUBO {
     int32_t alphaTest;
     int32_t unlit;
     int32_t blendMode;
-    int32_t cullBackFaces; // authored single-sided transparent material
     float specularIntensity;
     float emissiveBoost;
     // The batch's authored colour, from the M2's colour track, with any
@@ -1213,6 +1216,28 @@ private:
     std::shared_ptr<uint32_t> materialPoolGeneration_ = std::make_shared<uint32_t>(0);
     void destroyPosedEmitterModels();
 
+    /// The particle and ribbon texture sets, one per texture and wrap mode,
+    /// shared by every emitter of every model that draws with them. A set
+    /// lives while some model uses it - which also keeps its texture in the
+    /// cache, so the address in the key is not reused - and goes back to
+    /// materialDescPool_ after the frames in flight when the last one is
+    /// destroyed.
+    struct EmitterTexKeyHash {
+        size_t operator()(const M2EmitterTexKey& key) const {
+            return std::hash<const void*>{}(key.texture) ^ (static_cast<size_t>(key.wrap) << 1);
+        }
+    };
+    struct SharedEmitterSet {
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        uint32_t users = 0;
+    };
+    std::unordered_map<M2EmitterTexKey, SharedEmitterSet, EmitterTexKeyHash> emitterTexSets_;
+    /// The shared set for this texture and wrap, made on first use; one more
+    /// use recorded in `gpu`. Null when the pool is exhausted.
+    VkDescriptorSet acquireEmitterTexSet(M2ModelGPU& gpu, VkTexture* texture, uint8_t wrap);
+    /// Gives back every use `gpu` holds.
+    void releaseEmitterTexSets(M2ModelGPU& gpu);
+
     // O(1) dedup: key = (modelId, quantized x, quantized y, quantized z) → instanceId
     struct DedupKey {
         uint32_t modelId;
@@ -1267,9 +1292,10 @@ private:
 
     /// Instances by 64-yard column, for the view and shadow passes to reject
     /// whole regions before looking at any instance in them. See M2CullGrid.
-    /// Files (or refiles) an instance in cullGrid_ from its current position
-    /// and cull data. Called wherever those change.
-    void fileInCullGrid(const M2Instance& instance);
+    /// Writes instance `index`'s cull record from the instance and files it
+    /// in its column (M2CullGrid::Record): wherever its position, cull data,
+    /// model, hidden or finished state, or game-object flag change.
+    void fileInCullGrid(size_t index);
     /// Indices of the instances in the columns this camera may see within
     /// maxPossibleDistSq. Every instance the per-instance view test would keep
     /// is among them.
@@ -1487,12 +1513,12 @@ private:
     };
     /// The particles in view, written into this frame's buffer as runs.
     /// Reads the scene; returns how many particles went in.
-    size_t gatherM2Particles(Frame& frame);
+    size_t gatherM2Particles(Frame& frame, const glm::vec3& eye);
     /// The runs gatherM2Particles wrote; reads no instance.
     void recordM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
     /// The ribbon trails, written into this frame's buffer with a draw each.
     /// Reads the scene; returns how many vertices went in.
-    size_t gatherM2Ribbons(Frame& frame);
+    size_t gatherM2Ribbons(Frame& frame, const glm::vec3& eye);
     /// The draws gatherM2Ribbons made; reads no instance.
     void recordM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
     /// Quads the particle buffer holds: a whole frame's, a particle that is
@@ -1513,11 +1539,33 @@ private:
     // draws its particles' randomness from its own generator.
     /// Particles drawn per emitter of the instance being written; scratch.
     std::vector<uint32_t> drawnPerEmitter_;
+    /// An instance whose particles or ribbons are gathered, and how far it is
+    /// from the eye. The gathers take them nearest first, so a full buffer
+    /// loses the farthest, and draw them farthest first, as blending needs.
+    struct EmitterInView {
+        const M2Instance* inst;
+        float distSq;
+    };
+    std::vector<EmitterInView> emittersInView_;
+    /// Where each instance's runs or draws start; scratch for the reversal.
+    std::vector<size_t> emitterBlocks_;
+    std::vector<ParticleRun> reorderedRuns_;
+    std::vector<RibbonDrawCall> reorderedRibbons_;
     bool skyMode_ = false;
     float skyTimeOfDayHours_ = 12.0f;
     std::function<std::optional<float>(float, float, float)> waterHeightAt_;
     // What the sky-model clock diagnostic last reported, so it prints on a
     // restart or once a second rather than every frame. See M2Renderer::update.
+    /// One animation clock for every instance, advanced once an update. An
+    /// instance keeps the reading its sequence started at (animStartMs), so
+    /// the many nothing steps cost nothing a frame; advancing a total on each
+    /// was a pass over every instance.
+    double animClockMs_ = 0.0;
+    /// The sequence time an instance shows now (m2AnimTimeAt).
+    float animTimeOf(const M2Instance& instance) const;
+    float globalSequenceTimeOf(const M2Instance& instance) const;
+    /// Puts the instance's sequence at timeMs now.
+    void setAnimTime(M2Instance& instance, float timeMs) const;
     uint32_t skyDiagInstanceId_ = 0;
     float skyDiagAnimTime_ = 0.0f;
     /// Whether the sky model was drawn last frame, so the cull
@@ -1593,11 +1641,9 @@ private:
     // Helper to destroy instance bone buffers.
     // When defer=true, destruction is scheduled via deferAfterAllFrameFences so
     // in-flight command buffers are not invalidated (use for streaming unload).
-    /// Starts a new instance's animation and seeds its bones from a
-    /// sibling of the same model, so it draws on the frame it spawns.
-    /// Both spawn paths need it and each used to have its own copy.
-    void seedInstanceAnimation(const M2ModelGPU& model, uint32_t modelId,
-                               M2Instance& instance);
+    /// Starts a new instance's animation and computes its bones, so it draws
+    /// on the frame it spawns. Both spawn paths need it.
+    void startInstanceAnimation(const M2ModelGPU& model, M2Instance& instance);
     void seedUnanimatedSequence(const M2ModelGPU& model, M2Instance& instance);
 
     void destroyInstanceBones(M2Instance& inst, bool defer = true);
@@ -1616,9 +1662,11 @@ private:
         /// kMaxShadowRefiled it gives up listing and the cull starts over.
         std::vector<uint32_t> shadowRefiledIds;
         bool shadowRefiledOverflow = false;
-        std::unordered_map<uint32_t, uint32_t> boneSeedInstanceByModel_;
         InstanceIndexSet animatedInstanceIndices_;     // hasAnimation && !disableAnimation
         InstanceIndexSet particleOnlyInstanceIndices_; // !hasAnimation && hasParticleEmitters
+        /// Boats still asking whether they are on water; the rest have their
+        /// answer and are not looked at again.
+        std::vector<uint32_t> pendingAfloatIds_;
         InstanceIndexSet particleInstanceIndices_;     // ALL instances with particle emitters
         InstanceIndexSet lightInstanceIndices_;        // models that can throw a local light
         std::vector<size_t> boneWorkIndices_;        // Reused each frame
@@ -1641,6 +1689,9 @@ public:
         std::vector<glm::mat4> bones;
         std::vector<CullInstanceGPU> cullInput;
         std::vector<uint32_t> cullIds;
+        /// Where each was in the instance list, as a hint: checked against
+        /// its id when the verdict comes back.
+        std::vector<uint32_t> cullIndices;
         std::vector<ShadowDraw> depth, solarDepth, strikeDepth;
         glm::mat4 solarMatrix{0.0f}, overheadMatrix{0.0f}, strikeMatrix{0.0f};
         float maxPossibleDistSq = 0, time = 0;
@@ -1655,6 +1706,7 @@ private:
     std::mutex cullResultMutex_;
     std::vector<CullAnswer> collectedCull_;
     std::vector<uint32_t> submittedCullIds_[2];
+    std::vector<uint32_t> submittedCullIndices_[2];
     uint64_t submittedCullScenes_[2]{};
     uint64_t submittedCullFrames_[2]{};
 

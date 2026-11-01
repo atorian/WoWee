@@ -5,8 +5,6 @@
 #include "ui/chat/chat_settings.hpp"
 #include "ui/chat/chat_bubble_manager.hpp"
 #include "ui/chat/cast_sequence_tracker.hpp"
-#include "ui/chat/chat_markup_parser.hpp"
-#include "ui/chat/chat_markup_renderer.hpp"
 #include "ui/chat/chat_command_registry.hpp"
 #include <vulkan/vulkan.h>
 #include <imgui.h>
@@ -99,6 +97,9 @@ public:
         /// /record: start, stop, or whichever it is not doing.
         enum class Recording { None, Toggle, Start, Stop };
         Recording recording = Recording::None;
+        /// /ai: hand the character to the agent, take it back, or flip.
+        enum class AgentControl { None, Toggle, On, Off };
+        AgentControl agentControl = AgentControl::None;
     };
 
     /** Return accumulated slash-command flags and reset them. */
@@ -188,20 +189,6 @@ private:
     // Command registry (Phase 3 - replaces if/else chain)
     ChatCommandRegistry commandRegistry_;
     void registerAllCommands();
-
-    // Markup parser + renderer (Phase 2)
-
-    // Per-message render cache. A chat line's formatted text and parsed
-    // segments are immutable once built (modulo sender-name resolution and
-    // the timestamp toggle), so formatting + markup parsing runs once per
-    // message instead of once per message per frame.
-    struct CachedChatLine {
-        std::string senderNameUsed;  // rebuild when a name query resolves
-        bool tsEnabled = false;      // rebuild when timestamp toggle flips
-        bool isMention = false;
-        std::string fullMsg;         // plain text (for Copy Message)
-        std::vector<ChatSegment> segments;
-    };
 
 
     // Mention notification

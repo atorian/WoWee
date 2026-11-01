@@ -40,8 +40,6 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v6
-      with:
-        submodules: true
 
     - name: Cache apt packages
       uses: actions/cache@v4
@@ -185,8 +183,6 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v6
-      with:
-        submodules: true
 
     - name: Install dependencies
       run: |
@@ -496,8 +492,6 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v6
-      with:
-        submodules: true
 
     - name: Set up MSYS2
       uses: msys2/setup-msys2@v2
@@ -639,8 +633,6 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v6
-      with:
-        submodules: true
 
     - name: Set up MSYS2
       uses: msys2/setup-msys2@v2
@@ -784,7 +776,6 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v6
       with:
-        submodules: true
         # The APK takes its version from the nearest tag, which a shallow
         # clone does not fetch. Without them the build falls back to 0.0.0.
         fetch-depth: 0

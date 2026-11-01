@@ -1,4 +1,5 @@
 #include "game/zone_manager.hpp"
+#include "game/game_data.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "core/logger.hpp"
 #include <algorithm>
@@ -544,24 +545,13 @@ std::vector<std::string> ZoneManager::getAllMusicPaths() const {
     return out;
 }
 
-void ZoneManager::enrichFromDBC(pipeline::AssetManager* assets) {
-    if (!assets) return;
-
-    auto areaDbc = assets->loadDBC("AreaTable.dbc");
-    auto zoneMusicDbc = assets->loadDBC("ZoneMusic.dbc");
-    auto soundDbc = assets->loadDBC("SoundEntries.dbc");
-
-    if (!areaDbc || !areaDbc->isLoaded()) {
-        LOG_WARNING("ZoneManager::enrichFromDBC: AreaTable.dbc not available");
-        return;
-    }
+void ZoneManager::enrichFromDBC(const GameData& data, pipeline::AssetManager& assets) {
+    const auto areaDbc = data.table("AreaTable.dbc", 3, "which zone an area belongs to");
+    auto zoneMusicDbc = assets.loadDBC("ZoneMusic.dbc");
+    auto soundDbc = assets.loadDBC("SoundEntries.dbc");
 
     const uint32_t numAreas = areaDbc->getRecordCount();
     const uint32_t areaFields = areaDbc->getFieldCount();
-    if (areaFields < 3) {
-        LOG_WARNING("ZoneManager::enrichFromDBC: AreaTable.dbc has too few fields (", areaFields, ")");
-        return;
-    }
 
     // ID, ContinentID, ParentAreaNum are the first three fields in the client
     // layouts supported here. Preserve this relationship even when the music
@@ -660,7 +650,7 @@ void ZoneManager::enrichFromDBC(pipeline::AssetManager* assets) {
         (void)zoneId;
         auto& paths = zone.musicPaths;
         const auto missing = [&](const std::string& path) {
-            if (path.rfind("file:", 0) == 0 || assets->fileExists(path)) return false;
+            if (path.rfind("file:", 0) == 0 || assets.fileExists(path)) return false;
             if (firstDropped.empty()) firstDropped = path;
             ++dropped;
             return true;

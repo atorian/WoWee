@@ -47,7 +47,6 @@ struct WoweeLoadingScreen {
         Classic   = 0,
         TBC       = 1,
         WotLK     = 2,
-        TurtleWoW = 3,
     };
 
     struct Entry {

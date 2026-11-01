@@ -19,8 +19,7 @@ struct ExpansionProfile {
     uint8_t majorVersion = 0;
     uint8_t minorVersion = 0;
     uint8_t patchVersion = 0;
-    uint16_t build = 0;           // Realm build (sent in LOGON_CHALLENGE)
-    uint16_t worldBuild = 0;      // World build (sent in CMSG_AUTH_SESSION, defaults to build)
+    uint16_t build = 0;           // Client build (LOGON_CHALLENGE and CMSG_AUTH_SESSION)
     uint8_t protocolVersion = 0;  // SRP auth protocol version byte
     // Client header fields used in LOGON_CHALLENGE.
     // Defaults match a typical Windows x86 client.
@@ -28,11 +27,17 @@ struct ExpansionProfile {
     std::string platform = "x86";
     std::string os = "Win";
     std::string locale = "enUS";
-    uint32_t timezone = 0;
+    std::optional<uint32_t> timezone;  // empty: this machine's standard offset
     std::string dataPath;      // Absolute path to expansion data dir
     uint32_t maxLevel = 60;
     std::vector<uint32_t> races;
     std::vector<uint32_t> classes;
+    /// The game data this expansion uses (AGENTS.md, "Game data: what an
+    /// expansion uses is required"): its own files in dataPath, and the DBC
+    /// tables by file name. GameData reads nothing else and stops the game
+    /// when one of these cannot be read.
+    std::vector<std::string> files;
+    std::vector<std::string> tables;
 
     /// The RSA public key this realm signs its Warden module with, 256 bytes.
     ///

@@ -2,6 +2,7 @@
 // Owns and manages transport path data - DBC, taxi, and custom paths.
 // Ported from TransportManager (path management subset).
 #include "game/transport_path_repository.hpp"
+#include "game/game_data.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "pipeline/dbc_loader.hpp"
@@ -255,21 +256,13 @@ void TransportPathRepository::loadPathFromNodes(uint32_t pathId, const std::vect
 
 // ── DBC: TransportAnimation ────────────────────────────────────
 
-bool TransportPathRepository::loadTransportAnimationDBC(pipeline::AssetManager* assetMgr) {
+bool TransportPathRepository::loadTransportAnimationDBC(const GameData& data) {
     LOG_INFO("Loading TransportAnimation.dbc...");
 
-    if (!assetMgr) {
-        LOG_ERROR("AssetManager is null");
-        return false;
-    }
-
-    // Through loadDBC, which lays a realm's over_TransportAnimation.dbc over
-    // the client's: its new ships and their paths are only in there.
-    auto loaded = assetMgr->loadDBC("TransportAnimation.dbc");
-    if (!loaded || !loaded->isLoaded()) {
-        LOG_WARNING("TransportAnimation.dbc not found - transports will use fallback paths");
-        return false;
-    }
+    // Through the asset manager's loadDBC, which lays a realm's
+    // over_TransportAnimation.dbc over the client's: its new ships and their
+    // paths are only in there.
+    const auto loaded = data.table("TransportAnimation.dbc", 7, "the paths ships and zeppelins sail");
     const pipeline::DBCFile& dbc = *loaded;
 
     LOG_INFO("TransportAnimation.dbc: ", dbc.getRecordCount(), " records, ",
@@ -639,20 +632,12 @@ const TaxiRoute* TransportPathRepository::findTaxiRoute(uint32_t taxiPathId) con
     return it != taxiRoutes_.end() ? &it->second : nullptr;
 }
 
-bool TransportPathRepository::loadTaxiPathNodeDBC(pipeline::AssetManager* assetMgr) {
+bool TransportPathRepository::loadTaxiPathNodeDBC(const GameData& data) {
     LOG_INFO("Loading TaxiPathNode.dbc...");
 
-    if (!assetMgr) {
-        LOG_ERROR("AssetManager is null");
-        return false;
-    }
-
-    // Through loadDBC for the same reason as TransportAnimation.dbc.
-    auto loaded = assetMgr->loadDBC("TaxiPathNode.dbc");
-    if (!loaded || !loaded->isLoaded()) {
-        LOG_WARNING("TaxiPathNode.dbc not found - MO_TRANSPORT will use fallback paths");
-        return false;
-    }
+    // Through the asset manager's loadDBC for the same reason as
+    // TransportAnimation.dbc.
+    const auto loaded = data.table("TaxiPathNode.dbc", 9, "the paths MO_TRANSPORT boats and elevators take");
     const pipeline::DBCFile& dbc = *loaded;
 
     LOG_INFO("TaxiPathNode.dbc: ", dbc.getRecordCount(), " records, ",

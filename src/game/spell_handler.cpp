@@ -1,10 +1,15 @@
 #include "game/spell_handler.hpp"
+#include "game/game_data.hpp"
+#include "achievement/services/achievements.hpp"
+#include "game/achievement_data.hpp"
 #include "core/event_bus.hpp"
 #include "game/game_events.hpp"
 #include "game/protocol_constants.hpp"
+#include "game/update_field_table.hpp"
+#include "game/world_packets.hpp"
 #include "game/gather_spells.hpp"
 #include "game/spell_classification.hpp"
-#include "game/pet_action.hpp"
+#include "pet/domain/actions.hpp"
 #include "game/chat_log.hpp"
 #include "game/craft_recipe.hpp"
 #include "game/frame_xml_events.hpp"
@@ -26,6 +31,7 @@
 #include <cstdio>
 #include <sstream>
 #include <unordered_set>
+#include <utility>
 
 namespace wowee {
 namespace game {
@@ -188,8 +194,7 @@ uint32_t SpellHandler::gatherRequiredSkillRank(uint64_t goGuid) const {
     const auto* info = queries_.gameObjectInfo(go->getEntry());
     if (!info || !info->hasData || info->data[0] == 0) return 0;
 
-    auto lockDbc = assets_ ? assets_->loadDBC("Lock.dbc") : nullptr;
-    if (!lockDbc || !lockDbc->isLoaded() || lockDbc->getFieldCount() < 33) return 0;
+    const auto lockDbc = data_.table("Lock.dbc", 33, "the skill a gathering node asks for");
 
     const uint32_t lockId = info->data[0];
     for (uint32_t row = 0; row < lockDbc->getRecordCount(); ++row) {
@@ -327,14 +332,17 @@ std::string SpellHandler::formatSpellNameList(const std::vector<uint32_t>& spell
 
 SpellHandler::SpellHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
                            ChatLog& chat, SpellQueries& queries, const core::CVarStore& cvars,
-                           pipeline::AssetManager* assets)
+                           const GameData& data)
     : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat), queries_(queries),
-      cvars_(cvars), assets_(assets) {
+      cvars_(cvars), data_(data) {
     // A spell bought from a trainer is in the book from the moment the
     // purchase succeeds; SMSG_LEARNED_SPELL can come after the trainer
     // window has redrawn from SPELLS_CHANGED.
     subscriptions_.push_back(events_.subscribe<events::TrainerSpellLearned>(
         [this](const events::TrainerSpellLearned& e) { addKnownSpell(e.spellId); }));
+    for (auto& subscription : subscribeAchievementNotices(
+             events_, chat_, frameXml_, [this](uint32_t id) { return queries_.achievementName(id); }))
+        subscriptions_.push_back(std::move(subscription));
 }
 
 void SpellHandler::raiseUiError(const std::string& message) {
@@ -469,35 +477,6 @@ void SpellHandler::registerOpcodes(DispatchTable& table) {
 // Public API
 // ============================================================
 
-bool SpellHandler::isGameObjectInteractionCasting() const {
-    return casting_ && currentCastSpellId_ == 0 && queries_.pendingGameObjectInteraction() != 0;
-}
-
-bool SpellHandler::isTargetCasting() const {
-    return getUnitCastState(queries_.currentTargetGuid()) != nullptr;
-}
-
-uint32_t SpellHandler::getTargetCastSpellId() const {
-    auto* s = getUnitCastState(queries_.currentTargetGuid());
-    return s ? s->spellId : 0;
-}
-
-float SpellHandler::getTargetCastProgress() const {
-    auto* s = getUnitCastState(queries_.currentTargetGuid());
-    return (s && s->timeTotal > 0.0f)
-        ? (s->timeTotal - s->timeRemaining) / s->timeTotal : 0.0f;
-}
-
-float SpellHandler::getTargetCastTimeRemaining() const {
-    auto* s = getUnitCastState(queries_.currentTargetGuid());
-    return s ? s->timeRemaining : 0.0f;
-}
-
-bool SpellHandler::isTargetCastInterruptible() const {
-    auto* s = getUnitCastState(queries_.currentTargetGuid());
-    return s ? s->interruptible : true;
-}
-
 void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     LOG_DEBUG("castSpell: spellId=", spellId, " target=0x", std::hex, targetGuid, std::dec);
     if (!sender_.worldCommandAllowed("a cast")) return;
@@ -582,9 +561,9 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     // no aura, so there is nothing in the buff bar to right-click and this is
     // the only way to send one back - without it the button could only ever
     // summon, which is why pressing it again just produced the same critter.
-    if (spellId != 0 && spellId == queries_.activeCritterSpellId() &&
-        queries_.activeCritterGuid() != 0) {
-        queries_.dismissCritter();
+    if (spellId != 0 && spellId == character_.companionSpellId &&
+        character_.companionGuid != 0) {
+        dismissCompanion();
         return;
     }
 
@@ -1133,152 +1112,112 @@ void SpellHandler::confirmTalentWipe() {
 }
 
 const std::vector<SpellHandler::SpellBookTab>& SpellHandler::getSpellBookTabs() {
-    // Must be an instance member, not static - a static is shared across all
-    // SpellHandler instances, so switching characters with the same spell count
-    // would skip the rebuild and return the previous character's tabs.
+    // The first book query can precede SMSG_INITIAL_SPELLS (e.g. a trainer or
+    // a headless interface). Resolve its metadata before caching the view.
+    if (!spellNameCacheLoaded_ || !skillLineDbcLoaded_ || !skillLineAbilityLoaded_)
+        spellBookTabsDirty_ = true;
+    loadSpellNameCache();
+    loadSkillLineDbc();
+    loadSkillLineAbilityDbc();
     if (lastSpellCount_ == knownSpells_.size() && !spellBookTabsDirty_)
         return spellBookTabs_;
     lastSpellCount_ = knownSpells_.size();
     spellBookTabsDirty_ = false;
     spellBookTabs_.clear();
 
-    // Which SkillLine.dbc categories earn a tab of their own.
-    //
-    // Only the class one did, so everything else fell into General - and what
-    // falls into General is not a handful of odds and ends but every recipe
-    // the character knows. A miner's General tab listed Smelt Copper, Smelt
-    // Tin, Smelt Silver and the rest beside Hearthstone, and a tailor's ran to
-    // a hundred entries. The recipes belong under the skill that makes them.
-    static constexpr uint32_t SKILLLINE_CATEGORY_CLASS     = 7;
-    static constexpr uint32_t SKILLLINE_CATEGORY_SECONDARY = 9;   // Cooking, First Aid, Fishing
-    static constexpr uint32_t SKILLLINE_CATEGORY_PROFESSION = 11; // Mining, Tailoring, ...
-    // Category 9 is not only Cooking, First Aid and Fishing: it also holds
-    // every racial and every riding skill - Dwarven Racial, Horse Riding, Kodo
-    // Riding, twenty-four lines in all. Tabbing the category wholesale would
-    // put a tab named "Kodo Riding" beside Mining. So a secondary line earns
-    // one only when the character knows something in it that is actually made:
-    // a spell with reagents or a created item. That is the same question the
-    // General tab was answering wrongly, asked once here instead.
-    const auto lineHasRecipe = [this](uint32_t skillLine) {
-        for (uint32_t known : knownSpells_) {
-            auto kslIt = spellToSkillLine_.find(known);
-            if (kslIt == spellToSkillLine_.end() ||
-                kslIt->second != skillLine) continue;
-            auto cacheIt = spellNameCache_.find(known);
-            if (cacheIt == spellNameCache_.end()) continue;
-            if (cacheIt->second.createdItemId != 0) return true;
-            for (const auto& reagent : cacheIt->second.reagents) {
-                if (reagent.itemId != 0) return true;
-            }
-        }
-        return false;
-    };
-    const auto earnsOwnTab = [&](uint32_t category, uint32_t skillLine) {
-        if (category == SKILLLINE_CATEGORY_CLASS) return true;
-        if (category == SKILLLINE_CATEGORY_PROFESSION) return true;
-        if (category == SKILLLINE_CATEGORY_SECONDARY) return lineHasRecipe(skillLine);
-        return false;
-    };
-
+    constexpr uint32_t kClassSkill = 7;
+    constexpr uint32_t kTradeRecipe = 0x20;
+    constexpr uint32_t kHiddenInUi = 0x80;
     std::map<uint32_t, std::vector<uint32_t>> bySkillLine;
     std::vector<uint32_t> general;
-
     for (uint32_t spellId : knownSpells_) {
-        auto slIt = spellToSkillLine_.find(spellId);
-        if (slIt != spellToSkillLine_.end()) {
-            uint32_t skillLineId = slIt->second;
-            auto catIt = skillLineCategories_.find(skillLineId);
-            if (catIt != skillLineCategories_.end() &&
-                earnsOwnTab(catIt->second, skillLineId)) {
-                bySkillLine[skillLineId].push_back(spellId);
+        const auto data = spellNameCache_.find(spellId);
+        if (data != spellNameCache_.end() &&
+            (data->second.attr & (kTradeRecipe | kHiddenInUi)) != 0)
+            continue;
+        const auto line = spellToSkillLine_.find(spellId);
+        if (line != spellToSkillLine_.end()) {
+            const auto category = skillLineCategories_.find(line->second);
+            if (category != skillLineCategories_.end() && category->second == kClassSkill) {
+                bySkillLine[line->second].push_back(spellId);
                 continue;
             }
         }
+        // Profession openers, weapon skills and racial abilities belong in
+        // General. Recipes are listed by the profession UI, not the book.
         general.push_back(spellId);
     }
 
-    auto byName = [this](uint32_t a, uint32_t b) {
-        return getSpellName(a) < getSpellName(b);
+    const auto byNameAndRank = [this](uint32_t a, uint32_t b) {
+        const auto& nameA = getSpellName(a);
+        const auto& nameB = getSpellName(b);
+        if (nameA != nameB) return nameA < nameB;
+        const int rankA = spellclass::rankValue(getSpellRank(a));
+        const int rankB = spellclass::rankValue(getSpellRank(b));
+        if (rankA != rankB) return rankA < rankB;
+        return a < b;
     };
-
-    if (!general.empty()) {
-        std::sort(general.begin(), general.end(), byName);
-        spellBookTabs_.push_back({.name = "General", .texture = "Interface\\Icons\\INV_Misc_Book_09", .spellIds = std::move(general)});
-    }
-
-    // Each tab's own picture, from SkillLine.dbc's icon column. Every tab used
-    // to carry the same book, so the row of tabs down the side of the
-    // spellbook was a column of identical squares that said nothing about
-    // which was which - the tooltip was the only way to tell them apart.
-    //
-    // The book stays as the fallback: a skill line with no icon, or an icon
-    // this install cannot resolve, keeps what it had rather than going blank.
     static constexpr const char* kDefaultTabIcon = "Interface\\Icons\\INV_Misc_Book_09";
-    auto tabIcon = [this](uint32_t skillLineId) -> std::string {
-        auto it = skillLineIcons_.find(skillLineId);
-        if (it == skillLineIcons_.end()) return kDefaultTabIcon;
-        std::string path = queries_.iconPath(it->second);
-        return path.empty() ? kDefaultTabIcon : path;
-    };
-
-    // Down the side of the book in the order the kinds belong in, not in one
-    // alphabetical run: General, then the class's own lines, then the crafting
-    // ones. Sorting every tab by name alone dealt them together - Affliction,
-    // Alchemy, Arms, Blacksmithing - so a warlock's specialisations and their
-    // professions read as one undifferentiated column.
-    //
-    // Alphabetical within each kind, which is what the sort was right about.
-    const auto tabRank = [&](uint32_t skillLineId) {
-        auto catIt = skillLineCategories_.find(skillLineId);
-        if (catIt == skillLineCategories_.end()) return 3;
-        switch (catIt->second) {
-            case SKILLLINE_CATEGORY_CLASS:      return 0;
-            case SKILLLINE_CATEGORY_PROFESSION: return 1;
-            case SKILLLINE_CATEGORY_SECONDARY:  return 2;
-            default:                            return 3;
-        }
-    };
-
-    struct NamedTab {
-        int rank;
-        std::string name;
+    std::sort(general.begin(), general.end(), byNameAndRank);
+    // General exists even when it has no entries: stock FrameXML selects tab 1.
+    spellBookTabs_.push_back({.name = "General", .texture = kDefaultTabIcon,
+                             .spellIds = std::move(general)});
+    for (auto& [skillLine, spells] : bySkillLine) {
+        const auto name = skillLineNames_.find(skillLine);
         std::string icon;
-        std::vector<uint32_t> spells;
-    };
-    std::vector<NamedTab> named;
-    for (auto& [skillLineId, spells] : bySkillLine) {
-        auto nameIt = skillLineNames_.find(skillLineId);
-        std::string tabName = (nameIt != skillLineNames_.end()) ? nameIt->second : "Unknown";
-        std::sort(spells.begin(), spells.end(), byName);
-        named.push_back({.rank = tabRank(skillLineId), .name = std::move(tabName), .icon = tabIcon(skillLineId),
-                         .spells = std::move(spells)});
+        if (const auto found = skillLineIcons_.find(skillLine); found != skillLineIcons_.end())
+            icon = queries_.iconPath(found->second);
+        if (icon.empty()) {
+            if (warnedSpellBookIcons_.insert(skillLine).second) {
+                LOG_WARNING("Spellbook: no icon for skill line ", skillLine,
+                            "; using the default book icon");
+            }
+            icon = kDefaultTabIcon;
+        }
+        std::sort(spells.begin(), spells.end(), byNameAndRank);
+        spellBookTabs_.push_back({.name = name != skillLineNames_.end() ? name->second : "Unknown",
+                                 .texture = std::move(icon), .spellIds = std::move(spells)});
     }
-    std::sort(named.begin(), named.end(), [](const NamedTab& a, const NamedTab& b) {
-        if (a.rank != b.rank) return a.rank < b.rank;
-        return a.name < b.name;
-    });
+    std::sort(spellBookTabs_.begin() + 1, spellBookTabs_.end(),
+        [](const SpellBookTab& a, const SpellBookTab& b) { return a.name < b.name; });
 
-    for (auto& tab : named) {
-        spellBookTabs_.push_back({.name = std::move(tab.name), .texture = std::move(tab.icon),
-                                  .spellIds = std::move(tab.spells)});
+    uint32_t offset = 0;
+    for (auto& tab : spellBookTabs_) {
+        // Numeric ranks of the same named ability share one display entry.
+        // Rankless abilities stay independent, even if their names coincide.
+        std::unordered_map<std::string, size_t> rankedEntries;
+        for (size_t i = 0; i < tab.spellIds.size(); ++i) {
+            const uint32_t id = tab.spellIds[i];
+            const uint32_t slot = offset + static_cast<uint32_t>(i) + 1;
+            if (spellclass::rankValue(getSpellRank(id)) > 0 && !getSpellName(id).empty()) {
+                const auto [entry, inserted] = rankedEntries.emplace(
+                    getSpellName(id), tab.highestRankSlots.size());
+                if (!inserted) {
+                    tab.highestRankSlots[entry->second] = slot;
+                    continue;
+                }
+            }
+            tab.highestRankSlots.push_back(slot);
+        }
+        offset += static_cast<uint32_t>(tab.spellIds.size());
     }
-
     return spellBookTabs_;
+}
+
+uint32_t SpellHandler::getKnownSlotFromHighestRankSlot(uint32_t slot) {
+    if (slot == 0) return 0;
+    for (const auto& tab : getSpellBookTabs()) {
+        if (slot <= tab.highestRankSlots.size()) return tab.highestRankSlots[slot - 1];
+        slot -= static_cast<uint32_t>(tab.highestRankSlots.size());
+    }
+    return 0;
 }
 
 void SpellHandler::loadTalentDbc() {
     if (talentDbcLoaded_) return;
-
-    auto* am = assets_;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
     talentDbcLoaded_ = true;
 
-    // Load Talent.dbc
-    auto talentDbc = am->loadDBC("Talent.dbc");
-    if (talentDbc && talentDbc->isLoaded()) {
+    {
         const auto* talL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("Talent") : nullptr;
         const uint32_t tID = talL ? (*talL)["ID"] : 0;
         const uint32_t tTabID = talL ? (*talL)["TabID"] : 1;
@@ -1287,6 +1226,9 @@ void SpellHandler::loadTalentDbc() {
         const uint32_t tRank0 = talL ? (*talL)["RankSpell0"] : 4;
         const uint32_t tPrereq0 = talL ? (*talL)["PrereqTalent0"] : 9;
         const uint32_t tPrereqR0 = talL ? (*talL)["PrereqRank0"] : 12;
+        const auto talentDbc = data_.table(
+            "Talent.dbc", std::max({tID, tTabID, tRow, tCol, tRank0 + 4, tPrereq0 + 2, tPrereqR0 + 2}) + 1,
+            "the talent trees");
 
         uint32_t count = talentDbc->getRecordCount();
         for (uint32_t i = 0; i < count; ++i) {
@@ -1317,13 +1259,9 @@ void SpellHandler::loadTalentDbc() {
             talentCache_[entry.talentId] = entry;
         }
         LOG_INFO("Loaded ", talentCache_.size(), " talents from Talent.dbc");
-    } else {
-        LOG_WARNING("Could not load Talent.dbc");
     }
 
-    // Load TalentTab.dbc
-    auto tabDbc = am->loadDBC("TalentTab.dbc");
-    if (tabDbc && tabDbc->isLoaded()) {
+    {
         const auto* ttL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("TalentTab") : nullptr;
         // Cache field indices before the loop
         const uint32_t ttIdField    = ttL ? (*ttL)["ID"]             : 0;
@@ -1331,6 +1269,10 @@ void SpellHandler::loadTalentDbc() {
         const uint32_t ttClassField = ttL ? (*ttL)["ClassMask"]      : 20;
         const uint32_t ttOrderField = ttL ? (*ttL)["OrderIndex"]     : 22;
         const uint32_t ttBgField    = ttL ? (*ttL)["BackgroundFile"] : 23;
+        const auto tabDbc = data_.table(
+            "TalentTab.dbc",
+            std::max({ttIdField, ttNameField, ttClassField, ttOrderField, ttBgField}) + 1,
+            "the talent trees");
 
         uint32_t count = tabDbc->getRecordCount();
         for (uint32_t i = 0; i < count; ++i) {
@@ -1350,8 +1292,6 @@ void SpellHandler::loadTalentDbc() {
             }
         }
         LOG_INFO("Loaded ", talentTabCache_.size(), " talent tabs from TalentTab.dbc");
-    } else {
-        LOG_WARNING("Could not load TalentTab.dbc");
     }
 
     syncPreWotlkTalentsFromKnownSpells();
@@ -1542,13 +1482,13 @@ void SpellHandler::handleInitialSpells(network::Packet& packet) {
     if (!queries_.packetParsers().parseInitialSpells(packet, data)) return;
 
     knownSpells_ = {data.spellIds.begin(), data.spellIds.end()};
+    spellBookTabsDirty_ = true;
 
     LOG_DEBUG("Initial spells include: 527=", knownSpells_.count(527u),
               " 988=", knownSpells_.count(988u), " 1180=", knownSpells_.count(1180u));
 
-    // Ensure Attack and Hearthstone are always present
-    knownSpells_.insert(SPELL_ID_ATTACK);
-    knownSpells_.insert(SPELL_ID_HEARTHSTONE);
+    // The realm owns the learned set. Item effects (such as Hearthstone)
+    // are usable through inventory and must not become spellbook abilities.
     if (isPreWotlk()) {
         loadTalentDbc();
         syncPreWotlkTalentsFromKnownSpells();
@@ -2185,6 +2125,7 @@ void SpellHandler::handleRemovedSpell(network::Packet& packet) {
     if (packet.getRemainingSize() < minSz) return;
     uint32_t spellId = classicSpellId ? packet.readUInt16() : packet.readUInt32();
     knownSpells_.erase(spellId);
+    spellBookTabsDirty_ = true;
     syncPreWotlkTalentsFromKnownSpells();
     LOG_INFO("Removed spell: ", spellId);
     // Braced. The two lines below were indented as though they sat inside the
@@ -2241,6 +2182,7 @@ void SpellHandler::handleSupercededSpell(network::Packet& packet) {
     uint32_t newSpellId = classicSpellId ? packet.readUInt16() : packet.readUInt32();
 
     knownSpells_.erase(oldSpellId);
+    spellBookTabsDirty_ = true;
 
     const bool newSpellAlreadyAnnounced = knownSpells_.count(newSpellId) > 0;
 
@@ -2252,6 +2194,7 @@ void SpellHandler::handleSupercededSpell(network::Packet& packet) {
     // The new rank takes the old one's place on the buttons (ActionBarHandler).
     events_.publish(events::SpellSuperseded{.oldSpellId = oldSpellId,
                                                       .newSpellId = newSpellId});
+    frameXml_.fireFrameXmlEvent("SPELLS_CHANGED", {});
 
     if (!newSpellAlreadyAnnounced) {
         const std::string& newName = getSpellName(newSpellId);
@@ -2270,12 +2213,14 @@ void SpellHandler::handleUnlearnSpells(network::Packet& packet) {
     for (uint32_t i = 0; i < spellCount && packet.getRemainingSize() >= 4; ++i) {
         uint32_t spellId = packet.readUInt32();
         knownSpells_.erase(spellId);
+        spellBookTabsDirty_ = true;
         unlearned.push_back(spellId);
         LOG_INFO("  Unlearned spell: ", spellId);
     }
     // Off the buttons that held them (ActionBarHandler).
     if (!unlearned.empty()) {
         events_.publish(events::SpellsUnlearned{.spellIds = std::move(unlearned)});
+        frameXml_.fireFrameXmlEvent("SPELLS_CHANGED", {});
     }
 
     if (spellCount > 0) {
@@ -2349,6 +2294,16 @@ void SpellHandler::handleTalentsInfo(network::Packet& packet) {
     }
 }
 
+// The achievements the protocol feeds. A client built without them drops the
+// achievement packets, and says so once.
+static achievement::IAchievementsFeed* achievementsFeed(SpellQueries& queries) {
+    auto* feed = queries.achievementsFeed();
+    static bool said = false;
+    if (!feed && !std::exchange(said, true))
+        LOG_WARNING("Achievements are not wired into this client; achievement packets are dropped");
+    return feed;
+}
+
 void SpellHandler::handleAchievementEarned(network::Packet& packet) {
     // WotLK SMSG_ACHIEVEMENT_EARNED: packGUID player + uint32 achievementId + packedTime.
     // The player GUID is a PACKED guid, not a full uint64 - reading it as uint64 swallowed
@@ -2362,27 +2317,13 @@ void SpellHandler::handleAchievementEarned(network::Packet& packet) {
 
     const std::string achName = queries_.achievementName(achievementId);
 
-    bool isSelf = (guid == queries_.characterGuid());
+    // Only the player's own: what it raises - the chat line, the alert, the
+    // banner and ACHIEVEMENT_EARNED, which is what puts FrameXML's badge up -
+    // is about the player reading it. Fired for everyone, a stranger turning in
+    // a quest nearby put their achievement badge on this player's screen.
+    const bool isSelf = (guid == queries_.characterGuid());
     if (isSelf) {
-        char buf[256];
-        if (!achName.empty()) {
-            std::snprintf(buf, sizeof(buf), "Achievement earned: %s", achName.c_str());
-        } else {
-            std::snprintf(buf, sizeof(buf), "Achievement earned! (ID %u)", achievementId);
-        }
-        chat_.addSystemChatMessage(buf);
-
-        queries_.recordAchievementEarned(achievementId, earnDate);
-        events_.publish(events::AchievementEarned{achievementId, achName});
-        // Inside the branch, not after it. ACHIEVEMENT_EARNED is what raises
-        // FrameXML's badge, and it is about the player who is reading it -
-        // somebody else's is CHAT_MSG_ACHIEVEMENT, which the server sends
-        // separately and this client already handles. Fired for everyone, a
-        // stranger turning in a quest nearby put their achievement badge on
-        // this player's screen.
-        if (frameXml_.frameXmlListening())
-            frameXml_.fireFrameXmlEvent("ACHIEVEMENT_EARNED",
-                                           {std::to_string(achievementId)});
+        if (auto* feed = achievementsFeed(queries_)) feed->onEarned(achievementId, earnDate);
     }
     // No line for somebody else's, because the server has already sent one.
     // AchievementMgr::SendAchievementEarned puts a CHAT_MSG_ACHIEVEMENT through
@@ -2460,6 +2401,7 @@ void SpellHandler::resetCastState() {
 void SpellHandler::resetAllState() {
     character_ = {};
     knownSpells_.clear();
+    spellBookTabsDirty_ = true;
     spellCooldowns_.clear();
     spellCooldownTotals_.clear();
     playerAuras_.clear();
@@ -2508,26 +2450,16 @@ static const std::string SPELL_EMPTY_STRING;
 
 void SpellHandler::loadSpellNameCache() const {
     if (spellNameCacheLoaded_) return;
-
-    auto* am = assets_;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
     spellNameCacheLoaded_ = true;
 
-    auto dbc = am->loadDBC("Spell.dbc");
-    if (!dbc || !dbc->isLoaded()) {
-        LOG_WARNING("Trainer: Could not load Spell.dbc for spell names");
-        return;
-    }
-
-    if (dbc->getFieldCount() < 148) {
-        LOG_WARNING("Trainer: Spell.dbc has too few fields (", dbc->getFieldCount(), ")");
-        return;
-    }
-
     const auto* spellL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("Spell") : nullptr;
+    // The columns every spell is read for; the rest below are each taken only
+    // where the layout names them and the file has them.
+    const uint32_t idField   = spellL ? (*spellL)["ID"]   : 0;
+    const uint32_t nameField = spellL ? (*spellL)["Name"] : 136;
+    const uint32_t rankField = spellL ? (*spellL)["Rank"] : 153;
+    const auto dbc = data_.table("Spell.dbc", std::max({idField, nameField, rankField}) + 1,
+                                 "the names, ranks and costs of spells");
 
     uint32_t schoolMaskField = 0, schoolEnumField = 0;
     bool hasSchoolMask = false, hasSchoolEnum = false;
@@ -2582,10 +2514,6 @@ void SpellHandler::loadSpellNameCache() const {
         if (f != 0xFFFFFFFF && f < dbc->getFieldCount()) targetsField = f;
     }
 
-    // Cache field indices before the loop to avoid repeated layout lookups
-    const uint32_t idField   = spellL ? (*spellL)["ID"]   : 0;
-    const uint32_t nameField = spellL ? (*spellL)["Name"] : 136;
-    const uint32_t rankField = spellL ? (*spellL)["Rank"] : 153;
     const uint32_t fieldCount = dbc->getFieldCount();
 
     // Which row of SpellDescriptionVariables.dbc a spell's $<name> tokens are
@@ -2600,23 +2528,20 @@ void SpellHandler::loadSpellNameCache() const {
     }
     if (descVarField == 0xFFFFFFFF && fieldCount == 234) descVarField = 232;
 
-    // The declarations themselves, read once. Thirty rows in 3.3.5.
-    if (spellDescriptionVariables_.empty()) {
-        if (auto varDbc = am->loadDBC("SpellDescriptionVariables.dbc");
-            varDbc && varDbc->isLoaded() && varDbc->getFieldCount() >= 2) {
-            for (uint32_t i = 0; i < varDbc->getRecordCount(); ++i) {
-                const uint32_t vid = varDbc->getUInt32(i, 0);
-                std::string text = varDbc->getString(i, 1);
-                if (vid != 0 && !text.empty()) {
-                    spellDescriptionVariables_[vid] = std::move(text);
-                }
+    // The declarations themselves, read once. Thirty rows in 3.3.5. Only a
+    // Spell.dbc with the column refers to them, so only then are they needed.
+    if (descVarField != 0xFFFFFFFF && spellDescriptionVariables_.empty()) {
+        const auto varDbc = data_.table("SpellDescriptionVariables.dbc", 2,
+                                        "the named values ($<name>) in spell descriptions");
+        for (uint32_t i = 0; i < varDbc->getRecordCount(); ++i) {
+            const uint32_t vid = varDbc->getUInt32(i, 0);
+            std::string text = varDbc->getString(i, 1);
+            if (vid != 0 && !text.empty()) {
+                spellDescriptionVariables_[vid] = std::move(text);
             }
-            LOG_INFO("Loaded ", spellDescriptionVariables_.size(),
-                     " spell description variable set(s)");
-        } else {
-            LOG_WARNING("SpellDescriptionVariables.dbc did not load; spell descriptions show "
-                        "their named values ($<name>) blank");
         }
+        LOG_INFO("Loaded ", spellDescriptionVariables_.size(),
+                 " spell description variable set(s)");
     }
     // What a recipe makes and what it consumes, from the layout rather than
     // from three WotLK column numbers written out here.
@@ -2693,7 +2618,7 @@ void SpellHandler::loadSpellNameCache() const {
     const uint32_t targetAuraStateField = spellL ? spellL->field("TargetAuraState") : 0xFFFFFFFF;
     const uint32_t spellVisualIdField = spellL ? spellL->field("SpellVisualID") : 0xFFFFFFFF;
     // Read off the file's own shape. Only TBC's layout named these two, so on
-    // WotLK, Classic and Turtle every cooldown this client worked out for itself
+    // WotLK and Classic every cooldown this client worked out for itself
     // came back zero - which is most of them, since the server sends a cooldown
     // only when it is correcting one the client should already have.
     const auto timing = pipeline::detectSpellTimingFields(dbc.get(), spellL);
@@ -2710,6 +2635,14 @@ void SpellHandler::loadSpellNameCache() const {
             SpellNameEntry entry;
             entry.name = std::move(name);
             entry.rank = std::move(rank);
+            // Locale strings end immediately before the next locstring's
+            // flags word. Preserve names from multilingual extracted DBCs.
+            for (uint32_t locale = 0; rankField > nameField &&
+                 locale < 16 && locale + 1 < rankField - nameField; ++locale) {
+                auto localized = dbc->getStringInLocale(i, nameField, locale);
+                if (!localized.empty()) entry.localizedNames.emplace_back(
+                    std::move(localized), dbc->getStringInLocale(i, rankField, locale));
+            }
             if (descriptionField != 0xFFFFFFFF) {
                 entry.description = dbc->getString(i, descriptionField);
             }
@@ -2789,8 +2722,8 @@ void SpellHandler::loadSpellNameCache() const {
             spellNameCache_[id] = std::move(entry);
         }
     }
-    auto durDbc = am->loadDBC("SpellDuration.dbc");
-    if (durDbc && durDbc->isLoaded()) {
+    {
+        const auto durDbc = data_.table("SpellDuration.dbc", 2, "how long a spell's effect lasts");
         std::unordered_map<uint32_t, float> durMap;
         for (uint32_t di = 0; di < durDbc->getRecordCount(); ++di) {
             uint32_t durId = durDbc->getUInt32(di, 0);
@@ -2811,14 +2744,13 @@ void SpellHandler::loadSpellNameCache() const {
     // rather than mistaking a raw index for a distance in yards.
     const auto* rangeL = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("SpellRange") : nullptr;
-    auto rangeDbc = am->loadDBC("SpellRange.dbc");
+    // MaxRange is column 4 in the WotLK file, read where no layout is loaded.
+    const uint32_t maxRangeField = rangeL ? rangeL->field("MaxRange") : 4;
     std::unordered_map<uint32_t, float> rangeMap;
-    if (rangeDbc && rangeDbc->isLoaded() && rangeL) {
-        const uint32_t maxRangeField = rangeL->field("MaxRange");
-        if (maxRangeField != 0xFFFFFFFF && maxRangeField < rangeDbc->getFieldCount()) {
-            for (uint32_t ri = 0; ri < rangeDbc->getRecordCount(); ++ri) {
-                rangeMap[rangeDbc->getUInt32(ri, 0)] = rangeDbc->getFloat(ri, maxRangeField);
-            }
+    if (maxRangeField != 0xFFFFFFFF) {
+        const auto rangeDbc = data_.table("SpellRange.dbc", maxRangeField + 1, "how far a spell reaches");
+        for (uint32_t ri = 0; ri < rangeDbc->getRecordCount(); ++ri) {
+            rangeMap[rangeDbc->getUInt32(ri, 0)] = rangeDbc->getFloat(ri, maxRangeField);
         }
     }
     for (auto& [sid, entry] : spellNameCache_) {
@@ -2831,19 +2763,15 @@ void SpellHandler::loadSpellNameCache() const {
 
 void SpellHandler::loadSkillLineAbilityDbc() const {
     if (skillLineAbilityLoaded_) return;
-
-    auto* am = assets_;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
     skillLineAbilityLoaded_ = true;
 
-    auto slaDbc = am->loadDBC("SkillLineAbility.dbc");
-    if (slaDbc && slaDbc->isLoaded()) {
+    {
         const auto* slaL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("SkillLineAbility") : nullptr;
         const uint32_t slaSkillField = slaL ? (*slaL)["SkillLineID"] : 1;
         const uint32_t slaSpellField = slaL ? (*slaL)["SpellID"]     : 2;
+        const auto slaDbc = data_.table("SkillLineAbility.dbc",
+                                        std::max(slaSkillField, slaSpellField) + 1,
+                                        "which profession a spell belongs to");
         const uint32_t slaFieldCount = slaDbc->getFieldCount();
         const bool hasDiffFields = (slaFieldCount > 11);
         for (uint32_t i = 0; i < slaDbc->getRecordCount(); i++) {
@@ -2874,21 +2802,17 @@ const std::string& SpellHandler::getSpellFocusName(uint32_t focusId) {
     static const std::string kEmpty;
     if (!spellFocusDbcLoaded_) {
         spellFocusDbcLoaded_ = true;
-        auto* am = assets_;
-        if (am && am->isInitialized()) {
-            auto dbc = am->loadDBC("SpellFocusObject.dbc");
-            // Layout is stable across expansions: ID(0) + Name locstring
-            // whose English text sits at field 1.
-            if (dbc && dbc->isLoaded() && dbc->getFieldCount() >= 2) {
-                for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-                    uint32_t id = dbc->getUInt32(i, 0);
-                    std::string name = dbc->getString(i, 1);
-                    if (id != 0 && !name.empty())
-                        spellFocusNames_[id] = std::move(name);
-                }
-                LOG_INFO("Loaded ", spellFocusNames_.size(), " spell focus object names");
-            }
+        // Layout is stable across expansions: ID(0) + Name locstring
+        // whose English text sits at field 1.
+        const auto dbc = data_.table("SpellFocusObject.dbc", 2,
+                                     "the object a spell must be cast near");
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            uint32_t id = dbc->getUInt32(i, 0);
+            std::string name = dbc->getString(i, 1);
+            if (id != 0 && !name.empty())
+                spellFocusNames_[id] = std::move(name);
         }
+        LOG_INFO("Loaded ", spellFocusNames_.size(), " spell focus object names");
     }
     auto it = spellFocusNames_.find(focusId);
     return it != spellFocusNames_.end() ? it->second : kEmpty;
@@ -2898,22 +2822,18 @@ const std::string& SpellHandler::getTotemCategoryName(uint32_t categoryId) {
     static const std::string kEmpty;
     if (!totemCategoryDbcLoaded_) {
         totemCategoryDbcLoaded_ = true;
-        auto* am = assets_;
-        if (am && am->isInitialized()) {
-            // TBC/WotLK only - absent in Vanilla, where totem failures carry
-            // item ids instead of category ids.
-            auto dbc = am->loadDBC("TotemCategory.dbc");
-            // ID(0) + Name locstring whose English text sits at field 1.
-            if (dbc && dbc->isLoaded() && dbc->getFieldCount() >= 2) {
-                for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
-                    uint32_t id = dbc->getUInt32(i, 0);
-                    std::string name = dbc->getString(i, 1);
-                    if (id != 0 && !name.empty())
-                        totemCategoryNames_[id] = std::move(name);
-                }
-                LOG_INFO("Loaded ", totemCategoryNames_.size(), " totem category names");
-            }
+        // TBC/WotLK only - absent in Vanilla, where totem failures carry item
+        // ids instead of category ids, so it is asked for only where it is.
+        // ID(0) + Name locstring whose English text sits at field 1.
+        const auto dbc = data_.table("TotemCategory.dbc", 2,
+                                     "the tool a spell's failure names");
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            uint32_t id = dbc->getUInt32(i, 0);
+            std::string name = dbc->getString(i, 1);
+            if (id != 0 && !name.empty())
+                totemCategoryNames_[id] = std::move(name);
         }
+        LOG_INFO("Loaded ", totemCategoryNames_.size(), " totem category names");
     }
     auto it = totemCategoryNames_.find(categoryId);
     return it != totemCategoryNames_.end() ? it->second : kEmpty;
@@ -3057,10 +2977,7 @@ const std::string& SpellHandler::getSpellDescription(uint32_t spellId) const {
 
 std::string SpellHandler::getEnchantName(uint32_t enchantId) const {
     if (enchantId == 0) return {};
-    auto* am = assets_;
-    if (!am || !am->isInitialized()) return {};
-    auto dbc = am->loadDBC("SpellItemEnchantment.dbc");
-    if (!dbc || !dbc->isLoaded()) return {};
+    const auto dbc = data_.table("SpellItemEnchantment.dbc", 1, "the name of an enchantment");
     const auto* sieL = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("SpellItemEnchantment") : nullptr;
     const uint32_t nameField = pipeline::detectEnchantmentNameField(dbc.get(), sieL);
@@ -3074,10 +2991,7 @@ std::string SpellHandler::getEnchantName(uint32_t enchantId) const {
 
 uint32_t SpellHandler::getEnchantGemItem(uint32_t enchantId) const {
     if (enchantId == 0) return 0;
-    auto* am = assets_;
-    if (!am || !am->isInitialized()) return 0;
-    auto dbc = am->loadDBC("SpellItemEnchantment.dbc");
-    if (!dbc || !dbc->isLoaded()) return 0;
+    const auto dbc = data_.table("SpellItemEnchantment.dbc", 1, "the gem in a socket");
     const auto* sieL = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("SpellItemEnchantment") : nullptr;
     const uint32_t gemField = pipeline::detectEnchantmentGemItemField(dbc.get(), sieL);
@@ -3217,6 +3131,7 @@ const std::string* SpellHandler::spellDescriptionVariables(uint32_t variableId) 
 
 void SpellHandler::resetSpellDbcCaches() {
     spellNameCacheLoaded_ = false;
+    spellBookTabsDirty_ = true;
     spellNameCache_.clear();
     spellDescriptionVariables_.clear();
     skillLineDbcLoaded_ = false;
@@ -3347,23 +3262,14 @@ const TotemSlot& SpellHandler::totemSlot(int slot) const {
 void SpellHandler::loadSkillLineDbc() const {
     if (skillLineDbcLoaded_) return;
 
-    auto* am = assets_;
-    // Not an attempt: the assets are not there to read yet, and a
-    // caller can reach this before they are. Marking it loaded here
-    // meant one early call disabled this file for the whole session.
-    if (!am || !am->isInitialized()) return;
     skillLineDbcLoaded_ = true;
-
-    auto dbc = am->loadDBC("SkillLine.dbc");
-    if (!dbc || !dbc->isLoaded()) {
-        LOG_WARNING("GameHandler: Could not load SkillLine.dbc");
-        return;
-    }
 
     const auto* slL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("SkillLine") : nullptr;
     const uint32_t slIdField   = slL ? (*slL)["ID"]       : 0;
     const uint32_t slCatField  = slL ? (*slL)["Category"] : 1;
     const uint32_t slNameField = slL ? (*slL)["Name"]     : 3;
+    const auto dbc = data_.table("SkillLine.dbc", std::max({slIdField, slCatField, slNameField}) + 1,
+                                 "the skills tab");
     // The icon column moved between expansions with the locale block in front
     // of it: 37 where there is a description and an alternate verb, 21 in the
     // vanilla-era file that has neither. Both were read off the files rather
@@ -3402,11 +3308,7 @@ void SpellHandler::loadSkillLineDbc() const {
     // itself gives, which is the order the original tab draws them in:
     // Attributes, Class Skills, Professions, Secondary Skills, Weapon Skills,
     // Armor Proficiencies, Languages, Not Displayed.
-    auto catDbc = am->loadDBC("SkillLineCategory.dbc");
-    if (!catDbc || !catDbc->isLoaded()) {
-        LOG_WARNING("GameHandler: Could not load SkillLineCategory.dbc");
-        return;
-    }
+    const auto catDbc = data_.table("SkillLineCategory.dbc", 2, "the skills tab's headings");
     // Nineteen fields: the id, seventeen locale columns, and the sort index
     // last. Taken from the end rather than by number so a shorter localised
     // build still finds it.
@@ -3422,6 +3324,73 @@ void SpellHandler::loadSkillLineDbc() const {
     }
     LOG_INFO("GameHandler: Loaded ", skillCategoryNames_.size(),
              " skill categories");
+}
+
+void SpellHandler::playerAuraFieldsArrived(const FlatFieldMap& allFields, FrameXmlEvents& packetEvents) {
+    if (!isPreWotlk()) return;
+
+    const uint16_t ufAuras     = fieldIndex(UF::UNIT_FIELD_AURAS);
+    const uint16_t ufAuraFlags = fieldIndex(UF::UNIT_FIELD_AURAFLAGS);
+    if (ufAuras == 0xFFFF) return;
+
+    bool hasAuraField = false;
+    for (const auto& [fk, fv] : allFields) {
+        if (fk >= ufAuras && fk < ufAuras + 48) { hasAuraField = true; break; }
+    }
+    if (!hasAuraField) return;
+
+    resetPlayerAuras(48);
+    uint64_t nowMs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    for (int slot = 0; slot < 48; ++slot) {
+        auto it = allFields.find(static_cast<uint16_t>(ufAuras + slot));
+        if (it != allFields.end() && it->second != 0) {
+            AuraSlot& a = playerAuras_[slot];
+            a.spellId = it->second;
+            // Read aura flag byte: packed 4-per-uint32 at ufAuraFlags
+            uint8_t aFlag = 0;
+            if (ufAuraFlags != 0xFFFF) {
+                auto fit = allFields.find(static_cast<uint16_t>(ufAuraFlags + slot / 4));
+                if (fit != allFields.end())
+                    aFlag = static_cast<uint8_t>((fit->second >> ((slot % 4) * 8)) & 0xFF);
+            }
+            // Normalize pre-WotLK harmful bit (0x02) to WotLK debuff bit (0x80)
+            // so downstream code checking for 0x80 works consistently.
+            if (aFlag & 0x02)
+                aFlag = (aFlag & ~0x02) | 0x80;
+            a.flags = aFlag;
+            a.durationMs = -1;
+            a.maxDurationMs = -1;
+            a.casterGuid = queries_.characterGuid();
+            a.receivedAtMs = nowMs;
+        }
+    }
+    LOG_DEBUG("[pre-WotLK] Rebuilt playerAuras from UNIT_FIELD_AURAS");
+    refreshRestorationFromPlayerAuras();
+    // How many the player actually has, said once. "BuffButton1 - NOT BUILT"
+    // means the interface asked UnitAura for the first buff and got nothing,
+    // and a character with no buffs is the correct reason for that - this
+    // separates it from the interface never having asked.
+    static bool saidAuraCount = false;
+    if (!saidAuraCount) {
+        saidAuraCount = true;
+        LOG_WARNING("player auras on first rebuild: ", playerAuras_.size());
+    }
+    packetEvents.fireFrameXmlEvent("UNIT_AURA", {"player"});
+    // The 1.12 name for the same news, carrying no unit - which is how a
+    // vanilla interface hears that its buffs changed at all.
+    packetEvents.fireFrameXmlEvent("PLAYER_AURAS_CHANGED", {});
+    queries_.announceCompanionChange();
+    // Tracking is one of these auras, and the minimap's tracking icon is drawn
+    // from whichever tracking spell is active - GetTrackingTexture walks the
+    // player's tracking spells and asks exactly this aura list. The icon
+    // updates on MINIMAP_UPDATE_TRACKING and nothing else, so it never changed.
+    //
+    // Here rather than at SetTracking, and that is what makes it complete
+    // rather than half: both routes end in the aura arriving, whether the
+    // spell was cast from the interface's dropdown or from a button.
+    packetEvents.fireFrameXmlEvent("MINIMAP_UPDATE_TRACKING", {});
 }
 
 void SpellHandler::extractSkillFields(const FlatFieldMap& fields) {
@@ -4157,7 +4126,7 @@ void SpellHandler::handleExtraAuraInfo(network::Packet& packet, bool isInit) {
 }
 
 void SpellHandler::handleSpellDispelLog(network::Packet& packet) {
-    // WotLK/Classic/Turtle: packed casterGuid + packed victimGuid + uint32 dispelSpell + uint8 isStolen
+    // WotLK/Classic: packed casterGuid + packed victimGuid + uint32 dispelSpell + uint8 isStolen
     // TBC:                  full uint64 casterGuid + full uint64 victimGuid + ...
     // + uint32 count + count × (uint32 dispelled_spellId + uint32 unk)
     const bool dispelUsesFullGuid = isActiveExpansion("tbc");
@@ -4247,7 +4216,7 @@ void SpellHandler::handleSpellDispelLog(network::Packet& packet) {
 void SpellHandler::handleSpellStealLog(network::Packet& packet) {
     // Sent to the CASTER (Mage) when Spellsteal succeeds.
     // Wire format mirrors SPELLDISPELLOG:
-    // WotLK/Classic/Turtle: packed victim + packed caster + uint32 spellId + uint8 isStolen + uint32 count
+    // WotLK/Classic: packed victim + packed caster + uint32 spellId + uint8 isStolen + uint32 count
     //                        + count × (uint32 stolenSpellId + uint8 isPositive)
     // TBC:                   full uint64 victim + full uint64 caster + same tail
     const bool stealUsesFullGuid = isActiveExpansion("tbc");
@@ -4316,7 +4285,7 @@ void SpellHandler::handleSpellStealLog(network::Packet& packet) {
 }
 
 void SpellHandler::handleSpellChanceProcLog(network::Packet& packet) {
-    // WotLK/Classic/Turtle: packed_guid target + packed_guid caster + uint32 spellId + ...
+    // WotLK/Classic: packed_guid target + packed_guid caster + uint32 spellId + ...
     // TBC:                  uint64 target + uint64 caster + uint32 spellId + ...
     const bool procChanceUsesFullGuid = isActiveExpansion("tbc");
     auto readProcChanceGuid = [&]() -> uint64_t {
@@ -4347,7 +4316,7 @@ void SpellHandler::handleSpellChanceProcLog(network::Packet& packet) {
 
 void SpellHandler::handleSpellInstaKillLog(network::Packet& packet) {
     // Sent when a unit is killed by a spell with SPELL_ATTR_EX2_INSTAKILL (e.g. Execute, Obliterate, etc.)
-    // WotLK/Classic/Turtle: packed_guid caster + packed_guid victim + uint32 spellId
+    // WotLK/Classic: packed_guid caster + packed_guid victim + uint32 spellId
     // TBC:                  full uint64 caster + full uint64 victim + uint32 spellId
     const bool ikUsesFullGuid = isActiveExpansion("tbc");
     auto ik_rem = [&]() { return packet.getRemainingSize(); };
@@ -4543,7 +4512,7 @@ void SpellHandler::parseEffectFeedPet(network::Packet& packet, uint32_t effectLo
 }
 
 void SpellHandler::handleSpellLogExecute(network::Packet& packet) {
-    // WotLK/Classic/Turtle: packed_guid caster + uint32 spellId + uint32 effectCount
+    // WotLK/Classic: packed_guid caster + uint32 spellId + uint32 effectCount
     // TBC:                  uint64 caster + uint32 spellId + uint32 effectCount
     // Per-effect: uint8 effectType + uint32 effectLogCount + effect-specific data
     // Effect 10 = POWER_DRAIN:   packed_guid target + uint32 amount + uint32 powerType + float multiplier
@@ -4746,6 +4715,62 @@ void SpellHandler::handleChannelUpdate(network::Packet& packet) {
         if (!unitId.empty())
             frameXml_.fireFrameXmlEvent("UNIT_SPELLCAST_CHANNEL_STOP", {unitId});
     }
+}
+
+void SpellHandler::forgetPlayerAura(uint32_t spellId) {
+    for (auto& a : playerAuras_) {
+        if (!a.isEmpty() && a.spellId == spellId) {
+            a = AuraSlot{};
+            break;
+        }
+    }
+}
+
+void SpellHandler::companionFieldsArrived(const FlatFieldMap& blockFields) {
+    // A non-combat companion is announced only by this field on the player: it
+    // gets no aura, so there is nothing in the buff bar to cancel and nothing
+    // else to notice it by. Remembering which spell called it is what lets
+    // casting that spell again put it away rather than summon a second one.
+    const uint16_t critterIdx = fieldIndex(UF::UNIT_FIELD_CRITTER);
+    if (critterIdx == 0xFFFF) return;   // pre-WotLK: no such field, no dismiss opcode
+
+    auto loIt = blockFields.find(critterIdx);
+    auto hiIt = blockFields.find(static_cast<uint16_t>(critterIdx + 1));
+    if (loIt == blockFields.end() && hiIt == blockFields.end()) return;
+
+    const uint32_t lo = (loIt != blockFields.end()) ? loIt->second
+                                                     : static_cast<uint32_t>(character_.companionGuid);
+    const uint32_t hi = (hiIt != blockFields.end())
+                            ? hiIt->second
+                            : static_cast<uint32_t>(character_.companionGuid >> 32);
+    const uint64_t critterGuid = (static_cast<uint64_t>(hi) << 32) | lo;
+    if (critterGuid == character_.companionGuid) return;
+
+    if (critterGuid == 0) {
+        LOG_INFO("Companion dismissed: was guid=0x", std::hex,
+                 character_.companionGuid, std::dec);
+        character_.companionGuid = 0;
+        character_.companionSpellId = 0;
+        return;
+    }
+    // Attribute it to the spell just cast from the ground, the same way the
+    // mount aura is identified - a blind guess at "some spell" would make the
+    // toggle fire on the wrong button.
+    const uint32_t summonedBy = lastGroundCastSpellId_;
+    character_.companionGuid = critterGuid;
+    character_.companionSpellId = summonedBy;
+    LOG_INFO("Companion summoned: guid=0x", std::hex, critterGuid, std::dec,
+             " by spell=", summonedBy);
+}
+
+void SpellHandler::dismissCompanion() {
+    if (!sender_.characterInWorld()) return;
+    if (wireOpcode(Opcode::CMSG_DISMISS_CRITTER) == 0xFFFF) return;   // expansion has no such opcode
+    sender_.send(DismissCritterPacket::build(character_.companionGuid));
+    LOG_INFO("Dismissing companion: guid=0x", std::hex, character_.companionGuid, std::dec,
+             " summonedBy=", character_.companionSpellId);
+    // The server confirms by clearing the critter field; leave the local state
+    // alone so a refused dismiss does not leave the client thinking it worked.
 }
 
 } // namespace game

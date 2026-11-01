@@ -16,8 +16,9 @@
 #include <vector>
 
 namespace wowee {
-namespace pipeline { class AssetManager; }
 namespace game {
+
+class GameData;
 
 class PacketSender;
 class FrameXmlEvents;
@@ -67,7 +68,7 @@ public:
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
     QuestHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
-                 ChatLog& chat, QuestQueries& queries, pipeline::AssetManager* assets);
+                 ChatLog& chat, QuestQueries& queries, const GameData& data);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -212,7 +213,7 @@ public:
     // order. The last field of each PLAYER_QUEST_LOG slot is when the quest
     // fails, as a Unix timestamp; zero means the quest is not timed.
     [[nodiscard]] std::vector<std::pair<uint32_t, uint32_t>> getQuestTimers() const;
-    // Server-side quest log capacity: 20 slots in Vanilla/Turtle, 25 from TBC on
+    // Server-side quest log capacity: 20 slots in Vanilla, 25 from TBC on
     [[nodiscard]] int maxQuestLogSlots() const;
     // QuestSort.dbc name ("Seasonal", class/profession sorts, ...) for negative
     // ZoneOrSort values; empty if unknown
@@ -269,7 +270,6 @@ public:
     [[nodiscard]] const std::string& getSharedQuestTitle() const { return journal_.sharedQuestTitle; }
     [[nodiscard]] const std::string& getSharedQuestSharerName() const { return journal_.sharedQuestSharerName; }
     void acceptSharedQuest();
-    void declineSharedQuest();
 
     // --- Internal helpers called from GameHandler ---
     [[nodiscard]] bool hasQuestInLog(uint32_t questId) const;
@@ -291,6 +291,10 @@ public:
 
     /// A quest giver left view: its mark goes with it.
     void forgetQuestGiver(uint64_t guid) { journal_.npcQuestStatus.erase(guid); }
+
+    /// The name of a creature or (isGameObject) game object template
+    /// arrived: the log is told to look again if an objective is about it.
+    void objectiveTargetNamed(uint32_t entry, bool isGameObject);
 
     /// Tell the interface a quest moved - see the definition for why the
     /// three events go together.
@@ -340,7 +344,7 @@ private:
     QuestQueries& queries_;
     /// The client's data, for the quest DBC tables. Null in a test that has
     /// none.
-    pipeline::AssetManager* const assets_;
+    const GameData& data_;
 
     /// The character's quests and the quest windows open on them. Assigned
     /// whole when a character logs in (events::CharacterLoggingIn): the

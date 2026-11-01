@@ -61,6 +61,8 @@ class DBCLayout {
 public:
     /** Load from JSON file. Returns true if successful. */
     bool loadFromJson(const std::string& path);
+    /// The same, from the file's text; `source` names it in the log.
+    bool loadFromJsonText(const std::string& json, const std::string& source);
 
     /** Get the field map for a DBC file. Returns nullptr if unknown. */
     [[nodiscard]] const DBCFieldMap* getLayout(const std::string& dbcName) const;
@@ -81,12 +83,19 @@ const DBCLayout* getActiveDBCLayout();
 // Forward declaration
 class DBCFile;
 
+// Configure only schema-declared locstrings for the matching client build.
+// Raw numeric fields and nonlocalized asset-path strings are never changed.
+bool mergeDbcLocale(DBCFile& dbc, const DBCFile& source, const std::string& table,
+                    uint32_t build, const std::string& locale);
+bool selectDbcLocale(DBCFile& dbc, const std::string& table,
+                     uint32_t build, const std::string& locale);
+
 /**
  * Resolved CharSections.dbc field indices.
  *
  * Stock WotLK 3.3.5a uses: Texture1=4, Texture2=5, Texture3=6, Flags=7,
  *   VariationIndex=8, ColorIndex=9  (textures first).
- * Classic/TBC/Turtle and HD-texture WotLK use: VariationIndex=4, ColorIndex=5,
+ * Classic/TBC and HD-texture WotLK use: VariationIndex=4, ColorIndex=5,
  *   Texture1=6, Texture2=7, Texture3=8, Flags=9  (variation first).
  *
  * detectCharSectionsFields() auto-detects which layout the actual DBC uses
@@ -146,7 +155,7 @@ FacialHairFields detectFacialHairFields(const DBCFile* dbc, const DBCFieldMap* f
  * Resolve the SpellItemEnchantment.dbc name (description) field index.
  *
  * The record grew across expansions, so the name sits at a different column in
- * each: Vanilla/Turtle=10, TBC=13, WotLK=14. Reading the wrong column yields an
+ * each: Vanilla=10, TBC=13, WotLK=14. Reading the wrong column yields an
  * integer that getString() treats as a string-block offset, which silently
  * produces a garbled name ("Rockbiter 3" read as "ockbiter 3") instead of failing.
  *
@@ -184,7 +193,7 @@ uint32_t detectEnchantmentNameField(const DBCFile* dbc, const DBCFieldMap* sieL)
 
 /**
  * Resolve the SpellItemEnchantment.dbc ItemVisual field index, which likewise
- * shifted with the record: Vanilla/Turtle=19, TBC=30, WotLK=31.
+ * shifted with the record: Vanilla=19, TBC=30, WotLK=31.
  */
 uint32_t detectEnchantmentItemVisualField(const DBCFile* dbc, const DBCFieldMap* sieL);
 

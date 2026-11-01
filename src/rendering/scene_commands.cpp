@@ -384,7 +384,8 @@ bool SceneCommands::Models::hasInstance(uint32_t instanceId) const {
 // --- World models (WMO) ---------------------------------------------------
 
 uint32_t SceneCommands::WorldModels::createInstance(uint32_t modelId, const glm::vec3& position,
-                                                    const glm::vec3& rotation, float scale) {
+                                                    const glm::vec3& rotation, float scale,
+                                                    uint16_t nameSet) {
     WMORenderer* wmo = owner_.renderer_.getWMORenderer();
     if (!wmo || !wmo->isModelLoaded(modelId)) {
         LOG_ERROR("Cannot create instance of unloaded WMO model ", modelId);
@@ -393,7 +394,7 @@ uint32_t SceneCommands::WorldModels::createInstance(uint32_t modelId, const glm:
     const uint32_t id = wmo->reserveInstanceId();
     queued_.insert(id);
     owner_.post([=](Renderer& r) {
-        if (auto* w = r.getWMORenderer()) w->createInstance(modelId, position, rotation, scale, id);
+        if (auto* w = r.getWMORenderer()) w->createInstance(modelId, position, rotation, scale, id, nameSet);
     });
     return id;
 }

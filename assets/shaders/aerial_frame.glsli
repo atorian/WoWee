@@ -23,8 +23,20 @@ vec3 aerialSky(vec3 sky,vec3 direction) {
 
 #ifndef AERIAL_ANALYTIC_ONLY
 layout(set = 0, binding = 5) uniform sampler2D uSceneSky; // reflections, including stars
-layout(set = 0, binding = 11) uniform sampler2D uAtmosphereSky; // scattering only
+layout(set = 0, binding = 11) uniform sampler2D uAtmosphereSky; // star-free sky background
 #endif
+
+vec3 aerialDiffuseAt(vec3 direction) {
+    if(aerialParams.w<0.5)return fogColor.rgb;
+    float len=length(direction);
+    vec3 ray=len>0.001 ? direction/len : vec3(0,0,1);
+    // Fog receives diffuse sky light, not the visible image of cloud layers.
+    // Keep the authored directional palette and horizon scattering without
+    // projecting captured cloud silhouettes onto opaque scene geometry.
+    vec3 sky=atmosphereSkyColor(ray,fogSkyTop.rgb,fogSkyMiddle.rgb,
+        fogSkyBand1.rgb,fogSkyBand2.rgb,skySmogColor.rgb,fogColor.rgb);
+    return aerialSky(sky,ray);
+}
 
 vec3 aerialBackgroundAt(vec3 direction) {
     if(aerialParams.w<0.5)return fogColor.rgb;
@@ -43,11 +55,8 @@ vec3 aerialBackgroundAt(vec3 direction) {
         }
     }
 #endif
-    // Before the capture (including fog injection), or outside its camera,
-    // use the same directional sky bands and horizon correction as the dome.
-    vec3 sky=atmosphereSkyColor(ray,fogSkyTop.rgb,fogSkyMiddle.rgb,
-        fogSkyBand1.rgb,fogSkyBand2.rgb,skySmogColor.rgb,fogColor.rgb);
-    return aerialSky(sky,ray);
+    // Outside the capture, approximate the background with the sky bands.
+    return aerialDiffuseAt(ray);
 }
 
 #ifndef AERIAL_INJECT_ONLY

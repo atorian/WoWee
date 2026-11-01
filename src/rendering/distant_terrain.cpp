@@ -8,12 +8,10 @@
 #include "rendering/vk_pipeline.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
+#include "pipeline/minimap_tile_index.hpp"
 #include "core/logger.hpp"
 #include "core/profiler.hpp"
-#include <sstream>
-#include <unordered_map>
 #include <cstddef>
-#include <cctype>
 namespace wowee::rendering {
 struct DistantTerrain::Prepared {
     struct Tile { int x,y; uint32_t vertex; std::array<pipeline::DistantMesh::Range,4> lods; glm::vec3 min,max; };
@@ -73,27 +71,15 @@ void DistantTerrain::setMap(pipeline::AssetManager* assets,const std::string& ma
         if(wdl.tiles.empty()) { LOG_WARNING("DistantTerrain: ",path," contains no far terrain - detailed streaming retained"); return {}; }
         auto result=std::make_shared<Prepared>();
         const auto lookupData=assets->readFile("Textures\\Minimap\\md5translate.trs");
-        std::unordered_map<std::string,std::string> lookup;
-        std::istringstream lines(std::string(lookupData.begin(),lookupData.end()));std::string line;
-        while(std::getline(lines,line)) {
-            if(!line.empty()&&line.back()=='\r')line.pop_back();
-            auto tab=line.find('\t');if(tab==std::string::npos)continue;
-            auto key=line.substr(0,tab),hash=line.substr(tab+1);
-            if(key.ends_with(".blp"))key.resize(key.size()-4);
-            if(hash.ends_with(".blp"))hash.resize(hash.size()-4);
-            std::transform(key.begin(),key.end(),key.begin(),[](unsigned char c){return std::tolower(c);});
-            lookup.emplace(std::move(key),std::move(hash));
-        }
+        const auto lookup=pipeline::MinimapTileIndex::parse(lookupData);
         if(lookupData.empty())LOG_WARNING("DistantTerrain: minimap lookup missing - distant terrain uses neutral albedo");
         for(const auto& tile:wdl.tiles) {
             if(!token.current())return {};
             auto mesh=pipeline::distantTileMesh(tile);
-            auto key=map+"\\map"+std::to_string(tile.x)+"_"+std::to_string(tile.y);
-            std::transform(key.begin(),key.end(),key.begin(),[](unsigned char c){return std::tolower(c);});
-            auto found=lookup.find(key);
+            const auto* file=lookup.terrainTile(map,tile.x,tile.y);
             pipeline::BLPImage image;
-            if(found!=lookup.end()) {
-                auto bytes=assets->readFile("Textures\\Minimap\\"+found->second+".blp");
+            if(file) {
+                auto bytes=assets->readFile("Textures\\Minimap\\"+*file+".blp");
                 if(!bytes.empty())image=pipeline::BLPLoader::load(bytes,true);
             }
             if(image.isValid()) {
@@ -111,7 +97,7 @@ void DistantTerrain::setMap(pipeline::AssetManager* assets,const std::string& ma
                     size_t p=(y*image.width+x)*4;
                     vertex.color=glm::vec3(image.data[p],image.data[p+1],image.data[p+2])/255.f;
                 }
-            } else LOG_WARNING("DistantTerrain: no minimap colour for ",key," - neutral distant albedo used");
+            } else LOG_WARNING("DistantTerrain: no minimap colour for ",pipeline::MinimapTileIndex::terrainTileName(map,tile.x,tile.y)," - neutral distant albedo used");
             Prepared::Tile out{tile.x,tile.y,static_cast<uint32_t>(result->vertices.size()),mesh.lods,mesh.min,mesh.max};
             for(auto& range:out.lods) range.first+=static_cast<uint32_t>(result->indices.size());
             result->vertices.insert(result->vertices.end(),mesh.vertices.begin(),mesh.vertices.end());

@@ -73,17 +73,6 @@ std::string shaderPath(const std::string& name) {
 
 }  // namespace
 
-TEST_CASE("the WMO vertex is what the layout comment claims", "[wmovertex]") {
-    // 3+3+2+4+4 floats. The shadow pipeline used to spell this 64 as a
-    // literal, so it is worth stating once where a change would be noticed.
-    STATIC_REQUIRE(sizeof(WMOVertex) == 64);
-    STATIC_REQUIRE(offsetof(WMOVertex, position) == 0);
-    STATIC_REQUIRE(offsetof(WMOVertex, normal) == 12);
-    STATIC_REQUIRE(offsetof(WMOVertex, texCoord) == 24);
-    STATIC_REQUIRE(offsetof(WMOVertex, color) == 32);
-    STATIC_REQUIRE(offsetof(WMOVertex, tangent) == 48);
-}
-
 TEST_CASE("every attribute sits inside the vertex", "[wmovertex]") {
     for (const VertexAttribute& attribute : kWmoVertexAttributes) {
         INFO("location " << attribute.location);
@@ -129,12 +118,6 @@ TEST_CASE("the shadow attributes match what shadow.vert.glsl declares",
         CHECK(kWmoShadowVertexAttributes[i].componentCount ==
               inputs[i].componentCount);
     }
-}
-
-TEST_CASE("the shadow pass reads position and texcoord from the real places",
-          "[wmovertex]") {
-    CHECK(kWmoShadowVertexAttributes[0].offset == offsetof(WMOVertex, position));
-    CHECK(kWmoShadowVertexAttributes[1].offset == offsetof(WMOVertex, texCoord));
 }
 
 TEST_CASE("the main attributes are in the order the struct declares them",

@@ -197,16 +197,14 @@ void VkContext::shutdown() {
     if (nextAcquireSemaphore_) { vkDestroySemaphore(device, nextAcquireSemaphore_, nullptr); nextAcquireSemaphore_ = VK_NULL_HANDLE; }
 
     // Clean up any in-flight async upload batches. waitAllUploads does the full
-    // retirement -- fence, VMA staging and the plainly allocated staging -- and
+    // retirement -- fence and staging -- and
     // the device is already idle above, so its waits return at once. Every
     // lane's command pool is destroyed below this point, and so is the
     // allocator.
     //
     // This used to destroy only the fence, on the grounds that the allocator
-    // was about to be torn down anyway. That was never true of rawStaging,
-    // which is vkCreateBuffer/vkAllocateMemory and belongs to no allocator, and
-    // stopped being true of the rest once shutdown began destroying the VMA
-    // allocator under validation. Every batch left in flight leaked a command
+    // was about to be torn down anyway, which stopped being true once shutdown
+    // began destroying the VMA allocator under validation. Every batch left in flight leaked a command
     // buffer, its staging buffers and their memory, which is most of what
     // vkDestroyDevice reported.
     waitAllUploads();
@@ -217,11 +215,10 @@ void VkContext::shutdown() {
             // waitAllUploads does not see it. Its staging belongs to this
             // context alone, so there is nothing here that could already be
             // invalid.
-            if (!l->batchRawStaging.empty() || !l->batchStaging.empty()) {
-                LOG_INFO("shutdown: freeing ", l->batchRawStaging.size(), " raw + ", l->batchStaging.size(),
-                         " pooled staging in a batch still being built");
+            if (!l->batchStaging.empty()) {
+                LOG_INFO("shutdown: freeing ", l->batchStaging.size(),
+                         " staging buffers in a batch still being built");
             }
-            freeRawStaging(*l);
             for (auto& staging : l->batchStaging) destroyBuffer(allocator, staging);
             l->batchStaging.clear();
             if (l->immFence) vkDestroyFence(device, l->immFence, nullptr);
@@ -1017,6 +1014,19 @@ bool VkContext::createLogicalDevice() {
         }
     }
     setPipelineBarrier2Fn(cmdPipelineBarrier2_);
+
+    // The cull mode as command-buffer state, core at 1.3: a batch shows the
+    // faces its material shows without a second set of pipelines.
+    cmdSetCullMode_ = reinterpret_cast<PFN_vkCmdSetCullMode>(vkGetDeviceProcAddr(device, "vkCmdSetCullMode"));
+    if (!cmdSetCullMode_) {
+        LOG_WARNING("vkCmdSetCullMode did not resolve on a Vulkan 1.3 device: "
+                    "buildings and doodads draw their back faces too");
+    }
+    faceCullingEnabled_ = true;
+    if (const char* v = std::getenv("WOWEE_FACE_CULLING"); v && std::string(v) == "0") {
+        faceCullingEnabled_ = false;
+        LOG_INFO("Face culling off (WOWEE_FACE_CULLING=0): every face of the world's models is drawn");
+    }
 
     // Only present with VK_EXT_debug_utils (createInstance). When it is
     // absent naming and labels are no-ops.
@@ -2586,25 +2596,6 @@ void VkContext::destroyOverlayRenderPass() {
 }
 
 void VkContext::destroyImGuiResources() {
-    // Destroy uploaded UI textures
-    for (auto& tex : uiTextures_) {
-        if (tex.view) vkDestroyImageView(device, tex.view, nullptr);
-        if (tex.image) vkDestroyImage(device, tex.image, nullptr);
-        if (tex.memory) vkFreeMemory(device, tex.memory, nullptr);
-    }
-    uiTextures_.clear();
-    uiTextureSampler_ = VK_NULL_HANDLE; // Owned by sampler cache
-
-    // Said here rather than by whoever decided to destroy them, so that the
-    // generation cannot disagree with what actually happened to the sets.
-    ++uiTextureGeneration_;
-
-    // This context's own UI texture pool, which the sets above were allocated
-    // from. Freed with them rather than with ImGui's, which is the whole point
-    // of it existing.
-    destroy(device, uiTexturePool_);
-    destroy(device, uiTextureLayout_);
-
     destroy(device, imguiDescriptorPool);
     destroyMsaaColorImage();
     destroyDepthResolveImage();
@@ -2615,257 +2606,6 @@ void VkContext::destroyImGuiResources() {
         vkDestroyRenderPass(device, imguiRenderPass, nullptr);
         imguiRenderPass = VK_NULL_HANDLE;
     }
-}
-
-static uint32_t findMemType(VkPhysicalDevice physDev, uint32_t typeFilter, VkMemoryPropertyFlags props) {
-    VkPhysicalDeviceMemoryProperties memProps;
-    vkGetPhysicalDeviceMemoryProperties(physDev, &memProps);
-    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
-        if ((typeFilter & (1 << i)) && (memProps.memoryTypes[i].propertyFlags & props) == props)
-            return i;
-    }
-    LOG_ERROR("VkContext: no suitable memory type found");
-    return UINT32_MAX;
-}
-
-bool VkContext::ensureUiTextureDescriptorPool() {
-    if (uiTexturePool_ != VK_NULL_HANDLE) return true;
-
-    VkDescriptorSetLayoutBinding binding{};
-    binding.binding = 0;
-    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    binding.descriptorCount = 1;
-    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    VkDescriptorSetLayoutCreateInfo layoutInfo{};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 1;
-    layoutInfo.pBindings = &binding;
-    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr,
-                                    &uiTextureLayout_) != VK_SUCCESS) {
-        LOG_ERROR("Could not create the UI texture descriptor layout");
-        return false;
-    }
-
-    // Sized for the interface with FrameXML loaded, which asks for several
-    // hundred distinct files; the old path shared ImGui's pool and inherited
-    // whatever that was sized for.
-    VkDescriptorPoolSize size{};
-    size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    size.descriptorCount = 4096;
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = 4096;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = &size;
-    LOG_WARNING("UI textures allocate from this context's own descriptor pool, "
-                "so they outlive an ImGui backend restart");
-    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &uiTexturePool_) != VK_SUCCESS) {
-        LOG_ERROR("Could not create the UI texture descriptor pool");
-        vkDestroyDescriptorSetLayout(device, uiTextureLayout_, nullptr);
-        uiTextureLayout_ = VK_NULL_HANDLE;
-        return false;
-    }
-    return true;
-}
-
-VkDescriptorSet VkContext::uploadImGuiTexture(const uint8_t* rgba, int width, int height) {
-    if (!device || !physicalDevice || width <= 0 || height <= 0 || !rgba)
-        return VK_NULL_HANDLE;
-
-    VkDeviceSize imageSize = static_cast<VkDeviceSize>(width) * height * 4;
-
-    // Create shared sampler on first call (via sampler cache)
-    if (!uiTextureSampler_) {
-        VkSamplerCreateInfo si{};
-        si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        si.magFilter = VK_FILTER_LINEAR;
-        si.minFilter = VK_FILTER_LINEAR;
-        si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        uiTextureSampler_ = getOrCreateSampler(si);
-        if (!uiTextureSampler_) {
-            LOG_ERROR("Failed to create UI texture sampler");
-            return VK_NULL_HANDLE;
-        }
-    }
-
-    // Staging buffer
-    VkBuffer stagingBuffer;
-    VkDeviceMemory stagingMemory;
-    {
-        VkBufferCreateInfo bufInfo{};
-        bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bufInfo.size = imageSize;
-        bufInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        if (vkCreateBuffer(device, &bufInfo, nullptr, &stagingBuffer) != VK_SUCCESS)
-            return VK_NULL_HANDLE;
-
-        VkMemoryRequirements memReqs;
-        vkGetBufferMemoryRequirements(device, stagingBuffer, &memReqs);
-
-        VkMemoryAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocInfo.allocationSize = memReqs.size;
-        allocInfo.memoryTypeIndex = findMemType(physicalDevice, memReqs.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (vkAllocateMemory(device, &allocInfo, nullptr, &stagingMemory) != VK_SUCCESS) {
-            vkDestroyBuffer(device, stagingBuffer, nullptr);
-            return VK_NULL_HANDLE;
-        }
-        vkBindBufferMemory(device, stagingBuffer, stagingMemory, 0);
-
-        void* mapped;
-        vkMapMemory(device, stagingMemory, 0, imageSize, 0, &mapped);
-        memcpy(mapped, rgba, imageSize);
-        vkUnmapMemory(device, stagingMemory);
-    }
-
-    // Create image
-    VkImage image;
-    VkDeviceMemory imageMemory;
-    {
-        VkImageCreateInfo imgInfo{};
-        imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        imgInfo.imageType = VK_IMAGE_TYPE_2D;
-        imgInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-        imgInfo.extent = {.width = static_cast<uint32_t>(width), .height = static_cast<uint32_t>(height), .depth = 1};
-        imgInfo.mipLevels = 1;
-        imgInfo.arrayLayers = 1;
-        imgInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-        imgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-        imgInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        imgInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        if (vkCreateImage(device, &imgInfo, nullptr, &image) != VK_SUCCESS) {
-            vkDestroyBuffer(device, stagingBuffer, nullptr);
-            vkFreeMemory(device, stagingMemory, nullptr);
-            return VK_NULL_HANDLE;
-        }
-
-        VkMemoryRequirements memReqs;
-        vkGetImageMemoryRequirements(device, image, &memReqs);
-
-        VkMemoryAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocInfo.allocationSize = memReqs.size;
-        allocInfo.memoryTypeIndex = findMemType(physicalDevice, memReqs.memoryTypeBits,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (vkAllocateMemory(device, &allocInfo, nullptr, &imageMemory) != VK_SUCCESS) {
-            vkDestroyImage(device, image, nullptr);
-            vkDestroyBuffer(device, stagingBuffer, nullptr);
-            vkFreeMemory(device, stagingMemory, nullptr);
-            return VK_NULL_HANDLE;
-        }
-        vkBindImageMemory(device, image, imageMemory, 0);
-    }
-
-    // Upload via immediate submit
-    immediateSubmit([&](VkCommandBuffer cmd) {
-        VkImageMemoryBarrier2 barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-        barrier.srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-        barrier.dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image = image;
-        barrier.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
-        barrier.srcAccessMask = 0;
-        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        VkDependencyInfo barrierDep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-        barrierDep.dependencyFlags = 0;
-        barrierDep.imageMemoryBarrierCount = 1;
-        barrierDep.pImageMemoryBarriers = &barrier;
-        cmdPipelineBarrier2(cmd, barrierDep);
-
-        VkBufferImageCopy region{};
-        region.imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1};
-        region.imageExtent = {.width = static_cast<uint32_t>(width), .height = static_cast<uint32_t>(height), .depth = 1};
-        vkCmdCopyBufferToImage(cmd, stagingBuffer, image,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
-        barrier.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        barrier.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        VkDependencyInfo toReadDep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-        toReadDep.imageMemoryBarrierCount = 1;
-        toReadDep.pImageMemoryBarriers = &barrier;
-        cmdPipelineBarrier2(cmd, toReadDep);
-    });
-
-    // Freed now only if the copy has already run. Inside a batch immediateSubmit
-    // records and returns without submitting, so destroying the staging here
-    // pulls the source out from under a copy that has not happened - the image
-    // then contains whatever was left behind, which draws as nothing at all.
-    if (isInUploadBatch()) {
-        deferRawStagingCleanup(stagingBuffer, stagingMemory);
-    } else {
-        vkDestroyBuffer(device, stagingBuffer, nullptr);
-        vkFreeMemory(device, stagingMemory, nullptr);
-    }
-
-    // Create image view
-    VkImageView imageView;
-    {
-        VkImageViewCreateInfo viewInfo{};
-        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        viewInfo.image = image;
-        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-        viewInfo.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
-        if (vkCreateImageView(device, &viewInfo, nullptr, &imageView) != VK_SUCCESS) {
-            vkDestroyImage(device, image, nullptr);
-            vkFreeMemory(device, imageMemory, nullptr);
-            return VK_NULL_HANDLE;
-        }
-    }
-
-    // From this context's own pool rather than ImGui's, so the set survives a
-    // backend restart. ImGui only ever binds what ImTextureID points at, and a
-    // set built to the same layout binds identically.
-    VkDescriptorSet ds = VK_NULL_HANDLE;
-    if (ensureUiTextureDescriptorPool()) {
-        VkDescriptorSetAllocateInfo alloc{};
-        alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        alloc.descriptorPool = uiTexturePool_;
-        alloc.descriptorSetCount = 1;
-        alloc.pSetLayouts = &uiTextureLayout_;
-        if (vkAllocateDescriptorSets(device, &alloc, &ds) != VK_SUCCESS) {
-            ds = VK_NULL_HANDLE;
-        } else {
-            VkDescriptorImageInfo info{};
-            info.sampler = uiTextureSampler_;
-            info.imageView = imageView;
-            info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            VkWriteDescriptorSet write{};
-            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            write.dstSet = ds;
-            write.dstBinding = 0;
-            write.descriptorCount = 1;
-            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            write.pImageInfo = &info;
-            vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-        }
-    }
-
-    if (!ds) {
-        LOG_ERROR("UI descriptor pool exhausted - cannot upload UI texture");
-        vkDestroyImageView(device, imageView, nullptr);
-        vkDestroyImage(device, image, nullptr);
-        vkFreeMemory(device, imageMemory, nullptr);
-        return VK_NULL_HANDLE;
-    }
-
-    // Track for cleanup
-    uiTextures_.push_back({.image = image, .memory = imageMemory, .view = imageView});
-
-    return ds;
 }
 
 void VkContext::releaseSurface() {
@@ -3694,9 +3434,15 @@ void VkContext::ensureBatchCmd() {
     checkpoint(l.batchCmd, "upload batch");
 }
 
-void VkContext::endUploadBatch() {
+void VkContext::endUploadBatch(UploadCompletion completion) {
     SubmitLane& l = lane();
-    if (l.uploadBatchDepth <= 0) return;
+    if (completion) l.batchCompletions.push_back(std::move(completion));
+    if (l.uploadBatchDepth <= 0) {
+        // Batching disabled: the immediate uploads have already completed.
+        for (auto& done : l.batchCompletions) done->store(1);
+        l.batchCompletions.clear();
+        return;
+    }
     l.uploadBatchDepth--;
     if (l.uploadBatchDepth > 0) return; // still inside an outer batch
 
@@ -3705,19 +3451,18 @@ void VkContext::endUploadBatch() {
     // Nothing ever recorded, so there is nothing to end, submit or free.
     if (l.batchCmd == VK_NULL_HANDLE) {
         l.batchStaging.clear();
-        l.batchRawStaging.clear();
+        for (auto& done : l.batchCompletions) done->store(1);
+        l.batchCompletions.clear();
         return;
     }
 
-    // Raw staging counts too. Checking only the allocator's list meant a batch
-    // holding nothing but ImGui texture uploads looked empty, so the command
-    // buffer holding every one of those copies was thrown away unsubmitted and
-    // the images stayed blank.
-    if (l.batchStaging.empty() && l.batchRawStaging.empty()) {
+    if (l.batchStaging.empty()) {
         // No GPU copies were recorded - skip the submit entirely.
         vkEndCommandBuffer(l.batchCmd);
         vkFreeCommandBuffers(device, l.pool, 1, &l.batchCmd);
         l.batchCmd = VK_NULL_HANDLE;
+        for (auto& done : l.batchCompletions) done->store(1);
+        l.batchCompletions.clear();
         return;
     }
 
@@ -3727,7 +3472,20 @@ void VkContext::endUploadBatch() {
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     VkFence fence = VK_NULL_HANDLE;
-    vkCreateFence(device, &fenceInfo, nullptr, &fence);
+    const auto abandon = [&] {
+        for (auto& done : l.batchCompletions) done->store(-1);
+        l.batchCompletions.clear();
+        for (auto& staging : l.batchStaging) destroyBuffer(allocator, staging);
+        l.batchStaging.clear();
+        vkFreeCommandBuffers(device, l.pool, 1, &l.batchCmd);
+        l.batchCmd = VK_NULL_HANDLE;
+    };
+    const VkResult fenceResult = vkCreateFence(device, &fenceInfo, nullptr, &fence);
+    if (fenceResult != VK_SUCCESS) {
+        LOG_ERROR("Async upload fence creation failed: ", fenceResult, "; batch not published");
+        abandon();
+        return;
+    }
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -3759,9 +3517,17 @@ void VkContext::endUploadBatch() {
         return v && *v && *v != '0';
     }();
     VkQueue targetQueue = (hasDedicatedTransfer_ && asyncUploadQueue) ? transferQueue_ : graphicsQueue;
+    VkResult submitted;
     {
         auto queues = lockQueues();
-        noteDeviceLost("async upload batch submit", vkQueueSubmit(targetQueue, 1, &submitInfo, fence));
+        submitted = vkQueueSubmit(targetQueue, 1, &submitInfo, fence);
+        noteDeviceLost("async upload batch submit", submitted);
+    }
+    if (submitted != VK_SUCCESS) {
+        LOG_ERROR("Async upload submission failed: ", submitted, "; batch not published");
+        vkDestroyFence(device, fence, nullptr);
+        abandon();
+        return;
     }
 
     // Said once, with the handle, because these are the only fences created
@@ -3779,8 +3545,8 @@ void VkContext::endUploadBatch() {
     batch.fence = fence;
     batch.cmd = l.batchCmd;
     batch.stagingBuffers = std::move(l.batchStaging);
-    batch.rawStaging = std::move(l.batchRawStaging);
     batch.onTransferQueue = targetQueue != graphicsQueue;
+    batch.completions = std::move(l.batchCompletions);
     {
         std::lock_guard<std::mutex> lock(l.mutex);
         l.inFlight.push_back(std::move(batch));
@@ -3788,7 +3554,6 @@ void VkContext::endUploadBatch() {
 
     l.batchCmd = VK_NULL_HANDLE;
     l.batchStaging.clear();
-    l.batchRawStaging.clear();
 }
 
 void VkContext::endUploadBatchSync() {
@@ -3802,14 +3567,17 @@ void VkContext::endUploadBatchSync() {
     // Nothing ever recorded, so there is nothing to end, submit or free.
     if (l.batchCmd == VK_NULL_HANDLE) {
         l.batchStaging.clear();
-        l.batchRawStaging.clear();
+        for (auto& done : l.batchCompletions) done->store(1);
+        l.batchCompletions.clear();
         return;
     }
 
-    if (l.batchStaging.empty() && l.batchRawStaging.empty()) {
+    if (l.batchStaging.empty()) {
         vkEndCommandBuffer(l.batchCmd);
         vkFreeCommandBuffers(device, l.pool, 1, &l.batchCmd);
         l.batchCmd = VK_NULL_HANDLE;
+        for (auto& done : l.batchCompletions) done->store(1);
+        l.batchCompletions.clear();
         return;
     }
 
@@ -3864,12 +3632,15 @@ void VkContext::endUploadBatchSync() {
     // Both checked. These were the only unchecked waits between a world load
     // and the first frame's submit, so a device lost in one of them was first
     // reported by that submit, one stage later and with no name attached.
+    VkResult submitted;
     {
         auto queues = lockQueues();
-        noteDeviceLost("sync upload batch submit", vkQueueSubmit(targetQueue, 1, &submitInfo, batchFence));
+        submitted = vkQueueSubmit(targetQueue, 1, &submitInfo, batchFence);
+        noteDeviceLost("sync upload batch submit", submitted);
     }
-    noteDeviceLost("sync upload batch wait",
-                   vkWaitForFences(device, 1, &batchFence, VK_TRUE, UINT64_MAX));
+    const VkResult completed = submitted == VK_SUCCESS
+        ? vkWaitForFences(device, 1, &batchFence, VK_TRUE, UINT64_MAX) : submitted;
+    noteDeviceLost("sync upload batch wait", completed);
     if (batchFence != l.immFence) {
         vkDestroyFence(device, batchFence, nullptr);
     } else {
@@ -3883,8 +3654,8 @@ void VkContext::endUploadBatchSync() {
         destroyBuffer(allocator, staging);
     }
     l.batchStaging.clear();
-    // The copies have completed by here, so the sources can go.
-    freeRawStaging(l);
+    for (auto& done : l.batchCompletions) done->store(completed == VK_SUCCESS ? 1 : -1);
+    l.batchCompletions.clear();
 }
 
 void VkContext::retireBatches(SubmitLane& l, bool wait) {
@@ -3897,18 +3668,17 @@ void VkContext::retireBatches(SubmitLane& l, bool wait) {
             // saying so through a fence nobody was going to wait on.
             if (result != VK_NOT_READY) noteDeviceLost(wait ? "waitAllUploads" : "upload batch fence status",
                                                        result);
+            if (result != VK_NOT_READY)
+                for (auto& done : it->completions) done->store(-1);
             if (!wait) {
                 ++it;
                 continue;
             }
         }
+        for (auto& done : it->completions) done->store(result == VK_SUCCESS ? 1 : -1);
         // GPU finished - free resources. The command buffer goes back to its
         // pool on the lane's own thread (reclaimFinished): the pool is that
         // thread's, and it may be recording into it right now.
-        for (auto& raw : it->rawStaging) {
-            vkDestroyBuffer(device, raw.buffer, nullptr);
-            vkFreeMemory(device, raw.memory, nullptr);
-        }
         for (auto& staging : it->stagingBuffers) {
             destroyBuffer(allocator, staging);
         }
@@ -3958,18 +3728,6 @@ bool VkContext::uploadsComplete() const {
 
 void VkContext::deferStagingCleanup(AllocatedBuffer staging) {
     lane().batchStaging.push_back(staging);
-}
-
-void VkContext::deferRawStagingCleanup(VkBuffer buffer, VkDeviceMemory memory) {
-    lane().batchRawStaging.push_back({.buffer = buffer, .memory = memory});
-}
-
-void VkContext::freeRawStaging(SubmitLane& l) {
-    for (const RawStaging& s : l.batchRawStaging) {
-        vkDestroyBuffer(device, s.buffer, nullptr);
-        vkFreeMemory(device, s.memory, nullptr);
-    }
-    l.batchRawStaging.clear();
 }
 
 } // namespace rendering

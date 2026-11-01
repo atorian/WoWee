@@ -233,9 +233,9 @@ int handleValidate(int& i, int argc, char** argv) {
             if (e.texturePath.empty())
                 errors.push_back(ctx + ": texturePath is empty "
                     "(screen has no image to display)");
-            if (e.expansionRequired > wowee::pipeline::WoweeLoadingScreen::TurtleWoW) {
+            if (e.expansionRequired > wowee::pipeline::WoweeLoadingScreen::WotLK) {
                 errors.push_back(ctx + ": expansionRequired " +
-                    std::to_string(e.expansionRequired) + " not in 0..3");
+                    std::to_string(e.expansionRequired) + " not in 0..2");
             }
             if (e.minLevel > e.maxLevel) {
                 errors.push_back(ctx + ": minLevel " +

@@ -661,8 +661,8 @@ bool AddonManager::loadFrameXml(const std::string& frameXmlDir) {
     //
     // Read off the manifest rather than off the active expansion profile,
     // because it is a fact about the files about to be loaded and the two can
-    // disagree: a Turtle install is 1.12's interface whichever profile is
-    // selected.
+    // disagree: an install's interface is whatever its files are, whichever
+    // profile is selected.
     //
     // A manifest that does not say gets the older convention. The two ways of
     // being wrong are not the same size - publishing three globals for an
@@ -1295,32 +1295,6 @@ bool AddonManager::loadFrameXml(const std::string& frameXmlDir) {
         "  end)\n"
         "end\n");
 
-    // Let the bag windows, the character sheet and the PvP panels be dragged
-    // around.
-    //
-    // A deliberate departure from 3.3.5, where neither can be moved: the bags
-    // arrange themselves up the right-hand side and the character sheet is a
-    // fixed panel. Asked for, and harmless - the item buttons inside them are
-    // what a drag starting on a slot picks up, because a drag belongs to the
-    // frame the press landed on.
-    luaEngine_.executeString(
-        "local function draggable(f)\n"
-        "  if not f then return end\n"
-        "  f:SetMovable(true)\n"
-        "  f:EnableMouse(true)\n"
-        "  f:RegisterForDrag('LeftButton')\n"
-        "  f:SetScript('OnDragStart', function(self) self:StartMoving() end)\n"
-        "  f:SetScript('OnDragStop', function(self) self:StopMovingOrSizing() end)\n"
-        "end\n"
-        "for i = 1, 13 do draggable(_G['ContainerFrame' .. i]) end\n"
-        "draggable(CharacterFrame)\n"
-        // The PvP window (H), the battlemaster's list and the scoreboard -
-        // asked for with the rest, and fixed panels in 3.3.5 for the same
-        // reason the character sheet is.
-        "draggable(PVPParentFrame)\n"
-        "draggable(BattlefieldFrame)\n"
-        "draggable(WorldStateScoreFrame)\n");
-
     // The PvP window and the battlemaster's list open in the middle of the
     // screen, where they were asked for.
     //
@@ -1747,7 +1721,7 @@ void AddonManager::fireEvent(const std::string& event, const std::vector<std::st
     // this one had been diagnosed from readings taken when nothing was
     // selected, where correct and broken look identical.
     if (event == "PLAYER_TARGET_CHANGED" && !targetCheckRequested_ &&
-        gameHandler_ && gameHandler_->getTargetGuid() != 0) {
+        gameHandler_ && gameHandler_->combat().getTargetGuid() != 0) {
         targetCheckRequested_ = true;
         ui::frameXmlRequestCheck();
     }

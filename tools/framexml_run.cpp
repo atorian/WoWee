@@ -64,6 +64,9 @@
 #include "core/app_clock.hpp"
 #include "ui/widget_renderer.hpp"
 #include "pipeline/asset_manager.hpp"
+#include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
+#include "pipeline/spell_icon_paths.hpp"
 #include "ui/interface_fonts.hpp"
 #include "ui/link_hit.hpp"
 #include "game/expansion_profile.hpp"
@@ -75,6 +78,11 @@
 
 #include <array>
 #include "game/emote_table.hpp"
+#include "game/stat_tables.hpp"
+#include "game/game_data.hpp"
+#include "game/flat_field_map.hpp"
+#include "game/update_field_table.hpp"
+#include "game/protocol_tables.hpp"
 #include "game/game_services.hpp"
 #include "game/character.hpp"
 #include "game/spell_handler.hpp"
@@ -87,6 +95,7 @@
 #include <cstdlib>
 #include "core/env.hpp"
 #include <string>
+#include <map>
 #include <set>
 #include <vector>
 
@@ -155,7 +164,6 @@ int main(int argc, char** argv) {
     // channels were written to it and saved from the chat panel's, so they read
     // back as whatever they had always been.
     gameScreen.setServices(wowee::ui::UIServices{});
-    wowee::ui::SettingsPanel& settingsPanel = gameScreen.getSettingsPanel();
     // No seeding of the defaults. The panel's fields already hold them - the
     // schema's default and the member's initialiser are checked against each
     // other in settings_apply_on_load - and setting them here went through
@@ -167,7 +175,16 @@ int main(int argc, char** argv) {
     // what the first run had saved. The client does not do this - loadSettings
     // assigns the pending fields directly - so it was the harness undoing the
     // thing the harness exists to watch.
+    // A direct expansion folder still owns a profile (including its locale).
+    wowee::game::ExpansionRegistry assetExpansions;
+    const std::filesystem::path suppliedAssets(assetPath);
+    const auto profileRoot = std::filesystem::exists(suppliedAssets / "expansion.json")
+        ? suppliedAssets.parent_path().parent_path() : suppliedAssets;
+    assetExpansions.initialize(profileRoot.string());
+    if (std::filesystem::exists(suppliedAssets / "expansion.json"))
+        assetExpansions.setActive(suppliedAssets.filename().string());
     wowee::addons::LuaServices settingServices;
+    settingServices.expansionRegistry = &assetExpansions;
     // The macro bodies the interface asked the client to run, newest last,
     // for --ran-macro. The client hands them to its chat panel; what this
     // checks is that the interface asked, with which text.
@@ -206,9 +223,16 @@ int main(int argc, char** argv) {
     // What the client builds per character: the catalog of what is on disk,
     // and one interface over one character's interface state. No character
     // here, so no per-character saved variables.
+    std::string interfaceRoot = assetPath;
+    if (const auto* profile = assetExpansions.getActive()) {
+        const auto localizedRoot = profile->dataPath + "/locales/" + profile->locale;
+        if (std::filesystem::is_regular_file(localizedRoot + "/manifest.json") &&
+            std::filesystem::is_directory(localizedRoot + "/interface/framexml"))
+            interfaceRoot = localizedRoot;
+    }
     wowee::addons::AddonCatalog catalog;
-    catalog.setFrameXmlDir(assetPath + "/interface/FrameXML");
-    catalog.scan(assetPath + "/interface/AddOns");
+    catalog.setFrameXmlDir(interfaceRoot + "/interface/FrameXML");
+    catalog.scan(interfaceRoot + "/interface/AddOns");
     wowee::addons::InterfaceState interfaceState;
     wowee::addons::AddonManager mgr(catalog, interfaceState, nullptr, settingServices, "");
     if (!mgr.isInitialized()) {
@@ -351,7 +375,19 @@ int main(int argc, char** argv) {
         int faces = 0;
         for (const char* name : {"frizqt__.ttf", "morpheus.ttf", "skurri.ttf",
                                  "arialn.ttf", "friends.ttf"}) {
-            const std::string file = assetPath + "/misc/fonts/" + name;
+            std::string file;
+            for (const auto& root : {interfaceRoot, assetPath}) {
+                for (const char* folder : {"/fonts/", "/misc/fonts/"}) {
+                    const auto candidate = root + folder + name;
+                    if (std::filesystem::is_regular_file(candidate)) { file = candidate; break; }
+                }
+                if (!file.empty()) break;
+            }
+            if (file.empty()) {
+                LOG_WARNING("FrameXML fixture: font ", name, " missing under ", interfaceRoot,
+                            " and ", assetPath, "; fallback face used");
+                continue;
+            }
             ImFontConfig cfg;
             cfg.ExtraSizeScale = wowee::ui::fontEmSizeScaleOfFile(file);
             if (ImFont* f = io.Fonts->AddFontFromFileTTF(file.c_str(), 16.0f, &cfg)) {
@@ -388,11 +424,10 @@ int main(int argc, char** argv) {
     // replaces models or a DBC for one expansion reaches the client at all.
     // Opening the base path directly, as this used to, reads straight past
     // every such overlay and reports the unmodified game.
-    wowee::game::ExpansionRegistry assetExpansions;
     std::string primaryAssetPath = assetPath;
     std::string assetFallbackPath;
     std::string assetExpansionId;
-    if (assetExpansions.initialize(assetPath) > 0) {
+    if (assetExpansions.getActive()) {
         if (const auto* active = assetExpansions.getActive()) {
             const std::string expansionManifest = active->dataPath + "/manifest.json";
             if (!active->dataPath.empty() &&
@@ -405,11 +440,22 @@ int main(int argc, char** argv) {
         }
     }
 
+    wowee::pipeline::DBCLayout layouts;
+    const std::string layoutsPath = primaryAssetPath + "/dbc_layouts.json";
+    if (!layouts.loadFromJson(layoutsPath)) {
+        std::fprintf(stderr, "framexml_run: could not load DBC layouts from %s\n", layoutsPath.c_str());
+        return 2;
+    }
+    wowee::pipeline::setActiveDBCLayout(&layouts);
     wowee::pipeline::AssetManager assets;
     // Before initialize, exactly as application.cpp does it - the fallback
     // manifest is loaded here and initialize does not clear it.
     if (!assetFallbackPath.empty())
         assets.setBaseFallbackPath(assetFallbackPath, assetExpansionId);
+    if (const auto* profile = assetExpansions.getActive()) {
+        assets.setExpansionDataPath(profile->dataPath);
+        assets.setDBCLocale(profile->locale, profile->build);
+    }
     const bool haveAssets = assets.initialize(primaryAssetPath);
     if (!haveAssets) {
         std::printf("== assets: none at %s; texture sizes are unavailable\n",
@@ -450,6 +496,7 @@ int main(int argc, char** argv) {
     relayout();
 
     int raised = 0;
+    wowee::game::GameHandler* fixtureGame = nullptr;
     for (int i = 2; i < argc; ++i) {
         const size_t before = errors.size();
         std::printf("\n== %s\n", argv[i]);
@@ -478,12 +525,21 @@ int main(int argc, char** argv) {
         // Nothing here talks to a server: the services are null pointers apart
         // from the event bus, which GameHandler requires, and the character is
         // set directly.
-        if (std::strcmp(argv[i], "--player") == 0) {
+        if (std::strcmp(argv[i], "--player") == 0 ||
+            std::strncmp(argv[i], "--player:", 9) == 0) {
+            const auto playerClass = std::strlen(argv[i]) > 8
+                ? static_cast<wowee::game::Class>(std::atoi(argv[i] + 9))
+                : wowee::game::Class::WARRIOR;
             static wowee::core::EventBus events;
             static wowee::game::GameServices svc;
             svc.events = &events;
-            static wowee::game::EmoteTable emotes(haveAssets ? &assets : nullptr);
+            static wowee::game::GameData gameData(
+                wowee::game::GameData::fromAssets(haveAssets ? &assets : nullptr), assetExpansions);
+            svc.gameData = &gameData;
+            static wowee::game::EmoteTable emotes(gameData);
             svc.emotes = &emotes;
+            static wowee::game::StatTables statTables(gameData);
+            svc.statTables = &statTables;
             // The two more GameHandler refuses to be built without. A store
             // in memory, so a run writes no CVar file, and a connection
             // factory that is never called: nothing here logs in.
@@ -495,6 +551,7 @@ int main(int argc, char** argv) {
             // rather than the empty they give with no assets behind them.
             if (haveAssets) svc.assetManager = &assets;
             static wowee::game::GameHandler gh(svc);
+            fixtureGame = &gh;
             constexpr uint64_t kGuid = 0x0000000000000001ull;
             gh.setPlayerGuid(kGuid);
             // Through the character list, because that is where the client
@@ -505,49 +562,71 @@ int main(int argc, char** argv) {
             ch.guid = kGuid;
             ch.name = "Headless";
             ch.race = wowee::game::Race::HUMAN;
-            ch.characterClass = wowee::game::Class::WARRIOR;
+            ch.characterClass = playerClass;
             ch.gender = wowee::game::Gender::MALE;
             ch.level = 80;
             gh.charactersRef().clear();
             gh.charactersRef().push_back(ch);
             gh.setActiveCharacterGuid(kGuid);
-            gh.playerRaceRef() = wowee::game::Race::HUMAN;
             // Base stats, so the character-sheet stat conversions (crit from
-            // agility, etc.) have something to read. str, agi, sta, int, spirit.
-            gh.playerStatsArr()[0] = 150;
-            gh.playerStatsArr()[1] = 200;  // agility
-            gh.playerStatsArr()[2] = 300;
-            gh.playerStatsArr()[3] = 50;
-            gh.playerStatsArr()[4] = 60;
-            gh.serverPlayerLevelRef() = 80;  // the level the game-table lookups use
-            gh.playerCombatRatingsRef()[1] = 148;  // CR_DEFENSE_SKILL, for UnitDefense
-            gh.playerCombatRatingsRef()[2] = 100;  // CR_DODGE, for GetCombatRatingBonus
-            gh.playerCombatRatingsRef()[24] = 100; // CR_ARMOR_PENETRATION, for GetArmorPenetration
-            gh.playerManaRegenRef() = 172.5f;        // per second, not casting, for GetManaRegen
-            gh.playerManaRegenCastingRef() = 50.0f;  // per second, while casting
+            // agility, etc.) have something to read, given as the realm gives
+            // them: the player's fields at create, in the expansion's layout.
+            if (assetExpansions.getActive()) {
+                wowee::game::loadProtocolTables(gh, gameData);
+                using wowee::game::UF;
+                const auto at = [](UF f) { return wowee::game::fieldIndex(f); };
+                const auto bitsOf = [](float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; };
+                const uint16_t ratings = at(UF::PLAYER_FIELD_COMBAT_RATING_1);
+                const std::map<uint16_t, uint32_t> fields = {
+                    {at(UF::UNIT_FIELD_STAT0), 150},
+                    {at(UF::UNIT_FIELD_STAT1), 200},  // agility
+                    {at(UF::UNIT_FIELD_STAT2), 300},
+                    {at(UF::UNIT_FIELD_STAT3), 50},
+                    {at(UF::UNIT_FIELD_STAT4), 60},
+                    {at(UF::UNIT_FIELD_LEVEL), 80},  // the level the game-table lookups use
+                    {static_cast<uint16_t>(ratings + 1), 148},   // CR_DEFENSE_SKILL, for UnitDefense
+                    {static_cast<uint16_t>(ratings + 2), 100},   // CR_DODGE, for GetCombatRatingBonus
+                    {static_cast<uint16_t>(ratings + 24), 100},  // CR_ARMOR_PENETRATION, for GetArmorPenetration
+                    // per second, not casting and while casting, for GetManaRegen
+                    {at(UF::UNIT_FIELD_POWER_REGEN_FLAT_MODIFIER), bitsOf(172.5f)},
+                    {at(UF::UNIT_FIELD_POWER_REGEN_INTERRUPTED_FLAT_MODIFIER), bitsOf(50.0f)},
+                };
+                wowee::game::FlatFieldMap flat;
+                for (const auto& [key, value] : fields) flat.insert_or_assign(key, value);
+                gh.player().playerFieldsArrived(flat, /*isCreate=*/true, gh);
+            } else {
+                std::fprintf(stderr, "--player: no expansion profile in %s, so the character has no stats\n",
+                             assetPath.c_str());
+            }
             // A few spells, so the spellbook is not empty. getSpellBookTabs
             // rebuilds itself from the known set whenever the count changes,
             // so adding them is all that is needed - and without them
             // PickupSpell resolves slot 1 to nothing and every drag out of the
             // book is a no-op that looks like a broken drag.
-            if (auto* sh = gh.getSpellHandler()) {
-                for (uint32_t id : {133u, 168u, 116u}) sh->addKnownSpell(id);
+            for (uint32_t id : {6603u, 8690u, 133u, 168u, 116u}) gh.spells().addKnownSpell(id);
+            // Use the dataset's actual icons: a question mark for every spell
+            // would hide macro and spellbook icon regressions.
+            std::unordered_map<uint32_t, std::string> iconPaths, spellPaths;
+            if (haveAssets) {
+                wowee::pipeline::loadSpellIconPaths(gameData, iconPaths);
+                const wowee::pipeline::RequiredTable dbc(gameData, "Spell.dbc", "the fixture's spell icons");
+                const uint32_t iconField = dbc.column("IconID");
+                const uint32_t idField = dbc.column("ID");
+                for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
+                    auto icon = iconPaths.find(dbc->getUInt32(row, iconField));
+                    if (icon != iconPaths.end()) spellPaths.emplace(dbc->getUInt32(row, idField), icon->second);
+                }
             }
-            // A spell icon path for every id, so GetSpellTexture answers
-            // non-empty. Without it SpellButton_UpdateButton hides the icon and
-            // SpellButton_OnDrag's `not IconTexture:IsShown()` guard returns
-            // before PickupSpell - a drag that looks broken but is only a
-            // spellbook with no icons, which is what the client draws over a
-            // realm and the harness cannot. The path need not resolve to pixels;
-            // the guard only asks whether the texture is shown.
-            gh.setSpellIconPathResolver(
-                [](uint32_t) { return std::string("Interface\\Icons\\INV_Misc_QuestionMark"); });
+            gh.setSpellIconPathResolver([paths = std::move(spellPaths)](uint32_t id) {
+                const auto found = paths.find(id);
+                return found == paths.end() ? std::string{} : found->second;
+            });
             // A quest in the log, with the text the server sends only on
             // query, so the quest-log detail has something real to lay out.
             // Without it GetQuestLogQuestText answers empty and "the
             // description is blank" cannot be told from "there was no quest".
-            if (auto* qh = gh.getQuestHandler()) {
-                auto& log = qh->questLogRef();
+            {
+                auto& log = gh.quests().questLogRef();
                 if (log.empty()) {
                     wowee::game::QuestHandler::QuestLogEntry q{};
                     q.questId = 375;
@@ -567,7 +646,7 @@ int main(int argc, char** argv) {
                     q.rewardTitleId = 6;  // CharTitles.dbc id 6 = "Knight %s"
                     q.factionRewards[0] = {69, 5, 0};  // faction 69, value idx 5 -> 250 rep
                     log.push_back(q);
-                    gh.setSelectedQuestLogIndex(1);
+                    gh.quests().setSelectedQuestLogIndex(1);
                 }
             }
             if (auto* engine = mgr.getLuaEngine()) engine->setGameHandler(&gh);
@@ -590,7 +669,7 @@ int main(int argc, char** argv) {
             player->setPosition(0.0f, 0.0f, 0.0f, 0.0f);
             {
                 const uint32_t race = static_cast<uint32_t>(wowee::game::Race::HUMAN);
-                const uint32_t klass = static_cast<uint32_t>(wowee::game::Class::WARRIOR);
+                const uint32_t klass = static_cast<uint32_t>(playerClass);
                 player->setField(
                     wowee::game::fieldIndex(wowee::game::UF::UNIT_FIELD_BYTES_0),
                     race | (klass << 8));
@@ -602,6 +681,18 @@ int main(int argc, char** argv) {
                         static_cast<unsigned>(gh.getPlayerRace()),
                         static_cast<unsigned>(gh.getPlayerClass()),
                         static_cast<unsigned>(ch.level));
+            continue;
+        }
+        // Add a learned spell through the same public API as the trainer.
+        if (std::strncmp(argv[i], "--learn-spell:", 14) == 0) {
+            if (!fixtureGame) {
+                std::fprintf(stderr, "--learn-spell needs --player first\n");
+                ++raised;
+            } else {
+                fixtureGame->spells().addKnownSpell(
+                    static_cast<uint32_t>(std::strtoul(argv[i] + 14, nullptr, 10)));
+                mgr.fireEvent("SPELLS_CHANGED");
+            }
             continue;
         }
         // --hit:X,Y says which frame the client's own hit test lands on.
@@ -731,10 +822,14 @@ int main(int argc, char** argv) {
         // ShowUIPanel(QuestLogFrame); QuestLog_SetSelection(1) is the quest log
         // opening onto its first quest, which is exactly the path a "the
         // description is blank" report walks.
-        if (std::strncmp(argv[i], "--lua:", 6) == 0) {
+        // Read UTF-8 scripts directly: Windows' narrow argv uses the system
+        // codepage and cannot faithfully carry localized Lua source text.
+        const bool luaFile = std::strncmp(argv[i], "--lua-file:", 11) == 0;
+        if (luaFile || std::strncmp(argv[i], "--lua:", 6) == 0) {
             relayout();
             if (auto* engine = mgr.getLuaEngine()) {
-                const bool ok = engine->executeString(argv[i] + 6);
+                const bool ok = luaFile ? engine->executeFile(argv[i] + 11)
+                                        : engine->executeString(argv[i] + 6);
                 if (ok && errors.size() == before) {
                     std::printf("   ran\n");
                 } else {

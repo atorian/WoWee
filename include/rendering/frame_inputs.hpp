@@ -93,7 +93,6 @@ struct FrameInputs {
     bool aerialRayMarching = false;
     std::optional<float> cameraWaterDepth;
     std::optional<float> waterHeight;
-    std::optional<float> reflectionWaterHeight;
     std::optional<float> seaWaterHeight;
     bool waterIsWmo = false;
     bool canal = false;

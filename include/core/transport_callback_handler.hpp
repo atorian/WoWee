@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/event_bus.hpp"
+
 #include <cstdint>
 #include <vector>
 #include <glm/glm.hpp>
@@ -31,6 +33,7 @@ private:
     PlayerView& playerView_;
     game::GameHandler& gameHandler_;
     AppearanceComposer* appearanceComposer_;
+    std::vector<EventBus::Subscription> subscriptions_;
 };
 
 } // namespace core

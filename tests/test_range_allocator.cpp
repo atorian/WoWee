@@ -7,6 +7,10 @@
 #include "rendering/range_allocator.hpp"
 
 #include <vector>
+#include <array>
+#include <atomic>
+#include <barrier>
+#include <thread>
 
 using wowee::rendering::RangeAllocator;
 
@@ -78,4 +82,36 @@ TEST_CASE("handed out ranges never overlap", "[terrain][allocator]") {
             CHECK(apart);
         }
     }
+}
+
+TEST_CASE("streaming allocations and fence returns preserve exclusive ranges", "[terrain][allocator][threaded]") {
+    constexpr uint32_t capacity = 1024;
+    RangeAllocator ranges(capacity);
+    std::array<std::atomic<unsigned>, capacity> owners{};
+    std::atomic<bool> valid{true};
+    std::barrier start(3);
+    auto churn = [&](unsigned owner, uint32_t count) {
+        start.arrive_and_wait();
+        for (int i = 0; i < 20000 && valid.load(); ++i) {
+            const auto at = ranges.allocate(count);
+            if (!at || *at > capacity - count) { valid = false; break; }
+            for (uint32_t slot = *at; slot < *at + count; ++slot)
+                if (owners[slot].exchange(owner) != 0) valid = false;
+            for (uint32_t slot = *at; slot < *at + count; ++slot)
+                if (owners[slot].exchange(0) != owner) valid = false;
+            ranges.free(*at, count);
+        }
+    };
+    std::thread producer(churn, 1, 7);
+    std::thread retiring(churn, 2, 13);
+    start.arrive_and_wait();
+    for (int i = 0; i < 20000 && valid.load(); ++i) {
+        if (ranges.used() > capacity || ranges.largestFree() > capacity ||
+            ranges.freeRangeCount() > capacity || ranges.capacity() != capacity) valid = false;
+    }
+    producer.join();
+    retiring.join();
+    REQUIRE(valid.load());
+    CHECK(ranges.used() == 0);
+    CHECK(ranges.allocate(capacity) == 0);
 }

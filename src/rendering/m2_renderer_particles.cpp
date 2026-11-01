@@ -19,9 +19,11 @@
 #include <glm/gtx/quaternion.hpp>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <random>
 #include <limits>
 #include <set>
+#include <tuple>
 
 namespace wowee {
 namespace rendering {
@@ -60,6 +62,35 @@ glm::vec3 particleWorldPosition(const M2Instance& inst, const M2ModelGPU& gpu, c
     const auto& em = gpu.particleEmitters[p.emitterIndex];
     if (!(em.flags & pipeline::kM2EmitterModelSpace)) return p.position;
     return glm::vec3(emitterToWorld(inst, em) * glm::vec4(p.position, 1.0f));
+}
+
+// Nearest first. Equally far ones by where they stand, then by model, so the
+// order is the same whatever order the instances were loaded in: blended
+// particles drawn in load order came out differently from one run of the
+// same scene to the next.
+template <typename Emitter>
+void sortNearestFirst(std::vector<Emitter>& emitters) {
+    std::sort(emitters.begin(), emitters.end(), [](const Emitter& a, const Emitter& b) {
+        if (a.distSq != b.distSq) return a.distSq < b.distSq;
+        const glm::vec3 p(a.inst->modelMatrix[3]);
+        const glm::vec3 q(b.inst->modelMatrix[3]);
+        if (p != q) return std::tie(p.x, p.y, p.z) < std::tie(q.x, q.y, q.z);
+        return a.inst->cachedModel->name < b.inst->cachedModel->name;
+    });
+}
+
+// The blocks of `items` starting at `starts` in reverse order, each block as
+// it was.
+template <typename T>
+void reverseBlocks(std::vector<T>& items, const std::vector<size_t>& starts, std::vector<T>& scratch) {
+    scratch.clear();
+    size_t end = items.size();
+    for (size_t b = starts.size(); b-- > 0;) {
+        scratch.insert(scratch.end(), items.begin() + static_cast<std::ptrdiff_t>(starts[b]),
+                       items.begin() + static_cast<std::ptrdiff_t>(end));
+        end = starts[b];
+    }
+    items.swap(scratch);
 }
 
 } // namespace
@@ -125,9 +156,9 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
         const auto& em = gpu.particleEmitters[ei];
         if (!em.enabled) continue;
 
-        const float authoredRate = interpFloat(em.emissionRate, inst.animTime, inst.globalSequenceTime,
+        const float authoredRate = interpFloat(em.emissionRate, animTimeOf(inst), globalSequenceTimeOf(inst),
                                                inst.currentSequenceIndex, gpu.globalSequenceDurations);
-        float life = interpFloat(em.lifespan, inst.animTime, inst.globalSequenceTime,
+        float life = interpFloat(em.lifespan, animTimeOf(inst), globalSequenceTimeOf(inst),
                                  inst.currentSequenceIndex, gpu.globalSequenceDurations);
         // As the client emits (CParticleEmitter2, 0x97d8c0): the rate give or
         // take its variation, thinned by the density setting and by the
@@ -151,9 +182,9 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
                 if (reported.insert(gpu.name).second) {
                     LOG_WARNING("Flame emitter idle: '", gpu.name, "' emitter=", ei,
                                 " rate=", rate, " life=", life,
-                                " animTime=", inst.animTime,
+                                " animTime=", animTimeOf(inst),
                                 " seqIdx=", inst.currentSequenceIndex,
-                                " gsTime=", inst.globalSequenceTime,
+                                " gsTime=", globalSequenceTimeOf(inst),
                                 " rateSeqs=", em.emissionRate.sequences.size(),
                                 " lifeSeqs=", em.lifespan.sequences.size(),
                                 " rateGlobalSeq=", em.emissionRate.globalSequence);
@@ -187,7 +218,7 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
             p.twinkleOffset = static_cast<uint32_t>(inst.random()) & (kM2TwinkleSlots - 1);
 
             const auto track = [&](const pipeline::M2AnimationTrack& t) {
-                return interpFloat(t, inst.animTime, inst.globalSequenceTime,
+                return interpFloat(t, animTimeOf(inst), globalSequenceTimeOf(inst),
                                    inst.currentSequenceIndex, gpu.globalSequenceDurations);
             };
 
@@ -309,7 +340,7 @@ void M2Renderer::updateParticles(M2Instance& inst, float dt) {
     for (size_t e = 0; e < numEm; ++e) {
         const auto& pem = gpu.particleEmitters[e];
         const auto track = [&](const pipeline::M2AnimationTrack& t) {
-            return interpFloat(t, inst.animTime, inst.globalSequenceTime,
+            return interpFloat(t, animTimeOf(inst), globalSequenceTimeOf(inst),
                                inst.currentSequenceIndex, gpu.globalSequenceDurations);
         };
         emitterMotion[e] = {.gravity = track(pem.gravity)};
@@ -376,15 +407,15 @@ void M2Renderer::updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt
         const size_t capacity = static_cast<size_t>(std::ceil(lifetime * edgesPerSecond)) + 2;
 
         const auto sample = [&](const pipeline::M2AnimationTrack& track) {
-            return m2_track::sampleFloat(track, inst.currentSequenceIndex, inst.animTime,
-                                         inst.globalSequenceTime, gpu.globalSequenceDurations, 1.0f);
+            return m2_track::sampleFloat(track, inst.currentSequenceIndex, animTimeOf(inst),
+                                         globalSequenceTimeOf(inst), gpu.globalSequenceDurations, 1.0f);
         };
         const bool visible = sample(em.visibilityTrack) > 0.5f;
         const float above = sample(em.heightAboveTrack);
         const float below = sample(em.heightBelowTrack);
         const float alpha = sample(em.alphaTrack);
         const glm::vec3 color = m2_track::sampleVec3(em.colorTrack, inst.currentSequenceIndex,
-            inst.animTime, inst.globalSequenceTime, gpu.globalSequenceDurations, glm::vec3(1.0f));
+            animTimeOf(inst), globalSequenceTimeOf(inst), gpu.globalSequenceDurations, glm::vec3(1.0f));
 
         // The emitter's frame: model, bone, then its own offset on the bone.
         const glm::mat4 bone = em.bone < inst.boneMatrices.size()
@@ -474,7 +505,7 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     recordM2Ribbons(cmd, perFrameSet);
 }
 
-size_t M2Renderer::gatherM2Ribbons(Frame& frame) {
+size_t M2Renderer::gatherM2Ribbons(Frame& frame, const glm::vec3& eye) {
     auto& ribbonDraws_ = frame.ribbonDraws_;
     ribbonDraws_.clear();
     // Diagnostic: WOWEE_M2_NO_RIBBONS=1 drops every M2 ribbon trail draw.
@@ -570,10 +601,26 @@ size_t M2Renderer::gatherM2Ribbons(Frame& frame) {
     // concerned (M2ModelGPU::hasEmitters). This walked every instance in the
     // world, asking each whether its model had ribbons - the walk the particle
     // pass dropped for costing 2 ms of a 16 ms frame.
+    //
+    // Nearest first, so a full buffer cuts the farthest trails short, and
+    // then drawn farthest first, over what is behind them.
+    emittersInView_.clear();
+    const auto addInView = [&](const M2Instance& inst) {
+        if (!inst.cachedModel) return;
+        const glm::vec3 toEye = glm::vec3(inst.modelMatrix[3]) - eye;
+        emittersInView_.push_back({.inst = &inst, .distSq = glm::dot(toEye, toEye)});
+    };
     for (size_t idx : scene_->particleInstanceIndices_) {
-        if (idx < scene_->instances.size()) addInstanceRibbons(scene_->instances[idx]);
+        if (idx < scene_->instances.size()) addInView(scene_->instances[idx]);
     }
-    for (const auto& [id, posed] : scene_->posedEmitters_) addInstanceRibbons(posed.inst);
+    for (const auto& [id, posed] : scene_->posedEmitters_) addInView(posed.inst);
+    sortNearestFirst(emittersInView_);
+    emitterBlocks_.clear();
+    for (const auto& e : emittersInView_) {
+        emitterBlocks_.push_back(draws.size());
+        addInstanceRibbons(*e.inst);
+    }
+    reverseBlocks(draws, emitterBlocks_, reorderedRibbons_);
 
     // Periodic diagnostic: spell ribbon draw count
     {
@@ -647,7 +694,7 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
     recordM2Particles(cmd, perFrameSet);
 }
 
-size_t M2Renderer::gatherM2Particles(Frame& frame) {
+size_t M2Renderer::gatherM2Particles(Frame& frame, const glm::vec3& eye) {
     auto& particleRuns_ = frame.particleRuns_;
     particleRuns_.clear();
     // Diagnostic: WOWEE_M2_NO_PARTICLES=1 drops every M2 particle draw, which
@@ -890,21 +937,39 @@ size_t M2Renderer::gatherM2Particles(Frame& frame) {
     // filled before a Shadowform priest's fire - created last, so listed last
     // - got any of it. The sphere is the model's and its particles' reach,
     // with room for a particle's own size.
+    //
+    // Nearest first, so a full buffer drops the farthest particles rather
+    // than whichever effect was created last; then drawn farthest first, as
+    // blending needs them.
     constexpr float kParticleSizeMargin = 2.0f;
+    emittersInView_.clear();
+    const auto addInView = [&](const M2Instance& inst) {
+        if (inst.particles.empty() || !inst.cachedModel) return;
+        const glm::vec3 toEye = glm::vec3(inst.modelMatrix[3]) - eye;
+        emittersInView_.push_back({.inst = &inst, .distSq = glm::dot(toEye, toEye)});
+    };
     for (size_t idx : scene_->particleInstanceIndices_) {
         if (idx >= scene_->instances.size()) continue;
         const M2Instance& inst = scene_->instances[idx];
         if (inst.particles.empty()) continue;
         const float radius = std::max(inst.cachedPaddedRadius, inst.particleReach) + kParticleSizeMargin;
         if (!viewFrustum.intersectsSphere(inst.cachedCullCenter, radius)) continue;
-        addInstanceParticles(inst);
+        addInView(inst);
     }
-    for (const auto& [id, posed] : scene_->posedEmitters_) addInstanceParticles(posed.inst);
+    for (const auto& [id, posed] : scene_->posedEmitters_) addInView(posed.inst);
+    sortNearestFirst(emittersInView_);
+    emitterBlocks_.clear();
+    for (const auto& e : emittersInView_) {
+        emitterBlocks_.push_back(particleRuns_.size());
+        runGroup = nullptr;
+        addInstanceParticles(*e.inst);
+    }
+    reverseBlocks(particleRuns_, emitterBlocks_, reorderedRuns_);
     if (droppedForSpace > 0) {
         static core::LogBudget overflowBudget(8, "M2 particle buffer overflows");
         if (overflowBudget.take()) {
             LOG_WARNING("M2 particle buffer full: ", droppedForSpace, " particles in view not drawn (",
-                        MAX_M2_PARTICLE_QUADS, " quads); the effects listed last lose them");
+                        MAX_M2_PARTICLE_QUADS, " quads); the farthest effects lose them");
         }
     }
 
@@ -958,32 +1023,17 @@ void M2Renderer::recordM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
             currentPipeline = desiredPipeline;
         }
 
-        // Use pre-allocated stable descriptor set; fall back to per-frame alloc only if unavailable
+        // The set loadModel allocated for the emitter. There is none only when
+        // that allocation failed, which means materialDescPool_ was exhausted;
+        // stop there rather than draw with whatever set 1 was bound last.
         VkDescriptorSet texSet = group.preAllocSet;
         if (texSet == VK_NULL_HANDLE) {
-            // Fallback: allocate per-frame (pool exhaustion risk - should not happen in practice)
-            VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-            ai.descriptorPool = materialDescPool_;
-            ai.descriptorSetCount = 1;
-            ai.pSetLayouts = &particleTexLayout_;
-            if (vkCtx_->allocateDescriptorSets(ai, &texSet) == VK_SUCCESS) {
-                VkTexture* tex = (group.texture && group.texture->isValid())
-                    ? group.texture : whiteTexture_.get();
-                if (!tex || !tex->isValid()) continue;
-                VkDescriptorImageInfo imgInfo = tex->descriptorInfo();
-                VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-                write.dstSet = texSet;
-                write.dstBinding = 0;
-                write.descriptorCount = 1;
-                write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                write.pImageInfo = &imgInfo;
-                vkUpdateDescriptorSets(vkCtx_->getDevice(), 1, &write, 0, nullptr);
-            }
+            LOG_FATAL("M2 particles: group (blend ", static_cast<int>(group.blendType),
+                      ") has no descriptor set; loadModel could not allocate one");
+            std::abort();
         }
-        if (texSet != VK_NULL_HANDLE) {
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    particlePipelineLayout_, 1, 1, &texSet, 0, nullptr);
-        }
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                particlePipelineLayout_, 1, 1, &texSet, 0, nullptr);
 
         const M2ParticlePush pc{
             .tileX = static_cast<float>(group.tilesX), .tileY = static_cast<float>(group.tilesY),

@@ -208,7 +208,7 @@ bool MapWindow::open(SDL_Window* gameWindow, rendering::Renderer* renderer,
     // places. Its textures are made under this window's context.
     map_ = std::make_shared<rendering::world_map::WorldMapFacade>();
     withContext([&] {
-        if (!map_->initialize(ctx, assets)) {
+        if (!map_->initialize(ctx, assets, renderer->gameTables())) {
             LOG_WARNING("Map window: the map did not initialise");
         }
         map_->setPersistent(true);
@@ -398,11 +398,11 @@ void MapWindow::drawQuestPanel(float x, float width, float height, uint64_t now)
         return;
     }
 
-    const auto& log = gh->getQuestLog();
+    const auto& log = gh->quests().getQuestLog();
     const ImVec4 gold(1.0f, 0.82f, 0.0f, 1.0f);
     ImGui::TextColored(gold, "Quest Log");
     ImGui::SameLine();
-    const int slots = gh->getQuestHandler() ? gh->getQuestHandler()->maxQuestLogSlots() : 25;
+    const int slots = gh->quests().maxQuestLogSlots();
     ImGui::TextDisabled("%d/%d", static_cast<int>(log.size()), slots);
     ImGui::Separator();
     if (log.empty()) ImGui::TextDisabled("No quests.");
@@ -420,7 +420,7 @@ void MapWindow::drawQuestPanel(float x, float width, float height, uint64_t now)
         Group& group = groups[quest.zoneOrSort];
         if (group.name.empty()) {
             if (quest.zoneOrSort > 0) group.name = gh->getAreaName(static_cast<uint32_t>(quest.zoneOrSort));
-            else if (quest.zoneOrSort < 0) group.name = gh->getQuestSortName(static_cast<uint32_t>(-quest.zoneOrSort));
+            else if (quest.zoneOrSort < 0) group.name = gh->quests().getQuestSortName(static_cast<uint32_t>(-quest.zoneOrSort));
             if (group.name.empty()) group.name = "Other";
         }
         group.quests.push_back(&quest);
@@ -434,7 +434,7 @@ void MapWindow::drawQuestPanel(float x, float width, float height, uint64_t now)
         return a->second.name < b->second.name;
     });
 
-    const int playerLevel = static_cast<int>(gh->getPlayerLevel());
+    const int playerLevel = static_cast<int>(gh->player().level());
     for (const auto* entry : order) {
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(0.85f, 0.75f, 0.55f, 1.0f), "%s", entry->second.name.c_str());
@@ -443,8 +443,8 @@ void MapWindow::drawQuestPanel(float x, float width, float height, uint64_t now)
 
             // Tracked, the same set the objectives tracker on the game's screen
             // shows; changing it here changes it there.
-            bool tracked = gh->isQuestTracked(quest->questId);
-            if (ImGui::Checkbox("##track", &tracked)) gh->setQuestTracked(quest->questId, tracked);
+            bool tracked = gh->quests().isQuestTracked(quest->questId);
+            if (ImGui::Checkbox("##track", &tracked)) gh->quests().setQuestTracked(quest->questId, tracked);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Track this quest");
             ImGui::SameLine();
 

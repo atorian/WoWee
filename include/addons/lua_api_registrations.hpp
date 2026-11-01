@@ -67,6 +67,7 @@ void noteClientSettingChanged(const std::string& settingKey, const std::string& 
 /// a player can rely on, and this client is exited every way there is.
 void setStoredCVar(const std::string& key, const std::string& value);
 void registerActionLuaAPI(lua_State* L);
+void refreshMacroIcons(lua_State* L, float elapsed);
 /// MoveForwardStart and the rest of what bindings.xml moves the character
 /// with, through LuaServices::holdMovement.
 void registerMovementLuaAPI(lua_State* L);

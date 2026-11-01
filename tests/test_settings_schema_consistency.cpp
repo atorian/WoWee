@@ -249,7 +249,9 @@ std::vector<SourceRow> sourceRows() {
 
     const std::regex keyRx(R"RX(^\s*\{"([a-z0-9_]+)")RX");
     const std::regex catRx(
-        R"RX(SettingKind::\w+,\s*[-0-9.]+f?,\s*[-0-9.]+f?,\s*[-0-9.]+f?,\s*"([^"]*)",\s*"([^"]*)")RX");
+        // A bound may be a named constant (rendering::kMaxViewDistance) as
+        // well as a number.
+        R"RX(SettingKind::\w+,\s*[-\w:.]+,\s*[-\w:.]+,\s*[-\w:.]+,\s*"([^"]*)",\s*"([^"]*)")RX");
 
     for (size_t i = 0; i < starts.size(); ++i) {
         const size_t from = starts[i].first;

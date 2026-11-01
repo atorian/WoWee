@@ -33,7 +33,7 @@ namespace wowee {
 namespace pipeline {
 
 class AssetManager;
-class DBCFile;
+class RequiredTable;
 
 /// The eight texture regions of ItemDisplayInfo, in the order its columns run.
 constexpr int kItemTextureRegionCount = 8;
@@ -81,7 +81,17 @@ struct ItemDisplayArt {
     std::string textureName;   ///< no folder and no extension, as the table has it
 };
 
-ItemDisplayArt readItemDisplayArt(const DBCFile& itemDisplayInfo, uint32_t recordIndex);
+ItemDisplayArt readItemDisplayArt(const RequiredTable& itemDisplayInfo, uint32_t recordIndex);
+
+/// ItemDisplayInfo.dbc's eight texture-region columns, arm upper first, as the
+/// expansion's layout names TextureArmUpper.
+///
+/// A 25-column file (TBC, WotLK) has them at 15-22 and a 23-column one
+/// (Classic) at 14-21: vanilla has one InventoryIcon where the later
+/// files have two. A layout one off from the file it is read against - before
+/// 2026-08-13 all four said 14 - is put right by the file's width rather than
+/// read one column past the eight.
+void getItemDisplayInfoTextureFields(const RequiredTable& itemDisplayInfo, uint32_t (&out)[8]);
 
 /// Every path a cape's texture might be at, in the order to try them.
 ///

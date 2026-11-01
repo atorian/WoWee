@@ -81,19 +81,20 @@ void NPCInteractionCallbackHandler::setupCallbacks() {
         }));
 
     // NPC aggro callback - play combat start voice line
-    gameHandler_.setNpcAggroCallback([this](uint64_t guid, const glm::vec3& position) {
-        if (audioCoordinator_ && audioCoordinator_->getNpcVoiceManager()) {
-            glm::vec3 renderPos = core::coords::canonicalToRender(position);
-            audio::VoiceType voiceType = resolveNpcVoiceType(guid);
-            uint32_t displayId = 0;
-            auto entity = gameHandler_.getEntityManager().getEntity(guid);
-            if (entity && entity->getType() == game::ObjectType::UNIT) {
-                displayId = std::static_pointer_cast<game::Unit>(entity)->getDisplayId();
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::NpcAggroed>(
+        [this](const game::events::NpcAggroed& e) {
+            if (audioCoordinator_ && audioCoordinator_->getNpcVoiceManager()) {
+                glm::vec3 renderPos = core::coords::canonicalToRender(glm::vec3(e.x, e.y, e.z));
+                audio::VoiceType voiceType = resolveNpcVoiceType(e.guid);
+                uint32_t displayId = 0;
+                auto entity = gameHandler_.getEntityManager().getEntity(e.guid);
+                if (entity && entity->getType() == game::ObjectType::UNIT) {
+                    displayId = std::static_pointer_cast<game::Unit>(entity)->getDisplayId();
+                }
+                audioCoordinator_->getNpcVoiceManager()->playAggro(
+                    e.guid, displayId, voiceType, renderPos);
             }
-            audioCoordinator_->getNpcVoiceManager()->playAggro(
-                guid, displayId, voiceType, renderPos);
-        }
-    });
+        }));
 }
 
 }} // namespace wowee::core

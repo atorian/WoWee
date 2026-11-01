@@ -3,8 +3,10 @@
 //                 /clearmainassist, /raidinfo, /raidconvert, /lootmethod,
 //                 /lootthreshold, /mark, /roll
 // Moved from ChatPanel::sendChatMessage() if/else chain (Phase 3).
+#include "duel/services/duels.hpp"
 #include "game/group_defines.hpp"
 #include "ui/chat/chat_utils.hpp"
+#include "group/services/group.hpp"
 #include "ui/chat/i_chat_command.hpp"
 #include "ui/chat_panel.hpp"
 #include "game/game_handler.hpp"
@@ -19,7 +21,7 @@ namespace wowee { namespace ui {
 class ReadyCheckCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.initiateReadyCheck();
+        group::orNoGroup(ctx.services.group).initiateReadyCheck();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"readycheck", "rc"}; }
@@ -30,7 +32,7 @@ public:
 class ReadyCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.respondToReadyCheck(true);
+        group::orNoGroup(ctx.services.group).respondToReadyCheck(true);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"ready"}; }
@@ -41,7 +43,7 @@ public:
 class NotReadyCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.respondToReadyCheck(false);
+        group::orNoGroup(ctx.services.group).respondToReadyCheck(false);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"notready", "nr"}; }
@@ -52,7 +54,7 @@ public:
 class YieldCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.forfeitDuel();
+        if (auto* duels = ctx.services.duels) duels->forfeitDuel();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"yield", "forfeit", "surrender"}; }
@@ -63,7 +65,7 @@ public:
 class AfkCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.toggleAfk(ctx.args);
+        ctx.gameHandler.chat().toggleAfk(ctx.args);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"afk", "away"}; }
@@ -74,7 +76,7 @@ public:
 class DndCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.toggleDnd(ctx.args);
+        ctx.gameHandler.chat().toggleDnd(ctx.args);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"dnd", "busy"}; }
@@ -86,7 +88,7 @@ class UninviteCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (!ctx.args.empty()) {
-            ctx.gameHandler.uninvitePlayer(ctx.args);
+            group::orNoGroup(ctx.services.group).uninvitePlayer(ctx.args);
         } else {
             game::MessageChatData msg;
             msg.type = game::ChatType::SYSTEM;
@@ -107,9 +109,9 @@ public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (!ctx.args.empty()) {
             // /leave ChannelName - leave a chat channel
-            ctx.gameHandler.leaveChannel(ctx.args);
+            ctx.gameHandler.chat().leaveChannel(ctx.args);
         } else {
-            ctx.gameHandler.leaveParty();
+            group::orNoGroup(ctx.services.group).leaveGroup();
         }
         return {};
     }
@@ -121,8 +123,8 @@ public:
 class MainTankCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (ctx.gameHandler.hasTarget()) {
-            ctx.gameHandler.setMainTank(ctx.gameHandler.getTargetGuid());
+        if (ctx.gameHandler.combat().hasTarget()) {
+            group::orNoGroup(ctx.services.group).setMainTank(ctx.gameHandler.combat().getTargetGuid());
         } else {
             game::MessageChatData msg;
             msg.type = game::ChatType::SYSTEM;
@@ -140,8 +142,8 @@ public:
 class MainAssistCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (ctx.gameHandler.hasTarget()) {
-            ctx.gameHandler.setMainAssist(ctx.gameHandler.getTargetGuid());
+        if (ctx.gameHandler.combat().hasTarget()) {
+            group::orNoGroup(ctx.services.group).setMainAssist(ctx.gameHandler.combat().getTargetGuid());
         } else {
             game::MessageChatData msg;
             msg.type = game::ChatType::SYSTEM;
@@ -159,7 +161,7 @@ public:
 class ClearMainTankCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.clearMainTank();
+        group::orNoGroup(ctx.services.group).clearMainTank();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"clearmaintank"}; }
@@ -170,7 +172,7 @@ public:
 class ClearMainAssistCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.clearMainAssist();
+        group::orNoGroup(ctx.services.group).clearMainAssist();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"clearmainassist"}; }
@@ -185,13 +187,13 @@ public:
         // packet and arrives well after this returns, so what is printed is
         // what the last request brought back - the one the interface makes at
         // login, which is why there is something to print at all.
-        ctx.gameHandler.requestRaidInfo();
-        const auto& lockouts = ctx.gameHandler.getInstanceLockouts();
+        ctx.gameHandler.social().requestRaidInfo();
+        const auto& lockouts = ctx.gameHandler.social().getInstanceLockouts();
         if (lockouts.empty()) {
-            ctx.gameHandler.addSystemChatMessage("You are not saved to any instances.");
+            ctx.gameHandler.chat().addSystemChatMessage("You are not saved to any instances.");
             return {};
         }
-        ctx.gameHandler.addSystemChatMessage("Saved instances:");
+        ctx.gameHandler.chat().addSystemChatMessage("Saved instances:");
         const auto now = static_cast<uint64_t>(std::time(nullptr));
         for (const auto& lo : lockouts) {
             std::string name = ctx.gameHandler.getMapName(lo.mapId);
@@ -212,7 +214,7 @@ public:
                 when = days > 0 ? std::to_string(days) + "d " + std::to_string(hours) + "h"
                                 : std::to_string(hours) + "h";
             }
-            ctx.gameHandler.addSystemChatMessage(
+            ctx.gameHandler.chat().addSystemChatMessage(
                 "  " + name + " - resets in " + when +
                 (lo.extended ? " (extended)" : ""));
         }
@@ -226,7 +228,7 @@ public:
 class RaidConvertCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.convertToRaid();
+        group::orNoGroup(ctx.services.group).convertToRaid();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"raidconvert"}; }
@@ -237,12 +239,12 @@ public:
 class LootMethodCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (!ctx.gameHandler.isInGroup()) {
+        if (!group::orNoGroup(ctx.services.group).isInGroup()) {
             ctx.gameHandler.addUIError("You are not in a group.");
             return {};
         }
         if (ctx.args.empty()) {
-            const auto& pd = ctx.gameHandler.getPartyData();
+            const auto& pd = group::orNoGroup(ctx.services.group).getPartyData();
             const char* cur = game::lootMethodName(pd.lootMethod);
             game::MessageChatData msg;
             msg.type = game::ChatType::SYSTEM;
@@ -265,9 +267,11 @@ public:
         if (method == 0xFFFFFFFF) {
             ctx.gameHandler.addUIError("Unknown loot method. Use: ffa, roundrobin, master, group, needbeforegreed");
         } else {
-            const auto& pd = ctx.gameHandler.getPartyData();
-            uint64_t masterGuid = (method == 2) ? ctx.gameHandler.getPlayerGuid() : 0;
-            ctx.gameHandler.sendSetLootMethod(method, pd.lootThreshold, masterGuid);
+            // Master loot names the player as the looter; the service sends a
+            // looter for master loot alone.
+            auto& party = group::orNoGroup(ctx.services.group);
+            party.setLootMethod(static_cast<uint8_t>(method), ctx.gameHandler.getPlayerGuid(),
+                                party.getPartyData().lootThreshold);
         }
         return {};
     }
@@ -279,12 +283,12 @@ public:
 class LootThresholdCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (!ctx.gameHandler.isInGroup()) {
+        if (!group::orNoGroup(ctx.services.group).isInGroup()) {
             ctx.gameHandler.addUIError("You are not in a group.");
             return {};
         }
         if (ctx.args.empty()) {
-            const auto& pd = ctx.gameHandler.getPartyData();
+            const auto& pd = group::orNoGroup(ctx.services.group).getPartyData();
             static constexpr const char* kQualityNames[] = {
                 "Poor (grey)", "Common (white)", "Uncommon (green)",
                 "Rare (blue)", "Epic (purple)", "Legendary (orange)"
@@ -316,9 +320,11 @@ public:
         if (threshold == 0xFFFFFFFF) {
             ctx.gameHandler.addUIError("Invalid threshold. Use 0-5 or: poor, common, uncommon, rare, epic, legendary");
         } else {
-            const auto& pd = ctx.gameHandler.getPartyData();
-            uint64_t masterGuid = (pd.lootMethod == 2) ? ctx.gameHandler.getPlayerGuid() : 0;
-            ctx.gameHandler.sendSetLootMethod(pd.lootMethod, threshold, masterGuid);
+            // The method and its looter stay as they are; CMSG_LOOT_METHOD
+            // carries all three, so the other two are resent.
+            auto& party = group::orNoGroup(ctx.services.group);
+            const auto& pd = party.getPartyData();
+            party.setLootMethod(pd.lootMethod, pd.looterGuid, static_cast<uint8_t>(threshold));
         }
         return {};
     }
@@ -330,7 +336,7 @@ public:
 class MarkCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (!ctx.gameHandler.hasTarget()) {
+        if (!ctx.gameHandler.combat().hasTarget()) {
             game::MessageChatData noTgt;
             noTgt.type = game::ChatType::SYSTEM;
             noTgt.language = game::ChatLanguage::UNIVERSAL;
@@ -350,7 +356,7 @@ public:
             std::string argLow = ui::chat_utils::toLower(ctx.args);
             while (!argLow.empty() && argLow.front() == ' ') argLow.erase(argLow.begin());
             if (argLow == "clear" || argLow == "0" || argLow == "none") {
-                ctx.gameHandler.setRaidMark(ctx.gameHandler.getTargetGuid(), 0xFF);
+                group::orNoGroup(ctx.services.group).setRaidMark(ctx.gameHandler.combat().getTargetGuid(), 0xFF);
                 return {};
             }
             bool found = false;
@@ -374,7 +380,7 @@ public:
                 return {};
             }
         }
-        ctx.gameHandler.setRaidMark(ctx.gameHandler.getTargetGuid(), icon);
+        group::orNoGroup(ctx.services.group).setRaidMark(ctx.gameHandler.combat().getTargetGuid(), icon);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"mark", "marktarget", "raidtarget"}; }
@@ -404,7 +410,7 @@ public:
                 try { maxRoll = std::stoul(ctx.args); } catch (...) {}
             }
         }
-        ctx.gameHandler.randomRoll(minRoll, maxRoll);
+        ctx.gameHandler.social().randomRoll(minRoll, maxRoll);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"roll", "random", "rnd"}; }

@@ -16,13 +16,13 @@ namespace {
 std::string targetName(GameHandler& gh, int32_t npcOrGoId) {
     const uint32_t entry = static_cast<uint32_t>(std::abs(npcOrGoId));
     if (npcOrGoId > 0) {
-        std::string name = gh.getCachedCreatureName(entry);
-        if (name.empty()) gh.queryCreatureInfo(entry, 0);
+        std::string name = gh.queryCache().getCachedCreatureName(entry);
+        if (name.empty()) gh.queryCache().queryCreatureInfo(entry, 0);
         return name;
     }
-    const auto* info = gh.getCachedGameObjectInfo(entry);
+    const auto* info = gh.queryCache().getCachedGameObjectInfo(entry);
     if (!info || info->name.empty()) {
-        gh.queryGameObjectInfo(entry, 0);
+        gh.queryCache().queryGameObjectInfo(entry, 0);
         return {};
     }
     return info->name;
@@ -53,11 +53,11 @@ std::vector<QuestObjective> questObjectives(GameHandler& gh,
         // By name; the number stands in while the item query is out, and the
         // answer lands with a QUEST_LOG_UPDATE behind it.
         std::string name;
-        const auto* info = gh.getItemInfo(item.itemId);
+        const auto* info = gh.inventory().getItemInfo(item.itemId);
         if (info && !info->name.empty()) {
             name = info->name;
         } else {
-            gh.queryItemInfo(item.itemId, 0);
+            gh.inventory().queryItemInfo(item.itemId, 0);
             name = "Item #" + std::to_string(item.itemId);
         }
         QuestObjective line;

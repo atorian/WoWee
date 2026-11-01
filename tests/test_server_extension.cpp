@@ -2,6 +2,7 @@
 #include "ezwow_loader_fixture.hpp"
 #include <catch_amalgamated.hpp>
 #include "game/server_extension.hpp"
+#include "core/env.hpp"
 #include "ezwow_bootstrap_fixture.hpp"
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
@@ -67,6 +68,41 @@ TEST_CASE("Switching servers starts a fresh adapter and clears runtime memory", 
     REQUIRE(runtime.begin(f.root, "stock.example", 3724, 12340, f.executable));
     CHECK_FALSE(runtime.active()); CHECK(runtime.error().empty()); CHECK(runtime.clientPath().empty());
     CHECK(runtime.readMemory("fixture.dll", 0x1000, 4, result) == ServerExtension::ReadResult::Unhandled);
+}
+TEST_CASE("A realm's profile is found in the data folder the client reads, not only in Data/", "[extension]") {
+    // A client started with WOW_DATA_PATH and no Data/ in its working
+    // directory read its assets and never the realm's profile, answered the
+    // realm's own Warden checks as stock WoW, and waited for a character list
+    // that never came.
+    Fixture f; f.install("data-root.example", f.profile());
+    const auto dataRoot = f.root.parent_path() / (f.root.filename().string() + "_data");
+    fs::create_directories(dataRoot);
+    fs::rename(f.root, dataRoot / "server_extensions");
+    const auto* oldOverride = std::getenv("WOWEE_SERVER_EXTENSIONS_DIR");
+    const auto* oldData = std::getenv("WOW_DATA_PATH");
+    const std::string savedOverride = oldOverride ? oldOverride : "", savedData = oldData ? oldData : "";
+    wowee::core::unsetEnvVar("WOWEE_SERVER_EXTENSIONS_DIR");
+    wowee::core::setEnvVar("WOW_DATA_PATH", dataRoot.string().c_str());
+
+    const auto found = wowee::game::locateServerExtension("data-root.example", 3724);
+    const auto stock = wowee::game::locateServerExtension("stock.example", 3724);
+    ServerExtension runtime; uint8_t result[4]{};
+    const bool begun = !found.root.empty() &&
+        runtime.begin(found.root, "data-root.example", 3724, 12340, f.executable);
+    const auto read = begun ? runtime.readMemory("fixture.dll", 0x1000, 4, result)
+                            : ServerExtension::ReadResult::Unhandled;
+
+    savedOverride.empty() ? wowee::core::unsetEnvVar("WOWEE_SERVER_EXTENSIONS_DIR")
+                          : wowee::core::setEnvVar("WOWEE_SERVER_EXTENSIONS_DIR", savedOverride.c_str());
+    savedData.empty() ? wowee::core::unsetEnvVar("WOW_DATA_PATH")
+                      : wowee::core::setEnvVar("WOW_DATA_PATH", savedData.c_str());
+    runtime.reset();
+    std::error_code ec; fs::remove_all(dataRoot, ec);
+
+    REQUIRE(begun);
+    CHECK(read == ServerExtension::ReadResult::Handled);
+    CHECK(stock.root.empty());
+    CHECK_FALSE(stock.searched.empty());
 }
 TEST_CASE("A server library cannot be used with the wrong build or checksum", "[extension]") {
     Fixture f; ServerExtension runtime;

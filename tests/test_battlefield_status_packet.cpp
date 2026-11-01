@@ -16,6 +16,7 @@
 // battleground queue with no tracker, no chat line and no invitation.
 #include <catch_amalgamated.hpp>
 #include "game/world_packets.hpp"
+#include "battleground/domain/records.hpp"
 
 using namespace wowee::game;
 

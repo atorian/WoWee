@@ -7,8 +7,27 @@
 
 namespace wowee {
 namespace pipeline { class AssetManager; }
-namespace game { class ExpansionRegistry; class EmoteTable; class MovementCollision; }
+namespace game { class ExpansionRegistry; class EmoteTable; class GameData; class MovementCollision; class StatTables; }
 namespace core { class EventBus; class CVarStore; }
+namespace contacts { class IContactsServerFeed; }
+namespace who { class IWhoFeed; }
+namespace duel { class IDuelsFeed; }
+namespace petition { class IPetitionsFeed; }
+namespace arena { class IArenaTeamsFeed; }
+namespace battleground { class IBattlegroundsFeed; }
+namespace lfg { class ILfgFeed; }
+namespace calendar { class ICalendarFeed; }
+namespace group { class IGroupServerFeed; class IGroup; }
+namespace guild { class IGuildServerFeed; class IGuild; }
+namespace auction { class IAuctionHouseFeed; }
+namespace mail { class IMailboxFeed; class IMailbox; }
+namespace guild_bank { class IGuildBankFeed; class IGuildBank; }
+namespace trade { class ITradeFeed; class ITrade; }
+namespace loot { class ILootFeed; class ILoot; }
+namespace achievement { class IAchievementsFeed; class IAchievements; }
+namespace title { class ITitlesFeed; class ITitles; }
+namespace reputation { class IReputationFeed; class IReputation; }
+namespace pet { class IPetFeed; class IPet; }
 namespace network { class WorldConnection; }
 
 namespace game {
@@ -25,6 +44,10 @@ struct GameServices {
     ExpansionRegistry* expansionRegistry = nullptr;
     /// What the emotes are. Required, like `events`.
     const EmoteTable* emotes = nullptr;
+    /// The combat game tables the character sheet reads. Required.
+    const StatTables* statTables = nullptr;
+    /// The client's tables the game reads its rules and names from. Required.
+    const GameData* gameData = nullptr;
     /// Where the game announces what happened. Required: GameHandler
     /// refuses to be built without one.
     core::EventBus* events = nullptr;
@@ -47,6 +70,66 @@ struct GameServices {
     /// own, so time passes when it says.
     std::function<std::chrono::steady_clock::time_point()> steadyNow =
         [] { return std::chrono::steady_clock::now(); };
+    /// The contact lists, which the friend, ignore and mute packets feed.
+    /// Set by the composition root once the game exists: the contacts
+    /// gateway sends through it.
+    contacts::IContactsServerFeed* contactsFeed = nullptr;
+    /// Where SMSG_WHO's answer goes. Set like contactsFeed.
+    who::IWhoFeed* whoFeed = nullptr;
+    /// Where the duel packets go. Set like contactsFeed.
+    duel::IDuelsFeed* duelFeed = nullptr;
+    /// Where the charter packets go. Set like contactsFeed.
+    petition::IPetitionsFeed* petitionFeed = nullptr;
+    /// Where the arena team packets go. Set like contactsFeed.
+    arena::IArenaTeamsFeed* arenaFeed = nullptr;
+    /// Where the battleground packets go. Set like contactsFeed.
+    battleground::IBattlegroundsFeed* battlegroundFeed = nullptr;
+    /// Where the dungeon finder's packets go. Set like contactsFeed.
+    lfg::ILfgFeed* lfgFeed = nullptr;
+    /// Where the calendar's packets go. Set like contactsFeed.
+    calendar::ICalendarFeed* calendarFeed = nullptr;
+    /// Where the party and raid packets go, and the group as it stands for
+    /// the handlers that ask who is in it. Set like contactsFeed.
+    group::IGroupServerFeed* groupFeed = nullptr;
+    group::IGroup* group = nullptr;
+    /// Where the guild's packets go, and the player's guild for the handlers
+    /// that read its roster.
+    guild::IGuildServerFeed* guildFeed = nullptr;
+    guild::IGuild* guild = nullptr;
+    /// Where the auction packets and the client's clock go. Set like
+    /// contactsFeed.
+    auction::IAuctionHouseFeed* auctionFeed = nullptr;
+    /// Where the mail packets go, and the mailbox a used mailbox opens.
+    mail::IMailboxFeed* mailFeed = nullptr;
+    mail::IMailbox* mail = nullptr;
+    /// Where the vault's packets and the guild's balance go, and the vault a
+    /// used banker opens.
+    guild_bank::IGuildBankFeed* guildBankFeed = nullptr;
+    guild_bank::IGuildBank* guildBank = nullptr;
+    /// Where the trade status packets go, and the trade for who the player
+    /// is dealing with.
+    trade::ITradeFeed* tradeFeed = nullptr;
+    trade::ITrade* trade = nullptr;
+    /// Where the loot packets go, and the loot the game itself opens (a used
+    /// game object, a finished gather) and tab targeting reads.
+    loot::ILootFeed* lootFeed = nullptr;
+    loot::ILoot* loot = nullptr;
+    /// Where the achievement packets go, and the achievements the chat names
+    /// in a CHAT_MSG_ACHIEVEMENT line.
+    achievement::IAchievementsFeed* achievementsFeed = nullptr;
+    achievement::IAchievements* achievements = nullptr;
+    /// Where the title packets, the worn title and a realm extension's known
+    /// list go, and the titles the client reads CharTitles.dbc through.
+    title::ITitlesFeed* titlesFeed = nullptr;
+    title::ITitles* titles = nullptr;
+    /// Where the standings go, and the reputation the hostility rules and the
+    /// character's settings read.
+    reputation::IReputationFeed* reputationFeed = nullptr;
+    reputation::IReputation* reputation = nullptr;
+    /// Where the pet's and the stable's packets go, and the pet the rest of
+    /// the game reads (which unit is "pet", whose fields are the pet's).
+    pet::IPetFeed* petFeed = nullptr;
+    pet::IPet* pet = nullptr;
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };

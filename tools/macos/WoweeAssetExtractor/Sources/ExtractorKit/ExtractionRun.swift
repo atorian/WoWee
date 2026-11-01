@@ -3,7 +3,6 @@ import Foundation
 public enum Expansion: String, CaseIterable, Identifiable, Sendable {
     case auto
     case classic
-    case turtle
     case tbc
     case wotlk
 
@@ -13,7 +12,6 @@ public enum Expansion: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .auto: return "Détection automatique"
         case .classic: return "Classic (1.12)"
-        case .turtle: return "Turtle WoW"
         case .tbc: return "The Burning Crusade (2.4.3)"
         case .wotlk: return "Wrath of the Lich King (3.3.5a)"
         }

@@ -22,6 +22,8 @@
 
 namespace wowee {
 namespace core { class CVarStore; }
+namespace group { struct Roster; }
+namespace guild { struct Roster; }
 namespace game {
 
 class PacketSender;
@@ -29,8 +31,8 @@ class FrameXmlEvents;
 class PacketParsers;
 class EmoteTable;
 struct Character;
-struct GroupListData;
-struct GuildRosterData;
+using GroupListData = group::Roster;
+using GuildRosterData = guild::Roster;
 struct TextSubject;
 
 /// What chat asks of the rest of the game: who the player is and where, who

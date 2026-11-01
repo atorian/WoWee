@@ -14,6 +14,11 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "group/domain/records.hpp"
+
+namespace wowee::guild { struct EventLogEntry; }
+namespace wowee::guild_bank { struct GuildBankLogEntry; }
+namespace wowee::loot { struct LootRoll; }
 
 namespace wowee {
 namespace game {
@@ -139,163 +144,15 @@ struct ChannelMember {
     bool muted = false;
 };
 
-// ---- Who ----
+// ---- Guild event log (MSG_GUILD_EVENT_LOG_QUERY): the guild's entries ----
+using GuildEventLogEntry = guild::EventLogEntry;
 
-struct WhoEntry {
-    std::string name;
-    std::string guildName;
-    uint32_t level    = 0;
-    uint32_t classId  = 0;
-    uint32_t raceId   = 0;
-    uint32_t zoneId   = 0;
-};
-
-// ---- Battleground ----
-
-struct BgQueueSlot {
-    uint32_t queueSlot = 0;
-    uint32_t bgTypeId = 0;
-    uint8_t arenaType = 0;
-    uint32_t statusId = 0;
-    uint32_t inviteTimeout = 80;
-    uint32_t avgWaitTimeSec = 0;
-    uint32_t timeInQueueSec = 0;
-    // The level range comes with the status, so a queued battleground can say
-    // what it is without the available-battleground list having arrived - that
-    // list only turns up at a battlemaster, and the interface asks for the range
-    // every time it draws the queue.
-    uint32_t minLevel = 0;
-    uint32_t maxLevel = 0;
-    // Both are in the status packet too. The instance number is what makes the
-    // queue read "Warsong Gulch 2" rather than "Warsong Gulch", and rated is
-    // what tells a rated arena from a casual one.
-    uint32_t instanceId = 0;
-    bool     isRated = false;
-    std::chrono::steady_clock::time_point inviteReceivedTime{};
-    // When timeInQueueSec was last told. The server says it about once a
-    // minute; the time waited counts on from here in between.
-    std::chrono::steady_clock::time_point queueTimeReceivedAt{};
-    std::string bgName;
-};
-
-struct AvailableBgInfo {
-    uint32_t bgTypeId         = 0;
-    bool     isRegistered     = false;
-    bool     isHoliday        = false;
-    uint32_t minLevel         = 0;
-    uint32_t maxLevel         = 0;
-    std::vector<uint32_t> instanceIds;
-};
-
-struct BgPlayerScore {
-    uint64_t    guid            = 0;
-    std::string name;
-    uint8_t     team            = 0;
-    uint32_t    killingBlows    = 0;
-    uint32_t    deaths          = 0;
-    uint32_t    honorableKills  = 0;
-    uint32_t    bonusHonor      = 0;
-    /// Both are on the wire and both were being skipped, which is why the
-    /// scoreboard showed two columns of zeros.
-    uint32_t    damageDone      = 0;
-    uint32_t    healingDone     = 0;
-    /// Whether the team above came from the packet. Arenas carry a team byte
-    /// and battlegrounds do not, so a battleground row has no faction to give
-    /// and saying so is better than answering zero as though it meant Horde.
-    bool        hasTeam         = false;
-    /// The objective values, in the order the battleground writes them. The
-    /// names are not on the wire - this used to read one before each value and
-    /// took every value after the first from the wrong offset.
-    std::vector<std::pair<std::string, uint32_t>> bgStats;
-};
-
-struct ArenaTeamScore {
-    std::string teamName;
-    uint32_t    ratingChange = 0;
-    uint32_t    newRating    = 0;
-};
-
-struct BgScoreboardData {
-    std::vector<BgPlayerScore> players;
-    bool hasWinner = false;
-    uint8_t winner = 0;
-    bool isArena   = false;
-    ArenaTeamScore arenaTeams[2];
-};
-
-struct BgPlayerPosition {
-    uint64_t guid  = 0;
-    float    wowX  = 0.0f;
-    float    wowY  = 0.0f;
-    int      group = 0;
-};
-
-// ---- Guild event log (MSG_GUILD_EVENT_LOG_QUERY) ----
-//
-// Layout verified against AzerothCore's GuildEventLogQueryResults::Write
-// (GuildPackets.cpp:146) rather than guessed: uint8 count, then per entry a
-// type byte, the acting player's guid, a second guid only when the type is
-// neither join nor leave, a rank byte only for promote and demote, and a date
-// that is seconds *ago* rather than absolute.
-struct GuildEventLogEntry {
-    uint8_t  type = 0;
-    uint64_t playerGuid = 0;
-    uint64_t otherGuid = 0;      // 0 when the type carries none
-    uint8_t  newRank = 0;        // only meaningful for promote/demote
-    uint32_t secondsAgo = 0;
-};
-
-/// One line of a guild bank tab's log, or of the money tab's.
-///
-/// Types are AzerothCore's GuildBankEventLogTypes: 1 deposit item, 2 withdraw
-/// item, 3 move item, 4 deposit money, 5 withdraw money, 6 repair, 7 move item
-/// between tabs, 9 buy a tab. Which fields carry anything depends on which.
-struct GuildBankLogEntry {
-    uint8_t  type = 0;
-    uint64_t playerGuid = 0;
-    uint32_t itemId = 0;      ///< item types only
-    uint32_t count = 0;       ///< stack size for items, copper for money
-    uint8_t  otherTab = 0;    ///< a move's destination
-    uint32_t secondsAgo = 0;
-};
-
-// ---- Guild petition ----
-
-struct PetitionSignature {
-    uint64_t playerGuid = 0;
-    std::string playerName;
-};
-
-struct PetitionInfo {
-    uint64_t petitionGuid = 0;
-    uint64_t ownerGuid = 0;
-    std::string guildName;
-    uint32_t signatureCount = 0;
-    /// How many signatures the charter needs. Only SMSG_PETITION_QUERY_RESPONSE
-    /// says, so this is the fallback until that reply lands - nine is retail's
-    /// guild figure, and AzerothCore's is a config the reply carries.
-    uint32_t signaturesRequired = 9;
-    /// Guild or arena, from the query reply. The signature frame writes a
-    /// different heading and a different confirmation for each, and calling
-    /// every charter a guild charter mislabels all three arena ones.
-    bool isArena = false;
-    std::vector<PetitionSignature> signatures;
-    bool showUI = false;
-};
-
-/// One dungeon of an LFG role check: its id, and the type packed into the top
-/// byte of the entry SMSG_LFG_ROLE_CHECK_UPDATE sends.
-struct LfgRoleCheckDungeon {
-    uint32_t dungeonId = 0;
-    uint8_t typeId = 0;
-};
+// ---- Guild bank log (MSG_GUILD_BANK_LOG_QUERY): the vault's entries ----
+using GuildBankLogEntry = guild_bank::GuildBankLogEntry;
 
 // ---- Ready check ----
 
-struct ReadyCheckResult {
-    std::string name;
-    bool ready = false;
-};
+using ReadyCheckResult = group::ReadyCheckResult;
 
 // ---- Chat ----
 
@@ -327,34 +184,6 @@ struct GossipPoi {
 
 // ---- Instance lockouts ----
 
-/// What a random dungeon pays out the first time it is run each day.
-struct LfgRewardItem {
-    uint32_t itemId = 0;
-    uint32_t displayInfoId = 0;
-    uint32_t count = 0;
-};
-struct LfgReward {
-    uint32_t dungeonId = 0;
-    bool done = false;          // already claimed today
-    uint32_t money = 0;
-    uint32_t experience = 0;
-    std::vector<LfgRewardItem> items;
-};
-
-/// One row of the dungeon-ready dialog: who the proposal is offering, and
-/// whether they have answered it yet.
-///
-/// The server sends no names or levels here - only what each player is for and
-/// what they have said - so those stay empty rather than being invented.
-struct LfgProposalMember {
-    uint32_t role = 0;      // LFG role mask, same bits SetLFGRoles sends
-    bool isSelf = false;
-    bool inDungeon = false;
-    bool sameGroup = false;
-    bool answered = false;
-    bool accepted = false;
-};
-
 /// A mount or a critter the player knows, as the character sheet's pet tab
 /// lists them. Both are spells; what separates them is what the spell does.
 struct Companion {
@@ -371,27 +200,6 @@ struct Companion {
 /// map 43, Ragefire Chasm faction 0 where everything else is -1, Karazhan in
 /// the Burning Crusade raid group. The layout table only ever named ID and
 /// Name, which is why the picker had nothing to list.
-/// What a finished dungeon-finder run paid out, from SMSG_LFG_PLAYER_REWARD.
-///
-/// Kept because the alert frame reads it back rather than being handed it:
-/// LFG_COMPLETION_REWARD carries no arguments, and
-/// DungeonCompletionAlertFrame_ShowAlert then asks GetLFGCompletionReward for
-/// all nine values and GetLFGCompletionRewardItem for each item.
-struct LfgCompletionReward {
-    struct Item {
-        uint32_t itemId = 0;
-        uint32_t displayId = 0;
-        uint32_t count = 0;
-    };
-    uint32_t randomDungeonId = 0;  ///< the "Random ..." entry that was queued for
-    uint32_t dungeonId = 0;        ///< the dungeon actually finished
-    bool done = false;
-    uint32_t money = 0;            ///< copper
-    uint32_t xp = 0;
-    std::vector<Item> items;
-    bool valid = false;
-};
-
 struct LfgDungeon {
     uint32_t id = 0;
     std::string name;
@@ -429,122 +237,8 @@ struct InstanceLockout {
     bool     extended    = false;
 };
 
-// ---- LFG ----
-
-enum class LfgState : uint8_t {
-    None           = 0,
-    RoleCheck      = 1,
-    Queued         = 2,
-    Proposal       = 3,
-    Boot           = 4,
-    InDungeon      = 5,
-    FinishedDungeon= 6,
-    RaidBrowser    = 7,
-};
-
-// ---- Arena teams ----
-
-struct ArenaTeamStats {
-    uint32_t teamId       = 0;
-    uint32_t rating       = 0;
-    uint32_t weekGames    = 0;
-    uint32_t weekWins     = 0;
-    uint32_t seasonGames  = 0;
-    uint32_t seasonWins   = 0;
-    uint32_t rank         = 0;
-    std::string teamName;
-    uint32_t teamType     = 0;
-};
-
-struct ArenaTeamMember {
-    uint64_t    guid            = 0;
-    std::string name;
-    bool        online          = false;
-    /// The three the roster carries between the name and the record. They were
-    /// on the wire all along and read as part of the games played.
-    bool        isCaptain       = false;
-    uint8_t     level           = 0;
-    uint8_t     classId         = 0;
-    uint32_t    weekGames       = 0;
-    uint32_t    weekWins        = 0;
-    uint32_t    seasonGames     = 0;
-    uint32_t    seasonWins      = 0;
-    uint32_t    personalRating  = 0;
-};
-
-struct ArenaTeamRoster {
-    uint32_t teamId = 0;
-    std::vector<ArenaTeamMember> members;
-};
-
-// ---- Trade ----
-
-enum class TradeStatus : uint8_t {
-    None = 0, PendingIncoming, Open, Accepted, Complete
-};
-
-/// WoW trade window: 7 slots. Slots 0-5 are transferred to the partner;
-/// slot 6 (kTradeSlotNonTraded) is the "will not be traded" slot - you place
-/// your own item there so the partner can enchant or craft on it without it
-/// changing hands.
-inline constexpr int kTradeSlotCount     = 7;
-inline constexpr int kTradeSlotNonTraded = 6;
-
-struct TradeSlot {
-    uint32_t itemId      = 0;
-    uint32_t displayId   = 0;
-    uint32_t stackCount  = 0;
-    uint64_t itemGuid    = 0;
-    [[nodiscard]] bool occupied() const { return itemId != 0; }
-};
-
-// ---- Group loot roll ----
-
-struct LootRollEntry {
-    /// What the interface calls this roll, and what it passes back to
-    /// RollOnLoot. Its own number rather than the loot slot: a dungeon rolls
-    /// several items at once and two of them can sit in the same slot of
-    /// different corpses, so the slot does not tell one roll from another.
-    int      rollId        = 0;
-    uint64_t objectGuid    = 0;
-    uint32_t slot          = 0;
-    uint32_t itemId        = 0;
-    std::string itemName;
-    uint8_t  itemQuality   = 0;
-    uint32_t rollCountdownMs = 60000;
-    uint8_t  voteMask      = 0xFF;
-    std::chrono::steady_clock::time_point rollStartedAt{};
-
-    struct PlayerRollResult {
-        std::string playerName;
-        uint8_t rollNum  = 0;
-        uint8_t rollType = 0;
-    };
-    std::vector<PlayerRollResult> playerRolls;
-};
-
-/**
- * A single contact list entry (friend, ignore, or mute).
- */
-struct ContactEntry {
-    uint64_t    guid     = 0;
-    std::string name;
-    std::string note;
-    uint32_t    flags    = 0;   // 0x1=friend, 0x2=ignore, 0x4=mute
-    /// AzerothCore's FriendStatus, and a bitmask rather than a number:
-    /// 0x01 online, 0x02 away, 0x04 do-not-disturb, 0x08 recruit-a-friend.
-    /// An away friend is 0x03 - online *and* away - which is why this cannot
-    /// be compared for equality. It used to be documented as 0/1/2/3 and read
-    /// that way, so an away friend was shown as busy.
-    uint8_t     status   = 0;
-    uint32_t    areaId   = 0;
-    uint32_t    level    = 0;
-    uint32_t    classId  = 0;
-
-    [[nodiscard]] bool isFriend() const { return (flags & 0x1) != 0; }
-    [[nodiscard]] bool isIgnored() const { return (flags & 0x2) != 0; }
-    [[nodiscard]] bool isOnline()  const { return (status & 0x01) != 0; }
-};
+// ---- Group loot roll: the loot domain's ----
+using LootRollEntry = loot::LootRoll;
 
 /// A point on the minimap a party member (or the player) pinged.
 struct MinimapPing {

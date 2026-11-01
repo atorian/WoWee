@@ -1,6 +1,7 @@
 #include "core/https_get.hpp"
 
 #include <openssl/err.h>
+#include <openssl/opensslv.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
 
@@ -152,7 +153,16 @@ HttpsResponse httpsGet(const std::string& host, const std::string& path,
     const std::unique_ptr<SSL, void (*)(SSL*)> sslGuard(ssl, SSL_free);
 
     SSL_set_tlsext_host_name(ssl, host.c_str());   // SNI
-    SSL_set1_host(ssl, host.c_str());              // and check the name matches
+    // and check the name matches; OpenSSL 4 renamed the call
+#if defined(OPENSSL_VERSION_MAJOR) && OPENSSL_VERSION_MAJOR >= 4
+    const int hostChecked = SSL_set1_dnsname(ssl, host.c_str());
+#else
+    const int hostChecked = SSL_set1_host(ssl, host.c_str());
+#endif
+    if (hostChecked != 1) {
+        result.error = "cannot verify host name " + host + ": " + sslError();
+        return result;
+    }
     SSL_set_fd(ssl, static_cast<int>(sock));
 
     if (SSL_connect(ssl) != 1) {

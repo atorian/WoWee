@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Component Diagram · WoWee</title><style>
+:root {color-scheme:light dark;--bg:light-dark(#f4f6fa,#11151e);--fg:light-dark(#172334,#e5edf7);--panel:light-dark(#fff,#1a2230);--line:light-dark(#d9e1ec,#344153);--muted:light-dark(#53647a,#afbdd0);--blue:light-dark(#175a9c,#8fc7ff);--red:light-dark(#a03932,#ffaca6)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 system-ui,-apple-system,'Segoe UI',sans-serif}a{color:var(--blue);text-underline-offset:3px}header,main,footer{max-width:1800px;margin:auto;padding:24px 36px}header{padding-bottom:12px}h1{font-size:32px;line-height:1.15;margin:10px 0 16px;font-weight:650}h2{font-size:26px;margin:0 0 6px;line-height:1.3}h3{font-size:17px;line-height:1.4;margin:8px 0}p{margin:8px 0 14px}.meta,.legend,small{color:var(--muted)}.kicker{letter-spacing:.12em;text-transform:uppercase;font-size:12px;color:var(--blue)}nav{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0}nav a{padding:8px 14px;border:1px solid var(--line);border-radius:6px;text-decoration:none;color:var(--fg)}nav a[aria-current]{background:var(--fg);color:var(--bg)}.page{margin:24px 0 64px;scroll-margin-top:24px}.intro{max-width:1100px}.layout{display:grid;grid-template-columns:minmax(0,1fr) 370px;gap:28px;align-items:start;margin:20px 0}.diagram{background:#fff;border-radius:8px;padding:14px;overflow:auto}.diagram svg{display:block;width:100%;height:auto;min-width:640px}.figuretools{display:flex;gap:8px;margin-bottom:8px}.figuretools button{font-size:13px;background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:4px}.diagram{max-height:1100px}.legend{font-size:13px;margin:12px 0}.issue{border-top:2px solid var(--line);padding:14px 0 18px}.issue:first-child{border-color:var(--red)}.badge{font-size:12px;letter-spacing:.02em;color:var(--red)}.issue p{font-size:14px}.action{border-left:2px solid var(--line);padding-left:12px}.sources{font-size:12px;overflow-wrap:anywhere}.sources a{display:block;margin:4px 0}.good{background:var(--panel);padding:18px 22px;border-left:3px solid var(--blue);margin:24px 0}.downloads{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;margin:14px 0}.details{background:var(--panel);padding:16px 22px;margin:20px 0;border:1px solid var(--line);border-radius:6px}summary{cursor:pointer;font-weight:600}table{border-collapse:collapse;width:100%;margin-top:15px;font-size:14px}th,td{padding:12px 10px;vertical-align:top;border-top:1px solid var(--line);text-align:left}th{width:190px;font-weight:600}.findings{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;margin-top:24px}.findings a{font-weight:600}.findings p{font-size:14px}.toolbar{margin-top:12px}button{font:inherit;padding:6px 12px;cursor:pointer}footer{border-top:1px solid var(--line);font-size:13px;color:var(--muted)}@media(max-width:1100px){.layout{grid-template-columns:1fr}.notes{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}.diagram svg{max-height:none}.findings{grid-template-columns:1fr}}@media(max-width:720px){header,main,footer{padding:20px 16px}.notes{display:block}h1{font-size:27px}.diagram{padding:8px}th{width:120px}}@media print{.diagram{max-height:none;overflow:visible}body{background:white;color:#172334;font-size:11pt}nav,.toolbar,.downloads,.figuretools{display:none}header,main,footer{padding:12px}.page{break-before:page;margin-bottom:0}.layout{grid-template-columns:minmax(0,1fr) 300px;gap:18px}.diagram svg{min-width:0}.issue p{font-size:10pt}.sources{font-size:9pt}.notes{display:block}details{display:none}.good{background:transparent}a{color:inherit}.findings{display:block}}
+</style></head>
+<body><header><div class="kicker">WoWee / архитектура по исходному коду</div><h1>Component Diagram</h1><p class="meta">31 октября 2026 · HEAD 1637f77c + рабочее дерево · статический разбор</p><nav aria-label="Диаграммы"><a href="index.html">Обзор</a><a href="01-threading-model.html">Потоки</a><a href="02-frame-lifecycle.html">Кадр</a><a href="03-component-diagram.html" aria-current="page">Подсистемы</a><a href="04-data-flow.html">Данные</a><a href="05-ownership-lifetime.html">Владение</a></nav></header><main><article class="page" id="03-component-diagram"><h2>Component Diagram</h2><p class="meta">Направления зависимостей библиотек и связи между подсистемами клиента.</p><div class="downloads"><a href="03-component-diagram.html">Отдельный артефакт</a><a href="diagrams/03-component-diagram.svg">SVG</a> · <a href="diagrams/03-component-diagram.png">PNG</a> · <a href="diagrams/03-component-diagram.mmd">MMD</a> · <a href="diagrams/03-component-diagram.dot">DOT</a></div><div class="layout"><div><div class="figuretools"><button type="button" data-zoom="in">Увеличить</button><button type="button" data-zoom="out">Уменьшить</button><button type="button" data-zoom="fit">Вписать</button></div><div class="diagram"><svg role="img" aria-label="Component Diagram: Направления зависимостей библиотек и связи между подсистемами клиента." width="1486pt" height="638pt"
+ viewBox="0.00 0.00 1486.00 638.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="03-component-diagram-graph0" class="graph" transform="scale(1 1) rotate(0) translate(14.4 623.94)">
+<title>atlas</title>
+<polygon fill="white" stroke="none" points="-14.4,14.4 -14.4,-623.94 1471.4,-623.94 1471.4,14.4 -14.4,14.4"/>
+<g id="03-component-diagram-clust1" class="cluster">
+<title>cluster_client</title>
+<path fill="white" stroke="#c4d1e2" d="M330,-439.35C330,-439.35 862,-439.35 862,-439.35 868,-439.35 874,-445.35 874,-451.35 874,-451.35 874,-589.54 874,-589.54 874,-595.54 868,-601.54 862,-601.54 862,-601.54 330,-601.54 330,-601.54 324,-601.54 318,-595.54 318,-589.54 318,-589.54 318,-451.35 318,-451.35 318,-445.35 324,-439.35 330,-439.35"/>
+<text xml:space="preserve" text-anchor="middle" x="596" y="-583.29" font-family="DejaVu Sans" font-size="15.00" fill="#38546f">wowee_client_objects / wowee_client · композиция</text>
+</g>
+<g id="03-component-diagram-clust2" class="cluster">
+<title>cluster_gamebox</title>
+<path fill="white" stroke="#c4d1e2" d="M948,-146.44C948,-146.44 1437,-146.44 1437,-146.44 1443,-146.44 1449,-152.44 1449,-158.44 1449,-158.44 1449,-400.1 1449,-400.1 1449,-406.1 1443,-412.1 1437,-412.1 1437,-412.1 948,-412.1 948,-412.1 942,-412.1 936,-406.1 936,-400.1 936,-400.1 936,-158.44 936,-158.44 936,-152.44 942,-146.44 948,-146.44"/>
+<text xml:space="preserve" text-anchor="middle" x="1192.5" y="-393.85" font-family="DejaVu Sans" font-size="15.00" fill="#38546f">wowee_game · protocol state</text>
+</g>
+<g id="03-component-diagram-clust3" class="cluster">
+<title>cluster_renderbox</title>
+<path fill="white" stroke="#c4d1e2" d="M20,-319.88C20,-319.88 298,-319.88 298,-319.88 304,-319.88 310,-325.88 310,-331.88 310,-331.88 310,-589.54 310,-589.54 310,-595.54 304,-601.54 298,-601.54 298,-601.54 20,-601.54 20,-601.54 14,-601.54 8,-595.54 8,-589.54 8,-589.54 8,-331.88 8,-331.88 8,-325.88 14,-319.88 20,-319.88"/>
+<text xml:space="preserve" text-anchor="middle" x="159" y="-583.29" font-family="DejaVu Sans" font-size="15.00" fill="#38546f">wowee_render · сцена и GPU</text>
+</g>
+<g id="03-component-diagram-clust4" class="cluster">
+<title>cluster_libraries</title>
+<path fill="white" stroke="#c4d1e2" d="M448,-8C448,-8 916,-8 916,-8 922,-8 928,-14 928,-20 928,-20 928,-280.63 928,-280.63 928,-286.63 922,-292.63 916,-292.63 916,-292.63 448,-292.63 448,-292.63 442,-292.63 436,-286.63 436,-280.63 436,-280.63 436,-20 436,-20 436,-14 442,-8 448,-8"/>
+<text xml:space="preserve" text-anchor="middle" x="682" y="-274.38" font-family="DejaVu Sans" font-size="15.00" fill="#38546f">Общие нижние слои</text>
+</g>
+<!-- app -->
+<g id="03-component-diagram-node1" class="node">
+<title>app</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M720.71,-569.79C720.71,-569.79 573.29,-569.79 573.29,-569.79 567.29,-569.79 561.29,-563.79 561.29,-557.79 561.29,-557.79 561.29,-536.07 561.29,-536.07 561.29,-530.07 567.29,-524.07 573.29,-524.07 573.29,-524.07 720.71,-524.07 720.71,-524.07 726.71,-524.07 732.71,-530.07 732.71,-536.07 732.71,-536.07 732.71,-557.79 732.71,-557.79 732.71,-563.79 726.71,-569.79 720.71,-569.79"/>
+<text xml:space="preserve" text-anchor="middle" x="647" y="-548.08" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">Application + ClientLoop</text>
+<text xml:space="preserve" text-anchor="middle" x="647" y="-534.58" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">создание и wiring</text>
+</g>
+<!-- ui -->
+<g id="03-component-diagram-node2" class="node">
+<title>ui</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M636.09,-493.07C636.09,-493.07 511.92,-493.07 511.92,-493.07 505.92,-493.07 499.92,-487.07 499.92,-481.07 499.92,-481.07 499.92,-459.35 499.92,-459.35 499.92,-453.35 505.92,-447.35 511.92,-447.35 511.92,-447.35 636.09,-447.35 636.09,-447.35 642.09,-447.35 648.09,-453.35 648.09,-459.35 648.09,-459.35 648.09,-481.07 648.09,-481.07 648.09,-487.07 642.09,-493.07 636.09,-493.07"/>
+<text xml:space="preserve" text-anchor="middle" x="574" y="-471.36" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">UI + Addons / Lua</text>
+<text xml:space="preserve" text-anchor="middle" x="574" y="-457.86" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">FrameXML / screens</text>
+</g>
+<!-- app&#45;&gt;ui -->
+<g id="03-component-diagram-edge1" class="edge">
+<title>app&#45;&gt;ui</title>
+<path fill="none" stroke="#687f98" d="M625.49,-523.92C617.84,-516.08 609.12,-507.16 601.06,-498.91"/>
+<polygon fill="#687f98" stroke="#687f98" points="602.83,-497.47 596.66,-494.41 599.58,-500.65 602.83,-497.47"/>
+</g>
+<!-- presentation -->
+<g id="03-component-diagram-node3" class="node">
+<title>presentation</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M854.21,-493.07C854.21,-493.07 679.79,-493.07 679.79,-493.07 673.79,-493.07 667.79,-487.07 667.79,-481.07 667.79,-481.07 667.79,-459.35 667.79,-459.35 667.79,-453.35 673.79,-447.35 679.79,-447.35 679.79,-447.35 854.21,-447.35 854.21,-447.35 860.21,-447.35 866.21,-453.35 866.21,-459.35 866.21,-459.35 866.21,-481.07 866.21,-481.07 866.21,-487.07 860.21,-493.07 854.21,-493.07"/>
+<text xml:space="preserve" text-anchor="middle" x="767" y="-471.36" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">PlayerView / EntitySpawner</text>
+<text xml:space="preserve" text-anchor="middle" x="767" y="-457.86" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">SpellPresentation / callbacks</text>
+</g>
+<!-- app&#45;&gt;presentation -->
+<g id="03-component-diagram-edge2" class="edge">
+<title>app&#45;&gt;presentation</title>
+<path fill="none" stroke="#687f98" d="M682.68,-523.71C695.86,-515.51 710.93,-506.13 724.64,-497.59"/>
+<polygon fill="#687f98" stroke="#687f98" points="725.65,-499.64 729.97,-494.27 723.25,-495.77 725.65,-499.64"/>
+</g>
+<!-- sound -->
+<g id="03-component-diagram-node4" class="node">
+<title>sound</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M467.71,-493.07C467.71,-493.07 338.29,-493.07 338.29,-493.07 332.29,-493.07 326.29,-487.07 326.29,-481.07 326.29,-481.07 326.29,-459.35 326.29,-459.35 326.29,-453.35 332.29,-447.35 338.29,-447.35 338.29,-447.35 467.71,-447.35 467.71,-447.35 473.71,-447.35 479.71,-453.35 479.71,-459.35 479.71,-459.35 479.71,-481.07 479.71,-481.07 479.71,-487.07 473.71,-493.07 467.71,-493.07"/>
+<text xml:space="preserve" text-anchor="middle" x="403" y="-471.36" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">AudioCoordinator</text>
+<text xml:space="preserve" text-anchor="middle" x="403" y="-457.86" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">miniaudio / managers</text>
+</g>
+<!-- app&#45;&gt;sound -->
+<g id="03-component-diagram-edge3" class="edge">
+<title>app&#45;&gt;sound</title>
+<path fill="none" stroke="#687f98" d="M574.12,-523.61C545.51,-514.85 512.58,-504.77 483.29,-495.8"/>
+<polygon fill="#687f98" stroke="#687f98" points="484.25,-493.71 477.37,-493.98 482.92,-498.06 484.25,-493.71"/>
+</g>
+<!-- gh -->
+<g id="03-component-diagram-node5" class="node">
+<title>gh</title>
+<path fill="#fff1e9" stroke="#d6a68b" d="M1165.84,-380.35C1165.84,-380.35 956.16,-380.35 956.16,-380.35 950.16,-380.35 944.16,-374.35 944.16,-368.35 944.16,-368.35 944.16,-346.63 944.16,-346.63 944.16,-340.63 950.16,-334.63 956.16,-334.63 956.16,-334.63 1165.84,-334.63 1165.84,-334.63 1171.84,-334.63 1177.84,-340.63 1177.84,-346.63 1177.84,-346.63 1177.84,-368.35 1177.84,-368.35 1177.84,-374.35 1171.84,-380.35 1165.84,-380.35"/>
+<text xml:space="preserve" text-anchor="middle" x="1061" y="-358.64" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">[C1/C2] GameHandler</text>
+<text xml:space="preserve" text-anchor="middle" x="1061" y="-345.14" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">session / queue / dispatch / facade</text>
+</g>
+<!-- app&#45;&gt;gh -->
+<g id="03-component-diagram-edge4" class="edge">
+<title>app&#45;&gt;gh</title>
+<path fill="none" stroke="#687f98" d="M732.96,-540.03C798.37,-534.43 882.23,-524.54 913,-509.07 969.57,-480.63 1017.19,-422 1042.17,-386.88"/>
+<polygon fill="#687f98" stroke="#687f98" points="1043.83,-388.48 1045.7,-381.85 1040.11,-385.87 1043.83,-388.48"/>
+</g>
+<!-- renderer -->
+<g id="03-component-diagram-node8" class="node">
+<title>renderer</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M289.58,-387.1C289.58,-387.1 102.42,-387.1 102.42,-387.1 96.42,-387.1 90.42,-381.1 90.42,-375.1 90.42,-375.1 90.42,-339.88 90.42,-339.88 90.42,-333.88 96.42,-327.88 102.42,-327.88 102.42,-327.88 289.58,-327.88 289.58,-327.88 295.58,-327.88 301.58,-333.88 301.58,-339.88 301.58,-339.88 301.58,-375.1 301.58,-375.1 301.58,-381.1 295.58,-387.1 289.58,-387.1"/>
+<text xml:space="preserve" text-anchor="middle" x="196" y="-365.39" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">Renderer / VkContext API</text>
+<text xml:space="preserve" text-anchor="middle" x="196" y="-351.89" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">terrain / M2 / WMO / characters</text>
+<text xml:space="preserve" text-anchor="middle" x="196" y="-338.39" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">RT / water / post / overlays</text>
+</g>
+<!-- app&#45;&gt;renderer -->
+<g id="03-component-diagram-edge5" class="edge">
+<title>app&#45;&gt;renderer</title>
+<path fill="none" stroke="#687f98" d="M561.06,-538.78C477.42,-530.66 357.1,-515.55 316,-493.07 273.44,-469.79 238.43,-425.38 217.43,-393.95"/>
+<polygon fill="#687f98" stroke="#687f98" points="219.46,-392.9 213.99,-388.71 215.66,-395.4 219.46,-392.9"/>
+</g>
+<!-- pipeline -->
+<g id="03-component-diagram-node12" class="node">
+<title>pipeline</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M692.34,-260.88C692.34,-260.88 455.66,-260.88 455.66,-260.88 449.66,-260.88 443.66,-254.88 443.66,-248.88 443.66,-248.88 443.66,-227.16 443.66,-227.16 443.66,-221.16 449.66,-215.16 455.66,-215.16 455.66,-215.16 692.34,-215.16 692.34,-215.16 698.34,-215.16 704.34,-221.16 704.34,-227.16 704.34,-227.16 704.34,-248.88 704.34,-248.88 704.34,-254.88 698.34,-260.88 692.34,-260.88"/>
+<text xml:space="preserve" text-anchor="middle" x="574" y="-239.17" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">wowee_pipeline</text>
+<text xml:space="preserve" text-anchor="middle" x="574" y="-225.67" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">AssetManager / DBC / ADT / M2 / WMO</text>
+</g>
+<!-- app&#45;&gt;pipeline -->
+<g id="03-component-diagram-edge6" class="edge">
+<title>app&#45;&gt;pipeline</title>
+<path fill="none" stroke="#687f98" d="M732.97,-537.18C790.2,-529.38 858.06,-515.62 876,-493.07 890.86,-474.39 892.27,-456.82 876,-439.35 859,-421.09 786.67,-441.78 764,-431.35 743.47,-421.9 646.31,-317.83 599.43,-266.84"/>
+<polygon fill="#687f98" stroke="#687f98" points="601.33,-265.56 595.26,-262.31 597.98,-268.64 601.33,-265.56"/>
+</g>
+<!-- ui&#45;&gt;gh -->
+<g id="03-component-diagram-edge7" class="edge">
+<title>ui&#45;&gt;gh</title>
+<path fill="none" stroke="#687f98" d="M629.37,-446.85C638.79,-443.82 648.57,-441.15 658,-439.35 757.6,-420.37 786.93,-452.96 886,-431.35 892.14,-430.01 953.19,-404.36 1001.48,-383.87"/>
+<polygon fill="#687f98" stroke="#687f98" points="1002.32,-385.98 1007.41,-381.35 1000.54,-381.79 1002.32,-385.98"/>
+</g>
+<!-- ui&#45;&gt;renderer -->
+<g id="03-component-diagram-edge8" class="edge">
+<title>ui&#45;&gt;renderer</title>
+<path fill="none" stroke="#687f98" d="M513.16,-446.99C505.39,-444.33 497.53,-441.72 490,-439.35 430.92,-420.75 364.44,-402.27 309.66,-387.67"/>
+<polygon fill="#687f98" stroke="#687f98" points="310.33,-385.5 303.47,-386.03 309.17,-389.9 310.33,-385.5"/>
+</g>
+<!-- ui&#45;&gt;pipeline -->
+<g id="03-component-diagram-edge9" class="edge">
+<title>ui&#45;&gt;pipeline</title>
+<path fill="none" stroke="#687f98" d="M574,-447.14C574,-405.74 574,-316.37 574,-269.35"/>
+<polygon fill="#687f98" stroke="#687f98" points="576.28,-269.38 574,-262.88 571.73,-269.38 576.28,-269.38"/>
+</g>
+<!-- presentation&#45;&gt;gh -->
+<g id="03-component-diagram-edge10" class="edge">
+<title>presentation&#45;&gt;gh</title>
+<path fill="none" stroke="#687f98" d="M865.53,-446.86C881.9,-442.29 898.56,-437.09 914,-431.35 948.82,-418.4 986.33,-399.73 1014.74,-384.53"/>
+<polygon fill="#687f98" stroke="#687f98" points="1015.78,-386.55 1020.42,-381.46 1013.62,-382.54 1015.78,-386.55"/>
+</g>
+<!-- presentation&#45;&gt;renderer -->
+<g id="03-component-diagram-edge11" class="edge">
+<title>presentation&#45;&gt;renderer</title>
+<path fill="none" stroke="#687f98" d="M688.93,-446.87C678.57,-444.18 668.05,-441.6 658,-439.35 540.14,-412.95 403.75,-390 309.88,-375.36"/>
+<polygon fill="#687f98" stroke="#687f98" points="310.34,-373.13 303.56,-374.38 309.64,-377.62 310.34,-373.13"/>
+</g>
+<!-- presentation&#45;&gt;pipeline -->
+<g id="03-component-diagram-edge12" class="edge">
+<title>presentation&#45;&gt;pipeline</title>
+<path fill="none" stroke="#687f98" d="M709.29,-446.88C700.15,-442.32 691.06,-437.12 683,-431.35 626.73,-391.08 595.66,-312.15 582.2,-268.98"/>
+<polygon fill="#687f98" stroke="#687f98" points="584.39,-268.36 580.33,-262.8 580.04,-269.68 584.39,-268.36"/>
+</g>
+<!-- gh&#45;&gt;presentation -->
+<g id="03-component-diagram-edge27" class="edge">
+<title>gh&#45;&gt;presentation</title>
+<path fill="none" stroke="#687f98" stroke-dasharray="5,2" d="M943.93,-370.48C875.86,-379.92 798.98,-395.63 775.5,-420.1 770.48,-425.33 767.84,-432.39 766.55,-439.52"/>
+<polygon fill="#687f98" stroke="#687f98" points="764.33,-438.99 765.82,-445.71 768.84,-439.52 764.33,-438.99"/>
+<text xml:space="preserve" text-anchor="middle" x="842.25" y="-421.85" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">уведомления: bus / callbacks</text>
+</g>
+<!-- domain -->
+<g id="03-component-diagram-node6" class="node">
+<title>domain</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M1156.34,-200.16C1156.34,-200.16 955.66,-200.16 955.66,-200.16 949.66,-200.16 943.66,-194.16 943.66,-188.16 943.66,-188.16 943.66,-166.44 943.66,-166.44 943.66,-160.44 949.66,-154.44 955.66,-154.44 955.66,-154.44 1156.34,-154.44 1156.34,-154.44 1162.34,-154.44 1168.34,-160.44 1168.34,-166.44 1168.34,-166.44 1168.34,-188.16 1168.34,-188.16 1168.34,-194.16 1162.34,-200.16 1156.34,-200.16"/>
+<text xml:space="preserve" text-anchor="middle" x="1056" y="-178.45" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">Доменные handlers</text>
+<text xml:space="preserve" text-anchor="middle" x="1056" y="-164.95" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">chat / spell / inventory / quest / …</text>
+</g>
+<!-- gh&#45;&gt;domain -->
+<g id="03-component-diagram-edge13" class="edge">
+<title>gh&#45;&gt;domain</title>
+<path fill="none" stroke="#687f98" d="M1060.38,-334.28C1059.48,-302.45 1057.84,-243.77 1056.84,-208.17"/>
+<polygon fill="#687f98" stroke="#687f98" points="1059.12,-208.45 1056.67,-202.02 1054.57,-208.58 1059.12,-208.45"/>
+<text xml:space="preserve" text-anchor="middle" x="1111.11" y="-302.38" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">создаёт и делегирует</text>
+</g>
+<!-- netlib -->
+<g id="03-component-diagram-node10" class="node">
+<title>netlib</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M907.71,-260.88C907.71,-260.88 736.29,-260.88 736.29,-260.88 730.29,-260.88 724.29,-254.88 724.29,-248.88 724.29,-248.88 724.29,-227.16 724.29,-227.16 724.29,-221.16 730.29,-215.16 736.29,-215.16 736.29,-215.16 907.71,-215.16 907.71,-215.16 913.71,-215.16 919.71,-221.16 919.71,-227.16 919.71,-227.16 919.71,-248.88 919.71,-248.88 919.71,-254.88 913.71,-260.88 907.71,-260.88"/>
+<text xml:space="preserve" text-anchor="middle" x="822" y="-239.17" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">wowee_net</text>
+<text xml:space="preserve" text-anchor="middle" x="822" y="-225.67" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">Auth / WorldSocket / HTTPS</text>
+</g>
+<!-- gh&#45;&gt;netlib -->
+<g id="03-component-diagram-edge15" class="edge">
+<title>gh&#45;&gt;netlib</title>
+<path fill="none" stroke="#687f98" d="M988.84,-334.19C970.91,-327.77 951.98,-320.22 935,-311.88 908.23,-298.73 880.03,-280.56 858.5,-265.65"/>
+<polygon fill="#687f98" stroke="#687f98" points="859.91,-263.86 853.28,-262 857.3,-267.59 859.91,-263.86"/>
+</g>
+<!-- protocol -->
+<g id="03-component-diagram-node11" class="node">
+<title>protocol</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M907.84,-138.44C907.84,-138.44 698.16,-138.44 698.16,-138.44 692.16,-138.44 686.16,-132.44 686.16,-126.44 686.16,-126.44 686.16,-104.72 686.16,-104.72 686.16,-98.72 692.16,-92.72 698.16,-92.72 698.16,-92.72 907.84,-92.72 907.84,-92.72 913.84,-92.72 919.84,-98.72 919.84,-104.72 919.84,-104.72 919.84,-126.44 919.84,-126.44 919.84,-132.44 913.84,-138.44 907.84,-138.44"/>
+<text xml:space="preserve" text-anchor="middle" x="803" y="-116.73" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">wowee_protocol</text>
+<text xml:space="preserve" text-anchor="middle" x="803" y="-103.23" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">Packet / opcodes / parsers / crypto</text>
+</g>
+<!-- gh&#45;&gt;protocol -->
+<g id="03-component-diagram-edge16" class="edge">
+<title>gh&#45;&gt;protocol</title>
+<path fill="none" stroke="#687f98" d="M1042.5,-334.38C1018.02,-305.64 972.92,-254.48 930,-215.16 901.64,-189.17 867,-162.6 841.07,-143.59"/>
+<polygon fill="#687f98" stroke="#687f98" points="842.49,-141.81 835.9,-139.82 839.81,-145.49 842.49,-141.81"/>
+</g>
+<!-- gh&#45;&gt;pipeline -->
+<g id="03-component-diagram-edge17" class="edge">
+<title>gh&#45;&gt;pipeline</title>
+<path fill="none" stroke="#687f98" d="M943.72,-340.4C875.9,-329.74 789.34,-313.79 714,-292.63 686.75,-284.97 657.38,-274.15 632.62,-264.22"/>
+<polygon fill="#687f98" stroke="#687f98" points="633.71,-262.21 626.83,-261.88 632,-266.43 633.71,-262.21"/>
+</g>
+<!-- base -->
+<g id="03-component-diagram-node13" class="node">
+<title>base</title>
+<path fill="#f1f5fa" stroke="#c4d1e2" d="M718.71,-61.72C718.71,-61.72 487.29,-61.72 487.29,-61.72 481.29,-61.72 475.29,-55.72 475.29,-49.72 475.29,-49.72 475.29,-28 475.29,-28 475.29,-22 481.29,-16 487.29,-16 487.29,-16 718.71,-16 718.71,-16 724.71,-16 730.71,-22 730.71,-28 730.71,-28 730.71,-49.72 730.71,-49.72 730.71,-55.72 724.71,-61.72 718.71,-61.72"/>
+<text xml:space="preserve" text-anchor="middle" x="603" y="-40.01" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">wowee_base</text>
+<text xml:space="preserve" text-anchor="middle" x="603" y="-26.51" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">EventBus / jobs / logging / CVar / math</text>
+</g>
+<!-- gh&#45;&gt;base -->
+<g id="03-component-diagram-edge18" class="edge">
+<title>gh&#45;&gt;base</title>
+<path fill="none" stroke="#687f98" d="M943.9,-352.88C771.87,-346.36 467.46,-329.68 434,-292.63 366.73,-218.16 492.58,-114.89 561.81,-66.67"/>
+<polygon fill="#687f98" stroke="#687f98" points="563.02,-68.6 567.08,-63.04 560.44,-64.85 563.02,-68.6"/>
+</g>
+<!-- domain&#45;&gt;base -->
+<g id="03-component-diagram-edge19" class="edge">
+<title>domain&#45;&gt;base</title>
+<path fill="none" stroke="#687f98" d="M1029.86,-154.08C1005.6,-134.7 967.65,-107.45 930,-92.72 869.53,-69.06 798.78,-55.98 738.59,-48.76"/>
+<polygon fill="#687f98" stroke="#687f98" points="739.15,-46.54 732.43,-48.04 738.62,-51.06 739.15,-46.54"/>
+<text xml:space="preserve" text-anchor="middle" x="1044.01" y="-111.7" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">events / queries</text>
+</g>
+<!-- old -->
+<g id="03-component-diagram-node7" class="node">
+<title>old</title>
+<path fill="#fff1e9" stroke="#d6a68b" d="M1429.09,-200.16C1429.09,-200.16 1184.91,-200.16 1184.91,-200.16 1178.91,-200.16 1172.91,-194.16 1172.91,-188.16 1172.91,-188.16 1172.91,-166.44 1172.91,-166.44 1172.91,-160.44 1178.91,-154.44 1184.91,-154.44 1184.91,-154.44 1429.09,-154.44 1429.09,-154.44 1435.09,-154.44 1441.09,-160.44 1441.09,-166.44 1441.09,-166.44 1441.09,-188.16 1441.09,-188.16 1441.09,-194.16 1435.09,-200.16 1429.09,-200.16"/>
+<text xml:space="preserve" text-anchor="middle" x="1307" y="-178.45" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">[C1] XxxQueries</text>
+<text xml:space="preserve" text-anchor="middle" x="1307" y="-164.95" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">GameHandler реализует и пересылает</text>
+</g>
+<!-- old&#45;&gt;gh -->
+<g id="03-component-diagram-edge14" class="edge">
+<title>old&#45;&gt;gh</title>
+<path fill="none" stroke="#ae5b32" stroke-dasharray="5,2" d="M1288.59,-200.28C1263.54,-229.07 1216.17,-279.65 1167,-311.88 1156.11,-319.02 1143.89,-325.41 1131.73,-330.98"/>
+<polygon fill="#ae5b32" stroke="#ae5b32" points="1130.98,-328.82 1125.97,-333.55 1132.83,-332.98 1130.98,-328.82"/>
+<text xml:space="preserve" text-anchor="middle" x="1261.46" y="-302.38" font-family="DejaVu Sans" font-size="10.00" fill="#8a4324">реализует: пересылка владельцу</text>
+</g>
+<!-- renderer&#45;&gt;pipeline -->
+<g id="03-component-diagram-edge20" class="edge">
+<title>renderer&#45;&gt;pipeline</title>
+<path fill="none" stroke="#687f98" d="M289.44,-327.45C352.44,-307.87 434.67,-282.32 494.52,-263.72"/>
+<polygon fill="#687f98" stroke="#687f98" points="495.1,-265.92 500.63,-261.82 493.75,-261.58 495.1,-265.92"/>
+</g>
+<!-- renderer&#45;&gt;base -->
+<g id="03-component-diagram-edge21" class="edge">
+<title>renderer&#45;&gt;base</title>
+<path fill="none" stroke="#687f98" d="M207.8,-327.45C233.03,-269.35 298.09,-139.07 397,-76.72 410,-68.53 436.9,-61.72 467.09,-56.29"/>
+<polygon fill="#687f98" stroke="#687f98" points="467.33,-58.55 473.34,-55.19 466.54,-54.07 467.33,-58.55"/>
+</g>
+<!-- boundary -->
+<g id="03-component-diagram-node9" class="node">
+<title>boundary</title>
+<path fill="#fff1e9" stroke="#d6a68b" d="M289.71,-569.79C289.71,-569.79 28.29,-569.79 28.29,-569.79 22.29,-569.79 16.29,-563.79 16.29,-557.79 16.29,-557.79 16.29,-536.07 16.29,-536.07 16.29,-530.07 22.29,-524.07 28.29,-524.07 28.29,-524.07 289.71,-524.07 289.71,-524.07 295.71,-524.07 301.71,-530.07 301.71,-536.07 301.71,-536.07 301.71,-557.79 301.71,-557.79 301.71,-563.79 295.71,-569.79 289.71,-569.79"/>
+<text xml:space="preserve" text-anchor="middle" x="159" y="-548.08" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">[C3] граница CMake</text>
+<text xml:space="preserve" text-anchor="middle" x="159" y="-534.58" font-family="DejaVu Sans" font-size="13.00" fill="#142b45">не вся папка rendering — эта библиотека</text>
+</g>
+<!-- boundary&#45;&gt;renderer -->
+<g id="03-component-diagram-edge22" class="edge">
+<title>boundary&#45;&gt;renderer</title>
+<path fill="none" stroke="#687f98" stroke-dasharray="5,2" d="M137.05,-523.64C129.84,-514.85 122.74,-504.2 119,-493.07 111.4,-470.44 110.13,-461.52 119,-439.35 126.05,-421.71 138.99,-405.73 152.27,-392.72"/>
+<polygon fill="#687f98" stroke="#687f98" points="153.71,-394.49 156.87,-388.37 150.59,-391.18 153.71,-394.49"/>
+<text xml:space="preserve" text-anchor="middle" x="165.5" y="-466.34" font-family="DejaVu Sans" font-size="10.00" fill="#38546f">список исключений</text>
+</g>
+<!-- netlib&#45;&gt;protocol -->
+<g id="03-component-diagram-edge23" class="edge">
+<title>netlib&#45;&gt;protocol</title>
+<path fill="none" stroke="#687f98" d="M818.52,-214.93C815.49,-195.78 811.09,-167.89 807.75,-146.7"/>
+<polygon fill="#687f98" stroke="#687f98" points="810.02,-146.5 806.76,-140.43 805.53,-147.21 810.02,-146.5"/>
+</g>
+<!-- netlib&#45;&gt;base -->
+<g id="03-component-diagram-edge24" class="edge">
+<title>netlib&#45;&gt;base</title>
+<path fill="none" stroke="#687f98" d="M781.52,-214.79C750.62,-196.66 708.03,-169.11 676,-138.44 654.07,-117.44 633.92,-89.26 620.38,-68.4"/>
+<polygon fill="#687f98" stroke="#687f98" points="622.46,-67.43 617.03,-63.18 618.62,-69.88 622.46,-67.43"/>
+</g>
+<!-- protocol&#45;&gt;base -->
+<g id="03-component-diagram-edge25" class="edge">
+<title>protocol&#45;&gt;base</title>
+<path fill="none" stroke="#687f98" d="M743.26,-92.26C720.21,-83.65 693.73,-73.76 670.03,-64.9"/>
+<polygon fill="#687f98" stroke="#687f98" points="671.08,-62.86 664.19,-62.72 669.48,-67.13 671.08,-62.86"/>
+</g>
+<!-- pipeline&#45;&gt;base -->
+<g id="03-component-diagram-edge26" class="edge">
+<title>pipeline&#45;&gt;base</title>
+<path fill="none" stroke="#687f98" d="M577.27,-214.79C582.49,-179.27 592.73,-109.67 598.6,-69.81"/>
+<polygon fill="#687f98" stroke="#687f98" points="600.83,-70.27 599.52,-63.51 596.32,-69.61 600.83,-70.27"/>
+</g>
+</g>
+</svg>
+</div><p class="legend">Сплошная стрелка A → B означает «A зависит от B». Пунктир внутри клиента — runtime-взаимодействие. Транзитивные и внешние библиотечные зависимости частично опущены.</p></div><aside class="notes" aria-label="Проблемы рядом с диаграммой"><section class="issue" id="C1"><span class="badge">C1 · Подтверждённый долг</span><h3>GameHandler остаётся узлом, через который домены спрашивают друг друга</h3><p>Статическая проверка: 0 handlers с GameHandler&amp;, 0 обращений через owner_. Каждый handler строится из своих interfaces, но реализует их GameHandler: вопрос одного домена к другому проходит через его пересылку, а порядок вызовов в ней держит порядок событий FrameXML. Ещё 4 xxxRef-accessors открывают его состояние наружу.</p><p class="action">Переносить оставшееся состояние (movementInfo, characters, currentMapId, update field table) к владельцам; уведомления между контекстами вести через bus, а не через пересылку.</p><div class="sources"><a href="../../tools/domain_shape_check.py#L54">tools/domain_shape_check.py:54</a><a href="../../src/game/game_handler.cpp#L123">src/game/game_handler.cpp:123</a><a href="../../include/game/world_handler.hpp#L37">include/game/world_handler.hpp:37</a><a href="../../include/game/game_handler.hpp#L101">include/game/game_handler.hpp:101</a></div></section><section class="issue" id="C2"><span class="badge">C2 · Долг → риск</span><h3>Сохраняются каналы уведомления с одним слушателем</h3><p>В GameHandler осталось 2 set*Callback setters. Они требуют ручного wiring и допускают замену предыдущего слушателя. Само число не доказывает потерю события сейчас, но показывает объём неявного контракта.</p><p class="action">При изменении существующего уведомления переходить на типизированное событие и RAII Subscription; FrameXML оставить отдельным контрактом Lua.</p><div class="sources"><a href="../../tools/domain_shape_check.py#L47">tools/domain_shape_check.py:47</a><a href="../../src/core/client_loop.cpp#L38">src/core/client_loop.cpp:38</a><a href="../../include/core/event_bus.hpp#L38">include/core/event_bus.hpp:38</a></div></section><section class="issue" id="C3"><span class="badge">C3 · Подтверждённый долг</span><h3>Граница подсистемы не совпадает с путём файла</h3><p>CMake исключает camera_controller, animation_controller, spell visuals и другие presentation-файлы из wowee_render. В game также остаётся 6 includes общих animation/movement constants из rendering/. Это усложняет определение владельца по каталогу.</p><p class="action">Ориентироваться на CMake targets и guard checks; общие protocol/animation IDs постепенно переносить в нейтральные headers.</p><div class="sources"><a href="../../CMakeLists.txt#L1319">CMakeLists.txt:1319</a><a href="../../tools/render_dependency_check.py#L58">tools/render_dependency_check.py:58</a><a href="../../tools/game_dependency_check.py#L46">tools/game_dependency_check.py:46</a></div></section></aside></div><p class="good"><strong>Что уже защищено.</strong> Проверки дали 0 includes presentation из game и 0 includes клиента из wowee_render. Общие константы из rendering учитываются отдельно. Это успешная статическая проверка includes, не доказательство отсутствия всех runtime-зависимостей.</p><details class="details"><summary>Обязанности, границы и точный порядок</summary><table><tr><th scope="row">Client</th><td>Application владеет и связывает game, render, assets, UI и audio; ClientLoop управляет кадром и transitions. UI, addons, audio показаны как подсистемы, а не отдельные wowee_* targets.</td></tr><tr><th scope="row">Game</th><td>Domain handlers владеют своими opcode/state; GameHandler сохраняет session/dispatch и legacy facade. Команды идут владельцу, queries — через interfaces, notifications — в bus.</td></tr><tr><th scope="row">Renderer</th><td>Получает scene/presentation state, не включает game/ui/audio/network client modules. 95 source-файлов в текущей проверке; compile-time границы зависят от CMake.</td></tr><tr><th scope="row">Pipeline</th><td>Загрузка файлов, архивные слои, кеши и парсеры. Зависит от base, не от game/render клиента.</td></tr><tr><th scope="row">Network / protocol</th><td>Сеть использует protocol; game использует net и protocol. Сетевые transport-данные не вызывают GPU напрямую.</td></tr><tr><th scope="row">Headless validation</th><td>GameHarness ведёт real GameHandler без client; scene_render связывает wowee_render без game. ClientHarness ведёт тот же ClientLoop с front-end stand-ins.</td></tr></table></details></article></main><footer>Факт — наблюдаемое поведение кода. Риск — возможное следствие без runtime-подтверждения. Долг — текущая архитектурная связанность. Числа бюджетов — настройки по умолчанию, а не результаты профилирования. Исходники и строки указаны рядом с каждым замечанием. <a href="README.md">Markdown</a> · <a href="sources.json">Снимок источников</a> · <a href="checks.txt">Статические проверки</a></footer><script>
+document.addEventListener('click', function(event) {
+ const button=event.target.closest('button[data-zoom]'); if(!button)return;
+ const svg=button.closest('article').querySelector('.diagram svg');
+ if(button.dataset.zoom==='fit'){svg.style.width='100%';return;}
+ const current=svg.getBoundingClientRect().width;
+ svg.style.width=Math.max(640, Math.min(6000,current*(button.dataset.zoom==='in'?1.25:0.8)))+'px';
+});
+</script></body></html>

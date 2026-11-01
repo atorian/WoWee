@@ -48,4 +48,4 @@ vec4 worldAtmosphere(vec3 worldPos) {
     }
     return air;
 }
-vec3 aerialColorAt(vec3 direction) { return aerialBackgroundAt(direction); }
+vec3 aerialColorAt(vec3 direction) { return aerialDiffuseAt(direction); }

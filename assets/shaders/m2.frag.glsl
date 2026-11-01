@@ -53,7 +53,6 @@ layout(set = 1, binding = 2) uniform M2Material {
     int alphaTest;
     int unlit;
     int blendMode;
-    int cullBackFaces;
     float specularIntensity;
     float emissiveBoost;
     float tintR;
@@ -132,7 +131,6 @@ vec4 fogVolumeSky(vec2 uv) {
 
 void main() {
     const vec3 receiverFace = receiverFaceNormal(FragPos);
-    if (cullBackFaces != 0 && !gl_FrontFacing) discard;
     // The stages as the client combines them: armour doubled by its
     // sphere-mapped shine, a flame shaped by its mask, a layer with light
     // of its own added on top of the lit one.

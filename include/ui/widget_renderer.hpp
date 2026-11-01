@@ -10,6 +10,8 @@
 // same route the action bar already takes for its backpack button. Nothing new
 // is shipped; it is the player's own install being drawn.
 
+#include "ui/ui_texture_cache.hpp"
+#include "ui/interface_art.hpp"
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -34,6 +36,15 @@ struct Widget;
 
 class WidgetRenderer {
 public:
+    ~WidgetRenderer();
+    void resetResources();
+    void preloadInterface(const std::string& directory);
+    void prefetch(const std::string& path, bool additive = false, bool priority = false);
+    void pumpResources();
+    bool resourcesPending() const { return artDiscovery_.valid() || (textureCache_ && textureCache_->pending()); }
+    size_t unavailableResources() const { return textureCache_ ? textureCache_->failed() : 0; }
+    // Includes hidden widgets and templates materialized by addons.
+    void prefetchWidgets(const WidgetTree& tree);
     void initialize(pipeline::AssetManager* assets, rendering::VkContext* vkCtx);
     /// Where draw() records what its parts cost, for the frame profile.
     void setStageTimes(rendering::CpuStageTimes* times) { stageTimes_ = times; }
@@ -62,9 +73,8 @@ public:
     void reportWidgetDiagnostics(WidgetTree& tree, const std::vector<const Widget*>& order,
                                  float s, float screenW, float screenH);
 
-    /// Number of distinct textures resident. Cheap diagnostic; the cache never
-    /// evicts, because Interface\ art is small, bounded and reused constantly.
-    [[nodiscard]] size_t textureCount() const { return textures_.size(); }
+    /// Ready UI images retained for this dataset under the shared GPU budget.
+    [[nodiscard]] size_t textureCount() const { return textureCache_ ? textureCache_->ready() : 0; }
 
     /// Whether the art at this path can be read and decoded at all, and how big
     /// it is. Public because it answers a question worth asking from outside:
@@ -76,9 +86,8 @@ public:
     }
 
 private:
-    /// Descriptor set for an Interface\ path, loading it on first use. Returns
-    /// VK_NULL_HANDLE for anything missing, and remembers the failure so a
-    /// mistyped path is not re-read every frame.
+    /// Request a path, then return its already-ready descriptor. A queued
+    /// image and a failed image both draw nothing, but only failure is cached.
     VkDescriptorSet texture(const std::string& path, bool add = false);
     /// Already-uploaded texture for a path, without triggering an upload.
     [[nodiscard]] VkDescriptorSet resident(const std::string& path, bool add = false) const;
@@ -166,21 +175,20 @@ private:
     pipeline::AssetManager* assets_ = nullptr;
     rendering::VkContext* vkCtx_ = nullptr;
     rendering::CpuStageTimes* stageTimes_ = nullptr;
-    std::unordered_map<std::string, VkDescriptorSet> textures_;
+    std::unique_ptr<UiTextureCache> textureCache_;
+    std::future<std::vector<InterfaceArt>> artDiscovery_;
+    bool discoveryStarted_ = false;
+    bool preloadReported_ = false;
+    size_t layoutTextureCount_ = 0;
+    uint32_t prefetchWidgetCursor_ = 1;
     /// The cached set for a path, or null when nothing is cached for it -
     /// which is different from a cached kMissing, and both callers care.
     ///
-    /// Here rather than through cacheKey because cacheKey returns a string by
-    /// value, so the ordinary case copied the path onto the heap purely to
-    /// look it up. The draw pass does that twice for every texture on screen,
-    /// every frame.
     [[nodiscard]] const VkDescriptorSet* cachedTexture(const std::string& path,
                                                        bool add) const;
     /// Image dimensions by path, including the ones that could not be read -
     /// stored as zero so a missing file is looked for once and not once a frame.
     std::unordered_map<std::string, std::pair<float, float>> textureSizes_;
-    /// Which incarnation of ImGui's backend the cache above belongs to.
-    uint32_t uiTextureGenerationSeen_ = 0;
 };
 
 } // namespace ui

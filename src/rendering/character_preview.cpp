@@ -13,6 +13,7 @@
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/char_sections.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "core/appearance_composer.hpp"
 #include "core/geoset_rules.hpp"
 #include "pipeline/item_textures.hpp"
@@ -79,7 +80,7 @@ CharacterPreview::~CharacterPreview() {
 }
 
 void CharacterPreview::ensureAppearanceGeosetsLoaded() {
-    if (appearanceGeosetsLoaded_ || !assetManager_) {
+    if (appearanceGeosetsLoaded_ || !gameTables_) {
         return;
     }
 
@@ -90,14 +91,17 @@ void CharacterPreview::ensureAppearanceGeosetsLoaded() {
     // CharHairGeosets.dbc maps (race, sex, hairStyleId) to the group-0
     // scalp/hair submesh. Activating every group-0 submesh draws all hair
     // variants at once, which shows up as flickering magenta patches.
-    if (auto chg = assetManager_->loadDBC("CharHairGeosets.dbc"); chg && chg->isLoaded()) {
-        const auto* chgL = pipeline::getActiveDBCLayout()
-            ? pipeline::getActiveDBCLayout()->getLayout("CharHairGeosets") : nullptr;
+    {
+        const pipeline::RequiredTable chg(*gameTables_, "CharHairGeosets.dbc", "a character's hair");
+        const uint32_t raceField = chg.column("RaceID");
+        const uint32_t sexField = chg.column("SexID");
+        const uint32_t variationField = chg.column("Variation");
+        const uint32_t geosetField = chg.column("GeosetID");
         for (uint32_t i = 0; i < chg->getRecordCount(); i++) {
-            uint32_t raceId = chg->getUInt32(i, chgL ? (*chgL)["RaceID"] : 1);
-            uint32_t sexId = chg->getUInt32(i, chgL ? (*chgL)["SexID"] : 2);
-            uint32_t variation = chg->getUInt32(i, chgL ? (*chgL)["Variation"] : 3);
-            uint32_t geosetId = chg->getUInt32(i, chgL ? (*chgL)["GeosetID"] : 4);
+            uint32_t raceId = chg->getUInt32(i, raceField);
+            uint32_t sexId = chg->getUInt32(i, sexField);
+            uint32_t variation = chg->getUInt32(i, variationField);
+            uint32_t geosetId = chg->getUInt32(i, geosetField);
             const bool useDefaultScalp = chg->getFieldCount() > 5 && chg->getUInt32(i, 5) != 0;
             const uint32_t key = core::appearanceKey(static_cast<uint8_t>(raceId),
                                                     static_cast<uint8_t>(sexId),
@@ -107,14 +111,17 @@ void CharacterPreview::ensureAppearanceGeosetsLoaded() {
         LOG_INFO("CharacterPreview: loaded ", hairGeosetMap_.size(), " hair geoset mappings");
     }
 
-    if (auto cfh = assetManager_->loadDBC("CharacterFacialHairStyles.dbc"); cfh && cfh->isLoaded()) {
-        const auto* cfhL = pipeline::getActiveDBCLayout()
-            ? pipeline::getActiveDBCLayout()->getLayout("CharacterFacialHairStyles") : nullptr;
-        const auto fhF = pipeline::detectFacialHairFields(cfh.get(), cfhL);
+    {
+        const pipeline::RequiredTable cfh(*gameTables_, "CharacterFacialHairStyles.dbc",
+                                          "a character's facial hair");
+        const auto fhF = pipeline::detectFacialHairFields(cfh.get(), &cfh.layout());
+        const uint32_t raceField = cfh.column("RaceID");
+        const uint32_t sexField = cfh.column("SexID");
+        const uint32_t variationField = cfh.column("Variation");
         for (uint32_t i = 0; i < cfh->getRecordCount(); i++) {
-            uint32_t raceId = cfh->getUInt32(i, cfhL ? (*cfhL)["RaceID"] : 0);
-            uint32_t sexId = cfh->getUInt32(i, cfhL ? (*cfhL)["SexID"] : 1);
-            uint32_t variation = cfh->getUInt32(i, cfhL ? (*cfhL)["Variation"] : 2);
+            uint32_t raceId = cfh->getUInt32(i, raceField);
+            uint32_t sexId = cfh->getUInt32(i, sexField);
+            uint32_t variation = cfh->getUInt32(i, variationField);
             const uint32_t key = core::appearanceKey(static_cast<uint8_t>(raceId),
                                                     static_cast<uint8_t>(sexId),
                                                     static_cast<uint8_t>(variation));
@@ -174,8 +181,10 @@ std::unordered_set<uint16_t> CharacterPreview::buildBaseGeosets() {
     return activeGeosets;
 }
 
-bool CharacterPreview::initialize(pipeline::AssetManager* am, int width, int height) {
+bool CharacterPreview::initialize(pipeline::AssetManager* am, const pipeline::GameTables& tables,
+                                  int width, int height) {
     assetManager_ = am;
+    gameTables_ = &tables;
     // If already initialized with valid resources, reuse them.
     // This avoids destroying GPU resources that may still be referenced by
     // an in-flight command buffer (composite request recorded earlier this frame).
@@ -600,11 +609,10 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
     bodySkinPath_.clear();
     baseLayers_.clear();
 
-    auto charSectionsDbc = assetManager_->loadDBC("CharSections.dbc");
-    if (charSectionsDbc) {
-        const auto* csL = pipeline::getActiveDBCLayout()
-            ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
-        const auto csF = pipeline::detectCharSectionsFields(charSectionsDbc.get(), csL);
+    {
+        const pipeline::RequiredTable charSectionsDbc(*gameTables_, "CharSections.dbc",
+                                                      "a character's skin, face and hair");
+        const auto csF = pipeline::detectCharSectionsFields(charSectionsDbc.get(), &charSectionsDbc.layout());
 
         // The one reader, in pipeline/char_sections.hpp. This copy had no
         // fallback for a face the table does not carry - a character created
@@ -641,8 +649,6 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
                      : "(not found)",
                  " hair=", sections.haveHair ? hairScalpPath : "(not found)",
                  " underwear=", underwearPaths.size(), " textures");
-    } else {
-        LOG_WARNING("CharSections.dbc not loaded - no character textures");
     }
 
     // Assign texture filenames on model before GPU upload
@@ -794,11 +800,8 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     charRenderer_->clearTextureSlotOverride(instanceId_, static_cast<uint16_t>(skinTextureSlotIndex_));
     charRenderer_->setGroupTextureOverride(instanceId_, 15, {});
 
-    auto displayInfoDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
-    if (!displayInfoDbc || !displayInfoDbc->isLoaded()) {
-        LOG_WARNING("applyEquipment: ItemDisplayInfo.dbc not loaded");
-        return false;
-    }
+    const pipeline::RequiredTable displayInfoDbc(*gameTables_, "ItemDisplayInfo.dbc",
+                                                 "the equipment a character is shown in");
 
     auto hasInvType = [&](std::initializer_list<uint8_t> types) -> bool {
         for (const auto& it : equipment) {
@@ -820,11 +823,9 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
         return 0;
     };
 
-    const auto* idiL = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-    const uint32_t geosetGroup1Field = idiL ? (*idiL)["GeosetGroup1"] : 7u;
-    const uint32_t geosetGroup2Field = idiL ? (*idiL)["GeosetGroup2"] : 8u;
-    const uint32_t geosetGroup3Field = idiL ? (*idiL)["GeosetGroup3"] : 9u;
+    const uint32_t geosetGroup1Field = displayInfoDbc.column("GeosetGroup1");
+    const uint32_t geosetGroup2Field = displayInfoDbc.column("GeosetGroup2");
+    const uint32_t geosetGroup3Field = displayInfoDbc.column("GeosetGroup3");
 
     auto getGeosetGroup = [&](uint32_t displayInfoId, uint32_t fieldIdx) -> uint32_t {
         if (displayInfoId == 0) return 0;
@@ -971,7 +972,7 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
 
     // Texture component region fields - use DBC layout when available, fall back to binary offsets.
     uint32_t texRegionFields[8];
-    pipeline::getItemDisplayInfoTextureFields(*displayInfoDbc, idiL, texRegionFields);
+    pipeline::getItemDisplayInfoTextureFields(displayInfoDbc, texRegionFields);
 
     std::vector<std::pair<int, std::string>> regionLayers;
     regionLayers.reserve(32);
@@ -1011,8 +1012,10 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
                         capeNames.push_back(n);
                     }
                 };
-                std::string leftName = displayInfoDbc->getString(static_cast<uint32_t>(capeRecIdx), 3);
-                std::string rightName = displayInfoDbc->getString(static_cast<uint32_t>(capeRecIdx), 4);
+                std::string leftName = displayInfoDbc->getString(static_cast<uint32_t>(capeRecIdx),
+                                                                 displayInfoDbc.column("LeftModelTexture"));
+                std::string rightName = displayInfoDbc->getString(static_cast<uint32_t>(capeRecIdx),
+                                                                  displayInfoDbc.column("RightModelTexture"));
                 if (gender_ == game::Gender::FEMALE) {
                     addName(rightName);
                     addName(leftName);
@@ -1203,9 +1206,8 @@ void CharacterPreview::attachWeapons(const std::vector<game::EquipmentItem>& equ
     charRenderer_->detachWeapon(instanceId_, 1);
     charRenderer_->detachWeapon(instanceId_, 2);
 
-    auto displayInfoDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
-    if (!displayInfoDbc || !displayInfoDbc->isLoaded()) return;
-
+    const pipeline::RequiredTable displayInfoDbc(*gameTables_, "ItemDisplayInfo.dbc",
+                                                 "the weapons a character is shown holding");
 
     struct WeaponSlot {
         std::initializer_list<uint8_t> invTypes;
@@ -1237,7 +1239,7 @@ void CharacterPreview::attachWeapons(const std::vector<game::EquipmentItem>& equ
         int32_t recIdx = displayInfoDbc->findRecordById(displayId);
         if (recIdx < 0) continue;
 
-        const auto art = pipeline::readItemDisplayArt(*displayInfoDbc,
+        const auto art = pipeline::readItemDisplayArt(displayInfoDbc,
                                                       static_cast<uint32_t>(recIdx));
         if (art.modelFile.empty()) continue;
         const std::string& modelFile = art.modelFile;
@@ -1281,9 +1283,9 @@ uint32_t CharacterPreview::previewModelIdFor(const std::string& assetKey) {
 void CharacterPreview::attachWeaponEnchantVisual(uint32_t attachmentId, uint32_t itemVisualId) {
     if (itemVisualId == 0 || !charRenderer_ || !assetManager_) return;
 
-    auto visualsDbc = assetManager_->loadDBC("ItemVisuals.dbc");
-    auto effectsDbc = assetManager_->loadDBC("ItemVisualEffects.dbc");
-    if (!visualsDbc || !visualsDbc->isLoaded() || !effectsDbc || !effectsDbc->isLoaded()) return;
+    // ItemVisuals: ID and five effect slots; ItemVisualEffects: ID and model.
+    const auto visualsDbc = gameTables_->table("ItemVisuals.dbc", 6, "a weapon's enchant glow");
+    const auto effectsDbc = gameTables_->table("ItemVisualEffects.dbc", 2, "a weapon's enchant glow");
 
     auto effectModels = pipeline::resolveItemVisualModels(itemVisualId, visualsDbc.get(),
                                                           effectsDbc.get());

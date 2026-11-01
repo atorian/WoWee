@@ -9,7 +9,8 @@
 // dungeons are ticked and which headers folded were function statics, so the
 // next character opened the dungeon finder with the last one's choices made.
 // The others moved the same way and are held there by
-// tools/function_static_check.py.
+// tools/function_static_check.py. What a relog and a /reload leave behind is
+// tested through the client itself, in test_client_transitions.
 #include <catch_amalgamated.hpp>
 
 #include "game_harness.hpp"
@@ -70,42 +71,6 @@ struct CharacterLua {
 
 }  // namespace
 
-TEST_CASE("the next character's dungeon finder starts with nothing the last one chose",
-          "[charactersession]") {
-    wowee::test::GameHarness h;
-    h.enterWorld();
-
-    // Character A ticks a dungeon and folds a header.
-    auto stateA = std::make_unique<InterfaceState>();
-    {
-        CharacterLua a(h.game(), stateA.get());
-        a.run("SetLFGDungeonEnabled(285, true); SetLFGHeaderCollapsed(261, true)");
-        CHECK(a.truthy("GetLFDChoiceEnabledState()[285]"));
-        CHECK(a.truthy("GetLFDChoiceCollapseState()[261]"));
-    }
-    // A logs out: its session - Lua state and interface state - ends.
-    stateA.reset();
-
-    // B logs in on the same client and gets a session of its own.
-    InterfaceState stateB;
-    CharacterLua b(h.game(), &stateB);
-    CHECK(b.truthy("next(GetLFDChoiceEnabledState()) == nil"));
-    CHECK(b.truthy("next(GetLFDChoiceCollapseState()) == nil"));
-}
-
-TEST_CASE("a reload keeps the character's dungeon finder choices", "[charactersession]") {
-    wowee::test::GameHarness h;
-    h.enterWorld();
-    // /reload: a new Lua state over the same character's interface state.
-    InterfaceState state;
-    {
-        CharacterLua before(h.game(), &state);
-        before.run("SetLFGDungeon(285)");
-    }
-    CharacterLua after(h.game(), &state);
-    CHECK(after.truthy("GetLFDChoiceEnabledState()[285]"));
-}
-
 TEST_CASE("a Lua state with no interface state refuses rather than sharing one",
           "[charactersession]") {
     wowee::test::GameHarness h;
@@ -133,12 +98,12 @@ TEST_CASE("a relog's session is the new character's, and so are its saved variab
     h.enterWorld(alice);
     const auto first = wowee::core::characterIdentityOf(
         h.game().getPlayerGuid(), h.game().getCharacters(),
-        h.game().lookupName(h.game().getPlayerGuid()));
+        h.game().queryCache().lookupName(h.game().getPlayerGuid()));
     CHECK(first.guid == alice.guid);
     CHECK(first.name == "Alice");
 
     // Logout to the character list, then the other character in.
-    h.game().requestLogout(false);
+    h.game().social().requestLogout(false);
     h.receive(Opcode::SMSG_LOGOUT_COMPLETE);
     h.pump();
     h.game().returnToCharacterSelect();
@@ -153,7 +118,7 @@ TEST_CASE("a relog's session is the new character's, and so are its saved variab
 
     const auto second = wowee::core::characterIdentityOf(
         h.game().getPlayerGuid(), h.game().getCharacters(),
-        h.game().lookupName(h.game().getPlayerGuid()));
+        h.game().queryCache().lookupName(h.game().getPlayerGuid()));
     CHECK(second.guid == bob.guid);
     CHECK(second.name == "Bob");
 

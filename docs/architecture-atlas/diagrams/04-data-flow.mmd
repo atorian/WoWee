@@ -1,0 +1,42 @@
+flowchart TB
+  subgraph sg_wire["Сервер → авторитетное состояние игры"]
+    server["World server<br/>TCP bytes"]
+    socket["WorldSocket pump<br/>decrypt + framing"]
+    sq["Socket callback FIFO<br/>4096 → overflow disconnect"]
+    gq["[D1] Game inbound FIFO<br/>8192 → overflow drops packet"]
+    dispatch["Main: budgeted dispatch<br/>4 / 8 / catch-up 12 мс"]
+    state["Domain state / EntityManager<br/>логический игровой мир"]
+    ev["Bus notifications + FrameXML FIFO"]
+  end
+  subgraph sg_resources["Ресурсы → подготовленные CPU-данные"]
+    disk["Loose files + archive layers<br/>ADT / M2 / WMO / BLP / DBC"]
+    cache["[D2] AssetManager<br/>file LRU + DBC cache / generations"]
+    workers["Terrain / ioWorkers / normals<br/>read → parse → decode → composite"]
+    prepared["[D3] CPU ready results<br/>PendingTile / prepared model / pixels"]
+  end
+  subgraph sg_scene["Главный поток → видимый мир → GPU"]
+    spawner["EntitySpawner / PlayerView<br/>GUID → model / appearance requests"]
+    validate["Проверить map/request token<br/>отбросить устаревший result"]
+    upload["GPU upload batch<br/>staging → submit, без wait"]
+    instances["Renderer instance state<br/>models + material + transform / bones"]
+    gpu["GPU buffers / textures<br/>frame passes → swapchain"]
+  end
+  server --> socket
+  socket -->|"callbackMutex"| sq
+  sq -->|"main transfer"| gq
+  gq --> dispatch
+  dispatch --> state
+  state -->|"publish / queue"| ev
+  ev -->|"spawn / appearance"| spawner
+  state -.->|"queries"| spawner
+  spawner -->|"запрос ресурсов"| workers
+  disk --> cache
+  cache -->|"immutable/shared CPU bytes"| workers
+  workers --> prepared
+  prepared -->|"poll готовности"| validate
+  validate -->|"актуальные данные"| upload
+  upload -->|"создать / заменить instance"| instances
+  spawner -->|"transform / pose"| instances
+  instances -->|"record + submit"| gpu
+  upload -->|"copy commands"| gpu
+  gpu -.->|"poll upload fence"| instances

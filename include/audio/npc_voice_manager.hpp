@@ -9,7 +9,7 @@
 #include <glm/glm.hpp>
 
 namespace wowee {
-namespace pipeline { class AssetManager; }
+namespace pipeline { class AssetManager; class GameTables; }
 
 namespace audio {
 
@@ -50,7 +50,7 @@ public:
     NpcVoiceManager();
     ~NpcVoiceManager();
 
-    bool initialize(pipeline::AssetManager* assets);
+    bool initialize(pipeline::AssetManager* assets, const pipeline::GameTables& tables);
     void shutdown();
 
     // Play NPC interaction sounds
@@ -85,6 +85,7 @@ private:
     void playSound(uint64_t npcGuid, VoiceType voiceType, SoundCategory category, const glm::vec3& position);
 
     pipeline::AssetManager* assetManager_ = nullptr;
+    const pipeline::GameTables* gameTables_ = nullptr;
     float volumeScale_ = 1.0f;
 
     // Voice samples grouped by type and category

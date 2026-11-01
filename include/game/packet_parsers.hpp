@@ -262,7 +262,7 @@ public:
     [[nodiscard]] virtual uint8_t questLogStride() const { return 5; }
 
     /** Number of PLAYER_EXPLORED_ZONES uint32 fields in update-object blocks.
-     *  Classic/Vanilla/Turtle: 64 (bit-packs up to zone ID 2047).
+     *  Classic/Vanilla: 64 (bit-packs up to zone ID 2047).
      *  TBC/WotLK: 128 (covers Outland/Northrend zone IDs up to 4095). */
     [[nodiscard]] virtual uint8_t exploredZonesCount() const { return 128; }
 
@@ -533,25 +533,6 @@ public:
 };
 
 /**
- * Turtle WoW packet parsers.
- *
- * Turtle is Classic-based but not wire-identical to vanilla MaNGOS. It keeps
- * most Classic packet formats, while overriding the movement-bearing paths that
- * have proven to vary in live traffic:
- * - update-object movement blocks use a Turtle-specific hybrid layout
- * - update-object parsing falls back through Classic/TBC/WotLK movement layouts
- * - monster-move parsing falls back through Vanilla, TBC, and guarded WotLK layouts
- *
- * Everything else inherits the Classic parser behavior.
- */
-class TurtlePacketParsers : public ClassicPacketParsers {
-public:
-    bool parseUpdateObject(network::Packet& packet, UpdateObjectData& data) override;
-    bool parseMovementBlock(network::Packet& packet, UpdateBlock& block) override;
-    bool parseMonsterMove(network::Packet& packet, MonsterMoveData& data) override;
-};
-
-/**
  * The parser set for an expansion id, or null if there is not one.
  *
  * Null rather than a WotLK fallback. This used to end in WotLK's parsers for
@@ -565,7 +546,6 @@ public:
  */
 inline std::unique_ptr<PacketParsers> createPacketParsers(const std::string& expansionId) {
     if (expansionId == "classic") return std::make_unique<ClassicPacketParsers>();
-    if (expansionId == "turtle") return std::make_unique<TurtlePacketParsers>();
     if (expansionId == "tbc") return std::make_unique<TbcPacketParsers>();
     if (expansionId == "wotlk") return std::make_unique<WotlkPacketParsers>();
     return nullptr;

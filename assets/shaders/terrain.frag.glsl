@@ -51,21 +51,22 @@ layout(set = 0, binding = 0) uniform PerFrame {
 // The chunk's own normals, every vertex's, as a 17x17 image (ChunkMesh::
 // normalGrid): outer vertices on even texels, inner on odd. The ground is lit
 // from these rather than from the vertices drawn, so a far chunk drawn with a
-// handful of them keeps the light and shade of all 145.
-layout(set = 1, binding = 12) uniform sampler2D uChunkNormal;
+// handful of them keeps the light and shade of all 145. Every chunk of the
+// tile's is in one array (TerrainTileMaps), this one's at mapLayer.
+layout(set = 1, binding = 10) uniform sampler2DArray uTileNormals;
 
 // LayerUV runs over the alpha maps' texel centres, (offset * 63/8 + 0.5) / 64
 // for a grid offset of 0 to 8; the normal image's texel centres for the same
 // offset are (offset * 2 + 0.5) / 17.
 vec3 chunkNormal(vec2 layerUV) {
     vec2 offset = (layerUV * 64.0 - 0.5) * (8.0 / 63.0);
-    return normalize(texture(uChunkNormal, (offset * 2.0 + 0.5) / 17.0).xyz * 2.0 - 1.0);
+    return normalize(texture(uTileNormals, vec3((offset * 2.0 + 0.5) / 17.0, float(mapLayer))).xyz * 2.0 - 1.0);
 }
 
 // The far ground: the chunk's tile's colour and relief, its layers blended
 // once into 32x32 texels a chunk (TerrainBake), the chunk at its cell.
-layout(set = 1, binding = 13) uniform sampler2D uBakedColor;
-layout(set = 1, binding = 14) uniform sampler2D uBakedRelief;
+layout(set = 1, binding = 11) uniform sampler2D uBakedColor;
+layout(set = 1, binding = 12) uniform sampler2D uBakedRelief;
 
 // After the vertex stage's model matrix and lights (GPUPushConstants).
 layout(push_constant) uniform Surface {
@@ -160,8 +161,15 @@ vec3 reliefNormal(vec3 n, vec3 mapNormal, float strength) {
     return len2 > 1e-8 ? turned * inversesqrt(len2) : n;
 }
 
+/// Off for the pipeline that draws chunks ending short of both the fog band
+/// and the distant-terrain hand-over, where neither discard below could fire.
+/// A shader that can discard keeps an Apple GPU from removing hidden pixels
+/// before it shades them, and the ground drawn first under a city is almost
+/// all hidden. See terrainChunkShortOfDiscards.
+layout(constant_id = 0) const bool kDistanceDiscards = true;
+
 void main() {
-    if (terrainCoverageThreshold() < distantTerrainWeight(FragPos)) discard;
+    if (kDistanceDiscards && terrainCoverageThreshold() < distantTerrainWeight(FragPos)) discard;
     const vec3 receiverFace = receiverFaceNormal(FragPos);
     // The gradients every texture read below takes, here where the whole quad
     // is still there: past the discard, and inside the per-pixel branches
@@ -170,7 +178,8 @@ void main() {
     const vec2 layerDx = dFdx(LayerUV), layerDy = dFdy(LayerUV);
     const vec2 atlasUv = bakedAtlasUv(LayerUV);
     const vec2 atlasDx = dFdx(atlasUv), atlasDy = dFdy(atlasUv);
-    if (fogSkyBand1.w > 0.0 && length(FragPos.xy - viewPos.xy) >= fogSkyBand1.w) discard;
+    if (kDistanceDiscards && fogSkyBand1.w > 0.0 &&
+        length(FragPos.xy - viewPos.xy) >= fogSkyBand1.w) discard;
 
     float fragDist = length(viewPos.xyz - FragPos);
 

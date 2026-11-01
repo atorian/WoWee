@@ -5,7 +5,7 @@
 #include "rendering/character_renderer.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
-#include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "core/logger.hpp"
 #include "core/thread_pool.hpp"
@@ -51,34 +51,26 @@ void SpellVisualSystem::loadSpellVisualDbc() {
     if (!cachedAssetManager_ || !cachedAssetManager_->isInitialized()) return;
     spellVisualDbcLoaded_ = true;  // a real attempt follows; do not repeat it
 
-    auto* layout = pipeline::getActiveDBCLayout();
-    const pipeline::DBCFieldMap* svLayout  = layout ? layout->getLayout("SpellVisual")           : nullptr;
-    const pipeline::DBCFieldMap* kitLayout = layout ? layout->getLayout("SpellVisualKit")        : nullptr;
-    const pipeline::DBCFieldMap* fxLayout  = layout ? layout->getLayout("SpellVisualEffectName") : nullptr;
-    const auto fieldOf = [](const pipeline::DBCFieldMap* map, const char* name, uint32_t fallback) {
-        return map ? map->field(name) : fallback;
-    };
+    const pipeline::GameTables& tables = renderer_->gameTables();
 
-    // SpellVisualEffectName: id -> model, scale and its limits.
-    auto fxDbc = cachedAssetManager_->loadDBC("SpellVisualEffectName.dbc");
-    const uint32_t fxPathField = fieldOf(fxLayout, "FilePath", 2);
-    if (!fxDbc || !fxDbc->isLoaded() || fxDbc->getFieldCount() <= fxPathField) {
-        LOG_WARNING("SpellVisual: SpellVisualEffectName.dbc unavailable (fields ",
-                    fxDbc ? fxDbc->getFieldCount() : 0, ") - no spell effects will show");
-        return;
-    }
-    const uint32_t fxScaleField = fieldOf(fxLayout, "Scale", 4);
-    const uint32_t fxMinField = fieldOf(fxLayout, "MinAllowedScale", 5);
-    const uint32_t fxMaxField = fieldOf(fxLayout, "MaxAllowedScale", 6);
-    const uint32_t fxFields = fxDbc->getFieldCount();
+    // SpellVisualEffectName: id -> model, scale and its limits. The scale
+    // columns are WotLK's; an expansion whose layout does not name them
+    // draws every effect at its model's size.
+    const pipeline::RequiredTable fxDbc(tables, "SpellVisualEffectName.dbc", "spell effect models");
+    const uint32_t fxIdField = fxDbc.column("ID");
+    const uint32_t fxPathField = fxDbc.column("FilePath");
+    constexpr uint32_t kAbsent = pipeline::RequiredTable::kAbsent;
+    const uint32_t fxScaleField = fxDbc.optionalColumn("Scale");
+    const uint32_t fxMinField = fxDbc.optionalColumn("MinAllowedScale");
+    const uint32_t fxMaxField = fxDbc.optionalColumn("MaxAllowedScale");
     const auto positive = [&](uint32_t row, uint32_t field, float fallback) {
-        if (field >= fxFields) return fallback;
+        if (field == kAbsent) return fallback;
         const float v = fxDbc->getFloat(row, field);
         return std::isfinite(v) && v > 0.0f ? v : fallback;
     };
     std::unordered_map<uint32_t, SpellKitEffect> effects;
     for (uint32_t i = 0; i < fxDbc->getRecordCount(); ++i) {
-        const uint32_t id = fxDbc->getUInt32(i, 0);
+        const uint32_t id = fxDbc->getUInt32(i, fxIdField);
         std::string path = fxDbc->getString(i, fxPathField);
         if (!id || path.empty()) continue;
         SpellKitEffect effect;
@@ -94,22 +86,19 @@ void SpellVisualSystem::loadSpellVisualDbc() {
     }
 
     // SpellVisualKit: every column it fills, hung where that column hangs.
-    auto kitDbc = cachedAssetManager_->loadDBC("SpellVisualKit.dbc");
-    if (!kitDbc || !kitDbc->isLoaded()) {
-        LOG_WARNING("SpellVisual: SpellVisualKit.dbc unavailable - no spell effects will show");
-        return;
-    }
-    const uint32_t kitFields = kitDbc->getFieldCount();
+    // Each expansion's layout names the effect columns its file has.
+    const pipeline::RequiredTable kitDbc(tables, "SpellVisualKit.dbc", "spell effect kits");
+    const uint32_t kitIdField = kitDbc.column("ID");
     std::vector<uint32_t> columnFields;
     for (const auto& column : kSpellKitColumns)
-        columnFields.push_back(fieldOf(kitLayout, column.field, column.fallbackField));
+        columnFields.push_back(kitDbc.optionalColumn(column.field));
     size_t missingEffects = 0;
     for (uint32_t i = 0; i < kitDbc->getRecordCount(); ++i) {
-        const uint32_t kitId = kitDbc->getUInt32(i, 0);
+        const uint32_t kitId = kitDbc->getUInt32(i, kitIdField);
         if (!kitId) continue;
         SpellVisualKit kit;
         for (size_t c = 0; c < std::size(kSpellKitColumns); ++c) {
-            if (columnFields[c] >= kitFields) continue;
+            if (columnFields[c] == kAbsent) continue;
             const uint32_t effectId = kitDbc->getUInt32(i, columnFields[c]);
             if (!effectId) continue;
             const auto it = effects.find(effectId);
@@ -129,22 +118,17 @@ void SpellVisualSystem::loadSpellVisualDbc() {
     }
 
     // SpellVisual: its three kits.
-    auto svDbc = cachedAssetManager_->loadDBC("SpellVisual.dbc");
-    if (!svDbc || !svDbc->isLoaded()) {
-        LOG_WARNING("SpellVisual: SpellVisual.dbc unavailable - no spell effects will show");
-        return;
-    }
-    const uint32_t svFields = svDbc->getFieldCount();
-    const uint32_t precastField = fieldOf(svLayout, "PrecastKit", 1);
-    const uint32_t castField = fieldOf(svLayout, "CastKit", 2);
-    const uint32_t impactField = fieldOf(svLayout, "ImpactKit", 3);
+    const pipeline::RequiredTable svDbc(tables, "SpellVisual.dbc", "spell effects");
+    const uint32_t svIdField = svDbc.column("ID");
+    const uint32_t precastField = svDbc.column("PrecastKit");
+    const uint32_t castField = svDbc.column("CastKit");
+    const uint32_t impactField = svDbc.column("ImpactKit");
     const auto kitAt = [&](uint32_t record, uint32_t field) -> uint32_t {
-        if (field >= svFields) return 0;
         const uint32_t kitId = svDbc->getUInt32(record, field);
         return kits_.count(kitId) ? kitId : 0;
     };
     for (uint32_t i = 0; i < svDbc->getRecordCount(); ++i) {
-        const uint32_t visualId = svDbc->getUInt32(i, 0);
+        const uint32_t visualId = svDbc->getUInt32(i, svIdField);
         if (!visualId) continue;
         const VisualKits kits{.precast = kitAt(i, precastField), .cast = kitAt(i, castField),
                               .impact = kitAt(i, impactField)};

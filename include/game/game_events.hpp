@@ -3,6 +3,8 @@
 #include "game/refusal.hpp"
 #include "pipeline/weather_kind.hpp"
 
+#include <glm/vec3.hpp>
+
 #include <array>
 #include <cstdint>
 #include <string>
@@ -12,6 +14,8 @@
 namespace wowee::game {
 /// handler_types.hpp: DIRECTED, OMNI or AREA.
 enum class SpellCastType : uint8_t;
+/// server_protocol.hpp: a patch archive a realm extension names.
+struct EzWowPatch;
 }
 
 /// What the game tells the rest of the client has happened, delivered through
@@ -66,6 +70,30 @@ struct CharacterLoggingIn {
     uint64_t characterGuid = 0;
 };
 
+/// The answer to a character creation: SMSG_CHAR_CREATE, or the client's own
+/// refusal when it cannot ask (not connected, the list not in yet).
+struct CharacterCreateAnswered {
+    bool success = false;
+    std::string message;
+};
+
+/// The answer to a character deletion: SMSG_CHAR_DELETE, no answer in time, or
+/// the client's own refusal when it is not connected.
+struct CharacterDeleteAnswered {
+    bool success = false;
+    std::string message;
+};
+
+/// SMSG_CHARACTER_LOGIN_FAILED, and why, in the player's words.
+struct CharacterLoginFailed {
+    std::string reason;
+};
+
+/// A realm extension announced the patch archives this client should hold.
+struct ServerPatchManifestReceived {
+    std::vector<EzWowPatch> patches;
+};
+
 /// The player released to a graveyard (true) or came back to life (false).
 struct GhostStateChanged {
     bool isGhost = false;
@@ -77,7 +105,263 @@ struct OtherPlayerLevelUp {
     uint32_t newLevel = 0;
 };
 
+/// A creature or a player in view died: its health or its dead flag said so,
+/// it came into view dead, or its corpse appeared.
+struct UnitDied {
+    uint64_t guid = 0;
+};
+
+/// A creature or a player in view came back to life.
+struct UnitRespawned {
+    uint64_t guid = 0;
+};
+
+// ---- What is in view ----
+
+/// A transport's model is in the world: the spawner made its instance.
+/// Canonical position.
+struct TransportSpawned {
+    uint64_t guid = 0;
+    uint32_t entry = 0;
+    uint32_t displayId = 0;
+    float x = 0, y = 0, z = 0;
+    float orientation = 0;
+};
+
+/// The server moved a transport. Canonical position.
+struct TransportMoved {
+    uint64_t guid = 0;
+    float x = 0, y = 0, z = 0;
+    float orientation = 0;
+};
+
+/// A creature came into view, or its display changed in place. Canonical
+/// position; scale is OBJECT_FIELD_SCALE_X.
+struct CreatureSpawned {
+    uint64_t guid = 0;
+    uint32_t displayId = 0;
+    float x = 0, y = 0, z = 0;
+    float orientation = 0;
+    float scale = 1.0f;
+};
+
+/// A creature left view.
+struct CreatureDespawned {
+    uint64_t guid = 0;
+};
+
+/// A unit is moving to a canonical position over durationMs (0 = at once).
+struct CreatureMoved {
+    uint64_t guid = 0;
+    float x = 0, y = 0, z = 0;
+    uint32_t durationMs = 0;
+};
+
+/// Another player - or a player's corpse - came into view, with the
+/// appearance the renderer builds the body and hair textures from.
+struct PlayerSpawned {
+    uint64_t guid = 0;
+    uint32_t displayId = 0;
+    uint8_t raceId = 0;
+    uint8_t genderId = 0;
+    uint32_t appearanceBytes = 0;
+    uint8_t facialFeatures = 0;
+    float x = 0, y = 0, z = 0;
+    float orientation = 0;
+};
+
+/// A player or a corpse left view.
+struct PlayerDespawned {
+    uint64_t guid = 0;
+};
+
+/// A player in view other than the local character mounted (the mount's
+/// display id) or dismounted (0).
+struct OtherPlayerMounted {
+    uint64_t guid = 0;
+    uint32_t mountDisplayId = 0;
+};
+
+/// A game object came into view. Canonical position; scale is
+/// OBJECT_FIELD_SCALE_X.
+struct GameObjectSpawned {
+    uint64_t guid = 0;
+    uint32_t entry = 0;
+    uint32_t displayId = 0;
+    float x = 0, y = 0, z = 0;
+    float orientation = 0;
+    float scale = 1.0f;
+};
+
+/// A game object moved to a canonical position.
+struct GameObjectMoved {
+    uint64_t guid = 0;
+    float x = 0, y = 0, z = 0;
+    float orientation = 0;
+};
+
+/// A game object left view.
+struct GameObjectDespawned {
+    uint64_t guid = 0;
+};
+
+/// A game object plays a one-shot animation: SMSG_GAMEOBJECT_CUSTOM_ANIM, or a
+/// fishing bobber's bite.
+struct GameObjectCustomAnimPlayed {
+    uint64_t guid = 0;
+    uint32_t animId = 0;
+};
+
+/// A game object's state byte (GAMEOBJECT_BYTES_1) changed: 0 ready (closed),
+/// 1 open, 2 destroyed.
+struct GameObjectStateChanged {
+    uint64_t guid = 0;
+    uint8_t goState = 0;
+};
+
+/// A unit other than the player said what its movement flags are - Walk(4)
+/// against Run(5), swimming, flying.
+///
+/// `mask` says which flags this update actually speaks about, because most
+/// of the opcodes that reach here speak about one. A full movement block
+/// is authoritative and passes ~0u; SMSG_SPLINE_MOVE_START_SWIM knows only
+/// about swimming and passes SWIMMING, so it cannot take the flying
+/// animation off a creature that is doing both.
+struct UnitMoveFlagsChanged {
+    uint64_t guid = 0;
+    uint32_t moveFlags = 0;
+    uint32_t mask = 0;
+};
+
+/// How a unit took a melee hit, for the animation it plays.
+enum class HitReaction : uint8_t { WOUND, CRIT_WOUND, DODGE, PARRY, BLOCK, SHIELD_BLOCK };
+
+/// A unit took a melee hit that did not miss.
+struct UnitHitReacted {
+    uint64_t victimGuid = 0;
+    HitReaction reaction = HitReaction::WOUND;
+};
+
+/// An NPC turned on the player (SMSG_AI_REACTION, or its first swing at
+/// them), for its aggro line. Canonical position.
+struct NpcAggroed {
+    uint64_t guid = 0;
+    float x = 0, y = 0, z = 0;
+};
+
 // ---- The player ----
+
+/// SMSG_STANDSTATE_UPDATE confirmed a stand state: 0 stand, 1-6 sit
+/// variants, 7 dead, 8 kneel.
+struct StandStateChanged {
+    uint8_t standState = 0;
+};
+
+/// UNIT_FLAG_STUNNED came on or went off the player. The logout countdown's
+/// stun is not one.
+struct StunStateChanged {
+    bool stunned = false;
+};
+
+/// The player started or stopped sneaking.
+struct StealthStateChanged {
+    bool stealthed = false;
+};
+
+/// The player's health changed.
+struct PlayerHealthChanged {
+    uint32_t health = 0;
+    uint32_t maxHealth = 0;
+};
+
+/// The player got into a vehicle (its id) or out of one.
+struct VehicleStateChanged {
+    bool entered = false;
+    uint32_t vehicleId = 0;
+};
+
+/// The player mounted (the mount's display id) or dismounted (0) - a flight
+/// mount included.
+struct PlayerMountChanged {
+    uint32_t mountDisplayId = 0;
+};
+
+/// PLAYER_BYTES or the facial features changed (barber shop and the like).
+struct PlayerAppearanceChanged {};
+
+/// The player's model wants rebuilding with its new hair or facial hair,
+/// alongside the appearance change, without a restart.
+struct PlayerModelRebuildRequested {};
+
+/// SMSG_MOVE_KNOCK_BACK for the player. vcos, vsin: the direction in server
+/// (wire) space - the server to canonical to render swaps cancel, so the
+/// consumer uses them in render space as they are, see
+/// CameraController::applyKnockBack. hspeed and vspeed as the packet has them:
+/// vspeed is negative when the server means an upward launch, so negate it
+/// before using it as the initial vertical velocity.
+struct PlayerKnockedBack {
+    float vcos = 0, vsin = 0;
+    float hspeed = 0, vspeed = 0;
+};
+
+/// SMSG_CAMERA_SHAKE: magnitude in world units, frequency in Hz, duration in
+/// seconds.
+struct CameraShakeRequested {
+    float magnitude = 0;
+    float frequency = 0;
+    float duration = 0;
+};
+
+/// The player started following: renderPos is the render-space position to
+/// follow, which the game keeps current. Null when following stopped.
+struct AutoFollowChanged {
+    const glm::vec3* renderPos = nullptr;
+};
+
+/// /unstuck: put the player back on the floor.
+struct UnstuckRequested {};
+
+/// /unstuckgy: take the player to a safe place.
+struct UnstuckToGraveyardRequested {};
+
+/// /unstuckhearth: take the player to the hearthstone's bind point.
+struct UnstuckToHearthRequested {};
+
+/// The hearthstone was bound (SMSG_BINDPOINTUPDATE). Canonical position.
+struct BindPointChanged {
+    uint32_t mapId = 0;
+    float x = 0, y = 0, z = 0;
+};
+
+/// A flight's path, canonical, whose terrain wants loading ahead of it.
+struct TaxiPathPrecacheRequested {
+    std::vector<glm::vec3> path;
+};
+
+/// A flight is about to start: after the mounting delay, before it moves.
+struct TaxiFlightStarted {};
+
+/// The flight mount's rotation: yaw (render space), pitch and roll, in
+/// radians.
+struct TaxiOrientationChanged {
+    float yaw = 0, pitch = 0, roll = 0;
+};
+
+/// The game moved the player somewhere the renderer has not followed: a
+/// landing snapped to its node, or a server position taken over the client's.
+/// Canonical position.
+///
+/// Application's per-frame render-position sync only pulls from the game while
+/// on a flight (its "Sync character render position" block). Once
+/// finishClientTaxiFlight() clears the flight, that sync stops, so a
+/// correction applied only to movementInfo and the entity never reaches the
+/// renderer, which stays at its last (wrong) position: the landing clamp read
+/// renderer->getCharacterPosition() and kept computing from before the
+/// correction. This carries the corrected position to the renderer at the
+/// same moment.
+struct PlayerPositionCorrected {
+    float x = 0, y = 0, z = 0;
+};
 
 /// How drunk the player is, from 0 (sober, and on every character change) to
 /// 1 (completely smashed).
@@ -90,6 +374,19 @@ struct PlayerIntoxicationChanged {
 /// checks the cast's arc against what the client then reports.
 struct PlayerFacingSet {
     float canonicalYaw = 0.0f;
+};
+
+/// The player found an area, and the experience it gave.
+struct AreaDiscovered {
+    std::string areaName;  ///< Empty when the area has no name in the client's tables.
+    uint32_t xpGained = 0;
+};
+
+/// The player was credited honor for a kill (SMSG_PVP_CREDIT).
+struct HonorGained {
+    uint32_t honor = 0;
+    uint64_t victimGuid = 0;
+    uint32_t victimRank = 0;
 };
 
 // ---- Spells ----
@@ -205,12 +502,6 @@ struct PlayerRefused {
     Refusal reason = Refusal::CantUseItem;
 };
 
-/// Money the player looted, in copper. Once per loot.
-struct LootMoneyReceived {
-    uint64_t lootGuid = 0;
-    uint32_t copper = 0;
-};
-
 /// An item arrived in the player's bags - looted, a reward, pushed by the
 /// server - with what it is, once its name is known.
 struct ItemReceived {
@@ -230,9 +521,6 @@ struct ItemBought {
     uint32_t itemId = 0;
     uint32_t count = 0;
 };
-
-/// Unread mail arrived, where there was none.
-struct MailArrived {};
 
 /// A quest objective moved: a kill, an item, counted against what is needed.
 struct QuestObjectiveProgressed {
@@ -262,17 +550,6 @@ struct GossipClosedOnNpc {
 /// The server asks the dungeon finder be opened (SMSG_OPEN_LFG_DUNGEON_FINDER).
 struct DungeonFinderOpened {};
 
-/// The character's standing with a faction moved.
-struct ReputationChanged {
-    std::string factionName;
-    int32_t delta = 0;
-    int32_t standing = 0;
-};
-
-/// Which factions the character has, or which are visible, changed: the
-/// reputation list is built again.
-struct FactionListChanged {};
-
 /// The player accepted a quest into the log.
 struct QuestAccepted {
     uint32_t questId = 0;
@@ -287,23 +564,6 @@ struct QuestCompleted {
 /// The player learned a spell from a trainer.
 struct TrainerSpellLearned {
     uint32_t spellId = 0;
-};
-
-/// The player earned an achievement.
-struct AchievementEarned {
-    uint32_t achievementId = 0;
-    std::string name;
-};
-
-/// Someone challenged the player to a duel.
-struct DuelRequested {
-    uint64_t challengerGuid = 0;
-    std::string challengerName;
-};
-
-/// Someone invited the player to a group.
-struct GroupInviteReceived {
-    std::string inviterName;
 };
 
 /// Another player pinged the minimap, at a point in WoW coordinates.
@@ -399,11 +659,6 @@ struct CarriedItemsCounted {
     std::unordered_map<uint32_t, uint32_t> counts;
 };
 
-/// The loot window opened on a corpse or a chest, or closed.
-struct LootWindowChanged {
-    bool open = false;
-};
-
 /// The player opened a vendor's window. The position is the vendor's, in
 /// canonical coordinates.
 struct VendorOpened {
@@ -439,6 +694,26 @@ struct WeatherChanged {
     bool abrupt = false;
     /// The kind it was before.
     pipeline::WeatherKind previous = pipeline::WeatherKind::Clear;
+};
+
+// ---- Sound ----
+
+/// SMSG_PLAY_MUSIC: a SoundEntries.dbc record, which the receiver looks up
+/// and hands to the music player.
+struct MusicRequested {
+    uint32_t soundId = 0;
+};
+
+/// SMSG_PLAY_SOUND: a SoundEntries.dbc record, played flat.
+struct SoundRequested {
+    uint32_t soundId = 0;
+};
+
+/// SMSG_PLAY_OBJECT_SOUND: a SoundEntries.dbc record, played where
+/// sourceGuid stands.
+struct PositionalSoundRequested {
+    uint32_t soundId = 0;
+    uint64_t sourceGuid = 0;
 };
 
 } // namespace wowee::game::events

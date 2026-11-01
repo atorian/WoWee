@@ -6,7 +6,7 @@
 #include <glm/vec3.hpp>
 
 namespace wowee {
-namespace pipeline { class AssetManager; }
+namespace pipeline { class AssetManager; class GameTables; }
 namespace game { class ZoneManager; }
 namespace audio {
 
@@ -70,7 +70,8 @@ public:
     /// interface, combat, spells and movement over the frames that follow,
     /// one a step (see updateDeferredLoad), so entering the world is not one
     /// long stall. Later calls do nothing.
-    void loadWorldSounds(pipeline::AssetManager* assets, const game::ZoneManager* zones);
+    void loadWorldSounds(pipeline::AssetManager* assets, const pipeline::GameTables& tables,
+                         const game::ZoneManager* zones);
     /// One step of the deferred loading, once a frame in the world.
     void updateDeferredLoad(float deltaTime);
 
@@ -126,6 +127,7 @@ private:
     bool loadDeferredGroup(uint8_t group);
     bool worldSoundsLoaded_ = false;
     pipeline::AssetManager* deferredAssets_ = nullptr;
+    const pipeline::GameTables* deferredTables_ = nullptr;
     uint8_t deferredGroup_ = 0;
     float deferredCooldown_ = 0.0f;
 

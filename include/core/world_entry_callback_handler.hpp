@@ -11,7 +11,7 @@ namespace wowee {
 
 namespace rendering { class Renderer; }
 namespace game { class GameHandler; }
-namespace pipeline { class AssetManager; }
+namespace pipeline { class AssetManager; class GameTables; }
 namespace audio { class AudioCoordinator; }
 namespace core { class EntitySpawner; class WorldLoader; }
 
@@ -31,6 +31,7 @@ public:
                               WorldLoader* worldLoader,
                               EntitySpawner* entitySpawner,
                               pipeline::AssetManager* assetManager,
+                              const pipeline::GameTables& tables,
                               const Phase& currentPhase);
 
     void setupCallbacks();
@@ -90,6 +91,7 @@ private:
     WorldLoader* worldLoader_;
     EntitySpawner* entitySpawner_;
     pipeline::AssetManager* assetManager_;
+    const pipeline::GameTables& tables_;
     const Phase& currentPhase_;
 
     // Hearth teleport: freeze player until terrain loads at destination (moved from Application)

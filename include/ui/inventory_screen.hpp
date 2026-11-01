@@ -71,9 +71,7 @@ private:
     // Asset manager for icons and preview
     pipeline::AssetManager* assetManager_ = nullptr;
 
-    // Item icon cache: displayInfoId -> GL texture
 public:
-    VkDescriptorSet getItemIcon(uint32_t displayInfoId);
     void renderItemTooltip(const game::ItemQueryResponseData& info, const game::Inventory* inventory = nullptr, uint64_t itemGuid = 0);
     void renderItemTooltip(const game::ItemDef& item, const game::Inventory* inventory = nullptr, uint64_t itemGuid = 0);
 private:
@@ -104,7 +102,6 @@ private:
     // ignored on that frame so the right-click that used the item doesn't cancel it.
     int itemTargetArmedFrame_ = -1;
     /// The targeting cursor's own art. See castCursorTexture().
-    VkDescriptorSet castCursorTexture_ = VK_NULL_HANDLE;
     VkDescriptorSet castCursorTexture();
 
     // Click-and-hold pickup tracking

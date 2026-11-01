@@ -57,6 +57,8 @@ struct WmoModelPrep {
     std::vector<WMORenderer::PortalRef> portalRefs;
     std::vector<std::pair<uint16_t, uint16_t>> groupPortalRefs;
     std::vector<WMORenderer::DoodadTemplate> doodadTemplates;
+    /// What the minimap draws of it, by the file's group numbers.
+    std::shared_ptr<const WmoMinimapModel> minimap;
 
     /// The model's mesh for the ray-traced scene, all but the colour of its
     /// triangles: that is read from the loaded textures, by each triangle's

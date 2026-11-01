@@ -55,10 +55,11 @@ static void printUsage(const char* prog) {
               << "  --output <path>     Output directory for extracted assets\n"
               << "\n"
               << "Options:\n"
-              << "  --expansion <id>    Expansion: classic, turtle, tbc, wotlk, cata (default: auto-detect)\n"
+              << "  --expansion <id>    Expansion: classic, tbc, wotlk, cata (default: auto-detect)\n"
               << "  --expansion-subdir Write into <output>/expansions/<id> so multiple clients\n"
               << "                      cannot overwrite one another\n"
               << "  --locale <id>       Locale: enUS, deDE, frFR, etc. (default: auto-detect)\n"
+              << "  --locale-only       Extract all resources supplied by the selected locale archives\n"
               << "  --only-used-dbcs    Extract only the DBCs wowee uses (no other assets)\n"
               << "  --skip-dbc          Do not extract DBFilesClient/*.dbc (visual assets only)\n"
               << "  --dbc-csv           Convert selected DBFilesClient/*.dbc to CSV under\n"
@@ -125,6 +126,8 @@ int main(int argc, char** argv) {
             expansion = argv[++i];
         } else if (std::strcmp(argv[i], "--locale") == 0 && i + 1 < argc) {
             locale = argv[++i];
+        } else if (std::strcmp(argv[i], "--locale-only") == 0) {
+            opts.localeOnly = true;
         } else if (std::strcmp(argv[i], "--expansion-subdir") == 0) {
             opts.expansionSubdir = true;
         } else if (std::strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
@@ -380,10 +383,10 @@ int main(int argc, char** argv) {
     // docs/plan-cataclysm.md is the measure of what that would take. Extract a
     // 4.3.4 client to borrow its art - as an override over another expansion's
     // tree - rather than to play it.
-    if (expansion != "classic" && expansion != "turtle" &&
+    if (expansion != "classic" &&
         expansion != "tbc" && expansion != "wotlk" && expansion != "cata") {
         std::cerr << "Error: Unsupported expansion '" << expansion
-                  << "'. Expected classic, turtle, tbc, wotlk, or cata.\n";
+                  << "'. Expected classic, tbc, wotlk, or cata.\n";
         return 1;
     }
     if (expansion == "cata") {

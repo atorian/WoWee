@@ -13,7 +13,7 @@
 #include "game/game_handler.hpp"
 #include "game/spell_handler.hpp"
 #include "pipeline/asset_manager.hpp"
-#include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/renderer.hpp"
@@ -40,10 +40,9 @@ audio::SpellSoundManager::MagicSchool magicSchool(uint32_t schoolMask) {
 SpellPresentation::SpellPresentation(EventBus& events, game::GameHandler& game,
                                      rendering::Renderer& renderer, EntitySpawner& spawner,
                                      rendering::SpellVisualSystem* visuals,
-                                     audio::AudioCoordinator* audio,
-                                     pipeline::AssetManager& assets)
+                                     audio::AudioCoordinator* audio)
     : game_(game), renderer_(renderer), spawner_(spawner), visuals_(visuals),
-      audio_(audio), assets_(assets) {
+      audio_(audio) {
     namespace ev = game::events;
     subscriptions_.push_back(events.subscribe<ev::SpellCastStarted>([this](const ev::SpellCastStarted& e) {
         onCastStarted(e.casterGuid, e.spellId, e.castTimeMs, e.byPlayer, e.isProfession,
@@ -96,7 +95,7 @@ void SpellPresentation::onCastStarted(uint64_t caster, uint32_t spellId, uint32_
 
     if (byPlayer && castTimeMs > 0 && audio_) {
         if (auto* ssm = audio_->getSpellSoundManager()) {
-            ssm->playPrecast(magicSchool(game_.getSpellSchoolMask(spellId)),
+            ssm->playPrecast(magicSchool(game_.spells().getSpellSchoolMask(spellId)),
                              audio::SpellSoundManager::SpellPower::MEDIUM);
         }
     }
@@ -172,7 +171,7 @@ void SpellPresentation::syncAuraLooks(float deltaTime) {
     if (auraLookTimer_ < 0.2f) return;
     auraLookTimer_ = 0.0f;
 
-    const auto& spells = *game_.getSpellHandler();
+    const auto& spells = game_.spells();
     std::vector<rendering::SpellVisualSystem::UnitStateVisuals> units;
     units.reserve(spells.getUnitAurasByGuid().size() + 1);
     auto addUnit = [&](uint64_t guid, const std::vector<game::AuraSlot>& auras) {
@@ -194,7 +193,7 @@ void SpellPresentation::syncAuraLooks(float deltaTime) {
 void SpellPresentation::tickRestorationSound(float deltaTime) {
     // Eating and drinking munch and gulp for the whole restoration aura,
     // matching the real client's looping consume sound - the first at once.
-    const auto& spells = *game_.getSpellHandler();
+    const auto& spells = game_.spells();
     const bool restoring = spells.isRestoring();
     if (restoring && !wasRestoring_) restorationSoundTimer_ = 0.0f;
     wasRestoring_ = restoring;
@@ -212,13 +211,13 @@ void SpellPresentation::tickRestorationSound(float deltaTime) {
 void SpellPresentation::playCastSound(uint32_t spellId) {
     if (!audio_) return;
     if (auto* ssm = audio_->getSpellSoundManager())
-        ssm->playCast(magicSchool(game_.getSpellSchoolMask(spellId)));
+        ssm->playCast(magicSchool(game_.spells().getSpellSchoolMask(spellId)));
 }
 
 void SpellPresentation::playImpactSound(uint32_t spellId) {
     if (!audio_) return;
     if (auto* ssm = audio_->getSpellSoundManager())
-        ssm->playImpact(magicSchool(game_.getSpellSchoolMask(spellId)),
+        ssm->playImpact(magicSchool(game_.spells().getSpellSchoolMask(spellId)),
                         audio::SpellSoundManager::SpellPower::MEDIUM);
 }
 
@@ -236,7 +235,7 @@ void SpellPresentation::playImpactVisual(uint32_t spellId, uint64_t target) {
 }
 
 void SpellPresentation::launchRangedProjectile(uint32_t spellId, uint64_t target) {
-    if (target == 0) target = game_.getTargetGuid();
+    if (target == 0) target = game_.combat().getTargetGuid();
     if (target == 0 || !visuals_) return;
     auto* characters = renderer_.getCharacterRenderer();
     if (!characters) return;
@@ -250,7 +249,7 @@ void SpellPresentation::launchRangedProjectile(uint32_t spellId, uint64_t target
     if (!unitPosition(target, end)) return;
     end.z += 1.0f;
 
-    const auto& ranged = game_.getInventory().getEquipSlot(game::EquipSlot::RANGED);
+    const auto& ranged = game_.inventory().items().getEquipSlot(game::EquipSlot::RANGED);
     std::string modelPath;
     std::string texturePath;
     bool spin = false;
@@ -258,24 +257,21 @@ void SpellPresentation::launchRangedProjectile(uint32_t spellId, uint64_t target
     if (spellId == 2764 || (!ranged.empty() && ranged.item.inventoryType == game::InvType::THROWN)) {
         spin = true;
         if (!ranged.empty() && ranged.item.displayInfoId != 0) {
-            auto displayDbc = assets_.loadDBC("ItemDisplayInfo.dbc");
-            if (displayDbc && displayDbc->isLoaded()) {
-                const int32_t row = displayDbc->findRecordById(ranged.item.displayInfoId);
-                if (row >= 0) {
-                    const auto* layout = pipeline::getActiveDBCLayout()
-                        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-                    std::string model = displayDbc->getString(
-                        static_cast<uint32_t>(row), layout ? (*layout)["LeftModel"] : 1);
-                    std::string texture = displayDbc->getString(
-                        static_cast<uint32_t>(row), layout ? (*layout)["LeftModelTexture"] : 3);
-                    if (!model.empty()) {
-                        const size_t dot = model.rfind('.');
-                        if (dot != std::string::npos) model = model.substr(0, dot);
-                        modelPath = "Item\\ObjectComponents\\Weapon\\" + model + ".m2";
-                    }
-                    if (!texture.empty())
-                        texturePath = "Item\\ObjectComponents\\Weapon\\" + texture + ".blp";
+            const pipeline::RequiredTable displayDbc(renderer_.gameTables(), "ItemDisplayInfo.dbc",
+                                                     "a thrown weapon's model");
+            const int32_t row = displayDbc->findRecordById(ranged.item.displayInfoId);
+            if (row >= 0) {
+                std::string model = displayDbc->getString(
+                    static_cast<uint32_t>(row), displayDbc.column("LeftModel"));
+                std::string texture = displayDbc->getString(
+                    static_cast<uint32_t>(row), displayDbc.column("LeftModelTexture"));
+                if (!model.empty()) {
+                    const size_t dot = model.rfind('.');
+                    if (dot != std::string::npos) model = model.substr(0, dot);
+                    modelPath = "Item\\ObjectComponents\\Weapon\\" + model + ".m2";
                 }
+                if (!texture.empty())
+                    texturePath = "Item\\ObjectComponents\\Weapon\\" + texture + ".blp";
             }
         }
         if (modelPath.empty())
@@ -294,7 +290,7 @@ void SpellPresentation::launchRangedProjectile(uint32_t spellId, uint64_t target
 }
 
 uint32_t SpellPresentation::visualIdFor(uint32_t spellId) const {
-    return game_.getSpellVisualId(spellId);
+    return game_.spells().getSpellVisualId(spellId);
 }
 
 bool SpellPresentation::unitPosition(uint64_t guid, glm::vec3& out) const {

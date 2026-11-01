@@ -178,16 +178,6 @@ inline const char* itemQualityColorHex(uint32_t quality) {
     return quality < 8 ? kByQuality[quality] : "ffffffff";
 }
 
-/// The same colour without its alpha, for the callers that write "|cff".
-///
-/// Half the places that build a link write the alpha themselves and half take
-/// it from the string, so the two forms lived as two tables. Deriving one from
-/// the other is what keeps them the same colour: the pair that were written
-/// out separately disagreed about heirlooms for as long as both existed.
-inline const char* itemQualityColorHexRGB(uint32_t quality) {
-    return itemQualityColorHex(quality) + 2;
-}
-
 /// A chat hyperlink for an item, as 3.3.5a writes one.
 ///
 /// Nine fields after "item:": the id, then enchant, four gems, suffix, unique

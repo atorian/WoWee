@@ -161,6 +161,7 @@ void Job::run(Profile profile, std::string gameDir, std::string secondDir,
             opts.outputDir = outputDir;
             opts.expansion = step.expansion;
             opts.expansionSubdir = true;
+            opts.onError = [this](const std::string& message) { say("    ERROR: " + message); };
             say("    reading " + gameDir);
             say("    writing " + outputDir + "/expansions/" + step.expansion);
             // Called from an extraction worker, so it touches the atomic

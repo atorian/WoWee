@@ -19,6 +19,7 @@
 #include "ui/gamepad_controls.hpp"
 #include "core/gamepad.hpp"
 #include "core/application.hpp"
+#include "core/window.hpp"
 #include "core/config_paths.hpp"
 #include "core/logger.hpp"
 #include "core/version.hpp"

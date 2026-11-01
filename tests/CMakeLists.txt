@@ -116,6 +116,9 @@ function(wowee_add_test target)
     wowee_test_link_glm(${target})
     string(REGEX REPLACE "^test_" "" _name ${target})
     add_test(NAME ${_name} COMMAND ${target})
+    # Catch2 exits 4 when every test case in the binary skipped - the data it
+    # reads is not on this machine. That is a skip, not a failure.
+    set_tests_properties(${_name} PROPERTIES SKIP_RETURN_CODE 4)
     register_test_target(${target})
 endfunction()
 
@@ -135,6 +138,9 @@ function(wowee_add_packet_test target)
     endif()
     string(REGEX REPLACE "^test_" "" _name ${target})
     add_test(NAME ${_name} COMMAND ${target})
+    # Catch2 exits 4 when every test case in the binary skipped - the data it
+    # reads is not on this machine. That is a skip, not a failure.
+    set_tests_properties(${_name} PROPERTIES SKIP_RETURN_CODE 4)
     register_test_target(${target})
 endfunction()
 
@@ -149,8 +155,8 @@ wowee_add_test(test_event_bus
 # should end with, once per crossing. No logger: the owner logs what it says.
 wowee_add_test(test_resource_telemetry
     SOURCES test_resource_telemetry.cpp
-            ${CMAKE_SOURCE_DIR}/src/core/resource_telemetry.cpp
             ${CMAKE_SOURCE_DIR}/src/core/frame_budget.cpp)
+target_link_libraries(test_resource_telemetry PRIVATE wowee_client)
 
 # The frame budget the profile, the benchmark and scene_render report: the
 # frame time's spread and hitches, each stage's tail, and stages nested under
@@ -163,15 +169,14 @@ wowee_add_test(test_frame_budget
 # goes, and what the report covers. No client.
 wowee_add_test(test_benchmark_run
     SOURCES test_benchmark_run.cpp
-            ${CMAKE_SOURCE_DIR}/src/core/benchmark_run.cpp
             ${CMAKE_SOURCE_DIR}/src/core/frame_budget.cpp)
+target_link_libraries(test_benchmark_run PRIVATE wowee_client)
 
 # The pipeline cache kept between runs: checked against the device, written
 # whole or not at all.
 wowee_add_test(test_pipeline_cache_file
-    SOURCES test_pipeline_cache_file.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/pipeline_cache_file.cpp)
-target_link_libraries(test_pipeline_cache_file PRIVATE wowee_base)
+    SOURCES test_pipeline_cache_file.cpp)
+target_link_libraries(test_pipeline_cache_file PRIVATE wowee_render wowee_base)
 if(TARGET Vulkan::Vulkan)
     target_link_libraries(test_pipeline_cache_file PRIVATE Vulkan::Vulkan)
 endif()
@@ -182,8 +187,8 @@ wowee_add_test(test_host_image_copy
 
 # The ranges the terrain's shared geometry pages hand out and take back.
 wowee_add_test(test_range_allocator
-    SOURCES test_range_allocator.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/range_allocator.cpp)
+    SOURCES test_range_allocator.cpp)
+target_link_libraries(test_range_allocator PRIVATE wowee_render)
 
 # Which of the two memory pressure levels a share of free RAM is.
 wowee_add_test(test_memory_pressure
@@ -193,8 +198,8 @@ target_link_libraries(test_memory_pressure PRIVATE wowee_base)
 # What the video memory is used for, from the allocator's detailed map: each
 # allocation by its usage flags, in VRAM or system memory. No device.
 wowee_add_test(test_gpu_memory
-    SOURCES test_gpu_memory.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/gpu_memory.cpp)
+    SOURCES test_gpu_memory.cpp)
+target_link_libraries(test_gpu_memory PRIVATE wowee_render)
 if(TARGET Vulkan::Vulkan)
     target_link_libraries(test_gpu_memory PRIVATE Vulkan::Vulkan)
 endif()
@@ -203,14 +208,18 @@ endif()
 # only what nothing references, nothing freed before its frames have fenced.
 # The device is a fake; no GPU.
 wowee_add_test(test_texture_cache
-    SOURCES test_texture_cache.cpp ${TEST_COMMON_SOURCES}
-            ${CMAKE_SOURCE_DIR}/src/rendering/texture_cache.cpp)
+    SOURCES test_texture_cache.cpp ${TEST_COMMON_SOURCES})
+target_link_libraries(test_texture_cache PRIVATE wowee_render)
+
+wowee_add_test(test_ui_texture_cache
+    SOURCES test_ui_texture_cache.cpp ${TEST_COMMON_SOURCES})
+target_link_libraries(test_ui_texture_cache PRIVATE wowee_client wowee_render Vulkan::Vulkan)
 
 # Frames recorded only against a complete set of frame targets; a failure to
 # make one said once per stretch with the result, the size and the budget.
 wowee_add_test(test_frame_targets
-    SOURCES test_frame_targets.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/frame_targets.cpp)
+    SOURCES test_frame_targets.cpp)
+target_link_libraries(test_frame_targets PRIVATE wowee_render)
 if(TARGET Vulkan::Vulkan)
     target_link_libraries(test_frame_targets PRIVATE Vulkan::Vulkan)
 endif()
@@ -218,15 +227,14 @@ endif()
 # Normal/height maps encoded for the GPU: BC7 blocks that read back close to
 # what was derived, a mip chain down to one texel.
 wowee_add_test(test_normal_map_encoding
-    SOURCES test_normal_map_encoding.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/normal_map_encoding.cpp)
+    SOURCES test_normal_map_encoding.cpp)
+target_link_libraries(test_normal_map_encoding PRIVATE wowee_render)
 
 # Normal maps built on the builder's own few workers from a bounded queue,
 # nearest first. The derivation is a stand-in.
 wowee_add_test(test_normal_map_builder
-    SOURCES test_normal_map_builder.cpp ${TEST_COMMON_SOURCES}
-            ${CMAKE_SOURCE_DIR}/src/rendering/normal_map_builder.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/normal_map_encoding.cpp)
+    SOURCES test_normal_map_builder.cpp ${TEST_COMMON_SOURCES})
+target_link_libraries(test_normal_map_builder PRIVATE wowee_render)
 
 # What a vendor sell asks for. Header-only arithmetic, no game state.
 wowee_add_test(test_sell_count
@@ -251,8 +259,8 @@ wowee_add_test(test_spell_description_eval
 # assets or where it had looked. Cheap on purpose: the extraction manifest is
 # thirty megabytes and nothing here parses it.
 wowee_add_test(test_asset_inventory
-    SOURCES test_asset_inventory.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/asset_inventory.cpp)
+    SOURCES test_asset_inventory.cpp)
+target_link_libraries(test_asset_inventory PRIVATE wowee_pipeline)
 
 # ── test_data_paths ─────────────────────────────────────────
 # Where the assets go, which the client and the asset manager have to agree on
@@ -274,22 +282,15 @@ wowee_add_test(test_log_privacy
 # The asset sets on offer. Pinned because the upgrades used to be written per
 # base and so were only ever offered on Wrath, and because the plan's ordering
 # is load-bearing: an upscale before the models arrive sharpens nothing.
-wowee_add_test(test_asset_profiles
-    SOURCES test_asset_profiles.cpp
-            ${CMAKE_SOURCE_DIR}/tools/asset_manager/profiles.cpp)
-target_include_directories(test_asset_profiles PRIVATE
-    ${CMAKE_SOURCE_DIR}/tools/asset_manager)
+wowee_add_test(test_asset_profiles SOURCES test_asset_profiles.cpp)
+target_link_libraries(test_asset_profiles PRIVATE wowee_asset_tools)
 
 # ── test_asset_pack ─────────────────────────────────────────
 # A pack is a file people send each other, so its reader is handed archives
 # nobody here wrote. The round trip is checked, and so is the refusal: a zip
 # entry names where its own contents land, and "../.." is a name.
-wowee_add_test(test_asset_pack
-    SOURCES test_asset_pack.cpp
-            ${CMAKE_SOURCE_DIR}/tools/asset_manager/pack.cpp)
-target_include_directories(test_asset_pack PRIVATE
-    ${CMAKE_SOURCE_DIR}/tools/asset_manager)
-target_link_libraries(test_asset_pack PRIVATE ZLIB::ZLIB)
+wowee_add_test(test_asset_pack SOURCES test_asset_pack.cpp)
+target_link_libraries(test_asset_pack PRIVATE wowee_asset_tools ZLIB::ZLIB)
 
 # ── test_model_import ───────────────────────────────────────
 # The pass that brings a later client's models into this one's format. It once
@@ -297,11 +298,8 @@ target_link_libraries(test_asset_pack PRIVATE ZLIB::ZLIB)
 # and converted nothing at all, so the path matching is pinned here along with
 # every refusal - a model written without its skin or its textures is worse than
 # the one it replaced.
-wowee_add_test(test_model_import
-    SOURCES test_model_import.cpp
-            ${CMAKE_SOURCE_DIR}/tools/asset_manager/model_import.cpp)
-target_include_directories(test_model_import PRIVATE
-    ${CMAKE_SOURCE_DIR}/tools/asset_manager)
+wowee_add_test(test_model_import SOURCES test_model_import.cpp)
+target_link_libraries(test_model_import PRIVATE wowee_asset_tools)
 
 # ── test_cli_catalog_paths ──────────────────────────────────
 # Working a catalog's base name back out of a path the user typed. Pure header
@@ -323,9 +321,8 @@ register_test_target(test_cli_catalog_paths)
 # where bytes come from.
 wowee_add_test(test_shared_rules
     SOURCES test_shared_rules.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
-            ${CMAKE_SOURCE_DIR}/src/ui/settings_schema.cpp
             ${TEST_COMMON_SOURCES})
+target_link_libraries(test_shared_rules PRIVATE wowee_client wowee_pipeline)
 
 # ── test_geoset_rules ────────────────────────────────────────
 # Choosing a geoset when the model lacks the one asked for. Pure header, so the
@@ -340,9 +337,8 @@ register_test_target(test_geoset_rules)
 # ── test_framexml ───────────────────────────────────────────
 add_executable(test_framexml
     test_framexml.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/xml_parser.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/framexml_emitter.cpp
 )
+target_link_libraries(test_framexml PRIVATE wowee_client)
 target_include_directories(test_framexml PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_framexml SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_compile_definitions(test_framexml PRIVATE
@@ -359,9 +355,9 @@ register_test_target(test_framexml)
 # error - this client just draws its own version again.
 add_executable(test_framexml_takeover
     test_framexml_takeover.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/framexml_takeover.cpp
     ${TEST_COMMON_SOURCES}
 )
+target_link_libraries(test_framexml_takeover PRIVATE wowee_client)
 target_include_directories(test_framexml_takeover PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_framexml_takeover SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_framexml_takeover PRIVATE catch2_main)
@@ -376,9 +372,9 @@ register_test_target(test_framexml_takeover)
 # once and none of them where it belongs.
 add_executable(test_lua_handler_globals
     test_lua_handler_globals.cpp
-    ${CMAKE_SOURCE_DIR}/src/addons/lua_handler_globals.cpp
     ${TEST_COMMON_SOURCES}
 )
+target_link_libraries(test_lua_handler_globals PRIVATE wowee_client)
 target_include_directories(test_lua_handler_globals PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_lua_handler_globals SYSTEM PRIVATE
     ${TEST_SYSTEM_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR}/extern/lua-5.1.5/src)
@@ -444,9 +440,8 @@ register_test_target(test_lua_arg_coercion)
 # questions about emitted Lua without starting the client.
 add_executable(framexml_emit
     ${CMAKE_SOURCE_DIR}/tools/framexml_emit.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/framexml_emitter.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/xml_parser.cpp
 )
+target_link_libraries(framexml_emit PRIVATE wowee_client)
 target_include_directories(framexml_emit PRIVATE ${TEST_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}/extern/lua-5.1.5/src)
 target_include_directories(framexml_emit SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
@@ -458,9 +453,9 @@ target_link_libraries(framexml_emit PRIVATE lua51)
 # labels name two offers two and writes indices the labels cannot name.
 add_executable(test_settings_schema_consistency
     test_settings_schema_consistency.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/settings_schema.cpp
     ${TEST_COMMON_SOURCES}
 )
+target_link_libraries(test_settings_schema_consistency PRIVATE wowee_client)
 target_include_directories(test_settings_schema_consistency PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_settings_schema_consistency SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_compile_definitions(test_settings_schema_consistency PRIVATE
@@ -475,9 +470,9 @@ register_test_target(test_settings_schema_consistency)
 # panel registers, refreshes and answers correctly - it is just not on screen.
 add_executable(test_settings_panel_layout
     test_settings_panel_layout.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/settings_schema.cpp
     ${TEST_COMMON_SOURCES}
 )
+target_link_libraries(test_settings_panel_layout PRIVATE wowee_client)
 target_include_directories(test_settings_panel_layout PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_settings_panel_layout SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_settings_panel_layout PRIVATE catch2_main)
@@ -507,9 +502,8 @@ register_test_target(test_addon_lua_snippets)
 # whole rather than degraded. Skipped when the game data is not present.
 add_executable(framexml_compile_check
     ${CMAKE_SOURCE_DIR}/tools/framexml_compile_check.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/xml_parser.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/framexml_emitter.cpp
 )
+target_link_libraries(framexml_compile_check PRIVATE wowee_client)
 target_include_directories(framexml_compile_check PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(framexml_compile_check SYSTEM PRIVATE
     ${TEST_SYSTEM_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR}/extern/lua-5.1.5/src)
@@ -544,6 +538,31 @@ if(WOWEE_BUILD_FRAMEXML_RUN AND EXISTS "${WOWEE_FRAMEXML_TEST_DATA}/interface/Fr
         set_tests_properties(${name} PROPERTIES
             ENVIRONMENT "WOWEE_CONFIG_ROOT=${_dir}/config")
     endfunction()
+
+    file(READ "${CMAKE_SOURCE_DIR}/tests/framexml_spellbook.lua" _spellbook_checks)
+    foreach(_case panels selection ranks contents)
+        wowee_framexml_test(framexml_spellbook_${_case}
+            --player:8 --learn-spell:143 --learn-spell:145 --learn-spell:205
+            --learn-spell:11069 --learn-spell:2385 --learn-spell:3908
+            --learn-spell:6603 --learn-spell:20598
+            "--lua:SetCVar('ShowAllSpellRanks', 0) ToggleSpellBook(BOOKTYPE_SPELL)"
+            "--lua:woweeSpellbookCase='${_case}'" "--lua:${_spellbook_checks}")
+    endforeach()
+    wowee_framexml_test(framexml_spellbook_paging
+        --player:8 --learn-spell:143 --learn-spell:145 --learn-spell:3140
+        --learn-spell:8400 --learn-spell:8401 --learn-spell:8402 --learn-spell:10148
+        --learn-spell:10149 --learn-spell:10150 --learn-spell:10151 --learn-spell:25306
+        --learn-spell:27070 --learn-spell:38692 --learn-spell:42832 --learn-spell:42833
+        "--lua:SetCVar('ShowAllSpellRanks', 1) ToggleSpellBook(BOOKTYPE_SPELL)"
+        "--lua:woweeSpellbookCase='paging'" "--lua:${_spellbook_checks}")
+    wowee_framexml_test(framexml_spellbook_warrior --player
+        "--lua:ToggleSpellBook(BOOKTYPE_SPELL)"
+        "--lua:woweeSpellbookCase='warrior'" "--lua:${_spellbook_checks}")
+
+    wowee_framexml_test(framexml_macro_icons --player:8
+        --learn-spell:348 --learn-spell:6353 --learn-spell:29722
+        --learn-spell:686 --learn-spell:603 --learn-spell:172
+        "--lua-file:${CMAKE_SOURCE_DIR}/tests/framexml_macro_icons.lua")
 
     # bindings.xml marks the action buttons runOnUp: the press pushes the
     # button and the release performs it. The release is the key's, and runs
@@ -658,12 +677,6 @@ if(WOWEE_BUILD_FRAMEXML_RUN AND EXISTS "${WOWEE_FRAMEXML_TEST_DATA}/interface/Fr
         "--lua:assert(select(2, GetActionBarToggles()), 'the bottom right bar is not kept as shown')")
 endif()
 
-# ── test_taxi_map_projection ────────────────────────────────
-# The order of the coordinate conversions behind a flight map marker. Silent
-# when wrong - every marker still lands somewhere, just not where it belongs.
-wowee_add_test(test_taxi_map_projection
-    SOURCES test_taxi_map_projection.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/world_map/coordinate_projection.cpp)
 
 # ── test_inventory_slots ─────────────────────────────────────────
 # Where the bank, its bags and the keyring sit. A wrong slot here moves an
@@ -697,6 +710,131 @@ target_include_directories(test_warden_reloc SYSTEM PRIVATE ${TEST_SYSTEM_INCLUD
 target_link_libraries(test_warden_reloc PRIVATE catch2_main)
 add_test(NAME warden_reloc COMMAND test_warden_reloc)
 register_test_target(test_warden_reloc)
+
+# ── contacts ────────────────────────────────────────────────────
+# The friend, ignore and mute lists: the domain model alone, then the service
+# against a recording gateway. Neither links the client; a contacts header
+# that starts needing the game fails to link here.
+wowee_add_test(test_contact_list SOURCES test_contact_list.cpp)
+target_link_libraries(test_contact_list PRIVATE wowee_contacts)
+wowee_add_test(test_contacts_service SOURCES test_contacts_service.cpp)
+target_link_libraries(test_contacts_service PRIVATE wowee_contacts)
+
+# ── who ─────────────────────────────────────────────────────────
+# /who and its service, with only wowee_who linked.
+wowee_add_test(test_who SOURCES test_who.cpp)
+target_link_libraries(test_who PRIVATE wowee_who)
+
+# ── duel ────────────────────────────────────────────────────────
+# Duels and their service, with only wowee_duel linked.
+wowee_add_test(test_duels SOURCES test_duels.cpp)
+target_link_libraries(test_duels PRIVATE wowee_duel)
+
+# ── petition ────────────────────────────────────────────────────
+# Charters and their service, with only wowee_petition linked.
+wowee_add_test(test_petitions SOURCES test_petitions.cpp)
+target_link_libraries(test_petitions PRIVATE wowee_petition)
+
+# ── arena ───────────────────────────────────────────────────────
+# Arena teams and their service, with only wowee_arena linked.
+wowee_add_test(test_arena_teams SOURCES test_arena_teams.cpp)
+target_link_libraries(test_arena_teams PRIVATE wowee_arena)
+
+# ── battleground ────────────────────────────────────────────────
+# Battlegrounds and their service, with only wowee_battleground linked.
+wowee_add_test(test_battlegrounds SOURCES test_battlegrounds.cpp)
+target_link_libraries(test_battlegrounds PRIVATE wowee_battleground)
+
+# ── lfg ─────────────────────────────────────────────────────────
+# The dungeon finder and its service, with only wowee_lfg linked.
+wowee_add_test(test_dungeon_finder SOURCES test_dungeon_finder.cpp)
+target_link_libraries(test_dungeon_finder PRIVATE wowee_lfg)
+
+# ── calendar ────────────────────────────────────────────────────
+# The calendar and its service, with only wowee_calendar linked.
+wowee_add_test(test_calendar SOURCES test_calendar.cpp)
+target_link_libraries(test_calendar PRIVATE wowee_calendar)
+
+# ── group ───────────────────────────────────────────────────────
+# The player's party or raid, ready checks and raid markers: the domain model
+# alone, then the service against a recording gateway. Only wowee_group is
+# linked.
+wowee_add_test(test_group_model SOURCES test_group_model.cpp)
+target_link_libraries(test_group_model PRIVATE wowee_group)
+wowee_add_test(test_group_service SOURCES test_group_service.cpp)
+target_link_libraries(test_group_service PRIVATE wowee_group)
+
+# ── guild ───────────────────────────────────────────────────────
+# The player's guild: the domain model alone, then the service against a
+# recording gateway. Only wowee_guild is linked.
+wowee_add_test(test_guild_model SOURCES test_guild_model.cpp)
+target_link_libraries(test_guild_model PRIVATE wowee_guild)
+wowee_add_test(test_guild_service SOURCES test_guild_service.cpp)
+target_link_libraries(test_guild_service PRIVATE wowee_guild)
+
+# ── auction ─────────────────────────────────────────────────────
+# The auction house: the domain model and its service against a recording
+# gateway. Only wowee_auction is linked.
+wowee_add_test(test_auction_house SOURCES test_auction_house.cpp)
+target_link_libraries(test_auction_house PRIVATE wowee_auction)
+
+# ── mail ────────────────────────────────────────────────────────
+# The mailbox: the domain model and its service against a recording gateway.
+# Only wowee_mail is linked.
+wowee_add_test(test_mailbox SOURCES test_mailbox.cpp)
+target_link_libraries(test_mailbox PRIVATE wowee_mail)
+
+# ── guild bank ──────────────────────────────────────────────────
+# The guild vault: the domain model and its service against a recording
+# gateway. Only wowee_guild_bank is linked.
+wowee_add_test(test_guild_bank SOURCES test_guild_bank.cpp)
+target_link_libraries(test_guild_bank PRIVATE wowee_guild_bank)
+
+# ── trade ───────────────────────────────────────────────────────
+# A trade with another player: the domain model and its service against a
+# recording gateway. Only wowee_trade is linked.
+wowee_add_test(test_trade SOURCES test_trade.cpp)
+target_link_libraries(test_trade PRIVATE wowee_trade)
+
+# ── loot ────────────────────────────────────────────────────────
+# The loot window and the rolls: the domain model and its service against a
+# recording gateway. Only wowee_loot is linked.
+wowee_add_test(test_loot SOURCES test_loot.cpp)
+target_link_libraries(test_loot PRIVATE wowee_loot)
+
+# ── achievement ─────────────────────────────────────────────────
+# The achievements, their catalog and their service against recorded game
+# files. Only wowee_achievement is linked.
+wowee_add_test(test_achievements SOURCES test_achievements.cpp)
+target_link_libraries(test_achievements PRIVATE wowee_achievement)
+
+# ── title ───────────────────────────────────────────────────────
+# The titles and CharTitles.dbc's names for them, against a recording gateway.
+# Only wowee_title is linked.
+wowee_add_test(test_titles SOURCES test_titles.cpp)
+target_link_libraries(test_titles PRIVATE wowee_title)
+
+# ── reputation ──────────────────────────────────────────────────
+# The standings, the panel's rows and Faction.dbc, against a recording gateway.
+# Only wowee_reputation is linked.
+wowee_add_test(test_reputation SOURCES test_reputation.cpp)
+target_link_libraries(test_reputation PRIVATE wowee_reputation)
+
+# ── pet ─────────────────────────────────────────────────────────
+# The pet and the stable, against a recording gateway. Only wowee_pet is
+# linked.
+wowee_add_test(test_pet SOURCES test_pet.cpp)
+target_link_libraries(test_pet PRIVATE wowee_pet)
+
+# ── module_boundaries ───────────────────────────────────────────
+# New includes must point down the layers in tools/module_boundary_check.py;
+# the ones that broke them when the check came are listed in
+# tools/module_boundary_baseline.txt, and that list may only shrink. Instant.
+if(Python3_Interpreter_FOUND)
+    add_test(NAME module_boundaries
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_SOURCE_DIR}/tools/module_boundary_check.py)
+endif()
 
 # ── sweep_guard ──────────────────────────────────────────────────
 # The fast interface sweeps, run as a test so they stop depending on someone
@@ -750,13 +888,6 @@ if(Python3_Interpreter_FOUND)
                      ${CMAKE_SOURCE_DIR}/tools/android/test_data_profiles.py)
 endif()
 
-# ── test_chat_types ─────────────────────────────────────────────
-# A chat type is a byte off the wire and the event name is built from it, so a
-# value missing from the enum is a line of chat that never appears - no error,
-# no log. The whole run between LOOT and the battleground block was absent once.
-wowee_add_test(test_chat_types
-    SOURCES test_chat_types.cpp)
-
 # ── test_chat_window_background ─────────────────────────────────
 # The chat panel is a white image the interface tints, so the colour this client
 # saves is the whole of what it looks like - and it saved white at full alpha,
@@ -791,8 +922,8 @@ register_test_target(test_reputation_standing)
 # ── test_widget_tree ────────────────────────────────────────
 add_executable(test_widget_tree
     test_widget_tree.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/widget_tree.cpp
 )
+target_link_libraries(test_widget_tree PRIVATE wowee_client)
 target_include_directories(test_widget_tree PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_widget_tree SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_widget_tree PRIVATE catch2_main)
@@ -802,14 +933,14 @@ register_test_target(test_widget_tree)
 # ── test_text_edit ──────────────────────────────────────────
 wowee_add_test(test_text_edit SOURCES
     test_text_edit.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/text_edit.cpp
 )
+target_link_libraries(test_text_edit PRIVATE wowee_client)
 
 # ── test_escape_action ──────────────────────────────────────
 add_executable(test_escape_action
     test_escape_action.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/escape_action.cpp
 )
+target_link_libraries(test_escape_action PRIVATE wowee_client)
 target_include_directories(test_escape_action PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_escape_action SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_escape_action PRIVATE catch2_main)
@@ -874,18 +1005,6 @@ target_link_libraries(test_packet PRIVATE catch2_main)
 add_test(NAME packet COMMAND test_packet)
 register_test_target(test_packet)
 
-# ── test_bit_packet ──────────────────────────────────────────
-add_executable(test_bit_packet
-    test_bit_packet.cpp
-    ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/network/packet.cpp
-)
-target_include_directories(test_bit_packet PRIVATE ${TEST_INCLUDE_DIRS})
-target_include_directories(test_bit_packet SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_bit_packet PRIVATE catch2_main)
-add_test(NAME bit_packet COMMAND test_bit_packet)
-register_test_target(test_bit_packet)
-
 # Standard Warden challenge and RC4 transition (no downloaded module needed).
 add_executable(test_warden_challenge
     test_warden_challenge.cpp
@@ -898,6 +1017,52 @@ target_include_directories(test_warden_challenge SYSTEM PRIVATE ${TEST_SYSTEM_IN
 target_link_libraries(test_warden_challenge PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
 add_test(NAME warden_challenge COMMAND test_warden_challenge)
 register_test_target(test_warden_challenge)
+
+# The LOGON_PROOF integrity hash of a 12340 client, checked against
+# TrinityCore's checksum when WOWEE_TEST_CLIENT_DIR names a client folder.
+add_executable(test_integrity_hash
+    test_integrity_hash.cpp
+    ${TEST_COMMON_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/auth/crypto.cpp
+)
+target_link_libraries(test_integrity_hash PRIVATE wowee_client)
+target_include_directories(test_integrity_hash PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_integrity_hash SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_integrity_hash PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
+add_test(NAME integrity_hash COMMAND test_integrity_hash)
+register_test_target(test_integrity_hash)
+
+# MCP over JSON-RPC, as the specification answers it.
+wowee_add_test(test_mcp_server
+    SOURCES test_mcp_server.cpp)
+target_link_libraries(test_mcp_server PRIVATE wowee_client)
+
+# The MCP endpoint over HTTP: parsing, who is let in, a real round trip.
+add_executable(test_mcp_http
+    test_mcp_http.cpp
+    ${TEST_COMMON_SOURCES}
+)
+target_link_libraries(test_mcp_http PRIVATE wowee_client)
+target_include_directories(test_mcp_http PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_mcp_http SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_mcp_http PRIVATE catch2_main Threads::Threads)
+add_test(NAME mcp_http COMMAND test_mcp_http)
+register_test_target(test_mcp_http)
+
+# Tool calls handed from the listener's thread to the frame loop.
+wowee_add_test(test_mcp_main_thread_queue
+    SOURCES test_mcp_main_thread_queue.cpp)
+target_link_libraries(test_mcp_main_thread_queue PRIVATE wowee_client Threads::Threads)
+
+# An agent drives the character only while the player has handed control over.
+wowee_add_test(test_agent_controls
+    SOURCES test_agent_controls.cpp)
+target_link_libraries(test_agent_controls PRIVATE wowee_client)
+
+# The LOGON_CHALLENGE timezone: the standard offset, as Wow.exe sends -Bias.
+wowee_add_test(test_client_timezone
+    SOURCES test_client_timezone.cpp)
+target_link_libraries(test_client_timezone PRIVATE wowee_client)
 
 # Warden PE lookup must use the expansion selected by the asset manager.
 add_executable(test_warden_memory
@@ -915,10 +1080,9 @@ register_test_target(test_warden_memory)
 add_executable(test_srp
     test_srp.cpp
     ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/auth/srp.cpp
-    ${CMAKE_SOURCE_DIR}/src/auth/big_num.cpp
     ${CMAKE_SOURCE_DIR}/src/auth/crypto.cpp
 )
+target_link_libraries(test_srp PRIVATE wowee_client)
 target_include_directories(test_srp PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_srp SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_srp PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
@@ -931,8 +1095,8 @@ register_test_target(test_srp)
 add_executable(test_m2_ribbon_tracks
     test_m2_ribbon_tracks.cpp
     ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
 )
+target_link_libraries(test_m2_ribbon_tracks PRIVATE wowee_pipeline)
 target_include_directories(test_m2_ribbon_tracks PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_m2_ribbon_tracks SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_compile_definitions(test_m2_ribbon_tracks PRIVATE
@@ -948,8 +1112,8 @@ register_test_target(test_m2_ribbon_tracks)
 add_executable(test_m2_texture_transform
     test_m2_texture_transform.cpp
     ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
 )
+target_link_libraries(test_m2_texture_transform PRIVATE wowee_pipeline)
 target_include_directories(test_m2_texture_transform PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_m2_texture_transform SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_m2_texture_transform PRIVATE catch2_main)
@@ -969,33 +1133,24 @@ wowee_add_test(test_shapeshift_forms
 # with two fewer decimals. Pins the value against its own arithmetic.
 wowee_add_test(test_tile_size_agreement
     SOURCES test_tile_size_agreement.cpp
-            ${TEST_COMMON_SOURCES}
-            ${CMAKE_SOURCE_DIR}/src/pipeline/terrain_mesh.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_alpha.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
+            ${TEST_COMMON_SOURCES})
+target_link_libraries(test_tile_size_agreement PRIVATE wowee_pipeline)
 
 # ── test_terrain_lod ─────────────────────────────────────────
 # The far levels of a terrain chunk: the same ground with fewer triangles,
 # holes kept open, and skirts that close the seam between two levels.
 wowee_add_test(test_terrain_lod
     SOURCES test_terrain_lod.cpp
-            ${TEST_COMMON_SOURCES}
-            ${CMAKE_SOURCE_DIR}/src/pipeline/terrain_mesh.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_alpha.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
+            ${TEST_COMMON_SOURCES})
+target_link_libraries(test_terrain_lod PRIVATE wowee_pipeline)
 
 # ── test_chunk_surface ───────────────────────────────────────
 # Where a point inside a terrain chunk sits in the world. The clutter and
 # doodad scatterers each had their own copy, including the crossed axes.
 wowee_add_test(test_chunk_surface
     SOURCES test_chunk_surface.cpp
-            ${TEST_COMMON_SOURCES}
-            ${CMAKE_SOURCE_DIR}/src/pipeline/terrain_mesh.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_alpha.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
+            ${TEST_COMMON_SOURCES})
+target_link_libraries(test_chunk_surface PRIVATE wowee_pipeline)
 
 # ── test_spline_body ─────────────────────────────────────────
 # The body of SMSG_MONSTER_MOVE, whose head two parsers shared and neither
@@ -1019,8 +1174,8 @@ wowee_add_test(test_transport_path_repo
     SOURCES test_transport_path_repo.cpp
             ${TEST_COMMON_SOURCES}
             ${CMAKE_SOURCE_DIR}/src/game/transport_path_repository.cpp
-            ${CMAKE_SOURCE_DIR}/src/math/spline.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp)
+            ${CMAKE_SOURCE_DIR}/src/math/spline.cpp)
+target_link_libraries(test_transport_path_repo PRIVATE wowee_pipeline)
 
 # ── test_opcode_table ────────────────────────────────────────
 add_executable(test_opcode_table
@@ -1033,20 +1188,6 @@ target_include_directories(test_opcode_table SYSTEM PRIVATE ${TEST_SYSTEM_INCLUD
 target_link_libraries(test_opcode_table PRIVATE catch2_main)
 add_test(NAME opcode_table COMMAND test_opcode_table)
 register_test_target(test_opcode_table)
-
-# ── test_equipment_set_packets ───────────────────────────────
-# Every guid in the equipment-set family is packed and all twenty were read and
-# written as fixed eight-byte values - plus an ignore mask that the server does
-# not send at all. Saving a set could never have worked.
-add_executable(test_equipment_set_packets
-    test_equipment_set_packets.cpp
-    ${CMAKE_SOURCE_DIR}/src/network/packet.cpp
-)
-target_include_directories(test_equipment_set_packets PRIVATE ${TEST_INCLUDE_DIRS})
-target_include_directories(test_equipment_set_packets SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_equipment_set_packets PRIVATE catch2_main)
-add_test(NAME equipment_set_packets COMMAND test_equipment_set_packets)
-register_test_target(test_equipment_set_packets)
 
 # ── test_auction_sort_packet ─────────────────────────────────
 # The sort block on CMSG_AUCTION_LIST_ITEMS was a hardcoded zero, and the
@@ -1085,8 +1226,8 @@ wowee_add_packet_test(test_use_item_packet)
 # this is its first test.
 wowee_add_test(test_normal_map
     SOURCES test_normal_map.cpp
-            ${TEST_COMMON_SOURCES}
-            ${CMAKE_SOURCE_DIR}/src/rendering/normal_map.cpp)
+            ${TEST_COMMON_SOURCES})
+target_link_libraries(test_normal_map PRIVATE wowee_render)
 
 # ── test_spatial_grid ────────────────────────────────────────
 # The uniform grid the M2 and WMO renderers narrow collision queries with. Both
@@ -1095,22 +1236,6 @@ wowee_add_test(test_normal_map
 wowee_add_test(test_spatial_grid
     SOURCES test_spatial_grid.cpp
             ${TEST_COMMON_SOURCES})
-
-# ── test_cata_movement ─────────────────────────────────────────────────
-# The 109 Cataclysm movement layouts derived from a 4.3.4 core, and the reader
-# that executes them. Runs from the source dir for the derived JSON.
-add_executable(test_cata_movement
-    test_cata_movement.cpp
-    ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/game/cata_movement.cpp
-    ${CMAKE_SOURCE_DIR}/src/network/packet.cpp)
-target_include_directories(test_cata_movement PRIVATE ${TEST_INCLUDE_DIRS})
-target_include_directories(test_cata_movement SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_cata_movement PRIVATE catch2_main)
-wowee_test_link_glm(test_cata_movement)
-add_test(NAME cata_movement COMMAND test_cata_movement
-         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-register_test_target(test_cata_movement)
 
 # ── test_base_fallback ─────────────────────────────────────────────────
 # Whether one client's asset tree may answer for another's missing files.
@@ -1128,8 +1253,8 @@ register_test_target(test_base_fallback)
 # entry to resolve against, and resolution used to stop there.
 add_executable(test_override_add
     test_override_add.cpp
-    ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/pipeline/asset_manifest.cpp)
+    ${TEST_COMMON_SOURCES})
+target_link_libraries(test_override_add PRIVATE wowee_pipeline)
 target_include_directories(test_override_add PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_override_add SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_override_add PRIVATE catch2_main)
@@ -1142,8 +1267,8 @@ register_test_target(test_override_add)
 # what it read. Skips when Data/manifest.json is not in the checkout.
 add_executable(test_asset_manifest_load
     test_asset_manifest_load.cpp
-    ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/pipeline/asset_manifest.cpp)
+    ${TEST_COMMON_SOURCES})
+target_link_libraries(test_asset_manifest_load PRIVATE wowee_pipeline)
 target_include_directories(test_asset_manifest_load PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_asset_manifest_load SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_asset_manifest_load PRIVATE catch2_main)
@@ -1157,8 +1282,8 @@ register_test_target(test_asset_manifest_load)
 # copy of the line walk, neither with a test.
 wowee_add_test(test_macro_text
     SOURCES test_macro_text.cpp
-            ${TEST_COMMON_SOURCES}
-            ${CMAKE_SOURCE_DIR}/src/ui/macro_text.cpp)
+            ${TEST_COMMON_SOURCES})
+target_link_libraries(test_macro_text PRIVATE wowee_client)
 
 # ── test_water_surface_grid ──────────────────────────────────
 # Projecting a world position onto a water surface's grid, which
@@ -1267,6 +1392,10 @@ wowee_add_packet_test(test_battlefield_status_packet)
 # Every field of CMSG_LFG_JOIN, which was wrong in every field and silent.
 wowee_add_packet_test(test_lfg_join_packet)
 
+# ── test_auth_session_packet ─────────────────────────────────
+# The DoS proof-of-work in CMSG_AUTH_SESSION, which was sent as a constant zero.
+wowee_add_packet_test(test_auth_session_packet)
+
 # ── test_learn_talent_packet ─────────────────────────────────
 # The rank field counts from zero on the wire and from one everywhere else.
 wowee_add_packet_test(test_learn_talent_packet)
@@ -1282,7 +1411,9 @@ wowee_add_packet_test(test_item_query_sockets)
 wowee_add_test(test_item_stat_names SOURCES test_item_stat_names.cpp)
 
 # ── test_mail_packets ───────────────────────────────────────
+# The auction letter's subject and invoice readers are the mail domain's.
 wowee_add_packet_test(test_mail_packets)
+target_link_libraries(test_mail_packets PRIVATE wowee_mail)
 
 # ── test_raid_target_packets ────────────────────────────────
 wowee_add_packet_test(test_raid_target_packets)
@@ -1299,9 +1430,8 @@ wowee_add_test(test_entity
 add_executable(test_dbc_loader
     test_dbc_loader.cpp
     ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp
-    ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
 )
+target_link_libraries(test_dbc_loader PRIVATE wowee_pipeline)
 target_include_directories(test_dbc_loader PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_dbc_loader SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_dbc_loader PRIVATE catch2_main)
@@ -1310,17 +1440,17 @@ register_test_target(test_dbc_loader)
 
 # ── test_m2_structs ──────────────────────────────────────────
 wowee_add_test(test_m2_structs
-    SOURCES test_m2_structs.cpp
-            ../src/rendering/m2_model_classifier.cpp)
+    SOURCES test_m2_structs.cpp)
+target_link_libraries(test_m2_structs PRIVATE wowee_render)
 
 # ── test_m2_color_alpha ──────────────────────────────────────
 # Loads the peasant lumberjack carry models (WotLK v264 + vanilla v256) and
 # pins the M2 color-alpha track parsing that hides the duplicate wood bundle.
 add_executable(test_m2_color_alpha
     test_m2_color_alpha.cpp
-    ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
     ${TEST_COMMON_SOURCES}
 )
+target_link_libraries(test_m2_color_alpha PRIVATE wowee_pipeline)
 target_include_directories(test_m2_color_alpha PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_m2_color_alpha SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_compile_definitions(test_m2_color_alpha PRIVATE
@@ -1335,9 +1465,9 @@ register_test_target(test_m2_color_alpha)
 # event parsing that syncs footstep audio to foot-strike keyframes.
 add_executable(test_m2_footstep_events
     test_m2_footstep_events.cpp
-    ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
     ${TEST_COMMON_SOURCES}
 )
+target_link_libraries(test_m2_footstep_events PRIVATE wowee_pipeline)
 target_include_directories(test_m2_footstep_events PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_m2_footstep_events SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_compile_definitions(test_m2_footstep_events PRIVATE
@@ -1351,8 +1481,8 @@ register_test_target(test_m2_footstep_events)
 add_executable(test_blp_loader
     test_blp_loader.cpp
     ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/pipeline/blp_loader.cpp
 )
+target_link_libraries(test_blp_loader PRIVATE wowee_pipeline)
 target_include_directories(test_blp_loader PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_blp_loader SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_blp_loader PRIVATE catch2_main)
@@ -1366,8 +1496,8 @@ register_test_target(test_blp_loader)
 add_executable(test_dds_sidecar
     test_dds_sidecar.cpp
     ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/pipeline/dds_loader.cpp
 )
+target_link_libraries(test_dds_sidecar PRIVATE wowee_pipeline)
 target_include_directories(test_dds_sidecar PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_dds_sidecar SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_dds_sidecar PRIVATE catch2_main)
@@ -1397,8 +1527,8 @@ target_link_libraries(test_asset_file_cache PRIVATE wowee_pipeline wowee_base)
 add_executable(test_blp_alpha_scan
     test_blp_alpha_scan.cpp
     ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/pipeline/blp_loader.cpp
 )
+target_link_libraries(test_blp_alpha_scan PRIVATE wowee_pipeline)
 target_include_directories(test_blp_alpha_scan PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_blp_alpha_scan SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_compile_definitions(test_blp_alpha_scan PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
@@ -1414,8 +1544,8 @@ register_test_target(test_blp_alpha_scan)
 add_executable(test_blp_alpha_silhouette
     test_blp_alpha_silhouette.cpp
     ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/pipeline/blp_loader.cpp
 )
+target_link_libraries(test_blp_alpha_silhouette PRIVATE wowee_pipeline)
 target_include_directories(test_blp_alpha_silhouette PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_blp_alpha_silhouette SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_compile_definitions(test_blp_alpha_silhouette PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
@@ -1425,20 +1555,43 @@ register_test_target(test_blp_alpha_silhouette)
 
 # ── test_frustum ─────────────────────────────────────────────
 wowee_add_test(test_frustum
-    SOURCES test_frustum.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/frustum.cpp)
+    SOURCES test_frustum.cpp)
+target_link_libraries(test_frustum PRIVATE wowee_render)
 
 wowee_add_test(test_rt_instance_changes SOURCES test_rt_instance_changes.cpp)
+option(WOWEE_BUILD_RT_RENDERER_CHANGES_TEST "Build native renderer RT mutation regression" OFF)
+if(WOWEE_BUILD_RT_RENDERER_CHANGES_TEST AND NOT ANDROID)
+    add_executable(rt_renderer_changes_test rt_renderer_changes_main.cpp)
+    target_link_libraries(rt_renderer_changes_test PRIVATE wowee_render)
+    wowee_test_link_glm(rt_renderer_changes_test)
+    wowee_apply_client_flags(rt_renderer_changes_test)
+    add_test(NAME rt_renderer_changes COMMAND rt_renderer_changes_test
+             WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+    set_tests_properties(rt_renderer_changes PROPERTIES SKIP_RETURN_CODE 77)
+    register_test_target(rt_renderer_changes_test)
+endif()
+
+option(WOWEE_BUILD_WMO_VIEW_CULL_TEST "Build the native GPU test of the WMO view and reflection cull" OFF)
+if(WOWEE_BUILD_WMO_VIEW_CULL_TEST AND NOT ANDROID)
+    add_executable(wmo_view_cull_test wmo_view_cull_main.cpp)
+    target_link_libraries(wmo_view_cull_test PRIVATE wowee_render)
+    wowee_test_link_glm(wmo_view_cull_test)
+    wowee_apply_client_flags(wmo_view_cull_test)
+    add_test(NAME wmo_view_cull COMMAND wmo_view_cull_test
+             WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+    set_tests_properties(wmo_view_cull PROPERTIES SKIP_RETURN_CODE 77)
+    register_test_target(wmo_view_cull_test)
+endif()
 
 wowee_add_test(test_terrain_depth
-    SOURCES test_terrain_depth.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/frustum.cpp)
+    SOURCES test_terrain_depth.cpp)
+target_link_libraries(test_terrain_depth PRIVATE wowee_render)
 
 # ── test_rt_bvh ──────────────────────────────────────────────
-# The hierarchy the software ray tracer walks, against a brute-force scan.
+# The hierarchy the software ray tracer walks: its structure, not the walk.
 wowee_add_test(test_rt_bvh
-    SOURCES test_rt_bvh.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/rt_bvh.cpp)
+    SOURCES test_rt_bvh.cpp)
+target_link_libraries(test_rt_bvh PRIVATE wowee_render)
 
 # ── test_recording_size ──────────────────────────────────────
 # Header-only: the size a screen recording is encoded at.
@@ -1480,9 +1633,8 @@ register_test_target(test_game_clock)
 add_executable(test_animation_ids
     test_animation_ids.cpp
     ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/rendering/animation/animation_ids.cpp
-    ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp
 )
+target_link_libraries(test_animation_ids PRIVATE wowee_client wowee_pipeline)
 target_include_directories(test_animation_ids PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_animation_ids SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_animation_ids PRIVATE catch2_main)
@@ -1493,8 +1645,8 @@ register_test_target(test_animation_ids)
 add_executable(test_locomotion_fsm
     test_locomotion_fsm.cpp
     ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/rendering/animation/locomotion_fsm.cpp
 )
+target_link_libraries(test_locomotion_fsm PRIVATE wowee_client)
 target_include_directories(test_locomotion_fsm PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_locomotion_fsm SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_locomotion_fsm PRIVATE catch2_main)
@@ -1538,8 +1690,8 @@ register_test_target(test_combat_text_filter)
 add_executable(test_combat_fsm
     test_combat_fsm.cpp
     ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/rendering/animation/combat_fsm.cpp
 )
+target_link_libraries(test_combat_fsm PRIVATE wowee_client)
 target_include_directories(test_combat_fsm PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_combat_fsm SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_combat_fsm PRIVATE catch2_main)
@@ -1550,8 +1702,8 @@ register_test_target(test_combat_fsm)
 add_executable(test_activity_fsm
     test_activity_fsm.cpp
     ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/rendering/animation/activity_fsm.cpp
 )
+target_link_libraries(test_activity_fsm PRIVATE wowee_client)
 target_include_directories(test_activity_fsm PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_activity_fsm SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_activity_fsm PRIVATE catch2_main)
@@ -1559,21 +1711,6 @@ add_test(NAME activity_fsm COMMAND test_activity_fsm)
 register_test_target(test_activity_fsm)
 
 # NPC animator tests removed - NpcAnimator replaced by generic CharacterAnimator
-
-# ── test_anim_capability ─────────────────────────────────────
-# Header-only struct tests - no source files needed
-add_executable(test_anim_capability
-    test_anim_capability.cpp
-)
-target_include_directories(test_anim_capability PRIVATE ${TEST_INCLUDE_DIRS})
-target_include_directories(test_anim_capability SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_anim_capability PRIVATE catch2_main)
-add_test(NAME anim_capability COMMAND test_anim_capability)
-register_test_target(test_anim_capability)
-
-# ── test_indoor_shadows ──────────────────────────────────────
-wowee_add_test(test_indoor_shadows
-    SOURCES test_indoor_shadows.cpp)
 
 # ── test_zone_tiles ────────────────────────────────────────────
 wowee_add_test(test_zone_tiles
@@ -1587,37 +1724,31 @@ wowee_add_test(test_transport_components
             ${CMAKE_SOURCE_DIR}/src/game/transport_animator.cpp
             ${CMAKE_SOURCE_DIR}/src/math/spline.cpp)
 
-# ── test_world_map ────────────────────────────────────────────
-wowee_add_test(test_world_map
-    SOURCES test_world_map.cpp)
-
 # ── test_world_map_coordinate_projection ──────────────────────
 wowee_add_test(test_world_map_coordinate_projection
-    SOURCES test_world_map_coordinate_projection.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/world_map/coordinate_projection.cpp)
+    SOURCES test_world_map_coordinate_projection.cpp)
+target_link_libraries(test_world_map_coordinate_projection PRIVATE wowee_client)
 
 # ── test_world_map_map_resolver ───────────────────────────────
 wowee_add_test(test_world_map_map_resolver
     SOURCES test_world_map_map_resolver.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/world_map/map_resolver.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/world_map/coordinate_projection.cpp
             ${TEST_COMMON_SOURCES})
+target_link_libraries(test_world_map_map_resolver PRIVATE wowee_client)
 
 # ── test_world_map_view_state_machine ─────────────────────────
 wowee_add_test(test_world_map_view_state_machine
-    SOURCES test_world_map_view_state_machine.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/world_map/view_state_machine.cpp)
+    SOURCES test_world_map_view_state_machine.cpp)
+target_link_libraries(test_world_map_view_state_machine PRIVATE wowee_client)
 
 # ── test_world_map_exploration_state ──────────────────────────
 wowee_add_test(test_world_map_exploration_state
-    SOURCES test_world_map_exploration_state.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/world_map/exploration_state.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/world_map/coordinate_projection.cpp)
+    SOURCES test_world_map_exploration_state.cpp)
+target_link_libraries(test_world_map_exploration_state PRIVATE wowee_client)
 
 # ── test_world_map_zone_metadata ──────────────────────────────
 wowee_add_test(test_world_map_zone_metadata
-    SOURCES test_world_map_zone_metadata.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/world_map/zone_metadata.cpp)
+    SOURCES test_world_map_zone_metadata.cpp)
+target_link_libraries(test_world_map_zone_metadata PRIVATE wowee_client)
 
 # ── test_text_wrap ───────────────────────────────────────────
 add_executable(test_text_wrap
@@ -1663,7 +1794,7 @@ target_include_directories(test_link_hit PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_link_hit SYSTEM PRIVATE
     ${TEST_SYSTEM_INCLUDE_DIRS}
 )
-target_link_libraries(test_link_hit PRIVATE catch2_main)
+target_link_libraries(test_link_hit PRIVATE wowee_client catch2_main)
 add_test(NAME link_hit COMMAND test_link_hit)
 register_test_target(test_link_hit)
 
@@ -1681,29 +1812,14 @@ add_test(NAME minimap_projection COMMAND test_minimap_projection)
 register_test_target(test_minimap_projection)
 register_test_target(test_text_wrap)
 
-# ── test_chat_markup_parser ──────────────────────────────────
-add_executable(test_chat_markup_parser
-    test_chat_markup_parser.cpp
-    ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/ui/chat/chat_markup_parser.cpp
-)
-target_include_directories(test_chat_markup_parser PRIVATE ${TEST_INCLUDE_DIRS})
-target_include_directories(test_chat_markup_parser SYSTEM PRIVATE
-    ${TEST_SYSTEM_INCLUDE_DIRS}
-    ${CMAKE_SOURCE_DIR}/extern/imgui
-)
-target_link_libraries(test_chat_markup_parser PRIVATE catch2_main)
-add_test(NAME chat_markup_parser COMMAND test_chat_markup_parser)
-register_test_target(test_chat_markup_parser)
-
 # ── test_font_em_scale ───────────────────────────────────────
 # The head/hhea read that makes a font height mean an em, as FrameXML means it,
 # rather than the ascender-to-descender span ImGui fits into it. Absolute byte
 # offsets into a file this client did not write, so they are pinned.
 add_executable(test_font_em_scale
     test_font_em_scale.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/interface_fonts.cpp
 )
+target_link_libraries(test_font_em_scale PRIVATE wowee_client)
 target_include_directories(test_font_em_scale PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_font_em_scale SYSTEM PRIVATE
     ${TEST_SYSTEM_INCLUDE_DIRS}
@@ -1724,8 +1840,8 @@ wowee_add_test(test_quest_text SOURCES test_quest_text.cpp)
 # zero drew each wrapped objective over the row beneath it.
 add_executable(test_interface_text_lines
     test_interface_text_lines.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/interface_fonts.cpp
 )
+target_link_libraries(test_interface_text_lines PRIVATE wowee_client)
 target_include_directories(test_interface_text_lines PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_interface_text_lines SYSTEM PRIVATE
     ${TEST_SYSTEM_INCLUDE_DIRS}
@@ -1734,12 +1850,6 @@ target_include_directories(test_interface_text_lines SYSTEM PRIVATE
 target_link_libraries(test_interface_text_lines PRIVATE catch2_main imgui)
 add_test(NAME interface_text_lines COMMAND test_interface_text_lines)
 register_test_target(test_interface_text_lines)
-
-# ── test_npc_flags ───────────────────────────────────────────
-# UNIT_NPC_FLAGS bit by bit. A wrong one is invisible - the mask just always
-# answers no - and NPC_FLAG_VENDOR was 0x04, a bit nothing sets, so no merchant
-# ever read as one.
-wowee_add_test(test_npc_flags SOURCES test_npc_flags.cpp)
 
 # ── test_scene_pick ──────────────────────────────────────────
 # Which of ScenePick's answers a caller wants. closestGuid and resolve()
@@ -1784,8 +1894,8 @@ wowee_add_test(test_deferred_calls SOURCES test_deferred_calls.cpp)
 # overlap, freed ones are reused before a block is made, offsets are aligned.
 wowee_add_test(test_uniform_slot_pool
     SOURCES test_uniform_slot_pool.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/uniform_slot_pool.cpp
             ${TEST_COMMON_SOURCES})
+target_link_libraries(test_uniform_slot_pool PRIVATE wowee_render)
 if(TARGET Vulkan::Vulkan)
     target_link_libraries(test_uniform_slot_pool PRIVATE Vulkan::Vulkan)
 endif()
@@ -1796,8 +1906,8 @@ endif()
 # strings did the same.
 add_executable(test_plural_escape
     test_plural_escape.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/plural_escape.cpp
 )
+target_link_libraries(test_plural_escape PRIVATE wowee_client)
 target_include_directories(test_plural_escape PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_plural_escape SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_plural_escape PRIVATE catch2_main)
@@ -1808,8 +1918,8 @@ register_test_target(test_plural_escape)
 add_executable(test_macro_evaluator
     test_macro_evaluator.cpp
     ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/ui/chat/macro_evaluator.cpp
 )
+target_link_libraries(test_macro_evaluator PRIVATE wowee_client)
 target_include_directories(test_macro_evaluator PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_macro_evaluator SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_macro_evaluator PRIVATE catch2_main)
@@ -1831,31 +1941,16 @@ register_test_target(test_gm_commands)
 # ── test_open_formats ────────────────────────────────────────
 wowee_add_test(test_open_formats
     SOURCES test_open_formats.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_building.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_collision.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_terrain_loader.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_bsp.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
             ${TEST_COMMON_SOURCES})
+target_link_libraries(test_open_formats PRIVATE wowee_pipeline)
 
 # ── test_open_format_emitter ─────────────────────────────────
 # Locks in the asset_extract → wowee open-format conversion path.
 add_executable(test_open_format_emitter
     test_open_format_emitter.cpp
-    ${CMAKE_SOURCE_DIR}/tools/asset_extract/open_format_emitter.cpp
-    ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp
-    ${CMAKE_SOURCE_DIR}/src/pipeline/blp_loader.cpp
-    ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
-    ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_bsp.cpp
-    ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
-    ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
-    ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_model.cpp
-    ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_building.cpp
-    ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_collision.cpp
     ${TEST_COMMON_SOURCES}
 )
+target_link_libraries(test_open_format_emitter PRIVATE wowee_asset_tools)
 target_include_directories(test_open_format_emitter PRIVATE
     ${TEST_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}
@@ -1873,8 +1968,8 @@ register_test_target(test_open_format_emitter)
 # Frame timing at 144Hz, where a millisecond is a seventh of the budget.
 wowee_add_test(test_frame_pacer
     SOURCES test_frame_pacer.cpp
-            ${CMAKE_SOURCE_DIR}/src/core/frame_pacer.cpp
             ${TEST_COMMON_SOURCES})
+target_link_libraries(test_frame_pacer PRIVATE wowee_client)
 if(WIN32)
     # Same winmm the client links, for the same two timer calls.
     target_link_libraries(test_frame_pacer PRIVATE winmm)
@@ -1885,11 +1980,11 @@ endif()
 # part that decides whether anybody is told anything.
 add_executable(test_update_check
     test_update_check.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/update_check.cpp
     ${CMAKE_SOURCE_DIR}/src/core/https_get.cpp
     ${CMAKE_SOURCE_DIR}/src/core/config_paths.cpp
     ${TEST_COMMON_SOURCES}
 )
+target_link_libraries(test_update_check PRIVATE wowee_client)
 target_include_directories(test_update_check PRIVATE
     ${TEST_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}
@@ -1913,9 +2008,9 @@ register_test_target(test_update_check)
 # reach outside the directory its realm was given.
 add_executable(test_realm_patches
     test_realm_patches.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/realm_patches.cpp
     ${TEST_COMMON_SOURCES}
 )
+target_link_libraries(test_realm_patches PRIVATE wowee_client)
 target_include_directories(test_realm_patches PRIVATE
     ${TEST_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}
@@ -1935,24 +2030,9 @@ register_test_target(test_realm_patches)
 if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
     add_executable(test_extract_progress
         test_extract_progress.cpp
-        ${CMAKE_SOURCE_DIR}/tools/asset_extract/extractor.cpp
-        ${CMAKE_SOURCE_DIR}/tools/asset_extract/path_mapper.cpp
-        ${CMAKE_SOURCE_DIR}/tools/asset_extract/manifest_writer.cpp
-        ${CMAKE_SOURCE_DIR}/tools/asset_extract/open_format_emitter.cpp
-        ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp
-        ${CMAKE_SOURCE_DIR}/src/pipeline/blp_loader.cpp
-        ${CMAKE_SOURCE_DIR}/src/pipeline/dds_loader.cpp
-        ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
-        ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_bsp.cpp
-        ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
-        ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
-        ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_model.cpp
-        ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_building.cpp
-        ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_collision.cpp
-        ${CMAKE_SOURCE_DIR}/src/rendering/m2_model_classifier.cpp
         ${TEST_COMMON_SOURCES}
     )
+    target_link_libraries(test_extract_progress PRIVATE wowee_asset_build)
     target_include_directories(test_extract_progress PRIVATE
         ${TEST_INCLUDE_DIRS}
         ${CMAKE_SOURCE_DIR}
@@ -1978,20 +2058,17 @@ endif()
 # ── test_camera ──────────────────────────────────────────────
 wowee_add_test(test_camera
     SOURCES test_camera.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/camera.cpp
             ${TEST_COMMON_SOURCES})
+target_link_libraries(test_camera PRIVATE wowee_render)
 
 # ── test_install_probe ───────────────────────────────────────
-# Which folder the archives are in, given whatever somebody pointed at. Links
-# the probe alone: it is deliberately free of the extractor and the MPQ
-# library, because the question is about directories.
-add_executable(test_install_probe
-    test_install_probe.cpp
-    ${CMAKE_SOURCE_DIR}/tools/asset_manager/install_probe.cpp)
-target_include_directories(test_install_probe PRIVATE ${TEST_INCLUDE_DIRS}
-    ${CMAKE_SOURCE_DIR}/tools/asset_manager)
+# Which folder the archives are in, given whatever somebody pointed at. The
+# probe is in wowee_asset_tools, deliberately apart from the extractor and the
+# MPQ library, because the question is about directories.
+add_executable(test_install_probe test_install_probe.cpp)
+target_include_directories(test_install_probe PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_install_probe SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_install_probe PRIVATE catch2_main)
+target_link_libraries(test_install_probe PRIVATE wowee_asset_tools catch2_main)
 add_test(NAME install_probe COMMAND test_install_probe)
 register_test_target(test_install_probe)
 
@@ -2001,9 +2078,8 @@ register_test_target(test_install_probe)
 # none of that is needed to ask whether a button has been bound twice.
 add_executable(test_gamepad
     test_gamepad.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/gamepad.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/gamepad_bindings.cpp
     ${TEST_COMMON_SOURCES})
+target_link_libraries(test_gamepad PRIVATE wowee_client)
 target_include_directories(test_gamepad PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_gamepad SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_gamepad PRIVATE catch2_main SDL3::SDL3)
@@ -2080,25 +2156,13 @@ target_link_libraries(test_expansion_profile PRIVATE catch2_main)
 add_test(NAME expansion_profile COMMAND test_expansion_profile)
 register_test_target(test_expansion_profile)
 
-# ── test_buff_bar_layout ────────────────────────────────────
-# Header-only layout arithmetic - no ImGui needed.
-add_executable(test_buff_bar_layout
-    test_buff_bar_layout.cpp
-)
-target_include_directories(test_buff_bar_layout PRIVATE ${TEST_INCLUDE_DIRS})
-target_include_directories(test_buff_bar_layout SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_buff_bar_layout PRIVATE catch2_main)
-add_test(NAME buff_bar_layout COMMAND test_buff_bar_layout)
-register_test_target(test_buff_bar_layout)
-
 # ── test_dbc_layouts ────────────────────────────────────────
 # Reads the layout files shipped in Data/expansions, so it needs the source dir.
 add_executable(test_dbc_layouts
     test_dbc_layouts.cpp
     ${TEST_COMMON_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
-    ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp
 )
+target_link_libraries(test_dbc_layouts PRIVATE wowee_pipeline)
 target_include_directories(test_dbc_layouts PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_dbc_layouts SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_compile_definitions(test_dbc_layouts PRIVATE
@@ -2147,11 +2211,9 @@ add_executable(test_realm_list
     test_realm_list.cpp
     ${TEST_COMMON_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/network/packet.cpp
-    ${CMAKE_SOURCE_DIR}/src/auth/auth_packets.cpp
-    ${CMAKE_SOURCE_DIR}/src/auth/auth_opcodes.cpp
     ${CMAKE_SOURCE_DIR}/src/auth/crypto.cpp
-    ${CMAKE_SOURCE_DIR}/src/auth/big_num.cpp
 )
+target_link_libraries(test_realm_list PRIVATE wowee_client)
 target_include_directories(test_realm_list PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_realm_list SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_realm_list PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
@@ -2228,9 +2290,8 @@ wowee_add_test(test_m2_sway
 # the places they name.
 wowee_add_test(test_wind_field
     SOURCES test_wind_field.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/wind_field.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/wind_zones.cpp
             ${TEST_COMMON_SOURCES})
+target_link_libraries(test_wind_field PRIVATE wowee_pipeline wowee_render)
 
 # ── test_shadow_cull_reuse ───────────────────────────────────
 # A shadow map's cached cull holds while the map has moved by less than the
@@ -2245,20 +2306,13 @@ wowee_add_test(test_shadow_cull_reuse
 wowee_add_test(test_terrain_bake
     SOURCES test_terrain_bake.cpp)
 
-# ── test_shadow_plane ────────────────────────────────────────
-# The plane a shadow receiver is compared in, from its surface and the map
-# alone: along the surface it predicts the sun's and the units' map depth,
-# whichever way and however long the normal, and edge-on it stays bounded.
-wowee_add_test(test_shadow_plane
-    SOURCES test_shadow_plane.cpp)
-
 # ── test_weather_mix ─────────────────────────────────────────
 # The weather as it is drawn: a shower coming over in the time it is given,
 # rain turning to snow through both, a storm the realm asks for at once
 # arriving at once.
 wowee_add_test(test_weather_mix
-    SOURCES test_weather_mix.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/weather_mix.cpp)
+    SOURCES test_weather_mix.cpp)
+target_link_libraries(test_weather_mix PRIVATE wowee_render)
 
 # ── test_shelter_probe ───────────────────────────────────────
 # What the shelter map says of the camera's place, as its probe works it out
@@ -2272,8 +2326,8 @@ wowee_add_test(test_shelter_probe
 # camera looks into it and drying under a roof, big drops running down,
 # snow melting to water and frosting the edges, grit driven by the wind.
 wowee_add_test(test_lens_drops
-    SOURCES test_lens_drops.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/lens_drops.cpp)
+    SOURCES test_lens_drops.cpp)
+target_link_libraries(test_lens_drops PRIVATE wowee_render)
 
 # ── test_liquid_scene ────────────────────────────────────────
 # The map's liquid: where the water stands and how high, which body each
@@ -2281,73 +2335,50 @@ wowee_add_test(test_lens_drops
 # renderer is told about it.
 wowee_add_test(test_liquid_scene
     SOURCES test_liquid_scene.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/liquid_scene.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
             ${TEST_COMMON_SOURCES})
+target_link_libraries(test_liquid_scene PRIVATE wowee_pipeline wowee_render)
 
 # ── test_liquid_types ────────────────────────────────────────
 # What each liquid is: LiquidType.dbc through its layout, the client's rule
 # for a WMO group's liquid, MCLQ's ocean - and what the scene then says.
 wowee_add_test(test_liquid_types
     SOURCES test_liquid_types.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/liquid_scene.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types_dbc.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
             ${TEST_COMMON_SOURCES})
+target_link_libraries(test_liquid_types PRIVATE wowee_pipeline wowee_render)
 
 # ── test_ocean_spectrum ──────────────────────────────────────
 # The wind's sea as the ocean's compute shaders draw it: steep, downwind,
 # its waves as long and as fast as the sea's.
 wowee_add_test(test_ocean_spectrum
-    SOURCES test_ocean_spectrum.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/ocean_sea.cpp)
-
-# ── test_water_wake ──────────────────────────────────────────
-# The water's answer to what moves through it: water's speeds, Kelvin's wedge.
-wowee_add_test(test_water_wake
-    SOURCES test_water_wake.cpp)
+    SOURCES test_ocean_spectrum.cpp)
+target_link_libraries(test_ocean_spectrum PRIVATE wowee_render)
 
 # ── test_sea_bed ─────────────────────────────────────────────
 # What lies under the water: the map's views, and which buildings are its bed.
 wowee_add_test(test_sea_bed
     SOURCES test_sea_bed.cpp)
 
-# ── test_ocean_fft ───────────────────────────────────────────
-# The sea's surface out of its spectrum, by the compute shaders' own FFT.
-wowee_add_test(test_ocean_fft
-    SOURCES test_ocean_fft.cpp)
-
 # ── test_water_reflection ────────────────────────────────────
-# The mirrored camera sees what stands above the water and nothing of the bed.
+# The mirrored camera sees what stands above the water and nothing of the bed,
+# and the reflection is drawn for the water in view and what it can show.
 wowee_add_test(test_water_reflection
     SOURCES test_water_reflection.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/water_reflection.cpp
             ${TEST_COMMON_SOURCES})
+target_link_libraries(test_water_reflection PRIVATE wowee_render)
 
-# ── test_sphere_map ──────────────────────────────────────────
-# The sphere environment map coordinates m2.vert.glsl computes, run from the
-# shader's own include. The incident vector was negated, which put a surface
-# nearly facing the camera at the rim of the map instead of near its centre.
-wowee_add_test(test_sphere_map
-    SOURCES test_sphere_map.cpp)
+# ── test_water_visibility ────────────────────────────────────
+# Which water reached the screen, from the GPU's occlusion answers.
+wowee_add_test(test_water_visibility
+    SOURCES test_water_visibility.cpp
+            ${TEST_COMMON_SOURCES})
 
 # ── test_m2_classifier_foliage ───────────────────────────────
 # Pins the wind-sway classification against substring collisions: foliage
 # tokens are matched inside concatenated names, so "thorn" landed inside
 # Stranglethorn and made every troll ruin sway like a tree.
 wowee_add_test(test_m2_classifier_foliage
-    SOURCES test_m2_classifier_foliage.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/m2_model_classifier.cpp)
-
-# ── test_terrain_slope_limit ────────────────────────────────
-# The 50 degree limit as it applies to the ground. It governed WMO and M2
-# floors; the terrain query answers a height and no normal, so it was never
-# applied there and any mountain could be walked straight up.
-wowee_add_test(test_terrain_slope_limit
-    SOURCES test_terrain_slope_limit.cpp)
+    SOURCES test_m2_classifier_foliage.cpp)
+target_link_libraries(test_m2_classifier_foliage PRIVATE wowee_render)
 
 # ── test_particle_density_floor ─────────────────────────────
 # M2 particle emission, flight and layout against the 3.3.5a client's own
@@ -2376,19 +2407,12 @@ wowee_add_test(test_m2_combiner
 wowee_add_test(test_local_lights
     SOURCES test_local_lights.cpp)
 
-# ── test_shadow_shading ─────────────────────────────────────
-# How a surface takes a shadow, by the client's receiving shaders.
-wowee_add_test(test_shadow_shading
-    SOURCES test_shadow_shading.cpp)
-
 # ── test_m2_billboard_model ─────────────────────────────────
 # Mana Shield's card through the renderer's own bone update.
 wowee_add_test(test_m2_billboard_model
     SOURCES test_m2_billboard_model.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
-            ../src/rendering/m2_model_classifier.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/texture_cache.cpp
             ${TEST_COMMON_SOURCES})
+target_link_libraries(test_m2_billboard_model PRIVATE wowee_pipeline wowee_render)
 target_compile_definitions(test_m2_billboard_model PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 # ── test_m2_billboard ───────────────────────────────────────
@@ -2402,8 +2426,8 @@ wowee_add_test(test_m2_billboard
 # and clouds, and a floor doodad in Ulduar is named for stars without being
 # a sky - so suppressing the wrong one deletes the sky instead of its stars.
 wowee_add_test(test_m2_star_layer
-    SOURCES test_m2_star_layer.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/m2_model_classifier.cpp)
+    SOURCES test_m2_star_layer.cpp)
+target_link_libraries(test_m2_star_layer PRIVATE wowee_render)
 
 # ── test_calendar_packet ────────────────────────────────────
 add_executable(test_calendar_packet
@@ -2414,7 +2438,7 @@ add_executable(test_calendar_packet
 )
 target_include_directories(test_calendar_packet PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_calendar_packet SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_calendar_packet PRIVATE catch2_main SDL3::SDL3 ZLIB::ZLIB
+target_link_libraries(test_calendar_packet PRIVATE wowee_calendar catch2_main SDL3::SDL3 ZLIB::ZLIB
                                                  OpenSSL::SSL OpenSSL::Crypto)
 wowee_test_link_glm(test_calendar_packet)
 if(TARGET Vulkan::Vulkan)
@@ -2546,8 +2570,8 @@ register_test_target(test_format_lookup)
 # poisons every token under it: Item/TextureComponents/LegLowerTexture
 # spells "glow", so every leg and boot texture was being colour-keyed.
 wowee_add_test(test_asset_token_name
-    SOURCES test_asset_token_name.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/m2_model_classifier.cpp)
+    SOURCES test_asset_token_name.cpp)
+target_link_libraries(test_asset_token_name PRIVATE wowee_render)
 
 # ── test_pom_quality_one_scale ──────────────────────────────
 # Parallax quality is one scale and everywhere it is offered has to agree.
@@ -2571,8 +2595,8 @@ register_test_target(test_pom_quality_one_scale)
 # at the login screen was shown on the slider and never applied.
 add_executable(test_settings_apply_on_load
     test_settings_apply_on_load.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/settings_schema.cpp
     ${TEST_COMMON_SOURCES})
+target_link_libraries(test_settings_apply_on_load PRIVATE wowee_client)
 target_include_directories(test_settings_apply_on_load PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_settings_apply_on_load SYSTEM PRIVATE
     ${TEST_SYSTEM_INCLUDE_DIRS})
@@ -2602,7 +2626,6 @@ wowee_add_test(test_swim_wall SOURCES test_swim_wall.cpp)
 add_executable(test_light_bands
     test_light_bands.cpp
     test_distance_fog.cpp
-    test_rt_light_composition.cpp
     ${TEST_COMMON_SOURCES})
 target_include_directories(test_light_bands PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_light_bands SYSTEM PRIVATE
@@ -2617,11 +2640,11 @@ register_test_target(test_light_bands)
 # ── test_sky_model_gate ──────────────────────────────────────
 # When the original client's sky models stand in for its own stars, sun,
 # moons and clouds, and when they are drawn over them: LightingManager over
-# Light, LightParams and LightSkybox files made up in a data root. Links the
-# pipeline library for the AssetManager and the DBC reader.
+# Light, LightParams and LightSkybox tables made up under the expansion's
+# layouts. Links the pipeline library for the DBC reader.
 add_executable(test_sky_model_gate
-    test_sky_model_gate.cpp
-    ${CMAKE_SOURCE_DIR}/src/rendering/lighting_manager.cpp)
+    test_sky_model_gate.cpp)
+target_link_libraries(test_sky_model_gate PRIVATE wowee_render)
 target_include_directories(test_sky_model_gate PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_sky_model_gate SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_sky_model_gate PRIVATE catch2_main wowee_pipeline wowee_base)
@@ -2634,8 +2657,8 @@ register_test_target(test_sky_model_gate)
 # id: LightingManager over a light volume made up in a data root, stood in
 # under Tirisfal's, Silverpine's and Duskwood's zone ids.
 add_executable(test_zone_light
-    test_zone_light.cpp
-    ${CMAKE_SOURCE_DIR}/src/rendering/lighting_manager.cpp)
+    test_zone_light.cpp)
+target_link_libraries(test_zone_light PRIVATE wowee_render)
 target_include_directories(test_zone_light PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_zone_light SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_zone_light PRIVATE catch2_main wowee_pipeline wowee_base)
@@ -2643,12 +2666,25 @@ wowee_test_link_glm(test_zone_light)
 add_test(NAME zone_light COMMAND test_zone_light)
 register_test_target(test_zone_light)
 
+# ── test_light_channels ──────────────────────────────────────
+# Which LightIntBand and LightFloatBand channel lights what: one global light
+# with a colour of its own on every channel, read back from LightingManager.
+add_executable(test_light_channels
+    test_light_channels.cpp)
+target_link_libraries(test_light_channels PRIVATE wowee_render)
+target_include_directories(test_light_channels PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_light_channels SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_light_channels PRIVATE catch2_main wowee_pipeline wowee_base)
+wowee_test_link_glm(test_light_channels)
+add_test(NAME light_channels COMMAND test_light_channels)
+register_test_target(test_light_channels)
+
 # ── test_light_volume_blend ──────────────────────────────────
 # A point lit as WoW.exe lights it: its map's global light with the volumes
 # it stands in laid over it, farthest first, each by its linear falloff.
 add_executable(test_light_volume_blend
-    test_light_volume_blend.cpp
-    ${CMAKE_SOURCE_DIR}/src/rendering/lighting_manager.cpp)
+    test_light_volume_blend.cpp)
+target_link_libraries(test_light_volume_blend PRIVATE wowee_render)
 target_include_directories(test_light_volume_blend PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_light_volume_blend SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_light_volume_blend PRIVATE catch2_main wowee_pipeline wowee_base)
@@ -2697,10 +2733,8 @@ wowee_add_test(test_camera_water_depth
 # stands, from interior_light.glsli.
 wowee_add_test(test_interior_light
     SOURCES test_interior_light.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_bsp.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
             ${TEST_COMMON_SOURCES})
+target_link_libraries(test_interior_light PRIVATE wowee_pipeline)
 
 # ── test_m2_view_distance ────────────────────────────────────
 # How far one M2 instance draws. Three separate widenings - a size factor,
@@ -2717,6 +2751,19 @@ target_link_libraries(test_m2_view_distance PRIVATE catch2_main)
 add_test(NAME m2_view_distance COMMAND test_m2_view_distance)
 register_test_target(test_m2_view_distance)
 
+# ── test_m2_anim_clock ───────────────────────────────────────
+# The sequence time an M2 instance shows, worked out from one shared clock
+# instead of a total advanced on every instance every frame.
+add_executable(test_m2_anim_clock
+    test_m2_anim_clock.cpp
+    ${TEST_COMMON_SOURCES})
+target_include_directories(test_m2_anim_clock PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_m2_anim_clock SYSTEM PRIVATE
+    ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_m2_anim_clock PRIVATE catch2_main)
+add_test(NAME m2_anim_clock COMMAND test_m2_anim_clock)
+register_test_target(test_m2_anim_clock)
+
 # ── test_light_volume_order ──────────────────────────────────
 # The client's rule for laying light volumes over each other: each one's
 # weight, the order they go down in, and what each ends up contributing.
@@ -2732,8 +2779,8 @@ add_test(NAME light_volume_order COMMAND test_light_volume_order)
 register_test_target(test_light_volume_order)
 
 # Sky clock/opacity and real Dalaran UV mask regression.
-add_executable(test_m2_sky_material test_m2_sky_material.cpp
-    ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp ${TEST_COMMON_SOURCES})
+add_executable(test_m2_sky_material test_m2_sky_material.cpp ${TEST_COMMON_SOURCES})
+target_link_libraries(test_m2_sky_material PRIVATE wowee_pipeline)
 target_include_directories(test_m2_sky_material PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_m2_sky_material SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_compile_definitions(test_m2_sky_material PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
@@ -2820,7 +2867,7 @@ register_test_target(test_update_field_indices)
 # ── test_opcode_tables ───────────────────────────────────────
 # Opcode numbers and the structure around them. All 1306 WotLK numbers were
 # checked against AzerothCore's Opcodes.h and agreed; this holds them there
-# and pins the _extends inheritance the smaller tables rely on.
+# and holds every table free of two names on one number.
 add_executable(test_opcode_tables
     test_opcode_tables.cpp
     ${TEST_COMMON_SOURCES})
@@ -2832,14 +2879,6 @@ target_compile_definitions(test_opcode_tables PRIVATE
 target_link_libraries(test_opcode_tables PRIVATE catch2_main)
 add_test(NAME opcode_tables COMMAND test_opcode_tables)
 register_test_target(test_opcode_tables)
-
-# ── test_movement_flag_bits ──────────────────────────────────
-# Movement flag bits against AzerothCore's UnitDefines.h. FEATHER_FALL and
-# WATER_WALK sat on PENDING_STOP and PENDING_STRAFE_STOP, so the client
-# asserted a pending stop in every packet while those states were active.
-wowee_add_test(test_movement_flag_bits
-    SOURCES test_movement_flag_bits.cpp
-            ${TEST_COMMON_SOURCES})
 
 # ── test_spell_icon_columns ──────────────────────────────────
 # SpellIcon.dbc through the loader every caller uses, over the install's data.
@@ -2911,243 +2950,114 @@ wowee_add_test(test_collision_world
     SOURCES test_collision_world.cpp)
 target_link_libraries(test_collision_world PRIVATE wowee_collision)
 
-# An offline adapter for differential tests of the production contact API.
-# Golden results come from original machine code; regeneration requires the
-# caller's verified executable, but ordinary regressions need only Python.
-add_executable(movement_contact_probe movement_contact_probe.cpp)
-target_link_libraries(movement_contact_probe PRIVATE wowee_collision)
-wowee_test_link_glm(movement_contact_probe)
-register_test_target(movement_contact_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_contact
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_collision.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_collision_12340.json
-            --probe $<TARGET_FILE:movement_contact_probe>)
-endif()
+# ── Original 3.3.5a (build 12340) movement and collision ─────
+# Differential tests against the original client's own machine code. A probe
+# runs our implementation on the inputs a fixture recorded and prints what it
+# produced; the check script compares that with what the original routines
+# produced for the same inputs. tools/original_*_reference.py regenerates a
+# fixture from the verified executable; running the comparison needs only
+# Python. See docs/original-collision-reference.md for what each one covers.
+#
+# A probe links the library that holds what it exercises and nothing is
+# compiled for it again. The probes of the client-side status and reporting
+# adapters (src/core) link the client objects, as test_shared_rules does.
+function(wowee_add_original_probe target)
+    cmake_parse_arguments(ARG "" "" "LIBS" ${ARGN})
+    add_executable(${target} ${target}.cpp)
+    target_include_directories(${target} PRIVATE ${TEST_INCLUDE_DIRS})
+    target_include_directories(${target} SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+    target_link_libraries(${target} PRIVATE ${ARG_LIBS})
+    wowee_test_link_glm(${target})
+    register_test_target(${target})
+endfunction()
 
-add_executable(movement_surface_probe movement_surface_probe.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/movement_status.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/movement_reporting.cpp)
-target_link_libraries(movement_surface_probe PRIVATE wowee_collision wowee_protocol)
-wowee_test_link_glm(movement_surface_probe)
-register_test_target(movement_surface_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_surface
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_surface.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_surface_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-    add_test(NAME original_collision_fall
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_fall.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_fall_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-    add_test(NAME original_collision_swim
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_swim.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_swim_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-    add_test(NAME original_collision_hover
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_hover.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_hover_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-    add_test(NAME original_collision_ground
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_ground.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_ground_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-endif()
+# original_collision_<name>: tools/check_original_<SCRIPT>.py compares PROBE's
+# output with tests/fixtures/original_<FIXTURE>_12340.json.
+function(wowee_add_original_check name)
+    cmake_parse_arguments(ARG "" "SCRIPT;FIXTURE;PROBE" "ARGS" ${ARGN})
+    if(NOT Python3_Interpreter_FOUND)
+        return()
+    endif()
+    add_test(NAME original_collision_${name}
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_${ARG_SCRIPT}.py ${ARG_ARGS}
+            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_${ARG_FIXTURE}_12340.json
+            --probe $<TARGET_FILE:${ARG_PROBE}>)
+endfunction()
 
-# Authored WMO collision topology and the original 12340 BSP traversal.
+set(_wotlk_opcodes --opcodes ${CMAKE_SOURCE_DIR}/Data/expansions/wotlk/opcodes.json)
+
+# Collision inputs: authored geometry and how the original collects facets.
 wowee_add_test(test_wmo_bsp SOURCES test_wmo_bsp.cpp)
 target_link_libraries(test_wmo_bsp PRIVATE wowee_collision)
-add_executable(wmo_bsp_probe wmo_bsp_probe.cpp)
-target_link_libraries(wmo_bsp_probe PRIVATE wowee_collision)
-wowee_test_link_glm(wmo_bsp_probe)
-register_test_target(wmo_bsp_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_wmo_bsp
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_wmo.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_wmo_bsp_12340.json
-            --probe $<TARGET_FILE:wmo_bsp_probe>)
-endif()
-
-add_executable(movement_facet_probe movement_facet_probe.cpp)
-target_link_libraries(movement_facet_probe PRIVATE wowee_collision)
-wowee_test_link_glm(movement_facet_probe)
-register_test_target(movement_facet_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_facets
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_facets.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_facets_12340.json
-            --probe $<TARGET_FILE:movement_facet_probe>)
-endif()
-
-add_executable(terrain_facet_probe terrain_facet_probe.cpp)
-target_link_libraries(terrain_facet_probe PRIVATE wowee_collision)
-wowee_test_link_glm(terrain_facet_probe)
-register_test_target(terrain_facet_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_terrain
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_terrain.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_terrain_12340.json
-            --probe $<TARGET_FILE:terrain_facet_probe>)
-    add_test(NAME original_collision_movement_request
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_request.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_movement_request_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-    add_test(NAME original_collision_movement_query
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_query.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_movement_query_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-    add_test(NAME original_collision_liquid_vertices
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_liquid_vertices.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_liquid_vertices_12340.json
-            --probe $<TARGET_FILE:terrain_facet_probe>)
-    add_test(NAME original_collision_flight_bounds
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_terrain.py --flight
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_flight_bounds_12340.json
-            --probe $<TARGET_FILE:terrain_facet_probe>)
-    add_test(NAME original_collision_impassable
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_terrain.py --impassable
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_impassable_12340.json
-            --probe $<TARGET_FILE:terrain_facet_probe>)
-    add_test(NAME original_collision_liquid
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_terrain.py --liquid
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_liquid_12340.json
-            --probe $<TARGET_FILE:terrain_facet_probe>)
-endif()
-
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_dimensions
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_dimensions.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_dimensions_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-endif()
-
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_fall_edges
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_fall.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_fall_edges_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-endif()
-
-add_executable(world_facet_probe world_facet_probe.cpp)
-target_link_libraries(world_facet_probe PRIVATE wowee_collision)
-wowee_test_link_glm(world_facet_probe)
-register_test_target(world_facet_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_world_apply
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_world_movement.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_apply_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-    add_test(NAME original_collision_world_movement
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_world_movement.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_world_movement_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-    add_test(NAME original_collision_world_collection
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_world.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_world_12340.json
-            --probe $<TARGET_FILE:world_facet_probe>)
-endif()
-
-add_executable(entity_facet_probe entity_facet_probe.cpp)
-target_link_libraries(entity_facet_probe PRIVATE wowee_collision)
-wowee_test_link_glm(entity_facet_probe)
-register_test_target(entity_facet_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_entities
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_entities.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_entities_12340.json
-            --probe $<TARGET_FILE:entity_facet_probe>)
-endif()
-
-add_executable(doodad_facet_probe doodad_facet_probe.cpp)
-target_link_libraries(doodad_facet_probe PRIVATE wowee_collision)
-wowee_test_link_glm(doodad_facet_probe)
-register_test_target(doodad_facet_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_doodads
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_doodads.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_doodads_12340.json
-            --probe $<TARGET_FILE:doodad_facet_probe>)
-endif()
-
-add_executable(wmo_world_probe wmo_world_probe.cpp)
-target_link_libraries(wmo_world_probe PRIVATE wowee_collision)
-wowee_test_link_glm(wmo_world_probe)
-register_test_target(wmo_world_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_wmo_world
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_wmo_world.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_wmo_world_12340.json
-            --probe $<TARGET_FILE:wmo_world_probe>)
-endif()
-
-add_executable(wmo_model_probe wmo_model_probe.cpp)
-target_link_libraries(wmo_model_probe PRIVATE wowee_collision)
-wowee_test_link_glm(wmo_model_probe)
-register_test_target(wmo_model_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_wmo_model
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_wmo_model.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_wmo_model_12340.json
-            --probe $<TARGET_FILE:wmo_model_probe>)
-endif()
-
-add_executable(wmo_liquid_probe wmo_liquid_probe.cpp)
-target_link_libraries(wmo_liquid_probe PRIVATE wowee_collision)
-wowee_test_link_glm(wmo_liquid_probe)
-register_test_target(wmo_liquid_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_wmo_liquid
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_wmo_liquid.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_wmo_liquid_12340.json
-            --probe $<TARGET_FILE:wmo_liquid_probe>)
-endif()
-
-add_executable(terrain_chunk_probe terrain_chunk_probe.cpp)
-target_link_libraries(terrain_chunk_probe PRIVATE wowee_collision)
-wowee_test_link_glm(terrain_chunk_probe)
-register_test_target(terrain_chunk_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_chunk
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_chunk.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_chunk_12340.json
-            --probe $<TARGET_FILE:terrain_chunk_probe>)
-endif()
-
-add_executable(map_facet_probe map_facet_probe.cpp)
-target_link_libraries(map_facet_probe PRIVATE wowee_collision)
-wowee_test_link_glm(map_facet_probe)
-register_test_target(map_facet_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_streaming
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_streaming.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_streaming_12340.json
-            --probe $<TARGET_FILE:map_facet_probe>)
-    add_test(NAME original_collision_map
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_map.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_map_12340.json
-            --probe $<TARGET_FILE:map_facet_probe>)
-endif()
-
-# Authored ADT collision references and flight-bound participation.
-wowee_add_test(test_adt_collision
-    SOURCES test_adt_collision.cpp
-            ${TEST_COMMON_SOURCES}
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
-
-# Original authored M2 collision input and facet assembly.
 wowee_add_test(test_m2_collision SOURCES test_m2_collision.cpp)
 target_link_libraries(test_m2_collision PRIVATE wowee_collision)
-add_executable(m2_facet_probe m2_facet_probe.cpp)
-target_link_libraries(m2_facet_probe PRIVATE wowee_collision)
-wowee_test_link_glm(m2_facet_probe)
-register_test_target(m2_facet_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_m2
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_m2.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_m2_12340.json
-            --probe $<TARGET_FILE:m2_facet_probe>)
-endif()
+wowee_add_test(test_adt_collision SOURCES test_adt_collision.cpp ${TEST_COMMON_SOURCES})
+target_link_libraries(test_adt_collision PRIVATE wowee_pipeline)
+
+foreach(_probe wmo_bsp_probe movement_facet_probe terrain_facet_probe terrain_chunk_probe
+               m2_facet_probe doodad_facet_probe entity_facet_probe wmo_model_probe
+               wmo_world_probe wmo_liquid_probe map_facet_probe world_facet_probe
+               movement_contact_probe movement_plot_probe movement_commands_probe)
+    wowee_add_original_probe(${_probe} LIBS wowee_collision)
+endforeach()
+foreach(_probe movement_surface_probe movement_status_probe movement_ack_probe movement_reporting_probe)
+    wowee_add_original_probe(${_probe} LIBS wowee_client)
+endforeach()
+
+wowee_add_original_check(wmo_bsp            SCRIPT wmo            FIXTURE wmo_bsp          PROBE wmo_bsp_probe)
+wowee_add_original_check(facets             SCRIPT facets         FIXTURE facets           PROBE movement_facet_probe)
+wowee_add_original_check(terrain            SCRIPT terrain        FIXTURE terrain          PROBE terrain_facet_probe)
+wowee_add_original_check(flight_bounds      SCRIPT terrain        FIXTURE flight_bounds    PROBE terrain_facet_probe ARGS --flight)
+wowee_add_original_check(impassable         SCRIPT terrain        FIXTURE impassable       PROBE terrain_facet_probe ARGS --impassable)
+wowee_add_original_check(liquid             SCRIPT terrain        FIXTURE liquid           PROBE terrain_facet_probe ARGS --liquid)
+wowee_add_original_check(liquid_vertices    SCRIPT liquid_vertices FIXTURE liquid_vertices PROBE terrain_facet_probe)
+wowee_add_original_check(chunk              SCRIPT chunk          FIXTURE chunk            PROBE terrain_chunk_probe)
+wowee_add_original_check(m2                 SCRIPT m2             FIXTURE m2               PROBE m2_facet_probe)
+wowee_add_original_check(doodads            SCRIPT doodads        FIXTURE doodads          PROBE doodad_facet_probe)
+wowee_add_original_check(entities           SCRIPT entities       FIXTURE entities         PROBE entity_facet_probe)
+wowee_add_original_check(wmo_model          SCRIPT wmo_model      FIXTURE wmo_model        PROBE wmo_model_probe)
+wowee_add_original_check(wmo_world          SCRIPT wmo_world      FIXTURE wmo_world        PROBE wmo_world_probe)
+wowee_add_original_check(wmo_liquid         SCRIPT wmo_liquid     FIXTURE wmo_liquid       PROBE wmo_liquid_probe)
+wowee_add_original_check(streaming          SCRIPT streaming      FIXTURE streaming        PROBE map_facet_probe)
+wowee_add_original_check(map                SCRIPT map            FIXTURE map              PROBE map_facet_probe)
+wowee_add_original_check(world_collection   SCRIPT world          FIXTURE world            PROBE world_facet_probe)
+
+# Contact, surface traversal and the movement phases.
+wowee_add_original_check(contact            SCRIPT collision      FIXTURE collision        PROBE movement_contact_probe)
+wowee_add_original_check(surface            SCRIPT surface        FIXTURE surface          PROBE movement_surface_probe)
+wowee_add_original_check(fall               SCRIPT fall           FIXTURE fall             PROBE movement_surface_probe)
+wowee_add_original_check(fall_edges         SCRIPT fall           FIXTURE fall_edges       PROBE movement_surface_probe)
+wowee_add_original_check(swim               SCRIPT swim           FIXTURE swim             PROBE movement_surface_probe)
+wowee_add_original_check(hover              SCRIPT hover          FIXTURE hover            PROBE movement_surface_probe)
+wowee_add_original_check(ground             SCRIPT ground         FIXTURE ground           PROBE movement_surface_probe)
+wowee_add_original_check(dimensions         SCRIPT dimensions     FIXTURE dimensions       PROBE movement_surface_probe)
+wowee_add_original_check(movement_request   SCRIPT movement_request FIXTURE movement_request PROBE movement_surface_probe)
+wowee_add_original_check(movement_query     SCRIPT movement_query FIXTURE movement_query   PROBE movement_surface_probe)
+wowee_add_original_check(world_apply        SCRIPT world_movement FIXTURE apply            PROBE movement_surface_probe)
+wowee_add_original_check(world_movement     SCRIPT world_movement FIXTURE world_movement   PROBE movement_surface_probe)
+wowee_add_original_check(plot               SCRIPT movement_plot  FIXTURE plot             PROBE movement_plot_probe)
+
+# The movement event queue and its execution schedule.
+wowee_add_original_check(commands           SCRIPT movement_commands FIXTURE commands      PROBE movement_commands_probe)
+wowee_add_original_check(execution          SCRIPT movement_execution FIXTURE execution    PROBE movement_surface_probe)
+wowee_add_original_check(input              SCRIPT movement_input FIXTURE input            PROBE movement_surface_probe)
+wowee_add_original_check(input_queue        SCRIPT movement_input_queue FIXTURE input_queue PROBE movement_surface_probe)
+wowee_add_original_check(input_execution    SCRIPT movement_input_execution FIXTURE input_execution PROBE movement_surface_probe)
+wowee_add_original_check(state_changes      SCRIPT movement_state FIXTURE state            PROBE movement_surface_probe)
+wowee_add_original_check(rate_queue         SCRIPT movement_rate_queue FIXTURE rate_queue  PROBE movement_surface_probe)
+wowee_add_original_check(rate_execution     SCRIPT movement_rate_queue FIXTURE rate_execution PROBE movement_surface_probe ARGS --execute)
+wowee_add_original_check(launch             SCRIPT movement_launch FIXTURE launch          PROBE movement_surface_probe)
+wowee_add_original_check(launch_queue       SCRIPT movement_launch FIXTURE launch_queue    PROBE movement_surface_probe ARGS --queue)
+wowee_add_original_check(launch_execution   SCRIPT movement_launch FIXTURE launch_execution PROBE movement_surface_probe ARGS --execute)
+wowee_add_original_check(mode_queue         SCRIPT movement_mode_queue FIXTURE mode_queue  PROBE movement_surface_probe)
+wowee_add_original_check(mode_execution     SCRIPT movement_mode_queue FIXTURE mode_execution PROBE movement_surface_probe ARGS --execute)
+
+# What the server is sent: status bytes, acknowledgements and reporting.
+wowee_add_original_check(wire_status        SCRIPT movement_status FIXTURE status          PROBE movement_status_probe)
+wowee_add_original_check(force_ack          SCRIPT movement_ack   FIXTURE ack              PROBE movement_ack_probe ARGS ${_wotlk_opcodes})
+wowee_add_original_check(reporting          SCRIPT movement_reporting FIXTURE reporting    PROBE movement_reporting_probe ARGS ${_wotlk_opcodes})
+wowee_add_original_check(local_event        SCRIPT movement_local_event FIXTURE local_event PROBE movement_reporting_probe ARGS ${_wotlk_opcodes})
+wowee_add_original_check(delivery           SCRIPT movement_delivery FIXTURE delivery      PROBE movement_surface_probe ARGS ${_wotlk_opcodes})
 
 # ── test_race_gender_suffix ──────────────────────────────────
 # The two-letter race code per-race models are suffixed with. Written out twice
@@ -3200,10 +3110,8 @@ wowee_add_test(test_wmo_night_glow
 # when the WotLK data is extracted.
 wowee_add_test(test_wmo_lighting
     SOURCES test_wmo_lighting.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_bsp.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
             ${TEST_COMMON_SOURCES})
+target_link_libraries(test_wmo_lighting PRIVATE wowee_pipeline)
 target_compile_definitions(test_wmo_lighting PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 # ── test_placement_transform ─────────────────────────────────
@@ -3214,6 +3122,24 @@ target_compile_definitions(test_wmo_lighting PRIVATE WOWEE_SOURCE_DIR="${CMAKE_S
 wowee_add_test(test_placement_transform
     SOURCES test_placement_transform.cpp
             ${TEST_COMMON_SOURCES})
+
+# ── test_terrain_tile_maps ───────────────────────────────────
+# A terrain tile's chunk maps as its arrays hold them: each chunk's cover and
+# normals at the layer its slot names.
+wowee_add_test(test_terrain_tile_maps
+    SOURCES test_terrain_tile_maps.cpp)
+target_link_libraries(test_terrain_tile_maps PRIVATE wowee_render)
+
+# ── test_terrain_fog_band ────────────────────────────────────
+# Which terrain chunks draw with the shader that cannot discard: only those
+# no part of which reaches the fog band or the distant-terrain hand-over.
+wowee_add_test(test_terrain_fog_band
+    SOURCES test_terrain_fog_band.cpp)
+
+# ── test_wmo_draw_layer ──────────────────────────────────────
+# Which WMO batches the scene pass draws ahead of the sky and which after it.
+wowee_add_test(test_wmo_draw_layer
+    SOURCES test_wmo_draw_layer.cpp)
 
 # ── test_wmo_batch_merge ─────────────────────────────────────
 # Which WMO group batches draw as one. A merged batch is drawn with its first
@@ -3276,8 +3202,8 @@ wowee_add_test(test_stationery
 # check is that the triangles cover the ring's own area and no more.
 wowee_add_test(test_polygon_triangulate
     SOURCES test_polygon_triangulate.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/polygon_triangulate.cpp
             ${TEST_COMMON_SOURCES})
+target_link_libraries(test_polygon_triangulate PRIVATE wowee_render)
 
 # ── test_raid_mark_names ─────────────────────────────────────
 # The eight raid marker names, which /mark matches lowercase and the minimap
@@ -3295,9 +3221,8 @@ wowee_add_test(test_raid_mark_names
 # under --asan, where an overrun fails rather than passing unnoticed.
 wowee_add_test(test_adt_truncation
     SOURCES test_adt_truncation.cpp
-            ${TEST_COMMON_SOURCES}
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
+            ${TEST_COMMON_SOURCES})
+target_link_libraries(test_adt_truncation PRIVATE wowee_pipeline)
 
 # ── test_blp_truncation ──────────────────────────────────────
 # What the BLP loader does with a texture that lies about its own sizes. The
@@ -3307,26 +3232,16 @@ wowee_add_test(test_adt_truncation
 # only -- run under --asan, where the overrun fails rather than passing.
 wowee_add_test(test_blp_truncation
     SOURCES test_blp_truncation.cpp
-            ${TEST_COMMON_SOURCES}
-            ${CMAKE_SOURCE_DIR}/src/pipeline/blp_loader.cpp)
-
-# ── test_grass_blade_layout ────────────────────────────
-# The C++ and GLSL views of a grass blade have to agree byte for byte, and a
-# disagreement is silent: it compiles, passes validation, and renders the wrong
-# thing. Header-only on purpose -- grass_blade.hpp needs nothing but glm, so
-# this stays a fast test rather than one that drags in a Vulkan context.
-wowee_add_test(test_grass_blade_layout
-    SOURCES test_grass_blade_layout.cpp)
+            ${TEST_COMMON_SOURCES})
+target_link_libraries(test_blp_truncation PRIVATE wowee_pipeline)
 
 # ── test_adt_alpha ─────────────────────────────────────
 # MCAL alpha maps, and the row and column at the end of a four-bit one that are
 # not data. Left alone they put a hard line between every pair of chunks.
 wowee_add_test(test_adt_alpha
     SOURCES test_adt_alpha.cpp
-            ${TEST_COMMON_SOURCES}
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_alpha.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
+            ${TEST_COMMON_SOURCES})
+target_link_libraries(test_adt_alpha PRIVATE wowee_pipeline)
 
 # ── test_grass_terrain ─────────────────────────────────
 # Whether grass grows at a point, answered from the ADT's own ground-effect
@@ -3334,13 +3249,8 @@ wowee_add_test(test_adt_alpha
 # hand, so this needs no device, no tile and no world.
 wowee_add_test(test_grass_terrain
     SOURCES test_grass_terrain.cpp
-            ${TEST_COMMON_SOURCES}
-            ${CMAKE_SOURCE_DIR}/src/pipeline/grass_terrain.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/grass_profile.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/terrain_mesh.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_alpha.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
+            ${TEST_COMMON_SOURCES})
+target_link_libraries(test_grass_terrain PRIVATE wowee_pipeline)
 
 # ── test_grass_population ──────────────────────────────
 # Blades generated from terrain suitability. Most of these cases are one
@@ -3349,8 +3259,8 @@ wowee_add_test(test_grass_terrain
 # moves cannot shuffle the field.
 wowee_add_test(test_grass_population
     SOURCES test_grass_population.cpp
-            ${TEST_COMMON_SOURCES}
-            ${CMAKE_SOURCE_DIR}/src/pipeline/grass_population.cpp)
+            ${TEST_COMMON_SOURCES})
+target_link_libraries(test_grass_population PRIVATE wowee_pipeline)
 
 # ── test_grass_profile ─────────────────────────────────
 # What grass looks like on a patch of ground, from the detail doodads the map
@@ -3358,32 +3268,31 @@ wowee_add_test(test_grass_population
 # what a zone is - a profile needing a per-zone correction would be the wrong
 # shape entirely.
 wowee_add_test(test_grass_profile
-    SOURCES test_grass_profile.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/grass_profile.cpp)
+    SOURCES test_grass_profile.cpp)
+target_link_libraries(test_grass_profile PRIVATE wowee_pipeline)
 
 # ── test_grass_biomes ──────────────────────────────────
 # The per-zone look table: parsing, subzone-over-zone matching, and that an
 # override multiplies the scales and replaces the colours it names while
 # leaving everything else the effect data derived.
 wowee_add_test(test_grass_biomes
-    SOURCES test_grass_biomes.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/grass_biomes.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/grass_profile.cpp)
+    SOURCES test_grass_biomes.cpp)
+target_link_libraries(test_grass_biomes PRIVATE wowee_pipeline)
 
 # ── test_grass_clearing ────────────────────────────────
 # The clearings the placed world presses into the grass: box distance, the
 # cleared ring, the ease band, and the minimum across overlapping sources.
 wowee_add_test(test_grass_clearing
-    SOURCES test_grass_clearing.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/grass_clearing.cpp)
+    SOURCES test_grass_clearing.cpp)
+target_link_libraries(test_grass_clearing PRIVATE wowee_pipeline)
 
 # ── test_grass_cull_math ───────────────────────────────
 # The frustum arithmetic the grass cull performs, run for a camera turned all
 # the way round. Grass vanishing in one world direction is a claim about this
 # and nothing else, and it is cheaper to measure than to reason about.
 wowee_add_test(test_grass_cull_math
-    SOURCES test_grass_cull_math.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/frustum.cpp)
+    SOURCES test_grass_cull_math.cpp)
+target_link_libraries(test_grass_cull_math PRIVATE wowee_render)
 
 # ── test_pass_ablation ───────────────────────────────
 # The phase walk and the arithmetic of the ablation report. It is the only
@@ -3391,8 +3300,8 @@ wowee_add_test(test_grass_cull_math
 # in-pass GPU timestamp to the same clock, so there is nothing else to check
 # its numbers against.
 wowee_add_test(test_pass_ablation
-    SOURCES test_pass_ablation.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/pass_ablation.cpp)
+    SOURCES test_pass_ablation.cpp)
+target_link_libraries(test_pass_ablation PRIVATE wowee_render)
 
 # ── Sanitizers, once every test target exists ────────────────
 # This must be the last thing in this file. The loop walks ALL_TEST_TARGETS,
@@ -3441,8 +3350,8 @@ add_test(NAME server_extension COMMAND test_server_extension)
 register_test_target(test_server_extension)
 
 # Signed M2 UV mapping and the actual Dalaran sculpture's reflection layers.
-add_executable(test_m2_material test_m2_material.cpp
-    ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp ${TEST_COMMON_SOURCES})
+add_executable(test_m2_material test_m2_material.cpp ${TEST_COMMON_SOURCES})
+target_link_libraries(test_m2_material PRIVATE wowee_pipeline)
 target_include_directories(test_m2_material PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_m2_material SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_compile_definitions(test_m2_material PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
@@ -3456,10 +3365,9 @@ register_test_target(test_m2_material)
 # a faked transfer: resume, damage, overrun and a dropped connection.
 add_executable(test_realm_patch_sync
     test_realm_patch_sync.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/realm_patch_sync.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/realm_patches.cpp
     ${TEST_COMMON_SOURCES}
 )
+target_link_libraries(test_realm_patch_sync PRIVATE wowee_client)
 target_include_directories(test_realm_patch_sync PRIVATE
     ${TEST_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}
@@ -3483,12 +3391,11 @@ target_include_directories(test_archive_layer SYSTEM PRIVATE ${TEST_SYSTEM_INCLU
 target_link_libraries(test_archive_layer PRIVATE catch2_main wowee_pipeline wowee_base)
 wowee_test_link_glm(test_archive_layer)
 if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
-    target_sources(test_archive_layer PRIVATE ${CMAKE_SOURCE_DIR}/src/pipeline/mpq_archive_layer.cpp)
+    # The MPQ half is the client's: see "Realm patch archives" in the top-level
+    # CMakeLists.txt. The linker takes it from the archive.
+    target_link_libraries(test_archive_layer PRIVATE wowee_client)
     target_include_directories(test_archive_layer PRIVATE ${STORMLIB_INCLUDE_DIR})
     target_compile_definitions(test_archive_layer PRIVATE WOWEE_HAVE_STORMLIB)
-    if(WOWEE_STORMLIB_SERR)
-        target_compile_definitions(test_archive_layer PRIVATE WOWEE_STORMLIB_SERR=1)
-    endif()
     wowee_link_stormlib(test_archive_layer)
 endif()
 add_test(NAME archive_layer COMMAND test_archive_layer)
@@ -3528,11 +3435,13 @@ register_test_target(test_rt_build_budget)
 add_library(wowee_game_harness STATIC game_harness.cpp)
 target_include_directories(wowee_game_harness PUBLIC ${TEST_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(wowee_game_harness SYSTEM PUBLIC ${TEST_SYSTEM_INCLUDE_DIRS})
-target_compile_definitions(wowee_game_harness PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+# PUBLIC: test_support.hpp's inline sourceRoot() reads it, and a test that
+# includes the header without it would define a second, empty one.
+target_compile_definitions(wowee_game_harness PUBLIC WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(wowee_game_harness PUBLIC wowee_game catch2_main)
 wowee_test_link_glm(wowee_game_harness)
 
-foreach(_domain chat spell inventory quest social session account_data action_bar pet reputation realm_time weather movement_ack)
+foreach(_domain game_data chat spell inventory quest session combat movement player query_cache account_data action_bar pet reputation realm_time weather contacts who duel petition arena battleground lfg calendar group guild auction mail guild_bank trade loot achievement title)
     wowee_add_test(test_${_domain}_domain SOURCES test_${_domain}_domain.cpp)
     target_link_libraries(test_${_domain}_domain PRIVATE wowee_game_harness)
 endforeach()
@@ -3544,9 +3453,8 @@ target_link_libraries(test_recorded_entities PRIVATE wowee_game_harness)
 wowee_add_test(test_world_load_progress SOURCES test_world_load_progress.cpp)
 wowee_add_test(test_job_group SOURCES test_job_group.cpp)
 
-wowee_add_test(test_addon_event_queue SOURCES test_addon_event_queue.cpp
-    ${CMAKE_SOURCE_DIR}/src/addons/lua_handler_globals.cpp
-    ${CMAKE_SOURCE_DIR}/src/addons/lua_event_args.cpp)
+wowee_add_test(test_addon_event_queue SOURCES test_addon_event_queue.cpp)
+target_link_libraries(test_addon_event_queue PRIVATE wowee_client)
 target_include_directories(test_addon_event_queue SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/extern/lua-5.1.5/src)
 target_link_libraries(test_addon_event_queue PRIVATE wowee_game_harness lua51)
 target_compile_definitions(test_addon_event_queue PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
@@ -3557,9 +3465,8 @@ target_compile_definitions(test_addon_event_queue PRIVATE WOWEE_SOURCE_DIR="${CM
 # Lua state and then in the next one's, the identity a relog's session takes
 # from the game, and the saved variables keyed by it. The LFG bindings are the
 # ones that link without the whole interface; the rest share their accessor.
-wowee_add_test(test_character_session SOURCES test_character_session.cpp
-    ${CMAKE_SOURCE_DIR}/src/addons/toc_parser.cpp
-    ${CMAKE_SOURCE_DIR}/src/addons/lua_lfg_api.cpp)
+wowee_add_test(test_character_session SOURCES test_character_session.cpp)
+target_link_libraries(test_character_session PRIVATE wowee_client)
 target_include_directories(test_character_session SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/extern/lua-5.1.5/src)
 target_link_libraries(test_character_session PRIVATE wowee_game_harness lua51)
 target_compile_definitions(test_character_session PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
@@ -3605,6 +3512,21 @@ if(_ipo_supported AND WOWEE_ENABLE_LTO)
     set_property(TARGET test_interface_frame_scripts PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
 
+# The Minimap frame's two zooms, outdoor and indoor, through the interface.
+wowee_add_test(test_minimap_zoom SOURCES test_minimap_zoom.cpp)
+target_link_libraries(test_minimap_zoom PRIVATE wowee_client_harness)
+
+# TaxiNodePosition, as the flight map asks it: TaxiNodes.dbc and the
+# continent's WorldMapArea.dbc row in, a fraction of the map out. Silent when
+# wrong - every marker still lands somewhere, just not where it belongs.
+wowee_add_test(test_taxi_map_projection SOURCES test_taxi_map_projection.cpp)
+target_link_libraries(test_taxi_map_projection PRIVATE wowee_client_harness)
+
+# Widgets as the interface's Lua sees them: what a chat frame keeps of the
+# lines AddMessage hands it, and the type a widget answers.
+wowee_add_test(test_interface_widgets SOURCES test_interface_widgets.cpp)
+target_link_libraries(test_interface_widgets PRIVATE wowee_client_harness)
+
 # ── wowee_loading_test_client ────────────────────────────────
 option(WOWEE_BUILD_RENDER_CLIENT_PROBE "Build native interface/render lifecycle GPU probe" OFF)
 wowee_add_test(test_frame_results SOURCES test_frame_results.cpp)
@@ -3646,7 +3568,8 @@ wowee_add_test(test_cvar_store
 # The M2 view and shadow passes reject whole columns of the world before
 # testing instances; a column must never be rejected while an instance in it
 # would have passed.
-add_executable(test_m2_cull_grid test_m2_cull_grid.cpp ${CMAKE_SOURCE_DIR}/src/rendering/frustum.cpp)
+add_executable(test_m2_cull_grid test_m2_cull_grid.cpp)
+target_link_libraries(test_m2_cull_grid PRIVATE wowee_render)
 target_include_directories(test_m2_cull_grid PRIVATE ${TEST_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR})
 target_include_directories(test_m2_cull_grid SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_m2_cull_grid PRIVATE catch2_main)
@@ -3656,14 +3579,12 @@ register_test_target(test_m2_cull_grid)
 
 # Strike timing, geometry, fading and the sound travelling to the listener.
 wowee_add_test(test_lightning_storm
-    SOURCES test_lightning_storm.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/lightning_storm.cpp)
+    SOURCES test_lightning_storm.cpp)
+target_link_libraries(test_lightning_storm PRIVATE wowee_render)
 
 wowee_add_test(test_rain_audio
-    SOURCES test_rain_audio.cpp
-            ${CMAKE_SOURCE_DIR}/src/audio/ambient_sound_manager.cpp
-            ${CMAKE_SOURCE_DIR}/src/audio/audio_engine.cpp)
-target_link_libraries(test_rain_audio PRIVATE wowee_pipeline wowee_base ${CMAKE_DL_LIBS} Threads::Threads)
+    SOURCES test_rain_audio.cpp)
+target_link_libraries(test_rain_audio PRIVATE wowee_client wowee_pipeline wowee_base ${CMAKE_DL_LIBS} Threads::Threads)
 
 # ── The libraries' sources from their libraries, never a copy ─
 # Keep this last, after every test is declared. A test that names a source one
@@ -3706,153 +3627,57 @@ wowee_add_test(test_frame_worker SOURCES test_frame_worker.cpp)
 wowee_add_test(test_frame_pool SOURCES test_frame_pool.cpp)
 
 wowee_add_test(test_distant_terrain
-    SOURCES test_distant_terrain.cpp ${CMAKE_SOURCE_DIR}/src/pipeline/distant_terrain.cpp
+    SOURCES test_distant_terrain.cpp
             ${TEST_COMMON_SOURCES})
+target_link_libraries(test_distant_terrain PRIVATE wowee_pipeline)
 
-add_executable(movement_plot_probe movement_plot_probe.cpp)
-target_link_libraries(movement_plot_probe PRIVATE wowee_collision)
-wowee_test_link_glm(movement_plot_probe)
-register_test_target(movement_plot_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_plot
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_plot.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_plot_12340.json
-            --probe $<TARGET_FILE:movement_plot_probe>)
-endif()
+wowee_add_test(test_minimap_tile_index
+    SOURCES test_minimap_tile_index.cpp)
+target_link_libraries(test_minimap_tile_index PRIVATE wowee_pipeline)
 
-add_executable(movement_commands_probe movement_commands_probe.cpp)
-target_link_libraries(movement_commands_probe PRIVATE wowee_collision)
-wowee_test_link_glm(movement_commands_probe)
-register_test_target(movement_commands_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_commands
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_commands.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_commands_12340.json
-            --probe $<TARGET_FILE:movement_commands_probe>)
-endif()
+# ── test_item_tables ─────────────────────────────────────────
+# What an item tooltip reads from the expansion's tables: names through the
+# expansion's layout, ItemSet.dbc only where the expansion uses it, and a
+# column the layout does not name stopping the game.
+wowee_add_test(test_item_tables
+    SOURCES test_item_tables.cpp
+            ${TEST_COMMON_SOURCES})
+target_link_libraries(test_item_tables PRIVATE wowee_client wowee_pipeline)
 
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_execution
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_execution.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_execution_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-endif()
+wowee_add_test(test_wmo_minimap
+    SOURCES test_wmo_minimap.cpp ${TEST_COMMON_SOURCES})
+target_link_libraries(test_wmo_minimap PRIVATE wowee_pipeline wowee_render)
 
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_input
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_input.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_input_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-endif()
-
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_input_queue
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_input_queue.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_input_queue_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-endif()
-
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_input_execution
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_input_execution.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_input_execution_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-endif()
-
-add_executable(movement_status_probe movement_status_probe.cpp ${CMAKE_SOURCE_DIR}/src/core/movement_status.cpp)
-target_link_libraries(movement_status_probe PRIVATE wowee_protocol)
-wowee_test_link_glm(movement_status_probe)
-register_test_target(movement_status_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_wire_status
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_status.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_status_12340.json
-            --probe $<TARGET_FILE:movement_status_probe>)
-endif()
-
-add_executable(movement_ack_probe movement_ack_probe.cpp ${CMAKE_SOURCE_DIR}/src/core/movement_status.cpp)
-target_link_libraries(movement_ack_probe PRIVATE wowee_protocol)
-wowee_test_link_glm(movement_ack_probe)
-register_test_target(movement_ack_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_force_ack
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_ack.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_ack_12340.json
-            --opcodes ${CMAKE_SOURCE_DIR}/Data/expansions/wotlk/opcodes.json
-            --probe $<TARGET_FILE:movement_ack_probe>)
-endif()
-
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_state_changes
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_state.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_state_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-endif()
-
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_rate_queue
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_rate_queue.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_rate_queue_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-    add_test(NAME original_collision_rate_execution
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_rate_queue.py --execute
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_rate_execution_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-endif()
-
-if(Python3_Interpreter_FOUND)
-    foreach(_launch_mode launch launch_queue launch_execution)
-        if(_launch_mode STREQUAL "launch_queue")
-            set(_launch_args --queue)
-        elseif(_launch_mode STREQUAL "launch_execution")
-            set(_launch_args --execute)
-        else()
-            set(_launch_args)
-        endif()
-        add_test(NAME original_collision_${_launch_mode}
-            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_launch.py ${_launch_args}
-                --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_${_launch_mode}_12340.json
-                --probe $<TARGET_FILE:movement_surface_probe>)
-    endforeach()
-endif()
-
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_mode_queue
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_mode_queue.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_mode_queue_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-    add_test(NAME original_collision_mode_execution
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_mode_queue.py --execute
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_mode_execution_12340.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-endif()
-
-add_executable(movement_reporting_probe movement_reporting_probe.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/movement_status.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/movement_reporting.cpp)
-target_link_libraries(movement_reporting_probe PRIVATE wowee_protocol)
-wowee_test_link_glm(movement_reporting_probe)
-register_test_target(movement_reporting_probe)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_reporting
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_reporting.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_reporting_12340.json
-            --opcodes ${CMAKE_SOURCE_DIR}/Data/expansions/wotlk/opcodes.json
-            --probe $<TARGET_FILE:movement_reporting_probe>)
-endif()
-
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_local_event
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_local_event.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_local_event_12340.json
-            --opcodes ${CMAKE_SOURCE_DIR}/Data/expansions/wotlk/opcodes.json
-            --probe $<TARGET_FILE:movement_reporting_probe>)
-endif()
-
-if(Python3_Interpreter_FOUND)
-    add_test(NAME original_collision_delivery
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_original_movement_delivery.py
-            --reference ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/original_delivery_12340.json
-            --opcodes ${CMAKE_SOURCE_DIR}/Data/expansions/wotlk/opcodes.json
-            --probe $<TARGET_FILE:movement_surface_probe>)
-endif()
+# ── test_scene_references ───────────────────────────────────
+# Scenes drawn by scene_render against the pictures approved for them in
+# tests/approvals (ApprovalTests.cpp). Skipped without a Vulkan device or the
+# game data.
+# Built as wowee_add_test builds a test, but entered into ctest once per
+# scene, so the scenes draw side by side under -j rather than one after
+# another in a single entry - two at a time, no more (AGENTS.md): each scene
+# takes one of two locks in turn, and a lock's scenes draw one after another.
+add_executable(test_scene_references test_scene_references.cpp)
+target_include_directories(test_scene_references PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_scene_references SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_scene_references PRIVATE catch2_main)
+wowee_test_link_glm(test_scene_references)
+register_test_target(test_scene_references)
+set(_scene_lane 0)
+foreach(_scene IN ITEMS "water wake" "shadows" "sphere map" "ray traced lighting" "sea bed" "ocean")
+    string(REPLACE " " "_" _scene_name "${_scene}")
+    add_test(NAME scene_reference_${_scene_name} COMMAND test_scene_references "${_scene}")
+    set_tests_properties(scene_reference_${_scene_name} PROPERTIES SKIP_RETURN_CODE 4
+        RESOURCE_LOCK scene_render_${_scene_lane})
+    math(EXPR _scene_lane "1 - ${_scene_lane}")
+    if(WOWEE_GAME_DATA_DIR)
+        set_tests_properties(scene_reference_${_scene_name} PROPERTIES
+            ENVIRONMENT "WOW_DATA_PATH=${WOWEE_GAME_DATA_DIR}")
+    endif()
+endforeach()
+target_include_directories(test_scene_references PRIVATE
+    ${CMAKE_SOURCE_DIR}/extern/approval_tests ${CMAKE_CURRENT_SOURCE_DIR}/approval_catch2)
+target_compile_definitions(test_scene_references PRIVATE
+    WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    WOWEE_SCENE_RENDER="$<TARGET_FILE:scene_render>"
+    WOWEE_SCRATCH_DIR="${CMAKE_BINARY_DIR}/scratch")
+add_dependencies(test_scene_references scene_render)

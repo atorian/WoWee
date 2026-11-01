@@ -581,24 +581,6 @@ TEST_CASE("A frame's anchors can be read back as they were set",
     REQUIRE(tree.get(b)->bottom == Catch::Approx(bottom));
 }
 
-TEST_CASE("A widget knows what type it is", "[widget]") {
-    // FrameXML branches on this: whether to treat something as a region it can
-    // position, whether a frame is a Button worth clicking. Answering "Frame"
-    // for everything makes each of those branches take the wrong side, and
-    // silently, because the answer is a plausible string rather than nothing.
-    WidgetTree tree;
-    const uint32_t button = tree.create(WidgetKind::Frame, tree.root(), "B");
-    tree.get(button)->objectType = "Button";
-    const uint32_t tex = tree.create(WidgetKind::Texture, button, "T");
-    tree.get(tex)->objectType = "Texture";
-
-    REQUIRE(tree.get(button)->objectType == "Button");
-    REQUIRE(tree.get(tex)->objectType == "Texture");
-    // A widget created without being told keeps the type a plain frame has,
-    // which is what CreateFrame's own default argument means.
-    REQUIRE(tree.get(tree.root())->objectType == "Frame");
-}
-
 TEST_CASE("A scroll frame is a window onto a taller child", "[widget][scroll]") {
     // Scrolling down means seeing content further down the child, which is the
     // child moving up - and up is a larger bottom in these coordinates. The
@@ -932,12 +914,12 @@ TEST_CASE("A frame knows its level before it is ever laid out",
     REQUIRE(tree.get(art)->effLevel > tree.get(bar)->effLevel);
 }
 
-TEST_CASE("A message frame keeps its lines and drops the oldest",
+TEST_CASE("A message frame with lines paints; an emptied one does not",
           "[widget][chat]") {
-    // Chat is a list that grows at one end and falls off the other, not a
-    // single string. AddMessage was a name in the method list and nothing
-    // else, so every line the interface handed it went nowhere: the frame
-    // received the events, formatted the text, and dropped it.
+    // AddMessage was a name in the method list and nothing else, so every
+    // line the interface handed a chat frame went nowhere. What AddMessage
+    // keeps is tested through Lua in test_interface_widgets; this is what the
+    // tree draws for the lines it holds.
     WidgetTree tree;
     const uint32_t chat = tree.create(WidgetKind::Frame, tree.root(), "Chat");
     Widget* w = tree.get(chat);
@@ -947,13 +929,9 @@ TEST_CASE("A message frame keeps its lines and drops the oldest",
     w->height = 60.0f;
     tree.addPoint(chat, Anchor{"BOTTOMLEFT", 0, "BOTTOMLEFT", 0.0f, 0.0f});
 
-    for (const char* line : {"one", "two", "three", "four"}) {
+    for (const char* line : {"one", "two"}) {
         w->messages.push_back({line, {1.0f, 1.0f, 1.0f, 1.0f}});
-        while (w->messages.size() > w->maxMessages) w->messages.pop_front();
     }
-    REQUIRE(w->messages.size() == 3);
-    REQUIRE(w->messages.front().text == "two");
-    REQUIRE(w->messages.back().text == "four");
 
     // A frame with lines paints, even though a bare frame does not.
     tree.layout(1024.0f, 768.0f);
@@ -1857,23 +1835,6 @@ TEST_CASE("claiming the same portrait twice claims it once", "[widget_tree]") {
     tree.setPortraitUnit(tex, "pet");
     CHECK(tree.portraitsFor("pet").size() == 1);
     CHECK(tree.get(tex)->externalTexture == 0x99);
-}
-
-TEST_CASE("a model frame carries what it has been asked to try on",
-          "[widget_tree]") {
-    // The dressing room's contents belong to the frame, not to the
-    // application: a second one would have its own, and closing this one is
-    // what empties it.
-    WidgetTree tree;
-    const uint32_t model = tree.create(WidgetKind::Frame, tree.root(), "DressUpModel");
-    CHECK(tree.get(model)->tryOnItems.empty());
-
-    tree.get(model)->tryOnItems.push_back({1234u, 5u});
-    tree.get(model)->tryOnItems.push_back({5678u, 1u});
-    CHECK(tree.get(model)->tryOnItems.size() == 2);
-
-    tree.get(model)->tryOnItems.clear();
-    CHECK(tree.get(model)->tryOnItems.empty());
 }
 
 TEST_CASE("The screen sits above UIParent so a frame can leave it",

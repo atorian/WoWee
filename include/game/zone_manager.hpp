@@ -9,6 +9,8 @@ namespace wowee {
 namespace pipeline { class AssetManager; }
 namespace game {
 
+class GameData;
+
 // Conservative tile fallback for Duskwood's interior. Northern Duskwood and
 // southern Elwynn share ADTs, so their bank areas must be distinguished through
 // AreaTable parentage rather than broad tile rectangles.
@@ -30,7 +32,9 @@ public:
 
     // Supplement zone music paths using AreaTable → ZoneMusic → SoundEntries DBC chain.
     // Safe to call after initialize(); idempotent and additive (does not remove existing paths).
-    void enrichFromDBC(pipeline::AssetManager* assets);
+    // AreaTable.dbc unreadable stops the game; the music tables are the
+    // client's sound and are only warned about.
+    void enrichFromDBC(const GameData& data, pipeline::AssetManager& assets);
 
     [[nodiscard]] uint32_t getZoneId(int tileX, int tileY) const;
     [[nodiscard]] uint32_t resolveAreaZoneId(uint32_t areaId) const;

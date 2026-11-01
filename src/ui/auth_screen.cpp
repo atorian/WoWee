@@ -6,6 +6,7 @@
 #include "rendering/pom_quality.hpp"
 #include "ui/graphics_presets.hpp"
 #include "ui/settings_panel.hpp"
+#include "auth/client_timezone.hpp"
 #include "auth/crypto.hpp"
 #include "core/application.hpp"
 #include "pipeline/asset_inventory.hpp"
@@ -1152,7 +1153,7 @@ void AuthScreen::attemptAuth(auth::AuthHandler& authHandler) {
     // Build the auth-protocol candidate chain for this attempt. The profile's
     // own value is always tried first; vanilla-family profiles get the other
     // vanilla protocol byte appended as a fallback, because vanilla-family
-    // servers disagree on it (Turtle/vmangos-derived: 8, older mangos/cmangos:
+    // servers disagree on it (vmangos-derived: 8, older mangos/cmangos:
     // 3) and the profile can only name one. TBC/WotLK have no such ambiguity.
     authProtocols_.clear();
     authProtocolAttempt_ = 0;
@@ -1163,7 +1164,7 @@ void AuthScreen::attemptAuth(auth::AuthHandler& authHandler) {
         if (reg) {
             if (auto* profile = reg->getActive()) {
                 primary = profile->protocolVersion;
-                vanillaFamily = (profile->id == "classic" || profile->id == "turtle");
+                vanillaFamily = profile->id == "classic";
             }
         }
         authProtocols_.push_back(primary);
@@ -1211,12 +1212,11 @@ void AuthScreen::beginAuthAttempt(auth::AuthHandler& authHandler) {
             info.platform = profile->platform;
             info.os = profile->os;
             info.locale = profile->locale;
-            info.timezone = profile->timezone;
+            info.timezone = profile->timezone.value_or(auth::systemTimezoneBiasMinutes());
             // Vanilla-family servers send the legacy realm-list layout even
             // when the auth handshake itself uses protocol v8 (vmangos), so key
             // this on the expansion rather than on the protocol byte in play.
             info.legacyVanillaRealmList = (profile->id == "classic" ||
-                                           profile->id == "turtle" ||
                                            profile->protocolVersion <= 3);
             authHandler.setClientInfo(info);
         }

@@ -128,9 +128,11 @@ The point of this ordering is to reach the decision early and cheaply.
 
 1. **Stand up a 4.3.4 core.** Nothing below can be checked without one. If this step does not
    finish, neither does the port.
-2. **Bit reader and writer on `network::Packet`.** Done. `writeBit`/`readBit`, `writeBits`/
-   `readBits`, and GUID mask and byte passes that take the order as a parameter, in
-   `include/network/packet.hpp` and `src/network/packet.cpp`, covered by `tests/test_bit_packet.cpp`.
+2. **Bit reader and writer on `network::Packet`.** Written, then removed on 2026-10-31 because
+   nothing outside its tests called it; it is in commit `1af5d99e` (and the layouts in `0a37a272`)
+   for when the port resumes. `writeBit`/`readBit`, `writeBits`/`readBits`, and GUID mask
+   and byte passes that take the order as a parameter, in `include/network/packet.hpp` and
+   `src/network/packet.cpp`, covered by `tests/test_bit_packet.cpp`.
    The per-opcode order tables are deliberately *not* here: they are the part that has to be read
    off a core rather than recalled, and the helpers take them as arguments so that stays true.
 3. **Movement and update-object only.** A `CataPacketParsers` that logs in, receives the player,
@@ -140,8 +142,10 @@ The point of this ordering is to reach the decision early and cheaply.
    `MovementStatusElements` in `MovementStructures.cpp`, and there are 109 of them with no pattern
    between: `MSG_MOVE_START_FORWARD` writes position Y, Z, X then guid mask bits 5, 2, 0, while
    `MSG_MOVE_HEARTBEAT` writes Z, X, Y then pitch, timestamp and fall bits. `tools/derive_cata_movement.py`
-   parses them into `Data/expansions/cata/movement_sequences.json` and `src/game/cata_movement.cpp`
-   executes that, which is how the core does it and for the same reason.
+   parsed them into `Data/expansions/cata/movement_sequences.json` and `src/game/cata_movement.cpp`
+   executed that, which is how the core does it and for the same reason. No packet parser ever
+   called the reader, and all four files were removed with the bit reader on 2026-10-31; they are
+   in commit `0a37a272`.
 
    Two things came off the core that no amount of care would have produced from memory. The presence
    bits for movement flags, flags2, timestamp, orientation, pitch and spline elevation are

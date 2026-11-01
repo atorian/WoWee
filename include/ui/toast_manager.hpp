@@ -71,7 +71,7 @@ private:
     float discoveryToastTimer_ = 0.0f;
     std::string discoveryToastName_;
     uint32_t discoveryToastXP_ = 0;
-    bool areaDiscoveryCallbackSet_ = false;
+    core::EventBus::Subscription areaDiscoveredSub_;
     void renderDiscoveryToast();
 
     // ---- Whisper toast ----
@@ -117,7 +117,7 @@ private:
     };
     static constexpr float PVP_HONOR_TOAST_DURATION = 3.5f;
     std::vector<PvpHonorToastEntry> pvpHonorToasts_;
-    bool pvpHonorCallbackSet_ = false;
+    core::EventBus::Subscription honorGainedSub_;
     void renderPvpHonorToasts();
 
     // ---- Item loot toast ----

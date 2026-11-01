@@ -7,10 +7,8 @@ WoWee supports four World of Warcraft expansion profiles in a unified codebase u
 - **Vanilla (Classic) 1.12** - Original World of Warcraft
 - **The Burning Crusade (TBC) 2.4.3** - First expansion
 - **Wrath of the Lich King (WotLK) 3.3.5a** - Second expansion
-- **Turtle WoW 1.18** - Custom Vanilla-based server with extended content
 
-Each profile is a directory under `Data/expansions/` (`classic`, `tbc`, `wotlk`,
-`turtle`). `Data/expansions/cata` carries no `expansion.json`, so Cataclysm is not
+Each profile is a directory under `Data/expansions/` (`classic`, `tbc`, `wotlk`). `Data/expansions/cata` carries no `expansion.json`, so Cataclysm is not
 a server profile; a 4.3.4 client can still be read as an asset source by
 `asset_extract --expansion cata` and the asset builder.
 
@@ -24,9 +22,9 @@ The multi-expansion support is built on the **Expansion Profile** system:
      and optionally the realm's Warden signing key (`wardenRsaModulus`)
 
 2. **Packet Parsers** (`include/game/packet_parsers.hpp`) - Expansion-specific message handling
-   - `createPacketParsers(id)` picks `ClassicPacketParsers`, `TurtlePacketParsers`,
-     `TbcPacketParsers` or `WotlkPacketParsers`
-   - `packet_parsers_classic.cpp` - Vanilla 1.12 / Turtle WoW message parsing
+   - `createPacketParsers(id)` picks `ClassicPacketParsers`, `TbcPacketParsers`
+     or `WotlkPacketParsers`
+   - `packet_parsers_classic.cpp` - Vanilla 1.12 message parsing
    - `packet_parsers_tbc.cpp` - TBC 2.4.3 message parsing
    - Default (WotLK 3.3.5a) parsers in `game_handler.cpp` and domain handlers
 
@@ -109,11 +107,11 @@ if (isActiveExpansion("tbc")) {
 }
 
 if (isClassicLikeExpansion()) {
-    // Classic or Turtle WoW
+    // Classic
 }
 
 if (isPreWotlk()) {
-    // Classic, Turtle, or TBC (not WotLK)
+    // Classic or TBC (not WotLK)
 }
 ```
 

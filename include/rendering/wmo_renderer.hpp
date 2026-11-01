@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rendering/wmo_draw_layer.hpp"
 #include "rendering/rt_instance_changes.hpp"
 #include "rendering/frame_pool.hpp"
 
@@ -12,6 +13,7 @@
 #include "rendering/local_lights.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/wmo_lighting.hpp"
+#include "rendering/wmo_minimap.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/uniform_slot_pool.hpp"
 
@@ -22,6 +24,7 @@
 #include <glm/glm.hpp>
 #include <atomic>
 #include <memory>
+#include <optional>
 #include <span>
 #include <unordered_map>
 #include <unordered_set>
@@ -44,6 +47,7 @@ namespace rendering {
 
 class Camera;
 class Frustum;
+struct WaterReflectionView;
 class M2Renderer;
 class RtScene;
 class VkContext;
@@ -173,7 +177,11 @@ public:
      */
     uint32_t createInstance(uint32_t modelId, const glm::vec3& position,
                            const glm::vec3& rotation = glm::vec3(0.0f),
-                           float scale = 1.0f, uint32_t reservedId = 0);
+                           float scale = 1.0f, uint32_t reservedId = 0, uint16_t nameSet = 0);
+
+    /// A placed building as the minimap draws it. Nothing for an instance
+    /// that is not here or a model with no minimap description.
+    [[nodiscard]] std::optional<WmoMinimapPlacement> minimapPlacement(uint32_t instanceId) const;
     /// An id no instance has, for one SceneCommands will create at the apply
     /// point (createInstance's reservedId): the caller has it now, the
     /// instance from then on.
@@ -260,14 +268,20 @@ public:
      */
     /** Pre-update mutable state (frame ID, material UBOs) on main thread before parallel render. */
     struct Frame;
+    /// `mirror`, when there is water to reflect in, fills the reflection's
+    /// draw list with what its mirror can show. Each colour pass keeps only
+    /// the groups its own eye can see.
     std::shared_ptr<const Frame> extract(const Camera& camera, const glm::vec3& viewer,
-                                        const std::vector<LocalLight>& lights, bool reflection = false);
+                                        const std::vector<LocalLight>& lights,
+                                        const WaterReflectionView* mirror = nullptr);
     void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
     void prepareRender();
     /// The passes that draw the buildings in colour. Each culls into a draw
     /// list of its own: the water's reflection is recorded on the main thread
     /// and the view on a frame worker, and they share nothing they write.
     enum class Pass : uint8_t { View, Reflection, Count };
+    /// Which of a pass's batches a call records; see WmoDrawLayer.
+    using Layer = WmoDrawLayer;
 
     /// viewerPos is the character; portal culling seeds from it as well as from
     /// the camera, because at a doorway the two stand in different groups and
@@ -276,7 +290,8 @@ public:
     /// Culls the scene into the pass's draw list, then records from that list
     /// alone: the recording reads no instance.
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
-                const glm::vec3* viewerPos = nullptr, Pass pass = Pass::View);
+                const glm::vec3* viewerPos = nullptr, Pass pass = Pass::View,
+                Layer layer = Layer::All);
 
     /**
      * Initialize shadow pipeline (Phase 7)
@@ -325,7 +340,7 @@ public:
     /**
      * Get total draw call count (last frame)
      */
-    uint32_t getDrawCallCount() const { return viewDrawCallCount_; }
+    uint32_t getDrawCallCount() const { return viewDrawCallCount_ + viewBlendedDrawCallCount_; }
     /// Draw calls the depth-only passes recorded this frame, from the frame's
     /// first one (the sun's) on.
     uint32_t getShadowDrawCallCount() const { return shadowDrawCalls_; }
@@ -471,6 +486,9 @@ private:
         uint32_t groupFlags = 0;
         bool allUntextured = false;  // True if ALL batches use fallback white texture (collision/placeholder group)
         bool isLOD = false;          // Distance-only group (skip when camera is close)
+        /// How far a banner hung in the group can swing past its box, in the
+        /// building's units; zero when it has none (clothSwayReach).
+        float swayReach = 0.0f;
 
         // Material batches (start index, count, material ID)
         struct Batch {
@@ -496,6 +514,7 @@ private:
             bool hasTexture = false;
             bool alphaTest = false;
             bool isTransparent = false;     // blendMode >= 2
+            bool twoSided = false;          // F_UNCULLED: back faces shown too
             uint32_t sidnColor = 0;         // F_SIDN glow colour (BGRA), 0 without
             bool isLava = false;            // lava/magma texture (UV scroll)
             /// Cloth hung in the building's own mesh: where the bar is, how
@@ -561,6 +580,9 @@ private:
         glm::vec3 boundingBoxMax;
         glm::vec3 wmoAmbientColor{0.5f, 0.5f, 0.5f};  // From MOHD, used for interior lighting
         bool isLowPlatform = false;
+        /// Its groups and portals as the minimap reads them; null for a
+        /// model with no path to name its minimap tiles by.
+        std::shared_ptr<const WmoMinimapModel> minimap;
         /// Its groups' shapes, gathered for the collision world once every
         /// group is uploaded and the model is resident.
         std::shared_ptr<const collision::WmoShape> shape;
@@ -631,6 +653,8 @@ private:
         glm::vec3 position;
         glm::vec3 rotation;  // Euler angles (radians)
         float scale;
+        /// The placement's NameSetID: which WMOAreaTable rows name it.
+        uint16_t nameSet = 0;
         glm::mat4 modelMatrix;
         glm::mat4 invModelMatrix;  // Cached inverse for collision
         glm::vec3 worldBoundsMin;
@@ -769,7 +793,8 @@ private:
     collision::CollisionWorld* collision_ = nullptr;
 
     // Vulkan pipelines
-    VkPipeline opaquePipeline_ = VK_NULL_HANDLE;
+    VkPipeline opaquePipeline_ = VK_NULL_HANDLE;     // no alpha test: the shader cannot discard it
+    VkPipeline alphaTestPipeline_ = VK_NULL_HANDLE;  // opaque with the alpha test (lattices, foliage)
     VkPipeline transparentPipeline_ = VK_NULL_HANDLE;
     VkPipeline wireframePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
@@ -875,13 +900,15 @@ private:
         size_t used = 0;
         uint32_t portalCulled = 0;
         uint32_t distanceCulled = 0;
+        /// Groups outside the pass's view volume.
+        uint32_t frustumCulled = 0;
         uint32_t drawCalls = 0;
         /// The portal walk's result for the instance being culled.
         std::unordered_set<uint32_t> portalGroups;
 
         void clear() {
             used = 0;
-            portalCulled = distanceCulled = drawCalls = 0;
+            portalCulled = distanceCulled = frustumCulled = drawCalls = 0;
         }
         DrawEntry& add() {
             if (used == entries.size()) entries.emplace_back();
@@ -894,13 +921,20 @@ private:
         [[nodiscard]] std::span<const DrawEntry> drawn() const { return {entries.data(), used}; }
     };
     uint32_t viewDrawCallCount_ = 0;
+    /// The blended layer's, kept apart: it is recorded on another thread
+    /// from the opaque layer, at the same time.
+    uint32_t viewBlendedDrawCallCount_ = 0;
     /// The depth-only passes', one at a time on the main thread.
 
 
     /// The instances the camera sees and their groups that are drawn.
-    void cullView(const Camera& camera, const glm::vec3& portalViewerPos, DrawList& list) const;
+    /// The camera's view into `list`, and, given a mirror, what the water's
+    /// reflection can show into `mirrorList`; a group outside the camera's
+    /// volume is left out of the view, not of the reflection.
+    void cullView(const Camera& camera, const glm::vec3& portalViewerPos, DrawList& list,
+                  const WaterReflectionView* mirror = nullptr, DrawList* mirrorList = nullptr) const;
     uint32_t recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const glm::vec3& camPos,
-                    const DrawList& list) const;
+                    const DrawList& list, Layer layer) const;
     /// The instances, shown, and groups that reach a shadow map of this centre and reach.
     void extractDepth(DrawList& list) const;
     GroupDraw extractGroup(const GroupResources& group, const WMOInstance& instance, uint32_t groupIndex) const;

@@ -1,6 +1,5 @@
 #include "game/reputation_standing.hpp"
 #include "ui/ui_texture_load.hpp"
-#include "ui/ui_upload_budget.hpp"
 #include "ui/inventory_screen.hpp"
 #include "ui/item_tooltip.hpp"
 #include "audio/ui_sound_manager.hpp"
@@ -10,6 +9,7 @@
 #include "ui/ui_colors.hpp"
 #include "ui/keybinding_manager.hpp"
 #include "game/game_handler.hpp"
+#include "game/game_data.hpp"
 #include "core/application.hpp"
 #include "core/world_loader.hpp"
 #include "rendering/vk_context.hpp"
@@ -100,13 +100,6 @@ void InventoryScreen::renderItemTooltip(const game::ItemQueryResponseData& info,
                                         const game::Inventory* inventory,
                                         uint64_t itemGuid) {
     ui::renderItemTooltip(info, inventory, itemGuid, gameHandler_, assetManager_);
-}
-
-VkDescriptorSet InventoryScreen::getItemIcon(uint32_t displayInfoId) {
-    // The shared cache, so an item drawn here and on the action bar is
-    // uploaded once. See itemIconTexture.
-    return itemIconTexture(displayInfoId, assetManager_,
-                           core::Application::getInstance().getWindow());
 }
 
 // ============================================================
@@ -213,21 +206,15 @@ void InventoryScreen::cancelPickup(game::Inventory& inv) {
 /// Nothing in the client used the cursor art at all, so every cursor that
 /// meant something drew whatever the calling code had to hand.
 VkDescriptorSet InventoryScreen::castCursorTexture() {
-    if (!castCursorTexture_) {
-        if (assetManager_ && assetManager_->isInitialized()) {
-            castCursorTexture_ = uploadUiTextureFromBlp(
-                assetManager_, "Interface\\Cursor\\Cast.blp",
-                core::Application::getInstance().getWindow());
-        }
-    }
-    return castCursorTexture_;
+    return uploadUiTextureFromBlp(assetManager_, "Interface\\Cursor\\Cast.blp",
+        core::Application::getInstance().getWindow());
 }
 
 void InventoryScreen::renderItemTargetCursor() {
     // Both kinds of pending use: one waiting for an item to apply to, one
     // waiting for a unit. The cursor and the way out of it are the same.
-    const bool awaitingItem = gameHandler_ && gameHandler_->isAwaitingItemTarget();
-    const bool awaitingUnit = gameHandler_ && gameHandler_->isAwaitingUnitTarget();
+    const bool awaitingItem = gameHandler_ && gameHandler_->inventory().isAwaitingItemTarget();
+    const bool awaitingUnit = gameHandler_ && gameHandler_->inventory().isAwaitingUnitTarget();
     if (!awaitingItem && !awaitingUnit) {
         itemTargetArmedFrame_ = -1;
         return;
@@ -239,8 +226,8 @@ void InventoryScreen::renderItemTargetCursor() {
     if (itemTargetArmedFrame_ != ImGui::GetFrameCount() && !ImGui::GetIO().WantTextInput) {
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
             core::Input::getInstance().isKeyPressed(SDL_SCANCODE_ESCAPE)) {
-            gameHandler_->cancelItemTargeting();
-            gameHandler_->cancelUnitTargeting();
+            gameHandler_->inventory().cancelItemTargeting();
+            gameHandler_->inventory().cancelUnitTargeting();
             itemTargetArmedFrame_ = -1;
             return;
         }

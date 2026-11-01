@@ -1,5 +1,10 @@
 // Social commands: /friend, /removefriend, /ignore, /unignore, /invite, /inspect, /who
 // Moved from ChatPanel::sendChatMessage() if/else chain (Phase 3).
+#include "contacts/services/contacts.hpp"
+#include "trade/services/trade.hpp"
+#include "who/services/who.hpp"
+#include "duel/services/duels.hpp"
+#include "group/services/group.hpp"
 #include "ui/chat/i_chat_command.hpp"
 #include "ui/chat_panel.hpp"
 #include "game/game_handler.hpp"
@@ -13,7 +18,7 @@ class InviteCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (ctx.args.empty()) return {.handled = false, .clearInput = false};
-        ctx.gameHandler.inviteToGroup(ctx.args);
+        group::orNoGroup(ctx.services.group).inviteToGroup(ctx.args);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"invite"}; }
@@ -24,7 +29,7 @@ public:
 class InspectCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.inspectTarget();
+        ctx.gameHandler.social().inspectTarget();
         ctx.panel.getSlashCmds().showInspect = true;
         return {};
     }
@@ -42,15 +47,15 @@ public:
                 std::string subCmd = ctx.args.substr(0, subCmdSpace);
                 std::transform(subCmd.begin(), subCmd.end(), subCmd.begin(), ::tolower);
                 if (subCmd == "add") {
-                    ctx.gameHandler.addFriend(ctx.args.substr(subCmdSpace + 1));
+                    if (auto* contacts = ctx.services.contacts) contacts->addFriend(ctx.args.substr(subCmdSpace + 1));
                     return {};
                 } if (subCmd == "remove" || subCmd == "delete" || subCmd == "rem") {
-                    ctx.gameHandler.removeFriend(ctx.args.substr(subCmdSpace + 1));
+                    if (auto* contacts = ctx.services.contacts) contacts->removeFriend(ctx.args.substr(subCmdSpace + 1));
                     return {};
                 }
             } else {
                 // /addfriend name or /friend name (assume add)
-                ctx.gameHandler.addFriend(ctx.args);
+                if (auto* contacts = ctx.services.contacts) contacts->addFriend(ctx.args);
                 return {};
             }
         }
@@ -70,7 +75,7 @@ class RemoveFriendCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (!ctx.args.empty()) {
-            ctx.gameHandler.removeFriend(ctx.args);
+            if (auto* contacts = ctx.services.contacts) contacts->removeFriend(ctx.args);
             return {};
         }
         game::MessageChatData msg;
@@ -89,7 +94,7 @@ class IgnoreCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (!ctx.args.empty()) {
-            ctx.gameHandler.addIgnore(ctx.args);
+            if (auto* contacts = ctx.services.contacts) contacts->addIgnore(ctx.args);
             return {};
         }
         game::MessageChatData msg;
@@ -108,7 +113,7 @@ class UnignoreCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (!ctx.args.empty()) {
-            ctx.gameHandler.removeIgnore(ctx.args);
+            if (auto* contacts = ctx.services.contacts) contacts->removeIgnore(ctx.args);
             return {};
         }
         game::MessageChatData msg;
@@ -148,7 +153,7 @@ public:
             ctx.gameHandler.addLocalChatMessage(msg);
             return {};
         }
-        ctx.gameHandler.queryWho(query);
+        if (auto* who = ctx.services.who) who->queryWho(query);
         ctx.panel.getSlashCmds().showWho = true;
         return {};
     }
@@ -160,8 +165,8 @@ public:
 class DuelCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (ctx.gameHandler.hasTarget()) {
-            ctx.gameHandler.proposeDuel(ctx.gameHandler.getTargetGuid());
+        if (ctx.gameHandler.combat().hasTarget()) {
+            if (auto* duels = ctx.services.duels) duels->proposeDuel(ctx.gameHandler.combat().getTargetGuid());
         } else {
             game::MessageChatData msg;
             msg.type = game::ChatType::SYSTEM;
@@ -179,8 +184,8 @@ public:
 class TradeCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (ctx.gameHandler.hasTarget()) {
-            ctx.gameHandler.initiateTrade(ctx.gameHandler.getTargetGuid());
+        if (ctx.gameHandler.combat().hasTarget()) {
+            trade::orNoTrade(ctx.services.trade).initiateTrade(ctx.gameHandler.combat().getTargetGuid());
         } else {
             game::MessageChatData msg;
             msg.type = game::ChatType::SYSTEM;

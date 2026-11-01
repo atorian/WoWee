@@ -17,8 +17,9 @@ public:
     struct Options {
         std::string mpqDir;       // Path to WoW Data directory
         std::string outputDir;    // Output directory for extracted assets
-        std::string expansion;    // "classic", "turtle", "tbc", "wotlk", or "" for auto-detect
+        std::string expansion;    // "classic", "tbc", "wotlk", or "" for auto-detect
         std::string locale;       // "enUS", "deDE", etc., or "" for auto-detect
+        bool localeOnly = false; // Extract only the selected locale archives (text, fonts, speech, art)
         bool expansionSubdir = false; // Write under outputDir/expansions/<expansion>
         int threads = 0;          // 0 = auto-detect
         bool verify = false;      // CRC32 verify after extraction
@@ -55,6 +56,8 @@ public:
         /// bar counts whole stages, so it sat still for minutes and read as
         /// a hang. Same shape as writePack's.
         std::function<void(std::size_t done, std::size_t total)> onProgress;
+        // The window must show the same failure details as the command line.
+        std::function<void(const std::string&)> onError;
     };
 
     struct Stats {
@@ -66,7 +69,7 @@ public:
 
     /**
      * Auto-detect expansion from files in mpqDir.
-     * @return "classic", "turtle", "tbc", "wotlk", or "" if unknown
+     * @return "classic", "tbc", "wotlk", or "" if unknown
      */
     static std::string detectExpansion(const std::string& mpqDir);
 

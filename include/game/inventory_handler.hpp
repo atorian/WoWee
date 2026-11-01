@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/event_bus.hpp"
 #include "game/world_packet_data.hpp"
 #include "game/opcode_table.hpp"
 #include "game/inventory.hpp"
@@ -19,8 +20,14 @@
 
 namespace wowee {
 namespace core { class EventBus; class CVarStore; }
-namespace pipeline { class AssetManager; }
+namespace auction { class IAuctionHouseFeed; enum class AuctionList; }
+namespace mail { class IMailboxFeed; }
+namespace guild_bank { class IGuildBankFeed; class IGuildBank; }
+namespace trade { class ITradeFeed; }
+namespace loot { class ILootFeed; class ILoot; }
 namespace game {
+
+class GameData;
 
 class PacketSender;
 class FrameXmlEvents;
@@ -150,10 +157,38 @@ public:
     /// A gossip or quest window is on screen.
     [[nodiscard]] virtual bool npcDialogOpen() const = 0;
     virtual void closeGossip() = 0;
+    /// A game object's template; null until the realm has said it.
+    [[nodiscard]] virtual const GameObjectQueryResponseData* gameObjectInfo(uint32_t entry) const = 0;
+    /// Ask for a game object's template, for the object `guid`.
+    virtual void requestGameObjectInfo(uint32_t entry, uint64_t guid) = 0;
     /// Whether a quest in the log asks for this item.
     [[nodiscard]] virtual bool questWantsItem(uint32_t itemId) const = 0;
     /// Run a line of the interface's own Lua.
     virtual void runInterfaceCommand(const std::string& lua) = 0;
+    /// Whether a button on the action bar holds an item, whose count a bag
+    /// change moves.
+    [[nodiscard]] virtual bool actionBarHoldsItem() const = 0;
+    /// The coinage field turned out to be at `index` on this realm.
+    virtual void coinageFieldFoundAt(uint16_t index) = 0;
+
+    // ---- The contexts it feeds ----
+    /// Where the auction house's packets and the client's clock go; null when
+    /// the client was built without it.
+    [[nodiscard]] virtual auction::IAuctionHouseFeed* auctionFeed() = 0;
+    /// Where the mail packets and a late name or item go; null as above.
+    [[nodiscard]] virtual mail::IMailboxFeed* mailFeed() = 0;
+    /// Where the guild bank's list and tab texts go; null as above.
+    [[nodiscard]] virtual guild_bank::IGuildBankFeed* guildBankFeed() = 0;
+    /// The vault as it stands, which a slots-only list is read over; null as
+    /// above.
+    [[nodiscard]] virtual const guild_bank::IGuildBank* guildBank() const = 0;
+    /// Where the trade status packets go; null as above.
+    [[nodiscard]] virtual trade::ITradeFeed* tradeFeed() = 0;
+    /// Where the loot packets, the frame's time and an item's arrival go;
+    /// null as above.
+    [[nodiscard]] virtual loot::ILootFeed* lootFeed() = 0;
+    /// The open loot, which a full-bags refusal names; null as above.
+    [[nodiscard]] virtual const loot::ILoot* loot() const = 0;
 };
 
 class InventoryHandler {
@@ -164,7 +199,7 @@ public:
     InventoryHandler(PacketSender& sender, FrameXmlEvents& frameXml,
                      core::EventBus& events, ChatLog& chat,
                      InventoryQueries& queries, const core::CVarStore& cvars,
-                     pipeline::AssetManager* assets);
+                     const GameData& data);
 
     /// Announce that the bags changed, one event per bag.
     ///
@@ -251,6 +286,20 @@ public:
     };
     /// A held item's fields changed (a VALUES block).
     ItemObjectChange updateItemObject(uint64_t guid, bool isContainer, const FlatFieldMap& fields);
+    /// A held item's fields changed, as the object updates report it: the
+    /// bags are rebuilt and redrawn, and the rest of what the change means -
+    /// an item count on the action bar, the durability indicator - goes out
+    /// on `packetEvents`, among the other events of the packet it came in.
+    void itemObjectChanged(uint64_t guid, bool isContainer, const FlatFieldMap& fields,
+                           FrameXmlEvents& packetEvents);
+    /// The player's fields arrived (`isCreate` for the create block): the item
+    /// slots they hold are read, and a change is redrawn - on an update with
+    /// PLAYER_EQUIPMENT_CHANGED on `packetEvents` as well.
+    void inventoryFieldsArrived(const FlatFieldMap& fields, bool isCreate, FrameXmlEvents& packetEvents);
+    /// A packet's blocks are all applied: the bags are rebuilt once for the
+    /// item objects it created, and the slot layout is worked out late, once
+    /// both the player's fields and the items are known.
+    void updateBatchFinished(bool newItemCreated, const FlatFieldMap& playerFields);
     /// An item object left the client's view - destroyed, traded, mailed.
     /// Returns whether it was one the player held.
     bool forgetItemObject(uint64_t guid);
@@ -289,6 +338,13 @@ public:
     /// changed, which the caller announces (PLAYER_MONEY) with the rest of
     /// the update it came in.
     bool setMoneyFromFields(uint64_t copper);
+    /// PLAYER_FIELD_COINAGE arrived: PLAYER_MONEY goes out on `packetEvents`
+    /// when the coin moved.
+    void moneyFieldArrived(uint64_t copper, FrameXmlEvents& packetEvents);
+    /// The player's fields before and after an update. While a coin change is
+    /// expected and the coinage field's index is not known, the field that
+    /// moved by exactly that much is it.
+    void detectCoinageField(const FlatFieldMap& before, const FlatFieldMap& after);
     /// A realm's own authoritative extended balance.
     void applyServerMoney(uint64_t copper);
     /// The coin the client is waiting to see added to a field, while the
@@ -342,6 +398,17 @@ public:
     /// A new book is opened - an item read, an object used - before its first
     /// page is asked for. SMSG_PAGE_TEXT_QUERY_RESPONSE fills it, here.
     void beginBook(std::string title, uint32_t material);
+    /// Read what is written on a game object: a sign, a plaque, a gravestone.
+    ///
+    /// Public because the click is where this starts. SMSG_GAMEOBJECT_PAGETEXT
+    /// is the server *offering* a page, which not every server sends and no
+    /// server sends for a plain sign - the real client reads the page id out of
+    /// the object's own data and asks for the text itself. Both ends arrive
+    /// here.
+    void readGameObject(uint64_t guid);
+    /// A game object template arrived: a sign clicked before it came is read
+    /// now.
+    void gameObjectTemplateArrived(const GameObjectQueryResponseData& data);
 
     // ---- Refunds -------------------------------------------------------------
 
@@ -354,84 +421,21 @@ public:
         return (it != held_.itemRefundInfo.end()) ? &it->second : nullptr;
     }
 
-    /// Whether this corpse or chest was opened and still has items in it, by
-    /// what its last loot window held. Tab targeting asks, so a corpse left
-    /// with loot on it stays in the cycle after the fight.
-    [[nodiscard]] bool hasLootLeft(uint64_t guid) const {
-        auto it = localLootState_.find(guid);
-        return it != localLootState_.end() && !it->second.data.items.empty();
-    }
-
     // ---- Item text (books / readable items) ----
     bool isItemTextOpen() const { return itemTextOpen_; }
     const std::string& getItemText() const { return itemText_; }
     void closeItemText();
-    void queryItemText(uint64_t itemGuid);
 
-    // ---- Trade (types in handler_types.hpp) ----
-    using TradeStatus = game::TradeStatus;
-    using TradeSlot = game::TradeSlot;
-    static constexpr int TRADE_SLOT_COUNT     = kTradeSlotCount;
-    static constexpr int TRADE_SLOT_NONTRADED = kTradeSlotNonTraded;
-
-    TradeStatus getTradeStatus() const { return tradeStatus_; }
-    bool hasPendingTradeRequest() const { return tradeStatus_ == TradeStatus::PendingIncoming; }
-    bool isTradeOpen() const { return tradeStatus_ == TradeStatus::Open || tradeStatus_ == TradeStatus::Accepted; }
-    const std::string& getTradePeerName() const { return tradePeerName_; }
-    uint64_t getTradePeerGuid() const { return tradePeerGuid_; }
-    const std::array<TradeSlot, TRADE_SLOT_COUNT>& getMyTradeSlots() const { return myTradeSlots_; }
-    const std::array<TradeSlot, TRADE_SLOT_COUNT>& getPeerTradeSlots() const { return peerTradeSlots_; }
-    uint64_t getMyTradeGold() const { return myTradeGold_; }
-    uint64_t getPeerTradeGold() const { return peerTradeGold_; }
-    void acceptTradeRequest();
-    void declineTradeRequest();
-    void acceptTrade();
-    void unacceptTrade();
-    void cancelTrade();
-    void setTradeItem(uint8_t tradeSlot, uint8_t srcBag, uint8_t srcSlot);
-    void clearTradeItem(uint8_t tradeSlot);
-    void setTradeGold(uint64_t amount);
-
-    // ---- Loot ----
-    void lootTarget(uint64_t targetGuid);
-    /// Take the coin on the corpse. Its own request, with no slot:
-    /// money is not one of the numbered loot slots on the wire even
-    /// though the interface shows it as one.
-    void lootMoney();
+    /// Money looted, into the purse, and shown as the change it made.
+    void creditLootedMoney(uint32_t copper);
     /// Drop a temporary weapon enchant - a sharpening stone, poison, or a
     /// shaman's weapon imbue. Slot zero is the main hand and one the off hand,
     /// which is how the request numbers them; the interface counts from one.
     void cancelTempEnchantment(uint8_t handIndex);
-    void closeLoot();
-    bool isLootWindowOpen() const { return lootWindowOpen_; }
-    const LootResponseData& getCurrentLoot() const { return currentLoot_; }
-    void setAutoLoot(bool enabled) { autoLoot_ = enabled; }
-    bool isAutoLoot() const { return autoLoot_; }
     void setAutoSellGrey(bool enabled) { autoSellGrey_ = enabled; }
     bool isAutoSellGrey() const { return autoSellGrey_; }
     void setAutoRepair(bool enabled) { autoRepair_ = enabled; }
     bool isAutoRepair() const { return autoRepair_; }
-
-    // Master loot candidates (from SMSG_LOOT_MASTER_LIST)
-    const std::vector<uint64_t>& getMasterLootCandidates() const { return masterLootCandidates_; }
-    bool hasMasterLootCandidates() const { return !masterLootCandidates_.empty(); }
-    void lootMasterGive(uint8_t lootSlot, uint64_t targetGuid);
-
-    // Group loot roll (aliased from handler_types.hpp)
-    using LootRollEntry = game::LootRollEntry;
-    /// The roll the interface means, or null when it has already closed.
-    ///
-    /// Every roll the player has open is kept. This used to hold one: a dungeon
-    /// boss puts up several at once, each new roll overwrote the last, and a
-    /// window already on screen then described the item from the roll after it
-    /// - and rolling Need on it rolled on that one instead.
-    const LootRollEntry* getLootRoll(int rollId) const {
-        for (const auto& roll : lootRolls_) {
-            if (roll.rollId == rollId) return &roll;
-        }
-        return nullptr;
-    }
-    void sendLootRoll(uint64_t objectGuid, uint32_t slot, uint8_t rollType);
 
     // ---- Equipment Sets (aliased from handler_types.hpp) ----
     using EquipmentSetInfo = game::EquipmentSetInfo;
@@ -451,7 +455,6 @@ public:
         }
         return 0;
     }
-    bool supportsEquipmentSets() const;
     void useEquipmentSet(uint32_t setId);
     void saveEquipmentSet(const std::string& name, const std::string& iconName = "INV_Misc_QuestionMark",
                           uint64_t existingGuid = 0, uint32_t setIndex = 0xFFFFFFFF);
@@ -466,7 +469,6 @@ public:
         // identity, not the item's current row in the buyback UI.
         uint32_t wireSlot = 0;
     };
-    void openVendor(uint64_t npcGuid);
     void closeVendor();
     // Drop the session-persistent buyback mirror (fresh character world entry).
     void clearBuybackState();
@@ -492,9 +494,8 @@ public:
     void autoEquipItemBySlot(int backpackIndex, bool confirmed = false);
     void autoEquipItemInBag(int bagIndex, int slotIndex, bool confirmed = false);
 
-    /// Whether equipping what is in a slot would bind it - ItemDef carries
-    /// the rule; these two just find the item.
-    bool equipWouldBindFromBackpack(int backpackIndex) const;
+    /// Whether equipping what is in a bag slot would bind it - ItemDef carries
+    /// the rule; this just finds the item.
     bool equipWouldBindFromBag(int bagIndex, int slotIndex) const;
 
     /// The equip held back waiting for an answer. One at a time - FrameXML's
@@ -507,17 +508,6 @@ public:
         int     slot    = 0;
         uint8_t wireSlot = 0;   ///< what the event carried, for the reply
     };
-    // ---- Looting, and the prompt before something binds ----
-    //
-    // Same shape as the equip prompt above and for the same reason: neither
-    // interface warned before taking a bind-on-pickup item.
-    void lootItem(uint8_t slotIndex, bool confirmed = false);
-    /// Send the loot request that was held back. The dialog passes the slot it
-    /// was shown for, but only one can be waiting, so the held one is enough -
-    /// and going back through lootItem with the slot would raise the prompt
-    /// again, which is a loop rather than a confirmation.
-    void confirmPendingLoot();
-
     /// Send the use that was held back by the bind-on-use prompt. USE_BIND
     /// carries no slot at all - FrameXML shows it and calls this with nothing -
     /// so the held request is the only record of what was being used.
@@ -548,8 +538,6 @@ public:
     // ---- Item-targeted item use (sharpening stones, weightstones, weapon oils) ----
     /// True while a used item is waiting for the player to pick the item it applies to.
     bool isAwaitingItemTarget() const;
-    /// Entry of the item awaiting a target (0 if none) - drives the targeting cursor.
-    uint32_t getPendingItemTargetSourceItemId() const;
     void cancelItemTargeting();
 
     // ---- Unit-targeted item use (bandages, treats, quest items) ----
@@ -559,8 +547,6 @@ public:
     /// in WoW: the cursor changes and the next click on someone chooses them.
     /// Without this the item simply did nothing.
     bool isAwaitingUnitTarget() const;
-    /// Entry of the item awaiting a unit (0 if none) - drives the cursor.
-    uint32_t getPendingUnitTargetSourceItemId() const;
     void cancelUnitTargeting();
     /// Sends the parked CMSG_USE_ITEM against the unit the player clicked.
     void completeItemUseOnUnit(uint64_t targetUnitGuid);
@@ -576,7 +562,6 @@ public:
     void readItemBySlot(int backpackIndex);
     void readItemInBag(int bagIndex, int slotIndex);
     void destroyItem(uint8_t bag, uint8_t slot, uint8_t count = 1);
-    void splitItem(uint8_t srcBag, uint8_t srcSlot, uint8_t count);
     /// Split `count` off a stack into a named slot.
     ///
     /// The interface's SplitContainerItem does not choose a destination: it puts
@@ -601,93 +586,12 @@ public:
     void setVendorCanRepair(bool v) { currentVendorItems_.canRepair = v; }
     uint64_t getVendorGuid() const { return currentVendorItems_.vendorGuid; }
 
-    // ---- Mail ----
-    // Slots the UI can hold. What can actually be sent depends on the wire
-    // format - see maxSendableMailAttachments().
-    static constexpr int MAIL_MAX_ATTACHMENTS = 12;
-
-    /// How many attachments this expansion's CMSG_SEND_MAIL can carry. Vanilla
-    /// writes a single item GUID, so anything past the first was silently left
-    /// in the player's bags while the UI happily accepted twelve.
-    static int maxSendableMailAttachments();
-    struct MailAttachSlot {
-        uint64_t itemGuid = 0;
-        game::ItemDef item;
-        uint8_t srcBag = 0xFF;
-        uint8_t srcSlot = 0;
-        [[nodiscard]] bool occupied() const { return itemGuid != 0; }
-    };
-    bool isMailboxOpen() const { return mailboxOpen_; }
-    const std::vector<MailMessage>& getMailInbox() const { return mailInbox_; }
-    /// Writable, for the backfill that fills in a mail's sender once the name
-    /// packet for that guid arrives.
-    std::vector<MailMessage>& mailInboxRef() { return mailInbox_; }
-    int getSelectedMailIndex() const { return selectedMailIndex_; }
-    void setSelectedMailIndex(int idx) { selectedMailIndex_ = idx; }
-    bool isMailComposeOpen() const { return showMailCompose_; }
-
-    /// Whether the compose frame is on screen, without touching the draft.
-    ///
-    /// FrameXML owns the mail window and says so through SetSendMailShowing as
-    /// its two tabs swap. openMailCompose empties the attachments, which is
-    /// right when this client's own window opens a fresh letter and wrong on a
-    /// tab switch - flipping to the inbox and back would drop what was on it.
-    void setMailComposeShowing(bool showing) { showMailCompose_ = showing; }
-    void openMailCompose() { showMailCompose_ = true; clearMailAttachments(); }
-    void closeMailCompose() { showMailCompose_ = false; clearMailAttachments(); }
-    bool hasNewMail() const { return hasNewMail_; }
-    void openMailbox(uint64_t guid);
-    void closeMailbox();
-    /// What the server's mail refusal means, in words.
-    ///
-    /// SMSG_SEND_MAIL_RESULT carries a number from MailResponseResult and the
-    /// client printed it bare - "Failed to send mail (error 19)" says nothing
-    /// about what to do differently, and 19 is the one a player can actually
-    /// act on: something on the letter cannot be mailed.
-    static const char* mailResultText(uint32_t error);
-
-    /// Put paper in the compose frame, so its Send button can be enabled.
-    void selectDefaultStationery();
-
-    /// Say why a letter is not going out, and tell the compose frame so it
-    /// puts its Send button back.
-    void refuseSend(const std::string& reason, const char* logLine);
-
-    void sendMail(const std::string& recipient, const std::string& subject,
-                  const std::string& body, uint64_t money, uint64_t cod = 0);
-    bool attachItemFromBackpack(int backpackIndex);
-    /// Raise MAIL_LOCK_SEND_ITEMS when the attachment still has a refund
-    /// window, which posting it ends.
-    void noteMailAttachRefundable(int attachIndex);
-    bool attachItemFromBag(int bagIndex, int slotIndex);
-    bool detachMailAttachment(int attachIndex);
-    void clearMailAttachments();
-
-    /// Tell the compose frame its attachments changed.
-    ///
-    /// The letter being written lives entirely on this side; the send frame
-    /// draws its twelve slots, its postage and its Send button from
-    /// GetSendMailItem and redraws them only on MAIL_SEND_INFO_UPDATE. Attaching
-    /// and detaching used to change the list without saying so, and only the
-    /// send - which clears it - announced itself. So an item clicked onto the
-    /// letter went onto it and the slot stayed empty, with the item gone from
-    /// the cursor as well: it read as the attach having been refused.
-    void notifyMailComposeChanged();
-    const std::array<MailAttachSlot, 12>& getMailAttachments() const { return mailAttachments_; }
-    int getMailAttachmentCount() const;
-    void mailTakeMoney(uint32_t mailId);
-    void mailTakeItem(uint32_t mailId, uint32_t itemGuidLow);
-    void mailDelete(uint32_t mailId);
-    void mailReturnToSender(uint32_t mailId);
-    void mailMarkAsRead(uint32_t mailId);
-    void refreshMailList();
-
     // ---- Item socketing ----
     //
     // A gem is not put into an item one at a time: the player fills the sockets
     // on screen and then commits all three at once, and until they press the
     // button nothing has happened on the server. So the pending gems are this
-    // client's own state, exactly like the mail attachment slots above.
+    // client's own state, exactly like the letter being written at a mailbox.
     struct SocketSession {
         bool     open     = false;
         uint64_t itemGuid = 0;   ///< the item whose sockets are on screen
@@ -722,15 +626,6 @@ public:
     int getEffectiveBankSlots() const { return effectiveBankSlots_; }
     int getEffectiveBankBagSlots() const { return effectiveBankBagSlots_; }
 
-    // ---- Guild Bank ----
-    void openGuildBank(uint64_t guid);
-    void closeGuildBank();
-    void queryGuildBankTab(uint8_t tabId);
-    void buyGuildBankTab();
-    void depositGuildBankMoney(uint32_t amount);
-    void withdrawGuildBankMoney(uint32_t amount);
-    void guildBankWithdrawItem(uint8_t tabId, uint8_t bankSlot, uint8_t destBag,
-                               uint8_t destSlot, uint32_t splitCount = 0);
     /// Put a glyph from a bag slot into a socket.
     ///
     /// There is no separate socketing opcode in 3.3.5: the glyph item is used
@@ -738,70 +633,6 @@ public:
     /// carries, and the server applies the item's spell to that socket. The
     /// wire's bag and slot are the same ones a plain use writes.
     void placeGlyphFromBag(uint8_t wireBag, uint8_t wireSlot, uint32_t socketIndex);
-
-    /// Ask for a tab's info text, and read back what arrived.
-    ///
-    /// MSG_QUERY_GUILD_BANK_TEXT is a request the server answers with the same
-    /// opcode: a tab id and the text. This client could already *write* the
-    /// text - SetGuildBankText has sent CMSG_SET_GUILD_BANK_TEXT all along -
-    /// and had no way to read it, so a tab's description could be saved and
-    /// never seen again.
-    void queryGuildBankText(uint8_t tabId);
-    const std::string& getGuildBankTabText(uint8_t tabId) const;
-
-    /// Rename a guild bank tab and pick its icon.
-    ///
-    /// CMSG_GUILD_BANK_UPDATE_TAB: the banker's guid, the tab counted from
-    /// zero, then the name and the icon path. AzerothCore drops it unless both
-    /// strings are non-empty and the player is standing at the bank, which is
-    /// why the empty name the popup allows is refused here rather than sent.
-    void setGuildBankTabInfo(uint8_t tabId, const std::string& name,
-                             const std::string& icon);
-    void guildBankDepositItem(uint8_t tabId, uint8_t bankSlot, uint8_t srcBag, uint8_t srcSlot);
-    // Deposit an inventory item into the first free slot of the viewed tab.
-    void guildBankDepositFromInventory(uint8_t srcBag, uint8_t srcSlot);
-    bool isGuildBankOpen() const { return guildBankOpen_; }
-    const GuildBankData& getGuildBankData() const { return guildBankData_; }
-    /// The guild bank's balance as SMSG_GUILD_EVENT reports it. The bank list
-    /// is only sent to whoever is standing at the banker; everyone else learns
-    /// the new total from the event, and GetGuildBankMoney has to answer with
-    /// it or the panel shows the figure it opened with.
-    void setGuildBankMoney(uint64_t money);
-    uint8_t getGuildBankActiveTab() const { return guildBankActiveTab_; }
-    void setGuildBankActiveTab(uint8_t tab) { guildBankActiveTab_ = tab; }
-
-    // ---- Auction House ----
-    void openAuctionHouse(uint64_t guid);
-    void closeAuctionHouse();
-    void auctionSearch(const std::string& name, uint8_t levelMin, uint8_t levelMax,
-                       uint32_t quality, uint32_t itemClass, uint32_t itemSubClass,
-                       uint32_t invTypeMask, uint8_t usableOnly, uint32_t offset = 0,
-                       const std::vector<AuctionSortKey>& sort = {});
-    void auctionSellItem(int backpackIndex, uint32_t bid,
-                         uint32_t buyout, uint32_t duration);
-    // Post an auction for an item identified by its server GUID, so items in any
-    // container (backpack or equipped bags) can be listed, not just the backpack.
-    void auctionSellItemByGuid(uint64_t itemGuid, uint32_t stackCount, uint32_t bid,
-                               uint32_t buyout, uint32_t duration);
-    void auctionPlaceBid(uint32_t auctionId, uint32_t amount);
-    void auctionBuyout(uint32_t auctionId, uint32_t buyoutPrice);
-    void auctionCancelItem(uint32_t auctionId);
-    void auctionListOwnerItems(uint32_t offset = 0);
-    void auctionListBidderItems(uint32_t offset = 0);
-    bool isAuctionHouseOpen() const { return auctionOpen_; }
-    uint64_t getAuctioneerGuid() const { return auctioneerGuid_; }
-    const AuctionListResult& getAuctionBrowseResults() const { return auctionBrowseResults_; }
-    const AuctionListResult& getAuctionOwnerResults() const { return auctionOwnerResults_; }
-    const AuctionListResult& getAuctionBidderResults() const { return auctionBidderResults_; }
-    /// Writable, for the one thing that reorders a result set in place: the
-    /// panel's own column sort. The server sends a list and the client sorts
-    /// it, which is what the real client does too, there is no re-query.
-    AuctionListResult& auctionBrowseResultsRef() { return auctionBrowseResults_; }
-    AuctionListResult& auctionOwnerResultsRef()  { return auctionOwnerResults_; }
-    AuctionListResult& auctionBidderResultsRef() { return auctionBidderResults_; }
-    int getAuctionActiveTab() const { return auctionActiveTab_; }
-    void setAuctionActiveTab(int tab) { auctionActiveTab_ = tab; }
-    float getAuctionSearchDelay() const { return auctionSearchDelayTimer_; }
 
     // ---- Trainer ----
     struct TrainerTab {
@@ -813,12 +644,9 @@ public:
     void trainSpell(uint32_t spellId);
     void closeTrainer();
     const std::vector<TrainerTab>& getTrainerTabs() const { return trainerTabs_; }
-    void resetTradeState();
 
     // ---- Methods moved from GameHandler ----
-    void initiateTrade(uint64_t targetGuid);
     uint32_t getTempEnchantRemainingMs(uint32_t slot) const;
-    void addMoneyCopper(uint32_t amount);
 
     // ---- Inventory field / rebuild methods (moved from GameHandler) ----
     void queryItemInfo(uint32_t entry, uint64_t guid);
@@ -859,40 +687,14 @@ public:
 
 private:
     // --- Packet handlers ---
-    void handleLootResponse(network::Packet& packet);
-    void handleLootReleaseResponse(network::Packet& packet);
-    void handleLootRemoved(network::Packet& packet);
     void handleListInventory(network::Packet& packet);
     void handleTrainerList(network::Packet& packet);
     void handleItemTextQueryResponse(network::Packet& packet);
-    void handleTradeStatus(network::Packet& packet);
-    void handleTradeStatusExtended(network::Packet& packet);
-    void handleLootRoll(network::Packet& packet);
-    void handleLootRollWon(network::Packet& packet);
-
-    /// Tell the interface a roll is over, by the id it was opened with.
-    ///
-    /// The roll window hides itself on this and nothing else, so without it a
-    /// resolved roll stays on screen over a bar that has run down, offering
-    /// buttons the server has already stopped listening for.
-    LootRollEntry& beginLootRoll(uint64_t objectGuid, uint32_t slot);
-    LootRollEntry* findLootRoll(uint64_t objectGuid, uint32_t slot);
-    void endLootRoll(uint64_t objectGuid, uint32_t slot);
     void handleShowBank(network::Packet& packet);
     void handleBuyBankSlotResult(network::Packet& packet);
-    void handleGuildBankList(network::Packet& packet);
-    void handleAuctionHello(network::Packet& packet);
-    void handleAuctionListResult(network::Packet& packet);
-    void handleAuctionOwnerListResult(network::Packet& packet);
-    void handleAuctionBidderListResult(network::Packet& packet);
-    void handleAuctionCommandResult(network::Packet& packet);
-    void handleShowMailbox(network::Packet& packet);
-    void handleMailListResult(network::Packet& packet);
-    void handleSendMailResult(network::Packet& packet);
-    void handleReceivedMail(network::Packet& packet);
-    void handleQueryNextMailTime(network::Packet& packet);
-    // Update the unread-mail flag, announcing (chat + sound) once on the rising edge.
-    void setHasNewMail(bool value);
+    /// An auction list result, for the list it names, or for the one last
+    /// asked for when it names none.
+    void handleAuctionListResult(network::Packet& packet, std::optional<auction::AuctionList> list);
     void handleEquipmentSetList(network::Packet& packet);
 
     void categorizeTrainerSpells();
@@ -915,11 +717,6 @@ private:
     /// SMSG_PAGE_TEXT_QUERY_RESPONSE: a page of the book being read.
     void handlePageTextQueryResponse(network::Packet& packet);
 
-    /// Advances the fallback that announces looted money when the server
-    /// never sends SMSG_LOOT_MONEY_NOTIFY.
-    void tickLootMoneyFallback(float deltaTime);
-    /// The auction house's search button waits this out after a search.
-    void tickAuctionSearchDelay(float deltaTime);
     /// Equipment visuals fall back on an inspect when a player's visible-item
     /// fields cannot be read; one goes out at a time, rate-limited.
     void sendPendingAutoInspect(float deltaTime);
@@ -935,10 +732,13 @@ private:
     core::EventBus& events_;
     ChatLog& chat_;
     InventoryQueries& queries_;
-    const core::CVarStore& cvars_;
     /// The client's data, for the repair cost tables. Null in a test that
     /// has none, which leaves repairs unestimated.
-    pipeline::AssetManager* const assets_;
+    const GameData& data_;
+    /// The auction house's, the mailbox's, the vault's, the trade's and the
+    /// loot's chat lines and panel events, and the late names a letter waits
+    /// on, for as long as this handler lives.
+    std::vector<core::EventBus::Subscription> subscriptions_;
 
     /// Everything the character holds, as the realm has described it. Its own
     /// struct so that a new character starts from nothing in one step -
@@ -973,6 +773,14 @@ private:
         std::vector<BookPage> bookPages;
         std::string bookTitle;
         uint32_t bookMaterial = 0;
+        /// Objects clicked to be read before their template arrived.
+        ///
+        /// The page id lives in the query response, so a sign clicked in the
+        /// first moments after it spawns has nothing to read from yet. The
+        /// click is kept here and answered when the response lands, rather
+        /// than dropped - which is a sign that does nothing the first time it
+        /// is clicked and works the second.
+        std::unordered_set<uint64_t> pendingReads;
         std::unordered_map<uint64_t, ItemRefundInfo> itemRefundInfo;
         /// Items whose refund has been asked about, so it is asked once.
         std::set<uint64_t> itemRefundAsked;
@@ -1053,50 +861,9 @@ private:
     bool        itemTextOpen_   = false;
     std::string itemText_;
 
-    // ---- Trade state ----
-    TradeStatus tradeStatus_  = TradeStatus::None;
-    /// Which side has pressed accept, kept apart because TRADE_ACCEPT_UPDATE
-    /// carries both and tradeStatus_ can only say one thing at a time. Ours is
-    /// set when the accept goes out - the server echoes an acceptance to the
-    /// other player, not back to the one who made it, so there is nothing else
-    /// to learn it from.
-    bool tradeSelfAccepted_ = false;
-    bool tradePartnerAccepted_ = false;
-    void fireTradeAcceptUpdate();
-    uint64_t    tradePeerGuid_= 0;
-    std::string tradePeerName_;
-    std::array<TradeSlot, TRADE_SLOT_COUNT> myTradeSlots_{};
-    std::array<TradeSlot, TRADE_SLOT_COUNT> peerTradeSlots_{};
-    uint64_t myTradeGold_   = 0;
-    uint64_t peerTradeGold_ = 0;
-
-    // ---- Loot state ----
-    bool lootWindowOpen_ = false;
-    bool autoLoot_ = false;
+    // ---- Merchant settings ----
     bool autoSellGrey_ = false;
     bool autoRepair_ = false;
-    LootResponseData currentLoot_;
-    std::vector<uint64_t> masterLootCandidates_;
-
-    // Group loot roll state
-    std::vector<LootRollEntry> lootRolls_;
-    /// Never reused within a session, so a window that outlives its roll finds
-    /// nothing rather than somebody else's item.
-    int           nextLootRollId_ = 1;
-    struct LocalLootState {
-        LootResponseData data;
-        bool moneyTaken = false;
-        bool itemAutoLootSent = false;
-    };
-    std::unordered_map<uint64_t, LocalLootState> localLootState_;
-    void announceLootMoney(uint64_t lootGuid, uint32_t amount);
-    /// The coin is gone from the open loot window, because the server has said
-    /// so. Idempotent: both packets that report it call this.
-    void clearLootMoney();
-    uint64_t pendingLootMoneyGuid_ = 0;
-    uint32_t pendingLootMoneyAmount_ = 0;
-    float pendingLootMoneyNotifyTimer_ = 0.0f;
-    std::unordered_map<uint64_t, float> recentLootMoneyAnnounceCooldowns_;
 
     // ---- Vendor state ----
     bool vendorWindowOpen_ = false;
@@ -1119,7 +886,6 @@ private:
     /// when the window opened.
     void notifyBuybackChanged();
 
-    // ---- Mail state ----
     SocketSession socketSession_;
     PendingEquip pendingEquip_;
     /// The use held back waiting for an answer. Kept whole rather than as a
@@ -1147,15 +913,6 @@ private:
         PendingItemTarget request;
     };
     PendingEnchant pendingEnchant_;
-    bool pendingLootActive_ = false;
-    uint8_t pendingLootSlot_ = 0;
-    bool mailboxOpen_ = false;
-    uint64_t mailboxGuid_ = 0;
-    std::vector<MailMessage> mailInbox_;
-    int selectedMailIndex_ = -1;
-    bool showMailCompose_ = false;
-    bool hasNewMail_ = false;
-    std::array<MailAttachSlot, MAIL_MAX_ATTACHMENTS> mailAttachments_{};
 
     // ---- Bank state ----
     bool bankOpen_ = false;
@@ -1168,40 +925,6 @@ private:
     std::vector<int> pendingBankSlotEvents_;
     int effectiveBankSlots_ = 28;
     int effectiveBankBagSlots_ = 7;
-
-    // ---- Guild Bank state ----
-    bool guildBankOpen_ = false;
-    uint64_t guildBankerGuid_ = 0;
-    std::array<std::string, 6> guildBankTabText_{};
-    GuildBankData guildBankData_;
-    uint8_t guildBankActiveTab_ = 0;
-
-    // ---- Auction House state ----
-    bool auctionOpen_ = false;
-    uint64_t auctioneerGuid_ = 0;
-    AuctionListResult auctionBrowseResults_;
-    AuctionListResult auctionOwnerResults_;
-    AuctionListResult auctionBidderResults_;
-    int auctionActiveTab_ = 0;
-    float auctionSearchDelayTimer_ = 0.0f;
-    struct AuctionSearchParams {
-        std::string name;
-        uint8_t levelMin = 0, levelMax = 0;
-        uint32_t quality = 0xFFFFFFFF;
-        uint32_t itemClass = 0xFFFFFFFF;
-        uint32_t itemSubClass = 0xFFFFFFFF;
-        uint32_t invTypeMask = 0;
-        uint8_t usableOnly = 0;
-        uint32_t offset = 0;
-        /// Carried so the re-query after a successful bid asks for the same
-        /// ordering. Dropping it there would reorder the list under the player
-        /// at the moment they bought something.
-        std::vector<AuctionSortKey> sort;
-    };
-    AuctionSearchParams lastAuctionSearch_;
-    bool hasAuctionSearch_ = false;  // true after any search (including empty-name browse-all)
-    enum class AuctionResultTarget { BROWSE, OWNER, BIDDER };
-    AuctionResultTarget pendingAuctionTarget_ = AuctionResultTarget::BROWSE;
 
     // ---- Trainer state ----
     bool trainerWindowOpen_ = false;

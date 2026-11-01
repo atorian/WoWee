@@ -34,8 +34,8 @@ TEST_CASE("Mana Shield's card faces the camera whichever way its unit faces", "[
                                        glm::vec3(0.0f, 0.0f, 1.0f));
         inst.invModelMatrix = glm::inverse(inst.modelMatrix);
         inst.currentSequenceIndex = 0;
-        inst.animTime = 350.0f;  // the card at full size
-        rendering::computeBoneMatrices(gpu, inst, &view);
+        // At 350 ms the card is at full size.
+        rendering::computeBoneMatrices(gpu, inst, 350.0f, 0.0f, &view);
 
         // The card's normal is the model's X axis, carried by a child bone.
         const glm::mat4 world = inst.modelMatrix * inst.boneMatrices[1];

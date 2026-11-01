@@ -7,7 +7,7 @@
 #include "core/appearance_composer.hpp"
 #include "addons/addon_manager.hpp"
 #include "core/coordinates.hpp"
-#include "game/pet_action.hpp"
+#include "pet/domain/actions.hpp"
 #include "core/input.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/post_process_pipeline.hpp"

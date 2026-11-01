@@ -9,16 +9,6 @@
 
 namespace wowee::rendering {
 
-// Skin batches address a combo table, not the transparency array directly.
-// Zero is an authored invisible layer and must not become the default one.
-inline float m2TextureWeightOpacity(const std::vector<float>& weights,
-                                   const std::vector<uint16_t>& lookup,
-                                   uint16_t combo) {
-    if (combo >= lookup.size() || lookup[combo] >= weights.size()) return 1.0f;
-    const float value = weights[lookup[combo]];
-    return std::isfinite(value) ? std::clamp(value, 0.0f, 1.0f) : 1.0f;
-}
-
 // Preserve source order within an authored priority plane so each base,
 // reflection and decal stack keeps its layer order. Keep the batch array itself
 // unchanged: sky diagnostics and material descriptors refer to its indices.
@@ -30,6 +20,12 @@ inline std::vector<size_t> m2MaterialDrawOrder(const std::vector<Batch>& batches
         return batches[a].priorityPlane < batches[b].priorityPlane;
     });
     return order;
+}
+
+// M2Material flags 0x04: both faces shown. Without it the client culls the
+// back faces of the batch, opaque or blended, and so does the renderer.
+inline bool m2MaterialTwoSided(uint16_t materialFlags) {
+    return (materialFlags & 0x04) != 0;
 }
 
 // Only opaque/cutout geometry casts a directional shadow. Blended reflection

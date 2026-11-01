@@ -1,7 +1,7 @@
 #include "core/map_scope.hpp"
 #include "core/logger.hpp"
 #include "core/player_view.hpp"
-#include "game/entity_controller.hpp"
+#include "game/world_handler.hpp"
 #include "game/game_handler.hpp"
 #include "game/transport_manager.hpp"
 #include "rendering/animation_controller.hpp"
@@ -22,7 +22,7 @@ MapScope::MapScope(const Services& services, uint32_t mapId)
     // time, and a create that arrived before this scope existed - in the same
     // frame as the login, or kept across a far teleport - had no scene to go
     // to. The entities are the authority; present them once, here.
-    services_.game.getEntityController()->announceObjectsInView();
+    services_.game.world().announceObjectsInView();
 }
 
 MapScope::MapScope(const Services& services, WorldLoader& loader, WorldLoader::Entry entry)
@@ -54,11 +54,11 @@ MapScope::~MapScope() {
     // Transport GUIDs are reused across maps (an Undercity elevator's GUID
     // becomes a Deeprun tram's), and each transport is bound to an instance
     // of this scene, so the logical transports end with it.
-    services_.game.clearPlayerTransport();
+    services_.game.movement().clearPlayerTransport();
     if (auto* transports = services_.game.getTransportManager()) transports->clearTransports();
     // The equipment is composited onto the player model, which is one of this
     // scene's instances; the next scene's model is dressed from scratch.
-    services_.game.resetEquipmentDirtyTracking();
+    services_.game.inventory().resetEquipmentDirtyTracking();
 
     // Instances retire behind the frame fences; the renderers' model and
     // texture caches stay for the next map.

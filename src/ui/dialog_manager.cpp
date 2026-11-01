@@ -1,4 +1,6 @@
 #include "ui/dialog_manager.hpp"
+#include "pet/services/pet.hpp"
+#include "duel/services/duels.hpp"
 #include "game/item_text.hpp"
 #include "game/inventory_slots.hpp"
 #include "ui/framexml_takeover.hpp"
@@ -8,6 +10,7 @@
 #include "ui/ui_colors.hpp"
 #include "game/game_handler.hpp"
 #include "core/application.hpp"
+#include "core/window.hpp"
 
 #include <imgui.h>
 #include <algorithm>
@@ -25,7 +28,7 @@ namespace {
 // ---------------------------------------------------------------------------
 // Render early dialogs (group invite through LFG role check)
 // ---------------------------------------------------------------------------
-void DialogManager::renderDialogs(game::GameHandler& gameHandler) {
+void DialogManager::renderDialogs() {
     // The prompts uiparent.lua raises with a StaticPopup of its own, on events
     // this client fires, are gone from here: the group invite, the duel, the
     // trade request, the summon, the shared quest, the guild invite and both
@@ -36,29 +39,29 @@ void DialogManager::renderDialogs(game::GameHandler& gameHandler) {
 
     // No counterpart: FrameXML has the duel request popup and nothing that
     // counts down to the start.
-    renderDuelCountdown(gameHandler);
+    renderDuelCountdown();
 
 }
 
 // ---------------------------------------------------------------------------
 // Render late dialogs (resurrect, talent wipe, pet unlearn)
 // ---------------------------------------------------------------------------
-void DialogManager::renderLateDialogs(game::GameHandler& gameHandler) {
+void DialogManager::renderLateDialogs() {
     // The resurrect request and the talent wipe are uiparent.lua's, raised
     // from events this client fires.
     //
     // The pet unlearn is not: staticpopup.lua declares no CONFIRM_PET_UNLEARN,
     // so this client's is the only one there is and hiding it would leave the
     // confirmation with nothing to answer it.
-    renderPetUnlearnConfirmDialog(gameHandler);
+    renderPetUnlearnConfirmDialog();
 }
 
 // ============================================================
 // Group Invite Popup
 // ============================================================
 
-void DialogManager::renderDuelCountdown(game::GameHandler& gameHandler) {
-    float remaining = gameHandler.getDuelCountdownRemaining();
+void DialogManager::renderDuelCountdown() {
+    const float remaining = services_.duels ? services_.duels->getDuelCountdownRemaining() : 0.0f;
     if (remaining <= 0.0f) return;
 
     ImVec2 displaySize = ImGui::GetIO().DisplaySize;
@@ -102,8 +105,8 @@ void DialogManager::renderDuelCountdown(game::GameHandler& gameHandler) {
 // Talent Wipe Confirm Dialog
 // ============================================================
 
-void DialogManager::renderPetUnlearnConfirmDialog(game::GameHandler& gameHandler) {
-    if (!gameHandler.showPetUnlearnDialog()) return;
+void DialogManager::renderPetUnlearnConfirmDialog() {
+    if (!pet::orNoPet(services_.pet).showPetUnlearnDialog()) return;
 
     auto* window = services_.window;
     float screenW = window ? static_cast<float>(window->getWidth()) : 1280.0f;
@@ -123,7 +126,7 @@ void DialogManager::renderPetUnlearnConfirmDialog(game::GameHandler& gameHandler
             ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar)) {
 
         ImGui::Spacing();
-        uint32_t cost = gameHandler.getPetUnlearnCost();
+        uint32_t cost = pet::orNoPet(services_.pet).getPetUnlearnCost();
         const std::string costStr = game::formatCopperPrice(cost);
 
         std::string text = std::string("Reset your pet's talents for ") + costStr + "?";
@@ -143,7 +146,7 @@ void DialogManager::renderPetUnlearnConfirmDialog(game::GameHandler& gameHandler
         ImGui::PushStyleColor(ImGuiCol_Button, colors::kBtnDkGreen);
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, colors::kBtnDkGreenHover);
         if (ImGui::Button("Confirm##petunlearn", ImVec2(btnW, 30))) {
-            gameHandler.confirmPetUnlearn();
+            pet::orNoPet(services_.pet).confirmPetUnlearn();
         }
         ImGui::PopStyleColor(2);
 
@@ -152,7 +155,7 @@ void DialogManager::renderPetUnlearnConfirmDialog(game::GameHandler& gameHandler
         ImGui::PushStyleColor(ImGuiCol_Button, colors::kBtnDkRed);
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, colors::kBtnDkRedHover);
         if (ImGui::Button("Cancel##petunlearn", ImVec2(btnW, 30))) {
-            gameHandler.cancelPetUnlearn();
+            pet::orNoPet(services_.pet).cancelPetUnlearn();
         }
         ImGui::PopStyleColor(2);
     }

@@ -1,6 +1,0 @@
-{
-  "_extends": "../classic/opcodes.json",
-  "_remove": [
-    "MSG_SET_DUNGEON_DIFFICULTY"
-  ]
-}

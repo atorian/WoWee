@@ -210,7 +210,7 @@ TEST_CASE("logout, and a disconnect that cannot be ridden out, while loading or 
         h.setRenewal(Renewal::Refused, "the login server holds no session for this key");
         h.server().server().disconnect();
     } else {
-        h.game().requestLogout(false);
+        h.game().social().requestLogout(false);
         h.server().receive(Opcode::SMSG_LOGOUT_COMPLETE);
     }
     const AppState destination = disconnect ? AppState::AUTHENTICATION : AppState::CHARACTER_SELECTION;
@@ -248,7 +248,7 @@ TEST_CASE("a committed logout stops drawing the world at once, while the world s
     h.enterWorld();
     REQUIRE(h.renderedView() == wowee::core::FrameView::World);
 
-    h.game().requestLogout(false);
+    h.game().social().requestLogout(false);
     h.server().receive(Opcode::SMSG_LOGOUT_RESPONSE, Body().u32(0).u8(instant ? 1 : 0));
     h.frameUntilHandled();
     if (!instant) {
@@ -278,11 +278,11 @@ TEST_CASE("a logout cancelled during its countdown keeps the world drawn",
           "[client][harness][logout]") {
     ClientHarness h;
     h.enterWorld();
-    h.game().requestLogout(false);
+    h.game().social().requestLogout(false);
     h.server().receive(Opcode::SMSG_LOGOUT_RESPONSE, Body().u32(0).u8(0));
     h.frameUntilHandled();
     h.advance(5.0f);
-    h.game().cancelLogout();
+    h.game().social().cancelLogout();
     // Past where the countdown would have run out.
     h.advance(20.0f);
 
@@ -296,7 +296,7 @@ TEST_CASE("a committed logout the server never completes ends at the login scree
           "[client][harness][logout]") {
     ClientHarness h;
     h.enterWorld();
-    h.game().requestLogout(false);
+    h.game().social().requestLogout(false);
     h.server().receive(Opcode::SMSG_LOGOUT_RESPONSE, Body().u32(0).u8(1));
     h.frameUntilHandled();
 
@@ -360,10 +360,12 @@ TEST_CASE("logging in another character carries none of the last one's interface
     ClientHarness h;
     h.enterWorld(alice);
     // Alice ticks a dungeon in the finder and leaves something in her Lua state.
-    h.runInInterface("SetLFGDungeonEnabled(285, true); RELOG_MARK = 'alice'");
+    h.runInInterface("SetLFGDungeonEnabled(285, true); SetLFGHeaderCollapsed(261, true); "
+                     "RELOG_MARK = 'alice'");
     REQUIRE(h.interfaceAnswers("GetLFDChoiceEnabledState()[285] == true"));
+    REQUIRE(h.interfaceAnswers("GetLFDChoiceCollapseState()[261] == true"));
 
-    h.game().requestLogout(false);
+    h.game().social().requestLogout(false);
     h.server().receive(Opcode::SMSG_LOGOUT_COMPLETE);
     h.frameUntil([&] { return h.state() == AppState::CHARACTER_SELECTION; }, 60,
                  "the character screen");
@@ -373,10 +375,22 @@ TEST_CASE("logging in another character carries none of the last one's interface
     REQUIRE(h.session());
     CHECK(h.session()->identity().name == "Bob");
     CHECK(h.interfaceAnswers("next(GetLFDChoiceEnabledState()) == nil"));
+    CHECK(h.interfaceAnswers("next(GetLFDChoiceCollapseState()) == nil"));
     CHECK(h.interfaceAnswers("RELOG_MARK == nil"));
     const auto bobHeard = h.interfaceEventsOf("Bob");
     CHECK(std::count(bobHeard.begin(), bobHeard.end(), "PLAYER_ENTERING_WORLD") >= 1);
     CHECK(std::count(bobHeard.begin(), bobHeard.end(), "PLAYER_LEAVING_WORLD") == 0);
+}
+
+TEST_CASE("a reload keeps the character's dungeon finder choices and nothing else",
+          "[client][harness][charactersession]") {
+    ClientHarness h;
+    h.enterWorld();
+    h.runInInterface("SetLFGDungeon(285); RELOAD_MARK = 'before'; ReloadUI()");
+    // The reload is taken at the next frame, as /reload is.
+    h.frame();
+    CHECK(h.interfaceAnswers("RELOAD_MARK == nil"));
+    CHECK(h.interfaceAnswers("GetLFDChoiceEnabledState()[285] == true"));
 }
 
 // ---- A world connection lost and restored --------------------------------------
@@ -582,7 +596,7 @@ TEST_CASE("a cast while the client reconnects is refused at once and never sent"
         "f:RegisterEvent('UI_ERROR_MESSAGE')\n"
         "f:SetScript('OnEvent', function(_, _, msg) ERRS = ERRS .. msg end)\n");
 
-    h.game().castSpell(kFireball, 0);
+    h.game().spells().castSpell(kFireball, 0);
     h.frame();
     CHECK(h.interfaceAnswers("ERRS == 'No connection to the server.'"));
 
@@ -672,4 +686,20 @@ TEST_CASE("control and F10 open the weather panel and reach nothing in the inter
         "for key, command in pairs(HarnessBindingsBefore) do\n"
         "  if command ~= '' then SetBinding(key, command) else SetBinding(key) end\n"
         "end\n");
+}
+
+TEST_CASE("the map to enter is found in Map.dbc and nowhere else", "[client][harness][tables]") {
+    // The harness's Map.dbc has Eastern Kingdoms and Kalimdor. The client kept
+    // a list of map directories of its own to fall back on, so a map the
+    // table did not have - Northrend here - was entered by that list's name.
+    ClientHarness h;
+    CHECK(h.loader().mapNameFor(1) == "Kalimdor");
+    CHECK(h.loader().mapNameFor(571).empty());
+}
+
+TEST_CASE("a Map.dbc that cannot be read stops the game when a map is to be entered",
+          "[client][harness][tables]") {
+    ClientHarness h;
+    h.server().unreadableDbc("Map.dbc");
+    CHECK_THROWS_AS(h.loader().mapNameFor(0), wowee::test::GameStopped);
 }

@@ -129,7 +129,7 @@ void AssetManager::setupFileCacheBudget() {
 
     fileCacheBudget = kDefaultBudgetMB * 1024ull * 1024ull;
     if (const size_t envFixedMB = parseEnvSizeMB("WOWEE_FILE_CACHE_MB"); envFixedMB > 0) {
-        fileCacheBudget = std::max(envFixedMB * 1024ull * 1024ull, kMinBudgetBytes);
+        fileCacheBudget = std::max(envFixedMB * 1024 * 1024, kMinBudgetBytes);
         LOG_WARNING("Asset file cache fixed via WOWEE_FILE_CACHE_MB=", envFixedMB,
                     " (effective ", fileCacheBudget / (1024 * 1024), " MB)");
     }
@@ -187,6 +187,13 @@ std::string AssetManager::resolveOverride(const std::string& normalizedPath) con
 }
 
 std::string AssetManager::resolveExtracted(const std::string& normalizedPath) const {
+    // Locale archives also contain executables and world geometry. Only their
+    // interface, fonts and audio replace resources; DBC strings merge below.
+    if (normalizedPath.starts_with("interface\\") || normalizedPath.starts_with("fonts\\") ||
+        normalizedPath.starts_with("sound\\")) {
+        auto localized = localeManifest_.resolveFilesystemPath(normalizedPath);
+        if (!localized.empty()) return localized;
+    }
     // Primary manifest
     std::string primaryPath = manifest_.resolveFilesystemPath(normalizedPath);
     if (!primaryPath.empty()) return primaryPath;
@@ -686,7 +693,30 @@ std::shared_ptr<DBCFile> AssetManager::cacheDBC(const std::string& name,
                                                 uint64_t generation) {
     std::lock_guard<std::shared_mutex> lock(cacheMutex);
     if (generation != cacheGeneration_) return dbc;
+    selectDbcLocale(*dbc, name, dbcLocaleBuild_, dbcLocale_);
     return dbcCache.emplace(name, std::move(dbc)).first->second;
+}
+
+void AssetManager::setDBCLocale(const std::string& locale, uint32_t build) {
+    std::unique_lock<std::shared_mutex> lock(cacheMutex);
+    localeManifest_ = AssetManifest{};
+    localeDataPath_.clear();
+    const auto root = expansionDataPath_ + "/locales/" + locale;
+    const auto manifest = root + "/manifest.json";
+    std::error_code ec;
+    if (!expansionDataPath_.empty() && std::filesystem::is_regular_file(manifest, ec)) {
+        if (localeManifest_.load(manifest)) localeDataPath_ = root;
+        else LOG_WARNING("Cannot load locale manifest ", manifest, "; base language resources retained");
+    }
+    // May also be a complete extraction in the requested language; no pack is
+    // required in that case. Missing table strings are reported on selection.
+    fileCache.clear();
+    fileCacheLru_.clear();
+    fileCacheTotalBytes = 0;
+    dbcLocale_ = locale;
+    dbcLocaleBuild_ = build;
+    dbcCache.clear();
+    ++cacheGeneration_;
 }
 
 // The archive layer's diff for a table. Merged here, before the table is
@@ -694,6 +724,13 @@ std::shared_ptr<DBCFile> AssetManager::cacheDBC(const std::string& name,
 // spell names, the visual kits, the display infos - none of them knows a realm
 // added to what it reads.
 void AssetManager::mergeDbcOverrides(const std::string& name, DBCFile& dbc) const {
+    const auto path = localeManifest_.resolveFilesystemPath(normalizePath("DBFilesClient\\" + name));
+    if (!path.empty()) {
+        DBCFile source;
+        if (source.load(LooseFileReader::readFile(path)))
+            mergeDbcLocale(dbc, source, name, dbcLocaleBuild_, dbcLocale_);
+        else LOG_WARNING("Cannot read locale DBC ", path, "; original text retained for ", name);
+    }
     auto layer = archiveLayer();
     if (!layer) return;
     const std::string overPath = normalizePath("DBFilesClient\\over_" + name);
@@ -721,56 +758,6 @@ std::shared_ptr<DBCFile> AssetManager::loadDbcOverridesAlone(const std::string& 
     return dbc;
 }
 
-std::shared_ptr<DBCFile> AssetManager::loadDBCOptional(const std::string& name) {
-    uint64_t generation = 0;
-    if (auto cached = cachedDBC(name, &generation)) return cached;
-
-    // Try binary DBC
-    std::vector<uint8_t> dbcData;
-    {
-        std::string dbcPath = "DBFilesClient\\" + name;
-        // The parsed table is cached (dbcCache); its file's bytes are not.
-        dbcData = readFileNotKept(normalizePath(dbcPath));
-    }
-
-    // Fall back to expansion-specific CSV
-    if (dbcData.empty() && !expansionDataPath_.empty()) {
-        std::string baseName = name;
-        auto dot = baseName.rfind('.');
-        if (dot != std::string::npos) baseName = baseName.substr(0, dot);
-        std::string csvPath = expansionDataPath_ + "/db/" + baseName + ".csv";
-        if (std::filesystem::exists(csvPath)) {
-            std::ifstream f(csvPath, std::ios::binary | std::ios::ate);
-            if (f) {
-                auto size = f.tellg();
-                if (size > 0) {
-                    f.seekg(0);
-                    dbcData.resize(static_cast<size_t>(size));
-                    f.read(reinterpret_cast<char*>(dbcData.data()), size);
-                    LOG_INFO("Binary DBC not found, using CSV fallback: ", csvPath);
-                }
-            }
-        }
-    }
-
-    if (dbcData.empty()) {
-        if (auto alone = loadDbcOverridesAlone(name)) return cacheDBC(name, std::move(alone), generation);
-        // Expected on some expansions - log at debug level only.
-        LOG_DEBUG("Optional DBC not found (expected on some expansions): ", name);
-        return nullptr;
-    }
-
-    auto dbc = std::make_shared<DBCFile>();
-    if (!dbc->load(dbcData)) {
-        LOG_ERROR("Failed to load DBC: ", name);
-        return nullptr;
-    }
-    mergeDbcOverrides(name, *dbc);
-
-    dbc = cacheDBC(name, std::move(dbc), generation);
-    LOG_INFO("Loaded optional DBC: ", name, " (", dbc->getRecordCount(), " records)");
-    return dbc;
-}
 bool AssetManager::fileExists(const std::string& path) const {
     if (!initialized) {
         return false;

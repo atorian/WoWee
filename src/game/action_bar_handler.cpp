@@ -129,7 +129,7 @@ void ActionBarHandler::clear() {
 
 void ActionBarHandler::handleActionButtons(network::Packet& packet) {
     // Slot encoding differs by expansion:
-    //   Classic/Turtle: uint16 actionId + uint8 type + uint8 misc
+    //   Classic: uint16 actionId + uint8 type + uint8 misc
     //     type: 0=spell, 1=item, 64=macro
     //   TBC/WotLK: uint32 packed = actionId | (type << 24)
     //     type: 0x00=spell, 0x80=item, 0x40=macro, 0x41=character macro

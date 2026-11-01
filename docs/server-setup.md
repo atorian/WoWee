@@ -648,4 +648,4 @@ Once you have a working local server connection:
 **Status**: Ready for local server testing
 **Last Updated**: 2026-09-21
 **Client Version**: v3.1.32
-**Server Compatibility**: Vanilla 1.12, TBC 2.4.3, WotLK 3.3.5a (12340), Turtle WoW 1.18
+**Server Compatibility**: Vanilla 1.12, TBC 2.4.3, WotLK 3.3.5a (12340)

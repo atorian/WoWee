@@ -7,7 +7,7 @@ set -euo pipefail
 #
 # Arguments:
 #   $1  Path to WoW's Data directory (containing .MPQ files)
-#   $2  Expansion hint: classic, turtle, tbc, wotlk (optional, auto-detected if omitted)
+#   $2  Expansion hint: classic, tbc, wotlk (optional, auto-detected if omitted)
 #
 # Options:
 #   --upscale[=N]  After extracting, run tools/upscale_textures.py over the
@@ -18,7 +18,6 @@ set -euo pipefail
 # Examples:
 #   ./extract_assets.sh /mnt/games/WoW-3.3.5a/Data
 #   ./extract_assets.sh /mnt/games/WoW-1.12/Data classic
-#   ./extract_assets.sh /mnt/games/TurtleWoW/Data turtle
 #   ./extract_assets.sh /mnt/games/WoW-2.4.3/Data tbc
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,7 +54,7 @@ set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
 # check: every run of it, with arguments or without, ended at
 # "POSITIONAL: unbound variable" and nothing was ever extracted.
 if [ $# -lt 1 ]; then
-    echo "Usage: $0 /path/to/WoW/Data [classic|turtle|tbc|wotlk] [--upscale[=N]]"
+    echo "Usage: $0 /path/to/WoW/Data [classic|tbc|wotlk] [--upscale[=N]]"
     echo ""
     echo "Point this at your WoW client's Data directory."
     echo "The expansion is auto-detected if not specified."

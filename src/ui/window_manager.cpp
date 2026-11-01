@@ -7,7 +7,6 @@
 #include "ui/ui_texture_load.hpp"
 #include "game/item_text.hpp"
 #include "ui/framexml_takeover.hpp"
-#include "ui/ui_upload_budget.hpp"
 #include "game/inventory_slots.hpp"
 #include "ui/chat_panel.hpp"
 #include "ui/chat/chat_utils.hpp"
@@ -23,9 +22,10 @@
 #include "core/window.hpp"
 #include "game/game_handler.hpp"
 #include "game/auction_filters.hpp"
-#include "game/packed_time.hpp"
+#include "core/packed_time.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/ui_sound_manager.hpp"
 #include "audio/music_manager.hpp"
@@ -82,22 +82,19 @@ uint8_t WindowManager::barberSelectedAppearance(const std::vector<BarberStyleOpt
 void WindowManager::rebuildBarberHairColors(uint8_t hairStyle, uint8_t preferredColor,
                                             uint32_t raceId, uint32_t sexId) {
     barberHairColors_.clear();
-    if (services_.assetManager) {
-        auto dbc = services_.assetManager->loadDBC("CharSections.dbc");
-        if (dbc && dbc->isLoaded()) {
-            const auto* layout = pipeline::getActiveDBCLayout()
-                ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
-            const auto fields = pipeline::detectCharSectionsFields(dbc.get(), layout);
-            for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
-                if (dbc->getUInt32(row, fields.raceId) != raceId ||
-                    dbc->getUInt32(row, fields.sexId) != sexId ||
-                    dbc->getUInt32(row, fields.baseSection) != 3 ||
-                    dbc->getUInt32(row, fields.variationIndex) != hairStyle) {
-                    continue;
-                }
-                const uint32_t color = dbc->getUInt32(row, fields.colorIndex);
-                if (color <= 255) barberHairColors_.push_back(static_cast<uint8_t>(color));
+    if (services_.gameTables) {
+        const pipeline::RequiredTable dbc(*services_.gameTables, "CharSections.dbc",
+                                          "the barber shop's hair colours");
+        const auto fields = pipeline::detectCharSectionsFields(dbc.get(), &dbc.layout());
+        for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
+            if (dbc->getUInt32(row, fields.raceId) != raceId ||
+                dbc->getUInt32(row, fields.sexId) != sexId ||
+                dbc->getUInt32(row, fields.baseSection) != 3 ||
+                dbc->getUInt32(row, fields.variationIndex) != hairStyle) {
+                continue;
             }
+            const uint32_t color = dbc->getUInt32(row, fields.colorIndex);
+            if (color <= 255) barberHairColors_.push_back(static_cast<uint8_t>(color));
         }
     }
     std::sort(barberHairColors_.begin(), barberHairColors_.end());
@@ -150,39 +147,40 @@ void WindowManager::ensureBarberState(game::GameHandler& gameHandler) {
     // Entry zero tells the server to retain the existing skin.
     barberSkinStyles_.push_back({.entryId = 0, .appearanceId = barberOrigSkinColor_, .name = "Current"});
 
-    if (services_.assetManager) {
-        auto dbc = services_.assetManager->loadDBC("BarberShopStyle.dbc");
-        if (dbc && dbc->isLoaded() && dbc->getFieldCount() >= 40) {
-            for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
-                if (dbc->getUInt32(row, 37) != raceId || dbc->getUInt32(row, 38) != sexId)
-                    continue;
-                const uint32_t appearance = dbc->getUInt32(row, 39);
-                if (appearance > 255) continue;
-                std::string name;
-                for (uint32_t field = 2; field <= 17 && name.empty(); ++field)
-                    name = dbc->getString(row, field);
-                if (name.empty()) name = "Style " + std::to_string(appearance);
-                BarberStyleOption option{.entryId = dbc->getUInt32(row, 0),
-                                         .appearanceId = static_cast<uint8_t>(appearance), .name = std::move(name)};
-                switch (dbc->getUInt32(row, 1)) {
-                    case 0: barberHairStyles_.push_back(std::move(option)); break;
-                    case 2: barberFacialStyles_.push_back(std::move(option)); break;
-                    case 3: barberSkinStyles_.push_back(std::move(option)); break;
-                    default: break;
-                }
+    // WotLK's chair; an expansion without the tables offers no styles.
+    if (services_.gameTables && services_.gameTables->has("BarberShopStyle.dbc")) {
+        const pipeline::GameTables& tables = *services_.gameTables;
+        // Type 1, names 2..17, race 37, sex 38, the appearance it gives 39.
+        const auto dbc = tables.table("BarberShopStyle.dbc", 40, "the barber shop's styles");
+        for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
+            if (dbc->getUInt32(row, 37) != raceId || dbc->getUInt32(row, 38) != sexId)
+                continue;
+            const uint32_t appearance = dbc->getUInt32(row, 39);
+            if (appearance > 255) continue;
+            std::string name;
+            for (uint32_t field = 2; field <= 17 && name.empty(); ++field)
+                name = dbc->getString(row, field);
+            if (name.empty()) name = "Style " + std::to_string(appearance);
+            BarberStyleOption option{.entryId = dbc->getUInt32(row, 0),
+                                     .appearanceId = static_cast<uint8_t>(appearance), .name = std::move(name)};
+            switch (dbc->getUInt32(row, 1)) {
+                case 0: barberHairStyles_.push_back(std::move(option)); break;
+                case 2: barberFacialStyles_.push_back(std::move(option)); break;
+                case 3: barberSkinStyles_.push_back(std::move(option)); break;
+                default: break;
             }
-        } else {
-            LOG_WARNING("Barber Shop: WotLK BarberShopStyle.dbc is unavailable or malformed");
         }
 
-        auto baseCost = services_.assetManager->loadDBC("gtBarberShopCostBase.dbc");
-        if (baseCost && baseCost->isLoaded() && baseCost->getRecordCount() > 0) {
-            const uint32_t level = std::max<uint32_t>(1, ch->level);
-            const uint32_t row = std::min(level, baseCost->getRecordCount()) - 1;
-            barberBaseCost_ = baseCost->getFloat(row, 0);
-        } else {
-            barberBaseCost_ = 0.0f;
+        // One row per level, the base cost in its only column.
+        const auto baseCost = tables.table("gtBarberShopCostBase.dbc", 1, "the barber shop's prices");
+        if (baseCost->getRecordCount() == 0) {
+            tables.stop("gtBarberShopCostBase.dbc", "the barber shop's prices", "has no rows");
         }
+        const uint32_t level = std::max<uint32_t>(1, ch->level);
+        const uint32_t row = std::min(level, baseCost->getRecordCount()) - 1;
+        barberBaseCost_ = baseCost->getFloat(row, 0);
+    } else {
+        barberBaseCost_ = 0.0f;
     }
 
     auto normalizeOptions = [](std::vector<BarberStyleOption>& options) {
@@ -276,7 +274,7 @@ void WindowManager::barberApplySelection(game::GameHandler& gameHandler) {
         return index >= 0 && index < static_cast<int>(options.size())
             ? options[static_cast<size_t>(index)].entryId : 0u;
     };
-    gameHandler.sendAlterAppearance(entryOf(barberHairStyles_, barberHairStyle_),
+    gameHandler.social().sendAlterAppearance(entryOf(barberHairStyles_, barberHairStyle_),
                                     sel.hairColor,
                                     entryOf(barberFacialStyles_, barberFacialHair_),
                                     entryOf(barberSkinStyles_, barberSkinColor_));
@@ -394,7 +392,7 @@ void WindowManager::renderInstanceLockouts(game::GameHandler& gameHandler) {
         return;
     }
 
-    const auto& lockouts = gameHandler.getInstanceLockouts();
+    const auto& lockouts = gameHandler.social().getInstanceLockouts();
 
     if (lockouts.empty()) {
         ImGui::TextColored(kColorGray, "No active instance lockouts.");
@@ -507,7 +505,7 @@ void WindowManager::renderEquipSetWindow(game::GameHandler& gameHandler) {
         return;
     }
 
-    const auto& sets = gameHandler.getEquipmentSets();
+    const auto& sets = gameHandler.inventory().getEquipmentSets();
 
     if (sets.empty()) {
         ImGui::TextDisabled("No equipment sets saved.");
@@ -531,7 +529,7 @@ void WindowManager::renderEquipSetWindow(game::GameHandler& gameHandler) {
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.40f, 0.30f, 0.15f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.60f, 0.45f, 0.20f, 1.0f));
         if (ImGui::Button("##icon", iconSize)) {
-            gameHandler.useEquipmentSet(set.setId);
+            gameHandler.inventory().useEquipmentSet(set.setId);
         }
         ImGui::PopStyleColor(3);
 
@@ -547,7 +545,7 @@ void WindowManager::renderEquipSetWindow(game::GameHandler& gameHandler) {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.35f, 0.15f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.30f, 0.50f, 0.22f, 1.0f));
         if (ImGui::SmallButton("Equip")) {
-            gameHandler.useEquipmentSet(set.setId);
+            gameHandler.inventory().useEquipmentSet(set.setId);
         }
         ImGui::PopStyleColor(2);
         ImGui::EndGroup();
@@ -571,7 +569,7 @@ void WindowManager::renderSkillsWindow(game::GameHandler& gameHandler) {
         return;
     }
 
-    const auto& skills = gameHandler.getPlayerSkills();
+    const auto& skills = gameHandler.spells().playerSkills();
     if (skills.empty()) {
         ImGui::TextDisabled("No skill data received yet.");
         ImGui::End();
@@ -586,7 +584,7 @@ void WindowManager::renderSkillsWindow(game::GameHandler& gameHandler) {
     };
     std::map<uint32_t, std::vector<SkillEntry>> byCategory;
     for (const auto& [id, sk] : skills) {
-        uint32_t cat = gameHandler.getSkillCategory(id);
+        uint32_t cat = gameHandler.spells().skillCategory(id);
         byCategory[cat].push_back({.skillId = id, .skill = &sk});
     }
 
@@ -623,12 +621,12 @@ void WindowManager::renderSkillsWindow(game::GameHandler& gameHandler) {
         auto& entries = it->second;
         // Sort alphabetically within each category
         std::sort(entries.begin(), entries.end(), [&](const SkillEntry& a, const SkillEntry& b) {
-            return gameHandler.getSkillName(a.skillId) < gameHandler.getSkillName(b.skillId);
+            return gameHandler.spells().getSkillLineName(a.skillId) < gameHandler.spells().getSkillLineName(b.skillId);
         });
 
         if (ImGui::CollapsingHeader(label, ImGuiTreeNodeFlags_DefaultOpen)) {
             for (const auto& e : entries) {
-                const std::string& name = gameHandler.getSkillName(e.skillId);
+                const std::string& name = gameHandler.spells().getSkillLineName(e.skillId);
                 const char* displayName = name.empty() ? "Unknown" : name.c_str();
                 uint16_t val = e.skill->effectiveValue();
                 uint16_t maxVal = e.skill->maxValue;

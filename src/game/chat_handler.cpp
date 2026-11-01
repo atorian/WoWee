@@ -9,6 +9,7 @@
 #include "game/packet_sender.hpp"
 #include "game/text_tokens.hpp"
 #include "game/ui_errors.hpp"
+#include "guild/domain/records.hpp"
 #include "game/game_utils.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/entity.hpp"
@@ -209,6 +210,7 @@ void ChatHandler::logChatMessage(const MessageChatData& msg, const char* source)
 }
 
 void ChatHandler::registerOpcodes(DispatchTable& table) {
+    table[Opcode::SMSG_MOTD] = [this](network::Packet& packet) { handleMotd(packet); };
     table[Opcode::SMSG_MESSAGECHAT] = [this](network::Packet& packet) {
         if (sender_.characterInWorld()) handleMessageChat(packet);
     };

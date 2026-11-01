@@ -3,7 +3,7 @@
 #include "rendering/m2_renderer.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/m2_renderer_internal.h"
-#include "rendering/m2_model_classifier.hpp"
+#include "pipeline/m2_model_classifier.hpp"
 #include "rendering/texture_upload.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_buffer.hpp"
@@ -36,21 +36,31 @@ void M2Renderer::placeInCollision(const M2Instance& instance) {
     if (instance.hidden) collision_->setM2Hidden(instance.id, true);
 }
 
-void M2Renderer::fileInCullGrid(const M2Instance& instance) {
-    // A hidden instance is in no column, however it moves meanwhile.
-    if (instance.hidden) {
-        scene_->cullGrid_.remove(instance.id);
-        return;
-    }
+void M2Renderer::fileInCullGrid(size_t index) {
+    const M2Instance& instance = scene_->instances[index];
+    auto& record = scene_->cullGrid_.record(static_cast<uint32_t>(index));
+    record.position = instance.position;
+    record.cullCenter = instance.cachedCullCenter;
+    record.paddedRadius = instance.cachedPaddedRadius;
+    record.maxDistSqFactor = instance.cachedEffectiveMaxDistSqFactor;
+    record.id = instance.id;
     // The margin the shadow pass inflates a position by, before its division
     // by the pass's radius: the model's bound radius at this scale, times 1.5.
     const float boundRadius = instance.cachedModel ? instance.cachedModel->boundRadius
                                                    : instance.cachedBoundRadius;
-    scene_->cullGrid_.update(instance.id, M2CullGrid::Entry{
-        .position = instance.position,
-        .cullCenter = instance.cachedCullCenter,
-        .cullRadius = instance.cachedPaddedRadius,
-        .shadowRadius = boundRadius * instance.scale * 1.5f});
+    record.shadowRadius = boundRadius * instance.scale * 1.5f;
+    using G = M2CullGrid;
+    record.flags = static_cast<uint16_t>(
+        (instance.cachedIsValid ? G::kValid : 0) | (instance.cachedModel ? G::kHasModel : 0) |
+        (instance.cachedIsInvisibleTrap ? G::kInvisibleTrap : 0) |
+        (instance.cachedIsGroundDetail ? G::kGroundDetail : 0) |
+        (instance.cachedIsSkyBird && instance.cachedHasAnimation && !instance.cachedDisableAnimation
+             ? G::kAnimatedSkyBird : 0) |
+        (instance.isGameObject ? G::kGameObject : 0) | (instance.hidden ? G::kHidden : 0) |
+        (instance.finishing ? G::kFinishing : 0));
+    // A hidden instance is in no column, however it moves meanwhile.
+    scene_->cullGrid_.file(static_cast<uint32_t>(index));
+    if (instance.hidden) return;
     // The sun's shadow cull reuses its candidates across frames; this one
     // arrived or moved since, and is added to them (gatherReusedShadowCandidates).
     // Past this many it is cheaper to cull again than to fold them in.
@@ -66,18 +76,13 @@ void M2Renderer::gatherViewCandidates(const glm::vec3& camPos, const Frustum& fr
                                       float maxPossibleDistSq, std::vector<uint32_t>& out) const {
     out.clear();
     for (const auto& cell : scene_->cullGrid_.cells()) {
-        if (cell.ids.empty()) continue;
+        if (cell.members.empty()) continue;
         // Nothing in a column is drawn further away than this, and nothing
         // whose cull sphere is outside the frustum - and the column's box
         // holds every position and every sphere filed in it.
         if (distanceSqToBox(camPos, cell.viewMin, cell.viewMax) > maxPossibleDistSq) continue;
         if (!frustum.intersectsAABB(cell.viewMin, cell.viewMax)) continue;
-        for (const uint32_t id : cell.ids) {
-            const auto it = scene_->instanceIndexById.find(id);
-            if (it != scene_->instanceIndexById.end() && it->second < scene_->instances.size()) {
-                out.push_back(static_cast<uint32_t>(it->second));
-            }
-        }
+        out.insert(out.end(), cell.members.begin(), cell.members.end());
     }
 }
 
@@ -89,7 +94,7 @@ void M2Renderer::gatherShadowCandidates(const glm::mat4& lightSpace, float shado
     Frustum frustum;
     if (perspective) frustum.extractFromMatrix(lightSpace);
     for (const auto& cell : scene_->cullGrid_.cells()) {
-        if (cell.ids.empty()) continue;
+        if (cell.members.empty()) continue;
         // The light's box, not the camera's: a caster behind the camera can
         // still throw its shadow into view.
         if (perspective) {
@@ -97,12 +102,7 @@ void M2Renderer::gatherShadowCandidates(const glm::mat4& lightSpace, float shado
             if (!frustum.intersectsAABB(cell.posMin - margin, cell.posMax + margin)) continue;
         } else if (!cellMayCastShadow(lightSpace, cell.posMin, cell.posMax,
                                       cell.maxShadowRadius * invRadius)) continue;
-        for (const uint32_t id : cell.ids) {
-            const auto it = scene_->instanceIndexById.find(id);
-            if (it != scene_->instanceIndexById.end() && it->second < scene_->instances.size()) {
-                out.push_back(static_cast<uint32_t>(it->second));
-            }
-        }
+        out.insert(out.end(), cell.members.begin(), cell.members.end());
     }
 }
 
@@ -112,16 +112,13 @@ void M2Renderer::gatherReusedShadowCandidates(const glm::mat4& lightSpace, float
     // texel snap and the sun's turn take it up a little a frame.
     constexpr float kShadowCullSlack = 0.05f;
     const float invRadius = shadowRadius > 0.0f ? 1.0f / shadowRadius : 0.0f;
-    const auto marginOf = [&](const M2Instance& instance) {
-        const float boundRadius = instance.cachedModel ? instance.cachedModel->boundRadius
-                                                       : instance.cachedBoundRadius;
-        return boundRadius * instance.scale * 1.5f * invRadius;
-    };
+    // Read from the instances' cull records (M2CullGrid::Record).
+    const auto marginOf = [&](const M2CullGrid::Record& r) { return r.shadowRadius * invRadius; };
     // Against the map the candidates were culled for: a refiled instance
     // joins them by the same test the others passed.
-    const auto withinSlackOf = [&](const glm::mat4& map, const M2Instance& instance) {
-        const glm::vec4 clip = map * glm::vec4(instance.position, 1.0f);
-        const float m = marginOf(instance) + kShadowCullSlack;
+    const auto withinSlackOf = [&](const glm::mat4& map, const M2CullGrid::Record& r) {
+        const glm::vec4 clip = map * glm::vec4(r.position, 1.0f);
+        const float m = marginOf(r) + kShadowCullSlack;
         return std::abs(clip.x) <= 1.0f + m && std::abs(clip.y) <= 1.0f + m &&
                clip.z >= -m && clip.z <= 1.0f + m;
     };
@@ -129,9 +126,11 @@ void M2Renderer::gatherReusedShadowCandidates(const glm::mat4& lightSpace, float
     // What can cast at all, and stays so for the instance's life: a valid
     // model that is not a trap. Whether it is hidden or on its way out the
     // caller's exact test asks every frame.
-    const auto canCast = [](const M2Instance& instance) {
-        return instance.cachedIsValid && !instance.cachedIsInvisibleTrap && instance.cachedModel;
+    const auto canCast = [](const M2CullGrid::Record& r) {
+        constexpr uint16_t kNeeds = M2CullGrid::kValid | M2CullGrid::kHasModel;
+        return (r.flags & kNeeds) == kNeeds && !(r.flags & M2CullGrid::kInvisibleTrap);
     };
+    const auto& grid = scene_->cullGrid_;
     // Kept in the order the pass draws them in - by model, then index - so
     // the casters it picks out come out grouped without sorting them anew.
     const auto drawOrder = [this](uint32_t a, uint32_t b) {
@@ -148,7 +147,8 @@ void M2Renderer::gatherReusedShadowCandidates(const glm::mat4& lightSpace, float
         for (const uint32_t id : scene_->shadowRefiledIds) {
             const auto it = scene_->instanceIndexById.find(id);
             if (it == scene_->instanceIndexById.end() || it->second >= scene_->instances.size()) continue;
-            shadowCullMaxMargin_ = std::max(shadowCullMaxMargin_, marginOf(scene_->instances[it->second]));
+            shadowCullMaxMargin_ = std::max(shadowCullMaxMargin_,
+                                            marginOf(grid.record(static_cast<uint32_t>(it->second))));
         }
         reuse = lightSpaceCullStillCovers(shadowCullMatrix_, lightSpace, glm::vec3(-1.0f, -1.0f, 0.0f),
                                           glm::vec3(1.0f), shadowCullMaxMargin_, kShadowCullSlack);
@@ -159,9 +159,9 @@ void M2Renderer::gatherReusedShadowCandidates(const glm::mat4& lightSpace, float
         for (const uint32_t id : scene_->shadowRefiledIds) {
             const auto it = scene_->instanceIndexById.find(id);
             if (it == scene_->instanceIndexById.end() || it->second >= scene_->instances.size()) continue;
-            const M2Instance& instance = scene_->instances[it->second];
-            if (!canCast(instance) || !withinSlackOf(shadowCullMatrix_, instance)) continue;
             const auto index = static_cast<uint32_t>(it->second);
+            const auto& record = grid.record(index);
+            if (!canCast(record) || !withinSlackOf(shadowCullMatrix_, record)) continue;
             const auto at = std::lower_bound(shadowCullIndices_.begin(), shadowCullIndices_.end(), index,
                                              drawOrder);
             if (at == shadowCullIndices_.end() || *at != index) shadowCullIndices_.insert(at, index);
@@ -171,18 +171,14 @@ void M2Renderer::gatherReusedShadowCandidates(const glm::mat4& lightSpace, float
         // cast with the slack, for their instances.
         shadowCullIndices_.clear();
         shadowCullMaxMargin_ = 0.0f;
-        for (const auto& cell : scene_->cullGrid_.cells()) {
-            if (cell.ids.empty()) continue;
+        for (const auto& cell : grid.cells()) {
+            if (cell.members.empty()) continue;
             shadowCullMaxMargin_ = std::max(shadowCullMaxMargin_, cell.maxShadowRadius * invRadius);
             if (!cellMayCastShadow(lightSpace, cell.posMin, cell.posMax,
                                    cell.maxShadowRadius * invRadius + kShadowCullSlack)) continue;
-            for (const uint32_t id : cell.ids) {
-                const auto it = scene_->instanceIndexById.find(id);
-                if (it == scene_->instanceIndexById.end() || it->second >= scene_->instances.size()) continue;
-                const M2Instance& instance = scene_->instances[it->second];
-                if (canCast(instance) && withinSlackOf(lightSpace, instance)) {
-                    shadowCullIndices_.push_back(static_cast<uint32_t>(it->second));
-                }
+            for (const uint32_t index : cell.members) {
+                const auto& record = grid.record(index);
+                if (canCast(record) && withinSlackOf(lightSpace, record)) shadowCullIndices_.push_back(index);
             }
         }
         std::sort(shadowCullIndices_.begin(), shadowCullIndices_.end(), drawOrder);
@@ -214,7 +210,7 @@ void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& posit
         transformAABB(inst.modelMatrix, localMin, localMax, inst.worldBoundsMin, inst.worldBoundsMax);
         inst.recomputeCachedCullFactors();
     }
-    fileInCullGrid(inst);
+    fileInCullGrid(idxIt->second);
     scene_->rtChanges.changed(instanceId);
     if (collision_) collision_->moveM2(instanceId, inst.modelMatrix, inst.scale);
 }
@@ -246,20 +242,26 @@ void M2Renderer::setInstancesHidden(const std::vector<uint32_t>& instanceIds, bo
         scene_->rtChanges.changed(id);
         if (collision_) collision_->setM2Hidden(id, hidden);
         if (hidden) {
+            // Its clocks stop while it is away and resume where they were.
+            inst.hiddenAtMs = animClockMs_;
             dropFromIndexSets(idxIt->second);
-            scene_->cullGrid_.remove(id);
+            fileInCullGrid(idxIt->second);
             // What it had emitted goes with it rather than hanging where it
             // was, or reappearing there, stale, when it comes back.
             inst.particles.clear();
             inst.particleReach = 0.0f;
             for (auto& ribbon : inst.ribbons) ribbon = M2Instance::RibbonState{};
         } else {
-            fileInCullGrid(inst);
+            const double away = animClockMs_ - inst.hiddenAtMs;
+            inst.animStartMs += away;
+            inst.globalSequenceStartMs += away;
+            fileInCullGrid(idxIt->second);
             // Back as if newly placed: no cull verdict to trust, and its bone
             // slots were handed to others while it was away, so the bones are
             // uploaded again wherever it lands.
-            inst.lastCullVisible = 1;
-            inst.hizPrevCulledFrames = 2;
+            auto& record = scene_->cullGrid_.record(static_cast<uint32_t>(idxIt->second));
+            record.lastVisible = 1;
+            record.culledFrames = 2;
             fileInIndexSets(idxIt->second);
         }
     }
@@ -286,7 +288,7 @@ void M2Renderer::setInstanceAnimationFrozen(uint32_t instanceId, bool frozen) {
     inst.holdAtEnd = false;
     inst.nextAnimation.reset();
     if (frozen) {
-        inst.animTime = 0.0f;  // Reset to bind pose
+        setAnimTime(inst, 0.0f);  // Reset to bind pose
     }
 }
 
@@ -294,8 +296,10 @@ void M2Renderer::restartInstanceAnimation(uint32_t instanceId) {
     auto idxIt = scene_->instanceIndexById.find(instanceId);
     if (idxIt == scene_->instanceIndexById.end()) return;
     auto& inst = scene_->instances[idxIt->second];
-    inst.animTime = 0.0f;
-    if (inst.cachedModel) computeBoneMatrices(*inst.cachedModel, inst, &cachedView_);
+    setAnimTime(inst, 0.0f);
+    if (inst.cachedModel) {
+        computeBoneMatrices(*inst.cachedModel, inst, animTimeOf(inst), globalSequenceTimeOf(inst), &cachedView_);
+    }
 }
 
 void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animationId,
@@ -313,10 +317,10 @@ void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animatio
         inst.holdAtEnd = true;
         inst.nextAnimation.reset();
         if (skipToEnd) {
-            inst.animTime = inst.animDuration;
+            setAnimTime(inst, inst.animDuration);
             inst.animSpeed = 0.0f;
         } else {
-            inst.animTime = 0.0f;
+            setAnimTime(inst, 0.0f);
             inst.animSpeed = 1.0f;
         }
         return;
@@ -326,7 +330,8 @@ void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animatio
 namespace {
 
 // Put one planned animation on an instance. False when the model lacks it.
-bool startPlannedAnimation(M2Instance& inst, const M2AnimationPlay& play) {
+// The sequence time it starts at goes to `startTime`, for the caller to set.
+bool startPlannedAnimation(M2Instance& inst, const M2AnimationPlay& play, float& startTime) {
     const auto& seqs = inst.cachedModel->sequences;
     for (int i = 0; i < static_cast<int>(seqs.size()); ++i) {
         if (seqs[i].id != play.animationId) continue;
@@ -341,11 +346,11 @@ bool startPlannedAnimation(M2Instance& inst, const M2AnimationPlay& play) {
         const float start = play.reversed ? inst.animDuration : 0.0f;
         const float end = play.reversed ? 0.0f : inst.animDuration;
         if (play.frozen || play.startAtEnd) {
-            inst.animTime = play.frozen ? start : end;
+            startTime = play.frozen ? start : end;
             inst.animSpeed = 0.0f;
             inst.holdAtEnd = true;
         } else {
-            inst.animTime = start;
+            startTime = start;
             inst.animSpeed = play.reversed ? -1.0f : 1.0f;
         }
         return true;
@@ -361,7 +366,9 @@ bool M2Renderer::playInstanceAnimation(uint32_t instanceId, const M2AnimationPla
     if (idxIt == scene_->instanceIndexById.end()) return false;
     auto& inst = scene_->instances[idxIt->second];
     if (!inst.cachedModel) return false;
-    if (!startPlannedAnimation(inst, now)) return false;
+    float startTime = 0.0f;
+    if (!startPlannedAnimation(inst, now, startTime)) return false;
+    setAnimTime(inst, startTime);
     inst.nextAnimation = now.end == M2AnimationPlay::End::Next ? next : std::nullopt;
     return true;
 }
@@ -369,7 +376,10 @@ bool M2Renderer::playInstanceAnimation(uint32_t instanceId, const M2AnimationPla
 void M2Renderer::advanceToNextAnimation(M2Instance& inst) {
     const M2AnimationPlay next = *inst.nextAnimation;
     inst.nextAnimation.reset();
-    if (!startPlannedAnimation(inst, next)) {
+    float startTime = 0.0f;
+    if (startPlannedAnimation(inst, next, startTime)) {
+        setAnimTime(inst, startTime);
+    } else {
         LOG_WARNING("M2: '", inst.cachedModel->name, "' has no animation ", next.animationId,
                     " to go on to; holding where it is");
         inst.animSpeed = 0.0f;
@@ -388,7 +398,7 @@ void M2Renderer::setInstanceAnimation(uint32_t instanceId, uint32_t animationId,
         if (seqs[i].id == animationId) {
             inst.currentSequenceIndex = i;
             inst.animDuration = static_cast<float>(seqs[i].duration);
-            inst.animTime = 0.0f;
+            setAnimTime(inst, 0.0f);
             inst.animSpeed = 1.0f;
             // Use playingVariation=true for one-shot (returns to idle when done)
             inst.playingVariation = !loop;
@@ -496,7 +506,7 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
         transformAABB(inst.modelMatrix, localMin, localMax, inst.worldBoundsMin, inst.worldBoundsMax);
         inst.recomputeCachedCullFactors();
     }
-    fileInCullGrid(inst);
+    fileInCullGrid(idxIt->second);
     scene_->rtChanges.changed(instanceId);
     if (collision_) collision_->moveM2(instanceId, inst.modelMatrix, inst.scale);
 }
@@ -512,7 +522,6 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
 
     scene_->rtChanges.remove(instanceId, rtScene_);
     if (collision_) collision_->removeM2(instanceId);
-    scene_->cullGrid_.remove(instanceId);
 
     // Remove from dedup map
     if (!inst.cachedIsGroundDetail) {
@@ -532,6 +541,7 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
 
     // Swap-remove: move last element to the hole and pop_back to avoid O(n) shift
     scene_->instanceIndexById.erase(instanceId);
+    scene_->cullGrid_.removeSwapLast(static_cast<uint32_t>(idx));
     const size_t last = scene_->instances.size() - 1;
     if (idx < last) {
         uint32_t movedId = scene_->instances.back().id;
@@ -580,6 +590,7 @@ void M2Renderer::setInstanceIsGameObject(uint32_t instanceId, bool isGameObject)
     auto idxIt = scene_->instanceIndexById.find(instanceId);
     if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) return;
     scene_->instances[idxIt->second].isGameObject = isGameObject;
+    fileInCullGrid(idxIt->second);
 }
 
 void M2Renderer::setSkipCollision(uint32_t instanceId, bool skip) {
@@ -602,12 +613,13 @@ void M2Renderer::finishInstance(uint32_t instanceId) {
     auto& inst = scene_->instances[idxIt->second];
     if (inst.finishing) return;
     inst.finishing = true;
+    fileInCullGrid(idxIt->second);
     // Its particles have at most their longest life left to run.
     float longestLife = 0.0f;
     if (inst.cachedModel) {
         for (const auto& em : inst.cachedModel->particleEmitters) {
             longestLife = std::max(longestLife,
-                interpFloat(em.lifespan, inst.animTime, inst.globalSequenceTime,
+                interpFloat(em.lifespan, animTimeOf(inst), globalSequenceTimeOf(inst),
                             inst.currentSequenceIndex, inst.cachedModel->globalSequenceDurations));
         }
     }
@@ -674,7 +686,6 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
             }
         }
         destroyInstanceBones(inst, /*defer=*/true);
-        scene_->cullGrid_.remove(id);
         scene_->instanceIndexById.erase(idxIt);
     }
     if (holes.empty()) return;
@@ -686,6 +697,7 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
     for (size_t hole : holes) {
         const size_t last = scene_->instances.size() - 1;
         dropFromIndexSets(hole);
+        scene_->cullGrid_.removeSwapLast(static_cast<uint32_t>(hole));
         if (hole != last) {
             scene_->instances[hole] = std::move(scene_->instances[last]);
             scene_->instanceIndexById[scene_->instances[hole].id] = hole;
@@ -717,7 +729,6 @@ void M2Renderer::clear() {
     if (collision_) collision_->clearM2();
     scene_->instanceIndexById.clear();
     scene_->cullGrid_.clear();
-    scene_->boneSeedInstanceByModel_.clear();
     scene_->instanceDedupMap_.clear();
     scene_->animatedInstanceIndices_.clear();
     scene_->particleOnlyInstanceIndices_.clear();

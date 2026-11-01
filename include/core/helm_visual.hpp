@@ -15,7 +15,7 @@
 #include <string>
 
 namespace wowee {
-namespace pipeline { class AssetManager; }
+namespace pipeline { class AssetManager; class GameTables; }
 
 namespace core {
 
@@ -71,6 +71,7 @@ struct HelmVisual {
 /// Resolve the head model and texture for an ItemDisplayInfo id. Returns an
 /// empty result when the id is unknown or carries no model.
 HelmVisual resolveHelmVisual(pipeline::AssetManager& assets,
+                             const pipeline::GameTables& tables,
                              uint32_t itemDisplayInfoId,
                              uint8_t raceId,
                              uint8_t genderId);
@@ -93,6 +94,7 @@ struct ShoulderVisual {
 /// together elsewhere and never attached any. And the one path that did hung
 /// the LShoulder model on attachment 5, the right shoulder.
 ShoulderVisual resolveShoulderVisual(pipeline::AssetManager& assets,
+                                     const pipeline::GameTables& tables,
                                      uint32_t itemDisplayInfoId,
                                      uint8_t raceId,
                                      uint8_t genderId);
@@ -104,7 +106,7 @@ ShoulderVisual resolveShoulderVisual(pipeline::AssetManager& assets,
 /// points at a HelmetGeosetVisData row per gender, and that row carries the
 /// masks of what to hide - the row circlets and crowns use is all zeroes, while
 /// a plate helm's is not. An id of 0 likewise hides nothing.
-bool helmHidesHair(pipeline::AssetManager& assets,
+bool helmHidesHair(const pipeline::GameTables& tables,
                    uint32_t itemDisplayInfoId,
                    uint8_t genderId);
 

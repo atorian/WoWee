@@ -1,6 +1,8 @@
 // lua_spell_api.cpp - Spell info, casting, auras, and targeting Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
+#include "group/services/group.hpp"
 #include "game/shapeshift_forms.hpp"
+#include "pet/services/pet.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "game/item_text.hpp"
 #include "addons/lua_engine.hpp"
@@ -28,13 +30,13 @@ uint32_t highestKnownRankByName(game::GameHandler* gh, const std::string& name) 
 
     uint32_t bestId = 0;
     int bestRank = -1;
-    for (uint32_t sid : gh->getKnownSpells()) {
-        std::string known = gh->getSpellName(sid);
+    for (uint32_t sid : gh->spells().getKnownSpells()) {
+        std::string known = gh->spells().getSpellName(sid);
         toLowerInPlace(known);
         if (known != wanted) continue;
 
         int rank = 0;
-        const std::string& rankText = gh->getSpellRank(sid);
+        const std::string& rankText = gh->spells().getSpellRank(sid);
         if (!rankText.empty()) {
             std::string lowered = rankText;
             toLowerInPlace(lowered);
@@ -89,13 +91,13 @@ static int lua_GetTotemInfo(lua_State* L) {
         lua_pushnil(L);
         return 5;
     }
-    const auto& totem = gh->getTotemSlot(slot - 1);
+    const auto& totem = gh->spells().totemSlot(slot - 1);
     const bool active = totem.active();
     const double durationSec = totem.durationMs / 1000.0;
     const double remainingSec = totem.remainingMs() / 1000.0;
 
     lua_pushboolean(L, active ? 1 : 0);
-    lua_pushstring(L, active ? gh->getSpellName(totem.spellId).c_str() : "");
+    lua_pushstring(L, active ? gh->spells().getSpellName(totem.spellId).c_str() : "");
     // Placed at however long ago it has already run for.
     lua_pushnumber(L, active ? luaGetTimeNow() - (durationSec - remainingSec) : 0.0);
     lua_pushnumber(L, active ? durationSec : 0.0);
@@ -116,7 +118,7 @@ static int lua_GetTotemTimeLeft(lua_State* L) {
         lua_pushnumber(L, 0);
         return 1;
     }
-    lua_pushnumber(L, gh->getTotemSlot(slot - 1).remainingMs() / 1000.0);
+    lua_pushnumber(L, gh->spells().totemSlot(slot - 1).remainingMs() / 1000.0);
     return 1;
 }
 
@@ -192,12 +194,12 @@ static int lua_UnitAura(lua_State* L, bool wantBuff) {
     toLowerInPlace(uidStr);
 
     const std::vector<game::AuraSlot>* auras = nullptr;
-    if (uidStr == "player")      auras = &gh->getPlayerAuras();
-    else if (uidStr == "target") auras = &gh->getTargetAuras();
+    if (uidStr == "player")      auras = &gh->spells().getPlayerAuras();
+    else if (uidStr == "target") auras = &gh->spells().getTargetAuras();
     else {
         // Try party/raid/focus via GUID lookup in unitAurasCache
         uint64_t guid = resolveUnitGuid(gh, uidStr);
-        if (guid != 0) auras = gh->getUnitAuras(guid);
+        if (guid != 0) auras = gh->spells().getUnitAuras(guid);
     }
     if (!auras) { return luaReturnNil(L); }
 
@@ -221,13 +223,13 @@ static int lua_UnitAura(lua_State* L, bool wantBuff) {
         bool isDebuff = (aura.flags & 0x80) != 0;
         if (wantBuff ? isDebuff : !isDebuff) continue;
         if (dispellableOnly &&
-            !classCanDispel(playerClass, gh->getSpellDispelType(aura.spellId))) {
+            !classCanDispel(playerClass, gh->spells().getSpellDispelType(aura.spellId))) {
             continue;
         }
         found++;
         if (found == index) {
             // Return: name, rank, icon, count, debuffType, duration, expirationTime, ...spellId
-            std::string name = gh->getSpellName(aura.spellId);
+            std::string name = gh->spells().getSpellName(aura.spellId);
             if (name.empty()) {
                 // An aura this client's Spell.dbc has no row for draws as
                 // "Unknown" with no icon, and nothing said which one it was.
@@ -250,7 +252,7 @@ static int lua_UnitAura(lua_State* L, bool wantBuff) {
             lua_pushnumber(L, aura.charges); // count
             // debuffType: resolve from Spell.dbc dispel type
             {
-                uint8_t dt = gh->getSpellDispelType(aura.spellId);
+                uint8_t dt = gh->spells().getSpellDispelType(aura.spellId);
                 switch (dt) {
                     case 1:  lua_pushstring(L, "Magic");  break;
                     case 2:  lua_pushstring(L, "Curse");  break;
@@ -274,11 +276,11 @@ static int lua_UnitAura(lua_State* L, bool wantBuff) {
             if (aura.casterGuid != 0) {
                 if (aura.casterGuid == gh->getPlayerGuid())
                     lua_pushstring(L, "player");
-                else if (aura.casterGuid == gh->getTargetGuid())
+                else if (aura.casterGuid == gh->combat().getTargetGuid())
                     lua_pushstring(L, "target");
-                else if (aura.casterGuid == gh->getFocusGuid())
+                else if (aura.casterGuid == gh->combat().getFocusGuid())
                     lua_pushstring(L, "focus");
-                else if (aura.casterGuid == gh->getPetGuid())
+                else if (aura.casterGuid == petOf(L).getPetGuid())
                     lua_pushstring(L, "pet");
                 else {
                     char cBuf[32];
@@ -319,7 +321,7 @@ static int lua_UnitAura(lua_State* L, bool wantBuff) {
 /// stopped filtering - which is the whole point of handing it back.
 static const game::AuraSlot* playerAuraAt(game::GameHandler* gh, int slot) {
     if (!gh || slot < 0) return nullptr;
-    const auto& auras = gh->getPlayerAuras();
+    const auto& auras = gh->spells().getPlayerAuras();
     if (static_cast<size_t>(slot) >= auras.size()) return nullptr;
     const game::AuraSlot& aura = auras[static_cast<size_t>(slot)];
     return aura.isEmpty() ? nullptr : &aura;
@@ -349,7 +351,7 @@ static int lua_GetPlayerBuff(lua_State* L) {
     const int wanted = static_cast<int>(luaL_optnumber(L, 1, 0));
     const bool harmful = filterWantsHarmful(luaL_optstring(L, 2, "HELPFUL"));
     if (gh && wanted >= 0) {
-        const auto& auras = gh->getPlayerAuras();
+        const auto& auras = gh->spells().getPlayerAuras();
         int seen = 0;
         for (size_t i = 0; i < auras.size(); ++i) {
             const game::AuraSlot& aura = auras[i];
@@ -406,7 +408,7 @@ static int lua_GetPlayerBuffDispelType(lua_State* L) {
     auto* gh = getGameHandler(L);
     const auto* aura = playerAuraAt(gh, static_cast<int>(luaL_optnumber(L, 1, -1)));
     if (!aura) return luaReturnNil(L);
-    switch (gh->getSpellDispelType(aura->spellId)) {
+    switch (gh->spells().getSpellDispelType(aura->spellId)) {
         case 1:  lua_pushstring(L, "Magic");   return 1;
         case 2:  lua_pushstring(L, "Curse");   return 1;
         case 3:  lua_pushstring(L, "Disease"); return 1;
@@ -420,7 +422,7 @@ static int lua_GetPlayerBuffDispelType(lua_State* L) {
 static int lua_CancelPlayerBuff(lua_State* L) {
     auto* gh = getGameHandler(L);
     const auto* aura = playerAuraAt(gh, static_cast<int>(luaL_optnumber(L, 1, -1)));
-    if (aura) gh->cancelAura(aura->spellId);
+    if (aura) gh->spells().cancelAura(aura->spellId);
     return 0;
 }
 
@@ -460,17 +462,17 @@ static int lua_UnitCastInfo(lua_State* L, bool wantChannel) {
     bool interruptible = true;
 
     if (uidStr == "player") {
-        isCasting = gh->isCasting();
-        isChannel = gh->isChanneling();
-        spellId = gh->getCurrentCastSpellId();
-        timeTotal = gh->getCastTimeTotal();
-        timeRemaining = gh->getCastTimeRemaining();
+        isCasting = gh->spells().isCasting();
+        isChannel = gh->spells().isChanneling();
+        spellId = gh->spells().getCurrentCastSpellId();
+        timeTotal = gh->spells().getCastTimeTotal();
+        timeRemaining = gh->spells().getCastTimeRemaining();
         // Player interruptibility: always true for own casts (server controls actual interrupt)
         interruptible = true;
     } else {
         uint64_t guid = resolveUnitGuid(gh, uidStr);
         if (guid == 0) { return luaReturnNil(L); }
-        const auto* state = gh->getUnitCastState(guid);
+        const auto* state = gh->spells().getUnitCastState(guid);
         if (!state) { return luaReturnNil(L); }
         isCasting = state->casting;
         isChannel = state->isChannel;
@@ -487,7 +489,7 @@ static int lua_UnitCastInfo(lua_State* L, bool wantChannel) {
     if (wantChannel != isChannel) { return luaReturnNil(L); }
 
     // Spell name + icon
-    const std::string& name = gh->getSpellName(spellId);
+    const std::string& name = gh->spells().getSpellName(spellId);
     std::string iconPath = gh->getSpellIconPath(spellId);
 
     // Time values in milliseconds (WoW API convention)
@@ -506,7 +508,7 @@ static int lua_UnitCastInfo(lua_State* L, bool wantChannel) {
     // endTime - then computed (endTime - startTime) and raised, which is why no
     // cast bar was ever drawn rather than a wrong one.
     lua_pushstring(L, name.empty() ? "Unknown" : name.c_str()); // name
-    const std::string& rank = gh->getSpellRank(spellId);
+    const std::string& rank = gh->spells().getSpellRank(spellId);
     lua_pushstring(L, rank.c_str());                             // nameSubtext
     // What the bar is labelled with, which is the third value and not the
     // first: castingbarframe.lua reads `text` into barText and never touches
@@ -521,7 +523,7 @@ static int lua_UnitCastInfo(lua_State* L, bool wantChannel) {
     else lua_pushstring(L, "Interface\\Icons\\INV_Misc_QuestionMark");  // texture
     lua_pushnumber(L, startTimeMs);                              // startTime (ms)
     lua_pushnumber(L, endTimeMs);                                // endTime (ms)
-    lua_pushboolean(L, gh->isProfessionSpell(spellId) ? 1 : 0); // isTradeSkill
+    lua_pushboolean(L, gh->spells().isProfessionSpell(spellId) ? 1 : 0); // isTradeSkill
     if (!wantChannel) {
         lua_pushnumber(L, spellId);                              // castID (UnitCastingInfo only)
     }
@@ -549,8 +551,8 @@ static int lua_CastSpellByName(lua_State* L) {
             toLowerInPlace(u);
             target = resolveUnitGuid(gh, u);
         }
-        if (target == 0 && gh->hasTarget()) target = gh->getTargetGuid();
-        gh->castSpell(bestId, target);
+        if (target == 0 && gh->combat().hasTarget()) target = gh->combat().getTargetGuid();
+        gh->spells().castSpell(bestId, target);
     }
     return 0;
 }
@@ -558,7 +560,7 @@ static int lua_CastSpellByName(lua_State* L) {
 static int lua_IsSpellKnown(lua_State* L) {
     auto* gh = getGameHandler(L);
     uint32_t spellId = static_cast<uint32_t>(luaL_checknumber(L, 1));
-    lua_pushboolean(L, gh && gh->getKnownSpells().count(spellId));
+    lua_pushboolean(L, gh && gh->spells().getKnownSpells().count(spellId));
     return 1;
 }
 
@@ -568,7 +570,7 @@ static int lua_IsSpellKnown(lua_State* L) {
 static int lua_GetNumSpellTabs(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnZero(L); }
-    lua_pushnumber(L, gh->getSpellBookTabs().size());
+    lua_pushnumber(L, gh->spells().getSpellBookTabs().size());
     return 1;
 }
 
@@ -612,26 +614,24 @@ static int lua_GetSpellTabInfo(lua_State* L) {
     if (!gh || tabIdx < 1) {
         return emptyTab(L);
     }
-    const auto& tabs = gh->getSpellBookTabs();
+    const auto& tabs = gh->spells().getSpellBookTabs();
     if (tabIdx > static_cast<int>(tabs.size())) {
         return emptyTab(L);
     }
     // Compute offset: sum of spells in all preceding tabs (1-based)
     int offset = 0;
-    for (int i = 0; i < tabIdx - 1; ++i)
+    int highestOffset = 0;
+    for (int i = 0; i < tabIdx - 1; ++i) {
         offset += static_cast<int>(tabs[i].spellIds.size());
+        highestOffset += static_cast<int>(tabs[i].highestRankSlots.size());
+    }
     const auto& tab = tabs[tabIdx - 1];
     lua_pushstring(L, tab.name.c_str());           // name
     lua_pushstring(L, tab.texture.c_str());        // texture
     lua_pushnumber(L, offset);                     // offset (0-based for WoW compat)
     lua_pushnumber(L, tab.spellIds.size());        // numSpells
-    // The highest-rank pair, which is what FrameXML actually reads: with
-    // ShowAllSpellRanks off - the default - SpellBook_GetTabInfo throws away
-    // the first offset and count and keeps these. Returning four values left
-    // numSpells nil and the page count divided by nothing. This client does
-    // not track ranks separately, so the whole tab is the highest rank.
-    lua_pushnumber(L, offset);                     // highestRankOffset
-    lua_pushnumber(L, tab.spellIds.size());        // highestRankNumSpells
+    lua_pushnumber(L, highestOffset);
+    lua_pushnumber(L, tab.highestRankSlots.size());
     return 6;
 }
 
@@ -645,7 +645,7 @@ static int lua_GetSpellBookItemInfo(lua_State* L) {
         lua_pushnumber(L, 0);
         return 2;
     }
-    const auto& tabs = gh->getSpellBookTabs();
+    const auto& tabs = gh->spells().getSpellBookTabs();
     int idx = slot; // 1-based
     for (const auto& tab : tabs) {
         if (idx <= static_cast<int>(tab.spellIds.size())) {
@@ -665,14 +665,14 @@ static int lua_GetSpellBookItemName(lua_State* L) {
     auto* gh = getGameHandler(L);
     int slot = static_cast<int>(luaL_checknumber(L, 1));
     if (!gh || slot < 1) { return luaReturnNil(L); }
-    const auto& tabs = gh->getSpellBookTabs();
+    const auto& tabs = gh->spells().getSpellBookTabs();
     int idx = slot;
     for (const auto& tab : tabs) {
         if (idx <= static_cast<int>(tab.spellIds.size())) {
             uint32_t spellId = tab.spellIds[idx - 1];
-            const std::string& name = gh->getSpellName(spellId);
+            const std::string& name = gh->spells().getSpellName(spellId);
             lua_pushstring(L, name.empty() ? "Unknown" : name.c_str());
-            lua_pushstring(L, ""); // subName/rank
+            lua_pushstring(L, gh->spells().getSpellRank(spellId).c_str());
             return 2;
         }
         idx -= static_cast<int>(tab.spellIds.size());
@@ -699,9 +699,9 @@ static int lua_GetSpellName(lua_State* L) {
     // own spells - the wrong answer wearing the shape of a right one.
     const uint32_t id = spellIdForCall(L, gh);
     if (id == 0) { return luaReturnNil(L); }
-    const std::string& name = gh->getSpellName(id);
+    const std::string& name = gh->spells().getSpellName(id);
     lua_pushstring(L, name.empty() ? "Unknown" : name.c_str());
-    lua_pushstring(L, "");
+    lua_pushstring(L, gh->spells().getSpellRank(id).c_str());
     return 2;
 }
 
@@ -713,7 +713,7 @@ static int lua_CastSpell(lua_State* L) {
     // resolved through the player's tabs cast whichever of the player's spells
     // sat at that index.
     const uint32_t id = spellIdForCall(L, gh);
-    if (id != 0) gh->castSpell(id, gh->getTargetGuid());
+    if (id != 0) gh->spells().castSpell(id, gh->combat().getTargetGuid());
     return 0;
 }
 
@@ -736,7 +736,7 @@ static int lua_IsPassiveSpell(lua_State* L) {
     // answered for whichever spell happens to carry the number 1, 2 or 3.
     // The result decides whether a spell is drawn as castable at all.
     const uint32_t id = spellIdForCall(L, gh);
-    lua_pushboolean(L, gh->isSpellPassive(id) ? 1 : 0);
+    lua_pushboolean(L, gh->spells().isSpellPassive(id) ? 1 : 0);
     return 1;
 }
 
@@ -756,11 +756,12 @@ static int lua_GetSpellAutocast(lua_State* L) {
     lua_pushboolean(L, 0);
     return 2;
 }
-/// GetKnownSlotFromHighestRankSlot(slot) → the slot actually known. The book
-/// shows the highest rank and this maps back; with one entry per spell here
-/// the two are the same slot.
+/// Map a compact highest-rank display slot to the full learned spell book.
 static int lua_GetKnownSlotFromHighestRankSlot(lua_State* L) {
-    lua_pushnumber(L, luaL_optnumber(L, 1, 0));
+    const int slot = static_cast<int>(luaL_optnumber(L, 1, 0));
+    auto* gh = getGameHandler(L);
+    lua_pushnumber(L, gh && slot > 0
+        ? gh->spells().getKnownSlotFromHighestRankSlot(static_cast<uint32_t>(slot)) : 0);
     return 1;
 }
 
@@ -798,7 +799,7 @@ static int lua_GetSpellDescription(lua_State* L) {
     // The local one this replaced knew $s and $o and wrote a literal "X" for
     // $d and the rest, so a duration read as "lasts X sec".
     const std::string desc =
-        gh->formatSpellDescription(spellId, gh->getSpellDescription(spellId));
+        gh->formatSpellDescription(spellId, gh->spells().getSpellDescription(spellId));
     lua_pushstring(L, desc.c_str());
     return 1;
 }
@@ -808,7 +809,7 @@ static int lua_GetEnchantInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnNil(L); }
     uint32_t enchantId = static_cast<uint32_t>(luaL_checknumber(L, 1));
-    std::string name = gh->getEnchantName(enchantId);
+    std::string name = gh->spells().getEnchantName(enchantId);
     if (name.empty()) { return luaReturnNil(L); }
     lua_pushstring(L, name.c_str());
     return 1;
@@ -826,11 +827,11 @@ static int lua_GetSpellCooldown(lua_State* L) {
     // A name, an id, or a book slot with the book beside it - the spellbook
     // asks in the last of those three.
     const uint32_t spellId = spellIdForCall(L, gh);
-    float cd = gh->getSpellCooldown(spellId);
+    float cd = gh->spells().getSpellCooldown(spellId);
     // Also check GCD - if spell has no individual cooldown but GCD is active,
     // return the GCD timing (this is how WoW handles it)
-    float gcdRem = gh->getGCDRemaining();
-    float gcdTotal = gh->getGCDTotal();
+    float gcdRem = gh->spells().getGCDRemaining();
+    float gcdTotal = gh->spells().getGCDTotal();
 
     // WoW returns (start, duration, enabled) where remaining = start + duration - GetTime()
     double nowSec = luaGetTimeNow();
@@ -844,7 +845,7 @@ static int lua_GetSpellCooldown(lua_State* L) {
         // fires on every cast, so a five-minute cooldown looked like it kept
         // starting over. Wound back the same way the GCD branch below already
         // does it.
-        double total = gh->getSpellCooldownTotal(spellId);
+        double total = gh->spells().getSpellCooldownTotal(spellId);
         if (total < cd) total = cd;   // a total never recorded falls back to what is left
         double start = nowSec - (total - cd);
         lua_pushnumber(L, start);
@@ -865,7 +866,7 @@ static int lua_GetSpellCooldown(lua_State* L) {
 
 static int lua_HasTarget(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->hasTarget());
+    lua_pushboolean(L, gh && gh->combat().hasTarget());
     return 1;
 }
 
@@ -877,14 +878,14 @@ static int lua_TargetUnit(lua_State* L) {
     std::string uidStr(uid);
     toLowerInPlace(uidStr);
     uint64_t guid = resolveUnitGuid(gh, uidStr);
-    if (guid != 0) gh->setTarget(guid);
+    if (guid != 0) gh->combat().setTarget(guid);
     return 0;
 }
 
 // ClearTarget() - clear current target
 static int lua_ClearTarget(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (gh) gh->clearTarget();
+    if (gh) gh->combat().clearTarget();
     return 0;
 }
 
@@ -897,14 +898,14 @@ static int lua_FocusUnit(lua_State* L) {
     std::string uidStr(uid);
     toLowerInPlace(uidStr);
     uint64_t guid = resolveUnitGuid(gh, uidStr);
-    if (guid != 0) gh->setFocus(guid);
+    if (guid != 0) gh->combat().setFocus(guid);
     return 0;
 }
 
 // ClearFocus() - clear focus target
 static int lua_ClearFocus(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (gh) gh->clearFocus();
+    if (gh) gh->combat().clearFocus();
     return 0;
 }
 
@@ -918,14 +919,14 @@ static int lua_AssistUnit(lua_State* L) {
     uint64_t guid = resolveUnitGuid(gh, uidStr);
     if (guid == 0) return 0;
     uint64_t theirTarget = getEntityTargetGuid(gh, guid);
-    if (theirTarget != 0) gh->setTarget(theirTarget);
+    if (theirTarget != 0) gh->combat().setTarget(theirTarget);
     return 0;
 }
 
 // TargetLastTarget() - re-target previous target
 static int lua_TargetLastTarget(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (gh) gh->targetLastTarget();
+    if (gh) gh->combat().targetLastTarget();
     return 0;
 }
 
@@ -941,14 +942,14 @@ static bool wantsReverse(lua_State* L) {
 
 static int lua_TargetNearestEnemy(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (gh) gh->targetEnemy(wantsReverse(L));
+    if (gh) gh->combat().targetEnemy(wantsReverse(L));
     return 0;
 }
 
 // TargetNearestFriend([reverse]) - target nearest friendly unit
 static int lua_TargetNearestFriend(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (gh) gh->targetFriend(wantsReverse(L));
+    if (gh) gh->combat().targetFriend(wantsReverse(L));
     return 0;
 }
 
@@ -961,7 +962,7 @@ static int lua_GetRaidTargetIndex(lua_State* L) {
     toLowerInPlace(uidStr);
     uint64_t guid = resolveUnitGuid(gh, uidStr);
     if (guid == 0) { return luaReturnNil(L); }
-    uint8_t mark = gh->getEntityRaidMark(guid);
+    uint8_t mark = groupOf(L).getEntityRaidMark(guid);
     if (mark == 0xFF) { return luaReturnNil(L); }
     lua_pushnumber(L, mark + 1); // WoW uses 1-indexed (1=Star, 2=Circle, ... 8=Skull)
     return 1;
@@ -978,9 +979,9 @@ static int lua_SetRaidTarget(lua_State* L) {
     uint64_t guid = resolveUnitGuid(gh, uidStr);
     if (guid == 0) return 0;
     if (index >= 1 && index <= 8)
-        gh->setRaidMark(guid, static_cast<uint8_t>(index - 1));
+        groupOf(L).setRaidMark(guid, static_cast<uint8_t>(index - 1));
     else if (index == 0)
-        gh->setRaidMark(guid, 0xFF); // clear
+        groupOf(L).setRaidMark(guid, 0xFF); // clear
     return 0;
 }
 
@@ -1022,11 +1023,11 @@ static int lua_GetSpellInfo(lua_State* L) {
     }
 
     if (spellId == 0) { return luaReturnNil(L); }
-    std::string name = gh->getSpellName(spellId);
+    std::string name = gh->spells().getSpellName(spellId);
     if (name.empty()) { return luaReturnNil(L); }
 
     lua_pushstring(L, name.c_str());                        // 1: name
-    const std::string& rank = gh->getSpellRank(spellId);
+    const std::string& rank = gh->spells().getSpellRank(spellId);
     lua_pushstring(L, rank.c_str());                        // 2: rank
     std::string iconPath = gh->getSpellIconPath(spellId);
     if (!iconPath.empty()) lua_pushstring(L, iconPath.c_str());
@@ -1076,7 +1077,7 @@ static int lua_GetSpellLink(lua_State* L) {
 
     const uint32_t spellId = spellIdForCall(L, gh);
     if (spellId == 0) { return luaReturnNil(L); }
-    std::string name = gh->getSpellName(spellId);
+    std::string name = gh->spells().getSpellName(spellId);
     if (name.empty()) { return luaReturnNil(L); }
     const std::string link = game::spellChatLink(spellId, name);
     lua_pushstring(L, link.c_str());
@@ -1102,7 +1103,7 @@ static int lua_CancelUnitBuff(lua_State* L) {
     toLowerInPlace(uidStr);
     if (uidStr != "player") return 0;   // only one's own auras can be cancelled
 
-    const auto& auras = gh->getPlayerAuras();
+    const auto& auras = gh->spells().getPlayerAuras();
     const bool byName = lua_isstring(L, 2) && !lua_isnumber(L, 2);
 
     if (byName) {
@@ -1110,9 +1111,9 @@ static int lua_CancelUnitBuff(lua_State* L) {
         toLowerInPlace(want);
         for (const auto& a : auras) {
             if (a.isEmpty() || (a.flags & 0x80) != 0) continue;
-            std::string have = gh->getSpellName(a.spellId);
+            std::string have = gh->spells().getSpellName(a.spellId);
             toLowerInPlace(have);
-            if (have == want) { gh->cancelAura(a.spellId); return 0; }
+            if (have == want) { gh->spells().cancelAura(a.spellId); return 0; }
         }
         return 0;
     }
@@ -1123,7 +1124,7 @@ static int lua_CancelUnitBuff(lua_State* L) {
     for (const auto& a : auras) {
         if (a.isEmpty()) continue;
         if ((a.flags & 0x80) != 0) continue;   // debuffs are not cancellable
-        if (++buffCount == index) { gh->cancelAura(a.spellId); return 0; }
+        if (++buffCount == index) { gh->spells().cancelAura(a.spellId); return 0; }
     }
     return 0;
 }
@@ -1145,8 +1146,8 @@ static int lua_CastSpellByID(lua_State* L) {
         toLowerInPlace(u);
         target = resolveUnitGuid(gh, u);
     }
-    if (target == 0 && gh->hasTarget()) target = gh->getTargetGuid();
-    gh->castSpell(spellId, target);
+    if (target == 0 && gh->combat().hasTarget()) target = gh->combat().getTargetGuid();
+    gh->spells().castSpell(spellId, target);
     return 0;
 }
 
@@ -1162,20 +1163,20 @@ static int lua_IsUsableSpell(lua_State* L) {
         if (!name || !*name) { lua_pushboolean(L, 0); lua_pushboolean(L, 0); return 2; }
         std::string nameLow(name);
         toLowerInPlace(nameLow);
-        for (uint32_t sid : gh->getKnownSpells()) {
-            std::string sn = gh->getSpellName(sid);
+        for (uint32_t sid : gh->spells().getKnownSpells()) {
+            std::string sn = gh->spells().getSpellName(sid);
             toLowerInPlace(sn);
             if (sn == nameLow) { spellId = sid; break; }
         }
     }
 
-    if (spellId == 0 || !gh->getKnownSpells().count(spellId)) {
+    if (spellId == 0 || !gh->spells().getKnownSpells().count(spellId)) {
         lua_pushboolean(L, 0);
         lua_pushboolean(L, 0);
         return 2;
     }
 
-    float cd = gh->getSpellCooldown(spellId);
+    float cd = gh->spells().getSpellCooldown(spellId);
     bool onCooldown = (cd > 0.1f);
     bool noMana = false;
     if (!onCooldown) {
@@ -1218,12 +1219,12 @@ void registerSpellLuaAPI(lua_State* L) {
             // No AoE reticle, but the item cursor a stone or an oil arms is a
             // kind of targeting and escape has to put it down.
             auto* gh = getGameHandler(L);
-            if (gh && gh->isAwaitingItemTarget()) gh->cancelItemTargeting();
+            if (gh && gh->inventory().isAwaitingItemTarget()) gh->inventory().cancelItemTargeting();
             return 0;
         }},
                 {"SpellIsTargeting", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushboolean(L, gh && gh->isAwaitingItemTarget());
+            lua_pushboolean(L, gh && gh->inventory().isAwaitingItemTarget());
             return 1;
         }},
                 {"IsSpellInRange",    lua_IsSpellInRange},
@@ -1286,7 +1287,7 @@ void registerSpellLuaAPI(lua_State* L) {
                 {"IsPlayerSpell", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             uint32_t spellId = static_cast<uint32_t>(luaL_checknumber(L, 1));
-            lua_pushboolean(L, gh && gh->getKnownSpells().count(spellId) ? 1 : 0);
+            lua_pushboolean(L, gh && gh->spells().getKnownSpells().count(spellId) ? 1 : 0);
             return 1;
         }},
                 {"IsSpellOverlayed", [](lua_State* L) -> int {
@@ -1295,7 +1296,7 @@ void registerSpellLuaAPI(lua_State* L) {
                 {"IsCurrentSpell", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             uint32_t spellId = static_cast<uint32_t>(luaL_checknumber(L, 1));
-            lua_pushboolean(L, gh && gh->getCurrentCastSpellId() == spellId ? 1 : 0);
+            lua_pushboolean(L, gh && gh->spells().getCurrentCastSpellId() == spellId ? 1 : 0);
             return 1;
         }},
                 {"IsAutoRepeatSpell", [](lua_State* L) -> int {
@@ -1307,15 +1308,15 @@ void registerSpellLuaAPI(lua_State* L) {
             int index = static_cast<int>(luaL_checknumber(L, 1));
             if (!gh || index < 1) return 0;
             uint8_t classId = gh->getPlayerClass();
-            const auto forms = game::knownShapeshiftForms(classId, gh->getKnownSpells());
+            const auto forms = game::knownShapeshiftForms(classId, gh->spells().getKnownSpells());
             if (static_cast<size_t>(index) > forms.size()) return 0;
-            gh->castSpell(forms[static_cast<size_t>(index) - 1].spellId, 0);
+            gh->spells().castSpell(forms[static_cast<size_t>(index) - 1].spellId, 0);
             return 0;
         }},
                 {"CancelShapeshiftForm", [](lua_State* L) -> int {
             // Cancel current form - cast spell 0 or cancel aura
             auto* gh = getGameHandler(L);
-            if (gh && gh->getShapeshiftFormId() != 0) {
+            if (gh && gh->player().shapeshiftForm() != 0) {
                 // Cancelling a form is done by re-casting the same form spell
                 // For simplicity, just note that the server will handle it
             }
@@ -1328,7 +1329,7 @@ void registerSpellLuaAPI(lua_State* L) {
                 // framexml_lua_override_check exists to catch exactly that.
                 {"GetShapeshiftForm", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getShapeshiftFormId() : 0);
+            lua_pushnumber(L, gh ? gh->player().shapeshiftForm() : 0);
             return 1;
         }},
                 {"GetNumShapeshiftForms", [](lua_State* L) -> int {
@@ -1342,7 +1343,7 @@ void registerSpellLuaAPI(lua_State* L) {
             // a count taken from a different list describes one form and casts
             // another.
             lua_pushnumber(L, static_cast<double>(
-                game::knownShapeshiftForms(classId, gh->getKnownSpells()).size()));
+                game::knownShapeshiftForms(classId, gh->spells().getKnownSpells()).size()));
             return 1;
         }},
     };

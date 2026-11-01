@@ -18,9 +18,11 @@
 #include <vector>
 
 namespace wowee {
+namespace achievement { class IAchievementsFeed; }
 namespace core { class CVarStore; }
-namespace pipeline { class AssetManager; }
 namespace game {
+
+class GameData;
 
 class PacketSender;
 class FrameXmlEvents;
@@ -47,6 +49,9 @@ struct SpellReagent { uint32_t itemId = 0; uint32_t count = 0; };
 /// One row of Spell.dbc, as much of it as the client reads.
 struct SpellNameEntry {
     std::string name; std::string rank; std::string description;
+    // Additional localized names imported from the same expansion. They do
+    // not replace the active UI language or any gameplay fields.
+    std::vector<std::pair<std::string, std::string>> localizedNames;
     uint32_t schoolMask = 0; uint8_t dispelType = 0; uint32_t attrEx = 0;
     /// Spell.dbc Attributes, the base word. Bit 6 (0x40) is passive.
     uint32_t attr = 0;
@@ -263,16 +268,15 @@ public:
     virtual void lootTarget(uint64_t guid) = 0;
 
     // ---- Companions and the hearth ----
-    [[nodiscard]] virtual uint32_t activeCritterSpellId() const = 0;
-    [[nodiscard]] virtual uint64_t activeCritterGuid() const = 0;
-    virtual void dismissCritter() = 0;
     /// A mount or critter may have come out or gone away.
     virtual void announceCompanionChange() = 0;
     [[nodiscard]] virtual std::optional<HomeBind> homeBind() const = 0;
 
     // ---- Achievements ----
+    /// The achievement's name, empty when it is not known.
     [[nodiscard]] virtual std::string achievementName(uint32_t achievementId) = 0;
-    virtual void recordAchievementEarned(uint32_t achievementId, uint32_t packedDate) = 0;
+    /// The achievements, or null in a client with no game.
+    [[nodiscard]] virtual achievement::IAchievementsFeed* achievementsFeed() = 0;
 
     // ---- What the client's own data resolves ----
     [[nodiscard]] virtual SpellDataInfo spellData(uint32_t spellId) const = 0;
@@ -287,7 +291,7 @@ public:
 
     SpellHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
                  ChatLog& chat, SpellQueries& queries, const core::CVarStore& cvars,
-                 pipeline::AssetManager* assets);
+                 const GameData& data);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -299,7 +303,9 @@ public:
     struct SpellBookTab {
         std::string name;
         std::string texture; // icon path
-        std::vector<uint32_t> spellIds; // spells in this tab
+        std::vector<uint32_t> spellIds; // all visible learned ranks in this tab
+        // One-based slots in the full book, for the compact highest-rank view.
+        std::vector<uint32_t> highestRankSlots;
     };
 
     // Unit cast state (aliased from handler_types.hpp)
@@ -348,7 +354,6 @@ public:
     [[nodiscard]] bool isRestoring() const { return restorationActive_; }
     /// Eating rather than drinking, while isRestoring().
     [[nodiscard]] bool isRestorationFood() const { return restorationIsFood_; }
-    [[nodiscard]] bool isGameObjectInteractionCasting() const;
     [[nodiscard]] uint32_t getCurrentCastSpellId() const {
         return casting_ ? currentCastSpellId_ : restorationSpellId_;
     }
@@ -411,7 +416,9 @@ public:
     void removeUnitAuraCache(uint64_t guid) { unitAurasCache_.erase(guid); }
 
     // Known spells mutation (formerly accessed via friend)
-    void addKnownSpell(uint32_t spellId) { knownSpells_.insert(spellId); }
+    void addKnownSpell(uint32_t spellId) {
+        if (knownSpells_.insert(spellId).second) spellBookTabsDirty_ = true;
+    }
     [[nodiscard]] bool hasKnownSpell(uint32_t spellId) const { return knownSpells_.count(spellId) > 0; }
 
     // Target aura mutation (formerly accessed via friend)
@@ -420,14 +427,13 @@ public:
     // Player aura mutation (formerly accessed via friend)
     void resetPlayerAuras(size_t capacity) { playerAuras_.clear(); playerAuras_.resize(capacity); }
     AuraSlot& getPlayerAuraSlotRef(size_t slot) { return playerAuras_[slot]; }
-    std::vector<AuraSlot>& getPlayerAurasMut() { return playerAuras_; }
-
-    // Target cast helpers
-    [[nodiscard]] bool isTargetCasting() const;
-    [[nodiscard]] uint32_t getTargetCastSpellId() const;
-    [[nodiscard]] float getTargetCastProgress() const;
-    [[nodiscard]] float getTargetCastTimeRemaining() const;
-    [[nodiscard]] bool isTargetCastInterruptible() const;
+    /// Take this spell's aura off the player's buff bar, where the server's
+    /// own word on it will not come.
+    void forgetPlayerAura(uint32_t spellId);
+    /// The player's UNIT_FIELD_CRITTER, at create or in an update: which
+    /// non-combat companion is out. It is attributed to the spell last cast
+    /// from the ground, so casting that spell again puts it away.
+    void companionFieldsArrived(const FlatFieldMap& blockFields);
 
     // Talents
     [[nodiscard]] uint8_t getActiveTalentSpec() const { return activeTalentSpec_; }
@@ -502,6 +508,7 @@ public:
 
     // Spell book tabs
     const std::vector<SpellBookTab>& getSpellBookTabs();
+    uint32_t getKnownSlotFromHighestRankSlot(uint32_t slot);
 
     // Talent wipe confirm dialog
     [[nodiscard]] bool showTalentWipeConfirmDialog() const { return talentWipePending_; }
@@ -607,6 +614,12 @@ public:
     // Skill DBC
     void loadSkillLineDbc() const;
     void extractSkillFields(const FlatFieldMap& fields);
+    /// Before WotLK the player's auras are fields, not packets: UNIT_FIELD_AURAS
+    /// holds a spell per slot and UNIT_FIELD_AURAFLAGS a flag byte per slot.
+    /// `fields` are all the player's fields; when they carry any aura slot the
+    /// list is rebuilt from them, and the interface told on `packetEvents`,
+    /// among the other events of the packet they came in.
+    void playerAuraFieldsArrived(const FlatFieldMap& fields, FrameXmlEvents& packetEvents);
     void extractExploredZoneFields(const FlatFieldMap& fields);
 
     // Update per-frame timers (call from GameHandler::update)
@@ -715,7 +728,7 @@ private:
     const core::CVarStore& cvars_;
     /// The client's data, for the DBC tables. Null in a test that has none,
     /// which leaves every spell unknown to the client.
-    pipeline::AssetManager* const assets_;
+    const GameData& data_;
 
     // --- What the client's data says (read once, kept until an expansion switch) ---
     mutable std::unordered_map<uint32_t, SpellNameEntry> spellNameCache_;
@@ -734,6 +747,8 @@ private:
     /// The character's skills, talent modifiers, explored map and totems, as
     /// the realm has described them. Assigned whole by resetAllState, so a
     /// field added here cannot keep the last character's value.
+    void dismissCompanion();
+
     struct CharacterSpellState {
         std::unordered_map<uint32_t, PlayerSkill> skills;
         SpellModMap flatMods;
@@ -741,6 +756,9 @@ private:
         std::vector<uint32_t> exploredZones = std::vector<uint32_t>(kExploredZoneMaskCount, 0u);
         bool hasExploredZones = false;
         std::array<TotemSlot, kTotemSlots> totems{};
+        /// The non-combat companion out, and the spell that called it.
+        uint64_t companionGuid = 0;
+        uint32_t companionSpellId = 0;
     };
     CharacterSpellState character_;
 
@@ -817,6 +835,7 @@ private:
     std::vector<SpellBookTab> spellBookTabs_;
     size_t lastSpellCount_ = 0;
     bool spellBookTabsDirty_ = true;
+    std::unordered_set<uint32_t> warnedSpellBookIcons_;
 
     // Talent wipe confirm dialog
     bool talentWipePending_ = false;

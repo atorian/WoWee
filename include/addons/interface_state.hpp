@@ -13,7 +13,7 @@
 // state that holds them (interfaceState in lua_api_helpers.hpp), never through
 // a static - tools/function_static_check.py holds that at what it was left.
 
-#include "game/calendar_data.hpp"
+#include "calendar/domain/records.hpp"
 #include "game/craft_recipe.hpp"
 #include "game/inventory_slots.hpp"
 
@@ -57,6 +57,10 @@ struct AuctionSortKey {
 };
 
 struct InterfaceState {
+    // Last published macro textures. Only presentation state; never saved to
+    // account data. Compare during Interface so conditional icons can change.
+    std::unordered_map<uint32_t, std::string> macroIcons;
+    float macroIconRefreshRemaining = 0;
     struct Cursor {
         CursorType type = CursorType::NONE;
         uint32_t id = 0;       ///< spellId, itemId, action slot or vendor index
@@ -184,7 +188,7 @@ struct InterfaceState {
     struct Calendar {
         /// (month, year); zero until first asked, then seeded from the clock.
         std::pair<int, int> viewedMonth{0, 0};
-        game::CalendarEventDraft draft;
+        calendar::CalendarEventDraft draft;
         CalendarContextRow contextRow;
     } calendar;
 

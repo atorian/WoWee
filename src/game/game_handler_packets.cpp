@@ -3,7 +3,11 @@
 #include "core/event_bus.hpp"
 #include "game/game_events.hpp"
 #include "game/achievement_criteria.hpp"
-#include "game/packed_time.hpp"
+#include "achievement/domain/records.hpp"
+#include "achievement/services/achievements.hpp"
+#include "title/services/titles.hpp"
+#include "game/game_services.hpp"
+#include "core/packed_time.hpp"
 #include "game/protocol_constants.hpp"
 #include "game/game_utils.hpp"
 #include "game/chat_handler.hpp"
@@ -40,6 +44,7 @@
 #include <cctype>
 #include <ctime>
 #include <random>
+#include <utility>
 #include <zlib.h>
 #include <chrono>
 #include <filesystem>
@@ -61,6 +66,24 @@ namespace wowee {
 namespace game {
 
 namespace {
+
+// The titles the protocol feeds. A client built without them drops the title
+// packets, and says so once.
+title::ITitlesFeed* titlesFeedOf(const GameServices& services) {
+    static bool said = false;
+    if (!services.titlesFeed && !std::exchange(said, true))
+        LOG_WARNING("Titles are not wired into this client; title packets are dropped");
+    return services.titlesFeed;
+}
+
+// The achievements the protocol feeds. A client built without them drops the
+// achievement packets, and says so once.
+achievement::IAchievementsFeed* achievementsFeedOf(const GameServices& services) {
+    static bool said = false;
+    if (!services.achievementsFeed && !std::exchange(said, true))
+        LOG_WARNING("Achievements are not wired into this client; achievement packets are dropped");
+    return services.achievementsFeed;
+}
 
 bool isAuthCharPipelineOpcode(LogicalOpcode op) {
     switch (op) {
@@ -142,18 +165,6 @@ void GameHandler::fireRuneUpdate(uint32_t index) {
 // session handshake, XP and exploration, corpses and combat state, guilds and
 // loot and vendors, teleports and taxis and battlegrounds, world states, action
 // buttons, levelling.
-void GameHandler::applyKnownTitleUpdate(uint8_t operation, const std::vector<uint16_t>& bits) {
-    if (operation < 1 || operation > 3) return;
-    auto titles = operation == 3 ? std::unordered_set<uint32_t>{} : knownTitleBits_;
-    for (auto bit : bits) {
-        if (operation == 2) titles.erase(bit);
-        else titles.insert(bit);
-    }
-    knownTitleBits_.swap(titles);
-    fireAddonEvent("KNOWN_TITLES_UPDATE", {});
-    LOG_INFO("Server known titles updated: operation=", unsigned(operation), " count=", bits.size());
-}
-
 void GameHandler::registerCoreOpcodes() {
     // -----------------------------------------------------------------------
     // Auth / session / pre-world handshake
@@ -191,7 +202,7 @@ void GameHandler::registerCoreOpcodes() {
                 default:   msg = "Delete failed (server error code " + std::to_string(static_cast<int>(result)) + ")."; break;
             }
         }
-        if (charDeleteCallback_) charDeleteCallback_(success, msg);
+        eventBus().publish(events::CharacterDeleteAnswered{success, msg});
     };
     dispatchTable_[Opcode::SMSG_CHAR_ENUM] = [this](network::Packet& packet) {
         if (state == WorldState::CHAR_LIST_REQUESTED)
@@ -208,14 +219,13 @@ void GameHandler::registerCoreOpcodes() {
     };
     registerHandler(Opcode::SMSG_CLIENTCACHE_VERSION, &GameHandler::handleClientCacheVersion);
     registerHandler(Opcode::SMSG_TUTORIAL_FLAGS, &GameHandler::handleTutorialFlags);
-    registerHandler(Opcode::SMSG_MOTD, &GameHandler::handleMotd);
     registerHandler(Opcode::SMSG_NOTIFICATION, &GameHandler::handleNotification);
     registerHandler(Opcode::SMSG_PONG, &GameHandler::handlePong);
 
     // -----------------------------------------------------------------------
-    // World object updates + entity queries (delegated to EntityController)
+    // World object updates + entity queries (delegated to WorldHandler)
     // -----------------------------------------------------------------------
-    entityController_->registerOpcodes(dispatchTable_);
+    worldHandler_->registerOpcodes(dispatchTable_);
 
     // -----------------------------------------------------------------------
     // Item push / logout
@@ -226,7 +236,6 @@ void GameHandler::registerCoreOpcodes() {
     // -----------------------------------------------------------------------
     // XP / exploration
     // -----------------------------------------------------------------------
-    registerHandler(Opcode::SMSG_LOG_XPGAIN, &GameHandler::handleXpGain);
     dispatchTable_[Opcode::SMSG_EXPLORATION_EXPERIENCE] = [this](network::Packet& packet) {
         if (packet.hasRemaining(8)) {
             uint32_t areaId   = packet.readUInt32();
@@ -241,9 +250,9 @@ void GameHandler::registerCoreOpcodes() {
                     std::snprintf(buf, sizeof(buf), "Discovered new area! Gained %u experience.", xpGained);
                     msg = buf;
                 }
-                addLocalChatLine(game::ChatType::COMBAT_XP_GAIN, msg);
+                chatHandler_->addLocalChatLine(game::ChatType::COMBAT_XP_GAIN, msg);
                 addCombatText(CombatTextEntry::XP_GAIN, static_cast<int32_t>(xpGained), 0, true);
-                if (areaDiscoveryCallback_) areaDiscoveryCallback_(areaName, xpGained);
+                eventBus().publish(events::AreaDiscovered{areaName, xpGained});
             }
         }
     };
@@ -359,36 +368,7 @@ void GameHandler::registerCoreOpcodes() {
         if (!packet.hasRemaining(8)) return;
         uint32_t titleBit = packet.readUInt32();
         uint32_t isLost   = packet.readUInt32();
-        loadTitleNameCache();
-        std::string titleStr;
-        auto tit = titleNameCache_.find(titleBit);
-        if (tit != titleNameCache_.end() && !tit->second.empty()) {
-            const auto& ln = lookupName(playerGuid);
-            const std::string& pName = ln.empty() ? std::string("you") : ln;
-            const std::string& fmt = tit->second;
-            size_t pos = fmt.find("%s");
-            if (pos != std::string::npos)
-                titleStr = fmt.substr(0, pos) + pName + fmt.substr(pos + 2);
-            else
-                titleStr = fmt;
-        }
-        std::string msg;
-        if (!titleStr.empty()) {
-            msg = isLost ? ("Title removed: " + titleStr + ".") : ("Title earned: " + titleStr + "!");
-        } else {
-            char buf[64];
-            std::snprintf(buf, sizeof(buf), isLost ? "Title removed (bit %u)." : "Title earned (bit %u)!", titleBit);
-            msg = buf;
-        }
-        if (isLost) knownTitleBits_.erase(titleBit);
-        else        knownTitleBits_.insert(titleBit);
-        // And announce it. The set is read by IsTitleKnown, which the character
-        // sheet's title dropdown builds itself from - but only when told to
-        // rebuild, and this is what tells it. Without it a title earned mid
-        // session did not appear in the list until the sheet was reopened.
-        fireAddonEvent("KNOWN_TITLES_UPDATE", {});
-        addSystemChatMessage(msg);
-        LOG_INFO("SMSG_TITLE_EARNED: bit=", titleBit, " lost=", isLost, " title='", titleStr, "'");
+        if (auto* feed = titlesFeedOf(services_)) feed->onEarned(titleBit, isLost != 0);
     };
     dispatchTable_[Opcode::SMSG_LEARNED_DANCE_MOVES] = [](network::Packet& packet) {
         LOG_DEBUG("SMSG_LEARNED_DANCE_MOVES: ignored (size=", packet.getSize(), ")");
@@ -409,7 +389,7 @@ void GameHandler::registerCoreOpcodes() {
                 newName = packet.readString();
             }
             if (result == 0) {
-                addSystemChatMessage("Character name changed to: " + newName);
+                chatHandler_->addSystemChatMessage("Character name changed to: " + newName);
             } else {
                 static const char* kRenameErrors[] = {
                     nullptr, "Name already in use.", "Name too short.", "Name too long.",
@@ -418,7 +398,7 @@ void GameHandler::registerCoreOpcodes() {
                 };
                 const char* errMsg = (result < 8) ? kRenameErrors[result] : nullptr;
                 std::string renameErr = errMsg ? std::string("Rename failed: ") + errMsg : "Character rename failed.";
-                addUIError(renameErr); addSystemChatMessage(renameErr);
+                addUIError(renameErr); chatHandler_->addSystemChatMessage(renameErr);
             }
             LOG_INFO("SMSG_CHAR_RENAME: result=", static_cast<int>(result),
                      " newName=", newName);
@@ -441,7 +421,7 @@ void GameHandler::registerCoreOpcodes() {
         std::string zoneName = getAreaName(zoneId);
         if (!zoneName.empty()) pbMsg += " to " + zoneName;
         pbMsg += '.';
-        addSystemChatMessage(pbMsg);
+        chatHandler_->addSystemChatMessage(pbMsg);
     };
     // The innkeeper asking whether to make this the player's home. It was
     // skipped because this client's own gossip window never waited for it - it
@@ -453,18 +433,18 @@ void GameHandler::registerCoreOpcodes() {
         // Who is asking. StaticPopup_Show("CONFIRM_BINDER", arg1) puts the name
         // into "Do you want to make <name> your new home?" - without it the
         // question had a hole where the innkeeper should be.
-        fireAddonEvent("CONFIRM_BINDER", {lookupName(binderGuid_)});
+        fireAddonEvent("CONFIRM_BINDER", {queryCacheHandler_->lookupName(binderGuid_)});
     };
     registerSkipHandler(Opcode::SMSG_SET_PHASE_SHIFT);
     dispatchTable_[Opcode::SMSG_TOGGLE_XP_GAIN] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(1)) return;
         uint8_t enabled = packet.readUInt8();
-        addSystemChatMessage(enabled ? "XP gain enabled." : "XP gain disabled.");
+        chatHandler_->addSystemChatMessage(enabled ? "XP gain enabled." : "XP gain disabled.");
     };
     dispatchTable_[Opcode::SMSG_BINDZONEREPLY] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             uint32_t result = packet.readUInt32();
-            if (result == 0) addSystemChatMessage("Your home is now set to this location.");
+            if (result == 0) chatHandler_->addSystemChatMessage("Your home is now set to this location.");
             else { raiseUiError("You are too far from the innkeeper."); }
         }
     };
@@ -472,7 +452,7 @@ void GameHandler::registerCoreOpcodes() {
         if (packet.hasRemaining(4)) {
             uint32_t result = packet.readUInt32();
             if (result == 0) {
-                addSystemChatMessage("Difficulty changed.");
+                chatHandler_->addSystemChatMessage("Difficulty changed.");
             } else {
                 static const char* reasons[] = {
                     "", "Error", "Too many members", "Already in dungeon",
@@ -481,13 +461,13 @@ void GameHandler::registerCoreOpcodes() {
                 };
                 const char* msg = (result < 8) ? reasons[result] : "Difficulty change failed.";
                 addUIError(std::string("Cannot change difficulty: ") + msg);
-                addSystemChatMessage(std::string("Cannot change difficulty: ") + msg);
+                chatHandler_->addSystemChatMessage(std::string("Cannot change difficulty: ") + msg);
             }
         }
     };
     dispatchTable_[Opcode::SMSG_CORPSE_NOT_IN_INSTANCE] = [this](network::Packet& /*packet*/) {
         addUIError("Your corpse is outside this instance.");
-        addSystemChatMessage("Your corpse is outside this instance. Release spirit to retrieve it.");
+        chatHandler_->addSystemChatMessage("Your corpse is outside this instance. Release spirit to retrieve it.");
     };
     dispatchTable_[Opcode::SMSG_CROSSED_INEBRIATION_THRESHOLD] = [this](network::Packet& packet) {
         if (packet.hasRemaining(16)) {
@@ -496,10 +476,10 @@ void GameHandler::registerCoreOpcodes() {
             uint32_t itemId    = packet.readUInt32();
             if (guid == playerGuid) {
                 const float amount = static_cast<float>(std::min(threshold, 3u)) / 3.0f;
-                if (threshold == 1) addSystemChatMessage("You feel tipsy.");
-                else if (threshold == 2) addSystemChatMessage("You feel drunk.");
-                else if (threshold >= 3) addSystemChatMessage("You feel completely smashed.");
-                else addSystemChatMessage("You feel sober again.");
+                if (threshold == 1) chatHandler_->addSystemChatMessage("You feel tipsy.");
+                else if (threshold == 2) chatHandler_->addSystemChatMessage("You feel drunk.");
+                else if (threshold >= 3) chatHandler_->addSystemChatMessage("You feel completely smashed.");
+                else chatHandler_->addSystemChatMessage("You feel sober again.");
                 eventBus().publish(events::PlayerIntoxicationChanged{amount});
             }
             LOG_DEBUG("SMSG_CROSSED_INEBRIATION_THRESHOLD: guid=0x", std::hex, guid,
@@ -532,108 +512,27 @@ void GameHandler::registerCoreOpcodes() {
         if (!packet.hasRemaining(8)) return;
         uint64_t guid = packet.readUInt64();
         // Trigger a CLOSE animation / freeze before the object is removed
-        if (gameObjectStateCallback_) gameObjectStateCallback_(guid, 0);
+        eventBus().publish(events::GameObjectStateChanged{guid, 0});
     };
     // Game object reset state - return to READY(closed) state
     dispatchTable_[Opcode::SMSG_GAMEOBJECT_RESET_STATE] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(8)) return;
         uint64_t guid = packet.readUInt64();
-        if (gameObjectStateCallback_) gameObjectStateCallback_(guid, 0);
-    };
-    dispatchTable_[Opcode::SMSG_FORCED_DEATH_UPDATE] = [this](network::Packet& packet) {
-        playerDead_ = true;
-        corpseX_ = movementInfo.y;
-        corpseY_ = movementInfo.x;
-        corpseZ_ = movementInfo.z;
-        corpseMapId_ = currentMapId_;
-        corpsePositionValid_ = true;
-        eventBus().publish(events::GhostStateChanged{false});
-        fireAddonEvent("PLAYER_DEAD", {});
-        addSystemChatMessage("You have been killed.");
-        LOG_INFO("SMSG_FORCED_DEATH_UPDATE: player force-killed");
-        packet.skipAll();
+        eventBus().publish(events::GameObjectStateChanged{guid, 0});
     };
     // SMSG_DEFENSE_MESSAGE - moved to ChatHandler::registerOpcodes
-    dispatchTable_[Opcode::SMSG_CORPSE_RECLAIM_DELAY] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(4)) {
-            uint32_t delayMs = packet.readUInt32();
-            auto nowMs = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count());
-            corpseReclaimAvailableMs_ = nowMs + delayMs;
-            LOG_INFO("SMSG_CORPSE_RECLAIM_DELAY: ", delayMs, "ms");
-        }
-    };
-    dispatchTable_[Opcode::SMSG_DEATH_RELEASE_LOC] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(16)) {
-            uint32_t relMapId = packet.readUInt32();
-            float relX = packet.readFloat(), relY = packet.readFloat(), relZ = packet.readFloat();
-            // Read and logged and nothing else, until now: this is where the
-            // server says the nearest spirit healer is, and a ghost with no
-            // marker for it has to go looking.
-            //
-            // Map id -1 is the withdrawal. ResurrectPlayer sends it to take the
-            // marker down, so it is not a graveyard at (0,0,0).
-            if (relMapId == 0xFFFFFFFFu) {
-                deathReleaseValid_ = false;
-                LOG_INFO("SMSG_DEATH_RELEASE_LOC: spirit healer position cleared");
-            } else {
-                deathReleaseValid_ = true;
-                deathReleaseMapId_ = relMapId;
-                deathReleaseCanonical_ =
-                    core::coords::serverToCanonical(glm::vec3(relX, relY, relZ));
-                LOG_INFO("SMSG_DEATH_RELEASE_LOC (graveyard spawn): map=", relMapId,
-                         " x=", relX, " y=", relY, " z=", relZ);
-            }
-        }
-    };
     dispatchTable_[Opcode::SMSG_ENABLE_BARBER_SHOP] = [this](network::Packet& /*packet*/) {
         LOG_INFO("SMSG_ENABLE_BARBER_SHOP: barber shop available");
         barberShopOpen_ = true;
         fireAddonEvent("BARBER_SHOP_OPEN", {});
     };
 
-    // ---- Batch 3: Corpse/gametime, combat clearing, mount, loot notify,
+    // ---- Batch 3: gametime, combat clearing, mount, loot notify,
     //                movement/speed/flags, attack, spells, group ----
 
-    dispatchTable_[Opcode::MSG_CORPSE_QUERY] = [this](network::Packet& packet) {
-        // found(1) + travelMapId(4) + x,y,z(12) + corpseMapId(4) + unk(4).
-        //
-        // Two map ids, and they are not the same question. The first is where
-        // the coordinates are: for a corpse left in a dungeon the server
-        // answers with the instance's *entrance* on the outdoor map, because
-        // that is where a ghost has to walk to. The second is the map the
-        // corpse is actually lying on.
-        //
-        // This paired the coordinates with the second, and everything that
-        // reads corpseMapId_ compares it against the map the player is
-        // standing on - every other writer sets it to exactly that. So a
-        // corpse in a dungeon gave a position on the outdoor map filed under
-        // the dungeon's id, and the check `currentMapId_ != corpseMapId_`
-        // refused to show it precisely where it would have been useful.
-        if (!packet.hasRemaining(1)) return;
-        const uint8_t found = packet.readUInt8();
-        if (!found || !packet.hasRemaining(20)) return;
-        const uint32_t travelMapId = packet.readUInt32();
-        const float cx = packet.readFloat();
-        const float cy = packet.readFloat();
-        const float cz = packet.readFloat();
-        const uint32_t corpseMapId = packet.readUInt32();
-
-        corpseX_ = cx;
-        corpseY_ = cy;
-        corpseZ_ = cz;
-        corpseMapId_ = travelMapId;
-        corpsePositionValid_ = true;
-        LOG_INFO("MSG_CORPSE_QUERY: walk to (", cx, ",", cy, ",", cz,
-                 ") on map ", travelMapId,
-                 corpseMapId != travelMapId
-                     ? " (the corpse itself is inside map " + std::to_string(corpseMapId) + ")"
-                     : "");
-    };
     dispatchTable_[Opcode::SMSG_FEIGN_DEATH_RESISTED] = [this](network::Packet& /*packet*/) {
         addUIError("Your Feign Death was resisted.");
-        addSystemChatMessage("Your Feign Death attempt was resisted.");
+        chatHandler_->addSystemChatMessage("Your Feign Death attempt was resisted.");
     };
     dispatchTable_[Opcode::SMSG_CHANNEL_MEMBER_COUNT] = [](network::Packet& packet) {
         std::string chanName = packet.readString();
@@ -650,151 +549,21 @@ void GameHandler::registerCoreOpcodes() {
     dispatchTable_[Opcode::SMSG_ACHIEVEMENT_DELETED] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             uint32_t achId = packet.readUInt32();
-            earnedAchievements_.erase(achId);
-            achievementDates_.erase(achId);
+            if (auto* feed = achievementsFeedOf(services_)) feed->onRevoked(achId);
         }
         packet.skipAll();
     };
     dispatchTable_[Opcode::SMSG_CRITERIA_DELETED] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             uint32_t critId = packet.readUInt32();
-            criteriaProgress_.erase(critId);
+            if (auto* feed = achievementsFeedOf(services_)) feed->onCriteriaReset(critId);
         }
         packet.skipAll();
     };
 
-    // Combat clearing
-    dispatchTable_[Opcode::SMSG_BREAK_TARGET] = [this](network::Packet& packet) {
-        // Packed, not plain: Unit::BreakTarget sizes the packet with
-        // GetPackGUID().size() and writes GetPackGUID(). Read as a uint64 the
-        // guid never matched the target, so the target was never dropped.
-        if (packet.hasRemaining(1)) {
-            uint64_t bGuid = packet.readPackedGuid();
-            if (bGuid == targetGuid) targetGuid = 0;
-        }
-    };
-    dispatchTable_[Opcode::SMSG_CLEAR_TARGET] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(8)) {
-            uint64_t cGuid = packet.readUInt64();
-            if (cGuid == 0 || cGuid == targetGuid) targetGuid = 0;
-        }
-    };
+    // (SMSG_BREAK_TARGET, SMSG_CLEAR_TARGET → CombatHandler)
 
-    // Mount/dismount
-    dispatchTable_[Opcode::SMSG_DISMOUNT] = [this](network::Packet& packet) {
-        // TBC/WotLK identify the dismounting unit with a packed GUID. Applying
-        // every nearby unit's dismount to the local player made an enemy
-        // dismounting to attack knock us off our own mount. Classic variants
-        // may send the legacy empty packet, which is implicitly local.
-        uint64_t dismountGuid = playerGuid;
-        if (packet.hasRemaining(1)) {
-            dismountGuid = packet.readPackedGuid();
-            if (dismountGuid == 0) {
-                LOG_WARNING("Ignoring SMSG_DISMOUNT with an invalid packed GUID");
-                return;
-            }
-        }
-        if (dismountGuid != playerGuid) {
-            LOG_DEBUG("Remote SMSG_DISMOUNT: guid=0x", std::hex,
-                      dismountGuid, std::dec);
-            if (otherPlayerMountCallback_) {
-                otherPlayerMountCallback_(dismountGuid, 0);
-            }
-            return;
-        }
-
-        // Live-confirmed: CMaNGOS sends this partway through a taxi flight (its
-        // own server-side flight-completion estimate firing early, well before
-        // the client-simulated path actually finishes) - obeying it unconditionally
-        // cancelled the taxi mount animation while updateClientTaxi() kept flying
-        // the real path for several more seconds, seen as "walking in the air".
-        // But other cores (e.g. AzerothCore) finalize taxi flights server-side -
-        // dismounting/stopping the player is the *authoritative* completion
-        // signal there, not a premature estimate - so a blanket "ignore while
-        // flying" guard could let the client fly past a real landing if local
-        // spline timing ever drifts from the server's. Distinguish the two using
-        // the server's own UNIT_FLAG_TAXI_FLIGHT: still set means this is the
-        // premature-estimate quirk (ignore, let updateClientTaxi() finish
-        // naturally); already cleared means the server considers the flight
-        // genuinely over (honor it now instead of waiting on our own spline).
-        const bool onTaxiFlight = movementHandler_->isOnTaxiFlight();
-        bool serverStillTaxiing = false;
-        if (onTaxiFlight) {
-            auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
-            auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity);
-            if (playerUnit) {
-                serverStillTaxiing = (playerUnit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0;
-            }
-        }
-        const bool nearDestination = onTaxiFlight && movementHandler_->isNearTaxiDestination();
-        LOG_INFO("SMSG_DISMOUNT received: onTaxiFlight=", onTaxiFlight,
-                 " serverStillTaxiing=", serverStillTaxiing,
-                 " nearDestination=", nearDestination);
-        if (onTaxiFlight && (serverStillTaxiing || !nearDestination)) {
-            movementHandler_->deferServerTaxiCompletion();
-            LOG_WARNING("Deferring premature SMSG_DISMOUNT until taxi landing zone");
-            return;
-        }
-        if (onTaxiFlight && movementHandler_) {
-            // Authoritative server completion ahead of our own spline - stop the
-            // client flight now rather than snapping to a final waypoint that may
-            // not match where the server actually stopped us.
-            movementHandler_->finishClientTaxiFlight(/*snapToFinalWaypoint=*/false);
-            return;
-        }
-
-        // UNIT_FIELD_MOUNTDISPLAYID is the authoritative persistent mount
-        // state.  Some realms emit an isolated SMSG_DISMOUNT while processing
-        // damage (notably periodic poison) without actually removing the mount
-        // aura or clearing the update field.  Treating that transient packet as
-        // state made the local model dismount even though the player remained
-        // mounted server-side.  A real dismount also clears the update field;
-        // let that values update drive the visual when the two signals disagree.
-        if (isActiveExpansion("wotlk")) {
-            const uint16_t mountField = fieldIndex(UF::UNIT_FIELD_MOUNTDISPLAYID);
-            auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
-            const uint32_t serverMountDisplay =
-                (playerEntity && mountField != 0xFFFF && playerEntity->hasField(mountField))
-                    ? playerEntity->getField(mountField)
-                    : 0;
-            // ...unless the player asked to dismount, in which case a still-set
-            // field is exactly the staleness this packet is arriving to correct.
-            // Discarding it there threw away the one authoritative confirmation
-            // the dismount had.
-            const bool awaitingOurOwnDismount =
-                movementHandler_->isDismountPending();
-            if (serverMountDisplay != 0 && !awaitingOurOwnDismount) {
-                LOG_WARNING("Ignoring transient SMSG_DISMOUNT while authoritative mount field is ",
-                            serverMountDisplay,
-                            " casting=", isCasting(),
-                            " channeling=", isChanneling(),
-                            " spell=", getCurrentCastSpellId());
-                return;
-            }
-            movementHandler_->clearDismountPending();
-        }
-        currentMountDisplayId_ = 0;
-        if (mountCallback_) mountCallback_(0);
-    };
-    dispatchTable_[Opcode::SMSG_MOUNTRESULT] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(4)) return;
-        uint32_t result = packet.readUInt32();
-        if (result != 4) {
-            const char* msgs[] = { "Cannot mount here.", "Invalid mount spell.",
-                                   "Too far away to mount.", "Already mounted." };
-            std::string mountErr = result < 4 ? msgs[result] : "Cannot mount.";
-            addUIError(mountErr);
-            addSystemChatMessage(mountErr);
-        }
-    };
-    dispatchTable_[Opcode::SMSG_DISMOUNTRESULT] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(4)) return;
-        uint32_t result = packet.readUInt32();
-        if (result != 0) {
-            addUIError("Cannot dismount here.");
-            raiseUiError("Cannot dismount here.");
-        }
-    };
+    // (SMSG_DISMOUNT, SMSG_MOUNTRESULT, SMSG_DISMOUNTRESULT → MovementHandler)
 
     // Camera shake
     dispatchTable_[Opcode::SMSG_CAMERA_SHAKE] = [this](network::Packet& packet) {
@@ -803,8 +572,7 @@ void GameHandler::registerCoreOpcodes() {
             uint32_t shakeType = packet.readUInt32();
             (void)shakeType;
             float magnitude = (shakeId < 50) ? 0.04f : 0.08f;
-            if (cameraShakeCallback_)
-                cameraShakeCallback_(magnitude, 18.0f, 0.5f);
+            eventBus().publish(events::CameraShakeRequested{magnitude, 18.0f, 0.5f});
         }
     };
 
@@ -833,73 +601,18 @@ void GameHandler::registerCoreOpcodes() {
             homeBindMapId_ = data.mapId;
             homeBindZoneId_ = data.zoneId;
             homeBindPos_ = canonical;
-            if (bindPointCallback_)
-                bindPointCallback_(data.mapId, canonical.x, canonical.y, canonical.z);
+            eventBus().publish(events::BindPointChanged{data.mapId, canonical.x, canonical.y, canonical.z});
             if (wasSet && changed) {
                 std::string bindMsg = "Your home has been set";
                 std::string zoneName = getAreaName(data.zoneId);
                 if (!zoneName.empty()) bindMsg += " to " + zoneName;
                 bindMsg += '.';
-                addSystemChatMessage(bindMsg);
+                chatHandler_->addSystemChatMessage(bindMsg);
             }
         }
     };
 
-    // Spirit healer / resurrect
-    dispatchTable_[Opcode::SMSG_SPIRIT_HEALER_CONFIRM] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(8)) return;
-        uint64_t npcGuid = packet.readUInt64();
-        if (npcGuid) {
-            resurrectCasterGuid_ = npcGuid;
-            resurrectCasterName_ = "";
-            resurrectIsSpiritHealer_ = true;
-            resurrectRequestPending_ = true;
-            // The spirit healer's prompt is CONFIRM_XP_LOSS, not
-            // RESURRECT_REQUEST - uiparent.lua answers it with the durability
-            // and sickness warning and its Accept calls AcceptXPLoss. Nothing
-            // fired it, and the only thing that could reach
-            // activateSpiritHealer was this client's own gossip window, so with
-            // gossip handed over there was no way left to accept at all.
-            fireAddonEvent("CONFIRM_XP_LOSS", {});
-        }
-    };
-    dispatchTable_[Opcode::SMSG_RESURRECT_REQUEST] = [this](network::Packet& packet) {
-        // Spell::SendResurrectRequest writes:
-        //
-        //   uint64 casterGuid
-        //   uint32 nameLength      (the name plus its terminator)
-        //   char[] name            with that terminator
-        //   uint8  0               a second one, written explicitly
-        //   uint8  sickness        1 from a creature, 0 from a player
-        //   uint32 0               only when the spell overrides the timer
-        //
-        // The length was never read, so readString took the first byte of it
-        // as the whole name - a control character, for any name shorter than
-        // two hundred and fifty-five - and the dialog was raised offering a
-        // resurrection from that. Everything after it was out of step too, so
-        // the sickness flag was never read at all.
-        if (!packet.hasRemaining(12)) { packet.skipAll(); return; }
-        const uint64_t casterGuid = packet.readUInt64();
-        /*uint32_t nameLength =*/ packet.readUInt32();
-        std::string casterName = packet.readString();
-        if (packet.hasRemaining(1)) packet.readUInt8();   // the second terminator
-        const bool sickness = packet.hasRemaining(1) && packet.readUInt8() != 0;
-        // The trailing word is present only when the spell waives the reclaim
-        // delay, so having one means there is no timer to wait out.
-        const bool hasTimer = !packet.hasRemaining(4);
-        packet.skipAll();
-
-        if (!casterGuid) return;
-        resurrectCasterGuid_ = casterGuid;
-        // A creature offering this is a spirit healer, and that is what the
-        // sickness flag says - it is set for every non-player caster.
-        resurrectIsSpiritHealer_ = false;
-        resurrectHasSickness_ = sickness;
-        resurrectHasTimer_ = hasTimer;
-        resurrectCasterName_ = casterName.empty() ? lookupName(casterGuid) : casterName;
-        resurrectRequestPending_ = true;
-        fireAddonEvent("RESURRECT_REQUEST", {resurrectCasterName_});
-    };
+    // (The player's death, resurrection and spirit healers → CombatHandler)
 
     // Time sync
     dispatchTable_[Opcode::SMSG_TIME_SYNC_REQ] = [this](network::Packet& packet) {
@@ -908,7 +621,7 @@ void GameHandler::registerCoreOpcodes() {
         if (socket) {
             network::Packet resp(wireOpcode(Opcode::CMSG_TIME_SYNC_RESP));
             resp.writeUInt32(counter);
-            resp.writeUInt32(nextMovementTimestampMs());
+            resp.writeUInt32(movementHandler_->nextMovementTimestampMs());
             socket->send(resp);
         }
     };
@@ -930,26 +643,7 @@ void GameHandler::registerCoreOpcodes() {
         }
     };
 
-    // Spirit healer time / durability
-    dispatchTable_[Opcode::SMSG_AREA_SPIRIT_HEALER_TIME] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(12)) { packet.skipAll(); return; }
-        const uint64_t guid = packet.readUInt64();
-        const uint32_t timeMs = packet.readUInt32();
-        areaSpiritHealerGuid_ = guid;
-        areaSpiritHealerSeconds_ = static_cast<float>(timeMs) / 1000.0f;
-
-        char buf[128];
-        std::snprintf(buf, sizeof(buf), "You will be able to resurrect in %u seconds.",
-                      timeMs / 1000);
-        addSystemChatMessage(buf);
-
-        // Parsed and said in chat and announced to nobody. UIParent_OnEvent
-        // answers this by joining the queue and raising the countdown dialog,
-        // and it was never told - so the reply arrived, the line was printed,
-        // and the resurrection it was counting down to was one this player had
-        // not joined.
-        fireAddonEvent("AREA_SPIRIT_HEALER_IN_RANGE", {});
-    };
+    // Durability
     dispatchTable_[Opcode::SMSG_DURABILITY_DAMAGE_DEATH] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             uint32_t pct = packet.readUInt32();
@@ -957,7 +651,7 @@ void GameHandler::registerCoreOpcodes() {
             std::snprintf(buf, sizeof(buf),
                 "You have lost %u%% of your gear's durability due to death.", pct);
             addUIError(buf);
-            addSystemChatMessage(buf);
+            chatHandler_->addSystemChatMessage(buf);
         }
     };
 
@@ -982,7 +676,7 @@ void GameHandler::registerCoreOpcodes() {
     dispatchTable_[Opcode::SMSG_PLAY_SOUND] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             uint32_t soundId = packet.readUInt32();
-            if (playSoundCallback_) playSoundCallback_(soundId);
+            eventBus().publish(events::SoundRequested{soundId});
         }
     };
 
@@ -1034,28 +728,14 @@ void GameHandler::registerCoreOpcodes() {
         }
         packet.skipAll();
         addUIError(abortMsg);
-        addSystemChatMessage(abortMsg);
+        chatHandler_->addSystemChatMessage(abortMsg);
         LOG_WARNING("SMSG_TRANSFER_ABORTED: reason 0x", std::hex,
                     static_cast<int>(reason), std::dec, " - ", abortMsg);
     };
 
     // Taxi
-    dispatchTable_[Opcode::SMSG_STANDSTATE_UPDATE] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(1)) {
-            const uint8_t newStandState = packet.readUInt8();
-            if (newStandState == standState_) {
-                return;
-            }
-            standState_ = newStandState;
-            // 0=stand, 1=sit, 2-6=sit variants, 7=dead, 8=kneel. Logged because a
-            // wrong state here is indistinguishable, in-game, from a wrong animation.
-            // At warning level: the file log filters info out by default.
-            LOG_WARNING("SMSG_STANDSTATE_UPDATE: standState=", static_cast<int>(standState_));
-            if (standStateCallback_) standStateCallback_(standState_);
-        }
-    };
     dispatchTable_[Opcode::SMSG_NEW_TAXI_PATH] = [this](network::Packet& /*packet*/) {
-        addSystemChatMessage("New flight path discovered!");
+        chatHandler_->addSystemChatMessage("New flight path discovered!");
     };
 
     // (MSG_TALENT_WIPE_CONFIRM → registered by SpellHandler, which owns the
@@ -1065,13 +745,13 @@ void GameHandler::registerCoreOpcodes() {
     // (SMSG_CHANNEL_LIST → moved to ChatHandler)
     // (SMSG_GROUP_SET_LEADER → moved to SocialHandler)
 
-    // Gameobject / page text (entity queries moved to EntityController::registerOpcodes)
+    // Gameobject / page text (entity queries moved to WorldHandler::registerOpcodes)
     dispatchTable_[Opcode::SMSG_GAMEOBJECT_CUSTOM_ANIM] = [this](network::Packet& packet) {
         if (packet.getSize() < 12) return;
         uint64_t guid = packet.readUInt64();
         uint32_t animId = packet.readUInt32();
         bool ownedFishingBite = false;
-        auto goEnt = entityController_->getEntityManager().getEntity(guid);
+        auto goEnt = worldHandler_->getEntityManager().getEntity(guid);
         if (goEnt && goEnt->getType() == ObjectType::GAMEOBJECT) {
             auto go = std::static_pointer_cast<GameObject>(goEnt);
             // Only treat custom animation as a bite when this is our bobber.
@@ -1079,24 +759,23 @@ void GameHandler::registerCoreOpcodes() {
             // M2 animation id 0, so the packet payload itself cannot identify it.
             uint64_t createdBy = static_cast<uint64_t>(go->getField(6))
                                | (static_cast<uint64_t>(go->getField(7)) << 32);
-            auto* info = getCachedGameObjectInfo(go->getEntry());
+            auto* info = queryCacheHandler_->getCachedGameObjectInfo(go->getEntry());
             ownedFishingBite = createdBy == playerGuid && (!info || info->type == 17);
             if (ownedFishingBite) {
                 hookedFishingBobberGuid_ = guid;
                 // G_FishingBobber.m2 sequence 153 is its authored 1.33s bite/splash
                 // animation; sequence 0 is the normal three-second idle bob.
                 constexpr uint32_t kFishingBobberBiteAnimation = 153;
-                if (gameObjectCustomAnimCallback_)
-                    gameObjectCustomAnimCallback_(guid, kFishingBobberBiteAnimation);
+                eventBus().publish(events::GameObjectCustomAnimPlayed{guid, kFishingBobberBiteAnimation});
                 addUIError("A fish is on your line! Right-click to reel it in.");
-                addSystemChatMessage("A fish is on your line! Right-click to reel it in.");
+                chatHandler_->addSystemChatMessage("A fish is on your line! Right-click to reel it in.");
                 eventBus().publish(events::FishingBite{guid});
                 LOG_WARNING("Fishing bite ready: guid=0x", std::hex, guid, std::dec,
                             " serverAnimProgress=", animId);
             }
         }
-        if (!ownedFishingBite && gameObjectCustomAnimCallback_)
-            gameObjectCustomAnimCallback_(guid, animId);
+        if (!ownedFishingBite)
+            eventBus().publish(events::GameObjectCustomAnimPlayed{guid, animId});
     };
 
     // Item refund / socket gems / item time
@@ -1104,7 +783,7 @@ void GameHandler::registerCoreOpcodes() {
         if (packet.hasRemaining(12)) {
             packet.readUInt64(); // itemGuid
             uint32_t result = packet.readUInt32();
-            addSystemChatMessage(result == 0 ? "Item returned. Refund processed."
+            chatHandler_->addSystemChatMessage(result == 0 ? "Item returned. Refund processed."
                                              : "Could not return item for refund.");
         }
     };
@@ -1117,7 +796,7 @@ void GameHandler::registerCoreOpcodes() {
         // gem always reported that it had failed.
         if (!packet.hasRemaining(8)) return;
         const uint64_t itemGuid = packet.readUInt64();
-        addSystemChatMessage("Gems socketed successfully.");
+        chatHandler_->addSystemChatMessage("Gems socketed successfully.");
         LOG_DEBUG("SMSG_SOCKET_GEMS_RESULT: itemGuid=0x", std::hex, itemGuid, std::dec);
     };
     dispatchTable_[Opcode::SMSG_ITEM_TIME_UPDATE] = [](network::Packet& packet) {
@@ -1131,8 +810,33 @@ void GameHandler::registerCoreOpcodes() {
 
 
     // ---- Achievement / fishing delegates ----
+    // SMSG_ALL_ACHIEVEMENT_DATA (WotLK 3.3.5a)
+    //   Achievement records: repeated { uint32 id, uint32 packedDate } until 0xFFFFFFFF sentinel
+    //   Criteria records:    repeated { uint32 id, packed counter, ... } until 0xFFFFFFFF
     dispatchTable_[Opcode::SMSG_ALL_ACHIEVEMENT_DATA] = [this](network::Packet& packet) {
-        handleAllAchievementData(packet);
+        std::vector<achievement::EarnedAchievement> earned;
+        while (packet.hasRemaining(4)) {
+            uint32_t id = packet.readUInt32();
+            if (id == 0xFFFFFFFF) break;
+            if (!packet.hasRemaining(4)) break;
+            earned.push_back({.id = id, .date = packet.readUInt32()});
+        }
+        // The record's shape is in readCriteriaProgressTail, which
+        // SMSG_CRITERIA_UPDATE reads with too - the server builds both from the
+        // same lines.
+        std::vector<achievement::CriteriaCounter> criteria;
+        while (packet.hasRemaining(4)) {
+            uint32_t id = packet.readUInt32();
+            if (id == 0xFFFFFFFF) break;
+            CriteriaProgressRecord rec;
+            if (!readCriteriaProgressTail(packet, rec)) break;
+            criteria.push_back({.id = id, .counter = rec.counter});
+        }
+        LOG_INFO("SMSG_ALL_ACHIEVEMENT_DATA: loaded ", earned.size(), " achievements, ",
+                 criteria.size(), " criteria");
+        // The panel builds its whole tree on the list, and it arrives once at
+        // login - well before anything opens the panel.
+        if (auto* feed = achievementsFeedOf(services_)) feed->onAllData(earned, criteria);
     };
     // Both are errors rather than remarks, and the real client shows them on
     // the error line rather than in the chat log - ERR_FISH_NOT_HOOKED and
@@ -1179,7 +883,7 @@ void GameHandler::registerCoreOpcodes() {
                 worldStateZoneId_ = newZoneId;
             }
         }
-        // TBC added areaId in 2.1.0; WotLK kept it. Classic/Turtle use the shorter format.
+        // TBC added areaId in 2.1.0; WotLK kept it. Classic use the shorter format.
         size_t remaining = packet.getRemainingSize();
         bool hasAreaId = isActiveExpansion("tbc") || isActiveExpansion("wotlk");
         if (hasAreaId && remaining >= 6) {
@@ -1215,84 +919,7 @@ void GameHandler::registerCoreOpcodes() {
 
     // SMSG_ACTION_BUTTONS - moved to ActionBarHandler::registerOpcodes
 
-    // ---- SMSG_LEVELUP_INFO / SMSG_LEVELUP_INFO_ALT (shared body) ----
-    for (auto op : {Opcode::SMSG_LEVELUP_INFO, Opcode::SMSG_LEVELUP_INFO_ALT}) {
-        dispatchTable_[op] = [this](network::Packet& packet) {
-            // Server-authoritative level-up event.
-            // WotLK layout: uint32 newLevel + uint32 hpDelta + uint32 manaDelta + 5x uint32 statDeltas
-            if (packet.hasRemaining(4)) {
-                uint32_t newLevel = packet.readUInt32();
-                if (newLevel > 0) {
-                    // Parse stat deltas (WotLK layout has 7 more uint32s)
-                    lastLevelUpDeltas_ = {};
-                    if (packet.hasRemaining(28)) {
-                        lastLevelUpDeltas_.hp    = packet.readUInt32();
-                        lastLevelUpDeltas_.mana  = packet.readUInt32();
-                        lastLevelUpDeltas_.str   = packet.readUInt32();
-                        lastLevelUpDeltas_.agi   = packet.readUInt32();
-                        lastLevelUpDeltas_.sta   = packet.readUInt32();
-                        lastLevelUpDeltas_.intel = packet.readUInt32();
-                        lastLevelUpDeltas_.spi   = packet.readUInt32();
-                    }
-                    uint32_t oldLevel = serverPlayerLevel_;
-                    serverPlayerLevel_ = std::max(serverPlayerLevel_, newLevel);
-                    // Update the character-list entry so the selection screen
-                    // shows the correct level if the player logs out and back.
-                    for (auto& ch : characters) {
-                        if (ch.guid == playerGuid) {
-                            ch.level = serverPlayerLevel_;
-                            break;  // was 'return' - must NOT exit here or level-up notification is skipped
-                        }
-                    }
-                    if (newLevel > oldLevel) {
-                        // The sound, the ding banner, the glow and the client's
-                        // own chat line all answer this. FrameXML's chat writes
-                        // its line from PLAYER_LEVEL_UP below instead.
-                        eventBus().publish(events::PlayerLevelUp{oldLevel, newLevel});
-                        // All nine, in the order the interface reads them:
-                        // level, health, power, talent points, then the five
-                        // stats. The chat frame tests the third against zero
-                        // to decide whether to mention mana, so sending only
-                        // the level was an error on every level gained - and
-                        // every one of these was already parsed above.
-                        //
-                        // Talent points are zero: the packet carries no such
-                        // delta, and zero is what stops the interface claiming
-                        // a point was gained.
-                        fireAddonEvent("PLAYER_LEVEL_UP", {
-                            std::to_string(newLevel),
-                            std::to_string(lastLevelUpDeltas_.hp),
-                            std::to_string(lastLevelUpDeltas_.mana),
-                            "0",
-                            std::to_string(lastLevelUpDeltas_.str),
-                            std::to_string(lastLevelUpDeltas_.agi),
-                            std::to_string(lastLevelUpDeltas_.sta),
-                            std::to_string(lastLevelUpDeltas_.intel),
-                            std::to_string(lastLevelUpDeltas_.spi),
-                        });
-                    }
-                }
-            }
-            packet.skipAll();
-        };
-    }
-
-    // ---- MSG_RAID_TARGET_UPDATE ----
-    dispatchTable_[Opcode::MSG_RAID_TARGET_UPDATE] = [this](network::Packet& packet) {
-        RaidTargetUpdateData rtu;
-        if (!RaidTargetUpdateParser::parse(packet, rtu)) return;
-
-        // The full list is authoritative, so icons absent from it are gone.
-        if (rtu.fullList) {
-            for (uint32_t i = 0; i < kRaidMarkCount; ++i)
-                socialHandler_->setRaidTargetGuid(static_cast<uint8_t>(i), 0);
-        }
-        for (const auto& [icon, guid] : rtu.marks)
-            socialHandler_->setRaidTargetGuid(icon, guid);
-        LOG_DEBUG("MSG_RAID_TARGET_UPDATE: fullList=", rtu.fullList,
-                  " marks=", rtu.marks.size());
-        fireAddonEvent("RAID_TARGET_UPDATE", {});
-    };
+    // (MSG_RAID_TARGET_UPDATE and SMSG_REAL_GROUP_UPDATE → SocialHandler, which feeds the group)
 
     // ---- SMSG_CRITERIA_UPDATE ----
     dispatchTable_[Opcode::SMSG_CRITERIA_UPDATE] = [this](network::Packet& packet) {
@@ -1305,36 +932,12 @@ void GameHandler::registerCoreOpcodes() {
                 // A timed criteria whose window ran out reads as zero, which is
                 // what the server means by the flag and what the panel shows.
                 const uint64_t progress = (rec.flags == 1) ? 0 : rec.counter;
-                uint64_t oldProgress = 0;
-                auto cpit = criteriaProgress_.find(criteriaId);
-                if (cpit != criteriaProgress_.end()) oldProgress = cpit->second;
-                criteriaProgress_[criteriaId] = progress;
                 LOG_DEBUG("SMSG_CRITERIA_UPDATE: id=", criteriaId, " progress=", progress);
-                // Fire addon event for achievement tracking addons
-                if (progress != oldProgress)
-                    fireAddonEvent("CRITERIA_UPDATE", {std::to_string(criteriaId), std::to_string(progress)});
-
-                // A timed criteria also drives the tracker's countdown. The
-                // message says how far into the window the player is; how long
-                // the window is comes from the DBC, so the two have to be put
-                // together here - the interface reads the pair and works out a
-                // start time from them.
-                //
-                // Fired for any timed criteria rather than only tracked ones.
-                // The tracker stores what it is told and draws a timer only
-                // inside its tracked-achievement loop, so entries for the rest
-                // cost a table row and show nothing; the gain is that tracking
-                // an achievement part-way through its timer still shows the
-                // right countdown, instead of nothing until the next update.
-                ensureAchievementCriteriaLoaded();
-                const auto idx = getAchievementCriterionIndex(criteriaId);
-                if (idx.timeLimit != 0 && idx.achievementId != 0) {
-                    fireAddonEvent("TRACKED_ACHIEVEMENT_UPDATE",
-                                   {std::to_string(idx.achievementId),
-                                    std::to_string(criteriaId),
-                                    std::to_string(rec.timeElapsed),
-                                    std::to_string(idx.timeLimit)});
-                }
+                // A timed criteria also drives the tracker's countdown: the
+                // message says how far into the window the player is, and how
+                // long the window is comes from the DBC.
+                if (auto* feed = achievementsFeedOf(services_))
+                    feed->onCriteriaProgress(criteriaId, progress, rec.timeElapsed);
             }
         }
     };
@@ -1345,7 +948,7 @@ void GameHandler::registerCoreOpcodes() {
         if (packet.hasRemaining(4)) {
             uint32_t result = packet.readUInt32();
             if (result == 0) {
-                addSystemChatMessage("Hairstyle changed.");
+                chatHandler_->addSystemChatMessage("Hairstyle changed.");
                 barberShopOpen_ = false;
                 fireAddonEvent("BARBER_SHOP_CLOSE", {});
             } else {
@@ -1353,7 +956,7 @@ void GameHandler::registerCoreOpcodes() {
                                 : (result == 2) ? "You are not at a barber shop."
                                 : "Barber shop unavailable.";
                 addUIError(msg);
-                addSystemChatMessage(msg);
+                chatHandler_->addSystemChatMessage(msg);
             }
             LOG_DEBUG("SMSG_BARBER_SHOP_RESULT: result=", result);
         }
@@ -1389,7 +992,7 @@ void GameHandler::registerRemainingOpcodes() {
         // Server-script text message - display in system chat
         std::string msg = packet.readString();
         if (!msg.empty()) {
-            addSystemChatMessage(msg);
+            chatHandler_->addSystemChatMessage(msg);
             LOG_INFO("SMSG_SCRIPT_MESSAGE: ", msg);
         }
     };
@@ -1405,8 +1008,8 @@ void GameHandler::registerRemainingOpcodes() {
             LOG_DEBUG("SMSG_ENCHANTMENTLOG: spellId=", enchSpellId);
             // Show enchant message if the player is involved
             if (enchTargetGuid == playerGuid || enchCasterGuid == playerGuid) {
-                const std::string& enchName = getSpellName(enchSpellId);
-                std::string casterName = lookupName(enchCasterGuid);
+                const std::string& enchName = spellHandler_->getSpellName(enchSpellId);
+                std::string casterName = queryCacheHandler_->lookupName(enchCasterGuid);
                 if (!enchName.empty()) {
                     std::string msg;
                     if (enchCasterGuid == playerGuid)
@@ -1415,7 +1018,7 @@ void GameHandler::registerRemainingOpcodes() {
                         msg = casterName + " enchants your item with " + enchName + ".";
                     else
                         msg = "Your item has been enchanted with " + enchName + ".";
-                    addSystemChatMessage(msg);
+                    chatHandler_->addSystemChatMessage(msg);
                 }
             }
         }
@@ -1474,7 +1077,7 @@ void GameHandler::registerRemainingOpcodes() {
         bool nowInVehicle = newVehicleId != 0;
         vehicleId_ = newVehicleId;
         if (wasInVehicle != nowInVehicle) {
-            if (vehicleStateCallback_) vehicleStateCallback_(nowInVehicle, newVehicleId);
+            eventBus().publish(events::VehicleStateChanged{nowInVehicle, newVehicleId});
             // Announced as well as stored. The state was kept and handed to
             // this client's own bar, and the interface heard nothing - so the
             // leave-vehicle button, which redraws on VEHICLE_UPDATE, never
@@ -1491,7 +1094,7 @@ void GameHandler::registerRemainingOpcodes() {
         // Clear cached talent data so the talent screen reflects the reset.
         spellHandler_->resetTalentState();
         addUIError("Your talents have been reset by the server.");
-        addSystemChatMessage("Your talents have been reset by the server.");
+        chatHandler_->addSystemChatMessage("Your talents have been reset by the server.");
         // The talent frame rebuilds from this; the cached state was cleared
         // above and nothing told it to redraw, so it kept the old trees.
         if (hasAddonEventListener()) fireAddonEvent("TALENTS_INVOLUNTARILY_RESET", {});
@@ -1500,7 +1103,7 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_SET_REST_START] = [](network::Packet& packet) {
         // The rest-XP accumulation start time, not a statement about where the
         // player is standing: the server sends it on login wherever that is.
-        // Resting itself comes from PLAYER_FLAGS_RESTING, which entity_controller
+        // Resting itself comes from PLAYER_FLAGS_RESTING, which world_handler
         // watches, because that is the one that clears again on leaving an inn.
         packet.skipAll();
     };
@@ -1508,7 +1111,7 @@ void GameHandler::registerRemainingOpcodes() {
         if (packet.hasRemaining(5)) {
             uint8_t slot       = packet.readUInt8();
             uint32_t durationMs = packet.readUInt32();
-            handleUpdateAuraDuration(slot, durationMs);
+            spellHandler_->handleUpdateAuraDuration(slot, durationMs);
         }
     };
     // A plain guid: Unit::SendMountSpecialAnim writes GetGUID(), not the
@@ -1519,7 +1122,7 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_CHAR_CUSTOMIZE] = [this](network::Packet& packet) {
         if (packet.hasRemaining(1)) {
             uint8_t result = packet.readUInt8();
-            addSystemChatMessage(result == 0 ? "Character customization complete."
+            chatHandler_->addSystemChatMessage(result == 0 ? "Character customization complete."
                                              : "Character customization failed.");
         }
         packet.skipAll();
@@ -1527,7 +1130,7 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_CHAR_FACTION_CHANGE] = [this](network::Packet& packet) {
         if (packet.hasRemaining(1)) {
             uint8_t result = packet.readUInt8();
-            addSystemChatMessage(result == 0 ? "Faction change complete."
+            chatHandler_->addSystemChatMessage(result == 0 ? "Faction change complete."
                                              : "Faction change failed.");
         }
         packet.skipAll();
@@ -1535,7 +1138,7 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_INVALIDATE_PLAYER] = [this](network::Packet& packet) {
         if (packet.hasRemaining(8)) {
             uint64_t guid = packet.readUInt64();
-            entityController_->invalidatePlayerName(guid);
+            queryCacheHandler_->invalidatePlayerName(guid);
         }
     };
     // uint32 movieId - we don't play movies; acknowledge immediately.
@@ -1554,14 +1157,14 @@ void GameHandler::registerRemainingOpcodes() {
     // Server-side LFG invite timed out (no response within time limit)
     dispatchTable_[Opcode::SMSG_LFG_TIMEDOUT] = [this](network::Packet& packet) {
         // Server-side LFG invite timed out (no response within time limit)
-        addSystemChatMessage("Dungeon Finder: Invite timed out.");
+        chatHandler_->addSystemChatMessage("Dungeon Finder: Invite timed out.");
         eventBus().publish(events::DungeonFinderOpened{});
         packet.skipAll();
     };
     // Another party member failed to respond to a LFG role-check in time
     dispatchTable_[Opcode::SMSG_LFG_OTHER_TIMEDOUT] = [this](network::Packet& packet) {
         // Another party member failed to respond to a LFG role-check in time
-        addSystemChatMessage("Dungeon Finder: Another player's invite timed out.");
+        chatHandler_->addSystemChatMessage("Dungeon Finder: Another player's invite timed out.");
         eventBus().publish(events::DungeonFinderOpened{});
         packet.skipAll();
     };
@@ -1573,20 +1176,20 @@ void GameHandler::registerRemainingOpcodes() {
             (void)result;
         }
         addUIError("Dungeon Finder: Auto-join failed.");
-        addSystemChatMessage("Dungeon Finder: Auto-join failed.");
+        chatHandler_->addSystemChatMessage("Dungeon Finder: Auto-join failed.");
         packet.skipAll();
     };
     // No eligible players found for auto-join
     dispatchTable_[Opcode::SMSG_LFG_AUTOJOIN_FAILED_NO_PLAYER] = [this](network::Packet& packet) {
         // No eligible players found for auto-join
         addUIError("Dungeon Finder: No players available for auto-join.");
-        addSystemChatMessage("Dungeon Finder: No players available for auto-join.");
+        chatHandler_->addSystemChatMessage("Dungeon Finder: No players available for auto-join.");
         packet.skipAll();
     };
     // Party leader is currently set to Looking for More (LFM) mode
     dispatchTable_[Opcode::SMSG_LFG_LEADER_IS_LFM] = [this](network::Packet& packet) {
         // Party leader is currently set to Looking for More (LFM) mode
-        addSystemChatMessage("Your party leader is currently Looking for More.");
+        chatHandler_->addSystemChatMessage("Your party leader is currently Looking for More.");
         packet.skipAll();
     };
     // uint32 zoneId + uint8 level_min + uint8 level_max - player queued for meeting stone
@@ -1606,7 +1209,7 @@ void GameHandler::registerRemainingOpcodes() {
                 std::snprintf(buf, sizeof(buf),
                     "You are now in the Meeting Stone queue for zone %u (levels %u-%u).",
                     zoneId, levelMin, levelMax);
-            addSystemChatMessage(buf);
+            chatHandler_->addSystemChatMessage(buf);
             LOG_INFO("SMSG_MEETINGSTONE_SETQUEUE: zone=", zoneId,
                      " levels=", static_cast<int>(levelMin), "-", static_cast<int>(levelMax));
         }
@@ -1615,14 +1218,14 @@ void GameHandler::registerRemainingOpcodes() {
     // Server confirms group found and teleport summon is ready
     dispatchTable_[Opcode::SMSG_MEETINGSTONE_COMPLETE] = [this](network::Packet& packet) {
         // Server confirms group found and teleport summon is ready
-        addSystemChatMessage("Meeting Stone: Your group is ready! Use the Meeting Stone to summon.");
+        chatHandler_->addSystemChatMessage("Meeting Stone: Your group is ready! Use the Meeting Stone to summon.");
         LOG_INFO("SMSG_MEETINGSTONE_COMPLETE");
         packet.skipAll();
     };
     // Meeting stone search is still ongoing
     dispatchTable_[Opcode::SMSG_MEETINGSTONE_IN_PROGRESS] = [this](network::Packet& packet) {
         // Meeting stone search is still ongoing
-        addSystemChatMessage("Meeting Stone: Searching for group members...");
+        chatHandler_->addSystemChatMessage("Meeting Stone: Searching for group members...");
         LOG_DEBUG("SMSG_MEETINGSTONE_IN_PROGRESS");
         packet.skipAll();
     };
@@ -1631,12 +1234,12 @@ void GameHandler::registerRemainingOpcodes() {
         // uint64 memberGuid - a player was added to your group via meeting stone
         if (packet.hasRemaining(8)) {
             uint64_t memberGuid = packet.readUInt64();
-            const auto& memberName = lookupName(memberGuid);
+            const auto& memberName = queryCacheHandler_->lookupName(memberGuid);
             if (!memberName.empty()) {
-                addSystemChatMessage("Meeting Stone: " + memberName +
+                chatHandler_->addSystemChatMessage("Meeting Stone: " + memberName +
                                      " has been added to your group.");
             } else {
-                addSystemChatMessage("Meeting Stone: A new player has been added to your group.");
+                chatHandler_->addSystemChatMessage("Meeting Stone: A new player has been added to your group.");
             }
             LOG_INFO("SMSG_MEETINGSTONE_MEMBER_ADDED: guid=0x", std::hex, memberGuid, std::dec);
         }
@@ -1656,14 +1259,14 @@ void GameHandler::registerRemainingOpcodes() {
             uint8_t reason = packet.readUInt8();
             const char* msg = (reason < 4) ? kMeetingstoneErrors[reason]
                                            : "Meeting Stone: Could not join group.";
-            addSystemChatMessage(msg);
+            chatHandler_->addSystemChatMessage(msg);
             LOG_INFO("SMSG_MEETINGSTONE_JOINFAILED: reason=", static_cast<int>(reason));
         }
     };
     // Player was removed from the meeting stone queue (left, or group disbanded)
     dispatchTable_[Opcode::SMSG_MEETINGSTONE_LEAVE] = [this](network::Packet& packet) {
         // Player was removed from the meeting stone queue (left, or group disbanded)
-        addSystemChatMessage("You have left the Meeting Stone queue.");
+        chatHandler_->addSystemChatMessage("You have left the Meeting Stone queue.");
         LOG_DEBUG("SMSG_MEETINGSTONE_LEAVE");
         packet.skipAll();
     };
@@ -1677,7 +1280,7 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_GMTICKET_CREATE] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             const uint32_t res = packet.readUInt32();
-            addSystemChatMessage(
+            chatHandler_->addSystemChatMessage(
                 res == kTicketCreated       ? "GM ticket submitted."
               : res == kTicketAlreadyExists ? "You already have a GM ticket open."
                                             : "Failed to submit GM ticket.");
@@ -1686,7 +1289,7 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_GMTICKET_UPDATETEXT] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             const uint32_t res = packet.readUInt32();
-            addSystemChatMessage(res == kTicketUpdated ? "GM ticket updated."
+            chatHandler_->addSystemChatMessage(res == kTicketUpdated ? "GM ticket updated."
                                                        : "Failed to update GM ticket.");
         }
     };
@@ -1694,7 +1297,7 @@ void GameHandler::registerRemainingOpcodes() {
         if (packet.hasRemaining(4)) {
             const uint32_t res = packet.readUInt32();
             if (res == kTicketDeleted) gmTicketText_.clear();
-            addSystemChatMessage(res == kTicketDeleted ? "GM ticket deleted."
+            chatHandler_->addSystemChatMessage(res == kTicketDeleted ? "GM ticket deleted."
                                                        : "No ticket to delete.");
         }
     };
@@ -1733,7 +1336,7 @@ void GameHandler::registerRemainingOpcodes() {
                     "You have an open GM ticket (submitted %um ago). Estimated wait: %.1f hours.",
                     ageMin, gmTicketWaitHours_);
             }
-            addSystemChatMessage(buf);
+            chatHandler_->addSystemChatMessage(buf);
             LOG_INFO("SMSG_GMTICKET_GETTICKET: open ticket age=", ageSec,
                      "s wait=", gmTicketWaitHours_, "h");
 
@@ -1762,7 +1365,7 @@ void GameHandler::registerRemainingOpcodes() {
             });
         } else if (gmStatus == 3) {
             gmTicketText_.clear();
-            addSystemChatMessage("Your GM ticket has been closed.");
+            chatHandler_->addSystemChatMessage("Your GM ticket has been closed.");
             LOG_INFO("SMSG_GMTICKET_GETTICKET: ticket closed");
             // No arguments at all is how the interface is told there is no
             // ticket: it reads the first one and stops if it is absent.
@@ -1788,7 +1391,7 @@ void GameHandler::registerRemainingOpcodes() {
         if (packet.hasRemaining(4)) {
             uint32_t sysStatus = packet.readUInt32();
             gmSupportAvailable_ = (sysStatus != 0);
-            addSystemChatMessage(gmSupportAvailable_
+            chatHandler_->addSystemChatMessage(gmSupportAvailable_
                 ? "GM support is currently available."
                 : "GM support is currently unavailable.");
             LOG_INFO("SMSG_GMTICKET_SYSTEMSTATUS: available=", gmSupportAvailable_);
@@ -1871,7 +1474,7 @@ void GameHandler::registerRemainingOpcodes() {
         if (packet.hasRemaining(1)) {
             uint8_t result = packet.readUInt8();
             if (result == 0)
-                addSystemChatMessage("Your complaint has been submitted.");
+                chatHandler_->addSystemChatMessage("Your complaint has been submitted.");
             else if (result == 2)
                 addUIError("Report a Player is currently disabled.");
         }
@@ -1970,19 +1573,7 @@ void GameHandler::registerRemainingOpcodes() {
             if (packet.hasRemaining(12)) {
                 /*uint64_t guid =*/ packet.readUInt64();
                 uint32_t achievementId = packet.readUInt32();
-                loadAchievementNameCache();
-                auto nit = achievementNameCache_.find(achievementId);
-                char buf[256];
-                if (nit != achievementNameCache_.end() && !nit->second.empty()) {
-                    std::snprintf(buf, sizeof(buf),
-                        "%s is the first on the realm to earn: %s!",
-                        charName.c_str(), nit->second.c_str());
-                } else {
-                    std::snprintf(buf, sizeof(buf),
-                        "%s is the first on the realm to earn achievement #%u!",
-                        charName.c_str(), achievementId);
-                }
-                addSystemChatMessage(buf);
+                if (auto* feed = achievementsFeedOf(services_)) feed->onServerFirst(charName, achievementId);
             }
         }
         packet.skipAll();
@@ -1997,29 +1588,15 @@ void GameHandler::registerRemainingOpcodes() {
             }
         }
     };
-    // SMSG_PRE_RESURRECT: packed GUID of the player who can self-resurrect.
-    // Sent when the dead player has Reincarnation (Shaman), Twisting Nether (Warlock),
-    // or Deathpact (Death Knight passive). The client must send CMSG_SELF_RES to accept.
-    dispatchTable_[Opcode::SMSG_PRE_RESURRECT] = [this](network::Packet& packet) {
-        // SMSG_PRE_RESURRECT: packed GUID of the player who can self-resurrect.
-        // Sent when the dead player has Reincarnation (Shaman), Twisting Nether (Warlock),
-        // or Deathpact (Death Knight passive). The client must send CMSG_SELF_RES to accept.
-        uint64_t targetGuid = packet.readPackedGuid();
-        if (targetGuid == playerGuid || targetGuid == 0) {
-            selfResAvailable_ = true;
-            LOG_INFO("SMSG_PRE_RESURRECT: self-resurrection available (guid=0x",
-                     std::hex, targetGuid, std::dec, ")");
-        }
-    };
     dispatchTable_[Opcode::SMSG_PLAYERBINDERROR] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             uint32_t error = packet.readUInt32();
             if (error == 0) {
                 addUIError("Your hearthstone is not bound.");
-                addSystemChatMessage("Your hearthstone is not bound.");
+                chatHandler_->addSystemChatMessage("Your hearthstone is not bound.");
             } else {
                 addUIError("Hearthstone bind failed.");
-                addSystemChatMessage("Hearthstone bind failed.");
+                chatHandler_->addSystemChatMessage("Hearthstone bind failed.");
             }
         }
     };
@@ -2055,15 +1632,15 @@ void GameHandler::registerRemainingOpcodes() {
                                 "teleported out in " + std::to_string(timerMs / 1000) +
                                 " seconds.";
         addUIError(msg);
-        addSystemChatMessage(msg);
+        chatHandler_->addSystemChatMessage(msg);
         fireAddonEvent("INSTANCE_BOOT_START", {});
     };
     dispatchTable_[Opcode::SMSG_RAID_READY_CHECK_ERROR] = [this](network::Packet& packet) {
         if (packet.hasRemaining(1)) {
             uint8_t err = packet.readUInt8();
-            if (err == 0) { addUIError("Ready check failed: not in a group."); addSystemChatMessage("Ready check failed: not in a group."); }
-            else if (err == 1) { addUIError("Ready check failed: in instance."); addSystemChatMessage("Ready check failed: in instance."); }
-            else { addUIError("Ready check failed."); addSystemChatMessage("Ready check failed."); }
+            if (err == 0) { addUIError("Ready check failed: not in a group."); chatHandler_->addSystemChatMessage("Ready check failed: not in a group."); }
+            else if (err == 1) { addUIError("Ready check failed: in instance."); chatHandler_->addSystemChatMessage("Ready check failed: in instance."); }
+            else { addUIError("Ready check failed."); chatHandler_->addSystemChatMessage("Ready check failed."); }
         }
     };
     dispatchTable_[Opcode::SMSG_RESET_FAILED_NOTIFY] = [this](network::Packet& packet) {
@@ -2088,37 +1665,10 @@ void GameHandler::registerRemainingOpcodes() {
             LOG_DEBUG("SMSG_REALM_SPLIT splitType=", splitType, " - sent CMSG_REALM_SPLIT ack");
         }
     };
-    dispatchTable_[Opcode::SMSG_REAL_GROUP_UPDATE] = [this](network::Packet& packet) {
-        auto rem = [&]() { return packet.getRemainingSize(); };
-        if (rem() < 1) return;
-        uint8_t newGroupType = packet.readUInt8();
-        if (rem() < 4) return;
-        uint32_t newMemberFlags = packet.readUInt32();
-        if (rem() < 8) return;
-        uint64_t newLeaderGuid = packet.readUInt64();
-
-        auto& pd = socialHandler_->mutablePartyData();
-        pd.groupType = newGroupType;
-        pd.leaderGuid = newLeaderGuid;
-
-        // Update local player's flags in the member list
-        uint64_t localGuid = playerGuid;
-        for (auto& m : pd.members) {
-            if (m.guid == localGuid) {
-                m.flags = static_cast<uint8_t>(newMemberFlags & 0xFF);
-                break;
-            }
-        }
-        LOG_DEBUG("SMSG_REAL_GROUP_UPDATE groupType=", static_cast<int>(newGroupType),
-                  " memberFlags=0x", std::hex, newMemberFlags, std::dec,
-                  " leaderGuid=", newLeaderGuid);
-        fireAddonEvent("PARTY_LEADER_CHANGED", {});
-        fireAddonEvent("GROUP_ROSTER_UPDATE", {});
-    };
     dispatchTable_[Opcode::SMSG_PLAY_MUSIC] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             uint32_t soundId = packet.readUInt32();
-            if (playMusicCallback_) playMusicCallback_(soundId);
+            eventBus().publish(events::MusicRequested{soundId});
         }
     };
     dispatchTable_[Opcode::SMSG_PLAY_OBJECT_SOUND] = [this](network::Packet& packet) {
@@ -2127,11 +1677,10 @@ void GameHandler::registerRemainingOpcodes() {
             uint32_t soundId = packet.readUInt32();
             uint64_t srcGuid = packet.readUInt64();
             LOG_DEBUG("SMSG_PLAY_OBJECT_SOUND: id=", soundId, " src=0x", std::hex, srcGuid, std::dec);
-            if (playPositionalSoundCallback_) playPositionalSoundCallback_(soundId, srcGuid);
-            else if (playSoundCallback_) playSoundCallback_(soundId);
+            eventBus().publish(events::PositionalSoundRequested{soundId, srcGuid});
         } else if (packet.hasRemaining(4)) {
             uint32_t soundId = packet.readUInt32();
-            if (playSoundCallback_) playSoundCallback_(soundId);
+            eventBus().publish(events::SoundRequested{soundId});
         }
     };
     // SMSG_READ_ITEM_OK - moved to InventoryHandler::registerOpcodes
@@ -2177,7 +1726,7 @@ void GameHandler::registerRemainingOpcodes() {
             items[s] = packet.readUInt32();
 
         // Resolve player name
-        auto ent = entityController_->getEntityManager().getEntity(guid);
+        auto ent = worldHandler_->getEntityManager().getEntity(guid);
         std::string playerName = "Target";
         if (ent) {
             auto pl = std::dynamic_pointer_cast<Player>(ent);
@@ -2269,10 +1818,10 @@ void GameHandler::registerRemainingOpcodes() {
         if (packet.hasRemaining(1)) {
             uint64_t mentorGuid = packet.readPackedGuid();
             std::string mentorName;
-            auto ent = entityController_->getEntityManager().getEntity(mentorGuid);
+            auto ent = worldHandler_->getEntityManager().getEntity(mentorGuid);
             if (auto* unit = dynamic_cast<Unit*>(ent.get())) mentorName = unit->getName();
-            if (mentorName.empty()) mentorName = lookupName(mentorGuid);
-            addSystemChatMessage(mentorName.empty()
+            if (mentorName.empty()) mentorName = queryCacheHandler_->lookupName(mentorGuid);
+            chatHandler_->addSystemChatMessage(mentorName.empty()
                 ? "A player is offering to grant you a level."
                 : (mentorName + " is offering to grant you a level."));
         }
@@ -2281,8 +1830,10 @@ void GameHandler::registerRemainingOpcodes() {
     // SMSG_REFER_A_FRIEND_EXPIRED - moved to SocialHandler::registerOpcodes
     // SMSG_REFER_A_FRIEND_FAILURE - moved to SocialHandler::registerOpcodes
     // SMSG_REPORT_PVP_AFK_RESULT - moved to SocialHandler::registerOpcodes
+    // SMSG_RESPOND_INSPECT_ACHIEVEMENTS (WotLK 3.3.5a): packed_guid (inspected
+    // player) + the same two blocks as SMSG_ALL_ACHIEVEMENT_DATA. Only the
+    // earned achievements and their dates are kept.
     dispatchTable_[Opcode::SMSG_RESPOND_INSPECT_ACHIEVEMENTS] = [this](network::Packet& packet) {
-        loadAchievementNameCache();
         if (!packet.hasRemaining(1)) return;
         uint64_t inspectedGuid = packet.readPackedGuid();
         if (inspectedGuid == 0) { packet.skipAll(); return; }
@@ -2301,19 +1852,15 @@ void GameHandler::registerRemainingOpcodes() {
             if (!packet.hasRemaining(16)) break;
             packet.readUInt64(); packet.readUInt32(); packet.readUInt32();
         }
-        inspectedPlayerAchievements_[inspectedGuid] = std::move(achievements);
         LOG_INFO("SMSG_RESPOND_INSPECT_ACHIEVEMENTS: guid=0x", std::hex, inspectedGuid, std::dec,
-                 " achievements=", inspectedPlayerAchievements_[inspectedGuid].size());
-        // The comparison tab reads its totals on this and nothing else, so
-        // without it the panel sat on whatever it had when it opened.
-        fireAddonEvent("INSPECT_ACHIEVEMENT_READY", {});
+                 " achievements=", achievements.size());
+        if (auto* feed = achievementsFeedOf(services_))
+            feed->onInspected(inspectedGuid, std::move(achievements));
     };
     dispatchTable_[Opcode::SMSG_ON_CANCEL_EXPECTED_RIDE_VEHICLE_AURA] = [this](network::Packet& packet) {
         const bool wasRiding = vehicleId_ != 0;
         vehicleId_ = 0;  // Vehicle ride cancelled; clear UI
-        if (vehicleStateCallback_) {
-            vehicleStateCallback_(false, 0);
-        }
+        eventBus().publish(events::VehicleStateChanged{false, 0});
         if (wasRiding) {
             fireAddonEvent("VEHICLE_UPDATE", {});
             fireAddonEvent("UNIT_EXITED_VEHICLE", {"player"});
@@ -2340,7 +1887,7 @@ void GameHandler::registerRemainingOpcodes() {
             } else {
                 std::snprintf(buf, sizeof(buf), "%sYou have been playing for a long time.", severity);
             }
-            addSystemChatMessage(buf);
+            chatHandler_->addSystemChatMessage(buf);
             addUIError(buf);
         }
     };
@@ -2375,7 +1922,7 @@ void GameHandler::registerRemainingOpcodes() {
         /*uint8_t classId  =*/ packet.readUInt8();
         // Apply display ID to the mirror image unit so it renders correctly
         if (mirrorGuid != 0 && displayId != 0) {
-            auto entity = entityController_->getEntityManager().getEntity(mirrorGuid);
+            auto entity = worldHandler_->getEntityManager().getEntity(mirrorGuid);
             if (entity) {
                 auto unit = std::dynamic_pointer_cast<game::Unit>(entity);
                 if (unit && unit->getDisplayId() == 0)
@@ -2387,222 +1934,7 @@ void GameHandler::registerRemainingOpcodes() {
         packet.skipAll();
     };
     // (SMSG_BATTLEFIELD_MGR_* → SocialHandler)
-    // One event in full, in answer to opening it.
-    dispatchTable_[Opcode::SMSG_CALENDAR_SEND_EVENT] = [this](network::Packet& packet) {
-        CalendarEventDetail parsed;
-        if (!parseCalendarSendEvent(packet, parsed)) {
-            LOG_WARNING("SMSG_CALENDAR_SEND_EVENT: could not be read whole; "
-                        "keeping the previous event rather than a partial one");
-            packet.skipAll();
-            return;
-        }
-        calendarEventDetail_ = std::move(parsed);
-        LOG_INFO("SMSG_CALENDAR_SEND_EVENT: '", calendarEventDetail_.title,
-                 "' with ", calendarEventDetail_.invitees.size(), " invitee(s)");
-        if (hasAddonEventListener()) fireAddonEvent("CALENDAR_UPDATE_EVENT", {});
-        packet.skipAll();
-    };
-
-    // The whole calendar, in answer to a request for it.
-    //
-    // Six lists back to back with no length prefix on any of them, so this is
-    // parsed in one place with a test rather than read inline - a row taken
-    // one field wrong slides everything after it and the next count is read
-    // out of the middle of a string, which fails silently and completely.
-    // See parseCalendarSendCalendar.
-    dispatchTable_[Opcode::SMSG_CALENDAR_SEND_CALENDAR] = [this](network::Packet& packet) {
-        CalendarData parsed;
-        if (!parseCalendarSendCalendar(packet, parsed)) {
-            LOG_WARNING("SMSG_CALENDAR_SEND_CALENDAR: could not be read whole; "
-                        "keeping the previous calendar rather than a partial one");
-            packet.skipAll();
-            return;
-        }
-        calendarData_ = std::move(parsed);
-        LOG_INFO("SMSG_CALENDAR_SEND_CALENDAR: ", calendarData_.events.size(),
-                 " event(s), ", calendarData_.invites.size(), " invite(s), ",
-                 calendarData_.lockouts.size(), " raid lockout(s), ",
-                 calendarData_.holidays.size(), " holiday(s)");
-        // The addon reads the whole thing on this event and nothing else
-        // announces that it arrived.
-        if (hasAddonEventListener()) fireAddonEvent("CALENDAR_UPDATE_EVENT_LIST", {});
-        packet.skipAll();
-    };
-    // uint32 numPending - number of unacknowledged calendar invites
-    dispatchTable_[Opcode::SMSG_CALENDAR_SEND_NUM_PENDING] = [this](network::Packet& packet) {
-        // uint32 numPending - number of unacknowledged calendar invites
-        if (packet.hasRemaining(4)) {
-            uint32_t numPending = packet.readUInt32();
-            const bool countChanged = (calendarPendingInvites_ != numPending);
-            calendarPendingInvites_ = numPending;
-            // The minimap's date button carries the indicator: gametime.lua
-            // shows GameTimeCalendarInvitesTexture when the count rises and
-            // hides it at zero, and it only ever asks on this event and on
-            // PLAYER_ENTERING_WORLD. Firing nothing left it correct at login
-            // and stale for the rest of the session.
-            if (countChanged && hasAddonEventListener())
-                fireAddonEvent("CALENDAR_UPDATE_PENDING_INVITES", {});
-            if (numPending > 0) {
-                char buf[64];
-                std::snprintf(buf, sizeof(buf),
-                    "You have %u pending calendar invite%s.",
-                    numPending, numPending == 1 ? "" : "s");
-                addSystemChatMessage(buf);
-            }
-            LOG_DEBUG("SMSG_CALENDAR_SEND_NUM_PENDING: ", numPending, " pending invites");
-        }
-    };
-    // uint32 command + uint8 result + cstring info
-    // result 0 = success; non-zero = error code
-    // command values: 0=add,1=get,2=guild_filter,3=arena_team,4=update,5=remove,
-    //                 6=copy,7=invite,8=rsvp,9=remove_invite,10=status,11=moderator_status
-    dispatchTable_[Opcode::SMSG_CALENDAR_COMMAND_RESULT] = [this](network::Packet& packet) {
-        // uint32 command + uint8 result + cstring info
-        // result 0 = success; non-zero = error code
-        // command values: 0=add,1=get,2=guild_filter,3=arena_team,4=update,5=remove,
-        //                 6=copy,7=invite,8=rsvp,9=remove_invite,10=status,11=moderator_status
-        if (!packet.hasRemaining(5)) {
-            packet.skipAll(); return;
-        }
-        /*uint32_t command =*/ packet.readUInt32();
-        uint8_t result    = packet.readUInt8();
-        std::string info  = (packet.hasData()) ? packet.readString() : "";
-        if (result != 0) {
-            // Map common calendar error codes to friendly strings
-            static const char* kCalendarErrors[] = {
-                "",
-                "Calendar: Internal error.",           // 1 = CALENDAR_ERROR_INTERNAL
-                "Calendar: Guild event limit reached.",// 2
-                "Calendar: Event limit reached.",      // 3
-                "Calendar: You cannot invite that player.", // 4
-                "Calendar: No invites remaining.",     // 5
-                "Calendar: Invalid date.",             // 6
-                "Calendar: Cannot invite yourself.",   // 7
-                "Calendar: Cannot modify this event.", // 8
-                "Calendar: Not invited.",              // 9
-                "Calendar: Already invited.",          // 10
-                "Calendar: Player not found.",         // 11
-                "Calendar: Not enough focus.",         // 12
-                "Calendar: Event locked.",             // 13
-                "Calendar: Event deleted.",            // 14
-                "Calendar: Not a moderator.",          // 15
-            };
-            const char* errMsg = (result < 16) ? kCalendarErrors[result]
-                                               : "Calendar: Command failed.";
-            if (errMsg && errMsg[0] != '\0') addSystemChatMessage(errMsg);
-            else if (!info.empty()) addSystemChatMessage("Calendar: " + info);
-        }
-        packet.skipAll();
-    };
-    // Rich notification: eventId(8) + title(cstring) + eventTime(8) + flags(4) +
-    //                   eventType(1) + dungeonId(4) + inviteId(8) + status(1) + rank(1) +
-    //                   isGuildEvent(1) + inviterGuid(8)
-    dispatchTable_[Opcode::SMSG_CALENDAR_EVENT_INVITE_ALERT] = [this](network::Packet& packet) {
-        // eventId(8) + title(cstring) + eventTime(4, packed) + flags(4) +
-        // eventType(4) + dungeonId(4, signed) + inviteId(8) + status(1) +
-        // rank(1) + creatorGuid(packed) + senderGuid(packed).
-        //
-        // Only the id and the title are read; the rest is skipped. The widths
-        // written here before were a different shape - an eight-byte time, a
-        // one-byte type, an isGuildEvent that is not sent, and two full guids
-        // where the wire has packed ones - which would misread everything past
-        // the title for whoever went to use it.
-        if (!packet.hasRemaining(9)) {
-            packet.skipAll(); return;
-        }
-        /*uint64_t eventId =*/ packet.readUInt64();
-        std::string title = (packet.hasData()) ? packet.readString() : "";
-        packet.skipAll(); // consume remaining fields
-        if (!title.empty()) {
-            addSystemChatMessage("Calendar invite: " + title);
-        } else {
-            addSystemChatMessage("You have a new calendar invite.");
-        }
-        if (calendarPendingInvites_ < 255) ++calendarPendingInvites_;
-        // Same indicator, and this is the path that matters most: an invite
-        // arriving mid-session is exactly when the button has to light up.
-        if (hasAddonEventListener())
-            fireAddonEvent("CALENDAR_UPDATE_PENDING_INVITES", {});
-        LOG_INFO("SMSG_CALENDAR_EVENT_INVITE_ALERT: title='", title, "'");
-    };
-    // Sent when an event invite's RSVP status changes for the local player
-    // Format: inviteId(8) + eventId(8) + eventType(1) + flags(4) +
-    //         inviteTime(8) + status(1) + rank(1) + isGuildEvent(1) + title(cstring)
-    dispatchTable_[Opcode::SMSG_CALENDAR_EVENT_STATUS] = [this](network::Packet& packet) {
-        // Sent when an event invite's RSVP status changes for the local player
-        // Format: inviteId(8) + eventId(8) + eventType(1) + flags(4) +
-        //         inviteTime(8) + status(1) + rank(1) + isGuildEvent(1) + title(cstring)
-        if (!packet.hasRemaining(31)) {
-            packet.skipAll(); return;
-        }
-        /*uint64_t inviteId =*/ packet.readUInt64();
-        /*uint64_t eventId  =*/ packet.readUInt64();
-        /*uint8_t  evType   =*/ packet.readUInt8();
-        /*uint32_t flags    =*/ packet.readUInt32();
-        /*uint64_t invTime  =*/ packet.readUInt64();
-        uint8_t status     = packet.readUInt8();
-        /*uint8_t rank      =*/ packet.readUInt8();
-        /*uint8_t isGuild   =*/ packet.readUInt8();
-        std::string evTitle = (packet.hasData()) ? packet.readString() : "";
-        // status: 0=Invited,1=Accepted,2=Declined,3=Confirmed,4=Out,5=Standby,6=SignedUp,7=Not Signed Up,8=Tentative
-        static const char* kRsvpStatus[] = {
-            "invited", "accepted", "declined", "confirmed",
-            "out", "on standby", "signed up", "not signed up", "tentative"
-        };
-        const char* statusStr = (status < 9) ? kRsvpStatus[status] : "unknown";
-        if (!evTitle.empty()) {
-            char buf[256];
-            std::snprintf(buf, sizeof(buf), "Calendar event '%s': your RSVP is %s.",
-                          evTitle.c_str(), statusStr);
-            addSystemChatMessage(buf);
-        }
-        // The chat line is the whole of it, deliberately. framexml_event_gap
-        // pairs this message with CALENDAR_UPDATE_EVENT on the words they
-        // share, but an RSVP changing is CALENDAR_UPDATE_INVITE_LIST in
-        // retail - and both are read by a calendar that would re-read nothing,
-        // since no event list is kept here for either to draw from.
-        packet.skipAll();
-    };
-    // uint64 inviteId + uint64 eventId + uint32 mapId + uint32 difficulty + uint64 resetTime
-    dispatchTable_[Opcode::SMSG_CALENDAR_RAID_LOCKOUT_ADDED] = [this](network::Packet& packet) {
-        // uint64 inviteId + uint64 eventId + uint32 mapId + uint32 difficulty + uint64 resetTime
-        if (packet.hasRemaining(28)) {
-            /*uint64_t inviteId =*/ packet.readUInt64();
-            /*uint64_t eventId  =*/ packet.readUInt64();
-            uint32_t mapId     = packet.readUInt32();
-            uint32_t difficulty = packet.readUInt32();
-            /*uint64_t resetTime =*/ packet.readUInt64();
-            std::string mapLabel = getMapName(mapId);
-            if (mapLabel.empty()) mapLabel = "map #" + std::to_string(mapId);
-            const char* diffStr = instanceDifficultyName(difficulty);
-            std::string msg = "Calendar: Raid lockout added for " + mapLabel;
-            if (diffStr) msg += std::string(" (") + diffStr + ")";
-            msg += '.';
-            addSystemChatMessage(msg);
-            LOG_DEBUG("SMSG_CALENDAR_RAID_LOCKOUT_ADDED: mapId=", mapId, " difficulty=", difficulty);
-        }
-        packet.skipAll();
-    };
-    // uint64 inviteId + uint64 eventId + uint32 mapId + uint32 difficulty
-    dispatchTable_[Opcode::SMSG_CALENDAR_RAID_LOCKOUT_REMOVED] = [this](network::Packet& packet) {
-        // uint64 inviteId + uint64 eventId + uint32 mapId + uint32 difficulty
-        if (packet.hasRemaining(20)) {
-            /*uint64_t inviteId =*/ packet.readUInt64();
-            /*uint64_t eventId  =*/ packet.readUInt64();
-            uint32_t mapId     = packet.readUInt32();
-            uint32_t difficulty = packet.readUInt32();
-            std::string mapLabel = getMapName(mapId);
-            if (mapLabel.empty()) mapLabel = "map #" + std::to_string(mapId);
-            const char* diffStr = instanceDifficultyName(difficulty);
-            std::string msg = "Calendar: Raid lockout removed for " + mapLabel;
-            if (diffStr) msg += std::string(" (") + diffStr + ")";
-            msg += '.';
-            addSystemChatMessage(msg);
-            LOG_DEBUG("SMSG_CALENDAR_RAID_LOCKOUT_REMOVED: mapId=", mapId,
-                      " difficulty=", difficulty);
-        }
-        packet.skipAll();
-    };
+    // (SMSG_CALENDAR_* → SocialHandler, which feeds the calendar context)
     // SMSG_SERVERTIME is RealmTimeHandler's: the realm clock keeps time from it.
     // uint64 kickerGuid + uint32 kickReasonType + null-terminated reason string
     // kickReasonType: 0=other, 1=afk, 2=vote kick
@@ -2626,7 +1958,7 @@ void GameHandler::registerRemainingOpcodes() {
             msg = "You have been removed from the group for being AFK.";
         else if (reasonType == 2)
             msg = "You have been removed from the group by vote.";
-        addSystemChatMessage(msg);
+        chatHandler_->addSystemChatMessage(msg);
         addUIError(msg);
         LOG_INFO("SMSG_KICK_REASON: reasonType=", reasonType,
                  " reason='", reason, "'");
@@ -2644,7 +1976,7 @@ void GameHandler::registerRemainingOpcodes() {
             } else {
                 std::snprintf(buf, sizeof(buf), "Group action throttled.");
             }
-            addSystemChatMessage(buf);
+            chatHandler_->addSystemChatMessage(buf);
             LOG_DEBUG("SMSG_GROUPACTION_THROTTLED: throttleMs=", throttleMs);
         }
     };
@@ -2682,7 +2014,7 @@ void GameHandler::registerRemainingOpcodes() {
             msg = "[GM Response] " + subject;
         else
             msg = "[GM Response] Your ticket has been answered.";
-        addSystemChatMessage(msg);
+        chatHandler_->addSystemChatMessage(msg);
         addUIError(msg);
         // The help frame takes the ticket's own text and the reply, and opens
         // the panel that lets the answer be accepted or more help asked for.
@@ -2712,7 +2044,7 @@ void GameHandler::registerRemainingOpcodes() {
             char buf[128];
             std::snprintf(buf, sizeof(buf),
                           "[GM Ticket #%u] Status: %s.", ticketId, statusStr);
-            addSystemChatMessage(buf);
+            chatHandler_->addSystemChatMessage(buf);
             LOG_DEBUG("SMSG_GMRESPONSE_STATUS_UPDATE: ticketId=", ticketId,
                       " status=", static_cast<int>(status));
         }
@@ -2848,6 +2180,7 @@ void GameHandler::registerRemainingOpcodes() {
 // opcode by opcode, 182 here against 320 there, no overlap - so the order
 // between them carries no meaning and a reader need not look for one.
 void GameHandler::registerDomainOpcodes() {
+    queryCacheHandler_->registerOpcodes(dispatchTable_);
     chatHandler_->registerOpcodes(dispatchTable_);
     movementHandler_->registerOpcodes(dispatchTable_);
     combatHandler_->registerOpcodes(dispatchTable_);
@@ -2862,6 +2195,7 @@ void GameHandler::registerDomainOpcodes() {
     reputationHandler_->registerOpcodes(dispatchTable_);
     realmTimeHandler_->registerOpcodes(dispatchTable_);
     weatherHandler_->registerOpcodes(dispatchTable_);
+    playerHandler_->registerOpcodes(dispatchTable_);
 }
 
 void GameHandler::registerOpcodeHandlers() {
@@ -2921,7 +2255,7 @@ void GameHandler::handlePacket(network::Packet& packet) {
         if (packet.getRemainingSize() == 4) {
             uint32_t soundId = packet.readUInt32();
             LOG_INFO("SMSG_PLAY_MUSIC (0x0103 alias): soundId=", soundId);
-            if (playMusicCallback_) playMusicCallback_(soundId);
+            eventBus().publish(events::MusicRequested{soundId});
             return;
         }
     }
@@ -3071,7 +2405,7 @@ void GameHandler::enqueueIncomingPacketFront(network::Packet&& packet) {
     pendingIncomingPackets_.emplace_front(std::move(packet));
 }
 
-// enqueueUpdateObjectWork and processPendingUpdateObjectWork moved to EntityController
+// enqueueUpdateObjectWork and processPendingUpdateObjectWork moved to WorldHandler
 
 void GameHandler::processQueuedIncomingPackets() {
     const auto start = std::chrono::steady_clock::now();
@@ -3115,7 +2449,7 @@ void GameHandler::processQueuedIncomingPackets() {
         lagEpisode = {};
     }
 
-    if (pendingIncomingPackets_.empty() && !entityController_->hasPendingUpdateObjectWork()) {
+    if (pendingIncomingPackets_.empty() && !worldHandler_->hasPendingUpdateObjectWork()) {
         return;
     }
 
@@ -3134,9 +2468,9 @@ void GameHandler::processQueuedIncomingPackets() {
             break;
         }
 
-        if (entityController_->hasPendingUpdateObjectWork()) {
-            entityController_->processPendingUpdateObjectWork(start, budgetMs);
-            if (entityController_->hasPendingUpdateObjectWork()) {
+        if (worldHandler_->hasPendingUpdateObjectWork()) {
+            worldHandler_->processPendingUpdateObjectWork(start, budgetMs);
+            if (worldHandler_->hasPendingUpdateObjectWork()) {
                 break;
             }
             continue;
@@ -3167,7 +2501,7 @@ void GameHandler::processQueuedIncomingPackets() {
         ++processed;
     }
 
-    if (entityController_->hasPendingUpdateObjectWork()) {
+    if (worldHandler_->hasPendingUpdateObjectWork()) {
         return;
     }
 

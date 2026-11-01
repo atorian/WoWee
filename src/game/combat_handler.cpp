@@ -1,7 +1,12 @@
 #include "game/combat_handler.hpp"
+#include "game/chat_log.hpp"
+#include "game/frame_xml_events.hpp"
+#include "game/packet_sender.hpp"
+#include "game/ui_errors.hpp"
 #include "game/combat_text_filter.hpp"
-#include "game/game_handler.hpp"
-#include "game/inventory_handler.hpp"
+#include "game/entity.hpp"
+#include "game/inventory.hpp"
+#include "group/domain/records.hpp"
 #include "game/game_utils.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/entity.hpp"
@@ -15,14 +20,23 @@
 #include "game/game_events.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <ctime>
 #include <random>
 
 namespace wowee {
 namespace game {
 
-CombatHandler::CombatHandler(GameHandler& owner)
-    : owner_(owner) {}
+CombatHandler::CombatHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
+                             ChatLog& chat, const core::CVarStore& cvars, CombatQueries& queries)
+    : sender_(sender), frameXml_(frameXml), events_(events), chat_(chat), cvars_(cvars), queries_(queries) {}
+
+Unit* CombatHandler::unitByGuid(uint64_t guid) const {
+    auto entity = queries_.entities().getEntity(guid);
+    // Both UNIT and PLAYER derive from Unit; the type tag says so without RTTI.
+    if (!entity || !entity->isUnit()) return nullptr;
+    return static_cast<Unit*>(entity.get());
+}
 
 /// The same rule the threat indicator uses, kept in step with it.
 ///
@@ -32,25 +46,207 @@ CombatHandler::CombatHandler(GameHandler& owner)
 /// picture disagreeing about when a warning is wanted.
 bool CombatHandler::threatWarningWanted() const {
     int setting = 3;
-    const std::string stored = owner_.cvars().get("threatWarning", "3");
+    const std::string stored = cvars_.get("threatWarning", "3");
     try { setting = std::stoi(stored); } catch (const std::exception&) {}
     switch (setting) {
-        case 1:  return owner_.isInInstance();
-        case 2:  return !owner_.getPartyData().members.empty();
+        case 1:  return queries_.inInstance();
+        case 2:  return !queries_.party().members.empty();
         case 3:  return true;
         default: return false;   // 0, and anything unrecognised
     }
 }
 
 void CombatHandler::registerOpcodes(DispatchTable& table) {
+    // ---- The player's death ----
+    table[Opcode::SMSG_FORCED_DEATH_UPDATE] = [this](network::Packet& packet) {
+        death_.dead = true;
+        death_.corpseX = queries_.playerMovement().y;
+        death_.corpseY = queries_.playerMovement().x;
+        death_.corpseZ = queries_.playerMovement().z;
+        death_.corpseMapId = queries_.currentMapId();
+        death_.corpsePositionValid = true;
+        events_.publish(events::GhostStateChanged{false});
+        frameXml_.fireFrameXmlEvent("PLAYER_DEAD", {});
+        chat_.addSystemChatMessage("You have been killed.");
+        LOG_INFO("SMSG_FORCED_DEATH_UPDATE: player force-killed");
+        packet.skipAll();
+    };
+    table[Opcode::SMSG_CORPSE_RECLAIM_DELAY] = [this](network::Packet& packet) {
+        if (packet.hasRemaining(4)) {
+            uint32_t delayMs = packet.readUInt32();
+            auto nowMs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            death_.corpseReclaimAvailableMs = nowMs + delayMs;
+            LOG_INFO("SMSG_CORPSE_RECLAIM_DELAY: ", delayMs, "ms");
+        }
+    };
+    table[Opcode::SMSG_DEATH_RELEASE_LOC] = [this](network::Packet& packet) {
+        if (packet.hasRemaining(16)) {
+            uint32_t relMapId = packet.readUInt32();
+            float relX = packet.readFloat(), relY = packet.readFloat(), relZ = packet.readFloat();
+            // Read and logged and nothing else, until now: this is where the
+            // server says the nearest spirit healer is, and a ghost with no
+            // marker for it has to go looking.
+            //
+            // Map id -1 is the withdrawal. ResurrectPlayer sends it to take the
+            // marker down, so it is not a graveyard at (0,0,0).
+            if (relMapId == 0xFFFFFFFFu) {
+                death_.deathReleaseValid = false;
+                LOG_INFO("SMSG_DEATH_RELEASE_LOC: spirit healer position cleared");
+            } else {
+                death_.deathReleaseValid = true;
+                death_.deathReleaseMapId = relMapId;
+                death_.deathReleaseCanonical =
+                    core::coords::serverToCanonical(glm::vec3(relX, relY, relZ));
+                LOG_INFO("SMSG_DEATH_RELEASE_LOC (graveyard spawn): map=", relMapId,
+                         " x=", relX, " y=", relY, " z=", relZ);
+            }
+        }
+    };
+    table[Opcode::MSG_CORPSE_QUERY] = [this](network::Packet& packet) {
+        // found(1) + travelMapId(4) + x,y,z(12) + corpseMapId(4) + unk(4).
+        //
+        // Two map ids, and they are not the same question. The first is where
+        // the coordinates are: for a corpse left in a dungeon the server
+        // answers with the instance's *entrance* on the outdoor map, because
+        // that is where a ghost has to walk to. The second is the map the
+        // corpse is actually lying on.
+        //
+        // This paired the coordinates with the second, and everything that
+        // reads death_.corpseMapId compares it against the map the player is
+        // standing on - every other writer sets it to exactly that. So a
+        // corpse in a dungeon gave a position on the outdoor map filed under
+        // the dungeon's id, and the check `queries_.currentMapId() != death_.corpseMapId`
+        // refused to show it precisely where it would have been useful.
+        if (!packet.hasRemaining(1)) return;
+        const uint8_t found = packet.readUInt8();
+        if (!found || !packet.hasRemaining(20)) return;
+        const uint32_t travelMapId = packet.readUInt32();
+        const float cx = packet.readFloat();
+        const float cy = packet.readFloat();
+        const float cz = packet.readFloat();
+        const uint32_t corpseMapId = packet.readUInt32();
+
+        death_.corpseX = cx;
+        death_.corpseY = cy;
+        death_.corpseZ = cz;
+        death_.corpseMapId = travelMapId;
+        death_.corpsePositionValid = true;
+        LOG_INFO("MSG_CORPSE_QUERY: walk to (", cx, ",", cy, ",", cz,
+                 ") on map ", travelMapId,
+                 corpseMapId != travelMapId
+                     ? " (the corpse itself is inside map " + std::to_string(corpseMapId) + ")"
+                     : "");
+    };
+    table[Opcode::SMSG_SPIRIT_HEALER_CONFIRM] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(8)) return;
+        uint64_t npcGuid = packet.readUInt64();
+        if (npcGuid) {
+            death_.resurrectCasterGuid = npcGuid;
+            death_.resurrectCasterName = "";
+            death_.resurrectIsSpiritHealer = true;
+            death_.resurrectRequestPending = true;
+            // The spirit healer's prompt is CONFIRM_XP_LOSS, not
+            // RESURRECT_REQUEST - uiparent.lua answers it with the durability
+            // and sickness warning and its Accept calls AcceptXPLoss. Nothing
+            // fired it, and the only thing that could reach
+            // activateSpiritHealer was this client's own gossip window, so with
+            // gossip handed over there was no way left to accept at all.
+            frameXml_.fireFrameXmlEvent("CONFIRM_XP_LOSS", {});
+        }
+    };
+    table[Opcode::SMSG_RESURRECT_REQUEST] = [this](network::Packet& packet) {
+        // Spell::SendResurrectRequest writes:
+        //
+        //   uint64 casterGuid
+        //   uint32 nameLength      (the name plus its terminator)
+        //   char[] name            with that terminator
+        //   uint8  0               a second one, written explicitly
+        //   uint8  sickness        1 from a creature, 0 from a player
+        //   uint32 0               only when the spell overrides the timer
+        //
+        // The length was never read, so readString took the first byte of it
+        // as the whole name - a control character, for any name shorter than
+        // two hundred and fifty-five - and the dialog was raised offering a
+        // resurrection from that. Everything after it was out of step too, so
+        // the sickness flag was never read at all.
+        if (!packet.hasRemaining(12)) { packet.skipAll(); return; }
+        const uint64_t casterGuid = packet.readUInt64();
+        /*uint32_t nameLength =*/ packet.readUInt32();
+        std::string casterName = packet.readString();
+        if (packet.hasRemaining(1)) packet.readUInt8();   // the second terminator
+        const bool sickness = packet.hasRemaining(1) && packet.readUInt8() != 0;
+        // The trailing word is present only when the spell waives the reclaim
+        // delay, so having one means there is no timer to wait out.
+        const bool hasTimer = !packet.hasRemaining(4);
+        packet.skipAll();
+
+        if (!casterGuid) return;
+        death_.resurrectCasterGuid = casterGuid;
+        // A creature offering this is a spirit healer, and that is what the
+        // sickness flag says - it is set for every non-player caster.
+        death_.resurrectIsSpiritHealer = false;
+        death_.resurrectHasSickness = sickness;
+        death_.resurrectHasTimer = hasTimer;
+        death_.resurrectCasterName = casterName.empty() ? queries_.playerName(casterGuid) : casterName;
+        death_.resurrectRequestPending = true;
+        frameXml_.fireFrameXmlEvent("RESURRECT_REQUEST", {death_.resurrectCasterName});
+    };
+    table[Opcode::SMSG_AREA_SPIRIT_HEALER_TIME] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(12)) { packet.skipAll(); return; }
+        const uint64_t guid = packet.readUInt64();
+        const uint32_t timeMs = packet.readUInt32();
+        death_.areaSpiritHealerGuid = guid;
+        death_.areaSpiritHealerSeconds = static_cast<float>(timeMs) / 1000.0f;
+
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "You will be able to resurrect in %u seconds.",
+                      timeMs / 1000);
+        chat_.addSystemChatMessage(buf);
+
+        // Parsed and said in chat and announced to nobody. UIParent_OnEvent
+        // answers this by joining the queue and raising the countdown dialog,
+        // and it was never told - so the reply arrived, the line was printed,
+        // and the resurrection it was counting down to was one this player had
+        // not joined.
+        frameXml_.fireFrameXmlEvent("AREA_SPIRIT_HEALER_IN_RANGE", {});
+    };
+    table[Opcode::SMSG_PRE_RESURRECT] = [this](network::Packet& packet) {
+        // SMSG_PRE_RESURRECT: packed GUID of the player who can self-resurrect.
+        // Sent when the dead player has Reincarnation (Shaman), Twisting Nether (Warlock),
+        // or Deathpact (Death Knight passive). The client must send CMSG_SELF_RES to accept.
+        uint64_t targetGuid = packet.readPackedGuid();
+        if (targetGuid == queries_.characterGuid() || targetGuid == 0) {
+            death_.selfResAvailable = true;
+            LOG_INFO("SMSG_PRE_RESURRECT: self-resurrection available (guid=0x",
+                     std::hex, targetGuid, std::dec, ")");
+        }
+    };
+
     // ---- Combat clearing ----
+    table[Opcode::SMSG_BREAK_TARGET] = [this](network::Packet& packet) {
+        // Packed, not plain: Unit::BreakTarget sizes the packet with
+        // GetPackGUID().size() and writes GetPackGUID(). Read as a uint64 the
+        // guid never matched the target, so the target was never dropped.
+        if (packet.hasRemaining(1)) {
+            uint64_t bGuid = packet.readPackedGuid();
+            if (bGuid == targetGuid_) targetGuid_ = 0;
+        }
+    };
+    table[Opcode::SMSG_CLEAR_TARGET] = [this](network::Packet& packet) {
+        if (packet.hasRemaining(8)) {
+            uint64_t cGuid = packet.readUInt64();
+            if (cGuid == 0 || cGuid == targetGuid_) targetGuid_ = 0;
+        }
+    };
     table[Opcode::SMSG_ATTACKSWING_DEADTARGET] = [this](network::Packet& /*packet*/) {
         autoAttacking_ = false;
         autoAttackTarget_ = 0;
     };
     table[Opcode::SMSG_THREAT_CLEAR] = [this](network::Packet& /*packet*/) {
         threatLists_.clear();
-        if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("UNIT_THREAT_LIST_UPDATE", {});
+        if (frameXml_.frameXmlListening()) frameXml_.fireFrameXmlEvent("UNIT_THREAT_LIST_UPDATE", {});
     };
     table[Opcode::SMSG_THREAT_REMOVE] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(1)) return;
@@ -80,7 +276,7 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_ATTACKSWING_NOTINRANGE] = [this](network::Packet& /*packet*/) {
         autoAttackOutOfRange_ = true;
         if (autoAttackRangeWarnCooldown_ <= 0.0f) {
-            owner_.raiseUiError("Target is too far away.");
+            raiseUiError(events_, frameXml_, "Target is too far away.");
             autoAttackRangeWarnCooldown_ = 1.25f;
         }
     };
@@ -95,7 +291,7 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
         // The real client says so and leaves the heading alone - the swing
         // simply does not land until the player turns back.
         if (autoAttackRangeWarnCooldown_ <= 0.0f) {
-            owner_.raiseUiError("You are facing the wrong way!");
+            raiseUiError(events_, frameXml_, "You are facing the wrong way!");
             autoAttackRangeWarnCooldown_ = 1.25f;
         }
     };
@@ -103,14 +299,14 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
         autoAttackOutOfRange_ = false;
         autoAttackOutOfRangeTime_ = 0.0f;
         if (autoAttackRangeWarnCooldown_ <= 0.0f) {
-            owner_.raiseUiError("You need to stand up to fight.");
+            raiseUiError(events_, frameXml_, "You need to stand up to fight.");
             autoAttackRangeWarnCooldown_ = 1.25f;
         }
     };
     table[Opcode::SMSG_ATTACKSWING_CANT_ATTACK] = [this](network::Packet& /*packet*/) {
         stopAutoAttack();
         if (autoAttackRangeWarnCooldown_ <= 0.0f) {
-            owner_.raiseUiError("You can't attack that.");
+            raiseUiError(events_, frameXml_, "You can't attack that.");
             autoAttackRangeWarnCooldown_ = 1.25f;
         }
     };
@@ -119,14 +315,15 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
         if (!packet.hasRemaining(12)) return;
         uint64_t guid = packet.readUInt64();
         uint32_t reaction = packet.readUInt32();
-        if (reaction == 2 && owner_.npcAggroCallbackRef()) {
-            auto entity = owner_.getEntityManager().getEntity(guid);
+        if (reaction == 2) {
+            auto entity = queries_.entities().getEntity(guid);
             if (entity)
-                owner_.npcAggroCallbackRef()(guid, glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
+                events_.publish(events::NpcAggroed{guid, entity->getX(), entity->getY(), entity->getZ()});
         }
     };
     table[Opcode::SMSG_SPELLNONMELEEDAMAGELOG] = [this](network::Packet& packet) { handleSpellDamageLog(packet); };
     table[Opcode::SMSG_SPELLHEALLOG] = [this](network::Packet& packet) { handleSpellHealLog(packet); };
+    table[Opcode::SMSG_LOG_XPGAIN] = [this](network::Packet& packet) { handleXpGain(packet); };
 
     // ---- Environmental damage ----
     table[Opcode::SMSG_ENVIRONMENTAL_DAMAGE_LOG] = [this](network::Packet& packet) {
@@ -138,7 +335,7 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
         uint32_t dmg         = packet.readUInt32();
         uint32_t envAbs      = packet.readUInt32();
         uint32_t envRes      = packet.readUInt32();
-        if (victimGuid == owner_.getPlayerGuid()) {
+        if (victimGuid == queries_.characterGuid()) {
             // Environmental damage: pass envType via powerType field for display differentiation
             if (dmg > 0)
                 addCombatText(CombatTextEntry::ENVIRONMENTAL, static_cast<int32_t>(dmg), 0, false, envType, 0, victimGuid);
@@ -148,7 +345,7 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
                 addCombatText(CombatTextEntry::RESIST, static_cast<int32_t>(envRes), 0, false, 0, 0, victimGuid);
             // Drowning damage → play DROWN one-shot on player
             if (envType == 1 && dmg > 0)  // 131 is anim::DROWN
-                owner_.eventBus().publish(events::UnitEmotePlayed{victimGuid, 131, false});
+                events_.publish(events::UnitEmotePlayed{victimGuid, 131, false});
         }
         packet.skipAll();
     };
@@ -197,20 +394,20 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
             // fought, not every update while they are: the list arrives on
             // every threat change and a warning per packet would be a siren.
             const bool topNow = !list.empty() &&
-                                list.front().victimGuid == owner_.getPlayerGuid();
+                                list.front().victimGuid == queries_.characterGuid();
             const bool topBefore = playerTopThreatOn_.count(unitGuid) != 0;
             if (topNow != topBefore) {
                 if (topNow) playerTopThreatOn_.insert(unitGuid);
                 else        playerTopThreatOn_.erase(unitGuid);
                 if (topNow && threatWarningWanted() &&
-                    owner_.cvars().get("threatPlaySounds", "0") != "0") {
-                    owner_.eventBus().publish(events::ThreatWarningRaised{unitGuid});
+                    cvars_.get("threatPlaySounds", "0") != "0") {
+                    events_.publish(events::ThreatWarningRaised{unitGuid});
                 }
             }
 
             threatLists_[unitGuid] = std::move(list);
-            if (!owner_.hasAddonEventListener()) return;
-            auto fire = [this](const std::string& event, const std::vector<std::string>& args) { owner_.fireAddonEvent(event, args); };
+            if (!frameXml_.frameXmlListening()) return;
+            auto fire = [this](const std::string& event, const std::vector<std::string>& args) { frameXml_.fireFrameXmlEvent(event, args); };
             // The list changed, and separately: whether each unit on it is
             // tanking. They are different events and unit frames read the
             // second one - UnitFrameThreatIndicator_OnEvent is registered for
@@ -218,17 +415,17 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
             // border on a frame. It was never fired, so no frame ever showed
             // one, and the list it would have been read from was misparsed
             // anyway.
-            fire("UNIT_THREAT_LIST_UPDATE", {owner_.guidToUnitId(unitGuid)});
+            fire("UNIT_THREAT_LIST_UPDATE", {queries_.unitIdFor(unitGuid)});
             // Named per unit, because the indicator compares the argument
             // against its own frame's unit and ignores anything else. Every
             // unit on the list that the interface has a token for, plus the mob
             // itself - a target frame's indicator is fed by the player's
             // situation against the target, so both ends have to be told.
             for (const ThreatEntry& e : threatLists_[unitGuid]) {
-                const std::string who = owner_.guidToUnitId(e.victimGuid);
+                const std::string who = queries_.unitIdFor(e.victimGuid);
                 if (!who.empty()) fire("UNIT_THREAT_SITUATION_UPDATE", {who});
             }
-            if (const std::string mob = owner_.guidToUnitId(unitGuid); !mob.empty())
+            if (const std::string mob = queries_.unitIdFor(unitGuid); !mob.empty())
                 fire("UNIT_THREAT_SITUATION_UPDATE", {mob});
         };
     }
@@ -261,7 +458,7 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
 
 void CombatHandler::startAutoAttack(uint64_t targetGuid) {
     // Can't attack yourself
-    if (targetGuid == owner_.getPlayerGuid()) return;
+    if (targetGuid == queries_.characterGuid()) return;
     if (targetGuid == 0) return;
 
     // Assist Attack: swinging at a friendly unit attacks whatever they are
@@ -272,12 +469,12 @@ void CombatHandler::startAutoAttack(uint64_t targetGuid) {
     // Only when the friend has a target of their own, and only when that
     // target is hostile: assisting somebody who is fighting nothing, or who
     // has a friendly unit selected, would turn one refusal into another.
-    if (owner_.cvars().get("assistAttack", "0") != "0") {
-        auto entity = owner_.getEntityManager().getEntity(targetGuid);
+    if (cvars_.get("assistAttack", "0") != "0") {
+        auto entity = queries_.entities().getEntity(targetGuid);
         if (auto* unit = dynamic_cast<Unit*>(entity.get())) {
             if (!unit->isHostile() && !isAggressiveTowardPlayer(targetGuid)) {
                 const uint64_t theirTarget = unitTargetGuid(entity);
-                auto their = owner_.getEntityManager().getEntity(theirTarget);
+                auto their = queries_.entities().getEntity(theirTarget);
                 auto* theirUnit = dynamic_cast<Unit*>(their.get());
                 if (theirUnit && (theirUnit->isHostile() ||
                                   isAggressiveTowardPlayer(theirTarget))) {
@@ -291,21 +488,20 @@ void CombatHandler::startAutoAttack(uint64_t targetGuid) {
 
     // Client-side range gate to avoid starting "swing forever" loops when
     // target is already clearly out of range.
-    if (auto target = owner_.getEntityManager().getEntity(targetGuid)) {
-        float dx = owner_.movementInfoRef().x - target->getLatestX();
-        float dy = owner_.movementInfoRef().y - target->getLatestY();
-        float dz = owner_.movementInfoRef().z - target->getLatestZ();
+    if (auto target = queries_.entities().getEntity(targetGuid)) {
+        float dx = queries_.playerMovement().x - target->getLatestX();
+        float dy = queries_.playerMovement().y - target->getLatestY();
+        float dz = queries_.playerMovement().z - target->getLatestZ();
         float dist3d = std::sqrt(dx * dx + dy * dy + dz * dz);
         // Use longer range limit when a ranged weapon is equipped
-        const auto& rangedSlot = owner_.getInventory().getEquipSlot(game::EquipSlot::RANGED);
-        bool hasRangedWeapon = !rangedSlot.empty() &&
-            (rangedSlot.item.inventoryType == game::InvType::RANGED_BOW ||
-             rangedSlot.item.inventoryType == game::InvType::RANGED_GUN ||
-             rangedSlot.item.inventoryType == game::InvType::THROWN);
+        const uint8_t ranged = queries_.rangedWeaponInventoryType();
+        bool hasRangedWeapon = ranged == game::InvType::RANGED_BOW ||
+                               ranged == game::InvType::RANGED_GUN ||
+                               ranged == game::InvType::THROWN;
         float maxRange = hasRangedWeapon ? 40.0f : 8.0f;
         if (dist3d > maxRange) {
             if (autoAttackRangeWarnCooldown_ <= 0.0f) {
-                owner_.raiseUiError("Target is too far away.");
+                raiseUiError(events_, frameXml_, "Target is too far away.");
                 autoAttackRangeWarnCooldown_ = 1.25f;
             }
             return;
@@ -318,13 +514,13 @@ void CombatHandler::startAutoAttack(uint64_t targetGuid) {
     //
     // Never in the air, unless Auto Dismount in Flight asks for it: a hostile
     // right-clicked from a flying mount dropped the player out of the sky.
-    if (owner_.isMounted()) {
-        if (owner_.isPlayerFlying() && !owner_.isTaxiMountActive() &&
-            owner_.cvars().get("autoDismountFlying", "0") == "0") {
-            owner_.addUIError("You can't do that while flying.");
+    if (queries_.mounted()) {
+        if (queries_.flying() && !queries_.taxiMountActive() &&
+            cvars_.get("autoDismountFlying", "0") == "0") {
+            raiseUiError(events_, frameXml_, "You can't do that while flying.");
             return;
         }
-        owner_.dismount();
+        queries_.dismount();
     }
 
     autoAttackRequested_ = true;
@@ -343,21 +539,19 @@ void CombatHandler::startAutoAttack(uint64_t targetGuid) {
     // Only with the Combat page's debug setting on. The original client does
     // not turn the player at all; attacking something behind them is refused
     // until they face it themselves.
-    auto target = owner_.isAutoFaceTarget() ? owner_.getEntityManager().getEntity(targetGuid)
+    auto target = queries_.autoFaceTarget() ? queries_.entities().getEntity(targetGuid)
                                             : nullptr;
     if (target) {
-        const float toTargetX = target->getLatestX() - owner_.movementInfoRef().x;
-        const float toTargetY = target->getLatestY() - owner_.movementInfoRef().y;
-        if (std::abs(toTargetX) > 0.01f || std::abs(toTargetY) > 0.01f) {
-            owner_.movementInfoRef().orientation = std::atan2(-toTargetY, toTargetX);
-            if (owner_.getState() == WorldState::IN_WORLD && owner_.getSocket()) {
-                owner_.sendMovement(Opcode::MSG_MOVE_SET_FACING);
-            }
+        const float toTargetX = target->getLatestX() - queries_.playerMovement().x;
+        const float toTargetY = target->getLatestY() - queries_.playerMovement().y;
+        if ((std::abs(toTargetX) > 0.01f || std::abs(toTargetY) > 0.01f) &&
+            sender_.characterInWorld()) {
+            queries_.setFacing(std::atan2(-toTargetY, toTargetX));
         }
     }
-    if (owner_.getState() == WorldState::IN_WORLD && owner_.getSocket()) {
+    if (sender_.characterInWorld()) {
         auto packet = AttackSwingPacket::build(targetGuid);
-        owner_.getSocket()->send(packet);
+        sender_.send(packet);
     }
     LOG_INFO("Starting auto-attack on 0x", std::hex, targetGuid, std::dec);
 }
@@ -371,13 +565,13 @@ void CombatHandler::stopAutoAttack() {
     autoAttackOutOfRange_ = false;
     autoAttackOutOfRangeTime_ = 0.0f;
     autoAttackResendTimer_ = 0.0f;
-    if (owner_.getState() == WorldState::IN_WORLD && owner_.getSocket()) {
+    if (sender_.characterInWorld()) {
         auto packet = AttackStopPacket::build();
-        owner_.getSocket()->send(packet);
+        sender_.send(packet);
     }
     LOG_INFO("Stopping auto-attack");
-    if (owner_.hasAddonEventListener())
-        owner_.fireAddonEvent("PLAYER_LEAVE_COMBAT", {});
+    if (frameXml_.frameXmlListening())
+        frameXml_.fireFrameXmlEvent("PLAYER_LEAVE_COMBAT", {});
 }
 
 // ============================================================
@@ -390,8 +584,8 @@ void CombatHandler::addCombatText(CombatTextEntry::Type type, int32_t amount, ui
     // lives in combat_text_filter.hpp so it can be tested without a settings
     // store; only the lookup is here.
     const auto rule = combatTextFilterFor(type, isPlayerSource, srcGuid, dstGuid,
-                                          owner_.getPetGuid(), owner_.getTargetGuid());
-    if (rule.cvar && owner_.cvars().get(rule.cvar, rule.fallback) == "0") return;
+                                          queries_.petGuid(), targetGuid_);
+    if (rule.cvar && cvars_.get(rule.cvar, rule.fallback) == "0") return;
 
     CombatTextEntry entry;
     entry.type = type;
@@ -418,8 +612,8 @@ void CombatHandler::addCombatText(CombatTextEntry::Type type, int32_t amount, ui
     // ones it acts on, and everything else falls through its final else to a
     // blank. Only a unit the interface has a token for is worth announcing -
     // the frame compares the first argument against its own unit.
-    if (dstGuid != 0 && owner_.hasAddonEventListener()) {
-        const std::string unitId = owner_.guidToUnitId(dstGuid);
+    if (dstGuid != 0 && frameXml_.frameXmlListening()) {
+        const std::string unitId = queries_.unitIdFor(dstGuid);
         if (!unitId.empty()) {
             const char* action = nullptr;
             const char* flags  = "";
@@ -444,7 +638,7 @@ void CombatHandler::addCombatText(CombatTextEntry::Type type, int32_t amount, ui
                 default: break;  // energize, xp, honour - not combat feedback
             }
             if (action) {
-                owner_.fireAddonEvent(
+                frameXml_.fireFrameXmlEvent(
                     "UNIT_COMBAT",
                     {unitId, action, flags, std::to_string(amount), "0"});
             }
@@ -464,11 +658,11 @@ void CombatHandler::addCombatText(CombatTextEntry::Type type, int32_t amount, ui
     // preserve "unknown/no source" (e.g. environmental damage) instead of
     // backfilling from current target.
     uint64_t effectiveSrc = (srcGuid != 0) ? srcGuid
-                          : ((dstGuid != 0) ? 0 : (isPlayerSource ? owner_.getPlayerGuid() : owner_.getTargetGuid()));
+                          : ((dstGuid != 0) ? 0 : (isPlayerSource ? queries_.characterGuid() : targetGuid_));
     uint64_t effectiveDst = (dstGuid != 0) ? dstGuid
-                          : (isPlayerSource ? owner_.getTargetGuid() : owner_.getPlayerGuid());
-    log.sourceName = owner_.lookupName(effectiveSrc);
-    log.targetName = (effectiveDst != 0) ? owner_.lookupName(effectiveDst) : std::string{};
+                          : (isPlayerSource ? targetGuid_ : queries_.characterGuid());
+    log.sourceName = queries_.playerName(effectiveSrc);
+    log.targetName = (effectiveDst != 0) ? queries_.playerName(effectiveDst) : std::string{};
     // Held for the addon event below. log is moved into combatLog_ here, which
     // leaves both name strings empty, so reading them afterwards sent every
     // COMBAT_LOG_EVENT_UNFILTERED to Lua with a blank source and target.
@@ -480,7 +674,7 @@ void CombatHandler::addCombatText(CombatTextEntry::Type type, int32_t amount, ui
 
     // Fire COMBAT_LOG_EVENT_UNFILTERED for Lua addons
     // Args: subevent, sourceGUID, sourceName, 0 (sourceFlags), destGUID, destName, 0 (destFlags), spellId, spellName, amount
-    if (owner_.hasAddonEventListener()) {
+    if (frameXml_.frameXmlListening()) {
         static const char* kSubevents[] = {
             "SWING_DAMAGE", "SPELL_DAMAGE", "SPELL_HEAL", "SWING_MISSED", "SWING_MISSED",
             "SWING_MISSED", "SWING_MISSED", "SWING_MISSED", "SPELL_DAMAGE", "SPELL_HEAL",
@@ -495,9 +689,9 @@ void CombatHandler::addCombatText(CombatTextEntry::Type type, int32_t amount, ui
         char srcBuf[32], dstBuf[32];
         snprintf(srcBuf, sizeof(srcBuf), "0x%016llX", (unsigned long long)effectiveSrc);
         snprintf(dstBuf, sizeof(dstBuf), "0x%016llX", (unsigned long long)effectiveDst);
-        std::string spellName = (spellId != 0) ? owner_.getSpellName(spellId) : std::string{};
+        std::string spellName = (spellId != 0) ? queries_.spellName(spellId) : std::string{};
         std::string timestamp = std::to_string(static_cast<double>(std::time(nullptr)));
-        owner_.fireAddonEvent("COMBAT_LOG_EVENT_UNFILTERED", {
+        frameXml_.fireFrameXmlEvent("COMBAT_LOG_EVENT_UNFILTERED", {
             timestamp, subevent,
             srcBuf, sourceName, "0",
             dstBuf, targetName, "0",
@@ -547,10 +741,10 @@ void CombatHandler::updateCombatText(float deltaTime) {
 // ============================================================
 
 void CombatHandler::autoTargetAttacker(uint64_t attackerGuid) {
-    if (attackerGuid == 0 || attackerGuid == owner_.getPlayerGuid()) return;
-    if (owner_.getTargetGuid() != 0) return;
-    if (!owner_.getEntityManager().hasEntity(attackerGuid)) return;
-    owner_.setTarget(attackerGuid);
+    if (attackerGuid == 0 || attackerGuid == queries_.characterGuid()) return;
+    if (targetGuid_ != 0) return;
+    if (!queries_.entities().hasEntity(attackerGuid)) return;
+    setTarget(attackerGuid);
 }
 
 void CombatHandler::handleAttackStart(network::Packet& packet) {
@@ -572,44 +766,42 @@ void CombatHandler::handleAttackStart(network::Packet& packet) {
     // presentation state here so the normal creature visual sync restores full
     // opacity instead of leaving an invisible monster in melee.
     auto revealCombatant = [this](uint64_t guid) {
-        auto entity = owner_.getEntityManager().getEntity(guid);
+        auto entity = queries_.entities().getEntity(guid);
         if (!entity || !entity->isUnit()) return;
         auto unit = std::static_pointer_cast<Unit>(entity);
         if (!unit->hasCreepVisibility()) return;
         unit->clearCreepVisibility();
-        if (guid == owner_.getPlayerGuid() && owner_.stealthStateCallbackRef()) {
-            owner_.stealthStateCallbackRef()(false);
+        if (guid == queries_.characterGuid()) {
+            events_.publish(events::StealthStateChanged{false});
         }
     };
     revealCombatant(data.attackerGuid);
     revealCombatant(data.victimGuid);
 
-    if (data.attackerGuid == owner_.getPlayerGuid()) {
+    if (data.attackerGuid == queries_.characterGuid()) {
         autoAttackRequested_ = true;
         autoAttacking_ = true;
         autoAttackRetryPending_ = false;
         autoAttackTarget_ = data.victimGuid;
-        if (owner_.hasAddonEventListener())
-            owner_.fireAddonEvent("PLAYER_ENTER_COMBAT", {});
-    } else if (data.victimGuid == owner_.getPlayerGuid() && data.attackerGuid != 0) {
+        if (frameXml_.frameXmlListening())
+            frameXml_.fireFrameXmlEvent("PLAYER_ENTER_COMBAT", {});
+    } else if (data.victimGuid == queries_.characterGuid() && data.attackerGuid != 0) {
         hostileAttackers_.insert(data.attackerGuid);
         autoTargetAttacker(data.attackerGuid);
 
         // Play aggro sound when NPC attacks player
-        if (owner_.npcAggroCallbackRef()) {
-            auto entity = owner_.getEntityManager().getEntity(data.attackerGuid);
-            if (entity && entity->getType() == ObjectType::UNIT) {
-                glm::vec3 pos(entity->getX(), entity->getY(), entity->getZ());
-                owner_.npcAggroCallbackRef()(data.attackerGuid, pos);
-            }
+        auto entity = queries_.entities().getEntity(data.attackerGuid);
+        if (entity && entity->getType() == ObjectType::UNIT) {
+            events_.publish(events::NpcAggroed{
+                data.attackerGuid, entity->getX(), entity->getY(), entity->getZ()});
         }
     }
 
     // Force both participants to face each other at combat start.
     // Uses atan2(-dy, dx): canonical orientation convention where the West/Y
     // component is negated (renderYaw = orientation + 90°, model-forward = render+X).
-    auto attackerEnt = owner_.getEntityManager().getEntity(data.attackerGuid);
-    auto victimEnt   = owner_.getEntityManager().getEntity(data.victimGuid);
+    auto attackerEnt = queries_.entities().getEntity(data.attackerGuid);
+    auto victimEnt   = queries_.entities().getEntity(data.victimGuid);
     if (attackerEnt && victimEnt) {
         float dx = victimEnt->getX() - attackerEnt->getX();
         float dy = victimEnt->getY() - attackerEnt->getY();
@@ -625,22 +817,22 @@ void CombatHandler::handleAttackStop(network::Packet& packet) {
     if (!AttackStopParser::parse(packet, data)) return;
 
     // Keep intent, but clear server-confirmed active state until ATTACKSTART resumes.
-    if (data.attackerGuid == owner_.getPlayerGuid()) {
+    if (data.attackerGuid == queries_.characterGuid()) {
         autoAttacking_ = false;
         autoAttackRetryPending_ = autoAttackRequested_;
         autoAttackResendTimer_ = 0.0f;
         LOG_DEBUG("SMSG_ATTACKSTOP received (keeping auto-attack intent)");
-    } else if (data.victimGuid == owner_.getPlayerGuid()) {
+    } else if (data.victimGuid == queries_.characterGuid()) {
         hostileAttackers_.erase(data.attackerGuid);
     }
 }
 
 void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
     AttackerStateUpdateData data;
-    if (!owner_.getPacketParsers()->parseAttackerStateUpdate(packet, data)) return;
+    if (!queries_.packetParsers().parseAttackerStateUpdate(packet, data)) return;
 
-    bool isPlayerAttacker = (data.attackerGuid == owner_.getPlayerGuid());
-    bool isPlayerTarget = (data.targetGuid == owner_.getPlayerGuid());
+    bool isPlayerAttacker = (data.attackerGuid == queries_.characterGuid());
+    bool isPlayerTarget = (data.targetGuid == queries_.characterGuid());
     if (!isPlayerAttacker && !isPlayerTarget) return;  // Not our combat
 
     if (isPlayerAttacker) {
@@ -650,14 +842,11 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
         // Skip melee animation if a ranged shot was just triggered from
         // SMSG_SPELL_GO (Auto Shot / Shoot / Throw).  The ranged animation
         // is already playing; firing the melee callback here would override it.
-        if (owner_.consumeSuppressMeleeSwingAnim()) {
+        if (queries_.consumeSuppressMeleeSwingAnim()) {
             LOG_DEBUG("Suppressed melee swing anim - ranged shot already triggered");
         } else {
-            owner_.eventBus().publish(events::PlayerMeleeSwing{0});
+            events_.publish(events::PlayerMeleeSwing{0});
         }
-    }
-    if (!isPlayerAttacker && owner_.npcSwingCallbackRef()) {
-        owner_.npcSwingCallbackRef()(data.attackerGuid);
     }
 
     if (isPlayerTarget && data.attackerGuid != 0) {
@@ -667,7 +856,7 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
 
     // The swing's sound, the grunt and the wound, and an attacking creature's
     // battle cry, are the client's to play from this.
-    owner_.eventBus().publish(events::MeleeSwingResolved{
+    events_.publish(events::MeleeSwingResolved{
         .attackerGuid = data.attackerGuid,
         .victimGuid = data.targetGuid,
         .attackerIsPlayer = isPlayerAttacker,
@@ -721,24 +910,24 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
     }
 
     // Fire hit reaction animation on the victim
-    if (owner_.hitReactionCallbackRef() && !data.isMiss()) {
-        using HR = GameHandler::HitReaction;
+    if (!data.isMiss()) {
+        using HR = events::HitReaction;
         HR reaction = HR::WOUND;
         if (data.victimState == 1) reaction = HR::DODGE;
         else if (data.victimState == 2) reaction = HR::PARRY;
         else if (data.victimState == 4) reaction = HR::BLOCK;
         else if (data.isCrit()) reaction = HR::CRIT_WOUND;
-        owner_.hitReactionCallbackRef()(data.targetGuid, reaction);
+        events_.publish(events::UnitHitReacted{data.targetGuid, reaction});
     }
 
 }
 
 void CombatHandler::handleSpellDamageLog(network::Packet& packet) {
     SpellDamageLogData data;
-    if (!owner_.getPacketParsers()->parseSpellDamageLog(packet, data)) return;
+    if (!queries_.packetParsers().parseSpellDamageLog(packet, data)) return;
 
-    bool isPlayerSource = (data.attackerGuid == owner_.getPlayerGuid());
-    bool isPlayerTarget = (data.targetGuid == owner_.getPlayerGuid());
+    bool isPlayerSource = (data.attackerGuid == queries_.characterGuid());
+    bool isPlayerTarget = (data.targetGuid == queries_.characterGuid());
     if (!isPlayerSource && !isPlayerTarget) return;  // Not our combat
 
     if (isPlayerTarget && data.attackerGuid != 0) {
@@ -757,10 +946,10 @@ void CombatHandler::handleSpellDamageLog(network::Packet& packet) {
 
 void CombatHandler::handleSpellHealLog(network::Packet& packet) {
     SpellHealLogData data;
-    if (!owner_.getPacketParsers()->parseSpellHealLog(packet, data)) return;
+    if (!queries_.packetParsers().parseSpellHealLog(packet, data)) return;
 
-    bool isPlayerSource = (data.casterGuid == owner_.getPlayerGuid());
-    bool isPlayerTarget = (data.targetGuid == owner_.getPlayerGuid());
+    bool isPlayerSource = (data.casterGuid == queries_.characterGuid());
+    bool isPlayerTarget = (data.targetGuid == queries_.characterGuid());
     if (!isPlayerSource && !isPlayerTarget) return;  // Not our combat
 
     auto type = data.isCrit ? CombatTextEntry::CRIT_HEAL : CombatTextEntry::HEAL;
@@ -800,35 +989,34 @@ void CombatHandler::updateAutoAttack(float deltaTime) {
     // Leave combat if auto-attack target is too far away (leash range)
     // and keep melee intent tightly synced while stationary.
     if (autoAttackRequested_ && autoAttackTarget_ != 0) {
-        auto targetEntity = owner_.getEntityManager().getEntity(autoAttackTarget_);
+        auto targetEntity = queries_.entities().getEntity(autoAttackTarget_);
         if (targetEntity) {
             const float targetX = targetEntity->getLatestX();
             const float targetY = targetEntity->getLatestY();
             const float targetZ = targetEntity->getLatestZ();
-            float dx = owner_.movementInfoRef().x - targetX;
-            float dy = owner_.movementInfoRef().y - targetY;
-            float dz = owner_.movementInfoRef().z - targetZ;
+            float dx = queries_.playerMovement().x - targetX;
+            float dy = queries_.playerMovement().y - targetY;
+            float dz = queries_.playerMovement().z - targetZ;
             float dist = std::sqrt(dx * dx + dy * dy);
             float dist3d = std::sqrt(dx * dx + dy * dy + dz * dz);
             const bool classicLike = isPreWotlk();
             if (dist > 40.0f) {
                 stopAutoAttack();
                 LOG_INFO("Left combat: target too far (", dist, " yards)");
-            } else if (owner_.isInWorld()) {
+            } else if (sender_.characterInWorld()) {
                 bool allowResync = true;
                 const float meleeRange = classicLike ? 5.25f : 5.75f;
                 if (dist3d > meleeRange) {
                     autoAttackOutOfRange_ = true;
                     autoAttackOutOfRangeTime_ += deltaTime;
                     if (autoAttackRangeWarnCooldown_ <= 0.0f) {
-                        owner_.raiseUiError("Target is too far away.");
-                        owner_.addUIError("Target is too far away.");
+                        raiseUiError(events_, frameXml_, "Target is too far away.");
                         autoAttackRangeWarnCooldown_ = 1.25f;
                     }
                     // Stop chasing stale swings when the target remains out of range.
                     if (autoAttackOutOfRangeTime_ > 2.0f && dist3d > 9.0f) {
                         stopAutoAttack();
-                        owner_.raiseUiError("Auto-attack stopped: target out of range.");
+                        raiseUiError(events_, frameXml_, "Auto-attack stopped: target out of range.");
                         allowResync = false;
                     }
                 } else {
@@ -839,7 +1027,7 @@ void CombatHandler::updateAutoAttack(float deltaTime) {
                 if (allowResync) {
                     autoAttackResendTimer_ += deltaTime;
 
-                    // Classic/Turtle servers do not tolerate steady attack-start
+                    // Classic servers do not tolerate steady attack-start
                     // reissues well. Only retry once after local start or an
                     // explicit server-side attack stop while intent is still set.
                     const float resendInterval = classicLike ? 1.0f : 0.50f;
@@ -848,7 +1036,7 @@ void CombatHandler::updateAutoAttack(float deltaTime) {
                         autoAttackResendTimer_ = 0.0f;
                         autoAttackRetryPending_ = false;
                         auto pkt = AttackSwingPacket::build(autoAttackTarget_);
-                        owner_.getSocket()->send(pkt);
+                        sender_.send(pkt);
                     }
 
                     // No periodic facing sync. The player is turned to face the
@@ -867,10 +1055,10 @@ void CombatHandler::updateAutoAttack(float deltaTime) {
     // Keep active melee attackers visually facing the player as positions change.
     if (!hostileAttackers_.empty()) {
         for (uint64_t attackerGuid : hostileAttackers_) {
-            auto attacker = owner_.getEntityManager().getEntity(attackerGuid);
+            auto attacker = queries_.entities().getEntity(attackerGuid);
             if (!attacker) continue;
-            float dx = owner_.movementInfoRef().x - attacker->getX();
-            float dy = owner_.movementInfoRef().y - attacker->getY();
+            float dx = queries_.playerMovement().x - attacker->getX();
+            float dy = queries_.playerMovement().y - attacker->getY();
             if (std::abs(dx) < 0.01f && std::abs(dy) < 0.01f) continue;
             attacker->setOrientation(std::atan2(-dy, dx));
         }
@@ -922,10 +1110,10 @@ void CombatHandler::handleHealthUpdate(network::Packet& packet) {
     uint64_t guid = huTbc ? packet.readUInt64() : packet.readPackedGuid();
     if (!packet.hasRemaining(4)) return;
     uint32_t hp = packet.readUInt32();
-    if (auto* unit = owner_.getUnitByGuid(guid)) unit->setHealth(hp);
+    if (auto* unit = unitByGuid(guid)) unit->setHealth(hp);
     if (guid != 0) {
-        auto unitId = owner_.guidToUnitId(guid);
-        if (!unitId.empty()) owner_.fireAddonEvent("UNIT_HEALTH", {unitId});
+        auto unitId = queries_.unitIdFor(guid);
+        if (!unitId.empty()) frameXml_.fireFrameXmlEvent("UNIT_HEALTH", {unitId});
     }
 }
 
@@ -936,14 +1124,14 @@ void CombatHandler::handlePowerUpdate(network::Packet& packet) {
     if (!packet.hasRemaining(5)) return;
     uint8_t  powerType = packet.readUInt8();
     uint32_t value     = packet.readUInt32();
-    if (auto* unit = owner_.getUnitByGuid(guid)) unit->setPowerByType(powerType, value);
+    if (auto* unit = unitByGuid(guid)) unit->setPowerByType(powerType, value);
     if (guid != 0) {
-        auto unitId = owner_.guidToUnitId(guid);
+        auto unitId = queries_.unitIdFor(guid);
         if (!unitId.empty()) {
-            owner_.fireAddonEvent("UNIT_POWER", {unitId});
-            if (guid == owner_.getPlayerGuid()) {
-                owner_.fireAddonEvent("ACTIONBAR_UPDATE_USABLE", {});
-                owner_.fireAddonEvent("SPELL_UPDATE_USABLE", {});
+            frameXml_.fireFrameXmlEvent("UNIT_POWER", {unitId});
+            if (guid == queries_.characterGuid()) {
+                frameXml_.fireFrameXmlEvent("ACTIONBAR_UPDATE_USABLE", {});
+                frameXml_.fireFrameXmlEvent("SPELL_UPDATE_USABLE", {});
             }
         }
     }
@@ -954,11 +1142,10 @@ void CombatHandler::handleUpdateComboPoints(network::Packet& packet) {
     if (!packet.hasRemaining(cpTbc ? 8u : 2u) ) return;
     uint64_t target = cpTbc ? packet.readUInt64() : packet.readPackedGuid();
     if (!packet.hasRemaining(1)) return;
-    owner_.comboPointsRef() = packet.readUInt8();
-    owner_.comboTargetRef() = target;
+    comboPoints_ = packet.readUInt8();
     LOG_DEBUG("SMSG_UPDATE_COMBO_POINTS: target=0x", std::hex, target,
-              std::dec, " points=", static_cast<int>(owner_.comboPointsRef()));
-    owner_.fireAddonEvent("PLAYER_COMBO_POINTS", {});
+              std::dec, " points=", static_cast<int>(comboPoints_));
+    frameXml_.fireFrameXmlEvent("PLAYER_COMBO_POINTS", {});
 }
 
 void CombatHandler::handlePvpCredit(network::Packet& packet) {
@@ -968,9 +1155,9 @@ void CombatHandler::handlePvpCredit(network::Packet& packet) {
         uint32_t rank       = packet.readUInt32();
         LOG_INFO("SMSG_PVP_CREDIT: honor=", honor, " victim=0x", std::hex, victimGuid, std::dec, " rank=", rank);
         std::string msg = "You gain " + std::to_string(honor) + " honor points.";
-        owner_.addLocalChatLine(ChatType::COMBAT_HONOR_GAIN, msg);
+        chat_.addLocalChatLine(ChatType::COMBAT_HONOR_GAIN, msg);
         if (honor > 0) addCombatText(CombatTextEntry::HONOR_GAIN, static_cast<int32_t>(honor), 0, true);
-        if (owner_.pvpHonorCallbackRef()) owner_.pvpHonorCallbackRef()(honor, victimGuid, rank);
+        events_.publish(events::HonorGained{honor, victimGuid, rank});
     }
 }
 
@@ -987,8 +1174,8 @@ void CombatHandler::handleProcResist(network::Packet& packet) {
     uint64_t victim = readPrGuid();
     if (!packet.hasRemaining(4)) return;
     uint32_t spellId = packet.readUInt32();
-    if (victim == owner_.getPlayerGuid())       addCombatText(CombatTextEntry::RESIST, 0, spellId, false, 0, caster, victim);
-    else if (caster == owner_.getPlayerGuid())  addCombatText(CombatTextEntry::RESIST, 0, spellId, true,  0, caster, victim);
+    if (victim == queries_.characterGuid())       addCombatText(CombatTextEntry::RESIST, 0, spellId, false, 0, caster, victim);
+    else if (caster == queries_.characterGuid())  addCombatText(CombatTextEntry::RESIST, 0, spellId, true,  0, caster, victim);
     packet.skipAll();
 }
 
@@ -1028,17 +1215,17 @@ void CombatHandler::handleSpellDamageShield(network::Packet& packet) {
         /*uint32_t absorbed =*/ packet.readUInt32();
     /*uint32_t school =*/  packet.readUInt32();
     // Show combat text: damage shield reflect
-    if (casterGuid == owner_.getPlayerGuid()) {
+    if (casterGuid == queries_.characterGuid()) {
         // We have a damage shield that reflected damage
         addCombatText(CombatTextEntry::SPELL_DAMAGE, static_cast<int32_t>(damage), shieldSpellId, true, 0, casterGuid, victimGuid);
-    } else if (victimGuid == owner_.getPlayerGuid()) {
+    } else if (victimGuid == queries_.characterGuid()) {
         // A damage shield hit us (e.g. target's Thorns)
         addCombatText(CombatTextEntry::SPELL_DAMAGE, static_cast<int32_t>(damage), shieldSpellId, false, 0, casterGuid, victimGuid);
     }
 }
 
 void CombatHandler::handleSpellOrDamageImmune(network::Packet& packet) {
-    // WotLK/Classic/Turtle: packed casterGuid + packed victimGuid + uint32 spellId + uint8 saveType
+    // WotLK/Classic: packed casterGuid + packed victimGuid + uint32 spellId + uint8 saveType
     // TBC:                  full uint64 casterGuid + full uint64 victimGuid + uint32 + uint8
     const bool immuneUsesFullGuid = isActiveExpansion("tbc");
     const size_t minSz = immuneUsesFullGuid ? 21u : 2u;
@@ -1060,14 +1247,14 @@ void CombatHandler::handleSpellOrDamageImmune(network::Packet& packet) {
     /*uint8_t saveType =*/ packet.readUInt8();
     // Show IMMUNE text when the player is the caster (we hit an immune target)
     // or the victim (we are immune)
-    if (casterGuid == owner_.getPlayerGuid() || victimGuid == owner_.getPlayerGuid()) {
+    if (casterGuid == queries_.characterGuid() || victimGuid == queries_.characterGuid()) {
         addCombatText(CombatTextEntry::IMMUNE, 0, immuneSpellId,
-                      casterGuid == owner_.getPlayerGuid(), 0, casterGuid, victimGuid);
+                      casterGuid == queries_.characterGuid(), 0, casterGuid, victimGuid);
     }
 }
 
 void CombatHandler::handleResistLog(network::Packet& packet) {
-    // WotLK/Classic/Turtle: uint32 hitInfo + packed_guid attacker + packed_guid victim + uint32 spellId
+    // WotLK/Classic: uint32 hitInfo + packed_guid attacker + packed_guid victim + uint32 spellId
     //                      + float resistFactor + uint32 targetRes + uint32 resistedValue + ...
     // TBC:                 same layout but full uint64 GUIDs
     // Show RESIST combat text when player resists an incoming spell.
@@ -1098,9 +1285,9 @@ void CombatHandler::handleResistLog(network::Packet& packet) {
     /*uint32_t targetRes =*/ packet.readUInt32();
     int32_t resistedAmount = static_cast<int32_t>(packet.readUInt32());
     // Show RESIST when the player is involved on either side.
-    if (resistedAmount > 0 && victimGuid == owner_.getPlayerGuid()) {
+    if (resistedAmount > 0 && victimGuid == queries_.characterGuid()) {
         addCombatText(CombatTextEntry::RESIST, resistedAmount, spellId, false, 0, attackerGuid, victimGuid);
-    } else if (resistedAmount > 0 && attackerGuid == owner_.getPlayerGuid()) {
+    } else if (resistedAmount > 0 && attackerGuid == queries_.characterGuid()) {
         addCombatText(CombatTextEntry::RESIST, resistedAmount, spellId, true, 0, attackerGuid, victimGuid);
     }
     packet.skipAll();
@@ -1116,8 +1303,8 @@ void CombatHandler::handleResurrectFailed(network::Packet& packet) {
         const char* msg = (reason == 1) ? "The target cannot be resurrected right now."
                         : (reason == 2) ? "Cannot resurrect in this area."
                         : "Resurrection failed.";
-        owner_.addUIError(msg);
-        owner_.addSystemChatMessage(msg);
+        raiseUiError(events_, frameXml_, msg);
+        chat_.addSystemChatMessage(msg);
     }
 }
 
@@ -1134,7 +1321,7 @@ bool CombatHandler::isSelectableUnit(uint64_t guid) const {
     // reaches this - the click, tab, /target, a macro - and each one that
     // targeted an object put a selection circle on the floor around it and
     // sent CMSG_SET_SELECTION for a guid that is not a unit.
-    if (auto entity = owner_.getEntityManager().getEntity(guid)) {
+    if (auto entity = queries_.entities().getEntity(guid)) {
         const auto type = entity->getType();
         if (type == ObjectType::GAMEOBJECT || type == ObjectType::DYNAMICOBJECT) {
             return false;
@@ -1158,12 +1345,12 @@ bool CombatHandler::isSelectableUnit(uint64_t guid) const {
     // live corpse that the flag now reads what it should.
     // Empty, fully-looted corpses are already removed locally by the
     // lootableCleared -> despawnCreatureLocally path (see
-    // EntityController::onValuesUpdateUnit), so they don't return as click targets.
+    // WorldHandler::onValuesUpdateUnit), so they don't return as click targets.
     return true;
 }
 
 void CombatHandler::setTarget(uint64_t guid) {
-    if (guid == owner_.getTargetGuid()) return;
+    if (guid == targetGuid_) return;
     // Looted-out, unskinnable corpses cannot be selected.
     if (!isSelectableUnit(guid)) return;
 
@@ -1171,10 +1358,10 @@ void CombatHandler::setTarget(uint64_t guid) {
     // what TargetLastTarget flips back to, and once under its kind, which is
     // what makes TargetLastEnemy and TargetLastFriend worth having: a healer's
     // last friendly target survives half a fight's worth of tab-targeting.
-    if (owner_.getTargetGuid() != 0) {
-        const uint64_t previous = owner_.getTargetGuid();
-        owner_.lastTargetGuidRef() = previous;
-        auto entity = owner_.getEntityManager().getEntity(previous);
+    if (targetGuid_ != 0) {
+        const uint64_t previous = targetGuid_;
+        lastTargetGuid_ = previous;
+        auto entity = queries_.entities().getEntity(previous);
         if (auto* unit = dynamic_cast<Unit*>(entity.get())) {
             if (unit->isHostile() || isAggressiveTowardPlayer(previous)) {
                 lastEnemyTargetGuid_ = previous;
@@ -1191,30 +1378,30 @@ void CombatHandler::setTarget(uint64_t guid) {
     // Only when the target actually changes, and only when something is being
     // swung at: re-selecting the same unit is not a change, and stopping an
     // attack nobody started would send a cancel for nothing.
-    if (guid != owner_.getTargetGuid() && autoAttacking_ &&
-        owner_.cvars().get("stopAutoAttackOnTargetChange", "0") != "0") {
+    if (guid != targetGuid_ && autoAttacking_ &&
+        cvars_.get("stopAutoAttackOnTargetChange", "0") != "0") {
         stopAutoAttack();
     }
 
-    owner_.setTargetGuidRaw(guid);
+    targetGuid_ = guid;
 
     // Clear stale aura data from the previous target so the buff bar shows
     // an empty state until the server sends SMSG_AURA_UPDATE_ALL for the new target.
-    if (owner_.getSpellHandler()) owner_.getSpellHandler()->clearTargetAuras();
+    queries_.forgetTargetAuras();
 
     // Clear previous target's cast bar on target change
     // (the new target's cast state is naturally fetched from spellHandler_->unitCastStates_ by GUID)
 
     // Inform server of target selection
-    if (owner_.isInWorld()) {
+    if (sender_.characterInWorld()) {
         auto packet = SetSelectionPacket::build(guid);
-        owner_.getSocket()->send(packet);
+        sender_.send(packet);
     }
 
     if (guid != 0) {
         LOG_INFO("Target set: 0x", std::hex, guid, std::dec);
     }
-    owner_.fireAddonEvent("PLAYER_TARGET_CHANGED", {});
+    frameXml_.fireFrameXmlEvent("PLAYER_TARGET_CHANGED", {});
 
     // The first target of the session, said plainly. The interface takes its
     // own reading at the same moment, from PLAYER_TARGET_CHANGED above.
@@ -1226,7 +1413,7 @@ void CombatHandler::setTarget(uint64_t guid) {
         // question asked where it can actually be answered - the interface
         // reports "target" as existing exactly when this guid resolves to a
         // unit.
-        auto entity = owner_.getEntityManager().getEntity(guid);
+        auto entity = queries_.entities().getEntity(guid);
         LOG_WARNING("first target: guid=0x", std::hex, guid, std::dec,
                     " entity=", (entity ? "found" : "MISSING"),
                     " unit=", (entity && dynamic_cast<Unit*>(entity.get())
@@ -1235,75 +1422,70 @@ void CombatHandler::setTarget(uint64_t guid) {
 }
 
 void CombatHandler::clearTarget() {
-    if (owner_.getTargetGuid() != 0) {
+    if (targetGuid_ != 0) {
         LOG_INFO("Target cleared");
         // Zero the GUID before firing the event so callbacks/addons that query
         // the current target see null (consistent with setTarget which updates
         // targetGuid before the event).
-        owner_.setTargetGuidRaw(0);
-        owner_.fireAddonEvent("PLAYER_TARGET_CHANGED", {});
+        targetGuid_ = 0;
+        frameXml_.fireFrameXmlEvent("PLAYER_TARGET_CHANGED", {});
     } else {
-        owner_.setTargetGuidRaw(0);
+        targetGuid_ = 0;
     }
-    owner_.tabCycleIndexRef() = -1;
-    owner_.tabCycleStaleRef() = true;
+    tabCycleIndex_ = -1;
+    tabCycleStale_ = true;
 }
 
 std::shared_ptr<Entity> CombatHandler::getTarget() const {
-    if (owner_.getTargetGuid() == 0) return nullptr;
-    return owner_.getEntityManager().getEntity(owner_.getTargetGuid());
+    if (targetGuid_ == 0) return nullptr;
+    return queries_.entities().getEntity(targetGuid_);
 }
 
 void CombatHandler::setFocus(uint64_t guid) {
-    owner_.focusGuidRef() = guid;
-    owner_.fireAddonEvent("PLAYER_FOCUS_CHANGED", {});
+    focusGuid_ = guid;
+    frameXml_.fireFrameXmlEvent("PLAYER_FOCUS_CHANGED", {});
     if (guid != 0) {
-        auto entity = owner_.getEntityManager().getEntity(guid);
+        auto entity = queries_.entities().getEntity(guid);
         if (entity) {
             std::string name;
             auto unit = std::dynamic_pointer_cast<Unit>(entity);
             if (unit && !unit->getName().empty()) {
                 name = unit->getName();
             }
-            if (name.empty()) name = owner_.lookupName(guid);
+            if (name.empty()) name = queries_.playerName(guid);
             if (name.empty()) name = "Unknown";
-            owner_.addSystemChatMessage("Focus set: " + name);
+            chat_.addSystemChatMessage("Focus set: " + name);
             LOG_INFO("Focus set: 0x", std::hex, guid, std::dec);
         }
     }
 }
 
 void CombatHandler::clearFocus() {
-    if (owner_.focusGuidRef() != 0) {
-        owner_.addSystemChatMessage("Focus cleared.");
+    if (focusGuid_ != 0) {
+        chat_.addSystemChatMessage("Focus cleared.");
         LOG_INFO("Focus cleared");
     }
-    owner_.focusGuidRef() = 0;
-    owner_.fireAddonEvent("PLAYER_FOCUS_CHANGED", {});
-}
-
-std::shared_ptr<Entity> CombatHandler::getFocus() const {
-    if (owner_.focusGuidRef() == 0) return nullptr;
-    return owner_.getEntityManager().getEntity(owner_.focusGuidRef());
+    focusGuid_ = 0;
+    frameXml_.fireFrameXmlEvent("PLAYER_FOCUS_CHANGED", {});
 }
 
 void CombatHandler::setMouseoverGuid(uint64_t guid) {
-    if (owner_.mouseoverGuidRef() != guid) {
-        owner_.mouseoverGuidRef() = guid;
-        owner_.fireAddonEvent("UPDATE_MOUSEOVER_UNIT", {});
+    if (mouseoverGuid_ != guid) {
+        mouseoverGuid_ = guid;
+        frameXml_.fireFrameXmlEvent("UPDATE_MOUSEOVER_UNIT", {});
     }
 }
 
 void CombatHandler::targetLastTarget() {
-    if (owner_.lastTargetGuidRef() == 0) {
-        owner_.addSystemChatMessage("No previous target.");
+    if (lastTargetGuid_ == 0) {
+        chat_.addSystemChatMessage("No previous target.");
         return;
     }
 
     // Swap current and last target
-    uint64_t temp = owner_.getTargetGuid();
-    setTarget(owner_.lastTargetGuidRef());
-    owner_.lastTargetGuidRef() = temp;
+    uint64_t temp = targetGuid_;
+    setTarget(lastTargetGuid_);
+    lastTargetGuid_ = temp;
 }
 
 void CombatHandler::cycleTarget(bool reverse, const char* noneMessage,
@@ -1311,14 +1493,14 @@ void CombatHandler::cycleTarget(bool reverse, const char* noneMessage,
     constexpr float kRangeSq = 40.0f * 40.0f;
 
     float px = 0.0f, py = 0.0f, pz = 0.0f;
-    if (auto self = owner_.getEntityManager().getEntity(owner_.getPlayerGuid())) {
+    if (auto self = queries_.entities().getEntity(queries_.characterGuid())) {
         px = self->getX(); py = self->getY(); pz = self->getZ();
     }
 
     struct Cand { uint64_t guid; float distSq; };
     std::vector<Cand> cands;
-    for (const auto& [guid, entity] : owner_.getEntityManager().getEntities()) {
-        if (!entity || guid == owner_.getPlayerGuid()) continue;
+    for (const auto& [guid, entity] : queries_.entities().getEntities()) {
+        if (!entity || guid == queries_.characterGuid()) continue;
         const float dx = entity->getX() - px;
         const float dy = entity->getY() - py;
         const float dz = entity->getZ() - pz;
@@ -1331,7 +1513,7 @@ void CombatHandler::cycleTarget(bool reverse, const char* noneMessage,
               [](const Cand& a, const Cand& b) { return a.distSq < b.distSq; });
 
     if (cands.empty()) {
-        owner_.addSystemChatMessage(noneMessage);
+        chat_.addSystemChatMessage(noneMessage);
         return;
     }
 
@@ -1340,7 +1522,7 @@ void CombatHandler::cycleTarget(bool reverse, const char* noneMessage,
     for (const auto& c : cands) order.push_back(c.guid);
 
     // Not on the list: start at the near end, or the far one going backwards.
-    auto it = std::find(order.begin(), order.end(), owner_.getTargetGuid());
+    auto it = std::find(order.begin(), order.end(), targetGuid_);
     if (it == order.end()) {
         setTarget(reverse ? order.back() : order.front());
         return;
@@ -1354,7 +1536,7 @@ void CombatHandler::cycleTarget(bool reverse, const char* noneMessage,
 }
 
 bool CombatHandler::isGroupMemberGuid(uint64_t guid) const {
-    for (const auto& m : owner_.getPartyData().members) {
+    for (const auto& m : queries_.party().members) {
         if (m.guid == guid) return true;
     }
     return false;
@@ -1411,7 +1593,7 @@ void CombatHandler::targetNearestRaidMember(bool reverse) {
 
 void CombatHandler::targetLastEnemy() {
     if (lastEnemyTargetGuid_ == 0) {
-        owner_.addSystemChatMessage("No previous enemy target.");
+        chat_.addSystemChatMessage("No previous enemy target.");
         return;
     }
     setTarget(lastEnemyTargetGuid_);
@@ -1419,7 +1601,7 @@ void CombatHandler::targetLastEnemy() {
 
 void CombatHandler::targetLastFriend() {
     if (lastFriendTargetGuid_ == 0) {
-        owner_.addSystemChatMessage("No previous friendly target.");
+        chat_.addSystemChatMessage("No previous friendly target.");
         return;
     }
     setTarget(lastFriendTargetGuid_);
@@ -1433,7 +1615,7 @@ void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
     // nearest enemy instead of continuing a stale rotation.
     constexpr uint64_t kCycleResetMs = 4000;
 
-    const bool playerInCombat = owner_.isInCombat();
+    const bool playerInCombat = isInCombat();
 
     // Helper: returns true if the entity is a hostile that can be tab-targeted.
     // Corpses are never tab targets while fighting; out of combat they only
@@ -1448,7 +1630,7 @@ void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
             // InventoryHandler keeps the loot state. This asked GameHandler's
             // copy, which nothing filled, so a looted-but-not-empty corpse was
             // never a tab target.
-            return owner_.inventory().hasLootLeft(guid);
+            return queries_.corpseHoldsLoot(guid);
         }
         const bool hostileByFaction = unit->isHostile();
         const bool hostileByCombat = isAggressiveTowardPlayer(guid);
@@ -1461,23 +1643,23 @@ void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
     if (nowMs - lastTabTargetMs_ > kCycleResetMs)
-        owner_.tabCycleStaleRef() = true;
+        tabCycleStale_ = true;
     lastTabTargetMs_ = nowMs;
 
     // Rebuild cycle list if stale (entity added/removed since last tab press).
-    if (owner_.tabCycleStaleRef()) {
-        owner_.tabCycleListRef().clear();
-        owner_.tabCycleIndexRef() = -1;
+    if (tabCycleStale_) {
+        tabCycleList_.clear();
+        tabCycleIndex_ = -1;
 
         struct EntityDist { uint64_t guid; float distSq; bool dead; };
         std::vector<EntityDist> sortable;
-        const auto& entities = owner_.getEntityManager().getEntities();
+        const auto& entities = queries_.entities().getEntities();
         sortable.reserve(entities.size());
 
         for (const auto& [guid, entity] : entities) {
             auto t = entity->getType();
             if (t != ObjectType::UNIT && t != ObjectType::PLAYER) continue;
-            if (guid == owner_.getPlayerGuid()) continue;
+            if (guid == queries_.characterGuid()) continue;
             if (!isValidTabTarget(entity)) continue;
             float dx = entity->getX() - playerX;
             float dy = entity->getY() - playerY;
@@ -1496,14 +1678,14 @@ void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
                       return a.distSq < b.distSq;
                   });
 
-        owner_.tabCycleListRef().reserve(sortable.size());
+        tabCycleList_.reserve(sortable.size());
         for (const auto& ed : sortable) {
-            owner_.tabCycleListRef().push_back(ed.guid);
+            tabCycleList_.push_back(ed.guid);
         }
-        owner_.tabCycleStaleRef() = false;
+        tabCycleStale_ = false;
     }
 
-    if (owner_.tabCycleListRef().empty()) {
+    if (tabCycleList_.empty()) {
         clearTarget();
         return;
     }
@@ -1512,12 +1694,12 @@ void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
     // the cycle from its position so tab advances to the NEXT enemy instead of
     // jumping back to wherever the old rotation left off.
     {
-        const uint64_t curTarget = owner_.getTargetGuid();
+        const uint64_t curTarget = targetGuid_;
         if (curTarget != 0) {
-            const auto& list = owner_.tabCycleListRef();
+            const auto& list = tabCycleList_;
             for (size_t i = 0; i < list.size(); ++i) {
                 if (list[i] == curTarget) {
-                    owner_.tabCycleIndexRef() = static_cast<int>(i);
+                    tabCycleIndex_ = static_cast<int>(i);
                     break;
                 }
             }
@@ -1526,11 +1708,11 @@ void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
 
     // Advance through the cycle, skipping any entry that has since died or
     // turned friendly (e.g. NPC killed between two tab presses).
-    int tries = static_cast<int>(owner_.tabCycleListRef().size());
+    int tries = static_cast<int>(tabCycleList_.size());
     while (tries-- > 0) {
-        owner_.tabCycleIndexRef() = (owner_.tabCycleIndexRef() + 1) % static_cast<int>(owner_.tabCycleListRef().size());
-        uint64_t guid = owner_.tabCycleListRef()[owner_.tabCycleIndexRef()];
-        auto entity = owner_.getEntityManager().getEntity(guid);
+        tabCycleIndex_ = (tabCycleIndex_ + 1) % static_cast<int>(tabCycleList_.size());
+        uint64_t guid = tabCycleList_[tabCycleIndex_];
+        auto entity = queries_.entities().getEntity(guid);
         if (isValidTabTarget(entity)) {
             setTarget(guid);
             return;
@@ -1538,24 +1720,24 @@ void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
     }
 
     // All cached entries are stale - clear target and force a fresh rebuild next time.
-    owner_.tabCycleStaleRef() = true;
+    tabCycleStale_ = true;
     clearTarget();
 }
 
 void CombatHandler::assistTarget() {
-    if (owner_.getState() != WorldState::IN_WORLD) {
+    if (!sender_.characterInWorld()) {
         LOG_WARNING("Cannot assist: not in world");
         return;
     }
 
-    if (owner_.getTargetGuid() == 0) {
-        owner_.raiseUiError("You must target someone to assist.");
+    if (targetGuid_ == 0) {
+        raiseUiError(events_, frameXml_, "You must target someone to assist.");
         return;
     }
 
     auto target = getTarget();
     if (!target) {
-        owner_.raiseUiError("Invalid target.");
+        raiseUiError(events_, frameXml_, "Invalid target.");
         return;
     }
 
@@ -1575,7 +1757,7 @@ void CombatHandler::assistTarget() {
     const uint64_t assistTargetGuid = unitTargetGuid(target);
 
     if (assistTargetGuid == 0) {
-        owner_.addSystemChatMessage(targetName + " has no target.");
+        chat_.addSystemChatMessage(targetName + " has no target.");
         LOG_INFO("Assist: ", targetName, " has no target");
         return;
     }
@@ -1590,23 +1772,23 @@ void CombatHandler::assistTarget() {
 // ============================================================
 
 void CombatHandler::togglePvp() {
-    if (!owner_.isInWorld()) {
+    if (!sender_.characterInWorld()) {
         LOG_WARNING("Cannot toggle PvP: not in world or not connected");
         return;
     }
 
     auto packet = TogglePvpPacket::build();
-    owner_.getSocket()->send(packet);
-    auto entity = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
+    sender_.send(packet);
+    auto entity = queries_.entities().getEntity(queries_.characterGuid());
     bool currentlyPvp = false;
     if (entity) {
         // UNIT_FIELD_FLAGS (index 59), bit 0x1000 = UNIT_FLAG_PVP
         currentlyPvp = (entity->getField(59) & 0x00001000) != 0;
     }
     if (currentlyPvp) {
-        owner_.addSystemChatMessage("PvP flag disabled.");
+        chat_.addSystemChatMessage("PvP flag disabled.");
     } else {
-        owner_.addSystemChatMessage("PvP flag enabled.");
+        chat_.addSystemChatMessage("PvP flag enabled.");
     }
     LOG_INFO("Toggled PvP flag");
 }
@@ -1616,67 +1798,67 @@ void CombatHandler::togglePvp() {
 // ============================================================
 
 void CombatHandler::releaseSpirit() {
-    if (owner_.getSocket() && owner_.getState() == WorldState::IN_WORLD) {
+    if (sender_.characterInWorld()) {
         auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        if (owner_.repopPendingRef() && now - static_cast<int64_t>(owner_.lastRepopRequestMsRef()) < 1000) {
+        if (death_.repopPending && now - static_cast<int64_t>(death_.lastRepopRequestMs) < 1000) {
             return;
         }
         auto packet = RepopRequestPacket::build();
-        owner_.getSocket()->send(packet);
-        owner_.selfResAvailableRef() = false;
-        owner_.repopPendingRef() = true;
-        owner_.lastRepopRequestMsRef() = static_cast<uint64_t>(now);
+        sender_.send(packet);
+        death_.selfResAvailable = false;
+        death_.repopPending = true;
+        death_.lastRepopRequestMs = static_cast<uint64_t>(now);
         LOG_INFO("Sent CMSG_REPOP_REQUEST (Release Spirit)");
         network::Packet cq(wireOpcode(Opcode::MSG_CORPSE_QUERY));
-        owner_.getSocket()->send(cq);
+        sender_.send(cq);
     }
 }
 
 bool CombatHandler::canReclaimCorpse() const {
-    if (!owner_.releasedSpiritRef() || owner_.corpseGuidRef() == 0 ||
-        !owner_.corpsePositionValidRef()) return false;
-    if (owner_.currentMapIdRef() != owner_.corpseMapIdRef()) return false;
-    float dx = owner_.movementInfoRef().x - owner_.corpseYRef();
-    float dy = owner_.movementInfoRef().y - owner_.corpseXRef();
-    float dz = owner_.movementInfoRef().z - owner_.corpseZRef();
+    if (!death_.ghost || death_.corpseGuid == 0 ||
+        !death_.corpsePositionValid) return false;
+    if (queries_.currentMapId() != death_.corpseMapId) return false;
+    float dx = queries_.playerMovement().x - death_.corpseY;
+    float dy = queries_.playerMovement().y - death_.corpseX;
+    float dz = queries_.playerMovement().z - death_.corpseZ;
     return (dx*dx + dy*dy + dz*dz) <= (40.0f * 40.0f);
 }
 
 float CombatHandler::getCorpseReclaimDelaySec() const {
-    if (owner_.corpseReclaimAvailableMsRef() == 0) return 0.0f;
+    if (death_.corpseReclaimAvailableMs == 0) return 0.0f;
     auto nowMs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
-    if (nowMs >= owner_.corpseReclaimAvailableMsRef()) return 0.0f;
-    return static_cast<float>(owner_.corpseReclaimAvailableMsRef() - nowMs) / 1000.0f;
+    if (nowMs >= death_.corpseReclaimAvailableMs) return 0.0f;
+    return static_cast<float>(death_.corpseReclaimAvailableMs - nowMs) / 1000.0f;
 }
 
 void CombatHandler::reclaimCorpse() {
-    if (!canReclaimCorpse() || !owner_.getSocket()) return;
-    if (owner_.corpseGuidRef() == 0) {
+    if (!canReclaimCorpse() || !sender_.connected()) return;
+    if (death_.corpseGuid == 0) {
         LOG_WARNING("reclaimCorpse: corpse GUID not yet known (corpse object not received); cannot reclaim");
         return;
     }
-    auto packet = ReclaimCorpsePacket::build(owner_.corpseGuidRef());
-    owner_.getSocket()->send(packet);
-    LOG_INFO("Sent CMSG_RECLAIM_CORPSE for corpse guid=0x", std::hex, owner_.corpseGuidRef(), std::dec);
+    auto packet = ReclaimCorpsePacket::build(death_.corpseGuid);
+    sender_.send(packet);
+    LOG_INFO("Sent CMSG_RECLAIM_CORPSE for corpse guid=0x", std::hex, death_.corpseGuid, std::dec);
 }
 
 void CombatHandler::useSelfRes() {
-    if (!owner_.selfResAvailableRef() || !owner_.getSocket()) return;
+    if (!death_.selfResAvailable || !sender_.connected()) return;
     network::Packet pkt(wireOpcode(Opcode::CMSG_SELF_RES));
-    owner_.getSocket()->send(pkt);
-    owner_.selfResAvailableRef() = false;
+    sender_.send(pkt);
+    death_.selfResAvailable = false;
     LOG_INFO("Sent CMSG_SELF_RES (Reincarnation / Twisting Nether)");
 }
 
 void CombatHandler::activateSpiritHealer(uint64_t npcGuid) {
-    if (!owner_.isInWorld()) return;
-    owner_.pendingSpiritHealerGuidRef() = npcGuid;
+    if (!sender_.characterInWorld()) return;
+    death_.pendingSpiritHealerGuid = npcGuid;
     auto packet = SpiritHealerActivatePacket::build(npcGuid);
-    owner_.getSocket()->send(packet);
-    owner_.resurrectPendingRef() = true;
+    sender_.send(packet);
+    death_.resurrectPending = true;
     LOG_INFO("Sent CMSG_SPIRIT_HEALER_ACTIVATE for 0x", std::hex, npcGuid, std::dec);
 }
 
@@ -1685,36 +1867,309 @@ void CombatHandler::acceptResurrect() {
     // happening looks the same from the chair whether the click never arrived,
     // the offer had already been cleared, or the packet went out and the server
     // ignored it - and only the last of those is not this function's fault.
-    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket() ||
-        !owner_.resurrectRequestPendingRef()) {
-        LOG_WARNING("acceptResurrect refused: inWorld=",
-                    owner_.getState() == WorldState::IN_WORLD,
-                    " socket=", owner_.getSocket() != nullptr,
-                    " offerPending=", owner_.resurrectRequestPendingRef());
+    if (!sender_.characterInWorld() ||
+        !death_.resurrectRequestPending) {
+        LOG_WARNING("acceptResurrect refused: inWorld=", sender_.characterInWorld(),
+                    " offerPending=", death_.resurrectRequestPending);
         return;
     }
-    if (owner_.resurrectIsSpiritHealerRef()) {
-        auto activate = SpiritHealerActivatePacket::build(owner_.resurrectCasterGuidRef());
-        owner_.getSocket()->send(activate);
+    if (death_.resurrectIsSpiritHealer) {
+        auto activate = SpiritHealerActivatePacket::build(death_.resurrectCasterGuid);
+        sender_.send(activate);
         LOG_INFO("Sent CMSG_SPIRIT_HEALER_ACTIVATE for 0x",
-                 std::hex, owner_.resurrectCasterGuidRef(), std::dec);
+                 std::hex, death_.resurrectCasterGuid, std::dec);
     } else {
-        auto resp = ResurrectResponsePacket::build(owner_.resurrectCasterGuidRef(), true);
-        owner_.getSocket()->send(resp);
+        auto resp = ResurrectResponsePacket::build(death_.resurrectCasterGuid, true);
+        sender_.send(resp);
         LOG_INFO("Sent CMSG_RESURRECT_RESPONSE (accept) for 0x",
-                 std::hex, owner_.resurrectCasterGuidRef(), std::dec);
+                 std::hex, death_.resurrectCasterGuid, std::dec);
     }
-    owner_.resurrectRequestPendingRef() = false;
-    owner_.resurrectPendingRef() = true;
+    death_.resurrectRequestPending = false;
+    death_.resurrectPending = true;
 }
 
 void CombatHandler::declineResurrect() {
-    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket() || !owner_.resurrectRequestPendingRef()) return;
-    auto resp = ResurrectResponsePacket::build(owner_.resurrectCasterGuidRef(), false);
-    owner_.getSocket()->send(resp);
+    if (!sender_.characterInWorld() || !death_.resurrectRequestPending) return;
+    auto resp = ResurrectResponsePacket::build(death_.resurrectCasterGuid, false);
+    sender_.send(resp);
     LOG_INFO("Sent CMSG_RESURRECT_RESPONSE (decline) for 0x",
-             std::hex, owner_.resurrectCasterGuidRef(), std::dec);
-    owner_.resurrectRequestPendingRef() = false;
+             std::hex, death_.resurrectCasterGuid, std::dec);
+    death_.resurrectRequestPending = false;
+}
+
+void CombatHandler::acceptXpLoss() {
+    if (death_.resurrectCasterGuid) activateSpiritHealer(death_.resurrectCasterGuid);
+    death_.resurrectRequestPending = false;
+}
+
+void CombatHandler::queryAreaSpiritHealer(uint64_t guid) {
+    if (!sender_.characterInWorld()) return;
+    death_.areaSpiritHealerGuid = guid;
+    network::Packet packet(wireOpcode(Opcode::CMSG_AREA_SPIRIT_HEALER_QUERY));
+    packet.writeUInt64(guid);
+    sender_.send(packet);
+    LOG_INFO("CMSG_AREA_SPIRIT_HEALER_QUERY: 0x", std::hex, guid, std::dec);
+}
+
+void CombatHandler::queueAreaSpiritHeal() {
+    // Joining the queue is what resurrects; the query only asks when the next
+    // one is. AzerothCore has no way to be told to leave it again, which is
+    // why CancelAreaSpiritHeal answers with nothing.
+    if (!sender_.characterInWorld() || !death_.areaSpiritHealerGuid) return;
+    network::Packet packet(wireOpcode(Opcode::CMSG_AREA_SPIRIT_HEALER_QUEUE));
+    packet.writeUInt64(death_.areaSpiritHealerGuid);
+    sender_.send(packet);
+    LOG_INFO("CMSG_AREA_SPIRIT_HEALER_QUEUE: 0x", std::hex, death_.areaSpiritHealerGuid, std::dec);
+}
+
+bool CombatHandler::getDeathReleaseLocation(uint32_t& mapId, glm::vec3& canonical) const {
+    if (!death_.deathReleaseValid) return false;
+    mapId = death_.deathReleaseMapId;
+    canonical = death_.deathReleaseCanonical;
+    return true;
+}
+
+float CombatHandler::getCorpseDistance() const {
+    if (!death_.corpsePositionValid || queries_.currentMapId() != death_.corpseMapId) return -1.0f;
+    // movementInfo is canonical (x=north=server_y, y=west=server_x);
+    // corpse coords are raw server (x=west, y=north) - swap to compare.
+    const auto& me = queries_.playerMovement();
+    float dx = me.x - death_.corpseY;
+    float dy = me.y - death_.corpseX;
+    float dz = me.z - death_.corpseZ;
+    return std::sqrt(dx*dx + dy*dy + dz*dz);
+}
+
+bool CombatHandler::getCorpseCanonicalPos(float& outX, float& outY) const {
+    if (!death_.corpsePositionValid || queries_.currentMapId() != death_.corpseMapId) return false;
+    outX = death_.corpseY;  // server Y = canonical X (north)
+    outY = death_.corpseX;  // server X = canonical Y (west)
+    return true;
+}
+
+void CombatHandler::unitHealthArrived(uint64_t guid, uint32_t previous, uint32_t health,
+                                      FrameXmlEvents& packetEvents) {
+    if (health == 0) {
+        if (guid == getAutoAttackTargetGuid()) stopAutoAttack();
+        removeHostileAttacker(guid);
+        if (guid == queries_.characterGuid()) {
+            playerDied("health=0");
+            stopAutoAttack();
+            packetEvents.fireFrameXmlEvent("PLAYER_DEAD", {});
+        }
+    } else if (previous == 0 && guid == queries_.characterGuid()) {
+        if (!playerHealthReturned()) {
+            LOG_INFO("Player resurrected!");
+            packetEvents.fireFrameXmlEvent("PLAYER_ALIVE", {});
+        } else {
+            LOG_INFO("Player entered ghost form");
+            packetEvents.fireFrameXmlEvent("PLAYER_UNGHOST", {});
+        }
+    }
+}
+
+void CombatHandler::playerDynamicFlagsArrived(uint32_t previous, uint32_t flags,
+                                              FrameXmlEvents& packetEvents) {
+    const bool wasDead = (previous & UNIT_DYNFLAG_DEAD) != 0;
+    const bool nowDead = (flags & UNIT_DYNFLAG_DEAD) != 0;
+    if (!wasDead && nowDead) {
+        playerDied("dynFlags");
+        // And tell the interface, which the health=0 path did and this one
+        // did not. The server marks a death either way - sometimes by
+        // dropping health to zero, sometimes by setting UNIT_DYNFLAG_DEAD, and
+        // not always both - and only the health path fired PLAYER_DEAD. When
+        // death came by the flag alone, the player was dead in every internal
+        // sense (could not attack, health read zero) but the interface never
+        // heard it: no release-spirit popup, until the server gave up waiting
+        // and pulled the corpse to the graveyard. FrameXML guards the popup on
+        // its own visibility, so a second PLAYER_DEAD from the health path is
+        // harmless.
+        stopAutoAttack();
+        packetEvents.fireFrameXmlEvent("PLAYER_DEAD", {});
+    } else if (wasDead && !nowDead) {
+        playerAliveAgain();
+        LOG_INFO("Player resurrected (dynamic flags)");
+        // The other side of the same signal. PLAYER_ALIVE is what hides the
+        // death popup and restores the interface, and firing PLAYER_DEAD
+        // without ever firing this left the popup up through a resurrection
+        // that came by the flag.
+        packetEvents.fireFrameXmlEvent("PLAYER_ALIVE", {});
+    }
+}
+
+void CombatHandler::playerUnitFlagsArrived(uint32_t previous, uint32_t flags,
+                                           FrameXmlEvents& packetEvents) {
+    const bool was = (previous & UNIT_FLAG_IN_COMBAT) != 0;
+    const bool now = (flags & UNIT_FLAG_IN_COMBAT) != 0;
+    // The server's authoritative combat state. Spell-only attackers do not
+    // necessarily produce SMSG_ATTACKSTOP, so retaining them after this bit
+    // clears leaves the client permanently "in combat".
+    if (was && !now) clearHostileAttackers();
+    // Entering and leaving combat, which the interface names after the health
+    // regeneration that stops and starts with it. Registered for seven times
+    // across FrameXML and the addons and fired by nothing else: it is how a
+    // panel knows to lock itself, and how anything that must not change
+    // mid-fight finds out the fight has started.
+    if (was != now) {
+        packetEvents.fireFrameXmlEvent(now ? "PLAYER_REGEN_DISABLED" : "PLAYER_REGEN_ENABLED", {});
+    }
+}
+
+void CombatHandler::playerFlagsArrived(uint32_t flags, FrameXmlEvents& packetEvents) {
+    // Not gated on an update, and that is the whole of a bug: logging in
+    // already dead delivers the player as a CREATE block, so the ghost flag it
+    // carries was never read. The ghost flag stayed false, canReclaimCorpse
+    // refused, and a player who logged in standing on their own corpse could
+    // not take it back - the one case where the flag arrives without a
+    // transition to notice.
+    constexpr uint32_t PLAYER_FLAGS_GHOST = 0x00000010;
+    const bool wasGhost = isPlayerGhost();
+    const bool nowGhost = (flags & PLAYER_FLAGS_GHOST) != 0;
+    if (!wasGhost && nowGhost) {
+        spiritReleased();
+        LOG_INFO("Player entered ghost form (PLAYER_FLAGS)");
+        events_.publish(events::GhostStateChanged{true});
+    } else if (wasGhost && !nowGhost) {
+        resurrectedFromGhost();
+        LOG_INFO("Player resurrected (PLAYER_FLAGS ghost cleared)");
+        packetEvents.fireFrameXmlEvent("PLAYER_ALIVE", {});
+        events_.publish(events::GhostStateChanged{false});
+    }
+}
+
+void CombatHandler::playerCreated(std::optional<uint32_t> health, uint32_t dynamicFlags,
+                                  std::optional<uint32_t> playerFlags) {
+    if (health && *health == 0) {
+        playerLoggedInDead();
+        LOG_INFO("Player logged in dead");
+    }
+    if ((dynamicFlags & UNIT_DYNFLAG_DEAD) != 0) {
+        playerLoggedInDead();
+        LOG_INFO("Player logged in dead (dynamic flags)");
+    }
+    constexpr uint32_t PLAYER_FLAGS_GHOST = 0x00000010;
+    if (playerFlags && (*playerFlags & PLAYER_FLAGS_GHOST) != 0) {
+        playerLoggedInAsGhost();
+        LOG_INFO("Player logged in as ghost (PLAYER_FLAGS)");
+        events_.publish(events::GhostStateChanged{true});
+        // Ask where the corpse is, so the minimap marker is right on reconnect.
+        if (sender_.connected()) {
+            network::Packet cq(wireOpcode(Opcode::MSG_CORPSE_QUERY));
+            sender_.send(cq);
+        }
+    }
+}
+
+void CombatHandler::playerLoggedInDead() {
+    death_.dead = true;
+}
+
+void CombatHandler::playerLoggedInAsGhost() {
+    death_.ghost = true;
+    death_.dead = true;
+}
+
+// Both the health==0 and the UNIT_DYNFLAG_DEAD paths come here, so they share
+// one corpse position. Classic does not send SMSG_DEATH_RELEASE_LOC, so this
+// cached position is the primary source for canReclaimCorpse().
+void CombatHandler::playerDied(const char* source) {
+    death_.dead = true;
+    death_.ghost = false;
+    // movementInfo is canonical (x=north, y=west); the corpse is kept in raw
+    // server coordinates (x=west, y=north) - swap axes.
+    const auto& me = queries_.playerMovement();
+    death_.corpseX = me.y;
+    death_.corpseY = me.x;
+    death_.corpseZ = me.z;
+    death_.corpseMapId = queries_.currentMapId();
+    death_.corpsePositionValid = true;
+    LOG_INFO("Player died (", source, "). Corpse cached at server=(",
+             death_.corpseX, ",", death_.corpseY, ",", death_.corpseZ,
+             ") map=", death_.corpseMapId);
+}
+
+bool CombatHandler::playerHealthReturned() {
+    const bool wasGhost = death_.ghost;
+    death_.dead = false;
+    if (wasGhost) death_.ghost = false;
+    return wasGhost;
+}
+
+void CombatHandler::playerAliveAgain() {
+    death_.dead = false;
+    death_.ghost = false;
+    death_.selfResAvailable = false;
+}
+
+void CombatHandler::spiritReleased() {
+    death_.ghost = true;
+}
+
+void CombatHandler::resurrectedFromGhost() {
+    death_.ghost = false;
+    death_.dead = false;
+    death_.repopPending = false;
+    death_.resurrectPending = false;
+    death_.selfResAvailable = false;
+    // The corpse is reclaimed.
+    death_.corpseMapId = 0;
+    death_.corpsePositionValid = false;
+    death_.corpseGuid = 0;
+    death_.corpseReclaimAvailableMs = 0;
+}
+
+void CombatHandler::ownCorpseSeen(uint64_t guid, bool hasPosition,
+                                  float serverX, float serverY, float serverZ) {
+    death_.corpseGuid = guid;
+    // The position only where the block actually carried one; a stationary
+    // create may not, and overwriting a good answer from MSG_CORPSE_QUERY with
+    // three zeroes would put the corpse at the map origin and refuse the
+    // reclaim on distance instead.
+    if (hasPosition) {
+        death_.corpseX = serverX;
+        death_.corpseY = serverY;
+        death_.corpseZ = serverZ;
+        death_.corpseMapId = queries_.currentMapId();
+        death_.corpsePositionValid = true;
+    }
+    LOG_INFO("Corpse object detected: guid=0x", std::hex, guid, std::dec,
+             " server=(", serverX, ", ", serverY, ", ", serverZ,
+             ") map=", death_.corpseMapId);
+}
+
+void CombatHandler::worldEntered() {
+    death_.resurrectPending = false;
+    death_.resurrectRequestPending = false;
+    death_.selfResAvailable = false;
+}
+
+void CombatHandler::arrivedInNewWorld() {
+    death_.resurrectPending = false;
+    death_.resurrectRequestPending = false;
+}
+
+void CombatHandler::resurrectedInPlace() {
+    death_.resurrectPending = false;
+    death_.resurrectRequestPending = false;
+    death_.ghost = false;
+    death_.dead = false;
+    death_.repopPending = false;
+    death_.pendingSpiritHealerGuid = 0;
+    death_.resurrectCasterGuid = 0;
+    death_.corpseMapId = 0;
+    death_.corpsePositionValid = false;
+    death_.corpseGuid = 0;
+}
+
+void CombatHandler::announceCorpseRange() {
+    // FrameXML answers CORPSE_IN_RANGE with StaticPopup "RECOVER_CORPSE", whose
+    // button calls RetrieveCorpse; without the edge that prompt could never
+    // appear.
+    const bool inRange = death_.ghost && canReclaimCorpse();
+    if (inRange != death_.corpseInRangeAnnounced) {
+        death_.corpseInRangeAnnounced = inRange;
+        frameXml_.fireFrameXmlEvent(inRange ? "CORPSE_IN_RANGE" : "CORPSE_OUT_OF_RANGE", {});
+    }
 }
 
 // ============================================================
@@ -1750,7 +2205,7 @@ void CombatHandler::handleXpGain(network::Packet& packet) {
 
     std::string msg;
     if (data.victimGuid != 0 && data.type == 0) {
-        std::string victimName = owner_.lookupName(data.victimGuid);
+        std::string victimName = queries_.playerName(data.victimGuid);
         if (!victimName.empty())
             msg = victimName + " dies, you gain " + std::to_string(data.totalXp) + " experience.";
         else
@@ -1761,7 +2216,7 @@ void CombatHandler::handleXpGain(network::Packet& packet) {
     if (data.groupBonus > 0) {
         msg += " (+" + std::to_string(data.groupBonus) + " group bonus)";
     }
-    owner_.addLocalChatLine(ChatType::COMBAT_XP_GAIN, msg);
+    chat_.addLocalChatLine(ChatType::COMBAT_XP_GAIN, msg);
 }
 
 } // namespace game

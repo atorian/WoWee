@@ -18,6 +18,7 @@
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/char_sections.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "game/game_handler.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -27,11 +28,13 @@ namespace core {
 AppearanceComposer::AppearanceComposer(rendering::Renderer* renderer,
                                        PlayerView* playerView,
                                        pipeline::AssetManager* assetManager,
+                                       const pipeline::GameTables& tables,
                                        game::GameHandler* gameHandler,
                                        EntitySpawner* entitySpawner)
     : renderer_(renderer)
     , playerView_(playerView)
     , assetManager_(assetManager)
+    , tables_(tables)
     , gameHandler_(gameHandler)
     , entitySpawner_(entitySpawner)
 {
@@ -69,11 +72,10 @@ PlayerTextureInfo AppearanceComposer::resolvePlayerTextures(pipeline::M2Model& m
     // the skin row's second texture, so ears and eyelashes were unbound on the
     // other two; only this one had a fallback for a face the table does not
     // carry. Every fault in this area had to be fixed two or three times.
-    auto charSectionsDbc = assetManager_->loadDBC("CharSections.dbc");
-    if (charSectionsDbc) {
-        const auto* csL = pipeline::getActiveDBCLayout()
-            ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
-        const auto csF = pipeline::detectCharSectionsFields(charSectionsDbc.get(), csL);
+    {
+        const pipeline::RequiredTable charSectionsDbc(tables_, "CharSections.dbc",
+                                                      "the player's skin, face and hair");
+        const auto csF = pipeline::detectCharSectionsFields(charSectionsDbc.get(), &charSectionsDbc.layout());
 
         pipeline::CharacterAppearance who;
         who.raceId = targetRaceId;
@@ -111,8 +113,6 @@ PlayerTextureInfo AppearanceComposer::resolvePlayerTextures(pipeline::M2Model& m
                         " color=", static_cast<int>(charHairColorId),
                         " race=", targetRaceId, " sex=", targetSexId);
         }
-    } else {
-        LOG_WARNING("Failed to load CharSections.dbc, using hardcoded textures");
     }
 
     // pipeline/char_sections.hpp fills the runtime slots - the same rules the
@@ -265,7 +265,7 @@ void AppearanceComposer::applyEnchantVisuals(uint32_t charInstanceId, int equipS
     const uint64_t itemGuid = inventory.getEquipSlotGuid(equipSlotIndex);
     const uint32_t enchantId = itemGuid != 0 ? inventory.shownEnchantId(itemGuid) : 0;
     attachEnchantVisuals(
-        renderer_->scene().characters(), *assetManager_, charInstanceId, attachmentId, enchantId,
+        renderer_->scene().characters(), tables_, charInstanceId, attachmentId, enchantId,
         [this](const std::string& path, pipeline::M2Model& model) { return loadWeaponM2(path, model); },
         [this] { return entitySpawner_->allocateWeaponModelId(); });
 }
@@ -290,11 +290,11 @@ void AppearanceComposer::loadEquippedHelm(game::Inventory& inventory) {
 
     // Hiding the helm is a display choice, not an unequip: the item stays on,
     // the model comes off, and the hair comes back.
-    if (!gameHandler_->isHelmVisible()) return;
+    if (!gameHandler_->player().helmVisible()) return;
 
     const auto& headSlot = inventory.getEquipSlot(game::EquipSlot::HEAD);
     if (headSlot.empty()) return;
-    const auto* info = gameHandler_->getItemInfo(headSlot.item.itemId);
+    const auto* info = gameHandler_->inventory().getItemInfo(headSlot.item.itemId);
     const uint32_t displayId = info && info->valid ? info->displayInfoId
                                                    : headSlot.item.displayInfoId;
     if (displayId == 0) return;
@@ -307,7 +307,7 @@ void AppearanceComposer::loadEquippedHelm(game::Inventory& inventory) {
     }
 
     const core::HelmVisual helm =
-        core::resolveHelmVisual(*assetManager_, displayId, raceId, genderId);
+        core::resolveHelmVisual(*assetManager_, tables_, displayId, raceId, genderId);
     if (!helm.valid()) return;
 
     pipeline::M2Model helmModel;
@@ -341,7 +341,7 @@ void AppearanceComposer::loadEquippedShoulders(game::Inventory& inventory) {
 
     const auto& slot = inventory.getEquipSlot(game::EquipSlot::SHOULDERS);
     if (slot.empty()) return;
-    const auto* info = gameHandler_->getItemInfo(slot.item.itemId);
+    const auto* info = gameHandler_->inventory().getItemInfo(slot.item.itemId);
     const uint32_t displayId = info && info->valid ? info->displayInfoId
                                                    : slot.item.displayInfoId;
     if (displayId == 0) return;
@@ -354,7 +354,7 @@ void AppearanceComposer::loadEquippedShoulders(game::Inventory& inventory) {
     }
 
     const core::ShoulderVisual shoulders =
-        core::resolveShoulderVisual(*assetManager_, displayId, raceId, genderId);
+        core::resolveShoulderVisual(*assetManager_, tables_, displayId, raceId, genderId);
     auto attachSide = [&](const core::HelmVisual& side, uint32_t attachmentId) {
         if (!side.valid()) return;
         pipeline::M2Model model;
@@ -373,7 +373,7 @@ void AppearanceComposer::loadEquippedShoulders(game::Inventory& inventory) {
 
 rendering::SheathSpot AppearanceComposer::sheathSpot(game::EquipSlot slot) const {
     if (!gameHandler_) return rendering::SheathSpot::NONE;
-    const auto& equipped = gameHandler_->getInventory().getEquipSlot(slot);
+    const auto& equipped = gameHandler_->inventory().items().getEquipSlot(slot);
     if (equipped.empty()) return rendering::SheathSpot::NONE;
     switch (weaponAttachment(true, slot, equipped.item.inventoryType)) {
         case kAttachHipWeaponLeft:
@@ -403,17 +403,12 @@ void AppearanceComposer::loadEquippedWeapons() {
     uint32_t charInstanceId = renderer_->getCharacterInstanceId();
     if (charInstanceId == 0) return;
 
-    auto& inventory = gameHandler_->getInventory();
+    auto& inventory = gameHandler_->inventory().items();
 
     loadEquippedHelm(inventory);
     loadEquippedShoulders(inventory);
 
-    // Load ItemDisplayInfo.dbc
-    auto displayInfoDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
-    if (!displayInfoDbc) {
-        LOG_WARNING("loadEquippedWeapons: failed to load ItemDisplayInfo.dbc");
-        return;
-    }
+    const pipeline::RequiredTable displayInfoDbc(tables_, "ItemDisplayInfo.dbc", "the player's weapons");
     // Mapping: EquipSlot → held attachment. Sheathed attachment is resolved
     // from the item's InventoryType below.
     struct WeaponSlot {
@@ -460,7 +455,7 @@ void AppearanceComposer::loadEquippedWeapons() {
         // The left pair first, the right one when there is none - the rule this
         // copy did not have, which is why a weapon whose display names only the
         // right model rendered on an NPC and not on the player holding it.
-        const auto art = pipeline::readItemDisplayArt(*displayInfoDbc,
+        const auto art = pipeline::readItemDisplayArt(displayInfoDbc,
                                                       static_cast<uint32_t>(recIdx));
         const std::string& textureName = art.textureName;
 
@@ -514,7 +509,7 @@ void AppearanceComposer::loadEquippedWeapons() {
         uint32_t displayInfoId = rangedSlot.item.displayInfoId;
         int32_t recIdx = displayInfoDbc->findRecordById(displayInfoId);
         if (recIdx >= 0) {
-            const auto art = pipeline::readItemDisplayArt(*displayInfoDbc,
+            const auto art = pipeline::readItemDisplayArt(displayInfoDbc,
                                                           static_cast<uint32_t>(recIdx));
             const std::string& textureName = art.textureName;
 
@@ -576,8 +571,7 @@ void AppearanceComposer::showMiningPick(bool show) {
 
     // Item 2901 (Mining Pick) resolves to ItemDisplayInfo 6568 in the WotLK DBC.
     constexpr uint32_t kMiningPickDisplayId = 6568;
-    auto displayInfoDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
-    if (!displayInfoDbc) return;
+    const pipeline::RequiredTable displayInfoDbc(tables_, "ItemDisplayInfo.dbc", "the mining pick");
 
     const int32_t recIdx = displayInfoDbc->findRecordById(kMiningPickDisplayId);
     if (recIdx < 0) {
@@ -586,12 +580,10 @@ void AppearanceComposer::showMiningPick(bool show) {
         return;
     }
 
-    const auto* idiL = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
     std::string modelName = displayInfoDbc->getString(
-        static_cast<uint32_t>(recIdx), idiL ? (*idiL)["LeftModel"] : 1);
+        static_cast<uint32_t>(recIdx), displayInfoDbc.column("LeftModel"));
     std::string textureName = displayInfoDbc->getString(
-        static_cast<uint32_t>(recIdx), idiL ? (*idiL)["LeftModelTexture"] : 3);
+        static_cast<uint32_t>(recIdx), displayInfoDbc.column("LeftModelTexture"));
     if (modelName.empty()) return;
 
     const size_t dotPos = modelName.rfind('.');
@@ -642,12 +634,12 @@ void AppearanceComposer::showFishingPole(bool show) {
     const auto isFishingPole = [this](const game::ItemSlot& slot) {
         if (slot.empty()) return false;
         if (slot.item.subclassName == "Fishing Pole") return true;
-        const auto* info = gameHandler_->getItemInfo(slot.item.itemId);
+        const auto* info = gameHandler_->inventory().getItemInfo(slot.item.itemId);
         return info && info->valid && info->itemClass == 2 && info->subClass == 20;
     };
 
     const game::ItemSlot* pole = nullptr;
-    const auto& inventory = gameHandler_->getInventory();
+    const auto& inventory = gameHandler_->inventory().items();
     const auto& mainHand = inventory.getEquipSlot(game::EquipSlot::MAIN_HAND);
     if (isFishingPole(mainHand)) pole = &mainHand;
     for (int i = 0; !pole && i < inventory.getBackpackSize(); ++i) {
@@ -665,17 +657,14 @@ void AppearanceComposer::showFishingPole(bool show) {
         return;
     }
 
-    auto displayInfoDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
-    if (!displayInfoDbc) return;
+    const pipeline::RequiredTable displayInfoDbc(tables_, "ItemDisplayInfo.dbc", "the fishing pole");
     const int32_t recIdx = displayInfoDbc->findRecordById(pole->item.displayInfoId);
     if (recIdx < 0) return;
 
-    const auto* idiL = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
     std::string modelName = displayInfoDbc->getString(
-        static_cast<uint32_t>(recIdx), idiL ? (*idiL)["LeftModel"] : 1);
+        static_cast<uint32_t>(recIdx), displayInfoDbc.column("LeftModel"));
     std::string textureName = displayInfoDbc->getString(
-        static_cast<uint32_t>(recIdx), idiL ? (*idiL)["LeftModelTexture"] : 3);
+        static_cast<uint32_t>(recIdx), displayInfoDbc.column("LeftModelTexture"));
     if (modelName.empty()) return;
 
     const size_t dotPos = modelName.rfind('.');
@@ -724,20 +713,18 @@ void AppearanceComposer::showRangedWeapon(bool show) {
         return;
     }
 
-    auto& inventory = gameHandler_->getInventory();
+    auto& inventory = gameHandler_->inventory().items();
     const auto& rangedSlot = inventory.getEquipSlot(game::EquipSlot::RANGED);
     if (rangedSlot.empty() || rangedSlot.item.displayInfoId == 0) return;
 
-    auto displayInfoDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
-    if (!displayInfoDbc) return;
+    const pipeline::RequiredTable displayInfoDbc(tables_, "ItemDisplayInfo.dbc", "the player's ranged weapon");
 
     uint32_t displayInfoId = rangedSlot.item.displayInfoId;
     int32_t recIdx = displayInfoDbc->findRecordById(displayInfoId);
     if (recIdx < 0) return;
 
-    const auto* idiL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-    std::string modelName = displayInfoDbc->getString(static_cast<uint32_t>(recIdx), idiL ? (*idiL)["LeftModel"] : 1);
-    std::string textureName = displayInfoDbc->getString(static_cast<uint32_t>(recIdx), idiL ? (*idiL)["LeftModelTexture"] : 3);
+    std::string modelName = displayInfoDbc->getString(static_cast<uint32_t>(recIdx), displayInfoDbc.column("LeftModel"));
+    std::string textureName = displayInfoDbc->getString(static_cast<uint32_t>(recIdx), displayInfoDbc.column("LeftModelTexture"));
     if (modelName.empty()) return;
 
     std::string modelFile = modelName;

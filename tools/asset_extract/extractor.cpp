@@ -33,6 +33,31 @@ namespace tools {
 namespace fs = std::filesystem;
 using wowee::pipeline::DBCFile;
 
+static bool extractionError(const Extractor::Options& opts, const std::string& message) {
+    std::cerr << "ERROR: " << message << "\n";
+    if (opts.onError) opts.onError(message);
+    return false;
+}
+
+static bool cacheClientFile(const Extractor::Options& opts,
+                            const fs::path& source, const fs::path& destination) {
+    std::error_code ec;
+    const bool exists = fs::exists(destination, ec);
+    if (!ec && exists)
+        fs::permissions(destination, fs::perms::owner_write, fs::perm_options::add, ec);
+    if (!ec)
+        fs::copy_file(source, destination, fs::copy_options::overwrite_existing, ec);
+    // copy_file also copies the source's read-only attribute on Windows.
+    // This is our cache; the original installation keeps its permissions.
+    if (!ec)
+        fs::permissions(destination, fs::perms::owner_write, fs::perm_options::add, ec);
+    if (ec)
+        return extractionError(opts, "Cannot cache " + source.string() + " at " +
+                               destination.string() + ": " + ec.message() +
+                               "; client integrity files are incomplete");
+    return true;
+}
+
 static std::string toLowerStr(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -399,24 +424,8 @@ std::string Extractor::detectExpansion(const std::string& mpqDir) {
         return "wotlk";
     if (hasFileCaseInsensitive(mpqDir, "expansion.mpq"))
         return "tbc";
-    // Turtle WoW uses vanilla-era base MPQs, so detect its executable and its
-    // custom high-numbered/letter patch archives before falling back to Classic.
     if (hasFileCaseInsensitive(mpqDir, "dbc.mpq") ||
         hasFileCaseInsensitive(mpqDir, "terrain.mpq")) {
-        const fs::path clientRoot = fs::path(mpqDir).parent_path();
-        if (hasFileCaseInsensitive(clientRoot, "TurtleWoW.exe")) return "turtle";
-        for (int patch = 8; patch <= 9; ++patch) {
-            if (hasFileCaseInsensitive(mpqDir,
-                                       "patch-" + std::to_string(patch) + ".mpq")) {
-                return "turtle";
-            }
-        }
-        for (char c = 'a'; c <= 'z'; ++c) {
-            if (hasFileCaseInsensitive(mpqDir,
-                                       std::string("patch-") + c + ".mpq")) {
-                return "turtle";
-            }
-        }
         return "classic";
     }
     return "";
@@ -550,7 +559,7 @@ static std::vector<std::string> discoverArchives(const std::string& mpqDirIn,
     std::vector<std::string> baseSequence;
     std::vector<std::string> localeSequence;
 
-    if (expansion == "classic" || expansion == "turtle") {
+    if (expansion == "classic") {
         baseSequence = {
             "base.mpq", "backup.mpq", "dbc.mpq", "fonts.mpq",
             "interface.mpq", "misc.mpq", "model.mpq", "sound.mpq",
@@ -688,11 +697,27 @@ std::vector<std::string> Extractor::archiveChain(const std::string& mpqDir,
 
 namespace {
 
+// Keep the same patch priority, but select only archives owned by a locale.
+// Base archives remain the responsibility of the existing expansion dataset.
+std::vector<std::string> extractionArchives(const Extractor::Options& opts) {
+    auto archives = discoverArchives(opts.mpqDir, opts.expansion, opts.locale);
+    if (!opts.localeOnly) return archives;
+    if (opts.locale.empty()) {
+        std::cerr << "--locale-only requires an explicit --locale\n";
+        return {};
+    }
+    const auto locale = toLowerStr(opts.locale);
+    std::erase_if(archives, [&](const auto& path) {
+        return toLowerStr(fs::path(path).parent_path().filename().string()) != locale;
+    });
+    return archives;
+}
+
 /// Every file the archives hold, for one extraction. Internal because only
 /// run() has ever asked: it was public API nothing outside this file called.
 bool enumerateFilesImpl(const Extractor::Options& opts,
                                std::vector<std::string>& outFiles) {
-    auto archives = discoverArchives(opts.mpqDir, opts.expansion, opts.locale);
+    auto archives = extractionArchives(opts);
     if (archives.empty()) {
         // What is in there, since what is not in there has already been said
         // and has never been enough to act on.
@@ -736,9 +761,11 @@ bool enumerateFilesImpl(const Extractor::Options& opts,
     // Enumerate from highest priority first so first-seen files win
     for (auto it = archives.rbegin(); it != archives.rend(); ++it) {
         HANDLE hMpq = nullptr;
-        if (!SFileOpenArchive(it->c_str(), 0, 0, &hMpq)) {
-            std::cerr << "  Failed to open: " << *it << "\n";
-            continue;
+        if (!SFileOpenArchive(it->c_str(), 0, MPQ_OPEN_READ_ONLY, &hMpq)) {
+            const auto error = SErrGetLastError();
+            return extractionError(opts, "Cannot read archive " + *it +
+                " (error " + std::to_string(error) +
+                "); extraction stopped before producing an incomplete asset set");
         }
 
         // Inject external listfile into archive's in-memory name table.
@@ -838,7 +865,7 @@ bool Extractor::run(const Options& opts) {
         return false;
     }
 
-    auto archives = discoverArchives(opts.mpqDir, opts.expansion, opts.locale);
+    auto archives = extractionArchives(opts);
 
     // Determine thread count
     int numThreads = opts.threads;
@@ -864,13 +891,17 @@ bool Extractor::run(const Options& opts) {
     std::vector<SharedArchive> sharedHandles;
     for (const auto& path : archives) {
         HANDLE h = nullptr;
-        if (SFileOpenArchive(path.c_str(), 0, 0, &h)) {
+        if (SFileOpenArchive(path.c_str(), 0, MPQ_OPEN_READ_ONLY, &h)) {
             if (!opts.listFile.empty()) {
                 SFileAddListFile(h, opts.listFile.c_str());
             }
             sharedHandles.push_back({h, path});
         } else {
-            std::cerr << "  Failed to open archive: " << path << "\n";
+            const auto error = SErrGetLastError();
+            for (const auto& opened : sharedHandles) SFileCloseArchive(opened.handle);
+            return extractionError(opts, "Cannot read archive " + path +
+                " (error " + std::to_string(error) +
+                "); extraction stopped before producing an incomplete asset set");
         }
     }
     if (sharedHandles.empty()) {
@@ -1201,7 +1232,7 @@ bool Extractor::run(const Options& opts) {
 
     // Cache WoW.exe for Warden MEM_CHECK responses
     {
-        const char* exeNames[] = { "WoW.exe", "TurtleWoW.exe", "Wow.exe" };
+        const char* exeNames[] = { "WoW.exe", "Wow.exe" };
         std::vector<std::string> searchDirs = {
             fs::path(opts.mpqDir).parent_path().string(),  // WoW.exe is typically next to Data/
             opts.mpqDir                                      // Some layouts put it inside Data/
@@ -1217,20 +1248,18 @@ bool Extractor::run(const Options& opts) {
                     auto dstDir = fs::path(effectiveOutputDir) / "misc";
                     fs::create_directories(dstDir);
                     auto dst = dstDir / name;
-                    fs::copy_file(src, dst, fs::copy_options::overwrite_existing);
+                    if (!cacheClientFile(opts, src, dst)) return false;
                     std::cout << "Cached " << name << " -> " << dst.string() << "\n";
 
                     // Legacy auth integrity hashes include companion DLLs. Keep
-                    // them with the executable so Classic and Turtle servers can
-                    // validate the exact distribution that was extracted.
+                    // them with the executable so Classic servers can validate
+                    // the exact distribution that was extracted.
                     for (const char* companion : {
-                            "fmod.dll", "ijl15.dll", "dbghelp.dll", "unicows.dll",
-                            "twloader.dll", "twdiscord.dll"}) {
+                            "fmod.dll", "ijl15.dll", "dbghelp.dll", "unicows.dll"}) {
                         const auto companionSrc = fs::path(dir) / companion;
                         if (!fs::exists(companionSrc)) continue;
                         const auto companionDst = dstDir / companion;
-                        fs::copy_file(companionSrc, companionDst,
-                                      fs::copy_options::overwrite_existing);
+                        if (!cacheClientFile(opts, companionSrc, companionDst)) return false;
                         std::cout << "Cached " << companion << " -> "
                                   << companionDst.string() << "\n";
                     }

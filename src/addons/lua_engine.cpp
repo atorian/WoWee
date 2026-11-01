@@ -1,3 +1,9 @@
+#include "lfg/services/lfg.hpp"
+#include "guild_bank/domain/records.hpp"
+#include "guild_bank/services/guild_bank.hpp"
+#include "guild/services/guild.hpp"
+#include "auction/domain/records.hpp"
+#include "auction/services/auction_house.hpp"
 #include "addons/lua_engine.hpp"
 #include "ui/link_hit.hpp"
 #include "ui/text_markup.hpp"
@@ -23,6 +29,7 @@
 #include "addons/lua_handler_globals.hpp"
 #include "addons/lua_event_args.hpp"
 #include "addons/lua_api_registrations.hpp"
+#include "addons/minimap_zoom.hpp"
 #include "addons/toc_parser.hpp"
 #include "core/window.hpp"
 #include <imgui.h>
@@ -1347,9 +1354,18 @@ int lua_CheckButton_SetChecked(lua_State* L) {
         // turned off. BagSlotButton_UpdateChecked is one: it counts the open
         // container frames and passes 0 or 1 straight in, so every bag button
         // stayed lit whether or not its bag was open.
-        w->checked = lua_isnone(L, 2)    ? true
-                   : lua_isnumber(L, 2)  ? (lua_tonumber(L, 2) != 0)
-                                         : (lua_toboolean(L, 2) != 0);
+        // Stock SpellButton_UpdateSelection passes the strings "true" and
+        // "false". Lua truthiness alone would keep every spell selected.
+        if (lua_type(L, 2) == LUA_TSTRING) {
+            std::string value = lua_tostring(L, 2);
+            toLowerInPlace(value);
+            w->checked = value != "false" &&
+                (!lua_isnumber(L, 2) || lua_tonumber(L, 2) != 0);
+        } else {
+            w->checked = lua_isnone(L, 2) ? true
+                : lua_isnumber(L, 2) ? lua_tonumber(L, 2) != 0
+                                     : lua_toboolean(L, 2) != 0;
+        }
     }
     return 0;
 }
@@ -1929,7 +1945,7 @@ static bool fillQuestTooltip(wowee::ui::Widget* w, game::GameHandler* gh,
     // Through the public log rather than the private finder beside it: this
     // wants the same entry the quest log itself draws from.
     const game::GameHandler::QuestLogEntry* q = nullptr;
-    for (const auto& e : gh->getQuestLog()) {
+    for (const auto& e : gh->quests().getQuestLog()) {
         if (e.questId == questId) { q = &e; break; }
     }
     if (!q) return false;
@@ -1966,7 +1982,7 @@ static bool fillQuestTooltip(wowee::ui::Widget* w, game::GameHandler* gh,
 static bool fillSpellTooltip(wowee::ui::Widget* w, game::GameHandler* gh,
                              uint32_t spellId) {
     if (!w || !gh || spellId == 0) return false;
-    const std::string& name = gh->getSpellName(spellId);
+    const std::string& name = gh->spells().getSpellName(spellId);
     if (name.empty()) return false;
 
     auto line = [&w](std::string l, std::string r, float lr, float lg, float lb) {
@@ -2001,7 +2017,7 @@ static bool fillSpellTooltip(wowee::ui::Widget* w, game::GameHandler* gh,
     line(cast, "", 1.0f, 1.0f, 1.0f);
 
     const std::string body =
-        gh->formatSpellDescription(spellId, gh->getSpellDescription(spellId));
+        gh->formatSpellDescription(spellId, gh->spells().getSpellDescription(spellId));
     if (!body.empty()) {
         // Wrapped, as every line of prose in a tooltip is: a line that does
         // not wrap sets the tooltip's width, and a description is a sentence
@@ -2019,7 +2035,7 @@ int lua_Tooltip_SetAction(lua_State* L) {
     auto* gh = wowee::addons::getGameHandler(L);
     const int slot = static_cast<int>(luaL_optnumber(L, 2, 0)) - 1;
     if (!w || !gh || slot < 0) { lua_pushboolean(L, 0); return 1; }
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) {
         lua_pushboolean(L, 0);
         return 1;
@@ -2075,7 +2091,7 @@ int lua_Tooltip_SetAction(lua_State* L) {
 static void appendEnchantLineById(wowee::ui::Widget* w, game::GameHandler* gh,
                                   uint32_t enchantId) {
     if (!w || !gh || enchantId == 0) return;
-    std::string name = gh->getEnchantName(enchantId);
+    std::string name = gh->spells().getEnchantName(enchantId);
     if (name.empty()) return;
     wowee::ui::Widget::TooltipLine line;
     line.left = std::move(name);
@@ -2176,7 +2192,7 @@ int lua_Tooltip_SetGlyph(lua_State* L) {
         return 1;
     }
     const auto& glyphs = (spec >= 1 && spec <= 2)
-        ? gh->getGlyphs(static_cast<uint8_t>(spec - 1)) : gh->getGlyphs();
+        ? gh->spells().getGlyphs(static_cast<uint8_t>(spec - 1)) : gh->spells().getGlyphs();
     const uint16_t glyphId = glyphs[static_cast<size_t>(socket) - 1];
     if (glyphId == 0) { lua_pushboolean(L, 0); return 1; }
     gh->ensureGlyphPropertiesLoaded();
@@ -2196,7 +2212,7 @@ int lua_Tooltip_SetLFGCompletionReward(lua_State* L) {
     auto* gh = wowee::addons::getGameHandler(L);
     const int index = static_cast<int>(luaL_optnumber(L, 2, 0));
     if (!w || !gh) { lua_pushboolean(L, 0); return 1; }
-    const auto& reward = gh->getLfgCompletionReward();
+    const auto& reward = wowee::addons::lfgOf(L).getLfgCompletionReward();
     if (!reward.valid || index < 1 ||
         index > static_cast<int>(reward.items.size())) {
         lua_pushboolean(L, 0);
@@ -2225,7 +2241,7 @@ int lua_Tooltip_SetEquipmentSet(lua_State* L) {
     if (!w || !gh || !wanted || !*wanted) { lua_pushboolean(L, 0); return 1; }
 
     const game::EquipmentSetInfo* set = nullptr;
-    for (const auto& es : gh->getEquipmentSets())
+    for (const auto& es : gh->inventory().getEquipmentSets())
         if (es.name == wanted) { set = &es; break; }
     if (!set) { lua_pushboolean(L, 0); return 1; }
 
@@ -2240,15 +2256,15 @@ int lua_Tooltip_SetEquipmentSet(lua_State* L) {
     };
     line(set->name, 1.0f, 1.0f, 1.0f);
 
-    const auto* guids = gh->getEquipmentSetItems(set->setId);
-    const uint32_t ignored = gh->getEquipmentSetIgnoreMask(set->setId);
+    const auto* guids = gh->inventory().getEquipmentSetItems(set->setId);
+    const uint32_t ignored = gh->inventory().getEquipmentSetIgnoreMask(set->setId);
     if (guids) {
         for (int slot = 0; slot < 19; ++slot) {
             if (ignored & (1u << slot)) continue;
             const uint64_t guid = (*guids)[static_cast<size_t>(slot)];
             if (guid == 0) continue;
-            const uint32_t itemId = gh->getItemIdByGuid(guid);
-            const auto* info = itemId ? gh->getItemInfo(itemId) : nullptr;
+            const uint32_t itemId = gh->inventory().getItemEntryByGuid(guid);
+            const auto* info = itemId ? gh->inventory().getItemInfo(itemId) : nullptr;
             if (info && info->valid && !info->name.empty()) {
                 line(info->name, 1.0f, 1.0f, 1.0f);
             } else {
@@ -2274,7 +2290,7 @@ int lua_Tooltip_SetQuestLogRewardSpell(lua_State* L) {
     if (gh) {
         // Through the row mapper: the selected index is a display index into a
         // log grouped under zone headers, not a position in getQuestLog().
-        if (const auto* q = wowee::addons::questAtLogRow(L, gh, gh->getSelectedQuestLogIndex()))
+        if (const auto* q = wowee::addons::questAtLogRow(L, gh, gh->quests().getSelectedQuestLogIndex()))
             spellId = q->rewardSpellId;
     }
     lua_pushboolean(L, spellId && fillSpellTooltip(w, gh, spellId) ? 1 : 0);
@@ -2301,7 +2317,7 @@ int lua_Tooltip_SetTalent(lua_State* L) {
     const auto* talent = wowee::addons::talentAt(gh, tabIndex, talentIndex);
     if (!talent) { lua_pushboolean(L, 0); return 1; }
 
-    const uint8_t rank = gh->getTalentRank(talent->talentId);
+    const uint8_t rank = gh->spells().getTalentRank(talent->talentId);
     // Rank 1's spell names the talent whatever the player has in it, and is the
     // only entry guaranteed to be filled.
     const uint32_t titleSpell = talent->rankSpells[0];
@@ -2309,7 +2325,7 @@ int lua_Tooltip_SetTalent(lua_State* L) {
     const uint32_t bodySpell = talent->rankSpells[rank > 0 ? rank - 1 : 0];
     if (titleSpell == 0) { lua_pushboolean(L, 0); return 1; }
 
-    const std::string& name = gh->getSpellName(titleSpell);
+    const std::string& name = gh->spells().getSpellName(titleSpell);
     if (name.empty()) { lua_pushboolean(L, 0); return 1; }
 
     w->isTooltip = true;
@@ -2333,7 +2349,7 @@ int lua_Tooltip_SetTalent(lua_State* L) {
     // Through the formatter for the same reason SetSpellByID is: a description
     // arrives as a template of $-tokens and reads as one if handed over raw.
     const std::string body =
-        gh->formatSpellDescription(bodySpell, gh->getSpellDescription(bodySpell));
+        gh->formatSpellDescription(bodySpell, gh->spells().getSpellDescription(bodySpell));
     if (!body.empty()) {
         wowee::ui::Widget::TooltipLine desc;
         desc.left = body;
@@ -2380,7 +2396,7 @@ int lua_Tooltip_SetTradeSkillItem(lua_State* L) {
     w->tooltipLines.push_back(std::move(title));
 
     const std::string body =
-        gh->formatSpellDescription(spellId, gh->getSpellDescription(spellId));
+        gh->formatSpellDescription(spellId, gh->spells().getSpellDescription(spellId));
     if (!body.empty()) {
         wowee::ui::Widget::TooltipLine desc;
         desc.left = body;
@@ -2441,7 +2457,7 @@ int lua_Tooltip_SetUnit(lua_State* L) {
     for (char& c : uidStr) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     const uint64_t guid = wowee::addons::resolveUnitGuid(gh, uidStr);
     if (guid == 0) { lua_pushboolean(L, 0); return 1; }
-    const std::string name = gh->lookupName(guid);
+    const std::string name = gh->queryCache().lookupName(guid);
     if (name.empty()) { lua_pushboolean(L, 0); return 1; }
 
     w->isTooltip = true;
@@ -2474,7 +2490,7 @@ int lua_Tooltip_SetUnit(lua_State* L) {
 
     if (isPlayer) {
         if (const uint32_t guildId = gh->getEntityGuildId(guid); guildId != 0) {
-            const std::string& guildName = gh->lookupGuildName(guildId);
+            const std::string& guildName = guildOf(L).lookupGuildName(guildId);
             if (!guildName.empty()) addLine("<" + guildName + ">", 0.25f, 1.0f, 0.25f);
         }
     } else if (entity) {
@@ -2482,7 +2498,7 @@ int lua_Tooltip_SetUnit(lua_State* L) {
         // guard: <Auctioneer>, <Innkeeper>, <Reagent Vendor>.
         const auto unit = std::dynamic_pointer_cast<game::Unit>(entity);
         if (unit) {
-            const std::string sub = gh->getCachedCreatureSubName(unit->getEntry());
+            const std::string sub = gh->queryCache().getCachedCreatureSubName(unit->getEntry());
             if (!sub.empty()) addLine("<" + sub + ">", 1.0f, 1.0f, 1.0f);
         }
     }
@@ -2575,7 +2591,7 @@ static void fillItemTooltip(wowee::ui::Widget* w, const game::ItemDef& item,
     }
 
     if (gh && item.itemId != 0) {
-        if (const auto* info = gh->getItemInfo(item.itemId); info && info->valid) {
+        if (const auto* info = gh->inventory().getItemInfo(item.itemId); info && info->valid) {
             appendItemStats(w, *info);
         }
     }
@@ -2679,7 +2695,7 @@ static void appendItemStats(wowee::ui::Widget* w, const game::ItemQueryResponseD
 static bool fillItemTooltipById(wowee::ui::Widget* w, game::GameHandler* gh,
                                 uint32_t itemId) {
     if (!w || !gh || itemId == 0) return false;
-    const auto* info = gh->getItemInfo(itemId);
+    const auto* info = gh->inventory().getItemInfo(itemId);
     if (!info || info->name.empty()) return false;
     game::ItemDef def;
     def.itemId  = itemId;
@@ -2758,9 +2774,9 @@ int lua_Tooltip_SetAuctionItem(lua_State* L) {
     if (!w || !gh || index < 1) { lua_pushboolean(L, 0); return 1; }
 
     const std::string which(list ? list : "list");
-    const auto& results = (which == "owner")  ? gh->getAuctionOwnerResults()
-                        : (which == "bidder") ? gh->getAuctionBidderResults()
-                                              : gh->getAuctionBrowseResults();
+    const auto& results = (which == "owner")  ? auctionOf(L).getAuctionOwnerResults()
+                        : (which == "bidder") ? auctionOf(L).getAuctionBidderResults()
+                                              : auctionOf(L).getAuctionBrowseResults();
     if (index > static_cast<int>(results.auctions.size())) {
         lua_pushboolean(L, 0);
         return 1;
@@ -2804,7 +2820,7 @@ int lua_Tooltip_SetAuctionItem(lua_State* L) {
 static void appendEnchantLines(wowee::ui::Widget* w, game::GameHandler* gh,
                                uint64_t itemGuid) {
     if (!w || !gh || itemGuid == 0) return;
-    const auto [permanentId, temporaryId] = gh->getItemEnchantIds(itemGuid);
+    const auto [permanentId, temporaryId] = gh->inventory().getItemEnchantIds(itemGuid);
 
     // Green, and after the item's own lines, which is where the real client
     // puts both of them. The permanent one was not shown at all: an enchanted
@@ -2909,11 +2925,11 @@ int lua_Tooltip_AppendItemEnchants(lua_State* L) {
     // The suffix first, because it renames the line the template put at the
     // top and the enchants below are appended after it.
     if (const game::ItemSlot* s =
-            wowee::addons::containerItemSlot(gh->getInventory(), bag, slot);
+            wowee::addons::containerItemSlot(gh->inventory().items(), bag, slot);
         s && !s->empty()) {
         appendRandomSuffix(w, gh, s->item);
     }
-    appendEnchantLines(w, gh, gh->getBagItemGuid(bag, slot - 1));
+    appendEnchantLines(w, gh, gh->inventory().getBagItemGuid(bag, slot - 1));
     return 0;
 }
 
@@ -2935,11 +2951,11 @@ int lua_Tooltip_AppendEquippedEnchants(lua_State* L) {
     // The suffix first, because it renames the line already at the top and the
     // enchants are appended below it - the order its sibling uses.
     if (const game::ItemSlot* s =
-            wowee::addons::inventorySlotItem(gh->getInventory(), slot);
+            wowee::addons::inventorySlotItem(gh->inventory().items(), slot);
         s && !s->empty()) {
         appendRandomSuffix(w, gh, s->item);
     }
-    appendEnchantLines(w, gh, gh->getEquipSlotGuid(slot - 1));
+    appendEnchantLines(w, gh, gh->inventory().getEquipSlotGuid(slot - 1));
     return 0;
 }
 
@@ -2973,7 +2989,7 @@ int lua_Tooltip_SetInventoryItem(lua_State* L) {
     // looked like it worked and did not: a bag button falls back to
     // GameTooltip:SetText(self.tooltipText) when this answers false, which is
     // the "Bank Bag" line, not the bag's own tooltip.
-    const game::ItemSlot* sp = wowee::addons::inventorySlotItem(gh->getInventory(), slot);
+    const game::ItemSlot* sp = wowee::addons::inventorySlotItem(gh->inventory().items(), slot);
     if (!sp) { lua_pushboolean(L, 0); return 1; }
     const auto& s = *sp;
     if (s.empty()) { lua_pushboolean(L, 0); return 1; }
@@ -2998,7 +3014,7 @@ int lua_Tooltip_SetInventoryItem(lua_State* L) {
     // Equipment only: the guid list behind it is one per equipped slot, and a
     // bank slot's id would read off the end of it.
     if (slot <= static_cast<int>(game::EquipSlot::NUM_SLOTS)) {
-        appendEnchantLines(w, gh, gh->getEquipSlotGuid(slot - 1));
+        appendEnchantLines(w, gh, gh->inventory().getEquipSlotGuid(slot - 1));
     }
     lua_pushboolean(L, 1);
     return 1;
@@ -3031,8 +3047,8 @@ int lua_Tooltip_SetExistingSocketGem(lua_State* L) {
     auto* gh = wowee::addons::getGameHandler(L);
     const int index = static_cast<int>(luaL_optnumber(L, 2, 1)) - 1;
     if (!widgetOf(L, 1) || !gh || index < 0 || index > 2) { lua_pushboolean(L, 0); return 1; }
-    const auto enchants = gh->getItemSocketEnchantIds(gh->getSocketItemGuid());
-    const uint32_t gemId = gh->getEnchantGemItem(enchants[static_cast<size_t>(index)]);
+    const auto enchants = gh->inventory().getItemSocketEnchantIds(gh->inventory().getSocketSession().itemGuid);
+    const uint32_t gemId = gh->spells().getEnchantGemItem(enchants[static_cast<size_t>(index)]);
     lua_pushboolean(L, fillItemTooltipById(L, gh, gemId) ? 1 : 0);
     return 1;
 }
@@ -3042,7 +3058,7 @@ int lua_Tooltip_SetExistingSocketGem(lua_State* L) {
 int lua_Tooltip_SetSocketedItem(lua_State* L) {
     auto* gh = wowee::addons::getGameHandler(L);
     if (!widgetOf(L, 1) || !gh) { lua_pushboolean(L, 0); return 1; }
-    lua_pushboolean(L, fillItemTooltipById(L, gh, gh->getSocketItemId()) ? 1 : 0);
+    lua_pushboolean(L, fillItemTooltipById(L, gh, gh->inventory().getSocketSession().itemId) ? 1 : 0);
     return 1;
 }
 
@@ -3085,7 +3101,7 @@ int lua_Tooltip_SetBagItem(lua_State* L) {
     const int bag = static_cast<int>(luaL_optnumber(L, 2, 0));
     const int slot = static_cast<int>(luaL_optnumber(L, 3, 0));
     if (!w || !gh || slot < 1) { lua_pushboolean(L, 0); return 1; }
-    const auto& inv = gh->getInventory();
+    const auto& inv = gh->inventory().items();
     const auto& s = (bag == 0) ? inv.getBackpackSlot(slot - 1)
                                : inv.getBagSlot(bag - 1, slot - 1);
     if (s.empty()) {
@@ -3125,7 +3141,7 @@ int lua_Tooltip_SetGuildBankItem(lua_State* L) {
     const int slot = static_cast<int>(luaL_optnumber(L, 3, 0));
     if (!w || !gh || slot < 1) { lua_pushboolean(L, 0); return 1; }
 
-    const auto& data = gh->getGuildBankData();
+    const auto& data = guildBankOf(L).getGuildBankData();
     // The open tab is the one kept current; any other answers from whatever
     // the last full update left behind, which is what the panel draws too.
     const std::vector<game::GuildBankItemSlot>* items = nullptr;
@@ -3231,37 +3247,28 @@ int lua_Region_GetNumPoints(lua_State* L) {
     return 1;
 }
 
-// Minimap zoom. Five levels, as in WoW, and the level is kept on the widget so
-// the buttons that step it can read back what they set - Minimap_Update
-// compares GetZoom() against GetZoomLevels() - 1 to decide whether to grey the
-// zoom-in button out, and nil there is arithmetic on nothing.
+// Minimap zoom: the level of the zoom for what the map shows now, terrain or a
+// building's own tiles - see addons/minimap_zoom.hpp. Minimap_Update compares
+// GetZoom() against GetZoomLevels() - 1 to decide whether to grey the zoom-in
+// button out.
+//
+// Only for the map itself. SetZoom sits on the frame metatable, so any frame
+// can be sent one, and a stray call on another frame must not move the map.
 int lua_Minimap_SetZoom(lua_State* L) {
-    if (auto* w = widgetOf(L, 1)) {
-        int z = static_cast<int>(luaL_optnumber(L, 2, 0));
-        w->zoomLevel = (z < 0) ? 0 : (z > 4 ? 4 : z);
-        // And kept, because the player set it by using the map rather than by
-        // setting a setting, and it was gone at every start: the ring came back
-        // at its widest however far in it had been left. Written to the CVar
-        // store, which is saved as it changes - see setStoredCVar - and read
-        // back once FrameXML has a Minimap to put it on.
-        //
-        // Only for the map itself. SetZoom sits on the frame metatable, so any
-        // frame can be sent one, and a stray call on another frame must not be
-        // what the minimap opens at next time.
-        if (w->name == "Minimap") {
-            setStoredCVar("wowee_minimapZoom", std::to_string(w->zoomLevel));
-        }
+    const auto* w = widgetOf(L, 1);
+    // The client does nothing for a level that is not a number.
+    if (w && w->name == "Minimap" && lua_isnumber(L, 2)) {
+        setMinimapZoom(*w, lua_tonumber(L, 2));
     }
     return 0;
 }
 int lua_Minimap_GetZoom(lua_State* L) {
     const auto* w = widgetOf(L, 1);
-    lua_pushnumber(L, w ? w->zoomLevel : 0);
+    lua_pushnumber(L, w && w->name == "Minimap" ? minimapZoom(*w) : 0);
     return 1;
 }
 int lua_Minimap_GetZoomLevels(lua_State* L) {
-    (void)L;
-    lua_pushnumber(L, 5);
+    lua_pushnumber(L, kMinimapZoomLevels);
     return 1;
 }
 /// Minimap_OnClick's whole body: a click inside the circle pings that spot for
@@ -11501,6 +11508,7 @@ void LuaEngine::dispatchOnUpdate(float elapsed) {
 
     if (!L_) return;
 
+    refreshMacroIcons(L_, elapsed);
     drainPendingTextChanged();
     advanceWheelGlide(elapsed);
 

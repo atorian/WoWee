@@ -1,15 +1,11 @@
 #pragma once
 
-#include "core/window.hpp"
 #include "core/frame_worker.hpp"
 #include <chrono>
 #include "core/gamepad.hpp"
 #include "ui/unit_portrait.hpp"
 #include "ui/widget_renderer.hpp"
 #include "rendering/cpu_stage_times.hpp"
-#include "core/input.hpp"
-#include "core/entity_spawner.hpp"
-#include "core/appearance_composer.hpp"
 #include "core/world_loader.hpp"
 #include "core/map_scope.hpp"
 #include "core/character_session.hpp"
@@ -26,8 +22,8 @@
 #include "game/reported_movement.hpp"
 #include "pipeline/asset_inventory.hpp"
 #include "core/update_check.hpp"
-#include "pipeline/blp_loader.hpp"
 #include <memory>
+#include <unordered_set>
 #include <map>
 #include <string>
 #include <vector>
@@ -43,6 +39,26 @@
 #include <atomic>
 
 namespace wowee {
+namespace contacts { class ContactsService; }
+namespace who { class WhoService; }
+namespace duel { class DuelService; }
+namespace petition { class PetitionService; }
+namespace arena { class ArenaService; }
+namespace battleground { class BattlegroundService; }
+namespace lfg { class LfgService; }
+namespace calendar { class CalendarService; }
+namespace group { class GroupService; }
+namespace guild { class GuildService; }
+namespace auction { class AuctionService; }
+namespace mail { class MailService; }
+namespace guild_bank { class GuildBankService; }
+namespace trade { class TradeService; }
+namespace loot { class LootService; }
+namespace achievement { class AchievementService; }
+namespace title { class TitleService; }
+namespace reputation { class ReputationService; }
+namespace pet { class PetService; }
+namespace game { class ContactsGateway; class WhoGateway; class DuelGateway; class PetitionGateway; class ArenaGateway; class BattlegroundGateway; class LfgGateway; class CalendarGateway; class GroupGateway; class GuildGateway; class GuildNameFile; class AuctionGateway; class MailGateway; class GuildBankGateway; class TradeGateway; class LootGateway; class AchievementData; class TitleData; class TitleGateway; class FactionData; class ReputationGateway; class PetGateway; }
 
 // Forward declarations
 namespace rendering {
@@ -55,7 +71,7 @@ class SpellVisualSystem;
 namespace world_map { class WorldMapFacade; }
 using WorldMap = world_map::WorldMapFacade;
 }
-namespace ui { class UIManager; class MapWindow; class WeatherPanel; }
+namespace ui { class UIManager; class MapWindow; class WeatherPanel; class AgentControls; }
 namespace auth { class AuthHandler; }
 namespace game { class GameHandler; class ExpansionRegistry; struct ExpansionProfile; struct EzWowPatch; }
 namespace pipeline { class AssetManager; class ArchiveLayer; class DBCLayout; struct M2Model; struct WMOModel; }
@@ -63,6 +79,11 @@ namespace audio { enum class VoiceType; class AudioCoordinator; }
 namespace addons { class AddonManager; class AddonCatalog; class LuaErrorReport; }
 
 namespace core {
+
+class Window;
+class EntitySpawner;
+class AppearanceComposer;
+class AgentBridge;
 
 // Handler forward declarations
 class NPCInteractionCallbackHandler;
@@ -152,7 +173,7 @@ public:
     /// The opcode table, update fields, packet parsers and DBC layouts a
     /// protocol profile brings with it. Loaded at startup and on every
     /// expansion change, which used to be two copies.
-    void loadExpansionTables(const game::ExpansionProfile& profile); // Reload DBC layouts, opcodes, etc. after expansion change
+    void loadExpansionTables(); // Reload DBC layouts, opcodes, etc. after expansion change
 
     // Singleton access
     static Application& getInstance() { return *instance; }
@@ -169,12 +190,12 @@ public:
     bool getRenderPositionForGuid(uint64_t guid, glm::vec3& outPos) const;
 
     // Character skin composite state - delegated to AppearanceComposer
-    [[nodiscard]] const std::string& getBodySkinPath() const { return appearanceComposer_ ? appearanceComposer_->getBodySkinPath() : emptyString_; }
-    [[nodiscard]] const std::vector<std::string>& getUnderwearPaths() const { return appearanceComposer_ ? appearanceComposer_->getUnderwearPaths() : emptyStringVec_; }
-    [[nodiscard]] uint32_t getSkinTextureSlotIndex() const { return appearanceComposer_ ? appearanceComposer_->getSkinTextureSlotIndex() : 0; }
-    [[nodiscard]] uint32_t getCloakTextureSlotIndex() const { return appearanceComposer_ ? appearanceComposer_->getCloakTextureSlotIndex() : 0; }
-    [[nodiscard]] uint32_t getGryphonDisplayId() const { return entitySpawner_ ? entitySpawner_->getGryphonDisplayId() : 0; }
-    [[nodiscard]] uint32_t getWyvernDisplayId() const { return entitySpawner_ ? entitySpawner_->getWyvernDisplayId() : 0; }
+    [[nodiscard]] const std::string& getBodySkinPath() const;
+    [[nodiscard]] const std::vector<std::string>& getUnderwearPaths() const;
+    [[nodiscard]] uint32_t getSkinTextureSlotIndex() const;
+    [[nodiscard]] uint32_t getCloakTextureSlotIndex() const;
+    [[nodiscard]] uint32_t getGryphonDisplayId() const;
+    [[nodiscard]] uint32_t getWyvernDisplayId() const;
 
     // Entity spawner access
     EntitySpawner* getEntitySpawner() { return entitySpawner_.get(); }
@@ -380,9 +401,16 @@ private:
     /// before everything that subscribes, so it is destroyed after them.
     core::EventBus eventBus_;
     game::GameServices gameServices_;
+    /// The tables the game reads; before the emote table and the game, which
+    /// read through it.
+    std::unique_ptr<game::GameData> gameData_;
     /// What the emotes are, for the game, the interface and the animation.
     std::unique_ptr<game::EmoteTable> emoteTable_;
+    std::unique_ptr<game::StatTables> statTables_;
 
+    // What an agent connected over MCP holds down; ahead of everything that
+    // reads it, so it is destroyed after them.
+    std::unique_ptr<ui::AgentControls> agentControls_;
     std::unique_ptr<Window> window;
     std::unique_ptr<rendering::Renderer> renderer;
     std::unique_ptr<rendering::FrameInputs> renderInputs_;
@@ -398,6 +426,49 @@ private:
     std::unique_ptr<LoginServerRenewal> sessionRenewal_;
     /// Said over the world while the client reconnects; empty otherwise.
     std::string reconnectStatus_;
+    // The friend, ignore and mute lists. Declared before the game, which
+    // feeds them, so they outlive it; the gateway sends through the game.
+    std::unique_ptr<game::ContactsGateway> contactsGateway_;
+    std::unique_ptr<contacts::ContactsService> contacts_;
+    std::unique_ptr<game::WhoGateway> whoGateway_;
+    std::unique_ptr<who::WhoService> who_;
+    std::unique_ptr<game::DuelGateway> duelGateway_;
+    std::unique_ptr<duel::DuelService> duels_;
+    std::unique_ptr<game::PetitionGateway> petitionGateway_;
+    std::unique_ptr<petition::PetitionService> petitions_;
+    std::unique_ptr<game::ArenaGateway> arenaGateway_;
+    std::unique_ptr<arena::ArenaService> arenaTeams_;
+    std::unique_ptr<game::BattlegroundGateway> battlegroundGateway_;
+    std::unique_ptr<battleground::BattlegroundService> battlegrounds_;
+    std::unique_ptr<game::LfgGateway> lfgGateway_;
+    std::unique_ptr<lfg::LfgService> lfg_;
+    std::unique_ptr<game::CalendarGateway> calendarGateway_;
+    std::unique_ptr<calendar::CalendarService> calendar_;
+    std::unique_ptr<game::GroupGateway> groupGateway_;
+    std::unique_ptr<group::GroupService> group_;
+    std::unique_ptr<game::GuildGateway> guildGateway_;
+    std::unique_ptr<game::GuildNameFile> guildNames_;
+    std::unique_ptr<guild::GuildService> guild_;
+    std::unique_ptr<game::AuctionGateway> auctionGateway_;
+    std::unique_ptr<auction::AuctionService> auctionHouse_;
+    std::unique_ptr<game::MailGateway> mailGateway_;
+    std::unique_ptr<mail::MailService> mail_;
+    std::unique_ptr<game::GuildBankGateway> guildBankGateway_;
+    std::unique_ptr<guild_bank::GuildBankService> guildBank_;
+    std::unique_ptr<game::TradeGateway> tradeGateway_;
+    std::unique_ptr<trade::TradeService> trade_;
+    std::unique_ptr<game::LootGateway> lootGateway_;
+    std::unique_ptr<loot::LootService> loot_;
+    std::unique_ptr<game::AchievementData> achievementData_;
+    std::unique_ptr<achievement::AchievementService> achievements_;
+    std::unique_ptr<game::TitleData> titleData_;
+    std::unique_ptr<game::TitleGateway> titleGateway_;
+    std::unique_ptr<title::TitleService> titles_;
+    std::unique_ptr<game::FactionData> factionData_;
+    std::unique_ptr<game::ReputationGateway> reputationGateway_;
+    std::unique_ptr<reputation::ReputationService> reputation_;
+    std::unique_ptr<game::PetGateway> petGateway_;
+    std::unique_ptr<pet::PetService> pet_;
     std::unique_ptr<game::GameHandler> gameHandler;
     /// The renderer's side of the transports - see game::TransportScene.
     std::unique_ptr<RendererTransportScene> transportScene_;
@@ -416,6 +487,10 @@ private:
     /// Draws the widget tree addons build through CreateFrame/CreateTexture.
     /// Holds the texture cache for Interface\ art, so it lives as long as the app.
     ui::WidgetRenderer widgetRenderer_;
+    void prepareInterfaceResources(float deltaTime);
+    float iconPrefetchDelay_ = 0.0f;
+    uint64_t iconPrefetchCharacter_ = 0;
+    std::unordered_set<uint32_t> prefetchedSpellIcons_, prefetchedItemIcons_;
     /// What the parts of the interface's two drawing stages cost this frame -
     /// the client's panels and the widget draw - read into the frame profile
     /// under their stage after drawInterface.
@@ -512,6 +587,8 @@ private:
     std::unique_ptr<NPCInteractionCallbackHandler> npcInteractionCallbacks_;
     std::unique_ptr<AudioCallbackHandler> audioCallbacks_;
     std::unique_ptr<EntitySpawnCallbackHandler> entitySpawnCallbacks_;
+    /// Application's own: the camera, the player's model, the realm patches.
+    std::vector<EventBus::Subscription> subscriptions_;
     std::unique_ptr<AnimationCallbackHandler> animationCallbacks_;
     std::unique_ptr<TransportCallbackHandler> transportCallbacks_;
     std::unique_ptr<WorldEntryCallbackHandler> worldEntryCallbacks_;
@@ -579,6 +656,11 @@ private:
     void updateQuestMarkers();     // Updates billboard positions
     void updateLootSparkles();     // The glitter over corpses with loot
     void updateCorpseBones();      // Players' bones, as their race's skeleton
+    /// Opens the MCP endpoint when WOWEE_MCP_PORT names a port.
+    void startAgentBridge();
+    // The MCP endpoint. Near the end, so it stops before anything its tools
+    // call into is destroyed.
+    std::unique_ptr<AgentBridge> agentBridge_;
 
     /// The frame and the world transitions, and with them the character in
     /// the world. Last, so it goes before everything it borrows; shutdown()

@@ -31,20 +31,20 @@ std::vector<uint8_t> terrain(bool truncated=false) {
 }
 TEST_CASE("ADT retains authored collision references and flight bounds", "[adt][collision]") {
     const auto data=wowee::pipeline::ADTLoader::load(terrain());
-    CHECK(data.collisionDataValid);
-    CHECK(data.chunks[0].doodadReferences==std::vector<uint32_t>{2,0,1});
-    CHECK(data.chunks[0].wmoReferences==std::vector<uint32_t>{1,0});
-    REQUIRE(data.flightBounds);
-    CHECK((*data.flightBounds)[0]==700);
-    CHECK((*data.flightBounds)[8]==708);
-    CHECK((*data.flightBounds)[9]==-109);
-    CHECK((*data.flightBounds)[17]==-117);
+    CHECK(data->collisionDataValid);
+    CHECK(data->chunks[0].doodadReferences==std::vector<uint32_t>{2,0,1});
+    CHECK(data->chunks[0].wmoReferences==std::vector<uint32_t>{1,0});
+    REQUIRE(data->flightBounds);
+    CHECK((*data->flightBounds)[0]==700);
+    CHECK((*data->flightBounds)[8]==708);
+    CHECK((*data->flightBounds)[9]==-109);
+    CHECK((*data->flightBounds)[17]==-117);
 }
 TEST_CASE("a truncated reference list cannot become an apparently clear chunk", "[adt][collision]") {
     const auto data=wowee::pipeline::ADTLoader::load(terrain(true));
-    CHECK_FALSE(data.collisionDataValid);
-    CHECK(data.chunks[0].doodadReferences.empty());
-    CHECK(data.chunks[0].wmoReferences.empty());
+    CHECK_FALSE(data->collisionDataValid);
+    CHECK(data->chunks[0].doodadReferences.empty());
+    CHECK(data->chunks[0].wmoReferences.empty());
 }
 
 TEST_CASE("ADT flight bounds obey MHDR participation and reject missing data", "[adt][collision]") {
@@ -52,13 +52,13 @@ TEST_CASE("ADT flight bounds obey MHDR participation and reject missing data", "
     SECTION("an unflagged MFBO does not participate") {
         put(bytes,8,0);
         const auto data=wowee::pipeline::ADTLoader::load(bytes);
-        CHECK(data.collisionDataValid);
-        CHECK_FALSE(data.flightBounds);
+        CHECK(data->collisionDataValid);
+        CHECK_FALSE(data->flightBounds);
     }
     SECTION("a flagged missing MFBO is a collision load failure") {
         bytes.resize(bytes.size()-44);
         const auto data=wowee::pipeline::ADTLoader::load(bytes);
-        CHECK_FALSE(data.collisionDataValid);
+        CHECK_FALSE(data->collisionDataValid);
     }
     SECTION("an absent referenced placement is a collision load failure") {
         // Locate the authored MCRF payload and replace its first MDDF ordinal.
@@ -69,7 +69,7 @@ TEST_CASE("ADT flight bounds obey MHDR participation and reject missing data", "
         }
         put(bytes,at+8,3);
         const auto data=wowee::pipeline::ADTLoader::load(bytes);
-        CHECK_FALSE(data.collisionDataValid);
+        CHECK_FALSE(data->collisionDataValid);
     }
 }
 
@@ -86,16 +86,16 @@ TEST_CASE("authored liquid collision survives visual fallbacks and masks", "[adt
     chunk(mcnk,0x4d434c51,liquid);
     std::vector<uint8_t> bytes;chunk(bytes,0x4d434e4b,mcnk);
     const auto data=wowee::pipeline::ADTLoader::load(bytes);
-    REQUIRE(data.collisionDataValid);
-    REQUIRE(data.collisionLiquids[0].size()==2);
-    const auto& water=data.collisionLiquids[0][0];
+    REQUIRE(data->collisionDataValid);
+    REQUIRE(data->collisionLiquids[0].size()==2);
+    const auto& water=data->collisionLiquids[0][0];
     CHECK(water.liquidType==1);
     REQUIRE(water.legacyTiles);
     CHECK((*water.legacyTiles)[0]==0x80);
     REQUIRE(water.heights.size()==81);
     CHECK(water.heights.front()==0.0f);
     CHECK(water.heights.back()==0.0f);
-    const auto& lava=data.collisionLiquids[0][1];
+    const auto& lava=data->collisionLiquids[0][1];
     CHECK(lava.liquidType==3);
     REQUIRE(lava.heights.size()==81);
     CHECK(lava.heights.front()==17.0f);
@@ -113,9 +113,9 @@ TEST_CASE("MH2O collision uses authored vertex format and packed rectangle mask"
     put(liquid,3088,uint32_t(liquid.size()-1));liquid.back()=0x02;
     std::vector<uint8_t> bytes;chunk(bytes,0x4d48324f,liquid);
     const auto data=wowee::pipeline::ADTLoader::load(bytes);
-    REQUIRE(data.collisionDataValid);
-    REQUIRE(data.collisionLiquids[0].size()==1);
-    const auto& layer=data.collisionLiquids[0][0];
+    REQUIRE(data->collisionDataValid);
+    REQUIRE(data->collisionLiquids[0].size()==1);
+    const auto& layer=data->collisionLiquids[0][0];
     CHECK(layer.minX==3);CHECK(layer.minY==4);CHECK(layer.maxX==5);CHECK(layer.maxY==5);
     CHECK(layer.cellMask==2);
     REQUIRE(layer.heights.size()==6);
@@ -129,9 +129,9 @@ TEST_CASE("ADT chunk coordinates own their collision references, independent of 
     put(second,52,456);
     chunk(bytes,0x4d434e4b,first);chunk(bytes,0x4d434e4b,second);
     const auto data=wowee::pipeline::ADTLoader::load(bytes);
-    REQUIRE(data.collisionDataValid);
-    CHECK(data.getChunk(5,4).areaId==123);
-    CHECK(data.getChunk(0,0).areaId==456);
+    REQUIRE(data->collisionDataValid);
+    CHECK(data->getChunk(5,4).areaId==123);
+    CHECK(data->getChunk(0,0).areaId==456);
 }
 
 TEST_CASE("MH2O rectangles outside the chunk cannot write a water mask", "[adt][collision]") {
@@ -140,7 +140,7 @@ TEST_CASE("MH2O rectangles outside the chunk cannot write a water mask", "[adt][
     liquid[3084]=9;liquid[3085]=0;liquid[3086]=1;liquid[3087]=1;
     std::vector<uint8_t> bytes;chunk(bytes,0x4d48324f,liquid);
     const auto data=wowee::pipeline::ADTLoader::load(bytes);
-    CHECK_FALSE(data.collisionDataValid);
-    CHECK(data.collisionLiquids[0].empty());
-    CHECK(data.waterData[0].layers.empty());
+    CHECK_FALSE(data->collisionDataValid);
+    CHECK(data->collisionLiquids[0].empty());
+    CHECK(data->waterData[0].layers.empty());
 }

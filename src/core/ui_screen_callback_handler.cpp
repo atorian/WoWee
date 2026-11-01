@@ -1,4 +1,5 @@
 #include "core/ui_screen_callback_handler.hpp"
+#include "game/game_events.hpp"
 #include "core/application.hpp"  // AppState
 #include "core/logger.hpp"
 #include "core/realm_address.hpp"
@@ -128,7 +129,7 @@ void UIScreenCallbackHandler::setupCallbacks() {
         uint32_t clientBuild = 12340; // default WotLK
         if (expansionRegistry_) {
             auto* profile = expansionRegistry_->getActive();
-            if (profile) clientBuild = profile->worldBuild;
+            if (profile) clientBuild = profile->build;
         }
         // Prefer realm-reported build when available (e.g. vanilla servers
         // that report build 5875 in the realm list)
@@ -178,26 +179,28 @@ void UIScreenCallbackHandler::setupCallbacks() {
     });
 
     // Character create result callback
-    gameHandler_.setCharCreateCallback([this](bool success, const std::string& msg) {
-        if (success) {
-            // Auto-select the newly created character
-            if (!pendingCreatedCharacterName_.empty()) {
-                uiManager_.getCharacterScreen().selectCharacterByName(pendingCreatedCharacterName_);
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::CharacterCreateAnswered>(
+        [this](const game::events::CharacterCreateAnswered& e) {
+            if (e.success) {
+                // Auto-select the newly created character
+                if (!pendingCreatedCharacterName_.empty()) {
+                    uiManager_.getCharacterScreen().selectCharacterByName(pendingCreatedCharacterName_);
+                    pendingCreatedCharacterName_.clear();
+                }
+                setState_(AppState::CHARACTER_SELECTION);
+            } else {
+                uiManager_.getCharacterCreateScreen().setStatus(e.message, true);
                 pendingCreatedCharacterName_.clear();
             }
-            setState_(AppState::CHARACTER_SELECTION);
-        } else {
-            uiManager_.getCharacterCreateScreen().setStatus(msg, true);
-            pendingCreatedCharacterName_.clear();
-        }
-    });
+        }));
 
     // Character login failure callback
-    gameHandler_.setCharLoginFailCallback([this](const std::string& reason) {
-        LOG_WARNING("Character login failed: ", reason);
-        setState_(AppState::CHARACTER_SELECTION);
-        uiManager_.getCharacterScreen().setStatus("Login failed: " + reason, true);
-    });
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::CharacterLoginFailed>(
+        [this](const game::events::CharacterLoginFailed& e) {
+            LOG_WARNING("Character login failed: ", e.reason);
+            setState_(AppState::CHARACTER_SELECTION);
+            uiManager_.getCharacterScreen().setStatus("Login failed: " + e.reason, true);
+        }));
 
     // "New Hero" button on character screen
     uiManager_.getCharacterScreen().setOnCreateCharacter([this]() {
@@ -228,12 +231,13 @@ void UIScreenCallbackHandler::setupCallbacks() {
     });
 
     // Character delete result callback
-    gameHandler_.setCharDeleteCallback([this](bool success, const std::string& message) {
-        uiManager_.getCharacterScreen().setStatus(message, !success);
-        if (success) {
-            gameHandler_.requestCharacterList();
-        }
-    });
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::CharacterDeleteAnswered>(
+        [this](const game::events::CharacterDeleteAnswered& e) {
+            uiManager_.getCharacterScreen().setStatus(e.message, !e.success);
+            if (e.success) {
+                gameHandler_.requestCharacterList();
+            }
+        }));
 }
 
 bool UIScreenCallbackHandler::isRetryable(const std::string& reason) {

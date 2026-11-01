@@ -1,4 +1,6 @@
 #include "core/world_entry_callback_handler.hpp"
+#include "pipeline/game_tables.hpp"
+#include "pipeline/dbc_loader.hpp"
 #include "collision/collision_world.hpp"
 #include "game/game_events.hpp"
 #include "core/frame_phase.hpp"
@@ -31,6 +33,7 @@ WorldEntryCallbackHandler::WorldEntryCallbackHandler(
     WorldLoader* worldLoader,
     EntitySpawner* entitySpawner,
     pipeline::AssetManager* assetManager,
+    const pipeline::GameTables& tables,
     const Phase& currentPhase)
     : renderer_(renderer)
     , playerView_(playerView)
@@ -38,6 +41,7 @@ WorldEntryCallbackHandler::WorldEntryCallbackHandler(
     , worldLoader_(worldLoader)
     , entitySpawner_(entitySpawner)
     , assetManager_(assetManager)
+    , tables_(tables)
     , currentPhase_(currentPhase)
 {
 }
@@ -65,7 +69,7 @@ void WorldEntryCallbackHandler::clearStuckMovement() {
     if (playerView_.getCameraController()) {
         playerView_.getCameraController()->clearMovementInputs();
     }
-    gameHandler_.forceClearTaxiAndMovementState();
+    gameHandler_.movement().forceClearTaxiAndMovementState();
     gameHandler_.sendMovement(game::Opcode::MSG_MOVE_STOP);
     gameHandler_.sendMovement(game::Opcode::MSG_MOVE_STOP_STRAFE);
     gameHandler_.sendMovement(game::Opcode::MSG_MOVE_STOP_TURN);
@@ -80,7 +84,7 @@ void WorldEntryCallbackHandler::clearMountForUnstuck() {
     const bool hasRenderedMount =
         (entitySpawner_ && entitySpawner_->getMountInstanceId() != 0) ||
         (playerView_.getAnimationController() && playerView_.getAnimationController()->isMounted());
-    if (gameHandler_.isMounted() || hasRenderedMount) {
+    if (gameHandler_.movement().isMounted() || hasRenderedMount) {
         gameHandler_.dismount();
     }
     if (entitySpawner_) {
@@ -95,7 +99,7 @@ void WorldEntryCallbackHandler::clearMountForUnstuck() {
 // Sync teleported render position to server
 void WorldEntryCallbackHandler::syncTeleportedPositionToServer(const glm::vec3& renderPos) {
     glm::vec3 canonical = core::coords::renderToCanonical(renderPos);
-    gameHandler_.setPosition(canonical.x, canonical.y, canonical.z);
+    gameHandler_.movement().setPosition(canonical.x, canonical.y, canonical.z);
     gameHandler_.sendMovement(game::Opcode::MSG_MOVE_STOP);
     gameHandler_.sendMovement(game::Opcode::MSG_MOVE_STOP_STRAFE);
     gameHandler_.sendMovement(game::Opcode::MSG_MOVE_STOP_TURN);
@@ -111,8 +115,8 @@ void WorldEntryCallbackHandler::forceServerTeleportCommand(const glm::vec3& rend
     }
 
     // Server-authoritative reset first, then teleport.
-    gameHandler_.sendChatMessage(game::ChatType::SAY, ".revive", "");
-    gameHandler_.sendChatMessage(game::ChatType::SAY, ".dismount", "");
+    gameHandler_.chat().sendChatMessage(game::ChatType::SAY, ".revive", "");
+    gameHandler_.chat().sendChatMessage(game::ChatType::SAY, ".dismount", "");
 
     glm::vec3 canonical = core::coords::renderToCanonical(renderPos);
     glm::vec3 serverPos = core::coords::canonicalToServer(canonical);
@@ -125,7 +129,7 @@ void WorldEntryCallbackHandler::forceServerTeleportCommand(const glm::vec3& rend
         << serverPos.z << " "
         << gameHandler_.getCurrentMapId() << " "
         << gameHandler_.getMovementInfo().orientation;
-    gameHandler_.sendChatMessage(game::ChatType::SAY, cmd.str(), "");
+    gameHandler_.chat().sendChatMessage(game::ChatType::SAY, cmd.str(), "");
 }
 
 // Precache tiles in a radius around a position (eliminates repeated tile-loop code)
@@ -163,7 +167,8 @@ void WorldEntryCallbackHandler::enterWorld(uint32_t mapId, float x, float y, flo
     // The game did this, which had it reach into the animation code it
     // has no use for.
     if (isInitialEntry && assetManager_) {
-        rendering::anim::validateAgainstDBC(assetManager_->loadDBC("AnimationData.dbc"));
+        rendering::anim::validateAgainstDBC(
+            *tables_.table("AnimationData.dbc", 1, "checking the animation ids against the client's"));
     }
 
     // A login is always a new map scope, even onto the map just left: the
@@ -270,135 +275,138 @@ void WorldEntryCallbackHandler::placeAfterReconnect(uint32_t mapId, float x, flo
 
 void WorldEntryCallbackHandler::setupCallbacks() {
     // /unstuck - nudge player forward and snap to floor at destination.
-    gameHandler_.setUnstuckCallback([this]() {
-        if (!playerView_.getCameraController()) return;
-        clearMountForUnstuck();
-        worldEntryMovementGraceTimer_ = std::max(worldEntryMovementGraceTimer_, 1.5f);
-        taxiLandingClampTimer_ = 0.0f;
-        lastTaxiFlight_ = false;
-        clearStuckMovement();
-        auto* cc = playerView_.getCameraController();
-        auto* ft = cc->getFollowTargetMutable();
-        if (!ft) return;
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::UnstuckRequested>(
+        [this](const game::events::UnstuckRequested&) {
+            if (!playerView_.getCameraController()) return;
+            clearMountForUnstuck();
+            worldEntryMovementGraceTimer_ = std::max(worldEntryMovementGraceTimer_, 1.5f);
+            taxiLandingClampTimer_ = 0.0f;
+            lastTaxiFlight_ = false;
+            clearStuckMovement();
+            auto* cc = playerView_.getCameraController();
+            auto* ft = cc->getFollowTargetMutable();
+            if (!ft) return;
 
-        glm::vec3 pos = *ft;
+            glm::vec3 pos = *ft;
 
-        // Always nudge forward first to escape stuck geometry (M2 models, collision seams).
-        float renderYaw = gameHandler_.getMovementInfo().orientation + glm::radians(90.0f);
-        pos.x += std::cos(renderYaw) * 5.0f;
-        pos.y += std::sin(renderYaw) * 5.0f;
+            // Always nudge forward first to escape stuck geometry (M2 models, collision seams).
+            float renderYaw = gameHandler_.getMovementInfo().orientation + glm::radians(90.0f);
+            pos.x += std::cos(renderYaw) * 5.0f;
+            pos.y += std::sin(renderYaw) * 5.0f;
 
-        // Sample floor at the DESTINATION position (after nudge).
-        // Pick the highest floor so we snap up to WMO floors when fallen below.
-        bool foundFloor = false;
-        if (auto floor = sampleBestFloorAt(pos.x, pos.y, pos.z + 60.0f)) {
-            pos.z = *floor + 0.2f;
-            foundFloor = true;
-        }
+            // Sample floor at the DESTINATION position (after nudge).
+            // Pick the highest floor so we snap up to WMO floors when fallen below.
+            bool foundFloor = false;
+            if (auto floor = sampleBestFloorAt(pos.x, pos.y, pos.z + 60.0f)) {
+                pos.z = *floor + 0.2f;
+                foundFloor = true;
+            }
 
-        cc->teleportTo(pos);
-        if (!foundFloor) {
-            cc->setGrounded(false);  // Let gravity pull player down to a surface
-        }
-        syncTeleportedPositionToServer(pos);
-        forceServerTeleportCommand(pos);
-        clearStuckMovement();
-        LOG_INFO("Unstuck: nudged forward and snapped to floor");
-    });
+            cc->teleportTo(pos);
+            if (!foundFloor) {
+                cc->setGrounded(false);  // Let gravity pull player down to a surface
+            }
+            syncTeleportedPositionToServer(pos);
+            forceServerTeleportCommand(pos);
+            clearStuckMovement();
+            LOG_INFO("Unstuck: nudged forward and snapped to floor");
+        }));
 
     // /unstuckgy - stronger recovery: safe/home position, then sampled floor fallback.
-    gameHandler_.setUnstuckGyCallback([this]() {
-        if (!playerView_.getCameraController()) return;
-        clearMountForUnstuck();
-        worldEntryMovementGraceTimer_ = std::max(worldEntryMovementGraceTimer_, 1.5f);
-        taxiLandingClampTimer_ = 0.0f;
-        lastTaxiFlight_ = false;
-        clearStuckMovement();
-        auto* cc = playerView_.getCameraController();
-        auto* ft = cc->getFollowTargetMutable();
-        if (!ft) return;
-
-        // Try last safe position first (nearby, terrain already loaded)
-        if (cc->hasLastSafePosition()) {
-            glm::vec3 safePos = cc->getLastSafePosition();
-            safePos.z += 5.0f;
-            cc->teleportTo(safePos);
-            syncTeleportedPositionToServer(safePos);
-            forceServerTeleportCommand(safePos);
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::UnstuckToGraveyardRequested>(
+        [this](const game::events::UnstuckToGraveyardRequested&) {
+            if (!playerView_.getCameraController()) return;
+            clearMountForUnstuck();
+            worldEntryMovementGraceTimer_ = std::max(worldEntryMovementGraceTimer_, 1.5f);
+            taxiLandingClampTimer_ = 0.0f;
+            lastTaxiFlight_ = false;
             clearStuckMovement();
-            LOG_INFO("Unstuck: teleported to last safe position");
-            return;
-        }
+            auto* cc = playerView_.getCameraController();
+            auto* ft = cc->getFollowTargetMutable();
+            if (!ft) return;
 
-        uint32_t bindMap = 0;
-        glm::vec3 bindPos(0.0f);
-        if (gameHandler_.getHomeBind(bindMap, bindPos) &&
-            bindMap == gameHandler_.getCurrentMapId()) {
-            bindPos.z += 2.0f;
-            cc->teleportTo(bindPos);
-            syncTeleportedPositionToServer(bindPos);
-            forceServerTeleportCommand(bindPos);
-            clearStuckMovement();
-            LOG_INFO("Unstuck: teleported to home bind position");
-            return;
-        }
+            // Try last safe position first (nearby, terrain already loaded)
+            if (cc->hasLastSafePosition()) {
+                glm::vec3 safePos = cc->getLastSafePosition();
+                safePos.z += 5.0f;
+                cc->teleportTo(safePos);
+                syncTeleportedPositionToServer(safePos);
+                forceServerTeleportCommand(safePos);
+                clearStuckMovement();
+                LOG_INFO("Unstuck: teleported to last safe position");
+                return;
+            }
 
-        // No safe/bind position - try current XY with a high floor probe.
-        glm::vec3 pos = *ft;
-        if (auto floor = sampleBestFloorAt(pos.x, pos.y, pos.z + 120.0f)) {
-            pos.z = *floor + 0.5f;
+            uint32_t bindMap = 0;
+            glm::vec3 bindPos(0.0f);
+            if (gameHandler_.getHomeBind(bindMap, bindPos) &&
+                bindMap == gameHandler_.getCurrentMapId()) {
+                bindPos.z += 2.0f;
+                cc->teleportTo(bindPos);
+                syncTeleportedPositionToServer(bindPos);
+                forceServerTeleportCommand(bindPos);
+                clearStuckMovement();
+                LOG_INFO("Unstuck: teleported to home bind position");
+                return;
+            }
+
+            // No safe/bind position - try current XY with a high floor probe.
+            glm::vec3 pos = *ft;
+            if (auto floor = sampleBestFloorAt(pos.x, pos.y, pos.z + 120.0f)) {
+                pos.z = *floor + 0.5f;
+                cc->teleportTo(pos);
+                syncTeleportedPositionToServer(pos);
+                forceServerTeleportCommand(pos);
+                clearStuckMovement();
+                LOG_INFO("Unstuck: teleported to sampled floor");
+                return;
+            }
+
+            // Last fallback: high snap to clear deeply bad geometry.
+            pos.z += 60.0f;
             cc->teleportTo(pos);
             syncTeleportedPositionToServer(pos);
             forceServerTeleportCommand(pos);
             clearStuckMovement();
-            LOG_INFO("Unstuck: teleported to sampled floor");
-            return;
-        }
-
-        // Last fallback: high snap to clear deeply bad geometry.
-        pos.z += 60.0f;
-        cc->teleportTo(pos);
-        syncTeleportedPositionToServer(pos);
-        forceServerTeleportCommand(pos);
-        clearStuckMovement();
-        LOG_INFO("Unstuck: high fallback snap");
-    });
+            LOG_INFO("Unstuck: high fallback snap");
+        }));
 
     // /unstuckhearth - teleport to hearthstone bind point (server-synced).
     // Freezes player until terrain loads at destination to prevent falling through world.
-    gameHandler_.setUnstuckHearthCallback([this]() {
-        if (!playerView_.getCameraController()) return;
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::UnstuckToHearthRequested>(
+        [this](const game::events::UnstuckToHearthRequested&) {
+            if (!playerView_.getCameraController()) return;
 
-        uint32_t bindMap = 0;
-        glm::vec3 bindPos(0.0f);
-        if (!gameHandler_.getHomeBind(bindMap, bindPos)) {
-            LOG_WARNING("Unstuck hearth: no bind point available");
-            return;
-        }
+            uint32_t bindMap = 0;
+            glm::vec3 bindPos(0.0f);
+            if (!gameHandler_.getHomeBind(bindMap, bindPos)) {
+                LOG_WARNING("Unstuck hearth: no bind point available");
+                return;
+            }
 
-        clearMountForUnstuck();
+            clearMountForUnstuck();
 
-        worldEntryMovementGraceTimer_ = 10.0f;  // long grace - terrain load check will clear it
-        taxiLandingClampTimer_ = 0.0f;
-        lastTaxiFlight_ = false;
-        clearStuckMovement();
+            worldEntryMovementGraceTimer_ = 10.0f;  // long grace - terrain load check will clear it
+            taxiLandingClampTimer_ = 0.0f;
+            lastTaxiFlight_ = false;
+            clearStuckMovement();
 
-        auto* cc = playerView_.getCameraController();
-        glm::vec3 renderPos = core::coords::canonicalToRender(bindPos);
-        renderPos.z += 2.0f;
+            auto* cc = playerView_.getCameraController();
+            glm::vec3 renderPos = core::coords::canonicalToRender(bindPos);
+            renderPos.z += 2.0f;
 
-        // Freeze player in place (no gravity/movement) until terrain loads
-        cc->teleportTo(renderPos);
-        cc->setExternalFollow(true);
-        forceServerTeleportCommand(renderPos);
-        clearStuckMovement();
+            // Freeze player in place (no gravity/movement) until terrain loads
+            cc->teleportTo(renderPos);
+            cc->setExternalFollow(true);
+            forceServerTeleportCommand(renderPos);
+            clearStuckMovement();
 
-        // Set pending state - update loop will unfreeze once terrain is loaded
-        hearthTeleportPending_ = true;
-        hearthTeleportPos_ = renderPos;
-        hearthTeleportTimer_ = 15.0f;  // 15s safety timeout
-        LOG_INFO("Unstuck hearth: teleporting to bind point, waiting for terrain...");
-    });
+            // Set pending state - update loop will unfreeze once terrain is loaded
+            hearthTeleportPending_ = true;
+            hearthTeleportPos_ = renderPos;
+            hearthTeleportTimer_ = 15.0f;  // 15s safety timeout
+            LOG_INFO("Unstuck hearth: teleporting to bind point, waiting for terrain...");
+        }));
 
     // Auto-unstuck: falling for > 5 seconds = void fall, teleport to map entry
     if (playerView_.getCameraController()) {
@@ -422,9 +430,10 @@ void WorldEntryCallbackHandler::setupCallbacks() {
     }
 
     // Bind point update (innkeeper) - position stored in gameHandler->getHomeBind()
-    gameHandler_.setBindPointCallback([](uint32_t mapId, float x, float y, float z) {
-        LOG_INFO("Bindpoint set: mapId=", mapId, " pos=(", x, ", ", y, ", ", z, ")");
-    });
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::BindPointChanged>(
+        [](const game::events::BindPointChanged& e) {
+            LOG_INFO("Bindpoint set: mapId=", e.mapId, " pos=(", e.x, ", ", e.y, ", ", e.z, ")");
+        }));
 
     // Hearthstone preload callback: begin loading terrain at the bind point as soon as
     // the player starts casting Hearthstone.  The ~10 s cast gives enough time for
@@ -437,15 +446,13 @@ void WorldEntryCallbackHandler::setupCallbacks() {
         auto* terrainMgr = renderer_ ? renderer_->getTerrainManager() : nullptr;
         if (!terrainMgr || !assetManager_) return;
 
-        // Resolve map name from the cached Map.dbc table
-        std::string mapName;
-        if (worldLoader_) {
-            mapName = worldLoader_->getMapNameById(mapId);
-        }
+        if (!worldLoader_) return;
+        const std::string mapName = worldLoader_->mapNameFor(mapId);
         if (mapName.empty()) {
-            mapName = WorldLoader::mapIdToName(mapId);
+            LOG_WARNING("Hearthstone preload: Map.dbc has no map ", mapId,
+                        "; the bind point's terrain is loaded on arrival instead");
+            return;
         }
-        if (mapName.empty()) mapName = "Azeroth";
 
         uint32_t currentLoadedMap = worldLoader_ ? worldLoader_->getLoadedMapId() : 0xFFFFFFFF;
         if (mapId == currentLoadedMap) {

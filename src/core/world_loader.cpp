@@ -19,6 +19,7 @@
 #include "pipeline/wmo_group_path.hpp"
 #include "pipeline/wdt_loader.hpp"
 #include "pipeline/dbc_loader.hpp"
+#include "pipeline/game_tables.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -76,9 +77,9 @@ struct WorldLoader::Load {
 };
 
 WorldLoader::WorldLoader(const Phase& phase, rendering::Renderer* renderer,
-                         pipeline::AssetManager* assets, std::filesystem::path lastWorldFile,
-                         Clock clock)
-    : phase_(phase), renderer_(renderer), assetManager_(assets),
+                         pipeline::AssetManager* assets, const pipeline::GameTables& tables,
+                         std::filesystem::path lastWorldFile, Clock clock)
+    : phase_(phase), renderer_(renderer), assetManager_(assets), tables_(tables),
       lastWorldFile_(std::move(lastWorldFile)), clock_(std::move(clock)) {}
 
 WorldLoader::~WorldLoader() { cancelWorldPreload(); }
@@ -123,19 +124,18 @@ void WorldLoader::fail(const std::string& reason) {
     LOG_ERROR("World load failed: map=", load_->entry.mapId, " ", reason, "; returning to login");
 }
 
-std::string WorldLoader::resolveMapName(uint32_t mapId) {
+std::string WorldLoader::mapNameFor(uint32_t mapId) {
     if (!mapNameCacheLoaded_) {
         mapNameCacheLoaded_ = true;
-        if (auto dbc = assetManager_ ? assetManager_->loadDBC("Map.dbc") : nullptr; dbc && dbc->isLoaded()) {
-            const auto* layout = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("Map") : nullptr;
-            for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
-                auto name = dbc->getString(row, layout ? (*layout)["InternalName"] : 1);
-                if (!name.empty()) mapNameById_.try_emplace(dbc->getUInt32(row, layout ? (*layout)["ID"] : 0), std::move(name));
-            }
-        } else LOG_WARNING("Map.dbc not available; using fallback map-id mapping");
+        // ID, InternalName: the map's directory under World\Maps.
+        const auto dbc = tables_.table("Map.dbc", 2, "the directory of the map to enter");
+        for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
+            auto name = dbc->getString(row, 1);
+            if (!name.empty()) mapNameById_.try_emplace(dbc->getUInt32(row, 0), std::move(name));
+        }
     }
     if (auto it = mapNameById_.find(mapId); it != mapNameById_.end()) return it->second;
-    return mapIdToName(mapId);
+    return {};
 }
 
 std::unique_ptr<WorldLoader::Session> WorldLoader::begin(Entry entry, JobGroup& jobs) {
@@ -151,8 +151,8 @@ std::unique_ptr<WorldLoader::Session> WorldLoader::begin(Entry entry, JobGroup& 
         fail("Game data is unavailable, so the map cannot be built");
         return session;
     }
-    load_->mapName = resolveMapName(entry.mapId);
-    if (load_->mapName.empty()) { fail("No map name for id " + std::to_string(entry.mapId)); return session; }
+    load_->mapName = mapNameFor(entry.mapId);
+    if (load_->mapName.empty()) { fail("Map.dbc has no map " + std::to_string(entry.mapId)); return session; }
     cancelWorldPreload();
     saveLastWorldInfo(entry.mapId, load_->mapName, entry.x, entry.y);
     LOG_INFO("World load started: map=", entry.mapId, " name=", load_->mapName,
@@ -192,6 +192,7 @@ std::shared_ptr<WorldLoader::PreparedMap> WorldLoader::prepareMap(pipeline::Asse
     if (!token.current()) return result;
     if (data.empty()) { result->error = "Cannot read root WMO " + path; return result; }
     model = pipeline::WMOLoader::load(data);
+    model.sourcePath = path;
     for (uint32_t group = 0; group < model.nGroups; ++group) {
         if (!token.current()) return result;
         bool found = false;
@@ -373,7 +374,8 @@ const WorldLoadStatus& WorldLoader::update(float /*deltaTime*/) {
                     }
                     if (result == rendering::WMORenderer::ModelLoadResult::InProgress) return status();
                     if (!renderer_->scene().worldModels().createInstance(modelId, prepared.position,
-                                                                         prepared.rotation, 1.0f)) {
+                                                                         prepared.rotation, 1.0f,
+                                                                         prepared.wdt.nameSet)) {
                         fail("Root WMO instance creation failed"); return status();
                     }
                     load.rootPlaced = true;
@@ -470,98 +472,6 @@ const char* WorldLoader::mapDisplayName(uint32_t mapId) {
     }
 }
 
-const char* WorldLoader::mapIdToName(uint32_t mapId) {
-    // Fallback when Map.dbc is unavailable. Names must match WDT directory names
-    // (case-insensitive - AssetManager lowercases all paths).
-    switch (mapId) {
-        // Continents
-        case 0: return "Azeroth";
-        case 1: return "Kalimdor";
-        case 530: return "Expansion01";
-        case 571: return "Northrend";
-        // Classic dungeons/raids
-        case 30: return "PVPZone01";
-        case 33: return "Shadowfang";
-        case 34: return "StormwindJail";
-        case 36: return "DeadminesInstance";
-        case 43: return "WailingCaverns";
-        case 47: return "RazserfenKraulInstance";
-        case 48: return "Blackfathom";
-        case 70: return "Uldaman";
-        case 90: return "GnomeragonInstance";
-        case 109: return "SunkenTemple";
-        case 129: return "RazorfenDowns";
-        case 189: return "MonasteryInstances";
-        case 209: return "TanarisInstance";
-        case 229: return "BlackRockSpire";
-        case 230: return "BlackrockDepths";
-        case 249: return "OnyxiaLairInstance";
-        case 289: return "ScholomanceInstance";
-        case 309: return "Zul'Gurub";
-        case 329: return "Stratholme";
-        case 349: return "Mauradon";
-        case 369: return "DeeprunTram";
-        case 389: return "OrgrimmarInstance";
-        case 409: return "MoltenCore";
-        case 429: return "DireMaul";
-        case 469: return "BlackwingLair";
-        case 489: return "PVPZone03";
-        case 509: return "AhnQiraj";
-        case 529: return "PVPZone04";
-        case 531: return "AhnQirajTemple";
-        case 533: return "Stratholme Raid";
-        // TBC
-        case 532: return "Karazahn";
-        case 534: return "HyjalPast";
-        case 540: return "HellfireMilitary";
-        case 542: return "HellfireDemon";
-        case 543: return "HellfireRampart";
-        case 544: return "HellfireRaid";
-        case 545: return "CoilfangPumping";
-        case 546: return "CoilfangMarsh";
-        case 547: return "CoilfangDraenei";
-        case 548: return "CoilfangRaid";
-        case 550: return "TempestKeepRaid";
-        case 552: return "TempestKeepArcane";
-        case 553: return "TempestKeepAtrium";
-        case 554: return "TempestKeepFactory";
-        case 555: return "AuchindounShadow";
-        case 556: return "AuchindounDraenei";
-        case 557: return "AuchindounEthereal";
-        case 558: return "AuchindounDemon";
-        case 560: return "HillsbradPast";
-        case 564: return "BlackTemple";
-        case 565: return "GruulsLair";
-        case 566: return "PVPZone05";
-        case 568: return "ZulAman";
-        case 580: return "SunwellPlateau";
-        case 585: return "Sunwell5ManFix";
-        // WotLK
-        case 574: return "Valgarde70";
-        case 575: return "UtgardePinnacle";
-        case 576: return "Nexus70";
-        case 578: return "Nexus80";
-        case 595: return "StratholmeCOT";
-        case 599: return "Ulduar70";
-        case 600: return "Ulduar80";
-        case 601: return "DrakTheronKeep";
-        case 602: return "GunDrak";
-        case 603: return "UlduarRaid";
-        case 608: return "DalaranPrison";
-        case 615: return "ChamberOfAspectsBlack";
-        case 617: return "DeathKnightStart";
-        case 619: return "Azjol_Uppercity";
-        case 624: return "WintergraspRaid";
-        case 631: return "IcecrownCitadel";
-        case 632: return "IcecrownCitadel5Man";
-        case 649: return "ArgentTournamentRaid";
-        case 650: return "ArgentTournamentDungeon";
-        case 658: return "QuarryOfTears";
-        case 668: return "HallsOfReflection";
-        case 724: return "ChamberOfAspectsRed";
-        default: return "";
-    }
-}
 void WorldLoader::startWorldPreload(uint32_t mapId, const std::string& mapName,
                                      float serverX, float serverY) {
     cancelWorldPreload();

@@ -1,6 +1,11 @@
 // lua_system_api.cpp - System, time, sound, locale, map, addons, instances, and utilities Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
+#include "group/services/group.hpp"
+#include "guild/services/guild.hpp"
 #include "game/action_bar_handler.hpp"
+#include "arena/services/arena.hpp"
+#include "battleground/services/battlegrounds.hpp"
+#include "lfg/services/lfg.hpp"
 #include <array>
 #include <algorithm>
 #include <optional>
@@ -21,6 +26,9 @@
 #include "core/cvar_store.hpp"
 #include "ui/settings_schema.hpp"
 #include "imgui.h"
+#include "achievement/services/achievements.hpp"
+#include "title/services/titles.hpp"
+#include "pet/services/pet.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "addons/chat_window_background.hpp"
 #include "ui/display_modes.hpp"
@@ -28,12 +36,15 @@
 #include "rendering/camera_controller.hpp"
 #include "rendering/view_distance.hpp"
 #include "addons/lua_engine.hpp"
+#include "addons/minimap_zoom.hpp"
 #include "game/bg_score_defs.hpp"
 #include "game/calendar_month.hpp"
-#include "game/calendar_data.hpp"
-#include "game/pet_action.hpp"
+#include "calendar/domain/records.hpp"
+#include "calendar/services/calendar.hpp"
+#include "pet/domain/actions.hpp"
 #include "game/account_data_handler.hpp"
 #include "game/weather_handler.hpp"
+#include "game/realm_time_handler.hpp"
 #include "audio/activity_sound_manager.hpp"
 #include "audio/ambient_sound_manager.hpp"
 #include "audio/audio_coordinator.hpp"
@@ -119,11 +130,44 @@ static int pushCalendarBoundDate(lua_State* L, int monthOffset) {
 
 /// The rows on the day an interface call is asking about.
 ///
+namespace {
+
+/// The calendar of a client with no game: empty, and every request dropped.
+class NoCalendar final : public wowee::calendar::ICalendar {
+public:
+    uint32_t getCalendarPendingInvites() const override { return 0; }
+    const wowee::calendar::CalendarData& getCalendarData() const override { return data_; }
+    const wowee::calendar::CalendarEventDetail& getCalendarEventDetail() const override { return detail_; }
+    void requestCalendar() override {}
+    void requestCalendarEvent(uint64_t) override {}
+    void createCalendarEvent(const wowee::calendar::CalendarEventDraft&) override {}
+    void updateCalendarEvent(uint64_t, uint64_t, const wowee::calendar::CalendarEventDraft&) override {}
+    void removeCalendarEvent(uint64_t, uint64_t) override {}
+    void inviteToCalendarEvent(uint64_t, uint64_t, const std::string&, bool, bool) override {}
+    void massInviteGuildToCalendarEvent(uint32_t, uint32_t, uint32_t) override {}
+    void setCalendarInviteStatus(uint64_t, uint64_t, uint64_t, uint8_t) override {}
+    void setCalendarInviteModerator(uint64_t, uint64_t, uint64_t, uint8_t) override {}
+    void respondToCalendarInvite(uint64_t, uint64_t, uint32_t) override {}
+
+private:
+    wowee::calendar::CalendarData data_;
+    wowee::calendar::CalendarEventDetail detail_;
+};
+
+NoCalendar kNoCalendar;
+
+} // namespace
+
+calendar::ICalendar& calendarOf(lua_State* L) {
+    auto* services = getLuaServices(L);
+    return (services && services->calendar) ? *services->calendar : kNoCalendar;
+}
+
 /// Every day-indexed calendar getter takes (monthOffset, day) and indexes the
 /// same list, so resolving it lives here once - three getters computing "which
 /// month is offset -1 of the viewed one" separately is how they would drift
 /// apart on the first month that ends on a Sunday.
-static std::vector<wowee::game::CalendarDayEntry> calendarDayRows(lua_State* L) {
+static std::vector<wowee::calendar::CalendarDayEntry> calendarDayRows(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) return {};
     const int monthOffset = static_cast<int>(luaL_optnumber(L, 1, 0));
@@ -133,7 +177,7 @@ static std::vector<wowee::game::CalendarDayEntry> calendarDayRows(lua_State* L) 
     const auto info = wowee::game::calendarMonthAt(viewed.first, viewed.second,
                                                    monthOffset);
     if (day > info.numDays) return {};
-    return wowee::game::calendarEntriesForDay(gh->getCalendarData(), info.month,
+    return wowee::calendar::calendarEntriesForDay(calendarOf(L).getCalendarData(), info.month,
                                               day, info.year);
 }
 
@@ -143,7 +187,7 @@ static std::vector<wowee::game::CalendarDayEntry> calendarDayRows(lua_State* L) 
 /// with another: CalendarNewEvent starts it, CalendarEventSetTitle and the
 /// rest fill it in, CalendarAddEvent sends it. Nothing is carried between
 /// those calls except this.
-static wowee::game::CalendarEventDraft& calendarDraft(lua_State* L) {
+static wowee::calendar::CalendarEventDraft& calendarDraft(lua_State* L) {
     return interfaceState(L).calendar.draft;
 }
 
@@ -159,22 +203,22 @@ static CalendarContextRow& calendarContextRow(lua_State* L) {
     return interfaceState(L).calendar.contextRow;
 }
 
-/// The rows of a day, for a caller that already has the handler and the day.
-static std::vector<wowee::game::CalendarDayEntry> calendarRowsFor(
-        lua_State* L, wowee::game::GameHandler& gh, int monthOffset, int day) {
+/// The rows of a day, for a caller that already has the day.
+static std::vector<wowee::calendar::CalendarDayEntry> calendarRowsFor(
+        lua_State* L, int monthOffset, int day) {
     if (day < 1) return {};
     const auto viewed = calendarViewedMonth(L);
     const auto info = wowee::game::calendarMonthAt(viewed.first, viewed.second,
                                                    monthOffset);
     if (day > info.numDays) return {};
-    return wowee::game::calendarEntriesForDay(gh.getCalendarData(), info.month,
+    return wowee::calendar::calendarEntriesForDay(calendarOf(L).getCalendarData(), info.month,
                                               day, info.year);
 }
 
 /// Which of the six kinds of row this event is, as the string the interface
 /// compares against. Guild events carry a flag; everything else the player can
 /// see on their own calendar is theirs.
-static const char* calendarTypeName(const wowee::game::CalendarEvent& ev) {
+static const char* calendarTypeName(const wowee::calendar::CalendarEvent& ev) {
     // CALENDAR_EVENTTYPE_* from the server: 4 is the guild announcement, and
     // the guild flag distinguishes an event from an announcement.
     constexpr uint32_t kGuildEventFlag = 0x0400;
@@ -186,7 +230,7 @@ static const char* calendarTypeName(const wowee::game::CalendarEvent& ev) {
 /// "CREATOR" when this is the player's own event, otherwise nothing. The
 /// interface shows the edit controls on the first of those.
 static const char* calendarModStatus(lua_State* L,
-                                     const wowee::game::CalendarEvent& ev) {
+                                     const wowee::calendar::CalendarEvent& ev) {
     auto* gh = getGameHandler(L);
     return (gh && ev.creatorGuid != 0 && ev.creatorGuid == gh->getPlayerGuid())
                ? "CREATOR" : "";
@@ -202,15 +246,15 @@ static int calendarRespondToContextInvite(lua_State* L, uint32_t status) {
     auto* gh = getGameHandler(L);
     const auto& row = calendarContextRow(L);
     if (!gh || row.day < 1) return 0;
-    const auto rows = calendarRowsFor(L, *gh,row.monthOffset, row.day);
+    const auto rows = calendarRowsFor(L, row.monthOffset, row.day);
     if (row.index < 1 || static_cast<size_t>(row.index) > rows.size()) return 0;
     const auto& entry = rows[static_cast<size_t>(row.index) - 1];
-    if (entry.kind != wowee::game::CalendarEntryKind::Event) return 0;
-    const auto& cal = gh->getCalendarData();
+    if (entry.kind != wowee::calendar::CalendarEntryKind::Event) return 0;
+    const auto& cal = calendarOf(L).getCalendarData();
     const uint64_t eventId = cal.events[entry.index].eventId;
     for (const auto& invite : cal.invites) {
         if (invite.eventId != eventId) continue;
-        gh->respondToCalendarInvite(eventId, invite.inviteId, status);
+        calendarOf(L).respondToCalendarInvite(eventId, invite.inviteId, status);
         return 0;
     }
     return 0;
@@ -219,7 +263,7 @@ static int calendarRespondToContextInvite(lua_State* L, uint32_t status) {
 /// The player's own answer to an event, from the invite list that came with
 /// it. Zero is CALENDAR_INVITESTATUS_INVITED, which is what an event carries
 /// while it is unanswered.
-static double calendarInviteStatusFor(const wowee::game::CalendarData& cal,
+static double calendarInviteStatusFor(const wowee::calendar::CalendarData& cal,
                                       uint64_t eventId) {
     for (const auto& invite : cal.invites) {
         if (invite.eventId == eventId) return static_cast<double>(invite.status);
@@ -716,6 +760,9 @@ static void pushCvarDefault(lua_State* L, const std::string& n) {
     else if (n == "sound_numchannels") lua_pushstring(L, "64");
     else if (n == "sound_outputquality") lua_pushstring(L, "2");
     else if (n == "uiscale") lua_pushstring(L, "1");
+    else if (n == "minimapzoom" || n == "minimapinsidezoom") {
+        lua_pushstring(L, std::to_string(kMinimapDefaultZoom).c_str());
+    }
     else if (n == "useuiscale") lua_pushstring(L, "1");
     else if (n == "screenwidth" || n == "gxresolution") {
         auto* svc = getLuaServices(L);
@@ -1459,6 +1506,11 @@ static void applyCVarSideEffects(lua_State* L, const std::string& key,
     // A sound CVar is a setting, not a note. Without this the interface's
     // volume keys and its Sound options both wrote to a map nobody read, so
     // turning music off left it playing.
+    // Either of the minimap's zooms, which Minimap:SetZoom keeps in range;
+    // a value set here or in the file is said once, as it arrives.
+    if (key == "minimapzoom" || key == "minimapinsidezoom") {
+        noteMinimapZoomCVar(key, value);
+    }
     // The interface's own scale, which is the widget tree's to keep - not a
     // client setting, and not the ImGui window scale beside it in the settings
     // window. Those are two different interfaces that happen to share a word.
@@ -1469,31 +1521,6 @@ static void applyCVarSideEffects(lua_State* L, const std::string& key,
             const std::string useIt = cvarValueOr(L, "useuiscale", "1");
             if (useIt != "0") {
                 tree->setUserScale(static_cast<float>(std::atof(value.c_str())));
-            }
-        }
-    }
-    // The minimap's zoom, put back where the player left it.
-    //
-    // Not a setting anyone sets in a panel: it is where the +/- buttons and the
-    // wheel over the ring were left, and the real client remembers that across
-    // a session. Minimap:SetZoom writes it here on the way past; this is the
-    // way back, and it runs after FrameXML is up, which is the first moment
-    // there is a Minimap to put it on.
-    //
-    // Straight onto the widget rather than through Minimap:SetZoom, so it does
-    // not write back what it just read. MINIMAP_UPDATE_ZOOM is what the real
-    // client fires when the zoom changes under the interface, and it is what
-    // greys the button that can no longer go any further - without it a map
-    // restored at full zoom offers a zoom-in that does nothing.
-    if (key == "wowee_minimapzoom") {
-        if (auto* tree = getWidgetTree(L)) {
-            if (auto* mm = tree->findByName("Minimap")) {
-                const int z = std::atoi(value.c_str());
-                mm->zoomLevel = (z < 0) ? 0 : (z > 4 ? 4 : z);
-                lua_getfield(L, LUA_REGISTRYINDEX, "wowee_lua_engine");
-                auto* engine = static_cast<LuaEngine*>(lua_touserdata(L, -1));
-                lua_pop(L, 1);
-                if (engine) engine->fireEvent("MINIMAP_UPDATE_ZOOM", {});
             }
         }
     }
@@ -2258,7 +2285,7 @@ static uint32_t possessAuraSpellId(wowee::game::GameHandler* gh) {
     constexpr uint32_t kModCharm = 6;
     constexpr uint32_t kModPossessPet = 128;
     constexpr uint32_t kAoeCharm = 177;
-    for (const auto& aura : gh->getPlayerAuras()) {
+    for (const auto& aura : gh->spells().getPlayerAuras()) {
         if (aura.isEmpty()) continue;
         const auto* spell = gh->spells().findSpell(aura.spellId);
         if (!spell) continue;
@@ -2283,7 +2310,7 @@ static constexpr uint32_t kAuraTrackResources = 45;
 static std::vector<uint32_t> trackingSpells(game::GameHandler* gh) {
     std::vector<uint32_t> out;
     if (!gh) return out;
-    for (uint32_t sid : gh->getKnownSpells()) {
+    for (uint32_t sid : gh->spells().getKnownSpells()) {
         const auto* spell = gh->spells().findSpell(sid);
         if (!spell) continue;
         for (uint32_t aura : spell->effectAuraIds) {
@@ -2294,7 +2321,7 @@ static std::vector<uint32_t> trackingSpells(game::GameHandler* gh) {
         }
     }
     std::sort(out.begin(), out.end(), [gh](uint32_t a, uint32_t b) {
-        return gh->getSpellName(a) < gh->getSpellName(b);
+        return gh->spells().getSpellName(a) < gh->spells().getSpellName(b);
     });
     return out;
 }
@@ -2302,7 +2329,7 @@ static std::vector<uint32_t> trackingSpells(game::GameHandler* gh) {
 /// Whether that tracking is the one currently running.
 static bool trackingActive(game::GameHandler* gh, uint32_t spellId) {
     if (!gh) return false;
-    for (const auto& aura : gh->getPlayerAuras()) {
+    for (const auto& aura : gh->spells().getPlayerAuras()) {
         if (aura.spellId == spellId) return true;
     }
     return false;
@@ -2360,7 +2387,7 @@ static int lua_GetTrackingInfo(lua_State* L) {
     const auto spells = trackingSpells(gh);
     if (index < 1 || index > static_cast<int>(spells.size())) return 0;
     const uint32_t sid = spells[static_cast<size_t>(index - 1)];
-    lua_pushstring(L, gh->getSpellName(sid).c_str());
+    lua_pushstring(L, gh->spells().getSpellName(sid).c_str());
     lua_pushstring(L, gh->getSpellIconPath(sid).c_str());
     lua_pushboolean(L, trackingActive(gh, sid) ? 1 : 0);
     lua_pushstring(L, "spell");
@@ -2393,7 +2420,7 @@ static int lua_SetTracking(lua_State* L) {
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
     const auto spells = trackingSpells(gh);
     if (index < 1 || index > static_cast<int>(spells.size())) return 0;
-    gh->castSpell(spells[static_cast<size_t>(index - 1)], 0);
+    gh->spells().castSpell(spells[static_cast<size_t>(index - 1)], 0);
     return 0;
 }
 
@@ -2401,7 +2428,7 @@ static int lua_SetTracking(lua_State* L) {
 static int lua_GetGameTime(lua_State* L) {
     // Returns server game time as hours, minutes
     auto* gh = getGameHandler(L);
-    float gt = gh ? gh->getGameTime() : -1.0f;
+    float gt = gh ? gh->realmTime().gameHours() : -1.0f;
     if (gt < 0.0f) {
         // The server has not said yet. Answer with the local clock rather than
         // a negative hour, which is what the interface's own clock would then
@@ -2445,7 +2472,7 @@ static int lua_GetInstanceInfo(lua_State* L) {
         return 7;
     }
     std::string mapName = gh->getMapName(gh->getCurrentMapId());
-    const uint32_t diff = gh->getInstanceDifficulty();
+    const uint32_t diff = gh->social().getInstanceDifficulty();
     lua_pushstring(L, mapName.c_str());                    // 1: name
     lua_pushstring(L, gh->isInInstance() ? "party" : "none"); // 2: instanceType
     // Counted from one, which is what the interface compares against.
@@ -2474,7 +2501,7 @@ static int lua_GetInstanceInfo(lua_State* L) {
 
 static int lua_GetInstanceDifficulty(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushnumber(L, gh ? (gh->getInstanceDifficulty() + 1) : 1);
+    lua_pushnumber(L, gh ? (gh->social().getInstanceDifficulty() + 1) : 1);
     return 1;
 }
 
@@ -2782,21 +2809,27 @@ static int lua_SetScreenResolution(lua_State* L) {
 /// sends, and group 1 is the carriers. The parser has recorded which all along
 /// and the first version of these accessors ignored it, which would have drawn
 /// flag carriers as ordinary party dots.
-static const game::BgPlayerPosition* bgEntryAt(game::GameHandler* gh,
-                                               int group, int index) {
-    if (!gh || index < 1) return nullptr;
+battleground::IBattlegrounds* battlegroundsOf(lua_State* L) {
+    auto* services = getLuaServices(L);
+    return services ? services->battlegrounds : nullptr;
+}
+
+static const battleground::BgPlayerPosition* bgEntryAt(lua_State* L, int group, int index) {
+    auto* battlegrounds = battlegroundsOf(L);
+    if (!battlegrounds || index < 1) return nullptr;
     int seen = 0;
-    for (const auto& p : gh->getBgPlayerPositions()) {
+    for (const auto& p : battlegrounds->getBgPlayerPositions()) {
         if (p.group != group) continue;
         if (++seen == index) return &p;
     }
     return nullptr;
 }
 
-static int bgCount(game::GameHandler* gh, int group) {
-    if (!gh) return 0;
+static int bgCount(lua_State* L, int group) {
+    auto* battlegrounds = battlegroundsOf(L);
+    if (!battlegrounds) return 0;
     int n = 0;
-    for (const auto& p : gh->getBgPlayerPositions()) if (p.group == group) ++n;
+    for (const auto& p : battlegrounds->getBgPlayerPositions()) if (p.group == group) ++n;
     return n;
 }
 
@@ -2812,12 +2845,12 @@ static int lua_GetBattlefieldPosition(lua_State* L) {
     auto* svc = getLuaServices(L);
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
     float u = 0.0f, v = 0.0f;
-    if (const auto* p = bgEntryAt(gh, 0, index)) {
+    if (const auto* p = bgEntryAt(L, 0, index); p && gh) {
         if (svc && svc->mapUVForWorldPos &&
             svc->mapUVForWorldPos(p->wowX, p->wowY, 0.0f, u, v)) {
             lua_pushnumber(L, u);
             lua_pushnumber(L, v);
-            lua_pushstring(L, gh->lookupName(p->guid).c_str());
+            lua_pushstring(L, gh->queryCache().lookupName(p->guid).c_str());
             return 3;
         }
     }
@@ -2836,12 +2869,11 @@ static int lua_GetBattlefieldPosition(lua_State* L) {
 /// and with one carried it does not. Rather than guess, that case answers zero
 /// and the frame hides: no flag on the map is a smaller lie than the wrong one.
 static int lua_GetBattlefieldFlagPosition(lua_State* L) {
-    auto* gh = getGameHandler(L);
     auto* svc = getLuaServices(L);
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
     float u = 0.0f, v = 0.0f;
-    const auto* p = bgEntryAt(gh, 1, index);
-    if (p && bgCount(gh, 1) == 2 && svc && svc->mapUVForWorldPos &&
+    const auto* p = bgEntryAt(L, 1, index);
+    if (p && bgCount(L, 1) == 2 && svc && svc->mapUVForWorldPos &&
         svc->mapUVForWorldPos(p->wowX, p->wowY, 0.0f, u, v)) {
         lua_pushnumber(L, u);
         lua_pushnumber(L, v);
@@ -3385,7 +3417,7 @@ static int expansionLevelZeroBased(lua_State* L) {
     if (!prof) return 2;
     if (prof->id == "wotlk") return 2;
     if (prof->id == "tbc") return 1;
-    return 0;   // classic and turtle
+    return 0;   // classic
 }
 
 static int lua_GetExpansionLevel(lua_State* L) {
@@ -3490,8 +3522,8 @@ static int lua_GetWeaponEnchantInfo(lua_State* L) {
     for (const game::EquipSlot hand : kHands) {
         bool enchanted = false;
         if (gh) {
-            const uint64_t guid = gh->getEquipSlotGuid(static_cast<int>(hand));
-            if (guid != 0) enchanted = gh->getItemEnchantIds(guid).second != 0;
+            const uint64_t guid = gh->inventory().getEquipSlotGuid(static_cast<int>(hand));
+            if (guid != 0) enchanted = gh->inventory().getItemEnchantIds(guid).second != 0;
         }
         lua_pushboolean(L, enchanted ? 1 : 0);   // hasEnchant
         lua_pushnumber(L, 0.0);                  // expiration, not tracked
@@ -3715,7 +3747,7 @@ static int lua_Screenshot(lua_State* L) {
 // way it was when the comment here said no such thing existed.
 static int lua_HasLFGRestrictions(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->isLfgInDungeon() ? 1 : 0);
+    lua_pushboolean(L, gh && lfgOf(L).isLfgInDungeon() ? 1 : 0);
     return 1;
 }
 
@@ -3728,7 +3760,7 @@ static int lua_HasLFGRestrictions(lua_State* L) {
 // an error rather than an answer of "none".
 static int lua_GetLFGProposal(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const bool pending = gh && gh->getLfgState() == game::LfgState::Proposal;
+    const bool pending = gh && lfgOf(L).getLfgState() == lfg::LfgState::Proposal;
     if (!pending) { for (int i = 0; i < 11; ++i) lua_pushnil(L); return 11; }
 
     // Nils here are not survivable, which only showed once the dialog could
@@ -3737,7 +3769,7 @@ static int lua_GetLFGProposal(lua_State* L) {
     // goes into `for i = numMembers+1, ...`, where nil is arithmetic on
     // nothing; completedEncounters is compared with > 0. The dialog was
     // unreachable before, so none of it had ever run.
-    const uint32_t dungeonId = gh->getLfgDungeonId();
+    const uint32_t dungeonId = lfgOf(L).getLfgDungeonId();
     const game::LfgDungeon* dungeon = nullptr;
     for (const auto& d : gh->getLfgDungeons()) {
         if (d.id == dungeonId) { dungeon = &d; break; }
@@ -3745,7 +3777,7 @@ static int lua_GetLFGProposal(lua_State* L) {
 
     // The role the player queued as. The dialog names it and picks its icon
     // from it, and these are the tokens GetTexCoordsForRole indexes by.
-    const uint8_t roles = gh->getLfgOfferedRoles();
+    const uint8_t roles = lfgOf(L).getLfgOfferedRoles();
     const char* role = (roles & 0x02) ? "TANK"
                      : (roles & 0x04) ? "HEALER"
                                       : "DAMAGER";
@@ -3756,7 +3788,7 @@ static int lua_GetLFGProposal(lua_State* L) {
     // dungeonID and looks the dungeon up by it.
     lua_pushnumber(L, dungeonId);                                // 3: id
     lua_pushstring(L, dungeon ? dungeon->name.c_str()
-                              : gh->getCurrentLfgDungeonName().c_str());  // 4: name
+                              : lfgOf(L).getCurrentLfgDungeonName().c_str());  // 4: name
     // TextureFilename from LFGDungeons.dbc, which is exactly the suffix that
     // path is built from.
     lua_pushstring(L, dungeon ? dungeon->texture.c_str() : "");  // 5: texture
@@ -3769,7 +3801,7 @@ static int lua_GetLFGProposal(lua_State* L) {
     lua_pushnumber(L, 0);                                        // 9: completedEncounters
     // The real count now that the roster is parsed - each row is a role icon
     // and a tick, both of which GetLFGProposalMember can answer.
-    lua_pushnumber(L, static_cast<double>(gh->getLfgProposalMembers().size()));  // 10
+    lua_pushnumber(L, static_cast<double>(lfgOf(L).getLfgProposalMembers().size()));  // 10
 
     lua_pushboolean(L, 0);                                       // 11: isLeader
     return 11;
@@ -3779,7 +3811,7 @@ static int lua_GetLFGProposal(lua_State* L) {
 //                      lfgComment, slotCount
 static int lua_GetLFGInfoServer(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const bool queued = gh && gh->isLfgQueued();
+    const bool queued = gh && lfgOf(L).isLfgQueued();
     // Answers, not blanks. LFRFrame_OnEvent does
     // `LFRQueueFrameComment:SetText(lfgComment)` and then `strtrim(lfgComment)`
     // whenever it is told the queue was joined, and nil there raised inside
@@ -3789,7 +3821,7 @@ static int lua_GetLFGInfoServer(lua_State* L) {
     //
     // This client keeps no listing comment: an empty string is what it has,
     // and it is the value the interface tests for anyway.
-    const bool inParty = gh && gh->isInGroup();
+    const bool inParty = gh && groupOf(L).isInGroup();
     lua_pushboolean(L, inParty ? 1 : 0);   // 1: inParty
     lua_pushboolean(L, queued ? 1 : 0);    // 2: joined
     lua_pushboolean(L, queued ? 1 : 0);    // 3: queued
@@ -3812,16 +3844,16 @@ static int lua_GetLFGInfoServer(lua_State* L) {
 // the group size behind the count the handler used to stop at.
 static int lua_GetLFGRoleUpdate(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const bool checking = gh && gh->getLfgState() == game::LfgState::RoleCheck;
+    const bool checking = gh && lfgOf(L).getLfgState() == lfg::LfgState::RoleCheck;
     if (checking) lua_pushboolean(L, 1); else lua_pushnil(L);
-    lua_pushnumber(L, gh ? static_cast<double>(gh->getLfgRoleCheckDungeons().size()) : 0.0);
-    lua_pushnumber(L, gh ? gh->getLfgRoleCheckMembers() : 0);
+    lua_pushnumber(L, gh ? static_cast<double>(lfgOf(L).getLfgRoleCheckDungeons().size()) : 0.0);
+    lua_pushnumber(L, gh ? lfgOf(L).getLfgRoleCheckMembers() : 0);
     return 3;
 }
 
 static int lua_IsListedInLFR(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->getLfgState() == game::LfgState::RaidBrowser ? 1 : 0);
+    lua_pushboolean(L, gh && lfgOf(L).getLfgState() == lfg::LfgState::RaidBrowser ? 1 : 0);
     return 1;
 }
 
@@ -3830,10 +3862,10 @@ static int lua_IsPartyLFG(lua_State* L) {
     auto* gh = getGameHandler(L);
     bool viaFinder = false;
     if (gh) {
-        const auto st = gh->getLfgState();
-        viaFinder = (st == game::LfgState::InDungeon ||
-                     st == game::LfgState::FinishedDungeon ||
-                     st == game::LfgState::Boot);
+        const auto st = lfgOf(L).getLfgState();
+        viaFinder = (st == lfg::LfgState::InDungeon ||
+                     st == lfg::LfgState::FinishedDungeon ||
+                     st == lfg::LfgState::Boot);
     }
     lua_pushboolean(L, viaFinder ? 1 : 0);
     return 1;
@@ -3853,7 +3885,7 @@ static int lua_RefreshLFGList(lua_State* L) { (void)L; return 0; }
 static int lua_GetTrackedAchievements(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) return 0;
-    const auto& tracked = gh->getTrackedAchievements();
+    const auto& tracked = achievementsOf(L).getTrackedAchievements();
     // The watch frame shows ten, but nothing here enforces that, and Lua
     // guarantees twenty free slots.
     if (!tracked.empty() && !lua_checkstack(L, static_cast<int>(tracked.size()))) {
@@ -3888,9 +3920,8 @@ static int lua_GetPVPRankProgress(lua_State* L) { lua_pushnumber(L, 0); return 1
 // Which team an index names comes from the same list GetArenaTeam reads.
 // ArenaTeamRoster(index) - ask the server for the roster.
 static int lua_ArenaTeamRoster(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    const uint32_t teamId = arenaTeamIdAtIndex(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
-    if (gh && teamId) gh->requestArenaTeamRoster(teamId);
+    const uint32_t teamId = arenaTeamIdAtIndex(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
+    if (teamId) arenaTeamsOf(L)->requestArenaTeamRoster(teamId);
     return 0;
 }
 
@@ -3902,11 +3933,10 @@ static int lua_ArenaTeamRoster(lua_State* L) {
 // the panel does test before using, and rank and level are zero because the
 // roster carries neither.
 static int lua_GetArenaTeamRosterInfo(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    const uint32_t teamId = arenaTeamIdAtIndex(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+    const uint32_t teamId = arenaTeamIdAtIndex(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
     const int member = static_cast<int>(luaL_optnumber(L, 2, 0));
-    if (!gh || teamId == 0 || member < 1) return luaReturnNil(L);
-    const auto* roster = gh->getArenaTeamRoster(teamId);
+    if (teamId == 0 || member < 1) return luaReturnNil(L);
+    const auto* roster = arenaTeamsOf(L)->getArenaTeamRoster(teamId);
     if (!roster || member > static_cast<int>(roster->members.size())) return luaReturnNil(L);
     const auto& m = roster->members[static_cast<size_t>(member) - 1];
 
@@ -3969,10 +3999,10 @@ static int lua_HasKey(lua_State* L) { lua_pushboolean(L, 1); return 1; }
 // style and colours and nothing here reads them. Those eight answer zero rather
 // than nil, so the tabard draws black instead of raising mid-arithmetic.
 static int lua_GetArenaTeam(lua_State* L) {
-    auto* gh = getGameHandler(L);
+    auto* arenaTeams = arenaTeamsOf(L);
     const int idx = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh || idx < 1) return luaReturnNil(L);
-    const auto& teams = gh->getArenaTeamStats();
+    if (!arenaTeams || idx < 1) return luaReturnNil(L);
+    const auto& teams = arenaTeams->getArenaTeamStats();
     if (idx > static_cast<int>(teams.size())) return luaReturnNil(L);
     const auto& t = teams[static_cast<size_t>(idx) - 1];
 
@@ -4053,10 +4083,10 @@ static int lua_GetBattlefieldInstanceInfo(lua_State* L) {
     //
     // SMSG_BATTLEFIELD_LIST carries these and they were parsed into
     // AvailableBgInfo::instanceIds all along.
-    auto* gh = getGameHandler(L);
+    auto* battlegrounds = battlegroundsOf(L);
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh || index < 1) { lua_pushnumber(L, 0); return 1; }
-    const auto& bgs = gh->getAvailableBgs();
+    if (!battlegrounds || index < 1) { lua_pushnumber(L, 0); return 1; }
+    const auto& bgs = battlegrounds->getAvailableBgs();
     if (bgs.empty()) { lua_pushnumber(L, 0); return 1; }
     const auto& ids = bgs.back().instanceIds;
     if (index > static_cast<int>(ids.size())) { lua_pushnumber(L, 0); return 1; }
@@ -4066,9 +4096,9 @@ static int lua_GetBattlefieldInstanceInfo(lua_State* L) {
 
 // GetNumBattlefields() - how many instances of it there are to choose between.
 static int lua_GetNumBattlefields(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    if (!gh) { lua_pushnumber(L, 0); return 1; }
-    const auto& bgs = gh->getAvailableBgs();
+    auto* battlegrounds = battlegroundsOf(L);
+    if (!battlegrounds) { lua_pushnumber(L, 0); return 1; }
+    const auto& bgs = battlegrounds->getAvailableBgs();
     lua_pushnumber(L, bgs.empty()
         ? 0 : static_cast<lua_Number>(bgs.back().instanceIds.size()));
     return 1;
@@ -4081,13 +4111,13 @@ static int lua_GetNumBattlefields(lua_State* L) {
 // not tell inside from outside and offered the wrong direction.
 static int lua_IsInLFGDungeon(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->getLfgState() == game::LfgState::InDungeon ? 1 : 0);
+    lua_pushboolean(L, gh && lfgOf(L).getLfgState() == lfg::LfgState::InDungeon ? 1 : 0);
     return 1;
 }
 
 // LFGTeleport(out) - out to the dungeon's entrance, or back in.
 static int lua_LFGTeleport(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->lfgTeleport(lua_toboolean(L, 1) != 0);
+    if (getGameHandler(L)) lfgOf(L).lfgTeleport(lua_toboolean(L, 1) != 0);
     return 0;
 }
 
@@ -4149,8 +4179,7 @@ static int lua_GetWorldPVPQueueStatus(lua_State* L) {
 
 // LeaveBattlefield() - walk out of the battleground currently being played.
 static int lua_LeaveBattlefield(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    if (gh) gh->leaveBattlefield();
+    if (auto* battlegrounds = battlegroundsOf(L)) battlegrounds->leaveBattlefield();
     return 0;
 }
 
@@ -4227,8 +4256,9 @@ static int lua_PlayerIsPVPInactive(lua_State* L) { lua_pushboolean(L, 0); return
 // treats a missing one as "no description" rather than raising on it.
 static int lua_GetBattlefieldInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (!gh) return luaReturnNil(L);
-    const auto& bgs = gh->getAvailableBgs();
+    auto* battlegrounds = battlegroundsOf(L);
+    if (!gh || !battlegrounds) return luaReturnNil(L);
+    const auto& bgs = battlegrounds->getAvailableBgs();
     if (bgs.empty()) return luaReturnNil(L);
     const auto* info = gh->getBattlemasterInfo(bgs.back().bgTypeId);
     if (!info || info->name.empty()) return luaReturnNil(L);
@@ -4240,7 +4270,7 @@ static int lua_GetBattlefieldInfo(lua_State* L) {
     // the level bracket the server sent, whether this is the week's call to
     // arms, and whether it is the random battleground rather than a named one
     // - type 32, which is what BattlefieldFrame keys the rewards block on.
-    const uint32_t level = gh->getPlayerLevel();
+    const uint32_t level = gh->player().level();
     const bool inBracket = (bg.minLevel == 0 || level >= bg.minLevel) &&
                            (bg.maxLevel == 0 || level <= bg.maxLevel);
     constexpr uint32_t kRandomBattleground = 32;
@@ -4282,7 +4312,7 @@ static int lua_GetBattlegroundInfo(lua_State* L) {
 
     // A row naming no level range - the random battleground is the only one -
     // is not a row saying nobody qualifies.
-    const uint32_t level = gh->getPlayerLevel();
+    const uint32_t level = gh->player().level();
     const bool hasRange = bg.minLevel != 0 || bg.maxLevel != 0;
     const bool canEnter = !hasRange || (level >= bg.minLevel && level <= bg.maxLevel);
 
@@ -4322,7 +4352,8 @@ static int lua_RequestBattlegroundInstanceInfo(lua_State* L) {
     const auto& list = gh->getBattlegroundTypes();
     if (index < 1 || index > static_cast<int>(list.size())) return 0;
     selectedBattlegroundTypeId(L) = list[static_cast<size_t>(index - 1)].id;
-    gh->requestBattlefieldList(selectedBattlegroundTypeId(L));
+    if (auto* battlegrounds = battlegroundsOf(L))
+        battlegrounds->requestBattlefieldList(selectedBattlegroundTypeId(L));
     return 0;
 }
 
@@ -4358,11 +4389,12 @@ static int lua_SetSelectedBattlefield(lua_State* L) {
 // first available one - which is what both join buttons pass.
 static int lua_JoinBattlefield(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (!gh) return 0;
+    auto* battlegrounds = battlegroundsOf(L);
+    if (!gh || !battlegrounds) return 0;
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
     const bool asGroup = lua_toboolean(L, 2) != 0;
 
-    const auto& bgs = gh->getAvailableBgs();
+    const auto& bgs = battlegrounds->getAvailableBgs();
     uint32_t bgTypeId = selectedBattlegroundTypeId(L);
     // Nothing selected can still happen - a queue asked for before the panel
     // has told anyone what it is showing - and one battleground on offer is
@@ -4389,10 +4421,10 @@ static int lua_JoinBattlefield(lua_State* L) {
     // spoken to - a vendor, a flight master - which is not a battlemaster and
     // is not what the real client sends. Nought is.
     const uint64_t battlemaster =
-        gh->isGossipWindowOpen() ? gh->getCurrentGossip().npcGuid : 0;
+        gh->quests().isGossipWindowOpen() ? gh->quests().getCurrentGossip().npcGuid : 0;
     LOG_WARNING("CMSG_BATTLEMASTER_JOIN: bgTypeId=", bgTypeId, " instance=", instanceId,
              " asGroup=", asGroup, " battlemaster=0x", std::hex, battlemaster, std::dec);
-    gh->joinBattlefield(battlemaster, bgTypeId, instanceId, asGroup);
+    battlegrounds->joinBattlefield(battlemaster, bgTypeId, instanceId, asGroup);
     return 0;
 }
 
@@ -4416,7 +4448,7 @@ static int lua_JoinBattlefield(lua_State* L) {
 // the arithmetic above lands on the base whichever way the frame reads it.
 static int lua_GetLFGCompletionReward(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const game::LfgCompletionReward* r = gh ? &gh->getLfgCompletionReward() : nullptr;
+    const lfg::LfgCompletionReward* r = gh ? &lfgOf(L).getLfgCompletionReward() : nullptr;
     if (!r || !r->valid) {
         lua_pushnil(L);      // 1: name
         lua_pushnil(L);      // 2: typeID
@@ -4458,7 +4490,7 @@ static int lua_GetLFGCompletionReward(lua_State* L) {
 static int lua_GetLFGCompletionRewardItem(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
-    const game::LfgCompletionReward* r = gh ? &gh->getLfgCompletionReward() : nullptr;
+    const lfg::LfgCompletionReward* r = gh ? &lfgOf(L).getLfgCompletionReward() : nullptr;
     if (!r || !r->valid || index < 1 ||
         index > static_cast<int>(r->items.size())) {
         lua_pushnil(L);
@@ -4523,7 +4555,7 @@ static int lua_TriggerTutorial(lua_State* L) { (void)L; return 0; }
 static int lua_Quit(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (gh) {
-        gh->requestLogout(/*exitAfterLogout=*/true);
+        gh->social().requestLogout(/*exitAfterLogout=*/true);
         return 0;
     }
     // No handler to route through - the login screen, or before one exists.
@@ -4553,7 +4585,7 @@ static int lua_ForceQuit(lua_State* L) {
 
 static int lua_ForceLogout(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (gh) gh->requestLogout(/*exitAfterLogout=*/false);
+    if (gh) gh->social().requestLogout(/*exitAfterLogout=*/false);
     return 0;
 }
 
@@ -4974,7 +5006,7 @@ static int lua_GetNumVoiceSessionMembersBySessionID(lua_State* L) {
 // GetSavedInstanceInfo; nothing was asking for it.
 static int lua_RequestRaidInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (gh) gh->requestRaidInfo();
+    if (gh) gh->social().requestRaidInfo();
     return 0;
 }
 
@@ -5022,8 +5054,8 @@ static std::vector<uint32_t> taxiNodeOrder(game::GameHandler* gh) {
     std::vector<uint32_t> ids;
     if (!gh) return ids;
 
-    const auto& nodes = gh->getTaxiNodes();
-    const auto current = nodes.find(gh->getTaxiCurrentNode());
+    const auto& nodes = gh->movement().getTaxiNodes();
+    const auto current = nodes.find(gh->movement().getTaxiCurrentNode());
     if (current == nodes.end()) return ids;
 
     const uint32_t mapId = current->second.mapId;
@@ -5057,7 +5089,7 @@ static uint32_t taxiNodeAt(game::GameHandler* gh, int index) {
 static bool taxiNodeMapPos(game::GameHandler* gh, uint32_t nodeId,
                            float& outU, float& outV) {
     if (!gh) return false;
-    const auto& nodes = gh->getTaxiNodes();
+    const auto& nodes = gh->movement().getTaxiNodes();
     const auto it = nodes.find(nodeId);
     if (it == nodes.end()) return false;
 
@@ -5103,7 +5135,7 @@ static int lua_TaxiLegCoord(lua_State* L) {
     const int hop = static_cast<int>(luaL_optnumber(L, 2, 0));
     if (dest == 0 || hop < 1 || !gh) { lua_pushnumber(L, 0); return 1; }
 
-    const auto route = gh->getTaxiRouteTo(dest);
+    const auto route = gh->movement().getTaxiRouteTo(dest);
     // Hop N runs from route[N-1] to route[N], so the last hop is size-1.
     if (hop >= static_cast<int>(route.size())) { lua_pushnumber(L, 0); return 1; }
 
@@ -5161,10 +5193,9 @@ void registerSystemLuaAPI(lua_State* L) {
                 // details called a nil global and raised before the first row
                 // was read - the reader beside it worked the whole time.
                 {"GetNumArenaTeamMembers", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
             const uint32_t teamId =
-                arenaTeamIdAtIndex(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
-            const auto* roster = (gh && teamId) ? gh->getArenaTeamRoster(teamId) : nullptr;
+                arenaTeamIdAtIndex(L, static_cast<int>(luaL_optnumber(L, 1, 0)));
+            const auto* roster = teamId ? arenaTeamsOf(L)->getArenaTeamRoster(teamId) : nullptr;
             lua_pushnumber(L, roster
                 ? static_cast<lua_Number>(roster->members.size()) : 0);
             return 1;
@@ -5172,9 +5203,9 @@ void registerSystemLuaAPI(lua_State* L) {
                 // SortArenaTeamRoster(column) - the details frame's column
                 // headers. Unbound, every one of them raised on click.
                 {"SortArenaTeamRoster", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
+            auto* teams = arenaTeamsOf(L);
             const char* key = luaL_optstring(L, 1, "");
-            if (gh && key && *key) gh->sortArenaTeamRosters(key);
+            if (teams && key && *key) teams->sortArenaTeamRosters(key);
             return 0;
         }},
                 {"GetArenaTeamRosterSelection",  lua_GetArenaTeamRosterSelection},
@@ -5300,7 +5331,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // the client knew exactly which achievements were earned.
                 {"HasCompletedAnyAchievement", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushboolean(L, gh && !gh->getEarnedAchievements().empty() ? 1 : 0);
+            lua_pushboolean(L, gh && !achievementsOf(L).getEarnedAchievements().empty() ? 1 : 0);
             return 1;
         }},
                 {"TurnInGuildCharter",       lua_ReturnNothing},
@@ -5341,12 +5372,12 @@ void registerSystemLuaAPI(lua_State* L) {
                 // sets a raid difficulty while standing in a dungeon.
                 {"GetDungeonDifficulty", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, (gh ? gh->getInstanceDifficulty() : 0u) + 1u);
+            lua_pushnumber(L, (gh ? gh->social().getInstanceDifficulty() : 0u) + 1u);
             return 1;
         }},
                 {"GetRaidDifficulty", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, (gh ? gh->getInstanceDifficulty() : 0u) + 1u);
+            lua_pushnumber(L, (gh ? gh->social().getInstanceDifficulty() : 0u) + 1u);
             return 1;
         }},
                 {"GetChatTypeIndex",         lua_ReturnOne},
@@ -5357,7 +5388,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // delay text on FrameXML's corpse prompt always empty.
                 {"GetCorpseRecoveryDelay", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getCorpseReclaimDelaySec() : 0.0);
+            lua_pushnumber(L, gh ? gh->combat().getCorpseReclaimDelaySec() : 0.0);
             return 1;
         }},
                 {"GetAdjustedSkillPoints",   lua_ReturnZero},
@@ -5374,7 +5405,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"GetPartyLeaderIndex", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushnumber(L, 0); return 1; }
-            const auto& pd = gh->getPartyData();
+            const auto& pd = groupOf(L).getPartyData();
             if (pd.leaderGuid == 0 || pd.leaderGuid == gh->getPlayerGuid()) {
                 lua_pushnumber(L, 0);
                 return 1;
@@ -5552,7 +5583,7 @@ void registerSystemLuaAPI(lua_State* L) {
             // so this reads from what is actually active rather than from a
             // flag nobody sets.
             bool active = false;
-            for (const auto& a : gh->getPlayerAuras()) {
+            for (const auto& a : gh->spells().getPlayerAuras()) {
                 if (a.spellId == c.spellId) { active = true; break; }
             }
             lua_pushboolean(L, active ? 1 : 0);
@@ -5635,14 +5666,14 @@ void registerSystemLuaAPI(lua_State* L) {
                 // both - a queue that always read as just-joined with no
                 // estimate, which is the whole content of that window.
                 {"GetBattlefieldTimeWaited", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
+            auto* battlegrounds = battlegroundsOf(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 1));
             // Counted on from the server's last word, which comes about once
             // a minute - answered as it stood, the minimap tooltip's time in
             // queue sat still for a minute and then jumped.
             double ms = 0.0;
-            if (gh && index >= 1 && index <= 3) {
-                const auto& q = gh->getBgQueues()[static_cast<size_t>(index - 1)];
+            if (battlegrounds && index >= 1 && index <= 3) {
+                const auto& q = battlegrounds->getBgQueues()[static_cast<size_t>(index - 1)];
                 ms = q.timeInQueueSec * 1000.0;
                 if (q.statusId == 1 &&
                     q.queueTimeReceivedAt != std::chrono::steady_clock::time_point{}) {
@@ -5654,11 +5685,11 @@ void registerSystemLuaAPI(lua_State* L) {
             return 1;
         }},
                 {"GetBattlefieldEstimatedWaitTime", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
+            auto* battlegrounds = battlegroundsOf(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 1));
             double ms = 0.0;
-            if (gh && index >= 1 && index <= 3)
-                ms = gh->getBgQueues()[static_cast<size_t>(index - 1)].avgWaitTimeSec * 1000.0;
+            if (battlegrounds && index >= 1 && index <= 3)
+                ms = battlegrounds->getBgQueues()[static_cast<size_t>(index - 1)].avgWaitTimeSec * 1000.0;
             lua_pushnumber(L, ms);
             return 1;
         }},
@@ -5671,7 +5702,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"CanJoinBattlefieldAsGroup", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushboolean(L, 0); return 1; }
-            const auto& pd = gh->getPartyData();
+            const auto& pd = groupOf(L).getPartyData();
             const bool leadsAParty = !pd.isEmpty() && pd.leaderGuid == gh->getPlayerGuid();
             lua_pushboolean(L, leadsAParty ? 1 : 0);
             return 1;
@@ -5791,12 +5822,12 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const auto category = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
             if (!gh) { lua_pushnumber(L, 0); return 1; }
-            const auto* set = gh->getInspectedPlayerAchievements(
-                gh->getAchievementComparisonGuid());
+            const auto* set = achievementsOf(L).getInspectedPlayerAchievements(
+                achievementsOf(L).getAchievementComparisonGuid());
             if (!set) { lua_pushnumber(L, 0); return 1; }
-            gh->ensureAchievementCategoriesLoaded();
+            achievementsOf(L).ensureAchievementCategoriesLoaded();
             uint32_t done = 0;
-            for (uint32_t id : gh->getCategoryAchievements(category))
+            for (uint32_t id : achievementsOf(L).getCategoryAchievements(category))
                 if (set->count(id)) ++done;
             lua_pushnumber(L, done);
             return 1;
@@ -5863,7 +5894,7 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int slot = static_cast<int>(luaL_optnumber(L, 1, 0)) - 1;
             if (!gh || slot < 0) { lua_pushboolean(L, 0); return 1; }
-            const auto& bar = gh->getActionBar();
+            const auto& bar = gh->actionBar().slots();
             // 6603 is Auto Attack, the one action that flashes the button red
             // for as long as the swing keeps going.
             constexpr uint32_t kAutoAttack = game::SPELL_ID_ATTACK;
@@ -5876,11 +5907,11 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int slot = static_cast<int>(luaL_optnumber(L, 1, 0)) - 1;
             if (!gh || slot < 0) { lua_pushboolean(L, 0); return 1; }
-            const auto& bar = gh->getActionBar();
+            const auto& bar = gh->actionBar().slots();
             bool consumable = false;
             if (slot < static_cast<int>(bar.size()) &&
                 bar[slot].type == game::ActionBarSlot::ITEM) {
-                const auto* info = gh->getItemInfo(bar[slot].id);
+                const auto* info = gh->inventory().getItemInfo(bar[slot].id);
                 consumable = info && info->valid && info->itemClass == 0;  // Consumable
             }
             lua_pushboolean(L, consumable);
@@ -5890,11 +5921,11 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int slot = static_cast<int>(luaL_optnumber(L, 1, 0)) - 1;
             if (!gh || slot < 0) { lua_pushboolean(L, 0); return 1; }
-            const auto& bar = gh->getActionBar();
+            const auto& bar = gh->actionBar().slots();
             bool worn = false;
             if (slot < static_cast<int>(bar.size()) &&
                 bar[slot].type == game::ActionBarSlot::ITEM) {
-                const auto& inv = gh->getInventory();
+                const auto& inv = gh->inventory().items();
                 for (int e = 0; e < game::Inventory::NUM_EQUIP_SLOTS && !worn; ++e) {
                     const auto& s = inv.getEquipSlot(static_cast<game::EquipSlot>(e));
                     worn = !s.empty() && s.item.itemId == bar[slot].id;
@@ -5907,11 +5938,11 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int slot = static_cast<int>(luaL_optnumber(L, 1, 0)) - 1;
             if (!gh || slot < 0) { lua_pushboolean(L, 0); return 1; }
-            const auto& bar = gh->getActionBar();
+            const auto& bar = gh->actionBar().slots();
             bool stackable = false;
             if (slot < static_cast<int>(bar.size()) &&
                 bar[slot].type == game::ActionBarSlot::ITEM) {
-                const auto* info = gh->getItemInfo(bar[slot].id);
+                const auto* info = gh->inventory().getItemInfo(bar[slot].id);
                 stackable = info && info->valid && info->maxStack > 1;
             }
             lua_pushboolean(L, stackable);
@@ -5994,22 +6025,22 @@ void registerSystemLuaAPI(lua_State* L) {
             constexpr int kCancelSlot = 2;
             if (!gh) return luaReturnNil(L);
             if (slot == 1) {
-                const uint32_t packed = gh->getPetActionSlot(0);
+                const uint32_t packed = petOf(L).getPetActionSlot(0);
                 if (packed == 0) return luaReturnNil(L);
-                const auto type = game::pet::petActionType(packed);
+                const auto type = pet::petActionType(packed);
                 // A command or a stance is not something to show here - an
                 // empty possess bar carries one of those in slot zero, and
                 // drawing its icon would put a Follow arrow where the
                 // creature's spell belongs.
-                if (type == game::pet::ActionType::Command ||
-                    type == game::pet::ActionType::Reaction) {
+                if (type == pet::ActionType::Command ||
+                    type == pet::ActionType::Reaction) {
                     return luaReturnNil(L);
                 }
-                const uint32_t spellId = game::pet::petActionId(packed);
+                const uint32_t spellId = pet::petActionId(packed);
                 if (spellId == 0) return luaReturnNil(L);
                 const std::string icon = gh->getSpellIconPath(spellId);
                 if (icon.empty()) lua_pushnil(L); else lua_pushstring(L, icon.c_str());
-                lua_pushstring(L, gh->getSpellName(spellId).c_str());
+                lua_pushstring(L, gh->spells().getSpellName(spellId).c_str());
                 lua_pushboolean(L, 1);
                 return 3;
             }
@@ -6018,7 +6049,7 @@ void registerSystemLuaAPI(lua_State* L) {
             if (spellId == 0) return luaReturnNil(L);
             const std::string icon = gh->getSpellIconPath(spellId);
             if (icon.empty()) lua_pushnil(L); else lua_pushstring(L, icon.c_str());
-            lua_pushstring(L, gh->getSpellName(spellId).c_str());
+            lua_pushstring(L, gh->spells().getSpellName(spellId).c_str());
             lua_pushboolean(L, 1);
             return 3;
         }},
@@ -6037,7 +6068,7 @@ void registerSystemLuaAPI(lua_State* L) {
             if (!gh) { lua_pushboolean(L, 0); return 1; }
             const uint64_t self = gh->getPlayerGuid();
             constexpr uint8_t kMemberFlagAssistant = 0x01;
-            for (const auto& mem : gh->getPartyData().members) {
+            for (const auto& mem : groupOf(L).getPartyData().members) {
                 if (mem.guid == self) {
                     lua_pushboolean(L, (mem.flags & kMemberFlagAssistant) ? 1 : 0);
                     return 1;
@@ -6070,7 +6101,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // missing at this end - and FrameXML's own call to it is
                 // commented out, which is the link missing at the other.
                 {"QueryGuildEventLog", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->requestGuildEventLog();
+            guildOf(L).requestGuildEventLog();
             return 0;
         }},
                 {"RegisterForSave",          lua_ReturnNothing},
@@ -6104,7 +6135,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // panel shows nothing.
                 {"GetNumDisplayChannels", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? static_cast<double>(gh->getJoinedChannels().size()) : 0.0);
+            lua_pushnumber(L, gh ? static_cast<double>(gh->chat().getJoinedChannels().size()) : 0.0);
             return 1;
         }},
                 {"GetNumMapOverlays",        lua_GetNumMapOverlays},
@@ -6115,7 +6146,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // count is asked for beside it and a flat zero said the
                 // positions were not there while they were.
                 {"GetNumBattlefieldPositions", [](lua_State* L) -> int {
-            lua_pushnumber(L, bgCount(getGameHandler(L), 0));
+            lua_pushnumber(L, bgCount(L, 0));
             return 1;
         }},
                 {"GetBattlefieldPosition",   lua_GetBattlefieldPosition},
@@ -6252,8 +6283,7 @@ void registerSystemLuaAPI(lua_State* L) {
             // Only when both are carried, for the reason the accessor gives:
             // one carrier cannot be told from the other, and the loop this
             // bounds draws a named flag texture per entry.
-            auto* gh = getGameHandler(L);
-            const int n = bgCount(gh, 1);
+            const int n = bgCount(L, 1);
             lua_pushnumber(L, n == 2 ? 2 : 0);
             return 1;
         }},
@@ -6314,7 +6344,7 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh || index < 1) { lua_pushnil(L); return 1; }
-            const auto& joined = gh->getJoinedChannels();
+            const auto& joined = gh->chat().getJoinedChannels();
             if (index > static_cast<int>(joined.size())) { lua_pushnil(L); return 1; }
             lua_pushstring(L, joined[static_cast<size_t>(index) - 1].c_str());
             lua_pushboolean(L, 0);      // header - flat list, no categories
@@ -6343,7 +6373,7 @@ void registerSystemLuaAPI(lua_State* L) {
             bool on = false;
             switch (setting) {
                 case 1: on = gh && gh->isInInstance(); break;
-                case 2: on = gh && !gh->getPartyData().members.empty(); break;
+                case 2: on = gh && !groupOf(L).getPartyData().members.empty(); break;
                 case 3: on = true; break;
                 default: on = false; break;   // 0, and anything unrecognised
             }
@@ -6360,7 +6390,7 @@ void registerSystemLuaAPI(lua_State* L) {
             const int slot = static_cast<int>(luaL_optnumber(L, 1, 0)) - 1;
             bool repeating = false;
             if (gh && slot >= 0) {
-                const auto& bar = gh->getActionBar();
+                const auto& bar = gh->actionBar().slots();
                 if (slot < static_cast<int>(bar.size()) &&
                     bar[slot].type == game::ActionBarSlot::SPELL) {
                     constexpr uint32_t kAutoShot = 75, kShoot = 5019;
@@ -6391,7 +6421,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"IsPartyLeader", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushboolean(L, 0); return 1; }
-            const uint64_t leader = gh->getPartyData().leaderGuid;
+            const uint64_t leader = groupOf(L).getPartyData().leaderGuid;
             lua_pushboolean(L, leader != 0 && leader == gh->getPlayerGuid());
             return 1;
         }},
@@ -6410,7 +6440,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"HasPetSpells", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushnil(L); return 1; }
-            const auto& spells = gh->getPetSpells();
+            const auto& spells = petOf(L).getPetSpells();
             if (spells.empty()) { lua_pushnil(L); return 1; }
             lua_pushnumber(L, static_cast<lua_Number>(spells.size()));
             constexpr uint8_t kWarlock = 9;
@@ -6481,9 +6511,9 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int sel = selectedDisplayChannel(L);
             if (!gh || sel < 1) { lua_pushboolean(L, 0); return 1; }
-            const auto& joined = gh->getJoinedChannels();
+            const auto& joined = gh->chat().getJoinedChannels();
             if (sel > static_cast<int>(joined.size())) { lua_pushboolean(L, 0); return 1; }
-            lua_pushboolean(L, gh->ownsChatChannel(joined[static_cast<size_t>(sel) - 1]) ? 1 : 0);
+            lua_pushboolean(L, gh->chat().ownsChannel(joined[static_cast<size_t>(sel) - 1]) ? 1 : 0);
             return 1;
         }},
                 {"SetSelectedDisplayChannel", [](lua_State* L) -> int {
@@ -6506,10 +6536,10 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int channel = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh || channel < 1) { lua_pushnumber(L, 0); return 1; }
-            const auto& joined = gh->getJoinedChannels();
+            const auto& joined = gh->chat().getJoinedChannels();
             if (channel > static_cast<int>(joined.size())) { lua_pushnumber(L, 0); return 1; }
             const auto& name = joined[static_cast<size_t>(channel) - 1];
-            gh->requestChannelList(name);
+            gh->chat().requestChannelList(name);
             lua_pushnumber(L, static_cast<lua_Number>(gh->getChannelRoster(name).size()));
             return 1;
         }},
@@ -6525,7 +6555,7 @@ void registerSystemLuaAPI(lua_State* L) {
             const int channel = static_cast<int>(luaL_optnumber(L, 1, 0));
             const int member = static_cast<int>(luaL_optnumber(L, 2, 0));
             if (!gh || channel < 1 || member < 1) { return luaReturnNil(L); }
-            const auto& joined = gh->getJoinedChannels();
+            const auto& joined = gh->chat().getJoinedChannels();
             if (channel > static_cast<int>(joined.size())) { return luaReturnNil(L); }
             const auto& roster = gh->getChannelRoster(joined[static_cast<size_t>(channel) - 1]);
             if (member > static_cast<int>(roster.size())) { return luaReturnNil(L); }
@@ -6571,7 +6601,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // so the list was empty for FrameXML's map and for this
                 // client's own minimap alike.
                 {"RequestBattlefieldPositions", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->requestBattlefieldPositions();
+            if (auto* battlegrounds = battlegroundsOf(L)) battlegrounds->requestBattlefieldPositions();
             return 0;
         }},
                 {"UpdateWorldMapArrowFrames",   lua_ReturnNothing},
@@ -6810,12 +6840,12 @@ void registerSystemLuaAPI(lua_State* L) {
                 // the Display panel was built.
                 {"ShowingHelm", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushboolean(L, (gh && gh->isHelmVisible()) ? 1 : 0);
+            lua_pushboolean(L, (gh && gh->player().helmVisible()) ? 1 : 0);
             return 1;
         }},
                 {"ShowingCloak", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushboolean(L, (gh && gh->isCloakVisible()) ? 1 : 0);
+            lua_pushboolean(L, (gh && gh->player().cloakVisible()) ? 1 : 0);
             return 1;
         }},
                 // The equipment manager exists here - GetNumEquipmentSets and
@@ -6840,7 +6870,7 @@ void registerSystemLuaAPI(lua_State* L) {
             if (!gh) return 0;
             const bool want = lua_isnumber(L, 1) ? (lua_tonumber(L, 1) != 0)
                                                  : (lua_toboolean(L, 1) != 0);
-            if (want != gh->isHelmVisible()) gh->toggleHelm();
+            if (want != gh->player().helmVisible()) gh->social().toggleHelm();
             return 0;
         }},
                 {"ShowCloak", [](lua_State* L) -> int {
@@ -6848,34 +6878,34 @@ void registerSystemLuaAPI(lua_State* L) {
             if (!gh) return 0;
             const bool want = lua_isnumber(L, 1) ? (lua_tonumber(L, 1) != 0)
                                                  : (lua_toboolean(L, 1) != 0);
-            if (want != gh->isCloakVisible()) gh->toggleCloak();
+            if (want != gh->player().cloakVisible()) gh->social().toggleCloak();
             return 0;
         }},
                 {"TogglePVP", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) gh->togglePvp();
+            if (gh) gh->combat().togglePvp();
             return 0;
         }},
                 {"Minimap_Ping", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             float x = static_cast<float>(luaL_optnumber(L, 1, 0));
             float y = static_cast<float>(luaL_optnumber(L, 2, 0));
-            if (gh) gh->sendMinimapPing(x, y);
+            if (gh) gh->social().sendMinimapPing(x, y);
             return 0;
         }},
                 {"RequestTimePlayed", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) gh->requestPlayedTime();
+            if (gh) gh->social().requestPlayedTime();
             return 0;
         }},
                 {"Logout", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) gh->requestLogout();
+            if (gh) gh->social().requestLogout();
             return 0;
         }},
                 {"CancelLogout", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) gh->cancelLogout();
+            if (gh) gh->social().cancelLogout();
             return 0;
         }},
                 {"NumTaxiNodes", [](lua_State* L) -> int {
@@ -6886,7 +6916,7 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const uint32_t id = taxiNodeAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
             if (id == 0) { lua_pushstring(L, ""); return 1; }
-            const auto& nodes = gh->getTaxiNodes();
+            const auto& nodes = gh->movement().getTaxiNodes();
             const auto it = nodes.find(id);
             lua_pushstring(L, it != nodes.end() ? it->second.name.c_str() : "");
             return 1;
@@ -6902,18 +6932,18 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const uint32_t id = taxiNodeAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
             if (id == 0) { lua_pushstring(L, "NONE"); return 1; }
-            if (id == gh->getTaxiCurrentNode())  { lua_pushstring(L, "CURRENT"); return 1; }
-            if (!gh->isKnownTaxiNode(id))        { lua_pushstring(L, "NONE"); return 1; }
+            if (id == gh->movement().getTaxiCurrentNode())  { lua_pushstring(L, "CURRENT"); return 1; }
+            if (!gh->movement().isKnownTaxiNode(id))        { lua_pushstring(L, "NONE"); return 1; }
             // Known, but nothing flies there from where the player is standing:
             // shown in yellow rather than hidden, so it reads as somewhere they
             // have been rather than somewhere that does not exist.
-            lua_pushstring(L, gh->hasTaxiRouteTo(id) ? "REACHABLE" : "DISTANT");
+            lua_pushstring(L, gh->movement().hasTaxiRouteTo(id) ? "REACHABLE" : "DISTANT");
             return 1;
         }},
                 {"TakeTaxiNode", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const uint32_t id = taxiNodeAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
-            if (id != 0) gh->activateTaxi(id);
+            if (id != 0) gh->movement().activateTaxi(id);
             return 0;
         }},
                 // TaxiNodePosition(index) → x, y as fractions of the map.
@@ -6932,7 +6962,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"TaxiNodeSetCurrent", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const uint32_t id = taxiNodeAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
-            taxiRouteShown(L) = (id != 0 && gh) ? gh->getTaxiRouteTo(id)
+            taxiRouteShown(L) = (id != 0 && gh) ? gh->movement().getTaxiRouteTo(id)
                                                : std::vector<uint32_t>{};
             return 0;
         }},
@@ -6946,7 +6976,7 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const uint32_t id = taxiNodeAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
             if (id == 0 || !gh) { lua_pushnumber(L, 0); return 1; }
-            const auto route = gh->getTaxiRouteTo(id);
+            const auto route = gh->movement().getTaxiRouteTo(id);
             // A route of N nodes is N-1 hops; one of fewer than two is no
             // journey at all.
             lua_pushnumber(L, route.size() >= 2
@@ -7012,14 +7042,14 @@ void registerSystemLuaAPI(lua_State* L) {
             return 0;
         }},
                 {"CloseTaxiMap", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->closeTaxi();
+            if (auto* gh = getGameHandler(L)) gh->movement().closeTaxi();
             return 0;
         }},
                 // TaxiNodeCost(index) → the fare in copper, for the tooltip.
                 {"TaxiNodeCost", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const uint32_t id = taxiNodeAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
-            lua_pushnumber(L, id != 0 ? static_cast<double>(gh->getTaxiCostTo(id)) : 0.0);
+            lua_pushnumber(L, id != 0 ? static_cast<double>(gh->movement().getTaxiCostTo(id)) : 0.0);
             return 1;
         }},
                 {"GetNetStats", [](lua_State* L) -> int {
@@ -7033,14 +7063,14 @@ void registerSystemLuaAPI(lua_State* L) {
         }},
                 {"GetCurrentTitle", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getChosenTitleBit() : -1);
+            lua_pushnumber(L, gh ? titlesOf(L).getChosenTitleBit() : -1);
             return 1;
         }},
                 {"GetTitleName", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             int bit = static_cast<int>(luaL_checknumber(L, 1));
             if (!gh || bit < 0) { return luaReturnNil(L); }
-            std::string title = gh->getFormattedTitle(static_cast<uint32_t>(bit));
+            std::string title = titlesOf(L).getFormattedTitle(static_cast<uint32_t>(bit));
             if (title.empty()) { return luaReturnNil(L); }
             lua_pushstring(L, title.c_str());
             return 1;
@@ -7055,12 +7085,12 @@ void registerSystemLuaAPI(lua_State* L) {
                 // better.
                 {"SetCurrentTitle", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) gh->sendSetTitle(static_cast<int32_t>(luaL_optnumber(L, 1, -1)));
+            if (gh) titlesOf(L).sendSetTitle(static_cast<int32_t>(luaL_optnumber(L, 1, -1)));
             return 0;
         }},
                 {"GetInspectSpecialization", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const auto* ir = gh ? gh->getInspectResult() : nullptr;
+            const auto* ir = gh ? gh->social().getInspectResult() : nullptr;
             lua_pushnumber(L, ir ? ir->activeTalentGroup : 0);
             return 1;
         }},
@@ -7072,7 +7102,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // parses them into InspectResult.
                 {"GetInspectArenaTeamData", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const auto* ir = gh ? gh->getInspectResult() : nullptr;
+            const auto* ir = gh ? gh->social().getInspectResult() : nullptr;
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!ir || index < 1 ||
                 index > static_cast<int>(ir->arenaTeams.size())) {
@@ -7116,7 +7146,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // claiming the player has never won anything.
                 {"HasInspectHonorData", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const auto* r = gh ? gh->getInspectResult() : nullptr;
+            const auto* r = gh ? gh->social().getInspectResult() : nullptr;
             lua_pushboolean(L, (r && r->hasHonorData) ? 1 : 0);
             return 1;
         }},
@@ -7126,8 +7156,8 @@ void registerSystemLuaAPI(lua_State* L) {
                 // was false for good.
                 {"RequestInspectHonorData", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const auto* r = gh ? gh->getInspectResult() : nullptr;
-            if (gh && r && r->guid != 0) gh->requestInspectHonorData(r->guid);
+            const auto* r = gh ? gh->social().getInspectResult() : nullptr;
+            if (gh && r && r->guid != 0) gh->social().requestInspectHonorData(r->guid);
             return 0;
         }},
                 {"GetInspectHonorData", [](lua_State* L) -> int {
@@ -7141,7 +7171,7 @@ void registerSystemLuaAPI(lua_State* L) {
             // reused rather than removed. Passed on as sent rather than
             // interpreted here.
             auto* gh = getGameHandler(L);
-            const auto* r = gh ? gh->getInspectResult() : nullptr;
+            const auto* r = gh ? gh->social().getInspectResult() : nullptr;
             if (!r || !r->hasHonorData) {
                 for (int i = 0; i < 6; ++i) lua_pushnumber(L, 0);
                 return 6;
@@ -7184,7 +7214,7 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
             const uint64_t guid = resolveUnitGuid(gh, luaL_optstring(L, 1, "target"));
-            if (guid) gh->inspectUnit(guid);
+            if (guid) gh->social().inspectUnit(guid);
             return 0;
         }},
                 {"ClearInspectPlayer", [](lua_State* L) -> int {
@@ -7203,21 +7233,21 @@ void registerSystemLuaAPI(lua_State* L) {
                 // overflow, which is exactly what they are right for.
                 {"GetHonorCurrency", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getHonorPoints() : 0);
+            lua_pushnumber(L, gh ? gh->player().honorPoints() : 0);
             lua_pushnumber(L, 75000);
             return 2;
         }},
                 {"GetArenaCurrency", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getArenaPoints() : 0);
+            lua_pushnumber(L, gh ? gh->player().arenaPoints() : 0);
             lua_pushnumber(L, 5000);
             return 2;
         }},
                 {"GetTimePlayed", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); return 2; }
-            lua_pushnumber(L, gh->getTotalTimePlayed());
-            lua_pushnumber(L, gh->getLevelTimePlayed());
+            lua_pushnumber(L, gh->social().getTotalTimePlayed());
+            lua_pushnumber(L, gh->social().getLevelTimePlayed());
             return 2;
         }},
                 {"GetBindLocation", [](lua_State* L) -> int {
@@ -7238,15 +7268,15 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh || index < 1) return 0;
-            const auto& locks = gh->getInstanceLockouts();
+            const auto& locks = gh->social().getInstanceLockouts();
             if (index > static_cast<int>(locks.size())) return 0;
             const auto& l = locks[static_cast<size_t>(index) - 1];
-            gh->setSavedInstanceExtend(l.mapId, l.difficulty, lua_toboolean(L, 2) != 0);
+            gh->social().setSavedInstanceExtend(l.mapId, l.difficulty, lua_toboolean(L, 2) != 0);
             return 0;
         }},
                 {"GetNumSavedInstances", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getInstanceLockouts().size() : 0);
+            lua_pushnumber(L, gh ? gh->social().getInstanceLockouts().size() : 0);
             return 1;
         }},
                 {"GetSavedInstanceInfo", [](lua_State* L) -> int {
@@ -7254,7 +7284,7 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             int index = static_cast<int>(luaL_checknumber(L, 1));
             if (!gh || index < 1) { return luaReturnNil(L); }
-            const auto& lockouts = gh->getInstanceLockouts();
+            const auto& lockouts = gh->social().getInstanceLockouts();
             if (index > static_cast<int>(lockouts.size())) { return luaReturnNil(L); }
             const auto& l = lockouts[index - 1];
             // The real name, out of Map.dbc, which the client already reads for
@@ -7296,7 +7326,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // arrived.
                 {"CalendarGetNumPendingInvites", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? static_cast<double>(gh->getCalendarPendingInvites()) : 0);
+            lua_pushnumber(L, gh ? static_cast<double>(calendarOf(L).getCalendarPendingInvites()) : 0);
             return 1;
         }},
                 {"CalendarGetNumDayEvents", [](lua_State* L) -> int {
@@ -7320,9 +7350,9 @@ void registerSystemLuaAPI(lua_State* L) {
             const auto& row = rows[static_cast<size_t>(index) - 1];
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
-            const wowee::game::CalendarData& cal = gh->getCalendarData();
+            const wowee::calendar::CalendarData& cal = calendarOf(L).getCalendarData();
 
-            if (row.kind == wowee::game::CalendarEntryKind::RaidLockout) {
+            if (row.kind == wowee::calendar::CalendarEntryKind::RaidLockout) {
                 const auto& lock = cal.lockouts[row.index];
                 lua_pushstring(L, gh->getMapName(lock.mapId).c_str());
                 lua_pushnumber(L, row.hour);
@@ -7341,7 +7371,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 lua_pushstring(L, "");             // difficultyName
                 return 15;
             }
-            if (row.kind == wowee::game::CalendarEntryKind::Holiday) {
+            if (row.kind == wowee::calendar::CalendarEntryKind::Holiday) {
                 const auto& holiday = cal.holidays[row.index];
                 lua_pushstring(L, holiday.textureFilename.c_str());
                 lua_pushnumber(L, 0);              // hour
@@ -7389,10 +7419,10 @@ void registerSystemLuaAPI(lua_State* L) {
             const int index = static_cast<int>(luaL_optnumber(L, 3, 0));
             if (index < 1 || static_cast<size_t>(index) > rows.size()) return 0;
             const auto& row = rows[static_cast<size_t>(index) - 1];
-            if (row.kind != wowee::game::CalendarEntryKind::Holiday) return 0;
+            if (row.kind != wowee::calendar::CalendarEntryKind::Holiday) return 0;
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
-            const auto& holiday = gh->getCalendarData().holidays[row.index];
+            const auto& holiday = calendarOf(L).getCalendarData().holidays[row.index];
             lua_pushstring(L, holiday.textureFilename.c_str());
             lua_pushstring(L, "");
             lua_pushstring(L, holiday.textureFilename.c_str());
@@ -7408,10 +7438,10 @@ void registerSystemLuaAPI(lua_State* L) {
             const int index = static_cast<int>(luaL_optnumber(L, 3, 0));
             if (index < 1 || static_cast<size_t>(index) > rows.size()) return 0;
             const auto& row = rows[static_cast<size_t>(index) - 1];
-            if (row.kind != wowee::game::CalendarEntryKind::RaidLockout) return 0;
+            if (row.kind != wowee::calendar::CalendarEntryKind::RaidLockout) return 0;
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
-            const auto& lock = gh->getCalendarData().lockouts[row.index];
+            const auto& lock = calendarOf(L).getCalendarData().lockouts[row.index];
             lua_pushstring(L, gh->getMapName(lock.mapId).c_str());
             lua_pushstring(L, "RAID_LOCKOUT");
             lua_pushnumber(L, static_cast<double>(lock.mapId));
@@ -7424,7 +7454,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // Ask the server for the calendar. The addon's OnShow calls
                 // this, and the answer arrives as CALENDAR_UPDATE_EVENT_LIST.
                 {"OpenCalendar", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->requestCalendar();
+            if (getGameHandler(L)) calendarOf(L).requestCalendar();
             return 0;
         }},
                 // Whether a request is in flight. Nothing here queues one, so
@@ -7448,8 +7478,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // The server decides for real; this is the guild-membership
                 // half of it, which is the half that gates the button.
                 {"CanEditGuildEvent", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            lua_pushboolean(L, (gh && !gh->getGuildName().empty()) ? 1 : 0);
+            lua_pushboolean(L, !guildOf(L).getGuildName().empty() ? 1 : 0);
             return 1;
         }},
                 // Arena team events need a team. No arena team is tracked, so
@@ -7470,8 +7499,8 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             if (!gh || index < 1 || static_cast<size_t>(index) > rows.size()) return 0;
             const auto& row = rows[static_cast<size_t>(index) - 1];
-            if (row.kind != wowee::game::CalendarEntryKind::Event) return 0;
-            gh->requestCalendarEvent(gh->getCalendarData().events[row.index].eventId);
+            if (row.kind != wowee::calendar::CalendarEntryKind::Event) return 0;
+            calendarOf(L).requestCalendarEvent(calendarOf(L).getCalendarData().events[row.index].eventId);
             return 0;
         }},
                 {"CalendarCloseEvent", [](lua_State* L) -> int {
@@ -7485,11 +7514,11 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"CalendarGetEventInfo", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
-            const auto& ev = gh->getCalendarEventDetail();
+            const auto& ev = calendarOf(L).getCalendarEventDetail();
             if (ev.eventId == 0) return 0;
             lua_pushstring(L, ev.title.c_str());
             lua_pushstring(L, ev.description.c_str());
-            lua_pushstring(L, gh->lookupName(ev.creatorGuid).c_str());
+            lua_pushstring(L, gh->queryCache().lookupName(ev.creatorGuid).c_str());
             lua_pushnumber(L, ev.type + 1);          // wire counts from zero
             lua_pushnumber(L, ev.repeatOption + 1);  // and so does this
             lua_pushnumber(L, ev.maxInvites);
@@ -7514,7 +7543,7 @@ void registerSystemLuaAPI(lua_State* L) {
             lua_pushboolean(L, (ev.flags & kFlagInvitesLocked) ? 1 : 0);
             lua_pushboolean(L, 0);              // autoApprove
             lua_pushboolean(L, 0);              // pendingInvite
-            lua_pushnumber(L, calendarInviteStatusFor(gh->getCalendarData(),
+            lua_pushnumber(L, calendarInviteStatusFor(calendarOf(L).getCalendarData(),
                                                       ev.eventId) + 1);
             // CALENDAR_INVITETYPE_NORMAL, which is 1 - the interface's range
             // starts there, so zero is not "normal" but out of range.
@@ -7542,7 +7571,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"CalendarCanSendInvite", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushboolean(L, 0); return 1; }
-            const auto& ev = gh->getCalendarEventDetail();
+            const auto& ev = calendarOf(L).getCalendarEventDetail();
             const uint64_t me = gh->getPlayerGuid();
             bool can = (me != 0 && ev.creatorGuid == me);
             if (!can) {
@@ -7558,7 +7587,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"CalendarEventGetNumInvites", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             lua_pushnumber(L, gh ? static_cast<double>(
-                gh->getCalendarEventDetail().invitees.size()) : 0);
+                calendarOf(L).getCalendarEventDetail().invitees.size()) : 0);
             return 1;
         }},
                 // name, level, className, classFilename, inviteStatus - the
@@ -7567,10 +7596,10 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh) return 0;
-            const auto& list = gh->getCalendarEventDetail().invitees;
+            const auto& list = calendarOf(L).getCalendarEventDetail().invitees;
             if (index < 1 || static_cast<size_t>(index) > list.size()) return 0;
             const auto& inv = list[static_cast<size_t>(index) - 1];
-            lua_pushstring(L, gh->lookupName(inv.guid).c_str());
+            lua_pushstring(L, gh->queryCache().lookupName(inv.guid).c_str());
             lua_pushnumber(L, inv.level);
             lua_pushstring(L, "");              // className
             lua_pushstring(L, "");              // classFilename
@@ -7588,7 +7617,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // without trace.
                 {"CalendarNewEvent", [](lua_State* L) -> int {
             (void)L;
-            calendarDraft(L) = wowee::game::CalendarEventDraft{};
+            calendarDraft(L) = wowee::calendar::CalendarEventDraft{};
             // Today, so an event committed without touching the date lands
             // somewhere real rather than on 1 January 2000.
             const auto viewed = calendarViewedMonth(L);
@@ -7603,7 +7632,7 @@ void registerSystemLuaAPI(lua_State* L) {
         }},
                 {"CalendarNewGuildEvent", [](lua_State* L) -> int {
             (void)L;
-            calendarDraft(L) = wowee::game::CalendarEventDraft{};
+            calendarDraft(L) = wowee::calendar::CalendarEventDraft{};
             // CALENDAR_FLAG_GUILD_EVENT, which is what the server reads to
             // decide the event belongs to the guild rather than the player.
             calendarDraft(L).flags |= 0x0400u;
@@ -7679,17 +7708,17 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"CalendarUpdateEvent", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
-            const auto& open = gh->getCalendarEventDetail();
+            const auto& open = calendarOf(L).getCalendarEventDetail();
             if (open.eventId == 0) return 0;
-            gh->updateCalendarEvent(open.eventId, 0, calendarDraft(L));
+            calendarOf(L).updateCalendarEvent(open.eventId, 0, calendarDraft(L));
             return 0;
         }},
                 {"CalendarRemoveEvent", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
-            const auto& open = gh->getCalendarEventDetail();
+            const auto& open = calendarOf(L).getCalendarEventDetail();
             if (open.eventId == 0) return 0;
-            gh->removeCalendarEvent(open.eventId, 0);
+            calendarOf(L).removeCalendarEvent(open.eventId, 0);
             return 0;
         }},
                 // Whether the edit form has anything to commit. The interface
@@ -7698,7 +7727,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"CalendarEventHaveSettingsChanged", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushboolean(L, 0); return 1; }
-            const auto& open = gh->getCalendarEventDetail();
+            const auto& open = calendarOf(L).getCalendarEventDetail();
             const auto& d = calendarDraft(L);
             const bool changed =
                 open.eventId != 0 &&
@@ -7724,10 +7753,10 @@ void registerSystemLuaAPI(lua_State* L) {
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
             const int uiStatus = static_cast<int>(luaL_optnumber(L, 2, 1));
             if (!gh) return 0;
-            const auto& ev = gh->getCalendarEventDetail();
+            const auto& ev = calendarOf(L).getCalendarEventDetail();
             if (index < 1 || static_cast<size_t>(index) > ev.invitees.size()) return 0;
             const auto& inv = ev.invitees[static_cast<size_t>(index) - 1];
-            gh->setCalendarInviteStatus(inv.guid, ev.eventId, inv.inviteId,
+            calendarOf(L).setCalendarInviteStatus(inv.guid, ev.eventId, inv.inviteId,
                                         static_cast<uint8_t>(uiStatus > 0 ? uiStatus - 1 : 0));
             return 0;
         }},
@@ -7735,20 +7764,20 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh) return 0;
-            const auto& ev = gh->getCalendarEventDetail();
+            const auto& ev = calendarOf(L).getCalendarEventDetail();
             if (index < 1 || static_cast<size_t>(index) > ev.invitees.size()) return 0;
             const auto& inv = ev.invitees[static_cast<size_t>(index) - 1];
-            gh->setCalendarInviteModerator(inv.guid, ev.eventId, inv.inviteId, 1);
+            calendarOf(L).setCalendarInviteModerator(inv.guid, ev.eventId, inv.inviteId, 1);
             return 0;
         }},
                 {"CalendarEventClearModerator", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh) return 0;
-            const auto& ev = gh->getCalendarEventDetail();
+            const auto& ev = calendarOf(L).getCalendarEventDetail();
             if (index < 1 || static_cast<size_t>(index) > ev.invitees.size()) return 0;
             const auto& inv = ev.invitees[static_cast<size_t>(index) - 1];
-            gh->setCalendarInviteModerator(inv.guid, ev.eventId, inv.inviteId, 0);
+            calendarOf(L).setCalendarInviteModerator(inv.guid, ev.eventId, inv.inviteId, 0);
             return 0;
         }},
                 // Inviting someone.
@@ -7763,10 +7792,10 @@ void registerSystemLuaAPI(lua_State* L) {
             const char* name = luaL_optstring(L, 1, "");
             auto* gh = getGameHandler(L);
             if (!gh || !name || !*name) return 0;
-            const auto& open = gh->getCalendarEventDetail();
+            const auto& open = calendarOf(L).getCalendarEventDetail();
             const bool preInvite = (open.eventId == 0);
             const uint32_t flags = preInvite ? calendarDraft(L).flags : open.flags;
-            gh->inviteToCalendarEvent(open.eventId, 0, name, preInvite,
+            calendarOf(L).inviteToCalendarEvent(open.eventId, 0, name, preInvite,
                                       (flags & 0x0400u) != 0);
             return 0;
         }},
@@ -7776,7 +7805,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"CalendarMassInviteGuild", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
-            gh->massInviteGuildToCalendarEvent(
+            calendarOf(L).massInviteGuildToCalendarEvent(
                 static_cast<uint32_t>(luaL_optnumber(L, 1, 1)),
                 static_cast<uint32_t>(luaL_optnumber(L, 2, 80)),
                 static_cast<uint32_t>(luaL_optnumber(L, 3, 0)));
@@ -7784,9 +7813,7 @@ void registerSystemLuaAPI(lua_State* L) {
         }},
                 // And the commit.
                 {"CalendarAddEvent", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) {
-                gh->createCalendarEvent(calendarDraft(L));
-            }
+            if (getGameHandler(L)) calendarOf(L).createCalendarEvent(calendarDraft(L));
             return 0;
         }},
                 // ---- The right-click menu on a day's event ----
@@ -7845,11 +7872,11 @@ void registerSystemLuaAPI(lua_State* L) {
                 return 1;
             }
             const auto& row = rows[static_cast<size_t>(index) - 1];
-            if (row.kind != wowee::game::CalendarEntryKind::Event) {
+            if (row.kind != wowee::calendar::CalendarEntryKind::Event) {
                 lua_pushboolean(L, 0);
                 return 1;
             }
-            const auto& ev = gh->getCalendarData().events[row.index];
+            const auto& ev = calendarOf(L).getCalendarData().events[row.index];
             lua_pushboolean(L, ev.creatorGuid != 0 &&
                                    ev.creatorGuid == gh->getPlayerGuid() ? 1 : 0);
             return 1;
@@ -7867,12 +7894,12 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
             const auto& row = calendarContextRow(L);
-            const auto rows = calendarRowsFor(L, *gh,row.monthOffset, row.day);
+            const auto rows = calendarRowsFor(L, row.monthOffset, row.day);
             if (row.index < 1 || static_cast<size_t>(row.index) > rows.size()) return 0;
             const auto& entry = rows[static_cast<size_t>(row.index) - 1];
-            if (entry.kind != wowee::game::CalendarEntryKind::Event) return 0;
-            gh->removeCalendarEvent(
-                gh->getCalendarData().events[entry.index].eventId, 0);
+            if (entry.kind != wowee::calendar::CalendarEntryKind::Event) return 0;
+            calendarOf(L).removeCalendarEvent(
+                calendarOf(L).getCalendarData().events[entry.index].eventId, 0);
             return 0;
         }},
                 // Signing up to a guild event, which is an RSVP with the
@@ -7890,17 +7917,17 @@ void registerSystemLuaAPI(lua_State* L) {
             // CalendarContextGetEventIndex above: the arity belongs at the
             // binding rather than resting on Lua filling the gap.
             if (!gh || row.day < 1) { lua_pushnil(L); return 1; }
-            const auto rows = calendarRowsFor(L, *gh,row.monthOffset, row.day);
+            const auto rows = calendarRowsFor(L, row.monthOffset, row.day);
             if (row.index < 1 || static_cast<size_t>(row.index) > rows.size()) {
                 lua_pushnil(L);
                 return 1;
             }
             const auto& entry = rows[static_cast<size_t>(row.index) - 1];
-            if (entry.kind == wowee::game::CalendarEntryKind::Holiday) {
+            if (entry.kind == wowee::calendar::CalendarEntryKind::Holiday) {
                 lua_pushstring(L, "HOLIDAY");
             } else {
                 lua_pushstring(L, calendarTypeName(
-                    gh->getCalendarData().events[entry.index]));
+                    calendarOf(L).getCalendarData().events[entry.index]));
             }
             return 1;
         }},
@@ -7929,9 +7956,9 @@ void registerSystemLuaAPI(lua_State* L) {
             const auto rows = calendarDayRows(L);
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushnumber(L, 0); return 1; }
-            const auto& cal = gh->getCalendarData();
+            const auto& cal = calendarOf(L).getCalendarData();
             for (size_t i = 0; i < rows.size(); ++i) {
-                if (rows[i].kind != wowee::game::CalendarEntryKind::Event) continue;
+                if (rows[i].kind != wowee::calendar::CalendarEntryKind::Event) continue;
                 const uint64_t id = cal.events[rows[i].index].eventId;
                 for (const auto& invite : cal.invites) {
                     // 0 is CALENDAR_INVITESTATUS_INVITED - still unanswered.

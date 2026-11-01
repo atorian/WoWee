@@ -18,7 +18,7 @@
 
 namespace wowee {
 namespace pipeline {
-class AssetManager;
+class GameTables;
 struct M2Model;
 }
 
@@ -30,9 +30,9 @@ namespace core {
 using EnchantVisualModels = std::array<std::string, 5>;
 
 /// SpellItemEnchantment -> ItemVisuals -> ItemVisualEffects for one enchant
-/// id. An id the tables do not have, or tables that are not there, are
-/// reported once and answer nothing. Safe to call from a worker thread.
-EnchantVisualModels resolveEnchantVisualModels(pipeline::AssetManager& assets, uint32_t enchantId);
+/// id. An id the tables do not have is reported once and answers nothing;
+/// tables that cannot be read stop the game. Safe to call from a worker thread.
+EnchantVisualModels resolveEnchantVisualModels(const pipeline::GameTables& tables, uint32_t enchantId);
 
 /// Reads one model by path, the way the caller reads its weapons (the
 /// spawner's come from a worker, the composer's from the archives).
@@ -43,7 +43,7 @@ using EnchantModelLoader = std::function<bool(const std::string& path, pipeline:
 /// away. A model that does not load is reported once per path and the weapon
 /// is drawn without it. `allocateModelId` names a fresh renderer model. The
 /// effects go on at the scene's next apply point, after the weapon.
-void attachEnchantVisuals(rendering::SceneCommands::Characters& characters, pipeline::AssetManager& assets,
+void attachEnchantVisuals(rendering::SceneCommands::Characters& characters, const pipeline::GameTables& tables,
                           uint32_t charInstanceId, uint32_t attachmentId, uint32_t enchantId,
                           const EnchantModelLoader& loadModel,
                           const std::function<uint32_t()>& allocateModelId);

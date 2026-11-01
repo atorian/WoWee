@@ -1,4 +1,6 @@
 #include "game/world_packets.hpp"
+#include "loot/domain/records.hpp"
+#include "battleground/domain/records.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/opcodes.hpp"
 #include "game/game_utils.hpp"
@@ -1364,7 +1366,7 @@ QuestQueryRewardsData QuestQueryRewardsParser::parse(const std::vector<uint8_t>&
         rewardSpellField = 13;
     } else if (questLogStride == 4) { // TBC
         moneyField = 9;  rewardPairsField = 17; choicePairsField = 25;
-    } else {                          // Classic / Turtle
+    } else {                          // Classic
         moneyField = 8;  rewardPairsField = 13; choicePairsField = 21;
     }
     const size_t lastField = choicePairsField + 6 * 2; // exclusive end of choice pairs

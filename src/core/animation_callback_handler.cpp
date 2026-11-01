@@ -1,4 +1,5 @@
 #include "rendering/animation/melee_anim_chains.hpp"
+#include "loot/domain/events.hpp"
 #include "core/player_view.hpp"
 #include "core/animation_callback_handler.hpp"
 #include "game/game_events.hpp"
@@ -71,7 +72,7 @@ bool AnimationCallbackHandler::updateCharge(float deltaTime) {
 
     // Sync to game handler
     glm::vec3 canonical = core::coords::renderToCanonical(renderPos);
-    gameHandler_.setPosition(canonical.x, canonical.y, canonical.z);
+    gameHandler_.movement().setPosition(canonical.x, canonical.y, canonical.z);
 
     // Update camera follow target
     if (playerView_.getCameraController()) {
@@ -102,7 +103,7 @@ bool AnimationCallbackHandler::updateCharge(float deltaTime) {
                     glm::vec3 snapPos = targetRender - toTarget * (1.5f * glm::inversesqrt(dSq));
                     renderer_.getCharacterPosition() = snapPos;
                     glm::vec3 snapCanonical = core::coords::renderToCanonical(snapPos);
-                    gameHandler_.setPosition(snapCanonical.x, snapCanonical.y, snapCanonical.z);
+                    gameHandler_.movement().setPosition(snapCanonical.x, snapCanonical.y, snapCanonical.z);
                     if (playerView_.getCameraController()) {
                         glm::vec3* ft = playerView_.getCameraController()->getFollowTargetMutable();
                         if (ft) *ft = snapPos;
@@ -142,12 +143,13 @@ void AnimationCallbackHandler::setupCallbacks() {
         }));
 
     // Vehicle state callback - hide player character when inside a vehicle
-    gameHandler_.setVehicleStateCallback([this](bool entered, uint32_t /*vehicleId*/) {
-        auto* cr = renderer_.getCharacterRenderer();
-        uint32_t instId = renderer_.getCharacterInstanceId();
-        if (!cr || instId == 0) return;
-        renderer_.scene().characters().setInstanceVisible(instId, !entered);
-    });
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::VehicleStateChanged>(
+        [this](const game::events::VehicleStateChanged& e) {
+            auto* cr = renderer_.getCharacterRenderer();
+            uint32_t instId = renderer_.getCharacterInstanceId();
+            if (!cr || instId == 0) return;
+            renderer_.scene().characters().setInstanceVisible(instId, !e.entered);
+        }));
 
     // A thunderstorm rolling in: a low rumble through the camera, as hard as
     // the storm.
@@ -185,7 +187,7 @@ void AnimationCallbackHandler::setupCallbacks() {
         renderer_.setCharacterYaw(yawDeg);
         // Sync canonical orientation to server so it knows we turned
         float canonicalYaw = core::coords::characterYawDegToCanonical(yawDeg);
-        gameHandler_.setOrientation(canonicalYaw);
+        gameHandler_.movement().setOrientation(canonicalYaw);
         gameHandler_.sendMovement(game::Opcode::MSG_MOVE_SET_FACING);
 
         // Set charge state
@@ -215,149 +217,142 @@ void AnimationCallbackHandler::setupCallbacks() {
     }));
 
 
-    // NPC/player death callback (online mode) - play death animation
-    gameHandler_.setNpcDeathCallback([this](uint64_t guid) {
-        entitySpawner_.markCreatureDead(guid);
-        if (!renderer_.getCharacterRenderer()) return;
-        uint32_t instanceId = entitySpawner_.getCreatureInstanceId(guid);
-        if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(guid);
-        if (instanceId != 0) {
-            renderer_.scene().characters().playAnimation(instanceId, rendering::anim::DEATH, false);
-        }
-    });
+    // A creature or player died - play the death animation
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::UnitDied>(
+        [this](const game::events::UnitDied& e) {
+            entitySpawner_.markCreatureDead(e.guid);
+            if (!renderer_.getCharacterRenderer()) return;
+            uint32_t instanceId = entitySpawner_.getCreatureInstanceId(e.guid);
+            if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(e.guid);
+            if (instanceId != 0) {
+                renderer_.scene().characters().playAnimation(instanceId, rendering::anim::DEATH, false);
+            }
+        }));
 
-    // NPC/player respawn callback (online mode) - play rise animation then idle
-    gameHandler_.setNpcRespawnCallback([this](uint64_t guid) {
-        entitySpawner_.unmarkCreatureDead(guid);
-        if (!renderer_.getCharacterRenderer()) return;
-        uint32_t instanceId = entitySpawner_.getCreatureInstanceId(guid);
-        if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(guid);
-        if (instanceId != 0) {
-            auto& characters = renderer_.scene().characters();
-            // Play RISE one-shot (auto-returns to STAND when finished), fall back to STAND
-            if (characters.hasAnimation(instanceId, rendering::anim::RISE))
-                characters.playAnimation(instanceId, rendering::anim::RISE, false);
-            else
-                characters.playAnimation(instanceId, rendering::anim::STAND, true);
-        }
-    });
+    // A creature or player came back to life - play the rise animation, then idle
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::UnitRespawned>(
+        [this](const game::events::UnitRespawned& e) {
+            entitySpawner_.unmarkCreatureDead(e.guid);
+            if (!renderer_.getCharacterRenderer()) return;
+            uint32_t instanceId = entitySpawner_.getCreatureInstanceId(e.guid);
+            if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(e.guid);
+            if (instanceId != 0) {
+                auto& characters = renderer_.scene().characters();
+                // Play RISE one-shot (auto-returns to STAND when finished), fall back to STAND
+                if (characters.hasAnimation(instanceId, rendering::anim::RISE))
+                    characters.playAnimation(instanceId, rendering::anim::RISE, false);
+                else
+                    characters.playAnimation(instanceId, rendering::anim::STAND, true);
+            }
+        }));
 
-    // NPC/player swing callback (online mode) - play attack animation
+    // Someone other than the player swung in melee - play an attack animation
     // Probes the model for the best available attack animation:
     //   ATTACK_1H(17) → ATTACK_2H(18) → ATTACK_2H_LOOSE(19) → ATTACK_UNARMED(16)
-    gameHandler_.setNpcSwingCallback([this](uint64_t guid) {
-        if (!renderer_.getCharacterRenderer()) return;
-        uint32_t instanceId = entitySpawner_.getCreatureInstanceId(guid);
-        if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(guid);
-        if (instanceId != 0) {
-            auto& characters = renderer_.scene().characters();
-            const auto attackAnims =
-                rendering::anim::meleeAnimChain(rendering::anim::MeleeChain::Generic);
-            bool played = false;
-            for (uint32_t anim : attackAnims) {
-                if (characters.hasAnimation(instanceId, anim)) {
-                    characters.playAnimation(instanceId, anim, false);
-                    played = true;
-                    break;
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::MeleeSwingResolved>(
+        [this](const game::events::MeleeSwingResolved& e) {
+            if (e.attackerIsPlayer) return;
+            if (!renderer_.getCharacterRenderer()) return;
+            uint32_t instanceId = entitySpawner_.getCreatureInstanceId(e.attackerGuid);
+            if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(e.attackerGuid);
+            if (instanceId != 0) {
+                auto& characters = renderer_.scene().characters();
+                const auto attackAnims =
+                    rendering::anim::meleeAnimChain(rendering::anim::MeleeChain::Generic);
+                bool played = false;
+                for (uint32_t anim : attackAnims) {
+                    if (characters.hasAnimation(instanceId, anim)) {
+                        characters.playAnimation(instanceId, anim, false);
+                        played = true;
+                        break;
+                    }
                 }
+                if (!played) characters.playAnimation(instanceId, rendering::anim::ATTACK_UNARMED, false);
             }
-            if (!played) characters.playAnimation(instanceId, rendering::anim::ATTACK_UNARMED, false);
-        }
-    });
+        }));
 
     // Hit reaction callback - plays one-shot dodge/block/wound animation on the victim
-    gameHandler_.setHitReactionCallback([this](uint64_t victimGuid, game::GameHandler::HitReaction reaction) {
-        auto* cr = renderer_.getCharacterRenderer();
-        if (!cr) return;
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::UnitHitReacted>(
+        [this](const game::events::UnitHitReacted& e) {
+            auto* cr = renderer_.getCharacterRenderer();
+            if (!cr) return;
 
-        // Determine animation based on reaction type
-        uint32_t animId = rendering::anim::COMBAT_WOUND;
-        switch (reaction) {
-            case game::GameHandler::HitReaction::DODGE:      animId = rendering::anim::DODGE; break;
-            case game::GameHandler::HitReaction::PARRY:      break; // Parry already handled by existing system
-            case game::GameHandler::HitReaction::BLOCK:      animId = rendering::anim::BLOCK; break;
-            case game::GameHandler::HitReaction::SHIELD_BLOCK: animId = rendering::anim::SHIELD_BLOCK; break;
-            case game::GameHandler::HitReaction::CRIT_WOUND: animId = rendering::anim::COMBAT_CRITICAL; break;
-            case game::GameHandler::HitReaction::WOUND:      animId = rendering::anim::COMBAT_WOUND; break;
-        }
-
-        // For local player: use AnimationController state
-        bool isLocalPlayer = (victimGuid == gameHandler_.getPlayerGuid());
-        if (isLocalPlayer) {
-            auto* ac = playerView_.getAnimationController();
-            if (ac) {
-                uint32_t charInstId = renderer_.getCharacterInstanceId();
-                if (charInstId && renderer_.scene().characters().hasAnimation(charInstId, animId))
-                    ac->triggerHitReaction(animId);
+            // Determine animation based on reaction type
+            uint32_t animId = rendering::anim::COMBAT_WOUND;
+            switch (e.reaction) {
+                case game::events::HitReaction::DODGE:      animId = rendering::anim::DODGE; break;
+                case game::events::HitReaction::PARRY:      break; // Parry already handled by existing system
+                case game::events::HitReaction::BLOCK:      animId = rendering::anim::BLOCK; break;
+                case game::events::HitReaction::SHIELD_BLOCK: animId = rendering::anim::SHIELD_BLOCK; break;
+                case game::events::HitReaction::CRIT_WOUND: animId = rendering::anim::COMBAT_CRITICAL; break;
+                case game::events::HitReaction::WOUND:      animId = rendering::anim::COMBAT_WOUND; break;
             }
-            return;
-        }
 
-        // For NPCs/other players: direct playAnimation
-        uint32_t instanceId = entitySpawner_.getCreatureInstanceId(victimGuid);
-        if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(victimGuid);
-        if (instanceId != 0 && renderer_.scene().characters().hasAnimation(instanceId, animId))
-            renderer_.scene().characters().playAnimation(instanceId, animId, false);
-    });
+            // For local player: use AnimationController state
+            bool isLocalPlayer = (e.victimGuid == gameHandler_.getPlayerGuid());
+            if (isLocalPlayer) {
+                auto* ac = playerView_.getAnimationController();
+                if (ac) {
+                    uint32_t charInstId = renderer_.getCharacterInstanceId();
+                    if (charInstId && renderer_.scene().characters().hasAnimation(charInstId, animId))
+                        ac->triggerHitReaction(animId);
+                }
+                return;
+            }
+
+            // For NPCs/other players: direct playAnimation
+            uint32_t instanceId = entitySpawner_.getCreatureInstanceId(e.victimGuid);
+            if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(e.victimGuid);
+            if (instanceId != 0 && renderer_.scene().characters().hasAnimation(instanceId, animId))
+                renderer_.scene().characters().playAnimation(instanceId, animId, false);
+        }));
 
     // Stun state callback - enters/exits STUNNED animation on local player
-    gameHandler_.setStunStateCallback([this](bool stunned) {
-        auto* ac = playerView_.getAnimationController();
-        if (ac) ac->setStunned(stunned);
-    });
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::StunStateChanged>(
+        [this](const game::events::StunStateChanged& e) {
+            auto* ac = playerView_.getAnimationController();
+            if (ac) ac->setStunned(e.stunned);
+        }));
 
     // Stealth state callback - switches to stealth animation variants
-    gameHandler_.setStealthStateCallback([this](bool stealthed) {
-        auto* ac = playerView_.getAnimationController();
-        if (ac) ac->setStealthed(stealthed);
-    });
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::StealthStateChanged>(
+        [this](const game::events::StealthStateChanged& e) {
+            auto* ac = playerView_.getAnimationController();
+            if (ac) ac->setStealthed(e.stealthed);
+        }));
 
     // Player health callback - switches to wounded idle when HP < 20%
-    gameHandler_.setPlayerHealthCallback([this](uint32_t health, uint32_t maxHealth) {
-        auto* ac = playerView_.getAnimationController();
-        if (!ac) return;
-        bool lowHp = (maxHealth > 0) && (health > 0) && (health * 5 <= maxHealth);
-        ac->setLowHealth(lowHp);
-    });
-
-    // Unit animation hint callback - plays jump (38=JumpMid) animation on other players/NPCs.
-    // Swim/walking state is now authoritative from the move-flags callback below.
-    // animId=38 (JumpMid): airborne jump animation; land detection is via per-frame sync.
-    gameHandler_.setUnitAnimHintCallback([this](uint64_t guid, uint32_t animId) {
-        auto* cr = renderer_.getCharacterRenderer();
-        if (!cr) return;
-        uint32_t instanceId = entitySpawner_.getPlayerInstanceId(guid);
-        if (instanceId == 0) instanceId = entitySpawner_.getCreatureInstanceId(guid);
-        if (instanceId == 0) return;
-        // Don't override Death animation
-        uint32_t curAnim = 0; float curT = 0.0f, curDur = 0.0f;
-        if (cr->getAnimationState(instanceId, curAnim, curT, curDur) && curAnim == rendering::anim::DEATH) return;
-        renderer_.scene().characters().playAnimation(instanceId, animId, /*loop=*/true);
-    });
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::PlayerHealthChanged>(
+        [this](const game::events::PlayerHealthChanged& e) {
+            auto* ac = playerView_.getAnimationController();
+            if (!ac) return;
+            bool lowHp = (e.maxHealth > 0) && (e.health > 0) && (e.health * 5 <= e.maxHealth);
+            ac->setLowHealth(lowHp);
+        }));
 
     // Unit move-flags callback - updates swimming and walking state from every MSG_MOVE_* packet.
     // This is more reliable than opcode-based hints for cold joins and heartbeats:
     // a player already swimming when we join will have SWIMMING set on the first heartbeat.
     // Walking(4) vs Running(5) is also driven here from the WALKING flag.
-    gameHandler_.setUnitMoveFlagsCallback([this](uint64_t guid, uint32_t moveFlags,
-                                                 uint32_t mask) {
-        // Only what this update speaks about. A full movement block passes a
-        // mask of all ones; the spline opcodes each pass the one bit they are
-        // named after, so starting to swim no longer says anything about
-        // whether the creature is also flying.
-        // Movement state is kept per map scope. Before one exists the flags
-        // have nowhere to go; the unit's next movement update carries them.
-        if (!entitySpawner_.hasMap()) return;
-        const auto apply = [&](game::MovementFlags flag, auto& state) {
-            const uint32_t bit = static_cast<uint32_t>(flag);
-            if ((mask & bit) == 0) return;
-            if (moveFlags & bit) state[guid] = true;
-            else                 state.erase(guid);
-        };
-        apply(game::MovementFlags::SWIMMING, entitySpawner_.getCreatureSwimmingState());
-        apply(game::MovementFlags::WALKING,  entitySpawner_.getCreatureWalkingState());
-        apply(game::MovementFlags::FLYING,   entitySpawner_.getCreatureFlyingState());
-    });
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::UnitMoveFlagsChanged>(
+        [this](const game::events::UnitMoveFlagsChanged& e) {
+            // Only what this update speaks about. A full movement block passes a
+            // mask of all ones; the spline opcodes each pass the one bit they are
+            // named after, so starting to swim no longer says anything about
+            // whether the creature is also flying.
+            // Movement state is kept per map scope. Before one exists the flags
+            // have nowhere to go; the unit's next movement update carries them.
+            if (!entitySpawner_.hasMap()) return;
+            const auto apply = [&](game::MovementFlags flag, auto& state) {
+                const uint32_t bit = static_cast<uint32_t>(flag);
+                if ((e.mask & bit) == 0) return;
+                if (e.moveFlags & bit) state[e.guid] = true;
+                else                 state.erase(e.guid);
+            };
+            apply(game::MovementFlags::SWIMMING, entitySpawner_.getCreatureSwimmingState());
+            apply(game::MovementFlags::WALKING,  entitySpawner_.getCreatureWalkingState());
+            apply(game::MovementFlags::FLYING,   entitySpawner_.getCreatureFlyingState());
+        }));
 
     // Emote animation callback - play server-driven emote animations on NPCs and other players.
     // isState marks persistent STATE_ emotes (UNIT_NPC_EMOTESTATE or state-type
@@ -463,7 +458,7 @@ void AnimationCallbackHandler::setupCallbacks() {
         const bool isArea     = (castType == game::SpellCastType::AREA);
 
         if (start) {
-            uint32_t currentSpell = isLocalPlayer ? gameHandler_.getCurrentCastSpellId() : 0;
+            uint32_t currentSpell = isLocalPlayer ? gameHandler_.spells().getCurrentCastSpellId() : 0;
             bool isFishing = isChannel && game::spellclass::isFishingCast(currentSpell);
 
             // Helper: pick first animation the model supports from a list
@@ -488,7 +483,7 @@ void AnimationCallbackHandler::setupCallbacks() {
                     const auto& nm = spell->name;
                     isMining = (nm == "Mining" || nm == "Smelting");
                     if (!isMining) {
-                        isGathering = gameHandler_.isProfessionSpell(currentSpell);
+                        isGathering = gameHandler_.spells().isProfessionSpell(currentSpell);
                         if (!isGathering)
                             isGathering = (nm == "Opening" || nm == "Open Lock");
                     }
@@ -715,55 +710,57 @@ void AnimationCallbackHandler::setupCallbacks() {
 
     // Stand state animation callback - route through AnimationController state machine
     // for proper sit/sleep/kneel transition animations (down → loop → up)
-    gameHandler_.setStandStateCallback([this](uint8_t standState) {
-        using AC = rendering::AnimationController;
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::StandStateChanged>(
+        [this](const game::events::StandStateChanged& e) {
+            using AC = rendering::AnimationController;
 
-        // The camera controller's two flags, from the one number: movement is
-        // blocked while sitting or kneeling, and grounding stands down while
-        // the server has the character in a chair.
-        //
-        // Both used to be set, by two callbacks - and this is one slot, so the
-        // one registered later replaced the other. This handler is built long
-        // after the world is, so the registration that carried
-        // applyServerStandState never ran again: seatedInChair_ stayed false,
-        // the chair stayed a floor, and a character sat down in the right pose
-        // on top of the furniture rather than in it.
-        if (auto* cc = playerView_.getCameraController()) {
-            cc->applyServerStandState(standState);
-        }
+            // The camera controller's two flags, from the one number: movement is
+            // blocked while sitting or kneeling, and grounding stands down while
+            // the server has the character in a chair.
+            //
+            // Both used to be set, by two callbacks - and this is one slot, so the
+            // one registered later replaced the other. This handler is built long
+            // after the world is, so the registration that carried
+            // applyServerStandState never ran again: seatedInChair_ stayed false,
+            // the chair stayed a floor, and a character sat down in the right pose
+            // on top of the furniture rather than in it.
+            if (auto* cc = playerView_.getCameraController()) {
+                cc->applyServerStandState(e.standState);
+            }
 
-        auto* ac = playerView_.getAnimationController();
-        if (!ac) return;
-
-        // Death is special - play directly, not through sit state machine
-        if (standState == AC::STAND_STATE_DEAD) {
-            auto* cr = renderer_.getCharacterRenderer();
-            if (!cr) return;
-            uint32_t charInstId = renderer_.getCharacterInstanceId();
-            if (charInstId == 0) return;
-            renderer_.scene().characters().playAnimation(charInstId, rendering::anim::DEATH, false);
-            return;
-        }
-
-        ac->setStandState(standState);
-        // Restoration food/water is an aura rather than MSG_CHANNEL_START on
-        // supported realms. The aura update starts its loop; standing up ends it.
-        // Only stop the cast presentation while restoring - the server also
-        // stands a seated player when a real cast begins, and stopping there
-        // would kill that cast's animation as it starts.
-        if (standState == AC::STAND_STATE_STAND) {
-            ac->setSeatedLoopAnimation(0);
-            if (gameHandler_.isRestoring()) ac->stopSpellCast();
-        }
-    });
-
-    // Loot window callback - play kneel/loot animation while looting
-    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::LootWindowChanged>(
-        [this](const game::events::LootWindowChanged& e) {
             auto* ac = playerView_.getAnimationController();
             if (!ac) return;
-            if (e.open) ac->startLooting();
-            else        ac->stopLooting();
+
+            // Death is special - play directly, not through sit state machine
+            if (e.standState == AC::STAND_STATE_DEAD) {
+                auto* cr = renderer_.getCharacterRenderer();
+                if (!cr) return;
+                uint32_t charInstId = renderer_.getCharacterInstanceId();
+                if (charInstId == 0) return;
+                renderer_.scene().characters().playAnimation(charInstId, rendering::anim::DEATH, false);
+                return;
+            }
+
+            ac->setStandState(e.standState);
+            // Restoration food/water is an aura rather than MSG_CHANNEL_START on
+            // supported realms. The aura update starts its loop; standing up ends it.
+            // Only stop the cast presentation while restoring - the server also
+            // stands a seated player when a real cast begins, and stopping there
+            // would kill that cast's animation as it starts.
+            if (e.standState == AC::STAND_STATE_STAND) {
+                ac->setSeatedLoopAnimation(0);
+                if (gameHandler_.spells().isRestoring()) ac->stopSpellCast();
+            }
+        }));
+
+    // The kneel while the loot window is open.
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<loot::LootOpened>(
+        [this](const loot::LootOpened&) {
+            if (auto* ac = playerView_.getAnimationController()) ac->startLooting();
+        }));
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<loot::LootClosed>(
+        [this](const loot::LootClosed&) {
+            if (auto* ac = playerView_.getAnimationController()) ac->stopLooting();
         }));
 }
 

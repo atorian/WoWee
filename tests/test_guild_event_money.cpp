@@ -8,7 +8,7 @@
 // That string is the balance, written as sixteen zero-padded hex digits. The
 // figure is only right if it is read as hex, and a server that sends the plain
 // number must not be read as hex - which is what is pinned here. That the event
-// sets the bank's figure and puts nothing in chat is test_social_domain's.
+// sets the bank's figure and puts nothing in chat is test_guild_domain's.
 #include <catch_amalgamated.hpp>
 
 #include <cstdint>
@@ -16,6 +16,9 @@
 #include <vector>
 
 #include "game/world_packets.hpp"
+#include "guild/domain/records.hpp"
+
+using wowee::guild::guildEventMoney;
 
 
 using namespace wowee::game;

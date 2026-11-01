@@ -16,7 +16,7 @@
 #include "rendering/character_renderer.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
-#include "pipeline/dbc_layout.hpp"
+#include "pipeline/required_table.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "core/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
@@ -28,8 +28,6 @@ namespace wowee {
 namespace rendering {
 
 namespace {
-
-constexpr uint32_t kNoField = 0xFFFFFFFFu;
 
 // SpellVisualKit character proc types (wowdev.wiki DB/SpellVisualKit).
 constexpr uint32_t kCharProcColor = 1;
@@ -53,61 +51,46 @@ void SpellVisualSystem::loadStateKits() {
     if (!cachedAssetManager_ || !cachedAssetManager_->isInitialized()) return;
     stateKitsLoaded_ = true;
 
-    auto* layout = pipeline::getActiveDBCLayout();
-    const pipeline::DBCFieldMap* svLayout  = layout ? layout->getLayout("SpellVisual")           : nullptr;
-    const pipeline::DBCFieldMap* kitLayout = layout ? layout->getLayout("SpellVisualKit")        : nullptr;
-    const pipeline::DBCFieldMap* fxLayout  = layout ? layout->getLayout("SpellVisualEffectName") : nullptr;
-    // Asked, not demanded: only the WotLK layout is known to carry these
-    // columns. An expansion without them simply has no aura looks.
-    const uint32_t stateKitField = svLayout ? svLayout->tryField("StateKit") : kNoField;
-    if (stateKitField == kNoField || !kitLayout || !fxLayout) {
-        LOG_WARNING("SpellVisual: no StateKit column in this expansion's layout (",
-                    layout ? "the layout has none" : "no layout loaded",
-                    "); aura looks - Shadowform's, a ghost's - are not drawn");
-        return;
-    }
-
-    auto svDbc  = cachedAssetManager_->loadDBC("SpellVisual.dbc");
-    auto kitDbc = cachedAssetManager_->loadDBC("SpellVisualKit.dbc");
-    if (!svDbc || !svDbc->isLoaded() || !kitDbc || !kitDbc->isLoaded()) {
-        LOG_WARNING("SpellVisual: state kits not loaded - a spell visual DBC is missing");
-        return;
-    }
     // The kits' effect models, read once for every kind of kit.
     if (!spellVisualDbcLoaded_) loadSpellVisualDbc();
 
+    const pipeline::GameTables& tables = renderer_->gameTables();
+    const pipeline::RequiredTable svDbc(tables, "SpellVisual.dbc", "spells' aura looks");
+    // Only the WotLK layout carries a state kit. An expansion without one has
+    // no aura looks to draw.
+    const uint32_t stateKitField = svDbc.optionalColumn("StateKit");
+    if (stateKitField == pipeline::RequiredTable::kAbsent) return;
+    const uint32_t svIdField = svDbc.column("ID");
+
     // SpellVisualKit: id -> what the kit hangs on the unit and does to it.
-    const uint32_t kitFc = kitDbc->getFieldCount();
-    const uint32_t procField  = kitLayout->tryField("CharProc0");
-    const uint32_t paramZero  = kitLayout->tryField("CharParamZero0");
-    const bool hasProcs = procField != kNoField && paramZero != kNoField &&
-                          procField + 4 <= kitFc && paramZero + 4 <= kitFc;
-    const uint32_t flagsField = kitLayout->field("Flags");
+    const pipeline::RequiredTable kitDbc(tables, "SpellVisualKit.dbc", "spells' aura looks");
+    const uint32_t kitIdField = kitDbc.column("ID");
+    const uint32_t flagsField = kitDbc.column("Flags");
+    const uint32_t procField = kitDbc.column("CharProc0", 4);
+    const uint32_t paramZero = kitDbc.column("CharParamZero0", 4);
 
     std::unordered_map<uint32_t, StateKit> kits;
     for (uint32_t i = 0; i < kitDbc->getRecordCount(); ++i) {
-        const uint32_t kitId = kitDbc->getUInt32(i, 0);
+        const uint32_t kitId = kitDbc->getUInt32(i, kitIdField);
         if (!kitId) continue;
         StateKit kit;
         if (const auto effectsIt = kits_.find(kitId); effectsIt != kits_.end())
             kit.effects = effectsIt->second.effects;
         constexpr uint32_t kKitLoopsStand = 0x20;
-        kit.loopStand = flagsField < kitFc && (kitDbc->getUInt32(i, flagsField) & kKitLoopsStand) != 0;
-        if (hasProcs) {
-            for (uint32_t p = 0; p < 4; ++p) {
-                const uint32_t type = kitDbc->getUInt32(i, procField + p);
-                const float param = kitDbc->getFloat(i, paramZero + p);
-                if (!std::isfinite(param)) continue;
-                if (type == kCharProcColor) {
-                    // The colour is stored as a float whose value is 0xRRGGBB:
-                    // Shadowform's 2555970 is 0x270042, a deep purple.
-                    const auto rgb = static_cast<uint32_t>(std::clamp(param, 0.0f, 16777215.0f));
-                    kit.tint = glm::vec3(static_cast<float>((rgb >> 16) & 0xFF),
-                                         static_cast<float>((rgb >> 8) & 0xFF),
-                                         static_cast<float>(rgb & 0xFF)) / 255.0f;
-                } else if (type == kCharProcAlpha) {
-                    kit.alpha = std::clamp(param, 0.0f, 1.0f);
-                }
+        kit.loopStand = (kitDbc->getUInt32(i, flagsField) & kKitLoopsStand) != 0;
+        for (uint32_t p = 0; p < 4; ++p) {
+            const uint32_t type = kitDbc->getUInt32(i, procField + p);
+            const float param = kitDbc->getFloat(i, paramZero + p);
+            if (!std::isfinite(param)) continue;
+            if (type == kCharProcColor) {
+                // The colour is stored as a float whose value is 0xRRGGBB:
+                // Shadowform's 2555970 is 0x270042, a deep purple.
+                const auto rgb = static_cast<uint32_t>(std::clamp(param, 0.0f, 16777215.0f));
+                kit.tint = glm::vec3(static_cast<float>((rgb >> 16) & 0xFF),
+                                     static_cast<float>((rgb >> 8) & 0xFF),
+                                     static_cast<float>(rgb & 0xFF)) / 255.0f;
+            } else if (type == kCharProcAlpha) {
+                kit.alpha = std::clamp(param, 0.0f, 1.0f);
             }
         }
         if (kit.effects.empty() && kit.tint == glm::vec3(1.0f) && kit.alpha >= 1.0f) continue;
@@ -115,10 +98,8 @@ void SpellVisualSystem::loadStateKits() {
     }
 
     // SpellVisual: visual -> its state kit.
-    const uint32_t svFc = svDbc->getFieldCount();
-    if (stateKitField >= svFc) return;
     for (uint32_t i = 0; i < svDbc->getRecordCount(); ++i) {
-        const uint32_t visualId = svDbc->getUInt32(i, 0);
+        const uint32_t visualId = svDbc->getUInt32(i, svIdField);
         const auto it = kits.find(svDbc->getUInt32(i, stateKitField));
         if (visualId && it != kits.end()) stateKits_[visualId] = it->second;
     }

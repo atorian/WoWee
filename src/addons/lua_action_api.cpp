@@ -1,6 +1,14 @@
 // lua_action_api.cpp - Action bar, cursor/pickup, keyboard input, key bindings, and pet actions Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
+#include "lfg/services/lfg.hpp"
+#include "trade/services/trade.hpp"
+#include "guild_bank/domain/records.hpp"
+#include "guild_bank/services/guild_bank.hpp"
+#include "mail/domain/records.hpp"
+#include "mail/services/mail.hpp"
 #include "game/item_text.hpp"
+#include "pet/domain/records.hpp"
+#include "pet/services/pet.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "addons/lua_api_registrations.hpp"
 // For fireEvent: paging has to reach the frames as well as the addons.
@@ -9,6 +17,7 @@
 #include "game/inventory_slots.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "ui/keybinding_manager.hpp"
+#include "ui/macro_icon.hpp"
 #include "ui/gamepad_controls.hpp"
 
 #include <span>
@@ -20,7 +29,7 @@
 #include <map>
 #include <set>
 #include <cstring>
-#include "game/pet_action.hpp"
+#include "pet/domain/actions.hpp"
 #include "game/account_data_handler.hpp"
 #include "imgui.h"
 #include <optional>
@@ -124,8 +133,34 @@ static const game::Macro* macroFromArg(lua_State* L, int arg) {
 }
 
 /// The texture an icon name is drawn from.
-static std::string macroTexture(const game::Macro& macro) {
-    return macro.icon.empty() ? std::string(kQuestionMarkIcon) : "Interface\\Icons\\" + macro.icon;
+static std::string macroTexture(lua_State* L, const game::Macro& macro) {
+    auto* services = getLuaServices(L);
+    if (services && services->macroIconPath) return services->macroIconPath(macro);
+    auto* gh = getGameHandler(L);
+    return gh ? ui::macroIconPath(macro, *gh, petOf(L)) : kQuestionMarkIcon;
+}
+
+void refreshMacroIcons(lua_State* L, float elapsed) {
+    auto& state = interfaceState(L);
+    state.macroIconRefreshRemaining -= elapsed;
+    if (state.macroIconRefreshRemaining > 0) return;
+    state.macroIconRefreshRemaining = 0.1f;
+    auto* gh = getGameHandler(L);
+    if (!gh) return;
+    std::unordered_map<uint32_t, std::string> current;
+    for (bool character : {false, true}) {
+        for (const auto& macro : gh->accountData().macros(character))
+            current.emplace(macro.id, macroTexture(L, macro));
+    }
+    if (state.macroIcons == current) return;
+    state.macroIcons = std::move(current);
+    lua_getfield(L, LUA_REGISTRYINDEX, "wowee_lua_engine");
+    auto* engine = static_cast<LuaEngine*>(lua_touserdata(L, -1));
+    lua_pop(L, 1);
+    if (engine) {
+        engine->fireEvent("UPDATE_MACROS", {});
+        engine->fireEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
+    }
 }
 
 /// An icon argument as a texture path: the macro frame passes its picker's
@@ -215,7 +250,7 @@ static int lua_HasAction(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnFalse(L); }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1; // WoW uses 1-indexed slots
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot < 0 || slot >= static_cast<int>(bar.size())) {
         lua_pushboolean(L, 0);
         return 1;
@@ -229,7 +264,7 @@ static int lua_GetActionTexture(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnNil(L); }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) {
         lua_pushnil(L);
         return 1;
@@ -242,7 +277,7 @@ static int lua_GetActionTexture(lua_State* L) {
             return 1;
         }
     } else if (action.type == game::ActionBarSlot::ITEM && action.id != 0) {
-        const auto* info = gh->getItemInfo(action.id);
+        const auto* info = gh->inventory().getItemInfo(action.id);
         if (info && info->displayInfoId != 0) {
             std::string icon = gh->getItemIconPath(info->displayInfoId);
             if (!icon.empty()) {
@@ -254,7 +289,7 @@ static int lua_GetActionTexture(lua_State* L) {
         // The macro's own icon. Without this branch every macro button was
         // drawn as an empty slot with only its name under it.
         if (const auto* macro = gh->accountData().macro(action.id)) {
-            lua_pushstring(L, macroTexture(*macro).c_str());
+            lua_pushstring(L, macroTexture(L, *macro).c_str());
             return 1;
         }
     }
@@ -275,7 +310,7 @@ static int lua_IsUsableAction(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { lua_pushboolean(L, 0); lua_pushboolean(L, 0); return 2; }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) {
         lua_pushboolean(L, 0);
         lua_pushboolean(L, 0);
@@ -293,7 +328,7 @@ static int lua_IsUsableAction(lua_State* L) {
     bool usable = true;
     bool noMana = false;
     if (action.type == game::ActionBarSlot::SPELL) {
-        usable = gh->getKnownSpells().count(action.id) > 0;
+        usable = gh->spells().getKnownSpells().count(action.id) > 0;
         // Check power cost
         if (usable && action.id != 0) {
             auto spellData = gh->getSpellData(action.id);
@@ -319,7 +354,7 @@ static int lua_IsActionInRange(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnNil(L); }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) {
         lua_pushnil(L);
         return 1;
@@ -333,7 +368,7 @@ static int lua_IsActionInRange(lua_State* L) {
         lua_pushnil(L);
         return 1;
     }
-    return pushSpellRangeAnswer(L, gh, spellId, gh->getTargetGuid());
+    return pushSpellRangeAnswer(L, gh, spellId, gh->combat().getTargetGuid());
 }
 
 // GetActionInfo(slot) → actionType, id, subType
@@ -341,7 +376,7 @@ static int lua_GetActionInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return 0; }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) {
         return 0;
     }
@@ -381,14 +416,14 @@ static int lua_GetActionCount(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnZero(L); }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) {
         lua_pushnumber(L, 0);
         return 1;
     }
     const auto& action = bar[slot];
     if (action.type == game::ActionBarSlot::ITEM && action.id != 0) {
-        lua_pushnumber(L, gh->getInventory().countItem(action.id));
+        lua_pushnumber(L, gh->inventory().items().countItem(action.id));
     } else {
         lua_pushnumber(L, 0);
     }
@@ -400,7 +435,7 @@ static int lua_GetActionCooldown(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 1); return 3; }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) {
         lua_pushnumber(L, 0);
         lua_pushnumber(L, 0);
@@ -426,8 +461,8 @@ static int lua_GetActionCooldown(lua_State* L) {
         lua_pushnumber(L, 1);
     } else if (action.type == game::ActionBarSlot::SPELL && gh->isGCDActive()) {
         // No individual cooldown but GCD is active - show GCD sweep
-        float gcdRem = gh->getGCDRemaining();
-        float gcdTotal = gh->getGCDTotal();
+        float gcdRem = gh->spells().getGCDRemaining();
+        float gcdTotal = gh->spells().getGCDTotal();
         double now = 0;
         lua_getglobal(L, "GetTime");
         if (lua_isfunction(L, -1)) { lua_call(L, 0, 1); now = lua_tonumber(L, -1); lua_pop(L, 1); }
@@ -457,7 +492,7 @@ static int lua_UseAction(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) return 0;
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) return 0;
     const auto& action = bar[slot];
     // The end of the chain a click travels, and the last place it can stop
@@ -474,7 +509,7 @@ static int lua_UseAction(lua_State* L) {
         // unit is not treated as "cast on nobody" - a raid frame naming a
         // member who has gone out of range should still cast at the target
         // rather than silently at nothing.
-        uint64_t target = gh->hasTarget() ? gh->getTargetGuid() : 0;
+        uint64_t target = gh->combat().hasTarget() ? gh->combat().getTargetGuid() : 0;
         if (const char* unit = lua_tostring(L, 2); unit && *unit) {
             std::string uid(unit);
             toLowerInPlace(uid);
@@ -484,13 +519,13 @@ static int lua_UseAction(lua_State* L) {
         // to go as CMSG_USE_ITEM rather than a cast, or the server drops it.
         // This client's own action bar did that and was the only place that
         // did; the bar is FrameXML's now and this is the path its buttons take.
-        if (const uint32_t itemForSpell = gh->getItemIdForSpell(action.id)) {
-            gh->useItemById(itemForSpell, target);
+        if (const uint32_t itemForSpell = gh->inventory().itemIdForSpell(action.id)) {
+            gh->inventory().useItemById(itemForSpell, target);
         } else {
-            gh->castSpell(action.id, target);
+            gh->spells().castSpell(action.id, target);
         }
     } else if (action.type == game::ActionBarSlot::ITEM && action.id != 0) {
-        gh->useItemById(action.id);
+        gh->inventory().useItemById(action.id);
     } else if (action.type == game::ActionBarSlot::MACRO) {
         // Run as RunMacro runs one, through the client's macro runner: one
         // line at a time through the slash commands, /stopmacro honoured.
@@ -600,7 +635,7 @@ static int lua_PickupAction(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) return 0;
     int slot = static_cast<int>(luaL_checknumber(L, 1));
-    const auto& bar = gh->getActionBar();
+    const auto& bar = gh->actionBar().slots();
     if (slot < 1 || slot > static_cast<int>(bar.size())) return 0;
 
     // Read before anything is written: setActionBarSlot rewrites the entry
@@ -620,11 +655,11 @@ static int lua_PickupAction(lua_State* L) {
                           held == CursorType::MACRO);
 
     if (holding) {
-        gh->setActionBarSlot(slot - 1, typeForCursor(held), heldId);
+        gh->actionBar().setSlot(slot - 1, typeForCursor(held), heldId);
     } else if (hadAction) {
         // Nothing held, so the slot empties. This is the fire that redraws the
         // button: setActionBarSlot raises ACTIONBAR_SLOT_CHANGED for it.
-        gh->setActionBarSlot(slot - 1, game::ActionBarSlot::EMPTY, 0);
+        gh->actionBar().setSlot(slot - 1, game::ActionBarSlot::EMPTY, 0);
     }
 
     if (hadAction) {
@@ -656,12 +691,12 @@ static int lua_PickupAction(lua_State* L) {
         if (existing.type == game::ActionBarSlot::SPELL) {
             wowee::ui::frameXmlSetCursorItem(gh->getSpellIconPath(existing.id));
         } else if (existing.type == game::ActionBarSlot::ITEM) {
-            const auto* info = gh->getItemInfo(existing.id);
+            const auto* info = gh->inventory().getItemInfo(existing.id);
             wowee::ui::frameXmlSetCursorItem(
                 info ? gh->getItemIconPath(info->displayInfoId) : std::string());
         } else {
             const auto* macro = gh->accountData().macro(existing.id);
-            wowee::ui::frameXmlSetCursorItem(macro ? macroTexture(*macro) : std::string(kQuestionMarkIcon));
+            wowee::ui::frameXmlSetCursorItem(macro ? macroTexture(L, *macro) : std::string(kQuestionMarkIcon));
         }
     } else {
         clearCursorItem(L);
@@ -721,7 +756,7 @@ static int lua_PlaceGlyphInSocket(lua_State* L) {
     if (!gh || socket < 1 || socket > game::GameHandler::MAX_GLYPH_SLOTS) return 0;
     uint8_t bag = 0, slot = 0;
     if (!cursorWireSlot(L, bag, slot)) return 0;   // nothing held: nothing to place
-    gh->placeGlyphFromBag(bag, slot, static_cast<uint32_t>(socket - 1));
+    gh->inventory().placeGlyphFromBag(bag, slot, static_cast<uint32_t>(socket - 1));
     setCursorType(L, CursorType::NONE);
     return 0;
 }
@@ -747,7 +782,7 @@ static int lua_PickupGuildBankItem(lua_State* L) {
     // Carrying a bag item, so this is the deposit.
     uint8_t srcBag = 0, srcSlot = 0;
     if (cursorWireSlot(L, srcBag, srcSlot)) {
-        gh->guildBankDepositItem(static_cast<uint8_t>(tab - 1),
+        guildBankOf(L).guildBankDepositItem(static_cast<uint8_t>(tab - 1),
                                  static_cast<uint8_t>(slot - 1), srcBag, srcSlot);
         setCursorType(L, CursorType::NONE);
         return 0;
@@ -762,7 +797,7 @@ static int lua_PickupGuildBankItem(lua_State* L) {
     }
 
     // Otherwise pick the slot up, if there is anything in it.
-    const auto& bank = gh->getGuildBankData();
+    const auto& bank = guildBankOf(L).getGuildBankData();
     for (const auto& it : bank.tabItems) {
         if (it.slotId != slot - 1 || it.itemEntry == 0) continue;
         setCursorType(L, CursorType::GUILDBANK);
@@ -770,7 +805,7 @@ static int lua_PickupGuildBankItem(lua_State* L) {
         cursor(L).bag = tab;
         cursor(L).slot = slot;
         cursor(L).split = 0;   // the whole stack, unless SplitGuildBankItem says otherwise
-        const auto* info = gh->getItemInfo(it.itemEntry);
+        const auto* info = gh->inventory().getItemInfo(it.itemEntry);
         wowee::ui::frameXmlSetCursorItem(
             info ? gh->getItemIconPath(info->displayInfoId) : std::string());
         return 0;
@@ -901,7 +936,7 @@ void pickupMerchantItem(lua_State* L, int index) {
     // Show it on the pointer, as a bag pickup does. Without this the cursor
     // holds something invisible and the click reads as having done nothing.
     if (auto* gh = getGameHandler(L)) {
-        const auto& items = gh->getVendorItems().items;
+        const auto& items = gh->inventory().getVendorItems().items;
         if (index <= static_cast<int>(items.size())) {
             ui::frameXmlSetCursorItem(
                 gh->getItemIconPath(items[index - 1].displayInfoId));
@@ -926,9 +961,9 @@ static void soldHeldItem(lua_State* L) {
     if (!game::slots::cursorSourceIsInventory(cursor(L).bag)) return;
 
     if (cursor(L).bag == 0) {
-        gh->sellItemBySlot(cursor(L).slot - 1);
+        gh->inventory().sellItemBySlot(cursor(L).slot - 1);
     } else if (cursor(L).bag > 0) {
-        gh->sellItemInBag(cursor(L).bag - 1, cursor(L).slot - 1);
+        gh->inventory().sellItemInBag(cursor(L).bag - 1, cursor(L).slot - 1);
     } else {
         return;   // worn, and held rather than dropped on the floor
     }
@@ -940,10 +975,10 @@ bool boughtHeldMerchantItem(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int index = static_cast<int>(cursor(L).id);
     if (gh && index >= 1) {
-        const auto& items = gh->getVendorItems().items;
+        const auto& items = gh->inventory().getVendorItems().items;
         if (index <= static_cast<int>(items.size())) {
             const auto& vi = items[index - 1];
-            gh->buyItem(gh->getVendorGuid(), vi.itemId, vi.slot, 1);
+            gh->inventory().buyItem(gh->inventory().getVendorGuid(), vi.itemId, vi.slot, 1);
         }
     }
     clearCursorItem(L);
@@ -958,7 +993,7 @@ bool boughtHeldMerchantItem(lua_State* L) {
 /// cursor twice is how one of them would come to set the icon and the other not.
 static void pickupFromContainerSlot(lua_State* L, game::GameHandler* gh,
                                     int bag, int slot) {
-    const auto& inv = gh->getInventory();
+    const auto& inv = gh->inventory().items();
     // Every container this numbering reaches, not the backpack and the four
     // worn bags alone: the bank's own slots are container -1 and its bags are
     // 5 through 11, and bankframe.lua picks an item up with
@@ -973,7 +1008,7 @@ static void pickupFromContainerSlot(lua_State* L, game::GameHandler* gh,
         cursor(L).slot = slot;
         uint32_t displayId = itemSlot->item.displayInfoId;
         if (displayId == 0) {
-            if (const auto* info = gh->getItemInfo(itemSlot->item.itemId)) {
+            if (const auto* info = gh->inventory().getItemInfo(itemSlot->item.itemId)) {
                 displayId = info->displayInfoId;
             }
         }
@@ -1042,7 +1077,7 @@ static int lua_PickupItem(lua_State* L) {
         return s.item.name == wantName;
     };
 
-    const auto& inv = gh->getInventory();
+    const auto& inv = gh->inventory().items();
     for (int i = 0; i < inv.getBackpackSize(); ++i) {
         if (matches(inv.getBackpackSlot(i))) {
             pickupFromContainerSlot(L, gh, 0, i + 1);
@@ -1085,7 +1120,7 @@ static int lua_PickupContainerItem(lua_State* L) {
     if (cursor(L).type == CursorType::GUILDBANK) {
         const uint8_t dstBag = containerWireBag(bag);
         const uint8_t dstSlot = containerWireSlot(bag, slot);
-        gh->guildBankWithdrawItem(static_cast<uint8_t>(cursor(L).bag - 1),
+        guildBankOf(L).guildBankWithdrawItem(static_cast<uint8_t>(cursor(L).bag - 1),
                                   static_cast<uint8_t>(cursor(L).slot - 1),
                                   dstBag, dstSlot, cursor(L).split);
         setCursorType(L, CursorType::NONE);
@@ -1135,10 +1170,10 @@ static int lua_PickupContainerItem(lua_State* L) {
         // Part of a stack moves as a split rather than a swap: a swap would
         // send the whole thing, which is not what was picked up.
         if (cursor(L).split > 0) {
-            gh->splitItemTo(srcBag, srcSlot, dstBag, dstSlot,
+            gh->inventory().splitItemTo(srcBag, srcSlot, dstBag, dstSlot,
                             static_cast<uint8_t>(cursor(L).split));
         } else {
-            gh->swapContainerItems(srcBag, srcSlot, dstBag, dstSlot);
+            gh->inventory().swapContainerItems(srcBag, srcSlot, dstBag, dstSlot);
         }
         clearCursorItem(L);
         gh->fireAddonEvent("ITEM_LOCK_CHANGED",
@@ -1170,9 +1205,9 @@ static int lua_ClickSendMailItemButton(lua_State* L) {
         // The cursor counts the backpack as bag zero and the worn bags from
         // one, with slots from one; the attach functions count both from zero.
         const bool attached = (cursor(L).bag == 0)
-            ? gh->attachItemFromBackpack(cursor(L).slot - 1)
+            ? mailOf(L).attachItemFromBackpack(cursor(L).slot - 1)
             : (cursor(L).bag > 0
-                   ? gh->attachItemFromBag(cursor(L).bag - 1, cursor(L).slot - 1)
+                   ? mailOf(L).attachItemFromBag(cursor(L).bag - 1, cursor(L).slot - 1)
                    : false);
         if (attached) clearCursorItem(L);
         return 0;
@@ -1181,7 +1216,7 @@ static int lua_ClickSendMailItemButton(lua_State* L) {
     // Nothing held: the click takes an attachment off the letter. Without an
     // index there is nothing to take off, since the caller meant a drop.
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (index >= 1) gh->detachMailAttachment(index - 1);
+    if (index >= 1) mailOf(L).detachMailAttachment(index - 1);
     return 0;
 }
 
@@ -1229,9 +1264,9 @@ static int lua_PickupBagFromSlot(lua_State* L) {
             // Both are worn bags, which has its own verb: it swaps the bags'
             // contents locally as well as sending the move, so the bags on
             // screen do not have to wait for the server to agree.
-            gh->swapBagSlots(srcWorn, wornIndex);
+            gh->inventory().swapBagSlots(srcWorn, wornIndex);
         } else {
-            gh->swapContainerItems(srcBag, srcSlot, 0xFF,
+            gh->inventory().swapContainerItems(srcBag, srcSlot, 0xFF,
                                    static_cast<uint8_t>(game::slots::toWireSlot(slot)));
         }
         clearCursorItem(L);
@@ -1239,8 +1274,8 @@ static int lua_PickupBagFromSlot(lua_State* L) {
     }
 
     const auto& held = isBank
-        ? gh->getInventory().getBankBagItem(bankIndex)
-        : gh->getInventory().getEquipSlot(static_cast<game::EquipSlot>(
+        ? gh->inventory().items().getBankBagItem(bankIndex)
+        : gh->inventory().items().getEquipSlot(static_cast<game::EquipSlot>(
               static_cast<int>(game::EquipSlot::BAG1) + wornIndex));
     if (held.empty()) {
         // Dragging a bag that is plainly in the slot has been reported doing
@@ -1268,7 +1303,7 @@ static int lua_PickupBagFromSlot(lua_State* L) {
     // the equipped-item pickup below reads it from when the slot has none.
     uint32_t displayId = held.item.displayInfoId;
     if (displayId == 0) {
-        if (const auto* info = gh->getItemInfo(held.item.itemId)) {
+        if (const auto* info = gh->inventory().getItemInfo(held.item.itemId)) {
             displayId = info->displayInfoId;
         }
     }
@@ -1292,24 +1327,24 @@ static int lua_PickupInventoryItem(lua_State* L) {
     // Before the pickup, because the paperdoll has no SpellCanTargetItem branch
     // of its own - a left-click on a worn weapon always arrives here, and while
     // a stone or an oil is waiting for a target that click is the target.
-    if (slot <= 19 && completedItemTarget(L, gh->getEquipSlotGuid(slot - 1))) return 0;
+    if (slot <= 19 && completedItemTarget(L, gh->inventory().getEquipSlotGuid(slot - 1))) return 0;
 
     // Worn gear is what usually needs repairing, and the paperdoll has no
     // branch of its own for it either.
-    if (slot <= 19 && repairedHeldItem(L, gh, gh->getEquipSlotGuid(slot - 1))) return 0;
+    if (slot <= 19 && repairedHeldItem(L, gh, gh->inventory().getEquipSlotGuid(slot - 1))) return 0;
 
     if (droppedItemFromNowhere(L)) return 0;
 
     // Carrying something: equip it here, which is the other half of the drag.
     uint8_t srcBag = 0, srcSlot = 0;
     if (cursorWireSlot(L, srcBag, srcSlot)) {
-        gh->swapContainerItems(srcBag, srcSlot, 0xFF,
+        gh->inventory().swapContainerItems(srcBag, srcSlot, 0xFF,
                                static_cast<uint8_t>(slot - 1));
         clearCursorItem(L);
         return 0;
     }
 
-    const auto& inv = gh->getInventory();
+    const auto& inv = gh->inventory().items();
     const auto& eq = inv.getEquipSlot(static_cast<game::EquipSlot>(slot - 1));
     if (!eq.empty()) {
         setCursorType(L, CursorType::ITEM);
@@ -1323,7 +1358,7 @@ static int lua_PickupInventoryItem(lua_State* L) {
         cursor(L).item = {-1, slot, true};
         uint32_t displayId = eq.item.displayInfoId;
         if (displayId == 0) {
-            if (const auto* info = gh->getItemInfo(eq.item.itemId)) {
+            if (const auto* info = gh->inventory().getItemInfo(eq.item.itemId)) {
                 displayId = info->displayInfoId;
             }
         }
@@ -1358,7 +1393,7 @@ static int lua_DeleteCursorItem(lua_State* L) {
     if (gh && cursorWireSlot(L, bag, slot)) {
         // The whole stack: WoW asks about a partial stack before it gets here,
         // and the popup that calls this is the confirmation for all of it.
-        gh->destroyItem(bag, slot, 0);
+        gh->inventory().destroyItem(bag, slot, 0);
     }
     clearCursorItem(L);
     return 0;
@@ -1368,7 +1403,7 @@ static int lua_DeleteCursorItem(lua_State* L) {
 static int lua_AutoEquipCursorItem(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (gh && cursor(L).type == CursorType::ITEM && cursor(L).id != 0) {
-        gh->useItemById(cursor(L).id);
+        gh->inventory().useItemById(cursor(L).id);
     }
     clearCursorItem(L);
     return 0;
@@ -1534,9 +1569,9 @@ static int lua_SetModifiedClick(lua_State* L) {
 // at and not touched, so clicking one does nothing rather than pretending.
 
 static int pushTradeSlot(lua_State* L, game::GameHandler* gh,
-                         const game::GameHandler::TradeSlot& slot) {
+                         const trade::TradeSlot& slot) {
     if (!slot.occupied() || slot.itemId == 0) { return luaReturnNil(L); }
-    const auto* info = gh->getItemInfo(slot.itemId);
+    const auto* info = gh->inventory().getItemInfo(slot.itemId);
     lua_pushstring(L, info ? info->name.c_str() : "");
     lua_pushstring(L, gh->getItemIconPath(
         info && info->displayInfoId ? info->displayInfoId : slot.displayId).c_str());
@@ -1549,20 +1584,20 @@ static int pushTradeSlot(lua_State* L, game::GameHandler* gh,
 static int lua_GetTradePlayerItemInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh || i < 1 || i > game::GameHandler::TRADE_SLOT_COUNT) { return luaReturnNil(L); }
-    return pushTradeSlot(L, gh, gh->getMyTradeSlots()[i - 1]);
+    if (!gh || i < 1 || i > trade::kSlotCount) { return luaReturnNil(L); }
+    return pushTradeSlot(L, gh, tradeOf(L).getMyTradeSlots()[i - 1]);
 }
 
 static int lua_GetTradeTargetItemInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh || i < 1 || i > game::GameHandler::TRADE_SLOT_COUNT) { return luaReturnNil(L); }
-    return pushTradeSlot(L, gh, gh->getPeerTradeSlots()[i - 1]);
+    if (!gh || i < 1 || i > trade::kSlotCount) { return luaReturnNil(L); }
+    return pushTradeSlot(L, gh, tradeOf(L).getPeerTradeSlots()[i - 1]);
 }
 
 static int pushTradeLink(lua_State* L, game::GameHandler* gh,
-                         const game::GameHandler::TradeSlot& slot) {
-    const auto* info = (gh && slot.occupied()) ? gh->getItemInfo(slot.itemId) : nullptr;
+                         const trade::TradeSlot& slot) {
+    const auto* info = (gh && slot.occupied()) ? gh->inventory().getItemInfo(slot.itemId) : nullptr;
     if (!info || info->name.empty()) { return luaReturnNil(L); }
     const std::string link = game::itemChatLink(slot.itemId, static_cast<uint32_t>(info->quality), info->name);
     lua_pushstring(L, link.c_str());
@@ -1572,15 +1607,15 @@ static int pushTradeLink(lua_State* L, game::GameHandler* gh,
 static int lua_GetTradePlayerItemLink(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh || i < 1 || i > game::GameHandler::TRADE_SLOT_COUNT) { return luaReturnNil(L); }
-    return pushTradeLink(L, gh, gh->getMyTradeSlots()[i - 1]);
+    if (!gh || i < 1 || i > trade::kSlotCount) { return luaReturnNil(L); }
+    return pushTradeLink(L, gh, tradeOf(L).getMyTradeSlots()[i - 1]);
 }
 
 static int lua_GetTradeTargetItemLink(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh || i < 1 || i > game::GameHandler::TRADE_SLOT_COUNT) { return luaReturnNil(L); }
-    return pushTradeLink(L, gh, gh->getPeerTradeSlots()[i - 1]);
+    if (!gh || i < 1 || i > trade::kSlotCount) { return luaReturnNil(L); }
+    return pushTradeLink(L, gh, tradeOf(L).getPeerTradeSlots()[i - 1]);
 }
 
 // ClickTradeButton(slot) - put what is held into the slot, or take back what is
@@ -1588,7 +1623,7 @@ static int lua_GetTradeTargetItemLink(lua_State* L) {
 static int lua_ClickTradeButton(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh || i < 1 || i > game::GameHandler::TRADE_SLOT_COUNT) return 0;
+    if (!gh || i < 1 || i > trade::kSlotCount) return 0;
     uint8_t srcBag = 0, srcSlot = 0;
     // Through the same translation as every other send. This passed FrameXML's
     // own numbering straight to the server - bags counted 0 to 4 and slots from
@@ -1598,10 +1633,10 @@ static int lua_ClickTradeButton(lua_State* L) {
     // answers TRADE_STATUS_TRADE_CANCELED, so offering an item ended the trade.
     if (cursor(L).type == CursorType::ITEM && cursor(L).bag >= 0 &&
         cursorWireSlot(L, srcBag, srcSlot)) {
-        gh->setTradeItem(static_cast<uint8_t>(i - 1), srcBag, srcSlot);
+        tradeOf(L).setTradeItem(static_cast<uint8_t>(i - 1), srcBag, srcSlot);
         clearCursorItem(L);
     } else {
-        gh->clearTradeItem(static_cast<uint8_t>(i - 1));
+        tradeOf(L).clearTradeItem(static_cast<uint8_t>(i - 1));
     }
     return 0;
 }
@@ -1611,17 +1646,17 @@ static int lua_ClickTargetTradeButton(lua_State* L) { (void)L; return 0; }
 
 static int lua_SetTradeMoney(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (gh) gh->setTradeGold(static_cast<uint64_t>(luaL_optnumber(L, 1, 0)));
+    if (gh) tradeOf(L).setTradeGold(static_cast<uint64_t>(luaL_optnumber(L, 1, 0)));
     return 0;
 }
 
 static int lua_CloseTrade(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->cancelTrade();
+    if (getGameHandler(L)) tradeOf(L).cancelTrade();
     return 0;
 }
 
 static int lua_BeginTrade(lua_State* L) {
-    if (auto* gh = getGameHandler(L)) gh->acceptTradeRequest();
+    if (getGameHandler(L)) tradeOf(L).acceptTradeRequest();
     return 0;
 }
 
@@ -2293,7 +2328,7 @@ void registerActionLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int slot = static_cast<int>(luaL_optnumber(L, 1, 0)) - 1;
             if (!gh || slot < 0) { lua_pushnil(L); return 1; }
-            const auto& bar = gh->getActionBar();
+            const auto& bar = gh->actionBar().slots();
             if (slot >= static_cast<int>(bar.size())) { lua_pushnil(L); return 1; }
             const auto& action = bar[static_cast<size_t>(slot)];
             if (action.type != game::ActionBarSlot::MACRO) { lua_pushnil(L); return 1; }
@@ -2372,7 +2407,7 @@ void registerActionLuaAPI(lua_State* L) {
             const game::Macro* macro = macroFromArg(L, 1);
             if (!macro) return luaReturnNil(L);
             lua_pushstring(L, macro->name.c_str());
-            lua_pushstring(L, macroTexture(*macro).c_str());
+            lua_pushstring(L, macroTexture(L, *macro).c_str());
             lua_pushstring(L, macro->body.c_str());
             lua_pushnil(L);
             return 4;
@@ -2449,7 +2484,7 @@ void registerActionLuaAPI(lua_State* L) {
             if (!macro) return 0;
             setCursorType(L, CursorType::MACRO);
             cursor(L).id = macro->id;
-            wowee::ui::frameXmlSetCursorItem(macroTexture(*macro));
+            wowee::ui::frameXmlSetCursorItem(macroTexture(L, *macro));
             return 0;
         }},
                 {"GetTradePlayerItemInfo", lua_GetTradePlayerItemInfo},
@@ -2464,7 +2499,7 @@ void registerActionLuaAPI(lua_State* L) {
                 // closing while the player has already accepted, so without it
                 // the only way out of an accepted trade was to end it.
                 {"CancelTradeAccept", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->unacceptTrade();
+            if (getGameHandler(L)) tradeOf(L).unacceptTrade();
             return 0;
         }},
                 {"CloseTrade",          lua_CloseTrade},
@@ -2513,7 +2548,7 @@ void registerActionLuaAPI(lua_State* L) {
                 // the player's level down to it.
                 {"GetQuestGreenRange", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const int lvl = gh ? static_cast<int>(gh->getPlayerLevel()) : 1;
+            const int lvl = gh ? static_cast<int>(gh->player().level()) : 1;
             int gray;
             if (lvl <= 5)       gray = 0;
             else if (lvl <= 39) gray = lvl - 5 - lvl / 10;
@@ -2592,7 +2627,7 @@ void registerActionLuaAPI(lua_State* L) {
                 // return left it nil.
                 {"HasPetUI", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const bool has = gh && gh->hasPet();
+            const bool has = gh && petOf(L).hasPet();
             lua_pushboolean(L, has ? 1 : 0);
             lua_pushboolean(L, 0);   // hunter pet: not distinguished yet
             return 2;
@@ -2681,18 +2716,18 @@ void registerActionLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int hand = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (gh && (hand == 1 || hand == 2)) {
-                gh->cancelTempEnchantment(static_cast<uint8_t>(hand - 1));
+                gh->inventory().cancelTempEnchantment(static_cast<uint8_t>(hand - 1));
             }
             return 0;
         }},
                 {"GetPetActionSlotUsable", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
-            if (!gh || index < 1 || index > game::GameHandler::PET_ACTION_BAR_SLOTS) {
+            if (!gh || index < 1 || index > pet::kActionBarSlots) {
                 lua_pushboolean(L, 0);
                 return 1;
             }
-            const uint32_t spellId = gh->getPetActionSlot(index - 1) & 0x00FFFFFF;
+            const uint32_t spellId = petOf(L).getPetActionSlot(index - 1) & 0x00FFFFFF;
             lua_pushboolean(L, spellId != 0 ? 1 : 0);
             return 1;
         }},
@@ -2715,43 +2750,43 @@ void registerActionLuaAPI(lua_State* L) {
                 {"GetPetActionInfo", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             int index = static_cast<int>(luaL_checknumber(L, 1));
-            if (!gh || index < 1 || index > game::GameHandler::PET_ACTION_BAR_SLOTS) {
+            if (!gh || index < 1 || index > pet::kActionBarSlots) {
                 return luaReturnNil(L);
             }
-            const uint32_t packed = gh->getPetActionSlot(index - 1);
+            const uint32_t packed = petOf(L).getPetActionSlot(index - 1);
             if (packed == 0) { return luaReturnNil(L); }
 
-            const uint32_t action = game::pet::petActionId(packed);
-            const auto type = game::pet::petActionType(packed);
+            const uint32_t action = pet::petActionId(packed);
+            const auto type = pet::petActionType(packed);
 
             const char* tokenName = nullptr;
             const char* tokenTexture = nullptr;
             bool active = false;
 
-            if (type == game::pet::ActionType::Command) {
+            if (type == pet::ActionType::Command) {
                 switch (action) {
-                    case game::pet::kStay:
+                    case pet::kStay:
                         tokenName = "PET_ACTION_WAIT";    tokenTexture = "PET_WAIT_TEXTURE";   break;
-                    case game::pet::kFollow:
+                    case pet::kFollow:
                         tokenName = "PET_ACTION_FOLLOW";  tokenTexture = "PET_FOLLOW_TEXTURE"; break;
-                    case game::pet::kAttack:
+                    case pet::kAttack:
                         tokenName = "PET_ACTION_ATTACK";  tokenTexture = "PET_ATTACK_TEXTURE"; break;
-                    case game::pet::kAbandon:
+                    case pet::kAbandon:
                         tokenName = "PET_DISMISS";        tokenTexture = "PET_DISMISS_TEXTURE"; break;
                     default: break;
                 }
-            } else if (type == game::pet::ActionType::Reaction) {
+            } else if (type == pet::ActionType::Reaction) {
                 switch (action) {
-                    case game::pet::kPassive:
+                    case pet::kPassive:
                         tokenName = "PET_MODE_PASSIVE";    tokenTexture = "PET_PASSIVE_TEXTURE";    break;
-                    case game::pet::kDefensive:
+                    case pet::kDefensive:
                         tokenName = "PET_MODE_DEFENSIVE";  tokenTexture = "PET_DEFENSIVE_TEXTURE";  break;
-                    case game::pet::kAggressive:
+                    case pet::kAggressive:
                         tokenName = "PET_MODE_AGGRESSIVE"; tokenTexture = "PET_AGGRESSIVE_TEXTURE"; break;
                     default: break;
                 }
                 // The stance the pet is in is the one drawn as chosen.
-                active = (action == gh->getPetReact());
+                active = (action == petOf(L).getPetReact());
             }
 
             if (tokenName) {
@@ -2769,7 +2804,7 @@ void registerActionLuaAPI(lua_State* L) {
 
             const uint32_t spellId = action;
             if (spellId == 0) { return luaReturnNil(L); }
-            const std::string& name = gh->getSpellName(spellId);
+            const std::string& name = gh->spells().getSpellName(spellId);
             const std::string iconPath = gh->getSpellIconPath(spellId);
             lua_pushstring(L, name.empty() ? "Unknown" : name.c_str());
             lua_pushstring(L, "");
@@ -2781,7 +2816,7 @@ void registerActionLuaAPI(lua_State* L) {
             // it on every spell the pet knows.
             lua_pushboolean(L, 0);                                      // isActive
             lua_pushboolean(L, 1);                                      // autoCastAllowed
-            lua_pushboolean(L, gh->isPetSpellAutocast(spellId) ? 1 : 0);
+            lua_pushboolean(L, petOf(L).isPetSpellAutocast(spellId) ? 1 : 0);
             return 7;
         }},
                 // IsPetAttackAction(index) - which slot is the attack command,
@@ -2790,10 +2825,10 @@ void registerActionLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
             bool isAttack = false;
-            if (gh && index >= 1 && index <= game::GameHandler::PET_ACTION_BAR_SLOTS) {
-                const uint32_t packed = gh->getPetActionSlot(index - 1);
-                isAttack = game::pet::petActionType(packed) == game::pet::ActionType::Command &&
-                           game::pet::petActionId(packed) == game::pet::kAttack;
+            if (gh && index >= 1 && index <= pet::kActionBarSlots) {
+                const uint32_t packed = petOf(L).getPetActionSlot(index - 1);
+                isAttack = pet::petActionType(packed) == pet::ActionType::Command &&
+                           pet::petActionId(packed) == pet::kAttack;
             }
             lua_pushboolean(L, isAttack ? 1 : 0);
             return 1;
@@ -2814,14 +2849,14 @@ void registerActionLuaAPI(lua_State* L) {
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
             // Enable is one, not zero: zero switches the sweep off entirely,
             // and all three go straight into CooldownFrame_SetTimer.
-            if (!gh || index < 1 || index > game::GameHandler::PET_ACTION_BAR_SLOTS) {
+            if (!gh || index < 1 || index > pet::kActionBarSlots) {
                 lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 1);
                 return 3;
             }
-            const uint32_t packed = gh->getPetActionSlot(index - 1);
+            const uint32_t packed = petOf(L).getPetActionSlot(index - 1);
             // A command or a stance has no cooldown of its own.
-            const float remaining = game::pet::isPetSpellAction(packed)
-                ? gh->getSpellCooldown(game::pet::petActionId(packed)) : 0.0f;
+            const float remaining = pet::isPetSpellAction(packed)
+                ? gh->spells().getSpellCooldown(pet::petActionId(packed)) : 0.0f;
             if (remaining <= 0.01f) {
                 lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 1);
                 return 3;
@@ -2833,38 +2868,38 @@ void registerActionLuaAPI(lua_State* L) {
         }},
                 {"PetAttack", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh && gh->hasPet() && gh->hasTarget())
-                gh->sendPetAction(
-                    game::pet::packPetAction(game::pet::ActionType::Command, game::pet::kAttack),
-                    gh->getTargetGuid());
+            if (gh && petOf(L).hasPet() && gh->combat().hasTarget())
+                petOf(L).sendPetAction(
+                    pet::packPetAction(pet::ActionType::Command, pet::kAttack),
+                    gh->combat().getTargetGuid());
             return 0;
         }},
                 {"PetFollow", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh && gh->hasPet())
-                gh->sendPetAction(
-                    game::pet::packPetAction(game::pet::ActionType::Command, game::pet::kFollow), 0);
+            if (gh && petOf(L).hasPet())
+                petOf(L).sendPetAction(
+                    pet::packPetAction(pet::ActionType::Command, pet::kFollow), 0);
             return 0;
         }},
                 {"PetWait", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh && gh->hasPet())
-                gh->sendPetAction(
-                    game::pet::packPetAction(game::pet::ActionType::Command, game::pet::kStay), 0);
+            if (gh && petOf(L).hasPet())
+                petOf(L).sendPetAction(
+                    pet::packPetAction(pet::ActionType::Command, pet::kStay), 0);
             return 0;
         }},
                 {"PetPassiveMode", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh && gh->hasPet())
-                gh->sendPetAction(
-                    game::pet::packPetAction(game::pet::ActionType::Reaction, game::pet::kPassive), 0);
+            if (gh && petOf(L).hasPet())
+                petOf(L).sendPetAction(
+                    pet::packPetAction(pet::ActionType::Reaction, pet::kPassive), 0);
             return 0;
         }},
                 {"CastPetAction", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             int index = static_cast<int>(luaL_checknumber(L, 1));
-            if (!gh || !gh->hasPet() || index < 1 || index > game::GameHandler::PET_ACTION_BAR_SLOTS) return 0;
-            uint32_t packed = gh->getPetActionSlot(index - 1);
+            if (!gh || !petOf(L).hasPet() || index < 1 || index > pet::kActionBarSlots) return 0;
+            uint32_t packed = petOf(L).getPetActionSlot(index - 1);
             uint32_t spellId = packed & 0x00FFFFFF;
             if (spellId != 0) {
                 // CastPetAction(action, unit) - the unit is what a click-cast
@@ -2878,25 +2913,25 @@ void registerActionLuaAPI(lua_State* L) {
                     target = resolveUnitGuid(gh, u);
                 }
                 if (target == 0)
-                    target = gh->hasTarget() ? gh->getTargetGuid() : gh->getPetGuid();
-                gh->sendPetAction(packed, target);
+                    target = gh->combat().hasTarget() ? gh->combat().getTargetGuid() : petOf(L).getPetGuid();
+                petOf(L).sendPetAction(packed, target);
             }
             return 0;
         }},
                 {"TogglePetAutocast", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             int index = static_cast<int>(luaL_checknumber(L, 1));
-            if (!gh || !gh->hasPet() || index < 1 || index > game::GameHandler::PET_ACTION_BAR_SLOTS) return 0;
-            uint32_t packed = gh->getPetActionSlot(index - 1);
+            if (!gh || !petOf(L).hasPet() || index < 1 || index > pet::kActionBarSlots) return 0;
+            uint32_t packed = petOf(L).getPetActionSlot(index - 1);
             uint32_t spellId = packed & 0x00FFFFFF;
-            if (spellId != 0) gh->togglePetSpellAutocast(spellId);
+            if (spellId != 0) petOf(L).togglePetSpellAutocast(spellId);
             return 0;
         }},
                 {"PetDismiss", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh && gh->hasPet())
-                gh->sendPetAction(
-                    game::pet::packPetAction(game::pet::ActionType::Command, game::pet::kAbandon), 0);
+            if (gh && petOf(L).hasPet())
+                petOf(L).sendPetAction(
+                    pet::packPetAction(pet::ActionType::Command, pet::kAbandon), 0);
             return 0;
         }},
                 // The other end of the ABANDON_PET dialog, which the pet's
@@ -2907,12 +2942,12 @@ void registerActionLuaAPI(lua_State* L) {
                 // which is what the dialog in front of it is for.
                 {"PetAbandon", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh && gh->hasPet()) gh->abandonPet();
+            if (gh && petOf(L).hasPet()) petOf(L).abandonPet();
             return 0;
         }},
                 // CONFIRM_BUY_STABLE_SLOT's accept, from the stable panel.
                 {"BuyStableSlot", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->buyStableSlot();
+            if (getGameHandler(L)) petOf(L).buyStableSlot();
             return 0;
         }},
                 // VOTE_BOOT_PLAYER's two buttons. The dialog is shown from
@@ -2922,7 +2957,7 @@ void registerActionLuaAPI(lua_State* L) {
                 // Both buttons matter here: declining is a vote, not a
                 // dismissal, and OnCancel sends it.
                 {"SetLFGBootVote", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->lfgSetBootVote(lua_toboolean(L, 1) != 0);
+            if (getGameHandler(L)) lfgOf(L).lfgSetBootVote(lua_toboolean(L, 1) != 0);
             return 0;
         }},
                 // CONFIRM_RESET_INSTANCES' accept, from /resetinstances and
@@ -2950,14 +2985,14 @@ void registerActionLuaAPI(lua_State* L) {
         }},
                 {"IsPetAttackActive", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushboolean(L, gh && gh->getPetCommand() == 2 ? 1 : 0); // 2=attack
+            lua_pushboolean(L, gh && petOf(L).getPetCommand() == 2 ? 1 : 0); // 2=attack
             return 1;
         }},
                 {"PetDefensiveMode", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh && gh->hasPet())
-                gh->sendPetAction(
-                    game::pet::packPetAction(game::pet::ActionType::Reaction, game::pet::kDefensive), 0);
+            if (gh && petOf(L).hasPet())
+                petOf(L).sendPetAction(
+                    pet::packPetAction(pet::ActionType::Reaction, pet::kDefensive), 0);
             return 0;
         }},
                 // The third stance, which was a no-op in another file entirely
@@ -2965,9 +3000,9 @@ void registerActionLuaAPI(lua_State* L) {
                 // aggressive, and the button for it did nothing.
                 {"PetAggressiveMode", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh && gh->hasPet())
-                gh->sendPetAction(
-                    game::pet::packPetAction(game::pet::ActionType::Reaction, game::pet::kAggressive), 0);
+            if (gh && petOf(L).hasPet())
+                petOf(L).sendPetAction(
+                    pet::packPetAction(pet::ActionType::Reaction, pet::kAggressive), 0);
             return 0;
         }},
     };

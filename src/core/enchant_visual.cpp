@@ -1,8 +1,9 @@
 #include "core/enchant_visual.hpp"
 
 #include "core/logger.hpp"
-#include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/dbc_loader.hpp"
+#include "pipeline/required_table.hpp"
 #include "pipeline/m2_loader.hpp"
 
 #include <mutex>
@@ -25,20 +26,14 @@ bool firstReport(const std::string& key) {
 
 } // namespace
 
-EnchantVisualModels resolveEnchantVisualModels(pipeline::AssetManager& assets, uint32_t enchantId) {
+EnchantVisualModels resolveEnchantVisualModels(const pipeline::GameTables& tables, uint32_t enchantId) {
     if (enchantId == 0) return {};
 
-    auto sieDbc     = assets.loadDBC("SpellItemEnchantment.dbc");
-    auto visualsDbc = assets.loadDBC("ItemVisuals.dbc");
-    auto effectsDbc = assets.loadDBC("ItemVisualEffects.dbc");
-    if (!sieDbc || !sieDbc->isLoaded() || !visualsDbc || !visualsDbc->isLoaded() ||
-        !effectsDbc || !effectsDbc->isLoaded()) {
-        if (firstReport("enchant-tables")) {
-            LOG_WARNING("Enchant visuals: SpellItemEnchantment, ItemVisuals or ItemVisualEffects.dbc "
-                        "did not load; weapons are drawn without their enchant glows");
-        }
-        return {};
-    }
+    constexpr std::string_view kNeededFor = "a weapon's enchant glow";
+    const pipeline::RequiredTable sieDbc(tables, "SpellItemEnchantment.dbc", kNeededFor);
+    // ItemVisuals: ID and five effect slots; ItemVisualEffects: ID and model.
+    const auto visualsDbc = tables.table("ItemVisuals.dbc", 6, kNeededFor);
+    const auto effectsDbc = tables.table("ItemVisualEffects.dbc", 2, kNeededFor);
 
     if (sieDbc->findRecordById(enchantId) < 0) {
         if (firstReport("enchant-id:" + std::to_string(enchantId))) {
@@ -48,20 +43,18 @@ EnchantVisualModels resolveEnchantVisualModels(pipeline::AssetManager& assets, u
         return {};
     }
 
-    const auto* sieL = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("SpellItemEnchantment") : nullptr;
     return pipeline::resolveEnchantItemVisuals(enchantId, sieDbc.get(), visualsDbc.get(),
-                                               effectsDbc.get(), sieL);
+                                               effectsDbc.get(), &sieDbc.layout());
 }
 
-void attachEnchantVisuals(rendering::SceneCommands::Characters& characters, pipeline::AssetManager& assets,
+void attachEnchantVisuals(rendering::SceneCommands::Characters& characters, const pipeline::GameTables& tables,
                           uint32_t charInstanceId, uint32_t attachmentId, uint32_t enchantId,
                           const EnchantModelLoader& loadModel,
                           const std::function<uint32_t()>& allocateModelId) {
     characters.detachWeaponEffects(charInstanceId, attachmentId);
     if (enchantId == 0) return;
 
-    const EnchantVisualModels models = resolveEnchantVisualModels(assets, enchantId);
+    const EnchantVisualModels models = resolveEnchantVisualModels(tables, enchantId);
     for (uint32_t visualSlot = 0; visualSlot < models.size(); ++visualSlot) {
         const std::string& path = models[visualSlot];
         if (path.empty()) continue;

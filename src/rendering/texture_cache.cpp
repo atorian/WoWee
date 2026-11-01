@@ -51,6 +51,7 @@ const char* textureFormName(TextureForm form) {
     case TextureForm::NormalHeight: return "normal maps";
     case TextureForm::Composite: return "character composites";
     case TextureForm::Owned: return "owned textures";
+    case TextureForm::Interface: return "interface textures";
     case TextureForm::Count_: break;
     }
     return "?";

@@ -20,15 +20,31 @@ class CameraController;
 class AnimationController;
 namespace world_map { class WorldMapFacade; }
 }
-namespace pipeline { class AssetManager; }
+namespace pipeline { class AssetManager; class GameTables; }
 namespace game { 
     class GameHandler;
     class ExpansionRegistry;
 }
 namespace addons { class AddonManager; class AddonCatalog; }
+namespace contacts { class IContacts; }
+namespace who { class IWho; }
+namespace duel { class IDuels; }
+namespace battleground { class IBattlegrounds; }
+namespace lfg { class ILfg; }
+namespace calendar { class ICalendar; }
+namespace group { class IGroup; }
+namespace guild { class IGuild; }
+namespace auction { class IAuctionHouse; }
+namespace mail { class IMailbox; }
+namespace guild_bank { class IGuildBank; }
+namespace trade { class ITrade; }
+namespace loot { class ILoot; }
+namespace title { class ITitles; }
+namespace pet { class IPet; }
 namespace audio { class AudioCoordinator; }
 
 namespace ui {
+class AgentControls;
 
 /**
  * UI Services - Dependency injection container for UI components.
@@ -45,8 +61,42 @@ struct UIServices {
     core::Window* window = nullptr;
     rendering::Renderer* renderer = nullptr;
     pipeline::AssetManager* assetManager = nullptr;
+    /// The running expansion's tables, which the interface reads names,
+    /// icons and appearances from.
+    const pipeline::GameTables* gameTables = nullptr;
     game::GameHandler* gameHandler = nullptr;
     game::ExpansionRegistry* expansionRegistry = nullptr;
+    /// The friend, ignore and mute lists, and the requests that change them.
+    contacts::IContacts* contacts = nullptr;
+    /// /who: the last answer, where answers go, and the query.
+    who::IWho* who = nullptr;
+    /// The duel the player is asked to or in: its countdown and the answers.
+    duel::IDuels* duels = nullptr;
+    /// The battleground queues, listings, scoreboard and map positions.
+    battleground::IBattlegrounds* battlegrounds = nullptr;
+    /// The dungeon finder's queue and what it is doing.
+    lfg::ILfg* lfg = nullptr;
+    /// The calendar, for the minimap's count of waiting invitations.
+    calendar::ICalendar* calendar = nullptr;
+    /// The player's party or raid, its invite, ready check and markers.
+    group::IGroup* group = nullptr;
+    /// The player's guild, and other guilds' names for nameplates.
+    guild::IGuild* guild = nullptr;
+    /// The auction house, for whether Escape closes it.
+    auction::IAuctionHouse* auctionHouse = nullptr;
+    /// The mailbox, for the minimap's envelope and whether Escape closes it.
+    mail::IMailbox* mail = nullptr;
+    /// The guild vault, for opening the bags beside it and whether Escape
+    /// closes it.
+    guild_bank::IGuildBank* guildBank = nullptr;
+    /// A trade with another player, for asking for one and for the window.
+    trade::ITrade* trade = nullptr;
+    /// The loot window, for autoloot, Escape and right-clicking a corpse.
+    loot::ILoot* loot = nullptr;
+    /// The titles, for another player's title over their nameplate.
+    title::ITitles* titles = nullptr;
+    /// The pet, for the pet commands, the pet talent dialog and the pet frame.
+    pet::IPet* pet = nullptr;
     /// The interface of the character in the world, in whatever state it is;
     /// null with no character in the world. Asked each time rather than held:
     /// each character has its own, and a /reload replaces it.
@@ -75,6 +125,7 @@ struct UIServices {
     core::EntitySpawner* entitySpawner = nullptr;
     core::AppearanceComposer* appearanceComposer = nullptr;
     core::WorldLoader* worldLoader = nullptr;
+    AgentControls* agentControls = nullptr;
     
     // Helper to check if core services are wired
     [[nodiscard]] bool isValid() const {

@@ -1,11 +1,16 @@
 #include "core/audio_callback_handler.hpp"
 #include "game/game_events.hpp"
+#include "duel/domain/duel.hpp"
+#include "group/domain/events.hpp"
+#include "mail/domain/events.hpp"
+#include "loot/domain/events.hpp"
+#include "achievement/domain/events.hpp"
 #include "core/player_view.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/animation_controller.hpp"
-#include "pipeline/asset_manager.hpp"
+#include "pipeline/game_tables.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "game/game_handler.hpp"
 #include "audio/audio_coordinator.hpp"
@@ -23,13 +28,13 @@
 namespace wowee { namespace core {
 
 AudioCallbackHandler::AudioCallbackHandler(
-    pipeline::AssetManager& assetManager,
+    const pipeline::GameTables& tables,
     audio::AudioCoordinator* audioCoordinator,
     rendering::Renderer* renderer,
     PlayerView* playerView,
     ui::UIManager* uiManager,
     game::GameHandler& gameHandler)
-    : assetManager_(assetManager)
+    : tables_(tables)
     , audioCoordinator_(audioCoordinator)
     , renderer_(renderer)
     , playerView_(playerView)
@@ -105,7 +110,7 @@ void AudioCallbackHandler::subscribeGameSounds() {
                          static_cast<uint8_t>(game::toServerGender(ch->gender)));
     }));
 
-    subscriptions_.push_back(bus.subscribe<ev::LootMoneyReceived>([this](const ev::LootMoneyReceived& e) {
+    subscriptions_.push_back(bus.subscribe<loot::MoneyAnnounced>([this](const loot::MoneyAnnounced& e) {
         playUi([&](audio::UiSoundManager& sfx) {
             if (e.copper >= 10000) sfx.playLootCoinLarge();
             else sfx.playLootCoinSmall();
@@ -120,7 +125,7 @@ void AudioCallbackHandler::subscribeGameSounds() {
     subscriptions_.push_back(bus.subscribe<ev::ItemBought>([this](const ev::ItemBought&) {
         playUi([](audio::UiSoundManager& sfx) { sfx.playPickupBag(); });
     }));
-    subscriptions_.push_back(bus.subscribe<ev::MailArrived>([this](const ev::MailArrived&) {
+    subscriptions_.push_back(bus.subscribe<mail::NewMailArrived>([this](const mail::NewMailArrived&) {
         playUi([](audio::UiSoundManager& sfx) { sfx.playMailReceived(); });
     }));
     subscriptions_.push_back(bus.subscribe<ev::QuestAccepted>([this](const ev::QuestAccepted&) {
@@ -132,10 +137,10 @@ void AudioCallbackHandler::subscribeGameSounds() {
     subscriptions_.push_back(bus.subscribe<ev::TrainerSpellLearned>([this](const ev::TrainerSpellLearned&) {
         playUi([](audio::UiSoundManager& sfx) { sfx.playQuestActivate(); });
     }));
-    subscriptions_.push_back(bus.subscribe<ev::DuelRequested>([this](const ev::DuelRequested&) {
+    subscriptions_.push_back(bus.subscribe<duel::DuelRequested>([this](const duel::DuelRequested&) {
         playUi([](audio::UiSoundManager& sfx) { sfx.playTargetSelect(); });
     }));
-    subscriptions_.push_back(bus.subscribe<ev::GroupInviteReceived>([this](const ev::GroupInviteReceived&) {
+    subscriptions_.push_back(bus.subscribe<group::InviteReceived>([this](const group::InviteReceived&) {
         playUi([](audio::UiSoundManager& sfx) { sfx.playQuestActivate(); });
     }));
     subscriptions_.push_back(bus.subscribe<ev::MinimapPinged>([this](const ev::MinimapPinged&) {
@@ -180,8 +185,8 @@ void AudioCallbackHandler::subscribeGameSounds() {
 }
 
 std::optional<std::string> AudioCallbackHandler::resolveSoundEntryPath(uint32_t soundId) const {
-    auto dbc = assetManager_.loadDBC("SoundEntries.dbc");
-    if (!dbc || !dbc->isLoaded()) return std::nullopt;
+    // File[0..9] at 3..12, DirectoryBase at 23.
+    const auto dbc = tables_.table("SoundEntries.dbc", 24, "the game's sound effects by id");
 
     int32_t idx = dbc->findRecordById(soundId);
     if (idx < 0) return std::nullopt;
@@ -213,8 +218,8 @@ void AudioCallbackHandler::setupCallbacks() {
     }));
 
     // An achievement: its alert and the toast banner.
-    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::AchievementEarned>(
-        [this](const game::events::AchievementEarned&) {
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<achievement::AchievementEarned>(
+        [this](const achievement::AchievementEarned&) {
         playUi([](audio::UiSoundManager& sfx) { sfx.playAchievementAlert(); });
         if (uiManager_) {
             uiManager_->getGameScreen().toastManager().playAchievementEarned();
@@ -225,41 +230,44 @@ void AudioCallbackHandler::setupCallbacks() {
 
     // Server-triggered music callback (SMSG_PLAY_MUSIC)
     // Resolves soundId → SoundEntries.dbc → MPQ path → MusicManager.
-    gameHandler_.setPlayMusicCallback([this](uint32_t soundId) {
-        if (!renderer_) return;
-        auto* music = audioCoordinator_ ? audioCoordinator_->getMusicManager() : nullptr;
-        if (!music) return;
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::MusicRequested>(
+        [this](const game::events::MusicRequested& e) {
+            if (!renderer_) return;
+            auto* music = audioCoordinator_ ? audioCoordinator_->getMusicManager() : nullptr;
+            if (!music) return;
 
-        auto path = resolveSoundEntryPath(soundId);
-        if (path) {
-            music->playMusic(*path, /*loop=*/false);
-        }
-    });
+            auto path = resolveSoundEntryPath(e.soundId);
+            if (path) {
+                music->playMusic(*path, /*loop=*/false);
+            }
+        }));
 
     // SMSG_PLAY_SOUND: look up SoundEntries.dbc and play 2-D sound effect
-    gameHandler_.setPlaySoundCallback([this](uint32_t soundId) {
-        auto path = resolveSoundEntryPath(soundId);
-        if (path) {
-            audio::AudioEngine::instance().playSound2D(*path);
-        }
-    });
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::SoundRequested>(
+        [this](const game::events::SoundRequested& e) {
+            auto path = resolveSoundEntryPath(e.soundId);
+            if (path) {
+                audio::AudioEngine::instance().playSound2D(*path);
+            }
+        }));
 
     // SMSG_PLAY_OBJECT_SOUND / SMSG_PLAY_SPELL_IMPACT: play as 3D positional sound at source entity
-    gameHandler_.setPlayPositionalSoundCallback([this](uint32_t soundId, uint64_t sourceGuid) {
-        auto path = resolveSoundEntryPath(soundId);
-        if (!path) return;
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::PositionalSoundRequested>(
+        [this](const game::events::PositionalSoundRequested& e) {
+            auto path = resolveSoundEntryPath(e.soundId);
+            if (!path) return;
 
-        // Play as 3D sound if source entity position is available.
-        // Entity stores canonical coords; listener uses render coords (camera).
-        auto entity = gameHandler_.getEntityManager().getEntity(sourceGuid);
-        if (entity) {
-            glm::vec3 canonical{entity->getLatestX(), entity->getLatestY(), entity->getLatestZ()};
-            glm::vec3 pos = core::coords::canonicalToRender(canonical);
-            audio::AudioEngine::instance().playSound3D(*path, pos);
-        } else {
-            audio::AudioEngine::instance().playSound2D(*path);
-        }
-    });
+            // Play as 3D sound if source entity position is available.
+            // Entity stores canonical coords; listener uses render coords (camera).
+            auto entity = gameHandler_.getEntityManager().getEntity(e.sourceGuid);
+            if (entity) {
+                glm::vec3 canonical{entity->getLatestX(), entity->getLatestY(), entity->getLatestZ()};
+                glm::vec3 pos = core::coords::canonicalToRender(canonical);
+                audio::AudioEngine::instance().playSound3D(*path, pos);
+            } else {
+                audio::AudioEngine::instance().playSound2D(*path);
+            }
+        }));
 
     // Other player level-up callback - trigger 3D effect + chat notification
     subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::OtherPlayerLevelUp>(
@@ -277,8 +285,8 @@ void AudioCallbackHandler::setupCallbacks() {
         }
 
         // Show chat message if in group
-        if (gameHandler_.isInGroup()) {
-            std::string name = gameHandler_.getCachedPlayerName(guid);
+        if (gameHandler_.inGroup()) {
+            std::string name = gameHandler_.queryCache().lookupName(guid);
             if (name.empty()) name = "A party member";
             game::MessageChatData msg;
             msg.type = game::ChatType::SYSTEM;

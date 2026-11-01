@@ -18,6 +18,8 @@ struct WDTInfo {
     float rotation[3] = {};        // degrees
     uint16_t flags = 0;
     uint16_t doodadSet = 0;
+    /// The NameSetID WMOAreaTable.dbc rows for this placement carry.
+    uint16_t nameSet = 0;
 };
 
 WDTInfo parseWDT(const std::vector<uint8_t>& data);

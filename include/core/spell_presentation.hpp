@@ -8,7 +8,6 @@
 
 namespace wowee {
 namespace audio { class AudioCoordinator; }
-namespace pipeline { class AssetManager; }
 namespace rendering { class Renderer; class SpellVisualSystem; }
 namespace game { class GameHandler; }
 
@@ -29,8 +28,7 @@ public:
     SpellPresentation(EventBus& events, game::GameHandler& game,
                       rendering::Renderer& renderer, EntitySpawner& spawner,
                       rendering::SpellVisualSystem* visuals,
-                      audio::AudioCoordinator* audio,
-                      pipeline::AssetManager& assets);
+                      audio::AudioCoordinator* audio);
 
     SpellPresentation(const SpellPresentation&) = delete;
     SpellPresentation& operator=(const SpellPresentation&) = delete;
@@ -67,7 +65,6 @@ private:
     EntitySpawner& spawner_;
     rendering::SpellVisualSystem* visuals_;
     audio::AudioCoordinator* audio_;
-    pipeline::AssetManager& assets_;
 
     float auraLookTimer_ = 0.0f;
     bool wasRestoring_ = false;
