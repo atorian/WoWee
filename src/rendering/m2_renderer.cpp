@@ -502,6 +502,8 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     if (initialized_) { assetManager = assets; return true; }
     vkCtx_ = ctx;
     assetManager = assets;
+    cullTable_.initialize(*ctx);
+    instanceTable_.initialize(*ctx);
 
     // Announce the renderer diagnostics this build understands, and which of
     // them are active. A run that logs this line is definitely a build that has
@@ -1028,18 +1030,16 @@ void M2Renderer::shutdown() {
     destroy(device, cullPipelineLayout_);
     for (int i = 0; i < 2; i++) {
         destroy(alloc, cullUniformBuffer_[i], cullUniformAlloc_[i]);
-        destroy(alloc, cullStaging_[i].buffer, cullStaging_[i].alloc);
         destroy(alloc, cullVisible_[i].buffer, cullVisible_[i].alloc);
-        cullStaging_[i] = cullVisible_[i] = CullBuffer{};
+        cullVisible_[i] = CullBuffer{};
         cullUniformMapped_[i] = nullptr;
         cullSet_[i] = VK_NULL_HANDLE;
         cullSetTableVersion_[i] = 0;
         instanceSetTableVersion_[i] = 0;
         slotCullDispatch_[i] = CullDispatch{};
     }
-    destroy(alloc, cullTable_.buffer, cullTable_.alloc);
-    destroy(alloc, instanceTable_.buffer, instanceTable_.alloc);
-    cullTable_ = instanceTable_ = CullBuffer{};
+    cullTable_.destroy();
+    instanceTable_.destroy();
     pendingCullDispatch_ = CullDispatch{};
     pendingUploadSerial_ = 0;
     // The table is gone: whatever scene comes next is mirrored from scratch.

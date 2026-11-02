@@ -3,6 +3,7 @@
 #include "rendering/rt_instance_changes.hpp"
 #include "rendering/frame_pool.hpp"
 #include "rendering/frame_results.hpp"
+#include "rendering/gpu_slot_table.hpp"
 
 #include "collision/m2_shape.hpp"
 #include "rendering/chunked_vector.hpp"
@@ -1169,38 +1170,32 @@ private:
     /// only by copies recorded into the frames, in queue order: the cull's
     /// row of each slot, and what the vertex shader reads of it
     /// (InstanceStaticGPU). They grow together.
-    CullBuffer cullTable_;
-    CullBuffer instanceTable_;
-    /// Bumped when a table is replaced, so each slot's sets are rewritten.
-    uint32_t slotTablesVersion_ = 0;
+    GpuSlotTable cullTable_{sizeof(CullRowGPU), "M2 cull table"};
+    GpuSlotTable instanceTable_{sizeof(InstanceStaticGPU), "M2 instance table"};
+    /// The table version (GpuSlotTable::version) each slot's sets name, so
+    /// they are rewritten when a table is replaced.
     uint32_t cullSetTableVersion_[2] = {};
     uint32_t instanceSetTableVersion_[2] = {};
     uint32_t shadowSetTableVersion_[kShadowTexPoolFrames] = {};
-    /// Per frame slot: the rows being copied in (cull rows, then instance
-    /// rows), and the kept list read back.
-    CullBuffer cullStaging_[2];
+    /// Per frame slot: the kept list read back.
     CullBuffer cullVisible_[2];
-    /// A buffer for the tables; false, logged, when there was no memory.
+    /// A buffer for the kept list; false, logged, when there was no memory.
     bool makeCullBuffer(CullBuffer& into, uint32_t capacity, VkDeviceSize bytes, VkBufferUsageFlags usage,
                         VmaMemoryUsage memory, const char* what);
-    /// `table` replaced by one of `capacity` rows, its rows copied across in
-    /// `cmd` and the rest zero.
-    bool growSlotTable(VkCommandBuffer cmd, CullBuffer& table, uint32_t capacity, VkDeviceSize row,
-                       const char* what);
-    /// Both tables and this slot's staging at least this large, and this
-    /// slot's instance set naming the instance table. False, logged, when
-    /// there was no memory for one: the frame's models are not drawn.
-    bool ensureSlotTables(VkCommandBuffer cmd, uint32_t frameIndex, uint32_t slots, uint32_t updates);
+    /// Both tables at least this large, and this slot's instance sets
+    /// naming the instance table. False, logged, when there was no memory
+    /// for one: the frame's models are not drawn.
+    bool ensureSlotTables(VkCommandBuffer cmd, uint32_t frameIndex, uint32_t slots);
     /// This slot's kept list at least this large and its cull set naming
     /// it and the table. False, logged, when there was no memory: no cull.
     bool ensureCullOutput(uint32_t frameIndex, uint32_t slots);
     /// Whether this slot's instance set names the instance table as it is.
     [[nodiscard]] bool instanceSetReady(uint32_t frameIndex) const {
-        return instanceTable_.buffer && instanceSetTableVersion_[frameIndex] == slotTablesVersion_;
+        return instanceTable_.buffer() && instanceSetTableVersion_[frameIndex] == instanceTable_.version();
     }
     /// The same for this slot's shadow caster set.
     [[nodiscard]] bool shadowSetReady(uint32_t frameIndex) const {
-        return instanceTable_.buffer && shadowSetTableVersion_[frameIndex] == slotTablesVersion_;
+        return instanceTable_.buffer() && shadowSetTableVersion_[frameIndex] == instanceTable_.version();
     }
     /// The extracted frame whose table changes were recorded and not yet
     /// known to be submitted; 0 for none.
@@ -1217,7 +1212,6 @@ private:
     };
     CullDispatch pendingCullDispatch_;
     CullDispatch slotCullDispatch_[2];
-    std::vector<VkBufferCopy> cullCopyRegions_;  ///< scratch, render thread
 
     const std::vector<LocalLight>* frameLights_ = nullptr;
 
