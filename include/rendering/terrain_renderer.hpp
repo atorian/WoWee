@@ -14,6 +14,7 @@
 #include "rendering/terrain_bake.hpp"
 #include "rendering/terrain_tile_maps.hpp"
 #include "pipeline/distant_terrain.hpp"
+#include "rendering/terrain_chunk_index.hpp"
 #include "rendering/uniform_slot_pool.hpp"
 #include "rendering/vk_utils.hpp"
 
@@ -348,7 +349,8 @@ public:
     /// level of detail is chosen against: a chunk is drawn at the coarsest
     /// level whose error stays within kLodMaxErrorPixels on screen.
     void setLodViewportHeight(uint32_t pixels) { lodViewportHeight_ = pixels; }
-    pipeline::TerrainCoverage detailedCoverage() const;
+    /// Each tile's resident chunks, which the distant terrain leaves alone.
+    [[nodiscard]] const pipeline::TerrainCoverage& detailedCoverage() const { return chunkIndex_.coverage(); }
     [[nodiscard]] VkContext* getVkContext() const { return vkCtx; }
 
     /// Where chunks register their geometry for the ray traced lighting.
@@ -469,23 +471,23 @@ private:
     /// its layers, to compare against.
     TerrainBake bake_;
     bool bakeEnabled_ = false;
-    /// Chunks waiting for their bake, by their place on the map (chunkAt_).
-    std::vector<uint64_t> bakeQueue_;
+    /// Chunks waiting for their bake, by their place on the map (gx, gy).
+    std::vector<std::pair<int, int>> bakeQueue_;
     int bakedDrawnChunks_ = 0;
     int crossfadeDrawnChunks_ = 0;
     /// Enqueue a chunk just added for its bake.
     void queueBake(const TerrainChunkGPU& chunk);
     /// Puts a chunk just made at the end of `chunks`, records its place in
-    /// chunkAt_ and its tile's list, and queues its bake.
+    /// chunkIndex_ and its tile's list, and queues its bake.
     void addChunk(TerrainChunkGPU&& chunk);
-    /// Where each chunk is in `chunks`, by its place on the map, so a chunk
-    /// can ask its neighbours' levels. Kept up as chunks come and go: rebuilt
-    /// from all of them whenever the list changed, it was 30,000-40,000
-    /// inserts on every frame a tile streamed in or out.
-    std::unordered_map<uint64_t, uint32_t> chunkAt_;
+    /// Where each chunk is in `chunks`, by its place on the map, its
+    /// neighbours there and the coverage, kept up as chunks come and go:
+    /// rebuilt from all of them whenever the list changed, it was
+    /// 30,000-40,000 inserts on every frame a tile streamed in or out.
+    TerrainChunkIndex chunkIndex_;
     /// The chunks of each tile and a sphere round all of theirs: the shadow
     /// pass tests a tile before its chunks, and a tile outside the map has no
-    /// chunk inside it. Kept up with chunkAt_.
+    /// chunk inside it. Kept up with chunkIndex_.
     struct ShadowTile {
         int tileX = 0, tileY = 0;
         std::vector<uint32_t> chunks;

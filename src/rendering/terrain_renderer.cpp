@@ -1058,7 +1058,7 @@ namespace {
 /// chunk's normal image.
 constexpr float kLodMaxErrorPixels = 1.0f;
 
-/// A chunk's place on the map: tile * 16 + chunk along each axis.
+/// A tile's place on the map, as a key.
 uint64_t chunkMapKey(int gx, int gy) {
     return (static_cast<uint64_t>(static_cast<uint32_t>(gx)) << 32) | static_cast<uint32_t>(gy);
 }
@@ -1085,16 +1085,6 @@ void TerrainRenderer::bindDraw(VkCommandBuffer cmd, const GeometryDraw& draw) {
     const VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &draw.vertices, &offset);
     vkCmdBindIndexBuffer(cmd, draw.indices, 0, VK_INDEX_TYPE_UINT32);
-}
-
-pipeline::TerrainCoverage TerrainRenderer::detailedCoverage() const {
-    pipeline::TerrainCoverage result{};
-    for(const auto& chunk:chunks) {
-        if(!chunk.isValid() || !chunk.materialSet || chunk.tileX<0 || chunk.tileX>=64 || chunk.tileY<0 || chunk.tileY>=64)continue;
-        const int cell=chunk.chunkY*16+chunk.chunkX;
-        if(cell>=0 && cell<256)result[chunk.tileY*64+chunk.tileX][cell/32]|=1u<<(cell%32);
-    }
-    return result;
 }
 
 TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const std::vector<LocalLight>& lights,
@@ -1153,12 +1143,12 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
         draw.material = ch.materialSet;
         draw.geometry = geometryOf(ch);
         draw.ranges[0] = ch.lods[level];
-        const int gx = ch.tileX * 16 + ch.chunkX, gy = ch.tileY * 16 + ch.chunkY;
-        const int nx[4] = {gx, gx, gx - 1, gx + 1};
-        const int ny[4] = {gy - 1, gy + 1, gy, gy};
-        for (size_t edge = 0; edge < 4; ++edge) {
-            const auto neighbour = chunkAt_.find(chunkMapKey(nx[edge], ny[edge]));
-            if (neighbour == chunkAt_.end() || levels[neighbour->second] != levels[i]) draw.ranges[edge + 1] = ch.skirts[level][edge];
+        // A skirt where the neighbour across an edge is missing or drawn at
+        // another level.
+        for (size_t edge = 0; edge < TerrainChunkIndex::kEdges; ++edge) {
+            const uint32_t neighbour = chunkIndex_.neighbour(i, edge);
+            if (neighbour == TerrainChunkIndex::kNone || levels[neighbour] != levels[i])
+                draw.ranges[edge + 1] = ch.skirts[level][edge];
         }
         const float distance = glm::length(ch.boundingSphereCenter - camPos);
         const auto source = bakeEnabled_ && ch.bakeComplete->load()
@@ -1190,13 +1180,13 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
         list.atlases = bake_.extractNewAtlases();
         // A skipped frame keeps its jobs pending. Recording acknowledges them
         // through a completion token, never by writing into the live chunk.
-        std::erase_if(bakeQueue_, [&](uint64_t key) {
-            const auto found = chunkAt_.find(key);
-            return found == chunkAt_.end() || chunks[found->second].bakeComplete->load();
+        std::erase_if(bakeQueue_, [&](const std::pair<int, int>& place) {
+            const uint32_t found = chunkIndex_.find(place.first, place.second);
+            return found == TerrainChunkIndex::kNone || chunks[found].bakeComplete->load();
         });
         const size_t take = std::min(bakeQueue_.size(), kBakeChunksPerFrame);
         for (size_t i = 0; i < take; ++i) {
-            const auto& ch = chunks[chunkAt_.at(bakeQueue_[i])];
+            const auto& ch = chunks[chunkIndex_.find(bakeQueue_[i].first, bakeQueue_[i].second)];
             auto* atlas = bake_.atlas(ch.tileX, ch.tileY);
             if (!atlas) continue; // atlas() reports the allocation failure.
             list.bake.push_back({geometryOf(ch), ch.materialSet, ch.tileX, ch.tileY,
@@ -1284,10 +1274,16 @@ uint32_t TerrainRenderer::recordChunks(VkCommandBuffer cmd, VkDescriptorSet perF
 }
 
 void TerrainRenderer::addChunk(TerrainChunkGPU&& chunk) {
-    const auto index = static_cast<uint32_t>(chunks.size());
+    const int gx = chunk.tileX * 16 + chunk.chunkX, gy = chunk.tileY * 16 + chunk.chunkY;
+    if (chunkIndex_.find(gx, gy) != TerrainChunkIndex::kNone) {
+        // Its tile was left with chunks in place: drawn twice, and the links
+        // between chunks no longer to be trusted there.
+        LOG_ERROR("TerrainRenderer: a second chunk at map chunk (", gx, ", ", gy, ") of tile [", chunk.tileX, ",",
+                  chunk.tileY, "]; the tile's earlier chunks were never removed");
+    }
     chunks.push_back(std::move(chunk));
     const TerrainChunkGPU& added = chunks.back();
-    chunkAt_[chunkMapKey(added.tileX * 16 + added.chunkX, added.tileY * 16 + added.chunkY)] = index;
+    const uint32_t index = chunkIndex_.add(gx, gy);
     const auto [slot, newTile] = tileAt_.try_emplace(chunkMapKey(added.tileX, added.tileY),
                                                      static_cast<uint32_t>(shadowTiles_.size()));
     if (newTile) {
@@ -1303,7 +1299,7 @@ void TerrainRenderer::addChunk(TerrainChunkGPU&& chunk) {
 
 void TerrainRenderer::queueBake(const TerrainChunkGPU& chunk) {
     if (!bakeEnabled_) return;
-    bakeQueue_.push_back(chunkMapKey(chunk.tileX * 16 + chunk.chunkX, chunk.tileY * 16 + chunk.chunkY));
+    bakeQueue_.emplace_back(chunk.tileX * 16 + chunk.chunkX, chunk.tileY * 16 + chunk.chunkY);
 }
 
 void TerrainRenderer::recordBake(VkCommandBuffer cmd, const DrawList& list) {
@@ -1427,12 +1423,11 @@ void TerrainRenderer::removeTile(int tileX, int tileY) {
         std::sort(leaving.begin(), leaving.end(), std::greater<>());
         for (const uint32_t index : leaving) {
             TerrainChunkGPU& chunk = chunks[index];
-            chunkAt_.erase(chunkMapKey(chunk.tileX * 16 + chunk.chunkX, chunk.tileY * 16 + chunk.chunkY));
+            chunkIndex_.removeSwapLast(index);
             destroyChunkGPU(chunk);
             const auto last = static_cast<uint32_t>(chunks.size() - 1);
             if (index != last) {
                 chunk = std::move(chunks[last]);
-                chunkAt_[chunkMapKey(chunk.tileX * 16 + chunk.chunkX, chunk.tileY * 16 + chunk.chunkY)] = index;
                 // The moved chunk keeps its geometry; the other tile's immutable
                 // depth snapshot contains values, not these live array indices.
                 auto& moversTile = shadowTiles_[tileAt_.at(chunkMapKey(chunk.tileX, chunk.tileY))].chunks;
@@ -1516,7 +1511,7 @@ void TerrainRenderer::clear() {
         destroyChunkGPU(chunk);
     }
     chunks.clear();
-    chunkAt_.clear();
+    chunkIndex_.clear();
     shadowTiles_.clear();
     tileAt_.clear();
     bakeQueue_.clear();
