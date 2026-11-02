@@ -160,6 +160,13 @@ whatever the code looks like inside.
   an acceptance test: a scene drawn by `scene_render` and the picture checked
   (`tools/scene_render/check_*.py`). Those are slow and run apart from the
   unit tests.
+- **Run the fewest tests that cover what changed**, not the whole suite (user
+  decision, 2026-11-02). Before running one, name the code it exercises
+  that the change touched; a test of untouched code, or one already failing
+  on master (the `scene_reference_*` approvals on Windows), tells nothing.
+  A port that changes the renderer's frame is checked by the test that
+  draws what it adds and one or two scenes that draw what it edits - not by
+  forty-four GPU tests at two at a time. CI runs everything on push.
 - **A test that needs a GPU is registered with `wowee_add_gpu_test`**, never
   `add_test` (user decision, 2026-11-01). It goes into ctest's `gpu`
   configuration, so a plain `ctest` neither lists nor runs it, and takes one
