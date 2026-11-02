@@ -4,6 +4,7 @@
 #include "rendering/rt_scene.hpp"
 #include "rendering/texture_upload.hpp"
 #include "rendering/vk_context.hpp"
+#include "rendering/cpu_stage_times.hpp"
 #include "rendering/vk_texture.hpp"
 #include "rendering/vk_buffer.hpp"
 #include "rendering/vk_pipeline.hpp"
@@ -1098,6 +1099,9 @@ pipeline::TerrainCoverage TerrainRenderer::detailedCoverage() const {
 
 TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const std::vector<LocalLight>& lights,
                                                    const WaterReflectionView* mirror) {
+    // Its steps timed apart under the frame's own terrain stage: the walk
+    // over every resident chunk against what each visible one costs.
+    CpuStageLaps laps(vkCtx ? &vkCtx->gameCpuStages() : nullptr, "extract/terrain");
     DrawList list;
     list.wireframe = wireframe;
     Frustum frustum;
@@ -1115,6 +1119,7 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
             return DepthDraw{geometryOf(ch), ch.boundingSphereCenter, ch.boundingSphereRadius};
         }));
     }
+    laps.lap("depth lists");
     for (uint32_t i = 0; i < chunks.size(); ++i) {
         const auto& ch = chunks[i];
         if (!ch.isValid()) continue;
@@ -1139,6 +1144,7 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
         }
         if (inMirror) mirrored.push_back(i);
     }
+    laps.lap("walk");
     // A chunk's draw, and where its surface is read from.
     const auto drawOf = [&](uint32_t i) -> std::pair<ChunkDraw, TerrainSurfaceSource> {
         const auto& ch = chunks[i];
@@ -1176,8 +1182,10 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
         if (source == TerrainSurfaceSource::Crossfade) ++list.crossfade;
         list.view.push_back(std::move(draw));
     }
+    laps.lap("view draws");
     list.reflection.reserve(mirrored.size());
     for (const uint32_t i : mirrored) list.reflection.push_back(drawOf(i).first);
+    laps.lap("reflection draws");
     if (bakeEnabled_) {
         list.atlases = bake_.extractNewAtlases();
         // A skipped frame keeps its jobs pending. Recording acknowledges them
@@ -1198,6 +1206,7 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
             return std::pair(a.tileX, a.tileY) < std::pair(b.tileX, b.tileY);
         });
     }
+    laps.lap("bake");
     return list;
 }
 

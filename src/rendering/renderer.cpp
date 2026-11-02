@@ -1639,8 +1639,10 @@ FrameInputs Renderer::extractFrameInputs() {
         terrainRenderer->setLodViewportHeight(sceneRenderExtent().height);
         scene->terrain = terrainRenderer->extract(in.camera, in.localLights, mirror);
     }
-    if(distantTerrain_ && terrainRenderer && in.terrainEnabled)
+    if(distantTerrain_ && terrainRenderer && in.terrainEnabled) {
+        CpuStage stage(vkCtx->gameCpuStages(), "extract/terrain", "distant terrain");
         scene->distantTerrain=distantTerrain_->extract(in.camera,in.viewDistance,terrainRenderer->detailedCoverage());
+    }
     extraction.lap("terrain");
     if (wmoRenderer) {
         wmoRenderer->setViewDistance(in.viewDistance);
