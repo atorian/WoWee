@@ -93,10 +93,6 @@ struct TerrainChunkMaps {
 };
 
 struct TerrainChunkGPU {
-    ::VkBuffer vertexBuffer = VK_NULL_HANDLE;
-    VmaAllocation vertexAlloc = VK_NULL_HANDLE;
-    ::VkBuffer indexBuffer = VK_NULL_HANDLE;
-    VmaAllocation indexAlloc = VK_NULL_HANDLE;
     /// Level 0, the full mesh, at the start of the index buffer: what the
     /// shadow pass and anything else that wants the true ground draws.
     uint32_t indexCount = 0;
@@ -147,10 +143,10 @@ struct TerrainChunkGPU {
     float boundingSphereRadius = 0.0f;
     glm::vec3 boundingSphereCenter = glm::vec3(0.0f);
 
-    // Where the chunk's geometry lives in a shared page (TerrainGeometryPage):
-    // the page's slot in TerrainRenderer::geometryPages_, or -1 when the chunk
-    // has buffers of its own (vertexBuffer, indexBuffer) because no page had
-    // room and none could be made.
+    // Where the chunk's geometry lives (TerrainGeometryPage): the page's slot
+    // in TerrainRenderer::geometryPages_ - a shared one, or one of its own
+    // size when no shared page had room and none could be made - or -1 when
+    // not even that could be made, and the chunk is not drawn.
     int32_t geometryPage = -1;
     int32_t baseVertex = 0;
     uint32_t firstIndex = 0;
@@ -172,7 +168,7 @@ struct TerrainChunkGPU {
     float steepestUpZ = 1.0f;
 
     [[nodiscard]] bool isValid() const {
-        return geometryPage >= 0 || (vertexBuffer != VK_NULL_HANDLE && indexBuffer != VK_NULL_HANDLE);
+        return geometryPage >= 0;
     }
 };
 
@@ -187,6 +183,9 @@ struct TerrainGeometryPage {
     AllocatedBuffer indices;
     RangeAllocator vertexRanges;
     RangeAllocator indexRanges;
+    /// Made for one chunk, its size, when no shared page could be: never
+    /// kept as the spare when it empties.
+    bool fitted = false;
 };
 
 /// How the resident terrain's geometry is held, for the frame profile.
@@ -196,8 +195,8 @@ struct TerrainGeometryStats {
     uint64_t verticesUsed = 0;
     uint64_t indexCapacity = 0;
     uint64_t indicesUsed = 0;
-    /// Chunks with buffers of their own because no page could take them.
-    uint32_t ownBufferChunks = 0;
+    /// Pages made for one chunk each because no shared page could take it.
+    uint32_t fittedPages = 0;
 };
 
 /**
@@ -569,7 +568,6 @@ private:
     /// until a page is let go or the terrain cleared, so a full device is not
     /// asked again for every chunk.
     bool geometryPagesExhausted_ = false;
-    uint32_t ownBufferChunks_ = 0;
 
     /// Copy the chunk's geometry into a page with room, making one if none
     /// has; false when no page could be made.

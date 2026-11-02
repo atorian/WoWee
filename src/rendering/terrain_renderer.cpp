@@ -644,23 +644,9 @@ TerrainChunkGPU TerrainRenderer::uploadChunk(const pipeline::ChunkMesh& chunk) {
         gpuChunk.steepestUpZ = std::min(gpuChunk.steepestUpZ, std::abs(chunk.vertices[v].normal[2]));
     }
 
-    if (placeInGeometryPage(gpuChunk, chunk.vertices, indices)) return gpuChunk;
-
-    // No page could be made: the chunk is drawn from buffers of its own,
-    // which costs it a rebind in both passes but keeps the ground there.
-    VkDeviceSize vbSize = chunk.vertices.size() * sizeof(pipeline::TerrainVertex);
-    AllocatedBuffer vb = uploadBuffer(*vkCtx, chunk.vertices.data(), vbSize,
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-    gpuChunk.vertexBuffer = vb.buffer;
-    gpuChunk.vertexAlloc = vb.allocation;
-
-    VkDeviceSize ibSize = indices.size() * sizeof(pipeline::TerrainIndex);
-    AllocatedBuffer ib = uploadBuffer(*vkCtx, indices.data(), ibSize,
-        VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-    gpuChunk.indexBuffer = ib.buffer;
-    gpuChunk.indexAlloc = ib.allocation;
-    if (gpuChunk.isValid()) ++ownBufferChunks_;
-
+    // Not placed: the chunk is invalid and not drawn; placeInGeometryPage
+    // said why.
+    placeInGeometryPage(gpuChunk, chunk.vertices, indices);
     return gpuChunk;
 }
 
@@ -669,18 +655,17 @@ bool TerrainRenderer::placeInGeometryPage(TerrainChunkGPU& gpuChunk,
                                           const std::vector<pipeline::TerrainIndex>& indices) {
     const auto vertexCount = static_cast<uint32_t>(vertices.size());
     const auto indexCount = static_cast<uint32_t>(indices.size());
-    if (vertexCount == 0 || indexCount == 0 ||
-        vertexCount > kPageVertices || indexCount > kPageIndices) {
-        return false;
-    }
+    if (vertexCount == 0 || indexCount == 0) return false;
+    const bool shareable = vertexCount <= kPageVertices && indexCount <= kPageIndices;
 
-    // A page with room, else a new one in the first empty slot.
+    // A shared page with room, else a new one in the first empty slot, else
+    // a page of the chunk's own size.
     int32_t slot = -1;
     std::optional<uint32_t> firstVertex;
     std::optional<uint32_t> firstIndex;
-    for (size_t i = 0; i < geometryPages_.size() && slot < 0; ++i) {
+    for (size_t i = 0; shareable && i < geometryPages_.size() && slot < 0; ++i) {
         TerrainGeometryPage* page = geometryPages_[i].get();
-        if (!page || page->vertexRanges.largestFree() < vertexCount ||
+        if (!page || page->fitted || page->vertexRanges.largestFree() < vertexCount ||
             page->indexRanges.largestFree() < indexCount) {
             continue;
         }
@@ -688,29 +673,25 @@ bool TerrainRenderer::placeInGeometryPage(TerrainChunkGPU& gpuChunk,
         firstIndex = page->indexRanges.allocate(indexCount);
         slot = static_cast<int32_t>(i);
     }
-    if (slot < 0 && geometryPagesExhausted_) return false;
-    if (slot < 0) {
+    const auto makePage = [&](uint32_t vertexRoom, uint32_t indexRoom, bool fitted) -> bool {
         auto page = std::make_shared<TerrainGeometryPage>();
         VmaAllocator allocator = vkCtx->getAllocator();
         page->vertices = createBuffer(allocator,
-            static_cast<VkDeviceSize>(kPageVertices) * sizeof(pipeline::TerrainVertex),
+            static_cast<VkDeviceSize>(vertexRoom) * sizeof(pipeline::TerrainVertex),
             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             VMA_MEMORY_USAGE_GPU_ONLY);
         page->indices = createBuffer(allocator,
-            static_cast<VkDeviceSize>(kPageIndices) * sizeof(pipeline::TerrainIndex),
+            static_cast<VkDeviceSize>(indexRoom) * sizeof(pipeline::TerrainIndex),
             VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             VMA_MEMORY_USAGE_GPU_ONLY);
         if (!page->vertices.buffer || !page->indices.buffer) {
             if (page->vertices.buffer) destroyBuffer(allocator, page->vertices);
             if (page->indices.buffer) destroyBuffer(allocator, page->indices);
-            geometryPagesExhausted_ = true;
-            LOG_WARNING("Terrain: no geometry page could be allocated (",
-                        geometryStats().pages, " pages resident) - chunks get buffers of"
-                        " their own until a page is let go, at a rebind each per pass");
             return false;
         }
-        page->vertexRanges = RangeAllocator(kPageVertices);
-        page->indexRanges = RangeAllocator(kPageIndices);
+        page->vertexRanges = RangeAllocator(vertexRoom);
+        page->indexRanges = RangeAllocator(indexRoom);
+        page->fitted = fitted;
         firstVertex = page->vertexRanges.allocate(vertexCount);
         firstIndex = page->indexRanges.allocate(indexCount);
         auto empty = std::find(geometryPages_.begin(), geometryPages_.end(), nullptr);
@@ -721,8 +702,25 @@ bool TerrainRenderer::placeInGeometryPage(TerrainChunkGPU& gpuChunk,
             *empty = std::move(page);
             slot = static_cast<int32_t>(empty - geometryPages_.begin());
         }
-        LOG_INFO("Terrain: geometry page ", slot, " made (", geometryStats().pages,
-                 " resident, ", kTilesPerGeometryPage, " tiles each)");
+        return true;
+    };
+    if (slot < 0 && shareable && !geometryPagesExhausted_) {
+        if (makePage(kPageVertices, kPageIndices, false)) {
+            LOG_INFO("Terrain: geometry page ", slot, " made (", geometryStats().pages,
+                     " resident, ", kTilesPerGeometryPage, " tiles each)");
+        } else {
+            geometryPagesExhausted_ = true;
+            LOG_WARNING("Terrain: no geometry page could be allocated (",
+                        geometryStats().pages, " pages resident) - chunks get pages of their own"
+                        " size until a page is let go, a draw group each");
+        }
+    }
+    if (slot < 0 && !makePage(vertexCount, indexCount, true)) {
+        static core::LogBudget budget(4, "terrain chunk geometry");
+        if (budget.take())
+            LOG_WARNING("Terrain: no memory for a chunk's own geometry page (", vertexCount, " vertices, ",
+                        indexCount, " indices) - the chunk is not drawn");
+        return false;
     }
 
     TerrainGeometryPage& page = *geometryPages_[slot];
@@ -740,7 +738,7 @@ bool TerrainRenderer::placeInGeometryPage(TerrainChunkGPU& gpuChunk,
         page.vertexRanges.free(*firstVertex, vertexCount);
         page.indexRanges.free(*firstIndex, indexCount);
         LOG_WARNING("Terrain: a chunk's geometry could not be staged into page ", slot,
-                    " - it gets buffers of its own");
+                    " - the chunk is not drawn");
         return false;
     }
     gpuChunk.geometryPage = slot;
@@ -756,7 +754,7 @@ void TerrainRenderer::releaseEmptyGeometryPages() {
     VmaAllocator allocator = vkCtx->getAllocator();
     for (auto& page : geometryPages_) {
         if (!page || page->vertexRanges.used() != 0 || page->indexRanges.used() != 0) continue;
-        if (!spareKept) {
+        if (!spareKept && !page->fitted) {
             spareKept = true;
             continue;
         }
@@ -776,7 +774,6 @@ void TerrainRenderer::destroyGeometryPages() {
         destroyBuffer(allocator, page->indices);
     }
     geometryPages_.clear();
-    ownBufferChunks_ = 0;
     geometryPagesExhausted_ = false;
 }
 
@@ -789,8 +786,8 @@ TerrainGeometryStats TerrainRenderer::geometryStats() const {
         stats.verticesUsed += page->vertexRanges.used();
         stats.indexCapacity += page->indexRanges.capacity();
         stats.indicesUsed += page->indexRanges.used();
+        if (page->fitted) ++stats.fittedPages;
     }
-    stats.ownBufferChunks = ownBufferChunks_;
     return stats;
 }
 
@@ -965,16 +962,11 @@ uint64_t chunkMapKey(int gx, int gy) {
 
 TerrainRenderer::GeometryDraw TerrainRenderer::geometryOf(const TerrainChunkGPU& chunk) const {
     GeometryDraw out;
-    if (chunk.geometryPage >= 0) {
-        const auto& page = *geometryPages_[chunk.geometryPage];
-        out.vertices = page.vertices.buffer;
-        out.indices = page.indices.buffer;
-        out.firstIndex = chunk.firstIndex;
-        out.baseVertex = chunk.baseVertex;
-    } else {
-        out.vertices = chunk.vertexBuffer;
-        out.indices = chunk.indexBuffer;
-    }
+    const auto& page = *geometryPages_[chunk.geometryPage];
+    out.vertices = page.vertices.buffer;
+    out.indices = page.indices.buffer;
+    out.firstIndex = chunk.firstIndex;
+    out.baseVertex = chunk.baseVertex;
     out.count = chunk.indexCount;
     return out;
 }
@@ -1552,14 +1544,6 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
         chunk.rtInstance = chunk.rtMesh = RtScene::kInvalid;
     }
 
-    VmaAllocator allocator = vkCtx->getAllocator();
-
-    // These resources may still be referenced by in-flight command buffers from
-    // previous frames. Defer actual destruction until this frame slot is safe.
-    ::VkBuffer vertexBuffer = chunk.vertexBuffer;
-    VmaAllocation vertexAlloc = chunk.vertexAlloc;
-    ::VkBuffer indexBuffer = chunk.indexBuffer;
-    VmaAllocation indexAlloc = chunk.indexAlloc;
     // Its row may go to the next chunk at once: a frame in flight draws from
     // what the table holds now, and the next chunk's row is copied in by a
     // later frame, after that one's draws in the queue.
@@ -1579,7 +1563,6 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     const uint32_t firstIndex = chunk.firstIndex;
     // All of it, the coarser levels and skirts after the full mesh included.
     const uint32_t indexCount = chunk.allIndexCount;
-    if (chunk.geometryPage < 0 && chunk.vertexBuffer && ownBufferChunks_ > 0) --ownBufferChunks_;
     chunk.geometryPage = -1;
 
     // The textures are let go below: the shared cache keeps a tileset texture
@@ -1587,29 +1570,17 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     // that may still sample it. The tile's maps go with the tile
     // (releaseTileMaps).
 
-    chunk.vertexBuffer = VK_NULL_HANDLE;
-    chunk.vertexAlloc = VK_NULL_HANDLE;
-    chunk.indexBuffer = VK_NULL_HANDLE;
-    chunk.indexAlloc = VK_NULL_HANDLE;
     chunk.baseTexture.reset();
     for (TextureRef& t : chunk.layerTextures) t.reset();
     chunk.baseNormalMap.reset();
     for (TextureRef& t : chunk.layerNormalMaps) t.reset();
     chunk.maps = {};
 
-    vkCtx->deferAfterAllFrameFences([allocator, vertexBuffer, vertexAlloc, indexBuffer, indexAlloc,
-                                     page, baseVertex, vertexCount, firstIndex, indexCount]() {
+    // A frame in flight may still draw them; the ranges come back after it.
+    vkCtx->deferAfterAllFrameFences([page, baseVertex, vertexCount, firstIndex, indexCount]() {
         if (page) {
             page->vertexRanges.free(baseVertex, vertexCount);
             page->indexRanges.free(firstIndex, indexCount);
-        }
-        if (vertexBuffer) {
-            AllocatedBuffer ab{}; ab.buffer = vertexBuffer; ab.allocation = vertexAlloc;
-            destroyBuffer(allocator, ab);
-        }
-        if (indexBuffer) {
-            AllocatedBuffer ab{}; ab.buffer = indexBuffer; ab.allocation = indexAlloc;
-            destroyBuffer(allocator, ab);
         }
     });
 }
