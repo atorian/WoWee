@@ -36,6 +36,7 @@
 #include "rendering/rt_build_budget.hpp"
 #include "rendering/rt_bvh.hpp"
 #include "rendering/rt_region.hpp"
+#include "rendering/rt_region_index.hpp"
 #include "rendering/rt_range_allocator.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_utils.hpp"
@@ -145,12 +146,26 @@ private:
     };
     std::vector<SourceMesh> sourceMeshes_;
     std::vector<std::shared_ptr<const MeshSource>> publishedMeshes_;
+    // Per mesh: the published instances that place it.
+    std::vector<uint32_t> publishedPlacements_;
     std::vector<Instance> publishedInstances_;
-    std::vector<uint8_t> wantedInstances_, wantedMeshes_;
+    // The published instances, and each one's place in that list.
+    std::vector<InstanceId> publishedIds_;
+    std::vector<uint32_t> publishedAt_;
     RtRegion publishedRegion_;
-    bool regionDirty_ = true;
     std::atomic<uint64_t> sourceBytes_{0};
     std::vector<Instance> sourceInstances_;
+    RtRegionIndex regionIndex_;
+    // Source instances added, moved or removed since the last extraction.
+    std::vector<InstanceId> editedInstances_;
+    // An extraction's instances to test against the region, each once.
+    std::vector<InstanceId> candidates_;
+    std::vector<uint8_t> candidateWanted_;
+    std::vector<uint32_t> candidateMark_;
+    uint32_t candidateRound_ = 0;
+    std::vector<MeshId> touchedMeshes_;
+    void publish(InstanceId id);
+    void unpublish(InstanceId id);
     struct Mesh {
         bool live = false;
         uint32_t triOffset = RtRangeAllocator::kFailed;

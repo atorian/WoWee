@@ -176,10 +176,14 @@ void RtScene::shutdown() {
     sourceInstances_.clear();
     publishedMeshes_.clear();
     publishedInstances_.clear();
-    wantedInstances_.clear();
-    wantedMeshes_.clear();
+    publishedPlacements_.clear();
+    publishedIds_.clear();
+    publishedAt_.clear();
+    publishedRegion_ = {};
+    regionIndex_ = {};
+    editedInstances_.clear();
+    candidateMark_.clear();
     sourceBytes_.store(0);
-    regionDirty_ = true;
     freeMeshes_.clear();
     freeInstances_.clear();
     nextChangeSerial_ = 1;
@@ -222,54 +226,109 @@ void RtScene::post(Change change) {
 RtScene::Changes RtScene::extractChanges(const RtRegion& region) {
     const uint64_t applied = appliedChangeSerial_.load(std::memory_order_acquire);
     std::erase_if(changes_, [applied](const Change& change) { return change.serial <= applied; });
-    if (!regionDirty_ && region == publishedRegion_) return changes_;
-    regionDirty_ = false;
+    const bool regionMoved = region != publishedRegion_;
+    if (!regionMoved && editedInstances_.empty()) return changes_;
     publishedRegion_ = region;
     publishedMeshes_.resize(sourceMeshes_.size());
+    publishedPlacements_.resize(sourceMeshes_.size());
     publishedInstances_.resize(sourceInstances_.size());
-    wantedInstances_.assign(sourceInstances_.size(), 0);
-    wantedMeshes_.assign(sourceMeshes_.size(), 0);
-    for (InstanceId id = 0; id < sourceInstances_.size(); ++id) {
-        const auto& source = sourceInstances_[id];
-        if (!source.live || !sourceMeshes_[source.mesh].source) continue;
-        const bool retained = publishedInstances_[id].live;
-        if (!region.keeps(source.bounds, retained)) continue;
-        wantedInstances_[id] = 1;
-        wantedMeshes_[source.mesh] = 1;
+    publishedAt_.resize(sourceInstances_.size());
+    candidateMark_.resize(sourceInstances_.size());
+
+    // Whether the region keeps an instance changes only if the instance was
+    // edited, or the region moved and either keeps it now or may admit it.
+    // Every other one would be tested to the same answer as last time.
+    if (++candidateRound_ == 0) {
+        std::fill(candidateMark_.begin(), candidateMark_.end(), 0);
+        candidateRound_ = 1;
     }
+    candidates_.clear();
+    auto consider = [this](InstanceId id) {
+        if (candidateMark_[id] == candidateRound_) return;
+        candidateMark_[id] = candidateRound_;
+        candidates_.push_back(id);
+    };
+    for (InstanceId id : editedInstances_) consider(id);
+    editedInstances_.clear();
+    if (regionMoved) {
+        for (InstanceId id : publishedIds_) consider(id);
+        regionIndex_.forEachReachable(
+            region, [this](InstanceId id) -> const RtAabb& { return sourceInstances_[id].bounds; }, consider);
+    }
+    // In id order, so the changes come in the order a walk over all of them
+    // would post.
+    std::sort(candidates_.begin(), candidates_.end());
+    candidateWanted_.resize(candidates_.size());
+    for (size_t i = 0; i < candidates_.size(); ++i) {
+        const InstanceId id = candidates_[i];
+        const auto& source = sourceInstances_[id];
+        candidateWanted_[i] = source.live && sourceMeshes_[source.mesh].source &&
+                              region.keeps(source.bounds, publishedInstances_[id].live);
+    }
+
     // Remove placements before retiring/replacing their mesh identity. All
     // deltas remain queued until acknowledged, even if this frame is dropped.
-    for (InstanceId id = 0; id < publishedInstances_.size(); ++id) {
+    touchedMeshes_.clear();
+    for (size_t i = 0; i < candidates_.size(); ++i) {
+        const InstanceId id = candidates_[i];
         auto& old = publishedInstances_[id];
-        if (old.live && (!wantedInstances_[id] || old.mesh != sourceInstances_[id].mesh ||
+        if (old.live && (!candidateWanted_[i] || old.mesh != sourceInstances_[id].mesh ||
                 publishedMeshes_[old.mesh] != sourceMeshes_[old.mesh].source)) {
             post({.kind = Change::Kind::RemoveInstance, .id = id});
+            --publishedPlacements_[old.mesh];
+            touchedMeshes_.push_back(old.mesh);
+            unpublish(id);
             old = {};
         }
     }
-    for (MeshId id = 0; id < sourceMeshes_.size(); ++id) {
+    for (size_t i = 0; i < candidates_.size(); ++i) {
+        const InstanceId id = candidates_[i];
+        if (!candidateWanted_[i] || publishedInstances_[id].live) continue;
+        ++publishedPlacements_[sourceInstances_[id].mesh];
+        touchedMeshes_.push_back(sourceInstances_[id].mesh);
+    }
+    std::sort(touchedMeshes_.begin(), touchedMeshes_.end());
+    touchedMeshes_.erase(std::unique(touchedMeshes_.begin(), touchedMeshes_.end()), touchedMeshes_.end());
+    for (MeshId id : touchedMeshes_) {
         auto& old = publishedMeshes_[id];
         const auto& source = sourceMeshes_[id].source;
-        if (old && (!wantedMeshes_[id] || old != source)) {
+        const bool wanted = publishedPlacements_[id] > 0;
+        if (old && (!wanted || old != source)) {
             post({.kind = Change::Kind::RemoveMesh, .id = id});
             old.reset();
         }
-        if (wantedMeshes_[id] && !old) {
+        if (wanted && !old) {
             post({.kind = Change::Kind::AddMesh, .id = id, .source = source});
             old = source;
         }
     }
-    for (InstanceId id = 0; id < sourceInstances_.size(); ++id) {
-        if (!wantedInstances_[id]) continue;
+    for (size_t i = 0; i < candidates_.size(); ++i) {
+        if (!candidateWanted_[i]) continue;
+        const InstanceId id = candidates_[i];
         const auto& source = sourceInstances_[id];
         auto& old = publishedInstances_[id];
-        if (!old.live) post({.kind = Change::Kind::AddInstance, .id = id,
-                            .mesh = source.mesh, .transform = source.objectToWorld});
-        else if (old.objectToWorld != source.objectToWorld)
+        if (!old.live) {
+            post({.kind = Change::Kind::AddInstance, .id = id, .mesh = source.mesh,
+                  .transform = source.objectToWorld});
+            publish(id);
+        } else if (old.objectToWorld != source.objectToWorld) {
             post({.kind = Change::Kind::MoveInstance, .id = id, .transform = source.objectToWorld});
+        }
         old = source;
     }
     return changes_;
+}
+
+void RtScene::publish(InstanceId id) {
+    publishedAt_[id] = static_cast<uint32_t>(publishedIds_.size());
+    publishedIds_.push_back(id);
+}
+
+void RtScene::unpublish(InstanceId id) {
+    const InstanceId last = publishedIds_.back();
+    publishedIds_[publishedAt_[id]] = last;
+    publishedAt_[last] = publishedAt_[id];
+    publishedIds_.pop_back();
 }
 
 void RtScene::applyChanges(std::span<const Change> changes) {
@@ -303,7 +362,6 @@ RtScene::MeshId RtScene::addMesh(MeshSource source) {
     sourceBytes_.fetch_add(pipeline::vectorBytes(source.positions) + pipeline::vectorBytes(source.indices) +
                           pipeline::vectorBytes(source.surfaces), std::memory_order_relaxed);
     sourceMeshes_[id] = {std::make_shared<const MeshSource>(std::move(source)), bounds};
-    regionDirty_ = true;
     return id;
 }
 
@@ -314,7 +372,6 @@ void RtScene::removeMesh(MeshId id) {
                           pipeline::vectorBytes(source.surfaces), std::memory_order_relaxed);
     sourceMeshes_[id] = {};
     freeMeshes_.push_back(id);
-    regionDirty_ = true;
 }
 
 RtScene::InstanceId RtScene::addInstance(MeshId mesh, const glm::mat4& transform) {
@@ -323,7 +380,8 @@ RtScene::InstanceId RtScene::addInstance(MeshId mesh, const glm::mat4& transform
     if (freeInstances_.empty()) { id = static_cast<InstanceId>(sourceInstances_.size()); sourceInstances_.emplace_back(); }
     else { id = freeInstances_.back(); freeInstances_.pop_back(); }
     sourceInstances_[id] = {true, mesh, transform, transformBounds(sourceMeshes_[mesh].bounds, transform)};
-    regionDirty_ = true;
+    regionIndex_.place(id, sourceInstances_[id].bounds);
+    editedInstances_.push_back(id);
     return id;
 }
 
@@ -333,14 +391,16 @@ void RtScene::setInstanceTransform(InstanceId id, const glm::mat4& transform) {
     auto& source = sourceInstances_[id];
     source.objectToWorld = transform;
     source.bounds = transformBounds(sourceMeshes_[source.mesh].bounds, transform);
-    regionDirty_ = true;
+    regionIndex_.place(id, source.bounds);
+    editedInstances_.push_back(id);
 }
 
 void RtScene::removeInstance(InstanceId id) {
     if (id >= sourceInstances_.size() || !sourceInstances_[id].live) return;
     sourceInstances_[id] = {};
     freeInstances_.push_back(id);
-    regionDirty_ = true;
+    regionIndex_.remove(id);
+    editedInstances_.push_back(id);
 }
 
 void RtScene::applyAddMesh(MeshId id, std::shared_ptr<const MeshSource> source) {

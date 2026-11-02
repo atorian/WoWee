@@ -1646,6 +1646,12 @@ wowee_add_test(test_rt_bvh
     SOURCES test_rt_bvh.cpp)
 target_link_libraries(test_rt_bvh PRIVATE wowee_render)
 
+# ── test_rt_scene_region ─────────────────────────────────────
+# What the ray tracer is handed as its region moves and the world changes.
+wowee_add_test(test_rt_scene_region
+    SOURCES test_rt_scene_region.cpp)
+target_link_libraries(test_rt_scene_region PRIVATE wowee_render)
+
 # ── test_recording_size ──────────────────────────────────────
 # Header-only: the size a screen recording is encoded at.
 wowee_add_test(test_recording_size
