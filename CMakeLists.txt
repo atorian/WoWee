@@ -1086,6 +1086,7 @@ set(WOWEE_SOURCES
     src/rendering/texture_cache.cpp
     src/rendering/texture_table.cpp
     src/rendering/gpu_slot_table.cpp
+    src/rendering/geometry_pool.cpp
     src/rendering/texture_upload.cpp
     src/rendering/normal_map_builder.cpp
     src/rendering/normal_map_encoding.cpp

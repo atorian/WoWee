@@ -16,6 +16,7 @@
 #include "pipeline/distant_terrain.hpp"
 #include "rendering/terrain_chunk_index.hpp"
 #include "rendering/frames_in_flight.hpp"
+#include "rendering/geometry_pool.hpp"
 #include "rendering/gpu_slot_table.hpp"
 #include "rendering/vk_utils.hpp"
 
@@ -186,17 +187,10 @@ struct TerrainChunkGPU {
     float boundingSphereRadius = 0.0f;
     glm::vec3 boundingSphereCenter = glm::vec3(0.0f);
 
-    // Where the chunk's geometry lives (TerrainGeometryPage): the page's slot
-    // in TerrainRenderer::geometryPages_ - a shared one, or one of its own
-    // size when no shared page had room and none could be made - or -1 when
-    // not even that could be made, and the chunk is not drawn.
-    int32_t geometryPage = -1;
-    int32_t baseVertex = 0;
-    uint32_t firstIndex = 0;
-    uint32_t vertexCount = 0;
-    /// Every index the chunk holds - all levels and their skirts - which is
-    /// what its place in a page spans and gives back.
-    uint32_t allIndexCount = 0;
+    /// Where its geometry lives in the renderer's GeometryPool: every index
+    /// it holds, all levels and their skirts. Unplaced when there was no room
+    /// anywhere, and then the chunk is not drawn.
+    GeometryPool::Range geometry;
 
     // The chunk as the ray traced lighting sees it (RtScene ids, or ~0u).
     uint32_t rtMesh = ~0u;
@@ -210,36 +204,7 @@ struct TerrainChunkGPU {
     /// (terrainSurfaceSourceFor).
     float steepestUpZ = 1.0f;
 
-    [[nodiscard]] bool isValid() const {
-        return geometryPage >= 0;
-    }
-};
-
-/// One device-local vertex buffer and index buffer that many chunks' geometry
-/// is copied into, each chunk at ranges handed out by the allocators. A
-/// chunk's ranges come back after the frames that may still draw it are done
-/// (deferAfterAllFrameFences), which is why the page is shared with those
-/// deferred frees rather than owned outright: a free may land after the
-/// renderer let the page go, and then it is only bookkeeping.
-struct TerrainGeometryPage {
-    AllocatedBuffer vertices;
-    AllocatedBuffer indices;
-    RangeAllocator vertexRanges;
-    RangeAllocator indexRanges;
-    /// Made for one chunk, its size, when no shared page could be: never
-    /// kept as the spare when it empties.
-    bool fitted = false;
-};
-
-/// How the resident terrain's geometry is held, for the frame profile.
-struct TerrainGeometryStats {
-    uint32_t pages = 0;
-    uint64_t vertexCapacity = 0;
-    uint64_t verticesUsed = 0;
-    uint64_t indexCapacity = 0;
-    uint64_t indicesUsed = 0;
-    /// Pages made for one chunk each because no shared page could take it.
-    uint32_t fittedPages = 0;
+    [[nodiscard]] bool isValid() const { return geometry.placed(); }
 };
 
 /**
@@ -391,7 +356,7 @@ public:
 
     [[nodiscard]] bool hasShadowPipeline() const { return shadowPipeline_ != VK_NULL_HANDLE; }
 
-    [[nodiscard]] TerrainGeometryStats geometryStats() const;
+    [[nodiscard]] GeometryPool::Stats geometryStats() const { return geometry_.stats(); }
 
     void clear();
 
@@ -629,28 +594,15 @@ private:
     float furthestDrawnSq_ = 0.0f;
     int culledChunks = 0;
 
-    // The chunks' geometry, in pages each holding many tiles, so the draw
-    // loops bind a vertex and an index buffer per page rather than per chunk.
-    // Made when the resident tiles need room and let go when a page empties,
-    // keeping one spare; a slot let go is null, so a chunk's page index stays
-    // put. A tile is 256 chunks, each with every level of detail and its
-    // skirts (pipeline::kChunkMaxVertices, kChunkMaxIndices).
-    std::vector<std::shared_ptr<TerrainGeometryPage>> geometryPages_;
+    // The chunks' geometry, in pages each holding many tiles: a call draws a
+    // page's chunks. A tile is 256 chunks, each with every level of detail
+    // and its skirts (pipeline::kChunkMaxVertices, kChunkMaxIndices).
     static constexpr uint32_t kTilesPerGeometryPage = 16;
     static constexpr uint32_t kPageVertices = kTilesPerGeometryPage * 256 * pipeline::kChunkMaxVertices;
     static constexpr uint32_t kPageIndices = kTilesPerGeometryPage * 256 * pipeline::kChunkMaxIndices;
-    /// Set, and said once, when a page could not be made: no other is tried
-    /// until a page is let go or the terrain cleared, so a full device is not
-    /// asked again for every chunk.
-    bool geometryPagesExhausted_ = false;
-
-    /// Copy the chunk's geometry into a page with room, making one if none
-    /// has; false when no page could be made.
-    bool placeInGeometryPage(TerrainChunkGPU& gpuChunk, const std::vector<pipeline::TerrainVertex>& vertices,
-                             const std::vector<pipeline::TerrainIndex>& indices);
-    /// Let go of pages nothing is in any more, keeping one spare.
-    void releaseEmptyGeometryPages();
-    void destroyGeometryPages();
+    GeometryPool geometry_{{.what = "Terrain", .vertexStride = sizeof(pipeline::TerrainVertex),
+                            .indexType = VK_INDEX_TYPE_UINT32, .pageVertices = kPageVertices,
+                            .pageIndices = kPageIndices}};
     /// Binds the page's buffers.
 
 };

@@ -3718,7 +3718,7 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
                 if (terrainRenderer) {
                     // Whether the resident tiles' geometry fits the shared
                     // pages, or chunks have pages of their own size.
-                    const TerrainGeometryStats geo = terrainRenderer->geometryStats();
+                    const GeometryPool::Stats geo = terrainRenderer->geometryStats();
                     LOG_WARNING("  terrain geometry: ", terrainRenderer->getChunkCount(),
                                 " chunks resident, ", geo.pages, " pages, vertices ",
                                 geo.verticesUsed, "/", geo.vertexCapacity, ", indices ",
