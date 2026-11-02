@@ -16,6 +16,7 @@
 #include "rendering/wmo_minimap.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/uniform_slot_pool.hpp"
+#include "rendering/geometry_pool.hpp"
 
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/grass_clearing.hpp"
@@ -475,10 +476,9 @@ private:
     struct GroupDrawData;
     struct GroupResources {
         mutable std::shared_ptr<const GroupDrawData> drawData;
-        ::VkBuffer vertexBuffer = VK_NULL_HANDLE;
-        VmaAllocation vertexAlloc = VK_NULL_HANDLE;
-        ::VkBuffer indexBuffer = VK_NULL_HANDLE;
-        VmaAllocation indexAlloc = VK_NULL_HANDLE;
+        /// Where its vertices and indices live (geometry_); unplaced, it is
+        /// not drawn.
+        GeometryPool::Range geometry;
         uint32_t indexCount = 0;
         uint32_t vertexCount = 0;
         glm::vec3 boundingBoxMin;
@@ -567,7 +567,7 @@ private:
     /// Immutable GPU description, shared across every instance and frame until
     /// a material binding changes. Collision meshes stay in GroupResources.
     struct GroupDrawData {
-        ::VkBuffer vertexBuffer = VK_NULL_HANDLE, indexBuffer = VK_NULL_HANDLE;
+        GeometryPool::Range geometry;
         glm::vec3 boundingBoxMin{0}, boundingBoxMax{0};
         uint32_t groupFlags = 0;
         bool isLOD = false;
@@ -821,6 +821,8 @@ private:
     VkDescriptorPool materialDescPool_ = VK_NULL_HANDLE;
     /// Every merged batch's material parameters (uniform_slot_pool.hpp).
     std::shared_ptr<UniformSlotPool> materialSlots_;
+    /// Every group's vertices and indices, in shared pages.
+    GeometryPool geometry_;
     static constexpr uint32_t MAX_MATERIAL_SETS = 32768;
 
     /// When a path that would not load, or found no room, is worth asking for

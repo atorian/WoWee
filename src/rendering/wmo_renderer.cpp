@@ -88,8 +88,10 @@ constexpr int kWmoAlphaKeyRef = 224;
 using collision::rayIntersectsAABB;
 using collision::transformAABB;
 
-WMORenderer::WMORenderer() {
-}
+// A group has at most 65536 vertices (16-bit indices); a page holds dozens.
+WMORenderer::WMORenderer()
+    : geometry_({.what = "WMO", .vertexStride = sizeof(WMOVertex), .indexType = VK_INDEX_TYPE_UINT16,
+                 .pageVertices = 1u << 18, .pageIndices = 1u << 20}) {}
 
 WMORenderer::~WMORenderer() {
     shutdown();
@@ -220,6 +222,7 @@ bool WMORenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
         core::Logger::getInstance().error("WMORenderer: null VkContext");
         return false;
     }
+    geometry_.initialize(*vkCtx_);
 
     const unsigned hc = std::thread::hardware_concurrency();
     const size_t availableCores = (hc > 1u) ? static_cast<size_t>(hc - 1u) : 1ull;
@@ -395,6 +398,7 @@ void WMORenderer::shutdown() {
     // run later against a dead pool.
     vkCtx_->flushDeferredCleanup();
     if (materialSlots_) materialSlots_->release();
+    geometry_.destroy();
 
     // Destroy pipelines
     destroy(device, opaquePipeline_);
@@ -533,6 +537,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadPreparedIncremental(WmoModelPrep& 
 
     // Batch all GPU uploads (textures, VBs, IBs) into a single command buffer
     // submission with one fence wait, instead of one per upload.
+    geometry_.releaseEmptyPages();
     vkCtx_->beginUploadBatch();
 
     // Textures and materials are model-level and done once; a resumed call has
@@ -599,14 +604,9 @@ WMORenderer::ModelLoadResult WMORenderer::loadPreparedIncremental(WmoModelPrep& 
         WmoModelPrep::Group& prepared = prep.groups[gi];
         GroupResources resources = std::move(prepared.resources);
 
-        AllocatedBuffer vertBuf = uploadBuffer(*vkCtx_, prepared.vertices.data(),
-            prepared.vertices.size() * sizeof(WMOVertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-        resources.vertexBuffer = vertBuf.buffer;
-        resources.vertexAlloc = vertBuf.allocation;
-        AllocatedBuffer idxBuf = uploadBuffer(*vkCtx_, prepared.indices.data(),
-            prepared.indices.size() * sizeof(uint16_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-        resources.indexBuffer = idxBuf.buffer;
-        resources.indexAlloc = idxBuf.allocation;
+        // Unplaced, said by the pool, the group is not drawn.
+        resources.geometry = geometry_.place(prepared.vertices.data(), static_cast<uint32_t>(prepared.vertices.size()),
+                                             prepared.indices.data(), static_cast<uint32_t>(prepared.indices.size()));
         // In the staging copy now; the preparation need not hold them.
         prepared.vertices = {};
         prepared.indices = {};
@@ -1128,8 +1128,7 @@ WMORenderer::GroupDraw WMORenderer::extractGroup(const GroupResources& group,
     GroupDraw out;
     if (!group.drawData) {
         auto data = std::make_shared<GroupDrawData>();
-        data->vertexBuffer = group.vertexBuffer;
-        data->indexBuffer = group.indexBuffer;
+        data->geometry = group.geometry;
         data->boundingBoxMin = group.boundingBoxMin;
         data->boundingBoxMax = group.boundingBoxMax;
         data->groupFlags = group.groupFlags;
@@ -1400,7 +1399,7 @@ uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
             }
 
             // Skip groups with invalid GPU resources
-            if (group.vertexBuffer == VK_NULL_HANDLE || group.indexBuffer == VK_NULL_HANDLE) continue;
+            if (!group.geometry.placed()) continue;
 
             // A batch is in the layer being recorded, or it waits for the other.
             const auto inLayer = [layer](const auto& mb) { return wmoBatchInLayer(mb.isTransparent, layer); };
@@ -1409,10 +1408,7 @@ uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
                 continue;
             }
 
-            // Bind vertex + index buffers
-            VkDeviceSize offset = 0;
-            vkCmdBindVertexBuffers(cmd, 0, 1, &group.vertexBuffer, &offset);
-            vkCmdBindIndexBuffer(cmd, group.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+            geometry_.bind(cmd, group.geometry);
 
             vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
                                offsetof(WMOPushConstants, localLights), sizeof(LocalLightSet), &kept.lights);
@@ -1462,7 +1458,8 @@ uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
                 // Issue draw calls for each range in this merged batch
                 for (const auto& dr : mb.draws) {
                     if (dr.indexCount == 0) continue;
-                    vkCmdDrawIndexed(cmd, dr.indexCount, 1, dr.firstIndex, 0, 0);
+                    vkCmdDrawIndexed(cmd, dr.indexCount, 1, group.geometry.firstIndex + dr.firstIndex,
+                                     group.geometry.baseVertex, 0);
                     ++drawCalls;
                 }
             }
@@ -1560,7 +1557,7 @@ void WMORenderer::extractDepth(DrawList& list) const {
         entry.scale = instance.scale;
         for (size_t gi = 0; gi < model.groups.size(); ++gi) {
             const auto& group = model.groups[gi];
-            if (group.vertexBuffer == VK_NULL_HANDLE || group.indexBuffer == VK_NULL_HANDLE) continue;
+            if (!group.geometry.placed()) continue;
 
             // Skip antiportal geometry
             if (group.groupFlags & 0x4000000) continue;
@@ -1613,9 +1610,7 @@ void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceM
             const glm::vec3 nearest = glm::clamp(shadowCenter, kept.worldMin, kept.worldMax);
             if (glm::dot(nearest - shadowCenter, nearest - shadowCenter) > radius * radius) continue;
             const auto& group = *kept.gpu;
-            VkDeviceSize offset = 0;
-            vkCmdBindVertexBuffers(cmd, 0, 1, &group.vertexBuffer, &offset);
-            vkCmdBindIndexBuffer(cmd, group.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+            geometry_.bind(cmd, group.geometry);
 
             for (const auto& mb : group.mergedBatches) {
                 // An alpha-keyed material casts what it draws: Dalaran's
@@ -1639,7 +1634,8 @@ void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceM
                                        0, sizeof(ShadowPush), &push);
                 }
                 for (const auto& dr : mb.draws) {
-                    vkCmdDrawIndexed(cmd, dr.indexCount, 1, dr.firstIndex, 0, 0);
+                    vkCmdDrawIndexed(cmd, dr.indexCount, 1, group.geometry.firstIndex + dr.firstIndex,
+                                     group.geometry.baseVertex, 0);
                     ++shadowDrawCalls_;
                 }
             }
@@ -1711,12 +1707,13 @@ uint32_t WMORenderer::getTotalTriangleCount() const {
 
 void WMORenderer::destroyGroupGPU(GroupResources& group, bool defer) {
     if (!vkCtx_) return;
-    VmaAllocator allocator = vkCtx_->getAllocator();
+    // Its ranges come back after the frames in flight; a frame still being
+    // recorded holds the group's draw data, range and all.
+    geometry_.release(group.geometry);
+    group.geometry = {};
 
     if (!defer) {
         // Immediate destruction (safe after vkDeviceWaitIdle)
-        destroy(allocator, group.vertexBuffer, group.vertexAlloc);
-        destroy(allocator, group.indexBuffer, group.indexAlloc);
         for (auto& mb : group.mergedBatches) {
             if (mb.materialSet) {
                 vkCtx_->freeDescriptorSets(materialDescPool_, 1, &mb.materialSet);
@@ -1727,14 +1724,7 @@ void WMORenderer::destroyGroupGPU(GroupResources& group, bool defer) {
         }
     } else {
         // Deferred destruction - previous frame's command buffer may still
-        // reference these buffers and descriptor sets.
-        ::VkBuffer vb = group.vertexBuffer;
-        VmaAllocation vbAlloc = group.vertexAlloc;
-        ::VkBuffer ib = group.indexBuffer;
-        VmaAllocation ibAlloc = group.indexAlloc;
-        group.vertexBuffer = VK_NULL_HANDLE;
-        group.indexBuffer = VK_NULL_HANDLE;
-
+        // reference these descriptor sets.
         // Snapshot material handles (::VkBuffer = raw Vulkan handle, not RAII wrapper)
         struct MatSnapshot { VkDescriptorSet set; UniformSlotPool::Slot slot; };
         std::vector<MatSnapshot> mats;
@@ -1746,10 +1736,7 @@ void WMORenderer::destroyGroupGPU(GroupResources& group, bool defer) {
         }
 
         VkDescriptorPool pool = materialDescPool_;
-        vkCtx_->deferAfterAllFrameFences([ctx = vkCtx_, allocator, pool, vb, vbAlloc, ib, ibAlloc,
-                                      slots = materialSlots_, mats = std::move(mats)]() {
-            if (vb) gpuDestroyBuffer(allocator, vb, vbAlloc);
-            if (ib) gpuDestroyBuffer(allocator, ib, ibAlloc);
+        vkCtx_->deferAfterAllFrameFences([ctx = vkCtx_, pool, slots = materialSlots_, mats = std::move(mats)]() {
             for (auto& m : mats) {
                 if (m.set) {
                     VkDescriptorSet s = m.set;
