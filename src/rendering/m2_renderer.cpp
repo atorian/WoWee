@@ -559,17 +559,20 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         vkCreateDescriptorSetLayout(device, &ci, nullptr, &boneSetLayout_);
     }
 
-    // Instance data set layout (set 3): binding 0 = STORAGE_BUFFER (per-instance data)
+    // Instance data set layout (set 3): binding 0 = this frame's per-draw
+    // records, binding 1 = the instance table (by slot)
     {
-        VkDescriptorSetLayoutBinding binding{};
-        binding.binding = 0;
-        binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        binding.descriptorCount = 1;
-        binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        VkDescriptorSetLayoutBinding bindings[2] = {};
+        for (uint32_t b = 0; b < 2; ++b) {
+            bindings[b].binding = b;
+            bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            bindings[b].descriptorCount = 1;
+            bindings[b].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        }
 
         VkDescriptorSetLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 1;
-        ci.pBindings = &binding;
+        ci.bindingCount = 2;
+        ci.pBindings = bindings;
         vkCreateDescriptorSetLayout(device, &ci, nullptr, &instanceSetLayout_);
     }
 
@@ -692,11 +695,12 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     // Instance data SSBO - per-frame buffer holding per-instance transforms, fade, bones.
     // Shader reads instanceData[push.instanceDataOffset + gl_InstanceIndex].
     {
-        static_assert(sizeof(M2InstanceGPU) == 208, "M2InstanceGPU must be 208 bytes (std430)");
+        static_assert(sizeof(M2InstanceGPU) == 112, "M2InstanceGPU must be 112 bytes (std430)");
+        static_assert(sizeof(InstanceStaticGPU) == 96, "InstanceStaticGPU must be 96 bytes (std430)");
         const VkDeviceSize instBufSize = kInitialInstanceCapacity * sizeof(M2InstanceGPU);
 
-        // Descriptor pool for 2 sets (double-buffered)
-        VkDescriptorPoolSize poolSize{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 2};
+        // Descriptor pool for 2 sets (double-buffered), two buffers each
+        VkDescriptorPoolSize poolSize{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 4};
         VkDescriptorPoolCreateInfo poolCi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         poolCi.maxSets = 2;
         poolCi.poolSizeCount = 1;
@@ -1030,11 +1034,14 @@ void M2Renderer::shutdown() {
         cullUniformMapped_[i] = nullptr;
         cullSet_[i] = VK_NULL_HANDLE;
         cullSetTableVersion_[i] = 0;
+        instanceSetTableVersion_[i] = 0;
         slotCullDispatch_[i] = CullDispatch{};
     }
     destroy(alloc, cullTable_.buffer, cullTable_.alloc);
-    cullTable_ = CullBuffer{};
+    destroy(alloc, instanceTable_.buffer, instanceTable_.alloc);
+    cullTable_ = instanceTable_ = CullBuffer{};
     pendingCullDispatch_ = CullDispatch{};
+    pendingUploadSerial_ = 0;
     // The table is gone: whatever scene comes next is mirrored from scratch.
     cullTableScene_ = 0;
     destroy(device, cullDescPool_);

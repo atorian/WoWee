@@ -52,9 +52,10 @@ layout(set = 2, binding = 0) readonly buffer BoneSSBO {
     mat4 bones[];
 };
 
-// Per-instance data read via gl_InstanceIndex (GPU instancing)
+// What this frame draws of an instance, read via gl_InstanceIndex (GPU
+// instancing): what changes from frame to frame. Where it stands and the
+// light of the room it is in are its slot's, in InstanceStatics.
 struct InstanceData {
-    mat4 model;
     // Texture animation for the base texture and for the mask stage, as two
     // rows of a 2x3 matrix each (w is padding). See m2_uv_transform.hpp.
     vec4 uvRow0;
@@ -65,21 +66,29 @@ struct InstanceData {
     int useBones;
     int boneBase;
     int boneCount;
-    // 0 for an ordinary instance, 1 while the player is pressing on it. Sits
-    // in what was padding, so the entry is the same 96 bytes it always was.
+    // 0 for an ordinary instance, 1 while the player is pressing on it.
     float highlight;
-    // Bit 0: a boat afloat, which rides the water. Also in what was padding.
+    // Bit 0: a boat afloat, which rides the water.
     int flags;
-    float pad1;
+    // Its slot in InstanceStatics.
+    uint slot;
     float pad0;
-    // See interior_light.glsli.
-    vec4 interiorAmbient;
-    vec4 interiorDirect;
     // The point lights that reach this instance (local_lights.glsli).
     uvec4 localLights;
 };
 layout(set = 3, binding = 0) readonly buffer InstanceSSBO {
     InstanceData instanceData[];
+};
+// An instance's slot (M2Renderer, InstanceSlots): what changes only when the
+// instance does, kept on the GPU and written only where it changed.
+struct InstanceStatic {
+    mat4 model;
+    // See interior_light.glsli.
+    vec4 interiorAmbient;
+    vec4 interiorDirect;
+};
+layout(set = 3, binding = 1) readonly buffer InstanceStatics {
+    InstanceStatic instanceStatics[];
 };
 
 layout(location = 0) in vec3 aPos;
@@ -118,7 +127,8 @@ vec2 uvTransform(vec4 row0, vec4 row1, vec2 uv) {
 void main() {
     // Fetch per-instance data from SSBO
     int instIdx = push.instanceDataOffset + gl_InstanceIndex;
-    mat4 model = instanceData[instIdx].model;
+    uint slot = instanceData[instIdx].slot;
+    mat4 model = instanceStatics[slot].model;
     float fade = instanceData[instIdx].fadeAlpha;
     int uBones = instanceData[instIdx].useBones;
     int bBase  = instanceData[instIdx].boneBase;
@@ -314,8 +324,8 @@ void main() {
     vFadeAlpha = fade;
     vSkyMode = push.isFoliage < 0 ? 1 : 0;
     vHighlight = instanceData[instIdx].highlight;
-    vInteriorAmbient = instanceData[instIdx].interiorAmbient;
-    vInteriorDirect = instanceData[instIdx].interiorDirect;
+    vInteriorAmbient = instanceStatics[slot].interiorAmbient;
+    vInteriorDirect = instanceStatics[slot].interiorDirect;
 
     gl_Position = projection * view * worldPos;
     // A sky model sits on the far plane whatever its radius, so the depth

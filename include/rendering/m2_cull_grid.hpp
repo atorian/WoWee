@@ -58,6 +58,8 @@ public:
         /// Times the frame's render distance squared: its own range.
         float maxDistSqFactor = 1.0f;
         uint32_t id = 0;
+        /// Its slot (InstanceSlots): its row in the GPU's instance tables.
+        uint32_t slot = 0;
         /// How far beyond its position the shadow pass lets it cast: its
         /// bound radius at its scale, times 1.5.
         float shadowRadius = 0.0f;
@@ -207,7 +209,7 @@ private:
     std::vector<uint32_t> cellOf_;
     std::vector<uint32_t> slotOf_;
 };
-static_assert(sizeof(M2CullGrid::Record) == 44, "two to three records to a 128-byte cache line");
+static_assert(sizeof(M2CullGrid::Record) == 48, "two to three records to a 128-byte cache line");
 
 /// The shadow pass's per-instance test against an orthographic light-space
 /// matrix: whether a caster at `position` with this bounding radius (already

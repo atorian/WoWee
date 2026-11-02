@@ -589,8 +589,12 @@ public:
     void prepareRender(uint32_t frameIndex, const Camera& camera);
     /** Dispatch GPU frustum culling compute shader on primary cmd before render pass. */
     void dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera);
-    /// The frame recorded since the last call went to the GPU: the cull
-    /// table changes it carried are in, and its kept list will be.
+    /// Record into `cmd`, before the cull and every draw of the frame, the
+    /// rows of the cull and instance tables that changed since the GPU last
+    /// had them. Every frame that draws, whether or not it culls.
+    void uploadSlotTables(VkCommandBuffer cmd, uint32_t frameIndex);
+    /// The frame recorded since the last call went to the GPU: the table
+    /// changes it carried are in, and its kept list will be.
     void frameSubmitted();
     /// The opaque pass, and the blended one too unless it is drawn after the
     /// water (see renderAfterWater).
@@ -1079,20 +1083,26 @@ private:
     // in the batch's material buffer: that one buffer is shared by every
     // instance and read when the GPU executes, so what was written into it
     // during recording reached all of them as whatever the last write said.
+    /// What a frame draws of an instance (InstanceData in m2.vert): what
+    /// changes from frame to frame. Where it stands is its slot's.
     struct M2InstanceGPU {
-        glm::mat4 model;           // 64 bytes @ offset 0
-        M2UVTransform uv;          // 32 bytes @ offset 64 - texture animation, stage 0
-        M2UVTransform uv2;         // 32 bytes @ offset 96 - texture animation, mask stage
-        float fadeAlpha;           //  4 bytes @ offset 128
-        int32_t useBones;          //  4 bytes @ offset 132
-        int32_t boneBase;          //  4 bytes @ offset 136
-        int32_t boneCount;         //  4 bytes @ offset 140 - clamps skinning reads
-        float highlight = 0.0f;    //  4 bytes @ offset 144 - pressed-on lift
-        int32_t flags = {};        //  4 bytes @ offset 148 - bit 0: afloat (bobs on the water)
-        float pad1 = 0.0f;         //  4 bytes @ offset 152
-        float pad0 = 0.0f;         //  4 bytes @ offset 156
-        InteriorLightGPU interiorLight; // 32 bytes @ offset 160 - M2Instance::interiorLight
-        LocalLightSet localLights = kNoLocalLights; // 16 bytes @ offset 192 - local_lights.glsli
+        M2UVTransform uv;          // 32 bytes @ offset 0 - texture animation, stage 0
+        M2UVTransform uv2;         // 32 bytes @ offset 32 - texture animation, mask stage
+        float fadeAlpha;           //  4 bytes @ offset 64
+        int32_t useBones;          //  4 bytes @ offset 68
+        int32_t boneBase;          //  4 bytes @ offset 72
+        int32_t boneCount;         //  4 bytes @ offset 76 - clamps skinning reads
+        float highlight = 0.0f;    //  4 bytes @ offset 80 - pressed-on lift
+        int32_t flags = {};        //  4 bytes @ offset 84 - bit 0: afloat (bobs on the water)
+        uint32_t slot = 0;         //  4 bytes @ offset 88 - into the instance table
+        float pad0 = 0.0f;         //  4 bytes @ offset 92
+        LocalLightSet localLights = kNoLocalLights; // 16 bytes @ offset 96 - local_lights.glsli
+    };
+    /// An instance's slot in the instance table (InstanceStatic in
+    /// m2.vert): what changes only when the instance does.
+    struct InstanceStaticGPU {
+        glm::mat4 model{1.0f};
+        InteriorLightGPU interiorLight;
     };
     // Bootstrap size only. Visible instances and per-batch UV records determine
     // each frame slot's capacity; scene models must not disappear at this size.
@@ -1145,19 +1155,41 @@ private:
     ::VkBuffer cullUniformBuffer_[2] = {};           // frustum planes, camera, ranges (UBO)
     VmaAllocation cullUniformAlloc_[2] = {};
     void* cullUniformMapped_[2] = {};
-    /// The table, device-local, shared by both frame slots: written only by
-    /// copies recorded into the frames, in queue order.
+    /// The tables, device-local, shared by both frame slots and written
+    /// only by copies recorded into the frames, in queue order: the cull's
+    /// row of each slot, and what the vertex shader reads of it
+    /// (InstanceStaticGPU). They grow together.
     CullBuffer cullTable_;
-    /// Bumped when the table is replaced, so each slot's set is rewritten.
-    uint32_t cullTableVersion_ = 0;
+    CullBuffer instanceTable_;
+    /// Bumped when a table is replaced, so each slot's sets are rewritten.
+    uint32_t slotTablesVersion_ = 0;
     uint32_t cullSetTableVersion_[2] = {};
-    /// Per frame slot: the rows being copied in, and the kept list read back.
+    uint32_t instanceSetTableVersion_[2] = {};
+    /// Per frame slot: the rows being copied in (cull rows, then instance
+    /// rows), and the kept list read back.
     CullBuffer cullStaging_[2];
     CullBuffer cullVisible_[2];
-    /// The table, the staging and the list at least this large, grown in
-    /// `cmd` (the table's rows copied across on the GPU).
-    /// False, logged, when there was no memory for one: no cull this frame.
-    bool ensureCullCapacity(VkCommandBuffer cmd, uint32_t frameIndex, uint32_t slots, uint32_t updates);
+    /// A buffer for the tables; false, logged, when there was no memory.
+    bool makeCullBuffer(CullBuffer& into, uint32_t capacity, VkDeviceSize bytes, VkBufferUsageFlags usage,
+                        VmaMemoryUsage memory, const char* what);
+    /// `table` replaced by one of `capacity` rows, its rows copied across in
+    /// `cmd` and the rest zero.
+    bool growSlotTable(VkCommandBuffer cmd, CullBuffer& table, uint32_t capacity, VkDeviceSize row,
+                       const char* what);
+    /// Both tables and this slot's staging at least this large, and this
+    /// slot's instance set naming the instance table. False, logged, when
+    /// there was no memory for one: the frame's models are not drawn.
+    bool ensureSlotTables(VkCommandBuffer cmd, uint32_t frameIndex, uint32_t slots, uint32_t updates);
+    /// This slot's kept list at least this large and its cull set naming
+    /// it and the table. False, logged, when there was no memory: no cull.
+    bool ensureCullOutput(uint32_t frameIndex, uint32_t slots);
+    /// Whether this slot's instance set names the instance table as it is.
+    [[nodiscard]] bool instanceSetReady(uint32_t frameIndex) const {
+        return instanceTable_.buffer && instanceSetTableVersion_[frameIndex] == slotTablesVersion_;
+    }
+    /// The extracted frame whose table changes were recorded and not yet
+    /// known to be submitted; 0 for none.
+    uint32_t pendingUploadSerial_ = 0;
     /// The recorded cull not yet known to be submitted, and per frame slot
     /// the one its list was last written by: the extracted frame it culled
     /// and the scene that frame held.
@@ -1394,10 +1426,11 @@ private:
     /// no instance. A render thread working from a snapshot records from these
     /// and never from the scene the game thread is changing.
     struct DrawInstance {
-        glm::mat4 modelMatrix{1.0f};
+        /// Its row in the GPU's instance table: where it stands, its
+        /// interior light.
+        uint32_t slot = 0;
         /// Valid for the frame: models are unloaded only between frames.
         std::shared_ptr<const M2ModelGPU> model;
-        InteriorLightGPU interiorLight;
         /// The point lights nearest its origin (local_lights.hpp).
         LocalLightSet localLights = kNoLocalLights;
         glm::vec3 position{0.0f};
@@ -1760,11 +1793,13 @@ public:
         std::vector<float> ribbonVertices;
         std::vector<M2ParticleQuad> particleVertices;
         std::vector<glm::mat4> bones;
-        /// The cull table's changes this frame carries, as they stand: the
-        /// rows of the slots changed and not yet known to be on the GPU, the
-        /// table cleared first when it starts mirroring this scene.
+        /// The tables' changes this frame carries, as they stand: the rows
+        /// of the slots changed and not yet known to be on the GPU, one of
+        /// each table per slot, the cull table cleared first when it starts
+        /// mirroring this scene.
         std::vector<uint32_t> cullUpdateSlots;
         std::vector<CullRowGPU> cullUpdateRows;
+        std::vector<InstanceStaticGPU> instanceUpdateRows;
         bool cullReset = false;
         /// Slots the cull tests, this extracted frame's number, and the
         /// ranges its test reads.

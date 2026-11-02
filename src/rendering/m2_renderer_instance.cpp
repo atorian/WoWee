@@ -46,6 +46,7 @@ void M2Renderer::fileInCullGrid(size_t index, InstanceChange why) {
     record.paddedRadius = instance.cachedPaddedRadius;
     record.maxDistSqFactor = instance.cachedEffectiveMaxDistSqFactor;
     record.id = instance.id;
+    record.slot = scene_->slots.slotOf(instance.id);
     // The margin the shadow pass inflates a position by, before its division
     // by the pass's radius: the model's bound radius at this scale, times 1.5.
     const float boundRadius = instance.cachedModel ? instance.cachedModel->boundRadius
@@ -611,6 +612,8 @@ void M2Renderer::setInteriorLight(uint32_t instanceId, const std::optional<Inter
     auto idxIt = scene_->instanceIndexById.find(instanceId);
     if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) return;
     scene_->instances[idxIt->second].interiorLight = packInteriorLight(light);
+    // The GPU's instance table holds it.
+    scene_->slots.changed(instanceId);
 }
 
 void M2Renderer::finishInstance(uint32_t instanceId) {

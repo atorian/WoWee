@@ -1978,12 +1978,16 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
     // directly into the normal frame command buffer. The old path submitted a
     // separate command buffer and synchronously waited on a fence every frame,
     // serializing CPU and GPU work solely to obtain same-frame cull results.
+    // The instance tables' changes go in first: the cull and every M2 draw
+    // of the frame, the sky's too, read them.
     if (m2Renderer && frameCamera() && vkCtx) {
         CpuStage stage(stages, "beginFrame", "M2 cull");
         GpuPass pass(*vkCtx, currentCmd, "M2 cull");
         uint32_t frame = vkCtx->getCurrentFrame();
+        m2Renderer->uploadSlotTables(currentCmd, frame);
         m2Renderer->dispatchCullCompute(currentCmd, frame, *frameCamera());
     }
+    if (skyboxModelRenderer_ && vkCtx) skyboxModelRenderer_->uploadSlotTables(currentCmd, vkCtx->getCurrentFrame());
 
     // Grass culls here too, for the same reason: a dispatch has to be recorded
     // outside a render pass. Unlike the M2 path nothing reads the result back -
@@ -2216,6 +2220,7 @@ void Renderer::endFrame() {
     vkCtx->endFrame(currentCmd, currentImageIndex);
     currentCmd = VK_NULL_HANDLE;
     if (m2Renderer) m2Renderer->frameSubmitted();
+    if (skyboxModelRenderer_) skyboxModelRenderer_->frameSubmitted();
     vkCtx->cpuStages().add("Render", "endFrame", std::chrono::duration<float, std::milli>(
         std::chrono::steady_clock::now() - recordingStart).count());
     publishFrameResults();

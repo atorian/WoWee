@@ -47,6 +47,9 @@
 //                                          //   transport is while its route is
 //                                          //   on the other map,
 //         "shownAtFrame": 10,              //   and back in it from this frame
+//         "movedAtFrame": 6,               // an M2 moved, at this frame, to
+//         "movedTo": [0, 6, 0],            //   here (render axes, from the
+//                                          //   origin), as a game object is
 //         "heldInPlace": false }           // set to where it stands every
 //                                          //   frame, as a transport at its dock
 //     ],
@@ -342,6 +345,9 @@ struct Placement {
     uint32_t instanceId = 0;
     uint32_t modelId = 0;
     int shownAtFrame = -1;  ///< -1: left as placed
+    /// An M2 moved to `movedTo` at this frame; -1: left where it was placed.
+    int movedAtFrame = -1;
+    glm::vec3 movedTo{0.0f};
     /// Set again to this transform every frame, as the client sets a
     /// transport waiting at its dock; none for a model left as placed.
     std::optional<glm::mat4> heldAt;
@@ -398,12 +404,18 @@ bool placeModel(const json& entry, const glm::vec3& origin, pipeline::AssetManag
     const glm::vec3 rotation = glm::radians(vec3(entry.value("rotation", json())));
     const float scale = entry.value("scale", 1.0f);
     const bool hidden = entry.value("hidden", false);
-    Placement placement{.modelId = modelId, .shownAtFrame = entry.value("shownAtFrame", -1)};
+    Placement placement{.modelId = modelId, .shownAtFrame = entry.value("shownAtFrame", -1),
+                        .movedAtFrame = entry.value("movedAtFrame", -1),
+                        .movedTo = origin + vec3(entry.value("movedTo", json()))};
     glm::vec3 lo(0.0f), hi(0.0f);
     const std::string lower = lowered(path);
     placement.wmo = lower.size() > 4 && lower.compare(lower.size() - 4, 4, ".wmo") == 0;
     if (!placement.wmo && entry.value("doodads", false)) {
         LOG_ERROR("scene_render: \"doodads\" is for a WMO, not ", path);
+        return false;
+    }
+    if (placement.wmo && placement.movedAtFrame >= 0) {
+        LOG_ERROR("scene_render: \"movedAtFrame\" is for an M2, not ", path);
         return false;
     }
     if (placement.wmo) {
@@ -902,6 +914,10 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
             } else {
                 renderer.getM2Renderer()->setInstanceHidden(placement.instanceId, false);
             }
+        }
+        for (const auto& placement : placements) {
+            if (placement.movedAtFrame == frame)
+                renderer.getM2Renderer()->setInstancePosition(placement.instanceId, placement.movedTo);
         }
         environment.realmSeconds = realmTime + frame * static_cast<double>(kStep);
         renderer.setWorldEnvironment(environment);

@@ -915,11 +915,20 @@ void M2Renderer::extractCull(const Camera& camera, Frame& frame) {
     frame.cullReset = cullResetSerial_ > applied;
     frame.cullUpdateSlots.reserve(cullPendingSlots_.size());
     frame.cullUpdateRows.reserve(cullPendingSlots_.size());
+    frame.instanceUpdateRows.reserve(cullPendingSlots_.size());
     for (const uint32_t slot : cullPendingSlots_) {
         frame.cullUpdateSlots.push_back(slot);
-        frame.cullUpdateRows.push_back(slots.idAt(slot) == InstanceSlots::invalid
-                                           ? CullRowGPU{}
-                                           : cullRowOf(scene_->indexOfSlot[slot]));
+        if (slots.idAt(slot) == InstanceSlots::invalid) {
+            // A free slot is never drawn; its cull row keeps the cull off it.
+            frame.cullUpdateRows.push_back(CullRowGPU{});
+            frame.instanceUpdateRows.push_back(InstanceStaticGPU{});
+            continue;
+        }
+        const size_t index = scene_->indexOfSlot[slot];
+        const M2Instance& instance = scene_->instances[index];
+        frame.cullUpdateRows.push_back(cullRowOf(index));
+        frame.instanceUpdateRows.push_back(
+            InstanceStaticGPU{.model = instance.modelMatrix, .interiorLight = instance.interiorLight});
     }
     frame.cullSlotCount = slotCount;
 }
@@ -930,90 +939,131 @@ M2Renderer::CullRowGPU M2Renderer::cullRowOf(size_t index) const {
             .flags = r.flags, .id = r.id};
 }
 
-bool M2Renderer::ensureCullCapacity(VkCommandBuffer cmd, uint32_t frameIndex, uint32_t slots, uint32_t updates) {
-    const auto grown = [](uint32_t capacity, uint32_t need) {
-        return std::max({need, capacity * 2u, 1024u});
-    };
-    const auto make = [&](CullBuffer& into, uint32_t capacity, VkDeviceSize bytes, VkBufferUsageFlags usage,
-                          VmaMemoryUsage memory, const char* what) {
-        VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        bci.size = bytes;
-        bci.usage = usage;
-        VmaAllocationCreateInfo aci{};
-        aci.usage = memory;
-        if (memory != VMA_MEMORY_USAGE_GPU_ONLY) aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-        VmaAllocationInfo info{};
-        CullBuffer next;
-        if (gpuCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &next.buffer, &next.alloc, &info) != VK_SUCCESS) {
-            static core::LogBudget budget(4, "M2 cull buffers");
-            if (budget.take())
-                LOG_ERROR("M2 cull: no memory for the ", what, " of ", capacity,
-                          " slots; this frame's models are culled on the CPU");
-            return false;
-        }
-        next.mapped = info.pMappedData;
-        next.capacity = capacity;
-        DeferredResources retire(*vkCtx_);
-        if (into.buffer) retire.buffer(into.buffer, into.alloc);
-        into = next;
-        return true;
-    };
-    constexpr VkDeviceSize kRow = sizeof(CullRowGPU);
+namespace {
 
-    if (slots > cullTable_.capacity) {
-        CullBuffer old = cullTable_;
-        const uint32_t capacity = grown(old.capacity, slots);
-        CullBuffer next;
-        if (!make(next, capacity, VkDeviceSize(capacity) * kRow,
-                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                  VMA_MEMORY_USAGE_GPU_ONLY, "cull table")) {
+uint32_t grownCapacity(uint32_t capacity, uint32_t need) {
+    return std::max({need, capacity * 2u, 1024u});
+}
+
+void memoryBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
+                   VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess) {
+    VkMemoryBarrier2 b{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    b.srcStageMask = srcStage;
+    b.srcAccessMask = srcAccess;
+    b.dstStageMask = dstStage;
+    b.dstAccessMask = dstAccess;
+    VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dep.memoryBarrierCount = 1;
+    dep.pMemoryBarriers = &b;
+    cmdPipelineBarrier2(cmd, dep);
+}
+
+}  // namespace
+
+bool M2Renderer::makeCullBuffer(CullBuffer& into, uint32_t capacity, VkDeviceSize bytes, VkBufferUsageFlags usage,
+                                VmaMemoryUsage memory, const char* what) {
+    VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = bytes;
+    bci.usage = usage;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = memory;
+    if (memory != VMA_MEMORY_USAGE_GPU_ONLY) aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VmaAllocationInfo info{};
+    CullBuffer next;
+    if (gpuCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &next.buffer, &next.alloc, &info) != VK_SUCCESS) {
+        static core::LogBudget budget(4, "M2 cull buffers");
+        if (budget.take())
+            LOG_ERROR("M2 slot tables: no memory for the ", what, " of ", capacity,
+                      " slots; this frame's models are not drawn, or culled on the CPU");
+        return false;
+    }
+    next.mapped = info.pMappedData;
+    next.capacity = capacity;
+    DeferredResources retire(*vkCtx_);
+    if (into.buffer) retire.buffer(into.buffer, into.alloc);
+    into = next;
+    return true;
+}
+
+bool M2Renderer::growSlotTable(VkCommandBuffer cmd, CullBuffer& table, uint32_t capacity, VkDeviceSize row,
+                               const char* what) {
+    CullBuffer old = table;
+    CullBuffer next;
+    if (!makeCullBuffer(next, capacity, VkDeviceSize(capacity) * row,
+                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                        VMA_MEMORY_USAGE_GPU_ONLY, what)) {
+        return false;
+    }
+    // The rows so far come across on the GPU, after every earlier frame's
+    // copies into the old table; the new rows start free.
+    const VkDeviceSize kept = VkDeviceSize(old.capacity) * row;
+    if (old.buffer) {
+        memoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                      VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        const VkBufferCopy region{.srcOffset = 0, .dstOffset = 0, .size = kept};
+        vkCmdCopyBuffer(cmd, old.buffer, next.buffer, 1, &region);
+    }
+    vkCmdFillBuffer(cmd, next.buffer, kept, VkDeviceSize(capacity) * row - kept, 0);
+    DeferredResources retire(*vkCtx_);
+    if (old.buffer) retire.buffer(old.buffer, old.alloc);
+    table = next;
+    ++slotTablesVersion_;
+    return true;
+}
+
+bool M2Renderer::ensureSlotTables(VkCommandBuffer cmd, uint32_t frameIndex, uint32_t slots, uint32_t updates) {
+    if (slots > cullTable_.capacity &&
+        !growSlotTable(cmd, cullTable_, grownCapacity(cullTable_.capacity, slots), sizeof(CullRowGPU),
+                       "cull table")) {
+        return false;
+    }
+    if (slots > instanceTable_.capacity &&
+        !growSlotTable(cmd, instanceTable_, grownCapacity(instanceTable_.capacity, slots),
+                       sizeof(InstanceStaticGPU), "instance table")) {
+        return false;
+    }
+    if (updates > cullStaging_[frameIndex].capacity) {
+        const uint32_t capacity = grownCapacity(cullStaging_[frameIndex].capacity, updates);
+        if (!makeCullBuffer(cullStaging_[frameIndex], capacity,
+                            VkDeviceSize(capacity) * (sizeof(CullRowGPU) + sizeof(InstanceStaticGPU)),
+                            VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, "table changes")) {
             return false;
         }
-        // The rows so far come across on the GPU, after every earlier frame's
-        // copies into the old table; the new rows start free.
-        const VkDeviceSize kept = VkDeviceSize(old.capacity) * kRow;
-        if (old.buffer) {
-            VkMemoryBarrier2 before{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-            before.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-            before.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-            before.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-            before.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
-            VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-            dep.memoryBarrierCount = 1;
-            dep.pMemoryBarriers = &before;
-            cmdPipelineBarrier2(cmd, dep);
-            const VkBufferCopy region{.srcOffset = 0, .dstOffset = 0, .size = kept};
-            vkCmdCopyBuffer(cmd, old.buffer, next.buffer, 1, &region);
-        }
-        vkCmdFillBuffer(cmd, next.buffer, kept, VkDeviceSize(capacity) * kRow - kept, 0);
-        DeferredResources retire(*vkCtx_);
-        if (old.buffer) retire.buffer(old.buffer, old.alloc);
-        cullTable_ = next;
-        ++cullTableVersion_;
     }
+    // This slot's set is written after its fence, and only when the table
+    // it names was replaced.
+    if (instanceSetTableVersion_[frameIndex] != slotTablesVersion_) {
+        const VkDescriptorBufferInfo table{.buffer = instanceTable_.buffer, .offset = 0,
+                                           .range = VkDeviceSize(instanceTable_.capacity) * sizeof(InstanceStaticGPU)};
+        VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = instanceSet_[frameIndex];
+        write.dstBinding = 1;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        write.pBufferInfo = &table;
+        vkUpdateDescriptorSets(vkCtx_->getDevice(), 1, &write, 0, nullptr);
+        instanceSetTableVersion_[frameIndex] = slotTablesVersion_;
+    }
+    return true;
+}
+
+bool M2Renderer::ensureCullOutput(uint32_t frameIndex, uint32_t slots) {
     bool visibleReplaced = false;
     if (slots > cullVisible_[frameIndex].capacity) {
-        const uint32_t capacity = grown(cullVisible_[frameIndex].capacity, slots);
-        if (!make(cullVisible_[frameIndex], capacity, sizeof(uint32_t) * (1 + 2 * VkDeviceSize(capacity)),
-                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                  VMA_MEMORY_USAGE_GPU_TO_CPU, "kept list")) {
+        const uint32_t capacity = grownCapacity(cullVisible_[frameIndex].capacity, slots);
+        if (!makeCullBuffer(cullVisible_[frameIndex], capacity, sizeof(uint32_t) * (1 + 2 * VkDeviceSize(capacity)),
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                            VMA_MEMORY_USAGE_GPU_TO_CPU, "kept list")) {
             return false;
         }
         visibleReplaced = true;
     }
-    if (updates > cullStaging_[frameIndex].capacity) {
-        const uint32_t capacity = grown(cullStaging_[frameIndex].capacity, updates);
-        if (!make(cullStaging_[frameIndex], capacity, VkDeviceSize(capacity) * kRow,
-                  VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, "table changes")) {
-            return false;
-        }
-    }
     // This slot's set is written after its fence, and only when what it
     // names was replaced.
-    if (visibleReplaced || cullSetTableVersion_[frameIndex] != cullTableVersion_) {
+    if (visibleReplaced || cullSetTableVersion_[frameIndex] != slotTablesVersion_) {
         const VkDescriptorBufferInfo table{.buffer = cullTable_.buffer, .offset = 0,
-                                           .range = VkDeviceSize(cullTable_.capacity) * kRow};
+                                           .range = VkDeviceSize(cullTable_.capacity) * sizeof(CullRowGPU)};
         const VkDescriptorBufferInfo kept{
             .buffer = cullVisible_[frameIndex].buffer, .offset = 0,
             .range = sizeof(uint32_t) * (1 + 2 * VkDeviceSize(cullVisible_[frameIndex].capacity))};
@@ -1028,16 +1078,58 @@ bool M2Renderer::ensureCullCapacity(VkCommandBuffer cmd, uint32_t frameIndex, ui
         writes[0].pBufferInfo = &table;
         writes[1].pBufferInfo = &kept;
         vkUpdateDescriptorSets(vkCtx_->getDevice(), 2, writes, 0, nullptr);
-        cullSetTableVersion_[frameIndex] = cullTableVersion_;
+        cullSetTableVersion_[frameIndex] = slotTablesVersion_;
     }
     return true;
 }
 
 void M2Renderer::frameSubmitted() {
+    if (pendingUploadSerial_ != 0) {
+        cullAppliedSerial_.store(pendingUploadSerial_, std::memory_order_release);
+        pendingUploadSerial_ = 0;
+    }
     if (!pendingCullDispatch_.valid) return;
     slotCullDispatch_[pendingCullDispatch_.frameIndex] = pendingCullDispatch_;
-    cullAppliedSerial_.store(pendingCullDispatch_.serial, std::memory_order_release);
     pendingCullDispatch_ = CullDispatch{};
+}
+
+void M2Renderer::uploadSlotTables(VkCommandBuffer cmd, uint32_t frameIndex) {
+    if (!recording_) return;
+    const Frame& frame = *recording_;
+    if (frame.cullSlotCount == 0) return;
+    const auto updates = static_cast<uint32_t>(frame.cullUpdateSlots.size());
+    if (!ensureSlotTables(cmd, frameIndex, frame.cullSlotCount, updates)) return;
+
+    // The changes go in after every earlier frame's copies, tests and draws.
+    memoryBarrier(cmd,
+                  VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                      VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+                  VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                  VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    if (frame.cullReset) {
+        // A free instance row is never read: only the cull's rows need clearing.
+        vkCmdFillBuffer(cmd, cullTable_.buffer, 0, VK_WHOLE_SIZE, 0);
+        memoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                      VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    }
+    if (updates > 0) {
+        const auto copyRows = [&](const void* rows, VkDeviceSize row, VkDeviceSize stagedAt, const CullBuffer& into) {
+            std::memcpy(static_cast<char*>(cullStaging_[frameIndex].mapped) + stagedAt, rows, updates * row);
+            cullCopyRegions_.resize(updates);
+            for (uint32_t k = 0; k < updates; ++k) {
+                cullCopyRegions_[k] = VkBufferCopy{.srcOffset = stagedAt + k * row,
+                                                   .dstOffset = frame.cullUpdateSlots[k] * row, .size = row};
+            }
+            vkCmdCopyBuffer(cmd, cullStaging_[frameIndex].buffer, into.buffer, updates, cullCopyRegions_.data());
+        };
+        copyRows(frame.cullUpdateRows.data(), sizeof(CullRowGPU), 0, cullTable_);
+        copyRows(frame.instanceUpdateRows.data(), sizeof(InstanceStaticGPU), VkDeviceSize(updates) * sizeof(CullRowGPU),
+                 instanceTable_);
+    }
+    memoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_READ_BIT);
+    pendingUploadSerial_ = frame.cullSerial;
 }
 
 void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera) {
@@ -1046,45 +1138,16 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
     collectCullOutput(frameIndex);
     const Frame& frame = *recording_;
     if (frame.cullSlotCount == 0 || !cullUniformMapped_[frameIndex]) return;
-    const auto updates = static_cast<uint32_t>(frame.cullUpdateSlots.size());
-    if (!ensureCullCapacity(cmd, frameIndex, frame.cullSlotCount, updates)) return;
+    // The table as this frame left it, or no cull (uploadSlotTables said why).
+    if (pendingUploadSerial_ != frame.cullSerial) return;
+    if (!ensureCullOutput(frameIndex, frame.cullSlotCount)) return;
 
-    const auto barrier = [&](VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
-                             VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess) {
-        VkMemoryBarrier2 b{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-        b.srcStageMask = srcStage;
-        b.srcAccessMask = srcAccess;
-        b.dstStageMask = dstStage;
-        b.dstAccessMask = dstAccess;
-        VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-        dep.memoryBarrierCount = 1;
-        dep.pMemoryBarriers = &b;
-        cmdPipelineBarrier2(cmd, dep);
-    };
-    // The table's changes go in after every earlier frame's copies and tests.
-    barrier(VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT,
-            VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
-    if (frame.cullReset) {
-        vkCmdFillBuffer(cmd, cullTable_.buffer, 0, VK_WHOLE_SIZE, 0);
-        barrier(VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
-    }
-    if (updates > 0) {
-        auto* staged = static_cast<CullRowGPU*>(cullStaging_[frameIndex].mapped);
-        std::memcpy(staged, frame.cullUpdateRows.data(), updates * sizeof(CullRowGPU));
-        cullCopyRegions_.resize(updates);
-        for (uint32_t k = 0; k < updates; ++k) {
-            cullCopyRegions_[k] = VkBufferCopy{.srcOffset = k * sizeof(CullRowGPU),
-                                               .dstOffset = frame.cullUpdateSlots[k] * sizeof(CullRowGPU),
-                                               .size = sizeof(CullRowGPU)};
-        }
-        vkCmdCopyBuffer(cmd, cullStaging_[frameIndex].buffer, cullTable_.buffer, updates,
-                        cullCopyRegions_.data());
-    }
+    // The count starts at zero after the last frame's cull wrote it.
+    memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
+                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
     vkCmdFillBuffer(cmd, cullVisible_[frameIndex].buffer, 0, sizeof(uint32_t), 0);
-    barrier(VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT);
+    memoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT);
 
     Frustum frustum;
     frustum.extractFromMatrix(camera.getViewProjectionMatrix());
@@ -1110,8 +1173,8 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
 
     // The kept list is the host's after this frame's fence: collectCullOutput
     // invalidates and reads it when this frame slot comes round again.
-    barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+    memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
+                  VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
 }
 
 namespace {
@@ -1599,9 +1662,8 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
                 out.skinned.push_back(draw);
             }
             out.draws.push_back(DrawInstance{
-                .modelMatrix = instance.modelMatrix,
+                .slot = r.slot,
                 .model = models.at(instance.modelId),
-                .interiorLight = instance.interiorLight,
                 .localLights = haveLights
                     ? pickLocalLights(*frameLights_, glm::vec3(instance.modelMatrix[3]), 0.0f)
                     : kNoLocalLights,
@@ -1879,7 +1941,7 @@ void M2Renderer::Frame::clear() noexcept {
     drawInstances_.clear(); sortedVisible_.clear(); transparentVisible_.clear();
     glowSprites_.clear(); ribbonDraws_.clear(); particleRuns_.clear();
     ribbonVertices.clear(); particleVertices.clear(); bones.clear();
-    cullUpdateSlots.clear(); cullUpdateRows.clear(); cullReset = false; cullSlotCount = cullSerial = 0;
+    cullUpdateSlots.clear(); cullUpdateRows.clear(); instanceUpdateRows.clear(); cullReset = false; cullSlotCount = cullSerial = 0;
     depth.clear(); solarDepth.clear(); strikeDepth.clear(); shadowModels.clear();
     instanceEntries = 0;
     skinnedDraws = 0;
@@ -2010,6 +2072,9 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     skyDiagDrawsTransparent_ = 0;
     const uint32_t frameIndex = vkCtx_->getCurrentFrame();
     if(recording_->instanceEntries>instanceCapacity_[frameIndex]) return;
+    // Where they stand is in the instance table; without it (no memory,
+    // logged by ensureSlotTables) nothing is drawn.
+    if (!drawInstances_.empty() && !instanceSetReady(frameIndex)) return;
 
     // State tracking
     VkPipeline currentPipeline = VK_NULL_HANDLE;
@@ -2041,7 +2106,8 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                                 pipelineLayout_, 2, 1, &dummyBoneSet_, 0, nullptr);
     }
 
-    // Bind instance data SSBO (set 3) - per-instance transforms, fade, bones
+    // Bind the instance set (set 3): this frame's per-draw records, and the
+    // instance table they name a slot of
     if (instanceSet_[frameIndex]) {
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 pipelineLayout_, 3, 1, &instanceSet_[frameIndex], 0, nullptr);
@@ -2129,7 +2195,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 if (instanceDataCount_ >= instanceCapacity_[frameIndex]) break;
                 const DrawInstance& inst = drawInstances_[p.draw];
                 auto& e = instSSBO[instanceDataCount_];
-                e.model = inst.modelMatrix;
+                e.slot = inst.slot;
                 e.uv = M2UVTransform{};
                 e.uv2 = M2UVTransform{};
                 e.localLights = inst.localLights;
@@ -2139,7 +2205,6 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 e.boneCount = static_cast<int32_t>(inst.boneCount);
                 e.highlight = inst.highlight;
                 e.flags = inst.afloat ? 1 : 0;
-                e.interiorLight = inst.interiorLight;
                 instanceDataCount_++;
                 ++writtenInstances;
             }
@@ -2261,7 +2326,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                             // upload memory: writing it is cheap, but reading it back is
                             // uncached and costs microseconds per instance.
                             auto& e = instSSBO[instanceDataCount_];
-                            e.model = inst.modelMatrix;
+                            e.slot = inst.slot;
                             e.uv = uv;
                             e.uv2 = uv2;
                             e.localLights = inst.localLights;
@@ -2278,7 +2343,6 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                             e.boneCount = static_cast<int32_t>(inst.boneCount);
                             e.highlight = inst.highlight;
                             e.flags = inst.afloat ? 1 : 0;
-                            e.interiorLight = inst.interiorLight;
                             instanceDataCount_++;
                         }
                     }
@@ -2370,6 +2434,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
     // sorted them back to front.
     const uint32_t frameIndex = vkCtx_->getCurrentFrame();
     if(recording_->instanceEntries>instanceCapacity_[frameIndex]) return;
+    if (!drawInstances_.empty() && !instanceSetReady(frameIndex)) return;
     auto* instSSBO = static_cast<M2InstanceGPU*>(instanceMapped_[frameIndex]);
 
     // The sets the opaque pass bound, again: this may be a different command
@@ -2525,7 +2590,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             if (instanceDataCount_ >= instanceCapacity_[frameIndex]) continue;
             uint32_t drawOffset = instanceDataCount_;
             auto& e = instSSBO[instanceDataCount_];
-            e.model = instance.modelMatrix;
+            e.slot = instance.slot;
             e.uv = uv;
             e.uv2 = uv2;
             e.localLights = instance.localLights;
@@ -2542,7 +2607,6 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             e.boneCount = static_cast<int32_t>(instance.boneCount);
             e.highlight = instance.highlight;
             e.flags = instance.afloat ? 1 : 0;
-            e.interiorLight = instance.interiorLight;
             instanceDataCount_++;
 
             // Earlier captures still reference these SSBO addresses. Reserve
