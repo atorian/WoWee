@@ -1202,20 +1202,21 @@ static_assert(sizeof(M2PushConstants) == kM2PushConstantBytes, "m2.vert's Push b
 // page, recorded as one indirect call. Each draw is written in order into
 // the frame slot's command and record buffers, so a call draws exactly what
 // its draws one by one did, in the same order; the caller flushes before
-// it changes any of that state.
+// it changes any of that state. A call's draws read their records from the
+// first one on by gl_DrawID; `announce(first)` tells the shader which.
+template <class Record, class Announce>
 class DrawRuns {
 public:
-    DrawRuns(VkCommandBuffer cmd, VkPipelineLayout layout, ::VkBuffer commands, void* commandData, void* recordData,
-             uint32_t& cursor, uint32_t capacity, uint32_t maxPerCall)
-        : cmd_(cmd), layout_(layout), commands_(commands),
-          commandData_(static_cast<VkDrawIndexedIndirectCommand*>(commandData)),
-          recordData_(static_cast<uint32_t*>(recordData)), cursor_(cursor), first_(cursor), capacity_(capacity),
-          maxPerCall_(std::max(1u, maxPerCall)) {}
+    DrawRuns(VkCommandBuffer cmd, ::VkBuffer commands, void* commandData, void* recordData, uint32_t& cursor,
+             uint32_t capacity, uint32_t maxPerCall, Announce announce)
+        : cmd_(cmd), commands_(commands), commandData_(static_cast<VkDrawIndexedIndirectCommand*>(commandData)),
+          recordData_(static_cast<Record*>(recordData)), cursor_(cursor), first_(cursor), capacity_(capacity),
+          maxPerCall_(std::max(1u, maxPerCall)), announce_(std::move(announce)) {}
     /// The draw added to the run; false when the frame slot's room is used up.
-    bool add(const VkDrawIndexedIndirectCommand& draw, uint32_t material) {
+    bool add(const VkDrawIndexedIndirectCommand& draw, const Record& record) {
         if (cursor_ >= capacity_) return false;
         commandData_[cursor_] = draw;
-        recordData_[cursor_] = material;
+        recordData_[cursor_] = record;
         ++cursor_;
         if (cursor_ - first_ >= maxPerCall_) flush();
         return true;
@@ -1224,8 +1225,7 @@ public:
     void flush() {
         const uint32_t count = cursor_ - first_;
         if (count == 0) return;
-        const M2PushConstants push{.drawBase = first_};
-        vkCmdPushConstants(cmd_, layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
+        announce_(first_);
         vkCmdDrawIndexedIndirect(cmd_, commands_, VkDeviceSize(first_) * sizeof(VkDrawIndexedIndirectCommand), count,
                                  sizeof(VkDrawIndexedIndirectCommand));
         first_ = cursor_;
@@ -1233,15 +1233,26 @@ public:
 
 private:
     VkCommandBuffer cmd_;
-    VkPipelineLayout layout_;
     ::VkBuffer commands_;
     VkDrawIndexedIndirectCommand* commandData_;
-    uint32_t* recordData_;
+    Record* recordData_;
     uint32_t& cursor_;
     uint32_t first_;
     uint32_t capacity_;
     uint32_t maxPerCall_;
+    Announce announce_;
 };
+
+/// The view's runs: a material row a draw, the first pushed.
+auto viewRuns(VkCommandBuffer cmd, VkPipelineLayout layout, const AllocatedBuffer& commands,
+              const AllocatedBuffer& records, uint32_t& cursor, uint32_t capacity, uint32_t maxPerCall) {
+    return DrawRuns<uint32_t, std::function<void(uint32_t)>>(
+        cmd, commands.buffer, commands.info.pMappedData, records.info.pMappedData, cursor, capacity, maxPerCall,
+        [cmd, layout](uint32_t first) {
+            const M2PushConstants push{.drawBase = first};
+            vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
+        });
+}
 
 /// Said once a stretch when a frame slot's draws outgrow its room.
 void sayDrawRoomFull(uint32_t capacity) {
@@ -2174,9 +2185,8 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     auto* instSSBO = static_cast<M2InstanceGPU*>(instanceMapped_[frameIndex]);
     // The draws, a call per run of the same state; the geometry page bound
     // and the faces shown are part of that state.
-    DrawRuns runs(cmd, pipelineLayout_, drawCommands_[frameIndex].buffer, drawCommands_[frameIndex].info.pMappedData,
-                  drawRecords_[frameIndex].info.pMappedData, frameDrawCursor(), drawRoom(frameIndex),
-                  maxDrawsPerCall_);
+    auto runs = viewRuns(cmd, pipelineLayout_, drawCommands_[frameIndex], drawRecords_[frameIndex], frameDrawCursor(),
+                         drawRoom(frameIndex), maxDrawsPerCall_);
     ::VkBuffer currentPage = VK_NULL_HANDLE;
     std::optional<bool> currentTwoSided;
     bool roomFull = false;
@@ -2528,9 +2538,8 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
     bool currentModelValid = false;
     VkPipeline currentPipeline = VK_NULL_HANDLE;
     FaceCulling faces(*vkCtx_, cmd);
-    DrawRuns runs(cmd, pipelineLayout_, drawCommands_[frameIndex].buffer, drawCommands_[frameIndex].info.pMappedData,
-                  drawRecords_[frameIndex].info.pMappedData, frameDrawCursor(), drawRoom(frameIndex),
-                  maxDrawsPerCall_);
+    auto runs = viewRuns(cmd, pipelineLayout_, drawCommands_[frameIndex], drawRecords_[frameIndex], frameDrawCursor(),
+                         drawRoom(frameIndex), maxDrawsPerCall_);
     ::VkBuffer currentPage = VK_NULL_HANDLE;
     std::optional<bool> currentTwoSided;
     bool roomFull = false;
@@ -2803,21 +2812,20 @@ bool M2Renderer::createShadowInstanceBuffers() {
     if (shadowInstanceSetLayout_) return true;
     VkDevice device = vkCtx_->getDevice();
     static_assert(sizeof(M2ShadowInstance) == 16, "M2ShadowInstance is m2_shadow.vert's std430 layout");
+    static_assert(sizeof(M2ShadowDraw) == 16, "M2ShadowDraw is m2_shadow.vert's uvec4");
     static_assert(sizeof(M2ShadowPush) <= 128, "the push block every device must take");
-    static_assert(offsetof(M2ShadowPush, flags) == offsetof(ShadowPush, flags),
-                  "shadow.frag reads every shadow pass's flags at one offset");
 
     // Binding 0: the frame's casters. Binding 1: the instance table they name
-    // a slot of, written by ensureSlotTables.
-    VkDescriptorSetLayoutBinding bindings[2] = {};
-    for (uint32_t b = 0; b < 2; ++b) {
+    // a slot of, written by ensureSlotTables. Binding 2: the frame's draws.
+    VkDescriptorSetLayoutBinding bindings[3] = {};
+    for (uint32_t b = 0; b < 3; ++b) {
         bindings[b].binding = b;
         bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bindings[b].descriptorCount = 1;
         bindings[b].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     }
     VkDescriptorSetLayoutCreateInfo layoutCi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    layoutCi.bindingCount = 2;
+    layoutCi.bindingCount = 3;
     layoutCi.pBindings = bindings;
     if (vkCreateDescriptorSetLayout(device, &layoutCi, nullptr, &shadowInstanceSetLayout_) != VK_SUCCESS) {
         LOG_ERROR("M2Renderer: could not create the shadow casters' set layout; doodads cast no shadow");
@@ -2825,7 +2833,7 @@ bool M2Renderer::createShadowInstanceBuffers() {
     }
 
     VkDescriptorPoolSize poolSize{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                  .descriptorCount = 2 * kShadowTexPoolFrames};
+                                  .descriptorCount = 3 * kShadowTexPoolFrames};
     VkDescriptorPoolCreateInfo poolCi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolCi.maxSets = kShadowTexPoolFrames;
     poolCi.poolSizeCount = 1;
@@ -2861,14 +2869,36 @@ bool M2Renderer::createShadowInstanceBuffers() {
             LOG_ERROR("M2Renderer: could not allocate the shadow casters' set; doodads cast no shadow");
             return false;
         }
+        // The draws' records and commands, mapped.
+        const auto make = [&](VkDeviceSize bytes, VkBufferUsageFlags usage, AllocatedBuffer& out) {
+            VkBufferCreateInfo drawBci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            drawBci.size = bytes;
+            drawBci.usage = usage;
+            return gpuCreateBuffer(vkCtx_->getAllocator(), &drawBci, &aci, &out.buffer, &out.allocation,
+                                   &out.info) == VK_SUCCESS &&
+                   out.info.pMappedData;
+        };
+        if (!make(VkDeviceSize(kMaxShadowDraws) * sizeof(M2ShadowDraw), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                  shadowDrawRecords_[i]) ||
+            !make(VkDeviceSize(kMaxShadowDraws) * sizeof(VkDrawIndexedIndirectCommand),
+                  VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, shadowDrawCommands_[i])) {
+            LOG_ERROR("M2Renderer: could not allocate the shadow draws' buffers; doodads cast no shadow");
+            return false;
+        }
+
         VkDescriptorBufferInfo bufInfo{.buffer = shadowInstanceBuffer_[i], .offset = 0, .range = size};
-        VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        write.dstSet = shadowInstanceSet_[i];
-        write.dstBinding = 0;
-        write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        write.pBufferInfo = &bufInfo;
-        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        VkDescriptorBufferInfo drawInfo{.buffer = shadowDrawRecords_[i].buffer, .offset = 0, .range = VK_WHOLE_SIZE};
+        VkWriteDescriptorSet writes[2] = {};
+        for (uint32_t w = 0; w < 2; ++w) {
+            writes[w] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            writes[w].dstSet = shadowInstanceSet_[i];
+            writes[w].dstBinding = w == 0 ? 0 : 2;
+            writes[w].descriptorCount = 1;
+            writes[w].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        }
+        writes[0].pBufferInfo = &bufInfo;
+        writes[1].pBufferInfo = &drawInfo;
+        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
     }
     return true;
 }
@@ -2877,44 +2907,16 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
     if (!vkCtx_ || shadowRenderPass == VK_NULL_HANDLE) return false;
     VkDevice device = vkCtx_->getDevice();
 
-    // The set the shadow pass binds, built the same way for all four renderers.
-    if (!createShadowParamsSet(device, vkCtx_->getAllocator(), sizeof(ShadowParamsUBO),
-                               whiteTexture_->getImageView(),
-                              whiteTexture_->getSampler(), "M2Renderer", shadowParams_)) {
-        return false;
-    }
-
-    // Per-frame pools for foliage shadow texture sets (one per frame-in-flight, reset each frame)
-    {
-        VkDescriptorPoolSize texPoolSizes[2]{};
-        texPoolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        texPoolSizes[0].descriptorCount = 256;
-        texPoolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        texPoolSizes[1].descriptorCount = 256;
-        VkDescriptorPoolCreateInfo texPoolCI{};
-        texPoolCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        texPoolCI.maxSets = 256;
-        texPoolCI.poolSizeCount = 2;
-        texPoolCI.pPoolSizes = texPoolSizes;
-        for (uint32_t f = 0; f < kShadowTexPoolFrames; ++f) {
-            if (vkCreateDescriptorPool(device, &texPoolCI, nullptr, &shadowTexPool_[f]) != VK_SUCCESS) {
-                LOG_ERROR("M2Renderer: failed to create shadow texture pool ", f);
-                return false;
-            }
-        }
-    }
-
     if (!createShadowInstanceBuffers()) return false;
 
-    // Set 0: the texture and the params, as every shadow pass has them. Set 1:
-    // the casters (M2ShadowInstance).
+    // Set 0: the texture table, which the draws' records name their
+    // textures in. Set 1: the casters (M2ShadowInstance) and the draws.
     VkPushConstantRange pc{};
-    // The fragment stage reads the alpha-test flags out of the same block.
-    pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     pc.offset = 0;
     pc.size = sizeof(M2ShadowPush);
     shadowPipelineLayout_ = createPipelineLayout(
-        device, {shadowParams_.layout, shadowInstanceSetLayout_}, {pc});
+        device, {vkCtx_->textureTable().layout(), shadowInstanceSetLayout_}, {pc});
     if (!shadowPipelineLayout_) {
         LOG_ERROR("M2Renderer: failed to create shadow pipeline layout");
         return false;
@@ -2926,7 +2928,7 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
         LOG_ERROR("M2Renderer: failed to load shadow vertex shader");
         return false;
     }
-    if (!fragShader.loadFromFile(device, "assets/shaders/shadow.frag.spv")) {
+    if (!fragShader.loadFromFile(device, "assets/shaders/m2_shadow.frag.spv")) {
         LOG_ERROR("M2Renderer: failed to load shadow fragment shader");
         return false;
     }
@@ -2958,50 +2960,6 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
     }
     LOG_INFO("M2Renderer shadow pipeline initialized");
     return true;
-}
-
-VkDescriptorSet M2Renderer::shadowTexSet(VkTexture* tex) {
-    // Cache: texture imageView -> allocated descriptor set (avoids duplicates within frame)
-    auto& texSetCache = shadowTexSetCache_;
-    {
-        VkImageView iv = tex->getImageView();
-        auto cacheIt = texSetCache.find(iv);
-        if (cacheIt != texSetCache.end()) return cacheIt->second;
-
-        VkDescriptorSet set = VK_NULL_HANDLE;
-        VkDescriptorSetAllocateInfo ai{};
-        ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        ai.descriptorPool = shadowTexPool_[vkCtx_->getCurrentFrame()];
-        ai.descriptorSetCount = 1;
-        ai.pSetLayouts = &shadowParams_.layout;
-        if (vkCtx_->allocateDescriptorSets(ai, &set) != VK_SUCCESS) {
-            return shadowParams_.set; // fallback to white texture
-        }
-        VkDescriptorImageInfo imgInfo{};
-        imgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        imgInfo.imageView = iv;
-        imgInfo.sampler = tex->getSampler();
-        VkDescriptorBufferInfo bufInfo{};
-        bufInfo.buffer = shadowParams_.ubo;
-        bufInfo.offset = 0;
-        bufInfo.range = sizeof(ShadowParamsUBO);
-        VkWriteDescriptorSet writes[2]{};
-        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = set;
-        writes[0].dstBinding = 0;
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[0].pImageInfo = &imgInfo;
-        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = set;
-        writes[1].dstBinding = 1;
-        writes[1].descriptorCount = 1;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        writes[1].pBufferInfo = &bufInfo;
-        vkUpdateDescriptorSets(vkCtx_->getDevice(), 2, writes, 0, nullptr);
-        texSetCache[iv] = set;
-        return set;
-    }
 }
 
 void M2Renderer::cullShadowCasters(const glm::mat4& lightSpaceMatrix, float shadowRadius, bool sunMap,
@@ -3059,17 +3017,31 @@ void M2Renderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& light
     auto* casterData = static_cast<M2ShadowInstance*>(shadowInstanceMapped_[frameIdx]);
     const VkDescriptorSet casterSet = shadowInstanceSet_[frameIdx];
     {
-        // What each draw is - the texture, the alpha test, the bend - is
-        // carried with it in push constants rather than written into a buffer
-        // both passes share. A uniform buffer is read when a draw executes,
-        // not when it is recorded, so writing it again for the foliage pass
-        // decided what the solid pass's draws saw as well; a foliage batch
-        // that lost its alpha test that way casts the whole leaf quad.
+        // What each draw is - the texture, the alpha test, the bend - is its
+        // own record in this frame's draws, never a buffer the passes share:
+        // a buffer is read when a draw executes, not when it is recorded, so
+        // one written again for the foliage pass decided what the solid
+        // pass's draws saw as well; a foliage batch that lost its alpha test
+        // that way casts the whole leaf quad.
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
+        const VkDescriptorSet table = vkCtx_->textureTable().set();
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
-            0, 1, &shadowParams_.set, 0, nullptr);
+            0, 1, &table, 0, nullptr);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
             1, 1, &casterSet, 0, nullptr);
+        // The draws, a call per run of one geometry page.
+        const auto announce = [&](uint32_t first) {
+            const M2ShadowPush push{.lightSpace = lightSpaceMatrix, .call = glm::uvec4(first, 0, 0, 0),
+                                    .windPhases = wind.phases, .windDirLean = wind.dirLean};
+            vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(M2ShadowPush),
+                               &push);
+        };
+        DrawRuns<M2ShadowDraw, decltype(announce)> runs(
+            cmd, shadowDrawCommands_[frameIdx].buffer, shadowDrawCommands_[frameIdx].info.pMappedData,
+            shadowDrawRecords_[frameIdx].info.pMappedData, shadowDrawCount_, kMaxShadowDraws, maxDrawsPerCall_,
+            announce);
+        ::VkBuffer currentPage = VK_NULL_HANDLE;
+        bool roomFull = false;
 
         const auto& casters = shadowCasters_[foliagePass ? 1 : 0];
         for (std::size_t g = 0; g < casters.size();) {
@@ -3117,9 +3089,8 @@ void M2Renderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& light
                     .slot = caster.slot, .refHeight = sway.refHeight, .amplitude = sway.amp * fade};
             }
 
-            geometry_.bind(cmd, model.geometry);
-
             for (const auto& batch : model.batches) {
+                if (roomFull) break;
                 // A layer that fades in and out is drawn blended, and blended
                 // layers cast no shadow.
                 if (batch.submeshLevel > 0 || batch.blendedByOpacity || !batch.shaderDrawn ||
@@ -3128,13 +3099,13 @@ void M2Renderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& light
                 const bool alphaCutout = batch.blendMode == 1;
                 // A leaf card with no texture is a shadow with no caster.
                 //
-                // The else below binds the white set, whose alpha test passes
-                // everywhere, so a batch that arrived without its texture casts
-                // the shadow of a solid quad - while the main pass skips that
-                // same batch for want of a material set. The result is a black
-                // rectangle on the ground under a tree that looks fine, coming
-                // and going as the texture cache lets the sheet back in.
-                if (alphaCutout && !batch.texture) {
+                // Drawn without one, its alpha test would pass everywhere, so
+                // a batch that arrived without its texture would cast the
+                // shadow of a solid quad - while the main pass skips that same
+                // batch. The result is a black rectangle on the ground under a
+                // tree that looks fine, coming and going as the texture cache
+                // lets the sheet back in.
+                if (alphaCutout && (!batch.texture || batch.textureHandle == kNoTextureHandle)) {
                     if (!warnedShadowNoTexture_) {
                         warnedShadowNoTexture_ = true;
                         LOG_WARNING("Shadow pass: a foliage batch of ", model.name,
@@ -3143,49 +3114,40 @@ void M2Renderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& light
                     }
                     continue;
                 }
-                // Once per batch, where it used to be once per batch per
-                // instance: the texture is the batch's, and every instance of
-                // this model shares it.
-                if (alphaCutout && batch.texture) {
-                    VkDescriptorSet texSet = shadowTexSet(batch.texture);
-                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        shadowPipelineLayout_, 0, 1, &texSet, 0, nullptr);
-                } else {
-                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        shadowPipelineLayout_, 0, 1, &shadowParams_.set, 0, nullptr);
+                if (model.geometry.vertices != currentPage) {
+                    runs.flush();
+                    geometry_.bind(cmd, model.geometry);
+                    currentPage = model.geometry.vertices;
                 }
-
-                const M2ShadowPush push{
-                    .lightSpace = lightSpaceMatrix,
-                    .flags = glm::ivec4(alphaCutout ? 1 : 0, alphaCutout ? 1 : 0, windBent ? 1 : 0,
-                                        batch.drawState.alphaTest == 4 ? 224 : 0),
-                    .windPhases = wind.phases,
-                    .windDirLean = wind.dirLean};
-                vkCmdPushConstants(cmd, shadowPipelineLayout_,
-                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   0, sizeof(M2ShadowPush), &push);
-                vkCmdDrawIndexed(cmd, batch.indexCount, count, model.geometry.firstIndex + batch.indexStart,
-                                 model.geometry.baseVertex, firstCaster);
+                // The texture through its own sampler, as the cache placed it.
+                const M2ShadowDraw draw{
+                    .texture = alphaCutout ? batch.textureHandle : kNoTextureHandle,
+                    .flags = (alphaCutout ? 3u : 0u) | (windBent ? 4u : 0u),
+                    .alphaRef = batch.drawState.alphaTest == 4 ? 224u : 0u};
+                if (!runs.add({.indexCount = batch.indexCount, .instanceCount = count,
+                               .firstIndex = model.geometry.firstIndex + batch.indexStart,
+                               .vertexOffset = model.geometry.baseVertex, .firstInstance = firstCaster},
+                              draw)) {
+                    static core::LogBudget budget(4, "M2 shadow draw room full");
+                    if (budget.take())
+                        LOG_WARNING("Shadow pass: this frame's maps filled their ", kMaxShadowDraws,
+                                    " draws - the doodads after them cast no shadow this frame");
+                    roomFull = true;
+                }
             }
             castersDrawn += count;
             g = groupEnd;
         }
+        runs.flush();
     }
 }
 
 void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, const WindGpu& wind,
                               const glm::vec3& /*shadowCenter*/, float shadowRadius, bool resetDescriptors,
                               bool reuseCull) {
-    if (!shadowPipeline_ || !shadowParams_.set) return;
+    if (!shadowPipeline_) return;
     if (recording_->depth.empty() && recording_->solarDepth.empty() && recording_->strikeDepth.empty()) return;
-
-    // Reset this frame slot's texture descriptor pool (safe: fence was waited on in beginFrame)
     const uint32_t frameIdx = vkCtx_->getCurrentFrame();
-    if (resetDescriptors && shadowTexPool_[frameIdx]) {
-        vkCtx_->resetDescriptorPool(shadowTexPool_[frameIdx]);
-    }
-    // Reuse persistent map - pool reset already invalidated the sets.
-    if (resetDescriptors) shadowTexSetCache_.clear();
 
     // How many casters each pass drew, so a shadow that comes and goes can say
     // whether its caster was culled or its texture was missing.
@@ -3199,7 +3161,11 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         CpuStage cullStage(vkCtx_->cpuStages(), stageGroup, "cull");
         cullShadowCasters(lightSpaceMatrix, shadowRadius, resetDescriptors, reuseCull);
     }
-    if (resetDescriptors) shadowInstanceCount_ = 0;
+    // The sun's map is a frame's first: the casters and draws start again.
+    if (resetDescriptors) {
+        shadowInstanceCount_ = 0;
+        shadowDrawCount_ = 0;
+    }
     // Where the casters stand is in the instance table; without it (no
     // memory, logged by ensureSlotTables) the doodads cast no shadow.
     if (!shadowInstanceMapped_[frameIdx] || !shadowInstanceSet_[frameIdx] || !shadowSetReady(frameIdx)) return;

@@ -1,4 +1,5 @@
 #version 450
+#extension GL_ARB_shader_draw_parameters : require
 
 // The doodads' side of the shadow maps, drawn instanced: one draw a batch of
 // a model, every caster of that model an instance, its slot and its bend in
@@ -15,10 +16,17 @@
 // with the model's numbers from m2_sway.hpp and the wind's from WindField.
 layout(push_constant) uniform Push {
     mat4 lightSpace;        // the map's: the sun's or the units'
-    ivec4 flags;            // x useTexture, y alphaTest, z bend in the wind; read by shadow.frag
+    uvec4 call;             // x the call's first draw record
     vec4 windPhases;        // x trunk, y branch, z leaf; w the branch and leaf scale
     vec4 windDirLean;       // xy toward (world), z lean, w swing: m2.vert's PerFrame one
 } push;
+
+// A batch's draw, one of an indirect call's (M2Renderer::M2ShadowDraw): x
+// its texture's TextureTable handle, y bit 0 sample it, bit 1 alpha-test it,
+// bit 2 bend in the wind, z where the alpha test cuts in 255ths (0: a half).
+layout(set = 1, binding = 2) readonly buffer ShadowDraws {
+    uvec4 shadowDraws[];
+};
 
 struct ShadowInstance {
     uint slot;              // its row in InstanceStatics
@@ -45,13 +53,15 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec2 aTexCoord;
 
 layout(location = 0) out vec2 TexCoord;
+layout(location = 1) flat out uvec4 vDraw;
 
 void main() {
+    vDraw = shadowDraws[push.call.x + uint(gl_DrawIDARB)];
     ShadowInstance caster = instances[gl_InstanceIndex];
     mat4 model = instanceStatics[caster.slot].model;
     vec4 pos = vec4(aPos, 1.0);
 
-    if (push.flags.z != 0) {
+    if ((vDraw.y & 4u) != 0u) {
         float heightFactor = clamp(pos.z / max(caster.refHeight, 0.01), 0.0, 1.0);
         heightFactor *= heightFactor;   // quadratic - the base stays planted
         // Turned into the model's own space as m2.vert turns it, since the

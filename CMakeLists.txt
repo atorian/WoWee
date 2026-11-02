@@ -2571,6 +2571,11 @@ if(WOWEE_BUILD_TESTS)
                         --scene-mutations --object ${object})
             set_tests_properties(scene_frame_scene_${object} PROPERTIES SKIP_RETURN_CODE 77)
         endforeach()
+        # A tree's shadow is cut by its leaves.
+        wowee_add_gpu_test(scene_m2_foliage_shadow
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_m2_foliage_shadow.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/m2-foliage-shadow)
+        set_tests_properties(scene_m2_foliage_shadow PROPERTIES SKIP_RETURN_CODE 77)
         # Models whose geometry shares a page are each drawn as themselves.
         foreach(object m2 character)
             wowee_add_gpu_test(scene_shared_geometry_${object}

@@ -981,12 +981,8 @@ private:
     // Shadow rendering (Phase 7)
     VkPipeline shadowPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout shadowPipelineLayout_ = VK_NULL_HANDLE;
-    /// The set the shadow pass binds. Five separate members before,
-    /// built and torn down here and in three other renderers.
-    ShadowParamsSet shadowParams_;
-    // Per-frame pools for foliage shadow texture descriptor sets (one per frame-in-flight)
+    /// Frame slots of the shadow casters' buffers.
     static constexpr uint32_t kShadowTexPoolFrames = 2;
-    VkDescriptorPool shadowTexPool_[kShadowTexPoolFrames] = {};
 
     // The shadow passes draw instanced: a batch of a model is one draw, its
     // casters its instances (m2_shadow.vert.glsl). They were a draw and a push
@@ -994,16 +990,25 @@ private:
     // ms in Dalaran.
     struct M2ShadowPush {
         glm::mat4 lightSpace;          // the map's, the sun's or the units'
-        /// x: sample the texture. y: alpha-test it. z: bend in the wind.
-        /// w: where the alpha test cuts, in 255ths; 0 is a half. At the
-        /// offset shadow.frag reads them from, as ShadowPush has them.
-        glm::ivec4 flags{0};
+        /// x: the call's first draw record (M2ShadowDraw), which its draws
+        /// read by gl_DrawID.
+        glm::uvec4 call{0};
         /// x trunk, y branch, z leaf phase; w the branch and leaf scale.
         /// The same for every caster.
         glm::vec4 windPhases{0.0f};
         /// xy toward (world), z lean, w swing: the main pass's, which the
         /// shader turns into each caster's own space as m2.vert does.
         glm::vec4 windDirLean{0.0f};
+    };
+    /// One batch's draw into a shadow map, as m2_shadow.vert.glsl reads it.
+    struct M2ShadowDraw {
+        TextureHandle texture = kNoTextureHandle;
+        /// Bit 0 sample the texture, bit 1 alpha-test it, bit 2 bend in the
+        /// wind.
+        uint32_t flags = 0;
+        /// Where the alpha test cuts, in 255ths; 0 is a half.
+        uint32_t alphaRef = 0;
+        uint32_t pad = 0;
     };
     /// One caster, as m2_shadow.vert.glsl reads it (std430). Where it stands
     /// is its slot's row in the instance table.
@@ -1028,6 +1033,14 @@ private:
     /// How many of this frame's slots the maps drawn so far have used.
     uint32_t shadowInstanceCount_ = 0;
     bool shadowInstancesFullSaid_ = false;
+    /// The maps' draws, a record each (binding 2) and an indirect command
+    /// each, in runs of one geometry page; every map of a frame writes
+    /// after the ones before it. A batch of a model is a draw, so a frame
+    /// has room for several a caster.
+    static constexpr uint32_t kMaxShadowDraws = 4 * kMaxShadowInstances;
+    AllocatedBuffer shadowDrawRecords_[kShadowTexPoolFrames];
+    AllocatedBuffer shadowDrawCommands_[kShadowTexPoolFrames];
+    uint32_t shadowDrawCount_ = 0;
     bool createShadowInstanceBuffers();
 
     // Particle pipelines
@@ -1587,8 +1600,6 @@ private:
     [[nodiscard]] const char* opaqueBatchSkip(const M2ModelGPU& model, size_t batchIndex, uint16_t lod,
                                               bool onlyBatchModel, bool suppressStars) const;
 
-    // Shadow-pass texture descriptor cache (reused each frame, cleared via pool reset)
-    std::unordered_map<VkImageView, VkDescriptorSet> shadowTexSetCache_;
     /// The casters this frame, grouped by model: [0] solid, [1] foliage.
     ///
     /// The shadow pass used to walk every instance in the world twice - once
@@ -1629,8 +1640,6 @@ private:
     /// Adds the casters it drew to `castersDrawn`.
     void recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, const WindGpu& wind,
                              bool foliagePass, uint32_t& castersDrawn);
-    /// The shadow pass's set binding this texture, made once a frame.
-    VkDescriptorSet shadowTexSet(VkTexture* tex);
     /// Set by the sun's pass once it has culled into shadowCasters_, and
     /// consumed by the contact pass that follows it in the same frame.
 
