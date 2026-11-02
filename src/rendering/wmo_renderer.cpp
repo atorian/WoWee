@@ -91,7 +91,7 @@ using collision::transformAABB;
 // A group has at most 65536 vertices (16-bit indices); a page holds dozens.
 WMORenderer::WMORenderer()
     : geometry_({.what = "WMO", .vertexStride = sizeof(WMOVertex), .indexType = VK_INDEX_TYPE_UINT16,
-                 .pageVertices = 1u << 18, .pageIndices = 1u << 20}) {}
+                 .pageVertices = 1u << 18u, .pageIndices = 1u << 20u}) {}
 
 WMORenderer::~WMORenderer() {
     shutdown();

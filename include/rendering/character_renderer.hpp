@@ -1,5 +1,6 @@
 #pragma once
 #include "rendering/frame_pool.hpp"
+#include "rendering/geometry_pool.hpp"
 #include <span>
 
 #include "rendering/normal_map_builder.hpp"
@@ -395,10 +396,9 @@ private:
     bool preparedTexturesOnly_ = false;
     // GPU representation of M2 model
     struct M2ModelGPU {
-        VkBuffer vertexBuffer = VK_NULL_HANDLE;
-        VmaAllocation vertexAlloc = VK_NULL_HANDLE;
-        VkBuffer indexBuffer = VK_NULL_HANDLE;
-        VmaAllocation indexAlloc = VK_NULL_HANDLE;
+        /// Where its vertices and indices live (geometry_); unplaced for a
+        /// model of emitters alone, or one the pool had no room for.
+        GeometryPool::Range geometry;
         uint32_t indexCount = 0;
         uint32_t vertexCount = 0;
 
@@ -598,7 +598,9 @@ private:
     [[nodiscard]] const CharacterInstance& drawnAs(const CharacterInstance& instance) const;
     /// Drawn at all: neither it nor, for an attachment, its body is hidden.
     [[nodiscard]] bool isShown(const CharacterInstance& instance) const;
-    void destroyModelGPU(std::shared_ptr<M2ModelGPU> gpuModel, bool defer = false);
+    /// Its geometry back to the pool once no frame in flight draws it; the
+    /// copies setModelTexture made share it.
+    void destroyModelGPU(const M2ModelGPU& gpuModel);
 
     // Attachment point lookup helper - shared by attachWeapon() and getAttachmentTransform()
     bool findAttachmentBone(uint32_t modelId, uint32_t attachmentId,
@@ -763,6 +765,8 @@ private:
     /// The set the shadow pass binds. Five separate members before,
     /// built and torn down here and in three other renderers.
     ShadowParamsSet shadowParams_;
+    /// Every model's vertices and indices, in shared pages.
+    GeometryPool geometry_;
 
     /// A batch's texture and the M2Texture wrap flags of the slot it came from
     /// (bit 0 repeats U, bit 1 repeats V). The wrap belongs to the slot, not

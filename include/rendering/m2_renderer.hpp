@@ -1173,7 +1173,7 @@ private:
     /// (InstanceStaticGPU). They grow together.
     /// Every model's vertices (18 floats) and 16-bit indices, in pages.
     GeometryPool geometry_{{.what = "M2", .vertexStride = 18 * sizeof(float), .indexType = VK_INDEX_TYPE_UINT16,
-                            .pageVertices = 1u << 19, .pageIndices = 1u << 21}};
+                            .pageVertices = 1u << 19u, .pageIndices = 1u << 21u}};
     GpuSlotTable cullTable_{sizeof(CullRowGPU), "M2 cull table"};
     GpuSlotTable instanceTable_{sizeof(InstanceStaticGPU), "M2 instance table"};
     /// The table version (GpuSlotTable::version) each slot's sets name, so

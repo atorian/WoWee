@@ -2571,6 +2571,14 @@ if(WOWEE_BUILD_TESTS)
                         --scene-mutations --object ${object})
             set_tests_properties(scene_frame_scene_${object} PROPERTIES SKIP_RETURN_CODE 77)
         endforeach()
+        # Models whose geometry shares a page are each drawn as themselves.
+        foreach(object m2 character)
+            wowee_add_gpu_test(scene_shared_geometry_${object}
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_shared_geometry.py
+                        $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/shared-geometry-${object}
+                        --object ${object})
+            set_tests_properties(scene_shared_geometry_${object} PROPERTIES SKIP_RETURN_CODE 77)
+        endforeach()
         wowee_add_gpu_test(scene_frame_scene_water_msaa
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/frame-scene-water-msaa

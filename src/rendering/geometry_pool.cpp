@@ -11,13 +11,15 @@ namespace rendering {
 GeometryPool::~GeometryPool() { destroy(); }
 
 void GeometryPool::destroy() {
-    if (!context_) return;
-    VmaAllocator allocator = context_->getAllocator();
-    for (auto& page : pages_) {
-        if (!page) continue;
-        destroyBuffer(allocator, page->vertices);
-        destroyBuffer(allocator, page->indices);
-    }
+    if (!context_ || pages_.empty()) return;
+    // A frame in flight may still draw from them.
+    context_->deferAfterAllFrameFences([allocator = context_->getAllocator(), pages = std::move(pages_)] {
+        for (const auto& page : pages) {
+            if (!page) continue;
+            destroyBuffer(allocator, page->vertices);
+            destroyBuffer(allocator, page->indices);
+        }
+    });
     pages_.clear();
     exhausted_ = false;
 }

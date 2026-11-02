@@ -324,8 +324,10 @@ struct CharVertexGPU {
     glm::vec2 texCoords2;    // 8 bytes,  offset 56
 };  // 64 bytes total
 
-CharacterRenderer::CharacterRenderer() {
-}
+// A model has at most 65536 vertices (16-bit indices); a page holds dozens.
+CharacterRenderer::CharacterRenderer()
+    : geometry_({.what = "Characters", .vertexStride = sizeof(CharVertexGPU), .indexType = VK_INDEX_TYPE_UINT16,
+                 .pageVertices = 1u << 18u, .pageIndices = 1u << 20u}) {}
 
 CharacterRenderer::~CharacterRenderer() {
     shutdown();
@@ -462,6 +464,7 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
     core::Logger::getInstance().info("Initializing character renderer (Vulkan)...");
 
     vkCtx_ = ctx;
+    if (vkCtx_) geometry_.initialize(*vkCtx_);
     assetManager = am;
     perFrameLayout_ = perFrameLayout;
     renderPassOverride_ = renderPassOverride;
@@ -641,7 +644,7 @@ void CharacterRenderer::shutdown() {
 
     // Clean up GPU resources for models
     for (auto& pair : models) {
-        destroyModelGPU(pair.second, /*defer=*/true);
+        destroyModelGPU(*pair.second);
     }
 
     failedTextureRetryAt_.clear();
@@ -709,6 +712,7 @@ void CharacterRenderer::shutdown() {
     for (auto& pool : shadowTexPool_) {
         if (pool) { retired.destroy(pool); pool = VK_NULL_HANDLE; }
     }
+    geometry_.destroy();
 
     vkCtx_ = nullptr;
 }
@@ -721,7 +725,7 @@ void CharacterRenderer::clear() {
 
     // Destroy GPU resources for all models
     for (auto& pair : models) {
-        destroyModelGPU(pair.second, /*defer=*/true);
+        destroyModelGPU(*pair.second);
     }
 
     clearInstances();
@@ -753,15 +757,9 @@ void CharacterRenderer::createFallbackTextures() {
                                      false, VK_SAMPLER_ADDRESS_MODE_REPEAT);
 }
 
-void CharacterRenderer::destroyModelGPU(std::shared_ptr<M2ModelGPU> model, bool defer) {
+void CharacterRenderer::destroyModelGPU(const M2ModelGPU& model) {
     if (!vkCtx_) return;
-    const VmaAllocator alloc = vkCtx_->getAllocator();
-    auto release = [model = std::move(model), alloc] {
-        if (model->vertexBuffer) gpuDestroyBuffer(alloc, model->vertexBuffer, model->vertexAlloc);
-        if (model->indexBuffer) gpuDestroyBuffer(alloc, model->indexBuffer, model->indexAlloc);
-    };
-    if (defer) vkCtx_->deferAfterAllFrameFences(std::move(release));
-    else release();
+    geometry_.release(model.geometry);
 }
 
 size_t CharacterRenderer::pendingNormalMapJobs() const {
@@ -1742,7 +1740,7 @@ bool CharacterRenderer::loadModel(pipeline::M2Model&& parsed, uint32_t id) {
     auto existingIt = models.find(id);
     if (existingIt != models.end()) {
         core::Logger::getInstance().warning("Model ID ", id, " already loaded, replacing");
-        destroyModelGPU(existingIt->second, /*defer=*/true);
+        destroyModelGPU(*existingIt->second);
         models.erase(existingIt);
     }
 
@@ -1799,6 +1797,7 @@ bool CharacterRenderer::loadModel(pipeline::M2Model&& parsed, uint32_t id) {
 
     // Batch all GPU uploads (VB, IB, textures) into a single command buffer
     // submission with one fence wait, instead of one fence wait per upload.
+    geometry_.releaseEmptyPages();
     vkCtx_->beginUploadBatch();
 
     // Setup GPU buffers
@@ -1955,22 +1954,11 @@ void CharacterRenderer::setupModelBuffers(M2ModelGPU& gpuModel) {
         gpuVerts[i].tangent = glm::vec4(tOrtho, w);
     }
 
-    // Upload vertex buffer (CharVertexGPU, 64 bytes per vertex)
-    auto vb = uploadBuffer(*vkCtx_,
-        gpuVerts.data(),
-        gpuVerts.size() * sizeof(CharVertexGPU),
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-    gpuModel.vertexBuffer = vb.buffer;
-    gpuModel.vertexAlloc = vb.allocation;
+    // Into the pool (CharVertexGPU, 64 bytes per vertex); unplaced, said by
+    // the pool, the model is not drawn.
+    gpuModel.geometry = geometry_.place(gpuVerts.data(), static_cast<uint32_t>(vertCount), model.indices.data(),
+                                        static_cast<uint32_t>(idxCount));
     gpuModel.vertexCount = static_cast<uint32_t>(vertCount);
-
-    // Upload index buffer
-    auto ib = uploadBuffer(*vkCtx_,
-        model.indices.data(),
-        idxCount * sizeof(uint16_t),
-        VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-    gpuModel.indexBuffer = ib.buffer;
-    gpuModel.indexAlloc = ib.allocation;
     gpuModel.indexCount = static_cast<uint32_t>(idxCount);
 }
 
@@ -2634,7 +2622,7 @@ std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const
     frame->normalStrength = normalMapStrength_;
     frameLights_ = &lights;
     for (const auto& [id, inst] : scene_->instances) {
-        if (!isShown(inst) || !inst.cachedModel || !inst.cachedModel->vertexBuffer) continue;
+        if (!isShown(inst) || !inst.cachedModel || !inst.cachedModel->geometry.placed()) continue;
         const uint32_t pose = static_cast<uint32_t>(frame->poses.size());
         frame->poseById.emplace_back(id, pose);
         const size_t count = std::min(inst.boneMatrices.size(), static_cast<size_t>(MAX_BONES));
@@ -2699,7 +2687,7 @@ void CharacterRenderer::cullCharacters(const Camera& camera, Part part,
         const auto& gpuModel = *instance.cachedModel;
 
         // Skip models without GPU buffers
-        if (!gpuModel.vertexBuffer) continue;
+        if (!gpuModel.geometry.placed()) continue;
 
         // Skip fully transparent instances. An aura's opacity caps the
         // instance's own rather than multiplying it, so a stealthed unit
@@ -2878,10 +2866,7 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 pipelineLayout_, 2, 1, &boneSet, 0, nullptr);
 
-        // Bind vertex and index buffers
-        VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &gpuModel.vertexBuffer, &offset);
-        vkCmdBindIndexBuffer(cmd, gpuModel.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+        geometry_.bind(cmd, gpuModel.geometry);
 
         // A model with no batches draws nothing, as in the client: an
         // invisible stalker's skin is exactly that. It used to be drawn
@@ -3298,7 +3283,8 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
                 // armor pieces (chest/legs/gloves) that share identical depth.
                 vkCmdSetDepthBias(cmd, static_cast<float>(batch.materialLayer) * 0.5f, 0.0f, 0.0f);
 
-                vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
+                vkCmdDrawIndexed(cmd, batch.indexCount, 1, gpuModel.geometry.firstIndex + batch.indexStart,
+                                 gpuModel.geometry.baseVertex, 0);
                 ++draws;
             }
             } // end pass loop
@@ -3494,9 +3480,7 @@ void CharacterRenderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4
         vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
                            0, sizeof(ShadowPush), &push);
 
-        VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &gpuModel.vertexBuffer, &offset);
-        vkCmdBindIndexBuffer(cmd, gpuModel.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+        geometry_.bind(cmd, gpuModel.geometry);
 
         const CharacterDress& dress = *inst.dress;
         bool applyGeosetFilter = !dress.activeGeosets.empty();
@@ -3530,7 +3514,8 @@ void CharacterRenderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4
                 currentTexSet = texSet;
             }
 
-            vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
+            vkCmdDrawIndexed(cmd, batch.indexCount, 1, gpuModel.geometry.firstIndex + batch.indexStart,
+                             gpuModel.geometry.baseVertex, 0);
         }
     }
 }
@@ -4390,7 +4375,7 @@ void CharacterRenderer::unloadModelIfUnused(uint32_t modelId) {
     for (const auto& p : scene_->instances) {
         if (p.second.modelId == modelId) return;
     }
-    destroyModelGPU(modelIt->second, /*defer=*/true);
+    destroyModelGPU(*modelIt->second);
     models.erase(modelIt);
 }
 

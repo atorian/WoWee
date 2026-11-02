@@ -64,7 +64,7 @@ public:
     GeometryPool& operator=(const GeometryPool&) = delete;
 
     void initialize(VkContext& context) { context_ = &context; }
-    /// Every page freed now; the device must be idle and nothing drawn.
+    /// Every page let go, freed once no frame in flight can draw from it.
     void destroy();
 
     /// The mesh copied into a page, inside an upload batch. An unplaced
