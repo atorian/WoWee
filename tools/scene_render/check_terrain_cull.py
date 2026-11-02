@@ -3,10 +3,10 @@
 
 The ground's draws are made on the GPU (terrain_cull.comp.glsl): which chunks
 the view sees, the level each is drawn at, and a skirt on each edge whose
-neighbour is drawn at another level. Goldshire's ground, looked over from
-above so that the near chunks are drawn at full detail and the far ones at
-the coarsest, against the same frame with every chunk in reach drawn and at
-full detail (WOWEE_TERRAIN_FRUSTUM_CULL=0, WOWEE_TERRAIN_LOD=0):
+neighbour is drawn at another level. Tanaris's ground alone, looked over
+from above so that the near chunks are drawn at full detail and the far ones
+at the coarsest, against the same frame with every chunk in reach drawn and
+at full detail (WOWEE_TERRAIN_FRUSTUM_CULL=0, WOWEE_TERRAIN_LOD=0):
 
 - a coarser level strays from the full mesh by under a pixel, so few pixels
   differ by much;
@@ -27,8 +27,8 @@ FRAMES = 12
 # drawn a little differently.
 FAR = 24
 # Coarser levels move the ground by under a pixel: along the far ridges a
-# few such pixels change by much - 17 here (0.007%). With the skirts left
-# out the cracks between levels make 95 (0.04%); a chunk left out, many more.
+# few such pixels change by much - 11 here (0.005%). With the skirts left
+# out the cracks between levels make 80 (0.035%); a chunk left out, many more.
 HOLES = 0.0002
 
 
@@ -54,6 +54,10 @@ def render(binary, scratch, name, everything=False):
     env["WOWEE_RESOURCE_ROOT"] = str(binary.parent)
     for key in ("WOWEE_TERRAIN_FRUSTUM_CULL", "WOWEE_TERRAIN_LOD"):
         env.pop(key, None)
+    # The ground alone: Gadgetzan's doodads stand below the camera, and what
+    # their emitters have thrown by the kept frame differs from run to run.
+    env["WOWEE_SKIP_M2"] = "1"
+    env["WOWEE_SKIP_WMO"] = "1"
     if everything:
         env["WOWEE_TERRAIN_FRUSTUM_CULL"] = "0"
         env["WOWEE_TERRAIN_LOD"] = "0"
