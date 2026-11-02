@@ -22,6 +22,8 @@ public:
     void shutdown();
     void setMap(pipeline::AssetManager* assets,const std::string& map);
     void update();
+    /// update(), after waiting for the load to finish or fail.
+    void finishLoading();
     bool hasSource() const { return source_; }
     bool ready() const { return bool(gpu_); }
     Frame extract(const Camera& camera,float distance,const pipeline::TerrainCoverage& coverage) const;

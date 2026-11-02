@@ -852,6 +852,11 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     // scene twice drew two different frames.
     const int frames = std::max(1, scene.value("frames", 30));
     constexpr float kStep = 1.0f / 30.0f;
+    // The map's distant terrain loads on a job of its own whenever the world
+    // streams, terrain or not, and is drawn from the frame it is in: whether
+    // Dalaran's lamppost had the mountains of Northrend behind it in the kept
+    // frame depended on how fast that job ran. In before the first frame.
+    renderer.finishDistantTerrain();
     const auto* terrain = renderer.getTerrainManager();
     const bool waitTerrain = scene.value("terrain", false) && terrain;
     if (waitTerrain) {
@@ -877,7 +882,7 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
             const int loaded = terrain->getLoadedTileCount();
             const uint64_t models = (uint64_t{renderer.getM2Renderer()->getInstanceCount()} << 32) |
                                     renderer.getWMORenderer()->getInstanceCount();
-            settled = terrain->getRemainingTileCount() == 0 && (!scene.value("distantTerrain",false) || renderer.extractFrameInputs().distantTerrainReady) && loaded == lastLoaded && models == lastModels ? settled + 1 : 0;
+            settled = terrain->getRemainingTileCount() == 0 && loaded == lastLoaded && models == lastModels ? settled + 1 : 0;
             lastLoaded = loaded;
             lastModels = models;
         }

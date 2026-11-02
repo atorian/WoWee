@@ -39,7 +39,6 @@
   "lens": false,
   "terrain": true,
   "terrainRadius": 3,
-  "distantTerrain": true,
   "settleFrames": 6000,
   "volumetricDensity": 1,
   "clouds": false,

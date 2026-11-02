@@ -2545,6 +2545,11 @@ if(WOWEE_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_m2_moved.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/m2-moved)
         set_tests_properties(scene_m2_moved PROPERTIES SKIP_RETURN_CODE 77)
+        # A scene draws the same frame however long the world takes to stream in.
+        wowee_add_gpu_test(scene_streamed_world_settled
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_streamed_world_settled.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/streamed-world-settled)
+        set_tests_properties(scene_streamed_world_settled PROPERTIES SKIP_RETURN_CODE 77)
         foreach(object m2 wmo character terrain water)
             wowee_add_gpu_test(scene_frame_scene_${object}
                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py

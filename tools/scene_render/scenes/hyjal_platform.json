@@ -10,7 +10,6 @@
   ],
   "terrain": true,
   "terrainRadius": 5,
-  "distantTerrain": true,
   "settleFrames": 6000,
   "camera": {
     "offset": [

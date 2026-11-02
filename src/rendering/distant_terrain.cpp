@@ -11,7 +11,10 @@
 #include "pipeline/minimap_tile_index.hpp"
 #include "core/logger.hpp"
 #include "core/profiler.hpp"
+#include <chrono>
 #include <cstddef>
+#include <cstdlib>
+#include <thread>
 namespace wowee::rendering {
 struct DistantTerrain::Prepared {
     struct Tile { int x,y; uint32_t vertex; std::array<pipeline::DistantMesh::Range,4> lods; glm::vec3 min,max; };
@@ -64,6 +67,12 @@ void DistantTerrain::setMap(pipeline::AssetManager* assets,const std::string& ma
     }
     source_=true;jobs_=std::make_unique<core::JobGroup>();
     pending_=jobs_->submit([assets,map,path](const core::JobGroup::Token& token)->std::shared_ptr<Prepared> {
+        // WOWEE_DISTANT_TERRAIN_DELAY_MS=<n> holds the load back that long, as
+        // a slow disk would: a fixture's frames must not depend on it.
+        if(const char* delay=std::getenv("WOWEE_DISTANT_TERRAIN_DELAY_MS")) {
+            LOG_WARNING("DistantTerrain: ",path," held back ",delay," ms (WOWEE_DISTANT_TERRAIN_DELAY_MS)");
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::strtol(delay,nullptr,10)));
+        }
         auto raw=assets->readFileShared(path);
         if(!raw) { LOG_ERROR("DistantTerrain: cannot read ",path," - distant terrain unavailable");return {}; }
         auto wdl=pipeline::readDistantMap(*raw);
@@ -107,6 +116,10 @@ void DistantTerrain::setMap(pipeline::AssetManager* assets,const std::string& ma
         LOG_INFO("DistantTerrain: ",path," prepared ",result->tiles.size()," coarse tiles, ",result->vertices.size()," vertices");
         return result;
     });
+}
+void DistantTerrain::finishLoading() {
+    if(pending_.valid())pending_.wait();
+    update();
 }
 void DistantTerrain::update() {
     if(!pending_.valid() || pending_.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return;

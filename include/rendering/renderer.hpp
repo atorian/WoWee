@@ -154,6 +154,11 @@ public:
      */
     bool loadTestTerrain(pipeline::AssetManager* assetManager, const std::string& adtPath);
 
+    /// The map's distant terrain resident, or known not to be had: blocks on
+    /// its load. For a fixture whose frames must not depend on how fast it
+    /// loads; the client draws it from whenever it arrives.
+    void finishDistantTerrain();
+
     /**
      * Initialize all sub-renderers (WMO, M2, Character, terrain, water, minimap, etc.)
      * without loading any ADT tile.  Used by WMO-only maps (dungeons/raids/BGs).
@@ -389,6 +394,9 @@ private:
     VkRenderPass blendedAfterWaterPass_ = VK_NULL_HANDLE;
 
     void runDeferredWorldInitStep(float deltaTime);
+    /// The distant terrain following the streamed map: started for a new
+    /// map, made resident once loaded - waited for when `waitForLoad`.
+    void syncDistantTerrain(bool waitForLoad);
 
     RenderSurface* surface_ = nullptr;
     std::unique_ptr<Camera> camera;

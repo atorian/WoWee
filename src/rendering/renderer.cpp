@@ -2478,12 +2478,7 @@ void Renderer::update(float deltaTime) {
     auto updateStart = std::chrono::steady_clock::now();
     globalTime += deltaTime;
     runDeferredWorldInitStep(deltaTime);
-    if(distantTerrain_ && cachedAssetManager && terrainManager && terrainManager->isStreamingEnabled()) {
-        const bool before=distantTerrain_->hasSource();
-        distantTerrain_->setMap(cachedAssetManager,terrainManager->getMapName());
-        distantTerrain_->update();
-        if(before!=distantTerrain_->hasSource())setViewDistance(viewDistance_);
-    }
+    syncDistantTerrain(false);
 
     updateGlares(deltaTime);
 
@@ -2737,6 +2732,19 @@ void Renderer::update(float deltaTime) {
             LOG_WARNING(line.str());
         }
     }
+}
+
+void Renderer::finishDistantTerrain() {
+    syncDistantTerrain(true);
+}
+
+void Renderer::syncDistantTerrain(bool waitForLoad) {
+    if (!distantTerrain_ || !cachedAssetManager || !terrainManager || !terrainManager->isStreamingEnabled()) return;
+    const bool before = distantTerrain_->hasSource();
+    distantTerrain_->setMap(cachedAssetManager, terrainManager->getMapName());
+    if (waitForLoad) distantTerrain_->finishLoading();
+    else distantTerrain_->update();
+    if (before != distantTerrain_->hasSource()) setViewDistance(viewDistance_);
 }
 
 void Renderer::runDeferredWorldInitStep(float deltaTime) {
