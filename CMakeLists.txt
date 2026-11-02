@@ -2589,6 +2589,16 @@ if(WOWEE_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_character_skinning.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/character-skinning)
         set_tests_properties(scene_character_skinning PROPERTIES SKIP_RETURN_CODE 77)
+        # A creature loaded after many others of one model is still posed.
+        wowee_add_gpu_test(scene_shared_skeletons
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_shared_skeletons.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/shared-skeletons)
+        set_tests_properties(scene_shared_skeletons PROPERTIES SKIP_RETURN_CODE 77)
+        # Two creatures of one model are each drawn in their own display's skin.
+        wowee_add_gpu_test(scene_display_skins
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_display_skins.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/display-skins)
+        set_tests_properties(scene_display_skins PROPERTIES SKIP_RETURN_CODE 77)
         # A tree's shadow is cut by its leaves.
         wowee_add_gpu_test(scene_m2_foliage_shadow
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_m2_foliage_shadow.py

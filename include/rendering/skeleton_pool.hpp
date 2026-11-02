@@ -48,6 +48,14 @@
 // size. A blob's words come back after the frames that may read them, handed
 // back by the thread that retires frames and freed on the main thread before
 // it next places one.
+//
+// A blob is held once however many models pack to it. The client loads a
+// model once per creature display, and the displays that dress one race's
+// model differently - every humanoid NPC - pack the same skeleton: held
+// apart, Dalaran's took all 64 pages, a gigabyte, and every model loaded
+// after that stood in its bind pose. A blob is known by its words alone, so
+// models from one file share it whatever the display, path or name they were
+// loaded under, and it goes when the last of them is let go.
 
 #include "rendering/range_allocator.hpp"
 #include "rendering/vk_utils.hpp"
@@ -59,6 +67,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -141,7 +150,8 @@ public:
     /// way. None placed, said, when there is nowhere for them: it is drawn
     /// without its particles and ribbons.
     [[nodiscard]] Emitters placeEmitters(const pipeline::M2Model& model, const char* name);
-    /// Its words back once no frame in flight can read them.
+    /// Let go by one model; its words come back once the last model holding
+    /// them has let go and no frame in flight can read them.
     void release(const Skeleton& skeleton);
     void release(const Emitters& emitters);
 
@@ -172,6 +182,31 @@ private:
     std::optional<std::pair<int32_t, uint32_t>> placeWords(const std::vector<uint32_t>& blob, const char* name,
                                                           const char* without);
     void releaseWords(int32_t page, uint32_t first, uint32_t words);
+    /// The blob copied into a page, without looking for one held already.
+    std::optional<std::pair<int32_t, uint32_t>> copyWords(const std::vector<uint32_t>& blob, const char* name,
+                                                         const char* without);
+
+    /// A blob's words told apart from any other's: two independent 64-bit
+    /// digests of them and how many there are.
+    struct Content {
+        uint64_t a = 0;
+        uint64_t b = 0;
+        uint32_t words = 0;
+        bool operator==(const Content&) const = default;
+    };
+    struct ContentHash {
+        size_t operator()(const Content& c) const noexcept { return static_cast<size_t>(c.a); }
+    };
+    [[nodiscard]] static Content contentOf(const std::vector<uint32_t>& blob);
+    /// A placed blob and how many models hold it.
+    struct Held {
+        int32_t page = -1;
+        uint32_t first = 0;
+        uint32_t users = 0;
+    };
+    std::unordered_map<Content, Held, ContentHash> held_;
+    /// The content at a page's word, for the release that names only where.
+    std::unordered_map<uint64_t, Content> contentAt_;
 
     static constexpr uint32_t kPageWords = 1u << 22u;  // 16 MiB
     VkContext* context_ = nullptr;

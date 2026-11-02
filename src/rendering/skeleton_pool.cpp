@@ -3,6 +3,7 @@
 #include "core/logger.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "rendering/m2_particle_emission.hpp"
+#include "rendering/retired_pages.hpp"
 #include "rendering/vk_context.hpp"
 
 #include <glm/gtc/quaternion.hpp>
@@ -281,12 +282,9 @@ SkeletonPool::~SkeletonPool() { destroy(); }
 void SkeletonPool::destroy() {
     if (!context_ || pages_.empty()) return;
     // A frame in flight may still read them.
-    context_->deferAfterAllFrameFences([allocator = context_->getAllocator(), pages = std::move(pages_)] {
-        for (const auto& page : pages) {
-            if (page) destroyBuffer(allocator, page->buffer);
-        }
-    });
-    pages_.clear();
+    retirePages(*context_, pages_);
+    held_.clear();
+    contentAt_.clear();
     ++version_;
 }
 
@@ -331,9 +329,34 @@ SkeletonPool::Emitters SkeletonPool::placeEmitters(const pipeline::M2Model& mode
                     .capacities = packed.capacities, .ribbonCapacities = packed.ribbonCapacities};
 }
 
+SkeletonPool::Content SkeletonPool::contentOf(const std::vector<uint32_t>& blob) {
+    // FNV-1a over the words, and a multiply-rotate of them from another
+    // seed: data no one chose to collide, told apart by 128 bits.
+    Content c{.a = 0xcbf29ce484222325ull, .b = 0x9e3779b97f4a7c15ull, .words = static_cast<uint32_t>(blob.size())};
+    for (const uint32_t w : blob) {
+        c.a = (c.a ^ w) * 0x100000001b3ull;
+        c.b = std::rotl(c.b + w * 0xc2b2ae3d27d4eb4full, 31) * 0x9e3779b185ebca87ull;
+    }
+    return c;
+}
+
 std::optional<std::pair<int32_t, uint32_t>> SkeletonPool::placeWords(const std::vector<uint32_t>& blob,
                                                                     const char* name, const char* without) {
     takeReturned();
+    const Content content = contentOf(blob);
+    if (auto it = held_.find(content); it != held_.end()) {
+        ++it->second.users;
+        return std::make_pair(it->second.page, it->second.first);
+    }
+    const auto at = copyWords(blob, name, without);
+    if (!at) return std::nullopt;
+    held_.emplace(content, Held{.page = at->first, .first = at->second, .users = 1});
+    contentAt_.emplace((uint64_t(uint32_t(at->first)) << 32) | at->second, content);
+    return at;
+}
+
+std::optional<std::pair<int32_t, uint32_t>> SkeletonPool::copyWords(const std::vector<uint32_t>& blob,
+                                                                   const char* name, const char* without) {
     const auto words = static_cast<uint32_t>(blob.size());
     int32_t slot = -1;
     for (size_t i = 0; i < pages_.size(); ++i) {
@@ -391,7 +414,20 @@ void SkeletonPool::release(const Emitters& emitters) {
 }
 
 void SkeletonPool::releaseWords(int32_t pageIndex, uint32_t first, uint32_t words) {
-    if (static_cast<size_t>(pageIndex) >= pages_.size() || !pages_[pageIndex]) return;
+    // Every placed blob is held under its content; a release of one that is
+    // not is let go twice or never placed, and its words may be another
+    // model's now - they stay where they are.
+    const uint64_t where = (uint64_t(uint32_t(pageIndex)) << 32) | first;
+    const auto at = contentAt_.find(where);
+    if (static_cast<size_t>(pageIndex) >= pages_.size() || !pages_[pageIndex] || at == contentAt_.end()) {
+        LOG_ERROR("Skeleton pool: page ", pageIndex, " word ", first, " (", words,
+                  " words) let go but not held - left in place");
+        return;
+    }
+    Held& held = held_.at(at->second);
+    if (--held.users > 0) return;
+    held_.erase(at->second);
+    contentAt_.erase(at);
     context_->deferAfterAllFrameFences([returned = returned_, page = pages_[pageIndex], first, words] {
         std::lock_guard lock(returned->mutex);
         returned->blobs.push_back({.page = page, .first = first, .words = words});

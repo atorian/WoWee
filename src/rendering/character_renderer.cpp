@@ -761,6 +761,8 @@ void CharacterRenderer::requestNormalMaps() {
         if (model == models.end()) continue;
         const float distance = glm::distance(instance.position, lastCameraPos_);
         for (const TextureRef& texture : model->second->textureIds) consider(texture, distance);
+        if (instance.dress->displaySkin)
+            for (const auto& [slot, texture] : *instance.dress->displaySkin) consider(texture, distance);
         for (const auto& [slot, texture] : instance.dress->textureSlotOverrides) consider(texture, distance);
         for (const auto& [group, texture] : instance.dress->groupTextureOverrides) consider(texture, distance);
     }
@@ -2751,7 +2753,7 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
                 // spent all its lines on the character-select models before a
                 // single NPC had spawned.
                 const bool worldCharacter =
-                    !dress.textureSlotOverrides.empty() || dress.drawSkinExtra;
+                    !dress.textureSlotOverrides.empty() || dress.displaySkin || dress.drawSkinExtra;
                 if (batch.submeshId == 0 && worldCharacter && headBatchCanaryCount_ < 24) {
                     ++headBatchCanaryCount_;
                     uint32_t chosenType = 0;
@@ -2852,6 +2854,10 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
                         if (texType != 6) {
                             for (size_t ti = 0; ti < gpuModel.textureIds.size(); ti++) {
                                 const TextureRef* candidate = &gpuModel.textureIds[ti];
+                                if (dress.displaySkin) {
+                                    auto itD = dress.displaySkin->find(static_cast<uint16_t>(ti));
+                                    if (itD != dress.displaySkin->end() && itD->second) candidate = &itD->second;
+                                }
                                 auto itO = dress.textureSlotOverrides.find(static_cast<uint16_t>(ti));
                                 if (itO != dress.textureSlotOverrides.end() && itO->second) {
                                     candidate = &itO->second;
@@ -3433,6 +3439,13 @@ CharacterRenderer::BatchTexture CharacterRenderer::resolveBatchTexture(
     // loincloth under a set of plate legs, and on everyone else, whose model
     // is shared and carries no skin of its own, white. Hair, the cloak and
     // the eye glow are not type 1; their slots keep them apart.
+    //
+    // Over the model's own, the display's (its skins, a humanoid's body), and
+    // over both the instance's.
+    if (dress.displaySkin) {
+        auto itD = dress.displaySkin->find(texSlot);
+        if (itD != dress.displaySkin->end() && itD->second) texPtr = &itD->second;
+    }
     auto itO = dress.textureSlotOverrides.find(texSlot);
     if (itO != dress.textureSlotOverrides.end() && itO->second) texPtr = &itO->second;
     return {.texture = *texPtr ? texPtr : &whiteTexture_, .wrapFlags = wrapFlags};
@@ -3663,6 +3676,12 @@ void CharacterRenderer::setTextureSlotOverride(uint32_t instanceId, uint16_t tex
         if (texture) dress.textureSlotOverrides[textureSlot] = std::move(texture);
         else dress.textureSlotOverrides.erase(textureSlot);
     });
+}
+
+void CharacterRenderer::setDisplaySkin(uint32_t instanceId, std::shared_ptr<const SlotTextures> skin) {
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end()) return;
+    redress(it->second, [&](CharacterDress& dress) { dress.displaySkin = std::move(skin); });
 }
 
 void CharacterRenderer::clearTextureSlotOverride(uint32_t instanceId, uint16_t textureSlot) {

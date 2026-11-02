@@ -6,6 +6,7 @@
 #include "pipeline/blp_loader.hpp"
 #include "rendering/animation/anim_capability_set.hpp"
 #include "rendering/animation/locomotion_fsm.hpp"
+#include "rendering/texture_cache.hpp"
 #include <memory>
 #include <string>
 #include <utility>
@@ -400,8 +401,19 @@ private:
     void applyHumanoidInstanceOverrides(uint32_t instanceId, uint32_t modelId,
                                         uint32_t displayId);
 
+    /// Builds the display's skin (displaySkins_), once a display: the model
+    /// it shares with the other displays of its file is left as loaded.
     void applyCreatureDisplayTextures(uint32_t displayId, uint32_t modelId,
                                       const CreatureDisplayData& dispData);
+    /// The display's skin with these slots put on it, given to every instance
+    /// of the display now standing and kept for the ones spawned after.
+    void dressDisplay(uint32_t displayId,
+                      const std::vector<std::pair<uint32_t, rendering::TextureRef>>& slots);
+    /// The display's skin, when it has one, on an instance of its file's model.
+    void dressInstance(uint32_t instanceId, uint32_t displayId);
+    /// The key a creature model's file is held under: its path, backslashed
+    /// and lower case, as the archives answer it.
+    [[nodiscard]] static std::string creatureModelKey(std::string path);
 
     struct HumanoidDisplayExtra {
         uint8_t raceId = 0;
@@ -445,11 +457,18 @@ private:
     void syncCreatureStealthVisuals();
 
     // --- Creature async loads ---
+    /// A display's spawn prepared on a worker: its textures decoded, and the
+    /// model of its file parsed when no other display of that file had it
+    /// loaded or being loaded (`model`, under `modelId`).
     struct PreparedCreatureModel {
         JobGroup::Token token;
         uint64_t guid;
         uint32_t displayId;
         uint32_t modelId;
+        /// The model's file, normalised (creatureModelKey).
+        std::string modelKey;
+        /// This load parses the file's model (asyncCreaturePathLoads_).
+        bool parsesModel = false;
         float x, y, z, orientation;
         float scale = 1.0f;
         std::shared_ptr<pipeline::M2Model> model;
@@ -520,7 +539,6 @@ private:
 
     // --- NPC composite loads ---
     struct DeferredNpcComposite {
-        uint32_t modelId;
         uint32_t displayId;
         std::string basePath;
         std::vector<std::string> overlayPaths;
@@ -763,7 +781,21 @@ private:
     std::unordered_map<uint32_t, bool> modelIdIsWolfLike_;
     std::unordered_map<std::string, std::shared_ptr<pipeline::M2Model>> attachmentModelData_;
     std::unordered_map<std::string, uint32_t> attachmentModelIds_;
+    /// The model each display draws: its file's (creatureModelByPath_).
     std::unordered_map<uint32_t, uint32_t> displayIdModelCache_;
+    /// A creature model by its file, loaded once however many displays dress
+    /// it: every humanoid NPC's display is a race's model in other clothes,
+    /// and loaded once per display Dalaran's took a gigabyte of skeletons
+    /// and every model after that stood in its bind pose.
+    std::unordered_map<std::string, uint32_t> creatureModelByPath_;
+    /// Files whose model did not parse or load; every display of them is
+    /// not drawn.
+    std::unordered_set<std::string> unloadableCreaturePaths_;
+    /// What each display puts on its file's model: its skins, a humanoid's
+    /// composited body and hair. Shared by its instances
+    /// (CharacterRenderer::setDisplaySkin), replaced whole when it changes.
+    std::unordered_map<uint32_t, std::shared_ptr<const std::unordered_map<uint16_t, rendering::TextureRef>>>
+        displaySkins_;
     std::unordered_set<uint32_t> displayIdTexturesApplied_;
     mutable std::unordered_set<uint32_t> warnedMissingDisplayDataIds_;
     mutable std::unordered_set<uint32_t> warnedMissingModelPathIds_;
@@ -820,6 +852,11 @@ public:
     std::unordered_map<uint64_t, uint8_t> creatureWeaponAttachAttempts_;
     std::vector<AsyncCreatureLoad> asyncCreatureLoads_;
     std::unordered_set<uint32_t> asyncCreatureDisplayLoads_;
+    /// Files whose model one of those loads is parsing; the other displays of
+    /// the file wait for it rather than parse it again.
+    std::unordered_set<std::string> asyncCreaturePathLoads_;
+    /// Displays whose textures are decoded, waiting for their file's model.
+    std::unordered_set<uint32_t> preparedCreatureDisplays_;
     std::unordered_set<uint64_t> deadCreatureGuids_;
     std::unordered_map<uint32_t, std::unordered_map<std::string, pipeline::BLPImage>> displayIdPredecodedTextures_;
     std::deque<PendingCreatureSpawn> pendingCreatureSpawns_;

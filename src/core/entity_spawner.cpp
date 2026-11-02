@@ -1837,12 +1837,11 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
             AsyncNpcCompositeLoad load;
             load.future = spawns_->jobs_.submit(
                 [am, tables, extraCopy, skinSlots = std::move(skinSlots),
-                 hairSlots = std::move(hairSlots), modelId, displayId, isHdCharacterModel](const JobGroup::Token& jobToken) mutable -> PreparedNpcComposite {
+                 hairSlots = std::move(hairSlots), displayId, isHdCharacterModel](const JobGroup::Token& jobToken) mutable -> PreparedNpcComposite {
                     PreparedNpcComposite result{};
                     result.token = jobToken;
                     if (!jobToken.current()) return result;
                     DeferredNpcComposite& def = result.info;
-                    def.modelId = modelId;
                     def.displayId = displayId;
                     def.skinTextureSlots = std::move(skinSlots);
                     def.hairTextureSlots = std::move(hairSlots);
@@ -2089,6 +2088,7 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
             return "";
         };
 
+        std::vector<std::pair<uint32_t, rendering::TextureRef>> dressed;
         for (size_t ti = 0; ti < modelData->textures.size(); ti++) {
             const auto& tex = modelData->textures[ti];
             std::string skinPath;
@@ -2105,7 +2105,7 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
             if (!skinPath.empty()) {
                 rendering::TextureRef skinTex = charRenderer->loadTexture(skinPath);
                 if (skinTex) {
-                    charRenderer->setModelTexture(modelId, static_cast<uint32_t>(ti), skinTex);
+                    dressed.emplace_back(static_cast<uint32_t>(ti), std::move(skinTex));
                     LOG_DEBUG("Applied creature skin texture: ", skinPath, " to slot ", ti);
                 } else {
                     // The row named a skin, the path was built, and the file
@@ -2124,6 +2124,7 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
                             dispData.skin2, "', '", dispData.skin3, "')");
             }
         }
+        dressDisplay(displayId, dressed);
     }
 
     // Clear pre-decoded cache after applying all display textures
@@ -2137,6 +2138,35 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
                         " hasPreDec=", hasPreDec, " extra=", dispData.extraDisplayId);
         }
     }
+}
+
+void EntitySpawner::dressDisplay(uint32_t displayId,
+                                 const std::vector<std::pair<uint32_t, rendering::TextureRef>>& slots) {
+    // A new skin, not the old one changed: a frame being recorded may still
+    // draw with the old one.
+    auto skin = std::make_shared<std::unordered_map<uint16_t, rendering::TextureRef>>();
+    if (auto old = assets_.displaySkins_.find(displayId); old != assets_.displaySkins_.end()) *skin = *old->second;
+    for (const auto& [slot, texture] : slots) (*skin)[static_cast<uint16_t>(slot)] = texture;
+    std::shared_ptr<const std::unordered_map<uint16_t, rendering::TextureRef>> dressed = std::move(skin);
+    assets_.displaySkins_[displayId] = dressed;
+    // A humanoid's composite comes in after its first instances stood up.
+    for (const auto& [guid, shown] : spawns_->creatureDisplayIds_) {
+        if (shown != displayId) continue;
+        if (auto instance = spawns_->creatureInstances_.find(guid); instance != spawns_->creatureInstances_.end())
+            scene().characters().setDisplaySkin(instance->second, dressed);
+    }
+}
+
+void EntitySpawner::dressInstance(uint32_t instanceId, uint32_t displayId) {
+    if (auto skin = assets_.displaySkins_.find(displayId); skin != assets_.displaySkins_.end())
+        scene().characters().setDisplaySkin(instanceId, skin->second);
+}
+
+std::string EntitySpawner::creatureModelKey(std::string path) {
+    std::replace(path.begin(), path.end(), '/', '\\');
+    std::transform(path.begin(), path.end(), path.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return path;
 }
 
 float EntitySpawner::creatureModelScale(uint32_t displayId) const {
@@ -2285,6 +2315,10 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
         return;
     }
 
+    // The display's clothes on its file's model, and over them the instance's
+    // own hair, skin and head detail below. A humanoid's composite that is
+    // still being made reaches it when done (dressDisplay).
+    dressInstance(instanceId, displayId);
     // Per-instance hair, skin and head-detail overrides. These run for every
     // NPC, cached model or not, so two NPCs sharing a model still get their own
     // colouring.

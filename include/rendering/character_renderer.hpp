@@ -73,6 +73,8 @@ struct WeaponAttachment {
 class CharacterRenderer {
     struct InstanceState;
 public:
+    /// Textures by the model's texture slot.
+    using SlotTextures = std::unordered_map<uint16_t, TextureRef>;
     /// The owning scene holds this lease. Geometry/texture caches stay here;
     /// instances, collision indexes and incomplete uploads die with the lease.
     class InstanceSession {
@@ -223,6 +225,9 @@ public:
     void setGroupTextureOverride(uint32_t instanceId, uint16_t geosetGroup, TextureRef texture);
     void setTextureSlotOverride(uint32_t instanceId, uint16_t textureSlot, TextureRef texture);
     void clearTextureSlotOverride(uint32_t instanceId, uint16_t textureSlot);
+    /// The instance's creature display's textures (CharacterDress::displaySkin);
+    /// null for none.
+    void setDisplaySkin(uint32_t instanceId, std::shared_ptr<const SlotTextures> skin);
     void setInstanceVisible(uint32_t instanceId, bool visible);
     void removeInstance(uint32_t instanceId);
     bool getAnimationState(uint32_t instanceId, uint32_t& animationId, float& animationTimeMs, float& animationDurationMs) const;
@@ -468,6 +473,12 @@ private:
         std::unordered_map<uint16_t, TextureRef> groupTextureOverrides;
         // Per-texture-slot overrides (slot → texture).
         std::unordered_map<uint16_t, TextureRef> textureSlotOverrides;
+        /// What the instance's creature display puts on a model that the
+        /// other displays of it share: its skins, a humanoid's composited
+        /// body and hair. Under the instance's own slots, over the model's.
+        /// One for all the display's instances, replaced whole when it
+        /// changes (setDisplaySkin).
+        std::shared_ptr<const SlotTextures> displaySkin;
     };
 
     // Character instance

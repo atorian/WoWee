@@ -63,7 +63,13 @@
 //         "offset": [0, 0, 0],             //   them - the water's wake - as
 //         "rotation": [0, 0, 0],           //   they move at `velocity` (render
 //         "scale": 1.0,                    //   yards a second) every frame
-//         "velocity": [3, 0, 0] }
+//         "velocity": [3, 0, 0],
+//         "sameModelAs": 0,                // optional: the model of the
+//                                          //   character placed at this index,
+//                                          //   not one of its own
+//         "skins": [[11, "Creature\\Wolf\\WolfSkinBlack.blp"]] }
+//                                          // optional: its display's skins by
+//                                          //   texture type
 //     ],
 //     "camera": { "offset": [-8, 0, 3],   // from the origin; or "position"
 //                 "lookAt": [0, 0, 2],    // from the origin; or "yaw"/"pitch"
@@ -118,6 +124,7 @@
 #include "pipeline/dbc_layout.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/game_tables.hpp"
+#include "pipeline/m2_asset_loader.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_group_path.hpp"
 #include "pipeline/wmo_loader.hpp"
@@ -497,24 +504,43 @@ struct MovingCharacter {
     glm::vec3 velocity{0.0f};
 };
 
+/// `models` holds the model each character placed before this one draws;
+/// "sameModelAs" names one of them to draw too, as the client draws every
+/// display of a file with the file's one model.
 bool placeCharacter(const json& entry, const glm::vec3& origin, pipeline::AssetManager& assets,
-                    rendering::Renderer& renderer, uint32_t modelId, MovingCharacter& placed) {
+                    rendering::Renderer& renderer, uint32_t modelId, std::vector<uint32_t>& models,
+                    MovingCharacter& placed) {
     const std::string path = entry.value("path", "");
     auto* characters = renderer.getCharacterRenderer();
     if (!characters) {
         LOG_ERROR("scene_render: no character renderer to place ", path, " with");
         return false;
     }
-    auto model = pipeline::M2Loader::load(assets.readFile(path));
-    model.name = path;
-    if (!pipeline::M2Loader::loadSkin(assets.readFile(pipeline::skinPathForM2(path)), model)) {
-        LOG_ERROR("scene_render: cannot load the skin of ", path);
-        return false;
+    if (entry.contains("sameModelAs")) {
+        const size_t shared = entry["sameModelAs"].get<size_t>();
+        if (shared >= models.size()) {
+            LOG_ERROR("scene_render: character ", models.size(), " names character ", shared,
+                      " as its model's, which is not placed before it");
+            return false;
+        }
+        modelId = models[shared];
+    } else {
+        const auto bytes = assets.readFile(path);
+        auto model = pipeline::M2Loader::load(bytes);
+        model.name = path;
+        if (!pipeline::M2Loader::loadSkin(assets.readFile(pipeline::skinPathForM2(path)), model)) {
+            LOG_ERROR("scene_render: cannot load the skin of ", path);
+            return false;
+        }
+        // Every sequence kept in .anim files beside it, as the client's spawner
+        // loads a unit's.
+        pipeline::loadExternalAnimations(assets, path, bytes, model);
+        if (!characters->loadModel(model, modelId)) {
+            LOG_ERROR("scene_render: the character renderer would not take ", path);
+            return false;
+        }
     }
-    if (!characters->loadModel(model, modelId)) {
-        LOG_ERROR("scene_render: the character renderer would not take ", path);
-        return false;
-    }
+    models.push_back(modelId);
     placed.position = origin + vec3(entry.value("offset", json()));
     placed.velocity = vec3(entry.value("velocity", json()));
     placed.instance = characters->createInstance(modelId, placed.position,
@@ -523,6 +549,24 @@ bool placeCharacter(const json& entry, const glm::vec3& origin, pipeline::AssetM
     if (placed.instance == 0) {
         LOG_ERROR("scene_render: cannot place ", path);
         return false;
+    }
+    // "skins": [[texture type, path], ...] - its display's, on every slot
+    // of that type, as the client dresses a creature display.
+    if (entry.contains("skins")) {
+        const auto* data = characters->getModelData(modelId);
+        auto skin = std::make_shared<rendering::CharacterRenderer::SlotTextures>();
+        for (const auto& pair : entry["skins"]) {
+            const uint32_t type = pair.at(0).get<uint32_t>();
+            const std::string texture = pair.at(1).get<std::string>();
+            rendering::TextureRef loaded = characters->loadTexture(texture);
+            if (!loaded) {
+                LOG_ERROR("scene_render: skin ", texture, " of ", path, " does not load");
+                return false;
+            }
+            for (size_t slot = 0; data && slot < data->textures.size(); ++slot)
+                if (data->textures[slot].type == type) (*skin)[static_cast<uint16_t>(slot)] = loaded;
+        }
+        characters->setDisplaySkin(placed.instance, std::move(skin));
     }
     LOG_INFO("scene_render: placed character ", path);
     return true;
@@ -748,9 +792,10 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         }
     }
     std::vector<MovingCharacter> movingCharacters;
+    std::vector<uint32_t> characterModels;
     for (const auto& entry : scene.value("characters", json::array())) {
         MovingCharacter placed;
-        if (!placeCharacter(entry, origin, assets, renderer, modelId++, placed)) return 1;
+        if (!placeCharacter(entry, origin, assets, renderer, modelId++, characterModels, placed)) return 1;
         movingCharacters.push_back(placed);
     }
 

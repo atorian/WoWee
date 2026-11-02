@@ -8,6 +8,7 @@
 #include <glm/glm.hpp>
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -93,6 +94,9 @@ public:
 
         void setTextureSlotOverride(uint32_t instanceId, uint16_t textureSlot, TextureRef texture);
         void clearTextureSlotOverride(uint32_t instanceId, uint16_t textureSlot);
+        /// CharacterRenderer::setDisplaySkin; the map is its SlotTextures.
+        void setDisplaySkin(uint32_t instanceId,
+                            std::shared_ptr<const std::unordered_map<uint16_t, TextureRef>> skin);
         void setGroupTextureOverride(uint32_t instanceId, uint16_t geosetGroup, TextureRef texture);
         void setActiveGeosets(uint32_t instanceId, const std::unordered_set<uint16_t>& geosets);
         void setDrawSkinExtra(uint32_t instanceId, bool enabled);

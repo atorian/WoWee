@@ -79,13 +79,16 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
         const auto& prepared = *it->ready;
         const bool current = spawns_->jobs_.accepts(prepared.token);
         if (current && prepared.valid && !prepared.permanent_failure && prepared.model &&
-            !assets_.displayIdModelCache_.count(prepared.displayId) && modelUploads >= maxUploadsThisTick) {
+            !assets_.creatureModelByPath_.count(prepared.modelKey) && modelUploads >= maxUploadsThisTick) {
             ++it;
             continue;
         }
         auto result = std::move(*it->ready);
         it = spawns_->asyncCreatureLoads_.erase(it);
         spawns_->asyncCreatureDisplayLoads_.erase(result.displayId);
+        // Whatever became of it, its file is no longer being parsed: the next
+        // display of it parses it, unless it is loaded below.
+        if (result.parsesModel) spawns_->asyncCreaturePathLoads_.erase(result.modelKey);
 
         if (!spawns_->jobs_.accepts(result.token)) {
             // A VALUES update changed the display while this model was loading.
@@ -102,78 +105,68 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
         // point, blocking ALL ready futures (including zero-cost ones) after a
         // single upload, which throttled creature spawn throughput during world load.
         if (result.permanent_failure) {
+            // The file itself: none of its displays is drawn.
+            assets_.unloadableCreaturePaths_.insert(result.modelKey);
             assets_.nonRenderableCreatureDisplayIds_.insert(result.displayId);
             spawns_->creaturePermanentFailureGuids_.insert(result.guid);
             spawns_->pendingCreatureSpawnGuids_.erase(result.guid);
             spawns_->creatureSpawnRetryDeadlines_.erase(result.guid);
             continue;
         }
-        if (!result.valid || !result.model) {
+        if (!result.valid) {
             spawns_->pendingCreatureSpawnGuids_.erase(result.guid);
             spawns_->creatureSpawnRetryDeadlines_.erase(result.guid);
             continue;
         }
 
-        // Another async result may have already uploaded this displayId while this
-        // task was still running; in that case, skip duplicate GPU upload.
-        if (assets_.displayIdModelCache_.find(result.displayId) != assets_.displayIdModelCache_.end()) {
-            spawns_->pendingCreatureSpawnGuids_.erase(result.guid);
-            spawns_->creatureSpawnRetryDeadlines_.erase(result.guid);
-            if (!spawns_->creatureInstances_.count(result.guid) &&
-                !spawns_->creaturePermanentFailureGuids_.count(result.guid)) {
-                PendingCreatureSpawn s{};
-                s.guid = result.guid;
-                s.token = result.token;
-                s.displayId = result.displayId;
-                s.x = result.x;
-                s.y = result.y;
-                s.z = result.z;
-                s.orientation = result.orientation;
-                s.scale = result.scale;
-                spawns_->pendingCreatureSpawns_.push_back(s);
-                spawns_->pendingCreatureSpawnGuids_.insert(result.guid);
+        // The file's model, parsed on a worker, uploaded here - once for
+        // every display of the file.
+        if (result.model && !assets_.creatureModelByPath_.count(result.modelKey)) {
+            auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+            if (!charRenderer) {
+                spawns_->pendingCreatureSpawnGuids_.erase(result.guid);
+                continue;
             }
-            continue;
-        }
 
-        // Model parsed on background thread - upload to GPU on main thread.
-        auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
-        if (!charRenderer) {
-            spawns_->pendingCreatureSpawnGuids_.erase(result.guid);
-            continue;
-        }
+            // Count upload attempts toward the frame budget even if upload fails.
+            // Otherwise repeated failures can consume an unbounded amount of frame time.
+            modelUploads++;
 
-        // Count upload attempts toward the frame budget even if upload fails.
-        // Otherwise repeated failures can consume an unbounded amount of frame time.
-        modelUploads++;
-
-        // Upload model to GPU (must happen on main thread)
-        // Use pre-decoded BLP cache to skip main-thread texture decode.
-        // The worker's parse is handed over, not copied: nothing reads it after.
-        auto uploadStart = std::chrono::steady_clock::now();
-        charRenderer->setPredecodedBLPCache(&result.predecodedTextures, true);
-        if (!charRenderer->loadModel(std::move(*result.model), result.modelId)) {
+            // Use pre-decoded BLP cache to skip main-thread texture decode.
+            // The worker's parse is handed over, not copied: nothing reads it after.
+            auto uploadStart = std::chrono::steady_clock::now();
+            charRenderer->setPredecodedBLPCache(&result.predecodedTextures, true);
+            if (!charRenderer->loadModel(std::move(*result.model), result.modelId)) {
+                charRenderer->setPredecodedBLPCache(nullptr);
+                assets_.unloadableCreaturePaths_.insert(result.modelKey);
+                assets_.nonRenderableCreatureDisplayIds_.insert(result.displayId);
+                spawns_->creaturePermanentFailureGuids_.insert(result.guid);
+                spawns_->pendingCreatureSpawnGuids_.erase(result.guid);
+                spawns_->creatureSpawnRetryDeadlines_.erase(result.guid);
+                continue;
+            }
             charRenderer->setPredecodedBLPCache(nullptr);
-            assets_.nonRenderableCreatureDisplayIds_.insert(result.displayId);
-            spawns_->creaturePermanentFailureGuids_.insert(result.guid);
-            spawns_->pendingCreatureSpawnGuids_.erase(result.guid);
-            spawns_->creatureSpawnRetryDeadlines_.erase(result.guid);
-            continue;
-        }
-        charRenderer->setPredecodedBLPCache(nullptr);
-        {
-            auto uploadEnd = std::chrono::steady_clock::now();
-            float uploadMs = std::chrono::duration<float, std::milli>(uploadEnd - uploadStart).count();
-            if (uploadMs > 100.0f) {
-                LOG_WARNING("charRenderer->loadModel took ", uploadMs, "ms displayId=", result.displayId,
-                            " preDecoded=", result.predecodedTextures.size());
+            {
+                auto uploadEnd = std::chrono::steady_clock::now();
+                float uploadMs = std::chrono::duration<float, std::milli>(uploadEnd - uploadStart).count();
+                if (uploadMs > 100.0f) {
+                    LOG_WARNING("charRenderer->loadModel took ", uploadMs, "ms displayId=", result.displayId,
+                                " preDecoded=", result.predecodedTextures.size());
+                }
             }
+            assets_.creatureModelByPath_[result.modelKey] = result.modelId;
         }
-        // Save remaining pre-decoded textures (display skins) for spawnOnlineCreature
+
+        // The display is ready to spawn once its file's model is in; until
+        // then its spawns wait in the queue for the display that parses it.
         if (!result.predecodedTextures.empty()) {
             spawns_->displayIdPredecodedTextures_[result.displayId] = std::move(result.predecodedTextures);
         }
-        assets_.displayIdModelCache_[result.displayId] = result.modelId;
+        spawns_->preparedCreatureDisplays_.insert(result.displayId);
+        if (auto loaded = assets_.creatureModelByPath_.find(result.modelKey);
+            loaded != assets_.creatureModelByPath_.end()) {
+            assets_.displayIdModelCache_[result.displayId] = loaded->second;
+        }
         spawns_->pendingCreatureSpawnGuids_.erase(result.guid);
         spawns_->creatureSpawnRetryDeadlines_.erase(result.guid);
 
@@ -270,26 +263,24 @@ void EntitySpawner::processAsyncNpcCompositeResults(bool unlimited) {
             }
         }
 
+        // On the display, not the model: the race's model is every display's
+        // of it, each in its own clothes.
+        std::vector<std::pair<uint32_t, rendering::TextureRef>> dressed;
         if (skinTex) {
-            for (uint32_t slot : info.skinTextureSlots) {
-                charRenderer->setModelTexture(info.modelId, slot, skinTex);
-            }
+            for (uint32_t slot : info.skinTextureSlots) dressed.emplace_back(slot, skinTex);
         }
 
         // --- Apply hair texture to type-6 slots ---
         if (!info.hairTexturePath.empty()) {
             rendering::TextureRef hairTex = charRenderer->loadTexture(info.hairTexturePath);
             if (hairTex && hairTex != charRenderer->whiteTexture()) {
-                for (uint32_t slot : info.hairTextureSlots) {
-                    charRenderer->setModelTexture(info.modelId, slot, hairTex);
-                }
+                for (uint32_t slot : info.hairTextureSlots) dressed.emplace_back(slot, hairTex);
             }
         } else if (info.useBakedForHair && skinTex) {
             // Bald NPC: use skin/baked texture for scalp cap
-            for (uint32_t slot : info.hairTextureSlots) {
-                charRenderer->setModelTexture(info.modelId, slot, skinTex);
-            }
+            for (uint32_t slot : info.hairTextureSlots) dressed.emplace_back(slot, skinTex);
         }
+        dressDisplay(info.displayId, dressed);
 
         charRenderer->setPredecodedBLPCache(nullptr);
     }
@@ -367,21 +358,13 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited, rendering::CpuStag
             continue;
         }
 
-        const bool needsNewModel = (assets_.displayIdModelCache_.find(s.displayId) == assets_.displayIdModelCache_.end());
+        bool needsNewModel = (assets_.displayIdModelCache_.find(s.displayId) == assets_.displayIdModelCache_.end());
 
         // For new models: launch async load on background thread instead of blocking.
         if (needsNewModel) {
             // Keep exactly one background load per displayId. Additional spawns for
             // the same displayId stay queued and will spawn once cache is populated.
             if (spawns_->asyncCreatureDisplayLoads_.count(s.displayId)) {
-                spawns_->pendingCreatureSpawns_.push_back(s);
-                rotationsLeft--;
-                continue;
-            }
-
-            const int maxAsync = unlimited ? (MAX_ASYNC_CREATURE_LOADS * 4) : MAX_ASYNC_CREATURE_LOADS;
-            if (static_cast<int>(spawns_->asyncCreatureLoads_.size()) + asyncLaunched >= maxAsync) {
-                // Too many in-flight - defer to next frame
                 spawns_->pendingCreatureSpawns_.push_back(s);
                 rotationsLeft--;
                 continue;
@@ -397,12 +380,57 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited, rendering::CpuStag
                 rotationsLeft = spawns_->pendingCreatureSpawns_.size();
                 continue;
             }
+            const std::string modelKey = creatureModelKey(m2Path);
+            if (assets_.unloadableCreaturePaths_.count(modelKey)) {
+                // Said where its file failed; every display of it is not drawn.
+                assets_.nonRenderableCreatureDisplayIds_.insert(s.displayId);
+                spawns_->creaturePermanentFailureGuids_.insert(s.guid);
+                spawns_->pendingCreatureSpawnGuids_.erase(s.guid);
+                spawns_->creatureSpawnRetryDeadlines_.erase(s.guid);
+                processed++;
+                rotationsLeft = spawns_->pendingCreatureSpawns_.size();
+                continue;
+            }
+            const auto loaded = assets_.creatureModelByPath_.find(modelKey);
+            const bool modelLoaded = loaded != assets_.creatureModelByPath_.end();
+            const bool modelParsing = spawns_->asyncCreaturePathLoads_.count(modelKey) != 0;
+            if (spawns_->preparedCreatureDisplays_.count(s.displayId)) {
+                if (modelLoaded) {
+                    // Its textures are in and so is its file's model, which
+                    // another display parsed: it draws that one.
+                    assets_.displayIdModelCache_[s.displayId] = loaded->second;
+                    needsNewModel = false;
+                } else if (modelParsing) {
+                    spawns_->pendingCreatureSpawns_.push_back(s);
+                    rotationsLeft--;
+                    continue;
+                }
+                // Neither: the display that was parsing the file was dropped,
+                // and this one parses it.
+            }
+        }
+        if (needsNewModel) {
+            const int maxAsync = unlimited ? (MAX_ASYNC_CREATURE_LOADS * 4) : MAX_ASYNC_CREATURE_LOADS;
+            if (static_cast<int>(spawns_->asyncCreatureLoads_.size()) + asyncLaunched >= maxAsync) {
+                // Too many in-flight - defer to next frame
+                spawns_->pendingCreatureSpawns_.push_back(s);
+                rotationsLeft--;
+                continue;
+            }
+
+            const std::string m2Path = getModelPathForDisplayId(s.displayId);
+            const std::string modelKey = creatureModelKey(m2Path);
+            // The file's model is parsed by the first display of it, and only
+            // its textures by the others: it is loaded once whatever the
+            // displays that dress it.
+            const bool parseModel = !assets_.creatureModelByPath_.count(modelKey) &&
+                                    !spawns_->asyncCreaturePathLoads_.count(modelKey);
 
             // An invisible stalker spawns like any creature. Its model has no
             // batches and draws nothing, and the effects a script hangs on it
             // still have somewhere to hang.
             // Launch async M2 load - file I/O and parsing happen off the main thread.
-            uint32_t modelId = nextCreatureModelId_++;
+            const uint32_t modelId = parseModel ? nextCreatureModelId_++ : 0;
             auto* am = assetManager_;
 
             // The display's rows are copied for the worker, which works out
@@ -424,10 +452,13 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited, rendering::CpuStag
 
             AsyncCreatureLoad load;
             load.future = spawns_->jobs_.submit(s.token, 
-                [am, tables = &tables_, m2Path, modelId, s, displayCopy, extraCopy](const JobGroup::Token& jobToken) -> PreparedCreatureModel {
+                [am, tables = &tables_, m2Path, modelKey, parseModel, modelId, s, displayCopy,
+                 extraCopy](const JobGroup::Token& jobToken) -> PreparedCreatureModel {
                     PreparedCreatureModel result{};
                     result.token = jobToken;
                     result.guid = s.guid; result.displayId = s.displayId;
+                    result.modelKey = modelKey;
+                    result.parsesModel = parseModel;
                     if (!jobToken.current()) return result;
                     // Collect display skin texture paths for pre-decode below.
                     std::vector<std::string> skinPaths;
@@ -551,65 +582,69 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited, rendering::CpuStag
                     result.orientation = s.orientation;
                     result.scale = s.scale;
 
-                    const auto m2Bytes = am->readFileShared(m2Path);
-                    if (!m2Bytes) {
-                        result.permanent_failure = true;
-                        return result;
-                    }
-                    const std::vector<uint8_t>& m2Data = *m2Bytes;
-
-                    auto model = std::make_shared<pipeline::M2Model>(pipeline::M2Loader::load(m2Data));
-                    if (model->name.empty()) model->name = m2Path;
-                    if (model->vertices.empty()) {
-                        LOG_WARNING("Creature model parsed to nothing: displayId=",
-                                    s.displayId, " ", m2Path, " (", m2Data.size(), " bytes)");
-                        result.permanent_failure = true;
-                        return result;
-                    }
-                    // What was actually read off disk for this display, and how
-                    // big it is. A path that resolves to the model wanted and a
-                    // model that is drawn are two different claims, and only the
-                    // second one is what is on screen.
-                    {
-                        std::string lower = m2Path;
-                        std::transform(lower.begin(), lower.end(), lower.begin(),
-                                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                        // Every humanoid NPC in the world announced itself
-                        // here, which is thirty-nine lines a session saying a
-                        // model loaded correctly. At debug: the log carries
-                        // warnings and above, and what belongs there is what
-                        // went wrong.
-                        if (lower.rfind("character\\", 0) == 0) {
-                            LOG_DEBUG("Humanoid NPC model loaded: displayId=", s.displayId,
-                                      " ", m2Path, " vertices=", model->vertices.size(),
-                                      " bones=", model->bones.size(),
-                                      " submeshes=", model->batches.size());
+                    // The file's model, when this display is the first of it.
+                    std::shared_ptr<pipeline::M2Model> model;
+                    if (parseModel) {
+                        const auto m2Bytes = am->readFileShared(m2Path);
+                        if (!m2Bytes) {
+                            result.permanent_failure = true;
+                            return result;
                         }
-                    }
+                        const std::vector<uint8_t>& m2Data = *m2Bytes;
 
-                    // Load skin file
-                    if (model->version >= 264) {
-                        std::string skinPath = pipeline::skinPathForM2(m2Path);
-                        if (const auto skinData = am->readFileShared(skinPath)) {
-                            pipeline::M2Loader::loadSkin(*skinData, *model);
+                        model = std::make_shared<pipeline::M2Model>(pipeline::M2Loader::load(m2Data));
+                        if (model->name.empty()) model->name = m2Path;
+                        if (model->vertices.empty()) {
+                            LOG_WARNING("Creature model parsed to nothing: displayId=",
+                                        s.displayId, " ", m2Path, " (", m2Data.size(), " bytes)");
+                            result.permanent_failure = true;
+                            return result;
                         }
-                    }
+                        // What was actually read off disk for this display, and how
+                        // big it is. A path that resolves to the model wanted and a
+                        // model that is drawn are two different claims, and only the
+                        // second one is what is on screen.
+                        {
+                            std::string lower = m2Path;
+                            std::transform(lower.begin(), lower.end(), lower.begin(),
+                                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                            // Every humanoid NPC in the world announced itself
+                            // here, which is thirty-nine lines a session saying a
+                            // model loaded correctly. At debug: the log carries
+                            // warnings and above, and what belongs there is what
+                            // went wrong.
+                            if (lower.rfind("character\\", 0) == 0) {
+                                LOG_DEBUG("Humanoid NPC model loaded: displayId=", s.displayId,
+                                          " ", m2Path, " vertices=", model->vertices.size(),
+                                          " bones=", model->bones.size(),
+                                          " submeshes=", model->batches.size());
+                            }
+                        }
 
-                    // This runs on a background thread, so every external
-                    // sequence can be loaded.
-                    pipeline::loadExternalAnimations(*am, m2Path, m2Data, *model);
+                        // Load skin file
+                        if (model->version >= 264) {
+                            std::string skinPath = pipeline::skinPathForM2(m2Path);
+                            if (const auto skinData = am->readFileShared(skinPath)) {
+                                pipeline::M2Loader::loadSkin(*skinData, *model);
+                            }
+                        }
 
-                    // Pre-decode model textures on background thread
-                    for (const auto& tex : model->textures) {
-                        if (tex.filename.empty()) continue;
-                        std::string texKey = tex.filename;
-                        std::replace(texKey.begin(), texKey.end(), '/', '\\');
-                        std::transform(texKey.begin(), texKey.end(), texKey.begin(),
-                                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                        if (result.predecodedTextures.find(texKey) != result.predecodedTextures.end()) continue;
-                        auto blp = am->loadTexture(texKey);
-                        if (blp.isValid()) {
-                            result.predecodedTextures[texKey] = std::move(blp);
+                        // This runs on a background thread, so every external
+                        // sequence can be loaded.
+                        pipeline::loadExternalAnimations(*am, m2Path, m2Data, *model);
+
+                        // Pre-decode model textures on background thread
+                        for (const auto& tex : model->textures) {
+                            if (tex.filename.empty()) continue;
+                            std::string texKey = tex.filename;
+                            std::replace(texKey.begin(), texKey.end(), '/', '\\');
+                            std::transform(texKey.begin(), texKey.end(), texKey.begin(),
+                                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                            if (result.predecodedTextures.find(texKey) != result.predecodedTextures.end()) continue;
+                            auto blp = am->loadTexture(texKey);
+                            if (blp.isValid()) {
+                                result.predecodedTextures[texKey] = std::move(blp);
+                            }
                         }
                     }
 
@@ -632,6 +667,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited, rendering::CpuStag
                 });
             spawns_->asyncCreatureLoads_.push_back(std::move(load));
             spawns_->asyncCreatureDisplayLoads_.insert(s.displayId);
+            if (parseModel) spawns_->asyncCreaturePathLoads_.insert(modelKey);
             asyncLaunched++;
             // Don't erase from spawns_->pendingCreatureSpawnGuids_ - the async result handler will do it
             rotationsLeft = spawns_->pendingCreatureSpawns_.size();
@@ -1844,6 +1880,7 @@ void EntitySpawner::processPendingMount() {
     }
 
     spawns_->mountInstanceId_ = instanceId;
+    dressInstance(instanceId, mountDisplayId);
     // Shadowform darkens the mount too.
     scene().characters().addLookCompanion(renderer_->getCharacterInstanceId(), instanceId);
 
@@ -1935,10 +1972,13 @@ EntitySpawner::ModelLoad EntitySpawner::loadRemoteMountModel(uint32_t displayId,
     modelPath = getModelPathForDisplayId(displayId);
     if (modelPath.empty()) return fail("no model is named for it in CreatureDisplayInfo/CreatureModelData");
 
-    auto cached = assets_.displayIdModelCache_.find(displayId);
-    if (cached != assets_.displayIdModelCache_.end() && cr->getModelData(cached->second)) {
-        modelId = cached->second;
-    } else {
+    // Its file's model, the one every display of the file draws, and this
+    // display's skin for it (dressInstance puts it on the instance).
+    const std::string key = creatureModelKey(modelPath);
+    if (assets_.unloadableCreaturePaths_.count(key)) return fail("its model could not be loaded");
+    const auto loadedModel = assets_.creatureModelByPath_.find(key);
+    const bool modelLoaded = loadedModel != assets_.creatureModelByPath_.end() && cr->getModelData(loadedModel->second);
+    if (!modelLoaded || !assets_.displaySkins_.count(displayId)) {
         pipeline::M2Model model;
         if (!loadWeaponM2(modelPath, model)) {
             // An empty entry is a model the workers could not load, not one
@@ -1994,12 +2034,14 @@ EntitySpawner::ModelLoad EntitySpawner::loadRemoteMountModel(uint32_t displayId,
             rendering::CharacterRenderer* renderer;
             ~TextureGuard() { renderer->setPredecodedBLPCache(nullptr); }
         } guard{cr};
-        modelId = nextCreatureModelId_++;
-        if (!cr->loadModel(model, modelId)) {
-            modelId = 0;
-            return fail("the renderer refused its model");
+        if (!modelLoaded) {
+            const uint32_t loadedId = nextCreatureModelId_++;
+            if (!cr->loadModel(model, loadedId)) {
+                assets_.unloadableCreaturePaths_.insert(key);
+                return fail("the renderer refused its model");
+            }
+            assets_.creatureModelByPath_[key] = loadedId;
         }
-        assets_.displayIdModelCache_[displayId] = modelId;
         if (skins.empty()) {
             // Only a skin slot some batch draws with is missing: many models
             // carry one their submeshes never use.
@@ -2020,6 +2062,7 @@ EntitySpawner::ModelLoad EntitySpawner::loadRemoteMountModel(uint32_t displayId,
                             "that part is drawn untextured");
             }
         }
+        std::vector<std::pair<uint32_t, rendering::TextureRef>> dressed;
         size_t forcedSlot = 0;
         for (size_t ti = 0; ti < model.textures.size(); ++ti) {
             const auto& slot = model.textures[ti];
@@ -2028,12 +2071,16 @@ EntitySpawner::ModelLoad EntitySpawner::loadRemoteMountModel(uint32_t displayId,
                     !skins.empty() && &path == &skins[std::min(forcedSlot, skins.size() - 1)].second;
                 if (slot.type != type && !emptyNamedSlot) continue;
                 if (rendering::TextureRef texture = cr->loadTexture(path))
-                    cr->setModelTexture(modelId, static_cast<uint32_t>(ti), texture);
+                    dressed.emplace_back(static_cast<uint32_t>(ti), std::move(texture));
                 if (emptyNamedSlot) ++forcedSlot;
                 break;
             }
         }
+        // Kept even with nothing in it: the display is dressed, as it is.
+        dressDisplay(displayId, dressed);
     }
+    modelId = assets_.creatureModelByPath_.at(key);
+    assets_.displayIdModelCache_[displayId] = modelId;
 
     if (const auto shape = cr->getModelShape(modelId); shape && shape->vertexCount > 0) {
         const float minZ = shape->boundMin.z;
@@ -2093,6 +2140,7 @@ void EntitySpawner::processPendingRemotePlayerMounts() {
         cr->getInstancePosition(playerIt->second, pos);
         uint32_t mountInstance = scene().characters().createInstance(modelId, pos, glm::vec3(0.0f), 1.0f);
         if (mountInstance != 0) {
+            dressInstance(mountInstance, displayId);
             const bool moving = gameHandler_ && [&] {
                 auto entity = gameHandler_->getEntityManager().getEntity(guid);
                 return entity && entity->isEntityMoving();
@@ -2175,6 +2223,7 @@ void EntitySpawner::processPendingRemotePlayerForms() {
             spawns_->pendingRemotePlayerForms_.erase(it);
             return;
         }
+        dressInstance(formInstance, displayId);
         if (existing != spawns_->remotePlayerForms_.end()) scene().characters().removeInstance(existing->second.formInstanceId);
         scene().characters().setInstanceVisible(character, false);
         removeRemotePlayerMount(guid);  // a form is never ridden; the server drops the mount too

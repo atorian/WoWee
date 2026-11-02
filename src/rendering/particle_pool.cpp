@@ -1,6 +1,7 @@
 #include "rendering/particle_pool.hpp"
 
 #include "core/logger.hpp"
+#include "rendering/retired_pages.hpp"
 #include "rendering/vk_context.hpp"
 
 #include <algorithm>
@@ -13,12 +14,7 @@ ParticlePool::~ParticlePool() { destroy(); }
 void ParticlePool::destroy() {
     if (!context_ || pages_.empty()) return;
     // A frame in flight may still run them.
-    context_->deferAfterAllFrameFences([allocator = context_->getAllocator(), pages = std::move(pages_)] {
-        for (const auto& page : pages) {
-            if (page) destroyBuffer(allocator, page->buffer);
-        }
-    });
-    pages_.clear();
+    retirePages(*context_, pages_);
     ++version_;
 }
 

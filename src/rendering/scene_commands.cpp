@@ -188,6 +188,13 @@ void SceneCommands::Characters::setTextureSlotOverride(uint32_t instanceId, uint
     });
 }
 
+void SceneCommands::Characters::setDisplaySkin(
+        uint32_t instanceId, std::shared_ptr<const std::unordered_map<uint16_t, TextureRef>> skin) {
+    owner_.post([=, skin = std::move(skin)](Renderer& r) mutable {
+        if (auto* c = r.getCharacterRenderer()) c->setDisplaySkin(instanceId, std::move(skin));
+    });
+}
+
 void SceneCommands::Characters::clearTextureSlotOverride(uint32_t instanceId, uint16_t textureSlot) {
     owner_.post([=](Renderer& r) {
         if (auto* c = r.getCharacterRenderer()) c->clearTextureSlotOverride(instanceId, textureSlot);
