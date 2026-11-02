@@ -9,16 +9,19 @@
 
 #include <cstddef>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
+using wowee::rendering::kNoTextureHandle;
 using wowee::rendering::normalizeTexturePath;
 using wowee::rendering::TextureCache;
 using wowee::rendering::TextureDevice;
 using wowee::rendering::TextureForm;
+using wowee::rendering::TextureHandle;
 using wowee::rendering::TextureKey;
 using wowee::rendering::TextureRef;
 using wowee::rendering::VkTexture;
@@ -27,11 +30,19 @@ namespace {
 
 constexpr uint64_t kMiB = 1024ull * 1024;
 
-/// Frames in flight that have not fenced yet, and the driver's heap budget.
+/// Frames in flight that have not fenced yet, the driver's heap budget, and
+/// the texture table's slots: which texture holds each.
 class FakeDevice : public TextureDevice {
 public:
     void retireAfterFrames(std::function<void()> release) override { pending_.push_back(std::move(release)); }
     [[nodiscard]] std::optional<uint64_t> textureHeapBudget() const override { return heapBudget; }
+    TextureHandle addToTable(const VkTexture& texture) override {
+        if (tableFull) return kNoTextureHandle;
+        const TextureHandle handle = nextHandle_++;
+        table[handle] = &texture;
+        return handle;
+    }
+    void removeFromTable(TextureHandle handle) override { CHECK(table.erase(handle) == 1); }
 
     /// Every frame that was in flight has fenced.
     void fencesPassed() {
@@ -41,9 +52,12 @@ public:
     }
 
     std::optional<uint64_t> heapBudget;
+    std::map<TextureHandle, const VkTexture*> table;
+    bool tableFull = false;
 
 private:
     std::vector<std::function<void()>> pending_;
+    TextureHandle nextHandle_ = 0;
 };
 
 /// Stands in for an uploaded image: a distinct pointer nothing reads, whose
@@ -247,4 +261,63 @@ TEST_CASE("a second upload of a resident key is retired and the first shared", "
     CHECK(cache.stats().bytes == 2 * kMiB);
     device.fencesPassed();
     CHECK(images.destroyed == std::set<std::string>{"second"});
+}
+
+TEST_CASE("a cached texture has a slot in the texture table until the frames that may sample it are done",
+          "[texture_cache]") {
+    FakeDevice device;
+    Images images;
+    TextureCache cache(device, budget(4 * kMiB));
+
+    TextureHandle handle = kNoTextureHandle;
+    {
+        TextureRef first = cache.insert(stored("first"), images.make("first"), 4 * kMiB);
+        handle = first.tableHandle();
+        REQUIRE(handle != kNoTextureHandle);
+        CHECK(device.table.at(handle) == first.get());
+    }
+    // Evicted: a frame recorded before may still name the slot.
+    TextureRef second = cache.insert(stored("second"), images.make("second"), 4 * kMiB);
+    REQUIRE(second);
+    CHECK(device.table.contains(handle));
+
+    device.fencesPassed();
+    CHECK_FALSE(device.table.contains(handle));
+    CHECK(device.table.at(second.tableHandle()) == second.get());
+}
+
+TEST_CASE("a texture's normal map is found in the table through the texture", "[texture_cache]") {
+    FakeDevice device;
+    Images images;
+    TextureCache cache(device, budget(8 * kMiB));
+
+    TextureRef skin = cache.insert(stored("skin.blp"), images.make("skin"), 2 * kMiB);
+    CHECK(skin.normalMapTableHandle() == kNoTextureHandle);
+    TextureRef normals = cache.insert({"skin.blp", TextureForm::NormalHeight, 5}, images.make("normals"), 2 * kMiB);
+    cache.setNormalMap(skin, normals);
+    REQUIRE(skin.normalMapTableHandle() != kNoTextureHandle);
+    CHECK(device.table.at(skin.normalMapTableHandle()) == normals.get());
+}
+
+TEST_CASE("only an admitted texture takes a slot, and one the table had no room for gives none back",
+          "[texture_cache]") {
+    FakeDevice device;
+    Images images;
+    TextureCache cache(device, budget(64 * kMiB));
+
+    TextureRef first = cache.insert(stored("dup"), images.make("first"), 2 * kMiB);
+    // The second upload of the key is retired at once and never sampled.
+    TextureRef again = cache.insert(stored("dup"), images.make("second"), 2 * kMiB);
+    CHECK(device.table.size() == 1);
+
+    device.tableFull = true;
+    TextureRef unslotted = cache.insert(stored("late"), images.make("late"), 2 * kMiB);
+    REQUIRE(unslotted);
+    CHECK(unslotted.tableHandle() == kNoTextureHandle);
+    unslotted.reset();
+    first.reset();
+    again.reset();
+    TextureRef big = cache.insert(stored("big"), images.make("big"), 64 * kMiB);
+    device.fencesPassed();
+    CHECK(device.table.empty());
 }

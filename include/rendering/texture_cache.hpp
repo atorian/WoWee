@@ -18,6 +18,11 @@ namespace rendering {
 class VkTexture;
 class TextureCache;
 
+/// A texture's place in the device's texture table (TextureTable): the number
+/// a shader samples it by.
+using TextureHandle = uint32_t;
+inline constexpr TextureHandle kNoTextureHandle = ~0u;
+
 /// What a texture in the cache is: a file as it is stored, or something made
 /// from one. Part of the key, because the same path in two forms is two
 /// different images on the GPU.
@@ -122,6 +127,12 @@ public:
     /// Its TextureInfo (heightVariance); empty without one.
     [[nodiscard]] TextureInfo normalMapInfo() const;
 
+    /// Where a shader finds it in the texture table, given when it was cached;
+    /// kNoTextureHandle when the table had no room.
+    [[nodiscard]] TextureHandle tableHandle() const;
+    /// Its normal map's, kNoTextureHandle without one.
+    [[nodiscard]] TextureHandle normalMapTableHandle() const;
+
     void reset();
 
     friend bool operator==(const TextureRef& a, const TextureRef& b) { return a.entry_ == b.entry_; }
@@ -141,6 +152,11 @@ public:
     virtual void retireAfterFrames(std::function<void()> release) = 0;
     /// What the driver lets the client hold in the heap textures live in.
     [[nodiscard]] virtual std::optional<uint64_t> textureHeapBudget() const = 0;
+    /// A place for `texture` in the texture table, or kNoTextureHandle when
+    /// the table has none left (said by the table).
+    [[nodiscard]] virtual TextureHandle addToTable(const VkTexture& texture) = 0;
+    /// The place back, once no frame in flight can sample it.
+    virtual void removeFromTable(TextureHandle handle) = 0;
 };
 
 struct TextureCacheStats {

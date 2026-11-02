@@ -30,6 +30,9 @@ struct TextureEntry {
     /// Atomic because a frame recording on a worker thread reads it while the
     /// main thread may attach one.
     std::atomic<TextureEntry*> normalMap{nullptr};
+    /// Its place in the texture table, given when admitted and given back
+    /// with the texture, after the frames that may sample it.
+    TextureHandle tableHandle = kNoTextureHandle;
 };
 
 } // namespace detail
@@ -114,6 +117,14 @@ TextureInfo TextureRef::normalMapInfo() const {
     if (!entry_) return {};
     const TextureEntry* normal = entry_->normalMap.load(std::memory_order_acquire);
     return normal ? normal->info : TextureInfo{};
+}
+
+TextureHandle TextureRef::tableHandle() const { return entry_ ? entry_->tableHandle : kNoTextureHandle; }
+
+TextureHandle TextureRef::normalMapTableHandle() const {
+    if (!entry_) return kNoTextureHandle;
+    const TextureEntry* normal = entry_->normalMap.load(std::memory_order_acquire);
+    return normal ? normal->tableHandle : kNoTextureHandle;
 }
 
 const TextureInfo& TextureRef::info() const {
@@ -259,9 +270,11 @@ void TextureCache::retireLocked(TextureEntry* entry) {
     if (entry->texture) {
         const uint64_t bytes = entry->bytes;
         retiringBytes_->fetch_add(bytes);
-        // A command buffer submitted a frame or two ago may still sample it.
-        device_.retireAfterFrames([texture = std::move(entry->texture), bytes,
-                                   retiring = retiringBytes_]() mutable {
+        // A command buffer submitted a frame or two ago may still sample it,
+        // through its place in the table as through the texture.
+        device_.retireAfterFrames([texture = std::move(entry->texture), bytes, retiring = retiringBytes_,
+                                   device = &device_, handle = entry->tableHandle]() mutable {
+            if (handle != kNoTextureHandle) device->removeFromTable(handle);
             texture.reset();
             retiring->fetch_sub(bytes);
         });
@@ -289,6 +302,7 @@ TextureRef TextureCache::admitLocked(std::unique_ptr<TextureEntry> entry, bool n
     raw->cache = this;
     raw->named = named;
     raw->refs = 1;
+    if (raw->texture) raw->tableHandle = device_.addToTable(*raw->texture);
     auto& form = forms_[static_cast<size_t>(raw->key.form)];
     form.entries += 1;
     form.bytes += raw->bytes;

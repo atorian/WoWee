@@ -9,6 +9,7 @@
 #include "rendering/gpu_allocations.hpp"
 #include "core/env_flag.hpp"
 #include "rendering/pipeline_cache_file.hpp"
+#include "rendering/vk_texture.hpp"
 #include "rendering/host_image_copy.hpp"
 #include "core/logger.hpp"
 #include "pipeline/blp_loader.hpp"
@@ -52,6 +53,14 @@ public:
         if (const auto heap = context_.deviceLocalHeap()) return heap->budgetBytes;
         return std::nullopt;
     }
+    [[nodiscard]] TextureHandle addToTable(const VkTexture& texture) override {
+        const VkDescriptorImageInfo info = texture.descriptorInfo();
+        return context_.textureTable().add(info.imageView, info.sampler, TextureTable::Kind::Plain,
+                                           info.imageLayout);
+    }
+    void removeFromTable(TextureHandle handle) override {
+        context_.textureTable().remove(handle, TextureTable::Kind::Plain);
+    }
 
 private:
     VkContext& context_;
@@ -59,6 +68,16 @@ private:
 
 TextureCache& VkContext::textures() { return *textureCache_; }
 const TextureCache& VkContext::textures() const { return *textureCache_; }
+TextureTable& VkContext::textureTable() { return *textureTable_; }
+
+bool VkContext::createTextureTable() {
+    VkPhysicalDeviceVulkan12Properties properties12{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES};
+    VkPhysicalDeviceProperties2 properties{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    properties.pNext = &properties12;
+    vkGetPhysicalDeviceProperties2(physicalDevice, &properties);
+    textureTable_ = std::make_unique<TextureTable>();
+    return textureTable_->initialize(device, TextureTable::capacityFor(properties.properties.limits, properties12));
+}
 
 // Hash a VkSamplerCreateInfo into a 64-bit key for the sampler cache.
 // FNV-1a chosen for speed and low collision rate on small structured data.
@@ -132,6 +151,7 @@ bool VkContext::initialize(SDL_Window* window) {
     if (!selectPhysicalDevice()) return false;
     if (!createLogicalDevice()) return false;
     if (!createAllocator()) return false;
+    if (!createTextureTable()) return false;
     textureDevice_ = std::make_unique<ContextTextureDevice>(*this);
     textureCache_ = std::make_unique<TextureCache>(*textureDevice_, TextureCache::configFromEnvironment());
 
@@ -166,12 +186,15 @@ void VkContext::shutdown() {
     // Every renderer has given its textures back by now; what the cache still
     // holds is unreferenced and goes through the flush below.
     textureCache_.reset();
-    textureDevice_.reset();
 
     // Late owners (including character-selection previews) may retire after
     // Renderer::shutdown. Their callbacks own their handles and pools, so
     // drain them after the device wait and before destroying the allocator.
+    // The cache's give their table places back through its device, so both
+    // go after.
     flushDeferredCleanup();
+    textureDevice_.reset();
+    textureTable_.reset();
 
     LOG_DEBUG("VkContext::shutdown - destroyImGuiResources...");
     destroyImGuiResources();
@@ -847,6 +870,30 @@ bool VkContext::createLogicalDevice() {  // NOLINT(readability-function-size)
         if (supported11.uniformAndStorageBuffer16BitAccess) {
             enabled11.uniformAndStorageBuffer16BitAccess = VK_TRUE;
         }
+        // Sampling by handle (TextureTable): every texture in arrays bound
+        // once a pass, indexed by a number that may differ between the draws
+        // of one indirect call, and written while frames that do not read
+        // the new places are in flight. Every Vulkan 1.3 device has these,
+        // and there is no other path to draw with.
+        const std::pair<VkBool32, const char*> tableFeatures[] = {
+            {supported12.runtimeDescriptorArray, "runtimeDescriptorArray"},
+            {supported12.descriptorBindingPartiallyBound, "descriptorBindingPartiallyBound"},
+            {supported12.descriptorBindingSampledImageUpdateAfterBind, "descriptorBindingSampledImageUpdateAfterBind"},
+            {supported12.descriptorBindingUpdateUnusedWhilePending, "descriptorBindingUpdateUnusedWhilePending"},
+            {supported12.shaderSampledImageArrayNonUniformIndexing, "shaderSampledImageArrayNonUniformIndexing"},
+        };
+        bool tableSupported = true;
+        for (const auto& [supported, name] : tableFeatures) {
+            if (supported) continue;
+            LOG_ERROR("Vulkan device lacks ", name, ", which drawing by texture handle needs");
+            tableSupported = false;
+        }
+        if (!tableSupported) return false;
+        enabled12.runtimeDescriptorArray = VK_TRUE;
+        enabled12.descriptorBindingPartiallyBound = VK_TRUE;
+        enabled12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+        enabled12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+        enabled12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
         // Add each struct separately - vk-bootstrap owns the pNext chaining;
         // manually linking them would be overwritten when it appends the next.
         if (hardwareRayQuery_) enabled12.bufferDeviceAddress = VK_TRUE;

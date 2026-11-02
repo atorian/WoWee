@@ -8,6 +8,7 @@
 #include "rendering/gpu_memory.hpp"
 #include "rendering/retire_queue.hpp"
 #include "rendering/texture_cache.hpp"
+#include "rendering/texture_table.hpp"
 #include "rendering/vk_utils.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
@@ -305,6 +306,9 @@ public:
     /// shutdown(); every TextureRef has to be given back before shutdown.
     [[nodiscard]] TextureCache& textures();
     [[nodiscard]] const TextureCache& textures() const;
+    /// Every texture sampled by handle (TextureTable): the cache's, given a
+    /// place as they are cached, and images a renderer owns itself.
+    [[nodiscard]] TextureTable& textureTable();
 
     [[nodiscard]] VkSurfaceKHR getSurface() const { return surface; }
     [[nodiscard]] VkPipelineCache getPipelineCache() const { return pipelineCache_; }
@@ -608,6 +612,8 @@ private:
     mutable std::unordered_map<VkFormat, bool> hostCopyFormats_;
     /// VK_EXT_memory_budget: the heap budgets are the driver's, not an estimate.
     bool memoryBudgetSupported_ = false;
+    bool createTextureTable();
+    std::unique_ptr<TextureTable> textureTable_;
     class ContextTextureDevice;
     std::unique_ptr<ContextTextureDevice> textureDevice_;
     std::unique_ptr<TextureCache> textureCache_;
