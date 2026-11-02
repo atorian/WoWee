@@ -3,8 +3,10 @@
 // GPU culling for M2 instances: one thread per slot of the scene's cull
 // table (M2Renderer, InstanceSlots). The table lives on the GPU and changes
 // only where an instance did; each frame every slot is tested against the
-// view's frustum and the instance's own draw distance, and the kept ones are
-// appended to a list the CPU reads back: (slot, id) pairs.
+// guard of the view (cull_guard.hpp: its sides widened and pushed out, its
+// ranges stretched) and the kept ones are appended to a list the CPU reads
+// back: (slot, id) pairs. The CPU reads it a frame or two later, and tests
+// what it kept against the view of its own frame.
 
 layout(local_size_x = 64) in;
 
@@ -15,11 +17,12 @@ struct CullRow {
     float maxDistSqFactor;  // the instance's share of the draw distance, squared
     uint  flags;
     uint  id;
-    uint  _pad0;
+    float centreOffset;     // how far the cull centre lies from its position,
+                            // which the CPU measures its distance from
 };
 
 layout(std140, set = 0, binding = 0) uniform CullUniforms {
-    vec4  frustumPlanes[6];       // xyz = normal, w = distance
+    vec4  guardPlanes[4];         // the guard's sides, inward: xyz = normal, w = distance
     vec4  cameraPos;              // xyz = camera position, w = maxPossibleDistSq
     uint  slotCount;
     float baseMaxDistSq;          // the adaptive doodad range, squared
@@ -27,8 +30,8 @@ layout(std140, set = 0, binding = 0) uniform CullUniforms {
     float groundDetailMaxDistance;
     float gameObjectMinDistance;
     float skyBirdMaxDistance;
-    uint  _pad1;
-    uint  _pad2;
+    float guardDistance;          // how far the camera may move (kCullGuardDistance)
+    float rangeSlack;             // how much a range may grow (kCullGuardRangeSlack)
 };
 
 layout(std430, set = 0, binding = 1) readonly buffer CullTable {
@@ -61,6 +64,11 @@ float instanceMaxDistSq(CullRow row) {
     return maxDistSq;
 }
 
+// A range as the guard stretches it.
+float reach(float maxDistSq) {
+    return sqrt(maxDistSq) * rangeSlack + guardDistance;
+}
+
 void main() {
     uint slot = gl_GlobalInvocationID.x;
     if (slot >= slotCount) return;
@@ -69,15 +77,15 @@ void main() {
     uint f = row.flags;
     if ((f & kValid) == 0u || (f & (kInvisibleTrap | kHidden | kFinishing)) != 0u) return;
 
-    vec3 toCam = row.sphere.xyz - cameraPos.xyz;
-    float distSq = dot(toCam, toCam);
-    if (distSq > cameraPos.w) return;
-    if (distSq > instanceMaxDistSq(row)) return;
+    // No nearer than this can its position be to the camera.
+    float nearest = length(row.sphere.xyz - cameraPos.xyz) - row.centreOffset;
+    if (nearest > reach(cameraPos.w)) return;
+    if (nearest > reach(instanceMaxDistSq(row))) return;
 
     float radius = row.sphere.w;
     if (radius > 0.0) {
-        for (int i = 0; i < 6; i++) {
-            float d = dot(frustumPlanes[i].xyz, row.sphere.xyz) + frustumPlanes[i].w;
+        for (int i = 0; i < 4; i++) {
+            float d = dot(guardPlanes[i].xyz, row.sphere.xyz) + guardPlanes[i].w;
             if (d < -radius) return;
         }
     }

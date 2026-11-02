@@ -1985,7 +1985,7 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
         GpuPass pass(*vkCtx, currentCmd, "M2 cull");
         uint32_t frame = vkCtx->getCurrentFrame();
         m2Renderer->uploadSlotTables(currentCmd, frame);
-        m2Renderer->dispatchCullCompute(currentCmd, frame, *frameCamera());
+        m2Renderer->dispatchCullCompute(currentCmd, frame);
     }
     if (skyboxModelRenderer_ && vkCtx) skyboxModelRenderer_->uploadSlotTables(currentCmd, vkCtx->getCurrentFrame());
 

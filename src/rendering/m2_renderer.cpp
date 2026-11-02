@@ -746,7 +746,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     // Output: uint visibility[] read back by CPU to skip culled instances in sortedVisible_ build.
     {
         static_assert(sizeof(CullRowGPU) == 32, "CullRowGPU must be 32 bytes (std430)");
-        static_assert(sizeof(CullUniformsGPU) == 144, "CullUniformsGPU must be 144 bytes (std140)");
+        static_assert(sizeof(CullUniformsGPU) == 112, "CullUniformsGPU must be 112 bytes (std140)");
 
         // Descriptor set layout: binding 0 = UBO (frustum+camera), 1 = SSBO (input), 2 = SSBO (output)
         VkDescriptorSetLayoutBinding bindings[3] = {};

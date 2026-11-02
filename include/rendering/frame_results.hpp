@@ -1,5 +1,8 @@
 #pragma once
 
+#include "rendering/cull_guard.hpp"
+
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -15,10 +18,14 @@ struct FrameStage {
 };
 
 /// What the GPU cull kept in one extracted frame: the slots of the instances
-/// it kept, each with the id the slot held then (slot, id, slot, id, ...).
+/// it kept, each with the id the slot held then (slot, id, slot, id, ...),
+/// against the guard of that frame's view and with its ranges (M2Renderer).
 struct CullVerdict {
     uint64_t sceneIdentity = 0;
     uint32_t serial = 0;
+    CullGuard guard;
+    /// The doodad range, the view distance and the ground clutter range.
+    std::array<float, 3> ranges{};
     std::vector<uint32_t> kept;
 };
 
@@ -50,6 +57,9 @@ struct RenderStatistics {
     /// m2InstanceChanges by why; the rest were reclassified or got a new
     /// copy of their model.
     uint32_t m2Placed = 0, m2Moved = 0, m2ShownOrHidden = 0, m2Finished = 0;
+    /// 1 when the view's M2 candidates came from the columns, the GPU's
+    /// verdict not covering the view (cull_guard.hpp); 0 when from it.
+    uint32_t m2CulledFromColumns = 0;
     uint64_t terrainTriangles = 0;
     uint32_t rtMeshes = 0, rtInstances = 0;
     uint64_t rtTriangles = 0, rtGpuBytes = 0, rtSourceBytes = 0;

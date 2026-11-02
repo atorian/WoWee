@@ -116,7 +116,7 @@ Json statistics(const rendering::RenderStatistics& s) {
         {"m2Skinned",s.m2Skinned}, {"m2BoneMatrices",s.m2BoneMatrices}, {"m2SunCasters",s.m2SunCasters},
         {"m2ParticleQuads",s.m2ParticleQuads}, {"m2InstanceChanges",s.m2InstanceChanges},
         {"m2Placed",s.m2Placed}, {"m2Moved",s.m2Moved}, {"m2ShownOrHidden",s.m2ShownOrHidden},
-        {"m2Finished",s.m2Finished},
+        {"m2Finished",s.m2Finished}, {"m2CulledFromColumns",s.m2CulledFromColumns},
         {"width",s.width}, {"height",s.height}};
 }
 }

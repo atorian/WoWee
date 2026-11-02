@@ -2545,6 +2545,12 @@ if(WOWEE_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_m2_moved.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/m2-moved)
         set_tests_properties(scene_m2_moved PROPERTIES SKIP_RETURN_CODE 77)
+        # What comes into view when the camera turns is drawn in the frame it
+        # turns, whether a GPU verdict or the CPU culled it.
+        wowee_add_gpu_test(scene_cull_turn
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_cull_turn.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/cull-turn)
+        set_tests_properties(scene_cull_turn PROPERTIES SKIP_RETURN_CODE 77)
         # A scene draws the same frame however long the world takes to stream in.
         wowee_add_gpu_test(scene_streamed_world_settled
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_streamed_world_settled.py

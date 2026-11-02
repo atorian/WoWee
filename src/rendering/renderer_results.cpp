@@ -85,6 +85,7 @@ void Renderer::publishFrameResults() {
         result.statistics.m2SunCasters = counts.sunCasters;
         result.statistics.m2ParticleQuads = counts.particleQuads;
         result.statistics.m2InstanceChanges = counts.instanceChanges;
+        result.statistics.m2CulledFromColumns = counts.culledFromColumns ? 1u : 0u;
         using Why = M2Renderer::InstanceChange;
         const auto by = [&](Why why) { return counts.changesBy[static_cast<size_t>(why)]; };
         result.statistics.m2Placed = by(Why::Placed);

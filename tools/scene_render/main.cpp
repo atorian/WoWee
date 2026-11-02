@@ -63,8 +63,10 @@
 //     "camera": { "offset": [-8, 0, 3],   // from the origin; or "position"
 //                 "lookAt": [0, 0, 2],    // from the origin; or "yaw"/"pitch"
 //                 "velocity": [0, 6, 0],  // optional: after the frames above, it
-//                 "motionFrames": 10 },   //   moves this fast (render yards/s) for
-//                                         //   this many more before the kept one
+//                 "motionFrames": 10,     //   moves this fast (render yards/s) for
+//                                         //   this many more before the kept one;
+//                 "lookAtLast": [9, 0, 0] }, // then turns at once to aim here
+//                                         //   for one frame more, the kept one
 //     "fov": 60.0,
 //     "size": [1280, 720],
 //     "frames": 30,                       // drawn before the one that is kept
@@ -1050,6 +1052,15 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
             drawFrame();
         }
     }
+    // Then, if asked, the camera turned at once to aim here, and one frame
+    // more - the kept one - drawn so: a player flicking the mouse. What any
+    // pass culls from what an earlier frame saw shows only in such a frame.
+    if (cam.contains("lookAtLast")) {
+        const glm::vec3 d = origin + vec3(cam["lookAtLast"]) - camera->getPosition();
+        camera->setRotation(glm::degrees(std::atan2(d.y, d.x)),
+                            glm::degrees(std::atan2(d.z, std::sqrt(d.x * d.x + d.y * d.y))));
+        drawFrame();
+    }
     timer.report(*renderer.getVkContext());
     // A repeatable strike after streaming has settled, for lighting and trail captures.
     if (scene.contains("lightning")) {
@@ -1074,6 +1085,8 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
                 keptStatistics.m2CullCandidates, keptStatistics.m2Drawn, keptStatistics.m2Skinned,
                 keptStatistics.m2BoneMatrices, keptStatistics.m2SunCasters,
                 keptStatistics.m2ParticleQuads, keptStatistics.m2InstanceChanges);
+    std::printf("scene_render: world M2 view culled from the %s in the kept frame\n",
+                keptStatistics.m2CulledFromColumns ? "columns" : "GPU verdict");
     std::printf("scene_render: WMO shadow draw calls: %u in the kept frame\n",
                 renderer.getWMORenderer()->getShadowDrawCallCount());
     if (const auto* rt = renderer.getRtScene()) {

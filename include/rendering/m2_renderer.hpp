@@ -587,8 +587,9 @@ public:
                                          const glm::mat4* strikeMatrix = nullptr, float strikeRadius = 1.0f);
     void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
     void prepareRender(uint32_t frameIndex, const Camera& camera);
-    /** Dispatch GPU frustum culling compute shader on primary cmd before render pass. */
-    void dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera);
+    /// Record into `cmd`, outside a render pass, the GPU cull of the
+    /// extracted frame's guard (cull_guard.hpp) over the whole cull table.
+    void dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex);
     /// Record into `cmd`, before the cull and every draw of the frame, the
     /// rows of the cull and instance tables that changed since the GPU last
     /// had them. Every frame that draws, whether or not it culls.
@@ -822,6 +823,7 @@ public:
     struct FrameCounts {
         uint32_t cullCandidates = 0, drawn = 0, skinned = 0, boneMatrices = 0;
         uint32_t sunCasters = 0, particleQuads = 0, instanceChanges = 0;
+        bool culledFromColumns = false;
         /// instanceChanges by why, in InstanceChange order.
         std::array<uint32_t, static_cast<size_t>(InstanceChange::Count)> changesBy{};
     };
@@ -1130,10 +1132,12 @@ private:
         float maxDistSqFactor = 0;  // M2CullGrid::Record::maxDistSqFactor
         uint32_t flags = 0;         // M2CullGrid flags; 0 for a free slot
         uint32_t id = 0;
-        uint32_t _pad = 0;
+        /// How far the cull centre lies from the position cullView measures
+        /// the distance from.
+        float centreOffset = 0.0f;
     };
     struct CullUniformsGPU {        // CullUniforms in m2_cull.comp.glsl (std140)
-        glm::vec4 frustumPlanes[6]; // xyz = normal, w = distance
+        glm::vec4 guardPlanes[4];   // CullGuard::planes
         glm::vec4 cameraPos;        // xyz = camera position, w = maxPossibleDistSq
         uint32_t slotCount;
         float baseMaxDistSq;
@@ -1141,7 +1145,8 @@ private:
         float groundDetailMaxDistance;
         float gameObjectMinDistance;
         float skyBirdMaxDistance;
-        uint32_t _pad[2] = {};
+        float guardDistance;
+        float rangeSlack;
     };
     /// A device buffer the cull owns, with what it holds room for.
     struct CullBuffer {
@@ -1199,12 +1204,14 @@ private:
     /// known to be submitted; 0 for none.
     uint32_t pendingUploadSerial_ = 0;
     /// The recorded cull not yet known to be submitted, and per frame slot
-    /// the one its list was last written by: the extracted frame it culled
-    /// and the scene that frame held.
+    /// the one its list was last written by: the extracted frame it culled,
+    /// the scene that frame held, and the guard and ranges it culled with.
     struct CullDispatch {
         bool valid = false;
         uint32_t frameIndex = 0, serial = 0;
         uint64_t sceneIdentity = 0;
+        CullGuard guard;
+        std::array<float, 3> ranges{};
     };
     CullDispatch pendingCullDispatch_;
     CullDispatch slotCullDispatch_[2];
@@ -1369,14 +1376,15 @@ private:
     void gatherShadowCandidates(const glm::mat4& lightSpace, float shadowRadius,
                                 std::vector<uint32_t>& out) const;
     std::vector<uint32_t> viewCandidates_;    // reused by render()
-    /// The view's candidates this frame, by instance index: those the GPU's
-    /// last verdict kept, marked kTrustedCandidate, and those to test here.
+    /// The view's candidates this frame, by instance index, each tested
+    /// against this frame's view by cullView.
     std::vector<uint32_t> cullCandidates_;
-    static constexpr uint32_t kTrustedCandidate = 1u << 31;
     /// cullCandidates_ for this frame: the verdict's kept instances and the
-    /// ones changed since it; without a verdict for this scene, the columns
-    /// in view, to be tested here.
-    void gatherCullCandidates(const glm::vec3& camPos, const Frustum& frustum, float maxPossibleDistSq);
+    /// ones changed since it, when the verdict's guard covers this view and
+    /// its ranges these `ranges` (CullDispatch::ranges); otherwise the
+    /// columns in view. Says which.
+    bool gatherCullCandidates(const Camera& camera, const Frustum& frustum, float maxPossibleDistSq,
+                              const std::array<float, 3>& ranges);
     /// The cull table row of instance `index`.
     [[nodiscard]] CullRowGPU cullRowOf(size_t index) const;
 
@@ -1399,6 +1407,8 @@ private:
     bool haveVerdict_ = false;
     uint64_t verdictScene_ = 0;
     uint32_t verdictSerial_ = 0;
+    CullGuard verdictGuard_;
+    std::array<float, 3> verdictRanges_{};
     std::vector<uint32_t> verdictVisible_;
     std::vector<uint32_t> slotChangeSerial_;     ///< by slot: the frame it last changed in
     std::vector<uint32_t> changedSinceVerdict_;  ///< slots, may repeat
@@ -1814,6 +1824,11 @@ public:
         /// ranges its test reads.
         uint32_t cullSlotCount = 0, cullSerial = 0;
         float cullBaseMaxDistSq = 0, cullViewDistance = 0, cullGroundDetailMaxDistance = 0;
+        /// The guard of this frame's view, which the GPU cull tests against.
+        CullGuard cullGuard;
+        /// Whether its view candidates came from the columns, the verdict in
+        /// hand not covering its view.
+        bool culledFromColumns = false;
         std::vector<ShadowDraw> depth, solarDepth, strikeDepth;
         /// The models the three caster lists point into, kept alive with the
         /// frame: one reference for each run of a model's casters rather than

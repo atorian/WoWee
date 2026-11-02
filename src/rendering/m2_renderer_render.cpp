@@ -871,8 +871,8 @@ void M2Renderer::extractCull(const Camera& camera, Frame& frame) {
     // must cover that ceiling: twice the adaptive clutter range can be much
     // shorter than a large landmark's own range once a dense scene settles.
     const float maxPossibleDistSq = cappedViewDistance() * cappedViewDistance();
-    (void)camera;
 
+    frame.cullGuard = cullGuardFor(camera);
     frame.maxPossibleDistSq = maxPossibleDistSq;
     frame.cullBaseMaxDistSq = maxRenderDistanceSq;
     frame.cullViewDistance = cappedViewDistance();
@@ -936,7 +936,7 @@ void M2Renderer::extractCull(const Camera& camera, Frame& frame) {
 M2Renderer::CullRowGPU M2Renderer::cullRowOf(size_t index) const {
     const M2CullGrid::Record& r = scene_->cullGrid_.record(static_cast<uint32_t>(index));
     return {.sphere = glm::vec4(r.cullCenter, r.paddedRadius), .maxDistSqFactor = r.maxDistSqFactor,
-            .flags = r.flags, .id = r.id};
+            .flags = r.flags, .id = r.id, .centreOffset = glm::length(r.cullCenter - r.position)};
 }
 
 namespace {
@@ -1136,7 +1136,7 @@ void M2Renderer::uploadSlotTables(VkCommandBuffer cmd, uint32_t frameIndex) {
     pendingUploadSerial_ = frame.cullSerial;
 }
 
-void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera) {
+void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex) {
     if (!cullPipeline_) return;
     // What this slot's last submitted cull kept, now its fence has passed.
     collectCullOutput(frameIndex);
@@ -1153,27 +1153,30 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
     memoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT);
 
-    Frustum frustum;
-    frustum.extractFromMatrix(camera.getViewProjectionMatrix());
+    // The guard of the extracted frame's view, so the verdict holds for the
+    // frames after it whose view the guard still covers.
+    const CullGuard& guard = frame.cullGuard;
     auto* ubo = static_cast<CullUniformsGPU*>(cullUniformMapped_[frameIndex]);
-    for (int i = 0; i < 6; i++) {
-        const auto& p = frustum.getPlane(static_cast<Frustum::Side>(i));
-        ubo->frustumPlanes[i] = glm::vec4(p.normal, p.distance);
-    }
-    ubo->cameraPos = glm::vec4(camera.getPosition(), frame.maxPossibleDistSq);
+    for (size_t i = 0; i < guard.planes.size(); ++i) ubo->guardPlanes[i] = guard.planes[i];
+    ubo->cameraPos = glm::vec4(guard.position, frame.maxPossibleDistSq);
     ubo->slotCount = frame.cullSlotCount;
     ubo->baseMaxDistSq = frame.cullBaseMaxDistSq;
     ubo->viewDistance = frame.cullViewDistance;
     ubo->groundDetailMaxDistance = frame.cullGroundDetailMaxDistance;
     ubo->gameObjectMinDistance = rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE;
     ubo->skyBirdMaxDistance = rendering::M2_SKY_BIRD_MAX_RENDER_DISTANCE;
+    ubo->guardDistance = kCullGuardDistance;
+    ubo->rangeSlack = kCullGuardRangeSlack;
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cullPipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                             cullPipelineLayout_, 0, 1, &cullSet_[frameIndex], 0, nullptr);
     vkCmdDispatch(cmd, (frame.cullSlotCount + 63) / 64, 1, 1);
     pendingCullDispatch_ = CullDispatch{.valid = true, .frameIndex = frameIndex,
-                                        .serial = frame.cullSerial, .sceneIdentity = frame.sceneIdentity};
+                                        .serial = frame.cullSerial, .sceneIdentity = frame.sceneIdentity,
+                                        .guard = guard,
+                                        .ranges = {std::sqrt(frame.cullBaseMaxDistSq), frame.cullViewDistance,
+                                                   frame.cullGroundDetailMaxDistance}};
 
     // The kept list is the host's after this frame's fence: collectCullOutput
     // invalidates and reads it when this frame slot comes round again.
@@ -1564,11 +1567,16 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
         }
     }
 
-    // What the GPU's last verdict kept and what changed since it; before the
-    // first verdict, the columns in view. This walked the whole resident
-    // world - ninety thousand instances in Dalaran - for the few thousand it
-    // drew, and then the columns in view - some twenty thousand.
-    if (!forceNoCull_) gatherCullCandidates(camPos, frustum, maxPossibleDistSq);
+    // What the GPU's last verdict kept and what changed since it, while the
+    // verdict's guard covers this view; otherwise the columns in view. This
+    // walked the whole resident world - ninety thousand instances in Dalaran
+    // - for the few thousand it drew, and then the columns in view - some
+    // twenty thousand.
+    if (!forceNoCull_) {
+        frame.culledFromColumns = gatherCullCandidates(
+            camera, frustum, maxPossibleDistSq,
+            {smoothedRenderDist_, cappedViewDistance(), groundDetailMaxDistance_});
+    }
     const auto& candidates = forceNoCull_ ? viewCandidates_ : cullCandidates_;
     if (forceNoCull_) {
         viewCandidates_.resize(scene_->instances.size());
@@ -1598,8 +1606,7 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
         using G = M2CullGrid;
         const G& grid = scene_->cullGrid_;
         for (uint32_t k = begin; k < end; ++k) {
-            const bool trusted = (list[k] & kTrustedCandidate) != 0;
-            const uint32_t i = list[k] & ~kTrustedCandidate;
+            const uint32_t i = list[k];
             // The tests read the instance's cull record; the instance itself
             // only once it is kept.
             const G::Record& r = grid.record(i);
@@ -1621,11 +1628,6 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
 
             if (forceNoCull_) {
                 if (!(r.flags & G::kValid)) continue;
-                glm::vec3 toCam = r.position - camPos;
-                distSq = glm::dot(toCam, toCam);
-                effectiveMaxDistSq = instanceMaxDistSq;
-            } else if (trusted) {
-                // The GPU kept it, and it has not changed since.
                 glm::vec3 toCam = r.position - camPos;
                 distSq = glm::dot(toCam, toCam);
                 effectiveMaxDistSq = instanceMaxDistSq;
@@ -1840,7 +1842,8 @@ void M2Renderer::collectCullOutput(uint32_t frame) {
     vmaInvalidateAllocation(vkCtx_->getAllocator(), list.alloc, 0, VK_WHOLE_SIZE);
     const auto* data = static_cast<const uint32_t*>(list.mapped);
     const uint32_t count = std::min(data[0], list.capacity);
-    CullVerdict verdict{.sceneIdentity = done.sceneIdentity, .serial = done.serial};
+    CullVerdict verdict{.sceneIdentity = done.sceneIdentity, .serial = done.serial, .guard = done.guard,
+                        .ranges = done.ranges};
     verdict.kept.assign(data + 1, data + 1 + 2 * size_t(count));
     std::lock_guard<std::mutex> lock(cullResultMutex_);
     collectedCull_.push_back(std::move(verdict));
@@ -1904,17 +1907,31 @@ void M2Renderer::acceptCullVerdicts(const std::vector<CullVerdict>& verdicts) {
     std::sort(kept.begin(), kept.end());
     verdictVisible_ = std::move(kept);
     verdictSerial_ = serial;
+    verdictGuard_ = newest->guard;
+    verdictRanges_ = newest->ranges;
     verdictScene_ = scene_->identity;
     haveVerdict_ = true;
 }
 
-void M2Renderer::gatherCullCandidates(const glm::vec3& camPos, const Frustum& frustum, float maxPossibleDistSq) {
+bool M2Renderer::gatherCullCandidates(const Camera& camera, const Frustum& frustum, float maxPossibleDistSq,
+                                      const std::array<float, 3>& ranges) {
     auto& out = cullCandidates_;
     out.clear();
-    if (!haveVerdict_ || verdictScene_ != scene_->identity) {
-        // No verdict for this scene yet: the columns in view, tested here.
-        gatherViewCandidates(camPos, frustum, maxPossibleDistSq, out);
-        return;
+    // The verdict holds only while its guard covers this view and its ranges
+    // these: otherwise something in view now may lie outside what it tested.
+    // WOWEE_CULL_ON_CPU=1 never uses one: the picture a GPU verdict should
+    // give, to compare it with.
+    bool covered = !cullOnCpu() && haveVerdict_ && verdictScene_ == scene_->identity &&
+                   cullGuardCovers(verdictGuard_, camera);
+    for (size_t i = 0; covered && i < ranges.size(); ++i) {
+        // A ground clutter range of 0 is none at all, wider than any.
+        const bool unbounded = ranges[i] <= 0.0f, wasUnbounded = verdictRanges_[i] <= 0.0f;
+        covered = wasUnbounded || (!unbounded && cullGuardRangeCovers(verdictRanges_[i], ranges[i]));
+    }
+    if (!covered) {
+        // No verdict that holds: the columns in view, tested here.
+        gatherViewCandidates(camera.getPosition(), frustum, maxPossibleDistSq, out);
+        return true;
     }
     const InstanceSlots& slots = scene_->slots;
     const uint32_t slotCount = slots.slotCount();
@@ -1925,11 +1942,11 @@ void M2Renderer::gatherCullCandidates(const glm::vec3& camPos, const Frustum& fr
     }
     const uint32_t stamp = markStamp_;
     out.reserve(verdictVisible_.size() + changedSinceVerdict_.size());
-    // What the GPU kept, unchanged since: trusted.
+    // What the GPU kept inside the guard, unchanged since.
     for (const uint32_t slot : verdictVisible_) {
         if (slots.idAt(slot) == InstanceSlots::invalid || slotChangeSerial_[slot] > verdictSerial_) continue;
         slotMark_[slot] = stamp;
-        out.push_back(scene_->indexOfSlot[slot] | kTrustedCandidate);
+        out.push_back(scene_->indexOfSlot[slot]);
     }
     // What changed after the frame it culled - placed, moved, shown - is
     // tested here, as an instance with no verdict always was.
@@ -1939,13 +1956,15 @@ void M2Renderer::gatherCullCandidates(const glm::vec3& camPos, const Frustum& fr
         slotMark_[slot] = stamp;
         out.push_back(scene_->indexOfSlot[slot]);
     }
+    return false;
 }
 
 void M2Renderer::Frame::clear() noexcept {
     drawInstances_.clear(); sortedVisible_.clear(); transparentVisible_.clear();
     glowSprites_.clear(); ribbonDraws_.clear(); particleRuns_.clear();
     ribbonVertices.clear(); particleVertices.clear(); bones.clear();
-    cullUpdateSlots.clear(); cullUpdateRows.clear(); instanceUpdateRows.clear(); cullReset = false; cullSlotCount = cullSerial = 0;
+    cullUpdateSlots.clear(); cullUpdateRows.clear(); instanceUpdateRows.clear(); cullReset = false;
+    cullGuard = {}; culledFromColumns = false; cullSlotCount = cullSerial = 0;
     depth.clear(); solarDepth.clear(); strikeDepth.clear(); shadowModels.clear();
     instanceEntries = 0;
     skinnedDraws = 0;
@@ -1965,6 +1984,7 @@ M2Renderer::FrameCounts M2Renderer::recordedCounts() const {
             .sunCasters = static_cast<uint32_t>(frame.solarDepth.size()),
             .particleQuads = static_cast<uint32_t>(frame.particleVertices.size()),
             .instanceChanges = std::accumulate(frame.changesBy.begin(), frame.changesBy.end(), 0u),
+            .culledFromColumns = frame.culledFromColumns,
             .changesBy = frame.changesBy};
 }
 
