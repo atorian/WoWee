@@ -55,6 +55,7 @@ bool GeometryPool::makePage(uint32_t vertexRoom, uint32_t indexRoom, bool fitted
 GeometryPool::Range GeometryPool::place(const void* vertices, uint32_t vertexCount, const void* indices,
                                         uint32_t indexCount) {
     if (vertexCount == 0 || indexCount == 0) return {};
+    takeReturned();
     const bool shareable = vertexCount <= config_.pageVertices && indexCount <= config_.pageIndices;
 
     // A shared page with room, else a new one in the first empty slot, else
@@ -109,14 +110,28 @@ GeometryPool::Range GeometryPool::place(const void* vertices, uint32_t vertexCou
 
 void GeometryPool::release(const Range& range) {
     if (!range.placed() || static_cast<size_t>(range.page) >= pages_.size() || !pages_[range.page]) return;
-    // A frame in flight may still draw it; the ranges come back after it.
-    context_->deferAfterAllFrameFences([page = pages_[range.page], range] {
-        page->vertexRanges.free(static_cast<uint32_t>(range.baseVertex), range.vertexCount);
-        page->indexRanges.free(range.firstIndex, range.indexCount);
+    // A frame in flight may still draw it; the ranges come back after it, on
+    // the thread that retires frames, and are freed here on the next call.
+    context_->deferAfterAllFrameFences([returned = returned_, page = pages_[range.page], range] {
+        std::lock_guard lock(returned->mutex);
+        returned->ranges.emplace_back(page, range);
     });
 }
 
+void GeometryPool::takeReturned() {
+    std::vector<std::pair<std::shared_ptr<Page>, Range>> ranges;
+    {
+        std::lock_guard lock(returned_->mutex);
+        ranges.swap(returned_->ranges);
+    }
+    for (const auto& [page, range] : ranges) {
+        page->vertexRanges.free(static_cast<uint32_t>(range.baseVertex), range.vertexCount);
+        page->indexRanges.free(range.firstIndex, range.indexCount);
+    }
+}
+
 void GeometryPool::releaseEmptyPages() {
+    takeReturned();
     // A page is empty only once every mesh in it has been retired behind the
     // frame fences, so nothing in flight reads it and it can go now.
     bool spareKept = false;

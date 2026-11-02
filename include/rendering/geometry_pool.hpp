@@ -12,7 +12,10 @@
 // back after the frames that may draw them; a page left empty goes when its
 // owner says so (releaseEmptyPages), all but one spare shared page.
 //
-// Main thread; the buffers are read by the recording.
+// Main thread; the buffers are read by the recording. The frames are retired
+// on the render thread, which only hands a range back (returned_); the main
+// thread frees it into its page before it next places a mesh or lets a page
+// go.
 
 #include "rendering/range_allocator.hpp"
 #include "rendering/vk_utils.hpp"
@@ -21,6 +24,8 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <utility>
 #include <vector>
 
 namespace wowee {
@@ -94,12 +99,21 @@ private:
         RangeAllocator indexRanges;
         bool fitted = false;
     };
+    /// Ranges no frame draws any more, handed back by the thread that
+    /// retires frames.
+    struct Returned {
+        std::mutex mutex;
+        std::vector<std::pair<std::shared_ptr<Page>, Range>> ranges;
+    };
     [[nodiscard]] uint32_t indexBytes() const { return config_.indexType == VK_INDEX_TYPE_UINT16 ? 2u : 4u; }
     bool makePage(uint32_t vertexRoom, uint32_t indexRoom, bool fitted, int32_t& slot);
+    /// The returned ranges freed into their pages.
+    void takeReturned();
 
     Config config_;
     VkContext* context_ = nullptr;
     std::vector<std::shared_ptr<Page>> pages_;
+    std::shared_ptr<Returned> returned_ = std::make_shared<Returned>();
     /// Set, and said once, when a shared page could not be made: none is
     /// tried again until a page is let go.
     bool exhausted_ = false;
