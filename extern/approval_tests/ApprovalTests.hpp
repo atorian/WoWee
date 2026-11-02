@@ -4015,7 +4015,12 @@ namespace ApprovalTests
     void TestName::setFileName(const std::string& file)
     {
         originalFileName = file;
-        fileName = file.empty() ? handleBoostQuirks() : findFileName(file);
+        // WoWee patch: GCC and Clang on Windows (MinGW, Ninja) give __FILE__
+        // with '/' separators, while the namer splits the path on the
+        // platform's separator; without this the approved file is looked
+        // for as approvals\D__path_to_tests_<file>.<case>.approved.<ext>.
+        fileName = file.empty() ? handleBoostQuirks()
+                                : findFileName(Path::normalizeSeparators(file));
     }
 
     std::string TestName::findFileName(const std::string& file)

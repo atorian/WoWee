@@ -15,5 +15,5 @@ when upgrading any dependency so maintainers can track drift.
 | stb_image | 2.30 | https://github.com/nothings/stb | Single header |
 | stb_image_write | 1.16 | https://github.com/nothings/stb | Single header |
 | Catch2 | amalgamated (Catch2 v3.x) | https://github.com/catchorg/Catch2 | Vendored `catch_amalgamated.{cpp,hpp}` — test build only |
-| ApprovalTests.cpp | v.10.13.0 | https://github.com/approvals/ApprovalTests.cpp | Single header (`extern/approval_tests/ApprovalTests.hpp`) — test build only; Catch2 v3 header shims in `tests/approval_catch2` |
+| ApprovalTests.cpp | v.10.13.0 | https://github.com/approvals/ApprovalTests.cpp | Single header (`extern/approval_tests/ApprovalTests.hpp`) — test build only; Catch2 v3 header shims in `tests/approval_catch2`. Patched: `TestName::setFileName` normalises the test file's separators (marked "WoWee patch"), keep it when upgrading |
 | Lua | 5.1.5 | https://www.lua.org/ | Intentionally 5.1 for WoW addon API compatibility |
