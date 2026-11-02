@@ -74,6 +74,7 @@ class ChargeEffect;
 class CharacterRenderer;
 class SceneCommands;
 class CharacterEmitters;
+class CpuStageTimes;
 class WMORenderer;
 class M2Renderer;
 class Minimap;
@@ -809,6 +810,10 @@ private:
     std::unique_ptr<RtScene> rtScene_;
     std::unique_ptr<RtLighting> rtLighting_;
     void writeRtLightingBindings(uint32_t slot);
+    /// The doodads' and the sky models' work on the GPU before any pass
+    /// draws them, in beginFrame: their tables' changes, the cull, their
+    /// skeletons and particles.
+    void recordModelCompute(CpuStageTimes& stages);
     VkExtent2D sceneRenderExtent() const;
     /// `stageGroup` is the renderer call it is recorded from, which its CPU
     /// parts are timed under (CpuStageTimes).

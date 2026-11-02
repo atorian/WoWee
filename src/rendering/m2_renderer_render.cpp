@@ -330,8 +330,10 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
     const glm::vec3 cameraPos = glm::vec3(glm::inverse(view)[3]);
     const glm::mat4 viewProjection = projection * view;
     ZoneScopedN("M2Renderer::update");
-    // The emitters', lights' and glow cards' bones as the GPU posed them.
+    // The ribbons', lights' and glow cards' bones as the GPU posed them, and
+    // what it last said of the particles.
     takeReadBones();
+    takeParticleReads();
     // The spatial grid, the cull grid and the id map are kept up to date by
     // every create, move and removal on the main thread; this update, which
     // runs on a frame worker, only reads them.
@@ -555,8 +557,11 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
         }
     }
 
-    // Particle update (sequential - uses RNG, not thread-safe)
-    // Only iterate instances that have particle emitters (pre-built list).
+    // The emitters that run this frame. Their particles are emitted and moved
+    // on the GPU (m2_particles.comp), over this update's time; here they are
+    // only marked, and given room the first time they run.
+    ++particleSerial_;
+    particleDt_ = deltaTime;
     for (size_t idx : scene_->particleInstanceIndices_) {
         if (idx >= scene_->instances.size()) continue;
         auto& instance = scene_->instances[idx];
@@ -568,14 +573,11 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
             std::transform(name.begin(), name.end(), name.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             if (name.find(kParticleDiag) != std::string::npos) {
-                glm::vec3 offset(0.0f);
-                if (!instance.particles.empty()) offset = instance.particles.front().position - instance.position;
                 LOG_WARNING("M2 PARTICLES '", instance.cachedModel->name, "' instance ", instance.id,
                             " gameObject=", instance.isGameObject ? 1 : 0,
                             " dist=", std::sqrt(distSq), " max=", std::sqrt(cachedMaxRenderDistSq_),
                             " emitters=", instance.cachedModel->particleEmitters.size(),
-                            " live=", instance.particles.size(),
-                            " first at (", offset.x, ", ", offset.y, ", ", offset.z, ") from the instance",
+                            " live=", instance.liveParticles, " reach=", instance.particleReach,
                             " bones=", instance.boneMatrices.size(),
                             " seq=", instance.currentSequenceIndex, " animTime=", animTimeOf(instance),
                             " scale=", instance.scale,
@@ -598,24 +600,8 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
             !updateFrustum.intersectsSphere(instance.cachedCullCenter, viewRadius)) {
             continue;
         }
-        // A long frame in steps of at most 0.1 s, and no more than the
-        // longest lifespan's worth of them (0x97acb0).
         const M2ModelGPU& model = *instance.cachedModel;
-        float longestLife = 0.0f;
-        for (const auto& em : model.particleEmitters) {
-            longestLife = std::max(longestLife,
-                interpFloat(em.lifespan, animTimeOf(instance), globalSequenceTimeOf(instance),
-                            instance.currentSequenceIndex, model.globalSequenceDurations) +
-                em.lifespanVary);
-        }
-        float remaining = longestLife > 0.0f ? std::min(deltaTime, longestLife) : deltaTime;
-        while (remaining > 0.0f) {
-            const float step = std::min(remaining, kM2ParticleMaxStep);
-            remaining -= step;
-            // A finished effect emits nothing more; what it has flies on.
-            if (!instance.finishing) emitParticles(instance, model, step);
-            updateParticles(instance, step);
-        }
+        if (placeParticles(instance)) instance.particlesRanAt = particleSerial_;
         if (!model.ribbonEmitters.empty()) {
             updateRibbons(instance, model, deltaTime, !instance.finishing);
         }
@@ -718,10 +704,16 @@ void M2Renderer::prepareRender(uint32_t frameIndex, const Camera&) {
     prepareInstanceStorage(frameIndex, recording_->instanceEntries);
 }
 
-void M2Renderer::poseSkeletons(VkCommandBuffer cmd, uint32_t frameIndex) {
+void M2Renderer::poseSkeletons(VkCommandBuffer cmd, uint32_t frameIndex, const PosedBones& characters) {
     if (frameIndex >= 2) return;
-    // A frame the pass could not pose (said) draws none of its skinned models.
+    // A frame the pass could not pose (said) draws none of its skinned models
+    // and runs none of its particles, which stand on those bones.
     posed_[frameIndex] = skeletonPass_.record(cmd, frameIndex, recording_->skeleton);
+    const VkDescriptorSet bones = skeletonPass_.drawSet(frameIndex);
+    particlesRun_[frameIndex] =
+        posed_[frameIndex] &&
+        particlePass_.record(cmd, frameIndex, recording_->particles, bones, characters.set ? characters.set : bones,
+                             characters.set && characters.posed);
 }
 
 SkeletonRequestGPU M2Renderer::skeletonRequest(const M2Instance& instance, uint32_t outBase) const {
@@ -741,38 +733,33 @@ SkeletonRequestGPU M2Renderer::skeletonRequest(const M2Instance& instance, uint3
     return request;
 }
 
-void M2Renderer::poseUnseen(const Camera& camera, Frame& frame) const {
-    // Out of view, a model near the camera still runs its emitters (within
-    // 33.3 yards for an entity, 10 for a doodad; updateParticles) and its
-    // lights (within 10; gatherLocalLights), on bones the GPU poses for
-    // them alone. Those in view were posed with their draws.
+uint32_t M2Renderer::poseOf(size_t index, Frame& frame) {
+    const auto [at, asked] = posedThisFrame_.try_emplace(static_cast<uint32_t>(index), 0u);
+    if (!asked) return at->second;
+    const M2Instance& inst = scene_->instances[index];
+    SkeletonFrame& skeleton = frame.skeleton;
+    const uint32_t outBase = skeleton.boneCount;
+    at->second = static_cast<uint32_t>(skeleton.requests.size());
+    skeleton.requests.push_back(skeletonRequest(inst, outBase));
+    for (const uint16_t bone : inst.cachedModel->readBones)
+        skeleton.reads.push_back({.owner = inst.id, .bone = bone, .source = outBase + bone});
+    skeleton.boneCount += inst.cachedModel->skeleton.boneCount;
+    return at->second;
+}
+
+void M2Renderer::poseUnseenLights(const Camera& camera, Frame& frame) {
+    // Out of view, a doodad within ten yards of the camera still shines
+    // (gatherLocalLights), on bones the GPU poses for it alone.
     const glm::vec3 eye = camera.getPosition();
-    const auto unseenNear = [&](size_t index) {
-        if (index >= scene_->instances.size()) return false;
+    for (const size_t index : scene_->lightInstanceIndices_) {
+        if (index >= scene_->instances.size()) continue;
         const M2Instance& inst = scene_->instances[index];
         if (!inst.cachedModel || inst.cachedModel->readBones.empty() || !inst.cachedModel->skeleton.placed() ||
             !inst.cachedHasAnimation || inst.cachedDisableAnimation || !inst.cachedIsValid || inst.hidden)
-            return false;
-        if (scene_->cullGrid_.record(static_cast<uint32_t>(index)).lastVisible) return false;
-        const bool entity = inst.isGameObject || inst.cachedModel->isSpellEffect;
-        const float withinSq = entity ? 1111.1f : 100.0f;
+            continue;
         const glm::vec3 toEye = inst.position - eye;
-        return glm::dot(toEye, toEye) <= withinSq;
-    };
-    SkeletonFrame& skeleton = frame.skeleton;
-    const auto pose = [&](size_t index) {
-        const M2Instance& inst = scene_->instances[index];
-        const uint32_t outBase = skeleton.boneCount;
-        skeleton.requests.push_back(skeletonRequest(inst, outBase));
-        for (const uint16_t bone : inst.cachedModel->readBones)
-            skeleton.reads.push_back({.owner = inst.id, .bone = bone, .source = outBase + bone});
-        skeleton.boneCount += inst.cachedModel->skeleton.boneCount;
-    };
-    for (const size_t index : scene_->particleInstanceIndices_)
-        if (unseenNear(index)) pose(index);
-    // Those with emitters were taken above.
-    for (const size_t index : scene_->lightInstanceIndices_)
-        if (unseenNear(index) && !scene_->instances[index].cachedHasEmitters) pose(index);
+        if (glm::dot(toEye, toEye) <= 100.0f) poseOf(index, frame);
+    }
 }
 
 void M2Renderer::takeReadBones() {
@@ -1341,6 +1328,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
 
 void M2Renderer::joinVisibleChunks(Frame& frame) {
     auto& chunks = visibilityChunks_;
+    posedThisFrame_.clear();
     const auto reserveGrowing = [](auto& values, size_t count) {
         if (count > values.capacity())
             values.reserve(std::max(count, values.capacity() + values.capacity() / 2));
@@ -1364,6 +1352,8 @@ void M2Renderer::joinVisibleChunks(Frame& frame) {
         const uint32_t base = static_cast<uint32_t>(frame.drawInstances_.size());
         // And its bones from zero, after the ones before it.
         const uint32_t boneBase = skeleton.boneCount;
+        const auto requestBase = static_cast<uint32_t>(skeleton.requests.size());
+        for (const auto& [index, request] : chunk.posed) posedThisFrame_[index] = requestBase + request;
         for (const uint32_t d : chunk.skinned) chunk.draws[d].boneBase += boneBase;
         frame.skinnedDraws += static_cast<uint32_t>(chunk.skinned.size());
         for (SkeletonRequestGPU& request : chunk.requests) request.outBase += boneBase;
@@ -1572,6 +1562,8 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
                                  instance.cachedModel && instance.cachedModel->skeleton.placed();
             const uint32_t firstBone = out.boneCount;
             if (skinned) {
+                if (instance.cachedHasEmitters || instance.cachedModel->canThrowLocalLight())
+                    out.posed.emplace_back(i, static_cast<uint32_t>(out.requests.size()));
                 out.requests.push_back(skeletonRequest(instance, firstBone));
                 for (const uint16_t bone : instance.cachedModel->readBones)
                     out.reads.push_back({.owner = instance.id, .bone = bone, .source = firstBone + bone});
@@ -1868,7 +1860,7 @@ bool M2Renderer::gatherCullCandidates(const Camera& camera, const Frustum& frust
 void M2Renderer::Frame::clear() noexcept {
     drawInstances_.clear(); sortedVisible_.clear(); transparentVisible_.clear();
     glowSprites_.clear(); ribbonDraws_.clear(); particleRuns_.clear();
-    ribbonVertices.clear(); particleVertices.clear(); skeleton.clear();
+    ribbonVertices.clear(); skeleton.clear(); particles.clear();
     cullUpdateSlots.clear(); cullUpdateRows.clear(); instanceUpdateRows.clear(); cullReset = false;
     materialUpdateSlots.clear(); materialUpdateRows.clear(); materialRowCount = 0;
     cullGuard = {}; culledFromColumns = false; cullSlotCount = cullSerial = 0;
@@ -1889,7 +1881,7 @@ M2Renderer::FrameCounts M2Renderer::recordedCounts() const {
             .skinned = frame.skinnedDraws,
             .boneMatrices = frame.skeleton.boneCount,
             .sunCasters = static_cast<uint32_t>(frame.solarDepth.size()),
-            .particleQuads = static_cast<uint32_t>(frame.particleVertices.size()),
+            .particleQuads = particlePass_.quadsLaidOut(),
             .instanceChanges = std::accumulate(frame.changesBy.begin(), frame.changesBy.end(), 0u),
             .culledFromColumns = frame.culledFromColumns,
             .changesBy = frame.changesBy};
@@ -1898,7 +1890,7 @@ M2Renderer::FrameCounts M2Renderer::recordedCounts() const {
 std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camera, std::string_view stageGroup,
         const std::vector<LocalLight>& lights, float time, const glm::mat4& shadowMatrix, float shadowRadius,
         const glm::mat4* overheadMatrix, float overheadRadius,
-        const glm::mat4* strikeMatrix, float strikeRadius) {
+        const glm::mat4* strikeMatrix, float strikeRadius, const PosedSkeletons* characters) {
     // The world's extraction was one number in the frame profile - 5.4 ms of
     // a 21.5 ms frame in Dalaran - that could not say which of these steps it
     // was. Each is timed apart.
@@ -1920,21 +1912,21 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
     laps.lap("view candidates");
     cullView(camera, *frame);
     laps.lap("visibility");
-    // The skeletons to pose: the drawn ones cullView asked for, and the
-    // unseen ones near enough to run their emitters and lights - one level,
-    // none rides another.
-    frame->skeleton.view = camera.getViewMatrix();
-    frame->skeleton.pages = skeletons_.pageBuffers();
-    frame->skeleton.pagesVersion = skeletons_.version();
-    poseUnseen(camera, *frame);
-    frame->skeleton.levelEnds.push_back(static_cast<uint32_t>(frame->skeleton.requests.size()));
-    laps.lap("skeletons");
     // One base record and at most one override per batch (opaque UVs or
     // transparent draws). This bounds every pass before any command is recorded.
     for(const auto& draw:frame->drawInstances_)
         if(draw.model) frame->instanceEntries+=uint64_t(1)+draw.model->batches.size();
-    gatherM2Particles(*frame, camera.getPosition());
+    gatherM2Particles(*frame, camera.getPosition(), characters);
     laps.lap("particles");
+    // The skeletons to pose: the drawn ones cullView asked for, those the
+    // emitters run on, and the unseen ones near enough to shine - one
+    // level, none rides another.
+    frame->skeleton.view = camera.getViewMatrix();
+    frame->skeleton.pages = skeletons_.pageBuffers();
+    frame->skeleton.pagesVersion = skeletons_.version();
+    poseUnseenLights(camera, *frame);
+    frame->skeleton.levelEnds.push_back(static_cast<uint32_t>(frame->skeleton.requests.size()));
+    laps.lap("skeletons");
     gatherM2Ribbons(*frame, camera.getPosition());
     laps.lap("ribbons");
     // The candidates that cast, as the shadow passes take them: all of it off

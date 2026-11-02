@@ -16,6 +16,8 @@
 #include "rendering/instance_random.hpp"
 #include "rendering/m2_cull_grid.hpp"
 #include "rendering/shadow_params.hpp"
+#include "rendering/m2_particle_pass.hpp"
+#include "rendering/particle_pool.hpp"
 #include "rendering/skeleton_pass.hpp"
 #include "rendering/skeleton_pool.hpp"
 
@@ -190,9 +192,13 @@ struct M2ModelGPU {
     /// Where its bones and keys are in the renderer's SkeletonPool, for an
     /// animated model; the GPU poses it from there and nowhere else.
     SkeletonPool::Skeleton skeleton;
-    /// The bones the CPU reads - its emitters', ribbons', lights' and glow
-    /// cards' - sorted; copied back for an instance each frame it is posed.
+    /// The bones the CPU reads - its ribbons', lights', glow cards' and
+    /// emitters' (a ground fire's glow sits on its lowest) - sorted; copied
+    /// back for an instance each frame it is posed.
     std::vector<uint16_t> readBones;
+    /// Its particle emitters in the same pool, which they are run from on
+    /// the GPU (m2_particles.comp).
+    SkeletonPool::Emitters emitters;
 
     // Skeletal animation data (kept from M2Model for bone computation)
     std::vector<pipeline::M2Bone> bones;
@@ -262,27 +268,6 @@ struct M2ModelGPU {
     [[nodiscard]] bool canThrowLocalLight() const { return !lights.empty(); }
 };
 
-/**
- * A single M2 particle emitted from a particle emitter
- */
-struct M2Particle {
-    glm::vec3 position;
-    glm::vec3 velocity;
-    float life;        // current age in seconds
-    float maxLife;     // total lifespan
-    int emitterIndex;  // which emitter spawned this
-    float tileIndex = 0.0f; // atlas cell picked at spawn (flag 0x10000)
-    /// Its own size factor from the emitter's scale variation.
-    glm::vec2 sizeFactor{1.0f};
-    /// Its draws in [-1, 1] for the spin's base angle and rate, and the spin
-    /// direction (flag 0x200 makes it random).
-    float spinRandBase = 0.0f;
-    float spinRandRate = 0.0f;
-    float spinSign = 1.0f;
-    /// Its own offset into the twinkle table.
-    uint32_t twinkleOffset = 0;
-};
-
 /// How a particle quad is laid out (render spec, section 4.5).
 enum class M2ParticleShape : uint32_t {
     Billboard = 0,      ///< facing the camera, turned by its spin
@@ -291,7 +276,8 @@ enum class M2ParticleShape : uint32_t {
     Plane = 3,          ///< in the plane of axisA and axisB (flag 0x1000)
 };
 
-/// One particle quad as m2_particle.vert reads it, an instance per quad.
+/// One particle quad as m2_particles.comp lays it out (the glow sprites'
+/// on the CPU) and m2_particle.vert reads it, an instance per quad.
 struct M2ParticleQuad {
     glm::vec3 position;        ///< the particle (its head), world
     glm::vec4 color;           ///< colour and alpha, straight
@@ -373,16 +359,24 @@ struct M2Instance {
     /// alone, every layer of it, since an opaque layer cannot fade otherwise.
     float fade = 1.0f;
 
-    // Particle emitter state
-    std::vector<float> emitterAccumulators;  // fractional particle counter per emitter
-    /// Per emitter, the most particles it may hold (m2EmitterPool): grown to
-    /// what it has needed, never shrunk, as the client keeps it.
-    std::vector<uint32_t> emitterPools;
-    std::vector<M2Particle> particles;
-    /// How far its live particles are from cachedCullCenter, at most, as of
-    /// the last update: with the model's own radius, the sphere they are seen
-    /// in. A mage portal's swirl and a tail of smoke leave the model's bounds.
+    // Particle emitter state. Its particles live and run on the GPU
+    // (ParticlePool, m2_particles.comp): each emitter has a range there from
+    // the first frame it runs until the instance goes or is hidden.
+    std::vector<ParticlePool::Range> particleRanges;  // by particle emitter
+    /// The update that last ran its emitters (M2Renderer::particleSerial_).
+    uint64_t particlesRanAt = 0;
+    /// What the GPU last said of them, two frames late: how many are alive,
+    /// and how far the farthest is from cachedCullCenter - with the model's
+    /// own radius, the sphere they are seen in. A mage portal's swirl and a
+    /// tail of smoke leave the model's bounds.
+    uint32_t liveParticles = 0;
     float particleReach = 0.0f;
+    /// How many counts have come back, and how many had when it began to
+    /// finish: a finishing effect waits for a count from after that.
+    uint32_t particleCounts = 0;
+    uint32_t particleCountsAtFinish = 0;
+    /// The read that last set them (M2Renderer::particleReadSerial_).
+    uint64_t particleCountedAt = 0;
 
     // Ribbon emitter state, kept the way the original client's CRibbonEmitter
     // keeps it. An edge is two world-space vertices laid across the emitter's
@@ -505,14 +499,18 @@ public:
     // no animation of their own, no culling entry, no collision and no place
     // in the ray-traced scene.
 
-    /// What the owner of the skeleton says about it this frame. `bones` are
-    /// in model space, as skeleton.comp poses them; an empty
-    /// list leaves every bone at rest. Not `posed`: the owner did not move the
-    /// skeleton this frame (out of its animation range, or hidden), so
-    /// nothing new is emitted and what is out there plays out.
+    /// What the owner of the skeleton says about it this frame. The
+    /// particles stand on the skeleton as the GPU posed it, found by
+    /// `skeletonOwner` in the owner's extracted frame (extract's
+    /// `characters`); the ribbons on `bones`, as read back from it, in model
+    /// space - an empty list leaves every bone at rest. Not `posed`: the
+    /// owner did not move the skeleton this frame (out of its animation
+    /// range, or hidden), so nothing new is emitted and what is out there
+    /// plays out.
     struct EmitterPose {
         glm::mat4 modelMatrix{1.0f};
         float scale = 1.0f;
+        uint32_t skeletonOwner = 0;
         const std::vector<glm::mat4>* bones = nullptr;
         int sequenceIndex = 0;
         float animationTimeMs = 0.0f;
@@ -530,9 +528,10 @@ public:
     void removePosedEmitters(uint32_t id);
     [[nodiscard]] bool hasPosedEmitters(uint32_t id) const;
     void setPosedEmittersPose(uint32_t id, const EmitterPose& pose);
-    /// Emits and moves the particles and ribbons of every posed set. Runs on
-    /// the main thread once the frame's skeletons are final - after both
-    /// update() and the owner's own update have returned.
+    /// Runs every posed set's emitters this frame - gives their particles
+    /// room the first time, moves the ribbons. Runs on the main thread once
+    /// the frame's skeletons are final - after both update() and the owner's
+    /// own update have returned.
     void updatePosedEmitters(float dt);
 
     /// Instances of the same model at the same spot are treated as one placement,
@@ -569,16 +568,18 @@ public:
     std::shared_ptr<const Frame> extract(const Camera& camera, std::string_view stageGroup,
                                          const std::vector<LocalLight>& lights, float time, const glm::mat4& shadowMatrix, float shadowRadius,
                                          const glm::mat4* overheadMatrix = nullptr, float overheadRadius = 1.0f,
-                                         const glm::mat4* strikeMatrix = nullptr, float strikeRadius = 1.0f);
+                                         const glm::mat4* strikeMatrix = nullptr, float strikeRadius = 1.0f,
+                                         const PosedSkeletons* characters = nullptr);
     void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
     /// The slot's instance storage grown to the frame, on the main thread
     /// before the parallel recording.
     void prepareRender(uint32_t frameIndex, const Camera& camera);
     /// Record into `cmd`, outside a render pass and before any pass draws
     /// the extracted frame (its shadows included), the posing of its
-    /// skeletons; the bones the slot's last frame copied back are kept for
-    /// update() to take.
-    void poseSkeletons(VkCommandBuffer cmd, uint32_t frameIndex);
+    /// skeletons and then the running of its particles, the creatures' on
+    /// `characters` (their slot's posed bones, after they were posed); what
+    /// the slot's last frame copied back is kept for update() to take.
+    void poseSkeletons(VkCommandBuffer cmd, uint32_t frameIndex, const PosedBones& characters = {});
     /// Record into `cmd`, outside a render pass, the GPU cull of the
     /// extracted frame's guard (cull_guard.hpp) over the whole cull table.
     void dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex);
@@ -1074,6 +1075,17 @@ private:
     SkeletonPool skeletons_;
     SkeletonPass skeletonPass_;
     bool posed_[2] = {};
+    /// The emitters' particles, and the pass that runs a frame's of them and
+    /// lays out its quads. particlesRun_: whether the slot's frame was run;
+    /// none of its particles is drawn otherwise.
+    ParticlePool particles_;
+    M2ParticlePass particlePass_;
+    bool particlesRun_[2] = {};
+    /// Bumped by each update(), which ran the emitters it marked with it,
+    /// over `particleDt_` seconds; and by each read of the counts.
+    uint64_t particleSerial_ = 0;
+    float particleDt_ = 0.0f;
+    uint64_t particleReadSerial_ = 0;
 
     // GPU instance data SSBO - per-instance transforms, fade, bones for instanced draws.
     // Shader reads instanceData[push.instanceDataOffset + gl_InstanceIndex].
@@ -1309,7 +1321,6 @@ private:
     void* frameMapped(const FrameVertexBuffer& vb) const;
 
     FrameVertexBuffer ribbonVB_;
-    FrameVertexBuffer m2ParticleVB_;
     static constexpr size_t MAX_GLOW_SPRITES = 8000;
     FrameVertexBuffer glowVB_;
 
@@ -1336,6 +1347,8 @@ private:
         uint32_t modelHandle = 0;
         M2Instance inst;
         bool posed = false;
+        /// Whose skeleton they stand on, as the owner names it.
+        uint32_t skeletonOwner = 0;
     };
     std::unordered_map<uint32_t, PosedEmitterModel> posedEmitterModels_;
     uint32_t nextPosedEmitterModel_ = 1;
@@ -1557,9 +1570,12 @@ private:
         std::vector<SkeletonFrame::Read> reads;
         std::vector<uint32_t> skinned;
         uint32_t boneCount = 0;
+        /// The instances among them that run emitters or throw lights, and
+        /// their requests, counted from the chunk's first.
+        std::vector<std::pair<uint32_t, uint32_t>> posed;
         void clear() noexcept {
             opaque.clear(); transparent.clear(); draws.clear(); glows.clear();
-            requests.clear(); reads.clear(); skinned.clear(); boneCount = 0;
+            requests.clear(); reads.clear(); skinned.clear(); boneCount = 0; posed.clear();
         }
     };
     // Producer-only scratch; workers write disjoint chunks and finish before
@@ -1645,95 +1661,53 @@ private:
         uint32_t        vertexCount;
     };
 
-    // Particle group structures (reused each frame)
-    struct ParticleGroupKey {
-        VkTexture* texture;
-        uint8_t blendType;
-        uint16_t tilesX;
-        uint16_t tilesY;
-        bool fogged;
-        bool operator==(const ParticleGroupKey& other) const {
-            return texture == other.texture &&
-                   blendType == other.blendType &&
-                   fogged == other.fogged &&
-                   tilesX == other.tilesX &&
-                   tilesY == other.tilesY;
-        }
-    };
-    struct ParticleGroupKeyHash {
-        size_t operator()(const ParticleGroupKey& key) const {
-            size_t h1 = std::hash<uintptr_t>{}(reinterpret_cast<uintptr_t>(key.texture));
-            size_t h2 = std::hash<uint32_t>{}((static_cast<uint32_t>(key.tilesX) << 16) | key.tilesY);
-            size_t h3 = std::hash<uint32_t>{}(key.blendType | (key.fogged ? 0x100u : 0u));
-            return h1 ^ (h2 * 0x9e3779b9u) ^ (h3 * 0x85ebca6bu);
-        }
-    };
-    struct ParticleGroup {
-        VkTexture* texture;
-        uint8_t blendType;
-        uint16_t tilesX;
-        uint16_t tilesY;
-        bool fogged = true;
-        VkDescriptorSet preAllocSet = VK_NULL_HANDLE;
-    };
-    std::unordered_map<ParticleGroupKey, ParticleGroup, ParticleGroupKeyHash> particleGroups_;
-
-    /// One run of particles written to the vertex buffer that share a group.
-    ///
-    /// The vertices used to be accumulated into a std::vector<float> per
-    /// group - nine push_backs a particle - and then memcpy'd into the mapped
-    /// buffer. They are written straight into it now, in the order they are
-    /// walked, and a run is closed whenever the group changes. Particles from
-    /// one emitter cluster together, so a run is roughly an emitter.
-    ///
-    /// That also fixes the upload: every group used to memcpy to offset zero
-    /// and draw from vertex zero, so with more than one group on screen they
-    /// all drew whichever group was copied last.
+    /// One emitter's quads drawn: how, and the frame's row whose draw
+    /// command it is (M2ParticlePass).
     struct ParticleRun {
-        ParticleGroup group{};
-        uint32_t first = 0;
-        uint32_t count = 0;
+        VkDescriptorSet texSet = VK_NULL_HANDLE;
+        uint8_t blendType = 0;
+        uint16_t tilesX = 1;
+        uint16_t tilesY = 1;
+        bool fogged = true;
+        uint32_t row = 0;
     };
-    /// The particles in view, written into this frame's buffer as runs.
-    /// Reads the scene; returns how many particles went in.
-    size_t gatherM2Particles(Frame& frame, const glm::vec3& eye);
-    /// The runs gatherM2Particles wrote; reads no instance.
+    /// The emitters the GPU runs this frame - those update() ran, and those
+    /// in view, whose quads it lays out - into the frame's rows, and the
+    /// seen ones' draws, farthest first. A skinned instance that runs is
+    /// posed for its emitters if its draw was not; a posed set stands on
+    /// its creature in `characters`. Returns how many rows there are.
+    size_t gatherM2Particles(Frame& frame, const glm::vec3& eye, const PosedSkeletons* characters);
+    /// The draws gatherM2Particles made; reads no instance.
     void recordM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
     /// The ribbon trails, written into this frame's buffer with a draw each.
     /// Reads the scene; returns how many vertices went in.
     size_t gatherM2Ribbons(Frame& frame, const glm::vec3& eye);
     /// The draws gatherM2Ribbons made; reads no instance.
     void recordM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
-    /// Quads the particle buffer holds: a whole frame's, a particle that is
-    /// both head and tail taking two. The client has no frame budget at all -
-    /// each emitter draws at most m2EmitterDrawCap - so this is sized for the
-    /// busiest place in view rather than as a limit; filling it is reported.
-    /// 32768 filled in Dalaran before particles were culled to the view.
-    static constexpr size_t MAX_M2_PARTICLE_QUADS = 131072;
-
     // Animation update buffers (avoid per-frame allocation)
 
     // Fast-path instance index sets (instance_index_set.hpp): filed on
     // create and when shown, taken out on removal and when hidden, and
     // following each instance a swap-remove moves - never rebuilt.
 
-    // M2 particle emitter system. Each emitter holds as many particles as its
-    // pool allows (m2EmitterPool), with no cap per instance; each instance
-    // draws its particles' randomness from its own generator.
-    /// Particles drawn per emitter of the instance being written; scratch.
-    std::vector<uint32_t> drawnPerEmitter_;
     /// An instance whose particles or ribbons are gathered, and how far it is
-    /// from the eye. The gathers take them nearest first, so a full buffer
-    /// loses the farthest, and draw them farthest first, as blending needs.
+    /// from the eye; for its particles, its rows in view. The gathers take
+    /// them nearest first, so a full buffer loses the farthest, and draw them
+    /// farthest first, as blending needs.
     struct EmitterInView {
         const M2Instance* inst;
         float distSq;
+        uint32_t firstRun = 0;
+        uint32_t runCount = 0;
     };
     std::vector<EmitterInView> emittersInView_;
-    /// Where each instance's runs or draws start; scratch for the reversal.
+    /// Where each instance's ribbon draws start; scratch for the reversal.
     std::vector<size_t> emitterBlocks_;
-    std::vector<ParticleRun> reorderedRuns_;
+    std::vector<ParticleRun> particleRunScratch_;
     std::vector<RibbonDrawCall> reorderedRibbons_;
+    /// The instances posed this frame that run emitters or throw lights:
+    /// their index and their request, from cullView; scratch.
+    std::unordered_map<uint32_t, uint32_t> posedThisFrame_;
     bool skyMode_ = false;
     float skyTimeOfDayHours_ = 12.0f;
     std::function<std::optional<float>(float, float, float)> waterHeightAt_;
@@ -1788,11 +1762,13 @@ private:
     float interpFloat(const pipeline::M2AnimationTrack& track, float animTime,
                       float globalTime, int seqIdx,
                       const std::vector<uint32_t>& globalSeqDurations);
-    float interpFBlockFloat(const pipeline::M2FBlock& fb, float lifeRatio);
-    glm::vec2 interpFBlockVec2(const pipeline::M2FBlock& fb, float lifeRatio);
-    glm::vec3 interpFBlockVec3(const pipeline::M2FBlock& fb, float lifeRatio);
-    float interpFBlockCell(const pipeline::M2FBlock& fb, float lifeRatio, uint32_t cellCount);
-    void emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt);
+    /// Room for its emitters' particles where they have none yet; whether
+    /// any of them has room.
+    bool placeParticles(M2Instance& inst);
+    /// Its particles' room given back: they go.
+    void releaseParticles(M2Instance& inst);
+    /// What the particle pass read back, into the instances and posed sets.
+    void takeParticleReads();
     /// A one-shot ended: start the animation queued after it.
     void advanceToNextAnimation(M2Instance& inst);
     /// Effects ended with finishInstance, removed once nothing they made is
@@ -1803,7 +1779,6 @@ private:
     };
     std::vector<FinishingInstance> finishingInstances_;
     void reapFinishedInstances();
-    void updateParticles(M2Instance& inst, float dt);
     /// Ages the instance's ribbon edges and, when `emit`, lays new ones.
     void updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt, bool emit = true);
     /// The emitter half of loadModel: per-emitter textures, blend modes and
@@ -1822,9 +1797,13 @@ private:
     /// The GPU's request to pose an animated instance whose model has a
     /// skeleton, its bones from `outBase` of the frame's.
     [[nodiscard]] SkeletonRequestGPU skeletonRequest(const M2Instance& instance, uint32_t outBase) const;
+    /// Its request in the frame: the one its draw was posed by, or one asked
+    /// for now, its read bones copied back with it. `index` into
+    /// scene_->instances; an animated instance whose model has a skeleton.
+    uint32_t poseOf(size_t index, Frame& frame);
     /// Asks the GPU to pose, for their bones read back alone, the instances
-    /// whose emitters or lights run unseen (near the camera) this frame.
-    void poseUnseen(const Camera& camera, Frame& frame) const;
+    /// whose lights shine unseen (near the camera) this frame.
+    void poseUnseenLights(const Camera& camera, Frame& frame);
     inline static std::atomic<uint64_t> nextSceneIdentity_{1};
     struct InstanceState {
         uint64_t identity = nextSceneIdentity_.fetch_add(1, std::memory_order_relaxed);
@@ -1866,10 +1845,11 @@ public:
         std::vector<RibbonDrawCall> ribbonDraws_;
         std::vector<ParticleRun> particleRuns_;
         std::vector<float> ribbonVertices;
-        std::vector<M2ParticleQuad> particleVertices;
         /// The skeletons the GPU poses for this frame: the skinned draws',
-        /// then those only read back (poseUnseen).
+        /// then those posed for their emitters and lights alone.
         SkeletonFrame skeleton;
+        /// The emitters the GPU runs this frame (M2ParticlePass).
+        ParticleFrame particles;
         /// The tables' changes this frame carries, as they stand: the rows
         /// of the slots changed and not yet known to be on the GPU, one of
         /// each table per slot, the cull table cleared first when it starts

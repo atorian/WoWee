@@ -49,14 +49,15 @@ bool SkeletonPass::initialize(VkContext& context, const char* owner) {
             return false;
         }
     }
-    // The draws' set: the bones and the models.
+    // The draws' set: the bones and the models - read by the draws and by
+    // what stands on the bones (m2_particles.comp).
     {
         VkDescriptorSetLayoutBinding bindings[2] = {};
         for (uint32_t b = 0; b < 2; ++b) {
             bindings[b].binding = b;
             bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             bindings[b].descriptorCount = 1;
-            bindings[b].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+            bindings[b].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
         }
         VkDescriptorSetLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         ci.bindingCount = 2;

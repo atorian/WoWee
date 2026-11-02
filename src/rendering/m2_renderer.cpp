@@ -530,7 +530,11 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     // textures are handles in its material row. Set 2 is the skeleton
     // pass's: the frame's posed bones.
     skeletons_.initialize(*vkCtx_);
-    if (!skeletonPass_.initialize(*vkCtx_, skyMode_ ? "M2Renderer (sky)" : "M2Renderer")) return false;
+    particles_.initialize(*vkCtx_);
+    const char* passOwner = skyMode_ ? "M2Renderer (sky)" : "M2Renderer";
+    if (!skeletonPass_.initialize(*vkCtx_, passOwner) ||
+        !particlePass_.initialize(*vkCtx_, skeletonPass_.drawSetLayout(), passOwner))
+        return false;
 
     // Instance data set layout (set 3): binding 0 = this frame's per-draw
     // instance records, binding 1 = the instance table (by slot), binding 2
@@ -744,8 +748,8 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     if (!buildMainPassPipelines(perFrameLayout)) return false;
 
     // --- Dynamic particle buffers, mapped for CPU writes, one per frame ---
-    // Ribbons: a triangle strip of pos(3)+color(3)+alpha(1)+uv(2).
-    createFrameVertexBuffer(m2ParticleVB_, MAX_M2_PARTICLE_QUADS * sizeof(M2ParticleQuad), "particle");
+    // (the M2 particles' quads are the particle pass's). Ribbons: a triangle
+    // strip of pos(3)+color(3)+alpha(1)+uv(2).
     createFrameVertexBuffer(glowVB_, MAX_GLOW_SPRITES * sizeof(M2ParticleQuad), "glow sprite");
     createFrameVertexBuffer(ribbonVB_, MAX_RIBBON_VERTS * 9 * sizeof(float), "ribbon");
 
@@ -830,6 +834,7 @@ void M2Renderer::shutdown() {
     destroyPosedEmitterModels();
 
     ++instanceLayoutRevision_;
+    for (auto& inst : scene_->instances) releaseParticles(inst);
     scene_->instances.clear();
     if (collision_) collision_->clearM2();
     scene_->instanceIndexById.clear();
@@ -849,7 +854,6 @@ void M2Renderer::shutdown() {
     glowTexture_.reset();
 
     // Clean up particle/ribbon buffers
-    destroyFrameVertexBuffer(m2ParticleVB_);
     destroyFrameVertexBuffer(glowVB_);
     destroyFrameVertexBuffer(ribbonVB_);
 
@@ -867,10 +871,15 @@ void M2Renderer::shutdown() {
 
     // Destroy descriptor pools and layouts
     destroy(device, materialDescPool_);
-    // The skeleton pass, and the skeletons (every model's came back above).
+    // The skeleton and particle passes, the particles, and the skeletons
+    // (every model's came back above).
+    particlePass_.destroy();
     skeletonPass_.destroy();
+    for (auto& inst : scene_->instances) releaseParticles(inst);
+    particles_.destroy();
     skeletons_.destroy();
     posed_[0] = posed_[1] = false;
+    particlesRun_[0] = particlesRun_[1] = false;
     // Instance data SSBO cleanup (sets freed with instanceDescPool_)
     for (int i = 0; i < 2; i++) {
         destroy(alloc, instanceBuffer_[i], instanceAlloc_[i]);
@@ -938,6 +947,7 @@ void M2Renderer::destroyModelGPU(uint32_t modelId, std::shared_ptr<M2ModelGPU> r
     // it, and it holds its textures until then.
     geometry_.release(retired->geometry);
     skeletons_.release(retired->skeleton);
+    skeletons_.release(retired->emitters);
     for (const auto& batch : retired->batches) releaseMaterialRow(batch.materialRow);
     vkCtx_->deferAfterAllFrameFences([retired] {});
 }
@@ -2053,6 +2063,8 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
     // a place it is drawn in its bind pose (said by the pool).
     if (gpuModel.hasAnimation)
         gpuModel.skeleton = skeletons_.place(model, kMaxBonesPerInstance, model.name.c_str());
+    // And its particle emitters, which are run on the GPU from there.
+    if (!model.particleEmitters.empty()) gpuModel.emitters = skeletons_.placeEmitters(model, model.name.c_str());
 
     vkCtx_->endUploadBatch();
 

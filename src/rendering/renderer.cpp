@@ -1660,7 +1660,8 @@ FrameInputs Renderer::extractFrameInputs() {
         scene->models = m2Renderer->extract(in.camera, "extract/M2", in.localLights, in.time, in.shadowMatrix,
             in.shadowDistance * 1.35f, in.weather.any() ? &shelterMatrix : nullptr,
             ShelterMap::kHalfExtent * 1.415f,
-            scene->lightning.lightColor.b > 0.0f ? &scene->lightning.lightMatrix : nullptr, 550.0f);
+            scene->lightning.lightColor.b > 0.0f ? &scene->lightning.lightMatrix : nullptr, 550.0f,
+            scene->characters.get());
     }
     extraction.lap("M2");
     if (minimap && in.minimapEnabled) {
@@ -1973,33 +1974,7 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
     }
     skySetStage.reset();
 
-    // ── Early compute: M2 frustum culling ──
-    // beginFrame() has already waited for this frame slot's previous fence, so
-    // its mapped visibility output is complete and safe for the CPU to reuse.
-    // Read/invalidate that completed output, then record the next cull dispatch
-    // directly into the normal frame command buffer. The old path submitted a
-    // separate command buffer and synchronously waited on a fence every frame,
-    // serializing CPU and GPU work solely to obtain same-frame cull results.
-    // The instance tables' changes go in first: the cull and every M2 draw
-    // of the frame, the sky's too, read them.
-    if (m2Renderer && frameCamera() && vkCtx) {
-        CpuStage stage(stages, "beginFrame", "M2 cull");
-        GpuPass pass(*vkCtx, currentCmd, "M2 cull");
-        uint32_t frame = vkCtx->getCurrentFrame();
-        m2Renderer->uploadSlotTables(currentCmd, frame);
-        m2Renderer->dispatchCullCompute(currentCmd, frame);
-    }
-    // The doodads' skeletons, posed before the shadow maps and the view
-    // draw them.
-    if (m2Renderer && vkCtx) {
-        CpuStage stage(stages, "beginFrame", "M2 skeletons");
-        GpuPass pass(*vkCtx, currentCmd, "M2 skeletons");
-        m2Renderer->poseSkeletons(currentCmd, vkCtx->getCurrentFrame());
-    }
-    if (skyboxModelRenderer_ && vkCtx) {
-        skyboxModelRenderer_->uploadSlotTables(currentCmd, vkCtx->getCurrentFrame());
-        skyboxModelRenderer_->poseSkeletons(currentCmd, vkCtx->getCurrentFrame());
-    }
+    recordModelCompute(stages);
     // The terrain's chunk rows, before the bake and every pass that draws
     // the ground reads them.
     if (terrainRenderer && vkCtx && frameInputs_.scene) {
@@ -5289,6 +5264,39 @@ VkImageView Renderer::getNeutralRtLightingView() const {
 
 void Renderer::setRtLightingMode(int mode) {
     requestedRtMode_ = std::clamp(mode, 0, 3);
+}
+
+void Renderer::recordModelCompute(CpuStageTimes& stages) {
+    if (!vkCtx) return;
+    const uint32_t frame = vkCtx->getCurrentFrame();
+    // ── Early compute: M2 frustum culling ──
+    // beginFrame() has already waited for this frame slot's previous fence, so
+    // its mapped visibility output is complete and safe for the CPU to reuse.
+    // Read/invalidate that completed output, then record the next cull dispatch
+    // directly into the normal frame command buffer. The old path submitted a
+    // separate command buffer and synchronously waited on a fence every frame,
+    // serializing CPU and GPU work solely to obtain same-frame cull results.
+    // The instance tables' changes go in first: the cull and every M2 draw
+    // of the frame, the sky's too, read them.
+    if (m2Renderer && frameCamera()) {
+        CpuStage stage(stages, "beginFrame", "M2 cull");
+        GpuPass pass(*vkCtx, currentCmd, "M2 cull");
+        m2Renderer->uploadSlotTables(currentCmd, frame);
+        m2Renderer->dispatchCullCompute(currentCmd, frame);
+    }
+    // The doodads' skeletons and then their particles, before the shadow
+    // maps and the view draw them; the creatures' emitters stand on their
+    // bones, posed before this (prepareRender).
+    if (m2Renderer) {
+        CpuStage stage(stages, "beginFrame", "M2 skeletons and particles");
+        GpuPass pass(*vkCtx, currentCmd, "M2 skeletons and particles");
+        m2Renderer->poseSkeletons(currentCmd, frame,
+                                  characterRenderer ? characterRenderer->posedBones(frame) : PosedBones{});
+    }
+    if (skyboxModelRenderer_) {
+        skyboxModelRenderer_->uploadSlotTables(currentCmd, frame);
+        skyboxModelRenderer_->poseSkeletons(currentCmd, frame);
+    }
 }
 
 void Renderer::writeRtLightingBindings(uint32_t i) {

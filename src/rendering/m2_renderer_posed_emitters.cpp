@@ -112,16 +112,22 @@ uint32_t M2Renderer::loadPosedEmitterModel(const pipeline::M2Model& model) {
         textures[index] = texture.get();
         gpu.textureRefs.push_back(std::move(texture));
     };
-    std::vector<uint32_t> bones;
     for (const auto& em : model.particleEmitters) {
         load(em.texture);
-        bones.push_back(em.bone);
+        // m2_particles.comp leaves such an emitter at the model origin.
+        if (em.bone >= model.bones.size())
+            LOG_WARNING("M2 '", model.name, "' has a particle emitter on bone ", em.bone, " of ",
+                        model.bones.size(), " - it emits from the model origin");
     }
+    // The ribbons are laid on the CPU, on the bones read back.
+    std::vector<uint32_t> bones;
     for (const auto& rib : model.ribbonEmitters) {
         load(rib.textureIndex);
         bones.push_back(rib.bone);
     }
     setupEmitterResources(gpu, model, textures);
+    // Its particles run on the GPU, on the owner's skeleton as posed there.
+    if (!model.particleEmitters.empty()) gpu.emitters = skeletons_.placeEmitters(model, model.name.c_str());
 
     std::sort(bones.begin(), bones.end());
     bones.erase(std::unique(bones.begin(), bones.end()), bones.end());
@@ -129,9 +135,8 @@ uint32_t M2Renderer::loadPosedEmitterModel(const pipeline::M2Model& model) {
         if (bone < model.bones.size()) {
             entry.bones.push_back(bone);
         } else {
-            // emitParticles leaves such an emitter at the model origin.
-            LOG_WARNING("M2 '", model.name, "' has an emitter on bone ", bone, " of ",
-                        model.bones.size(), " - it emits from the model origin");
+            LOG_WARNING("M2 '", model.name, "' has a ribbon emitter on bone ", bone, " of ",
+                        model.bones.size(), " - it trails from the model origin");
         }
     }
     entry.boneCount = entry.bones.empty() ? 0 : entry.bones.back() + 1;
@@ -148,6 +153,7 @@ void M2Renderer::unloadPosedEmitterModel(uint32_t handle) {
         if (posedIt->second.modelHandle == handle) {
             LOG_WARNING("M2 posed emitters ", posedIt->first, " outlived their model '",
                         it->second.gpu.name, "' - removed with it");
+            releaseParticles(posedIt->second.inst);
             posedIt = scene_->posedEmitters_.erase(posedIt);
         } else {
             ++posedIt;
@@ -155,8 +161,10 @@ void M2Renderer::unloadPosedEmitterModel(uint32_t handle) {
     }
 
     // Its texture sets may still be bound by frames in flight; the last use
-    // of a shared one gives it back after the fences.
+    // of a shared one gives it back after the fences, and its emitters' words
+    // come back after them too.
     releaseEmitterTexSets(it->second.gpu);
+    skeletons_.release(it->second.gpu.emitters);
     posedEmitterModels_.erase(it);
 }
 
@@ -178,7 +186,10 @@ uint32_t M2Renderer::createPosedEmitters(uint32_t modelHandle) {
 }
 
 void M2Renderer::removePosedEmitters(uint32_t id) {
-    scene_->posedEmitters_.erase(id);
+    auto it = scene_->posedEmitters_.find(id);
+    if (it == scene_->posedEmitters_.end()) return;
+    releaseParticles(it->second.inst);
+    scene_->posedEmitters_.erase(it);
 }
 
 bool M2Renderer::hasPosedEmitters(uint32_t id) const {
@@ -190,6 +201,7 @@ void M2Renderer::setPosedEmittersPose(uint32_t id, const EmitterPose& pose) {
     if (it == scene_->posedEmitters_.end()) return;
     PosedEmitters& posed = it->second;
     posed.posed = pose.posed;
+    posed.skeletonOwner = pose.skeletonOwner;
     if (!pose.posed) return;
 
     M2Instance& inst = posed.inst;
@@ -200,7 +212,7 @@ void M2Renderer::setPosedEmittersPose(uint32_t id, const EmitterPose& pose) {
     setAnimTime(inst, pose.animationTimeMs);
     inst.globalSequenceStartMs = animClockMs_ - pose.globalSequenceTimeMs;
 
-    // Only the bones an emitter hangs from; the rest stay at rest and are
+    // Only the bones a ribbon hangs from; the rest stay at rest and are
     // never read.
     const PosedEmitterModel& model = posedEmitterModels_.at(posed.modelHandle);
     for (uint32_t bone : model.bones) {
@@ -210,11 +222,12 @@ void M2Renderer::setPosedEmittersPose(uint32_t id, const EmitterPose& pose) {
 }
 
 void M2Renderer::updatePosedEmitters(float dt) {
+    // Their particles run on the GPU over the time update() gave the world's
+    // (particleDt_); here they only get room the first time.
     for (auto& [id, posed] : scene_->posedEmitters_) {
         M2Instance& inst = posed.inst;
         const M2ModelGPU& gpu = *inst.cachedModel;
-        if (posed.posed && !gpu.particleEmitters.empty()) emitParticles(inst, gpu, dt);
-        updateParticles(inst, dt);
+        if (placeParticles(inst)) inst.particlesRanAt = particleSerial_;
         if (!gpu.ribbonEmitters.empty()) updateRibbons(inst, gpu, dt, posed.posed);
     }
 }
@@ -222,7 +235,11 @@ void M2Renderer::updatePosedEmitters(float dt) {
 void M2Renderer::destroyPosedEmitterModels() {
     // Called with the device idle, before the material pool is reset or
     // destroyed: the sets go back to it now.
-    for (auto& [handle, model] : posedEmitterModels_) releaseEmitterTexSets(model.gpu);
+    for (auto& [id, posed] : scene_->posedEmitters_) releaseParticles(posed.inst);
+    for (auto& [handle, model] : posedEmitterModels_) {
+        releaseEmitterTexSets(model.gpu);
+        skeletons_.release(model.gpu.emitters);
+    }
     scene_->posedEmitters_.clear();
     posedEmitterModels_.clear();
     ++*materialPoolGeneration_;

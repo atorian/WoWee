@@ -2,6 +2,7 @@
 
 #include "core/logger.hpp"
 #include "pipeline/m2_loader.hpp"
+#include "rendering/m2_particle_emission.hpp"
 #include "rendering/vk_context.hpp"
 
 #include <glm/gtc/quaternion.hpp>
@@ -23,7 +24,7 @@ constexpr int32_t kKeyBoneShoulderR = 3;
 
 uint32_t bits(float value) { return std::bit_cast<uint32_t>(value); }
 
-enum class TrackKind { Vec3, Quat };
+enum class TrackKind { Vec3, Quat, Float };
 
 /// A track's record and its keys appended to `out`; its first word, or kNone
 /// for a track with no keys.
@@ -38,13 +39,17 @@ uint32_t packTrack(const pipeline::M2AnimationTrack& track, TrackKind kind, cons
     out.resize(out.size() + size_t(3) * sequences, 0u);
     for (uint32_t s = 0; s < sequences; ++s) {
         const auto& keys = track.sequences[s];
-        const size_t values = kind == TrackKind::Vec3 ? keys.vec3Values.size() : keys.quatValues.size();
+        const size_t values = kind == TrackKind::Vec3 ? keys.vec3Values.size()
+                            : kind == TrackKind::Quat ? keys.quatValues.size() : keys.floatValues.size();
         const auto count = static_cast<uint32_t>(std::min(keys.timestamps.size(), values));
         const auto times = static_cast<uint32_t>(out.size());
         out.insert(out.end(), keys.timestamps.begin(), keys.timestamps.begin() + count);
         const auto valuesAt = static_cast<uint32_t>(out.size());
         for (uint32_t k = 0; k < count; ++k) {
-            if (kind == TrackKind::Vec3) {
+            if (kind == TrackKind::Float) {
+                // As m2_track::sampleFloat reads them: not cleaned.
+                out.insert(out.end(), {bits(keys.floatValues[k]), 0u, 0u, 0u});
+            } else if (kind == TrackKind::Vec3) {
                 glm::vec3 v = keys.vec3Values[k];
                 if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z)) v = fallback;
                 out.insert(out.end(), {bits(v.x), bits(v.y), bits(v.z), 0u});
@@ -64,7 +69,119 @@ uint32_t packTrack(const pipeline::M2AnimationTrack& track, TrackKind kind, cons
     return record;
 }
 
+enum class FBlockKind { Float, Vec2, Vec3 };
+
+/// An FBlock appended to `out`: its value count, its time count, the times,
+/// then four words a value. Its first word, or kNone for one with no values.
+uint32_t packFBlock(const pipeline::M2FBlock& block, FBlockKind kind, std::vector<uint32_t>& out) {
+    const size_t values = kind == FBlockKind::Float ? block.floatValues.size()
+                        : kind == FBlockKind::Vec2  ? block.vec2Values.size()
+                                                    : block.vec3Values.size();
+    if (values == 0) return kNone;
+    const auto record = static_cast<uint32_t>(out.size());
+    out.push_back(static_cast<uint32_t>(values));
+    out.push_back(static_cast<uint32_t>(block.timestamps.size()));
+    for (const float t : block.timestamps) out.push_back(bits(t));
+    for (size_t k = 0; k < values; ++k) {
+        glm::vec4 v(0.0f);
+        if (kind == FBlockKind::Float) v.x = block.floatValues[k];
+        else if (kind == FBlockKind::Vec2) v = glm::vec4(block.vec2Values[k], 0.0f, 0.0f);
+        else v = glm::vec4(block.vec3Values[k], 0.0f);
+        out.insert(out.end(), {bits(v.x), bits(v.y), bits(v.z), bits(v.w)});
+    }
+    return record;
+}
+
+/// The most a float track's keys reach, or `none` above them.
+float trackMaximum(const pipeline::M2AnimationTrack& track, float none) {
+    float most = none;
+    for (const auto& keys : track.sequences)
+        for (const float v : keys.floatValues)
+            if (std::isfinite(v)) most = std::max(most, v);
+    return most;
+}
+
 } // namespace
+
+PackedEmitters packEmitters(const pipeline::M2Model& model) {
+    PackedEmitters packed;
+    const auto count = static_cast<uint32_t>(model.particleEmitters.size());
+    auto& out = packed.words;
+    out.resize(kEmitterHeaderWords + size_t(kEmitterWords) * count, 0u);
+    out[0] = count;
+    out[2] = kEmitterHeaderWords;
+    for (uint32_t e = 0; e < count; ++e) {
+        const auto& em = model.particleEmitters[e];
+        // The most it may ever hold (m2EmitterPool at its highest rate and
+        // longest life): its particles' room, which the GPU grows its pool in.
+        const uint32_t most = m2EmitterPool(trackMaximum(em.emissionRate, 0.0f), em.emissionRateVary,
+                                            trackMaximum(em.lifespan, 0.0f), em.lifespanVary);
+        uint32_t capacity = most;
+        if (capacity > kMaxEmitterParticles) {
+            LOG_WARNING("Particle emitter ", e, " of '", model.name, "' may hold ", capacity,
+                        " particles; it is given room for ", kMaxEmitterParticles, " and emits no more");
+            capacity = kMaxEmitterParticles;
+        }
+        packed.capacities.push_back(capacity);
+        if (em.emitterType == 3)
+            LOG_WARNING("Spline particle emitter ", e, " of '", model.name,
+                        "' emits from its origin; spline spawning is not implemented");
+        const size_t r = kEmitterHeaderWords + size_t(kEmitterWords) * e;
+        out[r + 0] = em.flags;
+        out[r + 1] = em.emitterType;
+        out[r + 2] = em.bone;
+        out[r + 3] = uint32_t(std::max<uint16_t>(em.textureCols, 1)) | (uint32_t(std::max<uint16_t>(em.textureRows, 1)) << 16u);
+        out[r + 4] = bits(em.position.x);
+        out[r + 5] = bits(em.position.y);
+        out[r + 6] = bits(em.position.z);
+        out[r + 7] = bits(em.drag);
+        out[r + 8] = bits(em.tailLength);
+        out[r + 9] = (em.drawsHead ? 1u : 0u) | (em.drawsTail ? 2u : 0u) | (em.enabled ? 4u : 0u);
+        out[r + 10] = bits(em.scaleVary.x);
+        out[r + 11] = bits(em.scaleVary.y);
+        out[r + 12] = bits(em.twinkleSpeed);
+        out[r + 13] = bits(em.twinklePercent);
+        out[r + 14] = bits(em.twinkleScaleMin);
+        out[r + 15] = bits(em.twinkleScaleMax);
+        out[r + 16] = bits(em.baseSpin);
+        out[r + 17] = bits(em.baseSpinVary);
+        out[r + 18] = bits(em.spin);
+        out[r + 19] = bits(em.spinVary);
+        out[r + 20] = bits(em.wind.x);
+        out[r + 21] = bits(em.wind.y);
+        out[r + 22] = bits(em.wind.z);
+        out[r + 23] = bits(em.windTime);
+        out[r + 24] = bits(em.lifespanVary);
+        out[r + 25] = bits(em.emissionRateVary);
+        out[r + 26] = capacity;
+    }
+    for (uint32_t e = 0; e < count; ++e) {
+        const auto& em = model.particleEmitters[e];
+        const size_t r = kEmitterHeaderWords + size_t(kEmitterWords) * e;
+        const pipeline::M2AnimationTrack* tracks[] = {&em.emissionSpeed, &em.speedVariation, &em.verticalRange,
+                                                      &em.horizontalRange, &em.gravity, &em.lifespan,
+                                                      &em.emissionRate, &em.emissionAreaLength,
+                                                      &em.emissionAreaWidth, &em.zSource};
+        for (size_t t = 0; t < std::size(tracks); ++t) {
+            const uint32_t at = packTrack(*tracks[t], TrackKind::Float, glm::vec3(0.0f), out);
+            out[r + kEmitterTracks + t] = at;
+        }
+        const uint32_t color = packFBlock(em.particleColor, FBlockKind::Vec3, out);
+        const uint32_t alpha = packFBlock(em.particleAlpha, FBlockKind::Float, out);
+        const uint32_t scale = packFBlock(em.particleScale, FBlockKind::Vec2, out);
+        const uint32_t headCell = packFBlock(em.headCellTrack, FBlockKind::Float, out);
+        const uint32_t tailCell = packFBlock(em.tailCellTrack, FBlockKind::Float, out);
+        out[r + kEmitterFBlocks + 0] = color;
+        out[r + kEmitterFBlocks + 1] = alpha;
+        out[r + kEmitterFBlocks + 2] = scale;
+        out[r + kEmitterFBlocks + 3] = headCell;
+        out[r + kEmitterFBlocks + 4] = tailCell;
+    }
+    out[3] = static_cast<uint32_t>(model.globalSequenceDurations.size());
+    out[4] = static_cast<uint32_t>(out.size());
+    out.insert(out.end(), model.globalSequenceDurations.begin(), model.globalSequenceDurations.end());
+    return packed;
+}
 
 PackedSkeleton packSkeleton(const pipeline::M2Model& model, uint32_t boneLimit) {
     PackedSkeleton packed;
@@ -136,12 +253,12 @@ void SkeletonPool::destroy() {
 }
 
 void SkeletonPool::takeReturned() {
-    std::vector<std::pair<std::shared_ptr<Page>, Skeleton>> skeletons;
+    std::vector<Returned::Blob> blobs;
     {
         std::lock_guard lock(returned_->mutex);
-        skeletons.swap(returned_->skeletons);
+        blobs.swap(returned_->blobs);
     }
-    for (const auto& [page, skeleton] : skeletons) page->words.free(skeleton.first, skeleton.words);
+    for (const auto& blob : blobs) blob.page->words.free(blob.first, blob.words);
     // A page left empty goes, but for one shared one.
     bool spareKept = false;
     VmaAllocator allocator = context_->getAllocator();
@@ -160,10 +277,26 @@ void SkeletonPool::takeReturned() {
 
 SkeletonPool::Skeleton SkeletonPool::place(const pipeline::M2Model& model, uint32_t boneLimit, const char* name) {
     if (!context_ || model.bones.empty()) return {};
-    takeReturned();
     const PackedSkeleton packed = packSkeleton(model, boneLimit);
-    const auto words = static_cast<uint32_t>(packed.words.size());
+    const auto at = placeWords(packed.words, name, "drawn in its bind pose");
+    if (!at) return {};
+    return Skeleton{.page = at->first, .first = at->second, .words = static_cast<uint32_t>(packed.words.size()),
+                    .boneCount = packed.boneCount};
+}
 
+SkeletonPool::Emitters SkeletonPool::placeEmitters(const pipeline::M2Model& model, const char* name) {
+    if (!context_ || model.particleEmitters.empty()) return {};
+    const PackedEmitters packed = packEmitters(model);
+    const auto at = placeWords(packed.words, name, "emits no particles");
+    if (!at) return {};
+    return Emitters{.page = at->first, .first = at->second, .words = static_cast<uint32_t>(packed.words.size()),
+                    .capacities = packed.capacities};
+}
+
+std::optional<std::pair<int32_t, uint32_t>> SkeletonPool::placeWords(const std::vector<uint32_t>& blob,
+                                                                    const char* name, const char* without) {
+    takeReturned();
+    const auto words = static_cast<uint32_t>(blob.size());
     int32_t slot = -1;
     for (size_t i = 0; i < pages_.size(); ++i) {
         if (pages_[i] && !pages_[i]->fitted && pages_[i]->words.largestFree() >= words) {
@@ -177,11 +310,11 @@ SkeletonPool::Skeleton SkeletonPool::place(const pipeline::M2Model& model, uint3
         const auto at = static_cast<size_t>(empty - pages_.begin());
         if (at >= kMaxPages) {
             if (!fullSaid_) {
-                LOG_WARNING("Skeleton pool: all ", kMaxPages, " pages in use - '", name,
-                            "' and the models after it are drawn in their bind pose until a page is let go");
+                LOG_WARNING("Skeleton pool: all ", kMaxPages, " pages in use - '", name, "' is ", without,
+                            ", and so are the models after it until a page is let go");
                 fullSaid_ = true;
             }
-            return {};
+            return std::nullopt;
         }
         auto page = std::make_shared<Page>();
         const uint32_t room = fitted ? words : kPageWords;
@@ -189,9 +322,8 @@ SkeletonPool::Skeleton SkeletonPool::place(const pipeline::M2Model& model, uint3
                                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                     VMA_MEMORY_USAGE_GPU_ONLY);
         if (!page->buffer.buffer) {
-            LOG_WARNING("Skeleton pool: no memory for a page of ", room, " words - '", name,
-                        "' is drawn in its bind pose");
-            return {};
+            LOG_WARNING("Skeleton pool: no memory for a page of ", room, " words - '", name, "' is ", without);
+            return std::nullopt;
         }
         page->words = RangeAllocator(room);
         page->fitted = fitted;
@@ -203,20 +335,28 @@ SkeletonPool::Skeleton SkeletonPool::place(const pipeline::M2Model& model, uint3
     }
     Page& page = *pages_[static_cast<size_t>(slot)];
     const auto first = page.words.allocate(words);
-    if (!first || !uploadIntoBuffer(*context_, packed.words.data(), VkDeviceSize(words) * sizeof(uint32_t),
+    if (!first || !uploadIntoBuffer(*context_, blob.data(), VkDeviceSize(words) * sizeof(uint32_t),
                                     page.buffer.buffer, VkDeviceSize(*first) * sizeof(uint32_t))) {
         if (first) page.words.free(*first, words);
-        LOG_WARNING("Skeleton pool: '", name, "' could not be copied to the GPU - it is drawn in its bind pose");
-        return {};
+        LOG_WARNING("Skeleton pool: '", name, "' could not be copied to the GPU - it is ", without);
+        return std::nullopt;
     }
-    return Skeleton{.page = slot, .first = *first, .words = words, .boneCount = packed.boneCount};
+    return std::make_pair(slot, *first);
 }
 
 void SkeletonPool::release(const Skeleton& skeleton) {
-    if (!skeleton.placed() || static_cast<size_t>(skeleton.page) >= pages_.size() || !pages_[skeleton.page]) return;
-    context_->deferAfterAllFrameFences([returned = returned_, page = pages_[skeleton.page], skeleton] {
+    if (skeleton.placed()) releaseWords(skeleton.page, skeleton.first, skeleton.words);
+}
+
+void SkeletonPool::release(const Emitters& emitters) {
+    if (emitters.placed()) releaseWords(emitters.page, emitters.first, emitters.words);
+}
+
+void SkeletonPool::releaseWords(int32_t pageIndex, uint32_t first, uint32_t words) {
+    if (static_cast<size_t>(pageIndex) >= pages_.size() || !pages_[pageIndex]) return;
+    context_->deferAfterAllFrameFences([returned = returned_, page = pages_[pageIndex], first, words] {
         std::lock_guard lock(returned->mutex);
-        returned->skeletons.emplace_back(page, skeleton);
+        returned->blobs.push_back({.page = page, .first = first, .words = words});
     });
 }
 

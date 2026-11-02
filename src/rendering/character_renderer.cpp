@@ -1974,12 +1974,12 @@ uint32_t CharacterRenderer::createInstance(uint32_t modelId, const glm::vec3& po
     instance.scale = scale;
 
     // The bones the CPU reads of it from the start: its lights' and its
-    // emitters'. Its attachment points are watched when first asked for.
+    // ribbons' (its particles stand on the GPU's pose itself). Its
+    // attachment points are watched when first asked for.
     auto& gpuRef = (*modelIt->second);
     instance.readBones.assign(gpuRef.data->bones.size(), glm::mat4(1.0f));
     for (const auto& light : gpuRef.data->lights)
         if (light.bone >= 0) watchBone(instance, static_cast<uint16_t>(light.bone));
-    for (const auto& emitter : gpuRef.data->particleEmitters) watchBone(instance, emitter.bone);
     for (const auto& emitter : gpuRef.data->ribbonEmitters) watchBone(instance, static_cast<uint16_t>(emitter.bone));
     instance.cachedModel = &gpuRef;
 
@@ -2297,6 +2297,18 @@ uint32_t CharacterRenderer::Frame::poseIndex(uint32_t id) const {
     if (at == poseById.end() || at->first != id)
         throw std::out_of_range("Visible character has no extracted pose");
     return at->second;
+}
+
+std::optional<PosedSkeletons::Pose> CharacterRenderer::Frame::poseOf(uint32_t id) const {
+    const auto at = std::lower_bound(poseById.begin(), poseById.end(), id,
+        [](const auto& entry, uint32_t wanted) { return entry.first < wanted; });
+    if (at == poseById.end() || at->first != id) return std::nullopt;
+    const SkeletonRequestGPU& request = skeleton.requests[at->second];
+    if (request.flags & SkeletonRequestGPU::kNoSkeleton) return std::nullopt;
+    // Its bones run to the next request's, or to the frame's end.
+    const uint32_t next = at->second + 1 < skeleton.requests.size() ? skeleton.requests[at->second + 1].outBase
+                                                                     : skeleton.boneCount;
+    return Pose{.request = at->second, .boneBase = request.outBase, .boneCount = next - request.outBase};
 }
 
 std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const Camera& camera,

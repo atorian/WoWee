@@ -252,8 +252,7 @@ void M2Renderer::setInstancesHidden(const std::vector<uint32_t>& instanceIds, bo
             fileInCullGrid(idxIt->second, InstanceChange::ShownOrHidden);
             // What it had emitted goes with it rather than hanging where it
             // was, or reappearing there, stale, when it comes back.
-            inst.particles.clear();
-            inst.particleReach = 0.0f;
+            releaseParticles(inst);
             for (auto& ribbon : inst.ribbons) ribbon = M2Instance::RibbonState{};
         } else {
             const double away = animClockMs_ - inst.hiddenAtMs;
@@ -538,6 +537,7 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
             scene_->instanceDedupMap_.erase(dedupIt);
         }
     }
+    releaseParticles(inst);
 
     // Swap-remove: move last element to the hole and pop_back to avoid O(n) shift
     scene_->instanceIndexById.erase(instanceId);
@@ -617,6 +617,7 @@ void M2Renderer::finishInstance(uint32_t instanceId) {
     auto& inst = scene_->instances[idxIt->second];
     if (inst.finishing) return;
     inst.finishing = true;
+    inst.particleCountsAtFinish = inst.particleCounts;
     fileInCullGrid(idxIt->second, InstanceChange::Finished);
     // Its particles have at most their longest life left to run.
     float longestLife = 0.0f;
@@ -642,9 +643,16 @@ void M2Renderer::reapFinishedInstances() {
         const auto& inst = scene_->instances[idxIt->second];
         const bool ribbonsLeft = std::any_of(inst.ribbons.begin(), inst.ribbons.end(),
                                              [](const auto& r) { return !r.edges.empty(); });
+        // Its particles are counted on the GPU, two frames late: until a
+        // count from a frame that ran it finished has come back - the third
+        // after - what is known is from before. One with no room has none.
+        const bool particlesPlaced = std::any_of(inst.particleRanges.begin(), inst.particleRanges.end(),
+                                                 [](const ParticlePool::Range& r) { return r.placed(); });
+        const bool particlesLeft = particlesPlaced && (inst.particleCounts - inst.particleCountsAtFinish < 3 ||
+                                                       inst.liveParticles > 0);
         // Gone when nothing it emitted is left - or when its particles have
         // had their whole life, though it was out of sight and not updated.
-        if ((inst.particles.empty() && !ribbonsLeft) || now >= f.deadline) {
+        if ((!particlesLeft && !ribbonsLeft) || now >= f.deadline) {
             done.push_back(f.instanceId);
             return true;
         }
@@ -690,6 +698,7 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
                 scene_->instanceDedupMap_.erase(dedupIt);
             }
         }
+        releaseParticles(inst);
         scene_->instanceIndexById.erase(idxIt);
     }
     if (holes.empty()) return;
@@ -727,6 +736,7 @@ void M2Renderer::clear() {
     }
     models.clear();
     pinnedModelIds_.clear();
+    for (auto& inst : scene_->instances) releaseParticles(inst);
     scene_->instances.clear();
     if (collision_) collision_->clearM2();
     scene_->instanceIndexById.clear();
@@ -751,6 +761,8 @@ void M2Renderer::clearInstances() {
     scene_->slots.clear();
     scene_->indexOfSlot.clear();
     ++instanceLayoutRevision_;
+    for (auto& inst : scene_->instances) releaseParticles(inst);
+    for (auto& [id, posed] : scene_->posedEmitters_) releaseParticles(posed.inst);
     *scene_ = InstanceState{};
     if (collision_) collision_->clearM2();
 }
@@ -919,9 +931,7 @@ uint64_t M2Renderer::instanceBytes() const {
     using pipeline::vectorBytes;
     uint64_t total = scene_->instances.storageBytes();
     for (const auto& inst : scene_->instances) {
-        total += vectorBytes(inst.boneMatrices) + vectorBytes(inst.emitterAccumulators) +
-                 vectorBytes(inst.emitterPools) + vectorBytes(inst.particles) +
-                 vectorBytes(inst.ribbons);
+        total += vectorBytes(inst.boneMatrices) + vectorBytes(inst.particleRanges) + vectorBytes(inst.ribbons);
     }
     return total;
 }

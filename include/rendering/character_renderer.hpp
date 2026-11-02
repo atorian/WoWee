@@ -136,6 +136,11 @@ public:
     std::shared_ptr<const Frame> extract(const Camera& camera, const std::vector<LocalLight>& lights);
     void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
     void prepareRender(VkCommandBuffer cmd, uint32_t frameIndex);
+    /// The slot's posed bones and whether its last prepareRender posed them,
+    /// for what stands on them.
+    [[nodiscard]] PosedBones posedBones(uint32_t frameIndex) const {
+        return {.set = skeletonPass_.drawSet(frameIndex), .posed = frameIndex < 2 && posed_[frameIndex]};
+    }
     /// Which instances a render call draws. A faded one - an aura's
     /// translucent body, a ghost, a fade-in - writes depth, so whatever is
     /// drawn after it inside or behind it is hidden: Shadowform's fire,
@@ -818,9 +823,12 @@ private:
     InstanceState* scene_ = &defaultInstances_;
 
 public:
-    struct Frame {
+    struct Frame final : PosedSkeletons {
         void clear() noexcept;
         uint32_t poseIndex(uint32_t id) const;
+        /// Where an instance's skeleton is in the frame's posed bones, for
+        /// the emitters M2Renderer runs on it.
+        [[nodiscard]] std::optional<Pose> poseOf(uint32_t id) const override;
         bool normalMapping = false;
         float normalStrength = 1;
         std::vector<DrawCharacter> drawLists[3];

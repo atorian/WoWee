@@ -58,102 +58,14 @@ layout(push_constant) uniform Push {
     uint pad0, pad1, pad2;
 } push;
 
-const uint kNone = 0xFFFFFFFFu;
-// Blob header and bone record (skeleton_pool.cpp).
+#include "m2_track.glsli"
+
+// Skeleton blob header and bone record (skeleton_pool.cpp).
 const uint kHeaderBoneCount = 0u;
 const uint kHeaderMaxDepth = 1u;
 const uint kHeaderBones = 2u;
-const uint kHeaderGlobalCount = 3u;
-const uint kHeaderGlobals = 4u;
 const uint kBoneWords = 16u;
 const int kKeyBoneSpineLow = 4;
-
-uint pageIndex;
-uint blobBase;
-
-uint word(uint offset) { return pages[pageIndex].words[blobBase + offset]; }
-float wordf(uint offset) { return uintBitsToFloat(word(offset)); }
-vec4 word4(uint offset) {
-    return vec4(wordf(offset), wordf(offset + 1u), wordf(offset + 2u), wordf(offset + 3u));
-}
-
-// A track's sequence and time: a global sequence keeps its own clock; a
-// track with fewer key arrays than the index is read from its first.
-// Returns the sequence's key count, first time and first value offsets.
-bool trackKeys(uint track, int sequence, float time, float globalTime,
-               out uint keyCount, out uint times, out uint values, out float sampleTime,
-               out uint interpolation) {
-    keyCount = 0u; times = 0u; values = 0u; sampleTime = time; interpolation = 0u;
-    if (track == kNone) return false;
-    const int globalSequence = int(word(track));
-    interpolation = word(track + 1u);
-    const uint sequences = word(track + 2u);
-    int index = sequence;
-    if (globalSequence >= 0 && uint(globalSequence) < word(kHeaderGlobalCount)) {
-        const float duration = float(word(word(kHeaderGlobals) + uint(globalSequence)));
-        float t = duration > 0.0 ? mod(globalTime, duration) : 0.0;
-        sampleTime = t;
-        index = 0;
-    } else if (index >= 0 && uint(index) >= sequences) {
-        index = 0;
-    }
-    if (index < 0 || uint(index) >= sequences) return false;
-    const uint entry = track + 3u + uint(index) * 3u;
-    keyCount = word(entry);
-    times = word(entry + 1u);
-    values = word(entry + 2u);
-    return keyCount > 0u;
-}
-
-// The key at or before the time (m2_track::lowerKeyIndex) and how far it is
-// toward the next (interpolationFraction): type 0 holds its key.
-uint lowerKey(uint times, uint keyCount, float t) {
-    if (keyCount <= 1u || t <= float(word(times))) return 0u;
-    uint lo = 0u, hi = keyCount;   // first key whose time is above t, by halving
-    while (lo < hi) {
-        const uint mid = (lo + hi) / 2u;
-        if (t < float(word(times + mid))) hi = mid; else lo = mid + 1u;
-    }
-    return lo == keyCount ? keyCount - 1u : lo - 1u;
-}
-
-float keyFraction(uint interpolation, uint times, uint lower, uint keyCount, float t) {
-    if (interpolation == 0u || lower + 1u >= keyCount) return 0.0;
-    const float t0 = float(word(times + lower));
-    const float t1 = float(word(times + lower + 1u));
-    return t1 > t0 ? clamp((t - t0) / (t1 - t0), 0.0, 1.0) : 0.0;
-}
-
-vec3 sampleVec3(uint track, int sequence, float time, float globalTime, vec3 fallback) {
-    uint keyCount, times, values, interpolation;
-    float t;
-    if (!trackKeys(track, sequence, time, globalTime, keyCount, times, values, t, interpolation)) return fallback;
-    const uint lower = lowerKey(times, keyCount, t);
-    const float f = keyFraction(interpolation, times, lower, keyCount, t);
-    const vec3 a = word4(values + lower * 4u).xyz;
-    return lower + 1u < keyCount ? mix(a, word4(values + (lower + 1u) * 4u).xyz, f) : a;
-}
-
-// glm::slerp: the short way round, linear where the two are nearly one.
-vec4 slerp(vec4 x, vec4 y, float a) {
-    vec4 z = y;
-    float cosTheta = dot(x, y);
-    if (cosTheta < 0.0) { z = -y; cosTheta = -cosTheta; }
-    if (cosTheta > 1.0 - 1.1920929e-7) return mix(x, z, a);
-    const float angle = acos(cosTheta);
-    return (sin((1.0 - a) * angle) * x + sin(a * angle) * z) / sin(angle);
-}
-
-vec4 sampleQuat(uint track, int sequence, float time, float globalTime) {
-    uint keyCount, times, values, interpolation;
-    float t;
-    if (!trackKeys(track, sequence, time, globalTime, keyCount, times, values, t, interpolation))
-        return vec4(0.0, 0.0, 0.0, 1.0);
-    const uint lower = lowerKey(times, keyCount, t);
-    const float f = keyFraction(interpolation, times, lower, keyCount, t);
-    const vec4 a = word4(values + lower * 4u);
-    return lower + 1u < keyCount ? normalize(slerp(a, word4(values + (lower + 1u) * 4u), f)) : a;
-}
 
 mat3 quatToMat3(vec4 q) {
     const float x = q.x, y = q.y, z = q.z, w = q.w;

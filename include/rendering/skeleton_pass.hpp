@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 namespace wowee {
@@ -69,6 +70,30 @@ struct SkeletonFrame {
     void clear() noexcept;
 };
 
+/// A frame slot's posed bones (SkeletonPass::drawSet) as another pass reads
+/// them, and whether that slot's frame was posed.
+struct PosedBones {
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    bool posed = false;
+};
+
+/// Where a renderer's skeletons are in a frame it extracted, for what
+/// stands on them that another renderer runs: the creatures' emitters
+/// (M2Renderer) on the skeletons CharacterRenderer poses.
+class PosedSkeletons {
+public:
+    /// Its request (its model matrix) and first bone in the frame's posed
+    /// bones, and how many it has.
+    struct Pose {
+        uint32_t request = 0;
+        uint32_t boneBase = 0;
+        uint32_t boneCount = 0;
+    };
+    virtual ~PosedSkeletons() = default;
+    /// `owner`'s skeleton in the frame, if it was posed there.
+    [[nodiscard]] virtual std::optional<Pose> poseOf(uint32_t owner) const = 0;
+};
+
 class SkeletonPass {
 public:
     /// A bone read back: whose, which, and its matrix in model space.
@@ -89,7 +114,8 @@ public:
     void destroy();
 
     /// The draws' set: binding 0 the frame's bones, binding 1 each request's
-    /// model matrix. Vertex stage. Valid from initialize() on, posed or not.
+    /// model matrix. Vertex and compute stages. Valid from initialize() on,
+    /// posed or not.
     [[nodiscard]] VkDescriptorSetLayout drawSetLayout() const { return drawSetLayout_; }
     [[nodiscard]] VkDescriptorSet drawSet(uint32_t slot) const { return slots_[slot].drawSet; }
 

@@ -55,6 +55,7 @@ void CharacterEmitters::update(float deltaTime) {
         M2Renderer::EmitterPose pose;
         pose.modelMatrix = source.modelMatrix;
         pose.scale = source.scale;
+        pose.skeletonOwner = source.instanceId;
         pose.bones = source.bones;
         pose.sequenceIndex = source.sequenceIndex;
         pose.animationTimeMs = source.animationTimeMs;

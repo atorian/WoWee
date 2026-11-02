@@ -2440,9 +2440,8 @@ wowee_add_test(test_m2_classifier_foliage
 target_link_libraries(test_m2_classifier_foliage PRIVATE wowee_render)
 
 # ── test_particle_density_floor ─────────────────────────────
-# M2 particle emission, flight and layout against the 3.3.5a client's own
-# arithmetic: pools, rate and distance LOD, FBlocks, spawn geometry, the
-# emitter's quarter turn, gravity, drag and wind, size and spin.
+# An M2 particle emitter's room against the 3.3.5a client's own arithmetic;
+# its emission and flight run on the GPU (scene_m2_particles).
 wowee_add_test(test_particle_density_floor
     SOURCES test_particle_density_floor.cpp)
 
