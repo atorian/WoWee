@@ -23,8 +23,9 @@ struct Request {
     uint page;           // the skeleton's page and first word
     uint blob;
     uint outBase;        // its first bone in bones[]
-    uint flags;          // bit 0 turn billboards to the view, bit 1 arms on their own sequences,
-                         // bit 2 no skeleton: placed, not posed
+    uint flags;          // SkeletonRequestGPU's: bit 0 turn billboards to the view, bit 1 arms on
+                         // their own sequences, bit 2 no skeleton (placed, not posed), bit 3 a
+                         // scale under a thousandth is one
     int sequence;        // the body's sequence index, and its time in ms
     float time;
     float globalTime;    // ms, for global sequences
@@ -250,7 +251,9 @@ void main() {
             }
             const vec3 translation = sampleVec3(word(record + 8u), sequence, time, request.globalTime, vec3(0.0));
             const vec4 rotation = sampleQuat(word(record + 9u), sequence, time, request.globalTime);
-            const vec3 scale = sampleVec3(word(record + 10u), sequence, time, request.globalTime, vec3(1.0));
+            vec3 scale = sampleVec3(word(record + 10u), sequence, time, request.globalTime, vec3(1.0));
+            // The doodads' rule: a scale under a thousandth is one.
+            if ((request.flags & 8u) != 0u) scale = mix(scale, vec3(1.0), lessThan(scale, vec3(0.001)));
 
             // T(pivot) T(translation) R S T(-pivot)
             const mat3 r = quatToMat3(rotation);

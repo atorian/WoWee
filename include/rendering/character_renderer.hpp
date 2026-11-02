@@ -1,6 +1,7 @@
 #pragma once
 #include "rendering/frame_pool.hpp"
 #include "rendering/geometry_pool.hpp"
+#include "rendering/skeleton_pass.hpp"
 #include "rendering/skeleton_pool.hpp"
 #include <span>
 
@@ -690,7 +691,7 @@ private:
     // Descriptor set layouts
     VkDescriptorSetLayout perFrameLayout_ = VK_NULL_HANDLE;  // set 0 (owned by Renderer)
     VkDescriptorSetLayout materialSetLayout_ = VK_NULL_HANDLE;  // set 1
-    VkDescriptorSetLayout boneSetLayout_ = VK_NULL_HANDLE;  // set 2
+    // set 2 is skeletonPass_'s draw set
 
     // Descriptor pool
     VkDescriptorPool materialDescPools_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
@@ -716,7 +717,6 @@ private:
     };
     std::unordered_map<MaterialDescriptorKey, VkDescriptorSet, MaterialDescriptorKeyHash>
         materialDescriptorCache_[2];
-    VkDescriptorPool boneDescPool_ = VK_NULL_HANDLE;
     uint32_t lastMaterialPoolResetFrame_ = 0xFFFFFFFFu;
     // Draw calls the last recording of each Part made.
     uint32_t drawCalls_[3] = {};
@@ -770,53 +770,12 @@ private:
     /// The view update() was given, which billboard bones turn against.
     std::optional<glm::mat4> boneView_;
 
-    /// Every character model's skeleton on the GPU.
+    /// Every character model's skeleton on the GPU, and the pass that
+    /// poses them; a request's owner is the instance's id.
     SkeletonPool skeletons_;
-    /// What skeleton.comp reads of one instance (Request there, std430).
-    struct SkeletonRequestGPU {
-        uint32_t page = 0, blob = 0, outBase = 0, flags = 0;
-        int32_t sequence = -1;
-        float time = 0.0f, globalTime = 0.0f, torsoYaw = 0.0f;
-        glm::ivec2 armSequence{-1};
-        glm::vec2 armTime{0.0f};
-        int32_t parent = -1;
-        uint32_t parentBone = ~0u;
-        uint32_t pad0 = 0, pad1 = 0;
-        glm::mat4 placement{1.0f};
-        /// Moved by this in the world after it is placed: a weapon on the
-        /// back eased out of the arm swinging into it.
-        glm::vec4 shift{0.0f};
-    };
-    /// The skeleton pass: its pipeline, and per frame slot the requests
-    /// (written by the CPU), the bones and models it writes (read by the
-    /// draws), the bones copied back for the CPU, and the sets naming them.
-    VkPipeline skeletonPipeline_ = VK_NULL_HANDLE;
-    VkPipelineLayout skeletonPipelineLayout_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout skeletonSetLayout_ = VK_NULL_HANDLE;
-    /// Its sets come from boneDescPool_, with the draw sets.
-    struct SkeletonSlot {
-        AllocatedBuffer requests, bones, models, readback;
-        uint32_t requestRoom = 0, boneRoom = 0, readRoom = 0;
-        VkDescriptorSet computeSet = VK_NULL_HANDLE;
-        VkDescriptorSet drawSet = VK_NULL_HANDLE;
-        uint32_t pagesVersion = 0;
-        bool setsCurrent = false;
-        /// The bones the slot's last frame copied back, in readback order:
-        /// whose and which. Read once its fence has passed.
-        std::vector<std::pair<uint32_t, uint16_t>> readOf;
-    };
-    SkeletonSlot skeletonSlots_[2];
-    /// Read back on the render thread, taken by the main thread.
-    struct ReadBone {
-        uint32_t instanceId;
-        uint16_t bone;
-        glm::mat4 matrix;
-    };
-    std::mutex readBonesMutex_;
-    std::vector<ReadBone> readBones_;
-    /// Room for this slot's frame; false, said, when there was no memory.
-    bool ensureSkeletonSlot(uint32_t slot, uint32_t requests, uint32_t bones, uint32_t reads);
-    bool createSkeletonPipeline();
+    SkeletonPass skeletonPass_;
+    /// Whether this frame slot's skeletons were posed (prepareRender).
+    bool posed_[2] = {};
 
     // Shadow pipeline resources
     VkPipeline shadowPipeline_ = VK_NULL_HANDLE;
@@ -866,25 +825,9 @@ public:
         float normalStrength = 1;
         std::vector<DrawCharacter> drawLists[3];
         std::vector<DrawCharacter> depth;
-        /// The skeletons to pose, those placed by their own matrix first and
-        /// then each level that rides the one before; levelEnds[i] is where
-        /// level i ends. boneCount bones in all.
-        std::vector<SkeletonRequestGPU> requests;
-        std::vector<uint32_t> levelEnds;
-        uint32_t boneCount = 0;
-        /// The view billboard bones turn against.
-        glm::mat4 view{1.0f};
-        /// The pool's pages as they were, and their version.
-        std::vector<::VkBuffer> skeletonPages;
-        uint32_t skeletonPagesVersion = 0;
-        /// The bones copied back to the CPU: whose, which, and where in
-        /// bones[].
-        struct Read {
-            uint32_t instanceId;
-            uint16_t bone;
-            uint32_t source;
-        };
-        std::vector<Read> reads;
+        /// The skeletons to pose: those placed by their own matrix, then the
+        /// weapons on their wielders, then the enchants on the weapons.
+        SkeletonFrame skeleton;
         std::vector<std::pair<uint32_t, uint32_t>> poseById;
     };
 private:

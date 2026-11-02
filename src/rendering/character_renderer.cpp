@@ -512,22 +512,9 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
         vkCreateDescriptorSetLayout(device, &ci, nullptr, &materialSetLayout_);
     }
 
-    // Bone set layout (set 2): binding 0 = the frame's bones, binding 1 =
-    // each request's model matrix, as skeleton.comp posed them
-    {
-        VkDescriptorSetLayoutBinding bindings[2] = {};
-        for (uint32_t b = 0; b < 2; ++b) {
-            bindings[b].binding = b;
-            bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            bindings[b].descriptorCount = 1;
-            bindings[b].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-        }
-
-        VkDescriptorSetLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 2;
-        ci.pBindings = bindings;
-        vkCreateDescriptorSetLayout(device, &ci, nullptr, &boneSetLayout_);
-    }
+    // Set 2 is the skeleton pass's: the frame's bones and each request's
+    // model matrix, as skeleton.comp posed them.
+    if (!skeletonPass_.initialize(*vkCtx_, "CharacterRenderer")) return false;
 
     // --- Descriptor pools ---
     // Material descriptors are transient and allocated every draw; keep per-frame
@@ -544,20 +531,6 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
         ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
         vkCreateDescriptorPool(device, &ci, nullptr, &materialDescPool);
     }
-    // Each frame slot's draw set (bones, models) and skeleton set (the
-    // pool's pages, the requests, bones and models).
-    {
-        VkDescriptorPoolSize sizes[] = {
-            {.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-             .descriptorCount = 2 * (2 + SkeletonPool::kMaxPages + 3)},
-        };
-        VkDescriptorPoolCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        ci.maxSets = 4;
-        ci.poolSizeCount = 1;
-        ci.pPoolSizes = sizes;
-        vkCreateDescriptorPool(device, &ci, nullptr, &boneDescPool_);
-    }
-    if (!createSkeletonPipeline()) return false;
 
     // --- Material UBO ring buffers (one per frame slot) ---
     {
@@ -586,7 +559,7 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
     // set 0 = perFrame, set 1 = material, set 2 = bones
     // Push constants: CharacterPushConstants
     {
-        VkDescriptorSetLayout setLayouts[] = {perFrameLayout, materialSetLayout_, boneSetLayout_};
+        VkDescriptorSetLayout setLayouts[] = {perFrameLayout, materialSetLayout_, skeletonPass_.drawSetLayout()};
         VkPushConstantRange pushRange{};
         pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         pushRange.offset = 0;
@@ -693,24 +666,10 @@ void CharacterRenderer::shutdown() {
     for (auto& materialDescPool : materialDescPools_) {
         retired.destroy(materialDescPool);
     }
-    if (boneDescPool_) {
-        // Bone callbacks were queued first and return their sets before this pool.
-        retired.destroy(boneDescPool_);
-        boneDescPool_ = VK_NULL_HANDLE;
-    }
     retired.destroy(materialSetLayout_);
-    // The skeleton pass: its slots' buffers (their sets went with the pool
-    // above), its pipeline and the skeletons themselves.
-    for (auto& slot : skeletonSlots_) {
-        for (AllocatedBuffer* buffer : {&slot.requests, &slot.bones, &slot.models, &slot.readback})
-            if (buffer->buffer) retired.buffer(*buffer);
-        slot = SkeletonSlot{};
-    }
-    retired.destroy(skeletonPipeline_);
-    retired.destroy(skeletonPipelineLayout_);
-    retired.destroy(skeletonSetLayout_);
+    // The skeleton pass and the skeletons themselves.
+    skeletonPass_.destroy();
     skeletons_.destroy();
-    retired.destroy(boneSetLayout_);
 
     // Shadow resources
     retired.destroy(shadowPipeline_);
@@ -2283,13 +2242,8 @@ void CharacterRenderer::watchBone(CharacterInstance& instance, uint16_t bone) {
 }
 
 void CharacterRenderer::takeReadBones() {
-    std::vector<ReadBone> read;
-    {
-        std::lock_guard lock(readBonesMutex_);
-        read.swap(readBones_);
-    }
-    for (const ReadBone& bone : read) {
-        auto it = scene_->instances.find(bone.instanceId);
+    for (const SkeletonPass::ReadBone& bone : skeletonPass_.takeReadBones()) {
+        auto it = scene_->instances.find(bone.owner);
         if (it == scene_->instances.end() || bone.bone >= it->second.readBones.size()) continue;
         it->second.readBones[bone.bone] = bone.matrix;
     }
@@ -2322,213 +2276,10 @@ void CharacterRenderer::setArmAnimations(uint32_t instanceId, uint32_t leftArmAn
 
 // --- Rendering ---
 
-bool CharacterRenderer::createSkeletonPipeline() {
-    VkDevice device = vkCtx_->getDevice();
-    // Binding 0: the pool's pages, as many as are made (partially bound).
-    // 1: the requests. 2: the bones. 3: the models.
-    VkDescriptorSetLayoutBinding bindings[4] = {};
-    for (uint32_t b = 0; b < 4; ++b) {
-        bindings[b].binding = b;
-        bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[b].descriptorCount = b == 0 ? SkeletonPool::kMaxPages : 1;
-        bindings[b].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    }
-    const VkDescriptorBindingFlags bindingFlags[4] = {VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, 0, 0, 0};
-    VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
-    flagsInfo.bindingCount = 4;
-    flagsInfo.pBindingFlags = bindingFlags;
-    VkDescriptorSetLayoutCreateInfo layoutCi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    layoutCi.pNext = &flagsInfo;
-    layoutCi.bindingCount = 4;
-    layoutCi.pBindings = bindings;
-    if (vkCreateDescriptorSetLayout(device, &layoutCi, nullptr, &skeletonSetLayout_) != VK_SUCCESS) {
-        LOG_ERROR("CharacterRenderer: could not create the skeleton pass's set layout; characters are not drawn");
-        return false;
-    }
-    const VkPushConstantRange push{.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0,
-                                   .size = sizeof(glm::mat4) + sizeof(glm::uvec4)};
-    skeletonPipelineLayout_ = createPipelineLayout(device, {skeletonSetLayout_}, {push});
-    VkShaderModule shader;
-    if (!skeletonPipelineLayout_ || !shader.loadFromFile(device, "assets/shaders/skeleton.comp.spv")) {
-        LOG_ERROR("CharacterRenderer: could not load the skeleton pass; characters are not drawn");
-        return false;
-    }
-    VkComputePipelineCreateInfo pipelineCi{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    pipelineCi.stage = shader.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
-    pipelineCi.layout = skeletonPipelineLayout_;
-    const VkResult made = vkCreateComputePipelines(device, vkCtx_->getPipelineCache(), 1, &pipelineCi, nullptr,
-                                                   &skeletonPipeline_);
-    shader.destroy();
-    if (made != VK_SUCCESS) {
-        LOG_ERROR("CharacterRenderer: could not build the skeleton pass (", static_cast<int>(made),
-                  "); characters are not drawn");
-        return false;
-    }
-    for (auto& slot : skeletonSlots_) {
-        const VkDescriptorSetLayout layouts[2] = {skeletonSetLayout_, boneSetLayout_};
-        VkDescriptorSet sets[2] = {};
-        VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-        ai.descriptorPool = boneDescPool_;
-        ai.descriptorSetCount = 2;
-        ai.pSetLayouts = layouts;
-        if (vkCtx_->allocateDescriptorSets(ai, sets) != VK_SUCCESS) {
-            LOG_ERROR("CharacterRenderer: could not allocate the skeleton pass's sets; characters are not drawn");
-            return false;
-        }
-        slot.computeSet = sets[0];
-        slot.drawSet = sets[1];
-    }
-    return true;
-}
-
-bool CharacterRenderer::ensureSkeletonSlot(uint32_t index, uint32_t requests, uint32_t bones, uint32_t reads) {
-    SkeletonSlot& slot = skeletonSlots_[index];
-    const VmaAllocator allocator = vkCtx_->getAllocator();
-    DeferredResources retired(*vkCtx_);
-    const auto grow = [&](AllocatedBuffer& buffer, uint32_t& room, uint32_t wanted, VkDeviceSize each,
-                          VkBufferUsageFlags usage, VmaMemoryUsage memory, const char* what) {
-        if (wanted <= room && buffer.buffer) return true;
-        const uint32_t next = std::max({wanted, room + room / 2, 64u});
-        AllocatedBuffer made = createBuffer(allocator, VkDeviceSize(next) * each, usage, memory);
-        if (!made.buffer) {
-            static core::LogBudget budget(4, "skeleton pass buffers");
-            if (budget.take())
-                LOG_ERROR("CharacterRenderer: no memory for the skeleton pass's ", what, " (", next,
-                          ") - characters are not drawn this frame");
-            return false;
-        }
-        if (buffer.buffer) retired.buffer(buffer);
-        buffer = made;
-        room = next;
-        slot.setsCurrent = false;
-        return true;
-    };
-    uint32_t requestRoom = slot.requestRoom, modelRoom = slot.requestRoom;
-    if (!grow(slot.requests, requestRoom, requests, sizeof(SkeletonRequestGPU), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-              VMA_MEMORY_USAGE_CPU_TO_GPU, "requests") ||
-        !grow(slot.models, modelRoom, requests, sizeof(glm::mat4), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-              VMA_MEMORY_USAGE_GPU_ONLY, "models") ||
-        !grow(slot.bones, slot.boneRoom, bones, sizeof(glm::mat4),
-              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_GPU_ONLY,
-              "bones") ||
-        !grow(slot.readback, slot.readRoom, std::max(reads, 1u), sizeof(glm::mat4), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-              VMA_MEMORY_USAGE_GPU_TO_CPU, "bones read back")) {
-        return false;
-    }
-    slot.requestRoom = std::min(requestRoom, modelRoom);
-    return true;
-}
-
 void CharacterRenderer::prepareRender(VkCommandBuffer cmd, uint32_t frameIndex) {
-    if (!scenePipes_.opaque || !skeletonPipeline_ || frameIndex >= 2) return;
-    SkeletonSlot& slot = skeletonSlots_[frameIndex];
-
-    // What this slot's last frame copied back: its fence has passed.
-    if (!slot.readOf.empty() && slot.readback.info.pMappedData) {
-        vmaInvalidateAllocation(vkCtx_->getAllocator(), slot.readback.allocation, 0, VK_WHOLE_SIZE);
-        const auto* matrices = static_cast<const glm::mat4*>(slot.readback.info.pMappedData);
-        std::lock_guard lock(readBonesMutex_);
-        for (size_t i = 0; i < slot.readOf.size(); ++i)
-            readBones_.push_back({.instanceId = slot.readOf[i].first, .bone = slot.readOf[i].second,
-                                  .matrix = matrices[i]});
-    }
-    slot.readOf.clear();
-
-    const Frame& frame = *recording_;
-    if (frame.requests.empty()) return;
-    const auto requestCount = static_cast<uint32_t>(frame.requests.size());
-    const auto readCount = static_cast<uint32_t>(frame.reads.size());
-    if (!ensureSkeletonSlot(frameIndex, requestCount, std::max(frame.boneCount, 1u), readCount)) return;
-    std::memcpy(slot.requests.info.pMappedData, frame.requests.data(), frame.requests.size() * sizeof(SkeletonRequestGPU));
-    vmaFlushAllocation(vkCtx_->getAllocator(), slot.requests.allocation, 0, VK_WHOLE_SIZE);
-
-    // The sets, after the slot's fence, when a buffer or the pages changed.
-    if (!slot.setsCurrent || slot.pagesVersion != frame.skeletonPagesVersion) {
-        std::vector<VkDescriptorBufferInfo> pages;
-        std::vector<uint32_t> pageAt;
-        for (size_t p = 0; p < frame.skeletonPages.size() && p < SkeletonPool::kMaxPages; ++p) {
-            if (!frame.skeletonPages[p]) continue;
-            pages.push_back({.buffer = frame.skeletonPages[p], .offset = 0, .range = VK_WHOLE_SIZE});
-            pageAt.push_back(static_cast<uint32_t>(p));
-        }
-        const VkDescriptorBufferInfo requests{.buffer = slot.requests.buffer, .offset = 0, .range = VK_WHOLE_SIZE};
-        const VkDescriptorBufferInfo bones{.buffer = slot.bones.buffer, .offset = 0, .range = VK_WHOLE_SIZE};
-        const VkDescriptorBufferInfo models{.buffer = slot.models.buffer, .offset = 0, .range = VK_WHOLE_SIZE};
-        std::vector<VkWriteDescriptorSet> writes;
-        const auto write = [&](VkDescriptorSet set, uint32_t binding, uint32_t element,
-                               const VkDescriptorBufferInfo* info) {
-            VkWriteDescriptorSet w{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            w.dstSet = set;
-            w.dstBinding = binding;
-            w.dstArrayElement = element;
-            w.descriptorCount = 1;
-            w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            w.pBufferInfo = info;
-            writes.push_back(w);
-        };
-        for (size_t p = 0; p < pages.size(); ++p) write(slot.computeSet, 0, pageAt[p], &pages[p]);
-        write(slot.computeSet, 1, 0, &requests);
-        write(slot.computeSet, 2, 0, &bones);
-        write(slot.computeSet, 3, 0, &models);
-        write(slot.drawSet, 0, 0, &bones);
-        write(slot.drawSet, 1, 0, &models);
-        vkUpdateDescriptorSets(vkCtx_->getDevice(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-        slot.setsCurrent = true;
-        slot.pagesVersion = frame.skeletonPagesVersion;
-    }
-
-    // A dispatch a level: a request reads what the level before posed.
-    const auto barrier = [&](VkPipelineStageFlags2 src, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dst,
-                             VkAccessFlags2 dstAccess) {
-        VkMemoryBarrier2 b{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-        b.srcStageMask = src;
-        b.srcAccessMask = srcAccess;
-        b.dstStageMask = dst;
-        b.dstAccessMask = dstAccess;
-        VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-        dep.memoryBarrierCount = 1;
-        dep.pMemoryBarriers = &b;
-        cmdPipelineBarrier2(cmd, dep);
-    };
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, skeletonPipeline_);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, skeletonPipelineLayout_, 0, 1, &slot.computeSet, 0,
-                            nullptr);
-    struct {
-        glm::mat4 view;
-        glm::uvec4 level;
-    } push{.view = frame.view, .level = glm::uvec4(0)};
-    uint32_t first = 0;
-    for (const uint32_t end : frame.levelEnds) {
-        if (end > first) {
-            push.level.x = first;
-            vkCmdPushConstants(cmd, skeletonPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-            vkCmdDispatch(cmd, end - first, 1, 1);
-            barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
-                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
-                        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                    VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_TRANSFER_READ_BIT);
-        }
-        first = end;
-    }
-
-    // The bones the CPU reads, copied back for it to take once this slot's
-    // fence has passed.
-    if (readCount > 0) {
-        std::vector<VkBufferCopy> regions;
-        regions.reserve(readCount);
-        slot.readOf.reserve(readCount);
-        for (uint32_t i = 0; i < readCount; ++i) {
-            const Frame::Read& read = frame.reads[i];
-            regions.push_back({.srcOffset = VkDeviceSize(read.source) * sizeof(glm::mat4),
-                               .dstOffset = VkDeviceSize(i) * sizeof(glm::mat4),
-                               .size = sizeof(glm::mat4)});
-            slot.readOf.emplace_back(read.instanceId, read.bone);
-        }
-        vkCmdCopyBuffer(cmd, slot.bones.buffer, slot.readback.buffer, readCount, regions.data());
-        barrier(VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_HOST_BIT,
-                VK_ACCESS_2_HOST_READ_BIT);
-    }
+    if (!scenePipes_.opaque || frameIndex >= 2) return;
+    // A frame the pass could not pose (said) draws no unit.
+    posed_[frameIndex] = skeletonPass_.record(cmd, frameIndex, recording_->skeleton);
 }
 
 void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera&, Part part) {
@@ -2537,9 +2288,8 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
 void CharacterRenderer::Frame::clear() noexcept {
     for (auto& list : drawLists) list.clear();
-    depth.clear(); requests.clear(); levelEnds.clear(); reads.clear(); poseById.clear();
-    skeletonPages.clear();
-    boneCount = 0;
+    depth.clear(); poseById.clear();
+    skeleton.clear();
 }
 
 uint32_t CharacterRenderer::Frame::poseIndex(uint32_t id) const {
@@ -2556,9 +2306,9 @@ std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const
     frame->normalMapping = normalMappingEnabled_;
     frame->normalStrength = normalMapStrength_;
     frameLights_ = &lights;
-    frame->view = boneView_.value_or(glm::mat4(1.0f));
-    frame->skeletonPages = skeletons_.pageBuffers();
-    frame->skeletonPagesVersion = skeletons_.version();
+    frame->skeleton.view = boneView_.value_or(glm::mat4(1.0f));
+    frame->skeleton.pages = skeletons_.pageBuffers();
+    frame->skeleton.pagesVersion = skeletons_.version();
 
     // Each shown instance a request: those placed by their own matrix, then
     // the weapons on their wielders' bones, then the enchants on the weapons
@@ -2578,7 +2328,7 @@ std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const
         r.parentBone = parentBone;
         r.placement = placement;
         r.shift = glm::vec4(shift, 0.0f);
-        r.outBase = frame->boneCount;
+        r.outBase = frame->skeleton.boneCount;
         const uint32_t boneCount = model.skeleton.placed() ? model.skeleton.boneCount : 0;
         if (boneCount > 0) {
             r.page = static_cast<uint32_t>(model.skeleton.page);
@@ -2587,9 +2337,9 @@ std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const
             r.time = inst.animationTime;
             r.globalTime = inst.globalSequenceTime;
             r.torsoYaw = inst.torsoYawOverrideRad;
-            if (boneView_) r.flags |= 1u;
+            if (boneView_) r.flags |= SkeletonRequestGPU::kTurnBillboards;
             if (inst.armSequenceIndex[0] >= 0 || inst.armSequenceIndex[1] >= 0) {
-                r.flags |= 2u;
+                r.flags |= SkeletonRequestGPU::kArmsOwnSequences;
                 const auto& sequences = model.data->sequences;
                 for (int arm = 0; arm < 2; ++arm) {
                     const int sequence = inst.armSequenceIndex[arm];
@@ -2603,14 +2353,15 @@ std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const
                 }
             }
         } else {
-            r.flags = 4u;
+            r.flags = SkeletonRequestGPU::kNoSkeleton;
         }
-        const auto index = static_cast<uint32_t>(frame->requests.size());
-        frame->requests.push_back(r);
+        const auto index = static_cast<uint32_t>(frame->skeleton.requests.size());
+        frame->skeleton.requests.push_back(r);
         frame->poseById.emplace_back(id, index);
-        frame->boneCount += boneCount;
+        frame->skeleton.boneCount += boneCount;
         for (const uint16_t bone : inst.watchedBones)
-            if (bone < boneCount) frame->reads.push_back({.instanceId = id, .bone = bone, .source = r.outBase + bone});
+            if (bone < boneCount)
+                frame->skeleton.reads.push_back({.owner = id, .bone = bone, .source = r.outBase + bone});
         if (model.geometry.placed()) {
             frame->depth.push_back({.modelMatrix = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix
                                                                                : getModelMatrix(inst),
@@ -2629,11 +2380,12 @@ std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const
                                        glm::vec3(0.0f));
         if (!inst.weaponAttachments.empty()) wielders.emplace_back(id, index);
     }
-    frame->levelEnds.push_back(static_cast<uint32_t>(frame->requests.size()));
+    frame->skeleton.levelEnds.push_back(static_cast<uint32_t>(frame->skeleton.requests.size()));
     std::vector<std::pair<const WeaponAttachment*, uint32_t>> weapons;  // attachment, the weapon's request
     for (const auto& [id, parent] : wielders) {
         const CharacterInstance& wielder = scene_->instances.at(id);
-        const uint32_t parentBones = frame->requests[parent].flags & 4u ? 0 : wielder.cachedModel->skeleton.boneCount;
+        const uint32_t parentBones = (frame->skeleton.requests[parent].flags & SkeletonRequestGPU::kNoSkeleton)
+                                         ? 0 : wielder.cachedModel->skeleton.boneCount;
         for (const auto& wa : wielder.weaponAttachments) {
             auto it = scene_->instances.find(wa.weaponInstanceId);
             if (it == scene_->instances.end() || !shown(it->second)) continue;
@@ -2642,7 +2394,7 @@ std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const
                                               attachmentPlacement(wa), wa.shift));
         }
     }
-    frame->levelEnds.push_back(static_cast<uint32_t>(frame->requests.size()));
+    frame->skeleton.levelEnds.push_back(static_cast<uint32_t>(frame->skeleton.requests.size()));
     for (const auto& [wa, weapon] : weapons) {
         for (const auto& fx : wa->effects) {
             auto it = scene_->instances.find(fx.effectInstanceId);
@@ -2651,7 +2403,7 @@ std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const
                     glm::translate(glm::mat4(1.0f), fx.offset), glm::vec3(0.0f));
         }
     }
-    frame->levelEnds.push_back(static_cast<uint32_t>(frame->requests.size()));
+    frame->skeleton.levelEnds.push_back(static_cast<uint32_t>(frame->skeleton.requests.size()));
     std::sort(frame->poseById.begin(), frame->poseById.end());
     cullCharacters(camera, Part::All, frame->drawLists[0], *frame);
     for (const auto& draw : frame->drawLists[0]) frame->drawLists[draw.opacity < 0.999f ? 2 : 1].push_back(draw);
@@ -2723,14 +2475,14 @@ void CharacterRenderer::cullCharacters(const Camera& camera, Part part,
         const glm::mat4 modelMatrix = instance.hasOverrideModelMatrix ? instance.overrideModelMatrix
                                                                       : getModelMatrix(instance);
         const uint32_t pose = frame.poseIndex(instance.id);
-        const SkeletonRequestGPU& posed = frame.requests[pose];
+        const SkeletonRequestGPU& posed = frame.skeleton.requests[pose];
         list.push_back(DrawCharacter{
             .modelMatrix = modelMatrix,
             .model = models.at(instance.modelId),
             .dress = instance.dress,
             .pose = pose,
             .boneBase = posed.outBase,
-            .boneCount = (posed.flags & 4u) ? 0u : gpuModel.skeleton.boneCount,
+            .boneCount = (posed.flags & SkeletonRequestGPU::kNoSkeleton) ? 0u : gpuModel.skeleton.boneCount,
             .interiorLight = instance.interiorLight,
             // The lights nearest the unit's origin, as the client picks them
             // for any model.
@@ -2852,8 +2604,8 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             pipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
     // The frame's bones and models (set 2), posed by prepareRender.
-    const VkDescriptorSet boneSet = skeletonSlots_[frameIndex].drawSet;
-    if (!boneSet || recording_->requests.empty()) return;
+    const VkDescriptorSet boneSet = skeletonPass_.drawSet(frameIndex);
+    if (!boneSet || !posed_[frameIndex] || recording_->skeleton.requests.empty()) return;
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 2, 1, &boneSet, 0, nullptr);
 
     auto pipelineFor = [&](CharacterBlendPipeline p) -> VkPipeline {
@@ -3369,7 +3121,7 @@ bool CharacterRenderer::initializeShadow(VkRenderPass shadowRenderPass) {
         }
     }
 
-    // Pipeline layout: set 0 = shadowParams_.layout, set 1 = boneSetLayout_
+    // Pipeline layout: set 0 = shadowParams_.layout, set 1 = the skeleton pass's bones
     //
     // There used to be a third, perFrameLayout_, sitting at set 0 as a dummy
     // that nothing ever bound, which pushed the params to set 1 and the bones to
@@ -3382,7 +3134,7 @@ bool CharacterRenderer::initializeShadow(VkRenderPass shadowRenderPass) {
     // indexing a descriptor array of length zero. A set that is never bound has
     // no business being in the layout.
     // Push constant: 128 bytes (lightSpaceMatrix + model), VERTEX stage
-    VkDescriptorSetLayout setLayouts[] = {shadowParams_.layout, boneSetLayout_};
+    VkDescriptorSetLayout setLayouts[] = {shadowParams_.layout, skeletonPass_.drawSetLayout()};
     VkPushConstantRange pc{};
     pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     pc.offset = 0;
@@ -3447,7 +3199,6 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
                                      const glm::vec3& shadowCenter, float shadowRadius, bool resetDescriptors) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
     if (recording_->depth.empty()) return;
-    if (boneDescPool_ == VK_NULL_HANDLE || boneSetLayout_ == VK_NULL_HANDLE) return;
 
     uint32_t frameIndex = vkCtx_->getCurrentFrame();
     if (frameIndex >= 2) return;
@@ -3489,8 +3240,8 @@ void CharacterRenderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4
         // from a set the GPU no longer considered bound, which GPU-assisted
         // validation reports as indexing a descriptor array of length zero,
         // thousands of times a session.
-        const VkDescriptorSet boneSet = skeletonSlots_[frameIndex].drawSet;
-        if (!boneSet || recording_->requests.empty()) return;
+        const VkDescriptorSet boneSet = skeletonPass_.drawSet(frameIndex);
+        if (!boneSet || !posed_[frameIndex] || recording_->skeleton.requests.empty()) return;
         VkDescriptorSet sets[2] = {shadowParams_.set, boneSet};
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
             0, 2, sets, 0, nullptr);
