@@ -101,20 +101,17 @@ GeometryPool::Range GeometryPool::place(const void* vertices, uint32_t vertexCou
         return {};
     }
     return Range{.page = slot, .baseVertex = static_cast<int32_t>(*firstVertex), .firstIndex = *firstIndex,
-                 .vertexCount = vertexCount, .indexCount = indexCount};
+                 .vertexCount = vertexCount, .indexCount = indexCount, .vertices = page.vertices.buffer,
+                 .indices = page.indices.buffer};
 }
 
-void GeometryPool::release(Range& range) {
-    if (!range.placed() || static_cast<size_t>(range.page) >= pages_.size() || !pages_[range.page]) {
-        range = {};
-        return;
-    }
+void GeometryPool::release(const Range& range) {
+    if (!range.placed() || static_cast<size_t>(range.page) >= pages_.size() || !pages_[range.page]) return;
     // A frame in flight may still draw it; the ranges come back after it.
     context_->deferAfterAllFrameFences([page = pages_[range.page], range] {
         page->vertexRanges.free(static_cast<uint32_t>(range.baseVertex), range.vertexCount);
         page->indexRanges.free(range.firstIndex, range.indexCount);
     });
-    range = {};
 }
 
 void GeometryPool::releaseEmptyPages() {
@@ -146,11 +143,10 @@ void GeometryPool::releaseEmptyPages() {
                                                                                     : VK_NULL_HANDLE;
 }
 
-void GeometryPool::bind(VkCommandBuffer cmd, int32_t page) const {
-    const ::VkBuffer vertexBuffer = vertices(page);
+void GeometryPool::bind(VkCommandBuffer cmd, const Range& range) const {
     const VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer, &offset);
-    vkCmdBindIndexBuffer(cmd, indices(page), 0, config_.indexType);
+    vkCmdBindVertexBuffers(cmd, 0, 1, &range.vertices, &offset);
+    vkCmdBindIndexBuffer(cmd, range.indices, 0, config_.indexType);
 }
 
 GeometryPool::Stats GeometryPool::stats() const {

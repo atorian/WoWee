@@ -3,6 +3,7 @@
 #include "rendering/rt_instance_changes.hpp"
 #include "rendering/frame_pool.hpp"
 #include "rendering/frame_results.hpp"
+#include "rendering/geometry_pool.hpp"
 #include "rendering/gpu_slot_table.hpp"
 
 #include "collision/m2_shape.hpp"
@@ -150,10 +151,10 @@ struct M2ModelGPU {
         glm::vec3 lightSuspensionPoint{0.0f};
     };
 
-    ::VkBuffer vertexBuffer = VK_NULL_HANDLE;
-    VmaAllocation vertexAlloc = VK_NULL_HANDLE;
-    ::VkBuffer indexBuffer = VK_NULL_HANDLE;
-    VmaAllocation indexAlloc = VK_NULL_HANDLE;
+    /// Where its vertices and indices live in the renderer's GeometryPool;
+    /// a batch's indices are counted from its first index, and its vertices
+    /// from its base vertex.
+    GeometryPool::Range geometry;
     uint32_t indexCount = 0;
     uint32_t vertexCount = 0;
     std::vector<BatchGPU> batches;
@@ -243,7 +244,7 @@ struct M2ModelGPU {
     std::vector<pipeline::M2AnimationTrack> textureWeightTracks;
     std::vector<int> idleVariationIndices;  // Sequence indices for idle variations (animId 0)
 
-    [[nodiscard]] bool isValid() const { return vertexBuffer != VK_NULL_HANDLE && indexCount > 0; }
+    [[nodiscard]] bool isValid() const { return geometry.placed() && indexCount > 0; }
     /// The lights the model carries (M2 header `lights`).
     std::vector<pipeline::M2Light> lights;
     [[nodiscard]] bool canThrowLocalLight() const { return !lights.empty(); }
@@ -1170,6 +1171,9 @@ private:
     /// only by copies recorded into the frames, in queue order: the cull's
     /// row of each slot, and what the vertex shader reads of it
     /// (InstanceStaticGPU). They grow together.
+    /// Every model's vertices (18 floats) and 16-bit indices, in pages.
+    GeometryPool geometry_{{.what = "M2", .vertexStride = 18 * sizeof(float), .indexType = VK_INDEX_TYPE_UINT16,
+                            .pageVertices = 1u << 19, .pageIndices = 1u << 21}};
     GpuSlotTable cullTable_{sizeof(CullRowGPU), "M2 cull table"};
     GpuSlotTable instanceTable_{sizeof(InstanceStaticGPU), "M2 instance table"};
     /// The table version (GpuSlotTable::version) each slot's sets name, so

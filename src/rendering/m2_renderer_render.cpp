@@ -1203,7 +1203,7 @@ void M2Renderer::appendGlowSprites(const M2Instance& inst, const M2ModelGPU& mod
                                    std::vector<GlowSprite>& out, float time) const {
     // The groups the opaque pass leaves out altogether.
     if (skipGroundDetail_ && model.isGroundDetail) return;
-    if (!model.vertexBuffer || !model.indexBuffer) return;
+    if (!model.geometry.placed()) return;
     const bool onlyBatchModel = m2BatchDiagNames(model);
     for (size_t bi = 0; bi < model.batches.size(); bi++) {
         const auto& batch = model.batches[bi];
@@ -2014,9 +2014,7 @@ void M2Renderer::recordStarReplacement(VkCommandBuffer cmd, VkDescriptorSet perF
                                      pipelineLayout_, 2, 1, &bones, 0, nullptr);
     if (instanceSet_[frame]) vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                               pipelineLayout_, 3, 1, &instanceSet_[frame], 0, nullptr);
-    const VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &model.vertexBuffer, &offset);
-    vkCmdBindIndexBuffer(cmd, model.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+    geometry_.bind(cmd, model.geometry);
 }
 
 void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
@@ -2113,7 +2111,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 visStart = groupEnd;
                 continue;
             }
-            if (!model.vertexBuffer || !model.indexBuffer) {
+            if (!model.geometry.placed()) {
                 visStart = groupEnd;
                 continue;
             }
@@ -2141,10 +2139,8 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             std::sort(pending.begin(), pending.end(),
                       [](const PendingInstance& a, const PendingInstance& b) { return a.targetLOD < b.targetLOD; });
 
-            // Bind vertex/index buffers once per model group
-            VkDeviceSize vbOffset = 0;
-            vkCmdBindVertexBuffers(cmd, 0, 1, &model.vertexBuffer, &vbOffset);
-            vkCmdBindIndexBuffer(cmd, model.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+            // Bind the model's geometry page once per model group
+            geometry_.bind(cmd, model.geometry);
 
             // Write base instance data to SSBO (no texture animation - overridden for tex-anim batches)
             uint32_t baseSSBOOffset = instanceDataCount_;
@@ -2339,7 +2335,8 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     fillSway(pc, model, skyMode_);
                     pc.instanceDataOffset = static_cast<int32_t>(drawOffset);
                     vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
-                    vkCmdDrawIndexed(cmd, batch.indexCount, groupSize, batch.indexStart, 0, 0);
+                    vkCmdDrawIndexed(cmd, batch.indexCount, groupSize, model.geometry.firstIndex + batch.indexStart,
+                                     model.geometry.baseVertex, 0);
                     if (skyMode_) ++skyDiagDrawsOpaque_;
                     lastDrawCallCount++;
                 }
@@ -2429,11 +2426,9 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             currentModel = instance.model.get();
             if (!currentModel) continue;
             if (!currentModel->hasTransparentBatches) continue;
-            if (!currentModel->vertexBuffer || !currentModel->indexBuffer) continue;
+            if (!currentModel->geometry.placed()) continue;
             currentModelValid = true;
-            VkDeviceSize vbOff = 0;
-            vkCmdBindVertexBuffers(cmd, 0, 1, &currentModel->vertexBuffer, &vbOff);
-            vkCmdBindIndexBuffer(cmd, currentModel->indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+            geometry_.bind(cmd, currentModel->geometry);
         }
         if (!currentModelValid) continue;
 
@@ -2602,7 +2597,8 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             fillSway(pc, model, skyMode_);
             pc.instanceDataOffset = static_cast<int32_t>(drawOffset);
             vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
-            vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
+            vkCmdDrawIndexed(cmd, batch.indexCount, 1, model.geometry.firstIndex + batch.indexStart,
+                             model.geometry.baseVertex, 0);
             if (skyMode_) ++skyDiagDrawsTransparent_;
             lastDrawCallCount++;
             lastBlendedDrawCallCount++;
@@ -2993,9 +2989,7 @@ void M2Renderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& light
                     .slot = caster.slot, .refHeight = sway.refHeight, .amplitude = sway.amp * fade};
             }
 
-            VkDeviceSize offset = 0;
-            vkCmdBindVertexBuffers(cmd, 0, 1, &model.vertexBuffer, &offset);
-            vkCmdBindIndexBuffer(cmd, model.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+            geometry_.bind(cmd, model.geometry);
 
             for (const auto& batch : model.batches) {
                 // A layer that fades in and out is drawn blended, and blended
@@ -3042,7 +3036,8 @@ void M2Renderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& light
                 vkCmdPushConstants(cmd, shadowPipelineLayout_,
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    0, sizeof(M2ShadowPush), &push);
-                vkCmdDrawIndexed(cmd, batch.indexCount, count, batch.indexStart, 0, firstCaster);
+                vkCmdDrawIndexed(cmd, batch.indexCount, count, model.geometry.firstIndex + batch.indexStart,
+                                 model.geometry.baseVertex, firstCaster);
             }
             castersDrawn += count;
             g = groupEnd;

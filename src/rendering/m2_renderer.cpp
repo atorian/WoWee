@@ -504,6 +504,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     assetManager = assets;
     cullTable_.initialize(*ctx);
     instanceTable_.initialize(*ctx);
+    geometry_.initialize(*ctx);
 
     // Announce the renderer diagnostics this build understands, and which of
     // them are active. A run that logs this line is definitely a build that has
@@ -1040,6 +1041,8 @@ void M2Renderer::shutdown() {
     }
     cullTable_.destroy();
     instanceTable_.destroy();
+    // Every model's ranges came back in the flush above.
+    geometry_.destroy();
     pendingCullDispatch_ = CullDispatch{};
     pendingUploadSerial_ = 0;
     // The table is gone: whatever scene comes next is mirrored from scratch.
@@ -1077,11 +1080,10 @@ void M2Renderer::destroyModelGPU(uint32_t modelId, std::shared_ptr<M2ModelGPU> r
     // Detach ownership immediately; command buffers retain these handles until
     // every frame slot has fenced. Capture values, never this or model refs.
     VkContext* ctx = vkCtx_;
-    const VmaAllocator alloc = vkCtx_->getAllocator();
     const VkDescriptorPool pool = materialDescPool_;
-    vkCtx_->deferAfterAllFrameFences([retired, ctx, alloc, pool, slots = materialSlots_]() {
-        destroy(alloc, retired->vertexBuffer, retired->vertexAlloc);
-        destroy(alloc, retired->indexBuffer, retired->indexAlloc);
+    // Its ranges come back after the frames that may draw it.
+    geometry_.release(retired->geometry);
+    vkCtx_->deferAfterAllFrameFences([retired, ctx, pool, slots = materialSlots_]() {
         for (auto& batch : retired->batches) {
             if (batch.materialSet) ctx->freeDescriptorSets(pool, 1, &batch.materialSet);
             if (slots) slots->free(batch.materialSlot);
@@ -1671,6 +1673,8 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
     vkCtx_->beginUploadBatch();
 
     if (hasGeometry) {
+        // Pages the models unloaded since emptied, now that their frames are done.
+        geometry_.releaseEmptyPages();
         // Create VBO with interleaved vertex data
         // Format: position (3), normal (3), texcoord0 (2), texcoord1 (2), boneWeights (4), boneIndices (4 as float)
         const size_t floatsPerVertex = 18;
@@ -1702,26 +1706,11 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
             vertexData.push_back(static_cast<float>(std::min(v.boneIndices[3], uint8_t(127))));
         }
 
-        // Upload vertex buffer to GPU
-        {
-            auto buf = uploadBuffer(*vkCtx_,
-                vertexData.data(), vertexData.size() * sizeof(float),
-                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-            gpuModel.vertexBuffer = buf.buffer;
-            gpuModel.vertexAlloc = buf.allocation;
-        }
-
-        // Upload index buffer to GPU
-        {
-            auto buf = uploadBuffer(*vkCtx_,
-                model.indices.data(), model.indices.size() * sizeof(uint16_t),
-                VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-            gpuModel.indexBuffer = buf.buffer;
-            gpuModel.indexAlloc = buf.allocation;
-        }
-
-        if (!gpuModel.vertexBuffer || !gpuModel.indexBuffer) {
-            LOG_ERROR("M2Renderer::loadModel: GPU buffer upload failed for model ", modelId);
+        // Into a page of the renderer's geometry, which says why when it cannot.
+        gpuModel.geometry = geometry_.place(vertexData.data(), static_cast<uint32_t>(model.vertices.size()),
+                                            model.indices.data(), static_cast<uint32_t>(model.indices.size()));
+        if (!gpuModel.geometry.placed()) {
+            LOG_ERROR("M2Renderer::loadModel: model ", modelId, " has no geometry on the GPU; it is not drawn");
         }
     }
 

@@ -1593,6 +1593,7 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     // The chunk's ranges in its geometry page, given back once no frame in
     // flight draws them; until then nothing else is copied over them.
     geometry_.release(chunk.geometry);
+    chunk.geometry = {};
 
     // The textures are let go below: the shared cache keeps a tileset texture
     // for the next tile that wants it, and retires it only after the frames

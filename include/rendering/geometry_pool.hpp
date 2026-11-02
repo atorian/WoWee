@@ -37,13 +37,18 @@ public:
         uint32_t pageVertices;      ///< a shared page's room
         uint32_t pageIndices;
     };
-    /// Where one mesh lives; page -1 for none.
+    /// Where one mesh lives; page -1 for none. It carries its page's buffers,
+    /// which last while it is placed, so a recording on another thread reads
+    /// them from the mesh and never from the pool, which the main thread
+    /// changes as meshes come and go.
     struct Range {
         int32_t page = -1;
         int32_t baseVertex = 0;
         uint32_t firstIndex = 0;
         uint32_t vertexCount = 0;
         uint32_t indexCount = 0;
+        ::VkBuffer vertices = VK_NULL_HANDLE;
+        ::VkBuffer indices = VK_NULL_HANDLE;
         [[nodiscard]] bool placed() const { return page >= 0; }
     };
     struct Stats {
@@ -65,8 +70,10 @@ public:
     /// The mesh copied into a page, inside an upload batch. An unplaced
     /// range, said at warning level, when there is nowhere for it.
     [[nodiscard]] Range place(const void* vertices, uint32_t vertexCount, const void* indices, uint32_t indexCount);
-    /// The mesh's ranges back once no frame in flight can draw them.
-    void release(Range& range);
+    /// The mesh's ranges back once no frame in flight can draw them. The
+    /// range itself is left as it is: a frame still being recorded may hold
+    /// the mesh and draw it.
+    void release(const Range& range);
     /// Pages that emptied go, but for one shared spare.
     void releaseEmptyPages();
 
@@ -75,8 +82,8 @@ public:
     [[nodiscard]] ::VkBuffer vertices(int32_t page) const;
     [[nodiscard]] ::VkBuffer indices(int32_t page) const;
     [[nodiscard]] VkIndexType indexType() const { return config_.indexType; }
-    /// Binds the page's buffers at binding 0.
-    void bind(VkCommandBuffer cmd, int32_t page) const;
+    /// Binds the mesh's page's buffers at binding 0. Any thread.
+    void bind(VkCommandBuffer cmd, const Range& range) const;
     [[nodiscard]] Stats stats() const;
 
 private:
