@@ -1,13 +1,18 @@
 #pragma once
 
+#include "pipeline/blp_loader.hpp"
+
 #include <cstdint>
-#include <unordered_map>
+#include <future>
 #include <memory>
+#include <string>
+#include <unordered_map>
 
 namespace wowee {
 namespace rendering {
 
 class CharacterRenderer;
+class CpuStageTimes;
 class M2Renderer;
 
 /// The particle and ribbon emitters of what CharacterRenderer draws.
@@ -36,7 +41,9 @@ public:
         CharacterEmitters& renderer_;
         std::unique_ptr<InstanceState> state_;
     };
-    CharacterEmitters(CharacterRenderer& characters, M2Renderer& m2);
+    /// `stages`, when given, times update()'s parts under
+    /// "rendererUpdate/character emitters".
+    CharacterEmitters(CharacterRenderer& characters, M2Renderer& m2, CpuStageTimes* stages = nullptr);
     ~CharacterEmitters();
     CharacterEmitters(const CharacterEmitters&) = delete;
     CharacterEmitters& operator=(const CharacterEmitters&) = delete;
@@ -45,11 +52,17 @@ public:
     /// M2Renderer::update() was given.
     void update();
     void clearInstances();
+    /// How many models' emitters are waiting for their textures to be read:
+    /// their instances have no emitters until update() finds them in.
+    [[nodiscard]] size_t loading() const;
 
 private:
     struct Model {
         uint32_t handle = 0;  // M2Renderer posed-emitter model; 0 while not loaded
         uint32_t users = 0;
+        /// Its emitters' textures being read on a worker; its instances get
+        /// their emitters once they are in.
+        std::future<std::unordered_map<std::string, pipeline::BLPImage>> textures;
         /// It did not load; not asked for again, as it would fail the same
         /// way every frame.
         bool failed = false;
@@ -64,6 +77,7 @@ private:
 
     CharacterRenderer& characters_;
     M2Renderer& m2_;
+    CpuStageTimes* stages_ = nullptr;
     /// Per CharacterRenderer model load (EmitterSource::modelSerial).
     std::unordered_map<uint64_t, Model> models_;
     /// Per CharacterRenderer instance.

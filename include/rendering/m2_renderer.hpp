@@ -491,10 +491,17 @@ public:
         float globalSequenceTimeMs = 0.0f;
         bool posed = false;
     };
+    /// The textures `model`'s emitters draw with, as loadPosedEmitterModel
+    /// reads them, keyed by their normalized paths.
+    using PreparedTextures = std::unordered_map<std::string, pipeline::BLPImage>;
+    /// Reads and decodes those of them the shared cache does not hold yet,
+    /// on an I/O worker: the frame that uploads them reads nothing from disk.
+    [[nodiscard]] std::future<PreparedTextures> preparePosedEmitterTextures(const pipeline::M2Model& model) const;
     /// Uploads `model`'s particle and ribbon emitters - their textures and
-    /// descriptor sets, not its geometry. Returns a handle, or 0 when the
-    /// model has no emitters.
-    uint32_t loadPosedEmitterModel(const pipeline::M2Model& model);
+    /// descriptor sets, not its geometry - taking the textures from
+    /// `prepared` (preparePosedEmitterTextures). Returns a handle, or 0 when
+    /// the model has no emitters.
+    uint32_t loadPosedEmitterModel(const pipeline::M2Model& model, PreparedTextures& prepared);
     void unloadPosedEmitterModel(uint32_t handle);
     [[nodiscard]] bool hasPosedEmitterModel(uint32_t handle) const;
     /// One set of emitters on one skeleton. 0 when the handle is not loaded.

@@ -10,9 +10,12 @@
 
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_renderer_internal.h"
+#include "rendering/texture_cache.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_texture.hpp"
 #include "core/logger.hpp"
+#include "core/thread_pool.hpp"
+#include "pipeline/asset_manager.hpp"
 #include <algorithm>
 #include <cmath>
 #include <memory>
@@ -87,7 +90,53 @@ void M2Renderer::setupEmitterResources(M2ModelGPU& gpuModel, const pipeline::M2M
     }
 }
 
-uint32_t M2Renderer::loadPosedEmitterModel(const pipeline::M2Model& model) {
+namespace {
+
+// The textures a model's emitters name, and only those, by their slot: the
+// model's skins are its owner's business. A slot with no file of its own is
+// one a display fills in, which an emitter cannot be given;
+// setupEmitterResources says so for each emitter that names one.
+std::vector<std::pair<uint32_t, std::string>> emitterTexturePaths(const pipeline::M2Model& model) {
+    std::vector<std::pair<uint32_t, std::string>> paths;
+    const auto want = [&](uint32_t index) {
+        if (index >= model.textures.size()) return;
+        for (const auto& [slot, path] : paths)
+            if (slot == index) return;
+        std::string path = model.textures[index].filename;
+        if (const size_t nul = path.find('\0'); nul != std::string::npos) path.resize(nul);
+        if (!path.empty()) paths.emplace_back(index, std::move(path));
+    };
+    for (const auto& em : model.particleEmitters) want(em.texture);
+    for (const auto& rib : model.ribbonEmitters) want(rib.textureIndex);
+    return paths;
+}
+
+} // namespace
+
+std::future<M2Renderer::PreparedTextures> M2Renderer::preparePosedEmitterTextures(
+        const pipeline::M2Model& model) const {
+    // Those the shared cache holds are uploaded already: nothing to read.
+    std::vector<std::string> keys;
+    for (const auto& [slot, path] : emitterTexturePaths(model)) {
+        std::string key = normalizeTexturePath(path);
+        if (vkCtx_ && vkCtx_->textures().find({key, TextureForm::Stored, 0})) continue;
+        keys.push_back(std::move(key));
+    }
+    return core::ThreadPool::ioWorkers().submit("posed emitter textures", [am = assetManager, keys]() {
+        PreparedTextures out;
+        if (!am) return out;
+        for (const std::string& key : keys) {
+            // As loadTexture reads one: M2 skins need no decode.
+            pipeline::BLPImage blp = am->loadTexture(key, true);
+            if (!blp.isValid()) continue;  // loadTexture says so, on the main thread
+            blp.analyzeAlpha();
+            out[key] = std::move(blp);
+        }
+        return out;
+    });
+}
+
+uint32_t M2Renderer::loadPosedEmitterModel(const pipeline::M2Model& model, PreparedTextures& prepared) {
     if (model.particleEmitters.empty() && model.ribbonEmitters.empty()) return 0;
     if (!vkCtx_) return 0;
 
@@ -98,30 +147,26 @@ uint32_t M2Renderer::loadPosedEmitterModel(const pipeline::M2Model& model) {
     gpu.boundMax = model.boundMax;
     gpu.globalSequenceDurations = model.globalSequenceDurations;
 
-    // The textures the emitters name, and only those: the model's skins are
-    // its owner's business. A slot with no file of its own is one a display
-    // fills in, which an emitter cannot be given; setupEmitterResources says
-    // so for each emitter that names one.
+    // Its textures, decoded on a worker, and its emitters go to the GPU in
+    // one batch, submitted without waiting for it: this runs on the main
+    // thread, in the frame, as a creature comes into view.
     std::vector<VkTexture*> textures(model.textures.size(), nullptr);
-    const auto load = [&](uint32_t index) {
-        if (index >= model.textures.size() || textures[index]) return;
-        std::string path = model.textures[index].filename;
-        if (const size_t nul = path.find('\0'); nul != std::string::npos) path.resize(nul);
-        if (path.empty()) return;
+    vkCtx_->beginUploadBatch();
+    PreparedTextures* const outerCache = std::exchange(predecodedBLPCache_, &prepared);
+    for (const auto& [slot, path] : emitterTexturePaths(model)) {
         TextureRef texture = loadTexture(path);
-        textures[index] = texture.get();
+        textures[slot] = texture.get();
         gpu.textureRefs.push_back(std::move(texture));
-    };
+    }
+    predecodedBLPCache_ = outerCache;
     // m2_particles.comp and m2_ribbons.comp leave an emitter on a bone the
     // skeleton does not have at the model origin.
     for (const auto& em : model.particleEmitters) {
-        load(em.texture);
         if (em.bone >= model.bones.size())
             LOG_WARNING("M2 '", model.name, "' has a particle emitter on bone ", em.bone, " of ",
                         model.bones.size(), " - it emits from the model origin");
     }
     for (const auto& rib : model.ribbonEmitters) {
-        load(rib.textureIndex);
         if (rib.bone >= model.bones.size())
             LOG_WARNING("M2 '", model.name, "' has a ribbon emitter on bone ", rib.bone, " of ",
                         model.bones.size(), " - it trails from the model origin");
@@ -129,6 +174,7 @@ uint32_t M2Renderer::loadPosedEmitterModel(const pipeline::M2Model& model) {
     setupEmitterResources(gpu, model, textures);
     // They run on the GPU, on the owner's skeleton as posed there.
     gpu.emitters = skeletons_.placeEmitters(model, model.name.c_str());
+    vkCtx_->endUploadBatch();
 
     const uint32_t handle = nextPosedEmitterModel_++;
     posedEmitterModels_.emplace(handle, std::move(entry));

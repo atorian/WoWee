@@ -4488,7 +4488,8 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         }
     }
     if (!characterEmitters_ && characterRenderer && m2Renderer) {
-        characterEmitters_ = std::make_unique<CharacterEmitters>(*characterRenderer, *m2Renderer);
+        characterEmitters_ = std::make_unique<CharacterEmitters>(*characterRenderer, *m2Renderer,
+                                                                 vkCtx ? &vkCtx->gameCpuStages() : nullptr);
     }
 
     // Create and initialize terrain manager

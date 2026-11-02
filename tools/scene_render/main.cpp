@@ -124,6 +124,7 @@
 #include "rendering/camera.hpp"
 #include "rendering/sky_system.hpp"
 #include "rendering/clouds.hpp"
+#include "rendering/character_emitters.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/frame_sink.hpp"
 #include "rendering/lighting_manager.hpp"
@@ -147,6 +148,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -937,6 +939,17 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         environment.realmSeconds = realmTime;
         renderer.setWorldEnvironment(environment);
         if (!streamTerrainIn(renderer, *terrain)) return 1;
+    }
+    // The creatures' emitters read their textures on a worker: they start
+    // with the scene, not whenever the disk gives them up, or a creature's
+    // flames would differ from one run of it to the next. Updates with no
+    // time pass for the wait, so nothing moves.
+    if (auto* emitters = renderer.getCharacterEmitters()) {
+        renderer.update(0.0f);
+        while (emitters->loading() > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            renderer.update(0.0f);
+        }
     }
     int frame = 0;
     SceneCapture capture(renderer, frame, frames - 1);
