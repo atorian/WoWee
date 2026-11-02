@@ -41,7 +41,9 @@ public:
     CharacterEmitters(const CharacterEmitters&) = delete;
     CharacterEmitters& operator=(const CharacterEmitters&) = delete;
 
-    void update(float deltaTime);
+    /// The creatures' emitters as they stand this frame, run over the time
+    /// M2Renderer::update() was given.
+    void update();
     void clearInstances();
 
 private:

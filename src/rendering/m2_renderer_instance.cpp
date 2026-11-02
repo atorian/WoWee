@@ -253,7 +253,6 @@ void M2Renderer::setInstancesHidden(const std::vector<uint32_t>& instanceIds, bo
             // What it had emitted goes with it rather than hanging where it
             // was, or reappearing there, stale, when it comes back.
             releaseParticles(inst);
-            for (auto& ribbon : inst.ribbons) ribbon = M2Instance::RibbonState{};
         } else {
             const double away = animClockMs_ - inst.hiddenAtMs;
             inst.animStartMs += away;
@@ -641,18 +640,19 @@ void M2Renderer::reapFinishedInstances() {
         auto idxIt = scene_->instanceIndexById.find(f.instanceId);
         if (idxIt == scene_->instanceIndexById.end()) return true;  // removed meanwhile
         const auto& inst = scene_->instances[idxIt->second];
-        const bool ribbonsLeft = std::any_of(inst.ribbons.begin(), inst.ribbons.end(),
-                                             [](const auto& r) { return !r.edges.empty(); });
-        // Its particles are counted on the GPU, two frames late: until a
-        // count from a frame that ran it finished has come back - the third
-        // after - what is known is from before. One with no room has none.
-        const bool particlesPlaced = std::any_of(inst.particleRanges.begin(), inst.particleRanges.end(),
-                                                 [](const ParticlePool::Range& r) { return r.placed(); });
-        const bool particlesLeft = particlesPlaced && (inst.particleCounts - inst.particleCountsAtFinish < 3 ||
-                                                       inst.liveParticles > 0);
+        // Its particles and edges are counted on the GPU, two frames late:
+        // until a count from a frame that ran it finished has come back - the
+        // third after - what is known is from before. One with no room has
+        // none.
+        const auto placed = [](const std::vector<ParticlePool::Range>& ranges) {
+            return std::any_of(ranges.begin(), ranges.end(), [](const ParticlePool::Range& r) { return r.placed(); });
+        };
+        const bool emittedLeft = (placed(inst.particleRanges) || placed(inst.ribbonRanges)) &&
+                                 (inst.particleCounts - inst.particleCountsAtFinish < 3 ||
+                                  inst.liveParticles > 0 || inst.liveEdges > 0);
         // Gone when nothing it emitted is left - or when its particles have
         // had their whole life, though it was out of sight and not updated.
-        if ((!particlesLeft && !ribbonsLeft) || now >= f.deadline) {
+        if (!emittedLeft || now >= f.deadline) {
             done.push_back(f.instanceId);
             return true;
         }
@@ -931,7 +931,7 @@ uint64_t M2Renderer::instanceBytes() const {
     using pipeline::vectorBytes;
     uint64_t total = scene_->instances.storageBytes();
     for (const auto& inst : scene_->instances) {
-        total += vectorBytes(inst.boneMatrices) + vectorBytes(inst.particleRanges) + vectorBytes(inst.ribbons);
+        total += vectorBytes(inst.boneMatrices) + vectorBytes(inst.particleRanges) + vectorBytes(inst.ribbonRanges);
     }
     return total;
 }

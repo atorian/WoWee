@@ -19,7 +19,7 @@ void CharacterEmitters::clearInstances() {
     *scene_ = InstanceState{};
 }
 
-void CharacterEmitters::update(float deltaTime) {
+void CharacterEmitters::update() {
     ++frame_;
     characters_.forEachEmitterSource([&](const CharacterRenderer::EmitterSource& source) {
         Binding& binding = scene_->bindings_[source.instanceId];
@@ -56,7 +56,6 @@ void CharacterEmitters::update(float deltaTime) {
         pose.modelMatrix = source.modelMatrix;
         pose.scale = source.scale;
         pose.skeletonOwner = source.instanceId;
-        pose.bones = source.bones;
         pose.sequenceIndex = source.sequenceIndex;
         pose.animationTimeMs = source.animationTimeMs;
         pose.globalSequenceTimeMs = source.globalSequenceTimeMs;
@@ -74,7 +73,7 @@ void CharacterEmitters::update(float deltaTime) {
         }
     }
 
-    m2_.updatePosedEmitters(deltaTime);
+    m2_.updatePosedEmitters();
 }
 
 void CharacterEmitters::release(Binding& binding) {

@@ -600,11 +600,7 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
             !updateFrustum.intersectsSphere(instance.cachedCullCenter, viewRadius)) {
             continue;
         }
-        const M2ModelGPU& model = *instance.cachedModel;
         if (placeParticles(instance)) instance.particlesRanAt = particleSerial_;
-        if (!model.ribbonEmitters.empty()) {
-            updateRibbons(instance, model, deltaTime, !instance.finishing);
-        }
     }
 
 }
@@ -1859,8 +1855,8 @@ bool M2Renderer::gatherCullCandidates(const Camera& camera, const Frustum& frust
 
 void M2Renderer::Frame::clear() noexcept {
     drawInstances_.clear(); sortedVisible_.clear(); transparentVisible_.clear();
-    glowSprites_.clear(); ribbonDraws_.clear(); particleRuns_.clear();
-    ribbonVertices.clear(); skeleton.clear(); particles.clear();
+    glowSprites_.clear(); ribbonRuns_.clear(); particleRuns_.clear();
+    skeleton.clear(); particles.clear();
     cullUpdateSlots.clear(); cullUpdateRows.clear(); instanceUpdateRows.clear(); cullReset = false;
     materialUpdateSlots.clear(); materialUpdateRows.clear(); materialRowCount = 0;
     cullGuard = {}; culledFromColumns = false; cullSlotCount = cullSerial = 0;
@@ -1917,7 +1913,7 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
     for(const auto& draw:frame->drawInstances_)
         if(draw.model) frame->instanceEntries+=uint64_t(1)+draw.model->batches.size();
     gatherM2Particles(*frame, camera.getPosition(), characters);
-    laps.lap("particles");
+    laps.lap("particles and ribbons");
     // The skeletons to pose: the drawn ones cullView asked for, those the
     // emitters run on, and the unseen ones near enough to shine - one
     // level, none rides another.
@@ -1927,8 +1923,6 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
     poseUnseenLights(camera, *frame);
     frame->skeleton.levelEnds.push_back(static_cast<uint32_t>(frame->skeleton.requests.size()));
     laps.lap("skeletons");
-    gatherM2Ribbons(*frame, camera.getPosition());
-    laps.lap("ribbons");
     // The candidates that cast, as the shadow passes take them: all of it off
     // the cull record the cull just read and the slot's model, none of it off
     // the instance - where one stands is its slot's row on the GPU. Its model

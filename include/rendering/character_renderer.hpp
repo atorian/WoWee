@@ -294,15 +294,14 @@ public:
 
     /// An instance whose model has particle or ribbon emitters, as the last
     /// update() left it. This renderer draws meshes only; CharacterEmitters
-    /// runs the emitters on this skeleton. `bones` is valid until the next
-    /// update() and may be empty for a model that is not animated (a weapon).
+    /// runs the emitters on this skeleton, as the GPU poses it (the frame's
+    /// PosedSkeletons, by the instance's id).
     struct EmitterSource {
         uint32_t instanceId = 0;
         uint64_t modelSerial = 0;
         const pipeline::M2Model* model = nullptr;
         glm::mat4 modelMatrix{1.0f};
         float scale = 1.0f;
-        const std::vector<glm::mat4>* bones = nullptr;
         int sequenceIndex = 0;
         float animationTimeMs = 0.0f;
         float globalSequenceTimeMs = 0.0f;

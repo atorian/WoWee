@@ -1973,14 +1973,13 @@ uint32_t CharacterRenderer::createInstance(uint32_t modelId, const glm::vec3& po
     instance.rotation = rotation;
     instance.scale = scale;
 
-    // The bones the CPU reads of it from the start: its lights' and its
-    // ribbons' (its particles stand on the GPU's pose itself). Its
-    // attachment points are watched when first asked for.
+    // The bones the CPU reads of it from the start: its lights' (its
+    // particles and ribbons stand on the GPU's pose itself). Its attachment
+    // points are watched when first asked for.
     auto& gpuRef = (*modelIt->second);
     instance.readBones.assign(gpuRef.data->bones.size(), glm::mat4(1.0f));
     for (const auto& light : gpuRef.data->lights)
         if (light.bone >= 0) watchBone(instance, static_cast<uint16_t>(light.bone));
-    for (const auto& emitter : gpuRef.data->ribbonEmitters) watchBone(instance, static_cast<uint16_t>(emitter.bone));
     instance.cachedModel = &gpuRef;
 
     uint32_t id = instance.id;
@@ -3546,8 +3545,6 @@ void CharacterRenderer::forEachEmitterSource(
         source.modelMatrix = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix
                                                          : getModelMatrix(inst);
         source.scale = inst.scale;
-        // Its emitters' bones as the GPU posed them, read back.
-        source.bones = &inst.readBones;
         source.sequenceIndex = inst.currentSequenceIndex;
         source.animationTimeMs = inst.animationTime;
         source.globalSequenceTimeMs = inst.globalSequenceTime;

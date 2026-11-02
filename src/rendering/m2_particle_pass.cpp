@@ -16,22 +16,29 @@ namespace rendering {
 
 namespace {
 
-/// M2ParticleQuad, as the shader writes it.
+/// M2ParticleQuad, and a ribbon vertex, as the shaders write them.
 constexpr VkDeviceSize kQuadBytes = 31 * sizeof(float);
-/// The most quads a frame's buffer grows to.
+constexpr VkDeviceSize kRibbonVertexBytes = 9 * sizeof(float);
+/// The most quads or ribbon vertices a frame's buffer grows to.
 constexpr uint32_t kMostQuads = 1u << 20u;
-constexpr uint32_t kBindings = 7;
+constexpr uint32_t kBindings = 8;
 
+/// Counters in m2_emitters.glsli: for the quads and the ribbon vertices,
+/// what was taken (wanted, in all), the room and what did not fit.
 struct Counters {
     uint32_t taken = 0;
     uint32_t room = 0;
     uint32_t wantedBeyond = 0;
+    uint32_t ribbonTaken = 0;
+    uint32_t ribbonRoom = 0;
+    uint32_t ribbonWantedBeyond = 0;
 };
 
 } // namespace
 
 void ParticleFrame::clear() noexcept {
     rows.clear();
+    ribbonFirst = 0;
     owners.clear();
     blobPages.clear();
     poolPages.clear();
@@ -44,7 +51,8 @@ bool M2ParticlePass::initialize(VkContext& context, VkDescriptorSetLayout bonesL
 
     // Binding 0: the emitter blobs' pages, 1: the particles' pages, as many
     // as are made (partially bound). 2: the rows. 3: the quads. 4: the draw
-    // commands. 5: the counters. 6: what is read back.
+    // commands. 5: the counters. 6: what is read back. 7: the ribbon
+    // vertices.
     {
         VkDescriptorSetLayoutBinding bindings[kBindings] = {};
         VkDescriptorBindingFlags bindingFlags[kBindings] = {};
@@ -84,22 +92,32 @@ bool M2ParticlePass::initialize(VkContext& context, VkDescriptorSetLayout bonesL
     const VkPushConstantRange push{.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0,
                                    .size = sizeof(glm::vec4) + sizeof(glm::uvec4)};
     pipelineLayout_ = createPipelineLayout(device, {setLayout_, bonesLayout, bonesLayout}, {push});
-    VkShaderModule shader;
-    if (!pipelineLayout_ || !shader.loadFromFile(device, "assets/shaders/m2_particles.comp.spv")) {
-        LOG_ERROR(owner_, ": could not load the particle pass; no particle is drawn");
+    if (!pipelineLayout_) {
+        LOG_ERROR(owner_, ": could not create the particle pass's pipeline layout; no particle is drawn");
         return false;
     }
-    VkComputePipelineCreateInfo pipelineCi{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    pipelineCi.stage = shader.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
-    pipelineCi.layout = pipelineLayout_;
-    const VkResult made =
-        vkCreateComputePipelines(device, context.getPipelineCache(), 1, &pipelineCi, nullptr, &pipeline_);
-    shader.destroy();
-    if (made != VK_SUCCESS) {
-        LOG_ERROR(owner_, ": could not build the particle pass (", static_cast<int>(made),
-                  "); no particle is drawn");
+    const auto build = [&](const char* path, VkPipeline& pipeline) {
+        VkShaderModule shader;
+        if (!shader.loadFromFile(device, path)) {
+            LOG_ERROR(owner_, ": could not load ", path, "; no particle or ribbon is drawn");
+            return false;
+        }
+        VkComputePipelineCreateInfo pipelineCi{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        pipelineCi.stage = shader.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
+        pipelineCi.layout = pipelineLayout_;
+        const VkResult made =
+            vkCreateComputePipelines(device, context.getPipelineCache(), 1, &pipelineCi, nullptr, &pipeline);
+        shader.destroy();
+        if (made != VK_SUCCESS) {
+            LOG_ERROR(owner_, ": could not build ", path, " (", static_cast<int>(made),
+                      "); no particle or ribbon is drawn");
+            return false;
+        }
+        return true;
+    };
+    if (!build("assets/shaders/m2_particles.comp.spv", pipeline_) ||
+        !build("assets/shaders/m2_ribbons.comp.spv", ribbonPipeline_))
         return false;
-    }
     for (auto& slot : slots_) {
         VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         ai.descriptorPool = pool_;
@@ -117,11 +135,13 @@ void M2ParticlePass::destroy() {
     if (!context_) return;
     DeferredResources retired(*context_);
     for (auto& slot : slots_) {
-        for (AllocatedBuffer* buffer : {&slot.rows, &slot.quads, &slot.draws, &slot.counters, &slot.read})
+        for (AllocatedBuffer* buffer :
+             {&slot.rows, &slot.quads, &slot.ribbonVertices, &slot.draws, &slot.counters, &slot.read})
             if (buffer->buffer) retired.buffer(*buffer);
         slot = Slot{};
     }
     retired.destroy(pipeline_);
+    retired.destroy(ribbonPipeline_);
     retired.destroy(pipelineLayout_);
     retired.destroy(pool_);
     retired.destroy(setLayout_);
@@ -175,6 +195,14 @@ bool M2ParticlePass::ensure(Slot& slot, uint32_t rows) {
             return false;
         slot.quadRoom = quadRoom;
     }
+    if (slot.ribbonVertexRoom < ribbonVertexRoom_ || !slot.ribbonVertices.buffer) {
+        uint32_t room = 0;
+        if (!grow(slot.ribbonVertices, room, ribbonVertexRoom_, kRibbonVertexBytes,
+                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY,
+                  "ribbon vertices"))
+            return false;
+        slot.ribbonVertexRoom = room;
+    }
     return true;
 }
 
@@ -197,6 +225,7 @@ void M2ParticlePass::writeSet(Slot& slot, const ParticleFrame& frame) {
         {.buffer = slot.draws.buffer, .offset = 0, .range = VK_WHOLE_SIZE},
         {.buffer = slot.counters.buffer, .offset = 0, .range = VK_WHOLE_SIZE},
         {.buffer = slot.read.buffer, .offset = 0, .range = VK_WHOLE_SIZE},
+        {.buffer = slot.ribbonVertices.buffer, .offset = 0, .range = VK_WHOLE_SIZE},
     };
     std::vector<VkWriteDescriptorSet> writes;
     const auto write = [&](uint32_t binding, uint32_t element, const VkDescriptorBufferInfo* info) {
@@ -247,6 +276,16 @@ bool M2ParticlePass::record(VkCommandBuffer cmd, uint32_t slotIndex, const Parti
                             counters.room, "); room for ", next, " from the next frame");
             quadRoom_ = next;
         }
+        if (counters.ribbonWantedBeyond > 0) {
+            const uint32_t next =
+                std::min(kMostQuads, std::max(ribbonVertexRoom_ + ribbonVertexRoom_ / 2, counters.ribbonTaken));
+            static core::LogBudget budget(8, "ribbon vertices short");
+            if (budget.take())
+                LOG_WARNING(owner_, ": ", counters.ribbonWantedBeyond,
+                            " ribbon vertices in view were not drawn (room for ", counters.ribbonRoom,
+                            "); room for ", next, " from the next frame");
+            ribbonVertexRoom_ = next;
+        }
     }
     slot.readOf.clear();
 
@@ -261,7 +300,8 @@ bool M2ParticlePass::record(VkCommandBuffer cmd, uint32_t slotIndex, const Parti
     if (!slot.setCurrent || slot.blobVersion != frame.blobVersion || slot.poolVersion != frame.poolVersion)
         writeSet(slot, frame);
 
-    const Counters start{.taken = 0, .room = slot.quadRoom, .wantedBeyond = 0};
+    const Counters start{.taken = 0, .room = slot.quadRoom, .wantedBeyond = 0,
+                         .ribbonTaken = 0, .ribbonRoom = slot.ribbonVertexRoom, .ribbonWantedBeyond = 0};
     vkCmdUpdateBuffer(cmd, slot.counters.buffer, 0, sizeof(start), &start);
     const auto barrier = [&](VkPipelineStageFlags2 src, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dst,
                              VkAccessFlags2 dstAccess) {
@@ -280,19 +320,26 @@ bool M2ParticlePass::record(VkCommandBuffer cmd, uint32_t slotIndex, const Parti
             VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
             VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT);
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
     const VkDescriptorSet sets[] = {slot.set, bones, characterBones};
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_, 0, 3, sets, 0, nullptr);
     struct {
         glm::vec4 eye;
         glm::uvec4 rows;
     } push{.eye = glm::vec4(frame.eye, frame.density), .rows = glm::uvec4(0u, charactersPosed ? 1u : 0u, 0u, 0u)};
-    constexpr uint32_t kMostGroups = 65535;
-    for (uint32_t first = 0; first < rows; first += kMostGroups) {
-        push.rows.x = first;
-        vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-        vkCmdDispatch(cmd, std::min(kMostGroups, rows - first), 1, 1);
-    }
+    // The particle emitters' rows, then the ribbons': a workgroup a row.
+    const auto dispatch = [&](VkPipeline pipeline, uint32_t begin, uint32_t end) {
+        if (end <= begin) return;
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+        constexpr uint32_t kMostGroups = 65535;
+        for (uint32_t first = begin; first < end; first += kMostGroups) {
+            push.rows.x = first;
+            vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+            vkCmdDispatch(cmd, std::min(kMostGroups, end - first), 1, 1);
+        }
+    };
+    const uint32_t ribbonFirst = std::min(frame.ribbonFirst, rows);
+    dispatch(pipeline_, 0, ribbonFirst);
+    dispatch(ribbonPipeline_, ribbonFirst, rows);
     // The quads and commands for the draws, the rest for the host.
     barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
             VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |

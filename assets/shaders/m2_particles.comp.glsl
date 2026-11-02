@@ -22,86 +22,12 @@
 // laid out in that order, and every draw is made of the particle's own
 // number, so a scene runs the same every time.
 
-layout(local_size_x = 64) in;
+#include "m2_emitters.glsli"
 
-layout(set = 0, binding = 0) readonly buffer Page {
-    uint words[];
-} pages[64];
-
-#include "m2_track.glsli"
-
-// Four vec4 a record (particle_pool.hpp): the header, then the particles.
-layout(set = 0, binding = 1) buffer ParticlePage {
-    vec4 records[];
-} particlePages[64];
-
-struct Row {
-    uint blobPage;       // the model's emitter blob
-    uint blobFirst;
-    uint emitter;        // which of them
-    uint flags;          // kEmit, kInView, kFirefly, kLit, kM2Skeleton, kCharacterSkeleton
-    uint poolPage;       // its range of records: the header's
-    uint poolFirst;
-    uint capacity;       // particles it has room for
-    uint tag;            // the range's, as the pool gave it
-    int sequence;        // the instance's sequence and times, ms
-    float time;
-    float globalTime;
-    float dt;            // seconds since the frame before
-    uint request;        // its skeleton in the frame's posed bones
-    uint boneBase;
-    uint boneCount;
-    uint seed;           // its own, fixed for its life
-    uint frameSerial;    // this frame's, for the rate's draw
-    uint pad0, pad1, pad2;
-    vec4 cullCentre;     // xyz: its instance's cull centre; w: its fade
-    mat4 placement;      // its model matrix, where it has no skeleton posed
-    vec4 lightAmbient;   // its instance's interior light (InteriorLightGPU)
-    vec4 lightDirect;
-    uvec4 localLights;   // its instance's point lights (local_lights.glsli)
-};
-layout(set = 0, binding = 2) readonly buffer Rows {
-    Row rows[];
-};
 // M2ParticleQuad, 31 words each.
 layout(set = 0, binding = 3) writeonly buffer Quads {
     float quads[];
 };
-// A VkDrawIndirectCommand a row.
-layout(set = 0, binding = 4) writeonly buffer Draws {
-    uvec4 draws[];
-};
-// x: quads taken, y: quads there were room for, z: quads wanted beyond it.
-layout(set = 0, binding = 5) coherent buffer Counters {
-    uint quadsTaken;
-    uint quadRoom;
-    uint quadsShort;
-};
-// A row's live particles and how far the farthest is from its instance.
-layout(set = 0, binding = 6) writeonly buffer Read {
-    uvec2 read[];
-};
-
-// The frame's posed bones: the doodads' (binding 0 bones, 1 models) and the
-// creatures'.
-layout(set = 1, binding = 0) readonly buffer M2Bones { mat4 m2Bones[]; };
-layout(set = 1, binding = 1) readonly buffer M2Models { mat4 m2Models[]; };
-layout(set = 2, binding = 0) readonly buffer CharacterBones { mat4 characterBones[]; };
-layout(set = 2, binding = 1) readonly buffer CharacterModels { mat4 characterModels[]; };
-
-layout(push_constant) uniform Push {
-    vec4 eye;            // xyz the camera; w the particle density setting
-    uint firstRow;
-    uint charactersPosed;
-    uint pad0, pad1;
-} push;
-
-const uint kEmit = 1u;
-const uint kInView = 2u;
-const uint kFirefly = 4u;
-const uint kLit = 8u;
-const uint kM2Skeleton = 16u;
-const uint kCharacterSkeleton = 32u;
 
 // The emitter blob (skeleton_pool.hpp).
 const uint kHeaderEmitters = 2u;
@@ -130,11 +56,7 @@ const uint kShapeAlongVelocity = 2u;
 const uint kShapePlane = 3u;
 
 uint emitterRecord;
-uint poolPage;
-uint poolBase;
 
-vec4 record(uint index, uint part) { return particlePages[poolPage].records[(poolBase + index) * 4u + part]; }
-void setRecord(uint index, uint part, vec4 value) { particlePages[poolPage].records[(poolBase + index) * 4u + part] = value; }
 // Particle i is record 1 + i.
 bool alive(uint i) { return record(1u + i, 1u).w > 0.0; }
 
@@ -249,25 +171,6 @@ shared float sSpeed, sSpeedVary, sVertical, sHorizontal, sGravity, sLife, sAreaL
 shared float sRate, sAccumulated;
 shared uint sPool, sSpawned, sSpawnNow, sLive, sReach, sVisible, sQuadFirst;
 shared bool sEmits;
-shared uint scan[64];
-
-// The exclusive prefix sum of `value` over the workgroup, in invocation
-// order, and the sum of all. Every invocation calls it.
-uint prefixSum(uint value, out uint total) {
-    const uint lid = gl_LocalInvocationIndex;
-    scan[lid] = value;
-    barrier();
-    for (uint offset = 1u; offset < 64u; offset <<= 1u) {
-        const uint add = lid >= offset ? scan[lid - offset] : 0u;
-        barrier();
-        scan[lid] += add;
-        barrier();
-    }
-    total = scan[63];
-    const uint inclusive = scan[lid];
-    barrier();
-    return inclusive - value;
-}
 
 // Born into record 1 + i, the emitter's `number`th particle.
 void spawn(Row row, uint i, uint number, float step) {
@@ -400,18 +303,7 @@ void main() {
         sAccumulated = fresh ? 0.0 : header.y;
         sPool = fresh ? 0u : floatBitsToUint(header.z);
         sSpawned = fresh ? 0u : floatBitsToUint(header.w);
-        // Where it stands: its instance's model, then its bone.
-        mat4 model = row.placement;
-        mat4 bone = mat4(1.0);
-        const uint b = em(2u);
-        if ((row.flags & kM2Skeleton) != 0u) {
-            model = m2Models[row.request];
-            if (b < row.boneCount) bone = m2Bones[row.boneBase + b];
-        } else if ((row.flags & kCharacterSkeleton) != 0u && push.charactersPosed != 0u) {
-            model = characterModels[row.request];
-            if (b < row.boneCount) bone = characterBones[row.boneBase + b];
-        }
-        sToWorld = model * bone;
+        sToWorld = emitterToWorld(row, em(2u));
         const uint tracks = emitterRecord + kEmitterTracks;
         sSpeed = sampleFloat(word(tracks + 0u), row.sequence, row.time, row.globalTime, 0.0);
         sSpeedVary = sampleFloat(word(tracks + 1u), row.sequence, row.time, row.globalTime, 0.0);

@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
-"""M2 particles are emitted, flown and drawn where the client draws them.
+"""M2 particles and ribbons are drawn where the client draws them.
 
-Particles run on the GPU (m2_particles.comp.glsl): each emitter's tracks
-sampled at its instance's time, born at its bone as posed this frame, moved
-under gravity, drag and wind, and laid out as quads. Three fires, each seen
-after a second of burning:
+Particles and ribbons run on the GPU (m2_particles.comp, m2_ribbons.comp):
+each emitter's tracks sampled at its instance's time, standing on its bone
+as posed this frame; particles born there, moved under gravity, drag and
+wind and laid out as quads; ribbon edges laid from there along the bone's
+path and drawn as strips. Three fires, each seen after a second of
+burning:
 
 - a bonfire doodad, whose flames rise from its logs (OrcBonFire.m2);
 - a fire elemental, a creature (CharacterRenderer poses it), whose flames
   stand on its body;
-- a phoenix, whose flames ride its beating wings.
+- a phoenix, whose flames ride its beating wings, and its wing trails
+  alone (ribbons).
 
-Their particles are where the frame differs from the same frame with the
-particles off (WOWEE_M2_NO_PARTICLES=1). Particles are random, so they are
-not compared a pixel at a time: the cover of each, widened by a few pixels,
-must share at least SHARED of itself with what the client drew while its
-skeletons and particles still ran on the CPU (master's build of 2 November
-2026, before stage 3.8; written by this script with --write-reference into
-reference/particles_<name>.png, white where a particle was). The GPU's share is 0.72, 0.86 and 0.59; a phoenix whose
-flames stand on its body's root rather than its wings', 0.32; particles
-born without their emitter's offset on its bone, 0.51, 0.31 and 0.25. And
-a scene runs the same every time: drawn twice, the particles are the same
-pixels.
+What is drawn is where the frame differs from the same frame without it
+(WOWEE_M2_NO_PARTICLES=1, WOWEE_M2_NO_RIBBONS=1). Particles are random, so
+they are not compared a pixel at a time: the cover of each, widened by a
+few pixels, must share at least SHARED of itself with what the client drew
+while its skeletons, particles and ribbons still ran on the CPU (master's
+build of 2 November 2026, before stage 3.8; written by this script with
+--write-reference into reference/particles_<name>.png, white where it
+was). The GPU's share is 0.72, 0.86 and 0.59; a phoenix whose flames stand
+on its body's root rather than its wings', 0.32; particles born without
+their emitter's offset on its bone, 0.51, 0.31 and 0.25. Ribbons are not
+random, and share more (RIBBONS_SHARED): 0.997, and trails laid from the
+root bone 0.10. And a scene runs the same every time: drawn twice, it is
+the same pixels.
 """
 import json
 import os
@@ -39,6 +44,7 @@ APART = 24
 # How far a cover is widened before the two are compared, in pixels.
 WIDEN = 4
 SHARED = 0.5
+RIBBONS_SHARED = 0.9
 REFERENCE = Path(__file__).resolve().parent / "reference"
 
 CASES = {
@@ -58,6 +64,15 @@ CASES = {
         "characters": [{"path": r"Creature\Phoenix\Phoenix.m2", "offset": [0, 0, 1]}],
         "camera": {"offset": [0, -12, 3], "lookAt": [0, 0, 3]},
     },
+    # Its wing trails alone: ribbons, laid from the wings' bones as they beat.
+    "phoenix_ribbons": {
+        "models": [],
+        "characters": [{"path": r"Creature\Phoenix\Phoenix.m2", "offset": [0, 0, 1]}],
+        "camera": {"offset": [0, -12, 3], "lookAt": [0, 0, 3]},
+        "drawn": {"WOWEE_M2_NO_PARTICLES": "1"},
+        "without": {"WOWEE_M2_NO_PARTICLES": "1", "WOWEE_M2_NO_RIBBONS": "1"},
+        "shared": RIBBONS_SHARED,
+    },
 }
 
 
@@ -72,15 +87,14 @@ def scene(case):
     }
 
 
-def render(binary, scratch, name, source, particles=True):
+def render(binary, scratch, name, source, switches):
     env = os.environ.copy()
     env["WOWEE_CONFIG_ROOT"] = str(scratch / "config")
     env["WOWEE_RESOURCE_ROOT"] = str(binary.parent)
     env["WOWEE_SINGLE_THREAD_RECORD"] = "1"
-    if particles:
-        env.pop("WOWEE_M2_NO_PARTICLES", None)
-    else:
-        env["WOWEE_M2_NO_PARTICLES"] = "1"
+    for switch in ("WOWEE_M2_NO_PARTICLES", "WOWEE_M2_NO_RIBBONS"):
+        env.pop(switch, None)
+    env.update(switches)
     path = scratch / f"{name}.json"
     path.write_text(json.dumps(source), encoding="utf-8")
     png = scratch / f"{name}.png"
@@ -134,8 +148,10 @@ def main() -> int:
     failures = []
     for name, case in CASES.items():
         source = scene(case)
-        drawn = render(binary, scratch, name, source)
-        without = render(binary, scratch, f"{name}-without", source, particles=False)
+        switches = case.get("drawn", {})
+        drawn = render(binary, scratch, name, source, switches)
+        without = render(binary, scratch, f"{name}-without", source,
+                         case.get("without", {"WOWEE_M2_NO_PARTICLES": "1"}))
         pixels = covered(drawn, without)
         if write_reference:
             write_mask(REFERENCE / f"particles_{name}.png", pixels)
@@ -149,10 +165,11 @@ def main() -> int:
         a, b = widened(pixels), widened(expected)
         shared = len(a & b) / len(a | b)
         print(f"{name}: {len(pixels)} pixels, the client's {len(expected)}; {shared:.3f} shared")
-        if shared < SHARED:
-            failures.append(f"{name}: {shared:.3f} shared with the client's (< {SHARED}) - "
-                            "its particles are not where its emitters are")
-        if render(binary, scratch, f"{name}-again", source) != drawn:
+        least = case.get("shared", SHARED)
+        if shared < least:
+            failures.append(f"{name}: {shared:.3f} shared with the client's (< {least}) - "
+                            "what its emitters draw is not where they are")
+        if render(binary, scratch, f"{name}-again", source, switches) != drawn:
             failures.append(f"{name}: drawn twice, the particles differ - a scene does not run the same")
 
     for failure in failures:

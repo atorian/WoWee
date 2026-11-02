@@ -2546,7 +2546,7 @@ if(WOWEE_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_m2_skinning.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/m2-skinning)
         set_tests_properties(scene_m2_skinning PROPERTIES SKIP_RETURN_CODE 77)
-        # Particles are emitted, flown and drawn where the client draws them.
+        # Particles and ribbons are drawn where the client draws them.
         wowee_add_gpu_test(scene_m2_particles
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_m2_particles.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/m2-particles)

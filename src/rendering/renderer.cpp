@@ -2696,7 +2696,7 @@ void Renderer::update(float deltaTime) {
 
     // Creatures' particles and ribbons, on the skeletons both updates above
     // have just finished - not while M2Renderer's worker is still running.
-    if (characterEmitters_) characterEmitters_->update(deltaTime);
+    if (characterEmitters_) characterEmitters_->update();
     endPhase("character emitters");
 
     // Footsteps: age visual prints, then let authored footfall events add new ones.

@@ -112,34 +112,23 @@ uint32_t M2Renderer::loadPosedEmitterModel(const pipeline::M2Model& model) {
         textures[index] = texture.get();
         gpu.textureRefs.push_back(std::move(texture));
     };
+    // m2_particles.comp and m2_ribbons.comp leave an emitter on a bone the
+    // skeleton does not have at the model origin.
     for (const auto& em : model.particleEmitters) {
         load(em.texture);
-        // m2_particles.comp leaves such an emitter at the model origin.
         if (em.bone >= model.bones.size())
             LOG_WARNING("M2 '", model.name, "' has a particle emitter on bone ", em.bone, " of ",
                         model.bones.size(), " - it emits from the model origin");
     }
-    // The ribbons are laid on the CPU, on the bones read back.
-    std::vector<uint32_t> bones;
     for (const auto& rib : model.ribbonEmitters) {
         load(rib.textureIndex);
-        bones.push_back(rib.bone);
+        if (rib.bone >= model.bones.size())
+            LOG_WARNING("M2 '", model.name, "' has a ribbon emitter on bone ", rib.bone, " of ",
+                        model.bones.size(), " - it trails from the model origin");
     }
     setupEmitterResources(gpu, model, textures);
-    // Its particles run on the GPU, on the owner's skeleton as posed there.
-    if (!model.particleEmitters.empty()) gpu.emitters = skeletons_.placeEmitters(model, model.name.c_str());
-
-    std::sort(bones.begin(), bones.end());
-    bones.erase(std::unique(bones.begin(), bones.end()), bones.end());
-    for (uint32_t bone : bones) {
-        if (bone < model.bones.size()) {
-            entry.bones.push_back(bone);
-        } else {
-            LOG_WARNING("M2 '", model.name, "' has a ribbon emitter on bone ", bone, " of ",
-                        model.bones.size(), " - it trails from the model origin");
-        }
-    }
-    entry.boneCount = entry.bones.empty() ? 0 : entry.bones.back() + 1;
+    // They run on the GPU, on the owner's skeleton as posed there.
+    gpu.emitters = skeletons_.placeEmitters(model, model.name.c_str());
 
     const uint32_t handle = nextPosedEmitterModel_++;
     posedEmitterModels_.emplace(handle, std::move(entry));
@@ -181,7 +170,6 @@ uint32_t M2Renderer::createPosedEmitters(uint32_t modelHandle) {
     posed.inst.id = id;
     posed.inst.random = InstanceRandom(id);
     posed.inst.cachedModel = &modelIt->second.gpu;
-    posed.inst.boneMatrices.assign(modelIt->second.boneCount, glm::mat4(1.0f));
     return id;
 }
 
@@ -211,24 +199,13 @@ void M2Renderer::setPosedEmittersPose(uint32_t id, const EmitterPose& pose) {
     inst.currentSequenceIndex = std::max(pose.sequenceIndex, 0);
     setAnimTime(inst, pose.animationTimeMs);
     inst.globalSequenceStartMs = animClockMs_ - pose.globalSequenceTimeMs;
-
-    // Only the bones a ribbon hangs from; the rest stay at rest and are
-    // never read.
-    const PosedEmitterModel& model = posedEmitterModels_.at(posed.modelHandle);
-    for (uint32_t bone : model.bones) {
-        inst.boneMatrices[bone] = (pose.bones && bone < pose.bones->size())
-            ? (*pose.bones)[bone] : glm::mat4(1.0f);
-    }
 }
 
-void M2Renderer::updatePosedEmitters(float dt) {
-    // Their particles run on the GPU over the time update() gave the world's
-    // (particleDt_); here they only get room the first time.
+void M2Renderer::updatePosedEmitters() {
+    // Their particles and ribbons run on the GPU over the time update() gave
+    // the world's (particleDt_); here they only get room the first time.
     for (auto& [id, posed] : scene_->posedEmitters_) {
-        M2Instance& inst = posed.inst;
-        const M2ModelGPU& gpu = *inst.cachedModel;
-        if (placeParticles(inst)) inst.particlesRanAt = particleSerial_;
-        if (!gpu.ribbonEmitters.empty()) updateRibbons(inst, gpu, dt, posed.posed);
+        if (placeParticles(posed.inst)) posed.inst.particlesRanAt = particleSerial_;
     }
 }
 

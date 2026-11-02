@@ -177,6 +177,44 @@ PackedEmitters packEmitters(const pipeline::M2Model& model) {
         out[r + kEmitterFBlocks + 3] = headCell;
         out[r + kEmitterFBlocks + 4] = tailCell;
     }
+    // The ribbons: their records, then their tracks.
+    const auto ribbons = static_cast<uint32_t>(model.ribbonEmitters.size());
+    const auto ribbonRecords = static_cast<uint32_t>(out.size());
+    out[1] = ribbons;
+    out[5] = ribbonRecords;
+    out.resize(out.size() + size_t(kRibbonWords) * ribbons, 0u);
+    for (uint32_t e = 0; e < ribbons; ++e) {
+        const auto& em = model.ribbonEmitters[e];
+        // As many edges as it lays over an edge's life, and the two it is
+        // between (CRibbonEmitter).
+        const float edgesPerSecond = std::max(std::ceil(em.edgesPerSecond), 1.0f);
+        const float lifetime = std::max(em.edgeLifetime, 0.25f);
+        const auto capacity = static_cast<uint32_t>(std::ceil(lifetime * edgesPerSecond)) + 2;
+        packed.ribbonCapacities.push_back(capacity);
+        const size_t r = ribbonRecords + size_t(kRibbonWords) * e;
+        out[r + 0] = em.bone;
+        out[r + 1] = bits(em.position.x);
+        out[r + 2] = bits(em.position.y);
+        out[r + 3] = bits(em.position.z);
+        out[r + 4] = bits(edgesPerSecond);
+        out[r + 5] = bits(lifetime);
+        out[r + 6] = bits(em.gravity);
+        out[r + 7] = capacity;
+    }
+    for (uint32_t e = 0; e < ribbons; ++e) {
+        const auto& em = model.ribbonEmitters[e];
+        const size_t r = ribbonRecords + size_t(kRibbonWords) * e;
+        const uint32_t color = packTrack(em.colorTrack, TrackKind::Vec3, glm::vec3(1.0f), out);
+        const uint32_t alpha = packTrack(em.alphaTrack, TrackKind::Float, glm::vec3(0.0f), out);
+        const uint32_t above = packTrack(em.heightAboveTrack, TrackKind::Float, glm::vec3(0.0f), out);
+        const uint32_t below = packTrack(em.heightBelowTrack, TrackKind::Float, glm::vec3(0.0f), out);
+        const uint32_t visibility = packTrack(em.visibilityTrack, TrackKind::Float, glm::vec3(0.0f), out);
+        out[r + kRibbonTracks + 0] = color;
+        out[r + kRibbonTracks + 1] = alpha;
+        out[r + kRibbonTracks + 2] = above;
+        out[r + kRibbonTracks + 3] = below;
+        out[r + kRibbonTracks + 4] = visibility;
+    }
     out[3] = static_cast<uint32_t>(model.globalSequenceDurations.size());
     out[4] = static_cast<uint32_t>(out.size());
     out.insert(out.end(), model.globalSequenceDurations.begin(), model.globalSequenceDurations.end());
@@ -285,12 +323,12 @@ SkeletonPool::Skeleton SkeletonPool::place(const pipeline::M2Model& model, uint3
 }
 
 SkeletonPool::Emitters SkeletonPool::placeEmitters(const pipeline::M2Model& model, const char* name) {
-    if (!context_ || model.particleEmitters.empty()) return {};
+    if (!context_ || (model.particleEmitters.empty() && model.ribbonEmitters.empty())) return {};
     const PackedEmitters packed = packEmitters(model);
-    const auto at = placeWords(packed.words, name, "emits no particles");
+    const auto at = placeWords(packed.words, name, "drawn without its particles and ribbons");
     if (!at) return {};
     return Emitters{.page = at->first, .first = at->second, .words = static_cast<uint32_t>(packed.words.size()),
-                    .capacities = packed.capacities};
+                    .capacities = packed.capacities, .ribbonCapacities = packed.ribbonCapacities};
 }
 
 std::optional<std::pair<int32_t, uint32_t>> SkeletonPool::placeWords(const std::vector<uint32_t>& blob,

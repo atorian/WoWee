@@ -4759,7 +4759,7 @@ void Application::present(float deltaTime, const FramePlan& plan) {
             // its emitters follow, the way Renderer::update has them in game.
             const glm::mat4 view = camera->getViewMatrix();
             renderer->getCharacterRenderer()->update(dt, camera->getPosition(), &view);
-            if (auto* emitters = renderer->getCharacterEmitters()) emitters->update(dt);
+            if (auto* emitters = renderer->getCharacterEmitters()) emitters->update();
         }
     }
 

@@ -747,11 +747,9 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     perFrameLayout_ = perFrameLayout;
     if (!buildMainPassPipelines(perFrameLayout)) return false;
 
-    // --- Dynamic particle buffers, mapped for CPU writes, one per frame ---
-    // (the M2 particles' quads are the particle pass's). Ribbons: a triangle
-    // strip of pos(3)+color(3)+alpha(1)+uv(2).
+    // --- The glow sprites' buffer, mapped for CPU writes, one per frame ---
+    // (the particles' quads and the ribbons' strips are the particle pass's).
     createFrameVertexBuffer(glowVB_, MAX_GLOW_SPRITES * sizeof(M2ParticleQuad), "glow sprite");
-    createFrameVertexBuffer(ribbonVB_, MAX_RIBBON_VERTS * 9 * sizeof(float), "ribbon");
 
     // --- Create white fallback texture ---
     {
@@ -853,9 +851,8 @@ void M2Renderer::shutdown() {
     whiteTexture_.reset();
     glowTexture_.reset();
 
-    // Clean up particle/ribbon buffers
+    // Clean up the glow sprites' buffer
     destroyFrameVertexBuffer(glowVB_);
-    destroyFrameVertexBuffer(ribbonVB_);
 
     // Destroy pipelines
     auto destroyPipeline = [&](VkPipeline& p) { if (p) { vkDestroyPipeline(device, p, nullptr); p = VK_NULL_HANDLE; } };
@@ -2116,15 +2113,16 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
         [&](const M2ModelGPU::BatchGPU& b) { return m2WantsGlowSprite(glowCardOf(gpuModel, b)); });
 
     // The bones the CPU reads of it, copied back from the GPU's pose: where
-    // its emitters, ribbons, lights and glow cards hang.
+    // its lights and glow cards hang, and a ground fire's emitters (its glow
+    // sits on the lowest).
     if (gpuModel.skeleton.placed()) {
         auto& read = gpuModel.readBones;
         const auto want = [&](int64_t bone) {
             if (bone >= 0 && bone < static_cast<int64_t>(gpuModel.skeleton.boneCount))
                 read.push_back(static_cast<uint16_t>(bone));
         };
-        for (const auto& emitter : gpuModel.particleEmitters) want(emitter.bone);
-        for (const auto& emitter : gpuModel.ribbonEmitters) want(emitter.bone);
+        if (gpuModel.isGroundFire)
+            for (const auto& emitter : gpuModel.particleEmitters) want(emitter.bone);
         for (const auto& light : gpuModel.lights) want(light.bone);
         for (const auto& batch : gpuModel.batches) {
             for (const auto& anchor : batch.lightBoneAnchors) want(anchor.bone);

@@ -1,14 +1,15 @@
 #pragma once
 
-// Runs a frame's M2 particles on the GPU (m2_particles.comp.glsl) - the
-// only place they are - for a renderer that keeps its models' emitters in a
-// SkeletonPool and their particles in a ParticlePool: the renderer lists at
-// extraction the emitters that run or are seen (a ParticleFrame), and the
-// pass, on the render thread after the frame's skeletons were posed, runs
-// them, lays out the seen ones' quads and a draw command for each, and
-// copies back what the CPU reads of them: how many are alive and how far
-// they reach. The draws read the quads as m2_particle.vert's instances, by
-// the commands.
+// Runs a frame's M2 particles and ribbons on the GPU (m2_particles.comp,
+// m2_ribbons.comp) - the only place they are - for a renderer that keeps
+// its models' emitters in a SkeletonPool and their particles and edges in
+// a ParticlePool: the renderer lists at extraction the emitters that run
+// or are seen (a ParticleFrame), and the pass, on the render thread after
+// the frame's skeletons were posed, runs them, lays out the seen ones'
+// quads and strips and a draw command for each, and copies back what the
+// CPU reads of them: how many particles or edges are alive and how far the
+// particles reach. The draws read the quads as m2_particle.vert's
+// instances and the strips as m2_ribbon.vert's vertices, by the commands.
 //
 // What the CPU reads comes back two frames late, as the skeletons' bones.
 
@@ -58,17 +59,20 @@ struct ParticleRowGPU {
 };
 static_assert(sizeof(ParticleRowGPU) == 208, "ParticleRowGPU must match Row in m2_particles.comp (std430)");
 
-/// What one frame runs: its rows, whose each one is, and the pools' pages
-/// as they were.
+/// What one frame runs: its rows - the particle emitters', then from
+/// `ribbonFirst` the ribbons' - whose each one is, and the pools' pages as
+/// they were.
 struct ParticleFrame {
-    /// Whose a row is, as the renderer names it: an instance's emitter, or
-    /// a posed set's.
+    /// Whose a row is, as the renderer names it: an instance's emitter or
+    /// ribbon, or a posed set's.
     struct Owner {
         uint32_t id = 0;
         uint16_t emitter = 0;
         bool posed = false;
+        bool ribbon = false;
     };
     std::vector<ParticleRowGPU> rows;
+    uint32_t ribbonFirst = 0;
     std::vector<Owner> owners;
     std::vector<::VkBuffer> blobPages, poolPages;
     uint32_t blobVersion = 0, poolVersion = 0;
@@ -79,7 +83,8 @@ struct ParticleFrame {
 
 class M2ParticlePass {
 public:
-    /// A row's emitter as the GPU last left it.
+    /// A row's emitter as the GPU last left it: its live particles or
+    /// edges, and how far the particles reach.
     struct Read {
         ParticleFrame::Owner owner;
         uint32_t live = 0;
@@ -110,16 +115,17 @@ public:
     /// The quads the latest frame read back laid out.
     [[nodiscard]] uint32_t quadsLaidOut() const { return quadsLaidOut_.load(std::memory_order_relaxed); }
 
-    /// The slot's quads (m2_particle.vert's instance buffer) and draw
-    /// commands, a VkDrawIndirectCommand by row, as its last record() left
-    /// them.
+    /// The slot's quads (m2_particle.vert's instance buffer), ribbon
+    /// vertices (m2_ribbon.vert's) and draw commands, a VkDrawIndirectCommand
+    /// by row, as its last record() left them.
     [[nodiscard]] ::VkBuffer quads(uint32_t slot) const { return slots_[slot].quads.buffer; }
+    [[nodiscard]] ::VkBuffer ribbonVertices(uint32_t slot) const { return slots_[slot].ribbonVertices.buffer; }
     [[nodiscard]] ::VkBuffer draws(uint32_t slot) const { return slots_[slot].draws.buffer; }
 
 private:
     struct Slot {
-        AllocatedBuffer rows, quads, draws, counters, read;
-        uint32_t rowRoom = 0, quadRoom = 0;
+        AllocatedBuffer rows, quads, ribbonVertices, draws, counters, read;
+        uint32_t rowRoom = 0, quadRoom = 0, ribbonVertexRoom = 0;
         VkDescriptorSet set = VK_NULL_HANDLE;
         uint32_t blobVersion = 0, poolVersion = 0;
         bool setCurrent = false;
@@ -132,12 +138,15 @@ private:
     VkContext* context_ = nullptr;
     const char* owner_ = "";
     VkPipeline pipeline_ = VK_NULL_HANDLE;
+    VkPipeline ribbonPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool pool_ = VK_NULL_HANDLE;
     Slot slots_[2];
-    /// Quads a frame may lay out; grown when a frame wanted more.
+    /// Quads and ribbon vertices a frame may lay out; grown when a frame
+    /// wanted more.
     uint32_t quadRoom_ = 16384;
+    uint32_t ribbonVertexRoom_ = 16384;
     std::mutex readMutex_;
     std::vector<Read> read_;
     std::atomic<uint32_t> quadsLaidOut_{0};

@@ -1,0 +1,128 @@
+// What the emitter passes share (M2ParticlePass: m2_particles.comp for the
+// particle emitters, m2_ribbons.comp for the ribbons): the model blobs, the
+// pool their state lives in, the frame's rows - a row each emitter of an
+// instance that runs or is seen, the particles' first and then the
+// ribbons' - and the frame's posed bones its emitter stands on.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Page {
+    uint words[];
+} pages[64];
+
+#include "m2_track.glsli"
+
+// Four vec4 a record (particle_pool.hpp): a range's header, then its
+// particles or edges.
+layout(set = 0, binding = 1) buffer ParticlePage {
+    vec4 records[];
+} particlePages[64];
+
+struct Row {
+    uint blobPage;       // the model's emitter blob
+    uint blobFirst;
+    uint emitter;        // which particle emitter or ribbon of it
+    uint flags;          // kEmit, kInView, kFirefly, kLit, kM2Skeleton, kCharacterSkeleton
+    uint poolPage;       // its range of records: the header's
+    uint poolFirst;
+    uint capacity;       // particles or edges it has room for
+    uint tag;            // the range's, as the pool gave it
+    int sequence;        // the instance's sequence and times, ms
+    float time;
+    float globalTime;
+    float dt;            // seconds since the frame before; none when it does not run
+    uint request;        // its skeleton in the frame's posed bones
+    uint boneBase;
+    uint boneCount;
+    uint seed;           // its own, fixed for its life
+    uint frameSerial;    // this frame's, for the rate's draw
+    uint pad0, pad1, pad2;
+    vec4 cullCentre;     // xyz: its instance's cull centre; w: its fade
+    mat4 placement;      // its model matrix, where it has no skeleton posed
+    vec4 lightAmbient;   // its instance's interior light (InteriorLightGPU)
+    vec4 lightDirect;
+    uvec4 localLights;   // its instance's point lights (local_lights.glsli)
+};
+layout(set = 0, binding = 2) readonly buffer Rows {
+    Row rows[];
+};
+// A VkDrawIndirectCommand a row.
+layout(set = 0, binding = 4) writeonly buffer Draws {
+    uvec4 draws[];
+};
+// What the frame's quads and ribbon vertices took, had room for, and wanted
+// beyond it.
+layout(set = 0, binding = 5) coherent buffer Counters {
+    uint quadsTaken;
+    uint quadRoom;
+    uint quadsShort;
+    uint ribbonVerticesTaken;
+    uint ribbonVertexRoom;
+    uint ribbonVerticesShort;
+};
+// A row's live particles or edges, and how far the farthest particle is
+// from its instance.
+layout(set = 0, binding = 6) writeonly buffer Read {
+    uvec2 read[];
+};
+
+// The frame's posed bones: the doodads' (binding 0 bones, 1 models) and the
+// creatures'.
+layout(set = 1, binding = 0) readonly buffer M2Bones { mat4 m2Bones[]; };
+layout(set = 1, binding = 1) readonly buffer M2Models { mat4 m2Models[]; };
+layout(set = 2, binding = 0) readonly buffer CharacterBones { mat4 characterBones[]; };
+layout(set = 2, binding = 1) readonly buffer CharacterModels { mat4 characterModels[]; };
+
+layout(push_constant) uniform Push {
+    vec4 eye;            // xyz the camera; w the particle density setting
+    uint firstRow;
+    uint charactersPosed;
+    uint pad0, pad1;
+} push;
+
+const uint kEmit = 1u;
+const uint kInView = 2u;
+const uint kFirefly = 4u;
+const uint kLit = 8u;
+const uint kM2Skeleton = 16u;
+const uint kCharacterSkeleton = 32u;
+
+uint poolPage;
+uint poolBase;
+
+vec4 record(uint index, uint part) { return particlePages[poolPage].records[(poolBase + index) * 4u + part]; }
+void setRecord(uint index, uint part, vec4 value) { particlePages[poolPage].records[(poolBase + index) * 4u + part] = value; }
+
+// Where an emitter on `bone` stands: its instance's model, then the bone as
+// posed this frame - the doodad's own skeleton, or a creature's.
+mat4 emitterToWorld(Row row, uint bone) {
+    mat4 model = row.placement;
+    mat4 posed = mat4(1.0);
+    if ((row.flags & kM2Skeleton) != 0u) {
+        model = m2Models[row.request];
+        if (bone < row.boneCount) posed = m2Bones[row.boneBase + bone];
+    } else if ((row.flags & kCharacterSkeleton) != 0u && push.charactersPosed != 0u) {
+        model = characterModels[row.request];
+        if (bone < row.boneCount) posed = characterBones[row.boneBase + bone];
+    }
+    return model * posed;
+}
+
+// The exclusive prefix sum of `value` over the workgroup, in invocation
+// order, and the sum of all. Every invocation calls it.
+shared uint scan[64];
+uint prefixSum(uint value, out uint total) {
+    const uint lid = gl_LocalInvocationIndex;
+    scan[lid] = value;
+    barrier();
+    for (uint offset = 1u; offset < 64u; offset <<= 1u) {
+        const uint add = lid >= offset ? scan[lid - offset] : 0u;
+        barrier();
+        scan[lid] += add;
+        barrier();
+    }
+    total = scan[63];
+    const uint inclusive = scan[lid];
+    barrier();
+    return inclusive - value;
+}
