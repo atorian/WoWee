@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_nonuniform_qualifier : require
 
 layout(set = 0, binding = 0) uniform PerFrame {
     mat4 view;
@@ -45,7 +46,20 @@ layout(set = 0, binding = 0) uniform PerFrame {
 #include "aerial_frame.glsli"
 #include "terrain_distance.glsli"
 
-#define TERRAIN_MATERIAL_SET 1
+// After the vertex stage's model matrix and lights (GPUPushConstants).
+layout(push_constant) uniform Surface {
+    layout(offset = 80) vec4 relief;  // x = how steeply the relief is drawn, 0 for flat ground
+    // x: 0 the layers, 1 the layers giving way to the bake between y and z
+    // yards from the camera, 2 the bake alone. w: the chunk's cell in its
+    // tile's atlas, x + 16 y.
+    vec4 baked;
+    // The chunk's row in the terrain's chunk table.
+    uint chunk;
+} surface;
+
+#define TEXTURE_TABLE_SET 1
+#define TERRAIN_CHUNK_SET 2
+#define TERRAIN_CHUNK surface.chunk
 #include "terrain_layers.glsli"
 
 // The chunk's own normals, every vertex's, as a 17x17 image (ChunkMesh::
@@ -53,7 +67,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
 // from these rather than from the vertices drawn, so a far chunk drawn with a
 // handful of them keeps the light and shade of all 145. Every chunk of the
 // tile's is in one array (TerrainTileMaps), this one's at mapLayer.
-layout(set = 1, binding = 10) uniform sampler2DArray uTileNormals;
+#define uTileNormals tableLayered2D(TERRAIN_ROW.maps.y)
 
 // LayerUV runs over the alpha maps' texel centres, (offset * 63/8 + 0.5) / 64
 // for a grid offset of 0 to 8; the normal image's texel centres for the same
@@ -65,17 +79,8 @@ vec3 chunkNormal(vec2 layerUV) {
 
 // The far ground: the chunk's tile's colour and relief, its layers blended
 // once into 32x32 texels a chunk (TerrainBake), the chunk at its cell.
-layout(set = 1, binding = 11) uniform sampler2D uBakedColor;
-layout(set = 1, binding = 12) uniform sampler2D uBakedRelief;
-
-// After the vertex stage's model matrix and lights (GPUPushConstants).
-layout(push_constant) uniform Surface {
-    layout(offset = 80) vec4 relief;  // x = how steeply the relief is drawn, 0 for flat ground
-    // x: 0 the layers, 1 the layers giving way to the bake between y and z
-    // yards from the camera, 2 the bake alone. w: the chunk's cell in its
-    // tile's atlas, x + 16 y.
-    vec4 baked;
-} surface;
+#define uBakedColor tablePlain2D(TERRAIN_ROW.maps.z)
+#define uBakedRelief tablePlain2D(TERRAIN_ROW.maps.w)
 
 // Where the point is in its tile's bake atlas.
 vec2 bakedAtlasUv(vec2 layerUV) {

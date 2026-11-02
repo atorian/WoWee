@@ -19,6 +19,7 @@
  * chunk changes over.
  */
 
+#include "rendering/texture_cache.hpp"
 #include "rendering/vk_utils.hpp"
 
 #include <vk_mem_alloc.h>
@@ -94,6 +95,9 @@ public:
         VkImageView colorTarget = VK_NULL_HANDLE;   ///< mip 0, drawn into
         VkImageView reliefTarget = VK_NULL_HANDLE;
         std::atomic<bool> ready{false};        ///< cleared and in the layout the ground samples
+        /// Where the ground samples them in the texture table.
+        TextureHandle colorHandle = kNoTextureHandle;
+        TextureHandle reliefHandle = kNoTextureHandle;
     };
 
     TerrainBake() = default;
@@ -101,10 +105,11 @@ public:
     TerrainBake(const TerrainBake&) = delete;
     TerrainBake& operator=(const TerrainBake&) = delete;
 
-    /// The pipeline, with the chunks' material set at set 0. False when the
-    /// far ground cannot be baked here - said why, once - and the ground is
-    /// then drawn from its layers however far.
-    bool initialize(VkContext& ctx, VkDescriptorSetLayout materialSetLayout);
+    /// The pipeline, with the texture table at set 0, the terrain's chunk
+    /// table at set 1 and the chunk's row pushed. False when the far ground
+    /// cannot be baked here - said why, once - and the ground is then drawn
+    /// from its layers however far.
+    bool initialize(VkContext& ctx, VkDescriptorSetLayout tableLayout, VkDescriptorSetLayout chunkLayout);
     void shutdown();
     [[nodiscard]] bool enabled() const { return pipeline_ != VK_NULL_HANDLE; }
     [[nodiscard]] VkSampler sampler() const { return sampler_; }

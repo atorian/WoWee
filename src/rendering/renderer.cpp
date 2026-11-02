@@ -1990,6 +1990,11 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
         m2Renderer->dispatchCullCompute(currentCmd, frame);
     }
     if (skyboxModelRenderer_ && vkCtx) skyboxModelRenderer_->uploadSlotTables(currentCmd, vkCtx->getCurrentFrame());
+    // The terrain's chunk rows, before the bake and every pass that draws
+    // the ground reads them.
+    if (terrainRenderer && vkCtx && frameInputs_.scene) {
+        terrainRenderer->uploadChunkRows(currentCmd, vkCtx->getCurrentFrame(), frameInputs_.scene->terrain);
+    }
 
     // Grass culls here too, for the same reason: a dispatch has to be recorded
     // outside a render pass. Unlike the M2 path nothing reads the result back -
@@ -2223,6 +2228,7 @@ void Renderer::endFrame() {
     currentCmd = VK_NULL_HANDLE;
     if (m2Renderer) m2Renderer->frameSubmitted();
     if (skyboxModelRenderer_) skyboxModelRenderer_->frameSubmitted();
+    if (terrainRenderer) terrainRenderer->frameSubmitted();
     vkCtx->cpuStages().add("Render", "endFrame", std::chrono::duration<float, std::milli>(
         std::chrono::steady_clock::now() - recordingStart).count());
     publishFrameResults();

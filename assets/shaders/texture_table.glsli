@@ -1,0 +1,18 @@
+// The device's texture table (TextureTable): images by place, plain and
+// layered, and samplers by place, a handle packing an image's place in its
+// low 20 bits and its sampler's above. The includer defines
+// TEXTURE_TABLE_SET, the set the table is bound at, and enables
+// GL_EXT_nonuniform_qualifier after its #version.
+
+layout(set = TEXTURE_TABLE_SET, binding = 0) uniform texture2D tablePlain[];
+layout(set = TEXTURE_TABLE_SET, binding = 1) uniform texture2DArray tableLayered[];
+layout(set = TEXTURE_TABLE_SET, binding = 2) uniform sampler tableSamplers[];
+
+#define TABLE_IMAGE(handle) ((handle) & 0xFFFFFu)
+#define TABLE_SAMPLER(handle) ((handle) >> 20)
+// A handle as a sampler. A handle may differ between the draws of one
+// indirect call, so the indices are marked nonuniform.
+#define tablePlain2D(handle) \
+    sampler2D(tablePlain[nonuniformEXT(TABLE_IMAGE(handle))], tableSamplers[nonuniformEXT(TABLE_SAMPLER(handle))])
+#define tableLayered2D(handle) \
+    sampler2DArray(tableLayered[nonuniformEXT(TABLE_IMAGE(handle))], tableSamplers[nonuniformEXT(TABLE_SAMPLER(handle))])

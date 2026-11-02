@@ -51,9 +51,12 @@ bool TextureTable::initialize(VkDevice device, Capacity capacity) {
 
     const VkShaderStageFlags stages = VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT;
     const std::array<VkDescriptorSetLayoutBinding, 3> bindings = {{
-        {kPlainBinding, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, capacity.plain, stages, nullptr},
-        {kLayeredBinding, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, capacity.layered, stages, nullptr},
-        {kSamplerBinding, VK_DESCRIPTOR_TYPE_SAMPLER, capacity.samplers, stages, nullptr},
+        {.binding = kPlainBinding, .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+         .descriptorCount = capacity.plain, .stageFlags = stages},
+        {.binding = kLayeredBinding, .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+         .descriptorCount = capacity.layered, .stageFlags = stages},
+        {.binding = kSamplerBinding, .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER,
+         .descriptorCount = capacity.samplers, .stageFlags = stages},
     }};
     // A place is written while frames that do not use it are in flight, and
     // most places are never written at all.
@@ -77,8 +80,8 @@ bool TextureTable::initialize(VkDevice device, Capacity capacity) {
     }
 
     const std::array<VkDescriptorPoolSize, 2> sizes = {{
-        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, capacity.plain + capacity.layered},
-        {VK_DESCRIPTOR_TYPE_SAMPLER, capacity.samplers},
+        {.type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = capacity.plain + capacity.layered},
+        {.type = VK_DESCRIPTOR_TYPE_SAMPLER, .descriptorCount = capacity.samplers},
     }};
     VkDescriptorPoolCreateInfo poolInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;

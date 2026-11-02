@@ -43,7 +43,9 @@ void barriers(VkCommandBuffer cmd, const VkImageMemoryBarrier2* list, uint32_t c
     cmdPipelineBarrier2(cmd, dep);
 }
 
-void destroyAtlasImages(VkDevice device, VmaAllocator allocator, TerrainBake::Atlas& atlas) {
+void destroyAtlasImages(VkDevice device, VmaAllocator allocator, TextureTable& table, TerrainBake::Atlas& atlas) {
+    table.remove(std::exchange(atlas.colorHandle, kNoTextureHandle), TextureTable::Kind::Plain);
+    table.remove(std::exchange(atlas.reliefHandle, kNoTextureHandle), TextureTable::Kind::Plain);
     for (VkImageView* view : {&atlas.colorTarget, &atlas.reliefTarget}) {
         if (*view) vkDestroyImageView(device, *view, nullptr);
         *view = VK_NULL_HANDLE;
@@ -68,7 +70,8 @@ VkImageView levelZeroView(VkDevice device, VkImage image) {
 
 TerrainBake::~TerrainBake() { shutdown(); }
 
-bool TerrainBake::initialize(VkContext& ctx, VkDescriptorSetLayout materialSetLayout) {
+bool TerrainBake::initialize(VkContext& ctx, VkDescriptorSetLayout tableLayout,
+                             VkDescriptorSetLayout chunkLayout) {
     ctx_ = &ctx;
     mipLevels_ = static_cast<uint32_t>(std::bit_width(kTerrainBakeAtlasSize));
     if (!ctx.useDynamicRendering()) {
@@ -78,7 +81,10 @@ bool TerrainBake::initialize(VkContext& ctx, VkDescriptorSetLayout materialSetLa
     }
     VkDevice device = ctx.getDevice();
 
-    pipelineLayout_ = createPipelineLayout(device, {materialSetLayout}, {});
+    // The chunk's row in the chunk table, pushed (terrain_bake.frag.glsl).
+    const VkPushConstantRange row{.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT, .offset = 0,
+                                  .size = sizeof(uint32_t)};
+    pipelineLayout_ = createPipelineLayout(device, {tableLayout, chunkLayout}, {row});
     if (!pipelineLayout_) {
         LOG_ERROR("Terrain bake: could not create the pipeline layout; the far ground is drawn "
                   "from its layers however far it is");
@@ -158,7 +164,7 @@ void TerrainBake::shutdown() {
 }
 
 void TerrainBake::destroyAtlas(Atlas& atlas) {
-    destroyAtlasImages(ctx_->getDevice(), ctx_->getAllocator(), atlas);
+    destroyAtlasImages(ctx_->getDevice(), ctx_->getAllocator(), ctx_->textureTable(), atlas);
 }
 
 TerrainBake::Atlas* TerrainBake::atlas(int tileX, int tileY) {
@@ -178,12 +184,18 @@ TerrainBake::Atlas* TerrainBake::atlas(int tileX, int tileY) {
         made->colorTarget = levelZeroView(device, made->color.image);
         made->reliefTarget = levelZeroView(device, made->relief.image);
     }
-    if (!made->colorTarget || !made->reliefTarget) {
+    if (made->colorTarget && made->reliefTarget) {
+        TextureTable& table = ctx_->textureTable();
+        made->colorHandle = table.add(made->color.imageView, sampler_, TextureTable::Kind::Plain);
+        made->reliefHandle = table.add(made->relief.imageView, sampler_, TextureTable::Kind::Plain);
+    }
+    if (!made->colorTarget || !made->reliefTarget || made->colorHandle == kNoTextureHandle ||
+        made->reliefHandle == kNoTextureHandle) {
         if (!atlasFailureSaid_) {
             atlasFailureSaid_ = true;
             LOG_WARNING("Terrain bake: no atlas for tile [", tileX, ",", tileY,
-                        "] (createImage said why); its far ground is drawn from its layers, and "
-                        "so is any other tile's that fails the same way");
+                        "] (createImage or the texture table said why); its far ground is drawn from its "
+                        "layers, and so is any other tile's that fails the same way");
         }
         destroyAtlas(*made);
         return nullptr;
@@ -198,12 +210,12 @@ void TerrainBake::releaseTile(int tileX, int tileY) {
     if (it == atlases_.end()) return;
     std::shared_ptr<Atlas> retired(std::move(it->second));
     atlases_.erase(it);
-    // The chunks that named it in their material sets may still be drawn by
-    // the frames in flight.
+    // The chunks whose rows name it may still be drawn by the frames in
+    // flight.
     const VkDevice device = ctx_->getDevice();
     const VmaAllocator allocator = ctx_->getAllocator();
-    ctx_->deferAfterAllFrameFences([device, allocator, retired] {
-        destroyAtlasImages(device, allocator, *retired);
+    ctx_->deferAfterAllFrameFences([device, allocator, table = &ctx_->textureTable(), retired] {
+        destroyAtlasImages(device, allocator, *table, *retired);
     });
 }
 

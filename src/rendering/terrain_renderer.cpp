@@ -32,37 +32,17 @@
 namespace wowee {
 namespace rendering {
 
-// Matches TerrainParams in terrain_layers.glsli (kParamsBinding).
-struct TerrainParamsUBO {
-    int32_t layerCount;
-    int32_t hasLayer1;
-    int32_t hasLayer2;
-    int32_t hasLayer3;
-    /// The chunk's layer in its tile's maps (TerrainChunkSlot).
-    int32_t mapLayer;
-};
-
 // The fragment stage's push constants, after the vertex stage's
-// GPUPushConstants. Matches `Surface` in terrain.frag.glsl.
+// GPUPushConstants: the surface, then the chunk's row. Matches `Surface` in
+// terrain.frag.glsl.
 constexpr uint32_t kSurfacePushOffset = sizeof(GPUPushConstants);
-static_assert(kSurfacePushOffset + sizeof(TerrainSurfacePush) <= 128,
+constexpr uint32_t kRowPushOffset = kSurfacePushOffset + sizeof(TerrainSurfacePush);
+static_assert(kRowPushOffset + sizeof(uint32_t) <= 128,
               "the terrain's push constants fit the space Vulkan guarantees");
 
-// The material set (terrain_layers.glsli, terrain.frag.glsl): the base texture
-// and the three layers' at 0-3, then what the layers cover - the tile's cover
-// array - and the params block.
-constexpr uint32_t kTileCoverBinding = 4;
-constexpr uint32_t kParamsBinding = 5;
-// Then the base texture's relief, then each layer's.
-constexpr uint32_t kFirstNormalMapBinding = 6;
-// Then the chunk's own normals, which the ground is lit from: the tile's
-// normals array.
-constexpr uint32_t kTileNormalsBinding = kFirstNormalMapBinding + 4;
-// Then its tile's bake atlas, colour and relief.
-constexpr uint32_t kBakedColorBinding = kTileNormalsBinding + 1;
-constexpr uint32_t kBakedReliefBinding = kBakedColorBinding + 1;
-constexpr uint32_t kMaterialBindingCount = kBakedReliefBinding + 1;
-constexpr uint32_t kMaterialSamplerCount = kMaterialBindingCount - 1;
+// The pipelines' sets: the frame's block, the texture table, the chunk rows.
+constexpr uint32_t kTableSet = 1;
+constexpr uint32_t kChunkSet = 2;
 
 /// Chunks drawn into their atlases a frame. A tile is 256; one arriving bakes
 /// in the frame after it, and the world's first hundred tiles in seventy.
@@ -143,9 +123,22 @@ bool uploadTileMapLayers(VkContext& ctx, TerrainTileMaps& maps, const uint8_t* c
     return true;
 }
 
-void destroyTileMaps(VkDevice device, VmaAllocator allocator, TerrainTileMaps& maps) {
+void destroyTileMaps(VkDevice device, VmaAllocator allocator, TextureTable& table, TerrainTileMaps& maps) {
+    table.remove(std::exchange(maps.coverHandle, kNoTextureHandle), TextureTable::Kind::Layered);
+    table.remove(std::exchange(maps.normalsHandle, kNoTextureHandle), TextureTable::Kind::Layered);
     destroyImage(device, allocator, maps.cover);
     destroyImage(device, allocator, maps.normals);
+}
+
+/// The maps' places in the texture table, sampled through `sampler`. False,
+/// with nothing taken, when the table had no room (it said so).
+bool placeTileMaps(TextureTable& table, VkSampler sampler, TerrainTileMaps& maps) {
+    maps.coverHandle = table.add(maps.cover.imageView, sampler, TextureTable::Kind::Layered);
+    maps.normalsHandle = table.add(maps.normals.imageView, sampler, TextureTable::Kind::Layered);
+    if (maps.coverHandle != kNoTextureHandle && maps.normalsHandle != kNoTextureHandle) return true;
+    table.remove(std::exchange(maps.coverHandle, kNoTextureHandle), TextureTable::Kind::Layered);
+    table.remove(std::exchange(maps.normalsHandle, kNoTextureHandle), TextureTable::Kind::Layered);
+    return false;
 }
 
 }  // namespace
@@ -273,51 +266,41 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
         LOG_WARNING("WOWEE_TERRAIN_LOD=0: every terrain chunk is drawn at full detail, however far");
     }
 
-    // --- Create material descriptor set layout (set 1) ---
-    // Every binding a combined image sampler but the params block; see
-    // kTileCoverBinding and the rest above.
-    std::vector<VkDescriptorSetLayoutBinding> materialBindings(kMaterialBindingCount);
-    for (uint32_t i = 0; i < kMaterialBindingCount; i++) {
-        materialBindings[i] = {};
-        materialBindings[i].binding = i;
-        materialBindings[i].descriptorType = i == kParamsBinding ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
-                                                                 : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        materialBindings[i].descriptorCount = 1;
-        materialBindings[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    }
-
-    materialSetLayout = createDescriptorSetLayout(device, materialBindings);
-    if (!materialSetLayout) {
-        LOG_ERROR("TerrainRenderer: failed to create material set layout");
+    // --- The chunk table's set, one per frame slot ---
+    const VkDescriptorSetLayoutBinding chunkBinding{.binding = 0,
+                                                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                                    .descriptorCount = 1,
+                                                    .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT};
+    chunkSetLayout_ = createDescriptorSetLayout(device, {chunkBinding});
+    const VkDescriptorPoolSize chunkPoolSize{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                             .descriptorCount = MAX_FRAMES_IN_FLIGHT};
+    VkDescriptorPoolCreateInfo poolInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolInfo.maxSets = MAX_FRAMES_IN_FLIGHT;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &chunkPoolSize;
+    if (!chunkSetLayout_ || vkCreateDescriptorPool(device, &poolInfo, nullptr, &chunkSetPool_) != VK_SUCCESS) {
+        LOG_ERROR("TerrainRenderer: could not make the chunk table's sets");
         return false;
     }
+    for (auto& set : chunkSets_) {
+        VkDescriptorSetAllocateInfo allocInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        allocInfo.descriptorPool = chunkSetPool_;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &chunkSetLayout_;
+        if (vkAllocateDescriptorSets(device, &allocInfo, &set) != VK_SUCCESS) {
+            LOG_ERROR("TerrainRenderer: could not allocate the chunk table's sets");
+            return false;
+        }
+    }
+    chunkRows_.initialize(*vkCtx);
+    const VkDescriptorSetLayout tableLayout = vkCtx->textureTable().layout();
 
     // The far ground's bake, which says itself why when it cannot be had.
     if (!core::envFlagEnabled("WOWEE_TERRAIN_BAKE", true)) {
         LOG_WARNING("WOWEE_TERRAIN_BAKE=0: every terrain chunk is drawn from its layers, however far");
     } else {
-        bakeEnabled_ = bake_.initialize(*vkCtx, materialSetLayout);
+        bakeEnabled_ = bake_.initialize(*vkCtx, tableLayout, chunkSetLayout_);
     }
-
-    // --- Create descriptor pool ---
-    VkDescriptorPoolSize poolSizes[] = {
-        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_MATERIAL_SETS * kMaterialSamplerCount },
-        { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_MATERIAL_SETS },
-    };
-
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    poolInfo.maxSets = MAX_MATERIAL_SETS;
-    poolInfo.poolSizeCount = 2;
-    poolInfo.pPoolSizes = poolSizes;
-
-    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &materialDescPool) != VK_SUCCESS) {
-        LOG_ERROR("TerrainRenderer: failed to create descriptor pool");
-        return false;
-    }
-    paramsSlots_ = UniformSlotPool::forDevice(vkCtx->getAllocator(), vkCtx->getPhysicalDevice(),
-                                              sizeof(TerrainParamsUBO), 1024, "Terrain chunk parameters");
 
     // --- Create pipeline layout ---
     VkPushConstantRange pushRange{};
@@ -327,9 +310,9 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
     VkPushConstantRange surfaceRange{};
     surfaceRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     surfaceRange.offset = kSurfacePushOffset;
-    surfaceRange.size = sizeof(TerrainSurfacePush);
+    surfaceRange.size = sizeof(TerrainSurfacePush) + sizeof(uint32_t);
 
-    std::vector<VkDescriptorSetLayout> setLayouts = { perFrameLayout, materialSetLayout };
+    std::vector<VkDescriptorSetLayout> setLayouts = { perFrameLayout, tableLayout, chunkSetLayout_ };
     pipelineLayout = createPipelineLayout(device, setLayouts, { pushRange, surfaceRange });
     if (!pipelineLayout) {
         LOG_ERROR("TerrainRenderer: failed to create pipeline layout");
@@ -391,7 +374,8 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
         fallback->normals = createArrayImage(device, vkCtx->getAllocator(), 1, 1, 1,
                                              VK_FORMAT_R8G8B8A8_UNORM, usage);
         if (!tileMapSampler_ || !fallback->cover.imageView || !fallback->normals.imageView ||
-            !uploadTileMapLayers(*vkCtx, *fallback, coverAll, flatNormal, 1, 1, 1)) {
+            !uploadTileMapLayers(*vkCtx, *fallback, coverAll, flatNormal, 1, 1, 1) ||
+            !placeTileMaps(vkCtx->textureTable(), tileMapSampler_, *fallback)) {
             LOG_ERROR("TerrainRenderer: the fallback chunk maps could not be made, so no chunk can be drawn");
             destroyImage(device, vkCtx->getAllocator(), fallback->cover);
             destroyImage(device, vkCtx->getAllocator(), fallback->normals);
@@ -448,9 +432,8 @@ void TerrainRenderer::shutdown() {
     // sets from are still alive. Without this every resident chunk's vertex and
     // index buffers outlived the device: twenty thousand of each.
     vkCtx->flushDeferredCleanup();
-    if (paramsSlots_) paramsSlots_->release();
     // After the flush, which destroyed the atlases clear() let go; before the
-    // material layout its pipeline layout names.
+    // chunk set layout its pipeline layout names.
     bake_.shutdown();
     bakeEnabled_ = false;
 
@@ -460,7 +443,7 @@ void TerrainRenderer::shutdown() {
     flatNormalTexture.reset();
     // After the flush, which destroyed the tiles' maps clear() let go. The
     // sampler is the context's cache's.
-    if (fallbackTileMaps_) destroyTileMaps(device, allocator, *fallbackTileMaps_);
+    if (fallbackTileMaps_) destroyTileMaps(device, allocator, vkCtx->textureTable(), *fallbackTileMaps_);
     fallbackTileMaps_.reset();
     tileMapSampler_ = VK_NULL_HANDLE;
 
@@ -468,8 +451,11 @@ void TerrainRenderer::shutdown() {
     destroy(device, shortOfDiscardsPipeline);
     destroy(device, wireframePipeline);
     destroy(device, pipelineLayout);
-    destroy(device, materialDescPool);
-    destroy(device, materialSetLayout);
+    chunkRows_.destroy();
+    destroy(device, chunkSetPool_);
+    destroy(device, chunkSetLayout_);
+    for (auto& set : chunkSets_) set = VK_NULL_HANDLE;
+    for (auto& version : chunkSetVersion_) version = 0;
 
     // Shadow pipeline cleanup
     destroy(device, shadowPipeline_);
@@ -515,21 +501,7 @@ bool TerrainRenderer::loadTerrain(const pipeline::TerrainMesh& mesh,
             gpuChunk.tileX = tileX;
             gpuChunk.tileY = tileY;
 
-            // Create per-chunk params UBO
-            // A failed allocation here is pressure rather than corruption, but
-            // this path has no way to come back for the chunk, so it skips it.
-            if (!createChunkParamsUBO(gpuChunk)) {
-                LOG_WARNING("Terrain chunk UBO allocation failed - skipping chunk");
-                destroyChunkGPU(gpuChunk);
-                continue;
-            }
-
-            gpuChunk.materialSet = allocateMaterialSet();
-            if (!gpuChunk.materialSet) {
-                destroyChunkGPU(gpuChunk);
-                continue;
-            }
-            if (!writeMaterialDescriptors(gpuChunk.materialSet, gpuChunk)) {
+            if (!writeChunkRow(gpuChunk)) {
                 destroyChunkGPU(gpuChunk);
                 continue;
             }
@@ -578,33 +550,9 @@ bool TerrainRenderer::loadTerrainIncremental(const pipeline::TerrainMesh& mesh,
         gpuChunk.tileX = tileX;
         gpuChunk.tileY = tileY;
 
-        if (!createChunkParamsUBO(gpuChunk)) {
-            LOG_WARNING("Terrain[", tileX, ",", tileY, "] chunk UBO allocation failed"
-                        " - retrying next frame");
-            destroyChunkGPU(gpuChunk);
-            chunkIndex--;
-            break;
-        }
-
-        gpuChunk.materialSet = allocateMaterialSet();
-        if (!gpuChunk.materialSet) {
-            destroyChunkGPU(gpuChunk);
-            // Give the chunk back rather than dropping it. Both failures above
-            // are pressure, not corruption: the descriptor pool is shared by
-            // every resident tile and its sets come back only through
-            // deferAfterAllFrameFences, so a tile arriving while an unloaded
-            // one is still in flight can find the pool momentarily full. A
-            // dropped chunk was never retried - the tile counted as loaded
-            // with a hole in it, and the hole stayed for the rest of the
-            // session. Stepping the index back and leaving means the caller
-            // sees "not finished" and comes back once the frees have landed.
-            chunkIndex--;
-            break;
-        }
-        if (!writeMaterialDescriptors(gpuChunk.materialSet, gpuChunk)) {
-            // Not the retry above: that one is descriptor-pool pressure, which
-            // passes. This is the fallback textures being unsampleable, which
-            // does not, so the chunk is dropped rather than asked for again.
+        if (!writeChunkRow(gpuChunk)) {
+            // The fallback textures are unsampleable, which does not pass, so
+            // the chunk is dropped rather than asked for again.
             destroyChunkGPU(gpuChunk);
             continue;
         }
@@ -658,23 +606,6 @@ void TerrainRenderer::bindChunkTextures(TerrainChunkGPU& gpuChunk,
         // What the layer covers is in the tile's maps (terrainTileMapPixels).
         gpuChunk.layerCount = static_cast<int>(i);
     }
-}
-
-bool TerrainRenderer::createChunkParamsUBO(TerrainChunkGPU& gpuChunk) {
-    TerrainParamsUBO params{};
-    params.layerCount = gpuChunk.layerCount;
-    params.hasLayer1 = gpuChunk.layerCount >= 1 ? 1 : 0;
-    params.hasLayer2 = gpuChunk.layerCount >= 2 ? 1 : 0;
-    params.hasLayer3 = gpuChunk.layerCount >= 3 ? 1 : 0;
-    params.mapLayer = static_cast<int32_t>(gpuChunk.maps.slot.layer());
-
-    // A slot rather than a buffer of its own. None - the pool could not make
-    // a block, and has said so - would leave the GPU reading an invalid
-    // descriptor, so the caller retries the chunk instead.
-    gpuChunk.paramsSlot = paramsSlots_ ? paramsSlots_->allocate() : UniformSlotPool::Slot{};
-    if (!gpuChunk.paramsSlot) return false;
-    std::memcpy(gpuChunk.paramsSlot.mapped, &params, sizeof(params));
-    return true;
 }
 
 TerrainChunkGPU TerrainRenderer::uploadChunk(const pipeline::ChunkMesh& chunk) {
@@ -948,41 +879,22 @@ void TerrainRenderer::uploadPreloadedTextures(
     vkCtx->endUploadBatch();
 }
 
-VkDescriptorSet TerrainRenderer::allocateMaterialSet() {
-    VkDescriptorSetAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = materialDescPool;
-    allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &materialSetLayout;
-
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    if (vkCtx->allocateDescriptorSets(allocInfo, &set) != VK_SUCCESS) {
-        static uint64_t failCount = 0;
-        ++failCount;
-        if (failCount <= 8 || (failCount % 256) == 0) {
-            LOG_WARNING("TerrainRenderer: failed to allocate material descriptor set (count=", failCount, ")");
-        }
-        return VK_NULL_HANDLE;
-    }
-    return set;
-}
-
-bool TerrainRenderer::writeMaterialDescriptors(VkDescriptorSet set, const TerrainChunkGPU& chunk) {
-    VkTexture* white = whiteTexture.get();
-
-    // Valid, not merely non-null. descriptorInfo() returns the texture's
-    // handles as they are, so one whose upload or view creation failed writes
-    // VK_NULL_HANDLE into a live descriptor and declares
-    // SHADER_READ_ONLY_OPTIMAL over it. Sampling that is undefined behaviour
-    // and reaches an NVIDIA driver as a graphics engine exception and a lost
-    // device rather than as anything this client can catch. See #123.
+bool TerrainRenderer::writeChunkRow(TerrainChunkGPU& chunk) {
+    // Valid, not merely non-null, and in the table. A texture whose upload or
+    // view creation failed has a null view, and sampling that is undefined
+    // behaviour that reaches an NVIDIA driver as a graphics engine exception
+    // and a lost device rather than as anything this client can catch. See
+    // #123. One the full table had no place for (it said so) has no handle.
     //
     // A chunk texture failing is ordinary - it is what the cache does under
     // memory pressure - and the 1x1 fallbacks are what that case is for.
-    const auto sampleable = [](VkTexture* t) { return t && t->isValid(); };
-    const auto pick = [&](VkTexture* wanted, VkTexture* fallback) {
-        return sampleable(wanted) ? wanted : fallback;
+    const auto sampleable = [](const TextureRef& t) {
+        return t && t->isValid() && t.tableHandle() != kNoTextureHandle;
     };
+    const auto pick = [&](const TextureRef& wanted, const TextureRef& fallback) {
+        return sampleable(wanted) ? wanted.tableHandle() : fallback.tableHandle();
+    };
+    const TextureRef& white = whiteTexture;
     if (!sampleable(white)) {
         // The fallbacks themselves are gone, so there is nothing safe to write.
         // The caller drops the chunk: a hole in the ground costs a view of one
@@ -998,55 +910,40 @@ bool TerrainRenderer::writeMaterialDescriptors(VkDescriptorSet set, const Terrai
 
     // The flat normal is the relief's fallback, and a white one stands in
     // for it: lit flat but for a slight tilt, never unbound.
-    VkTexture* flat = pick(flatNormalTexture.get(), white);
+    const TextureRef& flat = sampleable(flatNormalTexture) ? flatNormalTexture : white;
 
-    // Indexed by binding; 7 is the params block.
-    VkDescriptorImageInfo imageInfos[kMaterialBindingCount] = {};
-    imageInfos[0] = pick(chunk.baseTexture.get(), white)->descriptorInfo();
-    imageInfos[kFirstNormalMapBinding] = pick(chunk.baseNormalMap.get(), flat)->descriptorInfo();
+    TerrainChunkRowGPU row;
+    row.color[0] = pick(chunk.baseTexture, white);
+    row.relief[0] = pick(chunk.baseNormalMap, flat);
+    for (uint32_t i = 0; i < 3; i++) {
+        row.color[1 + i] = pick(chunk.layerTextures[i], white);
+        row.relief[1 + i] = pick(chunk.layerNormalMaps[i], flat);
+    }
     // The tile's maps, or the fallback ones a tile whose maps failed was given.
     const TerrainTileMaps& maps = chunk.maps.tile ? *chunk.maps.tile : *fallbackTileMaps_;
-    imageInfos[kTileCoverBinding] = {tileMapSampler_, maps.cover.imageView,
-                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    imageInfos[kTileNormalsBinding] = {tileMapSampler_, maps.normals.imageView,
-                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    for (uint32_t i = 0; i < 3; i++) {
-        imageInfos[1 + i] = pick(chunk.layerTextures[i].get(), white)->descriptorInfo();
-        imageInfos[kFirstNormalMapBinding + 1 + i] = pick(chunk.layerNormalMaps[i].get(), flat)->descriptorInfo();
-    }
+    row.maps[0] = maps.coverHandle;
+    row.maps[1] = maps.normalsHandle;
     // The tile's bake atlas, or the fallbacks where there is none; a chunk
     // with no atlas is never baked, and so never drawn from it.
     if (const TerrainBake::Atlas* atlas = bakeEnabled_ ? bake_.atlas(chunk.tileX, chunk.tileY) : nullptr) {
-        imageInfos[kBakedColorBinding] = {bake_.sampler(), atlas->color.imageView,
-                                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        imageInfos[kBakedReliefBinding] = {bake_.sampler(), atlas->relief.imageView,
-                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        row.maps[2] = atlas->colorHandle;
+        row.maps[3] = atlas->reliefHandle;
     } else {
-        imageInfos[kBakedColorBinding] = white->descriptorInfo();
-        imageInfos[kBakedReliefBinding] = flat->descriptorInfo();
+        row.maps[2] = white.tableHandle();
+        row.maps[3] = flat.tableHandle();
     }
+    row.layerCount = chunk.layerCount;
+    row.mapLayer = static_cast<int32_t>(chunk.maps.slot.layer());
 
-    VkDescriptorBufferInfo bufInfo{};
-    bufInfo.buffer = chunk.paramsSlot.buffer;
-    bufInfo.offset = chunk.paramsSlot.offset;
-    bufInfo.range = sizeof(TerrainParamsUBO);
-
-    VkWriteDescriptorSet writes[kMaterialBindingCount] = {};
-    for (uint32_t i = 0; i < kMaterialBindingCount; i++) {
-        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[i].dstSet = set;
-        writes[i].dstBinding = i;
-        writes[i].descriptorCount = 1;
-        if (i == kParamsBinding) {
-            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            writes[i].pBufferInfo = &bufInfo;
+    if (chunk.row == TerrainChunkGPU::kNoRow) {
+        if (freeRows_.empty()) {
+            chunk.row = rowCount_++;
         } else {
-            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[i].pImageInfo = &imageInfos[i];
+            chunk.row = freeRows_.back();
+            freeRows_.pop_back();
         }
     }
-
-    vkUpdateDescriptorSets(vkCtx->getDevice(), kMaterialBindingCount, writes, 0, nullptr);
+    pendingRows_[chunk.row] = {row, extractions_ + 1};
     return true;
 }
 
@@ -1148,7 +1045,7 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
     for (const uint32_t i : candidates) {
         const auto& ch = chunks[i];
         if (!ch.isValid()) continue;
-        if (!ch.materialSet) continue;
+        if (ch.row == TerrainChunkGPU::kNoRow) continue;
         const Seen chunk = seen(ch.boundingSphereCenter, ch.boundingSphereRadius);
         if (!chunk.view) ++list.culled;
         if (!chunk.view && !chunk.mirror) continue;
@@ -1167,7 +1064,7 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
         const auto& ch = chunks[i];
         const size_t level = static_cast<size_t>(levels[i]);
         ChunkDraw draw;
-        draw.material = ch.materialSet;
+        draw.row = ch.row;
         draw.geometry = geometryOf(ch);
         draw.ranges[0] = ch.lods[level];
         // A skirt where the neighbour across an edge is missing or drawn at
@@ -1216,7 +1113,7 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
             const auto& ch = chunks[chunkIndex_.find(bakeQueue_[i].first, bakeQueue_[i].second)];
             auto* atlas = bake_.atlas(ch.tileX, ch.tileY);
             if (!atlas) continue; // atlas() reports the allocation failure.
-            list.bake.push_back({geometryOf(ch), ch.materialSet, ch.tileX, ch.tileY,
+            list.bake.push_back({geometryOf(ch), ch.row, ch.tileX, ch.tileY,
                                  ch.chunkX, ch.chunkY, atlas, ch.bakeComplete});
         }
         std::sort(list.bake.begin(), list.bake.end(), [](const BakeDraw& a, const BakeDraw& b) {
@@ -1224,7 +1121,45 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
         });
     }
     laps.lap("bake");
+
+    // Every row not yet known to be on the GPU goes with every frame until
+    // one that carried it is submitted; a frame dropped on the way loses none.
+    const uint64_t submitted = rowsSubmitted_.load(std::memory_order_acquire);
+    std::erase_if(pendingRows_, [submitted](const auto& entry) { return entry.second.extraction <= submitted; });
+    ++extractions_;
+    list.rowsExtraction = extractions_;
+    list.rowCount = rowCount_;
+    list.rowSlots.reserve(pendingRows_.size());
+    list.rows.reserve(pendingRows_.size());
+    for (const auto& [slot, pending] : pendingRows_) {
+        list.rowSlots.push_back(slot);
+        list.rows.push_back(pending.row);
+    }
     return list;
+}
+
+void TerrainRenderer::uploadChunkRows(VkCommandBuffer cmd, uint32_t frameIndex, const DrawList& list) {
+    if (list.rowCount == 0 || !chunkRows_.reserve(cmd, list.rowCount)) return;
+    if (!chunkRows_.write(cmd, frameIndex, list.rowSlots, list.rows.data())) return;
+    rowsUploaded_ = list.rowsExtraction;
+    // This slot's set is rewritten after its fence, before any pass binds
+    // it, and only when the table it names was replaced.
+    if (chunkSetVersion_[frameIndex] == chunkRows_.version()) return;
+    const VkDescriptorBufferInfo table{.buffer = chunkRows_.buffer(), .offset = 0, .range = chunkRows_.bytes()};
+    VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = chunkSets_[frameIndex];
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.pBufferInfo = &table;
+    vkUpdateDescriptorSets(vkCtx->getDevice(), 1, &write, 0, nullptr);
+    chunkSetVersion_[frameIndex] = chunkRows_.version();
+}
+
+void TerrainRenderer::frameSubmitted() {
+    if (rowsUploaded_ == 0) return;
+    rowsSubmitted_.store(rowsUploaded_, std::memory_order_release);
+    rowsUploaded_ = 0;
 }
 
 void TerrainRenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const DrawList& list) {
@@ -1245,10 +1180,13 @@ void TerrainRenderer::recordReflection(VkCommandBuffer cmd, VkDescriptorSet perF
 TerrainRenderer::Recorded TerrainRenderer::recordChunks(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                                                         const std::vector<ChunkDraw>& draws, bool wireframe) {
     if (!pipeline || draws.empty()) return {};
+    const uint32_t frameIndex = vkCtx->getCurrentFrame();
+    // Without this frame's rows the ground is not drawn; the table said why.
+    if (!chunkRowsReady(frameIndex)) return {};
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                       wireframe && wireframePipeline ? wireframePipeline : pipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                             0, 1, &perFrameSet, 0, nullptr);
+    const VkDescriptorSet sets[] = {perFrameSet, vkCtx->textureTable().set(), chunkSets_[frameIndex]};
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 3, sets, 0, nullptr);
     GPUPushConstants push{};
     push.model = glm::mat4(1.0f);
     vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
@@ -1258,8 +1196,8 @@ TerrainRenderer::Recorded TerrainRenderer::recordChunks(VkCommandBuffer cmd, VkD
     TerrainSurfacePush pushedSurface;
     bool surfacePushed = false;
     auto recordChunk = [&](const ChunkDraw& draw) {
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                                1, 1, &draw.material, 0, nullptr);
+        vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, kRowPushOffset, sizeof(draw.row),
+                           &draw.row);
         if (draw.lights != pushedLights) {
             vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
                                offsetof(GPUPushConstants, localLights), sizeof(draw.lights), &draw.lights);
@@ -1335,6 +1273,10 @@ void TerrainRenderer::queueBake(const TerrainChunkGPU& chunk) {
 void TerrainRenderer::recordBake(VkCommandBuffer cmd, const DrawList& list) {
     if (!cmd) return;
     bake_.prepareNewAtlases(cmd, list.atlases);
+    const uint32_t frameIndex = vkCtx->getCurrentFrame();
+    // Without this frame's rows nothing is baked; the chunks wait.
+    if (!chunkRowsReady(frameIndex)) return;
+    const VkDescriptorSet sets[] = {vkCtx->textureTable().set(), chunkSets_[frameIndex]};
     for (size_t begin = 0; begin < list.bake.size();) {
         size_t end = begin + 1;
         while (end < list.bake.size() && list.bake[end].atlas == list.bake[begin].atlas) ++end;
@@ -1342,12 +1284,14 @@ void TerrainRenderer::recordBake(VkCommandBuffer cmd, const DrawList& list) {
         for (size_t i = begin; i < end; ++i) needed |= !list.bake[i].complete->load();
         if (needed) {
             bake_.beginTile(cmd, *list.bake[begin].atlas);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bake_.pipelineLayout(), 0, 2, sets, 0,
+                                    nullptr);
             for (size_t i = begin; i < end; ++i) {
                 const auto& draw = list.bake[i];
                 if (draw.complete->load()) continue;
                 bake_.cell(cmd, draw.chunkX, draw.chunkY);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bake_.pipelineLayout(),
-                                        0, 1, &draw.material, 0, nullptr);
+                vkCmdPushConstants(cmd, bake_.pipelineLayout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(draw.row),
+                                   &draw.row);
                 bindDraw(cmd, draw.geometry);
                 vkCmdDrawIndexed(cmd, draw.geometry.count, 1, draw.geometry.firstIndex,
                                   draw.geometry.baseVertex, 0);
@@ -1504,8 +1448,9 @@ std::shared_ptr<const TerrainTileMaps> TerrainRenderer::tileMapsFor(int tileX, i
     if (!made->cover.imageView || !made->normals.imageView ||
         !uploadTileMapLayers(*vkCtx, *made, pixels.cover.data(), pixels.normals.data(),
                              TerrainTileMapPixels::kCoverSize, TerrainTileMapPixels::kNormalSize,
-                             TerrainChunkSlot::kCount)) {
-        destroyTileMaps(device, allocator, *made);
+                             TerrainChunkSlot::kCount) ||
+        !placeTileMaps(vkCtx->textureTable(), tileMapSampler_, *made)) {
+        destroyTileMaps(device, allocator, vkCtx->textureTable(), *made);
         // Kept for the tile, so its later chunks take the same maps rather
         // than trying again; releaseTileMaps leaves the fallback alone.
         tileMaps_.emplace(key, fallbackTileMaps_);
@@ -1527,10 +1472,11 @@ void TerrainRenderer::releaseTileMaps(int tileX, int tileY) {
     std::shared_ptr<TerrainTileMaps> retired = std::move(it->second);
     tileMaps_.erase(it);
     if (retired == fallbackTileMaps_) return;
-    // The chunks that named it in their material sets may still be drawn by
-    // the frames in flight.
-    vkCtx->deferAfterAllFrameFences([device = vkCtx->getDevice(), allocator = vkCtx->getAllocator(), retired] {
-        destroyTileMaps(device, allocator, *retired);
+    // The chunks whose rows name it may still be drawn by the frames in
+    // flight.
+    vkCtx->deferAfterAllFrameFences([device = vkCtx->getDevice(), allocator = vkCtx->getAllocator(),
+                                     table = &vkCtx->textureTable(), retired] {
+        destroyTileMaps(device, allocator, *table, *retired);
     });
 }
 
@@ -1553,6 +1499,11 @@ void TerrainRenderer::clear() {
     }
     renderedChunks = 0;
     renderedDraws_ = 0;
+    // Every chunk gave its row back above; the table's rows are written again
+    // as the next chunks arrive.
+    freeRows_.clear();
+    rowCount_ = 0;
+    pendingRows_.clear();
     // A page refused before may fit now that every chunk is going.
     geometryPagesExhausted_ = false;
 }
@@ -1609,9 +1560,14 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     VmaAllocation vertexAlloc = chunk.vertexAlloc;
     ::VkBuffer indexBuffer = chunk.indexBuffer;
     VmaAllocation indexAlloc = chunk.indexAlloc;
-    const UniformSlotPool::Slot paramsSlot = chunk.paramsSlot;
-    VkDescriptorPool pool = materialDescPool;
-    VkDescriptorSet materialSet = chunk.materialSet;
+    // Its row may go to the next chunk at once: a frame in flight draws from
+    // what the table holds now, and the next chunk's row is copied in by a
+    // later frame, after that one's draws in the queue.
+    if (chunk.row != TerrainChunkGPU::kNoRow) {
+        pendingRows_.erase(chunk.row);
+        freeRows_.push_back(chunk.row);
+        chunk.row = TerrainChunkGPU::kNoRow;
+    }
     // The chunk's ranges in its geometry page, given back once no frame in
     // flight draws them; until then nothing else is copied over them.
     std::shared_ptr<TerrainGeometryPage> page;
@@ -1635,16 +1591,13 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     chunk.vertexAlloc = VK_NULL_HANDLE;
     chunk.indexBuffer = VK_NULL_HANDLE;
     chunk.indexAlloc = VK_NULL_HANDLE;
-    chunk.paramsSlot = {};
-    chunk.materialSet = VK_NULL_HANDLE;
     chunk.baseTexture.reset();
     for (TextureRef& t : chunk.layerTextures) t.reset();
     chunk.baseNormalMap.reset();
     for (TextureRef& t : chunk.layerNormalMaps) t.reset();
     chunk.maps = {};
 
-    vkCtx->deferAfterAllFrameFences([ctx = vkCtx, allocator, vertexBuffer, vertexAlloc, indexBuffer, indexAlloc,
-                                     paramsSlot, slots = paramsSlots_, pool, materialSet,
+    vkCtx->deferAfterAllFrameFences([allocator, vertexBuffer, vertexAlloc, indexBuffer, indexAlloc,
                                      page, baseVertex, vertexCount, firstIndex, indexCount]() {
         if (page) {
             page->vertexRanges.free(baseVertex, vertexCount);
@@ -1657,11 +1610,6 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
         if (indexBuffer) {
             AllocatedBuffer ab{}; ab.buffer = indexBuffer; ab.allocation = indexAlloc;
             destroyBuffer(allocator, ab);
-        }
-        if (slots) slots->free(paramsSlot);
-        if (materialSet && pool) {
-            VkDescriptorSet set = materialSet;
-            ctx->freeDescriptorSets(pool, 1, &set);
         }
     });
 }

@@ -15,7 +15,8 @@
 #include "rendering/terrain_tile_maps.hpp"
 #include "pipeline/distant_terrain.hpp"
 #include "rendering/terrain_chunk_index.hpp"
-#include "rendering/uniform_slot_pool.hpp"
+#include "rendering/frames_in_flight.hpp"
+#include "rendering/gpu_slot_table.hpp"
 #include "rendering/vk_utils.hpp"
 
 #include "pipeline/terrain_mesh.hpp"
@@ -65,7 +66,25 @@ struct TerrainTileMaps {
     AllocatedImage cover;
     /// RGBA8 17x17 by TerrainChunkSlot::kCount: TerrainTileMapPixels::normals.
     AllocatedImage normals;
+    /// Their places in the texture table, given back with the images.
+    TextureHandle coverHandle = kNoTextureHandle;
+    TextureHandle normalsHandle = kNoTextureHandle;
 };
+
+/// What the terrain shaders read of a chunk (TerrainChunk in
+/// terrain_layers.glsli, std430): its textures by handle - the base and the
+/// three layers over it, then their relief - its tile's maps and bake atlas,
+/// and how many layers lie over the base and its layer in the tile's maps.
+struct TerrainChunkRowGPU {
+    uint32_t color[4] = {kNoTextureHandle, kNoTextureHandle, kNoTextureHandle, kNoTextureHandle};
+    uint32_t relief[4] = {kNoTextureHandle, kNoTextureHandle, kNoTextureHandle, kNoTextureHandle};
+    /// Cover, normals, baked colour, baked relief.
+    uint32_t maps[4] = {kNoTextureHandle, kNoTextureHandle, kNoTextureHandle, kNoTextureHandle};
+    int32_t layerCount = 0;
+    int32_t mapLayer = 0;
+    int32_t pad[2] = {};
+};
+static_assert(sizeof(TerrainChunkRowGPU) == 64, "TerrainChunk in terrain_layers.glsli");
 
 /// Where a chunk's maps are: its tile's arrays, and its layer in them.
 struct TerrainChunkMaps {
@@ -98,15 +117,13 @@ struct TerrainChunkGPU {
     /// every level: a layer of its tile's maps.
     TerrainChunkMaps maps;
 
-    // Material descriptor set (set 1: 7 samplers, params UBO, 4 normal maps)
-    VkDescriptorSet materialSet = VK_NULL_HANDLE;
+    static constexpr uint32_t kNoRow = ~0u;
+    /// Its row in the renderer's chunk table (TerrainChunkRowGPU): what the
+    /// shaders read of it, its textures by handle.
+    uint32_t row = kNoRow;
 
-    // Per-chunk params UBO (hasLayer1/2/3)
-    /// Its TerrainParamsUBO, a slot of the renderer's paramsSlots_.
-    UniformSlotPool::Slot paramsSlot;
-
-    // The chunk's textures, held: what its material set names stays resident
-    // as long as the chunk does.
+    // The chunk's textures, held: what its row names stays resident as long
+    // as the chunk does.
     TextureRef baseTexture;
     TextureRef layerTextures[3];
     /// The relief of the base and layer textures, derived from their colours;
@@ -255,7 +272,7 @@ public:
         int32_t baseVertex = 0;
     };
     struct ChunkDraw {
-        VkDescriptorSet material = VK_NULL_HANDLE;
+        uint32_t row = TerrainChunkGPU::kNoRow;
         GeometryDraw geometry;
         std::array<TerrainChunkGPU::LodRange, 5> ranges{};
         TerrainSurfacePush surface;
@@ -268,7 +285,7 @@ public:
     using DepthTile = TerrainDepthTile<GeometryDraw>;
     struct BakeDraw {
         GeometryDraw geometry;
-        VkDescriptorSet material = VK_NULL_HANDLE;
+        uint32_t row = TerrainChunkGPU::kNoRow;
         int tileX = 0, tileY = 0, chunkX = 0, chunkY = 0;
         TerrainBake::Atlas* atlas = nullptr;
         std::shared_ptr<std::atomic<bool>> complete;
@@ -281,6 +298,13 @@ public:
         std::vector<std::shared_ptr<const DepthTile>> depth;
         std::vector<BakeDraw> bake;
         std::vector<std::shared_ptr<TerrainBake::Atlas>> atlases;
+        /// The chunk table's rows not yet known to be on the GPU, to be
+        /// copied in before this frame draws (uploadChunkRows), and how many
+        /// rows the table holds.
+        std::vector<uint32_t> rowSlots;
+        std::vector<TerrainChunkRowGPU> rows;
+        uint32_t rowCount = 0;
+        uint64_t rowsExtraction = 0;
         bool wireframe = false;
         int culled = 0, baked = 0, crossfade = 0;
         float furthestSq = 0;
@@ -297,6 +321,12 @@ public:
     /// atlases made since the last frame readied, and the chunks waiting for
     /// their bake drawn into them, a budget a frame (TerrainBake).
     void recordBake(VkCommandBuffer cmd, const DrawList& list);
+    /// Outside any rendering scope, before anything of the frame's terrain
+    /// is recorded: the chunk rows the list carries copied into the table.
+    void uploadChunkRows(VkCommandBuffer cmd, uint32_t frameIndex, const DrawList& list);
+    /// The frame that carried the last upload was submitted: its rows count
+    /// as on the GPU, and later lists leave them out.
+    void frameSubmitted();
     /// Chunks the last render() drew from their bake alone, and across the
     /// band from both it and their layers.
     [[nodiscard]] int getBakedDrawnChunkCount() const { return bakedDrawnChunks_; }
@@ -387,11 +417,15 @@ private:
     /// Lets the tile's maps go once the frames that may draw them are done.
     void releaseTileMaps(int tileX, int tileY);
     void calculateBoundingSphere(TerrainChunkGPU& chunk, const pipeline::ChunkMesh& meshChunk);
-    VkDescriptorSet allocateMaterialSet();
-    /// False when there is nothing sampleable to write, in which case the
-    /// caller must drop the chunk: a descriptor set that was allocated and
-    /// never written is as undefined to bind as one holding a null view.
-    bool writeMaterialDescriptors(VkDescriptorSet set, const TerrainChunkGPU& chunk);
+    /// Gives the chunk a row and queues what it holds for the GPU. False
+    /// when there is nothing sampleable to name, in which case the caller
+    /// must drop the chunk: a row naming no texture is as undefined to draw
+    /// as a null image view.
+    bool writeChunkRow(TerrainChunkGPU& chunk);
+    /// Whether this frame slot's chunk set names the table as it is.
+    [[nodiscard]] bool chunkRowsReady(uint32_t frameIndex) const {
+        return chunkRows_.buffer() && chunkSetVersion_[frameIndex] == chunkRows_.version();
+    }
     void destroyChunkGPU(TerrainChunkGPU& chunk);
 
     /// Point a chunk's base, layer and alpha textures at the loaded ones.
@@ -403,11 +437,6 @@ private:
                            const pipeline::ChunkMesh& chunk,
                            const std::vector<std::string>& texturePaths,
                            int tileX, int tileY, int chunkX, int chunkY);
-
-    /// Allocate and fill a chunk's params UBO. False means the allocation
-    /// failed, and the two callers answer that differently: the one-shot load
-    /// skips the chunk, the incremental one hands it back to be retried.
-    bool createChunkParamsUBO(TerrainChunkGPU& gpuChunk);
 
     VkContext* vkCtx = nullptr;
     RtScene* rtScene_ = nullptr;
@@ -422,7 +451,6 @@ private:
     VkPipeline shortOfDiscardsPipeline = VK_NULL_HANDLE;
     VkPipeline wireframePipeline = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-    VkDescriptorSetLayout materialSetLayout = VK_NULL_HANDLE;
 
     // Shadow pipeline
     VkPipeline shadowPipeline_ = VK_NULL_HANDLE;
@@ -431,17 +459,31 @@ private:
     /// built and torn down here and in three other renderers.
     ShadowParamsSet shadowParams_;
 
-    // Descriptor pool for material sets. One set per terrain chunk, 256 chunks
-    // to a tile, so this is a tile budget: 65536 covered 256 tiles, and tiles
-    // are held to the *unload* radius, not the load radius - 8 loading and 11
-    // unloading is 23×23 = 529 resident. Every tile past the 256th arrived
-    // with no descriptor set and, before the retry in loadTerrainIncremental,
-    // was dropped for good: terrain that simply was not there, in whichever
-    // direction the player had travelled furthest.
-    VkDescriptorPool materialDescPool = VK_NULL_HANDLE;
-    /// Every chunk's TerrainParamsUBO (uniform_slot_pool.hpp).
-    std::shared_ptr<UniformSlotPool> paramsSlots_;
-    static constexpr uint32_t MAX_MATERIAL_SETS = 160 * 1024;  // 640 tiles
+    /// Every resident chunk's row (TerrainChunkRowGPU), read by the ground's
+    /// and the bake's fragment shaders through a set per frame slot that is
+    /// rewritten when the table is replaced. Rows are handed out on the main
+    /// thread and given back with the chunk; a row given to another chunk is
+    /// copied in by a later frame, after every earlier frame's draws.
+    GpuSlotTable chunkRows_{sizeof(TerrainChunkRowGPU), "terrain chunk table"};
+    VkDescriptorSetLayout chunkSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool chunkSetPool_ = VK_NULL_HANDLE;
+    VkDescriptorSet chunkSets_[MAX_FRAMES_IN_FLIGHT] = {};
+    uint32_t chunkSetVersion_[MAX_FRAMES_IN_FLIGHT] = {};
+    std::vector<uint32_t> freeRows_;
+    uint32_t rowCount_ = 0;
+    /// Rows changed and not yet known to be on the GPU, with the first
+    /// extraction that carries them. Main thread.
+    struct PendingRow {
+        TerrainChunkRowGPU row;
+        uint64_t extraction = 0;
+    };
+    std::unordered_map<uint32_t, PendingRow> pendingRows_;
+    uint64_t extractions_ = 0;
+    /// The extraction whose rows the last upload copied, until its frame is
+    /// submitted (render thread); then the last one submitted, read by
+    /// extract on the main thread.
+    uint64_t rowsUploaded_ = 0;
+    std::atomic<uint64_t> rowsSubmitted_{0};
 
     // Loaded terrain chunks
     std::vector<TerrainChunkGPU> chunks;

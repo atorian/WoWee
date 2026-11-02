@@ -4,34 +4,48 @@
 // bakes the far ground's atlas from it (TerrainBake), so a chunk seen through
 // its bake is the same ground.
 //
-// The includer defines TERRAIN_MATERIAL_SET, the set the chunk's material is
-// bound at.
+// The includer defines TEXTURE_TABLE_SET and TERRAIN_CHUNK_SET, the sets the
+// texture table and the terrain's chunk rows are bound at, and TERRAIN_CHUNK,
+// the drawn chunk's row.
 
-layout(set = TERRAIN_MATERIAL_SET, binding = 0) uniform sampler2D uBaseTexture;
-layout(set = TERRAIN_MATERIAL_SET, binding = 1) uniform sampler2D uLayer1Texture;
-layout(set = TERRAIN_MATERIAL_SET, binding = 2) uniform sampler2D uLayer2Texture;
-layout(set = TERRAIN_MATERIAL_SET, binding = 3) uniform sampler2D uLayer3Texture;
-// What the three layers cover, for every chunk of the tile (TerrainTileMaps):
-// the chunk's at layer mapLayer, the first layer's cover in r, the second's
-// in g, the third's in b.
-layout(set = TERRAIN_MATERIAL_SET, binding = 4) uniform sampler2DArray uTileCover;
+#include "texture_table.glsli"
 
-layout(set = TERRAIN_MATERIAL_SET, binding = 5) uniform TerrainParams {
-    int layerCount;
-    int hasLayer1;
-    int hasLayer2;
-    int hasLayer3;
-    // The chunk's layer in its tile's maps (TerrainChunkSlot).
-    int mapLayer;
+// A chunk as TerrainRenderer keeps it (TerrainChunkRowGPU), its textures by
+// handle: the base and the three layers over it in color; each texture's
+// relief in relief, derived from its colours when the tile loaded
+// (TerrainRenderer::deriveNormalMap) - the normal in rgb, along the
+// texture's u and v and out of it; the tile's maps and bake atlas in maps.
+struct TerrainChunk {
+    uvec4 color;
+    uvec4 relief;
+    // x: what the three layers cover, for every chunk of the tile
+    // (TerrainTileMaps) - the chunk's at layer mapLayer, the first layer's
+    // cover in r, the second's in g, the third's in b. y: the chunk's own
+    // normals, likewise. z, w: the tile's bake atlas, colour and relief.
+    uvec4 maps;
+    // x: how many layers lie over the base; y: the chunk's layer in its
+    // tile's maps (TerrainChunkSlot).
+    ivec4 layers;
+};
+layout(std430, set = TERRAIN_CHUNK_SET, binding = 0) readonly buffer TerrainChunks {
+    TerrainChunk terrainChunks[];
 };
 
-// Each texture's relief, derived from its colours when the tile loaded
-// (TerrainRenderer::deriveNormalMap): the normal in rgb, along the texture's
-// u and v and out of it.
-layout(set = TERRAIN_MATERIAL_SET, binding = 6) uniform sampler2D uBaseNormal;
-layout(set = TERRAIN_MATERIAL_SET, binding = 7) uniform sampler2D uLayer1Normal;
-layout(set = TERRAIN_MATERIAL_SET, binding = 8) uniform sampler2D uLayer2Normal;
-layout(set = TERRAIN_MATERIAL_SET, binding = 9) uniform sampler2D uLayer3Normal;
+#define TERRAIN_ROW (terrainChunks[TERRAIN_CHUNK])
+#define layerCount (TERRAIN_ROW.layers.x)
+#define mapLayer (TERRAIN_ROW.layers.y)
+#define hasLayer1 int(layerCount >= 1)
+#define hasLayer2 int(layerCount >= 2)
+#define hasLayer3 int(layerCount >= 3)
+#define uBaseTexture tablePlain2D(TERRAIN_ROW.color.x)
+#define uLayer1Texture tablePlain2D(TERRAIN_ROW.color.y)
+#define uLayer2Texture tablePlain2D(TERRAIN_ROW.color.z)
+#define uLayer3Texture tablePlain2D(TERRAIN_ROW.color.w)
+#define uBaseNormal tablePlain2D(TERRAIN_ROW.relief.x)
+#define uLayer1Normal tablePlain2D(TERRAIN_ROW.relief.y)
+#define uLayer2Normal tablePlain2D(TERRAIN_ROW.relief.z)
+#define uLayer3Normal tablePlain2D(TERRAIN_ROW.relief.w)
+#define uTileCover tableLayered2D(TERRAIN_ROW.maps.x)
 
 // Every read below takes its gradients from the caller - the coordinate's
 // dFdx and dFdy, taken in uniform control flow - so a pixel may skip the
