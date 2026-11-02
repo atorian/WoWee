@@ -2093,6 +2093,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     const auto& sortedVisible_ = recording_->sortedVisible_;
 
     lastDrawCallCount = 0;
+    lastBlendedDrawCallCount = 0;
     skyDiagDrawsOpaque_ = 0;
     skyDiagDrawsTransparent_ = 0;
     const uint32_t frameIndex = vkCtx_->getCurrentFrame();
@@ -2672,6 +2673,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
             if (skyMode_) ++skyDiagDrawsTransparent_;
             lastDrawCallCount++;
+            lastBlendedDrawCallCount++;
         }
     }
 

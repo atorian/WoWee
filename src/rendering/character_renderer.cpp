@@ -2744,6 +2744,8 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
         part == Part::Faded && fadedPass_ != VK_NULL_HANDLE ? fadedPassPipes_ : scenePipes_;
     uint32_t frameIndex = vkCtx_->getCurrentFrame();
     uint32_t frameSlot = frameIndex % 2u;
+    uint32_t& draws = drawCalls_[static_cast<size_t>(part)];
+    draws = 0;
 
     // Reset material ring buffer and descriptor pool once per frame slot.
     if (lastMaterialPoolResetFrame_ != frameIndex) {
@@ -3297,6 +3299,7 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
                 vkCmdSetDepthBias(cmd, static_cast<float>(batch.materialLayer) * 0.5f, 0.0f, 0.0f);
 
                 vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
+                ++draws;
             }
             } // end pass loop
             } // end stage loop

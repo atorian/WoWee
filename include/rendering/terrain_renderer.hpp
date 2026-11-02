@@ -343,6 +343,9 @@ public:
     [[nodiscard]] int getCulledChunkCount() const { return culledChunks; }
     /// The triangles the last render() drew, at the levels it chose.
     [[nodiscard]] uint64_t getRenderedTriangleCount() const { return renderedTriangles_; }
+    /// The draw calls the last render() recorded: a chunk's level and each
+    /// skirt it draws are one apiece.
+    [[nodiscard]] uint32_t getDrawCallCount() const { return renderedDraws_; }
     [[nodiscard]] int getTriangleCount() const;
 
     /// The height in pixels of the image the terrain is drawn into, which the
@@ -358,8 +361,12 @@ public:
 
 private:
 
-    /// Records `draws`; the triangles it drew.
-    uint32_t recordChunks(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+    struct Recorded {
+        uint32_t triangles = 0;
+        uint32_t draws = 0;
+    };
+    /// Records `draws`; the triangles and draw calls it recorded.
+    Recorded recordChunks(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                           const std::vector<ChunkDraw>& draws, bool wireframe);
     GeometryDraw geometryOf(const TerrainChunkGPU& chunk) const;
     static void bindDraw(VkCommandBuffer cmd, const GeometryDraw& draw);
@@ -501,6 +508,7 @@ private:
 
     uint32_t lodViewportHeight_ = 0;
     uint64_t renderedTriangles_ = 0;
+    uint32_t renderedDraws_ = 0;
     int renderedChunks = 0;
     float furthestDrawnSq_ = 0.0f;
     int culledChunks = 0;

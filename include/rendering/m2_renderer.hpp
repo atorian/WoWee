@@ -817,6 +817,8 @@ public:
     [[nodiscard]] uint32_t getInstanceCount() const { return static_cast<uint32_t>(scene_->instances.size()); }
     [[nodiscard]] uint32_t getTotalTriangleCount() const;
     [[nodiscard]] uint32_t getDrawCallCount() const { return lastDrawCallCount; }
+    /// Of those, the blended ones: one per instance and batch, back to front.
+    [[nodiscard]] uint32_t getBlendedDrawCallCount() const { return lastBlendedDrawCallCount; }
     /// Why an instance was filed again, as the frame profile counts it.
     enum class InstanceChange : uint8_t { Placed, Moved, ShownOrHidden, Finished, Other, Count };
     /// How much the frame being recorded holds; see RenderStatistics.
@@ -1326,6 +1328,7 @@ private:
 
     uint32_t nextInstanceId = 1;
     uint32_t lastDrawCallCount = 0;
+    uint32_t lastBlendedDrawCallCount = 0;
     size_t modelCacheLimit_ = 6000;
     uint32_t modelLimitRejectWarnings_ = 0;
 

@@ -68,15 +68,19 @@ void Renderer::publishFrameResults() {
         result.statistics.terrainMs = lastTerrainRenderMs;
         result.statistics.wmoMs = lastWMORenderMs;
         result.statistics.m2Ms = lastM2RenderMs;
+        result.statistics.characterMs = lastCharacterRenderMs_;
+        result.statistics.postMs = lastPostRenderMs_;
     }
     if (terrainRenderer) {
         result.statistics.terrainDrawn = terrainRenderer->getRenderedChunkCount();
+        result.statistics.terrainDraws = terrainRenderer->getDrawCallCount();
         result.statistics.terrainCulled = terrainRenderer->getCulledChunkCount();
         result.statistics.terrainTriangles = terrainRenderer->getRenderedTriangleCount();
         result.statistics.terrainChunks = static_cast<uint32_t>(terrainRenderer->getChunkCount());
     }
     if (m2Renderer) {
         result.statistics.m2Draws = m2Renderer->getDrawCallCount();
+        result.statistics.m2BlendedDraws = m2Renderer->getBlendedDrawCallCount();
         const auto counts = m2Renderer->recordedCounts();
         result.statistics.m2CullCandidates = counts.cullCandidates;
         result.statistics.m2Drawn = counts.drawn;
@@ -97,7 +101,9 @@ void Renderer::publishFrameResults() {
     if (wmoRenderer) {
         result.statistics.wmoDraws = wmoRenderer->getDrawCallCount();
         result.statistics.wmoShadows = wmoRenderer->getShadowDrawCallCount();
+        result.statistics.wmoBlendedDraws = wmoRenderer->getBlendedDrawCallCount();
     }
+    if (characterRenderer) result.statistics.characterDraws = characterRenderer->getDrawCallCount();
     if (frameInputs_.scene && frameInputs_.scene->buildings) {
         const auto& view = frameInputs_.scene->buildings->view;
         result.statistics.wmoDistanceCulled = view.distanceCulled;

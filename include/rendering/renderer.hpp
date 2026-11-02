@@ -944,6 +944,8 @@ private:
     double lastTerrainRenderMs = 0.0;
     double lastWMORenderMs = 0.0;
     double lastM2RenderMs = 0.0;
+    double lastCharacterRenderMs_ = 0.0;
+    double lastPostRenderMs_ = 0.0;
 };
 
 } // namespace rendering

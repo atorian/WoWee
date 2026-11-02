@@ -1228,7 +1228,9 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
 }
 
 void TerrainRenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const DrawList& list) {
-    renderedTriangles_ = recordChunks(cmd, perFrameSet, list.view, list.wireframe);
+    const Recorded recorded = recordChunks(cmd, perFrameSet, list.view, list.wireframe);
+    renderedTriangles_ = recorded.triangles;
+    renderedDraws_ = recorded.draws;
     renderedChunks = static_cast<int>(list.view.size());
     culledChunks = list.culled;
     furthestDrawnSq_ = list.furthestSq;
@@ -1240,9 +1242,9 @@ void TerrainRenderer::recordReflection(VkCommandBuffer cmd, VkDescriptorSet perF
     recordChunks(cmd, perFrameSet, list.reflection, list.wireframe);
 }
 
-uint32_t TerrainRenderer::recordChunks(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                                       const std::vector<ChunkDraw>& draws, bool wireframe) {
-    if (!pipeline || draws.empty()) return 0;
+TerrainRenderer::Recorded TerrainRenderer::recordChunks(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                                                        const std::vector<ChunkDraw>& draws, bool wireframe) {
+    if (!pipeline || draws.empty()) return {};
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                       wireframe && wireframePipeline ? wireframePipeline : pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
@@ -1250,7 +1252,7 @@ uint32_t TerrainRenderer::recordChunks(VkCommandBuffer cmd, VkDescriptorSet perF
     GPUPushConstants push{};
     push.model = glm::mat4(1.0f);
     vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
-    uint32_t triangles = 0;
+    Recorded recorded;
     ::VkBuffer boundVertices = VK_NULL_HANDLE, boundIndices = VK_NULL_HANDLE;
     LocalLightSet pushedLights = push.localLights;
     TerrainSurfacePush pushedSurface;
@@ -1278,7 +1280,8 @@ uint32_t TerrainRenderer::recordChunks(VkCommandBuffer cmd, VkDescriptorSet perF
             if (!range.count) continue;
             vkCmdDrawIndexed(cmd, range.count, 1, draw.geometry.firstIndex + range.first,
                               draw.geometry.baseVertex, 0);
-            triangles += range.count / 3;
+            recorded.triangles += range.count / 3;
+            ++recorded.draws;
         }
     };
     // Chunks short of the distance discards first, through the pipeline whose
@@ -1297,7 +1300,7 @@ uint32_t TerrainRenderer::recordChunks(VkCommandBuffer cmd, VkDescriptorSet perF
             if (draw.reachesDiscards) recordChunk(draw);
         }
     }
-    return triangles;
+    return recorded;
 }
 
 void TerrainRenderer::addChunk(TerrainChunkGPU&& chunk) {
@@ -1549,6 +1552,7 @@ void TerrainRenderer::clear() {
                         static_cast<int>(static_cast<int32_t>(key & 0xffffffffu)));
     }
     renderedChunks = 0;
+    renderedDraws_ = 0;
     // A page refused before may fit now that every chunk is going.
     geometryPagesExhausted_ = false;
 }

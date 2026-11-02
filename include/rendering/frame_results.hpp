@@ -44,8 +44,13 @@ struct CapturedImage {
 };
 
 struct RenderStatistics {
-    double renderMs = 0, terrainMs = 0, wmoMs = 0, m2Ms = 0;
+    /// How long each recording task took on its worker; characters and the
+    /// post-world systems (water, weather, effects, overlays) included.
+    double renderMs = 0, terrainMs = 0, wmoMs = 0, m2Ms = 0, characterMs = 0, postMs = 0;
     uint32_t terrainDrawn = 0, terrainCulled = 0, m2Draws = 0, wmoDraws = 0, wmoShadows = 0;
+    /// Draw calls of the view: terrain levels and skirts, characters, and the
+    /// blended M2 and WMO ones among m2Draws and wmoDraws.
+    uint32_t terrainDraws = 0, characterDraws = 0, m2BlendedDraws = 0, wmoBlendedDraws = 0;
     /// The terrain chunks the extraction walked to find the drawn ones.
     uint32_t terrainChunks = 0;
     /// The world's M2s in the frame recorded: candidates sent to the GPU

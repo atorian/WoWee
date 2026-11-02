@@ -3405,6 +3405,8 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
     lastTerrainRenderMs = 0.0;
     lastWMORenderMs = 0.0;
     lastM2RenderMs = 0.0;
+    lastCharacterRenderMs_ = 0.0;
+    lastPostRenderMs_ = 0.0;
 
     uint32_t frameIdx = vkCtx->getCurrentFrame();
     VkDescriptorSet perFrameSet = perFrameDescSets[frameIdx];
@@ -3666,9 +3668,9 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
         catch (const std::exception& e) { LOG_ERROR("WMO render worker: ", e.what()); }
         try { if (m2Future.valid()) lastM2RenderMs = m2Future.get(); }
         catch (const std::exception& e) { LOG_ERROR("M2 render worker: ", e.what()); }
-        try { if (charFuture.valid()) (void)charFuture.get(); }
+        try { if (charFuture.valid()) lastCharacterRenderMs_ = charFuture.get(); }
         catch (const std::exception& e) { LOG_ERROR("Character render worker: ", e.what()); }
-        try { if (postFuture.valid()) (void)postFuture.get(); }
+        try { if (postFuture.valid()) lastPostRenderMs_ = postFuture.get(); }
         catch (const std::exception& e) { LOG_ERROR("Post render worker: ", e.what()); }
         waitStage.reset();
 

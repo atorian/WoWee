@@ -341,6 +341,7 @@ public:
      * Get total draw call count (last frame)
      */
     uint32_t getDrawCallCount() const { return viewDrawCallCount_ + viewBlendedDrawCallCount_; }
+    uint32_t getBlendedDrawCallCount() const { return viewBlendedDrawCallCount_; }
     /// Draw calls the depth-only passes recorded this frame, from the frame's
     /// first one (the sun's) on.
     uint32_t getShadowDrawCallCount() const { return shadowDrawCalls_; }

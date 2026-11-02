@@ -139,6 +139,8 @@ public:
     enum class Part { All, Solid, Faded };
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
                 Part part = Part::All);
+    /// The draw calls the last render of each part recorded, together.
+    [[nodiscard]] uint32_t getDrawCallCount() const { return drawCalls_[0] + drawCalls_[1] + drawCalls_[2]; }
     /// The pass faded instances are drawn in when it is not the scene's - the
     /// one after the water that blended M2s and particles go to - or null.
     /// Rebuilds pipelines: call between frames, with nothing in flight.
@@ -700,6 +702,8 @@ private:
         materialDescriptorCache_[2];
     VkDescriptorPool boneDescPool_ = VK_NULL_HANDLE;
     uint32_t lastMaterialPoolResetFrame_ = 0xFFFFFFFFu;
+    // Draw calls the last recording of each Part made.
+    uint32_t drawCalls_[3] = {};
 
     // Material UBO ring buffer - pre-allocated per frame slot, sub-allocated each draw
     VkBuffer materialRingBuffer_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
