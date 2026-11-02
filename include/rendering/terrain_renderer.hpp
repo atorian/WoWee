@@ -379,7 +379,6 @@ private:
                                                        const pipeline::TerrainMesh& mesh);
     /// Lets the tile's maps go once the frames that may draw them are done.
     void releaseTileMaps(int tileX, int tileY);
-    bool isChunkVisible(const TerrainChunkGPU& chunk, const Frustum& frustum);
     void calculateBoundingSphere(TerrainChunkGPU& chunk, const pipeline::ChunkMesh& meshChunk);
     VkDescriptorSet allocateMaterialSet();
     /// False when there is nothing sampleable to write, in which case the

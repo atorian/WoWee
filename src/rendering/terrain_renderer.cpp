@@ -22,6 +22,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
+#include <bit>
 #include <functional>
 #include <cstdlib>
 #include <unordered_set>
@@ -1110,29 +1111,55 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
         }));
     }
     laps.lap("depth lists");
-    for (uint32_t i = 0; i < chunks.size(); ++i) {
+    // Tiles first, by the sphere round all of a tile's chunks the depth list
+    // just made: a chunk inside a tile that is out of reach, of view and of
+    // the mirror is out of each of them too. The walk went over every chunk
+    // resident - 34,500 in Dalaran - for the 5,400 it drew. The chunks of the
+    // tiles kept are tested in their list order, as before, so the draws
+    // come out the same.
+    // Whether a sphere is in reach and in view, and whether the water's
+    // reflection can show it - the far side of a hill over a lake, which the
+    // camera may not see itself. One test for a tile's sphere and a chunk's:
+    // a sphere inside another passes no test the other fails.
+    struct Seen { float distanceSq; bool view, mirror; };
+    const auto seen = [&](const glm::vec3& centre, float radius) {
+        const glm::vec2 step = glm::vec2(centre - camPos);
+        const float distanceSq = glm::dot(step, step);
+        const float limit = maxViewDistance_ + radius;
+        const bool inReach = distanceSq <= limit * limit;
+        return Seen{distanceSq, inReach && (!frustumCullingEnabled || frustum.intersectsSphere(centre, radius)),
+                    inReach && mirror && mirror->canSee(centre, radius)};
+    };
+    std::vector<uint64_t> toTest((chunks.size() + 63) / 64, 0);
+    for (size_t t = 0; t < shadowTiles_.size(); ++t) {
+        const Seen tile = seen(list.depth[t]->centre, list.depth[t]->radius);
+        if (!tile.view && !tile.mirror) {
+            // Every chunk resident is valid and has its material.
+            list.culled += static_cast<int>(shadowTiles_[t].chunks.size());
+            continue;
+        }
+        for (const uint32_t index : shadowTiles_[t].chunks) toTest[index / 64] |= uint64_t{1} << (index % 64);
+    }
+    std::vector<uint32_t> candidates;
+    for (size_t word = 0; word < toTest.size(); ++word) {
+        for (uint64_t bits = toTest[word]; bits != 0; bits &= bits - 1)
+            candidates.push_back(static_cast<uint32_t>(word * 64 + static_cast<size_t>(std::countr_zero(bits))));
+    }
+    for (const uint32_t i : candidates) {
         const auto& ch = chunks[i];
         if (!ch.isValid()) continue;
         if (!ch.materialSet) continue;
-        const glm::vec2 step = glm::vec2(ch.boundingSphereCenter - camPos);
-        const float distanceSq = glm::dot(step, step);
-        const float limit = maxViewDistance_ + ch.boundingSphereRadius;
-        const bool inReach = distanceSq <= limit * limit;
-        const bool inView = inReach && (!frustumCullingEnabled || isChunkVisible(ch, frustum));
-        // The water's reflection draws what its mirror can show, which the
-        // camera may not see itself: the far side of a hill over a lake.
-        const bool inMirror = inReach && mirror &&
-                              mirror->canSee(ch.boundingSphereCenter, ch.boundingSphereRadius);
-        if (!inView) ++list.culled;
-        if (!inView && !inMirror) continue;
+        const Seen chunk = seen(ch.boundingSphereCenter, ch.boundingSphereRadius);
+        if (!chunk.view) ++list.culled;
+        if (!chunk.view && !chunk.mirror) continue;
         const float nearest = glm::length(ch.boundingSphereCenter - camPos) - ch.boundingSphereRadius;
         levels[i] = static_cast<int8_t>(lodEnabled_ ? pipeline::terrainLodFor(ch.lodErrors, ch.offeredLods,
                                                      nearest, focalPixels, kLodMaxErrorPixels) : 0);
-        if (inView) {
+        if (chunk.view) {
             visible.push_back(i);
-            list.furthestSq = std::max(list.furthestSq, distanceSq);
+            list.furthestSq = std::max(list.furthestSq, chunk.distanceSq);
         }
-        if (inMirror) mirrored.push_back(i);
+        if (chunk.mirror) mirrored.push_back(i);
     }
     laps.lap("walk");
     // A chunk's draw, and where its surface is read from.
@@ -1641,10 +1668,6 @@ int TerrainRenderer::getTriangleCount() const {
         total += chunk.indexCount / 3;
     }
     return total;
-}
-
-bool TerrainRenderer::isChunkVisible(const TerrainChunkGPU& chunk, const Frustum& frustum) {
-    return frustum.intersectsSphere(chunk.boundingSphereCenter, chunk.boundingSphereRadius);
 }
 
 void TerrainRenderer::calculateBoundingSphere(TerrainChunkGPU& gpuChunk,
